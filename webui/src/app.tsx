@@ -4,6 +4,7 @@ import type { WebUiSnapshot } from './api/types';
 import { AppShell, type RouteId } from './design-system/shell';
 import { applyAppearance, DEFAULT_APPEARANCE, loadAppearance, saveAppearance, type AppearancePreferences, type ContrastPreference } from './design-system/preferences';
 import { Button, Dialog, ErrorBanner, Field, IconButton, Select } from './design-system/primitives';
+import { ActivityPage } from './features/activity';
 import { DesignGallery } from './gallery';
 import { classifyAuthFailure, connectionFooterLabel, ProductConnectionSurface, selectedModelLabel, type AuthFailure } from './provider-surfaces';
 import { useWebUi, useWebUiActions } from './state';
@@ -120,6 +121,7 @@ function ChatScreen(props: { locale: AppearancePreferences['locale']; context: P
 }
 
 function ActivityScreen(props: { locale: AppearancePreferences['locale']; context: ProviderRouteContext }): React.JSX.Element {
+  if (props.context.snapshot.auth.status === 'authenticated' && !['schema-mismatch', 'forbidden', 'unauthorized'].includes(props.context.snapshot.connection)) return <ActivityPage locale={props.locale} />;
   return <ProductConnectionSurface locale={props.locale} eyebrow={t(props.locale, 'routes.activity.eyebrow')} title={t(props.locale, 'activity.title')} titleTestId={testId('activity.title')} snapshot={props.context.snapshot} authFailure={props.context.authFailure} onLogin={props.context.login} onLogout={props.context.logout} onRetry={props.context.retry} onRecoverSchema={props.context.recoverSchema} />;
 }
 

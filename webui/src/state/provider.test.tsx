@@ -3,6 +3,8 @@ import { createRoot, type Root } from 'react-dom/client';
 import { act } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import bootstrapFixture from '../../../tests/fixtures/webui/examples/bootstrap.model-free.json';
+import catalogFixture from '../../../tests/fixtures/webui/examples/catalog.page.json';
+import operationsFixture from '../../../tests/fixtures/webui/examples/operations.list.json';
 import runtimeFixture from '../../../tests/fixtures/webui/examples/runtime.snapshot.json';
 import { WebUiApiClient, WebUiHttpError } from '../api/client';
 import type { WebUiSnapshot } from '../api/types';
@@ -86,6 +88,7 @@ describe('WebUiProvider auth races', () => {
 });
 
 
+
 describe('operation session fences', () => {
   it.each(['accepted', 'rejected'] as const)('ignores late %s operation outcomes after logout and relogin', async (outcome) => {
     let resolve: ((value: { operation_id: string; state: 'queued'; idempotent_replay: boolean }) => void) | undefined;
@@ -104,5 +107,35 @@ describe('operation session fences', () => {
       expect(mounted.latest().snapshot.auth.status).toBe('authenticated');
       expect(mounted.latest().snapshot.pendingReconciliations.size).toBe(0);
     } finally { spy.mockRestore(); act(() => mounted.root.unmount()); mounted.element.remove(); }
+  });
+});
+
+describe('WebUiProvider selection and inference isolation', () => {
+  it('keeps a frozen stream alive across model selection but aborts on logout', async () => {
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+    let signal: AbortSignal | null = null;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes('/bootstrap')) return new Response(JSON.stringify(bootstrapFixture));
+      if (url.includes('/catalog')) return new Response(JSON.stringify({ ...catalogFixture, server_instance_id: bootstrapFixture.server.server_instance_id }));
+      if (url.includes('/operations')) return new Response(JSON.stringify({ ...JSON.parse(JSON.stringify(operationsFixture), (key, value: unknown) => key === '$schemaName' ? undefined : value), server_instance_id: bootstrapFixture.server.server_instance_id }));
+      if (url.includes('/chat/completions')) {
+        signal = init?.signal ?? null;
+        expect(JSON.parse(String(init?.body)).model).toBe(catalogFixture.items[0].identity.inference_id);
+      }
+      return new Response(new ReadableStream<Uint8Array>({ start() {} }), { headers: { 'content-type': 'text/event-stream' } });
+    };
+    const mounted = mount(fetchImpl);
+    await act(async () => mounted.latest().actions.login('token'));
+    await act(async () => mounted.latest().actions.refresh());
+    const stream = mounted.latest().actions.streamChatCompletions(catalogFixture.items[0].identity.id, {messages:[]}, {onFrame:()=>undefined});
+    const result = stream.catch((error: unknown) => error);
+    await act(async () => { await Promise.resolve(); mounted.latest().actions.selectModel(null); });
+    expect(signal).not.toBeNull();
+    expect((signal as AbortSignal | null)?.aborted).toBe(false);
+    act(() => mounted.latest().actions.logout());
+    expect((signal as AbortSignal | null)?.aborted).toBe(true);
+    await result; // Client abort rejection race is separately fixed/tested by Chat.
+    act(() => mounted.root.unmount()); mounted.element.remove(); vi.unstubAllGlobals();
   });
 });

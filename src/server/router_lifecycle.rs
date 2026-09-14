@@ -85,7 +85,7 @@ pub use super::router_lifecycle_dto::{
     ModelEvictionReport, Operation, OperationAccepted, OperationError, OperationKind,
     OperationResult, OperationState, OperationTarget, OperationsListResponse, Pagination,
     ProgressBytes, ReplayError, RuntimePayload, RuntimeSettingValue, RuntimeSettingsReport,
-    RuntimeSnapshot, SettingsPayload, UiEvent, UiEventPayload,
+    RuntimeSlot, RuntimeSlots, RuntimeSnapshot, SettingsPayload, UiEvent, UiEventPayload,
 };
 pub use super::router_lifecycle_ops::{
     EVENT_RING_LIMIT, LifecycleCoordinator, MAX_ACTIVE_DOWNLOAD_OPERATIONS,

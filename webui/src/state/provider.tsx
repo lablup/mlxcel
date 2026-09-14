@@ -106,9 +106,9 @@ export function WebUiProvider({ children, apiBase, fetchImpl }: WebUiProviderPro
       await syncRef.current?.refresh();
     },
     selectModel: (modelId: ModelId | null) => {
-      client.abortAll();
       dispatch({ type: 'select-model', modelId });
-      void syncRef.current?.refresh();
+      // Selection owns observation only, never an already-running inference turn.
+      syncRef.current?.selectionChanged();
     },
     loadModel: async (request: ModelActionRequest) => {
       await submitOperation('model-action', request.idempotency_key, request.model_id, () => client.modelAction(request));

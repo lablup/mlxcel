@@ -1477,6 +1477,13 @@ impl ModelProvider {
         self.created_at
     }
 
+    /// CPU-only worker-family flag; single-stream workers do not publish batch
+    /// active/decode counters even though their queue reservation gauge is valid.
+    #[cfg(feature = "webui")]
+    pub(crate) fn uses_single_stream_observation(&self) -> bool {
+        self.single_stream_queue_admission.load(Ordering::Acquire)
+    }
+
     /// Check if model is loaded and ready for inference
     pub fn is_loaded(&self) -> bool {
         self.loaded.load(Ordering::Acquire)

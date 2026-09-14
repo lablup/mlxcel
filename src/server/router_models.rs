@@ -288,6 +288,20 @@ impl RouterModelEntry {
             .map(|app| app.router.clone())
     }
 
+    /// Observe a loaded provider without routing, admission, autoload or LRU touch.
+    #[cfg(feature = "webui")]
+    pub(crate) fn runtime_observation_state(&self, expected_revision: u64) -> Option<AppState> {
+        let guard = self.state.lock().ok()?;
+        if self.hidden || self.lifecycle_revision() != expected_revision {
+            return None;
+        }
+        let app = guard.app.as_ref()?;
+        app.state
+            .model_provider
+            .is_loaded()
+            .then(|| app.state.clone())
+    }
+
     pub fn lifecycle_snapshot(&self) -> LifecycleSnapshot {
         self.lifecycle.snapshot()
     }

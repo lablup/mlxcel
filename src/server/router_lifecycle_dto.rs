@@ -180,6 +180,28 @@ pub struct MeasuredValue {
     pub reason: Option<String>,
 }
 
+/// Redacted CPU-only slot counters; never includes request parameters or text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeSlot {
+    pub id: usize,
+    pub processing: bool,
+    pub prompt_tokens: Option<usize>,
+    pub cached_prompt_tokens: Option<usize>,
+    pub decoded_tokens: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeSlots {
+    pub available: bool,
+    pub reason: Option<String>,
+    pub measured_at: Option<String>,
+    pub configured_parallelism: usize,
+    pub effective_parallelism: Option<usize>,
+    pub request_context_tokens: Option<usize>,
+    pub shared_pool_context_tokens: Option<usize>,
+    pub items: Vec<RuntimeSlot>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeSnapshot {
     pub schema_version: String,
@@ -188,6 +210,7 @@ pub struct RuntimeSnapshot {
     pub revision: u64,
     pub snapshot_sequence: u64,
     pub measurements: BTreeMap<String, MeasuredValue>,
+    pub slots: RuntimeSlots,
     pub settings: RuntimeSettingsReport,
 }
 

@@ -776,14 +776,17 @@ async fn single_ui_runtime(
         return single_invalid_field("model_id", "model_id must match ^mdl_[A-Za-z0-9_-]{43}$");
     }
     match single_catalog_entry_blocking(state.clone()).await {
-        Ok(entry) if entry.identity.id == model_id => Json(super::webui::api::runtime_snapshot(
-            state.webui_lifecycle.server_instance_id().to_string(),
-            model_id,
-            entry.identity.revision,
-            state.webui_lifecycle.snapshot_sequence(),
-            &state.config,
-        ))
-        .into_response(),
+        Ok(entry) if entry.identity.id == model_id => {
+            Json(super::webui::runtime::runtime_snapshot(
+                state.webui_lifecycle.server_instance_id().to_string(),
+                model_id,
+                entry.identity.revision,
+                state.webui_lifecycle.snapshot_sequence(),
+                &state.config,
+                Some(&state),
+            ))
+            .into_response()
+        }
         Ok(_) => single_webui_error(StatusCode::NOT_FOUND, "not_found", "model not found", true),
         Err(err) => single_webui_error(
             StatusCode::SERVICE_UNAVAILABLE,

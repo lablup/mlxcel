@@ -37,7 +37,7 @@ export interface SyncOptions {
 }
 
 const visiblePollMs = 2_000;
-const hiddenPollMs = 30_000;
+const observationTimeoutMs = 10_000;
 const maxBackoffMs = 30_000;
 const reconciliationTtlMs = 60_000;
 
@@ -49,6 +49,7 @@ export class WebUiSynchronizer {
   private readonly visibility: VisibilitySource;
   private readonly random: () => number;
   private timer: ReturnType<typeof globalThis.setTimeout> | null = null;
+  private observationTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
   private inflight: AbortController | null = null;
   private eventAbort: AbortController | null = null;
   private stopped = true;
@@ -63,7 +64,7 @@ export class WebUiSynchronizer {
     this.clock = options.clock ?? browserClock;
     this.visibility = options.visibility ?? browserVisibility;
     this.random = options.random ?? Math.random;
-    this.unsubscribe = this.visibility.subscribe(() => this.reschedule(0));
+    this.unsubscribe = this.visibility.subscribe(() => this.visibilityChanged());
   }
 
   start(): void {
@@ -78,10 +79,37 @@ export class WebUiSynchronizer {
     this.stopped = true;
     if (this.timer !== null) this.clock.clearTimeout(this.timer);
     this.timer = null;
+    if (this.observationTimer !== null) this.clock.clearTimeout(this.observationTimer);
+    this.observationTimer = null;
     this.inflight?.abort();
     this.inflight = null;
     this.eventAbort?.abort();
     this.eventAbort = null;
+  }
+
+  // Cancels observation only; inference streams belong to the request owner.
+  selectionChanged(): void {
+    this.cancelObservation();
+    this.reschedule(0);
+  }
+
+  private cancelObservation(): void {
+    this.generation += 1;
+    if (this.observationTimer !== null) this.clock.clearTimeout(this.observationTimer);
+    this.observationTimer = null;
+    this.inflight?.abort();
+    this.inflight = null;
+    this.eventAbort?.abort();
+    this.eventAbort = null;
+    if (this.timer !== null) this.clock.clearTimeout(this.timer);
+    this.timer = null;
+  }
+
+  private visibilityChanged(): void {
+    this.cancelObservation();
+    if (this.stopped) return;
+    this.dispatch({ type: 'connection', connection: 'stale', now: this.clock.now() });
+    this.reschedule(0);
   }
 
   dispose(): void {
@@ -95,6 +123,11 @@ export class WebUiSynchronizer {
     this.inflight = controller;
     const generation = this.generation;
     const now = this.clock.now();
+    const timeout = this.clock.setTimeout(() => {
+      controller.abort();
+      if (this.generation === generation) this.dispatch({ type: 'connection', connection: 'stale', error: { code: 'observation_timeout', message: 'Runtime observation timed out; retrying.', retryable: true }, now: this.clock.now() });
+    }, observationTimeoutMs);
+    this.observationTimer = timeout;
     try {
       if (this.getSnapshot().auth.status === 'signed-out') return;
       const bootstrap = await this.client.bootstrap(controller.signal);
@@ -115,18 +148,27 @@ export class WebUiSynchronizer {
         this.dispatch({ type: 'operations-snapshot', response: page, now });
         return page.items;
       });
-      await this.refreshSelectedRuntime(controller.signal, now, generation);
+      // Only a complete, unfiltered, same-instance catalog can clear selection.
+      // Never clear from an individual page or a stale request generation.
+      const selected = this.getSnapshot().selectedModelId;
+      const selectedAbsent = selected !== null && catalogPages.every((page) => page.server_instance_id === bootstrap.server.server_instance_id) && !catalogPages.some((page) => page.items.some((entry) => entry.identity.id === selected));
+      if (selectedAbsent) {
+        this.dispatch({ type: 'select-model', modelId: null });
+      }
+      if (!selectedAbsent) await this.refreshSelectedRuntime(controller.signal, generation);
       if (!this.isCurrent(controller, generation)) return;
       const unresolvedExpired = this.reconcilePending(operations, now);
       this.failures = 0;
       if (!unresolvedExpired) this.dispatch({ type: 'connection', connection: 'ready', now });
-      if (this.eventAbort === null) this.startEvents();
+      if (this.eventAbort === null && !this.visibility.hidden()) this.startEvents();
     } catch (error) {
       if (!controller.signal.aborted && this.generation === generation) {
         this.failures += 1;
         this.dispatch({ type: 'connection', connection: classifyConnectionError(error), error: safeClientError(error), now: this.clock.now() });
       }
     } finally {
+      this.clock.clearTimeout(timeout);
+      if (this.observationTimer === timeout) this.observationTimer = null;
       if (this.inflight === controller) this.inflight = null;
       if (!this.stopped && this.generation === generation) this.reschedule(this.pollDelay());
     }
@@ -197,13 +239,21 @@ export class WebUiSynchronizer {
     }
   }
 
-  private async refreshSelectedRuntime(signal: AbortSignal, now: number, generation: number): Promise<void> {
+  private async refreshSelectedRuntime(signal: AbortSignal, generation: number): Promise<void> {
     const modelId = this.getSnapshot().selectedModelId;
     if (modelId === null) return;
-    const runtime = await this.client.runtime(modelId, signal);
+    let runtime;
+    try {
+      runtime = await this.client.runtime(modelId, signal);
+    } catch (error) {
+      // Removal can commit between catalog and runtime reads. The next complete
+      // catalog reconciles selection; this is stale observation, not offline.
+      if (typeof error === 'object' && error !== null && 'status' in error && error.status === 404) throw new SnapshotConsistencyError('Selected model changed during observation; refreshing the catalog.');
+      throw error;
+    }
     if (signal.aborted || this.generation !== generation) return;
     if (this.getSnapshot().selectedModelId !== modelId) return;
-    this.dispatch({ type: 'runtime', runtime, sequence: runtime.snapshot_sequence, now });
+    this.dispatch({ type: 'runtime', runtime, sequence: runtime.snapshot_sequence, now: this.clock.now() });
   }
 
   private reconcilePending(operations: ReadonlyArray<{ readonly operation_id: string }>, now: number): boolean {
@@ -222,7 +272,7 @@ export class WebUiSynchronizer {
   }
 
   private reschedule(milliseconds: number): void {
-    if (this.stopped) return;
+    if (this.stopped || this.visibility.hidden()) return;
     if (this.timer !== null) this.clock.clearTimeout(this.timer);
     this.timer = this.clock.setTimeout(() => {
       this.timer = null;
@@ -231,7 +281,7 @@ export class WebUiSynchronizer {
   }
 
   private pollDelay(): number {
-    return this.visibility.hidden() ? hiddenPollMs : visiblePollMs;
+    return visiblePollMs;
   }
 
   private backoffDelay(): number {

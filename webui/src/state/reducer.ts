@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import { appendRuntimeHistory, boundOperations } from './observation';
 import { WEBUI_SCHEMA_VERSION } from '../api/types';
 import type { BootstrapResponse, CatalogEntry, CatalogListResponse, ModelId, Operation, OperationId, OperationsListResponse, PendingReconciliation, RuntimeSnapshot, UiClientError, UiEvent, WebUiSnapshot } from '../api/types';
 
@@ -30,14 +31,14 @@ export type WebUiAction =
   | { readonly type: 'connection'; readonly connection: WebUiSnapshot['connection']; readonly error?: UiClientError | null; readonly now: number };
 
 export function initialSnapshot(): WebUiSnapshot {
-  return { schemaVersion: WEBUI_SCHEMA_VERSION, auth: { status: 'signed-out', tokenPresent: false }, connection: 'idle', bootstrap: null, catalog: [], catalogSequence: null, operations: new Map(), runtimes: new Map(), selectedModelId: null, serverInstanceId: null, lastEventId: null, lastSequence: null, lastUpdatedAt: null, lastSuccessfulAt: null, error: null, pendingReconciliations: new Map(), resourceFences: { catalog: null, operationsSnapshot: null, operations: new Map(), models: new Map(), runtimes: new Map() } };
+  return { schemaVersion: WEBUI_SCHEMA_VERSION, auth: { status: 'signed-out', tokenPresent: false }, connection: 'idle', bootstrap: null, catalog: [], catalogSequence: null, operations: new Map(), runtimes: new Map(), runtimeHistory: [], selectedModelId: null, serverInstanceId: null, lastEventId: null, lastSequence: null, lastUpdatedAt: null, lastSuccessfulAt: null, error: null, pendingReconciliations: new Map(), resourceFences: { catalog: null, operationsSnapshot: null, operations: new Map(), models: new Map(), runtimes: new Map() } };
 }
 
 export function reduceWebUiSnapshot(state: WebUiSnapshot, action: WebUiAction): WebUiSnapshot {
   if (action.type === 'login-start') return { ...state, auth: { status: 'authenticating', tokenPresent: true }, connection: 'bootstrapping', error: null };
   if (action.type === 'login-success') return loginSuccess(state, action.bootstrap, action.now);
   if (action.type === 'logout') return { ...initialSnapshot(), lastUpdatedAt: action.now };
-  if (action.type === 'select-model') return { ...state, selectedModelId: action.modelId };
+  if (action.type === 'select-model') return { ...state, selectedModelId: action.modelId, runtimeHistory: [] };
   if (action.type === 'catalog') return applyCatalog(state, action.response, action.now);
   if (action.type === 'operations-snapshot') return applyOperationsSnapshot(state, action.response, action.now);
   if (action.type === 'operation') return applyOperation(state, action.operation, action.sequence, action.now);
@@ -73,27 +74,28 @@ function applyOperationsSnapshot(state: WebUiSnapshot, response: OperationsListR
     operations.set(operation.operation_id, operation);
     operationFences.set(operation.operation_id, response.snapshot_sequence);
   }
-  const resourceFences = { ...state.resourceFences, operationsSnapshot: response.snapshot_sequence, operations: operationFences };
-  return markSuccessful({ ...state, operations, serverInstanceId: response.server_instance_id, lastSequence: minReplaySequence(resourceFences), error: null, resourceFences }, now);
+  const retained = boundOperations(operations, now);
+  const resourceFences = { ...state.resourceFences, operationsSnapshot: response.snapshot_sequence, operations: new Map([...operationFences].filter(([id]) => retained.has(id))) };
+  return markSuccessful({ ...state, operations: retained, serverInstanceId: response.server_instance_id, lastSequence: minReplaySequence(resourceFences), error: null, resourceFences }, now);
 }
 
 function applyOperation(state: WebUiSnapshot, operation: Operation, sequence: number | null, now: number): WebUiSnapshot {
   if (sequence !== null && state.resourceFences.operationsSnapshot !== null && sequence <= state.resourceFences.operationsSnapshot) return state;
   const previousFence = state.resourceFences.operations.get(operation.operation_id);
   if (sequence !== null && previousFence !== undefined && sequence <= previousFence) return state;
-  const operations = mapSet(state.operations, operation.operation_id, operation);
+  const operations = boundOperations(mapSet(state.operations, operation.operation_id, operation), now);
   const fences = sequence === null ? state.resourceFences.operations : mapSet(state.resourceFences.operations, operation.operation_id, sequence);
-  const resourceFences = { ...state.resourceFences, operations: fences };
+  const resourceFences = { ...state.resourceFences, operations: new Map([...fences].filter(([id]) => operations.has(id))) };
   return markSuccessful({ ...state, operations, lastSequence: minReplaySequence(resourceFences), error: null, resourceFences }, now);
 }
 
 function applyRuntimeSnapshot(state: WebUiSnapshot, runtime: RuntimeSnapshot, sequence: number | null, now: number): WebUiSnapshot {
   if (state.serverInstanceId !== null && runtime.server_instance_id !== state.serverInstanceId) return restart(state, runtime.server_instance_id, now);
   const previousFence = state.resourceFences.runtimes.get(runtime.model_id);
-  if (sequence !== null && previousFence !== undefined && sequence <= previousFence) return state;
+  if (sequence !== null && previousFence !== undefined && sequence < previousFence) return state;
   const fences = sequence === null ? state.resourceFences.runtimes : mapSet(state.resourceFences.runtimes, runtime.model_id, sequence);
   const resourceFences = { ...state.resourceFences, runtimes: fences };
-  return markSuccessful({ ...state, runtimes: mapSet(state.runtimes, runtime.model_id, runtime), serverInstanceId: runtime.server_instance_id, lastSequence: minReplaySequence(resourceFences), error: null, resourceFences }, now);
+  return markSuccessful({ ...state, runtimes: mapSet(state.runtimes, runtime.model_id, runtime), runtimeHistory: runtime.model_id === state.selectedModelId ? appendRuntimeHistory(state.runtimeHistory, runtime, now) : state.runtimeHistory, serverInstanceId: runtime.server_instance_id, lastSequence: minReplaySequence(resourceFences), error: null, resourceFences }, now);
 }
 
 function applyEvent(state: WebUiSnapshot, event: UiEvent, now: number): WebUiSnapshot {
@@ -126,7 +128,7 @@ function applyRuntime(state: WebUiSnapshot, event: Extract<UiEvent, { type: 'run
   const previousFence = state.resourceFences.runtimes.get(runtime.model_id);
   if (previousFence !== undefined && event.sequence <= previousFence) return state;
   const resourceFences = { ...state.resourceFences, runtimes: mapSet(state.resourceFences.runtimes, runtime.model_id, event.sequence) };
-  return markSuccessful({ ...state, runtimes: mapSet(state.runtimes, runtime.model_id, runtime), serverInstanceId: event.server_instance_id, lastEventId: event.event_id, lastSequence: minReplaySequence(resourceFences), connection: 'streaming', resourceFences }, now);
+  return markSuccessful({ ...state, runtimes: mapSet(state.runtimes, runtime.model_id, runtime), runtimeHistory: runtime.model_id === state.selectedModelId ? appendRuntimeHistory(state.runtimeHistory, runtime, now) : state.runtimeHistory, serverInstanceId: event.server_instance_id, lastEventId: event.event_id, lastSequence: minReplaySequence(resourceFences), connection: 'streaming', resourceFences }, now);
 }
 
 function resetForResnapshot(state: WebUiSnapshot, event: Extract<UiEvent, { type: 'server_restart' | 'gap' | 'reset' }>, now: number): WebUiSnapshot {

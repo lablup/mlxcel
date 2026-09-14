@@ -1,0 +1,193 @@
+{
+  "schema_version": "webui.ui-api.v1",
+  "server_instance_id": "srv_20260912_a",
+  "model_id": "mdl_lR1nHQwFUguxLqHbEzH2DJLdZYiDFJ0S3FzxIzY5MUU",
+  "revision": 8,
+  "snapshot_sequence": 43,
+  "measurements": {
+    "gpu_utilization": {
+      "value": null,
+      "unit": "percent",
+      "scope": "unknown",
+      "measured_at": null,
+      "reason": "not measured by mlxcel"
+    },
+    "ttft": {
+      "value": null,
+      "unit": "ms",
+      "scope": "model",
+      "measured_at": null,
+      "reason": "request-send to first output token timing is not available in runtime counters"
+    },
+    "decode_rate": {
+      "value": null,
+      "unit": "tokens/s",
+      "scope": "model",
+      "measured_at": null,
+      "reason": "no atomic interval sample; cumulative generation time is not request TTFT or instantaneous decode rate"
+    },
+    "process_resident_bytes": {
+      "value": null,
+      "unit": "bytes",
+      "scope": "server",
+      "measured_at": null,
+      "reason": "process-wide resident memory has no existing cheap CPU snapshot"
+    },
+    "allocator_active_bytes": {
+      "value": null,
+      "unit": "bytes",
+      "scope": "server",
+      "measured_at": null,
+      "reason": "process-wide allocator active memory has no existing cheap CPU snapshot"
+    },
+    "allocator_cache_bytes": {
+      "value": null,
+      "unit": "bytes",
+      "scope": "server",
+      "measured_at": null,
+      "reason": "process-wide allocator cache memory has no existing cheap CPU snapshot"
+    },
+    "allocator_peak_bytes": {
+      "value": null,
+      "unit": "bytes",
+      "scope": "server",
+      "measured_at": null,
+      "reason": "process-wide allocator peak memory has no existing cheap CPU snapshot"
+    },
+    "device_total_bytes": {
+      "value": null,
+      "unit": "bytes",
+      "scope": "unknown",
+      "measured_at": null,
+      "reason": "device total memory has no existing cheap CPU snapshot; unified memory must not be summed with process memory"
+    },
+    "model_weights_bytes": {
+      "value": null,
+      "unit": "bytes",
+      "scope": "model",
+      "measured_at": null,
+      "reason": "resident weights estimate is unavailable; checkpoint download bytes are not resident memory"
+    },
+    "kv_cache_bytes": {
+      "value": null,
+      "unit": "bytes",
+      "scope": "model",
+      "measured_at": null,
+      "reason": "no cheap live KV byte snapshot; token occupancy cannot determine exact KV bytes"
+    },
+    "active_requests": {
+      "value": 0.0,
+      "unit": "requests",
+      "scope": "model",
+      "measured_at": "2026-09-12T03:04:05Z",
+      "reason": "BatchMetrics active decode sequences; point-in-time sample, excludes queued prefill"
+    },
+    "queued_requests": {
+      "value": 0.0,
+      "unit": "requests",
+      "scope": "model",
+      "measured_at": "2026-09-12T03:04:05Z",
+      "reason": "BatchMetrics pending prefill / single-stream queue; point-in-time sample"
+    },
+    "completed_requests_total": {
+      "value": 0.0,
+      "unit": "requests",
+      "scope": "model",
+      "measured_at": "2026-09-12T03:04:05Z",
+      "reason": "Metrics successfully recorded route completions; loaded-provider lifetime, not all admissions or errors"
+    },
+    "completion_tokens_total": {
+      "value": 0.0,
+      "unit": "tokens",
+      "scope": "model",
+      "measured_at": "2026-09-12T03:04:05Z",
+      "reason": "Metrics completion tokens from recorded route results; loaded-provider lifetime"
+    },
+    "generation_time_ms_total": {
+      "value": 0.0,
+      "unit": "ms",
+      "scope": "model",
+      "measured_at": "2026-09-12T03:04:05Z",
+      "reason": "Metrics sum of route-reported generation/elapsed times; loaded-provider lifetime, not decode-only or TTFT"
+    },
+    "decode_tokens_total": {
+      "value": null,
+      "unit": "tokens",
+      "scope": "model",
+      "measured_at": null,
+      "reason": "no completed decode timing sample has been published by this provider"
+    },
+    "decode_time_us_total": {
+      "value": null,
+      "unit": "us",
+      "scope": "model",
+      "measured_at": null,
+      "reason": "no completed decode timing sample has been published by this provider"
+    },
+    "prompt_cache_bytes": {
+      "value": null,
+      "unit": "bytes",
+      "scope": "model",
+      "measured_at": null,
+      "reason": "prompt cache is disabled for this provider"
+    },
+    "prompt_cache_entries": {
+      "value": null,
+      "unit": "entries",
+      "scope": "model",
+      "measured_at": null,
+      "reason": "prompt cache is disabled for this provider"
+    }
+  },
+  "settings": {
+    "scope": "server_startup",
+    "effective": {
+      "ctx_size": 4096.0,
+      "n_parallel": 4.0,
+      "kv_cache_mode": "fp16",
+      "temperature": 0.5
+    },
+    "overridden_by_cli": [],
+    "partial_errors": []
+  },
+  "slots": {
+    "available": true,
+    "reason": null,
+    "measured_at": "2026-09-12T03:04:05Z",
+    "configured_parallelism": 4,
+    "effective_parallelism": null,
+    "request_context_tokens": 4096,
+    "shared_pool_context_tokens": 16384,
+    "items": [
+      {
+        "id": 0,
+        "processing": false,
+        "prompt_tokens": null,
+        "cached_prompt_tokens": null,
+        "decoded_tokens": null
+      },
+      {
+        "id": 1,
+        "processing": false,
+        "prompt_tokens": null,
+        "cached_prompt_tokens": null,
+        "decoded_tokens": null
+      },
+      {
+        "id": 2,
+        "processing": false,
+        "prompt_tokens": null,
+        "cached_prompt_tokens": null,
+        "decoded_tokens": null
+      },
+      {
+        "id": 3,
+        "processing": false,
+        "prompt_tokens": null,
+        "cached_prompt_tokens": null,
+        "decoded_tokens": null
+      }
+    ]
+  },
+  "$schemaName": "RuntimeSnapshot"
+}
