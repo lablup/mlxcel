@@ -268,3 +268,35 @@ async fn manifest_hashes_match_embedded_assets() {
         assert_eq!(file["bytes"], data.len(), "{path}");
     }
 }
+
+#[test]
+fn vite_hash_cache_classification_accepts_base64url_without_splitting_hash() {
+    for path in [
+        "assets/index--ARMeYuQ.js",
+        "assets/index-a-b_cD12.js",
+        "assets/my-chunk-_bcdefg-.css",
+        "assets/index-ABCDEFGH.js",
+    ] {
+        assert!(super::has_vite_content_hash(path), "{path}");
+        assert_eq!(
+            super::cache_control_for(path),
+            "public, max-age=31536000, immutable"
+        );
+    }
+    for path in [
+        "index.html",
+        "mlxcel-webui-manifest.json",
+        "third-party-licenses.txt",
+        "root-ABCDEFGH.js",
+        "assets/plain.js",
+        "assets/my-long-file.js",
+        "assets/index-short.js",
+        "assets/-ABCDEFGH.js",
+        "assets/index_ABCDEFGH.js",
+        "assets/index-abc!defg.js",
+        "assets/index-한국어.js",
+    ] {
+        assert!(!super::has_vite_content_hash(path), "{path}");
+        assert_eq!(super::cache_control_for(path), "no-cache");
+    }
+}
