@@ -9,13 +9,14 @@ export { Select } from './common-select';
 
 export function Field(props: { label: string; value: string; onChange?: (value: string) => void; placeholder?: string; disabled?: boolean; busy?: boolean; error?: string; hint?: string; testId?: string }): React.JSX.Element {
   const id = useId();
+  const labelId = `${id}-label`;
   const hintId = `${id}-hint`;
   const errorId = `${id}-error`;
   const describedBy = [props.hint ? hintId : null, props.error ? errorId : null].filter(Boolean).join(' ') || undefined;
   return (
     <label className="ds-field" htmlFor={id} data-disabled={props.disabled || props.busy || undefined}>
-      <span>{props.label}</span>
-      <input id={id} value={props.value} placeholder={props.placeholder} disabled={props.disabled || props.busy} aria-busy={props.busy || undefined} aria-invalid={props.error ? 'true' : undefined} aria-describedby={describedBy} data-testid={props.testId} onChange={(event) => props.onChange?.(event.currentTarget.value)} />
+      <span id={labelId}>{props.label}</span>
+      <input id={id} aria-labelledby={labelId} value={props.value} placeholder={props.placeholder} disabled={props.disabled || props.busy} aria-busy={props.busy || undefined} aria-invalid={props.error ? 'true' : undefined} aria-describedby={describedBy} data-testid={props.testId} onChange={(event) => props.onChange?.(event.currentTarget.value)} />
       {props.hint ? <small id={hintId} data-tone="hint">{props.hint}</small> : null}
       {props.error ? <small id={errorId} data-tone="error">{props.error}</small> : null}
     </label>
