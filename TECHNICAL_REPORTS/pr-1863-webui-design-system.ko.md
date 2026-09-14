@@ -64,3 +64,7 @@ Hosted run 34801765896은 browser 19개를 통과하고 기존 States screenshot
 [`98fe9df2`의 canonical hosted WebUI job](https://github.com/lablup/mlxcel/actions/runs/34802205815/job/103846995858)은 typecheck, lint, unit 76개, browser 20개 전체와 deterministic bundle 검증을 통과했습니다. Bundle digest는 `858f5775f548532b3fa93942c7f063e06b83f427d107b47c82678f3564638f7f`입니다. `62c4f259`에서 빌드한 실제 model-free production server도 별도로 supplied-server CSP 두 경우(1440 light, 390 dark)를 통과했습니다. 실제 응답 정책, 정책 위반 및 외부 요청 없음, Select 위치와 Escape 포커스, 측정 progress, reduced motion, axe와 browser AX heading semantics를 검사했으며 static hosted 테스트만으로 이 결과를 주장하지 않습니다. 두 head의 production source/asset은 동일합니다.
 
 변경된 DOM의 Safari/VoiceOver/native zoom 재확인은 새 immutable production preview를 대상으로 한 번 요청했으며 아직 대기 중입니다. 과거4185 승인을 재사용하지 않습니다. Download backend 병합 이후 최종 통합 검증도 남아 있으므로 review 상태를 유지하며, 사용 불가 GB10 결과를 통과로 보고하지 않습니다.
+
+### 사용자 결정: 수동 검증을 최종 통합 수용으로 이연
+
+사용자는 현재 원격 환경에서 Safari/VoiceOver 검증을 수행할 수 없어, 변경된 ui-common DOM의 Safari/VoiceOver/native zoom 검사를 전체 구현 완료 후 최종 통합 수용 단계에서 함께 진행하도록 명시적으로 결정했습니다. 상태는 PASS가 아니라 DEFERRED이며 개별 유닛의 머지 차단 조건은 아닙니다. 공통 컨트롤과 페이지별 native 검사를 함께 수행하고, 이전4185 승인을 변경된 DOM에 재사용하지 않습니다. Download backend 병합 이후 최종 통합 검증은 여전히 필요하므로 review 상태를 유지합니다. 이번 변경은 문서 전용이며 immutable4186 preview, production source 및 bundle을 변경하지 않습니다.
