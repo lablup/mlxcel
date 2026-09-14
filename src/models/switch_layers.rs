@@ -39,10 +39,14 @@ use mlxcel_core::{MlxArray, UniquePtr, dtype};
 /// keeps the kernel on.
 ///
 /// **Byte-identical greedy output is NOT a general property, and never was**
-/// (#1045). It holds on `qwen3-30b-a3b`, re-confirmed at current HEAD: 64
-/// greedy tokens agree exactly with the kernel on and off. It does not hold on
+/// (#1045). On `qwen3-30b-a3b` it held for the prompt #1045 re-checked (64
+/// greedy tokens agreed exactly with the kernel on and off), but not for every
+/// prompt: on GB10 (CUDA) at `b8d10fb1` the chat-templated prompt `Explain how
+/// a hash map handles collisions.` agrees for 39 generated tokens and then
+/// diverges, deterministically on both paths (#1884). It does not hold on
 /// Klear, where the two paths pick different but equally coherent
-/// continuations. That is checkpoint-dependent, not a kernel defect. The
+/// continuations. That is checkpoint- and prompt-dependent, not a kernel
+/// defect. The
 /// `MLXCEL_FUSED_MOE_PARITY_CHECK=1` probe measured 96 decode MoE calls on each
 /// checkpoint against an all-f32 dequantize-and-matmul ground truth, and the
 /// fused kernel was CLOSER to that truth than `gather_qmm` in 96 of 96 calls on
@@ -1085,7 +1089,8 @@ impl SwitchGLU {
     /// Computes `sum_k scores[k] * down_k(silu(gate_k(x)) * up_k(x))` for the K
     /// selected experts as two all-cores Metal dispatches (gate/up+swiglu, then
     /// down+score), beating gather_qmm by ~3.5% on qwen3-30b-a3b. Greedy output
-    /// is byte-identical on that checkpoint but not on every family; see
+    /// can match exactly on that checkpoint, but that depends on the prompt and
+    /// the family; see
     /// [`fused_moe_enabled`] for the measured parity picture and for why
     /// `MLXCEL_FUSED_MOE=0` is the right switch when reference-diffing a port.
     /// gate/up are 4/8-bit; down also handles
