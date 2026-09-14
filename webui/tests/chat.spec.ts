@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test';
-import catalog from '../../tests/fixtures/webui/examples/catalog.page.json';
-import bootstrap from '../../tests/fixtures/webui/examples/bootstrap.model-free.json';
+import catalog from '../../tests/fixtures/webui/examples/catalog.page.json' with { type: 'json' };
+import bootstrap from '../../tests/fixtures/webui/examples/bootstrap.model-free.json' with { type: 'json' };
+import runtime from '../../tests/fixtures/webui/examples/runtime.snapshot.json' with { type: 'json' };
 import { bootProduct, browserStorageDump, installMockApi, loginWithMockApi, productVariants } from './browser-fixtures';
 import { expectAxeClean, expectSafeLayout } from './browser-assertions';
 
@@ -14,6 +15,9 @@ for (const width of [1440, 390]) {
       entry.capabilities = [{task:'chat',phase:'provider_ready',available:true,reason:null}];
       fixture.server_instance_id = bootstrap.server.server_instance_id;
       await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(fixture)});
+    });
+    await page.route('**/ui-api/v1/runtime?**', async (route) => {
+      await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({...runtime,server_instance_id:bootstrap.server.server_instance_id,model_id:catalog.items[0].identity.id})});
     });
     const requests: unknown[] = [];
     let remoteRequests = 0;
