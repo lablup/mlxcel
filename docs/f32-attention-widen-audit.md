@@ -2,7 +2,7 @@
 
 `lablup/mlxcel#1710` ported upstream's f32 attention guard into `src/models/phi.rs` and `src/models/stablelm.rs` after `phi-2-4bit` went NaN at layer 29 of 32 in f16 and every later token decoded as `!`. The defect had survived because `lablup/mlxcel#1709`'s `gelu_approx` was widening the residual stream by accident and holding the scores in range. That issue asked whether the other families upstream guards this way carry the guard in their mlxcel ports, and closed without an answer. This file is that answer.
 
-The useful half is the negative one. Of the eight upstream files the search returns, three are already matched, two are a different guard with a different failure mode, one is not this guard at all, one has no mlxcel port, and one needed a change. A family that legitimately needs no widen is a result.
+The useful half is the negative one. Of the eight upstream files the two-literal search returns, three are already matched, two are a different guard with a different failure mode, one is not this guard at all, one has no mlxcel port, and one needed a change. A second search is then needed, because those two literals do not cover that second guard class: it adds four more mlxcel families and three of them are matched too. A family that legitimately needs no widen is a result.
 
 ## What the search looks for
 
@@ -73,7 +73,29 @@ One property of Gemma 2 is worth writing down because it changes the failure mod
 
 **MiniMax-M3.** `src/models/minimax_m3_indexer.rs:219` computes its token scores with `matmul(q, k_t)` at the input dtype, where all four upstream copies widen both operands. This is the block-selection class, so a wrong verdict is silent: no NaN, just a different set of KV blocks entering the sparse attention. The path is reached only when `should_apply_sparse(kv_len)` holds, that is `kv_len > 2 * topk_blocks * block_size`, so it needs a long context to exercise at all. No M3 checkpoint is present on this machine, and `docs/supported-models.md` records the family as exceeding it. Recorded as unverified rather than as a pass, because a skip reported as `ok` is how the NaN guard from `lablup/mlxcel#1718` came to cover nothing on either machine (`tests/common/mod.rs`).
 
-**Adjacent and out of scope.** `src/models/deepseek_v4_indexer.rs` scores pooled keys for the same kind of discrete block selection. It was not part of #1829's site list and was not audited here.
+## The search literal does not cover the block-selection class
+
+The two literals are named for the overflow guard's variables. The block-selection sites only match them by accident, and one of them does not match at all.
+
+`minimax_m3_vl` matches because `idx_queries` and `idx_keys` contain the substrings. `qwen4_exp` matches on `pooled_keys` but not on `query`, so it surfaces through one of its two sites. DeepSeek-V4's HiSA indexer, which is the same class, names its operands `q` and `pooled` and therefore matches neither. It is in mlxcel and it was found here only because #1829's scope note pointed at it.
+
+So the class needs its own search, over the files that implement sparse block selection rather than over two variable names:
+
+```bash
+git -C mlx-vlm grep -nF "astype(mx.float32)" origin/main -- '*/hisa_kernel.py' '*_vl/language.py'
+grep -rn "FLOAT32" src/models/*indexer*.rs src/models/glm_moe_dsa.rs
+```
+
+Run on the same refs, that gives four more mlxcel families, three of which match upstream:
+
+| Family | Upstream | mlxcel | Verdict |
+|---|---|---|---|
+| DeepSeek-V4 HiSA indexer | widens `q` and `pooled`, [`hisa_kernel.py:42-43`](https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/deepseek_v4/hisa_kernel.py) | `src/models/deepseek_v4_indexer.rs:222-223` widens both | matches, no change |
+| DeepSeek-V3.2 indexer | no widen; its one f32 cast is a MoE router sigmoid, [`deepseek_v32.py`](https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/deepseek_v32.py) | `src/models/deepseek_v32_indexer.rs`, no widen | matches, no change |
+| GLM-MoE-DSA | no f32 cast at all, [`glm_moe_dsa.py`](https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/glm_moe_dsa.py) | `src/models/glm_moe_dsa.rs`, no widen | matches, no change |
+| MiniMax-M3 indexer | widens | `src/models/minimax_m3_indexer.rs:219`, no widen | the one gap; see above |
+
+DeepSeek-V4 is the useful entry. Its indexer widens for the same reason `minimax_m3_vl` does, mlxcel already does it, and the port states the dtype in its own doc comments (`q` is `[B, H, L, D]` f32). A reader who trusted only the two-literal search would have concluded the family was unguarded.
 
 ## Two entries that will match the search again
 
