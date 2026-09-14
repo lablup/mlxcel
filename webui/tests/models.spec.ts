@@ -1,14 +1,12 @@
 // Copyright 2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 import { expect, test, type Page } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
-import { model, snapshot } from '../src/features/models/test-fixtures';
-import { validateAgainstSchema } from '../src/api/jsonSchema';
+import { model, bootstrap, loadValidator } from './models-fixtures';
 import type { CatalogEntry, ModelActionRequest, Operation } from '../src/api/types';
 
 // Deterministic API composition tests; these do not claim real download/inference acceptance.
 async function installLibrary(page: Page, initial: CatalogEntry[] = []) {
-  const bootstrap = snapshot().bootstrap;
-  if (!bootstrap) throw new Error('Missing bootstrap fixture');
+  const { validateAgainstSchema } = await loadValidator();
   let entries = initial;
   let sequence = 10;
   let operation: Operation | null = null;
