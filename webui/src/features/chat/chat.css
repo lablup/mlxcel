@@ -21,3 +21,7 @@
 .chat-code-keyword { color: var(--color-focus, currentColor); font-weight: 600; }
 .chat-code-string { color: var(--color-text); }
 .chat-code-number { color: var(--color-muted); }
+.chat-screen a[href^="#"] { display: inline-flex; align-items: center; min-height: 44px; min-width: 24px; }
+.chat-markdown a { display: inline-block; min-height: 24px; min-width: 24px; }
+.chat-privacy .toggle { min-height: 44px; }
+.chat-privacy .toggle input { flex: 0 0 24px; min-width: 24px; min-height: 24px; }
