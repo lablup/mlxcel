@@ -94,3 +94,10 @@ describe('whole-request image revalidation', () => {
     expect(() => validateRequestImages([{ ...image, type: 'image/jpeg', dataUrl: image.dataUrl.replace('image/png', 'image/jpeg') }], limits)).toThrow('content');
   });
 });
+
+it('permits text-only requests when image admission is disabled but keeps body bounds', async () => {
+  const disabled = {...limits,max_images:0};
+  expect(() => validateRequestImages([], disabled)).not.toThrow();
+  await expect(loadLocalImages([png()],0,disabled)).rejects.toThrow();
+  expect(() => validateRequestImages([], {...disabled,max_body_bytes:0})).toThrow();
+});

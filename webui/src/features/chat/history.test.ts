@@ -182,3 +182,15 @@ describe('opt-in IndexedDB repository', () => {
   });
 
 });
+
+describe('imported completion invariants', () => {
+  it('rejects false completion but accepts finished reasoning and inert tools', () => {
+    const data = fixture(); data[0].turns[0].status = 'complete';
+    expect(() => validateConversations(data)).toThrow(HistoryValidationError);
+    data[0].turns[0].finishReason = 'stop'; data[0].turns[0].content = ''; data[0].turns[0].reasoning = '';
+    expect(() => validateConversations(data)).toThrow(HistoryValidationError);
+    data[0].turns[0].reasoning = 'Reasoning only'; expect(validateConversations(data)[0].turns[0].status).toBe('complete');
+    data[0].turns[0].reasoning = ''; data[0].turns[0].tools = [{index:0,id:'call',name:'not-executed',arguments:'{}'}];
+    expect(validateConversations(data)[0].turns[0].status).toBe('complete');
+  });
+});

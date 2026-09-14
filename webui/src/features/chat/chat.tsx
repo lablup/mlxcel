@@ -27,15 +27,16 @@ export function Chat({ locale }: { locale: Locale }): React.JSX.Element {
   const [imagesBusy, setImagesBusy] = useState(false);
   const imageEpoch = useRef(0);
   const composing = useRef(false);
+  const statusEpoch = useRef(0);
   const active = useRef<{ controller: AbortController; turn: ChatTurn; conversation: ChatConversation; flush: () => void } | null>(null);
   const current = conversations.find((entry) => entry.id === currentId) ?? null;
   const model = snapshot.catalog.find((entry) => entry.identity.id === snapshot.selectedModelId);
   const connected = ['ready', 'streaming', 'polling'].includes(snapshot.connection);
   const canChat = connected && model?.lifecycle.state === 'ready' && model.capabilities.some((cap) => cap.task === 'chat' && cap.phase === 'provider_ready' && cap.available);
-  const canImage = canChat && model?.capabilities.some((cap) => cap.task === 'vision_input' && cap.phase === 'provider_ready' && cap.available);
+  const canImage = canChat && snapshot.bootstrap !== null && Object.values(snapshot.bootstrap.media_limits).every((limit) => limit > 0) && model?.capabilities.some((cap) => cap.task === 'vision_input' && cap.phase === 'provider_ready' && cap.available);
 
   useEffect(() => () => {
-    imageEpoch.current++;
+    imageEpoch.current++; statusEpoch.current++;
     const request = active.current;
     if (request !== null) {
       request.turn = { ...request.turn, status: 'interrupted', error: 'View closed. The request was aborted and was not retried.' };
@@ -55,10 +56,12 @@ export function Chat({ locale }: { locale: Locale }): React.JSX.Element {
     if (request === null) return;
     request.turn = { ...request.turn, status: 'cancelled', error: null };
     request.controller.abort(); request.flush();
+    const epoch = ++statusEpoch.current;
     setAnnouncement('Stopped locally; checking server activity.');
     void actions.refreshRuntime(request.turn.modelId).then((runtime) => {
+      if (statusEpoch.current !== epoch) return;
       setAnnouncement(`Request aborted. Server observation refreshed at ${runtime.measurements.active_requests?.measured_at ?? 'an unknown time'}. See Activity for active requests; this is not a per-request cancellation receipt.`);
-    }).catch(() => setAnnouncement('Request aborted. Backend cancellation could not be observed; inspect Activity before unloading.'));
+    }).catch(() => { if (statusEpoch.current === epoch) setAnnouncement('Request aborted. Backend cancellation could not be observed; inspect Activity before unloading.'); });
   };
   const send = async (): Promise<void> => {
     if (active.current !== null || historyBusy || imagesBusy || !canChat || model === undefined || !draft.trim() || draft.length > MAX_PROMPT_CHARACTERS) return;
@@ -96,7 +99,7 @@ export function Chat({ locale }: { locale: Locale }): React.JSX.Element {
         setError('Conversation memory budget reached. No further output was retained.');
       }
     } };
-    active.current = request; setBusy(true); setError(null); setDraft(''); setImages([]); request.flush(); setAnnouncement('Generating.');
+    active.current = request; statusEpoch.current++; setBusy(true); setError(null); setDraft(''); setImages([]); request.flush(); setAnnouncement('Generating.');
     try {
       await actions.streamChatCompletions(turn.modelId, body, {
         onFrame: (frame) => {

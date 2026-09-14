@@ -144,6 +144,7 @@ function normalize(value: unknown, options: HistoryOptions): ChatConversation[] 
         ttftMs: nullable(turn.ttftMs, number), elapsedMs: nullable(turn.elapsedMs, number),
         error: nullable(turn.error, string), parameters, images: options.includeImages ? images : [],
       };
+      if (result.status === 'complete' && (!result.finishReason || (!result.content && !result.reasoning && !result.tools.length))) return invalid();
       totalJsonBytes += bytes(JSON.stringify(result));
       if (totalJsonBytes > HISTORY_LIMITS.jsonBytes) return invalid();
       return result;

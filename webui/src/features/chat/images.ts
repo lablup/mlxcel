@@ -57,6 +57,10 @@ function validateDimensions(width: number, height: number, limits: MediaImageLim
  * across all messages. This does not replace the complete JSON body check.
  */
 export function validateRequestImages(images: readonly LocalImage[], limits: MediaImageLimits): void {
+  if (images.length === 0) {
+    if (!limits || !Number.isSafeInteger(limits.max_body_bytes) || limits.max_body_bytes <= 0) throw new Error('Request body limit is unavailable.');
+    return;
+  }
   validateLimits(limits);
   if (images.length > limits.max_images) throw new Error('Conversation images exceed the server image count limit.');
   let encodedBytes = 0;

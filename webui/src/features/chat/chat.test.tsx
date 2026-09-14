@@ -45,4 +45,12 @@ describe('Chat real component composition',()=>{
   mocked.stream.mockImplementation(async(_id:string,_body:unknown,handlers:ChatStreamHandlers)=>{handlers.onFrame({data:JSON.stringify({choices:[{index:0,delta:{reasoning_content:'Thinking'},finish_reason:null}]}),event:'message',id:null,retry:null});throw new Error('disconnect');});
   input('Hello');await act(async()=>button('Send').click());expect(host.textContent).toContain('Thinking');expect(host.textContent).toContain('Generation failed or disconnected');expect(mocked.stream).toHaveBeenCalledOnce();
  });
+ it('allows text-only generation when server image admission is disabled', async()=>{
+  if(mocked.snapshot?.bootstrap)mocked.snapshot={...mocked.snapshot,bootstrap:{...mocked.snapshot.bootstrap,media_limits:{...mocked.snapshot.bootstrap.media_limits,max_images:0}}};
+  act(()=>root.render(<Chat locale="en"/>));
+  mocked.stream.mockImplementation(async(_id:string,_body:unknown,handlers:ChatStreamHandlers)=>{handlers.onFrame({data:JSON.stringify({choices:[{index:0,delta:{content:'Hello'},finish_reason:'stop'}]}),event:'message',id:null,retry:null});});
+  input('Hello');await act(async()=>button('Send').click());
+  expect(mocked.stream).toHaveBeenCalledOnce();expect(host.querySelector('input[accept="image/png,image/jpeg,image/webp"]')).toBeNull();expect(host.textContent).toContain('Response complete.');
+ });
+
 });
