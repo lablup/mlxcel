@@ -15,7 +15,8 @@
 //! Bounded WebUI operation and event store shared by router lifecycle adapters.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::router_lifecycle::LifecycleSnapshot;
@@ -27,6 +28,7 @@ pub const MAX_SAFE_EVENT_SEQUENCE: u64 = 9_007_199_254_740_991;
 pub const TERMINAL_OPERATION_LIMIT: usize = 200;
 pub const TERMINAL_OPERATION_RETENTION: Duration = Duration::from_secs(3600);
 pub const MAX_ACTIVE_OPERATIONS: usize = 64;
+pub const MAX_ACTIVE_DOWNLOAD_OPERATIONS: usize = 4;
 
 #[derive(Debug, Clone)]
 struct IdempotencyRecord {
@@ -39,6 +41,8 @@ struct CoordinatorInner {
     active: BTreeMap<String, Operation>,
     terminal: VecDeque<(Instant, Operation)>,
     idempotency: BTreeMap<String, IdempotencyRecord>,
+    download_aliases: BTreeMap<String, String>,
+    cancellations: BTreeMap<String, Arc<AtomicBool>>,
     events: VecDeque<(Instant, UiEvent)>,
     next_operation: u64,
     next_sequence: u64,
@@ -185,12 +189,24 @@ impl LifecycleCoordinator {
         idempotency_key: Option<&str>,
         fingerprint: String,
     ) -> Result<OperationAccepted, OperationError> {
-        let now = rfc3339_now();
         let mut inner = self
             .inner
             .lock()
             .map_err(|_| OperationError::TooManyActive)?;
-        prune_terminal(&mut inner);
+        self.begin_operation_locked(&mut inner, kind, target, idempotency_key, fingerprint, None)
+    }
+
+    fn begin_operation_locked(
+        &self,
+        inner: &mut CoordinatorInner,
+        kind: OperationKind,
+        target: OperationTarget,
+        idempotency_key: Option<&str>,
+        fingerprint: String,
+        max_active_for_kind: Option<usize>,
+    ) -> Result<OperationAccepted, OperationError> {
+        let now = rfc3339_now();
+        prune_terminal(inner);
         if let Some(key) = idempotency_key
             && let Some(record) = inner.idempotency.get(key)
         {
@@ -218,6 +234,11 @@ impl LifecycleCoordinator {
         if inner.active.len() >= MAX_ACTIVE_OPERATIONS {
             return Err(OperationError::TooManyActive);
         }
+        if let Some(max_active_for_kind) = max_active_for_kind
+            && inner.active.values().filter(|op| op.kind == kind).count() >= max_active_for_kind
+        {
+            return Err(OperationError::TooManyActive);
+        }
         inner.next_operation += 1;
         let operation_id = format!("op_{}_{:06}", kind.as_str(), inner.next_operation);
         let operation = Operation {
@@ -243,19 +264,177 @@ impl LifecycleCoordinator {
                 },
             );
         }
+        if let OperationTarget::Download {
+            repo_id,
+            revision: Some(revision),
+        } = &operation.target
+        {
+            inner
+                .download_aliases
+                .insert(download_alias_key(repo_id, revision), operation_id.clone());
+        }
         inner.active.insert(operation_id.clone(), operation.clone());
         self.append_and_broadcast_locked(
-            &mut inner,
+            inner,
             UiEventPayload::Operation(OperationPayload {
                 operation: operation.clone(),
             }),
         );
-        let accepted = OperationAccepted {
+        Ok(OperationAccepted {
             operation_id,
             state: OperationState::Queued,
             idempotent_replay: false,
+        })
+    }
+
+    pub fn begin_download_operation(
+        &self,
+        target: OperationTarget,
+        idempotency_key: Option<&str>,
+        fingerprint: String,
+    ) -> Result<OperationAccepted, OperationError> {
+        self.begin_operation_with_kind_limit(
+            OperationKind::Download,
+            target,
+            idempotency_key,
+            fingerprint,
+            MAX_ACTIVE_DOWNLOAD_OPERATIONS,
+        )
+    }
+
+    fn begin_operation_with_kind_limit(
+        &self,
+        kind: OperationKind,
+        target: OperationTarget,
+        idempotency_key: Option<&str>,
+        fingerprint: String,
+        max_active_for_kind: usize,
+    ) -> Result<OperationAccepted, OperationError> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| OperationError::TooManyActive)?;
+        self.begin_operation_locked(
+            &mut inner,
+            kind,
+            target,
+            idempotency_key,
+            fingerprint,
+            Some(max_active_for_kind),
+        )
+    }
+
+    pub fn idempotency_conflict(&self, key: &str, fingerprint: &str) -> Option<String> {
+        let inner = self.inner.lock().ok()?;
+        inner.idempotency.get(key).and_then(|record| {
+            (record.fingerprint != fingerprint).then(|| record.operation_id.clone())
+        })
+    }
+
+    pub fn find_active_download(&self, repo_id: &str, revision: &str) -> Option<Operation> {
+        let inner = self.inner.lock().ok()?;
+        if let Some(operation_id) = inner
+            .download_aliases
+            .get(&download_alias_key(repo_id, revision))
+            && let Some(operation) = inner.active.get(operation_id)
+        {
+            return Some(operation.clone());
+        }
+        inner
+            .active
+            .values()
+            .find_map(|operation| match &operation.target {
+                OperationTarget::Download {
+                    repo_id: target_repo,
+                    revision: target_revision,
+                } if target_repo == repo_id && target_revision.as_deref() == Some(revision) => {
+                    Some(operation.clone())
+                }
+                _ => None,
+            })
+    }
+
+    pub fn register_download_revision_alias(
+        &self,
+        operation_id: &str,
+        repo_id: &str,
+        revision: &str,
+    ) -> bool {
+        let Ok(mut inner) = self.inner.lock() else {
+            return false;
         };
-        Ok(accepted)
+        if !inner
+            .active
+            .get(operation_id)
+            .is_some_and(|operation| operation.kind == OperationKind::Download)
+        {
+            return false;
+        }
+        inner.download_aliases.insert(
+            download_alias_key(repo_id, revision),
+            operation_id.to_string(),
+        );
+        true
+    }
+
+    pub fn register_cancellation(&self, operation_id: &str, cancel: Arc<AtomicBool>) {
+        let Ok(mut inner) = self.inner.lock() else {
+            return;
+        };
+        inner.cancellations.insert(operation_id.to_string(), cancel);
+        if let Some(operation) = inner.active.get_mut(operation_id) {
+            operation.cancellable = true;
+            operation.cancel_reason = None;
+            operation.updated_at = rfc3339_now();
+            let cloned = operation.clone();
+            self.append_and_broadcast_locked(
+                &mut inner,
+                UiEventPayload::Operation(OperationPayload { operation: cloned }),
+            );
+        }
+    }
+
+    pub fn begin_publish_operation(&self, operation_id: &str) -> bool {
+        let Ok(mut inner) = self.inner.lock() else {
+            return false;
+        };
+        let Some(operation) = inner.active.get_mut(operation_id) else {
+            return false;
+        };
+        if operation.state == OperationState::Cancelling {
+            return false;
+        }
+        operation.cancellable = false;
+        operation.cancel_reason =
+            Some("download is being published and can no longer be cancelled".to_string());
+        operation.updated_at = rfc3339_now();
+        let cloned = operation.clone();
+        inner.cancellations.remove(operation_id);
+        self.append_and_broadcast_locked(
+            &mut inner,
+            UiEventPayload::Operation(OperationPayload { operation: cloned }),
+        );
+        true
+    }
+
+    pub fn update_operation_progress(
+        &self,
+        operation_id: &str,
+        progress: ProgressBytes,
+    ) -> Option<Operation> {
+        let mut inner = self.inner.lock().ok()?;
+        let operation = inner.active.get_mut(operation_id)?;
+        operation.progress = progress.clone();
+        operation.updated_at = rfc3339_now();
+        let cloned = operation.clone();
+        self.append_and_broadcast_locked(
+            &mut inner,
+            UiEventPayload::DownloadProgress(DownloadProgressPayload {
+                operation_id: operation_id.to_string(),
+                progress,
+            }),
+        );
+        Some(cloned)
     }
 
     pub fn update_operation(
@@ -277,6 +456,8 @@ impl LifecycleCoordinator {
         ) {
             operation.cancellable = false;
             operation.cancel_reason = None;
+            inner.cancellations.remove(operation_id);
+            inner.download_aliases.retain(|_, id| id != operation_id);
             inner
                 .terminal
                 .push_back((Instant::now(), operation.clone()));
@@ -349,11 +530,41 @@ impl LifecycleCoordinator {
     }
 
     pub fn cancel_operation(&self, operation_id: &str) -> Result<OperationAccepted, CancelError> {
-        let operation = self
-            .get_operation(operation_id)
+        let mut inner = self.inner.lock().map_err(|_| CancelError::NotFound)?;
+        let Some(cancel) = inner.cancellations.get(operation_id).cloned() else {
+            let operation = inner
+                .active
+                .get(operation_id)
+                .or_else(|| {
+                    inner
+                        .terminal
+                        .iter()
+                        .find_map(|(_, op)| (op.operation_id == operation_id).then_some(op))
+                })
+                .ok_or(CancelError::NotFound)?;
+            return Err(CancelError::Unsupported {
+                operation_id: operation.operation_id.clone(),
+            });
+        };
+        cancel.store(true, Ordering::Relaxed);
+        let operation = inner
+            .active
+            .get_mut(operation_id)
             .ok_or(CancelError::NotFound)?;
-        Err(CancelError::Unsupported {
-            operation_id: operation.operation_id,
+        operation.state = OperationState::Cancelling;
+        operation.updated_at = rfc3339_now();
+        operation.cancellable = false;
+        operation.cancel_reason =
+            Some("cancellation accepted; waiting for the writer to exit".to_string());
+        let cloned = operation.clone();
+        self.append_and_broadcast_locked(
+            &mut inner,
+            UiEventPayload::Operation(OperationPayload { operation: cloned }),
+        );
+        Ok(OperationAccepted {
+            operation_id: operation_id.to_string(),
+            state: OperationState::Cancelling,
+            idempotent_replay: false,
         })
     }
 
@@ -516,6 +727,13 @@ fn prune_idempotency(inner: &mut CoordinatorInner) {
     inner
         .idempotency
         .retain(|_, record| retained_operations.contains(&record.operation_id));
+    inner
+        .download_aliases
+        .retain(|_, operation_id| inner.active.contains_key(operation_id));
+}
+
+fn download_alias_key(repo_id: &str, revision: &str) -> String {
+    format!("{repo_id}::{revision}")
 }
 
 fn prune_events(inner: &mut CoordinatorInner) {

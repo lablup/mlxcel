@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(dead_code)]
+
 //! Whole-value producer comparisons against fixtures validated by the pinned
 //! JSON Schema gate. Only dynamic IDs, timestamps and revisions are normalized;
 //! missing fields, extra fields and all static values must match exactly.
@@ -41,6 +43,39 @@ fn operation_fixture() -> Value {
     fixture(include_str!(
         "../../tests/fixtures/webui/examples/operation.succeeded.json"
     ))
+}
+
+fn download_running_fixture() -> Value {
+    fixture(include_str!(
+        "../../tests/fixtures/webui/examples/operation.download-running.json"
+    ))
+}
+
+fn download_succeeded_fixture() -> Value {
+    fixture(include_str!(
+        "../../tests/fixtures/webui/examples/operation.download-succeeded.json"
+    ))
+}
+
+fn operation_accepted_fixture() -> Value {
+    fixture(include_str!(
+        "../../tests/fixtures/webui/examples/operation.accepted.json"
+    ))
+}
+
+fn download_operation_dynamic(prefix: &str, include_result: bool) -> Vec<(String, Dynamic)> {
+    let mut fields = vec![
+        ("/operation_id", Dynamic::Token),
+        ("/created_at", Dynamic::Timestamp),
+        ("/updated_at", Dynamic::Timestamp),
+    ];
+    if include_result {
+        fields.push(("/result/model_id", Dynamic::ModelId));
+    }
+    fields
+        .into_iter()
+        .map(|(path, kind)| (format!("{prefix}{path}"), kind))
+        .collect()
 }
 
 fn operation_dynamic(prefix: &str) -> Vec<(String, Dynamic)> {
@@ -116,6 +151,44 @@ fn matches_fixture(
         ));
     }
     Ok(())
+}
+
+pub(super) fn assert_operation_accepted(value: &Value) {
+    let expected = operation_accepted_fixture();
+    let dynamic = [("/operation_id".into(), Dynamic::Token)];
+    matches_fixture(value, &expected, &dynamic).unwrap_or_else(|error| panic!("{error}"));
+}
+
+pub(super) fn assert_download_operation_running(value: &Value) {
+    matches_fixture(
+        value,
+        &download_running_fixture(),
+        &download_operation_dynamic("", false),
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+}
+
+pub(super) fn assert_download_operation_succeeded(value: &Value) {
+    matches_fixture(
+        value,
+        &download_succeeded_fixture(),
+        &download_operation_dynamic("", true),
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+}
+
+pub(super) fn assert_download_progress_event(value: &Value) {
+    let expected = fixture(include_str!(
+        "../../tests/fixtures/webui/examples/event.2.json"
+    ));
+    let dynamic = [
+        ("/server_instance_id".into(), Dynamic::Token),
+        ("/event_id".into(), Dynamic::EventId),
+        ("/sequence".into(), Dynamic::Sequence),
+        ("/emitted_at".into(), Dynamic::Timestamp),
+        ("/payload/operation_id".into(), Dynamic::Token),
+    ];
+    matches_fixture(value, &expected, &dynamic).unwrap_or_else(|error| panic!("{error}"));
 }
 
 pub(super) fn assert_operation(operation: &Value, target: &str, eviction_target: &str) {

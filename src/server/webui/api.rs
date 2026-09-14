@@ -175,32 +175,13 @@ pub(crate) fn bootstrap_response(
     );
     actions.insert(
         "download",
-        action(
-            WebUiActionState::ReadOnly,
-            Some(
-                if cache_available && !matches!(mode, WebUiServerMode::SingleModel) {
-                    "download adapter is not mounted in this build"
-                } else {
-                    "no writable managed cache route is available in this mode"
-                },
-            ),
-            Some("Downloads are handled by the WebUI download adapter in issue #1841"),
-        ),
+        super::library_policy::availability(mode, cache_available, true),
     );
     actions.insert(
         "cache_delete",
-        action(
-            WebUiActionState::ReadOnly,
-            Some(
-                if cache_available && !matches!(mode, WebUiServerMode::SingleModel) {
-                    "cache removal adapter is not mounted in this build"
-                } else {
-                    "no writable managed cache route is available in this mode"
-                },
-            ),
-            Some("Cache deletion is handled by the WebUI removal adapter in issue #1841"),
-        ),
+        super::library_policy::availability(mode, cache_available, false),
     );
+    let features = feature_flags(config, &actions);
     BootstrapResponse {
         schema_version: SCHEMA_VERSION.to_string(),
         server: BackendIdentity {
@@ -208,9 +189,9 @@ pub(crate) fn bootstrap_response(
             mode: mode.as_str(),
             api_base: config.api_prefix.clone(),
             auth_required: !config.api_keys.is_empty(),
-            build: build_info(config, cache_available),
+            build: build_info(features.clone()),
         },
-        features: feature_flags(config, cache_available),
+        features,
         actions,
         roots: root_summaries(startup, cache_available, mode),
         limits: limit_summary(),
@@ -229,21 +210,31 @@ fn action(
     }
 }
 
-fn feature_flags(config: &ServerConfig, cache_available: bool) -> Vec<&'static str> {
+fn feature_flags(
+    config: &ServerConfig,
+    actions: &BTreeMap<&'static str, ActionAvailability>,
+) -> Vec<&'static str> {
     let mut features = vec!["webui", "catalog", "load", "unload", "chat", "runtime"];
-    let _ = cache_available;
+    for name in ["download", "cache_delete"] {
+        if actions
+            .get(name)
+            .is_some_and(|action| action.state == "enabled")
+        {
+            features.push(name);
+        }
+    }
     if config.enable_settings_endpoint {
         features.push("settings");
     }
     features
 }
 
-fn build_info(config: &ServerConfig, cache_available: bool) -> BuildInfo {
+fn build_info(features: Vec<&'static str>) -> BuildInfo {
     BuildInfo {
         version: env!("CARGO_PKG_VERSION"),
         git_commit: option_env!("MLXCEL_GIT_COMMIT"),
         target: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
-        features: feature_flags(config, cache_available),
+        features,
     }
 }
 
@@ -258,7 +249,11 @@ fn root_summaries(
             kind: "cache",
             display_name: "mlxcel managed cache".to_string(),
             redacted: true,
-            writable: Some(true),
+            writable: Some(
+                cache_available
+                    && mode != WebUiServerMode::SingleModel
+                    && crate::server::router_cache::managed_mutations_supported(),
+            ),
             error: None,
         });
     }

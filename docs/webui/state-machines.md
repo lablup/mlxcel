@@ -37,6 +37,8 @@ Deletion refusal cases are 409 for transient busy states and 422 for unsupported
 
 `idempotency_key` scope is one `server_instance_id` and expires with operation history retention unless the operation is still active. Reusing the same key with the same request returns the original operation. Reusing the same key with a different normalized request returns 409 conflict. A changed `server_instance_id` means the client must not replay POSTs automatically; it must resnapshot and ask the user when necessary.
 
+Download operation history and idempotency records are process-local. After a server restart, clients must discard old operation references even if an operation ID string is reused in the new `server_instance_id`. Previously published managed snapshots are rediscovered from the configured store; abandoned private `.mlxcel-staging` directories are excluded from the catalog and are neither resumed nor automatically deleted by a new process. An explicit retry starts a new private stage and does not adopt another writer's partial files. This is process-restart reconciliation, not a guarantee of power-loss durability.
+
 Every mutating model request carries `expected_revision`. If the catalog entry revision changed since the UI snapshot, return 409 `stale_revision` with the current operation/model pointer when possible.
 
 ## Snapshot to SSE fence
