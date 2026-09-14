@@ -81,5 +81,13 @@
     "cursor_bytes": 512,
     "settings_fields_max": 64,
     "measurements_max": 64
+  },
+  "media_limits": {
+    "max_images": 16,
+    "max_image_bytes": 67108864,
+    "max_width": 16384,
+    "max_height": 16384,
+    "max_decoded_bytes": 536870912,
+    "max_body_bytes": 67108864
   }
 }

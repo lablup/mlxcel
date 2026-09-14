@@ -65,7 +65,7 @@ const AUTOLOAD_WAIT: std::time::Duration = std::time::Duration::from_secs(600);
 /// Largest request body the dispatcher buffers while resolving `model`.
 /// Matches the most permissive sub-app limit (the 25 MiB audio uploads) with
 /// headroom.
-const DISPATCH_BODY_CAP: usize = 64 * 1024 * 1024;
+pub(crate) const DISPATCH_BODY_CAP: usize = 64 * 1024 * 1024;
 
 #[cfg(feature = "webui")]
 static CATALOG_REFRESH_OWNERS: OnceLock<Mutex<BTreeMap<String, String>>> = OnceLock::new();

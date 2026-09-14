@@ -1454,7 +1454,8 @@
           "features",
           "actions",
           "roots",
-          "limits"
+          "limits",
+          "media_limits"
         ],
         "properties": {
           "schema_version": {
@@ -1486,6 +1487,9 @@
           },
           "limits": {
             "$ref": "#/components/schemas/LimitSummary"
+          },
+          "media_limits": {
+            "$ref": "#/components/schemas/MediaLimits"
           }
         }
       },
@@ -3669,6 +3673,51 @@
             }
           }
         }
+      },
+      "MediaLimits": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "max_images",
+          "max_image_bytes",
+          "max_width",
+          "max_height",
+          "max_decoded_bytes",
+          "max_body_bytes"
+        ],
+        "properties": {
+          "max_images": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "max_image_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "max_width": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "max_height": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "max_decoded_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "max_body_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "description": "Resolved server image admission and WebUI JSON body limits; clients may impose additional lower local safety ceilings. JSON budget includes base64 encoding, transcript and request envelope."
       }
     }
   }

@@ -29,3 +29,6 @@ pub(crate) mod runtime;
 pub(crate) mod security;
 
 pub use assets::{WEBUI_PREFIX, manifest_json, router};
+
+#[cfg(test)]
+mod media_limits_tests;

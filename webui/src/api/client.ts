@@ -292,7 +292,7 @@ async function readWithAbort<T>(reader: ReadableStreamDefaultReader<T>, signal: 
   }
   let onAbort: (() => void) | null = null;
   try {
-    return await Promise.race([
+    const result = await Promise.race([
       reader.read(),
       new Promise<ReadableStreamReadResult<T>>((_, reject) => {
         onAbort = () => {
@@ -302,6 +302,10 @@ async function readWithAbort<T>(reader: ReadableStreamDefaultReader<T>, signal: 
         signal.addEventListener('abort', onAbort, { once: true });
       }),
     ]);
+    // reader.cancel() can resolve a pending read before the abort rejection wins.
+    // That transport cancellation must never appear as successful EOF.
+    if (signal.aborted) throw abortError();
+    return result;
   } finally {
     if (onAbort !== null) signal.removeEventListener('abort', onAbort);
   }

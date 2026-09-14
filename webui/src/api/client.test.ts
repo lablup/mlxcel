@@ -174,3 +174,16 @@ describe('WebUI API client security edges', () => {
     expect(cancelled).toBe(true);
   });
 });
+
+
+describe('inference cancellation EOF race', () => {
+  it('rejects abort even when reader cancellation resolves a pending read first', async () => {
+    const client = new WebUiApiClient({fetchImpl: async () => new Response(new ReadableStream<Uint8Array>({start() {}}))});
+    const controller = new AbortController();
+    const pending = client.chatCompletions('actual-model', {messages:[]}, {onFrame:()=>undefined}, controller.signal);
+    const rejected = expect(pending).rejects.toMatchObject({name:'AbortError'});
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    controller.abort();
+    await rejected;
+  });
+});
