@@ -153,9 +153,10 @@ const FUSED_MOE_MAX_DFF_CUDA: i32 = 8192;
 /// goes through the shared [`SwitchGLU::forward_fused_kernel`]: AFMoE,
 /// BailingMoe, Cohere2Moe, DBRX, dots.llm1, Klear, Laguna, LFM2, Mellum,
 /// MiniMax, Mixtral, OLMoE, PhiMoE (phi-3.5-moe), Qwen2Moe, Qwen3-MoE and
-/// Qwen3-VL-MoE. Two families still drive a fused kernel from their own expert
-/// type and do not read it: `qwen3_next.rs` (Qwen3Next, Qwen3.5 and the
-/// qwen3_omni_moe talker, SwiGLU kernel) and `gemma4.rs` (GeGLU kernel), and
+/// Qwen3-VL-MoE (and the Qwen3-Omni-MoE thinker, which is built as a
+/// `Qwen3VLMoeModel`). Two families still drive a fused kernel from their own
+/// expert type and do not read it: `qwen3_next.rs` (Qwen3Next, Qwen3.5 and the
+/// Qwen3-Omni-MoE talker, SwiGLU kernel) and `gemma4.rs` (GeGLU kernel), and
 /// NemotronH's opt-in `MLXCEL_FUSED_MOE_RELU2` path launches the down kernel
 /// without it as well. Qwen3-MoE and Qwen3-VL-MoE ignored it the same way until
 /// issue #1884 moved them onto the shared type. The backend is resolved at

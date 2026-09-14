@@ -1235,7 +1235,7 @@ impl SparseMoeBlock {
 
         // The shared loader bounds the declared pair, infers the stored bit
         // width from the tensor shapes and refuses packings MLX would reject
-        // (issues #958, #975), and its `forward_fused_kernel` carries every
+        // (issues #929, #958, #973), and its `forward_fused_kernel` carries every
         // fused-kernel guard, the `MLXCEL_FUSED_MOE_MAX_DFF` bound included
         // (issue #1884).
         let experts = SwitchGLU::from_weights(
