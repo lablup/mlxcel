@@ -58,3 +58,9 @@ Hosted Chromium CDP로 Latin 문자에 DejaVu Sans regular/bold, 한국어 fallb
 고정된 Playwright heading-level helper는 명시적 `aria-level`보다 native `h3`를 우선하지만, Chromium AX 직접 관찰에서는 common Tabs 반복 remount 후에도 level 2, 올바른 이름과 non-ignored 상태가 확인됩니다. Browser 및 실제 서버 CSP 테스트가 이 AX tree를 검증하고 StrictMode unit도 remount를 검사합니다. 이는 Chromium 증거이며 native Safari 증거가 아닙니다.
 
 Hosted run 34801765896은 browser 19개를 통과하고 기존 States screenshot만 실패했습니다. 측정 progress와 미상 progress를 기존 cell 하나로 묶고 lifecycle label casing을 보존했으며, 개별 시각 리뷰를 거친 Darwin/Linux States baseline만 출처와 함께 갱신합니다. 다른 baseline과 엄격한 threshold는 바꾸지 않았습니다. 이 문서 시점에서 hosted 전체 재실행, 루트의 실제 secured-CSP 실행 및 변경된 DOM에 대한 사용자 Safari/VoiceOver 표적 재확인은 각각 대기 중입니다. 로컬 브라우저 진단 프로세스는 루트 runtime build 전에 모두 종료했으며 이 유닛은 MLX/GPU 테스트를 실행하지 않았습니다.
+
+### Migration 게이트 결과
+
+[`98fe9df2`의 canonical hosted WebUI job](https://github.com/lablup/mlxcel/actions/runs/34802205815/job/103846995858)은 typecheck, lint, unit 76개, browser 20개 전체와 deterministic bundle 검증을 통과했습니다. Bundle digest는 `858f5775f548532b3fa93942c7f063e06b83f427d107b47c82678f3564638f7f`입니다. `62c4f259`에서 빌드한 실제 model-free production server도 별도로 supplied-server CSP 두 경우(1440 light, 390 dark)를 통과했습니다. 실제 응답 정책, 정책 위반 및 외부 요청 없음, Select 위치와 Escape 포커스, 측정 progress, reduced motion, axe와 browser AX heading semantics를 검사했으며 static hosted 테스트만으로 이 결과를 주장하지 않습니다. 두 head의 production source/asset은 동일합니다.
+
+변경된 DOM의 Safari/VoiceOver/native zoom 재확인은 새 immutable production preview를 대상으로 한 번 요청했으며 아직 대기 중입니다. 과거4185 승인을 재사용하지 않습니다. Download backend 병합 이후 최종 통합 검증도 남아 있으므로 review 상태를 유지하며, 사용 불가 GB10 결과를 통과로 보고하지 않습니다.
