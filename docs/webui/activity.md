@@ -36,3 +36,17 @@ node scripts/activity-performance.mjs
 The harness uses an actual headed browser and actual `document.hidden` after window minimization; it fails rather than substitutes a synthetic visibility event. One and two client windows render the real Activity screen with the shared observation schedule. Five alternating-order UI-off/treatment pairs per condition use the same native completion workload and backend `timings.predicted_per_second`; missing timings fail. It records median paired degradation, pair spread and baseline coefficient of variation. A median degradation above 2% or baseline CV above 5% is flagged for investigation, not silently accepted. The optional `WEBUI_PERF_PROMPT_FILE` supplies a fixed long prompt; prompts and model output are not written to the results.
 
 A separate long-prefill acceptance must sample both native `/slots` and canonical runtime slots while an actual chat request runs, comparing current context and accepted decode counters against #1800 source semantics. Observation timings, browser status, models, flags and hardware must accompany results. Automated fixture/browser tests do not establish real-model behavior or the performance target. Native Safari/VoiceOver and real 200% page zoom remain deferred to the final integrated manual acceptance by maintainer decision.
+
+For that long-request capture, use the same already-loaded server, key and model IDs, plus a fixed prompt file long enough to observe prefill and decode while staying below the configured context limit:
+
+```sh
+WEBUI_PERF_BASE=http://127.0.0.1:8080/ \
+WEBUI_PERF_KEY_FILE=/private/path/key \
+WEBUI_PERF_INFERENCE_MODEL=model-id \
+WEBUI_PERF_MODEL_ID=mdl_opaque \
+WEBUI_PERF_PROMPT_FILE=/private/path/long-prompt.txt \
+WEBUI_SLOTS_OUTPUT=/tmp/activity-slots.json \
+node scripts/activity-slots.mjs
+```
+
+Run from `webui/`. The script samples native slots before and after canonical runtime slots every two seconds during a real chat stream, with a ten-minute bound and owned-request cleanup on failure. It fails if no processing/decode phase is observed; a capture success is explicitly `captured-requires-comparison`, not a performance or correctness pass. Compare each sequential bracket and account for progress between reads. The result excludes prompts, generated output, debug slot parameters and credentials.
