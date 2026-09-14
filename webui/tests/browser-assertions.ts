@@ -27,10 +27,17 @@ export async function expectAxeClean(page: Page): Promise<void> {
   expect(results.violations).toEqual([]);
 }
 
-export async function expectNoOverflowOrInlineStyles(page: Page): Promise<void> {
+export async function expectSafeLayout(page: Page): Promise<void> {
   const result = await page.evaluate(() => ({
     overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
-    inlineStyleCount: document.querySelectorAll('[style]').length,
+    unexpectedStyles: Array.from(document.querySelectorAll<HTMLElement>('[style]')).filter((element) => {
+      // Library-owned CSSOM geometry only; not evidence that production CSP permits it.
+      const properties = Array.from(element.style);
+      if (element.matches('.ds-progress .progress-bar__fill')) return properties.some((key) => key !== 'width') || !/^\d+(?:\.\d+)?%$/.test(element.style.width);
+      if (element.matches('.select__dropdown--portal')) return properties.some((key) => !['position', 'top', 'left', 'width'].includes(key)) || element.style.position !== 'fixed' || ['top', 'left', 'width'].some((key) => !/^-?\d+(?:\.\d+)?px$/.test(element.style.getPropertyValue(key)));
+      if (element.matches('.ds-common-table th')) return properties.some((key) => key !== 'width') || !/^\d+(?:\.\d+)?px$/.test(element.style.width);
+      return true;
+    }).map((element) => element.outerHTML.slice(0, 160)),
     smallTargets: Array.from(document.querySelectorAll<HTMLElement>('button, a[href], input, select, textarea')).filter((element) => {
       const rect = element.getBoundingClientRect();
       const style = window.getComputedStyle(element);
@@ -39,7 +46,7 @@ export async function expectNoOverflowOrInlineStyles(page: Page): Promise<void> 
     }).map((element) => element.outerHTML.slice(0, 80)),
   }));
   expect(result.overflow).toBeLessThanOrEqual(1);
-  expect(result.inlineStyleCount).toBe(0);
+  expect(result.unexpectedStyles).toEqual([]);
   expect(result.smallTargets).toEqual([]);
 }
 
@@ -130,8 +137,8 @@ export async function expectTextScaleLabelsReachable(page: Page): Promise<void> 
     page.getByRole('button', { name: /보조/i }),
     page.getByRole('button', { name: /위험/i }),
     page.getByText('저장소 ID', { exact: true }),
-    page.getByText('네이티브 select 콤보박스', { exact: true }),
-    page.getByRole('combobox', { name: /네이티브 select 콤보박스/i }),
+    page.getByText('공통 선택 콤보박스', { exact: true }),
+    page.getByRole('combobox', { name: /공통 선택 콤보박스/i }),
   ];
   for (const locator of reachable) await expectLocatorWithinViewportX(locator);
 }

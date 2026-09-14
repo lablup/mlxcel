@@ -98,7 +98,7 @@ describe('mlxcel WebUI shell', () => {
   it('does not open global overlays from editable fields, IME composition, or Alt chords', () => {
     renderApp();
     act(() => document.querySelector<HTMLAnchorElement>('[data-testid="nav-settings"]')?.click());
-    const select = document.querySelector<HTMLSelectElement>('[data-testid="settings-theme"]');
+    const select = document.querySelector<HTMLButtonElement>('[data-testid="settings-theme"] [role="combobox"]');
     select?.focus();
     act(() => keydown('k', { metaKey: true }));
     expect(document.querySelector('[data-testid="command-dialog"]')?.hasAttribute('open')).toBe(false);

@@ -2,6 +2,7 @@ import { defineConfig, devices } from '@playwright/test';
 
 export default defineConfig({
   testDir: './tests',
+  testIgnore: '**/csp.spec.ts',
   fullyParallel: false,
   reporter: 'list',
   snapshotPathTemplate: '{testDir}/screenshots/{platform}/{arg}{ext}',

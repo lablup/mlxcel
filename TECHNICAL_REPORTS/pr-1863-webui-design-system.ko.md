@@ -46,3 +46,7 @@ Hosted Chromium CDP로 Latin 문자에 DejaVu Sans regular/bold, 한국어 fallb
 ## 수동 수용 문서 마감
 
 표적 수동 게이트는 사용자 보고 PASS로 수용했지만, #1838 → #1841 → #1843 순서의 중앙 통합은 아직 대기 중이므로 이슈와 PR은 review 상태를 유지합니다. 이번 문서 전용 변경은 소스·스타일·asset·테스트를 수정하지 않으며 로컬 GPU·브라우저·런타임 테스트를 실행하지 않습니다. 호스트 GPU firmware 장애 복구는 확인되지 않았으며, 사용 불가 GB10 면제는 로컬 호스트 복구나 다른 통합 게이트의 면제가 아닙니다.
+
+## ui-common adoption checkpoint
+
+새 사용자 요청에 따라 @lablup/ui-common alpha.19를 정확히 고정하고 공통 adapter/token bridge에서 component subpath를 사용합니다. [공유 export/예외 표](../docs/webui/ui-common.md)를 따릅니다. CPU typecheck·lint·unit 72개와 현재 worktree의 contract fixture 41개가 통과했으며 공개 NOTICE/LICENSE를 번들에 포함합니다. 이전4185 소스와 사용자 보고 수동 승인은 과거 버전에 한정되며, 변경된 DOM에는 실제 served-CSP·시각·관련 수동 검증이 새로 필요합니다. 루트의 호스트 예약 중 로컬 브라우저/GPU 테스트는 실행하지 않았습니다. 이후 중앙 rebase에서 최신 backend schema/fixture 변경을 보존해야 합니다.

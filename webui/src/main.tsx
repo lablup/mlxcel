@@ -14,12 +14,15 @@
 
 import React from 'react';
 import { createRoot } from 'react-dom/client';
+import '@lablup/ui-common/styles/base.css';
 import { App } from './app';
 import { WebUiProvider } from './state';
 import './styles.css';
 import './design-system/tokens.css';
 import './design-system/components.css';
 import './design-system/glass-intensity.css';
+import './design-system/common-tokens.css';
+import './design-system/common-components.css';
 
 const rootElement = document.getElementById('root');
 if (rootElement === null) {

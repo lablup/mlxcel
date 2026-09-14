@@ -517,6 +517,18 @@
       "test_id": "command-title"
     },
     {
+      "key": "select.search",
+      "en": "Search options",
+      "ko": "옵션 검색",
+      "test_id": "select-search"
+    },
+    {
+      "key": "select.no_options",
+      "en": "No matching options.",
+      "ko": "일치하는 옵션이 없습니다.",
+      "test_id": "select-no-options"
+    },
+    {
       "key": "command.search",
       "en": "Search commands",
       "ko": "명령 검색",
@@ -739,9 +751,15 @@
       "test_id": "gallery-field-repo-hint"
     },
     {
+      "key": "gallery.progress.measured",
+      "en": "Sample download progress",
+      "ko": "예시 다운로드 진행률",
+      "test_id": "gallery-progress-measured"
+    },
+    {
       "key": "gallery.select.native",
-      "en": "Native select combobox",
-      "ko": "네이티브 select 콤보박스",
+      "en": "Shared select combobox",
+      "ko": "공통 선택 콤보박스",
       "test_id": "gallery-select-native"
     },
     {

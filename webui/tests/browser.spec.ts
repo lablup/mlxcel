@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { expectAxeClean, expectCompactToolbarHitTargets, expectDataTableColumnsVisible, expectLocatorWithinViewportX, expectNoOverflowOrInlineStyles, expectTextScaleLabelsReachable, expectTextScalePanelsReflow, pressQuestionShortcut, reportFontDiagnostics } from './browser-assertions';
+import { expectAxeClean, expectCompactToolbarHitTargets, expectDataTableColumnsVisible, expectLocatorWithinViewportX, expectSafeLayout, expectTextScaleLabelsReachable, expectTextScalePanelsReflow, pressQuestionShortcut, reportFontDiagnostics } from './browser-assertions';
 import { bootGallery, bootProduct, browserStorageDump, gotoGalleryWithoutReload, installAbortRecorder, installMockApi, loadProductionCss, loginWithMockApi, productVariants, readAbortLog, selectGalleryTab, settleAnimationFrame, submitSessionKey, variants } from './browser-fixtures';
 
 test.describe('design system gallery and shell', () => {
@@ -7,7 +7,8 @@ test.describe('design system gallery and shell', () => {
     test(`renders and compares ${variant.name}`, async ({ page }) => {
       await bootGallery(page, variant);
       await expectAxeClean(page);
-      await expectNoOverflowOrInlineStyles(page);
+      await expectSafeLayout(page);
+      if (variant.tab === 'states') await expect(page.getByTestId('gallery-empty').getByRole('heading', { level: 2 })).toBeVisible();
       if (variant.width > 960) await expect(page.getByTestId('toolbar-menu')).toBeHidden();
       if (variant.width <= 560) await expectCompactToolbarHitTargets(page);
       if (variant.tab === 'data' && variant.width >= 1024) await expectDataTableColumnsVisible(page);
@@ -28,7 +29,7 @@ test.describe('design system gallery and shell', () => {
       await installMockApi(page, 'happy');
       await bootProduct(page, variant);
       await expectAxeClean(page);
-      await expectNoOverflowOrInlineStyles(page);
+      await expectSafeLayout(page);
       if (variant.signedIn) await loginWithMockApi(page);
       else await expect(page.getByTestId('auth-login')).toBeVisible();
       if (variant.width <= 560) await expectCompactToolbarHitTargets(page);
@@ -108,7 +109,7 @@ test.describe('design system gallery and shell', () => {
     const productionCss = loadProductionCss();
     expect(productionCss).not.toContain('data-test-text-scale');
     await bootGallery(page, { name: '390-production-compact-gallery-controls', width: 390, height: 844, tab: 'controls', appearance: { theme: 'dark', material: 'opaque', reduceTransparency: true, reduceMotion: true, locale: 'ko', glassIntensity: 100, highContrast: 'off' } });
-    await expectNoOverflowOrInlineStyles(page);
+    await expectSafeLayout(page);
     await expectTextScalePanelsReflow(page);
     const primary = page.getByRole('button', { name: /기본/i });
     await primary.focus();
@@ -131,10 +132,13 @@ test.describe('design system gallery and shell', () => {
 
   test('covers keyboard controls, focus containment, and modal shortcut suppression', async ({ page }) => {
     await bootGallery(page, variants[0]);
-    const select = page.getByRole('combobox', { name: /Native select/i });
+    const select = page.getByRole('combobox', { name: /Shared select/i });
     await select.focus();
     await page.keyboard.press('ArrowDown');
-    await expect(select).toHaveValue('unloaded');
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('Enter');
+    await expect(select).toContainText('Unloaded');
+    await expect(select).toBeFocused();
     await selectGalleryTab(page, 'controls');
     await page.getByRole('tab', { name: /Controls/i }).focus();
     await page.keyboard.press('End');
@@ -186,9 +190,9 @@ test.describe('design system gallery and shell', () => {
     await expect(page.locator('html')).toHaveAttribute('data-high-contrast', 'off');
     await expect(page.locator('.surface-card').first()).toHaveCSS('border-top-width', '1px');
     await selectGalleryTab(page, 'states');
-    await expect(page.locator('.ds-status[data-state="loading"]')).toHaveCSS('animation-name', 'none');
+    await expect(page.locator('.ds-status-wrap[data-state="loading"] .ds-status')).toHaveCSS('animation-name', 'none');
     await page.evaluate(() => { Object.defineProperty(document, 'hidden', { value: true, configurable: true }); document.dispatchEvent(new Event('visibilitychange')); });
-    await expect(page.locator('.ds-status[data-state="loading"]')).toHaveCSS('animation-name', 'none');
+    await expect(page.locator('.ds-status-wrap[data-state="loading"] .ds-status')).toHaveCSS('animation-name', 'none');
   });
 
   test('forces unsupported backdrop detection while glass is requested', async ({ page }) => {

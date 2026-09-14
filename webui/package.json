@@ -13,6 +13,7 @@
     "verify-generated": "python3 ../scripts/webui/build_bundle.py --verify"
   },
   "dependencies": {
+    "@lablup/ui-common": "0.1.0-alpha.19",
     "react": "19.3.0",
     "react-dom": "19.3.0"
   },

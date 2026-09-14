@@ -54,6 +54,8 @@ export type StringKey =
   | 'state.offline.title'
   | 'state.offline.body'
   | 'command.title'
+  | 'select.search'
+  | 'select.no_options'
   | 'command.search'
   | 'command.no_results'
   | 'help.title'
@@ -89,6 +91,7 @@ export type StringKey =
   | 'gallery.controls.busy'
   | 'gallery.field.repo'
   | 'gallery.field.repo_error'
+  | 'gallery.progress.measured'
   | 'gallery.select.native'
   | 'gallery.overlays.title'
   | 'gallery.tooltip'
@@ -257,6 +260,8 @@ export const entries: Entry[] = [
   { key: 'state.schema_mismatch.title', en: 'UI schema mismatch', ko: 'UI 스키마 불일치', test_id: 'state-schema-mismatch-title' },
   { key: 'state.schema_mismatch.body', en: 'The shell loaded, but the server reports a different UI API schema version; refresh after updating the bundle or server.', ko: '셸은 로드되었지만 서버가 다른 UI API 스키마 버전을 보고했습니다. 번들이나 서버를 업데이트한 뒤 새로고침하세요.', test_id: 'state-schema-mismatch-body' },
   { key: 'command.title', en: 'Command palette', ko: '명령 팔레트', test_id: 'command-title' },
+  { key: 'select.search', en: 'Search options', ko: '옵션 검색', test_id: 'select-search' },
+  { key: 'select.no_options', en: 'No matching options.', ko: '일치하는 옵션이 없습니다.', test_id: 'select-no-options' },
   { key: 'command.search', en: 'Search commands', ko: '명령 검색', test_id: 'command-search' },
   { key: 'command.no_results', en: 'No commands match this search.', ko: '검색과 일치하는 명령이 없습니다.', test_id: 'command-no-results' },
   { key: 'help.title', en: 'Keyboard shortcuts', ko: '키보드 단축키', test_id: 'help-title' },
@@ -295,7 +300,8 @@ export const entries: Entry[] = [
   { key: 'gallery.field.repo', en: 'Repository ID', ko: '저장소 ID', test_id: 'gallery-field-repo' },
   { key: 'gallery.field.repo_error', en: 'Use owner/name without a URL.', ko: 'URL 없이 owner/name 형식을 사용하세요.', test_id: 'gallery-field-repo-error' },
   { key: 'gallery.field.repo_hint', en: 'Sample only; downloads require the later lifecycle adapter.', ko: '샘플 전용입니다. 다운로드는 후속 수명주기 어댑터가 필요합니다.', test_id: 'gallery-field-repo-hint' },
-  { key: 'gallery.select.native', en: 'Native select combobox', ko: '네이티브 select 콤보박스', test_id: 'gallery-select-native' },
+  { key: 'gallery.progress.measured', en: 'Sample download progress', ko: '예시 다운로드 진행률', test_id: 'gallery-progress-measured' },
+  { key: 'gallery.select.native', en: 'Shared select combobox', ko: '공통 선택 콤보박스', test_id: 'gallery-select-native' },
   { key: 'gallery.overlays.title', en: 'Overlays', ko: '오버레이', test_id: 'gallery-overlays-title' },
   { key: 'gallery.tooltip', en: 'Tooltips are descriptive only', ko: '툴팁은 설명 전용입니다', test_id: 'gallery-tooltip' },
   { key: 'gallery.dialog.open', en: 'Open dialog', ko: '다이얼로그 열기', test_id: 'gallery-dialog-open' },

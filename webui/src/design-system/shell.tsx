@@ -28,7 +28,7 @@ export function AppShell(props: { locale: Locale; route: RouteId; onRouteChange:
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent): void => {
       const target = event.target;
-      const editable = target instanceof HTMLElement && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName));
+      const editable = target instanceof HTMLElement && (target.isContentEditable || Boolean(target.closest('[role="combobox"], [role="listbox"]')) || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName));
       const inModal = target instanceof HTMLElement && Boolean(target.closest('dialog[open]'));
       if (event.isComposing || event.altKey || editable || inModal) return;
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {

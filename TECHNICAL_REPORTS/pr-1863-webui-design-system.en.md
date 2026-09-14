@@ -46,3 +46,7 @@ The [canonical hosted WebUI job](https://github.com/lablup/mlxcel/actions/runs/3
 ## Manual-acceptance finalization
 
 The targeted manual gate is now accepted as user-reported; central integration remains pending in order #1838 → #1841 → #1843, with issue and PR still in review. This documentation-only update changes no source, styles, assets or tests and runs no local GPU, browser or runtime tests. Host GPU firmware recovery is not confirmed; the unavailable GB10 waiver does not waive local host recovery or other integration gates.
+
+## ui-common adoption checkpoint
+
+The new user-requested migration pins @lablup/ui-common alpha.19 and consumes component subpaths through shared adapters/token bridges. See the [export/exception matrix](../docs/webui/ui-common.md). CPU typecheck, lint, 72 unit tests and 41 current-worktree contract fixtures pass. Published NOTICE/LICENSE are bundled. The old4185 source/manual approval remains historical; rewritten DOM needs new served-CSP, visual and relevant manual evidence. No local browser/GPU test was run under the root host reservation. Central integration must preserve newer backend schema/fixture changes on rebase.

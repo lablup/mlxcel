@@ -31,7 +31,7 @@
 .ds-progress span[data-progress="indeterminate"] { animation: slide var(--motion-slow) ease-in-out infinite alternate; }
 .ds-empty, .surface-card, .ds-inspector, .ds-banner, .ds-table, .ds-list, .ds-login { background: var(--material-content-bg); border: 1px solid var(--color-separator); box-shadow: var(--shadow-card); border-radius: var(--radius-lg); }
 .ds-empty { display: grid; place-items: center; text-align: center; gap: var(--space-2); padding: var(--space-6); }
-.ds-empty div { width: 44px; height: 44px; display: grid; place-items: center; border-radius: var(--radius-md); background: var(--color-selection); color: var(--color-focus); }
+.ds-empty .empty-state__illustration { width: 44px; height: 44px; display: grid; place-items: center; border-radius: var(--radius-md); background: var(--color-selection); color: var(--color-focus); }
 .ds-empty h2, .ds-empty p, .ds-banner p { margin: 0; }
 .ds-banner { display: grid; gap: var(--space-2); padding: var(--space-4); color: var(--color-error); background: var(--color-error-bg); }
 .ds-banner[data-tone="warning"] { color: var(--color-warning); background: var(--color-warning-bg); }
