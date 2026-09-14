@@ -1700,7 +1700,8 @@ impl RouterPool {
             idempotency_key,
             ModelActionLoadOptions {
                 eviction_target_id: eviction_target_id.map(str::to_owned),
-                ..Default::default()
+                #[cfg(feature = "webui")]
+                profile: None,
             },
         )
     }
