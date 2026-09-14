@@ -168,6 +168,24 @@ async fn secured_webui_rejects_host_origin_fetch_and_query_credential_attacks() 
         include_str!("../../tests/fixtures/webui/examples/error.security-forbidden-origin.json"),
     );
 
+    for origin in [
+        "http://127.0.0.1:18038",
+        "http://127.0.0.1:18037/path",
+        "http://127.0.0.1:18037?query=1",
+    ] {
+        let rejected = secured_request(
+            app.clone(),
+            Method::GET,
+            "/props",
+            Some(ROUTER_KEY),
+            Some(origin),
+            None,
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(rejected.status(), StatusCode::FORBIDDEN, "{origin}");
+    }
+
     let null_origin = secured_request(
         app.clone(),
         Method::GET,

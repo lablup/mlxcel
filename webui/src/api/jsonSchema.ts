@@ -95,9 +95,20 @@ function validateArray(schema: JsonObject, value: readonly unknown[], path: stri
   if (schema.items !== undefined) value.forEach((entry, index) => validateSchema(schema.items, entry, `${path}[${index}]`));
 }
 
+// JSON Schema lengths count Unicode code points, not UTF-16 code units.
+// Walk the string without allocating an array proportional to response size.
+function unicodeLength(value: string): number {
+  let length = 0;
+  for (let offset = 0; offset < value.length; length++) {
+    offset += (value.codePointAt(offset) ?? 0) > 0xffff ? 2 : 1;
+  }
+  return length;
+}
+
 function validateString(schema: JsonObject, value: string, path: string): void {
-  if (schema.minLength !== undefined && value.length < numberSchema(schema.minLength, `${path}#schema.minLength`)) throw new ValidationError(path, 'string shorter than minimum');
-  if (schema.maxLength !== undefined && value.length > numberSchema(schema.maxLength, `${path}#schema.maxLength`)) throw new ValidationError(path, 'string longer than maximum');
+  const length = unicodeLength(value);
+  if (schema.minLength !== undefined && length < numberSchema(schema.minLength, `${path}#schema.minLength`)) throw new ValidationError(path, 'string shorter than minimum');
+  if (schema.maxLength !== undefined && length > numberSchema(schema.maxLength, `${path}#schema.maxLength`)) throw new ValidationError(path, 'string longer than maximum');
   if (typeof schema.pattern === 'string' && !new RegExp(schema.pattern, 'u').test(value)) throw new ValidationError(path, 'string does not match pattern');
   if (schema.format === 'date-time' && !isRfc3339DateTime(value)) throw new ValidationError(path, 'invalid RFC3339 date-time');
 }

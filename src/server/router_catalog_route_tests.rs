@@ -369,3 +369,98 @@ async fn cache_download_refreshes_catalog_inventory_after_empty_cache_hit() {
     assert_eq!(downloaded["identity"]["source"], "cache");
     assert_eq!(downloaded["removal"]["eligible"], true);
 }
+
+#[tokio::test]
+async fn mounted_dflash_catalog_matches_bounded_whole_fixture() {
+    let root = temp_models_dir("ui-catalog-dflash-contract");
+    add_catalog_model(&root, "dflash", "qwen3");
+    let model_path = root.join("dflash");
+    std::fs::write(
+        model_path.join("config.json"),
+        r#"{"model_type":"qwen3","dflash_config":{},"quantization_config":{"bits":4}}"#,
+    )
+    .expect("DFlash config");
+    // This real loader entry point delegates to detect_model_type_with_probes;
+    // structural DFlash rejection precedes all weight/probe inspection.
+    let raw = crate::models::get_model_type(&model_path)
+        .expect_err("a DFlash drafter is not a standalone model")
+        .to_string();
+    assert!(
+        raw.chars().count() > 512,
+        "exercise the actual long diagnostic"
+    );
+    assert!(raw.contains("not a standalone model."));
+    let app = create_router_app_with_authenticated_ui(router_state_from(
+        RouterSources {
+            models_dir: Some(root),
+            cache: None,
+            presets: Default::default(),
+        },
+        keyed_config(),
+        true,
+    ));
+    let mut actual = catalog_page(app, "/ui-api/v1/catalog?limit=50").await;
+    let metadata = &actual["items"][0]["metadata"];
+    for reason in [
+        &metadata["support"]["architecturally_supported_reason"],
+        &metadata["unknown_reasons"]["architecture"],
+    ] {
+        let reason = reason.as_str().expect("unsupported architecture reason");
+        assert_eq!(reason.chars().count(), 512);
+        assert!(reason.contains("not a standalone model."));
+        assert!(reason.ends_with('…'));
+        assert!(!reason.contains(model_path.to_str().expect("test path")));
+    }
+    let mut expected: serde_json::Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/webui/examples/catalog.dflash-page.json"
+    ))
+    .expect("canonical DFlash fixture");
+    expected
+        .as_object_mut()
+        .expect("fixture object")
+        .remove("$schemaName");
+    // Normalize only values derived from temporary paths and process identity.
+    // Sequence, revisions, capabilities, reasons and every other field remain
+    // part of the exact, schema-validated whole HTTP producer comparison.
+    let server_id = actual["server_instance_id"].as_str().expect("server id");
+    assert!(server_id.starts_with("srv_") && server_id.len() <= 128);
+    assert!(
+        server_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'~' | b'-'))
+    );
+    assert_eq!(actual["items"].as_array().expect("catalog items").len(), 1);
+    let identity = &actual["items"][0]["identity"];
+    let id = identity["id"].as_str().expect("model id");
+    assert!(id.starts_with("mdl_") && id.len() == 47);
+    assert!(
+        id[4..]
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+    );
+    let hash = identity["source_key_hash"].as_str().expect("source hash");
+    assert!(hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    let fingerprint = identity["content_fingerprint"]
+        .as_str()
+        .expect("fingerprint");
+    assert!(!fingerprint.is_empty() && fingerprint.len() <= 128);
+    assert!(
+        actual["items"][0]["metadata"]["disk_bytes"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    actual["server_instance_id"] = serde_json::json!("srv_fixture");
+    for (field, replacement) in [
+        ("id", "mdl_uB9xAUQSKlrb9ELybOgV-92lVC7XjiMXju6pwZZBbAU"),
+        (
+            "source_key_hash",
+            "fb957973e2e6f9fb17bbb5bf2922d6bb67dde35b08c94fa80f8154722b58af2e",
+        ),
+        ("content_fingerprint", "fixture-content-fingerprint"),
+    ] {
+        actual["items"][0]["identity"][field] = serde_json::json!(replacement);
+    }
+    actual["items"][0]["metadata"]["disk_bytes"] = serde_json::json!(12345);
+    assert_eq!(actual, expected, "mounted DFlash catalog contract drift");
+}

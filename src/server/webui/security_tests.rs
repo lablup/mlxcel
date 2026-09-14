@@ -33,6 +33,8 @@ fn loopback_config(
         interactive_terminal,
         allowed_hosts: vec!["127.0.0.1:18037".to_string()],
         allowed_origins: vec![origin("http://127.0.0.1:18037")],
+        public_webui_prefix: "/webui".to_string(),
+        api_prefix: "/".to_string(),
     }
 }
 

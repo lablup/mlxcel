@@ -229,7 +229,7 @@ pub async fn props(State(state): State<AppState>) -> Json<serde_json::Value> {
         "endpoint_props": state.config.enable_props_endpoint,
         "endpoint_metrics": state.config.enable_metrics_endpoint,
         "endpoint_settings": state.config.enable_settings_endpoint,
-        // mlxcel ships no web UI and no MCP CORS proxy.
+        // The llama.cpp root Web UI and MCP CORS proxy are not exposed on /props; mlxcel serves its bundled WebUI under the configured /webui/ prefix instead.
         "ui": false,
         "ui_settings": {},
         "chat_template": state.chat_template.template_source(),

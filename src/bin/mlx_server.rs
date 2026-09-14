@@ -2311,8 +2311,9 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     args.ui_compat
         .apply_env_bindings()
         .map_err(|(var, raw)| anyhow::anyhow!("{var} has an invalid boolean value {raw:?}"))?;
-    args.ui_compat
-        .ensure_inert()
+    let webui_enabled = args
+        .ui_compat
+        .webui_enabled()
         .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
     let image_token_bounds = args
         .multimodal_compat
@@ -2376,11 +2377,16 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     set_offline_mode(args.offline);
     // b10621 router mode (#1438): `--models-dir` with no model argument
     // serves the router surface and never resolves a checkpoint here.
-    let router_mode = args.models_dir.is_some()
-        && args.model.is_none()
-        && args.hf_repo.is_none()
-        && args.model_url.is_none()
-        && args.docker_repo.is_none();
+    let has_model_source = args.model.is_some()
+        || args.hf_repo.is_some()
+        || args.model_url.is_some()
+        || args.docker_repo.is_some()
+        || args.hf_file.is_some();
+    let router_mode = (args.models_dir.is_some() || args.models_preset.is_some() || webui_enabled)
+        && !has_model_source;
+    if webui_enabled && router_mode {
+        args.models_autoload = false;
+    }
     // The #1438 migration guard, raised BEFORE model resolution so the old
     // store-root combination fails in milliseconds instead of after a
     // multi-gigabyte download. `into_startup_config` re-checks it for
@@ -2502,6 +2508,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         decode_timeout_was_set: long_cli_flag_was_set("decode-timeout")
             || std::env::var_os("MLXCEL_DECODE_TIMEOUT").is_some(),
         api_prefix: args.api_prefix,
+        webui_enabled,
         sse_ping_interval: args.sse_ping_interval,
         threads_http: args.threads_http,
         reuse_port: args.reuse_port,

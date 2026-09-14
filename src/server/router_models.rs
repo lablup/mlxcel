@@ -740,6 +740,18 @@ impl RouterPool {
             .cloned()
     }
 
+    pub fn config_for_visible_model_id(
+        &self,
+        model_id: &str,
+    ) -> Option<super::config::ServerConfig> {
+        self.entries
+            .read()
+            .ok()?
+            .values()
+            .find(|entry| !entry.hidden && entry.ui_model_id == model_id)
+            .map(|entry| entry.config.clone())
+    }
+
     fn ensure_entry_is_current(
         &self,
         entry: &Arc<RouterModelEntry>,

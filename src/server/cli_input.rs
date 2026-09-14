@@ -96,6 +96,8 @@ pub struct ServerStartupInput {
     pub sleep_idle_seconds: i64,
     /// Raw `--api-prefix`; validated in [`Self::into_startup_config`].
     pub api_prefix: String,
+    /// `--webui` / `--ui`: serve the bundled local WebUI and typed UI API.
+    pub webui_enabled: bool,
     /// Raw `--sse-ping-interval`; `-1` disables the pings.
     pub sse_ping_interval: i64,
     /// Raw `--threads-http`; any value below 1 selects the automatic sizing.
@@ -1025,6 +1027,11 @@ impl ServerStartupInput {
             decode_timeout: self.decode_timeout,
             sleep_idle_seconds: self.sleep_idle_seconds,
             api_prefix,
+            webui_enabled: self.webui_enabled,
+            #[cfg(feature = "webui")]
+            webui_terminal_secret: None,
+            #[cfg(feature = "webui")]
+            webui_security_policy: None,
             sse_ping_interval,
             threads_http,
             reuse_port: self.reuse_port,

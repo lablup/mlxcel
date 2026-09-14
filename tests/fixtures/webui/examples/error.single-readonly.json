@@ -1,0 +1,9 @@
+{
+  "$schemaName": "ErrorEnvelope",
+  "error": {
+    "code": "unsupported",
+    "message": "single-model mode is read-only; restart without -m to manage models",
+    "retryable": false
+  },
+  "request_id": "req_single_fixture"
+}
