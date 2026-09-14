@@ -68,3 +68,9 @@ Hosted run 34801765896은 browser 19개를 통과하고 기존 States screenshot
 ### 사용자 결정: 수동 검증을 최종 통합 수용으로 이연
 
 사용자는 현재 원격 환경에서 Safari/VoiceOver 검증을 수행할 수 없어, 변경된 ui-common DOM의 Safari/VoiceOver/native zoom 검사를 전체 구현 완료 후 최종 통합 수용 단계에서 함께 진행하도록 명시적으로 결정했습니다. 상태는 PASS가 아니라 DEFERRED이며 개별 유닛의 머지 차단 조건은 아닙니다. 공통 컨트롤과 페이지별 native 검사를 함께 수행하고, 이전4185 승인을 변경된 DOM에 재사용하지 않습니다. Download backend 병합 이후 최종 통합 검증은 여전히 필요하므로 review 상태를 유지합니다. 이번 변경은 문서 전용이며 immutable4186 preview, production source 및 bundle을 변경하지 않습니다.
+
+### 최종 UI 우선 통합 결정
+
+중앙 머지 순서는 이미 병합된 #1838 다음에 독립 검증된 #1843을 통합하도록 조정합니다. #1843은 #1841에 의존하지 않습니다. 이후 download backend 통합은 현재 UI를 보존하고 contract fixture 44개를 해당 기능의 46개 검증 범위로 확장해야 합니다. Native Safari/VoiceOver/zoom 수용은 전체 구현 후 최종 통합 단계로 DEFERRED된 상태이며 PASS도 개별 머지 차단 조건도 아닙니다. 소비자는 안정적인 [공유 export/예외 표](https://github.com/lablup/mlxcel/blob/main/docs/webui/ui-common.md)를 사용합니다.
+
+`a01724df`의 hosted run 34804568515는 실행 가능한 모든 non-GB10 job을 통과했으며 unit 76개, browser 20개 및 deterministic bundle 검증을 포함합니다. 남은 queued job 네 개(cargo-clippy, OpenXLA feature compile, OpenXLA feature link, CUDA sm_70 compile)는 모두 정확히 `GB10` runner label을 요청하며 배정된 runner가 없습니다. 사용자 면제는 이 사용 불가 runner 작업에만 적용됩니다. 이번 순서 조정은 문서 전용이며 production source/asset은 실제 CSP 두 경우 검증 및 hosted browser 통과 버전과 동일합니다.
