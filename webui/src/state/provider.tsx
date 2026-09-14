@@ -13,6 +13,7 @@
 // limitations under the License.
 
 import React from 'react';
+import type { SettingsResponse, SettingsPatchResponse, ModelProps } from '../api/settings';
 import { WebUiApiClient, WebUiHttpError, type ChatStreamHandlers } from '../api/client';
 import type { DownloadRequest, ModelActionRequest, ModelId, RemovalRequest, RuntimeSnapshot, WebUiSnapshot } from '../api/types';
 import { initialSnapshot, reduceWebUiSnapshot } from './reducer';
@@ -25,6 +26,10 @@ export interface WebUiProviderProps {
 }
 
 export interface WebUiActions {
+  readonly getTokenCount: (modelId: ModelId, content: string, signal?: AbortSignal) => Promise<number>;
+  readonly getSettings: (modelId: ModelId, signal?: AbortSignal) => Promise<SettingsResponse>;
+  readonly patchSettings: (modelId: ModelId, values: Readonly<Record<string, unknown>>, signal?: AbortSignal) => Promise<SettingsPatchResponse>;
+  readonly getModelProps: (modelId: ModelId, signal?: AbortSignal) => Promise<ModelProps>;
   readonly login: (token: string) => Promise<void>;
   readonly logout: () => void;
   readonly refresh: () => Promise<void>;
@@ -66,6 +71,10 @@ export function WebUiProvider({ children, apiBase, fetchImpl }: WebUiProviderPro
   }, [client]);
 
   const actions = React.useMemo<WebUiActions>(() => ({
+    getTokenCount: (modelId, content, signal) => client.tokenCount(resolveInferenceModelId(modelId), content, signal),
+    getSettings: (modelId, signal) => client.settings(resolveInferenceModelId(modelId), signal),
+    patchSettings: (modelId, values, signal) => client.patchSettings(resolveInferenceModelId(modelId), values, signal),
+    getModelProps: (modelId, signal) => client.modelProps(resolveInferenceModelId(modelId), signal),
     login: async (token: string) => {
       sessionRef.current += 1;
       const session = sessionRef.current;
@@ -123,8 +132,9 @@ export function WebUiProvider({ children, apiBase, fetchImpl }: WebUiProviderPro
       await submitOperation('catalog-refresh', idempotencyKey, undefined, () => client.refreshCatalog(idempotencyKey));
     },
     cancelOperation: async (operationId: string) => {
+      const session = sessionRef.current;
       await client.cancelOperation(operationId);
-      await syncRef.current?.refresh();
+      if (sessionRef.current === session) await syncRef.current?.refresh();
     },
     streamChatCompletions: async (modelId: ModelId, body: unknown, handlers: ChatStreamHandlers, signal?: AbortSignal) => {
       await client.chatCompletions(resolveInferenceModelId(modelId), body, handlers, signal);
@@ -135,11 +145,13 @@ export function WebUiProvider({ children, apiBase, fetchImpl }: WebUiProviderPro
   }), [client]);
 
   async function submitOperation(kind: 'model-action' | 'download' | 'removal' | 'catalog-refresh', idempotencyKey: string, modelId: ModelId | undefined, submit: () => Promise<{ readonly operation_id: string }>): Promise<void> {
+    const session = sessionRef.current;
     try {
       const accepted = await submit();
+      if (sessionRef.current !== session) return;
       syncRef.current?.noteUnknownPost({ kind, idempotencyKey, operationId: accepted.operation_id, modelId, createdAt: Date.now() });
     } catch (error) {
-      if (!(error instanceof WebUiHttpError)) {
+      if (sessionRef.current === session && !(error instanceof WebUiHttpError)) {
         syncRef.current?.noteUnknownPost({ kind, idempotencyKey, operationId: null, modelId, createdAt: Date.now() });
       }
       throw error;

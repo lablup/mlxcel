@@ -237,7 +237,11 @@ fn pool_error_response(err: RouterPoolError) -> Response {
 fn webui_pool_error_response(err: RouterPoolError) -> Response {
     match err {
         RouterPoolError::OperationRejected(error) => (
-            StatusCode::CONFLICT,
+            if error.code == "unsupported" {
+                StatusCode::UNPROCESSABLE_ENTITY
+            } else {
+                StatusCode::CONFLICT
+            },
             Json(ErrorEnvelope {
                 error,
                 request_id: request_id(),
@@ -465,21 +469,8 @@ enum UiModelActionKind {
     Unload,
 }
 
-#[derive(Debug, Default, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 #[cfg(feature = "webui")]
-struct UiLoadProfile {
-    ctx_size: Option<u64>,
-    n_parallel: Option<u64>,
-    kv_cache_mode: Option<String>,
-}
-
-#[cfg(feature = "webui")]
-impl UiLoadProfile {
-    fn has_overrides(&self) -> bool {
-        self.ctx_size.is_some() || self.n_parallel.is_some() || self.kv_cache_mode.is_some()
-    }
-}
+use super::webui::load_profile::UiLoadProfile;
 
 #[cfg(feature = "webui")]
 const MODEL_ID_PREFIX: &str = "mdl_";
@@ -495,23 +486,6 @@ const OPERATION_ID_MAX: usize = 128;
 const CURSOR_TOKEN_MAX: usize = 512;
 #[cfg(feature = "webui")]
 const OPERATION_TARGET_TOKEN_MAX: usize = 128;
-#[cfg(feature = "webui")]
-const KV_CACHE_MODE_NAMES: &[&str] = &[
-    "fp16",
-    "float16",
-    "int8",
-    "i8",
-    "turbo4-asym",
-    "fp16+turbo4",
-    "turbo3-asym",
-    "fp16+turbo3",
-    "turbo3",
-    "turbo4",
-    "turbo4-sym",
-    "turbo4-delegated",
-    "fp16+turbo4-delegated",
-];
-
 #[cfg(feature = "webui")]
 fn is_webui_token_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'~' | b'-')
@@ -641,34 +615,10 @@ fn validate_target_filter(value: &str) -> Option<Response> {
 
 #[cfg(feature = "webui")]
 fn validate_load_profile(profile: &UiLoadProfile) -> Option<Response> {
-    if let Some(ctx_size) = profile.ctx_size
-        && !(1..=262_144).contains(&ctx_size)
-    {
-        return Some(invalid_webui_field(
-            "load_profile.ctx_size",
-            "out_of_range",
-            "ctx_size must be between 1 and 262144",
-        ));
-    }
-    if let Some(n_parallel) = profile.n_parallel
-        && !(1..=32).contains(&n_parallel)
-    {
-        return Some(invalid_webui_field(
-            "load_profile.n_parallel",
-            "out_of_range",
-            "n_parallel must be between 1 and 32",
-        ));
-    }
-    if let Some(mode) = profile.kv_cache_mode.as_deref()
-        && !KV_CACHE_MODE_NAMES.contains(&mode)
-    {
-        return Some(invalid_webui_field(
-            "load_profile.kv_cache_mode",
-            "invalid_enum",
-            "kv_cache_mode must be one of the WebUI contract KV cache mode names",
-        ));
-    }
-    None
+    profile
+        .validate()
+        .err()
+        .map(|error| invalid_webui_field(error.field, error.code, error.message))
 }
 
 #[cfg(feature = "webui")]
@@ -794,14 +744,15 @@ async fn ui_runtime(
                 );
             };
             let coordinator = state.pool.lifecycle_coordinator();
-            Json(super::webui::api::runtime_snapshot(
+            let mut snapshot = super::webui::api::runtime_snapshot(
                 coordinator.server_instance_id().to_string(),
                 model_id,
                 entry.identity.revision,
                 coordinator.snapshot_sequence(),
                 &config,
-            ))
-            .into_response()
+            );
+            snapshot.settings.overridden_by_cli = state.pool.next_load_cli_overrides();
+            Json(snapshot).into_response()
         }
         Ok(Err(super::webui::catalog::CatalogError::NotFound)) => {
             webui_error(StatusCode::NOT_FOUND, "not_found", "model not found", true)
@@ -1039,31 +990,47 @@ async fn ui_model_actions(
     {
         return response;
     }
-    if request
-        .load_profile
-        .as_ref()
-        .is_some_and(UiLoadProfile::has_overrides)
+    if matches!(request.action, UiModelActionKind::Unload)
+        && request
+            .load_profile
+            .as_ref()
+            .is_some_and(UiLoadProfile::has_overrides)
     {
-        return webui_field_error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "unsupported",
-            "next-load profile overrides are not implemented in this runtime path yet",
+        return invalid_webui_field(
             "load_profile",
-            "unsupported",
-            "ctx_size, n_parallel and kv_cache_mode are parsed but not applied by issue #1839",
+            "invalid_action",
+            "a next-load profile is only valid for load actions",
         );
     }
-    match state.pool.submit_model_action(
-        &request.model_id,
-        ui_action_to_router(&request.action),
-        request.expected_revision,
-        &request.idempotency_key,
-        request.eviction_target_id.as_deref(),
-    ) {
-        Ok(accepted) => (StatusCode::ACCEPTED, Json(accepted)).into_response(),
-        Err(err) => {
+    // Admission runs before filesystem-backed profile resolution inside this
+    // blocking task. The lifecycle coordinator bounds admitted operations;
+    // duplicate/over-capacity requests never reach metadata/config reads.
+    let pool = state.pool.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        pool.submit_model_action_with_profile(
+            &request.model_id,
+            ui_action_to_router(&request.action),
+            request.expected_revision,
+            &request.idempotency_key,
+            request.eviction_target_id.as_deref(),
+            request.load_profile,
+        )
+    })
+    .await;
+    match result {
+        Ok(Ok(accepted)) => (StatusCode::ACCEPTED, Json(accepted)).into_response(),
+        Ok(Err(err)) => {
             tracing::warn!(error = ?err, "router: rejected WebUI model action request");
             webui_pool_error_response(err)
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "router: model action admission task failed");
+            webui_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "unavailable",
+                "model action admission is unavailable",
+                true,
+            )
         }
     }
 }

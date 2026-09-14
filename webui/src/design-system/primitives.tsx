@@ -63,7 +63,7 @@ function ModalDialog(props: ModalProps): React.JSX.Element {
     if (!dialog) return;
     const restoreFocus = (): void => {
       const target = previousFocus.current;
-      if (target?.isConnected) target.focus();
+      restoreModalFocus(dialog, target);
       previousFocus.current = null;
     };
     const handleClose = (): void => {
@@ -91,6 +91,9 @@ function ModalDialog(props: ModalProps): React.JSX.Element {
     return () => {
       dialog.removeEventListener('close', handleClose);
       dialog.removeEventListener('keydown', handleKeyDown);
+      // Feature confirmations may unmount without a native close event.
+      const target = previousFocus.current;
+      window.setTimeout(() => restoreModalFocus(dialog, target), 0);
     };
   }, []);
 
@@ -98,11 +101,23 @@ function ModalDialog(props: ModalProps): React.JSX.Element {
     <dialog className={`ds-dialog ${props.className ?? ''}`.trim()} data-position={props.position ?? 'center'} ref={ref} aria-labelledby={titleId} data-testid={props.testId}>
       <header>
         <h2 id={titleId}>{props.title}</h2>
-        <IconButton label={props.closeLabel ?? 'Close'} icon="close" onClick={() => { const target = previousFocus.current; closingFromProp.current = true; onCloseRef.current(); ref.current?.close(); window.setTimeout(() => { if (target?.isConnected) target.focus(); }, 0); }} data-testid="dialog-close" />
+        <IconButton label={props.closeLabel ?? 'Close'} icon="close" onClick={() => { const target = previousFocus.current; closingFromProp.current = true; onCloseRef.current(); ref.current?.close(); window.setTimeout(() => { const dialog = ref.current; if (dialog) restoreModalFocus(dialog, target); }, 0); }} data-testid="dialog-close" />
       </header>
       <div><NativeModalContext.Provider value={true}>{props.children}</NativeModalContext.Provider></div>
     </dialog>
   );
+}
+
+// Do not steal focus from a newly opened modal or an intentionally focused control.
+function restoreModalFocus(dialog: HTMLDialogElement, target: HTMLElement | null): void {
+  if (dialog.isConnected && dialog.open) return;
+  const active = document.activeElement;
+  if (active && active !== document.body && active !== document.documentElement && !dialog.contains(active)) return;
+  if (document.querySelector('dialog[open]')) return;
+  const usable = (element: HTMLElement | null): element is HTMLElement => !!element?.isConnected && element !== document.body && !element.matches(':disabled, [aria-disabled="true"]') && !element.closest('[inert], [hidden]');
+  if (usable(target)) { target.focus(); return; }
+  const fallback = document.querySelector<HTMLElement>('[data-dialog-focus-fallback]') ?? document.querySelector<HTMLElement>('main button:not(:disabled)');
+  if (usable(fallback)) fallback.focus();
 }
 
 export function Dialog(props: Omit<ModalProps, 'position' | 'className'>): React.JSX.Element {

@@ -1,0 +1,3 @@
+/* Layout only: control appearance and material tokens remain shared. */
+.settings-sections { min-width: 0; overflow-wrap: anywhere; }
+.settings-sections .ds-field { min-width: 0; }

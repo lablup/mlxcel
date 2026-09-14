@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import { validateSettings, validateSettingsPatch, validateModelProps, validateTokenCount, type SettingsResponse, type SettingsPatchResponse, type ModelProps } from './settings';
 import { SseParser, type SseMessage } from './sse';
 import { apiPath, encodeOpaquePathSegment, validateApiBase } from './url';
 import { parseJson, validateBootstrap, validateCatalogEntry, validateCatalogList, validateErrorEnvelope, validateOperation, validateOperationAccepted, validateOperationsList, validateRuntime, validateUiEvent } from './validation';
@@ -124,6 +125,22 @@ export class WebUiApiClient {
     const runtime = await this.request('/ui-api/v1/runtime', validateRuntime, { method: 'GET', query: { model_id: modelId, autoload: false }, signal });
     if (runtime.model_id !== modelId) throw new Error('Runtime response model_id did not match the requested model.');
     return runtime;
+  }
+
+  async tokenCount(inferenceModelId: string, content: string, signal?: AbortSignal): Promise<number> {
+    return this.request('/tokenize', validateTokenCount, { method: 'POST', query: { model: inferenceModelId, autoload: false }, body: { content, add_special: false, parse_special: true, with_pieces: false }, signal });
+  }
+
+  async settings(inferenceModelId: string, signal?: AbortSignal): Promise<SettingsResponse> {
+    return this.request('/settings', validateSettings, { method: 'GET', query: { model: inferenceModelId, autoload: false }, signal });
+  }
+
+  async patchSettings(inferenceModelId: string, values: Readonly<Record<string, unknown>>, signal?: AbortSignal): Promise<SettingsPatchResponse> {
+    return this.request('/settings', validateSettingsPatch, { method: 'PATCH', query: { model: inferenceModelId, autoload: false }, body: { op: 'merge', values }, signal });
+  }
+
+  async modelProps(inferenceModelId: string, signal?: AbortSignal): Promise<ModelProps> {
+    return this.request('/props', validateModelProps, { method: 'GET', query: { model: inferenceModelId, autoload: false }, signal });
   }
 
   async events(handlers: EventStreamHandlers, signal?: AbortSignal, cursor?: EventReplayCursor): Promise<void> {

@@ -1,0 +1,17 @@
+{
+  "$schemaName": "ErrorEnvelope",
+  "error": {
+    "code": "unsupported",
+    "message": "next-load profile is invalid for this model or startup configuration",
+    "retryable": true,
+    "field_errors": [
+      {
+        "field": "load_profile.ctx_size",
+        "code": "unsupported",
+        "message": "resolved context is below the existing minimum per-slot context; increase context or reduce parallelism"
+      }
+    ],
+    "operation_id": "op_profile_invalid_example"
+  },
+  "request_id": "req_profile_invalid_example"
+}

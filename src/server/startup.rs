@@ -878,7 +878,8 @@ fn resolve_context_kv_cap(
     })
 }
 
-fn validate_parallel_context_startup(startup: &ServerStartupConfig) -> Result<()> {
+// Used by: server startup, WebUI next-load profile admission.
+pub(super) fn validate_parallel_context_startup(startup: &ServerStartupConfig) -> Result<()> {
     if startup.ctx_size == 0 {
         return Ok(());
     }
@@ -1325,7 +1326,10 @@ fn muse_glimmer_distributed_requested(startup: &ServerStartupConfig) -> bool {
         || startup.serving_bind.is_some()
 }
 
-fn validate_muse_glimmer_unsupported_startup(startup: &ServerStartupConfig) -> Result<()> {
+// Used by: server startup, WebUI next-load profile admission.
+pub(super) fn validate_muse_glimmer_unsupported_startup(
+    startup: &ServerStartupConfig,
+) -> Result<()> {
     if !is_muse_glimmer_model_path(&startup.model_path) {
         return Ok(());
     }

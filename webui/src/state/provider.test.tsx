@@ -1,10 +1,10 @@
 import React from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { act } from 'react';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import bootstrapFixture from '../../../tests/fixtures/webui/examples/bootstrap.model-free.json';
 import runtimeFixture from '../../../tests/fixtures/webui/examples/runtime.snapshot.json';
-import { WebUiHttpError } from '../api/client';
+import { WebUiApiClient, WebUiHttpError } from '../api/client';
 import type { WebUiSnapshot } from '../api/types';
 import { WebUiProvider, useWebUi, useWebUiActions, type WebUiActions } from './provider';
 
@@ -82,5 +82,27 @@ describe('WebUiProvider auth races', () => {
     expect(mounted.latest().snapshot.lastSuccessfulAt).toBeNull();
     act(() => mounted.root.unmount());
     mounted.element.remove();
+  });
+});
+
+
+describe('operation session fences', () => {
+  it.each(['accepted', 'rejected'] as const)('ignores late %s operation outcomes after logout and relogin', async (outcome) => {
+    let resolve: ((value: { operation_id: string; state: 'queued'; idempotent_replay: boolean }) => void) | undefined;
+    let reject: ((reason: Error) => void) | undefined;
+    const spy = vi.spyOn(WebUiApiClient.prototype, 'refreshCatalog').mockImplementation(() => new Promise((done, fail) => { resolve = done; reject = fail; }));
+    const fetchImpl: typeof fetch = async (input) => new Response(JSON.stringify(String(input).endsWith('/bootstrap') ? bootstrapFixture : { error: { code: 'not_found', message: 'No fixture', retryable: false }, request_id: 'test' }), { status: String(input).endsWith('/bootstrap') ? 200 : 404 });
+    const mounted = mount(fetchImpl);
+    try {
+      await act(async () => mounted.latest().actions.login('old-token'));
+      let pending: Promise<void> = Promise.resolve();
+      act(() => { pending = mounted.latest().actions.refreshCatalog('old-session-operation'); });
+      const observed = pending.catch(() => undefined);
+      act(() => mounted.latest().actions.logout());
+      await act(async () => mounted.latest().actions.login('new-token'));
+      await act(async () => { if (outcome === 'accepted') resolve?.({ operation_id: 'op_late', state: 'queued', idempotent_replay: false }); else reject?.(new TypeError('late network error')); await observed; });
+      expect(mounted.latest().snapshot.auth.status).toBe('authenticated');
+      expect(mounted.latest().snapshot.pendingReconciliations.size).toBe(0);
+    } finally { spy.mockRestore(); act(() => mounted.root.unmount()); mounted.element.remove(); }
   });
 });

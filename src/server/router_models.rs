@@ -394,6 +394,13 @@ pub struct RouterPool {
     load_after_reservation_hook: Mutex<Option<LoadAfterReservationHook>>,
 }
 
+#[derive(Default)]
+struct ModelActionLoadOptions {
+    eviction_target_id: Option<String>,
+    #[cfg(feature = "webui")]
+    profile: Option<super::webui::load_profile::UiLoadProfile>,
+}
+
 /// Why a name failed to resolve, load, download, or be removed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RouterPoolError {
@@ -842,7 +849,14 @@ impl RouterPool {
             .ok()?
             .values()
             .find(|entry| !entry.hidden && entry.ui_model_id == model_id)
-            .map(|entry| entry.config.clone())
+            .map(|entry| {
+                entry
+                    .state
+                    .lock()
+                    .ok()
+                    .and_then(|state| state.app.as_ref().map(|app| (*app.state.config).clone()))
+                    .unwrap_or_else(|| entry.config.clone())
+            })
     }
 
     fn has_case_alias_entry(&self, name: &str) -> bool {
@@ -1254,6 +1268,7 @@ impl RouterPool {
             eviction_target.as_ref(),
             allow_lru_eviction,
             expectation.as_ref(),
+            None,
         )
         .await
         .map(|outcome| outcome.entry)
@@ -1265,6 +1280,7 @@ impl RouterPool {
         eviction_target: Option<&EvictionTarget>,
         allow_lru_eviction: bool,
         expectation: Option<&LoadEntryExpectation>,
+        load_config: Option<super::config::ServerConfig>,
     ) -> Result<LoadStartOutcome, RouterPoolError> {
         let name = entry.name.clone();
         let _entry_permit = entry.lifecycle.operation_guard().await;
@@ -1384,7 +1400,10 @@ impl RouterPool {
         // an observable state; the tokenizer and chat-template reads are
         // still filesystem work, so they run on the blocking pool rather
         // than stalling the async runtime.
-        let (path, config) = (entry.path.clone(), entry.config.clone());
+        let (path, config) = (
+            entry.path.clone(),
+            load_config.unwrap_or_else(|| entry.config.clone()),
+        );
         let built = tokio::task::spawn_blocking(move || build_model_app(&path, config))
             .await
             .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())));
@@ -1630,6 +1649,42 @@ impl RouterPool {
         }
     }
 
+    /// Startup-pinned profile fields for the canonical runtime report. These
+    /// are captured once, not inferred from a running worker's changed values.
+    #[cfg(feature = "webui")]
+    pub(crate) fn next_load_cli_overrides(&self) -> Vec<String> {
+        [
+            ("ctx_size", self.cli_overrides.ctx_size),
+            ("n_parallel", self.cli_overrides.n_parallel),
+            ("kv_cache_mode", self.cli_overrides.kv_cache_mode),
+        ]
+        .into_iter()
+        .filter(|(_, pinned)| *pinned)
+        .map(|(name, _)| name.to_string())
+        .collect()
+    }
+
+    #[cfg(feature = "webui")]
+    fn resolve_entry_load_profile(
+        &self,
+        entry: &RouterModelEntry,
+        profile: &super::webui::load_profile::UiLoadProfile,
+    ) -> Result<super::config::ServerConfig, super::webui::load_profile::ProfileError> {
+        let mut startup = self.base_startup.clone();
+        startup.model_path = entry.path.clone();
+        let section = self.sources.presets.for_model(&entry.name);
+        super::router_presets::apply_section_to_startup(
+            &mut startup,
+            &section,
+            &self.cli_overrides,
+        );
+        profile.apply(&mut startup, &self.cli_overrides)?;
+        let mut config = super::startup::build_server_config(&startup, self.api_keys.clone());
+        config.model_alias = entry.config.model_alias.clone();
+        config.model_aliases = entry.config.model_aliases.clone();
+        Ok(config)
+    }
+
     pub fn submit_model_action(
         self: &Arc<Self>,
         model_id: &str,
@@ -1638,6 +1693,49 @@ impl RouterPool {
         idempotency_key: &str,
         eviction_target_id: Option<&str>,
     ) -> Result<super::router_lifecycle::OperationAccepted, RouterPoolError> {
+        self.submit_model_action_options(
+            model_id,
+            action,
+            expected_revision,
+            idempotency_key,
+            ModelActionLoadOptions {
+                eviction_target_id: eviction_target_id.map(str::to_owned),
+                ..Default::default()
+            },
+        )
+    }
+
+    #[cfg(feature = "webui")]
+    pub(crate) fn submit_model_action_with_profile(
+        self: &Arc<Self>,
+        model_id: &str,
+        action: RouterModelAction,
+        expected_revision: u64,
+        idempotency_key: &str,
+        eviction_target_id: Option<&str>,
+        profile: Option<super::webui::load_profile::UiLoadProfile>,
+    ) -> Result<super::router_lifecycle::OperationAccepted, RouterPoolError> {
+        self.submit_model_action_options(
+            model_id,
+            action,
+            expected_revision,
+            idempotency_key,
+            ModelActionLoadOptions {
+                eviction_target_id: eviction_target_id.map(str::to_owned),
+                profile: profile.filter(|profile| profile.has_overrides()),
+            },
+        )
+    }
+
+    fn submit_model_action_options(
+        self: &Arc<Self>,
+        model_id: &str,
+        action: RouterModelAction,
+        expected_revision: u64,
+        idempotency_key: &str,
+        options: ModelActionLoadOptions,
+    ) -> Result<super::router_lifecycle::OperationAccepted, RouterPoolError> {
+        let eviction_target_id = options.eviction_target_id.as_deref();
         let kind = match action {
             RouterModelAction::Load => OperationKind::ModelLoad,
             RouterModelAction::Unload => OperationKind::ModelUnload,
@@ -1646,6 +1744,9 @@ impl RouterPool {
             "{kind:?}:{model_id}:{expected_revision}:{}",
             eviction_target_id.unwrap_or("")
         );
+        // Request identity includes the profile even when CLI precedence masks a value.
+        #[cfg(feature = "webui")]
+        let fingerprint = format!("{fingerprint}:{:?}", options.profile);
         let accepted = self
             .lifecycle
             .begin_operation(
@@ -1703,6 +1804,49 @@ impl RouterPool {
                 other => other,
             });
         }
+
+        #[cfg(feature = "webui")]
+        let load_config =
+            if let Some(profile) = options.profile.as_ref().filter(|p| p.has_overrides()) {
+                let resolved = (|| {
+                    if action != RouterModelAction::Load {
+                        return Err(super::webui::load_profile::ProfileError::unsupported(
+                            "load_profile",
+                            "profiles only apply to load actions",
+                        ));
+                    }
+                    self.resolve_entry_load_profile(&entry, profile)
+                })();
+                match resolved {
+                    Ok(config) => Some(config),
+                    Err(error) => {
+                        let error = ErrorBody {
+                        code: "unsupported".to_string(),
+                        message:
+                            "next-load profile is invalid for this model or startup configuration"
+                                .to_string(),
+                        retryable: true,
+                        operation_id: Some(accepted.operation_id.clone()),
+                        field_errors: Some(vec![super::router_lifecycle::FieldError {
+                            field: error.field.to_string(),
+                            code: error.code.to_string(),
+                            message: error.message,
+                        }]),
+                    };
+                        self.lifecycle.update_operation(
+                            &accepted.operation_id,
+                            OperationState::Failed,
+                            None,
+                            Some(error.clone()),
+                        );
+                        return Err(RouterPoolError::OperationRejected(error));
+                    }
+                }
+            } else {
+                None
+            };
+        #[cfg(not(feature = "webui"))]
+        let load_config = None;
 
         let eviction_target = match eviction_target_id {
             Some(target_id) => match self.get_by_model_id(target_id) {
@@ -1790,6 +1934,7 @@ impl RouterPool {
                             eviction_target.as_ref(),
                             false,
                             Some(&expectation),
+                            load_config,
                         )
                         .await
                     };
@@ -3066,3 +3211,7 @@ mod router_models_discovery_tests;
 #[cfg(test)]
 #[path = "router_unload_revision_tests.rs"]
 mod router_unload_revision_tests;
+
+#[cfg(all(test, feature = "webui"))]
+#[path = "router_load_profile_tests.rs"]
+mod router_load_profile_tests;
