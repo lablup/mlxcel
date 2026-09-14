@@ -1,6 +1,8 @@
+import { modelStrings } from '../features/models/strings';
+
 export type Locale = 'en' | 'ko';
 
-export type StringKey =
+export type StringKey = typeof modelStrings[number]['key']
   | 'app.title'
   | 'app.subtitle'
   | 'nav.models'
@@ -344,6 +346,7 @@ export const entries: Entry[] = [
   { key: 'login.error.schema', en: 'The server response does not match this bundled UI schema. Reload after updating the server or bundle.', ko: '서버 응답이 번들된 UI 스키마와 일치하지 않습니다. 서버나 번들을 업데이트한 뒤 새로고침하세요.', test_id: 'login-error-schema' },
   { key: 'login.error.generic', en: 'The local API could not complete authentication. Retry with the latest terminal key.', ko: '로컬 API 인증을 완료할 수 없습니다. 터미널에 표시된 최신 키로 다시 시도하세요.', test_id: 'login-error-generic' },
   { key: 'gallery.delete_token', en: 'DELETE', ko: 'DELETE', test_id: 'gallery-delete-token' },
+  ...modelStrings,
 ];
 
 const table = new Map(entries.map((entry) => [entry.key, entry]));

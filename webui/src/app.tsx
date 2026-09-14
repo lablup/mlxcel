@@ -5,6 +5,7 @@ import { AppShell, type RouteId } from './design-system/shell';
 import { applyAppearance, DEFAULT_APPEARANCE, loadAppearance, saveAppearance, type AppearancePreferences, type ContrastPreference } from './design-system/preferences';
 import { Button, Dialog, ErrorBanner, Field, IconButton, Select } from './design-system/primitives';
 import { ActivityPage } from './features/activity';
+import { ModelsLibrary } from './features/models/screen';
 import { DesignGallery } from './gallery';
 import { classifyAuthFailure, connectionFooterLabel, ProductConnectionSurface, selectedModelLabel, type AuthFailure } from './provider-surfaces';
 import { useWebUi, useWebUiActions } from './state';
@@ -113,6 +114,7 @@ function renderRoute(route: RouteId, appearance: AppearancePreferences, setAppea
 }
 
 function ModelsScreen(props: { locale: AppearancePreferences['locale']; context: ProviderRouteContext }): React.JSX.Element {
+  if (props.context.snapshot.auth.status === 'authenticated' && props.context.snapshot.connection !== 'schema-mismatch') return <ModelsLibrary locale={props.locale} />;
   return <ProductConnectionSurface locale={props.locale} eyebrow={t(props.locale, 'routes.models.eyebrow')} title={t(props.locale, 'models.title')} titleTestId={testId('models.title')} snapshot={props.context.snapshot} authFailure={props.context.authFailure} onLogin={props.context.login} onLogout={props.context.logout} onRetry={props.context.retry} onRecoverSchema={props.context.recoverSchema} />;
 }
 

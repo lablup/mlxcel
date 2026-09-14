@@ -128,7 +128,7 @@ function SchemaSurface(props: ProductConnectionSurfaceProps): React.JSX.Element 
   );
 }
 
-function connectedDetail(locale: Locale, snapshot: WebUiSnapshot): string {
+export function connectedDetail(locale: Locale, snapshot: WebUiSnapshot): string {
   const bootstrap = snapshot.bootstrap;
   if (bootstrap === null) return t(locale, 'connection.prompt.detail');
   return t(locale, 'connection.authenticated.detail', {
@@ -162,7 +162,7 @@ function selectedCatalogEntry(snapshot: WebUiSnapshot): CatalogEntry | null {
   return snapshot.catalog.find((entry) => entry.identity.id === snapshot.selectedModelId) ?? null;
 }
 
-function lifecycleLabel(locale: Locale, state: CatalogEntry['lifecycle']['state']): string {
+export function lifecycleLabel(locale: Locale, state: CatalogEntry['lifecycle']['state']): string {
   const keys: Record<CatalogEntry['lifecycle']['state'], StringKey> = {
     unloaded: 'models.status.unloaded',
     loading: 'models.status.loading',
