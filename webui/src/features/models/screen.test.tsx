@@ -292,3 +292,17 @@ describe('reviewed asynchronous recovery paths', () => {
     expect(button('models-add').disabled).toBe(true);
   });
 });
+
+it('prefers the catalog display name for operation titles and retains opaque identity', () => {
+  const op: Operation = {
+    ...download,
+    kind: 'model_load',
+    target: { target_kind: 'model', model_id: model().identity.id, requested_revision: 4 },
+  };
+  state = { ...state, operations: new Map([[op.operation_id, op]]) };
+  render();
+  expect(host.querySelector('[data-testid="models-operation"] strong')?.textContent).toBe(
+    model().identity.display_name,
+  );
+  expect(host.querySelector('[data-testid="models-operation"]')?.textContent).toContain(model().identity.id);
+});

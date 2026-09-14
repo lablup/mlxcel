@@ -38,15 +38,16 @@ export function LibraryOperations({
         {operations.slice(0, 64).map((op) => (
           <li key={op.operation_id} data-testid="models-operation">
             <div>
-              <strong>
-                {op.target.target_kind === 'download'
-                  ? op.target.repo_id
-                  : op.target.target_kind === 'model'
-                    ? op.target.model_id
-                    : op.kind}
-              </strong>
+              <strong>{operationLabel(op, state)}</strong>
               <p>
-                <code>{op.operation_id}</code> · {t(locale, 'models.library.operation_state')}: {op.state}
+                <code>{op.operation_id}</code>
+                {op.target.target_kind === 'model' ? (
+                  <span>
+                    {' '}
+                    · <code>{op.target.model_id}</code>
+                  </span>
+                ) : null}{' '}
+                · {t(locale, 'models.library.operation_state')}: {op.state}
               </p>
               {op.kind === 'download' ? (
                 <ProgressBar
@@ -110,4 +111,14 @@ export function LibraryOperations({
 
 function modelTarget(op: Operation): string {
   return op.target.target_kind === 'model' ? op.target.model_id : '';
+}
+
+function operationLabel(op: Operation, state: WebUiSnapshot): string {
+  const target = op.target;
+  if (target.target_kind === 'download') return target.repo_id;
+  if (target.target_kind === 'model')
+    return (
+      state.catalog.find((entry) => entry.identity.id === target.model_id)?.identity.display_name ?? target.model_id
+    );
+  return op.kind;
 }

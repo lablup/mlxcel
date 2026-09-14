@@ -79,3 +79,29 @@
   white-space: normal;
   overflow-wrap: anywhere;
 }
+
+/* A grid item's automatic minimum must not let an opaque operation ID widen
+   the entire screen. Wrap identifiers; do not hide viewport overflow. */
+.models-library {
+  grid-template-columns: minmax(0, 1fr);
+}
+.models-library > *,
+.models-operations,
+.models-operations .ds-list,
+.models-operations li,
+.models-operations li > div {
+  min-width: 0;
+  max-width: 100%;
+}
+.models-operations strong,
+.models-operations p {
+  overflow-wrap: anywhere;
+}
+.models-library .button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.models-layout:not(:has(.ds-inspector)) {
+  grid-template-columns: minmax(0, 1fr);
+}
