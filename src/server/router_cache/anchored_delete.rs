@@ -147,9 +147,17 @@ fn stat_child(parent: &File, name: &CStr) -> io::Result<libc::stat> {
     }
 }
 
+// MetadataExt::dev returns u64, while libc::dev_t is signed on Darwin and
+// already u64 on Linux. Preserve Rust's signed-to-u64 representation exactly;
+// narrowing the metadata value could accept a different device identity.
+#[allow(clippy::unnecessary_cast)]
+fn stat_device_id(stat: &libc::stat) -> u64 {
+    stat.st_dev as u64
+}
+
 fn verify_file_matches_stat(file: &File, expected: &libc::stat) -> io::Result<()> {
     let actual = file.metadata()?;
-    if actual.dev() == expected.st_dev as u64 && actual.ino() == expected.st_ino {
+    if actual.dev() == stat_device_id(expected) && actual.ino() == expected.st_ino {
         Ok(())
     } else {
         Err(identity_mismatch())
@@ -159,7 +167,7 @@ fn verify_file_matches_stat(file: &File, expected: &libc::stat) -> io::Result<()
 fn verify_child_matches_file(parent: &File, name: &CStr, held: &File) -> io::Result<()> {
     let current = stat_child(parent, name)?;
     let held = held.metadata()?;
-    if held.dev() == current.st_dev as u64 && held.ino() == current.st_ino {
+    if held.dev() == stat_device_id(&current) && held.ino() == current.st_ino {
         Ok(())
     } else {
         Err(identity_mismatch())

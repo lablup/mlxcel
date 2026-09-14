@@ -53,3 +53,39 @@ fn delete_contents_detects_nested_directory_swap_before_open() {
         b"replacement"
     );
 }
+
+#[test]
+fn identity_checks_preserve_device_and_inode_without_narrowing() {
+    let root = tempfile::tempdir().expect("root");
+    fs::create_dir(root.path().join("child")).expect("child");
+    let parent = open_dir_path(root.path()).expect("parent");
+    let name = CString::new("child").expect("name");
+    let held = open_child_dir(&parent, &name).expect("held");
+    let mut expected = stat_child(&parent, &name).expect("stat");
+    assert_eq!(stat_device_id(&expected), held.metadata().unwrap().dev());
+    verify_file_matches_stat(&held, &expected).expect("same identity");
+    verify_child_matches_file(&parent, &name, &held).expect("same child");
+
+    expected.st_dev ^= 1;
+    assert!(verify_file_matches_stat(&held, &expected).is_err());
+    expected.st_dev ^= 1;
+    expected.st_ino ^= 1;
+    assert!(verify_file_matches_stat(&held, &expected).is_err());
+
+    fs::rename(root.path().join("child"), root.path().join("original")).expect("retain original");
+    fs::create_dir(root.path().join("child")).expect("replacement");
+    assert!(verify_child_matches_file(&parent, &name, &held).is_err());
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[test]
+fn darwin_signed_device_id_preserves_metadata_representation() {
+    let root = tempfile::tempdir().expect("root");
+    let parent = open_dir_path(root.path()).expect("parent");
+    let name = CString::new(".").expect("name");
+    let mut stat = stat_child(&parent, &name).expect("stat");
+    stat.st_dev = -1;
+    assert_eq!(stat_device_id(&stat), u64::MAX);
+    stat.st_dev = i32::MIN;
+    assert_eq!(stat_device_id(&stat), u64::MAX - i32::MAX as u64);
+}

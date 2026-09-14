@@ -143,3 +143,13 @@ None caller의 기존 동작을 보존한 최종 수정 후 scoped library/test 
 사용자가 quiet window를 알려줄 때까지 GPU·browser·전체 suite 실행은 중단합니다. 이번 rebase에서는 CPU/fake 테스트와 frontend unit·contract·build 검사만 사용합니다. 실제 Safari·VoiceOver·native 200% 수동 검사는 사용자가 전체 구현 완료 시점으로 미뤘으므로 pending이며 통과나 개별 unit blocker로 보고하지 않습니다.
 
 CPU-only rebase 검증: unload/token5, 순수 policy1, 보안 fake-router9, owned restart2(별도 nested child 실행2개), scoped clippy·포맷, strict fixture46개, frontend unit76개, type·lint 및 canonical deterministic bundle 검증을 통과했습니다. 이 unit rebase에서는 GPU·browser·전체 suite를 실행하지 않았습니다.
+
+## 10. 최신 main 통합과 hosted 이식성 수정 (2026-09-14)
+
+브랜치를 main `e9ee5f044fa28c14db50009fffbe02283513c3ae` 위로 rebase했습니다. #1888 shared SwitchGLU 전환, #1889 WebUI feature-disabled helper gate, #1882 f16 attention 범위 테스트, #1890 Phixtral narrowing을 포함합니다. 기존 브랜치 커밋 11개는 모두 range-diff상 동일하며 충돌이나 수동 asset 수정이 없었습니다. Upstream app/auth/router helper gate와 단일 secured library mount, 공유 정책, 정확한 ui-common alpha.19, fixture 46개를 보존했습니다. 과거 전체·GPU 결과는 새 core 기준점의 검증 결과가 아닙니다.
+
+이후 GB10 runner가 `71552f8c` hosted 작업을 실제 실행했습니다. Linux에서는 device-ID의 동일 타입 cast 때문에 clippy가 실패했고, feature-disabled 컴파일은 이제 upstream #1889가 gate한 helper 때문에 실패했습니다. 앞서 승인된 장애 면제는 실제 실행된 실패에 적용되지 않습니다. 로컬 이식성 수정은 기존 cast를 설명이 있는 helper 하나로 모으고 해당 함수에만 unnecessary-cast 허용을 둡니다. Darwin의 signed device 표현과 Linux의 u64 표현을 그대로 보존하며 어느 비교도 identity를 축소하거나 unsafe 코드를 추가하지 않습니다. 임시 디렉터리 회귀는 동일 identity, 독립적인 device/inode 불일치, child 교체를 검사하고 Darwin 전용 검사는 signed device 값을 확인합니다. 루트의 한정된 읽기 전용 리뷰는 이 변경을 승인했습니다. 게시 후 실제 hosted Linux clippy 및 feature-disabled 통과가 여전히 필요합니다.
+
+사용자가 이제 GPU 사용 가능 상태를 확인했습니다. 다음 GPU·전체 suite 및 실제 acceptance는 루트가 독점 실행하며 이 유닛은 CPU-only를 유지합니다. 첫 실제 unload 실패와 최신 Metal firmware timeout은 그대로 기록하며, 루트가 변경하지 않은 실제 download/restart/load/unload/delete acceptance를 다시 실행해야 합니다. 이 준비 과정에서 기존 사용자 checkpoint를 삭제하지 않습니다.
+
+CPU 준비 검증은 unload 5개, policy 1개, secured router 9개, owned restart 2개와 child 실행 2회, anchored filesystem 13개(새 identity 회귀 2개 포함), 일반 scoped library/test clippy, feature-disabled library/binary clippy, 포맷·diff, strict contract 46개, frontend 테스트 76개, type/lint 및 결정적 bundle 검증을 통과했습니다. 이 유닛은 GPU·브라우저·전체 suite를 실행하지 않았습니다.
