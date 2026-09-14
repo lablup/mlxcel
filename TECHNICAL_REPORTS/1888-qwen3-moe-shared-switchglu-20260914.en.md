@@ -7,7 +7,7 @@
 
 ## Executive Summary
 
-`qwen3_moe` kept a private copy of `SwitchLinear`, `SwitchGLU` and `forward_fused_kernel`, and `qwen3_vl_moe` built that copy by hand. The copy never received the fused-kernel `dff` upper bound that the shared `switch_layers::SwitchGLU` gained in #311 and #643, so `MLXCEL_FUSED_MOE_MAX_DFF` was silently ignored for both families. PR #1888 deletes the copy and puts both families on the shared type. On GB10 the greedy token ids of `qwen3-30b-a3b-4bit` and `qwen3-vl-30b-a3b-4bit` are identical before and after, on the fused path and with `MLXCEL_FUSED_MOE=0`; the decode trace still shows `path=fused tokens=1`; and a cap of 512 now moves both families to `gather_qmm`, where the base binary ignored it.
+`qwen3_moe` kept a private copy of `SwitchLinear`, `SwitchGLU` and `forward_fused_kernel`, and `qwen3_vl_moe` (which also builds the Qwen3-Omni-MoE thinker) built that copy by hand. The copy never received the fused-kernel `dff` upper bound that the shared `switch_layers::SwitchGLU` gained in #311 and #643, so `MLXCEL_FUSED_MOE_MAX_DFF` was silently ignored for both families. PR #1888 deletes the copy and puts both families on the shared type. On GB10 the greedy token ids of `qwen3-30b-a3b-4bit` and `qwen3-vl-30b-a3b-4bit` are identical before and after, on the fused path and with `MLXCEL_FUSED_MOE=0`; the decode trace still shows `path=fused tokens=1`; and a cap of 512 now moves both families to `gather_qmm`, where the base binary ignored it.
 
 ## 1. Problem Statement
 
@@ -58,6 +58,7 @@ The ranges overlap almost entirely. Single-run decode on GB10 is bimodal and the
 ### 2.4 Compatibility
 
 - **Breaking changes**: `qwen3_moe::SwitchLinear` and `qwen3_moe::SwitchGLU` are no longer exported. The only in-tree users were `qwen3_vl_moe` and the family tests, both migrated.
+- **Newly loadable layout**: the shared loader falls back to stacking unstacked `experts.{idx}` tensors, so a raw Hugging Face Qwen3-MoE checkpoint that failed with `Weight not found` now reaches that fallback, as Qwen2-MoE already did.
 - **New dependencies**: none.
 
 ## 3. Technical Decisions
@@ -113,7 +114,7 @@ Related: #268, #275, #311, #643, #958, #1045, #1803, #1859.
 | Item | Value |
 |------|-------|
 | Files changed | 7 (plus this report) |
-| Lines | +523 / -432 |
+| Lines | +524 / -432 |
 | Tests added | 3 (Dff decline through the qwen3_moe loader, Dff decline through the qwen3_vl_moe loader, mxfp4 decline) |
 | Tests retargeted | 2 (#958 guards for both families) |
 
@@ -123,6 +124,8 @@ Related: #268, #275, #311, #643, #958, #1045, #1803, #1859.
 | `a78d39e9` | test | pin the dff decline through the Qwen3-VL-MoE loader too |
 | `b7431338` | docs | state which families read MLXCEL_FUSED_MOE_MAX_DFF |
 | `92e3faf9` | docs | qualify the qwen3-30b-a3b fused greedy parity claim |
+| `c314b253` | docs | add technical report for PR #1888 |
+| `0c80472a` | docs | name the Qwen3-Omni thinker and fix issue references |
 
 ## 8. Follow-up Actions
 
@@ -134,12 +137,15 @@ Related: #268, #275, #311, #643, #958, #1045, #1803, #1859.
 - Ten families keep a local `SwitchGLU` with no fused path: deepseek, deepseek_v2, deepseek_v3, deepseek_v32, ernie4_5_moe, exaone_moe, glm4_moe, glm4_moe_lite, hunyuan_moe, llama4.
 - The shared bound reads the environment and queries the backend on every call; caching it in a `OnceLock`, as `fused_moe_enabled` does, would remove that work.
 - `deepseek_v4_moe` calls `validate_expert_quantization_params` but is missing from its Used-by list.
+- Security review, pre-existing in the shared loader: the three expert planes are never cross-checked against each other, and the router's row count is never compared with the stacked expert count, so a checkpoint whose planes disagree can reach an unchecked kernel index. The unstacked `experts.{idx}` fallback also stacks without a declared expert count and calls `stack` on tensors whose shapes are not compared first. Both belong in the shared `SwitchGLU` loader so every family gains them.
+- The `MLXCEL_FUSED_MOE` family list in `docs/benchmark_results/fused-moe-decode-kernel-design.md` ("eleven model paths") is stale.
+- The `OpenXLA feature compile` CI job fails on `main` at `b8d10fb1` with unused-import errors in `src/models/mod.rs` and the server modules under `--no-default-features`; it fails the same way on this PR and is unrelated to it.
 
 ## Appendix
 
 ### A. Test Results
 
-All 38 tests under `models::qwen3_moe`, `models::qwen3_vl_moe` and `models::switch_layers` pass on GB10 (`test-fast` profile, `--features cuda`), each run in its own process. The Dff decline positive controls ran (no skip message). `cargo fmt --check` and `cargo clippy --profile test-fast --features cuda -p mlxcel --lib --tests --no-deps -- -D warnings` are clean. Not run: the `metal,accelerate` gate (not runnable on Linux) and the workspace-wide `verify-test-cuda`.
+All 38 tests under `models::qwen3_moe`, `models::qwen3_vl_moe` and `models::switch_layers` pass on GB10 (`test-fast` profile, `--features cuda`), each run in its own process, at `92e3faf9` and again at the final `0c80472a`. The Dff decline positive controls ran (no skip message). `cargo fmt --check` and `cargo clippy --profile test-fast --features cuda -p mlxcel --lib --tests --no-deps -- -D warnings` are clean. Not run: the `metal,accelerate` gate (not runnable on Linux) and the workspace-wide `verify-test-cuda`.
 
 ### B. Verification on GB10 (sm_121, CUDA, release build)
 
@@ -153,5 +159,7 @@ All 38 tests under `models::qwen3_moe`, `models::qwen3_vl_moe` and `models::swit
 | Decode trace, `MLXCEL_FUSED_MOE_MAX_DFF=512` | 144 fused (bound ignored) | 144 `path=gather_qmm tokens=1` |
 | `mlxcel-server` `qwen3-30b-a3b-4bit`, temperature 0, 64 tokens | reference | identical content and reasoning |
 | `mlxcel-server` `qwen3-vl-30b-a3b-4bit`, temperature 0, 64 tokens | reference | identical, coherent, same opening tokens as the CLI |
+
+The branch column was measured with binaries built at `a78d39e9`; the later commits change comments and docs only. The ids, trace, cap and server checks were repeated with binaries rebuilt at the final `0c80472a` and matched the base again. The same final binaries added the Qwen3-Omni-MoE thinker (`qwen3-omni-30b-a3b-instruct-4bit`, text-only): ids identical to the base with the fused path and with `MLXCEL_FUSED_MOE=0`, where the two paths diverge from each other at token 26; with `MLXCEL_FUSED_MOE_MAX_DFF=512` the base ids equal its fused ids and the branch ids equal the `MLXCEL_FUSED_MOE=0` ids.
 
 `qwen3-coder-480b-a35b-instruct-4bit` was checked from its headers only. The kernel driver reported 0 `NV_ERR_NO_MEMORY` events throughout.

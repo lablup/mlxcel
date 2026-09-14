@@ -7,7 +7,7 @@
 
 ## 요약
 
-`qwen3_moe`는 `SwitchLinear`, `SwitchGLU`, `forward_fused_kernel`의 사본을 따로 갖고 있었고, `qwen3_vl_moe`는 그 사본을 직접 조립해 썼다. 공유 `switch_layers::SwitchGLU`가 #311과 #643에서 얻은 fused kernel `dff` 상한이 사본에는 반영되지 않아, 두 계열 모두에서 `MLXCEL_FUSED_MOE_MAX_DFF`가 조용히 무시되었다. PR #1888은 사본을 지우고 두 계열을 공유 타입으로 옮긴다. GB10에서 `qwen3-30b-a3b-4bit`와 `qwen3-vl-30b-a3b-4bit`의 greedy token id는 fused 경로와 `MLXCEL_FUSED_MOE=0` 모두에서 변경 전후가 같고, decode trace는 여전히 `path=fused tokens=1`을 보이며, 상한 512를 주면 두 계열이 이제 `gather_qmm`으로 내려간다(기존 바이너리는 이를 무시했다).
+`qwen3_moe`는 `SwitchLinear`, `SwitchGLU`, `forward_fused_kernel`의 사본을 따로 갖고 있었고, `qwen3_vl_moe`(Qwen3-Omni-MoE thinker도 이것으로 만든다)는 그 사본을 직접 조립해 썼다. 공유 `switch_layers::SwitchGLU`가 #311과 #643에서 얻은 fused kernel `dff` 상한이 사본에는 반영되지 않아, 두 계열 모두에서 `MLXCEL_FUSED_MOE_MAX_DFF`가 조용히 무시되었다. PR #1888은 사본을 지우고 두 계열을 공유 타입으로 옮긴다. GB10에서 `qwen3-30b-a3b-4bit`와 `qwen3-vl-30b-a3b-4bit`의 greedy token id는 fused 경로와 `MLXCEL_FUSED_MOE=0` 모두에서 변경 전후가 같고, decode trace는 여전히 `path=fused tokens=1`을 보이며, 상한 512를 주면 두 계열이 이제 `gather_qmm`으로 내려간다(기존 바이너리는 이를 무시했다).
 
 ## 1. 문제 정의
 
@@ -58,6 +58,7 @@ loader 동작은 두 가지가 바뀐다.
 ### 2.4 호환성/의존성 관점
 
 - **Breaking change**: `qwen3_moe::SwitchLinear`와 `qwen3_moe::SwitchGLU`를 더 이상 export하지 않는다. tree 안의 사용처는 `qwen3_vl_moe`와 계열 테스트뿐이었고 모두 옮겼다.
+- **새로 로드되는 레이아웃**: 공유 loader는 stack되지 않은 `experts.{idx}` tensor를 쌓는 fallback이 있어, 전에는 `Weight not found`로 실패하던 원본 Hugging Face Qwen3-MoE checkpoint가 이제 그 경로에 도달한다. Qwen2-MoE는 이미 그랬다.
 - **새 의존성**: 없음.
 
 ## 3. 기술적 선택과 그 이유
@@ -113,7 +114,7 @@ loader 동작은 두 가지가 바뀐다.
 | 항목 | 값 |
 |------|----|
 | 변경 파일 | 7개(이 리포트 제외) |
-| 라인 | +523 / -432 |
+| 라인 | +524 / -432 |
 | 추가 테스트 | 3개(qwen3_moe loader 경유 Dff decline, qwen3_vl_moe loader 경유 Dff decline, mxfp4 decline) |
 | 대상 변경 테스트 | 2개(두 계열의 #958 가드) |
 
@@ -123,6 +124,8 @@ loader 동작은 두 가지가 바뀐다.
 | `a78d39e9` | test | pin the dff decline through the Qwen3-VL-MoE loader too |
 | `b7431338` | docs | state which families read MLXCEL_FUSED_MOE_MAX_DFF |
 | `92e3faf9` | docs | qualify the qwen3-30b-a3b fused greedy parity claim |
+| `c314b253` | docs | add technical report for PR #1888 |
+| `0c80472a` | docs | name the Qwen3-Omni thinker and fix issue references |
 
 ## 8. 후속 조치
 
@@ -134,12 +137,15 @@ loader 동작은 두 가지가 바뀐다.
 - fused 경로 없이 로컬 `SwitchGLU`를 가진 계열이 10개 있다: deepseek, deepseek_v2, deepseek_v3, deepseek_v32, ernie4_5_moe, exaone_moe, glm4_moe, glm4_moe_lite, hunyuan_moe, llama4.
 - 공유 상한은 호출마다 환경 변수를 읽고 backend를 질의한다. `fused_moe_enabled`처럼 `OnceLock`에 캐시하면 이 작업이 없어진다.
 - `deepseek_v4_moe`는 `validate_expert_quantization_params`를 호출하지만 Used-by 목록에 빠져 있다.
+- 보안 검토에서 나온, 공유 loader에 원래 있던 문제: 세 expert plane끼리의 shape과 router 행 수 대 stack된 expert 수를 비교하지 않아, plane이 서로 맞지 않는 checkpoint는 경계 검사 없는 kernel 인덱스에 도달할 수 있다. stack되지 않은 `experts.{idx}` fallback도 선언된 expert 수 없이 쌓고, shape을 먼저 비교하지 않은 채 `stack`을 호출한다. 두 가지 모두 공유 `SwitchGLU` loader에 넣어야 모든 계열이 혜택을 받는다.
+- `docs/benchmark_results/fused-moe-decode-kernel-design.md`의 계열 목록("eleven model paths")은 오래되었다.
+- CI의 `OpenXLA feature compile` job은 `main`의 `b8d10fb1`에서 이미 `--no-default-features` 조건의 `src/models/mod.rs`와 server 모듈 unused import 오류로 실패하며, 이 PR에서도 같은 이유로 실패한다. 이 PR과는 무관하다.
 
 ## 부록
 
 ### A. 테스트 결과
 
-GB10(`test-fast` profile, `--features cuda`)에서 `models::qwen3_moe`, `models::qwen3_vl_moe`, `models::switch_layers` 아래 테스트 38개를 각각 별도 프로세스로 실행해 모두 통과했다. Dff decline positive control은 skip 없이 실행되었다. `cargo fmt --check`와 `cargo clippy --profile test-fast --features cuda -p mlxcel --lib --tests --no-deps -- -D warnings`는 경고가 없다. 실행하지 않은 항목: `metal,accelerate` gate(Linux에서 실행 불가), workspace 전체 `verify-test-cuda`.
+GB10(`test-fast` profile, `--features cuda`)에서 `models::qwen3_moe`, `models::qwen3_vl_moe`, `models::switch_layers` 아래 테스트 38개를 각각 별도 프로세스로 실행해 `92e3faf9`와 최종 `0c80472a`에서 모두 통과했다. Dff decline positive control은 skip 없이 실행되었다. `cargo fmt --check`와 `cargo clippy --profile test-fast --features cuda -p mlxcel --lib --tests --no-deps -- -D warnings`는 경고가 없다. 실행하지 않은 항목: `metal,accelerate` gate(Linux에서 실행 불가), workspace 전체 `verify-test-cuda`.
 
 ### B. GB10 검증(sm_121, CUDA, release build)
 
@@ -153,5 +159,7 @@ GB10(`test-fast` profile, `--features cuda`)에서 `models::qwen3_moe`, `models:
 | decode trace, `MLXCEL_FUSED_MOE_MAX_DFF=512` | fused 144회(상한 무시) | `path=gather_qmm tokens=1` 144회 |
 | `mlxcel-server` `qwen3-30b-a3b-4bit`, temperature 0, 64토큰 | 기준 | content와 reasoning 동일 |
 | `mlxcel-server` `qwen3-vl-30b-a3b-4bit`, temperature 0, 64토큰 | 기준 | 동일, 일관된 문장, CLI id와 같은 시작 토큰 |
+
+Branch 열은 `a78d39e9`에서 빌드한 바이너리로 측정했고, 이후 커밋은 주석과 문서만 바꾼다. 최종 `0c80472a`에서 다시 빌드한 바이너리로 id, trace, 상한, server 확인을 반복해 base와 다시 일치했다. 같은 최종 바이너리로 Qwen3-Omni-MoE thinker(`qwen3-omni-30b-a3b-instruct-4bit`, 텍스트 전용)도 확인했다. fused 경로와 `MLXCEL_FUSED_MOE=0` 모두 base와 id가 같고, 두 경로끼리는 26번째 토큰에서 갈라진다. `MLXCEL_FUSED_MOE_MAX_DFF=512`에서 base id는 fused id와, branch id는 `MLXCEL_FUSED_MOE=0` id와 같다.
 
 `qwen3-coder-480b-a35b-instruct-4bit`는 header로만 확인했다. 전 과정에서 kernel driver의 `NV_ERR_NO_MEMORY`는 0건이었다.
