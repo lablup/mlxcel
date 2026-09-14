@@ -6,7 +6,7 @@ import bootstrap from '../../../../tests/fixtures/webui/examples/bootstrap.model
 import catalog from '../../../../tests/fixtures/webui/examples/catalog.page.json';
 import { initialSnapshot } from '../../state/reducer';
 import type { WebUiSnapshot } from '../../api/types';
-import type { ChatStreamHandlers } from '../../api/client';
+import { WebUiHttpError, type ChatStreamHandlers } from '../../api/client';
 import { Chat } from './chat';
 import { replaceConversations } from './session';
 const mocked = vi.hoisted(() => ({ snapshot: null as WebUiSnapshot | null, stream: vi.fn(), select: vi.fn(), runtime: vi.fn() }));
@@ -51,6 +51,16 @@ describe('Chat real component composition',()=>{
   mocked.stream.mockImplementation(async(_id:string,_body:unknown,handlers:ChatStreamHandlers)=>{handlers.onFrame({data:JSON.stringify({choices:[{index:0,delta:{content:'Hello'},finish_reason:'stop'}]}),event:'message',id:null,retry:null});});
   input('Hello');await act(async()=>button('Send').click());
   expect(mocked.stream).toHaveBeenCalledOnce();expect(host.querySelector('input[accept="image/png,image/jpeg,image/webp"]')).toBeNull();expect(host.textContent).toContain('Response complete.');
+ });
+
+ it.each([['context overflow',400],['authentication expiration',401],['unavailable server',503]] as const)('does not retry or complete after %s',async(_name,status)=>{
+  mocked.stream.mockRejectedValue(new WebUiHttpError(status,null));
+  input('Hello');await act(async()=>button('Send').click());
+  expect(mocked.stream).toHaveBeenCalledOnce();expect(host.textContent).toContain('Generation failed or disconnected');expect(host.textContent).not.toContain('Response complete.');
+ });
+ it('marks an empty completed transport as an error rather than a completed answer',async()=>{
+  mocked.stream.mockResolvedValue(undefined);input('Hello');await act(async()=>button('Send').click());
+  expect(mocked.stream).toHaveBeenCalledOnce();expect(host.textContent).toContain('Generation failed or disconnected');
  });
 
 });
