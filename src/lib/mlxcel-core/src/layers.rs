@@ -4353,6 +4353,43 @@ pub fn attention(
     attention_dispatch(q, k, v, scale, mask, softcap)
 }
 
+/// Largest finite value float16 represents.
+///
+/// The ceiling `q @ k^T` has to stay under on an f16 checkpoint whose attention
+/// arithmetic is not widened. Named rather than written as a literal at each
+/// call site because the number is the whole content of the claim (issue
+/// #1830). It is the wrong threshold for bfloat16, which carries float32's
+/// exponent range; a bf16 family is checked for finiteness, not against this.
+pub const F16_MAX: f32 = 65504.0;
+
+/// Largest `|q @ k^T|` over a query/key pair, scaled, at the dtype handed in.
+///
+/// **Diagnostic only. No decode path may call this.** It materializes the whole
+/// score matrix and reads one scalar back to the host, which is a per-call GPU
+/// sync; the same boundary, present for another reason, cost 3.31x and 2.24x of
+/// decode on M5 Max (`tests/mamba2_hybrid_decode_finite.rs`). It exists so that
+/// "the scores stay inside the f16 range" is a number a test can compare
+/// against [`F16_MAX`], rather than a claim about a value nobody can see:
+/// [`attention`], [`attention_from_ptr`] and [`metal4_causal_attention`] all
+/// hand `q`, `k` and `v` to MLX's fused SDPA, so mlxcel never forms the scores
+/// and anything inspecting them has to recompute them.
+///
+/// The operands are deliberately left unwidened. Promoting them here would
+/// measure the widened path, which is the thing a caller is usually trying to
+/// show is necessary: `phi-2-4bit` ran f16 scores for months and passed 65504
+/// at layer 29 of 32, and layers 0 through 29 tracked the reference to three
+/// decimals first, so a check that samples an early layer sees nothing.
+///
+/// `q` and `k` are `[B, H, L, D]` and `[B, H, S, D]`; the product is taken over
+/// the last axis, giving `[B, H, L, S]`.
+pub fn max_abs_attention_score(q: &MlxArray, k: &MlxArray, scale: f32) -> f32 {
+    let k_t = ffi::transpose_axes(k, &[0, 1, 3, 2]);
+    let scores = ffi::matmul(q, &k_t);
+    let peak = ffi::max_all(&ffi::abs(&scores));
+    ffi::eval(&peak);
+    ffi::item_f32(&peak) * scale
+}
+
 /// Single-shot SDPA dispatch: softcap composite or MLX's fused/fallback SDPA.
 ///
 /// The score-materialization chunk gate lives in [`attention`]; this inner
@@ -5779,6 +5816,41 @@ pub fn compiled_gelu_mlp_fp16(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pin [`max_abs_attention_score`] against products computed by hand, on
+    /// both sides of [`F16_MAX`].
+    ///
+    /// Without this the helper's own arithmetic is taken on faith, and a
+    /// transpose on the wrong axes or a missing `abs` would still produce a
+    /// plausible number that a range test would report as a pass.
+    #[test]
+    fn max_abs_attention_score_matches_hand_computed_products() {
+        // q and k are [1, 1, 2, 2], so q @ k^T is the 2x2 of dot products:
+        //   [1 2] . [5 6] = 17    [1 2] . [7 8] = 23
+        //   [3 4] . [5 6] = 39    [3 4] . [7 8] = 53   <- the max
+        let q = ffi::from_slice_f32(&[1.0, 2.0, 3.0, 4.0], &[1, 1, 2, 2]);
+        let k = ffi::from_slice_f32(&[5.0, 6.0, 7.0, 8.0], &[1, 1, 2, 2]);
+        let peak = max_abs_attention_score(&q, &k, 2.0);
+        assert!(
+            (peak - 106.0).abs() < 1e-3,
+            "expected 53 * 2.0 = 106, got {peak}"
+        );
+        assert!(peak < F16_MAX, "{peak} should be under the f16 ceiling");
+
+        // The negative product is the largest in magnitude, so a helper that
+        // dropped `abs` would report 2 here instead of 90000.
+        let q = ffi::from_slice_f32(&[300.0, 1.0], &[1, 1, 1, 2]);
+        let k = ffi::from_slice_f32(&[-300.0, 2.0], &[1, 1, 1, 2]);
+        let peak = max_abs_attention_score(&q, &k, 1.0);
+        assert!(
+            (peak - 89_998.0).abs() < 1e-1,
+            "expected |300 * -300 + 1 * 2| = 89998, got {peak}"
+        );
+        assert!(
+            peak > F16_MAX,
+            "{peak} should be over the f16 ceiling {F16_MAX}"
+        );
+    }
 
     #[test]
     fn named_lora_selection_is_reversible_and_validated() {
