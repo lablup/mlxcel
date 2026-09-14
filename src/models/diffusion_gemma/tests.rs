@@ -445,7 +445,7 @@ fn dense_windowed_mask_is_correct_for_multi_token_offset_forward() {
 ///
 /// `cargo test --release --lib models::diffusion_gemma::tests::real_model_forward_determinism -- --ignored --nocapture`
 #[test]
-#[ignore]
+#[ignore = "real-model regression test; needs the DiffusionGemma checkpoint on disk"]
 fn real_model_forward_determinism() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("models/diffusiongemma-26B-A4B-it-4bit");
@@ -800,7 +800,7 @@ fn sanitize_drops_clip_calibration_when_unclipped() {
 ///
 /// `cargo test --release --lib models::diffusion_gemma::tests::real_model_loads_vision_front_end -- --ignored --nocapture`
 #[test]
-#[ignore]
+#[ignore = "real-model regression test; needs the DiffusionGemma checkpoint on disk"]
 fn real_model_loads_vision_front_end() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("models/diffusiongemma-26B-A4B-it-4bit");

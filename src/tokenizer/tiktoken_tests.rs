@@ -117,7 +117,7 @@ fn qwen_image_tags_encode_as_single_specials() {
 }
 
 #[test]
-#[ignore] // Requires model files
+#[ignore = "requires model files on disk"]
 fn test_load_tiktoken() {
     let tokenizer = TiktokenTokenizer::from_file(&tiktoken_file(), &test_model_path());
     assert!(
@@ -132,7 +132,7 @@ fn test_load_tiktoken() {
 }
 
 #[test]
-#[ignore] // Requires model files
+#[ignore = "requires model files on disk"]
 fn test_encode_decode_roundtrip() {
     let t = TiktokenTokenizer::from_file(&tiktoken_file(), &test_model_path()).unwrap();
     let text = "Hello, world!";
@@ -143,7 +143,7 @@ fn test_encode_decode_roundtrip() {
 }
 
 #[test]
-#[ignore] // Requires model files
+#[ignore = "requires model files on disk"]
 fn test_encode_chinese() {
     let t = TiktokenTokenizer::from_file(&tiktoken_file(), &test_model_path()).unwrap();
     let text = "你好，世界";
@@ -154,7 +154,7 @@ fn test_encode_chinese() {
 }
 
 #[test]
-#[ignore] // Requires model files
+#[ignore = "requires model files on disk"]
 fn test_special_tokens() {
     let t = TiktokenTokenizer::from_file(&tiktoken_file(), &test_model_path()).unwrap();
     let text = "<|eos|>";

@@ -129,7 +129,7 @@ fn text_only_forward_produces_finite_logits() {
 /// special-token-only degeneration is visible. Ignored by default; run with
 /// `--ignored --nocapture` when debugging.
 #[test]
-#[ignore]
+#[ignore = "diagnostic; needs a real ERNIE-4.5 MoE VL checkpoint on disk"]
 fn debug_image_greedy_ids() {
     let Some(dir) = model_dir() else { return };
     let (model, tokenizer) = mlxcel::load_model(&dir).expect("load ERNIE-4.5-VL");

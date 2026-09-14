@@ -63,7 +63,7 @@ fn audio_out_len_formula() {
 /// Diagnostic: greedy-decode a few steps after a TEMPLATED image prefill and
 /// dump raw ids. Ignored by default.
 #[test]
-#[ignore]
+#[ignore = "diagnostic; needs a real Qwen3-Omni checkpoint on disk"]
 fn debug_templated_image_greedy_ids() {
     let Some(dir) = model_dir() else { return };
     let (model, tokenizer) = mlxcel::load_model(&dir).expect("load qwen3-omni");
