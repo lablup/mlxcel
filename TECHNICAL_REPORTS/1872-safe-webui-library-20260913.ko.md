@@ -1,7 +1,7 @@
 # 기술 리포트: PR #1872 — 안전한 WebUI 모델 라이브러리 작업
 
 **작성일**: 2026-09-13
-**상태**: 열린 PR; 시작 경로 통합 및 첫 전체 게이트 통과, 실모델 검증에서 unload revision 결함 발견 후 수정본 전체·실모델 재검증 대기
+**상태**: 열린 PR; unload 수정과 ui-common 통합 유지, 최신 전체 게이트가 GPU firmware timeout으로 실패하여 소유자와 조율한 quiet window에서 전체·실모델 재검증 대기
 **언어**: Rust, JSON/OpenAPI fixture
 **위험도**: 높음
 **구현 스냅샷**: 통합 기준 `3cb4817d`와 아래 owned-drain revision 수정; 이전 보완 체크포인트 `d688ea4f` 및 `b7555005`
@@ -133,3 +133,13 @@ WebUI library action은 기존 helper 위의 버튼이 아니라 권한 경계�
 로드된 fake provider 회귀 테스트는 수정 전에 실제 실행과 동일한 expected3/current4 오류로 실패했습니다. 최종 호환성 보완 후 unload/token 테스트 5개, lifecycle 테스트 16개, router fake 테스트 50개를 통과했습니다. 활성 request lease, loaded entry를 유지하는 rescan, 실제 worker 종료 관찰, 외부 revision·registry 교체 거부, 공유 revision authority 및 legacy failed-worker 정리를 검증합니다. 독립 correctness/security 재검토에서 이 제한된 수정의 HIGH/CRITICAL 잔여 사항은 없습니다.
 
 None caller의 기존 동작을 보존한 최종 수정 후 scoped library/test clippy, 포맷 및 diff 검사를 통과했습니다. 수정본 전체 workspace·실모델 검증은 루트 담당으로 남아 있습니다.
+
+## 9. UI rebase와 미해결 전체 게이트 경계 (2026-09-14)
+
+머지된 UI PR #1863/main `b8d10fb1` 위로 rebase하면서 정확한 `@lablup/ui-common` 버전 `0.1.0-alpha.19`, 공유 보안·시작 동작 및 contract fixture 46개를 유지했습니다. 충돌은 생성된 bundle manifest 하나뿐이었으며 asset 수동 병합 없이 canonical builder로 해결했습니다. Range 비교에서 library 커밋 10개는 생성 manifest의 source digest 외에 동일하고, library/router/lifecycle production 파일은 `857937ca`와 바이트 단위로 동일합니다. Package lock, component, style 및 생성 JavaScript/CSS도 merged main을 유지합니다.
+
+루트의 최신 `857937ca` 전체 게이트는 core의 configured-depth DFlash 테스트가 확인된 Metal firmware progress-timeout recovery 중 abort되어 실패·미완료 상태입니다. 진단은 외부 프로세스나 WebUI 수정을 원인으로 확정하지 않습니다. `3cb4817d`의 과거 전체 통과는 최신 실패를 대신하지 않으며 GB10 장애 면제도 이 실패에 적용되지 않습니다. 이후 루트의 `857937ca` CPU-only workspace all-target clippy, fixture 46개, 구조·포맷 검사와 feature-disabled 컴파일은 통과했으나 수정본 실제 library driver는 재실행하지 않았습니다.
+
+사용자가 quiet window를 알려줄 때까지 GPU·browser·전체 suite 실행은 중단합니다. 이번 rebase에서는 CPU/fake 테스트와 frontend unit·contract·build 검사만 사용합니다. 실제 Safari·VoiceOver·native 200% 수동 검사는 사용자가 전체 구현 완료 시점으로 미뤘으므로 pending이며 통과나 개별 unit blocker로 보고하지 않습니다.
+
+CPU-only rebase 검증: unload/token5, 순수 policy1, 보안 fake-router9, owned restart2(별도 nested child 실행2개), scoped clippy·포맷, strict fixture46개, frontend unit76개, type·lint 및 canonical deterministic bundle 검증을 통과했습니다. 이 unit rebase에서는 GPU·browser·전체 suite를 실행하지 않았습니다.

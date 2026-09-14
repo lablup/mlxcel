@@ -1,7 +1,7 @@
 # Technical Report: PR #1872 — Safe WebUI model library operations
 
 **Date**: 2026-09-13
-**Status**: Open PR; startup integrated; first full gate passed; real acceptance exposed an unload revision defect, with corrected full/real acceptance pending
+**Status**: Open PR; unload repair and ui-common integration retained; latest full gate failed on GPU firmware timeout; corrected full/real acceptance awaits an owner-coordinated quiet window
 **Languages**: Rust, JSON/OpenAPI fixtures
 **Risk Level**: High
 **Implementation snapshot**: integrated baseline `3cb4817d` plus the owned-drain revision correction described below; earlier repair checkpoints `d688ea4f` and `b7555005`
@@ -133,3 +133,13 @@ The defect already existed in merged main: unload validates the caller's revisio
 The loaded fake-provider regression failed before the repair with the same expected3/current4 error as the real run. After the final compatibility refinement, five unload/token tests, 16 lifecycle tests and 50 router fake tests passed. Coverage includes a held request lease, rescan preserving the current loaded entry, observed worker exit, genuine external revision/registry replacement rejection, shared revision authority and legacy failed-worker cleanup. Independent correctness/security rechecks found no remaining HIGH/CRITICAL issue in this bounded repair.
 
 Final scoped library/test clippy, formatting and diff checks passed after the None-preserving refinement. Corrected full workspace and real-checkpoint acceptance remain root-owned and pending.
+
+## 9. UI rebase and unresolved full-gate boundary (2026-09-14)
+
+The branch was rebased onto merged UI PR #1863/main `b8d10fb1`, retaining the exact `@lablup/ui-common` version `0.1.0-alpha.19`, shared security/startup behavior and all 46 contract fixtures. The only rebase conflict was the generated bundle manifest. It was resolved through the canonical builder, not by hand-merging assets. Range comparison preserves all ten library commits unchanged except the generated manifest source digest; library/router/lifecycle production files are byte-identical to `857937ca`. The merged package lock, components, styles and generated JavaScript/CSS remain unchanged from main.
+
+Root's latest full gate at `857937ca` failed/incomplete after the core configured-depth DFlash test aborted during a confirmed Metal firmware progress-timeout recovery. The diagnostic does not establish either an external process or this WebUI repair as the cause. The historical full pass at `3cb4817d` does not replace this failed latest gate, and the GB10 outage waiver does not waive it. Root's later CPU-only workspace all-target clippy, 46 fixtures, structural/format checks and feature-disabled compilation passed at `857937ca`; the corrected actual library driver was not rerun.
+
+Further GPU, browser and full-suite execution is paused until the user confirms a quiet window. This rebase uses only CPU/fake tests and frontend unit/contract/build checks. Actual Safari, VoiceOver and native 200% manual checks are deferred by the user until the complete implementation is ready; they remain pending, not passed and not a per-unit blocker.
+
+CPU-only rebase verification passed: unload/token tests5, pure policy1, secured fake-router9, owned restart2 (plus two nested child runs), scoped clippy/format checks, all46 strict fixtures and76 frontend unit tests, type/lint checks and canonical deterministic bundle verification. No GPU, browser or full-suite execution occurred in this unit rebase.
