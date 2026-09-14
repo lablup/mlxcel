@@ -28,16 +28,13 @@
 //! Reference: https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/qwen3_vl_moe/language.py
 
 use crate::models::qwen_mrope_state::MRopeState;
-use crate::models::switch_layers::validate_expert_quantization_params;
+use crate::models::switch_layers::SwitchGLU;
 use mlxcel_core::cache::SequenceId;
 use mlxcel_core::layers::{FusedQKVLinear, KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
 use std::cell::RefCell;
-
-// Reuse MoE components from qwen3_moe
-use super::qwen3_moe::{SwitchGLU, SwitchLinear};
 
 // Config.
 #[derive(Debug, Clone, Deserialize)]
@@ -534,7 +531,7 @@ impl MLP {
     }
 }
 
-// Sparse MoE Block (uses SwitchGLU/SwitchLinear from qwen3_moe).
+// Sparse MoE Block (experts through the shared switch_layers::SwitchGLU).
 struct SparseMoeBlock {
     router: UnifiedLinear,
     experts: SwitchGLU,
@@ -554,7 +551,8 @@ impl SparseMoeBlock {
         let router =
             UnifiedLinear::from_weights(weights, &format!("{}.mlp.gate", prefix), gs, bits)?;
 
-        let experts = load_switch_glu(weights, config, &format!("{}.mlp.switch_mlp", prefix))?;
+        let experts =
+            SwitchGLU::from_weights(weights, &format!("{prefix}.mlp.switch_mlp"), gs, bits)?;
 
         Ok(Self {
             router,
@@ -635,55 +633,6 @@ impl SparseMoeBlock {
         } else {
             result
         }
-    }
-}
-
-/// Load SwitchGLU from weights with the new config type
-fn load_switch_glu(
-    weights: &WeightMap,
-    config: &Qwen3VLMoeConfig,
-    prefix: &str,
-) -> Result<SwitchGLU, String> {
-    let gs = config.group_size();
-    let bits = config.bits();
-
-    Ok(SwitchGLU {
-        gate_proj: load_switch_linear(weights, &format!("{}.gate_proj", prefix), gs, bits)?,
-        up_proj: load_switch_linear(weights, &format!("{}.up_proj", prefix), gs, bits)?,
-        down_proj: load_switch_linear(weights, &format!("{}.down_proj", prefix), gs, bits)?,
-    })
-}
-
-/// Load SwitchLinear from weights (falls back to Regular for non-quantized)
-fn load_switch_linear(
-    weights: &WeightMap,
-    prefix: &str,
-    group_size: i32,
-    bits: i32,
-) -> Result<SwitchLinear, String> {
-    let weight = get_weight_copy(weights, &format!("{}.weight", prefix))?;
-    let scales_key = format!("{}.scales", prefix);
-    if weights.contains_key(&scales_key) {
-        // This builds `qwen3_moe::SwitchLinear::Quantized` as a bare struct
-        // literal rather than through `qwen3_moe::SwitchLinear::from_weights`,
-        // so the bound that loader carries does not apply here (issue #958).
-        // The pair also arrives from `Qwen3VLMoeConfig`, whose accessors fall
-        // back to 0 rather than 64/4 when no `quantization` block was inherited.
-        validate_expert_quantization_params(prefix, group_size, bits)?;
-        let shape = mlxcel_core::array_shape(&weight);
-        let num_experts = shape[0] as usize;
-        let scales = mlxcel_core::copy(weights.get(&scales_key).unwrap());
-        let biases = get_weight_copy(weights, &format!("{}.biases", prefix))?;
-        Ok(SwitchLinear::Quantized {
-            weight,
-            scales,
-            biases,
-            group_size,
-            bits,
-            num_experts,
-        })
-    } else {
-        Ok(SwitchLinear::Regular { weight })
     }
 }
 
@@ -789,13 +738,6 @@ fn load_rms_norm(weights: &WeightMap, prefix: &str, eps: f32) -> Result<RMSNorm,
         .map(|w| mlxcel_core::copy(w))
         .ok_or_else(|| format!("Weight not found: {}", key))?;
     Ok(RMSNorm::new(weight, eps))
-}
-
-fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray>, String> {
-    weights
-        .get(name)
-        .map(|w| mlxcel_core::copy(w))
-        .ok_or_else(|| format!("Weight not found: {}", name))
 }
 
 // Qwen3VLMoeModel - Full language model with DeepStack support.

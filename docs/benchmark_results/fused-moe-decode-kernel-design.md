@@ -269,7 +269,10 @@ the expected numerical consequence of the fusion.
 ### Models covered
 
 The fused single-token decode dispatch is wired into eleven model paths: qwen3_moe
-(Qwen3 MoE), qwen3_next (qwen3.5/3.6), dots.llm1 (mixed 4/6-bit), gemma4 (GeGLU),
+(Qwen3 MoE; migrated from its local `SwitchGLU`/`SwitchLinear` to the shared ones
+in #1884, which put it under `MLXCEL_FUSED_MOE_MAX_DFF` for the first time; every
+local checkpoint's experts sit below the bound, so decode is unchanged), qwen3_next
+(qwen3.5/3.6), dots.llm1 (mixed 4/6-bit), gemma4 (GeGLU),
 qwen2_moe (qwen1.5-moe / Qwen2-MoE; migrated from its local `SwitchGLU` to the
 shared one, which gained a per-expert stacking loader for the `experts.{idx}`
 checkpoint layout), mixtral (Mixtral 8x7B; SwiGLU, softmax-routed with no shared
@@ -279,8 +282,9 @@ convention, mapping gate=w1, up=w3, down=w2; Mixtral's expert intermediate is
 14336, above `MLXCEL_FUSED_MOE_MAX_DFF`, so the kernel declines and decode stays
 on `gather_qmm` (the migration removes duplication; the dispatch arms only if the
 bound is raised)), lfm2 (LFM2-MoE; sigmoid-routed, optional expert_bias and
-norm_topk_prob), qwen3_vl_moe (Qwen3-VL MoE; imports `SwitchGLU` from qwen3_moe,
-SwiGLU activation, text-only decode path), phimoe (Phi-3.5-MoE; migrated from
+norm_topk_prob), qwen3_vl_moe (Qwen3-VL MoE; moved with qwen3_moe onto the shared
+`SwitchGLU` in #1884, where it previously built qwen3_moe's copy by hand; SwiGLU
+activation, text-only decode path), phimoe (Phi-3.5-MoE; migrated from
 its local `SwitchGLU`/`SwitchLinear` to the shared ones; checkpoints pre-stacked
 under `block_sparse_moe.switch_mlp.{gate,up,down}_proj`; `sanitize_weights` still
 handles the unstacked `experts.{i}.w1/w2/w3` layout for community checkpoints; the

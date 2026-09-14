@@ -16,7 +16,7 @@
 //!
 //! Used by: KimiLinear, KimiK3, LongcatFlashNgram, DeepSeekV3, DeepSeekV32,
 //!          GLM4Moe, GLM4MoeLite, ExaOneMoe, Jamba, Mixtral, Qwen2Moe, Qwen3Moe,
-//!          PhiMoE, OLMoE, Inkling, etc.
+//!          Qwen3VLMoe, PhiMoE, OLMoE, Inkling, etc.
 //!
 //! SwitchLinear: per-expert 3D matmul (quantized via gather_qmm, regular via gather_mm)
 //! SwitchGLU: gated MLP routing through SwitchLinear (SwiGLU by default, SiTU
@@ -39,10 +39,14 @@ use mlxcel_core::{MlxArray, UniquePtr, dtype};
 /// keeps the kernel on.
 ///
 /// **Byte-identical greedy output is NOT a general property, and never was**
-/// (#1045). It holds on `qwen3-30b-a3b`, re-confirmed at current HEAD: 64
-/// greedy tokens agree exactly with the kernel on and off. It does not hold on
+/// (#1045). On `qwen3-30b-a3b` it held for the prompt #1045 re-checked (64
+/// greedy tokens agreed exactly with the kernel on and off), but not for every
+/// prompt: on GB10 (CUDA) at `b8d10fb1` the chat-templated prompt `Explain how
+/// a hash map handles collisions.` agrees for 39 generated tokens and then
+/// diverges, deterministically on both paths (#1884). It does not hold on
 /// Klear, where the two paths pick different but equally coherent
-/// continuations. That is checkpoint-dependent, not a kernel defect. The
+/// continuations. That is checkpoint- and prompt-dependent, not a kernel
+/// defect. The
 /// `MLXCEL_FUSED_MOE_PARITY_CHECK=1` probe measured 96 decode MoE calls on each
 /// checkpoint against an all-f32 dequantize-and-matmul ground truth, and the
 /// fused kernel was CLOSER to that truth than `gather_qmm` in 96 of 96 calls on
@@ -145,9 +149,18 @@ const FUSED_MOE_MAX_DFF_CUDA: i32 = 8192;
 /// default is unit-testable without mutating process-global env or querying the
 /// live device; `metal_available` mirrors `mlx::core::metal::is_available()`.
 ///
-/// The cap is family-agnostic: it governs every SwitchGLU MoE model uniformly
-/// (Mixtral, Qwen3-MoE, OLMoE, phi-3.5-moe, gemma4, dots.llm1, and the rest of
-/// the module `Used by:` list). The backend is resolved at runtime via
+/// The cap is family-agnostic, but it only governs families whose fused decode
+/// goes through the shared [`SwitchGLU::forward_fused_kernel`]: AFMoE,
+/// BailingMoe, Cohere2Moe, DBRX, dots.llm1, Klear, Laguna, LFM2, Mellum,
+/// MiniMax, Mixtral, OLMoE, PhiMoE (phi-3.5-moe), Qwen2Moe, Qwen3-MoE and
+/// Qwen3-VL-MoE (and the Qwen3-Omni-MoE thinker, which is built as a
+/// `Qwen3VLMoeModel`). Two families still drive a fused kernel from their own
+/// expert type and do not read it: `qwen3_next.rs` (Qwen3Next, Qwen3.5 and the
+/// Qwen3-Omni-MoE talker, SwiGLU kernel) and `gemma4.rs` (GeGLU kernel), and
+/// NemotronH's opt-in `MLXCEL_FUSED_MOE_RELU2` path launches the down kernel
+/// without it as well. Qwen3-MoE and Qwen3-VL-MoE ignored it the same way until
+/// issue #1884 moved them onto the shared type. The backend is resolved at
+/// runtime via
 /// `metal_is_available()` (at the call site in `forward_fused_kernel`) rather
 /// than a `cfg!(feature = "cuda")` compile-time switch, so a single binary built
 /// with both backends picks the cap from the live device. This matches the fused
@@ -168,8 +181,9 @@ pub(crate) fn fused_moe_max_dff_from(env: Option<&str>, metal_available: bool) -
 /// loader stores it on a quantized expert plane (issue #958).
 ///
 /// [`SwitchLinear::from_stacked_parts`] below carries this bound for every
-/// family that routes its experts through the shared loader. Seventeen families
-/// keep their own quantized expert type instead (a local `SwitchLinear` /
+/// family that routes its experts through the shared loader, Qwen3-MoE and
+/// Qwen3-VL-MoE included since issue #1884. Fifteen families keep their own
+/// quantized expert type instead (a local `SwitchLinear` /
 /// `SwitchGLU` / `ExpertLinear` / `QuantizedSwitchLinear`), and those types
 /// store the declared pair verbatim and hand it to `gather_qmm`, which reaches
 /// the same `w.shape(-1) * 32 / bits` division inside
@@ -192,18 +206,20 @@ pub(crate) fn fused_moe_max_dff_from(env: Option<&str>, metal_available: bool) -
 /// `*StageModel::from_filtered_weights` entry points, the VLM text wrappers
 /// (`glm4v_moe`, `ernie4_5_moe_vl`, `loading/vlm_step3p7.rs`), `glm_moe_dsa` and
 /// `audio/qwen3_omni_moe/talker.rs` all build expert planes without ever calling
-/// the family's own model constructor, and three families build the quantized
-/// variant as a bare struct literal from a different module entirely. The pair
+/// the family's own model constructor, `ernie4_5_moe_vl` builds
+/// `ernie4_5_moe`'s quantized variant as a bare struct literal from another
+/// module, and `nemotron_h` has no named constructor for its
+/// `QuantizedSwitchLinear` at all. The pair
 /// also arrives from more than one config type per expert enum, so bounding the
 /// producer would not cover it either.
 ///
 /// `prefix` names the offending tensor so the load error points at the weight
 /// rather than at the config alone.
 ///
-/// Used by: Qwen3MoE, Qwen3VLMoE, DeepSeek, DeepSeekV2, DeepSeekV3, DeepSeekV32,
-///          GLM4MoE, GLM4MoELite, Ernie45MoE, Ernie45MoEVL, ExaoneMoE,
-///          HunyuanMoE, Llama4, NemotronH, Qwen3Next (and Qwen3.5 through it),
-///          Step3p5, GptOss, KimiLinear
+/// Used by: DeepSeek, DeepSeekV2, DeepSeekV3, DeepSeekV32, GLM4MoE,
+///          GLM4MoELite, Ernie45MoE, Ernie45MoEVL, ExaoneMoE, HunyuanMoE,
+///          Llama4, NemotronH, Qwen3Next (and Qwen3.5 through it), Step3p5,
+///          GptOss, KimiLinear
 pub(crate) fn validate_expert_quantization_params(
     prefix: &str,
     group_size: i32,
@@ -240,7 +256,7 @@ pub(crate) fn validate_expert_quantization_params(
 /// overflows `i32` well inside the range
 /// [`mlxcel_core::layers::validate_quantization_params`] accepts.
 ///
-/// Used by: DeepSeek. The other eighteen families listed on
+/// Used by: DeepSeek. The other fifteen families listed on
 ///          [`validate_expert_quantization_params`] are the obvious next
 ///          adopters and are left alone here so this stays one logical change;
 ///          they are unaffected either way, because none of them reads a
@@ -281,7 +297,9 @@ pub(crate) fn validate_expert_quantization_shapes(
 /// control is the declared `group_size` / `bits` pair.
 ///
 /// Used by: the guard tests of every family listed on
-///          [`validate_expert_quantization_params`]
+///          [`validate_expert_quantization_params`], plus the Qwen3MoE and
+///          Qwen3VLMoE block-loader guard tests (their experts moved onto the
+///          shared loader in issue #1884)
 #[cfg(test)]
 pub(crate) fn insert_stacked_quantized_expert_plane(
     weights: &mut WeightMap,
@@ -298,6 +316,60 @@ pub(crate) fn insert_stacked_quantized_expert_plane(
     weights.insert(format!("{prefix}.weight"), plane(packed_in, 0.0));
     weights.insert(format!("{prefix}.scales"), plane(num_groups, 1.0));
     weights.insert(format!("{prefix}.biases"), plane(num_groups, 0.0));
+}
+
+/// Group size of the planes [`insert_honest_affine_swiglu_experts`] builds.
+#[cfg(test)]
+pub(crate) const HONEST_EXPERT_GROUP_SIZE: i32 = 64;
+
+/// Insert `experts` affine 4-bit SwiGLU expert planes (`gate_proj`, `up_proj`,
+/// `down_proj`) of intermediate width `dff` under a `...switch_mlp` `prefix`,
+/// quantized with `quantize_weights` from deterministic bf16 values and stacked
+/// into the pre-stacked layout a converted checkpoint ships.
+///
+/// Unlike [`insert_stacked_quantized_expert_plane`], whose all-zero codes only
+/// exercise a loader, these planes carry real codes, so a `gather_qmm` forward
+/// or a fused-kernel launch over them computes something checkable. `hidden`
+/// and `dff` must both be multiples of [`HONEST_EXPERT_GROUP_SIZE`]. Nothing is
+/// evaluated here; the quantization stays lazy until a caller evaluates it.
+///
+/// Used by: the fused-kernel `dff` decline tests of Qwen3MoE and Qwen3VLMoE
+///          (issue #1884)
+#[cfg(test)]
+pub(crate) fn insert_honest_affine_swiglu_experts(
+    weights: &mut WeightMap,
+    prefix: &str,
+    experts: i32,
+    hidden: i32,
+    dff: i32,
+) {
+    let mut state = 0x1884_u64 ^ u64::from(dff.unsigned_abs());
+    let mut next = move || {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        ((state >> 40) as f32 / (1u64 << 24) as f32) - 0.5
+    };
+    for (leaf, out, input) in [
+        ("gate_proj", dff, hidden),
+        ("up_proj", dff, hidden),
+        ("down_proj", hidden, dff),
+    ] {
+        let (mut w, mut s, mut b) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..experts {
+            let data: Vec<f32> = (0..out * input).map(|_| next()).collect();
+            let dense = mlxcel_core::from_slice_f32(&data, &[out, input]);
+            let dense = mlxcel_core::astype(&dense, dtype::BFLOAT16);
+            let q = mlxcel_core::quantize_weights(&dense, HONEST_EXPERT_GROUP_SIZE, 4);
+            w.push(mlxcel_core::quantized_weights_w(&q));
+            s.push(mlxcel_core::quantized_weights_scales(&q));
+            b.push(mlxcel_core::quantized_weights_biases(&q));
+        }
+        let plane = format!("{prefix}.{leaf}");
+        weights.insert(format!("{plane}.weight"), mlxcel_core::stack_owned(&w, 0));
+        weights.insert(format!("{plane}.scales"), mlxcel_core::stack_owned(&s, 0));
+        weights.insert(format!("{plane}.biases"), mlxcel_core::stack_owned(&b, 0));
+    }
 }
 
 /// The `group_size` / `bits` pairs no tensor layout can describe, paired with
@@ -725,11 +797,12 @@ fn apply_expert_global_scale(
 ///          whenever its checkpoint ships experts unstacked (BailingMoe,
 ///          Cohere2Moe, Dots1, Gemma4, GraniteMoeHybrid, Jamba, KimiLinear,
 ///          Lfm2, Llada2Moe, LongcatFlashNgram, Mellum, MiniMax, MiniMaxM3Moe,
-///          Mistral4, Mixtral, Moondream3, OLMoE, PhiMoE, Qwen2Moe,
-///          SolarOpen), plus DeepSeek v1 (`src/models/deepseek.rs`), which
-///          calls it directly for the `baidu/Unlimited-OCR` raw per-expert
-///          checkpoint. The layouts that actually exercise it today are the
-///          Qwen1.5-MoE / Qwen2-MoE individual-expert exports, Mixtral's
+///          Mistral4, Mixtral, Moondream3, OLMoE, PhiMoE, Qwen2Moe, Qwen3Moe,
+///          Qwen3VLMoe, SolarOpen), plus DeepSeek v1
+///          (`src/models/deepseek.rs`), which calls it directly for the
+///          `baidu/Unlimited-OCR` raw per-expert checkpoint. The layouts that
+///          actually exercise it today are the Qwen1.5-MoE / Qwen2-MoE
+///          individual-expert exports, Mixtral's
 ///          `block_sparse_moe.experts.{idx}.{w1,w2,w3}`, and Ling-lite.
 ///
 /// PhiMoE and OLMoE are listed for completeness but normally pre-stack in their
@@ -1017,7 +1090,8 @@ impl SwitchGLU {
     /// Computes `sum_k scores[k] * down_k(silu(gate_k(x)) * up_k(x))` for the K
     /// selected experts as two all-cores Metal dispatches (gate/up+swiglu, then
     /// down+score), beating gather_qmm by ~3.5% on qwen3-30b-a3b. Greedy output
-    /// is byte-identical on that checkpoint but not on every family; see
+    /// can match exactly on that checkpoint, but that depends on the prompt and
+    /// the family; see
     /// [`fused_moe_enabled`] for the measured parity picture and for why
     /// `MLXCEL_FUSED_MOE=0` is the right switch when reference-diffing a port.
     /// gate/up are 4/8-bit; down also handles
@@ -1637,6 +1711,60 @@ mod tests {
             assert!(!declines(14336, Some("16384"), metal));
             assert!(declines(16385, Some("16384"), metal));
         }
+    }
+
+    #[test]
+    fn fused_kernel_declines_a_non_affine_expert_plane() {
+        // The kernel dequantizes affine codes with zero points and nothing else.
+        // A block-float plane ships no `.biases`, so `quantized_parts` declines
+        // it before the `mode == "affine"` check is reached, and the caller
+        // falls back to `gather_qmm`, which does honour the mode. Families that
+        // moved onto this type (Qwen3-MoE and Qwen3-VL-MoE in issue #1884) get
+        // this for free once they load a non-affine checkpoint. Nothing here is
+        // evaluated: the decline happens on shapes and metadata alone, so no
+        // kernel is launched on any backend.
+        let (experts, hidden, dff, group) = (2i32, 64i32, 64i32, 32i32);
+        let prefix = "model.layers.0.mlp.switch_mlp";
+        let mut weights = WeightMap::new();
+        for (leaf, out, input) in [
+            ("gate_proj", dff, hidden),
+            ("up_proj", dff, hidden),
+            ("down_proj", hidden, dff),
+        ] {
+            let (mut w, mut sc) = (Vec::new(), Vec::new());
+            for e in 0..experts {
+                let n = (out * input) as usize;
+                let data: Vec<f32> = (0..n)
+                    .map(|i| ((i as i32 + e) % 13) as f32 * 0.05 - 0.3)
+                    .collect();
+                let dense = mlxcel_core::from_slice_f32(&data, &[out, input]);
+                let q = mlxcel_core::quantize_weights_with_mode(&dense, group, 4, "mxfp4");
+                assert!(
+                    !mlxcel_core::quantized_weights_has_biases(&q),
+                    "mxfp4 must not produce zero points"
+                );
+                w.push(mlxcel_core::quantized_weights_w(&q));
+                sc.push(mlxcel_core::quantized_weights_scales(&q));
+            }
+            weights.insert(
+                format!("{prefix}.{leaf}.weight"),
+                mlxcel_core::stack_owned(&w, 0),
+            );
+            weights.insert(
+                format!("{prefix}.{leaf}.scales"),
+                mlxcel_core::stack_owned(&sc, 0),
+            );
+        }
+        let glu = SwitchGLU::from_weights_with_mode(&weights, prefix, group, 4, "mxfp4")
+            .expect("an honest mxfp4 expert plane must load");
+
+        let x = mlxcel_core::from_slice_f32(&vec![0.1f32; hidden as usize], &[1, hidden]);
+        let indices = mlxcel_core::from_slice_i32(&[0, 1], &[1, experts]);
+        let scores = mlxcel_core::from_slice_f32(&[0.5, 0.5], &[1, experts]);
+        assert!(
+            glu.forward_fused_kernel(&x, &indices, &scores).is_none(),
+            "a non-affine plane must stay on gather_qmm"
+        );
     }
 
     #[test]

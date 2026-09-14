@@ -16,7 +16,8 @@
 //!
 //! Implements Qwen3 MoE architecture with:
 //! - Q/K normalization (RMSNorm after projection, before RoPE)
-//! - Sparse MoE with top-k expert selection per token
+//! - Sparse MoE with top-k expert selection per token, through the shared
+//!   [`crate::models::switch_layers::SwitchGLU`]
 //! - norm_topk_prob: normalized top-k scores after softmax
 //! - decoder_sparse_step: MoE layer interval (dense MLP otherwise)
 //! - mlp_only_layers: explicit list of dense layers
@@ -24,7 +25,7 @@
 //! - RMSNorm normalization
 
 use crate::models::rope_utils::{RopeScalingKind, RopeScalingSpec};
-use crate::models::switch_layers::validate_expert_quantization_params;
+use crate::models::switch_layers::SwitchGLU;
 use mlxcel_core::cache::BatchedAttentionMetadata;
 use mlxcel_core::generate::{DecodeBatchContext, LanguageModel};
 use mlxcel_core::layers::{FusedQKVLinear, KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
@@ -131,257 +132,6 @@ impl ModelArgs {
             self.max_position_embeddings.map(|n| n as f32),
             self.model_label(),
         )
-    }
-}
-
-// SwitchLinear: Stacked expert weights for MoE.
-/// Stacked linear layers for MoE experts
-/// Weights shape: [num_experts, output_dim, input_dim_packed]
-pub enum SwitchLinear {
-    Quantized {
-        weight: UniquePtr<MlxArray>,
-        scales: UniquePtr<MlxArray>,
-        biases: UniquePtr<MlxArray>,
-        group_size: i32,
-        bits: i32,
-        num_experts: usize,
-    },
-    Regular {
-        weight: UniquePtr<MlxArray>,
-    },
-}
-
-impl SwitchLinear {
-    /// Forward pass using gather_qmm for quantized or gather_mm for regular
-    pub fn forward(
-        &self,
-        x: &MlxArray,
-        indices: &MlxArray,
-        sorted_indices: bool,
-    ) -> UniquePtr<MlxArray> {
-        match self {
-            Self::Quantized {
-                weight,
-                scales,
-                biases,
-                group_size,
-                bits,
-                ..
-            } => unsafe {
-                mlxcel_core::gather_qmm(
-                    x,
-                    weight,
-                    scales,
-                    biases
-                        .as_ref()
-                        .map(|b| b as *const _)
-                        .unwrap_or(std::ptr::null()),
-                    std::ptr::null(), // lhs_indices
-                    indices as *const _,
-                    true, // transpose
-                    *group_size,
-                    *bits,
-                    sorted_indices,
-                    "affine",
-                )
-            },
-            Self::Regular { weight } => {
-                let wt = mlxcel_core::swap_axes(weight, -1, -2);
-                unsafe {
-                    mlxcel_core::gather_mm(
-                        x,
-                        &wt,
-                        std::ptr::null(),
-                        indices as *const _,
-                        sorted_indices,
-                    )
-                }
-            }
-        }
-    }
-
-    /// Borrowed quantized parts (weight, scales, biases, group_size, bits) for
-    /// the fused MoE kernel; None for the Regular (non-quantized) variant.
-    fn quantized_parts(&self) -> Option<(&MlxArray, &MlxArray, &MlxArray, i32, i32)> {
-        match self {
-            Self::Quantized {
-                weight,
-                scales,
-                biases,
-                group_size,
-                bits,
-                ..
-            } => Some((
-                weight.as_ref().unwrap(),
-                scales.as_ref().unwrap(),
-                biases.as_ref().unwrap(),
-                *group_size,
-                *bits,
-            )),
-            Self::Regular { .. } => None,
-        }
-    }
-}
-
-// SwitchGLU: SwiGLU with stacked expert weights.
-/// SwitchGLU: SwiGLU activation with stacked expert weights for MoE
-pub struct SwitchGLU {
-    pub gate_proj: SwitchLinear,
-    pub up_proj: SwitchLinear,
-    pub down_proj: SwitchLinear,
-}
-
-impl SwitchGLU {
-    /// Forward pass with kernel-fused SwiGLU activation
-    pub fn forward(&self, x: &MlxArray, indices: &MlxArray) -> UniquePtr<MlxArray> {
-        let indices_shape = mlxcel_core::array_shape(indices);
-        let n_tokens = indices_shape[0];
-        let top_k = indices_shape[1];
-
-        // Check if we should use sorted_indices optimization (>= 64 tokens)
-        let total_elements = n_tokens * top_k;
-        let do_sort = total_elements >= 64;
-
-        // Expand x for broadcasting: [n_tokens, hidden] -> [n_tokens, 1, 1, hidden]
-        let x_expanded = mlxcel_core::expand_dims(x, -2);
-        let x_expanded = mlxcel_core::expand_dims(&x_expanded, -3);
-
-        if do_sort {
-            // Sort tokens by expert for better memory access
-            let (sorted_x, sorted_idx, inv_order) = self.gather_sort(&x_expanded, indices);
-
-            // Apply projections with sorted_indices=true
-            let x_gate = self.gate_proj.forward(&sorted_x, &sorted_idx, true);
-            let x_up = self.up_proj.forward(&sorted_x, &sorted_idx, true);
-
-            // Kernel-fused SwiGLU: silu(gate) * up
-            let activated = mlxcel_core::compiled_swiglu_activation(&x_gate, &x_up);
-
-            // Down projection
-            let output = self.down_proj.forward(&activated, &sorted_idx, true);
-
-            // Restore original order
-            self.scatter_unsort(&output, &inv_order, &indices_shape)
-        } else {
-            // Direct path without sorting
-            let x_gate = self.gate_proj.forward(&x_expanded, indices, false);
-            let x_up = self.up_proj.forward(&x_expanded, indices, false);
-
-            // Kernel-fused SwiGLU: silu(gate) * up
-            let activated = mlxcel_core::compiled_swiglu_activation(&x_gate, &x_up);
-
-            // Down projection
-            let output = self.down_proj.forward(&activated, indices, false);
-
-            // Squeeze: [n_tokens, top_k, 1, hidden] -> [n_tokens, top_k, hidden]
-            mlxcel_core::squeeze_axis(&output, -2)
-        }
-    }
-
-    /// Single-token decode via the fused MoE expert Metal kernel (#268).
-    /// gate/up are 4/8-bit, down also handles 6-bit. Returns None (caller falls
-    /// back to `forward` + `moe_weighted_sum`) for any unsupported config:
-    /// gate/up not 4/8-bit or down not 4/6/8-bit, gate/up bits mismatch,
-    /// group_size mismatch, the Regular variant, or a non-single token `x`.
-    pub fn forward_fused_kernel(
-        &self,
-        x: &MlxArray,
-        indices: &MlxArray,
-        scores: &MlxArray,
-    ) -> Option<UniquePtr<MlxArray>> {
-        let (gw, gs, gb, ggs, gbits) = self.gate_proj.quantized_parts()?;
-        let (uw, us, ub, ugs, ubits) = self.up_proj.quantized_parts()?;
-        let (dw, ds, db, dgs, dbits) = self.down_proj.quantized_parts()?;
-        // gate/up power-of-2 (kernel A); down also handles 6-bit (kernel B).
-        if gbits != 4 && gbits != 8 {
-            return None;
-        }
-        if dbits != 4 && dbits != 8 && dbits != 6 {
-            return None;
-        }
-        if gbits != ubits || ggs != ugs || ggs != dgs {
-            return None;
-        }
-        let gw_shape = mlxcel_core::array_shape(gw);
-        if gw_shape.len() != 3 {
-            return None;
-        }
-        let dff = gw_shape[1];
-        let din = gw_shape[2] * (32 / gbits);
-        if dbits == 6 && dff % 16 != 0 {
-            return None;
-        }
-        let k = *mlxcel_core::array_shape(indices).last()?;
-        let x_elems: i32 = mlxcel_core::array_shape(x).iter().product();
-        if x_elems != din {
-            return None;
-        }
-        let x_flat = mlxcel_core::reshape(x, &[din]);
-        let idx_flat = mlxcel_core::reshape(indices, &[k]);
-        let sc_flat = mlxcel_core::reshape(scores, &[k]);
-        Some(mlxcel_core::fused_moe_expert_kernel(
-            &x_flat, &idx_flat, gw, gs, gb, uw, us, ub, dw, ds, db, &sc_flat, din, dff, k, gbits,
-            dbits, ggs,
-        ))
-    }
-
-    /// Sort tokens by expert index for better memory access
-    fn gather_sort(
-        &self,
-        x: &MlxArray,
-        indices: &MlxArray,
-    ) -> (
-        UniquePtr<MlxArray>,
-        UniquePtr<MlxArray>,
-        UniquePtr<MlxArray>,
-    ) {
-        let indices_shape = mlxcel_core::array_shape(indices);
-        let top_k = indices_shape[indices_shape.len() - 1];
-
-        // Flatten indices: [n_tokens, top_k] -> [n_tokens * top_k]
-        let flat_indices = mlxcel_core::reshape(indices, &[-1]);
-
-        // Sort indices by expert
-        let order = mlxcel_core::argsort(&flat_indices, -1);
-        let inv_order = mlxcel_core::argsort(&order, -1);
-
-        // x is [n_tokens, 1, 1, hidden]
-        // Flatten: [n_tokens, 1, hidden]
-        let x_shape = mlxcel_core::array_shape(x);
-        let x_flat = mlxcel_core::reshape(x, &[x_shape[0], 1, x_shape[3]]);
-
-        // Divide order by top_k to get token indices
-        let top_k_arr = mlxcel_core::from_slice_i32(&[top_k], &[1]);
-        let token_indices = mlxcel_core::divide(&order, &top_k_arr);
-        let token_indices = mlxcel_core::astype(&token_indices, mlxcel_core::dtype::INT32);
-
-        // Take x rows in sorted order
-        let sorted_x = mlxcel_core::take(&x_flat, &token_indices, 0);
-
-        // Get sorted expert indices
-        let sorted_indices = mlxcel_core::take(&flat_indices, &order, 0);
-
-        (sorted_x, sorted_indices, inv_order)
-    }
-
-    /// Restore original order after sorted expert computation
-    fn scatter_unsort(
-        &self,
-        x: &MlxArray,
-        inv_order: &MlxArray,
-        orig_shape: &[i32],
-    ) -> UniquePtr<MlxArray> {
-        // x has shape [n_sorted, 1, hidden]
-        // Reorder by inv_order
-        let unsorted = mlxcel_core::take(x, inv_order, 0);
-
-        // Unflatten and squeeze
-        let x_shape = mlxcel_core::array_shape(&unsorted);
-        let n_tokens = orig_shape[0];
-        let top_k = orig_shape[1];
-
-        let reshaped = mlxcel_core::reshape(&unsorted, &[n_tokens, top_k, x_shape[1], x_shape[2]]);
-        mlxcel_core::squeeze_axis(&reshaped, 2)
     }
 }
 
@@ -1483,7 +1233,17 @@ impl SparseMoeBlock {
             args.bits(),
         )?;
 
-        let experts = SwitchGLU::from_weights(weights, args, &format!("{}.switch_mlp", prefix))?;
+        // The shared loader bounds the declared pair, infers the stored bit
+        // width from the tensor shapes and refuses packings MLX would reject
+        // (issues #929, #958, #973), and its `forward_fused_kernel` carries every
+        // fused-kernel guard, the `MLXCEL_FUSED_MOE_MAX_DFF` bound included
+        // (issue #1884).
+        let experts = SwitchGLU::from_weights(
+            weights,
+            &format!("{prefix}.switch_mlp"),
+            args.group_size(),
+            args.bits(),
+        )?;
 
         Ok(Self {
             router,
@@ -1491,51 +1251,6 @@ impl SparseMoeBlock {
             num_experts_per_tok: args.num_experts_per_tok,
             norm_topk_prob: args.norm_topk_prob,
         })
-    }
-}
-
-impl SwitchGLU {
-    pub fn from_weights(
-        weights: &WeightMap,
-        args: &ModelArgs,
-        prefix: &str,
-    ) -> Result<Self, String> {
-        Ok(Self {
-            gate_proj: SwitchLinear::from_weights(weights, args, &format!("{}.gate_proj", prefix))?,
-            up_proj: SwitchLinear::from_weights(weights, args, &format!("{}.up_proj", prefix))?,
-            down_proj: SwitchLinear::from_weights(weights, args, &format!("{}.down_proj", prefix))?,
-        })
-    }
-}
-
-impl SwitchLinear {
-    pub fn from_weights(
-        weights: &WeightMap,
-        args: &ModelArgs,
-        prefix: &str,
-    ) -> Result<Self, String> {
-        let weight = get_weight_copy(weights, &format!("{}.weight", prefix))?;
-        let scales_key = format!("{}.scales", prefix);
-        if weights.contains_key(&scales_key) {
-            let (group_size, bits) = (args.group_size(), args.bits());
-            // This type never reaches `reconcile_quantization_layout`, so the
-            // declared pair is bounded here, where it is stored (issue #958).
-            validate_expert_quantization_params(prefix, group_size, bits)?;
-            let scales = mlxcel_core::copy(weights.get(&scales_key).unwrap());
-            let biases = get_weight_copy(weights, &format!("{}.biases", prefix))?;
-            let shape = mlxcel_core::array_shape(&weight);
-            let num_experts = shape[0] as usize;
-            Ok(Self::Quantized {
-                weight,
-                scales,
-                biases,
-                group_size,
-                bits,
-                num_experts,
-            })
-        } else {
-            Ok(Self::Regular { weight })
-        }
     }
 }
 
