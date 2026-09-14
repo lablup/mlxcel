@@ -12,17 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Regression test for the bound on declared quantization params that the
-//! Qwen3-MoE `SwitchLinear` loader applies before it stores them on a quantized
-//! expert plane (issue #958).
+//! Qwen3-MoE tests: the expert loader's bound on declared quantization params
+//! (issue #958) and the fused-kernel `dff` decline (issue #1884), both reached
+//! through the shared `switch_layers::SwitchGLU` the family now holds, plus
+//! RoPE scaling and batched decode.
 
 use mlxcel_core::weights::WeightMap;
 
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::KVCache;
 
-use super::{Attention, DecoderLayer, MLPType, ModelArgs, Qwen3MoeModel, SwitchLinear};
-use crate::models::switch_layers::{HOSTILE_QUANT_PARAMS, insert_stacked_quantized_expert_plane};
+use super::{Attention, DecoderLayer, MLPType, ModelArgs, Qwen3MoeModel, SparseMoeBlock};
+use crate::models::switch_layers::{
+    HOSTILE_QUANT_PARAMS, fused_moe_enabled, insert_stacked_quantized_expert_plane,
+    moe_weighted_sum,
+};
 
 /// Honest 4-bit expert geometry: `packed_in * 32 == bits * num_groups *
 /// group_size` (8 * 32 == 4 * 1 * 64), so the positive control below is a plane
@@ -34,6 +38,9 @@ const NUM_GROUPS: i32 = 1;
 const GROUP_SIZE: i32 = 64;
 const BITS: i32 = 4;
 
+/// The MoE block prefix `SparseMoeBlock::from_weights` is handed, and the first
+/// expert plane its shared loader reads under it.
+const BLOCK_PREFIX: &str = "model.layers.0.mlp";
 const PREFIX: &str = "model.layers.0.mlp.switch_mlp.gate_proj";
 
 /// Smallest Qwen3-MoE config that parses, varying only the declared
@@ -211,25 +218,46 @@ fn llama3_block() -> serde_json::Value {
 /// first routed forward pass in production. This test asserts on the load
 /// result rather than running a forward pass, so a regression fails cleanly
 /// here instead of aborting the test binary.
+///
+/// Since issue #1884 the family keeps no expert loader of its own, so the test
+/// drives the block loader the model uses. That pins both halves: the shared
+/// `SwitchLinear` carries the bound, and `SparseMoeBlock::from_weights` hands
+/// it the declared pair from `ModelArgs` rather than something else.
 #[test]
 fn qwen3_moe_switch_linear_rejects_quantization_params_that_would_abort_gather_qmm() {
     let mut weights = WeightMap::new();
-    insert_stacked_quantized_expert_plane(
+    for leaf in ["gate_proj", "up_proj", "down_proj"] {
+        insert_stacked_quantized_expert_plane(
+            &mut weights,
+            &format!("{BLOCK_PREFIX}.switch_mlp.{leaf}"),
+            EXPERTS,
+            OUT,
+            PACKED_IN,
+            NUM_GROUPS,
+        );
+    }
+    // A non-quantized router, so the declared pair can only reach the experts.
+    insert_tensor(
         &mut weights,
-        PREFIX,
-        EXPERTS,
-        OUT,
-        PACKED_IN,
-        NUM_GROUPS,
+        &format!("{BLOCK_PREFIX}.gate.weight"),
+        values((EXPERTS * OUT) as usize, 0.1, 0.01),
+        &[EXPERTS, OUT],
     );
 
     // Positive control first, so a guard that rejected every quantized plane
     // could not pass this test.
-    SwitchLinear::from_weights(&weights, &args_with(GROUP_SIZE, BITS), PREFIX)
-        .expect("honest 4-bit expert plane must load");
+    if let Err(e) =
+        SparseMoeBlock::from_weights(&weights, &args_with(GROUP_SIZE, BITS), BLOCK_PREFIX)
+    {
+        panic!("honest 4-bit expert planes must load: {e}");
+    }
 
     for (group_size, bits, field) in HOSTILE_QUANT_PARAMS {
-        let err = match SwitchLinear::from_weights(&weights, &args_with(group_size, bits), PREFIX) {
+        let err = match SparseMoeBlock::from_weights(
+            &weights,
+            &args_with(group_size, bits),
+            BLOCK_PREFIX,
+        ) {
             Ok(_) => panic!(
                 "(group_size {group_size}, bits {bits}) must be refused at load, \
                  not stored for gather_qmm"
@@ -240,17 +268,204 @@ fn qwen3_moe_switch_linear_rejects_quantization_params_that_would_abort_gather_q
             err.contains(field),
             "(group_size {group_size}, bits {bits}) must be blamed on {field}, got: {err}"
         );
+        assert!(
+            err.contains(PREFIX),
+            "the load error must name the offending tensor {PREFIX}, got: {err}"
+        );
     }
 
     // A bf16 expert plane carries no packing at all, so the declared pair is
     // irrelevant there and must not gate the non-quantized fallback.
     let mut regular = WeightMap::new();
-    regular.insert(
-        format!("{PREFIX}.weight"),
-        mlxcel_core::ones(&[EXPERTS, OUT, PACKED_IN], mlxcel_core::dtype::BFLOAT16),
+    for leaf in ["gate_proj", "up_proj", "down_proj"] {
+        regular.insert(
+            format!("{BLOCK_PREFIX}.switch_mlp.{leaf}.weight"),
+            mlxcel_core::ones(&[EXPERTS, OUT, PACKED_IN], mlxcel_core::dtype::BFLOAT16),
+        );
+    }
+    insert_tensor(
+        &mut regular,
+        &format!("{BLOCK_PREFIX}.gate.weight"),
+        values((EXPERTS * OUT) as usize, 0.1, 0.01),
+        &[EXPERTS, OUT],
     );
-    SwitchLinear::from_weights(&regular, &args_with(0, 0), PREFIX)
-        .expect("a bf16 expert plane must not be gated on quantization params");
+    if let Err(e) = SparseMoeBlock::from_weights(&regular, &args_with(0, 0), BLOCK_PREFIX) {
+        panic!("a bf16 expert plane must not be gated on quantization params: {e}");
+    }
+}
+
+/// Hidden width and group size of the fused-kernel geometry below: a single
+/// quantization group per input row, so the kernel's `din` is 64 and one token
+/// carries 64 elements.
+const FUSED_HIDDEN: i32 = 64;
+const FUSED_GROUP: i32 = 64;
+const FUSED_EXPERTS: i32 = 2;
+
+/// Deterministic values in `[-0.5, 0.5)`, so the quantized planes are honest
+/// rather than constant.
+fn pseudo_random(len: usize, seed: u64) -> Vec<f32> {
+    let mut state = seed;
+    (0..len)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((state >> 40) as f32 / (1u64 << 24) as f32) - 0.5
+        })
+        .collect()
+}
+
+/// A Qwen3-MoE `SparseMoeBlock` over two honest affine 4-bit bf16 experts of
+/// intermediate width `dff`, built with `quantize_weights` and loaded through
+/// the real family loader, so the fused-kernel decision under test runs on the
+/// exact type and stored triple a converted checkpoint produces.
+fn fused_geometry_block(dff: i32) -> SparseMoeBlock {
+    let mut weights = WeightMap::new();
+    let mut seed = u64::from(dff.unsigned_abs());
+    for (leaf, out, input) in [
+        ("gate_proj", dff, FUSED_HIDDEN),
+        ("up_proj", dff, FUSED_HIDDEN),
+        ("down_proj", FUSED_HIDDEN, dff),
+    ] {
+        let (mut w, mut s, mut b) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..FUSED_EXPERTS {
+            seed += 1;
+            let dense = mlxcel_core::from_slice_f32(
+                &pseudo_random((out * input) as usize, seed),
+                &[out, input],
+            );
+            let dense = mlxcel_core::astype(&dense, mlxcel_core::dtype::BFLOAT16);
+            let q = mlxcel_core::quantize_weights(&dense, FUSED_GROUP, 4);
+            w.push(mlxcel_core::quantized_weights_w(&q));
+            s.push(mlxcel_core::quantized_weights_scales(&q));
+            b.push(mlxcel_core::quantized_weights_biases(&q));
+        }
+        let plane = format!("{BLOCK_PREFIX}.switch_mlp.{leaf}");
+        weights.insert(format!("{plane}.weight"), mlxcel_core::stack_owned(&w, 0));
+        weights.insert(format!("{plane}.scales"), mlxcel_core::stack_owned(&s, 0));
+        weights.insert(format!("{plane}.biases"), mlxcel_core::stack_owned(&b, 0));
+    }
+    insert_tensor(
+        &mut weights,
+        &format!("{BLOCK_PREFIX}.gate.weight"),
+        pseudo_random((FUSED_EXPERTS * FUSED_HIDDEN) as usize, 7),
+        &[FUSED_EXPERTS, FUSED_HIDDEN],
+    );
+    let args: ModelArgs = serde_json::from_value(serde_json::json!({
+        "model_type": "qwen3_moe",
+        "vocab_size": 8,
+        "hidden_size": FUSED_HIDDEN,
+        "intermediate_size": dff,
+        "num_hidden_layers": 1,
+        "num_attention_heads": 1,
+        "num_experts": FUSED_EXPERTS,
+        "num_experts_per_tok": FUSED_EXPERTS,
+        "norm_topk_prob": true,
+        "decoder_sparse_step": 1,
+        "moe_intermediate_size": dff,
+        "rms_norm_eps": 1e-5,
+        "num_key_value_heads": 1,
+        "head_dim": FUSED_HIDDEN,
+        "quantization": { "group_size": FUSED_GROUP, "bits": 4 },
+    }))
+    .expect("fused-geometry config must parse");
+    SparseMoeBlock::from_weights(&weights, &args, BLOCK_PREFIX)
+        .expect("honest affine 4-bit experts must load")
+}
+
+/// Before issue #1884 the family's own `forward_fused_kernel` had no `dff`
+/// bound, so an expert wider than `MLXCEL_FUSED_MOE_MAX_DFF` (4096 on Metal,
+/// 8192 on CUDA) still took the fused path in the regime measured as a net
+/// loss, and the override was silently ignored. Dff 8256 (129 groups of 64) is
+/// above both defaults; the shared kernel must decline it and the production
+/// dispatch must report `gather_qmm` for that single routed token.
+///
+/// The positive control at Dff 64 on the same geometry proves every other
+/// guard passes, so the decline above is the bound and nothing else. It
+/// launches the kernel, which on a backend without a port throws across an
+/// infallible bridge and ends the process (issue #1803), so it runs only when
+/// `custom_kernels_available()` says a port exists.
+#[test]
+fn qwen3_moe_fused_kernel_declines_experts_wider_than_the_dff_bound() {
+    if std::env::var_os("MLXCEL_FUSED_MOE_MAX_DFF").is_some() {
+        eprintln!(
+            "skipping: MLXCEL_FUSED_MOE_MAX_DFF is set, so the default bound this test pins is \
+             not in force"
+        );
+        return;
+    }
+    let x = mlxcel_core::astype(
+        &mlxcel_core::from_slice_f32(&pseudo_random(FUSED_HIDDEN as usize, 3), &[1, FUSED_HIDDEN]),
+        mlxcel_core::dtype::BFLOAT16,
+    );
+    let indices = mlxcel_core::from_slice_i32(&[0, 1], &[1, FUSED_EXPERTS]);
+    let scores = mlxcel_core::astype(
+        &mlxcel_core::from_slice_f32(&[0.25, 0.75], &[1, FUSED_EXPERTS]),
+        mlxcel_core::dtype::BFLOAT16,
+    );
+
+    let wide = fused_geometry_block(8256);
+    assert!(
+        wide.experts
+            .forward_fused_kernel(&x, &indices, &scores)
+            .is_none(),
+        "Dff 8256 is above both default bounds, so the fused kernel must decline"
+    );
+    let (_, profile) = wide.forward_profiled(&x);
+    assert_eq!(profile.tokens, 1);
+    assert_eq!(
+        profile.path, "gather_qmm",
+        "a single token over too-wide experts must dispatch to gather_qmm"
+    );
+
+    if !mlxcel_core::custom_kernels_available() {
+        eprintln!(
+            "skipping the positive control: this backend has no fused MoE kernel port (#1803)"
+        );
+        return;
+    }
+    let narrow = fused_geometry_block(FUSED_HIDDEN);
+    let fused = narrow
+        .experts
+        .forward_fused_kernel(&x, &indices, &scores)
+        .expect("Dff 64 is below both bounds, so the fused kernel must dispatch");
+    let fused = mlxcel_core::reshape(&fused, &[1, FUSED_HIDDEN]);
+    let gathered = moe_weighted_sum(
+        &narrow.experts.forward(&x, &indices),
+        &scores,
+        mlxcel_core::dtype::BFLOAT16,
+    );
+    // A structural check, not a numeric parity bound (that lives in
+    // `fused_moe_parity_tests`): swapped planes or a dropped expert land near
+    // 1, the bf16 quantized jitter between the two paths two orders lower.
+    let fused = mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(
+        &fused,
+        mlxcel_core::dtype::FLOAT32,
+    ));
+    let gathered = mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(
+        &gathered,
+        mlxcel_core::dtype::FLOAT32,
+    ));
+    let diff_sq: f64 = fused
+        .iter()
+        .zip(&gathered)
+        .map(|(a, b)| f64::from(a - b).powi(2))
+        .sum();
+    let ref_sq: f64 = gathered.iter().map(|b| f64::from(*b).powi(2)).sum();
+    let nrms = (diff_sq / ref_sq.max(1e-20)).sqrt();
+    assert!(
+        fused.iter().all(|v| v.is_finite()) && nrms < 0.1,
+        "the fused kernel must compute the gather path's function: nrms {nrms:e}"
+    );
+
+    let (_, profile) = narrow.forward_profiled(&x);
+    assert_eq!(profile.tokens, 1);
+    let want = if fused_moe_enabled() {
+        "fused"
+    } else {
+        "gather_qmm"
+    };
+    assert_eq!(profile.path, want, "single-token dispatch at Dff 64");
 }
 
 #[test]
