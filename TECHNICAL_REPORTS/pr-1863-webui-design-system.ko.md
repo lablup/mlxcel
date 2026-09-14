@@ -50,3 +50,11 @@ Hosted Chromium CDP로 Latin 문자에 DejaVu Sans regular/bold, 한국어 fallb
 ## ui-common adoption checkpoint
 
 새 사용자 요청에 따라 @lablup/ui-common alpha.19를 정확히 고정하고 공통 adapter/token bridge에서 component subpath를 사용합니다. [공유 export/예외 표](../docs/webui/ui-common.md)를 따릅니다. CPU typecheck·lint·unit 72개와 현재 worktree의 contract fixture 41개가 통과했으며 공개 NOTICE/LICENSE를 번들에 포함합니다. 이전4185 소스와 사용자 보고 수동 승인은 과거 버전에 한정되며, 변경된 DOM에는 실제 served-CSP·시각·관련 수동 검증이 새로 필요합니다. 루트의 호스트 예약 중 로컬 브라우저/GPU 테스트는 실행하지 않았습니다. 이후 중앙 rebase에서 최신 backend schema/fixture 변경을 보존해야 합니다.
+
+## Rebase 후 migration 검증
+
+`62c4f259`는 병합된 startup/security backend를 통합하면서 Unicode validator, schema 및 contract fixture 44개를 그대로 보존합니다. Frozen dependency install, typecheck, lint, unit 76개와 deterministic bundle 검증이 통과했습니다. Source digest는 `cfbcaada7d5e9734b2d305eacf534e003d8b8ea3916ce163c5a53f294c6bbd78`, bundle digest는 `858f5775f548532b3fa93942c7f063e06b83f427d107b47c82678f3564638f7f`입니다. 독립 correctness/security 재리뷰에서 migration seam 관련 findings는 없습니다.
+
+고정된 Playwright heading-level helper는 명시적 `aria-level`보다 native `h3`를 우선하지만, Chromium AX 직접 관찰에서는 common Tabs 반복 remount 후에도 level 2, 올바른 이름과 non-ignored 상태가 확인됩니다. Browser 및 실제 서버 CSP 테스트가 이 AX tree를 검증하고 StrictMode unit도 remount를 검사합니다. 이는 Chromium 증거이며 native Safari 증거가 아닙니다.
+
+Hosted run 34801765896은 browser 19개를 통과하고 기존 States screenshot만 실패했습니다. 측정 progress와 미상 progress를 기존 cell 하나로 묶고 lifecycle label casing을 보존했으며, 개별 시각 리뷰를 거친 Darwin/Linux States baseline만 출처와 함께 갱신합니다. 다른 baseline과 엄격한 threshold는 바꾸지 않았습니다. 이 문서 시점에서 hosted 전체 재실행, 루트의 실제 secured-CSP 실행 및 변경된 DOM에 대한 사용자 Safari/VoiceOver 표적 재확인은 각각 대기 중입니다. 로컬 브라우저 진단 프로세스는 루트 runtime build 전에 모두 종료했으며 이 유닛은 MLX/GPU 테스트를 실행하지 않았습니다.

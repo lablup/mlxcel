@@ -50,3 +50,11 @@ The targeted manual gate is now accepted as user-reported; central integration r
 ## ui-common adoption checkpoint
 
 The new user-requested migration pins @lablup/ui-common alpha.19 and consumes component subpaths through shared adapters/token bridges. See the [export/exception matrix](../docs/webui/ui-common.md). CPU typecheck, lint, 72 unit tests and 41 current-worktree contract fixtures pass. Published NOTICE/LICENSE are bundled. The old4185 source/manual approval remains historical; rewritten DOM needs new served-CSP, visual and relevant manual evidence. No local browser/GPU test was run under the root host reservation. Central integration must preserve newer backend schema/fixture changes on rebase.
+
+## Rebased migration validation
+
+At `62c4f259`, the branch incorporates the merged startup/security backend without modifying its Unicode validator, schema or 44 contract fixtures. Frozen dependency installation, typecheck, lint, 76 unit tests and deterministic bundle verification pass. Source digest: `cfbcaada7d5e9734b2d305eacf534e003d8b8ea3916ce163c5a53f294c6bbd78`; bundle digest: `858f5775f548532b3fa93942c7f063e06b83f427d107b47c82678f3564638f7f`. Independent correctness/security rereviews report no findings in the migration seam.
+
+The pinned Playwright heading-level helper prioritizes native `h3` over explicit `aria-level`; direct Chromium AX inspection proves level 2, the expected name and non-ignored visibility across repeated common Tabs remounts. Browser and supplied-server CSP tests now assert that actual tree, and StrictMode units cover remounts. This is Chromium evidence, not native Safari proof.
+
+Hosted run 34801765896 passed 19 browser cases and failed only the old States screenshot. The new measured-progress example is grouped with unknown progress in its existing cell, lifecycle label casing is preserved, and only the independently reviewed Darwin/Linux States baselines are updated with exact provenance. All other baselines and strict thresholds are unchanged; the full hosted rerun remains pending at this documentation checkpoint. Root-owned actual secured-CSP execution and a targeted user Safari/VoiceOver recheck for the migrated DOM remain separate pending gates. Local bounded browser diagnostics ended cleanly before the root runtime build; no MLX/GPU tests were run by this unit.
