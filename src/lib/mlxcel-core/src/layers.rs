@@ -4382,6 +4382,12 @@ pub const F16_MAX: f32 = 65504.0;
 ///
 /// `q` and `k` are `[B, H, L, D]` and `[B, H, S, D]`; the product is taken over
 /// the last axis, giving `[B, H, L, S]`.
+///
+/// The head counts must already match. On a GQA family they do not, and the
+/// matmul aborts rather than broadcasting, so repeat the kv heads
+/// (`repeat(k, q_heads / kv_heads, 1)`) the way the SDPA kernel does before
+/// calling. Stated because the shapes above are easy to read as permissive:
+/// measuring Gemma 2, at 8 query heads over 4 kv heads, walked into it.
 pub fn max_abs_attention_score(q: &MlxArray, k: &MlxArray, scale: f32) -> f32 {
     let k_t = ffi::transpose_axes(k, &[0, 1, 3, 2]);
     let scores = ffi::matmul(q, &k_t);
