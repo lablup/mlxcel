@@ -1,7 +1,7 @@
 # Technical Report: PR #1871 - feat: enable model-free WebUI startup
 
-**Date**: 2026-09-13
-**Status**: Needs Follow-up — `pending_host_recovery` (PR remains in review)
+**Date**: 2026-09-13 (updated 2026-09-14)
+**Status**: Local implementation and acceptance complete; publication and merge pending
 **Languages**: Rust, TypeScript contract fixtures, Markdown
 **Risk Level**: High
 
@@ -74,28 +74,34 @@ The read-only fix at `534563fb704619f407e4ea699482fda9c22fac98` mounts stateless
 | Events | Router and single-model UI events share canonical cursor parsing, replay subscription, gap handling, and SSE serialization. |
 | Documentation | WebUI bundling, catalog, architecture, and llama compatibility docs now describe mounted production startup and remaining unsupported adjacent surfaces. |
 
-## 4. Validation and Remaining Blockers
+## 4. Validation
 
-Validation is tied to the source revision below. An earlier full pass is not a full pass for the current changes.
+The complete acceptance run executed at `c2400a3e2ec36cd89954ee7544edb420b7a14d76`. The conflict-free rebase onto `3d8fd7b4` produced `4cb81177844126aab673dd08354d731952ee5058`: all eight patches are equivalent, and the tree differs from the measured revision only in `docs/benchmark_results/kernel-backend-kind-metal-m1ultra-2026-09-13.md` and `scripts/paged_decode_counter_ab.sh`. Runtime, build, frontend, and contract contents are identical. Heavy validation below belongs to `c2400a3e`, not a claimed rerun at `4cb81177`.
 
-| Revision / scope | Result |
-|------------------|--------|
-| `985f4a87` full local gate | Passed: 11,236 tests, 0 failed, 361 ignored across 123 summaries; workspace all-target Clippy, structural/contract checks, and feature-off workspace check passed. The feature-off check emitted 42 warnings. |
-| `985f4a87` actual test-fast binaries | Both `mlxcel-server` and `mlxcel serve` passed relocated empty-HOME/offline model-free startup and controlling-TTY/key/port-zero authority checks. These are not release-binary results. |
-| `985f4a87` real inventory | Failed strict schema validation on four oversized diagnostic fields from two DFlash entries in a 212-entry catalog. The attempted real lifecycle stopped before inference; `1ff25a18` fixes this boundary. |
-| `1ff25a18` catalog and RouterPool acceptance | All 212 entries remained unloaded and passed strict schema validation. Real Llama streamed 467 characters, drain refusal returned 400, worker exit was observed, Granite returned “Affirmative.”, and SIGINT cleanup reported one attempted and one completed worker shutdown. Complete loaded UI snapshots passed canonical validation. This is router-mode evidence, not explicit-`-m` single-model acceptance. |
-| `1ff25a18` targeted checks | 36 Rust catalog tests, scoped Clippy, 48 frontend tests, type/lint checks, 42 strict contract fixtures, and deterministic bundle verification passed. Independent correctness and security reviews of this delta cleared. |
-| `1ff25a18` full local gate | Failed in the unchanged `mlxcel-core` test `dflash_round_loop_starts_at_the_configured_depth`: SIG6 with Metal `commandbufferDiscarded` / `InnocentVictim` recovery. An isolated run of the exact same binary passed once and failed again on its second run. Cause remains unknown; this is neither a full pass nor an assumed transient failure. |
-| `534563fb704619f407e4ea699482fda9c22fac98` single-model refusal fix | Passed: three CPU-only mounted single-control tests with valid payloads, one existing single-model SSE replay test, 12 shared WebUI security tests, 44 strict contract fixtures, 48 frontend tests, type/lint checks, and deterministic bundle verification. Scoped Clippy and independent correctness and security delta reviews also cleared. The root CPU-only gate passed workspace all-target Clippy, 44 contract fixtures, structural checks, formatting, and diff checks at this exact runtime revision. |
-| Explicit-`-m` real acceptance and both release-binary relocation gates | Not run. All GPU work is paused pending Mac host recovery; a reboot has been requested. |
+| Scope | Result |
+|-------|--------|
+| Full local gate | Passed: 11,243 tests, 0 failed, 361 ignored across 123 summaries. Workspace all-target Clippy, 44 contract fixtures, structural checks, formatting, and feature-off workspace checks passed; feature-off emitted 42 warnings. |
+| Both actual test-fast binaries | Relocated empty-HOME/offline model-free startup and controlling-TTY/key/port-zero authority checks passed for `mlxcel-server` and `mlxcel serve`. Explicit-`-m` checks also passed: canonical bootstrap/catalog/runtime, real Llama “Hello” inference, canonical read-only `422`, and unchanged catalog after refusal. |
+| Real RouterPool lifecycle | Llama streamed 948 characters; drain refusal returned 400; worker exit was observed; Granite returned “Affirmative.”; SIGINT cleanup reported one worker shutdown attempted and one completed. Process RSS observations do not prove GPU allocation release. |
+| Release binaries | Both release binaries built successfully (9m 27s build log). Both passed relocated empty-HOME/offline startup, TTY/key checks, and explicit-`-m` real-model acceptance. |
+| Post-rebase checks at `4cb81177` | 44 contract fixtures, llama compatibility, crate versions, kernel dtype structural checks, formatting/diff checks, and scoped Clippy passed. The inherited C++ `BITLINEAR_HIP_SOURCE` warning remains; this is not a warning-free build. |
+| Targeted regression and reviews | The integration rebase at `c2400a3e` passed 38 selected Rust tests and scoped Clippy; 48 frontend tests, type/lint, 44 strict contract fixtures, and deterministic bundle verification passed. Independent correctness and security delta reviews cleared. |
 
-Earlier full attempts also exposed a synthetic route-identity mismatch (`0238c814`) and a stale cache fixture (`70d4e409`). Both were corrected without weakening the relevant assertion, and the subsequent `985f4a87` full gate passed. Process RSS observed during the real lifecycle is not evidence that GPU allocations were freed.
+### Failure history and acceptance boundaries
 
-The maintainer's GB10-down exception applies only to unavailable required runner checks. It does not waive the local GPU failure, outstanding release acceptance, or review findings, and does not establish CUDA execution coverage. No branch-protection changes are part of this work.
+Earlier gates caught a synthetic route-identity mismatch (`0238c814`), a stale cache fixture (`70d4e409`), and four oversized diagnostic fields in two DFlash entries (`985f4a87`). These were corrected without weakening the relevant assertions or schema limits. The subsequent `1ff25a18` model-free inventory audit validated all 212 entries while keeping them unloaded.
+
+The `1ff25a18` full gate later failed in unchanged `mlxcel-core::dflash_round_loop_starts_at_the_configured_depth` with SIG6 and Metal `commandbufferDiscarded` / `InnocentVictim` recovery. The same binary passed its first isolated run and failed the second. The cause remains unknown. No workaround or numerical tolerance change was introduced; the successful complete `c2400a3e` rerun resolves the acceptance gate, not the historical failure's root cause.
+
+The initial explicit-`-m` harness rejected SIGINT termination with return code `-2`. Read-only comparison established that `serve_http` and `listen` were byte-identical to the baseline and that this PR preserves single-model shutdown behavior. The harness was corrected only to accept bounded normal SIGINT termination; the original failure remains recorded. This does not establish graceful worker draining in single-model mode, unlike the separately observed RouterPool cleanup.
+
+The maintainer's GB10-down exception applies only to unavailable required runner checks. It does not waive local failures or review findings and does not establish CUDA execution coverage. No branch-protection changes are part of this work.
+
+Evidence is retained in the orchestration run's `gate-1838-c2400a3e.log`, `acceptance-1838-c2400a3e-run3.log`, and `release-build-1838-c2400a3e.log`; the acceptance log records the per-binary result artifacts.
 
 ## 5. Follow-up Actions
 
-- Recover the Mac host and diagnose/revalidate the failed GPU gate before resuming GPU work; do not repeatedly retry on the unhealthy host.
-- Rerun required full acceptance against the final runtime revision `534563fb704619f407e4ea699482fda9c22fac98` after host recovery.
-- Run explicit-`-m` real single-model acceptance and both release-binary relocated/offline gates. Keep PR #1871 in review until required local evidence is complete.
-- Later WebUI issues own downloads/removal adapters (#1841), rich metrics (#1847), page-level workflows, and Safari/VoiceOver acceptance for the revised UI. Actual GB10 CUDA validation remains unavailable until runner recovery.
+- Publish the finalized reports and PR evidence, then complete the centrally owned merge workflow; this report does not claim the PR is merged.
+- Investigate the historical Metal recovery failure separately if it recurs; its cause is still unproven.
+- Later WebUI issues own downloads/removal adapters (#1841), rich metrics (#1847), page-level workflows, and revised-UI Safari/VoiceOver acceptance. The separate `ui-common` adoption request is not implemented by this PR.
+- Run actual GB10 CUDA validation when the runner recovers.

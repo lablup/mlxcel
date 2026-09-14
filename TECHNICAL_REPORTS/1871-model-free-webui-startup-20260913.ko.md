@@ -1,7 +1,7 @@
 # 기술 보고서: PR #1871 - feat: enable model-free WebUI startup
 
-**작성일**: 2026-09-13
-**상태**: 후속 조치 필요 — `pending_host_recovery` (PR 리뷰 유지)
+**작성일**: 2026-09-13 (2026-09-14 갱신)
+**상태**: 로컬 구현·수용 검증 완료; 게시·머지 대기
 **언어**: Rust, TypeScript 계약 fixture, Markdown
 **위험도**: 높음
 
@@ -74,29 +74,34 @@ Bootstrap capability의 가용성은 시작 경로 힌트가 아닌 실제 pool 
 | 이벤트 | 라우터와 단일 모델 UI 이벤트가 표준 커서 파싱, replay 구독, gap 처리, SSE 직렬화를 공유합니다. |
 | 문서 | WebUI bundling, catalog, architecture, llama compatibility 문서가 운영 시작 경로와 남은 미지원 인접 표면을 현재 상태에 맞게 설명합니다. |
 
-## 4. 검증과 남은 차단 요인
+## 4. 검증
 
-검증 결과는 아래 소스 리비전에 한정됩니다. 이전 리비전의 전체 통과를 현재 변경의 전체 통과로 간주하지 않습니다.
+전체 수용 검증은 `c2400a3e2ec36cd89954ee7544edb420b7a14d76`에서 실행했습니다. `3d8fd7b4` 위로 충돌 없이 rebase한 결과는 `4cb81177844126aab673dd08354d731952ee5058`입니다. 패치 8개 모두 동등하며, 측정한 리비전과의 tree 차이는 `docs/benchmark_results/kernel-backend-kind-metal-m1ultra-2026-09-13.md`와 `scripts/paged_decode_counter_ab.sh`뿐입니다. Runtime, build, frontend, contract 내용은 동일합니다. 아래 대규모 검증은 `c2400a3e`의 결과이며 `4cb81177`에서 다시 실행했다고 주장하지 않습니다.
 
-| 리비전 / 범위 | 결과 |
-|---------------|------|
-| `985f4a87` 전체 로컬 게이트 | 통과: 123개 요약에서 테스트 11,236개 성공, 실패 0개, 무시 361개. Workspace all-target Clippy, 구조/계약 검사, feature-off workspace 검사를 통과했습니다. Feature-off 검사에는 경고 42개가 있었습니다. |
-| `985f4a87` 실제 test-fast 바이너리 | `mlxcel-server`와 `mlxcel serve` 모두 바이너리 이동·빈 HOME·오프라인 무모델 시작 및 controlling TTY/key/port-zero authority 검증을 통과했습니다. Release 바이너리 결과는 아닙니다. |
-| `985f4a87` 실제 모델 목록 | 212개 항목 중 DFlash 2개의 진단 필드 4개가 길이 제한을 초과해 strict schema 검증에 실패했습니다. 당시 실제 lifecycle 검증은 추론 전에 멈췄으며, 이 경계는 `1ff25a18`에서 수정했습니다. |
-| `1ff25a18` 카탈로그와 RouterPool 수용 검증 | 212개 항목 모두 unloaded 상태를 유지하며 strict schema 검증을 통과했습니다. 실제 Llama가 467자를 스트리밍하고, drain 거절은 400을 반환했으며, worker 종료를 관찰했습니다. Granite는 “Affirmative.”를 반환했고 SIGINT 정리는 시도 1개·완료 1개를 보고했습니다. 로드된 상태의 전체 UI snapshot도 표준 계약 검증을 통과했습니다. 이는 라우터 모드 증거이지 명시적 `-m` 단일 모델 검증은 아닙니다. |
-| `1ff25a18` 대상 한정 검사 | Rust 카탈로그 테스트 36개, scoped Clippy, 프런트엔드 테스트 48개, type/lint 검사, strict 계약 fixture 42개, 결정적 번들 검증이 통과했습니다. 이 변경의 독립 정확성·보안 리뷰도 통과했습니다. |
-| `1ff25a18` 전체 로컬 게이트 | 변경하지 않은 `mlxcel-core`의 `dflash_round_loop_starts_at_the_configured_depth`에서 Metal `commandbufferDiscarded` / `InnocentVictim` 복구와 SIG6으로 실패했습니다. 정확히 같은 바이너리의 단독 실행은 첫 회 통과, 두 번째 회에 다시 실패했습니다. 원인은 미확정이며, 전체 통과나 일시적 오류로 간주하지 않습니다. |
-| `534563fb704619f407e4ea699482fda9c22fac98` 단일 모델 거절 수정 | 유효 payload를 사용하는 CPU 기반 mounted 단일 모델 control 테스트 3개, 기존 단일 모델 SSE replay 테스트 1개, 공통 WebUI 보안 테스트 12개, strict 계약 fixture 44개, 프런트엔드 테스트 48개, type/lint, 결정적 번들 검증이 통과했습니다. Scoped Clippy와 독립 정확성·보안 변경 리뷰도 통과했습니다. |
-| `534563fb` root CPU 전용 게이트 | workspace all-target Clippy, 계약 fixture 44개, 구조 검사, 포맷 및 diff 검사를 통과했습니다. GPU 테스트 결과는 아닙니다. |
-| 명시적 `-m` 실제 검증과 두 release 바이너리 이동 검증 | 미실행. Mac 호스트 복구 전까지 모든 GPU 작업을 중지했으며 재부팅을 요청했습니다. |
+| 범위 | 결과 |
+|------|------|
+| 전체 로컬 게이트 | 통과: 123개 요약에서 테스트 11,243개 성공, 실패 0개, 무시 361개. Workspace all-target Clippy, 계약 fixture 44개, 구조 검사, 포맷, feature-off workspace 검사가 통과했습니다. Feature-off에는 경고 42개가 있었습니다. |
+| 두 실제 test-fast 바이너리 | `mlxcel-server`와 `mlxcel serve` 모두 바이너리 이동·빈 HOME·오프라인 무모델 시작 및 controlling TTY/key/port-zero authority 검증을 통과했습니다. 명시적 `-m` 검사도 표준 bootstrap/catalog/runtime, 실제 Llama “Hello” 추론, 표준 읽기 전용 `422`, 거절 후 카탈로그 불변을 확인하며 통과했습니다. |
+| 실제 RouterPool lifecycle | Llama가 948자를 스트리밍했고 drain 거절은 400을 반환했습니다. Worker 종료를 관찰했으며 Granite는 “Affirmative.”를 반환했습니다. SIGINT 정리는 worker 종료 시도 1개·완료 1개를 보고했습니다. 프로세스 RSS 관찰은 GPU 할당 해제의 증거가 아닙니다. |
+| Release 바이너리 | 두 release 바이너리 빌드가 성공했습니다(빌드 로그 9분 27초). 두 바이너리 모두 이동·빈 HOME·오프라인 시작, TTY/key 검사, 명시적 `-m` 실제 모델 수용 검증을 통과했습니다. |
+| Rebase 후 `4cb81177` 검사 | 계약 fixture 44개, llama 호환성, crate 버전, kernel dtype 구조 검사, 포맷/diff, scoped Clippy가 통과했습니다. 기존 C++ `BITLINEAR_HIP_SOURCE` 경고는 남아 있으며 무경고 빌드는 아닙니다. |
+| 대상 한정 회귀 검사와 리뷰 | `c2400a3e` 통합 rebase에서 선별 Rust 테스트 38개와 scoped Clippy를 통과했습니다. 프런트엔드 테스트 48개, type/lint, strict 계약 fixture 44개, 결정적 번들 검증도 통과했습니다. 독립 정확성·보안 변경 리뷰도 통과했습니다. |
 
-이전 전체 실행에서는 합성 route identity 불일치(`0238c814`)와 낡은 cache fixture(`70d4e409`)도 발견했습니다. 관련 assertion을 약화하지 않고 수정했고, 이후 `985f4a87` 전체 게이트가 통과했습니다. 실제 lifecycle 중 관찰한 프로세스 RSS는 GPU 할당 해제의 증거가 아닙니다.
+### 실패 이력과 수용 검증의 한계
 
-Maintainer의 GB10 장애 예외는 사용할 수 없는 필수 러너 검사에만 적용됩니다. 로컬 GPU 실패, 남은 release 수용 검증, 리뷰 지적은 면제하지 않으며 CUDA 실행 검증을 의미하지 않습니다. 이 작업에서 branch protection은 변경하지 않습니다.
+이전 게이트에서 합성 route identity 불일치(`0238c814`), 낡은 cache fixture(`70d4e409`), DFlash 2개의 길이 초과 진단 필드 4개(`985f4a87`)를 발견했습니다. 관련 assertion이나 스키마 제한을 약화하지 않고 수정했습니다. 이후 `1ff25a18`의 무모델 목록 감사는 212개 항목 모두 unloaded 상태를 유지하며 검증을 통과했습니다.
+
+`1ff25a18` 전체 게이트는 이후 변경하지 않은 `mlxcel-core::dflash_round_loop_starts_at_the_configured_depth`에서 SIG6 및 Metal `commandbufferDiscarded` / `InnocentVictim` 복구와 함께 실패했습니다. 같은 바이너리의 단독 실행도 첫 회 통과 후 두 번째 회에 실패했습니다. 원인은 미확정입니다. 우회 코드나 수치 허용 오차 변경 없이 `c2400a3e` 전체 재실행이 성공해 수용 게이트는 해소됐지만, 과거 실패의 근본 원인까지 규명한 것은 아닙니다.
+
+최초 명시적 `-m` 하네스는 반환 코드 `-2`인 SIGINT 종료를 실패로 처리했습니다. 읽기 전용 비교로 `serve_http`와 `listen`이 baseline과 바이트 단위로 같고 이 PR이 단일 모델 종료 동작을 유지함을 확인했습니다. 하네스는 제한 시간 내 정상 SIGINT 종료만 허용하도록 수정했으며 최초 실패 기록은 보존했습니다. 이는 별도로 관찰한 RouterPool 정리와 달리 단일 모델 모드의 graceful worker drain을 증명하지 않습니다.
+
+Maintainer의 GB10 장애 예외는 사용할 수 없는 필수 러너 검사에만 적용됩니다. 로컬 실패나 리뷰 지적을 면제하지 않으며 CUDA 실행 검증을 의미하지 않습니다. 이 작업에서 branch protection은 변경하지 않습니다.
+
+증거는 오케스트레이션 실행의 `gate-1838-c2400a3e.log`, `acceptance-1838-c2400a3e-run3.log`, `release-build-1838-c2400a3e.log`에 보존돼 있으며, 수용 검증 로그에는 바이너리별 결과 artifact가 기록돼 있습니다.
 
 ## 5. 후속 조치
 
-- Mac 호스트를 복구하고 실패한 GPU 게이트를 진단·재검증한 뒤 GPU 작업을 재개합니다. 복구 전 호스트에서 반복 실행하지 않습니다.
-- 호스트 복구 후 최종 runtime 리비전 `534563fb704619f407e4ea699482fda9c22fac98`으로 필수 전체 검증을 다시 수행합니다.
-- 명시적 `-m` 실제 단일 모델 수용 검증과 두 release 바이너리 이동·오프라인 게이트를 실행합니다. 필수 로컬 증거가 완료될 때까지 PR #1871은 리뷰 상태를 유지합니다.
-- 이후 WebUI 이슈는 다운로드/삭제 adapter(#1841), rich metrics(#1847), 페이지별 workflow, 수정 UI의 Safari/VoiceOver 수용 검증을 담당합니다. 실제 GB10 CUDA 검증은 러너 복구 전까지 불가능합니다.
+- 최종 보고서와 PR 검증 증거를 게시하고 중앙 담당 merge workflow를 완료합니다. 이 보고서는 PR이 머지됐다고 주장하지 않습니다.
+- 과거 Metal 복구 실패가 재발하면 별도로 조사합니다. 원인은 아직 입증되지 않았습니다.
+- 이후 WebUI 이슈는 다운로드/삭제 adapter(#1841), rich metrics(#1847), 페이지별 workflow, 수정 UI의 Safari/VoiceOver 수용 검증을 담당합니다. 별도의 `ui-common` 도입 요청은 이 PR의 구현 범위가 아닙니다.
+- GB10 러너 복구 후 실제 CUDA 검증을 실행합니다.
