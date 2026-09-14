@@ -75,6 +75,17 @@ describe('published ui-common adapters', () => {
     expect(host.querySelector('[data-testid="empty"] button')?.textContent).toBe('Add');
   });
 
+  it('reapplies the heading bridge after common Tabs unmount and remount', () => {
+    const changed = vi.fn();
+    for (const title of ['No models', '모델 없음', 'No models again']) {
+      const tabs = [{ id: 'empty', label: 'Empty', panel: <EmptyState title={title} body="Choose a repository" /> }, { id: 'other', label: 'Other', panel: 'Other panel' }];
+      render(<React.StrictMode><Tabs tabs={tabs} active="other" onChange={changed} /></React.StrictMode>);
+      expect(host.querySelector('.empty-state__title')).toBeNull();
+      render(<React.StrictMode><Tabs tabs={tabs} active="empty" onChange={changed} /></React.StrictMode>);
+      expect(host.querySelector('.empty-state__title[role="heading"][aria-level="2"]')?.textContent).toBe(title);
+    }
+  });
+
   it('namespaces duplicate tab IDs, links panels and translates keyboard callbacks', () => {
     const changed = vi.fn();
     const tabs = [{ id: 'overview', label: 'Overview', panel: 'First panel' }, { id: 'detail', label: 'Detail', panel: 'Second panel' }];

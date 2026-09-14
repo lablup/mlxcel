@@ -1,6 +1,6 @@
 // Copyright 2025-2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 import { expect, test } from '@playwright/test';
-import { expectAxeClean, expectSafeLayout } from './browser-assertions';
+import { expectAxeClean, expectEmptyStateHeading, expectSafeLayout } from './browser-assertions';
 
 for (const theme of ['light', 'dark'] as const) {
   test(`renders common controls under actual served CSP without external requests (${theme})`, async ({ page }) => {
@@ -38,7 +38,7 @@ for (const theme of ['light', 'dark'] as const) {
       await page.keyboard.press('Escape'); await expect(select).toBeFocused();
     }
     await page.getByRole('tab', { name: 'States', exact: true }).click();
-    await expect(page.getByTestId('gallery-empty').getByRole('heading', { level: 2 })).toBeVisible();
+    await expectEmptyStateHeading(page);
     const determinate = page.locator('[role="progressbar"][aria-valuenow]').first();
     const ratio = await determinate.evaluate((element) => {
       const fill = element.querySelector('.progress-bar__fill');

@@ -55,8 +55,10 @@ function StatePanel(props: { locale: Locale }): React.JSX.Element {
       <SchemaMismatchView title={t(props.locale, 'state.schema_mismatch.title')} body={t(props.locale, 'state.schema_mismatch.body')} actionLabel={t(props.locale, 'common.reload')} onRecover={() => undefined} />
       <EmptyState title={t(props.locale, 'models.empty.title')} body={t(props.locale, 'models.empty.body')} action={<Button tone="primary">{t(props.locale, 'common.add_model')}</Button>} testId="gallery-empty" />
       <ErrorBanner tone="warning" title={t(props.locale, 'gallery.states.load_failed')} body={t(props.locale, 'gallery.states.load_failed_body')} action={<Button>{t(props.locale, 'common.retry')}</Button>} />
+      <div className="gallery-progress-samples">
       <ProgressBar label={t(props.locale, 'gallery.download')} detail={t(props.locale, 'activity.progress.indeterminate', { bytes: formatBytes(64 * 1024 * 1024, props.locale) })} />
       <ProgressBar label={t(props.locale, 'gallery.progress.measured')} value={37} />
+      </div>
       <DenseList label={t(props.locale, 'gallery.lifecycle.samples')}><li><StatusBadge state="loading">{t(props.locale, 'models.status.loading')}</StatusBadge></li><li><StatusBadge state="draining">{t(props.locale, 'models.status.draining')}</StatusBadge></li><li><StatusBadge state="unloading">{t(props.locale, 'models.status.unloading')}</StatusBadge></li></DenseList>
     </div>
   );

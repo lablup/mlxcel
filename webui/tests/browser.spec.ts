@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { expectAxeClean, expectCompactToolbarHitTargets, expectDataTableColumnsVisible, expectLocatorWithinViewportX, expectSafeLayout, expectTextScaleLabelsReachable, expectTextScalePanelsReflow, pressQuestionShortcut, reportFontDiagnostics } from './browser-assertions';
+import { expectAxeClean, expectEmptyStateHeading, expectCompactToolbarHitTargets, expectDataTableColumnsVisible, expectLocatorWithinViewportX, expectSafeLayout, expectTextScaleLabelsReachable, expectTextScalePanelsReflow, pressQuestionShortcut, reportFontDiagnostics } from './browser-assertions';
 import { bootGallery, bootProduct, browserStorageDump, gotoGalleryWithoutReload, installAbortRecorder, installMockApi, loadProductionCss, loginWithMockApi, productVariants, readAbortLog, selectGalleryTab, settleAnimationFrame, submitSessionKey, variants } from './browser-fixtures';
 
 test.describe('design system gallery and shell', () => {
@@ -8,7 +8,30 @@ test.describe('design system gallery and shell', () => {
       await bootGallery(page, variant);
       await expectAxeClean(page);
       await expectSafeLayout(page);
-      if (variant.tab === 'states') await expect(page.getByTestId('gallery-empty').getByRole('heading', { level: 2 })).toBeVisible();
+      if (variant.tab === 'states') {
+        // Reopening common Tabs must reapply the product's heading hierarchy.
+        for (let mount = 0; mount < 3; mount++) {
+          await expectEmptyStateHeading(page);
+          if (mount < 2) {
+            await selectGalleryTab(page, 'controls');
+            await selectGalleryTab(page, 'states');
+            await expectAxeClean(page);
+          }
+        }
+      }
+      if (variant.tab === 'states') {
+        const progress = page.locator('.gallery-progress-samples');
+        await expect(progress.getByRole('progressbar')).toHaveCount(2);
+        const status = page.locator('.ds-status').first();
+        await expect(status).toHaveCSS('text-transform', 'none');
+        const layout = await progress.evaluate((element) => {
+          const samples = element.nextElementSibling;
+          if (!samples) throw new Error('Missing lifecycle samples');
+          return { progress: element.getBoundingClientRect().toJSON(), samples: samples.getBoundingClientRect().toJSON() };
+        });
+        expect(layout.progress.y).toBe(layout.samples.y);
+        expect(layout.progress.right).toBeLessThan(layout.samples.left);
+      }
       if (variant.width > 960) await expect(page.getByTestId('toolbar-menu')).toBeHidden();
       if (variant.width <= 560) await expectCompactToolbarHitTargets(page);
       if (variant.tab === 'data' && variant.width >= 1024) await expectDataTableColumnsVisible(page);

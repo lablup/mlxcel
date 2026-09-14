@@ -1,6 +1,31 @@
 import { AxeBuilder } from '@axe-core/playwright';
 import { expect, type Locator, type Page } from '@playwright/test';
 
+// Playwright 1.63's role locator prefers the native h3 level over aria-level.
+// Assert Chromium's actual accessibility tree instead, not that locator's model.
+export async function expectEmptyStateHeading(page: Page): Promise<void> {
+  const selector = '[data-testid="gallery-empty"] .empty-state__title';
+  const heading = page.locator(selector);
+  await expect(heading).toBeVisible();
+  await expect(heading).toHaveAttribute('role', 'heading');
+  await expect(heading).toHaveAttribute('aria-level', '2');
+  const name = await heading.innerText();
+  const session = await page.context().newCDPSession(page);
+  try {
+    const { root } = await session.send('DOM.getDocument');
+    const { nodeId } = await session.send('DOM.querySelector', { nodeId: root.nodeId, selector });
+    expect(nodeId).toBeGreaterThan(0);
+    const { nodes } = await session.send('Accessibility.getPartialAXTree', { nodeId, fetchRelatives: false });
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0].ignored).toBe(false);
+    expect(nodes[0].role?.value).toBe('heading');
+    expect(nodes[0].name?.value).toBe(name);
+    expect(nodes[0].properties?.find((property) => property.name === 'level')?.value.value).toBe(2);
+  } finally {
+    await session.detach();
+  }
+}
+
 export async function expectDataTableColumnsVisible(page: Page): Promise<void> {
   const metrics = await page.locator('.ds-table').evaluate((table) => {
     const element = table as HTMLElement;
