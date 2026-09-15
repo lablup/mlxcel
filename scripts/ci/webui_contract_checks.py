@@ -409,7 +409,7 @@ def check_transition_fixtures() -> None:
         ("loading", "loader_error", "failed"),
         ("loading", "unload", "draining"),
         ("ready", "unload", "draining"),
-        ("ready", "explicit_eviction", "draining"),
+        ("ready", "explicit_eviction_with_target_revision", "draining"),
         ("draining", "requests_complete", "unloading"),
         ("unloading", "worker_exit_observed", "unloaded"),
         ("failed", "retry_after_worker_absent", "loading"),
@@ -423,7 +423,7 @@ def check_transition_fixtures() -> None:
     expected_keys = {
         "duplicate_load": {"single_operation"},
         "load_unload_race": {"worker_exit_required", "continuous"},
-        "busy_eviction": {"surprise_eviction"},
+        "busy_eviction": {"surprise_eviction", "stale_victim_revision_rejected_before_unload"},
         "stale_revision": {"refresh_required"},
         "failed_load": {"resource_owner_absent_precondition"},
         "download_cancel": {"final_state", "indeterminate_not_percent"},
@@ -435,7 +435,7 @@ def check_transition_fixtures() -> None:
     given_keys = {
         "duplicate_load": {"model_id", "revision"},
         "load_unload_race": {"model_id", "revision"},
-        "busy_eviction": {"model_id", "eviction_target_id"},
+        "busy_eviction": {"model_id", "eviction_target_id", "eviction_target_expected_revision"},
         "stale_revision": {"model_id", "client_revision", "server_revision"},
         "failed_load": {"model_id"},
         "download_cancel": {"operation_id", "progress"},

@@ -22,12 +22,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::{
-    RouterModelSource, RouterModelStatus, RouterPool, RouterPoolError, RouterSources,
-    discover_models,
+    ModelActionEvictionTarget, RouterModelSource, RouterModelStatus, RouterPool, RouterPoolError,
+    RouterSources, discover_models,
 };
 use crate::downloader::DownloadHooks;
 use crate::server::ServerStartupConfig;
 use crate::server::router_cache::{CacheSource, RouterDownloader};
+use crate::server::router_lifecycle::ModelLifecycleState;
 use crate::server::router_presets::{PresetCliOverrides, parse_preset_text};
 
 fn temp_models_dir(tag: &str) -> PathBuf {
@@ -1414,6 +1415,46 @@ async fn ui_load_requires_explicit_eviction_when_capacity_is_reserved() {
 }
 
 #[tokio::test]
+async fn ui_load_rejects_stale_eviction_target_revision_before_unload() {
+    let root = temp_models_dir("ui-stale-eviction-target");
+    add_fake_model(&root, "resident");
+    add_fake_model(&root, "candidate");
+    let pool = Arc::new(pool(root, 1, true));
+    let resident = pool.get("resident").expect("resident");
+    resident.lifecycle.mark_ready();
+    let target_id = resident.ui_model_id.clone();
+    let stale_target_revision = resident.lifecycle_revision();
+    resident.lifecycle.mark_loading();
+    resident.lifecycle.mark_ready();
+    assert_ne!(resident.lifecycle_revision(), stale_target_revision);
+    let candidate = pool.get("candidate").expect("candidate");
+
+    let err = pool
+        .submit_model_action(
+            &candidate.ui_model_id,
+            super::RouterModelAction::Load,
+            candidate.lifecycle_revision(),
+            "stale-victim-0001",
+            Some(ModelActionEvictionTarget::new(
+                &target_id,
+                stale_target_revision,
+            )),
+        )
+        .expect_err("stale eviction target revision must be rejected");
+    let error = match err {
+        RouterPoolError::OperationRejected(error) => error,
+        other => panic!("unexpected error: {other:?}"),
+    };
+    assert_eq!(error.code, "stale_revision");
+    let field_errors = error.field_errors.expect("field error");
+    let field = &field_errors[0];
+    assert_eq!(field.field, "eviction_target_expected_revision");
+    assert_eq!(field.code, "stale");
+    assert_eq!(resident.lifecycle.state(), ModelLifecycleState::Ready);
+    assert_eq!(resident.ui_model_id, target_id);
+}
+
+#[tokio::test]
 async fn rescan_and_remove_preserve_reserved_entries_until_release() {
     let cache_root = temp_models_dir("reserved-cache");
     add_fake_model(&cache_root.join("mlx-community"), "reserved");
@@ -2024,7 +2065,7 @@ async fn queued_ui_load_rejects_same_id_recreated_eviction_target_before_executi
             super::RouterModelAction::Load,
             candidate_revision,
             "queued-target-same-id-0001",
-            Some(&target_id),
+            Some(ModelActionEvictionTarget::new(&target_id, target_revision)),
         )
         .expect("accepted");
     entered_rx.recv().expect("background reached hook");
@@ -2073,6 +2114,7 @@ async fn queued_ui_load_rejects_different_id_eviction_target_same_name_before_ex
     let resident = pool.get("resident").expect("resident");
     assert_eq!(resident.source, RouterModelSource::Cache);
     let target_id = resident.ui_model_id.clone();
+    let target_revision = resident.lifecycle_revision();
 
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -2092,7 +2134,7 @@ async fn queued_ui_load_rejects_different_id_eviction_target_same_name_before_ex
             super::RouterModelAction::Load,
             candidate_revision,
             "queued-target-different-id-0001",
-            Some(&target_id),
+            Some(ModelActionEvictionTarget::new(&target_id, target_revision)),
         )
         .expect("accepted");
     entered_rx.recv().expect("background reached hook");

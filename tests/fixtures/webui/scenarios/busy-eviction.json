@@ -3,7 +3,8 @@
   "description": "Capacity eviction requires explicit target and preserves busy resources.",
   "given": {
     "model_id": "mdl_lR1nHQwFUguxLqHbEzH2DJLdZYiDFJ0S3FzxIzY5MUU",
-    "eviction_target_id": "mdl_uB9xAUQSKlrb9ELybOgV-92lVC7XjiMXju6pwZZBbAU"
+    "eviction_target_id": "mdl_uB9xAUQSKlrb9ELybOgV-92lVC7XjiMXju6pwZZBbAU",
+    "eviction_target_expected_revision": 4
   },
   "steps": [
     {
@@ -24,7 +25,7 @@
     },
     {
       "from": "ready",
-      "action": "explicit_eviction",
+      "action": "explicit_eviction_with_target_revision",
       "to": "draining",
       "http_status": 202,
       "event": "operation",
@@ -33,6 +34,7 @@
     }
   ],
   "expected": {
-    "surprise_eviction": false
+    "surprise_eviction": false,
+    "stale_victim_revision_rejected_before_unload": true
   }
 }

@@ -79,14 +79,20 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
       setBusy(false);
     }
   };
-  const load = (entry: CatalogEntry, evictionTarget?: string, profile: LoadProfile = selectedProfile): void => {
+  const load = (
+    entry: CatalogEntry,
+    evictionTarget?: { id: string; revision: number },
+    profile: LoadProfile = selectedProfile,
+  ): void => {
     if (!canLoad(state, entry)) {
       setError(t(locale, 'models.library.stale'));
       return;
     }
     if (
       evictionTarget &&
-      !evictionCandidates(state, entry.identity.id).some((candidate) => candidate.identity.id === evictionTarget)
+      !evictionCandidates(state, entry.identity.id).some(
+        (candidate) => candidate.identity.id === evictionTarget.id && candidate.identity.revision === evictionTarget.revision,
+      )
     ) {
       setError(t(locale, 'models.library.stale'));
       return;
@@ -99,7 +105,12 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
           model_id: entry.identity.id,
           expected_revision: entry.identity.revision,
           idempotency_key: crypto.randomUUID(),
-          ...(evictionTarget ? { eviction_target_id: evictionTarget } : {}),
+          ...(evictionTarget
+            ? {
+                eviction_target_id: evictionTarget.id,
+                eviction_target_expected_revision: evictionTarget.revision,
+              }
+            : {}),
         }),
       (failure) => {
         if (failure instanceof WebUiHttpError && failure.envelope?.error.code === 'conflict')
@@ -139,7 +150,13 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
           setError(t(locale, 'models.library.stale'));
           return;
         }
-        load(entry, evictionTarget, capacityProfile);
+        load(
+          entry,
+          evictionTarget && evictionRevision !== undefined
+            ? { id: evictionTarget, revision: evictionRevision }
+            : undefined,
+          capacityProfile,
+        );
       } else if (value.kind === 'unload' && canUnload(state, entry))
         void execute(() =>
           actions.unloadModel({

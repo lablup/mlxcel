@@ -1044,6 +1044,7 @@ async fn ui_operations_routes_list_get_and_report_cancel_unsupported() {
                 model_id: entry.ui_model_id.clone(),
                 requested_revision: Some(entry.lifecycle_revision()),
                 eviction_target_id: Some(eviction_entry.ui_model_id.clone()),
+                eviction_target_expected_revision: Some(eviction_entry.lifecycle_revision()),
             },
             Some("route-ops-0001"),
             "route:ops:1".to_string(),
@@ -1207,6 +1208,7 @@ async fn ui_model_action_route_validates_profile_fields_and_idempotency() {
         "action": "load",
         "expected_revision": entry.lifecycle_revision(),
         "idempotency_key": "profile-load-0001",
+        "eviction_target_expected_revision": entry.lifecycle_revision(),
         "load_profile": {
             "ctx_size": 8192,
             "n_parallel": 4,
@@ -1346,9 +1348,41 @@ async fn ui_model_action_route_rejects_contract_invalid_fields() {
                 "action": "load",
                 "expected_revision": revision,
                 "idempotency_key": "valid-key-0003",
-                "eviction_target_id": "mdl_short"
+                "eviction_target_id": "mdl_short",
+                "eviction_target_expected_revision": revision
             }),
             "eviction_target_id",
+        ),
+        (
+            serde_json::json!({
+                "model_id": model_id.clone(),
+                "action": "load",
+                "expected_revision": revision,
+                "idempotency_key": "valid-key-0006",
+                "eviction_target_id": model_id.clone()
+            }),
+            "eviction_target_expected_revision",
+        ),
+        (
+            serde_json::json!({
+                "model_id": model_id.clone(),
+                "action": "load",
+                "expected_revision": revision,
+                "idempotency_key": "valid-key-0007",
+                "eviction_target_expected_revision": revision
+            }),
+            "eviction_target_expected_revision",
+        ),
+        (
+            serde_json::json!({
+                "model_id": model_id.clone(),
+                "action": "load",
+                "expected_revision": revision,
+                "idempotency_key": "valid-key-0008",
+                "eviction_target_id": model_id.clone(),
+                "eviction_target_expected_revision": 0
+            }),
+            "eviction_target_expected_revision",
         ),
         (
             serde_json::json!({

@@ -87,6 +87,6 @@ it('loads the confirmation target profile even after selection changes, using th
     select.value = idle.identity.id; select.dispatchEvent(new Event('change', { bubbles: true }));
   });
   await click('models-confirm-submit');
-  expect(actions.loadModel.mock.calls[1][0]).toMatchObject({ model_id: target.identity.id, eviction_target_id: idle.identity.id, load_profile: { ctx_size: 4096, n_parallel: 2 } });
+  expect(actions.loadModel.mock.calls[1][0]).toMatchObject({ model_id: target.identity.id, eviction_target_id: idle.identity.id, eviction_target_expected_revision: idle.identity.revision, load_profile: { ctx_size: 4096, n_parallel: 2 } });
   expect(actions.loadModel).toHaveBeenCalledTimes(2);
 });

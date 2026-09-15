@@ -252,6 +252,7 @@ describe('reviewed asynchronous recovery paths', () => {
     expect(actions.loadModel).toHaveBeenCalledTimes(2);
     expect(actions.loadModel.mock.calls[1][0]).toMatchObject({
       eviction_target_id: 'idle-target',
+      eviction_target_expected_revision: 4,
       expected_revision: 4,
     });
   });

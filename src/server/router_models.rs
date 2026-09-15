@@ -408,9 +408,30 @@ pub struct RouterPool {
     load_after_reservation_hook: Mutex<Option<LoadAfterReservationHook>>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ModelActionEvictionTarget<'a> {
+    pub model_id: &'a str,
+    pub expected_revision: u64,
+}
+
+impl<'a> ModelActionEvictionTarget<'a> {
+    pub fn new(model_id: &'a str, expected_revision: u64) -> Self {
+        Self {
+            model_id,
+            expected_revision,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct OwnedModelActionEvictionTarget {
+    model_id: String,
+    expected_revision: u64,
+}
+
 #[derive(Default)]
 struct ModelActionLoadOptions {
-    eviction_target_id: Option<String>,
+    eviction_target: Option<OwnedModelActionEvictionTarget>,
     #[cfg(feature = "webui")]
     profile: Option<super::webui::load_profile::UiLoadProfile>,
 }
@@ -1335,7 +1356,10 @@ impl RouterPool {
             let mut explicit_victim = eviction_target.cloned();
             while self.running_count() >= self.models_max {
                 let (victim, victim_expectation) = if let Some(target) = explicit_victim.take() {
-                    self.ensure_entry_is_current(&target.entry, Some(&target.expectation))?;
+                    self.ensure_entry_is_current(&target.entry, Some(&target.expectation))
+                        .map_err(|err| {
+                            retarget_router_error_field(err, "eviction_target_expected_revision")
+                        })?;
                     let victim = target.entry.clone();
                     if victim.name == entry.name {
                         return Err(RouterPoolError::Capacity(
@@ -1705,7 +1729,7 @@ impl RouterPool {
         action: RouterModelAction,
         expected_revision: u64,
         idempotency_key: &str,
-        eviction_target_id: Option<&str>,
+        eviction_target: Option<ModelActionEvictionTarget<'_>>,
     ) -> Result<super::router_lifecycle::OperationAccepted, RouterPoolError> {
         self.submit_model_action_options(
             model_id,
@@ -1713,7 +1737,10 @@ impl RouterPool {
             expected_revision,
             idempotency_key,
             ModelActionLoadOptions {
-                eviction_target_id: eviction_target_id.map(str::to_owned),
+                eviction_target: eviction_target.map(|target| OwnedModelActionEvictionTarget {
+                    model_id: target.model_id.to_string(),
+                    expected_revision: target.expected_revision,
+                }),
                 #[cfg(feature = "webui")]
                 profile: None,
             },
@@ -1727,7 +1754,7 @@ impl RouterPool {
         action: RouterModelAction,
         expected_revision: u64,
         idempotency_key: &str,
-        eviction_target_id: Option<&str>,
+        eviction_target: Option<ModelActionEvictionTarget<'_>>,
         profile: Option<super::webui::load_profile::UiLoadProfile>,
     ) -> Result<super::router_lifecycle::OperationAccepted, RouterPoolError> {
         self.submit_model_action_options(
@@ -1736,7 +1763,10 @@ impl RouterPool {
             expected_revision,
             idempotency_key,
             ModelActionLoadOptions {
-                eviction_target_id: eviction_target_id.map(str::to_owned),
+                eviction_target: eviction_target.map(|target| OwnedModelActionEvictionTarget {
+                    model_id: target.model_id.to_string(),
+                    expected_revision: target.expected_revision,
+                }),
                 profile: profile.filter(|profile| profile.has_overrides()),
             },
         )
@@ -1750,14 +1780,37 @@ impl RouterPool {
         idempotency_key: &str,
         options: ModelActionLoadOptions,
     ) -> Result<super::router_lifecycle::OperationAccepted, RouterPoolError> {
-        let eviction_target_id = options.eviction_target_id.as_deref();
+        let eviction_target_id = options
+            .eviction_target
+            .as_ref()
+            .map(|target| target.model_id.as_str());
+        let eviction_target_expected_revision = options
+            .eviction_target
+            .as_ref()
+            .map(|target| target.expected_revision);
+        if eviction_target_expected_revision == Some(0) {
+            return Err(RouterPoolError::OperationRejected(ErrorBody {
+                code: "invalid_request".to_string(),
+                message: "eviction target expected revision must be at least 1".to_string(),
+                retryable: false,
+                field_errors: Some(vec![super::router_lifecycle::FieldError {
+                    field: "eviction_target_expected_revision".to_string(),
+                    code: "out_of_range".to_string(),
+                    message: "eviction_target_expected_revision must be at least 1".to_string(),
+                }]),
+                operation_id: None,
+            }));
+        }
         let kind = match action {
             RouterModelAction::Load => OperationKind::ModelLoad,
             RouterModelAction::Unload => OperationKind::ModelUnload,
         };
         let fingerprint = format!(
-            "{kind:?}:{model_id}:{expected_revision}:{}",
-            eviction_target_id.unwrap_or("")
+            "{kind:?}:{model_id}:{expected_revision}:{}:{}",
+            eviction_target_id.unwrap_or(""),
+            eviction_target_expected_revision
+                .map(|revision| revision.to_string())
+                .unwrap_or_default()
         );
         // Request identity includes the profile even when CLI precedence masks a value.
         #[cfg(feature = "webui")]
@@ -1770,6 +1823,7 @@ impl RouterPool {
                     model_id: model_id.to_string(),
                     requested_revision: Some(expected_revision),
                     eviction_target_id: eviction_target_id.map(ToString::to_string),
+                    eviction_target_expected_revision,
                 },
                 Some(idempotency_key),
                 fingerprint,
@@ -1863,15 +1917,36 @@ impl RouterPool {
         #[cfg(not(feature = "webui"))]
         let load_config = None;
 
-        let eviction_target = match eviction_target_id {
-            Some(target_id) => match self.get_by_model_id(target_id) {
-                Some(target) => Some(EvictionTarget {
-                    expectation: LoadEntryExpectation {
+        let eviction_target = match options.eviction_target.as_ref() {
+            Some(requested_target) => match self.get_by_model_id(&requested_target.model_id) {
+                Some(target) => {
+                    let expectation = LoadEntryExpectation {
                         model_id: target.ui_model_id.clone(),
-                        revision: target.lifecycle.revision(),
-                    },
-                    entry: target,
-                }),
+                        revision: requested_target.expected_revision,
+                    };
+                    if let Err(err) = self.ensure_entry_is_current(&target, Some(&expectation)) {
+                        let error = retarget_field_error(
+                            operation_error_for_router_error(&err, accepted.operation_id.clone()),
+                            "eviction_target_expected_revision",
+                        );
+                        self.lifecycle.update_operation(
+                            &accepted.operation_id,
+                            OperationState::Failed,
+                            None,
+                            Some(error.clone()),
+                        );
+                        return Err(match err {
+                            RouterPoolError::OperationRejected(_) => {
+                                RouterPoolError::OperationRejected(error)
+                            }
+                            other => other,
+                        });
+                    }
+                    Some(EvictionTarget {
+                        expectation,
+                        entry: target,
+                    })
+                }
                 None => {
                     let error = ErrorBody {
                         code: "not_found".to_string(),
@@ -1888,7 +1963,7 @@ impl RouterPool {
                         None,
                         Some(error),
                     );
-                    return Err(RouterPoolError::NotFound(target_id.to_string()));
+                    return Err(RouterPoolError::NotFound(requested_target.model_id.clone()));
                 }
             },
             None => None,
@@ -2210,6 +2285,24 @@ impl RouterPool {
             Err(err) => match err {},
         }
     }
+}
+
+fn retarget_router_error_field(err: RouterPoolError, field: &str) -> RouterPoolError {
+    match err {
+        RouterPoolError::OperationRejected(error) => {
+            RouterPoolError::OperationRejected(retarget_field_error(error, field))
+        }
+        other => other,
+    }
+}
+
+fn retarget_field_error(mut error: ErrorBody, field: &str) -> ErrorBody {
+    if let Some(field_errors) = error.field_errors.as_mut() {
+        for field_error in field_errors {
+            field_error.field = field.to_string();
+        }
+    }
+    error
 }
 
 fn stale_catalog_error(expected_revision: Option<u64>, current_revision: u64) -> ErrorBody {
@@ -2798,6 +2891,7 @@ impl RouterPool {
             model_id: model_id.to_string(),
             requested_revision: Some(expected_revision),
             eviction_target_id: None,
+            eviction_target_expected_revision: None,
         };
         let fingerprint = format!("model_removal:{model_id}:{expected_revision}");
         let accepted = self

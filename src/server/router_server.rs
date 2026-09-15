@@ -53,7 +53,7 @@ use super::router_lifecycle::{
     OperationResult, OperationState, OperationTarget,
 };
 #[cfg(feature = "webui")]
-use super::router_models::RouterModelAction;
+use super::router_models::{ModelActionEvictionTarget, RouterModelAction};
 use super::router_models::{ROUTER_SHUTDOWN_TIMEOUT, RouterPool, RouterPoolError};
 use super::routes::slots::{llama_error_response, llama_invalid_request};
 
@@ -949,6 +949,7 @@ struct UiModelActionRequest {
     idempotency_key: String,
     load_profile: Option<UiLoadProfile>,
     eviction_target_id: Option<String>,
+    eviction_target_expected_revision: Option<u64>,
 }
 
 #[cfg(feature = "webui")]
@@ -994,6 +995,33 @@ async fn ui_model_actions(
     {
         return response;
     }
+    match (
+        request.eviction_target_id.as_ref(),
+        request.eviction_target_expected_revision,
+    ) {
+        (Some(_), None) => {
+            return invalid_webui_field(
+                "eviction_target_expected_revision",
+                "required",
+                "eviction_target_expected_revision is required when eviction_target_id is set",
+            );
+        }
+        (None, Some(_)) => {
+            return invalid_webui_field(
+                "eviction_target_expected_revision",
+                "unexpected",
+                "eviction_target_expected_revision requires eviction_target_id",
+            );
+        }
+        (_, Some(0)) => {
+            return invalid_webui_field(
+                "eviction_target_expected_revision",
+                "out_of_range",
+                "eviction_target_expected_revision must be at least 1",
+            );
+        }
+        _ => {}
+    }
     if let Some(profile) = request.load_profile.as_ref()
         && let Some(response) = validate_load_profile(profile)
     {
@@ -1016,12 +1044,17 @@ async fn ui_model_actions(
     // duplicate/over-capacity requests never reach metadata/config reads.
     let pool = state.pool.clone();
     let result = tokio::task::spawn_blocking(move || {
+        let eviction_target = request
+            .eviction_target_id
+            .as_deref()
+            .zip(request.eviction_target_expected_revision)
+            .map(|(target_id, revision)| ModelActionEvictionTarget::new(target_id, revision));
         pool.submit_model_action_with_profile(
             &request.model_id,
             ui_action_to_router(&request.action),
             request.expected_revision,
             &request.idempotency_key,
-            request.eviction_target_id.as_deref(),
+            eviction_target,
             request.load_profile,
         )
     })
