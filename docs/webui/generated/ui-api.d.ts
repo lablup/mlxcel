@@ -332,6 +332,7 @@ export interface RuntimeSnapshot {
   readonly measurements: Record<string, MeasuredValue>;
   readonly settings: RuntimeSettingsReport;
   readonly snapshot_sequence: EventSequence;
+  readonly slots: RuntimeSlots;
 }
 
 export type UiEvent = SnapshotEvent | ModelRevisionEvent | OperationEvent | DownloadProgressEvent | RuntimeEvent | SettingsEvent | ResetEvent | GapEvent | ServerRestartEvent | HeartbeatEvent;
@@ -581,4 +582,23 @@ export interface CatalogMetadataUnknownReasons {
   readonly parameter_count?: string | null;
   readonly disk_bytes?: string | null;
   readonly memory_estimate_bytes?: string | null;
+}
+
+export interface RuntimeSlot {
+  readonly id: number;
+  readonly processing: boolean;
+  readonly prompt_tokens: number | null;
+  readonly cached_prompt_tokens: number | null;
+  readonly decoded_tokens: number | null;
+}
+
+export interface RuntimeSlots {
+  readonly available: boolean;
+  readonly reason: string | null;
+  readonly measured_at: string | null;
+  readonly configured_parallelism: number;
+  readonly effective_parallelism: number | null;
+  readonly request_context_tokens: number | null;
+  readonly shared_pool_context_tokens: number | null;
+  readonly items: ReadonlyArray<RuntimeSlot>;
 }

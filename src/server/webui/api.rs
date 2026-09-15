@@ -20,8 +20,7 @@ use std::path::PathBuf;
 use serde::Serialize;
 
 use crate::server::router_lifecycle::{
-    FieldError, MeasuredValue, RuntimeSettingValue, RuntimeSettingsReport, RuntimeSnapshot,
-    SCHEMA_VERSION,
+    FieldError, RuntimeSettingValue, RuntimeSettingsReport, SCHEMA_VERSION,
 };
 use crate::server::{ServerConfig, ServerStartupConfig};
 
@@ -308,46 +307,7 @@ pub(crate) fn limit_summary() -> LimitSummary {
     }
 }
 
-pub(crate) fn runtime_snapshot(
-    server_instance_id: String,
-    model_id: String,
-    revision: u64,
-    snapshot_sequence: u64,
-    config: &ServerConfig,
-) -> RuntimeSnapshot {
-    let mut measurements = BTreeMap::new();
-    measurements.insert(
-        "gpu_utilization".to_string(),
-        MeasuredValue {
-            value: None,
-            unit: "percent".to_string(),
-            scope: "unknown".to_string(),
-            measured_at: None,
-            reason: Some("not measured by mlxcel".to_string()),
-        },
-    );
-    measurements.insert(
-        "ttft".to_string(),
-        MeasuredValue {
-            value: None,
-            unit: "ms".to_string(),
-            scope: "model".to_string(),
-            measured_at: None,
-            reason: Some("no request timing sample is available for this model".to_string()),
-        },
-    );
-    RuntimeSnapshot {
-        schema_version: SCHEMA_VERSION.to_string(),
-        server_instance_id,
-        model_id,
-        revision: revision.max(1),
-        snapshot_sequence,
-        measurements,
-        settings: settings_report(config),
-    }
-}
-
-fn settings_report(config: &ServerConfig) -> RuntimeSettingsReport {
+pub(super) fn settings_report(config: &ServerConfig) -> RuntimeSettingsReport {
     let mut effective = BTreeMap::new();
     effective.insert(
         "ctx_size".to_string(),

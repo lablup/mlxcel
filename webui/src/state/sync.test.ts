@@ -75,7 +75,7 @@ function makeImmediateFetch(methods?: string[]): typeof fetch {
     const url = String(input);
     if (url.includes('/events')) return new Response(streamDone(), { status: 200 });
     if (url.endsWith('/bootstrap')) return new Response(JSON.stringify(bootstrap));
-    if (url.includes('/catalog')) return new Response(JSON.stringify(catalogFixture));
+    if (url.includes('/catalog')) return new Response(JSON.stringify({ ...catalogFixture, items: catalogFixture.items.map((entry, i) => i === 0 ? { ...entry, identity: { ...entry.identity, id: runtimeFixture.model_id } } : entry) }));
     if (url.includes('/runtime')) return new Response(JSON.stringify(runtimeFixture));
     return new Response(JSON.stringify(operations));
   };
@@ -101,7 +101,7 @@ describe('WebUI synchronizer', () => {
     const sync = new WebUiSynchronizer({ client: new WebUiApiClient({ fetchImpl }), clock, visibility: visibleSource(() => false), getSnapshot: () => snapshot, dispatch: (action) => { snapshot = reduceWebUiSnapshot(snapshot, action); } });
     sync.start();
     clock.runOne();
-    expect(clock.count()).toBe(0);
+    expect(clock.count()).toBe(1); // The bounded observation timeout is active.
     await Promise.resolve();
     expect(maxActive).toBe(1);
     release();
@@ -139,14 +139,14 @@ describe('WebUI synchronizer', () => {
     sync.dispose();
   });
 
-  it('uses the hidden-tab polling interval after a successful refresh', async () => {
+  it('does not keep a polling timer for a hidden tab after an explicit refresh', async () => {
     const clock = new FakeClock();
     let snapshot = reduceWebUiSnapshot(initialSnapshot(), { type: 'login-success', bootstrap, now: 0 });
     const sync = new WebUiSynchronizer({ client: new WebUiApiClient({ fetchImpl: makeImmediateFetch() }), clock, visibility: visibleSource(() => true), getSnapshot: () => snapshot, dispatch: (action) => { snapshot = reduceWebUiSnapshot(snapshot, action); } });
     sync.start();
-    clock.runOne();
+    await sync.refresh();
     await new Promise((resolve) => globalThis.setTimeout(resolve, 0));
-    expect(clock.delays).toContain(30_000);
+    expect(clock.count()).toBe(0);
     sync.dispose();
   });
 
@@ -258,4 +258,94 @@ describe('WebUI synchronizer', () => {
     expect([...snapshot.operations.keys()].sort()).toEqual(['op_second', operations.items[0].operation_id].sort());
     sync.dispose();
   });
+  it('tears down hidden observation and selection requests without aborting inference', async () => {
+    const clock = new FakeClock();
+    let hidden = false;
+    let notify = (): void => undefined;
+    let unsubscribed = false;
+    let requestSignal: AbortSignal | null | undefined;
+    const inference = new AbortController();
+    let inferenceSignal: AbortSignal | null | undefined;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      if (String(input).includes('/v1/chat/completions')) {
+        inferenceSignal = init?.signal;
+        return new Response(new ReadableStream());
+      }
+      requestSignal = init?.signal;
+      return await new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true }));
+    };
+    let snapshot = reduceWebUiSnapshot(initialSnapshot(), { type: 'login-success', bootstrap, now: 0 });
+    const visibility: VisibilitySource = { hidden: () => hidden, subscribe: (callback) => { notify = callback; return () => { unsubscribed = true; }; } };
+    const client = new WebUiApiClient({ fetchImpl });
+    const turn = client.chatCompletions('inference-model', {}, { onFrame: () => undefined }, inference.signal).catch((error: unknown) => error);
+    const sync = new WebUiSynchronizer({ client, clock, visibility, getSnapshot: () => snapshot, dispatch: (action) => { snapshot = reduceWebUiSnapshot(snapshot, action); } });
+    sync.start(); clock.runOne();
+    await Promise.resolve();
+    hidden = true; notify();
+    expect(requestSignal?.aborted).toBe(true);
+    expect(clock.count()).toBe(0);
+    expect(snapshot.connection).toBe('stale');
+    expect(inferenceSignal?.aborted).toBe(false);
+    hidden = false; notify(); clock.runOne();
+    await Promise.resolve();
+    sync.selectionChanged();
+    expect(requestSignal?.aborted).toBe(true);
+    expect(clock.count()).toBe(1);
+    sync.dispose();
+    expect(clock.count()).toBe(0);
+    expect(unsubscribed).toBe(true);
+    expect(inferenceSignal?.aborted).toBe(false);
+    inference.abort();
+    await turn; // Explicit inference abort cleanup; rejection semantics belong to the client tests.
+    expect(inferenceSignal?.aborted).toBe(true);
+  });
+
+  it('bounds a stalled observation with a ten-second timeout and stale state', async () => {
+    const clock = new FakeClock();
+    const fetchImpl: typeof fetch = async (_input, init) => await new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true }));
+    let snapshot = reduceWebUiSnapshot(initialSnapshot(), { type: 'login-success', bootstrap, now: 0 });
+    const sync = new WebUiSynchronizer({ client: new WebUiApiClient({ fetchImpl }), clock, visibility: visibleSource(() => false), getSnapshot: () => snapshot, dispatch: (action) => { snapshot = reduceWebUiSnapshot(snapshot, action); } });
+    sync.start(); clock.runOne();
+    expect(clock.delays).toContain(10_000);
+    clock.runOne();
+    expect(snapshot.error?.code).toBe('observation_timeout');
+    expect(snapshot.connection).toBe('stale');
+    await new Promise((resolve) => globalThis.setTimeout(resolve, 0));
+    expect(clock.count()).toBe(1);
+    sync.dispose();
+  });
+
+  it('clears removed selection only after all pages and skips runtime despite deferred React dispatch', async () => {
+    const selected = 'mdl_removed';
+    let snapshot = reduceWebUiSnapshot(initialSnapshot(), { type: 'login-success', bootstrap, now: 0 });
+    snapshot = { ...snapshot, selectedModelId: selected };
+    const pendingActions: Parameters<typeof reduceWebUiSnapshot>[1][] = [];
+    const calls: string[] = [];
+    const sync = new WebUiSynchronizer({ client: new WebUiApiClient({ fetchImpl: makeImmediateFetch(calls) }), visibility: visibleSource(() => true), getSnapshot: () => snapshot, dispatch: (action) => { pendingActions.push(action); } });
+    await sync.refresh();
+    expect(calls.some((call) => call.includes('/runtime'))).toBe(false);
+    expect(pendingActions).toContainEqual({ type: 'select-model', modelId: null });
+    for (const action of pendingActions) snapshot = reduceWebUiSnapshot(snapshot, action);
+    expect(snapshot.selectedModelId).toBeNull();
+    expect(snapshot.connection).toBe('ready');
+    sync.dispose();
+  });
+
+  it('keeps a selected model found on a later complete catalog page', async () => {
+    let snapshot = reduceWebUiSnapshot(initialSnapshot(), { type: 'login-success', bootstrap, now: 0 });
+    snapshot = { ...snapshot, selectedModelId: runtimeFixture.model_id };
+    const fetchImpl: typeof fetch = async (input) => {
+      const url = String(input);
+      if (url.endsWith('/bootstrap')) return new Response(JSON.stringify(bootstrap));
+      if (url.includes('/catalog')) return new Response(JSON.stringify(url.includes('cursor=') ? { ...catalogFixture, items: [{ ...catalogFixture.items[0], identity: { ...catalogFixture.items[0].identity, id: runtimeFixture.model_id } }] } : { ...catalogFixture, items: [], pagination: { limit: 50, total_known: 1, next_cursor: 'next' } }));
+      if (url.includes('/runtime')) return new Response(JSON.stringify(runtimeFixture));
+      return new Response(JSON.stringify(operations));
+    };
+    const sync = new WebUiSynchronizer({ client: new WebUiApiClient({ fetchImpl }), visibility: visibleSource(() => true), getSnapshot: () => snapshot, dispatch: (action) => { snapshot = reduceWebUiSnapshot(snapshot, action); } });
+    await sync.refresh();
+    expect(snapshot.selectedModelId).toBe(runtimeFixture.model_id);
+    expect(snapshot.runtimes.has(runtimeFixture.model_id)).toBe(true);
+    sync.dispose();
+  });
+
 });

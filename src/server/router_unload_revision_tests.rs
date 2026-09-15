@@ -252,3 +252,29 @@ async fn legacy_unload_cleans_failed_worker_without_new_revision_precondition() 
     );
     assert!(fixture.entry.lifecycle_snapshot().worker_exit_observed);
 }
+
+#[cfg(feature = "webui")]
+#[test]
+fn runtime_observation_requires_current_revision_without_lru_or_lease_touch() {
+    let fixture = Fixture::new();
+    let revision = fixture.entry.lifecycle_revision();
+    let last_used = fixture.entry.last_used.load(Ordering::Relaxed);
+    let before = fixture.entry.lifecycle_snapshot();
+    assert!(fixture.entry.runtime_observation_state(revision).is_some());
+    assert!(
+        fixture
+            .entry
+            .runtime_observation_state(revision + 1)
+            .is_none()
+    );
+    assert_eq!(fixture.entry.last_used.load(Ordering::Relaxed), last_used);
+    assert_eq!(fixture.entry.lifecycle_snapshot(), before);
+    fixture.entry.lifecycle.begin_drain();
+    assert!(fixture.entry.runtime_observation_state(revision).is_none());
+    assert!(
+        fixture
+            .entry
+            .runtime_observation_state(fixture.entry.lifecycle_revision())
+            .is_some()
+    );
+}

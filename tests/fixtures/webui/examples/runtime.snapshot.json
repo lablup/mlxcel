@@ -36,5 +36,15 @@
         "message": "explicit CLI value remains authoritative"
       }
     ]
+  },
+  "slots": {
+    "available": false,
+    "reason": "slots disabled; restart with --slots",
+    "measured_at": null,
+    "configured_parallelism": 4,
+    "effective_parallelism": null,
+    "request_context_tokens": null,
+    "shared_pool_context_tokens": null,
+    "items": []
   }
 }

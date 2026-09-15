@@ -2398,7 +2398,8 @@
           "revision",
           "snapshot_sequence",
           "measurements",
-          "settings"
+          "settings",
+          "slots"
         ],
         "properties": {
           "schema_version": {
@@ -2427,6 +2428,9 @@
           "snapshot_sequence": {
             "$ref": "#/components/schemas/EventSequence",
             "description": "Single global event sequence after which this snapshot is authoritative."
+          },
+          "slots": {
+            "$ref": "#/components/schemas/RuntimeSlots"
           }
         }
       },
@@ -3540,6 +3544,117 @@
               "null"
             ],
             "maxLength": 512
+          }
+        }
+      },
+      "RuntimeSlot": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "processing",
+          "prompt_tokens",
+          "cached_prompt_tokens",
+          "decoded_tokens"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "processing": {
+            "type": "boolean"
+          },
+          "prompt_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "Current context occupancy from GET /slots n_prompt_tokens: includes processed prompt and accepted decoded tokens. Never add decoded_tokens again."
+          },
+          "cached_prompt_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "decoded_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          }
+        }
+      },
+      "RuntimeSlots": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "available",
+          "reason",
+          "measured_at",
+          "configured_parallelism",
+          "effective_parallelism",
+          "request_context_tokens",
+          "shared_pool_context_tokens",
+          "items"
+        ],
+        "properties": {
+          "available": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 256
+          },
+          "measured_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "configured_parallelism": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "effective_parallelism": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "request_context_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "shared_pool_context_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "items": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {
+              "$ref": "#/components/schemas/RuntimeSlot"
+            }
           }
         }
       }

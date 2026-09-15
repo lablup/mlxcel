@@ -178,6 +178,27 @@ impl SlotRegistry {
         handle
     }
 
+    /// WebUI projection reads only counters, even when debug text is retained.
+    /// A poisoned registry is unavailable, never an apparently empty/idle pool.
+    #[cfg(feature = "webui")]
+    pub(crate) fn runtime_snapshot(&self) -> Option<Vec<super::router_lifecycle::RuntimeSlot>> {
+        let slots = self.slots.lock().ok()?;
+        Some(
+            slots
+                .iter()
+                .take(256)
+                .enumerate()
+                .map(|(id, slot)| super::router_lifecycle::RuntimeSlot {
+                    id,
+                    processing: slot.processing,
+                    prompt_tokens: slot.task.as_ref().map(|task| task.n_prompt_tokens),
+                    cached_prompt_tokens: slot.task.as_ref().map(|task| task.n_prompt_tokens_cache),
+                    decoded_tokens: slot.task.as_ref().map(|task| task.n_decoded),
+                })
+                .collect(),
+        )
+    }
+
     /// Snapshot every slot as its b10621 `/slots` JSON object.
     ///
     /// `n_ctx` is the per-slot context window and `speculative` whether the

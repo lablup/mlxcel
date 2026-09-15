@@ -744,12 +744,21 @@ async fn ui_runtime(
                 );
             };
             let coordinator = state.pool.lifecycle_coordinator();
-            let mut snapshot = super::webui::api::runtime_snapshot(
+            let observed = state
+                .pool
+                .get_by_model_id(&model_id)
+                .and_then(|observed| observed.runtime_observation_state(entry.identity.revision));
+            let config = observed
+                .as_ref()
+                .map(|state| (*state.config).clone())
+                .unwrap_or(config);
+            let mut snapshot = super::webui::runtime::runtime_snapshot(
                 coordinator.server_instance_id().to_string(),
-                model_id,
+                model_id.clone(),
                 entry.identity.revision,
                 coordinator.snapshot_sequence(),
                 &config,
+                observed.as_ref(),
             );
             snapshot.settings.overridden_by_cli = state.pool.next_load_cli_overrides();
             Json(snapshot).into_response()

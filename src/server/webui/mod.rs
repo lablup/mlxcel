@@ -25,6 +25,7 @@ pub(crate) mod events;
 pub(crate) mod library;
 pub(crate) mod library_policy;
 pub(crate) mod load_profile;
+pub(crate) mod runtime;
 pub(crate) mod security;
 
 pub use assets::{WEBUI_PREFIX, manifest_json, router};

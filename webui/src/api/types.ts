@@ -75,6 +75,7 @@ export interface WebUiSnapshot {
   readonly catalogSequence: number | null;
   readonly operations: ReadonlyMap<OperationId, Operation>;
   readonly runtimes: ReadonlyMap<ModelId, RuntimeSnapshot>;
+  readonly runtimeHistory: ReadonlyArray<{ readonly receivedAt: number; readonly runtime: RuntimeSnapshot }>;
   readonly selectedModelId: ModelId | null;
   readonly serverInstanceId: ServerInstanceId | null;
   readonly lastEventId: EventId | null;
