@@ -40,6 +40,9 @@ use crate::server::{AppState, ChatTemplateProcessor, ModelProvider, ServerStartu
 const PLAYWRIGHT_TIMEOUT: Duration = Duration::from_secs(240);
 const PLAYWRIGHT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+const PROCESS_GROUP_EMPTY_TIMEOUT: Duration = Duration::from_secs(5);
+const FAILING_DOWNLOAD_REPO: &str = "mlx-community/Router-Harness-Fail-4bit";
+const CANCELLABLE_DOWNLOAD_REPO: &str = "mlx-community/Router-Harness-Slow-4bit";
 
 struct HarnessDownloader;
 
@@ -58,6 +61,37 @@ impl RouterDownloader for HarnessDownloader {
         dest_root: &Path,
         hooks: DownloadHooks,
     ) -> anyhow::Result<()> {
+        if let Some(plan) = &hooks.plan {
+            plan(crate::downloader::DownloadPlan {
+                repo_id: repo_id.to_string(),
+                requested_revision: revision.unwrap_or("main").to_string(),
+                resolved_revision: revision.unwrap_or("main").to_string(),
+                destination: dest_root.join(repo_id),
+                selected_files: 2,
+                total_bytes: Some(2),
+            });
+        }
+        let config_url = format!("https://example.invalid/{repo_id}/config.json");
+        if let Some(progress) = &hooks.progress {
+            progress(&config_url, 1, 2);
+        }
+        if repo_id == FAILING_DOWNLOAD_REPO {
+            anyhow::bail!("deterministic router harness download failure for {repo_id}");
+        }
+        if repo_id == CANCELLABLE_DOWNLOAD_REPO {
+            let cancel = hooks
+                .cancel
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("missing download cancel flag"))?;
+            let started = std::time::Instant::now();
+            while !cancel.load(Ordering::Relaxed) {
+                if started.elapsed() > Duration::from_secs(20) {
+                    anyhow::bail!("deterministic router harness download was never cancelled");
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            return Err(anyhow::Error::new(crate::downloader::DownloadCancelled));
+        }
         let dest = dest_root.join(repo_id);
         std::fs::create_dir_all(&dest)?;
         std::fs::write(
@@ -74,11 +108,6 @@ impl RouterDownloader for HarnessDownloader {
                 .to_string(),
         )?;
         if let Some(progress) = &hooks.progress {
-            progress(
-                &format!("https://example.invalid/{repo_id}/config.json"),
-                1,
-                2,
-            );
             progress(
                 &format!("https://example.invalid/{repo_id}/model.safetensors"),
                 2,
@@ -131,32 +160,60 @@ fn create_private_output(path: &Path) -> anyhow::Result<File> {
         .open(path)?)
 }
 
-fn default_artifacts_dir(repo_root: &Path) -> PathBuf {
-    repo_root
-        .join("target")
-        .join("webui-router-artifacts")
-        .join(format!("run-{}", uuid::Uuid::new_v4()))
+fn default_artifacts_parent(repo_root: &Path) -> PathBuf {
+    repo_root.join("target").join("webui-router-artifacts")
+}
+
+fn artifact_run_dir(parent: PathBuf) -> PathBuf {
+    parent.join(format!("run-{}", uuid::Uuid::new_v4()))
 }
 
 #[cfg(unix)]
-fn terminate_process_group(child_id: Option<u32>) {
+fn signal_process_group(child_id: Option<u32>, signal: libc::c_int) {
     if let Some(child_id) = child_id {
         // The Playwright launcher starts in its own process group below, so a
         // timeout can terminate browser children as well as the pnpm wrapper.
         unsafe {
-            let _ = libc::kill(-(child_id as libc::pid_t), libc::SIGTERM);
+            let _ = libc::kill(-(child_id as libc::pid_t), signal);
         }
     }
 }
 
+#[cfg(unix)]
+fn process_group_is_empty(child_id: Option<u32>) -> bool {
+    let Some(child_id) = child_id else {
+        return true;
+    };
+    let result = unsafe { libc::kill(-(child_id as libc::pid_t), 0) };
+    result != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+#[cfg(unix)]
+async fn wait_process_group_empty(child_id: Option<u32>, timeout: Duration) -> bool {
+    let start = tokio::time::Instant::now();
+    while start.elapsed() < timeout {
+        if process_group_is_empty(child_id) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    process_group_is_empty(child_id)
+}
+
 #[cfg(not(unix))]
-fn terminate_process_group(_child_id: Option<u32>) {}
+fn signal_process_group(_child_id: Option<u32>, _signal: i32) {}
+
+#[cfg(not(unix))]
+async fn wait_process_group_empty(_child_id: Option<u32>, _timeout: Duration) -> bool {
+    true
+}
 
 async fn run_playwright(
     repo_root: &Path,
     url: &str,
     key_file: &Path,
     artifacts: &Path,
+    models_dir: &Path,
 ) -> Result<ExitStatus, String> {
     let stdout_path = artifacts.join("playwright.stdout.log");
     let stderr_path = artifacts.join("playwright.stderr.log");
@@ -179,6 +236,7 @@ async fn run_playwright(
         .env("MLXCEL_WEBUI_ROUTER_URL", url)
         .env("MLXCEL_WEBUI_ROUTER_KEY_FILE", key_file)
         .env("MLXCEL_WEBUI_ROUTER_ARTIFACTS", artifacts)
+        .env("MLXCEL_WEBUI_ROUTER_MODELS_DIR", models_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
@@ -192,19 +250,31 @@ async fn run_playwright(
             "spawn playwright: {err}; install pnpm dependencies before running this opt-in target"
         )
     })?;
+    let child_id = child.id();
 
     match tokio::time::timeout(PLAYWRIGHT_TIMEOUT, child.wait()).await {
         Ok(Ok(status)) => Ok(status),
         Ok(Err(err)) => Err(format!("wait for playwright: {err}")),
         Err(_) => {
-            terminate_process_group(child.id());
+            #[cfg(unix)]
+            signal_process_group(child_id, libc::SIGTERM);
+            #[cfg(not(unix))]
+            signal_process_group(child_id, 15);
             let reaped = tokio::time::timeout(PLAYWRIGHT_SHUTDOWN_TIMEOUT, child.wait()).await;
-            if reaped.is_err() {
+            let empty_after_term =
+                wait_process_group_empty(child_id, PROCESS_GROUP_EMPTY_TIMEOUT).await;
+            if reaped.is_err() || !empty_after_term {
+                #[cfg(unix)]
+                signal_process_group(child_id, libc::SIGKILL);
+                #[cfg(not(unix))]
+                signal_process_group(child_id, 9);
                 let _ = child.start_kill();
                 let _ = tokio::time::timeout(PLAYWRIGHT_SHUTDOWN_TIMEOUT, child.wait()).await;
             }
+            let empty_after_kill =
+                wait_process_group_empty(child_id, PROCESS_GROUP_EMPTY_TIMEOUT).await;
             Err(format!(
-                "playwright timed out after {:?}; terminate/reap result: {reaped:?}",
+                "playwright timed out after {:?}; terminate/reap result: {reaped:?}; group_empty_after_term={empty_after_term}; group_empty_after_kill={empty_after_kill}",
                 PLAYWRIGHT_TIMEOUT
             ))
         }
@@ -214,17 +284,6 @@ async fn run_playwright(
 fn read_artifact_text(path: &Path) -> String {
     std::fs::read_to_string(path)
         .unwrap_or_else(|err| format!("<{} unavailable: {err}>", path.display()))
-}
-
-fn add_models_dir_seed(root: &Path) -> anyhow::Result<()> {
-    let seed = root.join("seed-local");
-    std::fs::create_dir_all(&seed)?;
-    std::fs::write(
-        seed.join("config.json"),
-        br#"{"model_type":"llama","architectures":["LlamaForCausalLM"],"quantization_config":{"bits":4}}"#,
-    )?;
-    std::fs::write(seed.join("model.safetensors"), b"seed weights")?;
-    Ok(())
 }
 
 fn install_model_app_factory(pool: &RouterPool, handles: Arc<Mutex<Vec<ScriptedStreamHandle>>>) {
@@ -297,13 +356,13 @@ async fn real_router_browser_harness() {
     let temp = tempfile::tempdir().expect("harness tempdir");
     let models_dir = temp.path().join("models-dir");
     let cache_root = temp.path().join("model-store");
-    let artifacts = std::env::var_os("MLXCEL_WEBUI_ROUTER_ARTIFACTS")
+    let artifact_parent = std::env::var_os("MLXCEL_WEBUI_ROUTER_ARTIFACTS")
         .map(PathBuf::from)
-        .unwrap_or_else(|| default_artifacts_dir(&repo_root));
+        .unwrap_or_else(|| default_artifacts_parent(&repo_root));
+    let artifacts = artifact_run_dir(artifact_parent);
     std::fs::create_dir_all(&models_dir).expect("models dir");
     std::fs::create_dir_all(&cache_root).expect("cache root");
     std::fs::create_dir_all(&artifacts).expect("artifact dir");
-    add_models_dir_seed(&models_dir).expect("seed model");
 
     let router_key = format!("router-{}", uuid::Uuid::new_v4());
     let api_keys =
@@ -383,7 +442,8 @@ async fn real_router_browser_harness() {
     let key_file = temp.path().join("router-key.txt");
     write_private_key(&key_file, &router_key).expect("private key file");
     let url = format!("{origin}/lab/webui/");
-    let playwright_result = run_playwright(&repo_root, &url, &key_file, &artifacts).await;
+    let playwright_result =
+        run_playwright(&repo_root, &url, &key_file, &artifacts, &models_dir).await;
 
     let _ = std::fs::remove_file(&key_file);
     let _ = shutdown_tx.send(());

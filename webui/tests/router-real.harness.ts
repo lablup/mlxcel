@@ -6,22 +6,27 @@ import { expectAxeClean, expectSafeLayout } from './browser-assertions';
 
 type Operation = { operation_id: string; kind: string; state: string; result?: unknown; error?: unknown };
 type CatalogItem = { identity: { id: string; display_name: string; inference_id: string; revision: number }; lifecycle: { state: string; worker_exit_observed: boolean; active_requests: number }; capabilities: Array<{ task: string; phase: string; available: boolean }> };
-type HarnessContext = { target: URL; apiBase: string; artifacts: string; keyPath: string; token: string; auth: { Authorization: string } };
+type HarnessContext = { target: URL; apiBase: string; artifacts: string; keyPath: string; token: string; auth: { Authorization: string }; modelsDir: string };
 type ErrorEnvelope = { error: { code: string; operation_id?: string | null; field_errors?: Array<{ field: string; code: string; message: string }> | null } };
 type DownloadResult = { repo_id?: string; revision?: string | null; model_id?: string | null };
 type Accepted = { operation_id: string };
 type BrowserJsonResponse<T> = { status: number; body: T };
 type HttpObservation = { method: string; path: string; status?: number; failure?: string };
 
+const SUCCESS_DOWNLOAD_REPO = 'mlx-community/Router-Harness-Fake-4bit';
+const FAILING_DOWNLOAD_REPO = 'mlx-community/Router-Harness-Fail-4bit';
+const CANCELLABLE_DOWNLOAD_REPO = 'mlx-community/Router-Harness-Slow-4bit';
+
 function harnessContext(): HarnessContext {
   const rawTarget = process.env.MLXCEL_WEBUI_ROUTER_URL;
   const artifacts = process.env.MLXCEL_WEBUI_ROUTER_ARTIFACTS;
   const keyPath = process.env.MLXCEL_WEBUI_ROUTER_KEY_FILE;
-  if (!rawTarget || !artifacts || !keyPath) throw new Error('Set MLXCEL_WEBUI_ROUTER_URL, MLXCEL_WEBUI_ROUTER_KEY_FILE and MLXCEL_WEBUI_ROUTER_ARTIFACTS; missing real-router setup is not a skipped pass.');
+  const modelsDir = process.env.MLXCEL_WEBUI_ROUTER_MODELS_DIR;
+  if (!rawTarget || !artifacts || !keyPath || !modelsDir) throw new Error('Set MLXCEL_WEBUI_ROUTER_URL, MLXCEL_WEBUI_ROUTER_KEY_FILE, MLXCEL_WEBUI_ROUTER_ARTIFACTS and MLXCEL_WEBUI_ROUTER_MODELS_DIR; missing real-router setup is not a skipped pass.');
   const target = new URL(rawTarget);
   if (!['http:', 'https:'].includes(target.protocol) || !['127.0.0.1', 'localhost', '[::1]'].includes(target.hostname) || target.username || target.password || !target.pathname.endsWith('/webui/')) throw new Error('The Rust-router harness must target a loopback /webui/ URL without URL credentials.');
   const token = readFileSync(keyPath, 'utf8').trim();
-  return { target, apiBase: target.pathname.slice(0, -'/webui/'.length), artifacts, keyPath, token, auth: { Authorization: `Bearer ${token}` } };
+  return { target, apiBase: target.pathname.slice(0, -'/webui/'.length), artifacts, keyPath, token, auth: { Authorization: `Bearer ${token}` }, modelsDir };
 }
 
 function saveArtifact(ctx: HarnessContext, name: string, value: unknown): void {
@@ -33,6 +38,10 @@ async function apiJson<T>(request: APIRequestContext, ctx: HarnessContext, metho
   const response = await request[method](`${ctx.target.origin}${ctx.apiBase}${path}`, { headers: ctx.auth, data: body });
   expect(response.ok(), `${method.toUpperCase()} ${path}: ${response.status()} ${await response.text()}`).toBe(true);
   return (await response.json()) as T;
+}
+
+async function submitDownload(request: APIRequestContext, ctx: HarnessContext, repoId: string, idempotencyKey: string): Promise<Accepted> {
+  return apiJson<Accepted>(request, ctx, 'post', '/ui-api/v1/downloads', { repo_id: repoId, idempotency_key: idempotencyKey });
 }
 
 async function waitOperationState(request: APIRequestContext, ctx: HarnessContext, operationId: string, expected: 'succeeded' | 'failed' | 'cancelled' = 'succeeded'): Promise<Operation> {
@@ -51,14 +60,18 @@ async function waitOperation(request: APIRequestContext, ctx: HarnessContext, op
   return waitOperationState(request, ctx, operationId, 'succeeded');
 }
 
-async function waitOperationKind(request: APIRequestContext, ctx: HarnessContext, kind: string): Promise<string> {
+async function waitOperationKind(request: APIRequestContext, ctx: HarnessContext, kind: string, exclude: ReadonlySet<string> = new Set()): Promise<string> {
   for (let attempt = 0; attempt < 200; attempt += 1) {
     const operations = (await apiJson<{ items: Operation[] }>(request, ctx, 'get', '/ui-api/v1/operations')).items;
-    const operation = operations.find(item => item.kind === kind);
+    const operation = operations.find(item => item.kind === kind && !exclude.has(item.operation_id));
     if (operation) return operation.operation_id;
     await new Promise(resolve => setTimeout(resolve, 25));
   }
   throw new Error(`operation kind ${kind} was not observed`);
+}
+
+async function operationIds(request: APIRequestContext, ctx: HarnessContext): Promise<Set<string>> {
+  return new Set((await apiJson<{ items: Operation[] }>(request, ctx, 'get', '/ui-api/v1/operations')).items.map(item => item.operation_id));
 }
 
 function requireCatalogItem(item: CatalogItem | undefined, label: string): CatalogItem {
@@ -82,6 +95,25 @@ async function login(page: Page, ctx: HarnessContext, observations: HttpObservat
 
 async function refresh(page: Page): Promise<void> {
   await page.getByRole('button', { name: 'Refresh server state', exact: true }).first().click();
+}
+
+function createLocalSeedModel(ctx: HarnessContext): void {
+  const seed = join(ctx.modelsDir, 'seed-local');
+  mkdirSync(seed, { recursive: true });
+  writeFileSync(join(seed, 'config.json'), '{"model_type":"llama","architectures":["LlamaForCausalLM"],"quantization_config":{"bits":4}}', { mode: 0o600, flag: 'wx' });
+  writeFileSync(join(seed, 'model.safetensors'), 'seed weights', { mode: 0o600, flag: 'wx' });
+}
+
+async function exerciseDownloadFailureAndCancel(request: APIRequestContext, ctx: HarnessContext): Promise<{ failed: string; cancelled: string }> {
+  const failing = await submitDownload(request, ctx, FAILING_DOWNLOAD_REPO, 'router-real-download-failure');
+  await waitOperationState(request, ctx, failing.operation_id, 'failed');
+
+  const slow = await submitDownload(request, ctx, CANCELLABLE_DOWNLOAD_REPO, 'router-real-download-cancel');
+  await expect.poll(async () => (await catalog(request, ctx)).some(item => item.identity.inference_id === CANCELLABLE_DOWNLOAD_REPO)).toBe(true);
+  const cancel = await request.post(`${ctx.target.origin}${ctx.apiBase}/ui-api/v1/operations/${slow.operation_id}/cancel`, { headers: ctx.auth });
+  expect(cancel.status()).toBe(202);
+  await waitOperationState(request, ctx, slow.operation_id, 'cancelled');
+  return { failed: failing.operation_id, cancelled: slow.operation_id };
 }
 
 async function browserModelAction(page: Page, ctx: HarnessContext, body: unknown): Promise<BrowserJsonResponse<Accepted | ErrorEnvelope>> {
@@ -177,19 +209,25 @@ test.describe('Rust router harness', () => {
     expect(csp).not.toContain("'unsafe-inline'");
     expect(csp).not.toContain("'unsafe-eval'");
     await login(page, ctx, httpObservations);
+    await expect.poll(async () => (await catalog(request, ctx)).length).toBe(0);
+    createLocalSeedModel(ctx);
+    await refresh(page);
+    await expect.poll(async () => (await catalog(request, ctx)).some(item => item.identity.inference_id === 'seed-local')).toBe(true);
     await expectSafeLayout(page); await expectAxeClean(page);
+    const downloadNegatives = await exerciseDownloadFailureAndCancel(request, ctx);
 
+    const operationsBeforeDownload = await operationIds(request, ctx);
     await page.getByTestId('models-add').click();
-    await page.getByTestId('models-repo').fill('mlx-community/Router-Harness-Fake-4bit');
+    await page.getByTestId('models-repo').fill(SUCCESS_DOWNLOAD_REPO);
     await page.getByTestId('models-public-repo').check();
     await page.getByTestId('models-download-submit').click();
-    const acceptedDownload = await waitOperationKind(request, ctx, 'download');
+    const acceptedDownload = await waitOperationKind(request, ctx, 'download', operationsBeforeDownload);
     const downloadOperation = await waitOperation(request, ctx, acceptedDownload);
     await refresh(page);
     await expect.poll(async () => (await catalog(request, ctx)).length).toBeGreaterThan(1);
 
     const downloadResult = downloadOperation.result as DownloadResult | undefined;
-    const downloaded = requireCatalogItem((await catalog(request, ctx)).find(item => item.identity.id === downloadResult?.model_id) ?? (await catalog(request, ctx)).find(item => item.identity.inference_id === 'mlx-community/Router-Harness-Fake-4bit'), 'downloaded fake');
+    const downloaded = requireCatalogItem((await catalog(request, ctx)).find(item => item.identity.id === downloadResult?.model_id) ?? (await catalog(request, ctx)).find(item => item.identity.inference_id === SUCCESS_DOWNLOAD_REPO), 'downloaded fake');
     await page.getByRole('button', { name: new RegExp(`Inspect .*${downloaded.identity.display_name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`) }).click();
     await page.getByTestId('models-load').click();
     const loadAccepted = await waitOperationKind(request, ctx, 'model_load');
@@ -241,7 +279,7 @@ test.describe('Rust router harness', () => {
     await waitOperation(request, ctx, unloadAccepted.operation_id);
     await expect.poll(async () => (await catalog(request, ctx)).find(item => item.identity.id === ready.identity.id)?.lifecycle.worker_exit_observed).toBe(true);
     const unloaded = requireCatalogItem((await catalog(request, ctx)).find(item => item.identity.id === ready.identity.id), 'unloaded fake');
-    const removeAccepted = await apiJson<{ operation_id: string }>(request, ctx, 'post', '/ui-api/v1/model-removals', { model_id: unloaded.identity.id, expected_revision: unloaded.identity.revision, confirm_model_id: unloaded.identity.id, idempotency_key: 'router-real-remove' });
+    const removeAccepted = await apiJson<{ operation_id: string }>(request, ctx, 'post', '/ui-api/v1/model-removals', { model_id: unloaded.identity.id, expected_revision: unloaded.identity.revision, idempotency_key: 'router-real-remove' });
     await waitOperation(request, ctx, removeAccepted.operation_id);
     await expect.poll(async () => (await catalog(request, ctx)).some(item => item.identity.id === ready.identity.id)).toBe(false);
 
@@ -261,6 +299,6 @@ test.describe('Rust router harness', () => {
     const violations = await page.evaluate(() => Reflect.get(window, '__routerCspViolations'));
     expect(violations).toEqual([]); expect(external).toEqual([]);
     await expectSafeLayout(page); await expectAxeClean(page);
-    saveArtifact(ctx, 'router-real-evidence.json', { csp, external, violations, lost_response_operation_id: lostRefreshOperation, stop_drain: { observed_active_requests: observedActiveRequests, final_active_requests: finalActiveRequests, stop_clicked_at: stopClickedAt, settled_at: stopSettledAt }, negative_cases: ['terminal operation cancel unsupported', 'two-tab stale revision 409', 'single-tab stale revision 409', 'unknown field 400', 'real 401 after credential change and reconnect', 'lost POST response recovered by operation id', 'unauth 401', 'bad bearer 401', 'hostile UI and legacy routes 403', 'missing asset 404', 'no token persistence'], final_catalog_size: (await catalog(request, ctx)).length, api_base: ctx.apiBase, note: 'Fake model/downloader leaves only; secured Rust router, embedded bundle, auth, CSP, Stop/drain and lifecycle routes were real.' });
+    saveArtifact(ctx, 'router-real-evidence.json', { csp, external, violations, download_negative_operations: downloadNegatives, lost_response_operation_id: lostRefreshOperation, stop_drain: { observed_active_requests: observedActiveRequests, final_active_requests: finalActiveRequests, stop_clicked_at: stopClickedAt, settled_at: stopSettledAt }, negative_cases: ['terminal operation cancel unsupported', 'two-tab stale revision 409', 'single-tab stale revision 409', 'unknown field 400', 'real 401 after credential change and reconnect', 'download failure operation failed', 'download cancellation operation cancelled', 'lost POST response recovered by operation id', 'unauth 401', 'bad bearer 401', 'hostile UI and legacy routes 403', 'missing asset 404', 'no token persistence'], final_catalog_size: (await catalog(request, ctx)).length, api_base: ctx.apiBase, note: 'Fake model/downloader leaves only; secured Rust router, embedded bundle, auth, CSP, Stop/drain and lifecycle routes were real.' });
   });
 });
