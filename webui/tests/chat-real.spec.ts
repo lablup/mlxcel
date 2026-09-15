@@ -1,9 +1,16 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { expectAxeClean, expectSafeLayout } from './browser-assertions';
 
 /** Root-owned serialized acceptance. Never run on an arbitrary shared server. */
 test('real bundled chat Stop releases the selected model request lease', async ({ page, request }, testInfo) => {
+  // Explicit files survive reporter=list and later assertion failures. Only this
+  // isolated synthetic acceptance writes generated output; never credentials.
+  const saveArtifact = async (name: string, body: string | Buffer, contentType: string): Promise<void> => {
+    const path = testInfo.outputPath(name);
+    writeFileSync(path, body, { mode: 0o600, flag: 'wx' });
+    await testInfo.attach(name, { path, contentType });
+  };
   const base = process.env.MLXCEL_CHAT_REAL_URL;
   const keyPath = process.env.MLXCEL_CHAT_REAL_KEY_FILE;
   const modelId = process.env.MLXCEL_CHAT_REAL_MODEL_ID;
@@ -47,10 +54,15 @@ test('real bundled chat Stop releases the selected model request lease', async (
   await page.getByRole('button',{name:'Send',exact:true}).click();
   await expect(page.locator('.chat-turn header')).toContainText('complete', {timeout:90000});
   const reply = await page.locator('.chat-markdown').innerText();
-  await testInfo.attach('real-response.json',{body:JSON.stringify({model_id:modelId,image_input:Boolean(imagePath),reply,evaluation:'Nonempty output observed; root must review whether the content is sensible.'}),contentType:'application/json'});
+  await saveArtifact('real-response.json', JSON.stringify({model_id:modelId,image_input:Boolean(imagePath),reply,evaluation:'Output captured; root must review whether the content is sensible.'}), 'application/json');
   expect(reply.trim().length).toBeGreaterThan(0);
   await expectSafeLayout(page); await expectAxeClean(page);
-  await testInfo.attach('real-chat-render.png', { body: await page.screenshot({ fullPage: true }), contentType: 'image/png' });
+  await page.evaluate(() => {
+    window.scrollTo(0, 0);
+    for (const element of document.querySelectorAll<HTMLElement>('.app-main, .app-content, .app-content-grid')) element.scrollTop = 0;
+  });
+  await saveArtifact('real-chat-viewport.png', await page.screenshot(), 'image/png');
+  await saveArtifact('real-chat-render.png', await page.screenshot({ fullPage: true }), 'image/png');
   await page.getByRole('button',{name:'New conversation',exact:true}).click();
   await page.getByLabel('Next turn max_tokens', { exact: true }).fill('1024');
   await page.getByRole('textbox',{name:'Message',exact:true}).fill('Write a very long numbered explanation of integers from 1 to 10000, without stopping early.');
@@ -59,10 +71,10 @@ test('real bundled chat Stop releases the selected model request lease', async (
   await page.getByRole('button',{name:'Stop',exact:true}).click();
   await expect(page.locator('.chat-turn header')).toContainText('cancelled');
   await expect.poll(async()=> (await readCatalog()).find(entry=>entry.identity.id===modelId)?.lifecycle.active_requests,{timeout:30000}).toBe(0);
+  await saveArtifact('real-stop-evidence.json', JSON.stringify({model_id:modelId,scope:'isolated server with no other request producers',initial_active:0,observed_during_positive:true,final_active:0,automatic_retry:false}), 'application/json');
   await expect(page.getByRole('button',{name:'Send',exact:true})).toBeDisabled(); // Empty composer, not a rerun.
   await expectSafeLayout(page); await expectAxeClean(page);
   const violations = await page.evaluate(() => Reflect.get(window, '__chatCspViolations'));
+  await saveArtifact('real-security-evidence.json', JSON.stringify({ csp, violations, external, axe: 'No violations in completed and cancelled states' }), 'application/json');
   expect(violations).toEqual([]); expect(external).toEqual([]);
-  await testInfo.attach('real-security-evidence.json', { body: JSON.stringify({ csp, violations, external, axe: 'No violations in completed and cancelled states' }), contentType: 'application/json' });
-  await testInfo.attach('real-stop-evidence.json',{body:JSON.stringify({model_id:modelId,scope:'isolated server with no other request producers',initial_active:0,observed_during_positive:true,final_active:0,automatic_retry:false}),contentType:'application/json'});
 });
