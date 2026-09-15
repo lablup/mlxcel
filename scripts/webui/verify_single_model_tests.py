@@ -419,6 +419,7 @@ class SingleModelHelperTests(unittest.TestCase):
                         options(Path("/unused")),
                         contract,
                     )
+                self.assertIn(("/webui/", "private-key", None), calls)
                 self.assertEqual(result["actual_reply"], "Hello.")
                 self.assertIn("REQUIRED", result["semantic_review"])
                 completions = [
@@ -441,6 +442,36 @@ class SingleModelHelperTests(unittest.TestCase):
                 else:
                     contract.check.assert_not_called()
                     self.assertTrue(result["ui_routes_absent"])
+
+    def test_exercise_rejects_unprefixed_webui_in_both_modes(self):
+        for ui in (True, False):
+            with self.subTest(ui=ui):
+                transport, calls = self.exercise_transport(ui)
+                contract = mock.Mock()
+                contract.check.side_effect = lambda schema, value: value
+
+                def exposed_shell(
+                    origin, path, key, timeout, body=None, transport=transport
+                ):
+                    if path == "/webui/":
+                        self.assertEqual(key, "private-key")
+                        return 200, {"content-type": "text/html"}, b"<html></html>"
+                    return transport(origin, path, key, timeout, body)
+
+                with (
+                    mock.patch.object(verify, "request", side_effect=exposed_shell),
+                    self.assertRaisesRegex(
+                        verify.GateError, "unprefixed_route_exposed"
+                    ),
+                ):
+                    verify.exercise(
+                        "http://127.0.0.1:1234",
+                        "private-key",
+                        ui,
+                        options(Path("/unused")),
+                        contract,
+                    )
+                self.assertFalse(any("/chat/completions?" in c[0] for c in calls))
 
     def test_exercise_fails_if_readonly_mutation_succeeds_or_completion_empty(self):
         for kwargs, code in (

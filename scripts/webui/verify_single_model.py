@@ -318,7 +318,7 @@ def exercise(
         "inference_identity_required",
     )
     result: dict[str, Any] = {"inference_id": inference_id, "ui_enabled": ui}
-    for path in ("/ui-api/v1/bootstrap", "/v1/models"):
+    for path in ("/webui/", "/ui-api/v1/bootstrap", "/v1/models"):
         require(
             request(origin, path, key, args.request_timeout)[0] == 404,
             "unprefixed_route_exposed",
