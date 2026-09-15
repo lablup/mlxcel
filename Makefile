@@ -12,6 +12,22 @@ WEBUI_BUNDLE_PY ?= python3
 WEBUI_EVIDENCE_PY ?= python3
 WEBUI_SERVER_BIN ?=
 WEBUI_CLI_BIN ?=
+WEBUI_FEATURE_OFF_SERVER_BIN ?=
+WEBUI_FEATURE_OFF_CLI_BIN ?=
+WEBUI_INSTALLED_EVIDENCE ?=
+WEBUI_BUILD_SOURCE_HEAD ?=
+WEBUI_FEATURE_OFF_BUILD_SOURCE_HEAD ?=
+WEBUI_BUILD_FEATURES ?=
+WEBUI_STARTUP_EVIDENCE ?=
+WEBUI_SINGLE_MODEL ?=
+WEBUI_SINGLE_MODEL_OUTPUT_DIR ?=
+WEBUI_SINGLE_MODEL_STARTUP_REPORT ?=
+WEBUI_ACTIVITY_MODEL ?=
+WEBUI_ACTIVITY_MODEL_ID ?=
+WEBUI_ACTIVITY_CHECKPOINT_REVISION ?=
+WEBUI_ACTIVITY_EVIDENCE ?=
+WEBUI_ACTIVITY_WORK_DIR ?=
+WEBUI_REVERSE_PROXY_EVIDENCE ?=
 WEBUI_HARDWARE_EVIDENCE ?=
 WEBUI_CUDA_EVIDENCE ?=
 
@@ -807,8 +823,19 @@ verify-webui-rust: ## Run CPU-safe Rust WebUI/router contract tests only; does n
 		$(CARGO) test --profile test-fast $(WEBUI_TEST_FEATURE_FLAG) --lib "$$filter" || exit $$?; \
 	done
 
+.PHONY: verify-webui-helper-tests
+verify-webui-helper-tests: ## Run pure-Python WebUI verifier helper tests; no server/browser/model launch (issue #1848)
+	@echo "$(CYAN)[verify] WebUI verifier helper unit tests...$(RESET)"
+	@$(WEBUI_EVIDENCE_PY) scripts/ci/check_webui_evidence.py --self-test
+	@$(WEBUI_BUNDLE_PY) scripts/webui/verify_installed_artifact_tests.py
+	@$(WEBUI_BUNDLE_PY) scripts/webui/verify_generated_key_helper_tests.py
+	@$(WEBUI_BUNDLE_PY) scripts/webui/measure_startup_tests.py
+	@$(WEBUI_BUNDLE_PY) scripts/webui/verify_single_model_tests.py
+	@$(WEBUI_BUNDLE_PY) scripts/webui/verify_activity_performance_tests.py
+	@$(WEBUI_BUNDLE_PY) scripts/webui/verify_reverse_proxy_tests.py
+
 .PHONY: verify-webui
-verify-webui: verify-webui-contract verify-webui-frontend verify-webui-bundle verify-webui-rust ## CPU-safe WebUI release gate; hardware/Safari/CUDA remain separate evidence (issue #1848)
+verify-webui: verify-webui-contract verify-webui-helper-tests verify-webui-frontend verify-webui-bundle verify-webui-rust ## CPU-safe WebUI release gate; hardware/Safari/CUDA remain separate evidence (issue #1848)
 	@echo "$(GREEN)[verify] WebUI deterministic gate OK; run the separate hardware/manual/CUDA targets before release$(RESET)"
 
 .PHONY: verify-webui-integration-fake
@@ -821,7 +848,47 @@ verify-webui-installed: ## Verify installed Rust server and CLI artifacts serve 
 	@test -n "$(WEBUI_SERVER_BIN)" || { echo "$(RED)WEBUI_SERVER_BIN=/path/to/mlxcel-server is required$(RESET)"; exit 1; }
 	@test -n "$(WEBUI_CLI_BIN)" || { echo "$(RED)WEBUI_CLI_BIN=/path/to/mlxcel is required$(RESET)"; exit 1; }
 	@echo "$(CYAN)[verify] WebUI installed artifact smoke...$(RESET)"
-	@$(WEBUI_BUNDLE_PY) scripts/webui/verify_installed_artifact.py --server-bin "$(WEBUI_SERVER_BIN)" --cli-bin "$(WEBUI_CLI_BIN)"
+	@$(WEBUI_BUNDLE_PY) scripts/webui/verify_installed_artifact.py --server-bin "$(WEBUI_SERVER_BIN)" --cli-bin "$(WEBUI_CLI_BIN)" $(if $(WEBUI_FEATURE_OFF_SERVER_BIN),--feature-off-server-bin "$(WEBUI_FEATURE_OFF_SERVER_BIN)",) $(if $(WEBUI_FEATURE_OFF_CLI_BIN),--feature-off-cli-bin "$(WEBUI_FEATURE_OFF_CLI_BIN)",) $(if $(WEBUI_BUILD_SOURCE_HEAD),--build-source-head "$(WEBUI_BUILD_SOURCE_HEAD)",) $(if $(WEBUI_FEATURE_OFF_BUILD_SOURCE_HEAD),--feature-off-build-source-head "$(WEBUI_FEATURE_OFF_BUILD_SOURCE_HEAD)",) $(if $(WEBUI_INSTALLED_EVIDENCE),--evidence "$(WEBUI_INSTALLED_EVIDENCE)",)
+
+.PHONY: verify-webui-startup
+verify-webui-startup: ## Measure installed empty-router startup/RSS for server and CLI, UI-on and UI-off (issue #1848)
+	@test -n "$(WEBUI_SERVER_BIN)" || { echo "$(RED)WEBUI_SERVER_BIN=/path/to/mlxcel-server is required$(RESET)"; exit 1; }
+	@test -n "$(WEBUI_CLI_BIN)" || { echo "$(RED)WEBUI_CLI_BIN=/path/to/mlxcel is required$(RESET)"; exit 1; }
+	@test -n "$(WEBUI_STARTUP_EVIDENCE)" || { echo "$(RED)WEBUI_STARTUP_EVIDENCE=/path/to/startup-evidence.json is required$(RESET)"; exit 1; }
+	@echo "$(CYAN)[verify] WebUI installed startup/RSS measurements...$(RESET)"
+	@$(WEBUI_BUNDLE_PY) scripts/webui/measure_startup.py --server-bin "$(WEBUI_SERVER_BIN)" --cli-bin "$(WEBUI_CLI_BIN)" --evidence "$(WEBUI_STARTUP_EVIDENCE)" $(if $(WEBUI_BUILD_SOURCE_HEAD),--build-source-head "$(WEBUI_BUILD_SOURCE_HEAD)",) $(if $(WEBUI_BUILD_FEATURES),--features "$(WEBUI_BUILD_FEATURES)",)
+
+.PHONY: verify-webui-single-model
+verify-webui-single-model: ## Run four fresh installed single-model processes with a real checkpoint; semantic output still needs root review (issue #1848)
+	@test "$(MLXCEL_REQUIRE_MODELS)" = "1" || { echo "$(RED)MLXCEL_REQUIRE_MODELS=1 is required; missing checkpoints/hardware are blockers, not skips$(RESET)"; exit 1; }
+	@test -n "$(WEBUI_SERVER_BIN)" || { echo "$(RED)WEBUI_SERVER_BIN=/path/to/mlxcel-server is required$(RESET)"; exit 1; }
+	@test -n "$(WEBUI_CLI_BIN)" || { echo "$(RED)WEBUI_CLI_BIN=/path/to/mlxcel is required$(RESET)"; exit 1; }
+	@test -n "$(WEBUI_SINGLE_MODEL)" || { echo "$(RED)WEBUI_SINGLE_MODEL=/path/to/checkpoint is required$(RESET)"; exit 1; }
+	@test -n "$(WEBUI_BUILD_SOURCE_HEAD)" || { echo "$(RED)WEBUI_BUILD_SOURCE_HEAD=<40-hex source sha> is required$(RESET)"; exit 1; }
+	@test -n "$(WEBUI_BUILD_FEATURES)" || { echo "$(RED)WEBUI_BUILD_FEATURES=metal,accelerate,webui or cuda,webui is required$(RESET)"; exit 1; }
+	@test -n "$(WEBUI_SINGLE_MODEL_OUTPUT_DIR)" || { echo "$(RED)WEBUI_SINGLE_MODEL_OUTPUT_DIR=/path/to/output-dir is required$(RESET)"; exit 1; }
+	@echo "$(CYAN)[verify] WebUI installed single-model acceptance gate...$(RESET)"
+	@$(WEBUI_BUNDLE_PY) scripts/webui/verify_single_model.py --server-bin "$(WEBUI_SERVER_BIN)" --cli-bin "$(WEBUI_CLI_BIN)" --model "$(WEBUI_SINGLE_MODEL)" --build-sha "$(WEBUI_BUILD_SOURCE_HEAD)" --features "$(WEBUI_BUILD_FEATURES)" --output-dir "$(WEBUI_SINGLE_MODEL_OUTPUT_DIR)" $(if $(WEBUI_SINGLE_MODEL_STARTUP_REPORT),--startup-resource-report "$(WEBUI_SINGLE_MODEL_STARTUP_REPORT)",)
+
+.PHONY: verify-webui-activity-performance
+verify-webui-activity-performance: ## Run root-owned real Activity overhead/native-hidden harness with a checkpoint (issue #1848)
+	@test "$(MLXCEL_REQUIRE_MODELS)" = "1" || { echo "$(RED)MLXCEL_REQUIRE_MODELS=1 is required; missing checkpoints/hardware are blockers, not skips$(RESET)"; exit 1; }
+	@test -n "$(WEBUI_SERVER_BIN)" || { echo "$(RED)WEBUI_SERVER_BIN=/path/to/mlxcel-server is required$(RESET)"; exit 1; }
+	@test -n "$(WEBUI_ACTIVITY_MODEL)" || { echo "$(RED)WEBUI_ACTIVITY_MODEL=/path/to/checkpoint is required$(RESET)"; exit 1; }
+	@test -n "$(WEBUI_ACTIVITY_CHECKPOINT_REVISION)" || { echo "$(RED)WEBUI_ACTIVITY_CHECKPOINT_REVISION=<revision> is required$(RESET)"; exit 1; }
+	@test -n "$(WEBUI_BUILD_SOURCE_HEAD)" || { echo "$(RED)WEBUI_BUILD_SOURCE_HEAD=<40-hex source sha> is required$(RESET)"; exit 1; }
+	@test -n "$(WEBUI_BUILD_FEATURES)" || { echo "$(RED)WEBUI_BUILD_FEATURES=metal,accelerate,webui or cuda,webui is required$(RESET)"; exit 1; }
+	@test -n "$(WEBUI_ACTIVITY_EVIDENCE)" || { echo "$(RED)WEBUI_ACTIVITY_EVIDENCE=/path/to/activity-evidence.json is required$(RESET)"; exit 1; }
+	@echo "$(CYAN)[verify] WebUI Activity actual performance/native-hidden evidence...$(RESET)"
+	@$(WEBUI_BUNDLE_PY) scripts/webui/verify_activity_performance.py --server-bin "$(WEBUI_SERVER_BIN)" --model "$(WEBUI_ACTIVITY_MODEL)" --checkpoint-revision "$(WEBUI_ACTIVITY_CHECKPOINT_REVISION)" --source-sha "$(WEBUI_BUILD_SOURCE_HEAD)" --features "$(WEBUI_BUILD_FEATURES)" --evidence "$(WEBUI_ACTIVITY_EVIDENCE)" $(if $(WEBUI_ACTIVITY_MODEL_ID),--model-id "$(WEBUI_ACTIVITY_MODEL_ID)",) $(if $(WEBUI_ACTIVITY_WORK_DIR),--work-dir "$(WEBUI_ACTIVITY_WORK_DIR)",)
+
+.PHONY: verify-webui-reverse-proxy
+verify-webui-reverse-proxy: ## Run installed artifact through the loopback reverse-proxy/TLS authority harness (issue #1848)
+	@test -n "$(WEBUI_SERVER_BIN)" || { echo "$(RED)WEBUI_SERVER_BIN=/path/to/mlxcel-server is required$(RESET)"; exit 1; }
+	@test -n "$(WEBUI_CLI_BIN)" || { echo "$(RED)WEBUI_CLI_BIN=/path/to/mlxcel is required$(RESET)"; exit 1; }
+	@test -n "$(WEBUI_REVERSE_PROXY_EVIDENCE)" || { echo "$(RED)WEBUI_REVERSE_PROXY_EVIDENCE=/path/to/reverse-proxy-evidence.json is required$(RESET)"; exit 1; }
+	@echo "$(CYAN)[verify] WebUI reverse-proxy/TLS authority harness...$(RESET)"
+	@$(WEBUI_BUNDLE_PY) scripts/webui/verify_reverse_proxy.py --server-bin "$(WEBUI_SERVER_BIN)" --cli-bin "$(WEBUI_CLI_BIN)" --evidence "$(WEBUI_REVERSE_PROXY_EVIDENCE)" $(if $(WEBUI_BUILD_SOURCE_HEAD),--build-source-head "$(WEBUI_BUILD_SOURCE_HEAD)",)
 
 .PHONY: verify-webui-hardware
 verify-webui-hardware: ## Validate root-run actual-model WebUI evidence JSON; set MLXCEL_REQUIRE_MODELS=1 WEBUI_HARDWARE_EVIDENCE=... (issue #1848)
