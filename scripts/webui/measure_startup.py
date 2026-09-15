@@ -67,9 +67,28 @@ def write_private(path: Path, body: str) -> None:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w") as fp:
         fp.write(body)
+    assert_private_file(path)
+
+
+def assert_private_file(path: Path) -> None:
     mode = stat.S_IMODE(path.stat().st_mode)
     if mode != 0o600:
         raise AssertionError(f"{path} mode is {mode:o}, want 600")
+
+
+def mkdir_private(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=False)
+    path.chmod(0o700)
+    mode = stat.S_IMODE(path.stat().st_mode)
+    if mode != 0o700:
+        raise AssertionError(f"{path} mode is {mode:o}, want 700")
+
+
+def open_private_binary(path: Path) -> Any:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    file = os.fdopen(fd, "ab", buffering=0)
+    assert_private_file(path)
+    return file
 
 
 def free_port() -> int:
@@ -114,7 +133,7 @@ def request_health(base: str) -> tuple[int, bytes]:
         return exc.code, exc.read(MAX_BODY + 1)
 
 
-def wait_root_health(base: str, proc: subprocess.Popen[bytes], timeout_secs: float) -> float:
+def wait_root_health(base: str, proc: subprocess.Popen[bytes], timeout_secs: float) -> None:
     start = time.perf_counter()
     deadline = start + timeout_secs
     last = ""
@@ -127,7 +146,7 @@ def wait_root_health(base: str, proc: subprocess.Popen[bytes], timeout_secs: flo
                 raise RuntimeError("/health response exceeded bounded buffer")
             last = body[:256].decode(errors="replace")
             if status == 200:
-                return (time.perf_counter() - start) * 1000.0
+                return
             last = f"status {status}: {last}"
         except Exception as exc:  # noqa: BLE001
             last = str(exc)
@@ -218,14 +237,14 @@ def run_one(
     shutdown_timeout_secs: float,
     secrets_to_hide: list[str],
     launcher: Callable[[list[str], Path, dict[str, str], Any], subprocess.Popen[bytes]] = launch_process,
-    waiter: Callable[[str, subprocess.Popen[bytes], float], float] = wait_root_health,
+    waiter: Callable[[str, subprocess.Popen[bytes], float], Any] = wait_root_health,
     rss_sampler: Callable[[int], int | None] = sample_rss_kib,
     port_picker: Callable[[], int] = free_port,
 ) -> dict[str, Any]:
     mode = "webui-on" if webui else "webui-off"
     work = root / artifact.label / mode / f"repeat-{repeat_index:02d}"
     for dirname in ("home", "empty-models", "store"):
-        (work / dirname).mkdir(parents=True, exist_ok=False)
+        mkdir_private(work / dirname)
     key = secrets.token_urlsafe(32)
     secrets_to_hide.append(key)
     key_file = work / "api-key.txt"
@@ -233,7 +252,7 @@ def run_one(
     port = port_picker()
     command = build_command(artifact, port, work / "empty-models", work / "store", key_file, webui)
     log_path = work / "server.log"
-    log_file = log_path.open("ab", buffering=0)
+    log_file = open_private_binary(log_path)
     proc: subprocess.Popen[bytes] | None = None
     result: dict[str, Any] = {
         "entrypoint": artifact.label,
@@ -246,11 +265,15 @@ def run_one(
         "measurement": "elapsed milliseconds from process launch to root /health 200; RSS sampled immediately after readiness before any model load",
     }
     try:
+        launch_started = time.perf_counter()
         proc = launcher(command, work, clean_env(work / "home", work / "store"), log_file)
         result["pid"] = proc.pid
-        startup_ms = waiter(f"http://127.0.0.1:{port}", proc, timeout_secs)
-        result["startup_ms_to_root_health_200"] = round(startup_ms, 3)
-        result["rss_kib_after_health_200"] = rss_sampler(proc.pid)
+        waiter(f"http://127.0.0.1:{port}", proc, timeout_secs)
+        result["startup_ms_to_root_health_200"] = round((time.perf_counter() - launch_started) * 1000.0, 3)
+        rss_kib = rss_sampler(proc.pid)
+        if not isinstance(rss_kib, int) or rss_kib <= 0:
+            raise AssertionError(f"RSS measurement unavailable for pid {proc.pid}")
+        result["rss_kib_after_health_200"] = rss_kib
     finally:
         try:
             if proc is not None:
@@ -312,7 +335,7 @@ def main(argv: list[str] | None = None) -> int:
     evidence_path = Path(args.evidence).resolve()
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     root = evidence_path.parent / f"{evidence_path.stem}-artifacts-{stamp}"
-    root.mkdir(parents=True, exist_ok=False)
+    mkdir_private(root)
     secrets_to_hide: list[str] = []
     source_root = Path(__file__).resolve().parents[2]
     artifacts = build_artifacts(args)
@@ -360,10 +383,18 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     except BaseException as exc:
         evidence["result"] = "fail"
-        evidence["error"] = {"type": type(exc).__name__, "message": redact(str(exc), secrets_to_hide)}
+        safe_error = {"type": type(exc).__name__, "message": redact(str(exc), secrets_to_hide)}
+        evidence["error"] = safe_error
         evidence["completed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         evidence_path.write_text(json.dumps(redact(evidence, secrets_to_hide), indent=2, sort_keys=True) + "\n")
-        raise
+        print(
+            json.dumps(
+                {"result": "fail", "error_type": safe_error["type"], "message": "startup measurement failed; see sanitized evidence", "evidence": str(evidence_path)},
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 1
 
 
 if __name__ == "__main__":
