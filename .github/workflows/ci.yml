@@ -513,8 +513,13 @@ jobs:
         run: cargo test --profile test-fast --features cuda,webui --lib server::router_server::router_webui_playwright_harness_tests::real_router_browser_harness -- --ignored --exact --nocapture
       - name: Unit-test the installed-artifact verifier helpers
         run: |
+          python3 scripts/webui/measure_startup_tests.py
           python3 scripts/webui/verify_installed_artifact_tests.py
           python3 scripts/webui/verify_generated_key_helper_tests.py
+          python3 scripts/webui/verify_reverse_proxy_tests.py
+          python3 scripts/webui/verify_single_model_tests.py
+          python3 scripts/webui/verify_activity_performance_tests.py
+          python3 scripts/webui/summarize_activity_evidence_tests.py
       - name: Verify the installed Rust artifact serves the bundled WebUI
         env:
           WEBUI_INSTALLED_EVIDENCE: ${{ runner.temp }}/webui-installed-evidence.json
@@ -528,6 +533,80 @@ jobs:
           WEBUI_FEATURE_OFF_SERVER_BIN="$RUNNER_TEMP/mlxcel-webui-installed/mlxcel-server-feature-off" \
           WEBUI_FEATURE_OFF_CLI_BIN="$RUNNER_TEMP/mlxcel-webui-installed/mlxcel-feature-off" \
           python3 scripts/webui/verify_installed_artifact.py
+      - name: Verify loopback reverse-proxy WebUI edge behavior
+        env:
+          WEBUI_REVERSE_PROXY_EVIDENCE: ${{ runner.temp }}/webui-reverse-proxy-evidence.json
+        run: |
+          python3 scripts/webui/verify_reverse_proxy.py \
+            --server-bin "$RUNNER_TEMP/mlxcel-webui-installed/mlxcel-server-webui" \
+            --cli-bin "$RUNNER_TEMP/mlxcel-webui-installed/mlxcel-webui" \
+            --build-source-head "${{ github.sha }}" \
+            --evidence "$WEBUI_REVERSE_PROXY_EVIDENCE"
+      - name: Install native-hidden Activity display tools
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xvfb openbox
+          command -v Xvfb
+          command -v openbox
+          command -v flock
+          command -v nvidia-smi
+      - name: Cache Activity checkpoint fixture
+        id: activity-fixture-cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/mlxcel-webui-activity-fixtures/qwen3-0.6b-4bit
+          key: ${{ runner.os }}-webui-activity-qwen3-0.6b-4bit-v1
+      - name: Download Activity checkpoint fixture
+        if: steps.activity-fixture-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CI_FIXTURE_TAG: ci-fixtures/qwen3-0.6b-4bit-v1
+          CI_FIXTURE_ASSET: qwen3-0.6b-4bit.tar.gz
+        run: |
+          set -euo pipefail
+          fixture_root="$RUNNER_TEMP/mlxcel-webui-activity-fixtures"
+          mkdir -p "$fixture_root"
+          test ! -e "$fixture_root/qwen3-0.6b-4bit"
+          tmp_dir="$(mktemp -d)"
+          gh release download "$CI_FIXTURE_TAG" \
+            --pattern "$CI_FIXTURE_ASSET" \
+            --dir "$tmp_dir"
+          tar -xzf "$tmp_dir/$CI_FIXTURE_ASSET" -C "$fixture_root"
+          rm -rf "$tmp_dir"
+          test -s "$fixture_root/qwen3-0.6b-4bit/config.json"
+      - name: Run native-hidden Activity performance gate
+        timeout-minutes: 45
+        env:
+          MLXCEL_REQUIRE_MODELS: '1'
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.cache/mlxcel/ci-locks"
+          (
+            # This flock serializes cooperating CI steps only; the nvidia-smi check below fails closed if non-cooperating GPU compute work is already present.
+            flock -w 600 -x 9 || { echo "::error::timed out waiting for cooperative WebUI Activity GPU lock"; exit 1; }
+            gpu_process_count="$(nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits | awk '$1 ~ /^[0-9]+$/ {count++} END {print count + 0}')"
+            if [ "$gpu_process_count" -ne 0 ]; then
+              echo "::error::GPU compute processes are already present before Activity gate"
+              exit 1
+            fi
+            full_evidence="$RUNNER_TEMP/webui-activity-performance-full.json"
+            summary_evidence="$RUNNER_TEMP/webui-activity-performance-summary.json"
+            python3 scripts/webui/verify_activity_performance.py \
+              --server-bin "$RUNNER_TEMP/mlxcel-webui-installed/mlxcel-server-webui" \
+              --model "$RUNNER_TEMP/mlxcel-webui-activity-fixtures/qwen3-0.6b-4bit" \
+              --checkpoint-revision "ci-fixtures/qwen3-0.6b-4bit-v1" \
+              --source-sha "${{ github.sha }}" \
+              --features cuda,webui \
+              --evidence "$full_evidence" \
+              --work-dir "$RUNNER_TEMP" \
+              --repo-root "$GITHUB_WORKSPACE" \
+              --node-bin "$(command -v node)" \
+              --virtual-display \
+              --activity-timeout 1800
+            python3 scripts/webui/summarize_activity_evidence.py \
+              --input "$full_evidence" \
+              --output "$summary_evidence"
+          ) 9>"$HOME/.cache/mlxcel/ci-locks/webui-activity-gpu.lock"
       - name: Upload installed-artifact WebUI evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -535,6 +614,20 @@ jobs:
           name: webui-installed-artifact-${{ runner.os }}
           path: ${{ runner.temp }}/webui-installed-evidence.json
           if-no-files-found: error
+      - name: Upload reverse-proxy WebUI evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: webui-reverse-proxy-${{ runner.os }}
+          path: ${{ runner.temp }}/webui-reverse-proxy-evidence.json
+          if-no-files-found: warn
+      - name: Upload Activity performance summary evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: webui-activity-performance-${{ runner.os }}
+          path: ${{ runner.temp }}/webui-activity-performance-summary.json
+          if-no-files-found: warn
 
   mlx-pin:
     name: MLX pin extraction
