@@ -1,6 +1,6 @@
 # Model library WebUI — PR #1891
 
-Updated: 2026-09-15. Issue #1844, epic #1834. Measured implementation: `22f19d9eb7836c4b33333724294980a3ecfb9168`. Local browser and isolated real-model lifecycle acceptance passed; final local Clippy and integrated/manual gates remain pending at this report revision.
+Updated: 2026-09-15. Issue #1844, epic #1834. Measured implementation: `22f19d9eb7836c4b33333724294980a3ecfb9168`. Local browser and isolated real-model lifecycle acceptance passed; integrated/manual gates remain pending at this report revision.
 
 ## Implementation and operator control
 
@@ -22,6 +22,7 @@ Combined browser testing also exposed a runtime fixture missing Activity's requi
 |---|---|
 | Frontend | 182 Vitest tests, 17 Node parser/harness tests, typecheck and lint passed |
 | Contract/bundle | 49 canonical fixtures; deterministic two-clean-build verification passed |
+| Local workspace all-target Clippy | Metal/Accelerate with default WebUI and with `--no-default-features` both passed |
 | Narrow backend | 30 catalog CPU tests and 5 focused eviction/error-field cases passed; independent reviews clear |
 | Production build | Both binaries, test-fast, Metal/Accelerate/default WebUI, passed |
 | Full local mocked browser suite | 26/26 passed |
@@ -36,4 +37,4 @@ Bundle digest: `96c48109c78a27b6eae26999603f0c596dc4abe474b24cb1b3af7d0fc065606c
 
 ## Remaining gates
 
-Final local feature-on/off Clippy is not yet claimed passed here. Source CI passed as recorded above; skipped jobs are not counted as executed validation. Integrated Chat generation and cross-screen acceptance belong to #1845/#1848. Safari/VoiceOver and actual native 200% zoom remain deferred to the consolidated manual session. GPU-timeout root-cause investigation was deferred by the maintainer; this successful bounded lifecycle run does not establish GPU stability or resolve that investigation.
+Final local WebUI-on/off workspace all-target Clippy and source CI passed as recorded above; skipped jobs are not counted as executed validation. A new full-workspace Metal test run is not claimed and remains a final #1848 integration gate. Integrated Chat generation and cross-screen acceptance belong to #1845/#1848. Safari/VoiceOver and actual native 200% zoom remain deferred to the consolidated manual session. GPU-timeout root-cause investigation was deferred by the maintainer; this successful bounded lifecycle run does not establish GPU stability or resolve that investigation.
