@@ -385,7 +385,7 @@ async fn real_router_browser_harness() {
         ..Default::default()
     };
     let sources = RouterSources {
-        models_dir: Some(models_dir),
+        models_dir: Some(models_dir.clone()),
         cache: Some(CacheSource::new(
             cache_root.clone(),
             Arc::new(HarnessDownloader),
