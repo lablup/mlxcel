@@ -170,6 +170,48 @@ fn artifact_run_dir(parent: PathBuf) -> PathBuf {
     parent.join(format!("run-{}", uuid::Uuid::new_v4()))
 }
 
+fn create_canonical_artifact_run_dir(parent: PathBuf) -> anyhow::Result<PathBuf> {
+    let run_dir = artifact_run_dir(parent);
+    std::fs::create_dir_all(&run_dir)?;
+    run_dir.canonicalize().map_err(|err| {
+        anyhow::anyhow!(
+            "canonicalize artifact run dir {} before exporting child paths: {err}",
+            run_dir.display()
+        )
+    })
+}
+
+#[test]
+fn artifact_run_dirs_export_absolute_child_paths_without_chdir() -> anyhow::Result<()> {
+    let absolute_parent = tempfile::tempdir()?;
+    let absolute_run = create_canonical_artifact_run_dir(absolute_parent.path().to_path_buf())?;
+    anyhow::ensure!(
+        absolute_run.is_absolute(),
+        "absolute parent produced relative run dir"
+    );
+    anyhow::ensure!(absolute_run.exists(), "absolute run dir was not created");
+    anyhow::ensure!(
+        absolute_run.join("control").is_absolute(),
+        "absolute run control path would be relative"
+    );
+
+    let relative_parent = PathBuf::from("target")
+        .join("webui-router-artifact-path-regression")
+        .join(uuid::Uuid::new_v4().to_string());
+    let relative_run = create_canonical_artifact_run_dir(relative_parent.clone())?;
+    anyhow::ensure!(
+        relative_run.is_absolute(),
+        "relative parent was not canonicalized"
+    );
+    anyhow::ensure!(relative_run.exists(), "relative run dir was not created");
+    anyhow::ensure!(
+        relative_run.join("control").is_absolute(),
+        "relative run control path would resolve under the child cwd"
+    );
+    let _ = std::fs::remove_dir_all(relative_parent);
+    Ok(())
+}
+
 #[cfg(unix)]
 fn signal_process_group(child_id: Option<u32>, signal: libc::c_int) {
     if let Some(child_id) = child_id {
@@ -603,11 +645,11 @@ async fn real_router_browser_harness() {
     let artifact_parent = std::env::var_os("MLXCEL_WEBUI_ROUTER_ARTIFACTS")
         .map(PathBuf::from)
         .unwrap_or_else(|| default_artifacts_parent(&repo_root));
-    let artifacts = artifact_run_dir(artifact_parent);
+    let artifacts =
+        create_canonical_artifact_run_dir(artifact_parent).expect("canonical artifact dir");
     let control_dir = artifacts.join("control");
     std::fs::create_dir_all(&models_dir).expect("models dir");
     std::fs::create_dir_all(&cache_root).expect("cache root");
-    std::fs::create_dir_all(&artifacts).expect("artifact dir");
     std::fs::create_dir_all(&control_dir).expect("control dir");
 
     let router_key = format!("router-{}", uuid::Uuid::new_v4());
