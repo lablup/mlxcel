@@ -71,8 +71,25 @@ async function clients(mode) {
       let hidden = await page.evaluate(() => document.hidden);
       while (!hidden && Date.now() < deadline) { await sleep(250); hidden = await page.evaluate(() => document.hidden); }
       if (!hidden) {
+        // Dropping the two visibility-suppressing launch arguments was not enough, so the next
+        // question is whether this browser propagates any real visibility change at all, or only
+        // refuses the window-manager iconify. Report three facts rather than guessing again:
+        // the command line actually in force (so a launch-argument change is verified, not
+        // assumed), the visibility state the page holds, and whether foregrounding a second tab
+        // in the same context makes this page report hidden through Chrome's own tab path.
         const state = await cdp.send('Browser.getWindowBounds', { windowId }).then((r) => r.bounds.windowState).catch((error) => `unavailable: ${error.message}`);
-        throw new Error(`Native hidden acceptance failed: document.hidden stayed false for 15s after requesting minimize; browser window state is now ${state}. Do not substitute a synthetic event.`);
+        const commandLine = await cdp.send('Browser.getBrowserCommandLine').then((r) => r.arguments.filter((a) => a.includes('background') || a.includes('occlu')).join(' ') || 'no backgrounding-related arguments').catch((error) => `unavailable: ${error.message}`);
+        const visibilityState = await page.evaluate(() => document.visibilityState);
+        let tabSwitchHidden;
+        try {
+          const sibling = await context.newPage();
+          await sibling.goto('data:text/html,<main>foreground</main>');
+          await sibling.bringToFront();
+          await sleep(1500);
+          tabSwitchHidden = String(await page.evaluate(() => document.hidden));
+          await sibling.close();
+        } catch (error) { tabSwitchHidden = `unavailable: ${error.message}`; }
+        throw new Error(`Native hidden acceptance failed: document.hidden stayed false for 15s after requesting minimize. windowState=${state}; visibilityState=${visibilityState}; backgrounding arguments in force=[${commandLine}]; document.hidden after foregrounding a sibling tab=${tabSwitchHidden}. Do not substitute a synthetic event.`);
       }
     }
     await sleep(500);
