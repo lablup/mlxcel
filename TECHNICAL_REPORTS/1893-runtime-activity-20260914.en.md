@@ -30,7 +30,7 @@ The selected-model history is memory-only, five minutes/150 two-second buckets. 
 
 ## Executed validation
 
-Measured implementation source: `51fe6579958718b72f1a7a89bbeb29d2c4cb886d`. Subsequent report/harness-only changes do not alter the runtime or frontend bundle.
+Historical pre-integration implementation source: `51fe6579958718b72f1a7a89bbeb29d2c4cb886d`. Subsequent report/harness-only changes do not alter the runtime or frontend bundle.
 
 | Gate | Result |
 |---|---|
@@ -52,4 +52,12 @@ Hosted source `51fe6579` passed all executable checks. The WebUI job `1039929713
 
 `webui/scripts/activity-performance.mjs` prepares five alternating-order UI-off/treatment pairs for one visible, two visible and actually hidden headed-browser clients. It requires native backend `timings.predicted_per_second`, records median paired degradation and noise, and flags >2% degradation or >5% baseline CV for investigation. `activity-slots.mjs` captures an actual long chat stream with before/runtime/after native slot samples, strips all text, bounds time and leaves the result explicitly requiring comparison. These scripts are prepared and syntax/lint-checked, not measured acceptance results.
 
-Central integration order is #1846 → #1847 → #1844 → #1845. The root must preserve Settings' active configuration/CLI override projection and operation session fences on rebase, union canonical schema additions, rebuild the bundle, and execute full/real-model/production-CSP/performance gates before merge. Safari/VoiceOver/native 200% checks are explicitly deferred to the final integrated manual session, not passed. No existing user checkpoints were modified or removed.
+Central integration order is #1846 → #1847 → #1844 → #1845. The Settings integration described below is complete. Root-owned full/real-model/production-CSP/performance acceptance remains outstanding. Safari/VoiceOver/native 200% checks are explicitly deferred to the final integrated manual session, not passed. No existing user checkpoints were modified or removed.
+
+## September 15 Settings integration
+
+Measured integrated source: `93c825b8a6dc432d8f2427fd1cc8edee1ba2dde0`, based on merged Settings `2a91bf3069fb84fdc729d688baad8747136af252` and the Rustls security update. Runtime metrics and actual effective configuration now share one revision-fenced loaded AppState; CLI override provenance survives. Settings session-fenced operations and Activity observation-only selection both retain their provider regressions. The generated bundle includes both screens, the corrected Field accessible names, and the canonical eight-character Vite asset hashes.
+
+Executed integration gates: 137 frontend tests in 19 files, 14 offline SSE acceptance tests, TypeScript, ESLint, 49 canonical fixtures/schema checks, six CPU runtime tests and one revision/LRU observation test, formatting/diff checks, and deterministic bundle verification all passed. Integrated bundle digest: `d9102d2559e51de2f16dc2c9a409c6ad5860c65157fb10f8ba190181a8a83dc8`. Previous hosted browser evidence above applies only to its recorded historical source; no new local browser, full workspace, real-model or performance pass is claimed here.
+
+The real slots harness now validates bounded UTF-8 SSE frames, rejects explicit errors, malformed/truncated responses and post-finish choices, and requires a successful finish reason followed by `[DONE]`. It retains no generated text. An independent read-only correctness/security review verified the integration seams and identified the post-finish acceptance gap; it was fixed with regressions and rereviewed with no remaining findings. The maintainer deferred GPU timeout root-cause diagnosis, not correctness assertions or failed acceptance results. Native Safari/VoiceOver/200% remains deferred to the final integrated session.
