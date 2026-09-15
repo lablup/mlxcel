@@ -1222,11 +1222,58 @@ async fn ui_model_action_route_validates_profile_fields_and_idempotency() {
         Some(ROUTER_KEY),
     )
     .await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{response}");
-    assert_eq!(
-        response["error"]["field_errors"][0]["field"],
-        "load_profile"
+    assert_eq!(status, StatusCode::ACCEPTED, "{response}");
+    contract::assert_operation_accepted(&response);
+}
+
+#[tokio::test]
+async fn ui_model_action_route_rejects_unsupported_load_profile_with_canonical_error() {
+    let root = temp_models_dir("ui-action-unsupported-profile");
+    add_fake_model(&root, "alpha");
+    let state = router_state_from(
+        RouterSources {
+            models_dir: Some(root),
+            cache: None,
+            presets: Default::default(),
+        },
+        keyed_config(),
+        true,
     );
+    let entry = state.pool.get("alpha").expect("entry");
+    let revision = entry.lifecycle_revision();
+    let app = create_router_app_with_authenticated_ui(state);
+    let body = serde_json::json!({"model_id": entry.ui_model_id, "action":"load", "expected_revision":revision, "idempotency_key":"unsupported-profile-0001", "load_profile":{"ctx_size":1}});
+    let (status, mut response) = send(
+        app,
+        Method::POST,
+        "/ui-api/v1/model-actions",
+        &body.to_string(),
+        Some(ROUTER_KEY),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{response}");
+    assert!(
+        response["request_id"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
+    );
+    assert!(
+        response["error"]["operation_id"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
+    );
+    response["request_id"] = serde_json::json!("req_profile_invalid_example");
+    response["error"]["operation_id"] = serde_json::json!("op_profile_invalid_example");
+    let mut expected: serde_json::Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/webui/examples/error.load-profile-unsupported.json"
+    ))
+    .expect("fixture");
+    expected
+        .as_object_mut()
+        .expect("object")
+        .remove("$schemaName");
+    assert_eq!(response, expected);
+    assert_eq!(entry.lifecycle_revision(), revision);
 }
 
 #[tokio::test]

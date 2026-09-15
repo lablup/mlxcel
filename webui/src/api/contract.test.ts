@@ -63,7 +63,7 @@ function failSchema(path: string): never {
 describe('canonical WebUI contract fixtures', () => {
   it('validates every shared fixture at the JavaScript runtime boundary', () => {
     const entries = Object.entries(fixtures).sort(([left], [right]) => left.localeCompare(right));
-    expect(entries).toHaveLength(46);
+    expect(entries).toHaveLength(47);
     for (const [path] of entries) validateAgainstSchema(schemaFor(path), cloneFixture(path), path);
   });
 

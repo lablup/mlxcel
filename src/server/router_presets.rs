@@ -154,6 +154,7 @@ impl RouterPresets {
 pub struct PresetCliOverrides {
     pub ctx_size: bool,
     pub n_parallel: bool,
+    pub kv_cache_mode: bool,
     pub min_p: bool,
     pub seed: bool,
     pub n_predict: bool,
@@ -162,14 +163,42 @@ pub struct PresetCliOverrides {
 }
 
 impl PresetCliOverrides {
-    /// Detect from the live process arguments. Long-form flags only; the
+    /// Detect from process arguments and operator environment aliases.
+    /// Profile fields also recognize their supported short spellings. The
     /// `temperature` / `top-k` / `top-p` flags need no detection here because
     /// [`super::ServerStartupConfig`] already carries their `*_was_set` bits.
     pub fn detect() -> Self {
         use super::long_cli_flag_was_set;
         Self {
-            ctx_size: long_cli_flag_was_set("ctx-size"),
-            n_parallel: long_cli_flag_was_set("parallel"),
+            ctx_size: long_cli_flag_was_set("ctx-size")
+                || std::env::args_os().any(|arg| {
+                    arg == "-c"
+                        || arg
+                            .to_string_lossy()
+                            .strip_prefix("-c")
+                            .is_some_and(|value| {
+                                value.starts_with(|ch: char| ch.is_ascii_digit())
+                                    || value.starts_with('=')
+                            })
+                })
+                || std::env::var_os("LLAMA_ARG_CTX_SIZE").is_some(),
+            n_parallel: long_cli_flag_was_set("parallel")
+                || long_cli_flag_was_set("n-parallel")
+                || std::env::args_os()
+                    .any(|arg| arg == "-np" || arg.to_string_lossy().starts_with("-np="))
+                || std::env::var_os("LLAMA_ARG_N_PARALLEL").is_some(),
+            kv_cache_mode: ["kv-cache-mode", "cache-type-k", "cache-type-v", "kv-bits"]
+                .iter()
+                .any(|name| long_cli_flag_was_set(name))
+                || std::env::args_os().any(|arg| {
+                    let arg = arg.to_string_lossy();
+                    ["-ctk", "-ctv"]
+                        .iter()
+                        .any(|name| arg == *name || arg.starts_with(&format!("{name}=")))
+                })
+                || ["LLAMA_ARG_CACHE_TYPE_K", "LLAMA_ARG_CACHE_TYPE_V"]
+                    .iter()
+                    .any(|name| std::env::var_os(name).is_some()),
             min_p: long_cli_flag_was_set("min-p"),
             seed: long_cli_flag_was_set("seed"),
             n_predict: long_cli_flag_was_set("n-predict") || long_cli_flag_was_set("predict"),

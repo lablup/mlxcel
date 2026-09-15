@@ -206,19 +206,27 @@ fn cache_control_for(path: &str) -> &'static str {
 }
 
 fn has_vite_content_hash(path: &str) -> bool {
+    if !path.starts_with("assets/") {
+        return false;
+    }
     let Some(file_name) = path.rsplit('/').next() else {
         return false;
     };
     let Some((stem, _extension)) = file_name.rsplit_once('.') else {
         return false;
     };
-    let Some((_name, hash)) = stem.rsplit_once('-') else {
+    // Vite emits exactly eight base64url hash bytes (`[hash:8]` in
+    // webui/vite.config.ts). A hyphen can be part of that hash, so splitting
+    // at the final hyphen misclassifies names such as index--ARMeYuQ.js.
+    let bytes = stem.as_bytes();
+    let Some(separator) = bytes.len().checked_sub(9) else {
         return false;
     };
-    hash.len() >= 8
-        && hash
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    separator > 0
+        && bytes[separator] == b'-'
+        && bytes[separator + 1..]
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'-')
 }
 
 fn format_uri_with_trailing_slash(uri: &Uri) -> String {

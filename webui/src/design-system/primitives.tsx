@@ -9,13 +9,14 @@ export { Select } from './common-select';
 
 export function Field(props: { label: string; value: string; onChange?: (value: string) => void; placeholder?: string; disabled?: boolean; busy?: boolean; error?: string; hint?: string; testId?: string }): React.JSX.Element {
   const id = useId();
+  const labelId = `${id}-label`;
   const hintId = `${id}-hint`;
   const errorId = `${id}-error`;
   const describedBy = [props.hint ? hintId : null, props.error ? errorId : null].filter(Boolean).join(' ') || undefined;
   return (
     <label className="ds-field" htmlFor={id} data-disabled={props.disabled || props.busy || undefined}>
-      <span>{props.label}</span>
-      <input id={id} value={props.value} placeholder={props.placeholder} disabled={props.disabled || props.busy} aria-busy={props.busy || undefined} aria-invalid={props.error ? 'true' : undefined} aria-describedby={describedBy} data-testid={props.testId} onChange={(event) => props.onChange?.(event.currentTarget.value)} />
+      <span id={labelId}>{props.label}</span>
+      <input id={id} aria-labelledby={labelId} value={props.value} placeholder={props.placeholder} disabled={props.disabled || props.busy} aria-busy={props.busy || undefined} aria-invalid={props.error ? 'true' : undefined} aria-describedby={describedBy} data-testid={props.testId} onChange={(event) => props.onChange?.(event.currentTarget.value)} />
       {props.hint ? <small id={hintId} data-tone="hint">{props.hint}</small> : null}
       {props.error ? <small id={errorId} data-tone="error">{props.error}</small> : null}
     </label>
@@ -63,7 +64,7 @@ function ModalDialog(props: ModalProps): React.JSX.Element {
     if (!dialog) return;
     const restoreFocus = (): void => {
       const target = previousFocus.current;
-      if (target?.isConnected) target.focus();
+      restoreModalFocus(dialog, target);
       previousFocus.current = null;
     };
     const handleClose = (): void => {
@@ -91,6 +92,9 @@ function ModalDialog(props: ModalProps): React.JSX.Element {
     return () => {
       dialog.removeEventListener('close', handleClose);
       dialog.removeEventListener('keydown', handleKeyDown);
+      // Feature confirmations may unmount without a native close event.
+      const target = previousFocus.current;
+      window.setTimeout(() => restoreModalFocus(dialog, target), 0);
     };
   }, []);
 
@@ -98,11 +102,23 @@ function ModalDialog(props: ModalProps): React.JSX.Element {
     <dialog className={`ds-dialog ${props.className ?? ''}`.trim()} data-position={props.position ?? 'center'} ref={ref} aria-labelledby={titleId} data-testid={props.testId}>
       <header>
         <h2 id={titleId}>{props.title}</h2>
-        <IconButton label={props.closeLabel ?? 'Close'} icon="close" onClick={() => { const target = previousFocus.current; closingFromProp.current = true; onCloseRef.current(); ref.current?.close(); window.setTimeout(() => { if (target?.isConnected) target.focus(); }, 0); }} data-testid="dialog-close" />
+        <IconButton label={props.closeLabel ?? 'Close'} icon="close" onClick={() => { const target = previousFocus.current; closingFromProp.current = true; onCloseRef.current(); ref.current?.close(); window.setTimeout(() => { const dialog = ref.current; if (dialog) restoreModalFocus(dialog, target); }, 0); }} data-testid="dialog-close" />
       </header>
       <div><NativeModalContext.Provider value={true}>{props.children}</NativeModalContext.Provider></div>
     </dialog>
   );
+}
+
+// Do not steal focus from a newly opened modal or an intentionally focused control.
+function restoreModalFocus(dialog: HTMLDialogElement, target: HTMLElement | null): void {
+  if (dialog.isConnected && dialog.open) return;
+  const active = document.activeElement;
+  if (active && active !== document.body && active !== document.documentElement && !dialog.contains(active)) return;
+  if (document.querySelector('dialog[open]')) return;
+  const usable = (element: HTMLElement | null): element is HTMLElement => !!element?.isConnected && element !== document.body && !element.matches(':disabled, [aria-disabled="true"]') && !element.closest('[inert], [hidden]');
+  if (usable(target)) { target.focus(); return; }
+  const fallback = document.querySelector<HTMLElement>('[data-dialog-focus-fallback]') ?? document.querySelector<HTMLElement>('main button:not(:disabled)');
+  if (usable(fallback)) fallback.focus();
 }
 
 export function Dialog(props: Omit<ModalProps, 'position' | 'className'>): React.JSX.Element {
