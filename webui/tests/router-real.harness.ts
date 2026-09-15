@@ -1,13 +1,16 @@
 // Copyright 2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
+import { expect, test, type APIRequestContext, type BrowserContext, type Page } from '@playwright/test';
 import { expectAxeClean, expectSafeLayout } from './browser-assertions';
 
 type Operation = { operation_id: string; kind: string; state: string; result?: unknown; error?: unknown };
 type CatalogItem = { identity: { id: string; display_name: string; inference_id: string; revision: number }; lifecycle: { state: string; worker_exit_observed: boolean; active_requests: number }; capabilities: Array<{ task: string; phase: string; available: boolean }> };
 type HarnessContext = { target: URL; apiBase: string; artifacts: string; keyPath: string; token: string; auth: { Authorization: string } };
 type ErrorEnvelope = { error: { code: string; operation_id?: string | null; field_errors?: Array<{ field: string; code: string; message: string }> | null } };
+type DownloadResult = { repo_id?: string; revision?: string | null; model_id?: string | null };
+type Accepted = { operation_id: string };
+type BrowserJsonResponse<T> = { status: number; body: T };
 type HttpObservation = { method: string; path: string; status?: number; failure?: string };
 
 function harnessContext(): HarnessContext {
@@ -32,16 +35,20 @@ async function apiJson<T>(request: APIRequestContext, ctx: HarnessContext, metho
   return (await response.json()) as T;
 }
 
-async function waitOperation(request: APIRequestContext, ctx: HarnessContext, operationId: string): Promise<Operation> {
+async function waitOperationState(request: APIRequestContext, ctx: HarnessContext, operationId: string, expected: 'succeeded' | 'failed' | 'cancelled' = 'succeeded'): Promise<Operation> {
   for (let attempt = 0; attempt < 200; attempt += 1) {
     const operation = await apiJson<Operation>(request, ctx, 'get', `/ui-api/v1/operations/${operationId}`);
     if (['succeeded', 'failed', 'cancelled'].includes(operation.state)) {
-      expect(operation.state, JSON.stringify(operation)).toBe('succeeded');
+      expect(operation.state, JSON.stringify(operation)).toBe(expected);
       return operation;
     }
     await new Promise(resolve => setTimeout(resolve, 25));
   }
   throw new Error(`operation ${operationId} did not reach a terminal state`);
+}
+
+async function waitOperation(request: APIRequestContext, ctx: HarnessContext, operationId: string): Promise<Operation> {
+  return waitOperationState(request, ctx, operationId, 'succeeded');
 }
 
 async function waitOperationKind(request: APIRequestContext, ctx: HarnessContext, kind: string): Promise<string> {
@@ -64,12 +71,12 @@ async function catalog(request: APIRequestContext, ctx: HarnessContext): Promise
   return body.items;
 }
 
-async function login(page: Page, ctx: HarnessContext, observations: HttpObservation[]): Promise<void> {
+async function login(page: Page, ctx: HarnessContext, observations: HttpObservation[], artifactName = 'router-login-observations.json'): Promise<void> {
   await page.goto(`${ctx.target.href}#models`);
   await page.getByLabel(/Session key|세션 키/i).fill(ctx.token);
   await page.getByRole('button', { name: /Connect|연결/i }).click();
   await page.waitForTimeout(750);
-  saveArtifact(ctx, 'router-login-observations.json', { api_base: ctx.apiBase, current_path: new URL(page.url()).pathname, observations });
+  saveArtifact(ctx, artifactName, { api_base: ctx.apiBase, current_path: new URL(page.url()).pathname, observations });
   await expect(page.getByTestId('models-table')).toBeVisible();
 }
 
@@ -77,8 +84,82 @@ async function refresh(page: Page): Promise<void> {
   await page.getByRole('button', { name: 'Refresh server state', exact: true }).first().click();
 }
 
+async function browserModelAction(page: Page, ctx: HarnessContext, body: unknown): Promise<BrowserJsonResponse<Accepted | ErrorEnvelope>> {
+  return page.evaluate(async ({ url, token, body }) => {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    return { status: response.status, body: await response.json() as Accepted | ErrorEnvelope };
+  }, { url: `${ctx.target.origin}${ctx.apiBase}/ui-api/v1/model-actions`, token: ctx.token, body });
+}
+
+function operationIdFrom(body: Accepted | ErrorEnvelope): string {
+  if ('operation_id' in body && typeof body.operation_id === 'string') return body.operation_id;
+  throw new Error(`expected operation id body, got ${JSON.stringify(body)}`);
+}
+
+async function triggerLostCatalogRefresh(page: Page, request: APIRequestContext, ctx: HarnessContext): Promise<string> {
+  const url = `${ctx.target.origin}${ctx.apiBase}/ui-api/v1/catalog/refresh`;
+  let accepted: string | null = null;
+  await page.route(url, async route => {
+    const response = await route.fetch();
+    const body = await response.json() as Accepted;
+    accepted = body.operation_id;
+    await route.abort('failed');
+  }, { times: 1 });
+  const browserResult = await page.evaluate(async ({ url, token }) => {
+    try {
+      await fetch(url, { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
+      return 'unexpected-success';
+    } catch (error) {
+      return error instanceof Error ? error.name : String(error);
+    }
+  }, { url, token: ctx.token });
+  expect(browserResult).not.toBe('unexpected-success');
+  if (accepted === null) throw new Error('catalog refresh POST did not reach the server before the response was lost');
+  await waitOperation(request, ctx, accepted);
+  return accepted;
+}
+
+async function injectRealUnauthorizedCatalog(page: Page, ctx: HarnessContext): Promise<void> {
+  await page.route(`${ctx.target.origin}${ctx.apiBase}/ui-api/v1/catalog**`, async route => {
+    await route.continue({ headers: { ...route.request().headers(), authorization: 'Bearer expired-router-key' } });
+  }, { times: 1 });
+  await refresh(page);
+  await expect(page.getByLabel(/Session key|세션 키/i)).toBeVisible();
+}
+
+async function performTwoTabStaleRevision(
+  context: BrowserContext,
+  request: APIRequestContext,
+  ctx: HarnessContext,
+  ready: CatalogItem,
+): Promise<CatalogItem> {
+  const second = await context.newPage();
+  const observations: HttpObservation[] = [];
+  try {
+    await login(second, ctx, observations, 'router-login-observations-tab-b.json');
+    const unload = await browserModelAction(second, ctx, { model_id: ready.identity.id, action: 'unload', expected_revision: ready.identity.revision, idempotency_key: 'router-real-tab-b-unload' });
+    expect(unload.status).toBe(202);
+    await waitOperation(request, ctx, operationIdFrom(unload.body));
+    const unloaded = requireCatalogItem((await catalog(request, ctx)).find(item => item.identity.id === ready.identity.id), 'tab-b unloaded fake');
+    const staleFromTabA = await request.post(`${ctx.target.origin}${ctx.apiBase}/ui-api/v1/model-actions`, { headers: ctx.auth, data: { model_id: ready.identity.id, action: 'unload', expected_revision: ready.identity.revision, idempotency_key: 'router-real-tab-a-stale-after-tab-b' } });
+    expect(staleFromTabA.status()).toBe(409);
+    expect(((await staleFromTabA.json()) as ErrorEnvelope).error.code).toBe('stale_revision');
+    const reload = await browserModelAction(second, ctx, { model_id: unloaded.identity.id, action: 'load', expected_revision: unloaded.identity.revision, idempotency_key: 'router-real-tab-b-reload' });
+    expect(reload.status).toBe(202);
+    await waitOperation(request, ctx, operationIdFrom(reload.body));
+    await expect.poll(async () => (await catalog(request, ctx)).find(item => item.identity.id === ready.identity.id)?.capabilities.some(cap => cap.task === 'chat' && cap.phase === 'provider_ready' && cap.available)).toBe(true);
+    return requireCatalogItem((await catalog(request, ctx)).find(item => item.identity.id === ready.identity.id), 'tab-b reloaded fake');
+  } finally {
+    await second.close();
+  }
+}
+
 test.describe('Rust router harness', () => {
-  test('secured Rust router drives download, load, chat, Stop/drain, unload, remove and negative security cases', async ({ page, request }) => {
+  test('secured Rust router drives download, load, chat, Stop/drain, unload, remove and negative security cases', async ({ page, request, context }) => {
     const ctx = harnessContext();
     expect(statSync(ctx.keyPath).mode & 0o777).toBe(0o600);
     const external: string[] = [];
@@ -103,11 +184,12 @@ test.describe('Rust router harness', () => {
     await page.getByTestId('models-public-repo').check();
     await page.getByTestId('models-download-submit').click();
     const acceptedDownload = await waitOperationKind(request, ctx, 'download');
-    await waitOperation(request, ctx, acceptedDownload);
+    const downloadOperation = await waitOperation(request, ctx, acceptedDownload);
     await refresh(page);
     await expect.poll(async () => (await catalog(request, ctx)).length).toBeGreaterThan(1);
 
-    const downloaded = requireCatalogItem((await catalog(request, ctx)).find(item => item.identity.display_name.includes('Router-Harness-Fake')) ?? (await catalog(request, ctx)).find(item => item.identity.id.includes('Router-Harness-Fake')), 'downloaded fake');
+    const downloadResult = downloadOperation.result as DownloadResult | undefined;
+    const downloaded = requireCatalogItem((await catalog(request, ctx)).find(item => item.identity.id === downloadResult?.model_id) ?? (await catalog(request, ctx)).find(item => item.identity.inference_id === 'mlx-community/Router-Harness-Fake-4bit'), 'downloaded fake');
     await page.getByRole('button', { name: new RegExp(`Inspect .*${downloaded.identity.display_name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`) }).click();
     await page.getByTestId('models-load').click();
     const loadAccepted = await waitOperationKind(request, ctx, 'model_load');
@@ -117,7 +199,13 @@ test.describe('Rust router harness', () => {
     await refresh(page);
     await expect.poll(async () => (await catalog(request, ctx)).find(item => item.identity.id === downloaded.identity.id)?.capabilities.some(cap => cap.task === 'chat' && cap.phase === 'provider_ready' && cap.available)).toBe(true);
 
-    const ready = requireCatalogItem((await catalog(request, ctx)).find(item => item.identity.id === downloaded.identity.id), 'ready fake');
+    let ready = requireCatalogItem((await catalog(request, ctx)).find(item => item.identity.id === downloaded.identity.id), 'ready fake');
+    const lostRefreshOperation = await triggerLostCatalogRefresh(page, request, ctx);
+    ready = await performTwoTabStaleRevision(context, request, ctx, ready);
+    await injectRealUnauthorizedCatalog(page, ctx);
+    await login(page, ctx, httpObservations, 'router-relogin-observations.json');
+    await refresh(page);
+    ready = requireCatalogItem((await catalog(request, ctx)).find(item => item.identity.id === ready.identity.id), 'ready fake after auth recovery');
     const staleAction = await request.post(`${ctx.target.origin}${ctx.apiBase}/ui-api/v1/model-actions`, { headers: ctx.auth, data: { model_id: ready.identity.id, action: 'unload', expected_revision: ready.identity.revision + 1000, idempotency_key: 'router-real-stale-revision' } });
     expect(staleAction.status()).toBe(409);
     expect(((await staleAction.json()) as ErrorEnvelope).error.code).toBe('stale_revision');
@@ -135,10 +223,18 @@ test.describe('Rust router harness', () => {
     await page.getByRole('button', { name: 'New conversation', exact: true }).click();
     await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Stream until this browser presses Stop.');
     await page.getByRole('button', { name: 'Send', exact: true }).click();
-    await expect.poll(async () => (await catalog(request, ctx)).find(item => item.identity.id === ready.identity.id)?.lifecycle.active_requests, { timeout: 30000 }).toBeGreaterThan(0);
+    let observedActiveRequests = 0;
+    await expect.poll(async () => {
+      const active = (await catalog(request, ctx)).find(item => item.identity.id === ready.identity.id)?.lifecycle.active_requests ?? 0;
+      observedActiveRequests = Math.max(observedActiveRequests, active);
+      return active;
+    }, { timeout: 30000 }).toBeGreaterThan(0);
+    const stopClickedAt = new Date().toISOString();
     await page.getByRole('button', { name: 'Stop', exact: true }).click();
     await expect(page.locator('.chat-turn header')).toContainText('cancelled');
     await expect.poll(async () => (await catalog(request, ctx)).find(item => item.identity.id === ready.identity.id)?.lifecycle.active_requests, { timeout: 30000 }).toBe(0);
+    const stopSettledAt = new Date().toISOString();
+    const finalActiveRequests = (await catalog(request, ctx)).find(item => item.identity.id === ready.identity.id)?.lifecycle.active_requests ?? -1;
 
     const afterStop = requireCatalogItem((await catalog(request, ctx)).find(item => item.identity.id === ready.identity.id), 'post-stop fake');
     const unloadAccepted = await apiJson<{ operation_id: string }>(request, ctx, 'post', '/ui-api/v1/model-actions', { model_id: afterStop.identity.id, action: 'unload', expected_revision: afterStop.identity.revision, idempotency_key: 'router-real-unload' });
@@ -165,6 +261,6 @@ test.describe('Rust router harness', () => {
     const violations = await page.evaluate(() => Reflect.get(window, '__routerCspViolations'));
     expect(violations).toEqual([]); expect(external).toEqual([]);
     await expectSafeLayout(page); await expectAxeClean(page);
-    saveArtifact(ctx, 'router-real-evidence.json', { csp, external, violations, stop_drain: { observed_active_request: true, final_active_requests: 0 }, negative_cases: ['terminal operation cancel unsupported', 'stale revision 409', 'unknown field 400', 'unauth 401', 'bad bearer 401', 'hostile UI and legacy routes 403', 'missing asset 404', 'no token persistence'], final_catalog_size: (await catalog(request, ctx)).length, api_base: ctx.apiBase, note: 'Fake model/downloader leaves only; secured Rust router, embedded bundle, auth, CSP, Stop/drain and lifecycle routes were real.' });
+    saveArtifact(ctx, 'router-real-evidence.json', { csp, external, violations, lost_response_operation_id: lostRefreshOperation, stop_drain: { observed_active_requests: observedActiveRequests, final_active_requests: finalActiveRequests, stop_clicked_at: stopClickedAt, settled_at: stopSettledAt }, negative_cases: ['terminal operation cancel unsupported', 'two-tab stale revision 409', 'single-tab stale revision 409', 'unknown field 400', 'real 401 after credential change and reconnect', 'lost POST response recovered by operation id', 'unauth 401', 'bad bearer 401', 'hostile UI and legacy routes 403', 'missing asset 404', 'no token persistence'], final_catalog_size: (await catalog(request, ctx)).length, api_base: ctx.apiBase, note: 'Fake model/downloader leaves only; secured Rust router, embedded bundle, auth, CSP, Stop/drain and lifecycle routes were real.' });
   });
 });
