@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import platform
 import secrets
@@ -71,7 +72,12 @@ def write_private(path: Path, body: str) -> None:
 
 
 def assert_private_file(path: Path) -> None:
-    mode = stat.S_IMODE(path.stat().st_mode)
+    meta = path.lstat()
+    if stat.S_ISLNK(meta.st_mode):
+        raise AssertionError(f"{path} must not be a symlink")
+    if not stat.S_ISREG(meta.st_mode):
+        raise AssertionError(f"{path} must be a regular file")
+    mode = stat.S_IMODE(meta.st_mode)
     if mode != 0o600:
         raise AssertionError(f"{path} mode is {mode:o}, want 600")
 
@@ -85,10 +91,29 @@ def mkdir_private(path: Path) -> None:
 
 
 def open_private_binary(path: Path) -> Any:
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
     file = os.fdopen(fd, "ab", buffering=0)
     assert_private_file(path)
     return file
+
+
+def write_private_json(path: Path, value: Any, secrets_to_hide: list[str], *, create: bool = False) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    flags |= os.O_EXCL if create else os.O_TRUNC
+    fd = os.open(path, flags, 0o600)
+    try:
+        meta = os.fstat(fd)
+        if not stat.S_ISREG(meta.st_mode):
+            raise AssertionError(f"{path} must be a regular file")
+        os.fchmod(fd, 0o600)
+        body = json.dumps(redact(value, secrets_to_hide), indent=2, sort_keys=True) + "\n"
+        with os.fdopen(fd, "w") as fp:
+            fd = -1
+            fp.write(body)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    assert_private_file(path)
 
 
 def free_port() -> int:
@@ -124,10 +149,10 @@ def clean_env(home: Path, store: Path) -> dict[str, str]:
     return env
 
 
-def request_health(base: str) -> tuple[int, bytes]:
+def request_health(base: str, *, timeout: float = 2.0) -> tuple[int, bytes]:
     req = urllib.request.Request(f"{base}/health", method="GET")
     try:
-        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=2) as resp:
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=timeout) as resp:
             return resp.status, resp.read(MAX_BODY + 1)
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read(MAX_BODY + 1)
@@ -140,8 +165,11 @@ def wait_root_health(base: str, proc: subprocess.Popen[bytes], timeout_secs: flo
     while time.perf_counter() < deadline:
         if proc.poll() is not None:
             raise RuntimeError(f"server exited before health became ready with {proc.returncode}: {last}")
+        remaining = deadline - time.perf_counter()
+        if remaining <= 0:
+            break
         try:
-            status, body = request_health(base)
+            status, body = request_health(base, timeout=max(0.001, min(2.0, remaining)))
             if len(body) > MAX_BODY:
                 raise RuntimeError("/health response exceeded bounded buffer")
             last = body[:256].decode(errors="replace")
@@ -150,7 +178,9 @@ def wait_root_health(base: str, proc: subprocess.Popen[bytes], timeout_secs: flo
             last = f"status {status}: {last}"
         except Exception as exc:  # noqa: BLE001
             last = str(exc)
-        time.sleep(0.05)
+        remaining = deadline - time.perf_counter()
+        if remaining > 0:
+            time.sleep(min(0.05, remaining))
     raise TimeoutError(f"/health did not return 200 within {timeout_secs:.1f}s: {last}")
 
 
@@ -201,16 +231,24 @@ def public_command(command: list[str], key_file: Path) -> list[str]:
     return [Path(rendered[0]).name, *rendered[1:]] if rendered else rendered
 
 
+def signal_process_group(proc: subprocess.Popen[bytes], sig: int) -> None:
+    try:
+        os.killpg(proc.pid, sig)
+    except ProcessLookupError:
+        if proc.poll() is None:
+            proc.send_signal(sig)
+
+
 def stop_proc(proc: subprocess.Popen[bytes], log_file: Any, log_path: Path, timeout_secs: float) -> dict[str, Any]:
     forced = False
     try:
         if proc.poll() is None:
-            proc.send_signal(signal.SIGINT)
+            signal_process_group(proc, signal.SIGINT)
             try:
                 proc.wait(timeout=timeout_secs)
             except subprocess.TimeoutExpired:
                 forced = True
-                proc.kill()
+                signal_process_group(proc, signal.SIGKILL)
                 proc.wait(timeout=5)
         if proc.returncode != 0:
             raise RuntimeError(f"server exited with {proc.returncode}; log: {log_path}")
@@ -224,7 +262,7 @@ def stop_proc(proc: subprocess.Popen[bytes], log_file: Any, log_path: Path, time
 
 
 def launch_process(command: list[str], work: Path, env: dict[str, str], log_file: Any) -> subprocess.Popen[bytes]:
-    return subprocess.Popen(command, cwd=work, env=env, stdout=log_file, stderr=subprocess.STDOUT)
+    return subprocess.Popen(command, cwd=work, env=env, stdout=log_file, stderr=subprocess.STDOUT, start_new_session=True)
 
 
 def run_one(
@@ -327,6 +365,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.repeats < 3:
         parser.error("--repeats must be at least 3 for issue #1848 startup measurements")
+    if not math.isfinite(args.timeout) or args.timeout <= 0 or args.timeout > 300:
+        parser.error("--timeout must be finite, positive, and no greater than 300 seconds")
+    if not math.isfinite(args.shutdown_timeout) or args.shutdown_timeout <= 0 or args.shutdown_timeout > 120:
+        parser.error("--shutdown-timeout must be finite, positive, and no greater than 120 seconds")
     return args
 
 
@@ -360,6 +402,7 @@ def main(argv: list[str] | None = None) -> int:
         ],
         "results": [],
     }
+    write_private_json(evidence_path, evidence, secrets_to_hide, create=True)
     try:
         for artifact in artifacts:
             for webui in (True, False):
@@ -375,18 +418,18 @@ def main(argv: list[str] | None = None) -> int:
                             secrets_to_hide=secrets_to_hide,
                         )
                     )
-                    evidence_path.write_text(json.dumps(redact(evidence, secrets_to_hide), indent=2, sort_keys=True) + "\n")
+                    write_private_json(evidence_path, evidence, secrets_to_hide)
         evidence["result"] = "pass"
         evidence["completed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        evidence_path.write_text(json.dumps(redact(evidence, secrets_to_hide), indent=2, sort_keys=True) + "\n")
+        write_private_json(evidence_path, evidence, secrets_to_hide)
         print(json.dumps(redact(evidence, secrets_to_hide), indent=2, sort_keys=True))
         return 0
     except BaseException as exc:
         evidence["result"] = "fail"
-        safe_error = {"type": type(exc).__name__, "message": redact(str(exc), secrets_to_hide)}
+        safe_error = {"type": type(exc).__name__, "code": "startup_measurement_failed", "message": "startup measurement failed; see private evidence artifacts"}
         evidence["error"] = safe_error
         evidence["completed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        evidence_path.write_text(json.dumps(redact(evidence, secrets_to_hide), indent=2, sort_keys=True) + "\n")
+        write_private_json(evidence_path, evidence, secrets_to_hide)
         print(
             json.dumps(
                 {"result": "fail", "error_type": safe_error["type"], "message": "startup measurement failed; see sanitized evidence", "evidence": str(evidence_path)},

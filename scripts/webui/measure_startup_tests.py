@@ -48,11 +48,33 @@ class FakeProc:
         self.returncode = -9
 
 
+class HungProc(FakeProc):
+    def wait(self, timeout=None):  # type: ignore[no-untyped-def]
+        if self.killed:
+            self.returncode = 0
+            return 0
+        raise measure.subprocess.TimeoutExpired("fake", timeout)
+
+    def send_signal(self, sig: int) -> None:
+        self.signals.append(sig)
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = 0
+
+
 class MeasureStartupHelperTests(unittest.TestCase):
     def test_repeats_must_be_at_least_three(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit):
                 measure.parse_args(["--server-bin", __file__, "--cli-bin", __file__, "--repeats", "2"])
+
+    def test_timeout_bounds_must_be_finite_positive_and_capped(self) -> None:
+        for flag, value in [("--timeout", "0"), ("--timeout", "301"), ("--timeout", "nan"), ("--shutdown-timeout", "0"), ("--shutdown-timeout", "121")]:
+            with self.subTest(flag=flag, value=value):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        measure.parse_args(["--server-bin", __file__, "--cli-bin", __file__, flag, value])
 
     def test_private_key_file_uses_0600_permissions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -60,6 +82,19 @@ class MeasureStartupHelperTests(unittest.TestCase):
             measure.write_private(path, "secret\n")
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
             self.assertEqual(path.read_text(), "secret\n")
+
+    def test_private_json_uses_exclusive_0600_and_rejects_existing_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "evidence.json"
+            measure.write_private_json(path, {"secret": "token"}, ["token"], create=True)
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            self.assertNotIn("token", path.read_text())
+            with self.assertRaises(FileExistsError):
+                measure.write_private_json(path, {"again": True}, [], create=True)
+            symlink = Path(tmp) / "link.json"
+            symlink.symlink_to(path)
+            with self.assertRaises(OSError):
+                measure.write_private_json(symlink, {"bad": True}, [])
 
     def test_build_command_toggles_webui_and_public_command_hides_key_path(self) -> None:
         artifact = measure.Artifact("mlxcel-server", Path("/bin/mlxcel-server"), ["/bin/mlxcel-server"], "abc", "head", "webui,metal")
@@ -79,6 +114,41 @@ class MeasureStartupHelperTests(unittest.TestCase):
             stdout = "  12345\n"
             stderr = ""
         self.assertEqual(measure.sample_rss_kib(111, runner=lambda *args, **kwargs: Result()), 12345)
+
+    def test_wait_root_health_bounds_each_read_to_remaining_deadline(self) -> None:
+        proc = FakeProc()
+        timeouts: list[float] = []
+
+        def fake_request(base: str, *, timeout: float):
+            timeouts.append(timeout)
+            raise TimeoutError("not ready")
+
+        with mock.patch.object(measure, "request_health", side_effect=fake_request):
+            with self.assertRaises(TimeoutError):
+                measure.wait_root_health("http://127.0.0.1:1", proc, 0.01)
+        self.assertTrue(timeouts)
+        self.assertTrue(all(0 < value <= 0.01 for value in timeouts), timeouts)
+
+    def test_launch_process_starts_a_new_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(measure.subprocess, "Popen") as popen:
+                measure.launch_process(["fake"], Path(tmp), {}, object())
+            self.assertTrue(popen.call_args.kwargs["start_new_session"])
+
+    def test_stop_proc_terminates_process_group_then_kills_group_on_timeout(self) -> None:
+        proc = HungProc()
+        log = io.BytesIO()
+        signals: list[int] = []
+
+        def killpg(pid: int, sig: int) -> None:
+            signals.append(sig)
+            if sig == measure.signal.SIGKILL:
+                proc.killed = True
+
+        with mock.patch.object(measure.os, "killpg", side_effect=killpg):
+            with self.assertRaises(RuntimeError):
+                measure.stop_proc(proc, log, Path("server.log"), 0.001)
+        self.assertEqual(signals, [measure.signal.SIGINT, measure.signal.SIGKILL])
 
     def test_run_one_records_observation_redacts_secret_and_deletes_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -198,8 +268,10 @@ class MeasureStartupHelperTests(unittest.TestCase):
             self.assertIn("RuntimeError", stderr.getvalue())
             saved = json.loads(evidence.read_text())
             self.assertEqual(saved["result"], "fail")
+            self.assertEqual(stat.S_IMODE(evidence.stat().st_mode), 0o600)
             self.assertEqual(stat.S_IMODE(Path(saved["artifact_dir"]).stat().st_mode), 0o700)
-            self.assertIn("boom secret-token", saved["error"]["message"])
+            self.assertNotIn("secret-token", json.dumps(saved))
+            self.assertEqual(saved["error"]["code"], "startup_measurement_failed")
 
     def test_clean_env_strips_proxy_and_secret_like_inputs(self) -> None:
         old = os.environ.copy()
