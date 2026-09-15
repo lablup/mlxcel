@@ -39,6 +39,7 @@ use crate::server::{AppState, ChatTemplateProcessor, ModelProvider, ServerStartu
 
 const PLAYWRIGHT_TIMEOUT: Duration = Duration::from_secs(240);
 const PLAYWRIGHT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+const SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct HarnessDownloader;
 
@@ -137,6 +138,20 @@ fn default_artifacts_dir(repo_root: &Path) -> PathBuf {
         .join(format!("run-{}", uuid::Uuid::new_v4()))
 }
 
+#[cfg(unix)]
+fn terminate_process_group(child_id: Option<u32>) {
+    if let Some(child_id) = child_id {
+        // The Playwright launcher starts in its own process group below, so a
+        // timeout can terminate browser children as well as the pnpm wrapper.
+        unsafe {
+            let _ = libc::kill(-(child_id as libc::pid_t), libc::SIGTERM);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn terminate_process_group(_child_id: Option<u32>) {}
+
 async fn run_playwright(
     repo_root: &Path,
     url: &str,
@@ -149,7 +164,8 @@ async fn run_playwright(
         .map_err(|err| format!("create {}: {err}", stdout_path.display()))?;
     let stderr = create_private_output(&stderr_path)
         .map_err(|err| format!("create {}: {err}", stderr_path.display()))?;
-    let mut child = tokio::process::Command::new("pnpm")
+    let mut command = tokio::process::Command::new("pnpm");
+    command
         .current_dir(repo_root)
         .args([
             "--dir",
@@ -166,22 +182,29 @@ async fn run_playwright(
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|err| {
-            format!(
-                "spawn playwright: {err}; install pnpm dependencies before running this opt-in target"
-            )
-        })?;
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    {
+        command.process_group(0);
+    }
+    let mut child = command.spawn().map_err(|err| {
+        format!(
+            "spawn playwright: {err}; install pnpm dependencies before running this opt-in target"
+        )
+    })?;
 
     match tokio::time::timeout(PLAYWRIGHT_TIMEOUT, child.wait()).await {
         Ok(Ok(status)) => Ok(status),
         Ok(Err(err)) => Err(format!("wait for playwright: {err}")),
         Err(_) => {
-            let _ = child.start_kill();
+            terminate_process_group(child.id());
             let reaped = tokio::time::timeout(PLAYWRIGHT_SHUTDOWN_TIMEOUT, child.wait()).await;
+            if reaped.is_err() {
+                let _ = child.start_kill();
+                let _ = tokio::time::timeout(PLAYWRIGHT_SHUTDOWN_TIMEOUT, child.wait()).await;
+            }
             Err(format!(
-                "playwright timed out after {:?}; kill/reap result: {reaped:?}",
+                "playwright timed out after {:?}; terminate/reap result: {reaped:?}",
                 PLAYWRIGHT_TIMEOUT
             ))
         }
@@ -366,7 +389,11 @@ async fn real_router_browser_harness() {
     let _ = shutdown_tx.send(());
     feeder_stop.store(true, Ordering::Relaxed);
     let _ = feeder_thread.join();
-    let served = server.await.expect("server task");
+    let served = tokio::time::timeout(SERVER_SHUTDOWN_TIMEOUT, server).await;
+    let served = match served {
+        Ok(joined) => joined.expect("server task"),
+        Err(_) => panic!("server did not stop within {:?}", SERVER_SHUTDOWN_TIMEOUT),
+    };
     assert!(served.is_ok(), "server failed: {served:?}");
 
     match playwright_result {

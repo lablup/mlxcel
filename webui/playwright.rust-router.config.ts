@@ -1,4 +1,5 @@
 // Copyright 2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
+import { join } from 'node:path';
 import { defineConfig, devices } from '@playwright/test';
 
 const target = process.env.MLXCEL_WEBUI_ROUTER_URL;
@@ -13,7 +14,7 @@ export default defineConfig({
   testMatch: '**/router-real.harness.ts',
   fullyParallel: false,
   reporter: 'list',
-  outputDir: process.env.MLXCEL_WEBUI_ROUTER_ARTIFACTS,
+  outputDir: join(artifacts, 'playwright'),
   use: {
     ...devices['Desktop Chrome'],
     baseURL: target,

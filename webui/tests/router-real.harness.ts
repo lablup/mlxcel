@@ -8,6 +8,7 @@ type Operation = { operation_id: string; kind: string; state: string; result?: u
 type CatalogItem = { identity: { id: string; display_name: string; inference_id: string; revision: number }; lifecycle: { state: string; worker_exit_observed: boolean; active_requests: number }; capabilities: Array<{ task: string; phase: string; available: boolean }> };
 type HarnessContext = { target: URL; apiBase: string; artifacts: string; keyPath: string; token: string; auth: { Authorization: string } };
 type ErrorEnvelope = { error: { code: string; operation_id?: string | null; field_errors?: Array<{ field: string; code: string; message: string }> | null } };
+type HttpObservation = { method: string; path: string; status?: number; failure?: string };
 
 function harnessContext(): HarnessContext {
   const rawTarget = process.env.MLXCEL_WEBUI_ROUTER_URL;
@@ -63,10 +64,12 @@ async function catalog(request: APIRequestContext, ctx: HarnessContext): Promise
   return body.items;
 }
 
-async function login(page: Page, ctx: HarnessContext): Promise<void> {
+async function login(page: Page, ctx: HarnessContext, observations: HttpObservation[]): Promise<void> {
   await page.goto(`${ctx.target.href}#models`);
   await page.getByLabel(/Session key|세션 키/i).fill(ctx.token);
   await page.getByRole('button', { name: /Connect|연결/i }).click();
+  await page.waitForTimeout(750);
+  saveArtifact(ctx, 'router-login-observations.json', { api_base: ctx.apiBase, current_path: new URL(page.url()).pathname, observations });
   await expect(page.getByTestId('models-table')).toBeVisible();
 }
 
@@ -79,7 +82,11 @@ test.describe('Rust router harness', () => {
     const ctx = harnessContext();
     expect(statSync(ctx.keyPath).mode & 0o777).toBe(0o600);
     const external: string[] = [];
+    const httpObservations: HttpObservation[] = [];
+    const remember = (observation: HttpObservation): void => { httpObservations.push(observation); if (httpObservations.length > 200) httpObservations.shift(); };
     page.on('request', req => { const url = new URL(req.url()); if (!['data:', 'blob:'].includes(url.protocol) && url.origin !== ctx.target.origin) external.push(req.url()); });
+    page.on('response', response => { const url = new URL(response.url()); if (url.origin === ctx.target.origin) remember({ method: response.request().method(), path: `${url.pathname}${url.search}`, status: response.status() }); });
+    page.on('requestfailed', request => { const url = new URL(request.url()); if (url.origin === ctx.target.origin) remember({ method: request.method(), path: `${url.pathname}${url.search}`, failure: request.failure()?.errorText ?? 'unknown' }); });
     await page.addInitScript(() => { const violations: string[] = []; Object.defineProperty(window, '__routerCspViolations', { value: violations }); document.addEventListener('securitypolicyviolation', event => violations.push(`${event.effectiveDirective}: ${event.blockedURI}`)); });
 
     const shell = await page.goto(`${ctx.target.href}#models`);
@@ -88,7 +95,7 @@ test.describe('Rust router harness', () => {
     expect(csp).toMatch(/(?:^|;)\s*style-src 'self'(?:;|$)/);
     expect(csp).not.toContain("'unsafe-inline'");
     expect(csp).not.toContain("'unsafe-eval'");
-    await login(page, ctx);
+    await login(page, ctx, httpObservations);
     await expectSafeLayout(page); await expectAxeClean(page);
 
     await page.getByTestId('models-add').click();
