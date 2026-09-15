@@ -1,17 +1,20 @@
 // Copyright 2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
-import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { expect, test, type APIRequestContext, type BrowserContext, type Page } from '@playwright/test';
 import { expectAxeClean, expectSafeLayout } from './browser-assertions';
 
 type Operation = { operation_id: string; kind: string; state: string; result?: unknown; error?: unknown };
 type CatalogItem = { identity: { id: string; display_name: string; inference_id: string; revision: number }; lifecycle: { state: string; worker_exit_observed: boolean; active_requests: number }; capabilities: Array<{ task: string; phase: string; available: boolean }> };
-type HarnessContext = { target: URL; apiBase: string; artifacts: string; keyPath: string; token: string; auth: { Authorization: string }; modelsDir: string };
+type HarnessContext = { target: URL; apiBase: string; artifacts: string; keyPath: string; token: string; auth: { Authorization: string }; modelsDir: string; controlDir: string };
 type ErrorEnvelope = { error: { code: string; operation_id?: string | null; field_errors?: Array<{ field: string; code: string; message: string }> | null } };
 type DownloadResult = { repo_id?: string; revision?: string | null; model_id?: string | null };
 type Accepted = { operation_id: string };
 type BrowserJsonResponse<T> = { status: number; body: T };
 type HttpObservation = { method: string; path: string; status?: number; failure?: string };
+type Bootstrap = { server: { server_instance_id: string } };
+type HarnessDone = { server_instance_id?: string; old_server_instance_id?: string; new_server_instance_id?: string; after_sequence?: number; snapshot_sequence?: number };
+type SseFirstEvent = { event: string | null; data: { type?: string; server_instance_id?: string; payload?: { reason?: string } } };
 
 const SUCCESS_DOWNLOAD_REPO = 'mlx-community/Router-Harness-Fake-4bit';
 const FAILING_DOWNLOAD_REPO = 'mlx-community/Router-Harness-Fail-4bit';
@@ -22,11 +25,12 @@ function harnessContext(): HarnessContext {
   const artifacts = process.env.MLXCEL_WEBUI_ROUTER_ARTIFACTS;
   const keyPath = process.env.MLXCEL_WEBUI_ROUTER_KEY_FILE;
   const modelsDir = process.env.MLXCEL_WEBUI_ROUTER_MODELS_DIR;
-  if (!rawTarget || !artifacts || !keyPath || !modelsDir) throw new Error('Set MLXCEL_WEBUI_ROUTER_URL, MLXCEL_WEBUI_ROUTER_KEY_FILE, MLXCEL_WEBUI_ROUTER_ARTIFACTS and MLXCEL_WEBUI_ROUTER_MODELS_DIR; missing real-router setup is not a skipped pass.');
+  const controlDir = process.env.MLXCEL_WEBUI_ROUTER_CONTROL_DIR;
+  if (!rawTarget || !artifacts || !keyPath || !modelsDir || !controlDir) throw new Error('Set MLXCEL_WEBUI_ROUTER_URL, MLXCEL_WEBUI_ROUTER_KEY_FILE, MLXCEL_WEBUI_ROUTER_ARTIFACTS, MLXCEL_WEBUI_ROUTER_MODELS_DIR and MLXCEL_WEBUI_ROUTER_CONTROL_DIR; missing real-router setup is not a skipped pass.');
   const target = new URL(rawTarget);
   if (!['http:', 'https:'].includes(target.protocol) || !['127.0.0.1', 'localhost', '[::1]'].includes(target.hostname) || target.username || target.password || !target.pathname.endsWith('/webui/')) throw new Error('The Rust-router harness must target a loopback /webui/ URL without URL credentials.');
   const token = readFileSync(keyPath, 'utf8').trim();
-  return { target, apiBase: target.pathname.slice(0, -'/webui/'.length), artifacts, keyPath, token, auth: { Authorization: `Bearer ${token}` }, modelsDir };
+  return { target, apiBase: target.pathname.slice(0, -'/webui/'.length), artifacts, keyPath, token, auth: { Authorization: `Bearer ${token}` }, modelsDir, controlDir };
 }
 
 function saveArtifact(ctx: HarnessContext, name: string, value: unknown): void {
@@ -42,6 +46,10 @@ async function apiJson<T>(request: APIRequestContext, ctx: HarnessContext, metho
 
 async function submitDownload(request: APIRequestContext, ctx: HarnessContext, repoId: string, idempotencyKey: string): Promise<Accepted> {
   return apiJson<Accepted>(request, ctx, 'post', '/ui-api/v1/downloads', { repo_id: repoId, idempotency_key: idempotencyKey });
+}
+
+async function bootstrap(request: APIRequestContext, ctx: HarnessContext): Promise<Bootstrap> {
+  return apiJson<Bootstrap>(request, ctx, 'get', '/ui-api/v1/bootstrap');
 }
 
 async function waitOperationState(request: APIRequestContext, ctx: HarnessContext, operationId: string, expected: 'succeeded' | 'failed' | 'cancelled' = 'succeeded'): Promise<Operation> {
@@ -104,6 +112,78 @@ async function rescanLocalRoots(page: Page, request: APIRequestContext, ctx: Har
   await waitOperation(request, ctx, operationId);
   await refresh(page);
   return operationId;
+}
+
+async function waitControlDone(ctx: HarnessContext, name: 'gap.done.json' | 'restart.done.json'): Promise<HarnessDone> {
+  const path = join(ctx.controlDir, name);
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (existsSync(path)) return JSON.parse(readFileSync(path, 'utf8')) as HarnessDone;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  throw new Error(`harness control response ${name} was not written`);
+}
+
+function requestHarnessControl(ctx: HarnessContext, name: 'gap' | 'restart'): void {
+  writeFileSync(join(ctx.controlDir, `${name}.request`), new Date().toISOString(), { mode: 0o600, flag: 'wx' });
+}
+
+async function readFirstSseEvent(page: Page, ctx: HarnessContext, serverInstanceId: string, afterSequence: number): Promise<SseFirstEvent> {
+  return page.evaluate(async ({ url, token }) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    try {
+      const response = await fetch(url, { headers: { Authorization: `Bearer ${token}`, Accept: 'text/event-stream' }, signal: controller.signal });
+      if (!response.ok || response.body === null) throw new Error(`SSE request failed: ${response.status}`);
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let text = '';
+      try {
+        while (text.length < 65536) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          text += decoder.decode(value, { stream: true });
+          const frames = text.split(/\r?\n\r?\n/u);
+          for (const frame of frames.slice(0, -1)) {
+            const event = frame.split(/\r?\n/u).find(line => line.startsWith('event: '))?.slice('event: '.length) ?? null;
+            const data = frame.split(/\r?\n/u).filter(line => line.startsWith('data: ')).map(line => line.slice('data: '.length)).join('\n');
+            if (data.length > 0) return { event, data: JSON.parse(data) as SseFirstEvent['data'] };
+          }
+          text = frames.at(-1) ?? '';
+        }
+      } finally {
+        controller.abort();
+        await reader.cancel().catch(() => undefined);
+      }
+      throw new Error('SSE stream did not produce a data frame within the bounded read.');
+    } finally {
+      clearTimeout(timeout);
+    }
+  }, { url: `${ctx.target.origin}${ctx.apiBase}/ui-api/v1/events?server_instance_id=${encodeURIComponent(serverInstanceId)}&after_sequence=${afterSequence}`, token: ctx.token });
+}
+
+async function exerciseServerRestartAndGap(page: Page, request: APIRequestContext, ctx: HarnessContext): Promise<{ gap: HarnessDone; restart: HarnessDone }> {
+  const before = await bootstrap(request, ctx);
+  requestHarnessControl(ctx, 'gap');
+  const gap = await waitControlDone(ctx, 'gap.done.json');
+  expect(gap.server_instance_id).toBe(before.server.server_instance_id);
+  const gapEvent = await readFirstSseEvent(page, ctx, before.server.server_instance_id, gap.after_sequence ?? 0);
+  expect(gapEvent.event).toBe('gap');
+  expect(gapEvent.data.type).toBe('gap');
+  expect(gapEvent.data.payload?.reason).toBe('gap');
+
+  requestHarnessControl(ctx, 'restart');
+  const restart = await waitControlDone(ctx, 'restart.done.json');
+  expect(restart.old_server_instance_id).toBe(before.server.server_instance_id);
+  expect(restart.new_server_instance_id).not.toBe(restart.old_server_instance_id);
+  const restartEvent = await readFirstSseEvent(page, ctx, before.server.server_instance_id, 0);
+  expect(restartEvent.event).toBe('server_restart');
+  expect(restartEvent.data.type).toBe('server_restart');
+  expect(restartEvent.data.server_instance_id).toBe(restart.new_server_instance_id);
+  const after = await bootstrap(request, ctx);
+  expect(after.server.server_instance_id).toBe(restart.new_server_instance_id);
+  await refresh(page);
+  await expect.poll(async () => (await catalog(request, ctx)).some(item => item.identity.inference_id === 'seed-local')).toBe(true);
+  return { gap, restart };
 }
 
 function createLocalSeedModel(ctx: HarnessContext): void {
@@ -223,6 +303,7 @@ test.describe('Rust router harness', () => {
     const seedRefreshOperation = await rescanLocalRoots(page, request, ctx);
     await expect.poll(async () => (await catalog(request, ctx)).some(item => item.identity.inference_id === 'seed-local')).toBe(true);
     await expectSafeLayout(page); await expectAxeClean(page);
+    const restartAndGap = await exerciseServerRestartAndGap(page, request, ctx);
     const downloadNegatives = await exerciseDownloadFailureAndCancel(request, ctx);
 
     const operationsBeforeDownload = await operationIds(request, ctx);
@@ -308,6 +389,6 @@ test.describe('Rust router harness', () => {
     const violations = await page.evaluate(() => Reflect.get(window, '__routerCspViolations'));
     expect(violations).toEqual([]); expect(external).toEqual([]);
     await expectSafeLayout(page); await expectAxeClean(page);
-    saveArtifact(ctx, 'router-real-evidence.json', { csp, external, violations, seed_refresh_operation_id: seedRefreshOperation, download_negative_operations: downloadNegatives, lost_response_operation_id: lostRefreshOperation, stop_drain: { observed_active_requests: observedActiveRequests, final_active_requests: finalActiveRequests, stop_clicked_at: stopClickedAt, settled_at: stopSettledAt }, negative_cases: ['empty library before local seed', 'local models-dir seed discovered by real catalog refresh', 'terminal operation cancel unsupported', 'two-tab stale revision 409', 'single-tab stale revision 409', 'unknown field 400', 'real 401 after credential change and reconnect', 'download failure operation failed', 'download cancellation operation cancelled', 'lost POST response recovered by operation id', 'unauth 401', 'bad bearer 401', 'hostile UI and legacy routes 403', 'missing asset 404', 'no token persistence'], final_catalog_size: (await catalog(request, ctx)).length, api_base: ctx.apiBase, note: 'Fake model/downloader leaves only; secured Rust router, embedded bundle, auth, CSP, Stop/drain and lifecycle routes were real.' });
+    saveArtifact(ctx, 'router-real-evidence.json', { csp, external, violations, seed_refresh_operation_id: seedRefreshOperation, restart_and_gap: restartAndGap, download_negative_operations: downloadNegatives, lost_response_operation_id: lostRefreshOperation, stop_drain: { observed_active_requests: observedActiveRequests, final_active_requests: finalActiveRequests, stop_clicked_at: stopClickedAt, settled_at: stopSettledAt }, negative_cases: ['empty library before local seed', 'local models-dir seed discovered by real catalog refresh', 'same-port fresh server state produced server_restart SSE and recovered bootstrap/catalog', 'event ring overflow produced gap SSE', 'terminal operation cancel unsupported', 'two-tab stale revision 409', 'single-tab stale revision 409', 'unknown field 400', 'real 401 after credential change and reconnect', 'download failure operation failed', 'download cancellation operation cancelled', 'lost POST response recovered by operation id', 'unauth 401', 'bad bearer 401', 'hostile UI and legacy routes 403', 'missing asset 404', 'no token persistence'], final_catalog_size: (await catalog(request, ctx)).length, api_base: ctx.apiBase, note: 'Fake model/downloader leaves only; secured Rust router, embedded bundle, auth, CSP, Stop/drain and lifecycle routes were real. Restart/gap controls are harness-only temp files, not production debug routes.' });
   });
 });

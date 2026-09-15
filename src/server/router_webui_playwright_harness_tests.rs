@@ -20,6 +20,7 @@
 //! assets, router lifecycle, operations and dispatch remain production code.
 
 use std::fs::File;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -33,6 +34,7 @@ use crate::downloader::DownloadHooks;
 use crate::server::config::ServerConfig;
 use crate::server::model_provider::ScriptedStreamHandle;
 use crate::server::router_cache::{CacheSource, RouterDownloader};
+use crate::server::router_lifecycle::{EVENT_RING_LIMIT, ResetEventKind};
 use crate::server::router_models::{RouterPool, RouterSources};
 use crate::server::router_presets::PresetCliOverrides;
 use crate::server::{AppState, ChatTemplateProcessor, ModelProvider, ServerStartupConfig};
@@ -214,6 +216,7 @@ async fn run_playwright(
     key_file: &Path,
     artifacts: &Path,
     models_dir: &Path,
+    control_dir: &Path,
 ) -> Result<ExitStatus, String> {
     let stdout_path = artifacts.join("playwright.stdout.log");
     let stderr_path = artifacts.join("playwright.stderr.log");
@@ -237,6 +240,7 @@ async fn run_playwright(
         .env("MLXCEL_WEBUI_ROUTER_KEY_FILE", key_file)
         .env("MLXCEL_WEBUI_ROUTER_ARTIFACTS", artifacts)
         .env("MLXCEL_WEBUI_ROUTER_MODELS_DIR", models_dir)
+        .env("MLXCEL_WEBUI_ROUTER_CONTROL_DIR", control_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
@@ -342,6 +346,246 @@ fn start_scripted_stream_feeder(
     (stop, thread)
 }
 
+struct HarnessServer {
+    addr: SocketAddr,
+    server_instance_id: String,
+    pool: Arc<RouterPool>,
+    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    task: tokio::task::JoinHandle<std::io::Result<()>>,
+}
+
+impl HarnessServer {
+    async fn stop_with_timeout(mut self, timeout: Duration) -> anyhow::Result<()> {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        let mut task = self.task;
+        match tokio::time::timeout(timeout, &mut task).await {
+            Ok(joined) => {
+                joined??;
+                Ok(())
+            }
+            Err(err) => {
+                task.abort();
+                let _ = tokio::time::timeout(SERVER_SHUTDOWN_TIMEOUT, task).await;
+                Err(err.into())
+            }
+        }
+    }
+
+    async fn stop(self) -> anyhow::Result<()> {
+        self.stop_with_timeout(SERVER_SHUTDOWN_TIMEOUT).await
+    }
+}
+
+fn build_router_state(
+    models_dir: &Path,
+    cache_root: &Path,
+    router_key: &str,
+    stream_handles: Arc<Mutex<Vec<ScriptedStreamHandle>>>,
+) -> RouterServerState {
+    let router_keys = vec![router_key.to_string()];
+    let api_keys = crate::server::resolve_api_keys(&router_keys, &[]).expect("keys");
+    let mut startup = ServerStartupConfig {
+        webui_enabled: true,
+        model_store_root: Some(cache_root.to_path_buf()),
+        router_models_dir: Some(models_dir.to_path_buf()),
+        models_max: 1,
+        models_autoload: false,
+        ..Default::default()
+    };
+    startup.api_prefix = "/lab".to_string();
+    let config = ServerConfig {
+        api_prefix: "/lab".to_string(),
+        enable_settings_endpoint: true,
+        enable_props_endpoint: true,
+        enable_metrics_endpoint: true,
+        api_keys: api_keys.clone(),
+        ..Default::default()
+    };
+    let sources = RouterSources {
+        models_dir: Some(models_dir.to_path_buf()),
+        cache: Some(CacheSource::new(
+            cache_root.to_path_buf(),
+            Arc::new(HarnessDownloader),
+        )),
+        presets: Default::default(),
+    };
+    let pool = Arc::new(
+        RouterPool::new(
+            sources,
+            startup.clone(),
+            api_keys,
+            PresetCliOverrides::default(),
+            1,
+            false,
+        )
+        .expect("router pool"),
+    );
+    install_model_app_factory(&pool, stream_handles);
+    RouterServerState {
+        pool,
+        config: Arc::new(config),
+        startup: Arc::new(startup),
+        catalog_cache: Arc::new(crate::server::webui::catalog::CatalogProjectionCache::new()),
+    }
+}
+
+async fn start_harness_server(
+    bind_addr: SocketAddr,
+    models_dir: &Path,
+    cache_root: &Path,
+    router_key: &str,
+    stream_handles: Arc<Mutex<Vec<ScriptedStreamHandle>>>,
+) -> anyhow::Result<HarnessServer> {
+    let listener = tokio::net::TcpListener::bind(bind_addr).await?;
+    let addr = listener.local_addr()?;
+    let origin = format!("http://127.0.0.1:{}", addr.port());
+    let state = build_router_state(models_dir, cache_root, router_key, stream_handles);
+    let pool = state.pool.clone();
+    let server_instance_id = pool
+        .lifecycle_coordinator()
+        .server_instance_id()
+        .to_string();
+    let policy =
+        crate::server::webui::security::WebUiSecurityPolicy::with_prefixes_limits_and_rate(
+            vec![format!("127.0.0.1:{}", addr.port())],
+            vec![HeaderValue::from_str(&origin).expect("origin header")],
+            "/lab/webui",
+            "/lab",
+            32,
+            32,
+            120,
+        )
+        .expect("security policy");
+    let app = create_router_app_with_secured_ui(state, policy);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app.into_make_service())
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+            })
+            .await
+    });
+    Ok(HarnessServer {
+        addr,
+        server_instance_id,
+        pool,
+        shutdown_tx: Some(shutdown_tx),
+        task,
+    })
+}
+
+#[cfg(unix)]
+fn write_private_json(path: &Path, value: serde_json::Value) -> anyhow::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(serde_json::to_string_pretty(&value)?.as_bytes())?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_private_json(path: &Path, value: serde_json::Value) -> anyhow::Result<()> {
+    std::fs::write(path, serde_json::to_vec_pretty(&value)?)?;
+    Ok(())
+}
+
+fn take_marker(path: &Path) -> bool {
+    if path.exists() {
+        let _ = std::fs::remove_file(path);
+        return true;
+    }
+    false
+}
+
+async fn run_control_loop(
+    current: Arc<tokio::sync::Mutex<Option<HarnessServer>>>,
+    control_dir: PathBuf,
+    models_dir: PathBuf,
+    cache_root: PathBuf,
+    router_key: String,
+    stream_handles: Arc<Mutex<Vec<ScriptedStreamHandle>>>,
+    done: Arc<AtomicBool>,
+) -> anyhow::Result<()> {
+    let restart_request = control_dir.join("restart.request");
+    let restart_done = control_dir.join("restart.done.json");
+    let gap_request = control_dir.join("gap.request");
+    let gap_done = control_dir.join("gap.done.json");
+    while !done.load(Ordering::Relaxed) {
+        if take_marker(&gap_request) {
+            let guard = current.lock().await;
+            let Some(server) = guard.as_ref() else {
+                anyhow::bail!("server not running for gap request");
+            };
+            let coordinator = server.pool.lifecycle_coordinator();
+            for _ in 0..(EVENT_RING_LIMIT + 2) {
+                coordinator.publish_reset("harness_gap_fill", ResetEventKind::Reset);
+            }
+            write_private_json(
+                &gap_done,
+                serde_json::json!({
+                    "server_instance_id": server.server_instance_id,
+                    "after_sequence": 0,
+                    "snapshot_sequence": coordinator.snapshot_sequence()
+                }),
+            )?;
+        }
+        if take_marker(&restart_request) {
+            let old = {
+                let mut guard = current.lock().await;
+                guard.take().expect("server present for restart")
+            };
+            let old_addr = old.addr;
+            let old_server_instance_id = old.server_instance_id.clone();
+            let _ = old.stop_with_timeout(Duration::from_secs(1)).await;
+            let mut new = None;
+            let mut last_error = None;
+            for _ in 0..40 {
+                match start_harness_server(
+                    old_addr,
+                    &models_dir,
+                    &cache_root,
+                    &router_key,
+                    stream_handles.clone(),
+                )
+                .await
+                {
+                    Ok(server) => {
+                        new = Some(server);
+                        break;
+                    }
+                    Err(err) => {
+                        last_error = Some(err);
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                    }
+                }
+            }
+            let new = new.ok_or_else(|| {
+                anyhow::anyhow!("restart rebind failed after stop: {:?}", last_error)
+            })?;
+            let new_server_instance_id = new.server_instance_id.clone();
+            {
+                let mut guard = current.lock().await;
+                *guard = Some(new);
+            }
+            write_private_json(
+                &restart_done,
+                serde_json::json!({
+                    "old_server_instance_id": old_server_instance_id,
+                    "new_server_instance_id": new_server_instance_id
+                }),
+            )?;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "opt-in real-router WebUI browser harness for #1848; use make verify-webui-integration-fake"]
 async fn real_router_browser_harness() {
@@ -360,101 +604,71 @@ async fn real_router_browser_harness() {
         .map(PathBuf::from)
         .unwrap_or_else(|| default_artifacts_parent(&repo_root));
     let artifacts = artifact_run_dir(artifact_parent);
+    let control_dir = artifacts.join("control");
     std::fs::create_dir_all(&models_dir).expect("models dir");
     std::fs::create_dir_all(&cache_root).expect("cache root");
     std::fs::create_dir_all(&artifacts).expect("artifact dir");
+    std::fs::create_dir_all(&control_dir).expect("control dir");
 
     let router_key = format!("router-{}", uuid::Uuid::new_v4());
-    let api_keys =
-        crate::server::resolve_api_keys(std::slice::from_ref(&router_key), &[]).expect("keys");
-    let mut startup = ServerStartupConfig {
-        webui_enabled: true,
-        model_store_root: Some(cache_root.clone()),
-        router_models_dir: Some(models_dir.clone()),
-        models_max: 1,
-        models_autoload: false,
-        ..Default::default()
-    };
-    startup.api_prefix = "/lab".to_string();
-    let config = ServerConfig {
-        api_prefix: "/lab".to_string(),
-        enable_settings_endpoint: true,
-        enable_props_endpoint: true,
-        enable_metrics_endpoint: true,
-        api_keys: api_keys.clone(),
-        ..Default::default()
-    };
-    let sources = RouterSources {
-        models_dir: Some(models_dir.clone()),
-        cache: Some(CacheSource::new(
-            cache_root.clone(),
-            Arc::new(HarnessDownloader),
-        )),
-        presets: Default::default(),
-    };
-    let pool = Arc::new(
-        RouterPool::new(
-            sources,
-            startup.clone(),
-            api_keys,
-            PresetCliOverrides::default(),
-            1,
-            false,
-        )
-        .expect("router pool"),
-    );
     let stream_handles = Arc::new(Mutex::new(Vec::new()));
-    install_model_app_factory(&pool, stream_handles.clone());
-    let (feeder_stop, feeder_thread) = start_scripted_stream_feeder(stream_handles);
-
-    let state = RouterServerState {
-        pool,
-        config: Arc::new(config),
-        startup: Arc::new(startup),
-        catalog_cache: Arc::new(crate::server::webui::catalog::CatalogProjectionCache::new()),
-    };
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind loopback");
-    let addr = listener.local_addr().expect("local addr");
-    let origin = format!("http://127.0.0.1:{}", addr.port());
-    let policy =
-        crate::server::webui::security::WebUiSecurityPolicy::with_prefixes_limits_and_rate(
-            vec![format!("127.0.0.1:{}", addr.port())],
-            vec![HeaderValue::from_str(&origin).expect("origin header")],
-            "/lab/webui",
-            "/lab",
-            32,
-            32,
-            120,
-        )
-        .expect("security policy");
-    let app = create_router_app_with_secured_ui(state, policy);
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let server = tokio::spawn(async move {
-        axum::serve(listener, app.into_make_service())
-            .with_graceful_shutdown(async move {
-                let _ = shutdown_rx.await;
-            })
-            .await
-    });
+    let (feeder_stop, feeder_thread) = start_scripted_stream_feeder(stream_handles.clone());
+    let server = start_harness_server(
+        "127.0.0.1:0".parse().expect("loopback addr"),
+        &models_dir,
+        &cache_root,
+        &router_key,
+        stream_handles.clone(),
+    )
+    .await
+    .expect("start harness server");
+    let origin = format!("http://127.0.0.1:{}", server.addr.port());
+    let current_server = Arc::new(tokio::sync::Mutex::new(Some(server)));
+    let control_done = Arc::new(AtomicBool::new(false));
+    let control_task = tokio::spawn(run_control_loop(
+        current_server.clone(),
+        control_dir.clone(),
+        models_dir.clone(),
+        cache_root.clone(),
+        router_key.clone(),
+        stream_handles,
+        control_done.clone(),
+    ));
 
     let key_file = temp.path().join("router-key.txt");
     write_private_key(&key_file, &router_key).expect("private key file");
     let url = format!("{origin}/lab/webui/");
-    let playwright_result =
-        run_playwright(&repo_root, &url, &key_file, &artifacts, &models_dir).await;
+    let playwright_result = run_playwright(
+        &repo_root,
+        &url,
+        &key_file,
+        &artifacts,
+        &models_dir,
+        &control_dir,
+    )
+    .await;
 
     let _ = std::fs::remove_file(&key_file);
-    let _ = shutdown_tx.send(());
+    control_done.store(true, Ordering::Relaxed);
+    let control_result = tokio::time::timeout(SERVER_SHUTDOWN_TIMEOUT, control_task)
+        .await
+        .map_err(|err| anyhow::anyhow!("control task stop: {err}"))
+        .and_then(|joined| joined.map_err(|err| anyhow::anyhow!("control task join: {err}")))
+        .and_then(|inner| inner);
+    let server_stop_result = match current_server.lock().await.take() {
+        Some(server) => server.stop().await,
+        None => Ok(()),
+    };
     feeder_stop.store(true, Ordering::Relaxed);
     let _ = feeder_thread.join();
-    let served = tokio::time::timeout(SERVER_SHUTDOWN_TIMEOUT, server).await;
-    let served = match served {
-        Ok(joined) => joined.expect("server task"),
-        Err(_) => panic!("server did not stop within {:?}", SERVER_SHUTDOWN_TIMEOUT),
-    };
-    assert!(served.is_ok(), "server failed: {served:?}");
+    assert!(
+        control_result.is_ok(),
+        "control task failed: {control_result:?}"
+    );
+    assert!(
+        server_stop_result.is_ok(),
+        "server stop failed: {server_stop_result:?}"
+    );
 
     match playwright_result {
         Ok(status) if status.success() => {}
