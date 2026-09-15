@@ -144,6 +144,31 @@ class InstalledArtifactHelperTests(unittest.TestCase):
             self.assertFalse(cert.exists())
             self.assertFalse(key.exists())
 
+    def test_sigint_server_shutdown_is_failure_but_key_cleanup_still_runs(self) -> None:
+        class Proc:
+            returncode = -verify.signal.SIGINT
+            def poll(self):
+                return self.returncode
+        class Log:
+            closed = False
+            def close(self):
+                self.closed = True
+        with tempfile.TemporaryDirectory() as tmp:
+            key = Path(tmp) / "key"
+            verify.write_private(key, "secret\n")
+            log = Log()
+            with self.assertRaises(RuntimeError):
+                verify.stop_proc_with_key_cleanup(Proc(), log, Path(tmp) / "server.log", key)
+            self.assertFalse(key.exists())
+            self.assertTrue(log.closed)
+
+    def test_generated_key_signal_wait_status_is_failure(self) -> None:
+        with self.assertRaises(AssertionError):
+            verify.assert_wait_status_zero(verify.signal.SIGINT, "generated-key server")
+
+    def test_generated_key_zero_wait_status_is_success(self) -> None:
+        verify.assert_wait_status_zero(0, "generated-key server")
+
 
 if __name__ == "__main__":
     unittest.main()

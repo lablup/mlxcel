@@ -163,7 +163,7 @@ def stop_proc(proc: subprocess.Popen[bytes], log_file: Any, log_path: Path) -> d
                 forced = True
                 proc.kill()
                 proc.wait(timeout=5)
-        if proc.returncode not in (0, -signal.SIGINT):
+        if proc.returncode != 0:
             raise RuntimeError(f"server exited with {proc.returncode}; log: {log_path}")
         return {"exit_code": proc.returncode, "forced": forced, "log": str(log_path)}
     finally:
@@ -190,6 +190,15 @@ def cleanup_tls_material(tls_extra: list[str] | None) -> None:
     for flag in ("--ssl-key-file", "--ssl-cert-file"):
         if flag in tls_extra:
             Path(tls_extra[tls_extra.index(flag) + 1]).unlink(missing_ok=True)
+def assert_wait_status_zero(status: int, label: str) -> None:
+    if os.WIFEXITED(status):
+        exit_value = os.WEXITSTATUS(status)
+        if exit_value == 0:
+            return
+        raise AssertionError(f"{label} exited {exit_value}")
+    if os.WIFSIGNALED(status):
+        raise AssertionError(f"{label} died from signal {os.WTERMSIG(status)}")
+    raise AssertionError(f"{label} ended with unexpected wait status {status}")
 def assert_html_and_assets(base: str, key: str, *, https: bool = False) -> dict[str, Any]:
     shell = f"{base}/lab/webui/"
     status, headers, html = request(shell, https=https)
@@ -363,12 +372,7 @@ def run_generated_key(h: Harness, artifact: Artifact) -> None:
                 pass
             raise AssertionError("generated-key server did not exit after SIGINT and had to be killed")
         os.close(fd)
-    if os.WIFEXITED(status):
-        exit_value = os.WEXITSTATUS(status)
-        assert exit_value == 0, f"generated-key server exited {exit_value}"
-    elif os.WIFSIGNALED(status):
-        sig = os.WTERMSIG(status)
-        assert sig in (signal.SIGINT, signal.SIGTERM), f"generated-key server died from signal {sig}"
+    assert_wait_status_zero(status, "generated-key server")
     h.add("generated_key", {"label": artifact.name, "headless_without_key_rejected": True, "tty_key_authenticated": True, "key_in_argv_or_env": False, "wait_status": status})
 def network_interfaces() -> list[dict[str, Any]]:
     interfaces: list[dict[str, Any]] = []
@@ -444,7 +448,7 @@ def main() -> int:
     args = p.parse_args()
     if not args.server_bin or not args.cli_bin:
         p.error("--server-bin and --cli-bin are required; issue #1848 must cover both mlxcel-server and `mlxcel serve`")
-    evidence: dict[str, Any] = {"result": "fail", "scope": "installed relocated Rust artifacts; model-free bundled WebUI/security/compatibility", "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "platform": platform.platform(), "feature_set": "webui-on artifacts plus optional feature-off artifacts", "limits": ["no real checkpoint inference", "no browser/Safari/VoiceOver/manual hardware validation"]}
+    evidence: dict[str, Any] = {"result": "fail", "scope": "installed relocated Rust artifacts; model-free bundled WebUI/security/compatibility", "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "platform": platform.platform(), "feature_set": "webui-on artifacts plus caller-provided required feature-off artifacts", "limits": ["no real checkpoint inference", "no browser/Safari/VoiceOver/manual hardware validation"]}
     evidence_path = Path(args.evidence).resolve()
     stamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
     root = evidence_path.parent / f"{evidence_path.stem}-artifacts-{stamp}"
