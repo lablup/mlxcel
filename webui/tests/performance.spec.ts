@@ -12,7 +12,7 @@ type Validator = Awaited<ReturnType<typeof loadValidator>>;
 type BrowserPaintPredicate =
   | { kind: 'visible-test-id'; testId: string }
   | { kind: 'table-row-count'; testId: string; rowCount: number; textIncludes?: string }
-  | { kind: 'textarea-empty-enabled'; selector: string };
+  | { kind: 'transcript-reset'; composerSelector: string };
 type BrowserPaintResult<T> = { elapsedMs: number; state: T; instrumentation: Record<string, unknown> };
 
 async function writeEvidence(testInfo: TestInfo, name: string, page: Page, evidence: Evidence): Promise<void> {
@@ -105,7 +105,8 @@ async function actionToSettledPaintMs<T>(locator: Locator, action: () => Promise
   const page = locator.page();
   await locator.evaluate((element, options) => {
     type Predicate = typeof options.predicate;
-    type TimedWindow = Window & { __mlxcelPerfActionToPaint?: Promise<{ elapsedMs: number; browserState: Record<string, unknown>; instrumentation: Record<string, unknown> }> };
+    type TimedResult = { elapsedMs: number; browserState: Record<string, unknown>; instrumentation: Record<string, unknown> };
+    type TimedWindow = Window & { __mlxcelPerfActionToPaint?: { promise: Promise<TimedResult>; cancel: (reason: string) => void } };
     const target = window as TimedWindow;
     const visible = (candidate: Element | null): candidate is HTMLElement => {
       if (!(candidate instanceof HTMLElement)) return false;
@@ -124,64 +125,108 @@ async function actionToSettledPaintMs<T>(locator: Locator, action: () => Promise
         if (requiredText && !rows.some((row) => row.textContent?.includes(requiredText))) return null;
         return { filtered_rows: rows.length };
       }
-      const textarea = document.querySelector(current.selector);
-      if (textarea instanceof HTMLTextAreaElement && !textarea.disabled && textarea.value === '') return { composer_empty: true };
+      const textarea = document.querySelector(current.composerSelector);
+      const transcript = document.querySelector('section[aria-label="Conversation transcript"]');
+      const hasTurns = (transcript?.querySelectorAll('article.chat-turn').length ?? 0) > 0;
+      const emptyTextVisible = visible(transcript?.querySelector('.chat-transcript p') ?? null) && transcript?.textContent?.includes('No messages yet.') === true;
+      if (textarea instanceof HTMLTextAreaElement && !textarea.disabled && textarea.value === '' && !hasTurns && emptyTextVisible) return { composer_empty: true, transcript_empty: true };
       return null;
     };
-    target.__mlxcelPerfActionToPaint = new Promise((resolve, reject) => {
+    if (evaluatePredicate(options.predicate) !== null) throw new Error(`Performance predicate ${options.predicate.kind} was already true before the action.`);
+    let cancelMeasurement: (reason: string) => void = () => {};
+    const promise = new Promise<TimedResult>((resolve, reject) => {
       let observer: MutationObserver | null = null;
       let raf = 0;
       let timeout: number | null = null;
-      let done = false;
+      let phase: 'waiting-event' | 'checking' | 'painting' | 'done' = 'waiting-event';
+      let removeListener: (() => void) | null = null;
       const cleanup = (): void => {
-        done = true;
+        phase = 'done';
         observer?.disconnect();
         if (raf) cancelAnimationFrame(raf);
         if (timeout !== null) window.clearTimeout(timeout);
+        removeListener?.();
       };
-      const settleAfterPaint = (started: number, browserState: Record<string, unknown>): void => {
+      const fail = (error: Error): void => {
         cleanup();
-        requestAnimationFrame(() => requestAnimationFrame(() => resolve({
-          elapsedMs: performance.now() - started,
-          browserState,
-          instrumentation: {
-            clock: 'performance.now',
-            start: 'capturing DOM event listener',
-            end: 'semantic DOM predicate satisfied, then two requestAnimationFrame paints',
-            excludes: 'Playwright assertion polling and driver IPC after the timed browser predicate',
-          },
-        })));
+        reject(error);
+      };
+      cancelMeasurement = (reason: string): void => fail(new Error(reason));
+      const settleAfterPaint = (started: number, deadline: number, browserState: Record<string, unknown>): void => {
+        phase = 'painting';
+        observer?.disconnect();
+        const assertInsideDeadline = (): boolean => {
+          if (performance.now() <= deadline) return true;
+          fail(new Error(`Timed out waiting for ${options.predicate.kind} paint.`));
+          return false;
+        };
+        raf = requestAnimationFrame(() => {
+          if (phase === 'done' || !assertInsideDeadline()) return;
+          raf = requestAnimationFrame(() => {
+            if (phase === 'done' || !assertInsideDeadline()) return;
+            const elapsedMs = performance.now() - started;
+            cleanup();
+            resolve({
+              elapsedMs,
+              browserState,
+              instrumentation: {
+                clock: 'performance.now',
+                start: 'capturing DOM event listener',
+                end: 'semantic DOM predicate satisfied, then two requestAnimationFrame paints before the same deadline',
+                excludes: 'Playwright assertion polling and driver IPC after the timed browser predicate',
+              },
+            });
+          });
+        });
       };
       const begin = (): void => {
+        if (phase === 'done') return;
+        phase = 'checking';
+        if (timeout !== null) window.clearTimeout(timeout);
         const started = performance.now();
         const deadline = started + options.timeoutMs;
+        timeout = window.setTimeout(() => fail(new Error(`Timed out waiting for ${options.predicate.kind} before painted semantic state.`)), options.timeoutMs);
         const check = (): void => {
-          if (done) return;
+          if (phase !== 'checking') return;
           try {
             const browserState = evaluatePredicate(options.predicate);
-            if (browserState !== null) { settleAfterPaint(started, browserState); return; }
+            if (browserState !== null) { settleAfterPaint(started, deadline, browserState); return; }
             if (performance.now() > deadline) {
-              cleanup();
-              reject(new Error(`Timed out waiting for ${options.predicate.kind} before paint.`));
+              fail(new Error(`Timed out waiting for ${options.predicate.kind} before paint.`));
             }
           } catch (error) {
-            cleanup();
-            reject(error);
+            fail(error instanceof Error ? error : new Error(String(error)));
           }
         };
         observer = new MutationObserver(check);
         observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
-        const tick = (): void => { check(); if (!done) raf = requestAnimationFrame(tick); };
-        timeout = window.setTimeout(check, options.timeoutMs + 50);
+        const tick = (): void => { check(); if (phase === 'checking') raf = requestAnimationFrame(tick); };
         tick();
       };
       element.addEventListener(options.eventName, begin, { once: true, capture: true });
+      removeListener = () => element.removeEventListener(options.eventName, begin, { capture: true });
+      timeout = window.setTimeout(() => fail(new Error(`Timed out waiting for ${options.eventName} event for ${options.predicate.kind}.`)), options.timeoutMs);
     });
+    promise.catch(() => undefined);
+    target.__mlxcelPerfActionToPaint = { promise, cancel: cancelMeasurement };
   }, { eventName, predicate, timeoutMs: 1000 });
-  await action();
+  try {
+    await action();
+  } catch (error) {
+    await page.evaluate(async () => {
+      const target = window as Window & { __mlxcelPerfActionToPaint?: { promise: Promise<unknown>; cancel: (reason: string) => void } };
+      const pending = target.__mlxcelPerfActionToPaint;
+      delete target.__mlxcelPerfActionToPaint;
+      if (pending) {
+        pending.cancel('Playwright action failed before the browser measurement completed.');
+        try { await pending.promise; } catch { /* consume the intentional cancellation */ }
+      }
+    });
+    throw error;
+  }
   const browserResult = await page.evaluate(() => {
-    const target = window as Window & { __mlxcelPerfActionToPaint?: Promise<{ elapsedMs: number; browserState: Record<string, unknown>; instrumentation: Record<string, unknown> }> };
-    const pending = target.__mlxcelPerfActionToPaint;
+    const target = window as Window & { __mlxcelPerfActionToPaint?: { promise: Promise<{ elapsedMs: number; browserState: Record<string, unknown>; instrumentation: Record<string, unknown> }>; cancel: (reason: string) => void } };
+    const pending = target.__mlxcelPerfActionToPaint?.promise;
     delete target.__mlxcelPerfActionToPaint;
     if (!pending) throw new Error('Performance action listener was not installed.');
     return pending;
@@ -274,11 +319,14 @@ test('10000-token transcript keeps post-render controls responsive', async ({ pa
   await page.getByRole('button', { name: 'Send', exact: true }).click();
   await expect(page.getByRole('status').filter({ hasText: 'Response complete.' })).toBeVisible();
   const renderMs = Number(process.hrtime.bigint() - renderStarted) / 1_000_000;
+  await expect(page.locator('section[aria-label="Conversation transcript"] article.chat-turn')).not.toHaveCount(0);
   const newConversation = page.getByRole('button', { name: 'New conversation', exact: true });
-  const conversationTiming = await actionToSettledPaintMs(newConversation, () => newConversation.click(), { kind: 'textarea-empty-enabled', selector: 'textarea[aria-label="Message"]' }, async () => {
+  const conversationTiming = await actionToSettledPaintMs(newConversation, () => newConversation.click(), { kind: 'transcript-reset', composerSelector: 'textarea[aria-label="Message"]' }, async () => {
     await expect(composer).toBeEnabled();
     await expect(composer).toHaveValue('');
-    return { composer_empty: true };
+    await expect(page.locator('section[aria-label="Conversation transcript"] article.chat-turn')).toHaveCount(0);
+    await expect(page.locator('section[aria-label="Conversation transcript"]')).toContainText('No messages yet.');
+    return { composer_empty: true, transcript_empty: true };
   });
   const feedbackMs = conversationTiming.elapsedMs;
   await writeEvidence(testInfo, 'transcript-10000-evidence.json', page, { dataset: '10000 repeated token streamed transcript fixture; no real inference backend', render_wall_ms: renderMs, post_render_event_to_empty_composer_paint_ms: feedbackMs, post_render_end_state: conversationTiming.state, post_render_instrumentation: conversationTiming.instrumentation, feedback_budget_ms: 100, validated_schemas: api.validated });
