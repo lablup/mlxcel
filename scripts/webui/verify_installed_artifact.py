@@ -317,6 +317,18 @@ def run_feature_off(h: Harness, artifact: Artifact) -> None:
     write_private(key_file, key + "\n")
     run_feature_off_probe_with_key_cleanup(artifact.command, work, key_file, clean_env(work / "home", work / "store"))
     h.add("feature_off", {"label": artifact.name, "no_webui_health": 200, "webui_flag_rejected": True, "shutdown": shutdown})
+def run_tls_matrix(h: Harness, artifacts: list[Artifact]) -> None:
+    tls_extra = generate_tls(h.root / "tls")
+    if tls_extra:
+        try:
+            for artifact in artifacts:
+                run_on_off(h, artifact, tls_extra=tls_extra, https=True, label_suffix="-tls")
+        finally:
+            cleanup_tls_material(tls_extra)
+    else:
+        if os.environ.get("WEBUI_REQUIRE_TLS") == "1":
+            raise AssertionError("WEBUI_REQUIRE_TLS=1 but openssl is unavailable for self-signed certificate generation")
+        h.add("tls", {"status": "not_run", "reason": "openssl unavailable for self-signed certificate generation"})
 def generate_tls(work: Path) -> list[str] | None:
     openssl = shutil.which("openssl")
     if not openssl:
@@ -444,16 +456,7 @@ def main() -> int:
         h.flush()
         for artifact in artifacts:
             run_on_off(h, artifact)
-        tls_extra = generate_tls(root / "tls")
-        if tls_extra:
-            try:
-                run_on_off(h, artifacts[0], tls_extra=tls_extra, https=True, label_suffix="-tls")
-            finally:
-                cleanup_tls_material(tls_extra)
-        else:
-            if os.environ.get("WEBUI_REQUIRE_TLS") == "1":
-                raise AssertionError("WEBUI_REQUIRE_TLS=1 but openssl is unavailable for self-signed certificate generation")
-            h.add("tls", {"status": "not_run", "reason": "openssl unavailable for self-signed certificate generation"})
+        run_tls_matrix(h, artifacts)
         for artifact in artifacts:
             run_generated_key(h, artifact)
         if args.feature_off_server_bin and args.feature_off_cli_bin:

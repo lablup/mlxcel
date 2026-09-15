@@ -144,6 +144,16 @@ class InstalledArtifactHelperTests(unittest.TestCase):
             self.assertFalse(cert.exists())
             self.assertFalse(key.exists())
 
+    def test_tls_matrix_runs_both_installed_commands_before_cleanup(self) -> None:
+        seen: list[str] = []
+        artifacts = [verify.Artifact("server", Path("s"), Path("s"), ["s"], "sha"), verify.Artifact("cli", Path("c"), Path("c"), ["c", "serve"], "sha")]
+        with tempfile.TemporaryDirectory() as tmp:
+            h = verify.Harness(Namespace(evidence=str(Path(tmp) / "evidence.json")), Path(tmp), {"result": "fail"})
+            with mock.patch.object(verify, "generate_tls", return_value=["--ssl-cert-file", "cert", "--ssl-key-file", "key"]), mock.patch.object(verify, "run_on_off", side_effect=lambda _h, artifact, **kwargs: seen.append(artifact.name)), mock.patch.object(verify, "cleanup_tls_material") as cleanup:
+                verify.run_tls_matrix(h, artifacts)
+        self.assertEqual(seen, ["server", "cli"])
+        cleanup.assert_called_once()
+
     def test_sigint_server_shutdown_is_failure_but_key_cleanup_still_runs(self) -> None:
         class Proc:
             returncode = -verify.signal.SIGINT

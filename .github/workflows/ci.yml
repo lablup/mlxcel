@@ -512,7 +512,9 @@ jobs:
           MLXCEL_WEBUI_ROUTER_ARTIFACTS: webui/test-results/rust-router-ci
         run: cargo test --profile test-fast --features cuda,webui --lib server::router_server::router_webui_playwright_harness_tests::real_router_browser_harness -- --ignored --exact --nocapture
       - name: Unit-test the installed-artifact verifier helpers
-        run: python3 scripts/webui/verify_installed_artifact_tests.py
+        run: |
+          python3 scripts/webui/verify_installed_artifact_tests.py
+          python3 scripts/webui/verify_generated_key_helper_tests.py
       - name: Verify the installed Rust artifact serves the bundled WebUI
         env:
           WEBUI_INSTALLED_EVIDENCE: ${{ runner.temp }}/webui-installed-evidence.json
