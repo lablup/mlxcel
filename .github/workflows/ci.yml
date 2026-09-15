@@ -506,7 +506,33 @@ jobs:
       - name: Install WebUI dependencies for real-router browser harness
         run: pnpm --dir webui install --frozen-lockfile
       - name: Install Chromium runtime for real-router browser harness
-        run: pnpm --dir webui exec playwright install --with-deps chromium
+        run: pnpm --dir webui exec playwright install chromium
+      - name: Probe Chromium runtime for real-router browser harness
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          timeout 45s pnpm --dir webui exec node -e '
+            const { chromium } = require("@playwright/test");
+            (async () => {
+              let browser;
+              try {
+                browser = await chromium.launch();
+                const page = await browser.newPage({ viewport: { width: 800, height: 600 } });
+                await page.setContent("<main id=\"probe\">ready</main>");
+                const box = await page.locator("#probe").boundingBox();
+                if (!box || box.width <= 0 || box.height <= 0) {
+                  throw new Error("Chromium geometry probe failed");
+                }
+              } finally {
+                if (browser) {
+                  await browser.close();
+                }
+              }
+            })().catch((error) => {
+              console.error(`Chromium runtime probe failed: ${error.message}`);
+              process.exit(1);
+            });
+          '
       - name: Run WebUI real-router browser harness
         env:
           MLXCEL_WEBUI_ROUTER_ARTIFACTS: webui/test-results/rust-router-ci
@@ -542,14 +568,20 @@ jobs:
             --cli-bin "$RUNNER_TEMP/mlxcel-webui-installed/mlxcel-webui" \
             --build-source-head "${{ github.sha }}" \
             --evidence "$WEBUI_REVERSE_PROXY_EVIDENCE"
-      - name: Install native-hidden Activity display tools
+      - name: Check native-hidden Activity display prerequisites
         run: |
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xvfb openbox
-          command -v Xvfb
-          command -v openbox
-          command -v flock
-          command -v nvidia-smi
+          set -euo pipefail
+          missing=0
+          for tool in Xvfb openbox flock nvidia-smi; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+              echo "::error::$tool is required on the GB10 runner for the native-hidden Activity gate"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::Provision Xvfb, openbox, flock, and nvidia-smi on the GB10 runner; this job does not use sudo or skip the native-hidden gate"
+            exit 1
+          fi
       - name: Cache Activity checkpoint fixture
         id: activity-fixture-cache
         uses: actions/cache@v6
