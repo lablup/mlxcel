@@ -10,7 +10,6 @@ best-effort OS network-denial evidence. It intentionally does not load a model;
 actual checkpoint, browser, Safari/VoiceOver, and GPU gates remain separate.
 """
 from __future__ import annotations
-
 import argparse
 import hashlib
 import json
@@ -18,6 +17,7 @@ import os
 import platform
 import pty
 import re
+import select
 import secrets
 import shutil
 import signal
@@ -34,22 +34,14 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-
-NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 MAX_BODY = 8 * 1024 * 1024
 SECRET_RE = re.compile(r"(Bearer\s+)[A-Za-z0-9._~+/=-]+")
-
-
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
         return None
-
-
 def sha256(path: Path) -> str:
     with path.open("rb") as fp:
         return hashlib.file_digest(fp, "sha256").hexdigest()
-
-
 def redact(value: Any, secrets_to_hide: list[str]) -> Any:
     if isinstance(value, str):
         text = SECRET_RE.sub(r"\1<redacted>", value)
@@ -62,8 +54,6 @@ def redact(value: Any, secrets_to_hide: list[str]) -> Any:
     if isinstance(value, dict):
         return {k: redact(v, secrets_to_hide) for k, v in value.items()}
     return value
-
-
 def write_private(path: Path, body: str) -> None:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w") as fp:
@@ -71,31 +61,29 @@ def write_private(path: Path, body: str) -> None:
     mode = stat.S_IMODE(path.stat().st_mode)
     if mode != 0o600:
         raise AssertionError(f"{path} mode is {mode:o}, want 600")
-
-
 def free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
-
-
 def clean_env(home: Path, store: Path) -> dict[str, str]:
     allowed = {"PATH", "SystemRoot", "WINDIR", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "SSL_CERT_FILE", "SSL_CERT_DIR", "TMPDIR", "TMP", "TEMP"}
     env = {k: v for k, v in os.environ.items() if k in allowed and not k.lower().endswith("proxy")}
     env.update({"HOME": str(home), "MLXCEL_MODELS_DIR": str(store), "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "NO_PROXY": "*", "no_proxy": "*"})
     return env
-
-
+def opener_for(*, https: bool = False, redirects: bool = True) -> urllib.request.OpenerDirector:
+    handlers: list[Any] = [urllib.request.ProxyHandler({})]
+    if https:
+        handlers.append(urllib.request.HTTPSHandler(context=ssl._create_unverified_context()))
+    if not redirects:
+        handlers.append(NoRedirect())
+    return urllib.request.build_opener(*handlers)
 def request(url: str, *, key: str | None = None, method: str = "GET", data: bytes | None = None, headers: dict[str, str] | None = None, https: bool = False) -> tuple[int, dict[str, str], bytes]:
     all_headers = dict(headers or {})
     if key is not None:
         all_headers["Authorization"] = f"Bearer {key}"
     req = urllib.request.Request(url, data=data, method=method, headers=all_headers)
-    opener = NO_PROXY_OPENER
-    if https:
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=ssl._create_unverified_context()))
     try:
-        with opener.open(req, timeout=8) as resp:
+        with opener_for(https=https).open(req, timeout=8) as resp:
             body = resp.read(MAX_BODY + 1)
             if len(body) > MAX_BODY:
                 raise AssertionError("response exceeded bounded buffer")
@@ -105,22 +93,15 @@ def request(url: str, *, key: str | None = None, method: str = "GET", data: byte
         if len(body) > MAX_BODY:
             raise AssertionError("error response exceeded bounded buffer")
         return exc.code, {k.lower(): v for k, v in exc.headers.items()}, body
-
-
 def open_headers(url: str, *, key: str | None = None, https: bool = False) -> tuple[int, dict[str, str]]:
     headers = {"Authorization": f"Bearer {key}"} if key is not None else {}
     req = urllib.request.Request(url, headers=headers)
-    opener = NO_PROXY_OPENER
-    if https:
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=ssl._create_unverified_context()))
     try:
-        resp = opener.open(req, timeout=8)
+        resp = opener_for(https=https).open(req, timeout=8)
     except urllib.error.HTTPError as exc:
         return exc.code, {k.lower(): v for k, v in exc.headers.items()}
     with resp:
         return resp.status, {k.lower(): v for k, v in resp.headers.items()}
-
-
 @dataclass
 class Artifact:
     name: str
@@ -128,23 +109,17 @@ class Artifact:
     relocated: Path
     command: list[str]
     sha256: str
-
-
 @dataclass
 class Harness:
     args: argparse.Namespace
     root: Path
     evidence: dict[str, Any]
     secrets: list[str] = field(default_factory=list)
-
     def add(self, section: str, value: Any) -> None:
         self.evidence.setdefault(section, []).append(redact(value, self.secrets))
         self.flush()
-
     def flush(self) -> None:
         Path(self.args.evidence).write_text(json.dumps(redact(self.evidence, self.secrets), indent=2, sort_keys=True) + "\n")
-
-
 def relocate(src: Path, install: Path, name: str, subcommand: list[str]) -> Artifact:
     src = src.resolve()
     if not src.is_file():
@@ -154,8 +129,6 @@ def relocate(src: Path, install: Path, name: str, subcommand: list[str]) -> Arti
     shutil.copy2(src, dest)
     dest.chmod(dest.stat().st_mode | stat.S_IXUSR)
     return Artifact(name, src, dest, [str(dest), *subcommand], sha256(dest))
-
-
 def launch(command: list[str], work: Path, key_file: Path, port: int, models: Path, store: Path, webui: bool, *, extra: list[str] | None = None, https: bool = False) -> tuple[subprocess.Popen[bytes], Any, Path, str]:
     args = command + ["--host", "127.0.0.1", "--port", str(port), "--models-dir", str(models), "--model-store-root", str(store), "--api-key-file", str(key_file), "--api-prefix", "/lab", "--no-models-autoload", "--settings", "--props", "--metrics", "--webui" if webui else "--no-webui"]
     if extra:
@@ -164,8 +137,6 @@ def launch(command: list[str], work: Path, key_file: Path, port: int, models: Pa
     log_file = open(log_path, "ab", buffering=0)
     proc = subprocess.Popen(args, cwd=work, env=clean_env(work / "home", store), stdout=log_file, stderr=subprocess.STDOUT)
     return proc, log_file, log_path, f"{'https' if https else 'http'}://127.0.0.1:{port}"
-
-
 def wait_ready(base: str, proc: subprocess.Popen[bytes], *, https: bool = False) -> None:
     deadline = time.time() + 45
     last = ""
@@ -181,8 +152,6 @@ def wait_ready(base: str, proc: subprocess.Popen[bytes], *, https: bool = False)
             last = str(exc)
         time.sleep(0.15)
     raise RuntimeError(f"server did not become ready: {last}")
-
-
 def stop_proc(proc: subprocess.Popen[bytes], log_file: Any, log_path: Path) -> dict[str, Any]:
     forced = False
     try:
@@ -201,8 +170,6 @@ def stop_proc(proc: subprocess.Popen[bytes], log_file: Any, log_path: Path) -> d
         close = getattr(log_file, "close", None)
         if close:
             close()
-
-
 def assert_html_and_assets(base: str, key: str, *, https: bool = False) -> dict[str, Any]:
     shell = f"{base}/lab/webui/"
     status, headers, html = request(shell, https=https)
@@ -214,9 +181,8 @@ def assert_html_and_assets(base: str, key: str, *, https: bool = False) -> dict[
     head_status, head_headers, head_body = request(shell, method="HEAD", https=https)
     assert head_status == 200 and head_body == b"" and head_headers.get("etag"), head_headers
     assert request(shell, headers={"If-None-Match": etag}, https=https)[0] == 304
-    redirect_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
     try:
-        with redirect_opener.open(urllib.request.Request(shell[:-1]), timeout=5) as resp:
+        with opener_for(https=https, redirects=False).open(urllib.request.Request(shell[:-1]), timeout=5) as resp:
             redirect_status, redirect_location = resp.status, resp.headers.get("Location")
     except urllib.error.HTTPError as exc:
         redirect_status, redirect_location = exc.code, exc.headers.get("Location")
@@ -237,8 +203,6 @@ def assert_html_and_assets(base: str, key: str, *, https: bool = False) -> dict[
     assert request(shell + "missing-asset-does-not-exist.js", https=https)[0] == 404
     assert key.encode() not in html
     return {"csp": csp, "html_etag": bool(etag), "assets_checked": checked, "missing_asset": 404}
-
-
 def assert_private_api(base: str, key: str, *, https: bool = False) -> dict[str, Any]:
     observed: dict[str, Any] = {}
     for name in ("bootstrap", "catalog", "operations"):
@@ -262,8 +226,6 @@ def assert_private_api(base: str, key: str, *, https: bool = False) -> dict[str,
     assert request(f"{base}/lab/tools", key=key, method="POST", data=b"{}", headers={"Content-Type": "application/json"}, https=https)[0] in (403, 404, 405)
     assert request(f"{base}/lab/cors-proxy/http://169.254.169.254/latest/meta-data/", key=key, https=https)[0] in (403, 404)
     return {"mode": observed["bootstrap"]["server"].get("mode"), "catalog_items": 0, "unknown_runtime": 404, "events_auth": True, "hostile_origin": 403, "legacy_attack_routes_denied": True}
-
-
 def run_on_off(h: Harness, artifact: Artifact, *, tls_extra: list[str] | None = None, https: bool = False, label_suffix: str = "") -> None:
     work = h.root / f"{artifact.name}{label_suffix}"
     work.mkdir(parents=True)
@@ -284,7 +246,6 @@ def run_on_off(h: Harness, artifact: Artifact, *, tls_extra: list[str] | None = 
     result["shutdown"] = shutdown
     result["no_model_autoload"] = True
     h.add("webui_on", result)
-
     write_private(key_file, key + "\n")
     proc, log_file, log_path, base = launch(artifact.command, work, key_file, free_port(), work / "empty-models", work / "store", False)
     try:
@@ -296,8 +257,6 @@ def run_on_off(h: Harness, artifact: Artifact, *, tls_extra: list[str] | None = 
         shutdown = stop_proc(proc, log_file, log_path)
         key_file.unlink(missing_ok=True)
     h.add("webui_off", {"label": artifact.name + label_suffix, "health": 200, "ui_routes_absent": True, "shutdown": shutdown})
-
-
 def run_feature_off(h: Harness, artifact: Artifact) -> None:
     work = h.root / f"{artifact.name}-feature-off"
     work.mkdir(parents=True)
@@ -318,8 +277,6 @@ def run_feature_off(h: Harness, artifact: Artifact) -> None:
     assert fail.returncode != 0 and "webui" in text.lower(), text
     key_file.unlink(missing_ok=True)
     h.add("feature_off", {"label": artifact.name, "no_webui_health": 200, "webui_flag_rejected": True, "shutdown": shutdown})
-
-
 def generate_tls(work: Path) -> list[str] | None:
     openssl = shutil.which("openssl")
     if not openssl:
@@ -328,8 +285,6 @@ def generate_tls(work: Path) -> list[str] | None:
     cert, key = work / "cert.pem", work / "key.pem"
     subprocess.run([openssl, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=127.0.0.1", "-keyout", str(key), "-out", str(cert), "-days", "1", "-addext", "subjectAltName=IP:127.0.0.1"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
     return ["--ssl-cert-file", str(cert), "--ssl-key-file", str(key)]
-
-
 def run_generated_key(h: Harness, artifact: Artifact) -> None:
     if platform.system() == "Windows":
         h.add("generated_key", {"label": artifact.name, "status": "unsupported", "reason": "pty unavailable on Windows"}); return
@@ -344,16 +299,23 @@ def run_generated_key(h: Harness, artifact: Artifact) -> None:
     if pid == 0:
         os.chdir(work); os.execve(artifact.command[0], cmd, env)
     try:
-        deadline = time.time() + 45
-        while time.time() < deadline:
-            try:
-                transcript.extend(os.read(fd, 65536))
-            except OSError:
-                pass
+        os.set_blocking(fd, False)
+        deadline = time.monotonic() + 45
+        while time.monotonic() < deadline:
+            waited, status = os.waitpid(pid, os.WNOHANG)
+            if waited:
+                raise AssertionError(f"generated-key server exited before printing key: {status}; {transcript[-2000:].decode(errors='replace')}")
+            if select.select([fd], [], [], 0.1)[0]:
+                try:
+                    transcript.extend(os.read(fd, 65536))
+                except BlockingIOError:
+                    pass
+                except OSError:
+                    pass
+                assert len(transcript) <= 1024 * 1024, "generated-key terminal output exceeded 1 MiB"
             match = re.search(rb"session key \(shown once\): ([^\s]+)", transcript)
             if match:
                 key = match.group(1).decode(); h.secrets.append(key); break
-            time.sleep(0.05)
         assert key, transcript.decode(errors="replace")[-2000:]
         assert request(f"http://127.0.0.1:{port}/gen/ui-api/v1/bootstrap", key=key)[0] == 200
         assert request(f"http://127.0.0.1:{port}/gen/ui-api/v1/bootstrap")[0] == 401
@@ -362,8 +324,8 @@ def run_generated_key(h: Harness, artifact: Artifact) -> None:
             os.kill(pid, signal.SIGINT)
         except ProcessLookupError:
             pass
-        deadline = time.time() + 15
-        while time.time() < deadline:
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
             try:
                 waited, status = os.waitpid(pid, os.WNOHANG)
             except ChildProcessError:
@@ -382,39 +344,74 @@ def run_generated_key(h: Harness, artifact: Artifact) -> None:
                 pass
             raise AssertionError("generated-key server did not exit after SIGINT and had to be killed")
         os.close(fd)
-    h.add("generated_key", {"label": artifact.name, "headless_without_key_rejected": True, "tty_key_authenticated": True, "key_in_argv_or_env": False, "exit_status": status})
-
-
+    if os.WIFEXITED(status):
+        exit_value = os.WEXITSTATUS(status)
+        assert exit_value == 0, f"generated-key server exited {exit_value}"
+    elif os.WIFSIGNALED(status):
+        sig = os.WTERMSIG(status)
+        assert sig in (signal.SIGINT, signal.SIGTERM), f"generated-key server died from signal {sig}"
+    h.add("generated_key", {"label": artifact.name, "headless_without_key_rejected": True, "tty_key_authenticated": True, "key_in_argv_or_env": False, "wait_status": status})
+def network_interfaces() -> list[dict[str, Any]]:
+    interfaces: list[dict[str, Any]] = []
+    root = Path("/sys/class/net")
+    if root.is_dir():
+        for entry in sorted(root.iterdir()):
+            try:
+                interfaces.append({"name": entry.name, "operstate": (entry / "operstate").read_text().strip(), "flags": (entry / "flags").read_text().strip()})
+            except OSError:
+                interfaces.append({"name": entry.name, "operstate": "unknown", "flags": "unknown"})
+    return interfaces
+def default_routes() -> list[str]:
+    route = Path("/proc/net/route")
+    if not route.is_file():
+        return []
+    rows = []
+    for line in route.read_text().splitlines()[1:]:
+        parts = line.split()
+        if len(parts) >= 3 and parts[1] == "00000000":
+            rows.append(line)
+    return rows
+def assert_network_namespace_isolated() -> dict[str, Any]:
+    interfaces = network_interfaces()
+    non_loopback = [iface for iface in interfaces if iface.get("name") != "lo"]
+    routes = default_routes()
+    if non_loopback or routes:
+        raise AssertionError(f"network namespace still exposes non-loopback interfaces/routes: interfaces={non_loopback} routes={routes}")
+    lo = next((iface for iface in interfaces if iface.get("name") == "lo"), None)
+    if not lo or lo.get("operstate") not in ("unknown", "up"):
+        raise AssertionError(f"loopback is not available/up inside network namespace: {lo}")
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(1)
+        try:
+            sock.connect(("198.51.100.1", 80))
+        except OSError as exc:
+            return {"status": "enforced", "mechanism": "unshare-net", "interfaces": interfaces, "default_routes": routes, "negative_control": f"TEST-NET external TCP connect denied: {type(exc).__name__}", "loopback_server_tests": "passed above"}
+    raise AssertionError("external TEST-NET TCP connect unexpectedly succeeded inside network namespace")
 def network_denial(h: Harness) -> None:
     if os.environ.get("MLXCEL_WEBUI_NETNS_ACTIVE") == "1":
-        try:
-            with NO_PROXY_OPENER.open("http://93.184.216.34/", timeout=2) as response:
-                response.read(1)
-        except (OSError, TimeoutError, urllib.error.URLError):
-            h.add("network_denial", {"status": "enforced", "mechanism": "unshare-net", "negative_control": "external IPv4 fetch denied", "loopback_server_tests": "passed above"})
-            return
-        raise AssertionError("external network reachable inside requested network-denial namespace")
-    value = {"status": "not_enforced_in_this_process", "mechanism": "none", "note": "run under `unshare -Urn` or macOS sandbox-exec for hard no-network evidence; offline env/proxy stripping is still applied"}
+        h.add("network_denial", assert_network_namespace_isolated())
+        return
+    value = {"status": "not_enforced_in_this_process", "mechanism": "none", "note": "run under WEBUI_NETWORK_SANDBOX=require on Linux so the script re-execs with unshare -Urn and loopback brought up; offline env/proxy stripping is still applied"}
     if os.environ.get("WEBUI_NETWORK_SANDBOX") == "require":
         raise AssertionError(value["note"])
     h.add("network_denial", value)
-
-
 def maybe_reexec_netns(argv: list[str]) -> None:
     mode = os.environ.get("WEBUI_NETWORK_SANDBOX", "auto")
     if mode == "off" or os.environ.get("MLXCEL_WEBUI_NETNS_ACTIVE") == "1" or platform.system() != "Linux":
         return
     unshare = shutil.which("unshare")
-    if not unshare:
+    ip = shutil.which("ip")
+    if not unshare or not ip:
+        if mode == "require":
+            raise SystemExit("WEBUI_NETWORK_SANDBOX=require needs both `unshare` and `ip` to create a loopback-only namespace")
         return
-    probe = subprocess.run([unshare, "-Urn", "true"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    probe = subprocess.run([unshare, "-Urn", ip, "link", "set", "lo", "up"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if probe.returncode == 0:
         env = os.environ.copy(); env["MLXCEL_WEBUI_NETNS_ACTIVE"] = "1"
-        raise SystemExit(subprocess.call([unshare, "-Urn", sys.executable, *argv], env=env))
+        script = '"$1" link set lo up && shift && exec "$@"'
+        raise SystemExit(subprocess.call([unshare, "-Urn", "/bin/sh", "-c", script, "sh", ip, sys.executable, *argv], env=env))
     if mode == "require":
-        raise SystemExit("WEBUI_NETWORK_SANDBOX=require but `unshare -Urn` is unavailable")
-
-
+        raise SystemExit("WEBUI_NETWORK_SANDBOX=require but `unshare -Urn ip link set lo up` failed")
 def main() -> int:
     maybe_reexec_netns(sys.argv)
     p = argparse.ArgumentParser()
@@ -422,6 +419,8 @@ def main() -> int:
     p.add_argument("--cli-bin", default=os.environ.get("WEBUI_CLI_BIN"))
     p.add_argument("--feature-off-server-bin", default=os.environ.get("WEBUI_FEATURE_OFF_SERVER_BIN"))
     p.add_argument("--feature-off-cli-bin", default=os.environ.get("WEBUI_FEATURE_OFF_CLI_BIN"))
+    p.add_argument("--build-source-head", default=os.environ.get("WEBUI_BUILD_SOURCE_HEAD"), help="Git commit used to build the WebUI-enabled artifacts, if known")
+    p.add_argument("--feature-off-build-source-head", default=os.environ.get("WEBUI_FEATURE_OFF_BUILD_SOURCE_HEAD"), help="Git commit used to build the feature-off artifacts, if known")
     p.add_argument("--evidence", default=os.environ.get("WEBUI_INSTALLED_EVIDENCE", "webui-installed-evidence.json"))
     args = p.parse_args()
     if not args.server_bin or not args.cli_bin:
@@ -433,11 +432,13 @@ def main() -> int:
     root.mkdir(parents=True, exist_ok=False)
     h = Harness(args, root, evidence)
     h.evidence["artifact_dir"] = str(root)
+    h.evidence["log_dir"] = str(root)
     try:
         artifacts = [relocate(Path(args.server_bin), root / "installed", "mlxcel-server", []), relocate(Path(args.cli_bin), root / "installed", "mlxcel-serve", ["serve"])]
-        h.evidence["artifacts"] = [{"label": a.name, "source": str(a.source), "relocated": str(a.relocated), "sha256": a.sha256, "command_shape": [a.relocated.name, *a.command[1:]]} for a in artifacts]
-        source_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parents[2], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        h.evidence["source_head"] = source_head.stdout.strip() if source_head.returncode == 0 else "unknown"
+        h.evidence["artifacts"] = [{"label": a.name, "source": str(a.source), "relocated": str(a.relocated), "sha256": a.sha256, "command_shape": [a.relocated.name, *a.command[1:]], "build_source_head": args.build_source_head or "unknown"} for a in artifacts]
+        script_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parents[2], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        h.evidence["script_worktree_head"] = script_head.stdout.strip() if script_head.returncode == 0 else "unknown"
+        h.evidence["build_provenance"] = {"webui_artifacts_source_head": args.build_source_head or "unknown", "feature_off_artifacts_source_head": args.feature_off_build_source_head or "unknown", "note": "script_worktree_head identifies the verifier source; build_source_head identifies the already-built binaries when the caller provides it"}
         h.flush()
         for artifact in artifacts:
             run_on_off(h, artifact)
@@ -450,7 +451,10 @@ def main() -> int:
             h.add("tls", {"status": "not_run", "reason": "openssl unavailable for self-signed certificate generation"})
         run_generated_key(h, artifacts[0])
         if args.feature_off_server_bin and args.feature_off_cli_bin:
-            for artifact in [relocate(Path(args.feature_off_server_bin), root / "installed-feature-off", "mlxcel-server", []), relocate(Path(args.feature_off_cli_bin), root / "installed-feature-off", "mlxcel-serve", ["serve"] )]:
+            feature_off_artifacts = [relocate(Path(args.feature_off_server_bin), root / "installed-feature-off", "mlxcel-server", []), relocate(Path(args.feature_off_cli_bin), root / "installed-feature-off", "mlxcel-serve", ["serve"] )]
+            h.evidence["feature_off_artifacts"] = [{"label": a.name, "source": str(a.source), "relocated": str(a.relocated), "sha256": a.sha256, "command_shape": [a.relocated.name, *a.command[1:]], "build_source_head": args.feature_off_build_source_head or "unknown"} for a in feature_off_artifacts]
+            h.flush()
+            for artifact in feature_off_artifacts:
                 run_feature_off(h, artifact)
         else:
             if os.environ.get("WEBUI_REQUIRE_FEATURE_OFF", "1") == "1":
@@ -461,7 +465,5 @@ def main() -> int:
         print(json.dumps(redact(h.evidence, h.secrets), indent=2, sort_keys=True)); return 0
     except BaseException as exc:
         h.evidence["result"] = "fail"; h.evidence["error"] = {"type": type(exc).__name__, "message": redact(str(exc), h.secrets)}; h.evidence["completed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()); h.flush(); raise
-
-
 if __name__ == "__main__":
     raise SystemExit(main())

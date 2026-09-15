@@ -9,6 +9,7 @@ import stat
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from argparse import Namespace
 from pathlib import Path
 
@@ -64,36 +65,50 @@ class InstalledArtifactHelperTests(unittest.TestCase):
             self.assertNotIn("secret-token", text)
             self.assertNotIn("abc123", text)
 
-    def test_network_denial_does_not_treat_reachable_network_as_pass(self) -> None:
-        class Reachable:
-            def open(self, *args, **kwargs):  # type: ignore[no-untyped-def]
-                class Response:
-                    def __enter__(self):
-                        return self
+    def test_network_denial_rejects_external_interface_or_route(self) -> None:
+        with mock.patch.object(verify, "network_interfaces", return_value=[{"name": "lo", "operstate": "up"}, {"name": "eth0", "operstate": "up"}]), mock.patch.object(verify, "default_routes", return_value=[]):
+            with self.assertRaises(AssertionError):
+                verify.assert_network_namespace_isolated()
+        with mock.patch.object(verify, "network_interfaces", return_value=[{"name": "lo", "operstate": "up"}]), mock.patch.object(verify, "default_routes", return_value=["eth0 default"]):
+            with self.assertRaises(AssertionError):
+                verify.assert_network_namespace_isolated()
 
-                    def __exit__(self, *exc):  # type: ignore[no-untyped-def]
-                        return False
+    def test_network_denial_rejects_reachable_tcp_negative_control(self) -> None:
+        class ReachableSocket:
+            def __enter__(self):
+                return self
 
-                    def read(self, size: int) -> bytes:
-                        return b"x"
+            def __exit__(self, *exc):  # type: ignore[no-untyped-def]
+                return False
 
-                return Response()
+            def settimeout(self, value: int) -> None:
+                pass
 
-        old_active = os.environ.get("MLXCEL_WEBUI_NETNS_ACTIVE")
-        old_opener = verify.NO_PROXY_OPENER
-        try:
-            os.environ["MLXCEL_WEBUI_NETNS_ACTIVE"] = "1"
-            verify.NO_PROXY_OPENER = Reachable()
-            with tempfile.TemporaryDirectory() as tmp:
-                h = verify.Harness(Namespace(evidence=str(Path(tmp) / "evidence.json")), Path(tmp), {"result": "fail"}, [])
-                with self.assertRaises(AssertionError):
-                    verify.network_denial(h)
-        finally:
-            verify.NO_PROXY_OPENER = old_opener
-            if old_active is None:
-                os.environ.pop("MLXCEL_WEBUI_NETNS_ACTIVE", None)
-            else:
-                os.environ["MLXCEL_WEBUI_NETNS_ACTIVE"] = old_active
+            def connect(self, address):  # type: ignore[no-untyped-def]
+                return None
+
+        with mock.patch.object(verify, "network_interfaces", return_value=[{"name": "lo", "operstate": "up"}]), mock.patch.object(verify, "default_routes", return_value=[]), mock.patch.object(verify.socket, "socket", return_value=ReachableSocket()):
+            with self.assertRaises(AssertionError):
+                verify.assert_network_namespace_isolated()
+
+    def test_network_denial_records_socket_oserror_as_denied(self) -> None:
+        class DeniedSocket:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):  # type: ignore[no-untyped-def]
+                return False
+
+            def settimeout(self, value: int) -> None:
+                pass
+
+            def connect(self, address):  # type: ignore[no-untyped-def]
+                raise OSError("network unreachable")
+
+        with mock.patch.object(verify, "network_interfaces", return_value=[{"name": "lo", "operstate": "up"}]), mock.patch.object(verify, "default_routes", return_value=[]), mock.patch.object(verify.socket, "socket", return_value=DeniedSocket()):
+            result = verify.assert_network_namespace_isolated()
+        self.assertEqual(result["status"], "enforced")
+        self.assertIn("external TCP connect denied", result["negative_control"])
 
 
 if __name__ == "__main__":

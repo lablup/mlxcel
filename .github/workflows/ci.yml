@@ -158,8 +158,13 @@ jobs:
             webui_bundle:
               - 'webui/**'
               - 'src/webui/assets/**'
-              - 'src/server/webui/**'
+              - 'src/server/**'
+              - 'src/cli/**'
+              - 'src/bin/mlx_server.rs'
+              - 'src/main.rs'
+              - 'tests/fixtures/webui/**'
               - 'scripts/webui/**'
+              - 'scripts/ci/*webui*'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'Makefile'
@@ -512,6 +517,8 @@ jobs:
         env:
           WEBUI_INSTALLED_EVIDENCE: webui-installed-evidence.json
           WEBUI_NETWORK_SANDBOX: require
+          WEBUI_BUILD_SOURCE_HEAD: ${{ github.sha }}
+          WEBUI_FEATURE_OFF_BUILD_SOURCE_HEAD: ${{ github.sha }}
         run: |
           WEBUI_SERVER_BIN="$RUNNER_TEMP/mlxcel-webui-installed/mlxcel-server-webui" \
           WEBUI_CLI_BIN="$RUNNER_TEMP/mlxcel-webui-installed/mlxcel-webui" \
@@ -524,7 +531,7 @@ jobs:
         with:
           name: webui-installed-artifact-${{ runner.os }}
           path: webui-installed-evidence.json
-          if-no-files-found: warn
+          if-no-files-found: error
 
   mlx-pin:
     name: MLX pin extraction
