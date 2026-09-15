@@ -9,8 +9,11 @@ CARGO := cargo
 RUSTFLAGS := RUSTFLAGS="-C target-cpu=native"
 WEBUI_CONTRACT_PY ?= python3
 WEBUI_BUNDLE_PY ?= python3
+WEBUI_EVIDENCE_PY ?= python3
 WEBUI_SERVER_BIN ?=
 WEBUI_CLI_BIN ?=
+WEBUI_HARDWARE_EVIDENCE ?=
+WEBUI_CUDA_EVIDENCE ?=
 
 # ----------------------------------------------------------------------------
 # Release accelerator features (platform-aware)
@@ -29,6 +32,19 @@ RELEASE_FEATURES := metal,accelerate
 endif
 # Expands to `--features <list>` only when RELEASE_FEATURES is set; empty on Linux.
 RELEASE_FEATURE_FLAG := $(if $(RELEASE_FEATURES),--features $(RELEASE_FEATURES))
+
+# WebUI Rust test features are platform-aware and overrideable. Darwin uses the
+# canonical Metal+Accelerate gate; Linux defaults to CUDA for the GB10/WebUI CI
+# host but may be overridden with WEBUI_TEST_FEATURES=rocm or an empty value for
+# a compile-only host that intentionally selects no accelerator feature.
+ifeq ($(UNAME_S),Darwin)
+WEBUI_TEST_FEATURES ?= metal,accelerate
+else ifeq ($(UNAME_S),Linux)
+WEBUI_TEST_FEATURES ?= cuda
+else
+WEBUI_TEST_FEATURES ?=
+endif
+WEBUI_TEST_FEATURE_FLAG := $(if $(WEBUI_TEST_FEATURES),--features $(WEBUI_TEST_FEATURES))
 
 # Binary names
 BIN_CLI := mlxcel
@@ -788,7 +804,7 @@ verify-webui-rust: ## Run CPU-safe Rust WebUI/router contract tests only; does n
 		router_load_profile \
 		app_single_webui_control \
 		server::webui:: ; do \
-		$(CARGO) test --profile test-fast --features metal,accelerate --lib "$$filter" || exit $$?; \
+		$(CARGO) test --profile test-fast $(WEBUI_TEST_FEATURE_FLAG) --lib "$$filter" || exit $$?; \
 	done
 
 .PHONY: verify-webui
@@ -798,24 +814,25 @@ verify-webui: verify-webui-contract verify-webui-frontend verify-webui-bundle ve
 .PHONY: verify-webui-integration-fake
 verify-webui-integration-fake: ## Opt-in real secured Rust-router + fake model/downloader browser harness; no real checkpoints (issue #1848)
 	@echo "$(CYAN)[verify] WebUI real-router fake-trait browser harness...$(RESET)"
-	@$(CARGO) test --profile test-fast --features metal,accelerate --lib server::router_server::router_webui_playwright_harness_tests::real_router_browser_harness -- --ignored --exact --nocapture
+	@$(CARGO) test --profile test-fast $(WEBUI_TEST_FEATURE_FLAG) --lib server::router_server::router_webui_playwright_harness_tests::real_router_browser_harness -- --ignored --exact --nocapture
 
 .PHONY: verify-webui-installed
-verify-webui-installed: ## Verify an installed Rust server artifact serves the bundled WebUI; set WEBUI_SERVER_BIN and optionally WEBUI_CLI_BIN (issue #1848)
+verify-webui-installed: ## Verify installed Rust server and CLI artifacts serve the bundled WebUI; set WEBUI_SERVER_BIN and WEBUI_CLI_BIN (issue #1848)
 	@test -n "$(WEBUI_SERVER_BIN)" || { echo "$(RED)WEBUI_SERVER_BIN=/path/to/mlxcel-server is required$(RESET)"; exit 1; }
+	@test -n "$(WEBUI_CLI_BIN)" || { echo "$(RED)WEBUI_CLI_BIN=/path/to/mlxcel is required$(RESET)"; exit 1; }
 	@echo "$(CYAN)[verify] WebUI installed artifact smoke...$(RESET)"
-	@$(WEBUI_BUNDLE_PY) scripts/webui/verify_installed_artifact.py --server-bin "$(WEBUI_SERVER_BIN)" $(if $(WEBUI_CLI_BIN),--cli-bin "$(WEBUI_CLI_BIN)")
+	@$(WEBUI_BUNDLE_PY) scripts/webui/verify_installed_artifact.py --server-bin "$(WEBUI_SERVER_BIN)" --cli-bin "$(WEBUI_CLI_BIN)"
 
 .PHONY: verify-webui-hardware
 verify-webui-hardware: ## Validate root-run actual-model WebUI evidence JSON; set MLXCEL_REQUIRE_MODELS=1 WEBUI_HARDWARE_EVIDENCE=... (issue #1848)
 	@test "$(MLXCEL_REQUIRE_MODELS)" = "1" || { echo "$(RED)MLXCEL_REQUIRE_MODELS=1 is required; missing checkpoints/hardware are blockers, not skips$(RESET)"; exit 1; }
 	@test -n "$(WEBUI_HARDWARE_EVIDENCE)" || { echo "$(RED)WEBUI_HARDWARE_EVIDENCE=/path/to/hardware-evidence.json is required$(RESET)"; exit 1; }
-	@WEBUI_HARDWARE_EVIDENCE="$(WEBUI_HARDWARE_EVIDENCE)" python3 -c 'import json, os; path=os.environ["WEBUI_HARDWARE_EVIDENCE"]; data=json.load(open(path, encoding="utf-8")); rows={row.get("id"): row for row in data.get("rows", [])}; required=["dense_generation", "hybrid_or_moe_generation", "vlm_image_generation", "small_public_download", "activity_native_hidden", "startup_and_performance"]; missing=[key for key in required if key not in rows]; bad=[key for key in required if key in rows and rows[key].get("result") != "passed"]; assert not missing, f"missing hardware evidence rows: {missing}"; assert not bad, f"non-passing hardware evidence rows: {bad}"; assert data.get("binary_sha") and data.get("source_commit") and data.get("hardware") and data.get("features"), "binary_sha, source_commit, hardware and features are required"; print(f"validated WebUI hardware evidence: {path}")'
+	@$(WEBUI_EVIDENCE_PY) scripts/ci/check_webui_evidence.py hardware --evidence "$(WEBUI_HARDWARE_EVIDENCE)"
 
 .PHONY: verify-webui-cuda
 verify-webui-cuda: ## Validate root-run CUDA installed-artifact evidence JSON; set WEBUI_CUDA_EVIDENCE=... on the supported host (issue #1848)
 	@test -n "$(WEBUI_CUDA_EVIDENCE)" || { echo "$(RED)WEBUI_CUDA_EVIDENCE=/path/to/cuda-evidence.json is required$(RESET)"; exit 1; }
-	@WEBUI_CUDA_EVIDENCE="$(WEBUI_CUDA_EVIDENCE)" python3 -c 'import json, os; path=os.environ["WEBUI_CUDA_EVIDENCE"]; data=json.load(open(path, encoding="utf-8")); rows={row.get("id"): row for row in data.get("rows", [])}; required=["cuda_ui_on", "cuda_ui_off", "cuda_installed_artifact"]; missing=[key for key in required if key not in rows]; bad=[key for key in required if key in rows and rows[key].get("result") != "passed"]; assert not missing, f"missing CUDA evidence rows: {missing}"; assert not bad, f"non-passing CUDA evidence rows: {bad}"; assert data.get("binary_sha") and data.get("source_commit") and data.get("host") and data.get("features"), "binary_sha, source_commit, host and features are required"; print(f"validated WebUI CUDA evidence: {path}")'
+	@$(WEBUI_EVIDENCE_PY) scripts/ci/check_webui_evidence.py cuda --evidence "$(WEBUI_CUDA_EVIDENCE)"
 
 .PHONY: bump-version
 bump-version: ## Release: set every version-tracking crate to VERSION and sync Cargo.lock (make bump-version VERSION=0.5.0)
