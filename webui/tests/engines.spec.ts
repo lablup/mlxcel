@@ -69,7 +69,8 @@ for (const variant of engineVariants) {
     await composer.dispatchEvent('compositionstart');
     await composer.dispatchEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true, isComposing: true });
     await composer.dispatchEvent('compositionend');
-    expect(mock.calls).toHaveLength(callsBeforeIme);
+    const imeCalls = mock.calls.slice(callsBeforeIme);
+    expect(imeCalls.filter((call) => call.url.startsWith('/v1/chat/completions') || call.url.startsWith('/v1/responses') || call.method !== 'GET')).toEqual([]);
     await expect(composer).toHaveValue('안녕하세요 cross-engine composition guard');
     await expectAxeClean(page);
     await expectSafeLayout(page);

@@ -14,6 +14,27 @@ type BrowserPaintPredicate =
   | { kind: 'table-row-count'; testId: string; rowCount: number; textIncludes?: string }
   | { kind: 'transcript-reset'; composerSelector: string };
 type BrowserPaintResult<T> = { elapsedMs: number; state: T; instrumentation: Record<string, unknown> };
+const CONSOLE_NUMERIC_EVIDENCE_KEYS = new Set([
+  'usable_wall_ms',
+  'feedback_event_to_activity_visible_paint_ms',
+  'search_event_to_filtered_table_paint_ms',
+  'post_render_event_to_empty_composer_paint_ms',
+  'event_to_predicate_ms',
+  'predicate_to_paint_ms',
+  'before_action_two_raf_calibration_ms',
+  'driver_assertion_wall_ms',
+  'feedback_budget_ms',
+  'budget_ms',
+]);
+
+function collectConsoleMetrics(value: unknown, output: Record<string, number>, prefix = ''): void {
+  if (typeof value !== 'object' || value === null) return;
+  for (const [key, item] of Object.entries(value)) {
+    const label = prefix ? `${prefix}.${key}` : key;
+    if (typeof item === 'number' && Number.isFinite(item) && CONSOLE_NUMERIC_EVIDENCE_KEYS.has(key)) output[label] = item;
+    else if (typeof item === 'object' && item !== null) collectConsoleMetrics(item, output, label);
+  }
+}
 
 async function writeEvidence(testInfo: TestInfo, name: string, page: Page, evidence: Evidence): Promise<void> {
   const browser = await page.evaluate(() => ({
@@ -24,13 +45,17 @@ async function writeEvidence(testInfo: TestInfo, name: string, page: Page, evide
     viewport: { width: window.innerWidth, height: window.innerHeight },
   }));
   const path = testInfo.outputPath(name);
-  await writeFile(path, JSON.stringify({
+  const payload = {
     measured_at: new Date().toISOString(),
     host: { hostname: hostname(), platform: platform(), release: release(), cpus: cpus().length, totalmem_bytes: totalmem() },
     project: testInfo.project.name,
     browser,
     ...evidence,
-  }, null, 2), { mode: 0o600, flag: 'wx' });
+  };
+  const metrics: Record<string, number> = {};
+  collectConsoleMetrics(evidence, metrics);
+  console.log(JSON.stringify({ kind: 'webui-performance-evidence', name, project: testInfo.project.name, metrics }));
+  await writeFile(path, JSON.stringify(payload, null, 2), { mode: 0o600, flag: 'wx' });
   await testInfo.attach(name, { path, contentType: 'application/json' });
 }
 
@@ -103,9 +128,13 @@ async function installPerformanceApi(page: Page, options: { catalog: readonly Ca
 
 async function actionToSettledPaintMs<T>(locator: Locator, action: () => Promise<void>, predicate: BrowserPaintPredicate, assertState: () => Promise<T>, eventName: 'click' | 'input' = 'click'): Promise<BrowserPaintResult<T>> {
   const page = locator.page();
+  const twoRafCalibrationMs = await page.evaluate(() => new Promise<number>((resolve) => {
+    const started = performance.now();
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve(performance.now() - started)));
+  }));
   await locator.evaluate((element, options) => {
     type Predicate = typeof options.predicate;
-    type TimedResult = { elapsedMs: number; browserState: Record<string, unknown>; instrumentation: Record<string, unknown> };
+    type TimedResult = { elapsedMs: number; predicateElapsedMs: number; paintAfterPredicateMs: number; browserState: Record<string, unknown>; instrumentation: Record<string, unknown> };
     type TimedWindow = Window & { __mlxcelPerfActionToPaint?: { promise: Promise<TimedResult>; cancel: (reason: string) => void } };
     const target = window as TimedWindow;
     const visible = (candidate: Element | null): candidate is HTMLElement => {
@@ -155,6 +184,7 @@ async function actionToSettledPaintMs<T>(locator: Locator, action: () => Promise
       const settleAfterPaint = (started: number, deadline: number, browserState: Record<string, unknown>): void => {
         phase = 'painting';
         observer?.disconnect();
+        const predicateAt = performance.now();
         const assertInsideDeadline = (): boolean => {
           if (performance.now() <= deadline) return true;
           fail(new Error(`Timed out waiting for ${options.predicate.kind} paint.`));
@@ -168,6 +198,8 @@ async function actionToSettledPaintMs<T>(locator: Locator, action: () => Promise
             cleanup();
             resolve({
               elapsedMs,
+              predicateElapsedMs: predicateAt - started,
+              paintAfterPredicateMs: elapsedMs - (predicateAt - started),
               browserState,
               instrumentation: {
                 clock: 'performance.now',
@@ -225,7 +257,7 @@ async function actionToSettledPaintMs<T>(locator: Locator, action: () => Promise
     throw error;
   }
   const browserResult = await page.evaluate(() => {
-    const target = window as Window & { __mlxcelPerfActionToPaint?: { promise: Promise<{ elapsedMs: number; browserState: Record<string, unknown>; instrumentation: Record<string, unknown> }>; cancel: (reason: string) => void } };
+    const target = window as Window & { __mlxcelPerfActionToPaint?: { promise: Promise<{ elapsedMs: number; predicateElapsedMs: number; paintAfterPredicateMs: number; browserState: Record<string, unknown>; instrumentation: Record<string, unknown> }>; cancel: (reason: string) => void } };
     const pending = target.__mlxcelPerfActionToPaint?.promise;
     delete target.__mlxcelPerfActionToPaint;
     if (!pending) throw new Error('Performance action listener was not installed.');
@@ -234,7 +266,7 @@ async function actionToSettledPaintMs<T>(locator: Locator, action: () => Promise
   const driverStarted = process.hrtime.bigint();
   const state = await assertState();
   const driverAssertionMs = Number(process.hrtime.bigint() - driverStarted) / 1_000_000;
-  return { elapsedMs: browserResult.elapsedMs, state, instrumentation: { ...browserResult.instrumentation, browser_state: browserResult.browserState, driver_assertion_wall_ms: driverAssertionMs } };
+  return { elapsedMs: browserResult.elapsedMs, state, instrumentation: { ...browserResult.instrumentation, event_to_predicate_ms: browserResult.predicateElapsedMs, predicate_to_paint_ms: browserResult.paintAfterPredicateMs, before_action_two_raf_calibration_ms: twoRafCalibrationMs, browser_state: browserResult.browserState, driver_assertion_wall_ms: driverAssertionMs } };
 }
 
 test('cold product shell is usable within the frontend budget', async ({ page }, testInfo) => {
