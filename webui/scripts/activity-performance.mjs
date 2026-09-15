@@ -14,7 +14,15 @@ const modelId = required('WEBUI_PERF_MODEL_ID');
 const output = required('WEBUI_PERF_OUTPUT');
 const prompt = process.env.WEBUI_PERF_PROMPT_FILE ? await readFile(process.env.WEBUI_PERF_PROMPT_FILE, 'utf8') : 'Explain the difference between a process and a thread, in detail. '.repeat(100);
 const modeConfig = performanceMode(process.env.WEBUI_PERF_MODE);
-const browser = await chromium.launch({ headless: modeConfig.headless });
+// Playwright's default Chromium arguments include --disable-backgrounding-occluded-windows and
+// --disable-renderer-backgrounding, which exist to keep ordinary tests deterministic by refusing
+// to treat a backgrounded window as hidden. That is the exact behaviour this gate measures: with
+// them on, a window the browser reports as `minimized` still reports document.hidden === false.
+// Drop only those two for the headed run. --disable-background-timer-throttling stays on, so a
+// hidden client that sends no observation request has to owe that to the application's own
+// backoff rather than to Chrome throttling its timers.
+const hiddenVisibilitySuppressingArgs = ['--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding'];
+const browser = await chromium.launch(modeConfig.headless ? { headless: true } : { headless: false, ignoreDefaultArgs: hiddenVisibilitySuppressingArgs });
 const preflight = [];
 const results = [];
 let uiRequests = 0;
