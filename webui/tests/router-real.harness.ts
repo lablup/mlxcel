@@ -97,6 +97,15 @@ async function refresh(page: Page): Promise<void> {
   await page.getByRole('button', { name: 'Refresh server state', exact: true }).first().click();
 }
 
+async function rescanLocalRoots(page: Page, request: APIRequestContext, ctx: HarnessContext): Promise<string> {
+  const before = await operationIds(request, ctx);
+  await page.getByTestId('models-rescan').click();
+  const operationId = await waitOperationKind(request, ctx, 'catalog_refresh', before);
+  await waitOperation(request, ctx, operationId);
+  await refresh(page);
+  return operationId;
+}
+
 function createLocalSeedModel(ctx: HarnessContext): void {
   const seed = join(ctx.modelsDir, 'seed-local');
   mkdirSync(seed, { recursive: true });
@@ -211,7 +220,7 @@ test.describe('Rust router harness', () => {
     await login(page, ctx, httpObservations);
     await expect.poll(async () => (await catalog(request, ctx)).length).toBe(0);
     createLocalSeedModel(ctx);
-    await refresh(page);
+    const seedRefreshOperation = await rescanLocalRoots(page, request, ctx);
     await expect.poll(async () => (await catalog(request, ctx)).some(item => item.identity.inference_id === 'seed-local')).toBe(true);
     await expectSafeLayout(page); await expectAxeClean(page);
     const downloadNegatives = await exerciseDownloadFailureAndCancel(request, ctx);
@@ -299,6 +308,6 @@ test.describe('Rust router harness', () => {
     const violations = await page.evaluate(() => Reflect.get(window, '__routerCspViolations'));
     expect(violations).toEqual([]); expect(external).toEqual([]);
     await expectSafeLayout(page); await expectAxeClean(page);
-    saveArtifact(ctx, 'router-real-evidence.json', { csp, external, violations, download_negative_operations: downloadNegatives, lost_response_operation_id: lostRefreshOperation, stop_drain: { observed_active_requests: observedActiveRequests, final_active_requests: finalActiveRequests, stop_clicked_at: stopClickedAt, settled_at: stopSettledAt }, negative_cases: ['terminal operation cancel unsupported', 'two-tab stale revision 409', 'single-tab stale revision 409', 'unknown field 400', 'real 401 after credential change and reconnect', 'download failure operation failed', 'download cancellation operation cancelled', 'lost POST response recovered by operation id', 'unauth 401', 'bad bearer 401', 'hostile UI and legacy routes 403', 'missing asset 404', 'no token persistence'], final_catalog_size: (await catalog(request, ctx)).length, api_base: ctx.apiBase, note: 'Fake model/downloader leaves only; secured Rust router, embedded bundle, auth, CSP, Stop/drain and lifecycle routes were real.' });
+    saveArtifact(ctx, 'router-real-evidence.json', { csp, external, violations, seed_refresh_operation_id: seedRefreshOperation, download_negative_operations: downloadNegatives, lost_response_operation_id: lostRefreshOperation, stop_drain: { observed_active_requests: observedActiveRequests, final_active_requests: finalActiveRequests, stop_clicked_at: stopClickedAt, settled_at: stopSettledAt }, negative_cases: ['empty library before local seed', 'local models-dir seed discovered by real catalog refresh', 'terminal operation cancel unsupported', 'two-tab stale revision 409', 'single-tab stale revision 409', 'unknown field 400', 'real 401 after credential change and reconnect', 'download failure operation failed', 'download cancellation operation cancelled', 'lost POST response recovered by operation id', 'unauth 401', 'bad bearer 401', 'hostile UI and legacy routes 403', 'missing asset 404', 'no token persistence'], final_catalog_size: (await catalog(request, ctx)).length, api_base: ctx.apiBase, note: 'Fake model/downloader leaves only; secured Rust router, embedded bundle, auth, CSP, Stop/drain and lifecycle routes were real.' });
   });
 });
