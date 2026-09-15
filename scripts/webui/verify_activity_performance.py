@@ -35,8 +35,13 @@ MODEL_ID_RE = re.compile(r"^mdl_[A-Za-z0-9_-]{43}$")
 HEX40_RE = re.compile(r"^[0-9a-f]{40}$")
 SECRET_RE = re.compile(r"(Bearer\s+)[A-Za-z0-9._~+/=-]+")
 REQUIRED_MODES = {"one-visible", "two-visible", "hidden"}
+VISIBLE_ONLY_MODES = {"one-visible", "two-visible"}
 EXPECTED_SAMPLE_COUNTS = {"warmup": 1, "off": 15, "one-visible": 5, "two-visible": 5, "hidden": 5}
 EXPECTED_PREFLIGHT_COUNTS = {"one-visible": 6, "two-visible": 12, "hidden": 6}
+# A visible-only run drops the hidden mode: its five paired runs and the six preflight records
+# that belong to it, and the five "off" baselines they were paired against.
+VISIBLE_ONLY_SAMPLE_COUNTS = {"warmup": 1, "off": 10, "one-visible": 5, "two-visible": 5}
+VISIBLE_ONLY_PREFLIGHT_COUNTS = {"one-visible": 6, "two-visible": 12}
 
 @dataclass
 class OwnedProcess:
@@ -230,14 +235,23 @@ def materialize_model_view(source: Path, work: Path) -> tuple[Path, str]:
             shutil.rmtree(dest)
     raise AssertionError(f"failed to create isolated model view: {'; '.join(errors)}")
 
-def validate_activity_output(path: Path) -> dict[str, Any]:
+def validate_activity_output(path: Path, perf_mode: str = "full") -> dict[str, Any]:
+    # A visible-only run is a declared deferral of the hidden acceptance, not a weaker pass: every
+    # numeric budget below still applies, and the expected mode, sample and preflight counts move
+    # to the visible-only set so a run that silently dropped a mode is still caught.
+    hidden_deferred = perf_mode != "full"
+    expected_status = "incomplete" if hidden_deferred else "within-target"
+    expected_hidden_native = "not-run" if hidden_deferred else "measured"
+    expected_modes = VISIBLE_ONLY_MODES if hidden_deferred else REQUIRED_MODES
+    expected_preflight = VISIBLE_ONLY_PREFLIGHT_COUNTS if hidden_deferred else EXPECTED_PREFLIGHT_COUNTS
+    expected_samples = VISIBLE_ONLY_SAMPLE_COUNTS if hidden_deferred else EXPECTED_SAMPLE_COUNTS
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise AssertionError("activity performance output must be a JSON object")
-    if data.get("status") != "within-target":
-        raise AssertionError(f"activity performance status is {data.get('status')!r}, want 'within-target'")
-    if data.get("hidden_native") != "measured":
-        raise AssertionError(f"hidden_native is {data.get('hidden_native')!r}, want 'measured'")
+    if data.get("status") != expected_status:
+        raise AssertionError(f"activity performance status is {data.get('status')!r}, want {expected_status!r}")
+    if data.get("hidden_native") != expected_hidden_native:
+        raise AssertionError(f"hidden_native is {data.get('hidden_native')!r}, want {expected_hidden_native!r}")
     summaries = data.get("summaries")
     if not isinstance(summaries, list) or not summaries:
         raise AssertionError("activity performance output must include summaries")
@@ -247,7 +261,7 @@ def validate_activity_output(path: Path) -> dict[str, Any]:
     seen_summary_modes: set[str] = set()
     for item in summaries:
         mode = item.get("mode")
-        if mode not in REQUIRED_MODES:
+        if mode not in expected_modes:
             raise AssertionError(f"unexpected summary mode: {mode!r}")
         if mode in seen_summary_modes:
             raise AssertionError(f"duplicate summary mode: {mode}")
@@ -267,7 +281,7 @@ def validate_activity_output(path: Path) -> dict[str, Any]:
         range_max = finite_number(pair_range[1], f"{mode} paired range max")
         if range_min > range_max:
             raise AssertionError(f"{mode} paired_range_percent must be ordered")
-    missing = REQUIRED_MODES - seen_summary_modes
+    missing = expected_modes - seen_summary_modes
     if missing:
         raise AssertionError(f"activity performance missing mode summaries: {sorted(missing)}")
     preflight = data.get("preflight")
@@ -275,7 +289,7 @@ def validate_activity_output(path: Path) -> dict[str, Any]:
         raise AssertionError("activity performance output must include preflight geometry/visibility records")
     preflight_counts: dict[str, int] = {}
     for item in preflight:
-        if not isinstance(item, dict) or item.get("mode") not in REQUIRED_MODES:
+        if not isinstance(item, dict) or item.get("mode") not in expected_modes:
             raise AssertionError("preflight records must identify a required mode")
         geometry = item.get("geometry")
         if not isinstance(geometry, dict):
@@ -283,7 +297,7 @@ def validate_activity_output(path: Path) -> dict[str, Any]:
         for field in ("innerWidth", "innerHeight", "visualWidth", "visualHeight"):
             finite_number(geometry.get(field), f"preflight {field}", positive=True)
         preflight_counts[item["mode"]] = preflight_counts.get(item["mode"], 0) + 1
-    if preflight_counts != EXPECTED_PREFLIGHT_COUNTS:
+    if preflight_counts != expected_preflight:
         raise AssertionError(f"unexpected preflight counts: {preflight_counts}")
     samples = data.get("samples")
     if not isinstance(samples, list):
@@ -296,7 +310,7 @@ def validate_activity_output(path: Path) -> dict[str, Any]:
         finite_number(item.get("tokens_per_second"), f"{item['mode']} tokens_per_second", positive=True)
         finite_number(item.get("predicted_tokens"), f"{item['mode']} predicted_tokens", positive=True)
         finite_number(item.get("predicted_ms"), f"{item['mode']} predicted_ms", positive=True)
-    if sample_counts != EXPECTED_SAMPLE_COUNTS:
+    if sample_counts != expected_samples:
         raise AssertionError(f"unexpected sample counts: {sample_counts}")
     return data
 
@@ -557,7 +571,7 @@ def run_activity_script(h: Harness, model_id: str, inference_id: str) -> tuple[d
         if not process_group_empty(proc.pid, 5.0):
             stop_process_group(proc)
             raise AssertionError(f"activity-performance.mjs left child processes in group {proc.pid}; log={log_path}")
-    data = validate_activity_output(output)
+    data = validate_activity_output(output, h.args.perf_mode)
     return data, output, log_path
 
 

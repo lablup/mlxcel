@@ -104,29 +104,43 @@ pub(super) fn classify_snapshot(dir: &Path) -> SnapshotState {
 /// Completeness verdict for a sharded snapshot given the shard names its index
 /// references.
 fn classify_sharded(dir: &Path, shards: &[String]) -> SnapshotState {
+    let missing = missing_indexed_shards(dir, shards);
+    if missing.is_empty() {
+        SnapshotState::Complete
+    } else {
+        SnapshotState::Incomplete { missing }
+    }
+}
+
+/// Index shards that are genuinely absent, with a repackaged quant reported as
+/// nothing missing. Empty means the loader can load this directory.
+///
+/// Some index shards being absent is not enough to call a checkpoint
+/// incomplete. Distinguish an interrupted download (the on-disk shards are a
+/// subset of the index) from a repackaged mlx-community quant whose stale
+/// full-precision index names shards that never matched the on-disk quant
+/// files. In the latter case the directory holds a `*.safetensors` the index
+/// does NOT name; `mlxcel_core::weights` globs those and loads fine, printing
+/// its "references shards that don't match the on-disk files" warning, so
+/// neither the downloader nor any catalog may call the checkpoint unusable.
+///
+/// Used by: downloader snapshot classification, WebUI catalog completeness
+/// (`src/server/webui/catalog_fs.rs`). Both must agree with the loader's glob
+/// fallback, or a checkpoint that loads is reported as unloadable.
+pub(crate) fn missing_indexed_shards(dir: &Path, shards: &[String]) -> Vec<String> {
     let missing: Vec<String> = shards
         .iter()
         .filter(|name| !shard_present(dir, name))
         .cloned()
         .collect();
     if missing.is_empty() {
-        return SnapshotState::Complete;
+        return missing;
     }
-    // Some index shards are absent. Distinguish an interrupted download (the
-    // on-disk shards are a subset of the index) from a repackaged mlx-community
-    // quant whose stale full-precision index names shards that never matched the
-    // on-disk quant files. In the latter case the directory holds a
-    // `*.safetensors` the index does NOT name; the loader globs those and loads
-    // fine, so we must not re-fetch.
     let indexed: HashSet<&str> = shards.iter().map(String::as_str).collect();
     let has_unindexed = on_disk_safetensors(dir)
         .iter()
         .any(|name| !indexed.contains(name.as_str()));
-    if has_unindexed {
-        SnapshotState::Complete
-    } else {
-        SnapshotState::Incomplete { missing }
-    }
+    if has_unindexed { Vec::new() } else { missing }
 }
 
 /// True when `name` is a plain shard filename that exists in `dir` and is

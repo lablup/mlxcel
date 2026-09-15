@@ -43,7 +43,53 @@ def valid_activity_output() -> dict[str, object]:
     }
 
 
+def visible_only_activity_output() -> dict[str, object]:
+    samples = [{"mode": "warmup", "tokens_per_second": 1.0, "predicted_tokens": 1, "predicted_ms": 1.0}]
+    for mode, count in {"off": 10, "one-visible": 5, "two-visible": 5}.items():
+        samples.extend({"mode": mode, "tokens_per_second": 1.0, "predicted_tokens": 1, "predicted_ms": 1.0} for _ in range(count))
+    geom = {"innerWidth": 700, "innerHeight": 900, "visualWidth": 700, "visualHeight": 900}
+    preflight = []
+    for mode, count in {"one-visible": 6, "two-visible": 12}.items():
+        preflight.extend({"mode": mode, "geometry": geom} for _ in range(count))
+    return {
+        "status": "incomplete",
+        "hidden_native": "not-run",
+        "preflight": preflight,
+        "samples": samples,
+        "summaries": [
+            {"mode": mode, "paired_runs": 5, "median_decode_degradation_percent": 1.0, "baseline_cv_percent": 1.0, "paired_range_percent": [0.0, 1.0], "status": "within-target"}
+            for mode in ("one-visible", "two-visible")
+        ],
+    }
+
+
 class ActivityPerformanceHelperTests(unittest.TestCase):
+    def test_visible_only_mode_accepts_its_own_shape_and_no_other(self) -> None:
+        # The deferral is declared by the caller, so neither shape may pass under the other mode.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "activity.json"
+            path.write_text(json.dumps(visible_only_activity_output()))
+            self.assertEqual(verify.validate_activity_output(path, "visible-only-headed")["hidden_native"], "not-run")
+            with self.assertRaises(AssertionError):
+                verify.validate_activity_output(path)
+            path.write_text(json.dumps(valid_activity_output()))
+            with self.assertRaises(AssertionError):
+                verify.validate_activity_output(path, "visible-only-headed")
+
+    def test_visible_only_mode_still_enforces_budgets_and_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "activity.json"
+            over = visible_only_activity_output()
+            over["summaries"][0]["median_decode_degradation_percent"] = 3.0  # type: ignore[index]
+            path.write_text(json.dumps(over))
+            with self.assertRaises(AssertionError):
+                verify.validate_activity_output(path, "visible-only-headed")
+            short = visible_only_activity_output()
+            short["samples"] = short["samples"][:-1]  # type: ignore[index]
+            path.write_text(json.dumps(short))
+            with self.assertRaises(AssertionError):
+                verify.validate_activity_output(path, "visible-only-headed")
+
     def test_validate_activity_output_requires_full_native_hidden_success(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "activity.json"
