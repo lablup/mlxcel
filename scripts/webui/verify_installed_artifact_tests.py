@@ -73,6 +73,33 @@ class InstalledArtifactHelperTests(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 verify.assert_network_namespace_isolated()
 
+    def test_network_interfaces_read_the_namespace_scoped_proc_table(self) -> None:
+        # Regression for the GB10 run where /sys/class/net reported host interfaces for a
+        # process whose own namespace held only loopback, because sysfs stays bound to the
+        # namespace that mounted it while /proc/net follows the reading task.
+        table = (
+            "Inter-|   Receive                                                |  Transmit\n"
+            " face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop\n"
+            "    lo:  123456     789    0    0    0     0          0         0   123456     789    0    0\n"
+            "  eth0:       0       0    0    0    0     0          0         0        0       0    0    0\n"
+        )
+        self.assertEqual(verify.proc_net_dev_names(table), ["eth0", "lo"])
+        self.assertEqual(verify.proc_net_dev_names(""), [])
+        with tempfile.TemporaryDirectory() as tmp:
+            dev = Path(tmp) / "dev"
+            dev.write_text(table)
+            with mock.patch.object(verify, "interface_flags", return_value=verify.IFF_UP):
+                interfaces = verify.network_interfaces(dev)
+            self.assertEqual([iface["name"] for iface in interfaces], ["eth0", "lo"])
+            self.assertEqual({iface["source"] for iface in interfaces}, {"proc-net-namespace"})
+            self.assertEqual({iface["operstate"] for iface in interfaces}, {"up"})
+            with mock.patch.object(verify, "interface_flags", return_value=None):
+                unknown = verify.network_interfaces(dev)
+            self.assertEqual({iface["operstate"] for iface in unknown}, {"unknown"})
+            with mock.patch.object(verify, "sysfs_interface_names", return_value=["lo"]):
+                fallback = verify.network_interfaces(Path(tmp) / "absent")
+            self.assertEqual(fallback, [{"name": "lo", "operstate": "unknown", "flags": "unknown", "source": "sysfs-mount-namespace"}])
+
     def test_network_denial_rejects_reachable_tcp_negative_control(self) -> None:
         class ReachableSocket:
             def __enter__(self):

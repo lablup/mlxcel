@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright 2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 from __future__ import annotations
-import argparse, hashlib, json, os, platform, re, secrets, shutil, signal, socket, ssl, stat, subprocess, sys, time, urllib.error, urllib.request
+import argparse, hashlib, importlib, json, os, platform, re, secrets, shutil, signal, socket, ssl, stat, struct, subprocess, sys, time, urllib.error, urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -365,15 +365,39 @@ def run_generated_key(h: Harness, artifact: Artifact) -> None:
     helper_result = json.loads(result.stdout or b"{}")
     helper_result.update({"label": artifact.name, "headless_without_key_rejected": True})
     h.add("generated_key", helper_result)
-def network_interfaces() -> list[dict[str, Any]]:
-    interfaces: list[dict[str, Any]] = []
+SIOCGIFFLAGS, IFF_UP = 0x8913, 0x1
+def sysfs_interface_names() -> list[str]:
     root = Path("/sys/class/net")
-    if root.is_dir():
-        for entry in sorted(root.iterdir()):
-            try:
-                interfaces.append({"name": entry.name, "operstate": (entry / "operstate").read_text().strip(), "flags": (entry / "flags").read_text().strip()})
-            except OSError:
-                interfaces.append({"name": entry.name, "operstate": "unknown", "flags": "unknown"})
+    return sorted(entry.name for entry in root.iterdir()) if root.is_dir() else []
+def proc_net_dev_names(text: str) -> list[str]:
+    names = []
+    for line in text.splitlines():
+        head, separator, _ = line.partition(":")
+        name = head.strip()
+        if separator and name:
+            names.append(name)
+    return sorted(names)
+def interface_flags(name: str) -> int | None:
+    try:
+        fcntl = importlib.import_module("fcntl")  # Linux/Unix-only; this path only runs inside the Linux sandbox.
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            raw = fcntl.ioctl(sock.fileno(), SIOCGIFFLAGS, struct.pack("16sH22x", name.encode()[:15], 0))
+    except (ImportError, OSError):
+        return None
+    return int(struct.unpack("16sH22x", raw)[1])
+def network_interfaces(dev: Path = Path("/proc/net/dev")) -> list[dict[str, Any]]:
+    # /proc/net is a symlink to /proc/self/net, so its contents follow the reading task's
+    # network namespace. /sys/class/net follows the namespace that mounted sysfs, which stays
+    # the host when `unshare -Urn` enters a network namespace without a new mount namespace;
+    # reading it there reports host interfaces for a process that in fact has only loopback.
+    # SIOCGIFFLAGS goes through a socket opened in the caller's namespace, so it is scoped too.
+    if not dev.is_file():
+        return [{"name": name, "operstate": "unknown", "flags": "unknown", "source": "sysfs-mount-namespace"} for name in sysfs_interface_names()]
+    interfaces: list[dict[str, Any]] = []
+    for name in proc_net_dev_names(dev.read_text()):
+        flags = interface_flags(name)
+        operstate = "unknown" if flags is None else ("up" if flags & IFF_UP else "down")
+        interfaces.append({"name": name, "operstate": operstate, "flags": "unknown" if flags is None else hex(flags), "source": "proc-net-namespace"})
     return interfaces
 def default_routes() -> list[str]:
     route = Path("/proc/net/route")
@@ -399,7 +423,7 @@ def assert_network_namespace_isolated() -> dict[str, Any]:
         try:
             sock.connect(("198.51.100.1", 80))
         except OSError as exc:
-            return {"status": "enforced", "mechanism": "unshare-net", "interfaces": interfaces, "default_routes": routes, "negative_control": f"TEST-NET external TCP connect denied: {type(exc).__name__}", "loopback_server_tests": "passed above"}
+            return {"status": "enforced", "mechanism": "unshare-net", "interfaces": interfaces, "default_routes": routes, "sysfs_mount_namespace_view": sysfs_interface_names(), "sysfs_view_note": "informational only: /sys/class/net reports the namespace that mounted sysfs, so it lists host interfaces here and is not part of the assertion", "negative_control": f"TEST-NET external TCP connect denied: {type(exc).__name__}", "loopback_server_tests": "passed above"}
     raise AssertionError("external TEST-NET TCP connect unexpectedly succeeded inside network namespace")
 def network_denial(h: Harness) -> None:
     if os.environ.get("MLXCEL_WEBUI_NETNS_ACTIVE") == "1":
