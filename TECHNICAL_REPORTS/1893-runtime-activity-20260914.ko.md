@@ -69,3 +69,9 @@
 CPU 전용 진단에서도 창 크기 변경 뒤 빈 headed 페이지의 layout/visual viewport가 0이었고 스크린샷이 멈췄습니다. 전체 Chromium의 headless 모드는 정상 크기였지만 창 최소화와 탭 전환으로 `document.hidden`이 바뀌지 않았습니다. 하네스는 이제 warmup 전에 실제 화면 크기·가시성을 검사합니다. 선택적인 visible-only headless 모드는 항상 incomplete이며 native hidden은 not-run입니다. hidden 오버헤드는 통합 #1848의 정상 대화형 호스트 검증으로 남기며 통과·면제 처리하지 않습니다.
 
 루트의 실제 화면 검토에서 기본 N/A 목록이 지나치게 길다는 문제가 확인되어 주요 가용 요청 카운터와 슬롯만 기본으로 표시하고, 사용할 수 없는 측정값 수를 명시했습니다. 측정된 0은 유지하며 모든 측정값·개별 사유·범위·출처는 키보드로 펼칠 수 있는 기본 disclosure에 남겼습니다. EN/KO 사람이 읽을 수 있는 이름과 누적 카운터 구분을 적용했고 백엔드·공통 디자인 토큰은 바꾸지 않았습니다. 독립 재검토에서 차단 지적은 없으며 프런트엔드 139개·오프라인 SSE/검증 정책 17개·TypeScript·ESLint를 통과했습니다. 수정 화면의 실제 브라우저 및 visible-only 성능 측정은 루트 담당 미완료 항목입니다.
+
+## Headless 진단 실행 환경 교정
+
+루트의 `34fffa69` 검증에서 운영 빌드·브라우저 23개·실제 CSP/axe/레이아웃 2개·실제 슬롯 비교를 다시 통과했습니다. 루트가 간결해진 실제 화면도 확인했으며 UI 회귀는 발견하지 않았습니다. 별도 full-Chromium headless 성능 시도는 표본을 남기기 전에 context 교체 중 SIGBUS로 종료했고 display-link/notification-center 오류를 기록했습니다. 이 실패는 정상 UI 검증과 구분하여 보존하며 처리량 증거로 사용하지 않습니다.
+
+진단 하네스만 기본 Chromium headless shell로 바꾸고 headless 경로의 native-window/CDP 호출을 모두 제거했습니다. 실제 가시성 검증, visible-only의 incomplete 상태와 #1848 native hidden 필수 검증은 유지합니다. 런타임·프런트엔드 소스와 UI 자산 바이트는 변경하지 않았습니다.

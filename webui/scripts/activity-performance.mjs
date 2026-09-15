@@ -14,7 +14,7 @@ const modelId = required('WEBUI_PERF_MODEL_ID');
 const output = required('WEBUI_PERF_OUTPUT');
 const prompt = process.env.WEBUI_PERF_PROMPT_FILE ? await readFile(process.env.WEBUI_PERF_PROMPT_FILE, 'utf8') : 'Explain the difference between a process and a thread, in detail. '.repeat(100);
 const modeConfig = performanceMode(process.env.WEBUI_PERF_MODE);
-const browser = await chromium.launch({ headless: modeConfig.headless, channel: 'chromium' });
+const browser = await chromium.launch({ headless: modeConfig.headless });
 const preflight = [];
 const results = [];
 let uiRequests = 0;
@@ -28,9 +28,14 @@ async function clients(mode) {
   for (let i = 0; i < (mode === 'two-visible' ? 2 : 1); i++) {
     const context = await browser.newContext({ viewport: { width: 700, height: 900 } }); contexts.push(context);
     const page = await context.newPage();
-    const cdp = await context.newCDPSession(page);
-    const { windowId } = await cdp.send('Browser.getWindowForTarget');
-    if (!modeConfig.headless) await cdp.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'normal', left: 20 + i * 710, top: 20, width: 700, height: 1000 } });
+    // Headless visible diagnostics use the default shell, without native windows.
+    let cdp = null;
+    let windowId;
+    if (!modeConfig.headless) {
+      cdp = await context.newCDPSession(page);
+      ({ windowId } = await cdp.send('Browser.getWindowForTarget'));
+      await cdp.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'normal', left: 20 + i * 710, top: 20, width: 700, height: 1000 } });
+    }
     page.on('request', (request) => { if (request.url().includes('/ui-api/')) uiRequests++; });
     await page.goto(api('webui/#activity'));
     const geometry = await page.evaluate(() => ({ innerWidth: window.innerWidth, innerHeight: window.innerHeight, visualWidth: window.visualViewport?.width ?? 0, visualHeight: window.visualViewport?.height ?? 0 }));
@@ -46,7 +51,10 @@ async function clients(mode) {
     const entry = catalog.items.find((item) => item.identity.id === modelId);
     if (!entry) throw new Error('Selected model must be in the first canonical 200-entry page for this bounded harness.');
     await page.getByRole('option', { name: entry.identity.display_name, exact: true }).click();
-    if (mode === 'hidden') await cdp.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } });
+    if (mode === 'hidden') {
+      if (cdp === null) throw new Error('Native hidden acceptance requires a headed browser.');
+      await cdp.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } });
+    }
     await sleep(500);
     if ((await page.evaluate(() => document.hidden)) !== (mode === 'hidden')) throw new Error(`Actual document visibility did not match ${mode}; do not substitute a synthetic event.`);
   }
