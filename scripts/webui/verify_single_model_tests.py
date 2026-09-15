@@ -194,25 +194,48 @@ class SingleModelHelperTests(unittest.TestCase):
             ):
                 verify.completion_text(payload)
 
-    def test_shutdown_requires_alive_and_exact_zero_not_negative_sigint(self):
-        for code, expected in ((0, True), (-signal.SIGINT, False), (1, False)):
+    def test_shutdown_accepts_only_owned_sigint_or_zero_without_drain_claim(self):
+        for code, expected, kind in (
+            (0, True, "normal_exit"),
+            (-signal.SIGINT, True, "owned_sigint_termination"),
+            (-signal.SIGTERM, False, "unexpected_exit"),
+            (-signal.SIGABRT, False, "unexpected_exit"),
+            (1, False, "unexpected_exit"),
+        ):
+            with self.subTest(code=code):
+                process = mock.Mock(returncode=code)
+                process.poll.return_value = None
+                result = verify.shutdown(process, 1)
+                self.assertEqual(result["passed"], expected)
+                self.assertEqual(result["termination_kind"], kind)
+                self.assertFalse(result["worker_drain_proven"])
+                process.send_signal.assert_called_once_with(signal.SIGINT)
+                process.wait.assert_called_once_with(timeout=1)
+
+    def test_shutdown_rejects_preexited_even_zero_or_sigint(self):
+        for code in (0, -signal.SIGINT, 1):
             process = mock.Mock(returncode=code)
-            process.poll.return_value = None
-            self.assertEqual(verify.shutdown(process, 1)["passed"], expected)
-            process.send_signal.assert_called_once_with(signal.SIGINT)
-            process.wait.assert_called_once_with(timeout=1)
-        process.poll.return_value = 0
-        self.assertFalse(verify.shutdown(process, 1)["passed"])
+            process.poll.return_value = code
+            result = verify.shutdown(process, 1)
+            self.assertFalse(result["passed"])
+            self.assertFalse(result["worker_drain_proven"])
+            self.assertEqual(result["termination_kind"], "preexited")
+            process.send_signal.assert_not_called()
+            process.wait.assert_not_called()
 
     def test_shutdown_timeout_kills_group_and_never_passes(self):
-        process = mock.Mock(returncode=-signal.SIGKILL, pid=2345)
-        process.poll.return_value = None
-        process.wait.side_effect = [subprocess.TimeoutExpired("test", 1), 0]
-        with mock.patch.object(verify.os, "killpg") as kill:
-            result = verify.shutdown(process, 1)
-        kill.assert_called_once_with(2345, signal.SIGKILL)
-        self.assertTrue(result["forced"])
-        self.assertFalse(result["passed"])
+        for code in (0, -signal.SIGINT, -signal.SIGKILL):
+            with self.subTest(code=code):
+                process = mock.Mock(returncode=code, pid=2345)
+                process.poll.return_value = None
+                process.wait.side_effect = [subprocess.TimeoutExpired("test", 1), code]
+                with mock.patch.object(verify.os, "killpg") as kill:
+                    result = verify.shutdown(process, 1)
+                kill.assert_called_once_with(2345, signal.SIGKILL)
+                self.assertTrue(result["forced"])
+                self.assertFalse(result["passed"])
+                self.assertFalse(result["worker_drain_proven"])
+                self.assertEqual(result["termination_kind"], "forced_termination")
 
     def test_request_blocks_redirects_proxies_oversize_and_reflected_key(self):
         response = mock.MagicMock(
@@ -521,7 +544,13 @@ class SingleModelHelperTests(unittest.TestCase):
                 mock.patch.object(
                     verify,
                     "run_arm",
-                    return_value={"status": "CAPTURED_REQUIRES_SEMANTIC_REVIEW"},
+                    side_effect=[
+                        {
+                            "status": "CAPTURED_REQUIRES_SEMANTIC_REVIEW",
+                            "shutdown": {"exit_code": code},
+                        }
+                        for code in (-signal.SIGINT, -signal.SIGINT, 0, -signal.SIGINT)
+                    ],
                 ) as arm,
                 contextlib.redirect_stdout(io.StringIO()),
             ):
@@ -533,6 +562,14 @@ class SingleModelHelperTests(unittest.TestCase):
             report = json.loads((args.output_dir / "result.json").read_text())
             self.assertEqual(report["status"], "CAPTURED_REQUIRES_SEMANTIC_REVIEW")
             self.assertTrue(report["checkpoint_unchanged"])
+            comparison = report["termination_comparisons"]
+            self.assertEqual(
+                [item["entrypoint"] for item in comparison], ["server", "cli serve"]
+            )
+            self.assertTrue(comparison[0]["exact_match"])
+            self.assertFalse(comparison[1]["exact_match"])
+            self.assertEqual(comparison[1]["ui_on_exit_code"], 0)
+            self.assertEqual(comparison[1]["ui_off_exit_code"], -signal.SIGINT)
             self.assertEqual(
                 report["binary_sha256"]["cli"], verify.sha256(args.cli_bin)
             )

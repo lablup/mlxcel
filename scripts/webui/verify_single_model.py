@@ -237,6 +237,8 @@ def completion_text(payload: Any) -> str:
 
 
 def shutdown(process: subprocess.Popen[bytes], timeout: float) -> dict[str, Any]:
+    # The pre-WebUI single-model serve_http/listen path has no ctrl_c handler.
+    # Preserve its OS SIGINT termination; router shutdown/drain is a different gate.
     alive = process.poll() is None
     forced = False
     error = None
@@ -255,12 +257,24 @@ def shutdown(process: subprocess.Popen[bytes], timeout: float) -> dict[str, Any]
                 process.wait(timeout=15)
             except subprocess.TimeoutExpired:
                 error = "kill_reap_timeout"
+    if not alive:
+        kind = "preexited"
+    elif forced:
+        kind = "forced_termination"
+    elif process.returncode == 0:
+        kind = "normal_exit"
+    elif process.returncode == -signal.SIGINT:
+        kind = "owned_sigint_termination"
+    else:
+        kind = "unexpected_exit"
     return {
         "alive_before_shutdown": alive,
         "forced": forced,
         "exit_code": process.returncode,
         "error": error,
-        "passed": alive and not forced and process.returncode == 0,
+        "termination_kind": kind,
+        "worker_drain_proven": False,
+        "passed": alive and not forced and process.returncode in (0, -signal.SIGINT),
     }
 
 
@@ -570,7 +584,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    report: dict[str, Any] = {"status": "FAIL", "arms": []}
+    report: dict[str, Any] = {
+        "status": "FAIL",
+        "arms": [],
+        "termination_comparisons": [],
+    }
     root = None
     try:
         require(
@@ -641,6 +659,16 @@ def main() -> int:
                     arm["status"] == "CAPTURED_REQUIRES_SEMANTIC_REVIEW",
                     "single_model_arm_failed",
                 )
+            on, off = (item["shutdown"] for item in report["arms"][-2:])
+            report["termination_comparisons"].append(
+                {
+                    "entrypoint": "cli serve" if cli else "server",
+                    "ui_on_exit_code": on["exit_code"],
+                    "ui_off_exit_code": off["exit_code"],
+                    "exact_match": on["exit_code"] == off["exit_code"],
+                    "scope": "Observed compatibility comparison only; each arm independently requires normal exit or owned SIGINT, not worker-drain proof",
+                }
+            )
         require(
             checkpoint_provenance(model) == provenance,
             "checkpoint_changed_during_verification",
