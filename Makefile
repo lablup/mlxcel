@@ -832,6 +832,7 @@ verify-webui-helper-tests: ## Run pure-Python WebUI verifier helper tests; no se
 	@$(WEBUI_BUNDLE_PY) scripts/webui/measure_startup_tests.py
 	@$(WEBUI_BUNDLE_PY) scripts/webui/verify_single_model_tests.py
 	@$(WEBUI_BUNDLE_PY) scripts/webui/verify_activity_performance_tests.py
+	@$(WEBUI_BUNDLE_PY) scripts/webui/summarize_activity_evidence_tests.py
 	@$(WEBUI_BUNDLE_PY) scripts/webui/verify_reverse_proxy_tests.py
 
 .PHONY: verify-webui
