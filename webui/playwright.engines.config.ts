@@ -3,9 +3,10 @@ import { defineConfig, devices } from '@playwright/test';
 
 export default defineConfig({
   testDir: './tests',
-  testMatch: 'engines.spec.ts',
+  testMatch: ['engines.spec.ts', 'performance.spec.ts'],
   fullyParallel: false,
   reporter: 'list',
+  timeout: 45_000,
   projects: [
     { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
     { name: 'firefox', use: { ...devices['Desktop Firefox'] } },
