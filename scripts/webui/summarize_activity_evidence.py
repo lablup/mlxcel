@@ -59,7 +59,7 @@ def activity_summary(records: list[Any]) -> dict[str, Any]:
         require(item.get("paired_runs") == 5, f"{mode} paired_runs must be 5")
         degradation = finite_number(item.get("median_decode_degradation_percent"), f"{mode} degradation")
         cv = finite_number(item.get("baseline_cv_percent"), f"{mode} baseline cv")
-        require(0 <= degradation <= 2, f"{mode} degradation exceeds budget")
+        require(degradation <= 2, f"{mode} degradation exceeds budget")
         require(0 <= cv <= 5, f"{mode} baseline cv exceeds budget")
         pair_range = item.get("paired_range_percent")
         require(isinstance(pair_range, list) and len(pair_range) == 2, f"{mode} paired_range_percent must have two values")

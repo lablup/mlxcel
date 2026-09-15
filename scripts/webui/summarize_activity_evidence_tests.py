@@ -95,6 +95,17 @@ class SummarizeActivityEvidenceTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             summarize.build_summary(data)
 
+    def test_summary_accepts_speedup_but_rejects_negative_cv(self) -> None:
+        data = full_evidence()
+        data["activity_performance"][0]["summary"]["summaries"][0]["median_decode_degradation_percent"] = -0.0698  # type: ignore[index]
+        result = summarize.build_summary(data)
+        self.assertEqual(result["activity_performance"]["summaries"][0]["median_decode_degradation_percent"], -0.0698)
+
+        data = full_evidence()
+        data["activity_performance"][0]["summary"]["summaries"][0]["baseline_cv_percent"] = -0.1  # type: ignore[index]
+        with self.assertRaises(AssertionError):
+            summarize.build_summary(data)
+
     def test_output_is_exclusive_0600_and_refuses_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "summary.json"
