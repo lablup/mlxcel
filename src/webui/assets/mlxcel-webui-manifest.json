@@ -1,36 +1,36 @@
 {
   "budgets": {
-    "embedded_asset_bytes": 577068,
+    "embedded_asset_bytes": 624059,
     "embedded_asset_limit_bytes": 5242880,
-    "initial_js_gzip_bytes": 123028,
+    "initial_js_gzip_bytes": 133646,
     "initial_js_gzip_limit_bytes": 204800,
-    "total_js_gzip_bytes": 123622,
+    "total_js_gzip_bytes": 134239,
     "total_js_gzip_limit_bytes": 716800
   },
   "files": [
     {
       "bytes": 1104,
-      "gzip_bytes": 594,
-      "path": "assets/history-BJfy9exY.js",
-      "sha256": "d1ec7231215da66acf4c5467c654ab2fe8dff5789a38e004b64f334c5312a3e4"
+      "gzip_bytes": 593,
+      "path": "assets/history-rhrGVPNb.js",
+      "sha256": "7cf288af2b8476b676b957758a56b76064014dd1c778387747da8155a26b9112"
     },
     {
-      "bytes": 85240,
-      "gzip_bytes": 13826,
-      "path": "assets/index-CzseuAwH.css",
-      "sha256": "955d960259a0278432bb02f04aef6c7fc2f65ac67c0586b4d76dea27026d0ff1"
+      "bytes": 516756,
+      "gzip_bytes": 133646,
+      "path": "assets/index-B3n9bWTn.js",
+      "sha256": "233d1fe7ca64ce4ffb481727a4f5dd33688b416d8422833e51771fd38bc14b26"
     },
     {
-      "bytes": 475136,
-      "gzip_bytes": 123028,
-      "path": "assets/index-DiV6zy1L.js",
-      "sha256": "cbe6399a348de89e203603012a61fd34e490617f5eab1742e80fb734d2f89163"
+      "bytes": 90611,
+      "gzip_bytes": 14681,
+      "path": "assets/index-CRbLazPD.css",
+      "sha256": "73e6b851c09e926423b9cb3a169b2bb650d9965185b555ed12f26f0f8ef9012a"
     },
     {
       "bytes": 453,
-      "gzip_bytes": 288,
+      "gzip_bytes": 290,
       "path": "index.html",
-      "sha256": "7dfe6c4508cc45eb7afeacac0c00ac3252b2e96ae0ac8a44ff41e7a9a204af34"
+      "sha256": "51d9712b22610430455dee2776c460d205bed33d0361c5fde6578e1bb7296722"
     },
     {
       "bytes": 13233,
@@ -61,5 +61,5 @@
   },
   "pnpm_version": "11.18.0",
   "schema_version": 1,
-  "source_digest_sha256": "bbf411ed7a39646e568f091f70bc15538e30e749b37238a08eb85bad703a4c07"
+  "source_digest_sha256": "aa12f5a973e14b059960d5b61a348e856cfc60cb659f89ac3b7ec785c2b6a016"
 }
