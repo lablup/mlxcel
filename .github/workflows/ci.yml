@@ -482,12 +482,41 @@ jobs:
           echo "CARGO_TARGET_DIR=$CARGO_TARGET" >> $GITHUB_ENV
       - name: Build installed server and CLI artifacts once
         run: cargo build --profile test-fast --features cuda,webui --bin mlxcel-server --bin mlxcel
+      - name: Preserve WebUI-enabled installed artifacts before feature-off build
+        run: |
+          mkdir -p "$RUNNER_TEMP/mlxcel-webui-installed"
+          cp "$CARGO_TARGET_DIR/test-fast/mlxcel-server" "$RUNNER_TEMP/mlxcel-webui-installed/mlxcel-server-webui"
+          cp "$CARGO_TARGET_DIR/test-fast/mlxcel" "$RUNNER_TEMP/mlxcel-webui-installed/mlxcel-webui"
+      - name: Build feature-disabled server and CLI artifacts once
+        run: cargo build --profile test-fast --no-default-features --features cuda --bin mlxcel-server --bin mlxcel
+      - name: Preserve feature-disabled installed artifacts
+        run: |
+          cp "$CARGO_TARGET_DIR/test-fast/mlxcel-server" "$RUNNER_TEMP/mlxcel-webui-installed/mlxcel-server-feature-off"
+          cp "$CARGO_TARGET_DIR/test-fast/mlxcel" "$RUNNER_TEMP/mlxcel-webui-installed/mlxcel-feature-off"
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '26.5.1'
+      - name: Install pnpm for real-router browser harness
+        run: npm install --global pnpm@11.18.0
+      - name: Install WebUI dependencies for real-router browser harness
+        run: pnpm --dir webui install --frozen-lockfile
+      - name: Install Chromium runtime for real-router browser harness
+        run: pnpm --dir webui exec playwright install --with-deps chromium
+      - name: Run WebUI real-router browser harness
+        env:
+          MLXCEL_WEBUI_ROUTER_ARTIFACTS: webui/test-results/rust-router-ci
+        run: cargo test --profile test-fast --features cuda,webui --lib server::router_server::router_webui_playwright_harness_tests::real_router_browser_harness -- --ignored --exact --nocapture
+      - name: Unit-test the installed-artifact verifier helpers
+        run: python3 scripts/webui/verify_installed_artifact_tests.py
       - name: Verify the installed Rust artifact serves the bundled WebUI
         env:
           WEBUI_INSTALLED_EVIDENCE: webui-installed-evidence.json
+          WEBUI_NETWORK_SANDBOX: require
         run: |
-          WEBUI_SERVER_BIN="$CARGO_TARGET_DIR/test-fast/mlxcel-server" \
-          WEBUI_CLI_BIN="$CARGO_TARGET_DIR/test-fast/mlxcel" \
+          WEBUI_SERVER_BIN="$RUNNER_TEMP/mlxcel-webui-installed/mlxcel-server-webui" \
+          WEBUI_CLI_BIN="$RUNNER_TEMP/mlxcel-webui-installed/mlxcel-webui" \
+          WEBUI_FEATURE_OFF_SERVER_BIN="$RUNNER_TEMP/mlxcel-webui-installed/mlxcel-server-feature-off" \
+          WEBUI_FEATURE_OFF_CLI_BIN="$RUNNER_TEMP/mlxcel-webui-installed/mlxcel-feature-off" \
           python3 scripts/webui/verify_installed_artifact.py
       - name: Upload installed-artifact WebUI evidence
         if: always()
