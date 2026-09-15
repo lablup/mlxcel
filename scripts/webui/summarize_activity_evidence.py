@@ -14,6 +14,7 @@ from typing import Any
 FORBIDDEN_KEYS = {"path", "work_dir", "model_view", "output", "log", "processes", "env"}
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 REQUIRED_MODES = {"one-visible", "two-visible", "hidden"}
+VISIBLE_ONLY_MODES = {"one-visible", "two-visible"}
 
 def require(condition: bool, message: str) -> None:
     if not condition:
@@ -39,13 +40,18 @@ def safe_relative_name(value: Any, label: str) -> str:
     require(not path.is_absolute() and ".." not in path.parts and len(path.parts) <= 2, f"{label} must be a safe relative filename")
     return value
 
-def activity_summary(records: list[Any]) -> dict[str, Any]:
+def activity_summary(records: list[Any], hidden_native: str = "measured") -> dict[str, Any]:
+    # `hidden_native` is the caller's declared expectation, not something read out of the evidence:
+    # accepting a run without the native hidden acceptance has to be an explicit argument at the
+    # call site, so a deferral cannot arrive by a summary quietly reporting less than it used to.
     require(len(records) == 1 and isinstance(records[0], dict), "expected one activity_performance record")
     output_sha256 = hex64(records[0].get("output_sha256"), "activity output_sha256")
     summary = records[0].get("summary")
     require(isinstance(summary, dict), "activity summary missing")
-    require(summary.get("status") == "within-target", "activity status must be within-target")
-    require(summary.get("hidden_native") == "measured", "hidden_native must be measured")
+    expected_status = "within-target" if hidden_native == "measured" else "incomplete"
+    expected_modes = REQUIRED_MODES if hidden_native == "measured" else VISIBLE_ONLY_MODES
+    require(summary.get("status") == expected_status, f"activity status must be {expected_status}")
+    require(summary.get("hidden_native") == hidden_native, f"hidden_native must be {hidden_native}")
     summaries = summary.get("summaries")
     require(isinstance(summaries, list) and summaries, "mode summaries missing")
     allowed = []
@@ -53,7 +59,7 @@ def activity_summary(records: list[Any]) -> dict[str, Any]:
     for item in summaries:
         require(isinstance(item, dict), "mode summary must be an object")
         mode = item.get("mode")
-        require(mode in REQUIRED_MODES and mode not in seen, "mode summaries must contain each required mode once")
+        require(mode in expected_modes and mode not in seen, "mode summaries must contain each required mode once")
         seen.add(mode)
         require(item.get("status") == "within-target", f"{mode} status must be within-target")
         require(item.get("paired_runs") == 5, f"{mode} paired_runs must be 5")
@@ -74,7 +80,7 @@ def activity_summary(records: list[Any]) -> dict[str, Any]:
             "baseline_cv_percent": cv,
             "paired_range_percent": [low, high],
         })
-    require(seen == REQUIRED_MODES, f"mode summaries missing required modes: {sorted(REQUIRED_MODES - seen)}")
+    require(seen == expected_modes, f"mode summaries missing required modes: {sorted(expected_modes - seen)}")
     out = {"status": summary["status"], "hidden_native": summary["hidden_native"], "output_sha256": output_sha256, "summaries": allowed}
     for key in ("sample_counts", "preflight_counts"):
         if key in records[0]:
@@ -105,7 +111,7 @@ def checkpoint_summary(raw: Any) -> dict[str, Any]:
         "safetensors_sha256": safe_weights,
     }
 
-def build_summary(data: dict[str, Any]) -> dict[str, Any]:
+def build_summary(data: dict[str, Any], hidden_native: str = "measured") -> dict[str, Any]:
     require(data.get("status") == "passed", "full activity evidence did not pass")
     server_shutdown = data.get("server_shutdown")
     require(isinstance(server_shutdown, dict), "server_shutdown missing")
@@ -117,7 +123,7 @@ def build_summary(data: dict[str, Any]) -> dict[str, Any]:
         "features": data.get("features"),
         "display": {"virtual": data.get("display", {}).get("virtual"), "minimum_geometry": data.get("display", {}).get("minimum_geometry")},
         "checkpoint": checkpoint_summary(data.get("checkpoint")),
-        "activity_performance": activity_summary(data.get("activity_performance", [])),
+        "activity_performance": activity_summary(data.get("activity_performance", []), hidden_native),
         "server_shutdown": {"exit_code": 0, "forced": False, "process_group_empty": True},
     }
     text = json.dumps(summary, sort_keys=True)
@@ -138,10 +144,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--expect-hidden-native", default="measured", choices=["measured", "not-run"], help="declare whether the run included the native hidden acceptance; 'not-run' accepts an incomplete visible-only summary and is how a deferral is recorded")
     args = parser.parse_args()
     data = json.loads(args.input.read_text(encoding="utf-8"))
     require(isinstance(data, dict), "full activity evidence must be a JSON object")
-    write_private_json(args.output, build_summary(data))
+    write_private_json(args.output, build_summary(data, args.expect_hidden_native))
     return 0
 
 if __name__ == "__main__":

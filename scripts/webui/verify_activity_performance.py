@@ -540,7 +540,7 @@ def runtime_snapshot(base: str, key: str, model_id: str) -> dict[str, Any]:
 def run_activity_script(h: Harness, model_id: str, inference_id: str) -> tuple[dict[str, Any], Path, Path]:
     output = h.work / "activity-performance.json"
     log_path = h.work / "activity-performance.log"
-    env = {**h.env, "WEBUI_PERF_BASE": h.base_prefixed + "/", "WEBUI_PERF_KEY_FILE": str(h.key_file), "WEBUI_PERF_INFERENCE_MODEL": inference_id, "WEBUI_PERF_MODEL_ID": model_id, "WEBUI_PERF_OUTPUT": str(output), "WEBUI_PERF_MODE": "full"}
+    env = {**h.env, "WEBUI_PERF_BASE": h.base_prefixed + "/", "WEBUI_PERF_KEY_FILE": str(h.key_file), "WEBUI_PERF_INFERENCE_MODEL": inference_id, "WEBUI_PERF_MODEL_ID": model_id, "WEBUI_PERF_OUTPUT": str(output), "WEBUI_PERF_MODE": h.args.perf_mode}
     if h.args.prompt_file:
         env["WEBUI_PERF_PROMPT_FILE"] = str(h.args.prompt_file.resolve())
     command = [h.args.node_bin, "webui/scripts/activity-performance.mjs"]
@@ -586,6 +586,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--server-bin", type=Path, required=True)
     parser.add_argument("--model", type=Path, required=True, help="Read-only local checkpoint directory to expose through --models-dir <parent>")
     parser.add_argument("--model-id", help="Optional opaque WebUI model id when basename lookup is ambiguous")
+    parser.add_argument("--perf-mode", default="full", choices=["full", "visible-only-headed", "visible-only-headless"], help="full runs the native hidden acceptance; the visible-only modes measure observation overhead and record hidden_native as not-run")
     parser.add_argument("--checkpoint-revision", required=True, help="Pinned checkpoint revision/commit/hash recorded in evidence")
     parser.add_argument("--source-sha", required=True, help="40-character source commit used to build the server artifact")
     parser.add_argument("--features", type=parse_features, required=True, help="Comma-separated build features, e.g. cuda,webui")

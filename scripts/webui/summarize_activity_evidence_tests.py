@@ -45,7 +45,42 @@ def full_evidence() -> dict[str, object]:
         "server_shutdown": {"exit_code": 0, "forced": False, "process_group_empty": True, "log": "/secret/server.log"},
     }
 
+def visible_only_evidence() -> dict[str, object]:
+    data = full_evidence()
+    record = data["activity_performance"][0]  # type: ignore[index]
+    record["summary"] = {
+        "status": "incomplete",
+        "hidden_native": "not-run",
+        "summaries": [
+            {"mode": mode, "status": "within-target", "paired_runs": 5, "median_decode_degradation_percent": 1.0, "baseline_cv_percent": 1.0, "paired_range_percent": [0.0, 1.0]}
+            for mode in ("one-visible", "two-visible")
+        ],
+    }
+    return data
+
 class SummarizeActivityEvidenceTests(unittest.TestCase):
+    def test_declared_deferral_accepts_visible_only_and_default_still_rejects_it(self) -> None:
+        # The deferral has to be asked for. A visible-only run must not summarize as evidence
+        # under the default expectation, and a complete run must not summarize as a deferral.
+        result = summarize.build_summary(visible_only_evidence(), "not-run")
+        self.assertEqual(result["activity_performance"]["hidden_native"], "not-run")
+        self.assertEqual(result["activity_performance"]["status"], "incomplete")
+        self.assertEqual({item["mode"] for item in result["activity_performance"]["summaries"]}, {"one-visible", "two-visible"})
+        with self.assertRaises(AssertionError):
+            summarize.build_summary(visible_only_evidence())
+        with self.assertRaises(AssertionError):
+            summarize.build_summary(full_evidence(), "not-run")
+
+    def test_declared_deferral_still_enforces_every_numeric_budget(self) -> None:
+        over_budget = visible_only_evidence()
+        over_budget["activity_performance"][0]["summary"]["summaries"][0]["median_decode_degradation_percent"] = 3.0  # type: ignore[index]
+        with self.assertRaises(AssertionError):
+            summarize.build_summary(over_budget, "not-run")
+        noisy = visible_only_evidence()
+        noisy["activity_performance"][0]["summary"]["summaries"][1]["baseline_cv_percent"] = 9.0  # type: ignore[index]
+        with self.assertRaises(AssertionError):
+            summarize.build_summary(noisy, "not-run")
+
     def test_summary_allowlist_excludes_paths_and_keeps_native_hidden_status(self) -> None:
         result = summarize.build_summary(full_evidence())
         encoded = json.dumps(result, sort_keys=True)
