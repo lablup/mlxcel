@@ -1,24 +1,24 @@
 {
   "budgets": {
-    "embedded_asset_bytes": 664133,
+    "embedded_asset_bytes": 664600,
     "embedded_asset_limit_bytes": 5242880,
-    "initial_js_gzip_bytes": 145917,
+    "initial_js_gzip_bytes": 146038,
     "initial_js_gzip_limit_bytes": 204800,
-    "total_js_gzip_bytes": 147119,
+    "total_js_gzip_bytes": 147242,
     "total_js_gzip_limit_bytes": 716800
   },
   "files": [
     {
       "bytes": 951,
-      "gzip_bytes": 611,
-      "path": "assets/code-highlight-ARqsOun_.js",
-      "sha256": "ac6a87c8c334614d543f0612dee28564f8f0a020faf0bae9af107f6678ad86fc"
+      "gzip_bytes": 612,
+      "path": "assets/code-highlight-BcKLLJaU.js",
+      "sha256": "36b6c8f029ec53068d74d6c886561c8520cea5fea93b4ca5cadf9ecd0e2964af"
     },
     {
       "bytes": 1104,
-      "gzip_bytes": 591,
-      "path": "assets/history-u9ZIDKCW.js",
-      "sha256": "9e781ef315bcbb8629d5cec3e5bc6b178a295de47b9687762a3abb39d123f761"
+      "gzip_bytes": 592,
+      "path": "assets/history-B5Scl-33.js",
+      "sha256": "0e682a90419597b90c1391164707f05da5f774af8b8a7b71cf06c5d7fe51effc"
     },
     {
       "bytes": 92565,
@@ -27,16 +27,16 @@
       "sha256": "753e82fed30cca52c47eb6d460336a564ceaee389d32653c016d67775658ef21"
     },
     {
-      "bytes": 553733,
-      "gzip_bytes": 145917,
-      "path": "assets/index-DpoeyrLA.js",
-      "sha256": "86cd60a7f02664d098f214044c7812ce0d33b28dde2038746484e7f3b4aa212c"
+      "bytes": 554200,
+      "gzip_bytes": 146038,
+      "path": "assets/index-po-_BxGD.js",
+      "sha256": "65d860f292cc3c18f84ac71f37f584a8a2ba4acbfd1c4bd5ec5ec039ab13009a"
     },
     {
       "bytes": 453,
-      "gzip_bytes": 288,
+      "gzip_bytes": 289,
       "path": "index.html",
-      "sha256": "6889c9a352cb4cbab5a656fdee17b7f04aa71cd22e3ca63027828089e4c84ea4"
+      "sha256": "ef2bcee49f96441570283681a4a9c460417777c1f571f20bd476abeb74b26ff7"
     },
     {
       "bytes": 13233,
@@ -67,5 +67,5 @@
   },
   "pnpm_version": "11.18.0",
   "schema_version": 1,
-  "source_digest_sha256": "eb9cbd356d0808b134a2ddd549d689502dabfe2ca77fe0318020216fae3ff802"
+  "source_digest_sha256": "1fe6be9cf0693235a074576fa626f15b3f3c178599bc86f3440d9dd78bc46103"
 }

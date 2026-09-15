@@ -40,6 +40,18 @@ const visiblePollMs = 2_000;
 const observationTimeoutMs = 10_000;
 const maxBackoffMs = 30_000;
 const reconciliationTtlMs = 60_000;
+// The contract makes polling a fallback to the event stream, so the 2 s tick may only carry what
+// genuinely changes on its own: pending operations and the selected model's runtime. Server
+// identity and the model inventory change on events the stream already delivers, and re-reading
+// them every tick made a 200-entry library cost seven requests every two seconds, five of them
+// catalog pages. They are re-read when the stream cannot be trusted: before it is connected, when
+// an event says the inventory moved, on a forced resnapshot, and on this safety net if the stream
+// stays silent about a change for longer than it should.
+const fullSnapshotSafetyNetMs = 60_000;
+// Events whose arrival means the inventory or server identity may have moved under us. The
+// resnapshot-forcing kinds (reset, gap, server_restart) are handled separately because they also
+// tear down the stream.
+const catalogAffectingEventTypes: ReadonlySet<string> = new Set(['snapshot', 'model_revision']);
 
 export class WebUiSynchronizer {
   private readonly client: WebUiApiClient;
@@ -55,6 +67,8 @@ export class WebUiSynchronizer {
   private stopped = true;
   private failures = 0;
   private generation = 0;
+  private needsFullSnapshot = true;
+  private lastFullSnapshotAt: number | null = null;
   private readonly unsubscribe: () => void;
 
   constructor(options: SyncOptions) {
@@ -71,6 +85,7 @@ export class WebUiSynchronizer {
     if (!this.stopped) return;
     this.stopped = false;
     this.generation += 1;
+    this.needsFullSnapshot = true;
     this.reschedule(0);
   }
 
@@ -93,6 +108,14 @@ export class WebUiSynchronizer {
     this.reschedule(0);
   }
 
+  /// True when this tick must re-read server identity and the whole inventory rather than only
+  /// the pending operations and the selected model's runtime.
+  private fullSnapshotDue(now: number): boolean {
+    if (this.needsFullSnapshot || this.lastFullSnapshotAt === null) return true;
+    if (this.eventAbort === null) return true;
+    return now - this.lastFullSnapshotAt >= fullSnapshotSafetyNetMs;
+  }
+
   private cancelObservation(): void {
     this.generation += 1;
     if (this.observationTimer !== null) this.clock.clearTimeout(this.observationTimer);
@@ -107,6 +130,8 @@ export class WebUiSynchronizer {
 
   private visibilityChanged(): void {
     this.cancelObservation();
+    // Becoming visible again resumes from an unknown age: the stream was torn down while hidden.
+    this.needsFullSnapshot = true;
     if (this.stopped) return;
     this.dispatch({ type: 'connection', connection: 'stale', now: this.clock.now() });
     this.reschedule(0);
@@ -130,12 +155,17 @@ export class WebUiSynchronizer {
     this.observationTimer = timeout;
     try {
       if (this.getSnapshot().auth.status === 'signed-out') return;
-      const bootstrap = await this.client.bootstrap(controller.signal);
-      if (!this.isCurrent(controller, generation) || this.getSnapshot().auth.status === 'signed-out') return;
-      this.dispatch({ type: 'login-success', bootstrap, now });
-      const catalogPages = await this.catalogSnapshot(controller.signal);
-      if (!this.isCurrent(controller, generation)) return;
-      for (const page of catalogPages) this.dispatch({ type: 'catalog', response: page, now });
+      const full = this.fullSnapshotDue(now);
+      let bootstrap = null;
+      let catalogPages: ReadonlyArray<CatalogListResponse> = [];
+      if (full) {
+        bootstrap = await this.client.bootstrap(controller.signal);
+        if (!this.isCurrent(controller, generation) || this.getSnapshot().auth.status === 'signed-out') return;
+        this.dispatch({ type: 'login-success', bootstrap, now });
+        catalogPages = await this.catalogSnapshot(controller.signal);
+        if (!this.isCurrent(controller, generation)) return;
+        for (const page of catalogPages) this.dispatch({ type: 'catalog', response: page, now });
+      }
       const operationPages = await this.operationSnapshot(controller.signal);
       if (!this.isCurrent(controller, generation)) return;
       const catalog = catalogPages.at(-1);
@@ -149,13 +179,18 @@ export class WebUiSynchronizer {
         return page.items;
       });
       // Only a complete, unfiltered, same-instance catalog can clear selection.
-      // Never clear from an individual page or a stale request generation.
+      // Never clear from an individual page or a stale request generation, and never from a tick
+      // that did not re-read the catalog at all.
       const selected = this.getSnapshot().selectedModelId;
-      const selectedAbsent = selected !== null && catalogPages.every((page) => page.server_instance_id === bootstrap.server.server_instance_id) && !catalogPages.some((page) => page.items.some((entry) => entry.identity.id === selected));
+      const selectedAbsent = full && bootstrap !== null && selected !== null && catalogPages.every((page) => page.server_instance_id === bootstrap.server.server_instance_id) && !catalogPages.some((page) => page.items.some((entry) => entry.identity.id === selected));
       if (selectedAbsent) {
         this.dispatch({ type: 'select-model', modelId: null });
       }
       if (!selectedAbsent) await this.refreshSelectedRuntime(controller.signal, generation);
+      if (full) {
+        this.needsFullSnapshot = false;
+        this.lastFullSnapshotAt = now;
+      }
       if (!this.isCurrent(controller, generation)) return;
       const unresolvedExpired = this.reconcilePending(operations, now);
       this.failures = 0;
@@ -204,7 +239,11 @@ export class WebUiSynchronizer {
 
   private handleEvent(event: UiEvent): void {
     this.dispatch({ type: 'event', event, now: this.clock.now() });
+    // An event that moves the inventory or server identity is what makes the next tick re-read
+    // them. Without this the light tick would never notice a download, removal or rescan.
+    if (catalogAffectingEventTypes.has(event.type)) this.needsFullSnapshot = true;
     if ((event.type === 'server_restart' || event.type === 'gap' || event.type === 'reset') && event.payload.resnapshot) {
+      this.needsFullSnapshot = true;
       this.eventAbort?.abort();
       this.eventAbort = null;
       void this.refresh();

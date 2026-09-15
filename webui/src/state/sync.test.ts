@@ -3,6 +3,7 @@ import bootstrapFixture from '../../../tests/fixtures/webui/examples/bootstrap.m
 import catalogContractFixture from '../../../tests/fixtures/webui/examples/catalog.page.json';
 import operationsFixture from '../../../tests/fixtures/webui/examples/operations.list.json';
 import runtimeFixture from '../../../tests/fixtures/webui/examples/runtime.snapshot.json';
+import modelRevisionEventFixture from '../../../tests/fixtures/webui/examples/event.1.json';
 import { WebUiApiClient } from '../api/client';
 import { validateBootstrap } from '../api/validation';
 import type { PendingReconciliation } from '../api/types';
@@ -45,6 +46,16 @@ class FakeClock implements SyncClock {
 
 function visibleSource(hiddenValue: () => boolean): VisibilitySource {
   return { hidden: hiddenValue, subscribe: () => () => undefined };
+}
+
+// A stream that stays open, so the synchronizer holds a live event subscription the way it does
+// against a real server. `streamDone` closes immediately, which leaves the fallback path active.
+function streamOpen(events: string[] = []): ReadableStream<Uint8Array> {
+  return new ReadableStream({
+    start(controller) {
+      for (const event of events) controller.enqueue(new TextEncoder().encode(`data: ${event}\n\n`));
+    },
+  });
 }
 
 function streamDone(): ReadableStream<Uint8Array> {
@@ -150,17 +161,97 @@ describe('WebUI synchronizer', () => {
     sync.dispose();
   });
 
+  function countingSession(streamFor: () => ReadableStream<Uint8Array>) {
+    const clock = new FakeClock();
+    const calls: string[] = [];
+    const fetchImpl: typeof fetch = async (input) => {
+      const url = String(input);
+      calls.push(url);
+      if (url.includes('/events')) return new Response(streamFor(), { status: 200 });
+      if (url.endsWith('/bootstrap')) return new Response(JSON.stringify(bootstrap));
+      if (url.includes('/catalog')) return new Response(JSON.stringify(catalogFixture));
+      if (url.includes('/runtime')) return new Response(JSON.stringify(runtimeFixture));
+      return new Response(JSON.stringify(operations));
+    };
+    let snapshot = reduceWebUiSnapshot(initialSnapshot(), { type: 'login-success', bootstrap, now: 0 });
+    const sync = new WebUiSynchronizer({ client: new WebUiApiClient({ fetchImpl }), clock, visibility: visibleSource(() => false), getSnapshot: () => snapshot, dispatch: (action) => { snapshot = reduceWebUiSnapshot(snapshot, action); } });
+    const since = () => { const seen = [...calls]; calls.length = 0; return { bootstrap: seen.filter((u) => u.endsWith('/bootstrap')).length, catalog: seen.filter((u) => u.includes('/catalog')).length, operations: seen.filter((u) => u.includes('/operations')).length }; };
+    return { clock, sync, since };
+  }
+
+  it('reads server identity and the inventory once, not on every tick, while the stream is connected', async () => {
+    const { sync, since } = countingSession(() => streamOpen());
+    await sync.refresh();
+    const first = since();
+    expect(first.bootstrap).toBe(1);
+    expect(first.catalog).toBeGreaterThan(0);
+    await sync.refresh();
+    await sync.refresh();
+    const steady = since();
+    expect(steady.bootstrap).toBe(0);
+    expect(steady.catalog).toBe(0);
+    expect(steady.operations).toBe(2);
+    sync.dispose();
+  });
+
+  it('keeps re-reading the inventory while the event stream is not connected', async () => {
+    // Polling is the fallback: with no live stream every tick must be authoritative again.
+    const { sync, since } = countingSession(() => streamDone());
+    await sync.refresh();
+    since();
+    // The subscription clears in the stream promise's continuation, not inside refresh().
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await sync.refresh();
+    const second = since();
+    expect(second.bootstrap).toBe(1);
+    expect(second.catalog).toBeGreaterThan(0);
+    sync.dispose();
+  });
+
+  it('re-reads the inventory after an event says a model revision moved', async () => {
+    const event = JSON.stringify({ ...modelRevisionEventFixture, server_instance_id: bootstrap.server.server_instance_id });
+    let withEvent = false;
+    const { sync, since } = countingSession(() => (withEvent ? streamOpen([event]) : streamOpen()));
+    await sync.refresh();
+    since();
+    await sync.refresh();
+    expect(since().catalog).toBe(0);
+    withEvent = true;
+    sync.stop();
+    sync.start();
+    await sync.refresh();
+    since();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await sync.refresh();
+    expect(since().catalog).toBeGreaterThan(0);
+    sync.dispose();
+  });
+
+  it('re-reads the inventory on the safety net even when the stream stays quiet', async () => {
+    const { clock, sync, since } = countingSession(() => streamOpen());
+    await sync.refresh();
+    since();
+    clock.nowValue = 59_000;
+    await sync.refresh();
+    expect(since().catalog).toBe(0);
+    clock.nowValue = 61_000;
+    await sync.refresh();
+    expect(since().catalog).toBeGreaterThan(0);
+    sync.dispose();
+  });
+
   it('publishes lastSuccessfulAt from the synchronizer clock only on successful data refreshes', async () => {
     const clock = new FakeClock();
     clock.nowValue = 1_234;
-    let failBootstrap = false;
+    // The failure is injected on every endpoint a tick can call, not on bootstrap alone: a steady
+    // state tick reads only operations and runtime, so a bootstrap-only failure would not reach it.
+    let failRequests = false;
+    const offline = () => new Response(JSON.stringify({ error: { code: 'offline', message: 'offline', retryable: true }, request_id: 'req_offline' }), { status: 503 });
     const fetchImpl: typeof fetch = async (input) => {
       const url = String(input);
       if (url.includes('/events')) return new Response(streamDone(), { status: 200 });
-      if (url.endsWith('/bootstrap')) {
-        if (failBootstrap) return new Response(JSON.stringify({ error: { code: 'offline', message: 'offline', retryable: true }, request_id: 'req_offline' }), { status: 503 });
-        return new Response(JSON.stringify(bootstrap));
-      }
+      if (failRequests) return offline();
+      if (url.endsWith('/bootstrap')) return new Response(JSON.stringify(bootstrap));
       if (url.includes('/catalog')) return new Response(JSON.stringify(catalogFixture));
       if (url.includes('/runtime')) return new Response(JSON.stringify(runtimeFixture));
       return new Response(JSON.stringify(operations));
@@ -170,7 +261,7 @@ describe('WebUI synchronizer', () => {
     await sync.refresh();
     expect(snapshot.lastSuccessfulAt).toBe(1_234);
     clock.nowValue = 2_000;
-    failBootstrap = true;
+    failRequests = true;
     await sync.refresh();
     expect(snapshot.lastUpdatedAt).toBe(2_000);
     expect(snapshot.lastSuccessfulAt).toBe(1_234);
