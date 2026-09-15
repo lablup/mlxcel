@@ -41,7 +41,7 @@ pub(super) fn classify_request(
     let public_static = matches!(*method, Method::GET | Method::HEAD)
         && path_matches_prefix(path, &policy.public_webui_prefix);
     let public_health = matches!(*method, Method::GET | Method::HEAD)
-        && matches!(relative, Some("/" | "/health" | "/v1/health"));
+        && matches!(path, "/" | "/health" | "/v1/health");
     let preflight = *method == Method::OPTIONS;
     let legacy_reload = *method == Method::GET
         && matches!(relative, Some("/models"))
