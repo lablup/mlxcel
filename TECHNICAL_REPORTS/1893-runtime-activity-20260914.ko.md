@@ -2,7 +2,7 @@
 
 **날짜**: 2026-09-14
 
-**상태**: 부분 완료 — 구현과 제한된 자동 검증·독립 리뷰는 완료했고, 루트의 실모델·성능 검증 및 최종 통합 수동 검증은 남아 있습니다.
+**상태**: 구현과 범위가 명시된 운영 검증 완료 — native hidden 호스트 성능 및 최종 통합 수동 검증은 남아 있습니다.
 
 **언어**: Rust, TypeScript/React, JavaScript, OpenAPI/JSON Schema
 
@@ -75,3 +75,16 @@ CPU 전용 진단에서도 창 크기 변경 뒤 빈 headed 페이지의 layout/
 루트의 `34fffa69` 검증에서 운영 빌드·브라우저 23개·실제 CSP/axe/레이아웃 2개·실제 슬롯 비교를 다시 통과했습니다. 루트가 간결해진 실제 화면도 확인했으며 UI 회귀는 발견하지 않았습니다. 별도 full-Chromium headless 성능 시도는 표본을 남기기 전에 context 교체 중 SIGBUS로 종료했고 display-link/notification-center 오류를 기록했습니다. 이 실패는 정상 UI 검증과 구분하여 보존하며 처리량 증거로 사용하지 않습니다.
 
 진단 하네스만 기본 Chromium headless shell로 바꾸고 headless 경로의 native-window/CDP 호출을 모두 제거했습니다. 실제 가시성 검증, visible-only의 incomplete 상태와 #1848 native hidden 필수 검증은 유지합니다. 런타임·프런트엔드 소스와 UI 자산 바이트는 변경하지 않았습니다.
+
+## 최종 visible-only 실측 증거
+
+최종 하네스 `e83508b083696657cdce36568c8ba3cd94bbfaf3`에서 `34fffa69adafccb7eb085cb1ce4d35b7fb50ee9c` 빌드의 운영 바이너리(SHA-256 `bfdaf8f5d3e5ae020bf00de726a30d9e3b94eb9f01784506782f171746400010`)로 visible-only headless 측정을 완료했습니다. 두 커밋 사이 UI·백엔드·번들 바이트는 동일합니다. 기존 Llama 3.1 8B Instruct 4-bit 체크포인트를 격리된 소유 캐시에 복사하고 같은 모델·요청·하드웨어에서 조건별 off/treatment 순서를 교대하며 5쌍씩 측정했습니다. warmup 1건을 포함한 총 21요청 모두 실제 256토큰을 기록했습니다.
+
+| Headless visible 조건 | 쌍 수 | 중앙 디코드 성능 저하 | 기준선 변동계수 |
+|---|---:|---:|---:|
+| 클라이언트 1개 | 5 | -0.069808% | 0.271240% |
+| 클라이언트 2개 | 5 | +0.104932% | 0.139325% |
+
+두 visible 조건은 성능 저하 2%와 기준선 노이즈 5% 목표 안에 들었습니다. 작은 음수 값을 속도 향상의 증거로 해석하지 않습니다. 가시성은 합성 이벤트 없이 확인했습니다. 전체 성능 상태는 여전히 **incomplete**, native hidden은 **not run**이며 완전한 성능 검증 통과가 아닙니다. 명시적 unload에서 worker 종료를 관측했고 소유 서버는 코드 0으로 정상 종료했습니다. 이전 headed/full-Chromium 실패는 별도 증거로 보존합니다.
+
+루트는 `34fffa69`에서 브라우저 23개, 실제 운영 CSP/axe/레이아웃 2개, 실제 native/runtime 슬롯 비교도 완료했고 간결한 실제 화면을 확인했습니다. 정상 대화형 호스트에서 native hidden 오버헤드와 연기된 Safari/VoiceOver/실제 200% 검증은 통합 #1848 필수 항목으로 남습니다. 에픽 완료나 해당 수동 검증 통과를 의미하지 않습니다. 최종 호스팅 CI와 중앙 머지는 루트 담당입니다.

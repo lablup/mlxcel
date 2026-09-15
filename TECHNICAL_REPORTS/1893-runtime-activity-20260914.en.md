@@ -2,7 +2,7 @@
 
 **Date**: 2026-09-14
 
-**Status**: Partial — implementation and bounded automated reviews complete; root real-model/performance and final integrated manual gates remain outstanding.
+**Status**: Implementation and scoped production acceptance complete; native hidden-host performance and final integrated manual acceptance remain outstanding.
 
 **Languages**: Rust, TypeScript/React, JavaScript, OpenAPI/JSON Schema
 
@@ -75,3 +75,16 @@ Root screenshot review also found an excessively long default list of unavailabl
 Root validation of `34fffa69` passed the production build, 23 browser tests, two production CSP/axe/layout cases and actual slots comparison again. Root visually reviewed and accepted the concise runtime presentation. No UI regression was identified. The separate full-Chromium headless performance attempt crashed with SIGBUS during context replacement before any sample, with display-link and notification-center failures in the process log; it supplies no throughput evidence. That failure is preserved independently of the passing UI checks.
 
 Only the diagnostic harness now uses default Chromium headless shell and skips every native-window/CDP call in headless mode. Actual visibility assertions remain, visible-only output remains incomplete, and native hidden overhead stays required in #1848. No runtime/frontend source or UI asset bytes changed in this correction.
+
+## Final visible-only measured evidence
+
+The final helper source `e83508b083696657cdce36568c8ba3cd94bbfaf3` completed the visible-only headless diagnostic against the production binary built from `34fffa69adafccb7eb085cb1ce4d35b7fb50ee9c` (SHA-256 `bfdaf8f5d3e5ae020bf00de726a30d9e3b94eb9f01784506782f171746400010`). UI, backend and embedded asset bytes were unchanged between those commits. The existing read-only Llama 3.1 8B Instruct 4-bit checkpoint was copied into an isolated owned cache; measurement used the same loaded model, request and hardware with five alternating-order off/treatment pairs per visible condition. All 21 requests, including one warmup, produced 256 measured tokens.
+
+| Visible headless condition | Paired runs | Median decode degradation | Baseline coefficient of variation |
+|---|---:|---:|---:|
+| One client | 5 | -0.069808% | 0.271240% |
+| Two clients | 5 | +0.104932% | 0.139325% |
+
+Both visible conditions met the 2% degradation and 5% baseline-noise targets. The small negative value does not establish a speedup. Actual visibility was checked without synthetic events. Overall performance status remains **incomplete**, and native hidden is **not run**; these limited headless measurements are not full performance acceptance. Explicit unload observed worker exit and the owned server exited normally with code 0. Original failed headed/full-Chromium attempts remain retained, not overwritten by this successful limited capture.
+
+Root also completed 23 browser cases, two actual production CSP/axe/layout cases and real native/runtime slots comparison, and accepted the concise actual layout at `34fffa69`. The remaining required acceptance belongs to integrated #1848: native hidden-host overhead on a functioning interactive host and the deferred Safari/VoiceOver/native 200% session. This report does not mark the epic complete or imply those checks passed. Final hosted CI and central merge remain root-owned.
