@@ -29,7 +29,7 @@ Settings의 정식 프로필은 선택이 바뀐 용량 충돌 복구를 포함�
 | 소스 CI `34920687721` | cargo-deny/fmt/clippy, WebUI 번들, OpenXLA 컴파일 등 실행된 검사 모두 통과; pin 추출·CUDA sm_70 컴파일·OpenXLA 링크는 조건부 생략 |
 | 격리된 실제 체크포인트 여정 | 통과, 생성 테스트는 의도적으로 수행하지 않음 |
 
-실제 증거 위치는 `target/mlxcel-models-owned-nnin2wfs/`의 `result.json`, `browser/result.json`, `browser/checkpoint.json`, `browser/responses.json`입니다. 호스트는 Apple M1 Ultra, macOS 27.0 빌드 26A428입니다. 서버 바이너리 SHA-256은 `00bf95141dfd446f21e142cf6c04bec0faddc33d1bb5d92e38424e3ddd654048`입니다. 체크포인트는 `mlx-community/SmolLM-135M-Instruct-4bit`, 고정 리비전은 `642e06afe3fab57fd6cc518637c471af0a569e1e`, 가중치 SHA-256은 `e91560ee24b13eee6ddeb14879d728a90780053d69057b15ff199ccadfcfe33b`입니다.
+기본 작업 디렉토리에 보존한 실제 증거 위치는 `target/epic-1834-recovery-20260913/models-22f19-actual/mlxcel-models-owned-nnin2wfs/`의 `result.json`, `browser/result.json`, `browser/checkpoint.json`, `browser/responses.json`입니다. 같은 상위 경로의 `mlxcel-models-owned-w3x1gprc/`는 스크린샷의 맨 위 스크롤 위치를 교정한 동일 바이너리의 두 번째 통과 실행을 보존합니다. 호스트는 Apple M1 Ultra, macOS 27.0 빌드 26A428입니다. 서버 바이너리 SHA-256은 `00bf95141dfd446f21e142cf6c04bec0faddc33d1bb5d92e38424e3ddd654048`입니다. 체크포인트는 `mlx-community/SmolLM-135M-Instruct-4bit`, 고정 리비전은 `642e06afe3fab57fd6cc518637c471af0a569e1e`, 가중치 SHA-256은 `e91560ee24b13eee6ddeb14879d728a90780053d69057b15ff199ccadfcfe33b`입니다.
 
 제품 브라우저는 빈 격리 저장소에서 시작하여 체크포인트 다운로드·검증, 서버 변경 없는 프로필 저장, 명시적 로드, provider-ready Chat 관측, 실제 컨텍스트 1024·슬롯 1개 확인을 완료했습니다. Use in Chat 이동, 워커 종료를 관측한 언로드, 새로 다운로드한 opaque ID만 삭제, 빈 카탈로그·pending=0 복귀까지 통과했습니다. 제품 CSP와 axe 위반은 0이며 외부 브라우저 요청이나 세션 키 영속 저장이 없었습니다. 소유한 서버는 코드 0으로 정상 종료했고 기존 사용자 체크포인트는 건드리지 않았습니다. 화면 이동은 추론 품질이나 Chat 생성 검증이 아닙니다.
 
