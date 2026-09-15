@@ -2,7 +2,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { ModuleKind, ScriptTarget, transpileModule } from 'typescript';
-import type { BootstrapResponse, CatalogEntry, CatalogListResponse } from '../src/api/types';
+import type { BootstrapResponse, CatalogEntry, CatalogListResponse, RuntimeSnapshot } from '../src/api/types';
 
 function read(relative: string): string {
   return readFileSync(fileURLToPath(new URL(relative, import.meta.url)), 'utf8');
@@ -30,6 +30,19 @@ export function model(): CatalogEntry {
       },
     },
     lifecycle: { ...entry.lifecycle, state: 'unloaded', active_requests: 0, draining_requests: 0, busy: false },
+  };
+}
+
+const runtimeFixture = JSON.parse(read('../../tests/fixtures/webui/examples/runtime.snapshot.json')) as RuntimeSnapshot;
+export function runtime(entry: CatalogEntry, sequence: number): RuntimeSnapshot {
+  return {
+    ...runtimeFixture,
+    server_instance_id: bootstrap.server.server_instance_id,
+    model_id: entry.identity.id,
+    revision: entry.identity.revision,
+    snapshot_sequence: sequence,
+    measurements: {},
+    settings: { scope: entry.lifecycle.state === 'ready' ? 'loaded_model_live' : 'next_load_profile', effective: {}, overridden_by_cli: [], partial_errors: [] },
   };
 }
 

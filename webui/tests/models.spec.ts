@@ -1,7 +1,7 @@
 // Copyright 2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 import { expect, test, type Page } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
-import { model, bootstrap, loadValidator } from './models-fixtures';
+import { model, runtime, bootstrap, loadValidator } from './models-fixtures';
 import type { CatalogEntry, ModelActionRequest, Operation } from '../src/api/types';
 
 // Deterministic API composition tests; these do not claim real download/inference acceptance.
@@ -116,15 +116,7 @@ async function installLibrary(page: Page, initial: CatalogEntry[] = []) {
           },
           404,
         );
-      return json({
-        schema_version: 'webui.ui-api.v1',
-        server_instance_id: bootstrap.server.server_instance_id,
-        model_id: url.searchParams.get('model_id'),
-        revision: entry.identity.revision,
-        measurements: {},
-        settings: { scope: 'next_load_profile', effective: {}, overridden_by_cli: [], partial_errors: [] },
-        snapshot_sequence: sequence,
-      });
+      return json(runtime(entry, sequence));
     }
     // Shared SSE parser consumes this mock transport sentinel before UiEvent JSON validation.
     if (path.endsWith('/events'))

@@ -1,6 +1,6 @@
 // Copyright 2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 import { describe, expect, it } from 'vitest';
-import { bootstrap, loadValidator, model } from '../../../tests/models-fixtures';
+import { bootstrap, loadValidator, model, runtime } from '../../../tests/models-fixtures';
 
 describe('Playwright fixture contract loader (no browser)', () => {
   it('executes the canonical validator and validates the complete CJK catalog', async () => {
@@ -12,4 +12,20 @@ describe('Playwright fixture contract loader (no browser)', () => {
     expect(() => validateAgainstSchema('CatalogListResponse', { ...page, items: [{ ...items[0], identity: { ...items[0].identity, id: 'id_invalid' } }] })).toThrow();
     expect(() => validateAgainstSchema('CatalogListResponse', { ...page, extra: true })).toThrow();
   });
+});
+
+
+it('validates the exact Models browser runtime response across lifecycle revisions', async () => {
+  const { validateAgainstSchema } = await loadValidator();
+  for (const state of ['unloaded', 'loading', 'ready', 'draining', 'unloading', 'failed'] as const) {
+    const entry = { ...model(), identity: { ...model().identity, revision: 18 }, lifecycle: { ...model().lifecycle, state } };
+    const response = runtime(entry, 71);
+    expect(() => validateAgainstSchema('RuntimeSnapshot', response)).not.toThrow();
+    expect(response).toMatchObject({ model_id: entry.identity.id, revision: 18, snapshot_sequence: 71, server_instance_id: bootstrap.server.server_instance_id });
+    expect(response.measurements).toEqual({});
+    expect(response.slots.available).toBe(false);
+    expect(response.settings.scope).toBe(state === 'ready' ? 'loaded_model_live' : 'next_load_profile');
+    const withoutSlots = Object.fromEntries(Object.entries(response).filter(([key]) => key !== 'slots'));
+    expect(() => validateAgainstSchema('RuntimeSnapshot', withoutSlots)).toThrow('$.slots: missing required property');
+  }
 });
