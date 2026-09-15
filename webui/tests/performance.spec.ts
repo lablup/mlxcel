@@ -2,22 +2,13 @@
 import { writeFile } from 'node:fs/promises';
 import { cpus, hostname, platform, release, totalmem } from 'node:os';
 import { expect, test, type Locator, type Page, type TestInfo } from '@playwright/test';
-import catalogFixture from '../../tests/fixtures/webui/examples/catalog.page.json' with { type: 'json' };
-import bootstrapFixture from '../../tests/fixtures/webui/examples/bootstrap.model-free.json' with { type: 'json' };
-import operationsFixture from '../../tests/fixtures/webui/examples/operations.list.json' with { type: 'json' };
-import runtimeFixture from '../../tests/fixtures/webui/examples/runtime.snapshot.json' with { type: 'json' };
-import type { CatalogEntry, CatalogListResponse, OperationsListResponse, RuntimeSnapshot } from '../src/api/types';
+import type { CatalogEntry } from '../src/api/types';
 import { bootProduct, productVariants, submitSessionKey } from './browser-fixtures';
-import { loadValidator, model } from './models-fixtures';
+import { loadValidator } from './models-fixtures';
+import { bootstrapResponse, catalogEntry, catalogPage, operationPage, runtimeFor } from './performance-fixtures';
 
 type Evidence = Record<string, unknown>;
 type Validator = Awaited<ReturnType<typeof loadValidator>>;
-
-function withoutFixtureAnnotations<T>(value: T): T {
-  const copy = structuredClone(value) as T;
-  if (typeof copy === 'object' && copy !== null && '$schemaName' in copy) delete (copy as Record<string, unknown>).$schemaName;
-  return copy;
-}
 
 async function writeEvidence(testInfo: TestInfo, name: string, page: Page, evidence: Evidence): Promise<void> {
   const browser = await page.evaluate(() => ({
@@ -36,51 +27,6 @@ async function writeEvidence(testInfo: TestInfo, name: string, page: Page, evide
     ...evidence,
   }, null, 2), { mode: 0o600, flag: 'wx' });
   await testInfo.attach(name, { path, contentType: 'application/json' });
-}
-
-function operationPage(sequence: number): OperationsListResponse {
-  return { ...withoutFixtureAnnotations(operationsFixture as OperationsListResponse), items: [], server_instance_id: bootstrapFixture.server.server_instance_id, snapshot_sequence: sequence, pagination: { limit: 200, next_cursor: null, total_known: 0 } };
-}
-
-function validModelId(index: number): string {
-  return `mdl_${index.toString(36).padStart(43, 'A')}`;
-}
-
-function validHex(index: number): string {
-  return index.toString(16).padStart(64, '0').slice(-64);
-}
-
-function catalogEntry(index: number, state: 'unloaded' | 'ready' = 'unloaded'): CatalogEntry {
-  const base = model();
-  return {
-    ...base,
-    identity: {
-      ...base.identity,
-      id: validModelId(index),
-      inference_id: `perf-model-${index}`,
-      display_name: `Catalog performance model ${String(index).padStart(4, '0')}`,
-      source_key_hash: validHex(index + 1),
-      revision: base.identity.revision + index,
-    },
-    lifecycle: { ...base.lifecycle, state, worker_exit_observed: state !== 'ready', busy: false, active_requests: 0, draining_requests: 0 },
-    capabilities: [{ task: 'chat', phase: state === 'ready' ? 'provider_ready' : 'pre_load', available: true, reason: null }],
-  };
-}
-
-function catalogPage(items: readonly CatalogEntry[], offset: number, limit: number, sequence: number, total: number): CatalogListResponse {
-  const pageItems = items.slice(offset, offset + limit);
-  const next = offset + limit < items.length ? `cursor_${offset + limit}` : null;
-  return {
-    ...withoutFixtureAnnotations(catalogFixture as CatalogListResponse),
-    items: pageItems,
-    pagination: { limit, next_cursor: next, total_known: total },
-    server_instance_id: bootstrapFixture.server.server_instance_id,
-    snapshot_sequence: sequence,
-  };
-}
-
-function runtimeFor(entry: CatalogEntry, sequence: number): RuntimeSnapshot {
-  return { ...withoutFixtureAnnotations(runtimeFixture as RuntimeSnapshot), server_instance_id: bootstrapFixture.server.server_instance_id, model_id: entry.identity.id, revision: entry.identity.revision, snapshot_sequence: sequence };
 }
 
 async function installPerformanceApi(page: Page, options: { catalog: readonly CatalogEntry[]; slowCatalog?: boolean; chatEntry?: CatalogEntry }): Promise<{ releaseCatalog: () => void; validated: string[] }> {
@@ -103,7 +49,7 @@ async function installPerformanceApi(page: Page, options: { catalog: readonly Ca
       return;
     }
     if (path === '/ui-api/v1/bootstrap') {
-      const body = withoutFixtureAnnotations(bootstrapFixture);
+      const body = bootstrapResponse();
       validate('BootstrapResponse', body);
       await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
       return;
@@ -150,15 +96,24 @@ async function installPerformanceApi(page: Page, options: { catalog: readonly Ca
   return { releaseCatalog, validated };
 }
 
-async function actionToPaintMs(locator: Locator, action: () => Promise<void>, eventName: 'click' | 'input' = 'click'): Promise<number> {
-  const pending = locator.evaluate((element, event) => new Promise<number>((resolve) => {
-    element.addEventListener(event, () => {
-      const started = performance.now();
-      requestAnimationFrame(() => requestAnimationFrame(() => resolve(performance.now() - started)));
-    }, { once: true, capture: true });
-  }), eventName);
+async function actionToSettledPaintMs<T>(locator: Locator, action: () => Promise<void>, waitForState: () => Promise<T>, eventName: 'click' | 'input' = 'click'): Promise<{ elapsedMs: number; state: T }> {
+  await locator.evaluate((element, event) => {
+    const target = window as Window & { __mlxcelPerfStart?: Promise<number> };
+    target.__mlxcelPerfStart = new Promise<number>((resolve) => {
+      element.addEventListener(event, () => resolve(performance.now()), { once: true, capture: true });
+    });
+  }, eventName);
   await action();
-  return pending;
+  const startTime = await locator.page().evaluate(() => {
+    const target = window as Window & { __mlxcelPerfStart?: Promise<number> };
+    if (!target.__mlxcelPerfStart) throw new Error('Performance action listener was not installed.');
+    return target.__mlxcelPerfStart;
+  });
+  const state = await waitForState();
+  const elapsedMs = await locator.page().evaluate((started) => new Promise<number>((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve(performance.now() - started)));
+  }), startTime);
+  return { elapsedMs, state };
 }
 
 test('cold product shell is usable within the frontend budget', async ({ page }, testInfo) => {
@@ -197,10 +152,13 @@ test('navigation feedback and status updates stay responsive without layout shif
   api.releaseCatalog();
   await expect(page.getByTestId('models-table')).toBeVisible();
   const activityNav = page.locator('[data-testid="nav-activity"]:visible').first();
-  const feedbackMs = await actionToPaintMs(activityNav, () => activityNav.click());
-  await expect(page.getByTestId('activity-page')).toBeVisible();
+  const activityTiming = await actionToSettledPaintMs(activityNav, () => activityNav.click(), async () => {
+    await expect(page.getByTestId('activity-page')).toBeVisible();
+    return { activity_visible: true };
+  });
+  const feedbackMs = activityTiming.elapsedMs;
   const cls = await page.evaluate(() => (window as Window & { __mlxcelCls?: number }).__mlxcelCls ?? 0);
-  await writeEvidence(testInfo, 'feedback-status-layout-evidence.json', page, { dataset: 'slow catalog status transition plus browser event-to-paint Activity navigation; route fixtures only', feedback_event_to_paint_ms: feedbackMs, feedback_budget_ms: 100, cumulative_layout_shift: layoutShift ? cls : null, layout_shift_status: layoutShift ? 'measured' : 'not-run-unsupported', validated_schemas: api.validated });
+  await writeEvidence(testInfo, 'feedback-status-layout-evidence.json', page, { dataset: 'slow catalog status transition plus browser event-to-paint Activity navigation; route fixtures only', feedback_event_to_activity_visible_paint_ms: feedbackMs, feedback_end_state: activityTiming.state, feedback_budget_ms: 100, cumulative_layout_shift: layoutShift ? cls : null, layout_shift_status: layoutShift ? 'measured' : 'not-run-unsupported', validated_schemas: api.validated });
   expect(feedbackMs).toBeLessThanOrEqual(100);
   if (layoutShift) expect(cls).toBeLessThanOrEqual(0.001);
 });
@@ -215,9 +173,12 @@ test('1000-entry catalog remains searchable and bounded', async ({ page }, testI
   await expect(page.locator('[data-testid="models-table"] tbody tr')).toHaveCount(25);
   const loadedMs = Number(process.hrtime.bigint() - started) / 1_000_000;
   const search = page.getByTestId('models-search');
-  const searchMs = await actionToPaintMs(search, () => search.fill('0999'), 'input');
-  await expect(page.locator('[data-testid="models-table"] tbody tr')).toHaveCount(1);
-  await writeEvidence(testInfo, 'catalog-1000-evidence.json', page, { dataset: '1000 schema-validated catalog entries over five 200-entry canonical pages', load_to_table_wall_ms: loadedMs, search_event_to_paint_ms: searchMs, feedback_budget_ms: 100, rendered_rows: 25, pages_expected: 5, validated_schemas: api.validated });
+  const searchTiming = await actionToSettledPaintMs(search, () => search.fill('0999'), async () => {
+    await expect(page.locator('[data-testid="models-table"] tbody tr')).toHaveCount(1);
+    return { filtered_rows: 1 };
+  }, 'input');
+  const searchMs = searchTiming.elapsedMs;
+  await writeEvidence(testInfo, 'catalog-1000-evidence.json', page, { dataset: '1000 schema-validated catalog entries over five 200-entry canonical pages', load_to_table_wall_ms: loadedMs, search_event_to_filtered_table_paint_ms: searchMs, search_end_state: searchTiming.state, feedback_budget_ms: 100, rendered_rows: 25, pages_expected: 5, validated_schemas: api.validated });
   expect(searchMs).toBeLessThanOrEqual(100);
 });
 
@@ -238,8 +199,12 @@ test('10000-token transcript keeps post-render controls responsive', async ({ pa
   await expect(page.getByRole('status').filter({ hasText: 'Response complete.' })).toBeVisible();
   const renderMs = Number(process.hrtime.bigint() - renderStarted) / 1_000_000;
   const newConversation = page.getByRole('button', { name: 'New conversation', exact: true });
-  const feedbackMs = await actionToPaintMs(newConversation, () => newConversation.click());
-  await expect(composer).toBeEnabled();
-  await writeEvidence(testInfo, 'transcript-10000-evidence.json', page, { dataset: '10000 repeated token streamed transcript fixture; no real inference backend', render_wall_ms: renderMs, post_render_event_to_paint_ms: feedbackMs, feedback_budget_ms: 100, validated_schemas: api.validated });
+  const conversationTiming = await actionToSettledPaintMs(newConversation, () => newConversation.click(), async () => {
+    await expect(composer).toBeEnabled();
+    await expect(composer).toHaveValue('');
+    return { composer_empty: true };
+  });
+  const feedbackMs = conversationTiming.elapsedMs;
+  await writeEvidence(testInfo, 'transcript-10000-evidence.json', page, { dataset: '10000 repeated token streamed transcript fixture; no real inference backend', render_wall_ms: renderMs, post_render_event_to_empty_composer_paint_ms: feedbackMs, post_render_end_state: conversationTiming.state, feedback_budget_ms: 100, validated_schemas: api.validated });
   expect(feedbackMs).toBeLessThanOrEqual(100);
 });

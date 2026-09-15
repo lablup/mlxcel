@@ -5,6 +5,7 @@ export default defineConfig({
   testDir: './tests',
   testMatch: ['engines.spec.ts', 'performance.spec.ts'],
   fullyParallel: false,
+  workers: 1,
   reporter: 'list',
   timeout: 45_000,
   projects: [
