@@ -15,6 +15,8 @@ const en = {
   noContext: 'N/A — context denominator is unknown; no occupancy percentage is inferred.',
   history: 'Show recent history', hideHistory: 'Hide recent history', historyNote: 'Five-minute in-memory history, at most 150 two-second samples. Hidden tabs stop observation; gaps and counter resets are not interpolated.',
   measure: 'Measurement', value: 'Value', scope: 'Scope', observed: 'Observed at', reason: 'Availability / source',
+  metricDetails: 'All measurements and sources', unavailableCount: 'Unavailable measurements', unavailableReason: 'Some sources are disabled or do not publish an authoritative sample. Expand details for individual reasons.', noPrimary: 'No primary request counters are available.',
+  metricLabels: { active_requests: 'Active requests', queued_requests: 'Queued requests', completed_requests_total: 'Total completed requests', completion_tokens_total: 'Total completion tokens', gpu_utilization: 'GPU utilization', ttft: 'Time to first token', decode_rate: 'Decode rate', process_resident_bytes: 'Process resident memory', allocator_active_bytes: 'Active allocator memory', allocator_cache_bytes: 'Cached allocator memory', allocator_peak_bytes: 'Peak allocator memory', device_total_bytes: 'Device memory', model_weights_bytes: 'Model weights estimate', kv_cache_bytes: 'KV cache memory', generation_time_ms_total: 'Total generation time', decode_tokens_total: 'Accepted decode tokens', decode_time_us_total: 'Total decode time', prompt_cache_bytes: 'Prompt cache memory', prompt_cache_entries: 'Prompt cache entries' },
   bytes: 'bytes downloaded', details: 'Operation details', status: 'Operation status', unknownTime: 'Unknown',
 };
 const ko: typeof en = {
@@ -28,6 +30,8 @@ const ko: typeof en = {
   timing: '서버 카운터는 브라우저 TTFT가 아닙니다. 채팅은 요청 전송부터 첫 추론/내용 델타까지 별도로 표시하며, 단어 수를 토큰으로 사용하지 않습니다.',
   slots: '요청 슬롯', slot: '슬롯', processing: '처리 중', idle: '유휴', context: '요청 컨텍스트 한도', pool: '공유 풀 컨텍스트', parallel: '실제 병렬도', noContext: 'N/A — 컨텍스트 분모를 알 수 없어 점유율을 추정하지 않습니다.',
   history: '최근 기록 보기', hideHistory: '최근 기록 숨기기', historyNote: '메모리 내 5분 기록이며 2초 간격 최대 150개입니다. 숨겨진 탭은 관측을 중지합니다. 공백과 카운터 초기화를 보간하지 않습니다.',
+  metricDetails: '전체 측정값과 출처', unavailableCount: '사용할 수 없는 측정값', unavailableReason: '일부 출처가 비활성화되었거나 확인된 관측값을 제공하지 않습니다. 상세 내용을 펼쳐 개별 사유를 확인하세요.', noPrimary: '사용 가능한 주요 요청 카운터가 없습니다.',
+  metricLabels: { active_requests: '활성 요청', queued_requests: '대기 요청', completed_requests_total: '누적 완료 요청', completion_tokens_total: '누적 완료 토큰', gpu_utilization: 'GPU 사용률', ttft: '첫 토큰 도달 시간', decode_rate: '디코드 속도', process_resident_bytes: '프로세스 상주 메모리', allocator_active_bytes: '할당자 활성 메모리', allocator_cache_bytes: '할당자 캐시 메모리', allocator_peak_bytes: '할당자 최대 메모리', device_total_bytes: '장치 메모리', model_weights_bytes: '모델 가중치 추정량', kv_cache_bytes: 'KV 캐시 메모리', generation_time_ms_total: '누적 생성 시간', decode_tokens_total: '수락된 디코드 토큰', decode_time_us_total: '누적 디코드 시간', prompt_cache_bytes: '프롬프트 캐시 메모리', prompt_cache_entries: '프롬프트 캐시 항목' },
   measure: '측정 항목', value: '값', scope: '범위', observed: '관측 시각', reason: '가용성 / 출처', bytes: '다운로드 바이트', details: '작업 상세', status: '작업 상태', unknownTime: '알 수 없음',
 };
 export function strings(locale: Locale): typeof en { return locale === 'ko' ? ko : en; }

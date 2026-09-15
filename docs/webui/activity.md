@@ -50,3 +50,11 @@ node scripts/activity-slots.mjs
 ```
 
 Run from `webui/`. The script samples native slots before and after canonical runtime slots every two seconds during a real chat stream, with a ten-minute bound and owned-request cleanup on failure. It validates bounded UTF-8 SSE frames, rejects error payloads and malformed or truncated streams, and requires a successful finish reason followed by `[DONE]` without retaining generated text. Offline parser regressions run through `pnpm unit`. It also fails if no processing/decode phase is observed; a capture success is explicitly `captured-requires-comparison`, not a performance or correctness pass. Compare each sequential bracket and account for progress between reads. The result excludes prompts, generated output, debug slot parameters and credentials.
+
+## Restricted desktop diagnostic mode
+
+The default `WEBUI_PERF_MODE=full` requires a working headed Chromium layout/visual viewport and real visible/hidden transitions. Every requested browser condition is preflighted before warmup inference; zero or invalid geometry fails closed. On the September 15 remote host, even a blank headed page reported zero layout and visual viewport dimensions after native bounds changes. Headless Chromium had usable geometry, but native minimize and foreground-tab changes did not produce `document.hidden=true`. These observations are an environment limitation, not a UI or GPU root-cause finding.
+
+`WEBUI_PERF_MODE=visible-only-headless` permits a limited diagnostic with five paired runs for each of one and two visible headless clients. It uses full Chromium, verifies actual visibility, never synthesizes hidden events, and always reports `status: incomplete` with `hidden_native: not-run`, even when both visible conditions meet the numeric target. Per-condition regressions remain marked `investigate`. Real native hidden-tab overhead must still be measured on a functioning interactive host during integrated acceptance; the original failed headed attempt remains evidence, not a passing measurement.
+
+Runtime defaults to available primary request counters and slot occupancy. Cumulative counters are labeled totals; unavailable counts remain explicit. All metrics, individual availability reasons, scopes and sampling provenance remain accessible through the native “All measurements and sources” disclosure.

@@ -36,3 +36,25 @@ test('rejects invalid UTF-8 with a fixed safe error', async () => {
   let sent = false;
   await assert.rejects(validateChatStream({ read: async () => ({ done: sent, value: sent ? undefined : (sent = true, new Uint8Array([255])) }) }), /UTF-8 decoding failed/);
 });
+
+// Shared pure policy tests run in the same offline acceptance gate.
+import { performanceMode, assertGeometry, performanceCompletion } from './activity-performance-config.mjs';
+test('performance default remains headed and includes actual hidden mode', () => {
+  assert.deepEqual(performanceMode(), { name: 'full', headless: false, modes: ['one-visible', 'two-visible', 'hidden'] });
+  assert.throws(() => performanceMode('headless'), /WEBUI_PERF_MODE/);
+});
+test('zero or nonfinite viewport fails before inference', () => {
+  const valid = { innerWidth: 700, innerHeight: 900, visualWidth: 700, visualHeight: 900 };
+  assert.doesNotThrow(() => assertGeometry(valid));
+  for (const key of Object.keys(valid)) for (const value of [0, -1, NaN, Infinity, undefined]) assert.throws(() => assertGeometry({ ...valid, [key]: value }), /no usable/);
+});
+test('visible-only diagnostic never reports complete acceptance', () => {
+  const mode = performanceMode('visible-only-headless');
+  assert.deepEqual(mode.modes, ['one-visible', 'two-visible']);
+  for (const status of ['within-target', 'investigate']) {
+    const result = performanceCompletion(mode, [{ status }]);
+    assert.equal(result.status, 'incomplete');
+    assert.equal(result.hidden_native, 'not-run');
+  }
+  assert.equal(performanceCompletion(performanceMode(), [{ status: 'investigate' }]).status, 'investigate');
+});
