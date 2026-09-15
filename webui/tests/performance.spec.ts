@@ -9,6 +9,11 @@ import { bootstrapResponse, catalogEntry, catalogPage, operationPage, runtimeFor
 
 type Evidence = Record<string, unknown>;
 type Validator = Awaited<ReturnType<typeof loadValidator>>;
+type BrowserPaintPredicate =
+  | { kind: 'visible-test-id'; testId: string }
+  | { kind: 'table-row-count'; testId: string; rowCount: number; textIncludes?: string }
+  | { kind: 'textarea-empty-enabled'; selector: string };
+type BrowserPaintResult<T> = { elapsedMs: number; state: T; instrumentation: Record<string, unknown> };
 
 async function writeEvidence(testInfo: TestInfo, name: string, page: Page, evidence: Evidence): Promise<void> {
   const browser = await page.evaluate(() => ({
@@ -96,24 +101,95 @@ async function installPerformanceApi(page: Page, options: { catalog: readonly Ca
   return { releaseCatalog, validated };
 }
 
-async function actionToSettledPaintMs<T>(locator: Locator, action: () => Promise<void>, waitForState: () => Promise<T>, eventName: 'click' | 'input' = 'click'): Promise<{ elapsedMs: number; state: T }> {
-  await locator.evaluate((element, event) => {
-    const target = window as Window & { __mlxcelPerfStart?: Promise<number> };
-    target.__mlxcelPerfStart = new Promise<number>((resolve) => {
-      element.addEventListener(event, () => resolve(performance.now()), { once: true, capture: true });
+async function actionToSettledPaintMs<T>(locator: Locator, action: () => Promise<void>, predicate: BrowserPaintPredicate, assertState: () => Promise<T>, eventName: 'click' | 'input' = 'click'): Promise<BrowserPaintResult<T>> {
+  const page = locator.page();
+  await locator.evaluate((element, options) => {
+    type Predicate = typeof options.predicate;
+    type TimedWindow = Window & { __mlxcelPerfActionToPaint?: Promise<{ elapsedMs: number; browserState: Record<string, unknown>; instrumentation: Record<string, unknown> }> };
+    const target = window as TimedWindow;
+    const visible = (candidate: Element | null): candidate is HTMLElement => {
+      if (!(candidate instanceof HTMLElement)) return false;
+      const style = window.getComputedStyle(candidate);
+      const rect = candidate.getBoundingClientRect();
+      return !candidate.hidden && style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+    };
+    const byTestId = (testId: string): Element | null => document.querySelector(`[data-testid="${testId}"]`);
+    const evaluatePredicate = (current: Predicate): Record<string, unknown> | null => {
+      if (current.kind === 'visible-test-id') return visible(byTestId(current.testId)) ? { [`${current.testId.replace(/-/gu, '_')}_visible`]: true } : null;
+      if (current.kind === 'table-row-count') {
+        const table = byTestId(current.testId);
+        const rows = Array.from(table?.querySelectorAll('tbody tr') ?? []);
+        if (rows.length !== current.rowCount) return null;
+        const requiredText = current.textIncludes;
+        if (requiredText && !rows.some((row) => row.textContent?.includes(requiredText))) return null;
+        return { filtered_rows: rows.length };
+      }
+      const textarea = document.querySelector(current.selector);
+      if (textarea instanceof HTMLTextAreaElement && !textarea.disabled && textarea.value === '') return { composer_empty: true };
+      return null;
+    };
+    target.__mlxcelPerfActionToPaint = new Promise((resolve, reject) => {
+      let observer: MutationObserver | null = null;
+      let raf = 0;
+      let timeout: number | null = null;
+      let done = false;
+      const cleanup = (): void => {
+        done = true;
+        observer?.disconnect();
+        if (raf) cancelAnimationFrame(raf);
+        if (timeout !== null) window.clearTimeout(timeout);
+      };
+      const settleAfterPaint = (started: number, browserState: Record<string, unknown>): void => {
+        cleanup();
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve({
+          elapsedMs: performance.now() - started,
+          browserState,
+          instrumentation: {
+            clock: 'performance.now',
+            start: 'capturing DOM event listener',
+            end: 'semantic DOM predicate satisfied, then two requestAnimationFrame paints',
+            excludes: 'Playwright assertion polling and driver IPC after the timed browser predicate',
+          },
+        })));
+      };
+      const begin = (): void => {
+        const started = performance.now();
+        const deadline = started + options.timeoutMs;
+        const check = (): void => {
+          if (done) return;
+          try {
+            const browserState = evaluatePredicate(options.predicate);
+            if (browserState !== null) { settleAfterPaint(started, browserState); return; }
+            if (performance.now() > deadline) {
+              cleanup();
+              reject(new Error(`Timed out waiting for ${options.predicate.kind} before paint.`));
+            }
+          } catch (error) {
+            cleanup();
+            reject(error);
+          }
+        };
+        observer = new MutationObserver(check);
+        observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
+        const tick = (): void => { check(); if (!done) raf = requestAnimationFrame(tick); };
+        timeout = window.setTimeout(check, options.timeoutMs + 50);
+        tick();
+      };
+      element.addEventListener(options.eventName, begin, { once: true, capture: true });
     });
-  }, eventName);
+  }, { eventName, predicate, timeoutMs: 1000 });
   await action();
-  const startTime = await locator.page().evaluate(() => {
-    const target = window as Window & { __mlxcelPerfStart?: Promise<number> };
-    if (!target.__mlxcelPerfStart) throw new Error('Performance action listener was not installed.');
-    return target.__mlxcelPerfStart;
+  const browserResult = await page.evaluate(() => {
+    const target = window as Window & { __mlxcelPerfActionToPaint?: Promise<{ elapsedMs: number; browserState: Record<string, unknown>; instrumentation: Record<string, unknown> }> };
+    const pending = target.__mlxcelPerfActionToPaint;
+    delete target.__mlxcelPerfActionToPaint;
+    if (!pending) throw new Error('Performance action listener was not installed.');
+    return pending;
   });
-  const state = await waitForState();
-  const elapsedMs = await locator.page().evaluate((started) => new Promise<number>((resolve) => {
-    requestAnimationFrame(() => requestAnimationFrame(() => resolve(performance.now() - started)));
-  }), startTime);
-  return { elapsedMs, state };
+  const driverStarted = process.hrtime.bigint();
+  const state = await assertState();
+  const driverAssertionMs = Number(process.hrtime.bigint() - driverStarted) / 1_000_000;
+  return { elapsedMs: browserResult.elapsedMs, state, instrumentation: { ...browserResult.instrumentation, browser_state: browserResult.browserState, driver_assertion_wall_ms: driverAssertionMs } };
 }
 
 test('cold product shell is usable within the frontend budget', async ({ page }, testInfo) => {
@@ -152,13 +228,13 @@ test('navigation feedback and status updates stay responsive without layout shif
   api.releaseCatalog();
   await expect(page.getByTestId('models-table')).toBeVisible();
   const activityNav = page.locator('[data-testid="nav-activity"]:visible').first();
-  const activityTiming = await actionToSettledPaintMs(activityNav, () => activityNav.click(), async () => {
+  const activityTiming = await actionToSettledPaintMs(activityNav, () => activityNav.click(), { kind: 'visible-test-id', testId: 'activity-page' }, async () => {
     await expect(page.getByTestId('activity-page')).toBeVisible();
     return { activity_visible: true };
   });
   const feedbackMs = activityTiming.elapsedMs;
   const cls = await page.evaluate(() => (window as Window & { __mlxcelCls?: number }).__mlxcelCls ?? 0);
-  await writeEvidence(testInfo, 'feedback-status-layout-evidence.json', page, { dataset: 'slow catalog status transition plus browser event-to-paint Activity navigation; route fixtures only', feedback_event_to_activity_visible_paint_ms: feedbackMs, feedback_end_state: activityTiming.state, feedback_budget_ms: 100, cumulative_layout_shift: layoutShift ? cls : null, layout_shift_status: layoutShift ? 'measured' : 'not-run-unsupported', validated_schemas: api.validated });
+  await writeEvidence(testInfo, 'feedback-status-layout-evidence.json', page, { dataset: 'slow catalog status transition plus browser event-to-semantic-DOM-to-paint Activity navigation; route fixtures only', feedback_event_to_activity_visible_paint_ms: feedbackMs, feedback_end_state: activityTiming.state, feedback_instrumentation: activityTiming.instrumentation, feedback_budget_ms: 100, cumulative_layout_shift: layoutShift ? cls : null, layout_shift_status: layoutShift ? 'measured' : 'not-run-unsupported', validated_schemas: api.validated });
   expect(feedbackMs).toBeLessThanOrEqual(100);
   if (layoutShift) expect(cls).toBeLessThanOrEqual(0.001);
 });
@@ -173,12 +249,12 @@ test('1000-entry catalog remains searchable and bounded', async ({ page }, testI
   await expect(page.locator('[data-testid="models-table"] tbody tr')).toHaveCount(25);
   const loadedMs = Number(process.hrtime.bigint() - started) / 1_000_000;
   const search = page.getByTestId('models-search');
-  const searchTiming = await actionToSettledPaintMs(search, () => search.fill('0999'), async () => {
+  const searchTiming = await actionToSettledPaintMs(search, () => search.fill('0999'), { kind: 'table-row-count', testId: 'models-table', rowCount: 1, textIncludes: '0999' }, async () => {
     await expect(page.locator('[data-testid="models-table"] tbody tr')).toHaveCount(1);
     return { filtered_rows: 1 };
   }, 'input');
   const searchMs = searchTiming.elapsedMs;
-  await writeEvidence(testInfo, 'catalog-1000-evidence.json', page, { dataset: '1000 schema-validated catalog entries over five 200-entry canonical pages', load_to_table_wall_ms: loadedMs, search_event_to_filtered_table_paint_ms: searchMs, search_end_state: searchTiming.state, feedback_budget_ms: 100, rendered_rows: 25, pages_expected: 5, validated_schemas: api.validated });
+  await writeEvidence(testInfo, 'catalog-1000-evidence.json', page, { dataset: '1000 schema-validated catalog entries over five 200-entry canonical pages', load_to_table_wall_ms: loadedMs, search_event_to_filtered_table_paint_ms: searchMs, search_end_state: searchTiming.state, search_instrumentation: searchTiming.instrumentation, feedback_budget_ms: 100, rendered_rows: 25, pages_expected: 5, validated_schemas: api.validated });
   expect(searchMs).toBeLessThanOrEqual(100);
 });
 
@@ -199,12 +275,12 @@ test('10000-token transcript keeps post-render controls responsive', async ({ pa
   await expect(page.getByRole('status').filter({ hasText: 'Response complete.' })).toBeVisible();
   const renderMs = Number(process.hrtime.bigint() - renderStarted) / 1_000_000;
   const newConversation = page.getByRole('button', { name: 'New conversation', exact: true });
-  const conversationTiming = await actionToSettledPaintMs(newConversation, () => newConversation.click(), async () => {
+  const conversationTiming = await actionToSettledPaintMs(newConversation, () => newConversation.click(), { kind: 'textarea-empty-enabled', selector: 'textarea[aria-label="Message"]' }, async () => {
     await expect(composer).toBeEnabled();
     await expect(composer).toHaveValue('');
     return { composer_empty: true };
   });
   const feedbackMs = conversationTiming.elapsedMs;
-  await writeEvidence(testInfo, 'transcript-10000-evidence.json', page, { dataset: '10000 repeated token streamed transcript fixture; no real inference backend', render_wall_ms: renderMs, post_render_event_to_empty_composer_paint_ms: feedbackMs, post_render_end_state: conversationTiming.state, feedback_budget_ms: 100, validated_schemas: api.validated });
+  await writeEvidence(testInfo, 'transcript-10000-evidence.json', page, { dataset: '10000 repeated token streamed transcript fixture; no real inference backend', render_wall_ms: renderMs, post_render_event_to_empty_composer_paint_ms: feedbackMs, post_render_end_state: conversationTiming.state, post_render_instrumentation: conversationTiming.instrumentation, feedback_budget_ms: 100, validated_schemas: api.validated });
   expect(feedbackMs).toBeLessThanOrEqual(100);
 });
