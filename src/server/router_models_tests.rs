@@ -2019,9 +2019,15 @@ async fn queued_ui_action_rejects_same_id_recreated_before_execution() {
         &[crate::server::router_lifecycle::OperationState::Failed],
     )
     .await;
+    let error = terminal.error.as_ref().expect("operation error");
+    assert_eq!(error.code, "stale_revision");
     assert_eq!(
-        terminal.error.as_ref().map(|error| error.code.as_str()),
-        Some("stale_revision")
+        error
+            .field_errors
+            .as_ref()
+            .and_then(|fields| fields.first())
+            .map(|field| field.field.as_str()),
+        Some("expected_revision")
     );
     pool.set_model_action_before_execute_hook(None);
 }
@@ -2086,11 +2092,133 @@ async fn queued_ui_load_rejects_same_id_recreated_eviction_target_before_executi
         &[crate::server::router_lifecycle::OperationState::Failed],
     )
     .await;
+    let error = terminal.error.as_ref().expect("operation error");
+    assert_eq!(error.code, "stale_revision");
     assert_eq!(
-        terminal.error.as_ref().map(|error| error.code.as_str()),
-        Some("stale_revision")
+        error
+            .field_errors
+            .as_ref()
+            .and_then(|fields| fields.first())
+            .map(|field| field.field.as_str()),
+        Some("expected_revision")
     );
     pool.set_model_action_before_execute_hook(None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn queued_ui_load_rejects_advanced_eviction_target_revision_before_execution() {
+    let cache_root = temp_models_dir("queued-target-revision-advanced");
+    add_fake_model(&cache_root.join("mlx-community"), "resident");
+    add_fake_model(&cache_root.join("mlx-community"), "candidate");
+    let pool = Arc::new(pool_from(
+        RouterSources {
+            models_dir: None,
+            cache: Some(CacheSource::new(cache_root.clone(), FakeDownloader::ok())),
+            presets: Default::default(),
+        },
+        1,
+        true,
+    ));
+    let resident = pool.get("mlx-community/resident").expect("resident");
+    resident.lifecycle.mark_ready();
+    let target_id = resident.ui_model_id.clone();
+    let target_revision = resident.lifecycle_revision();
+    let candidate = pool.get("mlx-community/candidate").expect("candidate");
+    let candidate_id = candidate.ui_model_id.clone();
+    let candidate_revision = candidate.lifecycle_revision();
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+    pool.set_model_action_before_execute_hook(Some(Arc::new(move || {
+        let _ = entered_tx.send(());
+        release_rx
+            .lock()
+            .expect("release receiver mutex")
+            .recv()
+            .expect("release queued action");
+    })));
+
+    let accepted = pool
+        .submit_model_action(
+            &candidate_id,
+            super::RouterModelAction::Load,
+            candidate_revision,
+            "queued-target-revision-advanced-0001",
+            Some(ModelActionEvictionTarget::new(&target_id, target_revision)),
+        )
+        .expect("accepted");
+    entered_rx.recv().expect("background reached hook");
+    let current_candidate = pool
+        .get("mlx-community/candidate")
+        .expect("candidate current");
+    assert!(
+        Arc::ptr_eq(&current_candidate, &candidate),
+        "test must keep the primary candidate registry entry current"
+    );
+    assert_eq!(
+        candidate.lifecycle_revision(),
+        candidate_revision,
+        "test must not advance the primary candidate revision"
+    );
+    resident.lifecycle.mark_loading();
+    resident.lifecycle.mark_ready();
+    assert_ne!(resident.lifecycle_revision(), target_revision);
+    let current_candidate = pool
+        .get("mlx-community/candidate")
+        .expect("candidate current");
+    assert!(Arc::ptr_eq(&current_candidate, &candidate));
+    assert_eq!(candidate.lifecycle_revision(), candidate_revision);
+    release_tx.send(()).expect("release hook");
+
+    let terminal = wait_for_operation_state(
+        &pool,
+        &accepted.operation_id,
+        &[crate::server::router_lifecycle::OperationState::Failed],
+    )
+    .await;
+    let error = terminal.error.as_ref().expect("operation error");
+    assert_eq!(error.code, "stale_revision");
+    assert_eq!(
+        error
+            .field_errors
+            .as_ref()
+            .and_then(|fields| fields.first())
+            .map(|field| field.field.as_str()),
+        Some("eviction_target_expected_revision")
+    );
+    pool.set_model_action_before_execute_hook(None);
+}
+
+#[test]
+fn explicit_eviction_error_retarget_preserves_operation_rejection() {
+    let err = RouterPoolError::OperationRejected(crate::server::router_lifecycle::ErrorBody {
+        code: "stale_revision".to_string(),
+        message: "catalog entry changed; refresh before retrying".to_string(),
+        retryable: true,
+        field_errors: Some(vec![crate::server::router_lifecycle::FieldError {
+            field: "expected_revision".to_string(),
+            code: "stale".to_string(),
+            message: "expected 1 but current revision is 2".to_string(),
+        }]),
+        operation_id: Some("op_model_load_000001".to_string()),
+    });
+
+    let RouterPoolError::OperationRejected(error) =
+        super::retarget_router_error_field(err, "eviction_target_expected_revision")
+    else {
+        panic!("operation rejection must remain an operation rejection");
+    };
+    assert_eq!(error.code, "stale_revision");
+    assert_eq!(error.operation_id.as_deref(), Some("op_model_load_000001"));
+    assert_eq!(
+        error
+            .field_errors
+            .as_ref()
+            .and_then(|fields| fields.first())
+            .map(|field| field.field.as_str()),
+        Some("eviction_target_expected_revision")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -1355,6 +1355,7 @@ impl RouterPool {
         if self.models_max > 0 {
             let mut explicit_victim = eviction_target.cloned();
             while self.running_count() >= self.models_max {
+                let unloading_explicit_victim = explicit_victim.is_some();
                 let (victim, victim_expectation) = if let Some(target) = explicit_victim.take() {
                     self.ensure_entry_is_current(&target.entry, Some(&target.expectation))
                         .map_err(|err| {
@@ -1411,8 +1412,16 @@ impl RouterPool {
                     name,
                     self.models_max
                 );
-                self.unload_entry_arc_with_expected(victim.clone(), victim_expectation.as_ref())
-                    .await?;
+                let unload_result = self
+                    .unload_entry_arc_with_expected(victim.clone(), victim_expectation.as_ref())
+                    .await;
+                if unloading_explicit_victim {
+                    unload_result.map_err(|err| {
+                        retarget_router_error_field(err, "eviction_target_expected_revision")
+                    })?;
+                } else {
+                    unload_result?;
+                }
                 if let Some(report) = eviction_report.as_mut() {
                     report.displaced_model_id = Some(victim.ui_model_id.clone());
                     report.outcome = ModelEvictionOutcome::Displaced;
