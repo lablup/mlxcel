@@ -1,7 +1,15 @@
 // Copyright 2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
-import { expect, test, type Page } from '@playwright/test';
+import { writeFile } from 'node:fs/promises';
+import { expect, test, type Page, type TestInfo } from '@playwright/test';
 import { expectAxeClean, expectSafeLayout } from './browser-assertions';
 import { bootProduct, installMockApi, loginWithMockApi } from './browser-fixtures';
+
+
+async function attachJsonEvidence(testInfo: TestInfo, name: string, value: Record<string, unknown>): Promise<void> {
+  const path = testInfo.outputPath(name);
+  await writeFile(path, JSON.stringify(value, null, 2), { mode: 0o600, flag: 'wx' });
+  await testInfo.attach(name, { path, contentType: 'application/json' });
+}
 
 const engineVariants = [
   {
@@ -24,16 +32,19 @@ const engineVariants = [
   },
 ] as const;
 
+function visibleByTestId(page: Page, testId: string) {
+  return page.locator(`[data-testid="${testId}"]:visible`).first();
+}
+
 async function openNavigationIfNeeded(page: Page, testId: string): Promise<void> {
-  const target = page.getByTestId(testId);
-  if (await target.isVisible()) return;
+  if ((await visibleByTestId(page, testId).count()) > 0) return;
   await page.getByRole('button', { name: /navigation|내비게이션/i }).click();
-  await expect(target).toBeVisible();
+  await expect(visibleByTestId(page, testId)).toBeVisible();
 }
 
 async function navigate(page: Page, testId: string, expectedHash: RegExp): Promise<void> {
   await openNavigationIfNeeded(page, testId);
-  await page.getByTestId(testId).click();
+  await visibleByTestId(page, testId).click();
   await expect(page).toHaveURL(expectedHash);
 }
 
@@ -52,13 +63,13 @@ for (const variant of engineVariants) {
     await navigate(page, 'nav-chat', /#chat$/);
     const composer = page.getByRole('textbox', { name: /Message|메시지/i, exact: true });
     await expect(composer).toBeVisible();
-    await composer.fill('안녕하세요 cross-engine IME');
+    await composer.fill('안녕하세요 cross-engine composition guard');
     const callsBeforeIme = mock.calls.length;
     await composer.dispatchEvent('compositionstart');
     await composer.dispatchEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true, isComposing: true });
     await composer.dispatchEvent('compositionend');
     expect(mock.calls).toHaveLength(callsBeforeIme);
-    await expect(composer).toHaveValue('안녕하세요 cross-engine IME');
+    await expect(composer).toHaveValue('안녕하세요 cross-engine composition guard');
     await expectAxeClean(page);
     await expectSafeLayout(page);
 
@@ -79,9 +90,6 @@ for (const variant of engineVariants) {
     await expectSafeLayout(page);
 
     expect(mock.calls.map((call) => call.auth).join(' ')).not.toContain(`engine-${testInfo.project.name}-${variant.width}`);
-    await testInfo.attach('engine-surface-evidence.json', {
-      body: JSON.stringify({ project: testInfo.project.name, variant: variant.name, viewport: { width: variant.width, height: variant.height }, exercised: ['models', 'chat-ime', 'settings-dialog-keyboard', 'activity'], api_calls: mock.calls.length }),
-      contentType: 'application/json',
-    });
+    await attachJsonEvidence(testInfo, 'engine-surface-evidence.json', { project: testInfo.project.name, variant: variant.name, viewport: { width: variant.width, height: variant.height }, exercised: ['models', 'chat-composition-event-guard', 'settings-dialog-keyboard', 'activity'], api_calls: mock.calls.length });
   });
 }
