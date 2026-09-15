@@ -407,7 +407,7 @@ jobs:
       - name: Test WebUI scaffold
         run: pnpm --dir webui run unit
       - name: Install browser runtime
-        run: pnpm --dir webui exec playwright install --with-deps chromium
+        run: pnpm --dir webui exec playwright install --with-deps chromium firefox webkit
       - name: Install WebUI screenshot fonts
         run: |
           sudo apt-get install -y --no-install-recommends fonts-dejavu-core=2.37-8 fonts-dejavu-extra=2.37-8 fonts-wqy-zenhei=0.9.45-8
@@ -419,16 +419,18 @@ jobs:
           node --version
           pnpm --version
           pnpm --dir webui exec playwright --version
-          pnpm --dir webui exec playwright install --dry-run chromium
+          pnpm --dir webui exec playwright install --dry-run chromium firefox webkit
           fc-match sans-serif || true
           fc-match system-ui || true
           fc-match 'system-ui:weight=bold' || true
           fc-match Arial || true
           fc-list | wc -l
-      - name: Run WebUI browser scaffold
+      - name: Run WebUI Chromium screenshot and accessibility scaffold
         env:
           MLXCEL_WEBUI_FONT_DIAGNOSTICS: '1'
         run: pnpm --dir webui run browser
+      - name: Run WebUI browser engine smoke on Chromium, Firefox, and WebKit
+        run: pnpm --dir webui run browser:all
       - name: Upload WebUI browser screenshots on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -458,6 +460,42 @@ jobs:
         run: python3 -m pip install -r scripts/ci/webui_contract_requirements.txt
       - name: Validate WebUI schema, DTOs, and fixtures
         run: python3 scripts/ci/check_webui_contract.py --self-test
+
+  webui-installed-artifact:
+    name: WebUI installed artifact
+    needs: changes
+    if: github.repository == 'lablup/mlxcel' && (needs.changes.outputs.webui_bundle == 'true' || needs.changes.outputs.rust == 'true')
+    runs-on: GB10
+    permissions:
+      contents: read
+    timeout-minutes: 90
+    env:
+      MLX_CUDA_ARCHITECTURES: "121"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Use a persistent target directory
+        run: |
+          CARGO_TARGET="$HOME/.cargo-target/mlxcel-webui-installed-ci"
+          mkdir -p "$CARGO_TARGET"
+          echo "CARGO_TARGET_DIR=$CARGO_TARGET" >> $GITHUB_ENV
+      - name: Build installed server and CLI artifacts once
+        run: cargo build --profile test-fast --features cuda,webui --bin mlxcel-server --bin mlxcel
+      - name: Verify the installed Rust artifact serves the bundled WebUI
+        env:
+          WEBUI_INSTALLED_EVIDENCE: webui-installed-evidence.json
+        run: |
+          WEBUI_SERVER_BIN="$CARGO_TARGET_DIR/test-fast/mlxcel-server" \
+          WEBUI_CLI_BIN="$CARGO_TARGET_DIR/test-fast/mlxcel" \
+          python3 scripts/webui/verify_installed_artifact.py
+      - name: Upload installed-artifact WebUI evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: webui-installed-artifact-${{ runner.os }}
+          path: webui-installed-evidence.json
+          if-no-files-found: warn
 
   mlx-pin:
     name: MLX pin extraction

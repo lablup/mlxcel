@@ -9,6 +9,8 @@ CARGO := cargo
 RUSTFLAGS := RUSTFLAGS="-C target-cpu=native"
 WEBUI_CONTRACT_PY ?= python3
 WEBUI_BUNDLE_PY ?= python3
+WEBUI_SERVER_BIN ?=
+WEBUI_CLI_BIN ?=
 
 # ----------------------------------------------------------------------------
 # Release accelerator features (platform-aware)
@@ -764,6 +766,56 @@ verify-webui-contract: ## Assert the WebUI API schema, DTOs, and fixtures stay i
 verify-webui-bundle: ## Rebuild the bundled WebUI twice and compare it with checked-in assets (issue #1836)
 	@echo "$(CYAN)[verify] WebUI frontend bundle reproducibility...$(RESET)"
 	@$(WEBUI_BUNDLE_PY) scripts/webui/build_bundle.py --verify
+
+.PHONY: verify-webui-frontend
+verify-webui-frontend: ## Run WebUI lint, typecheck, unit tests, Chromium screenshot gate, and multi-engine browser smoke (issue #1848)
+	@echo "$(CYAN)[verify] WebUI frontend lint/type/unit/browser matrix...$(RESET)"
+	@pnpm --dir webui run typecheck
+	@pnpm --dir webui run lint
+	@pnpm --dir webui run unit
+	@pnpm --dir webui run browser
+	@pnpm --dir webui run browser:all
+
+.PHONY: verify-webui-rust
+verify-webui-rust: ## Run CPU-safe Rust WebUI/router contract tests only; does not run actual model hardware gates (issue #1848)
+	@echo "$(CYAN)[verify] WebUI Rust router contracts...$(RESET)"
+	@for filter in \
+		router_server_security_support \
+		router_server_security_prefix \
+		router_server_security_tests \
+		router_library_integration \
+		router_catalog_route \
+		router_load_profile \
+		app_single_webui_control \
+		server::webui:: ; do \
+		$(CARGO) test --profile test-fast --features metal,accelerate --lib "$$filter" || exit $$?; \
+	done
+
+.PHONY: verify-webui
+verify-webui: verify-webui-contract verify-webui-frontend verify-webui-bundle verify-webui-rust ## CPU-safe WebUI release gate; hardware/Safari/CUDA remain separate evidence (issue #1848)
+	@echo "$(GREEN)[verify] WebUI deterministic gate OK; run the separate hardware/manual/CUDA targets before release$(RESET)"
+
+.PHONY: verify-webui-integration-fake
+verify-webui-integration-fake: ## Opt-in real secured Rust-router + fake model/downloader browser harness; no real checkpoints (issue #1848)
+	@echo "$(CYAN)[verify] WebUI real-router fake-trait browser harness...$(RESET)"
+	@$(CARGO) test --profile test-fast --features metal,accelerate --lib server::router_server::router_webui_playwright_harness_tests::real_router_browser_harness -- --ignored --exact --nocapture
+
+.PHONY: verify-webui-installed
+verify-webui-installed: ## Verify an installed Rust server artifact serves the bundled WebUI; set WEBUI_SERVER_BIN and optionally WEBUI_CLI_BIN (issue #1848)
+	@test -n "$(WEBUI_SERVER_BIN)" || { echo "$(RED)WEBUI_SERVER_BIN=/path/to/mlxcel-server is required$(RESET)"; exit 1; }
+	@echo "$(CYAN)[verify] WebUI installed artifact smoke...$(RESET)"
+	@$(WEBUI_BUNDLE_PY) scripts/webui/verify_installed_artifact.py --server-bin "$(WEBUI_SERVER_BIN)" $(if $(WEBUI_CLI_BIN),--cli-bin "$(WEBUI_CLI_BIN)")
+
+.PHONY: verify-webui-hardware
+verify-webui-hardware: ## Release-only serialized actual-model WebUI gate; requires MLXCEL_REQUIRE_MODELS=1 and root/GPU scheduling (issue #1848)
+	@test "$(MLXCEL_REQUIRE_MODELS)" = "1" || { echo "$(RED)MLXCEL_REQUIRE_MODELS=1 is required; missing checkpoints/hardware are blockers, not skips$(RESET)"; exit 1; }
+	@echo "$(RED)verify-webui-hardware is a root-run evidence bundle: run dense+hybrid/MoE+VLM+public-download acceptance harnesses, Activity hidden/visible overhead, Settings profile reload, Chat Stop/unload, and record docs/webui-integration-matrix.md rows.$(RESET)"
+	@exit 2
+
+.PHONY: verify-webui-cuda
+verify-webui-cuda: ## Release-only CUDA host WebUI smoke; root-run on supported GB10/CUDA host (issue #1848)
+	@echo "$(RED)verify-webui-cuda is intentionally host-specific: build CUDA server artifact, run installed UI-on/UI-off auth/prefix smoke, and record evidence. It is not satisfied by macOS/mock tests.$(RESET)"
+	@exit 2
 
 .PHONY: bump-version
 bump-version: ## Release: set every version-tracking crate to VERSION and sync Cargo.lock (make bump-version VERSION=0.5.0)

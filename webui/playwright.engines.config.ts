@@ -1,17 +1,17 @@
+// Copyright 2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 import { defineConfig, devices } from '@playwright/test';
 
 export default defineConfig({
   testDir: './tests',
-  testIgnore: ['**/csp.spec.ts', '**/chat-real.spec.ts'],
+  testMatch: 'engines.spec.ts',
   fullyParallel: false,
   reporter: 'list',
-  snapshotPathTemplate: '{testDir}/screenshots/{platform}/{arg}{ext}',
   projects: [
     { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+    { name: 'firefox', use: { ...devices['Desktop Firefox'] } },
+    { name: 'webkit', use: { ...devices['Desktop Safari'] } },
   ],
-  use: {
-    baseURL: 'http://127.0.0.1:4173',
-  },
+  use: { baseURL: 'http://127.0.0.1:4173', trace: 'off', screenshot: 'off', video: 'off' },
   webServer: {
     command: 'MLXCEL_WEBUI_OUT_DIR=.playwright-dist pnpm run build && pnpm exec vite preview --outDir .playwright-dist --host 127.0.0.1 --port 4173',
     url: 'http://127.0.0.1:4173',

@@ -70,6 +70,13 @@ type ModelActionBeforeExecuteHook = Arc<dyn Fn() + Send + Sync + 'static>;
 type LoadCurrentCheckBeforeReservationHook = Arc<dyn Fn() + Send + Sync + 'static>;
 #[cfg(test)]
 type LoadAfterReservationHook = Arc<dyn Fn() + Send + Sync + 'static>;
+#[cfg(test)]
+type ModelAppFactory = Arc<
+    dyn Fn(&Path, super::config::ServerConfig) -> anyhow::Result<(AppState, axum::Router)>
+        + Send
+        + Sync
+        + 'static,
+>;
 
 /// b10621 `server_model_status` (the subset an in-process pool reaches;
 /// `downloaded` is upstream's "erase on next reload" marker, which the
@@ -406,6 +413,8 @@ pub struct RouterPool {
         Mutex<Option<LoadCurrentCheckBeforeReservationHook>>,
     #[cfg(test)]
     load_after_reservation_hook: Mutex<Option<LoadAfterReservationHook>>,
+    #[cfg(test)]
+    model_app_factory: Mutex<Option<ModelAppFactory>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -566,6 +575,8 @@ impl RouterPool {
             load_current_check_before_reservation_hook: Mutex::new(None),
             #[cfg(test)]
             load_after_reservation_hook: Mutex::new(None),
+            #[cfg(test)]
+            model_app_factory: Mutex::new(None),
         };
         pool.rescan()?;
         Ok(pool)
@@ -607,6 +618,14 @@ impl RouterPool {
             .load_after_reservation_hook
             .lock()
             .expect("load after-reservation hook mutex poisoned") = hook;
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_model_app_factory_for_tests(&self, factory: Option<ModelAppFactory>) {
+        *self
+            .model_app_factory
+            .lock()
+            .expect("model app factory mutex poisoned") = factory;
     }
 
     /// Build the per-model [`super::config::ServerConfig`] by overlaying the
@@ -1451,9 +1470,21 @@ impl RouterPool {
             entry.path.clone(),
             load_config.unwrap_or_else(|| entry.config.clone()),
         );
-        let built = tokio::task::spawn_blocking(move || build_model_app(&path, config))
-            .await
-            .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())));
+        #[cfg(test)]
+        let factory = self
+            .model_app_factory
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone());
+        let built = tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            if let Some(factory) = factory {
+                return factory(&path, config);
+            }
+            build_model_app(&path, config)
+        })
+        .await
+        .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())));
         match built {
             Ok((state, router)) => {
                 if let Ok(mut guard) = entry.state.lock() {
