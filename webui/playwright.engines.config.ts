@@ -11,7 +11,14 @@ export default defineConfig({
   projects: [
     { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
     { name: 'firefox', use: { ...devices['Desktop Firefox'] } },
-    { name: 'webkit', use: { ...devices['Desktop Safari'] } },
+    { name: 'webkit', testMatch: ['engines.spec.ts'], use: { ...devices['Desktop Safari'] } },
+    // Linux headed WebKit is a supported Playwright mode when the CI command is wrapped in Xvfb.
+    // https://playwright.dev/docs/ci#running-headed
+    {
+      name: 'webkit-headed-performance',
+      testMatch: ['performance.spec.ts'],
+      use: { ...devices['Desktop Safari'], headless: false },
+    },
   ],
   use: { baseURL: 'http://127.0.0.1:4173', trace: 'off', screenshot: 'off', video: 'off' },
   webServer: {

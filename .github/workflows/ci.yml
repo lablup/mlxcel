@@ -434,8 +434,14 @@ jobs:
         env:
           MLXCEL_WEBUI_FONT_DIAGNOSTICS: '1'
         run: pnpm --dir webui run browser
+      - name: Ensure headed WebUI browser display helper
+        run: |
+          if ! command -v xvfb-run >/dev/null 2>&1; then
+            sudo apt-get install -y --no-install-recommends xvfb
+          fi
+          command -v xvfb-run
       - name: Run WebUI browser engine smoke on Chromium, Firefox, and WebKit
-        run: pnpm --dir webui run browser:all
+        run: xvfb-run -a --server-args='-screen 0 1920x1080x24' pnpm --dir webui run browser:all
       - name: Upload WebUI browser screenshots on failure
         if: failure()
         uses: actions/upload-artifact@v4
