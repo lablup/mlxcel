@@ -169,6 +169,27 @@ class InstalledArtifactHelperTests(unittest.TestCase):
     def test_generated_key_zero_wait_status_is_success(self) -> None:
         verify.assert_wait_status_zero(0, "generated-key server")
 
+    def test_headless_explanation_is_not_credential_marker(self) -> None:
+        explanation = b"--webui without --api-key is only allowed on an interactive loopback terminal so the generated session key can be shown once"
+        self.assertFalse(verify.generated_key_marker_present(explanation))
+        emitted = b"mlxcel WebUI session key (shown once): secret-seed"
+        self.assertTrue(verify.generated_key_marker_present(emitted))
+
+    def test_generated_key_format_drift_error_does_not_leak_unknown_secret(self) -> None:
+        transcript = b"format drift generated session key: secret-seed\n"
+        error = verify.generated_key_error("missing-recognized-key", None, transcript)
+        text = str(error)
+        self.assertNotIn("secret-seed", text)
+        self.assertNotIn("format drift", text)
+        self.assertIn("bytes=48", text)
+
+    def test_generated_key_marker_error_does_not_include_recognized_secret(self) -> None:
+        transcript = b"mlxcel WebUI session key (shown once): secret-seed\n"
+        error = verify.generated_key_error("exited-before-key", 1, transcript)
+        text = str(error)
+        self.assertNotIn("secret-seed", text)
+        self.assertIn("credential_marker_present=True", text)
+
 
 if __name__ == "__main__":
     unittest.main()

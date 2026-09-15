@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
 # Copyright 2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
-"""Installed WebUI artifact gate for issue #1848.
-
-The gate launches relocated Rust artifacts, never Vite preview, and verifies the
-model-free bundled WebUI surface for both `mlxcel-server` and `mlxcel serve`:
-authentication, prefixing, public/private route split, CSP/cache headers, UI-off
-regression, feature-off artifacts, generated-key startup, optional TLS, and
-best-effort OS network-denial evidence. It intentionally does not load a model;
-actual checkpoint, browser, Safari/VoiceOver, and GPU gates remain separate.
-"""
 from __future__ import annotations
 import argparse
 import hashlib
@@ -36,6 +27,7 @@ from pathlib import Path
 from typing import Any
 MAX_BODY = 8 * 1024 * 1024
 SECRET_RE = re.compile(r"(Bearer\s+)[A-Za-z0-9._~+/=-]+")
+GENERATED_KEY_RE = re.compile(rb"session key \(shown once\): ([^\s]+)")
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
         return None
@@ -54,6 +46,12 @@ def redact(value: Any, secrets_to_hide: list[str]) -> Any:
     if isinstance(value, dict):
         return {k: redact(v, secrets_to_hide) for k, v in value.items()}
     return value
+def generated_key_marker_present(output: bytes) -> bool:
+    return GENERATED_KEY_RE.search(output) is not None
+def generated_key_error(stage: str, status: int | None, transcript: bytes) -> AssertionError:
+    lines = transcript.count(b"\n") + (1 if transcript else 0)
+    marker = generated_key_marker_present(transcript)
+    return AssertionError(f"generated-key {stage}: status={status} bytes={len(transcript)} lines={lines} credential_marker_present={marker}")
 def write_private(path: Path, body: str) -> None:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w") as fp:
@@ -322,7 +320,10 @@ def run_generated_key(h: Harness, artifact: Artifact) -> None:
     port = free_port()
     cmd = artifact.command + ["--webui", "--host", "127.0.0.1", "--port", str(port), "--api-prefix", "/gen", "--models-dir", str(work / "models"), "--model-store-root", str(work / "store"), "--no-models-autoload"]
     headless = subprocess.run(cmd, cwd=work, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True, timeout=20)
-    assert headless.returncode != 0 and b"session key" not in headless.stdout.lower(), headless.stdout[:2000]
+    if headless.returncode == 0:
+        raise AssertionError("headless keyless WebUI unexpectedly succeeded")
+    if generated_key_marker_present(headless.stdout):
+        raise AssertionError("headless keyless WebUI emitted a generated credential marker")
     pid, fd = pty.fork(); transcript = bytearray(); key: str | None = None; status = 0
     if pid == 0:
         os.chdir(work); os.execve(artifact.command[0], cmd, env)
@@ -332,7 +333,7 @@ def run_generated_key(h: Harness, artifact: Artifact) -> None:
         while time.monotonic() < deadline:
             waited, status = os.waitpid(pid, os.WNOHANG)
             if waited:
-                raise AssertionError(f"generated-key server exited before printing key: {status}; {transcript[-2000:].decode(errors='replace')}")
+                raise generated_key_error("exited-before-key", status, transcript)
             if select.select([fd], [], [], 0.1)[0]:
                 try:
                     transcript.extend(os.read(fd, 65536))
@@ -341,10 +342,11 @@ def run_generated_key(h: Harness, artifact: Artifact) -> None:
                 except OSError:
                     pass
                 assert len(transcript) <= 1024 * 1024, "generated-key terminal output exceeded 1 MiB"
-            match = re.search(rb"session key \(shown once\): ([^\s]+)", transcript)
+            match = GENERATED_KEY_RE.search(transcript)
             if match:
                 key = match.group(1).decode(); h.secrets.append(key); break
-        assert key, transcript.decode(errors="replace")[-2000:]
+        if not key:
+            raise generated_key_error("missing-recognized-key", None, transcript)
         assert request(f"http://127.0.0.1:{port}/gen/ui-api/v1/bootstrap", key=key)[0] == 200
         assert request(f"http://127.0.0.1:{port}/gen/ui-api/v1/bootstrap")[0] == 401
     finally:
