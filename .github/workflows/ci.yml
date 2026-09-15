@@ -604,7 +604,7 @@ jobs:
               try {
                 browser = await chromium.launch({ headless: false });
                 const page = await browser.newPage({ viewport: { width: 700, height: 900 } });
-                await page.setContent("<main id="probe">ready</main>");
+                await page.goto("data:text/html,<main>ready</main>");
                 const geometry = await page.evaluate(() => ({ innerWidth: window.innerWidth, innerHeight: window.innerHeight }));
                 console.log(`headed geometry: ${JSON.stringify(geometry)}`);
                 if (!(geometry.innerWidth > 0 && geometry.innerHeight > 0)) {
