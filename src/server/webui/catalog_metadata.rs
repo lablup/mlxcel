@@ -39,6 +39,10 @@ use super::catalog_types::{
     MAX_CONFIG_BYTES, ModelIdentity, RemovalStatus, SupportStatus, TaskKind,
 };
 
+#[path = "catalog_provider_capabilities.rs"]
+mod provider_capabilities;
+use provider_capabilities::apply_provider_confirmed_capabilities;
+
 pub(super) fn catalog_entry(model: RouterCatalogModel) -> CatalogEntry {
     let metadata = metadata_for(&model.path);
     let complete = metadata.support.complete;
@@ -388,48 +392,6 @@ fn capabilities_for(metadata: &CatalogMetadata, supported: bool) -> Vec<Capabili
             },
         })
         .collect()
-}
-
-fn apply_provider_confirmed_capabilities(
-    entry: &mut CatalogEntry,
-    provider: Option<RouterCatalogProviderCapabilities>,
-) {
-    reset_provider_ready_capabilities(entry);
-    let Some(provider) = provider else { return };
-    for capability in &mut entry.capabilities {
-        if capability.task == TaskKind::VisionInput {
-            capability.available = provider.image_input && entry.supported;
-            capability.reason = if capability.available {
-                None
-            } else if provider.image_input {
-                entry.metadata.support.reason.clone()
-            } else {
-                Some("loaded provider does not advertise image input".to_string())
-            };
-        }
-        if capability.task == TaskKind::AudioTranscription && provider.audio_input {
-            capability.available = entry.supported;
-            capability.reason = if entry.supported {
-                None
-            } else {
-                entry.metadata.support.reason.clone()
-            };
-        }
-    }
-}
-
-fn reset_provider_ready_capabilities(entry: &mut CatalogEntry) {
-    for capability in &mut entry.capabilities {
-        if capability.phase == "provider_ready" {
-            capability.available = false;
-            capability.reason = entry
-                .metadata
-                .support
-                .reason
-                .clone()
-                .or_else(|| Some("provider readiness is confirmed after load".to_string()));
-        }
-    }
 }
 
 fn quantization_from_config(config: &Value) -> Option<String> {

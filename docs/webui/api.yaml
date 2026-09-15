@@ -1839,6 +1839,11 @@
           },
           "eviction_target_id": {
             "$ref": "#/components/schemas/ModelId"
+          },
+          "eviction_target_expected_revision": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Catalog revision of eviction_target_id observed when the user confirmed the eviction; required when eviction_target_id is present and forbidden otherwise."
           }
         }
       },
@@ -1944,6 +1949,13 @@
                 "type": "null"
               }
             ]
+          },
+          "eviction_target_expected_revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
           }
         }
       },

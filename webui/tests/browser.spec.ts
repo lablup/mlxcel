@@ -55,6 +55,9 @@ test.describe('design system gallery and shell', () => {
       await expectSafeLayout(page);
       if (variant.signedIn) await loginWithMockApi(page);
       else await expect(page.getByTestId('auth-login')).toBeVisible();
+      // The authenticated Models operation content has different intrinsic widths.
+      await expectAxeClean(page);
+      await expectSafeLayout(page);
       if (variant.width <= 560) await expectCompactToolbarHitTargets(page);
       await settleAnimationFrame(page);
       await expect(page).toHaveScreenshot(`${variant.name}.png`, { animations: 'disabled', maxDiffPixelRatio: 0.005, threshold: 0.2 });

@@ -1,0 +1,113 @@
+/* Feature layout only; all controls use the shared ui-common token bridge. */
+.models-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 320px);
+  gap: var(--space-6, 24px);
+  align-items: start;
+}
+.models-layout > *,
+.models-library {
+  min-width: 0;
+}
+.models-library .models-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: end;
+}
+.models-toolbar > .ds-field {
+  flex: 1 1 150px;
+}
+.models-library .models-wrap,
+.models-library pre,
+.models-library code,
+.models-library dd,
+.models-library h3,
+.models-library td {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.models-library .ds-inspector {
+  position: static;
+  width: auto;
+}
+.models-library .ds-inspector dd {
+  margin: 4px 0 16px;
+}
+.models-library .ds-inspector dt {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}
+.models-library .models-selected {
+  background: var(--surface-selected, var(--surface-hover));
+}
+.models-library .data-table__cell {
+  vertical-align: top;
+}
+.models-library .data-table__cell:first-child {
+  min-width: 160px;
+  max-width: 320px;
+}
+.models-library .models-pagination {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding-block: 16px;
+}
+.models-operations .ds-list li {
+  display: block;
+}
+.models-operations code {
+  font-size: 0.8rem;
+}
+.models-library summary {
+  cursor: pointer;
+  padding-block: 12px;
+}
+@media (max-width: 1100px) {
+  .models-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.models-library .ds-common-table {
+  max-width: 100%;
+  overflow-x: auto;
+}
+.models-library .data-table__cell .ds-button span {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* A grid item's automatic minimum must not let an opaque operation ID widen
+   the entire screen. Wrap identifiers; do not hide viewport overflow. */
+.models-library {
+  grid-template-columns: minmax(0, 1fr);
+}
+.models-library > *,
+.models-operations,
+.models-operations .ds-list,
+.models-operations li,
+.models-operations li > div {
+  min-width: 0;
+  max-width: 100%;
+}
+.models-operations strong,
+.models-operations p {
+  overflow-wrap: anywhere;
+}
+.models-library .button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.models-layout:not(:has(.ds-inspector)) {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.models-library [data-testid="models-pending-profile"] a {
+  display: inline-block;
+  min-height: 24px;
+  padding-block: 2px;
+}

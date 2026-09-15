@@ -94,6 +94,7 @@ fn lifecycle_coordinator_replays_idempotent_operations() {
         model_id: "mdl_test".to_string(),
         requested_revision: Some(7),
         eviction_target_id: None,
+        eviction_target_expected_revision: None,
     };
 
     let accepted = coordinator
@@ -141,6 +142,7 @@ fn lifecycle_coordinator_replays_idempotent_operations() {
                 model_id: "mdl_test".to_string(),
                 requested_revision: Some(7),
                 eviction_target_id: None,
+                eviction_target_expected_revision: None,
             },
             Some("idem-1"),
             "load:mdl_test:7".to_string(),
@@ -162,6 +164,7 @@ fn lifecycle_coordinator_prunes_idempotency_with_terminal_history() {
                     model_id: format!("mdl_{idx}"),
                     requested_revision: Some(idx),
                     eviction_target_id: None,
+                    eviction_target_expected_revision: None,
                 },
                 Some(&format!("key-{idx}")),
                 format!("load:{idx}"),
@@ -182,6 +185,7 @@ fn lifecycle_coordinator_prunes_idempotency_with_terminal_history() {
                 model_id: "mdl_0".to_string(),
                 requested_revision: Some(0),
                 eviction_target_id: None,
+                eviction_target_expected_revision: None,
             },
             Some("key-0"),
             "load:0".to_string(),
@@ -371,6 +375,7 @@ fn lifecycle_coordinator_lists_gets_and_reports_cancel_unsupported() {
                 model_id: "mdl_test".to_string(),
                 requested_revision: Some(3),
                 eviction_target_id: None,
+                eviction_target_expected_revision: None,
             },
             Some("ops-list-key"),
             "load:mdl_test:3".to_string(),

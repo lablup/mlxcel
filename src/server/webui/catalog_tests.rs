@@ -455,3 +455,6 @@ mod catalog_cache_tests;
 
 #[path = "catalog_contract_tests.rs"]
 mod catalog_contract_tests;
+
+#[path = "catalog_provider_tests.rs"]
+mod catalog_provider_tests;

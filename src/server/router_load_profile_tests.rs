@@ -158,7 +158,7 @@ async fn invalid_profile_is_rejected_before_eviction_or_lifecycle_mutation() {
         RouterModelAction::Load,
         revision,
         "invalid-profile-0001",
-        Some(&entry.ui_model_id),
+        Some(ModelActionEvictionTarget::new(&entry.ui_model_id, revision)),
         Some(UiLoadProfile {
             ctx_size: Some(1),
             ..Default::default()

@@ -86,6 +86,10 @@ fn operation_dynamic(prefix: &str) -> Vec<(String, Dynamic)> {
         ("/target/model_id", Dynamic::ModelId),
         ("/target/requested_revision", Dynamic::Revision),
         ("/target/eviction_target_id", Dynamic::ModelId),
+        (
+            "/target/eviction_target_expected_revision",
+            Dynamic::Revision,
+        ),
         ("/result/model_id", Dynamic::ModelId),
         ("/result/revision", Dynamic::Revision),
         ("/result/eviction/requested_target_id", Dynamic::ModelId),

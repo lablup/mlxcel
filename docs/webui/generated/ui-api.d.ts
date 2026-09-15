@@ -204,6 +204,7 @@ export interface ModelActionRequest {
   readonly idempotency_key: IdempotencyKey;
   readonly load_profile?: LoadProfile;
   readonly eviction_target_id?: ModelId;
+  readonly eviction_target_expected_revision?: number;
 }
 
 export interface DownloadRequest {
@@ -229,6 +230,7 @@ export interface ModelOperationTarget {
   readonly model_id: ModelId;
   readonly requested_revision: number | null;
   readonly eviction_target_id?: ModelId | null;
+  readonly eviction_target_expected_revision?: number | null;
 }
 
 export interface DownloadOperationTarget {
