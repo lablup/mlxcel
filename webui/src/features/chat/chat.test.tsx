@@ -9,6 +9,15 @@ import type { WebUiSnapshot } from '../../api/types';
 import { WebUiHttpError, type ChatStreamHandlers } from '../../api/client';
 import { Chat } from './chat';
 import { replaceConversations } from './session';
+import { useGenerationDefaults } from '../settings/generation-preferences';
+let preferences: ReturnType<typeof useGenerationDefaults>;
+function DefaultsControl(): null { preferences = useGenerationDefaults(); return null; }
+function parameter(name: string, value: string): void {
+ const label = Array.from(host.querySelectorAll('label')).find(item => item.textContent?.startsWith(`Next turn ${name}`));
+ const field = label?.querySelector('input'); if (!field) throw new Error(`Missing parameter ${name}`);
+ act(() => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(field, value); field.dispatchEvent(new Event('input', { bubbles: true })); });
+}
+const completion = async (_id:string,_body:unknown,handlers:ChatStreamHandlers): Promise<void> => { handlers.onFrame({data:JSON.stringify({choices:[{index:0,delta:{content:'Hello'},finish_reason:'stop'}]}),event:'message',id:null,retry:null}); };
 const mocked = vi.hoisted(() => ({ snapshot: null as WebUiSnapshot | null, stream: vi.fn(), select: vi.fn(), runtime: vi.fn() }));
 vi.mock('../../state', () => ({useWebUi:()=>mocked.snapshot,useWebUiActions:()=>({streamChatCompletions:mocked.stream,selectModel:mocked.select,refreshRuntime:mocked.runtime})}));
 let host: HTMLDivElement, root: Root;
@@ -19,9 +28,9 @@ beforeEach(()=>{
  const entry={...catalog.items[0],lifecycle:{...catalog.items[0].lifecycle,state:'ready'},capabilities:[{task:'chat',phase:'provider_ready',available:true,reason:null}]};
  mocked.snapshot={...initialSnapshot(),auth:{status:'authenticated',tokenPresent:true},bootstrap,connection:'ready',catalog:[entry],selectedModelId:entry.identity.id} as WebUiSnapshot;
  mocked.stream.mockReset();mocked.runtime.mockReset();mocked.runtime.mockResolvedValue({measurements:{}});
- host=document.createElement('div');document.body.append(host);root=createRoot(host);act(()=>root.render(<Chat locale="en"/>));
+ host=document.createElement('div');document.body.append(host);root=createRoot(host);act(()=>root.render(<><DefaultsControl/><Chat locale="en"/></>));act(()=>preferences.reset());
 });
-afterEach(()=>{act(()=>root.unmount());host.remove();replaceConversations([]);vi.unstubAllGlobals();});
+afterEach(()=>{act(()=>preferences.reset());act(()=>root.unmount());host.remove();replaceConversations([]);vi.unstubAllGlobals();});
 describe('Chat real component composition',()=>{
  it('sends frozen identity and explicit request parameters, then retains cancelled partial output',async()=>{
   let frame:ChatStreamHandlers|undefined;let signal:AbortSignal|undefined;
@@ -39,7 +48,10 @@ describe('Chat real component composition',()=>{
  });
  it('does not call inference for a response beyond the complete JSON transport budget',async()=>{
   if(mocked.snapshot?.bootstrap)mocked.snapshot={...mocked.snapshot,bootstrap:{...mocked.snapshot.bootstrap,media_limits:{...mocked.snapshot.bootstrap.media_limits,max_body_bytes:10}}};
-  act(()=>root.render(<Chat locale="en"/>));input('Hello');await act(async()=>button('Send').click());expect(mocked.stream).not.toHaveBeenCalled();expect(host.textContent).toContain('complete request exceeds');
+  act(()=>root.render(<Chat locale="en"/>));parameter('max_tokens', '64');input('Hello');await act(async()=>button('Send').click());expect(mocked.stream).not.toHaveBeenCalled();expect(host.textContent).toContain('complete request exceeds');
+  if (mocked.snapshot?.bootstrap) mocked.snapshot = { ...mocked.snapshot, bootstrap: { ...mocked.snapshot.bootstrap, media_limits: { ...mocked.snapshot.bootstrap.media_limits, max_body_bytes: bootstrap.media_limits.max_body_bytes } } };
+  act(()=>root.render(<Chat locale="en"/>)); mocked.stream.mockImplementation(completion);
+  await act(async()=>button('Send').click()); expect(mocked.stream.mock.calls[0][1]).toHaveProperty('max_tokens', 64);
  });
  it('preserves errored partial output without automatic retry on disconnect',async()=>{
   mocked.stream.mockImplementation(async(_id:string,_body:unknown,handlers:ChatStreamHandlers)=>{handlers.onFrame({data:JSON.stringify({choices:[{index:0,delta:{reasoning_content:'Thinking'},finish_reason:null}]}),event:'message',id:null,retry:null});throw new Error('disconnect');});
@@ -61,6 +73,44 @@ describe('Chat real component composition',()=>{
  it('marks an empty completed transport as an error rather than a completed answer',async()=>{
   mocked.stream.mockResolvedValue(undefined);input('Hello');await act(async()=>button('Send').click());
   expect(mocked.stream).toHaveBeenCalledOnce();expect(host.textContent).toContain('Generation failed or disconnected');
+ });
+
+ it('inherits canonical session defaults and consumes valid overrides once', async () => {
+  act(() => preferences.setDefaults({ temperature: 0.7, max_tokens: 32 }));
+  parameter('temperature', '0'); parameter('seed', '0');
+  mocked.stream.mockImplementation(completion);
+  input('First'); await act(async () => button('Send').click());
+  expect(mocked.stream.mock.calls[0][1]).toMatchObject({ temperature: 0, max_tokens: 32, seed: 0 });
+  input('Second'); await act(async () => button('Send').click());
+  expect(mocked.stream.mock.calls[1][1]).toMatchObject({ temperature: 0.7, max_tokens: 32 });
+  expect(mocked.stream.mock.calls[1][1]).not.toHaveProperty('seed');
+  expect(mocked.stream.mock.calls[1][1]).not.toHaveProperty('top_k');
+ });
+ it('rejects invalid drafts without consuming them or silently sending server defaults', async () => {
+  parameter('max_tokens', '-1'); input('Hello');
+  await act(async () => button('Send').click()); expect(mocked.stream).not.toHaveBeenCalled();
+  expect(host.textContent).toContain('outside its supported range');
+  parameter('max_tokens', '64'); parameter('temperature', 'NaN');
+  await act(async () => button('Send').click()); expect(mocked.stream).not.toHaveBeenCalled();
+  parameter('temperature', ''); mocked.stream.mockImplementation(completion);
+  await act(async () => button('Send').click()); expect(mocked.stream.mock.calls[0][1]).toHaveProperty('max_tokens', 64);
+  expect(mocked.stream.mock.calls[0][1]).not.toHaveProperty('temperature');
+ });
+ it('freezes running parameters and identity while changes apply to the next turn', async () => {
+  let finish: (() => void) | undefined;
+  mocked.stream.mockImplementation((_id:string,_body:unknown,handlers:ChatStreamHandlers) => new Promise<void>(resolve => { finish = () => { void completion(_id,_body,handlers); resolve(); }; }));
+  act(() => preferences.setDefaults({ temperature: 0.2 })); input('First'); await act(async () => button('Send').click());
+  const body = structuredClone(mocked.stream.mock.calls[0][1]);
+  act(() => preferences.setDefaults({ temperature: 0.9 })); parameter('max_tokens', '128');
+  const previous = mocked.snapshot?.catalog[0]; if (!previous || !mocked.snapshot) throw new Error('Missing fixture');
+  mocked.snapshot = { ...mocked.snapshot, selectedModelId: 'second', catalog: [...mocked.snapshot.catalog, { ...previous, identity: { ...previous.identity, id: 'second', inference_id: 'second-inference', revision: 42 } }] };
+  act(() => root.render(<><DefaultsControl/><Chat locale="en"/></>));
+  expect(mocked.stream.mock.calls[0][1]).toEqual(body); expect(mocked.stream).toHaveBeenCalledOnce();
+  await act(async () => finish?.()); mocked.stream.mockImplementation(completion);
+  input('Second'); await act(async () => button('Send').click());
+  expect(mocked.stream.mock.calls[1][0]).toBe('second');
+  expect(mocked.stream.mock.calls[1][1]).toMatchObject({model: 'second-inference', temperature: 0.9, max_tokens: 128 });
+  expect(mocked.stream.mock.calls[0][1]).toEqual(body);
  });
 
 });

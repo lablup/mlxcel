@@ -2,6 +2,10 @@
 
 The Chat screen uses the existing authenticated `/v1/chat/completions?autoload=false` transport. Choose a model in the shared picker, load it explicitly in Models, then send a message. The picker is not a load action. Each turn records the opaque model ID, catalog revision, actual inference ID, and numerical request parameters before dispatch. A model change never reroutes the request already running.
 
+## Next-turn parameters
+
+Chat reads the canonical memory-only generation defaults saved in Settings. Open **Parameters for next turn** to override supported numerical fields for one request. Nonblank overrides win over Settings; blank overrides inherit Settings, and fields absent from both are omitted so the server supplies its own defaults. Invalid or nonfinite inputs prevent sending rather than silently falling back. Overrides are consumed only after the browser admits the request, even if transport later fails; edits made while a turn is running apply to the next turn. Clear next-turn overrides does not change Settings or the server. These controls never persist a system prompt or secret.
+
 ## Interaction and cancellation
 
 Enter sends outside IME composition; Shift+Enter inserts a newline. New, rename, delete, system prompt, copy, and explicit edit-and-regenerate are local conversation operations. Editing asks before discarding that response and subsequent turns. Reasoning is collapsed by default; tool calls are inspectable structured text and are never executed. A response must include a finish reason, nonempty content/reasoning/tool data, and a complete SSE stream before it becomes complete. Network errors, authentication loss, navigation and Stop do not retry generation or mark a partial answer successful.
@@ -41,5 +45,7 @@ MLXCEL_CHAT_REAL_MODEL_ID=mdl_opaque_id \
 MLXCEL_CHAT_REAL_ISOLATED=1 \
 pnpm --dir webui exec playwright test --config playwright.chat-real.config.ts
 ```
+
+The harness checks the actual served CSP, blocks unexpected external requests and requires zero CSP violations, then checks automated accessibility and layout on completed and cancelled chat states. It captures the real rendered reply for human semantic review and observes a positive request lease before Stop and zero afterward. The short request uses a 128-token override, and the Stop request uses a 1024-token override; these are bounds, not a guarantee that a model will avoid early EOS. Failure to observe an active request is a failed acceptance, not a skipped pass.
 
 Repeat with a dense and hybrid/MoE checkpoint. For an actual provider-supported VLM, also set `MLXCEL_CHAT_REAL_IMAGE_FILE` to a known local PNG/JPEG/WebP fixture and inspect the captured response for sensible content. Missing configuration fails rather than skips. Manual Safari/VoiceOver and actual native 200% page zoom are deferred to the final integrated session at the maintainer's request, not recorded as passed.

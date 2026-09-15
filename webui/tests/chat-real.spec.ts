@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
+import { expectAxeClean, expectSafeLayout } from './browser-assertions';
 
 /** Root-owned serialized acceptance. Never run on an arbitrary shared server. */
 test('real bundled chat Stop releases the selected model request lease', async ({ page, request }, testInfo) => {
@@ -19,20 +20,39 @@ test('real bundled chat Stop releases the selected model request lease', async (
   };
   const initial = (await readCatalog()).find(entry=>entry.identity.id===modelId);
   expect(initial?.lifecycle.state).toBe('ready');expect(initial?.lifecycle.active_requests).toBe(0);
-  await page.goto(`${base}#chat`);
+  const external: string[] = [];
+  page.on('request', request => {
+    const url = new URL(request.url());
+    if (!['data:', 'blob:'].includes(url.protocol) && url.origin !== target.origin) external.push(request.url());
+  });
+  await page.addInitScript(() => {
+    const violations: string[] = [];
+    Object.defineProperty(window, '__chatCspViolations', { value: violations });
+    document.addEventListener('securitypolicyviolation', event => violations.push(`${event.effectiveDirective}: ${event.blockedURI}`));
+  });
+  const response = await page.goto(`${base}#chat`);
+  expect(response?.ok()).toBe(true);
+  const csp = response?.headers()['content-security-policy'];
+  expect(csp).toMatch(/(?:^|;)\s*style-src 'self'(?:;|$)/);
+  expect(csp).not.toContain("'unsafe-inline'"); expect(csp).not.toContain("'unsafe-eval'");
   await page.getByLabel(/Session key|세션 키/i).fill(token);
   await page.getByRole('button', {name:/Connect|연결/i}).click();
   await page.getByRole('combobox',{name:'Model for next turn'}).click();
   await page.getByRole('option',{name:`${initial?.identity.display_name} · ready`}).click();
+  await page.getByText('Parameters for next turn', { exact: true }).click();
+  await page.getByLabel('Next turn max_tokens', { exact: true }).fill('128');
   const imagePath = process.env.MLXCEL_CHAT_REAL_IMAGE_FILE;
   if (imagePath) await page.getByLabel('Local images', {exact:true}).setInputFiles(imagePath);
   await page.getByRole('textbox',{name:'Message',exact:true}).fill(imagePath ? 'Describe what is visible in this image in one short sentence.' : 'Say Hello in one short sentence.');
   await page.getByRole('button',{name:'Send',exact:true}).click();
   await expect(page.locator('.chat-turn header')).toContainText('complete', {timeout:90000});
   const reply = await page.locator('.chat-markdown').innerText();
-  expect(reply.trim().length).toBeGreaterThan(0);
   await testInfo.attach('real-response.json',{body:JSON.stringify({model_id:modelId,image_input:Boolean(imagePath),reply,evaluation:'Nonempty output observed; root must review whether the content is sensible.'}),contentType:'application/json'});
+  expect(reply.trim().length).toBeGreaterThan(0);
+  await expectSafeLayout(page); await expectAxeClean(page);
+  await testInfo.attach('real-chat-render.png', { body: await page.screenshot({ fullPage: true }), contentType: 'image/png' });
   await page.getByRole('button',{name:'New conversation',exact:true}).click();
+  await page.getByLabel('Next turn max_tokens', { exact: true }).fill('1024');
   await page.getByRole('textbox',{name:'Message',exact:true}).fill('Write a very long numbered explanation of integers from 1 to 10000, without stopping early.');
   await page.getByRole('button',{name:'Send',exact:true}).click();
   await expect.poll(async()=> (await readCatalog()).find(entry=>entry.identity.id===modelId)?.lifecycle.active_requests,{timeout:30000}).toBeGreaterThan(0);
@@ -40,5 +60,9 @@ test('real bundled chat Stop releases the selected model request lease', async (
   await expect(page.locator('.chat-turn header')).toContainText('cancelled');
   await expect.poll(async()=> (await readCatalog()).find(entry=>entry.identity.id===modelId)?.lifecycle.active_requests,{timeout:30000}).toBe(0);
   await expect(page.getByRole('button',{name:'Send',exact:true})).toBeDisabled(); // Empty composer, not a rerun.
+  await expectSafeLayout(page); await expectAxeClean(page);
+  const violations = await page.evaluate(() => Reflect.get(window, '__chatCspViolations'));
+  expect(violations).toEqual([]); expect(external).toEqual([]);
+  await testInfo.attach('real-security-evidence.json', { body: JSON.stringify({ csp, violations, external, axe: 'No violations in completed and cancelled states' }), contentType: 'application/json' });
   await testInfo.attach('real-stop-evidence.json',{body:JSON.stringify({model_id:modelId,scope:'isolated server with no other request producers',initial_active:0,observed_during_positive:true,final_active:0,automatic_retry:false}),contentType:'application/json'});
 });

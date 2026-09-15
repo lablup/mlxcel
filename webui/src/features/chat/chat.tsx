@@ -9,13 +9,15 @@ import { appendFrame, buildMessages, completeTurn, MAX_PROMPT_CHARACTERS } from 
 import { newConversation, replaceConversations, updateConversation, useConversations, sessionGeneration } from './session';
 import { Transcript } from './transcript';
 import { HistoryControls } from './privacy';
+import { useGenerationDefaults } from '../settings/generation-preferences';
+import { resolveTurnParameters, TurnParameters, type TurnParameterDraft } from './parameters';
 import './chat.css';
 
 export function Chat({ locale }: { locale: Locale }): React.JSX.Element {
   const snapshot = useWebUi();
   const actions = useWebUiActions();
-  // Shared Settings defaults are integrated after #1846 merges; empty means server defaults.
-  const defaults: Record<string, number> = {};
+  const { defaults } = useGenerationDefaults();
+  const [parameterDraft, setParameterDraft] = useState<TurnParameterDraft>({});
   const conversations = useConversations();
   const [currentId, setCurrentId] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
@@ -67,12 +69,15 @@ export function Chat({ locale }: { locale: Locale }): React.JSX.Element {
     if (active.current !== null || historyBusy || imagesBusy || !canChat || model === undefined || !draft.trim() || draft.length > MAX_PROMPT_CHARACTERS) return;
     if ((images.length || current?.turns.some((turn) => turn.images.length)) && !canImage) { setError('The selected provider does not confirm vision support. Remove images or select a vision model.'); return; }
     if (current === null && conversations.length >= 50) { setError('Conversation limit reached. Delete or export older conversations first.'); return; }
+    let parameters: Record<string, number>;
+    try { parameters = resolveTurnParameters(defaults, parameterDraft); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : 'Invalid next-turn parameters.'); return; }
     let conversation = current ?? newConversation();
     if (conversation.turns.length >= 100) { setError('This conversation reached its 100-turn limit. Start a new conversation.'); return; }
     setCurrentId(conversation.id);
     const controller = new AbortController();
     const started = performance.now();
-    const turn: ChatTurn = { id: crypto.randomUUID(), modelId: model.identity.id, inferenceId: model.identity.inference_id, modelName: model.identity.display_name, modelRevision: model.identity.revision, prompt: draft, content: '', reasoning: '', tools: [], status: 'streaming', finishReason: null, usage: null, ttftMs: null, elapsedMs: null, error: null, parameters: { ...defaults }, images: images.map((image) => ({ ...image })) };
+    const turn: ChatTurn = { id: crypto.randomUUID(), modelId: model.identity.id, inferenceId: model.identity.inference_id, modelName: model.identity.display_name, modelRevision: model.identity.revision, prompt: draft, content: '', reasoning: '', tools: [], status: 'streaming', finishReason: null, usage: null, ttftMs: null, elapsedMs: null, error: null, parameters, images: images.map((image) => ({ ...image })) };
     conversation = { ...conversation, title: conversation.turns.length === 0 && conversation.title === 'New conversation' ? draft.slice(0, 80) : conversation.title, turns: [...conversation.turns, turn], updatedAt: Date.now() };
     try {
       if (!snapshot.bootstrap) throw new Error('Limits unavailable');
@@ -99,6 +104,7 @@ export function Chat({ locale }: { locale: Locale }): React.JSX.Element {
         setError('Conversation memory budget reached. No further output was retained.');
       }
     } };
+    setParameterDraft({});
     active.current = request; statusEpoch.current++; setBusy(true); setError(null); setDraft(''); setImages([]); request.flush(); setAnnouncement('Generating.');
     try {
       await actions.streamChatCompletions(turn.modelId, body, {
@@ -126,6 +132,7 @@ export function Chat({ locale }: { locale: Locale }): React.JSX.Element {
     <div className="chat-toolbar"><Button onClick={create} disabled={busy || historyBusy || imagesBusy || conversations.length >= 50}>New conversation</Button><Select label="Conversation" value={currentId ?? ''} disabled={busy || historyBusy || imagesBusy} onChange={(id) => { setCurrentId(id); setDraft(''); setImages([]); }} options={[{ value: '', label: 'Choose conversation' }, ...conversations.map((item) => ({ value: item.id, label: item.title }))]} /><Select label="Model for next turn" value={snapshot.selectedModelId ?? ''} onChange={(id) => actions.selectModel(id || null)} options={[{ value: '', label: 'Select a model' }, ...snapshot.catalog.map((item) => ({ value: item.identity.id, label: `${item.identity.display_name} · ${item.lifecycle.state}` }))]} /></div>
     {!canChat ? <ErrorBanner tone="info" title="Choose a ready chat model" body="Selection never loads a model. Load one explicitly in Models. Embeddings, reranking and other tasks use their documented API, not this composer." action={<a href="#models">Open Models</a>} /> : null}
     {current ? <details><summary>Conversation settings</summary><Field label="Conversation name" value={current.title} disabled={busy || historyBusy || imagesBusy} onChange={(title) => updateConversation({ ...current, title: title.slice(0, 120) })} /><label className="ds-field">System prompt<textarea value={current.systemPrompt} maxLength={MAX_PROMPT_CHARACTERS} disabled={busy || historyBusy || imagesBusy} onChange={(event) => updateConversation({ ...current, systemPrompt: event.target.value })} /></label><p>Sampling defaults are set in <a href="#settings">Settings</a> and frozen when sending.</p><Button disabled={busy || historyBusy || imagesBusy} onClick={() => { replaceConversations(conversations.filter((item) => item.id !== current.id)); setCurrentId(null); }}>Delete conversation</Button></details> : null}
+    <TurnParameters defaults={defaults} draft={parameterDraft} onChange={setParameterDraft} />
     <Transcript turns={current?.turns ?? []} onEdit={(index) => {
       if (busy || historyBusy || imagesBusy || current === null || !window.confirm('Edit this prompt and discard this response and all later turns?')) return;
       setDraft(current.turns[index].prompt); setImages(current.turns[index].images);
