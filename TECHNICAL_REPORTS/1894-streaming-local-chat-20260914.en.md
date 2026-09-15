@@ -1,29 +1,35 @@
 # Technical report: PR #1894 — bounded local streaming chat
 
-**Date:** 2026-09-14 · **Status:** Partial; integration and real acceptance pending · **Risk:** Medium · **Languages:** TypeScript/React, Rust
+**Updated:** 2026-09-15 · **Status:** Implementation and scoped real acceptance complete; final epic/manual gates remain · **Risk:** Medium
 
-## Behavior and boundaries
+## Integrated behavior
 
-Chat composes the published npmjs ui-common adapters and the approved shell. It uses the existing authenticated OpenAI streaming handler, snapshots opaque/inference identity and catalog revision per turn, retains partial cancelled/interrupted/error output, separates reasoning and non-executing tool calls, and labels server usage versus client-observed timing. No alternate generator, automatic model loading, tool execution or remote media acquisition is added.
+Chat uses the existing authenticated `/v1/chat/completions?autoload=false` transport and published npm `@lablup/ui-common@0.1.0-alpha.19` adapters. Each turn freezes opaque/inference identity, revision and validated numerical parameters. Canonical memory-only Settings defaults are combined with explicit single-next-turn overrides: blank inherits Settings, absence inherits the server, invalid drafts prevent sending, and accepted requests consume the override. Model selection changes observation and the next turn, never the running inference stream. Logout/session fences and the reader-abort/EOF race fix remain integrated with Settings, Activity and Models.
 
-The small escaped Markdown renderer blocks HTML and remote images, bounds displayed text/blocks and lazily highlights completed local code blocks. Image admission reads actual server limits and applies separate lower browser allocation/request ceilings. Bootstrap now projects the real mode-specific inference body budget: the main application's configured image JSON budget, limited by the router dispatch buffer in pool mode. The 2 MiB administrative budget is deliberately not mistaken for the inference limit. Complete serialized UTF-8 request bytes include transcript, base64 and JSON overhead.
+The IME-safe composer preserves partial cancelled/interrupted/error output, separates collapsed reasoning and non-executing tool inspection, and distinguishes reported usage from client timing estimates. Bounded escaped Markdown blocks raw HTML and remote images; highlighting is lazy and local. Image admission requires provider-confirmed vision capability and validates the complete UTF-8/base64 request against actual mode-specific server limits and the separate 16 MiB browser ceiling, not the administrative 2 MiB limit.
 
-History is memory-only unless explicitly enabled. The strict versioned IndexedDB adapter bounds conversations, turns, bytes and separately consented image persistence, rejects unknown fields/import versions, preserves interrupted restored turns, handles quota errors and supports Clear All. Imports revalidate image headers/dimensions before any preview or replay. Clear/import/load callbacks are fenced against unmount and replacement; mutable request work cannot resurrect cleared sessions. Immutable historical turn byte sizes are cached to avoid serializing an entire origin's history every streaming frame.
+History remains memory-only unless explicitly enabled in bounded, versioned IndexedDB. Imports, quotas, Clear All and late callbacks are guarded; credentials are never persisted and image persistence requires separate consent. System prompts belong to conversations, not shared Settings.
 
-## Review corrections
+## Verification
 
-Independent reviews identified and corrected late history operations, imported-image allocation bypass, pending attachment navigation, ineffective transcript memoization, missing Clipboard API handling, false imported completion, and disabled image admission accidentally blocking text-only chat. A provider-level abort test exposed a separate reader race: cancelling the reader could resolve a pending read before the abort rejection. The shared client now rechecks the abort signal after the race, preventing cancelled transport from appearing as successful EOF.
+Measured source: `9385bcb7ef64386180ea62b3324540eef713a4e2`; server binary SHA256: `b32df976d255ca69d420368dd96130bb93748c5ade02d9f4596abbf580a26058`. Host: Apple M1 Ultra, macOS 27.0 build 26A428. Both test-fast executables built; features were Metal, Accelerate and default WebUI.
 
-Provider selection-only cancellation and submission auth fences are owned by the earlier Settings/Activity PRs. Their duplicate development hunks were explicitly transferred, not stacked into this issue. Final rebase must wire the canonical Settings defaults and local request overrides before acceptance; this checkpoint still uses server defaults. Both independent reviewers retain the selection integration and actual-model validation gates. Manual Safari/VoiceOver/native 200% checks are user-deferred final epic gates, not a repeated per-unit approval request.
+- Passed: 266 Vitest tests/34 files, 17 Node helper tests, type/lint, 49 strict contract fixtures, 18 constructed browser response shapes, deterministic bundle verification and 28 local browser tests. Initial JS gzip is 145,637 bytes; the raw-chunk advisory was not suppressed.
+- Workspace all-target Clippy passed with WebUI enabled and disabled on `988493fc`; all Rust source and every served asset path/SHA256 remained identical at `9385bcb7`, except generated manifest metadata and test/harness changes. This is not a claim of identical executable binaries.
+- Source CI [run 34922431893](https://github.com/lablup/mlxcel/actions/runs/34922431893) passed every executed job, including OpenXLA feature compile. MLX pin extraction, OpenXLA feature link and CUDA sm_70 compile were conditionally skipped, not passed runtime checks.
 
-## Executed evidence
+An isolated secured router with one loaded model, context 8192, parallelism 1 and autoload disabled ran the three checkpoints sequentially. Llama and Granite each answered “Hello.” correctly. Qwen3-VL correctly identified the red square, blue circle and green triangle in the inspected local image fixture. Each observed positive active requests before UI Stop, retained cancelled state, returned to zero without retry, explicitly unloaded with `worker_exit_observed`, and the server exited 0. Actual served CSP, completed/cancelled axe and layout checks passed with no violations or external requests. Selected Llama/Qwen screenshots were visually reviewed without visible clipping; this is not native accessibility acceptance.
 
-- Initial published implementation: 136 frontend unit tests, TypeScript and ESLint passed. Subsequent review-fix targeted tests passed; the final updated aggregate is recorded in the PR handoff.
-- Two CPU-only configured media-limit projection tests and one mounted whole-bootstrap fixture test passed. The projection covers asymmetric image dimensions and distinct router/single body budgets.
-- Scoped `cargo clippy --lib --tests --features metal,accelerate -- -D warnings` passed; the native dependency build emits its existing unused HIP source warning, not a Rust lint failure.
-- Forty-six strict contract fixtures, generated DTO drift, schema negatives, compatibility, crate versions and kernel dtype-key checks passed. Deterministic bundled assets stayed within the existing size budgets and include a local lazy highlighter chunk.
-- No local browser renderer, broad Rust suite or GPU checkpoint inference was executed by this unit. Hosted browser fixtures and an explicitly configured isolated production-browser harness are provided; absent real configuration fails instead of reporting a skipped pass.
+| Checkpoint | Cached config revision | `model.safetensors` SHA256 |
+|---|---|---|
+| Meta-Llama-3.1-8B-Instruct-4bit | `241a666dad6cb93c8ff213d39a7f34a36bf26db4` | `08eff50fa4eb1fe499ead69eaeb4c5177ae82f218da0b55e0e31d7a989debb92` |
+| Granite-4.0-H-Tiny-4bit | `02c8783da0cb171942e30a7dde8acce11fe82e0d` | `fc076be2631a2a6b6ca15cbe742d034f9a2217a73ab1238c351b0358085738ea` |
+| Qwen3-VL-2B-Instruct-4bit | Unknown | `4750d95a2162829e127a94e83ac350d498d02070aab216c4687da48804a06ffb` |
 
-## Remaining root-owned acceptance
+Cached config revisions are recorded provenance, not independently verified whole-checkpoint revisions. Qwen's cached config revision was unavailable and is not inferred. Maintainer-held `chat-9385-actual/result.json` preserves the original capture status; the separate `acceptance-review.json` records the subsequent semantic/visual PASS.
 
-Rebase after #1846/#1847/#1844, connect canonical request defaults and observation-only selection, and repeat final lint/unit/contract/bundle checks. Run hosted light/dark/compact accessibility and 10,000-token-sized fixture rendering; inspect any new actual screenshots without regenerating baselines blindly. Run the documented real browser harness on dense and hybrid/MoE models and a provider-confirmed VLM image, inspect response quality, and verify isolated backend request accounting returns to zero after Stop. These are pending, not replaced by fixture tests or compile success.
+## Corrected instrumentation and remaining scope
+
+The initial Llama acceptance at `988493fc` failed because screenshot caret cleanup left empty `style=""` attributes. The exact installed Playwright function reproduced this in jsdom; the initial axe hypothesis was not confirmed. The helper now exempts only trim-empty attributes while rejecting nonempty CSS, including invalid declaration text. Explicit private mode-0600 evidence files preserve replies before axe and Stop observations before later layout assertions. Product code and CSP strictness were unchanged; the failed attempt was not counted as complete acceptance.
+
+Independent implementation/security/performance/accessibility reviews found no remaining scoped blocker. Broad final workspace Metal verification belongs to #1848; this report does not claim it passed. GPU timeout root-cause investigation is separately deferred. Safari/VoiceOver and actual native 200% page zoom remain explicitly deferred to the integrated manual session, not passed. Reports-only follow-up commits do not change the measured implementation.
