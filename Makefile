@@ -807,15 +807,15 @@ verify-webui-installed: ## Verify an installed Rust server artifact serves the b
 	@$(WEBUI_BUNDLE_PY) scripts/webui/verify_installed_artifact.py --server-bin "$(WEBUI_SERVER_BIN)" $(if $(WEBUI_CLI_BIN),--cli-bin "$(WEBUI_CLI_BIN)")
 
 .PHONY: verify-webui-hardware
-verify-webui-hardware: ## Release-only serialized actual-model WebUI gate; requires MLXCEL_REQUIRE_MODELS=1 and root/GPU scheduling (issue #1848)
+verify-webui-hardware: ## Validate root-run actual-model WebUI evidence JSON; set MLXCEL_REQUIRE_MODELS=1 WEBUI_HARDWARE_EVIDENCE=... (issue #1848)
 	@test "$(MLXCEL_REQUIRE_MODELS)" = "1" || { echo "$(RED)MLXCEL_REQUIRE_MODELS=1 is required; missing checkpoints/hardware are blockers, not skips$(RESET)"; exit 1; }
-	@echo "$(RED)verify-webui-hardware is a root-run evidence bundle: run dense+hybrid/MoE+VLM+public-download acceptance harnesses, Activity hidden/visible overhead, Settings profile reload, Chat Stop/unload, and record docs/webui-integration-matrix.md rows.$(RESET)"
-	@exit 2
+	@test -n "$(WEBUI_HARDWARE_EVIDENCE)" || { echo "$(RED)WEBUI_HARDWARE_EVIDENCE=/path/to/hardware-evidence.json is required$(RESET)"; exit 1; }
+	@WEBUI_HARDWARE_EVIDENCE="$(WEBUI_HARDWARE_EVIDENCE)" python3 -c 'import json, os; path=os.environ["WEBUI_HARDWARE_EVIDENCE"]; data=json.load(open(path, encoding="utf-8")); rows={row.get("id"): row for row in data.get("rows", [])}; required=["dense_generation", "hybrid_or_moe_generation", "vlm_image_generation", "small_public_download", "activity_native_hidden", "startup_and_performance"]; missing=[key for key in required if key not in rows]; bad=[key for key in required if key in rows and rows[key].get("result") != "passed"]; assert not missing, f"missing hardware evidence rows: {missing}"; assert not bad, f"non-passing hardware evidence rows: {bad}"; assert data.get("binary_sha") and data.get("source_commit") and data.get("hardware") and data.get("features"), "binary_sha, source_commit, hardware and features are required"; print(f"validated WebUI hardware evidence: {path}")'
 
 .PHONY: verify-webui-cuda
-verify-webui-cuda: ## Release-only CUDA host WebUI smoke; root-run on supported GB10/CUDA host (issue #1848)
-	@echo "$(RED)verify-webui-cuda is intentionally host-specific: build CUDA server artifact, run installed UI-on/UI-off auth/prefix smoke, and record evidence. It is not satisfied by macOS/mock tests.$(RESET)"
-	@exit 2
+verify-webui-cuda: ## Validate root-run CUDA installed-artifact evidence JSON; set WEBUI_CUDA_EVIDENCE=... on the supported host (issue #1848)
+	@test -n "$(WEBUI_CUDA_EVIDENCE)" || { echo "$(RED)WEBUI_CUDA_EVIDENCE=/path/to/cuda-evidence.json is required$(RESET)"; exit 1; }
+	@WEBUI_CUDA_EVIDENCE="$(WEBUI_CUDA_EVIDENCE)" python3 -c 'import json, os; path=os.environ["WEBUI_CUDA_EVIDENCE"]; data=json.load(open(path, encoding="utf-8")); rows={row.get("id"): row for row in data.get("rows", [])}; required=["cuda_ui_on", "cuda_ui_off", "cuda_installed_artifact"]; missing=[key for key in required if key not in rows]; bad=[key for key in required if key in rows and rows[key].get("result") != "passed"]; assert not missing, f"missing CUDA evidence rows: {missing}"; assert not bad, f"non-passing CUDA evidence rows: {bad}"; assert data.get("binary_sha") and data.get("source_commit") and data.get("host") and data.get("features"), "binary_sha, source_commit, host and features are required"; print(f"validated WebUI CUDA evidence: {path}")'
 
 .PHONY: bump-version
 bump-version: ## Release: set every version-tracking crate to VERSION and sync Cargo.lock (make bump-version VERSION=0.5.0)

@@ -19,8 +19,9 @@
 //! are fake, through existing test-only traits, so authentication, CSP, static
 //! assets, router lifecycle, operations and dispatch remain production code.
 
+use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -36,7 +37,8 @@ use crate::server::router_models::{RouterPool, RouterSources};
 use crate::server::router_presets::PresetCliOverrides;
 use crate::server::{AppState, ChatTemplateProcessor, ModelProvider, ServerStartupConfig};
 
-const ROUTER_KEY: &str = "router-playwright-key";
+const PLAYWRIGHT_TIMEOUT: Duration = Duration::from_secs(240);
+const PLAYWRIGHT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct HarnessDownloader;
 
@@ -110,6 +112,87 @@ fn write_private_key(path: &Path, key: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+fn create_private_output(path: &Path) -> anyhow::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    Ok(std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?)
+}
+
+#[cfg(not(unix))]
+fn create_private_output(path: &Path) -> anyhow::Result<File> {
+    Ok(std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?)
+}
+
+fn default_artifacts_dir(repo_root: &Path) -> PathBuf {
+    repo_root
+        .join("target")
+        .join("webui-router-artifacts")
+        .join(format!("run-{}", uuid::Uuid::new_v4()))
+}
+
+async fn run_playwright(
+    repo_root: &Path,
+    url: &str,
+    key_file: &Path,
+    artifacts: &Path,
+) -> Result<ExitStatus, String> {
+    let stdout_path = artifacts.join("playwright.stdout.log");
+    let stderr_path = artifacts.join("playwright.stderr.log");
+    let stdout = create_private_output(&stdout_path)
+        .map_err(|err| format!("create {}: {err}", stdout_path.display()))?;
+    let stderr = create_private_output(&stderr_path)
+        .map_err(|err| format!("create {}: {err}", stderr_path.display()))?;
+    let mut child = tokio::process::Command::new("pnpm")
+        .current_dir(repo_root)
+        .args([
+            "--dir",
+            "webui",
+            "exec",
+            "playwright",
+            "test",
+            "--config",
+            "playwright.rust-router.config.ts",
+        ])
+        .env("MLXCEL_WEBUI_ROUTER_URL", url)
+        .env("MLXCEL_WEBUI_ROUTER_KEY_FILE", key_file)
+        .env("MLXCEL_WEBUI_ROUTER_ARTIFACTS", artifacts)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|err| {
+            format!(
+                "spawn playwright: {err}; install pnpm dependencies before running this opt-in target"
+            )
+        })?;
+
+    match tokio::time::timeout(PLAYWRIGHT_TIMEOUT, child.wait()).await {
+        Ok(Ok(status)) => Ok(status),
+        Ok(Err(err)) => Err(format!("wait for playwright: {err}")),
+        Err(_) => {
+            let _ = child.start_kill();
+            let reaped = tokio::time::timeout(PLAYWRIGHT_SHUTDOWN_TIMEOUT, child.wait()).await;
+            Err(format!(
+                "playwright timed out after {:?}; kill/reap result: {reaped:?}",
+                PLAYWRIGHT_TIMEOUT
+            ))
+        }
+    }
+}
+
+fn read_artifact_text(path: &Path) -> String {
+    std::fs::read_to_string(path)
+        .unwrap_or_else(|err| format!("<{} unavailable: {err}>", path.display()))
+}
+
 fn add_models_dir_seed(root: &Path) -> anyhow::Result<()> {
     let seed = root.join("seed-local");
     std::fs::create_dir_all(&seed)?;
@@ -146,12 +229,29 @@ fn start_scripted_stream_feeder(
     let stop = Arc::new(AtomicBool::new(false));
     let stop_for_thread = stop.clone();
     let thread = std::thread::spawn(move || {
+        let mut completed_by_handle: Vec<[bool; 2]> = Vec::new();
         while !stop_for_thread.load(Ordering::Relaxed) {
             if let Ok(guard) = handles.lock() {
-                for handle in guard.iter() {
-                    handle.token("router ");
-                    handle.token("harness");
-                    handle.finish();
+                if completed_by_handle.len() < guard.len() {
+                    completed_by_handle.resize(guard.len(), [false, false]);
+                }
+                for (index, handle) in guard.iter().enumerate() {
+                    if handle.cancellation_flag(0).is_some() && !completed_by_handle[index][0] {
+                        handle.token("router ");
+                        handle.token("harness");
+                        handle.finish();
+                        completed_by_handle[index][0] = true;
+                    }
+                    if let Some(cancelled) = handle.cancellation_flag(1)
+                        && !completed_by_handle[index][1]
+                    {
+                        if cancelled.load(Ordering::Relaxed) {
+                            handle.finish();
+                            completed_by_handle[index][1] = true;
+                        } else {
+                            handle.token("streaming ");
+                        }
+                    }
                 }
             }
             std::thread::sleep(Duration::from_millis(25));
@@ -176,13 +276,15 @@ async fn real_router_browser_harness() {
     let cache_root = temp.path().join("model-store");
     let artifacts = std::env::var_os("MLXCEL_WEBUI_ROUTER_ARTIFACTS")
         .map(PathBuf::from)
-        .unwrap_or_else(|| temp.path().join("artifacts"));
+        .unwrap_or_else(|| default_artifacts_dir(&repo_root));
     std::fs::create_dir_all(&models_dir).expect("models dir");
     std::fs::create_dir_all(&cache_root).expect("cache root");
     std::fs::create_dir_all(&artifacts).expect("artifact dir");
     add_models_dir_seed(&models_dir).expect("seed model");
 
-    let api_keys = crate::server::resolve_api_keys(&[ROUTER_KEY.to_string()], &[]).expect("keys");
+    let router_key = format!("router-{}", uuid::Uuid::new_v4());
+    let api_keys =
+        crate::server::resolve_api_keys(std::slice::from_ref(&router_key), &[]).expect("keys");
     let mut startup = ServerStartupConfig {
         webui_enabled: true,
         model_store_root: Some(cache_root.clone()),
@@ -256,35 +358,35 @@ async fn real_router_browser_harness() {
     });
 
     let key_file = temp.path().join("router-key.txt");
-    write_private_key(&key_file, ROUTER_KEY).expect("private key file");
+    write_private_key(&key_file, &router_key).expect("private key file");
     let url = format!("{origin}/lab/webui/");
-    let output = Command::new("pnpm")
-        .current_dir(&repo_root)
-        .args([
-            "--dir",
-            "webui",
-            "exec",
-            "playwright",
-            "test",
-            "--config",
-            "playwright.rust-router.config.ts",
-        ])
-        .env("MLXCEL_WEBUI_ROUTER_URL", &url)
-        .env("MLXCEL_WEBUI_ROUTER_KEY_FILE", &key_file)
-        .env("MLXCEL_WEBUI_ROUTER_ARTIFACTS", &artifacts)
-        .output()
-        .expect("spawn playwright; install pnpm dependencies before running this opt-in target");
+    let playwright_result = run_playwright(&repo_root, &url, &key_file, &artifacts).await;
+
+    let _ = std::fs::remove_file(&key_file);
     let _ = shutdown_tx.send(());
     feeder_stop.store(true, Ordering::Relaxed);
     let _ = feeder_thread.join();
     let served = server.await.expect("server task");
     assert!(served.is_ok(), "server failed: {served:?}");
-    assert!(
-        output.status.success(),
-        "Playwright real-router harness failed with status {:?}; artifacts: {}; stdout:\n{}\nstderr:\n{}",
-        output.status.code(),
-        artifacts.display(),
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+
+    match playwright_result {
+        Ok(status) if status.success() => {}
+        Ok(status) => {
+            panic!(
+                "Playwright real-router harness failed with status {:?}; artifacts: {}; stdout:\n{}\nstderr:\n{}",
+                status.code(),
+                artifacts.display(),
+                read_artifact_text(&artifacts.join("playwright.stdout.log")),
+                read_artifact_text(&artifacts.join("playwright.stderr.log"))
+            );
+        }
+        Err(err) => {
+            panic!(
+                "Playwright real-router harness failed before completion: {err}; artifacts: {}; stdout:\n{}\nstderr:\n{}",
+                artifacts.display(),
+                read_artifact_text(&artifacts.join("playwright.stdout.log")),
+                read_artifact_text(&artifacts.join("playwright.stderr.log"))
+            );
+        }
+    }
 }

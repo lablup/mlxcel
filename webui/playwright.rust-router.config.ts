@@ -10,7 +10,7 @@ if (!['http:', 'https:'].includes(url.protocol) || !['127.0.0.1', 'localhost', '
 
 export default defineConfig({
   testDir: './tests',
-  testMatch: 'router-real.spec.ts',
+  testMatch: '**/router-real.harness.ts',
   fullyParallel: false,
   reporter: 'list',
   outputDir: process.env.MLXCEL_WEBUI_ROUTER_ARTIFACTS,
