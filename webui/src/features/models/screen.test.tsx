@@ -112,7 +112,7 @@ describe('Models workflows', () => {
   it('rejects a stale delete confirmation after another tab changes the revision', async () => {
     render();
     await click('models-delete');
-    await input('models-confirm-name', model().identity.display_name);
+    await input('models-confirm-name', model().identity.id);
     state = { ...state, catalog: [{ ...model(), identity: { ...model().identity, revision: 5 } }] };
     render();
     expect(button('models-confirm-submit').disabled).toBe(true);
@@ -125,7 +125,7 @@ describe('Models workflows', () => {
     await click('models-delete');
     await input('models-confirm-name', 'DELETE');
     expect(button('models-confirm-submit').disabled).toBe(true);
-    await input('models-confirm-name', model().identity.display_name);
+    await input('models-confirm-name', model().identity.id);
     await click('models-confirm-submit');
     expect(actions.removeModel).toHaveBeenCalledWith(
       expect.objectContaining({ model_id: model().identity.id, expected_revision: 4 }),
@@ -182,7 +182,7 @@ describe('Models workflows', () => {
   it('freezes confirmations across a server restart and disables stale mutations', async () => {
     render();
     await click('models-delete');
-    await input('models-confirm-name', model().identity.display_name);
+    await input('models-confirm-name', model().identity.id);
     state = { ...state, serverInstanceId: 'srv_new', connection: 'stale' };
     render();
     expect(button('models-confirm-submit').disabled).toBe(true);
@@ -305,4 +305,37 @@ it('prefers the catalog display name for operation titles and retains opaque ide
     model().identity.display_name,
   );
   expect(host.querySelector('[data-testid="models-operation"]')?.textContent).toContain(model().identity.id);
+});
+
+
+describe('reviewed destructive identity fences', () => {
+  it('requires the exact cache ID rather than a duplicate display name or another entry ID', async () => {
+    const duplicate = { ...model(), identity: { ...model().identity, id: `mdl_${'d'.repeat(43)}` } };
+    state = { ...state, catalog: [model(), duplicate] }; render();
+    await click('models-delete');
+    expect(host.querySelector('[data-testid="models-confirm"]')?.textContent).toContain(model().identity.id);
+    await input('models-confirm-name', model().identity.display_name);
+    expect(button('models-confirm-submit').disabled).toBe(true);
+    await input('models-confirm-name', duplicate.identity.id);
+    expect(button('models-confirm-submit').disabled).toBe(true);
+    await input('models-confirm-name', model().identity.id);
+    await click('models-confirm-submit');
+    expect(actions.removeModel).toHaveBeenCalledWith(expect.objectContaining({ model_id: model().identity.id, expected_revision: 4 }));
+  });
+
+  it('rejects a selected eviction victim whose revision changes while still ready and idle', async () => {
+    const idle = { ...model(), identity: { ...model().identity, id: 'idle-target' }, lifecycle: { ...model().lifecycle, state: 'ready' as const } };
+    state = { ...state, catalog: [model(), idle] };
+    actions.loadModel.mockRejectedValueOnce(new WebUiHttpError(409, { request_id: 'req_full', error: { code: 'conflict', message: 'capacity full', retryable: false } }));
+    render(); await click('models-load');
+    await act(async () => {
+      const select = requireValue(host.querySelector<HTMLSelectElement>('[data-testid="models-eviction-target"]'));
+      select.value = idle.identity.id; select.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(button('models-confirm-submit').disabled).toBe(false);
+    state = { ...state, catalog: [model(), { ...idle, identity: { ...idle.identity, revision: idle.identity.revision + 1 } }] }; render();
+    expect(button('models-confirm-submit').disabled).toBe(true);
+    await click('models-confirm-submit');
+    expect(actions.loadModel).toHaveBeenCalledTimes(1);
+  });
 });

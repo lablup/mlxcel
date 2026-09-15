@@ -105,3 +105,9 @@
 .models-layout:not(:has(.ds-inspector)) {
   grid-template-columns: minmax(0, 1fr);
 }
+
+.models-library [data-testid="models-pending-profile"] a {
+  display: inline-block;
+  min-height: 24px;
+  padding-block: 2px;
+}

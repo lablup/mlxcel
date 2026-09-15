@@ -203,7 +203,7 @@ test('library journey observes operations before load/chat/unload/cache removal'
   await refresh(page);
   await expect(page.getByTestId('models-delete')).toBeEnabled();
   await page.getByTestId('models-delete').click();
-  await page.getByTestId('models-confirm-name').fill(model().identity.display_name);
+  await page.getByTestId('models-confirm-name').fill(model().identity.id);
   await page.getByTestId('models-confirm-submit').click();
   await expect.poll(() => api.posts.length).toBe(4);
   api.finish('delete');

@@ -1,6 +1,6 @@
 // Copyright 2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 import React, { useRef, useState } from 'react';
-import type { CatalogEntry, Operation } from '../../api/types';
+import type { CatalogEntry, LoadProfile, Operation } from '../../api/types';
 import { WebUiHttpError } from '../../api/client';
 import {
   Button,
@@ -15,6 +15,7 @@ import {
 import { t, testId, type Locale } from '../../i18n/catalog';
 import { connectedDetail, lifecycleLabel } from '../../provider-surfaces';
 import { useWebUi, useWebUiActions } from '../../state';
+import { useLoadProfile } from '../settings/load-profiles';
 import { AddModel, ConfirmAction, type Confirmation } from './dialogs';
 import { ModelInspector } from './inspector';
 import { LibraryOperations } from './operations';
@@ -46,6 +47,8 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
   const [add, setAdd] = useState<{ repo: string; revision: string } | null>(null);
   const [copyState, setCopyState] = useState<'copy' | 'copied' | 'copy_failed'>('copy');
   const selected = state.catalog.find((entry) => entry.identity.id === state.selectedModelId);
+  const { profile: selectedProfile } = useLoadProfile(selected?.identity.id ?? null);
+  const { profile: capacityProfile } = useLoadProfile(confirmation?.kind === 'capacity' ? confirmation.entry.identity.id : null);
   const rows = inventory(state.catalog, filter);
   const pages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
   const visiblePage = Math.min(page, pages - 1);
@@ -76,7 +79,7 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
       setBusy(false);
     }
   };
-  const load = (entry: CatalogEntry, evictionTarget?: string): void => {
+  const load = (entry: CatalogEntry, evictionTarget?: string, profile: LoadProfile = selectedProfile): void => {
     if (!canLoad(state, entry)) {
       setError(t(locale, 'models.library.stale'));
       return;
@@ -92,6 +95,7 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
       () =>
         actions.loadModel({
           action: 'load',
+          ...(Object.keys(profile).length ? { load_profile: { ...profile } } : {}),
           model_id: entry.identity.id,
           expected_revision: entry.identity.revision,
           idempotency_key: crypto.randomUUID(),
@@ -108,7 +112,7 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
     if (kind === 'load') load(selected);
     else setConfirmation({ kind, entry: selected, instance: state.serverInstanceId });
   };
-  const confirm = (evictionTarget?: string): void => {
+  const confirm = (evictionTarget?: string, evictionRevision?: number): void => {
     const value = confirmation;
     if (!value || busyRef.current) return;
     if (value.instance !== state.serverInstanceId) {
@@ -131,7 +135,11 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
         return;
       }
       if (value.kind === 'capacity') {
-        load(entry, evictionTarget);
+        if (!evictionCandidates(state, entry.identity.id).some((candidate) => candidate.identity.id === evictionTarget && candidate.identity.revision === evictionRevision)) {
+          setError(t(locale, 'models.library.stale'));
+          return;
+        }
+        load(entry, evictionTarget, capacityProfile);
       } else if (value.kind === 'unload' && canUnload(state, entry))
         void execute(() =>
           actions.unloadModel({
@@ -421,6 +429,7 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
         {selected ? (
           <ModelInspector
             entry={selected}
+            profile={selectedProfile}
             state={state}
             locale={locale}
             busy={busy}

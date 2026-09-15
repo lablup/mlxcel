@@ -21,9 +21,10 @@ export function ConfirmAction({
   locale: Locale;
   busy: boolean;
   onClose: () => void;
-  onConfirm: (target?: string) => void;
+  onConfirm: (target?: string, revision?: number) => void;
 }): React.JSX.Element {
   const [token, setToken] = useState('');
+  const [victimRevision, setVictimRevision] = useState<number>();
   const candidates = value.kind === 'capacity' ? evictionCandidates(state, value.entry.identity.id) : [];
   const name =
     value.kind === 'cancel'
@@ -61,11 +62,13 @@ export function ConfirmAction({
   const valid =
     same &&
     (value.kind === 'delete'
-      ? token === name
-      : value.kind !== 'capacity' || candidates.some((entry) => entry.identity.id === token));
+      ? token === value.entry.identity.id
+      : value.kind !== 'capacity' || candidates.some((entry) => entry.identity.id === token && entry.identity.revision === victimRevision));
   return (
     <Dialog open title={title} onClose={onClose} closeLabel={t(locale, 'common.close')} testId="models-confirm">
       <p>{body}</p>
+      {value.kind === 'delete' ? <code className="models-wrap">{value.entry.identity.id}</code> : null}
+      {value.kind === 'capacity' && token && !valid ? <p role="alert">{t(locale, 'models.library.stale')}</p> : null}
       {!same ? <p role="alert">{t(locale, 'models.library.stale')}</p> : null}
       {value.kind === 'delete' ? (
         <Field
@@ -91,7 +94,7 @@ export function ConfirmAction({
             locale={locale}
             label={t(locale, 'models.library.eviction')}
             value={token}
-            onChange={setToken}
+            onChange={(id) => { setToken(id); setVictimRevision(candidates.find((entry) => entry.identity.id === id)?.identity.revision); }}
             options={[
               { value: '', label: t(locale, 'models.library.choose') },
               ...candidates.map((entry) => ({ value: entry.identity.id, label: entry.identity.display_name })),
@@ -107,7 +110,7 @@ export function ConfirmAction({
           data-testid="models-confirm-submit"
           busy={busy}
           disabled={!valid || busy}
-          onClick={() => onConfirm(value.kind === 'capacity' ? token : undefined)}
+          onClick={() => onConfirm(value.kind === 'capacity' ? token : undefined, victimRevision)}
         >
           {t(locale, value.kind === 'capacity' ? 'models.library.evict_load' : 'models.library.confirm')}
         </Button>

@@ -248,8 +248,8 @@ export const modelStrings = [
   },
   {
     key: 'models.library.confirm_name',
-    en: 'Model name to confirm',
-    ko: '확인용 모델 이름',
+    en: 'Exact cache model ID to confirm',
+    ko: '확인용 정확한 캐시 모델 ID',
     test_id: 'models-library-confirm-name',
   },
   {

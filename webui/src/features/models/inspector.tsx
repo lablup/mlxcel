@@ -1,13 +1,15 @@
 // Copyright 2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 import React from 'react';
-import type { CatalogEntry, WebUiSnapshot } from '../../api/types';
+import type { CatalogEntry, LoadProfile, WebUiSnapshot } from '../../api/types';
 import { Button, Inspector, StatusBadge } from '../../design-system/primitives';
 import { lifecycleLabel } from '../../provider-surfaces';
 import { t, type Locale } from '../../i18n/catalog';
+import { NextLoadProfile } from './next-load-profile';
 import { bytes, canChat, canDelete, canLoad, canUnload } from './policy';
 
 export function ModelInspector({
   entry,
+  profile,
   state,
   locale,
   busy,
@@ -15,6 +17,7 @@ export function ModelInspector({
   onChat,
 }: {
   entry: CatalogEntry;
+  profile: LoadProfile;
   state: WebUiSnapshot;
   locale: Locale;
   busy: boolean;
@@ -35,7 +38,7 @@ export function ModelInspector({
     [t(locale, 'models.library.disk'), bytes(m.disk_bytes, locale)],
     [t(locale, 'models.library.memory'), bytes(m.memory_estimate_bytes, locale)],
     [t(locale, 'models.library.context'), known(typeof context === 'number' ? context : null)],
-    [t(locale, 'models.library.profile'), t(locale, 'models.library.defaults')],
+    [t(locale, 'models.library.profile'), Object.keys(profile).length ? JSON.stringify(profile) : t(locale, 'models.library.defaults')],
     [t(locale, 'models.library.active'), String(entry.lifecycle.active_requests)],
     [t(locale, 'models.library.worker'), bool(entry.lifecycle.worker_exit_observed)],
   ];
@@ -61,6 +64,7 @@ export function ModelInspector({
           </React.Fragment>
         ))}
       </dl>
+      {Object.keys(profile).length ? <NextLoadProfile locale={locale} /> : null}
       <p>{t(locale, 'models.library.tested_help')}</p>
       {[...new Set(reasons)].map((reason) => (
         <p key={reason}>{reason}</p>
