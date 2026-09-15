@@ -54,6 +54,18 @@ async function clients(mode) {
     if (mode === 'hidden') {
       if (cdp === null) throw new Error('Native hidden acceptance requires a headed browser.');
       await cdp.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } });
+      // The window manager applies the iconify asynchronously and the renderer's visibility
+      // change follows it, so a fixed wait cannot tell "the minimize never took effect" apart
+      // from "it has not propagated yet". Poll the genuine document.hidden to a deadline, and
+      // report the window state the browser actually holds when the deadline passes. This
+      // never substitutes a synthetic visibilitychange: only a real hidden document passes.
+      const deadline = Date.now() + 15000;
+      let hidden = await page.evaluate(() => document.hidden);
+      while (!hidden && Date.now() < deadline) { await sleep(250); hidden = await page.evaluate(() => document.hidden); }
+      if (!hidden) {
+        const state = await cdp.send('Browser.getWindowBounds', { windowId }).then((r) => r.bounds.windowState).catch((error) => `unavailable: ${error.message}`);
+        throw new Error(`Native hidden acceptance failed: document.hidden stayed false for 15s after requesting minimize; browser window state is now ${state}. Do not substitute a synthetic event.`);
+      }
     }
     await sleep(500);
     if ((await page.evaluate(() => document.hidden)) !== (mode === 'hidden')) throw new Error(`Actual document visibility did not match ${mode}; do not substitute a synthetic event.`);
