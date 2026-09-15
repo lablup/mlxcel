@@ -588,6 +588,38 @@ jobs:
             echo "::error::Provision Xvfb, openbox, flock, and nvidia-smi on the GB10 runner; this job does not use sudo or skip the native-hidden gate"
             exit 1
           fi
+      # The real-router harness runs headless, but the native-hidden Activity gate below needs a
+      # headed browser with a real window. Those fail differently: a headed launch with no window
+      # server reports a zero-sized content area rather than an error, which the gate only
+      # discovers after starting a server and loading a checkpoint. Probe it here, where the
+      # message names the cause.
+      - name: Probe headed Chromium geometry under a virtual display
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          timeout 90s xvfb-run -a --server-args='-screen 0 1600x1100x24' pnpm --dir webui exec node -e '
+            const { chromium } = require("@playwright/test");
+            (async () => {
+              let browser;
+              try {
+                browser = await chromium.launch({ headless: false });
+                const page = await browser.newPage({ viewport: { width: 700, height: 900 } });
+                await page.setContent("<main id="probe">ready</main>");
+                const geometry = await page.evaluate(() => ({ innerWidth: window.innerWidth, innerHeight: window.innerHeight }));
+                console.log(`headed geometry: ${JSON.stringify(geometry)}`);
+                if (!(geometry.innerWidth > 0 && geometry.innerHeight > 0)) {
+                  throw new Error("headed Chromium reported a zero-sized content area; the virtual display or window manager is not usable");
+                }
+              } finally {
+                if (browser) {
+                  await browser.close();
+                }
+              }
+            })().catch((error) => {
+              console.error(`Headed Chromium probe failed: ${error.message}`);
+              process.exit(1);
+            });
+          '
       - name: Cache Activity checkpoint fixture
         id: activity-fixture-cache
         uses: actions/cache@v6
@@ -665,6 +697,19 @@ jobs:
         with:
           name: webui-activity-performance-${{ runner.os }}
           path: ${{ runner.temp }}/webui-activity-performance-summary.json
+          if-no-files-found: warn
+      # A fail-closed gate whose diagnosis stays on the runner cannot be acted on from a PR.
+      # The harness writes its browser log and a full evidence JSON with the failing condition;
+      # publish both whenever the gate runs, not only when it succeeds.
+      - name: Upload Activity performance diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: webui-activity-performance-diagnostics-${{ runner.os }}
+          path: |
+            ${{ runner.temp }}/webui-activity-performance-full.json
+            ${{ runner.temp }}/mlxcel-activity-performance-*/activity-performance.log
+            ${{ runner.temp }}/mlxcel-activity-performance-*/*.log
           if-no-files-found: warn
 
   mlx-pin:
