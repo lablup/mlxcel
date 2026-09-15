@@ -80,6 +80,18 @@ mod ffi {
         /// value and unpacks it into `(major, minor)`.
         fn gpu_compute_capability(index: i32) -> i32;
 
+        /// Device name MLX publishes for GPU `index` ("AMD Radeon Graphics",
+        /// "NVIDIA GB10"), or "" when the backend does not publish one.
+        fn gpu_device_name(index: i32) -> String;
+
+        /// ROCm `gfx` target of GPU `index` ("gfx1151"), or "" on a backend
+        /// that publishes no architecture string (Metal, CUDA, CPU-only).
+        fn gpu_architecture(index: i32) -> String;
+
+        /// Total device memory of GPU `index` in bytes, or 0 when the backend
+        /// does not publish it.
+        fn gpu_total_memory(index: i32) -> usize;
+
         /// Create a new stream pinned to GPU `index` (0-based, unvalidated).
         fn new_stream_on_gpu_index(index: i32) -> UniquePtr<MlxStream>;
 
@@ -2107,6 +2119,11 @@ mod ffi {
         /// process.
         fn custom_kernels_available() -> bool;
 
+        /// The resolved GPU backend as a small integer: 0 none, 1 Metal,
+        /// 2 CUDA, 3 ROCm. Prefer the safe wrapper
+        /// [`crate::hardware::gpu_backend_kind`], which maps it to an enum.
+        fn gpu_backend_kind() -> i32;
+
         /// True when this backend has a BitLinear kernel port, that is Metal,
         /// CUDA or ROCm (issues #1803, #1862). Separate from
         /// `custom_kernels_available` on purpose: kernels are ported one at a
@@ -3516,6 +3533,7 @@ pub mod dtype;
 // Re-exported through `hardware` so callers have one place to ask about the
 // machine, whichever backend they are on.
 pub mod cuda_arch;
+pub mod rocm_arch;
 
 // The CUDA graph capture budget applied on GB10 (#1798): a pure policy over
 // the compute capability plus the env-wins applier, re-exported through

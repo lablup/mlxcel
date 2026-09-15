@@ -483,6 +483,7 @@ mod tests {
             macos_supports_na: true,
             memory_bandwidth_gbps: 150.0,
             unified_memory_gb: 32,
+            ..Default::default()
         };
 
         // Pass a temp dir — override_params bypasses config.json read.
@@ -510,6 +511,7 @@ mod tests {
             macos_supports_na: false,
             memory_bandwidth_gbps: 100.0,
             unified_memory_gb: 16,
+            ..Default::default()
         };
 
         let tmp = tempfile::tempdir().unwrap();
@@ -530,6 +532,7 @@ mod tests {
             macos_supports_na: false,
             memory_bandwidth_gbps: 100.0,
             unified_memory_gb: 16,
+            ..Default::default()
         };
 
         // Write an index.json with a known total_size (7B FP16 = ~14 GB = 14_000_000_000 bytes).

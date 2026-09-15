@@ -111,7 +111,7 @@ pub(crate) fn load_mllama_vlm(model_path: &Path) -> Result<LoadedModel> {
     // then widen bf16 -> f16 (keeping quantization scales/biases as bf16).
     let mut weights = strip_language_model_prefix(load_vlm_weights_common(model_path, None)?);
     let hw = mlxcel_core::hardware::get_hardware();
-    if hw.silicon_gen != mlxcel_core::hardware::AppleSiliconGen::Unknown {
+    if hw.is_apple_silicon() {
         let had_bf16 = models::convert_bf16_weights_with_keep(&mut weights, |key| {
             key.ends_with(".scales") || key.ends_with(".biases")
         });

@@ -723,30 +723,59 @@ fn resolve_weight_bytes(model_dir: &Path) -> (u64, WeightsSource) {
 ///    `fits = false` for any nonzero `total_bytes`, which is the safe
 ///    direction.
 fn resolve_available_memory(hw: &HardwareCapabilities) -> u64 {
-    // Honour the env var before runtime initialization. `generate` applies the
-    // cap via `initialize_runtime()` before calling the estimator, but `inspect`
-    // and `serve --estimate-memory` intentionally estimate before runtime
-    // bring-up.
-    if let Some(env_limit) = resolve_env_memory_limit_bytes() {
+    resolve_available_memory_from(
+        // Honour the env var before runtime initialization. `generate` applies
+        // the cap via `initialize_runtime()` before calling the estimator, but
+        // `inspect` and `serve --estimate-memory` intentionally estimate
+        // before runtime bring-up.
+        resolve_env_memory_limit_bytes(),
+        // The MLX allocator cap is what generation will actually be limited by
+        // once it runs. Passed as a closure, not a value: reading it forces the
+        // MLX allocator singleton, which on Metal constructs the MTLDevice, and
+        // the whole point of the step above is that an estimate with
+        // MLXCEL_MEMORY_LIMIT set answers without bringing the runtime up.
+        mlxcel_core::memory::memory_limit,
+        hw.unified_memory_gb,
+        || {
+            #[cfg(target_os = "linux")]
+            {
+                read_linux_available_memory_bytes()
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                None
+            }
+        },
+    )
+}
+
+/// The resolution order itself, with every probe passed in.
+///
+/// Split out from [`resolve_available_memory`] so the order can be pinned by
+/// unit tests that do not depend on which backend or host the suite runs on
+/// (issue #1805). The ROCm allocator returns a nonzero `memory_limit()`, so on
+/// an AMD host the walk stops at step 2 and never reaches `/proc/meminfo`;
+/// that measured behavior is what these steps have to keep.
+///
+/// Note that `unified_memory_gb` is Apple-only: `detect_hardware_gpu` leaves it
+/// at 0 on CUDA and ROCm on purpose, so step 3 is reachable only on macOS.
+fn resolve_available_memory_from(
+    env_limit: Option<u64>,
+    mlx_limit: impl FnOnce() -> u64,
+    unified_memory_gb: u32,
+    linux_available: impl FnOnce() -> Option<u64>,
+) -> u64 {
+    if let Some(env_limit) = env_limit {
         return env_limit;
     }
-
-    // Honour an explicit MLX allocator cap first — that's what
-    // generation will actually be limited by once it runs.
-    let mlx_limit = mlxcel_core::memory::memory_limit();
+    let mlx_limit = mlx_limit();
     if mlx_limit > 0 {
         return mlx_limit;
     }
-    if hw.unified_memory_gb > 0 {
-        return (hw.unified_memory_gb as u64) * 1024 * 1024 * 1024;
+    if unified_memory_gb > 0 {
+        return u64::from(unified_memory_gb) * 1024 * 1024 * 1024;
     }
-    #[cfg(target_os = "linux")]
-    {
-        if let Some(b) = read_linux_available_memory_bytes() {
-            return b;
-        }
-    }
-    0
+    linux_available().unwrap_or(0)
 }
 
 fn resolve_env_memory_limit_bytes() -> Option<u64> {
@@ -2511,5 +2540,90 @@ mod tests {
             auto()
         };
         assert_eq!(starved, 0);
+    }
+
+    // ── Available-memory resolution order (issue #1805) ───────────────────────
+    //
+    // These call the pure form, so they pin the same order on Metal, CUDA and
+    // ROCm regardless of what the host's allocator or `/proc/meminfo` says.
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    #[test]
+    fn env_limit_wins_over_every_other_source() {
+        let resolved =
+            resolve_available_memory_from(Some(4 * GIB), || 77 * GIB, 96, || Some(31 * GIB));
+        assert_eq!(
+            resolved,
+            4 * GIB,
+            "MLXCEL_MEMORY_LIMIT is step 1 and must beat the allocator cap, the unified-memory \
+             figure and /proc/meminfo"
+        );
+    }
+
+    #[test]
+    fn the_allocator_cap_wins_when_no_env_limit_is_set() {
+        // This is the ROCm case measured on gfx1151: the allocator reports
+        // 76.80 GiB, so the walk stops here and `/proc/meminfo`'s 31 GiB of
+        // host RAM never enters the estimate.
+        let resolved = resolve_available_memory_from(None, || 77 * GIB, 0, || Some(31 * GIB));
+        assert_eq!(resolved, 77 * GIB);
+    }
+
+    #[test]
+    fn unified_memory_is_step_three_and_only_reachable_on_apple() {
+        // Apple: no env limit, no applied allocator cap, a sysctl figure.
+        assert_eq!(
+            resolve_available_memory_from(None, || 0, 96, || Some(31 * GIB)),
+            96 * GIB
+        );
+        // Off Apple `unified_memory_gb` stays 0 by construction, so the same
+        // inputs fall through to `/proc/meminfo`. If a future change starts
+        // filling that field from device memory, this assertion is what says
+        // the CUDA and ROCm estimate just moved.
+        assert_eq!(
+            resolve_available_memory_from(None, || 0, 0, || Some(31 * GIB)),
+            31 * GIB
+        );
+    }
+
+    #[test]
+    fn nothing_detectable_resolves_to_zero() {
+        // Zero is the safe direction: the preflight then reports `fits = false`
+        // for any nonzero estimate rather than approving a load blindly.
+        assert_eq!(resolve_available_memory_from(None, || 0, 0, || None), 0);
+    }
+
+    #[test]
+    fn an_env_limit_answers_without_touching_the_allocator() {
+        // Reading the MLX allocator cap forces the allocator singleton, which
+        // on Metal constructs the MTLDevice. `inspect` and
+        // `serve --estimate-memory` estimate before runtime bring-up on
+        // purpose, so a set MLXCEL_MEMORY_LIMIT must answer without it.
+        let mut probed = false;
+        let resolved = resolve_available_memory_from(
+            Some(4 * GIB),
+            || {
+                probed = true;
+                77 * GIB
+            },
+            96,
+            || Some(31 * GIB),
+        );
+        assert_eq!(resolved, 4 * GIB);
+        assert!(
+            !probed,
+            "the allocator cap must not be read behind an env limit"
+        );
+    }
+
+    #[test]
+    fn a_zero_allocator_cap_is_unset_not_a_zero_budget() {
+        // MLX reports 0 for "no cap applied". Treating it as a 0-byte budget
+        // would make every model refuse to load on a CPU-only build.
+        assert_eq!(
+            resolve_available_memory_from(None, || 0, 0, || Some(31 * GIB)),
+            31 * GIB
+        );
     }
 }

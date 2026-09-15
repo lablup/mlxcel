@@ -246,7 +246,7 @@ pub(crate) fn load_llmjp_vl(model_path: &Path) -> Result<LoadedModel> {
     let mut weights = load_vlm_weights_common(model_path, None)?;
     weights.retain(|key, _| !key.starts_with(VISION_HEAD_PREFIX));
     let hw = mlxcel_core::hardware::get_hardware();
-    if hw.silicon_gen != mlxcel_core::hardware::AppleSiliconGen::Unknown {
+    if hw.is_apple_silicon() {
         let had_bf16 = models::convert_bf16_weights_with_keep(&mut weights, |key| {
             key.ends_with(".scales") || key.ends_with(".biases")
         });

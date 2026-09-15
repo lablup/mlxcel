@@ -240,7 +240,12 @@ int32_t gpu_compute_capability(int32_t index) {
     // backend populates the two capability keys; Metal and the no-gpu stub
     // return maps without them, which reads as "unknown" here.
     try {
-        const auto& info = mlx::core::device_info(Device(Device::gpu, index));
+        // Name the Device rather than passing a temporary: `device_info`
+        // returns a reference into a thread-local, not into its argument, but
+        // GCC cannot see that and reports -Wdangling-reference on the
+        // temporary form.
+        const Device device(Device::gpu, index);
+        const auto& info = mlx::core::device_info(device);
         auto major = info.find("compute_capability_major");
         auto minor = info.find("compute_capability_minor");
         if (major == info.end() || minor == info.end()) {
@@ -259,6 +264,92 @@ int32_t gpu_compute_capability(int32_t index) {
         // architecture check rather than refusing to start.
         return -1;
     }
+}
+
+namespace {
+
+// The three per-device strings `device_info()` publishes that never change for
+// the life of a device: its name, its architecture, and its total memory.
+//
+// Cached per index rather than read per call. `device_info()` is not the free
+// map lookup it looks like: every backend rebuilds a thread-local copy of the
+// whole map and reissues a memory query on each call (ROCm does
+// hipGetDevice/hipSetDevice/hipMemGetInfo/hipSetDevice, CUDA the NVML or
+// cudaMemGetInfo equivalent). Hardware detection reads all three, so without
+// this the first `get_hardware()` would force three driver round trips and, on
+// CUDA, an NVML load.
+//
+// Only `free_memory` is actually live in that map, and nothing here reads it.
+struct DeviceDescription {
+    std::string name;
+    std::string architecture;
+    size_t total_memory = 0;
+};
+
+const DeviceDescription& device_description(int32_t index) {
+    static std::mutex mutex;
+    static std::map<int32_t, DeviceDescription> cache;
+    std::lock_guard<std::mutex> guard(mutex);
+    auto it = cache.find(index);
+    if (it != cache.end()) {
+        return it->second;
+    }
+    DeviceDescription described;
+    try {
+        // Copy the values out before this scope ends: `device_info` returns a
+        // reference to a thread-local that the next call to it overwrites. The
+        // Device is named rather than passed as a temporary so GCC can see the
+        // returned reference does not point into it (-Wdangling-reference).
+        const Device device(Device::gpu, index);
+        const auto& info = mlx::core::device_info(device);
+        if (auto found = info.find("device_name"); found != info.end()) {
+            if (const auto* value = std::get_if<std::string>(&found->second)) {
+                described.name = *value;
+            }
+        }
+        if (auto found = info.find("architecture"); found != info.end()) {
+            if (const auto* value = std::get_if<std::string>(&found->second)) {
+                described.architecture = *value;
+            }
+        }
+        if (auto found = info.find("total_memory"); found != info.end()) {
+            if (const auto* value = std::get_if<size_t>(&found->second)) {
+                described.total_memory = *value;
+            }
+        }
+    } catch (...) {
+        // A host with no usable device, or an index past the adapter count, is
+        // "not reported", not a crash. `catch (...)` rather than
+        // `catch (const std::exception&)` because this runs under a noexcept
+        // cxx shim, where anything that escapes ends the process.
+        described = DeviceDescription{};
+    }
+    return cache.emplace(index, std::move(described)).first->second;
+}
+
+} // namespace
+
+rust::String gpu_device_name(int32_t index) {
+    // `rust::String` throws on non-UTF-8, and a vendor device name carries no
+    // UTF-8 guarantee, so fall back to empty rather than let it cross a
+    // noexcept boundary.
+    try {
+        return rust::String(device_description(index).name);
+    } catch (...) {
+        return rust::String("");
+    }
+}
+
+rust::String gpu_architecture(int32_t index) {
+    try {
+        return rust::String(device_description(index).architecture);
+    } catch (...) {
+        return rust::String("");
+    }
+}
+
+size_t gpu_total_memory(int32_t index) {
+    return device_description(index).total_memory;
 }
 
 std::unique_ptr<MlxStream> new_stream_on_gpu_index(int32_t index) {
@@ -4837,6 +4928,15 @@ bool gpu_backend_available() {
 // reaching a `fast::cuda_kernel` that throws.
 bool custom_kernels_available() {
     return mlxcel::custom_kernels_available();
+}
+
+// The resolved GPU backend as a small integer, matching
+// `mlxcel::GpuKernelBackend`. Callers that need to know *which* backend read
+// this rather than inferring it from which `device_info()` keys are present:
+// the ROCm backend publishes `compute_capability_major`/`minor` from the gfx
+// target, so key presence alone says "AMD is CUDA" (issue #1805).
+int32_t gpu_backend_kind() {
+    return static_cast<int32_t>(mlxcel::gpu_kernel_backend());
 }
 
 // True when this backend has a BitLinear kernel port. Metal, CUDA and, since

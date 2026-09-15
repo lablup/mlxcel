@@ -313,7 +313,7 @@ pub(crate) fn load_locateanything_vlm(model_path: &Path) -> Result<LoadedModel> 
     // fused projection could concatenate them, at about 190 MB on the released
     // 3B checkpoint; the shared path costs nothing and keeps them packed.
     let hw = mlxcel_core::hardware::get_hardware();
-    let convert_bf16 = hw.silicon_gen != mlxcel_core::hardware::AppleSiliconGen::Unknown;
+    let convert_bf16 = hw.is_apple_silicon();
     convert_plain_bf16_weights(&mut weights, convert_bf16);
 
     // Qwen2 text backbone. Keys arrive as `language_model.model.*`; the Qwen2
@@ -387,7 +387,7 @@ pub(crate) fn load_locateanything_vlm(model_path: &Path) -> Result<LoadedModel> 
 /// stored. Every other bf16 tensor is converted because the M5 JIT crashes on
 /// bf16 inputs.
 ///
-/// `convert_bf16` is `hw.silicon_gen != AppleSiliconGen::Unknown` at the real
+/// `convert_bf16` is `hw.is_apple_silicon()` at the real
 /// call site (the pass is an Apple Silicon optimization); it is a parameter,
 /// rather than read from the host directly here, so the behavior can be pinned
 /// by a test independent of the hardware the test happens to run on.

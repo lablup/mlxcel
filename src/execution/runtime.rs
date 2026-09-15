@@ -96,14 +96,16 @@ pub struct RuntimeSetup {
     pub invalid_device_override: Option<String>,
 }
 
-/// Initialize the runtime, refusing to start when this binary's compiled CUDA
-/// architectures do not cover the GPU in this host (issue #1537).
+/// Initialize the runtime, refusing to start when this binary's compiled GPU
+/// architectures do not cover the GPU in this host (issues #1537, #1805).
 ///
 /// This is the entry point every binary-facing caller uses. The check runs
 /// before any device state is touched, so an incompatible build reports which
 /// architectures it carries and which one it found, instead of continuing to
-/// the first kernel launch and dying there on a CUDA load error that names
-/// neither. It is inert on Metal, on CPU-only builds, and on any CUDA build
+/// the first kernel launch and dying there on a load error that names neither.
+/// Both backends are checked: CUDA compute capabilities (#1537) and HIP `gfx`
+/// targets (#1805). Each check is inert unless its backend is the live one, so
+/// it is inert on Metal, on CPU-only builds, and on any CUDA or ROCm build
 /// whose architecture list does cover the device, which is every supported
 /// configuration.
 ///
@@ -114,19 +116,57 @@ pub struct RuntimeSetup {
 /// Tests and other in-process callers that do not own the process exit path
 /// keep using [`initialize_runtime`], which performs the same setup without the
 /// refusal.
-pub fn initialize_runtime_checked() -> Result<RuntimeSetup, mlxcel_core::hardware::CudaArchMismatch>
-{
+pub fn initialize_runtime_checked() -> Result<RuntimeSetup, GpuArchMismatch> {
     // Trace before the refusal, so `MLXCEL_TRACE_ARCH` still explains an
     // incompatible build rather than going quiet on the one path where the
-    // architecture picture matters most.
+    // architecture picture matters most. Both traces run: each is a no-op
+    // unless its own backend is the live one.
     mlxcel_core::hardware::trace_arch_once();
+    mlxcel_core::rocm_arch::trace_rocm_arch_once();
     let (requested_device, _) =
         resolve_runtime_device(std::env::var(RUNTIME_DEVICE_ENV).ok().as_deref());
     if requested_device.uses_gpu() {
         mlxcel_core::hardware::enforce_cuda_arch_compatibility()?;
+        mlxcel_core::rocm_arch::enforce_rocm_arch_compatibility()?;
     }
     Ok(initialize_runtime())
 }
+
+/// The running GPU is not covered by the architectures this binary carries.
+///
+/// One variant per backend rather than one shared type, because the two
+/// coverage rules are different: CUDA's is an ordering over compute
+/// capabilities with a PTX JIT fallback, HIP's is set membership over `gfx`
+/// targets with no fallback at all (issue #1805). Only one variant is
+/// reachable in a given process, since only one GPU backend resolves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GpuArchMismatch {
+    Cuda(mlxcel_core::hardware::CudaArchMismatch),
+    Rocm(mlxcel_core::rocm_arch::RocmArchMismatch),
+}
+
+impl From<mlxcel_core::hardware::CudaArchMismatch> for GpuArchMismatch {
+    fn from(inner: mlxcel_core::hardware::CudaArchMismatch) -> Self {
+        Self::Cuda(inner)
+    }
+}
+
+impl From<mlxcel_core::rocm_arch::RocmArchMismatch> for GpuArchMismatch {
+    fn from(inner: mlxcel_core::rocm_arch::RocmArchMismatch) -> Self {
+        Self::Rocm(inner)
+    }
+}
+
+impl std::fmt::Display for GpuArchMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cuda(inner) => inner.fmt(f),
+            Self::Rocm(inner) => inner.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for GpuArchMismatch {}
 
 pub fn initialize_runtime() -> RuntimeSetup {
     // Device init is the once-per-process point where the architecture trace

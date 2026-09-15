@@ -194,8 +194,7 @@ pub(crate) fn apply_drafter_load_dtype_policy(weights: &mut WeightMap) {
 ///
 /// Used by: [`apply_drafter_load_dtype_policy`].
 pub fn drafter_bf16_to_f16_at_load() -> bool {
-    let apple_silicon =
-        crate::hardware::get_hardware().silicon_gen != crate::hardware::AppleSiliconGen::Unknown;
+    let apple_silicon = crate::hardware::get_hardware().is_apple_silicon();
     drafter_bf16_to_f16_policy(
         std::env::var_os("MLXCEL_KEEP_BF16").is_some(),
         apple_silicon,

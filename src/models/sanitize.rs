@@ -2030,7 +2030,7 @@ fn is_f16_fragile_family(config: &Value) -> bool {
 /// Non-Apple backends (Unknown silicon_gen) keep bf16 as-is.
 pub(crate) fn should_convert_bf16_to_f16() -> bool {
     let hw = mlxcel_core::hardware::get_hardware();
-    hw.silicon_gen != mlxcel_core::hardware::AppleSiliconGen::Unknown
+    hw.is_apple_silicon()
 }
 
 fn is_gemma3n_model_config(config: &Value) -> bool {

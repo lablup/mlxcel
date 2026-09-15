@@ -562,20 +562,28 @@ mod tests {
 
     /// `gpu_backend_available` answers whether a GPU backend exists, and that
     /// answer does not move with the default device: it is the same before,
-    /// during and after a CPU guard. On Apple Silicon (Metal) it is `true`;
-    /// on a build with neither Metal nor CUDA it is `false`.
+    /// during and after a CPU guard.
+    ///
+    /// The premise is the resolved backend, not "Metal, or CUDA, or CPU-only".
+    /// That enumeration was true while Metal and CUDA were the only GPU
+    /// backends; on ROCm both `metal_is_available()` and `cuda_is_available()`
+    /// are false while a real GPU is present, so the old third branch asserted
+    /// "no GPU backend" on a host that has one (issue #1805).
     #[test]
     fn gpu_backend_available_does_not_track_the_default_device() {
+        use crate::hardware::{GpuBackendKind, gpu_backend_kind};
+
         let _lock = lock_default_device();
         let available = ffi::gpu_backend_available();
-        if crate::metal_is_available() {
-            assert!(
+        match gpu_backend_kind() {
+            GpuBackendKind::None => assert!(
+                !available,
+                "no resolved GPU backend, so none may be reported available"
+            ),
+            kind => assert!(
                 available,
-                "Metal is a GPU backend, so Apple Silicon must report one"
-            );
-        }
-        if !crate::metal_is_available() && !crate::cuda_is_available() {
-            assert!(!available, "a CPU-only build has no GPU backend to report");
+                "{kind:?} is a GPU backend, so one must be reported available"
+            ),
         }
         let baseline = ffi::default_device_is_gpu();
         {

@@ -81,8 +81,18 @@ static COMPUTE_CAPABILITY: OnceLock<Option<(u32, u32)>> = OnceLock::new();
 /// instead of dying first.
 #[must_use]
 pub fn cuda_compute_capability() -> Option<(u32, u32)> {
-    *COMPUTE_CAPABILITY
-        .get_or_init(|| unpack_compute_capability(crate::ffi::gpu_compute_capability(0)))
+    *COMPUTE_CAPABILITY.get_or_init(|| {
+        // The backend gate is not redundant with the key lookup underneath.
+        // MLX's ROCm backend fills `compute_capability_major`/`minor` from the
+        // HIP device properties, so on a gfx1151 host the bridge hands back a
+        // well-formed `(11, 5)` that is not a CUDA compute capability at all,
+        // and `cuda_arch_startup_summary` printed it as `sm_115` for an AMD
+        // device (issue #1805). Only CUDA has a CUDA compute capability.
+        if crate::hardware::gpu_backend_kind() != crate::hardware::GpuBackendKind::Cuda {
+            return None;
+        }
+        unpack_compute_capability(crate::ffi::gpu_compute_capability(0))
+    })
 }
 
 /// Split the bridge's `major * 1000 + minor` packing, mapping the `-1`

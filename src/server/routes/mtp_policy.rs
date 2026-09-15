@@ -96,8 +96,24 @@ pub struct MtpPolicyResponse {
     pub target: Option<String>,
     /// Draft model directory basename.
     pub drafter: Option<String>,
-    /// Coarse hardware-class label, e.g. `"M5-16c"`.
+    /// Coarse hardware-class label, e.g. `"M5-16c"`. Apple-specific by
+    /// construction, so it is `"Unknown-0c"` on every non-Apple host and does
+    /// not distinguish an NVIDIA one from an AMD one. Read `gpu_vendor` and
+    /// `gpu_device` for that.
     pub hardware: Option<String>,
+    /// GPU vendor of the serving host: `"Apple"`, `"Nvidia"`, `"Amd"` or
+    /// `"Unknown"` (issue #1805). Reported separately from `hardware` rather
+    /// than folded into it, because that label is also a persisted policy cache
+    /// key and widening it would discard every profile recorded under the old
+    /// spelling.
+    pub gpu_vendor: String,
+    /// Device name as the backend reports it, e.g. `"AMD Radeon 8060S
+    /// Graphics"`, or `null` when the backend publishes none.
+    pub gpu_device: Option<String>,
+    /// Architecture string in the running backend's own vocabulary: `gfx1151`
+    /// on ROCm, `sm_89` on CUDA, an Apple GPU family string on Metal. Not
+    /// comparable across vendors, so read it together with `gpu_vendor`.
+    pub gpu_architecture: Option<String>,
     /// Draft block size (K) the pairing is keyed on. A consumer showing a
     /// verdict should confirm this matches the K it is showing, because a
     /// verdict profiled at one K does not carry to another.
@@ -139,6 +155,10 @@ pub(crate) fn build_mtp_policy_response(snapshot: Option<MtpPolicySnapshot>) -> 
         MtpPolicySnapshot::unavailable(MtpPolicyUnavailableReason::WorkerNotReady, None)
     });
     let samples_remaining = snapshot.samples_remaining();
+    // Vendor and device come from the live hardware probe rather than the
+    // snapshot: they describe the serving host, not the profiled pairing, and
+    // are reported even when no policy exists yet.
+    let hw = mlxcel_core::hardware::get_hardware();
     MtpPolicyResponse {
         schema_version: MTP_POLICY_SCHEMA_VERSION,
         state: snapshot.status.as_str().to_string(),
@@ -151,6 +171,9 @@ pub(crate) fn build_mtp_policy_response(snapshot: Option<MtpPolicySnapshot>) -> 
         target: snapshot.target,
         drafter: snapshot.drafter,
         hardware: snapshot.hardware,
+        gpu_vendor: format!("{:?}", hw.vendor),
+        gpu_device: (!hw.device_name.is_empty()).then(|| hw.device_name.clone()),
+        gpu_architecture: hw.device_architecture.clone(),
         block_size: snapshot.block_size,
         acceptance_rate: snapshot.acceptance_rate,
         samples: snapshot.samples,

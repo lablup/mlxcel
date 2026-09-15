@@ -384,9 +384,7 @@ fn load_and_sanitize_weights_selectively_keeps_gemma4_text_tensors() {
     let bf16 = weights
         .get("language_model.model.per_layer_projection_norm.weight")
         .unwrap();
-    let expected_bf16_dtype = if mlxcel_core::hardware::get_hardware().silicon_gen
-        != mlxcel_core::hardware::AppleSiliconGen::Unknown
-    {
+    let expected_bf16_dtype = if mlxcel_core::hardware::get_hardware().is_apple_silicon() {
         dtype::FLOAT16
     } else {
         dtype::BFLOAT16

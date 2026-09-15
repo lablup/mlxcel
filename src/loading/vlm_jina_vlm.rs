@@ -64,7 +64,7 @@ pub(crate) fn load_jina_vlm(model_path: &Path) -> Result<LoadedModel> {
     // Apple Silicon runs f16 faster than bf16; quantization planes must stay
     // bf16 or the dequantize kernels reject them.
     let hw = mlxcel_core::hardware::get_hardware();
-    if hw.silicon_gen != mlxcel_core::hardware::AppleSiliconGen::Unknown {
+    if hw.is_apple_silicon() {
         let had_bf16 = models::convert_bf16_weights_with_keep(&mut weights, |key| {
             key.ends_with(".scales") || key.ends_with(".biases")
         });
