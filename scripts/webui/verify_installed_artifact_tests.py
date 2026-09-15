@@ -110,6 +110,40 @@ class InstalledArtifactHelperTests(unittest.TestCase):
         self.assertEqual(result["status"], "enforced")
         self.assertIn("external TCP connect denied", result["negative_control"])
 
+    def test_shutdown_failure_still_deletes_private_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            key = Path(tmp) / "key"
+            verify.write_private(key, "secret\n")
+            def failing_stopper(proc, log_file, log_path):  # type: ignore[no-untyped-def]
+                raise RuntimeError("injected shutdown failure")
+            with self.assertRaises(RuntimeError):
+                verify.stop_proc_with_key_cleanup(object(), object(), Path(tmp) / "log", key, failing_stopper)
+            self.assertFalse(key.exists())
+
+    def test_feature_off_probe_failure_still_deletes_private_key(self) -> None:
+        class Result:
+            returncode = 0
+            stdout = b"unexpected success"
+        def runner(*args, **kwargs):  # type: ignore[no-untyped-def]
+            return Result()
+        with tempfile.TemporaryDirectory() as tmp:
+            key = Path(tmp) / "key"
+            verify.write_private(key, "secret\n")
+            with mock.patch.object(verify, "free_port", return_value=31337):
+                with self.assertRaises(AssertionError):
+                    verify.run_feature_off_probe_with_key_cleanup(["fake"], Path(tmp), key, {}, runner)
+            self.assertFalse(key.exists())
+
+    def test_tls_cleanup_deletes_key_and_cert_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cert = Path(tmp) / "cert.pem"
+            key = Path(tmp) / "key.pem"
+            cert.write_text("cert")
+            verify.write_private(key, "key")
+            verify.cleanup_tls_material(["--ssl-cert-file", str(cert), "--ssl-key-file", str(key)])
+            self.assertFalse(cert.exists())
+            self.assertFalse(key.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

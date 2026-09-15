@@ -515,8 +515,9 @@ jobs:
         run: python3 scripts/webui/verify_installed_artifact_tests.py
       - name: Verify the installed Rust artifact serves the bundled WebUI
         env:
-          WEBUI_INSTALLED_EVIDENCE: webui-installed-evidence.json
+          WEBUI_INSTALLED_EVIDENCE: ${{ runner.temp }}/webui-installed-evidence.json
           WEBUI_NETWORK_SANDBOX: require
+          WEBUI_REQUIRE_TLS: '1'
           WEBUI_BUILD_SOURCE_HEAD: ${{ github.sha }}
           WEBUI_FEATURE_OFF_BUILD_SOURCE_HEAD: ${{ github.sha }}
         run: |
@@ -530,7 +531,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: webui-installed-artifact-${{ runner.os }}
-          path: webui-installed-evidence.json
+          path: ${{ runner.temp }}/webui-installed-evidence.json
           if-no-files-found: error
 
   mlx-pin:

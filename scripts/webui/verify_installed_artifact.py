@@ -170,6 +170,26 @@ def stop_proc(proc: subprocess.Popen[bytes], log_file: Any, log_path: Path) -> d
         close = getattr(log_file, "close", None)
         if close:
             close()
+def stop_proc_with_key_cleanup(proc: subprocess.Popen[bytes], log_file: Any, log_path: Path, key_file: Path, stopper: Any = stop_proc) -> dict[str, Any]:
+    try:
+        return stopper(proc, log_file, log_path)
+    finally:
+        key_file.unlink(missing_ok=True)
+def run_feature_off_probe(command: list[str], work: Path, key_file: Path, env: dict[str, str], runner: Any = subprocess.run) -> None:
+    fail = runner(command + ["--webui", "--host", "127.0.0.1", "--port", str(free_port()), "--api-key-file", str(key_file)], cwd=work, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=20)
+    text = fail.stdout.decode(errors="replace")
+    assert fail.returncode != 0 and "webui" in text.lower(), text
+def run_feature_off_probe_with_key_cleanup(command: list[str], work: Path, key_file: Path, env: dict[str, str], runner: Any = subprocess.run) -> None:
+    try:
+        run_feature_off_probe(command, work, key_file, env, runner)
+    finally:
+        key_file.unlink(missing_ok=True)
+def cleanup_tls_material(tls_extra: list[str] | None) -> None:
+    if not tls_extra:
+        return
+    for flag in ("--ssl-key-file", "--ssl-cert-file"):
+        if flag in tls_extra:
+            Path(tls_extra[tls_extra.index(flag) + 1]).unlink(missing_ok=True)
 def assert_html_and_assets(base: str, key: str, *, https: bool = False) -> dict[str, Any]:
     shell = f"{base}/lab/webui/"
     status, headers, html = request(shell, https=https)
@@ -237,11 +257,10 @@ def run_on_off(h: Harness, artifact: Artifact, *, tls_extra: list[str] | None = 
     proc, log_file, log_path, base = launch(artifact.command, work, key_file, free_port(), work / "empty-models", work / "store", True, extra=["--sse-ping-interval", "5", *(tls_extra or [])], https=https)
     try:
         wait_ready(base, proc, https=https)
-        result = {"label": artifact.name + label_suffix, "command": [artifact.relocated.name, *artifact.command[1:], "<flags>", "--api-key-file", str(key_file)], "public_shell": assert_html_and_assets(base, key, https=https), "private_api": assert_private_api(base, key, https=https)}
+        result = {"label": artifact.name + label_suffix, "command": [artifact.relocated.name, *artifact.command[1:], "<flags>", "--api-key-file", "<private-key-file>"], "public_shell": assert_html_and_assets(base, key, https=https), "private_api": assert_private_api(base, key, https=https)}
         assert not (work / "home/.cache/mlxcel/models").exists(), "model-free startup created cache"
     finally:
-        shutdown = stop_proc(proc, log_file, log_path)
-        key_file.unlink(missing_ok=True)
+        shutdown = stop_proc_with_key_cleanup(proc, log_file, log_path, key_file)
     assert key not in log_path.read_text(errors="replace"), "credential leaked to server log"
     result["shutdown"] = shutdown
     result["no_model_autoload"] = True
@@ -254,8 +273,7 @@ def run_on_off(h: Harness, artifact: Artifact, *, tls_extra: list[str] | None = 
         assert request(f"{base}/lab/webui/")[0] in (401, 404)
         assert request(f"{base}/lab/ui-api/v1/bootstrap", key=key)[0] in (400, 404)
     finally:
-        shutdown = stop_proc(proc, log_file, log_path)
-        key_file.unlink(missing_ok=True)
+        shutdown = stop_proc_with_key_cleanup(proc, log_file, log_path, key_file)
     h.add("webui_off", {"label": artifact.name + label_suffix, "health": 200, "ui_routes_absent": True, "shutdown": shutdown})
 def run_feature_off(h: Harness, artifact: Artifact) -> None:
     work = h.root / f"{artifact.name}-feature-off"
@@ -271,11 +289,9 @@ def run_feature_off(h: Harness, artifact: Artifact) -> None:
         assert request(f"{base}/health")[0] == 200
         assert request(f"{base}/lab/webui/")[0] in (401, 404)
     finally:
-        shutdown = stop_proc(proc, log_file, log_path)
-    fail = subprocess.run(artifact.command + ["--webui", "--host", "127.0.0.1", "--port", str(free_port()), "--api-key-file", str(key_file)], cwd=work, env=clean_env(work / "home", work / "store"), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=20)
-    text = fail.stdout.decode(errors="replace")
-    assert fail.returncode != 0 and "webui" in text.lower(), text
-    key_file.unlink(missing_ok=True)
+        shutdown = stop_proc_with_key_cleanup(proc, log_file, log_path, key_file)
+    write_private(key_file, key + "\n")
+    run_feature_off_probe_with_key_cleanup(artifact.command, work, key_file, clean_env(work / "home", work / "store"))
     h.add("feature_off", {"label": artifact.name, "no_webui_health": 200, "webui_flag_rejected": True, "shutdown": shutdown})
 def generate_tls(work: Path) -> list[str] | None:
     openssl = shutil.which("openssl")
@@ -284,6 +300,9 @@ def generate_tls(work: Path) -> list[str] | None:
     work.mkdir(exist_ok=True)
     cert, key = work / "cert.pem", work / "key.pem"
     subprocess.run([openssl, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=127.0.0.1", "-keyout", str(key), "-out", str(cert), "-days", "1", "-addext", "subjectAltName=IP:127.0.0.1"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+    key.chmod(0o600)
+    if stat.S_IMODE(key.stat().st_mode) != 0o600:
+        raise AssertionError(f"TLS key {key} is not 0600")
     return ["--ssl-cert-file", str(cert), "--ssl-key-file", str(key)]
 def run_generated_key(h: Harness, artifact: Artifact) -> None:
     if platform.system() == "Windows":
@@ -444,7 +463,10 @@ def main() -> int:
             run_on_off(h, artifact)
         tls_extra = generate_tls(root / "tls")
         if tls_extra:
-            run_on_off(h, artifacts[0], tls_extra=tls_extra, https=True, label_suffix="-tls")
+            try:
+                run_on_off(h, artifacts[0], tls_extra=tls_extra, https=True, label_suffix="-tls")
+            finally:
+                cleanup_tls_material(tls_extra)
         else:
             if os.environ.get("WEBUI_REQUIRE_TLS") == "1":
                 raise AssertionError("WEBUI_REQUIRE_TLS=1 but openssl is unavailable for self-signed certificate generation")
