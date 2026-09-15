@@ -12,41 +12,66 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+function hasSpaceOrControls(value: string): boolean {
+  return Array.from(value).some(character => { const code = character.charCodeAt(0); return code <= 32 || code >= 127 && code <= 159; });
+}
+
+function assertUnambiguousPath(path: string): void {
+  if (/[\\?#]/.test(path) || hasSpaceOrControls(path) || path.includes('//')) {
+    throw new Error('WebUI API base must not contain a query, hash, backslash, whitespace, controls or empty path segments.');
+  }
+  for (const segment of path.split('/')) {
+    let decoded: string;
+    try { decoded = decodeURIComponent(segment); }
+    catch { throw new Error('WebUI API base contains an invalid path escape.'); }
+    if (decoded === '.' || decoded === '..') throw new Error('WebUI API base must not contain dot path segments.');
+    // Reject alternate separators and multiple-decoding ambiguity before URL
+    // normalization can silently turn them into a different route authority.
+    if (/[/\\%?#]/.test(decoded) || hasSpaceOrControls(decoded)) throw new Error('WebUI API base contains an ambiguous encoded path segment.');
+  }
+}
+
 export function validateApiBase(input: string | undefined): string {
   const candidate = input ?? apiBaseFromDocument();
-  if (candidate === '') {
-    return '';
-  }
+  if (candidate === '') return '';
   if (!candidate.startsWith('/') || candidate.startsWith('//')) {
     throw new Error('WebUI API base must be a same-origin absolute path.');
   }
-  if (candidate.includes('://') || candidate.includes('?') || candidate.includes('#') || candidate.includes('\\')) {
-    throw new Error('WebUI API base must not contain an origin, query, hash, or backslash.');
-  }
-  const segments = candidate.split('/').filter((segment) => segment.length > 0);
-  if (segments.some((segment) => segment === '.' || segment === '..')) {
-    throw new Error('WebUI API base must not contain dot path segments.');
-  }
-  return `/${segments.map(encodeURIComponent).join('/')}`;
+  assertUnambiguousPath(candidate);
+  // URL pathname encoding preserves existing escapes, unlike encodeURIComponent
+  // applied to an already encoded document prefix. Root denotes no prefix.
+  return new URL(candidate, 'http://webui.invalid').pathname.replace(/\/$/, '');
+}
+
+function prefixFromMount(path: string): string | null {
+  const match = /^(.*)\/webui(?:\/(?:index\.html)?)?$/.exec(path);
+  return match?.[1] ?? null;
 }
 
 export function apiBaseFromDocument(): string {
-  if (typeof document === 'undefined') {
-    return '';
-  }
+  if (typeof document === 'undefined') return '';
   const configured = document.querySelector<HTMLMetaElement>('meta[name="mlxcel-ui-api-base"]')?.content;
-  if (configured !== undefined && configured.length > 0) {
-    return configured;
-  }
+  if (configured !== undefined && configured.length > 0) return validateApiBase(configured);
   const base = document.querySelector<HTMLBaseElement>('base')?.getAttribute('href');
-  if (base === null || base === undefined || base.length === 0) {
-    return '';
+  if (base !== null && base !== undefined && base.length > 0) {
+    // Inspect the raw path first: new URL would erase literal/escaped dot segments.
+    const rawPath = base.replace(/^[a-z][a-z\d+.-]*:\/\/[^/]*/i, '');
+    // A leading literal ./ (or .) is standard same-directory base syntax,
+    // not an API-prefix segment. Encoded dots and parent traversal still fail.
+    assertUnambiguousPath(rawPath === '.' ? '' : rawPath.replace(/^\.\//, ''));
+    const parsed = new URL(base, document.URL);
+    if (parsed.origin !== window.location.origin || parsed.username || parsed.password || parsed.search || parsed.hash) {
+      throw new Error('WebUI document base must stay on the current origin without credentials, query or hash.');
+    }
+    return validateApiBase(prefixFromMount(parsed.pathname) ?? parsed.pathname);
   }
-  const parsed = new URL(base, window.location.origin);
-  if (parsed.origin !== window.location.origin || parsed.search.length > 0 || parsed.hash.length > 0) {
-    throw new Error('WebUI document base must stay on the current origin.');
-  }
-  return parsed.pathname.replace(/\/webui\/?$/, '');
+  // The bundled index has no injected base/meta. Its actual mount supplies the
+  // prefix for initial login; Vite's root preview intentionally stays unprefixed.
+  const path = window.location.pathname;
+  const prefix = prefixFromMount(path);
+  if (prefix === null) return '';
+  assertUnambiguousPath(path);
+  return validateApiBase(prefix);
 }
 
 export function apiPath(apiBase: string, path: string, query?: Readonly<Record<string, string | number | boolean | null | undefined>>): string {
