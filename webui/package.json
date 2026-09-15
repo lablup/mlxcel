@@ -9,7 +9,9 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --max-warnings=0",
     "unit": "node --test scripts/activity-stream.spec.mjs && vitest run",
-    "browser": "playwright test",
+    "browser": "playwright test --project=chromium",
+    "browser:all": "playwright test --config playwright.engines.config.ts",
+    "browser:rust-router": "playwright test --config playwright.rust-router.config.ts",
     "verify-generated": "python3 ../scripts/webui/build_bundle.py --verify"
   },
   "dependencies": {

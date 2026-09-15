@@ -14,7 +14,15 @@ const modelId = required('WEBUI_PERF_MODEL_ID');
 const output = required('WEBUI_PERF_OUTPUT');
 const prompt = process.env.WEBUI_PERF_PROMPT_FILE ? await readFile(process.env.WEBUI_PERF_PROMPT_FILE, 'utf8') : 'Explain the difference between a process and a thread, in detail. '.repeat(100);
 const modeConfig = performanceMode(process.env.WEBUI_PERF_MODE);
-const browser = await chromium.launch({ headless: modeConfig.headless });
+// Playwright's default Chromium arguments include --disable-backgrounding-occluded-windows and
+// --disable-renderer-backgrounding, which exist to keep ordinary tests deterministic by refusing
+// to treat a backgrounded window as hidden. That is the exact behaviour this gate measures: with
+// them on, a window the browser reports as `minimized` still reports document.hidden === false.
+// Drop only those two for the headed run. --disable-background-timer-throttling stays on, so a
+// hidden client that sends no observation request has to owe that to the application's own
+// backoff rather than to Chrome throttling its timers.
+const hiddenVisibilitySuppressingArgs = ['--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding'];
+const browser = await chromium.launch(modeConfig.headless ? { headless: true } : { headless: false, ignoreDefaultArgs: hiddenVisibilitySuppressingArgs });
 const preflight = [];
 const results = [];
 let uiRequests = 0;
@@ -54,6 +62,35 @@ async function clients(mode) {
     if (mode === 'hidden') {
       if (cdp === null) throw new Error('Native hidden acceptance requires a headed browser.');
       await cdp.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } });
+      // The window manager applies the iconify asynchronously and the renderer's visibility
+      // change follows it, so a fixed wait cannot tell "the minimize never took effect" apart
+      // from "it has not propagated yet". Poll the genuine document.hidden to a deadline, and
+      // report the window state the browser actually holds when the deadline passes. This
+      // never substitutes a synthetic visibilitychange: only a real hidden document passes.
+      const deadline = Date.now() + 15000;
+      let hidden = await page.evaluate(() => document.hidden);
+      while (!hidden && Date.now() < deadline) { await sleep(250); hidden = await page.evaluate(() => document.hidden); }
+      if (!hidden) {
+        // Dropping the two visibility-suppressing launch arguments was not enough, so the next
+        // question is whether this browser propagates any real visibility change at all, or only
+        // refuses the window-manager iconify. Report three facts rather than guessing again:
+        // the command line actually in force (so a launch-argument change is verified, not
+        // assumed), the visibility state the page holds, and whether foregrounding a second tab
+        // in the same context makes this page report hidden through Chrome's own tab path.
+        const state = await cdp.send('Browser.getWindowBounds', { windowId }).then((r) => r.bounds.windowState).catch((error) => `unavailable: ${error.message}`);
+        const commandLine = await cdp.send('Browser.getBrowserCommandLine').then((r) => r.arguments.filter((a) => a.includes('background') || a.includes('occlu')).join(' ') || 'no backgrounding-related arguments').catch((error) => `unavailable: ${error.message}`);
+        const visibilityState = await page.evaluate(() => document.visibilityState);
+        let tabSwitchHidden;
+        try {
+          const sibling = await context.newPage();
+          await sibling.goto('data:text/html,<main>foreground</main>');
+          await sibling.bringToFront();
+          await sleep(1500);
+          tabSwitchHidden = String(await page.evaluate(() => document.hidden));
+          await sibling.close();
+        } catch (error) { tabSwitchHidden = `unavailable: ${error.message}`; }
+        throw new Error(`Native hidden acceptance failed: document.hidden stayed false for 15s after requesting minimize. windowState=${state}; visibilityState=${visibilityState}; backgrounding arguments in force=[${commandLine}]; document.hidden after foregrounding a sibling tab=${tabSwitchHidden}. Do not substitute a synthetic event.`);
+      }
     }
     await sleep(500);
     if ((await page.evaluate(() => document.hidden)) !== (mode === 'hidden')) throw new Error(`Actual document visibility did not match ${mode}; do not substitute a synthetic event.`);

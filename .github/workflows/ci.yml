@@ -158,8 +158,13 @@ jobs:
             webui_bundle:
               - 'webui/**'
               - 'src/webui/assets/**'
-              - 'src/server/webui/**'
+              - 'src/server/**'
+              - 'src/cli/**'
+              - 'src/bin/mlx_server.rs'
+              - 'src/main.rs'
+              - 'tests/fixtures/webui/**'
               - 'scripts/webui/**'
+              - 'scripts/ci/*webui*'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'Makefile'
@@ -407,7 +412,7 @@ jobs:
       - name: Test WebUI scaffold
         run: pnpm --dir webui run unit
       - name: Install browser runtime
-        run: pnpm --dir webui exec playwright install --with-deps chromium
+        run: pnpm --dir webui exec playwright install --with-deps chromium firefox webkit
       - name: Install WebUI screenshot fonts
         run: |
           sudo apt-get install -y --no-install-recommends fonts-dejavu-core=2.37-8 fonts-dejavu-extra=2.37-8 fonts-wqy-zenhei=0.9.45-8
@@ -419,16 +424,24 @@ jobs:
           node --version
           pnpm --version
           pnpm --dir webui exec playwright --version
-          pnpm --dir webui exec playwright install --dry-run chromium
+          pnpm --dir webui exec playwright install --dry-run chromium firefox webkit
           fc-match sans-serif || true
           fc-match system-ui || true
           fc-match 'system-ui:weight=bold' || true
           fc-match Arial || true
           fc-list | wc -l
-      - name: Run WebUI browser scaffold
+      - name: Run WebUI Chromium screenshot and accessibility scaffold
         env:
           MLXCEL_WEBUI_FONT_DIAGNOSTICS: '1'
         run: pnpm --dir webui run browser
+      - name: Ensure headed WebUI browser display helper
+        run: |
+          if ! command -v xvfb-run >/dev/null 2>&1; then
+            sudo apt-get install -y --no-install-recommends xvfb
+          fi
+          command -v xvfb-run
+      - name: Run WebUI browser engine smoke on Chromium, Firefox, and WebKit
+        run: xvfb-run -a --server-args='-screen 0 1920x1080x24' pnpm --dir webui run browser:all
       - name: Upload WebUI browser screenshots on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -458,6 +471,246 @@ jobs:
         run: python3 -m pip install -r scripts/ci/webui_contract_requirements.txt
       - name: Validate WebUI schema, DTOs, and fixtures
         run: python3 scripts/ci/check_webui_contract.py --self-test
+
+  webui-installed-artifact:
+    name: WebUI installed artifact
+    needs: changes
+    if: github.repository == 'lablup/mlxcel' && (needs.changes.outputs.webui_bundle == 'true' || needs.changes.outputs.rust == 'true')
+    runs-on: GB10
+    permissions:
+      contents: read
+    timeout-minutes: 90
+    env:
+      MLX_CUDA_ARCHITECTURES: "121"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Use a persistent target directory
+        run: |
+          CARGO_TARGET="$HOME/.cargo-target/mlxcel-webui-installed-ci"
+          mkdir -p "$CARGO_TARGET"
+          echo "CARGO_TARGET_DIR=$CARGO_TARGET" >> $GITHUB_ENV
+      - name: Build installed server and CLI artifacts once
+        run: cargo build --profile test-fast --features cuda,webui --bin mlxcel-server --bin mlxcel
+      - name: Preserve WebUI-enabled installed artifacts before feature-off build
+        run: |
+          mkdir -p "$RUNNER_TEMP/mlxcel-webui-installed"
+          cp "$CARGO_TARGET_DIR/test-fast/mlxcel-server" "$RUNNER_TEMP/mlxcel-webui-installed/mlxcel-server-webui"
+          cp "$CARGO_TARGET_DIR/test-fast/mlxcel" "$RUNNER_TEMP/mlxcel-webui-installed/mlxcel-webui"
+      - name: Build feature-disabled server and CLI artifacts once
+        run: cargo build --profile test-fast --no-default-features --features cuda --bin mlxcel-server --bin mlxcel
+      - name: Preserve feature-disabled installed artifacts
+        run: |
+          cp "$CARGO_TARGET_DIR/test-fast/mlxcel-server" "$RUNNER_TEMP/mlxcel-webui-installed/mlxcel-server-feature-off"
+          cp "$CARGO_TARGET_DIR/test-fast/mlxcel" "$RUNNER_TEMP/mlxcel-webui-installed/mlxcel-feature-off"
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '26.5.1'
+      - name: Install pnpm for real-router browser harness
+        run: npm install --global pnpm@11.18.0
+      - name: Install WebUI dependencies for real-router browser harness
+        run: pnpm --dir webui install --frozen-lockfile
+      - name: Install Chromium runtime for real-router browser harness
+        run: pnpm --dir webui exec playwright install chromium
+      - name: Probe Chromium runtime for real-router browser harness
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          timeout 45s pnpm --dir webui exec node -e '
+            const { chromium } = require("@playwright/test");
+            (async () => {
+              let browser;
+              try {
+                browser = await chromium.launch();
+                const page = await browser.newPage({ viewport: { width: 800, height: 600 } });
+                await page.setContent("<main id=\"probe\">ready</main>");
+                const box = await page.locator("#probe").boundingBox();
+                if (!box || box.width <= 0 || box.height <= 0) {
+                  throw new Error("Chromium geometry probe failed");
+                }
+              } finally {
+                if (browser) {
+                  await browser.close();
+                }
+              }
+            })().catch((error) => {
+              console.error(`Chromium runtime probe failed: ${error.message}`);
+              process.exit(1);
+            });
+          '
+      - name: Run WebUI real-router browser harness
+        env:
+          MLXCEL_WEBUI_ROUTER_ARTIFACTS: webui/test-results/rust-router-ci
+        run: cargo test --profile test-fast --features cuda,webui --lib server::router_server::router_webui_playwright_harness_tests::real_router_browser_harness -- --ignored --exact --nocapture
+      - name: Unit-test the installed-artifact verifier helpers
+        run: |
+          python3 scripts/webui/measure_startup_tests.py
+          python3 scripts/webui/verify_installed_artifact_tests.py
+          python3 scripts/webui/verify_generated_key_helper_tests.py
+          python3 scripts/webui/verify_reverse_proxy_tests.py
+          python3 scripts/webui/verify_single_model_tests.py
+          python3 scripts/webui/verify_activity_performance_tests.py
+          python3 scripts/webui/summarize_activity_evidence_tests.py
+      - name: Verify the installed Rust artifact serves the bundled WebUI
+        env:
+          WEBUI_INSTALLED_EVIDENCE: ${{ runner.temp }}/webui-installed-evidence.json
+          WEBUI_NETWORK_SANDBOX: require
+          WEBUI_REQUIRE_TLS: '1'
+          WEBUI_BUILD_SOURCE_HEAD: ${{ github.sha }}
+          WEBUI_FEATURE_OFF_BUILD_SOURCE_HEAD: ${{ github.sha }}
+        run: |
+          WEBUI_SERVER_BIN="$RUNNER_TEMP/mlxcel-webui-installed/mlxcel-server-webui" \
+          WEBUI_CLI_BIN="$RUNNER_TEMP/mlxcel-webui-installed/mlxcel-webui" \
+          WEBUI_FEATURE_OFF_SERVER_BIN="$RUNNER_TEMP/mlxcel-webui-installed/mlxcel-server-feature-off" \
+          WEBUI_FEATURE_OFF_CLI_BIN="$RUNNER_TEMP/mlxcel-webui-installed/mlxcel-feature-off" \
+          python3 scripts/webui/verify_installed_artifact.py
+      - name: Verify loopback reverse-proxy WebUI edge behavior
+        env:
+          WEBUI_REVERSE_PROXY_EVIDENCE: ${{ runner.temp }}/webui-reverse-proxy-evidence.json
+        run: |
+          python3 scripts/webui/verify_reverse_proxy.py \
+            --server-bin "$RUNNER_TEMP/mlxcel-webui-installed/mlxcel-server-webui" \
+            --cli-bin "$RUNNER_TEMP/mlxcel-webui-installed/mlxcel-webui" \
+            --build-source-head "${{ github.sha }}" \
+            --evidence "$WEBUI_REVERSE_PROXY_EVIDENCE"
+      - name: Check native-hidden Activity display prerequisites
+        run: |
+          set -euo pipefail
+          missing=0
+          for tool in Xvfb openbox flock nvidia-smi; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+              echo "::error::$tool is required on the GB10 runner for the native-hidden Activity gate"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::Provision Xvfb, openbox, flock, and nvidia-smi on the GB10 runner; this job does not use sudo or skip the native-hidden gate"
+            exit 1
+          fi
+      # The real-router harness runs headless, but the native-hidden Activity gate below needs a
+      # headed browser with a real window. Those fail differently: a headed launch with no window
+      # server reports a zero-sized content area rather than an error, which the gate only
+      # discovers after starting a server and loading a checkpoint. Probe it here, where the
+      # message names the cause.
+      - name: Probe headed Chromium geometry under a virtual display
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          timeout 90s xvfb-run -a --server-args='-screen 0 1600x1100x24' pnpm --dir webui exec node -e '
+            const { chromium } = require("@playwright/test");
+            (async () => {
+              let browser;
+              try {
+                browser = await chromium.launch({ headless: false });
+                const page = await browser.newPage({ viewport: { width: 700, height: 900 } });
+                await page.goto("data:text/html,<main>ready</main>");
+                const geometry = await page.evaluate(() => ({ innerWidth: window.innerWidth, innerHeight: window.innerHeight }));
+                console.log(`headed geometry: ${JSON.stringify(geometry)}`);
+                if (!(geometry.innerWidth > 0 && geometry.innerHeight > 0)) {
+                  throw new Error("headed Chromium reported a zero-sized content area; the virtual display or window manager is not usable");
+                }
+              } finally {
+                if (browser) {
+                  await browser.close();
+                }
+              }
+            })().catch((error) => {
+              console.error(`Headed Chromium probe failed: ${error.message}`);
+              process.exit(1);
+            });
+          '
+      - name: Cache Activity checkpoint fixture
+        id: activity-fixture-cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/mlxcel-webui-activity-fixtures/qwen3-0.6b-4bit
+          key: ${{ runner.os }}-webui-activity-qwen3-0.6b-4bit-v1
+      - name: Download Activity checkpoint fixture
+        if: steps.activity-fixture-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CI_FIXTURE_TAG: ci-fixtures/qwen3-0.6b-4bit-v1
+          CI_FIXTURE_ASSET: qwen3-0.6b-4bit.tar.gz
+        run: |
+          set -euo pipefail
+          fixture_root="$RUNNER_TEMP/mlxcel-webui-activity-fixtures"
+          mkdir -p "$fixture_root"
+          test ! -e "$fixture_root/qwen3-0.6b-4bit"
+          tmp_dir="$(mktemp -d)"
+          gh release download "$CI_FIXTURE_TAG" \
+            --pattern "$CI_FIXTURE_ASSET" \
+            --dir "$tmp_dir"
+          tar -xzf "$tmp_dir/$CI_FIXTURE_ASSET" -C "$fixture_root"
+          rm -rf "$tmp_dir"
+          test -s "$fixture_root/qwen3-0.6b-4bit/config.json"
+      - name: Run native-hidden Activity performance gate
+        timeout-minutes: 45
+        env:
+          MLXCEL_REQUIRE_MODELS: '1'
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.cache/mlxcel/ci-locks"
+          (
+            # This flock serializes cooperating CI steps only; the nvidia-smi check below fails closed if non-cooperating GPU compute work is already present.
+            flock -w 600 -x 9 || { echo "::error::timed out waiting for cooperative WebUI Activity GPU lock"; exit 1; }
+            gpu_process_count="$(nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits | awk '$1 ~ /^[0-9]+$/ {count++} END {print count + 0}')"
+            if [ "$gpu_process_count" -ne 0 ]; then
+              echo "::error::GPU compute processes are already present before Activity gate"
+              exit 1
+            fi
+            full_evidence="$RUNNER_TEMP/webui-activity-performance-full.json"
+            summary_evidence="$RUNNER_TEMP/webui-activity-performance-summary.json"
+            python3 scripts/webui/verify_activity_performance.py \
+              --server-bin "$RUNNER_TEMP/mlxcel-webui-installed/mlxcel-server-webui" \
+              --model "$RUNNER_TEMP/mlxcel-webui-activity-fixtures/qwen3-0.6b-4bit" \
+              --checkpoint-revision "ci-fixtures/qwen3-0.6b-4bit-v1" \
+              --source-sha "${{ github.sha }}" \
+              --features cuda,webui \
+              --evidence "$full_evidence" \
+              --work-dir "$RUNNER_TEMP" \
+              --repo-root "$GITHUB_WORKSPACE" \
+              --node-bin "$(command -v node)" \
+              --virtual-display \
+              --activity-timeout 1800
+            python3 scripts/webui/summarize_activity_evidence.py \
+              --input "$full_evidence" \
+              --output "$summary_evidence"
+          ) 9>"$HOME/.cache/mlxcel/ci-locks/webui-activity-gpu.lock"
+      - name: Upload installed-artifact WebUI evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: webui-installed-artifact-${{ runner.os }}
+          path: ${{ runner.temp }}/webui-installed-evidence.json
+          if-no-files-found: error
+      - name: Upload reverse-proxy WebUI evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: webui-reverse-proxy-${{ runner.os }}
+          path: ${{ runner.temp }}/webui-reverse-proxy-evidence.json
+          if-no-files-found: warn
+      - name: Upload Activity performance summary evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: webui-activity-performance-${{ runner.os }}
+          path: ${{ runner.temp }}/webui-activity-performance-summary.json
+          if-no-files-found: warn
+      # A fail-closed gate whose diagnosis stays on the runner cannot be acted on from a PR.
+      # The harness writes its browser log and a full evidence JSON with the failing condition;
+      # publish both whenever the gate runs, not only when it succeeds.
+      - name: Upload Activity performance diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: webui-activity-performance-diagnostics-${{ runner.os }}
+          path: |
+            ${{ runner.temp }}/webui-activity-performance-full.json
+            ${{ runner.temp }}/mlxcel-activity-performance-*/activity-performance.log
+            ${{ runner.temp }}/mlxcel-activity-performance-*/*.log
+          if-no-files-found: warn
 
   mlx-pin:
     name: MLX pin extraction
