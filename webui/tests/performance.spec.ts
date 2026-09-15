@@ -49,12 +49,15 @@ async function writeEvidence(testInfo: TestInfo, name: string, page: Page, evide
     measured_at: new Date().toISOString(),
     host: { hostname: hostname(), platform: platform(), release: release(), cpus: cpus().length, totalmem_bytes: totalmem() },
     project: testInfo.project.name,
+    // Retry index of the attempt that produced these numbers: 0 is the first run. A non-zero
+    // value means an earlier attempt exceeded a budget and its own evidence file was kept.
+    attempt: testInfo.retry,
     browser,
     ...evidence,
   };
   const metrics: Record<string, number> = {};
   collectConsoleMetrics(evidence, metrics);
-  console.log(JSON.stringify({ kind: 'webui-performance-evidence', name, project: testInfo.project.name, metrics }));
+  console.log(JSON.stringify({ kind: 'webui-performance-evidence', name, project: testInfo.project.name, attempt: testInfo.retry, metrics }));
   await writeFile(path, JSON.stringify(payload, null, 2), { mode: 0o600, flag: 'wx' });
   await testInfo.attach(name, { path, contentType: 'application/json' });
 }
