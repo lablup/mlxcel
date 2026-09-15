@@ -13,6 +13,12 @@ import { loadValidator, model } from './models-fixtures';
 type Evidence = Record<string, unknown>;
 type Validator = Awaited<ReturnType<typeof loadValidator>>;
 
+function withoutFixtureAnnotations<T>(value: T): T {
+  const copy = structuredClone(value) as T;
+  if (typeof copy === 'object' && copy !== null && '$schemaName' in copy) delete (copy as Record<string, unknown>).$schemaName;
+  return copy;
+}
+
 async function writeEvidence(testInfo: TestInfo, name: string, page: Page, evidence: Evidence): Promise<void> {
   const browser = await page.evaluate(() => ({
     userAgent: navigator.userAgent,
@@ -33,7 +39,7 @@ async function writeEvidence(testInfo: TestInfo, name: string, page: Page, evide
 }
 
 function operationPage(sequence: number): OperationsListResponse {
-  return { ...(structuredClone(operationsFixture) as OperationsListResponse), items: [], server_instance_id: bootstrapFixture.server.server_instance_id, snapshot_sequence: sequence, pagination: { limit: 200, next_cursor: null, total_known: 0 } };
+  return { ...withoutFixtureAnnotations(operationsFixture as OperationsListResponse), items: [], server_instance_id: bootstrapFixture.server.server_instance_id, snapshot_sequence: sequence, pagination: { limit: 200, next_cursor: null, total_known: 0 } };
 }
 
 function validModelId(index: number): string {
@@ -65,7 +71,7 @@ function catalogPage(items: readonly CatalogEntry[], offset: number, limit: numb
   const pageItems = items.slice(offset, offset + limit);
   const next = offset + limit < items.length ? `cursor_${offset + limit}` : null;
   return {
-    ...(structuredClone(catalogFixture) as CatalogListResponse),
+    ...withoutFixtureAnnotations(catalogFixture as CatalogListResponse),
     items: pageItems,
     pagination: { limit, next_cursor: next, total_known: total },
     server_instance_id: bootstrapFixture.server.server_instance_id,
@@ -74,7 +80,7 @@ function catalogPage(items: readonly CatalogEntry[], offset: number, limit: numb
 }
 
 function runtimeFor(entry: CatalogEntry, sequence: number): RuntimeSnapshot {
-  return { ...(structuredClone(runtimeFixture) as RuntimeSnapshot), server_instance_id: bootstrapFixture.server.server_instance_id, model_id: entry.identity.id, revision: entry.identity.revision, snapshot_sequence: sequence };
+  return { ...withoutFixtureAnnotations(runtimeFixture as RuntimeSnapshot), server_instance_id: bootstrapFixture.server.server_instance_id, model_id: entry.identity.id, revision: entry.identity.revision, snapshot_sequence: sequence };
 }
 
 async function installPerformanceApi(page: Page, options: { catalog: readonly CatalogEntry[]; slowCatalog?: boolean; chatEntry?: CatalogEntry }): Promise<{ releaseCatalog: () => void; validated: string[] }> {
@@ -97,8 +103,9 @@ async function installPerformanceApi(page: Page, options: { catalog: readonly Ca
       return;
     }
     if (path === '/ui-api/v1/bootstrap') {
-      validate('BootstrapResponse', bootstrapFixture);
-      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(bootstrapFixture) });
+      const body = withoutFixtureAnnotations(bootstrapFixture);
+      validate('BootstrapResponse', body);
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
       return;
     }
     if (path === '/ui-api/v1/catalog') {

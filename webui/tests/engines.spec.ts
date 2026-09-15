@@ -2,7 +2,7 @@
 import { writeFile } from 'node:fs/promises';
 import { expect, test, type Page, type TestInfo } from '@playwright/test';
 import { expectAxeClean, expectSafeLayout } from './browser-assertions';
-import { bootProduct, installMockApi, loginWithMockApi } from './browser-fixtures';
+import { bootProduct, browserStorageDump, installMockApi, loginWithMockApi } from './browser-fixtures';
 
 
 async function attachJsonEvidence(testInfo: TestInfo, name: string, value: Record<string, unknown>): Promise<void> {
@@ -52,7 +52,8 @@ for (const variant of engineVariants) {
   test(`cross-engine product surfaces stay accessible and keyboard-usable: ${variant.name}`, async ({ page }, testInfo) => {
     const mock = await installMockApi(page, 'happy');
     await bootProduct(page, { ...variant, signedIn: true });
-    await loginWithMockApi(page, `engine-${testInfo.project.name}-${variant.width}`);
+    const token = `engine-${testInfo.project.name}-${variant.width}`;
+    await loginWithMockApi(page, token);
 
     await expect(page.getByTestId('models-table')).toBeVisible();
     await page.keyboard.press('Tab');
@@ -89,7 +90,13 @@ for (const variant of engineVariants) {
     await expectAxeClean(page);
     await expectSafeLayout(page);
 
-    expect(mock.calls.map((call) => call.auth).join(' ')).not.toContain(`engine-${testInfo.project.name}-${variant.width}`);
+    const apiCalls = mock.calls.filter((call) => call.url.startsWith('/ui-api/v1/'));
+    expect(apiCalls.length).toBeGreaterThan(0);
+    expect(apiCalls.every((call) => call.auth === `Bearer ${token}`)).toBe(true);
+    expect(mock.calls.map((call) => call.url).join(' ')).not.toContain(token);
+    expect(mock.calls.map((call) => call.body).join(' ')).not.toContain(token);
+    await expect(page.locator('body')).not.toContainText(token);
+    expect(await browserStorageDump(page)).not.toContain(token);
     await attachJsonEvidence(testInfo, 'engine-surface-evidence.json', { project: testInfo.project.name, variant: variant.name, viewport: { width: variant.width, height: variant.height }, exercised: ['models', 'chat-composition-event-guard', 'settings-dialog-keyboard', 'activity'], api_calls: mock.calls.length });
   });
 }
