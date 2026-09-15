@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright 2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 from __future__ import annotations
-import argparse, hashlib, json, os, platform, pty, re, select, secrets, shutil, signal, socket, ssl, stat, subprocess, sys, time, urllib.error, urllib.request
+import argparse, hashlib, json, os, platform, re, secrets, shutil, signal, socket, ssl, stat, subprocess, sys, time, urllib.error, urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -28,6 +28,20 @@ def redact(value: Any, secrets_to_hide: list[str]) -> Any:
         return {k: redact(v, secrets_to_hide) for k, v in value.items()}
     return value
 def generated_key_marker_present(output: bytes) -> bool: return GENERATED_KEY_RE.search(output) is not None  # noqa: E701
+def generated_key_helper_failure(status: int, stdout: bytes, stderr: bytes) -> AssertionError:
+    return AssertionError(f"generated-key helper failed: status={status} stdout_bytes={len(stdout)} stderr_bytes={len(stderr)}")
+def run_generated_key_helper_process(helper: Path, config: Path, work: Path, env: dict[str, str]) -> subprocess.CompletedProcess[bytes]:
+    proc = subprocess.Popen([sys.executable, str(helper), str(config)], cwd=work, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    try:
+        stdout, stderr = proc.communicate(timeout=75)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        stdout, stderr = proc.communicate(timeout=5)
+        return subprocess.CompletedProcess(proc.args, -signal.SIGKILL, stdout, stderr)
+    return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
 def generated_key_error(stage: str, status: int | None, transcript: bytes) -> AssertionError:
     lines = transcript.count(b"\n") + (1 if transcript else 0)
     marker = generated_key_marker_present(transcript)
@@ -327,58 +341,18 @@ def run_generated_key(h: Harness, artifact: Artifact) -> None:
         raise AssertionError("headless keyless WebUI unexpectedly succeeded")
     if generated_key_marker_present(headless.stdout):
         raise AssertionError("headless keyless WebUI emitted a generated credential marker")
-    pid, fd = pty.fork(); transcript = bytearray(); key: str | None = None; status = 0
-    if pid == 0:
-        os.chdir(work); os.execve(artifact.command[0], cmd, env)
+    config = work / "generated-key-helper.json"
+    write_private(config, json.dumps({"cmd": cmd, "work": str(work), "port": port}) + "\n")
+    helper = Path(__file__).with_name("verify_generated_key_helper.py")
     try:
-        os.set_blocking(fd, False)
-        deadline = time.monotonic() + 45
-        while time.monotonic() < deadline:
-            waited, status = os.waitpid(pid, os.WNOHANG)
-            if waited:
-                raise generated_key_error("exited-before-key", status, transcript)
-            if select.select([fd], [], [], 0.1)[0]:
-                try:
-                    transcript.extend(os.read(fd, 65536))
-                except BlockingIOError:
-                    pass
-                except OSError:
-                    pass
-                assert len(transcript) <= 1024 * 1024, "generated-key terminal output exceeded 1 MiB"
-            match = GENERATED_KEY_RE.search(transcript)
-            if match:
-                key = match.group(1).decode(); h.secrets.append(key); break
-        if not key:
-            raise generated_key_error("missing-recognized-key", None, transcript)
-        assert request(f"http://127.0.0.1:{port}/gen/ui-api/v1/bootstrap", key=key)[0] == 200
-        assert request(f"http://127.0.0.1:{port}/gen/ui-api/v1/bootstrap")[0] == 401
+        result = run_generated_key_helper_process(helper, config, work, env)
     finally:
-        try:
-            os.kill(pid, signal.SIGINT)
-        except ProcessLookupError:
-            pass
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline:
-            try:
-                waited, status = os.waitpid(pid, os.WNOHANG)
-            except ChildProcessError:
-                waited = pid
-            if waited:
-                break
-            time.sleep(0.1)
-        else:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            try:
-                _, status = os.waitpid(pid, 0)
-            except ChildProcessError:
-                pass
-            raise AssertionError("generated-key server did not exit after SIGINT and had to be killed")
-        os.close(fd)
-    assert_wait_status_zero(status, "generated-key server")
-    h.add("generated_key", {"label": artifact.name, "headless_without_key_rejected": True, "tty_key_authenticated": True, "key_in_argv_or_env": False, "wait_status": status})
+        config.unlink(missing_ok=True)
+    if result.returncode != 0:
+        raise generated_key_helper_failure(result.returncode, result.stdout, result.stderr)
+    helper_result = json.loads(result.stdout or b"{}")
+    helper_result.update({"label": artifact.name, "headless_without_key_rejected": True})
+    h.add("generated_key", helper_result)
 def network_interfaces() -> list[dict[str, Any]]:
     interfaces: list[dict[str, Any]] = []
     root = Path("/sys/class/net")
@@ -480,7 +454,8 @@ def main() -> int:
             if os.environ.get("WEBUI_REQUIRE_TLS") == "1":
                 raise AssertionError("WEBUI_REQUIRE_TLS=1 but openssl is unavailable for self-signed certificate generation")
             h.add("tls", {"status": "not_run", "reason": "openssl unavailable for self-signed certificate generation"})
-        run_generated_key(h, artifacts[0])
+        for artifact in artifacts:
+            run_generated_key(h, artifact)
         if args.feature_off_server_bin and args.feature_off_cli_bin:
             feature_off_artifacts = [relocate(Path(args.feature_off_server_bin), root / "installed-feature-off", "mlxcel-server", []), relocate(Path(args.feature_off_cli_bin), root / "installed-feature-off", "mlxcel-serve", ["serve"] )]
             h.evidence["feature_off_artifacts"] = [{"label": a.name, "source": str(a.source), "relocated": str(a.relocated), "sha256": a.sha256, "command_shape": [a.relocated.name, *a.command[1:]], "build_source_head": args.feature_off_build_source_head or "unknown"} for a in feature_off_artifacts]

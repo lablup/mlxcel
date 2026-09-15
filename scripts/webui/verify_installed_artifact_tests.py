@@ -190,6 +190,13 @@ class InstalledArtifactHelperTests(unittest.TestCase):
         self.assertNotIn("secret-seed", text)
         self.assertIn("credential_marker_present=True", text)
 
+    def test_generated_key_helper_failure_does_not_dump_output(self) -> None:
+        error = verify.generated_key_helper_failure(1, b"secret stdout", b"secret stderr")
+        text = str(error)
+        self.assertIn("stdout_bytes=13", text)
+        self.assertIn("stderr_bytes=13", text)
+        self.assertNotIn("secret", text)
+
     def test_compat_surface_accepts_feature_disabled_envelope(self) -> None:
         body = b'{"error":{"message":"this feature is disabled","type":"feature_disabled"}}'
         result = verify.assert_compat_surface("tools", 403, body)
