@@ -2,6 +2,7 @@
 /* global process, URL, fetch, setTimeout, AbortSignal, AbortController */
 // Root-owned actual long-request observation; never logs prompt/output/key.
 import { readFile, writeFile } from 'node:fs/promises';
+import { validateChatStream } from './activity-stream.mjs';
 const base = new URL(process.env.WEBUI_PERF_BASE ?? 'http://127.0.0.1:8080/');
 if (!['127.0.0.1', '[::1]', 'localhost'].includes(base.hostname) || base.username || base.password || base.search || base.hash) throw new Error('Use a credential-free loopback API base.');
 if (!base.pathname.endsWith('/')) base.pathname += '/';
@@ -25,7 +26,7 @@ const request = (async () => {
     const response = await fetch(url('v1/chat/completions', { autoload: 'false' }), { method: 'POST', headers, body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt }], max_tokens: 256, stream: true, temperature: 0, seed: 42 }), signal: AbortSignal.any([requestAbort.signal, AbortSignal.timeout(600000)]) });
     if (!response.ok || !response.body) throw new Error(`Real chat request failed ${response.status}`);
     const reader = response.body.getReader();
-    try { while (!(await reader.read()).done) { /* drain, never retain generated text */ } } finally { reader.releaseLock(); }
+    try { await validateChatStream(reader); } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
   } catch (error) { failure = error instanceof Error ? error.message : 'request failed'; } finally { done = true; }
 })();
 try {

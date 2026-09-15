@@ -8,7 +8,7 @@
     "build": "vite build",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --max-warnings=0",
-    "unit": "vitest run",
+    "unit": "node --test scripts/activity-stream.spec.mjs && vitest run",
     "browser": "playwright test",
     "verify-generated": "python3 ../scripts/webui/build_bundle.py --verify"
   },
