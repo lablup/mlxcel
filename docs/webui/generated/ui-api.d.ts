@@ -128,6 +128,7 @@ export interface BootstrapResponse {
   readonly actions: Record<string, ActionAvailability>;
   readonly roots: ReadonlyArray<RootSummary>;
   readonly limits: LimitSummary;
+  readonly media_limits: MediaLimits;
 }
 
 export interface ModelIdentity {
@@ -603,4 +604,13 @@ export interface RuntimeSlots {
   readonly request_context_tokens: number | null;
   readonly shared_pool_context_tokens: number | null;
   readonly items: ReadonlyArray<RuntimeSlot>;
+}
+
+export interface MediaLimits {
+  readonly max_images: number;
+  readonly max_image_bytes: number;
+  readonly max_width: number;
+  readonly max_height: number;
+  readonly max_decoded_bytes: number;
+  readonly max_body_bytes: number;
 }

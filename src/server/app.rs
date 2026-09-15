@@ -129,7 +129,9 @@ fn configured_image_json_body_budget_bytes(max_payload_bytes: usize, max_images:
     with_fixed_overhead.saturating_add(per_image_overhead)
 }
 
-fn main_json_body_limit_bytes_for_limits(limits: super::media::ImageInputLimits) -> usize {
+pub(crate) fn main_json_body_limit_bytes_for_limits(
+    limits: super::media::ImageInputLimits,
+) -> usize {
     configured_image_json_body_budget_bytes(limits.max_payload_bytes, limits.max_images_per_request)
         .clamp(
             AXUM_DEFAULT_BODY_LIMIT_BYTES,

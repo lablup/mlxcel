@@ -85,6 +85,7 @@ pub(crate) struct BootstrapResponse {
     pub actions: BTreeMap<&'static str, ActionAvailability>,
     pub roots: Vec<RootSummary>,
     pub limits: LimitSummary,
+    pub media_limits: MediaLimits,
 }
 
 #[derive(Debug, Serialize)]
@@ -141,6 +142,35 @@ pub(crate) struct LimitSummary {
     pub measurements_max: u64,
 }
 
+/// Projection of the same resolved limits used at the inference media boundary.
+#[derive(Debug, Serialize)]
+pub(crate) struct MediaLimits {
+    pub max_images: usize,
+    pub max_image_bytes: usize,
+    pub max_width: u32,
+    pub max_height: u32,
+    pub max_decoded_bytes: u64,
+    pub max_body_bytes: u64,
+}
+
+pub(crate) fn media_limits(
+    limits: crate::server::media::ImageInputLimits,
+    mode: WebUiServerMode,
+) -> MediaLimits {
+    let mut body_limit = crate::server::app::main_json_body_limit_bytes_for_limits(limits);
+    if mode != WebUiServerMode::SingleModel {
+        body_limit = body_limit.min(crate::server::router_server::DISPATCH_BODY_CAP);
+    }
+    MediaLimits {
+        max_images: limits.max_images_per_request,
+        max_image_bytes: limits.max_payload_bytes,
+        max_width: limits.max_width,
+        max_height: limits.max_height,
+        max_decoded_bytes: limits.max_decode_alloc_bytes,
+        max_body_bytes: body_limit as u64,
+    }
+}
+
 pub(crate) fn bootstrap_response(
     startup: &ServerStartupConfig,
     config: &ServerConfig,
@@ -194,6 +224,7 @@ pub(crate) fn bootstrap_response(
         actions,
         roots: root_summaries(startup, cache_available, mode),
         limits: limit_summary(),
+        media_limits: media_limits(crate::server::media::current_image_input_limits(), mode),
     }
 }
 

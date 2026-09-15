@@ -10,6 +10,8 @@ import { DesignGallery } from './gallery';
 import { classifyAuthFailure, connectionFooterLabel, ProductConnectionSurface, selectedModelLabel, type AuthFailure } from './provider-surfaces';
 import { useWebUi, useWebUiActions } from './state';
 import { t, testId } from './i18n/catalog';
+import { Chat } from './features/chat/chat';
+import { replaceConversations } from './features/chat/session';
 
 const routes: RouteId[] = ['models', 'chat', 'activity', 'settings', 'gallery'];
 const paletteRoutes: RouteId[] = ['models', 'chat', 'activity', 'settings'];
@@ -53,6 +55,7 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     if (snapshot.auth.status === 'authenticated') setAuthFailure(null);
   }, [snapshot.auth.status]);
+  useEffect(() => { if (snapshot.auth.status === 'signed-out') replaceConversations([]); }, [snapshot.auth.status]);
 
   const navigate = (next: RouteId): void => {
     setRoute(next);
@@ -119,6 +122,7 @@ function ModelsScreen(props: { locale: AppearancePreferences['locale']; context:
 }
 
 function ChatScreen(props: { locale: AppearancePreferences['locale']; context: ProviderRouteContext }): React.JSX.Element {
+  if (props.context.snapshot.auth.status === 'authenticated' && props.context.snapshot.connection !== 'schema-mismatch') return <Chat locale={props.locale} />;
   return <ProductConnectionSurface locale={props.locale} eyebrow={t(props.locale, 'routes.chat.eyebrow')} title={t(props.locale, 'chat.title')} titleTestId={testId('chat.title')} snapshot={props.context.snapshot} authFailure={props.context.authFailure} onLogin={props.context.login} onLogout={props.context.logout} onRetry={props.context.retry} onRecoverSchema={props.context.recoverSchema} />;
 }
 

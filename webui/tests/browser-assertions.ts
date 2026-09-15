@@ -56,6 +56,9 @@ export async function expectSafeLayout(page: Page): Promise<void> {
   const result = await page.evaluate(() => ({
     overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
     unexpectedStyles: Array.from(document.querySelectorAll<HTMLElement>('[style]')).filter((element) => {
+      // Screenshot caret cleanup can leave style="". Only trim-empty raw text is inert;
+      // do not accept nonempty invalid CSS merely because CSSOM has no properties.
+      if ((element.getAttribute('style') ?? '').trim() === '') return false;
       // Library-owned CSSOM geometry only; not evidence that production CSP permits it.
       const properties = Array.from(element.style);
       if (element.matches('.ds-progress .progress-bar__fill')) return properties.some((key) => key !== 'width') || !/^\d+(?:\.\d+)?%$/.test(element.style.width);

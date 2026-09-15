@@ -1,0 +1,29 @@
+.chat-screen { min-width: 0; }
+.chat-toolbar { display: flex; flex-wrap: wrap; gap: var(--space-3, 12px); align-items: end; }
+.chat-toolbar .ds-field { flex: 1; min-width: 180px; }
+.chat-transcript { max-height: 60vh; overflow: auto; overflow-anchor: none; }
+.chat-turn { padding-block: var(--space-4, 16px); border-bottom: 1px solid var(--color-separator); overflow-wrap: anywhere; }
+.chat-turn header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; }
+.chat-turn h2 { font-size: 1rem; }
+.chat-turn pre, .chat-prompt { white-space: pre-wrap; overflow-wrap: anywhere; }
+.chat-turn pre { max-height: 24rem; overflow: auto; }
+.chat-composer textarea, .chat-screen textarea { resize: vertical; min-height: 7rem; max-height: 24rem; width: 100%; box-sizing: border-box; color: inherit; background: var(--color-bg-elevated); border: 1px solid var(--color-separator); border-radius: var(--radius-sm); padding: 12px; font: inherit; }
+.chat-images { display: flex; flex-wrap: wrap; gap: 12px; }
+.chat-images figure { margin: 0; max-width: 160px; }
+.chat-images img { max-width: 100%; max-height: 120px; object-fit: contain; }
+.chat-metrics { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
+.chat-metrics dd { margin: 0; }
+.chat-screen details { padding-block: 8px; }
+.chat-screen summary { cursor: pointer; min-height: 44px; align-content: center; }
+.chat-code-block { min-width: 0; }
+.chat-code-block pre { white-space: pre; overflow-x: auto; }
+.chat-code-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.chat-code-keyword { color: var(--color-focus, currentColor); font-weight: 600; }
+.chat-code-string { color: var(--color-text); }
+.chat-code-number { color: var(--color-muted); }
+.chat-screen a[href^="#"] { display: inline-flex; align-items: center; min-height: 44px; min-width: 24px; }
+.chat-markdown a { display: inline-block; min-height: 24px; min-width: 24px; }
+.chat-privacy .toggle { min-height: 44px; }
+.chat-privacy .toggle input { flex: 0 0 24px; min-width: 24px; min-height: 24px; }
+
+.chat-parameter-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: 12px; }
