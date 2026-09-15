@@ -190,6 +190,33 @@ class InstalledArtifactHelperTests(unittest.TestCase):
         self.assertNotIn("secret-seed", text)
         self.assertIn("credential_marker_present=True", text)
 
+    def test_compat_surface_accepts_feature_disabled_envelope(self) -> None:
+        body = b'{"error":{"message":"this feature is disabled","type":"feature_disabled"}}'
+        result = verify.assert_compat_surface("tools", 403, body)
+        self.assertEqual(result["mode"], "disabled_feature_stub")
+        self.assertEqual(result["error_type"], "feature_disabled")
+
+    def test_compat_surface_accepts_router_missing_model_envelope(self) -> None:
+        body = b'{"error":{"message":"model name is missing from the request","type":"invalid_request_error","code":"invalid_request_error"}}'
+        result = verify.assert_compat_surface("tools", 400, body)
+        self.assertEqual(result["mode"], "router_dispatch_missing_model")
+        self.assertEqual(result["status"], 400)
+        self.assertEqual(result["error_code"], "invalid_request_error")
+
+    def test_compat_surface_accepts_probe_model_not_found_without_security_claim(self) -> None:
+        body = b"{\"error\":{\"message\":\"model 'mlxcel-installed-empty-router-probe' not found\",\"type\":\"invalid_request_error\"}}"
+        result = verify.assert_compat_surface("tools_probe", 400, body)
+        self.assertEqual(result["mode"], "router_dispatch_scope_not_forwarded")
+
+    def test_compat_surface_rejects_unrelated_400_with_sanitized_summary(self) -> None:
+        body = b'{"error":{"message":"different failure","type":"invalid_request_error","code":"secret-code"}}'
+        with self.assertRaises(AssertionError) as raised:
+            verify.assert_compat_surface("tools", 400, body)
+        text = str(raised.exception)
+        self.assertIn("status=400", text)
+        self.assertIn("different failure", text)
+        self.assertNotIn(body.decode(), text)
+
 
 if __name__ == "__main__":
     unittest.main()

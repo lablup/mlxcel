@@ -1,36 +1,17 @@
 #!/usr/bin/env python3
 # Copyright 2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 from __future__ import annotations
-import argparse
-import hashlib
-import json
-import os
-import platform
-import pty
-import re
-import select
-import secrets
-import shutil
-import signal
-import socket
-import ssl
-import stat
-import subprocess
-import sys
-import tempfile
-import time
-import urllib.error
-import urllib.request
-from datetime import datetime
+import argparse, hashlib, json, os, platform, pty, re, select, secrets, shutil, signal, socket, ssl, stat, subprocess, sys, time, urllib.error, urllib.request
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 MAX_BODY = 8 * 1024 * 1024
 SECRET_RE = re.compile(r"(Bearer\s+)[A-Za-z0-9._~+/=-]+")
 GENERATED_KEY_RE = re.compile(rb"session key \(shown once\): ([^\s]+)")
+DISABLED_FEATURE_MESSAGE, ROUTER_MISSING_MODEL_MESSAGE, PROBE_MODEL = "this feature is disabled", "model name is missing from the request", "mlxcel-installed-empty-router-probe"
 class NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
-        return None
+    def redirect_request(self, req, fp, code, msg, headers, newurl): return None  # type: ignore[no-untyped-def]  # noqa: E701
 def sha256(path: Path) -> str:
     with path.open("rb") as fp:
         return hashlib.file_digest(fp, "sha256").hexdigest()
@@ -46,8 +27,7 @@ def redact(value: Any, secrets_to_hide: list[str]) -> Any:
     if isinstance(value, dict):
         return {k: redact(v, secrets_to_hide) for k, v in value.items()}
     return value
-def generated_key_marker_present(output: bytes) -> bool:
-    return GENERATED_KEY_RE.search(output) is not None
+def generated_key_marker_present(output: bytes) -> bool: return GENERATED_KEY_RE.search(output) is not None  # noqa: E701
 def generated_key_error(stage: str, status: int | None, transcript: bytes) -> AssertionError:
     lines = transcript.count(b"\n") + (1 if transcript else 0)
     marker = generated_key_marker_present(transcript)
@@ -100,6 +80,27 @@ def open_headers(url: str, *, key: str | None = None, https: bool = False) -> tu
         return exc.code, {k.lower(): v for k, v in exc.headers.items()}
     with resp:
         return resp.status, {k.lower(): v for k, v in resp.headers.items()}
+def error_summary(body: bytes) -> dict[str, Any]:
+    try:
+        data = json.loads(body[:MAX_BODY])
+    except Exception: return {"body_class": "non_json", "bytes": len(body)}  # noqa: BLE001,E701
+    err = data.get("error") if isinstance(data, dict) else None
+    if not isinstance(err, dict):
+        return {"body_class": "json", "bytes": len(body)}
+    out = {"body_class": "json_error", "bytes": len(body)}
+    for src, dst in (("type", "error_type"), ("code", "error_code"), ("message", "error_message")):
+        if src in err: out[dst] = str(err[src])[:240]
+    return out
+def assert_compat_surface(label: str, status: int, body: bytes) -> dict[str, Any]:
+    summary = error_summary(body)
+    if status == 403 and summary.get("error_message") == DISABLED_FEATURE_MESSAGE and summary.get("error_type") == "feature_disabled":
+        return {"label": label, "status": status, "mode": "disabled_feature_stub", **summary}
+    missing_model_code = summary.get("error_type") == "invalid_request_error" or summary.get("error_code") == "invalid_request_error"
+    if status == 400 and summary.get("error_message") == ROUTER_MISSING_MODEL_MESSAGE and missing_model_code:
+        return {"label": label, "status": status, "mode": "router_dispatch_missing_model", **summary}
+    if status == 400 and summary.get("error_message") == f"model '{PROBE_MODEL}' not found" and missing_model_code:
+        return {"label": label, "status": status, "mode": "router_dispatch_scope_not_forwarded", **summary}
+    raise AssertionError(f"{label} exposed unexpected compatibility-surface response: status={status} summary={summary}")
 @dataclass
 class Artifact:
     name: str
@@ -250,9 +251,11 @@ def assert_private_api(base: str, key: str, *, https: bool = False) -> dict[str,
     attack = {"Host": "foreign.invalid", "Origin": "http://foreign.invalid", "Sec-Fetch-Site": "cross-site", "Content-Type": "application/json"}
     assert request(f"{base}/lab/ui-api/v1/model-actions", key=key, method="POST", data=b"{}", headers=attack, https=https)[0] == 403
     assert request(f"{base}/lab/v1/chat/completions", key=key, method="POST", data=b"{}", headers=attack, https=https)[0] == 403
-    assert request(f"{base}/lab/tools", key=key, method="POST", data=b"{}", headers={"Content-Type": "application/json"}, https=https)[0] in (403, 404, 405)
-    assert request(f"{base}/lab/cors-proxy/http://169.254.169.254/latest/meta-data/", key=key, https=https)[0] in (403, 404)
-    return {"mode": observed["bootstrap"]["server"].get("mode"), "catalog_items": 0, "unknown_runtime": 404, "events_auth": True, "hostile_origin": 403, "legacy_attack_routes_denied": True}
+    surfaces = []
+    for label, path, method, data in (("tools_post", "/lab/tools", "POST", b"{}"), ("tools_probe_model_post", "/lab/tools", "POST", json.dumps({"model": PROBE_MODEL}).encode()), ("tools_unprefixed_post", "/tools", "POST", b"{}"), ("tools_unprefixed_probe_model_post", "/tools", "POST", json.dumps({"model": PROBE_MODEL}).encode()), ("cors_proxy_get", "/lab/cors-proxy", "GET", None), ("cors_proxy_unprefixed_get", "/cors-proxy", "GET", None)):
+        status, _, body = request(f"{base}{path}", key=key, method=method, data=data, headers={"Content-Type": "application/json"} if data else None, https=https)
+        surfaces.append(assert_compat_surface(label, status, body))
+    return {"mode": observed["bootstrap"]["server"].get("mode"), "catalog_items": 0, "unknown_runtime": 404, "events_auth": True, "hostile_origin": 403, "disabled_feature_stubs": [s for s in surfaces if s["mode"] == "disabled_feature_stub"], "router_dispatch_rejections": [s for s in surfaces if s["mode"] != "disabled_feature_stub"], "compatibility_surface_scope": "router-mode empty-artifact probes prove non-successful dispatch only; hostile-origin checks are the installed security proof, while true feature-disabled 403 proof belongs to the ordinary/loaded-router harness"}
 def run_on_off(h: Harness, artifact: Artifact, *, tls_extra: list[str] | None = None, https: bool = False, label_suffix: str = "") -> None:
     work = h.root / f"{artifact.name}{label_suffix}"
     work.mkdir(parents=True)
