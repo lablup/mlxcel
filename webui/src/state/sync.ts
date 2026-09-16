@@ -110,7 +110,15 @@ export class WebUiSynchronizer {
 
   /// True when this tick must re-read server identity and the whole inventory rather than only
   /// the pending operations and the selected model's runtime.
+  ///
+  /// The first condition reads the published state rather than an internal flag on purpose.
+  /// Clearing the session and a server-instance change both reset the snapshot, and a
+  /// synchronizer that had already taken a full snapshot would otherwise keep taking light ticks
+  /// against a view that no longer has a bootstrap or a catalog, leaving the library stuck on
+  /// "waiting for an authoritative catalog snapshot" with every control disabled.
   private fullSnapshotDue(now: number): boolean {
+    const snapshot = this.getSnapshot();
+    if (snapshot.bootstrap === null || snapshot.catalogSequence === null) return true;
     if (this.needsFullSnapshot || this.lastFullSnapshotAt === null) return true;
     if (this.eventAbort === null) return true;
     return now - this.lastFullSnapshotAt >= fullSnapshotSafetyNetMs;
@@ -140,6 +148,14 @@ export class WebUiSynchronizer {
   dispose(): void {
     this.stop();
     this.unsubscribe();
+  }
+
+  /// The explicit, user-facing refresh. Asking for server state is a request for authoritative
+  /// state, so it always re-reads server identity and the whole inventory: a steady-state tick
+  /// would not notice a server restart, which is precisely what an operator presses this for.
+  async resnapshot(): Promise<void> {
+    this.needsFullSnapshot = true;
+    await this.refresh();
   }
 
   async refresh(): Promise<void> {

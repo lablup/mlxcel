@@ -194,6 +194,21 @@ describe('WebUI synchronizer', () => {
     sync.dispose();
   });
 
+  it('treats the explicit refresh as authoritative even in steady state', async () => {
+    // Pressing "Refresh server state" is how an operator recovers from a server restart, which a
+    // steady-state tick cannot notice because it never re-reads server identity.
+    const { sync, since } = countingSession(() => streamOpen());
+    await sync.refresh();
+    since();
+    await sync.refresh();
+    expect(since().bootstrap).toBe(0);
+    await sync.resnapshot();
+    const explicit = since();
+    expect(explicit.bootstrap).toBe(1);
+    expect(explicit.catalog).toBeGreaterThan(0);
+    sync.dispose();
+  });
+
   it('keeps re-reading the inventory while the event stream is not connected', async () => {
     // Polling is the fallback: with no live stream every tick must be authoritative again.
     const { sync, since } = countingSession(() => streamDone());
