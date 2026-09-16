@@ -103,7 +103,7 @@ export function WebUiProvider({ children, apiBase, fetchImpl }: WebUiProviderPro
       dispatch({ type: 'logout', now: Date.now() });
     },
     refresh: async () => {
-      await syncRef.current?.refresh();
+      await syncRef.current?.resnapshot();
     },
     selectModel: (modelId: ModelId | null) => {
       dispatch({ type: 'select-model', modelId });
@@ -134,7 +134,7 @@ export function WebUiProvider({ children, apiBase, fetchImpl }: WebUiProviderPro
     cancelOperation: async (operationId: string) => {
       const session = sessionRef.current;
       await client.cancelOperation(operationId);
-      if (sessionRef.current === session) await syncRef.current?.refresh();
+      if (sessionRef.current === session) await syncRef.current?.resnapshot();
     },
     streamChatCompletions: async (modelId: ModelId, body: unknown, handlers: ChatStreamHandlers, signal?: AbortSignal) => {
       await client.chatCompletions(resolveInferenceModelId(modelId), body, handlers, signal);

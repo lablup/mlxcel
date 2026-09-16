@@ -83,6 +83,81 @@ async fn request(
 }
 
 #[tokio::test]
+async fn prefixed_library_keeps_root_health_public_and_prefixed_health_private() {
+    let temp = tempfile::tempdir().unwrap();
+    let absent = temp.path().join("absent-store");
+    let app = prefixed_library(&absent, true);
+
+    for method in ["GET", "HEAD"] {
+        let response = request(
+            app.clone(),
+            method,
+            "/health",
+            "127.0.0.1:18037",
+            None,
+            None,
+            false,
+            "",
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "root {method} /health must remain public when --api-prefix is set"
+        );
+    }
+
+    let wrong_host = request(
+        app.clone(),
+        "GET",
+        "/health",
+        "foreign.invalid",
+        None,
+        None,
+        false,
+        "",
+    )
+    .await;
+    assert_eq!(wrong_host.status(), StatusCode::FORBIDDEN);
+
+    for method in ["GET", "HEAD"] {
+        let unauthenticated = request(
+            app.clone(),
+            method,
+            "/lab/health",
+            "127.0.0.1:18037",
+            None,
+            None,
+            false,
+            "",
+        )
+        .await;
+        assert_eq!(
+            unauthenticated.status(),
+            StatusCode::UNAUTHORIZED,
+            "prefixed {method} /lab/health must not inherit the public root-health exemption"
+        );
+
+        let authenticated = request(
+            app.clone(),
+            method,
+            "/lab/health",
+            "127.0.0.1:18037",
+            None,
+            None,
+            true,
+            "",
+        )
+        .await;
+        assert_eq!(
+            authenticated.status(),
+            StatusCode::BAD_REQUEST,
+            "prefixed {method} /lab/health reaches the router fallback when authenticated"
+        );
+    }
+}
+
+#[tokio::test]
 async fn prefixed_library_is_secured_once_and_observation_does_not_create_cache() {
     let temp = tempfile::tempdir().unwrap();
     let absent = temp.path().join("absent-store");

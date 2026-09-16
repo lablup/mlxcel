@@ -95,6 +95,11 @@ mod resolver;
 mod store;
 
 pub use cli::DownloadArgs;
+/// The shard-completeness rule the loader's glob fallback implies, shared with
+/// the WebUI catalog so the two cannot disagree about which checkpoints load.
+/// Only the catalog consumes it, so a build without `webui` would see it unused.
+#[cfg(feature = "webui")]
+pub(crate) use completeness::missing_indexed_shards;
 pub use errors::map_hf_error;
 pub use filters::{is_wanted_file, repo_basename};
 pub use model_format::{

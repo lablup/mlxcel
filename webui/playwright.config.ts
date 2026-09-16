@@ -2,12 +2,14 @@ import { defineConfig, devices } from '@playwright/test';
 
 export default defineConfig({
   testDir: './tests',
-  testIgnore: ['**/csp.spec.ts', '**/chat-real.spec.ts'],
+  testIgnore: ['**/csp.spec.ts', '**/chat-real.spec.ts', '**/router-real.spec.ts', '**/engines.spec.ts', '**/performance.spec.ts'],
   fullyParallel: false,
   reporter: 'list',
   snapshotPathTemplate: '{testDir}/screenshots/{platform}/{arg}{ext}',
+  projects: [
+    { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+  ],
   use: {
-    ...devices['Desktop Chrome'],
     baseURL: 'http://127.0.0.1:4173',
   },
   webServer: {

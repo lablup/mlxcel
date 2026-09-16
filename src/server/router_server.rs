@@ -1601,6 +1601,10 @@ mod router_server_security_prefix_tests;
 #[path = "router_server_security_tests.rs"]
 mod router_server_security_tests;
 
+#[cfg(all(test, feature = "webui"))]
+#[path = "router_webui_playwright_harness_tests.rs"]
+mod router_webui_playwright_harness_tests;
+
 fn validate_readable_model_store_root(path: &Path, source: &str) -> anyhow::Result<()> {
     std::fs::read_dir(path).map(|_| ()).map_err(|err| {
         anyhow::anyhow!(

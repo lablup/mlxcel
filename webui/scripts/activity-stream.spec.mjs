@@ -48,6 +48,18 @@ test('zero or nonfinite viewport fails before inference', () => {
   assert.doesNotThrow(() => assertGeometry(valid));
   for (const key of Object.keys(valid)) for (const value of [0, -1, NaN, Infinity, undefined]) assert.throws(() => assertGeometry({ ...valid, [key]: value }), /no usable/);
 });
+test('headed visible-only keeps the hidden acceptance unclaimed', () => {
+  const mode = performanceMode('visible-only-headed');
+  assert.equal(mode.headless, false);
+  assert.deepEqual(mode.modes, ['one-visible', 'two-visible']);
+  for (const status of ['within-target', 'investigate']) {
+    const result = performanceCompletion(mode, [{ status }]);
+    assert.equal(result.status, 'incomplete');
+    assert.equal(result.hidden_native, 'not-run');
+    assert.match(result.limitation, /native hidden acceptance is not run/);
+  }
+  assert.throws(() => performanceMode('visible-only'), /WEBUI_PERF_MODE/);
+});
 test('visible-only diagnostic never reports complete acceptance', () => {
   const mode = performanceMode('visible-only-headless');
   assert.deepEqual(mode.modes, ['one-visible', 'two-visible']);

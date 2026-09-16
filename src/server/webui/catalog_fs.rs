@@ -97,14 +97,25 @@ fn indexed_completeness(path: &Path, index: &Path) -> Completeness {
             };
         }
     }
-    for file in files.keys() {
-        let shard = path.join(file);
-        if !regular_nonzero_file(&shard) {
-            return Completeness {
-                ok: false,
-                reason: format!("required shard '{}' is missing or empty", file.display()),
-            };
-        }
+    // Ask the shared rule, not the index alone: a repackaged mlx-community quant ships a stale
+    // index naming shards that never existed on disk while holding one `*.safetensors` the index
+    // does not name, and the loader globs that and loads it. Judging by the index alone marked
+    // every such checkpoint unusable in the catalog while `mlxcel generate` ran it fine.
+    let shards: Vec<String> = files
+        .keys()
+        .filter_map(|file| file.to_str().map(str::to_string))
+        .collect();
+    if shards.len() != files.len() {
+        return Completeness {
+            ok: false,
+            reason: "safetensors index contains a shard name that is not valid UTF-8".to_string(),
+        };
+    }
+    if let Some(missing) = crate::downloader::missing_indexed_shards(path, &shards).first() {
+        return Completeness {
+            ok: false,
+            reason: format!("required shard '{missing}' is missing or empty"),
+        };
     }
     Completeness {
         ok: true,
@@ -440,3 +451,7 @@ fn safe_path_label(path: &Path) -> String {
         .unwrap_or("catalog metadata file")
         .to_string()
 }
+
+#[cfg(test)]
+#[path = "catalog_fs_tests.rs"]
+mod tests;
