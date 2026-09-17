@@ -310,6 +310,29 @@ jobs:
       - name: Check every CUDA JIT launch keys its cache on the input dtypes
         run: python3 scripts/ci/check_kernel_dtype_keys.py
 
+  binary-assets:
+    name: binary assets
+    # Deliberately not behind the `changes` filter, for the same reason as
+    # `crate-versions` and `kernel-dtype-keys`: it needs no toolchain, runs in
+    # seconds, and the defect it guards against is silent. Binary blobs never
+    # delta-compress and deleting one later does not shrink the history, so the
+    # cost of adding one only shows up as clone time long after the commit.
+    # `webui/tests/screenshots/` reached 24 PNGs and ~1.9 MB without any review
+    # step noticing, because each commit looked reasonable on its own and
+    # nothing looked at the aggregate. The check inverts the rule: an
+    # undeclared binary path fails until someone declares it with a reason.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Check every tracked binary file is declared with a size budget
+        run: python3 scripts/ci/check_binary_assets.py
+      - name: Check the guard still fails on undeclared and oversize binaries
+        run: bash scripts/ci/check_binary_assets_test.sh
+
   license-headers:
     name: license headers
     # Deliberately not behind the `changes` filter, like `crate-versions` and
