@@ -13,8 +13,16 @@ shows up under; a benchmark binary under test should be given a distinct name
 """
 import subprocess, time, os
 
+# Compilers, and the JavaScript toolchains that sit beside them. The node
+# family is here because a predicate that watches only for compilers reads a
+# frontend build as silence: a Tauri build bundles a node toolchain on top of
+# the Rust link step, and a CI job's own artifact step can be pure node. Both
+# saturate this box exactly as `rustc` does, and on 2026-09-17 a compiler-only
+# check reported the host clear while a `WebUI installed artifact` step was
+# still running (#1820).
 BUSY = ("rustc", "cc1plus", "cc1", "nvcc", "cicc", "ptxas", "cmake", "ninja", "ld", "ld.lld", "lld",
-        "clang", "clang++", "gcc", "g++", "fatbinary", "cargo-clippy", "clippy-driver")
+        "clang", "clang++", "gcc", "g++", "fatbinary", "cargo-clippy", "clippy-driver",
+        "node", "npm", "npx", "yarn", "pnpm", "bun", "tsc", "esbuild", "vite", "rollup", "webpack")
 FOREIGN = ("mlxcel", "mlxcel-server", "mlxcel-bench-de")
 
 
