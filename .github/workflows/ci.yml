@@ -413,7 +413,13 @@ jobs:
         run: pnpm --dir webui run unit
       - name: Install browser runtime
         run: pnpm --dir webui exec playwright install --with-deps chromium firefox webkit
-      - name: Install WebUI screenshot fonts
+      # Kept after the pixel baselines were dropped. The browser suite no longer
+      # compares images, but expectSafeLayout, expectCompactToolbarHitTargets and
+      # expectTextScaleLabelsReachable all assert measured geometry, and the CJK
+      # drawer variant needs a Korean face to lay out at all. An unpinned runner
+      # font set moves those measurements, so the pin is now a layout-stability
+      # dependency rather than a rendering one.
+      - name: Install WebUI layout fonts
         run: |
           sudo apt-get install -y --no-install-recommends fonts-dejavu-core=2.37-8 fonts-dejavu-extra=2.37-8 fonts-wqy-zenhei=0.9.45-8
           fc-cache -f
@@ -430,7 +436,7 @@ jobs:
           fc-match 'system-ui:weight=bold' || true
           fc-match Arial || true
           fc-list | wc -l
-      - name: Run WebUI Chromium screenshot and accessibility scaffold
+      - name: Run WebUI Chromium layout and accessibility scaffold
         env:
           MLXCEL_WEBUI_FONT_DIAGNOSTICS: '1'
         run: pnpm --dir webui run browser
@@ -442,14 +448,13 @@ jobs:
           command -v xvfb-run
       - name: Run WebUI browser engine smoke on Chromium, Firefox, and WebKit
         run: xvfb-run -a --server-args='-screen 0 1920x1080x24' pnpm --dir webui run browser:all
-      - name: Upload WebUI browser screenshots on failure
+      - name: Upload WebUI browser failure artifacts
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: webui-browser-screenshots-${{ runner.os }}
+          name: webui-browser-failure-artifacts-${{ runner.os }}
           path: |
             webui/test-results/**/*.png
-            webui/tests/screenshots/linux/**/*.png
           if-no-files-found: warn
       - name: Verify generated WebUI bundle
         run: python3 scripts/webui/build_bundle.py --verify

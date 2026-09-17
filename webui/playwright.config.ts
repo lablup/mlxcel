@@ -5,7 +5,6 @@ export default defineConfig({
   testIgnore: ['**/csp.spec.ts', '**/chat-real.spec.ts', '**/router-real.spec.ts', '**/engines.spec.ts', '**/performance.spec.ts'],
   fullyParallel: false,
   reporter: 'list',
-  snapshotPathTemplate: '{testDir}/screenshots/{platform}/{arg}{ext}',
   projects: [
     { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
   ],

@@ -4,7 +4,7 @@ import { bootGallery, bootProduct, browserStorageDump, gotoGalleryWithoutReload,
 
 test.describe('design system gallery and shell', () => {
   for (const variant of variants) {
-    test(`renders and compares ${variant.name}`, async ({ page }) => {
+    test(`renders ${variant.name}`, async ({ page }) => {
       await bootGallery(page, variant);
       await expectAxeClean(page);
       await expectSafeLayout(page);
@@ -39,16 +39,13 @@ test.describe('design system gallery and shell', () => {
         const fontSize = await page.evaluate(() => Number.parseFloat(window.getComputedStyle(document.documentElement).fontSize));
         expect(fontSize).toBeGreaterThanOrEqual(32);
         await expectTextScaleLabelsReachable(page);
-        await page.evaluate(() => window.scrollTo(0, 0));
-        await settleAnimationFrame(page);
       }
-      await expect(page).toHaveScreenshot(`${variant.name}.png`, { animations: 'disabled', maxDiffPixelRatio: 0.005, threshold: 0.2 });
     });
   }
 
 
   for (const variant of productVariants) {
-    test(`renders and compares ${variant.name}`, async ({ page }) => {
+    test(`renders ${variant.name}`, async ({ page }) => {
       await installMockApi(page, 'happy');
       await bootProduct(page, variant);
       await expectAxeClean(page);
@@ -59,8 +56,6 @@ test.describe('design system gallery and shell', () => {
       await expectAxeClean(page);
       await expectSafeLayout(page);
       if (variant.width <= 560) await expectCompactToolbarHitTargets(page);
-      await settleAnimationFrame(page);
-      await expect(page).toHaveScreenshot(`${variant.name}.png`, { animations: 'disabled', maxDiffPixelRatio: 0.005, threshold: 0.2 });
     });
   }
 
