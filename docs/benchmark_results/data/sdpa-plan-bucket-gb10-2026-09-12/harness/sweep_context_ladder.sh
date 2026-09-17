@@ -5,10 +5,11 @@
 # somewhere past a few hundred keys. The short-prompt table found none, so this
 # walks the context up until one appears or the range is exhausted.
 #
-# Only 15 of the pairing's 45 attention calls actually scale with the prompt:
-# the target's 10 full-attention layers and the drafter's 5. Its 30 sliding
-# layers are capped by a 512 window, so the effect is diluted by design and a
-# crossover has to be large to show in end-to-end throughput.
+# Only 10 of the pairing's 45 attention calls actually scale with the prompt:
+# the target's 10 full-attention layers. Its 30 sliding layers are capped by a
+# 512 window, and so are all 5 drafter layers (the drafter's config.json is
+# `sliding_window: 512` with every layer `sliding_attention`), so the effect is
+# diluted by design and a crossover has to be real to show end to end.
 set -uo pipefail
 cd "$(dirname "$0")"
 BIN=${BIN:?set BIN}

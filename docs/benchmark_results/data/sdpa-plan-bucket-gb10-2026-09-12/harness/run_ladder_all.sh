@@ -9,10 +9,11 @@
 # host problem that stops the sweep leaves the cheap rungs complete rather than
 # the expensive ones half done.
 #
-# Only 15 of the pairing's 45 attention calls scale with the prompt (the
-# target's 10 full-attention layers and the drafter's 5); its 30 sliding layers
-# are capped by a 512 window. The effect is diluted by design, so a crossover
-# has to be real to show in end-to-end throughput.
+# Only 10 of the pairing's 45 attention calls scale with the prompt: the
+# target's 10 full-attention layers. Its 30 sliding layers are capped by a 512
+# window, and so are all 5 drafter layers (the drafter is `sliding_window: 512`
+# with every layer `sliding_attention`), so the effect is diluted by design and
+# a crossover has to be real to show in end-to-end throughput.
 set -uo pipefail
 cd "$(dirname "$0")"
 BIN=${BIN:?set BIN to the mlxcel binary under test}
