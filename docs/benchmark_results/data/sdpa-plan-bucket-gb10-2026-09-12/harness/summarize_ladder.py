@@ -46,6 +46,28 @@ def main():
         print(f"WARNING: {len(dirty)} rows saw a foreign model process; excluded\n")
         rows = [r for r in rows if not (r.get("foreign_models_before") or r.get("foreign_models_after"))]
 
+    # A row can be contaminated with no foreign process anywhere near it. The
+    # 8k rung was halted mid-run under a driver allocation storm, and its rows
+    # carry clean `foreign_models_*` fields while one reports a 24.8 ms drafter
+    # host build against about 12 ms in every sibling. Excluding only on
+    # foreign processes would average those straight in, so an explicit
+    # `excluded_reason` on the row wins over every other signal (#1820).
+    marked = [r for r in rows if r.get("excluded_reason")]
+    if marked:
+        print(f"WARNING: {len(marked)} rows carry excluded_reason; excluded")
+        for reason in sorted({r["excluded_reason"] for r in marked}):
+            print(f"  - {reason}")
+        print()
+        rows = [r for r in rows if not r.get("excluded_reason")]
+
+    # A run that drove the driver hard is suspect even unmarked. Surface it
+    # rather than dropping it: the threshold is judgement, not a fact.
+    storms = [r for r in rows
+              if (r.get("nvrm_total_after", 0) - r.get("nvrm_total_before", 0)) > 20]
+    if storms:
+        print(f"WARNING: {len(storms)} rows moved the driver NV_ERR_NO_MEMORY count by more "
+              f"than 20 during the run; kept, but read their spread with suspicion\n")
+
     g = defaultdict(list)
     for r in rows:
         g[(r.get("prompt_file", "?"), r["cfg"])].append(r)
@@ -63,7 +85,8 @@ def main():
                 rounds = f"{d[0]['rounds']:.0f}" if d else ""
                 acc = f"{d[0]['accepted']:.0f}" if d else ""
                 ld = [r["load1_before"] for r in v]
-                print(f"| {LABEL.get(p, p)} | {w} | {name} | {len(v)} | {spread([r['tok_s'] for r in v])} "
+                flag = "" if len(v) >= 3 else f" **n={len(v)} UNDERPOWERED**"
+                print(f"| {LABEL.get(p, p)} | {w} | {name}{flag} | {len(v)} | {spread([r['tok_s'] for r in v])} "
                       f"| {vr} | {rounds} | {acc} | {min(ld):.2f} to {max(ld):.2f} |")
 
     print("\n### Bucketed against the #1799 fallback\n")

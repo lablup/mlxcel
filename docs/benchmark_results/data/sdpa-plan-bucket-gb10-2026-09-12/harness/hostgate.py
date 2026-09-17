@@ -35,8 +35,63 @@ def ci_job_running():
     return "Runner.Worker" in _procs()
 
 
+# Processes that carry a BUSY name but are never work: the self-hosted runner's
+# own service and listener daemons, which run continuously (3+ days uptime) and
+# would otherwise make a name-based node predicate report busy forever. Matched
+# on cmdline identity rather than on CPU: a genuine build dips to 0% between
+# compile units, so a CPU threshold would wave through exactly the contention
+# this gate exists to exclude. `Runner.Worker` is deliberately NOT here, since
+# that is the job executor and exists only while a job runs (#1820).
+DAEMON_MARKERS = ("RunnerService.js", "Runner.Listener")
+
+
+def _proc_rows():
+    """(comm, cmdline, state) for every readable process."""
+    rows = []
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            with open(f"/proc/{pid}/comm") as f:
+                comm = f.read().strip()
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                cmd = f.read().replace(b"\0", b" ").decode("utf-8", "replace")
+            state = ""
+            with open(f"/proc/{pid}/status") as f:
+                for line in f:
+                    if line.startswith("State:"):
+                        state = line.split()[1]
+                        break
+        except OSError:
+            continue
+        rows.append((comm, cmd, state))
+    return rows
+
+
 def busy_procs():
-    return sorted({p for p in _procs() if p in BUSY})
+    """Processes that can consume CPU RIGHT NOW, not processes that exist.
+
+    Three separate outages today came from conflating those two (#1820). A
+    permanent daemon is not busy: the runner's `RunnerService.js` has 3 days of
+    uptime and would pin a name-based predicate to busy forever. A STOPPED
+    process is not busy either: a peer SIGSTOPped its clippy group rather than
+    killing it, and those six processes hold memory while consuming nothing.
+
+    Deliberately NOT a CPU threshold, and the stopped group is the proof from
+    the opposite side: that frozen `clippy-driver` reports 73.9% in `ps`,
+    because `%cpu` is a lifetime average rather than an instantaneous rate. A
+    threshold calls a frozen process busy and a real build idle between compile
+    units, wrong in both directions. State plus identity is the predicate."""
+    out = set()
+    for comm, cmd, state in _proc_rows():
+        if comm not in BUSY:
+            continue
+        if any(m in cmd for m in DAEMON_MARKERS):
+            continue
+        if state.startswith("T"):  # T stopped, t tracing-stop
+            continue
+        out.add(comm)
+    return sorted(out)
 
 
 def foreign_model_procs():
