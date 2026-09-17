@@ -4517,7 +4517,7 @@ fn sdpa_plan_bucket_max_queries() -> i32 {
         std::env::var("MLXCEL_SDPA_PLAN_BUCKET_MAX_QUERIES")
             .ok()
             .map(|v| v.trim().parse::<i32>().unwrap_or(0))
-            .unwrap_or(32)
+            .unwrap_or(0)
     })
 }
 
@@ -4546,11 +4546,31 @@ fn cuda_sdpa_plan_bucket_eligible(
     arr_masked: bool,
     do_causal: bool,
 ) -> bool {
-    arr_masked
-        && !do_causal
-        && q_len > 1
-        && q_len <= sdpa_plan_bucket_max_queries()
-        && k_len > q_len
+    plan_bucket_eligible_with(
+        q_len,
+        k_len,
+        arr_masked,
+        do_causal,
+        sdpa_plan_bucket_max_queries(),
+    )
+}
+
+/// The eligibility predicate with the bound passed in rather than read from the
+/// environment, so it stays testable independently of the shipped default.
+///
+/// The default is `0`, meaning off: #1820 measured bucketing behind #1799's ops
+/// fallback at three of five block widths, so the shipped dispatch is #1799's
+/// alone and this predicate answers `false` unless a caller opts in. Tests here
+/// pass an explicit bound, because a `OnceLock` read of the environment cannot
+/// be varied per test.
+fn plan_bucket_eligible_with(
+    q_len: i32,
+    k_len: i32,
+    arr_masked: bool,
+    do_causal: bool,
+    max_queries: i32,
+) -> bool {
+    arr_masked && !do_causal && q_len > 1 && q_len <= max_queries && k_len > q_len
 }
 
 /// True when mlxcel's own small-query gate refuses cuDNN for this call, so MLX
@@ -7516,12 +7536,11 @@ mod tests {
     #[test]
     fn small_query_fallback_mirrors_the_patched_cudnn_gate() {
         let cuda = cfg!(feature = "cuda");
-        // Since #1820 an array-masked 2-to-32-row block over a longer key
-        // sequence keeps cuDNN (its plan-cache key is bucketed), so the #1799
-        // fallback no longer claims it on any build.
-        assert!(!cuda_sdpa_small_query_fallback(16, 4096, true, false));
-        assert!(!cuda_sdpa_small_query_fallback(2, 4096, true, false));
-        assert!(!cuda_sdpa_small_query_fallback(32, 4096, true, false));
+        // With bucketing off by default (#1820's measured recommendation), the
+        // #1799 fallback claims array-masked blocks again, exactly as on main.
+        assert_eq!(cuda_sdpa_small_query_fallback(16, 4096, true, false), cuda);
+        assert_eq!(cuda_sdpa_small_query_fallback(2, 4096, true, false), cuda);
+        assert_eq!(cuda_sdpa_small_query_fallback(32, 4096, true, false), cuda);
         // The causal half of the #1799 gate is what bucketing does NOT take
         // over: a `do_causal` block carries no array mask, so there is nothing
         // to widen and C++ still routes it to the materializing ops fallback.
@@ -7542,21 +7561,37 @@ mod tests {
 
     #[test]
     fn plan_bucket_eligibility_mirrors_the_patched_cudnn_gate() {
+        // Bound passed explicitly: the shipped default is 0 (off, see
+        // `sdpa_plan_bucket_max_queries`), and a OnceLock environment read
+        // cannot be varied per test, so the predicate is exercised directly.
+        let elig = |q, k, m, c| plan_bucket_eligible_with(q, k, m, c, 32);
         // The array-masked speculative verify shape, which #1820 buckets.
-        assert!(cuda_sdpa_plan_bucket_eligible(2, 350, true, false));
-        assert!(cuda_sdpa_plan_bucket_eligible(16, 4096, true, false));
-        assert!(cuda_sdpa_plan_bucket_eligible(32, 4096, true, false));
+        assert!(elig(2, 350, true, false));
+        assert!(elig(16, 4096, true, false));
+        assert!(elig(32, 4096, true, false));
         // Causal-mode blocks carry no array mask, so bucketing cannot
         // canonicalize their key and #1799's fallback still claims them. This
         // is the axis the C++ gate rejects at `do_causal`, mirrored here.
-        assert!(!cuda_sdpa_plan_bucket_eligible(16, 4096, false, true));
+        assert!(!elig(16, 4096, false, true));
         // Neither an array mask nor causal mode: nothing to widen either.
-        assert!(!cuda_sdpa_plan_bucket_eligible(16, 4096, false, false));
+        assert!(!elig(16, 4096, false, false));
         // One-row decode has its own upstream canonicalization, a wider block
         // amortizes its own plan build, and a prefill has no prior context.
-        assert!(!cuda_sdpa_plan_bucket_eligible(1, 4096, true, false));
-        assert!(!cuda_sdpa_plan_bucket_eligible(33, 4096, true, false));
-        assert!(!cuda_sdpa_plan_bucket_eligible(4096, 4096, true, false));
+        assert!(!elig(1, 4096, true, false));
+        assert!(!elig(33, 4096, true, false));
+        assert!(!elig(4096, 4096, true, false));
+    }
+
+    #[test]
+    fn plan_bucketing_is_off_by_default_so_1799_dispatch_ships() {
+        // The shipped default must reproduce main's dispatch exactly: with the
+        // bound at 0 nothing is bucket-eligible, so #1799's fallback reclaims
+        // every array-masked verify block it claimed before #1820.
+        assert_eq!(sdpa_plan_bucket_max_queries(), 0);
+        assert!(!plan_bucket_eligible_with(4, 4096, true, false, 0));
+        let cuda = cfg!(feature = "cuda");
+        assert_eq!(cuda_sdpa_small_query_fallback(4, 4096, true, false), cuda);
+        assert_eq!(cuda_sdpa_small_query_fallback(16, 4096, false, true), cuda);
     }
 
     #[test]

@@ -217,9 +217,19 @@ constexpr int QKV_NDIM = 4;
 // ---------------------------------------------------------------------------
 
 // Upper bound on the query rows eligible for bucketing; 0 disables it.
+// Default 0, meaning bucketing is OFF unless a caller opts in. #1820 built and
+// validated this path (12 plan builds per generation instead of 82, token ids
+// byte-identical to exact-shape cuDNN) and then measured it BEHIND #1799's ops
+// fallback at three of five block widths with disjoint ranges, so the shipped
+// dispatch is #1799's alone. The code stays because the mechanism is sound and
+// the crossover above 2634 keys is plausible and unmeasured: the fallback
+// materializes a [B, heads, q_len, k_len] score matrix that grows with the key
+// length while this path's cost is flat, so a long-context re-measurement on a
+// freshly booted host should be a flag flip rather than a reimplementation.
+// See docs/benchmark_results/sdpa-plan-cache-bucket-gb10-2026-09-17.md.
 inline int sdpa_plan_bucket_max_queries() {
   static int max_queries =
-      env::get_var("MLXCEL_SDPA_PLAN_BUCKET_MAX_QUERIES", 32);
+      env::get_var("MLXCEL_SDPA_PLAN_BUCKET_MAX_QUERIES", 0);
   return max_queries;
 }
 
