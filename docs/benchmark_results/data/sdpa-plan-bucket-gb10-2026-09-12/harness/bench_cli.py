@@ -22,7 +22,26 @@ import shlex
 import subprocess
 import sys
 import time
+import threading
+
 import hostgate
+
+
+def _peak_rss_kib(pid, stop):
+    """Poll VmHWM for the run's own peak resident size. Cheap (one small read
+    per 200 ms) and it is the number the memory floor should be set from."""
+    peak = 0
+    while not stop.is_set():
+        try:
+            with open(f"/proc/{pid}/status") as f:
+                for line in f:
+                    if line.startswith("VmHWM:"):
+                        peak = max(peak, int(line.split()[1]))
+                        break
+        except (OSError, ValueError):
+            break
+        stop.wait(0.2)
+    return peak
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 GEN_RE = re.compile(r"\[Generated (\d+) tokens in ([0-9.]+)s = ([0-9.]+) tok/s\]")
@@ -51,18 +70,40 @@ def run_once(a, cfg, presets, prompt, wrap=""):
         cmd += ["--draft-model", a.draft, "--draft-kind", "dflash",
                 "--draft-block-size", str(block)]
     gate_wait_s = hostgate.wait_quiet(log=sys.stderr)
+    # Driver trip wire, checked immediately before EVERY run rather than once
+    # per rung: the 2026-09-17 halt lost a rung because the check was manual
+    # and periodic. Raises DriverHalt, which the caller turns into a clean stop
+    # with everything so far already written (#1820).
+    driver_wait_s, nvrm_window, nvrm_total = hostgate.driver_gate(log=sys.stderr)
+    gate_wait_s += driver_wait_s
+    mem_wait_s, mem_avail = hostgate.mem_gate(log=sys.stderr)
+    gate_wait_s += mem_wait_s
     load1 = os.getloadavg()[0]
     ci_job = hostgate.ci_job_running()
     # Re-checked immediately before the load and again after: the gate above can
     # clear and a foreign session can start in the gap (#1820).
     foreign_before = hostgate.foreign_model_procs()
     t0 = time.perf_counter()
-    p = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=3600)
+    proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True)
+    stop = threading.Event()
+    peak = {}
+    sampler = threading.Thread(target=lambda: peak.__setitem__("kib", _peak_rss_kib(proc.pid, stop)))
+    sampler.start()
+    try:
+        out_s, err_s = proc.communicate(timeout=3600)
+    finally:
+        stop.set()
+        sampler.join(timeout=5)
+    p = subprocess.CompletedProcess(cmd, proc.returncode, out_s, err_s)
     wall = time.perf_counter() - t0
     out = ANSI.sub("", p.stdout)
     err = ANSI.sub("", p.stderr)
     rec = {"cfg": cfg, "block": block, "load1_before": load1, "ci_job_running": ci_job, "gate_wait_s": gate_wait_s, "wall_s": wall,
            "foreign_models_before": foreign_before, "foreign_models_after": hostgate.foreign_model_procs(),
+           "nvrm_window_before": nvrm_window, "nvrm_total_before": nvrm_total,
+           "mem_available_gib_before": round(mem_avail, 1), "peak_rss_kib": peak.get("kib", 0),
+           "nvrm_total_after": hostgate.nvrm_counts()[1],
            "prompt_file": a.prompt_file, "max_tokens": a.max_tokens, "rc": p.returncode}
     m = GEN_RE.search(out)
     if m:
@@ -105,7 +146,11 @@ def main():
     cfgs = a.configs.split(",")
     with open(a.out, "a") as f:
         for i in range(a.warmup):
-            r = run_once(a, cfgs[0], presets, prompt, a.wrap)
+            try:
+                r = run_once(a, cfgs[0], presets, prompt, a.wrap)
+            except hostgate.DriverHalt as e:
+                print(f"[driver] HALT before warmup: {e}", file=sys.stderr, flush=True)
+                return 3
             r["warmup"] = True
             r["tag"] = a.tag
             print(f"[warmup {i}] {cfgs[0]} tok/s={r.get('tok_s')} rc={r['rc']}", file=sys.stderr, flush=True)
@@ -114,7 +159,11 @@ def main():
             n = len(cfgs)
             for k in range(n):
                 cfg = cfgs[(rd + k) % n]
-                r = run_once(a, cfg, presets, prompt, a.wrap)
+                try:
+                    r = run_once(a, cfg, presets, prompt, a.wrap)
+                except hostgate.DriverHalt as e:
+                    print(f"[driver] HALT before {cfg}: {e}", file=sys.stderr, flush=True)
+                    return 3
                 r["warmup"] = False
                 r["round"] = rd
                 r["tag"] = a.tag
@@ -133,4 +182,6 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # Propagate the driver-halt code so the caller stops the rung instead of
+    # walking on to the next configuration (#1820).
+    sys.exit(main() or 0)
