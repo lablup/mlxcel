@@ -16,7 +16,7 @@
 //!
 //! Same shape as `tests/florence2_fusion_parity.rs` and driven by the same
 //! deterministic synthetic pixel tensor and task prompt, with one difference
-//! that matters: the checkpoint is `models/Florence-2-base-ft-4bit` and the
+//! that matters: the checkpoint is `models/florence-2-base-ft-4bit` and the
 //! reference is upstream mlx-vlm running *that same 4-bit checkpoint*, not the
 //! bf16 one.
 //!
@@ -58,7 +58,7 @@ use std::path::Path;
 
 use mlxcel::models::{Florence2Model, Florence2Quantization};
 
-const QUANT_DIR: &str = "models/Florence-2-base-ft-4bit";
+const QUANT_DIR: &str = "models/florence-2-base-ft-4bit";
 const DENSE_DIR: &str = "models/Florence-2-base-ft-bf16";
 
 /// Extra bit widths smoke-tested for load when present, so the packing path
@@ -75,7 +75,7 @@ const OTHER_QUANTIZED_DIRS: &[&str] = &[
     // load path. It stays in the smoke list because loading it still proves
     // the packing path is not `base-ft`-shaped: `d_model` 1024, twelve BART
     // layers, and `dim_embed` up to 2048.
-    "models/Florence-2-large-ft-4bit",
+    "models/florence-2-large-ft-4bit",
 ];
 
 const IMAGE_SIDE: i32 = 768;

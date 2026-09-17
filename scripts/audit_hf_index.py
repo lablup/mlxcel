@@ -13,7 +13,7 @@ Usage:
     python3 scripts/audit_hf_index.py mlx-community/Qwen3-VL-32B-Instruct-4bit
 
     # Audit every repo named in the READMEs of local checkpoints.
-    python3 scripts/audit_hf_index.py --local models/qwen3-vl-32b-4bit models/gemma-3-4b-it-4bit
+    python3 scripts/audit_hf_index.py --local models/qwen3-vl-32b-instruct-4bit models/gemma-3-4b-it-4bit
 
     # Audit a slice of the org, most-downloaded first.
     python3 scripts/audit_hf_index.py --search image-text-to-text --limit 60

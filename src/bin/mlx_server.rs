@@ -137,17 +137,17 @@ Remote Pipeline Parallel Example (TCP):
          examples/distributed/generated_pipeline_remote_2node_tcp.toml
 
   2. Start stage-1 on machine B:
-       mlxcel-server -m models/llama-3.2-1b-4bit \\
+       mlxcel-server -m models/llama-3.2-1b-instruct-4bit \\
          --distributed-config examples/distributed/generated_pipeline_remote_2node_tcp.toml \\
          --node-id stage-1 --host 0.0.0.0 --port 18081 --no-warmup
 
   3. Start stage-0 on machine A:
-       mlxcel-server -m models/llama-3.2-1b-4bit \\
+       mlxcel-server -m models/llama-3.2-1b-instruct-4bit \\
          --distributed-config examples/distributed/generated_pipeline_remote_2node_tcp.toml \\
          --node-id stage-0 --host 0.0.0.0 --port 18081 --no-warmup
 
   4. Start the coordinator on machine A:
-       mlxcel-server -m models/llama-3.2-1b-4bit --alias llama-remote-pp \\
+       mlxcel-server -m models/llama-3.2-1b-instruct-4bit --alias llama-remote-pp \\
          --distributed-config examples/distributed/generated_pipeline_remote_2node_tcp.toml \\
          --node-id coordinator --host 0.0.0.0 --port 18080 \\
          --parallel 2 --max-batch-size 2 --pp-micro-batch-size 2 \\

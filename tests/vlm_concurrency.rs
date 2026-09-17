@@ -36,10 +36,10 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use common::{repo_binary_path, repo_model_dir};
 
-const GEMMA3N_E2B_MODEL: &str = "gemma3n-e2b-4bit";
-const GEMMA3N_E4B_MODEL: &str = "gemma3n-e4b-4bit";
-const QWEN2_5_VL_MODEL: &str = "qwen2.5-vl-3b-4bit";
-const QWEN2_VL_MODEL: &str = "qwen2-vl-2b-4bit";
+const GEMMA3N_E2B_MODEL: &str = "gemma-3n-e2b-it-4bit";
+const GEMMA3N_E4B_MODEL: &str = "gemma-3n-e4b-it-4bit";
+const QWEN2_5_VL_MODEL: &str = "qwen2.5-vl-3b-instruct-4bit";
+const QWEN2_VL_MODEL: &str = "qwen2-vl-2b-instruct-4bit";
 
 fn reserve_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");

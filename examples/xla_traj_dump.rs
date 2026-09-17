@@ -48,7 +48,7 @@ fn arg(flag: &str, default: &str) -> String {
 }
 
 fn main() {
-    let model = PathBuf::from(arg("--model", "models/llama-3.2-1b-4bit"));
+    let model = PathBuf::from(arg("--model", "models/llama-3.2-1b-instruct-4bit"));
     let device = {
         let a = arg("--device", "");
         if a.is_empty() {

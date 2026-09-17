@@ -70,7 +70,7 @@
 //! ```
 //!
 //! Note: The B3 Qwen2.5-1.5B fixture uses the **base** (non-instruct) variant
-//! `Qwen2.5-1.5B-4bit`. The instruct variant collapses on raw wikitext without
+//! `qwen2.5-1.5b-4bit`. The instruct variant collapses on raw wikitext without
 //! the chat template (`<|im_start|>user\n...<|im_end|>`), producing PPL ≈ 2×10⁷
 //! and NIAH=0/12. This gate measures TurboQuant compression
 //! quality, not chat performance, so the base model is the correct fixture.
@@ -585,21 +585,21 @@ fn run_quality_gate(model_dir_name: &str) -> Option<(f64, f64, usize, usize)> {
 
 // B3 fixture: use the BASE (non-instruct) variant of Qwen2.5-1.5B.
 //
-// The instruct-tuned `Qwen2.5-1.5B-Instruct-4bit` collapses on raw wikitext
+// The instruct-tuned `qwen2.5-1.5b-instruct-4bit` collapses on raw wikitext
 // without the chat template, producing PPL ≈ 2×10⁷ and NIAH=0/12 — values
 // six orders of magnitude off a healthy ~10–15 baseline (and comment). The relative turbo4asym gate would still pass in that
 // case (both fp16 and turbo degenerate together), making the test a
 // meaningless noise check rather than a real quality signal.
 //
-// `Qwen2.5-1.5B-4bit` (base model) produces healthy absolute PPL on raw
+// `qwen2.5-1.5b-4bit` (base model) produces healthy absolute PPL on raw
 // wikitext and is the correct fixture for a TurboQuant compression gate.
 // Download: ./target/release/mlxcel download mlx-community/Qwen2.5-1.5B-4bit
 #[test]
-#[ignore = "requires Qwen2.5-1.5B-4bit weights (base, non-instruct variant) — \
+#[ignore = "requires qwen2.5-1.5b-4bit weights (base, non-instruct variant) — \
             run with --release -- --ignored test_qwen25_15b_quality_gate --nocapture"]
 fn test_qwen25_15b_quality_gate() {
     let Some((ppl_fp16, ppl_turbo, niah_baseline, niah_turbo)) =
-        run_quality_gate("Qwen2.5-1.5B-4bit")
+        run_quality_gate("qwen2.5-1.5b-4bit")
     else {
         return; // model absent — soft skip
     };
@@ -630,11 +630,11 @@ fn test_qwen25_15b_quality_gate() {
 }
 
 #[test]
-#[ignore = "requires Meta-Llama-3.1-8B-Instruct-4bit weights — \
+#[ignore = "requires meta-llama-3.1-8b-instruct-4bit weights — \
             run with --release -- --ignored test_llama31_8b_quality_gate --nocapture"]
 fn test_llama31_8b_quality_gate() {
     let Some((ppl_fp16, ppl_turbo, niah_baseline, niah_turbo)) =
-        run_quality_gate("Meta-Llama-3.1-8B-Instruct-4bit")
+        run_quality_gate("meta-llama-3.1-8b-instruct-4bit")
     else {
         return;
     };
@@ -842,17 +842,14 @@ fn test_rotation_kurtosis_sanity() {
     // rejects them and the test would otherwise soft-skip on quantized-only
     // hosts.
     let candidates = [
-        "qwen2.5-0.5b-bf16",
-        "gemma3n-e4b-bf16",
-        "Qwen2.5-7B-Instruct-4bit",
+        "qwen2.5-0.5b-instruct-bf16",
+        "gemma-3n-e4b-bf16",
         "qwen2.5-7b-instruct-4bit",
         // base model used by B3 quality gate since
-        "Qwen2.5-1.5B-4bit",
-        "Qwen2.5-1.5B-Instruct-4bit",
-        "Meta-Llama-3.1-8B-Instruct-4bit",
-        "gemma-3-4b-it-4bit",
+        "qwen2.5-1.5b-4bit",
+        "qwen2.5-1.5b-instruct-4bit",
         "meta-llama-3.1-8b-instruct-4bit",
-        "gemma3-4b-4bit",
+        "gemma-3-4b-it-4bit",
     ];
 
     let mut loaded: Option<(String, Vec<f32>)> = None;
@@ -1270,15 +1267,16 @@ fn measure_vlm_image_token_kurtosis(model_dir_name: &str) -> Option<(f64, f64, u
             run with --release -- --ignored test_vlm_image_token_kurtosis --nocapture"]
 fn test_vlm_image_token_kurtosis() {
     // Order matters: smaller checkpoints first so the soft-skip walk is fast
-    // when only the larger ones are available; aya-vision-8b and gemma-4-e4b
-    // are both healthy 4-bit VLM fixtures shipped during the follow-up.
+    // when only the larger ones are available; aya-vision-8b-4bit and
+    // gemma-4-e4b are both healthy 4-bit VLM fixtures shipped during the
+    // follow-up.
     let candidates = [
-        "qwen2-vl-2b-4bit",
-        "qwen2.5-vl-3b-4bit",
-        "aya-vision-8b",
+        "qwen2-vl-2b-instruct-4bit",
+        "qwen2.5-vl-3b-instruct-4bit",
+        "aya-vision-8b-4bit",
         "gemma-4-e4b-it-4bit",
-        "gemma3-4b-4bit",
-        "phi-3.5-vision-4bit",
+        "gemma-3-4b-it-4bit",
+        "phi-3.5-vision-instruct-4bit",
         "pixtral-12b-4bit",
     ];
 
@@ -1346,7 +1344,7 @@ fn test_vlm_image_token_kurtosis() {
             run with --release -- --ignored test_qwen2_vl_2b_quality_gate --nocapture"]
 fn test_qwen2_vl_2b_quality_gate() {
     let Some((ppl_fp16, ppl_turbo, niah_baseline, niah_turbo)) =
-        run_vlm_quality_gate("qwen2-vl-2b-4bit")
+        run_vlm_quality_gate("qwen2-vl-2b-instruct-4bit")
     else {
         return;
     };
@@ -1379,7 +1377,7 @@ fn test_qwen2_vl_2b_quality_gate() {
             run with --release -- --ignored test_aya_vision_8b_quality_gate --nocapture"]
 fn test_aya_vision_8b_quality_gate() {
     let Some((ppl_fp16, ppl_turbo, niah_baseline, niah_turbo)) =
-        run_vlm_quality_gate("aya-vision-8b")
+        run_vlm_quality_gate("aya-vision-8b-4bit")
     else {
         return;
     };

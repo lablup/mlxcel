@@ -321,9 +321,9 @@ fn version_constant_is_three() {
 fn build_index_from_real_tokenizer_smoke() {
     // Try multiple candidate tokenizer paths — use the first one found.
     let candidates = [
-        "models/smollm-135m-4bit/tokenizer.json",
-        "models/Qwen2.5-7B-Instruct-4bit/tokenizer.json",
-        "models/Meta-Llama-3.1-8B-Instruct-4bit/tokenizer.json",
+        "models/smollm-135m-instruct-4bit/tokenizer.json",
+        "models/qwen2.5-7b-instruct-4bit/tokenizer.json",
+        "models/meta-llama-3.1-8b-instruct-4bit/tokenizer.json",
     ];
 
     let found = candidates.iter().find(|p| std::path::Path::new(p).exists());
@@ -384,10 +384,9 @@ fn build_index_from_real_tokenizer_smoke() {
 #[test]
 fn real_multilingual_tokenizer_populates_non_latin_scripts() {
     let candidates = [
-        "models/qwen2.5-0.5b-bf16/tokenizer.json",
-        "models/qwen2.5-7b-4bit/tokenizer.json",
-        "models/qwen3-0.6b/tokenizer.json",
-        "models/Qwen2.5-7B-Instruct-4bit/tokenizer.json",
+        "models/qwen2.5-0.5b-instruct-bf16/tokenizer.json",
+        "models/qwen2.5-7b-instruct-4bit/tokenizer.json",
+        "models/qwen3-0.6b-4bit/tokenizer.json",
     ];
     let found = candidates.iter().find(|p| std::path::Path::new(p).exists());
     let Some(path) = found else {
@@ -524,9 +523,9 @@ fn cache_path_relative(tmp: &tempfile::TempDir, hash: &str) -> std::path::PathBu
 #[test]
 fn b4_cache_real_tokenizer_integration_smoke() {
     let candidates = [
-        "models/smollm-135m-4bit/tokenizer.json",
-        "models/Qwen2.5-7B-Instruct-4bit/tokenizer.json",
-        "models/Meta-Llama-3.1-8B-Instruct-4bit/tokenizer.json",
+        "models/smollm-135m-instruct-4bit/tokenizer.json",
+        "models/qwen2.5-7b-instruct-4bit/tokenizer.json",
+        "models/meta-llama-3.1-8b-instruct-4bit/tokenizer.json",
     ];
 
     let found = candidates.iter().find(|p| std::path::Path::new(p).exists());

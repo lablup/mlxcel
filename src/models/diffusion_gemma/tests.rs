@@ -448,7 +448,7 @@ fn dense_windowed_mask_is_correct_for_multi_token_offset_forward() {
 #[ignore]
 fn real_model_forward_determinism() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("models/diffusiongemma-26B-A4B-it-4bit");
+        .join("models/diffusiongemma-26b-a4b-it-4bit");
     if !dir.exists() {
         eprintln!("skip: checkpoint not present");
         return;
@@ -803,7 +803,7 @@ fn sanitize_drops_clip_calibration_when_unclipped() {
 #[ignore]
 fn real_model_loads_vision_front_end() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("models/diffusiongemma-26B-A4B-it-4bit");
+        .join("models/diffusiongemma-26b-a4b-it-4bit");
     if !dir.exists() {
         eprintln!("skip: checkpoint not present");
         return;

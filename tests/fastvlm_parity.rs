@@ -14,7 +14,7 @@
 
 //! FastVLM (`llava_qwen2`) real-model parity / smoke tests.
 //!
-//! Gated on the presence of `models/FastVLM-0.5B-bf16`; the tests `eprintln!` +
+//! Gated on the presence of `models/fastvlm-0.5b-bf16`; the tests `eprintln!` +
 //! return when the model is absent, so they are inert in CI and on machines
 //! without the checkpoint. With the model present they exercise:
 //!
@@ -37,7 +37,7 @@ use mlxcel::models::{ModelType, get_model_type};
 use mlxcel::vision::processors::ImageProcessor;
 use mlxcel::vision::processors::fastvlm::FastvlmProcessor;
 
-const MODEL_NAME: &str = "FastVLM-0.5B-bf16";
+const MODEL_NAME: &str = "fastvlm-0.5b-bf16";
 const VOCAB: i32 = 151_936;
 
 fn model_dir() -> Option<PathBuf> {
@@ -74,7 +74,7 @@ fn processor_emits_1024_square_channels_first() {
 fn text_only_forward_produces_finite_logits() {
     let Some(dir) = model_dir() else { return };
 
-    let (model, tokenizer) = mlxcel::load_model(&dir).expect("load FastVLM-0.5B-bf16");
+    let (model, tokenizer) = mlxcel::load_model(&dir).expect("load fastvlm-0.5b-bf16");
     assert!(model.is_vlm(), "FastVLM must register as a VLM");
 
     let tokens: Vec<i32> = tokenizer
@@ -111,7 +111,7 @@ fn text_only_forward_produces_finite_logits() {
 fn image_forward_produces_finite_logits() {
     let Some(dir) = model_dir() else { return };
 
-    let (model, tokenizer) = mlxcel::load_model(&dir).expect("load FastVLM-0.5B-bf16");
+    let (model, tokenizer) = mlxcel::load_model(&dir).expect("load fastvlm-0.5b-bf16");
 
     let images = vec![fixture_image()];
     let mut prompt_tokens: Vec<i32> = tokenizer

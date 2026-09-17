@@ -9,7 +9,7 @@ import time
 import mlx.core as mx
 from mlx_lm import load, generate
 
-MODEL_PATH = "models/gemma-3n-E4B-it-4bit"
+MODEL_PATH = "models/gemma-3n-e4b-it-4bit"
 
 def main():
     print("=" * 55)

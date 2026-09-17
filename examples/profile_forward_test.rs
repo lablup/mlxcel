@@ -19,7 +19,7 @@ fn main() {
     use std::time::Instant;
 
     let (model, _) =
-        mlxcel::load_model(Path::new("models/Meta-Llama-3.1-8B-Instruct-4bit")).unwrap();
+        mlxcel::load_model(Path::new("models/meta-llama-3.1-8b-instruct-4bit")).unwrap();
     let input = mlxcel_core::from_slice_i32(&[9906], &[1, 1]);
 
     // Warmup

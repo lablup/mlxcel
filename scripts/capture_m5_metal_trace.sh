@@ -32,7 +32,7 @@ usage() {
 Usage: capture_m5_metal_trace.sh --model PATH [options]
 
 Required:
-  --model PATH                    Model directory (e.g. models/gemma2-2b-4bit)
+  --model PATH                    Model directory (e.g. models/gemma-2-2b-it-4bit)
 
 Options:
   --prompt TEXT                   Prompt string

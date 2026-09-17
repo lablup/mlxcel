@@ -134,9 +134,9 @@ enum Commands {
     ///
     /// Examples:
     ///
-    ///     mlxcel inspect models/llama-3.2-1b-4bit
-    ///     mlxcel inspect models/llama-3.2-1b-4bit --max-tokens 32768
-    ///     mlxcel inspect models/llama-3.2-1b-4bit --cache-type-k int8 --cache-type-v int8
+    ///     mlxcel inspect models/llama-3.2-1b-instruct-4bit
+    ///     mlxcel inspect models/llama-3.2-1b-instruct-4bit --max-tokens 32768
+    ///     mlxcel inspect models/llama-3.2-1b-instruct-4bit --cache-type-k int8 --cache-type-v int8
     #[command(verbatim_doc_comment)]
     Inspect(InspectArgs),
 
@@ -170,7 +170,7 @@ enum Commands {
     /// Examples:
     ///
     ///     mlxcel embed -m sentence-transformers/all-MiniLM-L6-v2 -p "The weather is lovely" -p "It is sunny"
-    ///     mlxcel embed -m models/Qwen3-Embedding-0.6B -p "query" --instruction "Retrieve passages" --dimensions 256 --json
+    ///     mlxcel embed -m models/qwen3-embedding-0.6b -p "query" --instruction "Retrieve passages" --dimensions 256 --json
     #[command(verbatim_doc_comment)]
     Embed(commands::EmbedArgs),
 
@@ -214,10 +214,10 @@ enum Commands {
     ///
     /// Examples:
     ///
-    ///     mlxcel tune                                   # every op the backend supports
-    ///     mlxcel tune --op paged-decode-splits          # one op
-    ///     mlxcel tune -m models/llama-3.2-1b-4bit       # head geometry from a checkpoint
-    ///     mlxcel tune --dry-run                         # print the matrix, profile nothing
+    ///     mlxcel tune                                        # every op the backend supports
+    ///     mlxcel tune --op paged-decode-splits               # one op
+    ///     mlxcel tune -m models/llama-3.2-1b-instruct-4bit   # head geometry from a checkpoint
+    ///     mlxcel tune --dry-run                              # print the matrix, profile nothing
     ///
     /// Then run with `MLXCEL_AUTOTUNE=cache` to consume the tuned tactics, or
     /// `MLXCEL_AUTOTUNE=1` to additionally tune unseen shapes on first use.
@@ -1050,17 +1050,17 @@ Remote Pipeline Parallel Example (TCP):
          examples/distributed/generated_pipeline_remote_2node_tcp.toml
 
   2. Start stage-1 on machine B:
-       mlxcel serve -m models/llama-3.2-1b-4bit \\
+       mlxcel serve -m models/llama-3.2-1b-instruct-4bit \\
          --distributed-config examples/distributed/generated_pipeline_remote_2node_tcp.toml \\
          --node-id stage-1 --host 0.0.0.0 --port 18081 --no-warmup
 
   3. Start stage-0 on machine A:
-       mlxcel serve -m models/llama-3.2-1b-4bit \\
+       mlxcel serve -m models/llama-3.2-1b-instruct-4bit \\
          --distributed-config examples/distributed/generated_pipeline_remote_2node_tcp.toml \\
          --node-id stage-0 --host 0.0.0.0 --port 18081 --no-warmup
 
   4. Start the coordinator on machine A:
-       mlxcel serve -m models/llama-3.2-1b-4bit --alias llama-remote-pp \\
+       mlxcel serve -m models/llama-3.2-1b-instruct-4bit --alias llama-remote-pp \\
          --distributed-config examples/distributed/generated_pipeline_remote_2node_tcp.toml \\
          --node-id coordinator --host 0.0.0.0 --port 18080 \\
          --parallel 2 --max-batch-size 2 --pp-micro-batch-size 2 \\

@@ -50,9 +50,9 @@ use mlxcel::models::{Gemma2Model, HunyuanMoeModel, HunyuanV1DenseModel, InternLM
 use mlxcel_core::generate::LanguageModel;
 
 // Model directories.
-const INTERNLM3_DIR: &str = "models/internlm3-8b-4bit";
+const INTERNLM3_DIR: &str = "models/internlm3-8b-instruct-4bit";
 const HUNYUAN_DENSE_DIR: &str = "models/hunyuan-1.8b-4bit";
-const GEMMA2_DIR: &str = "models/gemma2-2b-4bit";
+const GEMMA2_DIR: &str = "models/gemma-2-2b-it-4bit";
 const HUNYUAN_MOE_DIR: &str = "models/hunyuan-a13b-instruct-4bit";
 
 // Per-family bounds on the position-0 deviation between a single-token prefill

@@ -35,7 +35,7 @@
 use mlxcel::models::DeepSeekV2Model;
 use mlxcel_core::generate::LanguageModel;
 
-const MODEL_DIR: &str = "models/deepseek-v2-lite-4bit";
+const MODEL_DIR: &str = "models/deepseek-v2-lite-chat-4bit-mlx";
 
 // tokenizer.encode("The capital of France is") with the BOS the checkpoint's
 // tokenizer adds, which is exactly what mlx-lm feeds prefill.

@@ -22,7 +22,7 @@
 //!
 //! ```bash
 //! # Start the server first:
-//! mlxcel-server -m models/Meta-Llama-3.1-8B-Instruct-4bit --batch-size 8
+//! mlxcel-server -m models/meta-llama-3.1-8b-instruct-4bit --batch-size 8
 //!
 //! # Run the benchmark:
 //! cargo run --release --example batch_benchmark -- \

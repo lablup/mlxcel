@@ -9,7 +9,7 @@ import time
 import mlx.core as mx
 from mlx_lm import load, generate
 
-MODEL_PATH = "models/Meta-Llama-3.1-8B-Instruct-4bit"
+MODEL_PATH = "models/meta-llama-3.1-8b-instruct-4bit"
 
 def main():
     print("=" * 55)
