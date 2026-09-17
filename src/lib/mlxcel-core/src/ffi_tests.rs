@@ -4824,3 +4824,71 @@ fn activation_helpers_return_the_input_dtype() {
         }
     }
 }
+
+/// `item_f32` must convert from the array's real dtype, not reinterpret it.
+///
+/// `array::item<T>()` is `*data<T>()`, so asking for `float` from a 2-byte
+/// dtype reads 4 bytes out of a 2-byte buffer: the low half is the real bit
+/// pattern and the high half is whatever follows in the allocation. Before the
+/// dispatch in `item_scalar`, a bfloat16 `10.3125` (bits `0x4125`) came back as
+/// `0x00004125` reinterpreted, or `2.337e-41`, and the same call returned a
+/// NaN under a different build profile because the layout put different bytes
+/// after the scalar.
+///
+/// Every value here is exactly representable in every dtype under test, so any
+/// difference is the read, never rounding.
+#[test]
+fn item_f32_converts_from_the_arrays_own_dtype() {
+    for (dtype, name) in [
+        (dtype::BFLOAT16, "bf16"),
+        (dtype::FLOAT16, "f16"),
+        (dtype::FLOAT32, "f32"),
+    ] {
+        for value in [10.3125_f32, 8.125, 11.25, -2.5, 0.0] {
+            let arr = full_f32(&[1], value, dtype);
+            eval(&arr);
+            let got = item_f32(&arr);
+            assert_eq!(
+                got, value,
+                "item_f32 on a {name} scalar holding {value} returned {got}; a reinterpret \
+                 rather than a conversion yields a denormal near 1e-41 or a NaN"
+            );
+            assert!(
+                got.is_finite(),
+                "item_f32 on a {name} scalar holding {value} returned a non-finite {got}"
+            );
+        }
+    }
+}
+
+/// The same defect class reaches the integer and bool readers, which share the
+/// raw-reinterpret implementation. `item_i32` on an `int64` array read the low
+/// word, and `item_bool` on any wider dtype read one byte of a larger element.
+#[test]
+fn item_readers_convert_across_widths() {
+    let i64_arr = astype(&full_f32(&[1], 7.0, dtype::FLOAT32), dtype::INT64);
+    eval(&i64_arr);
+    assert_eq!(item_i32(&i64_arr), 7, "item_i32 must convert from int64");
+
+    let i32_arr = astype(&full_f32(&[1], 9.0, dtype::FLOAT32), dtype::INT32);
+    eval(&i32_arr);
+    assert_eq!(item_i64(&i32_arr), 9, "item_i64 must convert from int32");
+
+    let bf16_arr = full_f32(&[1], 3.0, dtype::BFLOAT16);
+    eval(&bf16_arr);
+    assert_eq!(
+        item_i32(&bf16_arr),
+        3,
+        "item_i32 must convert from bfloat16"
+    );
+
+    for (value, expected) in [(0.0_f32, false), (1.0, true), (2.5, true)] {
+        let arr = full_f32(&[1], value, dtype::BFLOAT16);
+        eval(&arr);
+        assert_eq!(
+            item_bool(&arr),
+            expected,
+            "item_bool on a bfloat16 scalar holding {value}"
+        );
+    }
+}

@@ -606,20 +606,74 @@ size_t array_nbytes(const MlxArray& arr) {
 }
 
 // Array data access (scalar extraction).
+//
+// `array::item<T>()` is `eval(); return *data<T>();`, a raw reinterpret with
+// no dtype check and no conversion. Asking for a `T` wider than the array's
+// own dtype therefore reads past the element: `item<float>()` on a bfloat16
+// scalar reads 4 bytes out of a 2-byte buffer, so the low half carries the
+// bf16 bit pattern and the high half is whatever happens to follow in the
+// allocation. The value is a denormal when those trailing bytes are zero and
+// a NaN when they are not, which is why one call site returned a finite
+// denormal under `release` and a NaN under `test-fast`: the allocation layout
+// differs between the two, so the out-of-bounds bytes differ with it.
+//
+// That is not a theoretical hazard. GB10 keeps quantized checkpoints in
+// bfloat16 (`bf16_to_f16_at_load` skips the conversion when `is_quantized`),
+// so `glm-ocr-4bit` logits of 8.125 and 10.3125 were read back as 2.33e-41,
+// failing `text_only_forward_produces_finite_logits` against a model that was
+// computing correctly.
+//
+// Dispatching on the real dtype is the fix, and it belongs here rather than at
+// the call sites: there are over 300 of them and none can be expected to know
+// the backend's dtype policy. The scalar is already resident once `item<T>()`
+// has evaluated it, so converting on the host costs no extra graph node.
+namespace {
+
+template <typename Out>
+Out item_scalar(const MlxArray& arr) {
+    auto& a = const_cast<array&>(arr.inner);
+    switch (a.dtype().val()) {
+        case bool_.val(): return static_cast<Out>(a.item<bool>());
+        case uint8.val(): return static_cast<Out>(a.item<uint8_t>());
+        case uint16.val(): return static_cast<Out>(a.item<uint16_t>());
+        case uint32.val(): return static_cast<Out>(a.item<uint32_t>());
+        case uint64.val(): return static_cast<Out>(a.item<uint64_t>());
+        case int8.val(): return static_cast<Out>(a.item<int8_t>());
+        case int16.val(): return static_cast<Out>(a.item<int16_t>());
+        case int32.val(): return static_cast<Out>(a.item<int32_t>());
+        case int64.val(): return static_cast<Out>(a.item<int64_t>());
+        case float16.val():
+            return static_cast<Out>(static_cast<float>(a.item<float16_t>()));
+        case float32.val(): return static_cast<Out>(a.item<float>());
+        case float64.val(): return static_cast<Out>(a.item<double>());
+        case bfloat16.val():
+            return static_cast<Out>(static_cast<float>(a.item<bfloat16_t>()));
+        case complex64.val():
+            // Only the real part survives a scalar read; the imaginary part has
+            // nowhere to go in any of these return types.
+            return static_cast<Out>(a.item<complex64_t>().real());
+        default:
+            throw std::invalid_argument(
+                "item_scalar: unhandled dtype; add it to the dispatch above");
+    }
+}
+
+}  // namespace
+
 float item_f32(const MlxArray& arr) {
-    return const_cast<array&>(arr.inner).item<float>();
+    return item_scalar<float>(arr);
 }
 
 int32_t item_i32(const MlxArray& arr) {
-    return const_cast<array&>(arr.inner).item<int32_t>();
+    return item_scalar<int32_t>(arr);
 }
 
 int64_t item_i64(const MlxArray& arr) {
-    return const_cast<array&>(arr.inner).item<int64_t>();
+    return item_scalar<int64_t>(arr);
 }
 
 bool item_bool(const MlxArray& arr) {
-    return const_cast<array&>(arr.inner).item<bool>();
+    return item_scalar<bool>(arr);
 }
 
 rust::Vec<uint8_t> array_to_raw_bytes(const MlxArray& arr) {
