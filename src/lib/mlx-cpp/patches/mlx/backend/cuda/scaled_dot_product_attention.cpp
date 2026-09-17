@@ -38,6 +38,7 @@
 #include <nvtx3/nvtx3.hpp>
 
 #include <limits>
+#include <mutex>
 
 namespace mlx::core {
 
@@ -121,6 +122,20 @@ inline int64_t kv_buffer_extent(const array& kv) {
 inline int64_t kv_cache_slice_extent(const array& kv) {
   if (kv.ndim() != 4 || kv.shape(2) <= 0 || kv.strides(3) != 1 ||
       kv.strides(2) != kv.shape(3)) {
+    return 0;
+  }
+  // The slice has to start at the allocation's base. The element-count
+  // identity below proves the widened view is the same SIZE as the
+  // allocation, not that it BEGINS at it: a mid-buffer window
+  // `cache[..., a:b, :]` leaves every stride untouched and passes it, and
+  // `unslice_kv` would then subtract a non-zero offset from the base pointer
+  // and address memory before the allocation. No mlxcel producer hands SDPA
+  // such a slice today (the dense cache and `RingSlidingKVCache::full_view`
+  // both slice from [0, 0, 0, 0]), so this guards a future one rather than a
+  // live defect, and it costs one comparison. Upstream omits it because its
+  // own `is_kv_cache_slice` was only ever reached from the one-row decode
+  // path, where the caller is mlx-lm's own cache.
+  if (kv.offset() != 0) {
     return 0;
   }
   int64_t T_kv = kv_buffer_extent(kv);
@@ -287,7 +302,11 @@ SdpaBucketPlan sdpa_plan_bucket(
   }
 
   int64_t k_extent = kv_cache_slice_extent(k);
-  if (k_extent > k_len && k_extent == kv_cache_slice_extent(v)) {
+  // `>=`, not `>`: when the cache is exactly full the unslice is a no-op view
+  // of the same shape, which is free and already canonical. Requiring strict
+  // growth room would send that one call down the copy arm to copy a tensor
+  // onto a buffer of identical size.
+  if (k_extent >= k_len && k_extent == kv_cache_slice_extent(v)) {
     plan.apply = true;
     plan.bucket = k_extent;
     return plan;
@@ -655,6 +674,34 @@ static void sdpa_cudnn_impl(
     plan = sdpa_plan_bucket(q, k, v, mask_arr, do_causal, output_logsumexp);
   }
   bool bucketed = plan.apply;
+  // A call whose SHAPE is bucket-eligible is committed to cuDNN by
+  // `supports_sdpa_cudnn`, which narrows #1799's ops fallback on the shape
+  // alone because it has to answer identically during graph building and at
+  // eval. `sdpa_plan_bucket` can still decline here on LAYOUT, which only
+  // eval can see: the by-copy size cap, a mask that is not the broadcast
+  // plane `fast::scaled_dot_product_attention` builds (a per-head mask, or
+  // one broadcast over the query axis), or k/v that are neither a cache slice
+  // nor copyable. Such a call gets NEITHER fix: it rebuilds a plan every
+  // round, exactly the #1799 defect, and the LRU's lifetime-miss abort
+  // becomes reachable by generation length again. That is a real hole and it
+  // must not be silent, so say so once per process rather than leaving it to
+  // `MLXCEL_SDPA_PLAN_DEBUG`.
+  if (allow_bucket && !decoding && !bucketed && mask_arr &&
+      sdpa_plan_bucket_shape_eligible(q, k, /* has_arr_mask */ true, do_causal)) {
+    static std::once_flag warned;
+    std::call_once(warned, [&] {
+      fprintf(
+          stderr,
+          "[mlxcel-sdpa] warning: a %d-row masked SDPA over %d keys is "
+          "shape-eligible for plan-cache bucketing but its layout declined it, "
+          "so this call rebuilds a cuDNN plan every round (issue #1820). Raise "
+          "MLXCEL_SDPA_PLAN_BUCKET_MAX_MB, or set "
+          "MLXCEL_SDPA_PLAN_BUCKET_MAX_QUERIES=0 to hand these calls back to "
+          "the MLXCEL_SDPA_FALLBACK_MAX_QUERIES ops fallback.\n",
+          q.shape(2),
+          k.shape(2));
+    });
+  }
   int k_len = k.shape(2);
   int64_t k_extent_dbg = kv_cache_slice_extent(k);
   int64_t k_rowstride_dbg = k.ndim() == 4 ? k.strides(2) : -1;
@@ -733,11 +780,22 @@ static void sdpa_cudnn_impl(
     if (bucketed) {
       // A cuDNN install that cannot plan bias together with a padding mask
       // must degrade to the exact-shape plan, not abort the process.
-      try {
-        it = sdpa_cache().emplace(cache_key, build()).first;
-      } catch (const std::exception& e) {
-        throw SdpaBucketUnsupported(e.what());
-      }
+      //
+      // Only `build()` is inside the try, and the `emplace` is deliberately
+      // outside it. `LRUBytesKeyCache::emplace` has a throw of its own: the
+      // lifetime-miss "Cache thrashing" guard (`lru_cache.h`), which is the
+      // exact abort this bucketing exists to prevent. Catching it here would
+      // misread it as a cuDNN refusal, permanently switch bucketing off, and
+      // then hit it again uncaught on the exact-shape retry, so the abort
+      // would still land one call later with a misleading diagnostic.
+      auto build_or_decline = [&] {
+        try {
+          return build();
+        } catch (const std::exception& e) {
+          throw SdpaBucketUnsupported(e.what());
+        }
+      };
+      it = sdpa_cache().emplace(cache_key, build_or_decline()).first;
     } else {
       it = sdpa_cache().emplace(cache_key, build()).first;
     }

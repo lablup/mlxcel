@@ -3440,9 +3440,12 @@ pub fn causal_attention(
     // (e.g. head_dim > 128) would materialize the full [heads, L, L] score
     // matrix in MLX's fallback; chunk the query axis instead (issue #672).
     // `k_len >= q_len` guards the bottom-right causal alignment the chunked
-    // path reproduces.
+    // path reproduces. This call is maskless and causal, so it passes
+    // `arr_masked = false, do_causal = true`: #1820's bucketing needs an array
+    // mask to widen and declines here, which leaves #1799's ops fallback
+    // running and the chunking it needs still switched on.
     if k_len >= q_len
-        && let Some(chunk) = layers::materializing_sdpa_query_chunk(q, k, v, 0.0, true)
+        && let Some(chunk) = layers::materializing_sdpa_query_chunk(q, k, v, 0.0, false, true)
     {
         return layers::chunked_causal_attention(q, k, v, scale, chunk);
     }

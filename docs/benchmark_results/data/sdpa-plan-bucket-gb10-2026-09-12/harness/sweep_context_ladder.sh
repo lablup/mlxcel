@@ -24,4 +24,5 @@ exec python3 bench_cli.py \
   --prompt-file "$PROMPT" --out "$OUT" --rounds "$ROUNDS" \
   --max-tokens "$NTOK" --warmup "${WARMUP:-1}" --configs "$CONFIGS" \
   --preset "fb=MLXCEL_SDPA_PLAN_BUCKET_MAX_QUERIES=0" \
+  --preset "up=MLXCEL_SDPA_PLAN_BUCKET_MAX_QUERIES=0,MLXCEL_SDPA_FALLBACK_MAX_QUERIES=0" \
   --tag "${TAG:-ladder}"
