@@ -20,9 +20,9 @@ COOLDOWN_BETWEEN_MODELS=30
 PROMPT="M5 softcap grouped decode benchmark. Repeat this paragraph for a stable decode workload and consistent KV-cache behavior. M5 softcap grouped decode benchmark. Repeat this paragraph for a stable decode workload and consistent KV-cache behavior."
 
 DEFAULT_MODELS=(
-  "models/gemma2-2b-4bit"
+  "models/gemma-2-2b-it-4bit"
   "models/qwen3-1.7b-4bit"
-  "models/ministral-3b-4bit"
+  "models/ministral-3-3b-instruct-2512-4bit"
 )
 
 MODELS=()

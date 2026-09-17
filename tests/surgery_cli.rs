@@ -40,7 +40,7 @@ use std::process::Command;
 /// because it is small (~0.5 B parameters), quantized (no bf16
 /// conversion to worry about), and is one of the standard local
 /// smoke-test checkpoints.
-const REFERENCE_MODEL: &str = "models/qwen2.5-0.5b-4bit";
+const REFERENCE_MODEL: &str = "models/qwen2.5-0.5b-instruct-4bit";
 
 /// Locate the freshly built `mlxcel` binary under `target/`.
 ///

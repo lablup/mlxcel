@@ -35,7 +35,7 @@
 #
 # Usage:
 #   ./scripts/bench_kv_cache.sh                              # default model + full matrix
-#   ./scripts/bench_kv_cache.sh models/Meta-Llama-3.1-8B-Instruct-4bit
+#   ./scripts/bench_kv_cache.sh models/meta-llama-3.1-8b-instruct-4bit
 #   ./scripts/bench_kv_cache.sh --modes fp16,turbo4-asym --contexts 4096
 #   ./scripts/bench_kv_cache.sh --output benchmarks/turbo_kv/2026-04-29_M5Max_llama31.csv
 
@@ -44,7 +44,7 @@ set -euo pipefail
 MLXCEL="./target/release/mlxcel"
 DATE="$(date '+%Y-%m-%d')"
 HARDWARE_TAG="$(sysctl -n machdep.cpu.brand_string 2>/dev/null | tr ' ' '_' | tr -d '()' || echo "unknown")"
-DEFAULT_MODEL="models/Meta-Llama-3.1-8B-Instruct-4bit"
+DEFAULT_MODEL="models/meta-llama-3.1-8b-instruct-4bit"
 DEFAULT_OUTPUT_DIR="benchmarks/turbo_kv"
 TIMEOUT=900
 WARMUP_TOKENS=24

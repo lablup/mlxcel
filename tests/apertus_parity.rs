@@ -18,13 +18,13 @@
 //! RoPE, untied head) and the bf16 quantization-scale promotion in the weight
 //! loader (the Apertus-2509 checkpoint ships bf16 quant scales, which the
 //! dequant path needs promoted to f16). The reference ids were captured from
-//! `mlx_lm` 0.31.3 greedy decode on `models/Apertus-8B-Instruct-2509-4bit`.
+//! `mlx_lm` 0.31.3 greedy decode on `models/apertus-8b-instruct-2509-4bit`.
 //! Skips when the checkpoint is absent (CI has no Metal and no weights).
 
 use mlxcel::models::ApertusModel;
 use mlxcel_core::generate::LanguageModel;
 
-const MODEL_DIR: &str = "models/Apertus-8B-Instruct-2509-4bit";
+const MODEL_DIR: &str = "models/apertus-8b-instruct-2509-4bit";
 
 // tok.encode("The capital of France is") under the Apertus tokenizer.
 const INPUT_IDS: &[i32] = &[1, 1784, 8961, 1307, 5498, 1395];

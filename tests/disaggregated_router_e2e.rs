@@ -76,7 +76,7 @@ const GEMMA_MODEL_ALIAS: &str = "gemma-completions";
 /// Fetch with:
 /// `./target/release/mlxcel download mlx-community/MiniCPM-2B-sft-4bit-llama-format-mlx`
 /// and place/symlink it at `models/minicpm-2b-4bit`.
-const MINICPM_DIR: &str = "minicpm-2b-4bit";
+const MINICPM_DIR: &str = "minicpm-2b-sft-4bit-llama-format-mlx";
 
 /// Model alias for the MiniCPM byte-fallback CHAT usage parity test (issue
 /// #398). A distinct alias from [`GEMMA_MODEL_ALIAS`] keeps the

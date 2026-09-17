@@ -13,12 +13,12 @@ OUTPUT_CSV="${OUTPUT_CSV:-$ROOT_DIR/benchmarks/paged_decode_rollout_matrix_${DAT
 SERVER_BIN="${SERVER_BIN:-$ROOT_DIR/target/release/mlxcel-server}"
 KERNEL_BENCH_BIN="${KERNEL_BENCH_BIN:-$ROOT_DIR/target/release/examples/profile_paged_decode_kernel}"
 
-MODEL_LLAMA="${MODEL_LLAMA:-$MODEL_ROOT/llama-3.2-1b-4bit}"
+MODEL_LLAMA="${MODEL_LLAMA:-$MODEL_ROOT/llama-3.2-1b-instruct-4bit}"
 MODEL_QWEN3="${MODEL_QWEN3:-$MODEL_ROOT/qwen3-0.6b-4bit}"
 MODEL_QWEN35="${MODEL_QWEN35:-$MODEL_ROOT/qwen3.5-0.8b-4bit}"
-MODEL_GEMMA3="${MODEL_GEMMA3:-$MODEL_ROOT/gemma3-1b-4bit}"
-MODEL_LLAMA4="${MODEL_LLAMA4:-$MODEL_ROOT/llama-4-scout-17b-4bit}"
-MODEL_EXAONE4="${MODEL_EXAONE4:-$MODEL_ROOT/exaone4-1.2b-4bit}"
+MODEL_GEMMA3="${MODEL_GEMMA3:-$MODEL_ROOT/gemma-3-1b-it-4bit}"
+MODEL_LLAMA4="${MODEL_LLAMA4:-$MODEL_ROOT/llama-4-scout-17b-16e-instruct-4bit}"
+MODEL_EXAONE4="${MODEL_EXAONE4:-$MODEL_ROOT/exaone-4.0-1.2b-4bit}"
 
 BATCH_SIZE="${BATCH_SIZE:-2}"
 PROMPT_LEN="${PROMPT_LEN:-128}"

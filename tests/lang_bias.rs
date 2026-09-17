@@ -16,10 +16,10 @@
 //!
 //! These tests verify that `--lang-bias` and `--lang-bias-policy` flags
 //! actually shift the output script composition when running against
-//! `Qwen2.5-7B-Instruct-4bit`.
+//! `qwen2.5-7b-instruct-4bit`.
 //!
 //! All tests in this file require the model weights to be present at
-//! `models/Qwen2.5-7B-Instruct-4bit/`. They are gated with
+//! `models/qwen2.5-7b-instruct-4bit/`. They are gated with
 //! `#[ignore = "requires local model weights and the mlxcel binary"]`
 //! so that `cargo test --all` succeeds in CI where the model is absent.
 //!
@@ -48,7 +48,7 @@ use mlxcel_core::lang_analyzer::{Script, classify_token};
 // ============================================================================
 
 /// Target model name (subdirectory under `models/`).
-const MODEL_NAME: &str = "Qwen2.5-7B-Instruct-4bit";
+const MODEL_NAME: &str = "qwen2.5-7b-instruct-4bit";
 
 /// Number of tokens to generate per prompt in scenario tests.
 const N_TOKENS: usize = 50;

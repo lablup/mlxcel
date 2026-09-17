@@ -56,7 +56,7 @@
 # Usage:
 #   ./scripts/paged_decode_counter_ab.sh --baseline target/release/mlxcel.before \
 #                                        --arm target/release/mlxcel \
-#                                        --model models/mlx/Meta-Llama-3.1-8B-Instruct-4bit
+#                                        --model models/mlx/meta-llama-3.1-8b-instruct-4bit
 #
 # Exit status: 0 both sides launched the fused path the same number of times
 # with no fallbacks and produced the same text; 1 the counters disagree, a side

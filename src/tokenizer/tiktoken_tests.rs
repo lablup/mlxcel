@@ -18,7 +18,7 @@ use super::*;
 use std::path::PathBuf;
 
 fn test_model_path() -> PathBuf {
-    PathBuf::from("models/hunyuan-13b")
+    PathBuf::from("models/hunyuan-a13b-instruct-4bit")
 }
 
 fn tiktoken_file() -> PathBuf {

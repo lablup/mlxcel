@@ -26,10 +26,10 @@
 //! ## Reachable pairings (this PR)
 //!
 //! - **Qwen 3.5 4B + DFlash** (`models/qwen3.5-4b-4bit` target, drafter
-//!   `models/Qwen3.5-4B-DFlash`, `block_size = 16`). The DFlash drafter
+//!   `models/qwen3.5-4b-dflash`, `block_size = 16`). The DFlash drafter
 //!   is loadable via `mlxcel_core::drafter::dflash::DFlashDrafter::load`
 //!   and the Qwen 3.5 text / VLM wrappers implement
-//!   `mlxcel_core::drafter::dflash::SpeculativeTarget` (wired the B>1 path too; enables the VLM-wrapped text-only server dispatch). The published upstream `z-lab/Qwen3.5-4B-DFlash`
+//!   `mlxcel_core::drafter::dflash::SpeculativeTarget` (wired the B>1 path too; enables the VLM-wrapped text-only server dispatch). The published upstream `z-lab/qwen3.5-4b-dflash`
 //!   checkpoint omits `embed_tokens.weight`; ported upstream's
 //!   lazy-bind shape so the drafter loads with a tombstone and resolves
 //!   its embedding from the target during `Drafter::bind`. The
@@ -40,7 +40,7 @@
 //!   `Speculative burst completed` instead of silently falling back.
 //!
 //! - **Gemma 4 31B + MTP assistant** (`models/gemma-4-31b-it-4bit` target,
-//!   drafter `models/gemma-4-31B-it-assistant-bf16`, `block_size = 4`). The
+//!   drafter `models/gemma-4-31b-it-assistant-bf16`, `block_size = 4`). The
 //!   MTP drafter is loadable via
 //!   `mlxcel_core::drafter::gemma4_assistant::Gemma4AssistantDraftModel::from_path`,
 //!   `Gemma4Wrapper` exposes the underlying primitives
@@ -379,14 +379,14 @@ const REACHABLE_PAIRINGS: &[Pairing] = &[
     Pairing {
         name: "Qwen 3.5 4B + DFlash (b=16)",
         target_dir: "qwen3.5-4b-4bit",
-        draft_dir: "Qwen3.5-4B-DFlash",
+        draft_dir: "qwen3.5-4b-dflash",
         kind: "dflash",
         block_size: 16,
     },
     Pairing {
         name: "Gemma 4 31B + MTP assistant (b=4)",
         target_dir: "gemma-4-31b-it-4bit",
-        draft_dir: "gemma-4-31B-it-assistant-bf16",
+        draft_dir: "gemma-4-31b-it-assistant-bf16",
         kind: "mtp",
         block_size: 4,
     },
@@ -593,7 +593,7 @@ fn pairing_kind_resolution_matches_declaration() {
 /// 1. **Structural phase** (in-process): loads the target, asserts it is
 ///    a Qwen 3.5 family variant, resolves the drafter kind to
 ///    `DrafterKind::Dflash`, loads the DFlash drafter against the
-///    published upstream `z-lab/Qwen3.5-4B-DFlash` checkpoint — which
+///    published upstream `z-lab/qwen3.5-4b-dflash` checkpoint — which
 ///    omits `embed_tokens.weight` — and `bind()`s it to the target,
 ///    resolving `embed_tokens` lazily from the target (the pin). The in-process models are then dropped.
 /// 2. **Byte-equality phase** (subprocess): spawns `mlxcel-server` with
@@ -660,14 +660,14 @@ async fn greedy_parity_dflash_qwen35_4b() {
         assert_eq!(resolved_kind, DrafterKind::Dflash);
 
         // `load_drafter` constructs the full DFlashDrafter (weight loading
-        // + sanitize). The upstream `z-lab/Qwen3.5-4B-DFlash` checkpoint
+        // + sanitize). The upstream `z-lab/qwen3.5-4b-dflash` checkpoint
         // does NOT ship `embed_tokens.weight`; ported upstream's
         // lazy-bind shape so the loader builds an `embed_tokens = None`
         // tombstone instead of failing. A `LoadFailed` here is a
         // regression.
         let (mut drafter, drafter_kind) =
             mlxcel_core::drafter::load_drafter(&draft_path, Some(DrafterKind::Dflash)).expect(
-                "DFlash drafter must load against the published z-lab/Qwen3.5-4B-DFlash \
+                "DFlash drafter must load against the published z-lab/qwen3.5-4b-dflash \
                  checkpoint (embed_tokens.weight is absent and the loader \
                  builds a lazy-bind tombstone instead of failing)",
             );

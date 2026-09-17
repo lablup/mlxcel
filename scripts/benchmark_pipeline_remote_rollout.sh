@@ -11,7 +11,7 @@ fi
 
 DATE_TAG="${DATE_TAG:-$(date +%F)}"
 SERVER_BIN="${SERVER_BIN:-$ROOT_DIR/target/release/mlxcel-server}"
-MODEL_PATH="${MODEL_PATH:-$MODEL_ROOT/llama-3.2-1b-4bit}"
+MODEL_PATH="${MODEL_PATH:-$MODEL_ROOT/llama-3.2-1b-instruct-4bit}"
 MODEL_ALIAS="${MODEL_ALIAS:-$(basename "$MODEL_PATH")}"
 PROMPT="${PROMPT:-Hello from multi-machine pipeline parallel validation.}"
 MAX_TOKENS="${MAX_TOKENS:-16}"
@@ -39,7 +39,7 @@ Commands:
   benchmark     Send repeated requests to a running coordinator and append CSV rows.
 
 Key environment variables:
-  MODEL_PATH                Model directory. Default: models/llama-3.2-1b-4bit
+  MODEL_PATH                Model directory. Default: models/llama-3.2-1b-instruct-4bit
   COORDINATOR_URL           Coordinator HTTP base URL. Default: http://127.0.0.1:18080
   OUTPUT_CSV                CSV path for benchmark rows.
   CLUSTER_NAME              Cluster name for write-config.

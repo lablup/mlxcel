@@ -533,9 +533,9 @@ mod tests {
     #[test]
     fn cache_load_or_build_real_tokenizer_smoke() {
         let candidates = [
-            "models/smollm-135m-4bit/tokenizer.json",
-            "models/Qwen2.5-7B-Instruct-4bit/tokenizer.json",
-            "models/Meta-Llama-3.1-8B-Instruct-4bit/tokenizer.json",
+            "models/smollm-135m-instruct-4bit/tokenizer.json",
+            "models/qwen2.5-7b-instruct-4bit/tokenizer.json",
+            "models/meta-llama-3.1-8b-instruct-4bit/tokenizer.json",
         ];
 
         let found = candidates.iter().find(|p| std::path::Path::new(p).exists());

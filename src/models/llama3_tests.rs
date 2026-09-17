@@ -594,8 +594,8 @@ fn diagnostics_name_the_checkpoint_when_the_loader_knows_it() {
         "the architecture is the default"
     );
 
-    args.set_checkpoint_label(std::path::Path::new("models/internvl3-1b"));
-    assert_eq!(args.model_label(), "internvl3-1b");
+    args.set_checkpoint_label(std::path::Path::new("models/internvl3-1b-4bit"));
+    assert_eq!(args.model_label(), "internvl3-1b-4bit");
 
     // A path with no final component leaves the architecture in place rather
     // than producing an empty label.

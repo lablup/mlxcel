@@ -44,7 +44,7 @@ use std::path::Path;
 use mlxcel::generate::LanguageModel;
 use mlxcel_core::layers::KVCache;
 
-const DEFAULT_MODEL_DIR: &str = "models/llama-3.2-1b-4bit";
+const DEFAULT_MODEL_DIR: &str = "models/llama-3.2-1b-instruct-4bit";
 
 /// Byte-level hash of an array's contents after forcing evaluation.
 fn hash_array(arr: &mlxcel_core::UniquePtr<mlxcel_core::MlxArray>) -> u64 {

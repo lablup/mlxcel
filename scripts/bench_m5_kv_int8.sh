@@ -30,11 +30,11 @@ PROMPT="M5 decode benchmark for INT8 KV cache research. Repeat this paragraph to
 
 DEFAULT_MODELS=(
   "models/qwen3-1.7b-4bit"
-  "models/llama-3.1-8b-4bit"
+  "models/meta-llama-3.1-8b-instruct-4bit"
   "models/qwen3.5-4b-4bit"
-  "models/gemma3-4b-4bit"
+  "models/gemma-3-4b-it-4bit"
   "models/gemma-4-e4b-it-4bit"
-  "models/jamba-v0.1-4bit"
+  "models/ai21-jamba-reasoning-3b-4bit"
 )
 
 MODELS=()
