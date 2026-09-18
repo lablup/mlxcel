@@ -1,12 +1,12 @@
 # Upstream PR draft: `~CudaHandle` must not throw while the driver is unloading
 
-Ready to open against `ml-explore/mlx`. Nothing below needs editing; paste the title and body as they are.
+Ready to open against `ml-explore/mlx`. Paste the title and body as they are.
 
 - **Base:** `ml-explore/mlx` `main`
-- **Head:** `inureyes:fix/cuda-handle-destructor-no-throw` (commit `e48c7a4`)
-- **Open it at:** https://github.com/ml-explore/mlx/compare/main...inureyes:mlx:fix/cuda-handle-destructor-no-throw
-- **Diff:** one file, `mlx/backend/cuda/cuda_utils.h`, +12 −1
-- **Verified against upstream `main` at `59d600b5e`** (#4507), which still carries the unfixed destructor.
+- **Head:** `inureyes:fix/cuda-handle-destructor-no-throw` (commit `82b6b1d`)
+- **Open at:** https://github.com/ml-explore/mlx/compare/main...inureyes:mlx:fix/cuda-handle-destructor-no-throw
+- **Diff:** `mlx/backend/cuda/cuda_utils.h`, +7 −1
+- Verified against upstream `main` at `59d600b5e` (#4507), which still carries the unfixed destructor.
 
 ---
 
@@ -21,46 +21,46 @@ Ready to open against `ml-explore/mlx`. Nothing below needs editing; paste the t
 ```markdown
 ### Problem
 
-`~CudaHandle` calls `reset()`, which checks the result through `CHECK_CUDA_ERROR` and throws on failure. A throw that escapes a destructor calls `std::terminate`, so instead of reporting anything this aborts the process.
+`~CudaHandle` calls `reset()`, which throws through `CHECK_CUDA_ERROR`. A throw escaping a destructor calls `std::terminate`.
 
-It is reachable at ordinary shutdown. The existing guard tests `cudaPeekAtLastError()`, which catches a sticky per-context error but not the CUDA runtime unloading: once teardown has begun the peek still returns `cudaSuccess`, `reset()` proceeds, `Destroy` returns `cudaErrorCudartUnloading`, and the throw fires.
-
-The symptom is a `SIGABRT` after the program has otherwise finished successfully:
+The `cudaPeekAtLastError()` guard above it does not cover driver unloading, which is not a sticky per-context error: the peek returns `cudaSuccess`, `reset()` proceeds, `Destroy` returns `cudaErrorCudartUnloading`, and the process aborts.
 
 ```
 terminate called after throwing an instance of 'std::runtime_error'
   what():  Destroy(handle_) failed: driver shutting down
 ```
 
-We hit this on Linux / CUDA (GB10, sm_121, CUDA 13) as an intermittent abort in test binaries, after the test runner had already printed its success line, which turned green runs into a non-zero exit. It is load dependent: rare on an idle machine, reproducible when another process shares the GPU. Roughly one run in ten in our case.
+Seen on Linux / CUDA (GB10, sm_121, CUDA 13) as an intermittent abort in test binaries *after* the runner had already reported success, turning green runs into a non-zero exit. Load dependent: roughly one run in ten when another process shares the GPU, rare on an idle machine.
 
 ### Fix
 
-The destructor releases the handle without checking the result.
+Release the handle in the destructor without checking the result. `reset()` is unchanged, so `operator=` and explicit callers keep their error checking, where throwing is legal. The handle cannot be reclaimed once the runtime is gone, so there is nothing to recover and nothing to report.
 
-`reset()` is unchanged, so `operator=` and explicit callers keep their error checking, where throwing is legal and useful. Nothing is lost by not reporting in the destructor: the handle cannot be reclaimed once the runtime is gone, and the alternative is terminating the process.
+### Why it is reached that late
 
-### Why the destructor is reached that late
+`#4480` leaked the global `CommandEncoder` map for this class of problem. Two owners it did not cover can still destroy a `CudaHandle` after the primary context is released:
 
-`#4480` already leaked the global `CommandEncoder` map for this class of problem, with the comment that the encoders "would synchronize on process shutdown". Two sibling owners are not covered by that change:
+- `get_command_encoders()` returns a `static thread_local` map, destroyed at thread exit; each `CommandEncoder` owns a `CudaStream`, a `CudaGraph` and an `LRUCache<CudaGraphExec>`.
+- `Worker::start()` detaches its thread, and `~CommandEncoder` only signals `stop()` without waiting, so the detached thread and its `CudaStream` outlive the encoder by an unsynchronized amount.
 
-- `get_command_encoders()` in `mlx/backend/cuda/device.cpp` returns a `static thread_local std::unordered_map<int, CommandEncoder>`, which is destroyed at thread exit. Each `CommandEncoder` owns a `CudaStream`, a `CudaGraph` and an `LRUCache<CudaGraphExec>`, all deriving from `CudaHandle`.
-- `Worker::start()` detaches its thread, and `~CommandEncoder` calls `worker_->stop()`, which only sets a flag and notifies without waiting. The detached thread owns a `CudaStream` and outlives the encoder by an unsynchronized amount.
-
-Either can run after the primary context has been released. We did not instrument which one fires in our case, and this change does not depend on the answer: it makes late destruction safe rather than fatal for every `CudaHandle` owner.
-
-Whether those two owners should additionally be leaked the way `#4480` leaked the global map, or joined instead of detached, seems worth deciding separately. We did not change them here because the detach carries an explicit comment about a Windows join deadlock, and leaking a `thread_local` has a different cost profile than leaking a single global.
+This change makes late destruction safe for every owner rather than fatal. Whether those two should also be leaked as in `#4480`, or joined instead of detached, looks like a separate decision: the detach carries a comment about a Windows join deadlock, and leaking a `thread_local` costs more than leaking one global.
 
 ### Testing
 
-Built and run on Linux / CUDA (GB10, sm_121, CUDA 13.0). 40 runs of two test subsets with a sibling process holding the GPU throughout: no abort and no non-zero exit, against a baseline near one in ten before the change. A full suite of 11,369 tests passes with no failures and no aborts.
+Linux / CUDA (GB10, sm_121, CUDA 13.0). `pre-commit run --all` is clean. `python3 python/tests/run.py` ran 905 tests with one failure, `test_linalg.TestLinalg.test_eigh`, an eigenvalue tolerance comparison against numpy. That failure reproduces identically with this change reverted and the extension rebuilt, so it is pre-existing on this configuration rather than a regression. No test aborted.
+
+No automated regression test accompanies this, and I want to be explicit about why rather than leave it unsaid. Reproducing the failure requires a `CudaHandle` to be destroyed after the CUDA runtime has begun unloading. That ordering only exists during process teardown, after the test framework itself is gone, so it cannot be triggered deterministically from inside a test. Making it testable would mean injecting the `Destroy` result, a larger change than the fix it would cover.
+
+It was instead verified by repetition under the condition that provokes it: 40 runs of two test subsets with a sibling process holding the GPU throughout, no abort and no non-zero exit, against a baseline near one in ten.
+
+No benchmarks: the change is confined to a destructor and removes an error check, so no execution path gets slower.
 ```
 
 ---
 
 ## Notes for the submitter
 
-- The commit is authored as `Jeongkyu Shin <jshin@lablup.com>`.
-- MLX requires a CLA on first contribution; expect the bot to ask.
-- `pre-commit` in the MLX repo runs `clang-format`. The added lines respect the repo's `ColumnLimit: 80` (longest is 79), but `clang-format` is not installed on this machine, so it was not run. Worth running once before opening if convenient.
-- If the maintainers prefer the narrower fix, the alternative is to leak the `thread_local` encoder map the way `#4480` leaked the global one. That fixes our observed abort but leaves the general hazard that a throwing destructor represents.
+- Commit is authored as `Jeongkyu Shin <jshin@lablup.com>`.
+- MLX asks for a CLA on a first contribution.
+- MLX's `pre-commit` runs `clang-format`. The added lines respect `ColumnLimit: 80` (longest 79), but `clang-format` is not installed here and was not run.
+- Narrower alternative, if the maintainers prefer it: leak the `thread_local` encoder map the way `#4480` leaked the global one. That fixes the observed abort but leaves a throwing destructor in place.
