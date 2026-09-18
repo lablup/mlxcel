@@ -1,4 +1,16 @@
 // Copyright © 2025 Apple Inc.
+//
+// CUDA patch: do not throw from ~CudaHandle while the driver is unloading
+//
+// Modified from upstream MLX 81ba1c6a mlx/backend/cuda/cuda_utils.h
+//
+// Changes to ~CudaHandle():
+//   - Release the handle directly instead of calling reset(), which throws.
+//
+// Submitted upstream as inureyes:fix/cuda-handle-destructor-no-throw; drop
+// this overlay once it lands and the MLX pin moves past it. Rationale and
+// measurements: docs/upstream/mlx-cuda-handle-destructor-throws-at-teardown.md
+// (lablup/mlxcel#1422).
 
 #pragma once
 
@@ -30,23 +42,9 @@ class CudaHandle {
     if (cudaPeekAtLastError() != cudaSuccess) {
       return;
     }
-    // LOCAL PATCH (lablup/mlxcel#1422): release without CHECK_CUDA_ERROR.
-    //
-    // `reset()` routes through CHECK_CUDA_ERROR, which throws. Throwing from a
-    // destructor calls std::terminate, and at thread or process teardown the
-    // CUDA runtime may already be unloading, so every Destroy fails with
-    // cudaErrorCudartUnloading and the throw is guaranteed rather than
-    // unlikely. That is the `Destroy(handle_) failed: driver shutting down`
-    // SIGABRT seen on GB10 after a suite had already printed `test result: ok`.
-    //
-    // The existing cudaPeekAtLastError guard above does not cover it: driver
-    // unloading is not a sticky per-context error, so the peek returns
-    // cudaSuccess and reset() proceeds into the throw.
-    //
-    // The handle cannot be reclaimed once the driver is gone, so there is
-    // nothing to recover and nothing to report. `reset()` keeps its checking
-    // behavior for every non-destructor caller (`operator=`, explicit calls),
-    // where throwing is legal and useful.
+    // Not reset(): it throws via CHECK_CUDA_ERROR, and a throw escaping a
+    // destructor terminates. At exit the runtime may already be unloading, so
+    // Destroy fails and the handle can no longer be reclaimed or reported on.
     if (handle_ != nullptr) {
       Destroy(handle_);
       handle_ = nullptr;

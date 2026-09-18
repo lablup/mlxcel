@@ -34,29 +34,26 @@ The guard above it does not prevent this. It tests for a *sticky* CUDA error lef
 
 ## Which object reaches the destructor that late
 
-`CommandEncoder` owns three `CudaHandle` subclasses: `CudaStream stream_` and `CudaGraph graph_` (`mlx/backend/cuda/device.h:147-148`) and `LRUCache<std::string, CudaGraphExec> graph_cache_` (`device.h:158`). `CudaGraph`, `CudaGraphExec` and `CudaStream` all derive from `CudaHandle` (`cuda_utils.h:72`, `:79`, `:84`).
+Upstream has already addressed this class once. `#4480` (`24c699ece`, 2026-09-08) changed `get_global_command_encoders()` to leak, with the comment that the encoders "would synchronize on process shutdown". That commit is the one immediately before mlxcel's pin. It covers the global map only, and two sibling owners remain:
 
-MLX already recognises the teardown hazard for two of the three places it stores these, and deliberately leaks both:
+- `get_command_encoders()` (`mlx/backend/cuda/device.cpp:614`) returns a `static thread_local std::unordered_map<int, CommandEncoder>`, destroyed at thread exit. Each `CommandEncoder` owns a `CudaStream stream_`, a `CudaGraph graph_` and an `LRUCache<std::string, CudaGraphExec> graph_cache_` (`device.h:147-158`), all deriving from `CudaHandle` (`cuda_utils.h:72`, `:79`, `:84`).
+- `Worker::start()` detaches its thread (`worker.cpp:20`, with a comment citing a Windows join deadlock), and `~CommandEncoder` calls `worker_->stop()` (`device.cpp:215-218`), which only sets a flag and notifies without waiting. The detached thread owns a `CudaStream signal_stream_` (`worker.h:46`) and outlives the encoder by an unsynchronized amount. (`CudaEvent` is not a `CudaHandle`; it has its own destructor.)
 
-- `mlx/backend/cuda/device.cpp:583-592`, the `Device` vector: *"The devices are leak intentionally as user code may still be accessing device after main thread teardown."*
-- `mlx/backend/cuda/device.cpp:619-623`, the global encoder map: *"encoders are leaked intentionally as they would synchronize on process shutdown."*
+`Device` itself is not a candidate: `device()` leaks its vector deliberately (`device.cpp:583`).
 
-The third is not leaked. `mlx/backend/cuda/device.cpp:614-617`:
+**Which of the two fires here was not instrumented.** The abort was intermittent and is no longer reproducible with the patch applied, so the specific owner is unproven. The fix does not depend on the answer, since both reach the same base-class destructor.
 
-```cpp
-std::unordered_map<int, CommandEncoder>& get_command_encoders() {
-  static thread_local std::unordered_map<int, CommandEncoder> encoders;
-  return encoders;
-}
-```
+That either candidate exists explains the observed load dependence: both need a teardown ordering that an idle single run rarely produces and a shared GPU does.
 
-This `thread_local` has a non-trivial destructor and runs at thread exit. When a worker thread ends after the driver has released the primary context, the map destroys its `CommandEncoder`s, those destroy their stream, graph and cached graph execs, and the first one to call `Destroy` throws out of a destructor.
+## Why a host-side shutdown hook does not close it
 
-That also explains the observed load dependence: it needs a thread to exit late enough relative to driver teardown, which is why an isolated run on a quiet box rarely shows it and a shared GPU does.
+`lablup/mlxcel#1422` first proposed an explicit `mlxcel_core::shutdown()` that synchronizes and clears caches before `main` returns.
 
-## Why a host-side shutdown hook does not fix it
+MLX does expose a usable entry point for this: `gpu::clear_streams()` (`mlx/backend/cuda/eval.cpp:91-96`) calls `get_command_encoders().clear()` and, when `is_main_thread()`, `get_global_command_encoders().clear()`. So a hook is not inert, and it would make the main thread's and the global encoders deterministic.
 
-`lablup/mlxcel#1422` first proposed an explicit `mlxcel_core::shutdown()` that synchronizes and clears caches before `main` returns. That does not reach this: the objects are `thread_local` to MLX's worker threads, so a call on the main thread destroys none of them, and a thread that has already exited cannot be drained retroactively. `std::process::exit` bypasses it entirely.
+It still does not close the window. `get_command_encoders()` is `thread_local`, so the call clears only the calling thread's map; a detached worker thread's encoders and its own `CudaStream` are unreachable from the main thread, and a thread that has already exited cannot be drained retroactively. `std::process::exit` bypasses the hook entirely.
+
+A hook is therefore a partial mitigation with independent value for a deterministic server shutdown path, not a fix for this abort.
 
 ## The local fix
 
@@ -77,5 +74,5 @@ This fixes the whole class rather than the one instance, since all three wrapper
 
 Two changes would be worth making in MLX itself, either independently:
 
-1. Make `~CudaHandle` non-throwing, as here. A destructor that can throw is a latent `std::terminate` wherever it is used.
-2. Leak the `thread_local` encoder map the way `device()` and `get_global_command_encoders()` already leak theirs, or drain it on thread exit before the driver can unload.
+1. Make `~CudaHandle` non-throwing, as here. A destructor that can throw is a latent `std::terminate` wherever it is used. Submitted as a PR; the draft is `mlx-pr-cuda-handle-destructor.md` beside this file.
+2. Extend `#4480` to the two owners it did not cover: leak the `thread_local` encoder map the way `device()` and `get_global_command_encoders()` already leak theirs, or join the worker thread instead of detaching it. Both have costs the maintainers are better placed to weigh, which is why the PR does not change them.
