@@ -118,7 +118,7 @@ describe('drawer adapter keyboard contract', () => {
   it('computes the Tab cycle at key-press time, including a summary and only rendered controls', async () => {
     emulateLayout();
     act(() => root.render(
-      <Drawer open title="Panel" closeLabel="Close" onClose={() => undefined} testId="test-drawer" placement="end">
+      <Drawer open title="Panel" closeLabel="Close" onClose={() => undefined} testId="test-drawer" width="medium" side="end">
         <button type="button">First</button>
         <details open><summary>More</summary><button type="button">Inner</button></details>
         <button type="button" hidden>Hidden</button>
@@ -153,7 +153,7 @@ describe('drawer adapter keyboard contract', () => {
     const onClose = vi.fn();
     act(() => root.render(
       <>
-        <Drawer open title="Panel" closeLabel="Close" onClose={onClose} testId="test-drawer" placement="end">
+        <Drawer open title="Panel" closeLabel="Close" onClose={onClose} testId="test-drawer" width="medium" side="end">
           <button type="button">First</button>
         </Drawer>
         <Dialog open title="Confirm" onClose={() => undefined} testId="test-confirm"><button type="button">Cancel</button></Dialog>
@@ -177,7 +177,7 @@ describe('drawer adapter keyboard contract', () => {
     act(() => root.render(
       <>
         <button type="button">Behind</button>
-        <Drawer open title="Panel" closeLabel="Close" onClose={() => undefined} testId="test-drawer" placement="end">
+        <Drawer open title="Panel" closeLabel="Close" onClose={() => undefined} testId="test-drawer" width="medium" side="end">
           <button type="button">First</button>
           <button type="button">Last</button>
         </Drawer>
@@ -193,5 +193,61 @@ describe('drawer adapter keyboard contract', () => {
     act(() => close.blur());
     expect(tab(document.body, true).defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(byText('Last'));
+  });
+});
+
+describe('Drawer variants and Escape ownership', () => {
+  function Sheet({ open, onClose, width, side }: { open: boolean; onClose: () => void; width?: 'narrow' | 'medium'; side?: 'start' | 'end' }): React.JSX.Element {
+    return <Drawer open={open} onClose={onClose} title="Sheet" closeLabel="Close" testId="variant-sheet" width={width} side={side}><label>Field<input data-testid="variant-field" /></label></Drawer>;
+  }
+  const sheet = (): HTMLElement => { const element = document.querySelector<HTMLElement>('[data-testid="variant-sheet"]'); if (!element) throw new Error('Missing sheet'); return element; };
+  it('adds only modifier classes and keeps the constant inline sheet width', () => {
+    act(() => root.render(<Sheet open={false} onClose={() => undefined} />));
+    expect(sheet().className).not.toMatch(/ds-drawer--/);
+    act(() => root.render(<Sheet open={false} onClose={() => undefined} width="medium" side="end" />));
+    expect(sheet().classList.contains('ds-drawer--medium')).toBe(true);
+    expect(sheet().classList.contains('ds-drawer--end')).toBe(true);
+    expect(sheet().style.width).toMatch(/^min\(320px/);
+  });
+  it('leaves an Escape inside an open native dialog to that dialog', async () => {
+    const onClose = vi.fn();
+    act(() => root.render(<Sheet open onClose={onClose} />));
+    await frames();
+    const dialog = document.createElement('dialog'); dialog.setAttribute('open', '');
+    const inside = document.createElement('button'); dialog.append(inside); document.body.append(dialog);
+    act(() => { inside.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
+    expect(onClose).not.toHaveBeenCalled();
+    dialog.remove();
+    act(() => { document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+  it('does not close on an Escape that only ends an IME composition inside the panel', async () => {
+    const onClose = vi.fn();
+    act(() => root.render(<Sheet open onClose={onClose} />));
+    await frames();
+    const field = document.querySelector<HTMLInputElement>('[data-testid="variant-field"]');
+    if (!field) throw new Error('Missing field');
+    act(() => field.focus());
+    act(() => { field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', isComposing: true, bubbles: true, cancelable: true })); });
+    expect(onClose).not.toHaveBeenCalled();
+    act(() => { field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+  it('wraps Tab at the controls usable now, not the ones it saw when it opened', async () => {
+    const Panel = ({ locked }: { locked: boolean }): React.JSX.Element => <Drawer open onClose={() => undefined} title="Sheet" closeLabel="Close" testId="variant-sheet"><button type="button" data-testid="first-control">First</button><button type="button" data-testid="middle-control">Middle</button><button type="button" data-testid="last-control" disabled={locked}>Last</button></Drawer>;
+    act(() => root.render(<Panel locked={false} />));
+    await frames();
+    // Disabled after opening, as Chat's drawer controls are while a response streams.
+    act(() => root.render(<Panel locked />));
+    const control = (id: string): HTMLElement => { const element = sheet().querySelector<HTMLElement>(`[data-testid="${id}"]`); if (!element) throw new Error(`Missing ${id}`); return element; };
+    const close = sheet().querySelector<HTMLElement>('.drawer__close-btn');
+    const tab = (target: HTMLElement, shiftKey = false): KeyboardEvent => { const event = new KeyboardEvent('keydown', { key: 'Tab', shiftKey, bubbles: true, cancelable: true }); act(() => { target.dispatchEvent(event); }); return event; };
+    act(() => control('first-control').focus());
+    expect(tab(control('first-control')).defaultPrevented).toBe(false);
+    act(() => control('middle-control').focus());
+    expect(tab(control('middle-control')).defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(close);
+    expect(tab(close as HTMLElement, true).defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(control('middle-control'));
   });
 });

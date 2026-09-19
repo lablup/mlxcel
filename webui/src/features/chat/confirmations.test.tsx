@@ -96,7 +96,8 @@ describe('edit turn confirmation', () => {
     act(() => { Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(composer(), text); composer().dispatchEvent(new Event('input', { bubbles: true })); });
     await act(async () => button('Send').click());
   }
-  const edits = (): HTMLButtonElement[] => [...host.querySelectorAll('button')].filter((item) => item.textContent === t('en', 'chat.transcript.edit'));
+  // The edit trigger is an icon button in each user message's toolbar, named by its aria-label.
+  const edits = (): HTMLButtonElement[] => [...host.querySelectorAll('button')].filter((item) => item.getAttribute('aria-label') === t('en', 'chat.transcript.edit'));
   beforeEach(async () => {
     const entry = { ...catalog.items[0], lifecycle: { ...catalog.items[0].lifecycle, state: 'ready' }, capabilities: [{ task: 'chat', phase: 'provider_ready', available: true, reason: null }] };
     mocked.snapshot = { ...initialSnapshot(), auth: { status: 'authenticated', tokenPresent: true }, bootstrap, connection: 'ready', catalog: [entry], selectedModelId: entry.identity.id } as WebUiSnapshot;
@@ -209,6 +210,35 @@ describe('Clear All confirmation', () => {
     expect(document.activeElement).toBe(document.body);
     await act(async () => { clearing.resolve(undefined); await clearing.promise; });
     await settle();
+    expect(document.activeElement).toBe(trigger);
+  });
+  it('refocuses the Clear All trigger even when a zero-delay timer runs before React commits the re-enabled button', async () => {
+    render(<Harness />);
+    const trigger = button(t('en', 'chat.privacy.clear'));
+    const clearing = deferred<undefined>();
+    repository.clear.mockReturnValue(clearing.promise);
+    await press(trigger);
+    await confirm('chat-clear-history-dialog');
+    expect(document.activeElement).toBe(document.body);
+    // Settle outside act, so React commits the re-enabling render in a later scheduler
+    // task, and run zero-delay timers as microtasks, so any timer queued when clearing
+    // settles runs while the trigger is still disabled. This is the ordering that made
+    // the test above flaky under load; refocusing must not depend on which task wins.
+    const realSetTimeout = window.setTimeout.bind(window);
+    const early = vi.spyOn(window, 'setTimeout').mockImplementation(((callback: TimerHandler, delay?: number, ...args: unknown[]) => {
+      if (!delay && typeof callback === 'function') { queueMicrotask(() => { (callback as (...values: unknown[]) => void)(...args); }); return 0; }
+      return realSetTimeout(callback, delay, ...args);
+    }) as typeof window.setTimeout);
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', false);
+    try {
+      clearing.resolve(undefined);
+      await new Promise((resolve) => { realSetTimeout(resolve, 30); });
+    } finally {
+      early.mockRestore();
+      vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+    }
+    await settle();
+    expect(trigger.disabled).toBe(false);
     expect(document.activeElement).toBe(trigger);
   });
 });

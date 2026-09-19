@@ -31,7 +31,7 @@ export function ModelInspector(props: InspectorProps & { variant: 'pane' } | Ins
   const body = <InspectorBody {...props} />;
   if (props.variant === 'pane') return <Inspector title={title}>{body}</Inspector>;
   return (
-    <Drawer open={props.open} onClose={props.onClose} title={title} closeLabel={t(props.locale, 'common.close')} testId="models-inspector-drawer" placement="end">
+    <Drawer open={props.open} onClose={props.onClose} title={title} closeLabel={t(props.locale, 'common.close')} testId="models-inspector-drawer" width="medium" side="end">
       {body}
     </Drawer>
   );

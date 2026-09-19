@@ -1,7 +1,6 @@
 // Copyright 2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { CatalogEntry, LoadProfile, Operation } from '../../api/types';
-import { WebUiHttpError } from '../../api/client';
 import {
   Badge,
   Button,
@@ -27,6 +26,7 @@ import { AddModel, ConfirmAction, type Confirmation } from './dialogs';
 import { consumeInspectorRequest, useInspectorRequest, useWideInspector } from './inspect-request';
 import { ModelInspector, type ModelAction } from './inspector';
 import { downloadBadgeState, downloadStateLabel, sourceLabel, taskLabel } from './labels';
+import { submitLoad } from './load-action';
 import {
   allowed,
   bytes,
@@ -176,25 +176,15 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
       setError(t(locale, 'models.library.stale'));
       return;
     }
-    void execute(
-      () =>
-        actions.loadModel({
-          action: 'load',
-          ...(Object.keys(profile).length ? { load_profile: { ...profile } } : {}),
-          model_id: entry.identity.id,
-          expected_revision: entry.identity.revision,
-          idempotency_key: crypto.randomUUID(),
-          ...(evictionTarget
-            ? {
-                eviction_target_id: evictionTarget.id,
-                eviction_target_expected_revision: evictionTarget.revision,
-              }
-            : {}),
-        }),
-      (failure) => {
-        if (failure instanceof WebUiHttpError && failure.envelope?.error.code === 'conflict')
-          setConfirmation({ kind: 'capacity', entry, instance: state.serverInstanceId });
-      },
+    void execute(() =>
+      submitLoad(
+        actions,
+        state,
+        entry,
+        profile,
+        () => setConfirmation({ kind: 'capacity', entry, instance: state.serverInstanceId }),
+        evictionTarget,
+      ),
     );
   };
   // The one path from a row or the inspector into a lifecycle action: Load runs at once (it
@@ -332,7 +322,7 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
           </Button>
         ) : null}
         <IconButton
-          icon="details"
+          icon="info"
           label={t(locale, 'models.library.inspect', { name })}
           className={ROW_PRIMARY_CLASS}
           onClick={own(() => inspect(entry))}

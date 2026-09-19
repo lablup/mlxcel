@@ -64,9 +64,7 @@ export async function expectSafeLayout(page: Page): Promise<void> {
       if (element.matches('.ds-progress .progress-bar__fill')) return properties.some((key) => key !== 'width') || !/^\d+(?:\.\d+)?%$/.test(element.style.width);
       if (element.matches('.select__dropdown--portal')) return properties.some((key) => !['position', 'top', 'left', 'width'].includes(key)) || element.style.position !== 'fixed' || ['top', 'left', 'width'].some((key) => !/^-?\d+(?:\.\d+)?px$/.test(element.style.getPropertyValue(key)));
       if (element.matches('.ds-common-table th')) return properties.some((key) => key !== 'width') || !/^\d+(?:\.\d+)?px$/.test(element.style.width);
-      // Shared Drawer panel: always carries its width prop and max-width 100vw. The end
-      // placement (the Models inspector) passes the package's medium preset; CSS caps it.
-      if (element.matches('aside.drawer.ds-drawer.ds-drawer--end')) return properties.slice().sort().join(',') !== 'max-width,width' || element.style.maxWidth !== '100vw' || element.style.width !== '520px';
+      // Shared Drawer panel: always carries its width prop and max-width 100vw.
       if (element.matches('aside.drawer.ds-drawer')) return properties.slice().sort().join(',') !== 'max-width,width' || element.style.maxWidth !== '100vw' || !['min(320px, -32px + 100vw)', 'min(320px, 100vw - 32px)', 'min(320px, calc(100vw - 32px))'].includes(element.style.width);
       // Shared SmoothHeight: the measured content height while active. Scoped to the
       // product adapter's class, like aside.drawer.ds-drawer above, so an unadapted

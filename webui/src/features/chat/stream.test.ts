@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { SseParser, splitUtf8 } from '../../api/sse';
 import type { ChatTurn } from './history';
 import { appendFrame, buildMessages, completeTurn, decodeRate, MAX_TURN_CHARACTERS } from './stream';
-const turn = (): ChatTurn => ({ id:'turn',modelId:'opaque',inferenceId:'actual/model',modelRevision:3,modelName:'Model',prompt:'Hi',content:'',reasoning:'',tools:[],status:'streaming',finishReason:null,usage:null,ttftMs:null,elapsedMs:null,error:null,parameters:{temperature:0.1},images:[] });
+const turn = (): ChatTurn => ({ id:'turn',modelId:'opaque',inferenceId:'actual/model',modelRevision:3,modelName:'Model',prompt:'Hi',content:'',reasoning:'',tools:[],status:'streaming',finishReason:null,usage:null,ttftMs:null,elapsedMs:null,error:null,parameters:{temperature:0.1},images:[],startedAt:0 });
 const frame = (delta: unknown, finish_reason: string|null = null): string => JSON.stringify({choices:[{index:0,delta,finish_reason}]});
 describe('frozen chat stream',()=>{
  it('handles split UTF8 reasoning-only, mixed content and reported usage',()=>{
