@@ -6,7 +6,7 @@
 .ds-button { min-width: 32px; display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2); padding: 7px 14px; font-weight: 650; white-space: normal; overflow-wrap: anywhere; }
 .ds-icon-button { display: inline-grid; place-items: center; padding: 0 9px; }
 .ds-icon { width: 18px; height: 18px; flex: none; }
-.ds-button:hover, .ds-icon-button:hover { background: var(--color-selection); }
+.ds-button:hover:not(:disabled), .ds-icon-button:hover:not(:disabled) { background: var(--color-selection); }
 .ds-button:active, .ds-icon-button:active { transform: scale(0.985); }
 .ds-button:focus-visible, .ds-icon-button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, [role="tab"]:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .ds-button:disabled, .ds-icon-button:disabled, .ds-field[data-disabled="true"] { opacity: 0.56; cursor: not-allowed; }
