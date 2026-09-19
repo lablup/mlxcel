@@ -2,11 +2,13 @@ import React, { useEffect, useId, useRef } from 'react';
 import { Icon } from './icons';
 
 import { Button, IconButton } from './common-adapters';
+import { ErrorBanner } from './common-feedback';
 import { NativeModalContext } from './modal-context';
 export { Button, IconButton, StatusBadge, ProgressBar, EmptyState, Tabs, DataTable } from './common-adapters';
 export type { ButtonProps, ButtonTone, LifecycleState, DataTableColumn, DataTablePersistedState, SortDirection } from './common-adapters';
 export { Select } from './common-select';
 export { Tooltip } from './common-overlays';
+export { ErrorBanner } from './common-feedback';
 
 export function Field(props: { label: string; value: string; onChange?: (value: string) => void; placeholder?: string; disabled?: boolean; busy?: boolean; error?: string; hint?: string; testId?: string }): React.JSX.Element {
   const id = useId();
@@ -21,16 +23,6 @@ export function Field(props: { label: string; value: string; onChange?: (value: 
       {props.hint ? <small id={hintId} data-tone="hint">{props.hint}</small> : null}
       {props.error ? <small id={errorId} data-tone="error">{props.error}</small> : null}
     </label>
-  );
-}
-
-export function ErrorBanner(props: { title: string; body: string; action?: React.ReactNode; tone?: 'error' | 'warning' | 'info'; testId?: string }): React.JSX.Element {
-  return (
-    <section className="ds-banner" data-tone={props.tone ?? 'error'} role={props.tone === 'info' ? 'status' : 'alert'} data-testid={props.testId}>
-      <strong>{props.title}</strong>
-      <p>{props.body}</p>
-      {props.action}
-    </section>
   );
 }
 
