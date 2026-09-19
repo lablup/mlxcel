@@ -211,6 +211,20 @@ test('chat streaming status counts elapsed seconds until the answer arrives', as
     await expect(status).toHaveText(/^Generating · [0-9]+ s$/);
     await expect(status).toHaveText(/^Generating · [2-9] s$/, { timeout: 6000 });
     await expect(page.getByRole('button', { name: 'Stop', exact: true })).toBeEnabled();
+    // The settings drawer's trailing controls are disabled while the answer streams; Tab
+    // must still cycle inside the modal drawer rather than reach the page behind it.
+    await page.getByRole('button', { name: 'Chat settings', exact: true }).click();
+    const drawer = page.getByTestId('chat-settings-drawer');
+    const close = drawer.getByRole('button', { name: 'Close', exact: true });
+    const lastUsable = drawer.getByRole('button', { name: 'Clear next-turn overrides', exact: true });
+    await expect(close).toBeFocused();
+    await lastUsable.focus();
+    await page.keyboard.press('Tab');
+    await expect(close).toBeFocused();
+    await page.keyboard.press('Shift+Tab');
+    await expect(lastUsable).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(drawer).toBeHidden();
   } finally { release(); }
   await expect(page.locator('.chat-status')).toHaveText('Done');
   await expect(page.locator('.chat-markdown')).toHaveText('Held reply.');

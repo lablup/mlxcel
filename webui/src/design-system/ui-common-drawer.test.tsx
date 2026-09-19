@@ -129,4 +129,21 @@ describe('Drawer variants and Escape ownership', () => {
     act(() => { field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
     expect(onClose).toHaveBeenCalledOnce();
   });
+  it('wraps Tab at the controls usable now, not the ones it saw when it opened', async () => {
+    const Panel = ({ locked }: { locked: boolean }): React.JSX.Element => <Drawer open onClose={() => undefined} title="Sheet" closeLabel="Close" testId="variant-sheet"><button type="button" data-testid="first-control">First</button><button type="button" data-testid="middle-control">Middle</button><button type="button" data-testid="last-control" disabled={locked}>Last</button></Drawer>;
+    act(() => root.render(<Panel locked={false} />));
+    await frames();
+    // Disabled after opening, as Chat's drawer controls are while a response streams.
+    act(() => root.render(<Panel locked />));
+    const control = (id: string): HTMLElement => { const element = sheet().querySelector<HTMLElement>(`[data-testid="${id}"]`); if (!element) throw new Error(`Missing ${id}`); return element; };
+    const close = sheet().querySelector<HTMLElement>('.drawer__close-btn');
+    const tab = (target: HTMLElement, shiftKey = false): KeyboardEvent => { const event = new KeyboardEvent('keydown', { key: 'Tab', shiftKey, bubbles: true, cancelable: true }); act(() => { target.dispatchEvent(event); }); return event; };
+    act(() => control('first-control').focus());
+    expect(tab(control('first-control')).defaultPrevented).toBe(false);
+    act(() => control('middle-control').focus());
+    expect(tab(control('middle-control')).defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(close);
+    expect(tab(close as HTMLElement, true).defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(control('middle-control'));
+  });
 });

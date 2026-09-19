@@ -64,7 +64,24 @@ export function Drawer(props: { open: boolean; onClose: () => void; title: strin
     // alpha.19 closes on any Escape inside its panel, including one that only cancels an IME
     // composition in a text field. The capture phase runs before the panel's own listener.
     if (event.key === 'Escape' && (event.nativeEvent.isComposing || event.keyCode === 229)) event.stopPropagation();
+    if (props.open) wrapTab(hostRef.current?.querySelector<HTMLElement>('.drawer') ?? null, event);
   }}><CommonDrawer isOpen={props.open} onClose={close} title={props.title} closeLabel={props.closeLabel} ariaLabelledBy={titleId} width={SHEET_WIDTH} className={variant ? `ds-drawer ${variant}` : 'ds-drawer'}>{props.children}</CommonDrawer></div>;
+}
+
+// alpha.19 records its Tab cycle's first and last controls once, when the drawer opens.
+// A control disabled after that (Chat's drawers disable theirs while a response streams)
+// is then never focused, so Tab from the last usable control leaves the modal panel for
+// the page behind it. Wrap at the panel's current first and last usable tab stops instead;
+// the package's own handler, which runs after this one, then finds nothing left to do.
+const TAB_STOPS = 'a[href], button, input, select, textarea, [tabindex]';
+function wrapTab(panel: HTMLElement | null, event: React.KeyboardEvent): void {
+  if (event.key !== 'Tab' || event.altKey || event.ctrlKey || event.metaKey || !panel || !(event.target instanceof Node) || !panel.contains(event.target)) return;
+  const stops = Array.from(panel.querySelectorAll<HTMLElement>(TAB_STOPS)).filter((element) => element.tabIndex >= 0 && !element.matches(':disabled') && !element.closest('[inert], [hidden]') && (typeof element.checkVisibility !== 'function' || element.checkVisibility({ visibilityProperty: true })));
+  const first = stops.at(0);
+  const last = stops.at(-1);
+  if (!first || !last || document.activeElement !== (event.shiftKey ? first : last)) return;
+  event.preventDefault();
+  (event.shiftKey ? last : first).focus();
 }
 
 type DescribedElement = React.ReactElement<{ 'aria-describedby'?: string }>;
