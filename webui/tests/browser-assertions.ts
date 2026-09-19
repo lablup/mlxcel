@@ -66,6 +66,8 @@ export async function expectSafeLayout(page: Page): Promise<void> {
       if (element.matches('.ds-common-table th')) return properties.some((key) => key !== 'width') || !/^\d+(?:\.\d+)?px$/.test(element.style.width);
       // Shared Drawer panel: always carries its width prop and max-width 100vw.
       if (element.matches('aside.drawer.ds-drawer')) return properties.slice().sort().join(',') !== 'max-width,width' || element.style.maxWidth !== '100vw' || !['min(320px, -32px + 100vw)', 'min(320px, 100vw - 32px)', 'min(320px, calc(100vw - 32px))'].includes(element.style.width);
+      // Shared Skeleton: its width/height props as inline size.
+      if (element.matches('.skeleton')) return properties.slice().sort().join(',') !== 'height,width' || ['width', 'height'].some((key) => !/^\d+(?:\.\d+)?(?:px|%)$/.test(element.style.getPropertyValue(key)));
       // Shared Tooltip: hidden until measured, then fixed-position top/left in px.
       if (element.matches('.tooltip__content')) return properties.join(',') === 'visibility' ? element.style.visibility !== 'hidden' : properties.slice().sort().join(',') !== 'left,top' || ['top', 'left'].some((key) => !/^-?\d+(?:\.\d+)?px$/.test(element.style.getPropertyValue(key)));
       return true;

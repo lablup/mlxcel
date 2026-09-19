@@ -66,6 +66,10 @@
 .ds-stat-card .stat-card__hint { color: var(--color-muted); font-size: 0.85rem; }
 .ds-stat-card .stat-card__hint p { margin: var(--space-1) 0 0; }
 .base-card.ds-stat-card:hover { box-shadow: none; transform: none; }
+/* LoadingStatus: decorative Skeleton rows under one visible, localized status line. */
+.ds-loading { display: grid; gap: var(--space-2); }
+.ds-loading__label { margin: 0; color: var(--color-muted); }
+.ds-loading__shapes { display: grid; gap: var(--space-2); }
 /* ErrorBanner: the shared ErrorState as the compact product banner, not its centered 200px block. */
 .ds-banner .error-state { display: grid; gap: var(--space-2); justify-content: stretch; justify-items: start; align-content: start; align-items: start; min-height: 0; padding: 0; text-align: start; }
 .ds-banner .error-state__title { margin: 0; color: inherit; font-size: inherit; font-weight: 700; line-height: inherit; }

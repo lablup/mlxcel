@@ -8,6 +8,7 @@ import {
   EmptyState,
   ErrorBanner,
   Field,
+  LoadingStatus,
   Select,
   StatusBadge,
   type DataTableColumn,
@@ -418,7 +419,7 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
             testId="models-table"
             rowClassName={(entry) => (entry.identity.id === state.selectedModelId ? 'models-selected' : undefined)}
             loading={state.catalogSequence === null}
-            loadingState={<p role="status">{t(locale, 'models.library.waiting')}</p>}
+            loadingState={<LoadingStatus label={t(locale, 'models.library.waiting')} />}
             emptyState={
               <EmptyState
                 title={t(locale, state.catalog.length === 0 ? 'models.empty.title' : 'models.library.filtered')}

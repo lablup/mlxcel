@@ -8,7 +8,7 @@ export { Button, IconButton, StatusBadge, ProgressBar, EmptyState, Tabs, DataTab
 export type { ButtonProps, ButtonTone, LifecycleState, DataTableColumn, DataTablePersistedState, SortDirection } from './common-adapters';
 export { Select } from './common-select';
 export { Drawer, Tooltip } from './common-overlays';
-export { ErrorBanner } from './common-feedback';
+export { ErrorBanner, LoadingStatus } from './common-feedback';
 export { Card, PageHeader, PageLayout } from './common-layout';
 export { StatCard } from './common-data';
 
