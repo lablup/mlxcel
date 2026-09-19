@@ -71,6 +71,11 @@ async function resolvedColors(page: Page, names: string[]): Promise<Record<strin
   }, names);
 }
 
+/** Reads the fill the first rendered button of a tone paints, which a later hard-coded rule can hide from the token. */
+async function buttonFill(page: Page, selector: string): Promise<{ color: string; image: string }> {
+  return page.locator(selector).first().evaluate((element) => ({ color: getComputedStyle(element).backgroundColor, image: getComputedStyle(element).backgroundImage }));
+}
+
 function milliseconds(value: string): number {
   return value.endsWith('ms') ? Number.parseFloat(value) : Number.parseFloat(value) * 1000;
 }
@@ -154,6 +159,20 @@ test.describe('theme system', () => {
     ] as const) {
       await bootFresh(page, `baseline-${scheme}`, { colorScheme: scheme, material: 'glass', locale: 'en', glassIntensity: 35, highContrast: 'off' });
       expect(await resolvedColors(page, Object.keys(expected))).toEqual(expected);
+      expect(await buttonFill(page, '.ds-button-primary')).toEqual({ color: 'rgb(36, 91, 216)', image: 'none' });
+      expect(await buttonFill(page, '.ds-button-danger')).toEqual({ color: 'rgb(198, 53, 43)', image: 'none' });
+    }
+  });
+
+  test('glass paints its highlighted fill on the rendered filled buttons', async ({ page }) => {
+    for (const [colorScheme, primary] of [['light', 'rgb(0, 88, 185)'], ['dark', 'rgb(10, 91, 192)']] as const) {
+      await bootFresh(page, `glass-fill-${colorScheme}`, { themeFamily: 'glass', colorScheme, material: 'glass', locale: 'en', glassIntensity: 35, highContrast: 'off' });
+      const primaryFill = await buttonFill(page, '.ds-button-primary');
+      const dangerFill = await buttonFill(page, '.ds-button-danger');
+      expect(primaryFill.image).toContain('linear-gradient');
+      expect(primaryFill.color).toBe(primary);
+      expect(dangerFill.image).toContain('linear-gradient');
+      expect(dangerFill.color).toBe('rgb(179, 38, 30)');
     }
   });
 
@@ -190,6 +209,7 @@ test.describe('theme system', () => {
         const values = await rootValues(page, ['--material-control-backdrop', '--token-buttonPrimaryBg', '--material-content-bg', '--color-bg-elevated']);
         expect(values['--material-control-backdrop']).toBe('none');
         expect(values['--token-buttonPrimaryBg']).not.toContain('gradient');
+        expect((await buttonFill(page, '.ds-button-primary')).image).toBe('none');
         expect(values['--material-content-bg']).toBe(values['--color-bg-elevated']);
         await expectAxeClean(page);
       });

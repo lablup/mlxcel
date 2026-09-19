@@ -10,8 +10,8 @@
 .ds-button:active, .ds-icon-button:active { transform: scale(0.985); }
 .ds-button:focus-visible, .ds-icon-button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, [role="tab"]:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .ds-button:disabled, .ds-icon-button:disabled, .ds-field[data-disabled="true"] { opacity: 0.56; cursor: not-allowed; }
-.ds-button-primary { color: white; background: #245bd8; border-color: #245bd8; }
-.ds-button-danger { color: white; background: #c6352b; border-color: #c6352b; }
+.ds-button-primary { color: white; background: var(--token-buttonPrimaryBg); border-color: #245bd8; }
+.ds-button-danger { color: white; background: var(--token-buttonDangerBg); border-color: #c6352b; }
 .ds-button-ghost { background: transparent; }
 .ds-spinner { width: 14px; height: 14px; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; animation: spin var(--motion-slow) linear infinite; }
 .ds-field { display: grid; gap: var(--space-2); color: var(--color-muted); }
