@@ -1,6 +1,6 @@
 import React from 'react';
 import { WebUiHttpError } from './api/client';
-import type { CatalogEntry, ConnectionPhase, ModelLifecycleState, WebUiSnapshot } from './api/types';
+import type { CatalogEntry, ConnectionPhase, ModelId, ModelLifecycleState, WebUiSnapshot } from './api/types';
 import { ValidationError } from './api/validation';
 import { Button, ErrorBanner, LoginView, PageHeader, SchemaMismatchView } from './design-system/primitives';
 import type { Locale, StringKey } from './i18n/catalog';
@@ -38,6 +38,16 @@ export function compareByLoadedThenName(left: CatalogEntry, right: CatalogEntry)
 /** The models the server holds right now (not the browser's selection), in toolbar order. */
 export function loadedModels(snapshot: WebUiSnapshot): ReadonlyArray<CatalogEntry> {
   return snapshot.catalog.filter((entry) => isLoadedState(entry.lifecycle.state)).sort(compareByLoadedThenName);
+}
+
+/**
+ * What opening a model from a toolbar chip or the palette selects: the model while it is still in
+ * the catalog, otherwise nothing, so Models opens with no inspector. The caller dispatches only
+ * when this differs from the current selection, because a selection change restarts observation
+ * and clears the runtime history.
+ */
+export function modelSelectionFor(snapshot: WebUiSnapshot, id: ModelId): ModelId | null {
+  return snapshot.catalog.some((entry) => entry.identity.id === id) ? id : null;
 }
 
 export function connectionFooterLabel(locale: Locale, snapshot: WebUiSnapshot): string {

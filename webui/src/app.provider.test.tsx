@@ -7,7 +7,7 @@ import catalogFixture from '../../tests/fixtures/webui/examples/catalog.page.jso
 import operationsFixture from '../../tests/fixtures/webui/examples/operations.list.json';
 import { App } from './app';
 import { replaceConversations, useConversations } from './features/chat/session';
-import { WebUiProvider } from './state';
+import { WebUiProvider, WebUiSynchronizer } from './state';
 
 interface FetchCall {
   readonly url: string;
@@ -54,6 +54,16 @@ function readyCatalog(page: typeof catalogFixture): typeof catalogFixture {
   entry.lifecycle.state = 'ready';
   entry.lifecycle.worker_exit_observed = false;
   entry.capabilities = [{ task: 'chat', phase: 'provider_ready', available: true, reason: null }];
+  return page;
+}
+
+// The fixture's unloaded model next to a second one whose load failed: neither holds a worker.
+function unloadedAndFailedCatalog(page: typeof catalogFixture): typeof catalogFixture {
+  const failed = structuredClone(page.items[0]);
+  failed.identity = { ...failed.identity, id: `mdl_${'f'.repeat(43)}`, inference_id: 'beta', display_name: 'beta', source_key_hash: 'f'.repeat(64) };
+  failed.lifecycle = { ...failed.lifecycle, state: 'failed' };
+  page.items = [page.items[0], failed];
+  page.pagination = { ...page.pagination, total_known: 2 };
   return page;
 }
 
@@ -285,7 +295,10 @@ describe('provider-backed WebUI shell', () => {
     const region = document.querySelector<HTMLElement>('[data-testid="toolbar-loaded"]');
     expect(region?.getAttribute('role')).toBe('group');
     expect(region?.getAttribute('aria-label')).toBe('Loaded models');
-    expect(region?.textContent).toBe('No model loaded');
+    // Signed out, nothing has been read from the server, so the toolbar claims nothing about it.
+    expect(region?.textContent).toBe('Loaded models unknown');
+    expect(region?.querySelector('[data-testid="toolbar-loaded-unknown"]')).not.toBeNull();
+    expect(region?.querySelector('[data-testid="toolbar-loaded-none"]')).toBeNull();
     await submitSessionKey('good-key');
     await waitFor(() => expect(document.querySelector('[data-testid="toolbar-loaded-count"]')?.textContent).toBe('1 loaded'));
     const chips = document.querySelectorAll<HTMLButtonElement>('[data-testid="toolbar-loaded-chip"]');
@@ -302,6 +315,58 @@ describe('provider-backed WebUI shell', () => {
     await waitFor(() => expect(document.querySelector('aside[aria-label="Model details"]')?.textContent).toContain('alpha'));
     expect(window.location.hash).toBe('#models');
     expect(mock.calls.map((call) => call.url).join('\n')).not.toContain('/ui-api/v1/model-actions');
+  });
+
+  it('says the loaded models are unknown until the first catalog page, then that none is loaded when every entry is unloaded or failed', async () => {
+    let releaseCatalog: (() => void) | null = null;
+    const catalogGate = new Promise<void>((resolve) => { releaseCatalog = resolve; });
+    const fetchImpl: typeof fetch = async (input) => {
+      const url = String(input);
+      if (url.startsWith('/ui-api/v1/bootstrap')) return jsonResponse(makeBootstrap());
+      if (url.startsWith('/ui-api/v1/catalog')) {
+        await catalogGate;
+        return jsonResponse(unloadedAndFailedCatalog(makeCatalog()));
+      }
+      if (url.startsWith('/ui-api/v1/operations')) return jsonResponse(makeOperations());
+      if (url.startsWith('/ui-api/v1/events')) return new Response('data: [DONE]\n\n', { status: 200, headers: { 'content-type': 'text/event-stream' } });
+      return jsonResponse({ error: { code: 'not_found', message: `Unexpected ${url}`, retryable: false }, request_id: 'req_unexpected' }, 404);
+    };
+    renderApp(fetchImpl);
+    const region = (): HTMLElement | null => document.querySelector<HTMLElement>('[data-testid="toolbar-loaded"]');
+    await submitSessionKey('good-key');
+    // Authenticated, but the catalog snapshot has not arrived: still unknown, not "none".
+    await waitFor(() => expect(document.querySelector('[data-testid="connection-authenticated-detail"]')?.textContent).toContain('catalog pending'));
+    expect(document.querySelector('[data-testid="toolbar-logout"]')).not.toBeNull();
+    expect(region()?.textContent).toBe('Loaded models unknown');
+    await act(async () => { releaseCatalog?.(); await Promise.resolve(); });
+    await waitFor(() => expect(document.querySelector('[data-testid="connection-authenticated-detail"]')?.textContent).toContain('catalog 2'));
+    expect(region()?.textContent).toBe('No model loaded');
+    expect(region()?.querySelector('[data-testid="toolbar-loaded-none"]')).not.toBeNull();
+    expect(region()?.querySelectorAll('[data-testid="toolbar-loaded-chip"]')).toHaveLength(0);
+  });
+
+  it('does not restart observation when a chip or the palette opens the model that is already selected', async () => {
+    // Every selection change reaches the synchronizer through selectionChanged, which cancels
+    // observation, refetches and (with the reducer) clears the runtime history.
+    const selectionChanged = vi.spyOn(WebUiSynchronizer.prototype, 'selectionChanged');
+    const mock = createMockFetch('happy', readyCatalog);
+    renderApp(mock.fetchImpl);
+    await submitSessionKey('good-key');
+    await waitFor(() => expect(document.querySelector('[data-testid="toolbar-loaded-count"]')?.textContent).toBe('1 loaded'));
+    expect(selectionChanged).not.toHaveBeenCalled();
+    act(() => document.querySelector<HTMLButtonElement>('[data-testid="toolbar-loaded-chip"]')?.click());
+    await waitFor(() => expect(document.querySelector('aside[aria-label="Model details"]')?.textContent).toContain('alpha'));
+    expect(selectionChanged).toHaveBeenCalledTimes(1);
+    act(() => document.querySelector<HTMLAnchorElement>('[data-testid="nav-settings"]')?.click());
+    act(() => document.querySelector<HTMLButtonElement>('[data-testid="toolbar-loaded-chip"]')?.click());
+    expect(window.location.hash).toBe('#models');
+    act(() => document.querySelector<HTMLAnchorElement>('[data-testid="nav-activity"]')?.click());
+    act(() => document.querySelector<HTMLButtonElement>('[data-testid="toolbar-command"]')?.click());
+    const dialog = document.querySelector<HTMLElement>('[data-testid="command-dialog"]');
+    act(() => dialog?.querySelector<HTMLButtonElement>('[data-testid="command-model"]')?.click());
+    expect(window.location.hash).toBe('#models');
+    expect(dialog?.hasAttribute('open')).toBe(false);
+    expect(selectionChanged).toHaveBeenCalledTimes(1);
   });
 
   it('keeps the footer to mode, status and version and puts the instance and sequence only in its details', async () => {

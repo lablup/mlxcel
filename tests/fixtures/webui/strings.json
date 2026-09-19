@@ -91,6 +91,12 @@
       "test_id": "toolbar-loaded-none"
     },
     {
+      "key": "toolbar.loaded.unknown",
+      "en": "Loaded models unknown",
+      "ko": "로드된 모델 알 수 없음",
+      "test_id": "toolbar-loaded-unknown"
+    },
+    {
       "key": "toolbar.loaded.count",
       "en": "{count} loaded",
       "ko": "{count}개 로드됨",
@@ -614,8 +620,8 @@
     },
     {
       "key": "help.body",
-      "en": "Shortcuts do not fire while you type in a field, inside an open dialog or during IME composition. Cmd/Ctrl+N and Cmd/Ctrl+Enter also work in the chat message field. Brackets move navigation only while the sidebar has focus.",
-      "ko": "입력란에 입력하는 중, 열린 다이얼로그 안, IME 조합 중에는 단축키가 동작하지 않습니다. Cmd/Ctrl+N과 Cmd/Ctrl+Enter는 대화 메시지 입력란에서도 동작합니다. 대괄호는 사이드바에 포커스가 있을 때만 내비게이션을 이동합니다.",
+      "en": "Shortcuts do not fire while you type in a field, inside an open dialog (Esc still closes it) or during IME composition. Cmd/Ctrl+N and Cmd/Ctrl+Enter also work in the chat message field. Brackets move navigation only while the sidebar has focus.",
+      "ko": "입력란에 입력하는 중, 열린 다이얼로그 안(Esc로 닫기는 가능), IME 조합 중에는 단축키가 동작하지 않습니다. Cmd/Ctrl+N과 Cmd/Ctrl+Enter는 대화 메시지 입력란에서도 동작합니다. 대괄호는 사이드바에 포커스가 있을 때만 내비게이션을 이동합니다.",
       "test_id": "help-body"
     },
     {

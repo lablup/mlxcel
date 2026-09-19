@@ -69,8 +69,12 @@ export interface AppShellProps {
   readonly onOpenModel: (id: ModelId) => void;
   readonly children: React.ReactNode;
   readonly inspector?: React.ReactNode;
-  /** The server's loaded models in display order (never the browser's selection). */
-  readonly loadedModels: ReadonlyArray<ShellLoadedModel>;
+  /**
+   * The server's loaded models in display order (never the browser's selection). `null` means
+   * the shell does not know them (signed out, or no catalog snapshot yet), and the toolbar says
+   * so instead of claiming that nothing is loaded; an empty array means none is loaded.
+   */
+  readonly loadedModels: ReadonlyArray<ShellLoadedModel> | null;
   readonly connection: ShellConnection;
   readonly sessionAction?: React.ReactNode;
 }
@@ -184,14 +188,17 @@ export function AppShell(props: AppShellProps): React.JSX.Element {
 // The server's loaded models: a count and up to TOOLBAR_CHIP_LIMIT chips, then a "+n"
 // chip that opens the command palette, whose empty query lists every loaded model. A chip
 // only selects and inspects; it never loads or unloads. Its accessible name is its
-// visible text (name and lifecycle), so it takes no aria-label (WCAG 2.5.3).
-function LoadedModels(props: { locale: Locale; models: ReadonlyArray<ShellLoadedModel>; onOpenModel: (id: ModelId) => void; onMore: () => void }): React.JSX.Element {
-  const shown = props.models.slice(0, TOOLBAR_CHIP_LIMIT);
-  const hidden = props.models.length - shown.length;
+// visible text (name and lifecycle), so it takes no aria-label (WCAG 2.5.3). Unknown
+// (null) and none loaded (empty) are different claims, so each has its own text.
+function LoadedModels(props: { locale: Locale; models: ReadonlyArray<ShellLoadedModel> | null; onOpenModel: (id: ModelId) => void; onMore: () => void }): React.JSX.Element {
+  const models = props.models ?? [];
+  const shown = models.slice(0, TOOLBAR_CHIP_LIMIT);
+  const hidden = models.length - shown.length;
+  const status = props.models === null ? 'toolbar.loaded.unknown' : models.length === 0 ? 'toolbar.loaded.none' : null;
   return (
-    <div className="toolbar-loaded" role="group" aria-label={t(props.locale, 'toolbar.loaded.label')} data-testid={testId('toolbar.loaded.label')}>
-      {props.models.length === 0 ? <span className="toolbar-loaded-count" data-testid={testId('toolbar.loaded.none')}>{t(props.locale, 'toolbar.loaded.none')}</span> : <>
-        <span className="toolbar-loaded-count" data-testid={testId('toolbar.loaded.count')}>{t(props.locale, 'toolbar.loaded.count', { count: String(props.models.length) })}</span>
+    <div className="toolbar-loaded" role="group" aria-label={t(props.locale, 'toolbar.loaded.label')} data-testid={testId('toolbar.loaded.label')} onFocus={revealFocusedChip}>
+      {status !== null ? <span className="toolbar-loaded-count" data-testid={testId(status)}>{t(props.locale, status)}</span> : <>
+        <span className="toolbar-loaded-count" data-testid={testId('toolbar.loaded.count')}>{t(props.locale, 'toolbar.loaded.count', { count: String(models.length) })}</span>
         {shown.map((model) => (
           <Button key={model.id} tone="ghost" className="toolbar-chip" title={model.name} data-testid="toolbar-loaded-chip" onClick={() => props.onOpenModel(model.id)}>
             <span className="truncate">{model.name}</span>
@@ -202,6 +209,15 @@ function LoadedModels(props: { locale: Locale; models: ReadonlyArray<ShellLoaded
       </>}
     </div>
   );
+}
+
+// Below 960 px the chip row scrolls sideways. Chromium's own focus scrolling leaves an element
+// that is already partly visible where it is, so a keyboard-focused chip half past the row's
+// edge stays clipped; scroll it fully into view. Pointer focus is left alone, so a chip never
+// moves between mousedown and mouseup.
+function revealFocusedChip(event: React.FocusEvent<HTMLDivElement>): void {
+  const target = event.target;
+  if (target instanceof HTMLElement && typeof target.scrollIntoView === 'function' && target.matches(':focus-visible')) target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
 }
 
 const Sidebar = React.forwardRef<HTMLElement, { locale: Locale; route: RouteId; onRouteChange: (route: RouteId) => void; onKeyDown: (event: React.KeyboardEvent) => void; className: string; connection: ShellConnection }>((props, ref) => (

@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { CatalogEntry, ModelLifecycleState, WebUiSnapshot } from './api/types';
 import { paletteModelMatches, PALETTE_MODEL_LIMIT } from './command-palette';
 import { model, snapshot } from './features/models/test-fixtures';
-import { connectionFooterDetails, connectionFooterLabel, loadedModels } from './provider-surfaces';
+import { connectionFooterDetails, connectionFooterLabel, loadedModels, modelSelectionFor } from './provider-surfaces';
 import { initialSnapshot } from './state/reducer';
 
 function entry(id: string, name: string, state: ModelLifecycleState): CatalogEntry {
@@ -43,6 +43,27 @@ describe('loadedModels', () => {
     const state = withCatalog(catalog);
     loadedModels(state);
     expect(state.catalog.map((item) => item.identity.id)).toEqual(['mdl_b', 'mdl_a']);
+  });
+});
+
+describe('modelSelectionFor', () => {
+  const catalog = [entry('mdl_a', 'alpha', 'ready'), entry('mdl_b', 'beta', 'unloaded')];
+
+  it('selects a model that is still in the catalog, whatever its lifecycle', () => {
+    expect(modelSelectionFor(withCatalog(catalog), 'mdl_a')).toBe('mdl_a');
+    expect(modelSelectionFor(withCatalog(catalog), 'mdl_b')).toBe('mdl_b');
+  });
+
+  it('selects nothing for a model that has left the catalog', () => {
+    expect(modelSelectionFor(withCatalog(catalog), 'mdl_gone')).toBeNull();
+    expect(modelSelectionFor(initialSnapshot(), 'mdl_a')).toBeNull();
+  });
+
+  it('equals the current selection when the selected model is opened again, which callers skip', () => {
+    const state = { ...withCatalog(catalog), selectedModelId: 'mdl_a' };
+    expect(modelSelectionFor(state, 'mdl_a')).toBe(state.selectedModelId);
+    const gone = { ...withCatalog([]), selectedModelId: null };
+    expect(modelSelectionFor(gone, 'mdl_a')).toBe(gone.selectedModelId);
   });
 });
 

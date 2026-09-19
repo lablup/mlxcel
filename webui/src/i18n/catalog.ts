@@ -133,6 +133,7 @@ export type StringKey = typeof modelStrings[number]['key']
   | 'toolbar.menu'
   | 'toolbar.loaded.label'
   | 'toolbar.loaded.none'
+  | 'toolbar.loaded.unknown'
   | 'toolbar.loaded.count'
   | 'toolbar.loaded.more'
   | 'toolbar.loaded.more_label'
@@ -214,6 +215,7 @@ export const entries: Entry[] = [
   { key: 'toolbar.menu', en: 'Open navigation', ko: '내비게이션 열기', test_id: 'toolbar-menu' },
   { key: 'toolbar.loaded.label', en: 'Loaded models', ko: '로드된 모델', test_id: 'toolbar-loaded' },
   { key: 'toolbar.loaded.none', en: 'No model loaded', ko: '로드된 모델 없음', test_id: 'toolbar-loaded-none' },
+  { key: 'toolbar.loaded.unknown', en: 'Loaded models unknown', ko: '로드된 모델 알 수 없음', test_id: 'toolbar-loaded-unknown' },
   { key: 'toolbar.loaded.count', en: '{count} loaded', ko: '{count}개 로드됨', test_id: 'toolbar-loaded-count' },
   { key: 'toolbar.loaded.more', en: '+{count}', ko: '+{count}', test_id: 'toolbar-loaded-more' },
   { key: 'toolbar.loaded.more_label', en: '+{count}, show all loaded models', ko: '+{count}, 로드된 모델 모두 보기', test_id: 'toolbar-loaded-more-label' },
@@ -301,7 +303,7 @@ export const entries: Entry[] = [
   { key: 'command.section.commands', en: 'Commands', ko: '명령', test_id: 'command-section-commands' },
   { key: 'command.section.models', en: 'Models', ko: '모델', test_id: 'command-section-models' },
   { key: 'help.title', en: 'Keyboard shortcuts', ko: '키보드 단축키', test_id: 'help-title' },
-  { key: 'help.body', en: 'Shortcuts do not fire while you type in a field, inside an open dialog or during IME composition. Cmd/Ctrl+N and Cmd/Ctrl+Enter also work in the chat message field. Brackets move navigation only while the sidebar has focus.', ko: '입력란에 입력하는 중, 열린 다이얼로그 안, IME 조합 중에는 단축키가 동작하지 않습니다. Cmd/Ctrl+N과 Cmd/Ctrl+Enter는 대화 메시지 입력란에서도 동작합니다. 대괄호는 사이드바에 포커스가 있을 때만 내비게이션을 이동합니다.', test_id: 'help-body' },
+  { key: 'help.body', en: 'Shortcuts do not fire while you type in a field, inside an open dialog (Esc still closes it) or during IME composition. Cmd/Ctrl+N and Cmd/Ctrl+Enter also work in the chat message field. Brackets move navigation only while the sidebar has focus.', ko: '입력란에 입력하는 중, 열린 다이얼로그 안(Esc로 닫기는 가능), IME 조합 중에는 단축키가 동작하지 않습니다. Cmd/Ctrl+N과 Cmd/Ctrl+Enter는 대화 메시지 입력란에서도 동작합니다. 대괄호는 사이드바에 포커스가 있을 때만 내비게이션을 이동합니다.', test_id: 'help-body' },
   { key: 'help.shortcut.command', en: 'Open the command palette', ko: '명령 팔레트 열기', test_id: 'help-shortcut-command' },
   { key: 'help.shortcut.new_chat', en: 'Start a new conversation', ko: '새 대화 시작', test_id: 'help-shortcut-new-chat' },
   { key: 'help.shortcut.send', en: 'Send the message from the composer', ko: '입력 중인 메시지 보내기', test_id: 'help-shortcut-send' },

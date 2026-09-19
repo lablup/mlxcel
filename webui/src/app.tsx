@@ -9,7 +9,7 @@ import { Dialog, ErrorBanner, IconButton, PageHeader, Select } from './design-sy
 import { ActivityPage } from './features/activity';
 import { ModelsLibrary } from './features/models/screen';
 import { DesignGallery } from './gallery';
-import { classifyAuthFailure, connectionFooterDetails, connectionFooterLabel, lifecycleLabel, loadedModels, ProductConnectionSurface, type AuthFailure } from './provider-surfaces';
+import { classifyAuthFailure, connectionFooterDetails, connectionFooterLabel, lifecycleLabel, loadedModels, modelSelectionFor, ProductConnectionSurface, type AuthFailure } from './provider-surfaces';
 import { useWebUi, useWebUiActions } from './state';
 import { t, testId } from './i18n/catalog';
 import { Chat } from './features/chat/chat';
@@ -94,9 +94,12 @@ export function App(): React.JSX.Element {
     window.location.reload();
   };
   // Chip and palette: select the model and open its inspector on Models. A model that
-  // left the catalog in the meantime opens Models with no inspector. Never loads.
+  // left the catalog in the meantime opens Models with no inspector. Never loads. Opening
+  // the model that is already selected dispatches nothing: a selection change cancels
+  // observation, refetches and clears the runtime history.
   const openModel = (id: ModelId): void => {
-    actions.selectModel(snapshot.catalog.some((entry) => entry.identity.id === id) ? id : null);
+    const target = modelSelectionFor(snapshot, id);
+    if (target !== snapshot.selectedModelId) actions.selectModel(target);
     navigate('models');
     setOverlay(null);
   };
@@ -108,7 +111,11 @@ export function App(): React.JSX.Element {
     setOverlay(null);
   };
   const loaded = loadedModels(snapshot);
-  const shellLoaded: ShellLoadedModel[] = loaded.map((entry) => ({ id: entry.identity.id, name: entry.identity.display_name, state: entry.lifecycle.state, stateLabel: lifecycleLabel(appearance.locale, entry.lifecycle.state) }));
+  // Unknown until an authenticated session holds a catalog snapshot (signed out, the window
+  // before the first page, and the reset after a server restart): the toolbar must not claim
+  // "No model loaded" about a server it has not read.
+  const catalogKnown = snapshot.auth.status === 'authenticated' && snapshot.catalogSequence !== null;
+  const shellLoaded: ShellLoadedModel[] | null = catalogKnown ? loaded.map((entry) => ({ id: entry.identity.id, name: entry.identity.display_name, state: entry.lifecycle.state, stateLabel: lifecycleLabel(appearance.locale, entry.lifecycle.state) })) : null;
   const body = renderRoute(route, appearance, setAppearance, { snapshot, authFailure, login, logout, retry, recoverSchema });
   return (
     <>

@@ -94,7 +94,8 @@ for (const width of FLOOR_WIDTHS) {
 test('the toolbar names the server-loaded model and its chip opens the inspector without any model action', async ({ page }) => {
   const mock = await installMockApi(page, 'happy', { catalog: readyCatalog });
   await bootProduct(page, { name: 'chip', width: 1440, height: 900, signedIn: false, appearance: appearance('en') });
-  await expect(page.getByTestId('toolbar-loaded')).toHaveText('No model loaded');
+  // Signed out, the shell has not read the server, so it claims nothing about it.
+  await expect(page.getByTestId('toolbar-loaded')).toHaveText('Loaded models unknown');
   await loginWithMockApi(page);
   const region = page.getByRole('group', { name: 'Loaded models' });
   await expect(region.getByTestId('toolbar-loaded-count')).toHaveText('1 loaded');
@@ -157,6 +158,46 @@ test('a tight desktop toolbar keeps naming every loaded model and shrinks the ba
   // Clipping the badge label is visual only: the accessible name still carries the state.
   await expect(page.getByRole('button', { name: `${names[0]} Ready`, exact: true })).toBeVisible();
 });
+
+// Below 960 px the chip row is its own toolbar row. It scrolls sideways inside itself rather
+// than wrapping, so the sticky toolbar keeps two rows (title, chips) however many models are
+// loaded. Playwright's headless Chromium hides scrollbars; a classic scrollbar elsewhere adds
+// only its own thickness to that second row.
+const LONG_NAMES = ['DeepSeek-R1-Distill-Qwen-32B-4bit', 'Meta-Llama-3.1-8B-Instruct-4bit', 'Mixtral-8x7B-Instruct-v0.1-4bit', 'Qwen2.5-7B-Instruct-4bit'];
+for (const [width, height] of [[400, 844], [700, 900]] as const) {
+  test(`at ${width} px long-named chips scroll in one row and the toolbar stays two rows high`, async ({ page }) => {
+    let names: ReadonlyArray<string> = LONG_NAMES.slice(0, 1);
+    await installMockApi(page, 'happy', { catalog: (catalog) => readyModels(names)(catalog) });
+    await bootProduct(page, { name: 'compact-chips', width, height, signedIn: false, appearance: appearance('en') });
+    await loginWithMockApi(page);
+    await expect(page.getByTestId('toolbar-loaded-count')).toHaveText('1 loaded');
+    const toolbar = page.locator('.app-toolbar');
+    const oneChip = (await toolbar.boundingBox())?.height ?? Infinity;
+    names = LONG_NAMES;
+    await page.getByRole('button', { name: 'Refresh server state', exact: true }).click();
+    await expect(page.getByTestId('toolbar-loaded-count')).toHaveText('4 loaded');
+    const chips = page.getByTestId('toolbar-loaded-chip');
+    await expect(chips).toHaveCount(3);
+    const fourChips = (await toolbar.boundingBox())?.height ?? Infinity;
+    console.log(`SHELL_COMPACT_CHIPS viewport=${width} one_chip_toolbar=${oneChip} four_chip_toolbar=${fourChips}`);
+    expect(fourChips).toBeLessThanOrEqual(oneChip + 2);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1);
+    await expectAxeClean(page);
+    // The third chip ends past the row's visible edge; tabbing onto it scrolls it into view.
+    const region = page.getByTestId('toolbar-loaded');
+    const rowRight = async (): Promise<number> => region.evaluate((element) => element.getBoundingClientRect().right);
+    const before = await chips.nth(2).boundingBox();
+    expect((before?.x ?? 0) + (before?.width ?? 0)).toBeGreaterThan((await rowRight()) + 1);
+    await chips.nth(1).focus();
+    await page.keyboard.press('Tab');
+    await expect(chips.nth(2)).toBeFocused();
+    const third = await chips.nth(2).boundingBox();
+    if (third === null) throw new Error('The third chip has no box.');
+    expect(third.x).toBeGreaterThanOrEqual(0);
+    expect(third.x + third.width).toBeLessThanOrEqual(Math.min(width, await rowRight()) + 1);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1);
+  });
+}
 
 test('the command palette finds a model by name substring and opens its inspector without a model action', async ({ page }) => {
   const mock = await installMockApi(page, 'happy');
