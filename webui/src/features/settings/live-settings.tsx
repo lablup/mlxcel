@@ -1,12 +1,38 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { Button, Dialog, ErrorBanner, Field } from '../../design-system/primitives';
-import { parseSettingInput, settingInput, type SettingSpec, type SettingsResponse } from '../../api/settings';
+import React, { useEffect, useId, useRef, useState } from 'react';
+import { Button, Dialog, ErrorBanner } from '../../design-system/primitives';
+import { formatSettingValue, parseSettingInput, settingInput, type SettingSpec, type SettingsResponse } from '../../api/settings';
 import { useWebUiActions } from '../../state';
-import { t, type Locale } from '../../i18n/catalog';
+import { t, type Locale, type StringKey } from '../../i18n/catalog';
+import { recordServerSettings } from './server-defaults';
+import { HelpTip, SettingControl } from './setting-control';
 
-export function LiveSettings({ modelId, locale }: { modelId: string; locale: Locale }): React.JSX.Element {
+export type LiveSettingGroup = 'sampling' | 'dry' | 'diffusion' | 'template' | 'other';
+const GROUP_ORDER: readonly LiveSettingGroup[] = ['sampling', 'dry', 'diffusion', 'template', 'other'];
+const GROUP_LABEL: Readonly<Record<LiveSettingGroup, StringKey>> = { sampling: 'settings.live.group.sampling', dry: 'settings.live.group.dry', diffusion: 'settings.live.group.diffusion', template: 'settings.live.group.template', other: 'settings.live.group.other' };
+
+/** Group by name prefix, never by a fixed list: the schema may hold up to 256 entries and grow. */
+export function liveSettingGroup(name: string): LiveSettingGroup {
+  if (name.startsWith('default_dry_')) return 'dry';
+  if (name.startsWith('default_')) return 'sampling';
+  if (name.startsWith('diffusion_')) return 'diffusion';
+  if (name === 'chat_template_kwargs' || name === 'lang_bias_config' || name.includes('template') || name.includes('bias')) return 'template';
+  return 'other';
+}
+export function groupLiveSettings(specs: readonly SettingSpec[]): { group: LiveSettingGroup; specs: SettingSpec[] }[] {
+  return GROUP_ORDER.map((group) => ({ group, specs: specs.filter((spec) => liveSettingGroup(spec.name) === group) })).filter((entry) => entry.specs.length > 0);
+}
+
+/** Reset stages a startup default as display text when that text still reads back as the same value, else as exact JSON. */
+export function stagedDefault(spec: SettingSpec): string {
+  if (spec.default === null) return 'null';
+  const shown = formatSettingValue(spec, spec.default);
+  if (typeof spec.default !== 'number') return shown;
+  return Math.fround(Number(shown)) === Math.fround(spec.default) ? shown : settingInput(spec, spec.default);
+}
+
+export function LiveSettings({ modelId, revision, locale }: { modelId: string; revision?: number; locale: Locale }): React.JSX.Element {
   const actions = useWebUiActions();
-  const [current, setCurrent] = useState<SettingsResponse | null>(null);
+  const [current, setCurrentState] = useState<SettingsResponse | null>(null);
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [message, setMessage] = useState('');
@@ -14,7 +40,11 @@ export function LiveSettings({ modelId, locale }: { modelId: string; locale: Loc
   const [resetOpen, setResetOpen] = useState(false);
   const request = useRef<AbortController | null>(null);
   const localeRef = useRef(locale); localeRef.current = locale;
-  useEffect(() => { const controller = new AbortController(); request.current = controller; setBusy(true); void actions.getSettings(modelId, controller.signal).then((value) => { if (!controller.signal.aborted) setCurrent(value); }).catch(() => { if (!controller.signal.aborted) setMessage(t(localeRef.current, 'settings.live.unavailable')); }).finally(() => { if (!controller.signal.aborted) setBusy(false); }); return () => controller.abort(); }, [actions, modelId]);
+  const titleId = useId();
+  // Every read also refreshes the server defaults the Requests tab and the Chat hint resolve against.
+  const setCurrent = (value: SettingsResponse): void => { setCurrentState(value); if (revision !== undefined) recordServerSettings(modelId, revision, value); };
+  const setCurrentRef = useRef(setCurrent); setCurrentRef.current = setCurrent;
+  useEffect(() => { const controller = new AbortController(); request.current = controller; setBusy(true); void actions.getSettings(modelId, controller.signal).then((value) => { if (!controller.signal.aborted) setCurrentRef.current(value); }).catch(() => { if (!controller.signal.aborted) setMessage(t(localeRef.current, 'settings.live.unavailable')); }).finally(() => { if (!controller.signal.aborted) setBusy(false); }); return () => controller.abort(); }, [actions, modelId]);
   const refresh = async (): Promise<void> => {
     const controller = request.current;
     if (controller === null || controller.signal.aborted) return;
@@ -46,9 +76,22 @@ export function LiveSettings({ modelId, locale }: { modelId: string; locale: Loc
       if (!controller.signal.aborted) setCurrent(effective);
     } catch { if (!controller.signal.aborted) setMessage(t(localeRef.current, 'settings.live.unknown_outcome')); } finally { if (!controller.signal.aborted) setBusy(false); }
   };
-  const hint = (spec: SettingSpec, value: unknown): string => {
-    const values = { help: spec.help, current: settingInput(spec, value), type: spec.type };
-    return spec.allowed === null ? t(locale, 'settings.live.hint', values) : t(locale, 'settings.live.hint_allowed', { ...values, allowed: spec.allowed.join(', ') });
-  };
-  return <section className="screen-stack"><h2>{t(locale, 'settings.live.title')}</h2><p>{t(locale, 'settings.live.body')}</p>{message ? <ErrorBanner tone="warning" title={t(locale, 'settings.live.result_title')} body={message} /> : null}<div><Button onClick={() => void refresh()} disabled={busy}>{t(locale, 'settings.live.refresh')}</Button> <Button onClick={() => void apply()} disabled={busy || Object.keys(draft).length === 0}>{t(locale, 'settings.live.apply')}</Button> <Button onClick={() => setResetOpen(true)} disabled={busy || current === null}>{t(locale, 'settings.live.reset_open')}</Button></div>{current?.schema.filter((spec) => spec.mutable).map((spec) => <Field key={spec.name} label={spec.name} value={draft[spec.name] ?? settingInput(spec, current.current[spec.name])} onChange={(value) => setDraft((old) => ({ ...old, [spec.name]: value }))} disabled={busy} error={errors[spec.name]} hint={hint(spec, current.current[spec.name])} />)}<details><summary>{t(locale, 'settings.live.startup')}</summary>{current?.schema.filter((spec) => !spec.mutable).map((spec) => <Field key={spec.name} label={spec.name} value={settingInput(spec, current.current[spec.name])} disabled hint={spec.reason ?? spec.help} />)}</details><Dialog open={resetOpen} title={t(locale, 'settings.live.reset.title')} closeLabel={t(locale, 'common.close')} onClose={() => setResetOpen(false)}><p>{t(locale, 'settings.live.reset.body')}</p><Button onClick={() => { if (current !== null) setDraft(Object.fromEntries(current.schema.filter((spec) => spec.mutable).map((spec) => [spec.name, settingInput(spec, spec.default)]))); setErrors({}); setResetOpen(false); }}>{t(locale, 'settings.live.reset.confirm')}</Button></Dialog></section>;
+  const edit = (name: string, value: string | undefined): void => setDraft((old) => value !== undefined ? { ...old, [name]: value } : Object.fromEntries(Object.entries(old).filter(([key]) => key !== name)));
+  const mutable = current?.schema.filter((spec) => spec.mutable) ?? [];
+  return (
+    <section className="screen-stack settings-live" aria-labelledby={titleId}>
+      <div className="settings-heading"><h2 id={titleId}>{t(locale, 'settings.live.title')}</h2><HelpTip label={t(locale, 'settings.help.live')} content={t(locale, 'settings.live.body')} /></div>
+      {message ? <ErrorBanner tone="warning" title={t(locale, 'settings.live.result_title')} body={message} testId="settings-live-result" /> : null}
+      <div className="control-row settings-actions"><Button onClick={() => void refresh()} disabled={busy}>{t(locale, 'settings.live.refresh')}</Button><Button tone="primary" onClick={() => void apply()} disabled={busy || Object.keys(draft).length === 0}>{t(locale, 'settings.live.apply')}</Button><Button onClick={() => setResetOpen(true)} disabled={busy || current === null}>{t(locale, 'settings.live.reset_open')}</Button></div>
+      {groupLiveSettings(mutable).map(({ group, specs }) => (
+        <fieldset key={group} className="settings-group" data-group={group}>
+          <legend>{t(locale, GROUP_LABEL[group])}</legend>
+          <div className="settings-grid settings-grid-dense">
+            {specs.map((spec) => <SettingControl key={spec.name} spec={spec} value={current?.current[spec.name] ?? null} draft={Object.hasOwn(draft, spec.name) ? draft[spec.name] : undefined} onChange={(value) => edit(spec.name, value)} error={errors[spec.name]} disabled={busy} locale={locale} />)}
+          </div>
+        </fieldset>
+      ))}
+      <Dialog open={resetOpen} title={t(locale, 'settings.live.reset.title')} closeLabel={t(locale, 'common.close')} onClose={() => setResetOpen(false)}><p>{t(locale, 'settings.live.reset.body')}</p><Button onClick={() => { if (current !== null) setDraft(Object.fromEntries(current.schema.filter((spec) => spec.mutable).map((spec) => [spec.name, stagedDefault(spec)]))); setErrors({}); setResetOpen(false); }}>{t(locale, 'settings.live.reset.confirm')}</Button></Dialog>
+    </section>
+  );
 }

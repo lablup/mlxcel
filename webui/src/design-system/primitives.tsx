@@ -192,3 +192,19 @@ export function LoginView(props: { title: string; body: string; tokenLabel: stri
 export function SchemaMismatchView(props: { title: string; body: string; actionLabel: string; onRecover: () => void }): React.JSX.Element {
   return <ErrorBanner tone="error" title={props.title} body={props.body} action={<Button onClick={props.onRecover}><Icon name="schema" />{props.actionLabel}</Button>} />;
 }
+
+/** A labelled on/off checkbox. The label text is its accessible name; the hint and error describe it. */
+export function Toggle(props: { label: string; checked: boolean; onChange: (checked: boolean) => void; disabled?: boolean; hint?: string; error?: string; testId?: string }): React.JSX.Element {
+  const id = useId();
+  const hintId = `${id}-hint`;
+  const errorId = `${id}-error`;
+  const describedBy = [props.hint ? hintId : null, props.error ? errorId : null].filter(Boolean).join(' ') || undefined;
+  return (
+    <label className="toggle" data-disabled={props.disabled || undefined}>
+      <input type="checkbox" checked={props.checked} disabled={props.disabled} aria-invalid={props.error ? 'true' : undefined} aria-describedby={describedBy} data-testid={props.testId} onChange={(event) => props.onChange(event.currentTarget.checked)} />
+      <span>{props.label}</span>
+      {props.hint ? <small id={hintId} data-tone="hint">{props.hint}</small> : null}
+      {props.error ? <small id={errorId} data-tone="error">{props.error}</small> : null}
+    </label>
+  );
+}

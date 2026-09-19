@@ -6,7 +6,7 @@ import catalog from '../../../../tests/fixtures/webui/examples/catalog.page.json
 import { initialSnapshot } from '../../state/reducer';
 import type { BootstrapResponse, CatalogEntry, WebUiSnapshot } from '../../api/types';
 import { validateAgainstSchema } from '../../api/jsonSchema';
-import { ServerSettings } from './server-settings';
+import { ModelSettings, ServerSettings } from './server-settings';
 const mocks = vi.hoisted(() => ({ snapshot: null as WebUiSnapshot | null, actions: { selectModel: vi.fn(), loadModel: vi.fn(), unloadModel: vi.fn(), getModelProps: vi.fn(), getSettings: vi.fn() } }));
 vi.mock('../../state', () => ({ useWebUi: () => mocks.snapshot, useWebUiActions: () => mocks.actions }));
 it('selects an opaque ready model through the sole provider authority without loading it', async () => {
@@ -21,7 +21,7 @@ it('selects an opaque ready model through the sole provider authority without lo
   mocks.actions.getModelProps.mockResolvedValue({ nCtx: 2048, totalSlots: 1, kvCacheMode: 'fp16', geometry: null });
   const host = document.createElement('div'); document.body.append(host); const root = createRoot(host);
   try {
-    await act(async () => root.render(<ServerSettings locale="en" />));
+    await act(async () => root.render(<ModelSettings locale="en" />));
     expect(mocks.actions.getModelProps).not.toHaveBeenCalled();
     const trigger = host.querySelector('[data-testid="settings-model-selector"] [role="combobox"]');
     expect(trigger).not.toBeNull();
@@ -33,6 +33,6 @@ it('selects an opaque ready model through the sole provider authority without lo
     mocks.snapshot = { ...mocks.snapshot, selectedModelId: ready.identity.id };
     await act(async () => root.render(<ServerSettings locale="en" />));
     expect(mocks.actions.getModelProps).toHaveBeenCalledWith(ready.identity.id, expect.any(AbortSignal));
-    expect([...host.querySelectorAll('input')].some((input) => input.value === '2048')).toBe(true);
+    expect(host.querySelector('[data-testid="settings-context-n-ctx"]')?.textContent).toBe('2048');
   } finally { act(() => root.unmount()); host.remove(); }
 });

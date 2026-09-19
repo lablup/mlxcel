@@ -1,3 +1,24 @@
 /* Layout only: control appearance and material tokens remain shared. */
 .settings-sections { min-width: 0; overflow-wrap: anywhere; }
 .settings-sections .ds-field { min-width: 0; }
+/* Up to four columns on a wide screen, one below 15rem; min() keeps a narrow column from overflowing. */
+.settings-grid.settings-grid-dense { grid-template-columns: repeat(auto-fill, minmax(min(15rem, 100%), 1fr)); gap: var(--space-3) var(--space-4); align-items: start; }
+.settings-heading { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.settings-heading h2 { margin: 0; min-width: 0; }
+.settings-note { margin: 0; color: var(--color-muted); }
+.settings-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.settings-group { min-width: 0; margin: 0; padding: var(--space-3) 0 0; border: 0; border-top: 1px solid var(--color-separator); }
+.settings-group > legend { padding: 0 var(--space-2) 0 0; color: var(--color-text); font-weight: 650; }
+.setting-control { display: grid; gap: var(--space-1); min-width: 0; }
+.settings-disclosure { display: grid; gap: var(--space-2); min-width: 0; }
+.settings-disclosure > summary { cursor: pointer; color: var(--color-text); font-weight: 650; }
+.settings-cli { display: block; min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+/* Read-only values: a name and its value on one line where they fit, several per row. */
+.settings-values { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(17rem, 100%), 1fr)); gap: var(--space-1) var(--space-4); margin: 0; }
+.settings-values > div { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0 var(--space-2); min-width: 0; padding: 2px 0; border-bottom: 1px solid var(--color-separator); }
+.settings-values dt { min-width: 0; color: var(--color-muted); font-size: 0.85rem; overflow-wrap: anywhere; }
+.settings-values.settings-keys dt { font-family: ui-monospace, monospace; }
+.settings-values dd { min-width: 0; margin: 0; color: var(--color-text); font-size: 0.9rem; text-align: end; overflow-wrap: anywhere; }
+.settings-reasons { display: grid; gap: var(--space-2); margin: 0; }
+.settings-reasons dt { color: var(--color-text); font-weight: 650; }
+.settings-reasons dd { margin: 0; color: var(--color-muted); font-family: ui-monospace, monospace; font-size: 0.85rem; overflow-wrap: anywhere; }
