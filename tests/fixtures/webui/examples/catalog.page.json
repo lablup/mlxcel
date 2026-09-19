@@ -56,6 +56,7 @@
           "completion"
         ],
         "quantization": "4bit",
+        "dtype": null,
         "format": "safetensors",
         "parameter_count": null,
         "disk_bytes": 12345,

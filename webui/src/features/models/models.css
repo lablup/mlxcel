@@ -1,14 +1,33 @@
 /* Feature layout only; all controls use the shared ui-common token bridge. */
+/* A denser rhythm than .screen-stack's, so a 900 px viewport holds fifteen rows. */
+.screen-stack.models-library {
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-4, 16px);
+}
+.models-library > * {
+  min-width: 0;
+  max-width: 100%;
+}
 .models-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(260px, 320px);
   gap: var(--space-6, 24px);
   align-items: start;
 }
-.models-layout > *,
-.models-library {
+.models-layout:not(:has(.ds-inspector)) {
+  grid-template-columns: minmax(0, 1fr);
+}
+.models-layout > * {
   min-width: 0;
 }
+/* Below 1100 px the inspector is a drawer (useWideInspector matches min-width: 1100px). */
+@media (width < 1100px) {
+  .models-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .models-library .models-toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -18,103 +37,250 @@
 .models-toolbar > .ds-field {
   flex: 1 1 150px;
 }
-.models-library .models-wrap,
-.models-library pre,
-.models-library code,
-.models-library dd,
-.models-library h3,
-.models-library td {
-  white-space: pre-wrap;
+.models-library .models-pending {
+  margin: 0;
+}
+
+/* The list: one line per row. Cells never wrap; the name takes the room the other columns leave
+   and truncates with its full text in `title`. Narrower than its columns, the table scrolls inside
+   its own box (a focusable region then), never the page. */
+.models-library .models-table .data-table__table {
+  min-width: 18rem;
+}
+.models-library .models-table .data-table__cell {
+  padding: 3px 10px;
+  white-space: nowrap;
+  word-break: normal;
+  overflow-wrap: normal;
+}
+.models-library .models-table .data-table__cell--head {
+  text-transform: none;
+  letter-spacing: normal;
+  font-size: 0.8rem;
+}
+.models-library .models-table .data-table__cell--head:not(.data-table__cell--align-right) {
+  text-align: start;
+}
+.models-library .models-table td.models-col-name {
+  width: 100%;
+  max-width: 0;
+}
+.models-library .models-name {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2, 8px);
+  min-width: 0;
+}
+.models-library .models-name > .truncate {
+  flex: 0 1 auto;
+}
+.models-library .models-name > .ds-badge,
+.models-library .models-tasks .ds-badge {
+  flex: none;
+  white-space: nowrap;
+}
+.models-library .models-download-row .models-name {
+  flex-wrap: wrap;
+}
+.models-library .models-row-note {
+  flex-basis: 100%;
+  color: var(--color-error);
+  white-space: normal;
   overflow-wrap: anywhere;
 }
-.models-library .ds-inspector {
-  position: static;
-  width: auto;
+.models-library .models-col-size {
+  font-variant-numeric: tabular-nums;
 }
-.models-library .ds-inspector dd {
-  margin: 4px 0 16px;
+.models-library .models-col-size .ds-progress {
+  min-width: 8rem;
+  white-space: normal;
 }
-.models-library .ds-inspector dt {
-  color: var(--color-muted);
-  font-size: 0.85rem;
+.models-library .models-tasks {
+  display: inline-flex;
+  gap: var(--space-1, 4px);
+}
+.models-library .models-row-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 6px;
+}
+.models-library .models-row-actions .ds-button span {
+  white-space: nowrap;
+}
+/* With a fine pointer, row controls drop from the 32 px toolbar size to 28 px (above the 24 px
+   target minimum), so fifteen rows fit a 900 px viewport whatever the platform's font metrics.
+   Touch keeps the full size. */
+@media (pointer: fine) {
+  .models-library .models-row-actions .button.ds-button.button--inline,
+  .models-library .models-row-actions .button.ds-icon-button.button--inline {
+    min-height: 28px;
+  }
+  .models-library .models-row-actions .button.ds-button.button--inline {
+    padding: 3px 12px;
+  }
+  .models-library .models-row-actions .button.ds-icon-button.button--inline {
+    min-width: 28px;
+    padding: 0 6px;
+  }
+  .models-library .models-table .data-table__cell {
+    padding-block: 2px;
+  }
 }
 .models-library .models-selected {
   background: var(--color-selection);
 }
-.models-library .data-table__cell {
-  vertical-align: top;
+/* Columns give way as the list narrows, and the inspector keeps everything they held: tasks
+   first, then quantization and size, then the State column, whose badge moves under the name.
+   A download row has no inspector, so its progress moves under its name with the Size column.
+   The fallbacks are display: none until then, so one progress bar and one state are ever exposed. */
+.models-library .models-list {
+  container-type: inline-size;
 }
-.models-library .data-table__cell:first-child {
-  min-width: 160px;
-  max-width: 320px;
+.models-library .models-name-state,
+.models-library .models-name-progress {
+  display: none;
+}
+@container (max-width: 60rem) {
+  .models-library .models-col-tasks {
+    display: none;
+  }
+}
+@container (max-width: 44rem) {
+  .models-library .models-col-quantization,
+  .models-library .models-col-size {
+    display: none;
+  }
+  .models-library .models-name-progress {
+    display: block;
+    flex-basis: 100%;
+    min-width: 0;
+    white-space: normal;
+  }
+}
+@container (max-width: 32rem) {
+  .models-library .models-col-state {
+    display: none;
+  }
+  .models-library .models-name {
+    flex-wrap: wrap;
+    row-gap: 2px;
+  }
+  .models-library .models-name > .truncate {
+    flex-basis: 100%;
+  }
+  .models-library .models-name-state {
+    display: block;
+  }
+  .models-library .models-table .data-table__cell {
+    padding-block: 6px;
+  }
+  /* Wide enough for Load, Inspect and Delete on one line; a ready row's two text buttons wrap. */
+  .models-library .models-row-actions {
+    flex-wrap: wrap;
+    min-width: 11rem;
+  }
 }
 .models-library .models-pagination {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 12px;
-  padding-block: 16px;
-}
-.models-operations .ds-list li {
-  display: block;
-}
-.models-operations code {
-  font-size: 0.8rem;
-}
-.models-library summary {
-  cursor: pointer;
   padding-block: 12px;
 }
-@media (max-width: 1100px) {
-  .models-layout {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
 .models-library .ds-common-table {
   max-width: 100%;
   overflow-x: auto;
 }
-.models-library .data-table__cell .ds-button span {
-  white-space: normal;
-  overflow-wrap: anywhere;
+.models-library .ds-common-table[role="region"]:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
 }
 
-/* A grid item's automatic minimum must not let an opaque operation ID widen
-   the entire screen. Wrap identifiers; do not hide viewport overflow. */
-.models-library {
-  grid-template-columns: minmax(0, 1fr);
+/* Inspector: pane and drawer share the body. */
+.models-library .ds-inspector {
+  position: static;
+  width: auto;
 }
-.models-library > *,
-.models-operations,
-.models-operations .ds-list,
-.models-operations li,
-.models-operations li > div {
+.models-inspector {
+  display: grid;
+  gap: var(--space-3, 12px);
   min-width: 0;
-  max-width: 100%;
 }
-.models-operations strong,
-.models-operations p {
+.models-inspector h3,
+.models-inspector h4,
+.models-inspector h5 {
+  margin: 0;
   overflow-wrap: anywhere;
 }
-.models-library .button-row {
+.models-inspector h4 {
+  margin-top: var(--space-2, 8px);
+  font-size: 0.95rem;
+}
+.models-inspector h5 {
+  margin-top: var(--space-2, 8px);
+  font-size: 0.9rem;
+}
+.models-inspector .models-overview {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 12px;
+  margin: 0;
+}
+.models-inspector .models-overview dt {
+  color: var(--color-muted);
+  font-size: 0.85rem;
+}
+.models-inspector .models-overview dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.models-inspector .models-capabilities {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1, 4px);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.models-inspector .models-details summary {
+  cursor: pointer;
+  min-height: 24px;
+  padding-block: 8px;
+  font-weight: 650;
+}
+.models-inspector .models-details-body {
+  display: grid;
+  gap: var(--space-2, 8px);
+  min-width: 0;
+}
+.models-inspector .models-details-body p,
+.models-inspector .models-details-body ul {
+  margin: 0;
+}
+.models-library .models-wrap,
+.models-library pre,
+.models-library code,
+.drawer .models-wrap,
+.drawer .models-inspector pre,
+.drawer .models-inspector code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.models-library .button-row,
+.drawer .models-inspector .button-row {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
 }
-.models-layout:not(:has(.ds-inspector)) {
-  grid-template-columns: minmax(0, 1fr);
-}
-
-.models-library [data-testid="models-pending-profile"] a {
+.models-inspector [data-testid="models-pending-profile"] a {
   display: inline-block;
   min-height: 24px;
   padding-block: 2px;
 }
-
-.models-library .models-row-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-1, 4px);
-  margin-top: var(--space-1, 4px);
+.models-roots {
+  margin: 0;
+  padding-left: var(--space-5, 20px);
+  overflow-wrap: anywhere;
 }

@@ -1,5 +1,5 @@
 // Copyright 2025-2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
-import React, { forwardRef, useId } from 'react';
+import React, { forwardRef, useCallback, useId, useRef } from 'react';
 import { Button as CommonButton, type ButtonProps as CommonButtonProps } from '@lablup/ui-common/components/Button';
 import { StatusTag, type StatusKind } from '@lablup/ui-common/components/StatusTag';
 import { ProgressBar as CommonProgressBar } from '@lablup/ui-common/components/ProgressBar';
@@ -19,8 +19,10 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
   return <CommonButton {...supported} ref={ref} inline variant={tone} loading={busy} aria-busy={busy || supported['aria-busy']} ariaLabel={label} className={`ds-button ds-button-${tone} ${className}`.trim()}><span>{children}</span></CommonButton>;
 });
 
-export const IconButton = forwardRef<HTMLButtonElement, Omit<ButtonProps, 'children' | 'icon' | 'iconOnly' | 'tone' | 'aria-label'> & { label: string; icon: IconName }>(function IconButton({ label, icon, busy = false, className = '', ...supported }, ref) {
-  return <CommonButton {...supported} ref={ref} inline iconOnly icon={<Icon name={icon} />} ariaLabel={label} title={supported.title ?? label} variant="secondary" loading={busy} aria-busy={busy || supported['aria-busy']} className={`ds-icon-button ${className}`.trim()} />;
+// `danger` keeps the outlined control and draws the glyph in the error color, so a destructive
+// action in a dense row reads as one without a filled red button on every line.
+export const IconButton = forwardRef<HTMLButtonElement, Omit<ButtonProps, 'children' | 'icon' | 'iconOnly' | 'tone' | 'aria-label'> & { label: string; icon: IconName; tone?: 'secondary' | 'danger' }>(function IconButton({ label, icon, tone = 'secondary', busy = false, className = '', ...supported }, ref) {
+  return <CommonButton {...supported} ref={ref} inline iconOnly icon={<Icon name={icon} />} ariaLabel={label} title={supported.title ?? label} variant="secondary" loading={busy} aria-busy={busy || supported['aria-busy']} className={`ds-icon-button ${tone === 'danger' ? 'ds-icon-button-danger ' : ''}${className}`.trim()} />;
 });
 
 const lifecycleKinds: Record<LifecycleState, StatusKind> = {
@@ -85,13 +87,50 @@ export type DataTableAdapterProps<T> = Omit<DataTableProps<T>, 'ariaLabel' | 'on
    * Whole-row pointer activation. A click anywhere in a body row that is not on another interactive element, and that did
    * not end a text selection, focuses and clicks the row's `ROW_PRIMARY_CLASS` control, so pointer and keyboard run the same
    * handler. Rows keep their native `row` role and gain no tab stop; the primary control stays the keyboard and
-   * screen-reader target, and the row draws a focus outline while that control has `:focus-visible`. Rows without an
-   * enabled primary control, and the loading and empty rows, stay inert.
+   * screen-reader target, beside any other controls the row holds, and the row draws a focus outline while any of them has
+   * `:focus-visible`. Rows without an enabled primary control, and the loading and empty rows, stay inert.
    */
   activateRowPrimary?: boolean;
+  /**
+   * The table's own horizontal scroll box becomes a named, focusable region while its content is wider than it is, so
+   * a keyboard user can scroll it even when no row holds a control (the loading and empty states). Axe
+   * scrollable-region-focusable fails without it. Not scrollable, the box gets no role and no tab stop.
+   */
+  overflowRegionLabel?: string;
 };
-export function DataTable<T>({ activateRowPrimary = false, ...props }: DataTableAdapterProps<T>): React.JSX.Element {
+export function DataTable<T>({ activateRowPrimary = false, overflowRegionLabel, ...props }: DataTableAdapterProps<T>): React.JSX.Element {
+  const overflowRef = useOverflowRegion(overflowRegionLabel);
   const table = <CommonDataTable {...props} className={`ds-common-table ${props.className ?? ''}`.trim()} />;
-  return activateRowPrimary ? <div className="ds-row-activation" onClick={delegateRowClick}>{table}</div> : table;
+  if (!activateRowPrimary && overflowRegionLabel === undefined) return table;
+  return <div className={activateRowPrimary ? 'ds-row-activation' : 'ds-table-host'} onClick={activateRowPrimary ? delegateRowClick : undefined} ref={overflowRef}>{table}</div>;
+}
+
+function useOverflowRegion(label: string | undefined): (host: HTMLDivElement | null) => void {
+  const disconnect = useRef<(() => void) | null>(null);
+  return useCallback((host: HTMLDivElement | null) => {
+    disconnect.current?.();
+    disconnect.current = null;
+    const region = label === undefined ? null : host?.querySelector<HTMLElement>('.data-table');
+    if (!region || label === undefined) return;
+    const update = (): void => {
+      if (region.scrollWidth > region.clientWidth + 1) {
+        region.tabIndex = 0;
+        region.setAttribute('role', 'region');
+        region.setAttribute('aria-label', label);
+      } else {
+        region.removeAttribute('tabindex');
+        region.removeAttribute('role');
+        region.removeAttribute('aria-label');
+      }
+    };
+    update();
+    if (typeof ResizeObserver === 'undefined') return;
+    // The box resizes with the viewport, the table with its rows and their content.
+    const observer = new ResizeObserver(update);
+    observer.observe(region);
+    const table = region.querySelector('table');
+    if (table) observer.observe(table);
+    disconnect.current = () => observer.disconnect();
+  }, [label]);
 }
 export type { DataTableColumn, DataTablePersistedState, SortDirection } from '@lablup/ui-common/components/DataTable';

@@ -2701,6 +2701,7 @@
           "input_tasks",
           "output_tasks",
           "quantization",
+          "dtype",
           "format",
           "parameter_count",
           "disk_bytes",
@@ -2749,6 +2750,15 @@
               "null"
             ],
             "maxLength": 128
+          },
+          "dtype": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 32,
+            "pattern": "^[a-z0-9_]+$",
+            "description": "Declared weight dtype from config.json torch_dtype (or dtype), normalized to a short lowercase name such as bf16 or fp16; null when absent, auto, or not a recognized tensor dtype. Quantized checkpoints report the dtype of their unquantized tensors."
           },
           "format": {
             "type": [

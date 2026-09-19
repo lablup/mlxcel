@@ -139,7 +139,8 @@ function AuthenticatedSurface(props: ProductConnectionSurfaceProps): React.JSX.E
   return (
     <div className="screen-stack">
       <PageHeader className="connection-prompt" title={props.title} titleTestId={props.titleTestId} description={t(props.locale, 'connection.authenticated.body')} descriptionTestId={testId('connection.authenticated.body')} />
-      <ErrorBanner tone="info" title={t(props.locale, 'connection.authenticated.title')} body={connectedDetail(props.locale, props.snapshot)} testId={testId('connection.authenticated.detail')} />
+      {/* No test id: the sidebar's Connection details carries the one `connection-authenticated-detail`. */}
+      <ErrorBanner tone="info" title={t(props.locale, 'connection.authenticated.title')} body={connectedDetail(props.locale, props.snapshot)} />
       {retryable ? <ErrorBanner title={t(props.locale, 'connection.error.title')} body={connectionErrorBody(props.locale, props.snapshot.connection)} action={<Button onClick={props.onRetry}>{t(props.locale, 'common.retry')}</Button>} testId={testId('connection.error.title')} /> : null}
     </div>
   );

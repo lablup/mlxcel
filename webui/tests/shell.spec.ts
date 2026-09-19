@@ -216,7 +216,9 @@ test('the command palette finds a model by name substring and opens its inspecto
   await dialog.getByTestId('command-model').click();
   await expect(dialog).toBeHidden();
   await expect(page).toHaveURL(/#models$/);
-  await expect(page.getByRole('complementary', { name: 'Model details' })).toContainText('alpha');
+  // Below 1100 px the inspector is a drawer, opened on the palette's request (#1918).
+  await expect(page.getByRole('dialog', { name: 'Model details' })).toContainText('alpha');
+  await expect(page.getByRole('complementary', { name: 'Model details' })).toHaveCount(0);
   expect(mock.calls.map((call) => call.url).join('\n')).not.toContain('/ui-api/v1/model-actions');
   expect(mock.calls.filter((call) => call.method !== 'GET')).toEqual([]);
 });

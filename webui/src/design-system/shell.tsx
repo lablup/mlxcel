@@ -30,6 +30,8 @@ export interface ShellConnection {
   readonly label: string;
   readonly state: ConnectionPhase;
   readonly details: { readonly instance: string; readonly sequence: string } | null;
+  /** The provider summary (backend, build, phase, catalog and operation counts, snapshot); shown only inside the disclosure. */
+  readonly summary?: string | null;
 }
 
 /** Chips shown before the rest collapse into a "+n" chip that opens the command palette. */
@@ -158,7 +160,7 @@ export function AppShell(props: AppShellProps): React.JSX.Element {
   };
   return (
     <div className="app-shell">
-      <Sidebar locale={props.locale} route={props.route} onRouteChange={handleRoute} onKeyDown={handleSidebarKey} ref={sidebarRef} className="app-sidebar desktop-sidebar material-glass" connection={props.connection} />
+      <Sidebar locale={props.locale} route={props.route} onRouteChange={handleRoute} onKeyDown={handleSidebarKey} ref={sidebarRef} className="app-sidebar desktop-sidebar material-glass" connection={props.connection} primary />
       <Drawer open={navOpen} title={t(props.locale, 'nav.primary')} onClose={() => setNavOpen(false)} closeLabel={t(props.locale, 'common.close')} testId="mobile-nav-sheet">
         <Sidebar locale={props.locale} route={props.route} onRouteChange={handleRoute} onKeyDown={handleSidebarKey} className="app-sidebar sheet-sidebar" connection={props.connection} />
       </Drawer>
@@ -222,7 +224,8 @@ function revealFocusedChip(event: React.FocusEvent<HTMLDivElement>): void {
   if (target instanceof HTMLElement && typeof target.scrollIntoView === 'function' && target.matches(':focus-visible')) target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
 }
 
-const Sidebar = React.forwardRef<HTMLElement, { locale: Locale; route: RouteId; onRouteChange: (route: RouteId) => void; onKeyDown: (event: React.KeyboardEvent) => void; className: string; connection: ShellConnection }>((props, ref) => (
+// `primary` marks the desktop copy; the off-canvas sheet renders a second one, and a test id must name one element.
+const Sidebar = React.forwardRef<HTMLElement, { locale: Locale; route: RouteId; onRouteChange: (route: RouteId) => void; onKeyDown: (event: React.KeyboardEvent) => void; className: string; connection: ShellConnection; primary?: boolean }>((props, ref) => (
   <aside className={props.className} aria-label={t(props.locale, 'nav.primary')} onKeyDown={props.onKeyDown} ref={ref} tabIndex={-1}>
     <a className="brand-mark" href="#models" aria-label={t(props.locale, 'nav.home')} onClick={(event) => { event.preventDefault(); props.onRouteChange('models'); }}><span className="brand-symbol" aria-hidden="true">mx</span><span className="brand-name">mlxcel</span></a>
     <nav className="app-nav">
@@ -242,6 +245,7 @@ const Sidebar = React.forwardRef<HTMLElement, { locale: Locale; route: RouteId; 
       {props.connection.details ? (
         <details className="connection-details" data-testid={testId('connection.footer.details')}>
           <summary>{t(props.locale, 'connection.footer.details')}</summary>
+          {props.connection.summary ? <p data-testid={props.primary ? testId('connection.authenticated.detail') : undefined}>{props.connection.summary}</p> : null}
           <p data-testid={testId('connection.footer.instance')}>{t(props.locale, 'connection.footer.instance', { id: props.connection.details.instance })}</p>
           <p data-testid={testId('connection.footer.sequence')}>{t(props.locale, 'connection.footer.sequence', { sequence: props.connection.details.sequence })}</p>
         </details>
