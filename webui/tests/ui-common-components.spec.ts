@@ -1,7 +1,8 @@
 // Copyright 2025-2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
+import { AxeBuilder } from '@axe-core/playwright';
 import { expect, test, type Page } from '@playwright/test';
 import { expectAxeClean, expectSafeLayout } from './browser-assertions';
-import { bootGallery, bootProduct, installMockApi, loginWithMockApi, productVariants, selectGalleryTab, variants } from './browser-fixtures';
+import { bootGallery, bootProduct, installMockApi, loginWithMockApi, productVariants, selectGalleryTab, submitSessionKey, variants } from './browser-fixtures';
 import { horizontalOverflow, runtimeForFirstCatalogEntry, shownTooltips, text } from './ui-common-helpers';
 
 // Each case asserts the product behavior first and the shared ui-common DOM
@@ -130,6 +131,31 @@ test.describe('shared StatCard', () => {
       expect(await horizontalOverflow(page)).toBeLessThanOrEqual(1);
       await expectAxeClean(page);
       await expect(page.getByTestId('runtime-summary').locator('.activity-metric.stat-card')).toHaveCount(4);
+    });
+  }
+});
+
+test.describe('shared Skeleton', () => {
+  for (const width of [390, 1440]) {
+    test(`Models shows one visible, localized waiting status while the catalog is pending at ${width}`, async ({ page }) => {
+      await installMockApi(page, 'slow-catalog');
+      await bootProduct(page, { ...productVariants[0], width, appearance: { ...productVariants[0].appearance, locale: 'en' } });
+      await submitSessionKey(page, 'good-key');
+      const table = page.getByTestId('models-table');
+      const status = table.getByRole('status');
+      await expect(status).toHaveCount(1);
+      await expect(status).toHaveText(text('models.library.waiting'));
+      await expect(status.getByText(text('models.library.waiting'), { exact: true })).toBeVisible();
+      await expect(page.getByText('Loading', { exact: true })).toHaveCount(0);
+      expect(await horizontalOverflow(page)).toBeLessThanOrEqual(1);
+      // Pre-existing on main and independent of the loading content: at 390px the
+      // loading/empty table scrolls horizontally with nothing focusable inside. Tolerate
+      // exactly that node so the waiting state cannot add anything else.
+      const results = await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa']).analyze();
+      const known = (id: string, html: string): boolean => width === 390 && id === 'scrollable-region-focusable' && html.startsWith('<div class="data-table ds-common-table" data-testid="models-table">');
+      expect(results.violations.map((violation) => ({ id: violation.id, nodes: violation.nodes.map((node) => node.html).filter((html) => !known(violation.id, html)) })).filter((violation) => violation.nodes.length > 0)).toEqual([]);
+      await expectSafeLayout(page);
+      await expect(status.locator('.skeleton').first()).toBeVisible();
     });
   }
 });
