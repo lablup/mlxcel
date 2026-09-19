@@ -94,10 +94,13 @@ describe('Models workflows', () => {
           finish = resolve;
         }),
     );
+    state = { ...state, selectedModelId: null };
     render();
     await act(async () => host.querySelector<HTMLButtonElement>('[aria-label^="Inspect"]')?.click());
     expect(actions.selectModel).toHaveBeenCalledWith(model().identity.id);
     expect(actions.loadModel).not.toHaveBeenCalled();
+    state = { ...state, selectedModelId: model().identity.id };
+    render();
     await click('models-load');
     await click('models-load');
     expect(actions.loadModel).toHaveBeenCalledTimes(1);
@@ -395,5 +398,49 @@ describe('reviewed destructive identity fences', () => {
     expect(button('models-confirm-submit').disabled).toBe(true);
     await click('models-confirm-submit');
     expect(actions.loadModel).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('library row activation', () => {
+  const entries = ['alpha', 'bravo', 'charlie'].map((name, index) => ({
+    ...model(),
+    identity: { ...model().identity, id: `mdl_row_${index}`, display_name: `row-${name}` },
+  }));
+  const rowCell = (row: number, column: number): HTMLElement =>
+    requireValue(host.querySelectorAll('[data-testid="models-table"] tbody tr')[row]?.querySelectorAll<HTMLElement>('td')[column] ?? null);
+
+  it('opens the inspector from a non-name cell without loading, exactly once per click', async () => {
+    state = { ...state, catalog: entries, selectedModelId: null };
+    render();
+    await act(async () => rowCell(1, 1).click());
+    expect(actions.selectModel.mock.calls).toEqual([[entries[1].identity.id]]);
+    await act(async () => rowCell(2, 2).click());
+    expect(actions.selectModel.mock.calls).toEqual([[entries[1].identity.id], [entries[2].identity.id]]);
+    expect(actions.loadModel).not.toHaveBeenCalled();
+  });
+
+  it('keeps the name button a single activation, including for a busy entry', async () => {
+    const busy = { ...entries[0], lifecycle: { ...entries[0].lifecycle, state: 'loading' as const, busy: true } };
+    state = { ...state, catalog: [busy, entries[1]], selectedModelId: null };
+    render();
+    const name = requireValue(host.querySelector<HTMLButtonElement>(`[aria-label="Inspect ${busy.identity.display_name}"]`));
+    expect(name.disabled).toBe(false);
+    await act(async () => name.click());
+    expect(actions.selectModel.mock.calls).toEqual([[busy.identity.id]]);
+    await act(async () => rowCell(0, 3).click());
+    expect(actions.selectModel.mock.calls).toEqual([[busy.identity.id], [busy.identity.id]]);
+    expect(actions.loadModel).not.toHaveBeenCalled();
+  });
+
+  it('treats re-selecting the already-selected row as a no-op, but still opens a different row', async () => {
+    state = { ...state, catalog: entries, selectedModelId: entries[0].identity.id };
+    render();
+    await act(async () => rowCell(0, 1).click());
+    expect(actions.selectModel).not.toHaveBeenCalled();
+    const name = requireValue(host.querySelector<HTMLButtonElement>(`[aria-label="Inspect ${entries[0].identity.display_name}"]`));
+    await act(async () => name.click());
+    expect(actions.selectModel).not.toHaveBeenCalled();
+    await act(async () => rowCell(1, 1).click());
+    expect(actions.selectModel.mock.calls).toEqual([[entries[1].identity.id]]);
   });
 });
