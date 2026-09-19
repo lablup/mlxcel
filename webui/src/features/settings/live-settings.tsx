@@ -80,17 +80,19 @@ export function LiveSettings({ modelId, revision, locale }: { modelId: string; r
   const mutable = current?.schema.filter((spec) => spec.mutable) ?? [];
   return (
     <section className="screen-stack settings-live" aria-labelledby={titleId}>
-      <div className="settings-heading"><h2 id={titleId}>{t(locale, 'settings.live.title')}</h2><HelpTip label={t(locale, 'settings.help.live')} content={t(locale, 'settings.live.body')} /></div>
+      <div className="settings-heading"><h2 id={titleId}>{t(locale, 'settings.live.title')}</h2><HelpTip label={t(locale, 'settings.help.live')} content={t(locale, 'settings.live.body')} /><div className="control-row settings-actions"><Button onClick={() => void refresh()} disabled={busy}>{t(locale, 'settings.live.refresh')}</Button><Button tone="primary" onClick={() => void apply()} disabled={busy || Object.keys(draft).length === 0}>{t(locale, 'settings.live.apply')}</Button><Button onClick={() => setResetOpen(true)} disabled={busy || current === null}>{t(locale, 'settings.live.reset_open')}</Button></div></div>
       {message ? <ErrorBanner tone="warning" title={t(locale, 'settings.live.result_title')} body={message} testId="settings-live-result" /> : null}
-      <div className="control-row settings-actions"><Button onClick={() => void refresh()} disabled={busy}>{t(locale, 'settings.live.refresh')}</Button><Button tone="primary" onClick={() => void apply()} disabled={busy || Object.keys(draft).length === 0}>{t(locale, 'settings.live.apply')}</Button><Button onClick={() => setResetOpen(true)} disabled={busy || current === null}>{t(locale, 'settings.live.reset_open')}</Button></div>
-      {groupLiveSettings(mutable).map(({ group, specs }) => (
-        <fieldset key={group} className="settings-group" data-group={group}>
-          <legend>{t(locale, GROUP_LABEL[group])}</legend>
-          <div className="settings-grid settings-grid-dense">
-            {specs.map((spec) => <SettingControl key={spec.name} spec={spec} value={current?.current[spec.name] ?? null} draft={Object.hasOwn(draft, spec.name) ? draft[spec.name] : undefined} onChange={(value) => edit(spec.name, value)} error={errors[spec.name]} disabled={busy} locale={locale} />)}
-          </div>
-        </fieldset>
-      ))}
+      <div className="settings-live-groups">
+        {groupLiveSettings(mutable).map(({ group, specs }) => (
+          // Groups of one or two share a row where there is room for both.
+          <fieldset key={group} className="settings-group" data-group={group} data-size={specs.length <= 2 ? 'small' : 'large'}>
+            <legend>{t(locale, GROUP_LABEL[group])}</legend>
+            <div className="settings-grid settings-grid-dense">
+              {specs.map((spec) => <SettingControl key={spec.name} spec={spec} value={current?.current[spec.name] ?? null} draft={Object.hasOwn(draft, spec.name) ? draft[spec.name] : undefined} onChange={(value) => edit(spec.name, value)} error={errors[spec.name]} disabled={busy} locale={locale} />)}
+            </div>
+          </fieldset>
+        ))}
+      </div>
       <Dialog open={resetOpen} title={t(locale, 'settings.live.reset.title')} closeLabel={t(locale, 'common.close')} onClose={() => setResetOpen(false)}><p>{t(locale, 'settings.live.reset.body')}</p><Button onClick={() => { if (current !== null) setDraft(Object.fromEntries(current.schema.filter((spec) => spec.mutable).map((spec) => [spec.name, stagedDefault(spec)]))); setErrors({}); setResetOpen(false); }}>{t(locale, 'settings.live.reset.confirm')}</Button></Dialog>
     </section>
   );

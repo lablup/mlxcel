@@ -142,5 +142,5 @@ test('Settings renders catalog copy in Korean', async ({ page }) => {
   const profile = localizedPair('ko', 'settings.profile.title');
   await expect(page.getByRole('heading', { name: profile.shown, exact: true })).toBeVisible();
   await expect(page.getByText(profile.hidden, { exact: true })).toHaveCount(0);
-  await expectSafeLayout(page);
+  await expectAxeClean(page); await expectSafeLayout(page);
 });

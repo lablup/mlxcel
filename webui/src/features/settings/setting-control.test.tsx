@@ -111,7 +111,9 @@ describe('SettingControl maps each schema kind to its control', () => {
     expect(settingLabel('ko', 'default_temperature').label).toBe('온도');
     expect(settingLabel('en', 'some_future_knob')).toEqual({ label: 'some_future_knob', key: null });
     renderControl(spec('default_temperature', 'float'), 1);
-    expect(host.querySelector('label span')?.textContent).toBe('Temperature');
+    const label = host.querySelector<HTMLLabelElement>('.setting-label-row label');
+    expect(label?.textContent).toBe('Temperature');
+    expect(host.querySelector('input')?.id).toBe(label?.htmlFor);
     expect(host.textContent).toContain('default_temperature');
   });
 });

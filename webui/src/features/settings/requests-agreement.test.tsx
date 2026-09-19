@@ -35,7 +35,7 @@ function ChatHint(): React.JSX.Element {
   generation = useGenerationDefaults();
   return <TurnParameters defaults={generation.defaults} draft={{}} onChange={() => undefined} locale="en" />;
 }
-const hintFor = (selector: string): string => host.querySelector(`${selector}`)?.closest('label')?.querySelector('small[data-tone="hint"]')?.textContent ?? '';
+const hintFor = (selector: string): string => host.querySelector(`${selector}`)?.closest('.ds-field')?.querySelector('small[data-tone="hint"]')?.textContent ?? '';
 const settingsHint = (field: string): string => hintFor(`[data-testid="settings-request-${field}"]`);
 const chatHint = (field: string): string => [...host.querySelectorAll('.chat-parameters label')].find((label) => label.querySelector('span')?.textContent === `Next turn ${field}`)?.querySelector('small')?.textContent ?? '';
 

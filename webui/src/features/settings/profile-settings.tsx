@@ -37,6 +37,7 @@ export function ProfileSettings({ model, locale, single }: { model: CatalogEntry
       </div>
       {message ? <ErrorBanner tone="info" title={t(locale, 'settings.profile.result_title')} body={message} testId="settings-profile-result" /> : null}
       <div className="control-row settings-actions"><Button tone="primary" onClick={() => run(() => store.save(validateLoadProfile(draft), scope))}>{t(locale, 'settings.profile.save')}</Button><Button onClick={() => { setDraft(scopedProfile); setMessage(''); }}>{t(locale, 'settings.profile.discard')}</Button><Button onClick={() => setResetOpen(true)}>{t(locale, 'settings.profile.reset_open')}</Button></div>
+      <div className="settings-disclosures">
       <details className="settings-disclosure" onToggle={() => setCopy('idle')}>
         <summary>{t(locale, 'settings.profile.show_cli')}</summary>
         <p>{t(locale, 'settings.profile.saved_pending')}: <code>{JSON.stringify(scopedProfile)}</code></p>
@@ -49,6 +50,7 @@ export function ProfileSettings({ model, locale, single }: { model: CatalogEntry
         <label className="ds-field"><span>{t(locale, 'settings.profile.transfer.label')}</span><textarea value={transfer} onChange={(event) => setTransfer(event.currentTarget.value)} maxLength={65536} rows={6} /></label>
         <div className="control-row"><Button onClick={() => setTransfer(store.exportJson())}>{t(locale, 'settings.profile.transfer.export')}</Button><Button onClick={() => run(() => store.importJson(transfer))}>{t(locale, 'settings.profile.transfer.import')}</Button></div>
       </details>
+      </div>
       <Dialog open={resetOpen} title={t(locale, 'settings.profile.reset.title')} closeLabel={t(locale, 'common.close')} onClose={() => setResetOpen(false)}><p>{t(locale, 'settings.profile.reset.body')}</p><Button onClick={() => { run(() => store.reset(scope)); setResetOpen(false); }}>{t(locale, 'settings.profile.reset.confirm')}</Button></Dialog>
     </section>
   );

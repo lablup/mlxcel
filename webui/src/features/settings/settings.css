@@ -3,13 +3,29 @@
 .settings-sections .ds-field { min-width: 0; }
 /* Up to four columns on a wide screen, one below 15rem; min() keeps a narrow column from overflowing. */
 .settings-grid.settings-grid-dense { grid-template-columns: repeat(auto-fill, minmax(min(15rem, 100%), 1fr)); gap: var(--space-3) var(--space-4); align-items: start; }
-.settings-heading { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
-.settings-heading h2 { margin: 0; min-width: 0; }
+.settings-heading { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; }
+.settings-heading > .settings-actions { margin-inline-start: auto; }
+/* Grid items keep their margins; the stack gap alone spaces the headings. */
+.settings-sections h2, .settings-heading h2 { margin: 0; min-width: 0; }
+.settings-sections p { margin: 0; }
 .settings-note { margin: 0; color: var(--color-muted); }
 .settings-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
 .settings-group { min-width: 0; margin: 0; padding: var(--space-3) 0 0; border: 0; border-top: 1px solid var(--color-separator); }
 .settings-group > legend { padding: 0 var(--space-2) 0 0; color: var(--color-text); font-weight: 650; }
 .setting-control { display: grid; gap: var(--space-1); min-width: 0; }
+.settings-live-groups { display: flex; flex-wrap: wrap; gap: var(--space-4) var(--space-5); min-width: 0; }
+.settings-live-groups > .settings-group { flex: 1 1 100%; }
+.settings-live-groups > .settings-group[data-size="small"] { flex: 1 1 30rem; }
+.settings-disclosures { display: flex; flex-wrap: wrap; align-items: start; gap: var(--space-3) var(--space-5); min-width: 0; }
+.settings-disclosures > .settings-disclosure { flex: 1 1 20rem; }
+/* A field whose label row also holds a toggle: the label keeps the Field typography. */
+.setting-label-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0 var(--space-2); min-width: 0; }
+.setting-label-row > label { min-width: 0; color: var(--color-text); font-size: 0.9rem; font-weight: 650; overflow-wrap: anywhere; }
+.setting-label-row .toggle { flex-wrap: nowrap; gap: var(--space-1); min-height: 24px; font-size: 0.85rem; font-weight: 400; }
+/* .ds-field sizes every input as a text box; the label-row checkbox keeps the Toggle size. */
+.setting-label-row .toggle input { flex: none; width: 24px; height: 24px; min-width: 0; min-height: 0; margin: 0; padding: 0; }
+/* Only the disabled control dims: its label and hint stay readable (and keep AA contrast) beside the enabled unset toggle. */
+.setting-field[data-inner-disabled="true"] > :is(input, textarea) { opacity: 0.56; cursor: not-allowed; }
 .settings-disclosure { display: grid; gap: var(--space-2); min-width: 0; }
 .settings-disclosure > summary { cursor: pointer; color: var(--color-text); font-weight: 650; }
 .settings-cli { display: block; min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }

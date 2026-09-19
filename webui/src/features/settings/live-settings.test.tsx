@@ -12,7 +12,7 @@ afterEach(() => { act(() => root.unmount()); host.remove(); });
 async function render(model = 'model-a'): Promise<void> { await act(async () => { root.render(<LiveSettings modelId={model} locale="en" />); }); }
 async function button(label: string): Promise<void> { const element = [...host.querySelectorAll('button')].find((item) => item.textContent === label); expect(element).toBeDefined(); await act(async () => element?.click()); }
 // Controls are labelled from the catalog; the raw schema key is secondary text.
-const input = (label: string): HTMLInputElement | null | undefined => [...host.querySelectorAll('label')].find((item) => item.querySelector('span')?.textContent === label)?.querySelector('input');
+const input = (label: string): HTMLInputElement | null => { const element = [...host.querySelectorAll('label')].find((item) => item.textContent === label); return element ? host.querySelector<HTMLInputElement>(`[id="${element.htmlFor}"]`) : null; };
 async function edit(name: string, value: string): Promise<void> { const field = input(name); expect(field).toBeTruthy(); await act(async () => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(field, value); field?.dispatchEvent(new Event('input', { bubbles: true })); }); }
 describe('live settings partial/stale/reset behavior', () => {
   it('reports disabled endpoint and never submits a mutation', async () => { actions.getSettings.mockRejectedValue(new Error('404')); await render(); expect(host.textContent).toContain('may have disabled --settings'); expect(actions.patchSettings).not.toHaveBeenCalled(); });
