@@ -1,7 +1,7 @@
 // Copyright 2025-2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 import { expect, test } from '@playwright/test';
-import { expectSafeLayout } from './browser-assertions';
-import { bootGallery, variants } from './browser-fixtures';
+import { expectAxeClean, expectSafeLayout } from './browser-assertions';
+import { bootGallery, selectGalleryTab, variants } from './browser-fixtures';
 import { shownTooltips, text } from './ui-common-helpers';
 
 // Each case asserts the product behavior first and the shared ui-common DOM
@@ -62,5 +62,27 @@ test.describe('shared ErrorState', () => {
     expect(layout.left).toBeLessThan(32);
     expect(['start', 'left']).toContain(layout.align);
     await expect(banner.locator('.error-state')).toHaveCount(1);
+  });
+});
+
+test.describe('shared BaseCard', () => {
+  test('gallery cards keep article semantics, no hover lift, and a named keyboard-focusable data region', async ({ page }) => {
+    await bootGallery(page, variants[0]);
+    const articles = page.getByRole('article');
+    await expect(articles).toHaveCount(2);
+    for (const heading of [text('gallery.controls.title'), text('gallery.overlays.title')]) await expect(articles.filter({ has: page.getByRole('heading', { name: heading, level: 2 }) })).toHaveCount(1);
+    const card = page.locator('.surface-card').first();
+    await card.hover();
+    await expect(card).toHaveCSS('transform', 'none');
+    await selectGalleryTab(page, 'data');
+    const dataCard = page.locator('.surface-card.table-card');
+    await expect(dataCard).toHaveAccessibleName(text('gallery.sample.caption'));
+    await expect(dataCard).toHaveAttribute('tabindex', '0');
+    await page.getByRole('tab', { name: text('gallery.tab.data') }).focus();
+    for (let step = 0; step < 6 && !(await dataCard.evaluate((element) => element === document.activeElement)); step += 1) await page.keyboard.press('Tab');
+    await expect(dataCard).toBeFocused();
+    expect(await dataCard.evaluate((element) => window.getComputedStyle(element).outlineStyle)).not.toBe('none');
+    await expectAxeClean(page);
+    await expect(page.locator('.surface-card.base-card')).toHaveCount(1);
   });
 });
