@@ -134,6 +134,14 @@ describe('edit turn confirmation', () => {
     await confirm('chat-edit-dialog');
     expect(host.querySelectorAll('article.chat-turn')).toHaveLength(2); expect(composer().value).toBe('');
   });
+  it('drops a stale answer when a different conversation now holds a turn at the same index', async () => {
+    await press(edits()[0]);
+    await press(button(t('en', 'chat.new_conversation')));
+    await send('Other conversation prompt');
+    expect(host.querySelectorAll('article.chat-turn')).toHaveLength(1);
+    await confirm('chat-edit-dialog');
+    expect(host.querySelectorAll('article.chat-turn')).toHaveLength(1); expect(composer().value).toBe('');
+  });
 });
 
 describe('replace with saved history confirmation', () => {
@@ -188,6 +196,20 @@ describe('Clear All confirmation', () => {
     await press(button(t('en', 'chat.privacy.clear'))); render(<Harness busy />);
     await confirm('chat-clear-history-dialog');
     expect(repository.clear).not.toHaveBeenCalled();
+  });
+  it('refocuses the Clear All trigger once clearing settles if focus is still on body', async () => {
+    render(<Harness />);
+    const trigger = button(t('en', 'chat.privacy.clear'));
+    const clearing = deferred<undefined>();
+    repository.clear.mockReturnValue(clearing.promise);
+    await press(trigger);
+    // Every Chat control is disabled while clearing is in flight, so the dialog's own
+    // focus restoration finds nothing usable and Chromium leaves focus on <body>.
+    await confirm('chat-clear-history-dialog');
+    expect(document.activeElement).toBe(document.body);
+    await act(async () => { clearing.resolve(undefined); await clearing.promise; });
+    await settle();
+    expect(document.activeElement).toBe(trigger);
   });
 });
 

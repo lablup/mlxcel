@@ -6,8 +6,8 @@ let conversations: ChatConversation[] = [];
 let generation = 0;
 const listeners = new Set<() => void>();
 export function sessionGeneration(): number { return generation; }
-/** The title is caller-localized; the untitled default is replaced by the first prompt. */
-export function newConversation(title = 'New conversation'): ChatConversation {
+/** The title is always supplied by the caller, localized; there is no English default. */
+export function newConversation(title: string): ChatConversation {
   return { id: crypto.randomUUID(), title, systemPrompt: '', turns: [], updatedAt: Date.now() };
 }
 const turnBytes = new WeakMap<ChatTurn, number>();

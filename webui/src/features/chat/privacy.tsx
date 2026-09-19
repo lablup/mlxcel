@@ -23,6 +23,7 @@ export function HistoryControls({ conversations, busy, onPending, limits, onRepl
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const confirmationRef = useRef<Confirmation | null>(null);
   const ask = (next: Confirmation): void => { confirmationRef.current = next; setConfirmation(next); };
+  const clearButtonRef = useRef<HTMLButtonElement>(null);
   const epoch = useRef(0);
   useEffect(() => {
     if (!enabled) return;
@@ -46,7 +47,13 @@ export function HistoryControls({ conversations, busy, onPending, limits, onRepl
   };
   const clearAll = (): void => {
     const operation = ++epoch.current; setPendingState(true); setEnabled(false); setIncludeImages(false); repository.current.setEnabled(false);
-    void repository.current.clear().then(() => { if (operation === epoch.current && !busyRef.current) { onReplace([]); setMessage('chat.privacy.cleared'); } }).catch(() => { if (operation === epoch.current) setMessage('chat.privacy.clear_failed'); }).finally(() => { if (operation === epoch.current) setPendingState(false); });
+    void repository.current.clear().then(() => { if (operation === epoch.current && !busyRef.current) { onReplace([]); setMessage('chat.privacy.cleared'); } }).catch(() => { if (operation === epoch.current) setMessage('chat.privacy.clear_failed'); }).finally(() => {
+      if (operation !== epoch.current) return;
+      setPendingState(false);
+      // The dialog's own focus restoration may have found nothing usable while every
+      // Chat control was disabled for clearing; once the button re-enables, claim it back.
+      window.setTimeout(() => { if (document.activeElement === document.body) clearButtonRef.current?.focus(); }, 0);
+    });
   };
   // Every answer closes the dialog first and is consumed once; the operation then runs
   // only if no newer operation (or a started generation) has made the snapshot stale.
@@ -58,8 +65,14 @@ export function HistoryControls({ conversations, busy, onPending, limits, onRepl
     if (current.operation !== epoch.current) return;
     if (current.kind === 'replace-saved') {
       if (!confirmed) repository.current.setEnabled(false);
-      else if (!busyRef.current) { onReplace(current.saved); setEnabled(true); }
-    } else if (confirmed && !busyRef.current) onReplace(current.imported);
+      else if (!busyRef.current) {
+        try { onReplace(current.saved); setEnabled(true); }
+        catch { repository.current.setEnabled(false); setMessage('chat.privacy.open_failed'); }
+      }
+    } else if (confirmed && !busyRef.current) {
+      try { onReplace(current.imported); }
+      catch { setMessage('chat.privacy.import_rejected'); }
+    }
     const target = current.trigger;
     window.setTimeout(() => { const active = document.activeElement; if (target.isConnected && !target.matches(':disabled') && (active === null || active === document.body)) target.focus(); }, 0);
   };
@@ -76,7 +89,7 @@ export function HistoryControls({ conversations, busy, onPending, limits, onRepl
         const blob = new Blob([exportConversations(conversations, { includeImages })], { type: 'application/json' });
         const url = URL.createObjectURL(blob); const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'mlxcel-conversations.json'; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
       } catch { setMessage('chat.privacy.export_failed'); }
-    }}>{t(locale, 'chat.privacy.export')}</Button><Button disabled={busy || pending} onClick={() => ask({ kind: 'clear' })}>{t(locale, 'chat.privacy.clear')}</Button></div>
+    }}>{t(locale, 'chat.privacy.export')}</Button><Button ref={clearButtonRef} disabled={busy || pending} onClick={() => ask({ kind: 'clear' })}>{t(locale, 'chat.privacy.clear')}</Button></div>
     <label className="ds-field">{t(locale, 'chat.privacy.import')}<input type="file" accept="application/json,.json" disabled={busy || pending} onChange={(event) => {
       const trigger = event.currentTarget;
       const file = event.target.files?.[0]; event.target.value = '';

@@ -45,7 +45,7 @@ test('real bundled chat Stop releases the selected model request lease', async (
   await page.getByLabel(/Session key|세션 키/i).fill(token);
   await page.getByRole('button', {name:/Connect|연결/i}).click();
   await page.getByRole('combobox',{name:'Model for next turn'}).click();
-  await page.getByRole('option',{name:`${initial?.identity.display_name} · ready`}).click();
+  await page.getByRole('option',{name:`${initial?.identity.display_name} · Ready`, exact:true}).click();
   await page.getByText('Parameters for next turn', { exact: true }).click();
   await page.getByLabel('Next turn max_tokens', { exact: true }).fill('128');
   const imagePath = process.env.MLXCEL_CHAT_REAL_IMAGE_FILE;

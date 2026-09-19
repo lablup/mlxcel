@@ -14,7 +14,10 @@ import { entries } from './catalog';
 const SRC = join(import.meta.dirname, '..');
 const BYPASSES: readonly { pattern: RegExp; fix: string }[] = [
   { pattern: /window\.(confirm|alert|prompt)\b/, fix: 'native dialog; use ConfirmDialog or Dialog from design-system/primitives' },
-  { pattern: /locale === 'ko'/, fix: 'inline locale branch; add a catalog key and call t(locale, key)' },
+  // Bare confirm(/alert(/prompt( calls that are not a member access (window.confirm, foo.confirm) or a longer identifier.
+  { pattern: /(?<![\w.$])(confirm|alert|prompt)\s*\(/, fix: 'native dialog; use ConfirmDialog or Dialog from design-system/primitives' },
+  // Either operand order, loose or strict equality, single or double quotes.
+  { pattern: /\blocale\b\s*(===|!==|==|!=)\s*["'](ko|en)["']|["'](ko|en)["']\s*(===|!==|==|!=)\s*\blocale\b/, fix: 'inline locale branch; add a catalog key and call t(locale, key)' },
   // \s keeps the literal phrase out of this file, so the issue's plain grep stays empty.
   { pattern: /const\swords = /, fix: 'inline en/ko helper; add catalog keys and call t(locale, key)' },
 ];

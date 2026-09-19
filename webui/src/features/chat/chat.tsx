@@ -31,7 +31,7 @@ export function Chat({ locale }: { locale: Locale }): React.JSX.Element {
   const [busy, setBusy] = useState(false);
   const [historyBusy, setHistoryBusy] = useState(false);
   const [imagesBusy, setImagesBusy] = useState(false);
-  const [pendingEdit, setPendingEdit] = useState<number | null>(null);
+  const [pendingEdit, setPendingEdit] = useState<{ conversationId: string; turnId: string; index: number } | null>(null);
   // Async continuations and the unmount cleanup localize with the locale current when they run.
   const localeRef = useRef(locale); localeRef.current = locale;
   const localized = (key: StringKey, values?: Record<string, string>): string => t(localeRef.current, key, values);
@@ -136,11 +136,13 @@ export function Chat({ locale }: { locale: Locale }): React.JSX.Element {
       setBusy(false);
     }
   };
-  // Re-check the snapshot at answer time; a stale index or a started request drops the edit.
+  // Re-check the snapshot at answer time; a stale conversation, a stale turn at that
+  // index, or a started request drops the edit.
   const confirmEdit = (): void => {
-    const index = pendingEdit;
+    const pending = pendingEdit;
     setPendingEdit(null);
-    if (index === null || busy || historyBusy || imagesBusy || current === null || index >= current.turns.length) return;
+    if (pending === null || busy || historyBusy || imagesBusy || current === null || current.id !== pending.conversationId || current.turns[pending.index]?.id !== pending.turnId) return;
+    const { index } = pending;
     setDraft(current.turns[index].prompt); setImages(current.turns[index].images);
     updateConversation({ ...current, turns: current.turns.slice(0, index) });
     // The edited turn's controls are gone; continue in the composer that now holds its prompt.
@@ -148,14 +150,16 @@ export function Chat({ locale }: { locale: Locale }): React.JSX.Element {
   };
   const [samplingBefore, samplingAfter = ''] = t(locale, 'chat.settings.sampling').split('{link}');
   return <div className="screen-stack chat-screen">
-    <section className="screen-heading"><p className="eyebrow">{t(locale, 'chat.eyebrow')}</p><h1 data-testid={testId('chat.title')}>{t(locale, 'chat.title')}</h1><p>{t(locale, 'chat.intro')}</p></section>
+    <section className="screen-heading"><p className="eyebrow">{t(locale, 'chat.eyebrow')}</p><h1 tabIndex={-1} data-dialog-focus-fallback data-testid={testId('chat.title')}>{t(locale, 'chat.title')}</h1><p>{t(locale, 'chat.intro')}</p></section>
     <div className="chat-toolbar"><Button onClick={create} disabled={busy || historyBusy || imagesBusy || conversations.length >= 50}>{t(locale, 'chat.new_conversation')}</Button><Select locale={locale} label={t(locale, 'chat.conversation.label')} value={currentId ?? ''} disabled={busy || historyBusy || imagesBusy} onChange={(id) => { setCurrentId(id); setDraft(''); setImages([]); }} options={[{ value: '', label: t(locale, 'chat.conversation.choose') }, ...conversations.map((item) => ({ value: item.id, label: item.title }))]} /><Select locale={locale} label={t(locale, 'chat.model.label')} value={snapshot.selectedModelId ?? ''} onChange={(id) => actions.selectModel(id || null)} options={[{ value: '', label: t(locale, 'chat.model.choose') }, ...snapshot.catalog.map((item) => ({ value: item.identity.id, label: `${item.identity.display_name} · ${lifecycleLabel(locale, item.lifecycle.state)}` }))]} /></div>
     {!canChat ? <ErrorBanner tone="info" title={t(locale, 'chat.no_model.title')} body={t(locale, 'chat.no_model.body')} action={<a href="#models">{t(locale, 'chat.no_model.action')}</a>} /> : null}
     {current ? <details><summary>{t(locale, 'chat.settings.summary')}</summary><Field label={t(locale, 'chat.settings.name')} value={current.title} disabled={busy || historyBusy || imagesBusy} onChange={(title) => updateConversation({ ...current, title: title.slice(0, 120) })} /><label className="ds-field">{t(locale, 'chat.settings.system_prompt')}<textarea value={current.systemPrompt} maxLength={MAX_PROMPT_CHARACTERS} disabled={busy || historyBusy || imagesBusy} onChange={(event) => updateConversation({ ...current, systemPrompt: event.target.value })} /></label><p>{samplingBefore}<a href="#settings">{t(locale, 'nav.settings')}</a>{samplingAfter}</p><Button disabled={busy || historyBusy || imagesBusy} onClick={() => { replaceConversations(conversations.filter((item) => item.id !== current.id)); setCurrentId(null); }}>{t(locale, 'chat.settings.delete')}</Button></details> : null}
     <TurnParameters defaults={defaults} draft={parameterDraft} onChange={setParameterDraft} locale={locale} />
     <Transcript turns={current?.turns ?? []} onEdit={(index) => {
       if (busy || historyBusy || imagesBusy || current === null) return;
-      setPendingEdit(index);
+      const turn = current.turns[index];
+      if (!turn) return;
+      setPendingEdit({ conversationId: current.id, turnId: turn.id, index });
     }} busy={busy || historyBusy || imagesBusy} locale={locale} />
     {pendingEdit !== null ? <ConfirmDialog open title={t(locale, 'chat.transcript.edit.confirm.title')} body={t(locale, 'chat.transcript.edit.confirm.body')} confirmLabel={t(locale, 'chat.transcript.edit.confirm')} cancelLabel={t(locale, 'common.cancel')} closeLabel={t(locale, 'common.close')} tone="danger" testId="chat-edit-dialog" onConfirm={confirmEdit} onClose={() => setPendingEdit(null)} /> : null}
     {error ? <ErrorBanner title={t(locale, 'chat.error.title')} body={error} /> : null}

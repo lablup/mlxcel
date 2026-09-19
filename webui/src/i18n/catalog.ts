@@ -371,7 +371,7 @@ const table = new Map(entries.map((entry) => [entry.key, entry]));
 export function t(locale: Locale, key: StringKey, values: Record<string, string> = {}): string {
   const entry = table.get(key);
   if (!entry) return key;
-  return entry[locale].replace(/\{(\w+)\}/g, (_, name: string) => values[name] ?? `{${name}}`);
+  return entry[locale].replace(/\{(\w+)\}/g, (_, name: string) => Object.hasOwn(values, name) ? values[name] : `{${name}}`);
 }
 
 export function testId(key: StringKey): string {

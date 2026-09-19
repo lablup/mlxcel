@@ -6,12 +6,12 @@ beforeEach(() => replaceConversations([]));
 describe('bounded memory-only chat session', () => {
   it('admits fifty conversations but refuses a fifty-first without invalidating active generation', () => {
     const generation = sessionGeneration();
-    for (let index = 0; index < 50; index++) expect(updateConversation(newConversation())).toBe(true);
-    expect(updateConversation(newConversation())).toBe(false);
+    for (let index = 0; index < 50; index++) expect(updateConversation(newConversation('Test conversation'))).toBe(true);
+    expect(updateConversation(newConversation('Test conversation'))).toBe(false);
     expect(sessionGeneration()).toBe(generation);
   });
   it('increments replacement generation for imports, clear and logout but not normal turn updates', () => {
-    const initial = sessionGeneration(); const conversation = newConversation();
+    const initial = sessionGeneration(); const conversation = newConversation('Test conversation');
     expect(updateConversation(conversation)).toBe(true); expect(sessionGeneration()).toBe(initial);
     replaceConversations([conversation]); expect(sessionGeneration()).toBe(initial + 1);
     updateConversation({ ...conversation, title: 'Updated' }); expect(sessionGeneration()).toBe(initial + 1);
@@ -19,15 +19,15 @@ describe('bounded memory-only chat session', () => {
   });
   it('refuses oversized replacements atomically without changing the active generation', () => {
     const initial = sessionGeneration();
-    expect(() => replaceConversations(Array.from({ length: 51 }, () => newConversation()))).toThrow('memory limit');
+    expect(() => replaceConversations(Array.from({ length: 51 }, () => newConversation('Test conversation')))).toThrow('memory limit');
     expect(sessionGeneration()).toBe(initial);
-    const conversation = newConversation(); conversation.systemPrompt = 'a'.repeat(16 * 1024 * 1024);
+    const conversation = newConversation('Test conversation'); conversation.systemPrompt = 'a'.repeat(16 * 1024 * 1024);
     expect(updateConversation(conversation)).toBe(false); expect(sessionGeneration()).toBe(initial);
   });
   it('bounds aggregate turns independently from the number of conversations', () => {
     const turn: ChatTurn = { id: 'turn', modelId: 'model', modelRevision: 1, inferenceId: 'model', modelName: 'Model', prompt: '', content: '', reasoning: '', tools: [], status: 'complete', finishReason: 'stop', usage: null, ttftMs: null, elapsedMs: null, error: null, parameters: {}, images: [] };
-    const conversations = Array.from({ length: 10 }, () => ({ ...newConversation(), turns: Array.from({ length: 100 }, (_, index) => ({ ...turn, id: String(index) })) }));
+    const conversations = Array.from({ length: 10 }, () => ({ ...newConversation('Test conversation'), turns: Array.from({ length: 100 }, (_, index) => ({ ...turn, id: String(index) })) }));
     replaceConversations(conversations);
-    expect(updateConversation({ ...newConversation(), turns: [turn] })).toBe(false);
+    expect(updateConversation({ ...newConversation('Test conversation'), turns: [turn] })).toBe(false);
   });
 });
