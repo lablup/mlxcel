@@ -72,6 +72,7 @@ export function Chat({ locale }: { locale: Locale }): React.JSX.Element {
   const localized = (key: StringKey, values?: Record<string, string>): string => t(localeRef.current, key, values);
   const composer = useRef<HTMLTextAreaElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
+  const settingsOpenRef = useRef<HTMLButtonElement>(null);
   const imageEpoch = useRef(0);
   const composing = useRef(false);
   const statusEpoch = useRef(0);
@@ -267,7 +268,7 @@ export function Chat({ locale }: { locale: Locale }): React.JSX.Element {
   const headerActions = <>
     {overrides.length ? <Button tone="ghost" className="chat-overrides" data-testid="chat-overrides" onClick={() => { setParametersRequest((value) => value + 1); setSettingsOpen(true); }}>{t(locale, 'chat.overrides', { keys: overrides.join(', ') })}</Button> : null}
     {compact ? <IconButton label={t(locale, 'chat.list.open')} icon="list" aria-haspopup="dialog" aria-expanded={listDrawerOpen} onClick={() => setListOpen(true)} data-testid="chat-list-open" /> : null}
-    <IconButton label={t(locale, 'chat.settings.title')} icon="settings" aria-haspopup="dialog" aria-expanded={settingsOpen} onClick={() => setSettingsOpen(true)} data-testid="chat-settings-open" />
+    <IconButton ref={settingsOpenRef} label={t(locale, 'chat.settings.title')} icon="settings" aria-haspopup="dialog" aria-expanded={settingsOpen} onClick={() => setSettingsOpen(true)} data-testid="chat-settings-open" />
     {/* A disabled button does not reliably get hover, so the list also says why it is disabled. */}
     {atLimit ? <Tooltip content={t(locale, 'chat.list.limit')}>{newButton}</Tooltip> : newButton}
   </>;
@@ -296,7 +297,17 @@ export function Chat({ locale }: { locale: Locale }): React.JSX.Element {
       </div>
     </div>
     {compact ? <Drawer open={listOpen} onClose={() => setListOpen(false)} title={t(locale, 'chat.list.label')} closeLabel={t(locale, 'common.close')} testId="chat-list-drawer">{list}</Drawer> : null}
-    <SettingsDrawer open={settingsOpen} onClose={() => setSettingsOpen(false)} locale={locale} parametersRequest={parametersRequest} conversation={current} disabled={locked} onConversationChange={updateConversation}
+    <SettingsDrawer open={settingsOpen} onClose={() => {
+      setSettingsOpen(false);
+      // The overrides badge that can open this drawer unmounts the moment its last
+      // override is cleared; if that was the opener, the shared Drawer's own hand-off
+      // has nowhere to return focus, so it lands on <body>. Recover to the settings
+      // control instead of leaving keyboard and screen-reader users at the document root.
+      window.setTimeout(() => {
+        const focused = document.activeElement;
+        if (focused === null || focused === document.body) settingsOpenRef.current?.focus();
+      }, 0);
+    }} locale={locale} parametersRequest={parametersRequest} conversation={current} disabled={locked} onConversationChange={updateConversation}
       parameters={<TurnParameters defaults={defaults} draft={parameterDraft} onChange={setParameterDraft} locale={locale} />}
       history={<HistoryControls conversations={conversations} busy={busy || imagesBusy} onPending={setHistoryBusy} limits={snapshot.bootstrap?.media_limits} onReplace={(next) => { replaceConversations(next); setCurrentId(null); }} locale={locale} />} />
     {pendingEdit !== null ? <ConfirmDialog open title={t(locale, 'chat.transcript.edit.confirm.title')} body={t(locale, 'chat.transcript.edit.confirm.body')} confirmLabel={t(locale, 'chat.transcript.edit.confirm')} cancelLabel={t(locale, 'common.cancel')} closeLabel={t(locale, 'common.close')} tone="danger" testId="chat-edit-dialog" onConfirm={confirmEdit} onClose={() => setPendingEdit(null)} /> : null}

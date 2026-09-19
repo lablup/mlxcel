@@ -1,7 +1,7 @@
 // Copyright 2026 Lablup Inc. Licensed under Apache-2.0.
 // The pinned composer: attach, message, Send or Stop, then one helper line. Chat owns the
 // draft, the images, the keyboard handling and every send guard; this is the markup.
-import React, { useId, useLayoutEffect, useRef, useState } from 'react';
+import React, { useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Button, IconButton, Tooltip } from '../../design-system/primitives';
 import { localeTag } from '../../design-system/format';
 import { t, type Locale } from '../../i18n/catalog';
@@ -60,7 +60,8 @@ export function Composer(props: ComposerProps): React.JSX.Element {
   const countId = useId();
   const rows = useAutoRows(props.textareaRef, props.draft);
   const full = props.draft.length >= MAX_PROMPT_CHARACTERS;
-  const number = new Intl.NumberFormat(localeTag(locale));
+  // Every 50 ms stream flush re-renders the composer; build the formatter once per locale.
+  const number = useMemo(() => new Intl.NumberFormat(localeTag(locale)), [locale]);
   return <div className="chat-composer">
     {props.images.length ? <div className="chat-images">{props.images.map((image, index) => <figure key={`${image.name}-${index}`}><img src={image.dataUrl} alt={image.name} /><Button disabled={props.disabled} onClick={() => props.onRemoveImage(index)}>{t(locale, 'chat.images.remove', { name: image.name })}</Button></figure>)}</div> : null}
     <div className="chat-composer-row">

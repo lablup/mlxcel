@@ -306,6 +306,21 @@ describe('conversation view', () => {
   expect(document.activeElement?.textContent).toBe(t('en', 'chat.params.summary'));
   expect(document.activeElement?.closest('[data-testid="chat-settings-drawer"]')).not.toBeNull();
  });
+ it('falls back focus to the settings control when clearing overrides removes the badge that opened the drawer', async () => {
+  parameter('seed', '7');
+  const badge = host.querySelector<HTMLButtonElement>('[data-testid="chat-overrides"]');
+  await act(async () => badge?.click());
+  await frames(6);
+  expect(document.activeElement?.textContent).toBe(t('en', 'chat.params.summary'));
+  await act(async () => button(t('en', 'chat.params.clear')).click());
+  expect(host.querySelector('[data-testid="chat-overrides"]')).toBeNull();
+  // jsdom does not run the browser's inert focus-fixup rule, so drop focus to <body>
+  // the way a real close would once the opener (the overrides badge) is gone from the DOM.
+  act(() => (document.activeElement as HTMLElement | null)?.blur());
+  await act(async () => labelled(t('en', 'common.close')).click());
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
+  expect(document.activeElement).toBe(host.querySelector('[data-testid="chat-settings-open"]'));
+ });
  it('keeps conversation settings, next-turn parameters and local history in one drawer, and no details in the main column', () => {
   act(() => replaceConversations([conversation('Settings', 1_000)]));
   act(() => rows()[0].click());
