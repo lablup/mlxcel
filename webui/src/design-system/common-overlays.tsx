@@ -34,9 +34,11 @@ export function Drawer(props: { open: boolean; onClose: () => void; title: strin
     frame = requestAnimationFrame(settle);
     // alpha.19 listens for Escape on its panel only. A pointer press on a non-focusable
     // part of the drawer leaves focus on <body>, so also close on an Escape that starts
-    // outside the panel, as the native modal sheet did.
+    // outside the panel, as the native modal sheet did. Back off once defaultPrevented
+    // is set: a future popup that portals outside `.drawer` (like the Tooltip content)
+    // and already handles Escape for itself should not also close the drawer beneath it.
     const handleKeyDown = (event: KeyboardEvent): void => {
-      if (event.key !== 'Escape' || event.isComposing) return;
+      if (event.key !== 'Escape' || event.isComposing || event.defaultPrevented) return;
       const panel = hostRef.current?.querySelector('.drawer');
       if (panel && event.target instanceof Node && panel.contains(event.target)) return;
       close();
