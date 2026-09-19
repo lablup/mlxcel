@@ -38,11 +38,11 @@ button { cursor: pointer; }
 /* The server's loaded models: a count, up to three chips that shrink with truncated names, then "+n". Chip columns start at zero and grow in equal shares up to their natural width, so a tight row truncates every name alike instead of starving the shortest one, as proportional flex shrinking would. Below 960 px the region is its own toolbar row that scrolls sideways inside itself instead of wrapping, so the sticky toolbar stays two rows high however many models are loaded; the 4px padding, cancelled by an equal negative margin, keeps focus rings inside the scrollport. */
 .toolbar-loaded { min-width: 0; display: grid; grid-auto-flow: column; grid-template-columns: max-content; grid-auto-columns: minmax(0, max-content); align-items: center; gap: var(--space-2); color: var(--color-muted); }
 .toolbar-loaded-count { flex: none; font-size: 0.9rem; white-space: nowrap; }
-.toolbar-loaded .button.toolbar-chip.button--inline { flex: 0 1 auto; min-width: 0; max-width: 14rem; min-height: 32px; padding: 3px 4px 3px 12px; overflow: hidden; }
+.toolbar-loaded .button.toolbar-chip.button--inline { flex: 0 1 auto; min-width: 0; max-width: 14rem; min-height: 32px; padding: 3px 4px 3px 8px; overflow: hidden; }
 .toolbar-loaded .button.toolbar-chip-more.button--inline { flex: none; padding: 3px 10px; }
-.toolbar-chip > span { display: flex; align-items: center; gap: var(--space-2); min-width: 0; max-width: 100%; }
+.toolbar-chip > span { display: flex; align-items: center; gap: var(--space-1); min-width: 0; max-width: 100%; }
 /* A chip short of room gives it up in stages: the name truncates first, down to 5rem; then the badge narrows to a pill holding only its state dot (the clipped label stays in the accessible name); only then does the name shrink further. */
-.toolbar-chip .truncate { flex: 1 100000 auto; min-width: min(5rem, 100% - var(--space-2) - 28px); }
+.toolbar-chip .truncate { flex: 1 100000 auto; min-width: min(5rem, 100% - var(--space-1) - 28px); }
 .toolbar-chip .ds-status-wrap { display: flex; flex: 0 1 auto; min-width: 28px; }
 .toolbar-chip .ds-status { min-width: 0; overflow: hidden; }
 .toolbar-chip .ds-status::before { flex: none; }

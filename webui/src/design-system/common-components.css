@@ -45,8 +45,9 @@
 .drawer.ds-drawer { top: 12px; bottom: 12px; left: 12px; right: auto; width: min(320px, calc(100vw - 32px)) !important; max-width: calc(100vw - 32px) !important; transform: translateX(calc(-100% - 12px)); color: var(--color-text); background: var(--color-bg-elevated); border: 1px solid var(--color-separator); border-radius: var(--radius-xl); box-shadow: 0 30px 120px rgba(0, 0, 0, 0.32); overflow: hidden; }
 .drawer.ds-drawer.drawer--open { transform: translateX(0); }
 .ds-drawer .drawer__header { padding: var(--space-4) var(--space-5); border-bottom: 1px solid var(--color-separator); }
-.ds-drawer .drawer__title { color: var(--color-text); font-size: 1.1rem; }
-.ds-drawer .drawer__close-btn { color: var(--color-text); }
+/* The title shrinks and wraps before it can push the close button out of a 163 px drawer (a 195 CSS px viewport) in a wide font. */
+.ds-drawer .drawer__title { min-width: 0; color: var(--color-text); font-size: 1.1rem; overflow-wrap: anywhere; }
+.ds-drawer .drawer__close-btn { flex: none; color: var(--color-text); }
 .ds-drawer .drawer__close-btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .ds-drawer .drawer__content { padding: var(--space-5); }
 /* Card: BaseCard keeps the previous block flow; its :focus-within rule removes the outline, so restore a visible keyboard ring. */
