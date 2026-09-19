@@ -1,24 +1,30 @@
 {
   "budgets": {
-    "embedded_asset_bytes": 664743,
+    "embedded_asset_bytes": 700711,
     "embedded_asset_limit_bytes": 5242880,
-    "initial_js_gzip_bytes": 146064,
+    "initial_js_gzip_bytes": 151557,
     "initial_js_gzip_limit_bytes": 204800,
-    "total_js_gzip_bytes": 147271,
+    "total_js_gzip_bytes": 152732,
     "total_js_gzip_limit_bytes": 716800
   },
   "files": [
     {
       "bytes": 951,
-      "gzip_bytes": 613,
-      "path": "assets/code-highlight-BSPALh5l.js",
-      "sha256": "8cfd59d1b7783c0e094807844a68f9c653c2862f0cb88311f8ad005703a8498e"
+      "gzip_bytes": 612,
+      "path": "assets/code-highlight-Dih6hR5j.js",
+      "sha256": "65cf2cfbfcfbde517fc965ca783ffbbc208748bc6858f73c6e3283207a5c86c0"
     },
     {
-      "bytes": 1104,
-      "gzip_bytes": 594,
-      "path": "assets/history-Cw89XmYC.js",
-      "sha256": "326ad26496d0d5e7e18e2c5c5e324cc32013c01c29a5fe5a23f98d20e7d2afa3"
+      "bytes": 1134,
+      "gzip_bytes": 563,
+      "path": "assets/history-DbjED_sk.js",
+      "sha256": "bbce9a353ba9d9e7ab8e62d3f20d757020f3df9830519308c8950a4595411be6"
+    },
+    {
+      "bytes": 590281,
+      "gzip_bytes": 151557,
+      "path": "assets/index-B1xuOm0h.js",
+      "sha256": "efc265049a59edf5623a09e4a542731495ec430d090c2397cd0df098e609d08e"
     },
     {
       "bytes": 92565,
@@ -27,16 +33,10 @@
       "sha256": "753e82fed30cca52c47eb6d460336a564ceaee389d32653c016d67775658ef21"
     },
     {
-      "bytes": 554343,
-      "gzip_bytes": 146064,
-      "path": "assets/index-DJgpvm0R.js",
-      "sha256": "2167387556abd62d03d1f3b3a71fad293caabb0dae5134a6df68b35417b2886a"
-    },
-    {
       "bytes": 453,
-      "gzip_bytes": 286,
+      "gzip_bytes": 288,
       "path": "index.html",
-      "sha256": "2dcb72c211ce194f8f7c3a516ffbf0dae67c3c04bf13fcc4358febe46e508165"
+      "sha256": "738fd501f171051a268256e1f13a44f8ab897415901fecb9c365af68c9d97c3e"
     },
     {
       "bytes": 13233,
@@ -67,5 +67,5 @@
   },
   "pnpm_version": "11.18.0",
   "schema_version": 1,
-  "source_digest_sha256": "d3ee5c0cd73962e01be42d9ff06d1f32fcd35d0efcb2fb26a23137d7c4c9821e"
+  "source_digest_sha256": "941d893d74f67edd4256160d7f9df31815f455d582acf4873ef71c26842c0097"
 }
