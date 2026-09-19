@@ -432,6 +432,11 @@ jobs:
         run: pnpm --dir webui run typecheck
       - name: Lint WebUI
         run: pnpm --dir webui run lint
+      # Issue #1903: data-theme is always <family>-<scheme>, so a selector keyed
+      # on a bare mode (or on the host OS scheme) silently stops applying. The
+      # gate evaluates every theme selector against the ids theme.ts ships.
+      - name: Check WebUI theme selectors
+        run: pnpm --dir webui run check:theme-selectors
       - name: Test WebUI scaffold
         run: pnpm --dir webui run unit
       - name: Install browser runtime

@@ -1,0 +1,60 @@
+/* Copyright 2025-2026 Lablup Inc. Licensed under the Apache License, Version 2.0. */
+/*
+ * mlxcel family (mlxcel-light, mlxcel-dark): the approved 4185 baseline and the
+ * default family. Neutral content surfaces with glass reserved for the sidebar,
+ * the toolbar and transient overlays. These values are the ones tokens.css and
+ * common-tokens.css carried on :root before #1903, moved here unchanged so the
+ * default appearance does not move.
+ */
+[data-theme="mlxcel-light"] {
+  --color-bg: #f3f4f6;
+  --color-bg-elevated: #ffffff;
+  --color-bg-neutral: #f8f8fa;
+  --color-text: #151a24;
+  --color-muted: #59647a;
+  --color-separator: rgba(33, 42, 61, 0.12);
+  --color-focus: #245bd8;
+  --color-selection: rgba(36, 42, 55, 0.08);
+  --color-warning: #8a5200;
+  --color-warning-bg: #fff4d8;
+  --color-error: #b42318;
+  --color-error-bg: #fff0ed;
+  --color-success: #137333;
+  --color-success-bg: #eaf7ee;
+  --material-glass-bg: rgba(248, 249, 251, var(--material-glass-alpha));
+  --material-content-bg: rgba(255, 255, 255, 0.82);
+  --material-control-bg: rgba(255, 255, 255, 0.58);
+  --shadow-chrome: 0 1px 0 rgba(255, 255, 255, 0.62) inset;
+  --shadow-card: 0 12px 36px rgba(31, 37, 52, 0.07);
+}
+
+[data-theme="mlxcel-dark"] {
+  --color-bg: #0e1117;
+  --color-bg-elevated: #181d27;
+  --color-bg-neutral: #111722;
+  --color-text: #f5f7fb;
+  --color-muted: #aeb8c9;
+  --color-separator: rgba(255, 255, 255, 0.12);
+  --color-focus: #9dbdff;
+  --color-selection: rgba(255, 255, 255, 0.10);
+  --color-warning: #ffd28a;
+  --color-warning-bg: rgba(139, 92, 0, 0.22);
+  --color-error: #ffb4a8;
+  --color-error-bg: rgba(152, 43, 28, 0.24);
+  --color-success: #9be6b0;
+  --color-success-bg: rgba(25, 108, 55, 0.22);
+  --material-glass-bg: rgba(24, 28, 36, var(--material-glass-alpha));
+  --material-content-bg: rgba(25, 29, 38, 0.84);
+  --material-control-bg: rgba(255, 255, 255, 0.08);
+  --shadow-chrome: 0 1px 0 rgba(255, 255, 255, 0.08) inset;
+  --shadow-card: 0 14px 40px rgba(0, 0, 0, 0.22);
+}
+
+/* Both schemes keep the same solid button fills, as before. */
+[data-theme="mlxcel-light"],
+[data-theme="mlxcel-dark"] {
+  --button-primary-fill: #245bd8;
+  --button-primary-fill-active: #1c4dbc;
+  --button-danger-fill: #c6352b;
+  --button-danger-fill-active: #aa2b23;
+}

@@ -1,11 +1,23 @@
 import type { Locale } from '../i18n/catalog';
+import {
+  DEFAULT_COLOR_SCHEME,
+  DEFAULT_THEME_FAMILY,
+  getSystemColorScheme,
+  isColorSchemePreference,
+  isThemeFamily,
+  resolveThemeSelection,
+  type ColorScheme,
+  type ColorSchemePreference,
+  type ThemeFamily,
+} from './theme';
 
-export type ThemePreference = 'system' | 'light' | 'dark';
+export type { ColorSchemePreference, ThemeFamily } from './theme';
 export type MaterialPreference = 'glass' | 'tinted' | 'opaque';
 export type ContrastPreference = 'system' | 'on' | 'off';
 
 export type AppearancePreferences = {
-  theme: ThemePreference;
+  themeFamily: ThemeFamily;
+  colorScheme: ColorSchemePreference;
   material: MaterialPreference;
   glassIntensity: number;
   reduceMotion: boolean;
@@ -15,7 +27,8 @@ export type AppearancePreferences = {
 };
 
 export const DEFAULT_APPEARANCE: AppearancePreferences = {
-  theme: 'system',
+  themeFamily: DEFAULT_THEME_FAMILY,
+  colorScheme: DEFAULT_COLOR_SCHEME,
   material: 'glass',
   glassIntensity: 35,
   reduceMotion: false,
@@ -24,7 +37,9 @@ export const DEFAULT_APPEARANCE: AppearancePreferences = {
   locale: 'en',
 };
 
-const STORAGE_KEY = 'mlxcel.webui.appearance';
+// Also read by public/theme-bootstrap.js before the app mounts; keep the key and
+// the family/scheme fields in step with it (theme-bootstrap.test.ts checks).
+export const APPEARANCE_STORAGE_KEY = 'mlxcel.webui.appearance';
 
 function clampIntensity(value: unknown): number {
   const numeric = typeof value === 'number' && Number.isFinite(value) ? value : DEFAULT_APPEARANCE.glassIntensity;
@@ -33,10 +48,6 @@ function clampIntensity(value: unknown): number {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function isTheme(value: unknown): value is ThemePreference {
-  return value === 'system' || value === 'light' || value === 'dark';
 }
 
 function isMaterial(value: unknown): value is MaterialPreference {
@@ -54,6 +65,15 @@ function normalizeContrast(value: unknown): ContrastPreference {
   return DEFAULT_APPEARANCE.highContrast;
 }
 
+// Stored appearance written before #1903 carried the color scheme in a flat
+// `theme` field ('system' | 'light' | 'dark') and had no family. It is still
+// honored when `colorScheme` is absent, so an upgrade keeps the user's choice.
+function normalizeColorScheme(parsed: Record<string, unknown>): ColorSchemePreference {
+  if (isColorSchemePreference(parsed.colorScheme)) return parsed.colorScheme;
+  if (parsed.colorScheme === undefined && isColorSchemePreference(parsed.theme)) return parsed.theme;
+  return DEFAULT_APPEARANCE.colorScheme;
+}
+
 function isLocale(value: unknown): value is Locale {
   return value === 'en' || value === 'ko';
 }
@@ -62,7 +82,7 @@ export function loadAppearance(): AppearancePreferences {
   if (typeof window === 'undefined') return DEFAULT_APPEARANCE;
   let raw: string | null;
   try {
-    raw = window.localStorage.getItem(STORAGE_KEY);
+    raw = window.localStorage.getItem(APPEARANCE_STORAGE_KEY);
   } catch {
     return DEFAULT_APPEARANCE;
   }
@@ -71,7 +91,8 @@ export function loadAppearance(): AppearancePreferences {
     const parsed: unknown = JSON.parse(raw);
     if (!isRecord(parsed)) return DEFAULT_APPEARANCE;
     return {
-      theme: isTheme(parsed.theme) ? parsed.theme : DEFAULT_APPEARANCE.theme,
+      themeFamily: isThemeFamily(parsed.themeFamily) ? parsed.themeFamily : DEFAULT_APPEARANCE.themeFamily,
+      colorScheme: normalizeColorScheme(parsed),
       material: isMaterial(parsed.material) ? parsed.material : DEFAULT_APPEARANCE.material,
       glassIntensity: clampIntensity(parsed.glassIntensity),
       reduceMotion: parsed.reduceMotion === true,
@@ -86,7 +107,7 @@ export function loadAppearance(): AppearancePreferences {
 
 export function saveAppearance(preferences: AppearancePreferences): void {
   try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(preferences));
+    window.localStorage.setItem(APPEARANCE_STORAGE_KEY, JSON.stringify(preferences));
   } catch {
     // Browser appearance preferences remain functional in memory when storage is blocked or full.
   }
@@ -97,8 +118,17 @@ function supportsBackdropFilter(): boolean {
   return CSS.supports('backdrop-filter: blur(1px)') || CSS.supports('-webkit-backdrop-filter: blur(1px)');
 }
 
-export function applyAppearance(root: HTMLElement, preferences: AppearancePreferences): void {
-  root.dataset.theme = preferences.theme;
+/**
+ * Writes the appearance switches onto the document root. `data-theme` receives
+ * the applied `<family>-<scheme>` id, resolved against the host scheme when the
+ * preference is `system`; `data-color-scheme` keeps the raw preference, which is
+ * why no stylesheet may gate on it (scripts/check-theme-selectors.mjs).
+ */
+export function applyAppearance(root: HTMLElement, preferences: AppearancePreferences, systemScheme: ColorScheme = getSystemColorScheme()): void {
+  const theme = resolveThemeSelection(preferences.themeFamily, preferences.colorScheme, systemScheme);
+  root.dataset.theme = theme.id;
+  root.dataset.themeFamily = theme.family;
+  root.dataset.colorScheme = theme.preference;
   root.dataset.material = preferences.reduceTransparency ? 'opaque' : preferences.material;
   root.dataset.glassIntensity = String(clampIntensity(preferences.glassIntensity));
   root.dataset.reduceMotion = String(preferences.reduceMotion);

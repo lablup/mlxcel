@@ -100,3 +100,13 @@
 :root[data-glass-intensity="98"] { --material-glass-alpha: 0.633; --material-glass-blur: 35.52px; --material-glass-saturation: 147.28%; }
 :root[data-glass-intensity="99"] { --material-glass-alpha: 0.637; --material-glass-blur: 35.76px; --material-glass-saturation: 147.64%; }
 :root[data-glass-intensity="100"] { --material-glass-alpha: 0.64; --material-glass-blur: 36.0px; --material-glass-saturation: 148.0%; }
+
+/*
+ * Contrast and transparency preferences outrank decorative intensity. These
+ * resets tie the steps above on specificity, so they must stay after them: an
+ * opaque material, reduced transparency, a browser without backdrop-filter or
+ * raised contrast leaves no blur and no saturation boost at any intensity.
+ */
+:root[data-material="opaque"], :root[data-reduce-transparency="true"], :root[data-backdrop-filter="unsupported"], :root[data-high-contrast="on"] { --material-glass-blur: 0px; --material-glass-saturation: 100%; }
+@media (prefers-reduced-transparency: reduce) { :root[data-glass-intensity] { --material-glass-blur: 0px; --material-glass-saturation: 100%; } }
+@media (prefers-contrast: more) { :root:not([data-high-contrast="off"]) { --material-glass-blur: 0px; --material-glass-saturation: 100%; } }

@@ -136,6 +136,22 @@ The bundled WebUI assets under src/webui/assets/ include production runtime code
     SOFTWARE.
 
 
+backend.ai-go (WebUI glass theme)
+---------------------------------
+
+Portions of the WebUI glass theme in
+webui/src/design-system/themes/glass.css (its system-color palette, the
+filled-button highlight gradients, and the translucent surface, fill and
+chrome-highlight values) are derived from the glass theme tokens of
+backend.ai-go (https://github.com/lablup/backend.ai-go), Copyright 2025-2026
+Lablup Inc., licensed under the Apache License, Version 2.0. Colors were
+adjusted where needed to meet WCAG 2.2 AA against mlxcel's own surfaces. The
+theme is compiled into the bundled WebUI assets under src/webui/assets/.
+backend.ai-go ships no NOTICE file, so there is no upstream notice text to
+carry forward under Section 4(d); the Apache License, Version 2.0 text is in
+this repository's LICENSE.
+
+
 mlx ROCm backend (NripeshN/mlx, rocm-support branch)
 ----------------------------------------------------
 

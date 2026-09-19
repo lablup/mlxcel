@@ -50,7 +50,7 @@ cargo build --release --features cuda
 
 `mlxcel::server::webui::router::<S>()`의 라우트에는 이미 `/webui`가 포함됩니다. 루트에 병합하거나 **검증된 서버 API 접두사** 아래 한 번 중첩하세요. `/webui` 아래 다시 중첩하지 마세요. 부모 라우터의 루트 상태 확인·추론 경로는 유지됩니다. `/webui`는 `/webui/`로 리디렉션되고, `#models` 형태의 탐색은 클라이언트 안에서 처리됩니다. 없는 정적 경로는 API 라우팅 오류를 감출 수 있는 HTML 대체 응답 대신 404를 반환합니다.
 
-정적 응답은 GET/HEAD와 조건부 ETag를 지원하고, 다른 메서드는 `Allow: GET, HEAD`와 함께 405를 반환합니다. HTML·매니페스트는 재검증하며 콘텐츠 해시 자산에는 immutable 캐시를 허용합니다. 라우터는 인코딩·경로 탐색 표현을 거부하며 일반·오류·리디렉션·304 응답에 동일 출처 CSP, `nosniff`, no-referrer 헤더를 설정합니다. 이 정적 정책이 후속 관리 API의 Host/Origin/인증 검사를 대신하지는 않습니다.
+정적 응답은 GET/HEAD와 조건부 ETag를 지원하고, 다른 메서드는 `Allow: GET, HEAD`와 함께 405를 반환합니다. HTML·매니페스트·`theme-bootstrap.js`(`webui/public/`에서 복사되는 마운트 전 테마 스크립트로, 콘텐츠 해시가 없는 유일한 스크립트)는 재검증하며 콘텐츠 해시 자산에는 immutable 캐시를 허용합니다. 라우터는 인코딩·경로 탐색 표현을 거부하며 일반·오류·리디렉션·304 응답에 동일 출처 CSP, `nosniff`, no-referrer 헤더를 설정합니다. 이 정적 정책이 후속 관리 API의 Host/Origin/인증 검사를 대신하지는 않습니다.
 
 ## 정적 자산과 운영 시작 경로의 분리 검증
 
