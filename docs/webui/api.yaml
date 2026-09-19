@@ -2995,7 +2995,7 @@
             "items": {
               "$ref": "#/components/schemas/StringContract"
             },
-            "maxItems": 256
+            "maxItems": 1024
           }
         }
       },

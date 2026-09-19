@@ -15,6 +15,8 @@
 
 `completed_requests_total`, `completion_tokens_total` and `generation_time_ms_total` come from successfully recorded route results. Their window is the loaded provider's lifetime, and they can reset after model reload. They exclude errors not recorded by the route and are not admission counters. Generation time has route-specific semantics, including elapsed time for some non-chat routes; it is not a decode-only denominator.
 
+A chat completion counts the same whether it streams or not. A streamed one, which is what the WebUI chat sends, is recorded once when its generation finishes, with the token counts its usage chunk reports, whether or not the request asked for that chunk. A stream the client cancelled is not a completion and is not counted: a disconnect of a stream sent without `X-Conversation-Id`, `DELETE /v1/stream`, or replacement of the session by a new request with the same `X-Conversation-Id`. A resumable stream (`X-Conversation-Id`) whose client only disconnects keeps generating into its session, so it is counted when it finishes.
+
 `decode_tokens_total` and `decode_time_us_total` read the existing completed-request `BatchObservability` counters. They remain unavailable until a completed decode timing sample has been published. A backend that never publishes them is not shown as a measured zero. Independent atomic reads must not be converted into a claimed exact per-request or instantaneous rate. TTFT (request send to first output token, with thinking/content distinctions) and decode rate remain unavailable on this runtime surface; request-aware chat instrumentation is a separate source.
 
 ## Slots and context

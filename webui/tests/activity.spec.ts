@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test';
 import { bootProduct, installMockApi, loginWithMockApi, productVariants } from './browser-fixtures';
 import { expectAxeClean, expectSafeLayout } from './browser-assertions';
+import { localizedPair } from './strings-fixture';
 
 for (const width of [1440, 390]) {
   test(`Activity shares controls and exposes honest empty observation at ${width}`, async ({ page }) => {
@@ -23,3 +24,18 @@ for (const width of [1440, 390]) {
     await expect(page.getByTestId('activity-page')).toHaveCount(0);
   });
 }
+
+test('Activity renders catalog copy in Korean', async ({ page }) => {
+  await installMockApi(page);
+  await bootProduct(page, productVariants[3]);
+  await loginWithMockApi(page);
+  await page.evaluate(() => { location.hash = '#activity'; });
+  await expect(page.getByTestId('activity-page')).toBeVisible();
+  await expect(page.getByRole('heading', { name: localizedPair('ko', 'activity.title').shown, exact: true })).toBeVisible();
+  for (const key of ['activity.intro', 'activity.export', 'activity.session', 'activity.history.show']) {
+    const { shown, hidden } = localizedPair('ko', key);
+    await expect(page.getByText(shown, { exact: true }).first()).toBeVisible();
+    await expect(page.getByText(hidden, { exact: true })).toHaveCount(0);
+  }
+  await expectSafeLayout(page);
+});

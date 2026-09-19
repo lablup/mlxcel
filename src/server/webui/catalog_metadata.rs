@@ -14,11 +14,13 @@
 
 use std::path::{Path, PathBuf};
 
+use mlxcel_core::hardware::{GpuBackendKind, gpu_backend_kind};
 use serde_json::Value;
 
 use crate::models::detect_model_type_with_probes;
 use crate::models::registry::{
-    ArchitectureFamily, BackendStatus, Modality, OutputKind, Runtime, build_architecture_registry,
+    ArchitectureFamily, BackendStatus, BackendSupport, Modality, OutputKind, Runtime,
+    build_architecture_registry,
 };
 use crate::server::AppState;
 use crate::server::router_lifecycle::{DownloadState, LifecycleSnapshot, ModelLifecycleState};
@@ -319,14 +321,26 @@ fn family_for_registry_id(registry_id: &str) -> Option<ArchitectureFamily> {
 }
 
 fn runnable_on_backend(family: &ArchitectureFamily) -> bool {
-    let status = if cfg!(all(target_os = "macos", feature = "metal")) {
-        family.backends.metal
-    } else if cfg!(feature = "cuda") {
-        family.backends.cuda
-    } else {
-        BackendStatus::Unsupported
-    };
-    matches!(status, BackendStatus::Supported | BackendStatus::Partial)
+    matches!(
+        backend_status_for(gpu_backend_kind(), &family.backends),
+        BackendStatus::Supported | BackendStatus::Partial
+    )
+}
+
+/// The registry column for the GPU backend MLX resolved at runtime, not a `cfg!`
+/// chain: that chain sent every ROCm build to `Unsupported` (issue #1886) and
+/// cannot express a multi-backend build. `gpu_backend_kind()` works on every
+/// build and returns `None` when the build has no GPU backend (or, on ROCm, no
+/// visible device), which reads as `Unsupported`: the whole no-GPU fallback.
+fn backend_status_for(kind: GpuBackendKind, backends: &BackendSupport) -> BackendStatus {
+    match kind {
+        GpuBackendKind::Metal => backends.metal,
+        GpuBackendKind::Cuda => backends.cuda,
+        GpuBackendKind::Rocm => backends.rocm,
+        GpuBackendKind::None => BackendStatus::Unsupported,
+        // Required by `#[non_exhaustive]`; a kind with no column fails the `ALL` walk test.
+        _ => BackendStatus::Unsupported,
+    }
 }
 
 fn tasks_for_family(family: &ArchitectureFamily) -> (Vec<TaskKind>, Vec<TaskKind>) {
@@ -480,3 +494,7 @@ fn source_kind(source: RouterModelSource) -> CatalogSourceKind {
 #[cfg(test)]
 #[path = "catalog_reason_tests.rs"]
 mod reason_tests;
+
+#[cfg(test)]
+#[path = "catalog_backend_tests.rs"]
+mod backend_tests;

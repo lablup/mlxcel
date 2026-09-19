@@ -26,7 +26,7 @@ Do not collapse these separate facts into a single “works” badge:
 
 - `complete` describes the local checkpoint file layout; it is not a successful load or tensor-integrity check.
 - `metadata.support.architecturally_supported` comes from shared model detection and the architecture registry, not a vendor-heading match.
-- `runnable_on_backend` reflects registry support for the compiled backend, not a measured inference result.
+- `runnable_on_backend` reflects registry support for the GPU backend resolved at runtime (Metal, CUDA or ROCm), not a measured inference result. A process with no resolved GPU backend reports no architecture as runnable.
 - `tested_checkpoint` currently remains false with an explicit reason: the catalog has no per-checkpoint evidence database.
 - `lifecycle.state` reflects the current provider lifecycle; advertised pre-load capabilities do not imply `ready`.
 

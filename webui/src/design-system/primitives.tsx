@@ -124,6 +124,21 @@ export function Dialog(props: Omit<ModalProps, 'position' | 'className'>): React
   return <ModalDialog {...props} />;
 }
 
+export type ConfirmDialogProps = { open: boolean; title: string; body: string; confirmLabel: string; cancelLabel: string; closeLabel?: string; tone?: 'danger'; busy?: boolean; testId: string; onConfirm: () => void; onClose: () => void };
+
+/** Localized confirmation built from Dialog: Escape, the close button and Cancel all call onClose; busy disables confirm instead of closing. */
+export function ConfirmDialog(props: ConfirmDialogProps): React.JSX.Element {
+  return (
+    <Dialog open={props.open} title={props.title} onClose={props.onClose} testId={props.testId} closeLabel={props.closeLabel}>
+      <p>{props.body}</p>
+      <div className="dialog-actions">
+        <Button data-testid={`${props.testId}-cancel`} onClick={props.onClose}>{props.cancelLabel}</Button>
+        <Button tone={props.tone ?? 'primary'} busy={props.busy} disabled={props.busy} data-testid={`${props.testId}-confirm`} onClick={props.onConfirm}>{props.confirmLabel}</Button>
+      </div>
+    </Dialog>
+  );
+}
+
 export function Inspector(props: { title: string; children: React.ReactNode }): React.JSX.Element {
   return (
     <aside className="ds-inspector" aria-label={props.title}>

@@ -26,7 +26,7 @@
 
 - `complete`는 로컬 체크포인트 파일 구성을 나타내며 로드 성공이나 텐서 무결성 검증이 아닙니다.
 - `metadata.support.architecturally_supported`는 공유 모델 감지와 아키텍처 레지스트리에서 도출하며 공급업체 제목의 일치 여부가 아닙니다.
-- `runnable_on_backend`는 컴파일된 백엔드에 대한 레지스트리 지원 상태이며 실제 추론 측정 결과가 아닙니다.
+- `runnable_on_backend`는 런타임에 결정된 GPU 백엔드(Metal, CUDA 또는 ROCm)에 대한 레지스트리 지원 상태이며 실제 추론 측정 결과가 아닙니다. GPU 백엔드가 결정되지 않은 프로세스는 어떤 아키텍처도 실행 가능하다고 보고하지 않습니다.
 - `tested_checkpoint`는 현재 명시적인 사유와 함께 false입니다. 카탈로그에는 체크포인트별 검증 증거 데이터베이스가 없습니다.
 - `lifecycle.state`는 현재 provider 수명주기를 나타냅니다. 로드 전 capability가 있다고 `ready`인 것은 아닙니다.
 
