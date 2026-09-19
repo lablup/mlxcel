@@ -181,7 +181,14 @@ describe('Models workflows', () => {
     await act(async () => cancel?.click());
     await click('models-confirm-submit');
     expect(actions.cancelOperation).toHaveBeenCalledWith(download.operation_id);
-    expect(host.querySelector('[data-testid="models-operation"]')?.textContent).toBe('owner/repo');
+    const name = requireValue(host.querySelector('[data-testid="models-operation"]'));
+    expect(name.querySelector('.truncate')?.textContent).toBe('owner/repo');
+    // The name cell carries the state and progress the narrowing list hides with the State and
+    // Size columns; jsdom does not evaluate container queries, so which one shows is the browser's.
+    expect(name.querySelector('.models-name-state')?.textContent).toBe(t('en', 'models.download.running'));
+    const fallback = requireValue(name.querySelector('.models-name-progress [role="progressbar"]'));
+    expect(fallback.getAttribute('aria-label')).toBe(t('en', 'models.library.progress'));
+    expect(fallback.hasAttribute('aria-valuenow')).toBe(false);
     expect(host.textContent).toContain(t('en', 'models.download.running'));
     expect(host.textContent).not.toContain('op_download');
   });
@@ -509,6 +516,42 @@ describe('library row actions', () => {
     state = { ...state, catalog: [{ ...model(), identity: { ...model().identity, revision: 6 } }] };
     render();
     expect(document.activeElement).toBe(inRow('alpha', 'models-row-load'));
+  });
+
+  it('releases a Ready model without chat from its row: Unload, not a disabled Load', async () => {
+    const embedding = { ...ready(), capabilities: [{ task: 'embedding' as const, phase: 'provider_ready' as const, available: true, reason: null }] };
+    state = { ...state, catalog: [embedding], selectedModelId: null };
+    render();
+    expect(inRow('alpha', 'models-row-chat')).toBeNull();
+    expect(inRow('alpha', 'models-row-load')).toBeNull();
+    const unload = requireValue(inRow('alpha', 'models-row-unload'));
+    expect(unload.disabled).toBe(false);
+    expect(unload.getAttribute('aria-label')).toBe(t('en', 'models.library.unload_named', { name: 'alpha' }));
+    await act(async () => unload.click());
+    expect(host.querySelector('[data-testid="models-confirm"]')).not.toBeNull();
+    expect(actions.unloadModel).not.toHaveBeenCalled();
+    await click('models-confirm-submit');
+    expect(actions.unloadModel).toHaveBeenCalledTimes(1);
+    expect(actions.unloadModel).toHaveBeenCalledWith(expect.objectContaining({ action: 'unload', model_id: embedding.identity.id, expected_revision: 4 }));
+  });
+
+  it('moves focus to the row\'s Unload button once a Load of a model without chat started from that row is Ready', async () => {
+    const embedding = { ...model(), capabilities: [{ task: 'embedding' as const, phase: 'pre_load' as const, available: true, reason: null }] };
+    state = { ...state, catalog: [embedding], selectedModelId: null };
+    render();
+    const load = requireValue(inRow('alpha', 'models-row-load'));
+    act(() => load.focus());
+    await act(async () => load.click());
+    expect(actions.loadModel).toHaveBeenCalledTimes(1);
+    const inspect = requireValue(row('alpha').querySelector<HTMLButtonElement>('[aria-label^="Inspect"]'));
+    state = { ...state, catalog: [{ ...embedding, identity: { ...embedding.identity, revision: 5 }, lifecycle: { ...embedding.lifecycle, state: 'loading' as const, busy: true } }] };
+    render();
+    expect(inRow('alpha', 'models-row-load')?.disabled).toBe(true);
+    expect(document.activeElement).toBe(inspect);
+    state = { ...state, catalog: [{ ...ready(embedding), identity: { ...embedding.identity, revision: 6 }, capabilities: [{ task: 'embedding' as const, phase: 'provider_ready' as const, available: true, reason: null }] }] };
+    render();
+    expect(inRow('alpha', 'models-row-chat')).toBeNull();
+    expect(document.activeElement).toBe(inRow('alpha', 'models-row-unload'));
   });
 
   it('sorts from the column headers inside the lifecycle pin, with unknown sizes last in both directions', async () => {

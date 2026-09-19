@@ -11,6 +11,14 @@ const SHEET_WIDTH = 'min(320px, calc(100vw - 32px))';
 // 1100 px): the package's "medium" preset, capped to the viewport by CSS.
 const PANEL_WIDTH = 'medium';
 
+// Everything a Tab press can land on inside the panel, read when the key is pressed.
+const TABBABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])';
+
+// Rendered only: the contents of a closed <details> and display:none controls have no boxes.
+function tabbables(panel: HTMLElement): HTMLElement[] {
+  return Array.from(panel.querySelectorAll<HTMLElement>(TABBABLE)).filter((element) => element.getClientRects().length > 0 && !element.closest('[inert]'));
+}
+
 // The product's compact off-canvas sheet over the shared Drawer. The Drawer is a
 // modal aside (not a native dialog), so no NativeModalContext is provided here.
 // `placement="end"` is the right-anchored details panel instead of the left sheet.
@@ -43,16 +51,43 @@ export function Drawer(props: { open: boolean; onClose: () => void; title: strin
     // outside the panel, as the native modal sheet did. Back off once defaultPrevented
     // is set: a future popup that portals outside `.drawer` (like the Tooltip content)
     // and already handles Escape for itself should not also close the drawer beneath it.
+    // A native modal <dialog> opened above the drawer (a model confirmation) sits outside
+    // the panel and does not preventDefault its Escape, but it owns that key: it closes
+    // itself and restores focus to its opener in the drawer, so leave the drawer open.
     const handleKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape' || event.isComposing || event.defaultPrevented) return;
+      if (event.target instanceof Element && event.target.closest('dialog')) return;
       const panel = hostRef.current?.querySelector('.drawer');
       if (panel && event.target instanceof Node && panel.contains(event.target)) return;
       close();
     };
     document.addEventListener('keydown', handleKeyDown);
+    // alpha.19 builds its Tab trap list once, when the drawer opens, and its selector omits
+    // <summary>. A Details disclosure was never reachable, content opened or disabled later
+    // was never seen, and Tab past a stale last entry left the modal. Handle Tab here with
+    // the list as it is at key-press time. Stopping propagation in the capture phase keeps
+    // the package's stale handler on the same aside from also acting, so a Tab keydown inside
+    // a drawer never reaches a React onKeyDown handler; nothing inside a drawer uses one for Tab.
+    const drawerPanel = hostRef.current?.querySelector<HTMLElement>('.drawer');
+    const handleTab = (event: KeyboardEvent): void => {
+      if (event.key !== 'Tab' || event.isComposing || event.altKey || event.ctrlKey || event.metaKey || !drawerPanel) return;
+      event.stopPropagation();
+      const list = tabbables(drawerPanel);
+      if (list.length === 0) {
+        event.preventDefault();
+        return;
+      }
+      const index = document.activeElement instanceof HTMLElement ? list.indexOf(document.activeElement) : -1;
+      // Between the ends the browser moves focus in its own (document) order.
+      if (event.shiftKey ? index > 0 : index !== -1 && index < list.length - 1) return;
+      event.preventDefault();
+      (event.shiftKey ? list[list.length - 1] : list[0]).focus();
+    };
+    drawerPanel?.addEventListener('keydown', handleTab, true);
     return () => {
       cancelAnimationFrame(frame);
       document.removeEventListener('keydown', handleKeyDown);
+      drawerPanel?.removeEventListener('keydown', handleTab, true);
     };
   }, [props.open, close]);
   return <div className="ds-drawer-host" ref={(element) => {

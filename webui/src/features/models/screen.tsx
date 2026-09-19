@@ -59,11 +59,17 @@ const LIFECYCLE_FILTERS = ['unloaded', 'loading', 'ready', 'draining', 'unloadin
 type LibraryRow = { kind: 'model'; entry: CatalogEntry } | { kind: 'download'; op: Operation };
 /** Where an action started, so focus can follow it once the lifecycle settles. */
 type Origin = 'row' | 'inspector';
+/** A row control that focus can follow an action to. */
+type RowTarget = 'load' | 'chat' | 'unload';
 /**
- * After a row action, the row control that should take focus once it can: Load after Unload, Use
- * in Chat after Load. `from` is the control the action started from, which the action disables.
+ * After a row action, the row controls that should take focus once one can, in order of
+ * preference: the first that exists and is enabled wins. `from` is the control the action started
+ * from, which the action disables.
  */
-type RowFocus = { id: string; want: 'load' | 'chat'; from: Element | null };
+type RowFocus = { id: string; want: readonly RowTarget[]; from: Element | null };
+/** After a Load: Use in Chat for a chat model; Unload for one without chat (embedding, rerank, transcription). */
+const AFTER_LOAD: readonly RowTarget[] = ['chat', 'unload'];
+const AFTER_UNLOAD: readonly RowTarget[] = ['load'];
 
 function downloadRepo(op: Operation): string {
   return op.target.target_kind === 'download' ? op.target.repo_id : op.operation_id;
@@ -113,7 +119,9 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
     const pending = rowFocus.current;
     if (!pending) return;
     const holder = rowControls.current.get(`${pending.id}:inspect`);
-    const target = rowControls.current.get(`${pending.id}:${pending.want}`);
+    const target = pending.want
+      .map((slot) => rowControls.current.get(`${pending.id}:${slot}`))
+      .find((control) => control !== undefined && !control.disabled);
     const active = document.activeElement;
     const waiting =
       active === null || active === document.body || active === holder || active === pending.from || !!active.closest('[data-dialog-focus-fallback]');
@@ -121,7 +129,7 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
       rowFocus.current = null;
       return;
     }
-    if (target && !target.disabled) {
+    if (target) {
       target.focus();
       rowFocus.current = null;
     } else if (holder && active !== holder && !document.querySelector('dialog[open]')) holder.focus();
@@ -193,7 +201,7 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
   const openAction = (kind: ModelAction, entry: CatalogEntry, origin: Origin): void => {
     confirmationOrigin.current = origin;
     if (kind === 'load') {
-      if (origin === 'row') rowFocus.current = { id: entry.identity.id, want: 'chat', from: document.activeElement };
+      if (origin === 'row') rowFocus.current = { id: entry.identity.id, want: AFTER_LOAD, from: document.activeElement };
       load(entry);
     } else setConfirmation({ kind, entry, instance: state.serverInstanceId });
   };
@@ -228,7 +236,7 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
           setError(t(locale, 'models.library.stale'));
           return;
         }
-        if (confirmationOrigin.current === 'row') rowFocus.current = { id: entry.identity.id, want: 'chat', from: null };
+        if (confirmationOrigin.current === 'row') rowFocus.current = { id: entry.identity.id, want: AFTER_LOAD, from: null };
         load(
           entry,
           evictionTarget && evictionRevision !== undefined
@@ -236,7 +244,7 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
             : undefined,
         );
       } else if (value.kind === 'unload' && canUnload(state, entry)) {
-        if (confirmationOrigin.current === 'row') rowFocus.current = { id: entry.identity.id, want: 'load', from: null };
+        if (confirmationOrigin.current === 'row') rowFocus.current = { id: entry.identity.id, want: AFTER_UNLOAD, from: null };
         void execute(() =>
           actions.unloadModel({
             action: 'unload',
@@ -278,7 +286,7 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
     if (entry.identity.id !== state.selectedModelId) actions.selectModel(entry.identity.id);
     window.location.hash = 'chat';
   };
-  const register = (id: string, slot: 'inspect' | 'load' | 'chat') => (element: HTMLButtonElement | null): void => {
+  const register = (id: string, slot: 'inspect' | RowTarget) => (element: HTMLButtonElement | null): void => {
     if (element) rowControls.current.set(`${id}:${slot}`, element);
     else rowControls.current.delete(`${id}:${slot}`);
   };
@@ -300,18 +308,19 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
     return (
       <div className="models-row-actions">
         {canChat(state, entry) ? (
-          <>
-            <Button tone="primary" data-testid="models-row-chat" aria-label={t(locale, 'models.library.chat_named', { name })} disabled={busy} onClick={own(() => openChat(entry))} ref={register(entry.identity.id, 'chat')}>
-              {t(locale, 'models.library.chat')}
-            </Button>
-            {readOnly ? null : (
-              <Button data-testid="models-row-unload" aria-label={t(locale, 'models.library.unload_named', { name })} disabled={busy || !canUnload(state, entry)} onClick={own(() => openAction('unload', entry, 'row'))}>
-                {t(locale, 'models.unload')}
-              </Button>
-            )}
-          </>
-        ) : readOnly ? null : (
-          <Button data-testid="models-row-load" aria-label={t(locale, 'models.library.load_named', { name })} disabled={busy || !canLoad(state, entry)} onClick={own(() => openAction('load', entry, 'row'))} ref={register(entry.identity.id, 'load')}>
+          <Button tone="primary" data-testid="models-row-chat" aria-label={t(locale, 'models.library.chat_named', { name })} disabled={busy} onClick={own(() => openChat(entry))} ref={register(entry.identity.id, 'chat')}>
+            {t(locale, 'models.library.chat')}
+          </Button>
+        ) : null}
+        {/* Unload follows the lifecycle, not chat: a Ready embedding, rerank or transcription model is
+            released from its row too. Every other state keeps Load in place, disabled until the entry
+            can load, so a loading, draining or unloading row cannot submit twice. */}
+        {readOnly ? null : entry.lifecycle.state === 'ready' ? (
+          <Button key="unload" data-testid="models-row-unload" aria-label={t(locale, 'models.library.unload_named', { name })} disabled={busy || !canUnload(state, entry)} onClick={own(() => openAction('unload', entry, 'row'))} ref={register(entry.identity.id, 'unload')}>
+            {t(locale, 'models.unload')}
+          </Button>
+        ) : (
+          <Button key="load" data-testid="models-row-load" aria-label={t(locale, 'models.library.load_named', { name })} disabled={busy || !canLoad(state, entry)} onClick={own(() => openAction('load', entry, 'row'))} ref={register(entry.identity.id, 'load')}>
             {t(locale, 'models.load')}
           </Button>
         )}
@@ -340,6 +349,22 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
       </div>
     );
   };
+  // A download row draws its state and progress in two places: its State and Size columns, and a
+  // fallback under its name for when the narrowing list hides those columns (it has no inspector).
+  const downloadBadge = (op: Operation): React.ReactNode => (
+    <StatusBadge state={downloadBadgeState(op.state)}>{downloadStateLabel(locale, op.state)}</StatusBadge>
+  );
+  const downloadProgress = (op: Operation): React.ReactNode => (
+    <ProgressBar
+      label={t(locale, 'models.library.progress')}
+      value={
+        !op.progress.indeterminate && op.progress.total_bytes !== null && op.progress.total_bytes > 0
+          ? (op.progress.completed_bytes / op.progress.total_bytes) * 100
+          : undefined
+      }
+      detail={`${bytes(op.progress.completed_bytes, locale)} / ${bytes(op.progress.total_bytes, locale)}`}
+    />
+  );
   const downloadActions = (op: Operation): React.ReactNode => (
     <div className="models-row-actions">
       {!terminal(op) ? (
@@ -370,6 +395,9 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
           return (
             <span className="models-name" data-testid="models-operation">
               <span className="truncate" title={repo}>{repo}</span>
+              {/* Shown only once the State and Size columns have given way to a narrow list. */}
+              <span className="models-name-state">{downloadBadge(row.op)}</span>
+              <span className="models-name-progress">{downloadProgress(row.op)}</span>
               {row.op.error ? <small className="models-row-note">{row.op.error.message}</small> : null}
             </span>
           );
@@ -399,20 +427,7 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
       align: 'right',
       className: 'models-col-size',
       ...sortable,
-      render: (row) =>
-        row.kind === 'download' ? (
-          <ProgressBar
-            label={t(locale, 'models.library.progress')}
-            value={
-              !row.op.progress.indeterminate && row.op.progress.total_bytes !== null && row.op.progress.total_bytes > 0
-                ? (row.op.progress.completed_bytes / row.op.progress.total_bytes) * 100
-                : undefined
-            }
-            detail={`${bytes(row.op.progress.completed_bytes, locale)} / ${bytes(row.op.progress.total_bytes, locale)}`}
-          />
-        ) : (
-          bytes(row.entry.metadata.disk_bytes, locale)
-        ),
+      render: (row) => (row.kind === 'download' ? downloadProgress(row.op) : bytes(row.entry.metadata.disk_bytes, locale)),
     },
     {
       id: 'quantization',
@@ -443,11 +458,7 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
       className: 'models-col-state',
       ...sortable,
       render: (row) =>
-        row.kind === 'download' ? (
-          <StatusBadge state={downloadBadgeState(row.op.state)}>{downloadStateLabel(locale, row.op.state)}</StatusBadge>
-        ) : (
-          <StatusBadge state={row.entry.lifecycle.state}>{lifecycleLabel(locale, row.entry.lifecycle.state)}</StatusBadge>
-        ),
+        row.kind === 'download' ? downloadBadge(row.op) : <StatusBadge state={row.entry.lifecycle.state}>{lifecycleLabel(locale, row.entry.lifecycle.state)}</StatusBadge>,
     },
     {
       id: 'actions',

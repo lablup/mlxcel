@@ -513,6 +513,74 @@ test.describe('Models row actions', () => {
     await expectAxeClean(page);
   });
 
+  test('below 1100 px Escape in a drawer confirmation closes only the confirmation, and Tab reaches the Details disclosure', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await installLibrary(page, catalog());
+    await login(page);
+    await page.getByRole('button', { name: 'Inspect alpha-4bit', exact: true }).click();
+    const drawer = page.getByRole('dialog', { name: 'Model details' });
+    await expect(drawer).toBeVisible();
+    const remove = drawer.getByTestId('models-delete');
+    await remove.click();
+    await expect(page.getByTestId('models-confirm')).toBeVisible();
+    // The native confirmation owns this Escape: it closes itself and hands focus back to the
+    // drawer's Delete, and the drawer beneath it stays open.
+    await page.keyboard.press('Escape');
+    await expect(page.getByTestId('models-confirm')).toHaveCount(0);
+    await expect(drawer).toBeVisible();
+    await expect(drawer).toHaveClass(/(?:^|\s)drawer--open(?:\s|$)/);
+    await expect(remove).toBeFocused();
+    // The Details disclosure holds the ids, reasons, roots and docs link, which nothing else on
+    // the page shows below 1100 px, so it and everything inside it must be in the Tab cycle.
+    await page.keyboard.press('Tab');
+    await expect(drawer.locator('summary')).toBeFocused();
+    await expect(drawer.locator('summary')).toHaveText('Details');
+    await page.keyboard.press('Enter');
+    await expect(drawer.getByTestId('models-details')).toHaveJSProperty('open', true);
+    // The body mounts from the async toggle event, a task after `open` flips; wait for it.
+    await expect(drawer.getByRole('link', { name: 'API task documentation', exact: true })).toBeVisible();
+    const reached: string[] = [];
+    for (let step = 0; step < 12 && reached.at(-1) !== 'Close'; step += 1) {
+      await page.keyboard.press('Tab');
+      const focus = await page.evaluate(() => {
+        const active = document.activeElement;
+        return { inDrawer: Boolean(active?.closest('[data-testid="models-inspector-drawer"]')), name: active?.getAttribute('aria-label') ?? active?.textContent?.trim() ?? '' };
+      });
+      expect(focus.inDrawer, `Tab ${step + 1} left the drawer`).toBe(true);
+      reached.push(focus.name);
+    }
+    expect(reached).toContain('Copy command');
+    // The docs link is the drawer's last stop: Tab from it wraps to Close, and Shift+Tab comes back.
+    expect(reached.slice(-2)).toEqual(['API task documentation', 'Close']);
+    await expect(drawer.getByRole('button', { name: 'Close', exact: true })).toBeFocused();
+    await page.keyboard.press('Shift+Tab');
+    await expect(drawer.getByRole('link', { name: 'API task documentation', exact: true })).toBeFocused();
+    await expectAxeClean(page);
+  });
+
+  // A download row has no inspector to recover what the narrow list hides, so its name cell carries
+  // the progress and state that the Size and State columns hold at wider widths.
+  test('at 390 px a download row still shows its progress, its state and Cancel', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    const api = await installLibrary(page, []);
+    await login(page);
+    await page.getByTestId('models-add').click();
+    await page.getByTestId('models-repo').fill('mlx-community/SmolLM-135M-Instruct-4bit');
+    await page.getByTestId('models-public-repo').check();
+    await page.getByTestId('models-download-submit').click();
+    await expect.poll(() => api.posts.length).toBe(1);
+    await refresh(page);
+    const download = page.locator('[data-testid="models-table"] tbody tr.models-download-row');
+    await expect(download).toHaveCount(1);
+    await expect(download.locator('td.models-col-size')).toBeHidden();
+    await expect(download.locator('td.models-col-state')).toBeHidden();
+    await expect(download.getByRole('progressbar', { name: 'Download progress', exact: true })).toBeVisible();
+    await expect(download.getByText('Downloading', { exact: true }).filter({ visible: true })).toBeVisible();
+    await expect(download.getByRole('button', { name: 'Cancel download', exact: true })).toBeVisible();
+    await expectSafeLayout(page);
+    await expectAxeClean(page);
+  });
+
   test('an empty library at 390 px has no unreachable scroll region and offers the configured roots', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await installLibrary(page, []);

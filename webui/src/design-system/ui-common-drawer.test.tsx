@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../app';
 import { WebUiProvider } from '../state';
+import { Dialog, Drawer } from './primitives';
 import { AppShell } from './shell';
 
 let host: HTMLDivElement;
@@ -88,5 +89,86 @@ describe('navigation drawer adoption', () => {
     expect(isPanelOpen()).toBe(true);
     expectSharedDrawer();
     popup.remove();
+  });
+});
+
+// jsdom lays nothing out, so getClientRects() is empty for every element. Stand in for layout
+// instead of loosening the adapter's rendered-only filter: `hidden` elements and the contents
+// of a closed <details> (everything but its own summary) have no boxes, the rest have one.
+function emulateLayout(): void {
+  vi.spyOn(Element.prototype, 'getClientRects').mockImplementation(function getClientRects(this: Element) {
+    const closed = this.closest('details:not([open])');
+    const collapsed = closed !== null && !(this.tagName === 'SUMMARY' && this.parentElement === closed);
+    const rects = this.closest('[hidden]') || collapsed ? [] : [{ x: 0, y: 0, top: 0, left: 0, right: 10, bottom: 10, width: 10, height: 10 }];
+    return Object.assign(rects, { item: (index: number) => rects[index] ?? null }) as unknown as DOMRectList;
+  });
+}
+const tab = (target: Element, shiftKey = false): KeyboardEvent => {
+  const event = new KeyboardEvent('keydown', { key: 'Tab', shiftKey, bubbles: true, cancelable: true });
+  act(() => { target.dispatchEvent(event); });
+  return event;
+};
+const byText = (text: string): HTMLElement => {
+  const element = [...document.querySelectorAll<HTMLElement>('[data-testid="test-drawer"] button, [data-testid="test-drawer"] summary')].find((item) => item.textContent === text);
+  if (!element) throw new Error(`Missing drawer control ${text}`);
+  return element;
+};
+
+describe('drawer adapter keyboard contract', () => {
+  it('computes the Tab cycle at key-press time, including a summary and only rendered controls', async () => {
+    emulateLayout();
+    act(() => root.render(
+      <Drawer open title="Panel" closeLabel="Close" onClose={() => undefined} testId="test-drawer" placement="end">
+        <button type="button">First</button>
+        <details open><summary>More</summary><button type="button">Inner</button></details>
+        <button type="button" hidden>Hidden</button>
+      </Drawer>,
+    ));
+    await frames();
+    const close = document.querySelector<HTMLElement>('[data-testid="test-drawer"] .drawer__close-btn');
+    if (!close) throw new Error('Missing drawer close button');
+    const inner = byText('Inner');
+    act(() => inner.focus());
+    // The last rendered control wraps to the close button; the hidden button after it does not count.
+    expect(tab(inner).defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(close);
+    expect(tab(close, true).defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(inner);
+    // Between the ends the browser moves focus itself, so the adapter leaves the key alone.
+    const first = byText('First');
+    act(() => first.focus());
+    expect(tab(first).defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(first);
+    // Collapsing the disclosure while open makes its summary the last stop, read at key-press time.
+    const more = byText('More');
+    act(() => { (more.parentElement as HTMLDetailsElement).open = false; });
+    act(() => more.focus());
+    expect(tab(more).defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(close);
+    expect(tab(close, true).defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(more);
+  });
+
+  it('leaves the drawer open for an Escape inside a native dialog above it, and still closes on one outside', async () => {
+    const onClose = vi.fn();
+    act(() => root.render(
+      <>
+        <Drawer open title="Panel" closeLabel="Close" onClose={onClose} testId="test-drawer" placement="end">
+          <button type="button">First</button>
+        </Drawer>
+        <Dialog open title="Confirm" onClose={() => undefined} testId="test-confirm"><button type="button">Cancel</button></Dialog>
+      </>,
+    ));
+    await frames();
+    const cancel = [...document.querySelectorAll<HTMLElement>('[data-testid="test-confirm"] button')].find((item) => item.textContent === 'Cancel');
+    if (!cancel) throw new Error('Missing dialog button');
+    act(() => cancel.focus());
+    // The native dialog closes itself on this Escape and does not preventDefault it.
+    act(() => { cancel.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
+    await frames();
+    expect(onClose).not.toHaveBeenCalled();
+    // An Escape that starts outside both the panel and any dialog still closes the drawer.
+    act(() => { document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 });

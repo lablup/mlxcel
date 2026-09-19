@@ -111,11 +111,14 @@
   background: var(--color-selection);
 }
 /* Columns give way as the list narrows, and the inspector keeps everything they held: tasks
-   first, then quantization and size, then the State column, whose badge moves under the name. */
+   first, then quantization and size, then the State column, whose badge moves under the name.
+   A download row has no inspector, so its progress moves under its name with the Size column.
+   The fallbacks are display: none until then, so one progress bar and one state are ever exposed. */
 .models-library .models-list {
   container-type: inline-size;
 }
-.models-library .models-name-state {
+.models-library .models-name-state,
+.models-library .models-name-progress {
   display: none;
 }
 @container (max-width: 60rem) {
@@ -127,6 +130,12 @@
   .models-library .models-col-quantization,
   .models-library .models-col-size {
     display: none;
+  }
+  .models-library .models-name-progress {
+    display: block;
+    flex-basis: 100%;
+    min-width: 0;
+    white-space: normal;
   }
 }
 @container (max-width: 32rem) {
