@@ -49,6 +49,7 @@ export type StringKey = typeof modelStrings[number]['key']
   | 'settings.title'
   | 'settings.appearance'
   | 'settings.theme'
+  | 'settings.color_scheme'
   | 'settings.material'
   | 'settings.glass_intensity'
   | 'settings.reduce_motion'
@@ -114,9 +115,11 @@ export type StringKey = typeof modelStrings[number]['key']
   | 'gallery.sample.reasoning_body'
   | 'gallery.sample.tool_preview'
   | 'common.close'
-  | 'settings.theme.system'
-  | 'settings.theme.light'
-  | 'settings.theme.dark'
+  | 'settings.theme.mlxcel'
+  | 'settings.theme.glass'
+  | 'settings.color_scheme.system'
+  | 'settings.color_scheme.light'
+  | 'settings.color_scheme.dark'
   | 'settings.material.glass'
   | 'settings.material.tinted'
   | 'settings.material.opaque'
@@ -255,6 +258,7 @@ export const entries: Entry[] = [
   { key: 'settings.title', en: 'Settings', ko: '설정', test_id: 'settings-title' },
   { key: 'settings.appearance', en: 'Appearance preferences', ko: '화면 표시 설정', test_id: 'settings-appearance' },
   { key: 'settings.theme', en: 'Theme', ko: '테마', test_id: 'settings-theme' },
+  { key: 'settings.color_scheme', en: 'Color scheme', ko: '색상 모드', test_id: 'settings-color-scheme' },
   { key: 'settings.material', en: 'Material', ko: '재질', test_id: 'settings-material' },
   { key: 'settings.glass_intensity', en: 'Glass intensity', ko: '글래스 강도', test_id: 'settings-glass-intensity' },
   { key: 'settings.reduce_motion', en: 'Reduce motion', ko: '동작 줄이기', test_id: 'settings-reduce-motion' },
@@ -328,9 +332,11 @@ export const entries: Entry[] = [
   { key: 'gallery.sample.tool_preview', en: '{ "tool": "display_only" }', ko: '{ "tool": "표시_전용" }', test_id: 'gallery-sample-tool-preview' },
 
   { key: 'common.close', en: 'Close', ko: '닫기', test_id: 'common-close' },
-  { key: 'settings.theme.system', en: 'System', ko: '시스템', test_id: 'settings-theme-system' },
-  { key: 'settings.theme.light', en: 'Light', ko: '라이트', test_id: 'settings-theme-light' },
-  { key: 'settings.theme.dark', en: 'Dark', ko: '다크', test_id: 'settings-theme-dark' },
+  { key: 'settings.theme.mlxcel', en: 'Standard', ko: '표준', test_id: 'settings-theme-mlxcel' },
+  { key: 'settings.theme.glass', en: 'Glass', ko: '글래스', test_id: 'settings-theme-glass' },
+  { key: 'settings.color_scheme.system', en: 'System', ko: '시스템', test_id: 'settings-color-scheme-system' },
+  { key: 'settings.color_scheme.light', en: 'Light', ko: '라이트', test_id: 'settings-color-scheme-light' },
+  { key: 'settings.color_scheme.dark', en: 'Dark', ko: '다크', test_id: 'settings-color-scheme-dark' },
   { key: 'settings.material.glass', en: 'Glass', ko: '글래스', test_id: 'settings-material-glass' },
   { key: 'settings.material.tinted', en: 'Tinted', ko: '틴트', test_id: 'settings-material-tinted' },
   { key: 'settings.material.opaque', en: 'Opaque', ko: '불투명', test_id: 'settings-material-opaque' },

@@ -15,6 +15,9 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import '@lablup/ui-common/styles/base.css';
+// The one theme stylesheet, directly after base.css (ui-common: at most one theme
+// file alongside base.css, never imported by a component). See themes/index.css.
+import './design-system/themes/index.css';
 import { App } from './app';
 import { WebUiProvider } from './state';
 import './styles.css';

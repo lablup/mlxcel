@@ -50,7 +50,7 @@ cargo build --release --features cuda
 
 `mlxcel::server::webui::router::<S>()` returns a router whose routes already include `/webui`. Merge it at the root, or nest it once under the **validated server API prefix**, not under a second `/webui`. The parent router retains its root health and inference routes. `/webui` redirects to `/webui/`; the shell's `#models`-style navigation stays client-side. A missing static path returns 404 rather than an HTML fallback that could hide an API-routing error.
 
-Static responses support GET/HEAD and conditional ETags; other methods return 405 with `Allow: GET, HEAD`. HTML and the manifest revalidate; content-hashed assets may be cached immutably. The router rejects encoded/traversal path spellings and sets same-origin CSP, `nosniff`, and no-referrer headers on ordinary, error, redirect, and 304 responses. This static policy does not replace the later Host/Origin/authentication checks on administrative APIs.
+Static responses support GET/HEAD and conditional ETags; other methods return 405 with `Allow: GET, HEAD`. HTML, the manifest and `theme-bootstrap.js` (the pre-mount theme script copied from `webui/public/`, the one script without a content hash) revalidate; content-hashed assets may be cached immutably. The router rejects encoded/traversal path spellings and sets same-origin CSP, `nosniff`, and no-referrer headers on ordinary, error, redirect, and 304 responses. This static policy does not replace the later Host/Origin/authentication checks on administrative APIs.
 
 ## Testing static assets and production startup separately
 

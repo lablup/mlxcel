@@ -1,5 +1,5 @@
 /* Copyright 2025-2026 Lablup Inc. Licensed under the Apache License, Version 2.0. */
-.material-glass { background: var(--material-glass-bg); border: 1px solid var(--color-separator); box-shadow: var(--shadow-chrome); backdrop-filter: blur(var(--material-glass-blur)) saturate(var(--material-glass-saturation)); -webkit-backdrop-filter: blur(var(--material-glass-blur)) saturate(var(--material-glass-saturation)); }
+.material-glass { background: var(--material-glass-bg); border: 1px solid var(--color-separator); box-shadow: var(--shadow-chrome); -webkit-backdrop-filter: blur(var(--material-glass-blur)) saturate(var(--material-glass-saturation)); backdrop-filter: blur(var(--material-glass-blur)) saturate(var(--material-glass-saturation)); }
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) { .material-glass { background: var(--color-bg-elevated); } }
 .ds-button, .ds-icon-button, input, select, textarea { font: inherit; }
 .ds-button, .ds-icon-button { min-width: 32px; min-height: 32px; border: 1px solid var(--color-separator); color: var(--color-text); border-radius: 999px; background: var(--material-control-bg); transition: background var(--motion-fast), transform var(--motion-fast), border-color var(--motion-fast); }
@@ -11,8 +11,8 @@
 .ds-button:active, .ds-icon-button:active { transform: scale(0.985); }
 .ds-button:focus-visible, .ds-icon-button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, [role="tab"]:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .ds-button:disabled, .ds-icon-button:disabled, .ds-field[data-disabled="true"] { opacity: 0.56; cursor: not-allowed; }
-.ds-button-primary { color: white; background: #245bd8; border-color: #245bd8; }
-.ds-button-danger { color: white; background: #c6352b; border-color: #c6352b; }
+.ds-button-primary { color: white; background: var(--token-buttonPrimaryBg); border-color: #245bd8; }
+.ds-button-danger { color: white; background: var(--token-buttonDangerBg); border-color: #c6352b; }
 .ds-button-ghost { background: transparent; }
 .ds-spinner { width: 14px; height: 14px; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; animation: spin var(--motion-slow) linear infinite; }
 .ds-field { display: grid; gap: var(--space-2); color: var(--color-muted); }

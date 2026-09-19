@@ -1,0 +1,101 @@
+/* Copyright 2025-2026 Lablup Inc. Licensed under the Apache License, Version 2.0. */
+/*
+ * Binds the scheme-dependent half of the @lablup/ui-common token contract
+ * (colors, shadows, button fills, focus color, tab surfaces) to the product's
+ * semantic tokens (--color-*, --material-*, --shadow-*), for every theme this
+ * product ships. The family files after it (mlxcel.css, glass.css) set those
+ * semantic tokens per theme id and override a contract token only where the
+ * family genuinely differs. The theme-independent half of the contract (radius,
+ * type scale, spacing, control heights, motion, z-index) stays on :root in
+ * ../common-tokens.css, the way ui-common's own base.css keeps it.
+ *
+ * The selector lists every shipped id explicitly, never a bare [data-theme],
+ * so a future ui-common theme (orange-light, say) is not silently rebound to
+ * mlxcel's palette. scripts/check-theme-selectors.mjs fails when a shipped id
+ * is missing from a theme stylesheet or a listed id matches nothing.
+ */
+[data-theme="mlxcel-light"],
+[data-theme="mlxcel-dark"],
+[data-theme="glass-light"],
+[data-theme="glass-dark"] {
+  --token-boxShadow: var(--shadow-card);
+  --token-boxShadowDrawerRight: var(--shadow-card);
+  --token-boxShadowSecondary: var(--shadow-card);
+  --token-boxShadowTertiary: var(--shadow-chrome);
+  --token-buttonActiveTransform: none;
+  --token-buttonDangerBg: var(--button-danger-fill);
+  --token-buttonDangerBgActive: var(--button-danger-fill-active);
+  --token-buttonDangerBgHover: var(--button-danger-fill-active);
+  --token-buttonDangerBorder: 1px solid var(--color-separator);
+  --token-buttonDangerShadow: none;
+  --token-buttonDangerShadowHover: none;
+  --token-buttonDangerText: white;
+  --token-buttonGhostBackdrop: none;
+  --token-buttonGhostBg: transparent;
+  --token-buttonGhostBgActive: var(--color-selection);
+  --token-buttonGhostBgHover: var(--color-selection);
+  --token-buttonGhostBorder: 1px solid var(--color-separator);
+  --token-buttonGhostBorderHover: 1px solid var(--color-separator);
+  --token-buttonGhostShadow: none;
+  --token-buttonGhostShadowHover: none;
+  --token-buttonHoverTransform: none;
+  --token-buttonPrimaryBackdrop: none;
+  --token-buttonPrimaryBg: var(--button-primary-fill);
+  --token-buttonPrimaryBgActive: var(--button-primary-fill-active);
+  --token-buttonPrimaryBgHover: var(--button-primary-fill-active);
+  --token-buttonPrimaryBorder: 1px solid var(--color-separator);
+  --token-buttonPrimaryShadow: none;
+  --token-buttonPrimaryShadowHover: none;
+  --token-buttonSecondaryBackdrop: none;
+  --token-buttonSecondaryBg: var(--material-control-bg);
+  --token-buttonSecondaryBgActive: var(--color-selection);
+  --token-buttonSecondaryBgHover: var(--color-selection);
+  --token-buttonSecondaryBorder: 1px solid var(--color-separator);
+  --token-buttonSecondaryBorderHover: 1px solid var(--color-separator);
+  --token-buttonSecondaryShadow: none;
+  --token-buttonSecondaryShadowHover: none;
+  --token-buttonSuccessBackdrop: none;
+  --token-buttonSuccessBg: var(--color-success);
+  --token-buttonSuccessBgActive: var(--color-success);
+  --token-buttonSuccessBgHover: var(--color-success);
+  --token-buttonSuccessBorder: 1px solid var(--color-separator);
+  --token-buttonSuccessShadow: none;
+  --token-buttonSuccessShadowHover: none;
+  --token-colorBgContainer: var(--color-bg-elevated);
+  --token-colorBgElevated: var(--color-bg-elevated);
+  --token-colorBgLayout: var(--color-bg);
+  --token-colorBgMask: rgba(8, 10, 14, 0.42);
+  --token-colorBgTextActive: var(--color-selection);
+  --token-colorBgTextHover: var(--color-selection);
+  --token-colorBorder: var(--color-separator);
+  --token-colorBorderSecondary: var(--color-separator);
+  --token-colorError: var(--color-error);
+  --token-colorFillQuaternary: var(--color-bg-neutral);
+  --token-colorFillSecondary: var(--color-bg-neutral);
+  --token-colorFillTertiary: var(--color-bg-neutral);
+  --token-colorInfo: var(--color-focus);
+  --token-colorLink: var(--color-focus);
+  --token-colorLinkHover: var(--color-focus);
+  --token-colorPrimary: var(--color-focus);
+  --token-colorPrimaryActive: var(--color-focus);
+  --token-colorPrimaryBg: var(--color-selection);
+  --token-colorPrimaryBgHover: var(--color-selection);
+  --token-colorPrimaryBorder: var(--color-separator);
+  --token-colorSuccess: var(--color-success);
+  --token-colorSuccessActive: var(--color-success);
+  --token-colorSuccessBg: var(--color-success-bg);
+  --token-colorSuccessBorder: var(--color-separator);
+  --token-colorSuccessBorderHover: var(--color-separator);
+  --token-colorSuccessBoxShadow: none;
+  --token-colorText: var(--color-text);
+  --token-colorTextDisabled: var(--color-muted);
+  --token-colorTextPlaceholder: var(--color-muted);
+  --token-colorTextQuaternary: var(--color-muted);
+  --token-colorTextSecondary: var(--color-muted);
+  --token-colorTextTertiary: var(--color-muted);
+  --token-colorWarning: var(--color-warning);
+  --token-focusRingColor: var(--color-focus);
+  --token-tabActiveBg: var(--color-bg-elevated);
+  --token-tabFocusShadow: var(--focus-ring);
+  --token-tabHoverBg: var(--color-selection);
+}

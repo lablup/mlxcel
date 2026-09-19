@@ -1,0 +1,26 @@
+/* Copyright 2025-2026 Lablup Inc. Licensed under the Apache License, Version 2.0. */
+/*
+ * The WebUI's one theme stylesheet. src/main.tsx imports it directly after
+ * @lablup/ui-common/styles/base.css, following the package rule that an app
+ * imports at most one theme file alongside base.css and that components never
+ * import a theme file themselves. No ui-common theme file (orange-light,
+ * orange-dark) is loaded; this product ships its own [data-theme] blocks over
+ * the same --token-* contract, as base.css describes.
+ *
+ * Every block is keyed on the applied theme id, `<family>-<scheme>`, which
+ * src/design-system/theme.ts resolves and public/theme-bootstrap.js writes onto
+ * <html> before the first paint:
+ *
+ *   mlxcel-light, mlxcel-dark   the approved baseline and the default family
+ *   glass-light, glass-dark     the glass family
+ *
+ * The blocks are single-attribute selectors that rely on following base.css,
+ * exactly like ui-common's own theme files. Accessibility overrides elsewhere
+ * (tokens.css, glass-intensity.css and the tail of glass.css) are written with
+ * higher specificity so they win whatever the import order.
+ * scripts/check-theme-selectors.mjs is the CI gate that keeps every
+ * data-theme selector matching a shipped id.
+ */
+@import "./contract.css";
+@import "./mlxcel.css";
+@import "./glass.css";

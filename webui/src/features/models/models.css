@@ -35,11 +35,11 @@
   margin: 4px 0 16px;
 }
 .models-library .ds-inspector dt {
-  color: var(--text-secondary);
+  color: var(--color-muted);
   font-size: 0.85rem;
 }
 .models-library .models-selected {
-  background: var(--surface-selected, var(--surface-hover));
+  background: var(--color-selection);
 }
 .models-library .data-table__cell {
   vertical-align: top;

@@ -222,6 +222,19 @@ def assert_index_html(root: Path) -> None:
         raise SystemExit("index.html must not reference external origins")
     if 'id="root"' not in html or 'type="module"' not in html or './assets/' not in html:
         raise SystemExit("index.html must contain the WebUI root and relative module assets")
+    # The served CSP is script-src 'self', so every script is an external file.
+    for match in re.finditer(r"<script\b([^>]*)>(.*?)</script>", html, re.S):
+        if 'src="' not in match.group(1) or match.group(2).strip():
+            raise SystemExit("index.html must not carry an inline script; the WebUI CSP blocks it")
+    # Issue #1903: the theme is applied before first paint by a classic,
+    # render-blocking script that runs ahead of the app module.
+    bootstraps = re.findall(r'<script\b[^>]*\bsrc="\./theme-bootstrap\.js"[^>]*>', html)
+    bootstrap = re.search(r'<script\b[^>]*\bsrc="\./theme-bootstrap\.js"[^>]*>', html)
+    if bootstrap is None or len(bootstraps) != 1 or re.search(r'\btype=|\basync\b|\bdefer\b|\bnomodule\b', bootstrap.group(0)):
+        raise SystemExit("index.html must load ./theme-bootstrap.js as a classic, blocking script")
+    app_module = re.search(r'<script\b[^>]*\bsrc="\./assets/[^"]+\.js"[^>]*>', html)
+    if app_module is None or bootstrap.start() > app_module.start():
+        raise SystemExit("index.html must run ./theme-bootstrap.js before the app module")
     for token in html.replace('>', '>\n').splitlines():
         for attr in ('src="./', 'href="./'):
             if attr in token:
