@@ -57,6 +57,15 @@ function restoredDraftConflicts(restoredFingerprint: { current: string | null },
   return base !== null && value.fingerprint !== base;
 }
 
+// `spec.name` is a server-provided schema key, so a name such as `__proto__` or `constructor` must not resolve
+// through the prototype chain of a plain object literal. Both lookups below check `Object.hasOwn` first.
+function currentValueFor(current: SettingsResponse | null, name: string): unknown {
+  return current !== null && Object.hasOwn(current.current, name) ? current.current[name] ?? null : null;
+}
+function errorFor(errors: Readonly<Record<string, string>>, name: string): string | undefined {
+  return Object.hasOwn(errors, name) ? errors[name] : undefined;
+}
+
 export function LiveSettings({ modelId, scope, locale }: { modelId: string; scope?: ServerDefaultsScope | null; locale: Locale }): React.JSX.Element {
   const actions = useWebUiActions();
   const [current, setCurrentState] = useState<SettingsResponse | null>(null);
@@ -129,7 +138,7 @@ export function LiveSettings({ modelId, scope, locale }: { modelId: string; scop
           <fieldset key={group} className="settings-group" data-group={group} data-size={specs.length <= 2 ? 'small' : 'large'}>
             <legend>{t(locale, GROUP_LABEL[group])}</legend>
             <div className="settings-grid settings-grid-dense">
-              {specs.map((spec) => <SettingControl key={spec.name} spec={spec} value={current?.current[spec.name] ?? null} draft={Object.hasOwn(draft, spec.name) ? draft[spec.name] : undefined} onChange={(value) => edit(spec.name, value)} error={errors[spec.name]} disabled={busy} locale={locale} />)}
+              {specs.map((spec) => <SettingControl key={spec.name} spec={spec} value={currentValueFor(current, spec.name)} draft={Object.hasOwn(draft, spec.name) ? draft[spec.name] : undefined} onChange={(value) => edit(spec.name, value)} error={errorFor(errors, spec.name)} disabled={busy} locale={locale} />)}
             </div>
           </fieldset>
         ))}

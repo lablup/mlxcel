@@ -78,3 +78,18 @@ describe('live draft across Settings tab switches', () => {
     expect(input('Temperature')?.value).toBe('0.33');
   });
 });
+describe('schema names that collide with Object.prototype', () => {
+  it('renders a mutable setting named "constructor" without resolving errors or the current value through the prototype chain', async () => {
+    // `errors` and `current.current` are plain object literals, so an unguarded `errors[spec.name]`
+    // or `current.current[spec.name]` resolves to the inherited `Object.prototype.constructor`
+    // function for this name instead of `undefined`, which then crashes React when it is handed to
+    // `<small>{error}</small>` as a non-string, non-null child.
+    const response: SettingsResponse = { schema: [{ name: 'constructor', type: 'int', default: 0, mutable: true, allowed: null, help: 'Trap field' }], current: {}, fingerprint: 'a'.repeat(64) };
+    actions.getSettings.mockResolvedValue(response);
+    await render();
+    const field = input('constructor');
+    expect(field).toBeTruthy();
+    expect(field?.value).toBe('');
+    expect(host.querySelector('[data-tone="error"]')).toBeNull();
+  });
+});
