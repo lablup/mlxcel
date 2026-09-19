@@ -166,7 +166,7 @@ impl GpuBackendKind {
     /// `#[non_exhaustive]` enum, so adding a variant gives them no compile
     /// error. They walk this list in a test instead: the WebUI catalog checks
     /// that every kind reads its own registry column (issue #1886). The const
-    /// block below keeps the list complete.
+    /// block below fails the build when a variant is missing from the list.
     pub const ALL: [GpuBackendKind; 4] = [
         GpuBackendKind::None,
         GpuBackendKind::Metal,
@@ -176,20 +176,25 @@ impl GpuBackendKind {
 }
 
 // Compile-time guard for `GpuBackendKind::ALL`. The match has no wildcard, so a
-// new variant fails to compile here: give it the next index and append it to
-// `ALL` as well. The assertion then rejects a list that is out of order or
-// repeats a variant.
+// new variant fails to compile here until it has an arm, and each arm reads its
+// own variant's slot of `ALL`. The arm for a fifth variant reads `ALL[4]`,
+// which fails to compile (`unconditional_panic`) until `ALL` gains that entry.
+// The loop then rejects a list that is out of order, repeats a variant, or has
+// an arm reading another variant's slot.
 const _: () = {
+    const fn slot(kind: GpuBackendKind) -> GpuBackendKind {
+        match kind {
+            GpuBackendKind::None => GpuBackendKind::ALL[0],
+            GpuBackendKind::Metal => GpuBackendKind::ALL[1],
+            GpuBackendKind::Cuda => GpuBackendKind::ALL[2],
+            GpuBackendKind::Rocm => GpuBackendKind::ALL[3],
+        }
+    }
     let mut position = 0;
     while position < GpuBackendKind::ALL.len() {
-        let index = match GpuBackendKind::ALL[position] {
-            GpuBackendKind::None => 0,
-            GpuBackendKind::Metal => 1,
-            GpuBackendKind::Cuda => 2,
-            GpuBackendKind::Rocm => 3,
-        };
+        let kind = GpuBackendKind::ALL[position];
         assert!(
-            index == position,
+            kind as usize == position && slot(kind) as usize == position,
             "GpuBackendKind::ALL must list every variant once, in declaration order"
         );
         position += 1;
