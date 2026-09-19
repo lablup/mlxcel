@@ -2,7 +2,7 @@
 // The model for the next turn, in the conversation header: Ready chat models first,
 // then models on their way, then models that can be loaded. Selecting never loads;
 // only the inline Load button does, after a confirmation, with the Models request.
-import React, { useRef, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import type { CatalogEntry, WebUiSnapshot } from '../../api/types';
 import { Button, ConfirmDialog, Select } from '../../design-system/primitives';
 import type { SelectProps } from '../../design-system/common-select';
@@ -93,6 +93,9 @@ export function ModelPicker({ locale }: { locale: Locale }): React.JSX.Element {
     setCapacity(null);
     run(entry, () => submitLoad(actions, state, entry, capacityProfile, () => offerCapacity(entry), { id: target, revision }));
   };
+  // Chat re-renders on every 50 ms stream flush; rebuild and re-sort the options only when
+  // the catalog, the selection or the locale changes.
+  const options = useMemo(() => pickerOptions(state.catalog, model, locale), [state.catalog, model, locale]);
   const hint = hintKey(state, model);
   // Unloaded or failed chat models get the inline Load; canLoad covers a load already
   // pending for the model, unsupported or incomplete checkpoints and a disabled action.
@@ -102,7 +105,7 @@ export function ModelPicker({ locale }: { locale: Locale }): React.JSX.Element {
   // or the POST is still being reconciled. A later unload does not bring it back.
   const requested = result !== null && result.error === null && model !== undefined && (model.lifecycle.state === 'loading' || model.lifecycle.busy || modelPending(state, model.identity.id));
   return <div className="chat-model">
-    <Select locale={locale} label={t(locale, 'chat.model.label')} value={model?.identity.id ?? ''} options={pickerOptions(state.catalog, model, locale)} onChange={(id) => actions.selectModel(id || null)} testId="chat-model-picker" />
+    <Select locale={locale} label={t(locale, 'chat.model.label')} value={model?.identity.id ?? ''} options={options} onChange={(id) => actions.selectModel(id || null)} testId="chat-model-picker" />
     {loadTarget ? <Button tone="primary" busy={pending} disabled={pending || !canLoad(state, loadTarget)} data-testid="chat-load" onClick={() => setConfirming(loadTarget)}>{t(locale, 'models.load')}</Button> : null}
     {/* One polite status line for hints and the accepted request; load errors are alerts. */}
     <p className="chat-model-status" role="status" data-testid="chat-model-status">{requested ? t(locale, 'chat.load.requested') : hint && !result?.error ? <>{t(locale, hint)}{hint === 'chat.model.hint.cannot_load' ? <> <a href="#models">{t(locale, 'chat.no_model.action')}</a></> : null}</> : null}</p>

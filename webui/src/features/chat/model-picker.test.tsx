@@ -74,6 +74,19 @@ beforeEach(() => {
 afterEach(() => { act(() => root.unmount()); host.remove(); vi.unstubAllGlobals(); Reflect.deleteProperty(HTMLElement.prototype, 'scrollIntoView'); });
 
 describe('ModelPicker', () => {
+  it('keeps the sorted options across re-renders that change neither catalog, selection nor locale', () => {
+    // Chat re-renders the picker on every 50 ms stream flush; only a new catalog re-sorts.
+    mocked.state = { ...snapshot(target), catalog, selectedModelId: beta.identity.id };
+    render();
+    const compare = vi.spyOn(String.prototype, 'localeCompare');
+    try {
+      render(); render();
+      expect(compare).not.toHaveBeenCalled();
+      mocked.state = { ...mocked.state, catalog: [...catalog] };
+      render();
+      expect(compare).toHaveBeenCalled();
+    } finally { compare.mockRestore(); }
+  });
   it('selects without loading: choosing a model only calls selectModel', async () => {
     mocked.state = { ...snapshot(target), catalog: [target, alpha], selectedModelId: null };
     render();
