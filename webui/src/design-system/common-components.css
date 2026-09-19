@@ -38,6 +38,9 @@
 .ds-common-select .select__label { color: var(--color-text); font-size: 0.9rem; font-weight: 650; }
 .select__dropdown--portal { max-width: calc(100vw - 16px); }
 .tooltip__wrapper.ds-tooltip-trigger { min-width: 0; max-width: 100%; }
+/* Card: BaseCard keeps the previous block flow; its :focus-within rule removes the outline, so restore a visible keyboard ring. */
+.base-card.ds-card { display: block; }
+.base-card.ds-card:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 /* ErrorBanner: the shared ErrorState as the compact product banner, not its centered 200px block. */
 .ds-banner .error-state { display: grid; gap: var(--space-2); justify-content: stretch; justify-items: start; align-content: start; align-items: start; min-height: 0; padding: 0; text-align: start; }
 .ds-banner .error-state__title { margin: 0; color: inherit; font-size: inherit; font-weight: 700; line-height: inherit; }

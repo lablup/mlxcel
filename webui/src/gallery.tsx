@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Button, StaticTable, DenseList, Dialog, EmptyState, ErrorBanner, Field, Inspector, LoginView, ProgressBar, SchemaMismatchView, Select, StatusBadge, Tabs, Tooltip } from './design-system/primitives';
+import { Button, Card, StaticTable, DenseList, Dialog, EmptyState, ErrorBanner, Field, Inspector, LoginView, ProgressBar, SchemaMismatchView, Select, StatusBadge, Tabs, Tooltip } from './design-system/primitives';
 import { formatBytes, formatTokensPerSecond } from './design-system/format';
 import type { Locale } from './i18n/catalog';
 import { t, testId } from './i18n/catalog';
@@ -33,17 +33,17 @@ export function DesignGallery(props: { locale: Locale }): React.JSX.Element {
 function ControlPanel(props: { locale: Locale; value: string; onValueChange: (value: string) => void; selectValue: string; onSelectChange: (value: string) => void; onOpenDialog: () => void }): React.JSX.Element {
   return (
     <div className="gallery-grid">
-      <article className="surface-card">
+      <Card>
         <h2>{t(props.locale, 'gallery.controls.title')}</h2>
         <div className="control-row"><Button tone="primary">{t(props.locale, 'gallery.controls.primary')}</Button><Button>{t(props.locale, 'gallery.controls.secondary')}</Button><Button tone="danger">{t(props.locale, 'gallery.controls.danger')}</Button><Button busy>{t(props.locale, 'gallery.controls.busy')}</Button></div>
         <Field label={t(props.locale, 'gallery.field.repo')} value={props.value} onChange={props.onValueChange} error={t(props.locale, 'gallery.field.repo_error')} hint={t(props.locale, 'gallery.field.repo_hint')} testId="gallery-field" />
         <Select locale={props.locale} label={t(props.locale, 'gallery.select.native')} value={props.selectValue} onChange={props.onSelectChange} options={[{ value: 'ready', label: t(props.locale, 'models.status.ready') }, { value: 'unloaded', label: t(props.locale, 'models.status.unloaded') }]} />
-      </article>
-      <article className="surface-card">
+      </Card>
+      <Card>
         <h2>{t(props.locale, 'gallery.overlays.title')}</h2>
         <p>{t(props.locale, 'gallery.long_cjk')}</p>
         <div className="control-row"><Tooltip content={t(props.locale, 'gallery.tooltip')}><Button>{t(props.locale, 'gallery.hover_focus')}</Button></Tooltip><Button tone="primary" onClick={props.onOpenDialog}>{t(props.locale, 'gallery.dialog.open')}</Button></div>
-      </article>
+      </Card>
     </div>
   );
 }
@@ -67,10 +67,10 @@ function StatePanel(props: { locale: Locale }): React.JSX.Element {
 function DataPanel(props: { locale: Locale }): React.JSX.Element {
   return (
     <div className="gallery-grid dense-gallery">
-      <article className="surface-card table-card" tabIndex={0} aria-label={t(props.locale, 'gallery.sample.caption')}>
+      <Card className="table-card" role="region" tabIndex={0} ariaLabel={t(props.locale, 'gallery.sample.caption')}>
         <h2>{t(props.locale, 'gallery.data.title')}</h2>
         <StaticTable caption={t(props.locale, 'gallery.sample.caption')}><thead><tr><th>{t(props.locale, 'gallery.data.name')}</th><th>{t(props.locale, 'gallery.data.status')}</th><th>{t(props.locale, 'gallery.data.rate')}</th></tr></thead><tbody><tr><td><span className="truncate" title={t(props.locale, 'models.long_name')} aria-label={t(props.locale, 'models.long_name')}>{t(props.locale, 'models.long_name')}</span></td><td><StatusBadge state="ready">{t(props.locale, 'models.status.ready')}</StatusBadge></td><td>{formatTokensPerSecond(39.4, props.locale)}</td></tr><tr><td><span className="truncate" title="granite-4.0-h-tiny-4bit" aria-label="granite-4.0-h-tiny-4bit">granite-4.0-h-tiny-4bit</span></td><td><StatusBadge state="unloaded">{t(props.locale, 'models.status.unloaded')}</StatusBadge></td><td>{formatTokensPerSecond(null, props.locale)}</td></tr></tbody></StaticTable>
-      </article>
+      </Card>
       <Inspector title={t(props.locale, 'gallery.data.inspector')}><p className="sample-label">{t(props.locale, 'gallery.sample.label')}</p><p>{t(props.locale, 'models.unsupported.reason')}</p><StatusBadge state="failed">{t(props.locale, 'models.status.failed')}</StatusBadge><hr /><p>{t(props.locale, 'gallery.sample.reasoning_body')}</p><code>{t(props.locale, 'gallery.sample.tool_preview')}</code></Inspector>
     </div>
   );
