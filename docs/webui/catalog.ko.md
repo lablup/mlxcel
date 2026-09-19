@@ -32,6 +32,8 @@
 
 `metadata.model_type`은 `config.json`의 원본 문자열을 제한 안에서 그대로 보존한 값이며 대소문자를 유지합니다. 값이 없거나 문자열이 아니거나 너무 길거나 읽을 수 없으면 잘라내지 않고 사유가 있는 `null`을 반환합니다. `metadata.declared_architectures`도 같은 무절단 규칙을 적용한 원본 `architectures` 배열입니다. `metadata.architecture`는 이 원본 필드의 단순 복사본이 아니라 공유 로더 감지 권한이 해석한 mlxcel 레지스트리 식별자입니다. 카탈로그는 그 권한에 제한된 probe를 제공합니다. 변형 구분에 가중치 헤더가 필요하고 제한된 sidecar 증거가 없으면 사유와 함께 unknown으로 남깁니다. 관련 Gemma 4, Inkling, Kimi K3 변형을 임의로 텍스트 모델이라고 추정하지 않는 것도 이 원칙에 포함됩니다.
 
+`metadata.dtype`은 `config.json`에 선언된 가중치 dtype입니다. `torch_dtype`을 먼저 읽고, 없으면 최신 export가 쓰는 `dtype`을 읽으며, 최상위에서 찾지 못하면 `text_config` 아래에서 찾습니다. 값은 짧은 소문자 이름으로 정규화됩니다(`bfloat16`은 `bf16`, `float16`은 `fp16`, `float32`는 `fp32`가 되고 `torch.` 접두사는 제거됩니다). 그 밖의 값은 32바이트 이하의 ASCII 식별자일 때만 소문자로 보고합니다. 키가 없거나 문자열이 아니거나 `auto`이거나 이 제한을 벗어나면 별도 사유 없이 `null`입니다. 양자화된 체크포인트도 이 값을 보고하며, 이때는 양자화되지 않은 텐서의 dtype을 뜻합니다. 그래서 라이브러리는 `metadata.quantization`을 알 수 있으면 그것을 보여 주고, 양자화되지 않은 체크포인트에서는 `metadata.dtype`으로 대신합니다.
+
 Capability에는 적용 단계와 사용할 수 없는 사유가 있습니다. 이미지 입력은 준비된 기존 provider에서 확인하며 메타데이터만으로 이미지 전송을 활성화하지 않습니다. 비채팅 출력 task는 채팅과 구분합니다. 알 수 없는 파라미터 수와 메모리 추정값은 0이 아니라 사유가 있는 `null`입니다. 디스크 바이트는 파일 크기이며 프로세스 RSS나 allocator 메모리가 아닙니다.
 
 ## 파일시스템과 새로고침 경계

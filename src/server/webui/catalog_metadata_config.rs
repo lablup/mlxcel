@@ -16,7 +16,7 @@ use serde_json::Value;
 
 use super::catalog_types::{
     CatalogMetadataUnknownReasons, MAX_DECLARED_ARCHITECTURE_BYTES, MAX_DECLARED_ARCHITECTURES,
-    MAX_MODEL_TYPE_BYTES,
+    MAX_DTYPE_BYTES, MAX_MODEL_TYPE_BYTES,
 };
 
 pub(super) fn declared_model_type_from_config(
@@ -91,4 +91,42 @@ pub(super) fn declared_architectures_from_config(
         architectures.push(raw.to_string());
     }
     Some(architectures)
+}
+
+/// The declared weight dtype, normalized to the short name the library prints.
+///
+/// Reads `torch_dtype`, then `dtype` (the key newer `transformers` exports write),
+/// at the top level and then under `text_config`, the layout multimodal exports
+/// use. A `torch.` prefix is dropped and the common floating-point names shorten
+/// (`bfloat16` to `bf16`); any other value passes through lowercased only when it
+/// is a bounded ASCII identifier, so a config cannot put arbitrary text into the
+/// catalog. `auto` is a loader directive, not a dtype, and reads as unknown.
+pub(super) fn dtype_from_config(config: &Value) -> Option<String> {
+    [Some(config), config.get("text_config")]
+        .into_iter()
+        .flatten()
+        .flat_map(|scope| ["torch_dtype", "dtype"].map(|key| scope.get(key)))
+        .flatten()
+        .find_map(|value| normalize_dtype(value.as_str()?))
+}
+
+fn normalize_dtype(raw: &str) -> Option<String> {
+    let name = raw.trim();
+    let name = name.strip_prefix("torch.").unwrap_or(name);
+    if name.is_empty()
+        || name.len() > MAX_DTYPE_BYTES
+        || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    {
+        return None;
+    }
+    let lower = name.to_ascii_lowercase();
+    let short = match lower.as_str() {
+        "auto" => return None,
+        "bfloat16" | "bf16" => "bf16",
+        "float16" | "half" | "fp16" | "f16" => "fp16",
+        "float32" | "float" | "fp32" | "f32" => "fp32",
+        "float64" | "double" | "fp64" | "f64" => "fp64",
+        _ => return Some(lower),
+    };
+    Some(short.to_string())
 }

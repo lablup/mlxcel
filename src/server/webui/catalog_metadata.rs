@@ -33,7 +33,7 @@ use super::catalog_fs::{
     completeness, content_fingerprint, disk_size, format_for, read_json_bounded,
 };
 use super::catalog_metadata_config::{
-    declared_architectures_from_config, declared_model_type_from_config,
+    declared_architectures_from_config, declared_model_type_from_config, dtype_from_config,
 };
 
 use super::catalog_types::{
@@ -241,6 +241,7 @@ fn metadata_for(path: &Path) -> CatalogMetadata {
     let (disk_bytes, disk_reason) = disk_size(path);
     reasons.disk_bytes = disk_reason;
     let quantization = config.as_ref().and_then(quantization_from_config);
+    let dtype = config.as_ref().and_then(dtype_from_config);
     if quantization.is_none() {
         reasons.quantization = Some("quantization is not declared in bounded metadata".to_string());
     }
@@ -283,6 +284,7 @@ fn metadata_for(path: &Path) -> CatalogMetadata {
         input_tasks,
         output_tasks,
         quantization,
+        dtype,
         format,
         parameter_count: None,
         disk_bytes,

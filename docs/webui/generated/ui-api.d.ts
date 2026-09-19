@@ -383,6 +383,7 @@ export interface CatalogMetadata {
   readonly input_tasks: ReadonlyArray<TaskKind>;
   readonly output_tasks: ReadonlyArray<TaskKind>;
   readonly quantization: string | null;
+  readonly dtype: string | null;
   readonly format: string | null;
   readonly parameter_count: number | null;
   readonly disk_bytes: number | null;

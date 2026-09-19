@@ -450,6 +450,91 @@ fn non_chat_task_and_removal_reasons_are_truthful() {
     );
 }
 
+/// Issue #1918: an unquantized checkpoint showed "Unknown" in the library because
+/// nothing read the declared weight dtype. The field must be present (null when
+/// unknown) and normalized to the short names the UI prints.
+#[test]
+fn dtype_reports_the_declared_weight_dtype_and_null_when_unknown() {
+    let root = temp_dir("dtype");
+    let oversized = format!(
+        r#"{{"model_type":"qwen3","torch_dtype":"{}"}}"#,
+        "f".repeat(64)
+    );
+    let cases: [(&str, &str, Option<&str>); 12] = [
+        (
+            "bf16",
+            r#"{"model_type":"qwen3","torch_dtype":"bfloat16"}"#,
+            Some("bf16"),
+        ),
+        (
+            "fp16",
+            r#"{"model_type":"qwen3","torch_dtype":"float16"}"#,
+            Some("fp16"),
+        ),
+        (
+            "fp32-torch-prefix",
+            r#"{"model_type":"qwen3","torch_dtype":"torch.float32"}"#,
+            Some("fp32"),
+        ),
+        (
+            "dtype-key",
+            r#"{"model_type":"qwen3","dtype":"bfloat16"}"#,
+            Some("bf16"),
+        ),
+        (
+            "text-config",
+            r#"{"model_type":"qwen3","text_config":{"torch_dtype":"bfloat16"}}"#,
+            Some("bf16"),
+        ),
+        (
+            "quantized-keeps-dtype",
+            r#"{"model_type":"qwen3","torch_dtype":"bfloat16","quantization_config":{"bits":4}}"#,
+            Some("bf16"),
+        ),
+        (
+            "other-identifier",
+            r#"{"model_type":"qwen3","torch_dtype":"Float8_E4M3FN"}"#,
+            Some("float8_e4m3fn"),
+        ),
+        (
+            "absent",
+            r#"{"model_type":"qwen3","quantization_config":{"bits":4}}"#,
+            None,
+        ),
+        (
+            "auto",
+            r#"{"model_type":"qwen3","torch_dtype":"auto"}"#,
+            None,
+        ),
+        (
+            "non-string",
+            r#"{"model_type":"qwen3","torch_dtype":16}"#,
+            None,
+        ),
+        (
+            "markup",
+            r#"{"model_type":"qwen3","torch_dtype":"<b>bf16</b>"}"#,
+            None,
+        ),
+        ("oversized", oversized.as_str(), None),
+    ];
+    for (name, config, expected) in cases {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), config).unwrap();
+        std::fs::write(dir.join("model.safetensors"), b"weights").unwrap();
+        let entry = catalog_entry(model(name, dir, RouterModelSource::ModelsDir));
+        // Asserted on the wire shape: the key is part of the contract even when null.
+        let json = serde_json::to_value(&entry).unwrap();
+        let metadata = json["metadata"].as_object().unwrap();
+        assert_eq!(
+            metadata.get("dtype"),
+            Some(&expected.map_or(serde_json::Value::Null, serde_json::Value::from)),
+            "{name}"
+        );
+    }
+}
+
 #[path = "catalog_cache_tests.rs"]
 mod catalog_cache_tests;
 
