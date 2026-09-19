@@ -25,9 +25,11 @@ export function activePoints(samples: Samples): HistoryPoint[] {
  * Active requests over the five-minute window as a dot plot in one <path>: each point
  * is a zero-length subpath that the round line cap in activity.css draws as a dot, so a
  * full 150-sample ring costs one DOM node per poll instead of one <circle> per sample.
+ * The right edge is `end`, the latest runtime sample whether or not it carried a
+ * measurement, so a trailing run of missing measurements stays blank instead of sliding
+ * older dots to the edge where they would read as current.
  */
-export function Sparkline({ points, locale }: { points: readonly HistoryPoint[]; locale: Locale }): React.JSX.Element {
-  const end = points.at(-1)?.time ?? 0;
+export function Sparkline({ points, end, locale }: { points: readonly HistoryPoint[]; end: number; locale: Locale }): React.JSX.Element {
   const max = Math.max(1, ...points.map((point) => point.value));
   const span = WIDTH - 2 * INSET;
   const d = points.map((point) => {

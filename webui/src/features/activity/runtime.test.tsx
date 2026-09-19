@@ -68,6 +68,19 @@ describe('runtime summary tiles', () => {
     expect(svg?.querySelector('path')?.getAttribute('d')?.match(/M/g)).toHaveLength(samples.length - Math.ceil(150 / 7));
     expect(svg?.querySelector('circle')).toBeNull();
   });
+  it('keeps a trailing run of missing samples blank at the right edge of the sparkline', () => {
+    const runtime = observe({ active_requests: measured(1, 'requests') });
+    const unloaded = { ...runtime, measurements: { active_requests: missing('requests', 'model provider is not loaded; no live counters are available') } };
+    // The last 60 s of the 300 s window have no measurement: those dots must stay blank, not slide the older ones right.
+    const samples = Array.from({ length: 150 }, (_, index) => ({ receivedAt: Date.parse(at) + index * 2000, runtime: index >= 120 ? unloaded : runtime }));
+    snapshot = { ...snapshot, runtimeHistory: samples, lastUpdatedAt: samples.at(-1)?.receivedAt ?? null };
+    const svg = mount().querySelector('[data-testid="runtime-summary"] .activity-sparkline');
+    const width = Number(svg?.getAttribute('viewBox')?.split(' ')[2]);
+    const xs = [...(svg?.querySelector('path')?.getAttribute('d') ?? '').matchAll(/M([\d.]+) ([\d.]+)h0/g)].map((match) => Number(match[1]));
+    expect(xs).toHaveLength(120);
+    const lastX = xs.at(-1) ?? width;
+    expect(lastX).toBeLessThan(width * 0.85);
+  });
   it('shows four decorative loading tiles under one localized status until the first sample', () => {
     const runtime = validateRuntime(runtimeFixture);
     snapshot = { ...initialSnapshot(), connection: 'polling', selectedModelId: runtime.model_id };

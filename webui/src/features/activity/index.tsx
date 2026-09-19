@@ -49,7 +49,7 @@ export function ActivityPage({ locale }: { locale: Locale }): React.JSX.Element 
       onRetry={() => { void actions.refresh(); }}
       retryLabel={t(locale, 'activity.refresh')}
     />
-    {snapshot.selectedModelId === null ? <EmptyState title={t(locale, 'activity.select')} body={t(locale, 'activity.select_body')} /> : <RuntimeView runtime={runtime} points={points} locale={locale} stale={stale} runtimeStale={runtimeStale} />}
+    {snapshot.selectedModelId === null ? <EmptyState title={t(locale, 'activity.select')} body={t(locale, 'activity.select_body')} /> : <RuntimeView runtime={runtime} points={points} historyEnd={latestRuntimeAt} locale={locale} stale={stale} runtimeStale={runtimeStale} />}
     <Operations operations={snapshot.operations} names={names} locale={locale} stale={stale} now={snapshot.lastUpdatedAt ?? Date.now()} />
   </div>;
 }

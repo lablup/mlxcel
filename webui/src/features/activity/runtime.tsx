@@ -19,9 +19,9 @@ const measured = (metric: MeasuredValue | undefined): metric is MeasuredValue =>
 const PRIMARY = ['active_requests', 'completed_requests_total', 'completion_tokens_total', 'queued_requests'] as const;
 const SCOPE_KEYS = { model: 'activity.scope.model', slot: 'activity.scope.slot', pool: 'activity.scope.pool', server: 'activity.scope.server', unknown: 'activity.scope.unknown' } as const;
 
-type RuntimeViewProps = { runtime: RuntimeSnapshot | undefined; points: readonly HistoryPoint[]; locale: Locale; stale: boolean; runtimeStale: boolean };
+type RuntimeViewProps = { runtime: RuntimeSnapshot | undefined; points: readonly HistoryPoint[]; historyEnd: number | null; locale: Locale; stale: boolean; runtimeStale: boolean };
 
-export function RuntimeView({ runtime, points, locale, stale, runtimeStale }: RuntimeViewProps): React.JSX.Element {
+export function RuntimeView({ runtime, points, historyEnd, locale, stale, runtimeStale }: RuntimeViewProps): React.JSX.Element {
   const headingId = useId();
   if (runtime === undefined && stale) return <EmptyState title={t(locale, 'activity.runtime')} body={t(locale, 'activity.unavailable')} />;
   const heading = <h2 id={headingId}>{t(locale, 'activity.runtime')}</h2>;
@@ -37,7 +37,7 @@ export function RuntimeView({ runtime, points, locale, stale, runtimeStale }: Ru
   const tiles = PRIMARY.map((name) => {
     const metric = runtime.measurements[name];
     const hint = measured(metric) ? t(locale, 'activity.observed_at', { time: clockTime(metric.measured_at, locale) }) : t(locale, metricReasonKey(metric));
-    const sparkline = name === 'active_requests' && points.length >= 2 ? <Sparkline points={points} locale={locale} /> : undefined;
+    const sparkline = name === 'active_requests' && points.length >= 2 && historyEnd !== null ? <Sparkline points={points} end={historyEnd} locale={locale} /> : undefined;
     return <StatCard className="activity-metric" key={name} label={metricLabel(name, locale)} value={metric === undefined ? t(locale, 'format.unknown') : metricValue(metric, locale)} hint={hint} sparkline={sparkline} />;
   });
   return <section className="activity-runtime" aria-labelledby={headingId}>{heading}
