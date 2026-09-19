@@ -367,4 +367,30 @@ test.describe('Models row activation', () => {
     await expect(inspected(page)).toHaveText(catalog[0].identity.display_name);
     expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
   });
+
+  // Row activation makes a selected row routine, so its "Selected" badge must stay readable on the
+  // selection fill in every theme, including high contrast, where the fill is 30 percent focus color.
+  test('a selected row, and a hovered one, stay contrast-clean in every theme with and without high contrast', async ({ page }) => {
+    const catalog = entries();
+    await installLibrary(page, catalog);
+    const failures: string[] = [];
+    for (const themeFamily of ['mlxcel', 'glass'])
+      for (const colorScheme of ['light', 'dark'])
+        for (const highContrast of ['off', 'on']) {
+          const appearance = { themeFamily, colorScheme, highContrast, material: 'opaque', locale: 'en', reduceMotion: true };
+          // Store the appearance on the app origin, then boot a fresh document so it is read at startup.
+          await page.goto('/#models');
+          await page.evaluate((value) => localStorage.setItem('mlxcel.webui.appearance', value), JSON.stringify(appearance));
+          await page.goto('about:blank');
+          await login(page);
+          await expect(page.locator('html')).toHaveAttribute('data-theme', `${themeFamily}-${colorScheme}`);
+          await bodyRows(page).nth(0).locator('td').nth(2).click();
+          await expect(bodyRows(page).nth(0)).toHaveClass(/models-selected/);
+          await bodyRows(page).nth(1).locator('td').nth(2).hover();
+          const results = await new AxeBuilder({ page }).include('[data-testid="models-table"]').withRules(['color-contrast']).analyze();
+          for (const violation of results.violations)
+            for (const node of violation.nodes) failures.push(`${themeFamily}-${colorScheme} high-contrast ${highContrast}: ${node.target.join(' ')} ${node.failureSummary ?? ''}`);
+        }
+    expect(failures).toEqual([]);
+  });
 });
