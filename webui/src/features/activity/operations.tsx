@@ -1,6 +1,6 @@
 // Copyright 2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 import React, { useId, useState } from 'react';
-import type { Operation, OperationKind, OperationState } from '../../api/types';
+import type { ErrorCode, Operation, OperationKind, OperationState } from '../../api/types';
 import { Button, EmptyState, ErrorBanner, IconButton, ProgressBar, SmoothHeight, StatusBadge, Tooltip, type LifecycleState } from '../../design-system/primitives';
 import { formatBytes } from '../../design-system/format';
 import { useWebUiActions } from '../../state';
@@ -25,9 +25,32 @@ const STATE_KEYS: Record<OperationState, StringKey> = {
   failed: 'activity.state.failed',
   cancelled: 'activity.state.cancelled',
 };
+const ERROR_KEYS: Record<ErrorCode, StringKey> = {
+  invalid_request: 'activity.error.invalid_request',
+  unauthorized: 'activity.error.unauthorized',
+  forbidden: 'activity.error.forbidden',
+  not_found: 'activity.error.not_found',
+  stale_revision: 'activity.error.stale_revision',
+  conflict: 'activity.error.conflict',
+  unsupported: 'activity.error.unsupported',
+  rate_limited: 'activity.error.rate_limited',
+  unavailable: 'activity.error.unavailable',
+  payload_too_large: 'activity.error.payload_too_large',
+  server_restarted: 'activity.error.server_restarted',
+  event_gap: 'activity.error.event_gap',
+  partial_success: 'activity.error.partial_success',
+};
 
 export const operationKindLabel = (kind: OperationKind, locale: Locale): string => t(locale, KIND_KEYS[kind]);
 export const operationStateLabel = (state: OperationState, locale: Locale): string => t(locale, STATE_KEYS[state]);
+
+// A failed operation reads as a localized reason, never the enum word. The runtime value
+// can be a code newer than this build, so an unmapped one gets the generic reason; the
+// raw code stays in Operation details and the server's message is never rendered.
+function errorLabel(error: Operation['error'], locale: Locale): string {
+  if (error === null) return t(locale, 'activity.failure_no_code');
+  return t(locale, Object.hasOwn(ERROR_KEYS, error.code) ? ERROR_KEYS[error.code] : 'activity.error.other');
+}
 
 function badgeState(operation: Operation): LifecycleState {
   if (operation.state === 'failed') return 'failed';
@@ -87,9 +110,10 @@ function OperationRow({ operation, target, locale, stale, now }: { operation: Op
     <Disclosure className="activity-disclosure activity-operation__details" summary={t(locale, 'activity.details')}>{() => <ul className="activity-raw-list">
       <li><code>{t(locale, 'activity.details.operation_id', { id: operation.operation_id })}</code></li>
       {modelId === null ? null : <li><code>{t(locale, 'activity.details.model_id', { id: modelId })}</code></li>}
+      {operation.error === null ? null : <li><code>{t(locale, 'activity.details.error_code', { code: operation.error.code })}</code></li>}
       <li>{t(locale, 'activity.details.updated', { time: dateTime(operation.updated_at, locale) })}</li>
     </ul>}</Disclosure>
-    {operation.state === 'failed' ? <ErrorBanner title={t(locale, 'activity.failure')} body={operation.error?.code ?? t(locale, 'activity.failure_no_code')} /> : null}
+    {operation.state === 'failed' ? <ErrorBanner title={t(locale, 'activity.failure')} body={errorLabel(operation.error, locale)} /> : null}
     {failed ? <ErrorBanner title={t(locale, 'activity.cancel_failed')} body={t(locale, 'activity.refresh')} /> : null}
   </li>;
 }

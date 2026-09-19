@@ -72,10 +72,29 @@ describe('Activity page', () => {
     const cancel = [...element.querySelectorAll('button')].find((button) => button.textContent?.includes('Request cancellation'));
     expect(cancel?.disabled).toBe(true);
   });
-  it('shows a failed operation by its error code only', () => {
-    snapshot = { ...initialSnapshot(), connection: 'ready', operations: new Map([['op', { ...operation, state: 'failed', error: { code: 'conflict', message: '/Users/private SECRET', retryable: false } }]]) };
+  it.each(['en', 'ko'] as const)('shows a failed operation by a localized reason for its error code, keeping the code in details (%s)', async (locale) => {
+    snapshot = { ...initialSnapshot(), connection: 'ready', operations: new Map([['op', { ...operation, state: 'failed', error: { code: 'stale_revision', message: '/Users/private SECRET', retryable: false } }]]) };
+    const element = mount(locale);
+    const visible = collapsedText(element);
+    expect(visible).toContain(t(locale, 'activity.error.stale_revision'));
+    expect(visible).not.toContain('stale_revision');
+    expect(element.textContent).not.toContain('SECRET');
+    const details = element.querySelector<HTMLDetailsElement>('.activity-operation__details');
+    await act(async () => { details?.querySelector('summary')?.click(); await new Promise((resolve) => setTimeout(resolve, 0)); });
+    expect(details?.open).toBe(true);
+    expect(details?.textContent).toContain(t(locale, 'activity.details.error_code', { code: 'stale_revision' }));
+    expect(element.textContent).not.toContain('SECRET');
+  });
+  it('reads an unrecognized error code as a generic reason and keeps the raw code in details', async () => {
+    const failed = { ...operation, state: 'failed', error: { code: 'brand_new_code', message: '/Users/private SECRET', retryable: false } } as unknown as Operation;
+    snapshot = { ...initialSnapshot(), connection: 'ready', operations: new Map([['op', failed]]) };
     const element = mount();
-    expect(element.textContent).toContain('conflict');
+    const visible = collapsedText(element);
+    expect(visible).toContain(t('en', 'activity.error.other'));
+    expect(visible).not.toContain('brand_new_code');
+    const details = element.querySelector<HTMLDetailsElement>('.activity-operation__details');
+    await act(async () => { details?.querySelector('summary')?.click(); await new Promise((resolve) => setTimeout(resolve, 0)); });
+    expect(details?.textContent).toContain(t('en', 'activity.details.error_code', { code: 'brand_new_code' }));
     expect(element.textContent).not.toContain('SECRET');
   });
   it('uses shared cancellation and does not mark accepted cancellation completed', async () => {

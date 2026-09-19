@@ -2899,6 +2899,96 @@
       "test_id": "activity-failure-no-code"
     },
     {
+      "key": "activity.error.invalid_request",
+      "en": "The request was not valid.",
+      "ko": "요청이 올바르지 않습니다.",
+      "test_id": "activity-error-invalid-request"
+    },
+    {
+      "key": "activity.error.unauthorized",
+      "en": "The server did not accept the credentials.",
+      "ko": "서버가 인증 정보를 받아들이지 않았습니다.",
+      "test_id": "activity-error-unauthorized"
+    },
+    {
+      "key": "activity.error.forbidden",
+      "en": "This server does not allow this action.",
+      "ko": "이 서버에서는 허용되지 않는 작업입니다.",
+      "test_id": "activity-error-forbidden"
+    },
+    {
+      "key": "activity.error.not_found",
+      "en": "The target no longer exists.",
+      "ko": "대상이 더 이상 존재하지 않습니다.",
+      "test_id": "activity-error-not-found"
+    },
+    {
+      "key": "activity.error.stale_revision",
+      "en": "The model changed before the action ran.",
+      "ko": "작업이 실행되기 전에 모델이 변경되었습니다.",
+      "test_id": "activity-error-stale-revision"
+    },
+    {
+      "key": "activity.error.conflict",
+      "en": "Another operation conflicted with this one.",
+      "ko": "다른 작업과 충돌했습니다.",
+      "test_id": "activity-error-conflict"
+    },
+    {
+      "key": "activity.error.unsupported",
+      "en": "This action is not supported for this target.",
+      "ko": "이 대상에서는 지원하지 않는 작업입니다.",
+      "test_id": "activity-error-unsupported"
+    },
+    {
+      "key": "activity.error.rate_limited",
+      "en": "Too many requests. Try again later.",
+      "ko": "요청이 너무 많습니다. 잠시 후 다시 시도하세요.",
+      "test_id": "activity-error-rate-limited"
+    },
+    {
+      "key": "activity.error.unavailable",
+      "en": "A required resource was unavailable.",
+      "ko": "필요한 리소스를 사용할 수 없었습니다.",
+      "test_id": "activity-error-unavailable"
+    },
+    {
+      "key": "activity.error.payload_too_large",
+      "en": "The request was too large.",
+      "ko": "요청이 너무 큽니다.",
+      "test_id": "activity-error-payload-too-large"
+    },
+    {
+      "key": "activity.error.server_restarted",
+      "en": "The server restarted during the action.",
+      "ko": "작업 중에 서버가 다시 시작되었습니다.",
+      "test_id": "activity-error-server-restarted"
+    },
+    {
+      "key": "activity.error.event_gap",
+      "en": "Progress updates were lost. Refresh to reconcile the operation.",
+      "ko": "진행 상황 업데이트가 누락되었습니다. 새로고침하여 작업 상태를 대조하세요.",
+      "test_id": "activity-error-event-gap"
+    },
+    {
+      "key": "activity.error.partial_success",
+      "en": "The action only partly succeeded.",
+      "ko": "작업이 일부만 성공했습니다.",
+      "test_id": "activity-error-partial-success"
+    },
+    {
+      "key": "activity.error.other",
+      "en": "The server reported an error this page does not recognize.",
+      "ko": "이 화면이 인식하지 못하는 오류를 서버가 보고했습니다.",
+      "test_id": "activity-error-other"
+    },
+    {
+      "key": "activity.details.error_code",
+      "en": "Error code: {code}",
+      "ko": "오류 코드: {code}",
+      "test_id": "activity-details-error-code"
+    },
+    {
       "key": "activity.cancel_failed",
       "en": "Cancellation could not be confirmed. Refresh to reconcile the operation.",
       "ko": "취소를 확인하지 못했습니다. 새로고침하여 작업 상태를 대조하세요.",
