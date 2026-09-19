@@ -1,6 +1,7 @@
 // Copyright 2025-2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 import React, { act, createRef } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import { createPortal } from 'react-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Button, IconButton, StatusBadge, ProgressBar, EmptyState, Tabs, DataTable, ROW_PRIMARY_CLASS, type ButtonProps, type DataTableAdapterProps } from './common-adapters';
 import { Select } from './common-select';
@@ -232,6 +233,66 @@ describe('DataTable whole-row activation', () => {
     // @ts-expect-error alpha.19 onRowClick renders each row as role="button"; use activateRowPrimary instead.
     const withheld: Partial<DataTableAdapterProps<Row>> = { onRowClick: () => undefined };
     expect(withheld).toBeDefined();
+  });
+
+  it('still activates the row primary control from a plain cell when a focusable ancestor also matches the nested-interactive selector', () => {
+    // A focusable scroll region (tabIndex=0) wrapping the whole table, as #1918 may add, also matches
+    // ROW_INTERACTIVE ([tabindex]:not([tabindex="-1"])). It sits outside the row, so it must not suppress
+    // activation; only an interactive element inside the row may do that.
+    render(<div tabIndex={0}>{table(rows)}</div>);
+    click(cell(1));
+    expect(primary.mock.calls).toEqual([['b']]);
+  });
+
+  it('ignores a click that lands on a row rendered by a portal outside the delegation wrapper', () => {
+    const rowPrimary = vi.fn();
+    const portalPrimary = vi.fn();
+    function PortalCell(): React.ReactPortal {
+      return createPortal(
+        <table>
+          <tbody>
+            <tr>
+              <td>
+                <button className={ROW_PRIMARY_CLASS} onClick={portalPrimary}>
+                  Portal primary
+                </button>
+              </td>
+              <td className="portal-plain">Portal plain text</td>
+            </tr>
+          </tbody>
+        </table>,
+        document.body,
+      );
+    }
+    render(
+      <DataTable
+        activateRowPrimary
+        rows={[{ id: 'p', name: 'Portal' }]}
+        getRowKey={(row) => row.id}
+        ariaLabel="Rows"
+        columns={[
+          {
+            id: 'name',
+            header: 'Name',
+            render: (row) => (
+              <Button className={ROW_PRIMARY_CLASS} aria-label={`Inspect ${row.name}`} onClick={() => rowPrimary(row.id)}>
+                {row.name}
+              </Button>
+            ),
+          },
+          { id: 'detail', header: 'Detail', render: () => <PortalCell /> },
+        ]}
+      />,
+    );
+    // React bubbles a portal's events to its ancestors in the React tree, not the DOM tree, so this click
+    // reaches the wrapper's onClick even though the portal's own <tr> lives outside the wrapper in the DOM.
+    const plain = requireElement(document.body.querySelector<HTMLElement>('.portal-plain'));
+    click(plain);
+    expect(rowPrimary).not.toHaveBeenCalled();
+    expect(portalPrimary).not.toHaveBeenCalled();
+    // Unmounting the portal's owner cleans up the DOM it placed under document.body.
+    render(<div />);
+    expect(document.body.querySelector('.portal-plain')).toBeNull();
   });
 });
 

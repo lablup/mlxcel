@@ -47,9 +47,13 @@ it('uses canonical reusable defaults only on explicit load and freezes the submi
   expect(host.textContent).toContain('Pending browser profile; not applied yet.');
   expect(node<HTMLAnchorElement>('[data-testid="models-pending-profile"] a').getAttribute('href')).toBe('#settings');
   expect(actions.loadModel).not.toHaveBeenCalled();
+  state = { ...state, selectedModelId: null };
+  render();
   await act(async () => node<HTMLButtonElement>('[aria-label^="Inspect"]').click());
   expect(actions.selectModel).toHaveBeenCalledWith(target.identity.id);
   expect(actions.loadModel).not.toHaveBeenCalled();
+  state = { ...state, selectedModelId: target.identity.id };
+  render();
   await click('models-load');
   const request = actions.loadModel.mock.calls[0][0];
   expect(request.load_profile).toEqual({ ctx_size: 2048, n_parallel: 2, kv_cache_mode: 'int8' });

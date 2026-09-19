@@ -57,10 +57,11 @@ export function Tabs(props: { tabs: { id: string; label: string; panel: React.Re
 
 /** Marks a row's primary control, the one whole-row activation delegates to. A class, because the common Button forwards `className` but no arbitrary `data-*`. */
 export const ROW_PRIMARY_CLASS = 'ds-row-primary';
-// Mirrors the common table's own nested-interactive guard: a click on any of these inside the row is theirs, not the row's.
+// Mirrors the common table's own nested-interactive guard, except an anchor counts only with an href;
+// an anchor without one is not interactive.
 const ROW_INTERACTIVE = 'a[href], button, input, select, textarea, summary, label, [contenteditable="true"], [role="button"], [role="link"], [tabindex]:not([tabindex="-1"])';
 
-function activateRowPrimary(event: React.MouseEvent<HTMLDivElement>): void {
+function delegateRowClick(event: React.MouseEvent<HTMLDivElement>): void {
   if (event.defaultPrevented || event.button !== 0 || !(event.target instanceof Element)) return;
   const row = event.target.closest('tbody > tr');
   if (!row || !event.currentTarget.contains(row) || row.classList.contains('data-table__row--state')) return;
@@ -89,8 +90,8 @@ export type DataTableAdapterProps<T> = Omit<DataTableProps<T>, 'ariaLabel' | 'on
    */
   activateRowPrimary?: boolean;
 };
-export function DataTable<T>({ activateRowPrimary: delegate = false, ...props }: DataTableAdapterProps<T>): React.JSX.Element {
+export function DataTable<T>({ activateRowPrimary = false, ...props }: DataTableAdapterProps<T>): React.JSX.Element {
   const table = <CommonDataTable {...props} className={`ds-common-table ${props.className ?? ''}`.trim()} />;
-  return delegate ? <div className="ds-row-activation" onClick={activateRowPrimary}>{table}</div> : table;
+  return activateRowPrimary ? <div className="ds-row-activation" onClick={delegateRowClick}>{table}</div> : table;
 }
 export type { DataTableColumn, DataTablePersistedState, SortDirection } from '@lablup/ui-common/components/DataTable';

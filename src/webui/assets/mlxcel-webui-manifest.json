@@ -1,30 +1,24 @@
 {
   "budgets": {
-    "embedded_asset_bytes": 737338,
+    "embedded_asset_bytes": 737375,
     "embedded_asset_limit_bytes": 5242880,
-    "initial_js_gzip_bytes": 156652,
+    "initial_js_gzip_bytes": 156662,
     "initial_js_gzip_limit_bytes": 204800,
-    "total_js_gzip_bytes": 157828,
+    "total_js_gzip_bytes": 157838,
     "total_js_gzip_limit_bytes": 716800
   },
   "files": [
     {
       "bytes": 951,
       "gzip_bytes": 612,
-      "path": "assets/code-highlight-D8eeU4Y-.js",
-      "sha256": "d87117e8109f8563bbe7c580b661cf896a2064c990085fa8f06b069879a2788d"
+      "path": "assets/code-highlight-C_qcDneV.js",
+      "sha256": "9bee154f50ddaf20623143739f1c0169f3e19f37a2c7424090b588fc2b6c84a2"
     },
     {
       "bytes": 1134,
       "gzip_bytes": 564,
-      "path": "assets/history-DkAOPKCS.js",
-      "sha256": "654b53c70efce48b95578c3440151b0fcec1cad4d2f8da5b71047470610d4ca0"
-    },
-    {
-      "bytes": 607175,
-      "gzip_bytes": 156652,
-      "path": "assets/index-B2qFeS76.js",
-      "sha256": "b55de6bc63e25e2dddc6e833897c0e8c50beef6affb56d8b9087e5b76958f9db"
+      "path": "assets/history-DGQzQPrN.js",
+      "sha256": "43efce30f0d9b3c5c104a43428e2dfbef54a9ab4d357f939f5b14c223af1e523"
     },
     {
       "bytes": 112297,
@@ -33,10 +27,16 @@
       "sha256": "11466d6a3b72fdf6e5c0f2e16909f3253102182022e9b64eaa8d8a3147fa1b8b"
     },
     {
+      "bytes": 607212,
+      "gzip_bytes": 156662,
+      "path": "assets/index-YoiIhEsb.js",
+      "sha256": "35e3e39378db2f5cd0d9d713eb9f5cbfb03c97563ad06e6fe1fb2069c4459bc5"
+    },
+    {
       "bytes": 453,
       "gzip_bytes": 285,
       "path": "index.html",
-      "sha256": "2fa4be02e1a6f28bc3745a8b1ef8a9354e928c03e9a53b89578cb4c16494d39e"
+      "sha256": "983010ec3882e4f28e656a9494469b998d6eb6db1639c264dbe9d747959a6246"
     },
     {
       "bytes": 13233,
@@ -67,5 +67,5 @@
   },
   "pnpm_version": "11.18.0",
   "schema_version": 1,
-  "source_digest_sha256": "99190b41ad5a508a01844583454c2248154fb1e18d244a91fc9c6c1d53a776e2"
+  "source_digest_sha256": "cbac4083ef4b6604c89e45fe60b8e8a6e6e56f8af0d575be05f4a0740b351645"
 }

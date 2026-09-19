@@ -196,7 +196,12 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
             tone="ghost"
             className={ROW_PRIMARY_CLASS}
             aria-label={t(locale, 'models.library.inspect', { name: entry.identity.display_name })}
-            onClick={() => actions.selectModel(entry.identity.id)}
+            onClick={() => {
+              // Re-selecting the already-open row is a no-op: selectModel always aborts the live
+              // stream, forces a full snapshot refetch and clears runtimeHistory, even for the
+              // same id, so a stray click on an already-selected row must not pay that cost.
+              if (entry.identity.id !== state.selectedModelId) actions.selectModel(entry.identity.id);
+            }}
           >
             {entry.identity.display_name}
           </Button>

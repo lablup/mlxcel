@@ -93,10 +93,13 @@ describe('Models workflows', () => {
           finish = resolve;
         }),
     );
+    state = { ...state, selectedModelId: null };
     render();
     await act(async () => host.querySelector<HTMLButtonElement>('[aria-label^="Inspect"]')?.click());
     expect(actions.selectModel).toHaveBeenCalledWith(model().identity.id);
     expect(actions.loadModel).not.toHaveBeenCalled();
+    state = { ...state, selectedModelId: model().identity.id };
+    render();
     await click('models-load');
     await click('models-load');
     expect(actions.loadModel).toHaveBeenCalledTimes(1);
@@ -387,5 +390,17 @@ describe('library row activation', () => {
     await act(async () => rowCell(0, 3).click());
     expect(actions.selectModel.mock.calls).toEqual([[busy.identity.id], [busy.identity.id]]);
     expect(actions.loadModel).not.toHaveBeenCalled();
+  });
+
+  it('treats re-selecting the already-selected row as a no-op, but still opens a different row', async () => {
+    state = { ...state, catalog: entries, selectedModelId: entries[0].identity.id };
+    render();
+    await act(async () => rowCell(0, 1).click());
+    expect(actions.selectModel).not.toHaveBeenCalled();
+    const name = requireValue(host.querySelector<HTMLButtonElement>(`[aria-label="Inspect ${entries[0].identity.display_name}"]`));
+    await act(async () => name.click());
+    expect(actions.selectModel).not.toHaveBeenCalled();
+    await act(async () => rowCell(1, 1).click());
+    expect(actions.selectModel.mock.calls).toEqual([[entries[1].identity.id]]);
   });
 });
