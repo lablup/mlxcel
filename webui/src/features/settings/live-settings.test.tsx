@@ -29,9 +29,52 @@ describe('live draft across Settings tab switches', () => {
     act(() => root.unmount()); root = createRoot(host);
     await act(async () => { root.render(<LiveSettings modelId="model-a" scope={scope} locale="en" />); });
     expect(input('Temperature')?.value).toBe('0.5');
+    expect(host.textContent).not.toContain('Another client changed');
     expect([...host.querySelectorAll('button')].find((item) => item.textContent === 'Apply live draft')?.disabled).toBe(false);
     act(() => root.unmount()); root = createRoot(host);
     await act(async () => { root.render(<LiveSettings modelId="model-a" scope={{ ...scope, revision: 4 }} locale="en" />); });
     expect(input('Temperature')?.value).toBe('1');
+  });
+  it('asks for reconfirmation when another client changed the settings while the draft was away', async () => {
+    actions.getSettings.mockResolvedValue(make());
+    const scope = { instance: 'instance-b', modelId: 'model-a', revision: 1 };
+    await act(async () => { root.render(<LiveSettings modelId="model-a" scope={scope} locale="en" />); });
+    await edit('Temperature', '0.5');
+    act(() => root.unmount()); root = createRoot(host);
+    actions.getSettings.mockResolvedValue(make('b', 0.2));
+    actions.patchSettings.mockResolvedValue({ applied: { default_temperature: 0.5 }, rejected: [], current: {}, fingerprint: 'c'.repeat(64) });
+    await act(async () => { root.render(<LiveSettings modelId="model-a" scope={scope} locale="en" />); });
+    expect(host.textContent).toContain('Another client changed');
+    expect(input('Temperature')?.value).toBe('0.5');
+    expect(actions.patchSettings).not.toHaveBeenCalled();
+    await button('Apply live draft');
+    expect(actions.patchSettings.mock.calls[0][1]).toEqual({ default_temperature: 0.5 });
+  });
+  it('asks for reconfirmation on the first successful Refresh when the read after a restore failed', async () => {
+    actions.getSettings.mockResolvedValue(make());
+    const scope = { instance: 'instance-d', modelId: 'model-a', revision: 1 };
+    await act(async () => { root.render(<LiveSettings modelId="model-a" scope={scope} locale="en" />); });
+    await edit('Temperature', '0.5');
+    act(() => root.unmount()); root = createRoot(host);
+    actions.getSettings.mockRejectedValueOnce(new Error('offline')).mockResolvedValue(make('b', 0.2));
+    await act(async () => { root.render(<LiveSettings modelId="model-a" scope={scope} locale="en" />); });
+    expect(host.textContent).not.toContain('Another client changed');
+    await button('Refresh current values');
+    expect(host.textContent).toContain('Another client changed');
+    expect(actions.patchSettings).not.toHaveBeenCalled();
+  });
+  it('retains drafts for at most 32 workers, dropping the oldest', async () => {
+    actions.getSettings.mockResolvedValue(make());
+    const scopeAt = (revision: number): { instance: string; modelId: string; revision: number } => ({ instance: 'instance-c', modelId: 'model-a', revision });
+    for (let revision = 1; revision <= 33; revision += 1) {
+      await act(async () => { root.render(<LiveSettings key={revision} modelId="model-a" scope={scopeAt(revision)} locale="en" />); });
+      await edit('Temperature', String(revision / 100));
+    }
+    act(() => root.unmount()); root = createRoot(host);
+    await act(async () => { root.render(<LiveSettings modelId="model-a" scope={scopeAt(1)} locale="en" />); });
+    expect(input('Temperature')?.value).toBe('1');
+    act(() => root.unmount()); root = createRoot(host);
+    await act(async () => { root.render(<LiveSettings modelId="model-a" scope={scopeAt(33)} locale="en" />); });
+    expect(input('Temperature')?.value).toBe('0.33');
   });
 });

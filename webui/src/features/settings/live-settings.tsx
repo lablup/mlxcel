@@ -31,19 +31,45 @@ export function stagedDefault(spec: SettingSpec): string {
 }
 
 // Only the active Settings tab is mounted. An unapplied live draft survives a tab switch here, per worker and
-// in memory only, so moving to the Server tab and back does not silently drop edits.
-const retainedDrafts = new Map<string, Record<string, string>>();
+// in memory only, so moving to the Server tab and back does not silently drop edits. It keeps the fingerprint
+// it was written against: a draft restored after another client changed the settings gets the same conflict
+// notice as a stale Apply, rather than a clean Apply that silently overwrites that change.
+interface RetainedDraft { readonly values: Readonly<Record<string, string>>; readonly fingerprint: string | null }
+// Bounded like the server-defaults record: one entry per worker left with an unapplied draft.
+const MAX_RETAINED_DRAFTS = 32;
+const retainedDrafts = new Map<string, RetainedDraft>();
 const draftKey = (scope: ServerDefaultsScope): string => JSON.stringify([scope.instance, scope.modelId, scope.revision]);
+function retainDraft(key: string, entry: RetainedDraft | null): void {
+  retainedDrafts.delete(key);
+  if (entry === null) return;
+  retainedDrafts.set(key, entry);
+  while (retainedDrafts.size > MAX_RETAINED_DRAFTS) {
+    const oldest = retainedDrafts.keys().next();
+    if (oldest.done) break;
+    retainedDrafts.delete(oldest.value);
+  }
+}
+
+/** True at most once, on the first successful read after a restore, when the settings moved since the draft was written. */
+function restoredDraftConflicts(restoredFingerprint: { current: string | null }, value: SettingsResponse): boolean {
+  const base = restoredFingerprint.current;
+  restoredFingerprint.current = null;
+  return base !== null && value.fingerprint !== base;
+}
 
 export function LiveSettings({ modelId, scope, locale }: { modelId: string; scope?: ServerDefaultsScope | null; locale: Locale }): React.JSX.Element {
   const actions = useWebUiActions();
   const [current, setCurrentState] = useState<SettingsResponse | null>(null);
   const retainKey = scope ? draftKey(scope) : null;
-  const [draft, setDraft] = useState<Record<string, string>>(() => (retainKey === null ? undefined : retainedDrafts.get(retainKey)) ?? {});
+  const [restored] = useState(() => (retainKey === null ? undefined : retainedDrafts.get(retainKey)));
+  const [draft, setDraft] = useState<Record<string, string>>(() => ({ ...restored?.values }));
+  // The restored draft's fingerprint, until the first read compares it with the server's.
+  const restoredFingerprint = useRef(restored?.fingerprint ?? null);
+  const baseline = current?.fingerprint ?? restored?.fingerprint ?? null;
   useEffect(() => {
     if (retainKey === null) return;
-    if (Object.keys(draft).length > 0) retainedDrafts.set(retainKey, draft); else retainedDrafts.delete(retainKey);
-  }, [draft, retainKey]);
+    retainDraft(retainKey, Object.keys(draft).length > 0 ? { values: draft, fingerprint: baseline } : null);
+  }, [draft, retainKey, baseline]);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
@@ -54,12 +80,17 @@ export function LiveSettings({ modelId, scope, locale }: { modelId: string; scop
   // Every read also refreshes the server defaults the Requests tab and the Chat hint resolve against.
   const setCurrent = (value: SettingsResponse): void => { setCurrentState(value); if (scope) recordServerSettings(scope, value); };
   const setCurrentRef = useRef(setCurrent); setCurrentRef.current = setCurrent;
-  useEffect(() => { const controller = new AbortController(); request.current = controller; setBusy(true); void actions.getSettings(modelId, controller.signal).then((value) => { if (!controller.signal.aborted) setCurrentRef.current(value); }).catch(() => { if (!controller.signal.aborted) setMessage(t(localeRef.current, 'settings.live.unavailable')); }).finally(() => { if (!controller.signal.aborted) setBusy(false); }); return () => controller.abort(); }, [actions, modelId]);
+  useEffect(() => { const controller = new AbortController(); request.current = controller; setBusy(true); void actions.getSettings(modelId, controller.signal).then((value) => {
+    if (controller.signal.aborted) return;
+    setCurrentRef.current(value);
+    // A restored draft was written against older values when the fingerprint moved: reconfirm, as a stale Apply does.
+    if (restoredDraftConflicts(restoredFingerprint, value)) setMessage(t(localeRef.current, 'settings.live.conflict'));
+  }).catch(() => { if (!controller.signal.aborted) setMessage(t(localeRef.current, 'settings.live.unavailable')); }).finally(() => { if (!controller.signal.aborted) setBusy(false); }); return () => controller.abort(); }, [actions, modelId]);
   const refresh = async (): Promise<void> => {
     const controller = request.current;
     if (controller === null || controller.signal.aborted) return;
     setBusy(true);
-    try { const response = await actions.getSettings(modelId, controller.signal); if (!controller.signal.aborted) { setCurrent(response); setMessage(t(localeRef.current, 'settings.live.refreshed')); } } catch { if (!controller.signal.aborted) setMessage(t(localeRef.current, 'settings.live.refresh_failed')); } finally { if (!controller.signal.aborted) setBusy(false); }
+    try { const response = await actions.getSettings(modelId, controller.signal); if (!controller.signal.aborted) { setCurrent(response); setMessage(t(localeRef.current, restoredDraftConflicts(restoredFingerprint, response) ? 'settings.live.conflict' : 'settings.live.refreshed')); } } catch { if (!controller.signal.aborted) setMessage(t(localeRef.current, 'settings.live.refresh_failed')); } finally { if (!controller.signal.aborted) setBusy(false); }
   };
   const apply = async (): Promise<void> => {
     const controller = request.current;
