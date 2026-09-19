@@ -2,7 +2,7 @@
 import React, { act, createRef } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { Button, IconButton, StatusBadge, ProgressBar, EmptyState, Tabs, DataTable, type ButtonProps } from './common-adapters';
+import { Button, IconButton, StatusBadge, ProgressBar, EmptyState, Tabs, DataTable, ROW_PRIMARY_CLASS, type ButtonProps, type DataTableAdapterProps } from './common-adapters';
 import { Select } from './common-select';
 import { NativeModalContext } from './modal-context';
 
@@ -137,3 +137,105 @@ describe('published ui-common adapters', () => {
     expect(host.textContent).toContain('First');
   });
 });
+
+describe('DataTable whole-row activation', () => {
+  type Row = { id: string; name: string; primary?: 'disabled' | 'aria-disabled' | 'none' };
+  const rows: Row[] = [{ id: 'a', name: 'Alpha' }, { id: 'b', name: 'Bravo' }, { id: 'c', name: 'Charlie', primary: 'disabled' }, { id: 'd', name: 'Delta', primary: 'none' }, { id: 'e', name: 'Echo', primary: 'aria-disabled' }];
+  const primary = vi.fn<(id: string) => void>();
+  const other = vi.fn();
+  beforeEach(() => { primary.mockReset(); other.mockReset(); });
+  const table = (data: Row[], extra: Partial<DataTableAdapterProps<Row>> = { activateRowPrimary: true }): React.ReactNode => (
+    <DataTable
+      {...extra}
+      rows={data}
+      getRowKey={(row) => row.id}
+      ariaLabel="Rows"
+      emptyState={<Button className={ROW_PRIMARY_CLASS} onClick={() => primary('empty')}>Empty action</Button>}
+      loadingState={<Button className={ROW_PRIMARY_CLASS} onClick={() => primary('loading')}>Loading action</Button>}
+      columns={[
+        { id: 'name', header: 'Name', render: (row) => row.primary === 'none' ? row.name : row.primary === 'aria-disabled' ? <a href={`#${row.id}`} className={ROW_PRIMARY_CLASS} aria-disabled="true" onClick={(event) => { event.preventDefault(); primary(row.id); }}>{row.name}</a> : <Button className={ROW_PRIMARY_CLASS} disabled={row.primary === 'disabled'} aria-label={`Inspect ${row.name}`} onClick={() => primary(row.id)}>{row.name}</Button> },
+        { id: 'detail', header: 'Detail', render: (row) => <><span className="detail">{`${row.name} detail`}</span> <Button onClick={other}>Other</Button></> },
+      ]}
+    />
+  );
+  const cell = (row: number, column = 1): HTMLElement => {
+    const node = host.querySelectorAll('tbody tr')[row]?.querySelectorAll<HTMLElement>('td')[column];
+    if (!node) throw new Error('Missing table cell');
+    return node;
+  };
+  const click = (element: Element, init: MouseEventInit = {}): void => { act(() => { element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0, ...init })); }); };
+  const select = (node: Node): void => { const range = document.createRange(); range.selectNodeContents(node); window.getSelection()?.removeAllRanges(); window.getSelection()?.addRange(range); };
+  afterEach(() => { window.getSelection()?.removeAllRanges(); });
+
+  it('activates the row primary control once, focused, from a plain cell', () => {
+    render(table(rows));
+    click(cell(1));
+    expect(primary.mock.calls).toEqual([['b']]);
+    expect(document.activeElement).toBe(host.querySelector('[aria-label="Inspect Bravo"]'));
+    click(requireElement(cell(0).querySelector('.detail')));
+    expect(primary.mock.calls).toEqual([['b'], ['a']]);
+    expect(other).not.toHaveBeenCalled();
+  });
+
+  it('never double-fires the primary control and leaves other controls to themselves', () => {
+    render(table(rows));
+    act(() => host.querySelector<HTMLButtonElement>('[aria-label="Inspect Alpha"]')?.click());
+    expect(primary.mock.calls).toEqual([['a']]);
+    act(() => cell(0).querySelector('button')?.click());
+    expect(other).toHaveBeenCalledOnce();
+    click(cell(0), { button: 1 });
+    act(() => { cell(0).addEventListener('click', (event) => event.preventDefault(), { once: true }); });
+    click(cell(0));
+    expect(primary.mock.calls).toEqual([['a']]);
+  });
+
+  it('treats a text selection inside the row as a selection, not an activation', () => {
+    render(table(rows));
+    select(requireElement(cell(0).querySelector('.detail')));
+    click(cell(0));
+    expect(primary).not.toHaveBeenCalled();
+    window.getSelection()?.collapseToEnd();
+    click(cell(0));
+    expect(primary.mock.calls).toEqual([['a']]);
+    select(requireElement(cell(1).querySelector('.detail')));
+    click(cell(0));
+    expect(primary.mock.calls).toEqual([['a'], ['a']]);
+  });
+
+  it('keeps rows with a disabled, aria-disabled or missing primary control, and the loading and empty rows, inert', () => {
+    render(table(rows));
+    click(cell(2)); click(cell(3)); click(cell(3, 0)); click(cell(4));
+    expect(primary).not.toHaveBeenCalled();
+    render(table([]));
+    click(requireElement(host.querySelector('.data-table__state-cell')));
+    render(table(rows, { activateRowPrimary: true, loading: true }));
+    click(requireElement(host.querySelector('.data-table__state-cell')));
+    click(requireElement(host.querySelector('thead th')));
+    expect(primary).not.toHaveBeenCalled();
+  });
+
+  it('delegates nothing without the opt-in and keeps native row semantics with it', () => {
+    render(table(rows, {}));
+    expect(host.querySelector('.ds-row-activation')).toBeNull();
+    click(cell(0));
+    expect(primary).not.toHaveBeenCalled();
+    render(table(rows));
+    expect(host.querySelector('.ds-row-activation > .data-table')?.className).toBe('data-table ds-common-table');
+    for (const row of host.querySelectorAll('tr')) {
+      expect(row.hasAttribute('role')).toBe(false);
+      expect(row.hasAttribute('tabindex')).toBe(false);
+    }
+    expect(host.querySelectorAll('.data-table__row--clickable')).toHaveLength(0);
+  });
+
+  it('withholds the package row props that turn rows into buttons', () => {
+    // @ts-expect-error alpha.19 onRowClick renders each row as role="button"; use activateRowPrimary instead.
+    const withheld: Partial<DataTableAdapterProps<Row>> = { onRowClick: () => undefined };
+    expect(withheld).toBeDefined();
+  });
+});
+
+function requireElement<T extends Element>(element: T | null | undefined): T {
+  if (!element) throw new Error('Missing element');
+  return element;
+}

@@ -10,6 +10,7 @@ import {
   ErrorBanner,
   Field,
   LoadingStatus,
+  ROW_PRIMARY_CLASS,
   Select,
   StatusBadge,
   type DataTableColumn,
@@ -193,6 +194,7 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
         <>
           <Button
             tone="ghost"
+            className={ROW_PRIMARY_CLASS}
             aria-label={t(locale, 'models.library.inspect', { name: entry.identity.display_name })}
             onClick={() => actions.selectModel(entry.identity.id)}
           >
@@ -418,6 +420,7 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
             getRowKey={(entry) => entry.identity.id}
             ariaLabel={t(locale, 'models.title')}
             testId="models-table"
+            activateRowPrimary
             rowClassName={(entry) => (entry.identity.id === state.selectedModelId ? 'models-selected' : undefined)}
             loading={state.catalogSequence === null}
             loadingState={<LoadingStatus label={t(locale, 'models.library.waiting')} />}

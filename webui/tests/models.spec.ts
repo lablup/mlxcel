@@ -249,3 +249,122 @@ for (const variant of [
     expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
   });
 }
+
+// Whole-row activation: a user who never finds the name button still reaches the inspector.
+test.describe('Models row activation', () => {
+  const entries = (): CatalogEntry[] =>
+    ['alpha', 'bravo', 'charlie'].map((name, index) => ({
+      ...model(),
+      identity: {
+        ...model().identity,
+        id: `mdl_${String(index + 1).padStart(43, '0')}`,
+        display_name: `row-${name}-checkpoint`,
+      },
+    }));
+  const bodyRows = (page: Page) => page.locator('[data-testid="models-table"] tbody tr');
+  const inspector = (page: Page) => page.getByRole('complementary', { name: 'Model details' });
+  const inspected = (page: Page) => inspector(page).getByRole('heading', { level: 3 });
+  const inspect = (page: Page, entry: CatalogEntry) =>
+    page.getByRole('button', { name: `Inspect ${entry.identity.display_name}`, exact: true });
+
+  test('clicking a non-name cell opens that entry and reaches Load, Use in Chat and Unload', async ({ page }) => {
+    const catalog = entries();
+    const api = await installLibrary(page, catalog);
+    await login(page);
+    await expect(bodyRows(page)).toHaveCount(3);
+    await expect(inspector(page)).toHaveCount(0);
+    await bodyRows(page).nth(1).locator('td').nth(2).click();
+    await expect(inspector(page)).toBeVisible();
+    await expect(inspected(page)).toHaveText(catalog[1].identity.display_name);
+    await expect(bodyRows(page).nth(1)).toHaveClass(/models-selected/);
+    await expect(bodyRows(page).nth(0)).not.toHaveClass(/models-selected/);
+    expect(api.posts).toEqual([]);
+    await bodyRows(page).nth(1).locator('td').nth(1).click();
+    await expect(inspected(page)).toHaveText(catalog[1].identity.display_name);
+    expect(api.posts).toEqual([]);
+    await page.getByTestId('models-load').click();
+    await expect.poll(() => api.posts.length).toBe(1);
+    expect(api.posts[0].body).toMatchObject({ action: 'load', model_id: catalog[1].identity.id });
+    api.finish('load');
+    await refresh(page);
+    await expect(page.getByTestId('models-use-chat')).toBeEnabled();
+    await expect(page.getByTestId('models-unload')).toBeEnabled();
+  });
+
+  test('keyboard Tab reaches the next row with a visible row outline, and Space or Enter opens it', async ({ page }) => {
+    const catalog = entries();
+    const api = await installLibrary(page, catalog);
+    await login(page);
+    const outline = (index: number) =>
+      bodyRows(page)
+        .nth(index)
+        .evaluate((row) => {
+          const style = window.getComputedStyle(row);
+          return { style: style.outlineStyle, width: Number.parseFloat(style.outlineWidth) };
+        });
+    await inspect(page, catalog[0]).focus();
+    await page.keyboard.press('Tab');
+    await expect(inspect(page, catalog[1])).toBeFocused();
+    const focused = await outline(1);
+    expect(focused.style).not.toBe('none');
+    expect(focused.width).toBeGreaterThan(0);
+    expect((await outline(0)).style).toBe('none');
+    await page.keyboard.press('Space');
+    await expect(inspected(page)).toHaveText(catalog[1].identity.display_name);
+    await page.keyboard.press('Tab');
+    await expect(inspect(page, catalog[2])).toBeFocused();
+    expect((await outline(2)).style).not.toBe('none');
+    await page.keyboard.press('Enter');
+    await expect(inspected(page)).toHaveText(catalog[2].identity.display_name);
+    await expect(bodyRows(page).nth(2)).toHaveClass(/models-selected/);
+    expect(api.posts).toEqual([]);
+  });
+
+  test('dragging to select text inside a cell does not activate the row', async ({ page }) => {
+    const catalog = entries();
+    await installLibrary(page, catalog);
+    await login(page);
+    await inspect(page, catalog[0]).click();
+    await expect(inspected(page)).toHaveText(catalog[0].identity.display_name);
+    const task = bodyRows(page).nth(2).locator('td').nth(1);
+    await task.scrollIntoViewIfNeeded();
+    const line = await task.evaluate((cell) => {
+      const range = document.createRange();
+      range.selectNodeContents(cell);
+      const first = range.getClientRects()[0];
+      return { left: first.left, right: first.right, middle: first.top + first.height / 2 };
+    });
+    await page.mouse.move(line.left + 1, line.middle);
+    await page.mouse.down();
+    await page.mouse.move(line.right - 1, line.middle, { steps: 8 });
+    await page.mouse.up();
+    expect((await page.evaluate(() => window.getSelection()?.toString() ?? '')).trim()).not.toBe('');
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    await expect(inspected(page)).toHaveText(catalog[0].identity.display_name);
+    await expect(bodyRows(page).nth(2)).not.toHaveClass(/models-selected/);
+    // Control: with the selection gone, a click on the same point activates the row, so the drag did land inside it.
+    await page.evaluate(() => window.getSelection()?.removeAllRanges());
+    await page.mouse.click(line.left + 1, line.middle);
+    await expect(inspected(page)).toHaveText(catalog[2].identity.display_name);
+  });
+
+  test('rows keep table semantics, each entry keeps one Inspect button, and the page stays axe clean', async ({ page }) => {
+    const catalog = entries();
+    await installLibrary(page, catalog);
+    await login(page);
+    for (let index = 0; index < catalog.length; index += 1) {
+      expect(await bodyRows(page).nth(index).getAttribute('role')).toBeNull();
+      expect(await bodyRows(page).nth(index).getAttribute('tabindex')).toBeNull();
+    }
+    await expect(page.getByTestId('models-table').getByRole('row')).toHaveCount(catalog.length + 1);
+    await expect(page.getByTestId('models-table').getByRole('button')).toHaveCount(catalog.length);
+    for (const entry of catalog) {
+      // The router-real harness locator form; it must resolve to exactly one element.
+      const escaped = entry.identity.display_name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      await expect(page.getByRole('button', { name: new RegExp(`Inspect .*${escaped}`) })).toHaveCount(1);
+    }
+    await bodyRows(page).nth(0).locator('td').nth(3).click();
+    await expect(inspected(page)).toHaveText(catalog[0].identity.display_name);
+    expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+  });
+});

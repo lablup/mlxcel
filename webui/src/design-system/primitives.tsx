@@ -4,7 +4,7 @@ import { Icon } from './icons';
 import { Button, IconButton } from './common-adapters';
 import { ErrorBanner } from './common-feedback';
 import { NativeModalContext } from './modal-context';
-export { Button, IconButton, StatusBadge, ProgressBar, EmptyState, Tabs, DataTable } from './common-adapters';
+export { Button, IconButton, StatusBadge, ProgressBar, EmptyState, Tabs, DataTable, ROW_PRIMARY_CLASS } from './common-adapters';
 export type { ButtonProps, ButtonTone, LifecycleState, DataTableColumn, DataTablePersistedState, SortDirection } from './common-adapters';
 export { Select } from './common-select';
 export { Drawer, Tooltip } from './common-overlays';
