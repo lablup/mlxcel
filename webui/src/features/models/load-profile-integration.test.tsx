@@ -45,7 +45,7 @@ afterEach(() => { act(() => root.unmount()); host.remove(); });
 it('uses canonical reusable defaults only on explicit load and freezes the submitted values', async () => {
   act(() => store.save({ ctx_size: 2048, n_parallel: 2, kv_cache_mode: 'int8' }, 'reusable'));
   expect(host.textContent).toContain('Pending browser profile; not applied yet.');
-  expect(node<HTMLAnchorElement>('[data-testid="models-pending-profile"] a').getAttribute('href')).toBe('#settings');
+  expect(node<HTMLAnchorElement>('[data-testid="models-pending-profile"] a').getAttribute('href')).toBe('#settings/model');
   expect(actions.loadModel).not.toHaveBeenCalled();
   state = { ...state, selectedModelId: null };
   render();

@@ -76,6 +76,9 @@ for (const variant of engineVariants) {
     await expectSafeLayout(page);
 
     await navigate(page, 'nav-settings', /#settings$/);
+    // Request defaults are their own Settings tab; a tab change replaces the hash.
+    await page.getByRole('tab', { name: /^(Requests|요청)$/ }).click();
+    await expect(page).toHaveURL(/#settings\/requests$/);
     await expect(page.getByRole('heading', { name: /Generation · next request|생성 · 다음 요청/i })).toBeVisible();
     await page.getByRole('button', { name: /Reset request defaults|요청 기본값 초기화/i }).focus();
     await page.keyboard.press('Enter');
