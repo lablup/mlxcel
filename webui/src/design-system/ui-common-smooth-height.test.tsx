@@ -7,6 +7,7 @@ import type { Operation, WebUiSnapshot } from '../api/types';
 import { validateOperationsList } from '../api/validation';
 import { ActivityPage } from '../features/activity';
 import { initialSnapshot } from '../state/reducer';
+import { SmoothHeight } from './common-layout';
 
 let snapshot: WebUiSnapshot = initialSnapshot();
 const actions = { refresh: vi.fn(async () => undefined), cancelOperation: vi.fn(async () => undefined), selectModel: vi.fn() };
@@ -43,5 +44,27 @@ describe('Activity operations list height animation', () => {
     expect(pinned(show('succeeded'))).toBe(true);
     await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 600)); });
     expect(pinned(show('succeeded'))).toBe(false);
+  });
+});
+
+describe('SmoothHeight settle window', () => {
+  it('restarts the full 400ms settle window from the latest transition to false', () => {
+    vi.useFakeTimers();
+    try {
+      const active = (): boolean => Boolean(host.querySelector('.smooth-height--active'));
+      const render = (animate: boolean): void => { act(() => root.render(<SmoothHeight animate={animate}><p>content</p></SmoothHeight>)); };
+      render(false);
+      render(true);
+      render(false); // opens the settle window; a naive implementation ends it 400ms from here
+      act(() => { vi.advanceTimersByTime(300); });
+      render(true);
+      render(false); // a second transition to false inside the first window must restart it from here
+      act(() => { vi.advanceTimersByTime(300); }); // 600ms since the window opened, 300ms since the latest transition to false
+      expect(active()).toBe(true);
+      act(() => { vi.advanceTimersByTime(100); }); // 400ms since the latest transition to false
+      expect(active()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
