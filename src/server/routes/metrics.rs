@@ -144,13 +144,13 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
 
     let pp_snapshot = state.pp_observability.snapshot();
     let body = format!(
-        "# HELP mlxcel_requests_total Total number of generation requests\n\
+        "# HELP mlxcel_requests_total Total number of completed generation requests; chat completion streams cancelled by the client are excluded\n\
          # TYPE mlxcel_requests_total counter\n\
          mlxcel_requests_total {requests}\n\
          # HELP mlxcel_prompt_tokens_total Total prompt tokens processed\n\
          # TYPE mlxcel_prompt_tokens_total counter\n\
          mlxcel_prompt_tokens_total {prompt_tokens}\n\
-         # HELP mlxcel_completion_tokens_total Total completion tokens generated\n\
+         # HELP mlxcel_completion_tokens_total Total completion tokens of the requests counted in mlxcel_requests_total\n\
          # TYPE mlxcel_completion_tokens_total counter\n\
          mlxcel_completion_tokens_total {completion_tokens}\n\
          # HELP mlxcel_generation_time_seconds_total Total generation time in seconds\n\

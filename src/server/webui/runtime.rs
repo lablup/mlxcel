@@ -187,10 +187,10 @@ fn counter_source(key: &str) -> &'static str {
             "BatchMetrics pending prefill / single-stream queue; point-in-time sample"
         }
         "completed_requests_total" => {
-            "Metrics successfully recorded route completions; loaded-provider lifetime, not all admissions or errors"
+            "Metrics successfully recorded route completions, streamed and non-streamed chat alike, excluding chat streams the client cancelled; loaded-provider lifetime, not all admissions or errors"
         }
         "completion_tokens_total" => {
-            "Metrics completion tokens from recorded route results; loaded-provider lifetime"
+            "Metrics completion tokens from recorded route results, streamed and non-streamed chat alike, excluding chat streams the client cancelled; loaded-provider lifetime"
         }
         "generation_time_ms_total" => {
             "Metrics sum of route-reported generation/elapsed times; loaded-provider lifetime, not decode-only or TTFT"

@@ -94,14 +94,14 @@
       "unit": "requests",
       "scope": "model",
       "measured_at": "2026-09-12T03:04:05Z",
-      "reason": "Metrics successfully recorded route completions; loaded-provider lifetime, not all admissions or errors"
+      "reason": "Metrics successfully recorded route completions, streamed and non-streamed chat alike, excluding chat streams the client cancelled; loaded-provider lifetime, not all admissions or errors"
     },
     "completion_tokens_total": {
       "value": 0.0,
       "unit": "tokens",
       "scope": "model",
       "measured_at": "2026-09-12T03:04:05Z",
-      "reason": "Metrics completion tokens from recorded route results; loaded-provider lifetime"
+      "reason": "Metrics completion tokens from recorded route results, streamed and non-streamed chat alike, excluding chat streams the client cancelled; loaded-provider lifetime"
     },
     "generation_time_ms_total": {
       "value": 0.0,
