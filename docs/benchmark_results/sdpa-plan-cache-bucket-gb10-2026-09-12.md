@@ -6,7 +6,7 @@ Issue #1820. Host: NVIDIA GB10 (sm_121, DGX Spark), Linux aarch64, MLX pin `81ba
 
 ## Which cache-key fields actually move, per shape class
 
-Before designing around the key, measure it. `MLXCEL_SDPA_PLAN_DEBUG=1` writes one line per cuDNN SDPA call with the fields `build_sdpa_cache_key` reads. Run: block 4, 60 tokens, 25 verify rounds, upstream dispatch restored (`MLXCEL_SDPA_FALLBACK_MAX_QUERIES=0 MLXCEL_SDPA_PLAN_BUCKET_MAX_QUERIES=0`), so every verify SDPA reaches cuDNN as it did before #1817. Raw trace: `trace_upstream_w4.txt` (1401 calls).
+Before designing around the key, measure it. `MLXCEL_SDPA_PLAN_DEBUG=1` writes one line per cuDNN SDPA call with the fields `build_sdpa_cache_key` reads. Run: block 4, 60 tokens, 25 verify rounds, upstream dispatch restored (`MLXCEL_SDPA_FALLBACK_MAX_QUERIES=0 MLXCEL_SDPA_PLAN_BUCKET_MAX_QUERIES=0`), so every verify SDPA reaches cuDNN as it did before #1817. Trace: `data/sdpa-plan-bucket-gb10-2026-09-12/trace_upstream_w4.extract.txt`, a frequency extract (1401 calls, 169 distinct lines). The raw trace it replaces was 88 to 97 percent redundant; the extract keeps `<count>` with each distinct line, so the call totals, the per-class plan-build counts and the distinct-value counts in the table below are all still derivable, while per-call ordering is not. `harness/summarize_trace.py` reads either format.
 
 | shape class | layers | calls | plan builds | distinct `k_len` | distinct mask columns | distinct mask row stride | k/v buffer extent | k/v row stride | mask leading strides | sinks |
 |---|---|---|---|---|---|---|---|---|---|---|

@@ -1,0 +1,57 @@
+# MLXCEL_SDPA_PLAN_DEBUG frequency extract of the rebased-binary qwen3-1.7b-4bit non-speculative run (40 tokens, 2634-token prompt)
+# Format: '<count>\t<trace line>', one row per distinct line, count-descending.
+# calls=1204 distinct=45 plan_builds=3 bucketed_calls=0 max_resident_plans=3
+# Ordering is not preserved; counts, distinct counts and maxima are. See
+# extract_trace.py for which record numbers depend on which of those.
+# First 6 lines in original order follow, prefixed 'order:'.
+order:	[mlxcel-sdpa] q=1x16x2048x128 k_len=2048 k_extent=0 k_rowstride=1024 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=1 sinks=0 decode=0 bucket=0 copy=0 bucket_to=0 built=1 plans=1
+order:	[mlxcel-sdpa] q=1x16x2048x128 k_len=2048 k_extent=0 k_rowstride=1024 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=1 sinks=0 decode=0 bucket=0 copy=0 bucket_to=0 built=0 plans=1
+order:	[mlxcel-sdpa] q=1x16x2048x128 k_len=2048 k_extent=0 k_rowstride=1024 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=1 sinks=0 decode=0 bucket=0 copy=0 bucket_to=0 built=0 plans=1
+order:	[mlxcel-sdpa] q=1x16x2048x128 k_len=2048 k_extent=0 k_rowstride=1024 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=1 sinks=0 decode=0 bucket=0 copy=0 bucket_to=0 built=0 plans=1
+order:	[mlxcel-sdpa] q=1x16x2048x128 k_len=2048 k_extent=0 k_rowstride=1024 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=1 sinks=0 decode=0 bucket=0 copy=0 bucket_to=0 built=0 plans=1
+order:	[mlxcel-sdpa] q=1x16x2048x128 k_len=2048 k_extent=0 k_rowstride=1024 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=1 sinks=0 decode=0 bucket=0 copy=0 bucket_to=0 built=0 plans=1
+55	[mlxcel-sdpa] q=1x16x586x128 k_len=2634 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=1 sinks=0 decode=0 bucket=0 copy=0 bucket_to=0 built=0 plans=2
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2636 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2637 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2638 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2639 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2640 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2641 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2642 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2643 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2644 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2645 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2646 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2647 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2648 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2649 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2650 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2651 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2652 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2653 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2654 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2655 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2656 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2657 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2658 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2659 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2660 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2661 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2662 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2663 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2664 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2665 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2666 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2667 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2668 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2669 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2670 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2671 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2672 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x1x128 k_len=2673 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+28	[mlxcel-sdpa] q=1x16x2048x128 k_len=2048 k_extent=0 k_rowstride=1024 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=1 sinks=0 decode=0 bucket=0 copy=0 bucket_to=0 built=0 plans=2
+27	[mlxcel-sdpa] q=1x16x1x128 k_len=2635 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=0 plans=3
+27	[mlxcel-sdpa] q=1x16x2048x128 k_len=2048 k_extent=0 k_rowstride=1024 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=1 sinks=0 decode=0 bucket=0 copy=0 bucket_to=0 built=0 plans=1
+1	[mlxcel-sdpa] q=1x16x1x128 k_len=2635 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=0 sinks=0 decode=1 bucket=0 copy=0 bucket_to=2816 built=1 plans=3
+1	[mlxcel-sdpa] q=1x16x2048x128 k_len=2048 k_extent=0 k_rowstride=1024 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=1 sinks=0 decode=0 bucket=0 copy=0 bucket_to=0 built=1 plans=1
+1	[mlxcel-sdpa] q=1x16x586x128 k_len=2634 k_extent=2816 k_rowstride=128 mask_cols=-1 mask_rowstride=-1 mask_lead=-1,-1 causal=1 sinks=0 decode=0 bucket=0 copy=0 bucket_to=0 built=1 plans=2

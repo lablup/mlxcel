@@ -95,6 +95,31 @@ The step change with prompt length is in kind, not a noisy tail, and the runs th
 
 The harness samples `VmHWM` per run. It reports **1.9 GiB** for a run whose weights alone are 20.97 GiB, because CUDA unified allocations on this host do not appear in the process's resident set. The field is recorded but must not be trusted as a footprint, and the harness's 32 GiB memory floor stays **derived** (20.97 GiB of weights measured on disk plus 0.69 GiB of KV computed from `config.json`, plus headroom) rather than measured. Marked broken rather than left as a plausible number.
 
+## What is in the data directory, and what must not be read as a result
+
+`data/sdpa-plan-bucket-gb10-2026-09-12/`.
+
+**Throughput data, cited above.** `laguna_cli_rebased.jsonl` is the short-context sweep; `laguna_ladder_rebased.jsonl` is the 2634-token rung and contains nothing else.
+
+**`laguna_ladder_excluded.jsonl` is retained as raw evidence and is cited for nothing.** It holds the rows that were measured and then disqualified, and it exists as a separate file precisely because they cannot be told apart by any automatic filter: their `foreign_models_before` and `foreign_models_after` fields are clean, so every contamination check the harness has passes them. Two groups, each carrying an `excluded_reason` naming its own defect:
+
+- The **8k rung**, seven rows, halted mid-run under a driver allocation storm. Sparse (n = 1 to 2 per configuration against the n = 3 this record requires) and contaminated independently of that: one `b8` row reports a 24.8 ms per round drafter host build against about 12 ms in its siblings, which is the storm and not the arm under test.
+- The **16k rung**, two rows, stopped after the warm-up and one measured run when each 16k run proved to cost about 38 NVRM allocation failures.
+
+`harness/summarize_ladder.py` drops any row carrying `excluded_reason` ahead of every other signal and prints the reason, so pointing the summarizer at this file yields an empty table rather than numbers. Do not average these rows into anything.
+
+**Traces are frequency extracts, not raw.** The raw traces were 88 to 97 percent redundant and 70 percent of this directory's bytes. Each `*.extract.txt` is one row per distinct line as `<count>` then a tab then the line, count-descending, with a header giving the totals. Counts, distinct-value counts and maxima survive; per-call ordering does not, and no figure in this record depends on ordering. `harness/summarize_trace.py` reads either format and says which it was given; `harness/extract_trace.py` regenerates an extract from a raw trace.
+
+| extract | run | calls | plan builds | bucketed calls |
+|---|---|---|---|---|
+| `trace_upstream_w4.extract.txt` | pre-rebase, upstream dispatch, block 4 | 1401 | 82 | 0 |
+| `trace_bucketed_w4.extract.txt` | pre-rebase, bucketed, block 4 | 1401 | 11 | 1205 |
+| `trace_qwen3_nonspec.extract.txt` | pre-rebase, qwen3-1.7b-4bit, 120 tokens | 3444 | 3 | 0 |
+| `trace_rebased_bucketed_w4.extract.txt` | **rebased**, bucketed, block 4, 60 tokens | 1401 | **12** | 1205 |
+| `trace_rebased_qwen3_nonspec.extract.txt` | **rebased**, qwen3-1.7b-4bit, 40 tokens | **1204** | 3 | **0** |
+
+The last two are the evidence for this record's own numbers and were added when the extracts were made; before that, this record cited 12 plan builds and 1204 non-speculative calls against traces that had never been committed.
+
 ## Blast radius
 
 **Measured**: the Laguna DFlash pairing, and `qwen3-1.7b-4bit` as a dense head_dim-128 non-speculative control where the trace shows the path is not entered.
