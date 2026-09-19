@@ -159,3 +159,38 @@ test.describe('shared Skeleton', () => {
     });
   }
 });
+
+test.describe('shared SmoothHeight', () => {
+  for (const width of [390, 1440]) {
+    test(`focus rings inside the in-flight operations list are never clipped at ${width}`, async ({ page }) => {
+      await installMockApi(page, 'happy');
+      await bootProduct(page, { ...productVariants[0], width, appearance: { ...productVariants[0].appearance, locale: 'en' } });
+      await loginWithMockApi(page);
+      await page.evaluate(() => { window.location.hash = '#activity'; });
+      const list = page.locator('ol.activity-operations');
+      await expect(list).toContainText('running');
+      const controls = list.locator('summary, button:not([disabled]), a[href]');
+      const count = await controls.count();
+      expect(count).toBeGreaterThan(0);
+      for (let index = 0; index < count; index += 1) {
+        await controls.nth(index).focus();
+        // Any ancestor that clips must leave room for the 3px focus ring plus a pixel.
+        const clippedBy = await controls.nth(index).evaluate((element) => {
+          const rect = element.getBoundingClientRect();
+          const ring = 4;
+          const clipping: string[] = [];
+          for (let node = element.parentElement; node && node !== document.body; node = node.parentElement) {
+            const style = window.getComputedStyle(node);
+            if (style.overflowX === 'visible' && style.overflowY === 'visible') continue;
+            const box = node.getBoundingClientRect();
+            if (rect.left - ring < box.left || rect.right + ring > box.right || rect.top - ring < box.top || rect.bottom + ring > box.bottom) clipping.push(node.className);
+          }
+          return clipping;
+        });
+        expect(clippedBy).toEqual([]);
+      }
+      await expectSafeLayout(page);
+      await expect(page.locator('.smooth-height.smooth-height--active').filter({ has: list })).toHaveCount(1);
+    });
+  }
+});
