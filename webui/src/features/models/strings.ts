@@ -249,7 +249,7 @@ export const modelStrings = [
   {
     key: 'models.library.confirm_name',
     en: 'Opaque model ID shown above (starts with mdl_)',
-    ko: '위에 표시된 불투명 모델 ID (mdl_로 시작)',
+    ko: '위에 표시된 모델 ID (mdl_로 시작)',
     test_id: 'models-library-confirm-name',
   },
   {

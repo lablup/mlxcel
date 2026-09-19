@@ -1519,7 +1519,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 256,
-            "description": "The model's inference id verbatim, with no character rewriting (the full owner/name for cache entries). A label only: select and operate on a model by id."
+            "description": "The model's inference id with no character rewriting: the full id for cache and preset entries (owner/name for a cache repo), the directory name for models_dir entries, and the last /-separated segment of the served id for single_model. A label only: select and operate on a model by id."
           },
           "source": {
             "$ref": "#/components/schemas/CatalogSourceKind"
