@@ -55,8 +55,43 @@ export function Tabs(props: { tabs: { id: string; label: string; panel: React.Re
   }} ariaLabel={props.label ?? 'Sections'} variant="segmented" fillContainer overflowMode="menu" showOverflowControls={false} showGroupLabels={false} /></section>;
 }
 
+/** Marks a row's primary control, the one whole-row activation delegates to. A class, because the common Button forwards `className` but no arbitrary `data-*`. */
+export const ROW_PRIMARY_CLASS = 'ds-row-primary';
+// Mirrors the common table's own nested-interactive guard, except an anchor counts only with an href;
+// an anchor without one is not interactive.
+const ROW_INTERACTIVE = 'a[href], button, input, select, textarea, summary, label, [contenteditable="true"], [role="button"], [role="link"], [tabindex]:not([tabindex="-1"])';
+
+function delegateRowClick(event: React.MouseEvent<HTMLDivElement>): void {
+  if (event.defaultPrevented || event.button !== 0 || !(event.target instanceof Element)) return;
+  const row = event.target.closest('tbody > tr');
+  if (!row || !event.currentTarget.contains(row) || row.classList.contains('data-table__row--state')) return;
+  const primary = row.querySelector<HTMLElement>(`.${ROW_PRIMARY_CLASS}`);
+  if (!primary || primary.matches(':disabled, [aria-disabled="true"]')) return;
+  const nested = event.target.closest(ROW_INTERACTIVE);
+  if (nested && row.contains(nested)) return;
+  // A drag that selected text in this row is a selection, not an activation.
+  const selection = window.getSelection();
+  if (selection && !selection.isCollapsed && selection.toString().trim() !== '' && (row.contains(selection.anchorNode) || row.contains(selection.focusNode))) return;
+  primary.focus({ preventScroll: true });
+  primary.click();
+}
+
 // New feature tables use this typed seam, not the gallery's legacy markup table.
-export function DataTable<T>(props: Omit<DataTableProps<T>, 'ariaLabel'> & { ariaLabel: string }): React.JSX.Element {
-  return <CommonDataTable {...props} className={`ds-common-table ${props.className ?? ''}`.trim()} />;
+// onRowClick/isRowClickable are withheld: alpha.19 turns each body <tr> into role="button" with its own tab stop, which fails axe
+// aria-required-children and nested-interactive inside role="table" and gives the row an "Inspect ..." name that collides with its button.
+export type DataTableAdapterProps<T> = Omit<DataTableProps<T>, 'ariaLabel' | 'onRowClick' | 'isRowClickable'> & {
+  ariaLabel: string;
+  /**
+   * Whole-row pointer activation. A click anywhere in a body row that is not on another interactive element, and that did
+   * not end a text selection, focuses and clicks the row's `ROW_PRIMARY_CLASS` control, so pointer and keyboard run the same
+   * handler. Rows keep their native `row` role and gain no tab stop; the primary control stays the keyboard and
+   * screen-reader target, and the row draws a focus outline while that control has `:focus-visible`. Rows without an
+   * enabled primary control, and the loading and empty rows, stay inert.
+   */
+  activateRowPrimary?: boolean;
+};
+export function DataTable<T>({ activateRowPrimary = false, ...props }: DataTableAdapterProps<T>): React.JSX.Element {
+  const table = <CommonDataTable {...props} className={`ds-common-table ${props.className ?? ''}`.trim()} />;
+  return activateRowPrimary ? <div className="ds-row-activation" onClick={delegateRowClick}>{table}</div> : table;
 }
 export type { DataTableColumn, DataTablePersistedState, SortDirection } from '@lablup/ui-common/components/DataTable';
