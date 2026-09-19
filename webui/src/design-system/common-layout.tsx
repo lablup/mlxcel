@@ -1,8 +1,9 @@
 // Copyright 2025-2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { BaseCard } from '@lablup/ui-common/components/BaseCard';
 import { PageHeader as CommonPageHeader } from '@lablup/ui-common/components/PageHeader';
 import { PageLayout as CommonPageLayout } from '@lablup/ui-common/components/PageLayout';
+import { SmoothHeight as CommonSmoothHeight } from '@lablup/ui-common/components/SmoothHeight';
 
 // BaseCard renders a role-less div, so product cards pass their landmark role
 // (an aria-label on a role-less div is an axe aria-prohibited-attr failure).
@@ -32,4 +33,27 @@ export function PageHeader(props: { title: string; description?: string; titleTe
       heading.setAttribute('data-dialog-focus-fallback', '');
     }
   }}><CommonPageHeader title={props.title} description={props.description} /></div>;
+}
+
+// Covers the package transition (motion-standard) with margin for the last change.
+const SETTLE_MS = 400;
+
+// Animates height changes while `animate` is true (for example, while operations are
+// in flight) and for one settle window after it turns false, so the final change
+// still animates. SmoothHeight's active state pins an inline height with
+// overflow:hidden; releasing it once settled means a steady list never clips the focus
+// rings of controls at its edges.
+export function SmoothHeight(props: { animate: boolean; children: React.ReactNode }): React.JSX.Element {
+  const [previous, setPrevious] = useState(props.animate);
+  const [settling, setSettling] = useState(false);
+  if (previous !== props.animate) {
+    setPrevious(props.animate);
+    if (!props.animate) setSettling(true);
+  }
+  useEffect(() => {
+    if (!settling) return;
+    const timer = window.setTimeout(() => setSettling(false), SETTLE_MS);
+    return () => window.clearTimeout(timer);
+  }, [settling]);
+  return <CommonSmoothHeight active={props.animate || settling} className="ds-smooth-height">{props.children}</CommonSmoothHeight>;
 }

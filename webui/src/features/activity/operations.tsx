@@ -1,7 +1,7 @@
 // Copyright 2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 import React, { useState } from 'react';
 import type { Operation } from '../../api/types';
-import { Button, EmptyState, ErrorBanner, ProgressBar, StatusBadge } from '../../design-system/primitives';
+import { Button, EmptyState, ErrorBanner, ProgressBar, SmoothHeight, StatusBadge } from '../../design-system/primitives';
 import { useWebUi, useWebUiActions } from '../../state';
 import { isTerminal } from '../../state/observation';
 import { operationProgress } from './format';
@@ -11,7 +11,7 @@ import type { Locale } from '../../i18n/catalog';
 export function Operations({ operations, locale, stale }: { operations: ReadonlyMap<string, Operation>; locale: Locale; stale: boolean }): React.JSX.Element {
   const text = strings(locale);
   const entries = [...operations.values()].sort((a, b) => Number(isTerminal(a)) - Number(isTerminal(b)) || b.updated_at.localeCompare(a.updated_at));
-  return <section aria-label={text.operations}><h2>{text.operations}</h2><p role="status" aria-live="polite">{text.operations}: {entries.filter((operation) => !isTerminal(operation)).length} {locale === 'ko' ? '진행 중' : 'active'} · {entries.filter((operation) => operation.state === 'failed').length} {locale === 'ko' ? '실패' : 'failed'}</p><p>{text.session}</p>{entries.length === 0 ? <EmptyState title={text.empty} body={text.emptyBody} /> : <ol className="activity-operations">{entries.map((operation) => <li key={operation.operation_id}><OperationRow operation={operation} locale={locale} stale={stale} /></li>)}</ol>}</section>;
+  return <section aria-label={text.operations}><h2>{text.operations}</h2><p role="status" aria-live="polite">{text.operations}: {entries.filter((operation) => !isTerminal(operation)).length} {locale === 'ko' ? '진행 중' : 'active'} · {entries.filter((operation) => operation.state === 'failed').length} {locale === 'ko' ? '실패' : 'failed'}</p><p>{text.session}</p><SmoothHeight animate={entries.some((operation) => !isTerminal(operation))}>{entries.length === 0 ? <EmptyState title={text.empty} body={text.emptyBody} /> : <ol className="activity-operations">{entries.map((operation) => <li key={operation.operation_id}><OperationRow operation={operation} locale={locale} stale={stale} /></li>)}</ol>}</SmoothHeight></section>;
 }
 
 function OperationRow({ operation, locale, stale }: { operation: Operation; locale: Locale; stale: boolean }): React.JSX.Element {

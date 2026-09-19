@@ -9,7 +9,7 @@ export type { ButtonProps, ButtonTone, LifecycleState, DataTableColumn, DataTabl
 export { Select } from './common-select';
 export { Drawer, Tooltip } from './common-overlays';
 export { ErrorBanner, LoadingStatus } from './common-feedback';
-export { Card, PageHeader, PageLayout } from './common-layout';
+export { Card, PageHeader, PageLayout, SmoothHeight } from './common-layout';
 export { StatCard } from './common-data';
 
 export function Field(props: { label: string; value: string; onChange?: (value: string) => void; placeholder?: string; disabled?: boolean; busy?: boolean; error?: string; hint?: string; testId?: string }): React.JSX.Element {
