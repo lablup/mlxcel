@@ -3,6 +3,8 @@ import React, { useState } from 'react';
 import type { CatalogEntry, Operation, WebUiSnapshot } from '../../api/types';
 import { Button, Dialog, Field, Select } from '../../design-system/primitives';
 import { t, type Locale } from '../../i18n/catalog';
+import { lifecycleLabel } from '../../provider-surfaces';
+import { isolate, sourceLabel } from './labels';
 import { evictionCandidates, validRepo, validRevision } from './policy';
 
 export type Confirmation =
@@ -46,10 +48,10 @@ export function ConfirmAction({
     value.kind === 'capacity'
       ? t(locale, 'models.library.capacity_body')
       : value.kind === 'cancel'
-        ? t(locale, 'models.library.cancel_body', { name })
+        ? t(locale, 'models.library.cancel_body', { name: isolate(name) })
         : t(locale, value.kind === 'delete' ? 'models.library.delete_body' : 'models.library.unload_body', {
-            name,
-            source: value.entry.identity.source,
+            name: isolate(name),
+            source: sourceLabel(locale, value.entry.identity.source),
             count: String(value.entry.lifecycle.active_requests),
           });
   const same =
@@ -85,7 +87,7 @@ export function ConfirmAction({
               .filter((entry) => ['ready', 'loading', 'draining', 'unloading'].includes(entry.lifecycle.state))
               .map((entry) => (
                 <li key={entry.identity.id} className="models-wrap">
-                  {entry.identity.display_name} · {entry.lifecycle.state} · {t(locale, 'models.library.active')}:{' '}
+                  <bdi>{entry.identity.display_name}</bdi> · {lifecycleLabel(locale, entry.lifecycle.state)} · {t(locale, 'models.library.active')}:{' '}
                   {entry.lifecycle.active_requests}
                 </li>
               ))}

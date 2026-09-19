@@ -1,6 +1,7 @@
 // Copyright 2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 import { expect, test, type Page } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
+import { expectAxeClean, expectSafeLayout } from './browser-assertions';
 import { model, runtime, bootstrap, loadValidator } from './models-fixtures';
 import type { CatalogEntry, ModelActionRequest, Operation } from '../src/api/types';
 
@@ -241,7 +242,17 @@ for (const variant of [
     const inspect = page.getByRole('button', { name: /^Inspect / }).first();
     await inspect.focus();
     await page.keyboard.press('Enter');
-    await expect(page.getByRole('complementary', { name: 'Model details' })).toBeVisible();
+    if (variant.width >= 1100) await expect(page.getByRole('complementary', { name: 'Model details' })).toBeVisible();
+    else {
+      // Below 1100 px the inspector is a modal drawer: a dialog with the same name, closed with Escape.
+      const drawer = page.getByRole('dialog', { name: 'Model details' });
+      await expect(drawer).toBeVisible();
+      await expect(page.getByRole('complementary', { name: 'Model details' })).toHaveCount(0);
+      await expect(drawer.getByRole('heading', { level: 3 })).toHaveText(/-0-long_readable/);
+      await page.keyboard.press('Escape');
+      await expect(drawer).toBeHidden();
+      await expect(inspect).toBeFocused();
+    }
     await page.getByTestId('models-search').fill('模型-119');
     await expect(page.locator('[data-testid="models-table"] tbody tr')).toHaveCount(1);
     expect(api.posts).toEqual([]);
@@ -250,7 +261,7 @@ for (const variant of [
   });
 }
 
-// Whole-row activation: a user who never finds the name button still reaches the inspector.
+// Whole-row activation: a user who never finds the Inspect button still reaches the inspector.
 test.describe('Models row activation', () => {
   const entries = (): CatalogEntry[] =>
     ['alpha', 'bravo', 'charlie'].map((name, index) => ({
@@ -262,6 +273,8 @@ test.describe('Models row activation', () => {
       },
     }));
   const bodyRows = (page: Page) => page.locator('[data-testid="models-table"] tbody tr');
+  // State stays visible at every width the list reaches here, including beside the inspector pane.
+  const stateCell = (page: Page, index: number) => bodyRows(page).nth(index).locator('td.models-col-state');
   const inspector = (page: Page) => page.getByRole('complementary', { name: 'Model details' });
   const inspected = (page: Page) => inspector(page).getByRole('heading', { level: 3 });
   const inspect = (page: Page, entry: CatalogEntry) =>
@@ -273,13 +286,13 @@ test.describe('Models row activation', () => {
     await login(page);
     await expect(bodyRows(page)).toHaveCount(3);
     await expect(inspector(page)).toHaveCount(0);
-    await bodyRows(page).nth(1).locator('td').nth(2).click();
+    await stateCell(page, 1).click();
     await expect(inspector(page)).toBeVisible();
     await expect(inspected(page)).toHaveText(catalog[1].identity.display_name);
     await expect(bodyRows(page).nth(1)).toHaveClass(/models-selected/);
     await expect(bodyRows(page).nth(0)).not.toHaveClass(/models-selected/);
     expect(api.posts).toEqual([]);
-    await bodyRows(page).nth(1).locator('td').nth(1).click();
+    await bodyRows(page).nth(1).locator('td.models-col-name').click();
     await expect(inspected(page)).toHaveText(catalog[1].identity.display_name);
     expect(api.posts).toEqual([]);
     await page.getByTestId('models-load').click();
@@ -291,7 +304,7 @@ test.describe('Models row activation', () => {
     await expect(page.getByTestId('models-unload')).toBeEnabled();
   });
 
-  test('keyboard Tab reaches the next row with a visible row outline, and Space or Enter opens it', async ({ page }) => {
+  test('keyboard Tab walks each row\'s controls with the row outlined, and Space or Enter on Inspect opens it', async ({ page }) => {
     const catalog = entries();
     const api = await installLibrary(page, catalog);
     await login(page);
@@ -302,16 +315,22 @@ test.describe('Models row activation', () => {
           const style = window.getComputedStyle(row);
           return { style: style.outlineStyle, width: Number.parseFloat(style.outlineWidth) };
         });
+    const row = (index: number) => bodyRows(page).nth(index);
     await inspect(page, catalog[0]).focus();
+    // Row order: Load, Inspect, Delete; the next row begins with its Load.
     await page.keyboard.press('Tab');
-    await expect(inspect(page, catalog[1])).toBeFocused();
+    await expect(row(0).getByTestId('models-row-delete')).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(row(1).getByTestId('models-row-load')).toBeFocused();
     const focused = await outline(1);
     expect(focused.style).not.toBe('none');
     expect(focused.width).toBeGreaterThan(0);
     expect((await outline(0)).style).toBe('none');
+    await page.keyboard.press('Tab');
+    await expect(inspect(page, catalog[1])).toBeFocused();
     await page.keyboard.press('Space');
     await expect(inspected(page)).toHaveText(catalog[1].identity.display_name);
-    await page.keyboard.press('Tab');
+    for (let step = 0; step < 3; step += 1) await page.keyboard.press('Tab');
     await expect(inspect(page, catalog[2])).toBeFocused();
     expect((await outline(2)).style).not.toBe('none');
     await page.keyboard.press('Enter');
@@ -326,9 +345,9 @@ test.describe('Models row activation', () => {
     await login(page);
     await inspect(page, catalog[0]).click();
     await expect(inspected(page)).toHaveText(catalog[0].identity.display_name);
-    const task = bodyRows(page).nth(2).locator('td').nth(1);
-    await task.scrollIntoViewIfNeeded();
-    const line = await task.evaluate((cell) => {
+    const name = bodyRows(page).nth(2).locator('td.models-col-name .truncate');
+    await name.scrollIntoViewIfNeeded();
+    const line = await name.evaluate((cell) => {
       const range = document.createRange();
       range.selectNodeContents(cell);
       const first = range.getClientRects()[0];
@@ -357,19 +376,19 @@ test.describe('Models row activation', () => {
       expect(await bodyRows(page).nth(index).getAttribute('tabindex')).toBeNull();
     }
     await expect(page.getByTestId('models-table').getByRole('row')).toHaveCount(catalog.length + 1);
-    await expect(page.getByTestId('models-table').getByRole('button')).toHaveCount(catalog.length);
+    await expect(page.getByTestId('models-table').getByRole('button', { name: /^Inspect / })).toHaveCount(catalog.length);
     for (const entry of catalog) {
       // The router-real harness locator form; it must resolve to exactly one element.
       const escaped = entry.identity.display_name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       await expect(page.getByRole('button', { name: new RegExp(`Inspect .*${escaped}`) })).toHaveCount(1);
     }
-    await bodyRows(page).nth(0).locator('td').nth(3).click();
+    await stateCell(page, 0).click();
     await expect(inspected(page)).toHaveText(catalog[0].identity.display_name);
     expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
   });
 
-  // Row activation makes a selected row routine, so its "Selected" badge must stay readable on the
-  // selection fill in every theme, including high contrast, where the fill is 30 percent focus color.
+  // Row activation makes a selected row routine, so its content must stay readable on the selection
+  // fill in every theme, including high contrast, where the fill is 30 percent focus color.
   test('a selected row, and a hovered one, stay contrast-clean in every theme with and without high contrast', async ({ page }) => {
     const catalog = entries();
     await installLibrary(page, catalog);
@@ -384,13 +403,123 @@ test.describe('Models row activation', () => {
           await page.goto('about:blank');
           await login(page);
           await expect(page.locator('html')).toHaveAttribute('data-theme', `${themeFamily}-${colorScheme}`);
-          await bodyRows(page).nth(0).locator('td').nth(2).click();
+          await stateCell(page, 0).click();
           await expect(bodyRows(page).nth(0)).toHaveClass(/models-selected/);
-          await bodyRows(page).nth(1).locator('td').nth(2).hover();
+          await stateCell(page, 1).hover();
           const results = await new AxeBuilder({ page }).include('[data-testid="models-table"]').withRules(['color-contrast']).analyze();
           for (const violation of results.violations)
             for (const node of violation.nodes) failures.push(`${themeFamily}-${colorScheme} high-contrast ${highContrast}: ${node.target.join(' ')} ${node.failureSummary ?? ''}`);
         }
     expect(failures).toEqual([]);
+  });
+});
+
+// #1918: the row is the unit of work. The primary path (load, chat, unload) never needs the inspector.
+test.describe('Models row actions', () => {
+  const catalog = (): CatalogEntry[] =>
+    ['alpha', 'bravo', 'charlie'].map((name, index) => ({
+      ...model(),
+      identity: { ...model().identity, id: `mdl_${String(index + 1).padStart(43, '0')}`, display_name: `${name}-4bit` },
+    }));
+  const row = (page: Page, name: string) => page.locator('[data-testid="models-table"] tbody tr').filter({ has: page.getByTitle(name, { exact: true }) });
+
+  test('load, Use in Chat and unload run from the row buttons alone', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    const entries = catalog();
+    const api = await installLibrary(page, entries);
+    await login(page);
+    const bravo = () => row(page, 'bravo-4bit');
+    await bravo().getByTestId('models-row-load').click();
+    await expect.poll(() => api.posts.length).toBe(1);
+    expect(api.posts[0].body).toMatchObject({ action: 'load', model_id: entries[1].identity.id });
+    // Nothing was selected: the inspector never opened on the way.
+    await expect(page.getByRole('complementary', { name: 'Model details' })).toHaveCount(0);
+    await refresh(page);
+    await expect(bravo().getByTestId('models-row-load')).toBeDisabled();
+    api.finish('load');
+    await refresh(page);
+    await expect(bravo().getByTestId('models-row-load')).toHaveCount(0);
+    await expect(page.getByRole('complementary', { name: 'Model details' })).toHaveCount(0);
+    await bravo().getByTestId('models-row-chat').click();
+    await expect(page).toHaveURL(/#chat$/);
+    await page.getByRole('link', { name: 'Models', exact: true }).first().click();
+    await bravo().getByTestId('models-row-unload').click();
+    await expect(page.getByTestId('models-confirm')).toContainText('Files remain on disk');
+    await page.getByTestId('models-confirm-submit').click();
+    await expect.poll(() => api.posts.length).toBe(2);
+    expect(api.posts[1].body).toMatchObject({ action: 'unload', model_id: entries[1].identity.id });
+    api.finish('unload');
+    await refresh(page);
+    await expect(bravo().getByTestId('models-row-load')).toBeEnabled();
+    expect(api.posts.map((item) => item.path)).toEqual(['/ui-api/v1/model-actions', '/ui-api/v1/model-actions']);
+  });
+
+  test('at 1440x900 at least 15 rows of a 120-entry library are in view without scrolling', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    const entries = Array.from({ length: 120 }, (_, index) => ({
+      ...model(),
+      identity: {
+        ...model().identity,
+        id: `mdl_${String(index).padStart(43, '0')}`,
+        display_name: `긴-체크포인트-模型-${index}-long_readable_identity_without_truncating_meaning`,
+      },
+    }));
+    await installLibrary(page, entries);
+    await login(page);
+    await expect(page.locator('[data-testid="models-table"] tbody tr')).toHaveCount(25);
+    const inView = await page.evaluate(() =>
+      [...document.querySelectorAll('[data-testid="models-table"] tbody tr')].filter((item) => {
+        const rect = item.getBoundingClientRect();
+        return rect.top >= 0 && rect.bottom <= window.innerHeight;
+      }).length,
+    );
+    expect(inView).toBeGreaterThanOrEqual(15);
+    // A long name stays one line: truncated, with the full name in its title and the Inspect button's name.
+    const name = page.locator('[data-testid="models-table"] tbody tr').first().locator('.truncate');
+    await expect(name).toHaveAttribute('title', entries[0].identity.display_name);
+    expect(await name.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
+  });
+
+  test('below 1100 px a confirmation opened from the inspector drawer returns focus to the drawer', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    const entries = catalog();
+    entries[1] = {
+      ...entries[1],
+      lifecycle: { ...entries[1].lifecycle, state: 'ready' },
+      capabilities: [{ task: 'chat', phase: 'provider_ready', available: true, reason: null }],
+    };
+    const api = await installLibrary(page, entries);
+    await login(page);
+    await page.getByRole('button', { name: 'Inspect alpha-4bit', exact: true }).click();
+    const drawer = page.getByRole('dialog', { name: 'Model details' });
+    await expect(drawer).toBeVisible();
+    await drawer.getByTestId('models-delete').click();
+    await expect(page.getByTestId('models-confirm')).toBeVisible();
+    await page.getByTestId('models-confirm').getByRole('button', { name: 'Cancel', exact: true }).click();
+    await expect(page.getByTestId('models-confirm')).toHaveCount(0);
+    await expect(drawer.getByTestId('models-delete')).toBeFocused();
+    await drawer.getByRole('button', { name: 'Close', exact: true }).click();
+    await expect(drawer).toBeHidden();
+    // A confirmed Unload disables the control that opened it; focus stays in the drawer, not on the page behind it.
+    await page.getByRole('button', { name: 'Inspect bravo-4bit', exact: true }).click();
+    await expect(drawer.getByRole('heading', { level: 3 })).toHaveText('bravo-4bit');
+    await drawer.getByTestId('models-unload').click();
+    await page.getByTestId('models-confirm-submit').click();
+    await expect.poll(() => api.posts.length).toBe(1);
+    await expect(drawer.getByRole('button', { name: 'Close', exact: true })).toBeFocused();
+    await expectSafeLayout(page);
+    // WCAG rules only: the shared Drawer renders <aside role="dialog">, which axe's best-practice
+    // aria-allowed-role flags on the navigation sheet as well.
+    await expectAxeClean(page);
+  });
+
+  test('an empty library at 390 px has no unreachable scroll region and offers the configured roots', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await installLibrary(page, []);
+    await login(page);
+    await expect(page.getByTestId('models-empty')).toBeVisible();
+    expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+    await page.getByTestId('models-roots').click();
+    await expect(page.getByTestId('models-roots-dialog')).toContainText('--models-dir /path/to/models');
   });
 });

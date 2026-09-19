@@ -1,6 +1,6 @@
 import React from 'react';
 
-export type IconName = 'models' | 'chat' | 'activity' | 'settings' | 'gallery' | 'command' | 'help' | 'menu' | 'close' | 'search' | 'warning' | 'key' | 'schema';
+export type IconName = 'models' | 'chat' | 'activity' | 'settings' | 'gallery' | 'command' | 'help' | 'menu' | 'close' | 'search' | 'warning' | 'key' | 'schema' | 'details' | 'trash';
 
 const paths: Record<IconName, React.ReactNode> = {
   models: <path d="M5 6.5A1.5 1.5 0 0 1 6.5 5h4A1.5 1.5 0 0 1 12 6.5v4a1.5 1.5 0 0 1-1.5 1.5h-4A1.5 1.5 0 0 1 5 10.5zm8 0A1.5 1.5 0 0 1 14.5 5h3A1.5 1.5 0 0 1 19 6.5v11a1.5 1.5 0 0 1-1.5 1.5h-3a1.5 1.5 0 0 1-1.5-1.5zm-8 8A1.5 1.5 0 0 1 6.5 13h4a1.5 1.5 0 0 1 1.5 1.5v3a1.5 1.5 0 0 1-1.5 1.5h-4A1.5 1.5 0 0 1 5 17.5z" />,
@@ -16,6 +16,8 @@ const paths: Record<IconName, React.ReactNode> = {
   warning: <path d="M12 4.8 21 19H3zm0 5.2v4m0 2.5h.01" />,
   key: <path d="M14.5 9.5A4.5 4.5 0 1 0 11 13.9l2.1 2.1H16v2h2v2h2v-2.9l-4.6-4.6a4.5 4.5 0 0 0-.9-3Z" />,
   schema: <path d="M6 5h7l5 5v9H6zm7 0v5h5M9 13h6M9 16h6M9 10h2" />,
+  details: <path d="M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Zm0-10.5v6m0-9h.01" />,
+  trash: <path d="M5 7h14M10 7V5h4v2M7 7l1 12h8l1-12M10.5 10.5v5.5m3-5.5v5.5" />,
 };
 
 export function Icon(props: { name: IconName; className?: string }): React.JSX.Element {

@@ -7,9 +7,10 @@ import { applyAppearance, DEFAULT_APPEARANCE, loadAppearance, saveAppearance, ty
 import { onSystemColorSchemeChange } from './design-system/theme';
 import { Dialog, ErrorBanner, IconButton, PageHeader, Select } from './design-system/primitives';
 import { ActivityPage } from './features/activity';
+import { requestInspector } from './features/models/inspect-request';
 import { ModelsLibrary } from './features/models/screen';
 import { DesignGallery } from './gallery';
-import { classifyAuthFailure, connectionFooterDetails, connectionFooterLabel, lifecycleLabel, loadedModels, modelSelectionFor, ProductConnectionSurface, type AuthFailure } from './provider-surfaces';
+import { classifyAuthFailure, connectedDetail, connectionFooterDetails, connectionFooterLabel, lifecycleLabel, loadedModels, modelSelectionFor, ProductConnectionSurface, type AuthFailure } from './provider-surfaces';
 import { useWebUi, useWebUiActions } from './state';
 import { t, testId } from './i18n/catalog';
 import { Chat } from './features/chat/chat';
@@ -100,6 +101,8 @@ export function App(): React.JSX.Element {
   const openModel = (id: ModelId): void => {
     const target = modelSelectionFor(snapshot, id);
     if (target !== snapshot.selectedModelId) actions.selectModel(target);
+    // Below 1100 px the inspector is a drawer that opens only on request.
+    if (target !== null) requestInspector();
     navigate('models');
     setOverlay(null);
   };
@@ -119,7 +122,7 @@ export function App(): React.JSX.Element {
   const body = renderRoute(route, appearance, setAppearance, { snapshot, authFailure, login, logout, retry, recoverSchema });
   return (
     <>
-      <AppShell locale={appearance.locale} route={route} onRouteChange={navigate} onCommand={() => setOverlay('command')} onHelp={() => setOverlay('help')} onNewChat={newChat} onOpenModel={openModel} loadedModels={shellLoaded} connection={{ label: connectionFooterLabel(appearance.locale, snapshot), state: snapshot.connection, details: connectionFooterDetails(appearance.locale, snapshot) }} sessionAction={snapshot.auth.tokenPresent ? <IconButton label={t(appearance.locale, 'toolbar.logout')} icon="key" onClick={logout} data-testid={testId('toolbar.logout')} /> : null} inspector={null}>
+      <AppShell locale={appearance.locale} route={route} onRouteChange={navigate} onCommand={() => setOverlay('command')} onHelp={() => setOverlay('help')} onNewChat={newChat} onOpenModel={openModel} loadedModels={shellLoaded} connection={{ label: connectionFooterLabel(appearance.locale, snapshot), state: snapshot.connection, details: connectionFooterDetails(appearance.locale, snapshot), summary: snapshot.bootstrap === null ? null : connectedDetail(appearance.locale, snapshot) }} sessionAction={snapshot.auth.tokenPresent ? <IconButton label={t(appearance.locale, 'toolbar.logout')} icon="key" onClick={logout} data-testid={testId('toolbar.logout')} /> : null} inspector={null}>
         {body}
       </AppShell>
       <CommandPalette open={overlay === 'command'} locale={appearance.locale} catalog={snapshot.catalog} loaded={loaded} onClose={() => setOverlay(null)} onNavigate={(next) => { navigate(next); setOverlay(null); }} onNewChat={newChat} onOpenModel={openModel} />

@@ -117,7 +117,6 @@ describe('authoritative Models action policy', () => {
       source: 'cache',
       task: '',
       status: 'unloaded',
-      sort: 'name',
     });
     expect(result).toHaveLength(11);
     expect(entries.map((entry) => entry.identity.id)).toEqual(before);
@@ -130,7 +129,7 @@ describe('authoritative Models action policy', () => {
     const hyphen = named('qwen3-0.6b-4bit', 'id_hyphen');
     const underscore = named('qwen3_0.6b_4bit', 'id_underscore');
     const search = (query: string, entries = [hyphen, underscore]) =>
-      inventory(entries, { query, source: '', task: '', status: '', sort: 'name' }).map((entry) => entry.identity.id);
+      inventory(entries, { query, source: '', task: '', status: '' }).map((entry) => entry.identity.id);
     expect(search('qwen3-0.6b-4bit')).toEqual(['id_hyphen']);
     expect(search('qwen3_0.6b_4bit')).toEqual(['id_underscore']);
     const sorted = search('');

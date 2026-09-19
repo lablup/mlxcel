@@ -30,6 +30,16 @@ function node<T extends Element>(selector: string): T {
 async function click(id: string): Promise<void> {
   await act(async () => node<HTMLButtonElement>(`[data-testid="${id}"]`).click());
 }
+// The profile note and value live in the inspector's Details disclosure, rendered only while open.
+async function openDetails(): Promise<void> {
+  const details = node<HTMLDetailsElement>('[data-testid="models-details"]');
+  if (details.open) return;
+  // The toggle event is queued as a task after the attribute flips.
+  await act(async () => {
+    node<HTMLElement>('[data-testid="models-details"] summary').click();
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+  });
+}
 beforeEach(() => {
   vi.resetAllMocks();
   actions.loadModel.mockResolvedValue(undefined);
@@ -44,6 +54,8 @@ afterEach(() => { act(() => root.unmount()); host.remove(); });
 
 it('uses canonical reusable defaults only on explicit load and freezes the submitted values', async () => {
   act(() => store.save({ ctx_size: 2048, n_parallel: 2, kv_cache_mode: 'int8' }, 'reusable'));
+  expect(host.textContent).not.toContain('Pending browser profile; not applied yet.');
+  await openDetails();
   expect(host.textContent).toContain('Pending browser profile; not applied yet.');
   expect(node<HTMLAnchorElement>('[data-testid="models-pending-profile"] a').getAttribute('href')).toBe('#settings');
   expect(actions.loadModel).not.toHaveBeenCalled();
@@ -59,6 +71,7 @@ it('uses canonical reusable defaults only on explicit load and freezes the submi
   expect(request.load_profile).toEqual({ ctx_size: 2048, n_parallel: 2, kv_cache_mode: 'int8' });
   act(() => store.save({ ctx_size: 4096 }, 'reusable'));
   expect(request.load_profile.ctx_size).toBe(2048);
+  await openDetails();
   expect(host.textContent).toContain('4096');
 });
 
@@ -70,6 +83,7 @@ it('replaces rather than merges reusable defaults and omits an explicitly empty 
   act(() => store.save({}, 'model'));
   await click('models-load');
   expect(actions.loadModel.mock.calls[1][0]).not.toHaveProperty('load_profile');
+  await openDetails();
   expect(host.textContent).toContain('Server defaults; see Settings for scope and overrides.');
   act(() => store.reset('model'));
   await click('models-load');
@@ -93,4 +107,17 @@ it('loads the confirmation target profile even after selection changes, using th
   await click('models-confirm-submit');
   expect(actions.loadModel.mock.calls[1][0]).toMatchObject({ model_id: target.identity.id, eviction_target_id: idle.identity.id, eviction_target_expected_revision: idle.identity.revision, load_profile: { ctx_size: 4096, n_parallel: 2 } });
   expect(actions.loadModel).toHaveBeenCalledTimes(2);
+});
+
+it('loads a row entry with its own profile, not the selected model\'s', async () => {
+  state = { ...state, catalog: [target, other], selectedModelId: target.identity.id }; render();
+  act(() => store.save({ ctx_size: 2048 }, 'model'));
+  editorId = other.identity.id; render();
+  act(() => store.save({ ctx_size: 8192, n_parallel: 3 }, 'model'));
+  const rows = host.querySelectorAll('[data-testid="models-table"] tbody tr');
+  const otherRow = [...rows].find((row) => row.textContent?.includes(other.identity.display_name));
+  await act(async () => otherRow?.querySelector<HTMLButtonElement>('[data-testid="models-row-load"]')?.click());
+  expect(actions.loadModel).toHaveBeenCalledTimes(1);
+  expect(actions.loadModel.mock.calls[0][0]).toMatchObject({ model_id: other.identity.id, load_profile: { ctx_size: 8192, n_parallel: 3 } });
+  expect(actions.selectModel).not.toHaveBeenCalled();
 });

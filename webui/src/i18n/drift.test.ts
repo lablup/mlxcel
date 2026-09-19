@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import stringsFixture from '../../../tests/fixtures/webui/strings.json';
 import { activityStrings } from '../features/activity/strings';
 import { chatStrings } from '../features/chat/strings';
+import { modelStrings } from '../features/models/strings';
 import { settingsStrings } from '../features/settings/strings';
 import { entries } from './catalog';
 
@@ -45,7 +46,7 @@ describe('i18n drift gate', () => {
     const fixture = new Map(stringsFixture.strings.map((entry) => [entry.key, entry]));
     const inline = entries.filter((entry) => INLINE_KEYS.includes(entry.key));
     expect(inline).toHaveLength(INLINE_KEYS.length);
-    for (const { key, en, ko, test_id } of [...chatStrings, ...settingsStrings, ...activityStrings, ...inline]) {
+    for (const { key, en, ko, test_id } of [...modelStrings, ...chatStrings, ...settingsStrings, ...activityStrings, ...inline]) {
       expect(fixture.get(key)).toEqual({ key, en, ko, test_id });
     }
   });

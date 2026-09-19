@@ -7,9 +7,15 @@ import { NativeModalContext } from './modal-context';
 // The approved 4185 off-canvas sheet width; CSS keeps it left-anchored.
 const SHEET_WIDTH = 'min(320px, calc(100vw - 32px))';
 
+// A right-anchored panel for details that open over a list (the Models inspector below
+// 1100 px): the package's "medium" preset, capped to the viewport by CSS.
+const PANEL_WIDTH = 'medium';
+
 // The product's compact off-canvas sheet over the shared Drawer. The Drawer is a
 // modal aside (not a native dialog), so no NativeModalContext is provided here.
-export function Drawer(props: { open: boolean; onClose: () => void; title: string; closeLabel: string; testId?: string; children: React.ReactNode }): React.JSX.Element {
+// `placement="end"` is the right-anchored details panel instead of the left sheet.
+export function Drawer(props: { open: boolean; onClose: () => void; title: string; closeLabel: string; testId?: string; placement?: 'start' | 'end'; children: React.ReactNode }): React.JSX.Element {
+  const end = props.placement === 'end';
   const titleId = useId();
   const onCloseRef = useRef(props.onClose);
   onCloseRef.current = props.onClose;
@@ -53,7 +59,7 @@ export function Drawer(props: { open: boolean; onClose: () => void; title: strin
     hostRef.current = element;
     // alpha.19 has no test-id prop; tag the panel itself.
     if (props.testId) element?.querySelector('.drawer')?.setAttribute('data-testid', props.testId);
-  }}><CommonDrawer isOpen={props.open} onClose={close} title={props.title} closeLabel={props.closeLabel} ariaLabelledBy={titleId} width={SHEET_WIDTH} className="ds-drawer">{props.children}</CommonDrawer></div>;
+  }}><CommonDrawer isOpen={props.open} onClose={close} title={props.title} closeLabel={props.closeLabel} ariaLabelledBy={titleId} width={end ? PANEL_WIDTH : SHEET_WIDTH} className={end ? 'ds-drawer ds-drawer--end' : 'ds-drawer'}>{props.children}</CommonDrawer></div>;
 }
 
 type DescribedElement = React.ReactElement<{ 'aria-describedby'?: string }>;

@@ -1,5 +1,5 @@
 // Copyright 2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import type { CatalogEntry, LoadProfile, Operation } from '../../api/types';
 import { WebUiHttpError } from '../../api/client';
 import {
@@ -9,59 +9,124 @@ import {
   EmptyState,
   ErrorBanner,
   Field,
+  IconButton,
   LoadingStatus,
+  PageHeader,
+  ProgressBar,
   ROW_PRIMARY_CLASS,
   Select,
   StatusBadge,
-  PageHeader,
   type DataTableColumn,
+  type SortDirection,
 } from '../../design-system/primitives';
 import { t, testId, type Locale } from '../../i18n/catalog';
-import { connectedDetail, lifecycleLabel } from '../../provider-surfaces';
+import { lifecycleLabel } from '../../provider-surfaces';
 import { useWebUi, useWebUiActions } from '../../state';
-import { useLoadProfile } from '../settings/load-profiles';
+import { loadProfileFor, useLoadProfile } from '../settings/load-profiles';
 import { AddModel, ConfirmAction, type Confirmation } from './dialogs';
-import { ModelInspector } from './inspector';
-import { LibraryOperations } from './operations';
+import { consumeInspectorRequest, useInspectorRequest, useWideInspector } from './inspect-request';
+import { ModelInspector, type ModelAction } from './inspector';
+import { downloadBadgeState, downloadStateLabel, sourceLabel, taskLabel } from './labels';
 import {
   allowed,
+  bytes,
   canChat,
   canDelete,
   canLoad,
   canUnload,
+  capacityFailed,
+  compareEntries,
   current,
+  DEFAULT_SORT,
+  entryTasks,
   errorMessage,
   evictionCandidates,
   inventory,
+  quantizationValue,
   terminal,
+  visibleDownloads,
   type InventoryFilter,
+  type InventorySort,
+  type SortColumn,
 } from './policy';
+import { RootsDialog } from './roots';
 import './models.css';
 
 const PAGE_SIZE = 25;
+const LIFECYCLE_FILTERS = ['unloaded', 'loading', 'ready', 'draining', 'unloading', 'failed'] as const;
+
+/** A library row: a catalog entry, or a download that has no entry yet (in flight, failed or cancelled). */
+type LibraryRow = { kind: 'model'; entry: CatalogEntry } | { kind: 'download'; op: Operation };
+/** Where an action started, so focus can follow it once the lifecycle settles. */
+type Origin = 'row' | 'inspector';
+/**
+ * After a row action, the row control that should take focus once it can: Load after Unload, Use
+ * in Chat after Load. `from` is the control the action started from, which the action disables.
+ */
+type RowFocus = { id: string; want: 'load' | 'chat'; from: Element | null };
+
+function downloadRepo(op: Operation): string {
+  return op.target.target_kind === 'download' ? op.target.repo_id : op.operation_id;
+}
+
 export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element {
   const state = useWebUi();
   const actions = useWebUiActions();
-  const [filter, setFilter] = useState<InventoryFilter>({ query: '', source: '', task: '', status: '', sort: 'name' });
+  const wide = useWideInspector();
+  const inspectRequest = useInspectorRequest();
+  const [filter, setFilter] = useState<InventoryFilter>({ query: '', source: '', task: '', status: '' });
+  const [sort, setSort] = useState<InventorySort>(DEFAULT_SORT);
   const [page, setPage] = useState(0);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
+  const confirmationOrigin = useRef<Origin>('inspector');
   const [add, setAdd] = useState<{ repo: string; revision: string } | null>(null);
-  const [copyState, setCopyState] = useState<'copy' | 'copied' | 'copy_failed'>('copy');
+  const [rootsOpen, setRootsOpen] = useState(false);
+  // Below 1100 px the inspector is a modal drawer: it opens on an explicit Inspect (or a request
+  // from the toolbar or palette), not merely because a selection is remembered.
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const rowControls = useRef(new Map<string, HTMLButtonElement>());
+  const rowFocus = useRef<RowFocus | null>(null);
   const selected = state.catalog.find((entry) => entry.identity.id === state.selectedModelId);
   const { profile: selectedProfile } = useLoadProfile(selected?.identity.id ?? null);
-  const { profile: capacityProfile } = useLoadProfile(confirmation?.kind === 'capacity' ? confirmation.entry.identity.id : null);
-  const rows = inventory(state.catalog, filter);
+  const rows = inventory(state.catalog, filter, sort);
   const pages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
   const visiblePage = Math.min(page, pages - 1);
+  const readOnly = state.bootstrap?.server.mode === 'single_model';
+  const downloads = visibleDownloads(state);
   const downloadPending =
     [...state.operations.values()].some((op) => op.kind === 'download' && !terminal(op)) ||
     [...state.pendingReconciliations.values()].some((item) => item.kind === 'download');
   const rescanPending =
     [...state.operations.values()].some((op) => op.kind === 'catalog_refresh' && !terminal(op)) ||
     [...state.pendingReconciliations.values()].some((item) => item.kind === 'catalog-refresh');
+
+  useEffect(() => {
+    if (consumeInspectorRequest()) setDrawerOpen(true);
+  }, [inspectRequest]);
+
+  // Focus follows a row action to the control that replaces the one used, but only while the
+  // user has not moved on: focus is still on that row's Inspect button (where it waits) or nowhere.
+  useEffect(() => {
+    const pending = rowFocus.current;
+    if (!pending) return;
+    const holder = rowControls.current.get(`${pending.id}:inspect`);
+    const target = rowControls.current.get(`${pending.id}:${pending.want}`);
+    const active = document.activeElement;
+    const waiting =
+      active === null || active === document.body || active === holder || active === pending.from || !!active.closest('[data-dialog-focus-fallback]');
+    if (!waiting) {
+      rowFocus.current = null;
+      return;
+    }
+    if (target && !target.disabled) {
+      target.focus();
+      rowFocus.current = null;
+    } else if (holder && active !== holder && !document.querySelector('dialog[open]')) holder.focus();
+  });
+
   const set = (patch: Partial<InventoryFilter>): void => {
     setFilter({ ...filter, ...patch });
     setPage(0);
@@ -86,8 +151,9 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
   const load = (
     entry: CatalogEntry,
     evictionTarget?: { id: string; revision: number },
-    profile: LoadProfile = selectedProfile,
   ): void => {
+    // The entry's own profile, read now: a row loads entries other than the selected one.
+    const profile: LoadProfile = loadProfileFor(entry.identity.id);
     if (!canLoad(state, entry)) {
       setError(t(locale, 'models.library.stale'));
       return;
@@ -122,10 +188,18 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
       },
     );
   };
-  const openAction = (kind: 'load' | 'unload' | 'delete'): void => {
-    if (!selected) return;
-    if (kind === 'load') load(selected);
-    else setConfirmation({ kind, entry: selected, instance: state.serverInstanceId });
+  // The one path from a row or the inspector into a lifecycle action: Load runs at once (it
+  // never evicts), Unload and Delete always go through their confirmation.
+  const openAction = (kind: ModelAction, entry: CatalogEntry, origin: Origin): void => {
+    confirmationOrigin.current = origin;
+    if (kind === 'load') {
+      if (origin === 'row') rowFocus.current = { id: entry.identity.id, want: 'chat', from: document.activeElement };
+      load(entry);
+    } else setConfirmation({ kind, entry, instance: state.serverInstanceId });
+  };
+  const openCapacity = (entry: CatalogEntry): void => {
+    confirmationOrigin.current = 'row';
+    if (canLoad(state, entry)) setConfirmation({ kind: 'capacity', entry, instance: state.serverInstanceId });
   };
   const confirm = (evictionTarget?: string, evictionRevision?: number): void => {
     const value = confirmation;
@@ -154,14 +228,15 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
           setError(t(locale, 'models.library.stale'));
           return;
         }
+        if (confirmationOrigin.current === 'row') rowFocus.current = { id: entry.identity.id, want: 'chat', from: null };
         load(
           entry,
           evictionTarget && evictionRevision !== undefined
             ? { id: evictionTarget, revision: evictionRevision }
             : undefined,
-          capacityProfile,
         );
-      } else if (value.kind === 'unload' && canUnload(state, entry))
+      } else if (value.kind === 'unload' && canUnload(state, entry)) {
+        if (confirmationOrigin.current === 'row') rowFocus.current = { id: entry.identity.id, want: 'load', from: null };
         void execute(() =>
           actions.unloadModel({
             action: 'unload',
@@ -170,7 +245,7 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
             idempotency_key: crypto.randomUUID(),
           }),
         );
-      else if (value.kind === 'delete' && canDelete(state, entry))
+      } else if (value.kind === 'delete' && canDelete(state, entry))
         void execute(() =>
           actions.removeModel({
             model_id: entry.identity.id,
@@ -181,74 +256,220 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
       else setError(t(locale, 'models.library.stale'));
     }
     setConfirmation(null);
+    // A confirmation opened from the inspector drawer returns focus to the drawer, not to the
+    // page heading behind it, when the control that opened it is now disabled.
+    if (confirmationOrigin.current === 'inspector' && !wide && drawerOpen)
+      window.setTimeout(() => {
+        const panel = document.querySelector<HTMLElement>('[data-testid="models-inspector-drawer"]');
+        if (panel && !panel.contains(document.activeElement)) panel.querySelector<HTMLElement>('.drawer__close-btn')?.focus();
+      }, 0);
   };
   const retryDownload = (op: Operation): void => {
     if (op.target.target_kind === 'download') setAdd({ repo: op.target.repo_id, revision: op.target.revision ?? '' });
   };
-  const command = 'mlxcel-server --webui --models-dir /path/to/models --no-models-autoload';
-  const columns: DataTableColumn<CatalogEntry>[] = [
+  const inspect = (entry: CatalogEntry): void => {
+    // Re-selecting the already-open row is a no-op: selectModel always aborts the live stream,
+    // forces a full snapshot refetch and clears runtimeHistory, even for the same id.
+    if (entry.identity.id !== state.selectedModelId) actions.selectModel(entry.identity.id);
+    setDrawerOpen(true);
+  };
+  const openChat = (entry: CatalogEntry): void => {
+    if (!canChat(state, entry)) return;
+    if (entry.identity.id !== state.selectedModelId) actions.selectModel(entry.identity.id);
+    window.location.hash = 'chat';
+  };
+  const register = (id: string, slot: 'inspect' | 'load' | 'chat') => (element: HTMLButtonElement | null): void => {
+    if (element) rowControls.current.set(`${id}:${slot}`, element);
+    else rowControls.current.delete(`${id}:${slot}`);
+  };
+  // Row controls act on their own row only; the row-activation handler must not also open it.
+  const own = (run: () => void) => (event: React.MouseEvent<HTMLButtonElement>): void => {
+    event.stopPropagation();
+    run();
+  };
+
+  const rowComparator = (a: LibraryRow, b: LibraryRow): number => {
+    if (a.kind === 'download' || b.kind === 'download') return a.kind === b.kind ? 0 : a.kind === 'download' ? -1 : 1;
+    return compareEntries(sort)(a.entry, b.entry);
+  };
+  // alpha.19 sorts the page itself even in controlled mode, so every sortable column gets the
+  // same pinned comparator the pagination used rather than a bare value accessor.
+  const sortable: Pick<DataTableColumn<LibraryRow>, 'sortable' | 'sortComparator'> = { sortable: true, sortComparator: rowComparator };
+  const modelActions = (entry: CatalogEntry): React.ReactNode => {
+    const name = entry.identity.display_name;
+    return (
+      <div className="models-row-actions">
+        {canChat(state, entry) ? (
+          <>
+            <Button tone="primary" data-testid="models-row-chat" aria-label={t(locale, 'models.library.chat_named', { name })} disabled={busy} onClick={own(() => openChat(entry))} ref={register(entry.identity.id, 'chat')}>
+              {t(locale, 'models.library.chat')}
+            </Button>
+            {readOnly ? null : (
+              <Button data-testid="models-row-unload" aria-label={t(locale, 'models.library.unload_named', { name })} disabled={busy || !canUnload(state, entry)} onClick={own(() => openAction('unload', entry, 'row'))}>
+                {t(locale, 'models.unload')}
+              </Button>
+            )}
+          </>
+        ) : readOnly ? null : (
+          <Button data-testid="models-row-load" aria-label={t(locale, 'models.library.load_named', { name })} disabled={busy || !canLoad(state, entry)} onClick={own(() => openAction('load', entry, 'row'))} ref={register(entry.identity.id, 'load')}>
+            {t(locale, 'models.load')}
+          </Button>
+        )}
+        {!readOnly && capacityFailed(state, entry.identity.id) ? (
+          <Button data-testid="models-row-capacity" aria-label={t(locale, 'models.library.load_evict_named', { name })} disabled={busy || !canLoad(state, entry)} onClick={own(() => openCapacity(entry))}>
+            {t(locale, 'models.library.load_evict')}
+          </Button>
+        ) : null}
+        <IconButton
+          icon="details"
+          label={t(locale, 'models.library.inspect', { name })}
+          className={ROW_PRIMARY_CLASS}
+          onClick={own(() => inspect(entry))}
+          ref={register(entry.identity.id, 'inspect')}
+        />
+        {!readOnly && entry.identity.source === 'cache' ? (
+          <IconButton
+            icon="trash"
+            tone="danger"
+            label={t(locale, 'models.library.delete_named', { name })}
+            data-testid="models-row-delete"
+            disabled={busy || !canDelete(state, entry)}
+            onClick={own(() => openAction('delete', entry, 'row'))}
+          />
+        ) : null}
+      </div>
+    );
+  };
+  const downloadActions = (op: Operation): React.ReactNode => (
+    <div className="models-row-actions">
+      {!terminal(op) ? (
+        <Button
+          disabled={busy || !current(state) || !op.cancellable || op.state === 'cancelling'}
+          onClick={() => setConfirmation({ kind: 'cancel', operation: op, instance: state.serverInstanceId })}
+        >
+          {t(locale, 'models.library.cancel_download')}
+        </Button>
+      ) : (
+        <Button disabled={busy || downloadPending || !allowed(state, 'download')} onClick={() => retryDownload(op)}>
+          {t(locale, 'models.library.retry_download')}
+        </Button>
+      )}
+    </div>
+  );
+  const unknown = t(locale, 'models.library.unknown');
+  const columns: DataTableColumn<LibraryRow>[] = [
     {
       id: 'name',
       header: t(locale, 'models.library.name'),
       noResize: true,
-      render: (entry) => (
-        <>
-          <Button
-            tone="ghost"
-            className={ROW_PRIMARY_CLASS}
-            aria-label={t(locale, 'models.library.inspect', { name: entry.identity.display_name })}
-            onClick={() => {
-              // Re-selecting the already-open row is a no-op: selectModel always aborts the live
-              // stream, forces a full snapshot refetch and clears runtimeHistory, even for the
-              // same id, so a stray click on an already-selected row must not pay that cost.
-              if (entry.identity.id !== state.selectedModelId) actions.selectModel(entry.identity.id);
-            }}
-          >
-            {entry.identity.display_name}
-          </Button>
-          <span className="models-row-meta">
-            {entry.identity.id === state.selectedModelId ? <Badge tone="accent">{t(locale, 'models.library.selected')}</Badge> : null}{' '}
-            <Badge>{entry.identity.source}</Badge> <Badge>{entry.metadata.quantization ?? t(locale, 'models.library.unknown')}</Badge>
+      className: 'models-col-name',
+      ...sortable,
+      render: (row) => {
+        if (row.kind === 'download') {
+          const repo = downloadRepo(row.op);
+          return (
+            <span className="models-name" data-testid="models-operation">
+              <span className="truncate" title={repo}>{repo}</span>
+              {row.op.error ? <small className="models-row-note">{row.op.error.message}</small> : null}
+            </span>
+          );
+        }
+        const entry = row.entry;
+        const flag = !entry.complete
+          ? 'models.library.flag_incomplete'
+          : !entry.supported || !entry.metadata.support.runnable_on_backend
+            ? 'models.library.flag_unsupported'
+            : null;
+        return (
+          <span className="models-name">
+            <span className="truncate" title={entry.identity.display_name}>{entry.identity.display_name}</span>
+            {flag ? <Badge tone="warning">{t(locale, flag)}</Badge> : null}
+            {/* Shown only once the State column has given way to a narrow list. */}
+            <span className="models-name-state">
+              <StatusBadge state={entry.lifecycle.state}>{lifecycleLabel(locale, entry.lifecycle.state)}</StatusBadge>
+            </span>
           </span>
-        </>
-      ),
+        );
+      },
     },
     {
-      id: 'task',
-      header: t(locale, 'models.library.task'),
+      id: 'size',
+      header: t(locale, 'models.library.size'),
       noResize: true,
-      render: (entry) =>
-        entry.capabilities
-          .map((cap) => cap.task)
-          .filter((value, index, all) => all.indexOf(value) === index)
-          .join(', ') || t(locale, 'models.library.unknown'),
+      align: 'right',
+      className: 'models-col-size',
+      ...sortable,
+      render: (row) =>
+        row.kind === 'download' ? (
+          <ProgressBar
+            label={t(locale, 'models.library.progress')}
+            value={
+              !row.op.progress.indeterminate && row.op.progress.total_bytes !== null && row.op.progress.total_bytes > 0
+                ? (row.op.progress.completed_bytes / row.op.progress.total_bytes) * 100
+                : undefined
+            }
+            detail={`${bytes(row.op.progress.completed_bytes, locale)} / ${bytes(row.op.progress.total_bytes, locale)}`}
+          />
+        ) : (
+          bytes(row.entry.metadata.disk_bytes, locale)
+        ),
     },
     {
-      id: 'status',
+      id: 'quantization',
+      header: t(locale, 'models.library.quantization'),
+      noResize: true,
+      className: 'models-col-quantization',
+      ...sortable,
+      render: (row) => (row.kind === 'download' ? null : quantizationValue(row.entry) ?? unknown),
+    },
+    {
+      id: 'tasks',
+      header: t(locale, 'models.library.tasks'),
+      noResize: true,
+      className: 'models-col-tasks',
+      render: (row) =>
+        row.kind === 'download' ? null : (
+          <span className="models-tasks">
+            {entryTasks(row.entry).map((task) => (
+              <Badge key={task}>{taskLabel(locale, task)}</Badge>
+            ))}
+          </span>
+        ),
+    },
+    {
+      id: 'state',
       header: t(locale, 'models.library.status'),
       noResize: true,
-      render: (entry) => (
-        <StatusBadge state={entry.lifecycle.state}>{lifecycleLabel(locale, entry.lifecycle.state)}</StatusBadge>
-      ),
+      className: 'models-col-state',
+      ...sortable,
+      render: (row) =>
+        row.kind === 'download' ? (
+          <StatusBadge state={downloadBadgeState(row.op.state)}>{downloadStateLabel(locale, row.op.state)}</StatusBadge>
+        ) : (
+          <StatusBadge state={row.entry.lifecycle.state}>{lifecycleLabel(locale, row.entry.lifecycle.state)}</StatusBadge>
+        ),
     },
     {
-      id: 'support',
-      header: t(locale, 'models.library.support'),
+      id: 'actions',
+      header: t(locale, 'models.library.actions'),
       noResize: true,
-      render: (entry) => (
-        <>
-          {t(
-            locale,
-            entry.metadata.support.architecturally_supported
-              ? 'models.library.supported'
-              : 'models.library.unsupported',
-          )}
-          <br />
-          {t(locale, entry.complete ? 'models.library.complete' : 'models.library.incomplete')}
-        </>
-      ),
+      align: 'right',
+      className: 'models-col-actions',
+      render: (row) => (row.kind === 'download' ? downloadActions(row.op) : modelActions(row.entry)),
     },
   ];
+  const pageRows: LibraryRow[] = [
+    ...downloads.map((op) => ({ kind: 'download' as const, op })),
+    ...rows.slice(visiblePage * PAGE_SIZE, (visiblePage + 1) * PAGE_SIZE).map((entry) => ({ kind: 'model' as const, entry })),
+  ];
+  const inspectorProps = {
+    profile: selectedProfile,
+    state,
+    locale,
+    busy,
+    onAction: (kind: ModelAction, entry: CatalogEntry) => openAction(kind, entry, 'inspector'),
+    onChat: openChat,
+  };
   return (
     <div className="screen-stack models-library" data-testid="models-library">
       <PageHeader
@@ -266,7 +487,7 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
               {t(locale, 'models.library.add')}
             </Button>
             <Button
-              disabled={busy || rescanPending || !current(state) || state.bootstrap?.server.mode === 'single_model'}
+              disabled={busy || rescanPending || !current(state) || readOnly}
               onClick={() => {
                 void execute(() => actions.refreshCatalog(crypto.randomUUID()));
               }}
@@ -295,58 +516,11 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
         }}
         retryLabel={t(locale, 'models.library.refresh')}
       />
-      {state.bootstrap?.server.mode === 'single_model' ? (
-        <ErrorBanner
-          tone="info"
-          title={t(locale, 'models.library.single')}
-          body="mlxcel-server --webui"
-          testId="models-read-only"
-        />
+      {readOnly ? (
+        <ErrorBanner tone="info" title={t(locale, 'models.library.single')} body="mlxcel-server --webui" testId="models-read-only" />
       ) : null}
-      {Object.entries(state.bootstrap?.actions ?? {})
-        .filter(([, action]) => action.state !== 'enabled')
-        .map(([name, action]) => (
-          <p key={name}>
-            {name}: {action.reason} {action.instructions}
-          </p>
-        ))}
-      <p data-testid="connection-authenticated-detail">{connectedDetail(locale, state)}</p>
-      <details open={state.catalog.length === 0}>
-        <summary>{t(locale, 'models.library.roots')}</summary>
-        <ul>
-          {state.bootstrap?.roots.map((root, index) => (
-            <li key={index}>
-              <strong>{root.display_name}</strong> · {root.kind}
-              {root.error ? (
-                <p role="alert">
-                  {t(locale, 'models.library.permission')} {root.error}
-                </p>
-              ) : null}
-            </li>
-          ))}
-        </ul>
-        <p>{t(locale, 'models.library.roots_help')}</p>
-        <pre className="models-wrap">{command}</pre>
-        <Button
-          onClick={() => {
-            void navigator.clipboard
-              ?.writeText(command)
-              .then(() => setCopyState('copied'))
-              .catch(() => setCopyState('copy_failed'));
-            if (!navigator.clipboard) setCopyState('copy_failed');
-          }}
-        >
-          {t(locale, `models.library.${copyState}`)}
-        </Button>
-        <span role="status">{copyState !== 'copy' ? t(locale, `models.library.${copyState}`) : ''}</span>
-      </details>
       <div className="models-toolbar">
-        <Field
-          label={t(locale, 'models.library.search')}
-          value={filter.query}
-          onChange={(query) => set({ query })}
-          testId="models-search"
-        />
+        <Field label={t(locale, 'models.library.search')} value={filter.query} onChange={(query) => set({ query })} testId="models-search" />
         <Select
           locale={locale}
           label={t(locale, 'models.library.source')}
@@ -354,9 +528,7 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
           onChange={(source) => set({ source })}
           options={[
             { value: '', label: t(locale, 'models.library.all') },
-            ...[...new Set(state.catalog.map((entry) => entry.identity.source))]
-              .sort()
-              .map((value) => ({ value, label: value })),
+            ...[...new Set(state.catalog.map((entry) => entry.identity.source))].sort().map((value) => ({ value, label: sourceLabel(locale, value) })),
           ]}
         />
         <Select
@@ -368,7 +540,7 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
             { value: '', label: t(locale, 'models.library.all') },
             ...[...new Set(state.catalog.flatMap((entry) => entry.capabilities.map((cap) => cap.task)))]
               .sort()
-              .map((value) => ({ value, label: value })),
+              .map((value) => ({ value, label: taskLabel(locale, value) })),
           ]}
         />
         <Select
@@ -378,40 +550,51 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
           onChange={(status) => set({ status })}
           options={[
             { value: '', label: t(locale, 'models.library.all') },
-            ...(['unloaded', 'loading', 'ready', 'draining', 'unloading', 'failed'] as const).map((value) => ({
-              value,
-              label: lifecycleLabel(locale, value),
-            })),
+            ...LIFECYCLE_FILTERS.map((value) => ({ value, label: lifecycleLabel(locale, value) })),
           ]}
         />
-        <Select
-          locale={locale}
-          label={t(locale, 'models.library.sort')}
-          value={filter.sort}
-          onChange={(sort) => set({ sort })}
-          options={(['name', 'status', 'source', 'task'] as const).map((value) => ({
-            value,
-            label: t(locale, `models.library.sort_${value}`),
-          }))}
-        />
       </div>
+      {state.pendingReconciliations.size ? (
+        <p role="status" data-testid="models-pending" className="models-pending">
+          {t(locale, 'models.library.pending')}
+        </p>
+      ) : null}
       <div className="models-layout">
-        <section>
+        <section className="models-list">
           <DataTable
             columns={columns}
-            rows={rows.slice(visiblePage * PAGE_SIZE, (visiblePage + 1) * PAGE_SIZE)}
-            getRowKey={(entry) => entry.identity.id}
+            rows={pageRows}
+            getRowKey={(row) => (row.kind === 'download' ? `op:${row.op.operation_id}` : row.entry.identity.id)}
             ariaLabel={t(locale, 'models.title')}
             testId="models-table"
+            className="models-table"
             activateRowPrimary
-            rowClassName={(entry) => (entry.identity.id === state.selectedModelId ? 'models-selected' : undefined)}
+            overflowRegionLabel={t(locale, 'models.title')}
+            sortColumnId={sort.column}
+            sortDirection={sort.direction}
+            onSortChange={(column, direction) => {
+              // The third header activation clears the sort in alpha.19; the library always has
+              // one, so a cleared sort returns to the default name order.
+              setSort(column && direction ? { column: column as SortColumn, direction: direction as SortDirection } : DEFAULT_SORT);
+              setPage(0);
+            }}
+            rowClassName={(row) =>
+              row.kind === 'download' ? 'models-download-row' : row.entry.identity.id === state.selectedModelId ? 'models-selected' : undefined
+            }
             loading={state.catalogSequence === null}
-            loadingState={<LoadingStatus label={t(locale, 'models.library.waiting')} />}
+            loadingState={<LoadingStatus label={t(locale, 'models.library.waiting')} rows={8} />}
             emptyState={
               <EmptyState
                 title={t(locale, state.catalog.length === 0 ? 'models.empty.title' : 'models.library.filtered')}
                 body={t(locale, state.catalog.length === 0 ? 'models.empty.body' : 'models.library.filtered_body')}
                 testId="models-empty"
+                action={
+                  state.catalog.length === 0 ? (
+                    <Button onClick={() => setRootsOpen(true)} data-testid="models-roots">
+                      {t(locale, 'models.library.roots')}
+                    </Button>
+                  ) : undefined
+                }
               />
             }
           />
@@ -431,36 +614,11 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
             </Button>
           </nav>
         </section>
-        {selected ? (
-          <ModelInspector
-            entry={selected}
-            profile={selectedProfile}
-            state={state}
-            locale={locale}
-            busy={busy}
-            onAction={openAction}
-            onChat={() => {
-              if (canChat(state, selected)) {
-                actions.selectModel(selected.identity.id);
-                window.location.hash = 'chat';
-              }
-            }}
-          />
-        ) : null}
+        {selected && wide ? <ModelInspector variant="pane" entry={selected} {...inspectorProps} /> : null}
       </div>
-      <LibraryOperations
-        state={state}
-        locale={locale}
-        busy={busy}
-        downloadPending={downloadPending}
-        onCancel={(operation) => setConfirmation({ kind: 'cancel', operation, instance: state.serverInstanceId })}
-        onRetry={retryDownload}
-        onCapacity={(id) => {
-          const entry = state.catalog.find((candidate) => candidate.identity.id === id);
-          if (entry && canLoad(state, entry))
-            setConfirmation({ kind: 'capacity', entry, instance: state.serverInstanceId });
-        }}
-      />
+      {selected && !wide ? (
+        <ModelInspector variant="drawer" entry={selected} open={drawerOpen} onClose={() => setDrawerOpen(false)} {...inspectorProps} />
+      ) : null}
       {confirmation ? (
         <ConfirmAction
           key={confirmation.kind}
@@ -472,6 +630,7 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
           onConfirm={confirm}
         />
       ) : null}
+      {rootsOpen ? <RootsDialog state={state} locale={locale} onClose={() => setRootsOpen(false)} /> : null}
       {add ? (
         <AddModel
           locale={locale}

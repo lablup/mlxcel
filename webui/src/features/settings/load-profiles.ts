@@ -75,3 +75,8 @@ export function profileCli(profile: LoadProfile): string {
   const checked = validateLoadProfile(profile);
   return ['mlxcel-server --webui', checked.ctx_size === undefined ? '' : `--ctx-size ${checked.ctx_size}`, checked.n_parallel === undefined ? '' : `--parallel ${checked.n_parallel}`, checked.kv_cache_mode === undefined ? '' : `--kv-cache-mode ${checked.kv_cache_mode}`].filter(Boolean).join(' ');
 }
+/** What an explicit load of `modelId` submits right now: its own saved profile, else the reusable defaults. Read at submit time, so a row can load any entry, not only the selected one. */
+export function loadProfileFor(modelId: string): LoadProfile {
+  load();
+  return Object.hasOwn(document.models, modelId) ? document.models[modelId] : document.reusable;
+}
