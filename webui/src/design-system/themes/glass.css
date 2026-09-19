@@ -10,9 +10,10 @@
  * highlights on filled buttons, while transcript, table and form surfaces stay
  * near-opaque so they remain readable. The system-color palette and the
  * highlight and fill values follow backend.ai-go's glass theme
- * (src/themes/tokens/glass-light.css and glass-dark.css there), with the text,
- * accent and status colors darkened or lightened where needed to clear WCAG 2.2
- * AA against this product's surfaces.
+ * (https://github.com/lablup/backend.ai-go/blob/main/src/themes/tokens/glass-light.css
+ * and https://github.com/lablup/backend.ai-go/blob/main/src/themes/tokens/glass-dark.css),
+ * with the text, accent and status colors darkened or lightened where needed to
+ * clear WCAG 2.2 AA against this product's surfaces.
  *
  * It reads the appearance switches the product already has and adds none:
  *   - glass intensity: --material-glass-alpha, --material-glass-blur and
@@ -49,6 +50,7 @@
   --glass-edge: rgba(255, 255, 255, 0.15);
   --glass-highlight: linear-gradient(180deg, rgba(255, 255, 255, 0.18) 0%, rgba(255, 255, 255, 0.05) 40%, transparent 100%);
   --glass-button-shadow: 0 1px 3px rgba(0, 88, 185, 0.2);
+  --glass-danger-shadow: 0 1px 3px rgba(179, 38, 30, 0.2);
   --button-primary-solid: #0058b9;
   --button-primary-fill-active: #004a9c;
   --button-danger-solid: #b3261e;
@@ -79,6 +81,7 @@
   --glass-edge: rgba(255, 255, 255, 0.1);
   --glass-highlight: linear-gradient(180deg, rgba(255, 255, 255, 0.15) 0%, rgba(255, 255, 255, 0.04) 40%, transparent 100%);
   --glass-button-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  --glass-danger-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
   --button-primary-solid: #0a5bc0;
   --button-primary-fill-active: #0a4ea6;
   --button-danger-solid: #b3261e;
@@ -94,8 +97,8 @@
   --token-boxShadowSecondary: var(--shadow-popover);
   --token-buttonActiveTransform: scale(0.985);
   --token-buttonDangerBorder: 1px solid var(--glass-edge);
-  --token-buttonDangerShadow: var(--glass-button-shadow);
-  --token-buttonDangerShadowHover: var(--glass-button-shadow);
+  --token-buttonDangerShadow: var(--glass-danger-shadow);
+  --token-buttonDangerShadowHover: var(--glass-danger-shadow);
   --token-buttonPrimaryBorder: 1px solid var(--glass-edge);
   --token-buttonPrimaryShadow: var(--glass-button-shadow);
   --token-buttonPrimaryShadowHover: var(--glass-button-shadow);

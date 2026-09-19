@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import indexHtml from '../../index.html?raw';
 import bootstrapSource from '../../public/theme-bootstrap.js?raw';
 import { APPEARANCE_STORAGE_KEY, applyAppearance, loadAppearance } from './preferences';
+import { COLOR_SCHEME_PREFERENCES, THEME_FAMILIES, isThemeId } from './theme';
 
 const THEME_ATTRIBUTES = ['data-theme', 'data-theme-family', 'data-color-scheme'] as const;
 
@@ -49,6 +50,8 @@ const STORED: Array<[string, string | null]> = [
   ['an invalid colorScheme does not fall back to the legacy field', JSON.stringify({ colorScheme: 'sepia', theme: 'dark' })],
   ['unknown family and scheme', JSON.stringify({ themeFamily: 'orange', colorScheme: 'glass-dark' })],
   ['a full theme id in the legacy field', JSON.stringify({ theme: 'glass-dark' })],
+  // Every family theme.ts ships, so a family added there but not to the bootstrap fails here.
+  ...THEME_FAMILIES.flatMap((themeFamily) => COLOR_SCHEME_PREFERENCES.map((colorScheme): [string, string] => [`${themeFamily}, ${colorScheme}`, JSON.stringify({ themeFamily, colorScheme })])),
 ];
 
 beforeEach(() => {
@@ -68,7 +71,7 @@ describe('pre-mount theme bootstrap (public/theme-bootstrap.js)', () => {
       if (stored !== null) localStorage.setItem(APPEARANCE_STORAGE_KEY, stored);
       setHostScheme(host);
       const early = runBootstrap();
-      expect(early['data-theme']).toMatch(/^(mlxcel|glass)-(light|dark)$/);
+      expect(isThemeId(early['data-theme'])).toBe(true);
       expect(early).toEqual(runApp());
     });
   }
@@ -85,7 +88,7 @@ describe('pre-mount theme bootstrap (public/theme-bootstrap.js)', () => {
     for (const theme of ['system', 'light', 'dark']) {
       localStorage.setItem(APPEARANCE_STORAGE_KEY, JSON.stringify({ theme }));
       setHostScheme('light');
-      expect(runBootstrap()['data-theme']).toMatch(/^mlxcel-(light|dark)$/);
+      expect(isThemeId(runBootstrap()['data-theme'])).toBe(true);
     }
   });
 });
@@ -96,7 +99,8 @@ describe('index.html', () => {
   it('loads the bootstrap as a classic, render-blocking script in <head>', () => {
     const tag = head.match(/<script\b[^>]*\bsrc="\.\/theme-bootstrap\.js"[^>]*><\/script>/);
     expect(tag).not.toBeNull();
-    expect(tag?.[0]).not.toMatch(/\b(type="module"|async|defer)\b/);
+    // Any type attribute (module included), async or defer would stop it blocking the first paint.
+    expect(tag?.[0]).not.toMatch(/\btype=|\basync\b|\bdefer\b/);
   });
 
   it('carries no inline script, which the served CSP (script-src self) would block', () => {
@@ -107,7 +111,10 @@ describe('index.html', () => {
   });
 
   it('runs the bootstrap before the app module', () => {
-    expect(indexHtml.indexOf('./theme-bootstrap.js')).toBeGreaterThan(-1);
-    expect(indexHtml.indexOf('./theme-bootstrap.js')).toBeLessThan(indexHtml.indexOf('type="module"'));
+    const bootstrap = indexHtml.indexOf('./theme-bootstrap.js');
+    const app = indexHtml.search(/<script\b[^>]*\bsrc="\/src\/main\.tsx"/);
+    expect(bootstrap).toBeGreaterThan(-1);
+    expect(app).toBeGreaterThan(-1);
+    expect(bootstrap).toBeLessThan(app);
   });
 });

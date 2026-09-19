@@ -229,9 +229,10 @@ def assert_index_html(root: Path) -> None:
     # Issue #1903: the theme is applied before first paint by a classic,
     # render-blocking script that runs ahead of the app module.
     bootstrap = re.search(r'<script\b[^>]*\bsrc="\./theme-bootstrap\.js"[^>]*>', html)
-    if bootstrap is None or re.search(r'\b(type="module"|async|defer)\b', bootstrap.group(0)):
+    if bootstrap is None or re.search(r'\btype=|\basync\b|\bdefer\b', bootstrap.group(0)):
         raise SystemExit("index.html must load ./theme-bootstrap.js as a classic, blocking script")
-    if bootstrap.start() > html.index('type="module"'):
+    app_module = re.search(r'<script\b[^>]*\bsrc="\./assets/[^"]+\.js"[^>]*>', html)
+    if app_module is None or bootstrap.start() > app_module.start():
         raise SystemExit("index.html must run ./theme-bootstrap.js before the app module")
     for token in html.replace('>', '>\n').splitlines():
         for attr in ('src="./', 'href="./'):
