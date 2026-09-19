@@ -739,7 +739,7 @@ draft flags without a drafter, by name at startup.
 - Muse Glimmer's measured gate above is hardware-specific. CUDA allocator
   counters are unavailable on the GB10 backend, and Apple-Silicon/Metal remains
   untested; use the recorded OS memory bounds rather than extrapolating them.
-- `mlxcel arch` is the human-readable architecture catalog. `mlxcel arch --json` emits the machine-readable recipes registry with `mlxcel_version`, one `families` entry per loadable `ALL_MODEL_TYPES` variant plus standalone runtime families such as `rt_detr_v2`, stable `id` values, detection keys in `model_types`, runtime/modalities/output fields, Metal and CUDA status, tensor/pipeline parallel flags, speculative drafter support, and supported KV modes.
+- `mlxcel arch` is the human-readable architecture catalog. `mlxcel arch --json` emits the machine-readable recipes registry with `mlxcel_version`, one `families` entry per loadable `ALL_MODEL_TYPES` variant plus standalone runtime families such as `rt_detr_v2`, stable `id` values, detection keys in `model_types`, runtime/modalities/output fields, Metal, CUDA and ROCm status, tensor/pipeline parallel flags, speculative drafter support, and supported KV modes. The ROCm column is a first-pass `partial` for every family until families are validated on AMD under lablup/mlxcel#1801.
 - The registry is still a family-level contract, not a checkpoint qualification. Use the per-family notes above before treating a model card, quantization, backend, or hardware combination as validated.
 
 ## Adding support

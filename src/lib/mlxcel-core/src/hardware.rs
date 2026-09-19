@@ -159,6 +159,43 @@ pub enum GpuBackendKind {
     Rocm,
 }
 
+impl GpuBackendKind {
+    /// Every variant, in declaration order.
+    ///
+    /// Crates downstream of this one cannot `match` exhaustively on a
+    /// `#[non_exhaustive]` enum, so adding a variant gives them no compile
+    /// error. They walk this list in a test instead: the WebUI catalog checks
+    /// that every kind reads its own registry column (issue #1886). The const
+    /// block below keeps the list complete.
+    pub const ALL: [GpuBackendKind; 4] = [
+        GpuBackendKind::None,
+        GpuBackendKind::Metal,
+        GpuBackendKind::Cuda,
+        GpuBackendKind::Rocm,
+    ];
+}
+
+// Compile-time guard for `GpuBackendKind::ALL`. The match has no wildcard, so a
+// new variant fails to compile here: give it the next index and append it to
+// `ALL` as well. The assertion then rejects a list that is out of order or
+// repeats a variant.
+const _: () = {
+    let mut position = 0;
+    while position < GpuBackendKind::ALL.len() {
+        let index = match GpuBackendKind::ALL[position] {
+            GpuBackendKind::None => 0,
+            GpuBackendKind::Metal => 1,
+            GpuBackendKind::Cuda => 2,
+            GpuBackendKind::Rocm => 3,
+        };
+        assert!(
+            index == position,
+            "GpuBackendKind::ALL must list every variant once, in declaration order"
+        );
+        position += 1;
+    }
+};
+
 /// The GPU backend MLX resolved, probed once per process.
 #[must_use]
 pub fn gpu_backend_kind() -> GpuBackendKind {

@@ -77,7 +77,7 @@ pub struct FamilyCapabilities {
     pub runtimes: &'static [Runtime],
     pub modalities_in: &'static [Modality],
     pub output: OutputKind,
-    pub backends: [BackendStatus; 2],
+    pub backends: BackendSupport,
     pub tensor_parallel: bool,
     pub pipeline_parallel: bool,
     pub drafters: &'static [Drafter],
@@ -107,11 +107,30 @@ pub struct ArchitectureFamily {
     pub kv_modes: &'static [KvMode],
 }
 
-#[derive(Debug, Serialize)]
+/// Per-backend support, one named column per GPU backend.
+///
+/// Named fields rather than a positional array, so a new column has to be
+/// written at every construction site. Serialized in declaration order into
+/// `mlxcel arch --json`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct BackendSupport {
     pub metal: BackendStatus,
     pub cuda: BackendStatus,
+    pub rocm: BackendStatus,
 }
+
+/// First-pass ROCm status, applied to every family (issue #1886).
+///
+/// ROCm is an experimental backend (docs/installation.md, "Linux with AMD ROCm
+/// (experimental)", "Current status"). mlxcel's fused kernels run there as MLX
+/// graph fallbacks until #1814, and only a handful of checkpoints have been
+/// run on AMD: Qwen3 dense and MoE, gpt-oss MXFP4, and the audio paths. So
+/// this is a starting value, not a per-family result. `Partial` keeps every
+/// family runnable in the WebUI catalog, whose predicate admits
+/// `Supported | Partial`, without claiming parity with Metal in
+/// `mlxcel arch --json`. Refine it per family as each is validated on AMD
+/// under epic #1801.
+const ROCM_FIRST_PASS: BackendStatus = BackendStatus::Partial;
 
 const GENERATE_SERVE: &[Runtime] = &[Runtime::Generate, Runtime::Serve];
 const GENERATE_SERVE_RERANK: &[Runtime] = &[Runtime::Generate, Runtime::Serve, Runtime::Rerank];
@@ -156,7 +175,7 @@ struct StandaloneArchitectureFamily {
     runtimes: &'static [Runtime],
     modalities_in: &'static [Modality],
     output: OutputKind,
-    backends: [BackendStatus; 2],
+    backends: BackendSupport,
     tensor_parallel: bool,
     pipeline_parallel: bool,
     drafters: &'static [Drafter],
@@ -173,7 +192,11 @@ const STANDALONE_ARCHITECTURE_FAMILIES: &[StandaloneArchitectureFamily] =
         runtimes: DETECT,
         modalities_in: IMAGE,
         output: OutputKind::Boxes,
-        backends: [BackendStatus::Supported, BackendStatus::Supported],
+        backends: BackendSupport {
+            metal: BackendStatus::Supported,
+            cuda: BackendStatus::Supported,
+            rocm: ROCM_FIRST_PASS,
+        },
         tensor_parallel: false,
         pipeline_parallel: false,
         drafters: NO_DRAFTERS,
@@ -473,7 +496,11 @@ impl ModelType {
             runtimes,
             modalities_in,
             output,
-            backends: [BackendStatus::Supported, cuda],
+            backends: BackendSupport {
+                metal: BackendStatus::Supported,
+                cuda,
+                rocm: ROCM_FIRST_PASS,
+            },
             tensor_parallel: TENSOR_PARALLEL_MODEL_TYPES.contains(&self),
             pipeline_parallel: PIPELINE_PARALLEL_MODEL_TYPES.contains(&self),
             drafters,
@@ -602,10 +629,7 @@ pub fn build_architecture_registry(mlxcel_version: &'static str) -> Architecture
                 runtimes: caps.runtimes,
                 modalities_in: caps.modalities_in,
                 output: caps.output,
-                backends: BackendSupport {
-                    metal: caps.backends[0],
-                    cuda: caps.backends[1],
-                },
+                backends: caps.backends,
                 tensor_parallel: caps.tensor_parallel,
                 pipeline_parallel: caps.pipeline_parallel,
                 drafters: caps.drafters,
@@ -626,10 +650,7 @@ pub fn build_architecture_registry(mlxcel_version: &'static str) -> Architecture
                 runtimes: family.runtimes,
                 modalities_in: family.modalities_in,
                 output: family.output,
-                backends: BackendSupport {
-                    metal: family.backends[0],
-                    cuda: family.backends[1],
-                },
+                backends: family.backends,
                 tensor_parallel: family.tensor_parallel,
                 pipeline_parallel: family.pipeline_parallel,
                 drafters: family.drafters,
@@ -996,6 +1017,48 @@ mod tests {
             value["families"].as_array().unwrap().len(),
             ALL_MODEL_TYPES.len() + STANDALONE_ARCHITECTURE_FAMILIES.len()
         );
+
+        // Pins the `backends` shape `mlxcel arch --json` emits, `rocm` included
+        // (issue #1886): one object per family, one key per GPU backend.
+        let backends = |id: &str| {
+            value["families"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|family| family["id"] == id)
+                .unwrap_or_else(|| panic!("registry has no {id} family"))["backends"]
+                .clone()
+        };
+        assert_eq!(
+            backends("qwen3"),
+            serde_json::json!({"metal": "supported", "cuda": "supported", "rocm": "partial"})
+        );
+        assert_eq!(
+            backends("whisper"),
+            serde_json::json!({"metal": "supported", "cuda": "partial", "rocm": "partial"})
+        );
+        assert_eq!(
+            backends("rt_detr_v2"),
+            serde_json::json!({"metal": "supported", "cuda": "supported", "rocm": "partial"})
+        );
+    }
+
+    #[test]
+    fn every_family_is_runnable_on_rocm() {
+        // The WebUI catalog admits `Supported | Partial`. A family whose ROCm
+        // column falls outside that is listed as not runnable on a ROCm host,
+        // which is how issue #1886 reported every family.
+        for family in build_architecture_registry("test").families {
+            assert!(
+                matches!(
+                    family.backends.rocm,
+                    BackendStatus::Supported | BackendStatus::Partial
+                ),
+                "{} is not runnable on ROCm: {:?}",
+                family.id,
+                family.backends.rocm
+            );
+        }
     }
 
     #[test]
