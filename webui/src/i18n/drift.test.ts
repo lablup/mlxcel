@@ -14,7 +14,7 @@ import { entries } from './catalog';
 const SRC = join(import.meta.dirname, '..');
 const BYPASSES: readonly { pattern: RegExp; fix: string }[] = [
   { pattern: /window\.(confirm|alert|prompt)\b/, fix: 'native dialog; use ConfirmDialog or Dialog from design-system/primitives' },
-  // Bare confirm(/alert(/prompt( calls that are not a member access (window.confirm, foo.confirm) or a longer identifier.
+  // Bare confirm(/alert(/prompt( calls that are not a member access (foo.confirm) or part of a longer identifier.
   { pattern: /(?<![\w.$])(confirm|alert|prompt)\s*\(/, fix: 'native dialog; use ConfirmDialog or Dialog from design-system/primitives' },
   // Either operand order, loose or strict equality, single or double quotes.
   { pattern: /\blocale\b\s*(===|!==|==|!=)\s*["'](ko|en)["']|["'](ko|en)["']\s*(===|!==|==|!=)\s*\blocale\b/, fix: 'inline locale branch; add a catalog key and call t(locale, key)' },
