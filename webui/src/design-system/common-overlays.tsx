@@ -4,12 +4,15 @@ import { Drawer as CommonDrawer } from '@lablup/ui-common/components/Drawer';
 import { Tooltip as CommonTooltip } from '@lablup/ui-common/components/Tooltip';
 import { NativeModalContext } from './modal-context';
 
-// The approved 4185 off-canvas sheet width; CSS keeps it left-anchored.
+// The approved 4185 off-canvas sheet width; CSS keeps it left-anchored. Every drawer
+// passes this constant inline width (the layout gate allowlists exactly it); the wider
+// and end-anchored variants are modifier classes that override it in CSS.
 const SHEET_WIDTH = 'min(320px, calc(100vw - 32px))';
 
 // The product's compact off-canvas sheet over the shared Drawer. The Drawer is a
 // modal aside (not a native dialog), so no NativeModalContext is provided here.
-export function Drawer(props: { open: boolean; onClose: () => void; title: string; closeLabel: string; testId?: string; children: React.ReactNode }): React.JSX.Element {
+// `width` and `side` only add modifier classes: `narrow` and `start` are the sheet above.
+export function Drawer(props: { open: boolean; onClose: () => void; title: string; closeLabel: string; testId?: string; width?: 'narrow' | 'medium'; side?: 'start' | 'end'; children: React.ReactNode }): React.JSX.Element {
   const titleId = useId();
   const onCloseRef = useRef(props.onClose);
   onCloseRef.current = props.onClose;
@@ -37,10 +40,13 @@ export function Drawer(props: { open: boolean; onClose: () => void; title: strin
     // outside the panel, as the native modal sheet did. Back off once defaultPrevented
     // is set: a future popup that portals outside `.drawer` (like the Tooltip content)
     // and already handles Escape for itself should not also close the drawer beneath it.
+    // A native modal dialog opened above the drawer (a confirmation launched from inside
+    // it) owns that Escape: it closes the dialog, not the drawer beneath.
     const handleKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape' || event.isComposing || event.defaultPrevented) return;
       const panel = hostRef.current?.querySelector('.drawer');
       if (panel && event.target instanceof Node && panel.contains(event.target)) return;
+      if (event.target instanceof Element && event.target.closest('dialog[open]')) return;
       close();
     };
     document.addEventListener('keydown', handleKeyDown);
@@ -49,11 +55,33 @@ export function Drawer(props: { open: boolean; onClose: () => void; title: strin
       document.removeEventListener('keydown', handleKeyDown);
     };
   }, [props.open, close]);
+  const variant = [props.width === 'medium' ? 'ds-drawer--medium' : '', props.side === 'end' ? 'ds-drawer--end' : ''].filter(Boolean).join(' ');
   return <div className="ds-drawer-host" ref={(element) => {
     hostRef.current = element;
     // alpha.19 has no test-id prop; tag the panel itself.
     if (props.testId) element?.querySelector('.drawer')?.setAttribute('data-testid', props.testId);
-  }}><CommonDrawer isOpen={props.open} onClose={close} title={props.title} closeLabel={props.closeLabel} ariaLabelledBy={titleId} width={SHEET_WIDTH} className="ds-drawer">{props.children}</CommonDrawer></div>;
+  }} onKeyDownCapture={(event) => {
+    // alpha.19 closes on any Escape inside its panel, including one that only cancels an IME
+    // composition in a text field. The capture phase runs before the panel's own listener.
+    if (event.key === 'Escape' && (event.nativeEvent.isComposing || event.keyCode === 229)) event.stopPropagation();
+    if (props.open) wrapTab(hostRef.current?.querySelector<HTMLElement>('.drawer') ?? null, event);
+  }}><CommonDrawer isOpen={props.open} onClose={close} title={props.title} closeLabel={props.closeLabel} ariaLabelledBy={titleId} width={SHEET_WIDTH} className={variant ? `ds-drawer ${variant}` : 'ds-drawer'}>{props.children}</CommonDrawer></div>;
+}
+
+// alpha.19 records its Tab cycle's first and last controls once, when the drawer opens.
+// A control disabled after that (Chat's drawers disable theirs while a response streams)
+// is then never focused, so Tab from the last usable control leaves the modal panel for
+// the page behind it. Wrap at the panel's current first and last usable tab stops instead;
+// the package's own handler, which runs after this one, then finds nothing left to do.
+const TAB_STOPS = 'a[href], button, input, select, textarea, [tabindex]';
+function wrapTab(panel: HTMLElement | null, event: React.KeyboardEvent): void {
+  if (event.key !== 'Tab' || event.altKey || event.ctrlKey || event.metaKey || !panel || !(event.target instanceof Node) || !panel.contains(event.target)) return;
+  const stops = Array.from(panel.querySelectorAll<HTMLElement>(TAB_STOPS)).filter((element) => element.tabIndex >= 0 && !element.matches(':disabled') && !element.closest('[inert], [hidden]') && (typeof element.checkVisibility !== 'function' || element.checkVisibility({ visibilityProperty: true })));
+  const first = stops.at(0);
+  const last = stops.at(-1);
+  if (!first || !last || document.activeElement !== (event.shiftKey ? first : last)) return;
+  event.preventDefault();
+  (event.shiftKey ? last : first).focus();
 }
 
 type DescribedElement = React.ReactElement<{ 'aria-describedby'?: string }>;

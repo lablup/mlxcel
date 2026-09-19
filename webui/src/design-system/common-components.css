@@ -44,6 +44,11 @@
 .ds-drawer-host { display: contents; }
 .drawer.ds-drawer { top: 12px; bottom: 12px; left: 12px; right: auto; width: min(320px, calc(100vw - 32px)) !important; max-width: calc(100vw - 32px) !important; transform: translateX(calc(-100% - 12px)); color: var(--color-text); background: var(--color-bg-elevated); border: 1px solid var(--color-separator); border-radius: var(--radius-xl); box-shadow: 0 30px 120px rgba(0, 0, 0, 0.32); overflow: hidden; }
 .drawer.ds-drawer.drawer--open { transform: translateX(0); }
+/* Drawer variants (Chat): a wider sheet and an end-anchored sheet. Both keep the inline
+   320px width the adapter always passes and override it here, as the base rule does. */
+.drawer.ds-drawer.ds-drawer--medium { width: min(520px, calc(100vw - 32px)) !important; }
+.drawer.ds-drawer.ds-drawer--end { left: auto; right: 12px; transform: translateX(calc(100% + 12px)); }
+.drawer.ds-drawer.ds-drawer--end.drawer--open { transform: translateX(0); }
 .ds-drawer .drawer__header { padding: var(--space-4) var(--space-5); border-bottom: 1px solid var(--color-separator); }
 /* The title shrinks and wraps before it can push the close button out of a 163 px drawer (a 195 CSS px viewport) in a wide font. */
 .ds-drawer .drawer__title { min-width: 0; color: var(--color-text); font-size: 1.1rem; overflow-wrap: anywhere; }

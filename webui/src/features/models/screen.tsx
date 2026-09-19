@@ -1,7 +1,6 @@
 // Copyright 2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 import React, { useRef, useState } from 'react';
 import type { CatalogEntry, LoadProfile, Operation } from '../../api/types';
-import { WebUiHttpError } from '../../api/client';
 import {
   Badge,
   Button,
@@ -21,6 +20,7 @@ import { connectedDetail, lifecycleLabel } from '../../provider-surfaces';
 import { useWebUi, useWebUiActions } from '../../state';
 import { useLoadProfile } from '../settings/load-profiles';
 import { AddModel, ConfirmAction, type Confirmation } from './dialogs';
+import { submitLoad } from './load-action';
 import { ModelInspector } from './inspector';
 import { LibraryOperations } from './operations';
 import {
@@ -101,25 +101,15 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
       setError(t(locale, 'models.library.stale'));
       return;
     }
-    void execute(
-      () =>
-        actions.loadModel({
-          action: 'load',
-          ...(Object.keys(profile).length ? { load_profile: { ...profile } } : {}),
-          model_id: entry.identity.id,
-          expected_revision: entry.identity.revision,
-          idempotency_key: crypto.randomUUID(),
-          ...(evictionTarget
-            ? {
-                eviction_target_id: evictionTarget.id,
-                eviction_target_expected_revision: evictionTarget.revision,
-              }
-            : {}),
-        }),
-      (failure) => {
-        if (failure instanceof WebUiHttpError && failure.envelope?.error.code === 'conflict')
-          setConfirmation({ kind: 'capacity', entry, instance: state.serverInstanceId });
-      },
+    void execute(() =>
+      submitLoad(
+        actions,
+        state,
+        entry,
+        profile,
+        () => setConfirmation({ kind: 'capacity', entry, instance: state.serverInstanceId }),
+        evictionTarget,
+      ),
     );
   };
   const openAction = (kind: 'load' | 'unload' | 'delete'): void => {

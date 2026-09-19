@@ -1,6 +1,6 @@
 import React from 'react';
 
-export type IconName = 'models' | 'chat' | 'activity' | 'settings' | 'gallery' | 'command' | 'help' | 'menu' | 'close' | 'search' | 'warning' | 'key' | 'schema';
+export type IconName = 'models' | 'chat' | 'activity' | 'settings' | 'gallery' | 'command' | 'help' | 'menu' | 'close' | 'search' | 'warning' | 'key' | 'schema' | 'list' | 'attach' | 'copy' | 'edit' | 'retry' | 'trash' | 'info' | 'details';
 
 const paths: Record<IconName, React.ReactNode> = {
   models: <path d="M5 6.5A1.5 1.5 0 0 1 6.5 5h4A1.5 1.5 0 0 1 12 6.5v4a1.5 1.5 0 0 1-1.5 1.5h-4A1.5 1.5 0 0 1 5 10.5zm8 0A1.5 1.5 0 0 1 14.5 5h3A1.5 1.5 0 0 1 19 6.5v11a1.5 1.5 0 0 1-1.5 1.5h-3a1.5 1.5 0 0 1-1.5-1.5zm-8 8A1.5 1.5 0 0 1 6.5 13h4a1.5 1.5 0 0 1 1.5 1.5v3a1.5 1.5 0 0 1-1.5 1.5h-4A1.5 1.5 0 0 1 5 17.5z" />,
@@ -16,6 +16,14 @@ const paths: Record<IconName, React.ReactNode> = {
   warning: <path d="M12 4.8 21 19H3zm0 5.2v4m0 2.5h.01" />,
   key: <path d="M14.5 9.5A4.5 4.5 0 1 0 11 13.9l2.1 2.1H16v2h2v2h2v-2.9l-4.6-4.6a4.5 4.5 0 0 0-.9-3Z" />,
   schema: <path d="M6 5h7l5 5v9H6zm7 0v5h5M9 13h6M9 16h6M9 10h2" />,
+  list: <path d="M9 6.5h10M9 12h10M9 17.5h10M5 6.5h.01M5 12h.01M5 17.5h.01" />,
+  attach: <path d="M16.5 7.5v8a4.5 4.5 0 0 1-9 0V6.75a3 3 0 0 1 6 0V15a1.5 1.5 0 0 1-3 0V7.5" />,
+  copy: <path d="M9.5 9h8A1.5 1.5 0 0 1 19 10.5v8a1.5 1.5 0 0 1-1.5 1.5h-8A1.5 1.5 0 0 1 8 18.5v-8A1.5 1.5 0 0 1 9.5 9ZM16 9V6.5A1.5 1.5 0 0 0 14.5 5h-8A1.5 1.5 0 0 0 5 6.5v8A1.5 1.5 0 0 0 6.5 16H8" />,
+  edit: <path d="M5 19h4L18.5 9.5a2.83 2.83 0 0 0-4-4L5 15zm8.5-12.5 4 4" />,
+  retry: <path d="M5 12a7 7 0 0 1 12-4.9L19 9m0-4.5V9h-4.5M19 12a7 7 0 0 1-12 4.9L5 15m0 4.5V15h4.5" />,
+  trash: <path d="M5 7h14M10 11v5.5m4-5.5v5.5M6.5 7l.75 11.1A2 2 0 0 0 9.24 20h5.52a2 2 0 0 0 2-1.9L17.5 7M9.5 7V5.5A1.5 1.5 0 0 1 11 4h2a1.5 1.5 0 0 1 1.5 1.5V7" />,
+  info: <path d="M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Zm0-10v5.5m0-8.5h.01" />,
+  details: <path d="M6 19v-7m6 7V5m6 14v-4" />,
 };
 
 export function Icon(props: { name: IconName; className?: string }): React.JSX.Element {

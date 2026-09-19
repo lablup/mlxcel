@@ -98,7 +98,7 @@ describe('history async privacy boundaries', () => {
     const bytes = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jB1kAAAAASUVORK5CYII='), (char) => char.charCodeAt(0));
     new DataView(bytes.buffer).setUint32(16, 1_000_000);
     const image = { name: 'bomb.png', type: 'image/png', dataUrl: `data:image/png;base64,${btoa(String.fromCharCode(...bytes))}` };
-    const conversations = empty(); conversations[0].turns = [{ id: 'turn', modelId: 'model', modelRevision: 1, inferenceId: 'model', modelName: 'Model', prompt: 'Image', content: 'Earlier response', reasoning: '', tools: [], status: 'complete', finishReason: 'stop', usage: null, ttftMs: null, elapsedMs: null, error: null, parameters: {}, images: [image] }];
+    const conversations = empty(); conversations[0].turns = [{ id: 'turn', modelId: 'model', modelRevision: 1, inferenceId: 'model', modelName: 'Model', prompt: 'Image', content: 'Earlier response', reasoning: '', tools: [], status: 'complete', finishReason: 'stop', usage: null, ttftMs: null, elapsedMs: null, error: null, parameters: {}, images: [image], startedAt: 1 }];
     const decoder = vi.fn(); vi.stubGlobal('createImageBitmap', decoder);
     act(() => host.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')[1].click());
     importFile(Promise.resolve(exportConversations(conversations, { includeImages: true })));
