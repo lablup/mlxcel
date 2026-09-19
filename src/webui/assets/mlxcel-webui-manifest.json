@@ -1,30 +1,24 @@
 {
   "budgets": {
-    "embedded_asset_bytes": 701450,
+    "embedded_asset_bytes": 701474,
     "embedded_asset_limit_bytes": 5242880,
-    "initial_js_gzip_bytes": 151757,
+    "initial_js_gzip_bytes": 151766,
     "initial_js_gzip_limit_bytes": 204800,
-    "total_js_gzip_bytes": 152935,
+    "total_js_gzip_bytes": 152943,
     "total_js_gzip_limit_bytes": 716800
   },
   "files": [
     {
       "bytes": 951,
       "gzip_bytes": 613,
-      "path": "assets/code-highlight-BnhC4eLy.js",
-      "sha256": "089eaf750cfba3a01b66d36ada3ced11e731079c8fb9b82bdf73c40c71428b18"
+      "path": "assets/code-highlight-Bzr80CGF.js",
+      "sha256": "44335b05d4772e7831fc472e8821bafdfb3e02923e505c8a9804598aa6730d61"
     },
     {
       "bytes": 1134,
-      "gzip_bytes": 565,
-      "path": "assets/history-CM7oxx53.js",
-      "sha256": "8768144841cd8c3992ba6fde03d11f64e29bae55d307f7e511ce95206eb3b0e2"
-    },
-    {
-      "bytes": 591020,
-      "gzip_bytes": 151757,
-      "path": "assets/index-C_Pu7Kmq.js",
-      "sha256": "568bd3dd3574d7389d9bd46f3417584acd48241e8c25ed281526e3f0a085d665"
+      "gzip_bytes": 564,
+      "path": "assets/history-Dti2V2j9.js",
+      "sha256": "5bb6f96234b1469d70c55f214c78f8109a3e7e10f5651dd21924565891a31afb"
     },
     {
       "bytes": 92565,
@@ -33,10 +27,16 @@
       "sha256": "753e82fed30cca52c47eb6d460336a564ceaee389d32653c016d67775658ef21"
     },
     {
+      "bytes": 591044,
+      "gzip_bytes": 151766,
+      "path": "assets/index-hSW7Bij5.js",
+      "sha256": "6efff9d38abe0d4e2d7343d6890ce0bb002a03957c92a6fd34febf40deee7e62"
+    },
+    {
       "bytes": 453,
-      "gzip_bytes": 291,
+      "gzip_bytes": 289,
       "path": "index.html",
-      "sha256": "8442b953f2a5e4daedf10f6cc99418bd8a31fe809c8ea5b7ea5ca14990057a6a"
+      "sha256": "3521cb083edb8217689ace5618ba8da2597080cca83682823aa358dd01475a61"
     },
     {
       "bytes": 13233,
@@ -67,5 +67,5 @@
   },
   "pnpm_version": "11.18.0",
   "schema_version": 1,
-  "source_digest_sha256": "eae39df2078a233c6594e16bee882fb2353e774783b899168f4d4cc4801ecfcf"
+  "source_digest_sha256": "2b7af35ab3129e265ea910676d400b5522a7feff3c4981dc2112eb3ab7544e0a"
 }

@@ -84,7 +84,7 @@ export function ConfirmAction({
             {state.catalog
               .filter((entry) => ['ready', 'loading', 'draining', 'unloading'].includes(entry.lifecycle.state))
               .map((entry) => (
-                <li key={entry.identity.id}>
+                <li key={entry.identity.id} className="models-wrap">
                   {entry.identity.display_name} · {entry.lifecycle.state} · {t(locale, 'models.library.active')}:{' '}
                   {entry.lifecycle.active_requests}
                 </li>

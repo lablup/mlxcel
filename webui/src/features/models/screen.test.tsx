@@ -253,6 +253,9 @@ describe('reviewed asynchronous recovery paths', () => {
       (node) => node.textContent === 'Capacity / conflicting operation',
     );
     await act(async () => recovery?.click());
+    const listed = Array.from(host.querySelectorAll('[data-testid="models-confirm"] li'));
+    expect(listed.map((item) => item.textContent?.split(' · ')[0])).toEqual(['idle-target', 'busy-target']);
+    expect(listed.every((item) => item.classList.contains('models-wrap'))).toBe(true);
     const select = host.querySelector<HTMLSelectElement>('[data-testid="models-eviction-target"]');
     expect(select?.textContent).toContain('idle-target');
     expect(select?.textContent).not.toContain('busy-target');
