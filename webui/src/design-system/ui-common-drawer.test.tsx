@@ -34,6 +34,7 @@ async function openNav(): Promise<void> {
   await frames();
 }
 const expectSharedDrawer = (): void => { expect(panel().matches('aside.drawer[role="dialog"][aria-modal="true"]')).toBe(true); };
+const isPanelOpen = (): boolean => panel().classList.contains('drawer--open');
 
 function Shell({ connectionLabel }: { connectionLabel: string }): React.JSX.Element {
   return <AppShell locale="en" route="models" onRouteChange={() => undefined} onCommand={() => undefined} onHelp={() => undefined} selectedModel="none" connectionLabel={connectionLabel} connectionState="streaming"><p>Route content</p></AppShell>;
@@ -67,5 +68,25 @@ describe('navigation drawer adoption', () => {
     expect(document.querySelector('[data-testid="command-dialog"]')?.hasAttribute('open')).toBe(false);
     expect(document.querySelector('[data-testid="help-dialog"]')?.hasAttribute('open')).toBe(false);
     expectSharedDrawer();
+  });
+
+  it('leaves the drawer open when an Escape reaching it was already handled elsewhere', async () => {
+    act(() => root.render(<Shell connectionLabel="snapshot 1" />));
+    await openNav();
+    expect(isPanelOpen()).toBe(true);
+    // Stands in for a future popup that portals outside `.drawer` (like the Tooltip
+    // content or a nested dialog) and already handles Escape for itself: the drawer's
+    // own outside-the-panel handler must back off once defaultPrevented is set, rather
+    // than also closing the drawer underneath the popup.
+    const popup = document.createElement('div');
+    popup.tabIndex = -1;
+    popup.addEventListener('keydown', (event) => { if (event.key === 'Escape') event.preventDefault(); });
+    document.body.append(popup);
+    act(() => popup.focus());
+    act(() => { popup.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
+    await frames();
+    expect(isPanelOpen()).toBe(true);
+    expectSharedDrawer();
+    popup.remove();
   });
 });
