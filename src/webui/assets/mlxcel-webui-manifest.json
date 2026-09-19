@@ -1,36 +1,36 @@
 {
   "budgets": {
-    "embedded_asset_bytes": 774569,
+    "embedded_asset_bytes": 803898,
     "embedded_asset_limit_bytes": 5242880,
-    "initial_js_gzip_bytes": 164057,
+    "initial_js_gzip_bytes": 170636,
     "initial_js_gzip_limit_bytes": 204800,
-    "total_js_gzip_bytes": 164671,
+    "total_js_gzip_bytes": 171248,
     "total_js_gzip_limit_bytes": 716800
   },
   "files": [
     {
       "bytes": 951,
-      "gzip_bytes": 614,
-      "path": "assets/code-highlight-CVUuwqcC.js",
-      "sha256": "59a4158c806f869b62ffc16dba986e6f1f8c0ec1750a33423c97b290e8930b1d"
+      "gzip_bytes": 612,
+      "path": "assets/code-highlight-NhHf6Eg4.js",
+      "sha256": "3a40ecb1dd674341829d9a35b846dc42833bc3966ef6b51ba64ccf8ab1eb5ada"
     },
     {
-      "bytes": 632803,
-      "gzip_bytes": 163068,
-      "path": "assets/index-SCLyOIB0.js",
-      "sha256": "9e96e39983588fab91d239dcd3e1721d38e4d4d5eab4e47b5bdbfd99ee4a4e80"
+      "bytes": 125752,
+      "gzip_bytes": 20038,
+      "path": "assets/index-DnT-nVPF.css",
+      "sha256": "b55ed85f2dee7c8e0ed6ba53452825b7346c244773802c2b75cf4cf61287e18a"
     },
     {
-      "bytes": 122863,
-      "gzip_bytes": 19603,
-      "path": "assets/index-uBcwUASe.css",
-      "sha256": "07a7a553618d5c8ed586cbf594f34a287e9f449b00de07788f2fc3813e991fed"
+      "bytes": 659243,
+      "gzip_bytes": 169647,
+      "path": "assets/index-h-4zIuYd.js",
+      "sha256": "7980bc287689e85440a3e0cfe850c54025a8e824e6bdc9b5428981ddd9043236"
     },
     {
       "bytes": 503,
-      "gzip_bytes": 303,
+      "gzip_bytes": 302,
       "path": "index.html",
-      "sha256": "8ead5f9a1e9fbac4e0eafd232ccd6798244672215f15e4516ff5bc0e29030ed6"
+      "sha256": "a5fef9b842a54591da32a15d127a643d45ee71ec3e8a0274c4d53656c392c0f3"
     },
     {
       "bytes": 2129,
@@ -67,5 +67,5 @@
   },
   "pnpm_version": "11.18.0",
   "schema_version": 1,
-  "source_digest_sha256": "92dde56cd38105dc7b5f72bfe5a24bd30ee55c42ec05f8f8b09a2ddf3c5186c7"
+  "source_digest_sha256": "0bae12fdd8126cddb677d3147f63c5019a53b55decdcfc500a4e1d108e55f599"
 }

@@ -5,6 +5,6 @@ import { t, type Locale } from '../../i18n/catalog';
 export function NextLoadProfile({ locale }: { locale: Locale }): React.JSX.Element {
   return <p data-testid="models-pending-profile">
     {t(locale, 'models.next_profile.body')}{' '}
-    <a href="#settings">{t(locale, 'models.next_profile.edit')}</a>
+    <a href="#settings/model">{t(locale, 'models.next_profile.edit')}</a>
   </p>;
 }
