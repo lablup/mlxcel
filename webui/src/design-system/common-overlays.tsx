@@ -54,12 +54,21 @@ export function Drawer(props: { open: boolean; onClose: () => void; title: strin
     // A native modal <dialog> opened above the drawer (a model confirmation) sits outside
     // the panel and does not preventDefault its Escape, but it owns that key: it closes
     // itself and restores focus to its opener in the drawer, so leave the drawer open.
+    // The same pointer press leaves Tab starting from <body>, which would walk the page behind
+    // the modal panel; bring a Tab that starts outside the panel back to its first (or last) stop.
     const handleKeyDown = (event: KeyboardEvent): void => {
-      if (event.key !== 'Escape' || event.isComposing || event.defaultPrevented) return;
+      if ((event.key !== 'Escape' && event.key !== 'Tab') || event.isComposing || event.defaultPrevented) return;
       if (event.target instanceof Element && event.target.closest('dialog')) return;
-      const panel = hostRef.current?.querySelector('.drawer');
+      const panel = hostRef.current?.querySelector<HTMLElement>('.drawer');
       if (panel && event.target instanceof Node && panel.contains(event.target)) return;
-      close();
+      if (event.key === 'Escape') {
+        close();
+        return;
+      }
+      if (!panel || event.altKey || event.ctrlKey || event.metaKey) return;
+      const list = tabbables(panel);
+      event.preventDefault();
+      (event.shiftKey ? list[list.length - 1] : list[0])?.focus();
     };
     document.addEventListener('keydown', handleKeyDown);
     // alpha.19 builds its Tab trap list once, when the drawer opens, and its selector omits

@@ -20,8 +20,6 @@ export function StatCard(props: { label: string; value: string; hint?: React.Rea
 // Secondary metadata chip. Lifecycle state keeps using StatusBadge (StatusTag).
 // `warning` flags a fact that blocks an action (an unsupported checkpoint, an unavailable task).
 const badgeVariants = { neutral: 'default', accent: 'primary', warning: 'warning' } as const;
-export function Badge(props: { children: React.ReactNode; tone?: keyof typeof badgeVariants; title?: string }): React.JSX.Element {
-  const badge = <CommonBadge variant={badgeVariants[props.tone ?? 'neutral']} className="ds-badge">{props.children}</CommonBadge>;
-  // alpha.19 Badge takes no title; the wrapper carries the full text of a truncated chip.
-  return props.title ? <span className="ds-badge-wrap" title={props.title}>{badge}</span> : badge;
+export function Badge(props: { children: React.ReactNode; tone?: keyof typeof badgeVariants }): React.JSX.Element {
+  return <CommonBadge variant={badgeVariants[props.tone ?? 'neutral']} className="ds-badge">{props.children}</CommonBadge>;
 }

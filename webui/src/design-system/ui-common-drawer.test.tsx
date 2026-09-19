@@ -171,4 +171,27 @@ describe('drawer adapter keyboard contract', () => {
     act(() => { document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
     expect(onClose).toHaveBeenCalledTimes(1);
   });
+
+  it('brings a Tab that starts outside the open panel back into it instead of walking the page behind', async () => {
+    emulateLayout();
+    act(() => root.render(
+      <>
+        <button type="button">Behind</button>
+        <Drawer open title="Panel" closeLabel="Close" onClose={() => undefined} testId="test-drawer" placement="end">
+          <button type="button">First</button>
+          <button type="button">Last</button>
+        </Drawer>
+      </>,
+    ));
+    await frames();
+    const close = document.querySelector<HTMLElement>('[data-testid="test-drawer"] .drawer__close-btn');
+    if (!close) throw new Error('Missing drawer close button');
+    // A pointer press on the panel's heading leaves focus on <body>.
+    act(() => (document.activeElement as HTMLElement | null)?.blur());
+    expect(tab(document.body).defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(close);
+    act(() => close.blur());
+    expect(tab(document.body, true).defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(byText('Last'));
+  });
 });
