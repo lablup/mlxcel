@@ -38,6 +38,13 @@ describe('MessageList', () => {
     render([turn('a', { startedAt: 0 })]);
     expect(host.querySelector('time')).toBeNull();
   });
+  it('omits a timestamp a Date cannot hold instead of failing to render', () => {
+    // Imported history bounds elapsedMs only as finite, so the completion time can pass the
+    // largest time a Date holds (8.64e15 ms); formatting it would throw during render.
+    render([turn('a', { elapsedMs: 1e300 }), turn('b', { startedAt: 8.64e15 + 1, elapsedMs: null })]);
+    expect(host.querySelectorAll('article.chat-turn')).toHaveLength(2);
+    expect([...host.querySelectorAll('time')].map((node) => node.getAttribute('dateTime'))).toEqual([new Date(STARTED).toISOString()]);
+  });
   it.each(['complete', 'cancelled', 'interrupted', 'error'] as const)('labels a %s turn without printing the status value', (status) => {
     render([turn('a', { status, finishReason: status === 'complete' ? 'stop' : null })]);
     const label = host.querySelector(`.chat-status[data-status="${status}"]`)?.textContent ?? '';

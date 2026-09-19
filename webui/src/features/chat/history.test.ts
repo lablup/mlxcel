@@ -115,7 +115,8 @@ describe('bounded portable history', () => {
     const unsaved = fixture(); Reflect.deleteProperty(unsaved[0].turns[0], 'startedAt');
     expect(() => validateConversations(unsaved)).toThrow(HistoryValidationError);
   });
-  it.each([-1, 1.5, Infinity, Number.MAX_SAFE_INTEGER + 1])('rejects a start time of %s', (startedAt) => {
+  // 8.64e15 is the largest time a Date holds; a start time past it could never be shown.
+  it.each([-1, 1.5, Infinity, 8.64e15 + 1, Number.MAX_SAFE_INTEGER + 1])('rejects a start time of %s', (startedAt) => {
     const value = fixture(); value[0].turns[0].startedAt = startedAt;
     expect(() => validateConversations(value)).toThrow(HistoryValidationError);
   });

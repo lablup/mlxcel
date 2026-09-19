@@ -85,6 +85,12 @@ function number(value: unknown, integer = false): number {
       (integer && !Number.isSafeInteger(value))) return invalid();
   return value;
 }
+// The largest epoch-millisecond time a Date holds; a start time past it could never be shown.
+const LATEST_TIME_MS = 8.64e15;
+function time(value: unknown): number {
+  const result = number(value, true);
+  return result > LATEST_TIME_MS ? invalid() : result;
+}
 function nullable<T>(value: unknown, validate: (v: unknown) => T): T | null {
   return value === null ? null : validate(value);
 }
@@ -153,7 +159,7 @@ function normalize(value: unknown, options: HistoryOptions, version: PayloadVers
         }),
         ttftMs: nullable(turn.ttftMs, number), elapsedMs: nullable(turn.elapsedMs, number),
         error: nullable(turn.error, string), parameters, images: options.includeImages ? images : [],
-        startedAt: version === 1 ? 0 : number(turn.startedAt, true),
+        startedAt: version === 1 ? 0 : time(turn.startedAt),
       };
       if (result.status === 'complete' && (!result.finishReason || (!result.content && !result.reasoning && !result.tools.length))) return invalid();
       totalJsonBytes += bytes(JSON.stringify(result));

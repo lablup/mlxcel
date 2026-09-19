@@ -39,12 +39,20 @@ export function formatRelative(then: number, now: number, locale: Locale): strin
   return format.format(0, 'second');
 }
 
-/** Hour and minute in the active locale. */
+// Imported history bounds updatedAt and elapsedMs only as safe or finite numbers, which
+// reach past the largest time a Date holds (8.64e15 ms). Formatting such a time throws a
+// RangeError, and a throw during render takes the whole WebUI down, so it reads as unknown.
+function representable(epochMs: number): boolean {
+  return !Number.isNaN(new Date(epochMs).getTime());
+}
+
+/** Hour and minute in the active locale; empty for a time a Date cannot hold. */
 export function formatClock(epochMs: number, locale: Locale): string {
+  if (!representable(epochMs)) return '';
   return cached(clockFormats, locale, (tag) => new Intl.DateTimeFormat(tag, { hour: 'numeric', minute: '2-digit' })).format(epochMs);
 }
 
-/** The machine-readable value for a `<time>` element. */
-export function isoTime(epochMs: number): string {
-  return new Date(epochMs).toISOString();
+/** The machine-readable value for a `<time>` element; undefined for a time a Date cannot hold. */
+export function isoTime(epochMs: number): string | undefined {
+  return representable(epochMs) ? new Date(epochMs).toISOString() : undefined;
 }

@@ -24,8 +24,10 @@ export function canRetry(turn: ChatTurn, last: boolean): boolean {
 }
 
 function Clock({ at, locale }: { at: number; locale: Locale }): React.JSX.Element | null {
-  // startedAt 0 marks a turn imported from a version-1 payload, whose time is unknown.
-  return at > 0 ? <time className="chat-time" dateTime={isoTime(at)}>{formatClock(at, locale)}</time> : null;
+  // startedAt 0 marks a turn imported from a version-1 payload, whose time is unknown; so is
+  // an imported time a Date cannot hold (isoTime is then undefined).
+  const iso = at > 0 ? isoTime(at) : undefined;
+  return iso !== undefined ? <time className="chat-time" dateTime={iso}>{formatClock(at, locale)}</time> : null;
 }
 
 // The only per-second timer in Chat, mounted while its turn streams.
