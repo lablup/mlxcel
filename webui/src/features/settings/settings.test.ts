@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { validateGenerationDefaults, snapshotGenerationDefaults } from './generation-defaults';
+import { describeEffectiveParameter, resolveEffectiveParameter, validateGenerationDefaults, snapshotGenerationDefaults } from './generation-defaults';
+import { serverGenerationDefaults } from './server-defaults';
 import { importProfiles, profileCli, validateLoadProfile, KV_MODES } from './load-profiles';
 import { contextBudget } from './context-check';
 import { validateAgainstSchema } from '../../api/jsonSchema';
-import { parseSettingInput, validateModelProps, validateSettings, validateSettingsPatch, type SettingSpec } from '../../api/settings';
+import { formatSettingValue, parseSettingInput, validateModelProps, validateSettings, validateSettingsPatch, type SettingSpec } from '../../api/settings';
 import { WebUiApiClient } from '../../api/client';
 const spec: SettingSpec = { name: 'default_temperature', type: 'float', default: 1, mutable: true, allowed: null, help: 'Temperature' };
 const settings = { schema: [spec], current: { default_temperature: 1 }, fingerprint: 'a'.repeat(64) };
@@ -28,5 +29,49 @@ describe('existing opt-in settings adapter', () => {
     const client = new WebUiApiClient({ apiBase: '/prefix', fetchImpl }); client.setBearerToken('secret');
     await client.settings('org/model'); await client.patchSettings('org/model', { default_temperature: 0.5 }); await client.modelProps('org/model'); expect(await client.tokenCount('org/model', 'hello')).toBe(2);
     expect(calls.map((call) => call.url)).toEqual(['/prefix/settings?model=org%2Fmodel&autoload=false', '/prefix/settings?model=org%2Fmodel&autoload=false', '/prefix/props?model=org%2Fmodel&autoload=false', '/prefix/tokenize?model=org%2Fmodel&autoload=false']); expect(calls.every((call) => call.auth === 'Bearer secret')).toBe(true); expect(calls[1].body).toEqual({ op: 'merge', values: { default_temperature: 0.5 } });
+  });
+});
+describe('schema value display', () => {
+  it('shows an f32 float as the shortest decimal that reads back as the same f32, at most 7 significant digits', () => {
+    expect(formatSettingValue(spec, 0.800000011920929)).toBe('0.8');
+    expect(formatSettingValue(spec, 0.949999988079071)).toBe('0.95');
+    expect(formatSettingValue(spec, 0.05000000074505806)).toBe('0.05');
+    expect(formatSettingValue(spec, 0.1234567)).toBe('0.1234567');
+    expect(formatSettingValue(spec, 1)).toBe('1');
+    for (const value of [0.800000011920929, 0.1234567, 0.333333343267, 1e-7, 123456.789]) expect(formatSettingValue(spec, value).replace(/^0\.0*|[.-]|e.*$/g, '').length).toBeLessThanOrEqual(7);
+  });
+  it('shows int as written, null as empty, and defers every other kind to settingInput', () => {
+    expect(formatSettingValue({ ...spec, type: 'int' }, 4096)).toBe('4096');
+    expect(formatSettingValue({ ...spec, type: 'int_or_null' }, null)).toBe('');
+    expect(formatSettingValue({ ...spec, type: 'object_or_null' }, null)).toBe('');
+    expect(formatSettingValue({ ...spec, type: 'str' }, 'entropy-bound')).toBe('entropy-bound');
+    expect(formatSettingValue({ ...spec, type: 'bool' }, true)).toBe('true');
+    expect(formatSettingValue({ ...spec, type: 'array' }, ['\n', ':'])).toBe('["\\n",":"]');
+  });
+});
+describe('effective next-request parameters', () => {
+  it('resolves override over session over server over unknown', () => {
+    expect(resolveEffectiveParameter('temperature', 0.3, 0.5, 0.8)).toEqual({ value: 0.3, source: 'override' });
+    expect(resolveEffectiveParameter('temperature', undefined, 0.5, 0.8)).toEqual({ value: 0.5, source: 'session' });
+    expect(resolveEffectiveParameter('temperature', undefined, undefined, 0.800000011920929)).toEqual({ value: 0.8, source: 'server' });
+    expect(resolveEffectiveParameter('temperature', undefined, undefined, undefined)).toEqual({ value: null, source: 'unknown' });
+    expect(resolveEffectiveParameter('temperature', 0, undefined, 0.8)).toEqual({ value: 0, source: 'override' });
+  });
+  it('keeps a server null as a known unset default and treats malformed server values as unknown', () => {
+    expect(resolveEffectiveParameter('seed', undefined, undefined, null)).toEqual({ value: null, source: 'server' });
+    expect(resolveEffectiveParameter('max_tokens', undefined, undefined, 1.5)).toEqual({ value: null, source: 'unknown' });
+    expect(resolveEffectiveParameter('max_tokens', undefined, undefined, 256)).toEqual({ value: 256, source: 'server' });
+    expect(resolveEffectiveParameter('top_p', undefined, undefined, 'high')).toEqual({ value: null, source: 'unknown' });
+  });
+  it('words each source once for Settings and the Chat hint', () => {
+    expect(describeEffectiveParameter('en', { value: 0.5, source: 'session' })).toBe('0.5 (session default)');
+    expect(describeEffectiveParameter('en', { value: 0.8, source: 'server' })).toBe('0.8 (server default)');
+    expect(describeEffectiveParameter('en', { value: null, source: 'server' })).toBe('not set (server default)');
+    expect(describeEffectiveParameter('en', { value: null, source: 'unknown' })).toBe('server default, not readable');
+    expect(describeEffectiveParameter('ko', { value: 0.5, source: 'override' })).toBe('0.5 (다음 턴 재정의)');
+  });
+  it('reads a server default only where the schema has a default_<field> entry', () => {
+    const response = { schema: [spec, { ...spec, name: 'default_seed', type: 'int_or_null' as const }], current: { default_temperature: 0.699999988079071, default_seed: null, default_top_p: 0.9 }, fingerprint: 'a'.repeat(64) };
+    expect(serverGenerationDefaults(response)).toEqual({ temperature: 0.699999988079071, seed: null });
   });
 });

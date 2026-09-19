@@ -42,6 +42,29 @@ export function parseSettingInput(spec: SettingSpec, raw: string): unknown {
   return value;
 }
 export function settingInput(spec: SettingSpec, value: unknown): string { return typeof value === 'string' && ['str', 'str_or_null'].includes(spec.type) ? value : JSON.stringify(value) ?? ''; }
+/** Significant digits of an f32 display; 7 always identifies the stored value to the precision a person edits. */
+const F32_DISPLAY_DIGITS = 7;
+/**
+ * The server stores floats as f32 and serializes the widened f64 (0.8 arrives as 0.800000011920929).
+ * Returns the shortest decimal, at most 7 significant digits, that reads back as the same f32.
+ */
+export function formatF32(value: number): string {
+  if (!Number.isFinite(value)) return String(value);
+  const stored = Math.fround(value);
+  for (let digits = 1; digits < F32_DISPLAY_DIGITS; digits += 1) {
+    const candidate = Number(stored.toPrecision(digits));
+    if (Math.fround(candidate) === stored) return String(candidate);
+  }
+  return String(Number(stored.toPrecision(F32_DISPLAY_DIGITS)));
+}
+/** Display text for a schema value. Never the literal `null`: a null value is empty and its null toggle carries the state. */
+export function formatSettingValue(spec: SettingSpec, value: unknown): string {
+  if (value === null || value === undefined) return '';
+  const base = spec.type.replace('_or_null', '');
+  if (base === 'float' && typeof value === 'number') return formatF32(value);
+  if (base === 'int' && typeof value === 'number') return String(value);
+  return settingInput(spec, value);
+}
 
 export function validateTokenCount(value: unknown): number {
   const data = object(value);

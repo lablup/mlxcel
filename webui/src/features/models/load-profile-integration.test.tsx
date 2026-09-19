@@ -57,7 +57,7 @@ it('uses canonical reusable defaults only on explicit load and freezes the submi
   expect(host.textContent).not.toContain('Pending browser profile; not applied yet.');
   await openDetails();
   expect(host.textContent).toContain('Pending browser profile; not applied yet.');
-  expect(node<HTMLAnchorElement>('[data-testid="models-pending-profile"] a').getAttribute('href')).toBe('#settings');
+  expect(node<HTMLAnchorElement>('[data-testid="models-pending-profile"] a').getAttribute('href')).toBe('#settings/model');
   expect(actions.loadModel).not.toHaveBeenCalled();
   state = { ...state, selectedModelId: null };
   render();

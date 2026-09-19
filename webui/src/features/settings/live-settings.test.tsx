@@ -11,10 +11,85 @@ beforeEach(() => { vi.clearAllMocks(); host = document.createElement('div'); doc
 afterEach(() => { act(() => root.unmount()); host.remove(); });
 async function render(model = 'model-a'): Promise<void> { await act(async () => { root.render(<LiveSettings modelId={model} locale="en" />); }); }
 async function button(label: string): Promise<void> { const element = [...host.querySelectorAll('button')].find((item) => item.textContent === label); expect(element).toBeDefined(); await act(async () => element?.click()); }
-async function edit(name: string, value: string): Promise<void> { const field = [...host.querySelectorAll('label')].find((item) => item.querySelector('span')?.textContent === name)?.querySelector('input'); expect(field).toBeTruthy(); await act(async () => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(field, value); field?.dispatchEvent(new Event('input', { bubbles: true })); }); }
+// Controls are labelled from the catalog; the raw schema key is secondary text.
+const input = (label: string): HTMLInputElement | null => { const element = [...host.querySelectorAll('label')].find((item) => item.textContent === label); return element ? host.querySelector<HTMLInputElement>(`[id="${element.htmlFor}"]`) : null; };
+async function edit(name: string, value: string): Promise<void> { const field = input(name); expect(field).toBeTruthy(); await act(async () => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(field, value); field?.dispatchEvent(new Event('input', { bubbles: true })); }); }
 describe('live settings partial/stale/reset behavior', () => {
   it('reports disabled endpoint and never submits a mutation', async () => { actions.getSettings.mockRejectedValue(new Error('404')); await render(); expect(host.textContent).toContain('may have disabled --settings'); expect(actions.patchSettings).not.toHaveBeenCalled(); });
-  it('preserves rejected input, removes applied input and refetches effective values', async () => { actions.getSettings.mockResolvedValueOnce(make()).mockResolvedValueOnce(make()).mockResolvedValueOnce(make('b', 0.5)); actions.patchSettings.mockResolvedValue({ applied: { default_temperature: 0.5 }, rejected: [{ name: 'default_top_p', reason: 'must be between zero and one' }], current: {}, fingerprint: 'b'.repeat(64) }); await render(); await edit('default_temperature', '0.5'); await edit('default_top_p', '2'); await button('Apply live draft'); expect(host.textContent).toContain('1 applied; 1 rejected'); expect(host.textContent).toContain('must be between zero and one'); expect(actions.getSettings).toHaveBeenCalledTimes(3); expect(actions.patchSettings.mock.calls[0][1]).toEqual({ default_temperature: 0.5, default_top_p: 2 }); });
-  it('requires reconfirmation after another client edit and stages reset without PATCH', async () => { actions.getSettings.mockResolvedValueOnce(make()).mockResolvedValue(make('b', 0.2)); await render(); await edit('default_temperature', '0.5'); await button('Apply live draft'); expect(actions.patchSettings).not.toHaveBeenCalled(); expect(host.textContent).toContain('Another client changed'); await button('Reset live draft…'); await button('Reset draft'); expect(actions.patchSettings).not.toHaveBeenCalled(); expect(host.textContent).toContain('worker-owned; restart'); });
-  it('ignores a stale fetch after model binding changes', async () => { let resolve: ((value: SettingsResponse) => void) | undefined; actions.getSettings.mockImplementationOnce(() => new Promise<SettingsResponse>((done) => { resolve = done; })).mockResolvedValueOnce(make('b', 0.7)); await render(); await render('model-b'); await act(async () => resolve?.(make('a', 99))); expect(host.textContent).not.toContain('Current: 99'); expect(host.textContent).toContain('Current: 0.7'); });
+  it('preserves rejected input, removes applied input and refetches effective values', async () => { actions.getSettings.mockResolvedValueOnce(make()).mockResolvedValueOnce(make()).mockResolvedValueOnce(make('b', 0.5)); actions.patchSettings.mockResolvedValue({ applied: { default_temperature: 0.5 }, rejected: [{ name: 'default_top_p', reason: 'must be between zero and one' }], current: {}, fingerprint: 'b'.repeat(64) }); await render(); await edit('Temperature', '0.5'); await edit('Top P', '2'); await button('Apply live draft'); expect(host.textContent).toContain('1 applied; 1 rejected'); expect(host.textContent).toContain('must be between zero and one'); expect(actions.getSettings).toHaveBeenCalledTimes(3); expect(actions.patchSettings.mock.calls[0][1]).toEqual({ default_temperature: 0.5, default_top_p: 2 }); });
+  it('requires reconfirmation after another client edit and stages reset without PATCH', async () => { actions.getSettings.mockResolvedValueOnce(make()).mockResolvedValue(make('b', 0.2)); await render(); await edit('Temperature', '0.5'); await button('Apply live draft'); expect(actions.patchSettings).not.toHaveBeenCalled(); expect(host.textContent).toContain('Another client changed'); await button('Reset live draft…'); await button('Reset draft'); expect(actions.patchSettings).not.toHaveBeenCalled(); expect(input('Temperature')?.value).toBe('0.8'); expect(input('Top P')?.value).toBe('0.9'); });
+  it('ignores a stale fetch after model binding changes', async () => { let resolve: ((value: SettingsResponse) => void) | undefined; actions.getSettings.mockImplementationOnce(() => new Promise<SettingsResponse>((done) => { resolve = done; })).mockResolvedValueOnce(make('b', 0.7)); await render(); await render('model-b'); await act(async () => resolve?.(make('a', 99))); expect(input('Temperature')?.value).toBe('0.7'); });
+});
+describe('live draft across Settings tab switches', () => {
+  it('keeps an unapplied draft when the tab unmounts and returns, per worker only', async () => {
+    actions.getSettings.mockResolvedValue(make());
+    const scope = { instance: 'instance-a', modelId: 'model-a', revision: 3 };
+    await act(async () => { root.render(<LiveSettings modelId="model-a" scope={scope} locale="en" />); });
+    await edit('Temperature', '0.5');
+    act(() => root.unmount()); root = createRoot(host);
+    await act(async () => { root.render(<LiveSettings modelId="model-a" scope={scope} locale="en" />); });
+    expect(input('Temperature')?.value).toBe('0.5');
+    expect(host.textContent).not.toContain('Another client changed');
+    expect([...host.querySelectorAll('button')].find((item) => item.textContent === 'Apply live draft')?.disabled).toBe(false);
+    act(() => root.unmount()); root = createRoot(host);
+    await act(async () => { root.render(<LiveSettings modelId="model-a" scope={{ ...scope, revision: 4 }} locale="en" />); });
+    expect(input('Temperature')?.value).toBe('1');
+  });
+  it('asks for reconfirmation when another client changed the settings while the draft was away', async () => {
+    actions.getSettings.mockResolvedValue(make());
+    const scope = { instance: 'instance-b', modelId: 'model-a', revision: 1 };
+    await act(async () => { root.render(<LiveSettings modelId="model-a" scope={scope} locale="en" />); });
+    await edit('Temperature', '0.5');
+    act(() => root.unmount()); root = createRoot(host);
+    actions.getSettings.mockResolvedValue(make('b', 0.2));
+    actions.patchSettings.mockResolvedValue({ applied: { default_temperature: 0.5 }, rejected: [], current: {}, fingerprint: 'c'.repeat(64) });
+    await act(async () => { root.render(<LiveSettings modelId="model-a" scope={scope} locale="en" />); });
+    expect(host.textContent).toContain('Another client changed');
+    expect(input('Temperature')?.value).toBe('0.5');
+    expect(actions.patchSettings).not.toHaveBeenCalled();
+    await button('Apply live draft');
+    expect(actions.patchSettings.mock.calls[0][1]).toEqual({ default_temperature: 0.5 });
+  });
+  it('asks for reconfirmation on the first successful Refresh when the read after a restore failed', async () => {
+    actions.getSettings.mockResolvedValue(make());
+    const scope = { instance: 'instance-d', modelId: 'model-a', revision: 1 };
+    await act(async () => { root.render(<LiveSettings modelId="model-a" scope={scope} locale="en" />); });
+    await edit('Temperature', '0.5');
+    act(() => root.unmount()); root = createRoot(host);
+    actions.getSettings.mockRejectedValueOnce(new Error('offline')).mockResolvedValue(make('b', 0.2));
+    await act(async () => { root.render(<LiveSettings modelId="model-a" scope={scope} locale="en" />); });
+    expect(host.textContent).not.toContain('Another client changed');
+    await button('Refresh current values');
+    expect(host.textContent).toContain('Another client changed');
+    expect(actions.patchSettings).not.toHaveBeenCalled();
+  });
+  it('retains drafts for at most 32 workers, dropping the oldest', async () => {
+    actions.getSettings.mockResolvedValue(make());
+    const scopeAt = (revision: number): { instance: string; modelId: string; revision: number } => ({ instance: 'instance-c', modelId: 'model-a', revision });
+    for (let revision = 1; revision <= 33; revision += 1) {
+      await act(async () => { root.render(<LiveSettings key={revision} modelId="model-a" scope={scopeAt(revision)} locale="en" />); });
+      await edit('Temperature', String(revision / 100));
+    }
+    act(() => root.unmount()); root = createRoot(host);
+    await act(async () => { root.render(<LiveSettings modelId="model-a" scope={scopeAt(1)} locale="en" />); });
+    expect(input('Temperature')?.value).toBe('1');
+    act(() => root.unmount()); root = createRoot(host);
+    await act(async () => { root.render(<LiveSettings modelId="model-a" scope={scopeAt(33)} locale="en" />); });
+    expect(input('Temperature')?.value).toBe('0.33');
+  });
+});
+describe('schema names that collide with Object.prototype', () => {
+  it('renders a mutable setting named "constructor" without resolving errors or the current value through the prototype chain', async () => {
+    // `errors` and `current.current` are plain object literals, so an unguarded `errors[spec.name]`
+    // or `current.current[spec.name]` resolves to the inherited `Object.prototype.constructor`
+    // function for this name instead of `undefined`, which then crashes React when it is handed to
+    // `<small>{error}</small>` as a non-string, non-null child.
+    const response: SettingsResponse = { schema: [{ name: 'constructor', type: 'int', default: 0, mutable: true, allowed: null, help: 'Trap field' }], current: {}, fingerprint: 'a'.repeat(64) };
+    actions.getSettings.mockResolvedValue(response);
+    await render();
+    const field = input('constructor');
+    expect(field).toBeTruthy();
+    expect(field?.value).toBe('');
+    expect(host.querySelector('[data-tone="error"]')).toBeNull();
+  });
 });
