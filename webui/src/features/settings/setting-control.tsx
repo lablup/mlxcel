@@ -79,7 +79,8 @@ export function SettingControl({ spec, value, draft, onChange, error, disabled =
   const { label, key } = settingLabel(locale, spec.name);
   const nullable = spec.type.endsWith('_or_null');
   const base = spec.type.replace('_or_null', '');
-  const isNull = draft === undefined ? value === null : draft === 'null';
+  // Only an `_or_null` kind has a null state: typed text `null` in any other kind is just a (possibly invalid) draft that stays editable.
+  const isNull = nullable && (draft === undefined ? value === null : draft === 'null');
   const shown = draft ?? formatSettingValue(spec, value);
   const serverText = value === null ? t(locale, 'settings.value.unset') : formatSettingValue(spec, value);
   const edited = draft !== undefined && draft !== formatSettingValue(spec, value) && !(draft === 'null' && value === null);

@@ -84,6 +84,18 @@ describe('SettingControl maps each schema kind to its control', () => {
     expect(area.getAttribute('aria-invalid')).toBe('true');
   });
 
+  it.each(['str', 'array', 'object'] as const)('keeps a non-nullable %s control editable when its draft text is null', (type) => {
+    const control = renderControl(spec('payload', type), type === 'str' ? 'abc' : type === 'array' ? ['a'] : { a: 1 });
+    const field = host.querySelector<HTMLInputElement | HTMLTextAreaElement>('textarea, input');
+    expect(field).not.toBeNull();
+    if (!field) return;
+    setValue(field, 'null');
+    expect(control.draft()).toBe('null');
+    expect(field.value).toBe('null');
+    expect(field.disabled).toBe(false);
+    expect(host.querySelector('[data-testid="setting-payload-unset"]')).toBeNull();
+  });
+
   it('opens a null value with the unset toggle on and the inner control empty, and never shows the literal null', () => {
     renderControl(spec('default_seed', 'int_or_null'), null);
     const [number, unset] = [host.querySelector<HTMLInputElement>('input[type="number"]'), host.querySelector<HTMLInputElement>('[data-testid="setting-default_seed-unset"]')];
