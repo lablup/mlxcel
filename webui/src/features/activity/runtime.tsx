@@ -1,7 +1,7 @@
 // Copyright 2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 import React from 'react';
 import type { RuntimeSnapshot } from '../../api/types';
-import { EmptyState, ErrorBanner, ProgressBar } from '../../design-system/primitives';
+import { EmptyState, ErrorBanner, ProgressBar, StatCard } from '../../design-system/primitives';
 import type { Locale } from '../../i18n/catalog';
 import { metricValue } from './format';
 import { strings } from './strings';
@@ -15,7 +15,7 @@ export function RuntimeView({ runtime, locale, stale = false }: { runtime: Runti
   const unavailableCount = entries.filter(([, metric]) => metric.value === null || !Number.isFinite(metric.value)).length;
   const metricLabel = (name: string): string => text.metricLabels[name as keyof typeof text.metricLabels] ?? name.replaceAll('_', ' ');
   return <section aria-label={text.runtime}><h2>{text.runtime}</h2>{stale ? <ErrorBanner tone="warning" title={text.stale} body={text.observed} /> : null}
-    <div className="activity-metrics activity-metrics--summary" data-testid="runtime-summary">{availablePrimary.map(([name, metric]) => <dl className="activity-metric" key={name}><dt>{metricLabel(name)}</dt><dd>{metricValue(metric)}</dd></dl>)}</div>
+    <div className="activity-metrics activity-metrics--summary" data-testid="runtime-summary">{availablePrimary.map(([name, metric]) => <StatCard className="activity-metric" key={name} label={metricLabel(name)} value={metricValue(metric)} />)}</div>
     {availablePrimary.length === 0 ? <p>{text.noPrimary}</p> : null}
     {unavailableCount > 0 ? <p>{text.unavailableCount}: {unavailableCount}. {text.unavailableReason}</p> : null}
     <h3>{text.slots}</h3><p>{text.parallel}: {runtime.slots.effective_parallelism ?? 'N/A'} / {runtime.slots.configured_parallelism}</p><p>{text.context}: {runtime.slots.request_context_tokens ?? 'N/A'} tokens · {text.pool}: {runtime.slots.shared_pool_context_tokens ?? 'N/A'} tokens</p>
@@ -27,9 +27,9 @@ export function RuntimeView({ runtime, locale, stale = false }: { runtime: Runti
       <p>Accepted decode: {slot.decoded_tokens ?? 'N/A'} tokens · Cached prompt: {slot.cached_prompt_tokens ?? 'N/A'} tokens</p>
     </section>)}
     <details className="activity-measurement-details"><summary>{text.metricDetails}</summary><p>{text.memory}</p><p>{text.timing}</p>
-      <div className="activity-metrics">{entries.map(([name, metric]) => <dl className="activity-metric" key={name}>
-        <dt>{metricLabel(name)}</dt><dd>{metricValue(metric)}</dd><dd>{text.scope}: {metric.scope}</dd><dd>{text.observed}: {metric.measured_at === null ? text.unknownTime : new Date(metric.measured_at).toLocaleString(locale)}</dd>{metric.reason === null ? null : <dd>{metric.reason}</dd>}
-      </dl>)}</div>
+      <div className="activity-metrics">{entries.map(([name, metric]) => <StatCard className="activity-metric" key={name} label={metricLabel(name)} value={metricValue(metric)} hint={<>
+        <p>{text.scope}: {metric.scope}</p><p>{text.observed}: {metric.measured_at === null ? text.unknownTime : new Date(metric.measured_at).toLocaleString(locale)}</p>{metric.reason === null ? null : <p>{metric.reason}</p>}
+      </>} />)}</div>
     </details>
   </section>;
 }

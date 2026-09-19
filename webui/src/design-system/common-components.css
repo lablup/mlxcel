@@ -59,6 +59,13 @@
 .ds-page-header .page-header { margin: 0; }
 .ds-page-header .page-header__title { margin: 0; color: var(--color-text); font-size: clamp(1.45rem, 2.6vw, 1.75rem); font-weight: 700; line-height: 1.12; letter-spacing: -0.025em; overflow-wrap: anywhere; }
 .ds-page-header .page-header__description { margin: 1em 0 0; color: var(--color-muted); font-size: 1rem; line-height: 1.55; overflow-wrap: anywhere; }
+/* StatCard: labels and values wrap instead of truncating, keep their authored casing, and the non-interactive tile does not lift on hover. */
+.ds-stat-card .stat-card__label, .ds-stat-card .stat-card__value { min-width: 0; overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; }
+.ds-stat-card .stat-card__label { color: var(--color-text); font-size: 0.9rem; letter-spacing: normal; text-transform: none; }
+.ds-stat-card .stat-card__value { color: var(--color-text); font-size: 1.25rem; }
+.ds-stat-card .stat-card__hint { color: var(--color-muted); font-size: 0.85rem; }
+.ds-stat-card .stat-card__hint p { margin: var(--space-1) 0 0; }
+.base-card.ds-stat-card:hover { box-shadow: none; transform: none; }
 /* ErrorBanner: the shared ErrorState as the compact product banner, not its centered 200px block. */
 .ds-banner .error-state { display: grid; gap: var(--space-2); justify-content: stretch; justify-items: start; align-content: start; align-items: start; min-height: 0; padding: 0; text-align: start; }
 .ds-banner .error-state__title { margin: 0; color: inherit; font-size: inherit; font-weight: 700; line-height: inherit; }
