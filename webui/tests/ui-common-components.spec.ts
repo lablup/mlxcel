@@ -249,3 +249,19 @@ test.describe('disabled button hover', () => {
     expect(results.violations).toEqual([]);
   });
 });
+
+test.describe('enabled button hover', () => {
+  test('hovered enabled primary and danger buttons keep a readable fill', async ({ page }) => {
+    // Excluding :disabled from the product hover tint must not let that tint outrank
+    // the package's enabled primary/danger hover fills and leave white text on an 8% tint.
+    await bootGallery(page, variants[0]);
+    for (const name of [text('gallery.controls.primary'), text('gallery.controls.danger')]) {
+      const button = page.getByRole('button', { name, exact: true });
+      await expect(button).toBeEnabled();
+      await button.hover();
+      await button.evaluate((element) => Promise.all(element.getAnimations().map((animation) => animation.finished)));
+      const results = await new AxeBuilder({ page }).include('.gallery-grid .control-row').withRules(['color-contrast']).analyze();
+      expect(results.violations.flatMap((violation) => violation.nodes.map((node) => node.html.slice(0, 120))), name).toEqual([]);
+    }
+  });
+});
