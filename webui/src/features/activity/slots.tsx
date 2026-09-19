@@ -32,11 +32,11 @@ function slotCount(value: number | null, slot: RuntimeSlot, locale: Locale): str
 
 function columns(locale: Locale, context: number | null): DataTableColumn<RuntimeSlot>[] {
   return [
-    { id: 'slot', header: t(locale, 'activity.slot'), render: (slot) => formatCount(slot.id, locale), noResize: true, minWidth: 48 },
-    { id: 'state', header: t(locale, 'activity.slot_state'), render: (slot) => <StatusBadge state={slot.processing ? 'ready' : 'unloaded'}>{t(locale, slot.processing ? 'activity.processing' : 'activity.idle')}</StatusBadge>, noResize: true },
-    { id: 'occupancy', header: t(locale, 'activity.occupancy'), render: (slot) => <Occupancy slot={slot} context={context} locale={locale} />, noResize: true, className: 'activity-slot-occupancy' },
-    { id: 'decoded', header: t(locale, 'activity.decoded'), render: (slot) => slotCount(slot.decoded_tokens, slot, locale), noResize: true, align: 'right' },
-    { id: 'cached', header: t(locale, 'activity.cached'), render: (slot) => slotCount(slot.cached_prompt_tokens, slot, locale), noResize: true, align: 'right' },
+    { id: 'slot', header: t(locale, 'activity.slot'), render: (slot) => formatCount(slot.id, locale), noResize: true, className: 'activity-slot-col-slot' },
+    { id: 'state', header: t(locale, 'activity.slot_state'), render: (slot) => <StatusBadge state={slot.processing ? 'ready' : 'unloaded'}>{t(locale, slot.processing ? 'activity.processing' : 'activity.idle')}</StatusBadge>, noResize: true, className: 'activity-slot-col-state' },
+    { id: 'occupancy', header: t(locale, 'activity.occupancy'), render: (slot) => <Occupancy slot={slot} context={context} locale={locale} />, noResize: true, className: 'activity-slot-occupancy activity-slot-col-occupancy' },
+    { id: 'decoded', header: t(locale, 'activity.decoded'), render: (slot) => slotCount(slot.decoded_tokens, slot, locale), noResize: true, align: 'right', className: 'activity-slot-col-decoded' },
+    { id: 'cached', header: t(locale, 'activity.cached'), render: (slot) => slotCount(slot.cached_prompt_tokens, slot, locale), noResize: true, align: 'right', className: 'activity-slot-col-cached' },
   ];
 }
 

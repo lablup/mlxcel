@@ -3236,20 +3236,20 @@
     },
     {
       "key": "activity.occupancy",
-      "en": "Context occupancy",
-      "ko": "컨텍스트 점유",
+      "en": "Context",
+      "ko": "컨텍스트",
       "test_id": "activity-occupancy"
     },
     {
       "key": "activity.decoded",
-      "en": "Decoded tokens",
-      "ko": "디코드 토큰",
+      "en": "Decoded",
+      "ko": "디코드",
       "test_id": "activity-decoded"
     },
     {
       "key": "activity.cached",
-      "en": "Cached prompt tokens",
-      "ko": "캐시된 프롬프트 토큰",
+      "en": "Cached",
+      "ko": "캐시",
       "test_id": "activity-cached"
     },
     {

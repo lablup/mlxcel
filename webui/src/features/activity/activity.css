@@ -40,12 +40,31 @@
 
 /* Slot table: one line of capacity facts, then the table. Past eight rows it scrolls here, not the page. */
 .activity-slot-meta { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-4); margin: 0; color: var(--color-muted); }
-.activity-slot-scroll { min-width: 0; max-width: 100%; overflow: auto; border-radius: var(--radius-lg); }
+.activity-slot-scroll { container-type: inline-size; min-width: 0; max-width: 100%; overflow: auto; border-radius: var(--radius-lg); }
 .activity-slot-scroll[data-bounded] { max-height: min(30rem, 70vh); }
 .activity-slot-scroll:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 .activity-slot-scroll .data-table { overflow: visible; }
-.activity-slot-scroll .data-table__cell { padding: var(--space-2); }
+/* The table fits its column by construction: a fixed layout at 100% width takes its column
+   widths from the shares below, never from the text, so a wider font wraps inside cells
+   instead of widening the table. Wide columns favour the occupancy bar; narrow ones give
+   the state badge room and tighten the inline padding. */
+.activity-slot-scroll .data-table__table { table-layout: fixed; width: 100%; }
+.activity-slot-scroll .data-table__cell { padding: var(--space-2); overflow-wrap: anywhere; }
 .activity-slot-scroll .data-table__cell--head { white-space: normal; text-transform: none; letter-spacing: normal; }
+.activity-slot-scroll .activity-slot-col-slot { width: 8%; }
+.activity-slot-scroll .activity-slot-col-state { width: 16%; }
+.activity-slot-scroll .activity-slot-col-occupancy { width: 40%; }
+.activity-slot-scroll .activity-slot-col-decoded, .activity-slot-scroll .activity-slot-col-cached { width: 18%; }
+@container (max-width: 48rem) {
+  .activity-slot-scroll .data-table__cell { padding: var(--space-2) var(--space-1); }
+  .activity-slot-scroll .data-table__cell--head { font-size: 0.8rem; }
+  .activity-slot-scroll .ds-status { gap: 3px; padding: 2px 6px; }
+  .activity-slot-scroll .activity-slot-col-slot { width: 11%; }
+  .activity-slot-scroll .activity-slot-col-state { width: 32%; }
+  .activity-slot-scroll .activity-slot-col-occupancy { width: 18%; }
+  .activity-slot-scroll .activity-slot-col-decoded { width: 21%; }
+  .activity-slot-scroll .activity-slot-col-cached { width: 18%; }
+}
 .activity-slot-occupancy .ds-progress { display: grid; gap: var(--space-1); }
 
 /* Operations: one line per operation, wrapping only when the column is narrow. The inline
