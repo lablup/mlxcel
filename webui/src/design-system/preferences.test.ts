@@ -30,6 +30,31 @@ describe('appearance preferences', () => {
     expect(loadAppearance()).toMatchObject({ themeFamily: 'mlxcel', colorScheme: 'system' });
   });
 
+  // glass-intensity.css has one discrete [data-glass-intensity="N"] rule per integer 0-100; a value outside that
+  // range or shape matches none of them, so an unclamped write would silently drop the glass blur and saturation.
+  it('clamps stored glass intensity into 0-100, rounds fractions, and falls back to the default for non-numeric input', () => {
+    localStorage.setItem(APPEARANCE_STORAGE_KEY, JSON.stringify({ glassIntensity: -20 }));
+    expect(loadAppearance().glassIntensity).toBe(0);
+    localStorage.setItem(APPEARANCE_STORAGE_KEY, JSON.stringify({ glassIntensity: 250 }));
+    expect(loadAppearance().glassIntensity).toBe(100);
+    localStorage.setItem(APPEARANCE_STORAGE_KEY, JSON.stringify({ glassIntensity: 12.6 }));
+    expect(loadAppearance().glassIntensity).toBe(13);
+    localStorage.setItem(APPEARANCE_STORAGE_KEY, '{"glassIntensity": 1e999}');
+    expect(loadAppearance().glassIntensity).toBe(35);
+    localStorage.setItem(APPEARANCE_STORAGE_KEY, JSON.stringify({ glassIntensity: '70' }));
+    expect(loadAppearance().glassIntensity).toBe(35);
+  });
+
+  it('clamps a glass intensity passed straight to applyAppearance, not only a value read from storage', () => {
+    const root = document.documentElement;
+    applyAppearance(root, { ...DEFAULT_APPEARANCE, glassIntensity: -25 });
+    expect(root.dataset.glassIntensity).toBe('0');
+    applyAppearance(root, { ...DEFAULT_APPEARANCE, glassIntensity: 340 });
+    expect(root.dataset.glassIntensity).toBe('100');
+    applyAppearance(root, { ...DEFAULT_APPEARANCE, glassIntensity: 12.4 });
+    expect(root.dataset.glassIntensity).toBe('12');
+  });
+
   it('write the applied id to data-theme and keep the raw preference apart', () => {
     const root = document.documentElement;
     applyAppearance(root, { ...DEFAULT_APPEARANCE, themeFamily: 'glass', colorScheme: 'system' }, 'dark');
