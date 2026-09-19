@@ -38,6 +38,17 @@
 .ds-common-select .select__label { color: var(--color-text); font-size: 0.9rem; font-weight: 650; }
 .select__dropdown--portal { max-width: calc(100vw - 16px); }
 .tooltip__wrapper.ds-tooltip-trigger { min-width: 0; max-width: 100%; }
+/* Drawer: the approved left off-canvas sheet, inset 12px like the previous native sheet.
+   The package anchors right and sets width:100vw !important below 768px; the two
+   !important declarations here exist only to outrank that rule. */
+.ds-drawer-host { display: contents; }
+.drawer.ds-drawer { top: 12px; bottom: 12px; left: 12px; right: auto; width: min(320px, calc(100vw - 32px)) !important; max-width: calc(100vw - 32px) !important; transform: translateX(calc(-100% - 12px)); color: var(--color-text); background: var(--color-bg-elevated); border: 1px solid var(--color-separator); border-radius: var(--radius-xl); box-shadow: 0 30px 120px rgba(0, 0, 0, 0.32); overflow: hidden; }
+.drawer.ds-drawer.drawer--open { transform: translateX(0); }
+.ds-drawer .drawer__header { padding: var(--space-4) var(--space-5); border-bottom: 1px solid var(--color-separator); }
+.ds-drawer .drawer__title { color: var(--color-text); font-size: 1.1rem; }
+.ds-drawer .drawer__close-btn { color: var(--color-text); }
+.ds-drawer .drawer__close-btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.ds-drawer .drawer__content { padding: var(--space-5); }
 /* Card: BaseCard keeps the previous block flow; its :focus-within rule removes the outline, so restore a visible keyboard ring. */
 .base-card.ds-card { display: block; }
 .base-card.ds-card:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }

@@ -7,7 +7,7 @@ import { NativeModalContext } from './modal-context';
 export { Button, IconButton, StatusBadge, ProgressBar, EmptyState, Tabs, DataTable } from './common-adapters';
 export type { ButtonProps, ButtonTone, LifecycleState, DataTableColumn, DataTablePersistedState, SortDirection } from './common-adapters';
 export { Select } from './common-select';
-export { Tooltip } from './common-overlays';
+export { Drawer, Tooltip } from './common-overlays';
 export { ErrorBanner } from './common-feedback';
 export { Card } from './common-layout';
 
@@ -117,10 +117,6 @@ function restoreModalFocus(dialog: HTMLDialogElement, target: HTMLElement | null
 
 export function Dialog(props: Omit<ModalProps, 'position' | 'className'>): React.JSX.Element {
   return <ModalDialog {...props} />;
-}
-
-export function Sheet(props: Omit<ModalProps, 'position'>): React.JSX.Element {
-  return <ModalDialog {...props} position="left" className={`ds-sheet ${props.className ?? ''}`.trim()} />;
 }
 
 export function Inspector(props: { title: string; children: React.ReactNode }): React.JSX.Element {
