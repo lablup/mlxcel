@@ -1,8 +1,8 @@
 // Copyright 2025-2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { expectAxeClean, expectSafeLayout } from './browser-assertions';
-import { bootGallery, selectGalleryTab, variants } from './browser-fixtures';
-import { shownTooltips, text } from './ui-common-helpers';
+import { bootGallery, bootProduct, installMockApi, loginWithMockApi, productVariants, selectGalleryTab, variants } from './browser-fixtures';
+import { horizontalOverflow, runtimeForFirstCatalogEntry, shownTooltips, text } from './ui-common-helpers';
 
 // Each case asserts the product behavior first and the shared ui-common DOM
 // last, so a run against the pre-adoption code fails on the last assertion.
@@ -85,4 +85,51 @@ test.describe('shared BaseCard', () => {
     await expectAxeClean(page);
     await expect(page.locator('.surface-card.base-card')).toHaveCount(1);
   });
+});
+
+async function openActivityRuntime(page: Page, width: number): Promise<void> {
+  await installMockApi(page, 'happy');
+  const at = '2026-09-15T00:00:00Z';
+  const { modelName, body } = runtimeForFirstCatalogEntry({
+    active_requests: { value: 2, unit: 'requests', scope: 'model', measured_at: at, reason: 'Authoritative route completions' },
+    queued_requests: { value: 0, unit: 'requests', scope: 'model', measured_at: at, reason: null },
+    completed_requests_total: { value: 1234567, unit: 'requests', scope: 'model', measured_at: at, reason: null },
+    completion_tokens_total: { value: 98765432, unit: 'tokens', scope: 'model', measured_at: at, reason: null },
+  });
+  await page.route('**/ui-api/v1/runtime*', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) }));
+  await bootProduct(page, { ...productVariants[0], width, appearance: { ...productVariants[0].appearance, locale: 'en' } });
+  await loginWithMockApi(page);
+  await page.evaluate(() => { window.location.hash = '#activity'; });
+  await page.getByTestId('activity-page').getByRole('combobox').click();
+  await page.getByRole('option', { name: modelName, exact: true }).click();
+  await expect(page.getByTestId('runtime-summary')).toContainText('Total completion tokens');
+}
+
+test.describe('shared StatCard', () => {
+  for (const width of [390, 1440]) {
+    test(`Activity runtime tiles show full labels and values without hover lift at ${width}`, async ({ page }) => {
+      await openActivityRuntime(page, width);
+      const tiles = page.getByTestId('runtime-summary').locator('.activity-metric');
+      await expect(tiles).toHaveCount(4);
+      const report = await tiles.evaluateAll((elements) => elements.map((tile) => {
+        const leaves = Array.from(tile.querySelectorAll<HTMLElement>('*')).filter((node) => node.childElementCount === 0 && (node.textContent ?? '').trim() !== '');
+        return {
+          text: tile.textContent ?? '',
+          clipped: leaves.filter((node) => node.scrollWidth > node.clientWidth + 1).map((node) => node.textContent),
+          transformed: leaves.filter((node) => window.getComputedStyle(node).textTransform !== 'none').map((node) => node.textContent),
+        };
+      }));
+      for (const [index, [label, value]] of [['Active requests', '2 requests'], ['Queued requests', '0 requests'], ['Total completed requests', '1,234,567 requests'], ['Total completion tokens', '98,765,432 tokens']].entries()) {
+        expect(report[index].text).toContain(label);
+        expect(report[index].text).toContain(value);
+        expect(report[index].clipped).toEqual([]);
+        expect(report[index].transformed).toEqual([]);
+      }
+      await tiles.first().hover();
+      await expect(tiles.first()).toHaveCSS('transform', 'none');
+      expect(await horizontalOverflow(page)).toBeLessThanOrEqual(1);
+      await expectAxeClean(page);
+      await expect(page.getByTestId('runtime-summary').locator('.activity-metric.stat-card')).toHaveCount(4);
+    });
+  }
 });
