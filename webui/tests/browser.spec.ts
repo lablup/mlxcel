@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test';
 import { expectAxeClean, expectEmptyStateHeading, expectCompactToolbarHitTargets, expectDataTableColumnsVisible, expectLocatorWithinViewportX, expectSafeLayout, expectTextScaleLabelsReachable, expectTextScalePanelsReflow, pressQuestionShortcut, reportFontDiagnostics } from './browser-assertions';
-import { bootGallery, bootProduct, browserStorageDump, gotoGalleryWithoutReload, installAbortRecorder, installMockApi, loadProductionCss, loginWithMockApi, productVariants, readAbortLog, selectGalleryTab, settleAnimationFrame, submitSessionKey, variants } from './browser-fixtures';
+import { bootGallery, bootProduct, browserStorageDump, gotoGalleryWithoutReload, installAbortRecorder, installMockApi, loadProductionCss, loginWithMockApi, productVariants, readAbortLog, readyCatalog, selectGalleryTab, settleAnimationFrame, submitSessionKey, variants } from './browser-fixtures';
+import { fixtureString } from './strings-fixture';
 
 test.describe('design system gallery and shell', () => {
   for (const variant of variants) {
@@ -194,6 +195,37 @@ test.describe('design system gallery and shell', () => {
     await expect(page.getByTestId('help-dialog')).toBeVisible();
     await page.keyboard.press('Control+K');
     await expect(page.getByTestId('command-dialog')).toBeHidden();
+  });
+
+  test('lists the six global shortcuts in help and starts a new conversation with Control+N from Settings', async ({ page }) => {
+    const mock = await installMockApi(page, 'happy', { catalog: readyCatalog });
+    await bootProduct(page, productVariants[0]);
+    await loginWithMockApi(page);
+    await page.getByRole('link', { name: 'Settings' }).first().click();
+    await expect(page.getByTestId('settings-title')).toBeVisible();
+    await pressQuestionShortcut(page);
+    const help = page.getByTestId('help-dialog');
+    await expect(help).toBeVisible();
+    const shortcuts = help.getByTestId('help-shortcuts').locator(':scope > li');
+    await expect(shortcuts).toHaveCount(6);
+    const ids = ['command', 'new-chat', 'send', 'escape', 'navigate', 'help'];
+    const keys = ['help.shortcut.command', 'help.shortcut.new_chat', 'help.shortcut.send', 'help.shortcut.escape', 'help.shortcut.navigate', 'help.shortcut.help'];
+    for (const [index, id] of ids.entries()) {
+      await expect(shortcuts.nth(index)).toHaveAttribute('data-testid', `help-shortcut-${id}`);
+      await expect(shortcuts.nth(index)).toContainText(fixtureString('en', keys[index]));
+    }
+    await expectAxeClean(page);
+    await page.keyboard.press('Escape');
+    await expect(help).toBeHidden();
+    await expect(page.getByTestId('settings-title')).toBeVisible();
+    // Chromium reserves Ctrl+N for a new window in a normal browser window; CDP input
+    // reaches the page in headless Chromium, which is what this checks.
+    await page.keyboard.press('Control+N');
+    await expect(page).toHaveURL(/#chat$/);
+    await expect(page.getByTestId('chat-title')).toBeVisible();
+    await expect(page.getByRole('combobox', { name: 'Conversation', exact: true })).toContainText('New conversation');
+    expect(page.context().pages()).toHaveLength(1);
+    expect(mock.calls.map((call) => call.url).join('\n')).not.toContain('/v1/chat/completions');
   });
 
   test('covers system contrast, reduced motion, visibility pause, and glass fallback', async ({ page }) => {

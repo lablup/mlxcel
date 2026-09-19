@@ -1,6 +1,6 @@
 import React from 'react';
 import { WebUiHttpError } from './api/client';
-import type { CatalogEntry, ConnectionPhase, WebUiSnapshot } from './api/types';
+import type { CatalogEntry, ConnectionPhase, ModelLifecycleState, WebUiSnapshot } from './api/types';
 import { ValidationError } from './api/validation';
 import { Button, ErrorBanner, LoginView, PageHeader, SchemaMismatchView } from './design-system/primitives';
 import type { Locale, StringKey } from './i18n/catalog';
@@ -19,10 +19,25 @@ export function classifyAuthFailure(error: unknown): AuthFailure {
   return 'generic';
 }
 
-export function selectedModelLabel(locale: Locale, snapshot: WebUiSnapshot): string {
-  const selected = selectedCatalogEntry(snapshot);
-  if (selected === null) return t(locale, 'model.selected.none');
-  return `${selected.identity.display_name} · ${lifecycleLabel(locale, selected.lifecycle.state)}`;
+// Lifecycle states that hold a worker, and so memory, on the server. `failed` and
+// `unloaded` never count as loaded.
+const LOADED_STATES: ReadonlySet<ModelLifecycleState> = new Set<ModelLifecycleState>(['ready', 'loading', 'draining', 'unloading']);
+
+export function isLoadedState(state: ModelLifecycleState): boolean {
+  return LOADED_STATES.has(state);
+}
+
+/** Ready before the other loaded states, then loaded before the rest, then by display name and id. */
+export function compareByLoadedThenName(left: CatalogEntry, right: CatalogEntry): number {
+  const rank = (entry: CatalogEntry): number => (entry.lifecycle.state === 'ready' ? 0 : isLoadedState(entry.lifecycle.state) ? 1 : 2);
+  return rank(left) - rank(right)
+    || left.identity.display_name.localeCompare(right.identity.display_name)
+    || left.identity.id.localeCompare(right.identity.id);
+}
+
+/** The models the server holds right now (not the browser's selection), in toolbar order. */
+export function loadedModels(snapshot: WebUiSnapshot): ReadonlyArray<CatalogEntry> {
+  return snapshot.catalog.filter((entry) => isLoadedState(entry.lifecycle.state)).sort(compareByLoadedThenName);
 }
 
 export function connectionFooterLabel(locale: Locale, snapshot: WebUiSnapshot): string {
@@ -30,9 +45,22 @@ export function connectionFooterLabel(locale: Locale, snapshot: WebUiSnapshot): 
   return t(locale, 'connection.footer.connected', {
     mode: snapshot.bootstrap.server.mode,
     version: snapshot.bootstrap.server.build.version,
-    sequence: snapshotSequence(locale, snapshot),
     status: connectionPhaseLabel(locale, snapshot.connection),
   });
+}
+
+export interface ConnectionFooterDetails {
+  readonly instance: string;
+  readonly sequence: string;
+}
+
+/** Internal identifiers for the footer's details disclosure; null before bootstrap. */
+export function connectionFooterDetails(locale: Locale, snapshot: WebUiSnapshot): ConnectionFooterDetails | null {
+  if (snapshot.bootstrap === null) return null;
+  const unknown = t(locale, 'format.unknown');
+  const instance = snapshot.serverInstanceId ?? snapshot.bootstrap.server.server_instance_id;
+  const sequence = snapshot.lastSequence ?? snapshot.catalogSequence ?? snapshot.resourceFences.operationsSnapshot;
+  return { instance: instance || unknown, sequence: sequence === null ? unknown : String(sequence) };
 }
 
 export function connectionPhaseLabel(locale: Locale, phase: ConnectionPhase): string {
@@ -143,11 +171,6 @@ function loginErrorMessage(locale: Locale, failure: AuthFailure): string {
   if (failure === 'forbidden') return t(locale, 'login.error.forbidden');
   if (failure === 'schema') return t(locale, 'login.error.schema');
   return t(locale, 'login.error.generic');
-}
-
-function selectedCatalogEntry(snapshot: WebUiSnapshot): CatalogEntry | null {
-  if (snapshot.selectedModelId === null) return null;
-  return snapshot.catalog.find((entry) => entry.identity.id === snapshot.selectedModelId) ?? null;
 }
 
 export function lifecycleLabel(locale: Locale, state: CatalogEntry['lifecycle']['state']): string {

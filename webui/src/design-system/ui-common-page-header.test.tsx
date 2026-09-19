@@ -8,6 +8,7 @@ import { t } from '../i18n/catalog';
 import { ProductConnectionSurface } from '../provider-surfaces';
 import { WebUiProvider } from '../state';
 import { initialSnapshot } from '../state/reducer';
+import { PageHeader } from './primitives';
 
 let host: HTMLDivElement;
 let root: Root;
@@ -82,9 +83,27 @@ describe('PageHeader adoption', () => {
 
   it.each([['offline', 'connection-authenticated-body'], ['schema-mismatch', undefined]] as const)('keeps the %s connection surface title', (connection, descriptionId) => {
     const snapshot: WebUiSnapshot = { ...initialSnapshot(), auth: { status: 'authenticated', tokenPresent: true }, connection };
-    // eyebrow goes through a spread so this compiles both before and after the prop is dropped.
-    act(() => root.render(<ProductConnectionSurface locale="en" title={t('en', 'activity.title')} titleTestId="activity-title" snapshot={snapshot} authFailure={null} onLogin={() => undefined} onLogout={() => undefined} onRetry={() => undefined} onRecoverSchema={() => undefined} {...{ eyebrow: t('en', 'routes.activity.eyebrow') }} />));
+    act(() => root.render(<ProductConnectionSurface locale="en" title={t('en', 'activity.title')} titleTestId="activity-title" snapshot={snapshot} authFailure={null} onLogin={() => undefined} onLogout={() => undefined} onRetry={() => undefined} onRecoverSchema={() => undefined} />));
     expectPageTitle('activity-title', t('en', 'activity.title'), descriptionId, descriptionId ? t('en', 'connection.authenticated.body') : undefined);
     expectSharedHeader('activity-title', descriptionId);
+  });
+
+  it('always makes the title the focus fallback and re-applies the error test id each time the error mounts', () => {
+    const retry = vi.fn();
+    const header = (error: string | null): React.JSX.Element => <PageHeader title="Route" titleTestId="route-title" actions={<button type="button">Act</button>} error={error} errorDetail="detail" errorTestId="route-error" onRetry={retry} retryLabel="Refresh route" />;
+    act(() => root.render(header(null)));
+    expect(byTestId('route-title').hasAttribute('data-dialog-focus-fallback')).toBe(true);
+    expect(byTestId('route-title').tabIndex).toBe(-1);
+    expect(document.querySelector('.page-header__actions')?.textContent).toBe('Act');
+    expect(document.querySelector('.page-header__error')).toBeNull();
+    for (const message of ['First failure', 'Second failure']) {
+      act(() => root.render(header(message)));
+      expect(byTestId('route-error').matches('.page-header__error[role="alert"]')).toBe(true);
+      expect(byTestId('route-error').textContent).toContain(message);
+      act(() => byTestId('route-error').querySelector<HTMLButtonElement>('button')?.click());
+      act(() => root.render(header(null)));
+      expect(document.querySelector('[data-testid="route-error"]')).toBeNull();
+    }
+    expect(retry).toHaveBeenCalledTimes(2);
   });
 });

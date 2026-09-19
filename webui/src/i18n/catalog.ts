@@ -67,12 +67,19 @@ export type StringKey = typeof modelStrings[number]['key']
   | 'select.no_options'
   | 'command.search'
   | 'command.no_results'
+  | 'command.section.commands'
+  | 'command.section.models'
   | 'help.title'
   | 'help.body'
+  | 'help.shortcut.command'
+  | 'help.shortcut.new_chat'
+  | 'help.shortcut.send'
+  | 'help.shortcut.escape'
+  | 'help.shortcut.navigate'
+  | 'help.shortcut.help'
   | 'gallery.title'
   | 'gallery.subtitle'
   | 'gallery.long_cjk'
-  | 'model.selected.none'
   | 'common.unavailable'
   | 'common.cancel'
   | 'common.delete'
@@ -80,10 +87,6 @@ export type StringKey = typeof modelStrings[number]['key']
   | 'common.enter_key'
   | 'common.add_model'
   | 'common.send'
-  | 'routes.models.eyebrow'
-  | 'routes.chat.eyebrow'
-  | 'routes.activity.eyebrow'
-  | 'routes.settings.eyebrow'
   | 'adapters.pending.title'
   | 'adapters.pending.body'
   | 'chat.pending.body'
@@ -125,10 +128,14 @@ export type StringKey = typeof modelStrings[number]['key']
   | 'settings.material.opaque'
   | 'settings.locale.en'
   | 'settings.locale.ko'
-  | 'gallery.issue'
   | 'gallery.hover_focus'
   | 'gallery.download'
   | 'toolbar.menu'
+  | 'toolbar.loaded.label'
+  | 'toolbar.loaded.none'
+  | 'toolbar.loaded.count'
+  | 'toolbar.loaded.more'
+  | 'toolbar.loaded.more_label'
   | 'models.status.loading'
   | 'models.status.draining'
   | 'models.status.unloading'
@@ -148,6 +155,9 @@ export type StringKey = typeof modelStrings[number]['key']
   | 'connection.prompt.body'
   | 'connection.prompt.detail'
   | 'connection.footer.connected'
+  | 'connection.footer.details'
+  | 'connection.footer.instance'
+  | 'connection.footer.sequence'
   | 'connection.snapshot.pending'
   | 'connection.authenticated.title'
   | 'connection.authenticated.body'
@@ -202,12 +212,20 @@ export const entries: Entry[] = [
   { key: 'toolbar.help', en: 'Keyboard help', ko: '키보드 도움말', test_id: 'toolbar-help' },
   { key: 'toolbar.logout', en: 'Clear WebUI session', ko: 'WebUI 세션 지우기', test_id: 'toolbar-logout' },
   { key: 'toolbar.menu', en: 'Open navigation', ko: '내비게이션 열기', test_id: 'toolbar-menu' },
+  { key: 'toolbar.loaded.label', en: 'Loaded models', ko: '로드된 모델', test_id: 'toolbar-loaded' },
+  { key: 'toolbar.loaded.none', en: 'No model loaded', ko: '로드된 모델 없음', test_id: 'toolbar-loaded-none' },
+  { key: 'toolbar.loaded.count', en: '{count} loaded', ko: '{count}개 로드됨', test_id: 'toolbar-loaded-count' },
+  { key: 'toolbar.loaded.more', en: '+{count}', ko: '+{count}', test_id: 'toolbar-loaded-more' },
+  { key: 'toolbar.loaded.more_label', en: '+{count}, show all loaded models', ko: '+{count}, 로드된 모델 모두 보기', test_id: 'toolbar-loaded-more-label' },
   { key: 'connection.ready', en: 'Shell loaded; local API not connected', ko: '셸 로드됨; 로컬 API 미연결', test_id: 'connection-ready' },
   { key: 'connection.offline', en: 'Server connection is offline', ko: '서버 연결이 오프라인입니다', test_id: 'connection-offline' },
   { key: 'connection.prompt.title', en: 'Connect to the local WebUI API', ko: '로컬 WebUI API에 연결하세요', test_id: 'connection-prompt-title' },
   { key: 'connection.prompt.body', en: 'The shell is loaded, but catalog, chat and activity data wait for the authenticated local server connection.', ko: '셸은 로드되었지만 카탈로그, 대화, 활동 데이터는 인증된 로컬 서버 연결을 기다립니다.', test_id: 'connection-prompt-body' },
   { key: 'connection.prompt.detail', en: 'Start mlxcel-server with --webui, enter the terminal session key when prompted, then refresh this view.', ko: 'mlxcel-server를 --webui로 시작하고, 요청되면 터미널 세션 키를 입력한 뒤 이 화면을 새로고침하세요.', test_id: 'connection-prompt-detail' },
-  { key: 'connection.footer.connected', en: '{mode} · {status} · v{version} · seq {sequence}', ko: '{mode} · {status} · v{version} · seq {sequence}', test_id: 'connection-footer-connected' },
+  { key: 'connection.footer.connected', en: '{mode} · {status} · v{version}', ko: '{mode} · {status} · v{version}', test_id: 'connection-footer-connected' },
+  { key: 'connection.footer.details', en: 'Connection details', ko: '연결 세부 정보', test_id: 'connection-footer-details' },
+  { key: 'connection.footer.instance', en: 'Server instance: {id}', ko: '서버 인스턴스: {id}', test_id: 'connection-footer-instance' },
+  { key: 'connection.footer.sequence', en: 'Event sequence: {sequence}', ko: '이벤트 순번: {sequence}', test_id: 'connection-footer-sequence' },
   { key: 'connection.snapshot.pending', en: 'pending', ko: '대기 중', test_id: 'connection-snapshot-pending' },
   { key: 'connection.authenticated.title', en: 'Authenticated local API session', ko: '인증된 로컬 API 세션', test_id: 'connection-authenticated-title' },
   { key: 'connection.authenticated.body', en: 'This route is connected to the shared provider. Browsing does not load models or start inference; load, unload and chat actions remain explicit.', ko: '이 경로는 공유 provider에 연결되어 있습니다. 탐색만으로 모델을 로드하거나 추론을 시작하지 않으며, 로드·언로드·대화 동작은 명시적으로 실행됩니다.', test_id: 'connection-authenticated-body' },
@@ -278,15 +296,22 @@ export const entries: Entry[] = [
   { key: 'command.title', en: 'Command palette', ko: '명령 팔레트', test_id: 'command-title' },
   { key: 'select.search', en: 'Search options', ko: '옵션 검색', test_id: 'select-search' },
   { key: 'select.no_options', en: 'No matching options.', ko: '일치하는 옵션이 없습니다.', test_id: 'select-no-options' },
-  { key: 'command.search', en: 'Search commands', ko: '명령 검색', test_id: 'command-search' },
-  { key: 'command.no_results', en: 'No commands match this search.', ko: '검색과 일치하는 명령이 없습니다.', test_id: 'command-no-results' },
+  { key: 'command.search', en: 'Search commands and models', ko: '명령과 모델 검색', test_id: 'command-search' },
+  { key: 'command.no_results', en: 'No commands or models match this search.', ko: '검색과 일치하는 명령이나 모델이 없습니다.', test_id: 'command-no-results' },
+  { key: 'command.section.commands', en: 'Commands', ko: '명령', test_id: 'command-section-commands' },
+  { key: 'command.section.models', en: 'Models', ko: '모델', test_id: 'command-section-models' },
   { key: 'help.title', en: 'Keyboard shortcuts', ko: '키보드 단축키', test_id: 'help-title' },
-  { key: 'help.body', en: 'Command opens search. Escape closes overlays. Brackets move navigation only while the sidebar has focus.', ko: 'Command는 검색을 엽니다. Escape는 오버레이를 닫습니다. 대괄호는 사이드바에 포커스가 있을 때만 내비게이션을 이동합니다.', test_id: 'help-body' },
+  { key: 'help.body', en: 'Shortcuts do not fire while you type in a field, inside an open dialog or during IME composition. Cmd/Ctrl+N and Cmd/Ctrl+Enter also work in the chat message field. Brackets move navigation only while the sidebar has focus.', ko: '입력란에 입력하는 중, 열린 다이얼로그 안, IME 조합 중에는 단축키가 동작하지 않습니다. Cmd/Ctrl+N과 Cmd/Ctrl+Enter는 대화 메시지 입력란에서도 동작합니다. 대괄호는 사이드바에 포커스가 있을 때만 내비게이션을 이동합니다.', test_id: 'help-body' },
+  { key: 'help.shortcut.command', en: 'Open the command palette', ko: '명령 팔레트 열기', test_id: 'help-shortcut-command' },
+  { key: 'help.shortcut.new_chat', en: 'Start a new conversation', ko: '새 대화 시작', test_id: 'help-shortcut-new-chat' },
+  { key: 'help.shortcut.send', en: 'Send the message from the composer', ko: '입력 중인 메시지 보내기', test_id: 'help-shortcut-send' },
+  { key: 'help.shortcut.escape', en: 'Close the open dialog or navigation', ko: '열린 다이얼로그나 내비게이션 닫기', test_id: 'help-shortcut-escape' },
+  { key: 'help.shortcut.navigate', en: 'Move primary navigation while the sidebar has focus', ko: '사이드바에 포커스가 있을 때 주 내비게이션 이동', test_id: 'help-shortcut-navigate' },
+  { key: 'help.shortcut.help', en: 'Show keyboard shortcuts', ko: '키보드 단축키 보기', test_id: 'help-shortcut-help' },
   { key: 'gallery.title', en: 'Design system gallery', ko: '디자인 시스템 갤러리', test_id: 'gallery-title' },
   { key: 'gallery.subtitle', en: 'Shared tokens, controls, states, and viewport fixtures for page implementers.', ko: '페이지 구현자를 위한 공유 토큰, 컨트롤, 상태, 뷰포트 픽스처입니다.', test_id: 'gallery-subtitle' },
   { key: 'gallery.long_cjk', en: 'Long English and 한국어 labels truncate with accessible full labels.', ko: '긴 English 및 한국어 레이블은 접근 가능한 전체 레이블을 유지하며 줄임표 처리됩니다.', test_id: 'gallery-long-cjk' },
 
-  { key: 'model.selected.none', en: 'No model selected', ko: '선택한 모델 없음', test_id: 'model-selected-none' },
   { key: 'common.unavailable', en: 'Unavailable until server adapters connect', ko: '서버 어댑터 연결 전에는 사용할 수 없습니다', test_id: 'common-unavailable' },
   { key: 'common.cancel', en: 'Cancel', ko: '취소', test_id: 'common-cancel' },
   { key: 'common.delete', en: 'Delete', ko: '삭제', test_id: 'common-delete' },
@@ -295,10 +320,6 @@ export const entries: Entry[] = [
   { key: 'common.enter_key', en: 'Enter key', ko: '키 입력', test_id: 'common-enter-key' },
   { key: 'common.add_model', en: 'Add model', ko: '모델 추가', test_id: 'common-add-model' },
   { key: 'common.send', en: 'Send', ko: '보내기', test_id: 'common-send' },
-  { key: 'routes.models.eyebrow', en: 'Local library', ko: '로컬 라이브러리', test_id: 'routes-models-eyebrow' },
-  { key: 'routes.chat.eyebrow', en: 'Conversation', ko: '대화', test_id: 'routes-chat-eyebrow' },
-  { key: 'routes.activity.eyebrow', en: 'Operations', ko: '작업', test_id: 'routes-activity-eyebrow' },
-  { key: 'routes.settings.eyebrow', en: 'Browser only', ko: '브라우저 전용', test_id: 'routes-settings-eyebrow' },
   { key: 'adapters.pending.title', en: 'Local API is not connected yet', ko: '로컬 API가 아직 연결되지 않았습니다', test_id: 'adapters-pending-title' },
   { key: 'adapters.pending.body', en: 'This route shows the production shell only. Catalog, lifecycle, and runtime data will come from the shared typed client in the integration wave.', ko: '이 경로는 프로덕션 셸만 보여줍니다. 카탈로그, 수명주기, 런타임 데이터는 통합 웨이브의 공유 typed client에서 제공됩니다.', test_id: 'adapters-pending-body' },
   { key: 'chat.pending.body', en: 'Chat controls stay disabled until an authenticated ready model is selected by the shared state provider.', ko: '공유 상태 provider가 인증된 준비 모델을 선택하기 전까지 대화 컨트롤은 비활성화됩니다.', test_id: 'chat-pending-body' },
@@ -345,7 +366,6 @@ export const entries: Entry[] = [
   { key: 'settings.high_contrast.system', en: 'Follow system', ko: '시스템 따르기', test_id: 'settings-high-contrast-system' },
   { key: 'settings.high_contrast.on', en: 'On', ko: '켬', test_id: 'settings-high-contrast-on' },
   { key: 'settings.high_contrast.off', en: 'Off', ko: '끔', test_id: 'settings-high-contrast-off' },
-  { key: 'gallery.issue', en: 'Issue #1843', ko: '이슈 #1843', test_id: 'gallery-issue' },
   { key: 'gallery.hover_focus', en: 'Hover or focus', ko: '호버 또는 포커스', test_id: 'gallery-hover-focus' },
   { key: 'gallery.download', en: 'Download', ko: '다운로드', test_id: 'gallery-download' },
   { key: 'gallery.lifecycle.samples', en: 'Lifecycle sample badges', ko: '수명주기 샘플 배지', test_id: 'gallery-lifecycle-samples' },

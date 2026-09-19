@@ -37,7 +37,7 @@ const expectSharedDrawer = (): void => { expect(panel().matches('aside.drawer[ro
 const isPanelOpen = (): boolean => panel().classList.contains('drawer--open');
 
 function Shell({ connectionLabel }: { connectionLabel: string }): React.JSX.Element {
-  return <AppShell locale="en" route="models" onRouteChange={() => undefined} onCommand={() => undefined} onHelp={() => undefined} selectedModel="none" connectionLabel={connectionLabel} connectionState="streaming"><p>Route content</p></AppShell>;
+  return <AppShell locale="en" route="models" onRouteChange={() => undefined} onCommand={() => undefined} onHelp={() => undefined} onNewChat={() => undefined} onOpenModel={() => undefined} loadedModels={[]} connection={{ label: connectionLabel, state: 'streaming', details: null }}><p>Route content</p></AppShell>;
 }
 
 describe('navigation drawer adoption', () => {

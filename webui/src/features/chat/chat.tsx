@@ -1,13 +1,13 @@
 // Copyright 2026 Lablup Inc. Licensed under Apache-2.0.
 import React, { useEffect, useRef, useState } from 'react';
-import { Button, ConfirmDialog, ErrorBanner, Field, Select } from '../../design-system/primitives';
+import { Button, ConfirmDialog, ErrorBanner, Field, PageHeader, Select } from '../../design-system/primitives';
 import { useWebUi, useWebUiActions } from '../../state';
 import { t, testId, type Locale, type StringKey } from '../../i18n/catalog';
 import { lifecycleLabel } from '../../provider-surfaces';
 import type { ChatConversation, ChatTurn } from './history';
 import { loadLocalImages, validateRequestImages } from './images';
 import { appendFrame, buildMessages, completeTurn, MAX_PROMPT_CHARACTERS } from './stream';
-import { newConversation, replaceConversations, updateConversation, useConversations, sessionGeneration } from './session';
+import { consumeNewConversationRequest, newConversation, replaceConversations, updateConversation, useConversations, useNewConversationRequest, sessionGeneration } from './session';
 import { Transcript } from './transcript';
 import { HistoryControls } from './privacy';
 import { useGenerationDefaults } from '../settings/generation-preferences';
@@ -62,6 +62,12 @@ export function Chat({ locale }: { locale: Locale }): React.JSX.Element {
     const next = newConversation(localized('chat.conversation.default_title'));
     updateConversation(next); setCurrentId(next.id); setDraft(''); setImages([]);
   };
+  // Cmd/Ctrl+N and the palette ask through session.ts; consume first, then act, so a
+  // StrictMode re-run or a later mount finds nothing. create() keeps its own guards, so
+  // a request refused by the busy state or the 50-conversation cap is simply dropped.
+  const newConversationRequest = useNewConversationRequest();
+  const createRef = useRef(create); createRef.current = create;
+  useEffect(() => { if (consumeNewConversationRequest()) createRef.current(); }, [newConversationRequest]);
   const stop = (): void => {
     const request = active.current;
     if (request === null) return;
@@ -150,8 +156,8 @@ export function Chat({ locale }: { locale: Locale }): React.JSX.Element {
   };
   const [samplingBefore, samplingAfter = ''] = t(locale, 'chat.settings.sampling').split('{link}');
   return <div className="screen-stack chat-screen">
-    <section className="screen-heading"><p className="eyebrow">{t(locale, 'chat.eyebrow')}</p><h1 tabIndex={-1} data-dialog-focus-fallback data-testid={testId('chat.title')}>{t(locale, 'chat.title')}</h1><p>{t(locale, 'chat.intro')}</p></section>
-    <div className="chat-toolbar"><Button onClick={create} disabled={busy || historyBusy || imagesBusy || conversations.length >= 50}>{t(locale, 'chat.new_conversation')}</Button><Select locale={locale} label={t(locale, 'chat.conversation.label')} value={currentId ?? ''} disabled={busy || historyBusy || imagesBusy} onChange={(id) => { setCurrentId(id); setDraft(''); setImages([]); }} options={[{ value: '', label: t(locale, 'chat.conversation.choose') }, ...conversations.map((item) => ({ value: item.id, label: item.title }))]} /><Select locale={locale} label={t(locale, 'chat.model.label')} value={snapshot.selectedModelId ?? ''} onChange={(id) => actions.selectModel(id || null)} options={[{ value: '', label: t(locale, 'chat.model.choose') }, ...snapshot.catalog.map((item) => ({ value: item.identity.id, label: `${item.identity.display_name} · ${lifecycleLabel(locale, item.lifecycle.state)}` }))]} /></div>
+    <PageHeader title={t(locale, 'chat.title')} titleTestId={testId('chat.title')} description={t(locale, 'chat.intro')} actions={<Button onClick={create} disabled={busy || historyBusy || imagesBusy || conversations.length >= 50} data-testid={testId('chat.new_conversation')}>{t(locale, 'chat.new_conversation')}</Button>} />
+    <div className="chat-toolbar"><Select locale={locale} label={t(locale, 'chat.conversation.label')} value={currentId ?? ''} disabled={busy || historyBusy || imagesBusy} onChange={(id) => { setCurrentId(id); setDraft(''); setImages([]); }} options={[{ value: '', label: t(locale, 'chat.conversation.choose') }, ...conversations.map((item) => ({ value: item.id, label: item.title }))]} /><Select locale={locale} label={t(locale, 'chat.model.label')} value={snapshot.selectedModelId ?? ''} onChange={(id) => actions.selectModel(id || null)} options={[{ value: '', label: t(locale, 'chat.model.choose') }, ...snapshot.catalog.map((item) => ({ value: item.identity.id, label: `${item.identity.display_name} · ${lifecycleLabel(locale, item.lifecycle.state)}` }))]} /></div>
     {!canChat ? <ErrorBanner tone="info" title={t(locale, 'chat.no_model.title')} body={t(locale, 'chat.no_model.body')} action={<a href="#models">{t(locale, 'chat.no_model.action')}</a>} /> : null}
     {current ? <details><summary>{t(locale, 'chat.settings.summary')}</summary><Field label={t(locale, 'chat.settings.name')} value={current.title} disabled={busy || historyBusy || imagesBusy} onChange={(title) => updateConversation({ ...current, title: title.slice(0, 120) })} /><label className="ds-field">{t(locale, 'chat.settings.system_prompt')}<textarea value={current.systemPrompt} maxLength={MAX_PROMPT_CHARACTERS} disabled={busy || historyBusy || imagesBusy} onChange={(event) => updateConversation({ ...current, systemPrompt: event.target.value })} /></label><p>{samplingBefore}<a href="#settings">{t(locale, 'nav.settings')}</a>{samplingAfter}</p><Button disabled={busy || historyBusy || imagesBusy} onClick={() => { replaceConversations(conversations.filter((item) => item.id !== current.id)); setCurrentId(null); }}>{t(locale, 'chat.settings.delete')}</Button></details> : null}
     <TurnParameters defaults={defaults} draft={parameterDraft} onChange={setParameterDraft} locale={locale} />
@@ -164,7 +170,12 @@ export function Chat({ locale }: { locale: Locale }): React.JSX.Element {
     {pendingEdit !== null ? <ConfirmDialog open title={t(locale, 'chat.transcript.edit.confirm.title')} body={t(locale, 'chat.transcript.edit.confirm.body')} confirmLabel={t(locale, 'chat.transcript.edit.confirm')} cancelLabel={t(locale, 'common.cancel')} closeLabel={t(locale, 'common.close')} tone="danger" testId="chat-edit-dialog" onConfirm={confirmEdit} onClose={() => setPendingEdit(null)} /> : null}
     {error ? <ErrorBanner title={t(locale, 'chat.error.title')} body={error} /> : null}
     <div className="chat-composer"><label className="ds-field">{t(locale, 'chat.composer.label')}<textarea ref={composer} aria-label={t(locale, 'chat.composer.label')} value={draft} maxLength={MAX_PROMPT_CHARACTERS} disabled={busy || historyBusy || imagesBusy} onChange={(event) => setDraft(event.target.value)} onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }} onKeyDown={(event) => {
-      if (event.key === 'Enter' && !event.shiftKey && !composing.current && !event.nativeEvent.isComposing && event.keyCode !== 229) { event.preventDefault(); void send(); }
+      // Nothing fires mid-composition: the IME owns Enter and the modifiers until it commits.
+      if (composing.current || event.nativeEvent.isComposing || event.keyCode === 229) return;
+      // Cmd/Ctrl+N starts a conversation here too; the global handler skips edit fields.
+      if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'n') { event.preventDefault(); create(); return; }
+      // Enter and Cmd/Ctrl+Enter send; Shift+Enter keeps inserting a newline.
+      if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send(); }
     }} /></label><p>{t(locale, 'chat.composer.hint', { count: String(draft.length), max: String(MAX_PROMPT_CHARACTERS) })}</p>
       {canImage ? <label className="ds-field">{t(locale, 'chat.images.label')}<input type="file" accept="image/png,image/jpeg,image/webp" multiple disabled={busy || historyBusy || imagesBusy} onChange={(event) => {
         const files = event.target.files;

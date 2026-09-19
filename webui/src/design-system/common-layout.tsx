@@ -18,21 +18,45 @@ export function PageLayout(props: { children: React.ReactNode; className?: strin
   return <CommonPageLayout variant="wide" className={`ds-page-layout ${props.className ?? ''}`.trim()}>{props.children}</CommonPageLayout>;
 }
 
-// PageHeader forwards only className, and its h1 and description take no other
-// attributes. The bridge restores the product test ids and, when asked, makes the h1
-// the route's dialog focus fallback: a named page heading is a better landing target
-// than an unnamed layout container. It has no eyebrow slot (#1914 removes those keys).
-export function PageHeader(props: { title: string; description?: string; titleTestId?: string; descriptionTestId?: string; focusFallback?: boolean; className?: string }): React.JSX.Element {
+// A Retry button always carries a localized label: the package default is English.
+type PageHeaderRetry = { onRetry?: undefined; retryLabel?: undefined } | { onRetry: () => void; retryLabel: string };
+
+export type PageHeaderProps = {
+  title: string;
+  description?: string;
+  titleTestId?: string;
+  descriptionTestId?: string;
+  className?: string;
+  /** Route actions, rendered in the header's action slot beside the title. */
+  actions?: React.ReactNode;
+  /** The route's stale or action error, shown in the header's alert block. */
+  error?: string | null;
+  errorDetail?: string | null;
+  /** Test id for the `.page-header__error` alert block. */
+  errorTestId?: string;
+} & PageHeaderRetry;
+
+// Shell contract: every route renders exactly one PageHeader as the first child of the
+// shell's PageLayout, and its h1 is always the route's dialog focus fallback
+// (tabIndex=-1 plus data-dialog-focus-fallback), so restoreModalFocus always finds one
+// named landing target when a dialog closes after its opener is gone. PageHeader
+// forwards only className, and its h1, description and error block take no other
+// attributes, so the ref bridge applies the fallback and the product test ids. It runs
+// on every render because the error block mounts and unmounts with `error`. There is no
+// eyebrow slot and no dismiss control (the package's dismiss label is English).
+export function PageHeader(props: PageHeaderProps): React.JSX.Element {
   return <div className={`ds-page-header ${props.className ?? ''}`.trim()} ref={(element) => {
     const heading = element?.querySelector<HTMLElement>('.page-header__title');
     const description = element?.querySelector<HTMLElement>('.page-header__description');
-    if (heading && props.titleTestId) heading.dataset.testid = props.titleTestId;
-    if (description && props.descriptionTestId) description.dataset.testid = props.descriptionTestId;
-    if (heading && props.focusFallback) {
+    const error = element?.querySelector<HTMLElement>('.page-header__error');
+    if (heading) {
       heading.tabIndex = -1;
       heading.setAttribute('data-dialog-focus-fallback', '');
+      if (props.titleTestId) heading.dataset.testid = props.titleTestId;
     }
-  }}><CommonPageHeader title={props.title} description={props.description} /></div>;
+    if (description && props.descriptionTestId) description.dataset.testid = props.descriptionTestId;
+    if (error && props.errorTestId) error.dataset.testid = props.errorTestId;
+  }}><CommonPageHeader title={props.title} description={props.description} actions={props.actions} error={props.error} errorDetail={props.errorDetail} onRetry={props.onRetry} retryLabel={props.retryLabel} /></div>;
 }
 
 // Covers the package transition (motion-standard) with margin for the last change.

@@ -2,7 +2,6 @@
 // Chat, transcript, next-turn parameter and local-history copy. Every entry is
 // mirrored in tests/fixtures/webui/strings.json; resolve it with t(locale, key).
 export const chatStrings = [
-  { key: 'chat.eyebrow', en: 'Local inference', ko: '로컬 추론', test_id: 'chat-eyebrow' },
   { key: 'chat.intro', en: 'Memory-only by default. Changing the model affects the next turn, never the running request.', ko: '기본적으로 메모리에만 보관합니다. 모델을 바꾸면 다음 턴에만 적용되며 실행 중인 요청은 바뀌지 않습니다.', test_id: 'chat-intro' },
   { key: 'chat.new_conversation', en: 'New conversation', ko: '새 대화', test_id: 'chat-new-conversation' },
   { key: 'chat.conversation.default_title', en: 'New conversation', ko: '새 대화', test_id: 'chat-conversation-default-title' },

@@ -1,22 +1,27 @@
 import { ServerSettings } from './features/settings/server-settings';
 import React, { useEffect, useRef, useState } from 'react';
-import type { WebUiSnapshot } from './api/types';
-import { AppShell, type RouteId } from './design-system/shell';
+import type { ModelId, WebUiSnapshot } from './api/types';
+import { CommandPalette } from './command-palette';
+import { AppShell, globalShortcuts, type RouteId, type ShellLoadedModel } from './design-system/shell';
 import { applyAppearance, DEFAULT_APPEARANCE, loadAppearance, saveAppearance, type AppearancePreferences, type ColorSchemePreference, type ContrastPreference, type ThemeFamily } from './design-system/preferences';
 import { onSystemColorSchemeChange } from './design-system/theme';
-import { Button, Dialog, ErrorBanner, Field, IconButton, PageHeader, Select } from './design-system/primitives';
+import { Dialog, ErrorBanner, IconButton, PageHeader, Select } from './design-system/primitives';
 import { ActivityPage } from './features/activity';
 import { ModelsLibrary } from './features/models/screen';
 import { DesignGallery } from './gallery';
-import { classifyAuthFailure, connectionFooterLabel, ProductConnectionSurface, selectedModelLabel, type AuthFailure } from './provider-surfaces';
+import { classifyAuthFailure, connectionFooterDetails, connectionFooterLabel, lifecycleLabel, loadedModels, ProductConnectionSurface, type AuthFailure } from './provider-surfaces';
 import { useWebUi, useWebUiActions } from './state';
 import { t, testId } from './i18n/catalog';
 import { Chat } from './features/chat/chat';
-import { replaceConversations } from './features/chat/session';
+import { replaceConversations, requestNewConversation } from './features/chat/session';
 
 const routes: RouteId[] = ['models', 'chat', 'activity', 'settings', 'gallery'];
-const paletteRoutes: RouteId[] = ['models', 'chat', 'activity', 'settings'];
 type Overlay = 'command' | 'help' | null;
+
+// The same condition under which ChatScreen renders the real Chat, which consumes requests.
+function chatAvailable(snapshot: WebUiSnapshot): boolean {
+  return snapshot.auth.status === 'authenticated' && snapshot.connection !== 'schema-mismatch';
+}
 
 function routeFromHash(): RouteId {
   const raw = window.location.hash.slice(1).replace(/^\//, '') as RouteId;
@@ -88,16 +93,39 @@ export function App(): React.JSX.Element {
     logout();
     window.location.reload();
   };
+  // Chip and palette: select the model and open its inspector on Models. A model that
+  // left the catalog in the meantime opens Models with no inspector. Never loads.
+  const openModel = (id: ModelId): void => {
+    actions.selectModel(snapshot.catalog.some((entry) => entry.identity.id === id) ? id : null);
+    navigate('models');
+    setOverlay(null);
+  };
+  // Cmd/Ctrl+N and the palette. Signed out, Chat shows the connection surface and nothing
+  // would consume a request, so none is left behind.
+  const newChat = (): void => {
+    if (chatAvailable(snapshot)) requestNewConversation();
+    navigate('chat');
+    setOverlay(null);
+  };
+  const loaded = loadedModels(snapshot);
+  const shellLoaded: ShellLoadedModel[] = loaded.map((entry) => ({ id: entry.identity.id, name: entry.identity.display_name, state: entry.lifecycle.state, stateLabel: lifecycleLabel(appearance.locale, entry.lifecycle.state) }));
   const body = renderRoute(route, appearance, setAppearance, { snapshot, authFailure, login, logout, retry, recoverSchema });
   return (
     <>
-      <AppShell locale={appearance.locale} route={route} onRouteChange={navigate} onCommand={() => setOverlay('command')} onHelp={() => setOverlay('help')} selectedModel={selectedModelLabel(appearance.locale, snapshot)} connectionLabel={connectionFooterLabel(appearance.locale, snapshot)} connectionState={snapshot.connection} sessionAction={snapshot.auth.tokenPresent ? <IconButton label={t(appearance.locale, 'toolbar.logout')} icon="key" onClick={logout} data-testid={testId('toolbar.logout')} /> : null} inspector={null}>
+      <AppShell locale={appearance.locale} route={route} onRouteChange={navigate} onCommand={() => setOverlay('command')} onHelp={() => setOverlay('help')} onNewChat={newChat} onOpenModel={openModel} loadedModels={shellLoaded} connection={{ label: connectionFooterLabel(appearance.locale, snapshot), state: snapshot.connection, details: connectionFooterDetails(appearance.locale, snapshot) }} sessionAction={snapshot.auth.tokenPresent ? <IconButton label={t(appearance.locale, 'toolbar.logout')} icon="key" onClick={logout} data-testid={testId('toolbar.logout')} /> : null} inspector={null}>
         {body}
       </AppShell>
-      <CommandPalette open={overlay === 'command'} locale={appearance.locale} onClose={() => setOverlay(null)} onNavigate={(next) => { navigate(next); setOverlay(null); }} />
+      <CommandPalette open={overlay === 'command'} locale={appearance.locale} catalog={snapshot.catalog} loaded={loaded} onClose={() => setOverlay(null)} onNavigate={(next) => { navigate(next); setOverlay(null); }} onNewChat={newChat} onOpenModel={openModel} />
       <Dialog open={overlay === 'help'} title={t(appearance.locale, 'help.title')} onClose={() => setOverlay(null)} testId="help-dialog" closeLabel={t(appearance.locale, 'common.close')}>
         <p data-testid={testId('help.body')}>{t(appearance.locale, 'help.body')}</p>
-        <ul className="shortcut-list"><li><kbd>⌘/Ctrl</kbd> + <kbd>K</kbd> {t(appearance.locale, 'command.search')}</li><li><kbd>Esc</kbd> {t(appearance.locale, 'common.cancel')}</li><li><kbd>[</kbd> / <kbd>]</kbd> {t(appearance.locale, 'nav.models')}</li></ul>
+        <ul className="shortcut-list" data-testid="help-shortcuts">
+          {globalShortcuts.map((shortcut) => (
+            <li key={shortcut.id} data-testid={`help-shortcut-${shortcut.id}`}>
+              <span className="shortcut-keys">{shortcut.keys.map((key, index) => <React.Fragment key={key}>{index > 0 ? ` ${shortcut.separator} ` : null}<kbd>{key}</kbd></React.Fragment>)}</span>
+              <span>{t(appearance.locale, shortcut.key)}</span>
+            </li>
+          ))}
+        </ul>
       </Dialog>
     </>
   );
@@ -138,24 +166,12 @@ function ActivityScreen(props: { locale: AppearancePreferences['locale']; contex
 function SettingsScreen(props: { appearance: AppearancePreferences; setAppearance: (next: AppearancePreferences) => void }): React.JSX.Element {
   const set = (patch: Partial<AppearancePreferences>): void => props.setAppearance({ ...props.appearance, ...patch });
   return (
-    <div className="screen-stack"><PageHeader title={t(props.appearance.locale, 'settings.title')} titleTestId={testId('settings.title')} description={t(props.appearance.locale, 'settings.browser_only')} descriptionTestId={testId('settings.appearance')} focusFallback /><div className="settings-grid"><Select locale={props.appearance.locale} label={t(props.appearance.locale, 'settings.theme')} value={props.appearance.themeFamily} onChange={(value) => set({ themeFamily: value as ThemeFamily })} options={[{ value: 'mlxcel', label: t(props.appearance.locale, 'settings.theme.mlxcel') }, { value: 'glass', label: t(props.appearance.locale, 'settings.theme.glass') }]} testId={testId('settings.theme')} /><Select locale={props.appearance.locale} label={t(props.appearance.locale, 'settings.color_scheme')} value={props.appearance.colorScheme} onChange={(value) => set({ colorScheme: value as ColorSchemePreference })} options={[{ value: 'system', label: t(props.appearance.locale, 'settings.color_scheme.system') }, { value: 'light', label: t(props.appearance.locale, 'settings.color_scheme.light') }, { value: 'dark', label: t(props.appearance.locale, 'settings.color_scheme.dark') }]} testId={testId('settings.color_scheme')} /><Select locale={props.appearance.locale} label={t(props.appearance.locale, 'settings.material')} value={props.appearance.material} onChange={(value) => set({ material: value as AppearancePreferences['material'] })} options={[{ value: 'glass', label: t(props.appearance.locale, 'settings.material.glass') }, { value: 'tinted', label: t(props.appearance.locale, 'settings.material.tinted') }, { value: 'opaque', label: t(props.appearance.locale, 'settings.material.opaque') }]} testId={testId('settings.material')} /><Select locale={props.appearance.locale} label={t(props.appearance.locale, 'settings.locale')} value={props.appearance.locale} onChange={(value) => set({ locale: value as AppearancePreferences['locale'] })} options={[{ value: 'en', label: t(props.appearance.locale, 'settings.locale.en') }, { value: 'ko', label: t(props.appearance.locale, 'settings.locale.ko') }]} testId={testId('settings.locale')} /><Select locale={props.appearance.locale} label={t(props.appearance.locale, 'settings.high_contrast')} value={props.appearance.highContrast} onChange={(value) => set({ highContrast: value as ContrastPreference })} options={[{ value: 'system', label: t(props.appearance.locale, 'settings.high_contrast.system') }, { value: 'on', label: t(props.appearance.locale, 'settings.high_contrast.on') }, { value: 'off', label: t(props.appearance.locale, 'settings.high_contrast.off') }]} testId={testId('settings.high_contrast')} /><label className="ds-field"><span>{t(props.appearance.locale, 'settings.glass_intensity')}: {props.appearance.glassIntensity}</span><input type="range" min="0" max="100" value={props.appearance.glassIntensity} onChange={(event) => set({ glassIntensity: Number(event.currentTarget.value) })} data-testid={testId('settings.glass_intensity')} /></label><Toggle label={t(props.appearance.locale, 'settings.reduce_motion')} checked={props.appearance.reduceMotion} onChange={(checked) => set({ reduceMotion: checked })} testId={testId('settings.reduce_motion')} /><Toggle label={t(props.appearance.locale, 'settings.reduce_transparency')} checked={props.appearance.reduceTransparency} onChange={(checked) => set({ reduceTransparency: checked })} testId={testId('settings.reduce_transparency')} /></div><ErrorBanner tone="info" title={t(props.appearance.locale, 'settings.browser_only')} body={t(props.appearance.locale, 'settings.browser_only.body')} testId={testId('settings.browser_only')} /><ServerSettings locale={props.appearance.locale} /></div>
+    <div className="screen-stack"><PageHeader title={t(props.appearance.locale, 'settings.title')} titleTestId={testId('settings.title')} description={t(props.appearance.locale, 'settings.browser_only')} descriptionTestId={testId('settings.appearance')} /><div className="settings-grid"><Select locale={props.appearance.locale} label={t(props.appearance.locale, 'settings.theme')} value={props.appearance.themeFamily} onChange={(value) => set({ themeFamily: value as ThemeFamily })} options={[{ value: 'mlxcel', label: t(props.appearance.locale, 'settings.theme.mlxcel') }, { value: 'glass', label: t(props.appearance.locale, 'settings.theme.glass') }]} testId={testId('settings.theme')} /><Select locale={props.appearance.locale} label={t(props.appearance.locale, 'settings.color_scheme')} value={props.appearance.colorScheme} onChange={(value) => set({ colorScheme: value as ColorSchemePreference })} options={[{ value: 'system', label: t(props.appearance.locale, 'settings.color_scheme.system') }, { value: 'light', label: t(props.appearance.locale, 'settings.color_scheme.light') }, { value: 'dark', label: t(props.appearance.locale, 'settings.color_scheme.dark') }]} testId={testId('settings.color_scheme')} /><Select locale={props.appearance.locale} label={t(props.appearance.locale, 'settings.material')} value={props.appearance.material} onChange={(value) => set({ material: value as AppearancePreferences['material'] })} options={[{ value: 'glass', label: t(props.appearance.locale, 'settings.material.glass') }, { value: 'tinted', label: t(props.appearance.locale, 'settings.material.tinted') }, { value: 'opaque', label: t(props.appearance.locale, 'settings.material.opaque') }]} testId={testId('settings.material')} /><Select locale={props.appearance.locale} label={t(props.appearance.locale, 'settings.locale')} value={props.appearance.locale} onChange={(value) => set({ locale: value as AppearancePreferences['locale'] })} options={[{ value: 'en', label: t(props.appearance.locale, 'settings.locale.en') }, { value: 'ko', label: t(props.appearance.locale, 'settings.locale.ko') }]} testId={testId('settings.locale')} /><Select locale={props.appearance.locale} label={t(props.appearance.locale, 'settings.high_contrast')} value={props.appearance.highContrast} onChange={(value) => set({ highContrast: value as ContrastPreference })} options={[{ value: 'system', label: t(props.appearance.locale, 'settings.high_contrast.system') }, { value: 'on', label: t(props.appearance.locale, 'settings.high_contrast.on') }, { value: 'off', label: t(props.appearance.locale, 'settings.high_contrast.off') }]} testId={testId('settings.high_contrast')} /><label className="ds-field"><span>{t(props.appearance.locale, 'settings.glass_intensity')}: {props.appearance.glassIntensity}</span><input type="range" min="0" max="100" value={props.appearance.glassIntensity} onChange={(event) => set({ glassIntensity: Number(event.currentTarget.value) })} data-testid={testId('settings.glass_intensity')} /></label><Toggle label={t(props.appearance.locale, 'settings.reduce_motion')} checked={props.appearance.reduceMotion} onChange={(checked) => set({ reduceMotion: checked })} testId={testId('settings.reduce_motion')} /><Toggle label={t(props.appearance.locale, 'settings.reduce_transparency')} checked={props.appearance.reduceTransparency} onChange={(checked) => set({ reduceTransparency: checked })} testId={testId('settings.reduce_transparency')} /></div><ErrorBanner tone="info" title={t(props.appearance.locale, 'settings.browser_only')} body={t(props.appearance.locale, 'settings.browser_only.body')} testId={testId('settings.browser_only')} /><ServerSettings locale={props.appearance.locale} /></div>
   );
 }
 
 function Toggle(props: { label: string; checked: boolean; onChange: (checked: boolean) => void; testId: string }): React.JSX.Element {
   return <label className="toggle"><input type="checkbox" checked={props.checked} onChange={(event) => props.onChange(event.currentTarget.checked)} data-testid={props.testId} /><span>{props.label}</span></label>;
-}
-
-function CommandPalette(props: { open: boolean; locale: AppearancePreferences['locale']; onClose: () => void; onNavigate: (route: RouteId) => void }): React.JSX.Element {
-  const [query, setQuery] = useState('');
-  const searchable = props.locale && window.location.hash.includes('gallery') ? routes : paletteRoutes;
-  const items = searchable.filter((route) => route.includes(query.toLowerCase()));
-  return (
-    <Dialog open={props.open} title={t(props.locale, 'command.title')} onClose={props.onClose} testId="command-dialog" closeLabel={t(props.locale, 'common.close')}>
-      <Field label={t(props.locale, 'command.search')} value={query} onChange={setQuery} testId={testId('command.search')} />
-      {items.length === 0 ? <p data-testid={testId('command.no_results')}>{t(props.locale, 'command.no_results')}</p> : <div className="command-list">{items.map((route) => <Button key={route} onClick={() => props.onNavigate(route)}>{t(props.locale, route === 'models' ? 'nav.models' : route === 'chat' ? 'nav.chat' : route === 'activity' ? 'nav.activity' : route === 'settings' ? 'nav.settings' : 'nav.gallery')}</Button>)}</div>}
-    </Dialog>
-  );
 }
 
 export { DEFAULT_APPEARANCE };

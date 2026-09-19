@@ -12,6 +12,7 @@ import {
   LoadingStatus,
   Select,
   StatusBadge,
+  PageHeader,
   type DataTableColumn,
 } from '../../design-system/primitives';
 import { t, testId, type Locale } from '../../i18n/catalog';
@@ -243,46 +244,50 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
   ];
   return (
     <div className="screen-stack models-library" data-testid="models-library">
-      <section className="screen-heading">
-        <p className="eyebrow">{t(locale, 'routes.models.eyebrow')}</p>
-        <h1 tabIndex={-1} data-dialog-focus-fallback data-testid={testId('models.title')}>
-          {t(locale, 'models.title')}
-        </h1>
-        <p>{t(locale, 'models.library.subtitle')}</p>
-      </section>
-      {!current(state) ? (
-        <ErrorBanner
-          title={t(locale, 'models.library.stale')}
-          body={state.error?.message ?? t(locale, 'models.library.waiting')}
-          action={
+      <PageHeader
+        title={t(locale, 'models.title')}
+        titleTestId={testId('models.title')}
+        description={t(locale, 'models.library.subtitle')}
+        actions={
+          <>
+            <Button
+              tone="primary"
+              onClick={() => setAdd({ repo: '', revision: '' })}
+              disabled={busy || downloadPending || !allowed(state, 'download')}
+              data-testid="models-add"
+            >
+              {t(locale, 'models.library.add')}
+            </Button>
+            <Button
+              disabled={busy || rescanPending || !current(state) || state.bootstrap?.server.mode === 'single_model'}
+              onClick={() => {
+                void execute(() => actions.refreshCatalog(crypto.randomUUID()));
+              }}
+              data-testid="models-rescan"
+            >
+              {t(locale, 'models.library.rescan')}
+            </Button>
             <Button
               onClick={() => {
                 void actions.refresh();
               }}
+              disabled={busy}
             >
               {t(locale, 'models.library.refresh')}
             </Button>
-          }
-          testId="connection-error-title"
-        />
-      ) : null}
-      {error ? (
-        <ErrorBanner
-          title={t(locale, 'models.library.error')}
-          body={error}
-          action={
-            <Button
-              onClick={() => {
-                setError(null);
-                void actions.refresh();
-              }}
-            >
-              {t(locale, 'models.library.refresh')}
-            </Button>
-          }
-          testId="models-action-error"
-        />
-      ) : null}
+          </>
+        }
+        // A stale snapshot takes precedence over a local action error: actions are refused
+        // until it is refreshed. Retry (shown only with an error) clears it and refreshes.
+        error={!current(state) ? t(locale, 'models.library.stale') : error === null ? null : t(locale, 'models.library.error')}
+        errorDetail={!current(state) ? (state.error?.message ?? t(locale, 'models.library.waiting')) : error}
+        errorTestId={current(state) ? 'models-action-error' : 'connection-error-title'}
+        onRetry={() => {
+          setError(null);
+          void actions.refresh();
+        }}
+        retryLabel={t(locale, 'models.library.refresh')}
+      />
       {state.bootstrap?.server.mode === 'single_model' ? (
         <ErrorBanner
           tone="info"
@@ -291,33 +296,6 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
           testId="models-read-only"
         />
       ) : null}
-      <div className="button-row">
-        <Button
-          tone="primary"
-          onClick={() => setAdd({ repo: '', revision: '' })}
-          disabled={busy || downloadPending || !allowed(state, 'download')}
-          data-testid="models-add"
-        >
-          {t(locale, 'models.library.add')}
-        </Button>
-        <Button
-          disabled={busy || rescanPending || !current(state) || state.bootstrap?.server.mode === 'single_model'}
-          onClick={() => {
-            void execute(() => actions.refreshCatalog(crypto.randomUUID()));
-          }}
-          data-testid="models-rescan"
-        >
-          {t(locale, 'models.library.rescan')}
-        </Button>
-        <Button
-          onClick={() => {
-            void actions.refresh();
-          }}
-          disabled={busy}
-        >
-          {t(locale, 'models.library.refresh')}
-        </Button>
-      </div>
       {Object.entries(state.bootstrap?.actions ?? {})
         .filter(([, action]) => action.state !== 'enabled')
         .map(([name, action]) => (
