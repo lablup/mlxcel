@@ -46,14 +46,23 @@ const SETTLE_MS = 400;
 export function SmoothHeight(props: { animate: boolean; children: React.ReactNode }): React.JSX.Element {
   const [previous, setPrevious] = useState(props.animate);
   const [settling, setSettling] = useState(false);
+  // Bumped on every transition to false, even while already settling, so the effect
+  // below always restarts a fresh SETTLE_MS window from the latest one. Keying the
+  // effect on `settling` alone missed a false -> true -> false sequence inside the
+  // window: setSettling(true) while settling was already true is a no-op value-wise,
+  // so the effect would not rerun and the original timer ended the window early.
+  const [settledFrom, setSettledFrom] = useState(0);
   if (previous !== props.animate) {
     setPrevious(props.animate);
-    if (!props.animate) setSettling(true);
+    if (!props.animate) {
+      setSettling(true);
+      setSettledFrom((token) => token + 1);
+    }
   }
   useEffect(() => {
     if (!settling) return;
     const timer = window.setTimeout(() => setSettling(false), SETTLE_MS);
     return () => window.clearTimeout(timer);
-  }, [settling]);
+  }, [settling, settledFrom]);
   return <CommonSmoothHeight active={props.animate || settling} className="ds-smooth-height">{props.children}</CommonSmoothHeight>;
 }
