@@ -1,5 +1,6 @@
 // Copyright 2026 Lablup Inc. Licensed under Apache-2.0.
 import React, { useEffect, useRef, useState } from 'react';
+import { isPrimaryModifier } from '../../design-system/keyboard';
 import { Button, ConfirmDialog, ErrorBanner, Field, PageHeader, Select } from '../../design-system/primitives';
 import { useWebUi, useWebUiActions } from '../../state';
 import { t, testId, type Locale, type StringKey } from '../../i18n/catalog';
@@ -172,9 +173,16 @@ export function Chat({ locale }: { locale: Locale }): React.JSX.Element {
     <div className="chat-composer"><label className="ds-field">{t(locale, 'chat.composer.label')}<textarea ref={composer} aria-label={t(locale, 'chat.composer.label')} value={draft} maxLength={MAX_PROMPT_CHARACTERS} disabled={busy || historyBusy || imagesBusy} onChange={(event) => setDraft(event.target.value)} onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }} onKeyDown={(event) => {
       // Nothing fires mid-composition: the IME owns Enter and the modifiers until it commits.
       if (composing.current || event.nativeEvent.isComposing || event.keyCode === 229) return;
-      // Cmd/Ctrl+N starts a conversation here too; the global handler skips edit fields.
-      if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'n') { event.preventDefault(); create(); return; }
-      // Enter and Cmd/Ctrl+Enter send; Shift+Enter keeps inserting a newline.
+      // Cmd+N (Apple) / Ctrl+N (elsewhere) starts a conversation here too; the global handler
+      // skips edit fields. Ctrl+N on Apple is the native "move down a line" caret binding, so
+      // it is left untouched (no preventDefault, no create); a held key creates at most once.
+      if (isPrimaryModifier(event) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'n') {
+        event.preventDefault();
+        if (!event.repeat) create();
+        return;
+      }
+      // Enter and Cmd/Ctrl+Enter send regardless of platform; Ctrl+Enter has no native binding
+      // to preserve, so this stays unconditional rather than gated by isPrimaryModifier.
       if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send(); }
     }} /></label><p>{t(locale, 'chat.composer.hint', { count: String(draft.length), max: String(MAX_PROMPT_CHARACTERS) })}</p>
       {canImage ? <label className="ds-field">{t(locale, 'chat.images.label')}<input type="file" accept="image/png,image/jpeg,image/webp" multiple disabled={busy || historyBusy || imagesBusy} onChange={(event) => {

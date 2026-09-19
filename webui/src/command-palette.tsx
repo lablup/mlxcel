@@ -48,10 +48,12 @@ export function CommandPalette(props: CommandPaletteProps): React.JSX.Element {
   const [wasOpen, setWasOpen] = useState(props.open);
   const commandsId = useId();
   const modelsId = useId();
-  // Every opening starts from an empty query, which lists the loaded models.
+  // Every opening starts from an empty query, which lists the loaded models. Closing clears it
+  // too, so a query typed before closing does not keep matching in the background and holding
+  // up to PALETTE_MODEL_LIMIT model buttons in a dialog nothing can see.
   if (props.open !== wasOpen) {
     setWasOpen(props.open);
-    if (props.open) setQuery('');
+    setQuery('');
   }
   const needle = query.trim().toLowerCase();
   const commands = COMMANDS.filter((command) => needle === '' || command.id.includes(needle) || t(props.locale, command.key).toLowerCase().includes(needle));

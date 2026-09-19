@@ -140,20 +140,46 @@ describe('Chat real component composition',()=>{
    await act(async () => { key(field, { key: 'Enter', metaKey: true }); });
    expect(mocked.stream).not.toHaveBeenCalled();
   });
-  it('starts a new empty conversation with Cmd/Ctrl+N from the composer, but not mid-composition', () => {
+  it('starts a new empty conversation with Ctrl+N from the composer on a non-Apple platform, but not mid-composition or with an extra modifier', () => {
    renderChat();
    expect(conversationCount).toBe(0);
    input('draft text');
-   const first = key(composer(), { key: 'n', metaKey: true });
+   const first = key(composer(), { key: 'n', ctrlKey: true });
    expect(first.defaultPrevented).toBe(true);
    expect(conversationCount).toBe(1);
    expect(composer().value).toBe('');
-   key(composer(), { key: 'N', ctrlKey: true });
-   expect(conversationCount).toBe(2);
    key(composer(), { key: 'n', ctrlKey: true, isComposing: true });
    key(composer(), { key: 'n', ctrlKey: true, altKey: true });
-   key(composer(), { key: 'n', metaKey: true, shiftKey: true });
-   expect(conversationCount).toBe(2);
+   key(composer(), { key: 'n', ctrlKey: true, shiftKey: true });
+   expect(conversationCount).toBe(1);
+  });
+  it('creates with Meta+N but leaves Ctrl+N as the native caret-movement binding on an Apple platform', () => {
+   const platform = vi.spyOn(window.navigator, 'platform', 'get').mockReturnValue('MacIntel');
+   try {
+    renderChat();
+    input('draft text');
+    // Ctrl+N on macOS is Cocoa/Emacs "move down a line" inside a textarea; it must fall
+    // through untouched, without preventDefault, so the native caret movement still happens.
+    const ctrlEvent = key(composer(), { key: 'n', ctrlKey: true });
+    expect(ctrlEvent.defaultPrevented).toBe(false);
+    expect(conversationCount).toBe(0);
+    expect(composer().value).toBe('draft text');
+    const metaEvent = key(composer(), { key: 'N', metaKey: true });
+    expect(metaEvent.defaultPrevented).toBe(true);
+    expect(conversationCount).toBe(1);
+    expect(composer().value).toBe('');
+   } finally {
+    platform.mockRestore();
+   }
+  });
+  it('ignores a held key repeat for the composer new-conversation shortcut', () => {
+   renderChat();
+   input('draft text');
+   key(composer(), { key: 'n', ctrlKey: true, repeat: true });
+   expect(conversationCount).toBe(0);
+   expect(composer().value).toBe('draft text');
+   key(composer(), { key: 'n', ctrlKey: true });
+   expect(conversationCount).toBe(1);
   });
   it('consumes a pending request exactly once on mount under StrictMode', () => {
    act(() => root.render(<ConversationsProbe/>));

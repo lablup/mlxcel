@@ -104,9 +104,11 @@ export function AppShell(props: AppShellProps): React.JSX.Element {
         onCommandRef.current();
       }
       // Browsers reserve Cmd/Ctrl+N for a new window and usually never deliver it to the
-      // page; preventDefault still stops it wherever it does arrive.
+      // page; preventDefault still stops it wherever it does arrive. A held key still repeats
+      // this keydown, so preventDefault runs every time but a new conversation is opened once.
       if (command && !event.shiftKey && event.key.toLowerCase() === 'n') {
         event.preventDefault();
+        if (event.repeat) return;
         setNavOpen(false);
         onNewChatRef.current();
       }

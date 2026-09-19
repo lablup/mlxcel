@@ -1,30 +1,30 @@
 {
   "budgets": {
-    "embedded_asset_bytes": 755553,
+    "embedded_asset_bytes": 755763,
     "embedded_asset_limit_bytes": 5242880,
-    "initial_js_gzip_bytes": 159759,
+    "initial_js_gzip_bytes": 159870,
     "initial_js_gzip_limit_bytes": 204800,
-    "total_js_gzip_bytes": 160936,
+    "total_js_gzip_bytes": 161046,
     "total_js_gzip_limit_bytes": 716800
   },
   "files": [
     {
       "bytes": 951,
       "gzip_bytes": 612,
-      "path": "assets/code-highlight-DWoha8i5.js",
-      "sha256": "f21d3be3f6280ae29a03e208f8a0761317cac23cc38ecf90f7d3f31584f0b7b3"
+      "path": "assets/code-highlight-BVoZUElI.js",
+      "sha256": "c463c2c39c27010db60d04ceebc141fb5545a692dd8de35f971c96991ebb4c68"
     },
     {
       "bytes": 1134,
-      "gzip_bytes": 565,
-      "path": "assets/history-Ct1Ae3oa.js",
-      "sha256": "ec3882490259c4f4fc2e1d7e57e49f561c1cdc43f09fc18987c4218f9028d6c1"
+      "gzip_bytes": 564,
+      "path": "assets/history-UerYQceR.js",
+      "sha256": "8aee14b296eab9db78c8005d404bc09dd75164e856b03260792c61899eed2cf2"
     },
     {
-      "bytes": 615588,
-      "gzip_bytes": 158770,
-      "path": "assets/index-DXYb05yv.js",
-      "sha256": "c7d84fb719472a512e123b8568f734259bae66a99986622e887fe91cf52514a1"
+      "bytes": 615798,
+      "gzip_bytes": 158881,
+      "path": "assets/index-C8yrGh2w.js",
+      "sha256": "d93b12cd44e2ea601bf6dedfeeeb7805cdc77529e34b36cad9878547fb55bdcc"
     },
     {
       "bytes": 119742,
@@ -34,9 +34,9 @@
     },
     {
       "bytes": 503,
-      "gzip_bytes": 303,
+      "gzip_bytes": 301,
       "path": "index.html",
-      "sha256": "7adcb80602c7180b949bca84a7f218cfa33e1d208c674e4acf26d9d75f612c08"
+      "sha256": "b1bde7743cd2cabb694c168f5beddf87df64ccba3026dac757b74d12db7e9d95"
     },
     {
       "bytes": 2129,
@@ -73,5 +73,5 @@
   },
   "pnpm_version": "11.18.0",
   "schema_version": 1,
-  "source_digest_sha256": "40aec4679ed0e2bac8f6df4ed6611a639fe1d260f2b152611db61f725f95638d"
+  "source_digest_sha256": "b50889d42750c8fda51910a9a46951a7df338430c011c50d9d474c2011cbb4a7"
 }

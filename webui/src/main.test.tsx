@@ -219,6 +219,20 @@ describe('mlxcel WebUI shell', () => {
     }
   });
 
+  it('ignores a held key repeat for the global Cmd/Ctrl+N shortcut, but still prevents its default action', () => {
+    renderApp();
+    goTo('models');
+    act(() => { (document.activeElement as HTMLElement | null)?.blur(); });
+    let event: KeyboardEvent | undefined;
+    act(() => { event = keydown('n', { metaKey: true, repeat: true }); });
+    expect(event?.defaultPrevented).toBe(true);
+    expect(window.location.hash).toBe('#models');
+    expect(consumeNewConversationRequest()).toBe(false);
+    act(() => { event = keydown('n', { metaKey: true }); });
+    expect(event?.defaultPrevented).toBe(true);
+    expect(window.location.hash).toBe('#chat');
+  });
+
   it('suppresses Cmd/Ctrl+N in edit fields, during IME composition, with Alt or Shift, and inside dialogs', async () => {
     renderApp();
     goTo('settings');
