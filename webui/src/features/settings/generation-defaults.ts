@@ -12,6 +12,9 @@ export interface GenerationDefaults {
 }
 export const DEFAULT_GENERATION_DEFAULTS: GenerationDefaults = Object.freeze({});
 export const GENERATION_FIELDS = ['max_tokens', 'temperature', 'top_p', 'top_k', 'min_p', 'repetition_penalty', 'seed'] as const;
+export type GenerationField = typeof GENERATION_FIELDS[number];
+/** Request fields that take whole numbers; the rest are floats. */
+export const INTEGER_GENERATION_FIELDS: ReadonlySet<GenerationField> = new Set(['max_tokens', 'top_k', 'seed']);
 export function validateGenerationDefaults(value: unknown): GenerationDefaults {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('Request defaults must be an object.');
   const result: Record<string, number> = {};
@@ -19,7 +22,7 @@ export function validateGenerationDefaults(value: unknown): GenerationDefaults {
     if (!(GENERATION_FIELDS as readonly string[]).includes(key)) throw new Error(`Unsupported request default: ${key}`);
     if (item === undefined) continue;
     if (typeof item !== 'number' || !Number.isFinite(item)) throw new Error(`${key} must be a finite number; leave blank to inherit.`);
-    if (['max_tokens', 'top_k', 'seed'].includes(key) && !Number.isSafeInteger(item)) throw new Error(`${key} must be a safe integer.`);
+    if (INTEGER_GENERATION_FIELDS.has(key as GenerationField) && !Number.isSafeInteger(item)) throw new Error(`${key} must be a safe integer.`);
     if (key === 'max_tokens' && item < 1 || key === 'temperature' && item < 0 || key === 'top_k' && item < 0 || ['top_p', 'min_p'].includes(key) && (item < 0 || item > 1) || key === 'repetition_penalty' && item <= 0 || key === 'seed' && item < 0) throw new Error(`${key} is outside its supported range.`);
     result[key] = item;
   }
@@ -28,11 +31,9 @@ export function validateGenerationDefaults(value: unknown): GenerationDefaults {
 export function snapshotGenerationDefaults(value: GenerationDefaults): GenerationDefaults {
   return validateGenerationDefaults(value);
 }
-export type GenerationField = typeof GENERATION_FIELDS[number];
 /** Where the value of a request field for the next request comes from, in precedence order. */
 export type ParameterSource = 'override' | 'session' | 'server' | 'unknown';
 export interface EffectiveParameter { readonly value: number | null; readonly source: ParameterSource }
-const INTEGER_FIELDS: ReadonlySet<GenerationField> = new Set(['max_tokens', 'top_k', 'seed']);
 /**
  * The value the next request uses for `name`: a next-turn override, else the browser-session default,
  * else the server default. `serverDefault` is `current["default_" + name]` from the selected ready model's
@@ -44,7 +45,7 @@ export function resolveEffectiveParameter(name: GenerationField, override: numbe
   if (typeof sessionDefault === 'number' && Number.isFinite(sessionDefault)) return { value: sessionDefault, source: 'session' };
   if (serverDefault === null) return { value: null, source: 'server' };
   if (typeof serverDefault !== 'number' || !Number.isFinite(serverDefault)) return { value: null, source: 'unknown' };
-  if (INTEGER_FIELDS.has(name)) return Number.isSafeInteger(serverDefault) ? { value: serverDefault, source: 'server' } : { value: null, source: 'unknown' };
+  if (INTEGER_GENERATION_FIELDS.has(name)) return Number.isSafeInteger(serverDefault) ? { value: serverDefault, source: 'server' } : { value: null, source: 'unknown' };
   // Floats are stored as f32 on the server; report the value a person set, not its f64 widening.
   return { value: Number(formatF32(serverDefault)), source: 'server' };
 }

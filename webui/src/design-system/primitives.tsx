@@ -193,16 +193,18 @@ export function SchemaMismatchView(props: { title: string; body: string; actionL
   return <ErrorBanner tone="error" title={props.title} body={props.body} action={<Button onClick={props.onRecover}><Icon name="schema" />{props.actionLabel}</Button>} />;
 }
 
-/** A labelled on/off checkbox. The label text is its accessible name; the hint and error describe it. */
+/** A labelled on/off checkbox. The label text alone is its accessible name; the hint and error describe it. */
 export function Toggle(props: { label: string; checked: boolean; onChange: (checked: boolean) => void; disabled?: boolean; hint?: string; error?: string; testId?: string }): React.JSX.Element {
   const id = useId();
+  const labelId = `${id}-label`;
   const hintId = `${id}-hint`;
   const errorId = `${id}-error`;
   const describedBy = [props.hint ? hintId : null, props.error ? errorId : null].filter(Boolean).join(' ') || undefined;
   return (
     <label className="toggle" data-disabled={props.disabled || undefined}>
-      <input type="checkbox" checked={props.checked} disabled={props.disabled} aria-invalid={props.error ? 'true' : undefined} aria-describedby={describedBy} data-testid={props.testId} onChange={(event) => props.onChange(event.currentTarget.checked)} />
-      <span>{props.label}</span>
+      {/* Named by the span, as Field is: the hint and error sit inside the label but must not join the name. */}
+      <input type="checkbox" checked={props.checked} disabled={props.disabled} aria-labelledby={labelId} aria-invalid={props.error ? 'true' : undefined} aria-describedby={describedBy} data-testid={props.testId} onChange={(event) => props.onChange(event.currentTarget.checked)} />
+      <span id={labelId}>{props.label}</span>
       {props.hint ? <small id={hintId} data-tone="hint">{props.hint}</small> : null}
       {props.error ? <small id={errorId} data-tone="error">{props.error}</small> : null}
     </label>

@@ -20,3 +20,18 @@ describe('live settings partial/stale/reset behavior', () => {
   it('requires reconfirmation after another client edit and stages reset without PATCH', async () => { actions.getSettings.mockResolvedValueOnce(make()).mockResolvedValue(make('b', 0.2)); await render(); await edit('Temperature', '0.5'); await button('Apply live draft'); expect(actions.patchSettings).not.toHaveBeenCalled(); expect(host.textContent).toContain('Another client changed'); await button('Reset live draft…'); await button('Reset draft'); expect(actions.patchSettings).not.toHaveBeenCalled(); expect(input('Temperature')?.value).toBe('0.8'); expect(input('Top P')?.value).toBe('0.9'); });
   it('ignores a stale fetch after model binding changes', async () => { let resolve: ((value: SettingsResponse) => void) | undefined; actions.getSettings.mockImplementationOnce(() => new Promise<SettingsResponse>((done) => { resolve = done; })).mockResolvedValueOnce(make('b', 0.7)); await render(); await render('model-b'); await act(async () => resolve?.(make('a', 99))); expect(input('Temperature')?.value).toBe('0.7'); });
 });
+describe('live draft across Settings tab switches', () => {
+  it('keeps an unapplied draft when the tab unmounts and returns, per worker only', async () => {
+    actions.getSettings.mockResolvedValue(make());
+    const scope = { instance: 'instance-a', modelId: 'model-a', revision: 3 };
+    await act(async () => { root.render(<LiveSettings modelId="model-a" scope={scope} locale="en" />); });
+    await edit('Temperature', '0.5');
+    act(() => root.unmount()); root = createRoot(host);
+    await act(async () => { root.render(<LiveSettings modelId="model-a" scope={scope} locale="en" />); });
+    expect(input('Temperature')?.value).toBe('0.5');
+    expect([...host.querySelectorAll('button')].find((item) => item.textContent === 'Apply live draft')?.disabled).toBe(false);
+    act(() => root.unmount()); root = createRoot(host);
+    await act(async () => { root.render(<LiveSettings modelId="model-a" scope={{ ...scope, revision: 4 }} locale="en" />); });
+    expect(input('Temperature')?.value).toBe('1');
+  });
+});

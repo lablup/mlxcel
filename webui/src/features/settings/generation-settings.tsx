@@ -1,30 +1,30 @@
 import React, { useEffect, useId, useState } from 'react';
 import { Button, Dialog, ErrorBanner } from '../../design-system/primitives';
 import { t, type Locale } from '../../i18n/catalog';
-import { describeEffectiveParameter, GENERATION_FIELDS, resolveEffectiveParameter, validateGenerationDefaults, type GenerationField } from './generation-defaults';
+import { describeEffectiveParameter, GENERATION_FIELDS, INTEGER_GENERATION_FIELDS, resolveEffectiveParameter, validateGenerationDefaults } from './generation-defaults';
 import { useGenerationDefaults } from './generation-preferences';
 import { recordServerSettings, useServerGenerationDefaults } from './server-defaults';
 import { HelpTip, NumberField, settingLabel } from './setting-control';
 import { useSettingsTarget, type SettingsTarget } from './settings-target';
 
 type ServerRead = 'idle' | 'loading' | 'ready' | 'failed';
-const INTEGER_FIELDS: ReadonlySet<GenerationField> = new Set(['max_tokens', 'top_k', 'seed']);
 
 /** Reads the selected ready model's /settings once per model revision, so each field can name its server default. */
 function useServerDefaultsRead(target: SettingsTarget): { state: ServerRead; model: string | null; reason: 'offline' | 'none' | 'disabled' | null } {
-  const { actions, readyId, revision, liveEnabled } = target;
+  const { actions, readyId, scope, liveEnabled } = target;
   const [state, setState] = useState<ServerRead>('idle');
   useEffect(() => {
-    if (readyId === null || revision === null || !liveEnabled) { setState('idle'); return undefined; }
+    if (readyId === null || scope === null || !liveEnabled) { setState('idle'); return undefined; }
     const controller = new AbortController();
     setState('loading');
     void actions.getSettings(readyId, controller.signal).then((response) => {
       if (controller.signal.aborted) return;
-      recordServerSettings(readyId, revision, response);
+      recordServerSettings(scope, response);
       setState('ready');
     }).catch(() => { if (!controller.signal.aborted) setState('failed'); });
     return () => controller.abort();
-  }, [actions, readyId, revision, liveEnabled]);
+  // The scope object is rebuilt on every render; its fields are the real dependency.
+  }, [actions, readyId, scope?.instance, scope?.revision, liveEnabled]);
   const reason = !target.connected ? 'offline' : readyId === null ? 'none' : !liveEnabled ? 'disabled' : null;
   return { state, model: target.selected?.identity.display_name ?? null, reason };
 }
@@ -32,7 +32,7 @@ function useServerDefaultsRead(target: SettingsTarget): { state: ServerRead; mod
 export function GenerationSettings({ locale }: { locale: Locale }): React.JSX.Element {
   const { defaults, setDefaults, reset } = useGenerationDefaults();
   const target = useSettingsTarget();
-  const server = useServerGenerationDefaults(target.readyId, target.revision);
+  const server = useServerGenerationDefaults(target.scope);
   const read = useServerDefaultsRead(target);
   const [draft, setDraft] = useState<Record<string, string>>(() => Object.fromEntries(Object.entries(defaults).map(([key, value]) => [key, String(value)])));
   const [error, setError] = useState('');
@@ -51,7 +51,7 @@ export function GenerationSettings({ locale }: { locale: Locale }): React.JSX.El
         {GENERATION_FIELDS.map((name) => {
           const resolved = resolveEffectiveParameter(name, undefined, defaults[name], server?.[name]);
           const { label } = settingLabel(locale, `default_${name}`);
-          return <NumberField key={name} label={label} value={draft[name] ?? ''} step={INTEGER_FIELDS.has(name) ? '1' : 'any'} min={0} onChange={(value) => setDraft((old) => ({ ...old, [name]: value }))} hint={`${name} · ${t(locale, 'settings.requests.effective', { value: describeEffectiveParameter(locale, resolved) })}`} testId={`settings-request-${name}`} />;
+          return <NumberField key={name} label={label} value={draft[name] ?? ''} step={INTEGER_GENERATION_FIELDS.has(name) ? '1' : 'any'} min={0} onChange={(value) => setDraft((old) => ({ ...old, [name]: value }))} hint={`${name} · ${t(locale, 'settings.requests.effective', { value: describeEffectiveParameter(locale, resolved) })}`} testId={`settings-request-${name}`} />;
         })}
       </div>
       {error ? <ErrorBanner title={t(locale, 'settings.generation.error_title')} body={error} /> : null}

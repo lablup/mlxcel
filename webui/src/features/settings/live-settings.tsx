@@ -3,7 +3,7 @@ import { Button, Dialog, ErrorBanner } from '../../design-system/primitives';
 import { formatSettingValue, parseSettingInput, settingInput, type SettingSpec, type SettingsResponse } from '../../api/settings';
 import { useWebUiActions } from '../../state';
 import { t, type Locale, type StringKey } from '../../i18n/catalog';
-import { recordServerSettings } from './server-defaults';
+import { recordServerSettings, type ServerDefaultsScope } from './server-defaults';
 import { HelpTip, SettingControl } from './setting-control';
 
 export type LiveSettingGroup = 'sampling' | 'dry' | 'diffusion' | 'template' | 'other';
@@ -30,10 +30,20 @@ export function stagedDefault(spec: SettingSpec): string {
   return Math.fround(Number(shown)) === Math.fround(spec.default) ? shown : settingInput(spec, spec.default);
 }
 
-export function LiveSettings({ modelId, revision, locale }: { modelId: string; revision?: number; locale: Locale }): React.JSX.Element {
+// Only the active Settings tab is mounted. An unapplied live draft survives a tab switch here, per worker and
+// in memory only, so moving to the Server tab and back does not silently drop edits.
+const retainedDrafts = new Map<string, Record<string, string>>();
+const draftKey = (scope: ServerDefaultsScope): string => JSON.stringify([scope.instance, scope.modelId, scope.revision]);
+
+export function LiveSettings({ modelId, scope, locale }: { modelId: string; scope?: ServerDefaultsScope | null; locale: Locale }): React.JSX.Element {
   const actions = useWebUiActions();
   const [current, setCurrentState] = useState<SettingsResponse | null>(null);
-  const [draft, setDraft] = useState<Record<string, string>>({});
+  const retainKey = scope ? draftKey(scope) : null;
+  const [draft, setDraft] = useState<Record<string, string>>(() => (retainKey === null ? undefined : retainedDrafts.get(retainKey)) ?? {});
+  useEffect(() => {
+    if (retainKey === null) return;
+    if (Object.keys(draft).length > 0) retainedDrafts.set(retainKey, draft); else retainedDrafts.delete(retainKey);
+  }, [draft, retainKey]);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
@@ -42,7 +52,7 @@ export function LiveSettings({ modelId, revision, locale }: { modelId: string; r
   const localeRef = useRef(locale); localeRef.current = locale;
   const titleId = useId();
   // Every read also refreshes the server defaults the Requests tab and the Chat hint resolve against.
-  const setCurrent = (value: SettingsResponse): void => { setCurrentState(value); if (revision !== undefined) recordServerSettings(modelId, revision, value); };
+  const setCurrent = (value: SettingsResponse): void => { setCurrentState(value); if (scope) recordServerSettings(scope, value); };
   const setCurrentRef = useRef(setCurrent); setCurrentRef.current = setCurrent;
   useEffect(() => { const controller = new AbortController(); request.current = controller; setBusy(true); void actions.getSettings(modelId, controller.signal).then((value) => { if (!controller.signal.aborted) setCurrentRef.current(value); }).catch(() => { if (!controller.signal.aborted) setMessage(t(localeRef.current, 'settings.live.unavailable')); }).finally(() => { if (!controller.signal.aborted) setBusy(false); }); return () => controller.abort(); }, [actions, modelId]);
   const refresh = async (): Promise<void> => {

@@ -64,3 +64,12 @@ it('resolves every server default as unknown when no ready model is selected', a
     expect(chatHint(field)).toBe('Inherited: server default, not readable');
   }
 });
+
+it('does not carry server defaults across a server restart that reuses the model id and revision', async () => {
+  await act(async () => root.render(<><GenerationSettings locale="en" /><ChatHint /></>));
+  expect(chatHint('temperature')).toBe('Inherited: 0.8 (server default)');
+  const restarted = { ...bootstrap, server: { ...bootstrap.server, server_instance_id: `${bootstrap.server.server_instance_id}-restarted` } };
+  mocks.snapshot = { ...mocks.snapshot as WebUiSnapshot, bootstrap: restarted as unknown as BootstrapResponse };
+  await act(async () => root.render(<ChatHint />));
+  expect(chatHint('temperature')).toBe('Inherited: server default, not readable');
+});

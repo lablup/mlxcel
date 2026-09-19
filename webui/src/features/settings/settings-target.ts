@@ -1,6 +1,7 @@
 // Copyright 2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 import type { CatalogEntry } from '../../api/types';
 import { useWebUi, useWebUiActions } from '../../state';
+import { serverDefaultsScope, type ServerDefaultsScope } from './server-defaults';
 
 /** The model every server-scoped Settings tab reads: the app-wide selection, observed only once it is Ready. */
 export interface SettingsTarget {
@@ -11,6 +12,8 @@ export interface SettingsTarget {
   /** Selection never loads: a model that is not Ready is never observed. */
   readonly readyId: string | null;
   readonly revision: number | null;
+  /** Where reads of this model's /settings are recorded for the Requests tab and the Chat hint. */
+  readonly scope: ServerDefaultsScope | null;
   /** The operator started the server with --settings. */
   readonly liveEnabled: boolean;
   readonly single: boolean;
@@ -29,6 +32,7 @@ export function useSettingsTarget(): SettingsTarget {
     connected,
     readyId,
     revision: readyId === null || selected === null ? null : selected.identity.revision,
+    scope: readyId === null ? null : serverDefaultsScope(snapshot, selected),
     liveEnabled: snapshot.bootstrap?.features.includes('settings') === true,
     single: snapshot.bootstrap?.server.mode === 'single_model',
   };

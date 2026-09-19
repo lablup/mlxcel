@@ -1,30 +1,30 @@
 {
   "budgets": {
-    "embedded_asset_bytes": 784240,
+    "embedded_asset_bytes": 784587,
     "embedded_asset_limit_bytes": 5242880,
-    "initial_js_gzip_bytes": 166196,
+    "initial_js_gzip_bytes": 166326,
     "initial_js_gzip_limit_bytes": 204800,
-    "total_js_gzip_bytes": 167371,
+    "total_js_gzip_bytes": 167503,
     "total_js_gzip_limit_bytes": 716800
   },
   "files": [
     {
       "bytes": 951,
-      "gzip_bytes": 612,
-      "path": "assets/code-highlight-B3V6Oh4c.js",
-      "sha256": "fef861ec3100f6c56279d73687f6fa86876f498a13a24cd7e088060a6922c521"
+      "gzip_bytes": 613,
+      "path": "assets/code-highlight-BPmAMgJ6.js",
+      "sha256": "037ed9ad83864e5b83e7aee8692c51d10e087f6819df65e671756173f56dbc39"
     },
     {
       "bytes": 1134,
-      "gzip_bytes": 563,
-      "path": "assets/history-QnwNmtm9.js",
-      "sha256": "13048c4eb7241af0b005536cc4b4a39226ed19c2eaed0f983917c02b07bff183"
+      "gzip_bytes": 564,
+      "path": "assets/history-DQVys1xt.js",
+      "sha256": "18c18e463c6f9d03a89a8d6eeb577295bc244d71d18b397cba8bf02fc5c322a4"
     },
     {
-      "bytes": 641319,
-      "gzip_bytes": 165207,
-      "path": "assets/index-B8un95z3.js",
-      "sha256": "394d83beae1df9882bb21e45d420b21fce1ad2ef50889a345e1eb7e848341b9b"
+      "bytes": 641666,
+      "gzip_bytes": 165337,
+      "path": "assets/index-BNlC57Qu.js",
+      "sha256": "ed8e812b46568a80765db98423fa417c160595f11364785e42fcd0b263a9d0a5"
     },
     {
       "bytes": 122698,
@@ -36,7 +36,7 @@
       "bytes": 503,
       "gzip_bytes": 305,
       "path": "index.html",
-      "sha256": "83e66abcd7bd5b0a3184c8a62474893f897011a9802cf3b88504bd214d40ac4a"
+      "sha256": "9a75c50ae66a7c06de14e1007f3b217a70dfa30f05af65ac8138a38dda3e3b53"
     },
     {
       "bytes": 2129,
@@ -73,5 +73,5 @@
   },
   "pnpm_version": "11.18.0",
   "schema_version": 1,
-  "source_digest_sha256": "9ad5f2da50bf7ac251194aa509af5f261b3cb8faaed2ca60b6df78a8aa231336"
+  "source_digest_sha256": "887457006e658de169482e17a6cb93648619a9c359ecd44478ac9dd759391738"
 }

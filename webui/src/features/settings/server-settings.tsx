@@ -25,12 +25,12 @@ const liveDisabled = (locale: Locale): React.JSX.Element => <ErrorBanner tone="i
 export function ModelSettings({ locale }: { locale: Locale }): React.JSX.Element {
   const target = useSettingsTarget();
   if (!target.connected) return <div className="screen-stack settings-sections">{unavailable(locale)}</div>;
-  const { selected, readyId, revision } = target;
+  const { selected, readyId, scope } = target;
   return (
     <div className="screen-stack settings-sections">
       <ModelSelector locale={locale} target={target} />
       <ProfileSettings key={selected?.identity.id ?? 'reusable'} model={selected} locale={locale} single={target.single} />
-      {readyId === null ? noModel(locale) : target.liveEnabled ? <LiveSettings key={readyId} modelId={readyId} revision={revision ?? undefined} locale={locale} /> : liveDisabled(locale)}
+      {readyId === null ? noModel(locale) : target.liveEnabled ? <LiveSettings key={readyId} modelId={readyId} scope={scope} locale={locale} /> : liveDisabled(locale)}
     </div>
   );
 }
@@ -65,7 +65,7 @@ function StartupValues({ locale, specs, current }: { locale: Locale; specs: read
 /** Server tab: read-only facts about the selected Ready model's server. */
 export function ServerSettings({ locale }: { locale: Locale }): React.JSX.Element {
   const target = useSettingsTarget();
-  const { actions, readyId, revision, selected, liveEnabled } = target;
+  const { actions, readyId, scope, selected, liveEnabled } = target;
   const [props, setProps] = useState<ModelProps | null>(null);
   const [propsFailed, setPropsFailed] = useState(false);
   const [startup, setStartup] = useState<SettingsResponse | null>(null);
@@ -85,10 +85,11 @@ export function ServerSettings({ locale }: { locale: Locale }): React.JSX.Elemen
     void actions.getSettings(readyId, controller.signal).then((value) => {
       if (controller.signal.aborted) return;
       setStartup(value);
-      if (revision !== null) recordServerSettings(readyId, revision, value);
+      if (scope !== null) recordServerSettings(scope, value);
     }).catch(() => { if (!controller.signal.aborted) setStartupFailed(true); });
     return () => controller.abort();
-  }, [actions, readyId, revision, liveEnabled]);
+  // The scope object is rebuilt on every render; its fields are the real dependency.
+  }, [actions, readyId, scope?.instance, scope?.revision, liveEnabled]);
   if (!target.connected) return <div className="screen-stack settings-sections">{unavailable(locale)}</div>;
   const unknown = t(locale, 'settings.server.unknown');
   const readOnly = startup?.schema.filter((spec) => !spec.mutable) ?? [];

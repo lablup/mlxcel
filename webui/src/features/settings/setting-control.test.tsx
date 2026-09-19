@@ -35,6 +35,9 @@ describe('SettingControl maps each schema kind to its control', () => {
     const control = renderControl(spec('flag', 'bool'), false);
     const box = host.querySelector<HTMLInputElement>('input[type="checkbox"]');
     expect(box?.checked).toBe(false);
+    // Named by its label alone; the raw key and help describe it rather than joining the name.
+    expect(document.getElementById(box?.getAttribute('aria-labelledby') ?? '')?.textContent).toBe('flag');
+    expect(document.getElementById(box?.getAttribute('aria-describedby') ?? '')?.textContent).toBe('flag help');
     act(() => box?.click());
     expect(control.draft()).toBe('true');
     expect(parseSettingInput(spec('flag', 'bool'), control.draft() ?? '')).toBe(true);
