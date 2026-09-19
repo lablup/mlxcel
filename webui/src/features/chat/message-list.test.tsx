@@ -13,7 +13,7 @@ let host: HTMLDivElement;
 let root: Root;
 const onEdit = vi.fn();
 const onRetry = vi.fn();
-function render(turns: ChatTurn[], busy = false, locale: 'en' | 'ko' = 'en'): void { act(() => root.render(<MessageList turns={turns} onEdit={onEdit} onRetry={onRetry} busy={busy} locale={locale} />)); }
+function render(turns: ChatTurn[], busy = false, locale: 'en' | 'ko' = 'en', canSend = true): void { act(() => root.render(<MessageList turns={turns} onEdit={onEdit} onRetry={onRetry} busy={busy} canSend={canSend} locale={locale} />)); }
 const named = (label: string): HTMLButtonElement[] => [...host.querySelectorAll<HTMLButtonElement>('button')].filter((button) => button.getAttribute('aria-label') === label);
 
 beforeEach(() => { vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true); onEdit.mockReset(); onRetry.mockReset(); host = document.createElement('div'); document.body.append(host); root = createRoot(host); });
@@ -76,6 +76,10 @@ describe('MessageList', () => {
     expect(onRetry).toHaveBeenCalledExactlyOnceWith('b');
     render([turn('a'), turn('b', { status: 'error' })], true);
     expect(named(retry)[0].disabled).toBe(true);
+    // Retry sends, so without a model Send would accept it is disabled like Send.
+    render([turn('a'), turn('b', { status: 'error' })], false, 'en', false);
+    expect(named(retry)[0].disabled).toBe(true);
+    expect(named(t('en', 'chat.transcript.edit'))[1].disabled).toBe(false);
   });
   it('keeps the edit, copy and details actions per message, named by what they act on', () => {
     render([turn('a'), turn('b')]);

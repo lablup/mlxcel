@@ -61,7 +61,7 @@ function UserMessage({ turn, index, busy, locale, onEdit }: { turn: ChatTurn; in
   </div>;
 }
 
-function AssistantMessage({ turn, last, busy, locale, onRetry }: { turn: ChatTurn; last: boolean; busy: boolean; locale: Locale; onRetry: (turnId: string) => void }): React.JSX.Element {
+function AssistantMessage({ turn, last, busy, canSend, locale, onRetry }: { turn: ChatTurn; last: boolean; busy: boolean; canSend: boolean; locale: Locale; onRetry: (turnId: string) => void }): React.JSX.Element {
   const [copyStatus, copy] = useCopy();
   const [details, setDetails] = useState(false);
   const detailsId = useId();
@@ -91,7 +91,7 @@ function AssistantMessage({ turn, last, busy, locale, onRetry }: { turn: ChatTur
     <div className="chat-message-tools">
       <div className="chat-message-actions" role="group" aria-label={t(locale, 'chat.message.response_actions')}>
         <IconButton label={t(locale, 'chat.transcript.copy')} icon="copy" onClick={() => copy(turn.content, 'chat.transcript.copied', 'chat.transcript.copy_failed')} />
-        {canRetry(turn, last) ? <IconButton label={t(locale, 'chat.message.retry')} icon="retry" disabled={busy} onClick={() => onRetry(turn.id)} /> : null}
+        {canRetry(turn, last) ? <IconButton label={t(locale, 'chat.message.retry')} icon="retry" disabled={busy || !canSend} onClick={() => onRetry(turn.id)} /> : null}
         <IconButton label={t(locale, 'chat.transcript.details')} icon="details" aria-expanded={details} aria-controls={detailsId} onClick={() => setDetails(!details)} />
       </div>
       <span className="chat-copy-status" role="status">{copyStatus === null ? '' : t(locale, copyStatus)}</span>
@@ -105,14 +105,16 @@ function AssistantMessage({ turn, last, busy, locale, onRetry }: { turn: ChatTur
 }
 
 // Historical turns are immutable, so memo keeps them out of every 50 ms stream flush.
-const Turn = memo(function Turn({ turn, index, last, busy, locale, onEdit, onRetry }: { turn: ChatTurn; index: number; last: boolean; busy: boolean; locale: Locale; onEdit: (index: number) => void; onRetry: (turnId: string) => void }): React.JSX.Element {
+const Turn = memo(function Turn({ turn, index, last, busy, canSend, locale, onEdit, onRetry }: { turn: ChatTurn; index: number; last: boolean; busy: boolean; canSend: boolean; locale: Locale; onEdit: (index: number) => void; onRetry: (turnId: string) => void }): React.JSX.Element {
   return <article className="chat-turn" aria-label={t(locale, 'chat.transcript.turn_label', { model: turn.modelName })}>
     <UserMessage turn={turn} index={index} busy={busy} locale={locale} onEdit={onEdit} />
-    <AssistantMessage turn={turn} last={last} busy={busy} locale={locale} onRetry={onRetry} />
+    <AssistantMessage turn={turn} last={last} busy={busy} canSend={canSend} locale={locale} onRetry={onRetry} />
   </article>;
 });
 
-export function MessageList({ turns, onEdit, onRetry, busy, locale }: { turns: readonly ChatTurn[]; onEdit: (index: number) => void; onRetry: (turnId: string) => void; busy: boolean; locale: Locale }): React.JSX.Element {
+// `canSend` is whether Send would be admitted now (a Ready chat model on a live connection):
+// Retry sends, so it is disabled exactly when Send is, rather than doing nothing on click.
+export function MessageList({ turns, onEdit, onRetry, busy, canSend = true, locale }: { turns: readonly ChatTurn[]; onEdit: (index: number) => void; onRetry: (turnId: string) => void; busy: boolean; canSend?: boolean; locale: Locale }): React.JSX.Element {
   // Stable callbacks, so a parent re-render does not re-render every memoized turn.
   const editRef = useRef(onEdit); editRef.current = onEdit;
   const retryRef = useRef(onRetry); retryRef.current = onRetry;
@@ -132,7 +134,7 @@ export function MessageList({ turns, onEdit, onRetry, busy, locale }: { turns: r
       if (!node) return;
       following.current = node.scrollHeight - node.scrollTop - node.clientHeight < 80;
       setShowJump(!following.current);
-    }}>{turns.length ? turns.map((turn, index) => <Turn key={turn.id} turn={turn} index={index} last={index === turns.length - 1} busy={busy} locale={locale} onEdit={editAt} onRetry={retryAt} />) : <p className="chat-empty">{t(locale, 'chat.transcript.empty')}</p>}</div>
+    }}>{turns.length ? turns.map((turn, index) => <Turn key={turn.id} turn={turn} index={index} last={index === turns.length - 1} busy={busy} canSend={canSend} locale={locale} onEdit={editAt} onRetry={retryAt} />) : <p className="chat-empty">{t(locale, 'chat.transcript.empty')}</p>}</div>
     {showJump ? <Button className="chat-jump" onClick={() => { following.current = true; if (scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight; setShowJump(false); }}>{t(locale, 'chat.transcript.jump')}</Button> : null}
   </section>;
 }

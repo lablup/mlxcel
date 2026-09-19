@@ -286,7 +286,7 @@ export function Chat({ locale }: { locale: Locale }): React.JSX.Element {
             const turn = current.turns[index];
             if (!turn) return;
             setPendingEdit({ conversationId: current.id, turnId: turn.id, index });
-          }} onRetry={retry} busy={locked} locale={locale} />
+          }} onRetry={retry} busy={locked} canSend={canChat} locale={locale} />
           <div className="chat-footer">
             {error ? <ErrorBanner title={t(locale, 'chat.error.title')} body={error} /> : null}
             <Composer locale={locale} textareaRef={composer} draft={draft} onDraftChange={setDraft} images={images} onRemoveImage={(index) => setImages(images.filter((_, position) => index !== position))} canImage={Boolean(canImage)} onAddImages={addImages} disabled={locked} running={busy} canSend={canChat && !locked && draft.trim() !== ''} onSend={() => { void send(); }} onStop={stop} onKeyDown={handleKeyDown} onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }} />
