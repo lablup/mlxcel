@@ -98,7 +98,8 @@
 .chat-row { min-width: 0; display: flex; align-items: center; gap: 2px; padding-inline-end: var(--space-1); border-radius: var(--radius-sm); }
 .chat-row[data-current] { background: var(--color-selection); box-shadow: inset 3px 0 0 var(--color-focus); }
 .chat-row-select { flex: 1 1 auto; min-width: 0; min-height: 44px; display: grid; gap: 2px; padding: var(--space-2); color: inherit; background: transparent; border: 0; border-radius: var(--radius-sm); font: inherit; text-align: start; cursor: pointer; }
-.chat-row-select:hover:not(:disabled) { background: var(--color-selection); }
+/* Hover tints only other rows: stacked on the current row's tint it drops the muted metadata below 4.5:1. */
+.chat-row:not([data-current]) .chat-row-select:hover:not(:disabled) { background: var(--color-selection); }
 .chat-row-select:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .chat-row-select:disabled { cursor: not-allowed; opacity: 0.56; }
 .chat-row-title { min-width: 0; font-weight: 650; overflow-wrap: anywhere; }

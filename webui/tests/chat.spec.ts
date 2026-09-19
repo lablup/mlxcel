@@ -138,6 +138,9 @@ for (const width of [1440, 390]) {
     }
     await expect(page.locator('.chat-turn')).toHaveCount(1);
     await expect(page.locator('button.chat-row-select[aria-current="true"]')).toContainText('안녕하세요');
+    // At 1440 the pointer still rests on the row it just selected: a hovered current row keeps
+    // its muted metadata readable (the hover tint must not stack on the current-row tint).
+    await expectAxeClean(page);
   });
 }
 
