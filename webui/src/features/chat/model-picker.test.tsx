@@ -121,6 +121,24 @@ describe('ModelPicker', () => {
     expect(byTestId('models-confirm').textContent).toContain(t('en', 'models.library.capacity'));
     expect(host.querySelector('[role="alert"]')?.textContent).toBe('capacity full');
   });
+  it('answers the capacity dialog like Models: the chosen eviction target and the load profile, sent once more', async () => {
+    const idle = entry('idle', 'ready', [chat('provider_ready')]);
+    mocked.state = { ...snapshot(target), catalog: [target, idle] };
+    render();
+    act(() => profiles.save({ ctx_size: 4096 }, 'reusable'));
+    mocked.loadModel.mockRejectedValueOnce(new WebUiHttpError(409, { request_id: 'req_capacity', error: { code: 'conflict', message: 'capacity full', retryable: false } }));
+    await click(byTestId('chat-load'));
+    await click(byTestId('chat-load-dialog-confirm'));
+    expect(byTestId<HTMLDialogElement>('models-confirm').open).toBe(true);
+    const eviction = byTestId<HTMLSelectElement>('models-eviction-target');
+    act(() => { Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set?.call(eviction, idle.identity.id); eviction.dispatchEvent(new Event('change', { bubbles: true })); });
+    await click(byTestId('models-confirm-submit'));
+    expect(mocked.loadModel).toHaveBeenCalledTimes(2);
+    const request = mocked.loadModel.mock.calls[1][0];
+    expect(request).toEqual({ action: 'load', load_profile: { ctx_size: 4096 }, model_id: target.identity.id, expected_revision: target.identity.revision, idempotency_key: request.idempotency_key, eviction_target_id: idle.identity.id, eviction_target_expected_revision: idle.identity.revision });
+    expect(request.idempotency_key).not.toBe(mocked.loadModel.mock.calls[0][0].idempotency_key);
+    expect(document.querySelector('[data-testid="models-confirm"]')).toBeNull();
+  });
   it('disables Load when the model cannot be loaded and explains where to look', () => {
     mocked.state = snapshot({ ...target, supported: false });
     render();
