@@ -1,8 +1,10 @@
 // Copyright 2025-2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
-/* global URL */
+/* global URL, process */
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { cpSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -81,6 +83,33 @@ test('selectors that match no shipped id or family fail, including case and pref
     '[data-theme-family="orange"] { --x: 1; }',
   ].join('\n');
   assert.deepEqual(rules(scan('src/features/example.css', dead)), ['dead-theme-selector@1', 'dead-theme-selector@2', 'dead-theme-selector@3', 'dead-theme-selector@4', 'dead-theme-selector@5', 'dead-theme-selector@6']);
+});
+
+test('attribute names match case-insensitively, as in HTML documents', () => {
+  assert.deepEqual(rules(scan('src/example.css', '[DATA-THEME="dark"] .x { color: red; }\n[Data-Theme$="-dark"] .y { color: red; }')), ['dead-theme-selector@1']);
+});
+
+test('pathological whitespace does not make the scan super-linear', () => {
+  const started = Date.now();
+  // Neither input matches; the old patterns backtracked cubically and quadratically on them.
+  scan('src/example.ts', `import${' '.repeat(3000)};\n[data-theme="glass-dark"${' '.repeat(40000)}x`);
+  assert.ok(Date.now() - started < 1000, `scan took ${Date.now() - started} ms`);
+});
+
+test('a symlinked invocation still runs the check', () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'theme-gate-'));
+  try {
+    const copy = join(scratch, 'webui');
+    for (const directory of ['scripts', 'src', 'public', 'tests']) cpSync(join(webuiRoot, directory), join(copy, directory), { recursive: true });
+    cpSync(join(webuiRoot, 'index.html'), join(copy, 'index.html'));
+    const tokens = join(copy, 'src/design-system/tokens.css');
+    writeFileSync(tokens, `${readFileSync(tokens, 'utf8')}\n:root[data-theme="dark"] { color-scheme: dark; }\n`);
+    const link = join(scratch, 'gate.mjs');
+    symlinkSync(join(copy, 'scripts/check-theme-selectors.mjs'), link);
+    assert.throws(() => execFileSync(process.execPath, [link], { stdio: 'pipe' }), (error) => error.status === 1 && String(error.stderr).includes('dead-theme-selector'));
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
 });
 
 test('a data-color-scheme value selector is rejected because it holds the raw preference', () => {

@@ -18,7 +18,10 @@
  * It reads the appearance switches the product already has and adds none:
  *   - glass intensity: --material-glass-alpha, --material-glass-blur and
  *     --material-glass-saturation from ../glass-intensity.css
- *     (data-glass-intensity 0..100), which size the chrome and control glass;
+ *     (data-glass-intensity 0..100), which size the chrome glass. Buttons get
+ *     a tinted translucent fill but no backdrop blur of their own: they sit on
+ *     transcript, table and form surfaces, which stay stable, and a blur layer
+ *     per button would be re-rendered on every streamed token;
  *   - data-material, data-reduce-transparency, data-backdrop-filter and
  *     data-high-contrast, plus prefers-reduced-transparency and
  *     prefers-contrast: any of them turns every translucent glass surface in
@@ -91,7 +94,6 @@
 /* Family-wide glass bindings over contract.css. */
 [data-theme="glass-light"],
 [data-theme="glass-dark"] {
-  --material-control-backdrop: blur(calc(var(--material-glass-blur) / 2)) saturate(var(--material-glass-saturation));
   --button-primary-fill: var(--glass-highlight), var(--button-primary-solid);
   --button-danger-fill: var(--glass-highlight), var(--button-danger-solid);
   --token-boxShadowSecondary: var(--shadow-popover);
@@ -102,7 +104,6 @@
   --token-buttonPrimaryBorder: 1px solid var(--glass-edge);
   --token-buttonPrimaryShadow: var(--glass-button-shadow);
   --token-buttonPrimaryShadowHover: var(--glass-button-shadow);
-  --token-buttonSecondaryBackdrop: var(--material-control-backdrop);
   --token-buttonSecondaryShadow: var(--shadow-chrome);
   --token-buttonSecondaryShadowHover: var(--shadow-chrome);
   --token-colorBgMask: rgba(8, 10, 14, 0.32);
@@ -121,7 +122,6 @@
 :root[data-theme-family="glass"][data-high-contrast="on"] {
   --material-content-bg: var(--color-bg-elevated);
   --material-control-bg: var(--color-bg-neutral);
-  --material-control-backdrop: none;
   --button-primary-fill: var(--button-primary-solid);
   --button-danger-fill: var(--button-danger-solid);
 }
@@ -130,7 +130,6 @@
   :root[data-theme-family="glass"] {
     --material-content-bg: var(--color-bg-elevated);
     --material-control-bg: var(--color-bg-neutral);
-    --material-control-backdrop: none;
     --button-primary-fill: var(--button-primary-solid);
     --button-danger-fill: var(--button-danger-solid);
   }
@@ -140,7 +139,6 @@
   :root[data-theme-family="glass"]:not([data-high-contrast="off"]) {
     --material-content-bg: var(--color-bg-elevated);
     --material-control-bg: var(--color-bg-neutral);
-    --material-control-backdrop: none;
     --button-primary-fill: var(--button-primary-solid);
     --button-danger-fill: var(--button-danger-solid);
   }

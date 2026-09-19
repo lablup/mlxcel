@@ -99,8 +99,9 @@ describe('index.html', () => {
   it('loads the bootstrap as a classic, render-blocking script in <head>', () => {
     const tag = head.match(/<script\b[^>]*\bsrc="\.\/theme-bootstrap\.js"[^>]*><\/script>/);
     expect(tag).not.toBeNull();
-    // Any type attribute (module included), async or defer would stop it blocking the first paint.
-    expect(tag?.[0]).not.toMatch(/\btype=|\basync\b|\bdefer\b/);
+    // Any type attribute (module included), async or defer would stop it blocking the first paint, and nomodule would skip it.
+    expect(tag?.[0]).not.toMatch(/\btype=|\basync\b|\bdefer\b|\bnomodule\b/);
+    expect(indexHtml.split('./theme-bootstrap.js').length - 1).toBe(1);
   });
 
   it('carries no inline script, which the served CSP (script-src self) would block', () => {

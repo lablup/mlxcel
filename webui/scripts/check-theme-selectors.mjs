@@ -45,14 +45,14 @@
  * GitHub ::error annotation on the offending line.
  */
 
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, extname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { THEME_FAMILIES, THEME_IDS } from '../src/design-system/theme.ts';
 
-const SCANNED_EXTENSIONS = new Set(['.css', '.ts', '.tsx', '.js', '.mjs', '.html']);
-const SCRIPT_EXTENSIONS = new Set(['.ts', '.tsx', '.js', '.mjs']);
+const SCRIPT_EXTENSIONS = new Set(['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs']);
+const SCANNED_EXTENSIONS = new Set(['.css', '.html', ...SCRIPT_EXTENSIONS]);
 const THEMES_DIR = 'src/design-system/themes';
 const THEME_ENTRY_CSS = `${THEMES_DIR}/index.css`;
 const THEME_ENTRY_IMPORTER = 'src/main.tsx';
@@ -66,8 +66,12 @@ const SYSTEM_SCHEME_RESOLVERS = new Set(['src/design-system/theme.ts', 'public/t
  */
 const ALLOW_RE = /theme-selector-allow:\s*([^\s*/][^*\n]*)/;
 
-/** `[attr]`, `[attr="v"]`, `[attr^='v' i]`, `[attr=v]` for the three theme attributes. */
-const ATTRIBUTE_SELECTOR_RE = /\[\s*(data-theme-family|data-color-scheme|data-theme)\s*(?:([~|^$*]?=)\s*(?:"([^"]*)"|'([^']*)'|([^\s\]"'`]+))\s*([iIsS])?\s*)?\]/g;
+/**
+ * `[attr]`, `[attr="v"]`, `[attr^='v' i]`, `[attr=v]` for the three theme
+ * attributes. Attribute names match case-insensitively, as they do in HTML
+ * documents; each whitespace run has one quantifier so matching stays linear.
+ */
+const ATTRIBUTE_SELECTOR_RE = /\[\s*(data-theme-family|data-color-scheme|data-theme)\s*(?:([~|^$*]?=)\s*(?:"([^"]*)"|'([^']*)'|([^\s\]"'`]+))\s*(?:([iIsS])\s*)?)?\]/gi;
 const MEDIA_COLOR_SCHEME_RE = /@media[^{;]*prefers-color-scheme/g;
 const ANY_COLOR_SCHEME_RE = /prefers-color-scheme/g;
 /** Literal values compared with, or written to, data-theme in script code. */
@@ -80,7 +84,8 @@ const SCRIPT_THEME_VALUE_RES = [
   /toHaveAttribute\(\s*['"]data-theme['"]\s*,\s*(['"])([^'"\n]*)\1/g,
 ];
 const CSS_IMPORT_RE = /@import\s+(?:url\(\s*)?(['"]?)([^'")\s;]+)\1/g;
-const SCRIPT_IMPORT_RE = /(?:\bimport\s+(?:[\w$*{}\s,]+\s+from\s+)?|\bimport\(\s*|\brequire\(\s*)(['"])([^'"\n]+)\1/g;
+/** `import x from 'm'`, `import 'm'`, `import('m')`, `require('m')`: the first string after the keyword, lazily, so the scan is linear. */
+const SCRIPT_IMPORT_RE = /\b(?:import|require)\b[^'";]*?(['"])([^'"\n]+)\1/g;
 
 /** Evaluates one attribute selector against a candidate value, per Selectors Level 4. */
 export function attributeMatches(operator, value, caseInsensitive, candidate) {
@@ -165,7 +170,8 @@ export function findThemeSelectorViolations(sources, options = {}) {
     };
 
     for (const match of source.matchAll(ATTRIBUTE_SELECTOR_RE)) {
-      const [, attribute, operator] = match;
+      const attribute = match[1].toLowerCase();
+      const operator = match[2];
       if (operator === undefined) continue;
       const value = match[3] ?? match[4] ?? match[5] ?? '';
       if (value.includes('${')) continue;
@@ -274,5 +280,13 @@ function main() {
   process.exit(1);
 }
 
-const invokedDirectly = import.meta.url.startsWith('file:') && process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
+// Node resolves symlinks for import.meta.url, so compare real paths: a run through a symlinked path must not skip the check silently.
+function realPath(path) {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+const invokedDirectly = import.meta.url.startsWith('file:') && Boolean(process.argv[1]) && realPath(process.argv[1]) === realPath(fileURLToPath(import.meta.url));
 if (invokedDirectly) main();

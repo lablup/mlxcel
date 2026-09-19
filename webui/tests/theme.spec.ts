@@ -206,8 +206,8 @@ test.describe('theme system', () => {
         expect(chrome.filter).toMatch(/^(none|blur\(0px\)( saturate\(1\))?)$/);
         expect(chrome.image).toBe('none');
         expect(chrome.color).not.toMatch(/rgba\(.*, 0\.\d+\)$/);
-        const values = await rootValues(page, ['--material-control-backdrop', '--token-buttonPrimaryBg', '--material-content-bg', '--color-bg-elevated']);
-        expect(values['--material-control-backdrop']).toBe('none');
+        const values = await rootValues(page, ['--token-buttonSecondaryBackdrop', '--token-buttonPrimaryBg', '--material-content-bg', '--color-bg-elevated']);
+        expect(values['--token-buttonSecondaryBackdrop']).toBe('none');
         expect(values['--token-buttonPrimaryBg']).not.toContain('gradient');
         expect((await buttonFill(page, '.ds-button-primary')).image).toBe('none');
         expect(values['--material-content-bg']).toBe(values['--color-bg-elevated']);
