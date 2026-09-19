@@ -94,7 +94,7 @@
       "identity": {
         "id": "mdl_uB9xAUQSKlrb9ELybOgV-92lVC7XjiMXju6pwZZBbAU",
         "inference_id": "alpha",
-        "display_name": "alpha models dir",
+        "display_name": "alpha",
         "source": "models_dir",
         "source_key_hash": "fb957973e2e6f9fb17bbb5bf2922d6bb67dde35b08c94fa80f8154722b58af2e",
         "generation": 1,

@@ -1,30 +1,30 @@
 {
   "budgets": {
-    "embedded_asset_bytes": 735618,
+    "embedded_asset_bytes": 736094,
     "embedded_asset_limit_bytes": 5242880,
-    "initial_js_gzip_bytes": 156169,
+    "initial_js_gzip_bytes": 156337,
     "initial_js_gzip_limit_bytes": 204800,
-    "total_js_gzip_bytes": 157344,
+    "total_js_gzip_bytes": 157512,
     "total_js_gzip_limit_bytes": 716800
   },
   "files": [
     {
       "bytes": 951,
       "gzip_bytes": 612,
-      "path": "assets/code-highlight-CzWARrNf.js",
-      "sha256": "0836645d623e175f3bdf4e62055f59cd6c46731e70ebd8273ce40f01f14bb705"
+      "path": "assets/code-highlight-BZ-vBiaX.js",
+      "sha256": "cfe95687f9d5a8a5459ab78875a784ee5927bdd209f46bb3dbbc6aa1b4795ffd"
     },
     {
       "bytes": 1134,
       "gzip_bytes": 563,
-      "path": "assets/history-DTnpX_xH.js",
-      "sha256": "103a3311d0e5bba6c02d76639dfa212184549c255c78bdd388417119f012eee2"
+      "path": "assets/history-BTvgVv_A.js",
+      "sha256": "efae643f5f37ab937f06028768e8cb4da28721d76b260f37d8a7045b285785e2"
     },
     {
-      "bytes": 605868,
-      "gzip_bytes": 156169,
-      "path": "assets/index-Bfja5tJs.js",
-      "sha256": "8e4681ff9cd6ed2203ae90a77d568a1e5a819578791d8c5158126210601e1938"
+      "bytes": 606344,
+      "gzip_bytes": 156337,
+      "path": "assets/index-Bm7r1mqL.js",
+      "sha256": "b9e29de85c47695bf2af437540d2cbebd2d8a2cc373e5573d9e5731491cfe6f0"
     },
     {
       "bytes": 111884,
@@ -34,9 +34,9 @@
     },
     {
       "bytes": 453,
-      "gzip_bytes": 288,
+      "gzip_bytes": 287,
       "path": "index.html",
-      "sha256": "11ac28ffef10a24f7805a45715bfcd10848e3c0545a3d32c8d5250fa6b173a63"
+      "sha256": "cb4fc1384bcccc6db17e67d200ef6c0beeb9d7c9cb10c7c904e55ecd176c21d8"
     },
     {
       "bytes": 13233,
@@ -67,5 +67,5 @@
   },
   "pnpm_version": "11.18.0",
   "schema_version": 1,
-  "source_digest_sha256": "b101d708fd3063f571e863c5ca418e8adc4d207097aa7d76f36ae8f0261036e8"
+  "source_digest_sha256": "c83258ce8764335524d31014a3ddb44ec857d5d20332766fd09a2d51cad70eb4"
 }

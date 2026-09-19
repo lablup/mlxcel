@@ -16,7 +16,7 @@ let root: Root;
 let store: ReturnType<typeof useLoadProfile>;
 let editorId: string;
 const target = model();
-const other = { ...target, identity: { ...target.identity, id: `mdl_${'b'.repeat(43)}`, display_name: 'Other model' } };
+const other = { ...target, identity: { ...target.identity, id: `mdl_${'b'.repeat(43)}`, display_name: 'other-model' } };
 function Screen(): React.JSX.Element {
   store = useLoadProfile(editorId);
   return <ModelsLibrary locale="en" />;

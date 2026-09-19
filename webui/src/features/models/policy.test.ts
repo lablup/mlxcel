@@ -109,11 +109,11 @@ describe('authoritative Models action policy', () => {
   it('filters and sorts large CJK inventories without mutating authoritative data', () => {
     const entries = Array.from({ length: 1000 }, (_, index) => ({
       ...model(),
-      identity: { ...model().identity, id: `id_${index}`, display_name: `긴 모델 이름 模型 ${index}` },
+      identity: { ...model().identity, id: `id_${index}`, display_name: `긴-모델-이름-模型-${index}` },
     }));
     const before = entries.map((entry) => entry.identity.id);
     const result = inventory(entries, {
-      query: '模型 99',
+      query: '模型-99',
       source: 'cache',
       task: '',
       status: 'unloaded',
@@ -121,6 +121,21 @@ describe('authoritative Models action policy', () => {
     });
     expect(result).toHaveLength(11);
     expect(entries.map((entry) => entry.identity.id)).toEqual(before);
+  });
+  it('keeps hyphen and underscore spellings of one checkpoint name as distinct rows', () => {
+    const named = (name: string, id: string) => ({
+      ...model(),
+      identity: { ...model().identity, id, inference_id: name, display_name: name },
+    });
+    const hyphen = named('qwen3-0.6b-4bit', 'id_hyphen');
+    const underscore = named('qwen3_0.6b_4bit', 'id_underscore');
+    const search = (query: string, entries = [hyphen, underscore]) =>
+      inventory(entries, { query, source: '', task: '', status: '', sort: 'name' }).map((entry) => entry.identity.id);
+    expect(search('qwen3-0.6b-4bit')).toEqual(['id_hyphen']);
+    expect(search('qwen3_0.6b_4bit')).toEqual(['id_underscore']);
+    const sorted = search('');
+    expect([...sorted].sort()).toEqual(['id_hyphen', 'id_underscore']);
+    expect(search('', [underscore, hyphen])).toEqual(sorted);
   });
   it.each([
     'https://huggingface.co/owner/repo',

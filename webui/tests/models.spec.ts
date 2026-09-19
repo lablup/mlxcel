@@ -232,7 +232,7 @@ for (const variant of [
       identity: {
         ...model().identity,
         id: `mdl_${String(index).padStart(43, '0')}`,
-        display_name: `긴 체크포인트 模型 ${index} — long readable identity without truncating meaning`,
+        display_name: `긴-체크포인트-模型-${index}-long_readable_identity_without_truncating_meaning`,
       },
     }));
     const api = await installLibrary(page, entries);
@@ -242,7 +242,7 @@ for (const variant of [
     await inspect.focus();
     await page.keyboard.press('Enter');
     await expect(page.getByRole('complementary', { name: 'Model details' })).toBeVisible();
-    await page.getByTestId('models-search').fill('模型 119');
+    await page.getByTestId('models-search').fill('模型-119');
     await expect(page.locator('[data-testid="models-table"] tbody tr')).toHaveCount(1);
     expect(api.posts).toEqual([]);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);

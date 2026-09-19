@@ -329,7 +329,7 @@ test('1000-entry catalog remains searchable and bounded', async ({ page }, testI
   await expect(page.locator('[data-testid="models-table"] tbody tr')).toHaveCount(25);
   const loadedMs = Number(process.hrtime.bigint() - started) / 1_000_000;
   const search = page.getByTestId('models-search');
-  const searchTiming = await actionToSettledPaintMs(search, () => search.fill('0999'), { kind: 'table-row-count', testId: 'models-table', rowCount: 1, textIncludes: '0999' }, async () => {
+  const searchTiming = await actionToSettledPaintMs(search, () => search.fill('perf-model-999'), { kind: 'table-row-count', testId: 'models-table', rowCount: 1, textIncludes: 'perf-model-999' }, async () => {
     await expect(page.locator('[data-testid="models-table"] tbody tr')).toHaveCount(1);
     return { filtered_rows: 1 };
   }, 'input');
@@ -347,7 +347,7 @@ test('10000-token transcript keeps post-render controls responsive', async ({ pa
   const chatNav = page.locator('[data-testid="nav-chat"]:visible').first();
   await chatNav.click();
   await page.getByRole('combobox', { name: 'Model for next turn' }).click();
-  await page.getByRole('option', { name: 'Catalog performance model 0000 · Ready', exact: true }).click();
+  await page.getByRole('option', { name: 'perf-model-0 · Ready', exact: true }).click();
   const composer = page.getByRole('textbox', { name: 'Message', exact: true });
   await composer.fill('Produce a long deterministic transcript');
   const renderStarted = process.hrtime.bigint();
