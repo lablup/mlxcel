@@ -174,3 +174,41 @@ test.describe('shared PageLayout', () => {
     await expect(page.locator('.app-content.page-layout.page-layout--wide')).toHaveCount(1);
   });
 });
+
+async function expectHeaderReflows(page: Page, ids: string[]): Promise<void> {
+  for (const id of ids) {
+    const element = page.getByTestId(id);
+    await expectLocatorWithinViewportX(element);
+    expect(await element.evaluate((node) => node.scrollWidth - node.clientWidth)).toBeLessThanOrEqual(1);
+  }
+  await expect(page.getByRole('heading', { level: 1 })).toHaveCount(1);
+  // The product's bold page title, not the package's light 300 weight.
+  expect(await page.getByTestId(ids[0]).evaluate((node) => Number(window.getComputedStyle(node).fontWeight))).toBeGreaterThanOrEqual(600);
+  expect(await horizontalOverflow(page)).toBeLessThanOrEqual(1);
+}
+
+test.describe('shared PageHeader', () => {
+  test('390 gallery header keeps its test ids and reflows at the 200 percent text scale', async ({ page }) => {
+    await bootGallery(page, { ...compact, textScale: '200' });
+    await expect(page.getByTestId('gallery-title')).toHaveText(text('gallery.title', 'ko'));
+    await expectHeaderReflows(page, ['gallery-title', 'gallery-subtitle']);
+    await expectTextScalePanelsReflow(page);
+    await expect(page.getByTestId('gallery-title')).toHaveClass(/page-header__title/);
+  });
+
+  test('390 settings header keeps its test ids and reflows at the 200 percent text scale', async ({ page }) => {
+    await bootGallery(page, { ...compact, textScale: '200' });
+    await page.evaluate(() => { window.location.hash = '#settings'; });
+    await expect(page.getByTestId('settings-title')).toHaveText(text('settings.title', 'ko'));
+    await expectHeaderReflows(page, ['settings-title', 'settings-appearance']);
+    await expect(page.getByTestId('settings-title')).toHaveClass(/page-header__title/);
+  });
+
+  test('390 signed-out connection surface keeps its title and prompt', async ({ page }) => {
+    await bootProduct(page, productVariants[2]);
+    await expect(page.getByTestId('models-title')).toHaveText(text('models.title', 'ko'));
+    await expectHeaderReflows(page, ['models-title', 'connection-prompt-body']);
+    await expectAxeClean(page);
+    await expect(page.getByTestId('models-title')).toHaveClass(/page-header__title/);
+  });
+});
