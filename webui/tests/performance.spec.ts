@@ -329,7 +329,7 @@ test('1000-entry catalog remains searchable and bounded', async ({ page }, testI
   await expect(page.locator('[data-testid="models-table"] tbody tr')).toHaveCount(25);
   const loadedMs = Number(process.hrtime.bigint() - started) / 1_000_000;
   const search = page.getByTestId('models-search');
-  const searchTiming = await actionToSettledPaintMs(search, () => search.fill('0999'), { kind: 'table-row-count', testId: 'models-table', rowCount: 1, textIncludes: '0999' }, async () => {
+  const searchTiming = await actionToSettledPaintMs(search, () => search.fill('perf-model-999'), { kind: 'table-row-count', testId: 'models-table', rowCount: 1, textIncludes: 'perf-model-999' }, async () => {
     await expect(page.locator('[data-testid="models-table"] tbody tr')).toHaveCount(1);
     return { filtered_rows: 1 };
   }, 'input');
