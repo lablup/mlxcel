@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Icon } from './icons';
-import { Drawer, IconButton } from './primitives';
+import { Drawer, IconButton, PageLayout } from './primitives';
 import type { StringKey, Locale } from '../i18n/catalog';
 import type { ConnectionPhase } from '../api/types';
 import { t, testId } from '../i18n/catalog';
@@ -102,7 +102,7 @@ export function AppShell(props: { locale: Locale; route: RouteId; onRouteChange:
           </div>
         </header>
         <div className={`app-content-grid ${props.inspector ? 'has-inspector' : ''}`.trim()}>
-          <section className="app-content">{props.children}</section>
+          <PageLayout className="app-content">{props.children}</PageLayout>
           {props.inspector}
         </div>
       </main>
