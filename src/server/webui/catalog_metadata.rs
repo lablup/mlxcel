@@ -330,8 +330,8 @@ fn runnable_on_backend(family: &ArchitectureFamily) -> bool {
 /// The registry column for the GPU backend MLX resolved at runtime, not a `cfg!`
 /// chain: that chain sent every ROCm build to `Unsupported` (issue #1886) and
 /// cannot express a multi-backend build. `gpu_backend_kind()` works on every
-/// build and returns `None` when no GPU backend is compiled in or available,
-/// which reads as `Unsupported`; that is the whole no-GPU fallback.
+/// build and returns `None` when the build has no GPU backend (or, on ROCm, no
+/// visible device), which reads as `Unsupported`: the whole no-GPU fallback.
 fn backend_status_for(kind: GpuBackendKind, backends: &BackendSupport) -> BackendStatus {
     match kind {
         GpuBackendKind::Metal => backends.metal,
