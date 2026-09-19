@@ -1,42 +1,42 @@
 {
   "budgets": {
-    "embedded_asset_bytes": 698891,
+    "embedded_asset_bytes": 698921,
     "embedded_asset_limit_bytes": 5242880,
-    "initial_js_gzip_bytes": 150605,
+    "initial_js_gzip_bytes": 150602,
     "initial_js_gzip_limit_bytes": 204800,
-    "total_js_gzip_bytes": 151810,
+    "total_js_gzip_bytes": 151807,
     "total_js_gzip_limit_bytes": 716800
   },
   "files": [
     {
       "bytes": 951,
       "gzip_bytes": 612,
-      "path": "assets/code-highlight-Ckl-q5T7.js",
-      "sha256": "f3bf4f16dd297bff0c4b446250252e06b9a8484ec2c58221b8ebad379549397b"
+      "path": "assets/code-highlight-BfyLxpor.js",
+      "sha256": "ab89089182977af1379e6be17a2d94f22698ba38b9bed3e2254f98252db64ae8"
     },
     {
       "bytes": 1104,
       "gzip_bytes": 593,
-      "path": "assets/history-B0nM7SrP.js",
-      "sha256": "47d1d772b1a13378f8a067c7cd24f906a6e3336e065a21b3c4216a22a5aaf3af"
-    },
-    {
-      "bytes": 111838,
-      "gzip_bytes": 17798,
-      "path": "assets/index-Bs1hUKzH.css",
-      "sha256": "a165aab179e3ab20358381b10a957ef3782e9bf7e17483cd56367c8fc3078cf8"
+      "path": "assets/history--RSi8tWy.js",
+      "sha256": "ee5e8dc50460c8b17608123756269b0a37b2932fb00ed0a5b03ebfacd3067c98"
     },
     {
       "bytes": 569217,
-      "gzip_bytes": 150605,
-      "path": "assets/index-gG1aJxGn.js",
-      "sha256": "71aea6d57da0337f2ca0362641441d9c9a7969bd4df7fcf096b0e2f1cd087a9e"
+      "gzip_bytes": 150602,
+      "path": "assets/index-D4l7n2N4.js",
+      "sha256": "1bf141c56a563e887802f210502e02a7c4b97230637a72fa776b99f7c9ae0dd4"
+    },
+    {
+      "bytes": 111868,
+      "gzip_bytes": 17804,
+      "path": "assets/index-jE9boKnj.css",
+      "sha256": "b46f49036631d06e5d6ee849edc0658e75e440c9ab31e5130c24e93d9776df7f"
     },
     {
       "bytes": 453,
-      "gzip_bytes": 285,
+      "gzip_bytes": 288,
       "path": "index.html",
-      "sha256": "186f8a6ca96dc2acf02890c26ce74c5f37d62856f2a2b653368c8d5ff7b0288f"
+      "sha256": "2bd9dac4103e55bd9b22e4fd940dcfd36ebc05b8463370497688a6e56e3c763d"
     },
     {
       "bytes": 13233,
@@ -67,5 +67,5 @@
   },
   "pnpm_version": "11.18.0",
   "schema_version": 1,
-  "source_digest_sha256": "95561dddd1e05e2ccef64e298b22479ede7ed794adf1e8b05ccf8e494e35fe87"
+  "source_digest_sha256": "62306961102de01a2fefe019515336fb400be5d681ce737764f2b887a1adb85b"
 }
