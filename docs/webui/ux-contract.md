@@ -24,7 +24,7 @@ Text inputs must be IME-safe and never send while composition is active. Focus i
 
 ## Metrics, units and context labels
 
-Use IEC bytes for file/model sizes, decimal tokens/s for throughput, milliseconds for TTFT, seconds for operation age, and tokens for context. Every metric shows `unknown`, `unsupported`, or `not yet measured` when the value is null; never show zero as a placeholder. Context labels must say actual resolved context, not the theoretical family maximum. #1815 unified KV arithmetic is not a prerequisite.
+Use IEC bytes for file/model sizes, decimal tokens/s for throughput, milliseconds for TTFT, seconds for operation age, and tokens for context. Every metric shows `unknown`, `unsupported`, or `not yet measured` when the value is null; never show zero as a placeholder. One documented exception: an idle request slot (not processing) whose `prompt_tokens` is null reads `0 / D tokens` with an empty bar when the request context `D` is known, because the server reports null for a slot that holds no task, not for a failed measurement (`src/server/slots_state.rs`), and an empty slot holds no context. A processing slot with a null count, and any slot without a known context, still reads `unknown`. Context labels must say actual resolved context, not the theoretical family maximum. #1815 unified KV arithmetic is not a prerequisite.
 
 ## Visual and viewport contract
 

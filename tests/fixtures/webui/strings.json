@@ -3260,14 +3260,14 @@
     },
     {
       "key": "activity.updated",
-      "en": "Last successful snapshot",
-      "ko": "마지막 성공 스냅샷",
+      "en": "Last snapshot {time}.",
+      "ko": "마지막 스냅샷 {time}.",
       "test_id": "activity-updated"
     },
     {
       "key": "activity.pending",
-      "en": "Waiting for the first snapshot",
-      "ko": "첫 스냅샷을 기다리는 중",
+      "en": "Waiting for the first snapshot.",
+      "ko": "첫 스냅샷을 기다리는 중입니다.",
       "test_id": "activity-pending"
     },
     {
@@ -3278,8 +3278,8 @@
     },
     {
       "key": "activity.operations.counts",
-      "en": "Operations: {active} active · {failed} failed",
-      "ko": "작업: {active} 진행 중 · {failed} 실패",
+      "en": "{active} active · {failed} failed",
+      "ko": "진행 중 {active}건 · 실패 {failed}건",
       "test_id": "activity-operations-counts"
     },
     {
@@ -3289,10 +3289,88 @@
       "test_id": "activity-operations-empty-title"
     },
     {
-      "key": "activity.operations.empty.body",
-      "en": "Explicit downloads, loads, drains and removals will appear here.",
-      "ko": "명시적인 다운로드, 로드, 드레인 및 삭제 작업이 표시됩니다.",
-      "test_id": "activity-operations-empty-body"
+      "key": "activity.session_help",
+      "en": "About operation history",
+      "ko": "작업 기록 안내",
+      "test_id": "activity-session-help"
+    },
+    {
+      "key": "activity.kind.catalog_refresh",
+      "en": "Catalog refresh",
+      "ko": "카탈로그 새로고침",
+      "test_id": "activity-kind-catalog-refresh"
+    },
+    {
+      "key": "activity.kind.model_load",
+      "en": "Model load",
+      "ko": "모델 로드",
+      "test_id": "activity-kind-model-load"
+    },
+    {
+      "key": "activity.kind.model_unload",
+      "en": "Model unload",
+      "ko": "모델 언로드",
+      "test_id": "activity-kind-model-unload"
+    },
+    {
+      "key": "activity.kind.download",
+      "en": "Download",
+      "ko": "다운로드",
+      "test_id": "activity-kind-download"
+    },
+    {
+      "key": "activity.kind.model_removal",
+      "en": "Model removal",
+      "ko": "모델 삭제",
+      "test_id": "activity-kind-model-removal"
+    },
+    {
+      "key": "activity.kind.settings_patch",
+      "en": "Settings change",
+      "ko": "설정 변경",
+      "test_id": "activity-kind-settings-patch"
+    },
+    {
+      "key": "activity.state.queued",
+      "en": "Queued",
+      "ko": "대기 중",
+      "test_id": "activity-state-queued"
+    },
+    {
+      "key": "activity.state.running",
+      "en": "Running",
+      "ko": "실행 중",
+      "test_id": "activity-state-running"
+    },
+    {
+      "key": "activity.state.cancelling",
+      "en": "Cancelling",
+      "ko": "취소 중",
+      "test_id": "activity-state-cancelling"
+    },
+    {
+      "key": "activity.state.succeeded",
+      "en": "Succeeded",
+      "ko": "완료",
+      "test_id": "activity-state-succeeded"
+    },
+    {
+      "key": "activity.state.failed",
+      "en": "Failed",
+      "ko": "실패",
+      "test_id": "activity-state-failed"
+    },
+    {
+      "key": "activity.state.cancelled",
+      "en": "Cancelled",
+      "ko": "취소됨",
+      "test_id": "activity-state-cancelled"
+    },
+    {
+      "key": "activity.target.unknown_model",
+      "en": "Unknown model",
+      "ko": "알 수 없는 모델",
+      "test_id": "activity-target-unknown-model"
     },
     {
       "key": "activity.cancel",
@@ -3313,6 +3391,102 @@
       "test_id": "activity-failure"
     },
     {
+      "key": "activity.failure_no_code",
+      "en": "The server did not report an error code.",
+      "ko": "서버가 오류 코드를 보고하지 않았습니다.",
+      "test_id": "activity-failure-no-code"
+    },
+    {
+      "key": "activity.error.invalid_request",
+      "en": "The request was not valid.",
+      "ko": "요청이 올바르지 않습니다.",
+      "test_id": "activity-error-invalid-request"
+    },
+    {
+      "key": "activity.error.unauthorized",
+      "en": "The server did not accept the credentials.",
+      "ko": "서버가 인증 정보를 받아들이지 않았습니다.",
+      "test_id": "activity-error-unauthorized"
+    },
+    {
+      "key": "activity.error.forbidden",
+      "en": "This server does not allow this action.",
+      "ko": "이 서버에서는 허용되지 않는 작업입니다.",
+      "test_id": "activity-error-forbidden"
+    },
+    {
+      "key": "activity.error.not_found",
+      "en": "The target no longer exists.",
+      "ko": "대상이 더 이상 존재하지 않습니다.",
+      "test_id": "activity-error-not-found"
+    },
+    {
+      "key": "activity.error.stale_revision",
+      "en": "The model changed before the action ran.",
+      "ko": "작업이 실행되기 전에 모델이 변경되었습니다.",
+      "test_id": "activity-error-stale-revision"
+    },
+    {
+      "key": "activity.error.conflict",
+      "en": "Another operation conflicted with this one.",
+      "ko": "다른 작업과 충돌했습니다.",
+      "test_id": "activity-error-conflict"
+    },
+    {
+      "key": "activity.error.unsupported",
+      "en": "This action is not supported for this target.",
+      "ko": "이 대상에서는 지원하지 않는 작업입니다.",
+      "test_id": "activity-error-unsupported"
+    },
+    {
+      "key": "activity.error.rate_limited",
+      "en": "Too many requests. Try again later.",
+      "ko": "요청이 너무 많습니다. 잠시 후 다시 시도하세요.",
+      "test_id": "activity-error-rate-limited"
+    },
+    {
+      "key": "activity.error.unavailable",
+      "en": "A required resource was unavailable.",
+      "ko": "필요한 리소스를 사용할 수 없었습니다.",
+      "test_id": "activity-error-unavailable"
+    },
+    {
+      "key": "activity.error.payload_too_large",
+      "en": "The request was too large.",
+      "ko": "요청이 너무 큽니다.",
+      "test_id": "activity-error-payload-too-large"
+    },
+    {
+      "key": "activity.error.server_restarted",
+      "en": "The server restarted during the action.",
+      "ko": "작업 중에 서버가 다시 시작되었습니다.",
+      "test_id": "activity-error-server-restarted"
+    },
+    {
+      "key": "activity.error.event_gap",
+      "en": "Progress updates were lost. Refresh to reconcile the operation.",
+      "ko": "진행 상황 업데이트가 누락되었습니다. 새로고침하여 작업 상태를 대조하세요.",
+      "test_id": "activity-error-event-gap"
+    },
+    {
+      "key": "activity.error.partial_success",
+      "en": "The action only partly succeeded.",
+      "ko": "작업이 일부만 성공했습니다.",
+      "test_id": "activity-error-partial-success"
+    },
+    {
+      "key": "activity.error.other",
+      "en": "The server reported an error this page does not recognize.",
+      "ko": "이 화면이 인식하지 못하는 오류를 서버가 보고했습니다.",
+      "test_id": "activity-error-other"
+    },
+    {
+      "key": "activity.details.error_code",
+      "en": "Error code: {code}",
+      "ko": "오류 코드: {code}",
+      "test_id": "activity-details-error-code"
+    },
+    {
       "key": "activity.cancel_failed",
       "en": "Cancellation could not be confirmed. Refresh to reconcile the operation.",
       "ko": "취소를 확인하지 못했습니다. 새로고침하여 작업 상태를 대조하세요.",
@@ -3320,15 +3494,57 @@
     },
     {
       "key": "activity.cancel_unsupported",
-      "en": "Cancellation is unavailable for this operation; worker execution is not interrupted.",
-      "ko": "이 작업은 취소할 수 없습니다. 실행 중인 작업자를 강제로 중단하지 않습니다.",
+      "en": "Cannot be cancelled",
+      "ko": "취소할 수 없음",
       "test_id": "activity-cancel-unsupported"
+    },
+    {
+      "key": "activity.bytes",
+      "en": "Download progress",
+      "ko": "다운로드 진행률",
+      "test_id": "activity-bytes"
+    },
+    {
+      "key": "activity.download_progress",
+      "en": "{completed} / {total}",
+      "ko": "{completed} / {total}",
+      "test_id": "activity-download-progress"
+    },
+    {
+      "key": "activity.details",
+      "en": "Operation details",
+      "ko": "작업 상세",
+      "test_id": "activity-details"
+    },
+    {
+      "key": "activity.details.operation_id",
+      "en": "Operation ID: {id}",
+      "ko": "작업 ID: {id}",
+      "test_id": "activity-details-operation-id"
+    },
+    {
+      "key": "activity.details.model_id",
+      "en": "Model ID: {id}",
+      "ko": "모델 ID: {id}",
+      "test_id": "activity-details-model-id"
+    },
+    {
+      "key": "activity.details.updated",
+      "en": "Updated {time}",
+      "ko": "{time} 갱신",
+      "test_id": "activity-details-updated"
     },
     {
       "key": "activity.runtime",
       "en": "Selected model runtime",
       "ko": "선택한 모델 런타임",
       "test_id": "activity-runtime"
+    },
+    {
+      "key": "activity.model",
+      "en": "Observed model",
+      "ko": "관측 모델",
+      "test_id": "activity-model"
     },
     {
       "key": "activity.select",
@@ -3344,15 +3560,75 @@
     },
     {
       "key": "activity.unavailable",
-      "en": "N/A — no authoritative sample is available.",
-      "ko": "N/A — 확인된 관측값이 없습니다.",
+      "en": "No runtime sample has been received for this model.",
+      "ko": "이 모델의 런타임 샘플을 아직 받지 못했습니다.",
       "test_id": "activity-unavailable"
     },
     {
-      "key": "activity.not_available",
-      "en": "N/A",
-      "ko": "N/A",
-      "test_id": "activity-not-available"
+      "key": "activity.waiting",
+      "en": "Waiting for the first runtime sample",
+      "ko": "첫 런타임 샘플을 기다리는 중",
+      "test_id": "activity-waiting"
+    },
+    {
+      "key": "activity.runtime_stale",
+      "en": "The runtime snapshot has stopped refreshing; the values below are the last observation.",
+      "ko": "런타임 스냅샷이 갱신되지 않고 있습니다. 아래 값은 마지막 관측값입니다.",
+      "test_id": "activity-runtime-stale"
+    },
+    {
+      "key": "activity.observed_at",
+      "en": "Observed at {time}",
+      "ko": "{time} 관측",
+      "test_id": "activity-observed-at"
+    },
+    {
+      "key": "activity.unknown_time",
+      "en": "No observation time",
+      "ko": "관측 시각 없음",
+      "test_id": "activity-unknown-time"
+    },
+    {
+      "key": "activity.reason.metrics_disabled",
+      "en": "Metrics are off. Restart the server with --metrics.",
+      "ko": "메트릭이 꺼져 있습니다. --metrics로 서버를 다시 시작하세요.",
+      "test_id": "activity-reason-metrics-disabled"
+    },
+    {
+      "key": "activity.reason.not_loaded",
+      "en": "The model is not loaded, so there are no live counters.",
+      "ko": "모델이 로드되지 않아 실시간 카운터가 없습니다.",
+      "test_id": "activity-reason-not-loaded"
+    },
+    {
+      "key": "activity.reason.single_stream",
+      "en": "This single-stream model does not publish this counter.",
+      "ko": "단일 스트림 모델은 이 카운터를 제공하지 않습니다.",
+      "test_id": "activity-reason-single-stream"
+    },
+    {
+      "key": "activity.reason.counter_unavailable",
+      "en": "The server did not report this counter.",
+      "ko": "서버가 이 카운터를 보고하지 않았습니다.",
+      "test_id": "activity-reason-counter-unavailable"
+    },
+    {
+      "key": "activity.reason.see_details",
+      "en": "See All measurements and sources for the reason.",
+      "ko": "사유는 전체 측정값과 출처에서 확인하세요.",
+      "test_id": "activity-reason-see-details"
+    },
+    {
+      "key": "activity.metric_details",
+      "en": "All measurements and sources",
+      "ko": "전체 측정값과 출처",
+      "test_id": "activity-metric-details"
+    },
+    {
+      "key": "activity.unavailable_badge",
+      "en": "{count} unavailable",
+      "ko": "{count}개 사용 불가",
+      "test_id": "activity-unavailable-badge"
     },
     {
       "key": "activity.memory",
@@ -3367,88 +3643,52 @@
       "test_id": "activity-timing"
     },
     {
-      "key": "activity.slots",
-      "en": "Request slots",
-      "ko": "요청 슬롯",
-      "test_id": "activity-slots"
+      "key": "activity.scope",
+      "en": "Scope: {scope}",
+      "ko": "범위: {scope}",
+      "test_id": "activity-scope"
     },
     {
-      "key": "activity.slot",
+      "key": "activity.scope.model",
+      "en": "Model",
+      "ko": "모델",
+      "test_id": "activity-scope-model"
+    },
+    {
+      "key": "activity.scope.slot",
       "en": "Slot",
       "ko": "슬롯",
-      "test_id": "activity-slot"
+      "test_id": "activity-scope-slot"
     },
     {
-      "key": "activity.processing",
-      "en": "Processing",
-      "ko": "처리 중",
-      "test_id": "activity-processing"
+      "key": "activity.scope.pool",
+      "en": "Shared pool",
+      "ko": "공유 풀",
+      "test_id": "activity-scope-pool"
     },
     {
-      "key": "activity.idle",
-      "en": "Idle",
-      "ko": "유휴",
-      "test_id": "activity-idle"
+      "key": "activity.scope.server",
+      "en": "Server",
+      "ko": "서버",
+      "test_id": "activity-scope-server"
     },
     {
-      "key": "activity.context",
-      "en": "Request context window",
-      "ko": "요청 컨텍스트 한도",
-      "test_id": "activity-context"
-    },
-    {
-      "key": "activity.pool",
-      "en": "Shared pool context",
-      "ko": "공유 풀 컨텍스트",
-      "test_id": "activity-pool"
-    },
-    {
-      "key": "activity.parallel",
-      "en": "Effective parallelism",
-      "ko": "실제 병렬도",
-      "test_id": "activity-parallel"
-    },
-    {
-      "key": "activity.context_line",
-      "en": "{context}: {request} tokens · {pool}: {shared} tokens",
-      "ko": "{context}: {request} 토큰 · {pool}: {shared} 토큰",
-      "test_id": "activity-context-line"
-    },
-    {
-      "key": "activity.no_context",
-      "en": "N/A — context denominator is unknown; no occupancy percentage is inferred.",
-      "ko": "N/A — 컨텍스트 분모를 알 수 없어 점유율을 추정하지 않습니다.",
-      "test_id": "activity-no-context"
-    },
-    {
-      "key": "activity.slot_progress",
-      "en": "{used} / {total} tokens",
-      "ko": "{used} / {total} 토큰",
-      "test_id": "activity-slot-progress"
-    },
-    {
-      "key": "activity.slot_tokens",
-      "en": "Accepted decode: {decoded} tokens · Cached prompt: {cached} tokens",
-      "ko": "수락된 디코드: {decoded} 토큰 · 캐시된 프롬프트: {cached} 토큰",
-      "test_id": "activity-slot-tokens"
-    },
-    {
-      "key": "activity.history.show",
-      "en": "Show recent history",
-      "ko": "최근 기록 보기",
-      "test_id": "activity-history-show"
-    },
-    {
-      "key": "activity.history.hide",
-      "en": "Hide recent history",
-      "ko": "최근 기록 숨기기",
-      "test_id": "activity-history-hide"
+      "key": "activity.scope.unknown",
+      "en": "Unknown",
+      "ko": "알 수 없음",
+      "test_id": "activity-scope-unknown"
     },
     {
       "key": "activity.history.note",
       "en": "Five-minute in-memory history, at most 150 two-second samples. Hidden tabs stop observation; gaps and counter resets are not interpolated.",
       "ko": "메모리 내 5분 기록이며 2초 간격 최대 150개입니다. 숨겨진 탭은 관측을 중지합니다. 공백과 카운터 초기화를 보간하지 않습니다.",
       "test_id": "activity-history-note"
+    },
+    {
+      "key": "activity.history.empty",
+      "en": "No active request samples in the last five minutes.",
+      "ko": "최근 5분 동안 활성 요청 샘플이 없습니다.",
+      "test_id": "activity-history-empty"
     },
     {
       "key": "activity.chart.label",
@@ -3465,74 +3705,206 @@
     {
       "key": "activity.chart.point",
       "en": "{value} requests",
-      "ko": "요청 {value}개",
+      "ko": "요청 {value}건",
       "test_id": "activity-chart-point"
     },
     {
-      "key": "activity.scope",
-      "en": "Scope",
-      "ko": "범위",
-      "test_id": "activity-scope"
+      "key": "activity.chart.point_one",
+      "en": "{value} request",
+      "ko": "요청 {value}건",
+      "test_id": "activity-chart-point-one"
     },
     {
-      "key": "activity.observed",
-      "en": "Observed at",
-      "ko": "관측 시각",
-      "test_id": "activity-observed"
+      "key": "activity.slots",
+      "en": "Request slots",
+      "ko": "요청 슬롯",
+      "test_id": "activity-slots"
     },
     {
-      "key": "activity.metric_details",
-      "en": "All measurements and sources",
-      "ko": "전체 측정값과 출처",
-      "test_id": "activity-metric-details"
+      "key": "activity.slot",
+      "en": "Slot",
+      "ko": "슬롯",
+      "test_id": "activity-slot"
     },
     {
-      "key": "activity.unavailable_count",
-      "en": "Unavailable measurements",
-      "ko": "사용할 수 없는 측정값",
-      "test_id": "activity-unavailable-count"
+      "key": "activity.slot_state",
+      "en": "State",
+      "ko": "상태",
+      "test_id": "activity-slot-state"
     },
     {
-      "key": "activity.unavailable_reason",
-      "en": "Some sources are disabled or do not publish an authoritative sample. Expand details for individual reasons.",
-      "ko": "일부 출처가 비활성화되었거나 확인된 관측값을 제공하지 않습니다. 상세 내용을 펼쳐 개별 사유를 확인하세요.",
-      "test_id": "activity-unavailable-reason"
+      "key": "activity.occupancy",
+      "en": "Context",
+      "ko": "컨텍스트",
+      "test_id": "activity-occupancy"
     },
     {
-      "key": "activity.no_primary",
-      "en": "No primary request counters are available.",
-      "ko": "사용 가능한 주요 요청 카운터가 없습니다.",
-      "test_id": "activity-no-primary"
+      "key": "activity.decoded",
+      "en": "Decoded",
+      "ko": "디코드",
+      "test_id": "activity-decoded"
     },
     {
-      "key": "activity.bytes",
-      "en": "bytes downloaded",
-      "ko": "다운로드 바이트",
-      "test_id": "activity-bytes"
+      "key": "activity.cached",
+      "en": "Cached",
+      "ko": "캐시",
+      "test_id": "activity-cached"
     },
     {
-      "key": "activity.download_progress",
-      "en": "{completed} / {total} bytes",
-      "ko": "{completed} / {total} 바이트",
-      "test_id": "activity-download-progress"
+      "key": "activity.processing",
+      "en": "Processing",
+      "ko": "처리 중",
+      "test_id": "activity-processing"
     },
     {
-      "key": "activity.details",
-      "en": "Operation details",
-      "ko": "작업 상세",
-      "test_id": "activity-details"
+      "key": "activity.idle",
+      "en": "Idle",
+      "ko": "유휴",
+      "test_id": "activity-idle"
     },
     {
-      "key": "activity.status",
-      "en": "Operation status",
-      "ko": "작업 상태",
-      "test_id": "activity-status"
+      "key": "activity.context",
+      "en": "Request context window: {tokens}",
+      "ko": "요청 컨텍스트 한도: {tokens}",
+      "test_id": "activity-context"
     },
     {
-      "key": "activity.unknown_time",
-      "en": "Unknown",
-      "ko": "알 수 없음",
-      "test_id": "activity-unknown-time"
+      "key": "activity.pool",
+      "en": "Shared pool context: {tokens}",
+      "ko": "공유 풀 컨텍스트: {tokens}",
+      "test_id": "activity-pool"
+    },
+    {
+      "key": "activity.parallel",
+      "en": "Effective parallelism: {effective} / {configured}",
+      "ko": "실제 병렬도: {effective} / {configured}",
+      "test_id": "activity-parallel"
+    },
+    {
+      "key": "activity.no_context",
+      "en": "unknown (no context limit reported)",
+      "ko": "알 수 없음 (컨텍스트 한도 미보고)",
+      "test_id": "activity-no-context"
+    },
+    {
+      "key": "activity.slot_progress",
+      "en": "{used} / {total} tokens",
+      "ko": "{used} / {total} 토큰",
+      "test_id": "activity-slot-progress"
+    },
+    {
+      "key": "activity.slot_occupancy",
+      "en": "Slot {id} context occupancy",
+      "ko": "슬롯 {id} 컨텍스트 점유율",
+      "test_id": "activity-slot-occupancy"
+    },
+    {
+      "key": "activity.slots_empty",
+      "en": "The server reported no slots.",
+      "ko": "서버가 보고한 슬롯이 없습니다.",
+      "test_id": "activity-slots-empty"
+    },
+    {
+      "key": "activity.slots_reason.disabled",
+      "en": "Slots are off. Restart the server with --slots.",
+      "ko": "슬롯 관측이 꺼져 있습니다. --slots로 서버를 다시 시작하세요.",
+      "test_id": "activity-slots-reason-disabled"
+    },
+    {
+      "key": "activity.slots_reason.not_loaded",
+      "en": "The model is not loaded, so no slots are observed.",
+      "ko": "모델이 로드되지 않아 슬롯을 관측할 수 없습니다.",
+      "test_id": "activity-slots-reason-not-loaded"
+    },
+    {
+      "key": "activity.slots_reason.registry",
+      "en": "The slot registry is unavailable.",
+      "ko": "슬롯 레지스트리를 사용할 수 없습니다.",
+      "test_id": "activity-slots-reason-registry"
+    },
+    {
+      "key": "activity.slots_reason.partial",
+      "en": "Partial list: showing the first 256 observational slots.",
+      "ko": "일부 목록: 처음 256개 관측 슬롯만 표시합니다.",
+      "test_id": "activity-slots-reason-partial"
+    },
+    {
+      "key": "activity.slots_reason.unavailable",
+      "en": "Slots are unavailable.",
+      "ko": "슬롯을 관측할 수 없습니다.",
+      "test_id": "activity-slots-reason-unavailable"
+    },
+    {
+      "key": "activity.slots_reason.other",
+      "en": "The server reported a slot condition this page does not recognize.",
+      "ko": "이 화면이 인식하지 못하는 슬롯 상태를 서버가 보고했습니다.",
+      "test_id": "activity-slots-reason-other"
+    },
+    {
+      "key": "activity.slots_reason.raw",
+      "en": "Server reason",
+      "ko": "서버 사유",
+      "test_id": "activity-slots-reason-raw"
+    },
+    {
+      "key": "activity.unit.requests",
+      "en": "{value} requests",
+      "ko": "{value}건",
+      "test_id": "activity-unit-requests"
+    },
+    {
+      "key": "activity.unit.request_one",
+      "en": "{value} request",
+      "ko": "{value}건",
+      "test_id": "activity-unit-request-one"
+    },
+    {
+      "key": "activity.unit.tokens",
+      "en": "{value} tokens",
+      "ko": "{value} 토큰",
+      "test_id": "activity-unit-tokens"
+    },
+    {
+      "key": "activity.unit.token_one",
+      "en": "{value} token",
+      "ko": "{value} 토큰",
+      "test_id": "activity-unit-token-one"
+    },
+    {
+      "key": "activity.unit.ms",
+      "en": "{value} ms",
+      "ko": "{value}ms",
+      "test_id": "activity-unit-ms"
+    },
+    {
+      "key": "activity.unit.us",
+      "en": "{value} µs",
+      "ko": "{value}µs",
+      "test_id": "activity-unit-us"
+    },
+    {
+      "key": "activity.unit.percent",
+      "en": "{value}%",
+      "ko": "{value}%",
+      "test_id": "activity-unit-percent"
+    },
+    {
+      "key": "activity.unit.entries",
+      "en": "{value} entries",
+      "ko": "항목 {value}개",
+      "test_id": "activity-unit-entries"
+    },
+    {
+      "key": "activity.unit.entry_one",
+      "en": "{value} entry",
+      "ko": "항목 {value}개",
+      "test_id": "activity-unit-entry-one"
+    },
+    {
+      "key": "activity.unit.tokens_per_second",
+      "en": "{value} tokens/s",
+      "ko": "초당 {value} 토큰",
+      "test_id": "activity-unit-tokens-per-second"
     },
     {
       "key": "activity.metric.active_requests",

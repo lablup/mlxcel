@@ -103,7 +103,8 @@ async function openActivityRuntime(page: Page, width: number): Promise<void> {
   await page.evaluate(() => { window.location.hash = '#activity'; });
   await page.getByTestId('activity-page').getByRole('combobox').click();
   await page.getByRole('option', { name: modelName, exact: true }).click();
-  await expect(page.getByTestId('runtime-summary')).toContainText('Total completion tokens');
+  // The waiting tiles already carry the labels; wait for a measured value.
+  await expect(page.getByTestId('runtime-summary')).toContainText('98,765,432 tokens');
 }
 
 test.describe('shared StatCard', () => {
@@ -120,7 +121,7 @@ test.describe('shared StatCard', () => {
           transformed: leaves.filter((node) => window.getComputedStyle(node).textTransform !== 'none').map((node) => node.textContent),
         };
       }));
-      for (const [index, [label, value]] of [['Active requests', '2 requests'], ['Queued requests', '0 requests'], ['Total completed requests', '1,234,567 requests'], ['Total completion tokens', '98,765,432 tokens']].entries()) {
+      for (const [index, [label, value]] of [['Active requests', '2 requests'], ['Total completed requests', '1,234,567 requests'], ['Total completion tokens', '98,765,432 tokens'], ['Queued requests', '0 requests']].entries()) {
         expect(report[index].text).toContain(label);
         expect(report[index].text).toContain(value);
         expect(report[index].clipped).toEqual([]);
@@ -168,7 +169,7 @@ test.describe('shared SmoothHeight', () => {
       await loginWithMockApi(page);
       await page.evaluate(() => { window.location.hash = '#activity'; });
       const list = page.locator('ol.activity-operations');
-      await expect(list).toContainText('running');
+      await expect(list).toContainText(text('activity.state.running'));
       const controls = list.locator('summary, button:not([disabled]), a[href]');
       const count = await controls.count();
       expect(count).toBeGreaterThan(0);

@@ -73,6 +73,8 @@ export async function expectSafeLayout(page: Page): Promise<void> {
       // Shared Skeleton: its width/height props as inline size. Scoped to the
       // LoadingStatus adapter's decorative shapes, not every Skeleton use.
       if (element.matches('.ds-loading__shapes .skeleton')) return properties.slice().sort().join(',') !== 'height,width' || ['width', 'height'].some((key) => !/^\d+(?:\.\d+)?(?:px|%)$/.test(element.style.getPropertyValue(key)));
+      // Shared StatCard loading state: its own value and hint Skeletons, decorative under the caller's one status.
+      if (element.matches('.ds-stat-card .skeleton[aria-hidden="true"]')) return properties.slice().sort().join(',') !== 'height,width' || ['width', 'height'].some((key) => !/^\d+(?:\.\d+)?(?:px|%|rem)$/.test(element.style.getPropertyValue(key)));
       // Shared Tooltip: hidden until measured, then fixed-position top/left in px.
       if (element.matches('.tooltip__content')) return properties.join(',') === 'visibility' ? element.style.visibility !== 'hidden' : properties.slice().sort().join(',') !== 'left,top' || ['top', 'left'].some((key) => !/^-?\d+(?:\.\d+)?px$/.test(element.style.getPropertyValue(key)));
       return true;
