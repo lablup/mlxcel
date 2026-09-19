@@ -76,6 +76,30 @@ test.describe('shared Drawer', () => {
     await expectSharedDrawer(page);
   });
 
+  test('390 open drawer keeps keyboard focus and Escape inside it after a pointer press on its heading', async ({ page }) => {
+    await bootGallery(page, compact);
+    const menu = page.getByTestId('toolbar-menu');
+    await menu.click();
+    const dialog = page.getByRole('dialog', { name: text('nav.primary', 'ko') });
+    await expect(dialog.getByRole('button', { name: text('common.close', 'ko'), exact: true })).toBeFocused();
+    await settled(dialog);
+    // Pressing the non-focusable heading leaves focus on <body>. The native modal sheet
+    // kept the page behind it inert and closed on Escape wherever focus was.
+    const heading = dialog.getByRole('heading', { name: text('nav.primary', 'ko') });
+    await heading.click();
+    const focusInDrawer = (): Promise<boolean> => page.evaluate(() => Boolean(document.activeElement?.closest('[data-testid="mobile-nav-sheet"]')));
+    for (let step = 0; step < 3; step += 1) {
+      await page.keyboard.press('Shift+Tab');
+      expect(await page.evaluate(() => document.activeElement === document.body) || await focusInDrawer()).toBe(true);
+    }
+    expect(await focusInDrawer()).toBe(true);
+    await heading.click();
+    await page.keyboard.press('Escape');
+    await expect(dialog).toBeHidden();
+    await expect(menu).toBeFocused();
+    await expectSharedDrawer(page);
+  });
+
   test('390 open drawer reflows at the 200 percent text scale without horizontal scroll', async ({ page }) => {
     await bootGallery(page, { ...compact, textScale: '200' });
     await page.getByTestId('toolbar-menu').click();
