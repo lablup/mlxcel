@@ -5,7 +5,9 @@ import { NativeModalContext } from './modal-context';
 import { t, type Locale } from '../i18n/catalog';
 
 export interface SelectProps {
-  label: string; value: string; options: { value: string; label: string; disabled?: boolean }[];
+  // `description` is a secondary line under the option label; the shared Select folds it
+  // into the option's accessible name as "label. description".
+  label: string; value: string; options: { value: string; label: string; description?: string; disabled?: boolean }[];
   onChange: (value: string) => void; disabled?: boolean; busy?: boolean; error?: string;
   hint?: string; testId?: string; locale?: Locale;
 }
@@ -21,7 +23,7 @@ export function Select(props: SelectProps): React.JSX.Element {
   if (nativeModal) return <label className="ds-field" htmlFor={id} data-disabled={disabled || undefined}>
     <span>{props.label}</span>
     <select id={id} value={props.value} disabled={disabled} aria-busy={props.busy || undefined} aria-invalid={props.error ? 'true' : undefined} aria-describedby={describedBy} data-testid={props.testId} onChange={(event) => props.onChange(event.currentTarget.value)}>
-      {props.options.map((option) => <option key={option.value} {...option}>{option.label}</option>)}
+      {props.options.map((option) => <option key={option.value} value={option.value} disabled={option.disabled}>{option.description ? `${option.label}. ${option.description}` : option.label}</option>)}
     </select>{details}
   </label>;
   return <div ref={(element) => {

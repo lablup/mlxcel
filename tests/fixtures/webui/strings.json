@@ -1627,16 +1627,76 @@
       "test_id": "chat-conversation-default-title"
     },
     {
-      "key": "chat.conversation.label",
-      "en": "Conversation",
-      "ko": "대화",
-      "test_id": "chat-conversation-label"
+      "key": "chat.list.label",
+      "en": "Conversations",
+      "ko": "대화 목록",
+      "test_id": "chat-list-label"
     },
     {
-      "key": "chat.conversation.choose",
-      "en": "Choose conversation",
-      "ko": "대화 선택",
-      "test_id": "chat-conversation-choose"
+      "key": "chat.list.open",
+      "en": "Show conversations",
+      "ko": "대화 목록 보기",
+      "test_id": "chat-list-open"
+    },
+    {
+      "key": "chat.list.empty.title",
+      "en": "No conversations yet",
+      "ko": "아직 대화가 없습니다",
+      "test_id": "chat-list-empty-title"
+    },
+    {
+      "key": "chat.list.empty.body",
+      "en": "Send a message to start one, or choose New conversation.",
+      "ko": "메시지를 보내 대화를 시작하거나 새 대화를 선택하세요.",
+      "test_id": "chat-list-empty-body"
+    },
+    {
+      "key": "chat.list.no_messages",
+      "en": "No messages yet",
+      "ko": "아직 메시지 없음",
+      "test_id": "chat-list-no-messages"
+    },
+    {
+      "key": "chat.list.limit",
+      "en": "Conversation limit reached (50). Delete or export older conversations first.",
+      "ko": "대화 개수 한도(50개)에 도달했습니다. 먼저 이전 대화를 삭제하거나 내보내세요.",
+      "test_id": "chat-list-limit"
+    },
+    {
+      "key": "chat.list.rename",
+      "en": "Rename {title}",
+      "ko": "{title} 이름 바꾸기",
+      "test_id": "chat-list-rename"
+    },
+    {
+      "key": "chat.list.rename_field",
+      "en": "New name for {title}",
+      "ko": "{title}의 새 이름",
+      "test_id": "chat-list-rename-field"
+    },
+    {
+      "key": "chat.list.delete",
+      "en": "Delete {title}",
+      "ko": "{title} 삭제",
+      "test_id": "chat-list-delete"
+    },
+    {
+      "key": "chat.list.delete.confirm.title",
+      "en": "Delete {title}?",
+      "ko": "{title} 대화를 삭제할까요?",
+      "test_id": "chat-list-delete-confirm-title"
+    },
+    {
+      "key": "chat.list.delete.confirm.body",
+      "en": "The conversation and all of its turns are removed. Export your history first if you want to keep a copy.",
+      "ko": "대화와 모든 턴이 삭제됩니다. 사본을 남기려면 먼저 기록을 내보내세요.",
+      "test_id": "chat-list-delete-confirm-body"
+    },
+    {
+      "key": "chat.list.delete.confirm",
+      "en": "Delete conversation",
+      "ko": "대화 삭제",
+      "test_id": "chat-list-delete-confirm"
     },
     {
       "key": "chat.model.label",
@@ -1651,16 +1711,76 @@
       "test_id": "chat-model-choose"
     },
     {
-      "key": "chat.no_model.title",
-      "en": "Choose a ready chat model",
-      "ko": "준비된 대화 모델을 선택하세요",
-      "test_id": "chat-no-model-title"
+      "key": "chat.model.group.ready",
+      "en": "Ready to chat",
+      "ko": "대화 준비됨",
+      "test_id": "chat-model-group-ready"
     },
     {
-      "key": "chat.no_model.body",
-      "en": "Selection never loads a model. Load one explicitly in Models. Embeddings, reranking and other tasks use their documented API, not this composer.",
-      "ko": "선택만으로 모델을 로드하지 않습니다. 모델 화면에서 명시적으로 로드하세요. 임베딩, 재순위화 등 다른 작업은 이 입력창이 아니라 문서화된 API를 사용합니다.",
-      "test_id": "chat-no-model-body"
+      "key": "chat.model.group.unloaded",
+      "en": "Not loaded",
+      "ko": "로드되지 않음",
+      "test_id": "chat-model-group-unloaded"
+    },
+    {
+      "key": "chat.model.group.failed",
+      "en": "Load failed",
+      "ko": "로드 실패",
+      "test_id": "chat-model-group-failed"
+    },
+    {
+      "key": "chat.model.group.unavailable",
+      "en": "Not available for chat",
+      "ko": "대화에 사용할 수 없음",
+      "test_id": "chat-model-group-unavailable"
+    },
+    {
+      "key": "chat.model.hint.choose",
+      "en": "Choose a model to start.",
+      "ko": "시작하려면 모델을 선택하세요.",
+      "test_id": "chat-model-hint-choose"
+    },
+    {
+      "key": "chat.model.hint.load",
+      "en": "Not loaded. Load it to chat; selecting a model never loads it.",
+      "ko": "로드되지 않았습니다. 대화하려면 로드하세요. 모델을 선택하는 것만으로는 로드하지 않습니다.",
+      "test_id": "chat-model-hint-load"
+    },
+    {
+      "key": "chat.model.hint.cannot_load",
+      "en": "This model cannot be loaded from here. Open Models for the reason.",
+      "ko": "여기에서는 이 모델을 로드할 수 없습니다. 모델 화면에서 이유를 확인하세요.",
+      "test_id": "chat-model-hint-cannot-load"
+    },
+    {
+      "key": "chat.model.hint.wait",
+      "en": "Not ready yet. Send turns on once the model is ready to chat.",
+      "ko": "아직 준비되지 않았습니다. 모델이 대화 준비를 마치면 보내기가 켜집니다.",
+      "test_id": "chat-model-hint-wait"
+    },
+    {
+      "key": "chat.model.hint.unavailable",
+      "en": "This model does not offer chat. Embeddings, reranking and other tasks use their documented API, not this composer.",
+      "ko": "이 모델은 대화를 지원하지 않습니다. 임베딩, 재순위화 등 다른 작업은 이 입력창이 아니라 문서화된 API를 사용합니다.",
+      "test_id": "chat-model-hint-unavailable"
+    },
+    {
+      "key": "chat.load.confirm.title",
+      "en": "Load {model}?",
+      "ko": "{model} 모델을 로드할까요?",
+      "test_id": "chat-load-confirm-title"
+    },
+    {
+      "key": "chat.load.confirm.body",
+      "en": "Selecting a model never loads it. Loading starts a server operation that reserves memory for this model and keeps running if you leave Chat.",
+      "ko": "모델을 선택하는 것만으로는 로드하지 않습니다. 로드는 이 모델에 메모리를 예약하는 서버 작업을 시작하며, 대화 화면을 떠나도 계속 진행됩니다.",
+      "test_id": "chat-load-confirm-body"
+    },
+    {
+      "key": "chat.load.requested",
+      "en": "Load requested. Send turns on when the model is ready.",
+      "ko": "로드를 요청했습니다. 모델이 준비되면 보내기가 켜집니다.",
+      "test_id": "chat-load-requested"
     },
     {
       "key": "chat.no_model.action",
@@ -1693,10 +1813,22 @@
       "test_id": "chat-settings-sampling"
     },
     {
-      "key": "chat.settings.delete",
-      "en": "Delete conversation",
-      "ko": "대화 삭제",
-      "test_id": "chat-settings-delete"
+      "key": "chat.settings.title",
+      "en": "Chat settings",
+      "ko": "대화 화면 설정",
+      "test_id": "chat-settings-title"
+    },
+    {
+      "key": "chat.settings.none",
+      "en": "Start or select a conversation to name it and set its system prompt.",
+      "ko": "대화를 시작하거나 선택하면 이름과 시스템 프롬프트를 지정할 수 있습니다.",
+      "test_id": "chat-settings-none"
+    },
+    {
+      "key": "chat.overrides",
+      "en": "Overrides: {keys}",
+      "ko": "재정의: {keys}",
+      "test_id": "chat-overrides"
     },
     {
       "key": "chat.composer.label",
@@ -1706,21 +1838,39 @@
     },
     {
       "key": "chat.composer.hint",
-      "en": "Enter sends · Shift+Enter inserts a line. {count}/{max} characters.",
-      "ko": "Enter로 보내고 Shift+Enter로 줄을 바꿉니다. {count}/{max}자.",
+      "en": "Enter sends · Shift+Enter inserts a line · Cmd/Ctrl+Enter also sends.",
+      "ko": "Enter로 보내고 Shift+Enter로 줄을 바꿉니다. Cmd/Ctrl+Enter로도 보낼 수 있습니다.",
       "test_id": "chat-composer-hint"
+    },
+    {
+      "key": "chat.composer.count",
+      "en": "{count} / {max}",
+      "ko": "{count} / {max}자",
+      "test_id": "chat-composer-count"
+    },
+    {
+      "key": "chat.composer.limit",
+      "en": "Limit reached",
+      "ko": "한도 도달",
+      "test_id": "chat-composer-limit"
+    },
+    {
+      "key": "chat.composer.keys",
+      "en": "Keyboard hints",
+      "ko": "키보드 도움말",
+      "test_id": "chat-composer-keys"
+    },
+    {
+      "key": "chat.images.attach",
+      "en": "Attach images",
+      "ko": "이미지 첨부",
+      "test_id": "chat-images-attach"
     },
     {
       "key": "chat.images.label",
       "en": "Local images",
       "ko": "로컬 이미지",
       "test_id": "chat-images-label"
-    },
-    {
-      "key": "chat.images.unsupported",
-      "en": "Image attachments require provider-confirmed vision support.",
-      "ko": "이미지를 첨부하려면 provider가 확인한 비전 지원이 필요합니다.",
-      "test_id": "chat-images-unsupported"
     },
     {
       "key": "chat.images.remove",
@@ -1838,8 +1988,8 @@
     },
     {
       "key": "chat.announce.complete",
-      "en": "Response complete.",
-      "ko": "응답이 완료되었습니다.",
+      "en": "Response finished.",
+      "ko": "응답이 끝났습니다.",
       "test_id": "chat-announce-complete"
     },
     {
@@ -1873,33 +2023,87 @@
       "test_id": "chat-transcript-turn-label"
     },
     {
+      "key": "chat.message.you",
+      "en": "You",
+      "ko": "나",
+      "test_id": "chat-message-you"
+    },
+    {
+      "key": "chat.message.prompt_actions",
+      "en": "Prompt actions",
+      "ko": "프롬프트 작업",
+      "test_id": "chat-message-prompt-actions"
+    },
+    {
+      "key": "chat.message.response_actions",
+      "en": "Response actions",
+      "ko": "응답 작업",
+      "test_id": "chat-message-response-actions"
+    },
+    {
+      "key": "chat.message.elapsed",
+      "en": "{status} · {seconds} s",
+      "ko": "{status} · {seconds}초",
+      "test_id": "chat-message-elapsed"
+    },
+    {
+      "key": "chat.message.copy_prompt",
+      "en": "Copy prompt",
+      "ko": "프롬프트 복사",
+      "test_id": "chat-message-copy-prompt"
+    },
+    {
+      "key": "chat.message.copied_prompt",
+      "en": "Copied prompt.",
+      "ko": "프롬프트를 복사했습니다.",
+      "test_id": "chat-message-copied-prompt"
+    },
+    {
+      "key": "chat.message.copy_prompt_failed",
+      "en": "Copy unavailable; select the prompt text instead.",
+      "ko": "복사할 수 없습니다. 프롬프트 텍스트를 직접 선택하세요.",
+      "test_id": "chat-message-copy-prompt-failed"
+    },
+    {
+      "key": "chat.message.retry",
+      "en": "Retry response",
+      "ko": "응답 다시 시도",
+      "test_id": "chat-message-retry"
+    },
+    {
+      "key": "chat.message.not_executed",
+      "en": "Not executed",
+      "ko": "실행하지 않음",
+      "test_id": "chat-message-not-executed"
+    },
+    {
       "key": "chat.transcript.status.streaming",
-      "en": "Streaming",
-      "ko": "스트리밍 중",
+      "en": "Generating",
+      "ko": "생성 중",
       "test_id": "chat-transcript-status-streaming"
     },
     {
       "key": "chat.transcript.status.complete",
-      "en": "Complete",
+      "en": "Done",
       "ko": "완료",
       "test_id": "chat-transcript-status-complete"
     },
     {
       "key": "chat.transcript.status.cancelled",
-      "en": "Cancelled",
-      "ko": "취소됨",
+      "en": "Stopped",
+      "ko": "중지됨",
       "test_id": "chat-transcript-status-cancelled"
     },
     {
       "key": "chat.transcript.status.interrupted",
-      "en": "Interrupted",
-      "ko": "중단됨",
+      "en": "Did not finish",
+      "ko": "완료되지 않음",
       "test_id": "chat-transcript-status-interrupted"
     },
     {
       "key": "chat.transcript.status.error",
-      "en": "Error",
-      "ko": "오류",
+      "en": "Failed",
+      "ko": "실패",
       "test_id": "chat-transcript-status-error"
     },
     {

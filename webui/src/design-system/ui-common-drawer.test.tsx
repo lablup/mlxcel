@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../app';
 import { WebUiProvider } from '../state';
+import { Drawer } from './primitives';
 import { AppShell } from './shell';
 
 let host: HTMLDivElement;
@@ -88,5 +89,44 @@ describe('navigation drawer adoption', () => {
     expect(isPanelOpen()).toBe(true);
     expectSharedDrawer();
     popup.remove();
+  });
+});
+
+describe('Drawer variants and Escape ownership', () => {
+  function Sheet({ open, onClose, width, side }: { open: boolean; onClose: () => void; width?: 'narrow' | 'medium'; side?: 'start' | 'end' }): React.JSX.Element {
+    return <Drawer open={open} onClose={onClose} title="Sheet" closeLabel="Close" testId="variant-sheet" width={width} side={side}><label>Field<input data-testid="variant-field" /></label></Drawer>;
+  }
+  const sheet = (): HTMLElement => { const element = document.querySelector<HTMLElement>('[data-testid="variant-sheet"]'); if (!element) throw new Error('Missing sheet'); return element; };
+  it('adds only modifier classes and keeps the constant inline sheet width', () => {
+    act(() => root.render(<Sheet open={false} onClose={() => undefined} />));
+    expect(sheet().className).not.toMatch(/ds-drawer--/);
+    act(() => root.render(<Sheet open={false} onClose={() => undefined} width="medium" side="end" />));
+    expect(sheet().classList.contains('ds-drawer--medium')).toBe(true);
+    expect(sheet().classList.contains('ds-drawer--end')).toBe(true);
+    expect(sheet().style.width).toMatch(/^min\(320px/);
+  });
+  it('leaves an Escape inside an open native dialog to that dialog', async () => {
+    const onClose = vi.fn();
+    act(() => root.render(<Sheet open onClose={onClose} />));
+    await frames();
+    const dialog = document.createElement('dialog'); dialog.setAttribute('open', '');
+    const inside = document.createElement('button'); dialog.append(inside); document.body.append(dialog);
+    act(() => { inside.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
+    expect(onClose).not.toHaveBeenCalled();
+    dialog.remove();
+    act(() => { document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+  it('does not close on an Escape that only ends an IME composition inside the panel', async () => {
+    const onClose = vi.fn();
+    act(() => root.render(<Sheet open onClose={onClose} />));
+    await frames();
+    const field = document.querySelector<HTMLInputElement>('[data-testid="variant-field"]');
+    if (!field) throw new Error('Missing field');
+    act(() => field.focus());
+    act(() => { field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', isComposing: true, bubbles: true, cancelable: true })); });
+    expect(onClose).not.toHaveBeenCalled();
+    act(() => { field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
+    expect(onClose).toHaveBeenCalledOnce();
   });
 });

@@ -45,14 +45,16 @@ test('real bundled chat Stop releases the selected model request lease', async (
   await page.getByLabel(/Session key|세션 키/i).fill(token);
   await page.getByRole('button', {name:/Connect|연결/i}).click();
   await page.getByRole('combobox',{name:'Model for next turn'}).click();
-  await page.getByRole('option',{name:`${initial?.identity.display_name} · Ready`, exact:true}).click();
-  await page.getByText('Parameters for next turn', { exact: true }).click();
+  await page.getByRole('option',{name:`${initial?.identity.display_name}. Ready to chat`, exact:true}).click();
+  // Next-turn parameters live in the settings drawer; close it again before composing.
+  await page.getByRole('button', {name:'Chat settings', exact:true}).click();
   await page.getByLabel('Next turn max_tokens', { exact: true }).fill('128');
+  await page.keyboard.press('Escape');
   const imagePath = process.env.MLXCEL_CHAT_REAL_IMAGE_FILE;
-  if (imagePath) await page.getByLabel('Local images', {exact:true}).setInputFiles(imagePath);
+  if (imagePath) await page.locator('input[type="file"][accept^="image/"]').setInputFiles(imagePath);
   await page.getByRole('textbox',{name:'Message',exact:true}).fill(imagePath ? 'Describe what is visible in this image in one short sentence.' : 'Say Hello in one short sentence.');
   await page.getByRole('button',{name:'Send',exact:true}).click();
-  await expect(page.locator('.chat-turn header')).toContainText('Complete', {timeout:90000});
+  await expect(page.locator('.chat-turn .chat-status')).toHaveText('Done', {timeout:90000});
   const reply = await page.locator('.chat-markdown').innerText();
   await saveArtifact('real-response.json', JSON.stringify({model_id:modelId,image_input:Boolean(imagePath),reply,evaluation:'Output captured; root must review whether the content is sensible.'}), 'application/json');
   expect(reply.trim().length).toBeGreaterThan(0);
@@ -64,12 +66,14 @@ test('real bundled chat Stop releases the selected model request lease', async (
   await saveArtifact('real-chat-viewport.png', await page.screenshot(), 'image/png');
   await saveArtifact('real-chat-render.png', await page.screenshot({ fullPage: true }), 'image/png');
   await page.getByRole('button',{name:'New conversation',exact:true}).click();
+  await page.getByRole('button', {name:'Chat settings', exact:true}).click();
   await page.getByLabel('Next turn max_tokens', { exact: true }).fill('1024');
+  await page.keyboard.press('Escape');
   await page.getByRole('textbox',{name:'Message',exact:true}).fill('Write a very long numbered explanation of integers from 1 to 10000, without stopping early.');
   await page.getByRole('button',{name:'Send',exact:true}).click();
   await expect.poll(async()=> (await readCatalog()).find(entry=>entry.identity.id===modelId)?.lifecycle.active_requests,{timeout:30000}).toBeGreaterThan(0);
   await page.getByRole('button',{name:'Stop',exact:true}).click();
-  await expect(page.locator('.chat-turn header')).toContainText('Cancelled');
+  await expect(page.locator('.chat-turn .chat-status')).toHaveText('Stopped');
   await expect.poll(async()=> (await readCatalog()).find(entry=>entry.identity.id===modelId)?.lifecycle.active_requests,{timeout:30000}).toBe(0);
   await saveArtifact('real-stop-evidence.json', JSON.stringify({model_id:modelId,scope:'isolated server with no other request producers',initial_active:0,observed_during_positive:true,final_active:0,automatic_retry:false}), 'application/json');
   await expect(page.getByRole('button',{name:'Send',exact:true})).toBeDisabled(); // Empty composer, not a rerun.

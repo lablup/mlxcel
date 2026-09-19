@@ -2,7 +2,7 @@ import { t, type Locale } from '../i18n/catalog';
 
 // BCP-47 tags for Intl formatting; these are identifiers, not user-facing copy.
 const LOCALE_TAGS: Record<Locale, string> = { en: 'en-US', ko: 'ko-KR' };
-const localeTag = (locale: Locale): string => LOCALE_TAGS[locale];
+export const localeTag = (locale: Locale): string => LOCALE_TAGS[locale];
 
 export function formatBytes(bytes: number, locale: Locale): string {
   if (!Number.isFinite(bytes) || bytes < 0) return t(locale, 'format.unknown');

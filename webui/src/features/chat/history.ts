@@ -18,6 +18,8 @@ export interface ChatTurn {
   error: string | null;
   parameters: Record<string, number>;
   images: Array<{ name: string; type: string; dataUrl: string }>;
+  /** Wall-clock send time in epoch milliseconds; 0 marks a turn imported from a version-1 payload, whose start is unknown. */
+  startedAt: number;
 }
 export interface ChatConversation {
   id: string;
@@ -35,7 +37,17 @@ export const HISTORY_LIMITS = Object.freeze({
 export const HISTORY_DATABASE = 'mlxcel.webui.chat.v1';
 const STORE = 'history';
 const KEY = 'conversations';
-const VERSION = 1;
+// The IndexedDB schema (one object store holding one JSON string) is independent of the
+// payload version inside that string. Bumping the database version would lock older
+// builds out with a VersionError, so it stays at 1 while the payload moves to 2.
+const DATABASE_VERSION = 1;
+// Version 2 adds ChatTurn.startedAt. Version 1 payloads still import, with startedAt 0.
+const PAYLOAD_VERSION = 2;
+const TURN_KEYS_V1 = ['id', 'modelId', 'modelRevision', 'inferenceId', 'modelName', 'prompt', 'content',
+  'reasoning', 'tools', 'status', 'finishReason', 'usage', 'ttftMs', 'elapsedMs', 'error',
+  'parameters', 'images'] as const;
+const TURN_KEYS_V2 = [...TURN_KEYS_V1, 'startedAt'] as const;
+type PayloadVersion = 1 | 2;
 const PARAMETER_KEYS = new Set([
   'temperature', 'top_p', 'top_k', 'min_p', 'max_tokens', 'seed',
   'repetition_penalty', 'presence_penalty', 'frequency_penalty',
@@ -81,7 +93,7 @@ function array(value: unknown, max: number): unknown[] {
   return value;
 }
 function bytes(value: string): number { return new TextEncoder().encode(value).byteLength; }
-function normalize(value: unknown, options: HistoryOptions): ChatConversation[] {
+function normalize(value: unknown, options: HistoryOptions, version: PayloadVersion): ChatConversation[] {
   let totalTurns = 0;
   let totalImages = 0;
   let totalJsonBytes = 0;
@@ -94,9 +106,7 @@ function normalize(value: unknown, options: HistoryOptions): ChatConversation[] 
     const turnIds = new Set<string>();
     const turns = array(item.turns, HISTORY_LIMITS.turnsPerConversation).map((rawTurn): ChatTurn => {
       if (++totalTurns > HISTORY_LIMITS.totalTurns) return invalid();
-      const turn = record(rawTurn, ['id', 'modelId', 'modelRevision', 'inferenceId', 'modelName', 'prompt', 'content',
-        'reasoning', 'tools', 'status', 'finishReason', 'usage', 'ttftMs', 'elapsedMs', 'error',
-        'parameters', 'images']);
+      const turn = record(rawTurn, version === 1 ? TURN_KEYS_V1 : TURN_KEYS_V2);
       const turnId = identifier(turn.id);
       if (turnIds.has(turnId)) return invalid();
       turnIds.add(turnId);
@@ -143,6 +153,7 @@ function normalize(value: unknown, options: HistoryOptions): ChatConversation[] 
         }),
         ttftMs: nullable(turn.ttftMs, number), elapsedMs: nullable(turn.elapsedMs, number),
         error: nullable(turn.error, string), parameters, images: options.includeImages ? images : [],
+        startedAt: version === 1 ? 0 : number(turn.startedAt, true),
       };
       if (result.status === 'complete' && (!result.finishReason || (!result.content && !result.reasoning && !result.tools.length))) return invalid();
       totalJsonBytes += bytes(JSON.stringify(result));
@@ -153,13 +164,17 @@ function normalize(value: unknown, options: HistoryOptions): ChatConversation[] 
       updatedAt: number(item.updatedAt, true) };
   });
 }
+/** Validates in-memory conversations, which always carry the current (version 2) turn shape. */
 export function validateConversations(value: unknown, options: HistoryOptions = {}): ChatConversation[] {
-  const result = normalize(value, options);
+  return validatePayload(value, options, PAYLOAD_VERSION);
+}
+function validatePayload(value: unknown, options: HistoryOptions, version: PayloadVersion): ChatConversation[] {
+  const result = normalize(value, options, version);
   if (bytes(JSON.stringify(result)) > HISTORY_LIMITS.jsonBytes) return invalid();
   return result;
 }
 export function exportConversations(value: ChatConversation[], options: HistoryOptions = {}): string {
-  const json = JSON.stringify({ version: VERSION, conversations: validateConversations(value, options) });
+  const json = JSON.stringify({ version: PAYLOAD_VERSION, conversations: validateConversations(value, options) });
   if (bytes(json) > HISTORY_LIMITS.jsonBytes) return invalid();
   return json;
 }
@@ -168,8 +183,8 @@ export function importConversations(json: string, options: HistoryOptions = {}):
   let parsed: unknown;
   try { parsed = JSON.parse(json) as unknown; } catch { return invalid(); }
   const envelope = record(parsed, ['version', 'conversations']);
-  if (envelope.version !== VERSION) return invalid();
-  return validateConversations(envelope.conversations, options);
+  if (envelope.version !== 1 && envelope.version !== 2) return invalid();
+  return validatePayload(envelope.conversations, options, envelope.version);
 }
 function storageError(error: unknown): HistoryStorageError {
   const quota = error instanceof DOMException && error.name === 'QuotaExceededError';
@@ -199,7 +214,7 @@ export function createHistoryRepository(options: { indexedDB?: IDBFactory } = {}
     if (opening) return opening;
     const epoch = generation;
     opening = new Promise((resolve, reject) => {
-      const request = factory().open(HISTORY_DATABASE, VERSION);
+      const request = factory().open(HISTORY_DATABASE, DATABASE_VERSION);
       request.onupgradeneeded = () => {
         if (!request.result.objectStoreNames.contains(STORE)) request.result.createObjectStore(STORE);
       };
