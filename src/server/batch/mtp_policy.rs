@@ -578,21 +578,52 @@ impl PolicyKey {
     }
 }
 
-/// Coarse hardware-class label, e.g. `"M5-16c"` / `"M1-20c"`. Apple-silicon
-/// generation plus the GPU-core proxy distinguishes M1 Max from M1 Ultra (the
-/// regression discriminator in #165) without recording anything
-/// request-specific. Non-Apple hosts collapse to `"Unknown-0c"`.
+/// Coarse hardware-class label used as the `hardware` component of [`PolicyKey`].
 ///
-/// That collapse means a CUDA host and a ROCm host share a `PolicyKey`, so a
-/// profile measured on one is reused on the other. Widening it here is not a
-/// free fix: this label is persisted in the hint files, so any new spelling
-/// discards every profile recorded under the old one. #1805 therefore reports
-/// the vendor alongside this label in the `/v1/internal/mtp-policy` body
-/// (`gpu_vendor`, `gpu_device`, `gpu_architecture`) and leaves the key alone.
+/// Apple hosts keep the generation-plus-core spelling, e.g. `"M5-16c"` /
+/// `"M1-20c"`. That form is the #165 discriminator (M1 Max vs M1 Ultra) and is
+/// byte-stable so existing Apple profiles keep loading.
+///
+/// Non-Apple hosts used to collapse to `"Unknown-0c"` (`silicon_gen` is
+/// `Unknown` and `gpu_core_count` is 0 on every CUDA and ROCm host), so a
+/// verdict profiled on one backend was loaded on the other. The label now
+/// prefixes the GPU backend (`cuda` / `rocm`) and, when the backend publishes
+/// one, the device architecture, e.g. `"cuda-Unknown-0c"` /
+/// `"rocm-gfx1151-Unknown-0c"` (issue #1887).
+///
+/// Hint files written under the old `"Unknown-0c"` spelling are not migrated.
+/// The stored `hardware` field is the ambiguous string and records no vendor,
+/// so any mapping would be a guess, and a wrong guess reuses a cross-vendor
+/// verdict. A new spelling hashes to a different path, [`PolicyStore::load`]
+/// returns `None`, and the host re-profiles once. Orphaned files are left in
+/// the cache directory; sweeping them is not a load-path side effect.
 #[must_use]
 pub(crate) fn hardware_label() -> String {
-    let hw = mlxcel_core::hardware::get_hardware();
-    format!("{}-{}c", hw.silicon_gen, hw.gpu_core_count)
+    hardware_label_for(mlxcel_core::hardware::get_hardware())
+}
+
+/// Test seam: same spelling as [`hardware_label`], driven by injected
+/// capabilities so a CUDA-vs-ROCm key split can be asserted on every backend.
+#[must_use]
+pub(crate) fn hardware_label_for(hw: &mlxcel_core::hardware::HardwareCapabilities) -> String {
+    let class = format!("{}-{}c", hw.silicon_gen, hw.gpu_core_count);
+    if hw.is_apple_silicon() {
+        return class;
+    }
+    // Backend tags rather than `GpuVendor` Debug names: the cache key is a
+    // host/backend identity (CUDA vs ROCm), which is what #1887 splits.
+    // `GpuVendor` is `#[non_exhaustive]`; an unnamed vendor still needs its
+    // own prefix, so the wildcard is `unknown` rather than a panic.
+    let backend = match hw.vendor {
+        mlxcel_core::hardware::GpuVendor::Nvidia => "cuda",
+        mlxcel_core::hardware::GpuVendor::Amd => "rocm",
+        mlxcel_core::hardware::GpuVendor::Apple => "metal",
+        _ => "unknown",
+    };
+    match hw.device_architecture.as_deref() {
+        Some(arch) if !arch.is_empty() => format!("{backend}-{arch}-{class}"),
+        _ => format!("{backend}-{class}"),
+    }
 }
 
 // ── Persisted hint ────────────────────────────────────────────────────────────
