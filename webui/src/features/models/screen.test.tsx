@@ -603,6 +603,15 @@ describe('library row actions', () => {
     Reflect.deleteProperty(HTMLElement.prototype, 'scrollIntoView');
   });
 
+  it('falls back to the weight dtype in the Quantization column when no quantization is declared', () => {
+    const dtypeOnly = { ...model(), identity: { ...model().identity, id: 'id_dtype', display_name: 'dtype-only' }, metadata: { ...model().metadata, quantization: null, dtype: 'bf16' } };
+    const neither = { ...model(), identity: { ...model().identity, id: 'id_neither', display_name: 'neither' }, metadata: { ...model().metadata, quantization: null, dtype: null } };
+    state = { ...state, catalog: [dtypeOnly, neither], selectedModelId: null };
+    render();
+    expect(row('dtype-only').querySelector('.models-col-quantization')?.textContent).toBe('bf16');
+    expect(row('neither').querySelector('.models-col-quantization')?.textContent).toBe(t('en', 'models.library.unknown'));
+  });
+
   it('shows download pseudo-rows for in-flight and failed downloads only, keyed apart from catalog rows', () => {
     const failed: Operation = { ...download, operation_id: 'op_failed', state: 'failed', cancellable: false, created_at: '2026-09-13T00:00:00Z', error: { code: 'unavailable', message: 'disk full', retryable: true } };
     const done: Operation = { ...download, operation_id: 'op_done', state: 'succeeded', cancellable: false, target: { target_kind: 'download', repo_id: 'owner/done', revision: null } };

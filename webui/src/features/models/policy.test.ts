@@ -7,9 +7,11 @@ import {
   canLoad,
   canUnload,
   current,
+  entryTasks,
   evictionCandidates,
   inventory,
   modelPending,
+  quantizationValue,
   validRepo,
 } from './policy';
 import { model, snapshot } from './test-fixtures';
@@ -146,6 +148,25 @@ describe('authoritative Models action policy', () => {
   ])('rejects non-repository input %s', (repo) => expect(validRepo(repo)).toBe(false));
   it('accepts public repo syntax without performing an external lookup', () =>
     expect(validRepo('mlx-community/SmolLM-135M-Instruct-4bit')).toBe(true));
+  it('shows the declared quantization, else the weight dtype, else nothing', () => {
+    expect(quantizationValue({ ...model(), metadata: { ...model().metadata, quantization: '4bit', dtype: 'bf16' } })).toBe('4bit');
+    expect(quantizationValue({ ...model(), metadata: { ...model().metadata, quantization: null, dtype: 'bf16' } })).toBe('bf16');
+    expect(quantizationValue({ ...model(), metadata: { ...model().metadata, quantization: null, dtype: null } })).toBeNull();
+  });
+  it('lists each capability task once, in output_tasks order, with tasks absent from output_tasks last in their original order', () => {
+    const entry = {
+      ...model(),
+      metadata: { ...model().metadata, output_tasks: ['embedding' as const, 'chat' as const] },
+      capabilities: [
+        { task: 'rerank' as const, phase: 'pre_load' as const, available: true, reason: null },
+        { task: 'audio_transcription' as const, phase: 'pre_load' as const, available: true, reason: null },
+        { task: 'chat' as const, phase: 'pre_load' as const, available: true, reason: null },
+        { task: 'chat' as const, phase: 'provider_ready' as const, available: true, reason: null },
+        { task: 'embedding' as const, phase: 'pre_load' as const, available: true, reason: null },
+      ],
+    };
+    expect(entryTasks(entry)).toEqual(['embedding', 'chat', 'rerank', 'audio_transcription']);
+  });
 });
 
 it('matches canonical repository segment and revision bounds', async () => {
