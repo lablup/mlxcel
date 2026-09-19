@@ -1,24 +1,30 @@
 {
   "budgets": {
-    "embedded_asset_bytes": 699180,
+    "embedded_asset_bytes": 699238,
     "embedded_asset_limit_bytes": 5242880,
-    "initial_js_gzip_bytes": 150665,
+    "initial_js_gzip_bytes": 150695,
     "initial_js_gzip_limit_bytes": 204800,
-    "total_js_gzip_bytes": 151869,
+    "total_js_gzip_bytes": 151900,
     "total_js_gzip_limit_bytes": 716800
   },
   "files": [
     {
       "bytes": 951,
-      "gzip_bytes": 611,
-      "path": "assets/code-highlight-Bm5vx0DP.js",
-      "sha256": "9b01b1aab87d8ad84bd516cd99c585b2554d56b4c17d5248bf7ce05fb52f7efe"
+      "gzip_bytes": 612,
+      "path": "assets/code-highlight-Bj0d9LHD.js",
+      "sha256": "421595d7d0bf36840209369c48c3b9fa8566b05877af5d28a0786fd39fd4fb2d"
     },
     {
       "bytes": 1104,
       "gzip_bytes": 593,
-      "path": "assets/history-DrPcgfrl.js",
-      "sha256": "742b619219956ae7e3a4964b1edc337fcdb2295838818784971517d137d12c99"
+      "path": "assets/history-CnVYYhv1.js",
+      "sha256": "f2f5e4682c3b1cfe7d85df6cc8e3db2611f596e531557882a61b570e4d6f99a0"
+    },
+    {
+      "bytes": 569518,
+      "gzip_bytes": 150695,
+      "path": "assets/index-BNMccglV.js",
+      "sha256": "3404c7b755e614509c503508e13bf9b3a131e03df94fc6f9233c8e498d563f9f"
     },
     {
       "bytes": 111884,
@@ -27,16 +33,10 @@
       "sha256": "35cc4e79a2313c0c1d16c0c63b3f190a4614bfc5e1cf4fd149df96d3dbb71c85"
     },
     {
-      "bytes": 569460,
-      "gzip_bytes": 150665,
-      "path": "assets/index-kszpQcpb.js",
-      "sha256": "493ff6479d7d8356af74193025e42bd52afce62ad32cd8cfdd3f80f042675cea"
-    },
-    {
       "bytes": 453,
-      "gzip_bytes": 286,
+      "gzip_bytes": 287,
       "path": "index.html",
-      "sha256": "a6ba015a217908ce90dd58b471af9497789319240fb9885e8171b63a2c3421ab"
+      "sha256": "7801d53531915f03dd38ad70cab2c17f91718b75c90a259cc87469d322ea3b00"
     },
     {
       "bytes": 13233,
@@ -67,5 +67,5 @@
   },
   "pnpm_version": "11.18.0",
   "schema_version": 1,
-  "source_digest_sha256": "3fcd51ae70deb4ada1fa1ebe8d7df194b1907749361da3e70bdf6569beec843a"
+  "source_digest_sha256": "20cb0ce296f7db9bca064feb8672a4602e71e87d18d85d52acaea6bf2aef7ebc"
 }
