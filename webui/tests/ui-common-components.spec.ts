@@ -38,3 +38,29 @@ test.describe('shared Tooltip', () => {
     await expect(page.locator('.tooltip__wrapper').filter({ has: trigger })).toHaveCount(1);
   });
 });
+
+test.describe('shared ErrorState', () => {
+  test('the gallery warning stays a compact start-aligned alert with its action and high-contrast border', async ({ page }) => {
+    await bootGallery(page, variants[6]);
+    const title = text('gallery.states.load_failed');
+    const banner = page.locator('.ds-banner').filter({ hasText: title });
+    await expect(banner).toHaveAttribute('role', 'alert');
+    await expect(banner.getByRole('button', { name: text('common.retry'), exact: true })).toBeVisible();
+    await expect(banner).toHaveCSS('border-top-width', '2px');
+    await expect(page.getByRole('heading', { name: title })).toHaveCount(0);
+    // The banner stretches to its grid row, so measure where the title sits instead:
+    // a compact banner starts at its padding, not centered in a 200px block.
+    const layout = await banner.evaluate((element, label) => {
+      const heading = Array.from(element.querySelectorAll<HTMLElement>('*')).find((node) => node.childElementCount === 0 && node.textContent === label);
+      if (!heading) return { top: -1, left: -1, align: 'missing' };
+      const box = element.getBoundingClientRect();
+      const title = heading.getBoundingClientRect();
+      return { top: title.top - box.top, left: title.left - box.left, align: window.getComputedStyle(heading).textAlign };
+    }, title);
+    expect(layout.top).toBeGreaterThanOrEqual(0);
+    expect(layout.top).toBeLessThan(32);
+    expect(layout.left).toBeLessThan(32);
+    expect(['start', 'left']).toContain(layout.align);
+    await expect(banner.locator('.error-state')).toHaveCount(1);
+  });
+});
