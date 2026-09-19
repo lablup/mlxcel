@@ -1,8 +1,11 @@
 // Copyright 2026 Lablup Inc. Licensed under Apache-2.0.
-import { beforeEach, describe, expect, it } from 'vitest';
-import { newConversation, replaceConversations, sessionGeneration, updateConversation } from './session';
+import { act, createElement } from 'react';
+import { createRoot } from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { consumeNewConversationRequest, newConversation, replaceConversations, requestNewConversation, sessionGeneration, updateConversation, useNewConversationRequest } from './session';
 import type { ChatTurn } from './history';
-beforeEach(() => replaceConversations([]));
+beforeEach(() => { vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true); replaceConversations([]); });
+afterEach(() => { replaceConversations([]); vi.unstubAllGlobals(); });
 describe('bounded memory-only chat session', () => {
   it('admits fifty conversations but refuses a fifty-first without invalidating active generation', () => {
     const generation = sessionGeneration();
@@ -29,5 +32,38 @@ describe('bounded memory-only chat session', () => {
     const conversations = Array.from({ length: 10 }, () => ({ ...newConversation('Test conversation'), turns: Array.from({ length: 100 }, (_, index) => ({ ...turn, id: String(index) })) }));
     replaceConversations(conversations);
     expect(updateConversation({ ...newConversation('Test conversation'), turns: [turn] })).toBe(false);
+  });
+});
+describe('new-conversation requests', () => {
+  it('holds one pending request until it is consumed once', () => {
+    expect(consumeNewConversationRequest()).toBe(false);
+    requestNewConversation();
+    requestNewConversation();
+    expect(consumeNewConversationRequest()).toBe(true);
+    expect(consumeNewConversationRequest()).toBe(false);
+  });
+  it('is cleared by replacing the conversations, including logout', () => {
+    requestNewConversation();
+    replaceConversations([]);
+    expect(consumeNewConversationRequest()).toBe(false);
+    requestNewConversation();
+    replaceConversations([newConversation('Imported')]);
+    expect(consumeNewConversationRequest()).toBe(false);
+  });
+  it('notifies subscribers with a fresh token for every request and 0 for none', () => {
+    const seen: number[] = [];
+    function Probe(): null { seen.push(useNewConversationRequest()); return null; }
+    const host = document.createElement('div');
+    const root = createRoot(host);
+    act(() => root.render(createElement(Probe)));
+    expect(seen.at(-1)).toBe(0);
+    act(() => requestNewConversation());
+    const first = seen.at(-1);
+    expect(first).toBeGreaterThan(0);
+    act(() => requestNewConversation());
+    expect(seen.at(-1)).toBeGreaterThan(first ?? 0);
+    act(() => replaceConversations([]));
+    expect(seen.at(-1)).toBe(0);
+    act(() => root.unmount());
   });
 });

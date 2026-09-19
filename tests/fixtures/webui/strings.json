@@ -79,6 +79,42 @@
       "test_id": "toolbar-menu"
     },
     {
+      "key": "toolbar.loaded.label",
+      "en": "Loaded models",
+      "ko": "로드된 모델",
+      "test_id": "toolbar-loaded"
+    },
+    {
+      "key": "toolbar.loaded.none",
+      "en": "No model loaded",
+      "ko": "로드된 모델 없음",
+      "test_id": "toolbar-loaded-none"
+    },
+    {
+      "key": "toolbar.loaded.unknown",
+      "en": "Loaded models unknown",
+      "ko": "로드된 모델 알 수 없음",
+      "test_id": "toolbar-loaded-unknown"
+    },
+    {
+      "key": "toolbar.loaded.count",
+      "en": "{count} loaded",
+      "ko": "{count}개 로드됨",
+      "test_id": "toolbar-loaded-count"
+    },
+    {
+      "key": "toolbar.loaded.more",
+      "en": "+{count}",
+      "ko": "+{count}",
+      "test_id": "toolbar-loaded-more"
+    },
+    {
+      "key": "toolbar.loaded.more_label",
+      "en": "+{count}, show all loaded models",
+      "ko": "+{count}, 로드된 모델 모두 보기",
+      "test_id": "toolbar-loaded-more-label"
+    },
+    {
       "key": "connection.ready",
       "en": "Shell loaded; local API not connected",
       "ko": "셸 로드됨; 로컬 API 미연결",
@@ -110,9 +146,27 @@
     },
     {
       "key": "connection.footer.connected",
-      "en": "{mode} · {status} · v{version} · seq {sequence}",
-      "ko": "{mode} · {status} · v{version} · seq {sequence}",
+      "en": "{mode} · {status} · v{version}",
+      "ko": "{mode} · {status} · v{version}",
       "test_id": "connection-footer-connected"
+    },
+    {
+      "key": "connection.footer.details",
+      "en": "Connection details",
+      "ko": "연결 세부 정보",
+      "test_id": "connection-footer-details"
+    },
+    {
+      "key": "connection.footer.instance",
+      "en": "Server instance: {id}",
+      "ko": "서버 인스턴스: {id}",
+      "test_id": "connection-footer-instance"
+    },
+    {
+      "key": "connection.footer.sequence",
+      "en": "Event sequence: {sequence}",
+      "ko": "이벤트 순번: {sequence}",
+      "test_id": "connection-footer-sequence"
     },
     {
       "key": "connection.snapshot.pending",
@@ -536,15 +590,27 @@
     },
     {
       "key": "command.search",
-      "en": "Search commands",
-      "ko": "명령 검색",
+      "en": "Search commands and models",
+      "ko": "명령과 모델 검색",
       "test_id": "command-search"
     },
     {
       "key": "command.no_results",
-      "en": "No commands match this search.",
-      "ko": "검색과 일치하는 명령이 없습니다.",
+      "en": "No commands or models match this search.",
+      "ko": "검색과 일치하는 명령이나 모델이 없습니다.",
       "test_id": "command-no-results"
+    },
+    {
+      "key": "command.section.commands",
+      "en": "Commands",
+      "ko": "명령",
+      "test_id": "command-section-commands"
+    },
+    {
+      "key": "command.section.models",
+      "en": "Models",
+      "ko": "모델",
+      "test_id": "command-section-models"
     },
     {
       "key": "help.title",
@@ -554,9 +620,45 @@
     },
     {
       "key": "help.body",
-      "en": "Command opens search. Escape closes overlays. Brackets move navigation only while the sidebar has focus.",
-      "ko": "Command는 검색을 엽니다. Escape는 오버레이를 닫습니다. 대괄호는 사이드바에 포커스가 있을 때만 내비게이션을 이동합니다.",
+      "en": "Shortcuts do not fire while you type in a field, inside an open dialog (Esc still closes it) or during IME composition. Cmd/Ctrl+N and Cmd/Ctrl+Enter also work in the chat message field. Brackets move navigation only while the sidebar has focus.",
+      "ko": "입력란에 입력하는 중, 열린 다이얼로그 안(Esc로 닫기는 가능), IME 조합 중에는 단축키가 동작하지 않습니다. Cmd/Ctrl+N과 Cmd/Ctrl+Enter는 대화 메시지 입력란에서도 동작합니다. 대괄호는 사이드바에 포커스가 있을 때만 내비게이션을 이동합니다.",
       "test_id": "help-body"
+    },
+    {
+      "key": "help.shortcut.command",
+      "en": "Open the command palette",
+      "ko": "명령 팔레트 열기",
+      "test_id": "help-shortcut-command"
+    },
+    {
+      "key": "help.shortcut.new_chat",
+      "en": "Start a new conversation",
+      "ko": "새 대화 시작",
+      "test_id": "help-shortcut-new-chat"
+    },
+    {
+      "key": "help.shortcut.send",
+      "en": "Send the message from the composer",
+      "ko": "입력 중인 메시지 보내기",
+      "test_id": "help-shortcut-send"
+    },
+    {
+      "key": "help.shortcut.escape",
+      "en": "Close the open dialog or navigation",
+      "ko": "열린 다이얼로그나 내비게이션 닫기",
+      "test_id": "help-shortcut-escape"
+    },
+    {
+      "key": "help.shortcut.navigate",
+      "en": "Move primary navigation while the sidebar has focus",
+      "ko": "사이드바에 포커스가 있을 때 주 내비게이션 이동",
+      "test_id": "help-shortcut-navigate"
+    },
+    {
+      "key": "help.shortcut.help",
+      "en": "Show keyboard shortcuts",
+      "ko": "키보드 단축키 보기",
+      "test_id": "help-shortcut-help"
     },
     {
       "key": "gallery.title",
@@ -575,12 +677,6 @@
       "en": "Long English and 한국어 labels truncate with accessible full labels.",
       "ko": "긴 English 및 한국어 레이블은 접근 가능한 전체 레이블을 유지하며 줄임표 처리됩니다.",
       "test_id": "gallery-long-cjk"
-    },
-    {
-      "key": "model.selected.none",
-      "en": "No model selected",
-      "ko": "선택한 모델 없음",
-      "test_id": "model-selected-none"
     },
     {
       "key": "common.unavailable",
@@ -629,30 +725,6 @@
       "en": "Send",
       "ko": "보내기",
       "test_id": "common-send"
-    },
-    {
-      "key": "routes.models.eyebrow",
-      "en": "Local library",
-      "ko": "로컬 라이브러리",
-      "test_id": "routes-models-eyebrow"
-    },
-    {
-      "key": "routes.chat.eyebrow",
-      "en": "Conversation",
-      "ko": "대화",
-      "test_id": "routes-chat-eyebrow"
-    },
-    {
-      "key": "routes.activity.eyebrow",
-      "en": "Operations",
-      "ko": "작업",
-      "test_id": "routes-activity-eyebrow"
-    },
-    {
-      "key": "routes.settings.eyebrow",
-      "en": "Browser only",
-      "ko": "브라우저 전용",
-      "test_id": "routes-settings-eyebrow"
     },
     {
       "key": "adapters.pending.title",
@@ -923,12 +995,6 @@
       "en": "Off",
       "ko": "끔",
       "test_id": "settings-high-contrast-off"
-    },
-    {
-      "key": "gallery.issue",
-      "en": "Issue #1843",
-      "ko": "이슈 #1843",
-      "test_id": "gallery-issue"
     },
     {
       "key": "gallery.hover_focus",
@@ -1541,12 +1607,6 @@
       "en": "not yet measured",
       "ko": "아직 측정되지 않음",
       "test_id": "format-not-measured"
-    },
-    {
-      "key": "chat.eyebrow",
-      "en": "Local inference",
-      "ko": "로컬 추론",
-      "test_id": "chat-eyebrow"
     },
     {
       "key": "chat.intro",

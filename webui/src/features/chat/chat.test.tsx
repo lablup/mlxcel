@@ -8,10 +8,13 @@ import { initialSnapshot } from '../../state/reducer';
 import type { WebUiSnapshot } from '../../api/types';
 import { WebUiHttpError, type ChatStreamHandlers } from '../../api/client';
 import { Chat } from './chat';
-import { replaceConversations } from './session';
+import { consumeNewConversationRequest, newConversation, replaceConversations, requestNewConversation, useConversations } from './session';
 import { useGenerationDefaults } from '../settings/generation-preferences';
 let preferences: ReturnType<typeof useGenerationDefaults>;
 function DefaultsControl(): null { preferences = useGenerationDefaults(); return null; }
+let conversationCount = 0;
+function ConversationsProbe(): null { conversationCount = useConversations().length; return null; }
+function key(target: EventTarget, init: KeyboardEventInit & { keyCode?: number }): KeyboardEvent { const event = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init }); if (init.keyCode !== undefined) Object.defineProperty(event, 'keyCode', { value: init.keyCode }); act(() => { target.dispatchEvent(event); }); return event; }
 function parameter(name: string, value: string): void {
  const label = Array.from(host.querySelectorAll('label')).find(item => item.textContent?.startsWith(`Next turn ${name}`));
  const field = label?.querySelector('input'); if (!field) throw new Error(`Missing parameter ${name}`);
@@ -113,4 +116,97 @@ describe('Chat real component composition',()=>{
   expect(mocked.stream.mock.calls[0][1]).toEqual(body);
  });
 
+ describe('keyboard shortcuts', () => {
+  const renderChat = (): void => act(() => root.render(<React.StrictMode><DefaultsControl/><ConversationsProbe/><Chat locale="en"/></React.StrictMode>));
+  const composer = (): HTMLTextAreaElement => { const field = host.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]'); if (!field) throw new Error('Missing composer'); return field; };
+  it.each([['metaKey'], ['ctrlKey']] as const)('sends with %s+Enter from the composer', async (modifier) => {
+   mocked.stream.mockImplementation(completion);
+   const field = input('Hello');
+   let event: KeyboardEvent | undefined;
+   await act(async () => { event = key(field, { key: 'Enter', [modifier]: true }); });
+   expect(event?.defaultPrevented).toBe(true);
+   expect(mocked.stream).toHaveBeenCalledOnce();
+   expect(mocked.stream.mock.calls[0][1]).toMatchObject({ messages: [{ role: 'user', content: 'Hello' }] });
+  });
+  it('does not send with Cmd/Ctrl+Enter during composition, on keyCode 229, or with an empty draft', async () => {
+   const field = input('한글');
+   await act(async () => { key(field, { key: 'Enter', metaKey: true, isComposing: true }); });
+   await act(async () => { key(field, { key: 'Enter', ctrlKey: true, keyCode: 229 }); });
+   act(() => { field.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true })); });
+   await act(async () => { key(field, { key: 'Enter', metaKey: true }); });
+   act(() => { field.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true })); });
+   expect(mocked.stream).not.toHaveBeenCalled();
+   input('');
+   await act(async () => { key(field, { key: 'Enter', metaKey: true }); });
+   expect(mocked.stream).not.toHaveBeenCalled();
+  });
+  it('starts a new empty conversation with Ctrl+N from the composer on a non-Apple platform, but not mid-composition or with an extra modifier', () => {
+   renderChat();
+   expect(conversationCount).toBe(0);
+   input('draft text');
+   const first = key(composer(), { key: 'n', ctrlKey: true });
+   expect(first.defaultPrevented).toBe(true);
+   expect(conversationCount).toBe(1);
+   expect(composer().value).toBe('');
+   key(composer(), { key: 'n', ctrlKey: true, isComposing: true });
+   key(composer(), { key: 'n', ctrlKey: true, altKey: true });
+   key(composer(), { key: 'n', ctrlKey: true, shiftKey: true });
+   expect(conversationCount).toBe(1);
+  });
+  it('creates with Meta+N but leaves Ctrl+N as the native caret-movement binding on an Apple platform', () => {
+   const platform = vi.spyOn(window.navigator, 'platform', 'get').mockReturnValue('MacIntel');
+   try {
+    renderChat();
+    input('draft text');
+    // Ctrl+N on macOS is Cocoa/Emacs "move down a line" inside a textarea; it must fall
+    // through untouched, without preventDefault, so the native caret movement still happens.
+    const ctrlEvent = key(composer(), { key: 'n', ctrlKey: true });
+    expect(ctrlEvent.defaultPrevented).toBe(false);
+    expect(conversationCount).toBe(0);
+    expect(composer().value).toBe('draft text');
+    const metaEvent = key(composer(), { key: 'N', metaKey: true });
+    expect(metaEvent.defaultPrevented).toBe(true);
+    expect(conversationCount).toBe(1);
+    expect(composer().value).toBe('');
+   } finally {
+    platform.mockRestore();
+   }
+  });
+  it('ignores a held key repeat for the composer new-conversation shortcut', () => {
+   renderChat();
+   input('draft text');
+   key(composer(), { key: 'n', ctrlKey: true, repeat: true });
+   expect(conversationCount).toBe(0);
+   expect(composer().value).toBe('draft text');
+   key(composer(), { key: 'n', ctrlKey: true });
+   expect(conversationCount).toBe(1);
+  });
+  it('consumes a pending request exactly once on mount under StrictMode', () => {
+   act(() => root.render(<ConversationsProbe/>));
+   requestNewConversation();
+   renderChat();
+   expect(conversationCount).toBe(1);
+   expect(host.querySelector('[data-testid="chat-title"]')).not.toBeNull();
+   act(() => root.render(<ConversationsProbe/>));
+   renderChat();
+   expect(conversationCount).toBe(1);
+   expect(consumeNewConversationRequest()).toBe(false);
+  });
+  it('consumes a request raised while Chat is already mounted', () => {
+   renderChat();
+   act(() => requestNewConversation());
+   expect(conversationCount).toBe(1);
+   act(() => requestNewConversation());
+   expect(conversationCount).toBe(2);
+  });
+  it('drops a request at the 50-conversation cap without creating one', () => {
+   replaceConversations(Array.from({ length: 50 }, () => newConversation('Kept')));
+   requestNewConversation();
+   renderChat();
+   expect(conversationCount).toBe(50);
+   expect(consumeNewConversationRequest()).toBe(false);
+   key(composer(), { key: 'n', metaKey: true });
+   expect(conversationCount).toBe(50);
+  });
+ });
 });

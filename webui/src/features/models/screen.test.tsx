@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { WebUiSnapshot, Operation } from '../../api/types';
 import { WebUiHttpError } from '../../api/client';
+import { t } from '../../i18n/catalog';
 import { ModelsLibrary } from './screen';
 import { model, snapshot } from './test-fixtures';
 
@@ -291,6 +292,45 @@ describe('reviewed asynchronous recovery paths', () => {
     await click('models-download-submit');
     expect(host.querySelector('[data-testid="models-add-dialog"]')?.textContent).toContain('revision not found');
     expect(host.querySelector<HTMLInputElement>('[data-testid="models-repo"]')?.value).toBe('owner/repo');
+  });
+  it('keeps the library actions in the PageHeader and the stale and action errors in its error slot', async () => {
+    actions.refreshCatalog.mockRejectedValue(
+      new WebUiHttpError(409, {
+        request_id: 'req_busy',
+        error: { code: 'conflict', message: 'catalog refresh already running', retryable: true },
+      }),
+    );
+    render();
+    const header = requireValue(host.querySelector<HTMLElement>('.ds-page-header'));
+    expect(header.querySelector('h1')?.dataset.testid).toBe('models-title');
+    expect(host.querySelectorAll('[data-dialog-focus-fallback]')).toHaveLength(1);
+    for (const id of ['models-add', 'models-rescan'])
+      expect(header.querySelector(`.page-header__actions [data-testid="${id}"]`)).not.toBeNull();
+    expect(Array.from(header.querySelectorAll('.page-header__actions button')).map((item) => item.textContent)).toEqual([
+      t('en', 'models.library.add'),
+      t('en', 'models.library.rescan'),
+      'Refresh server state',
+    ]);
+    expect(header.querySelector('.page-header__error')).toBeNull();
+    await click('models-rescan');
+    const actionError = requireValue(host.querySelector<HTMLElement>('[data-testid="models-action-error"]'));
+    expect(actionError.matches('.ds-page-header .page-header__error[role="alert"]')).toBe(true);
+    expect(actionError.querySelector('.page-header__error-text')?.textContent).toBe(t('en', 'models.library.error'));
+    const retry = requireValue(actionError.querySelector<HTMLButtonElement>('button'));
+    expect(retry.textContent).toBe('Refresh server state');
+    await act(async () => retry.click());
+    expect(actions.refresh).toHaveBeenCalledOnce();
+    expect(host.querySelector('[data-testid="models-action-error"]')).toBeNull();
+    state = { ...state, connection: 'stale', error: { code: 'stale', message: 'server restarted', retryable: true } };
+    render();
+    const stale = requireValue(host.querySelector<HTMLElement>('[data-testid="connection-error-title"]'));
+    expect(stale.matches('.ds-page-header .page-header__error[role="alert"]')).toBe(true);
+    expect(stale.querySelector('.page-header__error-text')?.textContent).toBe(t('en', 'models.library.stale'));
+    expect(stale.querySelector('.page-header__error-detail')?.textContent).toBe('server restarted');
+    expect(button('models-rescan').disabled).toBe(true);
+    await act(async () => requireValue(stale.querySelector<HTMLButtonElement>('button')).click());
+    expect(actions.refresh).toHaveBeenCalledTimes(2);
+    expect(host.querySelectorAll('.page-header__error')).toHaveLength(1);
   });
   it('keeps rescan and lifecycle read-only in single-model mode', () => {
     if (!state.bootstrap) throw new Error('Missing fixture');

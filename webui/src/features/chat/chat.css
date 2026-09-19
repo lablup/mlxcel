@@ -1,6 +1,6 @@
 .chat-screen { min-width: 0; }
 .chat-toolbar { display: flex; flex-wrap: wrap; gap: var(--space-3, 12px); align-items: end; }
-.chat-toolbar .ds-field { flex: 1; min-width: 180px; }
+.chat-toolbar .ds-field { flex: 1; min-width: min(180px, 100%); }
 .chat-transcript { max-height: 60vh; overflow: auto; overflow-anchor: none; }
 .chat-turn { padding-block: var(--space-4, 16px); border-bottom: 1px solid var(--color-separator); overflow-wrap: anywhere; }
 .chat-turn header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; }

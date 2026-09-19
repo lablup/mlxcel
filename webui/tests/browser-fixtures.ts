@@ -120,7 +120,19 @@ export async function browserStorageDump(page: Page): Promise<string> {
   }));
 }
 
-export async function installMockApi(page: Page, mode: MockMode = 'happy'): Promise<{ calls: ApiCall[]; releaseCatalog: () => void; catalogFulfillFailures: string[] }> {
+export type CatalogPage = typeof catalogFixture;
+
+/** The catalog fixture's single model, loaded and chat-ready on the server. */
+export function readyCatalog(page: CatalogPage): CatalogPage {
+  const entry = page.items[0];
+  entry.lifecycle.state = 'ready';
+  entry.lifecycle.worker_exit_observed = false;
+  entry.capabilities = [{ task: 'chat', phase: 'provider_ready', available: true, reason: null }];
+  return page;
+}
+
+/** `catalog` rewrites the fixture catalog page per request; without it the mock serves the fixture unchanged. */
+export async function installMockApi(page: Page, mode: MockMode = 'happy', options: { catalog?: (page: CatalogPage) => CatalogPage } = {}): Promise<{ calls: ApiCall[]; releaseCatalog: () => void; catalogFulfillFailures: string[] }> {
   const calls: ApiCall[] = [];
   const catalogFulfillFailures: string[] = [];
   let releaseCatalog = (): void => undefined;
@@ -148,7 +160,7 @@ export async function installMockApi(page: Page, mode: MockMode = 'happy'): Prom
     if (path === '/ui-api/v1/catalog') {
       if (mode === 'slow-catalog' && !slowCatalogReleased) await slowCatalog;
       try {
-        await fulfillJson(route, makeCatalog());
+        await fulfillJson(route, options.catalog ? options.catalog(makeCatalog()) : makeCatalog());
       } catch (error) {
         catalogFulfillFailures.push(error instanceof Error ? error.message : String(error));
       }

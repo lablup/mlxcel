@@ -6,7 +6,8 @@ import bootstrapFixture from '../../tests/fixtures/webui/examples/bootstrap.mode
 import catalogFixture from '../../tests/fixtures/webui/examples/catalog.page.json';
 import operationsFixture from '../../tests/fixtures/webui/examples/operations.list.json';
 import { App } from './app';
-import { WebUiProvider } from './state';
+import { replaceConversations, useConversations } from './features/chat/session';
+import { WebUiProvider, WebUiSynchronizer } from './state';
 
 interface FetchCall {
   readonly url: string;
@@ -19,12 +20,15 @@ type Scenario = 'happy' | 'bad-key' | 'offline' | 'malformed-bootstrap' | 'sync-
 
 let root: Root | null = null;
 let host: HTMLDivElement | null = null;
+let conversationCount = 0;
+function ConversationsProbe(): null { conversationCount = useConversations().length; return null; }
 
 beforeEach(() => {
   HTMLDialogElement.prototype.showModal = vi.fn(function showModal(this: HTMLDialogElement) { this.setAttribute('open', ''); });
   HTMLDialogElement.prototype.close = vi.fn(function close(this: HTMLDialogElement) { this.removeAttribute('open'); this.dispatchEvent(new Event('close')); });
   localStorage.clear();
   sessionStorage.clear();
+  replaceConversations([]);
   window.history.replaceState(null, '', '/webui/#models');
   host = document.createElement('div');
   host.id = 'root';
@@ -41,10 +45,29 @@ afterEach(() => {
 });
 
 function renderApp(fetchImpl: typeof fetch): void {
-  act(() => root?.render(<React.StrictMode><WebUiProvider fetchImpl={fetchImpl}><App /></WebUiProvider></React.StrictMode>));
+  act(() => root?.render(<React.StrictMode><WebUiProvider fetchImpl={fetchImpl}><App /><ConversationsProbe /></WebUiProvider></React.StrictMode>));
 }
 
-function createMockFetch(scenario: Scenario): { readonly calls: FetchCall[]; readonly fetchImpl: typeof fetch } {
+// The catalog fixture's single model, loaded and chat-ready on the server.
+function readyCatalog(page: typeof catalogFixture): typeof catalogFixture {
+  const entry = page.items[0];
+  entry.lifecycle.state = 'ready';
+  entry.lifecycle.worker_exit_observed = false;
+  entry.capabilities = [{ task: 'chat', phase: 'provider_ready', available: true, reason: null }];
+  return page;
+}
+
+// The fixture's unloaded model next to a second one whose load failed: neither holds a worker.
+function unloadedAndFailedCatalog(page: typeof catalogFixture): typeof catalogFixture {
+  const failed = structuredClone(page.items[0]);
+  failed.identity = { ...failed.identity, id: `mdl_${'f'.repeat(43)}`, inference_id: 'beta', display_name: 'beta', source_key_hash: 'f'.repeat(64) };
+  failed.lifecycle = { ...failed.lifecycle, state: 'failed' };
+  page.items = [page.items[0], failed];
+  page.pagination = { ...page.pagination, total_known: 2 };
+  return page;
+}
+
+function createMockFetch(scenario: Scenario, catalog: (page: typeof catalogFixture) => typeof catalogFixture = (page) => page): { readonly calls: FetchCall[]; readonly fetchImpl: typeof fetch } {
   const calls: FetchCall[] = [];
   let bootstrapCount = 0;
   const fetchImpl: typeof fetch = async (input, init) => {
@@ -57,7 +80,7 @@ function createMockFetch(scenario: Scenario): { readonly calls: FetchCall[]; rea
       if (scenario === 'malformed-bootstrap') return jsonResponse({ schema_version: 'wrong', server: { server_instance_id: 'srv_bad' } });
       return jsonResponse(makeBootstrap());
     }
-    if (url.startsWith('/ui-api/v1/catalog')) return jsonResponse(makeCatalog());
+    if (url.startsWith('/ui-api/v1/catalog')) return jsonResponse(catalog(makeCatalog()));
     if (url.startsWith('/ui-api/v1/operations')) {
       if (scenario === 'sync-401' && bootstrapCount >= 2) return jsonResponse({ error: { code: 'unauthorized', message: 'stale session', retryable: false }, request_id: 'req_sync_401' }, 401);
       return jsonResponse(makeOperations());
@@ -143,6 +166,7 @@ describe('provider-backed WebUI shell', () => {
     expect(snapshotCalls.map((call) => call.url).join('\n')).toContain('/ui-api/v1/catalog');
     expect(document.querySelector('[data-testid="connection-authenticated-detail"]')?.textContent).toContain('catalog 1');
     expect(document.querySelector('[data-testid="connection-ready"]')?.textContent).toContain('model_free');
+    expect(document.querySelector('[data-testid="connection-ready"]')?.textContent).not.toContain('seq');
     expect(`${localStorage.getItem('good-key')} ${sessionStorage.getItem('good-key')}`).not.toContain('good-key');
     expect(mock.calls.map((call) => call.url).join(' ')).not.toContain('good-key');
   });
@@ -263,5 +287,150 @@ describe('provider-backed WebUI shell', () => {
     expect(urls).not.toContain('/ui-api/v1/runtime');
     expect(urls).not.toContain('/ui-api/v1/model-actions');
     expect(urls).not.toContain('/ui-api/v1/downloads');
+  });
+
+  it('names the server-loaded model in the toolbar with no browser selection and opens its inspector from the chip', async () => {
+    const mock = createMockFetch('happy', readyCatalog);
+    renderApp(mock.fetchImpl);
+    const region = document.querySelector<HTMLElement>('[data-testid="toolbar-loaded"]');
+    expect(region?.getAttribute('role')).toBe('group');
+    expect(region?.getAttribute('aria-label')).toBe('Loaded models');
+    // Signed out, nothing has been read from the server, so the toolbar claims nothing about it.
+    expect(region?.textContent).toBe('Loaded models unknown');
+    expect(region?.querySelector('[data-testid="toolbar-loaded-unknown"]')).not.toBeNull();
+    expect(region?.querySelector('[data-testid="toolbar-loaded-none"]')).toBeNull();
+    await submitSessionKey('good-key');
+    await waitFor(() => expect(document.querySelector('[data-testid="toolbar-loaded-count"]')?.textContent).toBe('1 loaded'));
+    const chips = document.querySelectorAll<HTMLButtonElement>('[data-testid="toolbar-loaded-chip"]');
+    expect(chips).toHaveLength(1);
+    expect(chips[0].textContent).toBe('alphaReady');
+    expect(chips[0].title).toBe('alpha');
+    expect(chips[0].hasAttribute('aria-label')).toBe(false);
+    expect(chips[0].querySelector('.ds-status-wrap[data-state="ready"]')?.textContent).toBe('Ready');
+    expect(document.querySelector('[data-testid="toolbar-loaded-more"]')).toBeNull();
+    expect(document.querySelector('aside[aria-label="Model details"]')).toBeNull();
+    act(() => document.querySelector<HTMLAnchorElement>('[data-testid="nav-settings"]')?.click());
+    expect(window.location.hash).toBe('#settings');
+    act(() => document.querySelector<HTMLButtonElement>('[data-testid="toolbar-loaded-chip"]')?.click());
+    await waitFor(() => expect(document.querySelector('aside[aria-label="Model details"]')?.textContent).toContain('alpha'));
+    expect(window.location.hash).toBe('#models');
+    expect(mock.calls.map((call) => call.url).join('\n')).not.toContain('/ui-api/v1/model-actions');
+  });
+
+  it('says the loaded models are unknown until the first catalog page, then that none is loaded when every entry is unloaded or failed', async () => {
+    let releaseCatalog: (() => void) | null = null;
+    const catalogGate = new Promise<void>((resolve) => { releaseCatalog = resolve; });
+    const fetchImpl: typeof fetch = async (input) => {
+      const url = String(input);
+      if (url.startsWith('/ui-api/v1/bootstrap')) return jsonResponse(makeBootstrap());
+      if (url.startsWith('/ui-api/v1/catalog')) {
+        await catalogGate;
+        return jsonResponse(unloadedAndFailedCatalog(makeCatalog()));
+      }
+      if (url.startsWith('/ui-api/v1/operations')) return jsonResponse(makeOperations());
+      if (url.startsWith('/ui-api/v1/events')) return new Response('data: [DONE]\n\n', { status: 200, headers: { 'content-type': 'text/event-stream' } });
+      return jsonResponse({ error: { code: 'not_found', message: `Unexpected ${url}`, retryable: false }, request_id: 'req_unexpected' }, 404);
+    };
+    renderApp(fetchImpl);
+    const region = (): HTMLElement | null => document.querySelector<HTMLElement>('[data-testid="toolbar-loaded"]');
+    await submitSessionKey('good-key');
+    // Authenticated, but the catalog snapshot has not arrived: still unknown, not "none".
+    await waitFor(() => expect(document.querySelector('[data-testid="connection-authenticated-detail"]')?.textContent).toContain('catalog pending'));
+    expect(document.querySelector('[data-testid="toolbar-logout"]')).not.toBeNull();
+    expect(region()?.textContent).toBe('Loaded models unknown');
+    await act(async () => { releaseCatalog?.(); await Promise.resolve(); });
+    await waitFor(() => expect(document.querySelector('[data-testid="connection-authenticated-detail"]')?.textContent).toContain('catalog 2'));
+    expect(region()?.textContent).toBe('No model loaded');
+    expect(region()?.querySelector('[data-testid="toolbar-loaded-none"]')).not.toBeNull();
+    expect(region()?.querySelectorAll('[data-testid="toolbar-loaded-chip"]')).toHaveLength(0);
+  });
+
+  it('does not restart observation when a chip or the palette opens the model that is already selected', async () => {
+    // Every selection change reaches the synchronizer through selectionChanged, which cancels
+    // observation, refetches and (with the reducer) clears the runtime history.
+    const selectionChanged = vi.spyOn(WebUiSynchronizer.prototype, 'selectionChanged');
+    const mock = createMockFetch('happy', readyCatalog);
+    renderApp(mock.fetchImpl);
+    await submitSessionKey('good-key');
+    await waitFor(() => expect(document.querySelector('[data-testid="toolbar-loaded-count"]')?.textContent).toBe('1 loaded'));
+    expect(selectionChanged).not.toHaveBeenCalled();
+    act(() => document.querySelector<HTMLButtonElement>('[data-testid="toolbar-loaded-chip"]')?.click());
+    await waitFor(() => expect(document.querySelector('aside[aria-label="Model details"]')?.textContent).toContain('alpha'));
+    expect(selectionChanged).toHaveBeenCalledTimes(1);
+    act(() => document.querySelector<HTMLAnchorElement>('[data-testid="nav-settings"]')?.click());
+    act(() => document.querySelector<HTMLButtonElement>('[data-testid="toolbar-loaded-chip"]')?.click());
+    expect(window.location.hash).toBe('#models');
+    act(() => document.querySelector<HTMLAnchorElement>('[data-testid="nav-activity"]')?.click());
+    act(() => document.querySelector<HTMLButtonElement>('[data-testid="toolbar-command"]')?.click());
+    const dialog = document.querySelector<HTMLElement>('[data-testid="command-dialog"]');
+    act(() => dialog?.querySelector<HTMLButtonElement>('[data-testid="command-model"]')?.click());
+    expect(window.location.hash).toBe('#models');
+    expect(dialog?.hasAttribute('open')).toBe(false);
+    expect(selectionChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the footer to mode, status and version and puts the instance and sequence only in its details', async () => {
+    const mock = createMockFetch('happy');
+    renderApp(mock.fetchImpl);
+    expect(document.querySelector('[data-testid="connection-footer-details"]')).toBeNull();
+    await submitSessionKey('good-key');
+    await waitFor(() => expect(document.querySelector('[data-testid="connection-footer-details"]')).not.toBeNull());
+    const instance = bootstrapFixture.server.server_instance_id;
+    const label = document.querySelector<HTMLElement>('[data-testid="connection-ready"]');
+    expect(label?.textContent).toMatch(/^model_free · \w+ · v0\.7\.0$/);
+    const footer = label?.closest('footer');
+    const details = footer?.querySelector<HTMLDetailsElement>('details.connection-details');
+    expect(details?.open).toBe(false);
+    expect(details?.querySelector('summary')?.textContent).toBe('Connection details');
+    expect(details?.querySelector('[data-testid="connection-footer-instance"]')?.textContent).toBe(`Server instance: ${instance}`);
+    expect(details?.querySelector('[data-testid="connection-footer-sequence"]')?.textContent).toMatch(/^Event sequence: \d+$/);
+    // Outside the disclosure, the footer shows neither identifier.
+    const outside = Array.from(footer?.childNodes ?? []).filter((node) => node !== details).map((node) => node.textContent).join(' ');
+    expect(outside).not.toContain(instance);
+    expect(outside).not.toMatch(/sequence|seq/i);
+  });
+
+  it.each(['models', 'activity', 'settings'])('starts a new empty conversation with Cmd/Ctrl+N from %s', async (route) => {
+    const mock = createMockFetch('happy', readyCatalog);
+    renderApp(mock.fetchImpl);
+    await submitSessionKey('good-key');
+    await waitFor(() => expect(document.querySelector('[data-testid="toolbar-loaded-count"]')).not.toBeNull());
+    act(() => document.querySelector<HTMLAnchorElement>(`[data-testid="nav-${route}"]`)?.click());
+    act(() => { (document.activeElement as HTMLElement | null)?.blur(); });
+    expect(conversationCount).toBe(0);
+    let event: KeyboardEvent | undefined;
+    act(() => { event = new KeyboardEvent('keydown', { key: 'n', ctrlKey: true, bubbles: true, cancelable: true }); document.body.dispatchEvent(event); });
+    expect(event?.defaultPrevented).toBe(true);
+    await waitFor(() => expect(conversationCount).toBe(1));
+    expect(window.location.hash).toBe('#chat');
+    expect(document.querySelector('[data-testid="chat-title"]')).not.toBeNull();
+    act(() => { document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'n', metaKey: true, bubbles: true, cancelable: true })); });
+    await waitFor(() => expect(conversationCount).toBe(2));
+    expect(mock.calls.map((call) => call.url).join('\n')).not.toContain('/v1/chat/completions');
+  });
+
+  it('finds a catalog model in the command palette and opens its inspector without any model action', async () => {
+    const mock = createMockFetch('happy');
+    renderApp(mock.fetchImpl);
+    await submitSessionKey('good-key');
+    await waitFor(() => expect(document.querySelector('[data-testid="connection-authenticated-detail"]')?.textContent).toContain('catalog 1'));
+    act(() => document.querySelector<HTMLAnchorElement>('[data-testid="nav-activity"]')?.click());
+    act(() => document.querySelector<HTMLButtonElement>('[data-testid="toolbar-command"]')?.click());
+    const dialog = document.querySelector<HTMLElement>('[data-testid="command-dialog"]');
+    expect(dialog?.hasAttribute('open')).toBe(true);
+    // Nothing is loaded, so the empty query lists commands only.
+    expect(dialog?.querySelectorAll('[data-testid="command-model"]')).toHaveLength(0);
+    const search = dialog?.querySelector<HTMLInputElement>('[data-testid="command-search"]');
+    act(() => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(search, 'ALP'); search?.dispatchEvent(new Event('input', { bubbles: true })); });
+    const hits = dialog?.querySelectorAll<HTMLButtonElement>('[data-testid="command-model"]');
+    expect(Array.from(hits ?? []).map((hit) => hit.textContent)).toEqual(['alpha · Unloaded']);
+    act(() => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(search, catalogFixture.items[0].identity.id.slice(4, 14)); search?.dispatchEvent(new Event('input', { bubbles: true })); });
+    expect(dialog?.querySelectorAll('[data-testid="command-model"]')).toHaveLength(1);
+    act(() => dialog?.querySelector<HTMLButtonElement>('[data-testid="command-model"]')?.click());
+    await waitFor(() => expect(document.querySelector('aside[aria-label="Model details"]')?.textContent).toContain('alpha'));
+    expect(window.location.hash).toBe('#models');
+    expect(dialog?.hasAttribute('open')).toBe(false);
+    expect(mock.calls.filter((call) => call.method !== 'GET')).toEqual([]);
+    expect(mock.calls.map((call) => call.url).join('\n')).not.toContain('/ui-api/v1/model-actions');
   });
 });

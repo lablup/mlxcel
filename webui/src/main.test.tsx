@@ -6,7 +6,9 @@ import stringsFixture from '../../tests/fixtures/webui/strings.json';
 import { App } from './app';
 import { LoginView, SchemaMismatchView } from './design-system/primitives';
 import { DEFAULT_APPEARANCE, applyAppearance, loadAppearance, saveAppearance } from './design-system/preferences';
-import { entries } from './i18n/catalog';
+import { globalShortcuts } from './design-system/shell';
+import { consumeNewConversationRequest } from './features/chat/session';
+import { entries, t } from './i18n/catalog';
 import { WebUiProvider } from './state';
 
 let root: Root | null = null;
@@ -41,10 +43,23 @@ function renderApp(): void {
   act(() => root?.render(<WebUiProvider fetchImpl={neverFetch as typeof fetch}><App /></WebUiProvider>));
 }
 
-function keydown(key: string, init: KeyboardEventInit = {}): void {
+function keydown(key: string, init: KeyboardEventInit = {}): KeyboardEvent {
   const target = document.activeElement instanceof HTMLElement ? document.activeElement : window;
-  target.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, ...init }));
+  const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...init });
+  target.dispatchEvent(event);
+  return event;
 }
+
+function goTo(route: string): void {
+  act(() => { window.history.replaceState(null, '', `#${route}`); window.dispatchEvent(new HashChangeEvent('hashchange')); });
+}
+
+const settle = async (): Promise<void> => { await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 10)); }); };
+const element = (selector: string): HTMLElement => {
+  const found = document.querySelector<HTMLElement>(selector);
+  if (!found) throw new Error(`Missing ${selector}`);
+  return found;
+};
 
 describe('mlxcel WebUI shell', () => {
   it('keeps hash navigation client-side', () => {
@@ -188,5 +203,132 @@ describe('mlxcel WebUI shell', () => {
       expect(entry.ko).toBeTruthy();
       expect(entry.test_id).toMatch(/^[a-z0-9-]+$/);
     }
+  });
+
+  it.each([['metaKey'], ['ctrlKey']] as const)('navigates to Chat with %s+N from Models, Activity and Settings', (modifier) => {
+    renderApp();
+    for (const route of ['models', 'activity', 'settings']) {
+      goTo(route);
+      act(() => { (document.activeElement as HTMLElement | null)?.blur(); });
+      let event: KeyboardEvent | undefined;
+      act(() => { event = keydown('n', { [modifier]: true }); });
+      expect(event?.defaultPrevented).toBe(true);
+      expect(window.location.hash).toBe('#chat');
+      // Signed out, Chat renders the connection surface; no request is left pending for a later mount.
+      expect(consumeNewConversationRequest()).toBe(false);
+    }
+  });
+
+  it('ignores a held key repeat for the global Cmd/Ctrl+N shortcut, but still prevents its default action', () => {
+    renderApp();
+    goTo('models');
+    act(() => { (document.activeElement as HTMLElement | null)?.blur(); });
+    let event: KeyboardEvent | undefined;
+    act(() => { event = keydown('n', { metaKey: true, repeat: true }); });
+    expect(event?.defaultPrevented).toBe(true);
+    expect(window.location.hash).toBe('#models');
+    expect(consumeNewConversationRequest()).toBe(false);
+    act(() => { event = keydown('n', { metaKey: true }); });
+    expect(event?.defaultPrevented).toBe(true);
+    expect(window.location.hash).toBe('#chat');
+  });
+
+  it('suppresses Cmd/Ctrl+N in edit fields, during IME composition, with Alt or Shift, and inside dialogs', async () => {
+    renderApp();
+    goTo('settings');
+    element('[data-testid="settings-theme"] [role="combobox"]').focus();
+    let event: KeyboardEvent | undefined;
+    act(() => { event = keydown('n', { metaKey: true }); });
+    expect(event?.defaultPrevented).toBe(false);
+    expect(window.location.hash).toBe('#settings');
+    act(() => { (document.activeElement as HTMLElement | null)?.blur(); });
+    expect(document.activeElement).toBe(document.body);
+    for (const init of [{ ctrlKey: true, isComposing: true }, { ctrlKey: true, altKey: true }, { metaKey: true, shiftKey: true }]) {
+      act(() => { event = keydown('n', init); });
+      expect(event?.defaultPrevented).toBe(false);
+      expect(window.location.hash).toBe('#settings');
+    }
+    act(() => { keydown('k', { metaKey: true }); });
+    await settle();
+    expect(element('[data-testid="command-dialog"]').hasAttribute('open')).toBe(true);
+    element('[data-testid="command-dialog"] [data-testid="dialog-close"]').focus();
+    act(() => { event = keydown('n', { metaKey: true }); });
+    expect(event?.defaultPrevented).toBe(false);
+    expect(window.location.hash).toBe('#settings');
+  });
+
+  it.each([['en'], ['ko']] as const)('lists exactly the globalShortcuts entries in the %s help dialog, in order', async (locale) => {
+    localStorage.setItem('mlxcel.webui.appearance', JSON.stringify({ ...DEFAULT_APPEARANCE, locale }));
+    renderApp();
+    document.body.focus();
+    act(() => { keydown('?'); });
+    await settle();
+    const items = Array.from(document.querySelectorAll<HTMLLIElement>('[data-testid="help-shortcuts"] > li'));
+    expect(globalShortcuts).toHaveLength(6);
+    expect(items).toHaveLength(globalShortcuts.length);
+    expect(items.map((item) => item.dataset.testid)).toEqual(globalShortcuts.map((shortcut) => `help-shortcut-${shortcut.id}`));
+    expect(globalShortcuts.map((shortcut) => shortcut.id)).toEqual(['command', 'new-chat', 'send', 'escape', 'navigate', 'help']);
+    items.forEach((item, index) => {
+      const shortcut = globalShortcuts[index];
+      expect(Array.from(item.querySelectorAll('kbd')).map((kbd) => kbd.textContent)).toEqual([...shortcut.keys]);
+      expect(item.textContent).toContain(t(locale, shortcut.key));
+    });
+    expect(items[4].textContent).toContain('[ / ]');
+    expect(items[0].textContent).toContain('⌘/Ctrl + K');
+  });
+
+  it('keeps gallery out of the command palette and finds commands by localized label or route id', async () => {
+    localStorage.setItem('mlxcel.webui.appearance', JSON.stringify({ ...DEFAULT_APPEARANCE, locale: 'ko' }));
+    window.history.replaceState(null, '', '/webui/#gallery');
+    renderApp();
+    act(() => { element('[data-testid="toolbar-command"]').click(); });
+    await settle();
+    const dialog = element('[data-testid="command-dialog"]');
+    const labels = (): string[] => Array.from(dialog.querySelectorAll<HTMLButtonElement>('.command-list button')).map((button) => button.textContent ?? '');
+    expect(labels()).toEqual(['모델', '대화', '활동', '설정', '새 대화']);
+    expect(dialog.textContent).not.toContain(t('ko', 'nav.gallery'));
+    const search = element('[data-testid="command-search"]') as HTMLInputElement;
+    const type = (value: string): void => act(() => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(search, value); search.dispatchEvent(new Event('input', { bubbles: true })); });
+    type('설정');
+    expect(labels()).toEqual(['설정']);
+    type('SETT');
+    expect(labels()).toEqual(['설정']);
+    type('gallery');
+    expect(labels()).toEqual([]);
+    expect(dialog.querySelector('[data-testid="command-no-results"]')).not.toBeNull();
+    act(() => { element('[data-testid="command-dialog"] [data-testid="dialog-close"]').click(); });
+    await settle();
+    act(() => { element('[data-testid="toolbar-command"]').click(); });
+    await settle();
+    expect(search.value).toBe('');
+    expect(labels()).toHaveLength(5);
+  });
+
+  it.each([['models', 'models-title'], ['chat', 'chat-title'], ['activity', 'activity-title'], ['settings', 'settings-title'], ['gallery', 'gallery-title']])('gives the signed-out %s route exactly one dialog focus fallback, its PageHeader title', (route, titleId) => {
+    window.history.replaceState(null, '', `/webui/#${route}`);
+    renderApp();
+    const fallbacks = document.querySelectorAll<HTMLElement>('[data-dialog-focus-fallback]');
+    expect(fallbacks).toHaveLength(1);
+    expect(fallbacks[0].dataset.testid).toBe(titleId);
+    expect(fallbacks[0].matches('.app-content .ds-page-header h1.page-header__title')).toBe(true);
+    expect(fallbacks[0].tabIndex).toBe(-1);
+  });
+
+  it('lands focus on the route PageHeader title inside the shell PageLayout when a dialog closes after its trigger was detached', async () => {
+    renderApp();
+    const trigger = document.createElement('button');
+    trigger.textContent = 'Temporary trigger';
+    document.body.append(trigger);
+    trigger.focus();
+    act(() => { trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', metaKey: true, bubbles: true, cancelable: true })); });
+    await settle();
+    expect(element('[data-testid="command-dialog"]').hasAttribute('open')).toBe(true);
+    trigger.remove();
+    act(() => { element('[data-testid="command-dialog"] [data-testid="dialog-close"]').click(); });
+    await settle();
+    const title = element('[data-testid="models-title"]');
+    expect(document.activeElement).toBe(title);
+    expect(title.hasAttribute('data-dialog-focus-fallback')).toBe(true);
+    expect(title.closest('.app-content.page-layout')).not.toBeNull();
   });
 });

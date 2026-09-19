@@ -61,7 +61,8 @@
 .ds-table .truncate { max-width: 100%; }
 .ds-list { display: grid; gap: var(--space-2); list-style: none; padding: var(--space-4); margin: 0; }
 .ds-login { display: grid; gap: var(--space-3); padding: var(--space-4); }
-.ds-login h2, .ds-login p { margin: 0; }
+/* A long word (the "Authentication" heading in a wide font such as DejaVu Sans) must not set the form's min-content above a 195 CSS px viewport. */
+.ds-login h2, .ds-login p { margin: 0; overflow-wrap: anywhere; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes pulse { to { opacity: 0.45; } }
 @keyframes slide { from { transform: translateX(-60%); } to { transform: translateX(120%); } }

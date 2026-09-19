@@ -112,13 +112,13 @@ export async function expectTextScalePanelsReflow(page: Page): Promise<void> {
     '.app-content-grid',
     '.app-content',
     '.page-layout',
+    '.toolbar-title',
+    '.toolbar-loaded',
     '.screen-stack',
-    '.screen-heading',
-    '.screen-heading h1',
-    '.screen-heading p',
     '.page-header',
     '.page-header__title',
     '.page-header__description',
+    '.page-header__actions',
     '.ds-tabs',
     '.ds-tabs [role="tablist"]',
     '.ds-tabs [role="tab"]',
@@ -187,7 +187,7 @@ export async function expectTextScaleLabelsReachable(page: Page): Promise<void> 
 }
 
 export async function reportFontDiagnostics(page: Page, label: string): Promise<void> {
-  const selectors = ['.brand-mark', '.toolbar-title p', '.toolbar-title span', '.screen-heading h1', '.screen-heading p:last-child', '.page-header__title', '.page-header__description', '.app-nav a', '.ds-tabs [role="tab"]', '.ds-button', '.ds-field > span'];
+  const selectors = ['.brand-mark', '.toolbar-title p', '.toolbar-title span', '.page-header__title', '.page-header__description', '.app-nav a', '.ds-tabs [role="tab"]', '.ds-button', '.ds-field > span'];
   const client = await page.context().newCDPSession(page);
   try {
     await client.send('DOM.enable');
