@@ -211,6 +211,12 @@ async fn metrics_endpoint_reports_a_completed_stream() {
 /// The WebUI Activity tiles read `completed_requests_total` and
 /// `completion_tokens_total` from the runtime projection; a completed stream
 /// moves both.
+///
+/// `runtime_snapshot` lives behind the `webui` feature (`server::webui` is
+/// `#[cfg(feature = "webui")]` in `server/mod.rs`), so this test needs the
+/// same gate; without it, `--no-default-features --features xla-diagnostics`
+/// fails to compile this file.
+#[cfg(feature = "webui")]
 #[tokio::test]
 async fn activity_projection_counts_a_completed_stream() {
     let config = ServerConfig {
