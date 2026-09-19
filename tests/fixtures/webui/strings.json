@@ -415,6 +415,12 @@
       "test_id": "settings-theme"
     },
     {
+      "key": "settings.color_scheme",
+      "en": "Color scheme",
+      "ko": "색상 모드",
+      "test_id": "settings-color-scheme"
+    },
+    {
       "key": "settings.material",
       "en": "Material",
       "ko": "재질",
@@ -841,22 +847,34 @@
       "test_id": "common-close"
     },
     {
-      "key": "settings.theme.system",
+      "key": "settings.theme.mlxcel",
+      "en": "Standard",
+      "ko": "표준",
+      "test_id": "settings-theme-mlxcel"
+    },
+    {
+      "key": "settings.theme.glass",
+      "en": "Glass",
+      "ko": "글래스",
+      "test_id": "settings-theme-glass"
+    },
+    {
+      "key": "settings.color_scheme.system",
       "en": "System",
       "ko": "시스템",
-      "test_id": "settings-theme-system"
+      "test_id": "settings-color-scheme-system"
     },
     {
-      "key": "settings.theme.light",
+      "key": "settings.color_scheme.light",
       "en": "Light",
       "ko": "라이트",
-      "test_id": "settings-theme-light"
+      "test_id": "settings-color-scheme-light"
     },
     {
-      "key": "settings.theme.dark",
+      "key": "settings.color_scheme.dark",
       "en": "Dark",
       "ko": "다크",
-      "test_id": "settings-theme-dark"
+      "test_id": "settings-color-scheme-dark"
     },
     {
       "key": "settings.material.glass",

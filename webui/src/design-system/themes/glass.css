@@ -1,0 +1,155 @@
+/* Copyright 2025-2026 Lablup Inc. Licensed under the Apache License, Version 2.0. */
+/* Portions of this file are derived from backend.ai-go
+ * (https://github.com/lablup/backend.ai-go), Copyright 2025-2026 Lablup Inc.,
+ * licensed under the Apache License, Version 2.0. See the top-level NOTICE
+ * file for the attribution. */
+/*
+ * glass family (glass-light, glass-dark): a frosted-glass look in the macOS 27
+ * design language epic #1834 set. Translucent chrome with a top light
+ * reflection, soft translucent borders, tinted glass controls and gradient
+ * highlights on filled buttons, while transcript, table and form surfaces stay
+ * near-opaque so they remain readable. The system-color palette and the
+ * highlight and fill values follow backend.ai-go's glass theme
+ * (https://github.com/lablup/backend.ai-go/blob/main/src/themes/tokens/glass-light.css
+ * and https://github.com/lablup/backend.ai-go/blob/main/src/themes/tokens/glass-dark.css),
+ * with the text, accent and status colors darkened or lightened where needed to
+ * clear WCAG 2.2 AA against this product's surfaces.
+ *
+ * It reads the appearance switches the product already has and adds none:
+ *   - glass intensity: --material-glass-alpha, --material-glass-blur and
+ *     --material-glass-saturation from ../glass-intensity.css
+ *     (data-glass-intensity 0..100), which size the chrome glass. Buttons get
+ *     a tinted translucent fill but no backdrop blur of their own: they sit on
+ *     transcript, table and form surfaces, which stay stable, and a blur layer
+ *     per button would be re-rendered on every streamed token;
+ *   - data-material, data-reduce-transparency, data-backdrop-filter and
+ *     data-high-contrast, plus prefers-reduced-transparency and
+ *     prefers-contrast: any of them turns every translucent glass surface in
+ *     this file opaque (../tokens.css does the same for the chrome material),
+ *     so contrast settings always outrank decorative intensity;
+ *   - data-reduce-motion and prefers-reduced-motion: drop the press transform.
+ */
+[data-theme="glass-light"] {
+  --color-bg: #e6ebf3;
+  --color-bg-elevated: #fbfbfd;
+  --color-bg-neutral: #f1f2f6;
+  --color-text: #1d1d1f;
+  --color-muted: #545458;
+  --color-separator: rgba(60, 60, 67, 0.14);
+  --color-focus: #0058b9;
+  --color-selection: rgba(0, 88, 185, 0.10);
+  --color-warning: #8a4f00;
+  --color-warning-bg: rgba(255, 149, 0, 0.12);
+  --color-error: #b3261e;
+  --color-error-bg: rgba(255, 59, 48, 0.10);
+  --color-success: #1b6f3c;
+  --color-success-bg: rgba(52, 199, 89, 0.12);
+  --material-glass-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.36), rgba(255, 255, 255, 0) 64px), rgba(248, 249, 252, var(--material-glass-alpha));
+  --material-content-bg: rgba(255, 255, 255, 0.94);
+  --material-control-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.5), rgba(255, 255, 255, 0) 60%), rgba(120, 120, 128, 0.12);
+  --shadow-chrome: inset 0 1px 0 rgba(255, 255, 255, 0.72);
+  --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.04), 0 10px 30px rgba(15, 23, 42, 0.07);
+  --shadow-popover: 0 12px 40px rgba(0, 0, 0, 0.12), 0 4px 12px rgba(0, 0, 0, 0.06);
+  --glass-edge: rgba(255, 255, 255, 0.15);
+  --glass-highlight: linear-gradient(180deg, rgba(255, 255, 255, 0.18) 0%, rgba(255, 255, 255, 0.05) 40%, transparent 100%);
+  --glass-button-shadow: 0 1px 3px rgba(0, 88, 185, 0.2);
+  --glass-danger-shadow: 0 1px 3px rgba(179, 38, 30, 0.2);
+  --button-primary-solid: #0058b9;
+  --button-primary-fill-active: #004a9c;
+  --button-danger-solid: #b3261e;
+  --button-danger-fill-active: #99201a;
+}
+
+[data-theme="glass-dark"] {
+  --color-bg: #0b0d12;
+  --color-bg-elevated: #1c1c1f;
+  --color-bg-neutral: #232327;
+  --color-text: #f5f5f7;
+  --color-muted: #b8b8bc;
+  --color-separator: rgba(255, 255, 255, 0.12);
+  --color-focus: #6cb2ff;
+  --color-selection: rgba(64, 156, 255, 0.18);
+  --color-warning: #ffb340;
+  --color-warning-bg: rgba(255, 159, 10, 0.14);
+  --color-error: #ff7b72;
+  --color-error-bg: rgba(255, 69, 58, 0.16);
+  --color-success: #4cd964;
+  --color-success-bg: rgba(50, 215, 75, 0.14);
+  --material-glass-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0) 64px), rgba(30, 30, 34, var(--material-glass-alpha));
+  --material-content-bg: rgba(36, 36, 40, 0.94);
+  --material-control-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.10), rgba(255, 255, 255, 0) 60%), rgba(255, 255, 255, 0.10);
+  --shadow-chrome: inset 0 1px 0 rgba(255, 255, 255, 0.14);
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 32px rgba(0, 0, 0, 0.28);
+  --shadow-popover: 0 12px 40px rgba(0, 0, 0, 0.45), 0 4px 12px rgba(0, 0, 0, 0.3);
+  --glass-edge: rgba(255, 255, 255, 0.1);
+  --glass-highlight: linear-gradient(180deg, rgba(255, 255, 255, 0.15) 0%, rgba(255, 255, 255, 0.04) 40%, transparent 100%);
+  --glass-button-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  --glass-danger-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  --button-primary-solid: #0a5bc0;
+  --button-primary-fill-active: #0a4ea6;
+  --button-danger-solid: #b3261e;
+  --button-danger-fill-active: #99201a;
+}
+
+/* Family-wide glass bindings over contract.css. */
+[data-theme="glass-light"],
+[data-theme="glass-dark"] {
+  --button-primary-fill: var(--glass-highlight), var(--button-primary-solid);
+  --button-danger-fill: var(--glass-highlight), var(--button-danger-solid);
+  --token-boxShadowSecondary: var(--shadow-popover);
+  --token-buttonActiveTransform: scale(0.985);
+  --token-buttonDangerBorder: 1px solid var(--glass-edge);
+  --token-buttonDangerShadow: var(--glass-danger-shadow);
+  --token-buttonDangerShadowHover: var(--glass-danger-shadow);
+  --token-buttonPrimaryBorder: 1px solid var(--glass-edge);
+  --token-buttonPrimaryShadow: var(--glass-button-shadow);
+  --token-buttonPrimaryShadowHover: var(--glass-button-shadow);
+  --token-buttonSecondaryShadow: var(--shadow-chrome);
+  --token-buttonSecondaryShadowHover: var(--shadow-chrome);
+  --token-colorBgMask: rgba(8, 10, 14, 0.32);
+}
+
+/*
+ * Opaque glass. Transparency is dropped whenever the user asked for an opaque
+ * material or less transparency, the browser cannot blur, or contrast is
+ * raised, whatever the decorative intensity says. Every rule below is keyed
+ * on :root plus an attribute, so it outranks the single-attribute palettes
+ * above regardless of order.
+ */
+:root[data-theme-family="glass"][data-material="opaque"],
+:root[data-theme-family="glass"][data-reduce-transparency="true"],
+:root[data-theme-family="glass"][data-backdrop-filter="unsupported"],
+:root[data-theme-family="glass"][data-high-contrast="on"] {
+  --material-content-bg: var(--color-bg-elevated);
+  --material-control-bg: var(--color-bg-neutral);
+  --button-primary-fill: var(--button-primary-solid);
+  --button-danger-fill: var(--button-danger-solid);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  :root[data-theme-family="glass"] {
+    --material-content-bg: var(--color-bg-elevated);
+    --material-control-bg: var(--color-bg-neutral);
+    --button-primary-fill: var(--button-primary-solid);
+    --button-danger-fill: var(--button-danger-solid);
+  }
+}
+
+@media (prefers-contrast: more) {
+  :root[data-theme-family="glass"]:not([data-high-contrast="off"]) {
+    --material-content-bg: var(--color-bg-elevated);
+    --material-control-bg: var(--color-bg-neutral);
+    --button-primary-fill: var(--button-primary-solid);
+    --button-danger-fill: var(--button-danger-solid);
+  }
+}
+
+:root[data-theme-family="glass"][data-reduce-motion="true"] {
+  --token-buttonActiveTransform: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root[data-theme-family="glass"] {
+    --token-buttonActiveTransform: none;
+  }
+}

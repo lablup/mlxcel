@@ -1,91 +1,20 @@
 /* Copyright 2025-2026 Lablup Inc. Licensed under the Apache License, Version 2.0. */
-/* Product configuration of the published alpha.19 token API; also reaches body portals. */
+/*
+ * The theme-independent half of the published alpha.19 token API: radius, type
+ * scale, spacing, control heights, focus-ring geometry, motion and z-index, set
+ * once on :root like ui-common's base.css does, so it also reaches body
+ * portals. Every color, shadow and button-fill token is per theme and lives in
+ * themes/contract.css and the family files next to it.
+ */
 :root {
   --token-borderRadius: var(--radius-sm);
   --token-borderRadiusLG: var(--radius-lg);
   --token-borderRadiusSM: var(--radius-xs);
   --token-borderRadiusXL: var(--radius-xl);
-  --token-boxShadow: var(--shadow-card);
-  --token-boxShadowDrawerRight: var(--shadow-card);
-  --token-boxShadowSecondary: var(--shadow-card);
-  --token-boxShadowTertiary: var(--shadow-chrome);
-  --token-buttonActiveTransform: none;
   --token-buttonBorderRadius: 999px;
-  --token-buttonDangerBg: #c6352b;
-  --token-buttonDangerBgActive: #aa2b23;
-  --token-buttonDangerBgHover: #aa2b23;
-  --token-buttonDangerBorder: 1px solid var(--color-separator);
-  --token-buttonDangerShadow: none;
-  --token-buttonDangerShadowHover: none;
-  --token-buttonDangerText: white;
-  --token-buttonGhostBackdrop: none;
-  --token-buttonGhostBg: transparent;
-  --token-buttonGhostBgActive: var(--color-selection);
-  --token-buttonGhostBgHover: var(--color-selection);
-  --token-buttonGhostBorder: 1px solid var(--color-separator);
-  --token-buttonGhostBorderHover: 1px solid var(--color-separator);
-  --token-buttonGhostShadow: none;
-  --token-buttonGhostShadowHover: none;
-  --token-buttonHoverTransform: none;
-  --token-buttonPrimaryBackdrop: none;
-  --token-buttonPrimaryBg: #245bd8;
-  --token-buttonPrimaryBgActive: #1c4dbc;
-  --token-buttonPrimaryBgHover: #1c4dbc;
-  --token-buttonPrimaryBorder: 1px solid var(--color-separator);
-  --token-buttonPrimaryShadow: none;
-  --token-buttonPrimaryShadowHover: none;
-  --token-buttonSecondaryBackdrop: none;
-  --token-buttonSecondaryBg: var(--material-control-bg);
-  --token-buttonSecondaryBgActive: var(--color-selection);
-  --token-buttonSecondaryBgHover: var(--color-selection);
-  --token-buttonSecondaryBorder: 1px solid var(--color-separator);
-  --token-buttonSecondaryBorderHover: 1px solid var(--color-separator);
-  --token-buttonSecondaryShadow: none;
-  --token-buttonSecondaryShadowHover: none;
-  --token-buttonSuccessBackdrop: none;
-  --token-buttonSuccessBg: var(--color-success);
-  --token-buttonSuccessBgActive: var(--color-success);
-  --token-buttonSuccessBgHover: var(--color-success);
-  --token-buttonSuccessBorder: 1px solid var(--color-separator);
-  --token-buttonSuccessShadow: none;
-  --token-buttonSuccessShadowHover: none;
-  --token-colorBgContainer: var(--color-bg-elevated);
-  --token-colorBgElevated: var(--color-bg-elevated);
-  --token-colorBgLayout: var(--color-bg);
-  --token-colorBgMask: rgba(8, 10, 14, 0.42);
-  --token-colorBgTextActive: var(--color-selection);
-  --token-colorBgTextHover: var(--color-selection);
-  --token-colorBorder: var(--color-separator);
-  --token-colorBorderSecondary: var(--color-separator);
-  --token-colorError: var(--color-error);
-  --token-colorFillQuaternary: var(--color-bg-neutral);
-  --token-colorFillSecondary: var(--color-bg-neutral);
-  --token-colorFillTertiary: var(--color-bg-neutral);
-  --token-colorInfo: var(--color-focus);
-  --token-colorLink: var(--color-focus);
-  --token-colorLinkHover: var(--color-focus);
-  --token-colorPrimary: var(--color-focus);
-  --token-colorPrimaryActive: var(--color-focus);
-  --token-colorPrimaryBg: var(--color-selection);
-  --token-colorPrimaryBgHover: var(--color-selection);
-  --token-colorPrimaryBorder: var(--color-separator);
-  --token-colorSuccess: var(--color-success);
-  --token-colorSuccessActive: var(--color-success);
-  --token-colorSuccessBg: var(--color-success-bg);
-  --token-colorSuccessBorder: var(--color-separator);
-  --token-colorSuccessBorderHover: var(--color-separator);
-  --token-colorSuccessBoxShadow: none;
-  --token-colorText: var(--color-text);
-  --token-colorTextDisabled: var(--color-muted);
-  --token-colorTextPlaceholder: var(--color-muted);
-  --token-colorTextQuaternary: var(--color-muted);
-  --token-colorTextSecondary: var(--color-muted);
-  --token-colorTextTertiary: var(--color-muted);
-  --token-colorWarning: var(--color-warning);
   --token-controlHeight: 36px;
   --token-controlHeightLG: 44px;
   --token-controlHeightSM: 32px;
-  --token-focusRingColor: var(--color-focus);
   --token-focusRingOffset: 2px;
   --token-focusRingStyle: solid;
   --token-focusRingWidth: 2px;
@@ -114,9 +43,6 @@
   --token-paddingXXS: var(--space-1);
   --token-scrollbarRadius: 999px;
   --token-scrollbarSize: 6px;
-  --token-tabActiveBg: var(--color-bg-elevated);
-  --token-tabFocusShadow: var(--focus-ring);
-  --token-tabHoverBg: var(--color-selection);
   --token-themeTransitionDuration: var(--motion-standard);
   --token-themeTransitionTiming: ease;
   --token-zIndexDrawer: 90;

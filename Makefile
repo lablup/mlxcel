@@ -806,10 +806,11 @@ verify-webui-bundle: ## Rebuild the bundled WebUI twice and compare it with chec
 	@$(WEBUI_BUNDLE_PY) scripts/webui/build_bundle.py --verify
 
 .PHONY: verify-webui-frontend
-verify-webui-frontend: ## Run WebUI lint, typecheck, unit tests, Chromium layout/accessibility gate, and multi-engine browser smoke (issue #1848)
+verify-webui-frontend: ## Run WebUI lint, typecheck, theme-selector gate, unit tests, Chromium layout/accessibility gate, and multi-engine browser smoke (issue #1848)
 	@echo "$(CYAN)[verify] WebUI frontend lint/type/unit/browser matrix...$(RESET)"
 	@pnpm --dir webui run typecheck
 	@pnpm --dir webui run lint
+	@pnpm --dir webui run check:theme-selectors
 	@pnpm --dir webui run unit
 	@pnpm --dir webui run browser
 	@pnpm --dir webui run browser:all

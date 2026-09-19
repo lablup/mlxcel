@@ -32,6 +32,13 @@ export const variants: Variant[] = [
   { name: '390-opaque-gallery-controls-drawer-cjk', width: 390, height: 844, tab: 'controls', openDrawer: true, appearance: { theme: 'light', material: 'opaque', locale: 'ko', glassIntensity: 0, highContrast: 'system' } },
   { name: '1440-highcontrast-gallery-states', width: 1440, height: 900, tab: 'states', appearance: { theme: 'light', material: 'opaque', highContrast: 'on', locale: 'en', glassIntensity: 0 } },
   { name: '390-dark-opaque-textscale200-gallery-controls', width: 390, height: 844, tab: 'controls', appearance: { theme: 'dark', material: 'opaque', reduceTransparency: true, reduceMotion: true, locale: 'ko', glassIntensity: 100, highContrast: 'off' }, textScale: '200' },
+  // Glass family (#1903): every shipped theme id runs the same axe, layout and reflow checks.
+  { name: '1440-glass-light-gallery-controls', width: 1440, height: 900, tab: 'controls', appearance: { themeFamily: 'glass', colorScheme: 'light', material: 'glass', locale: 'en', glassIntensity: 35, highContrast: 'system' } },
+  { name: '1440-glass-dark-gallery-states', width: 1440, height: 900, tab: 'states', appearance: { themeFamily: 'glass', colorScheme: 'dark', material: 'glass', locale: 'en', glassIntensity: 60, highContrast: 'system' } },
+  { name: '1024-glass-light-gallery-data-tinted', width: 1024, height: 768, tab: 'data', appearance: { themeFamily: 'glass', colorScheme: 'light', material: 'tinted', locale: 'ko', glassIntensity: 45, highContrast: 'system' } },
+  { name: '1024-glass-dark-gallery-data', width: 1024, height: 768, tab: 'data', appearance: { themeFamily: 'glass', colorScheme: 'dark', material: 'glass', locale: 'en', glassIntensity: 100, highContrast: 'system' } },
+  { name: '1440-glass-light-highcontrast-gallery-states', width: 1440, height: 900, tab: 'states', appearance: { themeFamily: 'glass', colorScheme: 'light', material: 'glass', highContrast: 'on', locale: 'en', glassIntensity: 100 } },
+  { name: '390-glass-dark-textscale200-gallery-controls-drawer', width: 390, height: 844, tab: 'controls', openDrawer: true, appearance: { themeFamily: 'glass', colorScheme: 'dark', material: 'glass', reduceMotion: true, locale: 'ko', glassIntensity: 100, highContrast: 'system' }, textScale: '200' },
 ];
 
 export const productVariants: ProductVariant[] = [
@@ -39,7 +46,22 @@ export const productVariants: ProductVariant[] = [
   { name: '1440-light-product-signed-in', width: 1440, height: 900, signedIn: true, appearance: { theme: 'light', material: 'glass', locale: 'en', glassIntensity: 35, highContrast: 'system' } },
   { name: '390-dark-product-login', width: 390, height: 844, signedIn: false, appearance: { theme: 'dark', material: 'glass', reduceTransparency: false, reduceMotion: true, locale: 'ko', glassIntensity: 45, highContrast: 'system' } },
   { name: '390-dark-product-signed-in', width: 390, height: 844, signedIn: true, appearance: { theme: 'dark', material: 'glass', reduceTransparency: false, reduceMotion: true, locale: 'ko', glassIntensity: 45, highContrast: 'system' } },
+  { name: '1440-glass-light-product-signed-in', width: 1440, height: 900, signedIn: true, appearance: { themeFamily: 'glass', colorScheme: 'light', material: 'glass', locale: 'en', glassIntensity: 35, highContrast: 'system' } },
+  { name: '390-glass-dark-product-login', width: 390, height: 844, signedIn: false, appearance: { themeFamily: 'glass', colorScheme: 'dark', material: 'glass', reduceMotion: true, locale: 'ko', glassIntensity: 45, highContrast: 'system' } },
+  { name: '390-glass-dark-product-signed-in', width: 390, height: 844, signedIn: true, appearance: { themeFamily: 'glass', colorScheme: 'dark', material: 'glass', reduceMotion: true, locale: 'ko', glassIntensity: 45, highContrast: 'system' } },
 ];
+
+/**
+ * The data-theme id a stored appearance should produce once a scheme is pinned,
+ * or null for `system` (which depends on the emulated host). Appearance written
+ * before #1903 carried the scheme in a flat `theme` field; fixtures that still
+ * use it exercise that migration.
+ */
+export function expectedThemeId(appearance: Record<string, unknown>): string | null {
+  const family = appearance.themeFamily === 'glass' ? 'glass' : 'mlxcel';
+  const scheme = appearance.colorScheme ?? appearance.theme;
+  return scheme === 'light' || scheme === 'dark' ? `${family}-${scheme}` : null;
+}
 
 function withoutSchemaName<T>(value: T): T {
   const copy = structuredClone(value);
@@ -151,7 +173,8 @@ export async function bootGallery(page: Page, variant: Variant): Promise<void> {
   await page.addInitScript((appearance) => localStorage.setItem('mlxcel.webui.appearance', JSON.stringify(appearance)), variant.appearance);
   await page.goto('/#gallery');
   await expect(page.getByTestId('app-title')).toBeVisible();
-  if (typeof variant.appearance.theme === 'string') await expect(page.locator('html')).toHaveAttribute('data-theme', variant.appearance.theme);
+  const themeId = expectedThemeId(variant.appearance);
+  if (themeId) await expect(page.locator('html')).toHaveAttribute('data-theme', themeId);
   if (variant.textScale) await page.evaluate((scale) => { document.documentElement.dataset.testTextScale = scale; }, variant.textScale);
   await selectGalleryTab(page, variant.tab);
   if (variant.openDrawer) await page.getByRole('button', { name: /navigation|내비게이션/i }).click();
@@ -162,7 +185,8 @@ export async function bootProduct(page: Page, variant: ProductVariant): Promise<
   await page.addInitScript((appearance) => localStorage.setItem('mlxcel.webui.appearance', JSON.stringify(appearance)), variant.appearance);
   await page.goto('/#models');
   await expect(page.getByTestId('app-title')).toBeVisible();
-  if (typeof variant.appearance.theme === 'string') await expect(page.locator('html')).toHaveAttribute('data-theme', variant.appearance.theme);
+  const themeId = expectedThemeId(variant.appearance);
+  if (themeId) await expect(page.locator('html')).toHaveAttribute('data-theme', themeId);
 }
 
 export async function submitSessionKey(page: Page, token: string): Promise<void> {
