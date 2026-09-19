@@ -19,13 +19,15 @@ test('real bundled chat Stop releases the selected model request lease', async (
   if (!['127.0.0.1', '[::1]', 'localhost'].includes(target.hostname) || !target.pathname.endsWith('/webui/')) throw new Error('Real chat acceptance requires a loopback bundled WebUI URL.');
   const apiBase = target.pathname.slice(0, -'/webui/'.length);
   const token = readFileSync(keyPath, 'utf8').trim();
-  const catalogUrl = `${target.origin}${apiBase}/ui-api/v1/catalog`;
+  // The model's own catalog entry: the list is paginated, so a large catalog can put the
+  // model beyond the first page.
+  const entryUrl = `${target.origin}${apiBase}/ui-api/v1/catalog/${encodeURIComponent(modelId)}`;
   const headers = {Authorization:`Bearer ${token}`};
-  const readCatalog = async (): Promise<Array<{identity:{id:string;display_name:string};lifecycle:{state:string;active_requests:number}}>> => {
-    const response = await request.get(catalogUrl,{headers});expect(response.ok()).toBe(true);
-    return (await response.json() as {items:Array<{identity:{id:string;display_name:string};lifecycle:{state:string;active_requests:number}}>}).items;
+  const readEntry = async (): Promise<{identity:{id:string;display_name:string};lifecycle:{state:string;active_requests:number}}> => {
+    const response = await request.get(entryUrl,{headers});expect(response.ok()).toBe(true);
+    return await response.json() as {identity:{id:string;display_name:string};lifecycle:{state:string;active_requests:number}};
   };
-  const initial = (await readCatalog()).find(entry=>entry.identity.id===modelId);
+  const initial = await readEntry();
   expect(initial?.lifecycle.state).toBe('ready');expect(initial?.lifecycle.active_requests).toBe(0);
   const external: string[] = [];
   page.on('request', request => {
@@ -48,7 +50,7 @@ test('real bundled chat Stop releases the selected model request lease', async (
   await page.getByRole('option',{name:`${initial?.identity.display_name}. Ready to chat`, exact:true}).click();
   // Next-turn parameters live in the settings drawer; close it again before composing.
   await page.getByRole('button', {name:'Chat settings', exact:true}).click();
-  await page.getByLabel('Next turn max_tokens', { exact: true }).fill('128');
+  await page.getByLabel('Next turn max_tokens', { exact: true }).fill('64');
   await page.keyboard.press('Escape');
   const imagePath = process.env.MLXCEL_CHAT_REAL_IMAGE_FILE;
   if (imagePath) await page.locator('input[type="file"][accept^="image/"]').setInputFiles(imagePath);
@@ -71,10 +73,10 @@ test('real bundled chat Stop releases the selected model request lease', async (
   await page.keyboard.press('Escape');
   await page.getByRole('textbox',{name:'Message',exact:true}).fill('Write a very long numbered explanation of integers from 1 to 10000, without stopping early.');
   await page.getByRole('button',{name:'Send',exact:true}).click();
-  await expect.poll(async()=> (await readCatalog()).find(entry=>entry.identity.id===modelId)?.lifecycle.active_requests,{timeout:30000}).toBeGreaterThan(0);
+  await expect.poll(async()=> (await readEntry()).lifecycle.active_requests,{timeout:30000}).toBeGreaterThan(0);
   await page.getByRole('button',{name:'Stop',exact:true}).click();
   await expect(page.locator('.chat-turn .chat-status')).toHaveText('Stopped');
-  await expect.poll(async()=> (await readCatalog()).find(entry=>entry.identity.id===modelId)?.lifecycle.active_requests,{timeout:30000}).toBe(0);
+  await expect.poll(async()=> (await readEntry()).lifecycle.active_requests,{timeout:30000}).toBe(0);
   await saveArtifact('real-stop-evidence.json', JSON.stringify({model_id:modelId,scope:'isolated server with no other request producers',initial_active:0,observed_during_positive:true,final_active:0,automatic_retry:false}), 'application/json');
   await expect(page.getByRole('button',{name:'Send',exact:true})).toBeDisabled(); // Empty composer, not a rerun.
   await expectSafeLayout(page); await expectAxeClean(page);
