@@ -104,6 +104,7 @@ export async function expectTextScalePanelsReflow(page: Page): Promise<void> {
     '.app-toolbar',
     '.app-content-grid',
     '.app-content',
+    '.page-layout',
     '.screen-stack',
     '.screen-heading',
     '.screen-heading h1',

@@ -1,6 +1,6 @@
 // Copyright 2025-2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 import { expect, test, type Locator, type Page } from '@playwright/test';
-import { expectAxeClean, expectLocatorWithinViewportX, expectSafeLayout } from './browser-assertions';
+import { expectAxeClean, expectLocatorWithinViewportX, expectSafeLayout, expectTextScalePanelsReflow } from './browser-assertions';
 import { bootGallery, bootProduct, productVariants, settleAnimationFrame, type Variant } from './browser-fixtures';
 import { horizontalOverflow, text } from './ui-common-helpers';
 
@@ -122,5 +122,55 @@ test.describe('shared Drawer', () => {
     await expect(dialog).toBeHidden();
     await expect(page.locator('.desktop-sidebar a[aria-current="page"]')).toBeFocused();
     await expectSharedDrawer(page);
+  });
+});
+
+// The route content must fill the grid's content box exactly: no second padding
+// layer at 390 px and no width cap below 1400 px.
+async function columnMetrics(page: Page): Promise<{ left: number; right: number; column: number; route: number; document: number; width: number }> {
+  return page.evaluate(() => {
+    const grid = document.querySelector<HTMLElement>('.app-content-grid');
+    const column = document.querySelector<HTMLElement>('.app-content');
+    const route = column?.firstElementChild;
+    if (!grid || !column || !(route instanceof HTMLElement)) throw new Error('Missing shell content column');
+    const style = window.getComputedStyle(grid);
+    const box = grid.getBoundingClientRect();
+    const inner = column.getBoundingClientRect();
+    // Measure the route content, not the column box: a second padding layer sits inside the column.
+    const content = route.getBoundingClientRect();
+    return {
+      left: content.left - (box.left + Number.parseFloat(style.paddingLeft)),
+      right: box.right - Number.parseFloat(style.paddingRight) - content.right,
+      column: column.scrollWidth - column.clientWidth,
+      route: route.scrollWidth - route.clientWidth,
+      document: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      width: inner.width,
+    };
+  });
+}
+
+test.describe('shared PageLayout', () => {
+  for (const textScale of [undefined, '200'] as const) {
+    test(`390 content column fills the grid without double padding${textScale ? ' at the 200 percent text scale' : ''}`, async ({ page }) => {
+      await bootGallery(page, { ...compact, textScale });
+      const metrics = await columnMetrics(page);
+      expect(Math.abs(metrics.left)).toBeLessThanOrEqual(1);
+      expect(Math.abs(metrics.right)).toBeLessThanOrEqual(1);
+      expect(metrics.column).toBeLessThanOrEqual(1);
+      expect(metrics.route).toBeLessThanOrEqual(1);
+      expect(metrics.document).toBeLessThanOrEqual(1);
+      await expectTextScalePanelsReflow(page);
+      await expect(page.locator('.app-content.page-layout.page-layout--wide')).toHaveCount(1);
+    });
+  }
+
+  test('1440 keeps the content column at the full grid width', async ({ page }) => {
+    await bootGallery(page, { ...compact, width: 1440, height: 900, appearance: { ...compact.appearance, locale: 'en' } });
+    const metrics = await columnMetrics(page);
+    expect(Math.abs(metrics.left)).toBeLessThanOrEqual(1);
+    expect(Math.abs(metrics.right)).toBeLessThanOrEqual(1);
+    expect(metrics.width).toBeLessThan(1400);
+    expect(metrics.document).toBeLessThanOrEqual(1);
+    await expect(page.locator('.app-content.page-layout.page-layout--wide')).toHaveCount(1);
   });
 });
