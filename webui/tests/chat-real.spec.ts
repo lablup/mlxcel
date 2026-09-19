@@ -52,7 +52,7 @@ test('real bundled chat Stop releases the selected model request lease', async (
   if (imagePath) await page.getByLabel('Local images', {exact:true}).setInputFiles(imagePath);
   await page.getByRole('textbox',{name:'Message',exact:true}).fill(imagePath ? 'Describe what is visible in this image in one short sentence.' : 'Say Hello in one short sentence.');
   await page.getByRole('button',{name:'Send',exact:true}).click();
-  await expect(page.locator('.chat-turn header')).toContainText('complete', {timeout:90000});
+  await expect(page.locator('.chat-turn header')).toContainText('Complete', {timeout:90000});
   const reply = await page.locator('.chat-markdown').innerText();
   await saveArtifact('real-response.json', JSON.stringify({model_id:modelId,image_input:Boolean(imagePath),reply,evaluation:'Output captured; root must review whether the content is sensible.'}), 'application/json');
   expect(reply.trim().length).toBeGreaterThan(0);
@@ -69,7 +69,7 @@ test('real bundled chat Stop releases the selected model request lease', async (
   await page.getByRole('button',{name:'Send',exact:true}).click();
   await expect.poll(async()=> (await readCatalog()).find(entry=>entry.identity.id===modelId)?.lifecycle.active_requests,{timeout:30000}).toBeGreaterThan(0);
   await page.getByRole('button',{name:'Stop',exact:true}).click();
-  await expect(page.locator('.chat-turn header')).toContainText('cancelled');
+  await expect(page.locator('.chat-turn header')).toContainText('Cancelled');
   await expect.poll(async()=> (await readCatalog()).find(entry=>entry.identity.id===modelId)?.lifecycle.active_requests,{timeout:30000}).toBe(0);
   await saveArtifact('real-stop-evidence.json', JSON.stringify({model_id:modelId,scope:'isolated server with no other request producers',initial_active:0,observed_during_positive:true,final_active:0,automatic_retry:false}), 'application/json');
   await expect(page.getByRole('button',{name:'Send',exact:true})).toBeDisabled(); // Empty composer, not a rerun.

@@ -6,8 +6,9 @@ let conversations: ChatConversation[] = [];
 let generation = 0;
 const listeners = new Set<() => void>();
 export function sessionGeneration(): number { return generation; }
-export function newConversation(): ChatConversation {
-  return { id: crypto.randomUUID(), title: 'New conversation', systemPrompt: '', turns: [], updatedAt: Date.now() };
+/** The title is caller-localized; the untitled default is replaced by the first prompt. */
+export function newConversation(title = 'New conversation'): ChatConversation {
+  return { id: crypto.randomUUID(), title, systemPrompt: '', turns: [], updatedAt: Date.now() };
 }
 const turnBytes = new WeakMap<ChatTurn, number>();
 function byteSize(turn: ChatTurn): number {

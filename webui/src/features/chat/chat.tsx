@@ -1,8 +1,9 @@
 // Copyright 2026 Lablup Inc. Licensed under Apache-2.0.
 import React, { useEffect, useRef, useState } from 'react';
-import { Button, ErrorBanner, Field, Select } from '../../design-system/primitives';
+import { Button, ConfirmDialog, ErrorBanner, Field, Select } from '../../design-system/primitives';
 import { useWebUi, useWebUiActions } from '../../state';
-import type { Locale } from '../../i18n/catalog';
+import { t, testId, type Locale, type StringKey } from '../../i18n/catalog';
+import { lifecycleLabel } from '../../provider-surfaces';
 import type { ChatConversation, ChatTurn } from './history';
 import { loadLocalImages, validateRequestImages } from './images';
 import { appendFrame, buildMessages, completeTurn, MAX_PROMPT_CHARACTERS } from './stream';
@@ -12,6 +13,9 @@ import { HistoryControls } from './privacy';
 import { useGenerationDefaults } from '../settings/generation-preferences';
 import { resolveTurnParameters, TurnParameters, type TurnParameterDraft } from './parameters';
 import './chat.css';
+
+// Untitled conversations are auto-titled from their first prompt in either locale.
+const DEFAULT_TITLES = new Set((['en', 'ko'] as const).map((code) => t(code, 'chat.conversation.default_title')));
 
 export function Chat({ locale }: { locale: Locale }): React.JSX.Element {
   const snapshot = useWebUi();
@@ -27,6 +31,11 @@ export function Chat({ locale }: { locale: Locale }): React.JSX.Element {
   const [busy, setBusy] = useState(false);
   const [historyBusy, setHistoryBusy] = useState(false);
   const [imagesBusy, setImagesBusy] = useState(false);
+  const [pendingEdit, setPendingEdit] = useState<number | null>(null);
+  // Async continuations and the unmount cleanup localize with the locale current when they run.
+  const localeRef = useRef(locale); localeRef.current = locale;
+  const localized = (key: StringKey, values?: Record<string, string>): string => t(localeRef.current, key, values);
+  const composer = useRef<HTMLTextAreaElement>(null);
   const imageEpoch = useRef(0);
   const composing = useRef(false);
   const statusEpoch = useRef(0);
@@ -41,7 +50,7 @@ export function Chat({ locale }: { locale: Locale }): React.JSX.Element {
     imageEpoch.current++; statusEpoch.current++;
     const request = active.current;
     if (request !== null) {
-      request.turn = { ...request.turn, status: 'interrupted', error: 'View closed. The request was aborted and was not retried.' };
+      request.turn = { ...request.turn, status: 'interrupted', error: t(localeRef.current, 'chat.error.view_closed') };
       request.controller.abort();
       request.flush();
     }
@@ -50,7 +59,7 @@ export function Chat({ locale }: { locale: Locale }): React.JSX.Element {
   const create = (): void => {
     if (busy || historyBusy || imagesBusy || conversations.length >= 50) return;
     imageEpoch.current++;
-    const next = newConversation();
+    const next = newConversation(localized('chat.conversation.default_title'));
     updateConversation(next); setCurrentId(next.id); setDraft(''); setImages([]);
   };
   const stop = (): void => {
@@ -59,34 +68,34 @@ export function Chat({ locale }: { locale: Locale }): React.JSX.Element {
     request.turn = { ...request.turn, status: 'cancelled', error: null };
     request.controller.abort(); request.flush();
     const epoch = ++statusEpoch.current;
-    setAnnouncement('Stopped locally; checking server activity.');
+    setAnnouncement(localized('chat.announce.stopped'));
     void actions.refreshRuntime(request.turn.modelId).then((runtime) => {
       if (statusEpoch.current !== epoch) return;
-      setAnnouncement(`Request aborted. Server observation refreshed at ${runtime.measurements.active_requests?.measured_at ?? 'an unknown time'}. See Activity for active requests; this is not a per-request cancellation receipt.`);
-    }).catch(() => { if (statusEpoch.current === epoch) setAnnouncement('Request aborted. Backend cancellation could not be observed; inspect Activity before unloading.'); });
+      setAnnouncement(localized('chat.announce.aborted_observed', { time: runtime.measurements.active_requests?.measured_at ?? localized('chat.announce.unknown_time') }));
+    }).catch(() => { if (statusEpoch.current === epoch) setAnnouncement(localized('chat.announce.aborted_unobserved')); });
   };
   const send = async (): Promise<void> => {
     if (active.current !== null || historyBusy || imagesBusy || !canChat || model === undefined || !draft.trim() || draft.length > MAX_PROMPT_CHARACTERS) return;
-    if ((images.length || current?.turns.some((turn) => turn.images.length)) && !canImage) { setError('The selected provider does not confirm vision support. Remove images or select a vision model.'); return; }
-    if (current === null && conversations.length >= 50) { setError('Conversation limit reached. Delete or export older conversations first.'); return; }
+    if ((images.length || current?.turns.some((turn) => turn.images.length)) && !canImage) { setError(localized('chat.error.vision_unsupported')); return; }
+    if (current === null && conversations.length >= 50) { setError(localized('chat.error.conversation_limit')); return; }
     let parameters: Record<string, number>;
     try { parameters = resolveTurnParameters(defaults, parameterDraft); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : 'Invalid next-turn parameters.'); return; }
-    let conversation = current ?? newConversation();
-    if (conversation.turns.length >= 100) { setError('This conversation reached its 100-turn limit. Start a new conversation.'); return; }
+    catch (cause) { setError(cause instanceof Error ? cause.message : localized('chat.error.invalid_parameters')); return; }
+    let conversation = current ?? newConversation(localized('chat.conversation.default_title'));
+    if (conversation.turns.length >= 100) { setError(localized('chat.error.turn_limit')); return; }
     setCurrentId(conversation.id);
     const controller = new AbortController();
     const started = performance.now();
     const turn: ChatTurn = { id: crypto.randomUUID(), modelId: model.identity.id, inferenceId: model.identity.inference_id, modelName: model.identity.display_name, modelRevision: model.identity.revision, prompt: draft, content: '', reasoning: '', tools: [], status: 'streaming', finishReason: null, usage: null, ttftMs: null, elapsedMs: null, error: null, parameters, images: images.map((image) => ({ ...image })) };
-    conversation = { ...conversation, title: conversation.turns.length === 0 && conversation.title === 'New conversation' ? draft.slice(0, 80) : conversation.title, turns: [...conversation.turns, turn], updatedAt: Date.now() };
+    conversation = { ...conversation, title: conversation.turns.length === 0 && DEFAULT_TITLES.has(conversation.title) ? draft.slice(0, 80) : conversation.title, turns: [...conversation.turns, turn], updatedAt: Date.now() };
     try {
       if (!snapshot.bootstrap) throw new Error('Limits unavailable');
       validateRequestImages(conversation.turns.flatMap((item) => item.images), snapshot.bootstrap.media_limits);
-    } catch { setError('Conversation images exceed the current server count, size or decode limits. Remove attachments or start a new conversation.'); return; }
+    } catch { setError(localized('chat.error.images_exceed')); return; }
     const body = { ...turn.parameters, model: turn.inferenceId, stream: true, messages: buildMessages(conversation.systemPrompt, conversation.turns), stream_options: { include_usage: true } };
     const bodyBudget = Math.min(snapshot.bootstrap?.media_limits.max_body_bytes ?? 0, 16 * 1024 * 1024);
-    if (new TextEncoder().encode(JSON.stringify(body)).byteLength > bodyBudget) { setError('The complete request exceeds the server or 16 MiB browser JSON body limit. Remove attachments or start a shorter conversation.'); return; }
-    if (!updateConversation(conversation)) { setError('Conversation memory budget reached. Export and clear older history first.'); return; }
+    if (new TextEncoder().encode(JSON.stringify(body)).byteLength > bodyBudget) { setError(localized('chat.error.body_limit')); return; }
+    if (!updateConversation(conversation)) { setError(localized('chat.error.memory_budget')); return; }
     let timer: ReturnType<typeof setTimeout> | null = null;
     const epoch = sessionGeneration();
     const request = { controller, turn, conversation, flush: (): void => {
@@ -101,11 +110,11 @@ export function Chat({ locale }: { locale: Locale }): React.JSX.Element {
         request.turn = { ...(previous.turns.find((item) => item.id === turn.id) ?? turn), status: 'error', error: null };
         request.conversation = { ...previous, turns: previous.turns.map((item) => item.id === turn.id ? request.turn : item) };
         updateConversation(request.conversation);
-        setError('Conversation memory budget reached. No further output was retained.');
+        setError(localized('chat.error.memory_budget_stream'));
       }
     } };
     setParameterDraft({});
-    active.current = request; statusEpoch.current++; setBusy(true); setError(null); setDraft(''); setImages([]); request.flush(); setAnnouncement('Generating.');
+    active.current = request; statusEpoch.current++; setBusy(true); setError(null); setDraft(''); setImages([]); request.flush(); setAnnouncement(localized('chat.announce.generating'));
     try {
       await actions.streamChatCompletions(turn.modelId, body, {
         onFrame: (frame) => {
@@ -114,12 +123,12 @@ export function Chat({ locale }: { locale: Locale }): React.JSX.Element {
           if (timer === null) timer = setTimeout(request.flush, 50);
         },
       }, controller.signal);
-      if (!controller.signal.aborted) { request.turn = completeTurn(request.turn, performance.now() - started); setAnnouncement('Response complete.'); }
+      if (!controller.signal.aborted) { request.turn = completeTurn(request.turn, performance.now() - started); setAnnouncement(localized('chat.announce.complete')); }
     } catch {
       if (!controller.signal.aborted) {
         controller.abort();
-        request.turn = { ...request.turn, status: 'error', elapsedMs: performance.now() - started, error: 'Generation failed or disconnected. Partial output is preserved. Check context limits, authentication and server availability; nothing was retried.' };
-        setAnnouncement('Generation failed; partial response preserved.');
+        request.turn = { ...request.turn, status: 'error', elapsedMs: performance.now() - started, error: localized('chat.error.generation_failed') };
+        setAnnouncement(localized('chat.announce.failed'));
       }
     } finally {
       request.flush();
@@ -127,30 +136,41 @@ export function Chat({ locale }: { locale: Locale }): React.JSX.Element {
       setBusy(false);
     }
   };
+  // Re-check the snapshot at answer time; a stale index or a started request drops the edit.
+  const confirmEdit = (): void => {
+    const index = pendingEdit;
+    setPendingEdit(null);
+    if (index === null || busy || historyBusy || imagesBusy || current === null || index >= current.turns.length) return;
+    setDraft(current.turns[index].prompt); setImages(current.turns[index].images);
+    updateConversation({ ...current, turns: current.turns.slice(0, index) });
+    // The edited turn's controls are gone; continue in the composer that now holds its prompt.
+    window.setTimeout(() => composer.current?.focus(), 0);
+  };
+  const [samplingBefore, samplingAfter = ''] = t(locale, 'chat.settings.sampling').split('{link}');
   return <div className="screen-stack chat-screen">
-    <section className="screen-heading"><p className="eyebrow">Local inference</p><h1 data-testid="chat-title">{locale === 'ko' ? '채팅' : 'Chat'}</h1><p>Memory-only by default. Changing the model affects the next turn, never the running request.</p></section>
-    <div className="chat-toolbar"><Button onClick={create} disabled={busy || historyBusy || imagesBusy || conversations.length >= 50}>New conversation</Button><Select label="Conversation" value={currentId ?? ''} disabled={busy || historyBusy || imagesBusy} onChange={(id) => { setCurrentId(id); setDraft(''); setImages([]); }} options={[{ value: '', label: 'Choose conversation' }, ...conversations.map((item) => ({ value: item.id, label: item.title }))]} /><Select label="Model for next turn" value={snapshot.selectedModelId ?? ''} onChange={(id) => actions.selectModel(id || null)} options={[{ value: '', label: 'Select a model' }, ...snapshot.catalog.map((item) => ({ value: item.identity.id, label: `${item.identity.display_name} · ${item.lifecycle.state}` }))]} /></div>
-    {!canChat ? <ErrorBanner tone="info" title="Choose a ready chat model" body="Selection never loads a model. Load one explicitly in Models. Embeddings, reranking and other tasks use their documented API, not this composer." action={<a href="#models">Open Models</a>} /> : null}
-    {current ? <details><summary>Conversation settings</summary><Field label="Conversation name" value={current.title} disabled={busy || historyBusy || imagesBusy} onChange={(title) => updateConversation({ ...current, title: title.slice(0, 120) })} /><label className="ds-field">System prompt<textarea value={current.systemPrompt} maxLength={MAX_PROMPT_CHARACTERS} disabled={busy || historyBusy || imagesBusy} onChange={(event) => updateConversation({ ...current, systemPrompt: event.target.value })} /></label><p>Sampling defaults are set in <a href="#settings">Settings</a> and frozen when sending.</p><Button disabled={busy || historyBusy || imagesBusy} onClick={() => { replaceConversations(conversations.filter((item) => item.id !== current.id)); setCurrentId(null); }}>Delete conversation</Button></details> : null}
-    <TurnParameters defaults={defaults} draft={parameterDraft} onChange={setParameterDraft} />
+    <section className="screen-heading"><p className="eyebrow">{t(locale, 'chat.eyebrow')}</p><h1 data-testid={testId('chat.title')}>{t(locale, 'chat.title')}</h1><p>{t(locale, 'chat.intro')}</p></section>
+    <div className="chat-toolbar"><Button onClick={create} disabled={busy || historyBusy || imagesBusy || conversations.length >= 50}>{t(locale, 'chat.new_conversation')}</Button><Select locale={locale} label={t(locale, 'chat.conversation.label')} value={currentId ?? ''} disabled={busy || historyBusy || imagesBusy} onChange={(id) => { setCurrentId(id); setDraft(''); setImages([]); }} options={[{ value: '', label: t(locale, 'chat.conversation.choose') }, ...conversations.map((item) => ({ value: item.id, label: item.title }))]} /><Select locale={locale} label={t(locale, 'chat.model.label')} value={snapshot.selectedModelId ?? ''} onChange={(id) => actions.selectModel(id || null)} options={[{ value: '', label: t(locale, 'chat.model.choose') }, ...snapshot.catalog.map((item) => ({ value: item.identity.id, label: `${item.identity.display_name} · ${lifecycleLabel(locale, item.lifecycle.state)}` }))]} /></div>
+    {!canChat ? <ErrorBanner tone="info" title={t(locale, 'chat.no_model.title')} body={t(locale, 'chat.no_model.body')} action={<a href="#models">{t(locale, 'chat.no_model.action')}</a>} /> : null}
+    {current ? <details><summary>{t(locale, 'chat.settings.summary')}</summary><Field label={t(locale, 'chat.settings.name')} value={current.title} disabled={busy || historyBusy || imagesBusy} onChange={(title) => updateConversation({ ...current, title: title.slice(0, 120) })} /><label className="ds-field">{t(locale, 'chat.settings.system_prompt')}<textarea value={current.systemPrompt} maxLength={MAX_PROMPT_CHARACTERS} disabled={busy || historyBusy || imagesBusy} onChange={(event) => updateConversation({ ...current, systemPrompt: event.target.value })} /></label><p>{samplingBefore}<a href="#settings">{t(locale, 'nav.settings')}</a>{samplingAfter}</p><Button disabled={busy || historyBusy || imagesBusy} onClick={() => { replaceConversations(conversations.filter((item) => item.id !== current.id)); setCurrentId(null); }}>{t(locale, 'chat.settings.delete')}</Button></details> : null}
+    <TurnParameters defaults={defaults} draft={parameterDraft} onChange={setParameterDraft} locale={locale} />
     <Transcript turns={current?.turns ?? []} onEdit={(index) => {
-      if (busy || historyBusy || imagesBusy || current === null || !window.confirm('Edit this prompt and discard this response and all later turns?')) return;
-      setDraft(current.turns[index].prompt); setImages(current.turns[index].images);
-      updateConversation({ ...current, turns: current.turns.slice(0, index) });
-    }} busy={busy || historyBusy || imagesBusy} />
-    {error ? <ErrorBanner title="Chat could not continue" body={error} /> : null}
-    <div className="chat-composer"><label className="ds-field">Message<textarea aria-label="Message" value={draft} maxLength={MAX_PROMPT_CHARACTERS} disabled={busy || historyBusy || imagesBusy} onChange={(event) => setDraft(event.target.value)} onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }} onKeyDown={(event) => {
+      if (busy || historyBusy || imagesBusy || current === null) return;
+      setPendingEdit(index);
+    }} busy={busy || historyBusy || imagesBusy} locale={locale} />
+    {pendingEdit !== null ? <ConfirmDialog open title={t(locale, 'chat.transcript.edit.confirm.title')} body={t(locale, 'chat.transcript.edit.confirm.body')} confirmLabel={t(locale, 'chat.transcript.edit.confirm')} cancelLabel={t(locale, 'common.cancel')} closeLabel={t(locale, 'common.close')} tone="danger" testId="chat-edit-dialog" onConfirm={confirmEdit} onClose={() => setPendingEdit(null)} /> : null}
+    {error ? <ErrorBanner title={t(locale, 'chat.error.title')} body={error} /> : null}
+    <div className="chat-composer"><label className="ds-field">{t(locale, 'chat.composer.label')}<textarea ref={composer} aria-label={t(locale, 'chat.composer.label')} value={draft} maxLength={MAX_PROMPT_CHARACTERS} disabled={busy || historyBusy || imagesBusy} onChange={(event) => setDraft(event.target.value)} onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }} onKeyDown={(event) => {
       if (event.key === 'Enter' && !event.shiftKey && !composing.current && !event.nativeEvent.isComposing && event.keyCode !== 229) { event.preventDefault(); void send(); }
-    }} /></label><p>Enter sends · Shift+Enter inserts a line. {draft.length}/{MAX_PROMPT_CHARACTERS} characters.</p>
-      {canImage ? <label className="ds-field">Local images<input type="file" accept="image/png,image/jpeg,image/webp" multiple disabled={busy || historyBusy || imagesBusy} onChange={(event) => {
+    }} /></label><p>{t(locale, 'chat.composer.hint', { count: String(draft.length), max: String(MAX_PROMPT_CHARACTERS) })}</p>
+      {canImage ? <label className="ds-field">{t(locale, 'chat.images.label')}<input type="file" accept="image/png,image/jpeg,image/webp" multiple disabled={busy || historyBusy || imagesBusy} onChange={(event) => {
         const files = event.target.files;
-        if (files && snapshot.bootstrap) { const epoch = ++imageEpoch.current; setImagesBusy(true); void loadLocalImages(files, images.length, snapshot.bootstrap.media_limits, images).then((added) => { if (epoch === imageEpoch.current) setImages((previous) => [...previous, ...added]); }).catch(() => setError('Images must be bounded local PNG, JPEG or WebP files. No URL, SVG or HTML input is accepted.')).finally(() => { if (epoch === imageEpoch.current) setImagesBusy(false); }); }
+        if (files && snapshot.bootstrap) { const epoch = ++imageEpoch.current; setImagesBusy(true); void loadLocalImages(files, images.length, snapshot.bootstrap.media_limits, images).then((added) => { if (epoch === imageEpoch.current) setImages((previous) => [...previous, ...added]); }).catch(() => setError(localized('chat.error.images_invalid'))).finally(() => { if (epoch === imageEpoch.current) setImagesBusy(false); }); }
         event.target.value = '';
-      }} /></label> : <p>Image attachments require provider-confirmed vision support.</p>}
-      <div className="chat-images">{images.map((image, index) => <figure key={`${image.name}-${index}`}><img src={image.dataUrl} alt={image.name} /><Button disabled={busy || historyBusy || imagesBusy} onClick={() => setImages(images.filter((_, position) => index !== position))}>Remove {image.name}</Button></figure>)}</div>
-      <div className="chat-toolbar"><Button tone="primary" disabled={!canChat || busy || historyBusy || imagesBusy || !draft.trim()} onClick={() => { void send(); }}>Send</Button><Button disabled={!busy} onClick={stop}>Stop</Button></div>
+      }} /></label> : <p>{t(locale, 'chat.images.unsupported')}</p>}
+      <div className="chat-images">{images.map((image, index) => <figure key={`${image.name}-${index}`}><img src={image.dataUrl} alt={image.name} /><Button disabled={busy || historyBusy || imagesBusy} onClick={() => setImages(images.filter((_, position) => index !== position))}>{t(locale, 'chat.images.remove', { name: image.name })}</Button></figure>)}</div>
+      <div className="chat-toolbar"><Button tone="primary" disabled={!canChat || busy || historyBusy || imagesBusy || !draft.trim()} onClick={() => { void send(); }}>{t(locale, 'common.send')}</Button><Button disabled={!busy} onClick={stop}>{t(locale, 'chat.stop')}</Button></div>
     </div>
     <p role="status" aria-live="polite" aria-atomic="true">{announcement}</p>
-    <HistoryControls conversations={conversations} busy={busy || imagesBusy} onPending={setHistoryBusy} limits={snapshot.bootstrap?.media_limits} onReplace={(next) => { replaceConversations(next); setCurrentId(null); }} />
+    <HistoryControls conversations={conversations} busy={busy || imagesBusy} onPending={setHistoryBusy} limits={snapshot.bootstrap?.media_limits} onReplace={(next) => { replaceConversations(next); setCurrentId(null); }} locale={locale} />
   </div>;
 }

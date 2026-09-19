@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { bootProduct, installMockApi, loginWithMockApi, productVariants } from './browser-fixtures';
 import { expectAxeClean, expectSafeLayout } from './browser-assertions';
+import { fixtureString, localizedPair } from './strings-fixture';
 
 function fixture(name: string): Record<string, unknown> { const data = JSON.parse(readFileSync(new URL(`../../tests/fixtures/webui/examples/${name}`, import.meta.url), 'utf8')) as Record<string, unknown>; delete data.$schemaName; return data; }
 for (const width of [390, 1440]) {
@@ -31,7 +32,7 @@ for (const width of [390, 1440]) {
     await expect(page.getByRole('heading', { name: 'Generation · next request' })).toBeVisible();
     expect(calls.some((call) => call.path === '/props' || call.path === '/settings')).toBe(false);
     await page.getByTestId('settings-model-selector').getByRole('combobox').click();
-    await page.getByRole('option', { name: `${entry.identity.display_name} · ready`, exact: true }).click();
+    await page.getByRole('option', { name: `${entry.identity.display_name} · ${fixtureString('en', 'models.status.ready')}`, exact: true }).click();
     await expect(page.getByLabel('Per-slot context tokens (/props n_ctx)', { exact: true })).toHaveValue('2048');
     await expect(page.getByRole('heading', { name: 'Loaded model · live server values' })).toBeVisible();
     await expect(page.getByLabel('default_temperature', { exact: true })).toHaveValue('1');
@@ -48,3 +49,22 @@ for (const width of [390, 1440]) {
     await expect(page.getByRole('heading', { name: 'Generation · next request' })).toBeVisible();
   });
 }
+
+test('Settings renders catalog copy in Korean', async ({ page }) => {
+  await installMockApi(page, 'happy');
+  await bootProduct(page, productVariants[3]);
+  await loginWithMockApi(page);
+  await page.evaluate(() => { window.location.hash = '#settings'; });
+  await expect(page.getByRole('heading', { name: localizedPair('ko', 'settings.generation.title').shown, exact: true })).toBeVisible();
+  for (const key of ['settings.generation.title', 'settings.server.privacy.title', 'settings.generation.save', 'settings.profile.title']) {
+    const { shown, hidden } = localizedPair('ko', key);
+    await expect(page.getByText(shown, { exact: true }).first()).toBeVisible();
+    await expect(page.getByText(hidden, { exact: true })).toHaveCount(0);
+  }
+  await page.getByRole('button', { name: fixtureString('ko', 'settings.generation.reset_open'), exact: true }).click();
+  await expect(page.getByRole('dialog')).toBeVisible();
+  await expect(page.getByRole('dialog').getByTestId('dialog-close')).toHaveAccessibleName(fixtureString('ko', 'common.close'));
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog')).toBeHidden();
+  await expectSafeLayout(page);
+});

@@ -1,8 +1,14 @@
 import { modelStrings } from '../features/models/strings';
+import { chatStrings } from '../features/chat/strings';
+import { settingsStrings } from '../features/settings/strings';
+import { activityStrings } from '../features/activity/strings';
 
 export type Locale = 'en' | 'ko';
 
 export type StringKey = typeof modelStrings[number]['key']
+  | typeof chatStrings[number]['key']
+  | typeof settingsStrings[number]['key']
+  | typeof activityStrings[number]['key']
   | 'app.title'
   | 'app.subtitle'
   | 'nav.models'
@@ -171,6 +177,10 @@ export type StringKey = typeof modelStrings[number]['key']
   | 'login.error.schema'
   | 'login.error.generic'
   | 'gallery.delete_token'
+  | 'models.next_profile.body'
+  | 'models.next_profile.edit'
+  | 'format.unknown'
+  | 'format.not_measured'
 ;
 
 type Entry = { key: StringKey; en: string; ko: string; test_id: string };
@@ -346,7 +356,14 @@ export const entries: Entry[] = [
   { key: 'login.error.schema', en: 'The server response does not match this bundled UI schema. Reload after updating the server or bundle.', ko: '서버 응답이 번들된 UI 스키마와 일치하지 않습니다. 서버나 번들을 업데이트한 뒤 새로고침하세요.', test_id: 'login-error-schema' },
   { key: 'login.error.generic', en: 'The local API could not complete authentication. Retry with the latest terminal key.', ko: '로컬 API 인증을 완료할 수 없습니다. 터미널에 표시된 최신 키로 다시 시도하세요.', test_id: 'login-error-generic' },
   { key: 'gallery.delete_token', en: 'DELETE', ko: 'DELETE', test_id: 'gallery-delete-token' },
+  { key: 'models.next_profile.body', en: 'Pending browser profile; not applied yet. Explicit CLI/environment settings take precedence. Read effective values after loading.', ko: '대기 중인 브라우저 프로필이며 아직 적용되지 않았습니다. 명시적 CLI/환경 설정이 우선합니다. 실제 값은 로드 후 확인하세요.', test_id: 'models-next-profile-body' },
+  { key: 'models.next_profile.edit', en: 'Edit profile', ko: '프로필 편집', test_id: 'models-next-profile-edit' },
+  { key: 'format.unknown', en: 'unknown', ko: '알 수 없음', test_id: 'format-unknown' },
+  { key: 'format.not_measured', en: 'not yet measured', ko: '아직 측정되지 않음', test_id: 'format-not-measured' },
   ...modelStrings,
+  ...chatStrings,
+  ...settingsStrings,
+  ...activityStrings,
 ];
 
 const table = new Map(entries.map((entry) => [entry.key, entry]));

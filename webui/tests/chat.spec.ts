@@ -4,6 +4,7 @@ import bootstrap from '../../tests/fixtures/webui/examples/bootstrap.model-free.
 import runtime from '../../tests/fixtures/webui/examples/runtime.snapshot.json' with { type: 'json' };
 import { bootProduct, browserStorageDump, installMockApi, loginWithMockApi, productVariants } from './browser-fixtures';
 import { expectAxeClean, expectSafeLayout } from './browser-assertions';
+import { fixtureString, localizedPair, type FixtureLocale } from './strings-fixture';
 
 for (const width of [1440, 390]) {
   test(`chat safe transcript, IME and privacy at ${width}`, async ({ page }, testInfo) => {
@@ -34,19 +35,22 @@ for (const width of [1440, 390]) {
       await route.fulfill({status:200,contentType:'text/event-stream',body:frames.map(frame=>`data: ${JSON.stringify(frame)}\n\n`).join('')+'data: [DONE]\n\n'});
     });
     const variant={...productVariants[width===390 ? 2 : 0],width};
+    // The 390 variant boots in Korean, so every accessible name comes from the string fixture.
+    const locale = variant.appearance.locale as FixtureLocale;
+    const text = (key: string): string => fixtureString(locale, key);
     await bootProduct(page, variant); await loginWithMockApi(page);
     await page.evaluate(()=>{window.location.hash='chat';});
-    const picker = page.getByRole('combobox', {name:'Model for next turn'});
-    await picker.click(); await page.getByRole('option',{name:'alpha · ready'}).click();
-    const composer=page.getByRole('textbox',{name:'Message',exact:true});
+    const picker = page.getByRole('combobox', {name:text('chat.model.label')});
+    await picker.click(); await page.getByRole('option',{name:`alpha · ${text('models.status.ready')}`}).click();
+    const composer=page.getByRole('textbox',{name:text('chat.composer.label'),exact:true});
     await composer.fill('안녕하세요');
     await composer.dispatchEvent('compositionstart');
     await composer.dispatchEvent('keydown',{key:'Enter',isComposing:true});
     expect(requests).toHaveLength(0);
     await composer.dispatchEvent('compositionend');
     await composer.press('Shift+Enter'); expect(requests).toHaveLength(0);
-    const before=Date.now(); await page.getByRole('button',{name:'Send',exact:true}).click();
-    await expect(page.getByRole('status').filter({hasText:'Response complete.'})).toBeVisible();
+    const before=Date.now(); await page.getByRole('button',{name:text('common.send'),exact:true}).click();
+    await expect(page.getByRole('status').filter({hasText:text('chat.announce.complete')})).toBeVisible();
     const elapsed=Date.now()-before;
     await testInfo.attach('10000-token-fixture-render.json',{body:JSON.stringify({elapsed_ms:elapsed,kind:'browser fixture end-to-end render, not inference performance'}),contentType:'application/json'});
     expect(requests).toHaveLength(1);expect(requests[0]).toMatchObject({model:'alpha',stream:true});
@@ -56,7 +60,19 @@ for (const width of [1440, 390]) {
     await expect(page.getByText('Reasoning is separate.',{exact:true})).toBeHidden();
     await expectAxeClean(page);await expectSafeLayout(page);
     expect(await browserStorageDump(page)).not.toContain('안녕하세요');
-    await page.getByRole('button',{name:'New conversation',exact:true}).click();
+    if (locale === 'ko') for (const key of ['chat.intro', 'chat.transcript.edit', 'chat.params.summary', 'chat.privacy.summary']) {
+      const { shown, hidden } = localizedPair(locale, key);
+      await expect(page.getByText(shown, {exact:true}).first()).toBeVisible();
+      await expect(page.getByText(hidden, {exact:true})).toHaveCount(0);
+    }
+    // Edit asks through the design-system dialog; Escape keeps the turn and returns focus.
+    const edit = page.getByRole('button',{name:text('chat.transcript.edit'),exact:true});
+    await edit.click();
+    const editDialog = page.getByTestId('chat-edit-dialog');
+    await expect(editDialog).toBeVisible(); await expect(editDialog).toContainText(text('chat.transcript.edit.confirm.body'));
+    await page.keyboard.press('Escape');
+    await expect(editDialog).toBeHidden(); await expect(edit).toBeFocused(); await expect(page.locator('.chat-turn')).toHaveCount(1);
+    await page.getByRole('button',{name:text('chat.new_conversation'),exact:true}).click();
     await expect(composer).toBeEnabled();
     await testInfo.attach(`chat-${width}.png`,{body:await page.screenshot({fullPage:true}),contentType:'image/png'});
   });

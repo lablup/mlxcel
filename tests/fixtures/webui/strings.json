@@ -1499,6 +1499,1578 @@
       "en": "Operation state",
       "ko": "작업 상태",
       "test_id": "models-library-operation-state"
+    },
+    {
+      "key": "models.next_profile.body",
+      "en": "Pending browser profile; not applied yet. Explicit CLI/environment settings take precedence. Read effective values after loading.",
+      "ko": "대기 중인 브라우저 프로필이며 아직 적용되지 않았습니다. 명시적 CLI/환경 설정이 우선합니다. 실제 값은 로드 후 확인하세요.",
+      "test_id": "models-next-profile-body"
+    },
+    {
+      "key": "models.next_profile.edit",
+      "en": "Edit profile",
+      "ko": "프로필 편집",
+      "test_id": "models-next-profile-edit"
+    },
+    {
+      "key": "format.unknown",
+      "en": "unknown",
+      "ko": "알 수 없음",
+      "test_id": "format-unknown"
+    },
+    {
+      "key": "format.not_measured",
+      "en": "not yet measured",
+      "ko": "아직 측정되지 않음",
+      "test_id": "format-not-measured"
+    },
+    {
+      "key": "chat.eyebrow",
+      "en": "Local inference",
+      "ko": "로컬 추론",
+      "test_id": "chat-eyebrow"
+    },
+    {
+      "key": "chat.intro",
+      "en": "Memory-only by default. Changing the model affects the next turn, never the running request.",
+      "ko": "기본적으로 메모리에만 보관합니다. 모델을 바꾸면 다음 턴에만 적용되며 실행 중인 요청은 바뀌지 않습니다.",
+      "test_id": "chat-intro"
+    },
+    {
+      "key": "chat.new_conversation",
+      "en": "New conversation",
+      "ko": "새 대화",
+      "test_id": "chat-new-conversation"
+    },
+    {
+      "key": "chat.conversation.default_title",
+      "en": "New conversation",
+      "ko": "새 대화",
+      "test_id": "chat-conversation-default-title"
+    },
+    {
+      "key": "chat.conversation.label",
+      "en": "Conversation",
+      "ko": "대화",
+      "test_id": "chat-conversation-label"
+    },
+    {
+      "key": "chat.conversation.choose",
+      "en": "Choose conversation",
+      "ko": "대화 선택",
+      "test_id": "chat-conversation-choose"
+    },
+    {
+      "key": "chat.model.label",
+      "en": "Model for next turn",
+      "ko": "다음 턴에 사용할 모델",
+      "test_id": "chat-model-label"
+    },
+    {
+      "key": "chat.model.choose",
+      "en": "Select a model",
+      "ko": "모델 선택",
+      "test_id": "chat-model-choose"
+    },
+    {
+      "key": "chat.no_model.title",
+      "en": "Choose a ready chat model",
+      "ko": "준비된 대화 모델을 선택하세요",
+      "test_id": "chat-no-model-title"
+    },
+    {
+      "key": "chat.no_model.body",
+      "en": "Selection never loads a model. Load one explicitly in Models. Embeddings, reranking and other tasks use their documented API, not this composer.",
+      "ko": "선택만으로 모델을 로드하지 않습니다. 모델 화면에서 명시적으로 로드하세요. 임베딩, 재순위화 등 다른 작업은 이 입력창이 아니라 문서화된 API를 사용합니다.",
+      "test_id": "chat-no-model-body"
+    },
+    {
+      "key": "chat.no_model.action",
+      "en": "Open Models",
+      "ko": "모델 화면 열기",
+      "test_id": "chat-no-model-action"
+    },
+    {
+      "key": "chat.settings.summary",
+      "en": "Conversation settings",
+      "ko": "대화 설정",
+      "test_id": "chat-settings-summary"
+    },
+    {
+      "key": "chat.settings.name",
+      "en": "Conversation name",
+      "ko": "대화 이름",
+      "test_id": "chat-settings-name"
+    },
+    {
+      "key": "chat.settings.system_prompt",
+      "en": "System prompt",
+      "ko": "시스템 프롬프트",
+      "test_id": "chat-settings-system-prompt"
+    },
+    {
+      "key": "chat.settings.sampling",
+      "en": "Sampling defaults are set in {link} and frozen when sending.",
+      "ko": "샘플링 기본값은 {link}에서 지정하며 전송할 때 고정됩니다.",
+      "test_id": "chat-settings-sampling"
+    },
+    {
+      "key": "chat.settings.delete",
+      "en": "Delete conversation",
+      "ko": "대화 삭제",
+      "test_id": "chat-settings-delete"
+    },
+    {
+      "key": "chat.composer.label",
+      "en": "Message",
+      "ko": "메시지",
+      "test_id": "chat-composer-label"
+    },
+    {
+      "key": "chat.composer.hint",
+      "en": "Enter sends · Shift+Enter inserts a line. {count}/{max} characters.",
+      "ko": "Enter로 보내고 Shift+Enter로 줄을 바꿉니다. {count}/{max}자.",
+      "test_id": "chat-composer-hint"
+    },
+    {
+      "key": "chat.images.label",
+      "en": "Local images",
+      "ko": "로컬 이미지",
+      "test_id": "chat-images-label"
+    },
+    {
+      "key": "chat.images.unsupported",
+      "en": "Image attachments require provider-confirmed vision support.",
+      "ko": "이미지를 첨부하려면 provider가 확인한 비전 지원이 필요합니다.",
+      "test_id": "chat-images-unsupported"
+    },
+    {
+      "key": "chat.images.remove",
+      "en": "Remove {name}",
+      "ko": "{name} 제거",
+      "test_id": "chat-images-remove"
+    },
+    {
+      "key": "chat.stop",
+      "en": "Stop",
+      "ko": "중지",
+      "test_id": "chat-stop"
+    },
+    {
+      "key": "chat.error.title",
+      "en": "Chat could not continue",
+      "ko": "대화를 계속할 수 없습니다",
+      "test_id": "chat-error-title"
+    },
+    {
+      "key": "chat.error.view_closed",
+      "en": "View closed. The request was aborted and was not retried.",
+      "ko": "화면을 닫았습니다. 요청을 중단했으며 다시 시도하지 않았습니다.",
+      "test_id": "chat-error-view-closed"
+    },
+    {
+      "key": "chat.error.vision_unsupported",
+      "en": "The selected provider does not confirm vision support. Remove images or select a vision model.",
+      "ko": "선택한 provider가 비전 지원을 확인하지 않습니다. 이미지를 제거하거나 비전 모델을 선택하세요.",
+      "test_id": "chat-error-vision-unsupported"
+    },
+    {
+      "key": "chat.error.conversation_limit",
+      "en": "Conversation limit reached. Delete or export older conversations first.",
+      "ko": "대화 개수 한도에 도달했습니다. 먼저 이전 대화를 삭제하거나 내보내세요.",
+      "test_id": "chat-error-conversation-limit"
+    },
+    {
+      "key": "chat.error.invalid_parameters",
+      "en": "Invalid next-turn parameters.",
+      "ko": "다음 턴 매개변수가 올바르지 않습니다.",
+      "test_id": "chat-error-invalid-parameters"
+    },
+    {
+      "key": "chat.error.turn_limit",
+      "en": "This conversation reached its 100-turn limit. Start a new conversation.",
+      "ko": "이 대화는 100턴 한도에 도달했습니다. 새 대화를 시작하세요.",
+      "test_id": "chat-error-turn-limit"
+    },
+    {
+      "key": "chat.error.images_exceed",
+      "en": "Conversation images exceed the current server count, size or decode limits. Remove attachments or start a new conversation.",
+      "ko": "대화 이미지가 현재 서버의 개수, 크기 또는 디코드 한도를 넘습니다. 첨부를 제거하거나 새 대화를 시작하세요.",
+      "test_id": "chat-error-images-exceed"
+    },
+    {
+      "key": "chat.error.body_limit",
+      "en": "The complete request exceeds the server or 16 MiB browser JSON body limit. Remove attachments or start a shorter conversation.",
+      "ko": "전체 요청이 서버 또는 16 MiB 브라우저 JSON 본문 한도를 넘습니다. 첨부를 제거하거나 더 짧은 대화를 시작하세요.",
+      "test_id": "chat-error-body-limit"
+    },
+    {
+      "key": "chat.error.memory_budget",
+      "en": "Conversation memory budget reached. Export and clear older history first.",
+      "ko": "대화 메모리 예산에 도달했습니다. 먼저 이전 기록을 내보내고 지우세요.",
+      "test_id": "chat-error-memory-budget"
+    },
+    {
+      "key": "chat.error.memory_budget_stream",
+      "en": "Conversation memory budget reached. No further output was retained.",
+      "ko": "대화 메모리 예산에 도달했습니다. 이후 출력은 보존하지 않았습니다.",
+      "test_id": "chat-error-memory-budget-stream"
+    },
+    {
+      "key": "chat.error.generation_failed",
+      "en": "Generation failed or disconnected. Partial output is preserved. Check context limits, authentication and server availability; nothing was retried.",
+      "ko": "생성에 실패했거나 연결이 끊겼습니다. 부분 출력은 보존됩니다. 컨텍스트 한도, 인증, 서버 상태를 확인하세요. 자동으로 다시 시도하지 않았습니다.",
+      "test_id": "chat-error-generation-failed"
+    },
+    {
+      "key": "chat.error.images_invalid",
+      "en": "Images must be bounded local PNG, JPEG or WebP files. No URL, SVG or HTML input is accepted.",
+      "ko": "이미지는 크기 한도 안의 로컬 PNG, JPEG 또는 WebP 파일이어야 합니다. URL, SVG, HTML 입력은 허용하지 않습니다.",
+      "test_id": "chat-error-images-invalid"
+    },
+    {
+      "key": "chat.announce.stopped",
+      "en": "Stopped locally; checking server activity.",
+      "ko": "로컬에서 중지했습니다. 서버 활동을 확인하는 중입니다.",
+      "test_id": "chat-announce-stopped"
+    },
+    {
+      "key": "chat.announce.aborted_observed",
+      "en": "Request aborted. Server observation refreshed at {time}. See Activity for active requests; this is not a per-request cancellation receipt.",
+      "ko": "요청을 중단했습니다. 서버 관측값을 {time}에 새로 고쳤습니다. 활성 요청은 활동 화면에서 확인하세요. 이 메시지는 요청별 취소 확인이 아닙니다.",
+      "test_id": "chat-announce-aborted-observed"
+    },
+    {
+      "key": "chat.announce.unknown_time",
+      "en": "an unknown time",
+      "ko": "알 수 없는 시각",
+      "test_id": "chat-announce-unknown-time"
+    },
+    {
+      "key": "chat.announce.aborted_unobserved",
+      "en": "Request aborted. Backend cancellation could not be observed; inspect Activity before unloading.",
+      "ko": "요청을 중단했습니다. 백엔드 취소를 확인할 수 없으니 언로드하기 전에 활동 화면을 확인하세요.",
+      "test_id": "chat-announce-aborted-unobserved"
+    },
+    {
+      "key": "chat.announce.generating",
+      "en": "Generating.",
+      "ko": "생성하는 중입니다.",
+      "test_id": "chat-announce-generating"
+    },
+    {
+      "key": "chat.announce.complete",
+      "en": "Response complete.",
+      "ko": "응답이 완료되었습니다.",
+      "test_id": "chat-announce-complete"
+    },
+    {
+      "key": "chat.announce.failed",
+      "en": "Generation failed; partial response preserved.",
+      "ko": "생성에 실패했습니다. 부분 응답은 보존됩니다.",
+      "test_id": "chat-announce-failed"
+    },
+    {
+      "key": "chat.transcript.label",
+      "en": "Conversation transcript",
+      "ko": "대화 기록",
+      "test_id": "chat-transcript-label"
+    },
+    {
+      "key": "chat.transcript.empty",
+      "en": "No messages yet. Start with a prompt after loading a model.",
+      "ko": "아직 메시지가 없습니다. 모델을 로드한 뒤 프롬프트를 입력해 시작하세요.",
+      "test_id": "chat-transcript-empty"
+    },
+    {
+      "key": "chat.transcript.jump",
+      "en": "Jump to latest",
+      "ko": "최신 메시지로 이동",
+      "test_id": "chat-transcript-jump"
+    },
+    {
+      "key": "chat.transcript.turn_label",
+      "en": "Turn with {model}",
+      "ko": "{model} 턴",
+      "test_id": "chat-transcript-turn-label"
+    },
+    {
+      "key": "chat.transcript.status.streaming",
+      "en": "Streaming",
+      "ko": "스트리밍 중",
+      "test_id": "chat-transcript-status-streaming"
+    },
+    {
+      "key": "chat.transcript.status.complete",
+      "en": "Complete",
+      "ko": "완료",
+      "test_id": "chat-transcript-status-complete"
+    },
+    {
+      "key": "chat.transcript.status.cancelled",
+      "en": "Cancelled",
+      "ko": "취소됨",
+      "test_id": "chat-transcript-status-cancelled"
+    },
+    {
+      "key": "chat.transcript.status.interrupted",
+      "en": "Interrupted",
+      "ko": "중단됨",
+      "test_id": "chat-transcript-status-interrupted"
+    },
+    {
+      "key": "chat.transcript.status.error",
+      "en": "Error",
+      "ko": "오류",
+      "test_id": "chat-transcript-status-error"
+    },
+    {
+      "key": "chat.transcript.images",
+      "en": "{count} local image attachment(s)",
+      "ko": "로컬 이미지 첨부 {count}개",
+      "test_id": "chat-transcript-images"
+    },
+    {
+      "key": "chat.transcript.edit",
+      "en": "Edit and regenerate",
+      "ko": "편집 후 다시 생성",
+      "test_id": "chat-transcript-edit"
+    },
+    {
+      "key": "chat.transcript.edit.confirm.title",
+      "en": "Edit this prompt?",
+      "ko": "이 프롬프트를 편집할까요?",
+      "test_id": "chat-transcript-edit-confirm-title"
+    },
+    {
+      "key": "chat.transcript.edit.confirm.body",
+      "en": "This response and all later turns in this conversation are discarded. The prompt returns to the composer.",
+      "ko": "이 응답과 이 대화의 이후 모든 턴이 삭제됩니다. 프롬프트는 입력창으로 돌아갑니다.",
+      "test_id": "chat-transcript-edit-confirm-body"
+    },
+    {
+      "key": "chat.transcript.edit.confirm",
+      "en": "Discard and edit",
+      "ko": "삭제하고 편집",
+      "test_id": "chat-transcript-edit-confirm"
+    },
+    {
+      "key": "chat.transcript.reasoning_thinking",
+      "en": "Reasoning · Thinking",
+      "ko": "추론 · 생각하는 중",
+      "test_id": "chat-transcript-reasoning-thinking"
+    },
+    {
+      "key": "chat.transcript.thinking",
+      "en": "Thinking…",
+      "ko": "생각하는 중…",
+      "test_id": "chat-transcript-thinking"
+    },
+    {
+      "key": "chat.transcript.waiting",
+      "en": "Waiting for response…",
+      "ko": "응답을 기다리는 중…",
+      "test_id": "chat-transcript-waiting"
+    },
+    {
+      "key": "chat.transcript.tool_call",
+      "en": "Tool call: {name} (not executed)",
+      "ko": "도구 호출: {name} (실행하지 않음)",
+      "test_id": "chat-transcript-tool-call"
+    },
+    {
+      "key": "chat.transcript.tool_name_pending",
+      "en": "Name pending",
+      "ko": "이름 대기 중",
+      "test_id": "chat-transcript-tool-name-pending"
+    },
+    {
+      "key": "chat.transcript.copy",
+      "en": "Copy response",
+      "ko": "응답 복사",
+      "test_id": "chat-transcript-copy"
+    },
+    {
+      "key": "chat.transcript.copied",
+      "en": "Copied response.",
+      "ko": "응답을 복사했습니다.",
+      "test_id": "chat-transcript-copied"
+    },
+    {
+      "key": "chat.transcript.copy_failed",
+      "en": "Copy unavailable; select the response text instead.",
+      "ko": "복사할 수 없습니다. 응답 텍스트를 직접 선택하세요.",
+      "test_id": "chat-transcript-copy-failed"
+    },
+    {
+      "key": "chat.transcript.details",
+      "en": "Response details",
+      "ko": "응답 상세",
+      "test_id": "chat-transcript-details"
+    },
+    {
+      "key": "chat.transcript.finish_reason",
+      "en": "Finish reason",
+      "ko": "종료 사유",
+      "test_id": "chat-transcript-finish-reason"
+    },
+    {
+      "key": "chat.transcript.unknown",
+      "en": "Unknown",
+      "ko": "알 수 없음",
+      "test_id": "chat-transcript-unknown"
+    },
+    {
+      "key": "chat.transcript.usage",
+      "en": "Usage (server reported)",
+      "ko": "사용량 (서버 보고)",
+      "test_id": "chat-transcript-usage"
+    },
+    {
+      "key": "chat.transcript.usage_value",
+      "en": "{prompt} prompt / {completion} completion / {total} total tokens",
+      "ko": "프롬프트 {prompt} / 완성 {completion} / 전체 {total} 토큰",
+      "test_id": "chat-transcript-usage-value"
+    },
+    {
+      "key": "chat.transcript.first_delta",
+      "en": "First delta (client observed)",
+      "ko": "첫 델타 (클라이언트 관측)",
+      "test_id": "chat-transcript-first-delta"
+    },
+    {
+      "key": "chat.transcript.decode_rate",
+      "en": "Decode rate (client estimate)",
+      "ko": "디코드 속도 (클라이언트 추정)",
+      "test_id": "chat-transcript-decode-rate"
+    },
+    {
+      "key": "chat.transcript.metrics_note",
+      "en": "First delta measures send to first non-empty content, reasoning or tool delta, including transport. Decode rate uses reported completion tokens minus one over the remaining client-observed stream duration; it is not a server kernel metric.",
+      "ko": "첫 델타는 전송부터 비어 있지 않은 첫 내용, 추론 또는 도구 델타까지의 시간이며 전송 구간을 포함합니다. 디코드 속도는 보고된 완성 토큰 수에서 1을 뺀 값을 클라이언트가 관측한 나머지 스트림 시간으로 나눈 값이며 서버 커널 지표가 아닙니다.",
+      "test_id": "chat-transcript-metrics-note"
+    },
+    {
+      "key": "chat.params.summary",
+      "en": "Parameters for next turn",
+      "ko": "다음 턴 매개변수",
+      "test_id": "chat-params-summary"
+    },
+    {
+      "key": "chat.params.body",
+      "en": "These overrides apply once, after Send accepts a request. Blank fields inherit Settings; absent Settings fields inherit the server. Changes never affect a running turn.",
+      "ko": "이 재정의 값은 보내기로 요청이 수락된 뒤 한 번만 적용됩니다. 빈 필드는 설정 값을, 설정에 없는 필드는 서버 값을 상속합니다. 실행 중인 턴에는 영향을 주지 않습니다.",
+      "test_id": "chat-params-body"
+    },
+    {
+      "key": "chat.params.field",
+      "en": "Next turn {name}",
+      "ko": "다음 턴 {name}",
+      "test_id": "chat-params-field"
+    },
+    {
+      "key": "chat.params.inherited",
+      "en": "Inherited: {value}",
+      "ko": "상속 값: {value}",
+      "test_id": "chat-params-inherited"
+    },
+    {
+      "key": "chat.params.server_default",
+      "en": "server default",
+      "ko": "서버 기본값",
+      "test_id": "chat-params-server-default"
+    },
+    {
+      "key": "chat.params.clear",
+      "en": "Clear next-turn overrides",
+      "ko": "다음 턴 재정의 지우기",
+      "test_id": "chat-params-clear"
+    },
+    {
+      "key": "chat.privacy.summary",
+      "en": "Local history and privacy",
+      "ko": "로컬 기록과 개인정보",
+      "test_id": "chat-privacy-summary"
+    },
+    {
+      "key": "chat.privacy.body",
+      "en": "Conversations stay in memory unless you opt in below. Signing out or refreshing requires authentication again; saved history belongs to this browser origin, not a server account. No API keys are stored.",
+      "ko": "아래에서 동의하지 않으면 대화는 메모리에만 남습니다. 로그아웃하거나 새로고침하면 다시 인증해야 합니다. 저장된 기록은 서버 계정이 아니라 이 브라우저 origin에 속합니다. API 키는 저장하지 않습니다.",
+      "test_id": "chat-privacy-body"
+    },
+    {
+      "key": "chat.privacy.save",
+      "en": "Save conversations on this device (IndexedDB)",
+      "ko": "이 기기에 대화 저장 (IndexedDB)",
+      "test_id": "chat-privacy-save"
+    },
+    {
+      "key": "chat.privacy.include_images",
+      "en": "Also include attached image bytes in saved history and exports (separate consent)",
+      "ko": "저장 기록과 내보내기에 첨부 이미지 바이트도 포함 (별도 동의)",
+      "test_id": "chat-privacy-include-images"
+    },
+    {
+      "key": "chat.privacy.note",
+      "en": "Turning saving off stops future writes; use Clear All to remove previously saved history. Re-enable explicitly after refresh to read it.",
+      "ko": "저장을 끄면 이후 쓰기만 멈춥니다. 이미 저장된 기록은 모두 지우기로 삭제하세요. 새로고침 후 기록을 읽으려면 다시 명시적으로 켜세요.",
+      "test_id": "chat-privacy-note"
+    },
+    {
+      "key": "chat.privacy.export",
+      "en": "Export JSON",
+      "ko": "JSON 내보내기",
+      "test_id": "chat-privacy-export"
+    },
+    {
+      "key": "chat.privacy.export_failed",
+      "en": "Export exceeds the bounded history size or contains unsupported data.",
+      "ko": "내보내기가 기록 크기 한도를 넘거나 지원하지 않는 데이터를 포함합니다.",
+      "test_id": "chat-privacy-export-failed"
+    },
+    {
+      "key": "chat.privacy.clear",
+      "en": "Clear All",
+      "ko": "모두 지우기",
+      "test_id": "chat-privacy-clear"
+    },
+    {
+      "key": "chat.privacy.cleared",
+      "en": "All history cleared.",
+      "ko": "모든 기록을 지웠습니다.",
+      "test_id": "chat-privacy-cleared"
+    },
+    {
+      "key": "chat.privacy.clear_failed",
+      "en": "Stored history could not be cleared. Check browser storage permissions; no success is claimed.",
+      "ko": "저장된 기록을 지우지 못했습니다. 브라우저 저장소 권한을 확인하세요. 성공으로 처리하지 않았습니다.",
+      "test_id": "chat-privacy-clear-failed"
+    },
+    {
+      "key": "chat.privacy.import",
+      "en": "Import conversation JSON (replaces current history)",
+      "ko": "대화 JSON 가져오기 (현재 기록을 대체)",
+      "test_id": "chat-privacy-import"
+    },
+    {
+      "key": "chat.privacy.import_too_large",
+      "en": "Import exceeds 16 MiB.",
+      "ko": "가져오기가 16 MiB를 넘습니다.",
+      "test_id": "chat-privacy-import-too-large"
+    },
+    {
+      "key": "chat.privacy.import_rejected",
+      "en": "Import rejected: unsupported version, invalid data or exceeded limits.",
+      "ko": "가져오기를 거부했습니다. 지원하지 않는 버전, 잘못된 데이터 또는 한도 초과입니다.",
+      "test_id": "chat-privacy-import-rejected"
+    },
+    {
+      "key": "chat.privacy.save_failed",
+      "en": "History was not saved. Storage may be full or unavailable; export your conversation.",
+      "ko": "기록을 저장하지 못했습니다. 저장소가 가득 찼거나 사용할 수 없을 수 있으니 대화를 내보내세요.",
+      "test_id": "chat-privacy-save-failed"
+    },
+    {
+      "key": "chat.privacy.open_failed",
+      "en": "Local history could not be opened or its images failed validation. Nothing was saved.",
+      "ko": "로컬 기록을 열 수 없거나 이미지 검증에 실패했습니다. 아무것도 저장하지 않았습니다.",
+      "test_id": "chat-privacy-open-failed"
+    },
+    {
+      "key": "chat.privacy.title",
+      "en": "Local history",
+      "ko": "로컬 기록",
+      "test_id": "chat-privacy-title"
+    },
+    {
+      "key": "chat.privacy.replace_saved.confirm.title",
+      "en": "Replace the in-memory conversations with saved history?",
+      "ko": "메모리의 대화를 저장된 기록으로 바꿀까요?",
+      "test_id": "chat-privacy-replace-saved-confirm-title"
+    },
+    {
+      "key": "chat.privacy.replace_saved.confirm.body",
+      "en": "The conversations in memory are discarded and replaced by the saved history. Export current conversations first if needed.",
+      "ko": "메모리의 대화는 삭제되고 저장된 기록으로 대체됩니다. 필요하면 먼저 현재 대화를 내보내세요.",
+      "test_id": "chat-privacy-replace-saved-confirm-body"
+    },
+    {
+      "key": "chat.privacy.replace_saved.confirm",
+      "en": "Replace with saved history",
+      "ko": "저장된 기록으로 바꾸기",
+      "test_id": "chat-privacy-replace-saved-confirm"
+    },
+    {
+      "key": "chat.privacy.clear.confirm.title",
+      "en": "Delete all in-memory and saved conversations for this browser origin?",
+      "ko": "이 브라우저 origin의 메모리 대화와 저장된 대화를 모두 삭제할까요?",
+      "test_id": "chat-privacy-clear-confirm-title"
+    },
+    {
+      "key": "chat.privacy.clear.confirm",
+      "en": "Delete all history",
+      "ko": "모든 기록 삭제",
+      "test_id": "chat-privacy-clear-confirm"
+    },
+    {
+      "key": "chat.privacy.replace_import.confirm.title",
+      "en": "Replace the current conversations with validated imported history?",
+      "ko": "현재 대화를 검증된 가져온 기록으로 바꿀까요?",
+      "test_id": "chat-privacy-replace-import-confirm-title"
+    },
+    {
+      "key": "chat.privacy.replace_import.confirm.body",
+      "en": "The current conversations are discarded and replaced by the imported history. Export current conversations first if needed.",
+      "ko": "현재 대화는 삭제되고 가져온 기록으로 대체됩니다. 필요하면 먼저 현재 대화를 내보내세요.",
+      "test_id": "chat-privacy-replace-import-confirm-body"
+    },
+    {
+      "key": "chat.privacy.replace_import.confirm",
+      "en": "Replace with imported history",
+      "ko": "가져온 기록으로 바꾸기",
+      "test_id": "chat-privacy-replace-import-confirm"
+    },
+    {
+      "key": "settings.server.privacy.title",
+      "en": "Privacy · browser only",
+      "ko": "개인정보 · 브라우저 전용",
+      "test_id": "settings-server-privacy-title"
+    },
+    {
+      "key": "settings.server.privacy.body",
+      "en": "Appearance and explicitly saved load profiles use this browser’s preferences. Request defaults stay in memory; API credentials and system prompts are never stored by Settings. Conversation history is controlled separately in Chat.",
+      "ko": "모양과 명시적으로 저장한 로드 프로필은 브라우저 환경설정을 사용합니다. 요청 기본값은 메모리에만 유지하며 API 자격 증명과 시스템 프롬프트는 설정에서 저장하지 않습니다. 대화 기록은 채팅에서 별도로 관리합니다.",
+      "test_id": "settings-server-privacy-body"
+    },
+    {
+      "key": "settings.server.unavailable.title",
+      "en": "Server controls unavailable",
+      "ko": "서버 제어 사용 불가",
+      "test_id": "settings-server-unavailable-title"
+    },
+    {
+      "key": "settings.server.unavailable.body",
+      "en": "Connect from Models or Chat, or refresh the connection before changing server settings. Browser appearance and request defaults remain available. Schema mismatch disables server controls.",
+      "ko": "모델이나 채팅에서 연결하거나 연결을 새로 고친 후 서버 설정을 변경하세요. 브라우저 모양과 요청 기본값은 계속 사용할 수 있습니다. 스키마 불일치 시 서버 제어가 비활성화됩니다.",
+      "test_id": "settings-server-unavailable-body"
+    },
+    {
+      "key": "settings.server.model",
+      "en": "Selected model for settings",
+      "ko": "설정 대상 모델",
+      "test_id": "settings-server-model"
+    },
+    {
+      "key": "settings.server.model.none",
+      "en": "No model selected",
+      "ko": "선택한 모델 없음",
+      "test_id": "settings-server-model-none"
+    },
+    {
+      "key": "settings.server.model.hint",
+      "en": "Selection changes browser context only. It never loads, unloads or reroutes an existing request.",
+      "ko": "선택은 브라우저 문맥만 변경하며 모델을 로드하거나 언로드하거나 기존 요청의 대상을 변경하지 않습니다.",
+      "test_id": "settings-server-model-hint"
+    },
+    {
+      "key": "settings.server.context.title",
+      "en": "Effective context · observed, not estimated",
+      "ko": "실제 컨텍스트 · 추정이 아닌 관측값",
+      "test_id": "settings-server-context-title"
+    },
+    {
+      "key": "settings.server.context.n_ctx",
+      "en": "Per-slot context tokens (/props n_ctx)",
+      "ko": "슬롯별 컨텍스트 토큰 (/props n_ctx)",
+      "test_id": "settings-server-context-n-ctx"
+    },
+    {
+      "key": "settings.server.context.n_ctx_hint",
+      "en": "Zero/missing is unknown; do not multiply this value into a shared-pool capacity. Unified KV remains separate work (#1815).",
+      "ko": "0 또는 누락은 알 수 없음입니다. 이 값에 슬롯 수를 곱해 공유 풀 용량으로 간주하지 않습니다. 통합 KV는 별도 작업입니다 (#1815).",
+      "test_id": "settings-server-context-n-ctx-hint"
+    },
+    {
+      "key": "settings.server.context.slots",
+      "en": "Configured slots (/props total_slots)",
+      "ko": "설정된 슬롯 (/props total_slots)",
+      "test_id": "settings-server-context-slots"
+    },
+    {
+      "key": "settings.server.context.kv_mode",
+      "en": "Active resolved KV cache mode (/props)",
+      "ko": "현재 실제 KV 캐시 모드 (/props)",
+      "test_id": "settings-server-context-kv-mode"
+    },
+    {
+      "key": "settings.server.context.geometry",
+      "en": "Reported context geometry",
+      "ko": "보고된 컨텍스트 구성",
+      "test_id": "settings-server-context-geometry"
+    },
+    {
+      "key": "settings.server.context.geometry_unknown",
+      "en": "Unknown / props disabled or unavailable",
+      "ko": "알 수 없음 / props 비활성화 또는 사용 불가",
+      "test_id": "settings-server-context-geometry-unknown"
+    },
+    {
+      "key": "settings.server.unknown",
+      "en": "Unknown",
+      "ko": "알 수 없음",
+      "test_id": "settings-server-unknown"
+    },
+    {
+      "key": "settings.server.no_model.title",
+      "en": "No ready model selected",
+      "ko": "준비된 모델이 선택되지 않음",
+      "test_id": "settings-server-no-model-title"
+    },
+    {
+      "key": "settings.server.no_model.body",
+      "en": "Selection never loads a model. Load explicitly from Models to read live settings.",
+      "ko": "모델 선택은 로드를 수행하지 않습니다. 모델 화면에서 명시적으로 로드하여 실시간 설정을 확인하세요.",
+      "test_id": "settings-server-no-model-body"
+    },
+    {
+      "key": "settings.server.live_disabled.title",
+      "en": "Live settings disabled by operator",
+      "ko": "운영자가 실시간 설정을 비활성화함",
+      "test_id": "settings-server-live-disabled-title"
+    },
+    {
+      "key": "settings.server.live_disabled.body",
+      "en": "Restart with --settings to enable this endpoint. WebUI never enables settings, props, metrics or slots implicitly.",
+      "ko": "엔드포인트를 활성화하려면 --settings로 재시작하세요. WebUI는 settings, props, metrics 또는 slots를 자동으로 활성화하지 않습니다.",
+      "test_id": "settings-server-live-disabled-body"
+    },
+    {
+      "key": "settings.generation.title",
+      "en": "Generation · next request",
+      "ko": "생성 · 다음 요청",
+      "test_id": "settings-generation-title"
+    },
+    {
+      "key": "settings.generation.body",
+      "en": "These defaults stay in browser memory only. Blank fields are omitted and inherit server defaults. Existing turns are frozen; changing defaults never alters an in-flight request. System prompts belong to individual conversations in Chat and are not stored here.",
+      "ko": "기본값은 브라우저 메모리에만 남습니다. 빈 필드는 생략되어 서버 기본값을 사용합니다. 진행 중인 요청은 변경되지 않습니다. 시스템 프롬프트는 채팅의 개별 대화에서 설정하며 여기에 저장하지 않습니다.",
+      "test_id": "settings-generation-body"
+    },
+    {
+      "key": "settings.generation.current",
+      "en": "Current next-request default: {value}",
+      "ko": "현재 다음 요청 기본값: {value}",
+      "test_id": "settings-generation-current"
+    },
+    {
+      "key": "settings.generation.inherit",
+      "en": "inherit",
+      "ko": "상속",
+      "test_id": "settings-generation-inherit"
+    },
+    {
+      "key": "settings.generation.invalid",
+      "en": "Invalid defaults",
+      "ko": "잘못된 기본값",
+      "test_id": "settings-generation-invalid"
+    },
+    {
+      "key": "settings.generation.error_title",
+      "en": "Invalid request defaults",
+      "ko": "잘못된 요청 기본값",
+      "test_id": "settings-generation-error-title"
+    },
+    {
+      "key": "settings.generation.save",
+      "en": "Save session defaults",
+      "ko": "세션 기본값 저장",
+      "test_id": "settings-generation-save"
+    },
+    {
+      "key": "settings.generation.reset_open",
+      "en": "Reset request defaults…",
+      "ko": "요청 기본값 초기화…",
+      "test_id": "settings-generation-reset-open"
+    },
+    {
+      "key": "settings.generation.reasoning_label",
+      "en": "Reasoning / structured output",
+      "ko": "추론 / 구조화 출력",
+      "test_id": "settings-generation-reasoning-label"
+    },
+    {
+      "key": "settings.generation.reasoning_value",
+      "en": "Endpoint-specific controls are available only where explicitly supported in Chat.",
+      "ko": "채팅에서 명시적으로 지원되는 엔드포인트에만 제공됩니다.",
+      "test_id": "settings-generation-reasoning-value"
+    },
+    {
+      "key": "settings.generation.reasoning_hint",
+      "en": "No unsupported parameters are sent.",
+      "ko": "지원되지 않는 매개변수는 전송하지 않습니다.",
+      "test_id": "settings-generation-reasoning-hint"
+    },
+    {
+      "key": "settings.generation.reset.title",
+      "en": "Reset request defaults?",
+      "ko": "요청 기본값을 초기화할까요?",
+      "test_id": "settings-generation-reset-title"
+    },
+    {
+      "key": "settings.generation.reset.body",
+      "en": "Only browser-session request defaults will be cleared. Server and next-load profiles remain unchanged.",
+      "ko": "브라우저 세션 요청 기본값만 지워집니다. 서버와 다음 로드 프로필은 변경되지 않습니다.",
+      "test_id": "settings-generation-reset-body"
+    },
+    {
+      "key": "settings.generation.reset.confirm",
+      "en": "Reset request defaults",
+      "ko": "요청 기본값 초기화",
+      "test_id": "settings-generation-reset-confirm"
+    },
+    {
+      "key": "settings.live.title",
+      "en": "Loaded model · live server values",
+      "ko": "로드된 모델 · 실시간 서버 값",
+      "test_id": "settings-live-title"
+    },
+    {
+      "key": "settings.live.body",
+      "en": "Changes affect newly admitted requests. Fingerprints detect already-observed external changes, not atomic compare-and-swap. Numeric bounds remain enforced by the server; this schema publishes types and allowed enums, not numeric min/max.",
+      "ko": "변경은 새로 수락되는 요청에 적용됩니다. 지문은 관측된 외부 변경을 감지하지만 원자적 비교 교환은 아닙니다. 숫자 범위는 서버가 검증합니다. 스키마에는 타입과 허용 열거값만 있습니다.",
+      "test_id": "settings-live-body"
+    },
+    {
+      "key": "settings.live.unavailable",
+      "en": "Settings unavailable. The server may have disabled --settings.",
+      "ko": "설정을 사용할 수 없습니다. 서버에서 --settings가 비활성화되었을 수 있습니다.",
+      "test_id": "settings-live-unavailable"
+    },
+    {
+      "key": "settings.live.refreshed",
+      "en": "Current values refreshed. Review the retained draft before applying.",
+      "ko": "현재 값을 새로 고쳤습니다. 남아 있는 초안을 검토한 후 적용하세요.",
+      "test_id": "settings-live-refreshed"
+    },
+    {
+      "key": "settings.live.refresh_failed",
+      "en": "Refresh failed. No changes submitted.",
+      "ko": "새로 고침에 실패했습니다. 변경 사항은 전송되지 않았습니다.",
+      "test_id": "settings-live-refresh-failed"
+    },
+    {
+      "key": "settings.live.invalid_value",
+      "en": "Invalid value",
+      "ko": "잘못된 값",
+      "test_id": "settings-live-invalid-value"
+    },
+    {
+      "key": "settings.live.conflict",
+      "en": "Another client changed these settings. Current values refreshed; review and Apply again to reconfirm.",
+      "ko": "다른 클라이언트가 설정을 변경했습니다. 갱신된 현재 값을 검토하고 다시 적용하여 확인하세요.",
+      "test_id": "settings-live-conflict"
+    },
+    {
+      "key": "settings.live.partial",
+      "en": "{applied} applied; {rejected} rejected. Rejected drafts retained.",
+      "ko": "{applied}개 적용, {rejected}개 거부됨. 거부된 초안은 유지됩니다.",
+      "test_id": "settings-live-partial"
+    },
+    {
+      "key": "settings.live.applied",
+      "en": "Accepted fields applied; reading effective values.",
+      "ko": "승인된 필드를 적용했습니다. 실제 값을 다시 읽습니다.",
+      "test_id": "settings-live-applied"
+    },
+    {
+      "key": "settings.live.unknown_outcome",
+      "en": "The outcome may be unknown. Refresh effective values before retrying; no automatic PATCH retry.",
+      "ko": "결과를 확정할 수 없습니다. 재시도 전에 실제 값을 새로 고치세요. PATCH는 자동 재시도하지 않습니다.",
+      "test_id": "settings-live-unknown-outcome"
+    },
+    {
+      "key": "settings.live.result_title",
+      "en": "Settings result",
+      "ko": "설정 결과",
+      "test_id": "settings-live-result-title"
+    },
+    {
+      "key": "settings.live.refresh",
+      "en": "Refresh current values",
+      "ko": "현재 값 새로 고침",
+      "test_id": "settings-live-refresh"
+    },
+    {
+      "key": "settings.live.apply",
+      "en": "Apply live draft",
+      "ko": "실시간 초안 적용",
+      "test_id": "settings-live-apply"
+    },
+    {
+      "key": "settings.live.reset_open",
+      "en": "Reset live draft…",
+      "ko": "실시간 초안 초기화…",
+      "test_id": "settings-live-reset-open"
+    },
+    {
+      "key": "settings.live.hint",
+      "en": "{help} Current: {current}. Type: {type}",
+      "ko": "{help} 현재: {current}. 타입: {type}",
+      "test_id": "settings-live-hint"
+    },
+    {
+      "key": "settings.live.hint_allowed",
+      "en": "{help} Current: {current}. Type: {type}; allowed: {allowed}",
+      "ko": "{help} 현재: {current}. 타입: {type}; 허용: {allowed}",
+      "test_id": "settings-live-hint-allowed"
+    },
+    {
+      "key": "settings.live.startup",
+      "en": "Server startup · restart required (read-only)",
+      "ko": "서버 시작 · 재시작 필요 (읽기 전용)",
+      "test_id": "settings-live-startup"
+    },
+    {
+      "key": "settings.live.reset.title",
+      "en": "Reset live draft only?",
+      "ko": "실시간 초안만 초기화할까요?",
+      "test_id": "settings-live-reset-title"
+    },
+    {
+      "key": "settings.live.reset.body",
+      "en": "Stage server startup defaults for mutable fields. No server change occurs until Apply.",
+      "ko": "변경 가능한 필드에 서버 시작 기본값을 초안으로 설정합니다. 적용 전에는 서버가 변경되지 않습니다.",
+      "test_id": "settings-live-reset-body"
+    },
+    {
+      "key": "settings.live.reset.confirm",
+      "en": "Reset draft",
+      "ko": "초안 초기화",
+      "test_id": "settings-live-reset-confirm"
+    },
+    {
+      "key": "settings.profile.title",
+      "en": "Next load · browser profile",
+      "ko": "다음 로드 · 브라우저 프로필",
+      "test_id": "settings-profile-title"
+    },
+    {
+      "key": "settings.profile.body",
+      "en": "Explicit CLI settings take precedence over this profile; the profile overrides a preset only where CLI has not pinned a value. Effective resolved values must be read after loading. Saving is not loading. A loaded model requires an explicit unload and load from Models; failed loads retain this pending profile.",
+      "ko": "명시적 CLI 설정이 프로필보다 우선합니다. CLI로 고정되지 않은 값에만 프로필이 프리셋보다 우선합니다. 실제 값은 로드 후 확인하세요. 저장은 로드가 아닙니다. 로드된 모델은 모델 화면에서 명시적으로 언로드 후 로드해야 하며, 실패 시 프로필은 대기 상태로 남습니다.",
+      "test_id": "settings-profile-body"
+    },
+    {
+      "key": "settings.profile.saved",
+      "en": "Browser profile saved. Nothing loaded or changed on the server.",
+      "ko": "브라우저 프로필을 저장했습니다. 서버에서 로드하거나 변경한 내용은 없습니다.",
+      "test_id": "settings-profile-saved"
+    },
+    {
+      "key": "settings.profile.failed",
+      "en": "Profile operation failed",
+      "ko": "프로필 작업에 실패했습니다",
+      "test_id": "settings-profile-failed"
+    },
+    {
+      "key": "settings.profile.single.title",
+      "en": "Single-model mode: restart required",
+      "ko": "단일 모델 모드: 재시작 필요",
+      "test_id": "settings-profile-single-title"
+    },
+    {
+      "key": "settings.profile.single.body",
+      "en": "These preferences cannot be applied to this running worker. Restart with validated CLI flags, or start model-free mode to use load operations.",
+      "ko": "실행 중인 워커에 적용할 수 없습니다. 검증된 CLI 플래그로 재시작하거나 모델 없는 모드에서 로드 작업을 사용하세요.",
+      "test_id": "settings-profile-single-body"
+    },
+    {
+      "key": "settings.profile.scope",
+      "en": "Profile scope",
+      "ko": "프로필 범위",
+      "test_id": "settings-profile-scope"
+    },
+    {
+      "key": "settings.profile.scope.reusable",
+      "en": "Reusable defaults",
+      "ko": "재사용 기본값",
+      "test_id": "settings-profile-scope-reusable"
+    },
+    {
+      "key": "settings.profile.ctx_hint",
+      "en": "Blank: inherit. Actual per-slot context is resolved by the server, not estimated here.",
+      "ko": "빈 값: 상속. 슬롯별 실제 컨텍스트는 서버가 결정하며 여기서 추정하지 않습니다.",
+      "test_id": "settings-profile-ctx-hint"
+    },
+    {
+      "key": "settings.profile.parallel_hint",
+      "en": "Scheduler/worker geometry changes only on the next explicit load.",
+      "ko": "스케줄러/워커 구성은 다음 명시적 로드에서만 변경됩니다.",
+      "test_id": "settings-profile-parallel-hint"
+    },
+    {
+      "key": "settings.profile.inherit",
+      "en": "Inherit",
+      "ko": "상속",
+      "test_id": "settings-profile-inherit"
+    },
+    {
+      "key": "settings.profile.restrictions",
+      "en": "Backend/model restrictions are validated by the existing loader; accepting a browser profile does not promise a model supports every mode. Draft models, adapters, distributed topology and other worker geometry are read-only in v1.",
+      "ko": "백엔드/모델 제약은 기존 로더가 검증합니다. 브라우저 프로필 저장이 모든 모드의 지원을 보장하지 않습니다. 초안 모델, 어댑터, 분산 구성 및 기타 워커 설정은 v1에서 읽기 전용입니다.",
+      "test_id": "settings-profile-restrictions"
+    },
+    {
+      "key": "settings.profile.result_title",
+      "en": "Profile result",
+      "ko": "프로필 결과",
+      "test_id": "settings-profile-result-title"
+    },
+    {
+      "key": "settings.profile.save",
+      "en": "Save pending profile",
+      "ko": "대기 프로필 저장",
+      "test_id": "settings-profile-save"
+    },
+    {
+      "key": "settings.profile.discard",
+      "en": "Discard draft",
+      "ko": "초안 취소",
+      "test_id": "settings-profile-discard"
+    },
+    {
+      "key": "settings.profile.reset_open",
+      "en": "Reset selected profile…",
+      "ko": "선택 프로필 초기화…",
+      "test_id": "settings-profile-reset-open"
+    },
+    {
+      "key": "settings.profile.saved_pending",
+      "en": "Saved pending profile (not active)",
+      "ko": "저장된 대기 프로필 (미적용)",
+      "test_id": "settings-profile-saved-pending"
+    },
+    {
+      "key": "settings.profile.cli",
+      "en": "Sanitized CLI flags · display only; model source omitted",
+      "ko": "안전한 CLI 플래그 · 표시 전용; 모델 소스 생략",
+      "test_id": "settings-profile-cli"
+    },
+    {
+      "key": "settings.profile.transfer",
+      "en": "Import / export browser profiles",
+      "ko": "브라우저 프로필 가져오기 / 내보내기",
+      "test_id": "settings-profile-transfer"
+    },
+    {
+      "key": "settings.profile.transfer.label",
+      "en": "Versioned profile JSON",
+      "ko": "버전이 있는 프로필 JSON",
+      "test_id": "settings-profile-transfer-label"
+    },
+    {
+      "key": "settings.profile.transfer.export",
+      "en": "Export to text",
+      "ko": "텍스트로 내보내기",
+      "test_id": "settings-profile-transfer-export"
+    },
+    {
+      "key": "settings.profile.transfer.import",
+      "en": "Validate and import",
+      "ko": "검증 후 가져오기",
+      "test_id": "settings-profile-transfer-import"
+    },
+    {
+      "key": "settings.profile.reset.title",
+      "en": "Reset this browser profile?",
+      "ko": "이 브라우저 프로필을 초기화할까요?",
+      "test_id": "settings-profile-reset-title"
+    },
+    {
+      "key": "settings.profile.reset.body",
+      "en": "Resets only the selected scope. Model scope falls back to reusable defaults; reusable scope leaves model-specific profiles intact. Does not change a running worker.",
+      "ko": "선택한 범위만 초기화합니다. 모델 범위는 재사용 기본값으로 돌아가며 재사용 범위는 모델별 프로필을 유지합니다. 실행 중인 워커는 변경하지 않습니다.",
+      "test_id": "settings-profile-reset-body"
+    },
+    {
+      "key": "settings.profile.reset.confirm",
+      "en": "Reset profile",
+      "ko": "프로필 초기화",
+      "test_id": "settings-profile-reset-confirm"
+    },
+    {
+      "key": "settings.context_check.label",
+      "en": "Optional raw prompt budget check",
+      "ko": "선택적 원시 프롬프트 예산 확인",
+      "test_id": "settings-context-check-label"
+    },
+    {
+      "key": "settings.context_check.hint",
+      "en": "Sent only when Check is pressed; never persisted. Raw tokens exclude chat templates, conversation history and media. Server validation is final.",
+      "ko": "확인을 누를 때만 전송하며 저장하지 않습니다. 원시 토큰은 채팅 템플릿, 대화 기록, 미디어를 제외합니다. 최종 검증은 서버가 수행합니다.",
+      "test_id": "settings-context-check-hint"
+    },
+    {
+      "key": "settings.context_check.check",
+      "en": "Check with model tokenizer",
+      "ko": "모델 토크나이저로 확인",
+      "test_id": "settings-context-check-check"
+    },
+    {
+      "key": "settings.context_check.unavailable",
+      "en": "Tokenization unavailable; budget unknown.",
+      "ko": "토큰화 불가; 예산을 알 수 없습니다.",
+      "test_id": "settings-context-check-unavailable"
+    },
+    {
+      "key": "settings.context_check.not_measured",
+      "en": "Not measured",
+      "ko": "측정하지 않음",
+      "test_id": "settings-context-check-not-measured"
+    },
+    {
+      "key": "settings.context_check.count",
+      "en": "{count} raw tokens. {verdict}",
+      "ko": "{count} 원시 토큰. {verdict}",
+      "test_id": "settings-context-check-count"
+    },
+    {
+      "key": "settings.context_check.exceeds",
+      "en": "Raw input + requested output already exceeds observed context.",
+      "ko": "원시 입력 + 요청 출력이 관측 컨텍스트를 초과합니다.",
+      "test_id": "settings-context-check-exceeds"
+    },
+    {
+      "key": "settings.context_check.unknown",
+      "en": "Context/output is unknown; no fit claim.",
+      "ko": "컨텍스트/출력을 알 수 없어 수용 가능 여부를 판단하지 않습니다.",
+      "test_id": "settings-context-check-unknown"
+    },
+    {
+      "key": "settings.context_check.fits",
+      "en": "Raw input + output fits, but templated chat may still exceed the context.",
+      "ko": "원시 입력 + 출력은 들어가지만 템플릿 적용 채팅은 컨텍스트를 초과할 수 있습니다.",
+      "test_id": "settings-context-check-fits"
+    },
+    {
+      "key": "activity.intro",
+      "en": "Operations and runtime observations. Browsing never loads a model.",
+      "ko": "작업과 런타임 관측입니다. 조회는 모델을 로드하지 않습니다.",
+      "test_id": "activity-intro"
+    },
+    {
+      "key": "activity.session",
+      "en": "History belongs to this server session: up to 200 terminal operations for one hour. A restart clears it; reconnect reconciles the authoritative snapshot.",
+      "ko": "기록은 서버 세션에 속합니다. 완료 작업 최대 200개를 한 시간 보관하며, 재시작 시 초기화하고 재연결 시 서버 상태와 대조합니다.",
+      "test_id": "activity-session"
+    },
+    {
+      "key": "activity.export",
+      "en": "Export sanitized diagnostics",
+      "ko": "민감 정보 없는 진단 내보내기",
+      "test_id": "activity-export"
+    },
+    {
+      "key": "activity.refresh",
+      "en": "Refresh observations",
+      "ko": "관측 새로고침",
+      "test_id": "activity-refresh"
+    },
+    {
+      "key": "activity.stale",
+      "en": "Observations are stale. Last values are not current measurements.",
+      "ko": "관측이 최신 상태가 아닙니다. 마지막 값은 현재 측정값이 아닙니다.",
+      "test_id": "activity-stale"
+    },
+    {
+      "key": "activity.updated",
+      "en": "Last successful snapshot",
+      "ko": "마지막 성공 스냅샷",
+      "test_id": "activity-updated"
+    },
+    {
+      "key": "activity.pending",
+      "en": "Waiting for the first snapshot",
+      "ko": "첫 스냅샷을 기다리는 중",
+      "test_id": "activity-pending"
+    },
+    {
+      "key": "activity.operations",
+      "en": "Operations",
+      "ko": "작업",
+      "test_id": "activity-operations"
+    },
+    {
+      "key": "activity.operations.counts",
+      "en": "Operations: {active} active · {failed} failed",
+      "ko": "작업: {active} 진행 중 · {failed} 실패",
+      "test_id": "activity-operations-counts"
+    },
+    {
+      "key": "activity.operations.empty.title",
+      "en": "No operations in this session",
+      "ko": "이 세션의 작업 없음",
+      "test_id": "activity-operations-empty-title"
+    },
+    {
+      "key": "activity.operations.empty.body",
+      "en": "Explicit downloads, loads, drains and removals will appear here.",
+      "ko": "명시적인 다운로드, 로드, 드레인 및 삭제 작업이 표시됩니다.",
+      "test_id": "activity-operations-empty-body"
+    },
+    {
+      "key": "activity.cancel",
+      "en": "Request cancellation",
+      "ko": "취소 요청",
+      "test_id": "activity-cancel"
+    },
+    {
+      "key": "activity.cancelling",
+      "en": "Cancellation requested; waiting for worker acknowledgement.",
+      "ko": "취소 요청됨. 작업자 확인을 기다립니다.",
+      "test_id": "activity-cancelling"
+    },
+    {
+      "key": "activity.failure",
+      "en": "The action failed. Check its state and refresh before retrying from Models.",
+      "ko": "작업에 실패했습니다. 상태를 확인하고 새로고침한 후 모델 화면에서 재시도하세요.",
+      "test_id": "activity-failure"
+    },
+    {
+      "key": "activity.cancel_failed",
+      "en": "Cancellation could not be confirmed. Refresh to reconcile the operation.",
+      "ko": "취소를 확인하지 못했습니다. 새로고침하여 작업 상태를 대조하세요.",
+      "test_id": "activity-cancel-failed"
+    },
+    {
+      "key": "activity.cancel_unsupported",
+      "en": "Cancellation is unavailable for this operation; worker execution is not interrupted.",
+      "ko": "이 작업은 취소할 수 없습니다. 실행 중인 작업자를 강제로 중단하지 않습니다.",
+      "test_id": "activity-cancel-unsupported"
+    },
+    {
+      "key": "activity.runtime",
+      "en": "Selected model runtime",
+      "ko": "선택한 모델 런타임",
+      "test_id": "activity-runtime"
+    },
+    {
+      "key": "activity.select",
+      "en": "Select a model to observe",
+      "ko": "관측할 모델 선택",
+      "test_id": "activity-select"
+    },
+    {
+      "key": "activity.select_body",
+      "en": "Use the model picker. Selection does not load the model.",
+      "ko": "모델 선택기를 사용하세요. 선택만으로 모델을 로드하지 않습니다.",
+      "test_id": "activity-select-body"
+    },
+    {
+      "key": "activity.unavailable",
+      "en": "N/A — no authoritative sample is available.",
+      "ko": "N/A — 확인된 관측값이 없습니다.",
+      "test_id": "activity-unavailable"
+    },
+    {
+      "key": "activity.not_available",
+      "en": "N/A",
+      "ko": "N/A",
+      "test_id": "activity-not-available"
+    },
+    {
+      "key": "activity.memory",
+      "en": "Memory figures have separate scopes and may overlap. Do not add process, allocator, device and cache values together.",
+      "ko": "메모리 수치는 서로 다른 범위이며 중복될 수 있습니다. 프로세스, 할당자, 장치 및 캐시 값을 합산하지 마세요.",
+      "test_id": "activity-memory"
+    },
+    {
+      "key": "activity.timing",
+      "en": "Server counters are not browser TTFT. Chat shows request-send to first reasoning/content delta separately; no rendered word counts are used as tokens.",
+      "ko": "서버 카운터는 브라우저 TTFT가 아닙니다. 채팅은 요청 전송부터 첫 추론/내용 델타까지 별도로 표시하며, 단어 수를 토큰으로 사용하지 않습니다.",
+      "test_id": "activity-timing"
+    },
+    {
+      "key": "activity.slots",
+      "en": "Request slots",
+      "ko": "요청 슬롯",
+      "test_id": "activity-slots"
+    },
+    {
+      "key": "activity.slot",
+      "en": "Slot",
+      "ko": "슬롯",
+      "test_id": "activity-slot"
+    },
+    {
+      "key": "activity.processing",
+      "en": "Processing",
+      "ko": "처리 중",
+      "test_id": "activity-processing"
+    },
+    {
+      "key": "activity.idle",
+      "en": "Idle",
+      "ko": "유휴",
+      "test_id": "activity-idle"
+    },
+    {
+      "key": "activity.context",
+      "en": "Request context window",
+      "ko": "요청 컨텍스트 한도",
+      "test_id": "activity-context"
+    },
+    {
+      "key": "activity.pool",
+      "en": "Shared pool context",
+      "ko": "공유 풀 컨텍스트",
+      "test_id": "activity-pool"
+    },
+    {
+      "key": "activity.parallel",
+      "en": "Effective parallelism",
+      "ko": "실제 병렬도",
+      "test_id": "activity-parallel"
+    },
+    {
+      "key": "activity.context_line",
+      "en": "{context}: {request} tokens · {pool}: {shared} tokens",
+      "ko": "{context}: {request} 토큰 · {pool}: {shared} 토큰",
+      "test_id": "activity-context-line"
+    },
+    {
+      "key": "activity.no_context",
+      "en": "N/A — context denominator is unknown; no occupancy percentage is inferred.",
+      "ko": "N/A — 컨텍스트 분모를 알 수 없어 점유율을 추정하지 않습니다.",
+      "test_id": "activity-no-context"
+    },
+    {
+      "key": "activity.slot_progress",
+      "en": "{used} / {total} tokens",
+      "ko": "{used} / {total} 토큰",
+      "test_id": "activity-slot-progress"
+    },
+    {
+      "key": "activity.slot_tokens",
+      "en": "Accepted decode: {decoded} tokens · Cached prompt: {cached} tokens",
+      "ko": "수락된 디코드: {decoded} 토큰 · 캐시된 프롬프트: {cached} 토큰",
+      "test_id": "activity-slot-tokens"
+    },
+    {
+      "key": "activity.history.show",
+      "en": "Show recent history",
+      "ko": "최근 기록 보기",
+      "test_id": "activity-history-show"
+    },
+    {
+      "key": "activity.history.hide",
+      "en": "Hide recent history",
+      "ko": "최근 기록 숨기기",
+      "test_id": "activity-history-hide"
+    },
+    {
+      "key": "activity.history.note",
+      "en": "Five-minute in-memory history, at most 150 two-second samples. Hidden tabs stop observation; gaps and counter resets are not interpolated.",
+      "ko": "메모리 내 5분 기록이며 2초 간격 최대 150개입니다. 숨겨진 탭은 관측을 중지합니다. 공백과 카운터 초기화를 보간하지 않습니다.",
+      "test_id": "activity-history-note"
+    },
+    {
+      "key": "activity.chart.label",
+      "en": "Active requests: discrete observations over the last five minutes",
+      "ko": "활성 요청: 최근 5분 동안의 개별 관측값",
+      "test_id": "activity-chart-label"
+    },
+    {
+      "key": "activity.chart.title",
+      "en": "Active requests (requests, selected model)",
+      "ko": "활성 요청 (요청 수, 선택한 모델)",
+      "test_id": "activity-chart-title"
+    },
+    {
+      "key": "activity.chart.point",
+      "en": "{value} requests",
+      "ko": "요청 {value}개",
+      "test_id": "activity-chart-point"
+    },
+    {
+      "key": "activity.scope",
+      "en": "Scope",
+      "ko": "범위",
+      "test_id": "activity-scope"
+    },
+    {
+      "key": "activity.observed",
+      "en": "Observed at",
+      "ko": "관측 시각",
+      "test_id": "activity-observed"
+    },
+    {
+      "key": "activity.metric_details",
+      "en": "All measurements and sources",
+      "ko": "전체 측정값과 출처",
+      "test_id": "activity-metric-details"
+    },
+    {
+      "key": "activity.unavailable_count",
+      "en": "Unavailable measurements",
+      "ko": "사용할 수 없는 측정값",
+      "test_id": "activity-unavailable-count"
+    },
+    {
+      "key": "activity.unavailable_reason",
+      "en": "Some sources are disabled or do not publish an authoritative sample. Expand details for individual reasons.",
+      "ko": "일부 출처가 비활성화되었거나 확인된 관측값을 제공하지 않습니다. 상세 내용을 펼쳐 개별 사유를 확인하세요.",
+      "test_id": "activity-unavailable-reason"
+    },
+    {
+      "key": "activity.no_primary",
+      "en": "No primary request counters are available.",
+      "ko": "사용 가능한 주요 요청 카운터가 없습니다.",
+      "test_id": "activity-no-primary"
+    },
+    {
+      "key": "activity.bytes",
+      "en": "bytes downloaded",
+      "ko": "다운로드 바이트",
+      "test_id": "activity-bytes"
+    },
+    {
+      "key": "activity.download_progress",
+      "en": "{completed} / {total} bytes",
+      "ko": "{completed} / {total} 바이트",
+      "test_id": "activity-download-progress"
+    },
+    {
+      "key": "activity.details",
+      "en": "Operation details",
+      "ko": "작업 상세",
+      "test_id": "activity-details"
+    },
+    {
+      "key": "activity.status",
+      "en": "Operation status",
+      "ko": "작업 상태",
+      "test_id": "activity-status"
+    },
+    {
+      "key": "activity.unknown_time",
+      "en": "Unknown",
+      "ko": "알 수 없음",
+      "test_id": "activity-unknown-time"
+    },
+    {
+      "key": "activity.metric.active_requests",
+      "en": "Active requests",
+      "ko": "활성 요청",
+      "test_id": "activity-metric-active-requests"
+    },
+    {
+      "key": "activity.metric.queued_requests",
+      "en": "Queued requests",
+      "ko": "대기 요청",
+      "test_id": "activity-metric-queued-requests"
+    },
+    {
+      "key": "activity.metric.completed_requests_total",
+      "en": "Total completed requests",
+      "ko": "누적 완료 요청",
+      "test_id": "activity-metric-completed-requests-total"
+    },
+    {
+      "key": "activity.metric.completion_tokens_total",
+      "en": "Total completion tokens",
+      "ko": "누적 완료 토큰",
+      "test_id": "activity-metric-completion-tokens-total"
+    },
+    {
+      "key": "activity.metric.gpu_utilization",
+      "en": "GPU utilization",
+      "ko": "GPU 사용률",
+      "test_id": "activity-metric-gpu-utilization"
+    },
+    {
+      "key": "activity.metric.ttft",
+      "en": "Time to first token",
+      "ko": "첫 토큰 도달 시간",
+      "test_id": "activity-metric-ttft"
+    },
+    {
+      "key": "activity.metric.decode_rate",
+      "en": "Decode rate",
+      "ko": "디코드 속도",
+      "test_id": "activity-metric-decode-rate"
+    },
+    {
+      "key": "activity.metric.process_resident_bytes",
+      "en": "Process resident memory",
+      "ko": "프로세스 상주 메모리",
+      "test_id": "activity-metric-process-resident-bytes"
+    },
+    {
+      "key": "activity.metric.allocator_active_bytes",
+      "en": "Active allocator memory",
+      "ko": "할당자 활성 메모리",
+      "test_id": "activity-metric-allocator-active-bytes"
+    },
+    {
+      "key": "activity.metric.allocator_cache_bytes",
+      "en": "Cached allocator memory",
+      "ko": "할당자 캐시 메모리",
+      "test_id": "activity-metric-allocator-cache-bytes"
+    },
+    {
+      "key": "activity.metric.allocator_peak_bytes",
+      "en": "Peak allocator memory",
+      "ko": "할당자 최대 메모리",
+      "test_id": "activity-metric-allocator-peak-bytes"
+    },
+    {
+      "key": "activity.metric.device_total_bytes",
+      "en": "Device memory",
+      "ko": "장치 메모리",
+      "test_id": "activity-metric-device-total-bytes"
+    },
+    {
+      "key": "activity.metric.model_weights_bytes",
+      "en": "Model weights estimate",
+      "ko": "모델 가중치 추정량",
+      "test_id": "activity-metric-model-weights-bytes"
+    },
+    {
+      "key": "activity.metric.kv_cache_bytes",
+      "en": "KV cache memory",
+      "ko": "KV 캐시 메모리",
+      "test_id": "activity-metric-kv-cache-bytes"
+    },
+    {
+      "key": "activity.metric.generation_time_ms_total",
+      "en": "Total generation time",
+      "ko": "누적 생성 시간",
+      "test_id": "activity-metric-generation-time-ms-total"
+    },
+    {
+      "key": "activity.metric.decode_tokens_total",
+      "en": "Accepted decode tokens",
+      "ko": "수락된 디코드 토큰",
+      "test_id": "activity-metric-decode-tokens-total"
+    },
+    {
+      "key": "activity.metric.decode_time_us_total",
+      "en": "Total decode time",
+      "ko": "누적 디코드 시간",
+      "test_id": "activity-metric-decode-time-us-total"
+    },
+    {
+      "key": "activity.metric.prompt_cache_bytes",
+      "en": "Prompt cache memory",
+      "ko": "프롬프트 캐시 메모리",
+      "test_id": "activity-metric-prompt-cache-bytes"
+    },
+    {
+      "key": "activity.metric.prompt_cache_entries",
+      "en": "Prompt cache entries",
+      "ko": "프롬프트 캐시 항목",
+      "test_id": "activity-metric-prompt-cache-entries"
     }
   ]
 }

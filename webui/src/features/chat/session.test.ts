@@ -19,7 +19,7 @@ describe('bounded memory-only chat session', () => {
   });
   it('refuses oversized replacements atomically without changing the active generation', () => {
     const initial = sessionGeneration();
-    expect(() => replaceConversations(Array.from({ length: 51 }, newConversation))).toThrow('memory limit');
+    expect(() => replaceConversations(Array.from({ length: 51 }, () => newConversation()))).toThrow('memory limit');
     expect(sessionGeneration()).toBe(initial);
     const conversation = newConversation(); conversation.systemPrompt = 'a'.repeat(16 * 1024 * 1024);
     expect(updateConversation(conversation)).toBe(false); expect(sessionGeneration()).toBe(initial);

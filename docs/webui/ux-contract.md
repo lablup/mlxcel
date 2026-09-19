@@ -12,7 +12,7 @@ Changing selected models never reroutes an in-flight conversation. Closing a bro
 
 Every user-facing string has a stable key, English value, Korean value and primary test ID in `tests/fixtures/webui/strings.json`. Korean copy is not optional because CJK long-name and layout tests are release gates. Destructive confirmation copy must include the model display name, source kind, consequence, and the typed confirmation token when required.
 
-Minimum destructive keys: `models.delete.confirm.title`, `models.delete.confirm.body`, `models.delete.confirm.token_label`, `models.unload.confirm.body`, `downloads.cancel.confirm.body`, `settings.clear_history.confirm.body`. Error copy must distinguish stale revision, unsupported action, authorization failure, offline/reset, partial settings success, deletion refusal, and indeterminate download progress.
+Minimum destructive keys: `models.delete.confirm.title`, `models.delete.confirm.body`, `models.delete.confirm.token_label`, `models.unload.confirm.body`, `downloads.cancel.confirm.body`, `settings.clear_history.confirm.body` (rendered by Chat's Clear All dialog), plus Chat's `chat.transcript.edit.confirm.body`, `chat.privacy.replace_saved.confirm.body` and `chat.privacy.replace_import.confirm.body`. Confirmations render through `ConfirmDialog` in `webui/src/design-system/primitives.tsx`; `webui/src/i18n/drift.test.ts` rejects `window.confirm`, `window.alert`, `window.prompt` and inline `locale === 'ko'` copy branches anywhere in `webui/src`. Error copy must distinguish stale revision, unsupported action, authorization failure, offline/reset, partial settings success, deletion refusal, and indeterminate download progress.
 
 ## Keyboard and accessibility
 

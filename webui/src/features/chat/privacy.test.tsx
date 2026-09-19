@@ -19,7 +19,7 @@ function deferred<T>() {
 }
 function Harness({ busy = false }: { busy?: boolean }): React.JSX.Element {
   const [pending, setPending] = useState(false);
-  return <><button data-testid="send" disabled={busy || pending}>Send</button><HistoryControls conversations={[]} busy={busy} onPending={setPending} limits={limits} onReplace={replace} /></>;
+  return <><button data-testid="send" disabled={busy || pending}>Send</button><HistoryControls conversations={[]} busy={busy} onPending={setPending} limits={limits} onReplace={replace} locale="en" /></>;
 }
 function input(): HTMLInputElement {
   const element = host.querySelector<HTMLInputElement>('input[type="file"]');
@@ -31,6 +31,11 @@ function button(text: string): HTMLButtonElement {
   if (!element) throw new Error(`Button missing: ${text}`);
   return element;
 }
+function confirmDialog(testId: string): void {
+  const element = document.querySelector<HTMLButtonElement>(`[data-testid="${testId}-confirm"]`);
+  if (!element) throw new Error(`Confirmation missing: ${testId}`);
+  act(() => element.click());
+}
 function importFile(text: Promise<string>): void {
   const file = new File(['pending'], 'history.json', { type: 'application/json' });
   Object.defineProperty(file, 'text', { value: () => text });
@@ -39,7 +44,8 @@ function importFile(text: Promise<string>): void {
 }
 beforeEach(() => {
   vi.resetAllMocks(); repository.load.mockResolvedValue([]); repository.save.mockResolvedValue(undefined); repository.clear.mockResolvedValue(undefined);
-  vi.spyOn(window, 'confirm').mockReturnValue(true);
+  HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
+  HTMLDialogElement.prototype.close = function () { this.removeAttribute('open'); this.dispatchEvent(new Event('close')); };
   replace = vi.fn(); host = document.createElement('div'); document.body.append(host); root = createRoot(host);
   act(() => root?.render(<Harness />));
 });
@@ -50,19 +56,21 @@ describe('history async privacy boundaries', () => {
     expect(button('Send').disabled).toBe(true); expect(button('Clear All').disabled).toBe(true);
     act(() => button('Clear All').click()); expect(repository.clear).not.toHaveBeenCalled();
     await act(async () => { reading.resolve(exportConversations(empty())); await reading.promise; });
+    expect(replace).not.toHaveBeenCalled(); expect(button('Send').disabled).toBe(false);
+    confirmDialog('chat-replace-import-dialog');
     expect(replace).toHaveBeenCalledWith(empty()); expect(button('Send').disabled).toBe(false);
   });
   it('does not restore imported history after unmount invalidates its epoch', async () => {
     const reading = deferred<string>(); importFile(reading.promise);
     act(() => { root?.unmount(); root = null; });
     await act(async () => { reading.resolve(exportConversations(empty())); await reading.promise; });
-    expect(replace).not.toHaveBeenCalled(); expect(window.confirm).not.toHaveBeenCalled();
+    expect(replace).not.toHaveBeenCalled(); expect(document.querySelector('dialog')).toBeNull();
   });
   it('does not replace history if generation becomes busy while a read is pending', async () => {
     const reading = deferred<string>(); importFile(reading.promise);
     act(() => root?.render(<Harness busy />));
     await act(async () => { reading.resolve(exportConversations(empty())); await reading.promise; });
-    expect(replace).not.toHaveBeenCalled();
+    expect(replace).not.toHaveBeenCalled(); expect(host.querySelector('dialog')).toBeNull();
   });
   it('disables sending during saved-history loading and rejects late unmounted results', async () => {
     const loading = deferred<ChatConversation[]>(); repository.load.mockReturnValue(loading.promise);
@@ -74,14 +82,15 @@ describe('history async privacy boundaries', () => {
   });
   it('marks Clear All pending and does not apply a late clear after unmount', async () => {
     const clearing = deferred<undefined>(); repository.clear.mockReturnValue(clearing.promise);
-    act(() => button('Clear All').click()); expect(button('Send').disabled).toBe(true); expect(input().disabled).toBe(true);
+    act(() => button('Clear All').click()); expect(repository.clear).not.toHaveBeenCalled();
+    confirmDialog('chat-clear-history-dialog'); expect(button('Send').disabled).toBe(true); expect(input().disabled).toBe(true);
     act(() => { root?.unmount(); root = null; });
     await act(async () => { clearing.resolve(undefined); await clearing.promise; });
     expect(replace).not.toHaveBeenCalled();
   });
   it('clears once and releases pending controls after deletion completes', async () => {
     const clearing = deferred<undefined>(); repository.clear.mockReturnValue(clearing.promise);
-    act(() => button('Clear All').click());
+    act(() => button('Clear All').click()); confirmDialog('chat-clear-history-dialog');
     await act(async () => { clearing.resolve(undefined); await clearing.promise; });
     expect(replace).toHaveBeenCalledExactlyOnceWith([]); expect(button('Send').disabled).toBe(false);
   });

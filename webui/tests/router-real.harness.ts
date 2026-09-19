@@ -345,7 +345,7 @@ test.describe('Rust router harness', () => {
     await page.getByRole('option', { name: new RegExp(ready.identity.display_name) }).click();
     await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Say hello from the router harness.');
     await page.getByRole('button', { name: 'Send', exact: true }).click();
-    await expect(page.locator('.chat-turn header')).toContainText('complete', { timeout: 30000 });
+    await expect(page.locator('.chat-turn header')).toContainText('Complete', { timeout: 30000 });
     await expect(page.locator('.chat-markdown')).toContainText(/router harness/i);
 
     await page.getByRole('button', { name: 'New conversation', exact: true }).click();
@@ -359,7 +359,7 @@ test.describe('Rust router harness', () => {
     }, { timeout: 30000 }).toBeGreaterThan(0);
     const stopClickedAt = new Date().toISOString();
     await page.getByRole('button', { name: 'Stop', exact: true }).click();
-    await expect(page.locator('.chat-turn header')).toContainText('cancelled');
+    await expect(page.locator('.chat-turn header')).toContainText('Cancelled');
     await expect.poll(async () => (await catalog(request, ctx)).find(item => item.identity.id === ready.identity.id)?.lifecycle.active_requests, { timeout: 30000 }).toBe(0);
     const stopSettledAt = new Date().toISOString();
     const finalActiveRequests = (await catalog(request, ctx)).find(item => item.identity.id === ready.identity.id)?.lifecycle.active_requests ?? -1;
