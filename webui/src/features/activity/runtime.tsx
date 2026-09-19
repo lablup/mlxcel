@@ -2,7 +2,7 @@
 import React, { useId } from 'react';
 import type { MeasuredValue, RuntimeSnapshot } from '../../api/types';
 import { Badge, EmptyState, ErrorBanner, StatCard } from '../../design-system/primitives';
-import { t, type Locale } from '../../i18n/catalog';
+import { t, type Locale, type StringKey } from '../../i18n/catalog';
 import { Disclosure } from './disclosure';
 import { clockTime, metricValue } from './format';
 import { HistoryList, Sparkline, type HistoryPoint } from './history';
@@ -18,6 +18,10 @@ const measured = (metric: MeasuredValue | undefined): metric is MeasuredValue =>
 // Always four tiles in this order, whether or not the server reported each counter.
 const PRIMARY = ['active_requests', 'completed_requests_total', 'completion_tokens_total', 'queued_requests'] as const;
 const SCOPE_KEYS = { model: 'activity.scope.model', slot: 'activity.scope.slot', pool: 'activity.scope.pool', server: 'activity.scope.server', unknown: 'activity.scope.unknown' } as const;
+// `metric.scope` is a closed union today (schema validation enforces it), but this reads
+// server JSON: a future scope the schema has not caught up to must still fall back to the
+// localized "unknown" label instead of printing an undefined lookup as raw text.
+const scopeKey = (scope: string): StringKey => (SCOPE_KEYS as Record<string, StringKey>)[scope] ?? SCOPE_KEYS.unknown;
 
 type RuntimeViewProps = { runtime: RuntimeSnapshot | undefined; points: readonly HistoryPoint[]; historyEnd: number | null; locale: Locale; stale: boolean; runtimeStale: boolean };
 
@@ -50,7 +54,7 @@ export function RuntimeView({ runtime, points, historyEnd, locale, stale, runtim
         <ul className="activity-measurements">{entries.map(([name, metric]) => <li key={name}>
           <span className="activity-measurement__name">{metricLabel(name, locale)}</span>
           <span className="activity-measurement__value">{metricValue(metric, locale)}</span>
-          <span className="activity-muted">{t(locale, 'activity.scope', { scope: t(locale, SCOPE_KEYS[metric.scope]) })}</span>
+          <span className="activity-muted">{t(locale, 'activity.scope', { scope: t(locale, scopeKey(metric.scope)) })}</span>
           <span className="activity-muted">{metric.measured_at === null ? t(locale, 'activity.unknown_time') : t(locale, 'activity.observed_at', { time: clockTime(metric.measured_at, locale) })}</span>
           {/* The server's own provenance or availability text, kept verbatim for diagnosis. */}
           {metric.reason === null ? null : <span className="activity-raw">{metric.reason}</span>}

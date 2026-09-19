@@ -135,6 +135,17 @@ describe('All measurements and sources', () => {
     const element = mount();
     expect(element.querySelector('details.activity-measurement-details .ds-badge')).toBeNull();
   });
+  it('falls back to the unknown scope label for a scope the schema has not caught up to', async () => {
+    // Schema validation keeps `scope` to the known union today; this simulates a future
+    // server value that reaches the page before this build knows about it.
+    const future = { ...measured(1, 'requests'), scope: 'gpu' } as unknown as MeasuredValue;
+    observe({ active_requests: future });
+    const element = mount();
+    await activate(element.querySelector('details.activity-measurement-details summary'));
+    const text = element.querySelector('details.activity-measurement-details')?.textContent ?? '';
+    expect(text).toContain(t('en', 'activity.scope', { scope: t('en', 'activity.scope.unknown') }));
+    expect(text).not.toContain('undefined');
+  });
 });
 
 describe('slot table', () => {
@@ -158,6 +169,16 @@ describe('slot table', () => {
     expect(region?.getAttribute('role')).toBe('region');
     expect(region?.getAttribute('tabindex')).toBe('0');
     expect(document.getElementById(region?.getAttribute('aria-labelledby') ?? '')?.textContent).toBe(t('en', 'activity.slots'));
+  });
+  it('treats a zero request context the same as a missing one: unknown, no bar', () => {
+    slots({ request_context_tokens: 0, items: [{ id: 0, processing: true, prompt_tokens: 12, cached_prompt_tokens: 1, decoded_tokens: 2 }, { id: 1, processing: false, prompt_tokens: null, cached_prompt_tokens: null, decoded_tokens: null }] });
+    const element = mount();
+    const noContext = t('en', 'activity.no_context');
+    expect(cells(element)).toEqual([
+      ['0', 'Processing', noContext, '2', '1'],
+      ['1', 'Idle', noContext, '', ''],
+    ]);
+    expect(element.querySelector('[role="progressbar"]')).toBeNull();
   });
   it.each(['en', 'ko'] as const)('localizes the %s server slot reasons and keeps an unrecognized one behind a disclosure', async (locale) => {
     slots({ available: false, reason: 'slots disabled; restart with --slots', items: [] });
