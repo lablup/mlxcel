@@ -65,8 +65,9 @@ h2 { letter-spacing: -0.02em; }
 .transcript details { border: 1px solid var(--color-separator); border-radius: var(--radius-md); padding: var(--space-3); }
 .composer { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-3); align-items: end; }
 .composer textarea { min-height: 88px; resize: vertical; }
-.toggle { display: flex; align-items: center; gap: var(--space-2); min-height: 36px; color: var(--color-text); }
+.toggle { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-height: 36px; color: var(--color-text); }
 .toggle input { width: 24px; height: 24px; }
+.toggle > small { flex-basis: 100%; min-width: 0; overflow-wrap: anywhere; }
 .command-section { display: grid; gap: var(--space-2); margin-top: var(--space-4); }
 .command-section h3 { margin: 0; color: var(--color-muted); font-size: 0.9rem; }
 .command-list { display: grid; gap: var(--space-2); }

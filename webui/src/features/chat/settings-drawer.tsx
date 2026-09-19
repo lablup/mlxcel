@@ -65,7 +65,7 @@ export function SettingsDrawer(props: SettingsDrawerProps): React.JSX.Element {
         {conversation ? <>
           <Field label={t(locale, 'chat.settings.name')} value={conversation.title} disabled={props.disabled} onChange={(title) => props.onConversationChange({ ...conversation, title: title.slice(0, TITLE_LIMIT) })} />
           <label className="ds-field"><span>{t(locale, 'chat.settings.system_prompt')}</span><textarea value={conversation.systemPrompt} maxLength={MAX_PROMPT_CHARACTERS} disabled={props.disabled} onChange={(event) => props.onConversationChange({ ...conversation, systemPrompt: event.target.value })} /></label>
-          <p>{samplingBefore}<a href="#settings">{t(locale, 'nav.settings')}</a>{samplingAfter}</p>
+          <p>{samplingBefore}<a href="#settings/requests">{t(locale, 'nav.settings')}</a>{samplingAfter}</p>
         </> : <p className="chat-settings-hint">{t(locale, 'chat.settings.none')}</p>}
       </section>
       <section className="chat-settings-section" aria-labelledby={parametersId}>

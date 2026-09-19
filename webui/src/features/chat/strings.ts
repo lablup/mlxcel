@@ -110,7 +110,6 @@ export const chatStrings = [
   { key: 'chat.params.body', en: 'These overrides apply once, after Send accepts a request. Blank fields inherit Settings; absent Settings fields inherit the server. Changes never affect a running turn.', ko: '이 재정의 값은 보내기로 요청이 수락된 뒤 한 번만 적용됩니다. 빈 필드는 설정 값을, 설정에 없는 필드는 서버 값을 상속합니다. 실행 중인 턴에는 영향을 주지 않습니다.', test_id: 'chat-params-body' },
   { key: 'chat.params.field', en: 'Next turn {name}', ko: '다음 턴 {name}', test_id: 'chat-params-field' },
   { key: 'chat.params.inherited', en: 'Inherited: {value}', ko: '상속 값: {value}', test_id: 'chat-params-inherited' },
-  { key: 'chat.params.server_default', en: 'server default', ko: '서버 기본값', test_id: 'chat-params-server-default' },
   { key: 'chat.params.clear', en: 'Clear next-turn overrides', ko: '다음 턴 재정의 지우기', test_id: 'chat-params-clear' },
   { key: 'chat.privacy.summary', en: 'Local history and privacy', ko: '로컬 기록과 개인정보', test_id: 'chat-privacy-summary' },
   { key: 'chat.privacy.body', en: 'Conversations stay in memory unless you opt in below. Signing out or refreshing requires authentication again; saved history belongs to this browser origin, not a server account. No API keys are stored.', ko: '아래에서 동의하지 않으면 대화는 메모리에만 남습니다. 로그아웃하거나 새로고침하면 다시 인증해야 합니다. 저장된 기록은 서버 계정이 아니라 이 브라우저 origin에 속합니다. API 키는 저장하지 않습니다.', test_id: 'chat-privacy-body' },

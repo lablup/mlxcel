@@ -1,11 +1,10 @@
-import { ServerSettings } from './features/settings/server-settings';
 import React, { useEffect, useRef, useState } from 'react';
 import type { ModelId, WebUiSnapshot } from './api/types';
 import { CommandPalette } from './command-palette';
 import { AppShell, globalShortcuts, type RouteId, type ShellLoadedModel } from './design-system/shell';
-import { applyAppearance, DEFAULT_APPEARANCE, loadAppearance, saveAppearance, type AppearancePreferences, type ColorSchemePreference, type ContrastPreference, type ThemeFamily } from './design-system/preferences';
+import { applyAppearance, DEFAULT_APPEARANCE, loadAppearance, saveAppearance, type AppearancePreferences } from './design-system/preferences';
 import { onSystemColorSchemeChange } from './design-system/theme';
-import { Dialog, ErrorBanner, IconButton, PageHeader, Select } from './design-system/primitives';
+import { Dialog, IconButton } from './design-system/primitives';
 import { ActivityPage } from './features/activity';
 import { ModelsLibrary } from './features/models/screen';
 import { DesignGallery } from './gallery';
@@ -14,6 +13,8 @@ import { useWebUi, useWebUiActions } from './state';
 import { t, testId } from './i18n/catalog';
 import { Chat } from './features/chat/chat';
 import { replaceConversations, requestNewConversation } from './features/chat/session';
+import { SettingsScreen } from './features/settings/settings-screen';
+import { DEFAULT_SETTINGS_SECTION, settingsSectionFrom, settingsSectionHash, type SettingsSection } from './features/settings/sections';
 
 const routes: RouteId[] = ['models', 'chat', 'activity', 'settings', 'gallery'];
 type Overlay = 'command' | 'help' | null;
@@ -23,15 +24,21 @@ function chatAvailable(snapshot: WebUiSnapshot): boolean {
   return snapshot.auth.status === 'authenticated' && snapshot.connection !== 'schema-mismatch';
 }
 
-function routeFromHash(): RouteId {
-  const raw = window.location.hash.slice(1).replace(/^\//, '') as RouteId;
-  return routes.includes(raw) ? raw : 'models';
+export interface HashLocation { readonly route: RouteId; readonly section: SettingsSection }
+
+/** `#settings/<section>` opens that Settings tab; any other route is its bare name. Unknown hashes open Models. */
+export function routeFromHash(hash: string = window.location.hash): HashLocation {
+  const raw = hash.replace(/^#/, '').replace(/^\//, '');
+  const [head, ...rest] = raw.split('/');
+  if (head === 'settings') return { route: 'settings', section: settingsSectionFrom(rest.join('/') || undefined) };
+  return { route: routes.includes(raw as RouteId) ? raw as RouteId : 'models', section: DEFAULT_SETTINGS_SECTION };
 }
 
 export function App(): React.JSX.Element {
   const snapshot = useWebUi();
   const actions = useWebUiActions();
-  const [route, setRoute] = useState<RouteId>(routeFromHash);
+  const [hashLocation, setHashLocation] = useState<HashLocation>(() => routeFromHash());
+  const route = hashLocation.route;
   const [appearance, setAppearance] = useState<AppearancePreferences>(loadAppearance);
   const [overlay, setOverlay] = useState<Overlay>(null);
   const [authFailure, setAuthFailure] = useState<AuthFailure | null>(null);
@@ -42,7 +49,7 @@ export function App(): React.JSX.Element {
   }, []);
 
   useEffect(() => {
-    const handleHash = (): void => setRoute(routeFromHash());
+    const handleHash = (): void => setHashLocation(routeFromHash());
     window.addEventListener('hashchange', handleHash);
     return () => window.removeEventListener('hashchange', handleHash);
   }, []);
@@ -67,8 +74,13 @@ export function App(): React.JSX.Element {
   useEffect(() => { if (snapshot.auth.status === 'signed-out') replaceConversations([]); }, [snapshot.auth.status]);
 
   const navigate = (next: RouteId): void => {
-    setRoute(next);
+    setHashLocation({ route: next, section: DEFAULT_SETTINGS_SECTION });
     window.history.replaceState(null, '', `#${next}`);
+  };
+  // Replace, not push: Back leaves Settings instead of stepping back through its tabs.
+  const selectSettingsSection = (section: SettingsSection): void => {
+    setHashLocation({ route: 'settings', section });
+    window.history.replaceState(null, '', settingsSectionHash(section));
   };
   const login = (token: string): void => {
     const attempt = authAttemptRef.current + 1;
@@ -116,7 +128,7 @@ export function App(): React.JSX.Element {
   // "No model loaded" about a server it has not read.
   const catalogKnown = snapshot.auth.status === 'authenticated' && snapshot.catalogSequence !== null;
   const shellLoaded: ShellLoadedModel[] | null = catalogKnown ? loaded.map((entry) => ({ id: entry.identity.id, name: entry.identity.display_name, state: entry.lifecycle.state, stateLabel: lifecycleLabel(appearance.locale, entry.lifecycle.state) })) : null;
-  const body = renderRoute(route, appearance, setAppearance, { snapshot, authFailure, login, logout, retry, recoverSchema });
+  const body = renderRoute(hashLocation, appearance, setAppearance, selectSettingsSection, { snapshot, authFailure, login, logout, retry, recoverSchema });
   return (
     <>
       <AppShell locale={appearance.locale} route={route} onRouteChange={navigate} onCommand={() => setOverlay('command')} onHelp={() => setOverlay('help')} onNewChat={newChat} onOpenModel={openModel} loadedModels={shellLoaded} connection={{ label: connectionFooterLabel(appearance.locale, snapshot), state: snapshot.connection, details: connectionFooterDetails(appearance.locale, snapshot) }} sessionAction={snapshot.auth.tokenPresent ? <IconButton label={t(appearance.locale, 'toolbar.logout')} icon="key" onClick={logout} data-testid={testId('toolbar.logout')} /> : null} inspector={null}>
@@ -147,11 +159,12 @@ interface ProviderRouteContext {
   readonly recoverSchema: () => void;
 }
 
-function renderRoute(route: RouteId, appearance: AppearancePreferences, setAppearance: (next: AppearancePreferences) => void, context: ProviderRouteContext): React.ReactNode {
+function renderRoute(at: HashLocation, appearance: AppearancePreferences, setAppearance: (next: AppearancePreferences) => void, selectSettingsSection: (section: SettingsSection) => void, context: ProviderRouteContext): React.ReactNode {
+  const { route } = at;
   if (route === 'models') return <ModelsScreen locale={appearance.locale} context={context} />;
   if (route === 'chat') return <ChatScreen locale={appearance.locale} context={context} />;
   if (route === 'activity') return <ActivityScreen locale={appearance.locale} context={context} />;
-  if (route === 'settings') return <SettingsScreen appearance={appearance} setAppearance={setAppearance} />;
+  if (route === 'settings') return <SettingsScreen appearance={appearance} setAppearance={setAppearance} section={at.section} onSectionChange={selectSettingsSection} />;
   return <DesignGallery locale={appearance.locale} />;
 }
 
@@ -168,17 +181,6 @@ function ChatScreen(props: { locale: AppearancePreferences['locale']; context: P
 function ActivityScreen(props: { locale: AppearancePreferences['locale']; context: ProviderRouteContext }): React.JSX.Element {
   if (props.context.snapshot.auth.status === 'authenticated' && !['schema-mismatch', 'forbidden', 'unauthorized'].includes(props.context.snapshot.connection)) return <ActivityPage locale={props.locale} />;
   return <ProductConnectionSurface locale={props.locale} title={t(props.locale, 'activity.title')} titleTestId={testId('activity.title')} snapshot={props.context.snapshot} authFailure={props.context.authFailure} onLogin={props.context.login} onLogout={props.context.logout} onRetry={props.context.retry} onRecoverSchema={props.context.recoverSchema} />;
-}
-
-function SettingsScreen(props: { appearance: AppearancePreferences; setAppearance: (next: AppearancePreferences) => void }): React.JSX.Element {
-  const set = (patch: Partial<AppearancePreferences>): void => props.setAppearance({ ...props.appearance, ...patch });
-  return (
-    <div className="screen-stack"><PageHeader title={t(props.appearance.locale, 'settings.title')} titleTestId={testId('settings.title')} description={t(props.appearance.locale, 'settings.browser_only')} descriptionTestId={testId('settings.appearance')} /><div className="settings-grid"><Select locale={props.appearance.locale} label={t(props.appearance.locale, 'settings.theme')} value={props.appearance.themeFamily} onChange={(value) => set({ themeFamily: value as ThemeFamily })} options={[{ value: 'mlxcel', label: t(props.appearance.locale, 'settings.theme.mlxcel') }, { value: 'glass', label: t(props.appearance.locale, 'settings.theme.glass') }]} testId={testId('settings.theme')} /><Select locale={props.appearance.locale} label={t(props.appearance.locale, 'settings.color_scheme')} value={props.appearance.colorScheme} onChange={(value) => set({ colorScheme: value as ColorSchemePreference })} options={[{ value: 'system', label: t(props.appearance.locale, 'settings.color_scheme.system') }, { value: 'light', label: t(props.appearance.locale, 'settings.color_scheme.light') }, { value: 'dark', label: t(props.appearance.locale, 'settings.color_scheme.dark') }]} testId={testId('settings.color_scheme')} /><Select locale={props.appearance.locale} label={t(props.appearance.locale, 'settings.material')} value={props.appearance.material} onChange={(value) => set({ material: value as AppearancePreferences['material'] })} options={[{ value: 'glass', label: t(props.appearance.locale, 'settings.material.glass') }, { value: 'tinted', label: t(props.appearance.locale, 'settings.material.tinted') }, { value: 'opaque', label: t(props.appearance.locale, 'settings.material.opaque') }]} testId={testId('settings.material')} /><Select locale={props.appearance.locale} label={t(props.appearance.locale, 'settings.locale')} value={props.appearance.locale} onChange={(value) => set({ locale: value as AppearancePreferences['locale'] })} options={[{ value: 'en', label: t(props.appearance.locale, 'settings.locale.en') }, { value: 'ko', label: t(props.appearance.locale, 'settings.locale.ko') }]} testId={testId('settings.locale')} /><Select locale={props.appearance.locale} label={t(props.appearance.locale, 'settings.high_contrast')} value={props.appearance.highContrast} onChange={(value) => set({ highContrast: value as ContrastPreference })} options={[{ value: 'system', label: t(props.appearance.locale, 'settings.high_contrast.system') }, { value: 'on', label: t(props.appearance.locale, 'settings.high_contrast.on') }, { value: 'off', label: t(props.appearance.locale, 'settings.high_contrast.off') }]} testId={testId('settings.high_contrast')} /><label className="ds-field"><span>{t(props.appearance.locale, 'settings.glass_intensity')}: {props.appearance.glassIntensity}</span><input type="range" min="0" max="100" value={props.appearance.glassIntensity} onChange={(event) => set({ glassIntensity: Number(event.currentTarget.value) })} data-testid={testId('settings.glass_intensity')} /></label><Toggle label={t(props.appearance.locale, 'settings.reduce_motion')} checked={props.appearance.reduceMotion} onChange={(checked) => set({ reduceMotion: checked })} testId={testId('settings.reduce_motion')} /><Toggle label={t(props.appearance.locale, 'settings.reduce_transparency')} checked={props.appearance.reduceTransparency} onChange={(checked) => set({ reduceTransparency: checked })} testId={testId('settings.reduce_transparency')} /></div><ErrorBanner tone="info" title={t(props.appearance.locale, 'settings.browser_only')} body={t(props.appearance.locale, 'settings.browser_only.body')} testId={testId('settings.browser_only')} /><ServerSettings locale={props.appearance.locale} /></div>
-  );
-}
-
-function Toggle(props: { label: string; checked: boolean; onChange: (checked: boolean) => void; testId: string }): React.JSX.Element {
-  return <label className="toggle"><input type="checkbox" checked={props.checked} onChange={(event) => props.onChange(event.currentTarget.checked)} data-testid={props.testId} /><span>{props.label}</span></label>;
 }
 
 export { DEFAULT_APPEARANCE };
