@@ -227,3 +227,25 @@ test.describe('shared Badge', () => {
     });
   }
 });
+
+test.describe('disabled button hover', () => {
+  test('a hovered disabled primary button keeps its readable background', async ({ page }) => {
+    // After sign-in the pointer can rest on the Models "Add" button while the catalog
+    // is still pending; hover must not swap its fill for the 8% selection tint.
+    await installMockApi(page, 'slow-catalog');
+    await bootProduct(page, productVariants[1]);
+    await submitSessionKey(page, 'good-key');
+    const add = page.getByTestId('models-add');
+    await expect(add).toBeDisabled();
+    const settle = async (): Promise<string> => add.evaluate(async (element) => {
+      await Promise.all(element.getAnimations().map((animation) => animation.finished));
+      return window.getComputedStyle(element).backgroundColor;
+    });
+    await page.mouse.move(1, 1);
+    const resting = await settle();
+    await add.hover({ force: true });
+    expect(await settle()).toBe(resting);
+    const results = await new AxeBuilder({ page }).include('[data-testid="models-add"]').withRules(['color-contrast']).analyze();
+    expect(results.violations).toEqual([]);
+  });
+});
