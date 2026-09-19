@@ -18,6 +18,8 @@
 //! preparation and option merging to shared helpers, and streams chunk payloads
 //! back through `server/streaming.rs`.
 
+use std::sync::atomic::Ordering;
+
 use axum::{
     Json,
     extract::State,
@@ -1664,7 +1666,7 @@ async fn stream_chat_completion(
                 prepared.videos,
                 prepared.media,
                 queue_reservation,
-                cancelled,
+                cancelled.clone(),
                 &live,
                 |token, lp_data| {
                     slot.on_token(&token);
@@ -1929,6 +1931,24 @@ async fn stream_chat_completion(
                 r.cached_tokens,
                 r.completion_tokens,
                 &r.text,
+            );
+        }
+
+        // Record the completion once (#1911), with the counts the usage chunk
+        // below carries, whether or not `stream_options.include_usage` asked
+        // for that chunk. A stream the client cancelled (a disconnect without
+        // `X-Conversation-Id`, `DELETE /v1/stream`, or session replacement) is
+        // not a completion. The worker still answers `Ok` with the partial
+        // count after an abort, so the flag is what tells the two apart. A
+        // resumable stream whose client only disconnected keeps generating,
+        // leaves the flag clear and is counted.
+        if let Ok(r) = &result
+            && !cancelled.load(Ordering::Acquire)
+        {
+            state.metrics.record_request(
+                r.prompt_tokens,
+                r.completion_tokens,
+                r.generation_time_ms,
             );
         }
 

@@ -39,6 +39,21 @@ fn scripted_app(
     ScriptedStreamHandle,
     mpsc::Receiver<ServerGenerateOptions>,
 ) {
+    let (app, handle, options_rx, _state) = scripted_app_with_state(config);
+    (app, handle, options_rx)
+}
+
+/// [`scripted_app`], also handing back the `AppState` the router serves, so a
+/// test can read what the routes publish into it (`state.metrics`, the
+/// completion-control registry).
+fn scripted_app_with_state(
+    config: ServerConfig,
+) -> (
+    axum::Router,
+    ScriptedStreamHandle,
+    mpsc::Receiver<ServerGenerateOptions>,
+    AppState,
+) {
     let (options_tx, options_rx) = mpsc::channel();
     let (provider, handle) = ModelProvider::scripted_streaming_for_route_tests(options_tx);
     let provider = Arc::new(provider);
@@ -51,7 +66,7 @@ fn scripted_app(
         PathBuf::from("route-test-model"),
         batch_metrics,
     );
-    (create_app(state), handle, options_rx)
+    (create_app(state.clone()), handle, options_rx, state)
 }
 
 fn chat_body(reasoning_control: Option<bool>) -> String {
@@ -696,3 +711,8 @@ async fn reasoning_end_on_an_unarmed_completion_reports_not_enabled() {
     );
     handle.finish();
 }
+
+/// What a streamed chat completion records in `Metrics` (#1911), driven
+/// through the same router and helpers as the lifecycle tests above.
+#[path = "stream_route_metrics_tests.rs"]
+mod metrics_tests;
