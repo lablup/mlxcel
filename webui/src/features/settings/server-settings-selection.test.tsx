@@ -36,3 +36,21 @@ it('selects an opaque ready model through the sole provider authority without lo
     expect(host.querySelector('[data-testid="settings-context-n-ctx"]')?.textContent).toBe('2048');
   } finally { act(() => root.unmount()); host.remove(); }
 });
+it('shows the /props-unavailable banner and falls back to "Unknown" context values when the probe fails', async () => {
+  Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: vi.fn() });
+  const entry = structuredClone(catalog.items[0]) as unknown as CatalogEntry;
+  const ready = { ...entry, lifecycle: { ...entry.lifecycle, state: 'ready' as const, worker_exit_observed: false } };
+  const connectedBootstrap = {...bootstrap, server: {...bootstrap.server, mode: 'router_pool' as const}};
+  validateAgainstSchema('CatalogEntry', ready, '$');
+  validateAgainstSchema('BootstrapResponse', connectedBootstrap, '$');
+  mocks.snapshot = { ...initialSnapshot(), auth: { status: 'authenticated', tokenPresent: true }, connection: 'ready', bootstrap: connectedBootstrap as unknown as BootstrapResponse, catalog: [ready], selectedModelId: ready.identity.id };
+  mocks.actions.getSettings.mockResolvedValue({ schema: [], current: {}, fingerprint: 'a'.repeat(64) });
+  mocks.actions.getModelProps.mockRejectedValue(new Error('no /props'));
+  const host = document.createElement('div'); document.body.append(host); const root = createRoot(host);
+  try {
+    await act(async () => root.render(<ServerSettings locale="en" />));
+    expect(host.querySelector('[data-testid="settings-props-unavailable"]')).not.toBeNull();
+    expect(host.textContent).toContain('Context unavailable');
+    expect(host.querySelector('[data-testid="settings-context-n-ctx"]')?.textContent).toBe('Unknown');
+  } finally { act(() => root.unmount()); host.remove(); }
+});
