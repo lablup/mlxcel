@@ -87,7 +87,9 @@ export function AppShell(props: { locale: Locale; route: RouteId; onRouteChange:
       <Drawer open={navOpen} title={t(props.locale, 'nav.primary')} onClose={() => setNavOpen(false)} closeLabel={t(props.locale, 'common.close')} testId="mobile-nav-sheet">
         <Sidebar locale={props.locale} route={props.route} onRouteChange={handleRoute} onKeyDown={handleSidebarKey} className="app-sidebar sheet-sidebar" connectionLabel={props.connectionLabel} connectionState={props.connectionState} />
       </Drawer>
-      <main className="app-main" aria-labelledby="app-title">
+      {/* The shared Drawer traps Tab only from inside its panel. Like the native modal sheet
+          before it, keep the page behind the open drawer inert so focus cannot reach it. */}
+      <main className="app-main" aria-labelledby="app-title" inert={navOpen}>
         <header className="app-toolbar material-glass">
           <IconButton className="mobile-menu-button" label={t(props.locale, 'toolbar.menu')} icon="menu" onClick={() => setNavOpen(true)} data-testid={testId('toolbar.menu')} />
           <div className="toolbar-title">

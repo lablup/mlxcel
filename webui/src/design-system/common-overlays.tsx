@@ -32,8 +32,21 @@ export function Drawer(props: { open: boolean; onClose: () => void; title: strin
       if (!panel.contains(document.activeElement) && attempts++ < 10) frame = requestAnimationFrame(settle);
     };
     frame = requestAnimationFrame(settle);
-    return () => cancelAnimationFrame(frame);
-  }, [props.open]);
+    // alpha.19 listens for Escape on its panel only. A pointer press on a non-focusable
+    // part of the drawer leaves focus on <body>, so also close on an Escape that starts
+    // outside the panel, as the native modal sheet did.
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape' || event.isComposing) return;
+      const panel = hostRef.current?.querySelector('.drawer');
+      if (panel && event.target instanceof Node && panel.contains(event.target)) return;
+      close();
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      cancelAnimationFrame(frame);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [props.open, close]);
   return <div className="ds-drawer-host" ref={(element) => {
     hostRef.current = element;
     // alpha.19 has no test-id prop; tag the panel itself.
