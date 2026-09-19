@@ -28,7 +28,7 @@ Each of the seven request fields (`max_tokens`, `temperature`, `top_p`, `top_k`,
 3. The server default: `current["default_" + field]` from the selected Ready model's `/settings`, when its schema has that entry. A server `null` (such as an unset seed) is shown as "not set".
 4. Otherwise "server default, not readable": no Ready model is selected, `--settings` is off, the schema has no such entry, or the read failed.
 
-The Chat hint uses the same resolution and wording (`resolveEffectiveParameter` and `describeEffectiveParameter` in `webui/src/features/settings/generation-defaults.ts`), so the same state reads the same in both places. Chat never reads `/settings` itself: it resolves against the server defaults Settings last read for the selected model revision, a memory-only record that every Settings read refreshes.
+The Chat hint uses the same resolution and wording (`resolveEffectiveParameter` and `describeEffectiveParameter` in `webui/src/features/settings/generation-defaults.ts`), so the same state reads the same in both places. Chat never reads `/settings` itself: it resolves against the server defaults Settings last read for the selected model, a memory-only record that every Settings read refreshes. That record is keyed by server instance, model id and revision, not model id and revision alone, so a server restart that reuses both (single-model mode is always revision 1) does not resolve to the previous server's values until Settings reads again.
 
 ## Model: live changes
 
