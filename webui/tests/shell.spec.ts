@@ -12,6 +12,16 @@ const appearance = (locale: FixtureLocale): Record<string, unknown> => ({ theme:
 
 interface ShellGeometry { readonly overflow: number; readonly collisions: string[] }
 
+/** The fixture's ready model repeated under each name, in the given order; ids stay distinct. */
+function readyModels(names: ReadonlyArray<string>): (catalog: CatalogPage) => CatalogPage {
+  return (catalog) => {
+    const [base] = readyCatalog(catalog).items;
+    catalog.items = names.map((name, index) => ({ ...structuredClone(base), identity: { ...base.identity, id: `mdl_${String(index).padStart(43, '0')}`, display_name: name, inference_id: name } }));
+    catalog.pagination = { ...catalog.pagination, total_known: names.length };
+    return catalog;
+  };
+}
+
 async function shellGeometry(page: Page): Promise<ShellGeometry> {
   return page.evaluate(() => {
     const visible = (element: Element): boolean => {
@@ -107,14 +117,7 @@ test('the toolbar names the server-loaded model and its chip opens the inspector
 });
 
 test('more than three loaded models collapse into a +n chip that opens the palette on the loaded list', async ({ page }) => {
-  const names = ['delta', 'alpha', 'charlie', 'bravo'];
-  const fourReady = (catalog: CatalogPage): CatalogPage => {
-    const [base] = readyCatalog(catalog).items;
-    catalog.items = names.map((name, index) => ({ ...structuredClone(base), identity: { ...base.identity, id: `mdl_${String(index).padStart(43, '0')}`, display_name: name, inference_id: name } }));
-    catalog.pagination = { ...catalog.pagination, total_known: names.length };
-    return catalog;
-  };
-  await installMockApi(page, 'happy', { catalog: fourReady });
+  await installMockApi(page, 'happy', { catalog: readyModels(['delta', 'alpha', 'charlie', 'bravo']) });
   await bootProduct(page, { name: 'more', width: 1440, height: 900, signedIn: false, appearance: appearance('en') });
   await page.getByLabel('Session key').fill('good-key');
   await page.getByRole('button', { name: 'Connect', exact: true }).click();
@@ -128,6 +131,31 @@ test('more than three loaded models collapse into a +n chip that opens the palet
   await expect(dialog.getByTestId('command-search')).toHaveValue('');
   await expect(dialog.getByTestId('command-model')).toHaveText(['alpha · Ready', 'bravo · Ready', 'charlie · Ready', 'delta · Ready']);
   await expectAxeClean(page);
+});
+
+test('a tight desktop toolbar keeps naming every loaded model and shrinks the badge to its dot first', async ({ page }) => {
+  // 1024 px is a reference viewport; three long names plus "+1" leave each chip about 100 px.
+  const names = ['Meta-Llama-3.1-8B-Instruct-4bit', 'Mixtral-8x7B-Instruct-v0.1-4bit', 'Qwen2.5-7B-Instruct-4bit', 'gemma-3-4b-it-4bit'];
+  await installMockApi(page, 'happy', { catalog: readyModels(names) });
+  await bootProduct(page, { name: 'tight', width: 1024, height: 768, signedIn: false, appearance: appearance('en') });
+  await page.getByLabel('Session key').fill('good-key');
+  await page.getByRole('button', { name: 'Connect', exact: true }).click();
+  await expect(page.getByTestId('toolbar-loaded-count')).toHaveText('4 loaded');
+  await expect(page.getByTestId('toolbar-loaded-chip')).toHaveCount(3);
+  const geometry = await page.evaluate(() => {
+    const width = (element: Element | null | undefined): number => element?.getBoundingClientRect().width ?? 0;
+    const chips = Array.from(document.querySelectorAll('.app-toolbar [data-testid="toolbar-loaded-chip"]')).map((chip) => ({ name: width(chip.querySelector('.truncate')), badge: width(chip.querySelector('.ds-status-wrap')) }));
+    const region = document.querySelector('.app-toolbar .toolbar-loaded')?.getBoundingClientRect();
+    const actions = document.querySelector('.app-toolbar .toolbar-actions')?.getBoundingClientRect();
+    return { chips, regionRight: region?.right ?? Infinity, actionsLeft: actions?.left ?? 0 };
+  });
+  for (const chip of geometry.chips) {
+    expect(chip.name, JSON.stringify(geometry)).toBeGreaterThanOrEqual(40);
+    expect(chip.badge, JSON.stringify(geometry)).toBeGreaterThanOrEqual(24);
+  }
+  expect(geometry.regionRight).toBeLessThanOrEqual(geometry.actionsLeft);
+  // Clipping the badge label is visual only: the accessible name still carries the state.
+  await expect(page.getByRole('button', { name: `${names[0]} Ready`, exact: true })).toBeVisible();
 });
 
 test('the command palette finds a model by name substring and opens its inspector without a model action', async ({ page }) => {
