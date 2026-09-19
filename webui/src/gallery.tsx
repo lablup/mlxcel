@@ -42,7 +42,7 @@ function ControlPanel(props: { locale: Locale; value: string; onValueChange: (va
       <article className="surface-card">
         <h2>{t(props.locale, 'gallery.overlays.title')}</h2>
         <p>{t(props.locale, 'gallery.long_cjk')}</p>
-        <div className="control-row"><Tooltip label={t(props.locale, 'gallery.tooltip')}><Button>{t(props.locale, 'gallery.hover_focus')}</Button></Tooltip><Button tone="primary" onClick={props.onOpenDialog}>{t(props.locale, 'gallery.dialog.open')}</Button></div>
+        <div className="control-row"><Tooltip content={t(props.locale, 'gallery.tooltip')}><Button>{t(props.locale, 'gallery.hover_focus')}</Button></Tooltip><Button tone="primary" onClick={props.onOpenDialog}>{t(props.locale, 'gallery.dialog.open')}</Button></div>
       </article>
     </div>
   );

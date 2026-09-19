@@ -6,6 +6,7 @@ import { NativeModalContext } from './modal-context';
 export { Button, IconButton, StatusBadge, ProgressBar, EmptyState, Tabs, DataTable } from './common-adapters';
 export type { ButtonProps, ButtonTone, LifecycleState, DataTableColumn, DataTablePersistedState, SortDirection } from './common-adapters';
 export { Select } from './common-select';
+export { Tooltip } from './common-overlays';
 
 export function Field(props: { label: string; value: string; onChange?: (value: string) => void; placeholder?: string; disabled?: boolean; busy?: boolean; error?: string; hint?: string; testId?: string }): React.JSX.Element {
   const id = useId();
@@ -127,16 +128,6 @@ export function Dialog(props: Omit<ModalProps, 'position' | 'className'>): React
 
 export function Sheet(props: Omit<ModalProps, 'position'>): React.JSX.Element {
   return <ModalDialog {...props} position="left" className={`ds-sheet ${props.className ?? ''}`.trim()} />;
-}
-
-export function Tooltip(props: { label: string; children: React.ReactElement }): React.JSX.Element {
-  const id = useId();
-  return (
-    <span className="ds-tooltip-wrap">
-      {React.cloneElement(props.children, { 'aria-describedby': id } as Partial<HTMLElement>)}
-      <span className="ds-tooltip" role="tooltip" id={id}>{props.label}</span>
-    </span>
-  );
 }
 
 export function Inspector(props: { title: string; children: React.ReactNode }): React.JSX.Element {

@@ -64,6 +64,8 @@ export async function expectSafeLayout(page: Page): Promise<void> {
       if (element.matches('.ds-progress .progress-bar__fill')) return properties.some((key) => key !== 'width') || !/^\d+(?:\.\d+)?%$/.test(element.style.width);
       if (element.matches('.select__dropdown--portal')) return properties.some((key) => !['position', 'top', 'left', 'width'].includes(key)) || element.style.position !== 'fixed' || ['top', 'left', 'width'].some((key) => !/^-?\d+(?:\.\d+)?px$/.test(element.style.getPropertyValue(key)));
       if (element.matches('.ds-common-table th')) return properties.some((key) => key !== 'width') || !/^\d+(?:\.\d+)?px$/.test(element.style.width);
+      // Shared Tooltip: hidden until measured, then fixed-position top/left in px.
+      if (element.matches('.tooltip__content')) return properties.join(',') === 'visibility' ? element.style.visibility !== 'hidden' : properties.slice().sort().join(',') !== 'left,top' || ['top', 'left'].some((key) => !/^-?\d+(?:\.\d+)?px$/.test(element.style.getPropertyValue(key)));
       return true;
     }).map((element) => element.outerHTML.slice(0, 160)),
     smallTargets: Array.from(document.querySelectorAll<HTMLElement>('button, a[href], input, select, textarea')).filter((element) => {

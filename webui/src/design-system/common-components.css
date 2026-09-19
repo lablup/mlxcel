@@ -37,6 +37,7 @@
 .ds-common-select .select--labelled { gap: var(--space-2); }
 .ds-common-select .select__label { color: var(--color-text); font-size: 0.9rem; font-weight: 650; }
 .select__dropdown--portal { max-width: calc(100vw - 16px); }
+.tooltip__wrapper.ds-tooltip-trigger { min-width: 0; max-width: 100%; }
 .ds-common-table { color: var(--color-text); background: var(--material-content-bg); border-radius: var(--radius-lg); }
 @media (max-width: 560px), (pointer: coarse) { .app-toolbar .button.ds-icon-button.button--inline { min-width: 44px; min-height: 44px; } }
 :root[data-high-contrast="on"] .button.ds-button, :root[data-high-contrast="on"] .button.ds-icon-button { border-width: 2px; }
