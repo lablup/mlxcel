@@ -108,6 +108,25 @@
 .models-library .models-row-actions .ds-button span {
   white-space: nowrap;
 }
+/* With a fine pointer, row controls drop from the 32 px toolbar size to 28 px (above the 24 px
+   target minimum), so fifteen rows fit a 900 px viewport whatever the platform's font metrics.
+   Touch keeps the full size. */
+@media (pointer: fine) {
+  .models-library .models-row-actions .button.ds-button.button--inline,
+  .models-library .models-row-actions .button.ds-icon-button.button--inline {
+    min-height: 28px;
+  }
+  .models-library .models-row-actions .button.ds-button.button--inline {
+    padding: 3px 12px;
+  }
+  .models-library .models-row-actions .button.ds-icon-button.button--inline {
+    min-width: 28px;
+    padding: 0 6px;
+  }
+  .models-library .models-table .data-table__cell {
+    padding-block: 2px;
+  }
+}
 .models-library .models-selected {
   background: var(--color-selection);
 }
