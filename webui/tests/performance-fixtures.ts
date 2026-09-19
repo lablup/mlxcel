@@ -38,7 +38,7 @@ export function catalogEntry(index: number, state: 'unloaded' | 'ready' = 'unloa
       ...base.identity,
       id: validModelId(index),
       inference_id: `perf-model-${index}`,
-      display_name: `Catalog performance model ${String(index).padStart(4, '0')}`,
+      display_name: `perf-model-${index}`,
       source_key_hash: validHex(index + 1),
       revision: base.identity.revision + index,
     },

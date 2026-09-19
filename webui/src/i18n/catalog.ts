@@ -232,7 +232,7 @@ export const entries: Entry[] = [
   { key: 'models.title', en: 'Model library', ko: '모델 라이브러리', test_id: 'models-title' },
   { key: 'models.empty.title', en: 'No local models yet', ko: '아직 로컬 모델이 없습니다', test_id: 'models-empty-title' },
   { key: 'models.empty.body', en: 'Browse, download, and load models explicitly. The shell never autoloads a checkpoint.', ko: '모델을 명시적으로 탐색, 다운로드, 로드하세요. 셸은 체크포인트를 자동 로드하지 않습니다.', test_id: 'models-empty-body' },
-  { key: 'models.long_name', en: 'Qwen3 Very Long Local Checkpoint Name With Mixed English and 한국어 모델 이름', ko: 'Qwen3 매우 긴 로컬 체크포인트 이름과 한국어 모델 이름', test_id: 'models-long-name' },
+  { key: 'models.long_name', en: 'Qwen3-Very-Long-Local-Checkpoint-Name-With-Mixed-English-and-한국어-모델-이름', ko: 'Qwen3-Very-Long-Local-Checkpoint-Name-With-Mixed-English-and-한국어-모델-이름', test_id: 'models-long-name' },
   { key: 'models.unsupported.reason', en: 'Vision input is unavailable for this backend; chat remains text-only.', ko: '이 백엔드에서는 비전 입력을 사용할 수 없어 대화는 텍스트 전용입니다.', test_id: 'models-unsupported-reason' },
   { key: 'models.load', en: 'Load', ko: '로드', test_id: 'models-load' },
   { key: 'models.unload', en: 'Unload', ko: '언로드', test_id: 'models-unload' },

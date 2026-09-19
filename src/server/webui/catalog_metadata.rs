@@ -60,7 +60,7 @@ pub(super) fn catalog_entry(model: RouterCatalogModel) -> CatalogEntry {
         identity: ModelIdentity {
             id: model.ui_model_id,
             inference_id: model.name.clone(),
-            display_name: display_name(&model.name),
+            display_name: display_name(&model.name, source_kind(model.source)),
             source: source_kind(model.source),
             source_key_hash: model.source_key_hash,
             generation: model.generation,
@@ -176,7 +176,7 @@ pub(super) fn single_model_entry_with_provider(
         identity: ModelIdentity {
             id,
             inference_id: inference_id.clone(),
-            display_name: display_name(&inference_id),
+            display_name: display_name(&inference_id, CatalogSourceKind::SingleModel),
             source: CatalogSourceKind::SingleModel,
             source_key_hash,
             generation: 1,
@@ -476,11 +476,20 @@ fn removal_status(
     }
 }
 
-fn display_name(name: &str) -> String {
-    name.rsplit('/')
-        .next()
-        .unwrap_or(name)
-        .replace(['-', '_'], " ")
+/// The label every WebUI surface prints for a model: its inference id
+/// verbatim, with no character rewriting. Cache and preset names are kept
+/// whole (`owner/name`); models-dir and single-model names keep their last
+/// `/` segment, or the whole name when that segment is empty.
+fn display_name(name: &str, source: CatalogSourceKind) -> String {
+    match source {
+        CatalogSourceKind::Cache | CatalogSourceKind::Preset => name.to_string(),
+        CatalogSourceKind::ModelsDir | CatalogSourceKind::SingleModel => name
+            .rsplit('/')
+            .next()
+            .filter(|segment| !segment.is_empty())
+            .unwrap_or(name)
+            .to_string(),
+    }
 }
 
 fn source_kind(source: RouterModelSource) -> CatalogSourceKind {
