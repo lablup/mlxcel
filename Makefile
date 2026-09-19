@@ -130,7 +130,7 @@ help: ## Show this help message
 	@grep -E '^[a-zA-Z0-9_.-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E '(clean|fmt|install)' | grep -v '^bench' | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(CYAN)%-20s$(RESET) %s\n", $$1, $$2}'
 	@echo ""
 	@echo "$(BOLD)Maintenance Targets:$(RESET)"
-	@grep -E '^[a-zA-Z0-9_.-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E '^(update|tree|outdated|verify-versions|verify-kernel-dtype-keys|bump-version):' | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(CYAN)%-20s$(RESET) %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z0-9_.-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E '^(update|tree|outdated|verify-versions|verify-kernel-dtype-keys|verify-binary-assets|bump-version):' | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(CYAN)%-20s$(RESET) %s\n", $$1, $$2}'
 	@echo ""
 	@echo "$(BOLD)Variables:$(RESET)"
 	@echo "  $(CYAN)MODEL$(RESET)    Path to model directory (default: ./models/default)"
@@ -772,6 +772,12 @@ verify-kernel-dtype-keys: ## Assert every CUDA JIT kernel launch keys its cache 
 	@echo "$(CYAN)[verify] kernel dtype cache keys...$(RESET)"
 	@python3 scripts/ci/check_kernel_dtype_keys.py
 
+.PHONY: verify-binary-assets
+verify-binary-assets: ## Assert every tracked binary file is declared with a size budget
+	@echo "$(CYAN)[verify] tracked binary assets...$(RESET)"
+	@python3 scripts/ci/check_binary_assets.py
+	@bash scripts/ci/check_binary_assets_test.sh
+
 # Offline structural half of the llama-server b10621 compatibility gate
 # (issue #1443, epic #1431): validates the checked-in manifest under
 # compat/llama-server/b10621/ without network or the b10621 archive. The
@@ -800,7 +806,7 @@ verify-webui-bundle: ## Rebuild the bundled WebUI twice and compare it with chec
 	@$(WEBUI_BUNDLE_PY) scripts/webui/build_bundle.py --verify
 
 .PHONY: verify-webui-frontend
-verify-webui-frontend: ## Run WebUI lint, typecheck, unit tests, Chromium screenshot gate, and multi-engine browser smoke (issue #1848)
+verify-webui-frontend: ## Run WebUI lint, typecheck, unit tests, Chromium layout/accessibility gate, and multi-engine browser smoke (issue #1848)
 	@echo "$(CYAN)[verify] WebUI frontend lint/type/unit/browser matrix...$(RESET)"
 	@pnpm --dir webui run typecheck
 	@pnpm --dir webui run lint

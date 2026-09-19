@@ -2,3 +2,13 @@ node_modules/
 .playwright-dist/
 playwright-report/
 test-results/
+
+# Playwright screenshot baselines, under both the old explicit path and the
+# default one Playwright picks per spec file. Deliberately not committed: a
+# pixel baseline is renderer-, font- and platform-specific, so keeping one per
+# platform meant ~2 MB of PNG that had to be recaptured on a hosted runner and
+# visually reviewed on every font, Chromium or UI change. The browser suite
+# asserts accessibility, layout geometry and behavior instead; see
+# docs/webui/design-system.md.
+tests/screenshots/
+tests/*-snapshots/

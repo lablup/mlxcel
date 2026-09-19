@@ -72,7 +72,7 @@ Route owner: verify every response is produced from existing runtime truth, appl
 
 Client owner: verify generated DTO drift gate passes, all actions use expected revisions and idempotency keys, reset/gap/server-restart events force resnapshot, indeterminate progress is rendered honestly, and request-only settings never become persistent UI state.
 
-Integration owner: verify compatibility routes and UI routes use one coordinator, producer/consumer/fixtures land atomically, browser security checks cover mutation surfaces, screenshot/test IDs match `ux-contract.md`, and no downstream issue invents an API/state/UX decision already frozen here.
+Integration owner: verify compatibility routes and UI routes use one coordinator, producer/consumer/fixtures land atomically, browser security checks cover mutation surfaces, state coverage and test IDs match `ux-contract.md`, and no downstream issue invents an API/state/UX decision already frozen here.
 
 ## Running the contract gate
 
