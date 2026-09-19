@@ -4346,7 +4346,11 @@ pub fn attention(
         return metal4_attention(q, k, v, scale, mask, softcap, window_size);
     }
 
-    if let Some(chunk) = materializing_sdpa_query_chunk(q, k, v, softcap, mask.is_some()) {
+    // `attention` always issues an array-masked (or unmasked) SDPA through
+    // `fast_scaled_dot_product_attention`; it never asks MLX for causal mode,
+    // so `do_causal` is false here. The causal entry point is
+    // `crate::fast_scaled_dot_product_attention_causal_windowed`.
+    if let Some(chunk) = materializing_sdpa_query_chunk(q, k, v, softcap, mask.is_some(), false) {
         return chunked_query_attention(q, k, v, scale, mask, softcap, chunk);
     }
 
@@ -4503,6 +4507,72 @@ fn sdpa_fallback_max_queries() -> i32 {
     })
 }
 
+/// Upper bound on the query rows whose cuDNN plan-cache key the patched
+/// `sdpa_cudnn` buckets, from `MLXCEL_SDPA_PLAN_BUCKET_MAX_QUERIES` (default
+/// 32; `0` disables bucketing). The `atoi`/`parse` divergence note on
+/// [`sdpa_fallback_max_queries`] applies here too.
+fn sdpa_plan_bucket_max_queries() -> i32 {
+    static MAX_QUERIES: OnceLock<i32> = OnceLock::new();
+    *MAX_QUERIES.get_or_init(|| {
+        std::env::var("MLXCEL_SDPA_PLAN_BUCKET_MAX_QUERIES")
+            .ok()
+            .map(|v| v.trim().parse::<i32>().unwrap_or(0))
+            .unwrap_or(0)
+    })
+}
+
+/// True when the patched `supports_sdpa_cudnn` keeps this call on cuDNN because
+/// its plan-cache key can be bucketed (issue #1820), so no score matrix is
+/// materialized and the small-query fallback below does not apply.
+///
+/// Mirrors `sdpa_plan_bucket_shape_eligible` in
+/// `src/lib/mlx-cpp/patches/mlx/backend/cuda/scaled_dot_product_attention.cpp`,
+/// which is deliberately shape-only so it answers the same during MLX graph
+/// building as at eval time. The layout half of the C++ gate (k/v being slices
+/// of one fixed-size KV cache, and the mask being the broadcast plane
+/// `fast::scaled_dot_product_attention` builds) is not mirrored: when it fails,
+/// MLX still runs cuDNN on the exact shape rather than the ops fallback, so the
+/// score matrix is not materialized either way.
+///
+/// `arr_masked` and `do_causal` are separate because the C++ gate treats them
+/// differently and a single "masked" flag cannot express that: bucketing needs
+/// an array mask to widen, so it takes `has_arr_mask && !do_causal`, while
+/// #1799's fallback fires on either. Collapsing the two here would tell this
+/// mirror that a causal block stays on cuDNN when C++ actually sends it to the
+/// materializing fallback, dropping the query chunking from exactly that call.
+fn cuda_sdpa_plan_bucket_eligible(
+    q_len: i32,
+    k_len: i32,
+    arr_masked: bool,
+    do_causal: bool,
+) -> bool {
+    plan_bucket_eligible_with(
+        q_len,
+        k_len,
+        arr_masked,
+        do_causal,
+        sdpa_plan_bucket_max_queries(),
+    )
+}
+
+/// The eligibility predicate with the bound passed in rather than read from the
+/// environment, so it stays testable independently of the shipped default.
+///
+/// The default is `0`, meaning off: #1820 measured bucketing behind #1799's ops
+/// fallback at three of five block widths, so the shipped dispatch is #1799's
+/// alone and this predicate answers `false` unless a caller opts in. Tests here
+/// pass an explicit bound, because a `OnceLock` read of the environment cannot
+/// be varied per test.
+fn plan_bucket_eligible_with(
+    q_len: i32,
+    k_len: i32,
+    arr_masked: bool,
+    do_causal: bool,
+    max_queries: i32,
+) -> bool {
+    arr_masked && !do_causal && q_len > 1 && q_len <= max_queries && k_len > q_len
+}
+
 /// True when mlxcel's own small-query gate refuses cuDNN for this call, so MLX
 /// materializes the score matrix even though the dtype and head dims are
 /// flash-eligible and [`cuda_sdpa_materializes_scores`] alone would say no.
@@ -4512,16 +4582,25 @@ fn sdpa_fallback_max_queries() -> i32 {
 /// (issue #1799): a masked or causal call with 2 to
 /// `MLXCEL_SDPA_FALLBACK_MAX_QUERIES` query rows over a longer key sequence,
 /// which is the speculative verify shape and the short trailing chunk of a
-/// chunked prefill. Keep the two in step. A stale mirror here silently drops
-/// the score-matrix chunking from exactly the calls the gate newly sends to the
-/// fallback, and raising the variable above its default would widen that hole
-/// without bound.
-fn cuda_sdpa_small_query_fallback(q_len: i32, k_len: i32, masked: bool) -> bool {
+/// chunked prefill. Since #1820 that gate no longer fires for an array-masked
+/// call whose key can be bucketed, so those stay on cuDNN, and what it still
+/// covers is the causal half: a `do_causal` block carries no array mask, so
+/// there is nothing for bucketing to widen and the fallback is still what runs.
+/// Keep the two in step. A stale mirror here silently drops the score-matrix
+/// chunking from exactly the calls the gate newly sends to the fallback, and
+/// raising the variable above its default would widen that hole without bound.
+fn cuda_sdpa_small_query_fallback(
+    q_len: i32,
+    k_len: i32,
+    arr_masked: bool,
+    do_causal: bool,
+) -> bool {
     cfg!(feature = "cuda")
-        && masked
+        && (arr_masked || do_causal)
         && q_len > 1
         && q_len <= sdpa_fallback_max_queries()
         && k_len > q_len
+        && !cuda_sdpa_plan_bucket_eligible(q_len, k_len, arr_masked, do_causal)
 }
 
 /// Pure chunk-length math for [`materializing_sdpa_query_chunk`].
@@ -4556,7 +4635,8 @@ pub(crate) fn materializing_sdpa_query_chunk(
     k: &MlxArray,
     v: &MlxArray,
     softcap: f32,
-    masked: bool,
+    arr_masked: bool,
+    do_causal: bool,
 ) -> Option<i32> {
     let budget = attention_chunk_budget_bytes();
     if budget == 0 {
@@ -4576,7 +4656,7 @@ pub(crate) fn materializing_sdpa_query_chunk(
     }
     let k_len = k_shape[2];
     if !cuda_sdpa_materializes_scores(q, v, softcap)
-        && !cuda_sdpa_small_query_fallback(q_len, k_len, masked)
+        && !cuda_sdpa_small_query_fallback(q_len, k_len, arr_masked, do_causal)
     {
         return None;
     }
@@ -7455,19 +7535,63 @@ mod tests {
 
     #[test]
     fn small_query_fallback_mirrors_the_patched_cudnn_gate() {
-        // The shape the patched `supports_sdpa_cudnn` diverts: masked, 2 to 32
-        // rows, longer key sequence. Off a CUDA build the mirror is inert.
         let cuda = cfg!(feature = "cuda");
-        assert_eq!(cuda_sdpa_small_query_fallback(16, 4096, true), cuda);
-        assert_eq!(cuda_sdpa_small_query_fallback(2, 4096, true), cuda);
-        assert_eq!(cuda_sdpa_small_query_fallback(32, 4096, true), cuda);
-        // Unmasked calls keep cuDNN, so they never reach the fallback.
-        assert!(!cuda_sdpa_small_query_fallback(16, 4096, false));
+        // With bucketing off by default (#1820's measured recommendation), the
+        // #1799 fallback claims array-masked blocks again, exactly as on main.
+        assert_eq!(cuda_sdpa_small_query_fallback(16, 4096, true, false), cuda);
+        assert_eq!(cuda_sdpa_small_query_fallback(2, 4096, true, false), cuda);
+        assert_eq!(cuda_sdpa_small_query_fallback(32, 4096, true, false), cuda);
+        // The causal half of the #1799 gate is what bucketing does NOT take
+        // over: a `do_causal` block carries no array mask, so there is nothing
+        // to widen and C++ still routes it to the materializing ops fallback.
+        // Collapsing these two axes into one `masked` flag is what made this
+        // mirror claim the causal block stayed on cuDNN, which silently
+        // dropped its query chunking.
+        assert_eq!(cuda_sdpa_small_query_fallback(16, 4096, false, true), cuda);
+        assert_eq!(cuda_sdpa_small_query_fallback(2, 4096, false, true), cuda);
+        assert_eq!(cuda_sdpa_small_query_fallback(32, 4096, false, true), cuda);
+        // Neither masked nor causal: cuDNN takes it and never falls back.
+        assert!(!cuda_sdpa_small_query_fallback(16, 4096, false, false));
         // One-row decode, a block wider than the bound, and a prefill whose
         // key length does not exceed its query length are all outside the gate.
-        assert!(!cuda_sdpa_small_query_fallback(1, 4096, true));
-        assert!(!cuda_sdpa_small_query_fallback(33, 4096, true));
-        assert!(!cuda_sdpa_small_query_fallback(4096, 4096, true));
+        assert!(!cuda_sdpa_small_query_fallback(1, 4096, false, true));
+        assert!(!cuda_sdpa_small_query_fallback(33, 4096, false, true));
+        assert!(!cuda_sdpa_small_query_fallback(4096, 4096, false, true));
+    }
+
+    #[test]
+    fn plan_bucket_eligibility_mirrors_the_patched_cudnn_gate() {
+        // Bound passed explicitly: the shipped default is 0 (off, see
+        // `sdpa_plan_bucket_max_queries`), and a OnceLock environment read
+        // cannot be varied per test, so the predicate is exercised directly.
+        let elig = |q, k, m, c| plan_bucket_eligible_with(q, k, m, c, 32);
+        // The array-masked speculative verify shape, which #1820 buckets.
+        assert!(elig(2, 350, true, false));
+        assert!(elig(16, 4096, true, false));
+        assert!(elig(32, 4096, true, false));
+        // Causal-mode blocks carry no array mask, so bucketing cannot
+        // canonicalize their key and #1799's fallback still claims them. This
+        // is the axis the C++ gate rejects at `do_causal`, mirrored here.
+        assert!(!elig(16, 4096, false, true));
+        // Neither an array mask nor causal mode: nothing to widen either.
+        assert!(!elig(16, 4096, false, false));
+        // One-row decode has its own upstream canonicalization, a wider block
+        // amortizes its own plan build, and a prefill has no prior context.
+        assert!(!elig(1, 4096, true, false));
+        assert!(!elig(33, 4096, true, false));
+        assert!(!elig(4096, 4096, true, false));
+    }
+
+    #[test]
+    fn plan_bucketing_is_off_by_default_so_1799_dispatch_ships() {
+        // The shipped default must reproduce main's dispatch exactly: with the
+        // bound at 0 nothing is bucket-eligible, so #1799's fallback reclaims
+        // every array-masked verify block it claimed before #1820.
+        assert_eq!(sdpa_plan_bucket_max_queries(), 0);
+        assert!(!plan_bucket_eligible_with(4, 4096, true, false, 0));
+        let cuda = cfg!(feature = "cuda");
+        assert_eq!(cuda_sdpa_small_query_fallback(4, 4096, true, false), cuda);
+        assert_eq!(cuda_sdpa_small_query_fallback(16, 4096, false, true), cuda);
     }
 
     #[test]

@@ -3440,9 +3440,12 @@ pub fn causal_attention(
     // (e.g. head_dim > 128) would materialize the full [heads, L, L] score
     // matrix in MLX's fallback; chunk the query axis instead (issue #672).
     // `k_len >= q_len` guards the bottom-right causal alignment the chunked
-    // path reproduces.
+    // path reproduces. This call is maskless and causal, so it passes
+    // `arr_masked = false, do_causal = true`: #1820's bucketing needs an array
+    // mask to widen and declines here, which leaves #1799's ops fallback
+    // running and the chunking it needs still switched on.
     if k_len >= q_len
-        && let Some(chunk) = layers::materializing_sdpa_query_chunk(q, k, v, 0.0, true)
+        && let Some(chunk) = layers::materializing_sdpa_query_chunk(q, k, v, 0.0, false, true)
     {
         return layers::chunked_causal_attention(q, k, v, scale, chunk);
     }
@@ -3641,6 +3644,14 @@ mod grouped_gemm_arch_tests;
 #[cfg(test)]
 #[path = "grouped_gemm_numeric_tests.rs"]
 mod grouped_gemm_numeric_tests;
+
+// [#1820] The bucketed cuDNN SDPA plan-cache path points the kernel at the
+// whole KV cache buffer instead of the live prefix, so these check that the
+// columns past `k_len` stay out of the result. CUDA-only: the patched file
+// compiles into the CUDA backend and nowhere else.
+#[cfg(all(test, feature = "cuda"))]
+#[path = "sdpa_plan_bucket_tests.rs"]
+mod sdpa_plan_bucket_tests;
 
 // Numeric-parity, determinism, and SGY-invariance tests for the fused
 // single-token decode-MoE GeGLU kernel (#886). GPU-only (Metal or CUDA);
