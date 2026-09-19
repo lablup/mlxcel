@@ -7,7 +7,7 @@ import { initialSnapshot, reduceWebUiSnapshot } from './reducer';
 
 const lifecycle = { state: 'ready', download: 'complete', busy: false, active_requests: 0, draining_requests: 0, worker_exit_observed: true, last_error: null } as const;
 const fixtureEntry = validateCatalogList(catalogFixture).items[0];
-const entry = { ...fixtureEntry, identity: { ...fixtureEntry.identity, id: 'mdl_a', inference_id: 'model/a', display_name: 'Model A', revision: 5 }, lifecycle };
+const entry = { ...fixtureEntry, identity: { ...fixtureEntry.identity, id: 'mdl_a', inference_id: 'model/a', display_name: 'model/a', revision: 5 }, lifecycle };
 const bootstrap = validateBootstrap(bootstrapFixture);
 
 function catalog(sequence: number): CatalogListResponse {

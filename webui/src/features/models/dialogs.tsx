@@ -66,7 +66,7 @@ export function ConfirmAction({
       : value.kind !== 'capacity' || candidates.some((entry) => entry.identity.id === token && entry.identity.revision === victimRevision));
   return (
     <Dialog open title={title} onClose={onClose} closeLabel={t(locale, 'common.close')} testId="models-confirm">
-      <p>{body}</p>
+      <p className="models-wrap">{body}</p>
       {value.kind === 'delete' ? <code className="models-wrap">{value.entry.identity.id}</code> : null}
       {value.kind === 'capacity' && token && !valid ? <p role="alert">{t(locale, 'models.library.stale')}</p> : null}
       {!same ? <p role="alert">{t(locale, 'models.library.stale')}</p> : null}

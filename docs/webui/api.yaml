@@ -1518,7 +1518,8 @@
           "display_name": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 128
+            "maxLength": 256,
+            "description": "The model's inference id verbatim, with no character rewriting (the full owner/name for cache entries). A label only: select and operate on a model by id."
           },
           "source": {
             "$ref": "#/components/schemas/CatalogSourceKind"

@@ -120,6 +120,20 @@ describe('Models workflows', () => {
     expect(actions.removeModel).not.toHaveBeenCalled();
     expect(host.textContent).toContain('State changed');
   });
+  it('tells the user to type the opaque model ID shown in the delete dialog, not the model name', async () => {
+    render();
+    await click('models-delete');
+    const dialog = requireValue(host.querySelector('[data-testid="models-confirm"]'));
+    const body = requireValue(dialog.querySelector('p'));
+    expect(body.textContent).toContain('type the model ID shown below, not the model name');
+    expect(body.classList.contains('models-wrap')).toBe(true);
+    expect(dialog.querySelector('code')?.textContent).toBe(model().identity.id);
+    const field = requireValue(dialog.querySelector<HTMLInputElement>('[data-testid="models-confirm-name"]'));
+    const label = document.getElementById(requireValue(field.getAttribute('aria-labelledby')))?.textContent ?? '';
+    expect(label).toContain('model ID');
+    expect(label).toContain('mdl_');
+    expect(label).not.toMatch(/model name/i);
+  });
   it('requires exact typed managed-cache identity and distinguishes unload from disk deletion', async () => {
     render();
     await click('models-delete');
@@ -192,12 +206,12 @@ describe('Models workflows', () => {
   it('pages a large inventory and retains selected opaque identity while filtering', async () => {
     const entries = Array.from({ length: 100 }, (_, index) => ({
       ...model(),
-      identity: { ...model().identity, id: `id_${index}`, display_name: `模型 long model ${index}` },
+      identity: { ...model().identity, id: `id_${index}`, display_name: `模型-long-model-${index}` },
     }));
     state = { ...state, catalog: entries, selectedModelId: 'id_99' };
     render();
     expect(host.querySelectorAll('[data-testid="models-table"] tbody tr')).toHaveLength(25);
-    await input('models-search', 'model 1');
+    await input('models-search', 'model-1');
     expect(host.querySelectorAll('[data-testid="models-table"] tbody tr')).toHaveLength(11);
     expect(state.selectedModelId).toBe('id_99');
     expect(actions.downloadModel).not.toHaveBeenCalled();
@@ -213,12 +227,12 @@ describe('reviewed asynchronous recovery paths', () => {
   it('offers explicit capacity recovery after an accepted load fails, without auto retry', async () => {
     const ready = {
       ...model(),
-      identity: { ...model().identity, id: 'idle-target', display_name: 'Idle target' },
+      identity: { ...model().identity, id: 'idle-target', display_name: 'idle-target' },
       lifecycle: { ...model().lifecycle, state: 'ready' as const },
     };
     const busy = {
       ...ready,
-      identity: { ...ready.identity, id: 'busy-target', display_name: 'Busy target' },
+      identity: { ...ready.identity, id: 'busy-target', display_name: 'busy-target' },
       lifecycle: { ...ready.lifecycle, active_requests: 3, busy: true },
     };
     state = { ...state, catalog: [model(), ready, busy] };
@@ -240,8 +254,8 @@ describe('reviewed asynchronous recovery paths', () => {
     );
     await act(async () => recovery?.click());
     const select = host.querySelector<HTMLSelectElement>('[data-testid="models-eviction-target"]');
-    expect(select?.textContent).toContain('Idle target');
-    expect(select?.textContent).not.toContain('Busy target');
+    expect(select?.textContent).toContain('idle-target');
+    expect(select?.textContent).not.toContain('busy-target');
     await act(async () => {
       if (select) {
         select.value = 'idle-target';

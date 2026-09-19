@@ -242,14 +242,14 @@ export const modelStrings = [
   },
   {
     key: 'models.library.delete_body',
-    en: 'Permanently delete the managed cache entry {name} ({source}). This removes files from disk, unlike Unload. Type the model name to confirm.',
-    ko: '관리 캐시 항목 {name} ({source})을 영구 삭제합니다. 언로드와 달리 디스크 파일을 제거합니다. 모델 이름을 입력하여 확인하세요.',
+    en: 'Permanently delete the managed cache entry {name} ({source}). This removes files from disk, unlike Unload. To confirm, type the model ID shown below, not the model name.',
+    ko: '관리 캐시 항목 {name} ({source})을 영구 삭제합니다. 언로드와 달리 디스크 파일을 제거합니다. 확인하려면 모델 이름이 아니라 아래에 표시된 모델 ID를 입력하세요.',
     test_id: 'models-library-delete-body',
   },
   {
     key: 'models.library.confirm_name',
-    en: 'Exact cache model ID to confirm',
-    ko: '확인용 정확한 캐시 모델 ID',
+    en: 'Opaque model ID shown above (starts with mdl_)',
+    ko: '위에 표시된 불투명 모델 ID (mdl_로 시작)',
     test_id: 'models-library-confirm-name',
   },
   {

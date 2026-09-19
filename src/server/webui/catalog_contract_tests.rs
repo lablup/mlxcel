@@ -495,3 +495,64 @@ fn pooling_parent_symlink_is_not_embedding_layout_evidence() {
     assert_eq!(entry.metadata.model_type.as_deref(), Some("qwen3"));
     assert!(entry.supported);
 }
+
+#[test]
+fn display_name_is_the_inference_id_verbatim() {
+    let root = temp_dir("verbatim-display-name");
+    let path = write_model(&root, "weights", "qwen3");
+    let sources = [
+        (
+            "Meta-Llama-3.1-8B-Instruct_4bit",
+            RouterModelSource::ModelsDir,
+        ),
+        ("qwen3-0.6b-4bit", RouterModelSource::ModelsDir),
+        ("qwen3_0.6b_4bit", RouterModelSource::ModelsDir),
+        ("mlx-community/Qwen3-4B-4bit", RouterModelSource::Cache),
+        ("team/qwen3-preset", RouterModelSource::Preset),
+    ];
+    let models: Vec<_> = sources
+        .iter()
+        .map(|(name, source)| model(name, path.clone(), *source))
+        .collect();
+    let listed = |q: Option<&str>| -> Vec<(String, String)> {
+        let query = CatalogQuery {
+            q: q.map(str::to_string),
+            ..Default::default()
+        };
+        let page = list_catalog(models.clone(), &query, "srv".into(), 1).expect("catalog");
+        let mut rows: Vec<_> = page
+            .items
+            .into_iter()
+            .map(|item| (item.identity.inference_id, item.identity.display_name))
+            .collect();
+        rows.sort();
+        rows
+    };
+    let verbatim = |names: &[&str]| -> Vec<(String, String)> {
+        let mut rows: Vec<_> = names
+            .iter()
+            .map(|name| (name.to_string(), name.to_string()))
+            .collect();
+        rows.sort();
+        rows
+    };
+
+    // Every row prints its inference id: `-` and `_` survive, the two
+    // spellings stay distinct, and cache and preset names keep `owner/`.
+    let all_names: Vec<_> = sources.iter().map(|(name, _)| *name).collect();
+    assert_eq!(listed(None), verbatim(&all_names));
+    assert_eq!(
+        listed(Some("qwen3-0.6b-4bit")),
+        verbatim(&["qwen3-0.6b-4bit"])
+    );
+    assert_eq!(
+        listed(Some("qwen3_0.6b_4bit")),
+        verbatim(&["qwen3_0.6b_4bit"])
+    );
+
+    let single = single_model_entry(path.clone(), "Qwen3_0.6B-4bit".into(), lifecycle());
+    assert_eq!(single.identity.display_name, "Qwen3_0.6B-4bit");
+    // An empty last segment falls back to the whole id, never to "".
+    let trailing = single_model_entry(path, "served/".into(), lifecycle());
+    assert_eq!(trailing.identity.display_name, "served/");
+}

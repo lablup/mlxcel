@@ -20,7 +20,7 @@
 
 목록은 `limit`(기본 50, 최대 200), 반환받은 `cursor`, `q`(최대 128바이트), `source`, `task`, `lifecycle`, `support`, `completeness`를 받습니다. 커서는 최대 512바이트이며 투영 대상은 1,000개 항목으로 제한됩니다. 페이지 순서는 인벤토리가 변하지 않을 때 결정적이며 동시 새로고침을 가로지르는 트랜잭션 스냅샷은 아닙니다. `server_instance_id`와 `snapshot_sequence`를 보관하고 상태 변경 시 [architecture.md](architecture.md)의 재스냅샷 규칙을 따릅니다.
 
-카탈로그 작업과 선택에는 `identity.id`, 추론 요청에는 `identity.inference_id`를 사용합니다. 표시 이름은 어느 쪽의 식별자도 아닙니다. 콘텐츠 fingerprint는 메타데이터를 처음 투영하거나 명시적으로 새로고침할 때 관찰한 제한된 파일시스템 메타데이터를 나타내며, 가중치 내용의 암호학적 검증값도 아니고 매 polling마다 다시 계산하는 값도 아닙니다. revision과 lifecycle은 브라우저가 관리하는 별도 상태 머신이 아니라 풀에서 가져옵니다.
+카탈로그 작업과 선택에는 `identity.id`, 추론 요청에는 `identity.inference_id`를 사용합니다. `identity.display_name`은 사람이 읽기 좋게 바꾼 이름이 아니라 추론 ID를 그대로 옮긴 값입니다(models-dir 항목은 디렉터리 이름, 캐시 항목은 전체 `owner/name`). 그래도 이 값은 표시용 레이블일 뿐입니다. 두 소스가 같은 이름을 노출할 수 있으므로 작업과 선택에는 `identity.id`를 사용합니다. 콘텐츠 fingerprint는 메타데이터를 처음 투영하거나 명시적으로 새로고침할 때 관찰한 제한된 파일시스템 메타데이터를 나타내며, 가중치 내용의 암호학적 검증값도 아니고 매 polling마다 다시 계산하는 값도 아닙니다. revision과 lifecycle은 브라우저가 관리하는 별도 상태 머신이 아니라 풀에서 가져옵니다.
 
 다음 사실을 하나의 “작동함” 배지로 합치지 마십시오.
 
