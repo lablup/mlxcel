@@ -1,16 +1,57 @@
-.activity-operations { list-style: none; margin: 0; padding: 0; }
-.activity-operation { padding: var(--space-4); border-bottom: 1px solid var(--color-separator); overflow-wrap: anywhere; }
-.activity-operation header { display: flex; gap: var(--space-3); align-items: center; justify-content: space-between; flex-wrap: wrap; }
-.activity-updated { margin: 0; color: var(--color-muted); overflow-wrap: anywhere; }
-.activity-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: var(--space-4); }
-.activity-metric { margin: 0; padding: var(--space-4); border-bottom: 1px solid var(--color-separator); overflow-wrap: anywhere; }
-.activity-metric dt { font-weight: 600; }
-.activity-metric dd { margin: var(--space-2) 0; }
-.activity-chart { width: 100%; height: 180px; color: var(--color-focus); }
-.activity-chart circle { fill: currentColor; }
+/* Activity: a dense status page. Tokens only; no inline styles (CSP style-src 'self'). */
+.screen-stack.activity-page { gap: var(--space-4); }
+.activity-page h2 { margin: 0; font-size: 1.1rem; }
+.activity-page h3 { margin: 0; font-size: 1rem; }
+.activity-muted { color: var(--color-muted); }
+.activity-note { margin: 0; color: var(--color-muted); overflow-wrap: anywhere; }
+.activity-raw { color: var(--color-muted); font-size: 0.85rem; overflow-wrap: anywhere; }
 
-.activity-metrics--summary { grid-template-columns: repeat(auto-fit, minmax(min(100%, 140px), 1fr)); gap: var(--space-2); }
-.activity-metrics--summary .activity-metric { padding: var(--space-2); }
-.activity-measurement-details { margin-top: var(--space-4); }
-.activity-measurement-details > summary { cursor: pointer; padding: var(--space-2); border-radius: var(--radius-sm); }
-.activity-measurement-details > summary:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+/* Header: the model picker sits beside Refresh and Export; its visible label stays above the trigger. */
+.activity-header .page-header { margin-bottom: 0; }
+.activity-header .page-header__actions { align-items: flex-end; }
+.activity-model-picker { width: min(100%, 18rem); min-width: 0; }
+/* The package stacks the header below 768px; the picker then takes the full column. */
+@media (max-width: 767px) { .activity-model-picker { width: 100%; } }
+
+/* Sections */
+.activity-runtime, .activity-operations-section, .activity-slots { display: grid; gap: var(--space-3); min-width: 0; }
+.activity-section-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); min-width: 0; }
+.activity-counts { margin: 0; color: var(--color-muted); }
+
+/* Summary tiles */
+.activity-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: var(--space-4); }
+.activity-metrics--summary { grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr)); gap: var(--space-2); }
+.activity-metric { margin: 0; padding: var(--space-3); overflow-wrap: anywhere; }
+/* The sparkline moves below the value when the tile is too narrow for both, instead of squeezing the value. */
+.activity-metric .stat-card__value-line { flex-wrap: wrap; }
+.activity-sparkline { display: block; width: 7.5rem; max-width: 100%; height: 2rem; color: var(--color-focus); }
+.activity-sparkline path { fill: none; stroke: currentColor; stroke-width: 4; stroke-linecap: round; }
+
+/* Native disclosures: the measurement list, per-operation identifiers, an unrecognized slot reason. */
+.activity-disclosure > summary { cursor: pointer; padding: var(--space-1) var(--space-2); border-radius: var(--radius-xs); overflow-wrap: anywhere; }
+.activity-disclosure > summary:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+.activity-disclosure > summary .ds-badge { margin-inline-start: var(--space-2); }
+.activity-disclosure[open] > summary { margin-bottom: var(--space-2); }
+.activity-measurement-details > p { margin: 0 0 var(--space-2); color: var(--color-muted); }
+.activity-measurements, .activity-history, .activity-raw-list { margin: 0 0 var(--space-3); padding: 0; list-style: none; display: grid; gap: var(--space-2); }
+.activity-measurements li { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-3); padding-bottom: var(--space-2); border-bottom: 1px solid var(--color-separator); overflow-wrap: anywhere; }
+.activity-measurement__name { font-weight: 650; }
+.activity-measurements .activity-raw { flex-basis: 100%; }
+
+/* Slot table: one line of capacity facts, then the table. Past eight rows it scrolls here, not the page. */
+.activity-slot-meta { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-4); margin: 0; color: var(--color-muted); }
+.activity-slot-scroll { min-width: 0; max-width: 100%; overflow: auto; border-radius: var(--radius-lg); }
+.activity-slot-scroll[data-bounded] { max-height: min(30rem, 70vh); }
+.activity-slot-scroll:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+.activity-slot-scroll .data-table { overflow: visible; }
+.activity-slot-scroll .data-table__cell { padding: var(--space-2); }
+.activity-slot-scroll .data-table__cell--head { white-space: normal; text-transform: none; letter-spacing: normal; }
+.activity-slot-occupancy .ds-progress { display: grid; gap: var(--space-1); }
+
+/* Operations: one line per operation, wrapping only when the column is narrow. The inline
+   padding keeps focus rings clear of SmoothHeight's overflow while it animates. */
+.activity-operations { list-style: none; margin: 0; padding: 0; }
+.activity-operation { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); padding: var(--space-2); border-bottom: 1px solid var(--color-separator); overflow-wrap: anywhere; }
+.activity-operation__kind { font-weight: 650; }
+.activity-operation .ds-progress { flex: 1 1 12rem; min-width: 0; }
+.activity-operation .ds-banner, .activity-operation__details[open] { flex-basis: 100%; }

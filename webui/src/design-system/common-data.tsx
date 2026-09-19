@@ -13,8 +13,22 @@ import { StatCard as CommonStatCard } from '@lablup/ui-common/components/StatCar
 //   (data-reduce-motion), so the count-up would ignore it. CSS stays the only
 //   reduced-motion mechanism: tokens.css and components.css also stop the shared
 //   components' transitions and animations under data-reduce-motion.
-export function StatCard(props: { label: string; value: string; hint?: React.ReactNode; className?: string; testId?: string }): React.JSX.Element {
-  return <CommonStatCard label={props.label} value={props.value} hint={props.hint} className={`ds-stat-card ${props.className ?? ''}`.trim()} testId={props.testId} />;
+// - loading renders the package's skeletons in place of the value and hint. alpha.19 mounts
+//   each one as its own role="status" named "Loading" (English), so the ref bridge makes
+//   them decorative; the caller owns one localized status for the whole waiting region
+//   (the LoadingStatus convention).
+// - sparkline is the package's trailing slot on the value line.
+export function StatCard(props: { label: string; value: string; hint?: React.ReactNode; className?: string; testId?: string; loading?: boolean; sparkline?: React.ReactNode }): React.JSX.Element {
+  const card = <CommonStatCard label={props.label} value={props.value} hint={props.hint} loading={props.loading} sparkline={props.sparkline} className={`ds-stat-card ${props.className ?? ''}`.trim()} testId={props.testId} />;
+  if (!props.loading) return card;
+  return <div className="ds-stat-card-loading" ref={(element) => {
+    for (const shape of element?.querySelectorAll('.skeleton') ?? []) {
+      shape.removeAttribute('role');
+      shape.removeAttribute('aria-busy');
+      shape.removeAttribute('aria-label');
+      shape.setAttribute('aria-hidden', 'true');
+    }
+  }}>{card}</div>;
 }
 
 // Secondary metadata chip. Lifecycle state keeps using StatusBadge (StatusTag).
