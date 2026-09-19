@@ -1,7 +1,7 @@
 // Copyright 2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 import React from 'react';
 import type { RuntimeSnapshot } from '../../api/types';
-import { EmptyState, ErrorBanner, ProgressBar } from '../../design-system/primitives';
+import { EmptyState, ErrorBanner, ProgressBar, StatCard } from '../../design-system/primitives';
 import { t, type Locale } from '../../i18n/catalog';
 import { metricValue } from './format';
 import { activityStrings, type ActivityMetricKey } from './strings';
@@ -18,7 +18,7 @@ export function RuntimeView({ runtime, locale, stale = false }: { runtime: Runti
   const metricLabel = (name: string): string => { const key = `activity.metric.${name}`; return isMetricKey(key) ? t(locale, key) : name.replaceAll('_', ' '); };
   const notAvailable = t(locale, 'activity.not_available');
   return <section aria-label={t(locale, 'activity.runtime')}><h2>{t(locale, 'activity.runtime')}</h2>{stale ? <ErrorBanner tone="warning" title={t(locale, 'activity.stale')} body={t(locale, 'activity.observed')} /> : null}
-    <div className="activity-metrics activity-metrics--summary" data-testid="runtime-summary">{availablePrimary.map(([name, metric]) => <dl className="activity-metric" key={name}><dt>{metricLabel(name)}</dt><dd>{metricValue(metric)}</dd></dl>)}</div>
+    <div className="activity-metrics activity-metrics--summary" data-testid="runtime-summary">{availablePrimary.map(([name, metric]) => <StatCard className="activity-metric" key={name} label={metricLabel(name)} value={metricValue(metric)} />)}</div>
     {availablePrimary.length === 0 ? <p>{t(locale, 'activity.no_primary')}</p> : null}
     {unavailableCount > 0 ? <p>{t(locale, 'activity.unavailable_count')}: {unavailableCount}. {t(locale, 'activity.unavailable_reason')}</p> : null}
     <h3>{t(locale, 'activity.slots')}</h3><p>{t(locale, 'activity.parallel')}: {runtime.slots.effective_parallelism ?? notAvailable} / {runtime.slots.configured_parallelism}</p><p>{t(locale, 'activity.context_line', { context: t(locale, 'activity.context'), request: runtime.slots.request_context_tokens?.toString() ?? notAvailable, pool: t(locale, 'activity.pool'), shared: runtime.slots.shared_pool_context_tokens?.toString() ?? notAvailable })}</p>
@@ -30,9 +30,9 @@ export function RuntimeView({ runtime, locale, stale = false }: { runtime: Runti
       <p>{t(locale, 'activity.slot_tokens', { decoded: slot.decoded_tokens?.toString() ?? notAvailable, cached: slot.cached_prompt_tokens?.toString() ?? notAvailable })}</p>
     </section>)}
     <details className="activity-measurement-details"><summary>{t(locale, 'activity.metric_details')}</summary><p>{t(locale, 'activity.memory')}</p><p>{t(locale, 'activity.timing')}</p>
-      <div className="activity-metrics">{entries.map(([name, metric]) => <dl className="activity-metric" key={name}>
-        <dt>{metricLabel(name)}</dt><dd>{metricValue(metric)}</dd><dd>{t(locale, 'activity.scope')}: {metric.scope}</dd><dd>{t(locale, 'activity.observed')}: {metric.measured_at === null ? t(locale, 'activity.unknown_time') : new Date(metric.measured_at).toLocaleString(locale)}</dd>{metric.reason === null ? null : <dd>{metric.reason}</dd>}
-      </dl>)}</div>
+      <div className="activity-metrics">{entries.map(([name, metric]) => <StatCard className="activity-metric" key={name} label={metricLabel(name)} value={metricValue(metric)} hint={<>
+        <p>{t(locale, 'activity.scope')}: {metric.scope}</p><p>{t(locale, 'activity.observed')}: {metric.measured_at === null ? t(locale, 'activity.unknown_time') : new Date(metric.measured_at).toLocaleString(locale)}</p>{metric.reason === null ? null : <p>{metric.reason}</p>}
+      </>} />)}</div>
     </details>
   </section>;
 }

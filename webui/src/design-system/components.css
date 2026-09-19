@@ -6,7 +6,8 @@
 .ds-button { min-width: 32px; display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2); padding: 7px 14px; font-weight: 650; white-space: normal; overflow-wrap: anywhere; }
 .ds-icon-button { display: inline-grid; place-items: center; padding: 0 9px; }
 .ds-icon { width: 18px; height: 18px; flex: none; }
-.ds-button:hover, .ds-icon-button:hover { background: var(--color-selection); }
+/* :where() keeps this at .ds-button:hover specificity, below the package's enabled-variant hover fills, while still skipping disabled buttons. */
+.ds-button:hover:where(:not(:disabled)), .ds-icon-button:hover:where(:not(:disabled)) { background: var(--color-selection); }
 .ds-button:active, .ds-icon-button:active { transform: scale(0.985); }
 .ds-button:focus-visible, .ds-icon-button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, [role="tab"]:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .ds-button:disabled, .ds-icon-button:disabled, .ds-field[data-disabled="true"] { opacity: 0.56; cursor: not-allowed; }
@@ -41,7 +42,6 @@
 .ds-dialog header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); padding: var(--space-4) var(--space-5); border-bottom: 1px solid var(--color-separator); }
 .ds-dialog h2 { margin: 0; font-size: 1.1rem; }
 .ds-dialog > div { padding: var(--space-5); }
-.ds-sheet[data-position="left"] { width: min(320px, calc(100vw - 32px)); min-height: calc(100vh - 24px); margin: 12px auto 12px 12px; }
 .ds-tooltip-wrap { position: relative; display: inline-flex; min-width: 0; max-width: 100%; }
 .ds-tooltip { position: absolute; z-index: 10; inset: auto auto calc(100% + 8px) 0; opacity: 0; pointer-events: none; width: max-content; max-width: 240px; padding: 6px 9px; border-radius: var(--radius-sm); color: var(--color-bg-elevated); background: var(--color-text); transition: opacity var(--motion-fast); }
 .ds-tooltip-wrap:focus-within .ds-tooltip, .ds-tooltip-wrap:hover .ds-tooltip { opacity: 1; }

@@ -37,6 +37,20 @@ for (const theme of ['light', 'dark'] as const) {
       await expectSafeLayout(page); await expectAxeClean(page);
       await page.keyboard.press('Escape'); await expect(select).toBeFocused();
     }
+    if (theme === 'dark') {
+      // 390px: the shared Drawer writes its width through CSSOM under the served CSP.
+      await page.getByRole('button', { name: 'Open navigation', exact: true }).click();
+      const drawer = page.getByRole('dialog', { name: 'Primary navigation' });
+      await expect(drawer.getByRole('button', { name: 'Close', exact: true })).toBeFocused();
+      await expectSafeLayout(page); await expectAxeClean(page);
+      await page.keyboard.press('Escape'); await expect(drawer).toBeHidden();
+    }
+    // The shared Tooltip positions its body-portalled content through CSSOM top/left.
+    const tooltipTrigger = page.getByRole('button', { name: 'Hover or focus', exact: true });
+    await tooltipTrigger.focus(); await expect(page.getByRole('tooltip')).toBeVisible();
+    await tooltipTrigger.hover(); await expect(page.getByRole('tooltip')).toBeVisible();
+    await expectSafeLayout(page);
+    await page.keyboard.press('Escape'); await expect(page.getByRole('tooltip')).toHaveCount(0);
     await page.getByRole('tab', { name: 'States', exact: true }).click();
     await expectEmptyStateHeading(page);
     const determinate = page.locator('[role="progressbar"][aria-valuenow]').first();

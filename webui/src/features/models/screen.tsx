@@ -3,11 +3,13 @@ import React, { useRef, useState } from 'react';
 import type { CatalogEntry, LoadProfile, Operation } from '../../api/types';
 import { WebUiHttpError } from '../../api/client';
 import {
+  Badge,
   Button,
   DataTable,
   EmptyState,
   ErrorBanner,
   Field,
+  LoadingStatus,
   Select,
   StatusBadge,
   type DataTableColumn,
@@ -196,10 +198,10 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
           >
             {entry.identity.display_name}
           </Button>
-          {entry.identity.id === state.selectedModelId ? <small>{t(locale, 'models.library.selected')}</small> : null}
-          <p>
-            {entry.identity.source} · {entry.metadata.quantization ?? t(locale, 'models.library.unknown')}
-          </p>
+          <span className="models-row-meta">
+            {entry.identity.id === state.selectedModelId ? <Badge tone="accent">{t(locale, 'models.library.selected')}</Badge> : null}{' '}
+            <Badge>{entry.identity.source}</Badge> <Badge>{entry.metadata.quantization ?? t(locale, 'models.library.unknown')}</Badge>
+          </span>
         </>
       ),
     },
@@ -418,7 +420,7 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
             testId="models-table"
             rowClassName={(entry) => (entry.identity.id === state.selectedModelId ? 'models-selected' : undefined)}
             loading={state.catalogSequence === null}
-            loadingState={<p role="status">{t(locale, 'models.library.waiting')}</p>}
+            loadingState={<LoadingStatus label={t(locale, 'models.library.waiting')} />}
             emptyState={
               <EmptyState
                 title={t(locale, state.catalog.length === 0 ? 'models.empty.title' : 'models.library.filtered')}
