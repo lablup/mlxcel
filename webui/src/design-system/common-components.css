@@ -70,6 +70,8 @@
 .ds-loading { display: grid; gap: var(--space-2); }
 .ds-loading__label { margin: 0; color: var(--color-muted); }
 .ds-loading__shapes { display: grid; gap: var(--space-2); }
+/* Badge: metadata keeps its authored casing and wraps rather than overflowing a narrow cell. */
+.badge.ds-badge { min-height: 20px; letter-spacing: normal; text-transform: none; white-space: normal; overflow-wrap: anywhere; }
 /* ErrorBanner: the shared ErrorState as the compact product banner, not its centered 200px block. */
 .ds-banner .error-state { display: grid; gap: var(--space-2); justify-content: stretch; justify-items: start; align-content: start; align-items: start; min-height: 0; padding: 0; text-align: start; }
 .ds-banner .error-state__title { margin: 0; color: inherit; font-size: inherit; font-weight: 700; line-height: inherit; }

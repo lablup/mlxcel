@@ -1,5 +1,6 @@
 // Copyright 2025-2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 import React from 'react';
+import { Badge as CommonBadge } from '@lablup/ui-common/components/Badge';
 import { StatCard as CommonStatCard } from '@lablup/ui-common/components/StatCard';
 
 // A measurement tile. Values arrive already formatted as strings:
@@ -14,4 +15,9 @@ import { StatCard as CommonStatCard } from '@lablup/ui-common/components/StatCar
 //   components' transitions and animations under data-reduce-motion.
 export function StatCard(props: { label: string; value: string; hint?: React.ReactNode; className?: string; testId?: string }): React.JSX.Element {
   return <CommonStatCard label={props.label} value={props.value} hint={props.hint} className={`ds-stat-card ${props.className ?? ''}`.trim()} testId={props.testId} />;
+}
+
+// Secondary metadata chip. Lifecycle state keeps using StatusBadge (StatusTag).
+export function Badge(props: { children: React.ReactNode; tone?: 'neutral' | 'accent' }): React.JSX.Element {
+  return <CommonBadge variant={props.tone === 'accent' ? 'primary' : 'default'} className="ds-badge">{props.children}</CommonBadge>;
 }

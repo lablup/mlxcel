@@ -3,6 +3,7 @@ import React, { useRef, useState } from 'react';
 import type { CatalogEntry, LoadProfile, Operation } from '../../api/types';
 import { WebUiHttpError } from '../../api/client';
 import {
+  Badge,
   Button,
   DataTable,
   EmptyState,
@@ -197,10 +198,10 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
           >
             {entry.identity.display_name}
           </Button>
-          {entry.identity.id === state.selectedModelId ? <small>{t(locale, 'models.library.selected')}</small> : null}
-          <p>
-            {entry.identity.source} · {entry.metadata.quantization ?? t(locale, 'models.library.unknown')}
-          </p>
+          <span className="models-row-meta">
+            {entry.identity.id === state.selectedModelId ? <Badge tone="accent">{t(locale, 'models.library.selected')}</Badge> : null}{' '}
+            <Badge>{entry.identity.source}</Badge> <Badge>{entry.metadata.quantization ?? t(locale, 'models.library.unknown')}</Badge>
+          </span>
         </>
       ),
     },
