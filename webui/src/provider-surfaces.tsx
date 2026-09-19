@@ -2,7 +2,7 @@ import React from 'react';
 import { WebUiHttpError } from './api/client';
 import type { CatalogEntry, ConnectionPhase, WebUiSnapshot } from './api/types';
 import { ValidationError } from './api/validation';
-import { Button, ErrorBanner, LoginView, SchemaMismatchView } from './design-system/primitives';
+import { Button, ErrorBanner, LoginView, PageHeader, SchemaMismatchView } from './design-system/primitives';
 import type { Locale, StringKey } from './i18n/catalog';
 import { t, testId } from './i18n/catalog';
 
@@ -54,7 +54,6 @@ export function connectionPhaseLabel(locale: Locale, phase: ConnectionPhase): st
 
 export interface ProductConnectionSurfaceProps {
   readonly locale: Locale;
-  readonly eyebrow: string;
   readonly title: string;
   readonly titleTestId: string;
   readonly snapshot: WebUiSnapshot;
@@ -79,11 +78,7 @@ function SignedOutSurface(props: ProductConnectionSurfaceProps): React.JSX.Eleme
   if (props.authFailure === 'schema') return <SchemaSurface {...props} />;
   return (
     <div className="screen-stack">
-      <section className="screen-heading connection-prompt">
-        <p className="eyebrow">{props.eyebrow}</p>
-        <h1 data-testid={props.titleTestId}>{props.title}</h1>
-        <p data-testid={testId('connection.prompt.body')}>{t(props.locale, 'connection.prompt.body')}</p>
-      </section>
+      <PageHeader className="connection-prompt" title={props.title} titleTestId={props.titleTestId} description={t(props.locale, 'connection.prompt.body')} descriptionTestId={testId('connection.prompt.body')} />
       <LoginView
         title={t(props.locale, 'state.unauthorized.title')}
         body={t(props.locale, 'state.unauthorized.body')}
@@ -105,11 +100,7 @@ function AuthenticatedSurface(props: ProductConnectionSurfaceProps): React.JSX.E
   const retryable = props.snapshot.connection === 'offline' || props.snapshot.connection === 'stale' || props.snapshot.connection === 'error' || props.snapshot.connection === 'unauthorized' || props.snapshot.connection === 'forbidden';
   return (
     <div className="screen-stack">
-      <section className="screen-heading connection-prompt">
-        <p className="eyebrow">{props.eyebrow}</p>
-        <h1 data-testid={props.titleTestId}>{props.title}</h1>
-        <p data-testid={testId('connection.authenticated.body')}>{t(props.locale, 'connection.authenticated.body')}</p>
-      </section>
+      <PageHeader className="connection-prompt" title={props.title} titleTestId={props.titleTestId} description={t(props.locale, 'connection.authenticated.body')} descriptionTestId={testId('connection.authenticated.body')} />
       <ErrorBanner tone="info" title={t(props.locale, 'connection.authenticated.title')} body={connectedDetail(props.locale, props.snapshot)} testId={testId('connection.authenticated.detail')} />
       {retryable ? <ErrorBanner title={t(props.locale, 'connection.error.title')} body={connectionErrorBody(props.locale, props.snapshot.connection)} action={<Button onClick={props.onRetry}>{t(props.locale, 'common.retry')}</Button>} testId={testId('connection.error.title')} /> : null}
     </div>
@@ -119,10 +110,7 @@ function AuthenticatedSurface(props: ProductConnectionSurfaceProps): React.JSX.E
 function SchemaSurface(props: ProductConnectionSurfaceProps): React.JSX.Element {
   return (
     <div className="screen-stack">
-      <section className="screen-heading connection-prompt">
-        <p className="eyebrow">{props.eyebrow}</p>
-        <h1 data-testid={props.titleTestId}>{props.title}</h1>
-      </section>
+      <PageHeader className="connection-prompt" title={props.title} titleTestId={props.titleTestId} />
       <SchemaMismatchView title={t(props.locale, 'state.schema_mismatch.title')} body={t(props.locale, 'state.schema_mismatch.body')} actionLabel={t(props.locale, 'common.reload')} onRecover={props.onRecoverSchema} />
     </div>
   );

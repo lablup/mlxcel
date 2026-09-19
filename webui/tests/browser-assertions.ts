@@ -64,6 +64,17 @@ export async function expectSafeLayout(page: Page): Promise<void> {
       if (element.matches('.ds-progress .progress-bar__fill')) return properties.some((key) => key !== 'width') || !/^\d+(?:\.\d+)?%$/.test(element.style.width);
       if (element.matches('.select__dropdown--portal')) return properties.some((key) => !['position', 'top', 'left', 'width'].includes(key)) || element.style.position !== 'fixed' || ['top', 'left', 'width'].some((key) => !/^-?\d+(?:\.\d+)?px$/.test(element.style.getPropertyValue(key)));
       if (element.matches('.ds-common-table th')) return properties.some((key) => key !== 'width') || !/^\d+(?:\.\d+)?px$/.test(element.style.width);
+      // Shared Drawer panel: always carries its width prop and max-width 100vw.
+      if (element.matches('aside.drawer.ds-drawer')) return properties.slice().sort().join(',') !== 'max-width,width' || element.style.maxWidth !== '100vw' || !['min(320px, -32px + 100vw)', 'min(320px, 100vw - 32px)', 'min(320px, calc(100vw - 32px))'].includes(element.style.width);
+      // Shared SmoothHeight: the measured content height while active. Scoped to the
+      // product adapter's class, like aside.drawer.ds-drawer above, so an unadapted
+      // SmoothHeight use elsewhere cannot pass this check by class name alone.
+      if (element.matches('.smooth-height.ds-smooth-height')) return properties.join(',') !== 'height' || !/^\d+px$/.test(element.style.height);
+      // Shared Skeleton: its width/height props as inline size. Scoped to the
+      // LoadingStatus adapter's decorative shapes, not every Skeleton use.
+      if (element.matches('.ds-loading__shapes .skeleton')) return properties.slice().sort().join(',') !== 'height,width' || ['width', 'height'].some((key) => !/^\d+(?:\.\d+)?(?:px|%)$/.test(element.style.getPropertyValue(key)));
+      // Shared Tooltip: hidden until measured, then fixed-position top/left in px.
+      if (element.matches('.tooltip__content')) return properties.join(',') === 'visibility' ? element.style.visibility !== 'hidden' : properties.slice().sort().join(',') !== 'left,top' || ['top', 'left'].some((key) => !/^-?\d+(?:\.\d+)?px$/.test(element.style.getPropertyValue(key)));
       return true;
     }).map((element) => element.outerHTML.slice(0, 160)),
     smallTargets: Array.from(document.querySelectorAll<HTMLElement>('button, a[href], input, select, textarea')).filter((element) => {
@@ -100,10 +111,14 @@ export async function expectTextScalePanelsReflow(page: Page): Promise<void> {
     '.app-toolbar',
     '.app-content-grid',
     '.app-content',
+    '.page-layout',
     '.screen-stack',
     '.screen-heading',
     '.screen-heading h1',
     '.screen-heading p',
+    '.page-header',
+    '.page-header__title',
+    '.page-header__description',
     '.ds-tabs',
     '.ds-tabs [role="tablist"]',
     '.ds-tabs [role="tab"]',
@@ -172,7 +187,7 @@ export async function expectTextScaleLabelsReachable(page: Page): Promise<void> 
 }
 
 export async function reportFontDiagnostics(page: Page, label: string): Promise<void> {
-  const selectors = ['.brand-mark', '.toolbar-title p', '.toolbar-title span', '.screen-heading h1', '.screen-heading p:last-child', '.app-nav a', '.ds-tabs [role="tab"]', '.ds-button', '.ds-field > span'];
+  const selectors = ['.brand-mark', '.toolbar-title p', '.toolbar-title span', '.screen-heading h1', '.screen-heading p:last-child', '.page-header__title', '.page-header__description', '.app-nav a', '.ds-tabs [role="tab"]', '.ds-button', '.ds-field > span'];
   const client = await page.context().newCDPSession(page);
   try {
     await client.send('DOM.enable');

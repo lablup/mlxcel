@@ -2,10 +2,15 @@ import React, { useEffect, useId, useRef } from 'react';
 import { Icon } from './icons';
 
 import { Button, IconButton } from './common-adapters';
+import { ErrorBanner } from './common-feedback';
 import { NativeModalContext } from './modal-context';
 export { Button, IconButton, StatusBadge, ProgressBar, EmptyState, Tabs, DataTable } from './common-adapters';
 export type { ButtonProps, ButtonTone, LifecycleState, DataTableColumn, DataTablePersistedState, SortDirection } from './common-adapters';
 export { Select } from './common-select';
+export { Drawer, Tooltip } from './common-overlays';
+export { ErrorBanner, LoadingStatus } from './common-feedback';
+export { Card, PageHeader, PageLayout, SmoothHeight } from './common-layout';
+export { Badge, StatCard } from './common-data';
 
 export function Field(props: { label: string; value: string; onChange?: (value: string) => void; placeholder?: string; disabled?: boolean; busy?: boolean; error?: string; hint?: string; testId?: string }): React.JSX.Element {
   const id = useId();
@@ -23,18 +28,12 @@ export function Field(props: { label: string; value: string; onChange?: (value: 
   );
 }
 
-export function ErrorBanner(props: { title: string; body: string; action?: React.ReactNode; tone?: 'error' | 'warning' | 'info'; testId?: string }): React.JSX.Element {
-  return (
-    <section className="ds-banner" data-tone={props.tone ?? 'error'} role={props.tone === 'info' ? 'status' : 'alert'} data-testid={props.testId}>
-      <strong>{props.title}</strong>
-      <p>{props.body}</p>
-      {props.action}
-    </section>
-  );
-}
-
 type ModalProps = { open: boolean; title: string; children: React.ReactNode; onClose: () => void; labelledBy?: string; testId?: string; closeLabel?: string; className?: string; position?: 'center' | 'left' };
 
+// Stays local: the shared ui-common package has no Dialog or Modal. It is the strongest candidate
+// to contribute upstream, because it carries what the package lacks: the native
+// showModal() top layer, the Tab focus trap, and Escape with focus restoration through
+// restoreModalFocus (see docs/webui/ui-common.md).
 function ModalDialog(props: ModalProps): React.JSX.Element {
   const ref = useRef<HTMLDialogElement>(null);
   const previousFocus = useRef<HTMLElement | null>(null);
@@ -137,20 +136,6 @@ export function ConfirmDialog(props: ConfirmDialogProps): React.JSX.Element {
         <Button tone={props.tone ?? 'primary'} busy={props.busy} disabled={props.busy} data-testid={`${props.testId}-confirm`} onClick={props.onConfirm}>{props.confirmLabel}</Button>
       </div>
     </Dialog>
-  );
-}
-
-export function Sheet(props: Omit<ModalProps, 'position'>): React.JSX.Element {
-  return <ModalDialog {...props} position="left" className={`ds-sheet ${props.className ?? ''}`.trim()} />;
-}
-
-export function Tooltip(props: { label: string; children: React.ReactElement }): React.JSX.Element {
-  const id = useId();
-  return (
-    <span className="ds-tooltip-wrap">
-      {React.cloneElement(props.children, { 'aria-describedby': id } as Partial<HTMLElement>)}
-      <span className="ds-tooltip" role="tooltip" id={id}>{props.label}</span>
-    </span>
   );
 }
 

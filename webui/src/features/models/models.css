@@ -111,3 +111,10 @@
   min-height: 24px;
   padding-block: 2px;
 }
+
+.models-library .models-row-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1, 4px);
+  margin-top: var(--space-1, 4px);
+}

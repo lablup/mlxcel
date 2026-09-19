@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Icon } from './icons';
-import { IconButton, Sheet } from './primitives';
+import { Drawer, IconButton, PageLayout } from './primitives';
 import type { StringKey, Locale } from '../i18n/catalog';
 import type { ConnectionPhase } from '../api/types';
 import { t, testId } from '../i18n/catalog';
@@ -29,7 +29,8 @@ export function AppShell(props: { locale: Locale; route: RouteId; onRouteChange:
     const handleKeyDown = (event: KeyboardEvent): void => {
       const target = event.target;
       const editable = target instanceof HTMLElement && (target.isContentEditable || Boolean(target.closest('[role="combobox"], [role="listbox"]')) || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName));
-      const inModal = target instanceof HTMLElement && Boolean(target.closest('dialog[open]'));
+      // The navigation Drawer is a modal aside, not a native dialog, so match both.
+      const inModal = target instanceof HTMLElement && Boolean(target.closest('dialog[open], [role="dialog"][aria-modal="true"]'));
       if (event.isComposing || event.altKey || editable || inModal) return;
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault();
@@ -45,6 +46,25 @@ export function AppShell(props: { locale: Locale; route: RouteId; onRouteChange:
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
+  useEffect(() => {
+    if (!navOpen || typeof window.matchMedia !== 'function') return;
+    // The drawer exists only up to 960px. Widening past it would leave the drawer open
+    // and its restore target (the menu button) display:none, so close it and move
+    // focus to the desktop sidebar instead of letting it fall to <body>.
+    const compact = window.matchMedia('(max-width: 960px)');
+    const handleChange = (): void => {
+      if (compact.matches) return;
+      setNavOpen(false);
+      requestAnimationFrame(() => {
+        const active = document.activeElement;
+        if (active && active !== document.body && !active.closest('[aria-modal="true"]')) return;
+        const sidebar = sidebarRef.current;
+        (sidebar?.querySelector<HTMLElement>('a[aria-current="page"]') ?? sidebar?.querySelector<HTMLElement>('a'))?.focus();
+      });
+    };
+    compact.addEventListener('change', handleChange);
+    return () => compact.removeEventListener('change', handleChange);
+  }, [navOpen]);
   const moveNav = (direction: number): void => {
     const index = navItems.findIndex((item) => item.id === props.route);
     const next = navItems[(index + direction + navItems.length) % navItems.length];
@@ -64,10 +84,12 @@ export function AppShell(props: { locale: Locale; route: RouteId; onRouteChange:
   return (
     <div className="app-shell">
       <Sidebar locale={props.locale} route={props.route} onRouteChange={handleRoute} onKeyDown={handleSidebarKey} ref={sidebarRef} className="app-sidebar desktop-sidebar material-glass" connectionLabel={props.connectionLabel} connectionState={props.connectionState} />
-      <Sheet open={navOpen} title={t(props.locale, 'nav.primary')} onClose={() => setNavOpen(false)} closeLabel={t(props.locale, 'common.close')} testId="mobile-nav-sheet">
+      <Drawer open={navOpen} title={t(props.locale, 'nav.primary')} onClose={() => setNavOpen(false)} closeLabel={t(props.locale, 'common.close')} testId="mobile-nav-sheet">
         <Sidebar locale={props.locale} route={props.route} onRouteChange={handleRoute} onKeyDown={handleSidebarKey} className="app-sidebar sheet-sidebar" connectionLabel={props.connectionLabel} connectionState={props.connectionState} />
-      </Sheet>
-      <main className="app-main" aria-labelledby="app-title">
+      </Drawer>
+      {/* The shared Drawer traps Tab only from inside its panel. Like the native modal sheet
+          before it, keep the page behind the open drawer inert so focus cannot reach it. */}
+      <main className="app-main" aria-labelledby="app-title" inert={navOpen}>
         <header className="app-toolbar material-glass">
           <IconButton className="mobile-menu-button" label={t(props.locale, 'toolbar.menu')} icon="menu" onClick={() => setNavOpen(true)} data-testid={testId('toolbar.menu')} />
           <div className="toolbar-title">
@@ -82,7 +104,7 @@ export function AppShell(props: { locale: Locale; route: RouteId; onRouteChange:
           </div>
         </header>
         <div className={`app-content-grid ${props.inspector ? 'has-inspector' : ''}`.trim()}>
-          <section className="app-content">{props.children}</section>
+          <PageLayout className="app-content">{props.children}</PageLayout>
           {props.inspector}
         </div>
       </main>
