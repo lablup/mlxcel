@@ -1,5 +1,5 @@
 // Copyright 2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { CatalogEntry, LoadProfile, Operation } from '../../api/types';
 import { WebUiHttpError } from '../../api/client';
 import {
@@ -97,7 +97,8 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
   const rowFocus = useRef<RowFocus | null>(null);
   const selected = state.catalog.find((entry) => entry.identity.id === state.selectedModelId);
   const { profile: selectedProfile } = useLoadProfile(selected?.identity.id ?? null);
-  const rows = inventory(state.catalog, filter, sort);
+  // Runtime and operation events re-render the page without touching the catalog; skip the re-sort.
+  const rows = useMemo(() => inventory(state.catalog, filter, sort), [state.catalog, filter, sort]);
   const pages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
   const visiblePage = Math.min(page, pages - 1);
   const readOnly = state.bootstrap?.server.mode === 'single_model';
@@ -110,7 +111,7 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
     [...state.pendingReconciliations.values()].some((item) => item.kind === 'catalog-refresh');
 
   useEffect(() => {
-    if (consumeInspectorRequest()) setDrawerOpen(true);
+    if (consumeInspectorRequest() && !wide) setDrawerOpen(true);
   }, [inspectRequest]);
 
   // Focus follows a row action to the control that replaces the one used, but only while the
@@ -279,7 +280,8 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
     // Re-selecting the already-open row is a no-op: selectModel always aborts the live stream,
     // forces a full snapshot refetch and clears runtimeHistory, even for the same id.
     if (entry.identity.id !== state.selectedModelId) actions.selectModel(entry.identity.id);
-    setDrawerOpen(true);
+    // At 1100 px and wider the pane follows the selection; the drawer state is for narrow windows only.
+    if (!wide) setDrawerOpen(true);
   };
   const openChat = (entry: CatalogEntry): void => {
     if (!canChat(state, entry)) return;

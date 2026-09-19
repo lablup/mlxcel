@@ -30,13 +30,20 @@ export function consumeInspectorRequest(): boolean {
 }
 
 const WIDE_QUERY = '(min-width: 1100px)';
+// One MediaQueryList per matchMedia implementation, not one per render; tests swap the global.
+let wideQuery: { readonly matchMedia: typeof window.matchMedia; readonly list: MediaQueryList } | null = null;
+function wideList(): MediaQueryList | null {
+  if (typeof window.matchMedia !== 'function') return null;
+  if (wideQuery?.matchMedia !== window.matchMedia) wideQuery = { matchMedia: window.matchMedia, list: window.matchMedia(WIDE_QUERY) };
+  return wideQuery.list;
+}
 function subscribeWide(listener: () => void): () => void {
-  if (typeof window.matchMedia !== 'function') return () => undefined;
-  const query = window.matchMedia(WIDE_QUERY);
-  query.addEventListener('change', listener);
-  return () => query.removeEventListener('change', listener);
+  const list = wideList();
+  if (!list) return () => undefined;
+  list.addEventListener('change', listener);
+  return () => list.removeEventListener('change', listener);
 }
 /** True at 1100 px and wider, where the inspector is a pane beside the list. A browser without matchMedia counts as wide. */
 export function useWideInspector(): boolean {
-  return useSyncExternalStore(subscribeWide, () => typeof window.matchMedia !== 'function' || window.matchMedia(WIDE_QUERY).matches);
+  return useSyncExternalStore(subscribeWide, () => wideList()?.matches ?? true);
 }

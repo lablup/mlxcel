@@ -460,7 +460,7 @@ fn dtype_reports_the_declared_weight_dtype_and_null_when_unknown() {
         r#"{{"model_type":"qwen3","torch_dtype":"{}"}}"#,
         "f".repeat(64)
     );
-    let cases: [(&str, &str, Option<&str>); 12] = [
+    let cases: [(&str, &str, Option<&str>); 13] = [
         (
             "bf16",
             r#"{"model_type":"qwen3","torch_dtype":"bfloat16"}"#,
@@ -495,6 +495,11 @@ fn dtype_reports_the_declared_weight_dtype_and_null_when_unknown() {
             "other-identifier",
             r#"{"model_type":"qwen3","torch_dtype":"Float8_E4M3FN"}"#,
             Some("float8_e4m3fn"),
+        ),
+        (
+            "unrecognized-word",
+            r#"{"model_type":"qwen3","torch_dtype":"verified"}"#,
+            None,
         ),
         (
             "absent",

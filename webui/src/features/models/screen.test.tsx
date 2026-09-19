@@ -705,6 +705,18 @@ describe('inspector Details disclosure', () => {
 
 describe('inspector below 1100 px', () => {
   afterEach(() => vi.unstubAllGlobals());
+  const narrow = (): void => {
+    vi.stubGlobal('matchMedia', (query: string) => ({ matches: !query.includes('min-width: 1100px'), media: query, addEventListener: () => undefined, removeEventListener: () => undefined }));
+  };
+  it('does not leave a drawer to open later when Inspect was used in a wide window', async () => {
+    render();
+    await act(async () => requireValue(host.querySelector<HTMLButtonElement>('[aria-label^="Inspect"]')).click());
+    expect(host.querySelector('aside[aria-label="Model details"]')).not.toBeNull();
+    narrow();
+    render();
+    await act(async () => { await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))); });
+    expect(requireValue(host.querySelector<HTMLElement>('aside.drawer')).classList.contains('drawer--open')).toBe(false);
+  });
   it('opens as a drawer dialog from Inspect, never from a remembered selection, and closing keeps the selection', async () => {
     vi.stubGlobal('matchMedia', (query: string) => ({ matches: !query.includes('min-width: 1100px'), media: query, addEventListener: () => undefined, removeEventListener: () => undefined }));
     render();
