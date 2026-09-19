@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Button, Card, StaticTable, DenseList, Dialog, EmptyState, ErrorBanner, Field, Inspector, LoginView, ProgressBar, SchemaMismatchView, Select, StatusBadge, Tabs, Tooltip } from './design-system/primitives';
+import { Button, Card, StaticTable, DenseList, Dialog, EmptyState, ErrorBanner, Field, Inspector, LoginView, PageHeader, ProgressBar, SchemaMismatchView, Select, StatusBadge, Tabs, Tooltip } from './design-system/primitives';
 import { formatBytes, formatTokensPerSecond } from './design-system/format';
 import type { Locale } from './i18n/catalog';
 import { t, testId } from './i18n/catalog';
@@ -11,11 +11,7 @@ export function DesignGallery(props: { locale: Locale }): React.JSX.Element {
   const [selectValue, setSelectValue] = useState('ready');
   return (
     <div className="screen-stack gallery-screen">
-      <section className="screen-heading">
-        <p className="eyebrow">{t(props.locale, 'gallery.issue')}</p>
-        <h1 data-testid={testId('gallery.title')}>{t(props.locale, 'gallery.title')}</h1>
-        <p data-testid={testId('gallery.subtitle')}>{t(props.locale, 'gallery.subtitle')}</p>
-      </section>
+      <PageHeader title={t(props.locale, 'gallery.title')} titleTestId={testId('gallery.title')} description={t(props.locale, 'gallery.subtitle')} descriptionTestId={testId('gallery.subtitle')} />
       <Tabs active={tab} onChange={setTab} label={t(props.locale, 'gallery.tab.sections')} tabs={[
         { id: 'controls', label: t(props.locale, 'gallery.tab.controls'), panel: <ControlPanel locale={props.locale} value={fieldValue} onValueChange={setFieldValue} selectValue={selectValue} onSelectChange={setSelectValue} onOpenDialog={() => setDialogOpen(true)} /> },
         { id: 'states', label: t(props.locale, 'gallery.tab.states'), panel: <StatePanel locale={props.locale} /> },

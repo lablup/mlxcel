@@ -54,6 +54,11 @@
 .base-card.ds-card:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 /* PageLayout: .app-content-grid already pads the column; drop the package's second 0.5rem inline padding below 768px. */
 .page-layout.ds-page-layout { padding-inline: 0; }
+/* PageHeader: the product's page-title typography; .screen-stack owns the vertical rhythm. */
+.ds-page-header { min-width: 0; max-width: 100%; }
+.ds-page-header .page-header { margin: 0; }
+.ds-page-header .page-header__title { margin: 0; color: var(--color-text); font-size: clamp(1.45rem, 2.6vw, 1.75rem); font-weight: 700; line-height: 1.12; letter-spacing: -0.025em; overflow-wrap: anywhere; }
+.ds-page-header .page-header__description { margin: 1em 0 0; color: var(--color-muted); font-size: 1rem; line-height: 1.55; overflow-wrap: anywhere; }
 /* ErrorBanner: the shared ErrorState as the compact product banner, not its centered 200px block. */
 .ds-banner .error-state { display: grid; gap: var(--space-2); justify-content: stretch; justify-items: start; align-content: start; align-items: start; min-height: 0; padding: 0; text-align: start; }
 .ds-banner .error-state__title { margin: 0; color: inherit; font-size: inherit; font-weight: 700; line-height: inherit; }
