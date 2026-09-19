@@ -30,6 +30,10 @@ export function Field(props: { label: string; value: string; onChange?: (value: 
 
 type ModalProps = { open: boolean; title: string; children: React.ReactNode; onClose: () => void; labelledBy?: string; testId?: string; closeLabel?: string; className?: string; position?: 'center' | 'left' };
 
+// Stays local: the shared ui-common package has no Dialog or Modal. It is the strongest candidate
+// to contribute upstream, because it carries what the package lacks: the native
+// showModal() top layer, the Tab focus trap, and Escape with focus restoration through
+// restoreModalFocus (see docs/webui/ui-common.md).
 function ModalDialog(props: ModalProps): React.JSX.Element {
   const ref = useRef<HTMLDialogElement>(null);
   const previousFocus = useRef<HTMLElement | null>(null);
