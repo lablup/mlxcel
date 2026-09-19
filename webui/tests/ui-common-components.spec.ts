@@ -194,3 +194,36 @@ test.describe('shared SmoothHeight', () => {
     });
   }
 });
+
+test.describe('shared Badge', () => {
+  for (const width of [390, 1440]) {
+    test(`Models rows keep source and quantization readable without growing taller at ${width}`, async ({ page }) => {
+      await installMockApi(page, 'happy');
+      await bootProduct(page, { ...productVariants[0], width, appearance: { ...productVariants[0].appearance, locale: 'en' } });
+      await loginWithMockApi(page);
+      const row = page.getByTestId('models-table').locator('tbody tr').first();
+      const cell = row.locator('td').first();
+      for (const value of ['alpha', 'models_dir', '4bit']) await expect(cell).toContainText(value);
+      // Same-page baseline: the same row with the previous "source · quantization" paragraph.
+      const geometry = await row.evaluate((element, metadata) => {
+        const baseline = element.cloneNode(true) as HTMLElement;
+        const baselineCell = baseline.querySelector('td');
+        const button = baselineCell?.querySelector('button');
+        if (!baselineCell || !button) throw new Error('Missing name cell button');
+        const paragraph = document.createElement('p');
+        paragraph.textContent = metadata;
+        baselineCell.replaceChildren(button, paragraph);
+        element.after(baseline);
+        const result = { actual: element.getBoundingClientRect().height, baseline: baseline.getBoundingClientRect().height };
+        baseline.remove();
+        return result;
+      }, 'models_dir · 4bit');
+      expect(geometry.actual).toBeLessThanOrEqual(geometry.baseline + 0.5);
+      const clipped = await cell.evaluate((element) => Array.from(element.querySelectorAll<HTMLElement>('*')).filter((node) => node.childElementCount === 0 && node.scrollWidth > node.clientWidth + 1).map((node) => node.textContent));
+      expect(clipped).toEqual([]);
+      expect(await horizontalOverflow(page)).toBeLessThanOrEqual(1);
+      await expectAxeClean(page);
+      await expect(cell.locator('.badge:not(.status-tag)')).toHaveText(['models_dir', '4bit']);
+    });
+  }
+});
