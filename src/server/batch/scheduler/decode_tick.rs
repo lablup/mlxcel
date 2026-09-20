@@ -1357,8 +1357,8 @@ impl BatchScheduler {
                     None => {
                         tracing::warn!("Sequence {seq_id} missing from active batch during decode tick");
                         return;
-                        }
-                    };
+                    }
+                };
                 if seq.logprobs_config.enabled
                     && seq.logprobs_config.source == LogprobSource::PostSampling
                 {
