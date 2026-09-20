@@ -29,10 +29,11 @@ printf 'nvidia_driver: %s\n' \
 printf 'gpu: %s\n' \
   "$(nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader 2>/dev/null | head -1)"
 # The architecture list the build was PINNED to, which is not what a default
-# build produces here: build.rs auto-detects and yields `121a`, while the
-# shipped release and every prior GB10 record use plain `121`
-# (.github/workflows/release.yml). A block-width crossover is a kernel-dispatch
-# result, so the arch it was measured on is part of the configuration.
+# build produces here: build.rs auto-detects and yields `121a`, while
+# .github/workflows/release.yml ships `90a;100;121` and every prior GB10 record
+# pins plain `121`. The suffix does not change the decode kernels (only the
+# NVFP4 weight-quantization converter keys on __CUDA_ARCH_SPECIFIC__); it is
+# recorded because a measurement should describe the binaries users run.
 printf 'MLX_CUDA_ARCHITECTURES: %s\n' "${MLX_CUDA_ARCHITECTURES:-unset (auto-detected)}"
 # nvcc is not on the default PATH on this host; the CUDA install root is.
 NVCC=$(command -v nvcc || echo /usr/local/cuda/bin/nvcc)

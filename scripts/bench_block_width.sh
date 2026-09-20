@@ -112,8 +112,8 @@ MEM=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 ))
 # here, so a cross-session comparison had nothing to key on (issue #1797).
 # These three travel together as the host identity. The architecture belongs
 # with them because build.rs auto-detects `121a` on GB10 while the shipped
-# release and every earlier GB10 record use plain `121`, and a block width is
-# decided by which CUDA kernel a verify block dispatches to.
+# release and every earlier GB10 record use plain `121`, so a row measured on
+# an auto-detected build does not describe the binaries users run.
 KERNEL=$(uname -r)
 DRIVER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1)
 ARCHES=${MLX_CUDA_ARCHITECTURES:-auto-detected}

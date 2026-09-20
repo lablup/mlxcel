@@ -17,8 +17,8 @@
 # 2. `MLX_CUDA_ARCHITECTURES=121` is exported for the build AND for every
 #    server process. build.rs auto-detects `121a` on this host, which is not
 #    what `.github/workflows/release.yml` ships and not what any earlier GB10
-#    record used. A draft block width is a kernel-dispatch result, so the arch
-#    is part of the measured configuration rather than build trivia.
+#    record used. The suffix does not change the decode kernels this harness
+#    measures; it is pinned so the numbers describe the binaries users run.
 set -uo pipefail
 BIN=${1:?usage: run_session.sh <mlxcel-server binary> [outdir]}
 D="$(cd "$(dirname "$0")" && pwd)"

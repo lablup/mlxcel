@@ -191,8 +191,9 @@ def run_arm(a, width, prompt, tag):
     env.setdefault("MLX_ENABLE_TF32", "1")
     env.setdefault("RUST_LOG", "info")
     # Pinned, not auto-detected: build.rs yields `121a` here while the shipped
-    # release and every prior GB10 record use plain `121`, and a block-width
-    # crossover is a kernel-dispatch result.
+    # release and every prior GB10 record use plain `121`. The suffix does not
+    # change the decode kernels; the pin is so the numbers describe the
+    # binaries users run.
     env.setdefault("MLX_CUDA_ARCHITECTURES", "121")
     env.update(arm_env(width))
     t0 = time.time()
