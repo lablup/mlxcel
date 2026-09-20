@@ -24,7 +24,9 @@ Driver budget: the boot's cumulative kernel `NV_ERR_NO_MEMORY` count was 0 befor
 
 Served arms: one `mlxcel-server` per arm, `--ignore-eos --max-batch-size 1`, a fixed 158-token Python prompt (the #1797 harness's `prompt_retry.txt`), one non-streaming `POST /v1/completions` at `temperature 0` with `max_tokens 200`, compared by the sha256 of the completion text and by the per-token list the `logprobs` field returns. In-process arms: `#[ignore]`-gated tests in `src/models/qwen3_5_dflash_probe_tests.rs`, which load the real checkpoint and drive the model directly.
 
-The classic reference is anchored twice. Two classic served arms at the start and end of the session are byte-identical to each other (`2c76b0a181`), and `MLXCEL_PRINT_TOKEN_IDS=1 mlxcel generate --no-chat-template --temp 0` on the same prompt produces the same 200 tokens byte for byte. The offline CLI reaches `Qwen35Model::forward_internal` through `LanguageModel::forward`, so that equality is what licenses every in-process arm below to use `forward_internal` as the stand-in for served classic decode. It also supplies the prompt and reference token ids the replay arms take.
+The classic reference is anchored twice. Two classic served arms at the start and end of the session are byte-identical to each other (`2c76b0a181`), and `MLXCEL_PRINT_TOKEN_IDS=1 mlxcel generate --no-chat-template --temp 0` on the same prompt produces the same 200 tokens byte for byte. It also supplies the prompt and reference token ids the replay arms take.
+
+Every in-process arm below uses `Qwen35Model::forward_internal` as the stand-in for served classic decode, and that stands on the call graph rather than on the equality above. The scheduler's B = 1 decode calls `LanguageModel::forward_with_sequence_id` (`src/server/batch/scheduler/decode_tick.rs`), whose Qwen 3.5 impl is `forward_with_sequence_caches(input_ids, None, seq_id)`, which resolves the MRoPE entry and calls `forward_internal`. The offline CLI reaches the same function through `LanguageModel::forward`, which is the same call with `seq_id = None`. The two endpoints agreeing on 200 argmaxes is then a consistency check on that reading, not the reading itself.
 
 ## The root cause: the burst prefilled the prompt as if it were a verify block
 
@@ -56,6 +58,8 @@ In process, against the real 200-token classic transcript:
 | after, block 8 | 0 | 2, first at 93 |
 
 After the fix every layer's cache state is byte-identical between the two prefills, not merely the logits. The width-8 disagreement is the block-versus-chain divergence described below and is not something a prefill fix could reach.
+
+One thing about that cache comparison is worth stating because the first version of the test got it wrong: it has to run immediately after both prefills, before the classic arm's single-token loop advances its caches. Run afterwards it reports the offset gap the chain loop itself opened (358 against 158) and reads as a layer-0 divergence that is not there.
 
 Served, same session, same binary per row:
 
@@ -105,10 +109,13 @@ Against that, the in-process target path is exhaustively exact over the same tra
 
 - prefill: every layer's cache state byte-identical to `forward_internal`'s;
 - verify block: byte-identical to the single-token chain at every one of the 32 layers at block position 0, and 0 of 201 greedy argmax positions disagreeing over the full transcript;
-- rollback: 100 rewinds over the transcript, 0 disagreements, including with the rejected rows carrying a wrong token id (9999) the way a real round's rejected rows carry the drafter's wrong proposals, and across accept patterns `1,2,3`, `1,2,3,4`, `4,1`, `4,4,1`, `1,4,2,4,3` and `2,4,1,3,4,4,1,1`, which mix full-accept rounds that never rewind with partial ones that do;
+- rollback: 0 disagreements across accept patterns `1,2,3`, `1,2,3,4`, `4,1`, `4,4,1`, `1,4,2,4,3` and `2,4,1,3,4,4,1,1`, which mix full-accept rounds that never rewind with partial ones that do, and with the rejected rows carrying a wrong token id (9999) the way a real round's rejected rows carry the drafter's wrong proposals;
+- rollback again, against the served run's **own** accept sequence rather than a synthetic cycle: the width-4 server logs its per-round accept lengths (a `debug` line this change adds), and replaying those 79 rounds in process reproduces the served burst's exact cache history, 56 rewinds at the same depths in the same order. It disagrees with the chain at 0 of 201 positions, with the rejected rows wrong and with them correct alike;
 - with the served capture list `[1, 8, 15, 22, 29]` rather than no capture, and with the round loop's own whole-block `argmax_last_axis` rather than one call per sliced row: 0 disagreements either way.
 
-So the residual is in the served burst wrapper rather than in the target's forward, verify or rewind as this record can drive them. The next step is to drive `DFlashGenerator::run` in process with the real drafter bound, which is the one configuration these arms do not reproduce, and bisect from there. That is a test worth building and is not in this change.
+The last of those is the strongest exclusion available short of running the real drafter: the served burst's round structure is not an approximation of it any more, it is the same 79 rounds with the same rewind depths, and the target reproduces classic decode through all of them. Rejected-row content is excluded as well, since feeding the correct tokens and feeding 9999 give the same answer.
+
+So the residual is in the served burst wrapper rather than in the target's forward, verify or rewind, and one hypothesis is left standing: the drafter executing MLX work between the target's forwards, which every arm here omits. The next step is to drive `DFlashGenerator::run` in process with the real drafter bound and bisect from there, which is the one configuration these arms do not reproduce. That is a test worth building and is not in this change.
 
 ## Controls, including one that was void
 
@@ -124,7 +131,7 @@ So the residual is in the served burst wrapper rather than in the target's forwa
 
 ## Files
 
-Diagnostics: `src/models/qwen3_5_dflash_probe_tests.rs`, six `#[ignore]`-gated tests. The three that take a recorded transcript read it from `MLXCEL_Q35_PROBE_PROMPT` and `MLXCEL_Q35_PROBE_REFERENCE`; `MLXCEL_PRINT_TOKEN_IDS=1 mlxcel generate` prints both lines.
+Diagnostics: `src/models/qwen3_5_dflash_probe_tests.rs`, six `#[ignore]`-gated tests. The three that take a recorded transcript read it from `MLXCEL_Q35_PROBE_PROMPT` and `MLXCEL_Q35_PROBE_REFERENCE`; `MLXCEL_PRINT_TOKEN_IDS=1 mlxcel generate` prints both lines. To replay a served burst's own round structure, read its accept lengths from the server at `RUST_LOG=mlxcel::server::batch::dflash_target=debug`, add one to each (the log reports accepted draft tokens, the test takes kept rows) and pass them as `MLXCEL_Q35_PROBE_ACCEPTS`.
 
 ```
 cargo test --release --features cuda -p mlxcel --lib -- --ignored --test-threads=1 \
