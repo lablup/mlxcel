@@ -110,10 +110,15 @@ MEM=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 ))
 # GB10 host a kernel upgrade landed without its matching NVIDIA module on
 # 2026-09-20 and the resulting driver change was invisible to every harness
 # here, so a cross-session comparison had nothing to key on (issue #1797).
+# These three travel together as the host identity. The architecture belongs
+# with them because build.rs auto-detects `121a` on GB10 while the shipped
+# release and every earlier GB10 record use plain `121`, and a block width is
+# decided by which CUDA kernel a verify block dispatches to.
 KERNEL=$(uname -r)
 DRIVER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1)
+ARCHES=${MLX_CUDA_ARCHITECTURES:-auto-detected}
 echo "host: $HOST ($MEM GB), kernel: $KERNEL, nvidia driver: ${DRIVER:-none}, \
-kind: $KIND, widths: ${WIDTHS[*]}, rounds: $ROUNDS" >&2
+MLX_CUDA_ARCHITECTURES: $ARCHES, kind: $KIND, widths: ${WIDTHS[*]}, rounds: $ROUNDS" >&2
 
 OUT=$(mktemp); DIAG=$(mktemp)
 trap 'command rm -f "$OUT" "$DIAG"' EXIT
@@ -153,7 +158,7 @@ for w in "${WIDTHS[@]}"; do
        "$(echo "$line" | grep -oE 'emitted_per_verify=[0-9.]+' | cut -d= -f2)" >> "$DIAG"
 done
 
-MEASURE_HOST="$HOST ($MEM GB), kernel $KERNEL, nvidia driver ${DRIVER:-none}" \
+MEASURE_HOST="$HOST ($MEM GB), kernel $KERNEL, nvidia driver ${DRIVER:-none}, arch $ARCHES" \
 MEASURE_WATCH="$WATCH" MEASURE_QUIET="$QUIET_LIMIT" \
 python3 - "$OUT" "$DIAG" <<'PY'
 import os, sys, statistics, collections

@@ -1750,8 +1750,11 @@ pub(super) fn run_generation_mode(
         // Keyed on the TARGET checkpoint's quantization as well as the
         // drafter, because the verify block runs through the target's
         // quantized projections; see `mlxcel::cli::draft_block_policy`
-        // (issue #1797). Logged here because the offline path has no
-        // worker-startup summary line of its own.
+        // (issue #1797). `args.model.model` is already a local directory here:
+        // `run_generate_once` rewrites it through
+        // `resolve_model_source_with_override` before any generation runs, so
+        // a `owner/name` repo id never reaches the peek. Logged here because
+        // the offline path has no worker-startup summary line of its own.
         let resolved_block_size = resolve_draft_block_size_for_target(
             args.speculative.draft_block_size,
             resolved_kind,

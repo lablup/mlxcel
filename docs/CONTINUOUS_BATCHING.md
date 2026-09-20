@@ -374,7 +374,13 @@ Supplying a drafter checkpoint (`--draft-model` on `mlxcel serve`,
 `--model-draft` on `mlxcel-server`; the spellings are cross-aliased) turns on
 server-side speculative decoding. The kind is auto-detected from the drafter's
 `config.json` (`--draft-kind mtp|dflash` overrides), and the draft block size
-K defaults per kind (4 for MTP, 16 for DFlash; `--draft-block-size`).
+K is resolved at startup (`--draft-block-size` and its two environment
+spellings override it): a width the drafter checkpoint declares for itself
+wins first, then a measured default for the running compute capability and the
+target's quantization mode (issue #1797; a DFlash drafter against an
+affine-quantized target on GB10 resolves to 4), then the flat per-kind
+constant, 4 for MTP and 16 for DFlash. The resolved width and which of those
+produced it are logged at startup on the `speculative=` line.
 
 Whether the singleton (B=1) speculative burst actually runs is decided by an
 adaptive policy (issues #333/#736), not by the flag alone. The first 4

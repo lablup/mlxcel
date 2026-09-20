@@ -117,23 +117,69 @@ pub enum BlockSizeSource {
     /// names which peek matched.
     DrafterCheckpoint(&'static str),
     /// A measured per-device, per-quantization default from
-    /// [`measured_default_block_size`].
-    MeasuredHardwareDefault,
+    /// [`measured_default_block_size`], carrying the two keys it matched on.
+    MeasuredHardwareDefault {
+        capability: Option<(u32, u32)>,
+        quantization: TargetQuantization,
+    },
     /// The flat per-kind constant, which is what every unmeasured host and
-    /// quantization path takes.
-    KindDefault,
+    /// quantization path takes, carrying the two keys that found no entry.
+    KindDefault {
+        capability: Option<(u32, u32)>,
+        quantization: TargetQuantization,
+    },
 }
 
 impl BlockSizeSource {
     /// One-line reason for the startup log.
+    ///
+    /// The two policy arms name the inputs they were keyed on rather than
+    /// saying only that a default applied. Without that, a log reading
+    /// "per-kind default" cannot distinguish an unmeasured device from a
+    /// target whose `config.json` could not be read, and those call for
+    /// different actions.
     #[must_use]
-    pub fn reason(self) -> &'static str {
+    pub fn reason(self) -> String {
         match self {
-            Self::Override => "operator override",
-            Self::DrafterCheckpoint(which) => which,
-            Self::MeasuredHardwareDefault => "measured default for this device and quantization",
-            Self::KindDefault => "per-kind default (no measurement for this host)",
+            Self::Override => "operator override".to_string(),
+            Self::DrafterCheckpoint(which) => which.to_string(),
+            Self::MeasuredHardwareDefault {
+                capability,
+                quantization,
+            } => format!(
+                "measured default for {} with {}",
+                describe_capability(capability),
+                describe_quantization(quantization)
+            ),
+            Self::KindDefault {
+                capability,
+                quantization,
+            } => format!(
+                "per-kind default, no measurement for {} with {}",
+                describe_capability(capability),
+                describe_quantization(quantization)
+            ),
         }
+    }
+}
+
+/// How a compute capability reads in a log line.
+fn describe_capability(capability: Option<(u32, u32)>) -> String {
+    match capability {
+        Some((major, minor)) => format!("sm_{major}{minor}"),
+        None => "no CUDA device".to_string(),
+    }
+}
+
+/// How a quantization classification reads in a log line. `Other` and
+/// `Unknown` are deliberately different sentences: one is a checkpoint this
+/// policy has no entry for, the other is a checkpoint it could not read.
+fn describe_quantization(quantization: TargetQuantization) -> &'static str {
+    match quantization {
+        TargetQuantization::Affine => "an affine-quantized target",
+        TargetQuantization::Nvfp4 => "an NVFP4 target",
+        TargetQuantization::Other => "a target quantized neither affine nor NVFP4",
+        TargetQuantization::Unknown => "a target whose config.json could not be read",
     }
 }
 
@@ -216,11 +262,17 @@ pub fn resolve_measured_block_size(
     match measured_default_block_size(kind, cuda_compute_capability, target_quantization) {
         Some(width) => ResolvedBlockSize {
             width,
-            source: BlockSizeSource::MeasuredHardwareDefault,
+            source: BlockSizeSource::MeasuredHardwareDefault {
+                capability: cuda_compute_capability,
+                quantization: target_quantization,
+            },
         },
         None => ResolvedBlockSize {
             width: fallback,
-            source: BlockSizeSource::KindDefault,
+            source: BlockSizeSource::KindDefault {
+                capability: cuda_compute_capability,
+                quantization: target_quantization,
+            },
         },
     }
 }
@@ -262,7 +314,10 @@ pub fn peek_target_quantization(model_path: &Path) -> TargetQuantization {
 ///   and understood, there is simply no quantization in it.
 #[must_use]
 pub fn classify_quantization(config: &serde_json::Value) -> TargetQuantization {
-    for scope in [Some(config), config.get("text_config")].into_iter().flatten() {
+    for scope in [Some(config), config.get("text_config")]
+        .into_iter()
+        .flatten()
+    {
         if let Some(found) = classify_one_scope(scope) {
             return found;
         }

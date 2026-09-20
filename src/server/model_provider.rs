@@ -606,10 +606,8 @@ impl ModelProvider {
         // to the worker thread. Failures are
         // surfaced as `anyhow::Error` here so the operator gets a clear
         // startup-time error rather than a per-request 5xx.
-        let speculative_dispatch =
-            crate::server::SpeculativeDispatch::resolve(config, &model_path).map_err(|e| {
-                anyhow::anyhow!("Speculative decoding dispatch resolution failed: {e}")
-            })?;
+        let speculative_dispatch = crate::server::SpeculativeDispatch::resolve(config, &model_path)
+            .map_err(|e| anyhow::anyhow!("Speculative decoding dispatch resolution failed: {e}"))?;
 
         // OpenXLA backend (issue #449 M3 Stage 2c): when `MLXCEL_BACKEND=xla` is
         // selected on an `xla-iree` build, serve through the continuous-batching

@@ -128,11 +128,23 @@ fn resolve_draft_block_size_uses_override_when_provided() {
     )
     .expect("write config.json");
     assert_eq!(
-        resolve_draft_block_size(Some(8), DrafterKind::Mtp, dir.path(), None, TargetQuantization::Unknown),
+        resolve_draft_block_size(
+            Some(8),
+            DrafterKind::Mtp,
+            dir.path(),
+            None,
+            TargetQuantization::Unknown
+        ),
         8
     );
     assert_eq!(
-        resolve_draft_block_size(Some(32), DrafterKind::Dflash, dir.path(), None, TargetQuantization::Unknown),
+        resolve_draft_block_size(
+            Some(32),
+            DrafterKind::Dflash,
+            dir.path(),
+            None,
+            TargetQuantization::Unknown
+        ),
         32
     );
 }
@@ -143,9 +155,24 @@ fn resolve_draft_block_size_falls_back_to_per_kind_default_without_a_drafter_hin
     // an MTP drafter with no discoverable config falls back to the flat
     // Gemma-4-derived constant.
     let missing = std::path::Path::new("/nonexistent/mlxcel-drafter-test-path");
-    assert_eq!(resolve_draft_block_size(None, DrafterKind::Mtp, missing, None, TargetQuantization::Unknown), 4);
     assert_eq!(
-        resolve_draft_block_size(None, DrafterKind::Dflash, missing, None, TargetQuantization::Unknown),
+        resolve_draft_block_size(
+            None,
+            DrafterKind::Mtp,
+            missing,
+            None,
+            TargetQuantization::Unknown
+        ),
+        4
+    );
+    assert_eq!(
+        resolve_draft_block_size(
+            None,
+            DrafterKind::Dflash,
+            missing,
+            None,
+            TargetQuantization::Unknown
+        ),
         16
     );
 }
@@ -163,7 +190,13 @@ fn resolve_draft_block_size_honors_the_qwen35_mtp_drafters_own_configured_value(
     )
     .expect("write config.json");
     assert_eq!(
-        resolve_draft_block_size(None, DrafterKind::Mtp, dir.path(), None, TargetQuantization::Unknown),
+        resolve_draft_block_size(
+            None,
+            DrafterKind::Mtp,
+            dir.path(),
+            None,
+            TargetQuantization::Unknown
+        ),
         3
     );
 }
@@ -183,11 +216,23 @@ fn resolve_draft_block_size_derives_inkling_default_from_the_mtp_layer_count() {
     )
     .expect("write config.json");
     assert_eq!(
-        resolve_draft_block_size(None, DrafterKind::Mtp, dir.path(), None, TargetQuantization::Unknown),
+        resolve_draft_block_size(
+            None,
+            DrafterKind::Mtp,
+            dir.path(),
+            None,
+            TargetQuantization::Unknown
+        ),
         10
     );
     assert_eq!(
-        resolve_draft_block_size(Some(6), DrafterKind::Mtp, dir.path(), None, TargetQuantization::Unknown),
+        resolve_draft_block_size(
+            Some(6),
+            DrafterKind::Mtp,
+            dir.path(),
+            None,
+            TargetQuantization::Unknown
+        ),
         6,
         "an explicit CLI value must override Inkling's n + 2 default"
     );
@@ -213,11 +258,23 @@ fn resolve_draft_block_size_defaults_a_dspark_drafter_to_its_runtime_verify_widt
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(dir.path().join("config.json"), DSPARK_CONFIG).expect("write config.json");
     assert_eq!(
-        resolve_draft_block_size(None, DrafterKind::Dflash, dir.path(), None, TargetQuantization::Unknown),
+        resolve_draft_block_size(
+            None,
+            DrafterKind::Dflash,
+            dir.path(),
+            None,
+            TargetQuantization::Unknown
+        ),
         8
     );
     assert_eq!(
-        resolve_draft_block_size(Some(10), DrafterKind::Dflash, dir.path(), None, TargetQuantization::Unknown),
+        resolve_draft_block_size(
+            Some(10),
+            DrafterKind::Dflash,
+            dir.path(),
+            None,
+            TargetQuantization::Unknown
+        ),
         10,
         "an explicit --draft-block-size restores the trained width"
     );
@@ -233,7 +290,13 @@ fn resolve_draft_block_size_honors_a_dspark_runtime_block_size_up_to_the_trained
     std::fs::write(dir.path().join("config.json"), with_runtime).expect("write config.json");
     // 12 requested rows exceed the trained 10, so the width caps at 10.
     assert_eq!(
-        resolve_draft_block_size(None, DrafterKind::Dflash, dir.path(), None, TargetQuantization::Unknown),
+        resolve_draft_block_size(
+            None,
+            DrafterKind::Dflash,
+            dir.path(),
+            None,
+            TargetQuantization::Unknown
+        ),
         10
     );
 }
@@ -250,7 +313,13 @@ fn resolve_draft_block_size_keeps_the_flat_default_for_a_plain_dflash_drafter() 
     )
     .expect("write config.json");
     assert_eq!(
-        resolve_draft_block_size(None, DrafterKind::Dflash, dir.path(), None, TargetQuantization::Unknown),
+        resolve_draft_block_size(
+            None,
+            DrafterKind::Dflash,
+            dir.path(),
+            None,
+            TargetQuantization::Unknown
+        ),
         DEFAULT_DFLASH_BLOCK_SIZE
     );
 }
@@ -267,7 +336,13 @@ fn resolve_draft_block_size_ignores_block_size_from_a_non_qwen35_mtp_drafter() {
     )
     .expect("write config.json");
     assert_eq!(
-        resolve_draft_block_size(None, DrafterKind::Mtp, dir.path(), None, TargetQuantization::Unknown),
+        resolve_draft_block_size(
+            None,
+            DrafterKind::Mtp,
+            dir.path(),
+            None,
+            TargetQuantization::Unknown
+        ),
         4
     );
 }

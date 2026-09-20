@@ -189,7 +189,8 @@ fn resolve_internal_mtp_kind_is_rejected_at_cli() {
     cfg.draft_model_path = Some(path);
     cfg.draft_kind = Some("internal-mtp".to_string());
 
-    let err = SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect_err("must reject internal-mtp");
+    let err = SpeculativeDispatch::resolve(&cfg, unmeasured_target())
+        .expect_err("must reject internal-mtp");
     match err {
         SpeculativeDispatchError::InvalidKind { message } => {
             assert!(message.contains("internal-mtp"));
@@ -206,7 +207,8 @@ fn resolve_unknown_kind_returns_invalid_kind_error() {
     cfg.draft_model_path = Some(path);
     cfg.draft_kind = Some("bogus-kind".to_string());
 
-    let err = SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect_err("must reject unknown");
+    let err =
+        SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect_err("must reject unknown");
     match err {
         SpeculativeDispatchError::InvalidKind { message } => {
             assert!(message.contains("bogus-kind"));
@@ -236,7 +238,8 @@ fn resolve_with_missing_drafter_config_falls_back_to_default_kind() {
     // scan; the file is read inside.
     let _keep_dir_alive = dir;
 
-    let dispatch = SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect("must resolve via default fallback");
+    let dispatch = SpeculativeDispatch::resolve(&cfg, unmeasured_target())
+        .expect("must resolve via default fallback");
     match dispatch {
         SpeculativeDispatch::DFlash {
             draft_model_path,

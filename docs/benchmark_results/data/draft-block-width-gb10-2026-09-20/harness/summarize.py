@@ -69,13 +69,27 @@ def main():
     print("| arm | n | e2e tok/s mean (min to max) | vs classic | separates from classic | NVRM delta | resolved block_size |")
     print("| --- | ---: | ---: | ---: | --- | ---: | --- |")
     for rec in recs:
+        if rec.get("halted"):
+            print(f"| {rec['arm']} | 0 | HALTED: {rec['halted']} | | | | |")
+            continue
         rs = rates(rec)
         if not rs:
             print(f"| {rec['arm']} | 0 | ERROR {rec.get('error', '')} | | | {rec.get('nvrm_delta', '?')} | |")
             continue
         m = mean(rs)
         ratio = f"{m / baseline:.2f}x" if baseline else ""
-        if rec["arm"].startswith("classic") or not classic_rates:
+        speculative = not rec["arm"].startswith("classic")
+        if speculative and (rec.get("declined_to_classic") or not rec.get("speculative_ran")):
+            # Not a measurement of this width. A declined burst runs classic
+            # decode, so its throughput and its text are classic's, and a ratio
+            # computed from it would read as "this width does nothing".
+            why = "declined to classic" if rec.get("declined_to_classic") else "no DFlash diagnostics line"
+            print(
+                f"| {rec['arm']} | {len(rs)} | {mean(rs):.2f} ({min(rs):.2f} to {max(rs):.2f}) | "
+                f"NOT A MEASUREMENT ({why}) | | +{rec.get('nvrm_delta', '?')} | |"
+            )
+            continue
+        if not speculative or not classic_rates:
             sep = ""
         elif min(rs) > baseline_max:
             sep = "yes, above every classic run"

@@ -50,11 +50,12 @@ if [ -n "$BIN" ] && [ -x "$BIN" ]; then
   printf 'binary: %s\n' "$BIN"
   printf 'binary_sha256: %s\n' "$(sha256sum "$BIN" | cut -d' ' -f1)"
   printf 'binary_mtime: %s\n' "$(date -Is -r "$BIN")"
-  # What the binary was actually compiled for. `build.rs` auto-detects this
-  # from nvidia-smi, and the value it picks (121a) is not the one the shipped
-  # release uses (121), so it belongs in the record rather than being assumed.
-  printf 'cuda_architectures: %s\n' \
-    "$(strings "$BIN" 2>/dev/null | grep -m1 -E '^[0-9]+a?(;[0-9]+a?)*$' || echo unknown)"
+  # What the binary was actually compiled for is not readable from the file:
+  # the first bare numeric string in a 100 MB binary is not the architecture
+  # list. The binary prints it itself at startup, as
+  # `compiled for [121] (cubin)` on the arch summary line, and that log line is
+  # the evidence the record cites. `MLX_CUDA_ARCHITECTURES` above records what
+  # the build was asked for; the two are compared in the record.
 fi
 
 for d in "$@"; do

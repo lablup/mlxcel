@@ -49,7 +49,14 @@ sys.path.insert(
 import hostgate  # noqa: E402
 
 SPEC_LINE = re.compile(r"speculative=(\w+) \(([^)]*)\)")
-DIAG_LINE = re.compile(r"block_size[=:]\s*(\d+)")
+# Anchored on the DFlash diagnostics event specifically. A bare `block_size=`
+# also appears in paged-KV and prefill-chunking lines and would report a number
+# for the classic arm, which has no verify block at all.
+DIAG_LINE = re.compile(r"block_size[=:]\s*(\d+)[^\n]*DFlash diagnostics")
+# A burst that declines runs classic decode instead, at classic throughput and
+# with byte-identical text. Without this the summary reads a decline as "this
+# width does nothing", which is the same shape a genuine null result has.
+DECLINE = "falling back to classic decode"
 
 
 def wait_health(port, timeout=900):
@@ -230,6 +237,14 @@ def run_arm(a, width, prompt, tag):
     rec["diagnostics_block_sizes"] = sorted(
         {int(m) for m in DIAG_LINE.findall(blob)}
     )
+    rec["declined_to_classic"] = DECLINE in blob
+    if rec["declined_to_classic"]:
+        rec["decline_lines"] = [
+            ln.strip() for ln in blob.splitlines() if DECLINE in ln
+        ][:5]
+    # A speculative arm that produced no DFlash diagnostics line never ran a
+    # verify block, whatever its throughput says.
+    rec["speculative_ran"] = bool(rec["diagnostics_block_sizes"])
     window_after, total_after = hostgate.nvrm_counts()
     rec["nvrm_total_after"] = total_after
     rec["nvrm_delta"] = total_after - nvrm_before
@@ -288,7 +303,15 @@ def main():
                         flush=True,
                     )
                     break
-            rec = run_arm(a, width, prompt, tag)
+            try:
+                rec = run_arm(a, width, prompt, tag)
+            except hostgate.DriverHalt as halt:
+                # A budget stop belongs in the data, not only in a traceback.
+                rec = {"arm": tag, "width": width, "halted": str(halt)}
+                f.write(json.dumps(rec) + "\n")
+                f.flush()
+                print(f"[halt] {halt}", file=sys.stderr, flush=True)
+                break
             per_arm_nvrm.append(rec.get("nvrm_delta", 0))
             f.write(json.dumps(rec) + "\n")
             f.flush()
@@ -301,6 +324,7 @@ def main():
                     else f"ERROR {rec.get('error')}"
                 )
                 + f" | nvrm +{rec.get('nvrm_delta', '?')} (total {rec.get('nvrm_total_after', '?')})"
+                + (" | DECLINED TO CLASSIC" if rec.get("declined_to_classic") else "")
                 + f" | {rec.get('speculative_line')}",
                 file=sys.stderr,
                 flush=True,

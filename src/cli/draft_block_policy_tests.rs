@@ -165,12 +165,23 @@ fn resolve_measured_block_size_reports_the_measured_source() {
         FLAT_DFLASH,
     );
     assert_eq!(resolved.width, 4);
-    assert_eq!(resolved.source, BlockSizeSource::MeasuredHardwareDefault);
-    assert!(
-        resolved.describe().starts_with("4 ("),
-        "startup log line must lead with the width: {}",
-        resolved.describe()
+    assert_eq!(
+        resolved.source,
+        BlockSizeSource::MeasuredHardwareDefault {
+            capability: Some((12, 1)),
+            quantization: TargetQuantization::Affine,
+        }
     );
+    let line = resolved.describe();
+    assert!(
+        line.starts_with("4 ("),
+        "startup log line must lead with the width: {line}"
+    );
+    // The log has to name what the policy matched on, not only that a default
+    // applied: an operator reading it must be able to tell an unmeasured
+    // device from an unreadable target config.
+    assert!(line.contains("sm_121"), "{line}");
+    assert!(line.contains("affine"), "{line}");
 }
 
 #[test]
@@ -182,7 +193,49 @@ fn resolve_measured_block_size_reports_the_fallback_source() {
         FLAT_DFLASH,
     );
     assert_eq!(resolved.width, FLAT_DFLASH);
-    assert_eq!(resolved.source, BlockSizeSource::KindDefault);
+    assert_eq!(
+        resolved.source,
+        BlockSizeSource::KindDefault {
+            capability: None,
+            quantization: TargetQuantization::Affine,
+        }
+    );
+    assert!(
+        resolved.describe().contains("no CUDA device"),
+        "{}",
+        resolved.describe()
+    );
+}
+
+#[test]
+fn an_unreadable_target_config_is_distinguishable_from_an_unmeasured_device() {
+    // Both take the flat fallback, but they are different situations and the
+    // startup log is the only place an operator can tell them apart.
+    let unreadable = resolve_measured_block_size(
+        DrafterKind::Dflash,
+        Some((12, 1)),
+        TargetQuantization::Unknown,
+        FLAT_DFLASH,
+    );
+    let unmeasured_device = resolve_measured_block_size(
+        DrafterKind::Dflash,
+        Some((9, 0)),
+        TargetQuantization::Affine,
+        FLAT_DFLASH,
+    );
+    assert_eq!(unreadable.width, FLAT_DFLASH);
+    assert_eq!(unmeasured_device.width, FLAT_DFLASH);
+    assert_ne!(unreadable.describe(), unmeasured_device.describe());
+    assert!(
+        unreadable.describe().contains("config.json"),
+        "{}",
+        unreadable.describe()
+    );
+    assert!(
+        unmeasured_device.describe().contains("sm_90"),
+        "{}",
+        unmeasured_device.describe()
+    );
 }
 
 #[test]
@@ -190,11 +243,20 @@ fn every_block_size_source_has_a_distinct_reason() {
     // The startup log is the only way an operator can tell a measured
     // default from a flag they forgot they exported, so the reasons must not
     // collide.
+    let keys = (Some((12, 1)), TargetQuantization::Affine);
     let reasons = [
         BlockSizeSource::Override.reason(),
         BlockSizeSource::DrafterCheckpoint("the drafter checkpoint's own width").reason(),
-        BlockSizeSource::MeasuredHardwareDefault.reason(),
-        BlockSizeSource::KindDefault.reason(),
+        BlockSizeSource::MeasuredHardwareDefault {
+            capability: keys.0,
+            quantization: keys.1,
+        }
+        .reason(),
+        BlockSizeSource::KindDefault {
+            capability: keys.0,
+            quantization: keys.1,
+        }
+        .reason(),
     ];
     for (i, a) in reasons.iter().enumerate() {
         assert!(!a.is_empty());
@@ -261,7 +323,8 @@ fn an_mlx_native_nvfp4_mode_classifies_as_nvfp4() {
 #[test]
 fn block_float_modes_other_than_nvfp4_classify_as_other() {
     for mode in ["mxfp4", "mxfp8"] {
-        let config = serde_json::json!({"quantization": {"group_size": 32, "bits": 4, "mode": mode}});
+        let config =
+            serde_json::json!({"quantization": {"group_size": 32, "bits": 4, "mode": mode}});
         assert_eq!(
             classify_quantization(&config),
             TargetQuantization::Other,
