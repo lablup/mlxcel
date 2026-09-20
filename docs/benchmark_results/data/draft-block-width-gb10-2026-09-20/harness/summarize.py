@@ -66,15 +66,21 @@ def main():
     baseline = mean(classic_rates) if classic_rates else None
     baseline_max = max(classic_rates) if classic_rates else None
 
-    print("| arm | n | e2e tok/s mean (min to max) | vs classic | separates from classic | NVRM delta | resolved block_size |")
-    print("| --- | ---: | ---: | ---: | --- | ---: | --- |")
+    print(
+        "| arm | n | e2e tok/s mean (min to max) | vs classic | separates from classic | "
+        "acceptance | emitted per verify | round device sync ms | NVRM delta | resolved block_size |"
+    )
+    print("| --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- |")
     for rec in recs:
         if rec.get("halted"):
-            print(f"| {rec['arm']} | 0 | HALTED: {rec['halted']} | | | | |")
+            print(f"| {rec['arm']} | 0 | HALTED: {rec['halted']} | | | | | | | |")
             continue
         rs = rates(rec)
         if not rs:
-            print(f"| {rec['arm']} | 0 | ERROR {rec.get('error', '')} | | | {rec.get('nvrm_delta', '?')} | |")
+            print(
+                f"| {rec['arm']} | 0 | ERROR {rec.get('error', '')} | | | | | | "
+                f"{rec.get('nvrm_delta', '?')} | |"
+            )
             continue
         m = mean(rs)
         ratio = f"{m / baseline:.2f}x" if baseline else ""
@@ -83,10 +89,15 @@ def main():
             # Not a measurement of this width. A declined burst runs classic
             # decode, so its throughput and its text are classic's, and a ratio
             # computed from it would read as "this width does nothing".
-            why = "declined to classic" if rec.get("declined_to_classic") else "no DFlash diagnostics line"
+            if rec.get("declined_to_classic"):
+                why = "declined to classic"
+            elif not rec.get("diagnostics_block_sizes"):
+                why = "no DFlash diagnostics line"
+            else:
+                why = "every burst reported zero rounds"
             print(
                 f"| {rec['arm']} | {len(rs)} | {mean(rs):.2f} ({min(rs):.2f} to {max(rs):.2f}) | "
-                f"NOT A MEASUREMENT ({why}) | | +{rec.get('nvrm_delta', '?')} | |"
+                f"NOT A MEASUREMENT ({why}) | | | | | +{rec.get('nvrm_delta', '?')} | |"
             )
             continue
         if not speculative or not classic_rates:
@@ -95,15 +106,27 @@ def main():
             sep = "yes, above every classic run"
         elif max(rs) < min(classic_rates):
             sep = "yes, below every classic run"
-
         else:
             sep = "no, ranges overlap"
+        diags = rec.get("diagnostics") or []
+        acc = [d["acceptance_rate"] for d in diags if d.get("rounds")]
+        epv = [d["emitted_per_verify"] for d in diags if d.get("rounds")]
+        # The diagnostics fields are per REQUEST totals, so the per-round cost
+        # the #1782 record tabulates is the total divided by the round count.
+        sync = [
+            d["target_argmax_sync_ms"] / d["rounds"]
+            for d in diags
+            if d.get("rounds") and "target_argmax_sync_ms" in d
+        ]
         sizes = rec.get("diagnostics_block_sizes") or []
-        spec = rec.get("speculative_line") or ""
         resolved = f"{','.join(str(s) for s in sizes)}" if sizes else ("classic" if rec["width"] == "classic" else "?")
+        acc_s = f"{mean(acc):.3f}" if acc else ""
+        epv_s = f"{mean(epv):.2f}" if epv else ""
+        sync_s = f"{mean(sync):.1f}" if sync else ""
         print(
             f"| {rec['arm']} | {len(rs)} | {m:.2f} ({min(rs):.2f} to {max(rs):.2f}) | "
-            f"{ratio} | {sep} | +{rec.get('nvrm_delta', '?')} | {resolved} |"
+            f"{ratio} | {sep} | {acc_s} | {epv_s} | {sync_s} | "
+            f"+{rec.get('nvrm_delta', '?')} | {resolved} |"
         )
 
     print()

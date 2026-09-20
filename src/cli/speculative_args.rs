@@ -235,22 +235,15 @@ pub fn default_block_size_for_kind(kind: DrafterKind) -> u32 {
 /// checkpoint's own declaration; it sits between them and the flat constant
 /// precisely so an unmeasured platform is bit-for-bit unchanged.
 ///
-/// When `override_value` is `Some(n)`, returns `n` (with no further
-/// validation here; concrete generators enforce their own minimums).
-///
-/// When `override_value` is `None` AND `kind == DrafterKind::Mtp`, this
-/// first tries [`mlxcel_core::drafter::peek_qwen35_mtp_configured_block_size`]:
-/// `DrafterKind::Mtp` covers two unrelated drafter families (Gemma 4
-/// assistant and Qwen 3.5 MTP), and [`DEFAULT_MTP_BLOCK_SIZE`] is the
-/// Gemma-4-derived constant. Applying it unconditionally to a Qwen 3.5 MTP
-/// drafter ships whatever that constant happens to be rather than the
-/// checkpoint's own declared block size. Issue #1165's own measurement
-/// found the published checkpoint's configured block size (3) faster than
-/// the flat constant (4): 16.48 vs 13.81 tok/s, 0.591 vs 0.465 acceptance
-/// (`docs/benchmark_results/qwen38-mtp-m1ultra-2026-08-16.md`). When the
-/// peek finds no Qwen 3.5 MTP `block_size` (wrong family, missing config,
-/// or the checkpoint omits an explicit value), falls back to
-/// [`default_block_size_for_kind`] as before.
+/// Why step 2 exists at all, since it is not obvious that a checkpoint knows
+/// better than a constant: [`DrafterKind::Mtp`] covers two unrelated drafter
+/// families (Gemma 4 assistant and Qwen 3.5 MTP) and
+/// [`DEFAULT_MTP_BLOCK_SIZE`] is the Gemma-4-derived one, so applying it to a
+/// Qwen 3.5 MTP drafter ships whatever that constant happens to be rather
+/// than the checkpoint's own declared block size. Issue #1165 measured the
+/// published checkpoint's configured block size (3) faster than the flat
+/// constant (4): 16.48 against 13.81 tok/s, 0.591 against 0.465 acceptance
+/// (`docs/benchmark_results/qwen38-mtp-m1ultra-2026-08-16.md`).
 pub fn resolve_draft_block_size_detailed(
     override_value: Option<u32>,
     kind: DrafterKind,

@@ -51,8 +51,21 @@ import hostgate  # noqa: E402
 SPEC_LINE = re.compile(r"speculative=(\w+) \(([^)]*)\)")
 # Anchored on the DFlash diagnostics event specifically. A bare `block_size=`
 # also appears in paged-KV and prefill-chunking lines and would report a number
-# for the classic arm, which has no verify block at all.
-DIAG_LINE = re.compile(r"block_size[=:]\s*(\d+)[^\n]*DFlash diagnostics")
+# for the classic arm, which has no verify block at all. The tracing format
+# puts the message first and the fields after it, so the anchor leads.
+DIAG_LINE = re.compile(r"DFlash diagnostics ([^\n]*)")
+DIAG_FIELDS = (
+    "block_size",
+    "rounds",
+    "proposed_tokens",
+    "accepted_tokens",
+    "acceptance_rate",
+    "emitted_per_verify",
+    "draft_ms",
+    "verify_ms",
+    "target_argmax_sync_ms",
+    "decode_ms",
+)
 # A burst that declines runs classic decode instead, at classic throughput and
 # with byte-identical text. Without this the summary reads a decline as "this
 # width does nothing", which is the same shape a genuine null result has.
@@ -72,7 +85,15 @@ def wait_health(port, timeout=900):
     return False
 
 
-def complete(port, prompt, max_tokens, timeout=1800):
+def first_model_id(port, timeout=30):
+    """The id `/v1/models` reports. `CompletionRequest::model` has no serde
+    default, so a body without it is a 422 before any generation happens."""
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=timeout) as r:
+        data = json.loads(r.read())
+    return data["data"][0]["id"]
+
+
+def complete(port, prompt, max_tokens, model, timeout=1800):
     """One streaming completion. Returns (wall seconds, text, chunk count).
 
     End to end for a fixed token budget, because a DFlash burst delivers its
@@ -81,6 +102,7 @@ def complete(port, prompt, max_tokens, timeout=1800):
     """
     body = json.dumps(
         {
+            "model": model,
             "prompt": prompt,
             "max_tokens": max_tokens,
             "temperature": 0,
@@ -195,14 +217,18 @@ def run_arm(a, width, prompt, tag):
         rec["startup_s"] = round(time.time() - t0, 1)
         # Discarded: the first request pays MLX kernel and graph compilation
         # for every shape this arm will use.
-        warm_s, warm_text, _, prompt_tokens, _ = complete(a.port, prompt, a.max_tokens)
+        model_id = first_model_id(a.port)
+        rec["model_id"] = model_id
+        warm_s, warm_text, _, prompt_tokens, _ = complete(
+            a.port, prompt, a.max_tokens, model_id
+        )
         rec["prompt_tokens"] = prompt_tokens
         rec["warmup_s"] = round(warm_s, 3)
         rec["warmup_chars"] = len(warm_text)
         runs = []
         for _ in range(a.n):
             wall, text, chunks, _, completion_tokens = complete(
-                a.port, prompt, a.max_tokens
+                a.port, prompt, a.max_tokens, model_id
             )
             runs.append(
                 {
@@ -234,17 +260,34 @@ def run_arm(a, width, prompt, tag):
     blob = open(log_path, errors="replace").read()
     spec = SPEC_LINE.search(blob)
     rec["speculative_line"] = spec.group(0) if spec else None
+    diags = []
+    for fields in DIAG_LINE.findall(blob):
+        row = {}
+        for key in DIAG_FIELDS:
+            m = re.search(rf"\b{key}=([0-9.]+)", fields)
+            if m:
+                row[key] = float(m.group(1)) if "." in m.group(1) else int(m.group(1))
+        if row:
+            diags.append(row)
+    rec["diagnostics"] = diags
     rec["diagnostics_block_sizes"] = sorted(
-        {int(m) for m in DIAG_LINE.findall(blob)}
+        {d["block_size"] for d in diags if "block_size" in d}
     )
+    # A burst that produced zero rounds ran the first bonus and nothing else,
+    # which is what a request too short for the round loop looks like. It is
+    # not a measurement of the width either.
+    rec["diagnostics_rounds"] = sorted({d.get("rounds", 0) for d in diags})
     rec["declined_to_classic"] = DECLINE in blob
     if rec["declined_to_classic"]:
         rec["decline_lines"] = [
             ln.strip() for ln in blob.splitlines() if DECLINE in ln
         ][:5]
     # A speculative arm that produced no DFlash diagnostics line never ran a
-    # verify block, whatever its throughput says.
-    rec["speculative_ran"] = bool(rec["diagnostics_block_sizes"])
+    # verify block, whatever its throughput says, and one whose every burst
+    # reported zero rounds never ran one either.
+    rec["speculative_ran"] = bool(rec["diagnostics_block_sizes"]) and any(
+        d.get("rounds", 0) > 0 for d in diags
+    )
     window_after, total_after = hostgate.nvrm_counts()
     rec["nvrm_total_after"] = total_after
     rec["nvrm_delta"] = total_after - nvrm_before
