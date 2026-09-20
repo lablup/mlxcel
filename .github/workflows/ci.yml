@@ -1145,12 +1145,13 @@ jobs:
   # Every other CUDA job in this repository compiles for Blackwell
   # (`121a-real;121`), and release.yml ships
   # `80;86;89;90a;100a-real;100;120a-real;120` on x86_64 and
-  # `90a;100a-real;100;121a-real;121` on aarch64. Nothing below sm_80 is compiled anywhere, so an arch-conditional
-  # break on Volta reaches `main` unnoticed and is found by whoever next builds
-  # from source on one. That is not hypothetical for this repository: epic
-  # #1536 adds `cc < 8` fallbacks to the quantized-matmul overlays precisely
-  # because the sm_80+ paths are wrong there, and every one of those branches
-  # is compiled only when some job asks nvcc for a pre-Ampere target.
+  # `90a;100a-real;100;121a-real;121` on aarch64. Nothing below sm_80 is
+  # compiled anywhere, so an arch-conditional break on Volta reaches `main`
+  # unnoticed and is found by whoever next builds from source on one. That is
+  # not hypothetical for this repository: epic #1536 adds `cc < 8` fallbacks to
+  # the quantized-matmul overlays precisely because the sm_80+ paths are wrong
+  # there, and every one of those branches is compiled only when some job asks
+  # nvcc for a pre-Ampere target.
   #
   # Compile-only, and deliberately so. The realistic failure mode is a
   # compile-time one: a `__CUDA_ARCH__` guard that does not cover cc 7, a
