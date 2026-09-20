@@ -2165,6 +2165,105 @@ impl Qwen35Model {
         }
     }
 
+    /// Prefill `input_ids` through the **standard batched-attention** forward
+    /// while capturing the per-layer hidden states a DFlash drafter is seeded
+    /// from (issue #1935).
+    ///
+    /// This is deliberately NOT [`Self::forward_speculative`], for the reason
+    /// [`Self::forward_prefill_with_last_hidden`] already states for the MTP
+    /// path: `forward_speculative` sends every full-attention layer through
+    /// `attend_per_position`, which is byte-aligned with single-token *decode*
+    /// and is not the *prefill* computation classic decode runs. The classic
+    /// path samples its first token from the batched causal prefill logits and
+    /// carries that prefill's KV and gated-delta state into every token after
+    /// it, so a burst that prefills the per-position way starts from a
+    /// different state and its greedy output drifts away from classic decode
+    /// within a few tokens, at every verify width alike. Measured on GB10 with
+    /// `qwen3.5-4b-4bit`: the two prefills' last-row logits differ in 173206 of
+    /// 496640 bytes and the served completions part company at generated token
+    /// 9. The MTP path took this fix; the DFlash path did not, which is what
+    /// issue #1935 reported.
+    ///
+    /// GDN rollback snapshots are deliberately not captured: a prefill is never
+    /// rolled back, and they are prompt-sized rather than block-sized, which is
+    /// the memory argument `SpeculativeTarget::prefill_forward_with_capture_layers`
+    /// exists for. The returned `gdn_states` is therefore empty, and
+    /// `rollback_partial` must never be called against this output.
+    ///
+    /// Keep the loop in lockstep with [`Self::forward_internal`] (mask
+    /// construction, layer dispatch, final norm, LM head); the capture is the
+    /// only addition.
+    ///
+    /// Used by: `SpeculativeTarget::prefill_forward_with_capture_layers` for
+    /// `Qwen35Model` and `Qwen35VLModel`, which is the DFlash burst's first
+    /// call on both the B = 1 and B > 1 arms.
+    pub fn forward_prefill_with_capture_layers(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Qwen3NextCache],
+        capture_layer_ids: &[usize],
+    ) -> VerifyOutput {
+        let mut h = self.embed_tokens.forward(input_ids);
+
+        let shape = mlxcel_core::array_shape(&h);
+        let seq_len = shape[1];
+
+        let fa_idx = self.config.full_attention_interval - 1;
+        let fa_mask = if seq_len > 1 {
+            let offset = if fa_idx < caches.len() {
+                caches[fa_idx].offset()
+            } else {
+                0
+            };
+            Some(create_causal_mask(seq_len, offset))
+        } else {
+            None
+        };
+
+        let mut hidden_slots: Vec<Option<UniquePtr<MlxArray>>> =
+            (0..capture_layer_ids.len()).map(|_| None).collect();
+
+        for (i, (layer, cache)) in self.layers.iter().zip(caches.iter_mut()).enumerate() {
+            let mask = if layer.is_linear {
+                None
+            } else {
+                fa_mask.as_deref()
+            };
+            h = layer.forward(&h, mask, cache, None);
+
+            for (slot_idx, &want_idx) in capture_layer_ids.iter().enumerate() {
+                if want_idx == i {
+                    hidden_slots[slot_idx] = Some(mlxcel_core::copy(&h));
+                }
+            }
+        }
+
+        let hidden_states: Vec<UniquePtr<MlxArray>> = hidden_slots
+            .into_iter()
+            .map(|opt| {
+                opt.unwrap_or_else(|| {
+                    mlxcel_core::zeros(
+                        &[shape[0], seq_len, self.config.hidden_size as i32],
+                        mlxcel_core::array_dtype(&h),
+                    )
+                })
+            })
+            .collect();
+
+        let h = self.norm.forward(&h);
+        let logits = if let Some(ref lm_head) = self.lm_head {
+            lm_head.forward(&h)
+        } else {
+            self.embed_tokens.as_linear(&h)
+        };
+
+        VerifyOutput {
+            logits,
+            hidden_states,
+            gdn_states: Vec::new(),
+        }
+    }
+
     /// Rewind both KV (attention) and GDN (linear-attention) caches to the
     /// position of the last accepted token after a DFlash verify-pass block.
     ///
@@ -2587,6 +2686,32 @@ impl mlxcel_core::drafter::dflash::SpeculativeTarget for Qwen35Model {
             capture_layer_ids
         };
         self.forward_speculative(verify_input, caches, capture_layer_ids)
+    }
+
+    /// The burst's prompt prefill, which is NOT a verify block and must not
+    /// be computed like one (issue #1935).
+    ///
+    /// The trait default routes here to `verify_forward_with_capture_layers`,
+    /// which sends every full-attention layer through `attend_per_position`.
+    /// That is right for a verify block, whose rows have to match what
+    /// single-token decode would produce, and wrong for the prompt, which
+    /// classic decode runs as one batched causal attention. Prefilling the
+    /// per-position way leaves the burst holding different KV and gated-delta
+    /// state than classic decode, and its greedy output then drifts at every
+    /// verify width alike. See
+    /// [`Qwen35Model::forward_prefill_with_capture_layers`].
+    fn prefill_forward_with_capture_layers(
+        &self,
+        verify_input: &MlxArray,
+        caches: &mut [Self::Cache],
+        capture_layer_ids: &[usize],
+    ) -> Self::VerifyOut {
+        let capture_layer_ids = if capture_layer_ids.is_empty() {
+            mlxcel_core::drafter::dflash::config::DEFAULT_TARGET_LAYER_IDS
+        } else {
+            capture_layer_ids
+        };
+        self.forward_prefill_with_capture_layers(verify_input, caches, capture_layer_ids)
     }
 
     fn rollback_partial(
