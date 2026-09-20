@@ -1,9 +1,7 @@
 """Retry helpers with exponential backoff and jitter.
 
-This module is deliberately dependency-free so it can be vendored into
-small services that must not grow a third-party requirement just to
-retry an HTTP call. The public surface is one decorator and one context
-manager; everything else is private.
+Dependency-free so it can be vendored into small services that must not
+grow a third-party requirement just to retry an HTTP call.
 """
 
 import functools
@@ -28,12 +26,3 @@ class BackoffPolicy:
     jitter: bool = True
 
     def delays(self):
-        for attempt in itertools.count():
-            if attempt >= self.max_attempts:
-                return
-            raw = min(self.base_delay * (2 ** attempt), self.max_delay)
-            yield random.uniform(0, raw) if self.jitter else raw
-
-
-def retry_with_backoff(policy=None, retry_on=(OSError,)):
-    """Retry the wrapped callable according to `policy`.

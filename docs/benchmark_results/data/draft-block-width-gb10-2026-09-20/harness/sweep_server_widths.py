@@ -78,6 +78,9 @@ def complete(port, prompt, max_tokens, timeout=1800):
             "max_tokens": max_tokens,
             "temperature": 0,
             "stream": True,
+            # Without this the streamed response carries no usage block and
+            # the record cannot state the prompt length it measured at.
+            "stream_options": {"include_usage": True},
         }
     ).encode()
     req = urllib.request.Request(
@@ -87,6 +90,8 @@ def complete(port, prompt, max_tokens, timeout=1800):
     )
     text = []
     chunks = 0
+    prompt_tokens = None
+    completion_tokens = None
     t0 = time.time()
     with urllib.request.urlopen(req, timeout=timeout) as r:
         for raw in r:
@@ -100,12 +105,17 @@ def complete(port, prompt, max_tokens, timeout=1800):
                 obj = json.loads(payload)
             except json.JSONDecodeError:
                 continue
+            usage = obj.get("usage") or {}
+            if usage.get("prompt_tokens"):
+                prompt_tokens = usage["prompt_tokens"]
+            if usage.get("completion_tokens"):
+                completion_tokens = usage["completion_tokens"]
             for choice in obj.get("choices", []):
                 piece = choice.get("text")
                 if piece:
                     text.append(piece)
                     chunks += 1
-    return time.time() - t0, "".join(text), chunks
+    return time.time() - t0, "".join(text), chunks, prompt_tokens, completion_tokens
 
 
 def server_cmd(a, width):
@@ -178,18 +188,22 @@ def run_arm(a, width, prompt, tag):
         rec["startup_s"] = round(time.time() - t0, 1)
         # Discarded: the first request pays MLX kernel and graph compilation
         # for every shape this arm will use.
-        warm_s, warm_text, _ = complete(a.port, prompt, a.max_tokens)
+        warm_s, warm_text, _, prompt_tokens, _ = complete(a.port, prompt, a.max_tokens)
+        rec["prompt_tokens"] = prompt_tokens
         rec["warmup_s"] = round(warm_s, 3)
         rec["warmup_chars"] = len(warm_text)
         runs = []
         for _ in range(a.n):
-            wall, text, chunks = complete(a.port, prompt, a.max_tokens)
+            wall, text, chunks, _, completion_tokens = complete(
+                a.port, prompt, a.max_tokens
+            )
             runs.append(
                 {
                     "wall_s": round(wall, 3),
                     "e2e_tok_s": round(a.max_tokens / wall, 3),
                     "chunks": chunks,
                     "chars": len(text),
+                    "completion_tokens": completion_tokens,
                     "text": text,
                 }
             )
