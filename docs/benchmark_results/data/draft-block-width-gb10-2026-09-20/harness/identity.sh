@@ -34,11 +34,20 @@ printf 'gpu: %s\n' \
 # (.github/workflows/release.yml). A block-width crossover is a kernel-dispatch
 # result, so the arch it was measured on is part of the configuration.
 printf 'MLX_CUDA_ARCHITECTURES: %s\n' "${MLX_CUDA_ARCHITECTURES:-unset (auto-detected)}"
+# nvcc is not on the default PATH on this host; the CUDA install root is.
+NVCC=$(command -v nvcc || echo /usr/local/cuda/bin/nvcc)
 printf 'cuda_toolkit: %s\n' \
-  "$(nvcc --version 2>/dev/null | sed -n 's/.*release \([0-9.]*\).*/\1/p' | head -1)"
+  "$("$NVCC" --version 2>/dev/null | sed -n 's/.*release \([0-9.]*\).*/\1/p' | head -1)"
 printf 'mlx_pin: %s\n' \
   "$(sed -n 's/^ *GIT_TAG \([0-9a-f]\{40\}\).*/\1/p' "$REPO/src/lib/mlx-cpp/CMakeLists.txt" | head -1)"
-printf 'rustc: %s\n' "$(rustc --version 2>/dev/null)"
+# The rustc that BUILT the binary, which is not necessarily the one first on
+# PATH here: this repo pins a toolchain and the build exports it ahead of the
+# default. `BUILD_RUSTC` lets the caller state the one it used; both are
+# printed so a mismatch is visible rather than silently recorded as the wrong
+# one.
+printf 'rustc_on_path: %s\n' "$(rustc --version 2>/dev/null)"
+printf 'rustc_used_for_build: %s\n' \
+  "$(${BUILD_RUSTC:-rustc} --version 2>/dev/null)"
 printf 'git_commit: %s\n' "$(git -C "$REPO" rev-parse HEAD 2>/dev/null)"
 printf 'git_dirty: %s\n' \
   "$([ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ] && echo yes || echo no)"

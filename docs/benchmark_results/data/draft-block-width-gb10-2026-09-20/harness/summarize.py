@@ -134,15 +134,29 @@ def main():
     for rec in recs:
         for r in rec.get("runs", []):
             texts.setdefault(rec["arm"], set()).add(r["text"])
+    # The two classic arms have to agree with each other first. If they do
+    # not, greedy decode is not deterministic in this session and no identity
+    # claim about a speculative arm means anything.
+    opening_texts = texts.get("classic-open", set())
+    closing_texts = texts.get("classic-close", set())
+    if opening_texts and closing_texts:
+        if opening_texts == closing_texts and len(opening_texts) == 1:
+            print("Greedy identity: the two classic arms are byte-identical to each other.")
+        else:
+            print(
+                "Greedy identity: THE TWO CLASSIC ARMS DIFFER. Greedy decode is not "
+                "reproducible across servers in this session, so no identity claim below "
+                "is meaningful."
+            )
     classic_text = None
-    for arm in ("classic-open", "classic-close"):
-        if arm in texts and len(texts[arm]) == 1:
-            classic_text = next(iter(texts[arm]))
-            break
+    if len(opening_texts) == 1:
+        classic_text = next(iter(opening_texts))
+    elif len(closing_texts) == 1:
+        classic_text = next(iter(closing_texts))
     if classic_text is None:
         print("Greedy identity: no single classic completion to compare against.")
     else:
-        for arm, ts in texts.items():
+        for arm, ts in sorted(texts.items()):
             if len(ts) != 1:
                 print(f"Greedy identity: {arm} produced {len(ts)} distinct completions across its runs.")
                 continue

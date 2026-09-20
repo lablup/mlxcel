@@ -119,13 +119,18 @@ pub enum BlockSizeSource {
     /// A measured per-device, per-quantization default from
     /// [`measured_default_block_size`], carrying the two keys it matched on.
     MeasuredHardwareDefault {
+        /// The running CUDA compute capability the entry matched.
         capability: Option<(u32, u32)>,
+        /// The target quantization classification the entry matched.
         quantization: TargetQuantization,
     },
     /// The flat per-kind constant, which is what every unmeasured host and
     /// quantization path takes, carrying the two keys that found no entry.
     KindDefault {
+        /// The running CUDA compute capability, `None` off CUDA.
         capability: Option<(u32, u32)>,
+        /// What the target's `config.json` declared, or
+        /// [`TargetQuantization::Unknown`] when it could not be read.
         quantization: TargetQuantization,
     },
 }

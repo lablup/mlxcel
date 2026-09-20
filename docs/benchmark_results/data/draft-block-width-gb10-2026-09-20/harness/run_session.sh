@@ -24,6 +24,9 @@ BIN=${1:?usage: run_session.sh <mlxcel-server binary> [outdir]}
 D="$(cd "$(dirname "$0")" && pwd)"
 OUT=${2:-$(cd "$D/.." && pwd)}
 export MLX_CUDA_ARCHITECTURES=${MLX_CUDA_ARCHITECTURES:-121}
+# The pinned toolchain this repo builds with, so the identity records the rustc
+# that produced the binary rather than whichever one is first on PATH.
+export BUILD_RUSTC=${BUILD_RUSTC:-/home/inureyes/.rustup/toolchains/1.93.1-aarch64-unknown-linux-gnu/bin/rustc}
 
 # The renamed copy lives outside the repo: it is a 100 MB binary and the data
 # directory is committed.

@@ -181,9 +181,14 @@ def run_arm(a, width, prompt, tag):
     log_path = os.path.join(a.logdir, f"server.{tag}.log")
     log = open(log_path, "w")
     env = dict(os.environ)
-    # MLX defaults TF32 on; nothing here is a float comparison, but the record
-    # has to be able to say which way it was set.
-    env.setdefault("MLX_ENABLE_TF32", "0")
+    # MLX's own default is ON (`get_var("MLX_ENABLE_TF32", 1)` in mlx/utils.h),
+    # and a width seeded into a shipped default has to be measured in the
+    # configuration users actually run. It is not neutral here either: turning
+    # it off costs the speculative arms about 9% while costing the classic arm
+    # under 2%, because the linear-attention layers' chunked scan is a pile of
+    # f32 batched matmuls that only the verify path pays for. Set explicitly
+    # rather than left unset so the record can state it.
+    env.setdefault("MLX_ENABLE_TF32", "1")
     env.setdefault("RUST_LOG", "info")
     # Pinned, not auto-detected: build.rs yields `121a` here while the shipped
     # release and every prior GB10 record use plain `121`, and a block-width
