@@ -793,10 +793,10 @@ jobs:
     # A cold build compiles MLX for eight code-generation passes (six
     # architectures, two of them also as an `a-real` cubin; CUTLASS-heavy
     # quantized kernels per pass); the persistent cargo cache makes later runs
-    # far cheaper. Generous ceiling so a from-scratch build is not killed (a
-    # cold six-pass build was observed at ~3h, so budget proportionally more
-    # for the two added Blackwell cubins).
-    timeout-minutes: 600
+    # far cheaper. Generous ceiling so a from-scratch build is not killed. The
+    # ceiling is unchanged at eight passes: a cold six-pass build was observed
+    # at ~3h, so proportionally eight is ~4h against a 8h ceiling.
+    timeout-minutes: 480
 
     steps:
       - name: Checkout code
