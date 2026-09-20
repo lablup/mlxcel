@@ -16,9 +16,10 @@
 #
 # 2. `MLX_CUDA_ARCHITECTURES=121` is exported for the build AND for every
 #    server process. build.rs auto-detects `121a` on this host, which is not
-#    what `.github/workflows/release.yml` ships and not what any earlier GB10
-#    record used. The suffix does not change the decode kernels this harness
-#    measures; it is pinned so the numbers describe the binaries users run.
+#    what any earlier GB10 record used. The suffix does not change the decode
+#    kernels this harness measures (only the NVFP4 weight-quantization
+#    converter keys on __CUDA_ARCH_SPECIFIC__); it is pinned so these numbers
+#    sit alongside every earlier GB10 record's.
 set -uo pipefail
 BIN=${1:?usage: run_session.sh <mlxcel-server binary> [outdir]}
 D="$(cd "$(dirname "$0")" && pwd)"

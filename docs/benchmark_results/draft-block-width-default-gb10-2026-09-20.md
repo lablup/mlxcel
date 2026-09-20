@@ -18,7 +18,7 @@ mem_total_gib: 121.7
 binary_sha256: e4e0cce124d9a72b087ff9c0700b6013b281452b10cb483c365f604a2812208a
 ```
 
-Three of those are new to a record in this tree, and they are why this session cannot be compared to an earlier one by assumption. The kernel moved from `6.17.0-1029-nvidia` to `7.0.0-1019-nvidia` earlier today; the upgrade landed without its matching NVIDIA module, the GPU was dead on first boot, and the driver was reinstalled at `580.178.04`, up from `580.173.02`. No harness here recorded either value before today, so no earlier GB10 record can say which driver it ran on. `MLX_CUDA_ARCHITECTURES` is pinned to `121` rather than left to `build.rs`, which auto-detects `121a` here. Not because the suffix could move the kernel boundaries this record measures: it cannot. In the pinned MLX tree the only code keyed on `__CUDA_ARCH_SPECIFIC__` is the NVFP4 weight-quantization converter in `nvfp4_quantize.cuh`, reached only from the weight-quantization kernel, and `qmv`, `fp_qmv` and `qmm_sm80` compile identically under both targets. The reason is plainer: `.github/workflows/release.yml` ships `90a;100;121`, every earlier GB10 record pins `121`, and a measurement that seeds a shipped default should describe the binaries users run. The binary confirms it at startup: `CUDA compute capability 12.1 (sm_121); compiled for [121] (cubin)`.
+Three of those are new to a record in this tree, and they are why this session cannot be compared to an earlier one by assumption. The kernel moved from `6.17.0-1029-nvidia` to `7.0.0-1019-nvidia` earlier today; the upgrade landed without its matching NVIDIA module, the GPU was dead on first boot, and the driver was reinstalled at `580.178.04`, up from `580.173.02`. No harness here recorded either value before today, so no earlier GB10 record can say which driver it ran on. `MLX_CUDA_ARCHITECTURES` is pinned to `121` rather than left to `build.rs`, which auto-detects `121a` here. Not because the suffix could move the kernel boundaries this record measures: it cannot. In the pinned MLX tree the only code keyed on `__CUDA_ARCH_SPECIFIC__` is the NVFP4 weight-quantization converter in `nvfp4_quantize.cuh`, reached only from the weight-quantization kernel, and `qmv`, `fp_qmv` and `qmm_sm80` compile identically under both targets. The reason is comparability: every earlier GB10 record in this tree pins `121`, so pinning it here keeps this session's numbers alongside theirs. It also matches the release configuration as of 2026-09-20 (`.github/workflows/release.yml` ships `90a;100;121`), though that list may move and nothing in this record depends on it. The binary confirms the value at startup: `CUDA compute capability 12.1 (sm_121); compiled for [121] (cubin)`.
 
 Every arm below was measured in one session, on one binary, on an otherwise idle host, so the comparisons close inside this environment whatever an earlier session ran on.
 
@@ -129,17 +129,20 @@ Read the ratios against this pairing's own classic arm and nothing else. Laguna'
 | arm | n | e2e tok/s mean (min to max) | vs classic | acceptance | emitted per verify | round device sync ms |
 |---|---:|---:|---:|---:|---:|---:|
 | classic | 3 | 30.36 (29.88 to 30.66) | | | | |
-| 2 | 3 | 35.03 (34.42 to 35.82) | 1.15x | 0.887 | 1.88 | 40.3 |
-| 3 | 3 | 45.41 (45.32 to 45.53) | 1.50x | 0.750 | 2.49 | 41.8 |
-| 4 | 3 | 51.83 (51.75 to 51.95) | 1.71x | 0.720 | 3.16 | 45.9 |
-| 5 | 3 | 52.50 (52.43 to 52.55) | 1.73x | 0.643 | 3.55 | 51.2 |
-| 6 | 3 | 52.44 (52.31 to 52.55) | 1.73x | 0.547 | 3.69 | 54.2 |
-| 7 | 3 | 54.41 (54.27 to 54.68) | 1.79x | 0.531 | 4.15 | 57.4 |
-| 8 | 3 | 47.64 (47.53 to 47.87) | 1.57x | 0.420 | 3.90 | 63.8 |
+| 2 | 3 | 35.03 (34.42 to 35.82) | 1.17x | 0.887 | 1.88 | 40.3 |
+| 3 | 3 | 45.41 (45.32 to 45.53) | 1.52x | 0.750 | 2.49 | 41.8 |
+| 4 | 3 | 51.83 (51.75 to 51.95) | 1.73x | 0.720 | 3.16 | 45.9 |
+| 5 | 3 | 52.50 (52.43 to 52.55) | 1.75x | 0.643 | 3.55 | 51.2 |
+| 6 | 3 | 52.44 (52.31 to 52.55) | 1.75x | 0.547 | 3.69 | 54.2 |
+| 7 | 3 | 54.41 (54.27 to 54.68) | 1.82x | 0.531 | 4.15 | 57.4 |
+| 8 | 3 | 47.64 (47.53 to 47.87) | 1.59x | 0.420 | 3.90 | 63.8 |
+| classic (closing) | 3 | 29.56 (29.45 to 29.76) | | | | |
 
-Every width's range is disjoint from classic's. This pass has no closing classic bracket, so it has no drift check of its own; it is a mechanism arm, not a seeding one, and the affine pass measured immediately before it bracketed cleanly.
+**This pass failed its drift check.** The opening classic arm ran 29.88 to 30.66 and the closing one 29.45 to 29.76, and those do not overlap: the host lost about 2% over the pass. The ratios above are computed against the mean of both classic arms, so each is good to roughly that 2%, and no comparison in this table that turns on less than 2% survives it. What does survive: every width's range is disjoint from both classic arms; the 4-to-5 comparison the arm exists for is 14% on the affine side against 1% here, and a 2% drift cannot make a 14% loss look like a 1% gain; the 7-to-8 drop is 12%; and the per-round device sync is device time for a fixed row count, which host drift of this kind does not move (its increments are reproduced within a few percent across two independent passes of the affine family).
 
-**The prediction held.** The affine family loses 14% going from width 4 to width 5 (68.14 to 58.29 tok/s); this one gains 1.2% over the same step (51.85 to 52.49). That is the whole test in two number pairs. `dispatch_multirow_width` rounds a 5-row affine verify up to the 8-wide accumulator instantiation and charges it for three rows it does not use, and `fp_qmv` has no such dispatch to charge anything, so the step that dominates the affine curve is simply absent here.
+What does not survive it: the 4-to-5 and 5-to-6 throughput differences here, 1.3% and 0.1%, are inside the drift and this table cannot rank widths 4, 5 and 6 against each other. Since no policy entry is seeded from this pass, that costs nothing.
+
+**The prediction held.** The affine family loses 14% going from width 4 to width 5 (68.14 to 58.29 tok/s); this one gains 1.3% over the same step (51.83 to 52.50). That is the whole test in two number pairs. `dispatch_multirow_width` rounds a 5-row affine verify up to the 8-wide accumulator instantiation and charges it for three rows it does not use, and `fp_qmv` has no such dispatch to charge anything, so the step that dominates the affine curve is simply absent here.
 
 The same rule, fixed before either number was seen, applied to both families' per-round sync. An increment above 1.5x the mean of its two neighbours is a step; the family switch is visible if its increment is at least the median of the increments below it.
 

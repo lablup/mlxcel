@@ -35,3 +35,5 @@ Transcoded 234 compressed-tensors NVFP4 planes to MLX native NVFP4
 2026-09-20T08:54:44.044983Z  INFO mlxcel::server::startup:   GET  /health               - Health check
 2026-09-20T08:54:51.647709Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/156 prompt tokens, total 6681ms prompt_tokens=156 cached_tokens=0 generation_time_ms=6681
 2026-09-20T08:54:58.369148Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/156 prompt tokens, total 6719ms prompt_tokens=156 cached_tokens=0 generation_time_ms=6719
+2026-09-20T08:55:05.160131Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/156 prompt tokens, total 6788ms prompt_tokens=156 cached_tokens=0 generation_time_ms=6788
+2026-09-20T08:55:11.947227Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/156 prompt tokens, total 6784ms prompt_tokens=156 cached_tokens=0 generation_time_ms=6784
