@@ -2933,6 +2933,7 @@ mod tests {
         let dispatch = crate::server::SpeculativeDispatch::Mtp {
             draft_model_path: std::path::PathBuf::from("/tmp/fake-drafter"),
             block_size: 4,
+            block_size_source: crate::cli::draft_block_policy::BlockSizeSource::Override,
             user_requested_explicit_kind: true,
         };
         let slot = WorkerDrafterSlot::from_dispatch(&dispatch);
@@ -2949,6 +2950,7 @@ mod tests {
         let dispatch = crate::server::SpeculativeDispatch::DFlash {
             draft_model_path: std::path::PathBuf::from("/tmp/fake-drafter"),
             block_size: 16,
+            block_size_source: crate::cli::draft_block_policy::BlockSizeSource::Override,
             user_requested_explicit_kind: true,
         };
         let slot = WorkerDrafterSlot::from_dispatch(&dispatch);
@@ -2968,6 +2970,7 @@ mod tests {
         let dispatch = crate::server::SpeculativeDispatch::Mtp {
             draft_model_path: std::path::PathBuf::from("/nonexistent/drafter-path"),
             block_size: 4,
+            block_size_source: crate::cli::draft_block_policy::BlockSizeSource::Override,
             user_requested_explicit_kind: true,
         };
         let mut slot = WorkerDrafterSlot::from_dispatch(&dispatch);

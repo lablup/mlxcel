@@ -5,7 +5,22 @@
 #   ./scripts/bench_block_width.sh qwen        # widths 2 3 4 5 6 8
 #   ./scripts/bench_block_width.sh gemma       # widths 3 4 5 6 8 10 12
 #   ./scripts/bench_block_width.sh gemma31b    # widths 2 3 4 5 6 8
+#   ./scripts/bench_block_width.sh qwen35dflash  # DFlash, affine target
+#   ./scripts/bench_block_width.sh laguna        # DFlash, NVFP4 target
 #   ./scripts/bench_block_width.sh gemma 4 5 6 # explicit widths
+#
+# The two DFlash pairings were added by issue #1797. They are the arm that
+# decides the per-device block-width default in `src/cli/draft_block_policy.rs`,
+# and they bracket the two CUDA kernel boundaries the width interacts with: an
+# affine target takes `qmv` (multirow accumulator widths 2, 4, 8) below 8 rows
+# and `qmm_sm80` from 8, while an NVFP4 target takes `fp_qmv`, which has no
+# multirow accumulator dispatch at all. Sweeping 5, 6 and 7 is therefore not
+# padding: it is what tells the two boundaries apart.
+#
+# This script drives the OFFLINE `mlxcel generate` path. The server path has
+# its own driver (see the #1797 record's `harness/sweep_server_widths.py`),
+# because #1782's numbers came from `mlxcel-server` and a per-request generator
+# cannot be interleaved the way a per-sample offline run can.
 #
 # Run it through scripts/with_indexers_paused.sh, the same way the throughput
 # sweep is run:
@@ -41,6 +56,8 @@ set -uo pipefail
 QUIET_IGNORE="$QUIET_IGNORE|bench_block_width"
 
 BIN=${MLXCEL_BIN:-target/release/mlxcel}
+# Overridden by the DFlash pairings below; every pre-#1797 pairing is MTP.
+KIND=mtp
 if [ ! -x "$BIN" ]; then
   echo "no mlxcel binary; build one first:" >&2
   echo "  cargo build --release --features metal,accelerate" >&2
@@ -66,6 +83,18 @@ case "${1:-}" in
     # drafter costs far more per position than a 4-bit one.
     TARGET=models/gemma-4-31b-it-4bit; DRAFTER=models/gemma-4-31b-it-assistant-bf16
     DEFAULT_WIDTHS=(2 3 4 5 6 8) ;;
+  qwen35dflash)
+    # Issue #1797's affine arm: the pairing #1782 measured, whose checkpoint
+    # default of 16 loses to classic decode on GB10.
+    KIND=dflash
+    TARGET=models/mlx/qwen3.5-4b-4bit; DRAFTER=models/mlx/qwen3.5-4b-dflash
+    DEFAULT_WIDTHS=(2 3 4 5 6 7 8 16) ;;
+  laguna)
+    # Issue #1797's NVFP4 arm (drafter added by PR #1771). Same widths as the
+    # affine arm so the two tables line up row for row.
+    KIND=dflash
+    TARGET=models/mlx/laguna-xs-2.1-nvfp4; DRAFTER=models/mlx/laguna-xs-2.1-dflash
+    DEFAULT_WIDTHS=(2 3 4 5 6 7 8 16) ;;
   *)
     sed -n '2,10p' "$0"; exit 1 ;;
 esac
@@ -77,13 +106,25 @@ WIDTHS=("$@"); [ ${#WIDTHS[@]} -eq 0 ] && WIDTHS=("${DEFAULT_WIDTHS[@]}")
 
 HOST=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || uname -m)
 MEM=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 ))
-echo "host: $HOST ($MEM GB), widths: ${WIDTHS[*]}, rounds: $ROUNDS" >&2
+# Kernel and GPU driver belong in the identity, not just the CPU model. On the
+# GB10 host a kernel upgrade landed without its matching NVIDIA module on
+# 2026-09-20 and the resulting driver change was invisible to every harness
+# here, so a cross-session comparison had nothing to key on (issue #1797).
+# These three travel together as the host identity. The architecture belongs
+# with them because build.rs auto-detects `121a` on GB10 while every earlier
+# GB10 record pins plain `121`, so a row measured on an auto-detected build is
+# not directly comparable with those records.
+KERNEL=$(uname -r)
+DRIVER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1)
+ARCHES=${MLX_CUDA_ARCHITECTURES:-auto-detected}
+echo "host: $HOST ($MEM GB), kernel: $KERNEL, nvidia driver: ${DRIVER:-none}, \
+MLX_CUDA_ARCHITECTURES: $ARCHES, kind: $KIND, widths: ${WIDTHS[*]}, rounds: $ROUNDS" >&2
 
 OUT=$(mktemp); DIAG=$(mktemp)
 trap 'command rm -f "$OUT" "$DIAG"' EXIT
 
 sample() {
-  "$BIN" generate -m "$TARGET" --draft-model "$DRAFTER" --draft-kind mtp \
+  "$BIN" generate -m "$TARGET" --draft-model "$DRAFTER" --draft-kind "$KIND" \
     --draft-block-size "$1" -p "$PROMPT" -n "$NTOK" --temp 0 2>/dev/null \
     | sed 's/\x1b\[[0-9;]*m//g' | grep -oE '= [0-9.]+ tok/s' | sed 's/= //;s/ tok.s//'
 }
@@ -109,7 +150,7 @@ WATCH=$(stop_contention_watch)
 # Diagnostics run separately: the log costs throughput, so it stays out of the
 # timing samples.
 for w in "${WIDTHS[@]}"; do
-  line=$(RUST_LOG=info "$BIN" generate -m "$TARGET" --draft-model "$DRAFTER" --draft-kind mtp \
+  line=$(RUST_LOG=info "$BIN" generate -m "$TARGET" --draft-model "$DRAFTER" --draft-kind "$KIND" \
            --draft-block-size "$w" -p "$PROMPT" -n "$NTOK" --temp 0 2>&1 \
          | sed 's/\x1b\[[0-9;]*m//g' | grep -m1 "round-loop diagnostics")
   echo "$w $(echo "$line" | grep -oE 'effective_block_max=[0-9]+' | cut -d= -f2)" \
@@ -117,7 +158,8 @@ for w in "${WIDTHS[@]}"; do
        "$(echo "$line" | grep -oE 'emitted_per_verify=[0-9.]+' | cut -d= -f2)" >> "$DIAG"
 done
 
-MEASURE_HOST="$HOST ($MEM GB)" MEASURE_WATCH="$WATCH" MEASURE_QUIET="$QUIET_LIMIT" \
+MEASURE_HOST="$HOST ($MEM GB), kernel $KERNEL, nvidia driver ${DRIVER:-none}, arch $ARCHES" \
+MEASURE_WATCH="$WATCH" MEASURE_QUIET="$QUIET_LIMIT" \
 python3 - "$OUT" "$DIAG" <<'PY'
 import os, sys, statistics, collections
 vals = collections.defaultdict(list)
