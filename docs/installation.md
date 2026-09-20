@@ -176,8 +176,8 @@ and it decides it silently. MLX compiles the hardware block-float converters in
 `mlx/backend/cuda/quantized/nvfp4_quantize.cuh`, the ones that issue
 `cvt.rn.satfinite.e2m1x2.f32`, only when nvcc is compiling for an
 architecture-specific target, which it signals with `__CUDA_ARCH_SPECIFIC__`.
-Build for plain `121` and NVFP4 and MXFP4 quantization fall back to a scalar
-CUTLASS conversion sequence, stochastic-rounding quantization becomes
+Build for plain `121` and both NVFP4 and MXFP4 quantization fall back to a
+scalar CUTLASS conversion sequence, stochastic-rounding quantization becomes
 statically unavailable, and nothing in the build output says so. Name the target
 twice, `121a-real` beside plain `121`, to get both: `121a-real` contributes the
 architecture-specific cubin that carries the hardware instruction, and the plain
@@ -210,6 +210,11 @@ cuobjdump --list-elf "$A" | grep -c sm_121a          # architecture-specific cub
 cuobjdump --dump-sass "$A" | grep -c F2FP.SATFINITE.E2M1   # hardware fp4 conversions
 cuobjdump --dump-ptx  "$A" | grep -c '.target sm_121$'     # forward-JIT PTX
 ```
+
+One checkout can hold several of those build directories, one per feature set
+and architecture list, so confirm the one you are reading is the one you meant:
+`grep MLX_CUDA_ARCHITECTURES "$(dirname "$A")/../CMakeCache.txt"` names the list
+it was configured with.
 
 Do not look for `cvt.rn.satfinite.e2m1x2` in the PTX. With both entries present
 the emitted PTX comes from the plain `compute_121` pass, which takes the

@@ -1377,16 +1377,37 @@ jobs:
           fi
           echo "archive: $LIB ($(stat -c %s "$LIB") bytes)"
 
-          # The fp4 conversion instruction itself. Zero here means the
+          # The fp4 conversion instruction itself. Zero means the
           # architecture-specific entry did not reach nvcc and MLX compiled the
           # scalar fallback, which is exactly the state issue #1934 found.
-          "$CUOBJDUMP" --dump-sass "$LIB" > /tmp/blockfloat-sass.txt
-          FP4=$(grep -c 'F2FP.SATFINITE.E2M1' /tmp/blockfloat-sass.txt || true)
-          echo "F2FP.SATFINITE.E2M1 occurrences: $FP4"
+          #
+          # Scoped to the one translation unit that can carry the instruction
+          # rather than to the whole archive. `cuobjdump --dump-sass` on the
+          # 178 MB archive takes about ten minutes and this takes under a
+          # second, for the same verdict: on a plain `121` build both counts are
+          # zero, and `fp_quantize.cu.o` alone reproduces the full
+          # 128,920-line sm_121 disassembly the issue quotes. The archive-wide
+          # form is what the issue's acceptance criteria state; this is its
+          # cheap equivalent.
+          WORK="${RUNNER_TEMP:-/tmp}/blockfloat-$$"
+          mkdir -p "$WORK"
+          ( cd "$WORK" && ar x "$LIB" fp_quantize.cu.o )
+          if [ ! -f "$WORK/fp_quantize.cu.o" ]; then
+            echo "fp_quantize.cu.o not found in $LIB; MLX's quantized backend did not build" >&2
+            exit 1
+          fi
+          "$CUOBJDUMP" --dump-sass "$WORK/fp_quantize.cu.o" > "$WORK/sass.txt"
+          FP4=$(grep -c 'F2FP.SATFINITE.E2M1' "$WORK/sass.txt" || true)
+          echo "F2FP.SATFINITE.E2M1 occurrences in fp_quantize.cu.o: $FP4"
           if [ "$FP4" -eq 0 ]; then
             echo "no hardware fp4 conversion instruction in libmlx.a: MLX compiled the scalar fallback" >&2
             exit 1
           fi
+          # The fp8 converter is not gated on the architecture-specific target,
+          # so it is present either way. Printing it beside the fp4 count makes
+          # "nothing compiled at all" read differently from "the fp4 gate is
+          # off", which is the distinction this job exists to draw.
+          echo "F2FP.SATFINITE.E4M3 occurrences (ungated control): $(grep -c 'F2FP.SATFINITE.E4M3' "$WORK/sass.txt" || true)"
 
           # The cubin that carries it. `--list-elf` names one image per entry,
           # so this is the direct evidence that the `a-real` half of the list
@@ -1409,7 +1430,7 @@ jobs:
           if [ "$PTX" -eq 0 ]; then
             echo "note: this build carries no plain compute_121 PTX, so it cannot JIT forward to a later Blackwell revision." | tee -a "$GITHUB_STEP_SUMMARY"
           fi
-          rm -f /tmp/blockfloat-sass.txt
+          rm -rf "$WORK"
 
       - name: Run the MXFP4 and NVFP4 quantization tests
         # `--test-threads=1` is mandatory for CUDA here: parallel MLX tests
