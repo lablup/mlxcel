@@ -120,7 +120,46 @@ At width 16 the same probe reports 107002 of 200704 bytes. Half the bytes sounds
 
 The contrast with the affine pairing is the useful part, and it is about the gate rather than about the defect. Both verify blocks disagree with the single-token chain in their last mantissa bits, but the consequences differ. Laguna's difference barely changes any decision, which its own 0.887 acceptance under the override shows; it fails only because the probe compares bytes rather than argmax. Qwen 3.5's is large enough to change served output, about one token in thirty. Laguna's probe catches the harmless one and declines; Qwen 3.5 has no probe, so the consequential one ships. The gate, not the defect, is what differs usefully between them.
 
-<!-- NVFP4MECH -->
+### The mechanism arm, with the contract deliberately forfeited
+
+The decline above answers the policy question and not the mechanism one, so the pairing was measured again with `MLXCEL_MTP_ALLOW_INEXACT=1`, which makes the gate engage anyway and log `MTP exactness probe FAILED but MLXCEL_MTP_ALLOW_INEXACT is set` instead of declining. These rows are not eligible to seed anything, because a default resolves on a server that does not set that flag and that server declines. They exist to test the prediction.
+
+Read the ratios against this pairing's own classic arm and nothing else. Laguna's drafter accepts far more of its proposals than Qwen 3.5's (0.887 at width 2 against 0.746) and its classic decode is half the speed (29.9 tok/s against 58.2), so each accepted proposal buys more here. A 1.7x on this pairing and a 1.17x on the affine one are not comparable quantities.
+
+| arm | n | e2e tok/s mean (min to max) | vs classic | acceptance | emitted per verify | round device sync ms |
+|---|---:|---:|---:|---:|---:|---:|
+| classic | 3 | 30.36 (29.88 to 30.66) | | | | |
+| 2 | 3 | 35.03 (34.42 to 35.82) | 1.15x | 0.887 | 1.88 | 40.3 |
+| 3 | 3 | 45.41 (45.32 to 45.53) | 1.50x | 0.750 | 2.49 | 41.8 |
+| 4 | 3 | 51.83 (51.75 to 51.95) | 1.71x | 0.720 | 3.16 | 45.9 |
+| 5 | 3 | 52.50 (52.43 to 52.55) | 1.73x | 0.643 | 3.55 | 51.2 |
+| 6 | 3 | 52.44 (52.31 to 52.55) | 1.73x | 0.547 | 3.69 | 54.2 |
+| 7 | 3 | 54.41 (54.27 to 54.68) | 1.79x | 0.531 | 4.15 | 57.4 |
+| 8 | 3 | 47.64 (47.53 to 47.87) | 1.57x | 0.420 | 3.90 | 63.8 |
+
+Every width's range is disjoint from classic's. This pass has no closing classic bracket, so it has no drift check of its own; it is a mechanism arm, not a seeding one, and the affine pass measured immediately before it bracketed cleanly.
+
+**The prediction held.** The affine family loses 14% going from width 4 to width 5 (68.14 to 58.29 tok/s); this one gains 1.2% over the same step (51.85 to 52.49). That is the whole test in two number pairs. `dispatch_multirow_width` rounds a 5-row affine verify up to the 8-wide accumulator instantiation and charges it for three rows it does not use, and `fp_qmv` has no such dispatch to charge anything, so the step that dominates the affine curve is simply absent here.
+
+The same rule, fixed before either number was seen, applied to both families' per-round sync. An increment above 1.5x the mean of its two neighbours is a step; the family switch is visible if its increment is at least the median of the increments below it.
+
+| | affine (`qmv`) | NVFP4 (`fp_qmv`) |
+|---|---|---|
+| increments 2 to 8 (ms) | +5.5, +5.5, **+10.8**, +6.2, +7.4, +1.9 | +1.5, +4.1, **+5.2**, +3.0, +3.2, **+6.4** |
+| 4 to 5 against neighbour mean | 10.8 against 5.9, ratio 1.84 | 5.2 against 3.6, ratio 1.47 |
+| accumulator step at 4 to 5 | present, as predicted | absent, as predicted |
+| 7 to 8 against the 2-to-7 median | 1.9 against 6.2 | 6.4 against 3.2 |
+| family switch visible in sync | no | yes |
+
+The two are mirror images, and each has exactly the boundary its kernel has. `dispatch_multirow_width` exists only on the affine path and only the affine path steps at 4 to 5. The `M * B < 8` switch is on both paths, and it is the NVFP4 one that shows it in the sync column while the affine one absorbs it (affine's 7-to-8 round is almost free; what costs it throughput there is acceptance falling 0.352 to 0.309).
+
+The NVFP4 4-to-5 ratio of 1.47 sits just under the 1.5 threshold rather than far below it, so the sync column alone is a near miss rather than a clean null. The throughput column is not close: over the same step the affine family loses 14% and this one gains 1.2%.
+
+At width 8 both the round and the drafter give way together here: the sync steps 6.4 ms and acceptance falls 0.531 to 0.420, with emitted per verify turning over from 4.15 to 3.90. Both contribute to the 12% throughput drop, and this record cannot apportion them.
+
+Acceptance falls monotonically with width, 0.887 at 2 down to 0.420 at 8, while emitted per verify climbs to 4.15 at width 7 before turning over. So the curve rising all the way to 7 is the drafter still converting extra rows into extra tokens faster than the round costs them, not acceptance saturating. Width 7 is the highest width measured, and it is where the sweep stops because the family switch at 8 is the boundary this arm exists to test; whether anything above 8 recovers is a different question and was not asked.
+
+None of this changes the policy. `measured_default_block_size` returns `None` for `(12, 1, Nvfp4)` and the `gb10_with_a_non_affine_target_takes_the_flat_fallback` test asserts it, and both stay as they are: the widths above win only with the byte-identity contract forfeited by hand, and an unmodified server declines at every one of them. If the Laguna probe is ever satisfied, whether by fixing the verify's numerics or by narrowing what the probe compares, this table is the measurement an entry would be seeded from.
 
 ## Greedy byte-identity: not met, at any width, including today's default
 
@@ -161,6 +200,12 @@ What TF32 costs, measured rather than assumed: the classic arm runs 58.23 tok/s 
 
 It does change greedy output. The classic completion differs between the two passes, and so does the split of the speculative arms into identity groups, which is the second reason a record has to state the setting rather than leave it unset.
 
-<!-- DRIVER -->
+## Driver budget
+
+Every arm in this record cost zero kernel `NV_ERR_NO_MEMORY` errors, and the cumulative count for the boot is still zero after all of them: 34 arms across four passes, each starting and tearing down its own server, including ten that held the 20.1 GB Laguna NVFP4 target with its 0.86 GB drafter.
+
+That is worth recording because it contradicts the expectation this sweep was planned against. On driver `580.173.02` a single 16k-context run on this host cost 38 of these errors at about 21 GB resident, and a 13-run rung was abandoned at a 400 cumulative ceiling. The Laguna arms here sit at the same resident scale and delivered none. This is one session on `580.178.04`, not evidence that the driver is fixed; the trip wire stays where it is, and the next long sweep should still take its first run as calibration and project from a measured per-run delta rather than from this result.
+
+The host gate earned its place once. During the mechanism sweep it reported `foreign_models: ['mlxcel']` and held, because another session's model process appeared between arms. It was gone before the next arm started. That is the predicate working as designed on a shared host, which is the situation the #1820 harness was hardened for.
 
 <!-- POLICY -->

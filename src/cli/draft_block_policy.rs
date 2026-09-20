@@ -17,11 +17,12 @@
 //!
 //! The flat per-kind default in [`super::speculative_args`] resolves with no
 //! device or quantization input, so on GB10 a Qwen 3.5 DFlash pairing served
-//! at the effective default of 16 and lost 17% against classic decode, while
-//! the same pairing at width 4 won 32%
-//! (`docs/benchmark_results/dflash-verify-fixed-cost-gb10-2026-09-11.md`).
-//! The throughput was there, it was just unreachable without the operator
-//! passing `--draft-block-size` by hand.
+//! at the effective default of 16 runs 41.88 to 41.97 tok/s against classic
+//! decode's 57.98 to 58.71, while the same pairing at width 4 runs 67.22 to
+//! 67.91 (`docs/benchmark_results/draft-block-width-default-gb10-2026-09-20.md`,
+//! following `dflash-verify-fixed-cost-gb10-2026-09-11.md`). The throughput
+//! was there, it was just unreachable without the operator passing
+//! `--draft-block-size` by hand.
 //!
 //! This module owns the narrow fix: a **default only**, keyed on the pair
 //! (running compute capability, target quantization path) that actually
@@ -242,10 +243,18 @@ pub fn measured_default_block_size(
     }
     let (major, minor) = cuda_compute_capability?;
     match (major, minor, target_quantization) {
-        // GB10 (sm_121, DGX Spark), affine target: width 4 beat both the
-        // classic arm and the flat 16 default with disjoint n = 3 ranges.
-        // NVFP4 on the same host was measured in the same session and has no
-        // entry; see the record for what it found.
+        // GB10 (sm_121, DGX Spark), affine target. Served, n = 3 per arm,
+        // classic bracketing the widths at both ends: width 4 runs 67.22 to
+        // 67.91 tok/s against classic's 57.98 to 58.71 and the flat default's
+        // 41.88 to 41.97, all three ranges disjoint. Width 3 measured slightly
+        // faster still in that session and slightly slower in #1782's, so the
+        // peak inside the 2-to-4 plateau is not stable across sessions and 4
+        // is the value both records support.
+        //
+        // NVFP4 was measured on the same host in the same session and has no
+        // entry: the Laguna pairing's own block-versus-chain probe declines at
+        // every width, so an unmodified server never speculates there however
+        // the default resolves. See the record for the mechanism arm.
         (12, 1, TargetQuantization::Affine) => Some(4),
         _ => None,
     }
