@@ -600,12 +600,16 @@ impl ModelProvider {
         // resolve the speculative-decoding dispatch once
         // from the `ServerConfig::{draft_model_path, draft_kind,
         // draft_block_size}` fields. The resolution reads the drafter's
-        // `config.json` so it must happen on the main thread before we
-        // hand the resolved value to the worker thread. Failures are
+        // `config.json` and, since issue #1797, the target's as well (the
+        // block-width default is keyed on the target's quantization), so it
+        // must happen on the main thread before we hand the resolved value
+        // to the worker thread. Failures are
         // surfaced as `anyhow::Error` here so the operator gets a clear
         // startup-time error rather than a per-request 5xx.
-        let speculative_dispatch = crate::server::SpeculativeDispatch::resolve(config)
-            .map_err(|e| anyhow::anyhow!("Speculative decoding dispatch resolution failed: {e}"))?;
+        let speculative_dispatch =
+            crate::server::SpeculativeDispatch::resolve(config, &model_path).map_err(|e| {
+                anyhow::anyhow!("Speculative decoding dispatch resolution failed: {e}")
+            })?;
 
         // OpenXLA backend (issue #449 M3 Stage 2c): when `MLXCEL_BACKEND=xla` is
         // selected on an `xla-iree` build, serve through the continuous-batching

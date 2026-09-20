@@ -47,6 +47,11 @@
 use clap::Args;
 use mlxcel_core::drafter::{DrafterKind, KNOWN_DRAFTER_KINDS};
 
+use crate::cli::draft_block_policy::{
+    BlockSizeSource, ResolvedBlockSize, TargetQuantization, peek_target_quantization,
+    resolve_measured_block_size,
+};
+
 /// Per-kind default `--draft-block-size` when the operator does not pass
 /// the flag explicitly.
 ///
@@ -67,6 +72,14 @@ use mlxcel_core::drafter::{DrafterKind, KNOWN_DRAFTER_KINDS};
 ///   runtime verify width through
 ///   `mlxcel_core::drafter::peek_dspark_configured_block_size` (8 on the
 ///   published checkpoints, `block_size + 1 = 10` with `--draft-block-size 10`).
+///
+/// Since issue #1797 these are the **last** fallback rather than the only
+/// default: a drafter checkpoint's own declared width wins, and so does a
+/// measured entry in [`crate::cli::draft_block_policy`] for the running
+/// device and the target's quantization. On GB10 the flat DFlash 16 lost 17%
+/// against classic decode where width 4 won 32%, so a host with a
+/// measurement narrows it. Hosts with no measurement keep these constants
+/// unchanged.
 pub const DEFAULT_MTP_BLOCK_SIZE: u32 = 4;
 pub const DEFAULT_DFLASH_BLOCK_SIZE: u32 = 16;
 
@@ -119,9 +132,12 @@ pub struct SpeculativeArgs {
 
     /// Draft block size in tokens. Optional.
     ///
-    /// When unset, the default depends on the resolved drafter kind:
-    /// `4` for `mtp` and `16` for `dflash`. Mirrors the upstream
-    /// per-drafter `block_size` config field.
+    /// When unset, the default is resolved in this order: a width the
+    /// drafter checkpoint declares for itself, then a measured default for
+    /// the running device and the target's quantization, then the flat
+    /// per-kind constant (`4` for `mtp`, `16` for `dflash`, mirroring the
+    /// upstream per-drafter `block_size` config field). The resolved value
+    /// and which of those produced it are logged at startup.
     ///
     /// Also read from `LLAMA_ARG_DRAFT_BLOCK_SIZE` (and the mlxcel-native
     /// alias `MLXCEL_DRAFT_BLOCK_SIZE`).
@@ -200,8 +216,24 @@ pub fn default_block_size_for_kind(kind: DrafterKind) -> u32 {
     }
 }
 
-/// Resolve the effective draft block size given an explicit CLI override,
-/// the resolved drafter kind, and the drafter checkpoint path.
+/// Resolve the effective draft block size, reporting what produced it.
+///
+/// Precedence, highest first:
+///
+/// 1. `override_value`: `--draft-block-size` and its two environment
+///    spellings, returned verbatim with no further validation here (concrete
+///    generators enforce their own minimums).
+/// 2. A width the drafter checkpoint declares for itself (Qwen 3.5 MTP,
+///    Inkling, GLM 4 MoE Lite, LFM2 DSpark, Muse Glimmer).
+/// 3. A measured per-device, per-quantization default
+///    ([`crate::cli::draft_block_policy::measured_default_block_size`],
+///    issue #1797).
+/// 4. The flat [`default_block_size_for_kind`] constant, which is what every
+///    host and quantization path with no measurement takes.
+///
+/// Step 3 is a default only and can never displace an override or a
+/// checkpoint's own declaration; it sits between them and the flat constant
+/// precisely so an unmeasured platform is bit-for-bit unchanged.
 ///
 /// When `override_value` is `Some(n)`, returns `n` (with no further
 /// validation here; concrete generators enforce their own minimums).
@@ -219,34 +251,43 @@ pub fn default_block_size_for_kind(kind: DrafterKind) -> u32 {
 /// peek finds no Qwen 3.5 MTP `block_size` (wrong family, missing config,
 /// or the checkpoint omits an explicit value), falls back to
 /// [`default_block_size_for_kind`] as before.
-pub fn resolve_draft_block_size(
+pub fn resolve_draft_block_size_detailed(
     override_value: Option<u32>,
     kind: DrafterKind,
     model_path: &std::path::Path,
-) -> u32 {
+    cuda_compute_capability: Option<(u32, u32)>,
+    target_quantization: TargetQuantization,
+) -> ResolvedBlockSize {
+    let from_checkpoint = |width: u32, which: &'static str| ResolvedBlockSize {
+        width,
+        source: BlockSizeSource::DrafterCheckpoint(which),
+    };
     if let Some(n) = override_value {
-        return n;
+        return ResolvedBlockSize {
+            width: n,
+            source: BlockSizeSource::Override,
+        };
     }
     if kind == DrafterKind::Mtp
         && let Some(configured) =
             mlxcel_core::drafter::peek_qwen35_mtp_configured_block_size(model_path)
         && let Ok(n) = u32::try_from(configured)
     {
-        return n;
+        return from_checkpoint(n, "the Qwen 3.5 MTP drafter's configured block size");
     }
     if kind == DrafterKind::Mtp
         && let Some(configured) =
             mlxcel_core::drafter::peek_inkling_mtp_configured_block_size(model_path)
         && let Ok(n) = u32::try_from(configured)
     {
-        return n;
+        return from_checkpoint(n, "the Inkling MTP drafter's layer count");
     }
     if kind == DrafterKind::Mtp
         && let Some(configured) =
             mlxcel_core::drafter::peek_glm4_moe_lite_mtp_configured_block_size(model_path)
         && let Ok(n) = u32::try_from(configured)
     {
-        return n;
+        return from_checkpoint(n, "the GLM 4 MoE Lite MTP drafter's configured block size");
     }
     // An LFM2 DSpark drafter (issue #1339) counts proposals in `block_size`
     // and runs at `min(block_size + 1, runtime_block_size)` rows by default
@@ -257,7 +298,7 @@ pub fn resolve_draft_block_size(
             mlxcel_core::drafter::peek_dspark_configured_block_size(model_path)
         && let Ok(n) = u32::try_from(configured)
     {
-        return n;
+        return from_checkpoint(n, "the DSpark drafter's runtime verify width");
     }
     // The Muse Glimmer assistant (issue #1343) publishes `block_size 16`,
     // which is the flat DFlash default; the peek exists so a checkpoint that
@@ -267,9 +308,63 @@ pub fn resolve_draft_block_size(
             mlxcel_core::drafter::dflash::peek_muse_assistant_configured_block_size(model_path)
         && let Ok(n) = u32::try_from(configured)
     {
-        return n;
+        return from_checkpoint(n, "the Muse Glimmer assistant's configured block size");
     }
-    default_block_size_for_kind(kind)
+    resolve_measured_block_size(
+        kind,
+        cuda_compute_capability,
+        target_quantization,
+        default_block_size_for_kind(kind),
+    )
+}
+
+/// [`resolve_draft_block_size_detailed`] reduced to the width alone, for
+/// call sites that do not log the reason.
+pub fn resolve_draft_block_size(
+    override_value: Option<u32>,
+    kind: DrafterKind,
+    model_path: &std::path::Path,
+    cuda_compute_capability: Option<(u32, u32)>,
+    target_quantization: TargetQuantization,
+) -> u32 {
+    resolve_draft_block_size_detailed(
+        override_value,
+        kind,
+        model_path,
+        cuda_compute_capability,
+        target_quantization,
+    )
+    .width
+}
+
+/// [`resolve_draft_block_size_detailed`] with the two hardware inputs read
+/// from the running process instead of passed in.
+///
+/// This is the thin wrapper every binary entry point calls; the pure
+/// function above stays free of the device and the filesystem so the policy
+/// table is unit-testable on a host with no GPU at all. It mirrors the
+/// `drafter_bf16_to_f16_policy` / `drafter_bf16_to_f16_at_load` split.
+///
+/// `target_model_path` is the **target** checkpoint (`-m`), not the drafter:
+/// the quantization that decides the kernel path is the one the verify block
+/// runs through.
+///
+/// Used by: the server dispatch resolution
+/// (`crate::server::SpeculativeDispatch::resolve`) and the offline
+/// `mlxcel generate` speculative path.
+pub fn resolve_draft_block_size_for_target(
+    override_value: Option<u32>,
+    kind: DrafterKind,
+    drafter_path: &std::path::Path,
+    target_model_path: &std::path::Path,
+) -> ResolvedBlockSize {
+    resolve_draft_block_size_detailed(
+        override_value,
+        kind,
+        drafter_path,
+        mlxcel_core::cuda_arch::cuda_compute_capability(),
+        peek_target_quantization(target_model_path),
+    )
 }
 
 /// Apply the `MLXCEL_DRAFT_KIND` env-var fallback to the raw
