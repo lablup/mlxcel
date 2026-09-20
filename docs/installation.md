@@ -183,8 +183,11 @@ twice, `121a-real` beside plain `121`, to get both: `121a-real` contributes the
 architecture-specific cubin that carries the hardware instruction, and the plain
 entry beside it keeps the forward-JIT-capable `compute_121` PTX that a bare
 `121a` would discard. The only cost of carrying both is the extra cubin's size.
-Never use the family-specific `121f` spelling: it satisfies the converter's
-dispatcher gate but not the converter's own gate, so it fails to compile.
+On a device the `a` entry matches, the driver loads the architecture-specific
+image and the plain one is never executed, so the plain entry buys forward
+compatibility and nothing else. Never use the family-specific `121f` spelling:
+it satisfies the converter's dispatcher gate but not the converter's own gate,
+so it fails to compile.
 
 ```bash
 # Hopper / GH200-style target. The `a` suffix is required for the Hopper
