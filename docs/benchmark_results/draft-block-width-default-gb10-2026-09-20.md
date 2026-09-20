@@ -114,11 +114,11 @@ MTP declined: verify block position 0 differs from the single-token chain in
 Falling back to classic decode. block_size=2
 ```
 
-At width 16 the same probe reports 107002 of 200704 bytes. Roughly half the logit bytes differ at both ends of the width range, which is far too large to be a rounding difference between two kernels; something structural in the Laguna DFlash verify path disagrees with the chain on this host. That is its own defect and is not what this issue is about, but it is what makes the NVFP4 arm unmeasurable as a throughput comparison on an unmodified server.
+At width 16 the same probe reports 107002 of 200704 bytes. Half the bytes sounds structural and is not: 200704 bytes is 50176 f32 logits, and every one of them differing in its low two bytes is already 50%. The measured 54% is what a small last-mantissa-bits difference across essentially the whole vector looks like, which the acceptance rate confirms below. The probe is strict by design, comparing bytes rather than argmax, and a difference this size is enough to fail it while leaving the verify's decisions almost entirely intact.
 
 **No NVFP4 policy entry follows from this, and none is added.** A default resolves on a server that does not set `MLXCEL_MTP_ALLOW_INEXACT`, and that server declines whatever width the default names. Seeding a width there would be seeding a number nothing reads.
 
-The contrast with the affine pairing is the useful part. Both pairings have a verify block that disagrees with the single-token chain. Laguna declines, loudly, with a byte count, because `LagunaWrapper::exactness_allows` runs the block-versus-chain probe. Qwen 3.5 serves the divergent tokens silently, because its `DFlashTargetModel::exactness_allows` is the permissive default. Same underlying inexactness, two outcomes, and only one of them tells the operator.
+The contrast with the affine pairing is the useful part, and it is about the gate rather than about the defect. Both verify blocks disagree with the single-token chain in their last mantissa bits, but the consequences differ. Laguna's difference barely changes any decision, which its own 0.887 acceptance under the override shows; it fails only because the probe compares bytes rather than argmax. Qwen 3.5's is large enough to change served output, about one token in thirty. Laguna's probe catches the harmless one and declines; Qwen 3.5 has no probe, so the consequential one ships. The gate, not the defect, is what differs usefully between them.
 
 <!-- NVFP4MECH -->
 
@@ -161,6 +161,6 @@ What TF32 costs, measured rather than assumed: the classic arm runs 58.23 tok/s 
 
 It does change greedy output. The classic completion differs between the two passes, and so does the split of the speculative arms into identity groups, which is the second reason a record has to state the setting rather than leave it unset.
 
-<!-- DRIVER -->>
+<!-- DRIVER -->
 
 <!-- POLICY -->
