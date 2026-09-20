@@ -1355,7 +1355,9 @@ impl BatchScheduler {
                 let seq = match self.active_batch.get_mut(seq_id) {
                     Some(s) => s,
                     None => {
-                        tracing::warn!("Sequence {seq_id} missing from active batch during decode tick");
+                        tracing::warn!(
+                            "Sequence {seq_id} missing from active batch during decode tick"
+                        );
                         return;
                     }
                 };
