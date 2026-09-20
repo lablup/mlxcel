@@ -174,7 +174,7 @@ A representative divergence, about 30 tokens in: classic emits `for attempt in r
 
 Nothing gates this. `DFlashTargetModel::exactness_allows` defaults to `true` (`src/server/batch/dflash_target.rs`), the LFM2 and Muse Glimmer targets override it with a measured block-versus-chain probe, and the Qwen 3.5 target does not. So the property #1782 reported for this pairing was asserted by measurement rather than enforced, and nothing re-checks it.
 
-The forced-TF32-off pass splits the speculative arms further, into 2 through 7 against 8 and 16, which is exactly the `M * B < 8` boundary between `qmv_multirow_kernel` and `qmm_sm80_kernel`. A grouping that tracks the kernel dispatch boundary points at the failure class the Metal `MLXCEL_MTP_ALLOW_INEXACT` gate exists for: a quantized projection dispatching to a different kernel at `M = K` than at `M = 1` without being bit-equal to it.
+The forced-TF32-off pass splits the speculative arms further, into 2 through 7 against 8 and 16, which is exactly the `M * B < 8` boundary between `qmv_multirow_kernel` and `qmm_sm80_kernel`. A grouping that tracks the kernel dispatch boundary looked like the failure class the Metal `MLXCEL_MTP_ALLOW_INEXACT` gate exists for, a quantized projection dispatching to a different kernel at `M = K` than at `M = 1` without being bit-equal to it. The control below shows it is not that.
 
 **A control rules the obvious candidate out.** `MLXCEL_QMV_MULTIROW=0` (the #725 kill switch) restores the stock per-row path, so a 4-row verify then runs the same `qmv_kernel` classic decode runs, launched four times instead of once. If the multirow kernel were the cause, width 4 would become byte-identical to classic under it. It does not. Width 4's completion under the kill switch hashes to `57d291a...`, which is exactly the hash it has with the multirow path enabled, while classic keeps `2c76b0a...`. The multirow kernel makes no difference to the result at all, so it is not what the verify and the chain disagree about, and the grouping by kernel family that the forced-TF32-off pass showed is not the mechanism it looked like.
 
@@ -207,7 +207,7 @@ It does change greedy output. The classic completion differs between the two pas
 
 ## Driver budget
 
-Every arm in this record cost zero kernel `NV_ERR_NO_MEMORY` errors, and the cumulative count for the boot is still zero after all of them: 34 arms across four passes, each starting and tearing down its own server, including ten that held the 20.1 GB Laguna NVFP4 target with its 0.86 GB drafter.
+Every arm in this record cost zero kernel `NV_ERR_NO_MEMORY` errors, and the cumulative count for the boot is still zero after all of them: 39 arms across five passes, each starting and tearing down its own server, including twelve that held the 20.1 GB Laguna NVFP4 target with its 0.86 GB drafter.
 
 That is worth recording because it contradicts the expectation this sweep was planned against. On driver `580.173.02` a single 16k-context run on this host cost 38 of these errors at about 21 GB resident, and a 13-run rung was abandoned at a 400 cumulative ceiling. The Laguna arms here sit at the same resident scale and delivered none. This is one session on `580.178.04`, not evidence that the driver is fixed; the trip wire stays where it is, and the next long sweep should still take its first run as calibration and project from a measured per-run delta rather than from this result.
 
