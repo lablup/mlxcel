@@ -1433,10 +1433,16 @@ jobs:
           rm -rf "$WORK"
 
       - name: Run the MXFP4 and NVFP4 quantization tests
-        # `--test-threads=1` is mandatory for CUDA here: parallel MLX tests
-        # abort on this runner regardless of the change under test.
+        # `global_scale` selects the six `ffi_tests` cases that drive
+        # `quantize_weights_with_mode` with `mxfp4` and native NVFP4 sidecars,
+        # which is every test in this crate that reaches MLX's block-float
+        # quantization kernels. `shapeless_compile_audit_harness` touches them
+        # too but carries `#[ignore]` for a hardware audit script, so naming it
+        # here would add a skipped line and no coverage.
+        #
+        # `--test-threads=1` is mandatory for CUDA on this runner: parallel MLX
+        # tests abort regardless of the change under test.
         run: |
           cargo test -p mlxcel-core --profile test-fast --features cuda --lib -- \
             --test-threads=1 \
-            global_scale \
-            shapeless_compile_audit_harness
+            global_scale
