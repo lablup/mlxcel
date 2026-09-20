@@ -3909,3 +3909,7 @@ mod chain_parity_gate_tests {
         assert!(!qwen35_config_supports_chain_parity_kernel(&config));
     }
 }
+
+#[cfg(test)]
+#[path = "qwen3_5_dflash_probe_tests.rs"]
+mod qwen3_5_dflash_probe_tests;
