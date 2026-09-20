@@ -1527,6 +1527,40 @@ impl Qwen35Model {
         mtp_exactness_gate(key, || self.probe_block_chain_exactness(block_size))
     }
 
+    /// Whether the **DFlash** burst may engage at `block_size` verify rows on
+    /// this host (issue #1935).
+    ///
+    /// Deliberately not [`Self::mtp_exactness_allows`]: that gate's first
+    /// precondition is `metal_is_available()`, because Qwen 3.5 MTP's
+    /// byte-identity rests on the Metal chain-parity gated-delta kernel. The
+    /// DFlash burst runs on CUDA too, where that precondition would decline
+    /// every burst without measuring one, so this entry point is the measured
+    /// half alone: [`Self::probe_block_chain_exactness`], memoized per
+    /// (model, width) per process by
+    /// [`mtp_exactness_gate`](crate::models::speculative_exactness::mtp_exactness_gate),
+    /// which also owns the decline log line, the `qmv_wide` retry and the
+    /// `MLXCEL_MTP_ALLOW_INEXACT` override.
+    ///
+    /// What this catches on GB10 with `qwen3.5-4b-4bit`: at widths 2 and 4 the
+    /// verify block is byte-identical to the chain and the burst engages, and
+    /// at 8 and 16 it is not (229971 of 496640 logit bytes differ at block
+    /// position 0), which is the `M * B >= 8` switch from `qmv` to
+    /// `qmm_sm80` in MLX's CUDA quantized dispatch. That is a real numerical
+    /// difference between two kernels rather than a defect, so the burst
+    /// declines there instead of serving text that differs from classic
+    /// decode.
+    ///
+    /// Used by: `DFlashTargetModel::exactness_allows` for `Qwen35Model` and
+    /// `Qwen35VLModel`, which the server burst gate reads.
+    pub fn dflash_exactness_allows(&self, block_size: usize) -> bool {
+        let key = ProbeKey {
+            block_size: block_size as u32,
+            hidden_size: self.config.hidden_size as u32,
+            num_hidden_layers: self.config.num_hidden_layers as u32,
+        };
+        mtp_exactness_gate(key, || self.probe_block_chain_exactness(block_size))
+    }
+
     /// Measure, on this loaded checkpoint, whether a `T = block_size`
     /// verify block produces byte-identical logits to `block_size`
     /// consecutive single-token decode steps.
