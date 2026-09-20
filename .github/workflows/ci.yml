@@ -1221,9 +1221,15 @@ jobs:
           # code defect. Probe instead, and skip loudly. The moment a CUDA 12.x
           # runner joins the fleet this job starts gating for real with no edit.
           set -euo pipefail
-          NVCC=$(command -v nvcc || echo /usr/local/cuda/bin/nvcc)
+          # Same resolution order as the cuobjdump lookup below and as
+          # build.rs: CUDA_HOME, then the conventional location, then PATH.
+          # nvcc is not on PATH on this runner either.
+          NVCC="${CUDA_HOME:-/usr/local/cuda}/bin/nvcc"
           if [ ! -x "$NVCC" ]; then
-            echo "nvcc not found" >&2
+            NVCC=$(command -v nvcc || true)
+          fi
+          if [ ! -x "${NVCC:-}" ]; then
+            echo "nvcc not found at ${CUDA_HOME:-/usr/local/cuda}/bin/nvcc or on PATH" >&2
             exit 1
           fi
           VERSION=$("$NVCC" --version | sed -n 's/.*release \([0-9.]*\).*/\1/p' | head -1)
@@ -1255,19 +1261,24 @@ jobs:
           # architecture list failed to reach CMake would otherwise pass here
           # having compiled nothing for Volta.
           set -euo pipefail
-          # cuobjdump ships next to nvcc, which the build above already
-          # required, so resolving it from PATH and then from nvcc's directory
-          # covers both a CUDA toolkit on PATH and one reached only through an
-          # absolute nvcc.
-          CUOBJDUMP=$(command -v cuobjdump || true)
-          if [ -z "$CUOBJDUMP" ]; then
-            NVCC=$(command -v nvcc || true)
-            [ -n "$NVCC" ] && CUOBJDUMP="$(dirname "$NVCC")/cuobjdump"
+          # cuobjdump ships with the CUDA toolkit, next to nvcc, and neither is
+          # on PATH on the GB10 runner: a PATH-first lookup is what failed on
+          # the first run of the block-float job. Resolve the toolkit the way
+          # `src/lib/mlxcel-core/build.rs` resolves nvcc, CUDA_HOME first and
+          # then the conventional location, with PATH as a last resort rather
+          # than as the primary, so this reads the same toolkit that compiled
+          # the archive. Not found stays a hard failure: a skip here would make
+          # the gate pass while checking nothing.
+          CUDA_BIN="${CUDA_HOME:-/usr/local/cuda}/bin"
+          CUOBJDUMP="$CUDA_BIN/cuobjdump"
+          if [ ! -x "$CUOBJDUMP" ]; then
+            CUOBJDUMP=$(command -v cuobjdump || true)
           fi
           if [ ! -x "${CUOBJDUMP:-}" ]; then
-            echo "cuobjdump not found; it ships with the CUDA toolkit next to nvcc" >&2
+            echo "cuobjdump not found at $CUDA_BIN/cuobjdump or on PATH; it ships with the CUDA toolkit next to nvcc" >&2
             exit 1
           fi
+          echo "cuobjdump: $CUOBJDUMP"
           LIB=$(find "$CARGO_TARGET_DIR/debug/build" -path '*/out/build/lib/libmlx.a' | head -1)
           if [ -z "$LIB" ]; then
             echo "libmlx.a not found under $CARGO_TARGET_DIR/debug/build" >&2
@@ -1358,25 +1369,41 @@ jobs:
       - name: Verify the hardware fp4 converter is in the compiled archive
         run: |
           set -euo pipefail
-          # cuobjdump ships next to nvcc, which the build above already
-          # required, so resolving it from PATH and then from nvcc's directory
-          # covers both a CUDA toolkit on PATH and one reached only through an
-          # absolute nvcc.
-          CUOBJDUMP=$(command -v cuobjdump || true)
-          if [ -z "$CUOBJDUMP" ]; then
-            NVCC=$(command -v nvcc || true)
-            [ -n "$NVCC" ] && CUOBJDUMP="$(dirname "$NVCC")/cuobjdump"
+          # cuobjdump ships with the CUDA toolkit, next to nvcc, and neither is
+          # on PATH on the GB10 runner: a PATH-first lookup is what failed on
+          # the first run of the block-float job. Resolve the toolkit the way
+          # `src/lib/mlxcel-core/build.rs` resolves nvcc, CUDA_HOME first and
+          # then the conventional location, with PATH as a last resort rather
+          # than as the primary, so this reads the same toolkit that compiled
+          # the archive. Not found stays a hard failure: a skip here would make
+          # the gate pass while checking nothing.
+          CUDA_BIN="${CUDA_HOME:-/usr/local/cuda}/bin"
+          CUOBJDUMP="$CUDA_BIN/cuobjdump"
+          if [ ! -x "$CUOBJDUMP" ]; then
+            CUOBJDUMP=$(command -v cuobjdump || true)
           fi
           if [ ! -x "${CUOBJDUMP:-}" ]; then
-            echo "cuobjdump not found; it ships with the CUDA toolkit next to nvcc" >&2
+            echo "cuobjdump not found at $CUDA_BIN/cuobjdump or on PATH; it ships with the CUDA toolkit next to nvcc" >&2
             exit 1
           fi
+          echo "cuobjdump: $CUOBJDUMP"
           LIB=$(find "$CARGO_TARGET_DIR/test-fast/build" -path '*/out/build/lib/libmlx.a' | head -1)
           if [ -z "$LIB" ]; then
             echo "libmlx.a not found under $CARGO_TARGET_DIR/test-fast/build" >&2
             exit 1
           fi
           echo "archive: $LIB ($(stat -c %s "$LIB") bytes)"
+
+          # One checkout can hold several build directories, one per feature set
+          # and architecture list, and `head -1` above picks whichever comes
+          # first. Assert that the one being read was configured with the list
+          # this job pins, so the gate cannot pass by measuring a neighbour.
+          CONFIGURED=$(sed -n 's/^MLX_CUDA_ARCHITECTURES:[^=]*=//p' "$(dirname "$LIB")/../CMakeCache.txt")
+          echo "configured with: $CONFIGURED"
+          if [ "$CONFIGURED" != "$MLX_CUDA_ARCHITECTURES" ]; then
+            echo "archive was configured with [$CONFIGURED], not the job's [$MLX_CUDA_ARCHITECTURES]" >&2
+            exit 1
+          fi
 
           # The fp4 conversion instruction itself. Zero means the
           # architecture-specific entry did not reach nvcc and MLX compiled the
