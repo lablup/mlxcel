@@ -341,20 +341,29 @@ jobs:
   cuda-arch-lists:
     name: CUDA architecture lists
     # Deliberately not behind the `changes` filter, like `crate-versions` and
-    # `binary-assets`: it needs no toolchain, runs in seconds, and the defect it
-    # guards against is silent. MLX compiles its hardware NVFP4/MXFP4 converters
+    # `binary-assets`: it needs no toolchain, runs in seconds, and both defects
+    # it guards against are silent.
+    #
+    # MLX compiles its hardware NVFP4/MXFP4 converters
     # (`cvt.rn.satfinite.e2m1x2.f32` in
     # mlx/backend/cuda/quantized/nvfp4_quantize.cuh) only under an
-    # architecture-specific target, so every plain Blackwell entry this
-    # repository shipped compiled them out and quantization silently took the
-    # scalar CUTLASS fallback, in the release artifacts and in the tests alike
-    # (issue #1934). Two tokens in a YAML `env` block separate the two
-    # spellings, and no build output names the difference.
+    # architecture-specific target, and the lists here are plain, so what
+    # supplies them is the per-source injection in
+    # `src/lib/mlx-cpp/CMakeLists.txt`. Remove that and the plain lists quietly
+    # go back to compiling the converters out of every artifact and every test,
+    # which is where issue #1934 started, so this asserts it is still there.
     #
-    # The `cuda-blockfloat` job below proves the converter really reached the
-    # archive, but it costs a CUDA build and is path-filtered. This one runs on
-    # every PR, and it also rejects the `f` spelling by name, which is the
-    # plausible wrong fix: it looks like a milder `a` and does not compile.
+    # The other direction is the obvious fix: putting `121a` in a list. That
+    # compiles every translation unit architecture-specific for a converter one
+    # of them reaches, costs 12.7 MB of archive and replaces the machine code of
+    # every decode kernel on every Blackwell host. Two tokens in a YAML `env`
+    # block, and no build output names the difference, so it is rejected here by
+    # name. So is the `f` spelling, which reads as a milder `a` and does not
+    # compile at all.
+    #
+    # The `cuda-blockfloat` job below asserts the same two properties on the
+    # compiled artifact, which is stronger, but it costs a CUDA build and is
+    # path-filtered. This one runs on every PR.
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1303,25 +1312,26 @@ jobs:
   # `__CUDA_ARCH_SPECIFIC__`, and so the tests that were supposed to cover
   # block-float quantization exercised only the scalar CUTLASS fallback.
   #
-  # `cuda-arch-lists` above already rejects a plain-only list by reading the
-  # YAML. This job is the other half: it asserts on the compiled artifact, so a
-  # list that is spelled correctly but never reaches CMake (build.rs
-  # auto-detects and falls back to `90a` when it cannot see the host) fails
-  # here rather than shipping. That trap is not hypothetical; it is the same
-  # one `cuda-sm70-compile` asserts against, for the same reason.
+  # It also proves the converter reached *only* there. The architecture lists
+  # stay plain and `src/lib/mlx-cpp/CMakeLists.txt` gives the extra image to
+  # `fp_quantize.cu` alone, so an architecture-specific image anywhere else
+  # means the injection was replaced by a target-level list and every kernel on
+  # every Blackwell host now runs different machine code. `cuda-arch-lists`
+  # above catches that spelling in the YAML; this catches it in the artifact,
+  # which also covers a list that never reaches CMake at all (build.rs
+  # auto-detects and falls back to `90a` when it cannot see the host). That
+  # trap is not hypothetical; it is the same one `cuda-sm70-compile` asserts
+  # against, for the same reason.
   #
-  # Gate on SASS, never on PTX. Under the combined `121a-real;121` form the
-  # emitted PTX comes from the plain `compute_121` pass, which takes the
+  # Gate on SASS, never on PTX. The injection emits a cubin and no PTX, and the
+  # PTX that is emitted comes from the plain `compute_121` pass, which takes the
   # fallback arm, so `cuobjdump --dump-ptx | grep cvt.rn.satfinite.e2m1x2`
-  # returns zero on a *correct* build. The SASS assertion below holds for both
-  # the combined form and the bare `121a` form, so it survives a change of
-  # mind about which one ships.
+  # returns zero on a *correct* build.
   #
   # Path-filtered on `cuda_arch`, deliberately and with a known gap: a PR that
   # changes only the Rust quantization code or its tests does not run this job,
-  # because a cold MLX build at two code-generation passes is measured in tens
-  # of minutes on the one self-hosted runner that also serves clippy for every
-  # Rust PR. What the filter does cover is everything that can change *which*
+  # because a cold MLX build is measured in tens of minutes on the one
+  # self-hosted runner that also serves clippy for every Rust PR. What the filter does cover is everything that can change *which*
   # device code is compiled, which is what the gate is about. Its own
   # persistent target directory, because the architecture list is part of the
   # build-script fingerprint and sharing with a differently-pinned job would
