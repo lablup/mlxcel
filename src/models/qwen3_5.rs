@@ -1647,11 +1647,17 @@ impl Qwen35Model {
         if head_dim != 256 && head_dim != 288 {
             return None;
         }
+        // MLX reads this switch as `env::get_var("MLXCEL_SDPA_VECTOR_LARGE_D", 1)`,
+        // an integer defaulting to 1, and this deliberately reads it more
+        // narrowly than mlxcel's own documented spelling: only a value that
+        // parses to zero counts as off. Erring narrow declines a burst that
+        // might have been safe; erring wide would report "safe" for a process
+        // in which MLX still takes the fused kernels, which is the one
+        // direction a safety gate must not be wrong in.
         let fused_enabled = std::env::var("MLXCEL_SDPA_VECTOR_LARGE_D")
-            .map(|v| {
-                let v = v.trim().to_ascii_lowercase();
-                !(v == "0" || v == "false" || v == "off" || v == "no")
-            })
+            .ok()
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .map(|v| v != 0)
             .unwrap_or(true);
         if !fused_enabled {
             return None;

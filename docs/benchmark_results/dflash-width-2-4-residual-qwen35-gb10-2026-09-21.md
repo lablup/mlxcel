@@ -19,7 +19,7 @@ MLX_CUDA_ARCHITECTURES: 121
 mem_total_gib: 121.7
 ```
 
-Driver budget: the boot's cumulative kernel `NV_ERR_NO_MEMORY` count was 0 before this session. Nothing here is a timing measurement, so every arm ran while the host was also compiling; greedy token streams do not depend on host load, and the two classic arms below are the control that says so.
+Driver budget: the boot's cumulative kernel `NV_ERR_NO_MEMORY` count was 0 before this session and 0 after it, across roughly a dozen server starts and two dozen in-process model loads. Nothing here is a timing measurement, so every arm ran while the host was also compiling; greedy token streams do not depend on host load, and the two classic arms below are the control that says so.
 
 ## Method
 
