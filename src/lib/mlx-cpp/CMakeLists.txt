@@ -262,15 +262,34 @@ if(MLX_BUILD_CUDA)
   # byte for byte the code it had.
   set(_fp_quantize
       "${mlx_SOURCE_DIR}/mlx/backend/cuda/quantized/fp_quantize.cu")
+  #
+  # A capability the list already names architecture-specific needs nothing
+  # added: the whole target is compiled that way for it, and asking nvcc for the
+  # same `--generate-code` twice is an error rather than a no-op. This is not
+  # hypothetical, it is what an operator following the pre-#1934 advice to build
+  # `121a-real;121` by hand would hit.
+  set(_already_arch_specific "")
+  foreach(_entry IN LISTS MLX_CUDA_ARCHITECTURES)
+    if(_entry MATCHES "^([0-9][0-9]+)a")
+      list(APPEND _already_arch_specific "${CMAKE_MATCH_1}")
+    endif()
+  endforeach()
   set(_fp_quantize_arch_flags "")
   foreach(_entry IN LISTS MLX_CUDA_ARCHITECTURES)
     # Plain Blackwell entries only. An entry that already carries `a` or `f`,
     # or a `-real`/`-virtual` restriction, is left exactly as the operator
     # wrote it, and Hopper is skipped because these converters also gate on
     # `__CUDA_ARCH__ >= 1000`, which 9.0 fails however it is spelled.
-    if(_entry MATCHES "^([0-9][0-9]+)$" AND CMAKE_MATCH_1 GREATER_EQUAL 100)
-      list(APPEND _fp_quantize_arch_flags
-           "--generate-code=arch=compute_${CMAKE_MATCH_1}a,code=[sm_${CMAKE_MATCH_1}a]")
+    #
+    # `list(FIND)` rather than `IN_LIST`, which needs policy CMP0057 and so
+    # depends on the `cmake_minimum_required` of whoever includes this file.
+    if(_entry MATCHES "^([0-9][0-9]+)$")
+      set(_sm "${CMAKE_MATCH_1}")
+      list(FIND _already_arch_specific "${_sm}" _sm_index)
+      if(_sm GREATER_EQUAL 100 AND _sm_index EQUAL -1)
+        list(APPEND _fp_quantize_arch_flags
+             "--generate-code=arch=compute_${_sm}a,code=[sm_${_sm}a]")
+      endif()
     endif()
   endforeach()
   if(_fp_quantize_arch_flags)
