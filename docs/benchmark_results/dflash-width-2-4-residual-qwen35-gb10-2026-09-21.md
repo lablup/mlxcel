@@ -45,19 +45,15 @@ Data and harness: `data/dflash-width-2-4-residual-gb10-2026-09-21/`.
 
 That pattern is a difference in the logits that is below the reporting floor almost everywhere, surfacing as a one-step logprob difference from index 62 onward and finally crossing an argmax at 105, where the top two candidates sat within a reporting step of each other. It is not a rollback, not a round-boundary effect, and not nondeterminism: both requests in each arm are byte-identical to each other.
 
-## The cause: a verify row and the decode step it stands for are not the same call
+## The cause: the verify block's attention does not reproduce decode's, on one kernel
 
-`Qwen3NextAttention::attend_per_position` is what makes a verify block reproduce single-token decode. For each query position `i` of a `[B, H, T, D]` block it attends `queries[:, :, i:i+1, :]` to the causal prefix `keys[:, :, ..prefix + i + 1, :]` with no mask, so each row sees exactly the prefix a decode step would. The arithmetic is right. The layout is not.
+`Qwen3NextAttention::attend_per_position` is what makes a verify block reproduce single-token decode. For each query position `i` of a `[B, H, T, D]` block it attends `queries[:, :, i:i+1, :]` to the causal prefix `keys[:, :, ..prefix + i + 1, :]` with no mask, so each row sees exactly the prefix a decode step would, and `target_verify && l > 1` is the only condition that selects it. Classic decode takes the `l == 1` arm of the same match and reaches the same `layers::attention` entry point with the same absence of a mask.
 
-A one-row slice of a `[B, H, T, D]` tensor has its heads `T * D` apart. Single-token decode hands the same attention call a freshly built `[B, H, 1, D]`, whose heads are `D` apart. Same values, same shape, different strides. On CUDA this checkpoint's `head_dim` is 256, which `MLXCEL_SDPA_VECTOR_LARGE_D` (issue #675) routes to the fused `sdpa_vector` kernels, and that kernel is not bit-equal across the two layouts. The key and value slices are unaffected: both paths slice the same cache buffer to `prefix + i + 1`, so their strides already match, which is why the query row is the whole of it.
+One switch decides whether those two calls agree.
 
-Three arms establish this, and each rules out what the others cannot.
+**`MLXCEL_SDPA_VECTOR_LARGE_D=0` collapses the divergence, in two independent arms.** That switch does one thing: it decides whether `head_dim` 256 and 288 are accepted by CUDA's `supports_sdpa_vector` gate, and so whether a single-query attention call takes the fused `sdpa_vector` kernels or the materializing fallback (issue #675). Both classic decode and every row of `attend_per_position` are single-query calls, so both move together.
 
-**At `T = 1` the two forwards are byte-identical.** Prefilling classic with `forward_internal` and the burst with `forward_prefill_with_capture_layers`, then walking the real 200-token transcript one token at a time, every step's logits agree in all 496640 bytes and the prefill's do too. At `T = 1` the one-row slice IS the whole tensor, so the layouts coincide and the difference has nowhere to appear. This is what rules out everything that is not a block: the projections, the gated-delta layers, the rotary, the prefill, the caches.
-
-**At `T = 4` it reproduces with no drafter at all.** Replaying the served width-4 run's own 79 rounds and 56 rewinds in process, with the rejected rows carrying a wrong token id, the target disagrees with the classic chain at exactly one of 201 greedy positions, at 105, taking 5741 where classic takes 11439. The served position, from a replay that contains no drafter and no server. That kills the standing hypothesis that the drafter's interleaved MLX work was the cause: there is no drafter in this arm. Driving `run_dflash_on_target` with the real drafter bound reproduces the same position, which is consistent rather than additional.
-
-**Turning the fused kernel off makes the two byte-identical.** `MLXCEL_SDPA_VECTOR_LARGE_D=0` routes single-query attention off `sdpa_vector` for `head_dim` 256 on both paths. Served, same binary:
+Served, one binary, temperature 0:
 
 | arm | completion sha256 | first token differing from classic |
 |---|---|---:|
@@ -66,7 +62,17 @@ Three arms establish this, and each rules out what the others cannot.
 | classic, `MLXCEL_SDPA_VECTOR_LARGE_D=0` | `4c37650547` | |
 | width 4, `MLXCEL_SDPA_VECTOR_LARGE_D=0` | `4c37650547` | none, 200 of 200 |
 
-Both arms move, which is expected and is why the row is not evidence about classic decode; what matters is that they move onto each other. A single kill switch collapsing a 95-token divergence to nothing is stronger than any of the exclusions that preceded it, and it takes the remaining candidates with it: rollback, the gated-delta scan, the quantized matmul kernel, the drafter, the round loop, the server process. None of those is disabled by this switch, and all of them stop mattering when it is off.
+Both arms move, which is expected and is why this table is not evidence about classic decode; what matters is that they move onto each other. In process, replaying the served width-4 run's own 79 rounds and 56 rewinds against a classic chain computed in the same run, the same switch takes the target from 1 disagreement of 201 greedy positions to 0.
+
+A single kill switch collapsing a 95-token divergence to nothing is stronger than any of the exclusions that preceded it, and it takes the remaining candidates with it. Rollback, the gated-delta scan, the quantized matmul kernel, the drafter, the round loop and the server process are none of them disabled by this switch, and all of them stop mattering when it is off.
+
+**Two more arms place it at `T > 1` and nowhere else.** At `T = 1`, prefilling classic with `forward_internal` and the burst with `forward_prefill_with_capture_layers` and then walking the real 200-token transcript one token at a time, every step's logits agree in all 496640 bytes and the prefill's do too. `attend_per_position` at `T = 1` slices a one-row tensor, so its call is classic's call, and nothing differs. At `T = 4` the divergence reproduces in process with no drafter and no server, at exactly the served position, taking 5741 where classic takes 11439. That kills the hypothesis PR #1939 left standing, that the drafter's interleaved MLX work was the cause: there is no drafter in that arm.
+
+### What it is not: the per-row tensor layouts
+
+The obvious reading of "same math, one kernel, two answers" is that the two calls hand the kernel differently-laid-out tensors. A one-row slice of a `[B, H, T, D]` block does carry the block's strides, and single-token decode does hand the same call a `[B, H, 1, D]` built from a one-row forward. Measured, that is not the difference. Copying the per-row query slice to a fresh contiguous array leaves the served width 2 and 4 completions exactly where they were (`3e60b1574c`, first differing token 105), and copying the key and value slices along with it changes nothing either. The change that produced those arms is reverted; the negative result is recorded here instead.
+
+Reading the CUDA gate confirms why. `supports_sdpa_vector` admits a call when `q.shape(2) < 4`, which both satisfy, and `sdpa_vector`'s own `q_copy_unless` and `kv_copy_unless` predicates accept both layouts without copying: a `[1, H, 1, D]` query passes on `strides[3] == 1 && strides[2] == D * H && strides[1] == D`, which the block's slice satisfies as well as decode's tensor does, and a key or value whose batch dimension is 1 is accepted whatever its strides. The 1-pass and 2-pass split is on `k.shape(2) > 1024`, which neither reaches. So the arguments the kernel sees are the same shape, the same strides and the same values, and the difference is in what MLX does around the call rather than in what is handed to it.
 
 ## Why the gate reported the property intact
 
