@@ -598,10 +598,15 @@ fn cmake_bool_from_env(name: &str) -> Option<&'static str> {
 ///
 /// An explicitly set `MLX_CUDA_ARCHITECTURES` wins verbatim (the documented
 /// escape hatch); otherwise `nvidia-smi` detection decides, and `90a` is the
-/// last resort. That fallback is why the runtime mismatch check exists: on a
-/// host without `nvidia-smi` it produces a binary that cannot run on its own
-/// build machine, and without the check the only symptom is an opaque CUDA
-/// load failure at the first kernel launch.
+/// last resort. It stays spelled `90a` for the same reason `sm_arch_with_suffix`
+/// still suffixes Hopper: that is what `release.yml` ships, and a fallback that
+/// said `90` would hand a host without `nvidia-smi` a build shape no published
+/// archive uses, which is the divergence lablup/mlxcel#1943 closed on Blackwell.
+///
+/// That fallback is why the runtime mismatch check exists: on a host without
+/// `nvidia-smi` it produces a binary that cannot run on its own build machine,
+/// and without the check the only symptom is an opaque CUDA load failure at the
+/// first kernel launch.
 ///
 /// Empty string on a non-CUDA build, which the runtime reads as "no compiled
 /// architecture list" and skips the check entirely.
