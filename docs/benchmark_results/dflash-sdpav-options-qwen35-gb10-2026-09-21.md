@@ -56,4 +56,16 @@ Two facts the table carries that are easy to miss. **The fallback costs the burs
 
 Byte-identical speculation is achievable and is worth 1.13x; dropping the byte-identity requirement is worth 1.22x; and the fused kernel is worth about 8% to the burst while being worth nothing measurable to classic decode at this context length.
 
-A is the better default anyway, because it is the only option that leaves today's output and today's non-speculative performance exactly as they are, and because B's price is paid by every request on the process rather than by the ones that asked for speculation. B is worth documenting as the operator recipe for byte-identical speculation rather than shipping as a default, and it needs no new code: #1944's guard stands down when the flag is off, so an operator who sets `MLXCEL_SDPA_VECTOR_LARGE_D=0` gets the burst engaged and byte-identical on the same binary.
+A is the better default anyway, because it is the only option that leaves today's output and today's non-speculative performance exactly as they are, and because B's price is paid by every request on the process rather than by the ones that asked for speculation. B is worth documenting as the operator recipe for byte-identical speculation rather than shipping as a default, and it needs no new code.
+
+## That last claim, measured on the PR #1944 binary rather than argued
+
+The arms above run an `origin/main` binary, so they price the mechanism, not the gate. Three more arms run PR #1944's own binary (sha `9ae64508`, verified to carry the guard before it ran) to check that A and B are both reachable from the one build.
+
+| arm | `MLXCEL_SDPA_VECTOR_LARGE_D` | declines logged | bursts completed | completion sha256 |
+|---|---|---:|---:|---|
+| classic, no drafter | 0 | 0 | 0 | `4c37650547` |
+| width 3 | 0 | 0 | 2 | `4c37650547` |
+| width 3 | 1 (the default) | 2 | 0 | `2c76b0a181` |
+
+At the shipped default the guard declines, no burst runs, and the server returns exactly today's classic text. With the fallback selected the guard stands down, the burst runs, and its text is byte-identical to the drafter-less server in the same configuration. So one binary carries both options and the operator recipe for byte-identical speculation is a single environment variable.
