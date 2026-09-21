@@ -43,6 +43,15 @@
 use std::fmt;
 use std::sync::OnceLock;
 
+/// First SM number this project names plainly even though CUDA offers an
+/// architecture-specific spelling for it: Blackwell's `sm_100`.
+///
+/// The same boundary as `FIRST_PLAIN_SM` in `build.rs`, which auto-detection
+/// spells architecture lists with. Duplicated rather than shared because a
+/// build script cannot import from the crate it builds; the guard in
+/// `scripts/ci/check_cuda_arch_lists.py` keeps the two from drifting apart.
+const FIRST_PLAIN_SM: u32 = 100;
+
 // ── Compiled architecture list ────────────────────────────────────────────────
 
 /// The `MLX_CUDA_ARCHITECTURES` list this binary's MLX device code was
@@ -325,16 +334,24 @@ impl CudaArchMismatch {
     /// The `MLX_CUDA_ARCHITECTURES` value that would build for this device.
     ///
     /// Applies the same rule `build.rs`'s `sm_arch_with_suffix` applies when it
-    /// auto-detects: CUDA's architecture-specific `a` suffix from SM 90 up. The
-    /// suffix is load-bearing on Hopper and newer, where MLX compiles its
-    /// dedicated quantized kernel only when the list says `90a` rather than
-    /// `90`. Suggesting anything else here would send an operator to a rebuild
-    /// that differs from the one auto-detection would have produced.
+    /// auto-detects: CUDA's architecture-specific `a` suffix on Hopper, plain
+    /// from Blackwell up. This message is the one place the project hands an
+    /// operator an `MLX_CUDA_ARCHITECTURES` value to paste, so a suffix here
+    /// that auto-detection would not produce sends them to a build the project
+    /// rejects everywhere else: `121a` compiles every translation unit
+    /// architecture-specific rather than letting `src/lib/mlx-cpp/CMakeLists.txt`
+    /// give that image to `fp_quantize.cu` alone, and
+    /// `scripts/ci/check_cuda_arch_lists.py` fails any workflow list spelled
+    /// that way (lablup/mlxcel#1934, #1943).
     #[must_use]
     pub fn suggested_architecture(&self) -> String {
         let (major, minor) = self.device;
         let sm = major * 10 + minor;
-        let suffix = if sm >= 90 { "a" } else { "" };
+        let suffix = if (90..FIRST_PLAIN_SM).contains(&sm) {
+            "a"
+        } else {
+            ""
+        };
         format!("{sm}{suffix}")
     }
 }

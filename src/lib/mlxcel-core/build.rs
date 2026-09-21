@@ -413,13 +413,16 @@ fn build_mlx(expected_commit: &str, cuda_architectures: &str, rocm_architectures
         // honored verbatim (escape hatch); otherwise we auto-detect via nvidia-smi
         // and fall back to Hopper's sm_90a.
         //
-        // The `a` suffix is load-bearing: MLX only defines MLX_CUDA_SM90A_ENABLED
-        // (which compiles the dedicated Hopper `qmm_sm90` quantized kernel) when
-        // "90a" is in the arch list. MLX's own CMake appends that suffix for
-        // cc >= 90, but only inside its `if(NOT DEFINED MLX_CUDA_ARCHITECTURES)`
-        // branch. Because we always pass MLX_CUDA_ARCHITECTURES explicitly, that
-        // branch never runs, so we apply the same rule ourselves here and in
-        // detect_cuda_arch. See docs/installation.md (CUDA architecture selection).
+        // MLX's own CMake would spell a detected capability itself, appending the
+        // architecture-specific `a` suffix for cc >= 90, but only inside its
+        // `if(NOT DEFINED MLX_CUDA_ARCHITECTURES)` branch. We always pass the
+        // variable explicitly, so that branch never runs and `sm_arch_with_suffix`
+        // spells it here instead. It deliberately stops suffixing at
+        // `FIRST_PLAIN_SM`, where MLX's rule would not: on Blackwell the suffix
+        // belongs on one translation unit rather than on the whole target, which
+        // is what `src/lib/mlx-cpp/CMakeLists.txt` arranges and what the release
+        // lists carry. See `sm_arch_with_suffix` and docs/installation.md (CUDA
+        // architecture selection).
         //
         // The value is resolved in `main` by `resolve_cuda_architectures` and
         // passed in, so the list CMake compiles for and the list recorded in
@@ -647,17 +650,51 @@ fn detect_cuda_arch() -> Option<String> {
     }
 }
 
-/// Append CUDA's architecture-specific `a` suffix for SM >= 90, mirroring MLX's
-/// own CMake logic (`MLX_CUDA_ARCHITECTURES GREATER_EQUAL 90` -> append `a`).
+/// First SM number this project names plainly even though CUDA offers an
+/// architecture-specific spelling for it: Blackwell's `sm_100`.
 ///
-/// The `a` suffix enables architecture-specific features (e.g. Hopper wgmma/TMA)
-/// the dedicated quantized kernels rely on, and it gates MLX_CUDA_SM90A_ENABLED on
-/// "90a" (not "90"). SM < 90 (e.g. Ampere sm_80/sm_86) has no `a` variant and is
-/// returned unchanged.
+/// Both release lists in `.github/workflows/release.yml` stop suffixing here,
+/// and `scripts/ci/check_cuda_arch_lists.py` rejects any workflow list that
+/// does not. Auto-detection uses the same boundary so that a local build and a
+/// shipped build differ in which architectures they cover and never in what
+/// machine code those architectures get (lablup/mlxcel#1943).
+#[cfg(feature = "cuda")]
+const FIRST_PLAIN_SM: u32 = 100;
+
+/// Spell one detected SM number the way the shipped architecture lists spell
+/// it: `a`-suffixed for Hopper, plain from `FIRST_PLAIN_SM` up.
+///
+/// Suffixing Blackwell is what that boundary exists to prevent. The whole
+/// target would compile under `__CUDA_ARCH_SPECIFIC__`, CUTLASS keys
+/// `CUTLASS_ARCH_MMA_SM121A_ENABLED` on the same macro, and every decode kernel
+/// would get a second, architecture-specific image that the driver prefers on a
+/// matching device. `src/lib/mlx-cpp/CMakeLists.txt` injects that image into
+/// `fp_quantize.cu` alone instead, the one translation unit that can reach
+/// MLX's hardware block-float converters, and that injection only fires for
+/// plain entries: an entry already carrying `a` is recorded as
+/// architecture-specific and skipped, because a duplicate `--generate-code` is
+/// an nvcc error rather than a no-op. A plain `121` is therefore what makes the
+/// shipped mechanism work (lablup/mlxcel#1934, PR #1938).
+///
+/// Hopper keeps `90a` because `release.yml` ships `90a` and this function's job
+/// is to agree with it. The suffix no longer gates anything at the current MLX
+/// pin: upstream commit `44540d12` moved `qmm_sm80`, `qmm_sm90` and
+/// `gather_gemm` to runtime NVRTC compilation and deleted the
+/// `MLX_CUDA_SM90A_ENABLED` definition an earlier revision of this comment
+/// cited, and `jit_module.cpp` now derives the NVRTC `--gpu-architecture` from
+/// the running device, appending `a` itself from compute capability 9 up.
+/// Cross-compiling the pinned tree at `90` and at `90a` agrees: the quantized
+/// translation units, `qmm_sm90.cu` included, produce identical SASS either
+/// way. `CUTLASS_ARCH_MMA_SM90A_ENABLED` still keys on
+/// `__CUDA_ARCH_FEAT_SM90_ALL`, so a later pin can make the suffix matter
+/// again, which is a second reason not to drop what the release list carries.
+///
+/// SM < 90 (Ampere `sm_80`, `sm_86`) has no `a` variant and is returned
+/// unchanged. See `docs/installation.md` (CUDA architecture selection).
 #[cfg(feature = "cuda")]
 fn sm_arch_with_suffix(sm: &str) -> String {
     match sm.parse::<u32>() {
-        Ok(n) if n >= 90 => format!("{sm}a"),
+        Ok(n) if (90..FIRST_PLAIN_SM).contains(&n) => format!("{sm}a"),
         _ => sm.to_string(),
     }
 }
