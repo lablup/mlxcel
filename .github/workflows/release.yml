@@ -534,9 +534,15 @@ jobs:
     # One aarch64 fat binary covering the NVIDIA aarch64 targets in a single
     # build: GH200 (Grace Hopper, sm_90a), GB200 (Grace Blackwell, sm_100), and
     # GB10 / DGX Spark (Blackwell, sm_121), cross-compiled on the GB10 runner.
-    # 90a is load-bearing for MLX's Hopper quantized kernel gate, and build.rs
-    # forwards the list verbatim. The CLI and server (~347 MB each) ship as
-    # separate archives, both with the CCCL headers.
+    # build.rs forwards the list verbatim, so this is exactly what nvcc is asked
+    # for. Hopper is spelled 90a because that is the spelling this project has
+    # shipped and the one auto-detection mirrors, not because it gates a kernel
+    # at the current MLX pin: upstream 44540d12 moved the Hopper quantized kernel
+    # to runtime NVRTC compilation and deleted MLX_CUDA_SM90A_ENABLED, which this
+    # comment used to cite. CUTLASS_ARCH_MMA_SM90A_ENABLED still keys on
+    # __CUDA_ARCH_FEAT_SM90_ALL, so a later pin can make it matter again
+    # (issue #1943). The CLI and server (~347 MB each) ship as separate archives,
+    # both with the CCCL headers.
     #
     # Blackwell stays plain here even though MLX's hardware NVFP4/MXFP4
     # converters are gated on `__CUDA_ARCH_SPECIFIC__` and a plain target
@@ -766,9 +772,14 @@ jobs:
     permissions:
       contents: write
 
-    # One fat binary covering Ampere and later. 90a is load-bearing: MLX gates
-    # its Hopper quantized kernel on "90a" being in the list (MLX_CUDA_SM90A_ENABLED),
-    # and build.rs forwards MLX_CUDA_ARCHITECTURES verbatim (no auto-suffix).
+    # One fat binary covering Ampere and later. Hopper is spelled 90a, and
+    # build.rs forwards MLX_CUDA_ARCHITECTURES verbatim, so this list is exactly
+    # what nvcc is asked for. At the current MLX pin that suffix gates nothing
+    # by itself: upstream 44540d12 moved the Hopper quantized kernel to runtime
+    # NVRTC compilation and deleted MLX_CUDA_SM90A_ENABLED, which the rationale
+    # here used to cite. It stays because CUTLASS_ARCH_MMA_SM90A_ENABLED still
+    # keys on __CUDA_ARCH_FEAT_SM90_ALL, so a later pin can make it matter, and
+    # because auto-detection now mirrors this list (issue #1943).
     # Blackwell stays plain for the reason spelled out in the aarch64 job
     # above: the hardware NVFP4/MXFP4 converters are added to `fp_quantize.cu`
     # alone by `src/lib/mlx-cpp/CMakeLists.txt` rather than to the whole target.

@@ -164,18 +164,23 @@ CUDA_HOME=/opt/cuda cargo build --release --features cuda
 
 
 `src/lib/mlxcel-core/build.rs` reads `MLX_CUDA_ARCHITECTURES`. If it is unset,
-the build script tries to detect the compute capability with `nvidia-smi` and
-falls back to `90a` when detection fails. For SM 90 and above it appends CUDA's
-architecture-specific `a` suffix (so `90` becomes `90a`), because the dedicated
-Hopper quantized kernel (`qmm_sm90`) is only compiled when `90a` is in the arch
-list. An explicitly set `MLX_CUDA_ARCHITECTURES` is used verbatim, so include the
-suffix yourself for Hopper (`90a`).
+the build script detects the compute capability with `nvidia-smi` and spells it
+the way the release workflow spells it: Hopper gets CUDA's architecture-specific
+`a` suffix (`90` becomes `90a`), and Blackwell (`sm_100`, `sm_120`, `sm_121`)
+stays plain. Detection failure falls back to `90a`. An auto-detected build and a
+published one therefore differ in which architectures they cover and never in
+what machine code those architectures get, which is the point: before issue
+#1943 the rule suffixed everything from SM 90 up, so a default build on a GB10
+produced `121a` while the release archives for the same card carried `121`.
 
-On Blackwell (`sm_100`, `sm_120`, `sm_121`) the `a` suffix decides something
-else, and you should not set it. MLX compiles the hardware block-float
-converters in `mlx/backend/cuda/quantized/nvfp4_quantize.cuh`, the ones that
-issue `cvt.rn.satfinite.e2m1x2.f32`, only when nvcc is compiling for an
-architecture-specific target, which it signals with `__CUDA_ARCH_SPECIFIC__`.
+An explicitly set `MLX_CUDA_ARCHITECTURES` is used verbatim, so spell it the same
+way by hand: `90a` for Hopper, plain for Blackwell. The rest of this section is
+why Blackwell is plain.
+
+On Blackwell the `a` suffix decides something else. MLX compiles the hardware
+block-float converters in `mlx/backend/cuda/quantized/nvfp4_quantize.cuh`, the
+ones that issue `cvt.rn.satfinite.e2m1x2.f32`, only when nvcc is compiling for
+an architecture-specific target, which it signals with `__CUDA_ARCH_SPECIFIC__`.
 A plain `121` build therefore compiles them out, and both NVFP4 and MXFP4
 quantization fall back to a scalar CUTLASS conversion sequence with nothing in
 the build output saying so.
@@ -192,13 +197,28 @@ So the list stays plain and `src/lib/mlx-cpp/CMakeLists.txt` adds the
 architecture-specific image to `fp_quantize.cu` alone, which is the only
 translation unit that can reach those converters. You get the hardware path
 without asking for it, and without it reaching anything else. Building with
-`121a` is a step backwards, not a step forwards; `121f` is worse still, because
-it satisfies the converters' dispatcher gate but not their own gate and fails
-to compile outright.
+`121a` is a step backwards, not a step forwards, and it is also self-defeating:
+the injection skips a capability the list already names architecture-specific,
+because asking nvcc for the same `--generate-code` twice is an error rather than
+a no-op. `121f` is worse still, because it satisfies the converters' dispatcher
+gate but not their own gate and fails to compile outright.
+
+Hopper's `90a` is a different case: it is what both release lists ship, so the
+auto-detected spelling matches it. At the current MLX pin the suffix no longer
+gates anything on its own. Upstream commit `44540d12` moved `qmm_sm80`,
+`qmm_sm90` and `gather_gemm` to runtime NVRTC compilation and removed the
+`MLX_CUDA_SM90A_ENABLED` definition an earlier version of this section cited,
+and `jit_module.cpp` now derives the NVRTC `--gpu-architecture` from the running
+device, appending `a` itself from compute capability 9 up. Cross-compiling the
+pinned tree at `90` and at `90a` agrees: `qmm_sm90.cu`, `qmm.cu` and
+`qmm_sm80.cu` emit no device function at either spelling, and `qmv.cu` and
+`fp_qmv.cu` emit identical SASS apart from the `EF_CUDA_ACCELERATORS` header
+flag that marks a cubin architecture-specific.
+`CUTLASS_ARCH_MMA_SM90A_ENABLED` still keys on `__CUDA_ARCH_FEAT_SM90_ALL`, so
+a later pin can make it matter again.
 
 ```bash
-# Hopper / GH200-style target. The `a` suffix is required for the Hopper
-# quantized kernel; plain `90` builds without it.
+# Hopper / GH200-style target, spelled the way the release workflow spells it.
 MLX_CUDA_ARCHITECTURES=90a cargo build --release --features cuda
 
 # GB10 / DGX Spark-style target used by the release workflow. Plain: the

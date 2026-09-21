@@ -32,8 +32,11 @@ use crate::cuda_arch::{
 /// architecture-specific target, but `src/lib/mlx-cpp/CMakeLists.txt` gives that
 /// to `fp_quantize.cu` alone rather than to the whole `mlx` target, so these
 /// lists stay plain and every other kernel keeps the code it had (issue #1934).
-/// Hopper's `90a` is unrelated and load-bearing for MLX's own quantized-kernel
-/// gate.
+/// Hopper's `90a` is unrelated: these converters need compute capability 10.0,
+/// so 9.0 cannot reach them however it is spelled. It is kept because it is
+/// what the release lists ship and what auto-detection mirrors, not because it
+/// gates a kernel at the current MLX pin, where the macro that once did was
+/// deleted upstream (issue #1943).
 const RELEASE_AARCH64: &str = "90a;100;121";
 const RELEASE_X86_64: &str = "80;86;89;90a;100;120";
 
@@ -474,10 +477,14 @@ fn the_mismatch_message_names_both_sides_and_a_working_rebuild() {
 }
 
 #[test]
-fn the_suggested_rebuild_carries_the_hopper_suffix() {
-    // `90` and `90a` are not interchangeable: MLX only compiles its dedicated
-    // Hopper quantized kernel when the list says `90a`, so a suggestion that
-    // dropped the suffix would rebuild into a slower binary.
+fn the_suggested_rebuild_matches_the_shipped_spelling() {
+    // This message is the only place the project hands an operator an
+    // MLX_CUDA_ARCHITECTURES value to paste, so it has to name the spelling the
+    // release workflow builds and auto-detection produces. Hopper keeps `90a`,
+    // which is what `release.yml` ships. Blackwell stays plain: `121a` would
+    // compile every translation unit architecture-specific instead of letting
+    // the per-source injection give that image to `fp_quantize.cu` alone, and
+    // the CI guard rejects a workflow list spelled that way (#1934, #1943).
     let suggest = |device| {
         CudaArchMismatch {
             device,
@@ -488,5 +495,5 @@ fn the_suggested_rebuild_carries_the_hopper_suffix() {
     assert_eq!(suggest(V100), "70");
     assert_eq!(suggest(A100), "80");
     assert_eq!(suggest(H100), "90a");
-    assert_eq!(suggest(GB10), "121a");
+    assert_eq!(suggest(GB10), "121");
 }

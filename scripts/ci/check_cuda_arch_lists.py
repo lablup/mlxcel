@@ -39,9 +39,9 @@ For every ``MLX_CUDA_ARCHITECTURES`` value in ``.github/workflows/*.yml``:
    40-minute CUDA job.
 3. No Blackwell entry (major >= 10) may carry the ``a`` suffix, because that is
    the whole-target form the per-source injection exists to avoid. Hopper's
-   ``90a`` is untouched: it is load-bearing for MLX's own quantized-kernel gate
-   and cannot reach these converters anyway, which also require compute
-   capability 10.0.
+   ``90a`` is untouched: these converters require compute capability 10.0 and so
+   cannot be reached from 9.0 however it is spelled, and ``90a`` is what the
+   release lists ship.
 
 Then, once for the repository:
 
@@ -52,6 +52,18 @@ Then, once for the repository:
    ``docs/installation.md``. Documentation drift is how the original defect
    stayed invisible: the document names the architectures the published archives
    carry, and nothing made it move when the workflow did.
+6. The two places that spell an architecture list from a detected capability,
+   rather than reading one out of a workflow, must stop suffixing at the same
+   Blackwell boundary. A list nobody wrote down is not covered by rule 3: with
+   ``MLX_CUDA_ARCHITECTURES`` unset, ``build.rs`` auto-detects from
+   ``nvidia-smi``, and on a Blackwell host an unbounded suffix rule resolves the
+   whole target to ``121a``, which is the shape rule 3 rejects and which stops
+   the per-source injection from firing at all (an entry already carrying ``a``
+   is skipped, because a duplicate ``--generate-code`` is an nvcc error). The
+   startup mismatch message spells one the same way, and it is the only value
+   the project hands an operator to paste. Guarded statically here because the
+   job has no CUDA toolkit, and because ``cargo test`` does not run build
+   scripts (lablup/mlxcel#1943).
 """
 
 from __future__ import annotations
@@ -77,6 +89,42 @@ ENV_ASSIGNMENT = re.compile(r"^\s*MLX_CUDA_ARCHITECTURES:\s*(?P<value>\S.*?)\s*$
 #: ``src/lib/mlxcel-core/src/cuda_arch.rs``, which parses the same strings at
 #: runtime for the startup mismatch check.
 ENTRY = re.compile(r"^(?P<digits>\d{2,})(?P<variant>[af]?)(?P<restriction>-real|-virtual)?$")
+
+#: The Rust functions that spell an architecture list from a detected compute
+#: capability instead of reading one out of a workflow, as (path, function,
+#: consequence) triples relative to the repository root. Both must stop
+#: suffixing at ``FIRST_PLAIN_SM``; see rule 6 in the module docstring. The
+#: consequence is what an unbounded rule actually does at that site, so the
+#: failure names the damage rather than the style.
+SUFFIX_RULES = (
+    (
+        Path("src/lib/mlxcel-core/build.rs"),
+        "sm_arch_with_suffix",
+        "a Blackwell host with MLX_CUDA_ARCHITECTURES unset then builds the whole MLX target as "
+        "`121a`: every translation unit compiles under __CUDA_ARCH_SPECIFIC__, CUTLASS keys "
+        "CUTLASS_ARCH_MMA_SM121A_ENABLED on the same macro, and the per-source injection in "
+        "src/lib/mlx-cpp/CMakeLists.txt never fires at all, because an entry already carrying `a` "
+        "is skipped rather than given a duplicate --generate-code. That is the whole-target shape "
+        "rule 3 rejects in a workflow, reached by a path no workflow names",
+    ),
+    (
+        Path("src/lib/mlxcel-core/src/cuda_arch.rs"),
+        "suggested_architecture",
+        "the startup mismatch message then tells an operator on a Blackwell card to rebuild with "
+        "`MLX_CUDA_ARCHITECTURES=121a`, which is the one value this repository rejects everywhere "
+        "else and the only architecture list the project ever hands someone to paste",
+    ),
+)
+
+#: The shared boundary constant, which must equal ``BLACKWELL_MAJOR * 10``. It
+#: is declared once per file because a build script cannot import from the crate
+#: it builds, so this check is what keeps the two copies equal.
+BOUNDARY_CONST = re.compile(r"const\s+FIRST_PLAIN_SM\s*:\s*u32\s*=\s*(?P<value>\d+)\s*;")
+
+#: A suffix rule with no upper bound, i.e. the pre-#1943 shape. Matches both
+#: spellings the two functions used: a match guard (``Ok(n) if n >= 90 =>``) and
+#: an ``if`` expression (``if sm >= 90 { "a" }``).
+UNBOUNDED_SUFFIX = re.compile(r"\b[a-z_]+\s*>=\s*(?P<threshold>\d+)")
 
 
 @dataclass(frozen=True)
@@ -207,6 +255,94 @@ def check_injection(cmakelists: Path) -> list[str]:
     ]
 
 
+def _function_body(text: str, name: str) -> str | None:
+    """The braced body of ``fn <name>``, or ``None`` when it is not there.
+
+    Brace counting rather than indentation, so it reads a free function and an
+    ``impl`` method the same way. Safe for these two bodies because neither
+    holds an unbalanced brace inside a string literal; ``format!("{sm}a")`` and
+    friends are balanced.
+    """
+    start = text.find(f"fn {name}")
+    if start < 0:
+        return None
+    opening = text.find("{", start)
+    if opening < 0:
+        return None
+    depth = 0
+    for index in range(opening, len(text)):
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[opening : index + 1]
+    return None
+
+
+def check_auto_detect(root: Path) -> list[str]:
+    """The suffix rule the auto-detected and suggested lists are spelled with.
+
+    Rule 3 reads workflow files, so it cannot see the list a developer's own
+    machine produces when ``MLX_CUDA_ARCHITECTURES`` is unset. That list comes
+    from the functions named in ``SUFFIX_RULES``, and this is what holds them to
+    the same Blackwell boundary the shipped lists use.
+    """
+    problems: list[str] = []
+    expected_boundary = BLACKWELL_MAJOR * 10
+    for relative, function, consequence in SUFFIX_RULES:
+        path = root / relative
+        if not path.exists():
+            problems.append(
+                f"{relative} does not exist, so the {function} suffix rule cannot be checked. "
+                "If it moved, point SUFFIX_RULES at the new location rather than dropping the "
+                "check: an unguarded rule is how a local build silently stopped matching a "
+                "shipped one (issue #1943)."
+            )
+            continue
+        text = path.read_text()
+
+        boundary = BOUNDARY_CONST.search(text)
+        if boundary is None:
+            problems.append(
+                f"{relative} does not define `FIRST_PLAIN_SM`, the boundary {function} stops "
+                f"appending CUDA's architecture-specific `a` suffix at. Declare it as "
+                f"`const FIRST_PLAIN_SM: u32 = {expected_boundary};` (issue #1943)."
+            )
+        elif int(boundary.group("value")) != expected_boundary:
+            problems.append(
+                f"{relative} sets FIRST_PLAIN_SM to {boundary.group('value')}, but the "
+                f"converter gate in nvfp4_quantize.cuh is `__CUDA_ARCH__ >= {expected_boundary}0`, "
+                f"so the boundary is {expected_boundary}. A mismatch makes an auto-detected build "
+                "disagree with the release lists on which architectures are named plainly "
+                "(issue #1943)."
+            )
+
+        body = _function_body(text, function)
+        if body is None:
+            problems.append(
+                f"{relative} no longer defines `{function}`, which is where a detected compute "
+                "capability is spelled as an architecture-list entry. This check cannot verify "
+                "the Blackwell boundary without it (issue #1943)."
+            )
+            continue
+
+        if "FIRST_PLAIN_SM" not in body:
+            problems.append(
+                f"{relative}: `{function}` does not bound its suffix rule with FIRST_PLAIN_SM. "
+                f"Unbounded, it appends `a` to Blackwell too, and {consequence}. See issue #1943."
+            )
+        unbounded = UNBOUNDED_SUFFIX.search(body)
+        if unbounded is not None:
+            problems.append(
+                f"{relative}: `{function}` still compares with `>= {unbounded.group('threshold')}` "
+                "and no upper bound, which suffixes every architecture from there up. Use a "
+                "bounded range ending at FIRST_PLAIN_SM so Hopper keeps the `90a` the release "
+                "lists ship and Blackwell stays plain (issue #1943)."
+            )
+    return problems
+
+
 def check_docs(release_lists: list[ArchList], installation: Path) -> list[str]:
     """Release lists that `docs/installation.md` does not quote verbatim."""
     if not installation.exists():
@@ -254,6 +390,7 @@ def main() -> int:
             failures.append(f"{relative}:{arch_list.line}: {problem}")
 
     failures.extend(check_injection(args.root / "src" / "lib" / "mlx-cpp" / "CMakeLists.txt"))
+    failures.extend(check_auto_detect(args.root))
     release_lists = [a for a in arch_lists if a.path.name == "release.yml"]
     failures.extend(check_docs(release_lists, args.root / "docs" / "installation.md"))
 

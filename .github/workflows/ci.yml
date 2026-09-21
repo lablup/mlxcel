@@ -557,10 +557,13 @@ jobs:
       contents: read
     timeout-minutes: 90
     env:
-      # What releases build for this runner's architecture. Pinned rather than
-      # left to auto-detection, which yields `121a` here and would compile every
-      # kernel architecture-specific (issue #1934), so the artifact this job
-      # verifies carries the same device code the published one does.
+      # What releases build for this runner's architecture, pinned rather than
+      # inferred so the artifact this job verifies carries the same device code
+      # the published one does whatever GPU the runner turns out to have. Since
+      # issue #1943 auto-detection produces this same `121` on a GB10, so the pin
+      # no longer corrects a shape mismatch: it states the list instead of
+      # inferring it, which is what makes the job reviewable and what keeps it
+      # right if this ever runs on something other than a GB10.
       MLX_CUDA_ARCHITECTURES: "121"
     steps:
       - uses: actions/checkout@v7
@@ -929,10 +932,11 @@ jobs:
       contents: read
     timeout-minutes: 120
     env:
-      # The value shipped for this runner's architecture. Auto-detection yields
-      # `121a`, which is not what releases build and would compile every kernel
-      # architecture-specific (issue #1934), so the gate compiles what ships. The
-      # hardware NVFP4/MXFP4 converters come from the per-source injection in
+      # The value shipped for this runner's architecture, so the gate compiles
+      # what ships rather than whatever the runner's GPU implies. Since issue
+      # #1943 auto-detection produces this same `121` on a GB10; the pin remains
+      # because a gate should name the list it compiles instead of inferring it.
+      # The hardware NVFP4/MXFP4 converters come from the per-source injection in
       # `src/lib/mlx-cpp/CMakeLists.txt`, not from this list.
       MLX_CUDA_ARCHITECTURES: "121"
       # Every rustc lint, not just the `unused_imports` this job started with.
@@ -1113,10 +1117,11 @@ jobs:
       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
     timeout-minutes: 120
     env:
-      # The value shipped for this runner's architecture. Auto-detection yields
-      # `121a`, which is not what releases build and would compile every kernel
-      # architecture-specific (issue #1934), so the gate links what ships. The
-      # hardware NVFP4/MXFP4 converters come from the per-source injection in
+      # The value shipped for this runner's architecture, so the gate links what
+      # ships rather than whatever the runner's GPU implies. Since issue #1943
+      # auto-detection produces this same `121` on a GB10; the pin remains
+      # because a gate should name the list it compiles instead of inferring it.
+      # The hardware NVFP4/MXFP4 converters come from the per-source injection in
       # `src/lib/mlx-cpp/CMakeLists.txt`, not from this list.
       MLX_CUDA_ARCHITECTURES: "121"
     steps:

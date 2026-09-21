@@ -15,11 +15,15 @@
 #    unambiguously not the name a peer's server carries.
 #
 # 2. `MLX_CUDA_ARCHITECTURES=121` is exported for the build AND for every
-#    server process. build.rs auto-detects `121a` on this host, which is not
-#    what any earlier GB10 record used. The suffix does not change the decode
-#    kernels this harness measures (only the NVFP4 weight-quantization
-#    converter keys on __CUDA_ARCH_SPECIFIC__); it is pinned so these numbers
-#    sit alongside every earlier GB10 record's.
+#    server process, so these numbers sit alongside every earlier GB10 record's
+#    and the list is stated rather than inferred. Since issue #1943 a default
+#    build here auto-detects this same plain `121`, so the pin no longer
+#    corrects a shape; it is kept because a harness should name what it
+#    compiled. Before #1943 auto-detection yielded `121a`, so rows recorded
+#    between #1934 and #1943 on an unpinned build are the ones that are not
+#    directly comparable. The suffix does not change the decode kernels this
+#    harness measures either way (only the NVFP4 weight-quantization converter
+#    keys on __CUDA_ARCH_SPECIFIC__).
 set -uo pipefail
 BIN=${1:?usage: run_session.sh <mlxcel-server binary> [outdir]}
 D="$(cd "$(dirname "$0")" && pwd)"

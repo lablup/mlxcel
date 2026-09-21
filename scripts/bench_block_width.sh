@@ -111,9 +111,14 @@ MEM=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 ))
 # 2026-09-20 and the resulting driver change was invisible to every harness
 # here, so a cross-session comparison had nothing to key on (issue #1797).
 # These three travel together as the host identity. The architecture belongs
-# with them because build.rs auto-detects `121a` on GB10 while every earlier
-# GB10 record pins plain `121`, so a row measured on an auto-detected build is
-# not directly comparable with those records.
+# with them because it decides what machine code the kernels are, so two rows
+# built for different lists are not comparable whatever else matches. Since
+# issue #1943 an auto-detected GB10 build resolves to plain `121`, the same list
+# every earlier GB10 record pins, so an auto-detected row IS comparable with
+# those records. That was not true before #1943, when auto-detection produced
+# `121a` and gave every kernel a second, architecture-specific image; rows
+# recorded between #1934 and #1943 on an unpinned build are the ones to treat
+# with suspicion. The field is recorded rather than assumed either way.
 KERNEL=$(uname -r)
 DRIVER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1)
 ARCHES=${MLX_CUDA_ARCHITECTURES:-auto-detected}
