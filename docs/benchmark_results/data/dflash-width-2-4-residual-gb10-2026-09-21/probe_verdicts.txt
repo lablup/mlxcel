@@ -1,0 +1,5 @@
+[1935] width 2: verify block is byte-identical to the single-token chain
+[1935] width 4: verify block is byte-identical to the single-token chain
+[1935] width 8: verify block position 0 differs from the single-token chain in 229971 of 496640 logit bytes
+[1935] width 16: verify block position 0 differs from the single-token chain in 229971 of 496640 logit bytes
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8634 filtered out; finished in 3.77s
