@@ -29,3 +29,7 @@ Raw data for the residual PR #1939 left open: on `models/mlx/qwen3.5-4b-4bit` wi
 `probe_verdicts.txt` is `probe_block_chain_exactness` on the real checkpoint, and `probe_arms.txt` is the three in-process arms: the one-row byte walk, the replay of the served round structure with no drafter, and the served burst wrapper with the real drafter bound.
 
 `arms/accepts_w4.txt` and `arms/accepts_w2.txt` are the per-round kept-row counts the served runs produced, which is what `MLXCEL_Q35_PROBE_ACCEPTS` takes so an in-process replay reproduces a served run's own cache history rather than an approximation of it.
+
+`probe_length_sweep_and_bisect.txt` is the byte-level bisect over the recorded transcript followed by the exactness probe's verdict at prompt lengths 8, 32, 64, 128, 256 and 512. Two of those arms aborted mid-run with a CUDA `cudaStreamEndCapture` abort, which is this host's known parallelism artifact rather than a result; the lengths that completed all report the same verdict, and 512 completed.
+
+`parity_test.txt` is `greedy_parity_dflash_qwen35_4b` at widths 2, 4, 8 and 16 after the change.
