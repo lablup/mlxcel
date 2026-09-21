@@ -47,7 +47,7 @@ Classic bracket: opening 56.93 to 57.11, closing 56.71 to 56.75 tok/s. They DO N
 
 ## Reading
 
-**The brackets do not overlap, and the finding survives it anyway.** The opening classic arm ran at 56.93 to 57.11 and the closing one at 56.71 to 56.75, so the session drifted downward by about 0.3 tok/s, half a percent. That is the resolution floor for everything between them, and the harness says so rather than printing a clean table over a dirty run. Width 3's slowest run (67.76) is 0.80 tok/s above width 4's fastest (66.96), which is twice the full bracket spread, and width 4 ran after width 3, so the drift works against width 3 rather than for it. Correcting width 4 upward by the entire drift still leaves the two ranges disjoint.
+**The brackets do not overlap, and the finding survives it anyway.** The opening classic arm ran at 56.93 to 57.11 and the closing one at 56.71 to 56.75, so the session drifted downward by about 0.3 tok/s, half a percent. That is the resolution floor for everything between them, and the harness says so rather than printing a clean table over a dirty run. Two numbers describe that drift and they should not be added together: the brackets' full spread, 56.71 to 57.11, is 0.40 tok/s, and the shift between their means, 57.00 to 56.73, is 0.27. Width 3's slowest run (67.76) is 0.80 tok/s above width 4's fastest (66.96), which is twice the full spread. Width 4 ran after width 3, so the drift works against width 3 rather than for it, and correcting width 4 upward by the whole mean shift still leaves the two ranges disjoint.
 
 **Width 3 is the best of the four, width 2 and width 4 do not separate from each other, and width 6 is a loss.** Width 3 at 1.19x classic separates from both its neighbours: its range clears width 2's fastest run (67.09) and width 4's (66.96). Width 2 and width 4 overlap (66.56 to 67.09 against 65.71 to 66.96) and this sweep does not order them. Width 6 at 0.99x is below every classic run: the verify block has stopped paying for itself there.
 
@@ -67,6 +67,6 @@ Greedy identity: w6 != classic
 
 ## What follows
 
-The measured default for `(12, 1, Affine)` on a DFlash drafter should be re-examined against 3. This record does not change it: the sweep covers one pairing on one host, and on current main the issue #1935 gate is about to decline this pairing on CUDA anyway, which makes the width academic for it until that is resolved. The finding is filed so the number rests on evidence rather than on a pre-#1939 measurement.
+The measured default for `(12, 1, Affine)` on a DFlash drafter should be re-examined against 3. This record does not change it: the sweep covers one pairing on one host. The width is not moot for it either, which is worth saying because PR #1944 makes the issue #1935 gate decline this pairing on CUDA: `MLXCEL_MTP_ALLOW_INEXACT=1` is a documented escape, and an operator who sets it gets exactly this curve, so the default still decides what they run at. On the evidence here 4 is not the right number for this pairing on this host and 3 is the better one. The finding is filed so that rests on a measurement of the tree that ships rather than on a pre-#1939 one.
 
 Data: `data/draft-block-width-post-1939-gb10-2026-09-21/`.
