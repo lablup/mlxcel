@@ -356,12 +356,23 @@ impl Cohere2TransformerBlock {
         // h = norm(x)
         // out = attn(h) + mlp(h) + x
         let h = self.input_layernorm.forward(x);
-        let attn_h = self.self_attn.forward(&h, cache, mask);
-        let ff_h = self.mlp.forward(&h);
+        let (attn_h, ff_h) = self.attn_and_mlp(&h, cache, mask);
 
         // (attn_h + ff_h) + x as one fused kernel: byte-identical to two adds,
         // one barrier level fewer per layer on the decode critical path.
         mlxcel_core::compiled_add3(&attn_h, &ff_h, x)
+    }
+
+    /// The two parallel branches for an input that is already normalized by
+    /// this block's `input_layernorm`. The model's layer loop uses this so the
+    /// residual add of block `i` can be fused with the norm of block `i + 1`.
+    pub fn attn_and_mlp(
+        &self,
+        h: &MlxArray,
+        cache: &mut KVCache,
+        mask: Option<&MlxArray>,
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        (self.self_attn.forward(h, cache, mask), self.mlp.forward(h))
     }
 
     pub fn from_weights(
@@ -409,6 +420,43 @@ pub struct Cohere2Model {
 }
 
 impl Cohere2Model {
+    /// All transformer layers followed by the final norm, returning the
+    /// normalized hidden state for the LM head.
+    ///
+    /// Each block's residual add is fused with the norm that consumes it (the
+    /// next block's `input_layernorm`, or the model's final `norm` after the
+    /// last block), which on Metal saves one dispatch and one barrier level per
+    /// layer and is byte-identical to the unfused add and norm.
+    fn decoder_stack(
+        &self,
+        mut x: UniquePtr<MlxArray>,
+        caches: &mut [KVCache],
+        full_mask: Option<&MlxArray>,
+        sliding_mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let Some(first) = self.layers.first() else {
+            return self.norm.forward(&x);
+        };
+        let mut h = first.input_layernorm.forward(&x);
+        for (i, layer) in self.layers.iter().enumerate() {
+            let mask = if self.config.is_sliding_window_layer(i) {
+                sliding_mask
+            } else {
+                full_mask
+            };
+            let (attn_h, ff_h) = layer.attn_and_mlp(&h, &mut caches[i], mask);
+            let next_norm = self
+                .layers
+                .get(i + 1)
+                .map_or(&self.norm, |next| &next.input_layernorm);
+            let (x_new, h_new) =
+                mlxcel_core::layers::residual_add3_layer_norm(&attn_h, &ff_h, &x, next_norm);
+            x = x_new;
+            h = h_new;
+        }
+        h
+    }
+
     /// Forward pass through the entire model
     pub fn forward_impl(
         &self,
@@ -417,7 +465,7 @@ impl Cohere2Model {
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         // Embed tokens
-        let mut h = self.embed_tokens.forward(input_ids);
+        let h = self.embed_tokens.forward(input_ids);
         let shape = mlxcel_core::array_shape(&h);
         let l = shape[1] as usize;
 
@@ -452,18 +500,8 @@ impl Cohere2Model {
             (None, None)
         };
 
-        // Pass through transformer layers
-        for (i, layer) in self.layers.iter().enumerate() {
-            let mask = if self.config.is_sliding_window_layer(i) {
-                sliding_mask.as_ref().map(|m| m.as_ref().unwrap())
-            } else {
-                full_mask.as_ref().map(|m| m.as_ref().unwrap())
-            };
-            h = layer.forward(&h, &mut caches[i], mask);
-        }
-
-        // Final norm
-        let h = self.norm.forward(&h);
+        // Transformer layers and the final norm.
+        let h = self.decoder_stack(h, caches, full_mask.as_deref(), sliding_mask.as_deref());
 
         // Output projection
         let logits = self.lm_head.forward(&h);
@@ -487,7 +525,7 @@ impl Cohere2Model {
         caches: &mut [KVCache],
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        let mut h = if let Some(embeds) = input_embeddings {
+        let h = if let Some(embeds) = input_embeddings {
             mlxcel_core::copy(embeds)
         } else {
             self.embed_tokens.forward(input_ids)
@@ -525,16 +563,7 @@ impl Cohere2Model {
             (None, None)
         };
 
-        for (i, layer) in self.layers.iter().enumerate() {
-            let mask = if self.config.is_sliding_window_layer(i) {
-                sliding_mask.as_ref().map(|m| m.as_ref().unwrap())
-            } else {
-                full_mask.as_ref().map(|m| m.as_ref().unwrap())
-            };
-            h = layer.forward(&h, &mut caches[i], mask);
-        }
-
-        let h = self.norm.forward(&h);
+        let h = self.decoder_stack(h, caches, full_mask.as_deref(), sliding_mask.as_deref());
         let logits = self.lm_head.forward(&h);
         let scale_arr =
             mlxcel_core::full_f32(&[1], self.logit_scale, mlxcel_core::array_dtype(&logits));
