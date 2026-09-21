@@ -1029,8 +1029,7 @@ fn block_versus_chain_byte_bisect_on_the_real_transcript() {
         }
         let burst = text.forward_speculative(&ids_of(&fed), &mut burst_caches, &capture);
         for r in 0..keep {
-            let chain =
-                text.forward_speculative(&ids_of(&[fed[r]]), &mut chain_caches, &capture);
+            let chain = text.forward_speculative(&ids_of(&[fed[r]]), &mut chain_caches, &capture);
             let cb = row_bytes(&chain.logits, 0);
             let bb = row_bytes(&burst.logits, r as i32);
             let d = differing(&cb, &bb);

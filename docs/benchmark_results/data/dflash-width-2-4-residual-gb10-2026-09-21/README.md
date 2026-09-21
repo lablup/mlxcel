@@ -19,3 +19,13 @@ Raw data for the residual PR #1939 left open: on `models/mlx/qwen3.5-4b-4bit` wi
 `harness/algebra.py` checks a run's round algebra offline against the transcript lines, with no GPU: that each round's bonus is the previous round's last emitted token, that `accepted` is the longest common prefix of the drafter's proposals and the target's block argmax, and that the emitted tokens are `draft[:accepted] + [target[accepted]]`. Rounds are logged 0-based, which is where a burst boundary is.
 
 `harness/compare.py` reads the arms against the classic null arm: the first differing token index, and whether the logprobs agree before it.
+
+## The A/B arms
+
+`harness/ab_sdpav.sh` runs the `MLXCEL_SDPA_VECTOR_LARGE_D` A/B (`arms/arm.cls-novec.json`, `arms/arm.w4-novec.json`). That switch decides only whether `head_dim` 256 and 288 reach CUDA's fused `sdpa_vector` kernels, and both classic decode and every row of the verify block's per-position attention are single-query calls, so both move together. With it off the two completions are byte-identical over all 200 tokens.
+
+`harness/ab_fix.sh` runs the query-layout A/B (`arms/arm.fix-*.json`), which is a negative result: copying the per-row query slice to a fresh contiguous array, and copying the key and value slices with it, leave the width 2 and 4 completions exactly where they were. The change that produced those arms is reverted; the arms are kept because the reading they rule out is the obvious one.
+
+`probe_verdicts.txt` is `probe_block_chain_exactness` on the real checkpoint, and `probe_arms.txt` is the three in-process arms: the one-row byte walk, the replay of the served round structure with no drafter, and the served burst wrapper with the real drafter bound.
+
+`arms/accepts_w4.txt` and `arms/accepts_w2.txt` are the per-round kept-row counts the served runs produced, which is what `MLXCEL_Q35_PROBE_ACCEPTS` takes so an in-process replay reproduces a served run's own cache history rather than an approximation of it.
