@@ -565,6 +565,17 @@ mod ffi {
         /// without the Metal backend.
         fn qmv_wide_enabled() -> bool;
 
+        /// Override MLX's per-command-buffer input budget
+        /// (`MLX_MAX_MB_PER_BUFFER`, an element count >> 20) for work encoded
+        /// from now on; `0` restores the device default. Process-wide and
+        /// immediate. Use [`crate::DecodeCommandBufferBudget`] rather than
+        /// calling this directly. Inert on a build without the Metal backend.
+        fn set_metal_mb_per_buffer_override(mb: i32);
+
+        /// Current override set by [`set_metal_mb_per_buffer_override`], `0`
+        /// when none is active (always `0` without the Metal backend).
+        fn metal_mb_per_buffer_override() -> i32;
+
         /// Random categorical sampling
         fn random_categorical(logits: &MlxArray, axis: i32) -> UniquePtr<MlxArray>;
 
@@ -3546,6 +3557,11 @@ pub mod cuda_graph_budget;
 // Runtime Apple Silicon generation detection.
 // Public so that mlxcel (the main crate) can log hardware info at startup.
 pub mod hardware;
+
+// Decode-only raise of MLX's per-command-buffer input budget; prefill keeps
+// the device default so long prompts do not hold their activations longer.
+pub mod command_buffer_budget;
+pub use command_buffer_budget::DecodeCommandBufferBudget;
 
 // Typed wrappers around MLX's runtime memory accounting APIs (issue #55).
 // Public so that the CLI generate path can surface post-load resident
