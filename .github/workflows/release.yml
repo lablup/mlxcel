@@ -537,13 +537,25 @@ jobs:
     # 90a is load-bearing for MLX's Hopper quantized kernel gate, and build.rs
     # forwards the list verbatim. The CLI and server (~347 MB each) ship as
     # separate archives, both with the CCCL headers.
+    #
+    # Blackwell stays plain here even though MLX's hardware NVFP4/MXFP4
+    # converters are gated on `__CUDA_ARCH_SPECIFIC__` and a plain target
+    # compiles them out (issue #1934). Naming Blackwell `<sm>a` in this list
+    # would enable them for every translation unit, which costs 12.7 MB of
+    # archive and changes the machine code of every kernel, decode included.
+    # `src/lib/mlx-cpp/CMakeLists.txt` adds the architecture-specific image to
+    # `fp_quantize.cu` alone instead, which is the only translation unit that
+    # can reach those converters, so this list needs no `a` entry to get them.
+    # scripts/ci/check_cuda_arch_lists.py rejects one.
     env:
       MLX_CUDA_ARCHITECTURES: "90a;100;121"
       CLI_ASSET: mlxcel-linux-aarch64-cuda13
       SERVER_ASSET: mlxcel-server-linux-aarch64-cuda13
 
-    # Cold build compiles MLX for three CUDA architectures; generous ceiling so
-    # a from-scratch build is never killed (the cargo cache makes reruns cheap).
+    # Cold build compiles MLX for three CUDA architectures, plus one extra
+    # code-generation pass for `fp_quantize.cu` per Blackwell entry; generous
+    # ceiling so a from-scratch build is never killed (the cargo cache makes
+    # reruns cheap).
     timeout-minutes: 360
 
     steps:
@@ -756,10 +768,16 @@ jobs:
 
     # One fat binary covering Ampere and later. 90a is load-bearing: MLX gates
     # its Hopper quantized kernel on "90a" being in the list (MLX_CUDA_SM90A_ENABLED),
-    # and build.rs forwards MLX_CUDA_ARCHITECTURES verbatim (no auto-suffix). Blackwell
-    # (sm_100/sm_120) has no MLX gate, so plain numbers emit SASS+PTX. sm_87 (Jetson)
-    # and sm_121 (GB10) are aarch64-only and excluded here. The build runner's own GPU
-    # is an RTX 5060 (sm_120), so the smoke test below runs on native SASS.
+    # and build.rs forwards MLX_CUDA_ARCHITECTURES verbatim (no auto-suffix).
+    # Blackwell stays plain for the reason spelled out in the aarch64 job
+    # above: the hardware NVFP4/MXFP4 converters are added to `fp_quantize.cu`
+    # alone by `src/lib/mlx-cpp/CMakeLists.txt` rather than to the whole target.
+    # This corrects the rationale that stood here before, which said Blackwell
+    # had no MLX gate and that plain numbers were therefore enough. There is a
+    # gate (issue #1934); it is simply not answered from this list. sm_87
+    # (Jetson) and sm_121 (GB10) are aarch64-only and excluded here. The build
+    # runner's own GPU is an RTX 5060 (sm_120), so the smoke test below runs on
+    # native SASS.
     env:
       MLX_CUDA_ARCHITECTURES: "80;86;89;90a;100;120"
       # The CLI and server binaries are ~347 MB each, so ship them as separate
@@ -768,9 +786,10 @@ jobs:
       SERVER_ASSET: mlxcel-server-linux-x86_64-cuda13
 
     # A cold build compiles MLX for six CUDA architectures (CUTLASS-heavy
-    # quantized kernels per arch); the persistent cargo cache makes later runs
-    # far cheaper. Generous ceiling so a from-scratch build is not killed (a
-    # cold 6-arch build was observed at ~3h).
+    # quantized kernels per arch), plus one extra pass for `fp_quantize.cu` per
+    # Blackwell entry; the persistent cargo cache makes later runs far cheaper.
+    # Generous ceiling so a from-scratch build is not killed (a cold six-arch
+    # build was observed at ~3h).
     timeout-minutes: 480
 
     steps:

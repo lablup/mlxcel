@@ -47,7 +47,7 @@ use std::sync::OnceLock;
 
 /// The `MLX_CUDA_ARCHITECTURES` list this binary's MLX device code was
 /// compiled for, as a CMake-style semicolon-separated string
-/// (`"80;86;89;90a;100;120"`).
+/// (`"80;86;89;90a;100a-real;100;120a-real;120"`).
 ///
 /// Empty on any build without the `cuda` feature, and empty on a CUDA build
 /// whose build script predates this record. Callers treat empty as "unknown",
