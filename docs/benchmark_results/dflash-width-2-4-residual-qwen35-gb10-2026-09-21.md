@@ -106,3 +106,9 @@ What the fused `sdpa_vector` path does differently between the two calls is not 
 
 One discrepancy is recorded rather than explained. PR #1939's replay of the served width-4 accept sequence reported 0 disagreements of 201; the same arm on the same accept pattern reports 1 here, at 105. The accept vector this session used is committed at `data/dflash-width-2-4-residual-gb10-2026-09-21/arms/accepts_w4.txt`.
 
+
+## The served-path test after the change
+
+`greedy_parity_dflash_qwen35_4b` at widths 2, 4, 8 and 16 on GB10, against the drafter-less baseline from the same binary: `widths that ran the burst: []; widths the gate declined: [2, 4, 8, 16]`, every response equal to the baseline, `test result: ok`. It used to fail at all four. Each declined width now has to carry the exactness probe's own decline line before the arm counts, so a multimodal payload, an adopted prompt-cache prefix or a drafter from the wrong family cannot stand in for a measured verdict.
+
+One weakness in that test is worth naming rather than leaving for someone to discover. Its chat prompt at its token budget returns an empty `content` on this checkpoint (`completion_tokens=96, content.len()=0` in every arm, baseline included), so its byte comparison of `content` is comparing two empty strings and the weight is carried by the completion-token equality and by the decline assertions. That is not something this change introduced and it is not what this issue is about, but the test is weaker evidence than its name suggests and should either compare the reasoning channel too or use a prompt that produces content. The byte-identity claims in this record rest on the `/v1/completions` arms above, which return 823 characters and are compared by sha256, not on that test.
