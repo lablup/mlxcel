@@ -591,53 +591,6 @@ pub(crate) struct Qwen3NextAttention {
     pub(crate) mrope: Option<super::qwen3_vl::InterleavedMRoPE>,
 }
 
-/// Which of `attend_per_position`'s per-row tensors are copied to the layout
-/// single-token decode hands the same attention call (issue #1935).
-#[derive(Clone, Copy)]
-pub(crate) struct AttendContiguity {
-    /// Copy the one-row query slice. Cheap: `[B, H, 1, D]`.
-    pub(crate) queries: bool,
-    /// Copy the key and value prefix slices. Expensive: one prefix-sized copy
-    /// per row, so this exists for the A/B rather than for production.
-    pub(crate) keys_values: bool,
-}
-
-/// `MLXCEL_QWEN35_ATTEND_CONTIGUOUS`: `q` (the default), `kv`, `all`, or `0`.
-///
-/// Default `q`, because a verify row and the decode step it stands for must be
-/// the same computation and on CUDA they are not while the query row keeps the
-/// block's strides. `0` restores the pre-#1935 slicing without a rebuild, which
-/// is the kill switch the record's A/B uses.
-pub(crate) fn attend_per_position_contiguity() -> AttendContiguity {
-    static RESOLVED: std::sync::OnceLock<AttendContiguity> = std::sync::OnceLock::new();
-    *RESOLVED.get_or_init(|| {
-        match std::env::var("MLXCEL_QWEN35_ATTEND_CONTIGUOUS")
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "0" | "off" | "false" | "no" | "none" => AttendContiguity {
-                queries: false,
-                keys_values: false,
-            },
-            "kv" => AttendContiguity {
-                queries: false,
-                keys_values: true,
-            },
-            "all" => AttendContiguity {
-                queries: true,
-                keys_values: true,
-            },
-            // "q", "" and anything unrecognised take the shipped default.
-            _ => AttendContiguity {
-                queries: true,
-                keys_values: false,
-            },
-        }
-    })
-}
-
 impl Qwen3NextAttention {
     pub(crate) fn forward(
         &self,
@@ -872,40 +825,15 @@ impl Qwen3NextAttention {
         let l_kv = k_shape[2];
         let prefix_len = l_kv - l_q;
 
-        let contiguity = attend_per_position_contiguity();
         let mut out: Option<UniquePtr<MlxArray>> = None;
         for i in 0..l_q {
             // queries[:, :, i:i+1, :]
             let q_i = mlxcel_core::slice(queries, &[0, 0, i, 0], &[b, n_q_heads, i + 1, head_dim]);
-            // A one-row slice of an `[B, H, L_q, D]` tensor has its heads
-            // `L_q * D` apart, while single-token decode hands the same call a
-            // freshly built `[B, H, 1, D]` whose heads are `D` apart. Same
-            // values, different layout, and on CUDA the fused `sdpa_vector`
-            // kernel this checkpoint's head_dim 256 reaches (issue #675) is not
-            // bit-equal across the two. Copying the row to the decode layout is
-            // what makes a verify row reproduce the decode step it stands for.
-            // See `docs/benchmark_results/dflash-width-2-4-residual-qwen35-gb10-2026-09-21.md`.
-            let q_i = if contiguity.queries {
-                mlxcel_core::contiguous(&q_i, false)
-            } else {
-                q_i
-            };
             // keys/values[:, :, : prefix_len + i + 1, :]
             let kv_len = prefix_len + i + 1;
             let k_i = mlxcel_core::slice(keys, &[0, 0, 0, 0], &[b, n_kv_heads, kv_len, head_dim]);
             let v_i =
                 mlxcel_core::slice(values, &[0, 0, 0, 0], &[b, n_kv_heads, kv_len, v_shape[3]]);
-            // The key and value slices are leading slices in both paths, so
-            // their layout already matches; the copy is available for the A/B
-            // that establishes that, and costs a full prefix copy per row.
-            let (k_i, v_i) = if contiguity.keys_values {
-                (
-                    mlxcel_core::contiguous(&k_i, false),
-                    mlxcel_core::contiguous(&v_i, false),
-                )
-            } else {
-                (k_i, v_i)
-            };
             // Single-query attention, no mask: the K/V slice is already the
             // exact causal prefix, matching the single-token decode call.
             let attn_i = mlxcel_core::layers::attention(&q_i, &k_i, &v_i, self.scale, None, 0.0, 0);

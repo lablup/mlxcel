@@ -50,12 +50,38 @@ use mlxcel_core::{MlxArray, UniquePtr, concatenate};
 use serde::Deserialize;
 use std::path::Path;
 
-/// Prompt length the exactness probe prefills before comparing arms.
+/// Prompt length the exactness probe prefills before comparing arms, unless
+/// `MLXCEL_MTP_PROBE_PROMPT_LEN` overrides it.
 ///
-/// Long enough that the attention layers hold a real KV prefix rather
-/// than the empty-cache special case, short enough that the probe stays
-/// a fraction of a second on a 27B target.
-const PROBE_PROMPT_LEN: usize = 8;
+/// This was 8 until issue #1935, on the reasoning that 8 is enough for the
+/// attention layers to hold a real KV prefix rather than the empty-cache
+/// special case. It is not. At 8 the probe reported byte-identity at verify
+/// widths 2 and 4 on `qwen3.5-4b-4bit` while a served burst at those widths
+/// diverged from classic decode, because the difference the probe exists to
+/// catch is a kernel one and short key sequences do not reach the code path
+/// that carries it. A probe that prefills a served-sized prefix catches it.
+/// The cost is one prefill per draw per width at worker startup, paid once
+/// and memoized by `mtp_exactness_gate`.
+///
+/// See `docs/benchmark_results/dflash-width-2-4-residual-qwen35-gb10-2026-09-21.md`.
+const DEFAULT_PROBE_PROMPT_LEN: usize = 256;
+
+/// The probe's prompt length for this process.
+///
+/// `MLXCEL_MTP_PROBE_PROMPT_LEN` moves it without a rebuild, which is what the
+/// #1935 record's length sweep uses and what an operator whose checkpoint makes
+/// the default prefill too slow at startup can reach for. Values below 2 are
+/// ignored: the probe needs a prefix to attend to.
+fn probe_prompt_len() -> usize {
+    static RESOLVED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *RESOLVED.get_or_init(|| {
+        std::env::var("MLXCEL_MTP_PROBE_PROMPT_LEN")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|&n| n >= 2)
+            .unwrap_or(DEFAULT_PROBE_PROMPT_LEN)
+    })
+}
 
 /// Independent synthetic inputs the exactness probe compares before it
 /// is allowed to report equality.
@@ -1631,7 +1657,7 @@ impl Qwen35Model {
         let salt = draw * 977 + 1;
         let wrap =
             |i: usize, stride: usize, offset: usize| ((i * stride + offset + salt) % vocab) as i32;
-        let prompt: Vec<i32> = (0..PROBE_PROMPT_LEN).map(|i| wrap(i, 7, 1)).collect();
+        let prompt: Vec<i32> = (0..probe_prompt_len()).map(|i| wrap(i, 7, 1)).collect();
         let block: Vec<i32> = (0..block_size).map(|i| wrap(i, 13, 3)).collect();
 
         let as_input =
