@@ -20,7 +20,7 @@ The third arm is also the experiment's negative control. Its decode kernels are 
 
 ## Result: no decode cost survives interleaving
 
-30 arms, 0 errors, `nvrm_delta` 0 everywhere, no CI job overlapping any arm, load1 before each arm between 0.01 and 0.47.
+30 arms, 0 errors, `nvrm_delta` 0 everywhere, no CI job overlapping any arm, load1 before each arm between 0.01 and 0.47. All fifteen width-4 runs produced byte-identical text from a 158-token prompt, across all three binaries, so the arms did the same work and what is being compared is how fast they did it.
 
 | width | arm | n | min | max | mean | ratio to `121` | ranges disjoint |
 |---|---|---|---|---|---|---|---|
