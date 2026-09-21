@@ -725,3 +725,131 @@ fn round_loop_cache_dynamics_with_rollback_match_the_chain() {
         );
     }
 }
+
+/// The drafter checkpoint the served arms pair this target with; override
+/// with `MLXCEL_Q35_PROBE_DRAFTER`.
+const DEFAULT_DRAFTER: &str = "models/mlx/qwen3.5-4b-dflash";
+
+fn drafter_dir() -> String {
+    std::env::var("MLXCEL_Q35_PROBE_DRAFTER").unwrap_or_else(|_| DEFAULT_DRAFTER.to_string())
+}
+
+/// **Diagnostic 7.** Drive the served burst wrapper itself, with the real
+/// drafter bound, and compare its emitted ids against the classic transcript.
+///
+/// Every earlier arm drives the target alone: prefill, a verify block, a
+/// rewind, or a replay of the served run's own accept sequence. All of them
+/// are exact, and the served burst is not, so what separates them is the one
+/// thing they omit: the drafter, executing its own MLX work between the
+/// target's forwards, and the wrapper that carries the first bonus, the
+/// budget and the emission.
+///
+/// This arm omits only the server process. It calls
+/// [`crate::server::batch::dflash_target::run_dflash_on_target`], which is the
+/// function `run_dflash_burst` calls once it has resolved the model variant,
+/// so the prefill, the first-bonus sample, `DFlashGenerator::run` and the
+/// drafter slot are the served ones rather than an approximation of them.
+///
+/// A reproduction here is the reproducer the record asks for, under a
+/// debugger and without HTTP. Exactness here instead says the difference is
+/// the server process around this call, and the next arm has to look there.
+#[test]
+#[ignore = "needs the real Qwen 3.5 4B checkpoint, the DFlash drafter, a GPU and a recorded transcript"]
+fn served_burst_wrapper_with_real_drafter_matches_the_chain() {
+    use mlxcel_core::generate::{LanguageModel, SamplingConfig};
+    use mlxcel_core::sampling::LogprobsConfig;
+    use std::sync::atomic::AtomicBool;
+
+    let Some((model, dir)) = load_text_model() else {
+        return;
+    };
+    let draft_dir = drafter_dir();
+    if !std::path::Path::new(&draft_dir).exists() {
+        eprintln!("[1935] skipping: drafter {draft_dir} not on disk");
+        return;
+    }
+    let Some(prompt) = env_ids("MLXCEL_Q35_PROBE_PROMPT") else {
+        eprintln!("[1935] skipping: set MLXCEL_Q35_PROBE_PROMPT and MLXCEL_Q35_PROBE_REFERENCE");
+        return;
+    };
+    let reference = env_ids("MLXCEL_Q35_PROBE_REFERENCE").expect("MLXCEL_Q35_PROBE_REFERENCE");
+    let text = text_model(&model);
+
+    for block_size in widths() {
+        // The served arm's own configuration: `--ignore-eos` is a -inf bias on
+        // every end-of-generation id (`admission.rs`), and the burst still
+        // receives the merged EOS set, so both are reproduced here rather than
+        // approximated by an empty stop set.
+        let eos = mlxcel_core::generation_policy::merged_eos_token_ids(
+            model.eos_token_ids(),
+            &Vec::new(),
+        );
+        let mut sampling = SamplingConfig {
+            temperature: 0.0,
+            top_k: 1,
+            ..SamplingConfig::default()
+        };
+        sampling.token_bias.suppress_tokens(&eos);
+
+        let dispatch = crate::server::SpeculativeDispatch::DFlash {
+            draft_model_path: std::path::PathBuf::from(&draft_dir),
+            block_size: block_size as u32,
+            block_size_source: crate::cli::draft_block_policy::BlockSizeSource::Override,
+            user_requested_explicit_kind: true,
+        };
+        let mut slot =
+            crate::server::batch::speculative_burst::WorkerDrafterSlot::from_dispatch(&dispatch);
+        slot.ensure_loaded().expect("drafter must load");
+        let owned = slot.take().expect("drafter present after ensure_loaded");
+
+        let cancel = AtomicBool::new(false);
+        let logprobs = LogprobsConfig::default();
+        let max_tokens = reference.len();
+        let run = crate::server::batch::dflash_target::run_dflash_on_target(
+            text,
+            &prompt,
+            &sampling,
+            &[],
+            &eos,
+            owned,
+            block_size as u32,
+            max_tokens,
+            &mut slot,
+            &cancel,
+            &logprobs,
+        );
+        let run = match run {
+            Ok(r) => r,
+            Err(_) => {
+                eprintln!(
+                    "[1935] block {block_size}: the burst declined or errored rather than \
+                     running; nothing to compare"
+                );
+                continue;
+            }
+        };
+        let n = run.tokens.len().min(reference.len());
+        let first = (0..n)
+            .find(|&i| run.tokens[i] != reference[i])
+            .map(|i| i as i64)
+            .unwrap_or(-1);
+        let disagreements = (0..n).filter(|&i| run.tokens[i] != reference[i]).count();
+        eprintln!(
+            "[1935] {dir} + {draft_dir}, block {block_size}: burst emitted {} ids against \
+             {} reference; {disagreements} disagree over {n} compared, first at {first} \
+             (-1 means none)",
+            run.tokens.len(),
+            reference.len(),
+        );
+        if first >= 0 {
+            let i = first as usize;
+            let lo = i.saturating_sub(3);
+            let hi = (i + 4).min(n);
+            eprintln!(
+                "[1935] around {i}: reference {:?} against burst {:?}",
+                &reference[lo..hi],
+                &run.tokens[lo..hi],
+            );
+        }
+    }
+}
