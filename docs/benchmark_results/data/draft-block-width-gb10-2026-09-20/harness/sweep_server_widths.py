@@ -190,9 +190,12 @@ def run_arm(a, width, prompt, tag):
     # left unset, so the record states it instead of the reader assuming it.
     env.setdefault("MLX_ENABLE_TF32", "1")
     env.setdefault("RUST_LOG", "info")
-    # Pinned, not auto-detected: build.rs yields `121a` here while every prior
-    # GB10 record uses plain `121`. The suffix does not change the decode
-    # kernels; the pin is for comparability with those records.
+    # Stated rather than inferred, for comparability with every prior GB10
+    # record, which uses plain `121`. Since issue #1943 auto-detection here
+    # produces that same `121`, so the pin no longer corrects a shape; before
+    # #1943 it yielded `121a`, which is why rows recorded between #1934 and
+    # #1943 on an unpinned build are the ones that do not line up. The suffix
+    # does not change the decode kernels either way.
     env.setdefault("MLX_CUDA_ARCHITECTURES", "121")
     env.update(arm_env(width))
     t0 = time.time()

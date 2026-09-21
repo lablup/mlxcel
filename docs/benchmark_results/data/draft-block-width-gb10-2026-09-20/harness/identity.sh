@@ -28,11 +28,14 @@ printf 'nvidia_driver: %s\n' \
   "$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1)"
 printf 'gpu: %s\n' \
   "$(nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader 2>/dev/null | head -1)"
-# The architecture list the build was PINNED to, which is not what a default
-# build produces here: build.rs auto-detects and yields `121a`, while every
-# prior GB10 record pins plain `121`. The suffix does not change the decode
-# kernels (only the NVFP4 weight-quantization converter keys on
-# __CUDA_ARCH_SPECIFIC__); it is recorded so two sessions can be told apart.
+# The architecture list the build was compiled for, recorded so two sessions can
+# be told apart rather than assumed comparable. Since issue #1943 a default
+# build here auto-detects plain `121`, the same list every GB10 record pins, so
+# an auto-detected row and a pinned row agree. Before #1943 auto-detection
+# yielded `121a`, so rows recorded between #1934 and #1943 on an unpinned build
+# are the ones to check this field on. The suffix does not change the decode
+# kernels either way (only the NVFP4 weight-quantization converter keys on
+# __CUDA_ARCH_SPECIFIC__).
 printf 'MLX_CUDA_ARCHITECTURES: %s\n' "${MLX_CUDA_ARCHITECTURES:-unset (auto-detected)}"
 # nvcc is not on the default PATH on this host; the CUDA install root is.
 NVCC=$(command -v nvcc || echo /usr/local/cuda/bin/nvcc)
