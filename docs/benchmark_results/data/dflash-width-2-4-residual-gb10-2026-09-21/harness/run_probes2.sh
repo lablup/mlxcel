@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
 set -uo pipefail
-SP=/tmp/claude-1000/-home-inureyes-Development-mlxcel/a7ac83cc-0ca7-4ae0-8f19-a24a07471f2a/scratchpad
-WT=/home/inureyes/Development/mlxcel-wt-1935
-TB=${TEST_BIN:-/home/inureyes/Development/mlxcel/target/release/deps/mlxcel-e4caea9f4277a3b5}
+# Paths are derived, not hardcoded: SP is this harness directory, WT the repo
+# it lives in, and BIN/TEST_BIN are overridable so a run can point at a binary
+# built anywhere.
+SP=${SP:-$(cd "$(dirname "$0")" && pwd)}
+WT=${WT:-$(git -C "$SP" rev-parse --show-toplevel)}
+OUT=${OUT:-$SP/../arms}
+BIN=${BIN:-$WT/target/release/mlxcel-server}
+TB=${TEST_BIN:?set TEST_BIN to the cargo lib-test binary}
 cd "$WT" || exit 1
 export MLX_CUDA_ARCHITECTURES=121 MLX_ENABLE_TF32=1
-export MLXCEL_Q35_PROBE_PROMPT="$(python3 -c 'import json;print(",".join(map(str,json.load(open("'"$SP"'/prompt_ids.json")))))')"
-export MLXCEL_Q35_PROBE_REFERENCE="$(python3 -c 'import json;print(",".join(map(str,json.load(open("'"$SP"'/classic_ids.json")))))')"
+export MLXCEL_Q35_PROBE_PROMPT="$(python3 -c 'import json;print(",".join(map(str,json.load(open("'"$SP"'/../prompt_ids.json")))))')"
+export MLXCEL_Q35_PROBE_REFERENCE="$(python3 -c 'import json;print(",".join(map(str,json.load(open("'"$SP"'/../classic_ids.json")))))')"
 echo "test binary: $TB"
 
 echo "=== BISECT: where do logit bytes first differ, and in which layer ==="
-MLXCEL_Q35_PROBE_BLOCK=4 MLXCEL_Q35_PROBE_ACCEPTS="$(cat "$SP/accepts_w4.txt")" MLXCEL_Q35_PROBE_WRONG=9999 \
+MLXCEL_Q35_PROBE_BLOCK=4 MLXCEL_Q35_PROBE_ACCEPTS="$(cat "$OUT/accepts_w4.txt")" MLXCEL_Q35_PROBE_WRONG=9999 \
   "$TB" --ignored --test-threads=1 --nocapture block_versus_chain_byte_bisect_on_the_real_transcript 2>&1 | grep -E "^\[1935\]|panicked"
 
 echo "=== PROBE VERDICTS against prompt length ==="
