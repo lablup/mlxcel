@@ -359,9 +359,9 @@ impl Cohere2TransformerBlock {
         let attn_h = self.self_attn.forward(&h, cache, mask);
         let ff_h = self.mlp.forward(&h);
 
-        // attn_h + ff_h + x
-        let sum = mlxcel_core::add(&attn_h, &ff_h);
-        mlxcel_core::add(&sum, x)
+        // (attn_h + ff_h) + x as one fused kernel: byte-identical to two adds,
+        // one barrier level fewer per layer on the decode critical path.
+        mlxcel_core::compiled_add3(&attn_h, &ff_h, x)
     }
 
     pub fn from_weights(

@@ -1650,6 +1650,29 @@ std::unique_ptr<MlxArray> compiled_swiglu_activation(
     return std::make_unique<MlxArray>(std::move(result[0]));
 }
 
+// Compiled three-way add: (a + b) + c as one fused elementwise kernel.
+// Same association order as two chained `add` calls, so the result is
+// byte-identical; the win is one dispatch and one barrier level fewer per call.
+// Used by: Cohere2
+namespace {
+    static std::function<std::vector<array>(const std::vector<array>&)> get_compiled_add3() {
+        auto fn = [](const std::vector<array>& inputs) -> std::vector<array> {
+            return {mlx::core::add(mlx::core::add(inputs[0], inputs[1]), inputs[2])};
+        };
+        return compile_shapeless_audited("compiled_add3", fn);
+    }
+}
+
+std::unique_ptr<MlxArray> compiled_add3(
+    const MlxArray& a,
+    const MlxArray& b,
+    const MlxArray& c
+) {
+    static auto compiled_fn = get_compiled_add3();
+    auto result = compiled_fn({a.inner, b.inner, c.inner});
+    return std::make_unique<MlxArray>(std::move(result[0]));
+}
+
 // Compiled GptOss SwiGLU activation using the exact mlx-lm formulation:
 //   x_glu = clip(x_glu, max=7)
 //   x_linear = clip(x_linear, min=-7, max=7)

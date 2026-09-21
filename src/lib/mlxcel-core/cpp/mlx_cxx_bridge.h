@@ -538,6 +538,14 @@ std::unique_ptr<MlxArray> compiled_swiglu_activation(
     const MlxArray& x
 );
 
+// Three-way add (a + b) + c compiled into one fused kernel (shapeless=true).
+// Byte-identical to two chained adds. Used by: Cohere2
+std::unique_ptr<MlxArray> compiled_add3(
+    const MlxArray& a,
+    const MlxArray& b,
+    const MlxArray& c
+);
+
 // GptOss SwiGLU activation only - compiled with kernel fusion (shapeless=true)
 // output = clipped_gate * sigmoid(1.702 * clipped_gate) * (clipped_up + 1)
 // Used by: GptOss

@@ -640,6 +640,12 @@ mod ffi {
         /// output = silu(gate) * x
         fn compiled_swiglu_activation(gate: &MlxArray, x: &MlxArray) -> UniquePtr<MlxArray>;
 
+        /// Compiled three-way add `(a + b) + c` as one fused kernel.
+        /// Byte-identical to two chained `add` calls (same association order);
+        /// saves one dispatch and one barrier level per call.
+        /// Used by: Cohere2
+        fn compiled_add3(a: &MlxArray, b: &MlxArray, c: &MlxArray) -> UniquePtr<MlxArray>;
+
         /// Compiled GptOss SwiGLU activation with kernel fusion
         /// Matches mlx-lm gpt_oss.swiglu: clipped gate/up + sigmoid(1.702*gate).
         /// Used by: GptOss
