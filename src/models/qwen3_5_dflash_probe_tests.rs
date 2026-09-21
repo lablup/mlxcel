@@ -1028,8 +1028,8 @@ fn block_versus_chain_byte_bisect_on_the_real_transcript() {
             }
         }
         let burst = text.forward_speculative(&ids_of(&fed), &mut burst_caches, &capture);
-        for r in 0..keep {
-            let chain = text.forward_speculative(&ids_of(&[fed[r]]), &mut chain_caches, &capture);
+        for (r, tok) in fed.iter().enumerate().take(keep) {
+            let chain = text.forward_speculative(&ids_of(&[*tok]), &mut chain_caches, &capture);
             let cb = row_bytes(&chain.logits, 0);
             let bb = row_bytes(&burst.logits, r as i32);
             let d = differing(&cb, &bb);
@@ -1049,8 +1049,8 @@ fn block_versus_chain_byte_bisect_on_the_real_transcript() {
                         let c = row_bytes(&chain.hidden_states[layer], 0);
                         let b = row_bytes(&burst.hidden_states[layer], r as i32);
                         let dl = differing(&c, &b);
-                        if dl > 0 {
-                            if first_layer.is_none() {
+                        if dl > 0 && first_layer.is_none() {
+                            {
                                 first_layer = Some(layer);
                                 eprintln!(
                                     "[1935] FIRST layer divergence at layer {layer} ({}): \
