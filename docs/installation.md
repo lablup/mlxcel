@@ -210,9 +210,12 @@ gates anything on its own. Upstream commit `44540d12` moved `qmm_sm80`,
 `MLX_CUDA_SM90A_ENABLED` definition an earlier version of this section cited,
 and `jit_module.cpp` now derives the NVRTC `--gpu-architecture` from the running
 device, appending `a` itself from compute capability 9 up. Cross-compiling the
-pinned tree at `90` and at `90a` produces identical SASS for the quantized
-translation units. `CUTLASS_ARCH_MMA_SM90A_ENABLED` still keys on
-`__CUDA_ARCH_FEAT_SM90_ALL`, so a later pin can make it matter again.
+pinned tree at `90` and at `90a` agrees: `qmm_sm90.cu`, `qmm.cu` and
+`qmm_sm80.cu` emit no device function at either spelling, and `qmv.cu` and
+`fp_qmv.cu` emit identical SASS apart from the `EF_CUDA_ACCELERATORS` header
+flag that marks a cubin architecture-specific.
+`CUTLASS_ARCH_MMA_SM90A_ENABLED` still keys on `__CUDA_ARCH_FEAT_SM90_ALL`, so
+a later pin can make it matter again.
 
 ```bash
 # Hopper / GH200-style target, spelled the way the release workflow spells it.

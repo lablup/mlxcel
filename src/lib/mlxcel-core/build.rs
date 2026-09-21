@@ -626,7 +626,8 @@ fn detect_cuda_arch() -> Option<String> {
         .ok()?;
     let caps = String::from_utf8_lossy(&output.stdout);
     // Parse "X.Y" compute capabilities, convert to SM number (e.g. "9.0" -> "90"),
-    // and append the architecture-specific "a" suffix for cc >= 90 (e.g. "90a").
+    // and let `sm_arch_with_suffix` spell each one the way the release lists
+    // spell it: "90" becomes "90a", Blackwell stays plain.
     let archs: Vec<String> = caps
         .lines()
         .filter_map(|line| {
@@ -683,9 +684,11 @@ const FIRST_PLAIN_SM: u32 = 100;
 /// `MLX_CUDA_SM90A_ENABLED` definition an earlier revision of this comment
 /// cited, and `jit_module.cpp` now derives the NVRTC `--gpu-architecture` from
 /// the running device, appending `a` itself from compute capability 9 up.
-/// Cross-compiling the pinned tree at `90` and at `90a` agrees: the quantized
-/// translation units, `qmm_sm90.cu` included, produce identical SASS either
-/// way. `CUTLASS_ARCH_MMA_SM90A_ENABLED` still keys on
+/// Cross-compiling the pinned tree at `90` and at `90a` agrees: `qmm_sm90.cu`,
+/// `qmm.cu` and `qmm_sm80.cu` emit no device function at either spelling, and
+/// `qmv.cu` and `fp_qmv.cu` emit identical SASS apart from the
+/// `EF_CUDA_ACCELERATORS` header flag that marks a cubin architecture-specific.
+/// `CUTLASS_ARCH_MMA_SM90A_ENABLED` still keys on
 /// `__CUDA_ARCH_FEAT_SM90_ALL`, so a later pin can make the suffix matter
 /// again, which is a second reason not to drop what the release list carries.
 ///
