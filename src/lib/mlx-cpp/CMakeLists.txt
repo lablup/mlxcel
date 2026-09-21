@@ -33,8 +33,14 @@ function(mlx_apply_source_overlays mlx_source_dir)
   # `use_qmv_wide` (issue #1187). Upstream has no equivalent knob and the
   # predicate is unchanged as of pin 81ba1c6a, so it has to be overlaid here.
   # Refresh the file wholesale on a bump and re-apply that one hunk.
+  # device.cpp carries a runtime override of the per-command-buffer input
+  # budget (`mlxcel_set_mb_per_buffer_override`), which mlxcel raises around
+  # decode steps and leaves at the device default for prefill. Upstream latches
+  # the budget once from MLX_MAX_MB_PER_BUFFER and has no setter. Same refresh
+  # rule: take the new upstream file and re-apply the three marked hunks.
   set(_metal_patch_files
       "mlx/backend/metal/compiled.cpp"
+      "mlx/backend/metal/device.cpp"
       "mlx/backend/metal/kernels/utils.h"
       "mlx/backend/metal/quantized.cpp")
   foreach(_patch_file ${_metal_patch_files})

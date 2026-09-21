@@ -1795,6 +1795,11 @@ impl CxxGenerator {
         };
         ffi::async_eval(&y);
         self.prepare_turbo4_delegated_before_decode(max_tokens);
+        // Prefill is encoded by now; raise the command-buffer input budget for
+        // the decode loop only (see `DecodeCommandBufferBudget`). Not under
+        // MLXCEL_FORCE_SYNC: a synchronous eval gains nothing from larger
+        // buffers and loses the CPU-encode / GPU-execute overlap inside a step.
+        let _decode_budget = (!force_sync).then(crate::DecodeCommandBufferBudget::enter);
 
         // Main generation loop - matches Python exactly:
         // 1. Start next step computation
@@ -2116,6 +2121,9 @@ impl CxxGenerator {
         };
         ffi::async_eval(&y);
         self.prepare_turbo4_delegated_before_decode(max_tokens);
+        // Prefill is encoded by now; raise the command-buffer input budget for
+        // the decode loop only (see `DecodeCommandBufferBudget`).
+        let _decode_budget = crate::DecodeCommandBufferBudget::enter();
 
         // Decode loop — identical to standard generation (no embeddings needed)
         let mut n = 0;
@@ -2294,6 +2302,9 @@ impl CxxGenerator {
         let ttft_eval_ns = ttft_eval_start.map_or(0, |t| t.elapsed().as_nanos());
         let ttft_post_start = profile_ttft.then(Instant::now);
         self.prepare_turbo4_delegated_before_decode(max_tokens);
+        // Prefill is encoded by now; raise the command-buffer input budget for
+        // the decode loop only (see `DecodeCommandBufferBudget`).
+        let _decode_budget = crate::DecodeCommandBufferBudget::enter();
         let ttft_post_ns = ttft_post_start.map_or(0, |t| t.elapsed().as_nanos());
         let prefill_time = prefill_start.elapsed();
         if profile_ttft {
@@ -2566,6 +2577,9 @@ impl CxxGenerator {
         let ttft_eval_ns = ttft_eval_start.map_or(0, |t| t.elapsed().as_nanos());
         let ttft_post_start = profile_ttft.then(Instant::now);
         self.prepare_turbo4_delegated_before_decode(max_tokens);
+        // Prefill is encoded by now; raise the command-buffer input budget for
+        // the decode loop only (see `DecodeCommandBufferBudget`).
+        let _decode_budget = crate::DecodeCommandBufferBudget::enter();
         let ttft_post_ns = ttft_post_start.map_or(0, |t| t.elapsed().as_nanos());
         let prefill_time = prefill_start.elapsed();
         if profile_ttft {
