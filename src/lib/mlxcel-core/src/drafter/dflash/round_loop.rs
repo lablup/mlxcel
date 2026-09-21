@@ -835,6 +835,26 @@ impl DFlashGenerator {
             let (accepted, new_tokens) = speculative_walk(&draft_tokens, &target_tokens, budget);
             diagnostics.walk_time_ms += phase_start.elapsed().as_secs_f64() * 1000.0;
             self.accept_lens.push(accepted as u32);
+            // Per-round transcript, at `debug` (issue #1935). Every field is
+            // already on the host, so an enabled callsite costs no device work
+            // and a disabled one costs the level check: `bonus` followed by
+            // `draft_tokens` IS the verify input, and `target_tokens` is the
+            // block argmax the walk just consumed. With this a served run's
+            // round algebra (whether the next round's bonus follows from this
+            // round's emission, whether the kept prefix is what the caches
+            // hold) is checkable offline against a classic transcript, with no
+            // GPU and nothing replayed. That is what separates a round-loop or
+            // wrapper defect from a target-forward one.
+            tracing::debug!(
+                round = diagnostics.rounds,
+                bs,
+                bonus,
+                ?draft_tokens,
+                ?target_tokens,
+                accepted,
+                ?new_tokens,
+                "DFlash round transcript"
+            );
             diagnostics.rounds += 1;
             diagnostics.proposed_tokens += draft_tokens.len();
             diagnostics.accepted_tokens += accepted;

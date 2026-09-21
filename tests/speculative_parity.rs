@@ -349,6 +349,21 @@ async fn assert_server_byte_equality_at_widths(
         let identical = spec.content == baseline.content
             && spec.completion_tokens == baseline.completion_tokens;
         if was_declined {
+            // A decline only counts when the exactness gate measured it. The
+            // other decline reasons (a multimodal payload, an adopted
+            // prompt-cache prefix, a drafter from the wrong family) say
+            // nothing about verify-path parity, and letting one of them stand
+            // in for a measured verdict is how an all-declined run could pass
+            // while proving nothing.
+            assert!(
+                spec.logs
+                    .contains("the block-versus-chain exactness probe did not pass"),
+                "[{}] b={width}: the burst declined for a reason other than the exactness \
+                 probe, so this arm says nothing about verify-path parity. Captured \
+                 logs:\n{}",
+                pairing.name,
+                spec.logs,
+            );
             declined.push(width);
             assert!(
                 identical,
@@ -377,12 +392,24 @@ async fn assert_server_byte_equality_at_widths(
         mismatched.iter().map(|(w, _)| *w).collect::<Vec<_>>(),
         baseline.content,
     );
-    assert!(
-        !ran.is_empty(),
-        "[{}] every width declined, so this run says nothing about verify-path parity. \
-         Widths tried: {widths:?}",
-        pairing.name,
-    );
+    // An all-declined run used to fail here, on the reasoning that it says
+    // nothing about verify-path parity. It does say something, and on this
+    // pairing on CUDA it is the correct outcome rather than a hole in the test
+    // (issue #1935): the verify block is not bit-equal to classic decode at any
+    // width on this host, the exactness probe now measures that rather than
+    // reporting a false pass from an 8-token prefix, and the gate declines
+    // every width. What the test must not allow is a decline for any other
+    // reason standing in for a measured verdict, which the per-width assertion
+    // above rules out. `MLXCEL_MTP_ALLOW_INEXACT=1` remains the way to engage
+    // the burst anyway and forfeit the contract.
+    if ran.is_empty() {
+        eprintln!(
+            "[{}] every width declined by a measured exactness verdict, and every response \
+             equalled the drafter-less baseline byte for byte. That is the contract holding \
+             through the gate rather than through the verify block. Widths tried: {widths:?}",
+            pairing.name,
+        );
+    }
 }
 
 /// byte-equality phase: spawn `mlxcel-server` twice against the

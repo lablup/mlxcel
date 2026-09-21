@@ -725,3 +725,369 @@ fn round_loop_cache_dynamics_with_rollback_match_the_chain() {
         );
     }
 }
+
+/// The drafter checkpoint the served arms pair this target with; override
+/// with `MLXCEL_Q35_PROBE_DRAFTER`.
+const DEFAULT_DRAFTER: &str = "models/mlx/qwen3.5-4b-dflash";
+
+fn drafter_dir() -> String {
+    std::env::var("MLXCEL_Q35_PROBE_DRAFTER").unwrap_or_else(|_| DEFAULT_DRAFTER.to_string())
+}
+
+/// **Diagnostic 7.** Drive the served burst wrapper itself, with the real
+/// drafter bound, and compare its emitted ids against the classic transcript.
+///
+/// Every earlier arm drives the target alone: prefill, a verify block, a
+/// rewind, or a replay of the served run's own accept sequence. All of them
+/// are exact, and the served burst is not, so what separates them is the one
+/// thing they omit: the drafter, executing its own MLX work between the
+/// target's forwards, and the wrapper that carries the first bonus, the
+/// budget and the emission.
+///
+/// This arm omits only the server process. It calls
+/// [`crate::server::batch::dflash_target::run_dflash_on_target`], which is the
+/// function `run_dflash_burst` calls once it has resolved the model variant,
+/// so the prefill, the first-bonus sample, `DFlashGenerator::run` and the
+/// drafter slot are the served ones rather than an approximation of them.
+///
+/// A reproduction here is the reproducer the record asks for, under a
+/// debugger and without HTTP. Exactness here instead says the difference is
+/// the server process around this call, and the next arm has to look there.
+#[test]
+#[ignore = "needs the real Qwen 3.5 4B checkpoint, the DFlash drafter, a GPU and a recorded transcript"]
+fn served_burst_wrapper_with_real_drafter_matches_the_chain() {
+    use mlxcel_core::generate::{LanguageModel, SamplingConfig};
+    use mlxcel_core::sampling::LogprobsConfig;
+    use std::sync::atomic::AtomicBool;
+
+    let Some((model, dir)) = load_text_model() else {
+        return;
+    };
+    let draft_dir = drafter_dir();
+    if !std::path::Path::new(&draft_dir).exists() {
+        eprintln!("[1935] skipping: drafter {draft_dir} not on disk");
+        return;
+    }
+    let Some(prompt) = env_ids("MLXCEL_Q35_PROBE_PROMPT") else {
+        eprintln!("[1935] skipping: set MLXCEL_Q35_PROBE_PROMPT and MLXCEL_Q35_PROBE_REFERENCE");
+        return;
+    };
+    let reference = env_ids("MLXCEL_Q35_PROBE_REFERENCE").expect("MLXCEL_Q35_PROBE_REFERENCE");
+    let text = text_model(&model);
+
+    for block_size in widths() {
+        // The served arm's own configuration: `--ignore-eos` is a -inf bias on
+        // every end-of-generation id (`admission.rs`), and the burst still
+        // receives the merged EOS set, so both are reproduced here rather than
+        // approximated by an empty stop set.
+        let eos = mlxcel_core::generation_policy::merged_eos_token_ids(
+            model.eos_token_ids(),
+            &Vec::new(),
+        );
+        let mut sampling = SamplingConfig {
+            temperature: 0.0,
+            top_k: 1,
+            ..SamplingConfig::default()
+        };
+        sampling.token_bias.suppress_tokens(&eos);
+
+        let dispatch = crate::server::SpeculativeDispatch::DFlash {
+            draft_model_path: std::path::PathBuf::from(&draft_dir),
+            block_size: block_size as u32,
+            block_size_source: crate::cli::draft_block_policy::BlockSizeSource::Override,
+            user_requested_explicit_kind: true,
+        };
+        let mut slot =
+            crate::server::batch::speculative_burst::WorkerDrafterSlot::from_dispatch(&dispatch);
+        slot.ensure_loaded().expect("drafter must load");
+        let owned = slot.take().expect("drafter present after ensure_loaded");
+
+        let cancel = AtomicBool::new(false);
+        let logprobs = LogprobsConfig::default();
+        let max_tokens = reference.len();
+        let run = crate::server::batch::dflash_target::run_dflash_on_target(
+            text,
+            &prompt,
+            &sampling,
+            &[],
+            &eos,
+            owned,
+            block_size as u32,
+            max_tokens,
+            &mut slot,
+            &cancel,
+            &logprobs,
+        );
+        let run = match run {
+            Ok(r) => r,
+            Err(_) => {
+                eprintln!(
+                    "[1935] block {block_size}: the burst declined or errored rather than \
+                     running; nothing to compare"
+                );
+                continue;
+            }
+        };
+        let n = run.tokens.len().min(reference.len());
+        let first = (0..n)
+            .find(|&i| run.tokens[i] != reference[i])
+            .map(|i| i as i64)
+            .unwrap_or(-1);
+        let disagreements = (0..n).filter(|&i| run.tokens[i] != reference[i]).count();
+        eprintln!(
+            "[1935] {dir} + {draft_dir}, block {block_size}: burst emitted {} ids against \
+             {} reference; {disagreements} disagree over {n} compared, first at {first} \
+             (-1 means none)",
+            run.tokens.len(),
+            reference.len(),
+        );
+        if first >= 0 {
+            let i = first as usize;
+            let lo = i.saturating_sub(3);
+            let hi = (i + 4).min(n);
+            eprintln!(
+                "[1935] around {i}: reference {:?} against burst {:?}",
+                &reference[lo..hi],
+                &run.tokens[lo..hi],
+            );
+        }
+    }
+}
+
+/// **Diagnostic 8.** Is the speculative forward byte-identical to the classic
+/// forward at one row, on the real transcript, with both caches prefilled the
+/// way their own paths prefill them?
+///
+/// Diagnostic 3 asks a version of this and cannot answer it: it prefills the
+/// speculative arm with `forward_speculative`, which is the per-position
+/// prefill issue #1935 fixed, so every step it compares runs on caches that
+/// already differ. This arm prefills classic with `forward_internal` and the
+/// burst with `forward_prefill_with_capture_layers`, which the #1939 record
+/// measured byte-identical, and only then walks one token at a time.
+///
+/// What it separates: the exactness probe compares `forward_speculative` over
+/// a block against `forward_speculative` one row at a time, so a difference
+/// between `forward_speculative` at one row and `forward_internal` at one row
+/// is invisible to it and would make a passing probe meaningless. Bytes, not
+/// argmaxes: an argmax comparison stays silent until a difference happens to
+/// cross a boundary, which on this checkpoint is what token 105 is.
+#[test]
+#[ignore = "needs the real Qwen 3.5 4B checkpoint, a GPU and a recorded transcript"]
+fn speculative_t1_forward_versus_classic_on_the_real_transcript() {
+    let Some((model, dir)) = load_text_model() else {
+        return;
+    };
+    let text = text_model(&model);
+    let Some(prompt) = env_ids("MLXCEL_Q35_PROBE_PROMPT") else {
+        eprintln!("[1935] skipping: set MLXCEL_Q35_PROBE_PROMPT and MLXCEL_Q35_PROBE_REFERENCE");
+        return;
+    };
+    let reference = env_ids("MLXCEL_Q35_PROBE_REFERENCE").expect("MLXCEL_Q35_PROBE_REFERENCE");
+    let capture = probe_capture_layer_ids();
+    eprintln!(
+        "[1935] {dir}: one-row speculative against classic over {} reference ids, \
+         capture layers {capture:?}",
+        reference.len()
+    );
+
+    let mut classic_caches = text.make_internal_caches();
+    let classic_prefill = text.forward_internal(&ids_of(&prompt), None, &mut classic_caches, None);
+    let mut burst_caches = text.make_speculative_caches();
+    let burst_prefill =
+        text.forward_prefill_with_capture_layers(&ids_of(&prompt), &mut burst_caches, &capture);
+
+    let last = prompt.len() as i32 - 1;
+    let c0 = row_bytes(&classic_prefill, last);
+    let b0 = row_bytes(&burst_prefill.logits, last);
+    eprintln!(
+        "[1935] prefill last row: {} of {} logit bytes differ",
+        differing(&c0, &b0),
+        c0.len()
+    );
+    match compare_caches(&classic_caches, &burst_caches) {
+        None => eprintln!("[1935] prefill: every layer's cache state is byte-identical"),
+        Some((layer, why)) => {
+            eprintln!("[1935] prefill: FIRST cache divergence at layer {layer}: {why}")
+        }
+    }
+
+    // Walk the whole transcript rather than stopping at the first difference:
+    // how many steps differ, and from where, is what tells accumulated drift
+    // apart from a one-off.
+    let mut first_diff: i64 = -1;
+    let mut differing_steps = 0usize;
+    let mut worst = 0usize;
+    for (i, token) in reference.iter().enumerate() {
+        let c = text.forward_internal(&ids_of(&[*token]), None, &mut classic_caches, None);
+        let s = text.forward_speculative(&ids_of(&[*token]), &mut burst_caches, &capture);
+        let cb = row_bytes(&c, 0);
+        let sb = row_bytes(&s.logits, 0);
+        let d = differing(&cb, &sb);
+        if d > 0 {
+            if first_diff < 0 {
+                first_diff = i as i64;
+                if let Some((layer, why)) = compare_caches(&classic_caches, &burst_caches) {
+                    eprintln!("[1935] step {i}: FIRST cache divergence at layer {layer}: {why}");
+                } else {
+                    eprintln!(
+                        "[1935] step {i}: logits differ in {d} bytes while every layer's \
+                         cache state is still byte-identical, so the difference is in the \
+                         forward rather than inherited"
+                    );
+                }
+            }
+            differing_steps += 1;
+            worst = worst.max(d);
+        }
+        if i % 50 == 0 {
+            eprintln!("[1935] step {i}: {d} of {} logit bytes differ", cb.len());
+        }
+    }
+    eprintln!(
+        "[1935] {differing_steps} of {} one-row steps differ, first at {first_diff} \
+         (-1 means none), worst {worst} bytes",
+        reference.len()
+    );
+}
+
+/// **Diagnostic 9.** Where, in bytes and in which layer, a verify block first
+/// stops reproducing the single-token chain on the real transcript.
+///
+/// Diagnostic 2 asks the same question on a 64-token synthetic prompt and
+/// answers "nowhere", which is also what the shipped exactness probe answers
+/// on its 8-token one, and both are wrong about a served request. This arm
+/// drives the served run's own round structure over the recorded transcript
+/// and compares logit BYTES per kept row rather than argmaxes, so it sees the
+/// difference from the first round that has one instead of from the round
+/// where it happens to cross a boundary.
+///
+/// Both arms prefill through `forward_prefill_with_capture_layers` and the
+/// chain arm steps one token at a time through `forward_speculative`, which
+/// Diagnostic 8 measured byte-identical to `forward_internal` at one row over
+/// this whole transcript. So any difference found here belongs to the block.
+///
+/// On the first differing row it walks every layer's captured hidden state and
+/// names the first one that differs, which is what separates the full
+/// attention layers from the gated-delta ones.
+#[test]
+#[ignore = "needs the real Qwen 3.5 4B checkpoint, a GPU and a recorded transcript"]
+fn block_versus_chain_byte_bisect_on_the_real_transcript() {
+    let Some((model, dir)) = load_text_model() else {
+        return;
+    };
+    let text = text_model(&model);
+    let Some(prompt) = env_ids("MLXCEL_Q35_PROBE_PROMPT") else {
+        eprintln!("[1935] skipping: set MLXCEL_Q35_PROBE_PROMPT and MLXCEL_Q35_PROBE_REFERENCE");
+        return;
+    };
+    let reference = env_ids("MLXCEL_Q35_PROBE_REFERENCE").expect("MLXCEL_Q35_PROBE_REFERENCE");
+    let block_size: usize = std::env::var("MLXCEL_Q35_PROBE_BLOCK")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4);
+    let accepts: Vec<usize> = std::env::var("MLXCEL_Q35_PROBE_ACCEPTS")
+        .ok()
+        .map(|v| {
+            v.split(',')
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.trim().parse::<usize>().expect("accept count"))
+                .collect()
+        })
+        .unwrap_or_else(|| vec![1, 2, 3]);
+    let wrong: Option<i32> = std::env::var("MLXCEL_Q35_PROBE_WRONG")
+        .ok()
+        .filter(|v| v != "0")
+        .map(|v| v.parse::<i32>().unwrap_or(9999));
+    let layers = text.num_layers();
+    let capture: Vec<usize> = (0..layers).collect();
+    eprintln!(
+        "[1935] {dir}, {layers} layers, block {block_size}, {} accepts, prompt {}, \
+         reference {}",
+        accepts.len(),
+        prompt.len(),
+        reference.len()
+    );
+
+    let mut chain_caches = text.make_speculative_caches();
+    let _ = text.forward_prefill_with_capture_layers(&ids_of(&prompt), &mut chain_caches, &capture);
+    let mut burst_caches = text.make_speculative_caches();
+    let _ = text.forward_prefill_with_capture_layers(&ids_of(&prompt), &mut burst_caches, &capture);
+
+    let mut i = 0usize;
+    let mut round = 0usize;
+    let mut first_reported = false;
+    let mut differing_rows = 0usize;
+    while i < reference.len() {
+        let end = (i + block_size).min(reference.len());
+        let rows = end - i;
+        let keep = accepts[round % accepts.len()].clamp(1, rows);
+        let mut fed: Vec<i32> = reference[i..end].to_vec();
+        if let Some(w) = wrong {
+            for slot in fed.iter_mut().skip(keep) {
+                *slot = w;
+            }
+        }
+        let burst = text.forward_speculative(&ids_of(&fed), &mut burst_caches, &capture);
+        for (r, tok) in fed.iter().enumerate().take(keep) {
+            let chain = text.forward_speculative(&ids_of(&[*tok]), &mut chain_caches, &capture);
+            let cb = row_bytes(&chain.logits, 0);
+            let bb = row_bytes(&burst.logits, r as i32);
+            let d = differing(&cb, &bb);
+            if d > 0 {
+                differing_rows += 1;
+                if !first_reported {
+                    first_reported = true;
+                    eprintln!(
+                        "[1935] FIRST byte difference at round {round} row {r} \
+                         (emitted index {}, absolute position {}): {d} of {} logit bytes",
+                        i + r + 1,
+                        prompt.len() + i + r,
+                        cb.len()
+                    );
+                    let mut first_layer = None;
+                    for layer in 0..layers {
+                        let c = row_bytes(&chain.hidden_states[layer], 0);
+                        let b = row_bytes(&burst.hidden_states[layer], r as i32);
+                        let dl = differing(&c, &b);
+                        if dl > 0 && first_layer.is_none() {
+                            {
+                                first_layer = Some(layer);
+                                eprintln!(
+                                    "[1935] FIRST layer divergence at layer {layer} ({}): \
+                                     {dl} of {} hidden bytes",
+                                    if text.config.is_linear_layer(layer) {
+                                        "gated-delta"
+                                    } else {
+                                        "full attention"
+                                    },
+                                    c.len()
+                                );
+                            }
+                        }
+                    }
+                    if first_layer.is_none() {
+                        eprintln!(
+                            "[1935] every layer's hidden state agrees on this row, so the \
+                             difference is after the last captured layer (the norm or the \
+                             LM head)"
+                        );
+                    }
+                }
+            }
+        }
+        if keep < rows {
+            text.rollback_speculative_cache(
+                &mut burst_caches,
+                &burst.gdn_states,
+                &[keep as i32 - 1],
+                rows as i32,
+            );
+        }
+        i += keep;
+        round += 1;
+    }
+    eprintln!(
+        "[1935] {round} rounds, {differing_rows} of {} kept rows differ in logit bytes",
+        reference.len()
+    );
+}

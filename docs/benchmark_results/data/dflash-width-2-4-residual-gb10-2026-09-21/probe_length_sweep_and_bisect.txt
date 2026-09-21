@@ -1,0 +1,38 @@
+test binary: /home/inureyes/Development/mlxcel/target/release/deps/mlxcel-69c784c732fe3546
+=== BISECT: where do logit bytes first differ, and in which layer ===
+[1935] FIRST byte difference at round 17 row 3 (emitted index 37, absolute position 194): 230932 of 496640 logit bytes
+[1935] FIRST layer divergence at layer 15 (full attention): 1016 of 5120 hidden bytes
+[1935] 79 rounds, 164 of 200 kept rows differ in logit bytes
+=== PROBE VERDICTS against prompt length ===
+--- MLXCEL_MTP_PROBE_PROMPT_LEN=8 ---
+[1935] width 2: verify block is byte-identical to the single-token chain
+[1935] width 4: verify block is byte-identical to the single-token chain
+[1935] width 8: verify block position 0 differs from the single-token chain in 229971 of 496640 logit bytes
+[1935] width 16: verify block position 0 differs from the single-token chain in 229971 of 496640 logit bytes
+    (arm wall clock including model load: 4.0s)
+--- MLXCEL_MTP_PROBE_PROMPT_LEN=32 ---
+[1935] width 2: verify block is byte-identical to the single-token chain
+[1935] width 4: verify block is byte-identical to the single-token chain
+[1935] width 8: verify block position 0 differs from the single-token chain in 183229 of 496640 logit bytes
+[1935] width 16: verify block position 0 differs from the single-token chain in 183229 of 496640 logit bytes
+    (arm wall clock including model load: 24.1s)
+--- MLXCEL_MTP_PROBE_PROMPT_LEN=64 ---
+    (arm wall clock including model load: 3.9s)
+--- MLXCEL_MTP_PROBE_PROMPT_LEN=128 ---
+[1935] width 2: verify block is byte-identical to the single-token chain
+/tmp/claude-1000/-home-inureyes-Development-mlxcel/a7ac83cc-0ca7-4ae0-8f19-a24a07471f2a/scratchpad/run_probes2.sh: line 17: 1384507 Aborted                 (core dumped) MLXCEL_MTP_PROBE_PROMPT_LEN=$L "$TB" --ignored --test-threads=1 --nocapture block_chain_exactness_verdicts_on_the_real_checkpoint 2>&1
+     1384508 Done                    | grep -E "^\[1935\] width"
+    (arm wall clock including model load: 4.5s)
+--- MLXCEL_MTP_PROBE_PROMPT_LEN=256 ---
+[1935] width 2: verify block is byte-identical to the single-token chain
+[1935] width 4: verify block is byte-identical to the single-token chain
+/tmp/claude-1000/-home-inureyes-Development-mlxcel/a7ac83cc-0ca7-4ae0-8f19-a24a07471f2a/scratchpad/run_probes2.sh: line 17: 1384572 Aborted                 (core dumped) MLXCEL_MTP_PROBE_PROMPT_LEN=$L "$TB" --ignored --test-threads=1 --nocapture block_chain_exactness_verdicts_on_the_real_checkpoint 2>&1
+     1384573 Done                    | grep -E "^\[1935\] width"
+    (arm wall clock including model load: 6.4s)
+--- MLXCEL_MTP_PROBE_PROMPT_LEN=512 ---
+[1935] width 2: verify block is byte-identical to the single-token chain
+[1935] width 4: verify block is byte-identical to the single-token chain
+[1935] width 8: verify block position 0 differs from the single-token chain in 196664 of 496640 logit bytes
+[1935] width 16: verify block position 0 differs from the single-token chain in 196664 of 496640 logit bytes
+    (arm wall clock including model load: 9.2s)
+PROBES2 DONE

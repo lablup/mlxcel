@@ -50,12 +50,42 @@ use mlxcel_core::{MlxArray, UniquePtr, concatenate};
 use serde::Deserialize;
 use std::path::Path;
 
-/// Prompt length the exactness probe prefills before comparing arms.
+/// Prompt length the exactness probe prefills before comparing arms, unless
+/// `MLXCEL_MTP_PROBE_PROMPT_LEN` overrides it.
 ///
-/// Long enough that the attention layers hold a real KV prefix rather
-/// than the empty-cache special case, short enough that the probe stays
-/// a fraction of a second on a 27B target.
-const PROBE_PROMPT_LEN: usize = 8;
+/// Long enough that the attention layers hold a real KV prefix rather than the
+/// empty-cache special case, short enough that the probe stays a fraction of a
+/// second on a 27B target.
+///
+/// Issue #1935 swept this over 8, 32, 64, 128, 256 and 512 on
+/// `qwen3.5-4b-4bit`, looking for a length at which the probe would notice the
+/// divergence a served burst has at verify widths 2 and 4. There is none: the
+/// verdict is byte-identity at every length. What the probe misses is not a
+/// short prefix but its own shape, one block immediately after a clean
+/// prefill, and on that checkpoint the difference does not begin until several
+/// dozen tokens past the prompt (position 194 at a 158-token prompt, 326 at a
+/// 256-token one, in both cases whatever the accept pattern). The knob is kept
+/// because that sweep is worth being able to repeat; the default is unchanged.
+///
+/// See `docs/benchmark_results/dflash-width-2-4-residual-qwen35-gb10-2026-09-21.md`.
+const DEFAULT_PROBE_PROMPT_LEN: usize = 8;
+
+/// The probe's prompt length for this process.
+///
+/// `MLXCEL_MTP_PROBE_PROMPT_LEN` moves it without a rebuild, which is what the
+/// #1935 record's length sweep uses and what an operator whose checkpoint makes
+/// the default prefill too slow at startup can reach for. Values below 2 are
+/// ignored: the probe needs a prefix to attend to.
+fn probe_prompt_len() -> usize {
+    static RESOLVED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *RESOLVED.get_or_init(|| {
+        std::env::var("MLXCEL_MTP_PROBE_PROMPT_LEN")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|&n| n >= 2)
+            .unwrap_or(DEFAULT_PROBE_PROMPT_LEN)
+    })
+}
 
 /// Independent synthetic inputs the exactness probe compares before it
 /// is allowed to report equality.
@@ -1602,6 +1632,43 @@ impl Qwen35Model {
     ///
     /// Used by: [`Self::mtp_exactness_allows`], and the
     /// `metal_block_vs_chain_op_parity` diagnostic's model-level sibling.
+    /// Whether this checkpoint on this host is the configuration issue #1935
+    /// measured a verify block failing in, and which the probe cannot observe.
+    ///
+    /// `None` when the probe's verdict can be trusted. `Some(reason)` when it
+    /// cannot, which the caller turns into a decline.
+    fn cuda_sdpa_vector_verify_hazard(&self) -> Option<&'static str> {
+        if !mlxcel_core::cuda_is_available() {
+            return None;
+        }
+        // The same gate CUDA's `supports_sdpa_vector` applies, read from this
+        // checkpoint's geometry and from the kill switch that governs it.
+        let head_dim = self.config.head_dim_resolved();
+        if head_dim != 256 && head_dim != 288 {
+            return None;
+        }
+        // MLX reads this switch as `env::get_var("MLXCEL_SDPA_VECTOR_LARGE_D", 1)`,
+        // an integer defaulting to 1, and this deliberately reads it more
+        // narrowly than mlxcel's own documented spelling: only a value that
+        // parses to zero counts as off. Erring narrow declines a burst that
+        // might have been safe; erring wide would report "safe" for a process
+        // in which MLX still takes the fused kernels, which is the one
+        // direction a safety gate must not be wrong in.
+        let fused_enabled = std::env::var("MLXCEL_SDPA_VECTOR_LARGE_D")
+            .ok()
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .map(|v| v != 0)
+            .unwrap_or(true);
+        if !fused_enabled {
+            return None;
+        }
+        Some(
+            "on CUDA this head_dim reaches the fused sdpa_vector kernels, where a verify \
+             block's per-position attention is not bit-equal to the single-token decode it \
+             stands for (issue #1935); MLXCEL_SDPA_VECTOR_LARGE_D=0 restores it",
+        )
+    }
+
     pub fn probe_block_chain_exactness(&self, block_size: usize) -> BlockChainExactness {
         if block_size < 2 {
             return BlockChainExactness::NotRun("block width below 2 drafts nothing");
@@ -1609,6 +1676,27 @@ impl Qwen35Model {
         let vocab = self.config.vocab_size;
         if vocab < 2 {
             return BlockChainExactness::NotRun("degenerate vocabulary");
+        }
+
+        // A configuration the probe cannot observe, which is worse than one it
+        // fails, because a probe that cannot see a hazard reports a pass
+        // (issue #1935). On CUDA, `head_dim` 256 and 288 reach the fused
+        // `sdpa_vector` kernels (issue #675), and there a verify block's
+        // per-position attention stops being bit-equal to the single-token
+        // decode it stands for. Measured on GB10: the served greedy
+        // completion parts from classic decode at every verify width, and
+        // `MLXCEL_SDPA_VECTOR_LARGE_D=0` makes the two byte-identical over
+        // all 200 tokens. The probe's own arms never see it, because the
+        // difference does not begin until several dozen tokens past the
+        // prompt while the probe compares one block immediately after a clean
+        // prefill, and no prompt length from 8 to 512 changes that.
+        //
+        // So this declines rather than measuring. `MLXCEL_MTP_ALLOW_INEXACT=1`
+        // engages the burst anyway and forfeits the contract, and
+        // `MLXCEL_SDPA_VECTOR_LARGE_D=0` buys the contract back at the cost of
+        // classic decode's fused attention kernel.
+        if let Some(why) = self.cuda_sdpa_vector_verify_hazard() {
+            return BlockChainExactness::NotRun(why);
         }
 
         for draw in 0..PROBE_DRAWS {
@@ -1631,7 +1719,7 @@ impl Qwen35Model {
         let salt = draw * 977 + 1;
         let wrap =
             |i: usize, stride: usize, offset: usize| ((i * stride + offset + salt) % vocab) as i32;
-        let prompt: Vec<i32> = (0..PROBE_PROMPT_LEN).map(|i| wrap(i, 7, 1)).collect();
+        let prompt: Vec<i32> = (0..probe_prompt_len()).map(|i| wrap(i, 7, 1)).collect();
         let block: Vec<i32> = (0..block_size).map(|i| wrap(i, 13, 3)).collect();
 
         let as_input =
