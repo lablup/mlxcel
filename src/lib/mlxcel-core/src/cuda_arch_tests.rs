@@ -32,8 +32,11 @@ use crate::cuda_arch::{
 /// architecture-specific target, but `src/lib/mlx-cpp/CMakeLists.txt` gives that
 /// to `fp_quantize.cu` alone rather than to the whole `mlx` target, so these
 /// lists stay plain and every other kernel keeps the code it had (issue #1934).
-/// Hopper's `90a` is unrelated and load-bearing for MLX's own quantized-kernel
-/// gate.
+/// Hopper's `90a` is unrelated: these converters need compute capability 10.0,
+/// so 9.0 cannot reach them however it is spelled. It is kept because it is
+/// what the release lists ship and what auto-detection mirrors, not because it
+/// gates a kernel at the current MLX pin, where the macro that once did was
+/// deleted upstream (issue #1943).
 const RELEASE_AARCH64: &str = "90a;100;121";
 const RELEASE_X86_64: &str = "80;86;89;90a;100;120";
 

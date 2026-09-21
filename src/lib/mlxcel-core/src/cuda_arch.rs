@@ -55,8 +55,17 @@ const FIRST_PLAIN_SM: u32 = 100;
 // ── Compiled architecture list ────────────────────────────────────────────────
 
 /// The `MLX_CUDA_ARCHITECTURES` list this binary's MLX device code was
-/// compiled for, as a CMake-style semicolon-separated string
-/// (`"80;86;89;90a;100a-real;100;120a-real;120"`).
+/// compiled for, as a CMake-style semicolon-separated string. An x86_64 release
+/// build records `"80;86;89;90a;100;120"`, the list
+/// `.github/workflows/release.yml` passes it.
+///
+/// The example is a real shipped list rather than a tour of the grammar, so it
+/// cannot drift into recommending a spelling the project rejects: Blackwell is
+/// plain because the architecture-specific image belongs on `fp_quantize.cu`
+/// alone (lablup/mlxcel#1934, #1943). The `a`, `f`, `-real` and `-virtual`
+/// forms this module still has to parse are described on
+/// `parse_cuda_arch_entry` and round-tripped in
+/// `entry_display_round_trips_through_the_parser`.
 ///
 /// Empty on any build without the `cuda` feature, and empty on a CUDA build
 /// whose build script predates this record. Callers treat empty as "unknown",
