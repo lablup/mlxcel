@@ -62,7 +62,7 @@ Served, one binary, temperature 0:
 | classic, `MLXCEL_SDPA_VECTOR_LARGE_D=0` | `4c37650547` | |
 | width 4, `MLXCEL_SDPA_VECTOR_LARGE_D=0` | `4c37650547` | none, 200 of 200 |
 
-Both arms move, which is expected and is why this table is not evidence about classic decode; what matters is that they move onto each other. In process, replaying the served width-4 run's own 79 rounds and 56 rewinds against a classic chain computed in the same run, the same switch takes the target from 1 disagreement of 201 greedy positions to 0.
+Both arms move, which is expected and is why this table is not evidence about classic decode; what matters is that they move onto each other. The in-process arm says the same thing in the same shape: replaying the served width-4 run's own 79 rounds and 56 rewinds against a classic chain computed in the same process under the same switch, the block disagrees with the chain at 1 of 201 greedy positions with the fused kernel and at 0 without it. That is block-against-chain under each setting, not the burst reproducing the recorded classic ids, because the chain side moves with the switch too.
 
 A single kill switch collapsing a 95-token divergence to nothing is stronger than any of the exclusions that preceded it, and it takes the remaining candidates with it. Rollback, the gated-delta scan, the quantized matmul kernel, the drafter, the round loop and the server process are none of them disabled by this switch, and all of them stop mattering when it is off.
 
@@ -74,8 +74,35 @@ The obvious reading of "same math, one kernel, two answers" is that the two call
 
 Reading the CUDA gate confirms why. `supports_sdpa_vector` admits a call when `q.shape(2) < 4`, which both satisfy, and `sdpa_vector`'s own `q_copy_unless` and `kv_copy_unless` predicates accept both layouts without copying: a `[1, H, 1, D]` query passes on `strides[3] == 1 && strides[2] == D * H && strides[1] == D`, which the block's slice satisfies as well as decode's tensor does, and a key or value whose batch dimension is 1 is accepted whatever its strides. The 1-pass and 2-pass split is on `k.shape(2) > 1024`, which neither reaches. So the arguments the kernel sees are the same shape, the same strides and the same values, and the difference is in what MLX does around the call rather than in what is handed to it.
 
+## Where it starts, and in which layer
+
+A byte-level bisect over the recorded transcript, driving the served width-4 run's own round structure and comparing logit bytes per kept row rather than argmaxes, places it precisely. Both arms prefill through `forward_prefill_with_capture_layers`; the chain arm steps one token at a time through `forward_speculative`, which the one-row arm above measured byte-identical to `forward_internal` over this whole transcript.
+
+The first row whose logits differ is at round 17, row 3, emitted index 37, absolute position 194: 230932 of 496640 logit bytes. Walking every layer's captured hidden state on that row, the first to differ is **layer 15, a full attention layer**, in 1016 of 5120 bytes. From there it is pervasive: 164 of the 200 kept rows differ in logit bytes, while only one of them, at 105, differs in argmax. That is the shape a sub-reporting-floor difference has, and it is why an argmax comparison over 201 positions can report a single disagreement for something that is happening almost everywhere.
+
+**The position is fixed, and the round structure is not what sets it.** Repeating the bisect on a fully synthetic 256-token prompt with four different accept patterns (`1`, `2`, `3`, `1,3`, and `1,2,3,4`) puts the first byte difference at emitted index 71, absolute position 326, in all five, with the same 208510 differing bytes and the same first layer. The patterns reach that position at round 70, 35, 23, 35 and 28 respectively. So the trigger is a position in the sequence, not a number of rounds, a number of rewinds or a particular accept shape. At the served 158-token prompt that position is 194, thirty-six tokens past the prompt; at 256 it is 326, seventy tokens past it.
+
 ## Why the gate reported the property intact
 
-`Qwen35Model::probe_block_chain_exactness` compares a verify block against a single-token chain in logit bytes, which is the right comparison. It prefills 8 synthetic tokens first: `PROBE_PROMPT_LEN` is 8, chosen so the attention layers "hold a real KV prefix rather than the empty-cache special case". An 8-token prefix is not a served KV layout. The cache has not grown past its first step-aligned allocation, and the difference this record is about does not appear there.
+`Qwen35Model::probe_block_chain_exactness` compares a verify block against a single-token chain in logit bytes, which is the right comparison, and the one-row arm above is what establishes that it is: `forward_speculative` at one row IS `forward_internal`, so block-against-chain is block-against-classic-decode. The probe is measuring the right pair.
 
-Measured on the real checkpoint on this host, the probe reports byte-identity at widths 2 and 4 and divergence at 8 and 16, which is what PR #1939 recorded and wired the gate to. The served arms disagree with it at widths 2 and 4. So the gate's verdict was a false pass, not a correct pass that something downstream then violated, and the probe needs a prefix long enough to reproduce the layout a served request has before its verdict means anything.
+It is measuring it in the wrong place. The probe prefills, runs one block, and compares. The difference does not exist yet there. Swept over prompt lengths 8, 32, 64, 128, 256 and 512 on the real checkpoint, the verdict is byte-identity at widths 2 and 4 at **every** length, and divergence at 8 and 16 at every length. Lengthening the prefix is not the answer, and the original 8 was not the reason.
+
+A probe shaped like a served burst does catch it. The bisect arm, given a synthetic prompt and a synthetic accept cycle rather than the recorded transcript, reports the divergence at every accept pattern tried. What it needs is to keep going past the prompt, which the shipped probe does not do at any length.
+
+## What this change does about it
+
+It declines, and says why, rather than measuring something it cannot see.
+
+`probe_block_chain_exactness` now returns `NotRun` with a reason before its draws when the checkpoint and host are the configuration measured here: CUDA, a `head_dim` of 256 or 288, and `MLXCEL_SDPA_VECTOR_LARGE_D` left enabled. `mtp_exactness_gate` already treats every non-`Equal` verdict as a decline, so both Qwen 3.5 `DFlashTargetModel` impls decline the burst at every width and the request is served by classic decode, byte-identical to a drafter-less server. A probe that cannot observe a hazard reporting a pass is worse than one that fails, which is what the gate was doing at widths 2 and 4.
+
+Two escapes remain and both are honest. `MLXCEL_MTP_ALLOW_INEXACT=1` engages the burst anyway and logs the forfeit, which is what an operator who wants the throughput and does not need byte-identity should set. `MLXCEL_SDPA_VECTOR_LARGE_D=0` buys the contract back rather than forfeiting it: it moves single-query attention off the fused kernels on both paths, the served completions become byte-identical again, and the cost is classic decode's own fused attention kernel (issue #675 measured what that is worth).
+
+This is a narrowing of where DFlash engages on this family, and it is deliberate. The alternative is the status quo, in which an operator who turns on speculative decoding gets different greedy text than without it and nothing says so.
+
+## What remains unnamed
+
+What the fused `sdpa_vector` path does differently between the two calls is not identified here, and this record does not guess. What is established: the per-row query, key and value tensors are the same shape, the same strides and the same values in both paths, CUDA's `supports_sdpa_vector` admits both, `sdpa_vector`'s own copy predicates copy neither, and the 1-pass and 2-pass split is on a key length neither reaches. The difference is therefore in what MLX does around the call rather than in what is handed to it, and naming it means reading MLX's own graph-level decisions rather than mlxcel's.
+
+One discrepancy is recorded rather than explained. PR #1939's replay of the served width-4 accept sequence reported 0 disagreements of 201; the same arm on the same accept pattern reports 1 here, at 105. The accept vector this session used is committed at `data/dflash-width-2-4-residual-gb10-2026-09-21/arms/accepts_w4.txt`.
+
