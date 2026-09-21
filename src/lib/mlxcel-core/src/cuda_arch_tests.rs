@@ -28,17 +28,18 @@ use crate::cuda_arch::{
 
 /// The two lists `.github/workflows/release.yml` builds, and the CI pin.
 ///
-/// Every Blackwell target appears twice, `<sm>a-real` beside plain `<sm>`
-/// (issue #1934): the architecture-specific entry is the only one that compiles
-/// MLX's hardware NVFP4/MXFP4 converters, and the plain entry beside it is the
-/// only one that leaves forward-JIT-capable PTX behind. Hopper stays plain
-/// `90a` because those converters also require compute capability 10.0.
-const RELEASE_AARCH64: &str = "90a;100a-real;100;121a-real;121";
-const RELEASE_X86_64: &str = "80;86;89;90a;100a-real;100;120a-real;120";
+/// Blackwell is plain in both. MLX's hardware NVFP4/MXFP4 converters do need an
+/// architecture-specific target, but `src/lib/mlx-cpp/CMakeLists.txt` gives that
+/// to `fp_quantize.cu` alone rather than to the whole `mlx` target, so these
+/// lists stay plain and every other kernel keeps the code it had (issue #1934).
+/// Hopper's `90a` is unrelated and load-bearing for MLX's own quantized-kernel
+/// gate.
+const RELEASE_AARCH64: &str = "90a;100;121";
+const RELEASE_X86_64: &str = "80;86;89;90a;100;120";
 
-/// The Blackwell half of the list every CUDA job in `.github/workflows/ci.yml`
-/// pins, and what a GB10 release build carries.
-const CI_BLACKWELL: &str = "121a-real;121";
+/// The Blackwell list every CUDA job in `.github/workflows/ci.yml` pins, and
+/// what a GB10 release build carries.
+const CI_BLACKWELL: &str = "121";
 
 /// Compute capabilities of the machines this project actually runs on.
 const V100: (u32, u32) = (7, 0);
@@ -116,14 +117,13 @@ fn drops_entries_the_parser_does_not_recognise() {
 #[test]
 fn parses_the_release_matrices_completely() {
     let aarch64 = parse_cuda_arch_list(RELEASE_AARCH64);
-    assert_eq!(aarch64.len(), 5);
+    assert_eq!(aarch64.len(), 3);
     assert_eq!(aarch64[0].variant, ArchVariant::ArchSpecific);
 
     let x86_64 = parse_cuda_arch_list(RELEASE_X86_64);
-    assert_eq!(x86_64.len(), 8);
+    assert_eq!(x86_64.len(), 6);
     // Round-tripping through Display keeps the list readable in the error
-    // message and proves nothing was silently reinterpreted, including the
-    // `-real` restriction the Blackwell entries carry.
+    // message and proves nothing was silently reinterpreted.
     for list in [RELEASE_X86_64, RELEASE_AARCH64, CI_BLACKWELL] {
         let rendered: Vec<String> = parse_cuda_arch_list(list)
             .iter()
@@ -133,10 +133,20 @@ fn parses_the_release_matrices_completely() {
     }
 }
 
+/// What the release lists would have meant had Blackwell been named
+/// architecture-specific, which is the form issue #1934 measured and rejected.
+///
+/// Kept as a test rather than a comment because the coverage semantics are the
+/// reason the rejected form is not simply worse-but-equivalent: `121a` alone
+/// strands a later Blackwell revision, and `121a-real;121` does not. Neither is
+/// needed now that `fp_quantize.cu` carries the architecture-specific image on
+/// its own, but a future reader reaching for one of them should find the
+/// difference between them written down.
 #[test]
-fn blackwell_targets_are_named_twice_and_each_half_earns_its_place() {
-    // The `a-real` half is what compiles MLX's hardware fp4 converter, and it
-    // covers exactly its own target: a cubin, no PTX, nothing forward.
+fn the_rejected_architecture_specific_blackwell_forms_still_parse_as_documented() {
+    // The `a-real` half is what would have compiled MLX's hardware fp4
+    // converter, and it covers exactly its own target: a cubin, no PTX,
+    // nothing forward.
     let arch_specific = parse_cuda_arch_entry("121a-real").expect("121a-real is a valid entry");
     assert_eq!(arch_specific.variant, ArchVariant::ArchSpecific);
     assert!(arch_specific.emits_cubin);
@@ -147,15 +157,19 @@ fn blackwell_targets_are_named_twice_and_each_half_earns_its_place() {
     );
     assert_eq!(entry_coverage(arch_specific, (13, 0)), None);
 
-    // The plain half is what survives onto a device the cubin cannot serve.
-    // This is the whole difference between the combined form and a bare `121a`,
-    // and it is the reason the combined form is what releases build.
+    // A plain entry is what survives onto a device the cubin cannot serve, and
+    // it is what the release lists carry. The difference between the two
+    // rejected forms is exactly this: `121a-real;121` keeps it, `121a` does not.
     assert_eq!(
         arch_list_coverage(CI_BLACKWELL, GB10),
         Some(ArchCoverage::Cubin)
     );
     assert_eq!(
         arch_list_coverage(CI_BLACKWELL, (13, 0)),
+        Some(ArchCoverage::Ptx)
+    );
+    assert_eq!(
+        arch_list_coverage("121a-real;121", (13, 0)),
         Some(ArchCoverage::Ptx)
     );
     assert_eq!(arch_list_coverage("121a", (13, 0)), None);

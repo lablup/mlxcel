@@ -171,47 +171,56 @@ Hopper quantized kernel (`qmm_sm90`) is only compiled when `90a` is in the arch
 list. An explicitly set `MLX_CUDA_ARCHITECTURES` is used verbatim, so include the
 suffix yourself for Hopper (`90a`).
 
-On Blackwell (`sm_100`, `sm_120`, `sm_121`) the suffix decides something else,
-and it decides it silently. MLX compiles the hardware block-float converters in
-`mlx/backend/cuda/quantized/nvfp4_quantize.cuh`, the ones that issue
-`cvt.rn.satfinite.e2m1x2.f32`, only when nvcc is compiling for an
+On Blackwell (`sm_100`, `sm_120`, `sm_121`) the `a` suffix decides something
+else, and you should not set it. MLX compiles the hardware block-float
+converters in `mlx/backend/cuda/quantized/nvfp4_quantize.cuh`, the ones that
+issue `cvt.rn.satfinite.e2m1x2.f32`, only when nvcc is compiling for an
 architecture-specific target, which it signals with `__CUDA_ARCH_SPECIFIC__`.
-Build for plain `121` and both NVFP4 and MXFP4 quantization fall back to a
-scalar CUTLASS conversion sequence, stochastic-rounding quantization becomes
-statically unavailable, and nothing in the build output says so. Name the target
-twice, `121a-real` beside plain `121`, to get both: `121a-real` contributes the
-architecture-specific cubin that carries the hardware instruction, and the plain
-entry beside it keeps the forward-JIT-capable `compute_121` PTX that a bare
-`121a` would discard. The only cost of carrying both is the extra cubin's size.
-On a device the `a` entry matches, the driver loads the architecture-specific
-image and the plain one is never executed, so the plain entry buys forward
-compatibility and nothing else. Never use the family-specific `121f` spelling:
-it satisfies the converter's dispatcher gate but not the converter's own gate,
-so it fails to compile.
+A plain `121` build therefore compiles them out, and both NVFP4 and MXFP4
+quantization fall back to a scalar CUTLASS conversion sequence with nothing in
+the build output saying so.
+
+Putting `121a` in the list would fix that by charging every translation unit
+for it. CUTLASS derives `CUTLASS_ARCH_MMA_SM121A_ENABLED` from the same macro,
+so the decode kernels compile differently too, and on a device the suffix
+matches, the architecture-specific image is the one the driver loads rather
+than an alternative it can ignore. On this project's GB10 that is 12.7 MB of
+extra archive and a different `qmv` on every Blackwell machine, to fix a
+converter no decode kernel calls.
+
+So the list stays plain and `src/lib/mlx-cpp/CMakeLists.txt` adds the
+architecture-specific image to `fp_quantize.cu` alone, which is the only
+translation unit that can reach those converters. You get the hardware path
+without asking for it, and without it reaching anything else. Building with
+`121a` is a step backwards, not a step forwards; `121f` is worse still, because
+it satisfies the converters' dispatcher gate but not their own gate and fails
+to compile outright.
 
 ```bash
 # Hopper / GH200-style target. The `a` suffix is required for the Hopper
 # quantized kernel; plain `90` builds without it.
 MLX_CUDA_ARCHITECTURES=90a cargo build --release --features cuda
 
-# GB10 / DGX Spark-style target used by the release workflow. The `121a-real`
-# entry compiles MLX's hardware NVFP4/MXFP4 converter; the plain `121` beside
-# it keeps forward-JIT-capable PTX.
-MLX_CUDA_ARCHITECTURES="121a-real;121" cargo build --release --features cuda
+# GB10 / DGX Spark-style target used by the release workflow. Plain: the
+# hardware NVFP4/MXFP4 converter is added to one translation unit by CMake.
+MLX_CUDA_ARCHITECTURES=121 cargo build --release --features cuda
 
 # Multiple targets, if your MLX/CUDA toolchain supports them.
-MLX_CUDA_ARCHITECTURES="90a;121a-real;121" cargo build --release --features cuda
+MLX_CUDA_ARCHITECTURES="90a;121" cargo build --release --features cuda
 ```
 
-To confirm what a finished build actually carries, read the archive rather than
-the environment variable. The `sm_121a` image is the hardware converter, and the
-`.target sm_121` PTX is the forward-JIT fallback:
+To confirm what a finished build carries, read the archive rather than the
+environment variable. A correct Blackwell build has the fp4 instruction in
+`fp_quantize.cu.o`, exactly one architecture-specific image in the whole
+archive, and its forward-JIT PTX untouched:
 
 ```bash
 A=$(ls -d target/release/build/mlxcel-core-*/out/build/lib/libmlx.a | head -1)
-cuobjdump --list-elf "$A" | grep -c sm_121a          # architecture-specific cubins
-cuobjdump --dump-sass "$A" | grep -c F2FP.SATFINITE.E2M1   # hardware fp4 conversions
-cuobjdump --dump-ptx  "$A" | grep -c '.target sm_121$'     # forward-JIT PTX
+mkdir -p /tmp/mlxq && (cd /tmp/mlxq && ar x "$A" fp_quantize.cu.o qmv.cu.o)
+cuobjdump --dump-sass /tmp/mlxq/fp_quantize.cu.o | grep -c F2FP.SATFINITE.E2M1  # > 0
+cuobjdump --list-elf  /tmp/mlxq/qmv.cu.o | grep -c 'sm_[0-9]*a'                 # 0: decode untouched
+cuobjdump --list-elf  "$A" | grep -c 'sm_[0-9]*a'                               # 1
+cuobjdump --dump-ptx  "$A" | grep -c '.target sm_121$'                          # > 0
 ```
 
 One checkout can hold several of those build directories, one per feature set
@@ -219,10 +228,10 @@ and architecture list, so confirm the one you are reading is the one you meant:
 `grep MLX_CUDA_ARCHITECTURES "$(dirname "$A")/../CMakeCache.txt"` names the list
 it was configured with.
 
-Do not look for `cvt.rn.satfinite.e2m1x2` in the PTX. With both entries present
-the emitted PTX comes from the plain `compute_121` pass, which takes the
-fallback arm, so that grep returns zero on a correct build. The SASS count above
-is the one that distinguishes the two builds.
+Do not look for `cvt.rn.satfinite.e2m1x2` in the PTX. The injection emits a
+cubin and no PTX, and the PTX that is emitted comes from the plain `compute_121`
+pass, which takes the fallback arm, so that grep returns zero on a correct
+build. The SASS count above is the one that distinguishes the two builds.
 
 If the architecture list a binary was built with does not cover the GPU it is
 started on, it refuses to start and says so, naming both the list it carries and
@@ -241,12 +250,10 @@ wrong architecture can still be run on the CPU while a correct one is built.
 
 The repository release workflow builds two Linux CUDA targets on self-hosted
 runners, each as one fat binary: aarch64 covering GH200 (`90a`), GB200 (`100`),
-and GB10 (`121`) in a single build (`90a;100a-real;100;121a-real;121`), and
-x86_64 covering Ampere through Blackwell
-(`80;86;89;90a;100a-real;100;120a-real;120`). Each Blackwell target appears
-twice for the reason above; Hopper does not, because those converters also
-require compute capability 10.0 or newer and `90a` cannot reach them however it
-is spelled. For each target the `mlxcel` CLI and the
+and GB10 (`121`) in a single build (`90a;100;121`), and x86_64 covering Ampere
+through Blackwell (`80;86;89;90a;100;120`). Blackwell is plain in both for the
+reason above, with the hardware converter added to one translation unit by
+CMake. For each target the `mlxcel` CLI and the
 `mlxcel-server` are published as separate archives (`mlxcel-...` and
 `mlxcel-server-...`, each roughly 347 MB) so a consumer downloads only the one
 it needs. Every published release also ships a CycloneDX SBOM named

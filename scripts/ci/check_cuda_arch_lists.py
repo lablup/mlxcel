@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Require every Blackwell CUDA architecture list in CI and release to carry a
-hardware-capable, architecture-specific entry.
+"""Keep Blackwell architecture lists plain, and keep the mechanism that makes
+that safe in place.
 
 Rationale
 ---------
@@ -8,46 +8,50 @@ MLX compiles its hardware block-float converters (``cvt.rn.satfinite.e2m1x2.f32`
 and siblings in ``mlx/backend/cuda/quantized/nvfp4_quantize.cuh``) only when the
 translation unit is compiled for an *architecture-specific* target, which nvcc
 signals with ``__CUDA_ARCH_SPECIFIC__`` and CMake spells as the ``a`` suffix
-(``121a``). Every list this repository shipped or tested before issue #1934 named
-Blackwell in its plain form (``100``, ``120``, ``121``), so NVFP4 and MXFP4
-quantization silently took the scalar CUTLASS fallback in every release artifact
-and in every CI job, and stochastic-rounding quantization was statically
-unavailable. Nothing failed; the capability was simply compiled out everywhere,
-including in the tests that were supposed to cover it.
+(``121a``). Every list this repository ships names Blackwell plainly, so on its
+own that would compile the converters out of every artifact and every test,
+which is the defect issue #1934 opened on.
 
-That regression is invisible in review: ``"90a;100;121"`` and
-``"90a;100a-real;100;121a-real;121"`` differ by two tokens in a YAML ``env``
-block, and no build output names the difference. This check makes the plain-only
-spelling fail instead.
+The obvious fix, naming Blackwell ``121a`` in these lists, buys the converter by
+charging every translation unit for it: CUTLASS derives
+``CUTLASS_ARCH_MMA_SM121A_ENABLED`` from the same macro, so the decode kernels
+compile differently too, and on a device the suffix matches, the
+architecture-specific image is the one the driver loads rather than an
+alternative it may ignore. Measured on GB10, that is 12.7 MB of extra archive
+and a different ``qmv`` on every Blackwell user's machine, to fix a converter
+none of those kernels call.
 
-The rule
---------
+``src/lib/mlx-cpp/CMakeLists.txt`` adds the architecture-specific image to
+``fp_quantize.cu`` alone instead, which is the only translation unit that can
+reach the converters. So these lists stay plain, and an ``a`` in one is now a
+regression rather than a fix.
+
+The rules
+---------
 For every ``MLX_CUDA_ARCHITECTURES`` value in ``.github/workflows/*.yml``:
 
 1. Every entry must parse as CMake spells one: ``<sm>[a|f][-real|-virtual]``.
 2. No entry may use the family-specific ``f`` suffix. ``sm_121f`` satisfies the
-   dispatcher gate in ``nvfp4_quantize.cuh`` (line 315, ``__CUDA_ARCH_FAMILY_SPECIFIC__
-   >= 1000``) but not the converter gate (line 26, ``__CUDA_ARCH_SPECIFIC__``), so the
-   fast path calls converters that were never defined and nvcc fails with three
+   dispatcher gate in ``nvfp4_quantize.cuh`` (``__CUDA_ARCH_FAMILY_SPECIFIC__ >=
+   1000``) but not the converter gate (``__CUDA_ARCH_SPECIFIC__``), so the fast
+   path calls converters that were never defined and nvcc fails with three
    errors in that header. It is rejected here rather than discovered in a
    40-minute CUDA job.
-3. Every Blackwell compute capability (major >= 10) named by a plain entry must
-   also be named by an architecture-specific entry that emits a cubin, in the
-   same list: ``121`` alone fails, ``121a-real;121`` and ``121a`` both pass.
+3. No Blackwell entry (major >= 10) may carry the ``a`` suffix, because that is
+   the whole-target form the per-source injection exists to avoid. Hopper's
+   ``90a`` is untouched: it is load-bearing for MLX's own quantized-kernel gate
+   and cannot reach these converters anyway, which also require compute
+   capability 10.0.
 
-Rule 3 deliberately accepts both surviving forms. The combined
-``121a-real;121`` carries hardware SASS *and* keeps forward-JIT-capable plain
-PTX; the bare ``121a`` carries hardware SASS and gives the PTX up. Which one
-ships is a review decision (issue #1934); compiling the converter out is not.
+Then, once for the repository:
 
-Pre-Blackwell entries are untouched. Hopper fails the converter's
-``__CUDA_ARCH__ >= 1000`` gate no matter how it is spelled, so ``90a`` gains
-nothing here and ``80``/``86``/``89``/``70`` have no ``a`` variant at all.
-
-The second half of the check is documentation drift, which is how this went
-unnoticed for as long as it did: ``docs/installation.md`` names the two release
-lists in prose, and nothing made it move when the workflow did. Every list in
-``release.yml`` must appear verbatim in that document.
+4. ``src/lib/mlx-cpp/CMakeLists.txt`` must still carry the per-source injection.
+   Without it, plain lists mean the converters are compiled out again, silently,
+   which is exactly the state this issue started from.
+5. Every list in ``release.yml`` must appear verbatim in
+   ``docs/installation.md``. Documentation drift is how the original defect
+   stayed invisible: the document names the architectures the published archives
+   carry, and nothing made it move when the workflow did.
 """
 
 from __future__ import annotations
@@ -168,23 +172,39 @@ def check_list(arch_list: ArchList) -> list[str]:
                 "defined and nvcc fails with three errors in that header. Use the `a` suffix."
             )
 
-    hardware_capable = {
-        entry.capability for entry in entries if entry.variant == "a" and entry.emits_cubin
-    }
     for entry in entries:
-        if entry.variant != "" or entry.major < BLACKWELL_MAJOR:
+        if entry.variant != "a" or entry.major < BLACKWELL_MAJOR:
             continue
-        if entry.capability not in hardware_capable:
-            sm = f"{entry.major}{entry.minor}"
-            problems.append(
-                f"Blackwell entry {entry.raw!r} is plain-only: nothing in this list compiles "
-                f"sm_{sm} with the `a` suffix, so MLX's hardware NVFP4/MXFP4 converters "
-                "(cvt.rn.satfinite.e2m1x2.f32, gated on __CUDA_ARCH_SPECIFIC__) are compiled out "
-                f"and quantization silently takes the scalar fallback. Add {sm}a-real beside it "
-                f"(keeps forward-JIT PTX) or replace it with {sm}a (drops it). See issue #1934."
-            )
+        sm = f"{entry.major}{entry.minor}"
+        problems.append(
+            f"Blackwell entry {entry.raw!r} is architecture-specific at the target level. That "
+            "compiles every translation unit with __CUDA_ARCH_SPECIFIC__, not just the one that "
+            "reaches MLX's hardware NVFP4/MXFP4 converters: CUTLASS keys "
+            "CUTLASS_ARCH_MMA_SM121A_ENABLED on the same macro, so the decode kernels get a "
+            "second image, and on a matching device that is the image the driver loads. Measured "
+            "on GB10 it costs 12.7 MB of archive to change code no converter calls. Use plain "
+            f"{sm}; src/lib/mlx-cpp/CMakeLists.txt gives fp_quantize.cu the {sm}a image on its "
+            "own. See issue #1934."
+        )
 
     return problems
+
+
+def check_injection(cmakelists: Path) -> list[str]:
+    """The per-source injection that lets the lists above stay plain."""
+    if not cmakelists.exists():
+        return [f"{cmakelists} does not exist, so the per-source injection cannot be checked"]
+    text = cmakelists.read_text()
+    required = ("set_source_files_properties", "fp_quantize.cu", "TARGET_DIRECTORY mlx")
+    missing = [token for token in required if token not in text]
+    if not missing:
+        return []
+    return [
+        f"{cmakelists} no longer carries the per-source architecture injection (missing "
+        f"{', '.join(repr(m) for m in missing)}). Without it the plain Blackwell lists above "
+        "compile MLX's hardware NVFP4/MXFP4 converters out of every artifact and every test, "
+        "silently, which is the defect issue #1934 was opened on."
+    ]
 
 
 def check_docs(release_lists: list[ArchList], installation: Path) -> list[str]:
@@ -233,6 +253,7 @@ def main() -> int:
             relative = arch_list.path.relative_to(args.root)
             failures.append(f"{relative}:{arch_list.line}: {problem}")
 
+    failures.extend(check_injection(args.root / "src" / "lib" / "mlx-cpp" / "CMakeLists.txt"))
     release_lists = [a for a in arch_lists if a.path.name == "release.yml"]
     failures.extend(check_docs(release_lists, args.root / "docs" / "installation.md"))
 
