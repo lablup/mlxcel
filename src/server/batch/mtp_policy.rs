@@ -607,7 +607,9 @@ pub(crate) fn hardware_label() -> String {
 #[must_use]
 pub(crate) fn hardware_label_for(hw: &mlxcel_core::hardware::HardwareCapabilities) -> String {
     let class = format!("{}-{}c", hw.silicon_gen, hw.gpu_core_count);
-    if hw.is_apple_silicon() {
+    // Generation detection can fail on Apple hosts (or a future chip).
+    // Preserve their persisted spelling based on vendor, not generation.
+    if hw.vendor == mlxcel_core::hardware::GpuVendor::Apple {
         return class;
     }
     // Backend tags rather than `GpuVendor` Debug names: the cache key is a

@@ -612,6 +612,68 @@ fn apple_hardware_label_keeps_generation_core_spelling() {
     assert_eq!(hardware_label_for(&m1), "M1-20c");
 }
 
+#[test]
+fn apple_unknown_generation_keeps_existing_hint() {
+    use mlxcel_core::hardware::{AppleSiliconGen, GpuVendor};
+    let dir = unique_temp_dir("apple-unknown-generation");
+    let store = PolicyStore::with_dir(Some(dir.clone()));
+    let old = PolicyKey::new("t".into(), "d".into(), "Unknown-0c".into(), 4);
+    store
+        .save(&PolicyHint::new(&old, Verdict::Enable, 0.75, 4))
+        .unwrap();
+    let apple = key_for_hardware(&hardware_caps(
+        GpuVendor::Apple,
+        AppleSiliconGen::Unknown,
+        0,
+        Some("future"),
+    ));
+    assert_eq!(apple, old);
+    assert!(store.load(&apple).is_some());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn non_apple_architecture_separates_hints_and_empty_matches_absent() {
+    use mlxcel_core::hardware::{AppleSiliconGen, GpuVendor};
+    for vendor in [GpuVendor::Nvidia, GpuVendor::Amd, GpuVendor::Unknown] {
+        let key =
+            |arch| key_for_hardware(&hardware_caps(vendor, AppleSiliconGen::Unknown, 0, arch));
+        assert_eq!(key(None), key(Some("")));
+        assert_ne!(key(Some("arch-a")).hash(), key(Some("arch-b")).hash());
+        assert_ne!(key(None).hash(), key(Some("arch-a")).hash());
+    }
+}
+
+#[test]
+fn vendor_qualified_hints_round_trip_without_cross_vendor_reuse() {
+    use mlxcel_core::hardware::{AppleSiliconGen, GpuVendor};
+    let dir = unique_temp_dir("vendor-qualified");
+    let store = PolicyStore::with_dir(Some(dir.clone()));
+    let cuda = key_for_hardware(&hardware_caps(
+        GpuVendor::Nvidia,
+        AppleSiliconGen::Unknown,
+        0,
+        Some("sm_121"),
+    ));
+    let rocm = key_for_hardware(&hardware_caps(
+        GpuVendor::Amd,
+        AppleSiliconGen::Unknown,
+        0,
+        Some("gfx1151"),
+    ));
+    store
+        .save(&PolicyHint::new(&cuda, Verdict::Enable, 0.75, 4))
+        .unwrap();
+    assert!(store.load(&cuda).is_some());
+    assert!(store.load(&rocm).is_none());
+    store
+        .save(&PolicyHint::new(&rocm, Verdict::Decline, 0.25, 4))
+        .unwrap();
+    assert_eq!(store.load(&cuda).unwrap().verdict, Verdict::Enable);
+    assert_eq!(store.load(&rocm).unwrap().verdict, Verdict::Decline);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// A CUDA host and a ROCm host must not share a `PolicyKey` (issue #1887).
 /// Driven by injected `GpuVendor` so this runs on every backend, not only ROCm.
 /// Asserts on the key (and its hash), not on the label string: the property
