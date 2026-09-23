@@ -266,6 +266,86 @@ pub fn apply_token_bias(logits: &MlxArray, bias: &TokenBiasMap) -> UniquePtr<Mlx
     ffi::reshape(&biased, &shape)
 }
 
+/// Per-row [`apply_token_bias`] for a `[B, vocab]` batch, one [`TokenBiasMap`]
+/// per row.
+///
+/// The batched fused sampler dispatches `[B, vocab] -> [B]` from shared scalar
+/// parameters and has no per-row bias input, which is why a biased row used to
+/// leave the fused path (and with it the lookahead decode pipeline) entirely.
+/// Token bias does not read generated history, so it is a static additive edit
+/// that belongs on the logits instead: this applies every row's bias in one
+/// pass, in the chain position the per-row sampler uses (after the
+/// last-position slice, before [`apply_row_filters`]).
+///
+/// The work is sized by the union of biased ids across rows, never by the
+/// vocabulary, preserving the property `apply_token_bias` was rewritten for.
+/// Rows that do not bias an id in the union get an exact `0.0` delta, and
+/// `x + 0.0` is bitwise `x` for every finite logit and for `-inf`, so those
+/// rows come out unchanged. Returns the input pointer unchanged, adding no
+/// graph nodes, when every row's map is empty.
+///
+/// Panics when `biases` does not carry exactly one map per logit row: that
+/// means the caller's bias list and its forward batch disagree, and silently
+/// dropping a bias would let an `ignore_eos` request sample its EOS token.
+///
+/// Used by: `BatchScheduler::execute_batched_decode` (fused branch),
+/// `BatchScheduler::prime_lookahead_with_input` (lookahead pipeline)
+pub fn apply_token_bias_rows(
+    logits: UniquePtr<MlxArray>,
+    biases: &[&TokenBiasMap],
+) -> UniquePtr<MlxArray> {
+    if biases.iter().all(|bias| bias.is_empty()) {
+        return logits;
+    }
+    let shape = ffi::array_shape(&logits);
+    let Some(&vocab) = shape.last() else {
+        return logits;
+    };
+    let vocab_size = vocab as usize;
+    let rows: i32 = shape[..shape.len() - 1].iter().product();
+    assert_eq!(
+        rows as usize,
+        biases.len(),
+        "apply_token_bias_rows: one bias map per logit row required"
+    );
+
+    // One shared index vector over the union of biased ids keeps the update a
+    // single `[B, K]` matrix; per-row index sets would need either padding
+    // (which can overwrite a real bias when a pad id collides) or B separate
+    // scatters.
+    let mut ids: std::collections::BTreeSet<i32> = std::collections::BTreeSet::new();
+    for bias in biases {
+        for (&tok, _) in bias.iter() {
+            if tok >= 0 && (tok as usize) < vocab_size {
+                ids.insert(tok);
+            }
+        }
+    }
+    if ids.is_empty() {
+        return logits;
+    }
+    let idx: Vec<i32> = ids.into_iter().collect();
+    let k = idx.len() as i32;
+    let mut vals: Vec<f32> = Vec::with_capacity(biases.len() * idx.len());
+    for bias in biases {
+        // B9 — same applied counter the per-row stage increments, once per
+        // biased row per step.
+        if !bias.is_empty() {
+            LANG_BIAS_APPLIED_TOTAL.fetch_add(1, Ordering::Relaxed);
+        }
+        vals.extend(idx.iter().map(|tok| bias.get(tok).copied().unwrap_or(0.0)));
+    }
+
+    let idx_row = ffi::from_slice_i32(&idx, &[1, k]);
+    let idx2d = ffi::broadcast_to(&idx_row, &[rows, k]);
+    let upd = ffi::from_slice_f32(&vals, &[rows, k]);
+    let flat = ffi::reshape(&logits, &[rows, vocab]);
+    let current = ffi::take_along_axis(&flat, &idx2d, -1);
+    let updated = ffi::add(&current, &upd);
+    let biased = ffi::put_along_axis(&flat, &idx2d, &updated, -1);
+    ffi::reshape(&biased, &shape)
+}
+
 /// Optimized sampling that returns arrays for pipelining.
 ///
 /// Returns `(token_array, logits_array)` without forcing evaluation so the
@@ -940,8 +1020,27 @@ impl FusedSampleParams {
 ///
 /// Used by: `BatchScheduler::execute_batched_decode` fast-path gate
 pub fn config_supports_fused_batch(config: &SamplingConfig) -> bool {
+    config_supports_fused_batch_except_bias(config) && config.token_bias.is_empty()
+}
+
+/// [`config_supports_fused_batch`] without the token-bias requirement, for
+/// callers that apply the bias themselves before the fused dispatch.
+///
+/// Token bias is not per-row sampler state the way a penalty is: it does not
+/// read the tokens generated so far, so it is a static additive edit that
+/// [`apply_token_bias_rows`] can fold into the `[B, vocab]` logits ahead of the
+/// single dispatch. The strict predicate above stays the default because the
+/// callers that do NOT apply the bias ([`uniform_fused_batch_params`], and
+/// through it [`batched_sample`]) would otherwise drop it silently.
+///
+/// A caller that uses this predicate owes the batch an
+/// [`apply_token_bias_rows`] call in the same chain position the per-row
+/// sampler uses: after the last-position slice, before [`apply_row_filters`].
+///
+/// Used by: `BatchScheduler::batched_decode_fused_params` (the synchronous
+/// fused branch and the lookahead pipeline, both of which apply the bias)
+pub fn config_supports_fused_batch_except_bias(config: &SamplingConfig) -> bool {
     !config.needs_token_history()
-        && config.token_bias.is_empty()
         && config.xtc_probability <= 0.0
         // #1485: mirostat carries per-sequence feedback state and replaces
         // the chain; the extended chain (dynatemp / min_keep / adaptive-p)
@@ -979,6 +1078,30 @@ pub fn row_supports_fused_batch(
         && !needs_per_token_payload
 }
 
+/// [`row_supports_fused_batch`] for callers that apply the row's token bias
+/// themselves (see [`config_supports_fused_batch_except_bias`]).
+///
+/// The opt-in `MLXCEL_LANG_BIAS_COUNTERS` suppression counters read the
+/// pre-bias argmax back to the host on every step, which the pipelined decode
+/// path cannot afford, so a biased row goes back to the per-row sampler while
+/// they are enabled. Unbiased rows are unaffected either way.
+///
+/// Used by: `BatchScheduler::batched_decode_fused_params`
+pub fn row_supports_fused_batch_except_bias(
+    config: &SamplingConfig,
+    needs_logit_mask: bool,
+    needs_token_override: bool,
+    needs_per_token_payload: bool,
+) -> bool {
+    if !config.token_bias.is_empty() && lang_bias_counters_enabled() {
+        return false;
+    }
+    config_supports_fused_batch_except_bias(config)
+        && !needs_logit_mask
+        && !needs_token_override
+        && !needs_per_token_payload
+}
+
 /// Batched fused sampler: sample `[B]` token ids from `[B, vocab]` (or
 /// `[B, 1, vocab]`) logits with a single eval/sync point.
 ///
@@ -998,8 +1121,26 @@ pub fn row_supports_fused_batch(
 ///
 /// Used by: `BatchScheduler::execute_batched_decode` fast-path dispatch
 pub fn batched_fused_sample(logits: &MlxArray, params: &FusedSampleParams) -> Vec<i32> {
+    batched_fused_sample_with_bias(logits, params, &[])
+}
+
+/// [`batched_fused_sample`] with one [`TokenBiasMap`] per row folded into the
+/// logits first (see [`apply_token_bias_rows`]).
+///
+/// Pass an empty slice for an unbiased batch; the bias stage then adds no
+/// graph nodes and the dispatch is the one [`batched_fused_sample`] performs.
+///
+/// Used by: `BatchScheduler::execute_batched_decode` fast-path dispatch
+pub fn batched_fused_sample_with_bias(
+    logits: &MlxArray,
+    params: &FusedSampleParams,
+    biases: &[&TokenBiasMap],
+) -> Vec<i32> {
     // [B, 1, vocab] -> [B, vocab]; a 2-D input is returned unchanged.
     let last_logits = ffi::slice_last_logits(logits);
+    // Token bias before the filters, matching the per-row chain order in
+    // `preprocess_penalty_stages`.
+    let last_logits = apply_token_bias_rows(last_logits, biases);
     // Row filters (top-n-sigma) apply to the whole [B, vocab] batch before the
     // single fused dispatch; a no-op when every filter is disabled.
     let last_logits = apply_row_filters(last_logits, params);
@@ -2637,6 +2778,16 @@ fn apply_xtc_step(logits: &MlxArray, config: &SamplingConfig) -> UniquePtr<MlxAr
 mod tests {
     use super::*;
 
+    /// Whole-array f32 readback, for the `[B, V]` assertions the per-row
+    /// `logit_at` helper below cannot express.
+    fn array_to_vec_f32(array: &MlxArray) -> Vec<f32> {
+        ffi::eval(array);
+        ffi::array_to_raw_bytes(array)
+            .chunks_exact(4)
+            .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()
+    }
+
     fn logit_at(logits: &MlxArray, token_id: i32) -> f32 {
         let index = ffi::from_slice_i32(&[token_id], &[1, 1]);
         let taken = ffi::take_along_axis(logits, &index, -1);
@@ -2825,7 +2976,116 @@ mod tests {
             token_bias: bias,
             ..Default::default()
         };
+        // The strict predicate keeps rejecting bias, because its callers
+        // (`uniform_fused_batch_params` / `batched_sample`) do not apply one.
         assert!(!config_supports_fused_batch(&cfg));
+        // The caller-applies-it variant admits the same config, and still
+        // rejects everything the strict one rejects for other reasons.
+        assert!(config_supports_fused_batch_except_bias(&cfg));
+        assert!(row_supports_fused_batch_except_bias(
+            &cfg, false, false, false
+        ));
+        assert!(!row_supports_fused_batch_except_bias(
+            &cfg, true, false, false
+        ));
+
+        let penalised = SamplingConfig {
+            repetition_penalty: 1.1,
+            token_bias: {
+                let mut bias = TokenBiasMap::new();
+                bias.insert(7, -1.0);
+                bias
+            },
+            ..Default::default()
+        };
+        assert!(!config_supports_fused_batch_except_bias(&penalised));
+    }
+
+    #[test]
+    fn uniform_fused_batch_params_still_rejects_token_bias() {
+        // `batched_sample` reaches the fused dispatch through this helper and
+        // never applies a bias, so a biased row must keep falling back to the
+        // per-row sampler there even though the scheduler now admits one.
+        let mut bias = TokenBiasMap::new();
+        bias.insert(2, f32::NEG_INFINITY);
+        let biased = SamplingConfig {
+            token_bias: bias,
+            ..Default::default()
+        };
+        let plain = SamplingConfig::default();
+        assert!(uniform_fused_batch_params(&[&biased]).is_none());
+        assert!(uniform_fused_batch_params(&[&plain, &biased]).is_none());
+        assert!(uniform_fused_batch_params(&[&plain, &plain]).is_some());
+    }
+
+    #[test]
+    fn apply_token_bias_rows_matches_single_row_helper() {
+        // One row through the batched helper must be bitwise what the per-row
+        // stage produces, since that is what the fused fast path replaces.
+        let logits = ffi::from_slice_f32(&[0.5, 1.5, 0.3, -2.0], &[1, 4]);
+        let mut bias = TokenBiasMap::new();
+        bias.insert(1, -0.75);
+        bias.insert(3, 2.0);
+        let rows = apply_token_bias_rows(ffi::copy(&logits), &[&bias]);
+        let single = apply_token_bias(&logits, &bias);
+        assert_eq!(array_to_vec_f32(&rows), array_to_vec_f32(&single));
+        assert_eq!(array_to_vec_f32(&rows), vec![0.5, 0.75, 0.3, 0.0]);
+    }
+
+    #[test]
+    fn apply_token_bias_rows_biases_each_row_independently() {
+        // Row 0 bans id 2, row 1 is unbiased, row 2 boosts id 0. The unbiased
+        // row must come out untouched even though the shared index vector
+        // covers every id any row biases.
+        let logits = ffi::from_slice_f32(&[0.0, 1.0, 5.0, 0.0, 1.0, 5.0, 0.0, 1.0, 5.0], &[3, 3]);
+        let mut ban = TokenBiasMap::new();
+        ban.insert(2, f32::NEG_INFINITY);
+        let empty = TokenBiasMap::new();
+        let mut boost = TokenBiasMap::new();
+        boost.insert(0, 10.0);
+        let biased = apply_token_bias_rows(ffi::copy(&logits), &[&ban, &empty, &boost]);
+        let values = array_to_vec_f32(&biased);
+        assert_eq!(values[0..2], [0.0, 1.0]);
+        assert!(values[2].is_infinite() && values[2].is_sign_negative());
+        assert_eq!(values[3..6], [0.0, 1.0, 5.0]);
+        assert_eq!(values[6..9], [10.0, 1.0, 5.0]);
+
+        let greedy = FusedSampleParams::from_config(&SamplingConfig::greedy());
+        let tokens = batched_fused_sample_with_bias(&logits, &greedy, &[&ban, &empty, &boost]);
+        assert_eq!(tokens, vec![1, 2, 0]);
+    }
+
+    #[test]
+    fn apply_token_bias_rows_is_a_noop_without_bias() {
+        let logits = ffi::from_slice_f32(&[0.5, 1.5], &[1, 2]);
+        let empty = TokenBiasMap::new();
+        let untouched = apply_token_bias_rows(ffi::copy(&logits), &[&empty]);
+        assert_eq!(array_to_vec_f32(&untouched), vec![0.5, 1.5]);
+        // An empty list is the unbiased batch the fused dispatch passes.
+        let none = apply_token_bias_rows(ffi::copy(&logits), &[]);
+        assert_eq!(array_to_vec_f32(&none), vec![0.5, 1.5]);
+    }
+
+    #[test]
+    fn apply_token_bias_rows_ignores_out_of_range_ids() {
+        // Same contract as `apply_token_bias`: an id outside the vocabulary is
+        // dropped rather than gathered out of bounds.
+        let logits = ffi::from_slice_f32(&[0.5, 1.5], &[1, 2]);
+        let mut bias = TokenBiasMap::new();
+        bias.insert(9, -1.0);
+        bias.insert(-3, -1.0);
+        let result = apply_token_bias_rows(ffi::copy(&logits), &[&bias]);
+        assert_eq!(array_to_vec_f32(&result), vec![0.5, 1.5]);
+    }
+
+    #[test]
+    #[should_panic(expected = "one bias map per logit row")]
+    fn apply_token_bias_rows_rejects_a_row_count_mismatch() {
+        // Dropping a bias here would let an `ignore_eos` request sample EOS.
+        let logits = ffi::from_slice_f32(&[0.5, 1.5, 0.3, 0.1], &[2, 2]);
+        let mut bias = TokenBiasMap::new();
+        bias.insert(0, -1.0);
+        let _ = apply_token_bias_rows(ffi::copy(&logits), &[&bias]);
     }
 
     #[test]

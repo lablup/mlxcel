@@ -530,6 +530,21 @@ impl BatchScheduler {
     ) -> Option<DecodeLookahead> {
         let logits = self.lookahead_forward(seq_ids, input)?;
         let last_logits = mlxcel_core::slice_last_logits(&logits);
+        // Token bias, in the per-row sampler's chain position (after the slice,
+        // before the filters). Without this the gate could not admit a biased
+        // row at all, which is what kept `ignore_eos` and `logit_bias` requests
+        // on the synchronous path.
+        let biased = self
+            .row_token_biases(seq_ids)
+            .map(|biases| apply_token_bias_rows(last_logits, &biases));
+        let Some(last_logits) = biased else {
+            // A row left the batch between the gate and here. Unwind the
+            // speculative KV position `lookahead_forward` just appended, the
+            // same teardown the async-eval failure below performs, and let the
+            // caller decode synchronously.
+            self.apply_lookahead_trim(seq_ids, lookahead_teardown_positions(false));
+            return None;
+        };
         // Same pre-fused row filters (top-n-sigma, typical_p) as `batched_fused_sample`,
         // so the pipelined lookahead samples from the identical distribution
         // as the synchronous fused path it accelerates. A no-op adding no
@@ -797,8 +812,13 @@ impl BatchScheduler {
         // the exact fallback for every other case (structured output,
         // row-specific logprobs, token-bias observability, thinking budgets,
         // mixed sampling configs).
-        if let Some(params) = self.batched_decode_fused_params(seq_ids) {
-            let tokens = batched_fused_sample(&logits, &params);
+        let fused_tokens = self
+            .batched_decode_fused_params(seq_ids)
+            .and_then(|params| {
+                let biases = self.row_token_biases(seq_ids)?;
+                Some(batched_fused_sample_with_bias(&logits, &params, &biases))
+            });
+        if let Some(tokens) = fused_tokens {
             // #822: a completed fused decode is a successful eval (the graph is
             // evaluated inside `batched_fused_sample`'s host readback), so clear
             // the consecutive-failure run. This keeps isolated earlier failures
@@ -1125,7 +1145,12 @@ impl BatchScheduler {
             // A row that vanished from the batch forces the per-row fallback,
             // which carries its own missing-sequence guards.
             let seq = self.active_batch.get(seq_id)?;
-            if !row_supports_fused_batch(
+            // `_except_bias`: this scheduler folds every row's token bias into
+            // the logits itself (`row_token_biases` + `apply_token_bias_rows`)
+            // at both dispatch points, so a biased row no longer has to leave
+            // the fused path and, with it, the lookahead pipeline. That cost
+            // `ignore_eos` and `logit_bias` requests 13% decode.
+            if !row_supports_fused_batch_except_bias(
                 &seq.sampling,
                 seq.structured.is_some(),
                 !seq.thinking.is_disabled(),
@@ -1141,6 +1166,26 @@ impl BatchScheduler {
             }
         }
         shared
+    }
+
+    /// Every row's token bias, in `seq_ids` order, for the fused dispatch
+    /// points to fold into the logits.
+    ///
+    /// `None` when a sequence has left the batch: the tick then takes the
+    /// per-row path instead of sampling a batch whose bias list and forward
+    /// rows disagree.
+    ///
+    /// Used by: [`Self::execute_batched_decode`] fused branch,
+    /// [`Self::prime_lookahead_with_input`]
+    pub(super) fn row_token_biases(&self, seq_ids: &[SequenceId]) -> Option<Vec<&TokenBiasMap>> {
+        seq_ids
+            .iter()
+            .map(|&seq_id| {
+                self.active_batch
+                    .get(seq_id)
+                    .map(|seq| &seq.sampling.token_bias)
+            })
+            .collect()
     }
 
     /// Bookkeeping for the batched fused fast path.
