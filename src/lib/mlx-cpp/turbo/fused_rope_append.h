@@ -38,16 +38,17 @@
 // of `mlx::core::fast::metal_kernel` / `cuda_kernel` are always freshly
 // allocated (`CustomKernel::eval_gpu` calls `allocator::malloc` per output and
 // has no donation path), so taking the slab as an input and returning the
-// updated slab as an output would copy the whole slab every step. The existing
-// `slice_update` append does not: `copy_gpu` donates the input buffer when it
-// is uniquely referenced, which the cache's slab always is, so the append is
-// already an O(new tokens) write into a donated buffer.
+// updated slab as an output would copy the whole slab every step.
 //
-// Fusing the write would therefore trade an O(1) donated update for an
-// O(capacity) copy: at 4 K context, 8 KV heads and head_dim 128 that is 8 MiB
-// per tensor per layer per token. So the kernel produces the append *payload*
-// in the destination's own layout and leaves the O(1) donated `slice_update` to
-// perform the actual store. `dest_layout` selects which destination:
+// (Correction, #1959: the `slice_update` append this was compared against is
+// not the O(1) donated write it was assumed to be during pipelined decode. The
+// previous step's command buffer still holds the slab when the next step is
+// encoded, so the slab is not donatable and `slice_update` copies it whole.
+// The dense FP16 decode write now goes through `inplace_slice_write`
+// (`kv_inplace_write.h`), a primitive that adopts the slab's buffer.)
+//
+// So the kernel produces the append *payload* in the destination's own layout
+// and leaves the store to the cache. `dest_layout` selects which destination:
 //
 //   0 - dense `KVCache` slab order `[B, Hkv, L, D]` (what `update_and_fetch`
 //       splices into `[B, Hkv, capacity, D]`).

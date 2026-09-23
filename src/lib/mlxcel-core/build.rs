@@ -123,6 +123,10 @@ fn main() {
         // values rather than written through.
         .file("../mlx-cpp/turbo/fused_norm.cpp")
         .file("../mlx-cpp/turbo/fused_rope_append.cpp")
+        // In-place decode KV row write (#1959): a primitive whose output
+        // adopts the cache buffer, since slice_update copies it whole while the
+        // previous pipelined step still references it.
+        .file("../mlx-cpp/turbo/kv_inplace_write.cpp")
         // C shim over the `qmm_naive` CTA tile selector (#1541), so
         // `qmm_naive_tile_tests.rs` can sweep the shipped selection function on
         // the host. The selector is pure integer arithmetic with no CUDA in it,
@@ -290,6 +294,8 @@ fn main() {
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/fused_norm.cpp");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/fused_rope_append.h");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/fused_rope_append.cpp");
+    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/kv_inplace_write.h");
+    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/kv_inplace_write.cpp");
     println!("cargo:rerun-if-env-changed=MLX_CUDA_ARCHITECTURES");
     println!("cargo:rerun-if-env-changed=MLX_ROCM_ARCHITECTURES");
     println!("cargo:rerun-if-env-changed=ROCM_PATH");
