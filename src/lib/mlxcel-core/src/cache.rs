@@ -147,6 +147,30 @@ fn direct_prefill_cache_store_enabled() -> bool {
     std::env::var("MLXCEL_ENABLE_DIRECT_PREFILL_CACHE_STORE").is_ok()
 }
 
+/// DIAGNOSTIC ONLY, output is wrong while it is set:
+/// `MLXCEL_DIAG_SKIP_DECODE_KV_WRITE` makes a single-token FP16 decode step
+/// skip writing its K/V row and attend over the cache as it stood, so a decode
+/// benchmark can read the upper bound of removing the per-step cache write.
+/// That write is costlier than one row: while the previous step is still in
+/// flight its command buffer holds the cache buffer, so `slice_update` cannot
+/// donate it and copies the whole cache every step. On command-r7b 4-bit,
+/// M1 Ultra, the bound is +4.4% decode at context 16, +8% at 512 and +11% at
+/// 2048. The cache never grows and positions do not advance, so generated text
+/// is meaningless; read throughput only. Prints one warning when first used.
+fn diag_skip_decode_kv_write() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| {
+        let on = std::env::var_os("MLXCEL_DIAG_SKIP_DECODE_KV_WRITE").is_some();
+        if on {
+            eprintln!(
+                "WARNING: MLXCEL_DIAG_SKIP_DECODE_KV_WRITE is set: decode steps do not write \
+                 the KV cache. Output is invalid; use for throughput diagnosis only."
+            );
+        }
+        on
+    })
+}
+
 /// Check that all `KVCache` entries in `caches` support cache trimming.
 ///
 /// Mirrors the upstream mlx-lm `can_trim_prompt_cache` function
@@ -770,6 +794,21 @@ impl KVCache {
     /// Pre- callers (those that never trim) see this equal to
     /// `self.offset` because `live_start == 0`.
     #[inline]
+    /// The FP16 live window `[.., live_start..offset, ..]` as it stands, with
+    /// nothing written and `offset` unchanged. Only the
+    /// `MLXCEL_DIAG_SKIP_DECODE_KV_WRITE` diagnostic uses it.
+    fn live_window_without_write(&self) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        let live_len = self.buffer_idx();
+        let k = self.keys.as_ref().expect("live window needs keys");
+        let v = self.values.as_ref().expect("live window needs values");
+        let ks = ffi::array_shape(k);
+        let vs = ffi::array_shape(v);
+        (
+            ffi::slice(k, &[0, 0, 0, 0], &[ks[0], ks[1], live_len, ks[3]]),
+            ffi::slice(v, &[0, 0, 0, 0], &[vs[0], vs[1], live_len, vs[3]]),
+        )
+    }
+
     fn buffer_idx(&self) -> i32 {
         self.offset - self.live_start
     }
@@ -2992,6 +3031,14 @@ impl KVCache {
         // double-write or allocate dense buffers. See `new_paged`.
         if self.paged_backing.is_some() {
             return self.update_and_fetch_paged(&new_keys, &new_values);
+        }
+
+        if ffi::array_shape(&new_keys)[2] == 1
+            && self.mode == KVCacheMode::Fp16
+            && self.keys.is_some()
+            && diag_skip_decode_kv_write()
+        {
+            return self.live_window_without_write();
         }
 
         self.update(new_keys, new_values);
@@ -7361,6 +7408,29 @@ mod rotating_truncation_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `MLXCEL_DIAG_SKIP_DECODE_KV_WRITE` path returns exactly the live
+    /// window a normal fetch of the same cache would, and writes nothing.
+    #[test]
+    fn live_window_without_write_matches_the_cache_and_leaves_it_unchanged() {
+        let to_f32 = |arr: &MlxArray| {
+            ffi::eval(arr);
+            ffi::array_to_raw_bytes(arr)
+                .chunks_exact(4)
+                .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+                .collect::<Vec<f32>>()
+        };
+        let mut cache = KVCache::new();
+        let (k, v) = cache.update_and_fetch(
+            ffi::from_slice_f32(&[1.0, 2.0, 3.0], &[1, 1, 3, 1]),
+            ffi::from_slice_f32(&[10.0, 20.0, 30.0], &[1, 1, 3, 1]),
+        );
+        let (wk, wv) = cache.live_window_without_write();
+        assert_eq!(cache.offset, 3, "nothing is written or advanced");
+        assert_eq!(ffi::array_shape(&wk), vec![1, 1, 3, 1]);
+        assert_eq!(to_f32(&wk), to_f32(&k));
+        assert_eq!(to_f32(&wv), to_f32(&v));
+    }
 
     #[test]
     fn kv_cache_trim_clears_storage_when_fully_rewound() {
