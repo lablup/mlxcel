@@ -562,3 +562,19 @@ bias 있는 요청이 bias 없는 요청과 같아졌고(+6.2%, +6.5%), bias 없
 출력 동등성 확인에서 한 번 헛디뎠다. 처음 고른 bias 토큰(1734)이 생성문에 나오지 않아 출력이 그대로였고, 그건 bias가 적용됐다는 증거가 되지 못한다. 실제로 생성되는 첫 토큰(17939 `Ġprompt`)을 막자 텍스트가 바뀌었고, 동기 경로(main)와 lookahead 경로(브랜치)의 SHA-1이 같았다(`ef3caa8646c3`).
 
 게이트는 workspace 11417 passed / 0 failed, clippy·fmt 통과. 기록은 `docs/benchmark_results/lookahead-token-bias-m1ultra-2026-09-23.md`.
+
+## 21. 통합 브랜치에서 한계 재확인 (2026-09-23)
+
+통합 브랜치 `perf/cohere2-decode-m1-ultra`(`f86ebbc1`: #1947 예산 전환 + #1948 융합 두 개 + #1951 token bias)를 새 클론에서 빌드해, 저장소 하네스의 표준 조건(pp512 / tg128)으로 다시 쟀다. 인덱서 정지 상태였지만 부하 평균은 8 ~ 10으로 이전 측정(2 ~ 3)보다 높았다. 스크립트는 `.work/cohere2/limits.sh`(로컬 전용).
+
+| 경로 | 하네스 | 이 브랜치 | main | 이전 한계 |
+|---|---|---|---|---|
+| CLI decode | `scripts/bench_decode.sh` (`--ignore-eos`, 예열 20), 3회 | 111.38 / 112.80 / 112.93 | 미측정 | 111.3 ~ 112.1 (16절) |
+| CLI prefill | 같은 실행 | 702.9 / 706.1 / 708.6 | 미측정 | mlx-lm 778.5 (18절) |
+| 서버 decode | `scripts/bench_serving_concurrency.py --concurrency 1`, 3회 | 113.0 (첫 요청) / 117.1 / 116.7 | 101.9 (첫 요청) / 106.4 / 107.1 | 약 +10% (13.5절) |
+
+- CLI decode는 이전 한계에 도달했다. 부하가 높았는데도 범위가 겹친다.
+- 서버는 첫 요청을 빼면 main 대비 +9.6%로, 13.5절의 약 +10%와 같다. lookahead 카운터가 두 바이너리 모두 요청당 125씩 올랐으므로 둘 다 파이프라인 경로다.
+- 서버 2, 3회차의 TTFT가 73 ms인 것은 이 하네스가 같은 prompt를 반복해 prompt cache가 적중했기 때문이다. 서버 하네스로 prefill을 잴 때는 이 점을 감안해야 한다.
+- 서버 하네스의 decode 값(117)이 CLI(112)보다 높은 이유(분모 정의 또는 chat template으로 달라진 컨텍스트)는 확인하지 않았다. 같은 하네스 안의 브랜치 대 main 비교만 유효하다고 본다.
+- prefill 격차는 그대로다: mlxcel 약 706 대 mlx-lm 778.5(09-23 같은 조건), 약 9%.
