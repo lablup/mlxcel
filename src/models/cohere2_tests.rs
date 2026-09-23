@@ -170,3 +170,48 @@ fn last_logits_match_the_sliced_full_forward() {
         assert_eq!(c1[0].offset, seq.len() as i32);
     }
 }
+
+/// Last-position logits of a prefill must match a token-by-token decode of
+/// the same sequence, which never builds a prefill mask. Covers a prefill
+/// inside the sliding window (every layer on maskless causal SDPA), one that
+/// outgrows it (sliding layers on the windowed mask, global layers causal),
+/// and a chunked prefill whose second chunk crosses the window.
+#[test]
+fn prefill_matches_token_by_token_decode_inside_and_beyond_the_window() {
+    let _guard = test_guard().lock().unwrap();
+    let model = tiny_model();
+    let vocab = tiny_config().vocab_size as i32;
+    let seq = [1i32, 3, 5, 7, 2, 9, 4];
+
+    let decode_last = |n: usize| {
+        let mut caches = model.make_caches();
+        let mut last = None;
+        for &t in &seq[..n] {
+            let id = mlxcel_core::from_slice_i32(&[t], &[1, 1]);
+            let out = model.forward(&id, &mut caches, None);
+            mlxcel_core::eval(&out);
+            last = Some(out);
+        }
+        last.expect("non-empty sequence")
+    };
+
+    // Window is 4: 3 tokens stay inside it, 7 outgrow it.
+    for n in [3usize, 7] {
+        let mut caches = model.make_caches();
+        let ids = mlxcel_core::from_slice_i32(&seq[..n], &[1, n as i32]);
+        let got = model.forward_last_logits(&ids, &mut caches, None, n - 1);
+        let diff = max_abs_diff(&decode_last(n), &got);
+        assert!(diff < 1e-4, "prefill of {n}: max |diff| {diff}");
+    }
+
+    // Chunked: 3 tokens (inside the window), then 4 more (k_len 7 > 4).
+    let mut caches = model.make_caches();
+    let first = mlxcel_core::from_slice_i32(&seq[..3], &[1, 3]);
+    let out = model.forward_last_logits(&first, &mut caches, None, 2);
+    mlxcel_core::eval(&out);
+    let rest = mlxcel_core::from_slice_i32(&seq[3..], &[1, 4]);
+    let got = model.forward_last_logits(&rest, &mut caches, None, 3);
+    assert_eq!(mlxcel_core::array_shape(&got), vec![1, 1, vocab]);
+    let diff = max_abs_diff(&decode_last(seq.len()), &got);
+    assert!(diff < 1e-4, "chunked prefill: max |diff| {diff}");
+}
