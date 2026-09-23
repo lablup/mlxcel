@@ -33,8 +33,14 @@ function(mlx_apply_source_overlays mlx_source_dir)
   # `use_qmv_wide` (issue #1187). Upstream has no equivalent knob and the
   # predicate is unchanged as of pin 81ba1c6a, so it has to be overlaid here.
   # Refresh the file wholesale on a bump and re-apply that one hunk.
+  # device.cpp carries a runtime override of the per-command-buffer input
+  # budget (`mlxcel_set_mb_per_buffer_override`), which mlxcel raises around
+  # decode steps and leaves at the device default for prefill. Upstream latches
+  # the budget once from MLX_MAX_MB_PER_BUFFER and has no setter. Same refresh
+  # rule: take the new upstream file and re-apply the three marked hunks.
   set(_metal_patch_files
       "mlx/backend/metal/compiled.cpp"
+      "mlx/backend/metal/device.cpp"
       "mlx/backend/metal/kernels/utils.h"
       "mlx/backend/metal/quantized.cpp")
   foreach(_patch_file ${_metal_patch_files})
@@ -232,5 +238,84 @@ if(MLX_BUILD_CUDA)
   if(EXISTS "${_cutlass_include}")
     target_compile_definitions(mlx
                                PRIVATE MLX_CUTLASS_DIR="${_cutlass_include}")
+  endif()
+
+  # ------------------- Hardware block-float converter ----------------------
+  # MLX compiles its hardware NVFP4/MXFP4 converters, the
+  # `cvt.rn.satfinite.e2m1x2.f32` family in
+  # mlx/backend/cuda/quantized/nvfp4_quantize.cuh, only when nvcc is compiling
+  # for an architecture-specific target, which it signals with
+  # `__CUDA_ARCH_SPECIFIC__` and which CMake spells as the `a` suffix. Every
+  # architecture list this project shipped named Blackwell plainly, so those
+  # converters were compiled out of every release artifact and every test, and
+  # block-float quantization silently took a scalar CUTLASS fallback (#1934).
+  #
+  # Naming the whole target `<sm>a` fixes that and charges every kernel for it.
+  # CUTLASS derives `CUTLASS_ARCH_MMA_SM121A_ENABLED` from the same macro, so
+  # the decode kernels compile differently too, and on a device the suffix
+  # matches, the architecture-specific image is the one the driver loads rather
+  # than an alternative it can ignore.
+  #
+  # `fp_quantize.cu` is the only translation unit that can reach the
+  # converters: it is the only file that includes `fp_quantize.cuh`, which is
+  # the only file that includes `nvfp4_quantize.cuh`. The gated functions are
+  # `__device__ __forceinline__` in a header, so they stay inside whatever TU
+  # instantiates them; the TU exports only ordinary host entry points
+  # (`mlx::core::fp_quantize` and siblings); and MLX compiles whole-program,
+  # with no `-rdc`, so no device symbol has to resolve across objects. The
+  # extra architecture therefore belongs on that one source rather than on the
+  # target, which is what this does. Every other object, decode included, keeps
+  # byte for byte the code it had.
+  set(_fp_quantize
+      "${mlx_SOURCE_DIR}/mlx/backend/cuda/quantized/fp_quantize.cu")
+  #
+  # A capability the list already names architecture-specific needs nothing
+  # added: the whole target is compiled that way for it, and asking nvcc for the
+  # same `--generate-code` twice is an error rather than a no-op. This is not
+  # hypothetical, it is what an operator following the pre-#1934 advice to build
+  # `121a-real;121` by hand would hit.
+  set(_already_arch_specific "")
+  foreach(_entry IN LISTS MLX_CUDA_ARCHITECTURES)
+    if(_entry MATCHES "^([0-9][0-9]+)a")
+      list(APPEND _already_arch_specific "${CMAKE_MATCH_1}")
+    endif()
+  endforeach()
+  set(_fp_quantize_arch_flags "")
+  foreach(_entry IN LISTS MLX_CUDA_ARCHITECTURES)
+    # Plain Blackwell entries only. An entry that already carries `a` or `f`,
+    # or a `-real`/`-virtual` restriction, is left exactly as the operator
+    # wrote it, and Hopper is skipped because these converters also gate on
+    # `__CUDA_ARCH__ >= 1000`, which 9.0 fails however it is spelled.
+    #
+    # `list(FIND)` rather than `IN_LIST`, which needs policy CMP0057 and so
+    # depends on the `cmake_minimum_required` of whoever includes this file.
+    if(_entry MATCHES "^([0-9][0-9]+)$")
+      set(_sm "${CMAKE_MATCH_1}")
+      list(FIND _already_arch_specific "${_sm}" _sm_index)
+      if(_sm GREATER_EQUAL 100 AND _sm_index EQUAL -1)
+        list(APPEND _fp_quantize_arch_flags
+             "--generate-code=arch=compute_${_sm}a,code=[sm_${_sm}a]")
+      endif()
+    endif()
+  endforeach()
+  if(_fp_quantize_arch_flags)
+    if(NOT EXISTS "${_fp_quantize}")
+      # Silence here is the original defect: the capability disappears and
+      # nothing says so. A pin bump that moves or renames this file has to
+      # update the path rather than quietly lose the hardware converter.
+      message(
+        FATAL_ERROR
+          "MLX_CUDA_ARCHITECTURES names a Blackwell target but ${_fp_quantize} "
+          "does not exist, so MLX's hardware NVFP4/MXFP4 converter would be "
+          "compiled out (lablup/mlxcel#1934). Update this path for the current "
+          "MLX pin.")
+    endif()
+    set_source_files_properties(
+      "${_fp_quantize}" TARGET_DIRECTORY mlx PROPERTIES COMPILE_OPTIONS
+      "${_fp_quantize_arch_flags}")
+    message(
+      STATUS
+        "Hardware block-float converter: fp_quantize.cu also compiled for "
+        "${_fp_quantize_arch_flags}")
   endif()
 endif()

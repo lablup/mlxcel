@@ -47,7 +47,7 @@
 
 use mlxcel::server::{ServerConfig, SpeculativeDispatch, SpeculativeDispatchError};
 use mlxcel_core::drafter::DrafterKind;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 /// Tiny on-disk drafter fixture: write a `config.json` carrying the
@@ -106,6 +106,21 @@ fn make_ordinary_full_model_dir() -> (TempDir, PathBuf) {
     (dir, path)
 }
 
+/// A target checkpoint path with no `config.json`.
+///
+/// Every assertion in this file is about the dispatch matrix and the flat
+/// per-kind block-size defaults, and those defaults hold exactly when the
+/// #1797 policy has no measured entry for the target. An unreadable target
+/// classifies as `TargetQuantization::Unknown`, which is the "no entry" arm on
+/// every host, so these tests keep asserting what they asserted before the
+/// policy existed and stay independent of the machine that runs them. The
+/// policy's own arms are covered in `src/cli/draft_block_policy_tests.rs`, and
+/// the threading of the target path is pinned by
+/// `dispatch_classifies_the_target_not_the_drafter` below.
+fn unmeasured_target() -> &'static Path {
+    Path::new("/nonexistent/mlxcel-1797-integration-target")
+}
+
 fn base_server_config() -> ServerConfig {
     ServerConfig::default()
 }
@@ -121,12 +136,13 @@ fn dispatch_mtp_with_explicit_kind_resolves_to_mtp_variant() {
     cfg.draft_model_path = Some(path.clone());
     cfg.draft_kind = Some("mtp".to_string());
 
-    let dispatch = SpeculativeDispatch::resolve(&cfg).expect("resolve");
+    let dispatch = SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect("resolve");
     match dispatch {
         SpeculativeDispatch::Mtp {
             draft_model_path,
             block_size,
             user_requested_explicit_kind,
+            ..
         } => {
             assert_eq!(draft_model_path, path);
             assert_eq!(block_size, 4); // MTP default
@@ -144,7 +160,7 @@ fn dispatch_mtp_with_block_size_override_honors_override() {
     cfg.draft_kind = Some("mtp".to_string());
     cfg.draft_block_size = Some(8);
 
-    let dispatch = SpeculativeDispatch::resolve(&cfg).expect("resolve");
+    let dispatch = SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect("resolve");
     assert_eq!(dispatch.block_size(), Some(8));
 }
 
@@ -155,7 +171,7 @@ fn dispatch_mtp_auto_detected_from_config_resolves_to_mtp_variant() {
     cfg.draft_model_path = Some(path);
     cfg.draft_kind = None; // auto-detect
 
-    let dispatch = SpeculativeDispatch::resolve(&cfg).expect("resolve");
+    let dispatch = SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect("resolve");
     match dispatch {
         SpeculativeDispatch::Mtp {
             user_requested_explicit_kind,
@@ -180,12 +196,13 @@ fn dispatch_dflash_with_explicit_kind_resolves_to_dflash_variant() {
     cfg.draft_model_path = Some(path.clone());
     cfg.draft_kind = Some("dflash".to_string());
 
-    let dispatch = SpeculativeDispatch::resolve(&cfg).expect("resolve");
+    let dispatch = SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect("resolve");
     match dispatch {
         SpeculativeDispatch::DFlash {
             draft_model_path,
             block_size,
             user_requested_explicit_kind,
+            ..
         } => {
             assert_eq!(draft_model_path, path);
             assert_eq!(block_size, 16); // DFlash default
@@ -203,7 +220,7 @@ fn dispatch_dflash_with_block_size_override_honors_override() {
     cfg.draft_kind = Some("dflash".to_string());
     cfg.draft_block_size = Some(32);
 
-    let dispatch = SpeculativeDispatch::resolve(&cfg).expect("resolve");
+    let dispatch = SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect("resolve");
     assert_eq!(dispatch.block_size(), Some(32));
 }
 
@@ -216,7 +233,7 @@ fn dispatch_disabled_when_no_drafter_configured() {
     let cfg = base_server_config();
     assert!(cfg.draft_model_path.is_none());
 
-    let dispatch = SpeculativeDispatch::resolve(&cfg).expect("resolve");
+    let dispatch = SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect("resolve");
     assert!(matches!(dispatch, SpeculativeDispatch::Disabled));
     assert!(!dispatch.is_kind_specific());
     assert!(dispatch.draft_model_path().is_none());
@@ -226,7 +243,7 @@ fn dispatch_disabled_when_no_drafter_configured() {
 #[test]
 fn dispatch_disabled_does_not_construct_drafter_kind() {
     let cfg = base_server_config();
-    let dispatch = SpeculativeDispatch::resolve(&cfg).expect("resolve");
+    let dispatch = SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect("resolve");
     assert!(dispatch.drafter_kind().is_none());
 }
 
@@ -241,7 +258,8 @@ fn dispatch_rejects_unparseable_draft_kind() {
     cfg.draft_model_path = Some(path);
     cfg.draft_kind = Some("nonsense-kind".to_string());
 
-    let err = SpeculativeDispatch::resolve(&cfg).expect_err("must reject unparseable");
+    let err = SpeculativeDispatch::resolve(&cfg, unmeasured_target())
+        .expect_err("must reject unparseable");
     match err {
         SpeculativeDispatchError::InvalidKind { message } => {
             assert!(message.contains("nonsense-kind"));
@@ -259,7 +277,8 @@ fn dispatch_rejects_internal_mtp_from_cli() {
     cfg.draft_model_path = Some(path);
     cfg.draft_kind = Some("internal-mtp".to_string());
 
-    let err = SpeculativeDispatch::resolve(&cfg).expect_err("must reject internal-mtp from CLI");
+    let err = SpeculativeDispatch::resolve(&cfg, unmeasured_target())
+        .expect_err("must reject internal-mtp from CLI");
     match err {
         SpeculativeDispatchError::InvalidKind { message } => {
             assert!(
@@ -282,7 +301,7 @@ fn dispatch_summary_includes_drafter_kind_and_block_size() {
     cfg.draft_model_path = Some(path);
     cfg.draft_kind = Some("mtp".to_string());
 
-    let dispatch = SpeculativeDispatch::resolve(&cfg).expect("resolve");
+    let dispatch = SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect("resolve");
     let s = dispatch.summary();
     assert!(s.contains("speculative=mtp"));
     assert!(s.contains("block_size=4"));
@@ -296,7 +315,7 @@ fn dispatch_kind_specific_accessor_distinguishes_variants() {
     cfg_mtp.draft_model_path = Some(p1);
     cfg_mtp.draft_kind = Some("mtp".to_string());
     assert!(
-        SpeculativeDispatch::resolve(&cfg_mtp)
+        SpeculativeDispatch::resolve(&cfg_mtp, unmeasured_target())
             .unwrap()
             .is_kind_specific()
     );
@@ -306,14 +325,14 @@ fn dispatch_kind_specific_accessor_distinguishes_variants() {
     cfg_dflash.draft_model_path = Some(p2);
     cfg_dflash.draft_kind = Some("dflash".to_string());
     assert!(
-        SpeculativeDispatch::resolve(&cfg_dflash)
+        SpeculativeDispatch::resolve(&cfg_dflash, unmeasured_target())
             .unwrap()
             .is_kind_specific()
     );
 
     let cfg_disabled = base_server_config();
     assert!(
-        !SpeculativeDispatch::resolve(&cfg_disabled)
+        !SpeculativeDispatch::resolve(&cfg_disabled, unmeasured_target())
             .unwrap()
             .is_kind_specific()
     );
@@ -330,7 +349,7 @@ fn dispatch_reports_drafter_kind_for_kind_specific_variants() {
     cfg.draft_model_path = Some(p);
     cfg.draft_kind = Some("mtp".to_string());
 
-    let dispatch = SpeculativeDispatch::resolve(&cfg).expect("resolve");
+    let dispatch = SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect("resolve");
     assert_eq!(dispatch.drafter_kind(), Some(DrafterKind::Mtp));
 }
 
@@ -352,7 +371,7 @@ fn dispatch_disabled_never_routes_to_burst() {
     // this, so `Disabled` requests bypass the entire burst module and
     // run on the classic prefill + decode pipeline bit-exactly.
     let cfg = base_server_config();
-    let dispatch = SpeculativeDispatch::resolve(&cfg).expect("resolve");
+    let dispatch = SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect("resolve");
     assert!(matches!(dispatch, SpeculativeDispatch::Disabled));
     assert!(!dispatch.is_kind_specific());
     assert!(dispatch.draft_model_path().is_none());
@@ -371,7 +390,7 @@ fn dispatch_mtp_carries_path_and_block_size_for_burst_construction() {
     cfg.draft_kind = Some("mtp".to_string());
     cfg.draft_block_size = Some(4);
 
-    let dispatch = SpeculativeDispatch::resolve(&cfg).expect("resolve");
+    let dispatch = SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect("resolve");
     assert!(dispatch.is_kind_specific());
     assert_eq!(dispatch.draft_model_path(), Some(path.as_path()));
     assert_eq!(dispatch.drafter_kind(), Some(DrafterKind::Mtp));
@@ -389,7 +408,7 @@ fn dispatch_dflash_carries_path_and_block_size_for_burst_construction() {
     cfg.draft_kind = Some("dflash".to_string());
     cfg.draft_block_size = Some(16);
 
-    let dispatch = SpeculativeDispatch::resolve(&cfg).expect("resolve");
+    let dispatch = SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect("resolve");
     assert!(dispatch.is_kind_specific());
     assert_eq!(dispatch.draft_model_path(), Some(path.as_path()));
     assert_eq!(dispatch.drafter_kind(), Some(DrafterKind::Dflash));
@@ -407,7 +426,7 @@ fn dispatch_block_size_override_propagates_to_burst() {
     cfg.draft_kind = Some("mtp".to_string());
     cfg.draft_block_size = Some(8); // override default of 4
 
-    let dispatch = SpeculativeDispatch::resolve(&cfg).expect("resolve");
+    let dispatch = SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect("resolve");
     assert_eq!(dispatch.block_size(), Some(8));
 }
 
@@ -428,7 +447,7 @@ fn dispatch_classic_fallback_is_not_burstable() {
     // `src/server/speculative_dispatch_tests.rs` cover the Classic
     // variant directly.
     let cfg = base_server_config();
-    let dispatch = SpeculativeDispatch::resolve(&cfg).expect("resolve");
+    let dispatch = SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect("resolve");
     assert!(!dispatch.is_kind_specific());
 }
 
@@ -511,13 +530,61 @@ fn server_dispatch_still_accepts_a_real_dflash_drafter_directory() {
     cfg.draft_model_path = Some(dflash.clone());
     cfg.draft_kind = Some("dflash".to_string());
 
-    let dispatch = SpeculativeDispatch::resolve(&cfg).expect("resolve");
+    let dispatch = SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect("resolve");
     assert!(dispatch.is_kind_specific());
     assert_eq!(dispatch.drafter_kind(), Some(DrafterKind::Dflash));
     assert_eq!(dispatch.draft_model_path(), Some(dflash.as_path()));
 
     // Auto-detect (no `--draft-kind`) must reach the same DFlash dispatch.
     cfg.draft_kind = None;
-    let auto = SpeculativeDispatch::resolve(&cfg).expect("resolve");
+    let auto = SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect("resolve");
     assert_eq!(auto.drafter_kind(), Some(DrafterKind::Dflash));
+}
+
+/// The #1797 policy is keyed on the **target** checkpoint's quantization, not
+/// the drafter's, and `resolve` therefore has to read the path it is handed
+/// rather than the one in `ServerConfig::draft_model_path`. That is easy to
+/// get backwards and impossible to see from a block size alone, because both
+/// checkpoints can classify the same way. The resolved source carries the
+/// classification, so assert on it directly.
+///
+/// Deliberately device independent: the compute capability half of the policy
+/// key is whatever the runner has, and this asserts only the quantization
+/// half, which is read from a file.
+#[test]
+fn dispatch_classifies_the_target_not_the_drafter() {
+    use mlxcel::cli::draft_block_policy::{BlockSizeSource, TargetQuantization};
+
+    // An affine-quantized target, paired with a drafter whose own config
+    // declares no quantization at all.
+    let target = tempfile::tempdir().expect("create temp dir");
+    std::fs::write(
+        target.path().join("config.json"),
+        r#"{"model_type": "qwen3_5", "quantization": {"group_size": 64, "bits": 4, "mode": "affine"}}"#,
+    )
+    .expect("write target config.json");
+
+    let (_drafter_dir, drafter) = make_drafter_dir(Some("dflash"));
+    let mut cfg = base_server_config();
+    cfg.draft_model_path = Some(drafter);
+    cfg.draft_kind = Some("dflash".to_string());
+
+    let dispatch = SpeculativeDispatch::resolve(&cfg, target.path()).expect("resolve");
+    let SpeculativeDispatch::DFlash {
+        block_size_source, ..
+    } = dispatch
+    else {
+        panic!("expected DFlash dispatch");
+    };
+    let quantization = match block_size_source {
+        BlockSizeSource::MeasuredHardwareDefault { quantization, .. }
+        | BlockSizeSource::KindDefault { quantization, .. } => quantization,
+        other => panic!("expected a policy-resolved source, got {other:?}"),
+    };
+    assert_eq!(
+        quantization,
+        TargetQuantization::Affine,
+        "resolve must classify the target it was handed; reading the drafter \
+         instead would report Other, since that fixture declares no quantization"
+    );
 }

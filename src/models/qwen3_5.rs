@@ -50,12 +50,42 @@ use mlxcel_core::{MlxArray, UniquePtr, concatenate};
 use serde::Deserialize;
 use std::path::Path;
 
-/// Prompt length the exactness probe prefills before comparing arms.
+/// Prompt length the exactness probe prefills before comparing arms, unless
+/// `MLXCEL_MTP_PROBE_PROMPT_LEN` overrides it.
 ///
-/// Long enough that the attention layers hold a real KV prefix rather
-/// than the empty-cache special case, short enough that the probe stays
-/// a fraction of a second on a 27B target.
-const PROBE_PROMPT_LEN: usize = 8;
+/// Long enough that the attention layers hold a real KV prefix rather than the
+/// empty-cache special case, short enough that the probe stays a fraction of a
+/// second on a 27B target.
+///
+/// Issue #1935 swept this over 8, 32, 64, 128, 256 and 512 on
+/// `qwen3.5-4b-4bit`, looking for a length at which the probe would notice the
+/// divergence a served burst has at verify widths 2 and 4. There is none: the
+/// verdict is byte-identity at every length. What the probe misses is not a
+/// short prefix but its own shape, one block immediately after a clean
+/// prefill, and on that checkpoint the difference does not begin until several
+/// dozen tokens past the prompt (position 194 at a 158-token prompt, 326 at a
+/// 256-token one, in both cases whatever the accept pattern). The knob is kept
+/// because that sweep is worth being able to repeat; the default is unchanged.
+///
+/// See `docs/benchmark_results/dflash-width-2-4-residual-qwen35-gb10-2026-09-21.md`.
+const DEFAULT_PROBE_PROMPT_LEN: usize = 8;
+
+/// The probe's prompt length for this process.
+///
+/// `MLXCEL_MTP_PROBE_PROMPT_LEN` moves it without a rebuild, which is what the
+/// #1935 record's length sweep uses and what an operator whose checkpoint makes
+/// the default prefill too slow at startup can reach for. Values below 2 are
+/// ignored: the probe needs a prefix to attend to.
+fn probe_prompt_len() -> usize {
+    static RESOLVED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *RESOLVED.get_or_init(|| {
+        std::env::var("MLXCEL_MTP_PROBE_PROMPT_LEN")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|&n| n >= 2)
+            .unwrap_or(DEFAULT_PROBE_PROMPT_LEN)
+    })
+}
 
 /// Independent synthetic inputs the exactness probe compares before it
 /// is allowed to report equality.
@@ -1527,6 +1557,40 @@ impl Qwen35Model {
         mtp_exactness_gate(key, || self.probe_block_chain_exactness(block_size))
     }
 
+    /// Whether the **DFlash** burst may engage at `block_size` verify rows on
+    /// this host (issue #1935).
+    ///
+    /// Deliberately not [`Self::mtp_exactness_allows`]: that gate's first
+    /// precondition is `metal_is_available()`, because Qwen 3.5 MTP's
+    /// byte-identity rests on the Metal chain-parity gated-delta kernel. The
+    /// DFlash burst runs on CUDA too, where that precondition would decline
+    /// every burst without measuring one, so this entry point is the measured
+    /// half alone: [`Self::probe_block_chain_exactness`], memoized per
+    /// (model, width) per process by
+    /// [`mtp_exactness_gate`](crate::models::speculative_exactness::mtp_exactness_gate),
+    /// which also owns the decline log line, the `qmv_wide` retry and the
+    /// `MLXCEL_MTP_ALLOW_INEXACT` override.
+    ///
+    /// What this catches on GB10 with `qwen3.5-4b-4bit`: at widths 2 and 4 the
+    /// verify block is byte-identical to the chain and the burst engages, and
+    /// at 8 and 16 it is not (229971 of 496640 logit bytes differ at block
+    /// position 0), which is the `M * B >= 8` switch from `qmv` to
+    /// `qmm_sm80` in MLX's CUDA quantized dispatch. That is a real numerical
+    /// difference between two kernels rather than a defect, so the burst
+    /// declines there instead of serving text that differs from classic
+    /// decode.
+    ///
+    /// Used by: `DFlashTargetModel::exactness_allows` for `Qwen35Model` and
+    /// `Qwen35VLModel`, which the server burst gate reads.
+    pub fn dflash_exactness_allows(&self, block_size: usize) -> bool {
+        let key = ProbeKey {
+            block_size: block_size as u32,
+            hidden_size: self.config.hidden_size as u32,
+            num_hidden_layers: self.config.num_hidden_layers as u32,
+        };
+        mtp_exactness_gate(key, || self.probe_block_chain_exactness(block_size))
+    }
+
     /// Measure, on this loaded checkpoint, whether a `T = block_size`
     /// verify block produces byte-identical logits to `block_size`
     /// consecutive single-token decode steps.
@@ -1568,6 +1632,43 @@ impl Qwen35Model {
     ///
     /// Used by: [`Self::mtp_exactness_allows`], and the
     /// `metal_block_vs_chain_op_parity` diagnostic's model-level sibling.
+    /// Whether this checkpoint on this host is the configuration issue #1935
+    /// measured a verify block failing in, and which the probe cannot observe.
+    ///
+    /// `None` when the probe's verdict can be trusted. `Some(reason)` when it
+    /// cannot, which the caller turns into a decline.
+    fn cuda_sdpa_vector_verify_hazard(&self) -> Option<&'static str> {
+        if !mlxcel_core::cuda_is_available() {
+            return None;
+        }
+        // The same gate CUDA's `supports_sdpa_vector` applies, read from this
+        // checkpoint's geometry and from the kill switch that governs it.
+        let head_dim = self.config.head_dim_resolved();
+        if head_dim != 256 && head_dim != 288 {
+            return None;
+        }
+        // MLX reads this switch as `env::get_var("MLXCEL_SDPA_VECTOR_LARGE_D", 1)`,
+        // an integer defaulting to 1, and this deliberately reads it more
+        // narrowly than mlxcel's own documented spelling: only a value that
+        // parses to zero counts as off. Erring narrow declines a burst that
+        // might have been safe; erring wide would report "safe" for a process
+        // in which MLX still takes the fused kernels, which is the one
+        // direction a safety gate must not be wrong in.
+        let fused_enabled = std::env::var("MLXCEL_SDPA_VECTOR_LARGE_D")
+            .ok()
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .map(|v| v != 0)
+            .unwrap_or(true);
+        if !fused_enabled {
+            return None;
+        }
+        Some(
+            "on CUDA this head_dim reaches the fused sdpa_vector kernels, where a verify \
+             block's per-position attention is not bit-equal to the single-token decode it \
+             stands for (issue #1935); MLXCEL_SDPA_VECTOR_LARGE_D=0 restores it",
+        )
+    }
+
     pub fn probe_block_chain_exactness(&self, block_size: usize) -> BlockChainExactness {
         if block_size < 2 {
             return BlockChainExactness::NotRun("block width below 2 drafts nothing");
@@ -1575,6 +1676,27 @@ impl Qwen35Model {
         let vocab = self.config.vocab_size;
         if vocab < 2 {
             return BlockChainExactness::NotRun("degenerate vocabulary");
+        }
+
+        // A configuration the probe cannot observe, which is worse than one it
+        // fails, because a probe that cannot see a hazard reports a pass
+        // (issue #1935). On CUDA, `head_dim` 256 and 288 reach the fused
+        // `sdpa_vector` kernels (issue #675), and there a verify block's
+        // per-position attention stops being bit-equal to the single-token
+        // decode it stands for. Measured on GB10: the served greedy
+        // completion parts from classic decode at every verify width, and
+        // `MLXCEL_SDPA_VECTOR_LARGE_D=0` makes the two byte-identical over
+        // all 200 tokens. The probe's own arms never see it, because the
+        // difference does not begin until several dozen tokens past the
+        // prompt while the probe compares one block immediately after a clean
+        // prefill, and no prompt length from 8 to 512 changes that.
+        //
+        // So this declines rather than measuring. `MLXCEL_MTP_ALLOW_INEXACT=1`
+        // engages the burst anyway and forfeits the contract, and
+        // `MLXCEL_SDPA_VECTOR_LARGE_D=0` buys the contract back at the cost of
+        // classic decode's fused attention kernel.
+        if let Some(why) = self.cuda_sdpa_vector_verify_hazard() {
+            return BlockChainExactness::NotRun(why);
         }
 
         for draw in 0..PROBE_DRAWS {
@@ -1597,7 +1719,7 @@ impl Qwen35Model {
         let salt = draw * 977 + 1;
         let wrap =
             |i: usize, stride: usize, offset: usize| ((i * stride + offset + salt) % vocab) as i32;
-        let prompt: Vec<i32> = (0..PROBE_PROMPT_LEN).map(|i| wrap(i, 7, 1)).collect();
+        let prompt: Vec<i32> = (0..probe_prompt_len()).map(|i| wrap(i, 7, 1)).collect();
         let block: Vec<i32> = (0..block_size).map(|i| wrap(i, 13, 3)).collect();
 
         let as_input =
@@ -2165,6 +2287,105 @@ impl Qwen35Model {
         }
     }
 
+    /// Prefill `input_ids` through the **standard batched-attention** forward
+    /// while capturing the per-layer hidden states a DFlash drafter is seeded
+    /// from (issue #1935).
+    ///
+    /// This is deliberately NOT [`Self::forward_speculative`], for the reason
+    /// [`Self::forward_prefill_with_last_hidden`] already states for the MTP
+    /// path: `forward_speculative` sends every full-attention layer through
+    /// `attend_per_position`, which is byte-aligned with single-token *decode*
+    /// and is not the *prefill* computation classic decode runs. The classic
+    /// path samples its first token from the batched causal prefill logits and
+    /// carries that prefill's KV and gated-delta state into every token after
+    /// it, so a burst that prefills the per-position way starts from a
+    /// different state and its greedy output drifts away from classic decode
+    /// within a few tokens, at every verify width alike. Measured on GB10 with
+    /// `qwen3.5-4b-4bit`: the two prefills' last-row logits differ in 173206 of
+    /// 496640 bytes and the served completions part company at generated token
+    /// 9. The MTP path took this fix; the DFlash path did not, which is what
+    /// issue #1935 reported.
+    ///
+    /// GDN rollback snapshots are deliberately not captured: a prefill is never
+    /// rolled back, and they are prompt-sized rather than block-sized, which is
+    /// the memory argument `SpeculativeTarget::prefill_forward_with_capture_layers`
+    /// exists for. The returned `gdn_states` is therefore empty, and
+    /// `rollback_partial` must never be called against this output.
+    ///
+    /// Keep the loop in lockstep with [`Self::forward_internal`] (mask
+    /// construction, layer dispatch, final norm, LM head); the capture is the
+    /// only addition.
+    ///
+    /// Used by: `SpeculativeTarget::prefill_forward_with_capture_layers` for
+    /// `Qwen35Model` and `Qwen35VLModel`, which is the DFlash burst's first
+    /// call on both the B = 1 and B > 1 arms.
+    pub fn forward_prefill_with_capture_layers(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Qwen3NextCache],
+        capture_layer_ids: &[usize],
+    ) -> VerifyOutput {
+        let mut h = self.embed_tokens.forward(input_ids);
+
+        let shape = mlxcel_core::array_shape(&h);
+        let seq_len = shape[1];
+
+        let fa_idx = self.config.full_attention_interval - 1;
+        let fa_mask = if seq_len > 1 {
+            let offset = if fa_idx < caches.len() {
+                caches[fa_idx].offset()
+            } else {
+                0
+            };
+            Some(create_causal_mask(seq_len, offset))
+        } else {
+            None
+        };
+
+        let mut hidden_slots: Vec<Option<UniquePtr<MlxArray>>> =
+            (0..capture_layer_ids.len()).map(|_| None).collect();
+
+        for (i, (layer, cache)) in self.layers.iter().zip(caches.iter_mut()).enumerate() {
+            let mask = if layer.is_linear {
+                None
+            } else {
+                fa_mask.as_deref()
+            };
+            h = layer.forward(&h, mask, cache, None);
+
+            for (slot_idx, &want_idx) in capture_layer_ids.iter().enumerate() {
+                if want_idx == i {
+                    hidden_slots[slot_idx] = Some(mlxcel_core::copy(&h));
+                }
+            }
+        }
+
+        let hidden_states: Vec<UniquePtr<MlxArray>> = hidden_slots
+            .into_iter()
+            .map(|opt| {
+                opt.unwrap_or_else(|| {
+                    mlxcel_core::zeros(
+                        &[shape[0], seq_len, self.config.hidden_size as i32],
+                        mlxcel_core::array_dtype(&h),
+                    )
+                })
+            })
+            .collect();
+
+        let h = self.norm.forward(&h);
+        let logits = if let Some(ref lm_head) = self.lm_head {
+            lm_head.forward(&h)
+        } else {
+            self.embed_tokens.as_linear(&h)
+        };
+
+        VerifyOutput {
+            logits,
+            hidden_states,
+            gdn_states: Vec::new(),
+        }
+    }
+
     /// Rewind both KV (attention) and GDN (linear-attention) caches to the
     /// position of the last accepted token after a DFlash verify-pass block.
     ///
@@ -2587,6 +2808,32 @@ impl mlxcel_core::drafter::dflash::SpeculativeTarget for Qwen35Model {
             capture_layer_ids
         };
         self.forward_speculative(verify_input, caches, capture_layer_ids)
+    }
+
+    /// The burst's prompt prefill, which is NOT a verify block and must not
+    /// be computed like one (issue #1935).
+    ///
+    /// The trait default routes here to `verify_forward_with_capture_layers`,
+    /// which sends every full-attention layer through `attend_per_position`.
+    /// That is right for a verify block, whose rows have to match what
+    /// single-token decode would produce, and wrong for the prompt, which
+    /// classic decode runs as one batched causal attention. Prefilling the
+    /// per-position way leaves the burst holding different KV and gated-delta
+    /// state than classic decode, and its greedy output then drifts at every
+    /// verify width alike. See
+    /// [`Qwen35Model::forward_prefill_with_capture_layers`].
+    fn prefill_forward_with_capture_layers(
+        &self,
+        verify_input: &MlxArray,
+        caches: &mut [Self::Cache],
+        capture_layer_ids: &[usize],
+    ) -> Self::VerifyOut {
+        let capture_layer_ids = if capture_layer_ids.is_empty() {
+            mlxcel_core::drafter::dflash::config::DEFAULT_TARGET_LAYER_IDS
+        } else {
+            capture_layer_ids
+        };
+        self.forward_prefill_with_capture_layers(verify_input, caches, capture_layer_ids)
     }
 
     fn rollback_partial(
@@ -3909,3 +4156,7 @@ mod chain_parity_gate_tests {
         assert!(!qwen35_config_supports_chain_parity_kernel(&config));
     }
 }
+
+#[cfg(test)]
+#[path = "qwen3_5_dflash_probe_tests.rs"]
+mod qwen3_5_dflash_probe_tests;

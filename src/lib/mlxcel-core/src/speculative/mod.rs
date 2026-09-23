@@ -73,7 +73,7 @@ use crate::sampling::{
     TokenBiasMap, effective_token_distribution, sample_token_optimized,
     sample_token_with_distribution,
 };
-use crate::streams::{install_thread_local_default_stream, new_thread_local_generation_stream};
+use crate::streams::{install_thread_local_default_stream, shared_thread_local_generation_stream};
 use crate::utils::{align_to_na_tile, create_padded_prefill_mask};
 use cxx::UniquePtr;
 use std::borrow::Cow;
@@ -274,7 +274,7 @@ impl SpeculativeGenerator {
             main_caches: (0..main_num_layers).map(|_| KVCache::new()).collect(),
             draft_caches: (0..draft_num_layers).map(|_| KVCache::new()).collect(),
             generated_tokens: Vec::new(),
-            generation_stream: new_thread_local_generation_stream(),
+            generation_stream: shared_thread_local_generation_stream(),
             acceptance: SpeculativeAcceptanceStats::default(),
             stochastic_acceptance: None,
             token_bias: TokenBiasMap::default(),

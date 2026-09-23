@@ -150,7 +150,12 @@ struct Args {
     prompt: String,
 
     /// Block size for the speculative path (ignored when `--kind none`).
-    /// Mirrors the upstream defaults: 4 for MTP, 16 for DFlash.
+    /// Unset takes the per-pairing value in this file's own catalog, which
+    /// mirrors the upstream constants: 4 for MTP, 16 for DFlash. This bench
+    /// binary deliberately does NOT go through
+    /// `mlxcel::cli::speculative_args::resolve_draft_block_size_for_target`,
+    /// so the per-device policy of issue #1797 does not apply here and a
+    /// sweep row is comparable across hosts.
     #[arg(long)]
     block_size: Option<u32>,
 

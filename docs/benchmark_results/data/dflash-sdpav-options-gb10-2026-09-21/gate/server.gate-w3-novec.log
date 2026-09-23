@@ -1,0 +1,44 @@
+2026-09-21T08:41:41.759287Z  WARN mlxcel::server::startup: CORS is set to allow all origins ('*') and no API key is set; this can be a security risk (cross-origin attacks). Set --api-key, or narrow --cors-origins / --allowed-origins
+2026-09-21T08:41:41.759330Z  INFO mlxcel::server::startup: effective KV cache mode kv_cache_mode=fp16 kv_bits=0
+2026-09-21T08:41:41.759469Z  INFO mlxcel::server::startup: resolved context and batch geometry (0 = the checkpoint's own trained context) ctx_size=0 ctx_size_per_slot=0 context_slots=1 kv_unified=false n_parallel=4 prefill_chunk_size=512 max_kv_size=None
+2026-09-21T08:41:41.759525Z  INFO mlxcel::server::startup: Runtime device: NVIDIA GPU (CUDA)
+2026-09-21T08:41:41.759527Z  INFO mlxcel::server::startup: CUDA graph-cache LRU capacity: MLX_CUDA_GRAPH_CACHE_SIZE=2000 (mlxcel raises MLX's default of 400 to 2000 so long-lived, shape-diverse decode does not hit the cache-thrashing abort from issue #818, unless an operator override is set)
+2026-09-21T08:41:41.759530Z  INFO mlxcel::server::startup: Wired memory limit: 121.7 GB
+2026-09-21T08:41:42.102210Z  INFO mlxcel::server::startup: DRY sequence breakers active (b10621 semantics: breaker token data derived from the vocabulary per request) breakers=["\n", ":", "\"", "*"]
+2026-09-21T08:41:42.102245Z  INFO mlxcel::server::startup: Tokenizer recognizes a think marker pair; defaulting chat_template kwarg `enable_thinking=true` (upstream PR #1114) think_start=Some("<think>") think_end=Some("</think>") think_start_tokens_len=1 think_end_tokens_len=1
+2026-09-21T08:41:42.102802Z  INFO mlxcel::server::startup: Prompt-prefix cache store enabled (+ APC, snapshots) capacity_bytes=2147483648 max_entries=1024 ttl_seconds=3600 snapshot_capacity_bytes=536870912 snapshot_max_entries=4096 snapshot_ttl_seconds=7200 min_prefix_tokens=32 apc_enabled=true apc_block_size=16 apc_hash=sha256
+2026-09-21T08:41:42.445614Z  INFO mlxcel::server::startup: Warming up model...
+2026-09-21T08:41:42.445770Z  INFO mlxcel::server::model_provider::model_worker: Model worker thread starting, loading model...
+2026-09-21T08:41:42.805458Z  INFO mlxcel::server::model_provider::model_worker: Model qwen3.5-4b-4bit loaded in 0.360s (resident after load: 0.00 GB) worker_model_id=qwen3.5-4b-4bit load_seconds=0.359663724 active_bytes=0 peak_bytes=0 cache_bytes=0 limit_bytes=124128085401
+2026-09-21T08:41:42.805538Z  INFO mlxcel::server::model_provider::model_worker: Starting BatchScheduler (max_batch_size=1, max_queue_depth=32, prefill_chunk_size=512, max_batch_prefill=4, decode_storage=auto, speculative=dflash (drafter=/home/inureyes/Development/mlxcel-wt-1935/models/mlx/qwen3.5-4b-dflash, block_size=3, block_size_from=operator override, explicit_kind=true))
+2026-09-21T08:41:42.805953Z  INFO mlxcel::server::model_provider::model_worker: Paged KV block budget: 3062487 blocks (32 layers, 32-token blocks)
+2026-09-21T08:41:42.805969Z  INFO mlxcel::server::model_provider::model_worker: Paged KV slab size: 256 blocks per layer (fused decode serves a layer only while its rows fit one slab)
+2026-09-21T08:41:42.805992Z  INFO mlxcel::server::batch::scheduler::paged_layout: resolved KV cache mode applied to model caches kv_cache_mode_effective=fp16 kv_cache_mode_applied_layers=32 kv_cache_mode_total_layers=32
+2026-09-21T08:41:44.599988Z  INFO mlxcel::models::speculative_exactness: MTP exactness probe passed: verify block is byte-identical to the single-token chain block_size=3
+2026-09-21T08:41:44.600018Z  INFO mlxcel::server::batch::speculative_burst: Lazy-loading drafter from /home/inureyes/Development/mlxcel-wt-1935/models/mlx/qwen3.5-4b-dflash (kind=Some(Dflash))
+2026-09-21T08:41:44.600398Z  INFO mlxcel::server::batch::speculative_burst: Drafter loaded (kind=dflash, 0 ms)
+2026-09-21T08:41:44.601321Z  INFO mlxcel_core::sampling_dispatch: sampling dispatch: argmax: greedy path (temperature 0, top_k 1); no sampling kernel involved
+2026-09-21T08:41:44.624265Z  INFO mlxcel::server::batch::dflash_target: DFlash diagnostics block_size=3 rounds=0 proposed_tokens=0 accepted_tokens=0 acceptance_rate=0.0 emitted_per_verify=0.0 zero_accept_rounds=0 partial_accept_rounds=0 full_accept_rounds=0 prefill_verify_ms=0.880893 first_bonus_ms=22.784719 first_hidden_ms=0.017792 bind_reset_ms=0.13232 draft_ms=0.0 verify_ms=0.0 target_argmax_sync_ms=0.0 logprobs_ms=0.0 walk_ms=0.0 hidden_concat_ms=0.0 rollback_ms=0.0 decode_ms=0.0
+2026-09-21T08:41:44.624358Z DEBUG mlxcel::server::batch::dflash_target: DFlash accept lengths accept_lens=[]
+2026-09-21T08:41:44.624631Z  INFO mlxcel::server::batch::speculative_burst: Speculative burst completed prompt_tokens=1 generated_tokens=1 burst_ms=1818
+2026-09-21T08:41:44.624642Z  INFO mlxcel::server::batch::scheduler::speculative_finalize: speculative B=1 burst finalized (burst_wall_ms is the max single-tick HOL stall on concurrent rows) seq_id=seq-0 burst_wall_ms=1818.431133 burst_active_ms=1818.431133 slices=1 tokens_generated=1 rounds=0 accepted_draft_tokens=0 hol_waiters=0
+2026-09-21T08:41:44.624725Z  INFO mlxcel::server::startup: Warmup complete
+2026-09-21T08:41:44.625112Z  INFO mlxcel::server::startup: model_type=Qwen35VLM: enabling native video_url content block support
+2026-09-21T08:41:44.626701Z  WARN mlxcel::server::startup: The loaded model accepts video input, but `ffmpeg` and `ffprobe` are not both on PATH, so every video request will be refused. The check is cached for the life of the process: restart the server after installing ffmpeg.
+2026-09-21T08:41:44.627519Z  INFO mlxcel::server::startup: Starting mlxcel server on http://127.0.0.1:18941
+2026-09-21T08:41:44.627526Z  INFO mlxcel::server::startup: Detected 1 GPU(s)
+2026-09-21T08:41:44.627529Z  INFO mlxcel::server::startup: CUDA compute capability 12.1 (sm_121); compiled for [121] (cubin)
+2026-09-21T08:41:44.627531Z  INFO mlxcel::server::startup: Endpoints:
+2026-09-21T08:41:44.627532Z  INFO mlxcel::server::startup:   POST /v1/chat/completions  - OpenAI chat completions
+2026-09-21T08:41:44.627534Z  INFO mlxcel::server::startup:   POST /v1/completions       - OpenAI text completions
+2026-09-21T08:41:44.627535Z  INFO mlxcel::server::startup:   GET  /v1/models            - List models
+2026-09-21T08:41:44.627536Z  INFO mlxcel::server::startup:   POST /completion           - llama-server native completion
+2026-09-21T08:41:44.627537Z  INFO mlxcel::server::startup:   POST /tokenize             - Tokenize text
+2026-09-21T08:41:44.627539Z  INFO mlxcel::server::startup:   POST /detokenize           - Detokenize tokens
+2026-09-21T08:41:44.627540Z  INFO mlxcel::server::startup:   GET  /props                - Server properties
+2026-09-21T08:41:44.627541Z  INFO mlxcel::server::startup:   GET  /slots                - Slot status
+2026-09-21T08:41:44.627543Z  INFO mlxcel::server::startup:   GET  /health               - Health check
+2026-09-21T08:41:51.453837Z  INFO mlxcel::server::batch::dflash_target: DFlash diagnostics block_size=3 rounds=97 proposed_tokens=194 accepted_tokens=102 acceptance_rate=0.5257731958762887 emitted_per_verify=2.051546391752577 zero_accept_rounds=36 partial_accept_rounds=20 full_accept_rounds=41 prefill_verify_ms=4.922623 first_bonus_ms=431.598634 first_hidden_ms=0.004944 bind_reset_ms=0.023808 draft_ms=2496.762945000001 verify_ms=226.62330500000002 target_argmax_sync_ms=2461.5770899999998 logprobs_ms=324.58313399999986 walk_ms=0.033024000000000005 hidden_concat_ms=0.14614399999999997 rollback_ms=30.258836000000006 decode_ms=5547.549276
+2026-09-21T08:41:51.453882Z DEBUG mlxcel::server::batch::dflash_target: DFlash accept lengths accept_lens=[0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 2, 0, 2, 1, 0, 2, 0, 0, 0, 2, 0, 1, 1, 0, 0, 2, 2, 2, 1, 2, 1, 2, 1, 1, 0, 0, 0, 0, 2, 2, 0, 1, 0, 0, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 2, 2, 0, 1, 1, 2, 2, 1, 0, 0, 0, 0, 1, 0, 0, 2, 1, 2, 0, 2, 0, 2, 2, 0, 2, 1, 0, 1, 2, 2, 2, 2, 2, 2, 2, 2]
+2026-09-21T08:41:51.454202Z  INFO mlxcel::server::batch::speculative_burst: Speculative burst completed prompt_tokens=158 generated_tokens=200 burst_ms=5984
+2026-09-21T08:41:51.454301Z  INFO mlxcel::server::batch::scheduler::speculative_finalize: speculative B=1 burst finalized (burst_wall_ms is the max single-tick HOL stall on concurrent rows) seq_id=seq-1 burst_wall_ms=5984.639332000001 burst_active_ms=5984.639332000001 slices=1 tokens_generated=200 rounds=0 accepted_draft_tokens=0 hol_waiters=0

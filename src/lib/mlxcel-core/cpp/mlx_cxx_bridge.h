@@ -73,6 +73,15 @@ void synchronize_stream(const MlxStream& stream);
 // threads.
 std::unique_ptr<MlxThreadLocalStream> new_thread_local_stream_gpu();
 
+// Process-wide thread-local stream handle on the GPU, created once and
+// shared by every generator. Each thread still resolves it to its own
+// stream, but repeated generators on one thread reuse that stream instead
+// of registering a new handle (and a new command queue) per generator.
+std::unique_ptr<MlxThreadLocalStream> shared_thread_local_stream_gpu();
+
+// Index of the MLX stream behind `stream` (stable identity for tests).
+int32_t stream_index(const MlxStream& stream);
+
 // Resolve the calling thread's `MlxStream` from a thread-local handle.
 //
 // Each calling thread receives its own `mlx::core::Stream` for the
@@ -424,6 +433,14 @@ void random_seed(uint64_t seed);
 void set_qmv_wide(bool enabled);
 bool qmv_wide_enabled();
 
+// Override MLX's per-command-buffer input budget (MLX_MAX_MB_PER_BUFFER) for
+// work encoded from now on; 0 restores the device default. Lives in the
+// mlx/backend/metal/device.cpp overlay. mlxcel raises it around decode steps
+// only, because the same budget during prefill multiplies peak memory. Inert,
+// and reads back 0, on a build without the Metal backend.
+void set_metal_mb_per_buffer_override(int32_t mb);
+int32_t metal_mb_per_buffer_override();
+
 // Random categorical sampling
 std::unique_ptr<MlxArray> random_categorical(const MlxArray& logits, int32_t axis);
 
@@ -536,6 +553,29 @@ std::unique_ptr<MlxArray> compiled_gelu_topk(
 std::unique_ptr<MlxArray> compiled_swiglu_activation(
     const MlxArray& gate,
     const MlxArray& x
+);
+
+// Residual add fused with the next LayerNorm, one Metal launch:
+// x_out = (a + b) + x, h_out = layer_norm(x_out, weight, bias). Byte-identical to
+// compiled_add3 followed by fast::layer_norm. Metal only, D <= 6656; the Rust
+// wrapper (layers::residual_add3_layer_norm) checks that. Used by: Cohere2
+void fused_add3_layer_norm(
+    const MlxArray& a,
+    const MlxArray& b,
+    const MlxArray& x,
+    const MlxArray& weight,
+    const MlxArray* bias,
+    float eps,
+    std::unique_ptr<MlxArray>& x_out,
+    std::unique_ptr<MlxArray>& h_out
+);
+
+// Three-way add (a + b) + c compiled into one fused kernel (shapeless=true).
+// Byte-identical to two chained adds. Used by: Cohere2
+std::unique_ptr<MlxArray> compiled_add3(
+    const MlxArray& a,
+    const MlxArray& b,
+    const MlxArray& c
 );
 
 // GptOss SwiGLU activation only - compiled with kernel fusion (shapeless=true)

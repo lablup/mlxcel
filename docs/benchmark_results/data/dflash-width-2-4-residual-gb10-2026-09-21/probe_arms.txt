@@ -1,0 +1,22 @@
+=== ARM 3: speculative against classic at ONE ROW, logit BYTES ===
+[1935] prefill last row: 0 of 496640 logit bytes differ
+[1935] prefill: every layer's cache state is byte-identical
+[1935] step 0: 0 of 496640 logit bytes differ
+[1935] step 50: 0 of 496640 logit bytes differ
+[1935] step 100: 0 of 496640 logit bytes differ
+[1935] step 150: 0 of 496640 logit bytes differ
+[1935] 0 of 200 one-row steps differ, first at -1 (-1 means none), worst 0 bytes
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8634 filtered out; finished in 10.38s
+=== ARM 1: replay the served width-4 round structure, no drafter ===
+[1935] capture layers [1, 8, 15, 22, 29], block argmax false
+[1935] rejected rows carry the wrong token id 9999
+[1935] 79 rounds, 56 rollbacks; greedy argmax over 201 compared positions: 1 disagree, first at 105 (-1 means none)
+[1935] at position 105: classic 11439 against burst 5741
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8634 filtered out; finished in 8.05s
+=== ARM 2: the served burst wrapper with the real drafter ===
+[1935] models/mlx/qwen3.5-4b-4bit + models/mlx/qwen3.5-4b-dflash, block 4: burst emitted 200 ids against 200 reference; 95 disagree over 200 compared, first at 105 (-1 means none)
+[1935] around 105: reference [11, 198, 262, 11439, 198, 262, 5741] against burst [11, 198, 262, 5741, 25, 8132, 12385]
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8634 filtered out; finished in 12.98s
+ALL PROBES DONE
+
+[exited with code 0]
