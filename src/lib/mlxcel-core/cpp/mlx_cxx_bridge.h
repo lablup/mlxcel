@@ -2418,6 +2418,14 @@ void fused_rope_qk_append(
 // (issue #905). False on a CPU-only build.
 bool fused_rope_qk_append_available();
 
+// Wraps `mlxcel::turbo::inplace_slice_write` (#1959): `dst` with `rows` written
+// at `start`, sharing `dst`'s buffer instead of copying it. See
+// `src/lib/mlx-cpp/turbo/kv_inplace_write.h` for when that is sound.
+std::unique_ptr<MlxArray> inplace_slice_write(
+    const MlxArray& dst,
+    const MlxArray& rows,
+    rust::Slice<const int32_t> start);
+
 // Opaque holder for weights loaded via MLX's native load_safetensors().
 // Arrays are lazy — MLX manages the mmap internally, no eager copy needed.
 struct MlxLoadedWeights {

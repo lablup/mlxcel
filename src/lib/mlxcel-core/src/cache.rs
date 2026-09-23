@@ -147,6 +147,13 @@ fn direct_prefill_cache_store_enabled() -> bool {
     std::env::var("MLXCEL_ENABLE_DIRECT_PREFILL_CACHE_STORE").is_ok()
 }
 
+/// EXPERIMENT (#1959): `MLXCEL_KV_INPLACE_WRITE` routes the FP16 decode row
+/// write through `inplace_slice_write`. Not yet safe for shared buffers.
+fn kv_inplace_write_experiment() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("MLXCEL_KV_INPLACE_WRITE").is_some())
+}
+
 /// DIAGNOSTIC ONLY, output is wrong while it is set:
 /// `MLXCEL_DIAG_SKIP_DECODE_KV_WRITE` makes a single-token FP16 decode step
 /// skip writing its K/V row and attend over the cache as it stood, so a decode
@@ -992,6 +999,23 @@ impl KVCache {
 
         self.offset += new_seq_len;
         let live_len = self.buffer_idx();
+
+        // EXPERIMENT (#1959): write the decode row in place instead of the
+        // copying slice_update.
+        if new_seq_len == 1 && kv_inplace_write_experiment() && ffi::default_device_is_gpu() {
+            let start = [0, 0, prev, 0];
+            self.keys = Some(ffi::inplace_slice_write(
+                self.keys.as_ref().unwrap(),
+                &new_keys,
+                &start,
+            ));
+            self.values = Some(ffi::inplace_slice_write(
+                self.values.as_ref().unwrap(),
+                &new_values,
+                &start,
+            ));
+            return;
+        }
 
         let k_shape = ffi::array_shape(self.keys.as_ref().unwrap());
         let v_shape = ffi::array_shape(self.values.as_ref().unwrap());
