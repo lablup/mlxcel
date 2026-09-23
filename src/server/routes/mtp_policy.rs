@@ -96,16 +96,15 @@ pub struct MtpPolicyResponse {
     pub target: Option<String>,
     /// Draft model directory basename.
     pub drafter: Option<String>,
-    /// Coarse hardware-class label, e.g. `"M5-16c"`. Apple-specific by
-    /// construction, so it is `"Unknown-0c"` on every non-Apple host and does
-    /// not distinguish an NVIDIA one from an AMD one. Read `gpu_vendor` and
-    /// `gpu_device` for that.
+    /// Coarse hardware-class label that keys the persisted verdict, e.g.
+    /// `"M5-16c"` on Apple and `"cuda-Unknown-0c"` / `"rocm-gfx1151-Unknown-0c"`
+    /// off Apple (issue #1887). Read `gpu_vendor` for the serving-host vendor
+    /// tag, which is reported separately and is not the cache key.
     pub hardware: Option<String>,
     /// GPU vendor of the serving host: `"Apple"`, `"Nvidia"`, `"Amd"` or
-    /// `"Unknown"` (issue #1805). Reported separately from `hardware` rather
-    /// than folded into it, because that label is also a persisted policy cache
-    /// key and widening it would discard every profile recorded under the old
-    /// spelling.
+    /// `"Unknown"` (issue #1805). Host identity; not the pairing-key label in
+    /// `hardware`, which since #1887 already names the backend so CUDA and
+    /// ROCm do not share a cache entry.
     pub gpu_vendor: String,
     /// Device name as the backend reports it, e.g. `"AMD Radeon 8060S
     /// Graphics"`, or `null` when the backend publishes none.
