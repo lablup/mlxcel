@@ -178,7 +178,16 @@ impl Cohere2Attention {
         let (cache_k, cache_v) = cache.update_and_fetch(k, v);
 
         // Scaled dot-product attention
-        let attn_out = if l > 1 {
+        let k_len = mlxcel_core::array_shape(&cache_k)[2];
+        let attn_out = if l > 1 && (self.window_size == 0 || k_len <= self.window_size) {
+            // Prefill whose every live key is visible to the window: the
+            // global layers always, a sliding layer until the cache outgrows
+            // its window. The prefill mask is then plain bottom-right causal,
+            // so take MLX's maskless causal SDPA mode instead of reading an
+            // `(l, k_len)` mask array. mlx-lm passes `"causal"` in the same
+            // case (`create_attention_mask` for `N <= window_size`).
+            mlxcel_core::causal_attention(&q, &cache_k, &cache_v, self.scale, 0.0, 0)
+        } else if l > 1 {
             // Prefill: use mask. A sliding-window layer's mask is either the
             // clamped `(l, window_size)` mask or the full `(l, k_len)` mask for
             // a fresh single-pass prefill that exceeds the window (issue #408).
@@ -187,7 +196,6 @@ impl Cohere2Attention {
             // every key, a clamped mask drops the oldest. Mirrors
             // `causal_attention`'s internal handling.
             let k_shape = mlxcel_core::array_shape(&cache_k);
-            let k_len = k_shape[2];
             let mask_klen = mask
                 .map(|m| *mlxcel_core::array_shape(m).last().unwrap_or(&k_len))
                 .unwrap_or(k_len);
