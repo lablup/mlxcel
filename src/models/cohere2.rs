@@ -21,6 +21,7 @@
 //! - Parallel attention + MLP (both on same normalized input)
 //! - Logit scaling
 
+use mlxcel_core::cache::SequenceId;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{FusedQKVLinear, KVCache, LayerNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask_dense};
@@ -457,15 +458,20 @@ impl Cohere2Model {
         h
     }
 
-    /// Forward pass through the entire model
-    pub fn forward_impl(
+    /// Embeddings (or the caller's precomputed ones), every transformer layer,
+    /// and the final norm: the normalized hidden state `[B, L, hidden]` the LM
+    /// head consumes.
+    fn hidden_states(
         &self,
         input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
         caches: &mut [KVCache],
-        _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        // Embed tokens
-        let h = self.embed_tokens.forward(input_ids);
+        let h = if let Some(embeds) = input_embeddings {
+            mlxcel_core::copy(embeds)
+        } else {
+            self.embed_tokens.forward(input_ids)
+        };
         let shape = mlxcel_core::array_shape(&h);
         let l = shape[1] as usize;
 
@@ -501,15 +507,48 @@ impl Cohere2Model {
         };
 
         // Transformer layers and the final norm.
-        let h = self.decoder_stack(h, caches, full_mask.as_deref(), sliding_mask.as_deref());
+        self.decoder_stack(h, caches, full_mask.as_deref(), sliding_mask.as_deref())
+    }
 
-        // Output projection
-        let logits = self.lm_head.forward(&h);
-
-        // Apply logit scaling
+    /// LM head and logit scaling over normalized hidden states.
+    fn logits_from_hidden(&self, h: &MlxArray) -> UniquePtr<MlxArray> {
+        let logits = self.lm_head.forward(h);
         let scale_arr =
             mlxcel_core::full_f32(&[1], self.logit_scale, mlxcel_core::array_dtype(&logits));
         mlxcel_core::multiply(&logits, &scale_arr)
+    }
+
+    /// Logits `[B, 1, vocab]` for position `last_pos` only.
+    ///
+    /// A prefill samples one position, so this slices the hidden state before
+    /// the LM head instead of projecting every prompt row through the tied
+    /// 256k-vocabulary head and the logit scale and then keeping one row. At
+    /// 512 prompt tokens that skips about 1 TFLOP and two `[512, 256000]`
+    /// buffers, and it matches mlx-lm, which evaluates only the cache for
+    /// `prompt[:-1]` and computes logits for the last token alone.
+    fn last_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        let h = self.hidden_states(input_ids, input_embeddings, caches);
+        let shape = mlxcel_core::array_shape(&h);
+        let pos = last_pos as i32;
+        let row = mlxcel_core::slice(&h, &[0, pos, 0], &[shape[0], pos + 1, shape[2]]);
+        self.logits_from_hidden(&row)
+    }
+
+    /// Forward pass through the entire model
+    pub fn forward_impl(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let h = self.hidden_states(input_ids, None, caches);
+        self.logits_from_hidden(&h)
     }
 
     /// Get token embeddings (for VLM merge)
@@ -525,49 +564,8 @@ impl Cohere2Model {
         caches: &mut [KVCache],
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        let h = if let Some(embeds) = input_embeddings {
-            mlxcel_core::copy(embeds)
-        } else {
-            self.embed_tokens.forward(input_ids)
-        };
-        let shape = mlxcel_core::array_shape(&h);
-        let l = shape[1] as usize;
-
-        let (full_mask, sliding_mask) = if l > 1 {
-            // Size the prefill masks from the cache's live window
-            // (`live_len() = offset - live_start`), not the monotonic
-            // `offset`. Under `--max-kv-size`, `trim_front` slices the buffer
-            // to the live window and advances `live_start` while `offset`
-            // keeps growing to preserve the RoPE relative positions, so
-            // `update_and_fetch` returns only `live_len` keys. A mask sized
-            // from `offset` would be wider than the returned K/V and break the
-            // attention broadcast. With no trim (`live_start == 0`),
-            // `live_len == offset`, so this is byte-identical to the untrimmed
-            // path. See issue #419.
-            let ga_live_len = caches[self.ga_idx].live_len();
-            let swa_live_len = caches[self.swa_idx].live_len();
-
-            let full = Some(create_causal_mask(l as i32, ga_live_len));
-            // Dense `KVCache` keeps every key in the live window, so the
-            // prefill mask is the full windowed-causal mask over the retained
-            // (live) keys; the attention layer slices K/V to the mask's key
-            // axis. The window is enforced by the mask, not by dropping keys.
-            // See issues #408, #413, #419.
-            let sliding = Some(create_sliding_window_prefill_mask_dense(
-                l as i32,
-                swa_live_len,
-                self.config.sliding_window as i32,
-            ));
-            (full, sliding)
-        } else {
-            (None, None)
-        };
-
-        let h = self.decoder_stack(h, caches, full_mask.as_deref(), sliding_mask.as_deref());
-        let logits = self.lm_head.forward(&h);
-        let scale_arr =
-            mlxcel_core::full_f32(&[1], self.logit_scale, mlxcel_core::array_dtype(&logits));
-        mlxcel_core::multiply(&logits, &scale_arr)
+        let h = self.hidden_states(input_ids, input_embeddings, caches);
+        self.logits_from_hidden(&h)
     }
 
     /// Load model from directory
@@ -669,6 +667,39 @@ impl LanguageModel for Cohere2Model {
         self.forward_with_embeddings_impl(input_ids, input_embeddings, caches, mask)
     }
 
+    fn forward_last_logits(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.last_logits(input_ids, None, caches, last_pos)
+    }
+
+    fn forward_last_logits_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        _seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.last_logits(input_ids, None, caches, last_pos)
+    }
+
+    fn forward_last_logits_with_embeddings_and_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.last_logits(input_ids, input_embeddings, caches, last_pos)
+    }
+
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {
         Some(self.get_embed_tokens(input_ids))
     }
@@ -689,3 +720,7 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
         .map(|w| mlxcel_core::copy(w))
         .ok_or_else(|| format!("Weight not found: {}", name))
 }
+
+#[cfg(test)]
+#[path = "cohere2_tests.rs"]
+mod tests;
