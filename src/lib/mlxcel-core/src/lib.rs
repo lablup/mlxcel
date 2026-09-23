@@ -1539,6 +1539,13 @@ mod ffi {
         /// (issue #905). False on a CPU-only build.
         fn fused_rope_qk_append_available() -> bool;
 
+        /// A second handle to the same MLX array node: same id, same
+        /// buffer, nothing copied or evaluated.
+        fn array_handle_clone(a: &MlxArray) -> UniquePtr<MlxArray>;
+
+        /// Whether two handles refer to the same MLX array node.
+        fn array_same_handle(a: &MlxArray, b: &MlxArray) -> bool;
+
         /// `dst` with `rows` written at `start`, sharing `dst`'s buffer
         /// instead of copying it (#1959). Sound only when no reader of `dst`
         /// needs the written region's old contents and the caller owns the

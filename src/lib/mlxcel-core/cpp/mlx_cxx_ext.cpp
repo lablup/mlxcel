@@ -346,6 +346,14 @@ bool fused_rope_qk_append_available() {
     return mlxcel::turbo::fused_rope_qk_append_available();
 }
 
+std::unique_ptr<MlxArray> array_handle_clone(const MlxArray& a) {
+    return std::make_unique<MlxArray>(a.inner);
+}
+
+bool array_same_handle(const MlxArray& a, const MlxArray& b) {
+    return a.inner.id() == b.inner.id();
+}
+
 // In-place KV row write (#1959). Implementation in
 // `src/lib/mlx-cpp/turbo/kv_inplace_write.cpp`.
 std::unique_ptr<MlxArray> inplace_slice_write(

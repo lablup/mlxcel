@@ -2421,6 +2421,12 @@ bool fused_rope_qk_append_available();
 // Wraps `mlxcel::turbo::inplace_slice_write` (#1959): `dst` with `rows` written
 // at `start`, sharing `dst`'s buffer instead of copying it. See
 // `src/lib/mlx-cpp/turbo/kv_inplace_write.h` for when that is sound.
+// A second handle to the same MLX array node (same id, same buffer; no copy).
+std::unique_ptr<MlxArray> array_handle_clone(const MlxArray& a);
+
+// Whether two handles refer to the same MLX array node.
+bool array_same_handle(const MlxArray& a, const MlxArray& b);
+
 std::unique_ptr<MlxArray> inplace_slice_write(
     const MlxArray& dst,
     const MlxArray& rows,
