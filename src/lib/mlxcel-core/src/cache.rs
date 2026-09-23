@@ -3033,10 +3033,11 @@ impl KVCache {
             return self.update_and_fetch_paged(&new_keys, &new_values);
         }
 
-        if ffi::array_shape(&new_keys)[2] == 1
+        // Cached flag first, so the default path pays nothing for the check.
+        if diag_skip_decode_kv_write()
             && self.mode == KVCacheMode::Fp16
             && self.keys.is_some()
-            && diag_skip_decode_kv_write()
+            && ffi::array_shape(&new_keys)[2] == 1
         {
             return self.live_window_without_write();
         }
