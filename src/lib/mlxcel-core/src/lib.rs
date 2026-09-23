@@ -56,6 +56,13 @@ mod ffi {
         /// thread gets its own `MlxStream` on first resolution.
         fn new_thread_local_stream_gpu() -> UniquePtr<MlxThreadLocalStream>;
 
+        /// Process-wide GPU thread-local stream handle, created once and
+        /// shared by every caller; each thread still resolves its own stream.
+        fn shared_thread_local_stream_gpu() -> UniquePtr<MlxThreadLocalStream>;
+
+        /// Index of the MLX stream behind `stream`.
+        fn stream_index(stream: &MlxStream) -> i32;
+
         /// Resolve the calling thread's `MlxStream` from a TLS handle.
         fn stream_from_thread_local_stream(tls: &MlxThreadLocalStream) -> UniquePtr<MlxStream>;
 

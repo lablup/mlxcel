@@ -38,7 +38,7 @@ use crate::loop_detection::{LoopDetectionConfig, detect_repetition_loop};
 use crate::sampling::{
     SamplerState, TokenBiasMap, sample_token_optimized, sample_token_optimized_with_state,
 };
-use crate::streams::{install_thread_local_default_stream, new_thread_local_generation_stream};
+use crate::streams::{install_thread_local_default_stream, shared_thread_local_generation_stream};
 use crate::utils::{align_to_na_tile, create_padded_prefill_mask};
 use cxx::UniquePtr;
 
@@ -1469,7 +1469,7 @@ impl CxxGenerator {
         Self {
             caches: (0..num_layers).map(|_| KVCache::new()).collect(),
             generated_tokens: Vec::new(),
-            generation_stream: new_thread_local_generation_stream(),
+            generation_stream: shared_thread_local_generation_stream(),
             kv_cache_mode: KVCacheMode::Fp16,
             token_bias: TokenBiasMap::default(),
         }
@@ -1500,7 +1500,7 @@ impl CxxGenerator {
                 .map(KVCache::new_with_mode)
                 .collect(),
             generated_tokens: Vec::new(),
-            generation_stream: new_thread_local_generation_stream(),
+            generation_stream: shared_thread_local_generation_stream(),
             kv_cache_mode,
             token_bias: TokenBiasMap::default(),
         }
