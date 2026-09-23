@@ -288,8 +288,15 @@ impl BatchScheduler {
     pub(super) fn run_decode_tick(&mut self, seq_ids: &[SequenceId]) {
         let params = self.lookahead_params(seq_ids);
 
+        // The raised command-buffer input budget (`DecodeCommandBufferBudget`)
+        // is applied only around pipelined work, where step n+1 is encoded
+        // while the GPU still runs step n. A synchronous step encodes and then
+        // waits, so one large buffer there removes the CPU-encode / GPU-execute
+        // overlap inside the step: on M1 Ultra, command-r7b sync decode went
+        // from a steady 98-102 tok/s to 68-100 with the budget raised.
         match self.decode_lookahead.take() {
             Some(la) if la.ids == seq_ids && params.is_some() && self.lookahead_safe() => {
+                let _decode_budget = mlxcel_core::DecodeCommandBufferBudget::enter();
                 self.pipelined_steady_decode(la, seq_ids, &params.unwrap());
             }
             Some(la) => {
@@ -299,10 +306,12 @@ impl BatchScheduler {
                 self.apply_lookahead_trim(&la.ids, lookahead_teardown_positions(false));
                 drop(la);
                 self.dispatch_sync_decode(seq_ids);
+                let _decode_budget = mlxcel_core::DecodeCommandBufferBudget::enter();
                 self.maybe_prime_lookahead(seq_ids);
             }
             None => {
                 self.dispatch_sync_decode(seq_ids);
+                let _decode_budget = mlxcel_core::DecodeCommandBufferBudget::enter();
                 self.maybe_prime_lookahead(seq_ids);
             }
         }

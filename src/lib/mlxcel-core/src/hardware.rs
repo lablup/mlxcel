@@ -386,6 +386,104 @@ pub fn apply_metal_ops_per_buffer_default() {
     }
 }
 
+/// The per-command-buffer input budget to use during decode steps on an Apple
+/// Silicon class, or `None` to leave decode on MLX's device default.
+///
+/// MLX commits a Metal command buffer when either its op count passes
+/// `MLX_MAX_OPS_PER_BUFFER` or its input budget passes `MLX_MAX_MB_PER_BUFFER`
+/// (`command_buffer_needs_commit` in `mlx/backend/metal/device.cpp`). The budget
+/// is not bytes: MLX sums `array::data_size()`, an element count, over the
+/// distinct input arrays and compares `count >> 20` against the cap, which it
+/// defaults to 40-50 per device class. Once [`metal_ops_per_buffer_default`]
+/// lifts the op cap to 1000, the input budget is the one that binds during
+/// decode, because every token reads the whole weight set: a 4-bit 7B model
+/// packs its weights into about 1.1G `u32` elements, so the default 50 commits a
+/// buffer every one to two layers (about 23 per token on command-r7b), and each
+/// commit leaves the GPU idle for tens of microseconds before the next buffer
+/// starts. A bf16 checkpoint counts eight times as many elements per layer and
+/// commits more often still.
+///
+/// Measured on M1 Ultra, 500-token prompt, 128 generated tokens, three
+/// interleaved runs per cell, decode at MLX's default versus 1000: command-r7b
+/// 4-bit +7%, Llama 3.1 8B 4-bit +5.6%, Qwen2.5 7B 4-bit +8%, Gemma 3n E4B +3%,
+/// Granite 4.0 H Tiny +10%, Qwen3-30B-A3B +20%, Mixtral 8x7B +21%, Llama 3.1
+/// 8B bf16 +17%, Gemma 3 4B flat. See
+/// docs/benchmark_results/metal-mb-per-buffer-m1ultra-2026-09-21.md.
+///
+/// The value applies to decode only. The same budget during prefill keeps a
+/// whole prompt's activations alive until the buffer completes: at 1000 the
+/// peak for a 2048-token prompt went from 6.0 to 12.6 GB on Qwen2.5 7B and from
+/// 19.8 to 36.2 GB on Qwen3-30B-A3B, and prefill throughput lost up to 2.7%.
+/// [`crate::DecodeCommandBufferBudget`] applies it around pipelined decode only
+/// (the generate loops and the server's lookahead decode) and leaves prefill
+/// and synchronous decode steps on the device default: a step that encodes
+/// and then waits loses its CPU-encode / GPU-execute overlap in one large
+/// buffer.
+///
+/// Gated like [`metal_ops_per_buffer_default`]: the input budget only binds
+/// once the op cap is raised, which happens only on M1 through M4. M5+ was not
+/// measured and keeps MLX's default in both phases.
+#[must_use]
+pub fn metal_decode_mb_per_buffer_default(
+    r#gen: AppleSiliconGen,
+    has_neural_accelerator: bool,
+) -> Option<u32> {
+    metal_ops_per_buffer_default(r#gen, has_neural_accelerator).map(|_| 1000)
+}
+
+/// Environment variable that sets the decode-step input budget explicitly.
+/// `0`, `off`, `false` or `no` disables the decode switch; a positive integer
+/// replaces the hardware default. Ignored when `MLX_MAX_MB_PER_BUFFER` is set.
+pub const DECODE_MB_PER_BUFFER_ENV: &str = "MLXCEL_DECODE_MB_PER_BUFFER";
+
+/// Resolve the decode-step input budget from the two environment variables
+/// and the hardware default. Pure, so the precedence is unit-testable.
+///
+/// An operator-set `MLX_MAX_MB_PER_BUFFER` wins over everything: it pins the
+/// budget for prefill and decode alike, and a decode-only switch on top of it
+/// would silently override the value the operator chose. Otherwise
+/// `MLXCEL_DECODE_MB_PER_BUFFER` decides, and an unparseable value falls back
+/// to the hardware default.
+#[must_use]
+pub fn resolve_decode_mb_per_buffer(
+    mlx_max_mb_per_buffer: Option<&str>,
+    decode_override: Option<&str>,
+    hardware_default: Option<u32>,
+) -> Option<u32> {
+    if mlx_max_mb_per_buffer.is_some() {
+        return None;
+    }
+    let Some(value) = decode_override.map(str::trim).filter(|v| !v.is_empty()) else {
+        return hardware_default;
+    };
+    if matches!(
+        value.to_ascii_lowercase().as_str(),
+        "0" | "off" | "false" | "no"
+    ) {
+        return None;
+    }
+    value
+        .parse::<u32>()
+        .ok()
+        .filter(|n| *n > 0)
+        .or(hardware_default)
+}
+
+/// The decode-step input budget for this process, resolved once. See
+/// [`metal_decode_mb_per_buffer_default`] and [`resolve_decode_mb_per_buffer`].
+#[must_use]
+pub fn decode_mb_per_buffer() -> Option<u32> {
+    static CACHED: OnceLock<Option<u32>> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let hw = get_hardware();
+        resolve_decode_mb_per_buffer(
+            std::env::var("MLX_MAX_MB_PER_BUFFER").ok().as_deref(),
+            std::env::var(DECODE_MB_PER_BUFFER_ENV).ok().as_deref(),
+            metal_decode_mb_per_buffer_default(hw.silicon_gen, hw.has_neural_accelerator),
+        )
+    })
+}
+
 /// The `MLX_CUDA_GRAPH_CACHE_SIZE` default to apply on a CUDA build, or `None`
 /// off CUDA.
 ///
@@ -1151,6 +1249,78 @@ mod tests {
         assert_eq!(
             metal_ops_per_buffer_default(AppleSiliconGen::Unknown, false),
             None
+        );
+    }
+
+    #[test]
+    fn decode_mb_per_buffer_default_follows_the_ops_default_gate() {
+        // The input budget only binds once the op cap is raised, so the two
+        // defaults must apply on exactly the same hardware. Decoupling them
+        // would either leave M1-M4 decode committing a buffer every layer or
+        // raise the budget where nothing was measured (M5+, non-Apple).
+        for (r#gen, na) in [
+            (AppleSiliconGen::M1, false),
+            (AppleSiliconGen::M2, false),
+            (AppleSiliconGen::M3, false),
+            (AppleSiliconGen::M4, false),
+            (AppleSiliconGen::M5, true),
+            (AppleSiliconGen::Unknown, false),
+        ] {
+            let ops = metal_ops_per_buffer_default(r#gen, na);
+            let mb = metal_decode_mb_per_buffer_default(r#gen, na);
+            assert_eq!(ops.is_some(), mb.is_some(), "{gen:?} na={na}");
+        }
+        assert_eq!(
+            metal_decode_mb_per_buffer_default(AppleSiliconGen::M1, false),
+            Some(1000)
+        );
+    }
+
+    #[test]
+    fn operator_mlx_max_mb_per_buffer_disables_the_decode_switch() {
+        // An explicit MLX_MAX_MB_PER_BUFFER pins both phases; the decode switch
+        // must not override it, whatever MLXCEL_DECODE_MB_PER_BUFFER says.
+        assert_eq!(
+            resolve_decode_mb_per_buffer(Some("50"), None, Some(1000)),
+            None
+        );
+        assert_eq!(
+            resolve_decode_mb_per_buffer(Some("50"), Some("2000"), Some(1000)),
+            None
+        );
+    }
+
+    #[test]
+    fn decode_mb_per_buffer_env_overrides_and_disables() {
+        assert_eq!(
+            resolve_decode_mb_per_buffer(None, None, Some(1000)),
+            Some(1000)
+        );
+        assert_eq!(resolve_decode_mb_per_buffer(None, None, None), None);
+        assert_eq!(
+            resolve_decode_mb_per_buffer(None, Some("400"), Some(1000)),
+            Some(400)
+        );
+        // An explicit value applies even where the hardware default is off.
+        assert_eq!(
+            resolve_decode_mb_per_buffer(None, Some("400"), None),
+            Some(400)
+        );
+        for off in ["0", "off", "OFF", "false", "no", " 0 "] {
+            assert_eq!(
+                resolve_decode_mb_per_buffer(None, Some(off), Some(1000)),
+                None,
+                "{off}"
+            );
+        }
+        // Unparseable or empty falls back to the hardware default.
+        assert_eq!(
+            resolve_decode_mb_per_buffer(None, Some("lots"), Some(1000)),
+            Some(1000)
+        );
+        assert_eq!(
+            resolve_decode_mb_per_buffer(None, Some(""), Some(1000)),
+            Some(1000)
         );
     }
 

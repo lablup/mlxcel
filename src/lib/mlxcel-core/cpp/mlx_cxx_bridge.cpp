@@ -33,6 +33,12 @@ namespace mlx::core {
 void mlxcel_set_qmv_wide(bool enabled);
 bool mlxcel_qmv_wide(void);
 } // namespace mlx::core
+// Defined by the mlx/backend/metal/device.cpp overlay: the per-command-buffer
+// input budget override that mlxcel raises around decode steps.
+namespace mlx::core::metal {
+void mlxcel_set_mb_per_buffer_override(int mb);
+int mlxcel_mb_per_buffer_override();
+} // namespace mlx::core::metal
 #endif
 
 namespace mlx_cxx {
@@ -1341,6 +1347,23 @@ void set_qmv_wide(bool) {}
 
 bool qmv_wide_enabled() {
     return true;
+}
+#endif
+
+#ifdef MLXCEL_BRIDGE_METAL_BACKEND
+void set_metal_mb_per_buffer_override(int32_t mb) {
+    ::mlx::core::metal::mlxcel_set_mb_per_buffer_override(mb);
+}
+
+int32_t metal_mb_per_buffer_override() {
+    return ::mlx::core::metal::mlxcel_mb_per_buffer_override();
+}
+#else
+// No Metal command buffers to size: the override is inert and reads as unset.
+void set_metal_mb_per_buffer_override(int32_t) {}
+
+int32_t metal_mb_per_buffer_override() {
+    return 0;
 }
 #endif
 

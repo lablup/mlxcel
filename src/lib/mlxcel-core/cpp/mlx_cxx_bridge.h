@@ -424,6 +424,14 @@ void random_seed(uint64_t seed);
 void set_qmv_wide(bool enabled);
 bool qmv_wide_enabled();
 
+// Override MLX's per-command-buffer input budget (MLX_MAX_MB_PER_BUFFER) for
+// work encoded from now on; 0 restores the device default. Lives in the
+// mlx/backend/metal/device.cpp overlay. mlxcel raises it around decode steps
+// only, because the same budget during prefill multiplies peak memory. Inert,
+// and reads back 0, on a build without the Metal backend.
+void set_metal_mb_per_buffer_override(int32_t mb);
+int32_t metal_mb_per_buffer_override();
+
 // Random categorical sampling
 std::unique_ptr<MlxArray> random_categorical(const MlxArray& logits, int32_t axis);
 
