@@ -73,6 +73,15 @@ void synchronize_stream(const MlxStream& stream);
 // threads.
 std::unique_ptr<MlxThreadLocalStream> new_thread_local_stream_gpu();
 
+// Process-wide thread-local stream handle on the GPU, created once and
+// shared by every generator. Each thread still resolves it to its own
+// stream, but repeated generators on one thread reuse that stream instead
+// of registering a new handle (and a new command queue) per generator.
+std::unique_ptr<MlxThreadLocalStream> shared_thread_local_stream_gpu();
+
+// Index of the MLX stream behind `stream` (stable identity for tests).
+int32_t stream_index(const MlxStream& stream);
+
 // Resolve the calling thread's `MlxStream` from a thread-local handle.
 //
 // Each calling thread receives its own `mlx::core::Stream` for the

@@ -213,6 +213,17 @@ std::unique_ptr<MlxThreadLocalStream> new_thread_local_stream_gpu() {
         mlx::core::new_thread_local_stream(mlx::core::Device::gpu));
 }
 
+std::unique_ptr<MlxThreadLocalStream> shared_thread_local_stream_gpu() {
+    // Function-local static: initialized once, thread-safe (C++11).
+    static const mlx::core::ThreadLocalStream shared =
+        mlx::core::new_thread_local_stream(mlx::core::Device::gpu);
+    return std::make_unique<MlxThreadLocalStream>(shared);
+}
+
+int32_t stream_index(const MlxStream& stream) {
+    return static_cast<int32_t>(stream.inner.index);
+}
+
 std::unique_ptr<MlxStream> stream_from_thread_local_stream(const MlxThreadLocalStream& tls) {
     return std::make_unique<MlxStream>(mlx::core::stream_from_thread_local_stream(tls.inner));
 }
