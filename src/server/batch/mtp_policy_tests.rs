@@ -579,6 +579,183 @@ fn policy_key_hash_is_stable_and_distinct() {
     assert_eq!(a.hash().len(), 16, "16 hex chars");
 }
 
+fn hardware_caps(
+    vendor: mlxcel_core::hardware::GpuVendor,
+    silicon_gen: mlxcel_core::hardware::AppleSiliconGen,
+    gpu_core_count: u32,
+    device_architecture: Option<&str>,
+) -> mlxcel_core::hardware::HardwareCapabilities {
+    mlxcel_core::hardware::HardwareCapabilities {
+        vendor,
+        silicon_gen,
+        gpu_core_count,
+        device_architecture: device_architecture.map(str::to_string),
+        ..Default::default()
+    }
+}
+
+fn key_for_hardware(hw: &mlxcel_core::hardware::HardwareCapabilities) -> PolicyKey {
+    PolicyKey::new("t".into(), "d".into(), hardware_label_for(hw), 4)
+}
+
+/// Apple-host labels stay on the pre-#1887 spelling so existing Apple profiles
+/// keep loading. The generation-plus-core form is the #165 discriminator;
+/// changing it here would silently orphan every Apple hint file.
+#[test]
+fn apple_hardware_label_keeps_generation_core_spelling() {
+    use mlxcel_core::hardware::{AppleSiliconGen, GpuVendor};
+    let m5 = hardware_caps(GpuVendor::Apple, AppleSiliconGen::M5, 16, None);
+    // Architecture on Apple must not leak into the label: detection on macOS
+    // does not publish one, and a future probe must not invalidate the cache.
+    let m1 = hardware_caps(GpuVendor::Apple, AppleSiliconGen::M1, 20, Some("ignored"));
+    assert_eq!(hardware_label_for(&m5), "M5-16c");
+    assert_eq!(hardware_label_for(&m1), "M1-20c");
+}
+
+#[test]
+fn apple_unknown_generation_keeps_existing_hint() {
+    use mlxcel_core::hardware::{AppleSiliconGen, GpuVendor};
+    let dir = unique_temp_dir("apple-unknown-generation");
+    let store = PolicyStore::with_dir(Some(dir.clone()));
+    let old = PolicyKey::new("t".into(), "d".into(), "Unknown-0c".into(), 4);
+    store
+        .save(&PolicyHint::new(&old, Verdict::Enable, 0.75, 4))
+        .unwrap();
+    let apple = key_for_hardware(&hardware_caps(
+        GpuVendor::Apple,
+        AppleSiliconGen::Unknown,
+        0,
+        Some("future"),
+    ));
+    assert_eq!(apple, old);
+    assert!(store.load(&apple).is_some());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn non_apple_architecture_separates_hints_and_empty_matches_absent() {
+    use mlxcel_core::hardware::{AppleSiliconGen, GpuVendor};
+    for vendor in [GpuVendor::Nvidia, GpuVendor::Amd, GpuVendor::Unknown] {
+        let key =
+            |arch| key_for_hardware(&hardware_caps(vendor, AppleSiliconGen::Unknown, 0, arch));
+        assert_eq!(key(None), key(Some("")));
+        assert_ne!(key(Some("arch-a")).hash(), key(Some("arch-b")).hash());
+        assert_ne!(key(None).hash(), key(Some("arch-a")).hash());
+    }
+}
+
+#[test]
+fn vendor_qualified_hints_round_trip_without_cross_vendor_reuse() {
+    use mlxcel_core::hardware::{AppleSiliconGen, GpuVendor};
+    let dir = unique_temp_dir("vendor-qualified");
+    let store = PolicyStore::with_dir(Some(dir.clone()));
+    let cuda = key_for_hardware(&hardware_caps(
+        GpuVendor::Nvidia,
+        AppleSiliconGen::Unknown,
+        0,
+        Some("sm_121"),
+    ));
+    let rocm = key_for_hardware(&hardware_caps(
+        GpuVendor::Amd,
+        AppleSiliconGen::Unknown,
+        0,
+        Some("gfx1151"),
+    ));
+    store
+        .save(&PolicyHint::new(&cuda, Verdict::Enable, 0.75, 4))
+        .unwrap();
+    assert!(store.load(&cuda).is_some());
+    assert!(store.load(&rocm).is_none());
+    store
+        .save(&PolicyHint::new(&rocm, Verdict::Decline, 0.25, 4))
+        .unwrap();
+    assert_eq!(store.load(&cuda).unwrap().verdict, Verdict::Enable);
+    assert_eq!(store.load(&rocm).unwrap().verdict, Verdict::Decline);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A CUDA host and a ROCm host must not share a `PolicyKey` (issue #1887).
+/// Driven by injected `GpuVendor` so this runs on every backend, not only ROCm.
+/// Asserts on the key (and its hash), not on the label string: the property
+/// that matters is distinct hint files, not a particular spelling.
+#[test]
+fn cuda_and_rocm_hosts_produce_distinct_policy_keys() {
+    use mlxcel_core::hardware::{AppleSiliconGen, GpuVendor};
+    // Same silicon_gen / core count as the old `"Unknown-0c"` collapse: if
+    // vendor is omitted from the label, these two keys are identical.
+    let cuda = key_for_hardware(&hardware_caps(
+        GpuVendor::Nvidia,
+        AppleSiliconGen::Unknown,
+        0,
+        None,
+    ));
+    let rocm = key_for_hardware(&hardware_caps(
+        GpuVendor::Amd,
+        AppleSiliconGen::Unknown,
+        0,
+        None,
+    ));
+    assert_ne!(
+        cuda, rocm,
+        "Nvidia and Amd must yield different PolicyKeys for the same pairing"
+    );
+    assert_ne!(
+        cuda.hash(),
+        rocm.hash(),
+        "CUDA and ROCm must persist to different hint files"
+    );
+}
+
+/// Hint files written under the old `"Unknown-0c"` spelling are never loaded
+/// on a vendor-qualified host. The new label hashes to a different path, and
+/// even a copied file fails the hardware-field guard. No migration: the old
+/// field records no vendor, so mapping it would be a guess.
+#[test]
+fn old_unknown_hardware_hint_is_not_reused_across_vendors() {
+    use mlxcel_core::hardware::{AppleSiliconGen, GpuVendor};
+    let dir = unique_temp_dir("old-unknown-hw");
+    let store = PolicyStore::with_dir(Some(dir.clone()));
+    let old = PolicyKey::new("t".into(), "d".into(), "Unknown-0c".into(), 4);
+    store
+        .save(&PolicyHint::new(&old, Verdict::Enable, 0.75, 4))
+        .expect("save old Unknown-0c hint");
+    assert!(
+        store.load(&old).is_some(),
+        "the old key still loads its own file"
+    );
+
+    let cuda = key_for_hardware(&hardware_caps(
+        GpuVendor::Nvidia,
+        AppleSiliconGen::Unknown,
+        0,
+        None,
+    ));
+    let rocm = key_for_hardware(&hardware_caps(
+        GpuVendor::Amd,
+        AppleSiliconGen::Unknown,
+        0,
+        Some("gfx1151"),
+    ));
+    assert!(
+        store.load(&cuda).is_none(),
+        "CUDA must not adopt an Unknown-0c verdict"
+    );
+    assert!(
+        store.load(&rocm).is_none(),
+        "ROCm must not adopt an Unknown-0c verdict"
+    );
+
+    // Even if the old hint is copied onto the new hash path, the hardware
+    // field guard refuses it.
+    let copied = dir.join(format!("{}.json", cuda.hash()));
+    std::fs::copy(dir.join(format!("{}.json", old.hash())), &copied).expect("copy");
+    assert!(
+        store.load(&cuda).is_none(),
+        "hardware-field mismatch must reject a transplanted Unknown-0c hint"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ── block_size key separation ─────────────────────────────────────────────────
 
 /// A verdict profiled at block_size=K must not be reused when K changes.
