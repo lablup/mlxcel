@@ -538,6 +538,29 @@ std::unique_ptr<MlxArray> compiled_swiglu_activation(
     const MlxArray& x
 );
 
+// Residual add fused with the next LayerNorm, one Metal launch:
+// x_out = (a + b) + x, h_out = layer_norm(x_out, weight, bias). Byte-identical to
+// compiled_add3 followed by fast::layer_norm. Metal only, D <= 6656; the Rust
+// wrapper (layers::residual_add3_layer_norm) checks that. Used by: Cohere2
+void fused_add3_layer_norm(
+    const MlxArray& a,
+    const MlxArray& b,
+    const MlxArray& x,
+    const MlxArray& weight,
+    const MlxArray* bias,
+    float eps,
+    std::unique_ptr<MlxArray>& x_out,
+    std::unique_ptr<MlxArray>& h_out
+);
+
+// Three-way add (a + b) + c compiled into one fused kernel (shapeless=true).
+// Byte-identical to two chained adds. Used by: Cohere2
+std::unique_ptr<MlxArray> compiled_add3(
+    const MlxArray& a,
+    const MlxArray& b,
+    const MlxArray& c
+);
+
 // GptOss SwiGLU activation only - compiled with kernel fusion (shapeless=true)
 // output = clipped_gate * sigmoid(1.702 * clipped_gate) * (clipped_up + 1)
 // Used by: GptOss

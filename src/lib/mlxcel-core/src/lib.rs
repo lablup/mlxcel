@@ -640,6 +640,29 @@ mod ffi {
         /// output = silu(gate) * x
         fn compiled_swiglu_activation(gate: &MlxArray, x: &MlxArray) -> UniquePtr<MlxArray>;
 
+        /// Residual add fused with the next LayerNorm in one Metal launch:
+        /// `x_out = (a + b) + x`, `h_out = layer_norm(x_out, weight, bias)`.
+        /// Byte-identical to `compiled_add3` + `fast_layer_norm`. Metal only,
+        /// last dimension <= 6656; call it through
+        /// [`crate::layers::residual_add3_layer_norm`], which checks both.
+        /// Used by: Cohere2
+        unsafe fn fused_add3_layer_norm(
+            a: &MlxArray,
+            b: &MlxArray,
+            x: &MlxArray,
+            weight: &MlxArray,
+            bias: *const MlxArray,
+            eps: f32,
+            x_out: &mut UniquePtr<MlxArray>,
+            h_out: &mut UniquePtr<MlxArray>,
+        );
+
+        /// Compiled three-way add `(a + b) + c` as one fused kernel.
+        /// Byte-identical to two chained `add` calls (same association order);
+        /// saves one dispatch and one barrier level per call.
+        /// Used by: Cohere2
+        fn compiled_add3(a: &MlxArray, b: &MlxArray, c: &MlxArray) -> UniquePtr<MlxArray>;
+
         /// Compiled GptOss SwiGLU activation with kernel fusion
         /// Matches mlx-lm gpt_oss.swiglu: clipped gate/up + sigmoid(1.702*gate).
         /// Used by: GptOss
