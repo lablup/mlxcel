@@ -347,3 +347,17 @@ fn qwen3_batched_rope_uses_linear_scale_and_frequency_tables() {
     assert_close(&table_q, &want_q);
     assert_close(&table_k, &want_k);
 }
+
+/// The last-logits overrides slice the hidden state before the head and
+/// must return the full forward's row (#1968 follow-up).
+#[test]
+fn last_logits_match_the_sliced_full_forward() {
+    let args = args_with(None);
+    let model = Qwen3Model::from_weights(&make_weight_map(), &args).unwrap();
+    crate::test_support::last_logits::assert_last_logits_match_full_forward(
+        &model,
+        &[1, 2, 3, 4, 5, 6],
+        true,
+        1e-4,
+    );
+}

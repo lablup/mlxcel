@@ -648,3 +648,7 @@ impl LanguageModel for Gemma2Model {
         vec![1, 107] // Gemma2 EOS tokens: <eos> (1) and <end_of_turn> (107)
     }
 }
+
+#[cfg(test)]
+#[path = "gemma2_tests.rs"]
+mod tests;
