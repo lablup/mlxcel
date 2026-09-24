@@ -241,7 +241,8 @@ fn pad_embeddings(embeds: &MlxArray, padded_len: usize) -> UniquePtr<MlxArray> {
 /// `[batch, seq_len, width]` tensor, so a model's `forward_last_logits`
 /// override also uses it to slice the hidden state before its LM head.
 ///
-/// Used by: the `forward_last_logits*` defaults, Llama3Model::last_logits
+/// Used by: the `forward_last_logits*` defaults, Llama3Model::last_logits,
+/// Gemma4Model::logits_at
 pub fn logits_at_position(logits: &MlxArray, pos: usize) -> UniquePtr<MlxArray> {
     let shape = ffi::array_shape(logits);
     let batch = shape[0];
