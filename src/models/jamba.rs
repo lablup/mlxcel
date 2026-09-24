@@ -860,10 +860,29 @@ impl JambaModel {
         caches: Option<&mut [JambaLayerCache]>,
     ) -> UniquePtr<MlxArray> {
         let out = self.model.forward(inputs, caches);
+        self.logits_from_hidden(&out)
+    }
+
+    /// Logits `[B, 1, vocab]` for position `last_pos` only: the backbone's
+    /// final-normed hidden state is sliced before the LM head, which acts per
+    /// position.
+    pub fn last_logits_with_caches(
+        &self,
+        inputs: &MlxArray,
+        caches: Option<&mut [JambaLayerCache]>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        let out = self.model.forward(inputs, caches);
+        let row = mlxcel_core::generate::logits_at_position(&out, last_pos);
+        self.logits_from_hidden(&row)
+    }
+
+    /// LM head (or the tied embedding) over normalized hidden states.
+    fn logits_from_hidden(&self, h: &MlxArray) -> UniquePtr<MlxArray> {
         if let Some(ref head) = self.lm_head {
-            head.forward(&out)
+            head.forward(h)
         } else {
-            self.model.embed_tokens.as_linear(&out)
+            self.model.embed_tokens.as_linear(h)
         }
     }
 
@@ -1347,6 +1366,49 @@ impl LanguageModel for JambaModel {
             || JambaModel::make_caches(self),
             |internal| self.forward_with_caches(input_ids, Some(internal)),
         )
+    }
+
+    // The last-logits entry points mirror `forward` and
+    // `forward_with_sequence_id` (same sequence state) and slice before the
+    // head. The embeddings variant follows the trait defaults, which route an
+    // embeddings forward to plain `forward` for this model.
+    fn forward_last_logits(
+        &self,
+        input_ids: &MlxArray,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.sequence_state.with_sequence_state(None, |internal| {
+            self.last_logits_with_caches(input_ids, Some(internal), last_pos)
+        })
+    }
+
+    fn forward_last_logits_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || JambaModel::make_caches(self),
+            |internal| self.last_logits_with_caches(input_ids, Some(internal), last_pos),
+        )
+    }
+
+    fn forward_last_logits_with_embeddings_and_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        _input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_last_logits(input_ids, caches, mask, last_pos)
     }
 
     fn supports_snapshot_reuse(&self) -> bool {

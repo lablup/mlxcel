@@ -1978,6 +1978,30 @@ impl NemotronHModel {
         starting_hidden: UniquePtr<MlxArray>,
         caches: &mut [NemotronLayerCache],
     ) -> UniquePtr<MlxArray> {
+        let h = self.hidden_layer_stack(starting_hidden, caches);
+        self.lm_head.forward(&h)
+    }
+
+    /// Logits `[B, 1, vocab]` for position `last_pos` only: the final-normed
+    /// hidden state is sliced before the LM head, which acts per position.
+    pub fn last_logits_with_caches(
+        &self,
+        inputs: &MlxArray,
+        caches: &mut [NemotronLayerCache],
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        let h = self.embeddings.forward(inputs);
+        let h = self.hidden_layer_stack(h, caches);
+        let row = mlxcel_core::generate::logits_at_position(&h, last_pos);
+        self.lm_head.forward(&row)
+    }
+
+    /// Every layer from a pre-computed hidden state, then the final norm.
+    fn hidden_layer_stack(
+        &self,
+        starting_hidden: UniquePtr<MlxArray>,
+        caches: &mut [NemotronLayerCache],
+    ) -> UniquePtr<MlxArray> {
         let profile_blocks = std::env::var("MLXCEL_PROFILE_BLOCKS").is_ok();
         let mut mamba_ns = 0u128;
         let mut attn_ns = 0u128;
@@ -2092,8 +2116,7 @@ impl NemotronHModel {
             );
         }
 
-        let h = self.norm_f.forward(&h);
-        self.lm_head.forward(&h)
+        self.norm_f.forward(&h)
     }
 
     pub fn load(model_path: &str) -> Result<(Self, NemotronHConfig), Box<dyn std::error::Error>> {
@@ -2851,6 +2874,49 @@ impl LanguageModel for NemotronHModel {
             || NemotronHModel::make_caches(self),
             |internal| self.forward_with_caches(input_ids, internal),
         )
+    }
+
+    // The last-logits entry points mirror `forward` and
+    // `forward_with_sequence_id` (same sequence state) and slice before the
+    // head. The embeddings variant follows the trait defaults, which route an
+    // embeddings forward to plain `forward` for this model.
+    fn forward_last_logits(
+        &self,
+        input_ids: &MlxArray,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.sequence_state.with_sequence_state(None, |internal| {
+            self.last_logits_with_caches(input_ids, internal, last_pos)
+        })
+    }
+
+    fn forward_last_logits_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || NemotronHModel::make_caches(self),
+            |internal| self.last_logits_with_caches(input_ids, internal, last_pos),
+        )
+    }
+
+    fn forward_last_logits_with_embeddings_and_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        _input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_last_logits(input_ids, caches, mask, last_pos)
     }
 
     fn supports_snapshot_reuse(&self) -> bool {
