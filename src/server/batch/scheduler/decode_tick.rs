@@ -1406,7 +1406,15 @@ impl BatchScheduler {
             // (lazily created); a no-penalty sequence takes the original
             // rebuild-free path unchanged.
             let (token_arr, adjusted_logits, post_probs) = {
-                let seq = self.active_batch.get_mut(seq_id).unwrap();
+                let seq = match self.active_batch.get_mut(seq_id) {
+                    Some(s) => s,
+                    None => {
+                        tracing::warn!(
+                            "Sequence {seq_id} missing from active batch during decode tick"
+                        );
+                        return;
+                    }
+                };
                 if seq.logprobs_config.enabled
                     && seq.logprobs_config.source == LogprobSource::PostSampling
                 {
@@ -1455,7 +1463,15 @@ impl BatchScheduler {
                 return;
             }
             let sampled = mlxcel_core::item_i32(&token_arr);
-            let seq = self.active_batch.get_mut(seq_id).unwrap();
+            let seq = match self.active_batch.get_mut(seq_id) {
+                Some(s) => s,
+                None => {
+                    tracing::warn!(
+                        "Sequence {seq_id} missing from active batch after decode sampling"
+                    );
+                    return;
+                }
+            };
             // apply the thinking-budget override first so that
             // when the override fires the log-softmax work is skipped: the
             // logprob metadata for the sampled token would be dropped anyway
