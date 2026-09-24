@@ -88,7 +88,9 @@ mlxcel-server -m Qwen3.5-0.8B-4bit \
 
 Continuous batching and prompt-prefix caching are enabled by default. The
 native `cache_prompt` request field can opt a request out of both lookup and
-donation. `/v1/cache/stats` reports the cache state, while
+donation; send `cache_prompt: false` when greedy output must not depend on the
+cache state, since a cache hit prefills in two parts and can round differently
+(see [`llama-server-compat.md`](llama-server-compat.md#reproducible-greedy-output-send-cache_prompt-false)). `/v1/cache/stats` reports the cache state, while
 `POST /v1/cache/reset` clears it. Context shifting is disabled by default to
 match b10621; enable `--context-shift` and configure `--keep` when an
 application intentionally wants to retain part of an overlong conversation.
