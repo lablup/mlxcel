@@ -980,6 +980,45 @@ impl Gemma3Model {
         caches: &mut [Cache],
         external_mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        let h = self.hidden_with_caches_and_embeddings(
+            input_ids,
+            input_embeddings,
+            caches,
+            external_mask,
+        );
+        self.lm_head.forward(&h)
+    }
+
+    /// Logits `[B, 1, vocab]` for position `last_pos` only: the final-normed
+    /// hidden state is sliced before the LM head, which acts per position, so
+    /// a prefill does not project every prompt row through a 262k vocabulary.
+    pub(crate) fn last_logits_with_caches_and_embeddings(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [Cache],
+        external_mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        let h = self.hidden_with_caches_and_embeddings(
+            input_ids,
+            input_embeddings,
+            caches,
+            external_mask,
+        );
+        let row = mlxcel_core::generate::logits_at_position(&h, last_pos);
+        self.lm_head.forward(&row)
+    }
+
+    /// Embeddings (scaled by sqrt(hidden_size)), every layer and the final
+    /// norm.
+    fn hidden_with_caches_and_embeddings(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [Cache],
+        external_mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(input_ids);
         let seq_len = shape[1];
 
@@ -1059,10 +1098,7 @@ impl Gemma3Model {
         }
 
         // Final norm
-        let h = self.norm.forward(&h);
-
-        // LM head
-        self.lm_head.forward(&h)
+        self.norm.forward(&h)
     }
 
     /// Forward pass through the entire model
@@ -1666,6 +1702,66 @@ impl mlxcel_core::generate::LanguageModel for Gemma3Wrapper {
             seq_id,
             || self.make_configured_caches(),
             |sequence_caches| self.model.forward_with_caches(input_ids, sequence_caches),
+        )
+    }
+
+    // The three last-logits entry points mirror `forward`,
+    // `forward_with_sequence_id` and `forward_with_embeddings_and_sequence_id`
+    // (same sequence state, same mask handling) and slice before the LM head.
+    fn forward_last_logits(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [mlxcel_core::layers::KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_last_logits_with_sequence_id(input_ids, None, caches, None, last_pos)
+    }
+
+    fn forward_last_logits_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [mlxcel_core::layers::KVCache],
+        _mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.make_configured_caches(),
+            |sequence_caches| {
+                self.model.last_logits_with_caches_and_embeddings(
+                    input_ids,
+                    None,
+                    sequence_caches,
+                    None,
+                    last_pos,
+                )
+            },
+        )
+    }
+
+    fn forward_last_logits_with_embeddings_and_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [mlxcel_core::layers::KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.make_configured_caches(),
+            |sequence_caches| {
+                self.model.last_logits_with_caches_and_embeddings(
+                    input_ids,
+                    input_embeddings,
+                    sequence_caches,
+                    mask,
+                    last_pos,
+                )
+            },
         )
     }
 

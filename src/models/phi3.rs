@@ -659,6 +659,18 @@ impl Phi3Model {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        let h = self.hidden_states(input_ids, input_embeddings, caches, mask);
+        self.lm_head.forward(&h)
+    }
+
+    /// Embeddings (or the caller's), every layer and the final norm.
+    fn hidden_states(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
         let mut h = if let Some(embeddings) = input_embeddings {
             mlxcel_core::copy(embeddings)
         } else {
@@ -671,10 +683,22 @@ impl Phi3Model {
         }
 
         // Final norm
-        let h = self.norm.forward(&h);
+        self.norm.forward(&h)
+    }
 
-        // LM head
-        self.lm_head.forward(&h)
+    /// Logits `[B, 1, vocab]` for position `last_pos` only: the hidden state
+    /// is sliced before the LM head, which acts per position.
+    fn last_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        let h = self.hidden_states(input_ids, input_embeddings, caches, mask);
+        let row = mlxcel_core::generate::logits_at_position(&h, last_pos);
+        self.lm_head.forward(&row)
     }
 
     /// Get raw token embeddings (for VLM embedding merge).
@@ -755,6 +779,39 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
 
 // LanguageModel trait implementation.
 impl LanguageModel for Phi3Model {
+    fn forward_last_logits(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.last_logits(input_ids, None, caches, mask, last_pos)
+    }
+
+    fn forward_last_logits_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.last_logits(input_ids, None, caches, mask, last_pos)
+    }
+
+    fn forward_last_logits_with_embeddings_and_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.last_logits(input_ids, input_embeddings, caches, mask, last_pos)
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
