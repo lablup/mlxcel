@@ -4344,6 +4344,13 @@ pub struct RotatingKVCache {
     /// Deterministic seed for the Turbo4 sign vectors. Set at construction
     /// time so detach/adopt round-trip without recomputing rotations.
     pub(crate) turbo_seed: u32,
+    /// Same proof as [`KVCache::inplace_marker`], for the warmup phase
+    /// (#1959 follow-up): while `offset < max_size` each decode token lands on
+    /// a slot that was never valid, so it may be written in place when this
+    /// cache's own last write produced the current buffers. Steady-state
+    /// overwrites replace a slot that was valid a step ago and a snapshot may
+    /// still hold it, so they keep the copying `slice_update`.
+    inplace_marker: Option<InplaceWriteMarker>,
 }
 
 /// Scalar state required to restore a [`RotatingKVCache`] snapshot.
@@ -4459,6 +4466,7 @@ impl RotatingKVCache {
             v_rescale: None,
             turbo_params: None,
             turbo_seed,
+            inplace_marker: None,
         }
     }
 
@@ -5042,18 +5050,48 @@ impl RotatingKVCache {
         }
 
         let pos = self.idx;
-        let k_buffer = ffi::slice_update(
-            &k_buffer,
-            &new_keys,
-            &[0, 0, pos, 0],
-            &[batch, heads, pos + 1, head_dim],
-        );
-        let v_buffer = ffi::slice_update(
-            &v_buffer,
-            &new_values,
-            &[0, 0, pos, 0],
-            &[batch, heads, pos + 1, value_head_dim],
-        );
+        // Warmup slot that was never valid, in buffers this cache's own last
+        // write produced (a growth concat or trim above gives new handles and
+        // fails the check): write it in place (see `inplace_marker`).
+        let inplace = kv_inplace_write_enabled()
+            && self.offset < self.max_size
+            && pos == self.offset
+            && match &self.inplace_marker {
+                Some(m) => {
+                    m.live_len == pos
+                        && ffi::array_same_handle(&m.keys, &k_buffer)
+                        && ffi::array_same_handle(&m.values, &v_buffer)
+                }
+                None => false,
+            }
+            && ffi::default_device_is_gpu();
+        let (k_buffer, v_buffer) = if inplace {
+            let start = [0, 0, pos, 0];
+            (
+                ffi::inplace_slice_write(&k_buffer, &new_keys, &start),
+                ffi::inplace_slice_write(&v_buffer, &new_values, &start),
+            )
+        } else {
+            (
+                ffi::slice_update(
+                    &k_buffer,
+                    &new_keys,
+                    &[0, 0, pos, 0],
+                    &[batch, heads, pos + 1, head_dim],
+                ),
+                ffi::slice_update(
+                    &v_buffer,
+                    &new_values,
+                    &[0, 0, pos, 0],
+                    &[batch, heads, pos + 1, value_head_dim],
+                ),
+            )
+        };
+        self.inplace_marker = Some(InplaceWriteMarker {
+            keys: ffi::array_handle_clone(&k_buffer),
+            values: ffi::array_handle_clone(&v_buffer),
+            live_len: pos + 1,
+        });
 
         self.offset += 1;
         self.idx += 1;
@@ -7601,6 +7639,44 @@ mod tests {
             vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
             "the original never sees the restored cache's rows"
         );
+    }
+
+    /// A rotating cache writes warmup rows in place without touching the
+    /// rows a shared snapshot holds, and once the ring wraps it copies instead
+    /// of overwriting a slot the snapshot still considers valid (#1959
+    /// follow-up).
+    #[test]
+    fn rotating_inplace_warmup_and_wrap_keep_shared_snapshots_intact() {
+        if !ffi::default_device_is_gpu() {
+            return;
+        }
+        let mut c = RotatingKVCache::new(4);
+        for t in 1..=2 {
+            let (k, _) = c.update_and_fetch(row(t as f32), row(10.0 * t as f32));
+            ffi::eval(&k);
+        }
+        let warm_k = ffi::array_handle_clone(c.keys.as_ref().unwrap());
+        ffi::eval(&warm_k);
+        let warm_before = f32_rows(&warm_k)[..2].to_vec();
+        // Warmup continues (slots 2 and 3 were never valid), then the ring wraps.
+        for t in 3..=4 {
+            let (k, _) = c.update_and_fetch(row(t as f32), row(10.0 * t as f32));
+            ffi::eval(&k);
+        }
+        assert_eq!(
+            f32_rows(&warm_k)[..2].to_vec(),
+            warm_before,
+            "warmup rows kept"
+        );
+
+        let full_k = ffi::array_handle_clone(c.keys.as_ref().unwrap());
+        ffi::eval(&full_k);
+        let full_before = f32_rows(&full_k);
+        assert_eq!(full_before, vec![1.0, 2.0, 3.0, 4.0]);
+        // Steady state overwrites slot 0 (token 1): must not reach the snapshot.
+        let (k, _) = c.update_and_fetch(row(5.0), row(50.0));
+        assert_eq!(f32_rows(&k), vec![5.0, 2.0, 3.0, 4.0]);
+        assert_eq!(f32_rows(&full_k), full_before, "wrapped overwrite copied");
     }
 
     /// The `MLXCEL_DIAG_SKIP_DECODE_KV_WRITE` path returns exactly the live
