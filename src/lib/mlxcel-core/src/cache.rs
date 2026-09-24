@@ -155,7 +155,7 @@ fn direct_prefill_cache_store_enabled() -> bool {
 /// is never donatable. Writing only the new row removes that copy: on
 /// command-r7b 4-bit, M1 Ultra, decode +2.5% at context 16, +4.1% at 512 and
 /// +8.2% at 2048.
-fn kv_inplace_write_enabled() -> bool {
+pub(crate) fn kv_inplace_write_enabled() -> bool {
     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *FLAG.get_or_init(|| {
         !matches!(
