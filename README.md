@@ -48,7 +48,7 @@ The Homebrew formula installs the latest released `mlxcel` and `mlxcel-server` b
 
 ```bash
 brew tap lablup/tap
-brew install mlxcel
+brew install lablup/tap/mlxcel
 ```
 
 ### Run a model
