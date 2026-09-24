@@ -11,7 +11,7 @@ interface BrewInstallProps {
 
 export function BrewInstall({ dict }: BrewInstallProps) {
   const [copied, setCopied] = useState(false);
-  const command = "brew install --cask mlxcel";
+  const command = "brew install lablup/tap/mlxcel";
 
   const handleCopy = async () => {
     try {
