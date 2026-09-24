@@ -17,7 +17,7 @@
 //! This implements the standard Llama architecture for dense models
 //! like Llama 3.1 8B Instruct.
 
-use mlxcel_core::cache::{BatchedAttentionMetadata, PagedDecodeMetadata};
+use mlxcel_core::cache::{BatchedAttentionMetadata, PagedDecodeMetadata, SequenceId};
 use mlxcel_core::generate::{DecodeBatchContext, LanguageModel};
 use mlxcel_core::layers::{
     FusedQKVLinear, KVCache, KVCacheMode, RMSNorm, UnifiedEmbedding, UnifiedLinear,
@@ -1308,32 +1308,10 @@ pub struct Llama3Model {
 }
 
 impl Llama3Model {
-    /// Forward pass through the entire model
-    pub fn forward(
-        &self,
-        input_ids: &MlxArray,
-        caches: &mut [KVCache],
-        mask: Option<&MlxArray>,
-    ) -> UniquePtr<MlxArray> {
-        // Embed tokens
-        let mut h = self.embed_tokens.forward(input_ids);
-
-        // Pass through transformer layers
-        let n = self.layers.len();
-        for (i, layer) in self.layers.iter().enumerate() {
-            h = layer.forward(&h, &mut caches[i], mask);
-            pipeline_hint(&h, i, n);
-        }
-
-        // Final norm
-        let h = self.norm.forward(&h);
-
-        // LM head
-        self.lm_head.forward(&h)
-    }
-
-    /// Forward pass with optional pre-computed embeddings (for VLM support)
-    pub fn forward_with_embeddings_impl(
+    /// Embeddings (or the caller's precomputed ones), every transformer layer
+    /// and the final norm: the normalized hidden state `[B, L, hidden]` the LM
+    /// head consumes.
+    pub fn hidden_states(
         &self,
         input_ids: &MlxArray,
         input_embeddings: Option<&MlxArray>,
@@ -1355,9 +1333,50 @@ impl Llama3Model {
         }
 
         // Final norm
-        let h = self.norm.forward(&h);
+        self.norm.forward(&h)
+    }
 
-        // LM head
+    /// Logits `[B, 1, vocab]` for position `last_pos` only.
+    ///
+    /// A prefill samples one position, so the hidden state is sliced before
+    /// the LM head instead of projecting every prompt row through it and
+    /// keeping one: at 512 prompt tokens that skips about 0.5 TFLOP of LM head
+    /// for a 128k vocabulary (Llama 3) or 152k (Qwen2.5). The final norm and
+    /// the head act on each position independently, so the row is the one the
+    /// full forward would have produced.
+    pub fn last_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        let h = self.hidden_states(input_ids, input_embeddings, caches, mask);
+        let row = mlxcel_core::generate::logits_at_position(&h, last_pos);
+        self.lm_head.forward(&row)
+    }
+
+    /// Forward pass through the entire model
+    pub fn forward(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let h = self.hidden_states(input_ids, None, caches, mask);
+        self.lm_head.forward(&h)
+    }
+
+    /// Forward pass with optional pre-computed embeddings (for VLM support)
+    pub fn forward_with_embeddings_impl(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let h = self.hidden_states(input_ids, input_embeddings, caches, mask);
         self.lm_head.forward(&h)
     }
 
@@ -1507,6 +1526,39 @@ impl LanguageModel for Llama3Model {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.forward_with_embeddings_impl(input_ids, input_embeddings, caches, mask)
+    }
+
+    fn forward_last_logits(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.last_logits(input_ids, None, caches, mask, last_pos)
+    }
+
+    fn forward_last_logits_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        _seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.last_logits(input_ids, None, caches, mask, last_pos)
+    }
+
+    fn forward_last_logits_with_embeddings_and_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.last_logits(input_ids, input_embeddings, caches, mask, last_pos)
     }
 
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {
