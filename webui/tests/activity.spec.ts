@@ -119,8 +119,12 @@ for (const width of [1440, 390]) {
     await expect(summary.locator('.ds-badge')).toHaveText(fixtureString('en', 'activity.unavailable_badge', { count: '12' }));
     await expectAxeClean(page);
     await expectSafeLayout(page);
-    // The table fits the column: its scroller is the named, focusable region, and it does not scroll sideways at 390.
-    expect(await page.locator('.activity-slot-scroll').evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
+    // The table fits the column and four slots fit the box: it does not scroll either way, so its
+    // scroller is no region and no tab stop.
+    const scroller = page.locator('.activity-slot-scroll');
+    expect(await scroller.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
+    await expect(scroller).not.toHaveAttribute('tabindex');
+    await expect(scroller).not.toHaveAttribute('role');
     // Keyboard only from here: a pointer left resting on a control would hover it.
     await page.mouse.move(0, 0);
     await page.getByTestId('activity-page').getByRole('combobox').focus();
@@ -128,7 +132,6 @@ for (const width of [1440, 390]) {
       page.getByRole('button', { name: fixtureString('en', 'activity.refresh'), exact: true }),
       page.getByRole('button', { name: fixtureString('en', 'activity.export'), exact: true }),
       summary,
-      page.getByRole('region', { name: fixtureString('en', 'activity.slots'), exact: true }),
       page.getByRole('button', { name: fixtureString('en', 'activity.session_help'), exact: true }),
       page.locator('.activity-operation__details > summary'),
     ];
@@ -158,6 +161,7 @@ test('Activity scrolls more than eight slots inside the named table region, not 
   const rowHeight = await region.locator('tbody tr').first().evaluate((row) => row.getBoundingClientRect().height);
   expect(box.client).toBeGreaterThanOrEqual(8 * rowHeight);
   await expect(region).toHaveAttribute('tabindex', '0');
+  await expect(region).toHaveAttribute('aria-labelledby', /.+/);
   await expectAxeClean(page);
   await expectSafeLayout(page);
 });

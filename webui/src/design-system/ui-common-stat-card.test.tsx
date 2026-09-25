@@ -30,7 +30,9 @@ describe('runtime tiles through the shared StatCard', () => {
   it('keeps every label, value and localized provenance on non-interactive tiles', async () => {
     const runtime = validateRuntime(runtimeFixture);
     const measurements = { active_requests: measured(2, 'requests', 'Authoritative route completions'), completion_tokens_total: measured(0, 'tokens', null), gpu_utilization: measured(null, 'percent', 'not measured by mlxcel') };
-    snapshot = { ...initialSnapshot(), connection: 'ready', selectedModelId: runtime.model_id, runtimes: new Map([[runtime.model_id, { ...runtime, measurements }]]) };
+    const sample = { ...runtime, measurements };
+    // One sample of the selected model, as the reducer records it: without one, a live page waits.
+    snapshot = { ...initialSnapshot(), connection: 'ready', selectedModelId: runtime.model_id, runtimes: new Map([[runtime.model_id, sample]]), runtimeHistory: [{ receivedAt: 1, runtime: sample }], lastUpdatedAt: 1 };
     const element = mount(<ActivityPage locale="en" />);
     const summary = [...element.querySelectorAll('[data-testid="runtime-summary"] .activity-metric')];
     expect(summary).toHaveLength(4);

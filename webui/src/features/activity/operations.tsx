@@ -1,5 +1,5 @@
 // Copyright 2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
-import React, { useId, useState } from 'react';
+import React, { useId, useMemo, useState } from 'react';
 import type { ErrorCode, Operation, OperationKind, OperationState } from '../../api/types';
 import { Button, EmptyState, ErrorBanner, IconButton, ProgressBar, SmoothHeight, StatusBadge, Tooltip, type LifecycleState } from '../../design-system/primitives';
 import { formatBytes } from '../../design-system/format';
@@ -72,8 +72,11 @@ type OperationsProps = { operations: ReadonlyMap<string, Operation>; names: Read
 
 export function Operations({ operations, names, locale, stale, now }: OperationsProps): React.JSX.Element {
   const headingId = useId();
-  const entries = [...operations.values()].sort((a, b) => Number(isTerminal(a)) - Number(isTerminal(b)) || b.updated_at.localeCompare(a.updated_at));
-  const counts = t(locale, 'activity.operations.counts', { active: String(entries.filter((operation) => !isTerminal(operation)).length), failed: String(entries.filter((operation) => operation.state === 'failed').length) });
+  // Every 2 s poll re-renders with a new `now`; sort and count only when the operations or locale change.
+  const { entries, counts } = useMemo(() => {
+    const sorted = [...operations.values()].sort((a, b) => Number(isTerminal(a)) - Number(isTerminal(b)) || b.updated_at.localeCompare(a.updated_at));
+    return { entries: sorted, counts: t(locale, 'activity.operations.counts', { active: String(sorted.filter((operation) => !isTerminal(operation)).length), failed: String(sorted.filter((operation) => operation.state === 'failed').length) }) };
+  }, [operations, locale]);
   return <section className="activity-operations-section" aria-labelledby={headingId}>
     <div className="activity-section-head">
       <h2 id={headingId}>{t(locale, 'activity.operations')}</h2>

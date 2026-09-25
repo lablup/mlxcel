@@ -22,11 +22,12 @@ export function requestInspector(): void {
 export function useInspectorRequest(): number {
   return useSyncExternalStore(subscribe, () => request);
 }
-/** Clears the pending request and reports whether there was one. */
+/** Clears the pending request and reports whether there was one; subscribers see the token return to 0. */
 export function consumeInspectorRequest(): boolean {
-  const pending = request !== 0;
+  if (request === 0) return false;
   request = 0;
-  return pending;
+  for (const listener of listeners) listener();
+  return true;
 }
 
 const WIDE_QUERY = '(min-width: 1100px)';

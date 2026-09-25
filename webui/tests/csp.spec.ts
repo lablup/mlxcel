@@ -53,6 +53,8 @@ for (const theme of ['light', 'dark'] as const) {
     await page.keyboard.press('Escape'); await expect(page.getByRole('tooltip')).toHaveCount(0);
     await page.getByRole('tab', { name: 'States', exact: true }).click();
     await expectEmptyStateHeading(page);
+    // The loading StatCard's decorative skeletons take their size through CSSOM under the served CSP; the layout and violation checks below cover them.
+    await expect(page.locator('.ds-stat-card .skeleton[aria-hidden="true"]').first()).toBeVisible();
     const determinate = page.locator('[role="progressbar"][aria-valuenow]').first();
     const ratio = await determinate.evaluate((element) => {
       const fill = element.querySelector('.progress-bar__fill');

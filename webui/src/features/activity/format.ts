@@ -1,6 +1,6 @@
 // Copyright 2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 import type { MeasuredValue, Operation, WebUiSnapshot } from '../../api/types';
-import { formatBytes, localeTag } from '../../design-system/format';
+import { cached, formatBytes, localeTag } from '../../design-system/format';
 import { t, type Locale, type StringKey } from '../../i18n/catalog';
 
 // Server units with a catalog template, as [plural "one", every other count]. `bytes`
@@ -23,20 +23,21 @@ const pluralRules = new Map<Locale, Intl.PluralRules>();
 const relativeFormats = new Map<Locale, Intl.RelativeTimeFormat>();
 const timeFormats = new Map<Locale, Intl.DateTimeFormat>();
 const dateTimeFormats = new Map<Locale, Intl.DateTimeFormat>();
-function cached<T>(cache: Map<Locale, T>, locale: Locale, create: (tag: string) => T): T {
-  let format = cache.get(locale);
-  if (format === undefined) { format = create(localeTag(locale)); cache.set(locale, format); }
-  return format;
-}
+
+// Counts show at most two fraction digits; the plural form is chosen from that same rounding.
+const COUNT_OPTIONS = { maximumFractionDigits: 2 } as const;
 
 export function formatCount(value: number, locale: Locale): string {
   if (!Number.isFinite(value)) return t(locale, 'format.unknown');
-  return cached(numberFormats, locale, (tag) => new Intl.NumberFormat(tag, { maximumFractionDigits: 2 })).format(value);
+  return cached(numberFormats, locale, () => new Intl.NumberFormat(localeTag(locale), COUNT_OPTIONS)).format(value);
 }
 
-/** Picks the catalog key for a count: English "1 request", "2 requests"; Korean has one form. */
+/**
+ * Picks the catalog key for a count: English "1 request", "2 requests"; Korean has one form.
+ * The form follows the number as formatCount shows it, rounded the same way: 1.004 reads "1 request".
+ */
 export function pluralKey(value: number, [one, other]: UnitKeys, locale: Locale): StringKey {
-  return cached(pluralRules, locale, (tag) => new Intl.PluralRules(tag)).select(value) === 'one' ? one : other;
+  return cached(pluralRules, locale, () => new Intl.PluralRules(localeTag(locale), COUNT_OPTIONS)).select(value) === 'one' ? one : other;
 }
 
 export function metricValue(metric: MeasuredValue, locale: Locale): string {
@@ -60,12 +61,12 @@ function toDate(at: string | number | null): Date | null {
 /** Wall-clock time of an observation, or the localized "no observation time". */
 export function clockTime(at: string | number | null, locale: Locale): string {
   const date = toDate(at);
-  return date === null ? t(locale, 'activity.unknown_time') : cached(timeFormats, locale, (tag) => new Intl.DateTimeFormat(tag, { timeStyle: 'medium' })).format(date);
+  return date === null ? t(locale, 'activity.unknown_time') : cached(timeFormats, locale, () => new Intl.DateTimeFormat(localeTag(locale), { timeStyle: 'medium' })).format(date);
 }
 
 export function dateTime(at: string | number | null, locale: Locale): string {
   const date = toDate(at);
-  return date === null ? t(locale, 'activity.unknown_time') : cached(dateTimeFormats, locale, (tag) => new Intl.DateTimeFormat(tag, { dateStyle: 'medium', timeStyle: 'medium' })).format(date);
+  return date === null ? t(locale, 'activity.unknown_time') : cached(dateTimeFormats, locale, () => new Intl.DateTimeFormat(localeTag(locale), { dateStyle: 'medium', timeStyle: 'medium' })).format(date);
 }
 
 const RELATIVE_STEPS: ReadonlyArray<[Intl.RelativeTimeFormatUnit, number]> = [['second', 60], ['minute', 60], ['hour', 24], ['day', Number.POSITIVE_INFINITY]];
@@ -79,7 +80,7 @@ const RELATIVE_STEPS: ReadonlyArray<[Intl.RelativeTimeFormatUnit, number]> = [['
 export function relativeTime(iso: string, now: number, locale: Locale): string {
   const at = Date.parse(iso);
   if (!Number.isFinite(at) || !Number.isFinite(now)) return t(locale, 'format.unknown');
-  const format = cached(relativeFormats, locale, (tag) => new Intl.RelativeTimeFormat(tag, { numeric: 'auto' }));
+  const format = cached(relativeFormats, locale, () => new Intl.RelativeTimeFormat(localeTag(locale), { numeric: 'auto' }));
   let value = Math.min(0, (at - now) / 1000);
   for (const [unit, size] of RELATIVE_STEPS) {
     // `+ 0` turns -0 into 0, which Intl formats as "now" rather than "0 seconds ago".

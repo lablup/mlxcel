@@ -25,7 +25,8 @@ import { loadProfileFor, useLoadProfile } from '../settings/load-profiles';
 import { AddModel, ConfirmAction, type Confirmation } from './dialogs';
 import { consumeInspectorRequest, useInspectorRequest, useWideInspector } from './inspect-request';
 import { ModelInspector, type ModelAction } from './inspector';
-import { downloadBadgeState, downloadStateLabel, sourceLabel, taskLabel } from './labels';
+import { downloadBadgeState, downloadStateLabel, isolate, sourceLabel, taskLabel } from './labels';
+import { setLibraryFilter, setLibrarySort, useLibraryView } from './library-view';
 import { submitLoad } from './load-action';
 import {
   allowed,
@@ -46,7 +47,6 @@ import {
   terminal,
   visibleDownloads,
   type InventoryFilter,
-  type InventorySort,
   type SortColumn,
 } from './policy';
 import { RootsDialog } from './roots';
@@ -82,8 +82,8 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
   const actions = useWebUiActions();
   const wide = useWideInspector();
   const inspectRequest = useInspectorRequest();
-  const [filter, setFilter] = useState<InventoryFilter>({ query: '', source: '', task: '', status: '' });
-  const [sort, setSort] = useState<InventorySort>(DEFAULT_SORT);
+  // Search, filters and sort outlive this component: the router remounts it on every route change.
+  const { filter, sort } = useLibraryView();
   const [page, setPage] = useState(0);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
@@ -97,6 +97,8 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
   const [drawerOpen, setDrawerOpen] = useState(false);
   const rowControls = useRef(new Map<string, HTMLButtonElement>());
   const rowFocus = useRef<RowFocus | null>(null);
+  // One callback ref per row control, so a re-render does not detach and reattach every row button.
+  const rowRefs = useRef(new Map<string, (element: HTMLButtonElement | null) => void>());
   const selected = state.catalog.find((entry) => entry.identity.id === state.selectedModelId);
   const { profile: selectedProfile } = useLoadProfile(selected?.identity.id ?? null);
   // Runtime and operation events re-render the page without touching the catalog; skip the re-sort.
@@ -114,7 +116,7 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
 
   useEffect(() => {
     if (consumeInspectorRequest() && !wide) setDrawerOpen(true);
-  }, [inspectRequest]);
+  }, [inspectRequest, wide]);
   // The drawer unmounts at the wide breakpoint; forget it was open so narrowing the window
   // again does not reopen it over the list without a request.
   useEffect(() => {
@@ -137,6 +139,22 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
       rowFocus.current = null;
       return;
     }
+    // The lifecycle pin re-sorts a row whose state changed, often onto another page (an unloaded
+    // row leaves the Ready group at the top). Follow it there; the next render focuses it. A
+    // filter that now hides the row ends the intent. A failed action's return trip (`once`)
+    // never turns the page.
+    if (!pending.once) {
+      const index = rows.findIndex((entry) => entry.identity.id === pending.id);
+      if (index === -1) {
+        rowFocus.current = null;
+        return;
+      }
+      const rowPage = Math.floor(index / PAGE_SIZE);
+      if (rowPage !== visiblePage) {
+        setPage(rowPage);
+        return;
+      }
+    }
     if (target) {
       target.focus({ preventScroll: true });
       rowFocus.current = null;
@@ -145,7 +163,7 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
   });
 
   const set = (patch: Partial<InventoryFilter>): void => {
-    setFilter({ ...filter, ...patch });
+    setLibraryFilter({ ...filter, ...patch });
     setPage(0);
   };
   const execute = async (run: () => Promise<void>, onFailure?: (failure: unknown) => void): Promise<boolean> => {
@@ -300,9 +318,21 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
     if (entry.identity.id !== state.selectedModelId) actions.selectModel(entry.identity.id);
     window.location.hash = 'chat';
   };
-  const register = (id: string, slot: 'inspect' | RowTarget) => (element: HTMLButtonElement | null): void => {
-    if (element) rowControls.current.set(`${id}:${slot}`, element);
-    else rowControls.current.delete(`${id}:${slot}`);
+  const register = (id: string, slot: 'inspect' | RowTarget): ((element: HTMLButtonElement | null) => void) => {
+    const key = `${id}:${slot}`;
+    let callback = rowRefs.current.get(key);
+    if (callback === undefined) {
+      callback = (element: HTMLButtonElement | null): void => {
+        if (element) rowControls.current.set(key, element);
+        else {
+          // Detached (the row left the page or the control was swapped): forget both.
+          rowControls.current.delete(key);
+          rowRefs.current.delete(key);
+        }
+      };
+      rowRefs.current.set(key, callback);
+    }
+    return callback;
   };
   // Row controls act on their own row only; the row-activation handler must not also open it.
   const own = (run: () => void) => (event: React.MouseEvent<HTMLButtonElement>): void => {
@@ -318,7 +348,8 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
   // same pinned comparator the pagination used rather than a bare value accessor.
   const sortable: Pick<DataTableColumn<LibraryRow>, 'sortable' | 'sortComparator'> = { sortable: true, sortComparator: rowComparator };
   const modelActions = (entry: CatalogEntry): React.ReactNode => {
-    const name = entry.identity.display_name;
+    // Isolated: a name holding bidi controls (U+202E) must not reorder the words around it.
+    const name = isolate(entry.identity.display_name);
     return (
       <div className="models-row-actions">
         {canChat(state, entry) ? (
@@ -497,149 +528,153 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
   };
   return (
     <div className="screen-stack models-library" data-testid="models-library">
-      <PageHeader
-        title={t(locale, 'models.title')}
-        titleTestId={testId('models.title')}
-        description={t(locale, 'models.library.subtitle')}
-        actions={
-          <>
-            <Button
-              tone="primary"
-              onClick={() => setAdd({ repo: '', revision: '' })}
-              disabled={busy || downloadPending || !allowed(state, 'download')}
-              data-testid="models-add"
-            >
-              {t(locale, 'models.library.add')}
-            </Button>
-            <Button
-              disabled={busy || rescanPending || !current(state) || readOnly}
-              onClick={() => {
-                void execute(() => actions.refreshCatalog(crypto.randomUUID()));
-              }}
-              data-testid="models-rescan"
-            >
-              {t(locale, 'models.library.rescan')}
-            </Button>
-            <Button
-              onClick={() => {
-                void actions.refresh();
-              }}
-              disabled={busy}
-            >
-              {t(locale, 'models.library.refresh')}
-            </Button>
-          </>
-        }
-        // A stale snapshot takes precedence over a local action error: actions are refused
-        // until it is refreshed. Retry (shown only with an error) clears it and refreshes.
-        error={!current(state) ? t(locale, 'models.library.stale') : error === null ? null : t(locale, 'models.library.error')}
-        errorDetail={!current(state) ? (state.error?.message ?? t(locale, 'models.library.waiting')) : error}
-        errorTestId={current(state) ? 'models-action-error' : 'connection-error-title'}
-        onRetry={() => {
-          setError(null);
-          void actions.refresh();
-        }}
-        retryLabel={t(locale, 'models.library.refresh')}
-      />
-      {readOnly ? (
-        <ErrorBanner tone="info" title={t(locale, 'models.library.single')} body="mlxcel-server --webui" testId="models-read-only" />
-      ) : null}
-      <div className="models-toolbar">
-        <Field label={t(locale, 'models.library.search')} value={filter.query} onChange={(query) => set({ query })} testId="models-search" />
-        <Select
-          locale={locale}
-          label={t(locale, 'models.library.source')}
-          value={filter.source}
-          onChange={(source) => set({ source })}
-          options={[
-            { value: '', label: t(locale, 'models.library.all') },
-            ...[...new Set(state.catalog.map((entry) => entry.identity.source))].sort().map((value) => ({ value, label: sourceLabel(locale, value) })),
-          ]}
+      {/* Below 1100 px the open inspector drawer is modal: everything behind it is inert. The
+          wrapper adds no box (display: contents), so the page keeps its .screen-stack rhythm. */}
+      <div className="models-page" inert={!wide && drawerOpen && selected !== undefined}>
+        <PageHeader
+          title={t(locale, 'models.title')}
+          titleTestId={testId('models.title')}
+          description={t(locale, 'models.library.subtitle')}
+          actions={
+            <>
+              <Button
+                tone="primary"
+                onClick={() => setAdd({ repo: '', revision: '' })}
+                disabled={busy || downloadPending || !allowed(state, 'download')}
+                data-testid="models-add"
+              >
+                {t(locale, 'models.library.add')}
+              </Button>
+              <Button
+                disabled={busy || rescanPending || !current(state) || readOnly}
+                onClick={() => {
+                  void execute(() => actions.refreshCatalog(crypto.randomUUID()));
+                }}
+                data-testid="models-rescan"
+              >
+                {t(locale, 'models.library.rescan')}
+              </Button>
+              <Button
+                onClick={() => {
+                  void actions.refresh();
+                }}
+                disabled={busy}
+              >
+                {t(locale, 'models.library.refresh')}
+              </Button>
+            </>
+          }
+          // A stale snapshot takes precedence over a local action error: actions are refused
+          // until it is refreshed. Retry (shown only with an error) clears it and refreshes.
+          error={!current(state) ? t(locale, 'models.library.stale') : error === null ? null : t(locale, 'models.library.error')}
+          errorDetail={!current(state) ? (state.error?.message ?? t(locale, 'models.library.waiting')) : error}
+          errorTestId={current(state) ? 'models-action-error' : 'connection-error-title'}
+          onRetry={() => {
+            setError(null);
+            void actions.refresh();
+          }}
+          retryLabel={t(locale, 'models.library.refresh')}
         />
-        <Select
-          locale={locale}
-          label={t(locale, 'models.library.task')}
-          value={filter.task}
-          onChange={(task) => set({ task })}
-          options={[
-            { value: '', label: t(locale, 'models.library.all') },
-            ...[...new Set(state.catalog.flatMap((entry) => entry.capabilities.map((cap) => cap.task)))]
-              .sort()
-              .map((value) => ({ value, label: taskLabel(locale, value) })),
-          ]}
-        />
-        <Select
-          locale={locale}
-          label={t(locale, 'models.library.status')}
-          value={filter.status}
-          onChange={(status) => set({ status })}
-          options={[
-            { value: '', label: t(locale, 'models.library.all') },
-            ...LIFECYCLE_FILTERS.map((value) => ({ value, label: lifecycleLabel(locale, value) })),
-          ]}
-        />
-      </div>
-      {state.pendingReconciliations.size ? (
-        <p role="status" data-testid="models-pending" className="models-pending">
-          {t(locale, 'models.library.pending')}
-        </p>
-      ) : null}
-      <div className="models-layout">
-        <section className="models-list">
-          <DataTable
-            columns={columns}
-            rows={pageRows}
-            getRowKey={(row) => (row.kind === 'download' ? `op:${row.op.operation_id}` : row.entry.identity.id)}
-            ariaLabel={t(locale, 'models.title')}
-            testId="models-table"
-            className="models-table"
-            activateRowPrimary
-            overflowRegionLabel={t(locale, 'models.title')}
-            sortColumnId={sort.column}
-            sortDirection={sort.direction}
-            onSortChange={(column, direction) => {
-              // The third header activation clears the sort in alpha.19; the library always has
-              // one, so a cleared sort returns to the default name order.
-              setSort(column && direction ? { column: column as SortColumn, direction: direction as SortDirection } : DEFAULT_SORT);
-              setPage(0);
-            }}
-            rowClassName={(row) =>
-              row.kind === 'download' ? 'models-download-row' : row.entry.identity.id === state.selectedModelId ? 'models-selected' : undefined
-            }
-            loading={state.catalogSequence === null}
-            loadingState={<LoadingStatus label={t(locale, 'models.library.waiting')} rows={8} />}
-            emptyState={
-              <EmptyState
-                title={t(locale, state.catalog.length === 0 ? 'models.empty.title' : 'models.library.filtered')}
-                body={t(locale, state.catalog.length === 0 ? 'models.empty.body' : 'models.library.filtered_body')}
-                testId="models-empty"
-                action={
-                  state.catalog.length === 0 ? (
-                    <Button onClick={() => setRootsOpen(true)} data-testid="models-roots">
-                      {t(locale, 'models.library.roots')}
-                    </Button>
-                  ) : undefined
-                }
-              />
-            }
+        {readOnly ? (
+          <ErrorBanner tone="info" title={t(locale, 'models.library.single')} body="mlxcel-server --webui" testId="models-read-only" />
+        ) : null}
+        <div className="models-toolbar">
+          <Field label={t(locale, 'models.library.search')} value={filter.query} onChange={(query) => set({ query })} testId="models-search" />
+          <Select
+            locale={locale}
+            label={t(locale, 'models.library.source')}
+            value={filter.source}
+            onChange={(source) => set({ source })}
+            options={[
+              { value: '', label: t(locale, 'models.library.all') },
+              ...[...new Set(state.catalog.map((entry) => entry.identity.source))].sort().map((value) => ({ value, label: sourceLabel(locale, value) })),
+            ]}
           />
-          <nav className="models-pagination" aria-label={t(locale, 'models.title')}>
-            <Button disabled={visiblePage === 0} onClick={() => setPage(visiblePage - 1)}>
-              {t(locale, 'models.library.previous')}
-            </Button>
-            <span role="status">
-              {t(locale, 'models.library.page', {
-                page: String(visiblePage + 1),
-                pages: String(pages),
-                count: String(rows.length),
-              })}
-            </span>
-            <Button disabled={visiblePage >= pages - 1} onClick={() => setPage(visiblePage + 1)}>
-              {t(locale, 'models.library.next')}
-            </Button>
-          </nav>
-        </section>
-        {selected && wide ? <ModelInspector variant="pane" entry={selected} {...inspectorProps} /> : null}
+          <Select
+            locale={locale}
+            label={t(locale, 'models.library.task')}
+            value={filter.task}
+            onChange={(task) => set({ task })}
+            options={[
+              { value: '', label: t(locale, 'models.library.all') },
+              ...[...new Set(state.catalog.flatMap((entry) => entry.capabilities.map((cap) => cap.task)))]
+                .sort()
+                .map((value) => ({ value, label: taskLabel(locale, value) })),
+            ]}
+          />
+          <Select
+            locale={locale}
+            label={t(locale, 'models.library.status')}
+            value={filter.status}
+            onChange={(status) => set({ status })}
+            options={[
+              { value: '', label: t(locale, 'models.library.all') },
+              ...LIFECYCLE_FILTERS.map((value) => ({ value, label: lifecycleLabel(locale, value) })),
+            ]}
+          />
+        </div>
+        {state.pendingReconciliations.size ? (
+          <p role="status" data-testid="models-pending" className="models-pending">
+            {t(locale, 'models.library.pending')}
+          </p>
+        ) : null}
+        <div className="models-layout">
+          <section className="models-list">
+            <DataTable
+              columns={columns}
+              rows={pageRows}
+              getRowKey={(row) => (row.kind === 'download' ? `op:${row.op.operation_id}` : row.entry.identity.id)}
+              ariaLabel={t(locale, 'models.title')}
+              testId="models-table"
+              className="models-table"
+              activateRowPrimary
+              overflowRegionLabel={t(locale, 'models.title')}
+              sortColumnId={sort.column}
+              sortDirection={sort.direction}
+              onSortChange={(column, direction) => {
+                // The third header activation clears the sort in alpha.19; the library always has
+                // one, so a cleared sort returns to the default name order.
+                setLibrarySort(column && direction ? { column: column as SortColumn, direction: direction as SortDirection } : DEFAULT_SORT);
+                setPage(0);
+              }}
+              rowClassName={(row) =>
+                row.kind === 'download' ? 'models-download-row' : row.entry.identity.id === state.selectedModelId ? 'models-selected' : undefined
+              }
+              loading={state.catalogSequence === null}
+              loadingState={<LoadingStatus label={t(locale, 'models.library.waiting')} rows={8} />}
+              emptyState={
+                <EmptyState
+                  title={t(locale, state.catalog.length === 0 ? 'models.empty.title' : 'models.library.filtered')}
+                  body={t(locale, state.catalog.length === 0 ? 'models.empty.body' : 'models.library.filtered_body')}
+                  testId="models-empty"
+                  action={
+                    state.catalog.length === 0 ? (
+                      <Button onClick={() => setRootsOpen(true)} data-testid="models-roots">
+                        {t(locale, 'models.library.roots')}
+                      </Button>
+                    ) : undefined
+                  }
+                />
+              }
+            />
+            <nav className="models-pagination" aria-label={t(locale, 'models.title')}>
+              <Button disabled={visiblePage === 0} onClick={() => setPage(visiblePage - 1)}>
+                {t(locale, 'models.library.previous')}
+              </Button>
+              <span role="status">
+                {t(locale, 'models.library.page', {
+                  page: String(visiblePage + 1),
+                  pages: String(pages),
+                  count: String(rows.length),
+                })}
+              </span>
+              <Button disabled={visiblePage >= pages - 1} onClick={() => setPage(visiblePage + 1)}>
+                {t(locale, 'models.library.next')}
+              </Button>
+            </nav>
+          </section>
+          {selected && wide ? <ModelInspector variant="pane" entry={selected} {...inspectorProps} /> : null}
+        </div>
       </div>
       {selected && !wide ? (
         <ModelInspector variant="drawer" entry={selected} open={drawerOpen} onClose={() => setDrawerOpen(false)} {...inspectorProps} />

@@ -1,36 +1,36 @@
 {
   "budgets": {
-    "embedded_asset_bytes": 852352,
+    "embedded_asset_bytes": 853907,
     "embedded_asset_limit_bytes": 5242880,
-    "initial_js_gzip_bytes": 180660,
+    "initial_js_gzip_bytes": 181119,
     "initial_js_gzip_limit_bytes": 204800,
-    "total_js_gzip_bytes": 181272,
+    "total_js_gzip_bytes": 181732,
     "total_js_gzip_limit_bytes": 716800
   },
   "files": [
     {
       "bytes": 951,
-      "gzip_bytes": 612,
-      "path": "assets/code-highlight-De9YOj0d.js",
-      "sha256": "ba321810d16f4dc621e520fd9c2488089f8cde89dcbe5d174d1a8f0b2b0e41c4"
+      "gzip_bytes": 613,
+      "path": "assets/code-highlight-B2IiiO-1.js",
+      "sha256": "352269201c8b214987018df24b26ab7fdb552ce02523fa5106976020c111a30d"
     },
     {
-      "bytes": 137388,
-      "gzip_bytes": 21807,
-      "path": "assets/index-CB6QNVfo.css",
-      "sha256": "867be0521ad70c43cd0a32a954b70d1cd2cb4075e961034f6caf86eab4839c9f"
+      "bytes": 137465,
+      "gzip_bytes": 21825,
+      "path": "assets/index-B5U0RsHg.css",
+      "sha256": "23836a64534b2144f66f05ce625ed90a96fc57f0e56375556887e327c4c79510"
     },
     {
-      "bytes": 696061,
-      "gzip_bytes": 179671,
-      "path": "assets/index-CDEKMxNt.js",
-      "sha256": "7b652302cbb7f2aa5c1a7f8d617ecab166c753b20d1c3897fbc29bb5ddbaa576"
+      "bytes": 697539,
+      "gzip_bytes": 180130,
+      "path": "assets/index-CxWG7o86.js",
+      "sha256": "283a2ea3487ae66bf3f9fa82bfa09e00a0ae334c21462f76d116756521fbf570"
     },
     {
       "bytes": 503,
-      "gzip_bytes": 303,
+      "gzip_bytes": 302,
       "path": "index.html",
-      "sha256": "73c7145ea1f2a97e2a90f92f5f5ec7e7d156cde4337e79437750025355a542ec"
+      "sha256": "4c23e0bf53f7fe6f798de3f501fe65dd5c9c1356c5fc0804fb074c9d35b39002"
     },
     {
       "bytes": 2129,
@@ -67,5 +67,5 @@
   },
   "pnpm_version": "11.18.0",
   "schema_version": 1,
-  "source_digest_sha256": "aabbe271f967c6da74e3059bbaf769507c2870b0aa8656f0daec7e2660751a0c"
+  "source_digest_sha256": "db9bd25d30de3c9b72e95cde6dfd30baafe8678dc372cbc933ac543da3c3cea8"
 }

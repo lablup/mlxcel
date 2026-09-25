@@ -1,7 +1,7 @@
 // Copyright 2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 import React, { useId, useMemo } from 'react';
 import type { RuntimeSlot, RuntimeSlots } from '../../api/types';
-import { DataTable, ProgressBar, StatusBadge, type DataTableColumn } from '../../design-system/primitives';
+import { DataTable, ProgressBar, StatusBadge, useOverflowRegion, type DataTableColumn } from '../../design-system/primitives';
 import { t, type Locale } from '../../i18n/catalog';
 import { Disclosure } from './disclosure';
 import { formatCount, tokenCount } from './format';
@@ -56,17 +56,19 @@ export function SlotTable({ slots, locale }: { slots: RuntimeSlots; locale: Loca
   const context = slots.request_context_tokens;
   const slotColumns = useMemo(() => columns(locale, context), [locale, context]);
   const unknown = t(locale, 'format.unknown');
+  const scrollRegion = useOverflowRegion({ labelledBy: headingId });
   return <div className="activity-slots">
     <h3 id={headingId}>{t(locale, 'activity.slots')}</h3>
     <p className="activity-slot-meta">
       <span>{t(locale, 'activity.parallel', { effective: slots.effective_parallelism === null ? unknown : formatCount(slots.effective_parallelism, locale), configured: formatCount(slots.configured_parallelism, locale) })}</span>
-      <span>{t(locale, 'activity.context', { tokens: tokenCount(context, locale) })}</span>
+      {/* No denominator (null or 0) reads unknown, as the occupancy cells do. */}
+      <span>{t(locale, 'activity.context', { tokens: context === null || context <= 0 ? unknown : tokenCount(context, locale) })}</span>
       <span>{t(locale, 'activity.pool', { tokens: tokenCount(slots.shared_pool_context_tokens, locale) })}</span>
     </p>
     <SlotReason reason={slots.reason} available={slots.available} locale={locale} />
-    {/* More than eight rows scroll inside this region, not the page. It is a named tab stop so
-        keyboard users can scroll it (axe scrollable-region-focusable), at any width. */}
-    {slots.available ? <div className="activity-slot-scroll" role="region" aria-labelledby={headingId} tabIndex={0} data-bounded={slots.items.length > 8 || undefined}>
+    {/* More than eight rows scroll inside this region, not the page. While it actually overflows
+        it is a named tab stop so keyboard users can scroll it (axe scrollable-region-focusable). */}
+    {slots.available ? <div className="activity-slot-scroll" ref={scrollRegion} data-bounded={slots.items.length > 8 || undefined}>
       <DataTable columns={slotColumns} rows={[...slots.items]} getRowKey={(slot) => String(slot.id)} ariaLabel={t(locale, 'activity.slots')} testId="activity-slot-table" emptyState={<p>{t(locale, 'activity.slots_empty')}</p>} />
     </div> : null}
   </div>;

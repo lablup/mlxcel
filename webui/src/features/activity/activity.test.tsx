@@ -9,6 +9,7 @@ import runtimeFixture from '../../../../tests/fixtures/webui/examples/runtime.sn
 import { validateOperationsList, validateRuntime } from '../../api/validation';
 import { t } from '../../i18n/catalog';
 import { ActivityPage, modelOptions } from './index';
+import { SlotTable } from './slots';
 
 let snapshot: WebUiSnapshot = initialSnapshot();
 const actions = { refresh: vi.fn(async () => undefined), cancelOperation: vi.fn(async () => undefined), selectModel: vi.fn() };
@@ -18,7 +19,7 @@ const entry = catalogFixture.items[0] as CatalogEntry;
 let cleanup = (): void => undefined;
 const occurrences = (element: Element, text: string): number => (element.textContent ?? '').split(text).length - 1;
 beforeEach(() => { vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true); });
-afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); vi.clearAllMocks(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 function mount(locale: 'en' | 'ko' = 'en'): HTMLDivElement {
   const element = document.createElement('div'); document.body.append(element);
   const root = createRoot(element);
@@ -32,10 +33,17 @@ function collapsedText(element: Element): string {
   for (const details of copy.querySelectorAll('details:not([open])')) for (const child of [...details.children]) if (child.tagName !== 'SUMMARY') child.remove();
   return copy.textContent ?? '';
 }
+// One sample of the selected model, as the reducer records it: without one, a live page waits.
 const withRuntime = (slots: Partial<ReturnType<typeof validateRuntime>['slots']>): WebUiSnapshot => {
-  const runtime = validateRuntime(runtimeFixture);
-  return { ...initialSnapshot(), connection: 'ready', selectedModelId: runtime.model_id, runtimes: new Map([[runtime.model_id, { ...runtime, slots: { ...runtime.slots, ...slots } }]]) };
+  const fixture = validateRuntime(runtimeFixture);
+  const runtime = { ...fixture, slots: { ...fixture.slots, ...slots } };
+  return { ...initialSnapshot(), connection: 'ready', selectedModelId: runtime.model_id, runtimes: new Map([[runtime.model_id, runtime]]), runtimeHistory: [{ receivedAt: 1, runtime }], lastUpdatedAt: 1 };
 };
+// jsdom lays nothing out; stand in for the slot box's scroll metrics.
+function stubScrollBox(scrollHeight: number, clientHeight: number): void {
+  vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(scrollHeight);
+  vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(clientHeight);
+}
 
 describe('Activity page', () => {
   it('provides semantic empty state and shared model selection without loading', () => {
@@ -174,5 +182,31 @@ describe('Activity page', () => {
     snapshot = withRuntime({ available: true, reason: 'showing the first 256 observational slots' });
     const element = mount();
     expect(element.textContent).toContain('showing the first 256 observational slots');
+  });
+  it('makes the slot box a named tab stop only while it overflows', () => {
+    const idle = (count: number) => Array.from({ length: count }, (_, id) => ({ id, processing: false, prompt_tokens: null, cached_prompt_tokens: null, decoded_tokens: null }));
+    stubScrollBox(120, 120);
+    snapshot = withRuntime({ available: true, reason: null, request_context_tokens: 40960, items: idle(3) });
+    let region = mount().querySelector('.activity-slot-scroll');
+    expect(region?.hasAttribute('tabindex')).toBe(false);
+    expect(region?.hasAttribute('role')).toBe(false);
+    cleanup();
+    vi.restoreAllMocks();
+    stubScrollBox(900, 320);
+    snapshot = withRuntime({ available: true, reason: null, request_context_tokens: 40960, items: idle(20) });
+    region = mount().querySelector('.activity-slot-scroll');
+    expect(region?.getAttribute('tabindex')).toBe('0');
+    expect(region?.getAttribute('role')).toBe('region');
+    expect(document.getElementById(region?.getAttribute('aria-labelledby') ?? '')?.textContent).toBe(t('en', 'activity.slots'));
+  });
+  it('reads a zero request context as unknown in the slot meta line, as the occupancy cells do', () => {
+    const runtime = validateRuntime(runtimeFixture);
+    const element = document.createElement('div'); document.body.append(element);
+    const root = createRoot(element);
+    act(() => root.render(<SlotTable slots={{ ...runtime.slots, available: true, reason: null, request_context_tokens: 0, items: [] }} locale="en" />));
+    cleanup = () => { act(() => root.unmount()); element.remove(); };
+    const context = [...element.querySelectorAll('.activity-slot-meta span')].find((span) => span.textContent?.startsWith(t('en', 'activity.context', { tokens: '' }).split(':')[0]));
+    expect(context?.textContent).toBe(t('en', 'activity.context', { tokens: t('en', 'format.unknown') }));
+    expect(context?.textContent).not.toContain('0 tokens');
   });
 });

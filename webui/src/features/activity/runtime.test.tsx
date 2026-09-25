@@ -7,6 +7,7 @@ import runtimeFixture from '../../../../tests/fixtures/webui/examples/runtime.sn
 import { validateRuntime } from '../../api/validation';
 import { t } from '../../i18n/catalog';
 import { ActivityPage } from './index';
+import { RuntimeView } from './runtime';
 
 let snapshot: WebUiSnapshot = initialSnapshot();
 const actions = { refresh: vi.fn(async () => undefined), cancelOperation: vi.fn(async () => undefined), selectModel: vi.fn() };
@@ -101,6 +102,23 @@ describe('runtime summary tiles', () => {
     for (const shape of shapes) expect(shape.getAttribute('aria-hidden')).toBe('true');
     expect(element.textContent).not.toContain('N/A');
   });
+  it('waits for a sample instead of showing a re-selected model\'s old tiles under the stale banner', () => {
+    // select-model clears the history but keeps the model's last runtime in the shared map.
+    const runtime = validateRuntime(runtimeFixture);
+    const element = document.createElement('div'); document.body.append(element);
+    const root = createRoot(element);
+    act(() => root.render(<RuntimeView runtime={runtime} points={[]} historyEnd={null} locale="en" stale={false} runtimeStale />));
+    cleanup = () => { act(() => root.unmount()); element.remove(); };
+    expect([...element.querySelectorAll('.activity-runtime [role="status"]')].map((status) => status.textContent)).toEqual([t('en', 'activity.waiting')]);
+    expect(element.textContent).not.toContain(t('en', 'activity.stale'));
+    expect(element.textContent).not.toContain(t('en', 'activity.runtime_stale'));
+    expect(element.querySelector('.stat-card__value')?.textContent ?? '').toBe('');
+    // The first sample brings the tiles.
+    act(() => root.render(<RuntimeView runtime={runtime} points={[]} historyEnd={1} locale="en" stale={false} runtimeStale={false} />));
+    expect(element.querySelector('.activity-runtime [role="status"]')).toBeNull();
+    expect(tiles(element)).toHaveLength(4);
+    expect(element.querySelector('[data-testid="runtime-summary"]')?.getAttribute('aria-busy')).toBeNull();
+  });
   it('keeps a localized empty state without a sample while observations are stale', () => {
     const runtime = validateRuntime(runtimeFixture);
     snapshot = { ...initialSnapshot(), connection: 'offline', selectedModelId: runtime.model_id };
@@ -172,10 +190,10 @@ describe('slot table', () => {
       ['2', 'Idle', '0 / 40,960 tokens', '', ''],
     ]);
     expect(element.querySelector('.activity-slot-meta')?.textContent).toBe(`${t('en', 'activity.parallel', { effective: unknown, configured: '4' })}${t('en', 'activity.context', { tokens: '40,960 tokens' })}${t('en', 'activity.pool', { tokens: unknown })}`);
+    // Three slots do not overflow their box (jsdom lays nothing out): no region, no tab stop.
     const region = element.querySelector('.activity-slot-scroll');
-    expect(region?.getAttribute('role')).toBe('region');
-    expect(region?.getAttribute('tabindex')).toBe('0');
-    expect(document.getElementById(region?.getAttribute('aria-labelledby') ?? '')?.textContent).toBe(t('en', 'activity.slots'));
+    expect(region?.hasAttribute('role')).toBe(false);
+    expect(region?.hasAttribute('tabindex')).toBe(false);
   });
   it('treats a zero request context the same as a missing one: unknown, no bar', () => {
     slots({ request_context_tokens: 0, items: [{ id: 0, processing: true, prompt_tokens: 12, cached_prompt_tokens: 1, decoded_tokens: 2 }, { id: 1, processing: false, prompt_tokens: null, cached_prompt_tokens: null, decoded_tokens: null }] });

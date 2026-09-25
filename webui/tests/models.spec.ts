@@ -4,6 +4,7 @@ import AxeBuilder from '@axe-core/playwright';
 import { expectAxeClean, expectSafeLayout } from './browser-assertions';
 import { model, runtime, bootstrap, loadValidator } from './models-fixtures';
 import type { CatalogEntry, ModelActionRequest, Operation } from '../src/api/types';
+import { isolate } from '../src/features/models/labels';
 
 // Deterministic API composition tests; these do not claim real download/inference acceptance.
 async function installLibrary(page: Page, initial: CatalogEntry[] = []) {
@@ -176,7 +177,7 @@ test('library journey observes operations before load/chat/unload/cache removal'
   await expect(page.getByRole('progressbar')).not.toHaveAttribute('aria-valuenow');
   api.finish('download');
   await refresh(page);
-  await page.getByRole('button', { name: `Inspect ${model().identity.display_name}`, exact: true }).click();
+  await page.getByRole('button', { name: `Inspect ${isolate(model().identity.display_name)}`, exact: true }).click();
   await expect(page.getByTestId('models-load')).toBeEnabled();
   await page.getByTestId('models-load').click();
   await expect.poll(() => api.posts.length).toBe(2);
@@ -278,7 +279,7 @@ test.describe('Models row activation', () => {
   const inspector = (page: Page) => page.getByRole('complementary', { name: 'Model details' });
   const inspected = (page: Page) => inspector(page).getByRole('heading', { level: 3 });
   const inspect = (page: Page, entry: CatalogEntry) =>
-    page.getByRole('button', { name: `Inspect ${entry.identity.display_name}`, exact: true });
+    page.getByRole('button', { name: `Inspect ${isolate(entry.identity.display_name)}`, exact: true });
 
   test('clicking a non-name cell opens that entry and reaches Load, Use in Chat and Unload', async ({ page }) => {
     const catalog = entries();
@@ -490,7 +491,7 @@ test.describe('Models row actions', () => {
     };
     const api = await installLibrary(page, entries);
     await login(page);
-    await page.getByRole('button', { name: 'Inspect alpha-4bit', exact: true }).click();
+    await page.getByRole('button', { name: `Inspect ${isolate('alpha-4bit')}`, exact: true }).click();
     const drawer = page.getByRole('dialog', { name: 'Model details' });
     await expect(drawer).toBeVisible();
     await drawer.getByTestId('models-delete').click();
@@ -501,7 +502,7 @@ test.describe('Models row actions', () => {
     await drawer.getByRole('button', { name: 'Close', exact: true }).click();
     await expect(drawer).toBeHidden();
     // A confirmed Unload disables the control that opened it; focus stays in the drawer, not on the page behind it.
-    await page.getByRole('button', { name: 'Inspect bravo-4bit', exact: true }).click();
+    await page.getByRole('button', { name: `Inspect ${isolate('bravo-4bit')}`, exact: true }).click();
     await expect(drawer.getByRole('heading', { level: 3 })).toHaveText('bravo-4bit');
     await drawer.getByTestId('models-unload').click();
     await page.getByTestId('models-confirm-submit').click();
@@ -517,7 +518,7 @@ test.describe('Models row actions', () => {
     await page.setViewportSize({ width: 390, height: 844 });
     await installLibrary(page, catalog());
     await login(page);
-    await page.getByRole('button', { name: 'Inspect alpha-4bit', exact: true }).click();
+    await page.getByRole('button', { name: `Inspect ${isolate('alpha-4bit')}`, exact: true }).click();
     const drawer = page.getByRole('dialog', { name: 'Model details' });
     await expect(drawer).toBeVisible();
     const remove = drawer.getByTestId('models-delete');

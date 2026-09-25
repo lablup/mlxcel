@@ -7,6 +7,8 @@ import type { WebUiSnapshot, Operation, RuntimeSnapshot } from '../../api/types'
 import { validateRuntime } from '../../api/validation';
 import { WebUiHttpError } from '../../api/client';
 import { t } from '../../i18n/catalog';
+import { isolate } from './labels';
+import { resetLibraryView } from './library-view';
 import { ModelsLibrary } from './screen';
 import { model, snapshot } from './test-fixtures';
 
@@ -27,6 +29,8 @@ let host: HTMLDivElement;
 beforeEach(() => {
   state = snapshot();
   vi.resetAllMocks();
+  // Search, filters and sort outlive a mount for the session; each test starts from a reload.
+  act(() => resetLibraryView());
   HTMLDialogElement.prototype.showModal = function () {
     this.setAttribute('open', '');
   };
@@ -424,7 +428,7 @@ describe('library row activation', () => {
     const busy = { ...entries[0], lifecycle: { ...entries[0].lifecycle, state: 'loading' as const, busy: true } };
     state = { ...state, catalog: [busy, entries[1]], selectedModelId: null };
     render();
-    const name = requireValue(host.querySelector<HTMLButtonElement>(`[aria-label="Inspect ${busy.identity.display_name}"]`));
+    const name = requireValue(host.querySelector<HTMLButtonElement>(`[aria-label="Inspect ${isolate(busy.identity.display_name)}"]`));
     expect(name.disabled).toBe(false);
     await act(async () => name.click());
     expect(actions.selectModel.mock.calls).toEqual([[busy.identity.id]]);
@@ -438,7 +442,7 @@ describe('library row activation', () => {
     render();
     await act(async () => rowCell(0, 1).click());
     expect(actions.selectModel).not.toHaveBeenCalled();
-    const name = requireValue(host.querySelector<HTMLButtonElement>(`[aria-label="Inspect ${entries[0].identity.display_name}"]`));
+    const name = requireValue(host.querySelector<HTMLButtonElement>(`[aria-label="Inspect ${isolate(entries[0].identity.display_name)}"]`));
     await act(async () => name.click());
     expect(actions.selectModel).not.toHaveBeenCalled();
     await act(async () => rowCell(1, 1).click());
@@ -474,7 +478,7 @@ describe('library row actions', () => {
     state = { ...state, catalog: [model(), ready(other)] };
     render();
     expect(inRow('bravo', 'models-row-load')).toBeNull();
-    expect(inRow('bravo', 'models-row-chat')?.getAttribute('aria-label')).toBe(t('en', 'models.library.chat_named', { name: 'bravo' }));
+    expect(inRow('bravo', 'models-row-chat')?.getAttribute('aria-label')).toBe(t('en', 'models.library.chat_named', { name: isolate('bravo') }));
     await act(async () => inRow('bravo', 'models-row-unload')?.click());
     expect(actions.unloadModel).not.toHaveBeenCalled();
     await click('models-confirm-submit');
@@ -544,7 +548,7 @@ describe('library row actions', () => {
     expect(inRow('alpha', 'models-row-load')).toBeNull();
     const unload = requireValue(inRow('alpha', 'models-row-unload'));
     expect(unload.disabled).toBe(false);
-    expect(unload.getAttribute('aria-label')).toBe(t('en', 'models.library.unload_named', { name: 'alpha' }));
+    expect(unload.getAttribute('aria-label')).toBe(t('en', 'models.library.unload_named', { name: isolate('alpha') }));
     await act(async () => unload.click());
     expect(host.querySelector('[data-testid="models-confirm"]')).not.toBeNull();
     expect(actions.unloadModel).not.toHaveBeenCalled();
@@ -664,6 +668,79 @@ describe('library row actions', () => {
   });
 });
 
+// #1974: row labels, focus that follows a re-sorted row, view state across a remount, stable refs.
+describe('library rows and view state', () => {
+  const ready = (entry = model()) => ({
+    ...entry,
+    lifecycle: { ...entry.lifecycle, state: 'ready' as const, worker_exit_observed: false },
+    capabilities: [{ task: 'chat' as const, phase: 'provider_ready' as const, available: true, reason: null }],
+  });
+  const named = (id: string, display_name: string) => ({ ...model(), identity: { ...model().identity, id, display_name } });
+  const row = (name: string): HTMLTableRowElement =>
+    requireValue([...host.querySelectorAll<HTMLTableRowElement>('[data-testid="models-table"] tbody tr')].find((item) => item.querySelector('.truncate')?.textContent === name) ?? null);
+  const inRow = (name: string, id: string): HTMLButtonElement | null => row(name).querySelector<HTMLButtonElement>(`[data-testid="${id}"]`);
+  const pager = (): string => host.querySelector('.models-pagination [role="status"]')?.textContent ?? '';
+
+  it('isolates the model name in every row label and tooltip so bidi controls cannot reorder them', () => {
+    const name = 'a‮b';
+    state = { ...state, catalog: [named('mdl_bidi', name)], selectedModelId: null };
+    render();
+    const inspect = requireValue(row(name).querySelector<HTMLButtonElement>('[aria-label^="Inspect"]'));
+    expect(inspect.getAttribute('aria-label')).toBe('Inspect ⁨a‮b⁩');
+    expect(inspect.getAttribute('title')).toBe('Inspect ⁨a‮b⁩');
+    expect(inRow(name, 'models-row-load')?.getAttribute('aria-label')).toBe(t('en', 'models.library.load_named', { name: '⁨a‮b⁩' }));
+    expect(inRow(name, 'models-row-delete')?.getAttribute('aria-label')).toBe(t('en', 'models.library.delete_named', { name: '⁨a‮b⁩' }));
+    expect(inRow(name, 'models-row-delete')?.getAttribute('title')).toBe(t('en', 'models.library.delete_named', { name: '⁨a‮b⁩' }));
+  });
+
+  it('follows a row Unload to the page the row re-sorts onto and focuses its Load there', async () => {
+    const others = Array.from({ length: 29 }, (_, index) => named(`mdl_page_${index}`, `m-${String(index).padStart(2, '0')}`));
+    const target = ready(named('mdl_page_ready', 'zz-ready'));
+    state = { ...state, catalog: [...others, target], selectedModelId: null };
+    render();
+    expect(pager()).toBe(t('en', 'models.library.page', { page: '1', pages: '2', count: '30' }));
+    const unload = requireValue(inRow('zz-ready', 'models-row-unload'));
+    act(() => unload.focus());
+    await act(async () => unload.click());
+    await click('models-confirm-submit');
+    expect(actions.unloadModel).toHaveBeenCalledTimes(1);
+    // Unloaded, the row leaves the Ready pin at the top and sorts last by name: page 2.
+    state = { ...state, catalog: [...others, { ...named('mdl_page_ready', 'zz-ready'), identity: { ...target.identity, revision: 6 } }] };
+    render();
+    expect(pager()).toBe(t('en', 'models.library.page', { page: '2', pages: '2', count: '30' }));
+    expect(document.activeElement).toBe(inRow('zz-ready', 'models-row-load'));
+  });
+
+  it('keeps the search and sort across a remount, as a round trip through Chat does', async () => {
+    state = { ...state, catalog: [named('mdl_kilo', 'kilo-x'), named('mdl_bravo', 'bravo')], selectedModelId: null };
+    render();
+    await input('models-search', 'kilo-');
+    await act(async () => requireValue(host.querySelector<HTMLElement>('[data-testid="models-table"] th.models-col-size')).click());
+    act(() => root.unmount());
+    root = createRoot(host);
+    render();
+    expect(host.querySelector<HTMLInputElement>('[data-testid="models-search"]')?.value).toBe('kilo-');
+    expect(host.querySelector('[data-testid="models-table"] th.models-col-size')?.getAttribute('aria-sort')).toBe('ascending');
+    expect([...host.querySelectorAll('[data-testid="models-table"] tbody tr .truncate')].map((node) => node.textContent)).toEqual(['kilo-x']);
+  });
+
+  it('keeps every row control\'s callback ref across an unrelated re-render', () => {
+    state = { ...state, catalog: [model(), ready(named('mdl_ready', 'ready-one'))], selectedModelId: null };
+    render();
+    // A new callback ref per render makes React detach the old one (a null call, which deletes
+    // the control from the registry) and attach the new one on every render.
+    const deleted = vi.spyOn(Map.prototype, 'delete');
+    try {
+      state = { ...state, lastUpdatedAt: 1 };
+      render();
+      expect(deleted.mock.calls.filter(([key]) => typeof key === 'string' && /:(inspect|load|chat|unload)$/.test(key))).toEqual([]);
+    } finally {
+      deleted.mockRestore();
+    }
+    expect(inRow('ready-one', 'models-row-chat')).not.toBeNull();
+  });
+});
+
 // #1918: internal identifiers and raw reasons are not user copy outside the Details disclosure.
 describe('inspector Details disclosure', () => {
   it('renders no opaque id, operation id or raw reason until Details is opened', async () => {
@@ -748,6 +825,26 @@ describe('inspector below 1100 px', () => {
     render();
     await act(async () => { await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))); });
     expect(requireValue(host.querySelector<HTMLElement>('aside.drawer')).classList.contains('drawer--open')).toBe(false);
+  });
+  it('makes the page behind the open drawer inert, and only while it is open or narrow', async () => {
+    const layout = (): Element => requireValue(host.querySelector('.models-layout'));
+    const inspect = async (): Promise<void> => { await act(async () => requireValue(host.querySelector<HTMLButtonElement>('[aria-label^="Inspect"]')).click()); };
+    // 1100 px and wider: the inspector is a pane beside the list, and nothing is inert.
+    render();
+    await inspect();
+    expect(layout().closest('[inert]')).toBeNull();
+    act(() => root.unmount());
+    root = createRoot(host);
+    narrow();
+    render();
+    expect(layout().closest('[inert]')).toBeNull();
+    await inspect();
+    expect(layout().closest('[inert]')).not.toBeNull();
+    expect(host.querySelector('.models-toolbar')?.closest('[inert]')).not.toBeNull();
+    expect(host.querySelector('.models-pagination')?.closest('[inert]')).not.toBeNull();
+    expect(host.querySelector('aside.drawer')?.closest('[inert]')).toBeNull();
+    await act(async () => requireValue(host.querySelector<HTMLButtonElement>('aside.drawer .drawer__close-btn')).click());
+    expect(layout().closest('[inert]')).toBeNull();
   });
   it('opens as a drawer dialog from Inspect, never from a remembered selection, and closing keeps the selection', async () => {
     vi.stubGlobal('matchMedia', (query: string) => ({ matches: !query.includes('min-width: 1100px'), media: query, addEventListener: () => undefined, removeEventListener: () => undefined }));

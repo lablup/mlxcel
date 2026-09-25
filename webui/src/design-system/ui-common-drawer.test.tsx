@@ -258,6 +258,24 @@ describe('Drawer variants and Escape ownership', () => {
     act(() => { field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
     expect(onClose).toHaveBeenCalledOnce();
   });
+  it('lets a Tab between the edges reach a descendant handler, and still stops one from the package\'s stale last stop', async () => {
+    const seen = vi.fn();
+    // The package records its Tab cycle at open with a selector that has no <summary>: it believes Last is the last stop.
+    act(() => root.render(<Drawer open onClose={() => undefined} title="Sheet" closeLabel="Close" testId="variant-sheet"><button type="button" data-testid="first-control">First</button><button type="button" data-testid="middle-control" onKeyDown={(event) => seen(event.key)}>Middle</button><button type="button" data-testid="last-control" onKeyDown={(event) => seen(event.key)}>Last</button><details open><summary>More</summary></details></Drawer>));
+    await frames();
+    const control = (id: string): HTMLElement => { const element = sheet().querySelector<HTMLElement>(`[data-testid="${id}"]`); if (!element) throw new Error(`Missing ${id}`); return element; };
+    const tab = (target: HTMLElement): KeyboardEvent => { const event = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }); act(() => { target.dispatchEvent(event); }); return event; };
+    act(() => control('middle-control').focus());
+    // Neither the adapter nor the package wraps here: the browser moves focus, and the control's own handler sees the key.
+    expect(tab(control('middle-control')).defaultPrevented).toBe(false);
+    expect(seen).toHaveBeenCalledWith('Tab');
+    seen.mockClear();
+    // From Last the package would wrap early to the close button, skipping More; the adapter stops that Tab.
+    act(() => control('last-control').focus());
+    expect(tab(control('last-control')).defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(control('last-control'));
+    expect(seen).not.toHaveBeenCalled();
+  });
   it('wraps Tab at the controls usable now, not the ones it saw when it opened', async () => {
     const Panel = ({ locked }: { locked: boolean }): React.JSX.Element => <Drawer open onClose={() => undefined} title="Sheet" closeLabel="Close" testId="variant-sheet"><button type="button" data-testid="first-control">First</button><button type="button" data-testid="middle-control">Middle</button><button type="button" data-testid="last-control" disabled={locked}>Last</button></Drawer>;
     act(() => root.render(<Panel locked={false} />));
