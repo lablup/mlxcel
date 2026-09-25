@@ -112,7 +112,7 @@ pub struct CatalogMetadata {
     pub quantization: Option<String>,
     /// Declared weight dtype from `config.json` (`torch_dtype`, or `dtype` in newer
     /// exports), normalized to a short name such as `bf16`; `None` when absent or
-    /// not a bounded identifier. Reported for quantized checkpoints too, where it
+    /// not a recognized tensor dtype (`auto` included). Reported for quantized checkpoints too, where it
     /// names the unquantized tensors.
     pub dtype: Option<String>,
     pub format: Option<String>,

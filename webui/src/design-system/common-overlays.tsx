@@ -49,7 +49,9 @@ export function Drawer(props: { open: boolean; onClose: () => void; title: strin
       if ((event.key !== 'Escape' && event.key !== 'Tab') || event.isComposing || event.defaultPrevented) return;
       const panel = hostRef.current?.querySelector<HTMLElement>('.drawer');
       if (panel && event.target instanceof Node && panel.contains(event.target)) return;
-      if (event.target instanceof Element && event.target.closest('dialog[open]')) return;
+      // Any open native modal owns the keyboard, even when focus fell to <body> after a pointer
+      // press on its non-focusable text: the drawer beneath it is inert until it closes.
+      if (document.querySelector('dialog[open]')) return;
       if (event.key === 'Escape') {
         close();
         return;

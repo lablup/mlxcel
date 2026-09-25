@@ -167,9 +167,34 @@ describe('drawer adapter keyboard contract', () => {
     act(() => { cancel.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
     await frames();
     expect(onClose).not.toHaveBeenCalled();
-    // An Escape that starts outside both the panel and any dialog still closes the drawer.
+    // jsdom does not close the native dialog on Escape; once it is gone, an Escape that starts
+    // outside both the panel and any dialog still closes the drawer.
+    act(() => root.render(
+      <Drawer open title="Panel" closeLabel="Close" onClose={onClose} testId="test-drawer" width="medium" side="end">
+        <button type="button">First</button>
+      </Drawer>,
+    ));
     act(() => { document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves the drawer open for an Escape or Tab from <body> while a native dialog is open above it', async () => {
+    const onClose = vi.fn();
+    act(() => root.render(
+      <>
+        <Drawer open title="Panel" closeLabel="Close" onClose={onClose} testId="test-drawer" width="medium" side="end">
+          <button type="button">First</button>
+        </Drawer>
+        <Dialog open title="Confirm" onClose={() => undefined} testId="test-confirm"><p>Body text</p></Dialog>
+      </>,
+    ));
+    await frames();
+    // A pointer press on the dialog's non-focusable text leaves focus on <body>.
+    act(() => (document.activeElement as HTMLElement | null)?.blur());
+    const escape = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    act(() => { document.body.dispatchEvent(escape); });
+    expect(onClose).not.toHaveBeenCalled();
+    expect(tab(document.body).defaultPrevented).toBe(false);
   });
 
   it('brings a Tab that starts outside the open panel back into it instead of walking the page behind', async () => {

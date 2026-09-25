@@ -518,6 +518,24 @@ describe('library row actions', () => {
     expect(document.activeElement).toBe(inRow('alpha', 'models-row-load'));
   });
 
+  it('keeps focus on a row Load that failed, and does not pull focus into that row once it is Ready later', async () => {
+    state = { ...state, catalog: [model()], selectedModelId: null };
+    render();
+    actions.loadModel.mockRejectedValueOnce(new Error('load failed'));
+    const load = requireValue(inRow('alpha', 'models-row-load'));
+    act(() => load.focus());
+    await act(async () => load.click());
+    expect(actions.loadModel).toHaveBeenCalledTimes(1);
+    render();
+    expect(document.activeElement).toBe(inRow('alpha', 'models-row-load'));
+    // Ready through another path (another tab, the inspector): the failed intent must not fire.
+    act(() => (document.activeElement as HTMLElement | null)?.blur());
+    state = { ...state, catalog: [{ ...ready(), identity: { ...model().identity, revision: 6 } }] };
+    render();
+    expect(document.activeElement).not.toBe(inRow('alpha', 'models-row-chat'));
+    expect(document.activeElement).toBe(document.body);
+  });
+
   it('releases a Ready model without chat from its row: Unload, not a disabled Load', async () => {
     const embedding = { ...ready(), capabilities: [{ task: 'embedding' as const, phase: 'provider_ready' as const, available: true, reason: null }] };
     state = { ...state, catalog: [embedding], selectedModelId: null };

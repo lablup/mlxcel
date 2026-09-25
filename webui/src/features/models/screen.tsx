@@ -66,7 +66,9 @@ type RowTarget = 'load' | 'chat' | 'unload';
  * preference: the first that exists and is enabled wins. `from` is the control the action started
  * from, which the action disables.
  */
-type RowFocus = { id: string; want: readonly RowTarget[]; from: Element | null };
+// `once`: a failed action's return trip. Focus goes back to the control the user pressed if it
+// is usable on the next render, and the intent is dropped either way instead of waiting.
+type RowFocus = { id: string; want: readonly RowTarget[]; from: Element | null; once?: boolean };
 /** After a Load: Use in Chat for a chat model; Unload for one without chat (embedding, rerank, transcription). */
 const AFTER_LOAD: readonly RowTarget[] = ['chat', 'unload'];
 const AFTER_UNLOAD: readonly RowTarget[] = ['load'];
@@ -113,6 +115,11 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
   useEffect(() => {
     if (consumeInspectorRequest() && !wide) setDrawerOpen(true);
   }, [inspectRequest]);
+  // The drawer unmounts at the wide breakpoint; forget it was open so narrowing the window
+  // again does not reopen it over the list without a request.
+  useEffect(() => {
+    if (wide) setDrawerOpen(false);
+  }, [wide]);
 
   // Focus follows a row action to the control that replaces the one used, but only while the
   // user has not moved on: focus is still on that row's Inspect button (where it waits) or nowhere.
@@ -131,9 +138,10 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
       return;
     }
     if (target) {
-      target.focus();
+      target.focus({ preventScroll: true });
       rowFocus.current = null;
-    } else if (holder && active !== holder && !document.querySelector('dialog[open]')) holder.focus();
+    } else if (pending.once) rowFocus.current = null;
+    else if (holder && active !== holder && !document.querySelector('dialog[open]')) holder.focus({ preventScroll: true });
   });
 
   const set = (patch: Partial<InventoryFilter>): void => {
@@ -163,7 +171,16 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
   ): void => {
     // The entry's own profile, read now: a row loads entries other than the selected one.
     const profile: LoadProfile = loadProfileFor(entry.identity.id);
+    // A load that does not start or fails ends the row's focus intent: armed, it would pull
+    // focus into that row whenever the row next became ready by any other path.
+    const dropFocus = (): void => {
+      rowFocus.current = null;
+    };
+    const returnFocus = (): void => {
+      if (rowFocus.current) rowFocus.current = { id: rowFocus.current.id, want: ['load'], from: null, once: true };
+    };
     if (!canLoad(state, entry)) {
+      dropFocus();
       setError(t(locale, 'models.library.stale'));
       return;
     }
@@ -173,6 +190,7 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
         (candidate) => candidate.identity.id === evictionTarget.id && candidate.identity.revision === evictionTarget.revision,
       )
     ) {
+      dropFocus();
       setError(t(locale, 'models.library.stale'));
       return;
     }
@@ -185,6 +203,7 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
         () => setConfirmation({ kind: 'capacity', entry, instance: state.serverInstanceId }),
         evictionTarget,
       ),
+      returnFocus,
     );
   };
   // The one path from a row or the inspector into a lifecycle action: Load runs at once (it
@@ -243,6 +262,9 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
             expected_revision: entry.identity.revision,
             idempotency_key: crypto.randomUUID(),
           }),
+          () => {
+            if (rowFocus.current) rowFocus.current = { id: rowFocus.current.id, want: ['unload'], from: null, once: true };
+          },
         );
       } else if (value.kind === 'delete' && canDelete(state, entry))
         void execute(() =>
@@ -629,7 +651,11 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
           state={state}
           locale={locale}
           busy={busy}
-          onClose={() => setConfirmation(null)}
+          onClose={() => {
+            // Cancelled: a capacity confirmation after a row Load conflict leaves nothing to follow.
+            rowFocus.current = null;
+            setConfirmation(null);
+          }}
           onConfirm={confirm}
         />
       ) : null}
