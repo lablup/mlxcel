@@ -711,6 +711,33 @@ describe('library rows and view state', () => {
     expect(document.activeElement).toBe(inRow('zz-ready', 'models-row-load'));
   });
 
+  it('does not turn the page back when the user pages away from a row whose action is still settling', async () => {
+    const others = Array.from({ length: 29 }, (_, index) => named(`mdl_page_${index}`, `m-${String(index).padStart(2, '0')}`));
+    const target = ready(named('mdl_page_ready', 'zz-ready'));
+    state = { ...state, catalog: [...others, target], selectedModelId: null };
+    render();
+    const unload = requireValue(inRow('zz-ready', 'models-row-unload'));
+    act(() => unload.focus());
+    await act(async () => unload.click());
+    await click('models-confirm-submit');
+    // Still draining: the intent waits on the row's Inspect button.
+    state = { ...state, catalog: [...others, { ...target, lifecycle: { ...target.lifecycle, state: 'draining' as const, busy: true } }] };
+    render();
+    // A pointer press that does not focus the button (Safari, Firefox on macOS; jsdom's click()):
+    // focus falls to <body> when the row leaves the page, which alone must not bring the page back.
+    const next = requireValue([...host.querySelectorAll<HTMLButtonElement>('.models-pagination button')].at(-1) ?? null);
+    await act(async () => next.click());
+    expect(pager()).toBe(t('en', 'models.library.page', { page: '2', pages: '2', count: '30' }));
+    const previous = requireValue(host.querySelector<HTMLButtonElement>('.models-pagination button'));
+    await act(async () => previous.click());
+    await act(async () => next.click());
+    expect(pager()).toBe(t('en', 'models.library.page', { page: '2', pages: '2', count: '30' }));
+    // The user moved on: the settled row does not pull focus either.
+    state = { ...state, catalog: [...others, { ...named('mdl_page_ready', 'zz-ready'), identity: { ...target.identity, revision: 6 } }] };
+    render();
+    expect(document.activeElement).not.toBe(inRow('zz-ready', 'models-row-load'));
+  });
+
   it('keeps the search and sort across a remount, as a round trip through Chat does', async () => {
     state = { ...state, catalog: [named('mdl_kilo', 'kilo-x'), named('mdl_bravo', 'bravo')], selectedModelId: null };
     render();

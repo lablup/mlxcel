@@ -68,7 +68,9 @@ type RowTarget = 'load' | 'chat' | 'unload';
  */
 // `once`: a failed action's return trip. Focus goes back to the control the user pressed if it
 // is usable on the next render, and the intent is dropped either way instead of waiting.
-type RowFocus = { id: string; want: readonly RowTarget[]; from: Element | null; once?: boolean };
+// `page`: the page the row was last seen on, so a re-sort that moves it is told apart from the
+// user turning the page away from it.
+type RowFocus = { id: string; want: readonly RowTarget[]; from: Element | null; once?: boolean; page?: number };
 /** After a Load: Use in Chat for a chat model; Unload for one without chat (embedding, rerank, transcription). */
 const AFTER_LOAD: readonly RowTarget[] = ['chat', 'unload'];
 const AFTER_UNLOAD: readonly RowTarget[] = ['load'];
@@ -141,8 +143,10 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
     }
     // The lifecycle pin re-sorts a row whose state changed, often onto another page (an unloaded
     // row leaves the Ready group at the top). Follow it there; the next render focuses it. A
-    // filter that now hides the row ends the intent. A failed action's return trip (`once`)
-    // never turns the page.
+    // filter that now hides the row ends the intent, and so does the user turning the page away
+    // from a row that has not moved: a pointer press that does not focus the pager (Safari,
+    // Firefox on macOS) leaves focus on <body>, which alone must not turn the page back. A
+    // failed action's return trip (`once`) never turns the page.
     if (!pending.once) {
       const index = rows.findIndex((entry) => entry.identity.id === pending.id);
       if (index === -1) {
@@ -150,6 +154,11 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
         return;
       }
       const rowPage = Math.floor(index / PAGE_SIZE);
+      if (rowPage !== visiblePage && pending.page === rowPage) {
+        rowFocus.current = null;
+        return;
+      }
+      pending.page = rowPage;
       if (rowPage !== visiblePage) {
         setPage(rowPage);
         return;

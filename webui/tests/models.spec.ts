@@ -494,6 +494,11 @@ test.describe('Models row actions', () => {
     await page.getByRole('button', { name: `Inspect ${isolate('alpha-4bit')}`, exact: true }).click();
     const drawer = page.getByRole('dialog', { name: 'Model details' });
     await expect(drawer).toBeVisible();
+    // The page behind the open drawer is inert; the drawer and the confirmation above it are not.
+    await expect(page.locator('.models-layout')).toBeVisible();
+    expect(await page.locator('.models-layout').evaluate((element) => element.closest('[inert]') !== null)).toBe(true);
+    // inert holds through the display: contents wrapper: a control behind the drawer cannot take focus.
+    expect(await page.getByTestId('models-search').evaluate((element) => { (element as HTMLElement).focus(); return document.activeElement === element; })).toBe(false);
     await drawer.getByTestId('models-delete').click();
     await expect(page.getByTestId('models-confirm')).toBeVisible();
     await page.getByTestId('models-confirm').getByRole('button', { name: 'Cancel', exact: true }).click();
@@ -501,6 +506,10 @@ test.describe('Models row actions', () => {
     await expect(drawer.getByTestId('models-delete')).toBeFocused();
     await drawer.getByRole('button', { name: 'Close', exact: true }).click();
     await expect(drawer).toBeHidden();
+    // Closed, the page is live again and focus is back on the Inspect button that opened the drawer,
+    // even though that button sat under the inert wrapper while the drawer was open.
+    expect(await page.locator('.models-layout').evaluate((element) => element.closest('[inert]') === null)).toBe(true);
+    await expect(page.getByRole('button', { name: `Inspect ${isolate('alpha-4bit')}`, exact: true })).toBeFocused();
     // A confirmed Unload disables the control that opened it; focus stays in the drawer, not on the page behind it.
     await page.getByRole('button', { name: `Inspect ${isolate('bravo-4bit')}`, exact: true }).click();
     await expect(drawer.getByRole('heading', { level: 3 })).toHaveText('bravo-4bit');
