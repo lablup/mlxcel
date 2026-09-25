@@ -88,6 +88,8 @@
 .ds-stat-card .stat-card__hint { color: var(--color-muted); font-size: 0.85rem; }
 .ds-stat-card .stat-card__hint p { margin: var(--space-1) 0 0; }
 .base-card.ds-stat-card:hover { box-shadow: none; transform: none; }
+/* StatCard loading: the host only carries the ref bridge that makes the skeletons decorative; it adds no box. */
+.ds-stat-card-loading { display: contents; }
 /* LoadingStatus: decorative Skeleton rows under one visible, localized status line. */
 .ds-loading { display: grid; gap: var(--space-2); }
 .ds-loading__label { margin: 0; color: var(--color-muted); }

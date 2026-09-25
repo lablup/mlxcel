@@ -6,6 +6,7 @@ import operationsFixture from '../../../tests/fixtures/webui/examples/operations
 import type { Operation, WebUiSnapshot } from '../api/types';
 import { validateOperationsList } from '../api/validation';
 import { ActivityPage } from '../features/activity';
+import { t } from '../i18n/catalog';
 import { initialSnapshot } from '../state/reducer';
 import { SmoothHeight } from './common-layout';
 
@@ -30,7 +31,7 @@ const pinned = (list: Element): boolean => Boolean(list.closest('.smooth-height-
 describe('Activity operations list height animation', () => {
   it('never pins or clips the list once every operation has settled', async () => {
     const list = show('succeeded');
-    expect(list.textContent).toContain('succeeded');
+    expect(list.textContent).toContain(t('en', 'activity.state.succeeded'));
     expect(pinned(list)).toBe(false);
     await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 600)); });
     expect(pinned(show('succeeded'))).toBe(false);
@@ -39,7 +40,7 @@ describe('Activity operations list height animation', () => {
 
   it('animates while an operation is in flight and releases after the last one settles', async () => {
     const list = show('running');
-    expect(list.textContent).toContain('running');
+    expect(list.textContent).toContain(t('en', 'activity.state.running'));
     expect(pinned(list)).toBe(true);
     expect(pinned(show('succeeded'))).toBe(true);
     await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 600)); });
