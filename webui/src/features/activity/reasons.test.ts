@@ -18,6 +18,7 @@ describe('server reason mapping', () => {
     expect(metricReasonKey({ ...metric, reason: 'metrics disabled; restart with --metrics' })).toBe('activity.reason.metrics_disabled');
     expect(metricReasonKey({ ...metric, reason: 'something new' })).toBe('activity.reason.see_details');
     expect(metricReasonKey({ ...metric, reason: null })).toBe('activity.reason.see_details');
-    expect(metricReasonKey(undefined)).toBe('activity.reason.see_details');
+    // Absent from the snapshot, so the disclosure does not list it either.
+    expect(metricReasonKey(undefined)).toBe('activity.reason.counter_unavailable');
   });
 });

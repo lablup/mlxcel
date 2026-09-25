@@ -47,10 +47,17 @@ describe('runtime summary tiles', () => {
     for (const tile of [completed, tokens, queued]) expect(tile.querySelector('.stat-card__value')?.textContent).toBe(t(locale, 'format.unknown'));
     expect(tokens.textContent).toContain(t(locale, 'activity.reason.metrics_disabled'));
     expect(queued.textContent).toContain(t(locale, 'activity.reason.see_details'));
-    expect(completed.textContent).toContain(t(locale, 'activity.reason.see_details'));
+    expect(completed.textContent).toContain(t(locale, 'activity.reason.counter_unavailable'));
+    expect(completed.textContent).not.toContain(t(locale, 'activity.reason.see_details'));
     // Raw server reasons stay out of the tiles.
     for (const raw of ['metrics disabled', 'a reason the page has never seen', 'Authoritative route completions']) expect(element.querySelector('[data-testid="runtime-summary"]')?.textContent).not.toContain(raw);
     expect(element.querySelector('[data-testid="runtime-summary"]')?.textContent).not.toContain('GPU');
+  });
+  it('reads a measured tile without an observation time as such, not "Observed at" an unknown time', () => {
+    observe({ active_requests: { ...measured(2, 'requests'), measured_at: null } });
+    const [active] = tiles(mount('en'));
+    expect(active.textContent).toContain(t('en', 'activity.unknown_time'));
+    expect(active.textContent).not.toContain(t('en', 'activity.observed_at', { time: '' }).trim());
   });
   it('draws the active-request sparkline as one path once two samples exist', () => {
     const runtime = observe({ active_requests: measured(1, 'requests') });

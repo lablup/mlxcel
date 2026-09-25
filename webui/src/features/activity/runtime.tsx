@@ -40,7 +40,11 @@ export function RuntimeView({ runtime, points, historyEnd, locale, stale, runtim
   const unavailable = entries.filter(([, metric]) => !measured(metric)).length;
   const tiles = PRIMARY.map((name) => {
     const metric = runtime.measurements[name];
-    const hint = measured(metric) ? t(locale, 'activity.observed_at', { time: clockTime(metric.measured_at, locale) }) : t(locale, metricReasonKey(metric));
+    const hint = !measured(metric)
+      ? t(locale, metricReasonKey(metric))
+      : metric.measured_at === null
+        ? t(locale, 'activity.unknown_time')
+        : t(locale, 'activity.observed_at', { time: clockTime(metric.measured_at, locale) });
     const sparkline = name === 'active_requests' && points.length >= 2 && historyEnd !== null ? <Sparkline points={points} end={historyEnd} locale={locale} /> : undefined;
     return <StatCard className="activity-metric" key={name} label={metricLabel(name, locale)} value={metric === undefined ? t(locale, 'format.unknown') : metricValue(metric, locale)} hint={hint} sparkline={sparkline} />;
   });

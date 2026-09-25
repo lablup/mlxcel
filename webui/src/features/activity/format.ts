@@ -70,15 +70,21 @@ export function dateTime(at: string | number | null, locale: Locale): string {
 
 const RELATIVE_STEPS: ReadonlyArray<[Intl.RelativeTimeFormatUnit, number]> = [['second', 60], ['minute', 60], ['hour', 24], ['day', Number.POSITIVE_INFINITY]];
 
-/** "3 minutes ago" for `iso` seen from `now`. `now` comes from the render, never a timer. */
+/**
+ * "3 minutes ago" for `iso` seen from `now`. `now` comes from the render, never a timer.
+ * `iso` is server time and `now` client time, so a browser clock behind the server would put
+ * recent events in the future; an event is never later than now, so it reads "now" instead.
+ * Each step truncates rather than rounds: 23.6 hours reads "23 hours ago", not "yesterday".
+ */
 export function relativeTime(iso: string, now: number, locale: Locale): string {
   const at = Date.parse(iso);
   if (!Number.isFinite(at) || !Number.isFinite(now)) return t(locale, 'format.unknown');
   const format = cached(relativeFormats, locale, (tag) => new Intl.RelativeTimeFormat(tag, { numeric: 'auto' }));
-  let value = (at - now) / 1000;
+  let value = Math.min(0, (at - now) / 1000);
   for (const [unit, size] of RELATIVE_STEPS) {
-    const rounded = Math.round(value);
-    if (Math.abs(rounded) < size) return format.format(rounded, unit);
+    // `+ 0` turns -0 into 0, which Intl formats as "now" rather than "0 seconds ago".
+    const whole = Math.trunc(value) + 0;
+    if (Math.abs(whole) < size) return format.format(whole, unit);
     value /= size;
   }
   return t(locale, 'format.unknown');

@@ -20,7 +20,11 @@ export const SLOT_REASON_KEYS: ReadonlyMap<string, StringKey> = new Map<string, 
   ['showing the first 256 observational slots', 'activity.slots_reason.partial'],
 ]);
 
-/** Localized hint for a tile without a value; an unrecognized reason points at the disclosure. */
+/**
+ * Localized hint for a tile without a value; an unrecognized reason points at the disclosure.
+ * A metric absent from the snapshot is not listed there, so it says the server did not report it.
+ */
 export function metricReasonKey(metric: MeasuredValue | undefined): StringKey {
+  if (metric === undefined) return 'activity.reason.counter_unavailable';
   return (metric?.reason === null || metric?.reason === undefined ? undefined : METRIC_REASON_KEYS.get(metric.reason)) ?? 'activity.reason.see_details';
 }

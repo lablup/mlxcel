@@ -41,6 +41,12 @@ describe('honest Activity formatting and diagnostics', () => {
     expect(relativeTime('2026-09-15T00:05:00Z', now, 'ko')).toBe('5분 전');
     expect(relativeTime('2026-09-14T00:10:00Z', now, 'ko')).toBe('어제');
     expect(relativeTime('not a time', now, 'en')).toBe('unknown');
+    // A browser clock behind the server never puts a past event in the future.
+    expect(relativeTime('2026-09-15T00:10:03Z', now, 'en')).toBe('now');
+    expect(relativeTime('2026-09-15T00:12:00Z', now, 'ko')).toBe('지금');
+    // Truncated, not rounded: 23.6 hours is not "yesterday", 90 seconds is 1 minute.
+    expect(relativeTime('2026-09-14T00:34:00Z', now, 'en')).toBe('23 hours ago');
+    expect(relativeTime('2026-09-15T00:08:30Z', now, 'en')).toBe('1 minute ago');
   });
   it('only computes progress with a positive known denominator', () => {
     const op = validateOperationsList(JSON.parse(JSON.stringify(operationsFixture), (key, value: unknown) => key === '$schemaName' ? undefined : value)).items[0];
