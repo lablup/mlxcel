@@ -47,7 +47,8 @@ function InspectorBody({ entry, profile, state, locale, busy, onAction, onChat }
     [t(locale, 'models.library.architecture'), m.architecture ?? t(locale, 'models.library.unknown')],
     [t(locale, 'models.library.size'), bytes(m.disk_bytes, locale)],
     [t(locale, 'models.library.quantization'), quantizationValue(entry) ?? t(locale, 'models.library.unknown')],
-    ...(typeof context === 'number' ? [[t(locale, 'models.library.context'), context.toLocaleString(locale)] as [string, string]] : []),
+    // An unloaded model's runtime keeps its revision but reports ctx_size 0: no context, not zero.
+    ...(typeof context === 'number' && context > 0 ? [[t(locale, 'models.library.context'), context.toLocaleString(locale)] as [string, string]] : []),
     ...(m.memory_estimate_bytes !== null ? [[t(locale, 'models.library.memory'), bytes(m.memory_estimate_bytes, locale)] as [string, string]] : []),
     [t(locale, 'models.library.support'), t(locale, m.support.architecturally_supported ? 'models.library.supported' : 'models.library.unsupported')],
     [t(locale, 'models.library.files'), t(locale, entry.complete ? 'models.library.complete' : 'models.library.incomplete')],

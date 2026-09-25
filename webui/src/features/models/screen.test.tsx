@@ -726,6 +726,11 @@ describe('inspector Details disclosure', () => {
     state = { ...state, catalog: [{ ...entry, metadata: { ...entry.metadata, memory_estimate_bytes: 2048 } }], runtimes: new Map([[entry.identity.id, runtime(entry.identity.revision)]]) };
     render();
     expect(overview()).toContain(`${t('en', 'models.library.context')}40,960`);
+    // After an unload the runtime keeps the revision and reports 0, which is not a context.
+    const unloaded = runtime(entry.identity.revision);
+    state = { ...state, runtimes: new Map([[entry.identity.id, { ...unloaded, settings: { ...unloaded.settings, effective: { ctx_size: 0 } } }]]) };
+    render();
+    expect(overview()).not.toContain(t('en', 'models.library.context'));
     expect(overview()).toContain(`${t('en', 'models.library.memory')}2 KiB`);
   });
 });
