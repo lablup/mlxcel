@@ -85,7 +85,7 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
   const wide = useWideInspector();
   const inspectRequest = useInspectorRequest();
   // Search, filters and sort outlive this component: the router remounts it on every route change.
-  const { filter, sort } = useLibraryView();
+  const { filter, sort } = useLibraryView(state.serverInstanceId);
   const [page, setPage] = useState(0);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
@@ -172,7 +172,7 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
   });
 
   const set = (patch: Partial<InventoryFilter>): void => {
-    setLibraryFilter({ ...filter, ...patch });
+    setLibraryFilter(state.serverInstanceId, { ...filter, ...patch });
     setPage(0);
   };
   const execute = async (run: () => Promise<void>, onFailure?: (failure: unknown) => void): Promise<boolean> => {
@@ -643,7 +643,7 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
               onSortChange={(column, direction) => {
                 // The third header activation clears the sort in alpha.19; the library always has
                 // one, so a cleared sort returns to the default name order.
-                setLibrarySort(column && direction ? { column: column as SortColumn, direction: direction as SortDirection } : DEFAULT_SORT);
+                setLibrarySort(state.serverInstanceId, column && direction ? { column: column as SortColumn, direction: direction as SortDirection } : DEFAULT_SORT);
                 setPage(0);
               }}
               rowClassName={(row) =>

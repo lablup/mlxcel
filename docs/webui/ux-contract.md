@@ -6,7 +6,7 @@ The WebUI uses a desktop layout with a 224–280 px sidebar, restrained top tool
 
 Models: search/filter the local catalog, inspect source/support/completeness/capabilities, Load, Use in Chat, Unload, Add Model by public HuggingFace repo ID after explicit consent, and cache Delete when server-allowed. Chat: model picker, stream, Stop, copy, edit/regenerate, system prompt, request-only sampling, distinct content/reasoning/tool views, finish reason and usage. Activity: active loads/downloads/drains, bounded operation history, TTFT/decode/context/slot metrics with units and provenance. Settings: browser preferences, request parameters, loaded-model live settings, next-load profile, and restart-only server flags separated by scope.
 
-Changing selected models never reroutes an in-flight conversation. Closing a browser tab never unloads a shared model. Other tasks such as embeddings, rerank, audio and image generation appear as capabilities and copyable API examples, not misleading chat buttons.
+Changing selected models never reroutes an in-flight conversation. Closing a browser tab never unloads a shared model. The Models search, filters and sort survive route changes within a tab session; a reload, logout or a different server instance starts from the defaults, and nothing is persisted. Other tasks such as embeddings, rerank, audio and image generation appear as capabilities and copyable API examples, not misleading chat buttons.
 
 ## String, key and confirmation contract
 

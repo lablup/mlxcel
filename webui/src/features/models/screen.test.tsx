@@ -751,6 +751,23 @@ describe('library rows and view state', () => {
     expect([...host.querySelectorAll('[data-testid="models-table"] tbody tr .truncate')].map((node) => node.textContent)).toEqual(['kilo-x']);
   });
 
+  it('starts from the default view on another server instance, and after a reset', async () => {
+    state = { ...state, catalog: [named('mdl_kilo', 'kilo-x'), named('mdl_bravo', 'bravo')], selectedModelId: null };
+    render();
+    await input('models-search', 'kilo-');
+    act(() => root.unmount());
+    root = createRoot(host);
+    // A restarted or different server: its catalog may lack a remembered source or task.
+    state = { ...state, serverInstanceId: `${state.serverInstanceId ?? 'instance'}-restarted` };
+    render();
+    expect(host.querySelector<HTMLInputElement>('[data-testid="models-search"]')?.value).toBe('');
+    expect(host.querySelectorAll('[data-testid="models-table"] tbody tr')).toHaveLength(2);
+    await input('models-search', 'bravo');
+    // Logout resets the view, so the next session in this tab does not inherit it.
+    act(() => resetLibraryView());
+    expect(host.querySelector<HTMLInputElement>('[data-testid="models-search"]')?.value).toBe('');
+  });
+
   it('keeps every row control\'s callback ref across an unrelated re-render', () => {
     state = { ...state, catalog: [model(), ready(named('mdl_ready', 'ready-one'))], selectedModelId: null };
     render();
