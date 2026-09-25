@@ -182,6 +182,24 @@ impl mlxcel_core::drafter::dflash::SpeculativeTarget for Qwen35VLModel {
             .forward_speculative(verify_input, caches, capture_layer_ids)
     }
 
+    /// Prompt prefill through the batched causal attention path rather than
+    /// the per-position verify path, for the reason the text model's own
+    /// override states (issue #1935).
+    fn prefill_forward_with_capture_layers(
+        &self,
+        verify_input: &MlxArray,
+        caches: &mut [Self::Cache],
+        capture_layer_ids: &[usize],
+    ) -> Self::VerifyOut {
+        let capture_layer_ids = if capture_layer_ids.is_empty() {
+            mlxcel_core::drafter::dflash::config::DEFAULT_TARGET_LAYER_IDS
+        } else {
+            capture_layer_ids
+        };
+        self.text_model
+            .forward_prefill_with_capture_layers(verify_input, caches, capture_layer_ids)
+    }
+
     fn rollback_partial(
         &self,
         caches: &mut [Self::Cache],

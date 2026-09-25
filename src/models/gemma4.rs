@@ -3998,8 +3998,7 @@ const SUPPORTED_QUANT_SCHEMES: [&str; 4] = mlxcel_core::layers::SUPPORTED_QUANTI
 /// f32 prefill masks. Above this, the mask pair is left `None` and `attend`
 /// routes through `causal_attention`'s causal / sliding-window flag paths,
 /// avoiding the O(L^2) retained masks entirely (issue #672). 4096 keeps every
-/// dense mask under ~64 MiB and, like the LM-head gate in
-/// `forward_last_logits`, leaves short-context behavior byte-identical.
+/// dense mask under ~64 MiB and leaves short-context behavior byte-identical.
 const DENSE_PREFILL_MASK_MAX_TOKENS: i32 = 4096;
 
 /// Validate that a model's declared quantization scheme is one mlxcel supports,
@@ -4230,17 +4229,47 @@ impl Gemma4Model {
         let hidden =
             self.text_model
                 .forward(input_ids, input_embeddings, caches, mask, per_layer_inputs);
-        let shape = mlxcel_core::array_shape(&hidden);
-        let last = mlxcel_core::slice(
-            &hidden,
-            &[0, last_pos as i32, 0],
-            &[shape[0], last_pos as i32 + 1, shape[2]],
-        );
+        self.logits_at(&hidden, last_pos)
+    }
+
+    /// Tied LM head plus the optional final-logit softcap, applied to the
+    /// `last_pos` row of `hidden` only. Both are per-position operations, so
+    /// the row equals the same row of the full-sequence logits.
+    fn logits_at(&self, hidden: &MlxArray, last_pos: usize) -> UniquePtr<MlxArray> {
+        let last = mlxcel_core::generate::logits_at_position(hidden, last_pos);
         let mut logits = self.text_model.embed_tokens.as_linear(&last);
         if let Some(cap) = self.config.final_logit_softcapping {
             logits = mlxcel_core::compiled_softcap(&logits, cap);
         }
         logits
+    }
+
+    /// [`Self::forward_unified_with_caches_and_embeddings`] variant that
+    /// projects only the `last_pos` hidden row through the LM head.
+    fn forward_unified_last_with_caches_and_embeddings(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [Cache],
+        mask: Option<&MlxArray>,
+        per_layer_inputs: Option<&MlxArray>,
+        bidirectional_block_ids: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        let hidden = self.text_model.forward_with_speculative_sinks(
+            input_ids,
+            input_embeddings,
+            caches,
+            mask,
+            per_layer_inputs,
+            None,
+            None,
+            false,
+            bidirectional_block_ids,
+            None,
+            None,
+        );
+        self.logits_at(&hidden, last_pos)
     }
 
     /// Gemma 4 Unified forward with the optional blockwise bidirectional
@@ -5078,6 +5107,68 @@ impl Gemma4Wrapper {
         )
     }
 
+    /// [`Self::forward_with_inputs_and_sequence_id`] variant that projects
+    /// only the `last_pos` hidden row through the LM head, for prefill
+    /// callers that sample a single position.
+    ///
+    /// Used by: the three `forward_last_logits*` overrides on this wrapper and
+    /// [`crate::vision::Gemma4VLModel`]'s embeddings prefill.
+    pub(crate) fn last_logits_with_inputs_and_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        per_layer_inputs: Option<&MlxArray>,
+        mask: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.make_configured_caches(),
+            |sequence_caches| {
+                self.model.forward_last_with_caches_and_embeddings(
+                    input_ids,
+                    input_embeddings,
+                    sequence_caches,
+                    mask,
+                    per_layer_inputs,
+                    last_pos,
+                )
+            },
+        )
+    }
+
+    /// [`Self::forward_unified_with_inputs_and_sequence_id`] variant that
+    /// projects only the `last_pos` hidden row through the LM head.
+    ///
+    /// Used by: [`crate::vision::Gemma4UnifiedModel`]'s embeddings prefill.
+    pub(crate) fn unified_last_logits_with_inputs_and_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        per_layer_inputs: Option<&MlxArray>,
+        mask: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        bidirectional_block_ids: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.make_configured_caches(),
+            |sequence_caches| {
+                self.model.forward_unified_last_with_caches_and_embeddings(
+                    input_ids,
+                    input_embeddings,
+                    sequence_caches,
+                    mask,
+                    per_layer_inputs,
+                    bidirectional_block_ids,
+                    last_pos,
+                )
+            },
+        )
+    }
+
     /// Gemma 4 Unified VLM-prefill / step forward.
     ///
     /// Mirrors [`Self::forward_with_inputs_and_sequence_id`] but additionally
@@ -5672,16 +5763,14 @@ impl LanguageModel for Gemma4Wrapper {
         )
     }
 
-    /// Long-prefill override: project only the last real position through the
+    /// Prefill override: project only the last real position through the
     /// 262k-vocab LM head instead of materializing `[1, seq_len, vocab]`
-    /// logits plus a `final_logit_softcapping` copy (issue #672).
+    /// logits plus a `final_logit_softcapping` copy (issues #672, #1972).
     ///
-    /// Short prefills keep the full-logits path: the LM head then runs the
-    /// same batched kernel as before this override existed, so short-context
-    /// greedy output stays byte-identical. The threshold only trades memory
-    /// (full logits are ~0.5 GiB per 1k tokens) against that guarantee; at
-    /// long lengths the single-row projection is mathematically the same
-    /// `hidden[last] @ W` row, merely computed by the single-row kernel.
+    /// Applies at every prompt length. Before #1972 prompts up to 4096 tokens
+    /// kept the full-logits path so the first token came from the batched
+    /// head kernel; the single-row kernel computes the same `hidden[last] @ W`
+    /// row, and greedy output was verified identical on E4B and 12B.
     fn forward_last_logits(
         &self,
         input_ids: &MlxArray,
@@ -5689,30 +5778,36 @@ impl LanguageModel for Gemma4Wrapper {
         mask: Option<&MlxArray>,
         last_pos: usize,
     ) -> UniquePtr<MlxArray> {
-        const FULL_LOGITS_MAX_PREFILL: i32 = 4096;
-        let seq_len = mlxcel_core::array_shape(input_ids)[1];
-        if seq_len <= FULL_LOGITS_MAX_PREFILL {
-            let logits = self.forward(input_ids, _caches, mask);
-            let shape = mlxcel_core::array_shape(&logits);
-            return mlxcel_core::slice(
-                &logits,
-                &[0, last_pos as i32, 0],
-                &[shape[0], last_pos as i32 + 1, shape[2]],
-            );
-        }
-        self.sequence_state.with_or_create_sequence_state(
+        self.forward_last_logits_with_sequence_id(input_ids, None, _caches, mask, last_pos)
+    }
+
+    fn forward_last_logits_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.last_logits_with_inputs_and_sequence_id(input_ids, None, None, mask, seq_id, last_pos)
+    }
+
+    fn forward_last_logits_with_embeddings_and_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        _caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.last_logits_with_inputs_and_sequence_id(
+            input_ids,
+            input_embeddings,
             None,
-            || self.make_configured_caches(),
-            |sequence_caches| {
-                self.model.forward_last_with_caches_and_embeddings(
-                    input_ids,
-                    None,
-                    sequence_caches,
-                    mask,
-                    None,
-                    last_pos,
-                )
-            },
+            mask,
+            seq_id,
+            last_pos,
         )
     }
 

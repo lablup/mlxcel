@@ -625,6 +625,72 @@ impl LanguageModel for Gemma4UnifiedModel {
         }
     }
 
+    // The three last-logits entry points mirror the forward paths above but
+    // project only the sampled row through the 262k-vocab LM head (#1972).
+    // Without them the trait defaults computed full prompt logits.
+    fn forward_last_logits(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.text_model
+            .forward_last_logits(input_ids, caches, mask, last_pos)
+    }
+
+    fn forward_last_logits_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.text_model
+            .forward_last_logits_with_sequence_id(input_ids, seq_id, caches, mask, last_pos)
+    }
+
+    fn forward_last_logits_with_embeddings_and_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        if let Some(embeds) = input_embeddings {
+            // Same per-layer-input and vision block-id selection as
+            // `forward_with_embeddings_and_sequence_id`.
+            let per_layer_inputs = match seq_id {
+                Some(id) => self
+                    .per_layer_inputs_state
+                    .take_for_sequence(id)
+                    .or_else(|| self.per_layer_inputs_state.take_fallback()),
+                None => self.per_layer_inputs_state.take_fallback(),
+            };
+            let block_ids = if mask.is_none() {
+                self.block_ids_array_for(input_ids)
+            } else {
+                None
+            };
+            self.text_model
+                .unified_last_logits_with_inputs_and_sequence_id(
+                    input_ids,
+                    Some(embeds),
+                    per_layer_inputs.as_ref().and_then(|arr| arr.as_ref()),
+                    mask,
+                    seq_id,
+                    block_ids.as_ref().and_then(|arr| arr.as_ref()),
+                    last_pos,
+                )
+        } else {
+            self.text_model
+                .forward_last_logits_with_sequence_id(input_ids, seq_id, caches, mask, last_pos)
+        }
+    }
+
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {
         Some(self.text_model.input_embeddings(input_ids))
     }

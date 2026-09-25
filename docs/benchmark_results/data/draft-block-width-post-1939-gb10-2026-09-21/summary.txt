@@ -1,0 +1,25 @@
+## affine (qwen3.5-4b-4bit + qwen3.5-4b-dflash), main after #1939
+
+Classic bracket: opening 56.93 to 57.11, closing 56.71 to 56.75 tok/s. They DO NOT OVERLAP: the session drifted, treat every middle arm as suspect.
+
+| arm | n | e2e tok/s mean (min to max) | vs classic | separates from classic | acceptance | emitted per verify | round device sync ms | NVRM delta | resolved block_size |
+| --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- |
+| classic-open | 3 | 57.00 (56.93 to 57.11) | 1.00x |  |  |  |  | +0 | classic |
+| w2 | 3 | 66.74 (66.56 to 67.09) | 1.17x | yes, above every classic run | 0.754 | 1.75 | 19.9 | +0 | 2 |
+| w3 | 3 | 67.81 (67.76 to 67.89) | 1.19x | yes, above every classic run | 0.599 | 2.19 | 24.8 | +0 | 3 |
+| w4 | 3 | 66.50 (65.71 to 66.96) | 1.17x | yes, above every classic run | 0.511 | 2.52 | 30.3 | +0 | 4 |
+| w6 | 3 | 56.23 (56.01 to 56.47) | 0.99x | yes, below every classic run | 0.432 | 3.16 | 47.4 | +0 | 6 |
+| classic-close | 3 | 56.73 (56.71 to 56.75) | 1.00x |  |  |  |  | +0 | classic |
+
+Greedy identity: the two classic arms are byte-identical to each other.
+Greedy identity: classic-close == classic
+Greedy identity: classic-open == classic
+Greedy identity: w2 != classic
+Greedy identity: w3 != classic
+Greedy identity: w4 != classic
+Greedy identity: w6 != classic
+
+w2: speculative=dflash (drafter=/home/inureyes/Development/mlxcel-wt-main/models/mlx/qwen3.5-4b-dflash, block_size=2, block_size_from=operator override, explicit_kind=true)
+w3: speculative=dflash (drafter=/home/inureyes/Development/mlxcel-wt-main/models/mlx/qwen3.5-4b-dflash, block_size=3, block_size_from=operator override, explicit_kind=true)
+w4: speculative=dflash (drafter=/home/inureyes/Development/mlxcel-wt-main/models/mlx/qwen3.5-4b-dflash, block_size=4, block_size_from=operator override, explicit_kind=true)
+w6: speculative=dflash (drafter=/home/inureyes/Development/mlxcel-wt-main/models/mlx/qwen3.5-4b-dflash, block_size=6, block_size_from=operator override, explicit_kind=true)

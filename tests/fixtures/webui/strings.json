@@ -1118,15 +1118,9 @@
     },
     {
       "key": "models.library.status",
-      "en": "Lifecycle",
-      "ko": "수명주기",
+      "en": "State",
+      "ko": "상태",
       "test_id": "models-library-status"
-    },
-    {
-      "key": "models.library.sort",
-      "en": "Sort",
-      "ko": "정렬",
-      "test_id": "models-library-sort"
     },
     {
       "key": "models.library.name",
@@ -1201,12 +1195,6 @@
       "test_id": "models-library-inspect"
     },
     {
-      "key": "models.library.selected",
-      "en": "Selected",
-      "ko": "선택됨",
-      "test_id": "models-library-selected"
-    },
-    {
       "key": "models.library.details",
       "en": "Model details",
       "ko": "모델 상세",
@@ -1214,8 +1202,8 @@
     },
     {
       "key": "models.library.support",
-      "en": "Support / completeness",
-      "ko": "지원 / 완전성",
+      "en": "Architecture support",
+      "ko": "아키텍처 지원",
       "test_id": "models-library-support"
     },
     {
@@ -1265,12 +1253,6 @@
       "en": "Family support does not prove this checkpoint was tested.",
       "ko": "계열 지원은 해당 체크포인트의 검증을 의미하지 않습니다.",
       "test_id": "models-library-tested-help"
-    },
-    {
-      "key": "models.library.disk",
-      "en": "Disk size",
-      "ko": "디스크 크기",
-      "test_id": "models-library-disk"
     },
     {
       "key": "models.library.memory",
@@ -1399,12 +1381,6 @@
       "test_id": "models-library-repo-invalid"
     },
     {
-      "key": "models.library.operations",
-      "en": "Library operations",
-      "ko": "라이브러리 작업",
-      "test_id": "models-library-operations"
-    },
-    {
       "key": "models.library.pending",
       "en": "Request outcome is being reconciled. Do not resubmit; refresh to observe the server operation.",
       "ko": "요청 결과를 확인하고 있습니다. 재제출하지 말고 새로고침하여 서버 작업을 확인하세요.",
@@ -1519,30 +1495,6 @@
       "test_id": "models-library-waiting"
     },
     {
-      "key": "models.library.sort_name",
-      "en": "Name (A–Z)",
-      "ko": "이름 (오름차순)",
-      "test_id": "models-library-sort-name"
-    },
-    {
-      "key": "models.library.sort_status",
-      "en": "Lifecycle",
-      "ko": "수명주기",
-      "test_id": "models-library-sort-status"
-    },
-    {
-      "key": "models.library.sort_source",
-      "en": "Source",
-      "ko": "소스",
-      "test_id": "models-library-sort-source"
-    },
-    {
-      "key": "models.library.sort_task",
-      "en": "Task",
-      "ko": "작업",
-      "test_id": "models-library-sort-task"
-    },
-    {
       "key": "models.library.unavailable",
       "en": "Not available for this server or model",
       "ko": "현재 서버 또는 모델에서 사용할 수 없음",
@@ -1579,10 +1531,250 @@
       "test_id": "models-library-accepted"
     },
     {
-      "key": "models.library.operation_state",
-      "en": "Operation state",
-      "ko": "작업 상태",
-      "test_id": "models-library-operation-state"
+      "key": "models.library.size",
+      "en": "Size",
+      "ko": "크기",
+      "test_id": "models-library-size"
+    },
+    {
+      "key": "models.library.quantization",
+      "en": "Quantization",
+      "ko": "양자화",
+      "test_id": "models-library-quantization"
+    },
+    {
+      "key": "models.library.tasks",
+      "en": "Tasks",
+      "ko": "작업",
+      "test_id": "models-library-tasks"
+    },
+    {
+      "key": "models.library.actions",
+      "en": "Actions",
+      "ko": "동작",
+      "test_id": "models-library-actions"
+    },
+    {
+      "key": "models.library.files",
+      "en": "Files",
+      "ko": "파일",
+      "test_id": "models-library-files"
+    },
+    {
+      "key": "models.library.overview",
+      "en": "Overview",
+      "ko": "개요",
+      "test_id": "models-library-overview"
+    },
+    {
+      "key": "models.library.capabilities",
+      "en": "Capabilities",
+      "ko": "기능",
+      "test_id": "models-library-capabilities"
+    },
+    {
+      "key": "models.library.disclosure",
+      "en": "Details",
+      "ko": "세부 정보",
+      "test_id": "models-library-disclosure"
+    },
+    {
+      "key": "models.library.model_id",
+      "en": "Model ID",
+      "ko": "모델 ID",
+      "test_id": "models-library-model-id"
+    },
+    {
+      "key": "models.library.inference_id",
+      "en": "Inference ID",
+      "ko": "추론 ID",
+      "test_id": "models-library-inference-id"
+    },
+    {
+      "key": "models.library.catalog_revision",
+      "en": "Catalog revision",
+      "ko": "카탈로그 리비전",
+      "test_id": "models-library-catalog-revision"
+    },
+    {
+      "key": "models.library.reasons",
+      "en": "Support and metadata notes",
+      "ko": "지원 및 메타데이터 참고",
+      "test_id": "models-library-reasons"
+    },
+    {
+      "key": "models.library.removal",
+      "en": "Cache removal",
+      "ko": "캐시 삭제",
+      "test_id": "models-library-removal"
+    },
+    {
+      "key": "models.library.server_actions",
+      "en": "Unavailable server actions",
+      "ko": "사용할 수 없는 서버 동작",
+      "test_id": "models-library-server-actions"
+    },
+    {
+      "key": "models.library.load_named",
+      "en": "Load {name}",
+      "ko": "{name} 로드",
+      "test_id": "models-library-load-named"
+    },
+    {
+      "key": "models.library.unload_named",
+      "en": "Unload {name}",
+      "ko": "{name} 언로드",
+      "test_id": "models-library-unload-named"
+    },
+    {
+      "key": "models.library.chat_named",
+      "en": "Use in Chat: {name}",
+      "ko": "{name} 채팅에서 사용",
+      "test_id": "models-library-chat-named"
+    },
+    {
+      "key": "models.library.delete_named",
+      "en": "Delete cached files: {name}",
+      "ko": "{name} 캐시 파일 삭제",
+      "test_id": "models-library-delete-named"
+    },
+    {
+      "key": "models.library.load_evict",
+      "en": "Load with eviction",
+      "ko": "교체 후 로드",
+      "test_id": "models-library-load-evict"
+    },
+    {
+      "key": "models.library.load_evict_named",
+      "en": "Load with eviction: {name}",
+      "ko": "{name} 교체 후 로드",
+      "test_id": "models-library-load-evict-named"
+    },
+    {
+      "key": "models.library.flag_unsupported",
+      "en": "Unsupported",
+      "ko": "미지원",
+      "test_id": "models-library-flag-unsupported"
+    },
+    {
+      "key": "models.library.flag_incomplete",
+      "en": "Incomplete",
+      "ko": "불완전",
+      "test_id": "models-library-flag-incomplete"
+    },
+    {
+      "key": "models.source.cache",
+      "en": "Managed cache",
+      "ko": "관리 캐시",
+      "test_id": "models-source-cache"
+    },
+    {
+      "key": "models.source.models_dir",
+      "en": "Models directory",
+      "ko": "모델 디렉터리",
+      "test_id": "models-source-models-dir"
+    },
+    {
+      "key": "models.source.preset",
+      "en": "Preset",
+      "ko": "프리셋",
+      "test_id": "models-source-preset"
+    },
+    {
+      "key": "models.source.preset_file",
+      "en": "Preset file",
+      "ko": "프리셋 파일",
+      "test_id": "models-source-preset-file"
+    },
+    {
+      "key": "models.source.single_model",
+      "en": "Single model",
+      "ko": "단일 모델",
+      "test_id": "models-source-single-model"
+    },
+    {
+      "key": "models.task.chat",
+      "en": "Chat",
+      "ko": "채팅",
+      "test_id": "models-task-chat"
+    },
+    {
+      "key": "models.task.completion",
+      "en": "Completion",
+      "ko": "텍스트 완성",
+      "test_id": "models-task-completion"
+    },
+    {
+      "key": "models.task.embedding",
+      "en": "Embedding",
+      "ko": "임베딩",
+      "test_id": "models-task-embedding"
+    },
+    {
+      "key": "models.task.rerank",
+      "en": "Rerank",
+      "ko": "재순위",
+      "test_id": "models-task-rerank"
+    },
+    {
+      "key": "models.task.audio_transcription",
+      "en": "Transcription",
+      "ko": "음성 인식",
+      "test_id": "models-task-audio-transcription"
+    },
+    {
+      "key": "models.task.audio_speech",
+      "en": "Speech",
+      "ko": "음성 합성",
+      "test_id": "models-task-audio-speech"
+    },
+    {
+      "key": "models.task.vision_input",
+      "en": "Vision input",
+      "ko": "이미지 입력",
+      "test_id": "models-task-vision-input"
+    },
+    {
+      "key": "models.task.image_generation",
+      "en": "Image generation",
+      "ko": "이미지 생성",
+      "test_id": "models-task-image-generation"
+    },
+    {
+      "key": "models.download.queued",
+      "en": "Queued",
+      "ko": "대기 중",
+      "test_id": "models-download-queued"
+    },
+    {
+      "key": "models.download.running",
+      "en": "Downloading",
+      "ko": "다운로드 중",
+      "test_id": "models-download-running"
+    },
+    {
+      "key": "models.download.cancelling",
+      "en": "Cancelling",
+      "ko": "취소 중",
+      "test_id": "models-download-cancelling"
+    },
+    {
+      "key": "models.download.succeeded",
+      "en": "Downloaded",
+      "ko": "다운로드됨",
+      "test_id": "models-download-succeeded"
+    },
+    {
+      "key": "models.download.failed",
+      "en": "Download failed",
+      "ko": "다운로드 실패",
+      "test_id": "models-download-failed"
+    },
+    {
+      "key": "models.download.cancelled",
+      "en": "Cancelled",
+      "ko": "취소됨",
+      "test_id": "models-download-cancelled"
     },
     {
       "key": "models.next_profile.body",
@@ -1627,16 +1819,76 @@
       "test_id": "chat-conversation-default-title"
     },
     {
-      "key": "chat.conversation.label",
-      "en": "Conversation",
-      "ko": "대화",
-      "test_id": "chat-conversation-label"
+      "key": "chat.list.label",
+      "en": "Conversations",
+      "ko": "대화 목록",
+      "test_id": "chat-list-label"
     },
     {
-      "key": "chat.conversation.choose",
-      "en": "Choose conversation",
-      "ko": "대화 선택",
-      "test_id": "chat-conversation-choose"
+      "key": "chat.list.open",
+      "en": "Show conversations",
+      "ko": "대화 목록 보기",
+      "test_id": "chat-list-open"
+    },
+    {
+      "key": "chat.list.empty.title",
+      "en": "No conversations yet",
+      "ko": "아직 대화가 없습니다",
+      "test_id": "chat-list-empty-title"
+    },
+    {
+      "key": "chat.list.empty.body",
+      "en": "Send a message to start one, or choose New conversation.",
+      "ko": "메시지를 보내 대화를 시작하거나 새 대화를 선택하세요.",
+      "test_id": "chat-list-empty-body"
+    },
+    {
+      "key": "chat.list.no_messages",
+      "en": "No messages yet",
+      "ko": "아직 메시지 없음",
+      "test_id": "chat-list-no-messages"
+    },
+    {
+      "key": "chat.list.limit",
+      "en": "Conversation limit reached (50). Delete or export older conversations first.",
+      "ko": "대화 개수 한도(50개)에 도달했습니다. 먼저 이전 대화를 삭제하거나 내보내세요.",
+      "test_id": "chat-list-limit"
+    },
+    {
+      "key": "chat.list.rename",
+      "en": "Rename {title}",
+      "ko": "{title} 이름 바꾸기",
+      "test_id": "chat-list-rename"
+    },
+    {
+      "key": "chat.list.rename_field",
+      "en": "New name for {title}",
+      "ko": "{title}의 새 이름",
+      "test_id": "chat-list-rename-field"
+    },
+    {
+      "key": "chat.list.delete",
+      "en": "Delete {title}",
+      "ko": "{title} 삭제",
+      "test_id": "chat-list-delete"
+    },
+    {
+      "key": "chat.list.delete.confirm.title",
+      "en": "Delete {title}?",
+      "ko": "{title} 대화를 삭제할까요?",
+      "test_id": "chat-list-delete-confirm-title"
+    },
+    {
+      "key": "chat.list.delete.confirm.body",
+      "en": "The conversation and all of its turns are removed. Export your history first if you want to keep a copy.",
+      "ko": "대화와 모든 턴이 삭제됩니다. 사본을 남기려면 먼저 기록을 내보내세요.",
+      "test_id": "chat-list-delete-confirm-body"
+    },
+    {
+      "key": "chat.list.delete.confirm",
+      "en": "Delete conversation",
+      "ko": "대화 삭제",
+      "test_id": "chat-list-delete-confirm"
     },
     {
       "key": "chat.model.label",
@@ -1651,16 +1903,76 @@
       "test_id": "chat-model-choose"
     },
     {
-      "key": "chat.no_model.title",
-      "en": "Choose a ready chat model",
-      "ko": "준비된 대화 모델을 선택하세요",
-      "test_id": "chat-no-model-title"
+      "key": "chat.model.group.ready",
+      "en": "Ready to chat",
+      "ko": "대화 준비됨",
+      "test_id": "chat-model-group-ready"
     },
     {
-      "key": "chat.no_model.body",
-      "en": "Selection never loads a model. Load one explicitly in Models. Embeddings, reranking and other tasks use their documented API, not this composer.",
-      "ko": "선택만으로 모델을 로드하지 않습니다. 모델 화면에서 명시적으로 로드하세요. 임베딩, 재순위화 등 다른 작업은 이 입력창이 아니라 문서화된 API를 사용합니다.",
-      "test_id": "chat-no-model-body"
+      "key": "chat.model.group.unloaded",
+      "en": "Not loaded",
+      "ko": "로드되지 않음",
+      "test_id": "chat-model-group-unloaded"
+    },
+    {
+      "key": "chat.model.group.failed",
+      "en": "Load failed",
+      "ko": "로드 실패",
+      "test_id": "chat-model-group-failed"
+    },
+    {
+      "key": "chat.model.group.unavailable",
+      "en": "Not available for chat",
+      "ko": "대화에 사용할 수 없음",
+      "test_id": "chat-model-group-unavailable"
+    },
+    {
+      "key": "chat.model.hint.choose",
+      "en": "Choose a model to start.",
+      "ko": "시작하려면 모델을 선택하세요.",
+      "test_id": "chat-model-hint-choose"
+    },
+    {
+      "key": "chat.model.hint.load",
+      "en": "Not loaded. Load it to chat; selecting a model never loads it.",
+      "ko": "로드되지 않았습니다. 대화하려면 로드하세요. 모델을 선택하는 것만으로는 로드하지 않습니다.",
+      "test_id": "chat-model-hint-load"
+    },
+    {
+      "key": "chat.model.hint.cannot_load",
+      "en": "This model cannot be loaded from here. Open Models for the reason.",
+      "ko": "여기에서는 이 모델을 로드할 수 없습니다. 모델 화면에서 이유를 확인하세요.",
+      "test_id": "chat-model-hint-cannot-load"
+    },
+    {
+      "key": "chat.model.hint.wait",
+      "en": "Not ready yet. Send turns on once the model is ready to chat.",
+      "ko": "아직 준비되지 않았습니다. 모델이 대화 준비를 마치면 보내기가 켜집니다.",
+      "test_id": "chat-model-hint-wait"
+    },
+    {
+      "key": "chat.model.hint.unavailable",
+      "en": "This model does not offer chat. Embeddings, reranking and other tasks use their documented API, not this composer.",
+      "ko": "이 모델은 대화를 지원하지 않습니다. 임베딩, 재순위화 등 다른 작업은 이 입력창이 아니라 문서화된 API를 사용합니다.",
+      "test_id": "chat-model-hint-unavailable"
+    },
+    {
+      "key": "chat.load.confirm.title",
+      "en": "Load {model}?",
+      "ko": "{model} 모델을 로드할까요?",
+      "test_id": "chat-load-confirm-title"
+    },
+    {
+      "key": "chat.load.confirm.body",
+      "en": "Selecting a model never loads it. Loading starts a server operation that reserves memory for this model and keeps running if you leave Chat.",
+      "ko": "모델을 선택하는 것만으로는 로드하지 않습니다. 로드는 이 모델에 메모리를 예약하는 서버 작업을 시작하며, 대화 화면을 떠나도 계속 진행됩니다.",
+      "test_id": "chat-load-confirm-body"
+    },
+    {
+      "key": "chat.load.requested",
+      "en": "Load requested. Send turns on when the model is ready.",
+      "ko": "로드를 요청했습니다. 모델이 준비되면 보내기가 켜집니다.",
+      "test_id": "chat-load-requested"
     },
     {
       "key": "chat.no_model.action",
@@ -1693,10 +2005,22 @@
       "test_id": "chat-settings-sampling"
     },
     {
-      "key": "chat.settings.delete",
-      "en": "Delete conversation",
-      "ko": "대화 삭제",
-      "test_id": "chat-settings-delete"
+      "key": "chat.settings.title",
+      "en": "Chat settings",
+      "ko": "대화 화면 설정",
+      "test_id": "chat-settings-title"
+    },
+    {
+      "key": "chat.settings.none",
+      "en": "Start or select a conversation to name it and set its system prompt.",
+      "ko": "대화를 시작하거나 선택하면 이름과 시스템 프롬프트를 지정할 수 있습니다.",
+      "test_id": "chat-settings-none"
+    },
+    {
+      "key": "chat.overrides",
+      "en": "Overrides: {keys}",
+      "ko": "재정의: {keys}",
+      "test_id": "chat-overrides"
     },
     {
       "key": "chat.composer.label",
@@ -1706,21 +2030,39 @@
     },
     {
       "key": "chat.composer.hint",
-      "en": "Enter sends · Shift+Enter inserts a line. {count}/{max} characters.",
-      "ko": "Enter로 보내고 Shift+Enter로 줄을 바꿉니다. {count}/{max}자.",
+      "en": "Enter sends · Shift+Enter inserts a line · Cmd/Ctrl+Enter also sends.",
+      "ko": "Enter로 보내고 Shift+Enter로 줄을 바꿉니다. Cmd/Ctrl+Enter로도 보낼 수 있습니다.",
       "test_id": "chat-composer-hint"
+    },
+    {
+      "key": "chat.composer.count",
+      "en": "{count} / {max}",
+      "ko": "{count} / {max}자",
+      "test_id": "chat-composer-count"
+    },
+    {
+      "key": "chat.composer.limit",
+      "en": "Limit reached",
+      "ko": "한도 도달",
+      "test_id": "chat-composer-limit"
+    },
+    {
+      "key": "chat.composer.keys",
+      "en": "Keyboard hints",
+      "ko": "키보드 도움말",
+      "test_id": "chat-composer-keys"
+    },
+    {
+      "key": "chat.images.attach",
+      "en": "Attach images",
+      "ko": "이미지 첨부",
+      "test_id": "chat-images-attach"
     },
     {
       "key": "chat.images.label",
       "en": "Local images",
       "ko": "로컬 이미지",
       "test_id": "chat-images-label"
-    },
-    {
-      "key": "chat.images.unsupported",
-      "en": "Image attachments require provider-confirmed vision support.",
-      "ko": "이미지를 첨부하려면 provider가 확인한 비전 지원이 필요합니다.",
-      "test_id": "chat-images-unsupported"
     },
     {
       "key": "chat.images.remove",
@@ -1838,8 +2180,8 @@
     },
     {
       "key": "chat.announce.complete",
-      "en": "Response complete.",
-      "ko": "응답이 완료되었습니다.",
+      "en": "Response finished.",
+      "ko": "응답이 끝났습니다.",
       "test_id": "chat-announce-complete"
     },
     {
@@ -1873,33 +2215,87 @@
       "test_id": "chat-transcript-turn-label"
     },
     {
+      "key": "chat.message.you",
+      "en": "You",
+      "ko": "나",
+      "test_id": "chat-message-you"
+    },
+    {
+      "key": "chat.message.prompt_actions",
+      "en": "Prompt actions",
+      "ko": "프롬프트 작업",
+      "test_id": "chat-message-prompt-actions"
+    },
+    {
+      "key": "chat.message.response_actions",
+      "en": "Response actions",
+      "ko": "응답 작업",
+      "test_id": "chat-message-response-actions"
+    },
+    {
+      "key": "chat.message.elapsed",
+      "en": "{status} · {seconds} s",
+      "ko": "{status} · {seconds}초",
+      "test_id": "chat-message-elapsed"
+    },
+    {
+      "key": "chat.message.copy_prompt",
+      "en": "Copy prompt",
+      "ko": "프롬프트 복사",
+      "test_id": "chat-message-copy-prompt"
+    },
+    {
+      "key": "chat.message.copied_prompt",
+      "en": "Copied prompt.",
+      "ko": "프롬프트를 복사했습니다.",
+      "test_id": "chat-message-copied-prompt"
+    },
+    {
+      "key": "chat.message.copy_prompt_failed",
+      "en": "Copy unavailable; select the prompt text instead.",
+      "ko": "복사할 수 없습니다. 프롬프트 텍스트를 직접 선택하세요.",
+      "test_id": "chat-message-copy-prompt-failed"
+    },
+    {
+      "key": "chat.message.retry",
+      "en": "Retry response",
+      "ko": "응답 다시 시도",
+      "test_id": "chat-message-retry"
+    },
+    {
+      "key": "chat.message.not_executed",
+      "en": "Not executed",
+      "ko": "실행하지 않음",
+      "test_id": "chat-message-not-executed"
+    },
+    {
       "key": "chat.transcript.status.streaming",
-      "en": "Streaming",
-      "ko": "스트리밍 중",
+      "en": "Generating",
+      "ko": "생성 중",
       "test_id": "chat-transcript-status-streaming"
     },
     {
       "key": "chat.transcript.status.complete",
-      "en": "Complete",
+      "en": "Done",
       "ko": "완료",
       "test_id": "chat-transcript-status-complete"
     },
     {
       "key": "chat.transcript.status.cancelled",
-      "en": "Cancelled",
-      "ko": "취소됨",
+      "en": "Stopped",
+      "ko": "중지됨",
       "test_id": "chat-transcript-status-cancelled"
     },
     {
       "key": "chat.transcript.status.interrupted",
-      "en": "Interrupted",
-      "ko": "중단됨",
+      "en": "Did not finish",
+      "ko": "완료되지 않음",
       "test_id": "chat-transcript-status-interrupted"
     },
     {
       "key": "chat.transcript.status.error",
-      "en": "Error",
-      "ko": "오류",
+      "en": "Failed",
+      "ko": "실패",
       "test_id": "chat-transcript-status-error"
     },
     {
@@ -2051,12 +2447,6 @@
       "en": "Inherited: {value}",
       "ko": "상속 값: {value}",
       "test_id": "chat-params-inherited"
-    },
-    {
-      "key": "chat.params.server_default",
-      "en": "server default",
-      "ko": "서버 기본값",
-      "test_id": "chat-params-server-default"
     },
     {
       "key": "chat.params.clear",

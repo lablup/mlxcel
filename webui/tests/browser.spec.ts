@@ -223,7 +223,7 @@ test.describe('design system gallery and shell', () => {
     await page.keyboard.press('Control+N');
     await expect(page).toHaveURL(/#chat$/);
     await expect(page.getByTestId('chat-title')).toBeVisible();
-    await expect(page.getByRole('combobox', { name: 'Conversation', exact: true })).toContainText('New conversation');
+    await expect(page.getByRole('list', { name: 'Conversations', exact: true }).locator('button[aria-current="true"]')).toContainText('New conversation');
     expect(page.context().pages()).toHaveLength(1);
     expect(mock.calls.map((call) => call.url).join('\n')).not.toContain('/v1/chat/completions');
   });

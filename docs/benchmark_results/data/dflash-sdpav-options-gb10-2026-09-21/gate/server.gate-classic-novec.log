@@ -1,0 +1,35 @@
+2026-09-21T08:41:33.424813Z  WARN mlxcel::server::startup: CORS is set to allow all origins ('*') and no API key is set; this can be a security risk (cross-origin attacks). Set --api-key, or narrow --cors-origins / --allowed-origins
+2026-09-21T08:41:33.424960Z  INFO mlxcel::server::startup: effective KV cache mode kv_cache_mode=fp16 kv_bits=0
+2026-09-21T08:41:33.425373Z  INFO mlxcel::server::startup: resolved context and batch geometry (0 = the checkpoint's own trained context) ctx_size=0 ctx_size_per_slot=0 context_slots=1 kv_unified=false n_parallel=4 prefill_chunk_size=512 max_kv_size=None
+2026-09-21T08:41:33.425543Z  INFO mlxcel::server::startup: Runtime device: NVIDIA GPU (CUDA)
+2026-09-21T08:41:33.425545Z  INFO mlxcel::server::startup: CUDA graph-cache LRU capacity: MLX_CUDA_GRAPH_CACHE_SIZE=2000 (mlxcel raises MLX's default of 400 to 2000 so long-lived, shape-diverse decode does not hit the cache-thrashing abort from issue #818, unless an operator override is set)
+2026-09-21T08:41:33.425547Z  INFO mlxcel::server::startup: Wired memory limit: 121.7 GB
+2026-09-21T08:41:33.770270Z  INFO mlxcel::server::startup: DRY sequence breakers active (b10621 semantics: breaker token data derived from the vocabulary per request) breakers=["\n", ":", "\"", "*"]
+2026-09-21T08:41:33.770411Z  INFO mlxcel::server::startup: Tokenizer recognizes a think marker pair; defaulting chat_template kwarg `enable_thinking=true` (upstream PR #1114) think_start=Some("<think>") think_end=Some("</think>") think_start_tokens_len=1 think_end_tokens_len=1
+2026-09-21T08:41:33.771449Z  INFO mlxcel::server::startup: Prompt-prefix cache store enabled (+ APC, snapshots) capacity_bytes=2147483648 max_entries=1024 ttl_seconds=3600 snapshot_capacity_bytes=536870912 snapshot_max_entries=4096 snapshot_ttl_seconds=7200 min_prefix_tokens=32 apc_enabled=true apc_block_size=16 apc_hash=sha256
+2026-09-21T08:41:34.118910Z  INFO mlxcel::server::startup: Warming up model...
+2026-09-21T08:41:34.119634Z  INFO mlxcel::server::model_provider::model_worker: Model worker thread starting, loading model...
+2026-09-21T08:41:34.457333Z  INFO mlxcel::server::model_provider::model_worker: Model qwen3.5-4b-4bit loaded in 0.338s (resident after load: 0.00 GB) worker_model_id=qwen3.5-4b-4bit load_seconds=0.337673483 active_bytes=0 peak_bytes=0 cache_bytes=0 limit_bytes=124128085401
+2026-09-21T08:41:34.457474Z  INFO mlxcel::server::model_provider::model_worker: Starting BatchScheduler (max_batch_size=1, max_queue_depth=32, prefill_chunk_size=512, max_batch_prefill=4, decode_storage=auto)
+2026-09-21T08:41:34.457902Z  INFO mlxcel::server::model_provider::model_worker: Paged KV block budget: 3062487 blocks (32 layers, 32-token blocks)
+2026-09-21T08:41:34.457916Z  INFO mlxcel::server::model_provider::model_worker: Paged KV slab size: 256 blocks per layer (fused decode serves a layer only while its rows fit one slab)
+2026-09-21T08:41:34.458065Z  INFO mlxcel::server::batch::scheduler::paged_layout: resolved KV cache mode applied to model caches kv_cache_mode_effective=fp16 kv_cache_mode_applied_layers=32 kv_cache_mode_total_layers=32
+2026-09-21T08:41:34.460455Z  INFO prefill{seq_id=seq-0 prompt_len=1 cached=0 start=0}: mlxcel_core::sampling_dispatch: sampling dispatch: argmax: greedy path (temperature 0, top_k 1); no sampling kernel involved
+2026-09-21T08:41:35.526896Z  INFO prefill{seq_id=seq-0 prompt_len=1 cached=0 start=0}: mlxcel::server::batch::scheduler::prefill: prompt-cache: request completed during prefill: cached=0/1 prompt tokens, total 1068ms prompt_tokens=1 cached_tokens=0 generation_time_ms=1068
+2026-09-21T08:41:35.527225Z  INFO mlxcel::server::startup: Warmup complete
+2026-09-21T08:41:35.527389Z  INFO mlxcel::server::startup: model_type=Qwen35VLM: enabling native video_url content block support
+2026-09-21T08:41:35.528377Z  WARN mlxcel::server::startup: The loaded model accepts video input, but `ffmpeg` and `ffprobe` are not both on PATH, so every video request will be refused. The check is cached for the life of the process: restart the server after installing ffmpeg.
+2026-09-21T08:41:35.530064Z  INFO mlxcel::server::startup: Starting mlxcel server on http://127.0.0.1:18941
+2026-09-21T08:41:35.530080Z  INFO mlxcel::server::startup: Detected 1 GPU(s)
+2026-09-21T08:41:35.530083Z  INFO mlxcel::server::startup: CUDA compute capability 12.1 (sm_121); compiled for [121] (cubin)
+2026-09-21T08:41:35.530085Z  INFO mlxcel::server::startup: Endpoints:
+2026-09-21T08:41:35.530086Z  INFO mlxcel::server::startup:   POST /v1/chat/completions  - OpenAI chat completions
+2026-09-21T08:41:35.530087Z  INFO mlxcel::server::startup:   POST /v1/completions       - OpenAI text completions
+2026-09-21T08:41:35.530089Z  INFO mlxcel::server::startup:   GET  /v1/models            - List models
+2026-09-21T08:41:35.530090Z  INFO mlxcel::server::startup:   POST /completion           - llama-server native completion
+2026-09-21T08:41:35.530091Z  INFO mlxcel::server::startup:   POST /tokenize             - Tokenize text
+2026-09-21T08:41:35.530092Z  INFO mlxcel::server::startup:   POST /detokenize           - Detokenize tokens
+2026-09-21T08:41:35.530093Z  INFO mlxcel::server::startup:   GET  /props                - Server properties
+2026-09-21T08:41:35.530095Z  INFO mlxcel::server::startup:   GET  /slots                - Slot status
+2026-09-21T08:41:35.530096Z  INFO mlxcel::server::startup:   GET  /health               - Health check
+2026-09-21T08:41:41.037539Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/158 prompt tokens, total 3968ms prompt_tokens=158 cached_tokens=0 generation_time_ms=3968

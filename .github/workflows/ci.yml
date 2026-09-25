@@ -44,9 +44,14 @@
 # release.yml because it requires a Linux self-hosted runner (currently only the
 # GB10 node used for release builds). Adding a PR-level CUDA *test* gate would
 # double runner cost for limited additional safety on PRs that don't touch
-# CUDA-specific code paths. Compiling CUDA is a different question and three
-# jobs below do it: `xla-compile` and `xla-link` at the shipped sm_121, and
-# `cuda-sm70-compile` at sm_70, each on a narrow path filter.
+# CUDA-specific code paths. Compiling CUDA is a different question and four
+# jobs below do it: `xla-compile` and `xla-link` at the shipped sm_121,
+# `cuda-blockfloat` at the same list, and `cuda-sm70-compile` at sm_70, each on a
+# narrow path filter. `cuda-blockfloat` is the single exception to the sentence
+# above, and a narrow one: it runs the block-float quantization tests and only
+# those, because until issue #1934 no build anywhere compiled MLX's hardware
+# NVFP4/MXFP4 converter, so those tests had never once exercised the path they
+# are named for.
 
 name: CI
 
@@ -333,6 +338,44 @@ jobs:
       - name: Check the guard still fails on undeclared and oversize binaries
         run: bash scripts/ci/check_binary_assets_test.sh
 
+  cuda-arch-lists:
+    name: CUDA architecture lists
+    # Deliberately not behind the `changes` filter, like `crate-versions` and
+    # `binary-assets`: it needs no toolchain, runs in seconds, and both defects
+    # it guards against are silent.
+    #
+    # MLX compiles its hardware NVFP4/MXFP4 converters
+    # (`cvt.rn.satfinite.e2m1x2.f32` in
+    # mlx/backend/cuda/quantized/nvfp4_quantize.cuh) only under an
+    # architecture-specific target, and the lists here are plain, so what
+    # supplies them is the per-source injection in
+    # `src/lib/mlx-cpp/CMakeLists.txt`. Remove that and the plain lists quietly
+    # go back to compiling the converters out of every artifact and every test,
+    # which is where issue #1934 started, so this asserts it is still there.
+    #
+    # The other direction is the obvious fix: putting `121a` in a list. That
+    # compiles every translation unit architecture-specific for a converter one
+    # of them reaches, costs 12.7 MB of archive and replaces the machine code of
+    # every decode kernel on every Blackwell host. Two tokens in a YAML `env`
+    # block, and no build output names the difference, so it is rejected here by
+    # name. So is the `f` spelling, which reads as a milder `a` and does not
+    # compile at all.
+    #
+    # The `cuda-blockfloat` job below asserts the same two properties on the
+    # compiled artifact, which is stronger, but it costs a CUDA build and is
+    # path-filtered. This one runs on every PR.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Every Blackwell architecture list carries a hardware-capable entry
+        run: python3 scripts/ci/check_cuda_arch_lists.py
+      - name: Check the guard still fails on plain-only and family-specific lists
+        run: bash scripts/ci/check_cuda_arch_lists_test.sh
+
   license-headers:
     name: license headers
     # Deliberately not behind the `changes` filter, like `crate-versions` and
@@ -421,7 +464,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: '26.5.1'
       - name: Install pnpm
@@ -478,7 +521,7 @@ jobs:
         run: xvfb-run -a --server-args='-screen 0 1920x1080x24' pnpm --dir webui run browser:all
       - name: Upload WebUI browser failure artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: webui-browser-failure-artifacts-${{ runner.os }}
           path: |
@@ -514,6 +557,13 @@ jobs:
       contents: read
     timeout-minutes: 90
     env:
+      # What releases build for this runner's architecture, pinned rather than
+      # inferred so the artifact this job verifies carries the same device code
+      # the published one does whatever GPU the runner turns out to have. Since
+      # issue #1943 auto-detection produces this same `121` on a GB10, so the pin
+      # no longer corrects a shape mismatch: it states the list instead of
+      # inferring it, which is what makes the job reviewable and what keeps it
+      # right if this ever runs on something other than a GB10.
       MLX_CUDA_ARCHITECTURES: "121"
     steps:
       - uses: actions/checkout@v7
@@ -537,7 +587,7 @@ jobs:
         run: |
           cp "$CARGO_TARGET_DIR/test-fast/mlxcel-server" "$RUNNER_TEMP/mlxcel-webui-installed/mlxcel-server-feature-off"
           cp "$CARGO_TARGET_DIR/test-fast/mlxcel" "$RUNNER_TEMP/mlxcel-webui-installed/mlxcel-feature-off"
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: '26.5.1'
       - name: Install pnpm for real-router browser harness
@@ -722,21 +772,21 @@ jobs:
           ) 9>"$HOME/.cache/mlxcel/ci-locks/webui-activity-gpu.lock"
       - name: Upload installed-artifact WebUI evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: webui-installed-artifact-${{ runner.os }}
           path: ${{ runner.temp }}/webui-installed-evidence.json
           if-no-files-found: error
       - name: Upload reverse-proxy WebUI evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: webui-reverse-proxy-${{ runner.os }}
           path: ${{ runner.temp }}/webui-reverse-proxy-evidence.json
           if-no-files-found: warn
       - name: Upload Activity performance summary evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: webui-activity-performance-${{ runner.os }}
           path: ${{ runner.temp }}/webui-activity-performance-summary.json
@@ -746,7 +796,7 @@ jobs:
       # publish both whenever the gate runs, not only when it succeeds.
       - name: Upload Activity performance diagnostics
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: webui-activity-performance-diagnostics-${{ runner.os }}
           path: |
@@ -882,9 +932,12 @@ jobs:
       contents: read
     timeout-minutes: 120
     env:
-      # The value shipped for this runner's architecture. Auto-detection yields
-      # `121a`, which is numerically identical here but is not what releases
-      # build, so the gate compiles what ships.
+      # The value shipped for this runner's architecture, so the gate compiles
+      # what ships rather than whatever the runner's GPU implies. Since issue
+      # #1943 auto-detection produces this same `121` on a GB10; the pin remains
+      # because a gate should name the list it compiles instead of inferring it.
+      # The hardware NVFP4/MXFP4 converters come from the per-source injection in
+      # `src/lib/mlx-cpp/CMakeLists.txt`, not from this list.
       MLX_CUDA_ARCHITECTURES: "121"
       # Every rustc lint, not just the `unused_imports` this job started with.
       # The narrower value existed because the XLA feature combination carried a
@@ -1064,9 +1117,12 @@ jobs:
       cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
     timeout-minutes: 120
     env:
-      # The value shipped for this runner's architecture. Auto-detection yields
-      # `121a`, which is numerically identical here but is not what releases
-      # build, so the gate links what ships.
+      # The value shipped for this runner's architecture, so the gate links what
+      # ships rather than whatever the runner's GPU implies. Since issue #1943
+      # auto-detection produces this same `121` on a GB10; the pin remains
+      # because a gate should name the list it compiles instead of inferring it.
+      # The hardware NVFP4/MXFP4 converters come from the per-source injection in
+      # `src/lib/mlx-cpp/CMakeLists.txt`, not from this list.
       MLX_CUDA_ARCHITECTURES: "121"
     steps:
       - uses: actions/checkout@v7
@@ -1102,12 +1158,13 @@ jobs:
   # ============================================================================
   # Every other CUDA job in this repository compiles for sm_121, and
   # release.yml ships `80;86;89;90a;100;120` on x86_64 and `90a;100;121` on
-  # aarch64. Nothing below sm_80 is compiled anywhere, so an arch-conditional
-  # break on Volta reaches `main` unnoticed and is found by whoever next builds
-  # from source on one. That is not hypothetical for this repository: epic
-  # #1536 adds `cc < 8` fallbacks to the quantized-matmul overlays precisely
-  # because the sm_80+ paths are wrong there, and every one of those branches
-  # is compiled only when some job asks nvcc for a pre-Ampere target.
+  # aarch64. Nothing below sm_80 is
+  # compiled anywhere, so an arch-conditional break on Volta reaches `main`
+  # unnoticed and is found by whoever next builds from source on one. That is
+  # not hypothetical for this repository: epic #1536 adds `cc < 8` fallbacks to
+  # the quantized-matmul overlays precisely because the sm_80+ paths are wrong
+  # there, and every one of those branches is compiled only when some job asks
+  # nvcc for a pre-Ampere target.
   #
   # Compile-only, and deliberately so. The realistic failure mode is a
   # compile-time one: a `__CUDA_ARCH__` guard that does not cover cc 7, a
@@ -1177,9 +1234,15 @@ jobs:
           # code defect. Probe instead, and skip loudly. The moment a CUDA 12.x
           # runner joins the fleet this job starts gating for real with no edit.
           set -euo pipefail
-          NVCC=$(command -v nvcc || echo /usr/local/cuda/bin/nvcc)
+          # Same resolution order as the cuobjdump lookup below and as
+          # build.rs: CUDA_HOME, then the conventional location, then PATH.
+          # nvcc is not on PATH on this runner either.
+          NVCC="${CUDA_HOME:-/usr/local/cuda}/bin/nvcc"
           if [ ! -x "$NVCC" ]; then
-            echo "nvcc not found" >&2
+            NVCC=$(command -v nvcc || true)
+          fi
+          if [ ! -x "${NVCC:-}" ]; then
+            echo "nvcc not found at ${CUDA_HOME:-/usr/local/cuda}/bin/nvcc or on PATH" >&2
             exit 1
           fi
           VERSION=$("$NVCC" --version | sed -n 's/.*release \([0-9.]*\).*/\1/p' | head -1)
@@ -1211,19 +1274,24 @@ jobs:
           # architecture list failed to reach CMake would otherwise pass here
           # having compiled nothing for Volta.
           set -euo pipefail
-          # cuobjdump ships next to nvcc, which the build above already
-          # required, so resolving it from PATH and then from nvcc's directory
-          # covers both a CUDA toolkit on PATH and one reached only through an
-          # absolute nvcc.
-          CUOBJDUMP=$(command -v cuobjdump || true)
-          if [ -z "$CUOBJDUMP" ]; then
-            NVCC=$(command -v nvcc || true)
-            [ -n "$NVCC" ] && CUOBJDUMP="$(dirname "$NVCC")/cuobjdump"
+          # cuobjdump ships with the CUDA toolkit, next to nvcc, and neither is
+          # on PATH on the GB10 runner: a PATH-first lookup is what failed on
+          # the first run of the block-float job. Resolve the toolkit the way
+          # `src/lib/mlxcel-core/build.rs` resolves nvcc, CUDA_HOME first and
+          # then the conventional location, with PATH as a last resort rather
+          # than as the primary, so this reads the same toolkit that compiled
+          # the archive. Not found stays a hard failure: a skip here would make
+          # the gate pass while checking nothing.
+          CUDA_BIN="${CUDA_HOME:-/usr/local/cuda}/bin"
+          CUOBJDUMP="$CUDA_BIN/cuobjdump"
+          if [ ! -x "$CUOBJDUMP" ]; then
+            CUOBJDUMP=$(command -v cuobjdump || true)
           fi
           if [ ! -x "${CUOBJDUMP:-}" ]; then
-            echo "cuobjdump not found; it ships with the CUDA toolkit next to nvcc" >&2
+            echo "cuobjdump not found at $CUDA_BIN/cuobjdump or on PATH; it ships with the CUDA toolkit next to nvcc" >&2
             exit 1
           fi
+          echo "cuobjdump: $CUOBJDUMP"
           LIB=$(find "$CARGO_TARGET_DIR/debug/build" -path '*/out/build/lib/libmlx.a' | head -1)
           if [ -z "$LIB" ]; then
             echo "libmlx.a not found under $CARGO_TARGET_DIR/debug/build" >&2
@@ -1236,3 +1304,211 @@ jobs:
             echo "expected sm_70 only, found: $ARCHES" >&2
             exit 1
           fi
+
+  # ============================================================================
+  # CUDA block-float converter (self-hosted GB10)
+  # ============================================================================
+  # Compiles the shipped Blackwell list and then proves two different things
+  # about it: that MLX's hardware NVFP4/MXFP4 converter really reached the
+  # archive, and that the MXFP4/NVFP4 quantization tests still pass with it
+  # compiled in. Before issue #1934 neither held anywhere. Every list this
+  # repository built named Blackwell plainly, the converters in
+  # mlx/backend/cuda/quantized/nvfp4_quantize.cuh are gated on
+  # `__CUDA_ARCH_SPECIFIC__`, and so the tests that were supposed to cover
+  # block-float quantization exercised only the scalar CUTLASS fallback.
+  #
+  # It also proves the converter reached *only* there. The architecture lists
+  # stay plain and `src/lib/mlx-cpp/CMakeLists.txt` gives the extra image to
+  # `fp_quantize.cu` alone, so an architecture-specific image anywhere else
+  # means the injection was replaced by a target-level list and every kernel on
+  # every Blackwell host now runs different machine code. `cuda-arch-lists`
+  # above catches that spelling in the YAML; this catches it in the artifact,
+  # which also covers a list that never reaches CMake at all (build.rs
+  # auto-detects and falls back to `90a` when it cannot see the host). That
+  # trap is not hypothetical; it is the same one `cuda-sm70-compile` asserts
+  # against, for the same reason.
+  #
+  # Gate on SASS, never on PTX. The injection emits a cubin and no PTX, and the
+  # PTX that is emitted comes from the plain `compute_121` pass, which takes the
+  # fallback arm, so `cuobjdump --dump-ptx | grep cvt.rn.satfinite.e2m1x2`
+  # returns zero on a *correct* build.
+  #
+  # Path-filtered on `cuda_arch`, deliberately and with a known gap: a PR that
+  # changes only the Rust quantization code or its tests does not run this job,
+  # because a cold MLX build is measured in tens of minutes on the one
+  # self-hosted runner that also serves clippy for every Rust PR. What the filter does cover is everything that can change *which*
+  # device code is compiled, which is what the gate is about. Its own
+  # persistent target directory, because the architecture list is part of the
+  # build-script fingerprint and sharing with a differently-pinned job would
+  # make the two rebuild MLX against each other on every run.
+  cuda-blockfloat:
+    name: CUDA block-float converter
+    needs: changes
+    if: github.repository == 'lablup/mlxcel' && needs.changes.outputs.cuda_arch == 'true'
+    runs-on: GB10
+    permissions:
+      contents: read
+    # Same reasoning as `xla-link` and `cuda-sm70-compile`: minutes warm, tens
+    # of minutes cold, on the one runner that also serves clippy for every Rust
+    # PR and the release build. Keyed per PR, so PRs never cancel each other,
+    # and `main` is exempt so a merge cannot cancel the run that proves the
+    # shipped architecture still carries the converter.
+    concurrency:
+      group: cuda-blockfloat-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    timeout-minutes: 180
+    env:
+      # The list releases build for this runner's architecture. Keep it
+      # identical to the aarch64 release job's Blackwell half: a gate that
+      # compiles something else proves something else.
+      MLX_CUDA_ARCHITECTURES: "121"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Use a persistent target directory
+        run: |
+          CARGO_TARGET="$HOME/.cargo-target/mlxcel-cuda-blockfloat-ci"
+          mkdir -p "$CARGO_TARGET"
+          echo "CARGO_TARGET_DIR=$CARGO_TARGET" >> $GITHUB_ENV
+
+      - name: Build the block-float quantization tests
+        # `test-fast` inherits release but drops fat LTO, which is what the
+        # other CUDA test builds in this repository use: these tests drive MLX
+        # numerics, so an unoptimized build is not merely slower but
+        # impractically so.
+        run: cargo test -p mlxcel-core --profile test-fast --features cuda --lib --no-run
+
+      - name: Verify the hardware fp4 converter is compiled, and only where intended
+        run: |
+          set -euo pipefail
+          # cuobjdump ships with the CUDA toolkit, next to nvcc, and neither is on PATH
+          # on the GB10 runner: a PATH-first lookup is what failed on this job's first
+          # run. Resolve the toolkit the way `src/lib/mlxcel-core/build.rs` resolves
+          # nvcc, CUDA_HOME first and then the conventional location, with PATH as a
+          # last resort rather than as the primary, so this reads the same toolkit that
+          # compiled the archive. Not found stays a hard failure: a skip here would make
+          # the gate pass while checking nothing.
+          CUDA_BIN="${CUDA_HOME:-/usr/local/cuda}/bin"
+          CUOBJDUMP="$CUDA_BIN/cuobjdump"
+          if [ ! -x "$CUOBJDUMP" ]; then
+            CUOBJDUMP=$(command -v cuobjdump || true)
+          fi
+          if [ ! -x "${CUOBJDUMP:-}" ]; then
+            echo "cuobjdump not found at $CUDA_BIN/cuobjdump or on PATH; it ships with the CUDA toolkit next to nvcc" >&2
+            exit 1
+          fi
+          echo "cuobjdump: $CUOBJDUMP"
+
+          LIB=$(find "$CARGO_TARGET_DIR/test-fast/build" -path '*/out/build/lib/libmlx.a' | head -1)
+          if [ -z "$LIB" ]; then
+            echo "libmlx.a not found under $CARGO_TARGET_DIR/test-fast/build" >&2
+            exit 1
+          fi
+          echo "archive: $LIB ($(stat -c %s "$LIB") bytes)"
+
+          # One checkout can hold several build directories, one per feature set and
+          # architecture list, and `head -1` above picks whichever comes first. Assert
+          # that the one being read was configured with the list this job pins, so the
+          # gate cannot pass by measuring a neighbour.
+          BUILD_DIR="$(dirname "$LIB")/.."
+          CONFIGURED=$(sed -n 's/^MLX_CUDA_ARCHITECTURES:[^=]*=//p' "$BUILD_DIR/CMakeCache.txt")
+          echo "configured with: $CONFIGURED"
+          if [ "$CONFIGURED" != "$MLX_CUDA_ARCHITECTURES" ]; then
+            echo "archive was configured with [$CONFIGURED], not the job's [$MLX_CUDA_ARCHITECTURES]" >&2
+            exit 1
+          fi
+
+          WORK="${RUNNER_TEMP:-/tmp}/blockfloat-$$"
+          mkdir -p "$WORK"
+          ( cd "$WORK" && ar x "$LIB" fp_quantize.cu.o qmv.cu.o fp_qmv.cu.o )
+          for obj in fp_quantize.cu.o qmv.cu.o fp_qmv.cu.o; do
+            if [ ! -f "$WORK/$obj" ]; then
+              echo "$obj not found in $LIB; MLX's quantized backend did not build as expected" >&2
+              exit 1
+            fi
+          done
+
+          # 1. The converter is compiled. Zero means the architecture-specific image
+          #    never reached nvcc and MLX compiled the scalar fallback, which is the
+          #    state issue #1934 found in every artifact this project shipped.
+          #
+          #    Scoped to the one translation unit that can carry the instruction rather
+          #    than to the whole archive: `--dump-sass` on the 178 MB archive takes about
+          #    ten minutes and this takes under a second, for the same verdict.
+          "$CUOBJDUMP" --dump-sass "$WORK/fp_quantize.cu.o" > "$WORK/sass.txt"
+          FP4=$(grep -c 'F2FP.SATFINITE.E2M1' "$WORK/sass.txt" || true)
+          echo "F2FP.SATFINITE.E2M1 occurrences in fp_quantize.cu.o: $FP4"
+          if [ "$FP4" -eq 0 ]; then
+            echo "no hardware fp4 conversion instruction in libmlx.a: MLX compiled the scalar fallback" >&2
+            exit 1
+          fi
+          # The fp8 converter is not gated on an architecture-specific target, so it is
+          # present either way. Printing it beside the fp4 count makes "nothing compiled
+          # at all" read differently from "the fp4 gate is off".
+          echo "F2FP.SATFINITE.E4M3 occurrences (ungated control): $(grep -c 'F2FP.SATFINITE.E4M3' "$WORK/sass.txt" || true)"
+
+          # 2. The converter is compiled ONLY there. This is the half that separates the
+          #    per-source injection from naming Blackwell `121a` in the architecture
+          #    list. The list form gives every object an architecture-specific image, and
+          #    on a matching device that is the image the driver loads, so every kernel
+          #    on every Blackwell host would run different machine code than it does
+          #    today. Decode is supposed to be untouched by a converter fix.
+          for obj in qmv.cu.o fp_qmv.cu.o; do
+            IMAGES=$("$CUOBJDUMP" --list-elf "$WORK/$obj" | grep -oE 'sm_[0-9]+[af]?' | sort -u | tr '\n' ' ')
+            echo "$obj images: $IMAGES"
+            if printf '%s' "$IMAGES" | grep -qE 'sm_[0-9]+[af]'; then
+              echo "$obj carries an architecture-specific image; decode was not supposed to change (issue #1934)" >&2
+              exit 1
+            fi
+          done
+          ARCH_SPECIFIC=$("$CUOBJDUMP" --list-elf "$LIB" | grep -cE 'sm_[0-9]+a' || true)
+          echo "architecture-specific cubin images in the whole archive: $ARCH_SPECIFIC"
+          if [ "$ARCH_SPECIFIC" -ne 1 ]; then
+            echo "expected exactly one architecture-specific image in libmlx.a, the one in fp_quantize.cu.o, found $ARCH_SPECIFIC" >&2
+            exit 1
+          fi
+
+          # 3. Forward compatibility is untouched. Plain `compute_121` PTX is what a
+          #    later Blackwell revision JITs from, and the injection emits a cubin only,
+          #    so this count must not move.
+          PTX=$("$CUOBJDUMP" --dump-ptx "$LIB" | grep -cE '^\.target sm_121$' || true)
+          echo "forward-JIT-capable plain PTX images (.target sm_121): $PTX"
+          if [ "$PTX" -eq 0 ]; then
+            echo "no plain compute_121 PTX in libmlx.a; the architecture list is not what this job pinned" >&2
+            exit 1
+          fi
+
+          # 4. The assumption the per-source injection rests on: `nvfp4_quantize.cuh` is
+          #    the only place in MLX that gates code on an architecture-specific target.
+          #    If a pin bump adds another, a quantized GEMM say, the injection silently
+          #    stops covering the arch-specific surface, and this is the only place that
+          #    would notice.
+          MLX_SRC="$BUILD_DIR/_deps/mlx-src/mlx"
+          if [ ! -d "$MLX_SRC" ]; then
+            echo "MLX source tree not found at $MLX_SRC; cannot check the arch-specific surface" >&2
+            exit 1
+          fi
+          GATED=$(grep -rl '__CUDA_ARCH_SPECIFIC__\|__CUDA_ARCH_FAMILY_SPECIFIC__' "$MLX_SRC" | sed "s|$MLX_SRC/||" | sort | tr '\n' ' ' | sed 's/ $//')
+          echo "MLX files gated on an architecture-specific target: $GATED"
+          if [ "$GATED" != "backend/cuda/quantized/nvfp4_quantize.cuh" ]; then
+            echo "the arch-specific surface of the pinned MLX has changed; the per-source injection in src/lib/mlx-cpp/CMakeLists.txt covers only fp_quantize.cu, so decide whether to extend it or move to a target-level architecture list (issue #1934)" >&2
+            exit 1
+          fi
+          rm -rf "$WORK"
+
+      - name: Run the MXFP4 and NVFP4 quantization tests
+        # `global_scale` selects the six `ffi_tests` cases that drive
+        # `quantize_weights_with_mode` with `mxfp4` and native NVFP4 sidecars,
+        # which is every test in this crate that reaches MLX's block-float
+        # quantization kernels. `shapeless_compile_audit_harness` touches them
+        # too but carries `#[ignore]` for a hardware audit script, so naming it
+        # here would add a skipped line and no coverage.
+        #
+        # `--test-threads=1` is mandatory for CUDA on this runner: parallel MLX
+        # tests abort regardless of the change under test.
+        run: |
+          cargo test -p mlxcel-core --profile test-fast --features cuda --lib -- \
+            --test-threads=1 \
+            global_scale

@@ -1,5 +1,6 @@
 // Copyright 2026 Lablup Inc. Licensed under Apache-2.0.
 import React, { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Button, ConfirmDialog, ErrorBanner } from '../../design-system/primitives';
 import { t, type Locale, type StringKey } from '../../i18n/catalog';
 import { loadLocalImages, type MediaImageLimits } from './images';
@@ -24,6 +25,9 @@ export function HistoryControls({ conversations, busy, onPending, limits, onRepl
   const confirmationRef = useRef<Confirmation | null>(null);
   const ask = (next: Confirmation): void => { confirmationRef.current = next; setConfirmation(next); };
   const clearButtonRef = useRef<HTMLButtonElement>(null);
+  // Set when a Clear All settles; the refocus runs after the commit that re-enables the
+  // button, never from a timer that can fire while the button is still disabled.
+  const [refocusClear, setRefocusClear] = useState(false);
   const epoch = useRef(0);
   useEffect(() => {
     if (!enabled) return;
@@ -31,6 +35,14 @@ export function HistoryControls({ conversations, busy, onPending, limits, onRepl
     return () => clearTimeout(timer);
   }, [conversations, enabled, includeImages]);
   useEffect(() => { const repo = repository.current; return () => { epoch.current++; repo.close(); onPending(false); }; }, []);
+  useEffect(() => {
+    if (!refocusClear || pending || busy) return;
+    setRefocusClear(false);
+    // The dialog's own focus restoration may have found nothing usable while every Chat
+    // control was disabled for clearing; the button is enabled in this commit, so claim it back.
+    const active = document.activeElement;
+    if (active === null || active === document.body) clearButtonRef.current?.focus();
+  }, [refocusClear, pending, busy]);
   const toggle = async (checked: boolean, trigger: HTMLElement): Promise<void> => {
     const operation = ++epoch.current;
     repository.current.setEnabled(checked);
@@ -50,9 +62,7 @@ export function HistoryControls({ conversations, busy, onPending, limits, onRepl
     void repository.current.clear().then(() => { if (operation === epoch.current && !busyRef.current) { onReplace([]); setMessage('chat.privacy.cleared'); } }).catch(() => { if (operation === epoch.current) setMessage('chat.privacy.clear_failed'); }).finally(() => {
       if (operation !== epoch.current) return;
       setPendingState(false);
-      // The dialog's own focus restoration may have found nothing usable while every
-      // Chat control was disabled for clearing; once the button re-enables, claim it back.
-      window.setTimeout(() => { if (document.activeElement === document.body) clearButtonRef.current?.focus(); }, 0);
+      setRefocusClear(true);
     });
   };
   // Every answer closes the dialog first and is consumed once; the operation then runs
@@ -79,8 +89,10 @@ export function HistoryControls({ conversations, busy, onPending, limits, onRepl
   const dialog = (kind: Confirmation['kind'], title: StringKey, body: StringKey, confirmLabel: StringKey, testId: string): React.JSX.Element | null => confirmation?.kind === kind
     ? <ConfirmDialog open title={t(locale, title)} body={t(locale, body)} confirmLabel={t(locale, confirmLabel)} cancelLabel={t(locale, 'common.cancel')} closeLabel={t(locale, 'common.close')} tone="danger" testId={testId} onConfirm={() => answer(true)} onClose={() => answer(false)} />
     : null;
-  // Dialogs render outside <details>: a collapsed disclosure must never hide an open modal.
-  return <><details className="chat-privacy"><summary>{t(locale, 'chat.privacy.summary')}</summary><p>{t(locale, 'chat.privacy.body')}</p>
+  // The section heading belongs to the caller (the Chat settings drawer). The dialogs are
+  // portalled to <body>: inside the drawer panel, Escape in a dialog would bubble to the
+  // shared Drawer's own keydown handler and close the drawer beneath it as well.
+  return <><div className="chat-privacy"><p>{t(locale, 'chat.privacy.body')}</p>
     <label className="toggle"><input type="checkbox" checked={enabled} disabled={busy || pending} onChange={(event) => { void toggle(event.target.checked, event.currentTarget); }} />{t(locale, 'chat.privacy.save')}</label>
     <label className="toggle"><input type="checkbox" checked={includeImages} disabled={busy || pending} onChange={(event) => setIncludeImages(event.target.checked)} />{t(locale, 'chat.privacy.include_images')}</label>
     <p>{t(locale, 'chat.privacy.note')}</p>
@@ -104,10 +116,12 @@ export function HistoryControls({ conversations, busy, onPending, limits, onRepl
       }).catch(() => { if (operation === epoch.current) setMessage('chat.privacy.import_rejected'); }).finally(() => { if (operation === epoch.current) setPendingState(false); });
     }} /></label>
     {message ? <ErrorBanner tone="info" title={t(locale, 'chat.privacy.title')} body={t(locale, message)} /> : null}
-  </details>
-    {dialog('replace-saved', 'chat.privacy.replace_saved.confirm.title', 'chat.privacy.replace_saved.confirm.body', 'chat.privacy.replace_saved.confirm', 'chat-replace-saved-dialog')}
-    {dialog('clear', 'chat.privacy.clear.confirm.title', 'settings.clear_history.confirm.body', 'chat.privacy.clear.confirm', 'chat-clear-history-dialog')}
-    {dialog('replace-import', 'chat.privacy.replace_import.confirm.title', 'chat.privacy.replace_import.confirm.body', 'chat.privacy.replace_import.confirm', 'chat-replace-import-dialog')}
+  </div>
+    {confirmation !== null ? createPortal(<>
+      {dialog('replace-saved', 'chat.privacy.replace_saved.confirm.title', 'chat.privacy.replace_saved.confirm.body', 'chat.privacy.replace_saved.confirm', 'chat-replace-saved-dialog')}
+      {dialog('clear', 'chat.privacy.clear.confirm.title', 'settings.clear_history.confirm.body', 'chat.privacy.clear.confirm', 'chat-clear-history-dialog')}
+      {dialog('replace-import', 'chat.privacy.replace_import.confirm.title', 'chat.privacy.replace_import.confirm.body', 'chat.privacy.replace_import.confirm', 'chat-replace-import-dialog')}
+    </>, document.body) : null}
   </>;
 }
 

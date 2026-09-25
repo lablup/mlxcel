@@ -207,8 +207,10 @@ pub(crate) trait DFlashTargetModel:
 
     /// Whether a `block_size`-row verify block is byte-identical to the
     /// single-token decode chain on this host, and the burst may therefore
-    /// promise the temperature-0 contract. Qwen 3.5 DFlash has never gated on
-    /// this and keeps the permissive default; LFM2 runs the measured probe.
+    /// promise the temperature-0 contract. Every family with a server-side
+    /// DFlash target now overrides this with the measured block-versus-chain
+    /// probe; the permissive default remains only for a target that has not
+    /// been measured yet, and issue #1935 is what a permissive default costs.
     fn exactness_allows(&self, _block_size: usize) -> bool {
         true
     }
@@ -252,11 +254,17 @@ impl DFlashTargetModel for crate::models::Qwen35Model {
     fn make_dflash_caches(&self) -> Vec<crate::models::qwen3_next::Qwen3NextCache> {
         self.make_speculative_caches()
     }
+    fn exactness_allows(&self, block_size: usize) -> bool {
+        self.dflash_exactness_allows(block_size)
+    }
 }
 
 impl DFlashTargetModel for crate::vision::Qwen35VLModel {
     fn make_dflash_caches(&self) -> Vec<crate::models::qwen3_next::Qwen3NextCache> {
         self.text_model.make_speculative_caches()
+    }
+    fn exactness_allows(&self, block_size: usize) -> bool {
+        self.text_model.dflash_exactness_allows(block_size)
     }
 }
 
@@ -717,6 +725,13 @@ where
                 decode_ms = diagnostics.total_decode_time_ms,
                 "DFlash diagnostics"
             );
+            // The per-round accept lengths, at `debug` because they are one
+            // line per burst and only a parity investigation reads them. They
+            // are what lets an in-process replay reproduce a served burst's
+            // exact cache history (rewind depth per round) rather than a
+            // synthetic accept cycle, which is the gap issue #1935's residual
+            // divergence is being chased through.
+            tracing::debug!(accept_lens = ?output.accept_lens, "DFlash accept lengths");
             let mut tokens = Vec::with_capacity(output.tokens.len() + 1);
             tokens.push(first_bonus);
             tokens.extend(output.tokens);

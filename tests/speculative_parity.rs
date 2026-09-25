@@ -282,6 +282,136 @@ async fn server_round(
     }
 }
 
+/// Multi-width byte-equality for a DFlash pairing (issue #1935).
+///
+/// Runs the drafter-less baseline once and then one speculative server per
+/// width, and requires each width to land in one of exactly two acceptable
+/// states, naming which:
+///
+/// * the burst ran (`Speculative burst completed`, no decline line) and its
+///   text is byte-identical to the baseline, or
+/// * the exactness gate declined the burst, in which case the request was
+///   served by classic decode and byte-equality is not evidence about the
+///   verify path. The decline is reported as a decline.
+///
+/// A width that runs the burst and differs from the baseline fails, which is
+/// the condition issue #1935 was filed for. A width that declines does not
+/// fail, because declining is the gate working: on GB10 widths 8 and 16 are
+/// genuinely not byte-identical to the single-token chain, and no arrangement
+/// of this code makes them so.
+///
+/// The single-width [`assert_server_byte_equality`] stays for the MTP
+/// pairings, which have one measured width each.
+async fn assert_server_byte_equality_at_widths(
+    pairing: &Pairing,
+    target_path: &std::path::Path,
+    draft_path: &std::path::Path,
+    widths: &[usize],
+) {
+    let draft_str = draft_path.to_string_lossy().to_string();
+
+    // Baseline first and once: every width compares against the same text,
+    // and a drafter-less server is the cheapest arm to hold the GPU.
+    let baseline = server_round(pairing.name, "baseline", target_path, &[]).await;
+
+    let mut ran = Vec::new();
+    let mut declined = Vec::new();
+    let mut mismatched = Vec::new();
+
+    for &width in widths {
+        let width_str = width.to_string();
+        let label = format!("speculative b={width}");
+        let spec = server_round(
+            pairing.name,
+            &label,
+            target_path,
+            &[
+                "--model-draft",
+                &draft_str,
+                "--draft-kind",
+                pairing.kind,
+                "--draft-block-size",
+                &width_str,
+            ],
+        )
+        .await;
+
+        let was_declined = spec.logs.contains("DFlash speculative dispatch declined");
+        let burst_ran = spec.logs.contains("Speculative burst completed");
+        assert!(
+            was_declined || burst_ran,
+            "[{}] b={width}: the server neither completed a speculative burst nor logged a \
+             decline, so this arm proves nothing either way. Captured logs:\n{}",
+            pairing.name,
+            spec.logs,
+        );
+
+        let identical = spec.content == baseline.content
+            && spec.completion_tokens == baseline.completion_tokens;
+        if was_declined {
+            // A decline only counts when the exactness gate measured it. The
+            // other decline reasons (a multimodal payload, an adopted
+            // prompt-cache prefix, a drafter from the wrong family) say
+            // nothing about verify-path parity, and letting one of them stand
+            // in for a measured verdict is how an all-declined run could pass
+            // while proving nothing.
+            assert!(
+                spec.logs
+                    .contains("the block-versus-chain exactness probe did not pass"),
+                "[{}] b={width}: the burst declined for a reason other than the exactness \
+                 probe, so this arm says nothing about verify-path parity. Captured \
+                 logs:\n{}",
+                pairing.name,
+                spec.logs,
+            );
+            declined.push(width);
+            assert!(
+                identical,
+                "[{}] b={width}: the burst declined to classic decode, so the response must \
+                 equal the drafter-less baseline byte for byte; it does not, which means the \
+                 decline path itself changed the output.\nspeculative: {:?}\nbaseline:    {:?}",
+                pairing.name, spec.content, baseline.content,
+            );
+        } else {
+            ran.push(width);
+            if !identical {
+                mismatched.push((width, spec.content.clone()));
+            }
+        }
+    }
+
+    eprintln!(
+        "[{}] widths that ran the burst: {ran:?}; widths the gate declined: {declined:?}",
+        pairing.name
+    );
+    assert!(
+        mismatched.is_empty(),
+        "[{}] these widths ran a speculative burst and produced text that is NOT \
+         byte-identical to the drafter-less baseline at temperature 0: {:?}.\nbaseline: {:?}",
+        pairing.name,
+        mismatched.iter().map(|(w, _)| *w).collect::<Vec<_>>(),
+        baseline.content,
+    );
+    // An all-declined run used to fail here, on the reasoning that it says
+    // nothing about verify-path parity. It does say something, and on this
+    // pairing on CUDA it is the correct outcome rather than a hole in the test
+    // (issue #1935): the verify block is not bit-equal to classic decode at any
+    // width on this host, the exactness probe now measures that rather than
+    // reporting a false pass from an 8-token prefix, and the gate declines
+    // every width. What the test must not allow is a decline for any other
+    // reason standing in for a measured verdict, which the per-width assertion
+    // above rules out. `MLXCEL_MTP_ALLOW_INEXACT=1` remains the way to engage
+    // the burst anyway and forfeit the contract.
+    if ran.is_empty() {
+        eprintln!(
+            "[{}] every width declined by a measured exactness verdict, and every response \
+             equalled the drafter-less baseline byte for byte. That is the contract holding \
+             through the gate rather than through the verify block. Widths tried: {widths:?}",
+            pairing.name,
+        );
+    }
+}
+
 /// byte-equality phase: spawn `mlxcel-server` twice against the
 /// same `target_path` — once speculative (drafter attached via
 /// `--model-draft --draft-kind --draft-block-size`), once drafter-less —
@@ -699,7 +829,12 @@ async fn greedy_parity_dflash_qwen35_4b() {
     }
 
     // ---- Phase 2: end-to-end byte-equality (subprocess) ----
-    assert_server_byte_equality(pairing, &target_path, &draft_path).await;
+    // Every width issue #1935 measured, not just the one the pairing names.
+    // The divergence it reported was identical at 2, 4, 8 and 16, so a
+    // single-width arm could not tell a width-specific kernel boundary from a
+    // path difference shared by all of them, and the single width this test
+    // used to run was 16, which the gate now declines.
+    assert_server_byte_equality_at_widths(pairing, &target_path, &draft_path, &[2, 4, 8, 16]).await;
 }
 
 /// Greedy parity for the Gemma 4 31B + MTP assistant pairing.

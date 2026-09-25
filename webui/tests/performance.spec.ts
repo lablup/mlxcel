@@ -160,7 +160,7 @@ async function actionToSettledPaintMs<T>(locator: Locator, action: () => Promise
       const textarea = document.querySelector(current.composerSelector);
       const transcript = document.querySelector('section[aria-label="Conversation transcript"]');
       const hasTurns = (transcript?.querySelectorAll('article.chat-turn').length ?? 0) > 0;
-      const emptyTextVisible = visible(transcript?.querySelector('.chat-transcript p') ?? null) && transcript?.textContent?.includes('No messages yet.') === true;
+      const emptyTextVisible = visible(transcript?.querySelector('.chat-empty') ?? null) && transcript?.textContent?.includes('No messages yet.') === true;
       if (textarea instanceof HTMLTextAreaElement && !textarea.disabled && textarea.value === '' && !hasTurns && emptyTextVisible) return { composer_empty: true, transcript_empty: true };
       return null;
     };
@@ -347,12 +347,12 @@ test('10000-token transcript keeps post-render controls responsive', async ({ pa
   const chatNav = page.locator('[data-testid="nav-chat"]:visible').first();
   await chatNav.click();
   await page.getByRole('combobox', { name: 'Model for next turn' }).click();
-  await page.getByRole('option', { name: 'perf-model-0 · Ready', exact: true }).click();
+  await page.getByRole('option', { name: 'perf-model-0. Ready to chat', exact: true }).click();
   const composer = page.getByRole('textbox', { name: 'Message', exact: true });
   await composer.fill('Produce a long deterministic transcript');
   const renderStarted = process.hrtime.bigint();
   await page.getByRole('button', { name: 'Send', exact: true }).click();
-  await expect(page.getByRole('status').filter({ hasText: 'Response complete.' })).toBeVisible();
+  await expect(page.getByRole('status').filter({ hasText: 'Response finished.' })).toBeVisible();
   const renderMs = Number(process.hrtime.bigint() - renderStarted) / 1_000_000;
   await expect(page.locator('section[aria-label="Conversation transcript"] article.chat-turn')).not.toHaveCount(0);
   const newConversation = page.getByRole('button', { name: 'New conversation', exact: true });

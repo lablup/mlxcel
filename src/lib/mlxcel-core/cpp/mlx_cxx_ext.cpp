@@ -9,6 +9,7 @@
 #include "paged_attention_v2.h"     // paged decode v2 + merge kernels (#898).
 #include "fused_norm.h"             // fused residual-add + RMSNorm kernel (#905).
 #include "fused_rope_append.h"      // fused q/k RoPE + KV-append layout (#905).
+#include "kv_inplace_write.h"       // in-place decode KV row write (#1959).
 
 namespace mlx_cxx {
 
@@ -343,6 +344,25 @@ void fused_rope_qk_append(
 
 bool fused_rope_qk_append_available() {
     return mlxcel::turbo::fused_rope_qk_append_available();
+}
+
+std::unique_ptr<MlxArray> array_handle_clone(const MlxArray& a) {
+    return std::make_unique<MlxArray>(a.inner);
+}
+
+bool array_same_handle(const MlxArray& a, const MlxArray& b) {
+    return a.inner.id() == b.inner.id();
+}
+
+// In-place KV row write (#1959). Implementation in
+// `src/lib/mlx-cpp/turbo/kv_inplace_write.cpp`.
+std::unique_ptr<MlxArray> inplace_slice_write(
+    const MlxArray& dst,
+    const MlxArray& rows,
+    rust::Slice<const int32_t> start) {
+    std::vector<int> s(start.begin(), start.end());
+    return std::make_unique<MlxArray>(
+        mlxcel::turbo::inplace_slice_write(dst.inner, rows.inner, s));
 }
 
 std::unique_ptr<MlxLoadedWeights> mlx_load_safetensors(rust::Str path) {

@@ -311,6 +311,82 @@ mod cache_isolation {
         }
     }
 
+    /// Issue #1972: every `forward_last_logits*` entry point projects only the
+    /// sampled row, and that row equals the same row of the full forward, at
+    /// the last and an interior position, for both attention families. Each
+    /// call gets a fresh wrapper because the wrapper owns its caches.
+    #[test]
+    fn gemma4_last_logits_match_the_sliced_full_forward() {
+        for layer_type in ["sliding_attention", "full_attention"] {
+            let prompt: Vec<i32> = (0..12).map(|i| (i * 3) % 7).collect();
+            let ids = mlxcel_core::from_slice_i32(&prompt, &[1, prompt.len() as i32]);
+            for pos in [prompt.len() - 1, prompt.len() / 2] {
+                let row = |logits: &mlxcel_core::MlxArray| {
+                    let shape = mlxcel_core::array_shape(logits);
+                    let r = mlxcel_core::slice(
+                        logits,
+                        &[0, pos as i32, 0],
+                        &[1, pos as i32 + 1, shape[2]],
+                    );
+                    array_to_vec_f32(r.as_ref().unwrap())
+                };
+                let max_diff = |a: &[f32], b: &[f32]| {
+                    assert_eq!(a.len(), b.len(), "{layer_type} pos {pos}: shape mismatch");
+                    a.iter()
+                        .zip(b)
+                        .map(|(x, y)| (x - y).abs())
+                        .fold(0.0f32, f32::max)
+                };
+
+                let model = build_wrapper_with_layer(layer_type);
+                let mut caches = model.make_caches();
+                let want = row(model.forward(&ids, &mut caches, None).as_ref().unwrap());
+
+                let model = build_wrapper_with_layer(layer_type);
+                let mut caches = model.make_caches();
+                let plain = model.forward_last_logits(&ids, &mut caches, None, pos);
+                assert_eq!(mlxcel_core::array_shape(&plain)[1], 1);
+                let d = max_diff(&array_to_vec_f32(plain.as_ref().unwrap()), &want);
+                assert!(d < 1e-4, "{layer_type} plain at {pos}: max |diff| {d}");
+
+                let model = build_wrapper_with_layer(layer_type);
+                let mut caches = model.make_caches();
+                let seq = model.forward_last_logits_with_sequence_id(
+                    &ids,
+                    Some(SequenceId::from_raw(21)),
+                    &mut caches,
+                    None,
+                    pos,
+                );
+                let d = max_diff(&array_to_vec_f32(seq.as_ref().unwrap()), &want);
+                assert!(
+                    d < 1e-4,
+                    "{layer_type} sequence id at {pos}: max |diff| {d}"
+                );
+
+                let model = build_wrapper_with_layer(layer_type);
+                let mut caches = model.make_caches();
+                let embeds = model.embed_tokens(&ids).unwrap();
+                let want_emb = row(model
+                    .forward_with_embeddings(&ids, Some(&embeds), &mut caches, None)
+                    .as_ref()
+                    .unwrap());
+                let model = build_wrapper_with_layer(layer_type);
+                let mut caches = model.make_caches();
+                let emb = model.forward_last_logits_with_embeddings_and_sequence_id(
+                    &ids,
+                    Some(&embeds),
+                    Some(SequenceId::from_raw(22)),
+                    &mut caches,
+                    None,
+                    pos,
+                );
+                let d = max_diff(&array_to_vec_f32(emb.as_ref().unwrap()), &want_emb);
+                assert!(d < 1e-4, "{layer_type} embeddings at {pos}: max |diff| {d}");
+            }
+        }
+    }
+
     /// Issue #885 end-to-end parity: chunked prefill that feeds the server's
     /// chunk-local, offset-0 `create_padded_prefill_mask` on every CONTINUATION
     /// chunk (exactly what the scheduler passes for a model-owned-cache batching

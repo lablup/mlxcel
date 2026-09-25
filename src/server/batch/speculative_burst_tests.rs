@@ -148,6 +148,7 @@ fn make_mtp_dispatch() -> crate::server::SpeculativeDispatch {
     crate::server::SpeculativeDispatch::Mtp {
         draft_model_path: std::path::PathBuf::from("/tmp/test-mtp-drafter"),
         block_size: 4,
+        block_size_source: crate::cli::draft_block_policy::BlockSizeSource::Override,
         user_requested_explicit_kind: true,
     }
 }
@@ -159,6 +160,7 @@ fn make_dflash_dispatch() -> crate::server::SpeculativeDispatch {
     crate::server::SpeculativeDispatch::DFlash {
         draft_model_path: std::path::PathBuf::from("/tmp/test-dflash-drafter"),
         block_size: 16,
+        block_size_source: crate::cli::draft_block_policy::BlockSizeSource::Override,
         user_requested_explicit_kind: true,
     }
 }

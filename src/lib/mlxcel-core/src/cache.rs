@@ -147,6 +147,57 @@ fn direct_prefill_cache_store_enabled() -> bool {
     std::env::var("MLXCEL_ENABLE_DIRECT_PREFILL_CACHE_STORE").is_ok()
 }
 
+/// `MLXCEL_KV_INPLACE_WRITE`: the FP16 decode row write goes in place
+/// (#1959) unless this is `0`, `false`, `off` or `no`.
+///
+/// `slice_update` copies the whole cache every decode step because the
+/// previous pipelined step's command buffer still references the buffer, so it
+/// is never donatable. Writing only the new row removes that copy: on
+/// command-r7b 4-bit, M1 Ultra, decode +2.5% at context 16, +4.1% at 512 and
+/// +8.2% at 2048.
+pub(crate) fn kv_inplace_write_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| {
+        !matches!(
+            std::env::var("MLXCEL_KV_INPLACE_WRITE")
+                .map(|v| v.trim().to_ascii_lowercase())
+                .as_deref(),
+            Ok("0") | Ok("false") | Ok("off") | Ok("no")
+        )
+    })
+}
+
+/// See [`KVCache::inplace_marker`].
+struct InplaceWriteMarker {
+    keys: UniquePtr<MlxArray>,
+    values: UniquePtr<MlxArray>,
+    live_len: i32,
+}
+
+/// DIAGNOSTIC ONLY, output is wrong while it is set:
+/// `MLXCEL_DIAG_SKIP_DECODE_KV_WRITE` makes a single-token FP16 decode step
+/// skip writing its K/V row and attend over the cache as it stood, so a decode
+/// benchmark can read the upper bound of removing the per-step cache write.
+/// That write is costlier than one row: while the previous step is still in
+/// flight its command buffer holds the cache buffer, so `slice_update` cannot
+/// donate it and copies the whole cache every step. On command-r7b 4-bit,
+/// M1 Ultra, the bound is +4.4% decode at context 16, +8% at 512 and +11% at
+/// 2048. The cache never grows and positions do not advance, so generated text
+/// is meaningless; read throughput only. Prints one warning when first used.
+fn diag_skip_decode_kv_write() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| {
+        let on = std::env::var_os("MLXCEL_DIAG_SKIP_DECODE_KV_WRITE").is_some();
+        if on {
+            eprintln!(
+                "WARNING: MLXCEL_DIAG_SKIP_DECODE_KV_WRITE is set: decode steps do not write \
+                 the KV cache. Output is invalid; use for throughput diagnosis only."
+            );
+        }
+        on
+    })
+}
+
 /// Check that all `KVCache` entries in `caches` support cache trimming.
 ///
 /// Mirrors the upstream mlx-lm `can_trim_prompt_cache` function
@@ -325,9 +376,12 @@ pub(crate) const TURBO_DEFAULT_SEED: u32 = 0x7B4_70404; // "TUR" 0x474 + B2 issu
 
 /// KV Cache for attention layers.
 ///
-/// Uses pre-allocated buffers with slice_update for O(1) per-token updates,
-/// matching Python mlx-lm's KVCache implementation. Buffers grow by `step`
-/// slots at a time (default 256) to amortize allocation cost.
+/// Uses pre-allocated buffers, matching Python mlx-lm's KVCache
+/// implementation. Buffers grow by `step` slots at a time (default 256) to
+/// amortize allocation cost. A single-token FP16 decode step writes its row in
+/// place when the cache provably owns every row it writes (#1959, see
+/// `inplace_marker`); every other write goes through `slice_update`, which
+/// copies the whole buffer whenever the previous pipelined step still holds it.
 ///
 /// When `mode` is `KVCacheMode::Int8`, keys and values are stored as INT8
 /// tensors with per-token scale factors. `update_and_fetch` always returns
@@ -460,6 +514,16 @@ pub struct KVCache {
     /// `Send` analysis in the introducing PR — `KVCache` is never required to
     /// be `Send`/`Sync`).
     pub(crate) paged_backing: Option<PagedBacking>,
+    /// Proof that the next single-row FP16 decode write may go in place
+    /// (#1959): second handles to the `keys` / `values` arrays this cache's
+    /// own last write produced, and the live length right after that write.
+    /// The in-place write is taken only when both handles are still the ones
+    /// installed (nothing outside `update_fp16` replaced them) and the new row
+    /// lands exactly at that length (no trim or rollback since). Then the row
+    /// was never valid for anyone, so another holder sharing the buffer (a
+    /// prompt-cache snapshot, a detached or restored cache) cannot see it
+    /// change. Holding the handles keeps their ids from being reused.
+    inplace_marker: Option<InplaceWriteMarker>,
 }
 
 /// Shared handle that makes one [`KVCache`] write/read through a pooled paged
@@ -520,6 +584,7 @@ impl KVCache {
             delegated_fp16_fast_path: turbo::delegated_fp16_fast_path_enabled(),
             delegated_fp16_sidecar_policy: turbo::delegated_fp16_sidecar_policy(),
             paged_backing: None,
+            inplace_marker: None,
         }
     }
 
@@ -568,6 +633,7 @@ impl KVCache {
             delegated_fp16_fast_path: turbo::delegated_fp16_fast_path_enabled(),
             delegated_fp16_sidecar_policy: turbo::delegated_fp16_sidecar_policy(),
             paged_backing: None,
+            inplace_marker: None,
         }
     }
 
@@ -770,6 +836,21 @@ impl KVCache {
     /// Pre- callers (those that never trim) see this equal to
     /// `self.offset` because `live_start == 0`.
     #[inline]
+    /// The FP16 live window `[.., live_start..offset, ..]` as it stands, with
+    /// nothing written and `offset` unchanged. Only the
+    /// `MLXCEL_DIAG_SKIP_DECODE_KV_WRITE` diagnostic uses it.
+    fn live_window_without_write(&self) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        let live_len = self.buffer_idx();
+        let k = self.keys.as_ref().expect("live window needs keys");
+        let v = self.values.as_ref().expect("live window needs values");
+        let ks = ffi::array_shape(k);
+        let vs = ffi::array_shape(v);
+        (
+            ffi::slice(k, &[0, 0, 0, 0], &[ks[0], ks[1], live_len, ks[3]]),
+            ffi::slice(v, &[0, 0, 0, 0], &[vs[0], vs[1], live_len, vs[3]]),
+        )
+    }
+
     fn buffer_idx(&self) -> i32 {
         self.offset - self.live_start
     }
@@ -954,6 +1035,28 @@ impl KVCache {
         self.offset += new_seq_len;
         let live_len = self.buffer_idx();
 
+        // #1959: write a decode row in place when this cache provably owns
+        // every row at and past `prev` (see `inplace_marker`).
+        if new_seq_len == 1
+            && kv_inplace_write_enabled()
+            && self.inplace_write_is_private(prev)
+            && ffi::default_device_is_gpu()
+        {
+            let start = [0, 0, prev, 0];
+            self.keys = Some(ffi::inplace_slice_write(
+                self.keys.as_ref().unwrap(),
+                &new_keys,
+                &start,
+            ));
+            self.values = Some(ffi::inplace_slice_write(
+                self.values.as_ref().unwrap(),
+                &new_values,
+                &start,
+            ));
+            self.mark_own_write(live_len);
+            return;
+        }
+
         let k_shape = ffi::array_shape(self.keys.as_ref().unwrap());
         let v_shape = ffi::array_shape(self.values.as_ref().unwrap());
         self.keys = Some(ffi::slice_update(
@@ -968,6 +1071,35 @@ impl KVCache {
             &[0, 0, prev, 0],
             &[v_shape[0], v_shape[1], live_len, v_shape[3]],
         ));
+        // The copy produced buffers no one else has seen.
+        self.mark_own_write(live_len);
+    }
+
+    /// Whether the next FP16 decode row at `prev` may be written in place:
+    /// `keys` / `values` are still the arrays this cache's own last write
+    /// produced and nothing rolled the cache back since. See `inplace_marker`.
+    fn inplace_write_is_private(&self, prev: i32) -> bool {
+        match (&self.inplace_marker, &self.keys, &self.values) {
+            (Some(m), Some(k), Some(v)) => {
+                m.live_len == prev
+                    && ffi::array_same_handle(&m.keys, k)
+                    && ffi::array_same_handle(&m.values, v)
+            }
+            _ => false,
+        }
+    }
+
+    /// Record that `keys` / `values` were just produced by this cache's own
+    /// write, leaving `live_len` rows valid.
+    fn mark_own_write(&mut self, live_len: i32) {
+        self.inplace_marker = match (&self.keys, &self.values) {
+            (Some(k), Some(v)) => Some(InplaceWriteMarker {
+                keys: ffi::array_handle_clone(k),
+                values: ffi::array_handle_clone(v),
+                live_len,
+            }),
+            _ => None,
+        };
     }
 
     /// INT8 update path — quantizes incoming K/V tokens and accumulates into
@@ -2994,6 +3126,15 @@ impl KVCache {
             return self.update_and_fetch_paged(&new_keys, &new_values);
         }
 
+        // Cached flag first, so the default path pays nothing for the check.
+        if diag_skip_decode_kv_write()
+            && self.mode == KVCacheMode::Fp16
+            && self.keys.is_some()
+            && ffi::array_shape(&new_keys)[2] == 1
+        {
+            return self.live_window_without_write();
+        }
+
         self.update(new_keys, new_values);
 
         // After `update`, the live window length equals `buffer_idx()` —
@@ -4203,6 +4344,13 @@ pub struct RotatingKVCache {
     /// Deterministic seed for the Turbo4 sign vectors. Set at construction
     /// time so detach/adopt round-trip without recomputing rotations.
     pub(crate) turbo_seed: u32,
+    /// Same proof as [`KVCache::inplace_marker`], for the warmup phase
+    /// (#1959 follow-up): while `offset < max_size` each decode token lands on
+    /// a slot that was never valid, so it may be written in place when this
+    /// cache's own last write produced the current buffers. Steady-state
+    /// overwrites replace a slot that was valid a step ago and a snapshot may
+    /// still hold it, so they keep the copying `slice_update`.
+    inplace_marker: Option<InplaceWriteMarker>,
 }
 
 /// Scalar state required to restore a [`RotatingKVCache`] snapshot.
@@ -4318,6 +4466,7 @@ impl RotatingKVCache {
             v_rescale: None,
             turbo_params: None,
             turbo_seed,
+            inplace_marker: None,
         }
     }
 
@@ -4901,18 +5050,48 @@ impl RotatingKVCache {
         }
 
         let pos = self.idx;
-        let k_buffer = ffi::slice_update(
-            &k_buffer,
-            &new_keys,
-            &[0, 0, pos, 0],
-            &[batch, heads, pos + 1, head_dim],
-        );
-        let v_buffer = ffi::slice_update(
-            &v_buffer,
-            &new_values,
-            &[0, 0, pos, 0],
-            &[batch, heads, pos + 1, value_head_dim],
-        );
+        // Warmup slot that was never valid, in buffers this cache's own last
+        // write produced (a growth concat or trim above gives new handles and
+        // fails the check): write it in place (see `inplace_marker`).
+        let inplace = kv_inplace_write_enabled()
+            && self.offset < self.max_size
+            && pos == self.offset
+            && match &self.inplace_marker {
+                Some(m) => {
+                    m.live_len == pos
+                        && ffi::array_same_handle(&m.keys, &k_buffer)
+                        && ffi::array_same_handle(&m.values, &v_buffer)
+                }
+                None => false,
+            }
+            && ffi::default_device_is_gpu();
+        let (k_buffer, v_buffer) = if inplace {
+            let start = [0, 0, pos, 0];
+            (
+                ffi::inplace_slice_write(&k_buffer, &new_keys, &start),
+                ffi::inplace_slice_write(&v_buffer, &new_values, &start),
+            )
+        } else {
+            (
+                ffi::slice_update(
+                    &k_buffer,
+                    &new_keys,
+                    &[0, 0, pos, 0],
+                    &[batch, heads, pos + 1, head_dim],
+                ),
+                ffi::slice_update(
+                    &v_buffer,
+                    &new_values,
+                    &[0, 0, pos, 0],
+                    &[batch, heads, pos + 1, value_head_dim],
+                ),
+            )
+        };
+        self.inplace_marker = Some(InplaceWriteMarker {
+            keys: ffi::array_handle_clone(&k_buffer),
+            values: ffi::array_handle_clone(&v_buffer),
+            live_len: pos + 1,
+        });
 
         self.offset += 1;
         self.idx += 1;
@@ -7361,6 +7540,167 @@ mod rotating_truncation_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn f32_rows(arr: &MlxArray) -> Vec<f32> {
+        let a = ffi::astype(arr, dtype::FLOAT32);
+        ffi::eval(&a);
+        ffi::array_to_raw_bytes(&a)
+            .chunks_exact(4)
+            .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()
+    }
+
+    fn row(v: f32) -> UniquePtr<MlxArray> {
+        ffi::from_slice_f32(&[v], &[1, 1, 1, 1])
+    }
+
+    /// The in-place proof holds after the cache's own writes and fails once
+    /// anything else replaces the buffer or rolls the cache back (#1959).
+    #[test]
+    fn inplace_write_marker_tracks_own_writes_replacement_and_rollback() {
+        let mut cache = KVCache::new();
+        cache.update_and_fetch(
+            ffi::from_slice_f32(&[1.0, 2.0], &[1, 1, 2, 1]),
+            ffi::from_slice_f32(&[1.0, 2.0], &[1, 1, 2, 1]),
+        );
+        assert!(cache.inplace_write_is_private(2), "own prefill write");
+        cache.update_and_fetch(row(3.0), row(3.0));
+        assert!(cache.inplace_write_is_private(3), "own decode write");
+        assert!(
+            !cache.inplace_write_is_private(2),
+            "not at the recorded length"
+        );
+
+        // A buffer installed from outside (a restore) is not provably private.
+        let k = ffi::copy(cache.keys.as_ref().unwrap());
+        cache.keys = Some(k);
+        assert!(!cache.inplace_write_is_private(3), "replaced keys");
+        cache.update_and_fetch(row(4.0), row(4.0));
+        assert!(
+            cache.inplace_write_is_private(4),
+            "the copying write re-owns"
+        );
+
+        cache.trim(2);
+        assert!(
+            !cache.inplace_write_is_private(cache.buffer_idx()),
+            "after trim"
+        );
+    }
+
+    /// A snapshot sharing the cache buffer keeps its valid rows while the
+    /// cache keeps decoding in place, and a cache restored from that snapshot
+    /// writes into its own copy, leaving both the snapshot and the original
+    /// untouched (#1959, cache poisoning).
+    #[test]
+    fn inplace_writes_never_change_rows_a_shared_snapshot_holds() {
+        if !ffi::default_device_is_gpu() {
+            return;
+        }
+        let mut a = KVCache::new();
+        a.update_and_fetch(
+            ffi::from_slice_f32(&[1.0, 2.0], &[1, 1, 2, 1]),
+            ffi::from_slice_f32(&[10.0, 20.0], &[1, 1, 2, 1]),
+        );
+        a.update_and_fetch(row(3.0), row(30.0));
+        // Snapshot: second handles to A's current buffers, valid length 3.
+        let snap_k = ffi::array_handle_clone(a.keys.as_ref().unwrap());
+        let snap_v = ffi::array_handle_clone(a.values.as_ref().unwrap());
+        ffi::eval(&snap_k);
+        ffi::eval(&snap_v);
+        let snap_prefix = |arr: &MlxArray| f32_rows(arr)[..3].to_vec();
+        let before_k = snap_prefix(&snap_k);
+        let before_v = snap_prefix(&snap_v);
+        assert_eq!(before_k, vec![1.0, 2.0, 3.0]);
+
+        // A keeps decoding in place.
+        for t in 4..8 {
+            let (k, _) = a.update_and_fetch(row(t as f32), row(10.0 * t as f32));
+            ffi::eval(&k);
+        }
+        assert_eq!(snap_prefix(&snap_k), before_k, "snapshot keys unchanged");
+        assert_eq!(snap_prefix(&snap_v), before_v, "snapshot values unchanged");
+
+        // B restores the snapshot and decodes its own continuation.
+        let mut b = KVCache::new();
+        b.keys = Some(ffi::array_handle_clone(&snap_k));
+        b.values = Some(ffi::array_handle_clone(&snap_v));
+        b.offset = 3;
+        let (bk, _) = b.update_and_fetch(row(-1.0), row(-10.0));
+        assert_eq!(f32_rows(&bk), vec![1.0, 2.0, 3.0, -1.0]);
+        assert_eq!(
+            snap_prefix(&snap_k),
+            before_k,
+            "restore did not write the snapshot"
+        );
+        let (ak, _) = a.update_and_fetch(row(8.0), row(80.0));
+        assert_eq!(
+            f32_rows(&ak),
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            "the original never sees the restored cache's rows"
+        );
+    }
+
+    /// A rotating cache writes warmup rows in place without touching the
+    /// rows a shared snapshot holds, and once the ring wraps it copies instead
+    /// of overwriting a slot the snapshot still considers valid (#1959
+    /// follow-up).
+    #[test]
+    fn rotating_inplace_warmup_and_wrap_keep_shared_snapshots_intact() {
+        if !ffi::default_device_is_gpu() {
+            return;
+        }
+        let mut c = RotatingKVCache::new(4);
+        for t in 1..=2 {
+            let (k, _) = c.update_and_fetch(row(t as f32), row(10.0 * t as f32));
+            ffi::eval(&k);
+        }
+        let warm_k = ffi::array_handle_clone(c.keys.as_ref().unwrap());
+        ffi::eval(&warm_k);
+        let warm_before = f32_rows(&warm_k)[..2].to_vec();
+        // Warmup continues (slots 2 and 3 were never valid), then the ring wraps.
+        for t in 3..=4 {
+            let (k, _) = c.update_and_fetch(row(t as f32), row(10.0 * t as f32));
+            ffi::eval(&k);
+        }
+        assert_eq!(
+            f32_rows(&warm_k)[..2].to_vec(),
+            warm_before,
+            "warmup rows kept"
+        );
+
+        let full_k = ffi::array_handle_clone(c.keys.as_ref().unwrap());
+        ffi::eval(&full_k);
+        let full_before = f32_rows(&full_k);
+        assert_eq!(full_before, vec![1.0, 2.0, 3.0, 4.0]);
+        // Steady state overwrites slot 0 (token 1): must not reach the snapshot.
+        let (k, _) = c.update_and_fetch(row(5.0), row(50.0));
+        assert_eq!(f32_rows(&k), vec![5.0, 2.0, 3.0, 4.0]);
+        assert_eq!(f32_rows(&full_k), full_before, "wrapped overwrite copied");
+    }
+
+    /// The `MLXCEL_DIAG_SKIP_DECODE_KV_WRITE` path returns exactly the live
+    /// window a normal fetch of the same cache would, and writes nothing.
+    #[test]
+    fn live_window_without_write_matches_the_cache_and_leaves_it_unchanged() {
+        let to_f32 = |arr: &MlxArray| {
+            ffi::eval(arr);
+            ffi::array_to_raw_bytes(arr)
+                .chunks_exact(4)
+                .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+                .collect::<Vec<f32>>()
+        };
+        let mut cache = KVCache::new();
+        let (k, v) = cache.update_and_fetch(
+            ffi::from_slice_f32(&[1.0, 2.0, 3.0], &[1, 1, 3, 1]),
+            ffi::from_slice_f32(&[10.0, 20.0, 30.0], &[1, 1, 3, 1]),
+        );
+        let (wk, wv) = cache.live_window_without_write();
+        assert_eq!(cache.offset, 3, "nothing is written or advanced");
+        assert_eq!(ffi::array_shape(&wk), vec![1, 1, 3, 1]);
+        assert_eq!(to_f32(&wk), to_f32(&k));
+        assert_eq!(to_f32(&wv), to_f32(&v));
+    }
 
     #[test]
     fn kv_cache_trim_clears_storage_when_fully_rewound() {

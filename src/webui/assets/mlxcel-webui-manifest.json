@@ -1,36 +1,36 @@
 {
   "budgets": {
-    "embedded_asset_bytes": 803898,
+    "embedded_asset_bytes": 852352,
     "embedded_asset_limit_bytes": 5242880,
-    "initial_js_gzip_bytes": 170636,
+    "initial_js_gzip_bytes": 180660,
     "initial_js_gzip_limit_bytes": 204800,
-    "total_js_gzip_bytes": 171248,
+    "total_js_gzip_bytes": 181272,
     "total_js_gzip_limit_bytes": 716800
   },
   "files": [
     {
       "bytes": 951,
       "gzip_bytes": 612,
-      "path": "assets/code-highlight-NhHf6Eg4.js",
-      "sha256": "3a40ecb1dd674341829d9a35b846dc42833bc3966ef6b51ba64ccf8ab1eb5ada"
+      "path": "assets/code-highlight-De9YOj0d.js",
+      "sha256": "ba321810d16f4dc621e520fd9c2488089f8cde89dcbe5d174d1a8f0b2b0e41c4"
     },
     {
-      "bytes": 125752,
-      "gzip_bytes": 20038,
-      "path": "assets/index-DnT-nVPF.css",
-      "sha256": "b55ed85f2dee7c8e0ed6ba53452825b7346c244773802c2b75cf4cf61287e18a"
+      "bytes": 137388,
+      "gzip_bytes": 21807,
+      "path": "assets/index-CB6QNVfo.css",
+      "sha256": "867be0521ad70c43cd0a32a954b70d1cd2cb4075e961034f6caf86eab4839c9f"
     },
     {
-      "bytes": 659243,
-      "gzip_bytes": 169647,
-      "path": "assets/index-h-4zIuYd.js",
-      "sha256": "7980bc287689e85440a3e0cfe850c54025a8e824e6bdc9b5428981ddd9043236"
+      "bytes": 696061,
+      "gzip_bytes": 179671,
+      "path": "assets/index-CDEKMxNt.js",
+      "sha256": "7b652302cbb7f2aa5c1a7f8d617ecab166c753b20d1c3897fbc29bb5ddbaa576"
     },
     {
       "bytes": 503,
-      "gzip_bytes": 302,
+      "gzip_bytes": 303,
       "path": "index.html",
-      "sha256": "a5fef9b842a54591da32a15d127a643d45ee71ec3e8a0274c4d53656c392c0f3"
+      "sha256": "73c7145ea1f2a97e2a90f92f5f5ec7e7d156cde4337e79437750025355a542ec"
     },
     {
       "bytes": 2129,
@@ -67,5 +67,5 @@
   },
   "pnpm_version": "11.18.0",
   "schema_version": 1,
-  "source_digest_sha256": "0bae12fdd8126cddb677d3147f63c5019a53b55decdcfc500a4e1d108e55f599"
+  "source_digest_sha256": "aabbe271f967c6da74e3059bbaf769507c2870b0aa8656f0daec7e2660751a0c"
 }

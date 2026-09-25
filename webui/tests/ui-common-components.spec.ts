@@ -149,12 +149,9 @@ test.describe('shared Skeleton', () => {
       await expect(status.getByText(text('models.library.waiting'), { exact: true })).toBeVisible();
       await expect(page.getByText('Loading', { exact: true })).toHaveCount(0);
       expect(await horizontalOverflow(page)).toBeLessThanOrEqual(1);
-      // Pre-existing on main and independent of the loading content: at 390px the
-      // loading/empty table scrolls horizontally with nothing focusable inside. Tolerate
-      // exactly that node so the waiting state cannot add anything else.
-      const results = await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa']).analyze();
-      const known = (id: string, html: string): boolean => width === 390 && id === 'scrollable-region-focusable' && html.startsWith('<div class="data-table ds-common-table" data-testid="models-table">');
-      expect(results.violations.map((violation) => ({ id: violation.id, nodes: violation.nodes.map((node) => node.html).filter((html) => !known(violation.id, html)) })).filter((violation) => violation.nodes.length > 0)).toEqual([]);
+      // The table's own scroll box is a named, focusable region whenever it overflows, so the
+      // waiting state (nothing focusable inside) no longer trips scrollable-region-focusable (#1918).
+      await expectAxeClean(page);
       await expectSafeLayout(page);
       await expect(status.locator('.skeleton').first()).toBeVisible();
     });
@@ -198,33 +195,31 @@ test.describe('shared SmoothHeight', () => {
 
 test.describe('shared Badge', () => {
   for (const width of [390, 1440]) {
-    test(`Models rows keep source and quantization readable without growing taller at ${width}`, async ({ page }) => {
+    test(`Models rows keep quantization and task badges readable on one line at ${width}`, async ({ page }) => {
       await installMockApi(page, 'happy');
       await bootProduct(page, { ...productVariants[0], width, appearance: { ...productVariants[0].appearance, locale: 'en' } });
       await loginWithMockApi(page);
       const row = page.getByTestId('models-table').locator('tbody tr').first();
-      const cell = row.locator('td').first();
-      for (const value of ['alpha', 'models_dir', '4bit']) await expect(cell).toContainText(value);
-      // Same-page baseline: the same row with the previous "source · quantization" paragraph.
-      const geometry = await row.evaluate((element, metadata) => {
-        const baseline = element.cloneNode(true) as HTMLElement;
-        const baselineCell = baseline.querySelector('td');
-        const button = baselineCell?.querySelector('button');
-        if (!baselineCell || !button) throw new Error('Missing name cell button');
-        const paragraph = document.createElement('p');
-        paragraph.textContent = metadata;
-        baselineCell.replaceChildren(button, paragraph);
-        element.after(baseline);
-        const result = { actual: element.getBoundingClientRect().height, baseline: baseline.getBoundingClientRect().height };
-        baseline.remove();
-        return result;
-      }, 'models_dir · 4bit');
-      expect(geometry.actual).toBeLessThanOrEqual(geometry.baseline + 0.5);
-      const clipped = await cell.evaluate((element) => Array.from(element.querySelectorAll<HTMLElement>('*')).filter((node) => node.childElementCount === 0 && node.scrollWidth > node.clientWidth + 1).map((node) => node.textContent));
+      await expect(row.locator('td.models-col-name .truncate')).toHaveText('alpha');
+      if (width >= 1100) {
+        await expect(row.locator('td.models-col-quantization')).toHaveText('4bit');
+        const tasks = row.locator('td.models-col-tasks .badge:not(.status-tag)');
+        await expect(tasks).toHaveText([text('models.task.chat'), text('models.task.rerank'), text('models.task.completion')]);
+        // One line: the row is no taller than its tallest control plus the cell padding.
+        expect((await row.boundingBox())?.height ?? 0).toBeLessThanOrEqual(48);
+        expect(await tasks.evaluateAll((nodes) => nodes.filter((node) => window.getComputedStyle(node).textTransform !== 'none').length)).toBe(0);
+      } else {
+        // Narrow: tasks, size and quantization give way to the inspector; name, state and actions stay.
+        await expect(row.locator('td.models-col-tasks')).toBeHidden();
+        await expect(row.locator('td.models-col-quantization')).toBeHidden();
+        await expect(row.locator('.models-name-state .status-tag')).toBeVisible();
+        await expect(row.getByTestId('models-row-load')).toBeVisible();
+      }
+      // Nothing clips except the name, which truncates by design with its full text in `title`.
+      const clipped = await row.evaluate((element) => Array.from(element.querySelectorAll<HTMLElement>('*')).filter((node) => node.childElementCount === 0 && !node.closest('.truncate') && node.getBoundingClientRect().width > 0 && node.scrollWidth > node.clientWidth + 1).map((node) => node.textContent));
       expect(clipped).toEqual([]);
       expect(await horizontalOverflow(page)).toBeLessThanOrEqual(1);
       await expectAxeClean(page);
-      await expect(cell.locator('.badge:not(.status-tag)')).toHaveText(['models_dir', '4bit']);
     });
   }
 });

@@ -50,12 +50,20 @@ fn write_drafter_config(model_type: Option<&str>) -> (TempDir, PathBuf) {
     (dir, path)
 }
 
+/// A target checkpoint path with no `config.json`, so the #1797 block-width
+/// policy classifies it as `TargetQuantization::Unknown` and every
+/// expectation below stays the flat per-kind default. The policy's own arms
+/// are covered in `src/cli/draft_block_policy_tests.rs`.
+fn unmeasured_target() -> &'static std::path::Path {
+    std::path::Path::new("/nonexistent/mlxcel-dispatch-test-target")
+}
+
 #[test]
 fn resolve_returns_disabled_when_no_drafter_configured() {
     let cfg = base_config();
     assert!(cfg.draft_model_path.is_none());
 
-    let dispatch = SpeculativeDispatch::resolve(&cfg).expect("resolve");
+    let dispatch = SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect("resolve");
     assert!(matches!(dispatch, SpeculativeDispatch::Disabled));
     assert!(dispatch.drafter_kind().is_none());
     assert!(dispatch.block_size().is_none());
@@ -74,12 +82,13 @@ fn resolve_mtp_explicit_kind() {
     cfg.draft_model_path = Some(path.clone());
     cfg.draft_kind = Some("mtp".to_string());
 
-    let dispatch = SpeculativeDispatch::resolve(&cfg).expect("resolve");
+    let dispatch = SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect("resolve");
     match dispatch {
         SpeculativeDispatch::Mtp {
             draft_model_path,
             block_size,
             user_requested_explicit_kind,
+            ..
         } => {
             assert_eq!(draft_model_path, path);
             assert!(user_requested_explicit_kind);
@@ -98,7 +107,7 @@ fn resolve_mtp_explicit_kind_with_block_size_override() {
     cfg.draft_kind = Some("mtp".to_string());
     cfg.draft_block_size = Some(8);
 
-    let dispatch = SpeculativeDispatch::resolve(&cfg).expect("resolve");
+    let dispatch = SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect("resolve");
     match dispatch {
         SpeculativeDispatch::Mtp { block_size, .. } => assert_eq!(block_size, 8),
         other => panic!("expected Mtp, got {other:?}"),
@@ -116,7 +125,7 @@ fn resolve_mtp_auto_detected_from_drafter_config() {
     cfg.draft_model_path = Some(path);
     cfg.draft_kind = None;
 
-    let dispatch = SpeculativeDispatch::resolve(&cfg).expect("resolve");
+    let dispatch = SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect("resolve");
     match dispatch {
         SpeculativeDispatch::Mtp {
             user_requested_explicit_kind,
@@ -139,12 +148,13 @@ fn resolve_dflash_explicit_kind() {
     cfg.draft_model_path = Some(path.clone());
     cfg.draft_kind = Some("dflash".to_string());
 
-    let dispatch = SpeculativeDispatch::resolve(&cfg).expect("resolve");
+    let dispatch = SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect("resolve");
     match dispatch {
         SpeculativeDispatch::DFlash {
             draft_model_path,
             block_size,
             user_requested_explicit_kind,
+            ..
         } => {
             assert_eq!(draft_model_path, path);
             assert!(user_requested_explicit_kind);
@@ -163,7 +173,7 @@ fn resolve_dflash_block_size_override() {
     cfg.draft_kind = Some("dflash".to_string());
     cfg.draft_block_size = Some(32);
 
-    let dispatch = SpeculativeDispatch::resolve(&cfg).expect("resolve");
+    let dispatch = SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect("resolve");
     match dispatch {
         SpeculativeDispatch::DFlash { block_size, .. } => assert_eq!(block_size, 32),
         other => panic!("expected DFlash, got {other:?}"),
@@ -179,7 +189,8 @@ fn resolve_internal_mtp_kind_is_rejected_at_cli() {
     cfg.draft_model_path = Some(path);
     cfg.draft_kind = Some("internal-mtp".to_string());
 
-    let err = SpeculativeDispatch::resolve(&cfg).expect_err("must reject internal-mtp");
+    let err = SpeculativeDispatch::resolve(&cfg, unmeasured_target())
+        .expect_err("must reject internal-mtp");
     match err {
         SpeculativeDispatchError::InvalidKind { message } => {
             assert!(message.contains("internal-mtp"));
@@ -196,7 +207,8 @@ fn resolve_unknown_kind_returns_invalid_kind_error() {
     cfg.draft_model_path = Some(path);
     cfg.draft_kind = Some("bogus-kind".to_string());
 
-    let err = SpeculativeDispatch::resolve(&cfg).expect_err("must reject unknown");
+    let err =
+        SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect_err("must reject unknown");
     match err {
         SpeculativeDispatchError::InvalidKind { message } => {
             assert!(message.contains("bogus-kind"));
@@ -226,12 +238,14 @@ fn resolve_with_missing_drafter_config_falls_back_to_default_kind() {
     // scan; the file is read inside.
     let _keep_dir_alive = dir;
 
-    let dispatch = SpeculativeDispatch::resolve(&cfg).expect("must resolve via default fallback");
+    let dispatch = SpeculativeDispatch::resolve(&cfg, unmeasured_target())
+        .expect("must resolve via default fallback");
     match dispatch {
         SpeculativeDispatch::DFlash {
             draft_model_path,
             user_requested_explicit_kind,
             block_size,
+            ..
         } => {
             assert_eq!(draft_model_path, path);
             assert!(
@@ -251,7 +265,7 @@ fn summary_contains_block_size_for_kind_specific_variants() {
     cfg.draft_model_path = Some(path);
     cfg.draft_kind = Some("dflash".to_string());
 
-    let dispatch = SpeculativeDispatch::resolve(&cfg).expect("resolve");
+    let dispatch = SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect("resolve");
     let s = dispatch.summary();
     assert!(s.contains("speculative=dflash"));
     assert!(s.contains("block_size=16"));
@@ -281,11 +295,13 @@ fn is_kind_specific_is_true_only_for_mtp_and_dflash() {
     let mtp = SpeculativeDispatch::Mtp {
         draft_model_path: PathBuf::from("/tmp/m"),
         block_size: 4,
+        block_size_source: crate::cli::draft_block_policy::BlockSizeSource::Override,
         user_requested_explicit_kind: true,
     };
     let dflash = SpeculativeDispatch::DFlash {
         draft_model_path: PathBuf::from("/tmp/d"),
         block_size: 16,
+        block_size_source: crate::cli::draft_block_policy::BlockSizeSource::Override,
         user_requested_explicit_kind: false,
     };
     assert!(mtp.is_kind_specific());

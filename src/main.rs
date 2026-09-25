@@ -60,6 +60,11 @@ Environment Variables:
                            unset, auto-defaults to 1000 on pre-M5 Apple Silicon (M1-M4),
                              MLX default on M5+ and non-Apple (hardware-gated, #353)
                            explicit value always wins (manual override / sweeps)
+  MLXCEL_DECODE_MB_PER_BUFFER Metal command-buffer input budget, decode steps only
+                           unset, 1000 on pre-M5 Apple Silicon (M1-M4), off elsewhere;
+                             prefill keeps MLX's default to bound peak memory
+                           \"0\"/\"off\", disable; a positive value replaces the default
+                           ignored when MLX_MAX_MB_PER_BUFFER is set (pins both phases)
   MLX_CUDA_GRAPH_CACHE_SIZE CUDA graph-cache LRU capacity (CUDA only)
                            unset, auto-defaults to 2000 on CUDA builds (MLX default 400
                              aborts long-lived shape-diverse decode, #818)

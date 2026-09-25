@@ -123,6 +123,10 @@ fn main() {
         // values rather than written through.
         .file("../mlx-cpp/turbo/fused_norm.cpp")
         .file("../mlx-cpp/turbo/fused_rope_append.cpp")
+        // In-place decode KV row write (#1959): a primitive whose output
+        // adopts the cache buffer, since slice_update copies it whole while the
+        // previous pipelined step still references it.
+        .file("../mlx-cpp/turbo/kv_inplace_write.cpp")
         // C shim over the `qmm_naive` CTA tile selector (#1541), so
         // `qmm_naive_tile_tests.rs` can sweep the shipped selection function on
         // the host. The selector is pure integer arithmetic with no CUDA in it,
@@ -290,6 +294,8 @@ fn main() {
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/fused_norm.cpp");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/fused_rope_append.h");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/fused_rope_append.cpp");
+    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/kv_inplace_write.h");
+    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/kv_inplace_write.cpp");
     println!("cargo:rerun-if-env-changed=MLX_CUDA_ARCHITECTURES");
     println!("cargo:rerun-if-env-changed=MLX_ROCM_ARCHITECTURES");
     println!("cargo:rerun-if-env-changed=ROCM_PATH");
@@ -413,13 +419,16 @@ fn build_mlx(expected_commit: &str, cuda_architectures: &str, rocm_architectures
         // honored verbatim (escape hatch); otherwise we auto-detect via nvidia-smi
         // and fall back to Hopper's sm_90a.
         //
-        // The `a` suffix is load-bearing: MLX only defines MLX_CUDA_SM90A_ENABLED
-        // (which compiles the dedicated Hopper `qmm_sm90` quantized kernel) when
-        // "90a" is in the arch list. MLX's own CMake appends that suffix for
-        // cc >= 90, but only inside its `if(NOT DEFINED MLX_CUDA_ARCHITECTURES)`
-        // branch. Because we always pass MLX_CUDA_ARCHITECTURES explicitly, that
-        // branch never runs, so we apply the same rule ourselves here and in
-        // detect_cuda_arch. See docs/installation.md (CUDA architecture selection).
+        // MLX's own CMake would spell a detected capability itself, appending the
+        // architecture-specific `a` suffix for cc >= 90, but only inside its
+        // `if(NOT DEFINED MLX_CUDA_ARCHITECTURES)` branch. We always pass the
+        // variable explicitly, so that branch never runs and `sm_arch_with_suffix`
+        // spells it here instead. It deliberately stops suffixing at
+        // `FIRST_PLAIN_SM`, where MLX's rule would not: on Blackwell the suffix
+        // belongs on one translation unit rather than on the whole target, which
+        // is what `src/lib/mlx-cpp/CMakeLists.txt` arranges and what the release
+        // lists carry. See `sm_arch_with_suffix` and docs/installation.md (CUDA
+        // architecture selection).
         //
         // The value is resolved in `main` by `resolve_cuda_architectures` and
         // passed in, so the list CMake compiles for and the list recorded in
@@ -595,10 +604,15 @@ fn cmake_bool_from_env(name: &str) -> Option<&'static str> {
 ///
 /// An explicitly set `MLX_CUDA_ARCHITECTURES` wins verbatim (the documented
 /// escape hatch); otherwise `nvidia-smi` detection decides, and `90a` is the
-/// last resort. That fallback is why the runtime mismatch check exists: on a
-/// host without `nvidia-smi` it produces a binary that cannot run on its own
-/// build machine, and without the check the only symptom is an opaque CUDA
-/// load failure at the first kernel launch.
+/// last resort. It stays spelled `90a` for the same reason `sm_arch_with_suffix`
+/// still suffixes Hopper: that is what `release.yml` ships, and a fallback that
+/// said `90` would hand a host without `nvidia-smi` a build shape no published
+/// archive uses, which is the divergence lablup/mlxcel#1943 closed on Blackwell.
+///
+/// That fallback is why the runtime mismatch check exists: on a host without
+/// `nvidia-smi` it produces a binary that cannot run on its own build machine,
+/// and without the check the only symptom is an opaque CUDA load failure at the
+/// first kernel launch.
 ///
 /// Empty string on a non-CUDA build, which the runtime reads as "no compiled
 /// architecture list" and skips the check entirely.
@@ -623,7 +637,8 @@ fn detect_cuda_arch() -> Option<String> {
         .ok()?;
     let caps = String::from_utf8_lossy(&output.stdout);
     // Parse "X.Y" compute capabilities, convert to SM number (e.g. "9.0" -> "90"),
-    // and append the architecture-specific "a" suffix for cc >= 90 (e.g. "90a").
+    // and let `sm_arch_with_suffix` spell each one the way the release lists
+    // spell it: "90" becomes "90a", Blackwell stays plain.
     let archs: Vec<String> = caps
         .lines()
         .filter_map(|line| {
@@ -647,17 +662,53 @@ fn detect_cuda_arch() -> Option<String> {
     }
 }
 
-/// Append CUDA's architecture-specific `a` suffix for SM >= 90, mirroring MLX's
-/// own CMake logic (`MLX_CUDA_ARCHITECTURES GREATER_EQUAL 90` -> append `a`).
+/// First SM number this project names plainly even though CUDA offers an
+/// architecture-specific spelling for it: Blackwell's `sm_100`.
 ///
-/// The `a` suffix enables architecture-specific features (e.g. Hopper wgmma/TMA)
-/// the dedicated quantized kernels rely on, and it gates MLX_CUDA_SM90A_ENABLED on
-/// "90a" (not "90"). SM < 90 (e.g. Ampere sm_80/sm_86) has no `a` variant and is
-/// returned unchanged.
+/// Both release lists in `.github/workflows/release.yml` stop suffixing here,
+/// and `scripts/ci/check_cuda_arch_lists.py` rejects any workflow list that
+/// does not. Auto-detection uses the same boundary so that a local build and a
+/// shipped build differ in which architectures they cover and never in what
+/// machine code those architectures get (lablup/mlxcel#1943).
+#[cfg(feature = "cuda")]
+const FIRST_PLAIN_SM: u32 = 100;
+
+/// Spell one detected SM number the way the shipped architecture lists spell
+/// it: `a`-suffixed for Hopper, plain from `FIRST_PLAIN_SM` up.
+///
+/// Suffixing Blackwell is what that boundary exists to prevent. The whole
+/// target would compile under `__CUDA_ARCH_SPECIFIC__`, CUTLASS keys
+/// `CUTLASS_ARCH_MMA_SM121A_ENABLED` on the same macro, and every decode kernel
+/// would get a second, architecture-specific image that the driver prefers on a
+/// matching device. `src/lib/mlx-cpp/CMakeLists.txt` injects that image into
+/// `fp_quantize.cu` alone instead, the one translation unit that can reach
+/// MLX's hardware block-float converters, and that injection only fires for
+/// plain entries: an entry already carrying `a` is recorded as
+/// architecture-specific and skipped, because a duplicate `--generate-code` is
+/// an nvcc error rather than a no-op. A plain `121` is therefore what makes the
+/// shipped mechanism work (lablup/mlxcel#1934, PR #1938).
+///
+/// Hopper keeps `90a` because `release.yml` ships `90a` and this function's job
+/// is to agree with it. The suffix no longer gates anything at the current MLX
+/// pin: upstream commit `44540d12` moved `qmm_sm80`, `qmm_sm90` and
+/// `gather_gemm` to runtime NVRTC compilation and deleted the
+/// `MLX_CUDA_SM90A_ENABLED` definition an earlier revision of this comment
+/// cited, and `jit_module.cpp` now derives the NVRTC `--gpu-architecture` from
+/// the running device, appending `a` itself from compute capability 9 up.
+/// Cross-compiling the pinned tree at `90` and at `90a` agrees: `qmm_sm90.cu`,
+/// `qmm.cu` and `qmm_sm80.cu` emit no device function at either spelling, and
+/// `qmv.cu` and `fp_qmv.cu` emit identical SASS apart from the
+/// `EF_CUDA_ACCELERATORS` header flag that marks a cubin architecture-specific.
+/// `CUTLASS_ARCH_MMA_SM90A_ENABLED` still keys on
+/// `__CUDA_ARCH_FEAT_SM90_ALL`, so a later pin can make the suffix matter
+/// again, which is a second reason not to drop what the release list carries.
+///
+/// SM < 90 (Ampere `sm_80`, `sm_86`) has no `a` variant and is returned
+/// unchanged. See `docs/installation.md` (CUDA architecture selection).
 #[cfg(feature = "cuda")]
 fn sm_arch_with_suffix(sm: &str) -> String {
     match sm.parse::<u32>() {
-        Ok(n) if n >= 90 => format!("{sm}a"),
+        Ok(n) if (90..FIRST_PLAIN_SM).contains(&n) => format!("{sm}a"),
         _ => sm.to_string(),
     }
 }

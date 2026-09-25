@@ -28,7 +28,7 @@ describe('bounded memory-only chat session', () => {
     expect(updateConversation(conversation)).toBe(false); expect(sessionGeneration()).toBe(initial);
   });
   it('bounds aggregate turns independently from the number of conversations', () => {
-    const turn: ChatTurn = { id: 'turn', modelId: 'model', modelRevision: 1, inferenceId: 'model', modelName: 'Model', prompt: '', content: '', reasoning: '', tools: [], status: 'complete', finishReason: 'stop', usage: null, ttftMs: null, elapsedMs: null, error: null, parameters: {}, images: [] };
+    const turn: ChatTurn = { id: 'turn', modelId: 'model', modelRevision: 1, inferenceId: 'model', modelName: 'Model', prompt: '', content: '', reasoning: '', tools: [], status: 'complete', finishReason: 'stop', usage: null, ttftMs: null, elapsedMs: null, error: null, parameters: {}, images: [], startedAt: 1 };
     const conversations = Array.from({ length: 10 }, () => ({ ...newConversation('Test conversation'), turns: Array.from({ length: 100 }, (_, index) => ({ ...turn, id: String(index) })) }));
     replaceConversations(conversations);
     expect(updateConversation({ ...newConversation('Test conversation'), turns: [turn] })).toBe(false);

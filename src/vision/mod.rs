@@ -491,6 +491,53 @@ impl LanguageModel for VisionLanguageModel {
         )
     }
 
+    // The three last-logits entry points go to the text model too, so a text
+    // model that projects only the sampled row through its LM head (Llama 3,
+    // cohere2, gemma4, ...) keeps that saving behind the vision wrapper
+    // instead of falling back to the trait default's full-logits slice.
+    fn forward_last_logits(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.text_model
+            .forward_last_logits(input_ids, caches, mask, last_pos)
+    }
+
+    fn forward_last_logits_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.text_model
+            .forward_last_logits_with_sequence_id(input_ids, seq_id, caches, mask, last_pos)
+    }
+
+    fn forward_last_logits_with_embeddings_and_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.text_model
+            .forward_last_logits_with_embeddings_and_sequence_id(
+                input_ids,
+                input_embeddings,
+                seq_id,
+                caches,
+                mask,
+                last_pos,
+            )
+    }
+
     fn sync_sequence_storage(
         &self,
         seq_id: mlxcel_core::cache::SequenceId,

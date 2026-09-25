@@ -1338,6 +1338,11 @@ impl PagedBlockPool {
             }
         }
 
+        // In-place write proof (see below), taken before `assign_row` can
+        // give the block a row.
+        let row_already_owned = self.block_rows[layer_idx].contains_key(&block_id);
+        let exclusive = self.blocks.get(&block_id).is_some_and(|b| b.refcount == 1);
+
         // Resolve (and grow for) the physical row for this block.
         let row = self.assign_row(block_id, layer_idx)?;
         let (slab_i, row_in_slab) = self.slab_coords(row);
@@ -1354,10 +1359,30 @@ impl PagedBlockPool {
             n_kv_heads,
             head_dim,
         ];
+        //
+        // That donation fails whenever a previous pipelined (lookahead) step
+        // is still in flight: its command buffer holds the slab, so
+        // `slice_update` copies the whole slab, K and V, every layer, every
+        // write. On Llama 3.1 8B, M1 Ultra, server concurrency 1 that halved
+        // decode (#1964). So a write goes in place, touching only its rows,
+        // when no one else can see them: the block is held by exactly one
+        // sequence (a shared block is copied to a fresh one before any write)
+        // and it already owned its row before this call (a fresh or recycled
+        // row keeps the copying path, so a row a finished request may still be
+        // reading is never rewritten in place).
         let old_k = std::mem::replace(&mut self.pool_k[layer_idx][slab_i], UniquePtr::null());
-        self.pool_k[layer_idx][slab_i] = ffi::slice_update(&old_k, &k_slot, &starts, &stops);
         let old_v = std::mem::replace(&mut self.pool_v[layer_idx][slab_i], UniquePtr::null());
-        self.pool_v[layer_idx][slab_i] = ffi::slice_update(&old_v, &v_slot, &starts, &stops);
+        if row_already_owned
+            && exclusive
+            && super::kv_inplace_write_enabled()
+            && ffi::default_device_is_gpu()
+        {
+            self.pool_k[layer_idx][slab_i] = ffi::inplace_slice_write(&old_k, &k_slot, &starts);
+            self.pool_v[layer_idx][slab_i] = ffi::inplace_slice_write(&old_v, &v_slot, &starts);
+        } else {
+            self.pool_k[layer_idx][slab_i] = ffi::slice_update(&old_k, &k_slot, &starts, &stops);
+            self.pool_v[layer_idx][slab_i] = ffi::slice_update(&old_v, &v_slot, &starts, &stops);
+        }
         Ok(())
     }
 

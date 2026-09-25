@@ -124,7 +124,7 @@ fn forward_tokens(model: &Qwen35Model, tokens: &[i32], caches: &mut [Qwen3NextCa
 }
 
 #[test]
-#[ignore]
+#[ignore = "real-model heavy"]
 fn block_verify_chain_matches_single_token_chain() {
     let target_dir = CANDIDATE_TARGETS
         .iter()
@@ -199,7 +199,7 @@ fn block_verify_chain_matches_single_token_chain() {
 /// every GPU is that a passing probe implies a passing chain, because the
 /// gate turns MTP on off the back of it.
 #[test]
-#[ignore]
+#[ignore = "real-model heavy"]
 fn the_exactness_probe_never_passes_where_the_block_chain_diverges() {
     let target_dir = CANDIDATE_TARGETS
         .iter()
@@ -444,7 +444,7 @@ fn assert_parity_and_standard_arms_are_distinguishable() {
 /// cargo test --test qwen38_mtp_chain_parity --release --features metal,accelerate -- --ignored --nocapture parity_kernel_cost
 /// ```
 #[test]
-#[ignore]
+#[ignore = "real-model heavy"]
 fn parity_kernel_cost_vs_standard() {
     if !mlxcel_core::metal_is_available() {
         eprintln!("skipping: chain-parity kernel is Metal-only");
@@ -520,7 +520,7 @@ fn parity_kernel_cost_vs_standard() {
 /// cargo test --test qwen38_mtp_chain_parity --release --features metal,accelerate -- --ignored --nocapture verify_forward_cost
 /// ```
 #[test]
-#[ignore]
+#[ignore = "real-model heavy"]
 fn verify_forward_cost_scaling() {
     let Some(target_dir) = CANDIDATE_TARGETS
         .iter()
@@ -609,7 +609,7 @@ fn greedy() -> SamplingConfig {
 /// runs. Any divergence from the classic chain is therefore in the adapter's
 /// prefill or the multi-token verify forward itself.
 #[test]
-#[ignore]
+#[ignore = "real-model heavy; needs a Qwen 3.5-family checkpoint on disk"]
 fn adapter_chain_with_perfect_drafts_matches_classic_chain() {
     let Some(target_dir) = CANDIDATE_TARGETS
         .iter()
@@ -675,7 +675,7 @@ fn adapter_chain_with_perfect_drafts_matches_classic_chain() {
 /// conditions on the accepted prefix, so its argmax must still follow the
 /// classic chain; any divergence isolates the rollback path.
 #[test]
-#[ignore]
+#[ignore = "real-model heavy; needs a Qwen 3.5-family checkpoint on disk"]
 fn adapter_chain_with_rejected_drafts_matches_classic_chain() {
     let Some(target_dir) = CANDIDATE_TARGETS
         .iter()
