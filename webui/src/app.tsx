@@ -14,6 +14,7 @@ import { useWebUi, useWebUiActions } from './state';
 import { t, testId } from './i18n/catalog';
 import { Chat } from './features/chat/chat';
 import { replaceConversations, requestNewConversation } from './features/chat/session';
+import { resetLibraryView } from './features/models/library-view';
 import { SettingsScreen } from './features/settings/settings-screen';
 import { DEFAULT_SETTINGS_SECTION, settingsSectionFrom, settingsSectionHash, type SettingsSection } from './features/settings/sections';
 
@@ -96,6 +97,7 @@ export function App(): React.JSX.Element {
   const logout = (): void => {
     authAttemptRef.current += 1;
     setAuthFailure(null);
+    resetLibraryView();
     actions.logout();
   };
   const retry = (): void => {

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Button, Card, StaticTable, DenseList, Dialog, EmptyState, ErrorBanner, Field, Inspector, LoginView, PageHeader, ProgressBar, SchemaMismatchView, Select, StatusBadge, Tabs, Tooltip } from './design-system/primitives';
+import { Button, Card, StaticTable, DenseList, Dialog, EmptyState, ErrorBanner, Field, Inspector, LoginView, PageHeader, ProgressBar, SchemaMismatchView, Select, StatCard, StatusBadge, Tabs, Tooltip } from './design-system/primitives';
 import { formatBytes, formatTokensPerSecond } from './design-system/format';
 import type { Locale } from './i18n/catalog';
 import { t, testId } from './i18n/catalog';
@@ -56,6 +56,8 @@ function StatePanel(props: { locale: Locale }): React.JSX.Element {
       <ProgressBar label={t(props.locale, 'gallery.progress.measured')} value={37} />
       </div>
       <DenseList label={t(props.locale, 'gallery.lifecycle.samples')}><li><StatusBadge state="loading">{t(props.locale, 'models.status.loading')}</StatusBadge></li><li><StatusBadge state="draining">{t(props.locale, 'models.status.draining')}</StatusBadge></li><li><StatusBadge state="unloading">{t(props.locale, 'models.status.unloading')}</StatusBadge></li></DenseList>
+      {/* A loading StatCard sizes its value and hint skeletons through CSSOM; the CSP spec checks them here. */}
+      <StatCard label={t(props.locale, 'activity.runtime')} value="" hint=" " loading testId="gallery-stat-loading" />
     </div>
   );
 }

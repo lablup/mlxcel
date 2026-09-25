@@ -5,7 +5,13 @@
   grid-template-columns: minmax(0, 1fr);
   gap: var(--space-4, 16px);
 }
-.models-library > * {
+/* The wrapper that goes inert behind the inspector drawer adds no box: its children stay
+   the stack's grid items, with the stack's gap between them. */
+.models-library > .models-page {
+  display: contents;
+}
+.models-library > *,
+.models-library > .models-page > * {
   min-width: 0;
   max-width: 100%;
 }

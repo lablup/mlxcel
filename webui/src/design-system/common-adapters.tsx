@@ -99,28 +99,42 @@ export type DataTableAdapterProps<T> = Omit<DataTableProps<T>, 'ariaLabel' | 'on
   overflowRegionLabel?: string;
 };
 export function DataTable<T>({ activateRowPrimary = false, overflowRegionLabel, ...props }: DataTableAdapterProps<T>): React.JSX.Element {
-  const overflowRef = useOverflowRegion(overflowRegionLabel);
+  const overflow = useOverflowRegion(overflowRegionLabel === undefined ? undefined : { label: overflowRegionLabel });
+  // alpha.19 owns the scroll box (`.data-table`); reach it through the host.
+  const overflowRef = useCallback((host: HTMLDivElement | null) => overflow(host?.querySelector<HTMLElement>('.data-table') ?? null), [overflow]);
   const table = <CommonDataTable {...props} className={`ds-common-table ${props.className ?? ''}`.trim()} />;
   if (!activateRowPrimary && overflowRegionLabel === undefined) return table;
   return <div className={activateRowPrimary ? 'ds-row-activation' : 'ds-table-host'} onClick={activateRowPrimary ? delegateRowClick : undefined} ref={overflowRef}>{table}</div>;
 }
 
-function useOverflowRegion(label: string | undefined): (host: HTMLDivElement | null) => void {
+/** How a scroll region is named: its own label, or the id of a visible heading. */
+export type OverflowRegionName = { label: string } | { labelledBy: string };
+
+/**
+ * A callback ref for a scroll box that becomes a named, focusable region only while its content
+ * overflows it on either axis, so a keyboard user can scroll it (axe scrollable-region-focusable).
+ * Not scrollable, it gets no role and no tab stop. It follows the box's size and its table's.
+ * `undefined` leaves the box alone.
+ */
+export function useOverflowRegion(name: OverflowRegionName | undefined): (region: HTMLElement | null) => void {
   const disconnect = useRef<(() => void) | null>(null);
-  return useCallback((host: HTMLDivElement | null) => {
+  const label = name !== undefined && 'label' in name ? name.label : undefined;
+  const labelledBy = name !== undefined && 'labelledBy' in name ? name.labelledBy : undefined;
+  return useCallback((region: HTMLElement | null) => {
     disconnect.current?.();
     disconnect.current = null;
-    const region = label === undefined ? null : host?.querySelector<HTMLElement>('.data-table');
-    if (!region || label === undefined) return;
+    if (!region || (label === undefined && labelledBy === undefined)) return;
     const update = (): void => {
-      if (region.scrollWidth > region.clientWidth + 1) {
+      if (region.scrollWidth > region.clientWidth + 1 || region.scrollHeight > region.clientHeight + 1) {
         region.tabIndex = 0;
         region.setAttribute('role', 'region');
-        region.setAttribute('aria-label', label);
+        if (label !== undefined) region.setAttribute('aria-label', label);
+        else if (labelledBy !== undefined) region.setAttribute('aria-labelledby', labelledBy);
       } else {
         region.removeAttribute('tabindex');
         region.removeAttribute('role');
         region.removeAttribute('aria-label');
+        region.removeAttribute('aria-labelledby');
       }
     };
     update();
@@ -131,6 +145,6 @@ function useOverflowRegion(label: string | undefined): (host: HTMLDivElement | n
     const table = region.querySelector('table');
     if (table) observer.observe(table);
     disconnect.current = () => observer.disconnect();
-  }, [label]);
+  }, [label, labelledBy]);
 }
 export type { DataTableColumn, DataTablePersistedState, SortDirection } from '@lablup/ui-common/components/DataTable';

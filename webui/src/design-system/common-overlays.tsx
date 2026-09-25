@@ -22,8 +22,10 @@ export function Drawer(props: { open: boolean; onClose: () => void; title: strin
   // re-render while open would yank focus. Hand it one stable callback.
   const close = useCallback(() => onCloseRef.current(), []);
   const hostRef = useRef<HTMLDivElement | null>(null);
+  const staleEdges = useRef<StaleEdges>({ first: null, last: null });
   useEffect(() => {
     if (!props.open) return;
+    staleEdges.current = packageEdges(hostRef.current?.querySelector<HTMLElement>('.drawer') ?? null);
     // On the first open alpha.19 focuses its close button one frame before it makes
     // the panel visible (two frames), so that focus() is dropped. Finish the hand-off
     // once the panel can take focus, unless focus already moved into it.
@@ -39,8 +41,8 @@ export function Drawer(props: { open: boolean; onClose: () => void; title: strin
     // alpha.19 listens for Escape and Tab on its panel only. A pointer press on a
     // non-focusable part of the drawer leaves focus on <body>, so an Escape from there also
     // closes it, as the native modal sheet did, and a Tab from there enters the panel at its
-    // first (Shift+Tab: last) stop instead of walking the page behind it (the Models page
-    // is not inert behind its inspector). Back off once defaultPrevented is set: a popup
+    // first (Shift+Tab: last) stop instead of walking the page behind it. Back off once
+    // defaultPrevented is set: a popup
     // that portals outside `.drawer` (like the Tooltip content) and already handles Escape
     // for itself should not also close the drawer beneath it. A native modal dialog opened
     // above the drawer (a confirmation launched from inside it) owns its keys: it closes
@@ -80,7 +82,7 @@ export function Drawer(props: { open: boolean; onClose: () => void; title: strin
     // alpha.19 closes on any Escape inside its panel, including one that only cancels an IME
     // composition in a text field. The capture phase runs before the panel's own listener.
     if (event.key === 'Escape' && (event.nativeEvent.isComposing || event.keyCode === 229)) event.stopPropagation();
-    if (props.open) wrapTab(hostRef.current?.querySelector<HTMLElement>('.drawer') ?? null, event);
+    if (props.open) wrapTab(hostRef.current?.querySelector<HTMLElement>('.drawer') ?? null, staleEdges.current, event);
   }}><CommonDrawer isOpen={props.open} onClose={close} title={props.title} closeLabel={props.closeLabel} ariaLabelledBy={titleId} width={SHEET_WIDTH} className={variant ? `ds-drawer ${variant}` : 'ds-drawer'}>{props.children}</CommonDrawer></div>;
 }
 
@@ -100,22 +102,38 @@ function tabStops(panel: HTMLElement): HTMLElement[] {
   });
 }
 
+// The first and last elements alpha.19 recorded for its own Tab cycle: its selector, taken
+// once when the drawer opens (the package's open effect runs just before the adapter's, on
+// the same DOM).
+type StaleEdges = { first: Element | null; last: Element | null };
+const PACKAGE_TAB_STOPS = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
+function packageEdges(panel: HTMLElement | null): StaleEdges {
+  const recorded = panel?.querySelectorAll(PACKAGE_TAB_STOPS);
+  return { first: recorded?.[0] ?? null, last: recorded?.[recorded.length - 1] ?? null };
+}
+
 // Wraps Tab at the panel's current first and last stops; anywhere else the browser moves
-// focus in document order. Every Tab inside the panel stops here, in the capture phase, so
-// the package's stale handler on the panel never runs: it would wrap early at a control it
-// still believes is last (before the Details summary, or before a control enabled since).
-// React onKeyDown handlers inside a drawer therefore never see Tab; none uses it.
-function wrapTab(panel: HTMLElement | null, event: React.KeyboardEvent): void {
+// focus in document order. The package's own handler on the panel wraps early whenever focus
+// is on the element it recorded as first (Shift+Tab) or last (Tab) at open: a control it still
+// believes is last, before the Details summary or before a control enabled since. So a Tab is
+// stopped here, in the capture phase, when this adapter wraps it, when the panel has no stop,
+// or when it starts from that stale edge. Every other Tab propagates, so a descendant (a
+// Select that closes its list on Tab, a nested dialog's trap) still sees it.
+function wrapTab(panel: HTMLElement | null, stale: StaleEdges, event: React.KeyboardEvent): void {
   if (event.key !== 'Tab' || event.altKey || event.ctrlKey || event.metaKey || event.nativeEvent.isComposing || !panel || !(event.target instanceof Node) || !panel.contains(event.target)) return;
-  event.stopPropagation();
   const stops = tabStops(panel);
   if (stops.length === 0) {
+    event.stopPropagation();
     event.preventDefault();
     return;
   }
-  if (document.activeElement !== (event.shiftKey ? stops[0] : stops[stops.length - 1])) return;
-  event.preventDefault();
-  (event.shiftKey ? stops[stops.length - 1] : stops[0]).focus();
+  if (document.activeElement === (event.shiftKey ? stops[0] : stops[stops.length - 1])) {
+    event.stopPropagation();
+    event.preventDefault();
+    (event.shiftKey ? stops[stops.length - 1] : stops[0]).focus();
+    return;
+  }
+  if (document.activeElement === (event.shiftKey ? stale.first : stale.last)) event.stopPropagation();
 }
 
 type DescribedElement = React.ReactElement<{ 'aria-describedby'?: string }>;

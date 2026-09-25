@@ -29,8 +29,11 @@ export function RuntimeView({ runtime, points, historyEnd, locale, stale, runtim
   const headingId = useId();
   if (runtime === undefined && stale) return <EmptyState title={t(locale, 'activity.runtime')} body={t(locale, 'activity.unavailable')} />;
   const heading = <h2 id={headingId}>{t(locale, 'activity.runtime')}</h2>;
-  if (runtime === undefined) {
-    // Live connection, no sample yet: one localized status for the waiting tiles, whose skeletons are decorative.
+  // Live connection, no sample yet for this selection: one localized status for the waiting
+  // tiles, whose skeletons are decorative. Re-selecting a model clears its history but keeps its
+  // last runtime, which is not a sample of this selection: wait for one rather than show old
+  // tiles under a "stopped refreshing" banner.
+  if (runtime === undefined || (historyEnd === null && !stale)) {
     return <section className="activity-runtime" aria-labelledby={headingId}>{heading}
       <p className="activity-note" role="status">{t(locale, 'activity.waiting')}</p>
       <div className="activity-metrics activity-metrics--summary" data-testid="runtime-summary" aria-busy="true">{PRIMARY.map((name) => <StatCard className="activity-metric" key={name} label={metricLabel(name, locale)} value="" hint=" " loading />)}</div>

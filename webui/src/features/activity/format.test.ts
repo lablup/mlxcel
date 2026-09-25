@@ -20,6 +20,8 @@ describe('honest Activity formatting and diagnostics', () => {
     expect(metricValue(metric, 'en')).toBe('1,234,567.89 tokens');
     expect(metricValue(metric, 'ko')).toBe('1,234,567.89 토큰');
     expect(metricValue({ ...metric, value: 1, unit: 'requests' }, 'en')).toBe('1 request');
+    // The plural form follows the number as shown, rounded to two fraction digits.
+    expect(metricValue({ ...metric, value: 1.004, unit: 'requests' }, 'en')).toBe('1 request');
     expect(metricValue({ ...metric, value: 1, unit: 'tokens' }, 'en')).toBe('1 token');
     expect(metricValue({ ...metric, value: 1, unit: 'requests' }, 'ko')).toBe('1건');
     expect(metricValue({ ...metric, value: 3, unit: 'entries' }, 'ko')).toBe('항목 3개');

@@ -271,6 +271,24 @@ describe('provider-backed WebUI shell', () => {
     expect(calls.map((call) => call.auth).filter(Boolean)).toContain('Bearer good-key');
   });
 
+  it('clears the Models search on logout so the next session in this tab starts from the default view', async () => {
+    const mock = createMockFetch('happy');
+    renderApp(mock.fetchImpl);
+    await submitSessionKey('good-key');
+    const search = (): HTMLInputElement | null => document.querySelector<HTMLInputElement>('[data-testid="models-search"]');
+    await waitFor(() => expect(search()).not.toBeNull());
+    const field = search() as HTMLInputElement;
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(field, 'previous-user-query');
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(search()?.value).toBe('previous-user-query');
+    act(() => document.querySelector<HTMLButtonElement>('[data-testid="toolbar-logout"]')?.click());
+    await submitSessionKey('good-key');
+    await waitFor(() => expect(search()).not.toBeNull());
+    expect(search()?.value).toBe('');
+  });
+
   it('does not autoload models or call inference endpoints while browsing authenticated routes', async () => {
     const mock = createMockFetch('happy');
     renderApp(mock.fetchImpl);
