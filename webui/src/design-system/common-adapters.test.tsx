@@ -300,3 +300,40 @@ function requireElement<T extends Element>(element: T | null | undefined): T {
   if (!element) throw new Error('Missing element');
   return element;
 }
+
+// #1918: a table narrower than its columns scrolls inside its own box; with nothing focusable in
+// that box (the loading and empty states), a keyboard user could not scroll it.
+describe('DataTable overflow region', () => {
+  type Row = { id: string };
+  const columns = [{ id: 'name', header: 'Name', render: (row: Row) => row.id }];
+  const overflow = (scroll: number, client: number): void => {
+    vi.spyOn(HTMLElement.prototype, 'scrollWidth', 'get').mockReturnValue(scroll);
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(client);
+  };
+  const box = (): HTMLElement => {
+    const element = host.querySelector<HTMLElement>('.data-table');
+    if (!element) throw new Error('Missing table box');
+    return element;
+  };
+
+  it('makes an overflowing table box a named, focusable region', () => {
+    overflow(600, 200);
+    render(<DataTable<Row> columns={columns} rows={[]} getRowKey={(row) => row.id} ariaLabel="Models" overflowRegionLabel="Model library" loading />);
+    expect(box().getAttribute('role')).toBe('region');
+    expect(box().getAttribute('aria-label')).toBe('Model library');
+    expect(box().tabIndex).toBe(0);
+  });
+
+  it('adds no role and no tab stop while the table fits, or without the opt-in', () => {
+    overflow(200, 200);
+    render(<DataTable<Row> columns={columns} rows={[{ id: 'a' }]} getRowKey={(row) => row.id} ariaLabel="Models" overflowRegionLabel="Model library" />);
+    expect(box().hasAttribute('role')).toBe(false);
+    expect(box().hasAttribute('tabindex')).toBe(false);
+    act(() => root.unmount());
+    root = createRoot(host);
+    overflow(600, 200);
+    render(<DataTable<Row> columns={columns} rows={[]} getRowKey={(row) => row.id} ariaLabel="Models" />);
+    expect(box().hasAttribute('role')).toBe(false);
+    expect(box().hasAttribute('tabindex')).toBe(false);
+  });
+});

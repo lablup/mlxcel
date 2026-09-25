@@ -26,6 +26,8 @@ pub(super) const MAX_DISK_DEPTH: usize = 8;
 pub(super) const MAX_MODEL_TYPE_BYTES: usize = 128;
 pub(super) const MAX_DECLARED_ARCHITECTURES: usize = 16;
 pub(super) const MAX_DECLARED_ARCHITECTURE_BYTES: usize = 128;
+/// Longest declared weight dtype the catalog reports; `float8_e4m3fnuz` is 15.
+pub(super) const MAX_DTYPE_BYTES: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -108,6 +110,11 @@ pub struct CatalogMetadata {
     pub input_tasks: Vec<TaskKind>,
     pub output_tasks: Vec<TaskKind>,
     pub quantization: Option<String>,
+    /// Declared weight dtype from `config.json` (`torch_dtype`, or `dtype` in newer
+    /// exports), normalized to a short name such as `bf16`; `None` when absent or
+    /// not a recognized tensor dtype (`auto` included). Reported for quantized checkpoints too, where it
+    /// names the unquantized tensors.
+    pub dtype: Option<String>,
     pub format: Option<String>,
     pub parameter_count: Option<u64>,
     pub disk_bytes: Option<u64>,

@@ -2,7 +2,9 @@
 import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { WebUiSnapshot, Operation } from '../../api/types';
+import runtimeJson from '../../../../tests/fixtures/webui/examples/runtime.snapshot.json';
+import type { WebUiSnapshot, Operation, RuntimeSnapshot } from '../../api/types';
+import { validateRuntime } from '../../api/validation';
 import { WebUiHttpError } from '../../api/client';
 import { t } from '../../i18n/catalog';
 import { ModelsLibrary } from './screen';
@@ -54,6 +56,7 @@ async function input(id: string, value: string): Promise<void> {
     node.dispatchEvent(new Event('input', { bubbles: true }));
   });
 }
+const runtimeFixture = validateRuntime(Object.fromEntries(Object.entries(runtimeJson).filter(([key]) => key !== '$schemaName')));
 const download: Operation = {
   operation_id: 'op_download',
   kind: 'download',
@@ -70,7 +73,7 @@ const download: Operation = {
 };
 
 describe('Models workflows', () => {
-  it('renders empty-store guidance and root permission recovery without POSTs', () => {
+  it('renders empty-store guidance and root permission recovery without POSTs', async () => {
     state = {
       ...state,
       catalog: [],
@@ -82,8 +85,13 @@ describe('Models workflows', () => {
     };
     render();
     expect(host.querySelector('[data-testid="models-empty"]')).not.toBeNull();
-    expect(host.textContent).toContain('permission denied');
-    expect(host.textContent).toContain('--models-dir /path/to/models');
+    // Roots are the empty state's action, not a permanent disclosure on the page.
+    expect(host.textContent).not.toContain('--models-dir /path/to/models');
+    await click('models-roots');
+    const dialog = requireValue(host.querySelector('[data-testid="models-roots-dialog"]'));
+    expect(dialog.textContent).toContain('permission denied');
+    expect(dialog.textContent).toContain(t('en', 'models.source.models_dir'));
+    expect(dialog.textContent).toContain('--models-dir /path/to/models');
     expect(actions.loadModel).not.toHaveBeenCalled();
   });
   it('selection never loads, and duplicate clicks do not submit twice or assume readiness from 202', async () => {
@@ -173,7 +181,16 @@ describe('Models workflows', () => {
     await act(async () => cancel?.click());
     await click('models-confirm-submit');
     expect(actions.cancelOperation).toHaveBeenCalledWith(download.operation_id);
-    expect(host.textContent).toContain('running');
+    const name = requireValue(host.querySelector('[data-testid="models-operation"]'));
+    expect(name.querySelector('.truncate')?.textContent).toBe('owner/repo');
+    // The name cell carries the state and progress the narrowing list hides with the State and
+    // Size columns; jsdom does not evaluate container queries, so which one shows is the browser's.
+    expect(name.querySelector('.models-name-state')?.textContent).toBe(t('en', 'models.download.running'));
+    const fallback = requireValue(name.querySelector('.models-name-progress [role="progressbar"]'));
+    expect(fallback.getAttribute('aria-label')).toBe(t('en', 'models.library.progress'));
+    expect(fallback.hasAttribute('aria-valuenow')).toBe(false);
+    expect(host.textContent).toContain(t('en', 'models.download.running'));
+    expect(host.textContent).not.toContain('op_download');
   });
   it.each(['disk full', 'invalid config', 'unsupported backend', 'permission denied'])(
     'retains actionable server failure: %s',
@@ -253,10 +270,9 @@ describe('reviewed asynchronous recovery paths', () => {
     };
     state = { ...state, operations: new Map([[failed.operation_id, failed]]) };
     render();
-    const recovery = Array.from(host.querySelectorAll('button')).find(
-      (node) => node.textContent === 'Capacity / conflicting operation',
-    );
-    await act(async () => recovery?.click());
+    const recovery = button('models-row-capacity');
+    expect(recovery.textContent).toBe(t('en', 'models.library.load_evict'));
+    await act(async () => recovery.click());
     const listed = Array.from(host.querySelectorAll('[data-testid="models-confirm"] li'));
     expect(listed.map((item) => item.textContent?.split(' · ')[0])).toEqual(['idle-target', 'busy-target']);
     expect(listed.every((item) => item.classList.contains('models-wrap'))).toBe(true);
@@ -354,21 +370,6 @@ describe('reviewed asynchronous recovery paths', () => {
   });
 });
 
-it('prefers the catalog display name for operation titles and retains opaque identity', () => {
-  const op: Operation = {
-    ...download,
-    kind: 'model_load',
-    target: { target_kind: 'model', model_id: model().identity.id, requested_revision: 4 },
-  };
-  state = { ...state, operations: new Map([[op.operation_id, op]]) };
-  render();
-  expect(host.querySelector('[data-testid="models-operation"] strong')?.textContent).toBe(
-    model().identity.display_name,
-  );
-  expect(host.querySelector('[data-testid="models-operation"]')?.textContent).toContain(model().identity.id);
-});
-
-
 describe('reviewed destructive identity fences', () => {
   it('requires the exact cache ID rather than a duplicate display name or another entry ID', async () => {
     const duplicate = { ...model(), identity: { ...model().identity, id: `mdl_${'d'.repeat(43)}` } };
@@ -442,5 +443,326 @@ describe('library row activation', () => {
     expect(actions.selectModel).not.toHaveBeenCalled();
     await act(async () => rowCell(1, 1).click());
     expect(actions.selectModel.mock.calls).toEqual([[entries[1].identity.id]]);
+  });
+});
+
+// #1918: the row is the unit of work.
+describe('library row actions', () => {
+  const ready = (entry = model()) => ({
+    ...entry,
+    lifecycle: { ...entry.lifecycle, state: 'ready' as const, worker_exit_observed: false },
+    capabilities: [{ task: 'chat' as const, phase: 'provider_ready' as const, available: true, reason: null }],
+  });
+  const row = (name: string): HTMLTableRowElement =>
+    requireValue(
+      [...host.querySelectorAll<HTMLTableRowElement>('[data-testid="models-table"] tbody tr')].find(
+        (item) => item.querySelector('.truncate')?.textContent === name,
+      ) ?? null,
+    );
+  const inRow = (name: string, id: string): HTMLButtonElement | null => row(name).querySelector<HTMLButtonElement>(`[data-testid="${id}"]`);
+
+  it('loads, opens Chat and unloads from the row, without selecting or opening the inspector first', async () => {
+    const other = { ...model(), identity: { ...model().identity, id: `mdl_${'e'.repeat(43)}`, display_name: 'bravo' } };
+    state = { ...state, catalog: [model(), other], selectedModelId: null };
+    render();
+    expect(host.querySelector('aside[aria-label="Model details"]')).toBeNull();
+    expect(inRow('bravo', 'models-row-chat')).toBeNull();
+    await act(async () => inRow('bravo', 'models-row-load')?.click());
+    expect(actions.loadModel).toHaveBeenCalledTimes(1);
+    expect(actions.loadModel.mock.calls[0][0]).toMatchObject({ action: 'load', model_id: other.identity.id, expected_revision: 4 });
+    expect(actions.selectModel).not.toHaveBeenCalled();
+    state = { ...state, catalog: [model(), ready(other)] };
+    render();
+    expect(inRow('bravo', 'models-row-load')).toBeNull();
+    expect(inRow('bravo', 'models-row-chat')?.getAttribute('aria-label')).toBe(t('en', 'models.library.chat_named', { name: 'bravo' }));
+    await act(async () => inRow('bravo', 'models-row-unload')?.click());
+    expect(actions.unloadModel).not.toHaveBeenCalled();
+    await click('models-confirm-submit');
+    expect(actions.unloadModel).toHaveBeenCalledWith(expect.objectContaining({ action: 'unload', model_id: other.identity.id }));
+    window.location.hash = '';
+    await act(async () => inRow('bravo', 'models-row-chat')?.click());
+    expect(actions.selectModel).toHaveBeenCalledWith(other.identity.id);
+    expect(window.location.hash).toBe('#chat');
+    expect(host.querySelector('aside[aria-label="Model details"]')).toBeNull();
+  });
+
+  it('keeps a loading row in place with Load disabled, and hides lifecycle controls in single-model mode', () => {
+    const loading = { ...model(), lifecycle: { ...model().lifecycle, state: 'loading' as const, busy: true } };
+    state = { ...state, catalog: [loading], selectedModelId: null };
+    render();
+    expect(inRow('alpha', 'models-row-load')?.disabled).toBe(true);
+    expect(inRow('alpha', 'models-row-delete')?.disabled).toBe(true);
+    if (!state.bootstrap) throw new Error('Missing fixture');
+    state = { ...state, catalog: [model(), { ...ready(), identity: { ...model().identity, id: 'id_ready', display_name: 'ready-one' } }], bootstrap: { ...state.bootstrap, server: { ...state.bootstrap.server, mode: 'single_model' } } };
+    render();
+    for (const id of ['models-row-load', 'models-row-unload', 'models-row-delete']) expect(host.querySelector(`[data-testid="${id}"]`)).toBeNull();
+    expect(inRow('ready-one', 'models-row-chat')).not.toBeNull();
+    expect(host.querySelectorAll('[aria-label^="Inspect"]')).toHaveLength(2);
+  });
+
+  it('moves focus to the row\'s Load button once an Unload started from that row settles', async () => {
+    state = { ...state, catalog: [ready()], selectedModelId: null };
+    render();
+    const unload = requireValue(inRow('alpha', 'models-row-unload'));
+    act(() => unload.focus());
+    await act(async () => unload.click());
+    await click('models-confirm-submit');
+    expect(actions.unloadModel).toHaveBeenCalledTimes(1);
+    const inspect = requireValue(row('alpha').querySelector<HTMLButtonElement>('[aria-label^="Inspect"]'));
+    expect(document.activeElement).toBe(inspect);
+    state = { ...state, catalog: [{ ...ready(), lifecycle: { ...ready().lifecycle, state: 'draining' as const, busy: true } }] };
+    render();
+    expect(document.activeElement).toBe(inspect);
+    state = { ...state, catalog: [{ ...model(), identity: { ...model().identity, revision: 6 } }] };
+    render();
+    expect(document.activeElement).toBe(inRow('alpha', 'models-row-load'));
+  });
+
+  it('keeps focus on a row Load that failed, and does not pull focus into that row once it is Ready later', async () => {
+    state = { ...state, catalog: [model()], selectedModelId: null };
+    render();
+    actions.loadModel.mockRejectedValueOnce(new Error('load failed'));
+    const load = requireValue(inRow('alpha', 'models-row-load'));
+    act(() => load.focus());
+    await act(async () => load.click());
+    expect(actions.loadModel).toHaveBeenCalledTimes(1);
+    render();
+    expect(document.activeElement).toBe(inRow('alpha', 'models-row-load'));
+    // Ready through another path (another tab, the inspector): the failed intent must not fire.
+    act(() => (document.activeElement as HTMLElement | null)?.blur());
+    state = { ...state, catalog: [{ ...ready(), identity: { ...model().identity, revision: 6 } }] };
+    render();
+    expect(document.activeElement).not.toBe(inRow('alpha', 'models-row-chat'));
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it('releases a Ready model without chat from its row: Unload, not a disabled Load', async () => {
+    const embedding = { ...ready(), capabilities: [{ task: 'embedding' as const, phase: 'provider_ready' as const, available: true, reason: null }] };
+    state = { ...state, catalog: [embedding], selectedModelId: null };
+    render();
+    expect(inRow('alpha', 'models-row-chat')).toBeNull();
+    expect(inRow('alpha', 'models-row-load')).toBeNull();
+    const unload = requireValue(inRow('alpha', 'models-row-unload'));
+    expect(unload.disabled).toBe(false);
+    expect(unload.getAttribute('aria-label')).toBe(t('en', 'models.library.unload_named', { name: 'alpha' }));
+    await act(async () => unload.click());
+    expect(host.querySelector('[data-testid="models-confirm"]')).not.toBeNull();
+    expect(actions.unloadModel).not.toHaveBeenCalled();
+    await click('models-confirm-submit');
+    expect(actions.unloadModel).toHaveBeenCalledTimes(1);
+    expect(actions.unloadModel).toHaveBeenCalledWith(expect.objectContaining({ action: 'unload', model_id: embedding.identity.id, expected_revision: 4 }));
+  });
+
+  it('moves focus to the row\'s Unload button once a Load of a model without chat started from that row is Ready', async () => {
+    const embedding = { ...model(), capabilities: [{ task: 'embedding' as const, phase: 'pre_load' as const, available: true, reason: null }] };
+    state = { ...state, catalog: [embedding], selectedModelId: null };
+    render();
+    const load = requireValue(inRow('alpha', 'models-row-load'));
+    act(() => load.focus());
+    await act(async () => load.click());
+    expect(actions.loadModel).toHaveBeenCalledTimes(1);
+    const inspect = requireValue(row('alpha').querySelector<HTMLButtonElement>('[aria-label^="Inspect"]'));
+    state = { ...state, catalog: [{ ...embedding, identity: { ...embedding.identity, revision: 5 }, lifecycle: { ...embedding.lifecycle, state: 'loading' as const, busy: true } }] };
+    render();
+    expect(inRow('alpha', 'models-row-load')?.disabled).toBe(true);
+    expect(document.activeElement).toBe(inspect);
+    state = { ...state, catalog: [{ ...ready(embedding), identity: { ...embedding.identity, revision: 6 }, capabilities: [{ task: 'embedding' as const, phase: 'provider_ready' as const, available: true, reason: null }] }] };
+    render();
+    expect(inRow('alpha', 'models-row-chat')).toBeNull();
+    expect(document.activeElement).toBe(inRow('alpha', 'models-row-unload'));
+  });
+
+  it('sorts from the column headers inside the lifecycle pin, with unknown sizes last in both directions', async () => {
+    const make = (name: string, bytes: number | null, lifecycle: 'ready' | 'unloaded' | 'loading') => ({
+      ...(lifecycle === 'ready' ? ready() : model()),
+      identity: { ...model().identity, id: `id_${name}`, display_name: name },
+      metadata: { ...model().metadata, disk_bytes: bytes },
+      ...(lifecycle === 'loading' ? { lifecycle: { ...model().lifecycle, state: 'loading' as const } } : {}),
+    });
+    state = {
+      ...state,
+      selectedModelId: null,
+      catalog: [make('a-small', 10, 'unloaded'), make('b-unknown', null, 'unloaded'), make('c-big', 999, 'unloaded'), make('d-ready', 1, 'ready'), make('e-loading', 5, 'loading')],
+    };
+    render();
+    const names = (): string[] => [...host.querySelectorAll('[data-testid="models-table"] tbody tr .truncate')].map((node) => node.textContent ?? '');
+    const header = (id: string): HTMLElement => requireValue(host.querySelector<HTMLElement>(`[data-testid="models-table"] th.models-col-${id}`));
+    expect(names()).toEqual(['d-ready', 'e-loading', 'a-small', 'b-unknown', 'c-big']);
+    expect(header('name').getAttribute('aria-sort')).toBe('ascending');
+    await act(async () => header('size').click());
+    expect(header('size').getAttribute('aria-sort')).toBe('ascending');
+    expect(names()).toEqual(['d-ready', 'e-loading', 'a-small', 'c-big', 'b-unknown']);
+    await act(async () => header('size').click());
+    expect(names()).toEqual(['d-ready', 'e-loading', 'c-big', 'a-small', 'b-unknown']);
+    // A third activation clears the table's sort; the library falls back to name order.
+    await act(async () => header('size').click());
+    expect(header('name').getAttribute('aria-sort')).toBe('ascending');
+    expect(names()).toEqual(['d-ready', 'e-loading', 'a-small', 'b-unknown', 'c-big']);
+    // The separate Sort select is gone; the headers are the only sort control.
+    expect(host.querySelectorAll('.models-toolbar .ds-common-select')).toHaveLength(3);
+  });
+
+  it('labels the source and task filters instead of printing enum values', async () => {
+    const speech = { ...model(), identity: { ...model().identity, id: 'id_speech', display_name: 'speech', source: 'models_dir' as const }, capabilities: [{ task: 'audio_transcription' as const, phase: 'pre_load' as const, available: true, reason: null }] };
+    state = { ...state, catalog: [model(), speech] };
+    // jsdom has no scrollIntoView; the open listbox scrolls its active option into view.
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: vi.fn() });
+    render();
+    const optionsOf = async (index: number): Promise<string[]> => {
+      await act(async () => requireValue(host.querySelectorAll<HTMLElement>('.models-toolbar .select__trigger')[index] ?? null).click());
+      const labels = [...document.querySelectorAll('[role="option"]')].map((node) => node.textContent?.trim() ?? '');
+      await act(async () => requireValue(host.querySelectorAll<HTMLElement>('.models-toolbar .select__trigger')[index] ?? null).click());
+      return labels;
+    };
+    expect(await optionsOf(0)).toEqual(['All', t('en', 'models.source.cache'), t('en', 'models.source.models_dir')]);
+    const tasks = await optionsOf(1);
+    expect(tasks).toContain(t('en', 'models.task.audio_transcription'));
+    expect(tasks.join(' ')).not.toMatch(/audio_transcription|models_dir/);
+    Reflect.deleteProperty(HTMLElement.prototype, 'scrollIntoView');
+  });
+
+  it('falls back to the weight dtype in the Quantization column when no quantization is declared', () => {
+    const dtypeOnly = { ...model(), identity: { ...model().identity, id: 'id_dtype', display_name: 'dtype-only' }, metadata: { ...model().metadata, quantization: null, dtype: 'bf16' } };
+    const neither = { ...model(), identity: { ...model().identity, id: 'id_neither', display_name: 'neither' }, metadata: { ...model().metadata, quantization: null, dtype: null } };
+    state = { ...state, catalog: [dtypeOnly, neither], selectedModelId: null };
+    render();
+    expect(row('dtype-only').querySelector('.models-col-quantization')?.textContent).toBe('bf16');
+    expect(row('neither').querySelector('.models-col-quantization')?.textContent).toBe(t('en', 'models.library.unknown'));
+  });
+
+  it('shows download pseudo-rows for in-flight and failed downloads only, keyed apart from catalog rows', () => {
+    const failed: Operation = { ...download, operation_id: 'op_failed', state: 'failed', cancellable: false, created_at: '2026-09-13T00:00:00Z', error: { code: 'unavailable', message: 'disk full', retryable: true } };
+    const done: Operation = { ...download, operation_id: 'op_done', state: 'succeeded', cancellable: false, target: { target_kind: 'download', repo_id: 'owner/done', revision: null } };
+    const loadOp: Operation = { ...download, operation_id: 'op_load', kind: 'model_load', state: 'succeeded', target: { target_kind: 'model', model_id: model().identity.id, requested_revision: 4 } };
+    state = { ...state, operations: new Map([[download.operation_id, download], [failed.operation_id, failed], [done.operation_id, done], [loadOp.operation_id, loadOp]]) };
+    render();
+    const pseudo = [...host.querySelectorAll('[data-testid="models-operation"]')];
+    expect(pseudo.map((node) => node.querySelector('.truncate')?.textContent)).toEqual(['owner/repo', 'owner/repo']);
+    expect(host.querySelectorAll('[data-testid="models-table"] tbody tr')).toHaveLength(3);
+    expect(host.textContent).toContain('disk full');
+    expect(host.textContent).not.toContain('owner/done');
+    expect(host.textContent).not.toMatch(/op_[a-z]/);
+    expect(host.querySelector('.models-download-row')?.textContent).toContain(t('en', 'models.library.cancel_download'));
+  });
+
+  it('keeps the reconciliation notice above the table while a request outcome is unknown', () => {
+    state = { ...state, pendingReconciliations: new Map([['idem', { kind: 'model-action' as const, idempotencyKey: 'idem', operationId: null, modelId: model().identity.id, createdAt: 1 }]]) };
+    render();
+    const pending = requireValue(host.querySelector('[data-testid="models-pending"]'));
+    expect(pending.getAttribute('role')).toBe('status');
+    expect(pending.compareDocumentPosition(requireValue(host.querySelector('[data-testid="models-table"]'))) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('isolates the model name inside dialog sentences so bidi controls cannot reorder them', async () => {
+    const hostile = { ...model(), identity: { ...model().identity, display_name: 'evil‮ledom' } };
+    state = { ...state, catalog: [hostile] };
+    render();
+    await act(async () => inRow('evil‮ledom', 'models-row-delete')?.click());
+    const body = host.querySelector('[data-testid="models-confirm"] p')?.textContent ?? '';
+    expect(body).toContain('⁨evil‮ledom⁩');
+    expect(body).toContain(t('en', 'models.source.cache'));
+  });
+});
+
+// #1918: internal identifiers and raw reasons are not user copy outside the Details disclosure.
+describe('inspector Details disclosure', () => {
+  it('renders no opaque id, operation id or raw reason until Details is opened', async () => {
+    const entry = model();
+    const reasons = {
+      support: 'support reason sentinel',
+      arch: 'architecture reason sentinel',
+      runnable: 'runnable reason sentinel',
+      complete: 'complete reason sentinel',
+      tested: 'tested reason sentinel',
+      unknown: 'parameter count is not measured during metadata-only catalog scans',
+      capability: 'capability reason sentinel',
+      removal: 'removal reason sentinel',
+      error: 'last error sentinel',
+      action: 'bootstrap action reason sentinel',
+    };
+    const readyEntry = {
+      ...entry,
+      lifecycle: { ...entry.lifecycle, state: 'ready' as const, last_error: reasons.error },
+      capabilities: [{ task: 'chat' as const, phase: 'provider_ready' as const, available: true, reason: reasons.capability }],
+      removal: { eligible: false, reason: reasons.removal, instructions: 'removal instructions sentinel' },
+      metadata: {
+        ...entry.metadata,
+        support: { ...entry.metadata.support, reason: reasons.support, architecturally_supported_reason: reasons.arch, runnable_on_backend_reason: reasons.runnable, complete_reason: reasons.complete, tested_checkpoint_reason: reasons.tested },
+        unknown_reasons: { ...entry.metadata.unknown_reasons, parameter_count: reasons.unknown },
+      },
+    };
+    const loadOp: Operation = { ...download, operation_id: 'op_model_load_000001', kind: 'model_load', state: 'succeeded', target: { target_kind: 'model', model_id: entry.identity.id, requested_revision: 4 } };
+    const bootstrap = requireValue(state.bootstrap);
+    state = {
+      ...state,
+      catalog: [readyEntry],
+      operations: new Map([[loadOp.operation_id, loadOp]]),
+      bootstrap: { ...bootstrap, actions: { ...bootstrap.actions, download: { state: 'disabled', reason: reasons.action, instructions: null } } },
+    };
+    render();
+    const page = (): string => document.body.textContent ?? '';
+    expect(host.querySelector('aside[aria-label="Model details"]')).not.toBeNull();
+    for (const value of [entry.identity.id, loadOp.operation_id, ...Object.values(reasons)]) expect(page()).not.toContain(value);
+    expect(page()).not.toMatch(/mdl_|op_/);
+    await act(async () => {
+      requireValue(host.querySelector<HTMLElement>('[data-testid="models-details"] summary')).click();
+      // The toggle event is queued as a task after the attribute flips.
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+    });
+    expect(host.querySelector<HTMLDetailsElement>('[data-testid="models-details"]')?.open).toBe(true);
+    for (const value of [entry.identity.id, ...Object.values(reasons)]) expect(page()).toContain(value);
+    // Operation history belongs to Activity: the library never prints operation ids.
+    expect(page()).not.toContain(loadOp.operation_id);
+  });
+
+  it('shows context only for the runtime revision that matches, and memory only when estimated', () => {
+    const entry = { ...model(), metadata: { ...model().metadata, memory_estimate_bytes: null } };
+    const runtime = (revision: number): RuntimeSnapshot => ({ ...runtimeFixture, model_id: entry.identity.id, revision, settings: { ...runtimeFixture.settings, effective: { ctx_size: 40960 } } });
+    state = { ...state, catalog: [entry], runtimes: new Map([[entry.identity.id, runtime(entry.identity.revision - 1)]]) };
+    render();
+    const overview = (): string => host.querySelector('.models-inspector > .models-overview')?.textContent ?? '';
+    expect(overview()).not.toContain(t('en', 'models.library.context'));
+    expect(overview()).not.toContain(t('en', 'models.library.memory'));
+    state = { ...state, catalog: [{ ...entry, metadata: { ...entry.metadata, memory_estimate_bytes: 2048 } }], runtimes: new Map([[entry.identity.id, runtime(entry.identity.revision)]]) };
+    render();
+    expect(overview()).toContain(`${t('en', 'models.library.context')}40,960`);
+    // After an unload the runtime keeps the revision and reports 0, which is not a context.
+    const unloaded = runtime(entry.identity.revision);
+    state = { ...state, runtimes: new Map([[entry.identity.id, { ...unloaded, settings: { ...unloaded.settings, effective: { ctx_size: 0 } } }]]) };
+    render();
+    expect(overview()).not.toContain(t('en', 'models.library.context'));
+    expect(overview()).toContain(`${t('en', 'models.library.memory')}2 KiB`);
+  });
+});
+
+describe('inspector below 1100 px', () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const narrow = (): void => {
+    vi.stubGlobal('matchMedia', (query: string) => ({ matches: !query.includes('min-width: 1100px'), media: query, addEventListener: () => undefined, removeEventListener: () => undefined }));
+  };
+  it('does not leave a drawer to open later when Inspect was used in a wide window', async () => {
+    render();
+    await act(async () => requireValue(host.querySelector<HTMLButtonElement>('[aria-label^="Inspect"]')).click());
+    expect(host.querySelector('aside[aria-label="Model details"]')).not.toBeNull();
+    narrow();
+    render();
+    await act(async () => { await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))); });
+    expect(requireValue(host.querySelector<HTMLElement>('aside.drawer')).classList.contains('drawer--open')).toBe(false);
+  });
+  it('opens as a drawer dialog from Inspect, never from a remembered selection, and closing keeps the selection', async () => {
+    vi.stubGlobal('matchMedia', (query: string) => ({ matches: !query.includes('min-width: 1100px'), media: query, addEventListener: () => undefined, removeEventListener: () => undefined }));
+    render();
+    expect(host.querySelector('aside[aria-label="Model details"]')).toBeNull();
+    const drawer = (): HTMLElement => requireValue(host.querySelector<HTMLElement>('aside.drawer'));
+    expect(drawer().getAttribute('role')).toBe('dialog');
+    expect(drawer().classList.contains('drawer--open')).toBe(false);
+    await act(async () => requireValue(host.querySelector<HTMLButtonElement>('[aria-label^="Inspect"]')).click());
+    await act(async () => { await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))); });
+    expect(drawer().classList.contains('drawer--open')).toBe(true);
+    expect(drawer().textContent).toContain(t('en', 'models.library.details'));
+    expect(actions.selectModel).not.toHaveBeenCalled();
+    await act(async () => requireValue(drawer().querySelector<HTMLButtonElement>('.drawer__close-btn')).click());
+    expect(drawer().classList.contains('drawer--open')).toBe(false);
+    expect(actions.selectModel).not.toHaveBeenCalled();
   });
 });
