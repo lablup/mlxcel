@@ -2531,4 +2531,186 @@ void fused_mamba2_forward(
     ssm_state_out  = std::move(new_ssm_state);
 }
 
+// ── Residual add fused with the next LayerNorm (Cohere2 parallel block) ─────
+// One launch for `x_out = (a + b) + x` and `h_out = layer_norm(x_out, w, bias)`,
+// which the unfused graph runs as a compiled add3 kernel followed by MLX's
+// `layer_norm_single_row`, two dependent dispatches and two barrier levels per
+// layer boundary during decode.
+//
+// Byte-identical to that pair by construction, not by tolerance:
+// - the residual is formed in T with the same association order as
+//   `compiled_add3`, so `x_out` is the same array element for element;
+// - the normalization copies `layer_norm_single_row` from
+//   mlx/backend/metal/kernels/layer_norm.metal at the pinned MLX commit: the
+//   same threadgroup size (32 * ceil(ceil(D / 8) / 32)), 8 reads per thread,
+//   the same two-stage simd/threadgroup reductions for the mean and the
+//   centred sum of squares, `metal::precise::rsqrt`, and the affine step in T
+//   with the bias read from memory (a zero scalar with stride 0 when the norm
+//   has no bias, exactly what `fast::layer_norm` passes), so the compiler
+//   sees the same expression.
+// Covers the single-row kernel only (D <= 6656, MLX's `looped_limit`); the
+// caller falls back to the unfused pair above that, off Metal, or on mixed
+// dtypes. `residual_add3_layer_norm_matches_the_unfused_pair` pins the identity.
+// Used by: Cohere2
+namespace {
+    static const char* ADD3_LN_METAL_HEADER = R"(
+        inline void mlxcel_ln_init(threadgroup float* xs, uint lane, uint sg) {
+            if (sg == 0) {
+                xs[lane] = 0;
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+        inline void mlxcel_ln_sum(thread float* x, threadgroup float* xs, uint lane, uint sg) {
+            x[0] = simd_sum(x[0]);
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            if (lane == 0) {
+                xs[sg] = x[0];
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            x[0] = xs[lane];
+            x[0] = simd_sum(x[0]);
+        }
+    )";
+
+    static const char* ADD3_LN_METAL_SOURCE = R"(
+        constexpr int SIMD_SIZE = 32;
+        constexpr int N_READS = 8;
+        uint gid = threadgroup_position_in_grid.x;
+        uint lid = thread_position_in_threadgroup.x;
+        uint lane = thread_index_in_simdgroup;
+        uint sg = simdgroup_index_in_threadgroup;
+
+        float thread_x[N_READS] = {0};
+        threadgroup float local_buffer[SIMD_SIZE];
+        mlxcel_ln_init(local_buffer, lane, sg);
+
+        size_t off = size_t(gid) * D + lid * N_READS;
+        const bool safe = lid * N_READS + N_READS <= D;
+        const int n = int(D) - int(lid * N_READS);
+
+        if (safe) {
+            for (int i = 0; i < N_READS; i++) {
+                T s = ra[off + i] + rb[off + i];
+                T xn = s + rx[off + i];
+                x_out[off + i] = xn;
+                thread_x[i] = xn;
+            }
+        } else {
+            for (int i = 0; i < n; i++) {
+                T s = ra[off + i] + rb[off + i];
+                T xn = s + rx[off + i];
+                x_out[off + i] = xn;
+                thread_x[i] = xn;
+            }
+        }
+
+        float mean = 0;
+        for (int i = 0; i < N_READS; i++) {
+            mean += thread_x[i];
+        }
+        mlxcel_ln_sum(&mean, local_buffer, lane, sg);
+        mean /= D;
+
+        // Upstream starts this loop at `n`, which is negative for threads past
+        // the end of a narrow row (D < 8 * threadgroup size) and indexes before
+        // `thread_x`. Its in-range effect is "fill all eight with the mean",
+        // which clamping the start to 0 reproduces without the out-of-bounds
+        // write, so the result is unchanged.
+        float normalizer = 0;
+        if (!safe) {
+            for (int i = (n > 0 ? n : 0); i < N_READS; i++) {
+                thread_x[i] = mean;
+            }
+        }
+        for (int i = 0; i < N_READS; i++) {
+            thread_x[i] -= mean;
+            normalizer += thread_x[i] * thread_x[i];
+        }
+        mlxcel_ln_sum(&normalizer, local_buffer, lane, sg);
+        normalizer = metal::precise::rsqrt(normalizer / D + eps[0]);
+
+        // `auto`: metal_kernel may place a small input in the constant
+        // address space, so the pointer type follows the input.
+        auto wp = w + W_STRIDE * lid * N_READS;
+        auto bp = bias + B_STRIDE * lid * N_READS;
+        if (safe) {
+            for (int i = 0; i < N_READS; i++) {
+                thread_x[i] *= normalizer;
+                h_out[off + i] = wp[W_STRIDE * i] * static_cast<T>(thread_x[i]) + bp[B_STRIDE * i];
+            }
+        } else {
+            for (int i = 0; i < n; i++) {
+                thread_x[i] *= normalizer;
+                h_out[off + i] = wp[W_STRIDE * i] * static_cast<T>(thread_x[i]) + bp[B_STRIDE * i];
+            }
+        }
+    )";
+
+    struct Add3LayerNormKernelHolder {
+        std::optional<mlx::core::fast::CustomKernelFunction> kernel;
+        bool initialized = false;
+        mlx::core::fast::CustomKernelFunction& get() {
+            if (!initialized) {
+                kernel = mlx::core::fast::metal_kernel(
+                    "mlxcel_add3_layer_norm",
+                    {"ra", "rb", "rx", "w", "bias", "eps"},
+                    {"x_out", "h_out"},
+                    ADD3_LN_METAL_SOURCE,
+                    ADD3_LN_METAL_HEADER);
+                initialized = true;
+            }
+            return *kernel;
+        }
+    };
+    static Add3LayerNormKernelHolder& get_add3_layer_norm_kernel() {
+        static Add3LayerNormKernelHolder holder;
+        return holder;
+    }
+}
+
+void fused_add3_layer_norm(
+    const MlxArray& a,
+    const MlxArray& b,
+    const MlxArray& x,
+    const MlxArray& weight,
+    const MlxArray* bias,
+    float eps,
+    std::unique_ptr<MlxArray>& x_out,
+    std::unique_ptr<MlxArray>& h_out
+) {
+    using namespace mlx::core;
+    auto T = x.inner.dtype();
+    const auto& shape = x.inner.shape();
+    const int D = shape.back();
+    const int64_t rows = x.inner.size() / D;
+    const int simd = 32;
+    const int n_reads = 8;
+    const int tg = simd * (((D + n_reads - 1) / n_reads + simd - 1) / simd);
+
+    // The zero `fast::layer_norm` passes when there is no bias, read through a
+    // stride-0 pointer as upstream does. One element rather than 0-d, because
+    // metal_kernel hands a 0-d input to the kernel as a scalar, not a pointer.
+    array bias_arr = bias ? astype(bias->inner, T) : zeros({1}, T);
+    const int b_stride = bias && bias->inner.ndim() == 1 ? 1 : 0;
+
+    auto& kernel = get_add3_layer_norm_kernel().get();
+    std::vector<std::pair<std::string, mlx::core::fast::TemplateArg>> ta = {
+        {"T", T},
+        {"D", D},
+        {"W_STRIDE", 1},
+        {"B_STRIDE", b_stride},
+    };
+    std::vector<array> inputs = {
+        a.inner, b.inner, x.inner, astype(weight.inner, T), bias_arr,
+        full({1}, eps, float32),
+    };
+    auto results = kernel(
+        inputs, {shape, shape}, {T, T},
+        std::make_tuple(static_cast<int>(rows * tg), 1, 1),
+        std::make_tuple(tg, 1, 1),
+        ta, std::nullopt, false, {});
+    x_out = std::make_unique<MlxArray>(std::move(results[0]));
+    h_out = std::make_unique<MlxArray>(std::move(results[1]));
+}
+
 }  // namespace mlx_cxx

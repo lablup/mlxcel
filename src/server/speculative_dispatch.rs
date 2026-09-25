@@ -31,8 +31,12 @@
 //!   — raw `--draft-kind` string (`Some("dflash")` / `Some("mtp")` / `None`
 //!   for auto-detect).
 //! - [`ServerConfig::draft_block_size`](crate::server::config::ServerConfig::draft_block_size)
-//!   — explicit block-size override; `None` resolves to the per-kind default
-//!   via [`crate::cli::speculative_args::default_block_size_for_kind`].
+//!   — explicit block-size override; `None` resolves through
+//!   [`crate::cli::speculative_args::resolve_draft_block_size_for_target`],
+//!   which prefers a width the drafter checkpoint declares, then a measured
+//!   default for the running device and the target's quantization
+//!   ([`crate::cli::draft_block_policy`], issue #1797), then the flat
+//!   [`crate::cli::speculative_args::default_block_size_for_kind`].
 //!
 //! At worker-startup, [`SpeculativeDispatch::resolve`] turns those raw
 //! fields into one of:
@@ -84,7 +88,8 @@ use std::path::PathBuf;
 
 use mlxcel_core::drafter::{DrafterKind, resolve_drafter_kind};
 
-use crate::cli::speculative_args::resolve_draft_block_size;
+use crate::cli::draft_block_policy::BlockSizeSource;
+use crate::cli::speculative_args::resolve_draft_block_size_for_target;
 use crate::server::config::ServerConfig;
 
 /// Resolved speculative-decoding dispatch shape.
@@ -126,6 +131,12 @@ pub enum SpeculativeDispatch {
         /// Resolved draft block size (the verify input has `block_size`
         /// positions: `[bonus, draft_0, …, draft_{K-2}]`).
         block_size: u32,
+        /// What produced `block_size`: an operator override, the drafter
+        /// checkpoint's own declaration, a measured hardware default
+        /// (issue #1797), or the flat per-kind constant. Printed by
+        /// [`Self::summary`] so the startup log distinguishes a measured
+        /// narrowing from a flag the operator forgot they exported.
+        block_size_source: BlockSizeSource,
         /// Whether the kind was explicitly requested via `--draft-kind`
         /// (true) or auto-detected from the drafter's `config.json`
         /// (false). Affects the operator-facing error message when the
@@ -145,6 +156,8 @@ pub enum SpeculativeDispatch {
         /// Resolved draft block size — the drafter's masked forward
         /// produces `block_size - 1` proposal tokens per round.
         block_size: u32,
+        /// Same provenance record as [`Self::Mtp::block_size_source`].
+        block_size_source: BlockSizeSource,
         /// Whether the kind was explicitly requested via `--draft-kind`
         /// (true) or auto-detected from the drafter's `config.json`
         /// (false). Same operator-facing semantics as
@@ -186,8 +199,11 @@ impl SpeculativeDispatch {
     ///    kind (if any). A config-file failure produces
     ///    [`SpeculativeDispatchError::DrafterConfig`].
     /// 3. Resolves the effective block size via
-    ///    [`resolve_draft_block_size`] (using the per-kind default when
-    ///    `--draft-block-size` is unset).
+    ///    [`resolve_draft_block_size_for_target`], which needs
+    ///    `target_model_path` (the `-m` checkpoint) because the measured
+    ///    default is keyed on the target's quantization mode, not the
+    ///    drafter's. The resolved width carries its own provenance so
+    ///    [`Self::summary`] can name it.
     /// 4. Returns the kind-specific variant.
     ///
     /// The classic [`Self::Classic`] arm is selected only when the
@@ -203,7 +219,10 @@ impl SpeculativeDispatch {
     /// surfacing a clear error if the target model does not implement the
     /// matching trait (`MtpTarget` for MTP, `SpeculativeTarget` for
     /// DFlash) — see [`SpeculativeDispatch::Mtp::user_requested_explicit_kind`].
-    pub fn resolve(config: &ServerConfig) -> Result<Self, SpeculativeDispatchError> {
+    pub fn resolve(
+        config: &ServerConfig,
+        target_model_path: &std::path::Path,
+    ) -> Result<Self, SpeculativeDispatchError> {
         let Some(draft_model_path) = config.draft_model_path.clone() else {
             return Ok(Self::Disabled);
         };
@@ -245,8 +264,16 @@ impl SpeculativeDispatch {
             })?;
 
         let user_requested_explicit_kind = explicit_kind.is_some();
-        let block_size =
-            resolve_draft_block_size(config.draft_block_size, resolved_kind, &draft_model_path);
+        // The block-width policy is keyed on the TARGET's quantization, not
+        // the drafter's: the verify block runs through the target's quantized
+        // projections, and that is where the CUDA row boundaries are
+        // (issue #1797).
+        let block_size = resolve_draft_block_size_for_target(
+            config.draft_block_size,
+            resolved_kind,
+            &draft_model_path,
+            target_model_path,
+        );
 
         // Dispatch matrix:
         // - explicit MTP / DFlash → kind-specific generator
@@ -258,12 +285,14 @@ impl SpeculativeDispatch {
         match resolved_kind {
             DrafterKind::Mtp => Ok(Self::Mtp {
                 draft_model_path,
-                block_size,
+                block_size: block_size.width,
+                block_size_source: block_size.source,
                 user_requested_explicit_kind,
             }),
             DrafterKind::Dflash => Ok(Self::DFlash {
                 draft_model_path,
-                block_size,
+                block_size: block_size.width,
+                block_size_source: block_size.source,
                 user_requested_explicit_kind,
             }),
             DrafterKind::InternalMtp => Ok(Self::Classic {
@@ -300,20 +329,24 @@ impl SpeculativeDispatch {
             Self::Mtp {
                 draft_model_path,
                 block_size,
+                block_size_source,
                 user_requested_explicit_kind,
             } => format!(
                 "speculative=mtp (drafter={}, block_size={block_size}, \
-                 explicit_kind={user_requested_explicit_kind})",
-                draft_model_path.display()
+                 block_size_from={}, explicit_kind={user_requested_explicit_kind})",
+                draft_model_path.display(),
+                block_size_source.reason()
             ),
             Self::DFlash {
                 draft_model_path,
                 block_size,
+                block_size_source,
                 user_requested_explicit_kind,
             } => format!(
                 "speculative=dflash (drafter={}, block_size={block_size}, \
-                 explicit_kind={user_requested_explicit_kind})",
-                draft_model_path.display()
+                 block_size_from={}, explicit_kind={user_requested_explicit_kind})",
+                draft_model_path.display(),
+                block_size_source.reason()
             ),
         }
     }

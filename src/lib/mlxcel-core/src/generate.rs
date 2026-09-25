@@ -38,7 +38,7 @@ use crate::loop_detection::{LoopDetectionConfig, detect_repetition_loop};
 use crate::sampling::{
     SamplerState, TokenBiasMap, sample_token_optimized, sample_token_optimized_with_state,
 };
-use crate::streams::{install_thread_local_default_stream, new_thread_local_generation_stream};
+use crate::streams::{install_thread_local_default_stream, shared_thread_local_generation_stream};
 use crate::utils::{align_to_na_tile, create_padded_prefill_mask};
 use cxx::UniquePtr;
 
@@ -237,8 +237,12 @@ fn pad_embeddings(embeds: &MlxArray, padded_len: usize) -> UniquePtr<MlxArray> {
 /// internally calls `slice_last_logits` expecting `[batch, seq_len, vocab]`.
 ///
 /// Used after a padded prefill to obtain the prediction for the last *real*
-/// token position rather than the last padding position.
-fn logits_at_position(logits: &MlxArray, pos: usize) -> UniquePtr<MlxArray> {
+/// token position rather than the last padding position. Works on any
+/// `[batch, seq_len, width]` tensor, so a model's `forward_last_logits`
+/// override also uses it to slice the hidden state before its LM head.
+///
+/// Used by: the `forward_last_logits*` defaults, Llama3Model::last_logits
+pub fn logits_at_position(logits: &MlxArray, pos: usize) -> UniquePtr<MlxArray> {
     let shape = ffi::array_shape(logits);
     let batch = shape[0];
     let vocab = shape[2];
@@ -1469,7 +1473,7 @@ impl CxxGenerator {
         Self {
             caches: (0..num_layers).map(|_| KVCache::new()).collect(),
             generated_tokens: Vec::new(),
-            generation_stream: new_thread_local_generation_stream(),
+            generation_stream: shared_thread_local_generation_stream(),
             kv_cache_mode: KVCacheMode::Fp16,
             token_bias: TokenBiasMap::default(),
         }
@@ -1500,7 +1504,7 @@ impl CxxGenerator {
                 .map(KVCache::new_with_mode)
                 .collect(),
             generated_tokens: Vec::new(),
-            generation_stream: new_thread_local_generation_stream(),
+            generation_stream: shared_thread_local_generation_stream(),
             kv_cache_mode,
             token_bias: TokenBiasMap::default(),
         }
@@ -1795,6 +1799,11 @@ impl CxxGenerator {
         };
         ffi::async_eval(&y);
         self.prepare_turbo4_delegated_before_decode(max_tokens);
+        // Prefill is encoded by now; raise the command-buffer input budget for
+        // the decode loop only (see `DecodeCommandBufferBudget`). Not under
+        // MLXCEL_FORCE_SYNC: a synchronous eval gains nothing from larger
+        // buffers and loses the CPU-encode / GPU-execute overlap inside a step.
+        let _decode_budget = (!force_sync).then(crate::DecodeCommandBufferBudget::enter);
 
         // Main generation loop - matches Python exactly:
         // 1. Start next step computation
@@ -2116,6 +2125,9 @@ impl CxxGenerator {
         };
         ffi::async_eval(&y);
         self.prepare_turbo4_delegated_before_decode(max_tokens);
+        // Prefill is encoded by now; raise the command-buffer input budget for
+        // the decode loop only (see `DecodeCommandBufferBudget`).
+        let _decode_budget = crate::DecodeCommandBufferBudget::enter();
 
         // Decode loop — identical to standard generation (no embeddings needed)
         let mut n = 0;
@@ -2294,6 +2306,9 @@ impl CxxGenerator {
         let ttft_eval_ns = ttft_eval_start.map_or(0, |t| t.elapsed().as_nanos());
         let ttft_post_start = profile_ttft.then(Instant::now);
         self.prepare_turbo4_delegated_before_decode(max_tokens);
+        // Prefill is encoded by now; raise the command-buffer input budget for
+        // the decode loop only (see `DecodeCommandBufferBudget`).
+        let _decode_budget = crate::DecodeCommandBufferBudget::enter();
         let ttft_post_ns = ttft_post_start.map_or(0, |t| t.elapsed().as_nanos());
         let prefill_time = prefill_start.elapsed();
         if profile_ttft {
@@ -2566,6 +2581,9 @@ impl CxxGenerator {
         let ttft_eval_ns = ttft_eval_start.map_or(0, |t| t.elapsed().as_nanos());
         let ttft_post_start = profile_ttft.then(Instant::now);
         self.prepare_turbo4_delegated_before_decode(max_tokens);
+        // Prefill is encoded by now; raise the command-buffer input budget for
+        // the decode loop only (see `DecodeCommandBufferBudget`).
+        let _decode_budget = crate::DecodeCommandBufferBudget::enter();
         let ttft_post_ns = ttft_post_start.map_or(0, |t| t.elapsed().as_nanos());
         let prefill_time = prefill_start.elapsed();
         if profile_ttft {

@@ -19,5 +19,6 @@
 //! production builds never see it.
 
 pub(crate) mod env_lock;
+pub(crate) mod last_logits;
 pub(crate) mod pinned_checkpoint;
 pub(crate) mod video_gate;

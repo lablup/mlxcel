@@ -55,7 +55,7 @@ use mlxcel_core::generation_policy::{
 use mlxcel_core::lang_analyzer::LangBiasConfig;
 use mlxcel_core::sampling::{TokenBiasMap, sample_token_optimized};
 
-use mlxcel::cli::speculative_args::resolve_draft_block_size;
+use mlxcel::cli::speculative_args::resolve_draft_block_size_for_target;
 use mlxcel::cli::turbo_args::{resolve_and_announce_kv_cache_mode, resolve_kv_cache_mode};
 use mlxcel::models::drafter_loader::load_drafter;
 use mlxcel_core::drafter::{DrafterKind, resolve_drafter_kind};
@@ -1747,11 +1747,25 @@ pub(super) fn run_generation_mode(
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         let resolved_kind = resolve_drafter_kind(draft_model_path, explicit_kind)
             .map_err(|e| anyhow::anyhow!("--draft-kind / drafter config: {e}"))?;
-        let block_size = resolve_draft_block_size(
+        // Keyed on the TARGET checkpoint's quantization as well as the
+        // drafter, because the verify block runs through the target's
+        // quantized projections; see `mlxcel::cli::draft_block_policy`
+        // (issue #1797). `args.model.model` is already a local directory here:
+        // `run_generate_once` rewrites it through
+        // `resolve_model_source_with_override` before any generation runs, so
+        // a `owner/name` repo id never reaches the peek. Logged here because
+        // the offline path has no worker-startup summary line of its own.
+        let resolved_block_size = resolve_draft_block_size_for_target(
             args.speculative.draft_block_size,
             resolved_kind,
             draft_model_path,
+            &args.model.model,
         );
+        tracing::info!(
+            "speculative draft block size: {}",
+            resolved_block_size.describe()
+        );
+        let block_size = resolved_block_size.width;
         let user_requested_explicit_kind = explicit_kind.is_some();
 
         // issue #166 / #1165: when the resolved kind is MTP (explicit

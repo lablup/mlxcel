@@ -1419,3 +1419,53 @@ fn slab_growth_appends_without_copy_and_fragmented_gather_round_trips() {
     assert_eq!(flatten_fp32(&gk_b), flatten_fp32(&dense_kb));
     assert_eq!(flatten_fp32(&gv_b), flatten_fp32(&dense_vb));
 }
+
+// ---------------------------------------------------------------------------
+// In-place slab writes under lookahead (#1964)
+// ---------------------------------------------------------------------------
+
+/// A write into an exclusively held block that already owns its row goes in
+/// place, and must never change another block's rows. A write into a block
+/// shared with another holder must copy, so an existing view of the slab keeps
+/// its old bytes.
+#[test]
+fn inplace_slab_writes_touch_only_the_writers_own_block() {
+    if !ffi::default_device_is_gpu() {
+        return;
+    }
+    let block_size = 4usize;
+    let mut pool = fp16_pool(block_size, 1);
+    let mut a = PagedSequenceState::new(pool.layout());
+    let mut b = PagedSequenceState::new(pool.layout());
+    pool.append_tokens(&mut a, 0, 4).unwrap();
+    pool.append_tokens(&mut b, 0, 4).unwrap();
+    let a_id = a.layer(0).unwrap().block_ids[0];
+    let b_id = b.layer(0).unwrap().block_ids[0];
+    // First writes assign the rows (copying path).
+    pool.write_block(a_id, 0, 0, &make_block(1.0, 2), &make_block(1.0, 2))
+        .unwrap();
+    pool.write_block(b_id, 0, 0, &make_block(2.0, 4), &make_block(2.0, 4))
+        .unwrap();
+
+    // A view of B's block, materialized; A's next slots are written in place.
+    let (b_view, _) = pool.read_block_contents(b_id, 0).unwrap();
+    let b_before = flatten_fp32(&b_view);
+    pool.write_block(a_id, 0, 2, &make_block(3.0, 2), &make_block(3.0, 2))
+        .unwrap();
+    // Evaluate the write before reading the old view (writes are lazy).
+    let (a_after, _) = pool.read_block_contents(a_id, 0).unwrap();
+    ffi::eval(&a_after);
+    assert_eq!(flatten_fp32(&b_view), b_before, "B's rows untouched");
+    let (b_now, _) = pool.read_block_contents(b_id, 0).unwrap();
+    assert_eq!(flatten_fp32(&b_now), b_before);
+
+    // Share A (refcount 2): its next write must copy, leaving the view intact.
+    pool.retain_block(a_id).unwrap();
+    let (a_view, _) = pool.read_block_contents(a_id, 0).unwrap();
+    let a_before = flatten_fp32(&a_view);
+    pool.write_block(a_id, 0, 3, &make_block(9.0, 1), &make_block(9.0, 1))
+        .unwrap();
+    let (a_now, _) = pool.read_block_contents(a_id, 0).unwrap();
+    assert_ne!(flatten_fp32(&a_now), a_before, "the write itself landed");
+    assert_eq!(flatten_fp32(&a_view), a_before, "shared block copied");
+}

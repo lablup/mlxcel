@@ -419,33 +419,63 @@ impl Gemma2Model {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        // Embed tokens and multiply by sqrt(hidden_size)
-        let mut h = self.embed_tokens.forward(input_ids);
-        let hidden_size = mlxcel_core::array_shape(&h)[2]; // [..., hidden_size]
+        let h = self.hidden_states(input_ids, None, caches, mask);
+        self.logits_from_hidden(&h)
+    }
+
+    /// Embeddings (the caller's or looked up) scaled by sqrt(hidden_size),
+    /// every layer and the final norm. The scale applies to all embeddings,
+    /// matching Python GemmaModel.__call__.
+    fn hidden_states(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = if let Some(embeds) = input_embeddings {
+            mlxcel_core::copy(embeds)
+        } else {
+            self.embed_tokens.forward(input_ids)
+        };
+        let hidden_size = mlxcel_core::array_shape(&h)[2];
         let scale = (hidden_size as f32).sqrt();
         h = mlxcel_core::multiply_scalar(&h, scale);
 
-        // Pass through transformer layers
         let n = self.layers.len();
         for (i, layer) in self.layers.iter().enumerate() {
             h = layer.forward(&h, &mut caches[i], mask);
             pipeline_hint(&h, i, n);
         }
 
-        // Final norm
-        let h = self.norm.forward(&h);
+        self.norm.forward(&h)
+    }
 
-        // LM head
-        let mut logits = if let Some(head) = &self.lm_head {
-            head.forward(&h)
+    /// LM head (or the tied embedding) and the final logit softcap, both
+    /// per position.
+    fn logits_from_hidden(&self, h: &MlxArray) -> UniquePtr<MlxArray> {
+        let logits = if let Some(head) = &self.lm_head {
+            head.forward(h)
         } else {
-            self.embed_tokens.as_linear(&h)
+            self.embed_tokens.as_linear(h)
         };
+        mlxcel_core::compiled_softcap(&logits, self.final_logit_softcapping)
+    }
 
-        // Apply final logit softcapping
-        logits = mlxcel_core::compiled_softcap(&logits, self.final_logit_softcapping);
-
-        logits
+    /// Logits `[B, 1, vocab]` for position `last_pos` only: the hidden state
+    /// is sliced before the LM head and softcap, which act per position, so a
+    /// prefill does not project every prompt row through a 256k vocabulary.
+    fn last_logits(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        let h = self.hidden_states(input_ids, input_embeddings, caches, mask);
+        let row = mlxcel_core::generate::logits_at_position(&h, last_pos);
+        self.logits_from_hidden(&row)
     }
 
     /// Create KV caches for all layers
@@ -475,36 +505,8 @@ impl Gemma2Model {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        let mut h = if let Some(embeds) = input_embeddings {
-            mlxcel_core::copy(embeds)
-        } else {
-            self.embed_tokens.forward(input_ids)
-        };
-
-        // Apply sqrt(hidden_size) normalization to ALL embeddings.
-        // Python: normalizer = sqrt(config.hidden_size); h = h * normalizer
-        // Used by: PaliGemma VLM (Gemma2 backbone)
-        let hidden_size = mlxcel_core::array_shape(&h)[2];
-        let scale = (hidden_size as f32).sqrt();
-        h = mlxcel_core::multiply_scalar(&h, scale);
-
-        let n = self.layers.len();
-        for (i, layer) in self.layers.iter().enumerate() {
-            h = layer.forward(&h, &mut caches[i], mask);
-            pipeline_hint(&h, i, n);
-        }
-
-        let h = self.norm.forward(&h);
-
-        let mut logits = if let Some(head) = &self.lm_head {
-            head.forward(&h)
-        } else {
-            self.embed_tokens.as_linear(&h)
-        };
-
-        logits = mlxcel_core::compiled_softcap(&logits, self.final_logit_softcapping);
-
-        logits
+        let h = self.hidden_states(input_ids, input_embeddings, caches, mask);
+        self.logits_from_hidden(&h)
     }
 
     /// Load model from directory
@@ -578,6 +580,39 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
 
 // LanguageModel trait implementation.
 impl LanguageModel for Gemma2Model {
+    fn forward_last_logits(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.last_logits(input_ids, None, caches, mask, last_pos)
+    }
+
+    fn forward_last_logits_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.last_logits(input_ids, None, caches, mask, last_pos)
+    }
+
+    fn forward_last_logits_with_embeddings_and_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.last_logits(input_ids, input_embeddings, caches, mask, last_pos)
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -613,3 +648,7 @@ impl LanguageModel for Gemma2Model {
         vec![1, 107] // Gemma2 EOS tokens: <eos> (1) and <end_of_turn> (107)
     }
 }
+
+#[cfg(test)]
+#[path = "gemma2_tests.rs"]
+mod tests;

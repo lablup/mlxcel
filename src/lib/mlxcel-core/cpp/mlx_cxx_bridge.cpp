@@ -33,6 +33,12 @@ namespace mlx::core {
 void mlxcel_set_qmv_wide(bool enabled);
 bool mlxcel_qmv_wide(void);
 } // namespace mlx::core
+// Defined by the mlx/backend/metal/device.cpp overlay: the per-command-buffer
+// input budget override that mlxcel raises around decode steps.
+namespace mlx::core::metal {
+void mlxcel_set_mb_per_buffer_override(int mb);
+int mlxcel_mb_per_buffer_override();
+} // namespace mlx::core::metal
 #endif
 
 namespace mlx_cxx {
@@ -211,6 +217,17 @@ void synchronize_stream(const MlxStream& stream) {
 std::unique_ptr<MlxThreadLocalStream> new_thread_local_stream_gpu() {
     return std::make_unique<MlxThreadLocalStream>(
         mlx::core::new_thread_local_stream(mlx::core::Device::gpu));
+}
+
+std::unique_ptr<MlxThreadLocalStream> shared_thread_local_stream_gpu() {
+    // Function-local static: initialized once, thread-safe (C++11).
+    static const mlx::core::ThreadLocalStream shared =
+        mlx::core::new_thread_local_stream(mlx::core::Device::gpu);
+    return std::make_unique<MlxThreadLocalStream>(shared);
+}
+
+int32_t stream_index(const MlxStream& stream) {
+    return static_cast<int32_t>(stream.inner.index);
 }
 
 std::unique_ptr<MlxStream> stream_from_thread_local_stream(const MlxThreadLocalStream& tls) {
@@ -1344,6 +1361,23 @@ bool qmv_wide_enabled() {
 }
 #endif
 
+#ifdef MLXCEL_BRIDGE_METAL_BACKEND
+void set_metal_mb_per_buffer_override(int32_t mb) {
+    ::mlx::core::metal::mlxcel_set_mb_per_buffer_override(mb);
+}
+
+int32_t metal_mb_per_buffer_override() {
+    return ::mlx::core::metal::mlxcel_mb_per_buffer_override();
+}
+#else
+// No Metal command buffers to size: the override is inert and reads as unset.
+void set_metal_mb_per_buffer_override(int32_t) {}
+
+int32_t metal_mb_per_buffer_override() {
+    return 0;
+}
+#endif
+
 std::unique_ptr<MlxArray> random_categorical(const MlxArray& logits, int32_t axis) {
     return std::make_unique<MlxArray>(mlx::core::random::categorical(logits.inner, axis));
 }
@@ -1647,6 +1681,29 @@ std::unique_ptr<MlxArray> compiled_swiglu_activation(
 
     // Call the compiled function
     auto result = compiled_fn({gate.inner, x.inner});
+    return std::make_unique<MlxArray>(std::move(result[0]));
+}
+
+// Compiled three-way add: (a + b) + c as one fused elementwise kernel.
+// Same association order as two chained `add` calls, so the result is
+// byte-identical; the win is one dispatch and one barrier level fewer per call.
+// Used by: Cohere2
+namespace {
+    static std::function<std::vector<array>(const std::vector<array>&)> get_compiled_add3() {
+        auto fn = [](const std::vector<array>& inputs) -> std::vector<array> {
+            return {mlx::core::add(mlx::core::add(inputs[0], inputs[1]), inputs[2])};
+        };
+        return compile_shapeless_audited("compiled_add3", fn);
+    }
+}
+
+std::unique_ptr<MlxArray> compiled_add3(
+    const MlxArray& a,
+    const MlxArray& b,
+    const MlxArray& c
+) {
+    static auto compiled_fn = get_compiled_add3();
+    auto result = compiled_fn({a.inner, b.inner, c.inner});
     return std::make_unique<MlxArray>(std::move(result[0]));
 }
 

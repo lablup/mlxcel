@@ -1,0 +1,20 @@
+date: 2026-09-21T15:47:10+09:00
+host: spark-101
+kernel: 7.0.0-1019-nvidia
+arch: aarch64
+nvidia_driver: 580.178.04
+gpu: NVIDIA GB10, 12.1
+MLX_CUDA_ARCHITECTURES: 121
+cuda_toolkit: 13.0
+mlx_pin: 81ba1c6a0e50a9268b931579c2d4f1158b9aab5a
+rustc_on_path: rustc 1.97.1 (8bab26f4f 2026-07-14)
+rustc_used_for_build: rustc 1.97.1 (8bab26f4f 2026-07-14)
+git_commit: 6f9a0982d7854b653c7b354fe0f1f0b26af41a7f
+git_dirty: no
+uptime: up 23 hours, 52 minutes
+mem_total_gib: 121.7
+binary: /tmp/mlxcel1797.izrEDT/mlxcel1797-server
+binary_sha256: f2ba16883e8aed7aecf57212f5a81f4516eaeddcc618252bc5a6f464f015248c
+binary_mtime: 2026-09-21T15:47:10+09:00
+model /home/inureyes/Development/mlxcel-wt-main/models/mlx/qwen3.5-4b-4bit: bytes=3061131800 model_type=qwen3_5 quantization=affine
+model /home/inureyes/Development/mlxcel-wt-main/models/mlx/qwen3.5-4b-dflash: bytes=1074861667 model_type=qwen3 quantization=none

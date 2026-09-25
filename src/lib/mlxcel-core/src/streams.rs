@@ -59,10 +59,31 @@ use crate::ffi::{MlxStream, MlxThreadLocalStream};
 /// to bind its dedicated per-thread stream as the default for
 /// subsequent MLX dispatches on that thread.
 ///
-/// Used by: CxxGenerator, SpeculativeGenerator, BatchScheduler, AudioWorker
+/// Used by: BatchScheduler, AudioWorker, embedding and rerank workers, Kokoro
 pub fn new_thread_local_generation_stream() -> Option<UniquePtr<MlxThreadLocalStream>> {
     if ffi::default_device_is_gpu() {
         Some(ffi::new_thread_local_stream_gpu())
+    } else {
+        None
+    }
+}
+
+/// Hand out the process-wide thread-local generation stream handle.
+///
+/// Same contract as [`new_thread_local_generation_stream`], except every
+/// call returns the same underlying handle, so successive generators run
+/// on one thread resolve to one MLX stream, as mlx-lm's module-level
+/// `generation_stream` does. MLX registers a fresh stream (a new command
+/// queue that is never freed) for every new handle a thread resolves. On M1
+/// Ultra, command-r7b pp512/tg128, a second generator on a fresh stream paid
+/// about 25 ms in prefill and 20-40 ms at the start of decode; on the shared
+/// stream it pays neither. Different threads still resolve different
+/// streams, so dispatch and synchronization stay paired per thread.
+///
+/// Used by: CxxGenerator, SpeculativeGenerator
+pub fn shared_thread_local_generation_stream() -> Option<UniquePtr<MlxThreadLocalStream>> {
+    if ffi::default_device_is_gpu() {
+        Some(ffi::shared_thread_local_stream_gpu())
     } else {
         None
     }
@@ -708,6 +729,35 @@ mod tests {
     #[test]
     fn new_thread_local_generation_stream_is_total() {
         let _ = new_thread_local_generation_stream();
+    }
+
+    /// Generators built one after another on a thread must land on one MLX
+    /// stream: a fresh stream per generator adds a start-of-decode stall to
+    /// every generation after the first. A handle from
+    /// `new_thread_local_generation_stream` must still get its own stream.
+    #[test]
+    fn shared_generation_stream_resolves_to_one_stream_per_thread() {
+        let (Some(a), Some(b)) = (
+            shared_thread_local_generation_stream(),
+            shared_thread_local_generation_stream(),
+        ) else {
+            return;
+        };
+        let ia = ffi::stream_index(&ffi::stream_from_thread_local_stream(&a));
+        let ib = ffi::stream_index(&ffi::stream_from_thread_local_stream(&b));
+        assert_eq!(ia, ib, "shared handles must resolve to the same stream");
+
+        let fresh = new_thread_local_generation_stream().expect("GPU build");
+        let ic = ffi::stream_index(&ffi::stream_from_thread_local_stream(&fresh));
+        assert_ne!(ia, ic, "a fresh handle must resolve to its own stream");
+
+        let other = std::thread::spawn(|| {
+            let h = shared_thread_local_generation_stream().expect("GPU build");
+            ffi::stream_index(&ffi::stream_from_thread_local_stream(&h))
+        })
+        .join()
+        .expect("thread");
+        assert_ne!(ia, other, "another thread must resolve its own stream");
     }
 
     /// `new_generation_stream` (the deprecated, non-thread-local

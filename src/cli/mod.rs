@@ -27,6 +27,7 @@ pub mod cache_list;
 pub mod chat_compat_args;
 pub mod completion;
 pub mod context_args;
+pub mod draft_block_policy;
 pub mod embedding_compat_args;
 pub mod flag_surface;
 pub mod ggml_compat_args;

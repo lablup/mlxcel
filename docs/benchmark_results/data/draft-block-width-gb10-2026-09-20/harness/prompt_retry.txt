@@ -1,0 +1,28 @@
+"""Retry helpers with exponential backoff and jitter.
+
+Dependency-free so it can be vendored into small services that must not
+grow a third-party requirement just to retry an HTTP call.
+"""
+
+import functools
+import itertools
+import logging
+import random
+import time
+from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_BASE_DELAY = 0.1
+DEFAULT_MAX_DELAY = 30.0
+DEFAULT_MAX_ATTEMPTS = 5
+
+
+@dataclass(frozen=True)
+class BackoffPolicy:
+    base_delay: float = DEFAULT_BASE_DELAY
+    max_delay: float = DEFAULT_MAX_DELAY
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS
+    jitter: bool = True
+
+    def delays(self):

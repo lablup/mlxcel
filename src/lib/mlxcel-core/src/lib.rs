@@ -56,6 +56,13 @@ mod ffi {
         /// thread gets its own `MlxStream` on first resolution.
         fn new_thread_local_stream_gpu() -> UniquePtr<MlxThreadLocalStream>;
 
+        /// Process-wide GPU thread-local stream handle, created once and
+        /// shared by every caller; each thread still resolves its own stream.
+        fn shared_thread_local_stream_gpu() -> UniquePtr<MlxThreadLocalStream>;
+
+        /// Index of the MLX stream behind `stream`.
+        fn stream_index(stream: &MlxStream) -> i32;
+
         /// Resolve the calling thread's `MlxStream` from a TLS handle.
         fn stream_from_thread_local_stream(tls: &MlxThreadLocalStream) -> UniquePtr<MlxStream>;
 
@@ -565,6 +572,17 @@ mod ffi {
         /// without the Metal backend.
         fn qmv_wide_enabled() -> bool;
 
+        /// Override MLX's per-command-buffer input budget
+        /// (`MLX_MAX_MB_PER_BUFFER`, an element count >> 20) for work encoded
+        /// from now on; `0` restores the device default. Process-wide and
+        /// immediate. Use [`crate::DecodeCommandBufferBudget`] rather than
+        /// calling this directly. Inert on a build without the Metal backend.
+        fn set_metal_mb_per_buffer_override(mb: i32);
+
+        /// Current override set by [`set_metal_mb_per_buffer_override`], `0`
+        /// when none is active (always `0` without the Metal backend).
+        fn metal_mb_per_buffer_override() -> i32;
+
         /// Random categorical sampling
         fn random_categorical(logits: &MlxArray, axis: i32) -> UniquePtr<MlxArray>;
 
@@ -639,6 +657,29 @@ mod ffi {
         /// Uses mlx::core::compile(shapeless=true) like Python's @mx.compile
         /// output = silu(gate) * x
         fn compiled_swiglu_activation(gate: &MlxArray, x: &MlxArray) -> UniquePtr<MlxArray>;
+
+        /// Residual add fused with the next LayerNorm in one Metal launch:
+        /// `x_out = (a + b) + x`, `h_out = layer_norm(x_out, weight, bias)`.
+        /// Byte-identical to `compiled_add3` + `fast_layer_norm`. Metal only,
+        /// last dimension <= 6656; call it through
+        /// [`crate::layers::residual_add3_layer_norm`], which checks both.
+        /// Used by: Cohere2
+        unsafe fn fused_add3_layer_norm(
+            a: &MlxArray,
+            b: &MlxArray,
+            x: &MlxArray,
+            weight: &MlxArray,
+            bias: *const MlxArray,
+            eps: f32,
+            x_out: &mut UniquePtr<MlxArray>,
+            h_out: &mut UniquePtr<MlxArray>,
+        );
+
+        /// Compiled three-way add `(a + b) + c` as one fused kernel.
+        /// Byte-identical to two chained `add` calls (same association order);
+        /// saves one dispatch and one barrier level per call.
+        /// Used by: Cohere2
+        fn compiled_add3(a: &MlxArray, b: &MlxArray, c: &MlxArray) -> UniquePtr<MlxArray>;
 
         /// Compiled GptOss SwiGLU activation with kernel fusion
         /// Matches mlx-lm gpt_oss.swiglu: clipped gate/up + sigmoid(1.702*gate).
@@ -1497,6 +1538,24 @@ mod ffi {
         /// Whether the current backend has a fused RoPE + append kernel at all
         /// (issue #905). False on a CPU-only build.
         fn fused_rope_qk_append_available() -> bool;
+
+        /// A second handle to the same MLX array node: same id, same
+        /// buffer, nothing copied or evaluated.
+        fn array_handle_clone(a: &MlxArray) -> UniquePtr<MlxArray>;
+
+        /// Whether two handles refer to the same MLX array node.
+        fn array_same_handle(a: &MlxArray, b: &MlxArray) -> bool;
+
+        /// `dst` with `rows` written at `start`, sharing `dst`'s buffer
+        /// instead of copying it (#1959). Sound only when no reader of `dst`
+        /// needs the written region's old contents and the caller owns the
+        /// buffer alone; see `src/lib/mlx-cpp/turbo/kv_inplace_write.h`. GPU
+        /// only.
+        fn inplace_slice_write(
+            dst: &MlxArray,
+            rows: &MlxArray,
+            start: &[i32],
+        ) -> UniquePtr<MlxArray>;
 
         fn sdpa_supports_fast_path(
             q: &MlxArray,
@@ -3546,6 +3605,11 @@ pub mod cuda_graph_budget;
 // Runtime Apple Silicon generation detection.
 // Public so that mlxcel (the main crate) can log hardware info at startup.
 pub mod hardware;
+
+// Decode-only raise of MLX's per-command-buffer input budget; prefill keeps
+// the device default so long prompts do not hold their activations longer.
+pub mod command_buffer_budget;
+pub use command_buffer_budget::DecodeCommandBufferBudget;
 
 // Typed wrappers around MLX's runtime memory accounting APIs (issue #55).
 // Public so that the CLI generate path can surface post-load resident

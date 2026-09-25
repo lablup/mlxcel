@@ -977,6 +977,80 @@ impl LayerNorm {
     }
 }
 
+/// Largest normalized dimension MLX's single-row `layer_norm` kernel handles
+/// (`looped_limit` in `mlx/backend/metal/normalization.cpp`). The fused kernel
+/// copies that kernel, so it covers the same range.
+const FUSED_ADD3_LAYER_NORM_MAX_DIM: i32 = 6656;
+
+fn fused_add3_layer_norm_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !matches!(
+            std::env::var("MLXCEL_FUSED_ADD_NORM").as_deref(),
+            Ok("0" | "off" | "false" | "no")
+        )
+    })
+}
+
+/// Residual add fused with the LayerNorm that consumes it: returns
+/// `(x_new, norm(x_new))` with `x_new = (a + b) + x`.
+///
+/// A parallel-residual block ends in `(attn + mlp) + x` and the next block
+/// starts with a LayerNorm of that sum. Unfused that is a compiled add kernel
+/// and a norm kernel, two dependent dispatches (two barrier levels) per layer
+/// boundary on the decode critical path. On Metal this runs one kernel whose
+/// outputs are byte-identical to that pair; elsewhere, or when the shapes and
+/// dtypes fall outside what the kernel covers, it runs the pair itself.
+/// `MLXCEL_FUSED_ADD_NORM=0` forces the unfused pair.
+///
+/// Used by: Cohere2
+pub fn residual_add3_layer_norm(
+    a: &MlxArray,
+    b: &MlxArray,
+    x: &MlxArray,
+    norm: &LayerNorm,
+) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+    let shape = ffi::array_shape(x);
+    let dtype = ffi::array_dtype(x);
+    let dim = shape.last().copied().unwrap_or(0);
+    let weight = norm.weight.as_ref().unwrap();
+    let fusable = fused_add3_layer_norm_enabled()
+        && ffi::metal_is_available()
+        && dim > 0
+        && dim <= FUSED_ADD3_LAYER_NORM_MAX_DIM
+        && matches!(
+            dtype,
+            crate::dtype::FLOAT16 | crate::dtype::BFLOAT16 | crate::dtype::FLOAT32
+        )
+        && ffi::array_shape(a) == shape
+        && ffi::array_shape(b) == shape
+        && ffi::array_dtype(a) == dtype
+        && ffi::array_dtype(b) == dtype
+        && ffi::array_dtype(weight) == dtype
+        && ffi::array_shape(weight) == [dim]
+        && norm.bias.as_ref().is_none_or(|bias| {
+            let bias = bias.as_ref().unwrap();
+            ffi::array_dtype(bias) == dtype && ffi::array_shape(bias) == [dim]
+        });
+    if !fusable {
+        let x_new = ffi::compiled_add3(a, b, x);
+        let h = norm.forward(&x_new);
+        return (x_new, h);
+    }
+    let bias_ptr = norm
+        .bias
+        .as_ref()
+        .map(|bias| bias.as_ref().unwrap() as *const MlxArray)
+        .unwrap_or(std::ptr::null());
+    let mut x_new = UniquePtr::null();
+    let mut h = UniquePtr::null();
+    // SAFETY: `bias_ptr` is null or points at `norm.bias`, which outlives the call.
+    unsafe {
+        ffi::fused_add3_layer_norm(a, b, x, weight, bias_ptr, norm.eps, &mut x_new, &mut h);
+    }
+    (x_new, h)
+}
+
 /// Named LoRA weights for runtime on-the-fly application.
 /// Used by: Phi4MM VLM (language / vision / speech request modes)
 pub struct LoRAWeights {
@@ -8995,5 +9069,59 @@ mod metal4_attention_switch_tests {
             !should_use_metal4_attention(),
             "no neural accelerator, so the Metal 4 attention route must decline"
         );
+    }
+}
+
+#[cfg(all(test, feature = "metal"))]
+mod residual_add3_layer_norm_tests {
+    use super::*;
+    use crate::dtype;
+
+    fn normal(shape: &[i32], dt: i32, seed: u64, scale: f32) -> UniquePtr<MlxArray> {
+        let key = ffi::random_key(seed);
+        let x = unsafe { ffi::random_normal(shape, dtype::FLOAT32, &*key) };
+        let scaled = ffi::multiply(&x, &ffi::full_f32(&[1], scale, dtype::FLOAT32));
+        ffi::astype(&scaled, dt)
+    }
+
+    /// The fused kernel's contract is byte identity with `compiled_add3`
+    /// followed by `LayerNorm::forward`, the pair it replaces, not closeness.
+    /// Covers f16 and bf16, with and without a bias, several rows, and a width
+    /// that is not a multiple of the 8 reads per thread (the kernel's tail
+    /// branch). A tolerance check here would let a reordered reduction pass.
+    #[test]
+    fn residual_add3_layer_norm_matches_the_unfused_pair() {
+        for (dt, dim, rows, with_bias) in [
+            (dtype::FLOAT16, 4096, 1, false),
+            (dtype::FLOAT16, 4096, 5, false),
+            (dtype::FLOAT16, 4100, 3, true),
+            (dtype::BFLOAT16, 4096, 2, true),
+            (dtype::FLOAT16, 96, 4, false),
+        ] {
+            let shape = [1, rows, dim];
+            let a = normal(&shape, dt, 1, 1.0);
+            let b = normal(&shape, dt, 2, 1.0);
+            let x = normal(&shape, dt, 3, 4.0);
+            let norm = LayerNorm::new(
+                normal(&[dim], dt, 4, 0.5),
+                with_bias.then(|| normal(&[dim], dt, 5, 0.1)),
+                1e-5,
+            );
+
+            let (x_fused, h_fused) = residual_add3_layer_norm(&a, &b, &x, &norm);
+            let x_ref = ffi::compiled_add3(&a, &b, &x);
+            let h_ref = norm.forward(&x_ref);
+
+            let same_x = ffi::array_equal(&x_fused, &x_ref, false);
+            let same_h = ffi::array_equal(&h_fused, &h_ref, false);
+            assert!(
+                ffi::item_bool(&same_x),
+                "residual differs: dtype {dt} dim {dim} rows {rows} bias {with_bias}"
+            );
+            assert!(
+                ffi::item_bool(&same_h),
+                "normalized output differs: dtype {dt} dim {dim} rows {rows} bias {with_bias}"
+            );
+        }
     }
 }
