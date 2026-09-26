@@ -247,10 +247,65 @@ fn count_attention_layers(text: &Value, num_layers: u64) -> Option<u64> {
     None
 }
 
+/// HF `Gemma3TextConfig` defaults for the fields a real `text_config` often
+/// omits (gemma-3-4b-it-4bit carries only `hidden_size`, `intermediate_size`,
+/// `num_hidden_layers`, `sliding_window`). Without these, [`attn_dims`] falls
+/// back to `head_dim = hidden_size / num_heads` with `num_heads` defaulting to
+/// 1, which overstates the per-token footprint by roughly 2.6× on the 4B
+/// (issue #1980). Applied only when the corresponding field is absent from
+/// the config; an explicit value always wins.
+const GEMMA3_DEFAULT_NUM_ATTENTION_HEADS: u64 = 8;
+const GEMMA3_DEFAULT_NUM_KEY_VALUE_HEADS: u64 = 4;
+const GEMMA3_DEFAULT_HEAD_DIM: u64 = 256;
+const GEMMA3_DEFAULT_SLIDING_WINDOW_PATTERN: u64 = 6;
+
+/// Fill in the Gemma 3 config defaults above for whichever of
+/// `num_attention_heads` / `num_key_value_heads` / `head_dim` /
+/// `sliding_window_pattern` the config omits. Returns `text` unchanged
+/// (cloned) for every other `model_type`.
+fn apply_gemma3_defaults(text: &Value, mt: &str) -> Value {
+    if mt != "gemma3" && mt != "gemma3_text" {
+        return text.clone();
+    }
+    let has_num_heads = get_u64(text, NUM_HEADS_KEYS).is_some();
+    let has_num_kv_heads = get_u64(text, &["num_key_value_heads"]).is_some();
+    let has_head_dim = get_u64(text, HEAD_DIM_KEYS).is_some();
+    let has_sliding_window_pattern = get_u64(text, &["sliding_window_pattern"]).is_some();
+
+    let mut merged = text.clone();
+    let Some(obj) = merged.as_object_mut() else {
+        return merged;
+    };
+    if !has_num_heads {
+        obj.insert(
+            "num_attention_heads".to_string(),
+            GEMMA3_DEFAULT_NUM_ATTENTION_HEADS.into(),
+        );
+    }
+    if !has_num_kv_heads {
+        obj.insert(
+            "num_key_value_heads".to_string(),
+            GEMMA3_DEFAULT_NUM_KEY_VALUE_HEADS.into(),
+        );
+    }
+    if !has_head_dim {
+        obj.insert("head_dim".to_string(), GEMMA3_DEFAULT_HEAD_DIM.into());
+    }
+    if !has_sliding_window_pattern {
+        obj.insert(
+            "sliding_window_pattern".to_string(),
+            GEMMA3_DEFAULT_SLIDING_WINDOW_PATTERN.into(),
+        );
+    }
+    merged
+}
+
 /// Classify a model's config into KV layer groups and an architecture kind.
 fn classify(text: &Value, model_type: &str) -> Option<(Vec<KvGroup>, KvArchKind)> {
     let num_layers = get_u64(text, LAYER_COUNT_KEYS)?;
     let mt = model_type.to_ascii_lowercase();
+    let owned_text = apply_gemma3_defaults(text, &mt);
+    let text = &owned_text;
 
     // 1. Pure SSM — no context-proportional KV cache (needs only the layer count).
     if mt == "mamba" || mt == "mamba2" || mt == "falcon_mamba" {
@@ -596,6 +651,48 @@ mod tests {
         assert_eq!(e.total_bytes, expected);
         // Only the 2 global layers grow per token at steady state.
         assert_eq!(e.marginal_bytes_per_token, global * elems * FP16);
+    }
+
+    #[test]
+    fn gemma3_missing_head_fields_use_hf_defaults() {
+        // gemma-3-4b-it-4bit's real text_config shape (#1980): no
+        // num_attention_heads / num_key_value_heads / head_dim /
+        // sliding_window_pattern at all. Without the Gemma 3 defaults,
+        // attn_dims falls back to num_heads=1, head_dim=hidden_size/1=2560,
+        // which overstates the per-token footprint ~2.6x (348 KB vs the real
+        // ~139 KB measured on the checkpoint).
+        let cfg = json!({
+            "model_type": "gemma3_text",
+            "hidden_size": 2560,
+            "intermediate_size": 10240,
+            "num_hidden_layers": 34,
+            "sliding_window": 1024,
+        });
+        let e = estimate_kv_arch_unwindowed_from_config(&cfg, 8192, false, 1).expect("estimate");
+        // HF Gemma3TextConfig defaults: num_attention_heads=8,
+        // num_key_value_heads=4, head_dim=256. Snapshot sizing strips the
+        // sliding window (#1978), so every one of the 34 layers contributes
+        // its per-token rate: 34 x 2 x 4 x 256 x 2 bytes/token.
+        assert_eq!(e.marginal_bytes_per_token, 34 * 2 * 4 * 256 * FP16);
+    }
+
+    #[test]
+    fn gemma3_explicit_head_fields_win_over_defaults() {
+        // An explicit config value must never be overridden by the Gemma 3
+        // default, even when other head fields are absent.
+        let cfg = json!({
+            "model_type": "gemma3_text",
+            "hidden_size": 2560,
+            "num_hidden_layers": 34,
+            "num_attention_heads": 16,
+            "sliding_window": 1024,
+        });
+        let e = estimate_kv_arch_unwindowed_from_config(&cfg, 8192, false, 1).expect("estimate");
+        // num_attention_heads=16 is explicit and is kept; num_key_value_heads
+        // is still absent so it takes the Gemma 3 default (4), independently
+        // of num_attention_heads, and head_dim falls back to the Gemma 3
+        // default (256) since it is also absent.
+        assert_eq!(e.marginal_bytes_per_token, 34 * 2 * 4 * 256 * FP16);
     }
 
     #[test]
