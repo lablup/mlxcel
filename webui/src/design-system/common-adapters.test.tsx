@@ -374,6 +374,8 @@ describe('useOverflowRegion', () => {
     render(<Harness table={false} />);
     expect(observed).toEqual([box()]);
     await act(async () => root.render(<Harness table />));
+    // The overflow check waits for the next frame after the content change.
+    await act(async () => { await new Promise<void>((resolve) => requestAnimationFrame(() => resolve())); });
     const table = host.querySelector('table');
     expect(table).not.toBeNull();
     expect(observed).toContain(table);

@@ -164,7 +164,13 @@ export function useOverflowRegion(name: OverflowRegionName | undefined): (region
     let table = region.querySelector('table');
     if (table) observer.observe(table);
     // Content, a table among it, can mount, unmount or be replaced without the box resizing:
-    // follow the current table and check again.
+    // follow the current table and check again. The check reads layout, so it waits for the next
+    // frame and runs once for every commit in it instead of forcing layout after each one.
+    let frame: number | null = null;
+    const settle = (): void => {
+      frame = null;
+      update();
+    };
     const mutations =
       typeof MutationObserver === 'undefined'
         ? null
@@ -175,12 +181,14 @@ export function useOverflowRegion(name: OverflowRegionName | undefined): (region
               if (next) observer.observe(next);
               table = next;
             }
-            update();
+            if (typeof requestAnimationFrame === 'undefined') update();
+            else if (frame === null) frame = requestAnimationFrame(settle);
           });
     mutations?.observe(region, { childList: true, subtree: true });
     disconnect.current = () => {
       observer.disconnect();
       mutations?.disconnect();
+      if (frame !== null) cancelAnimationFrame(frame);
       removeBlur();
     };
   }, [label, labelledBy]);
