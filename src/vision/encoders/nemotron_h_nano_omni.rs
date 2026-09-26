@@ -883,4 +883,4 @@ impl NemotronHNanoOmniVisionModel {
 
 #[cfg(test)]
 #[path = "nemotron_h_nano_omni_tests.rs"]
-mod tests;
+pub(crate) mod tests;

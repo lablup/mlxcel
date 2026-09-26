@@ -1968,9 +1968,47 @@ impl NemotronHModel {
     ///
     /// Used by: Nemotron H Nano Omni VLM
     pub fn forward_with_inputs_embeds(&self, inputs_embeds: &MlxArray) -> UniquePtr<MlxArray> {
-        self.sequence_state.with_sequence_state(None, |internal| {
-            self.forward_layer_stack(mlxcel_core::copy(inputs_embeds), internal)
-        })
+        self.forward_with_inputs_embeds_and_sequence_id(inputs_embeds, None)
+    }
+
+    /// [`Self::forward_with_inputs_embeds`] on the state slot of `seq_id`
+    /// (`None` is the single-sequence fallback slot). The server prefills a
+    /// multimodal request through this so its recurrent and KV state land in
+    /// the request's own slot, not the one every sequence shares.
+    ///
+    /// Used by: Nemotron H Nano Omni VLM
+    pub fn forward_with_inputs_embeds_and_sequence_id(
+        &self,
+        inputs_embeds: &MlxArray,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+    ) -> UniquePtr<MlxArray> {
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || NemotronHModel::make_caches(self),
+            |internal| self.forward_layer_stack(mlxcel_core::copy(inputs_embeds), internal),
+        )
+    }
+
+    /// Logits `[B, 1, vocab]` at `last_pos` for an embeddings prefill on the
+    /// state slot of `seq_id`. Slicing before the LM head keeps an
+    /// image-heavy prompt from materializing full-vocab logits per position.
+    ///
+    /// Used by: Nemotron H Nano Omni VLM
+    pub fn last_logits_with_inputs_embeds_and_sequence_id(
+        &self,
+        inputs_embeds: &MlxArray,
+        seq_id: Option<mlxcel_core::cache::SequenceId>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || NemotronHModel::make_caches(self),
+            |internal| {
+                let h = self.hidden_layer_stack(mlxcel_core::copy(inputs_embeds), internal);
+                let row = mlxcel_core::generate::logits_at_position(&h, last_pos);
+                self.lm_head.forward(&row)
+            },
+        )
     }
 
     fn forward_layer_stack(

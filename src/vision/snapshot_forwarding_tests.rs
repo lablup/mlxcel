@@ -32,12 +32,7 @@ const SNAPSHOT_BACKBONES: &[&str] = &[
 ];
 
 /// Wrappers allowed to skip the forward, each with the reason.
-const EXEMPT: &[(&str, &str)] = &[(
-    "nemotron_h_nano_omni_vl.rs",
-    "no per-sequence state plumbing (no sequence_state_layout / seq_id forwards, \
-     supports_batching == false); forwarding snapshots without it would snapshot \
-     the wrong slot",
-)];
+const EXEMPT: &[(&str, &str)] = &[];
 
 /// `include_str!` needs literal paths, so this list is maintained by hand. It
 /// catches a listed wrapper losing its forwards; a NEW wrapper around one of

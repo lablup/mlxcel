@@ -34,7 +34,7 @@ const INTERMEDIATE_SIZE: usize = 64;
 const MAX_RES: usize = 64;
 const IMAGE_SIZE: usize = 32;
 
-fn small_config() -> NemotronHNanoOmniVisionConfig {
+pub(crate) fn small_config() -> NemotronHNanoOmniVisionConfig {
     NemotronHNanoOmniVisionConfig {
         args: None,
         hidden_size: EMBED_DIM,
@@ -79,7 +79,10 @@ fn zeros_1d(n: usize) -> mlxcel_core::UniquePtr<mlxcel_core::MlxArray> {
     mlxcel_core::zeros(&[n as i32], mlxcel_core::dtype::FLOAT32)
 }
 
-fn build_synthetic_weights(prefix: &str, config: &NemotronHNanoOmniVisionConfig) -> WeightMap {
+pub(crate) fn build_synthetic_weights(
+    prefix: &str,
+    config: &NemotronHNanoOmniVisionConfig,
+) -> WeightMap {
     let mut weights = WeightMap::new();
     let num_rows = config.cpe_max_size() / config.patch_size;
     let num_cols = num_rows;
