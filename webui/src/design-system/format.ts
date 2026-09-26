@@ -4,11 +4,23 @@ import { t, type Locale } from '../i18n/catalog';
 const LOCALE_TAGS: Record<Locale, string> = { en: 'en-US', ko: 'ko-KR' };
 export const localeTag = (locale: Locale): string => LOCALE_TAGS[locale];
 
-/** The cached value for `key`, created on first use. Intl formatters are costly to build and pages format on every poll. */
+/** The most keys one `cached` map holds; inserting past it evicts the oldest key first. */
+export const CACHE_LIMIT = 32;
+
+/**
+ * The cached value for `key`, created on first use. Intl formatters are costly to build and pages
+ * format on every poll. Each map is bounded by CACHE_LIMIT, so a caller keyed by server data cannot
+ * grow it without end.
+ */
 export function cached<K, T>(cache: Map<K, T>, key: K, create: () => T): T {
   let value = cache.get(key);
   if (value === undefined) {
     value = create();
+    if (cache.size >= CACHE_LIMIT) {
+      // A Map iterates in insertion order, so the first key is the oldest.
+      const oldest = cache.keys().next();
+      if (!oldest.done) cache.delete(oldest.value);
+    }
     cache.set(key, value);
   }
   return value;

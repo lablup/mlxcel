@@ -3,7 +3,7 @@ import React, { act, createRef } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { createPortal } from 'react-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { Button, IconButton, StatusBadge, ProgressBar, EmptyState, Tabs, DataTable, ROW_PRIMARY_CLASS, type ButtonProps, type DataTableAdapterProps } from './common-adapters';
+import { Button, IconButton, StatusBadge, ProgressBar, EmptyState, Tabs, DataTable, ROW_PRIMARY_CLASS, useOverflowRegion, type ButtonProps, type DataTableAdapterProps } from './common-adapters';
 import { Select } from './common-select';
 import { NativeModalContext } from './modal-context';
 
@@ -335,5 +335,62 @@ describe('DataTable overflow region', () => {
     render(<DataTable<Row> columns={columns} rows={[]} getRowKey={(row) => row.id} ariaLabel="Models" />);
     expect(box().hasAttribute('role')).toBe(false);
     expect(box().hasAttribute('tabindex')).toBe(false);
+  });
+});
+
+// #1976: the raw hook, for a region whose table is not there when the ref attaches or is swapped,
+// and for a focused box that stops overflowing.
+describe('useOverflowRegion', () => {
+  const overflow = (scroll: number, client: number): void => {
+    vi.spyOn(HTMLElement.prototype, 'scrollWidth', 'get').mockReturnValue(scroll);
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(client);
+  };
+  let observed: Element[];
+  let resized: (() => void) | undefined;
+  beforeEach(() => {
+    observed = [];
+    resized = undefined;
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(callback: ResizeObserverCallback) {
+        resized = () => callback([], this as unknown as ResizeObserver);
+      }
+      observe(element: Element): void { observed.push(element); }
+      unobserve(element: Element): void { observed = observed.filter((item) => item !== element); }
+      disconnect(): void { observed = []; }
+    });
+  });
+  function Harness({ table }: { table: boolean }): React.JSX.Element {
+    const ref = useOverflowRegion({ label: 'X' });
+    return <div ref={ref} data-testid="overflow-box">{table ? <table><tbody><tr><td>row</td></tr></tbody></table> : <p>none</p>}</div>;
+  }
+  const box = (): HTMLElement => {
+    const element = host.querySelector<HTMLElement>('[data-testid="overflow-box"]');
+    if (!element) throw new Error('Missing overflow box');
+    return element;
+  };
+
+  it('observes a table that mounts after the ref attaches', async () => {
+    overflow(600, 200);
+    render(<Harness table={false} />);
+    expect(observed).toEqual([box()]);
+    await act(async () => root.render(<Harness table />));
+    const table = host.querySelector('table');
+    expect(table).not.toBeNull();
+    expect(observed).toContain(table);
+    expect(box().getAttribute('role')).toBe('region');
+  });
+
+  it('keeps the tab stop of a focused box that stops overflowing until it loses focus', () => {
+    overflow(600, 200);
+    render(<Harness table />);
+    act(() => box().focus());
+    overflow(200, 200);
+    act(() => resized?.());
+    expect(box().tabIndex).toBe(0);
+    expect(box().getAttribute('role')).toBe('region');
+    expect(box().getAttribute('aria-label')).toBe('X');
+    act(() => { box().dispatchEvent(new FocusEvent('blur')); });
+    expect(box().hasAttribute('tabindex')).toBe(false);
+    expect(box().hasAttribute('role')).toBe(false);
   });
 });

@@ -1,7 +1,7 @@
 // Copyright 2026 Lablup Inc. Licensed under Apache-2.0.
 // Locale-aware clock and relative times for the conversation list and messages.
 import { useEffect, useState } from 'react';
-import { localeTag } from '../../design-system/format';
+import { cached, localeTag } from '../../design-system/format';
 import type { Locale } from '../../i18n/catalog';
 
 /** The current time, refreshed every `intervalMs` while the caller is mounted. */
@@ -23,17 +23,10 @@ const UNITS: ReadonlyArray<readonly [Intl.RelativeTimeFormatUnit, number]> = [
 // every 50 ms stream flush.
 const relativeFormats = new Map<Locale, Intl.RelativeTimeFormat>();
 const clockFormats = new Map<Locale, Intl.DateTimeFormat>();
-function cached<T>(cache: Map<Locale, T>, locale: Locale, create: (tag: string) => T): T {
-  const existing = cache.get(locale);
-  if (existing !== undefined) return existing;
-  const created = create(localeTag(locale));
-  cache.set(locale, created);
-  return created;
-}
 
 /** "5 minutes ago" / "5분 전"; anything under a minute reads as now. */
 export function formatRelative(then: number, now: number, locale: Locale): string {
-  const format = cached(relativeFormats, locale, (tag) => new Intl.RelativeTimeFormat(tag, { numeric: 'auto' }));
+  const format = cached(relativeFormats, locale, () => new Intl.RelativeTimeFormat(localeTag(locale), { numeric: 'auto' }));
   const delta = then - now;
   for (const [unit, size] of UNITS) if (Math.abs(delta) >= size) return format.format(Math.round(delta / size), unit);
   return format.format(0, 'second');
@@ -49,7 +42,7 @@ function representable(epochMs: number): boolean {
 /** Hour and minute in the active locale; empty for a time a Date cannot hold. */
 export function formatClock(epochMs: number, locale: Locale): string {
   if (!representable(epochMs)) return '';
-  return cached(clockFormats, locale, (tag) => new Intl.DateTimeFormat(tag, { hour: 'numeric', minute: '2-digit' })).format(epochMs);
+  return cached(clockFormats, locale, () => new Intl.DateTimeFormat(localeTag(locale), { hour: 'numeric', minute: '2-digit' })).format(epochMs);
 }
 
 /** The machine-readable value for a `<time>` element; undefined for a time a Date cannot hold. */
