@@ -244,7 +244,8 @@ impl BatchScheduler {
                     Some(seq.seq_id),
                     block_size,
                 )
-                .with_prefill_start_offset(prefill_start_offset);
+                .with_prefill_start_offset(prefill_start_offset)
+                .with_prefill_chunk_size(self.prefill_chunk_size);
                 Ok(
                     crate::server::batch::speculative_slice::begin_slice_session(
                         adapter,
@@ -265,7 +266,8 @@ impl BatchScheduler {
                     Some(seq.seq_id),
                     block_size,
                 )
-                .with_prefill_start_offset(prefill_start_offset);
+                .with_prefill_start_offset(prefill_start_offset)
+                .with_prefill_chunk_size(self.prefill_chunk_size);
                 Ok(
                     crate::server::batch::speculative_slice::begin_slice_session(
                         adapter,
@@ -286,7 +288,8 @@ impl BatchScheduler {
                     Some(seq.seq_id),
                     block_size,
                 )
-                .with_prefill_start_offset(prefill_start_offset);
+                .with_prefill_start_offset(prefill_start_offset)
+                .with_prefill_chunk_size(self.prefill_chunk_size);
                 Ok(
                     crate::server::batch::speculative_slice::begin_slice_session(
                         adapter,
@@ -504,7 +507,8 @@ impl BatchScheduler {
                     Some(job.seq.seq_id),
                     job.block_size,
                 )
-                .with_prefill_start_offset(job.prefill_start_offset);
+                .with_prefill_start_offset(job.prefill_start_offset)
+                .with_prefill_chunk_size(self.prefill_chunk_size);
                 crate::server::batch::speculative_slice::step_slice_session(
                     adapter,
                     &mut job,
@@ -518,7 +522,8 @@ impl BatchScheduler {
                     Some(job.seq.seq_id),
                     job.block_size,
                 )
-                .with_prefill_start_offset(job.prefill_start_offset);
+                .with_prefill_start_offset(job.prefill_start_offset)
+                .with_prefill_chunk_size(self.prefill_chunk_size);
                 crate::server::batch::speculative_slice::step_slice_session(
                     adapter,
                     &mut job,
@@ -532,7 +537,8 @@ impl BatchScheduler {
                     Some(job.seq.seq_id),
                     job.block_size,
                 )
-                .with_prefill_start_offset(job.prefill_start_offset);
+                .with_prefill_start_offset(job.prefill_start_offset)
+                .with_prefill_chunk_size(self.prefill_chunk_size);
                 crate::server::batch::speculative_slice::step_slice_session(
                     adapter,
                     &mut job,

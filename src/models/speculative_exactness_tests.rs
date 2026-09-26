@@ -276,3 +276,24 @@ fn a_decline_records_its_reason_and_a_pass_does_not() {
     assert!(mtp_exactness_gate(key(9106), || BlockChainExactness::Equal));
     assert_eq!(super::decline_reason(9106), None);
 }
+
+#[test]
+fn localized_divergence_is_preserved_in_decline_reason() {
+    let k = key(9199);
+    let decision = mtp_exactness_gate(k, || BlockChainExactness::Localized {
+        verdict: Box::new(BlockChainExactness::Diverges {
+            position: 0,
+            differing_bytes: 4,
+            total_bytes: 16,
+        }),
+        location: "first divergence: layer 5 (full_attention) attention output at position 0"
+            .to_owned(),
+    });
+    if !decision {
+        assert!(
+            super::decline_reason(9199)
+                .unwrap()
+                .contains("layer 5 (full_attention) attention output")
+        );
+    }
+}

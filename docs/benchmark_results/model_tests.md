@@ -6,6 +6,10 @@ For a public, data-driven Apple Silicon summary that combines M1 Ultra,
 M5 Max, and mlx-lm / mlx-vlm baselines, see
 [Benchmark Report - 2026-05-19](benchmark-report.md).
 
+## Focused correctness measurements
+
+- [Gemma 4 31B MTP exactness, 2026-09-26](gemma4-31b-mtp-exactness-2026-09-26.md): QAT and non-QAT localization, long-context teacher-forced traces, greedy parity and corrected throughput on M5 Max; test-fast profile, CUDA unavailable.
+
 ## Per-Hardware Results
 
 | Hardware | File | Status | Last Updated |

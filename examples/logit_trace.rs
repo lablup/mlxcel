@@ -90,6 +90,9 @@
 // width. That is the shape a real verify runs at, long context and narrow
 // forward, which a bare small chunk does not reproduce.
 
+#[path = "logit_trace/gemma4.rs"]
+mod gemma4;
+
 use anyhow::{Context, Result};
 use mlxcel::LanguageModel;
 use mlxcel_core::{
@@ -133,6 +136,19 @@ fn main() -> Result<()> {
     // Context to establish before the traced forward, so forward width and
     // context length can be varied independently.
     let prefill: usize = args.get(6).and_then(|s| s.parse().ok()).unwrap_or(0);
+    // Start after a fixed context instead of spending early chunks growing it.
+    let start_token: usize = std::env::var("MLXCEL_TRACE_START_TOKEN")
+        .ok()
+        .map(|value| value.parse())
+        .transpose()
+        .context("MLXCEL_TRACE_START_TOKEN must be a non-negative integer")?
+        .unwrap_or(0);
+    let gemma4_mode = gemma4::Mode::from_env()?;
+    let contiguous = std::env::var("MLXCEL_TRACE_CONTIGUOUS").as_deref() == Ok("1");
+    anyhow::ensure!(
+        !contiguous || (gemma4_mode.is_some() && prefill > 0 && start_token > 0),
+        "contiguous trace requires a Gemma 4 mode and nonzero prefill/start token"
+    );
 
     // The b10621 RoPE override is process-wide (see
     // `mlxcel::models::rope_overrides`), so comparing two rotations means two
@@ -194,7 +210,11 @@ fn main() -> Result<()> {
         .iter()
         .map(|&t| t as i32)
         .collect();
-    let n_chunks = ((ids.len() - 1) / chunk_tokens).min(max_chunks);
+    anyhow::ensure!(
+        chunk_tokens > 0 && start_token < ids.len(),
+        "invalid chunk width or trace start"
+    );
+    let n_chunks = ((ids.len() - start_token - 1) / chunk_tokens).min(max_chunks);
     anyhow::ensure!(n_chunks > 0, "text too short: {} tokens", ids.len());
 
     // Same BOS anchoring as `examples/perplexity`, and for the same reason
@@ -216,8 +236,14 @@ fn main() -> Result<()> {
     );
     println!("# columns\tchunk\tpos\ttarget\tnll\ttop_ids\ttop_logits");
 
+    println!("# start_token\t{start_token}");
+    if let Ok(mode) = std::env::var("MLXCEL_TRACE_GEMMA4") {
+        println!("# gemma4_mode\t{mode}");
+    }
+    println!("# contiguous\t{contiguous}");
     for c in 0..n_chunks {
-        let seg = &ids[c * chunk_tokens..(c + 1) * chunk_tokens + 1];
+        let start = start_token + c * chunk_tokens;
+        let seg = &ids[start..start + chunk_tokens + 1];
         let l = seg.len() as i32;
 
         let (input_ids, target_offset) = if prefill > 0 {
@@ -237,24 +263,33 @@ fn main() -> Result<()> {
         // Fresh sequence per chunk. Models that key KV state on a model-owned
         // slot ignore the external caches, so without this reset every chunk
         // after the first silently continues the previous one (#686).
-        model.reset_runtime_state();
+        if !contiguous || c == 0 {
+            model.reset_runtime_state();
+        }
         let mut caches = model.make_caches();
         // Optional context pass. Its rows are discarded; it exists so the
         // traced forward runs at the chunk's width against a realistic
         // context rather than against nothing.
-        if prefill > 0 {
-            let start = c * chunk_tokens;
+        if prefill > 0 && (!contiguous || c == 0) {
             let ctx_from = start.saturating_sub(prefill);
             if ctx_from < start {
                 let mut ctx: Vec<i32> = bos_prefix.clone();
                 ctx.extend_from_slice(&ids[ctx_from..start]);
                 let ctx_len = ctx.len() as i32;
-                let ctx_arr = from_slice_i32(&ctx, &[1, ctx_len]);
-                let warm = model.forward(&ctx_arr, &mut caches, None);
-                eval(&warm);
+                if let Some(mode) = gemma4_mode {
+                    mode.prefill(&model, &ctx, chunk_tokens)?;
+                } else {
+                    let ctx_arr = from_slice_i32(&ctx, &[1, ctx_len]);
+                    let warm = model.forward(&ctx_arr, &mut caches, None);
+                    eval(&warm);
+                }
             }
         }
-        let logits = model.forward(&input, &mut caches, None);
+        let logits = if let Some(mode) = gemma4_mode {
+            mode.forward(&model, &input)?
+        } else {
+            model.forward(&input, &mut caches, None)
+        };
         let shape = mlxcel_core::array_shape(&logits);
         anyhow::ensure!(
             shape.len() == 3 && shape[1] == input_len,

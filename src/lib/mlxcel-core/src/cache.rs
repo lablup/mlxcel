@@ -4317,6 +4317,9 @@ pub struct RotatingKVCache {
     /// sliding window is full.
     pub buffer_size: i32,
     pub offset: i32,
+    /// Original (logical offset, next ring write slot) before buffering.
+    /// Used by: Gemma 4 31B verify to preserve classic attention reduction order.
+    speculative_ring_origin: Option<(i32, i32)>,
     /// Absolute logical position of `keys[..., 0, :]` when `buffer_size > 0`.
     start_position: i32,
     /// Current write position in the buffer (separate from offset to handle trim correctly)
@@ -4364,6 +4367,7 @@ pub struct RotatingKVCacheSnapshotState {
     pub max_size: i32,
     pub buffer_size: i32,
     pub offset: i32,
+    pub speculative_ring_origin: Option<(i32, i32)>,
     pub start_position: i32,
     pub idx: i32,
     pub step: i32,
@@ -4391,8 +4395,9 @@ impl RotatingKVCacheSnapshotState {
     ///   the physical layout, so `offset <= max_size` is required as well.
     ///
     /// Buffered speculative mode (`buffer_size > 0`) keeps its own compaction
-    /// invariants and is excluded outright; snapshots are captured outside
-    /// MTP, so this costs nothing in practice.
+    /// invariants and is excluded outright. Exact snapshots may retain that
+    /// state, but partial restore cannot treat its chronological buffer as an
+    /// unwrapped physical ring.
     pub fn is_unwrapped(&self) -> bool {
         self.buffer_size == 0 && self.idx == self.offset && self.offset <= self.max_size
     }
@@ -4455,6 +4460,7 @@ impl RotatingKVCache {
             max_size,
             buffer_size: 0,
             offset: 0,
+            speculative_ring_origin: None,
             start_position: 0,
             idx: 0,
             step: 256,
@@ -4568,6 +4574,9 @@ impl RotatingKVCache {
     /// Used by: Gemma 4 MTP target caches near sliding-window rollover.
     pub fn enable_speculative_buffer(&mut self, buffer_size: i32) -> Result<(), String> {
         let buffer_size = buffer_size.max(0);
+        if buffer_size > 0 && self.max_size <= 0 {
+            return Err("RotatingKVCache speculative buffering requires a positive window".into());
+        }
         if buffer_size <= self.buffer_size && self.buffer_size > 0 {
             return Ok(());
         }
@@ -4577,6 +4586,19 @@ impl RotatingKVCache {
                  got {:?}",
                 self.mode
             ));
+        }
+
+        if self.buffer_size == 0 && buffer_size > 0 {
+            let oversized = self
+                .keys
+                .as_ref()
+                .is_some_and(|keys| ffi::array_shape(keys)[2] > self.max_size);
+            let cursor = if oversized {
+                0
+            } else {
+                self.idx.rem_euclid(self.max_size)
+            };
+            self.speculative_ring_origin = Some((self.offset, cursor));
         }
 
         if self.keys.is_none() {
@@ -5475,6 +5497,17 @@ impl RotatingKVCache {
         }
     }
 
+    /// Next write slot of the ordinary unbuffered M=1 reference cache.
+    /// Logical offset makes append, tail rollback and buffer compaction share
+    /// one derivation; the anchor survives scheduler slices and snapshots.
+    /// Used by: Gemma 4 31B MTP attention.
+    pub fn speculative_ring_cursor(&self) -> Option<i32> {
+        self.speculative_ring_origin.map(|(offset, cursor)| {
+            (i64::from(cursor) + i64::from(self.offset) - i64::from(offset))
+                .rem_euclid(i64::from(self.max_size)) as i32
+        })
+    }
+
     /// Internal write position in the ring buffer.
     ///
     /// Mirrors Python `mlx_lm.models.cache.RotatingKVCache._idx`. Used by the
@@ -5495,6 +5528,7 @@ impl RotatingKVCache {
             max_size: self.max_size,
             buffer_size: self.buffer_size,
             offset: self.offset,
+            speculative_ring_origin: self.speculative_ring_origin,
             start_position: self.start_position,
             idx: self.idx,
             step: self.step,
@@ -5546,6 +5580,16 @@ impl RotatingKVCache {
                 state.offset, state.start_position, state.idx
             ));
         }
+        if let Some((origin, cursor)) = state.speculative_ring_origin
+            && (origin < 0 || origin > state.offset || cursor < 0 || cursor >= state.max_size)
+        {
+            return Err("RotatingKVCache snapshot has an invalid speculative ring origin".into());
+        }
+        if state.buffer_size > 0
+            && state.start_position.checked_add(state.idx) != Some(state.offset)
+        {
+            return Err("RotatingKVCache buffered snapshot has inconsistent logical bounds".into());
+        }
         if state.step <= 0 {
             return Err(format!(
                 "RotatingKVCache::restore_fp16_snapshot_state requires positive step; got {}",
@@ -5555,11 +5599,22 @@ impl RotatingKVCache {
 
         if let Some(keys_ref) = keys.as_ref().and_then(|a| a.as_ref()) {
             let k_shape = ffi::array_shape(keys_ref);
-            if k_shape.len() < 3 {
+            if k_shape.len() != 4 {
                 return Err(format!(
                     "RotatingKVCache::restore_fp16_snapshot_state expected rank-4 keys, got shape {:?}",
                     k_shape
                 ));
+            }
+            let values_ref = values
+                .as_ref()
+                .and_then(|array| array.as_ref())
+                .ok_or_else(|| "RotatingKVCache snapshot has a null value buffer".to_string())?;
+            let v_shape = ffi::array_shape(values_ref);
+            if v_shape.len() != 4
+                || k_shape[..3] != v_shape[..3]
+                || ffi::array_dtype(keys_ref) != ffi::array_dtype(values_ref)
+            {
+                return Err("RotatingKVCache snapshot K/V shapes or dtypes disagree".into());
             }
             let physical_len = k_shape[2];
             // The write position has to land inside the buffer it is being
@@ -5581,10 +5636,14 @@ impl RotatingKVCache {
             }
         }
 
+        if state.buffer_size > 0 && state.speculative_ring_origin.is_none() {
+            return Err("RotatingKVCache buffered snapshot lacks its reference ring origin".into());
+        }
         self.keys = keys;
         self.values = values;
         self.max_size = state.max_size;
         self.buffer_size = state.buffer_size;
+        self.speculative_ring_origin = state.speculative_ring_origin;
         self.offset = state.offset;
         self.start_position = state.start_position;
         self.idx = state.idx;
@@ -5641,6 +5700,16 @@ impl RotatingKVCache {
         }
         self.offset -= n;
         self.idx -= n;
+        // Truncating an unwrapped prompt snapshot can move before the
+        // original anchor; re-anchor without changing the derived cursor.
+        if self
+            .speculative_ring_origin
+            .is_some_and(|(origin, _)| origin > self.offset)
+        {
+            self.speculative_ring_origin = self
+                .speculative_ring_cursor()
+                .map(|cursor| (self.offset, cursor));
+        }
         n
     }
 
@@ -7421,6 +7490,7 @@ mod rotating_truncation_tests {
         RotatingKVCacheSnapshotState {
             max_size,
             buffer_size: 0,
+            speculative_ring_origin: None,
             offset,
             start_position: 0,
             idx,
@@ -10209,3 +10279,7 @@ mod tests {
         metadata.assert_consistent().unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "cache/rotating_ring_tests.rs"]
+mod rotating_ring_tests;
