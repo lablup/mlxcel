@@ -43,6 +43,7 @@ use crate::vision::merge::InputEmbeddings;
 use crate::vision::processors::nemotron_h_nano_omni::{
     NemotronHNanoOmniImageInput, NemotronHNanoOmniImageProcessor,
 };
+use mlxcel_core::cache::SequenceId;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -455,10 +456,87 @@ impl LanguageModel for NemotronHNanoOmniVlModel {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        if let Some(embeds) = input_embeddings {
-            self.text_model.forward_with_inputs_embeds(embeds)
-        } else {
-            self.text_model.forward(input_ids, caches, mask)
+        self.forward_with_embeddings_and_sequence_id(
+            input_ids,
+            input_embeddings,
+            None,
+            caches,
+            mask,
+        )
+    }
+
+    fn forward_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.text_model
+            .forward_with_sequence_id(input_ids, seq_id, caches, mask)
+    }
+
+    // The embeddings entry points are implemented here rather than delegated:
+    // the text model's trait versions ignore `input_embeddings` and run on the
+    // fallback slot, which would drop the image/audio rows and leave the
+    // prefill state where this sequence's decode never reads it.
+    fn forward_with_embeddings_and_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        match input_embeddings {
+            Some(embeds) => self
+                .text_model
+                .forward_with_inputs_embeds_and_sequence_id(embeds, seq_id),
+            None => self
+                .text_model
+                .forward_with_sequence_id(input_ids, seq_id, caches, mask),
+        }
+    }
+
+    fn forward_last_logits(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.text_model
+            .forward_last_logits(input_ids, caches, mask, last_pos)
+    }
+
+    fn forward_last_logits_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        self.text_model
+            .forward_last_logits_with_sequence_id(input_ids, seq_id, caches, mask, last_pos)
+    }
+
+    fn forward_last_logits_with_embeddings_and_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        match input_embeddings {
+            Some(embeds) => self
+                .text_model
+                .last_logits_with_inputs_embeds_and_sequence_id(embeds, seq_id, last_pos),
+            None => self
+                .text_model
+                .forward_last_logits_with_sequence_id(input_ids, seq_id, caches, mask, last_pos),
         }
     }
 
@@ -485,18 +563,49 @@ impl LanguageModel for NemotronHNanoOmniVlModel {
         }
     }
 
+    fn sequence_state_layout(&self) -> mlxcel_core::cache::SequenceStateLayout {
+        self.text_model.sequence_state_layout()
+    }
+
     fn supports_padded_prefill(&self) -> bool {
-        // Nemotron-H is a hybrid Mamba+Attention model: padding tokens
-        // corrupt Mamba recurrent state. The text path declares this
-        // explicitly; the VLM wrapper inherits the same constraint.
-        false
+        // Hybrid Mamba+Attention: padding tokens corrupt the recurrent state.
+        self.text_model.supports_padded_prefill()
     }
 
     fn supports_batching(&self) -> bool {
-        // Internal cache state of the text backbone is not per-sequence
-        // isolated, so multiple sequences cannot share one model
-        // instance.
-        false
+        self.text_model.supports_batching()
+    }
+
+    fn prepare_sequence_state(&self, seq_id: SequenceId) {
+        self.text_model.prepare_sequence_state(seq_id);
+    }
+
+    fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
+        self.text_model.release_sequence_state_by_id(seq_id);
+    }
+
+    fn reset_runtime_state(&self) {
+        self.text_model.reset_runtime_state();
+    }
+
+    fn supports_snapshot_reuse(&self) -> bool {
+        self.text_model.supports_snapshot_reuse()
+    }
+
+    fn snapshot_sequence_state(
+        &self,
+        seq_id: SequenceId,
+        token_len: usize,
+    ) -> Option<mlxcel_core::generate::ModelStateSnapshot> {
+        self.text_model.snapshot_sequence_state(seq_id, token_len)
+    }
+
+    fn restore_sequence_state(
+        &self,
+        seq_id: SequenceId,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Result<(), String> {
+        self.text_model.restore_sequence_state(seq_id, snapshot)
     }
 
     fn trim_internal_caches(&self, excess: i32) {
