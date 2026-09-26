@@ -281,9 +281,10 @@ fn qmv_wide_switch_set(enabled: bool) {
 /// turning it off is the one lever that buys the contract back without
 /// giving up speculative decoding (#1187).
 ///
-/// Returns `true` when the retry was exact, in which case the switch is left
-/// off for the rest of the process. It is deliberately not restored: it is a
-/// per-process kernel selection, the exact arm stays correct for every other
+/// Returns the retry's own verdict, or `None` when the retry was skipped.
+/// An exact retry leaves the switch off for the rest of the process. It is
+/// deliberately not restored: it is a per-process kernel selection, the exact
+/// arm stays correct for every other
 /// caller, and re-enabling it would break the very block this gate just
 /// approved. The cost is real and measured, about 17 to 20 percent on the
 /// verify forward, so the log line says what was traded for what.
@@ -291,7 +292,7 @@ fn retry_without_qmv_wide<F>(
     key: ProbeKey,
     probe: &mut F,
     first: &BlockChainExactness,
-) -> Option<bool>
+) -> Option<BlockChainExactness>
 where
     F: FnMut() -> BlockChainExactness,
 {
@@ -312,10 +313,30 @@ where
              and decline MTP instead.",
             first.reason()
         );
-        Some(true)
     } else {
         qmv_wide_switch_set(true);
-        Some(false)
+    }
+    Some(retry)
+}
+
+/// Used by: declined policy snapshots and both ordinary/inexact warning logs.
+/// Keep the retry's location and count separate from the initial wide verdict.
+fn failed_probe_reason(
+    verdict: &BlockChainExactness,
+    retry: Option<&BlockChainExactness>,
+    pinned: bool,
+) -> String {
+    match retry {
+        Some(retry) => format!(
+            "Initial probe: {}. Retry with qmv_wide disabled: {}.",
+            verdict.reason(),
+            retry.reason()
+        ),
+        None if pinned => format!(
+            "{}. The qmv_wide retry was skipped because MLXCEL_QMV_WIDE is pinned.",
+            verdict.reason()
+        ),
+        None => format!("{}.", verdict.reason()),
     }
 }
 
@@ -335,23 +356,12 @@ where
     } else {
         retry_without_qmv_wide(key, &mut probe, &verdict)
     };
-    let exact = verdict.is_equal() || retried == Some(true);
+    let exact = verdict.is_equal() || retried.as_ref().is_some_and(BlockChainExactness::is_equal);
     let decision = exact || allow_inexact();
-    let also_tried = match retried {
-        Some(false) => " Disabling qmv_wide did not make it exact either.",
-        None if qmv_wide_pinned_by_operator() => {
-            " The qmv_wide retry was skipped because MLXCEL_QMV_WIDE is pinned."
-        }
-        _ => "",
-    };
-    // The sentence observability surfaces show for a declined pairing
-    // (issue #1298): the same content the WARN below logs, minus the
-    // env-var instructions, which are operator-console text.
-    let decline_reason = (!decision).then(|| {
-        format!("{}.{}", verdict.reason(), also_tried)
-            .trim()
-            .to_string()
-    });
+    let failure_reason = (!exact)
+        .then(|| failed_probe_reason(&verdict, retried.as_ref(), qmv_wide_pinned_by_operator()));
+    // The policy endpoint and console must describe the same measured arms.
+    let decline_reason = (!decision).then(|| failure_reason.clone().unwrap());
 
     if verdict.is_equal() {
         tracing::info!(
@@ -364,19 +374,18 @@ where
     } else if decision {
         tracing::warn!(
             block_size = key.block_size,
-            "MTP exactness probe FAILED but MLXCEL_MTP_ALLOW_INEXACT is set: {}. \
+            "MTP exactness probe FAILED but MLXCEL_MTP_ALLOW_INEXACT is set: {} \
              Temperature-0 speculative output will NOT be byte-identical to \
              classic decode on this host.",
-            verdict.reason()
+            failure_reason.as_deref().unwrap()
         );
     } else {
         tracing::warn!(
             block_size = key.block_size,
-            "MTP declined: {}.{} Falling back to classic decode. Set \
+            "MTP declined: {} Falling back to classic decode. Set \
              MLXCEL_MTP_ALLOW_INEXACT=1 to engage anyway and forfeit the \
              temperature-0 byte-identity contract.",
-            verdict.reason(),
-            also_tried
+            failure_reason.as_deref().unwrap()
         );
     }
 

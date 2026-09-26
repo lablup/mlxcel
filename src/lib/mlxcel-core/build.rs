@@ -18,6 +18,10 @@
 use cmake::Config;
 use std::{env, path::PathBuf};
 
+// Shared backend selection for CMake and the runtime-control bridge.
+#[path = "build_support/metal_backend.rs"]
+mod metal_backend;
+
 // Single-source-of-truth resolution and verification of the pinned MLX commit.
 // Shared by path (not by dependency) with `mlxcel-mlx-pin`, which unit-tests it
 // without dragging in an MLX build; see that crate's manifest for the reason.
@@ -59,8 +63,15 @@ fn main() {
     let rocm_arch = resolve_rocm_architectures();
     println!("cargo:rustc-env=MLXCEL_ROCM_ARCHITECTURES={rocm_arch}");
 
+    // Resolve once for both CMake and the bridge. On macOS a plain Cargo
+    // build enables Metal even without the optional `metal` feature (#1988).
+    let metal_override = env::var("MLXCEL_BUILD_METAL").ok();
+    let metal_backend =
+        metal_backend::resolve_metal_backend(cfg!(target_os = "macos"), metal_override.as_deref())
+            .unwrap_or_else(|error| panic!("{error}"));
+
     // Build MLX using cmake
-    let mlx_dst = build_mlx(&mlx_commit, &cuda_arch, &rocm_arch);
+    let mlx_dst = build_mlx(&mlx_commit, &cuda_arch, &rocm_arch, metal_backend);
     // Verify what actually landed on disk before blessing it. CMake reuses an
     // already-populated _deps/mlx-src rather than re-running FetchContent, so a
     // checkout restored from a CI cache or seeded by hand can disagree with the
@@ -151,13 +162,11 @@ fn main() {
         // included by the generated cxx bridge, so suppress it for all profiles.
         .flag_if_supported("-Wno-deprecated-copy");
 
-    // The qmv_wide off-switch (issue #1187) lives in the
-    // mlx/backend/metal/quantized.cpp overlay, so its symbol exists only when
-    // the Metal backend is actually compiled. `__APPLE__` is not that
-    // condition: a macOS build without the `metal` feature sets
-    // MLX_BUILD_METAL=OFF and would link against a symbol that was never
-    // emitted. Gate on the feature that decides whether the file is built.
-    if std::env::var("CARGO_FEATURE_METAL").is_ok() {
+    // Used by: QMV exactness retry and decode command-buffer budget controls.
+    // These symbols exist precisely when CMake builds the Metal backend.
+    // Cargo's optional feature is not that condition: macOS defaults to Metal,
+    // while MLXCEL_BUILD_METAL=OFF explicitly disables it even with the feature.
+    if metal_backend {
         bridge.define("MLXCEL_BRIDGE_METAL_BACKEND", None);
     }
 
@@ -257,6 +266,7 @@ fn main() {
     println!("cargo:rerun-if-changed=src/lib.rs");
     println!("cargo:rerun-if-changed=cpp/mlx_cxx_bridge.h");
     println!("cargo:rerun-if-changed=cpp/mlx_cxx_internal.h");
+    println!("cargo:rerun-if-changed=build_support/metal_backend.rs");
     println!("cargo:rerun-if-changed=cpp/mlx_cxx_bridge.cpp");
     println!("cargo:rerun-if-changed=cpp/mlx_cxx_kernels.cpp");
     println!("cargo:rerun-if-changed=cpp/mlx_cxx_nemotron.cpp");
@@ -373,7 +383,12 @@ fn mark_mlx_cache_valid(out_dir: &std::path::Path, expected_commit: &str) {
 // Each architecture list is consumed only by its own backend's branch below,
 // and at most one of the two backends is ever enabled.
 #[allow(unused_variables)]
-fn build_mlx(expected_commit: &str, cuda_architectures: &str, rocm_architectures: &str) -> PathBuf {
+fn build_mlx(
+    expected_commit: &str,
+    cuda_architectures: &str,
+    rocm_architectures: &str,
+    metal_backend: bool,
+) -> PathBuf {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     purge_stale_mlx_cache(&out_dir, expected_commit);
 
@@ -382,25 +397,24 @@ fn build_mlx(expected_commit: &str, cuda_architectures: &str, rocm_architectures
     config.define("CMAKE_INSTALL_PREFIX", ".");
 
     // Platform features
-    // On macOS: Metal and Accelerate are always available and enabled by default.
-    // Feature flags can still override (e.g. for CPU-only testing).
+    // On macOS: Metal and Accelerate are enabled by default. Environment
+    // overrides select CPU-only builds; the resolved Metal choice is shared
+    // with the bridge above.
     // On Linux: CPU-only by default, CUDA opt-in via feature flag.
     config.define("MLX_BUILD_CUDA", "OFF");
+    config.define("MLX_BUILD_METAL", if metal_backend { "ON" } else { "OFF" });
 
     #[cfg(target_os = "macos")]
     {
-        let build_metal = cmake_bool_from_env("MLXCEL_BUILD_METAL").unwrap_or("ON");
         let build_accelerate = cmake_bool_from_env("MLXCEL_BUILD_ACCELERATE").unwrap_or("ON");
 
         // Default to Metal + Accelerate on macOS, but allow CPU-only rebuilds
         // for environments where Metal device enumeration is unavailable.
-        config.define("MLX_BUILD_METAL", build_metal);
         config.define("MLX_BUILD_ACCELERATE", build_accelerate);
     }
 
     #[cfg(not(target_os = "macos"))]
     {
-        config.define("MLX_BUILD_METAL", "OFF");
         config.define("MLX_BUILD_ACCELERATE", "OFF");
     }
 
@@ -461,10 +475,9 @@ fn build_mlx(expected_commit: &str, cuda_architectures: &str, rocm_architectures
 
 /// Refuse feature combinations that cannot produce a working binary.
 ///
-/// The ROCm overlay replaces MLX core files that the CUDA-only patches also
-/// replace, and the `metal` feature makes the bridge reference symbols that
-/// only the Metal overlay emits. Failing here names the conflict instead of
-/// leaving it to a CMake error or an undefined symbol at link time.
+/// The ROCm and CUDA overlays replace the same MLX core files. Explicit
+/// backend feature selections remain mutually exclusive, and ROCm is Linux-only.
+/// Failing here names the conflict instead of leaving it to CMake or the linker.
 fn reject_conflicting_gpu_features() {
     if env::var_os("CARGO_FEATURE_ROCM").is_none() {
         return;

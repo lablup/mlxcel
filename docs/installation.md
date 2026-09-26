@@ -97,6 +97,12 @@ cd mlxcel
 cargo build --release --features metal,accelerate
 ```
 
+On macOS, MLX also enables Metal and Accelerate for a plain `cargo build --release`; the explicit features above document the intended backend. Runtime controls such as the MTP `qmv_wide` retry follow the backend actually built, including plain builds. `MLXCEL_BUILD_METAL=OFF` disables the Metal backend and its controls even if the Cargo `metal` feature is selected.
+
+To verify the runtime controls without loading a checkpoint, run `cargo run -p mlxcel-core --profile test-fast --example metal_runtime_switch_probe`. It checks both QMV selection and the decode command-buffer override, then restores their previous values. It reports a skip when no Metal device is available.
+
+For an older plain macOS build affected by [#1988](https://github.com/lablup/mlxcel/issues/1988), start a fresh process with `MLXCEL_QMV_WIDE=0` before the existing server command. This pins the narrower Metal projection kernel at startup while keeping the exactness gate enabled. It may reduce throughput, applies only to Metal, and still requires the loaded model's probe to pass.
+
 The build outputs:
 
 ```text

@@ -17,6 +17,11 @@
 //! This crate provides direct bindings to MLX C++ API, bypassing the mlx-c wrapper
 //! for improved performance.
 
+// Compile build-policy tests in the workspace gate without invoking build.rs.
+#[cfg(test)]
+#[path = "../build_support/metal_backend.rs"]
+mod metal_backend_build_policy;
+
 #[allow(clippy::missing_safety_doc, clippy::too_many_arguments)]
 #[cxx::bridge(namespace = "mlx_cxx")]
 mod ffi {
