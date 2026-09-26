@@ -52,7 +52,7 @@ Each item was either a latent defect or an accessibility gap that the two redesi
 
 ## Remaining items
 
-- **Models file size:** `screen.tsx` is about 720 lines, above the project's 500-line module guideline. Splitting it was out of scope.
+- **Models screen cohesion:** `screen.tsx` is about 720 lines, within the 800-line threshold in `docs/code-guidelines.md`, but one component holds page state, the row-focus effect, the column renderers and the filter toolbar. Splitting it was out of scope here; #1976 addresses it.
 - **Overflow hook timing:** the hook resolves the inner table once, when its ref attaches. The Activity slot box still updates because its bounded height changes the box's own size.
 - **Focus after shrink:** focus falls to `<body>` if a focused scroll box stops overflowing.
 - **Unbounded cache helper:** the exported `cached()` has no size bound. Every current key set is small and fixed.

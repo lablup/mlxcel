@@ -2,82 +2,47 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { CatalogEntry, LoadProfile, Operation } from '../../api/types';
 import {
-  Badge,
   Button,
   DataTable,
   EmptyState,
   ErrorBanner,
-  Field,
-  IconButton,
   LoadingStatus,
   PageHeader,
-  ProgressBar,
-  ROW_PRIMARY_CLASS,
-  Select,
-  StatusBadge,
-  type DataTableColumn,
   type SortDirection,
 } from '../../design-system/primitives';
 import { t, testId, type Locale } from '../../i18n/catalog';
-import { lifecycleLabel } from '../../provider-surfaces';
 import { useWebUi, useWebUiActions } from '../../state';
 import { loadProfileFor, useLoadProfile } from '../settings/load-profiles';
+import { libraryColumns, type LibraryRow } from './columns';
 import { AddModel, ConfirmAction, type Confirmation } from './dialogs';
 import { consumeInspectorRequest, useInspectorRequest, useWideInspector } from './inspect-request';
 import { ModelInspector, type ModelAction } from './inspector';
-import { downloadBadgeState, downloadStateLabel, isolate, sourceLabel, taskLabel } from './labels';
 import { setLibraryFilter, setLibrarySort, useLibraryView } from './library-view';
 import { submitLoad } from './load-action';
 import {
   allowed,
-  bytes,
   canChat,
   canDelete,
   canLoad,
   canUnload,
-  capacityFailed,
-  compareEntries,
   current,
   DEFAULT_SORT,
-  entryTasks,
   errorMessage,
   evictionCandidates,
   inventory,
-  quantizationValue,
   terminal,
   visibleDownloads,
   type InventoryFilter,
   type SortColumn,
 } from './policy';
 import { RootsDialog } from './roots';
+import { AFTER_LOAD, AFTER_UNLOAD, useRowFocus } from './row-focus';
+import { LibraryToolbar } from './toolbar';
 import './models.css';
 
 const PAGE_SIZE = 25;
-const LIFECYCLE_FILTERS = ['unloaded', 'loading', 'ready', 'draining', 'unloading', 'failed'] as const;
-
-/** A library row: a catalog entry, or a download that has no entry yet (in flight, failed or cancelled). */
-type LibraryRow = { kind: 'model'; entry: CatalogEntry } | { kind: 'download'; op: Operation };
 /** Where an action started, so focus can follow it once the lifecycle settles. */
 type Origin = 'row' | 'inspector';
-/** A row control that focus can follow an action to. */
-type RowTarget = 'load' | 'chat' | 'unload';
-/**
- * After a row action, the row controls that should take focus once one can, in order of
- * preference: the first that exists and is enabled wins. `from` is the control the action started
- * from, which the action disables.
- */
-// `once`: a failed action's return trip. Focus goes back to the control the user pressed if it
-// is usable on the next render, and the intent is dropped either way instead of waiting.
-// `page`: the page the row was last seen on, so a re-sort that moves it is told apart from the
-// user turning the page away from it.
-type RowFocus = { id: string; want: readonly RowTarget[]; from: Element | null; once?: boolean; page?: number };
-/** After a Load: Use in Chat for a chat model; Unload for one without chat (embedding, rerank, transcription). */
-const AFTER_LOAD: readonly RowTarget[] = ['chat', 'unload'];
-const AFTER_UNLOAD: readonly RowTarget[] = ['load'];
-
-function downloadRepo(op: Operation): string {
-  return op.target.target_kind === 'download' ? op.target.repo_id : op.operation_id;
-}
 
 export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element {
   const state = useWebUi();
@@ -97,10 +62,6 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
   // Below 1100 px the inspector is a modal drawer: it opens on an explicit Inspect (or a request
   // from the toolbar or palette), not merely because a selection is remembered.
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const rowControls = useRef(new Map<string, HTMLButtonElement>());
-  const rowFocus = useRef<RowFocus | null>(null);
-  // One callback ref per row control, so a re-render does not detach and reattach every row button.
-  const rowRefs = useRef(new Map<string, (element: HTMLButtonElement | null) => void>());
   const selected = state.catalog.find((entry) => entry.identity.id === state.selectedModelId);
   const { profile: selectedProfile } = useLoadProfile(selected?.identity.id ?? null);
   // Runtime and operation events re-render the page without touching the catalog; skip the re-sort.
@@ -125,51 +86,7 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
     if (wide) setDrawerOpen(false);
   }, [wide]);
 
-  // Focus follows a row action to the control that replaces the one used, but only while the
-  // user has not moved on: focus is still on that row's Inspect button (where it waits) or nowhere.
-  useEffect(() => {
-    const pending = rowFocus.current;
-    if (!pending) return;
-    const holder = rowControls.current.get(`${pending.id}:inspect`);
-    const target = pending.want
-      .map((slot) => rowControls.current.get(`${pending.id}:${slot}`))
-      .find((control) => control !== undefined && !control.disabled);
-    const active = document.activeElement;
-    const waiting =
-      active === null || active === document.body || active === holder || active === pending.from || !!active.closest('[data-dialog-focus-fallback]');
-    if (!waiting) {
-      rowFocus.current = null;
-      return;
-    }
-    // The lifecycle pin re-sorts a row whose state changed, often onto another page (an unloaded
-    // row leaves the Ready group at the top). Follow it there; the next render focuses it. A
-    // filter that now hides the row ends the intent, and so does the user turning the page away
-    // from a row that has not moved: a pointer press that does not focus the pager (Safari,
-    // Firefox on macOS) leaves focus on <body>, which alone must not turn the page back. A
-    // failed action's return trip (`once`) never turns the page.
-    if (!pending.once) {
-      const index = rows.findIndex((entry) => entry.identity.id === pending.id);
-      if (index === -1) {
-        rowFocus.current = null;
-        return;
-      }
-      const rowPage = Math.floor(index / PAGE_SIZE);
-      if (rowPage !== visiblePage && pending.page === rowPage) {
-        rowFocus.current = null;
-        return;
-      }
-      pending.page = rowPage;
-      if (rowPage !== visiblePage) {
-        setPage(rowPage);
-        return;
-      }
-    }
-    if (target) {
-      target.focus({ preventScroll: true });
-      rowFocus.current = null;
-    } else if (pending.once) rowFocus.current = null;
-    else if (holder && active !== holder && !document.querySelector('dialog[open]')) holder.focus({ preventScroll: true });
-  });
+  const { rowFocus, register } = useRowFocus({ rows, pageSize: PAGE_SIZE, visiblePage, setPage });
 
   const set = (patch: Partial<InventoryFilter>): void => {
     setLibraryFilter(state.serverInstanceId, { ...filter, ...patch });
@@ -327,202 +244,21 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
     if (entry.identity.id !== state.selectedModelId) actions.selectModel(entry.identity.id);
     window.location.hash = 'chat';
   };
-  const register = (id: string, slot: 'inspect' | RowTarget): ((element: HTMLButtonElement | null) => void) => {
-    const key = `${id}:${slot}`;
-    let callback = rowRefs.current.get(key);
-    if (callback === undefined) {
-      callback = (element: HTMLButtonElement | null): void => {
-        if (element) rowControls.current.set(key, element);
-        else {
-          // Detached (the row left the page or the control was swapped): forget both.
-          rowControls.current.delete(key);
-          rowRefs.current.delete(key);
-        }
-      };
-      rowRefs.current.set(key, callback);
-    }
-    return callback;
-  };
-  // Row controls act on their own row only; the row-activation handler must not also open it.
-  const own = (run: () => void) => (event: React.MouseEvent<HTMLButtonElement>): void => {
-    event.stopPropagation();
-    run();
-  };
-
-  const rowComparator = (a: LibraryRow, b: LibraryRow): number => {
-    if (a.kind === 'download' || b.kind === 'download') return a.kind === b.kind ? 0 : a.kind === 'download' ? -1 : 1;
-    return compareEntries(sort)(a.entry, b.entry);
-  };
-  // alpha.19 sorts the page itself even in controlled mode, so every sortable column gets the
-  // same pinned comparator the pagination used rather than a bare value accessor.
-  const sortable: Pick<DataTableColumn<LibraryRow>, 'sortable' | 'sortComparator'> = { sortable: true, sortComparator: rowComparator };
-  const modelActions = (entry: CatalogEntry): React.ReactNode => {
-    // Isolated: a name holding bidi controls (U+202E) must not reorder the words around it.
-    const name = isolate(entry.identity.display_name);
-    return (
-      <div className="models-row-actions">
-        {canChat(state, entry) ? (
-          <Button tone="primary" data-testid="models-row-chat" aria-label={t(locale, 'models.library.chat_named', { name })} disabled={busy} onClick={own(() => openChat(entry))} ref={register(entry.identity.id, 'chat')}>
-            {t(locale, 'models.library.chat')}
-          </Button>
-        ) : null}
-        {/* Unload follows the lifecycle, not chat: a Ready embedding, rerank or transcription model is
-            released from its row too. Every other state keeps Load in place, disabled until the entry
-            can load, so a loading, draining or unloading row cannot submit twice. */}
-        {readOnly ? null : entry.lifecycle.state === 'ready' ? (
-          <Button key="unload" data-testid="models-row-unload" aria-label={t(locale, 'models.library.unload_named', { name })} disabled={busy || !canUnload(state, entry)} onClick={own(() => openAction('unload', entry, 'row'))} ref={register(entry.identity.id, 'unload')}>
-            {t(locale, 'models.unload')}
-          </Button>
-        ) : (
-          <Button key="load" data-testid="models-row-load" aria-label={t(locale, 'models.library.load_named', { name })} disabled={busy || !canLoad(state, entry)} onClick={own(() => openAction('load', entry, 'row'))} ref={register(entry.identity.id, 'load')}>
-            {t(locale, 'models.load')}
-          </Button>
-        )}
-        {!readOnly && capacityFailed(state, entry.identity.id) ? (
-          <Button data-testid="models-row-capacity" aria-label={t(locale, 'models.library.load_evict_named', { name })} disabled={busy || !canLoad(state, entry)} onClick={own(() => openCapacity(entry))}>
-            {t(locale, 'models.library.load_evict')}
-          </Button>
-        ) : null}
-        <IconButton
-          icon="info"
-          label={t(locale, 'models.library.inspect', { name })}
-          className={ROW_PRIMARY_CLASS}
-          onClick={own(() => inspect(entry))}
-          ref={register(entry.identity.id, 'inspect')}
-        />
-        {!readOnly && entry.identity.source === 'cache' ? (
-          <IconButton
-            icon="trash"
-            tone="danger"
-            label={t(locale, 'models.library.delete_named', { name })}
-            data-testid="models-row-delete"
-            disabled={busy || !canDelete(state, entry)}
-            onClick={own(() => openAction('delete', entry, 'row'))}
-          />
-        ) : null}
-      </div>
-    );
-  };
-  // A download row draws its state and progress in two places: its State and Size columns, and a
-  // fallback under its name for when the narrowing list hides those columns (it has no inspector).
-  const downloadBadge = (op: Operation): React.ReactNode => (
-    <StatusBadge state={downloadBadgeState(op.state)}>{downloadStateLabel(locale, op.state)}</StatusBadge>
-  );
-  const downloadProgress = (op: Operation): React.ReactNode => (
-    <ProgressBar
-      label={t(locale, 'models.library.progress')}
-      value={
-        !op.progress.indeterminate && op.progress.total_bytes !== null && op.progress.total_bytes > 0
-          ? (op.progress.completed_bytes / op.progress.total_bytes) * 100
-          : undefined
-      }
-      detail={`${bytes(op.progress.completed_bytes, locale)} / ${bytes(op.progress.total_bytes, locale)}`}
-    />
-  );
-  const downloadActions = (op: Operation): React.ReactNode => (
-    <div className="models-row-actions">
-      {!terminal(op) ? (
-        <Button
-          disabled={busy || !current(state) || !op.cancellable || op.state === 'cancelling'}
-          onClick={() => setConfirmation({ kind: 'cancel', operation: op, instance: state.serverInstanceId })}
-        >
-          {t(locale, 'models.library.cancel_download')}
-        </Button>
-      ) : (
-        <Button disabled={busy || downloadPending || !allowed(state, 'download')} onClick={() => retryDownload(op)}>
-          {t(locale, 'models.library.retry_download')}
-        </Button>
-      )}
-    </div>
-  );
-  const unknown = t(locale, 'models.library.unknown');
-  const columns: DataTableColumn<LibraryRow>[] = [
-    {
-      id: 'name',
-      header: t(locale, 'models.library.name'),
-      noResize: true,
-      className: 'models-col-name',
-      ...sortable,
-      render: (row) => {
-        if (row.kind === 'download') {
-          const repo = downloadRepo(row.op);
-          return (
-            <span className="models-name" data-testid="models-operation">
-              <span className="truncate" title={repo}>{repo}</span>
-              {/* Shown only once the State and Size columns have given way to a narrow list. */}
-              <span className="models-name-state">{downloadBadge(row.op)}</span>
-              <span className="models-name-progress">{downloadProgress(row.op)}</span>
-              {row.op.error ? <small className="models-row-note">{row.op.error.message}</small> : null}
-            </span>
-          );
-        }
-        const entry = row.entry;
-        const flag = !entry.complete
-          ? 'models.library.flag_incomplete'
-          : !entry.supported || !entry.metadata.support.runnable_on_backend
-            ? 'models.library.flag_unsupported'
-            : null;
-        return (
-          <span className="models-name">
-            <span className="truncate" title={entry.identity.display_name}>{entry.identity.display_name}</span>
-            {flag ? <Badge tone="warning">{t(locale, flag)}</Badge> : null}
-            {/* Shown only once the State column has given way to a narrow list. */}
-            <span className="models-name-state">
-              <StatusBadge state={entry.lifecycle.state}>{lifecycleLabel(locale, entry.lifecycle.state)}</StatusBadge>
-            </span>
-          </span>
-        );
-      },
-    },
-    {
-      id: 'size',
-      header: t(locale, 'models.library.size'),
-      noResize: true,
-      align: 'right',
-      className: 'models-col-size',
-      ...sortable,
-      render: (row) => (row.kind === 'download' ? downloadProgress(row.op) : bytes(row.entry.metadata.disk_bytes, locale)),
-    },
-    {
-      id: 'quantization',
-      header: t(locale, 'models.library.quantization'),
-      noResize: true,
-      className: 'models-col-quantization',
-      ...sortable,
-      render: (row) => (row.kind === 'download' ? null : quantizationValue(row.entry) ?? unknown),
-    },
-    {
-      id: 'tasks',
-      header: t(locale, 'models.library.tasks'),
-      noResize: true,
-      className: 'models-col-tasks',
-      render: (row) =>
-        row.kind === 'download' ? null : (
-          <span className="models-tasks">
-            {entryTasks(row.entry).map((task) => (
-              <Badge key={task}>{taskLabel(locale, task)}</Badge>
-            ))}
-          </span>
-        ),
-    },
-    {
-      id: 'state',
-      header: t(locale, 'models.library.status'),
-      noResize: true,
-      className: 'models-col-state',
-      ...sortable,
-      render: (row) =>
-        row.kind === 'download' ? downloadBadge(row.op) : <StatusBadge state={row.entry.lifecycle.state}>{lifecycleLabel(locale, row.entry.lifecycle.state)}</StatusBadge>,
-    },
-    {
-      id: 'actions',
-      header: t(locale, 'models.library.actions'),
-      noResize: true,
-      align: 'right',
-      className: 'models-col-actions',
-      render: (row) => (row.kind === 'download' ? downloadActions(row.op) : modelActions(row.entry)),
-    },
-  ];
+  const columns = libraryColumns({
+    state,
+    locale,
+    sort,
+    busy,
+    readOnly,
+    downloadPending,
+    register,
+    openChat,
+    openAction,
+    openCapacity,
+    inspect,
+    setConfirmation,
+    retryDownload,
+  });
   const pageRows: LibraryRow[] = [
     ...downloads.map((op) => ({ kind: 'download' as const, op })),
     ...rows.slice(visiblePage * PAGE_SIZE, (visiblePage + 1) * PAGE_SIZE).map((entry) => ({ kind: 'model' as const, entry })),
@@ -587,41 +323,7 @@ export function ModelsLibrary({ locale }: { locale: Locale }): React.JSX.Element
         {readOnly ? (
           <ErrorBanner tone="info" title={t(locale, 'models.library.single')} body="mlxcel-server --webui" testId="models-read-only" />
         ) : null}
-        <div className="models-toolbar">
-          <Field label={t(locale, 'models.library.search')} value={filter.query} onChange={(query) => set({ query })} testId="models-search" />
-          <Select
-            locale={locale}
-            label={t(locale, 'models.library.source')}
-            value={filter.source}
-            onChange={(source) => set({ source })}
-            options={[
-              { value: '', label: t(locale, 'models.library.all') },
-              ...[...new Set(state.catalog.map((entry) => entry.identity.source))].sort().map((value) => ({ value, label: sourceLabel(locale, value) })),
-            ]}
-          />
-          <Select
-            locale={locale}
-            label={t(locale, 'models.library.task')}
-            value={filter.task}
-            onChange={(task) => set({ task })}
-            options={[
-              { value: '', label: t(locale, 'models.library.all') },
-              ...[...new Set(state.catalog.flatMap((entry) => entry.capabilities.map((cap) => cap.task)))]
-                .sort()
-                .map((value) => ({ value, label: taskLabel(locale, value) })),
-            ]}
-          />
-          <Select
-            locale={locale}
-            label={t(locale, 'models.library.status')}
-            value={filter.status}
-            onChange={(status) => set({ status })}
-            options={[
-              { value: '', label: t(locale, 'models.library.all') },
-              ...LIFECYCLE_FILTERS.map((value) => ({ value, label: lifecycleLabel(locale, value) })),
-            ]}
-          />
-        </div>
+        <LibraryToolbar locale={locale} catalog={state.catalog} filter={filter} onChange={set} />
         {state.pendingReconciliations.size ? (
           <p role="status" data-testid="models-pending" className="models-pending">
             {t(locale, 'models.library.pending')}

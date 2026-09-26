@@ -113,8 +113,10 @@ export type OverflowRegionName = { label: string } | { labelledBy: string };
 /**
  * A callback ref for a scroll box that becomes a named, focusable region only while its content
  * overflows it on either axis, so a keyboard user can scroll it (axe scrollable-region-focusable).
- * Not scrollable, it gets no role and no tab stop. It follows the box's size and its table's.
- * `undefined` leaves the box alone.
+ * Not scrollable, it gets no role and no tab stop. It follows the box's size and its table's, and
+ * re-resolves the table when the box's content changes, so a table mounted or swapped after the
+ * ref attaches is followed too. A box that stops overflowing while it has focus keeps its tab stop
+ * until it loses focus: removing it would drop focus to <body>. `undefined` leaves the box alone.
  */
 export function useOverflowRegion(name: OverflowRegionName | undefined): (region: HTMLElement | null) => void {
   const disconnect = useRef<(() => void) | null>(null);
@@ -124,12 +126,24 @@ export function useOverflowRegion(name: OverflowRegionName | undefined): (region
     disconnect.current?.();
     disconnect.current = null;
     if (!region || (label === undefined && labelledBy === undefined)) return;
-    const update = (): void => {
+    let blurPending = false;
+    // Losing focus settles a tab stop kept for the focused box.
+    const onBlur = (): void => {
+      blurPending = false;
+      apply(false);
+    };
+    const apply = (focused: boolean): void => {
       if (region.scrollWidth > region.clientWidth + 1 || region.scrollHeight > region.clientHeight + 1) {
         region.tabIndex = 0;
         region.setAttribute('role', 'region');
         if (label !== undefined) region.setAttribute('aria-label', label);
         else if (labelledBy !== undefined) region.setAttribute('aria-labelledby', labelledBy);
+      } else if (focused && region.hasAttribute('tabindex')) {
+        // The box has focus: keep its tab stop, role and name until focus leaves it.
+        if (!blurPending) {
+          blurPending = true;
+          region.addEventListener('blur', onBlur, { once: true });
+        }
       } else {
         region.removeAttribute('tabindex');
         region.removeAttribute('role');
@@ -137,14 +151,46 @@ export function useOverflowRegion(name: OverflowRegionName | undefined): (region
         region.removeAttribute('aria-labelledby');
       }
     };
+    const update = (): void => apply(document.activeElement === region);
+    const removeBlur = (): void => region.removeEventListener('blur', onBlur);
     update();
-    if (typeof ResizeObserver === 'undefined') return;
+    if (typeof ResizeObserver === 'undefined') {
+      disconnect.current = removeBlur;
+      return;
+    }
     // The box resizes with the viewport, the table with its rows and their content.
     const observer = new ResizeObserver(update);
     observer.observe(region);
-    const table = region.querySelector('table');
+    let table = region.querySelector('table');
     if (table) observer.observe(table);
-    disconnect.current = () => observer.disconnect();
+    // Content, a table among it, can mount, unmount or be replaced without the box resizing:
+    // follow the current table and check again. The check reads layout, so it waits for the next
+    // frame and runs once for every commit in it instead of forcing layout after each one.
+    let frame: number | null = null;
+    const settle = (): void => {
+      frame = null;
+      update();
+    };
+    const mutations =
+      typeof MutationObserver === 'undefined'
+        ? null
+        : new MutationObserver(() => {
+            const next = region.querySelector('table');
+            if (next !== table) {
+              if (table) observer.unobserve(table);
+              if (next) observer.observe(next);
+              table = next;
+            }
+            if (typeof requestAnimationFrame === 'undefined') update();
+            else if (frame === null) frame = requestAnimationFrame(settle);
+          });
+    mutations?.observe(region, { childList: true, subtree: true });
+    disconnect.current = () => {
+      observer.disconnect();
+      mutations?.disconnect();
+      if (frame !== null) cancelAnimationFrame(frame);
+      removeBlur();
+    };
   }, [label, labelledBy]);
 }
 export type { DataTableColumn, DataTablePersistedState, SortDirection } from '@lablup/ui-common/components/DataTable';
