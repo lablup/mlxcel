@@ -101,6 +101,12 @@ pub enum BlockChainExactness {
         /// Bytes compared at that position (one row of logits).
         total_bytes: usize,
     },
+    /// A failing startup probe rerun with operation capture identified where
+    /// the block first departed from the single-token chain.
+    Localized {
+        verdict: Box<BlockChainExactness>,
+        location: String,
+    },
     /// The probe could not run (no Metal device, degenerate block width).
     /// Treated as a decline, same as a divergence, so an un-runnable probe
     /// never reads as a pass.
@@ -113,6 +119,7 @@ impl BlockChainExactness {
     }
 
     /// One-line reason, for the decline log and the CLI error.
+    /// Used by: Gemma 4 and Qwen 3.5 startup gates, scheduler health and CLI.
     pub fn reason(&self) -> String {
         match self {
             Self::Equal => "verify block is byte-identical to the single-token chain".to_string(),
@@ -124,6 +131,7 @@ impl BlockChainExactness {
                 "verify block position {position} differs from the single-token \
                  chain in {differing_bytes} of {total_bytes} logit bytes"
             ),
+            Self::Localized { verdict, location } => format!("{}; {location}", verdict.reason()),
             Self::NotRun(why) => format!("exactness probe did not run: {why}"),
         }
     }

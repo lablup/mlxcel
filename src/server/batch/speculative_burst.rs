@@ -571,6 +571,13 @@ pub(crate) fn mtp_b1_burst_enabled(target_supports_batching: bool) -> bool {
 
 /// Pure decision core of [`mtp_b1_burst_enabled`], separated for unit testing.
 ///
+/// This static preference does not bypass checkpoint exactness or adaptive
+/// profitability. Issue #1983 restores 31B QAT/non-QAT singleton exactness by
+/// matching classic attention geometry; that correction has a measured cost,
+/// so the pre-probe #1217 speedups are not promises for the corrected path.
+/// See docs/benchmark_results/gemma4-31b-mtp-exactness-2026-09-26.md.
+/// Used by: Gemma 4 and Qwen 3.5 MTP policy fallback.
+///
 /// `wide_quantized_projections` is the host's Apple GPU generation reduced to
 /// the one property that decides whether a verify block amortizes; see
 /// [`mtp_b1_burst_enabled`] for what it is and what measured it.
@@ -1091,6 +1098,7 @@ pub(crate) struct BurstContext<'a> {
     /// [`super::mtp_policy::MtpPolicy::profile_probe_rounds`]. Ignored by
     /// the DFlash and batched burst arms.
     pub(crate) profile_probe_rounds: usize,
+    pub(crate) prefill_chunk_size: usize,
 }
 
 impl<'a> BurstContext<'a> {
@@ -1106,6 +1114,7 @@ impl<'a> BurstContext<'a> {
             drafter_slot: &mut *self.drafter_slot,
             dispatch: self.dispatch,
             profile_probe_rounds: self.profile_probe_rounds,
+            prefill_chunk_size: self.prefill_chunk_size,
         }
     }
 }
@@ -1314,7 +1323,8 @@ fn run_mtp_burst(
         LoadedModel::Gemma4(wrapper) => {
             let adapter =
                 Gemma4MtpTargetAdapter::new_with_block_size(wrapper, Some(seq.seq_id), block_size)
-                    .with_prefill_start_offset(prefill_start_offset);
+                    .with_prefill_start_offset(prefill_start_offset)
+                    .with_prefill_chunk_size(ctx.prefill_chunk_size);
             drive_mtp_generator(
                 adapter,
                 owned_drafter,
@@ -1335,7 +1345,8 @@ fn run_mtp_burst(
                     Some(seq.seq_id),
                     block_size,
                 )
-                .with_prefill_start_offset(prefill_start_offset);
+                .with_prefill_start_offset(prefill_start_offset)
+                .with_prefill_chunk_size(ctx.prefill_chunk_size);
             drive_mtp_generator(
                 adapter,
                 owned_drafter,
@@ -1356,7 +1367,8 @@ fn run_mtp_burst(
                     Some(seq.seq_id),
                     block_size,
                 )
-                .with_prefill_start_offset(prefill_start_offset);
+                .with_prefill_start_offset(prefill_start_offset)
+                .with_prefill_chunk_size(ctx.prefill_chunk_size);
             drive_mtp_generator(
                 adapter,
                 owned_drafter,
@@ -2473,6 +2485,24 @@ fn run_mtp_burst_batched(
         )));
     }
     let batch_size = seqs.len();
+
+    // Used by: Gemma 4 text, VLM, and Unified targets. The startup probe
+    // validates a linear singleton, not a padded/batched reduction layout.
+    // A passing 31B probe must not enable the uncorrected batched path,
+    // even when MLXCEL_ENABLE_MTP_BATCH is explicitly enabled.
+    let requires_singleton = match ctx.model {
+        LoadedModel::Gemma4(wrapper) => wrapper.mtp_requires_linear_singleton(),
+        LoadedModel::Gemma4VLM(vlm) => vlm.text_model.mtp_requires_linear_singleton(),
+        LoadedModel::Gemma4Unified(unified) => unified.text_model.mtp_requires_linear_singleton(),
+        _ => false,
+    };
+    if requires_singleton {
+        tracing::debug!(
+            batch_size,
+            "MTP batched dispatch declined: target exactness requires linear B=1 verification; falling back to classic decode"
+        );
+        return Err(BurstOutcome::DeclineToClassic);
+    }
 
     // HOIST: variant gate before any drafter IO.
     let target_lm: &dyn LanguageModel = match ctx.model {

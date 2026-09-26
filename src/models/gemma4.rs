@@ -24,6 +24,11 @@
 //! - Dense + MoE feed-forward paths
 //! - Final logit softcapping
 
+#[path = "gemma4_probe.rs"]
+mod probe_trace;
+#[path = "gemma4_attention.rs"]
+mod verify_attention;
+
 use crate::distributed::pipeline::LayerFilter;
 use crate::distributed::pipeline::StageExecutionOutput;
 use crate::distributed::pipeline::partial_loading::filter_weight_map;
@@ -259,6 +264,24 @@ pub struct TextConfig {
 }
 
 impl TextConfig {
+    pub(crate) fn mtp_requires_linear_singleton(&self) -> bool {
+        self.num_attention_heads == 32
+            && self.num_key_value_heads == 16
+            && self.num_global_key_value_heads == Some(4)
+            && self.head_dim == 256
+            && self.global_head_dim == Some(512)
+    }
+
+    pub(crate) fn mtp_probe_prompt_lengths(&self) -> Vec<usize> {
+        // Preserve the original three short draws for other Gemma variants.
+        // The long buffered draw validates the measured 31B correction.
+        let mut lengths = vec![8; 3];
+        if self.mtp_requires_linear_singleton() {
+            lengths.push(self.sliding_window.saturating_add(32).min(1536));
+        }
+        lengths
+    }
+
     fn group_size(&self) -> i32 {
         self.quantization
             .as_ref()
@@ -1090,6 +1113,9 @@ enum AttentionProjection {
 }
 
 pub(crate) trait CacheInterface {
+    fn speculative_ring_cursor(&self) -> Option<i32> {
+        None
+    }
     fn offset(&self) -> i32;
     fn set_offset(&mut self, offset: i32);
     fn update_and_fetch(
@@ -1118,6 +1144,9 @@ impl CacheInterface for KVCache {
 }
 
 impl CacheInterface for RotatingKVCache {
+    fn speculative_ring_cursor(&self) -> Option<i32> {
+        self.speculative_ring_cursor()
+    }
     fn offset(&self) -> i32 {
         self.offset
     }
@@ -1854,6 +1883,7 @@ impl Attention {
         out.expect("compiled_q_path_proportional_per_position requires at least one position")
     }
 
+    // Used by: Gemma 4 decoder, DiffusionGemma, tensor-parallel Gemma 4.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn forward(
         &self,
@@ -1867,10 +1897,40 @@ impl Attention {
         UniquePtr<MlxArray>,
         Option<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)>,
     ) {
+        self.forward_mtp(
+            x,
+            mask,
+            cache,
+            shared_kv,
+            divergent_rows,
+            tree_positions,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn forward_mtp(
+        &self,
+        x: &MlxArray,
+        mask: Option<&MlxArray>,
+        cache: &mut dyn CacheInterface,
+        shared_kv: Option<(&MlxArray, &MlxArray)>,
+        divergent_rows: Option<&DivergentVerifyRows<'_>>,
+        tree_positions: Option<&[i32]>,
+        mtp_verify: bool,
+    ) -> (
+        UniquePtr<MlxArray>,
+        Option<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)>,
+    ) {
         let shape = mlxcel_core::array_shape(x);
         let b = shape[0];
         let l = shape[1];
         let offset = cache.offset();
+        let ring_cursor = if mtp_verify {
+            cache.speculative_ring_cursor()
+        } else {
+            None
+        };
         let rope_offsets: Option<&[i32]> = divergent_rows.map(|ctx| ctx.ve);
 
         let q_proj_out = match &self.projection {
@@ -1971,12 +2031,12 @@ impl Attention {
         if self.is_kv_shared_layer
             && let Some((keys, values)) = shared_kv
         {
-            let attn_out = self.attend(&queries, keys, values, mask);
+            let attn_out = self.attend(&queries, keys, values, mask, mtp_verify, ring_cursor);
             return (self.project_output(&attn_out, b, l), None);
         }
 
         let (keys, values) = self.project_kv(x, b, l, offset, cache, rope_offsets, tree_positions);
-        let attn_out = self.attend(&queries, &keys, &values, mask);
+        let attn_out = self.attend(&queries, &keys, &values, mask, mtp_verify, ring_cursor);
         let stored = if self.store_full_length_kv {
             Some((keys, values))
         } else {
@@ -1992,9 +2052,49 @@ impl Attention {
         keys: &MlxArray,
         values: &MlxArray,
         mask: Option<&MlxArray>,
+        mtp_verify: bool,
+        ring_cursor: Option<i32>,
     ) -> UniquePtr<MlxArray> {
         let query_len = mlxcel_core::array_shape(queries)[2];
         let local_mask = trim_mask_to_keys(mask, keys, query_len);
+        // The measured 31B geometry uses unfused full attention. M=K and
+        // M=1 then select different matmul reductions (first measured at
+        // layer 41 on the 31B QAT checkpoint). Keep projections batched, but
+        // reproduce each decode query's shape, visible key prefix and maskless
+        // dispatch. An all-zero mask still selects different reductions.
+        if mtp_verify
+            && self.n_heads == 32
+            && self.n_kv_heads == 4
+            && self.head_dim == 512
+            && self.window_size == 0
+            && query_len > 1
+        {
+            return verify_attention::attend_query_rows(
+                queries,
+                keys,
+                values,
+                None,
+                self.scale,
+                self.window_size,
+            );
+        }
+
+        if mtp_verify
+            && self.n_heads == 32
+            && self.n_kv_heads == 16
+            && self.head_dim == 256
+            && self.window_size > 0
+            && let Some(cursor) = ring_cursor
+        {
+            return verify_attention::attend_ring_rows(
+                queries,
+                keys,
+                values,
+                self.scale,
+                self.window_size,
+                cursor,
+            );
+        }
 
         // When mask was discarded (undersized) or originally None,
         // use causal attention if possible.
@@ -2580,12 +2680,22 @@ fn trim_mask_to_keys(
         // with the layer window is the correct, pre-#885 behaviour for that
         // chronological buffered layout. Panicking here (the #891 regression)
         // crashed the server worker on that legitimate path.
-        tracing::warn!(
-            mask_len,
-            key_len,
-            query_len,
-            "trim_mask_to_keys: mask shorter than key length, discarding caller mask"
-        );
+        static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            tracing::warn!(
+                mask_len,
+                key_len,
+                query_len,
+                "trim_mask_to_keys: mask shorter than key length, discarding caller mask; subsequent occurrences logged at DEBUG"
+            );
+        } else {
+            tracing::debug!(
+                mask_len,
+                key_len,
+                query_len,
+                "trim_mask_to_keys: mask shorter than key length, discarding caller mask"
+            );
+        }
         None
     }
 }
@@ -2665,6 +2775,8 @@ impl DecoderLayer {
             false,
             None,
             None,
+            false,
+            false,
         )
     }
 
@@ -2680,6 +2792,8 @@ impl DecoderLayer {
         profile_subops: bool,
         divergent_rows: Option<&DivergentVerifyRows<'_>>,
         tree_positions: Option<&[i32]>,
+        mtp_verify: bool,
+        capture_probe: bool,
     ) -> (
         UniquePtr<MlxArray>,
         Option<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)>,
@@ -2692,21 +2806,28 @@ impl DecoderLayer {
         // residual is only *read* by the final `add`.
         let h_attn = self.input_layernorm.forward(x);
         timer.tick("input_layernorm", &h_attn);
-        let (h_attn, stored_kv) = self.self_attn.forward(
+        let (h_attn, stored_kv) = self.self_attn.forward_mtp(
             &h_attn,
             mask,
             cache,
             shared_kv,
             divergent_rows,
             tree_positions,
+            mtp_verify,
         );
         timer.tick("self_attn", &h_attn);
+        if capture_probe {
+            probe_trace::capture(layer_idx, &self.layer_type, "attention output", &h_attn);
+        }
         let h_attn = self.post_attention_layernorm.forward(&h_attn);
         timer.tick("post_attention_layernorm", &h_attn);
         let after_attn = mlxcel_core::add(x, &h_attn);
         timer.tick("attn_residual_add", &after_attn);
 
         let ffn_out = self.ffn_branch(&after_attn, &mut timer);
+        if capture_probe {
+            probe_trace::capture(layer_idx, &self.layer_type, "MLP output", &ffn_out);
+        }
 
         let ffn_out = self.post_feedforward_layernorm.forward(&ffn_out);
         timer.tick("post_ffn_ln", &ffn_out);
@@ -2776,6 +2897,9 @@ impl DecoderLayer {
 
         let h = mlxcel_core::multiply(&h, &self.layer_scalar);
         timer.tick("layer_scalar", &h);
+        if capture_probe {
+            probe_trace::capture(layer_idx, &self.layer_type, "layer output", &h);
+        }
         (h, stored_kv)
     }
 
@@ -3064,6 +3188,12 @@ pub struct Gemma4SpeculativeSinks {
     /// itself, which is what every non-tree caller wants and what a linear
     /// tree resolves to anyway (issue #1204).
     pub tree_positions: Option<Vec<i32>>,
+    /// Explicit verify-only numerical parity path. Prefill and classic decode
+    /// leave this false, including chunked prefills with nonzero cache offsets.
+    pub mtp_verify: bool,
+    /// Startup exactness diagnostics only; ordinary forwards leave this false.
+    #[doc(hidden)]
+    pub capture_probe: bool,
 }
 
 impl Gemma4SpeculativeSinks {
@@ -3075,6 +3205,8 @@ impl Gemma4SpeculativeSinks {
             hidden_sink: Some(Vec::new()),
             shared_kv_sink: None,
             tree_positions: None,
+            mtp_verify: false,
+            capture_probe: false,
         }
     }
 
@@ -3086,6 +3218,8 @@ impl Gemma4SpeculativeSinks {
             hidden_sink: None,
             shared_kv_sink: Some(HashMap::new()),
             tree_positions: None,
+            mtp_verify: false,
+            capture_probe: false,
         }
     }
 
@@ -3097,6 +3231,8 @@ impl Gemma4SpeculativeSinks {
             hidden_sink: Some(Vec::new()),
             shared_kv_sink: Some(HashMap::new()),
             tree_positions: None,
+            mtp_verify: false,
+            capture_probe: false,
         }
     }
 }
@@ -3582,6 +3718,14 @@ impl Gemma4TextModel {
                 profile_subops,
                 divergent_rows.as_ref(),
                 tree_positions.as_deref(),
+                sinks.as_ref().is_some_and(|s| s.mtp_verify)
+                    && (mask.is_none() || tree_positions.is_some())
+                    && verify_attention::linear_verify_layout(
+                        b,
+                        tree_positions.as_deref(),
+                        has_padding || divergent_verify,
+                    ),
+                sinks.as_ref().is_some_and(|s| s.capture_probe),
             );
             h = next_h;
             if let Some(start) = layer_build_start {
@@ -3658,7 +3802,11 @@ impl Gemma4TextModel {
         if skip_final_norm {
             h
         } else {
-            self.norm.forward(&h)
+            let normalized = self.norm.forward(&h);
+            if sinks.as_ref().is_some_and(|s| s.capture_probe) {
+                probe_trace::capture(n_layers, "final", "final norm", &normalized);
+            }
+            normalized
         }
     }
 
@@ -4920,6 +5068,12 @@ impl Gemma4Wrapper {
             .replace_internal(self.make_configured_caches());
     }
 
+    /// The 31B attention geometry is validated only for B=1 linear verify.
+    /// Used by: MTP scheduler dispatch and direct tree-target capability checks.
+    pub fn mtp_requires_linear_singleton(&self) -> bool {
+        self.model.config.mtp_requires_linear_singleton()
+    }
+
     /// Whether MTP may engage on this loaded checkpoint at `block_size`,
     /// measured rather than predicted.
     ///
@@ -4965,10 +5119,25 @@ impl Gemma4Wrapper {
     /// `M = K` versus `M = 1` dispatch of the head projection as well as
     /// the decoder layers, exactly as the Qwen probe does.
     pub fn probe_block_chain_exactness(&self, block_size: usize) -> BlockChainExactness {
-        // Mirrors `PROBE_PROMPT_LEN` / `PROBE_DRAWS` in `models::qwen3_5`.
-        const PROBE_PROMPT_LEN: usize = 8;
-        const PROBE_DRAWS: usize = 3;
+        let verdict = self.probe_block_chain_exactness_impl(block_size, false);
+        if verdict.is_equal() || matches!(verdict, BlockChainExactness::NotRun(_)) {
+            return verdict;
+        }
+        // Capture only a failed startup probe, never a serving forward. The
+        // ordinary probe remains unsynchronized between sub-operations.
+        let localized = self.probe_block_chain_exactness_impl(block_size, true);
+        if matches!(localized, BlockChainExactness::Localized { .. }) {
+            localized
+        } else {
+            verdict
+        }
+    }
 
+    fn probe_block_chain_exactness_impl(
+        &self,
+        block_size: usize,
+        trace: bool,
+    ) -> BlockChainExactness {
         if block_size < 2 {
             return BlockChainExactness::NotRun("block width below 2 drafts nothing");
         }
@@ -4985,7 +5154,16 @@ impl Gemma4Wrapper {
             mlxcel_core::array_to_raw_bytes(&row)
         };
 
-        for draw in 0..PROBE_DRAWS {
+        // The short draws catch projection dispatch changes. One draw past
+        // the standard sliding window also tests real buffered verify keys;
+        // a short-only pass does not establish long-context parity (#1983).
+        for (draw, prompt_len) in self
+            .model
+            .config
+            .mtp_probe_prompt_lengths()
+            .into_iter()
+            .enumerate()
+        {
             // Synthetic ids, varied per draw: dispatch depends only on shape
             // and `M`, but whether a last-ulp kernel difference lands on a
             // differing byte depends on the values (see the false-pass note
@@ -4994,7 +5172,7 @@ impl Gemma4Wrapper {
             let wrap = |i: usize, stride: usize, offset: usize| {
                 ((i * stride + offset + salt) % vocab) as i32
             };
-            let prompt: Vec<i32> = (0..PROBE_PROMPT_LEN).map(|i| wrap(i, 7, 1)).collect();
+            let prompt: Vec<i32> = (0..prompt_len).map(|i| wrap(i, 7, 1)).collect();
             let block: Vec<i32> = (0..block_size).map(|i| wrap(i, 13, 3)).collect();
 
             // Chain arm: prefill, then one token at a time — the shape
@@ -5008,15 +5186,39 @@ impl Gemma4Wrapper {
                 None,
             );
             let mut chain_positions: Vec<Vec<u8>> = Vec::with_capacity(block_size);
+            let mut chain_trace = Vec::with_capacity(block_size);
             for token in &block {
-                let out = self.model.forward_with_caches_and_embeddings(
-                    &as_input(&[*token]),
-                    None,
-                    &mut chain_caches,
-                    None,
-                    None,
-                );
+                let mut run = || {
+                    let mut sinks = Gemma4SpeculativeSinks {
+                        capture_probe: trace,
+                        ..Default::default()
+                    };
+                    let out = self.model.forward_with_caches_and_speculative_sinks(
+                        &as_input(&[*token]),
+                        None,
+                        &mut chain_caches,
+                        None,
+                        None,
+                        None,
+                        Some(&mut sinks),
+                        None,
+                        None,
+                    );
+                    probe_trace::capture(
+                        self.model.config.num_hidden_layers,
+                        "final",
+                        "LM head",
+                        &out,
+                    );
+                    out
+                };
+                let (out, stages) = if trace {
+                    probe_trace::with_capture(run)
+                } else {
+                    (run(), Vec::new())
+                };
                 chain_positions.push(position_bytes(&out, 0));
+                chain_trace.push(stages);
             }
 
             // Block arm: fresh caches, same prefill, the whole block at once.
@@ -5028,19 +5230,64 @@ impl Gemma4Wrapper {
                 None,
                 None,
             );
-            let out = self.model.forward_with_caches_and_embeddings(
-                &as_input(&block),
-                None,
-                &mut block_caches,
-                None,
-                None,
-            );
+            for cache in block_caches
+                .iter_mut()
+                .filter(|_| self.mtp_requires_linear_singleton())
+            {
+                if cache
+                    .enable_mtp_rotating_buffer(super::gemma4_mtp_target::mtp_rotating_buffer_size(
+                        block_size,
+                    ))
+                    .is_err()
+                {
+                    return BlockChainExactness::NotRun("rotating verify buffer unavailable");
+                }
+            }
+            let mut run = || {
+                let mut sinks = Gemma4SpeculativeSinks {
+                    mtp_verify: true,
+                    capture_probe: trace,
+                    ..Default::default()
+                };
+                let out = self.model.forward_with_caches_and_speculative_sinks(
+                    &as_input(&block),
+                    None,
+                    &mut block_caches,
+                    None,
+                    None,
+                    None,
+                    Some(&mut sinks),
+                    None,
+                    None,
+                );
+                probe_trace::capture(
+                    self.model.config.num_hidden_layers,
+                    "final",
+                    "LM head",
+                    &out,
+                );
+                out
+            };
+            let (out, block_trace) = if trace {
+                probe_trace::with_capture(run)
+            } else {
+                (run(), Vec::new())
+            };
             let block_positions: Vec<Vec<u8>> = (0..block_size)
                 .map(|i| position_bytes(&out, i as i32))
                 .collect();
 
             let verdict = compare_block_against_chain(&block_positions, &chain_positions);
             if !verdict.is_equal() {
+                if trace
+                    && let Some(location) =
+                        probe_trace::first_divergence(&block_trace, &chain_trace)
+                {
+                    return BlockChainExactness::Localized {
+                        verdict: Box::new(verdict),
+                        location,
+                    };
+                }
                 return verdict;
             }
         }
@@ -5336,6 +5583,28 @@ impl Gemma4Wrapper {
                     None,
                     per_row_valid_end,
                 )
+            },
+        )
+    }
+
+    /// Prefill one scheduler-sized chunk and project only its last row, exactly
+    /// like classic serving, while retaining the final chunk's assistant seed.
+    /// Used by: Gemma4MtpTargetAdapter for the corrected 31B geometry.
+    pub(crate) fn prefill_mtp_chunk(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        sinks: Option<&mut Gemma4SpeculativeSinks>,
+    ) -> UniquePtr<MlxArray> {
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.make_configured_caches(),
+            |caches| {
+                let hidden = self.model.text_model.forward_with_speculative_sinks(
+                    input_ids, None, caches, None, None, None, sinks, false, None, None, None,
+                );
+                let last = mlxcel_core::array_shape(input_ids)[1] as usize - 1;
+                self.model.logits_at(&hidden, last)
             },
         )
     }
@@ -5899,6 +6168,19 @@ impl LanguageModel for Gemma4Wrapper {
     ) -> Option<ModelStateSnapshot> {
         self.sequence_state
             .with_sequence_state_ref(seq_id, |state| {
+                // Buffered MTP caches store chronological keys, while ordinary
+                // decoding reduces over physical ring order. Restoring this
+                // state into classic decode or suffix prefill would bypass the
+                // verify-only layout correction. In-flight slice parking keeps
+                // live per-sequence state; low-level detach/restore retains
+                // the ring-origin metadata.
+                if self.mtp_requires_linear_singleton()
+                    && state.iter().any(
+                        |cache| matches!(cache, Cache::Rotating(cache) if cache.buffer_size > 0),
+                    )
+                {
+                    return None;
+                }
                 let mut snapshot = ModelStateSnapshot::new("gemma4", token_len);
                 for (idx, cache) in state.iter().enumerate() {
                     if let Err(error) = cache.snapshot_into(&mut snapshot, &format!("layer{idx}")) {
@@ -6559,6 +6841,54 @@ mod gemma4_unified_mask_tests {
             trim_mask_to_keys(Some(&short), &keys, 3).is_none(),
             "a too-short mask on a multi-token chunk is discarded, not a panic"
         );
+    }
+
+    /// Uniform attention to identity-valued keys exposes the effective mask:
+    /// output column k is nonzero exactly when key k is visible. Use the
+    /// uncompacted chronological buffer past the sliding window, including
+    /// future draft slots, and compare each row with the single-token chain.
+    #[test]
+    fn trimmed_verify_mask_matches_chain_over_buffered_keys() {
+        const WINDOW: i32 = 8;
+        const LIVE: i32 = 11;
+        const WIDTH: i32 = 4;
+        const DIM: i32 = 16;
+        let total = LIVE + WIDTH;
+        let q = mlxcel_core::zeros(&[1, 1, WIDTH, DIM], mlxcel_core::dtype::FLOAT32);
+        let k = mlxcel_core::zeros(&[1, 1, total, DIM], mlxcel_core::dtype::FLOAT32);
+        let mut identity = vec![0.0f32; (total * DIM) as usize];
+        for key in 0..total {
+            identity[(key * DIM + key) as usize] = 1.0;
+        }
+        let v = mlxcel_core::from_slice_f32(&identity, &[1, 1, total, DIM]);
+        let short = create_sliding_window_prefill_mask(WIDTH, LIVE, WINDOW);
+        assert!(trim_mask_to_keys(Some(&short), &k, WIDTH).is_none());
+        let block = mlxcel_core::causal_attention(&q, &k, &v, 1.0, 0.0, WINDOW);
+        let full_mask =
+            mlxcel_core::utils::create_causal_mask_with_window_full(WIDTH, LIVE, Some(WINDOW));
+        let bytes = mlxcel_core::array_to_raw_bytes(&full_mask);
+        let values: Vec<f32> = bytes
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+            .collect();
+        for row in 0..WIDTH {
+            let end = LIVE + row + 1;
+            for key in 0..total {
+                let visible = key < end && key >= end - WINDOW;
+                assert_eq!(values[(row * total + key) as usize] == 0.0, visible);
+            }
+            let query = slice_axis(&q, 2, row, row + 1);
+            let keys = slice_axis(&k, 2, 0, end);
+            let vals = slice_axis(&v, 2, 0, end);
+            let chain = mlxcel_core::causal_attention(&query, &keys, &vals, 1.0, 0.0, WINDOW);
+            let block_row = slice_axis(&block, 2, row, row + 1);
+            let diff = mlxcel_core::abs(&mlxcel_core::subtract(&block_row, &chain));
+            let total_diff = mlxcel_core::sum_all(&diff);
+            assert!(
+                mlxcel_core::item_f32(&total_diff) < 1e-6,
+                "verify row {row} must use the chain's causal and sliding-window mask"
+            );
+        }
     }
 
     /// A too-short mask on single-token DECODE (`query_len == 1`) is still

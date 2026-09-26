@@ -253,7 +253,7 @@ pub(crate) fn truncate_standard(
 /// is held, plus every scalar
 /// [`RotatingKVCache::restore_fp16_snapshot_state`] needs to reproduce the ring
 /// geometry: `.max_size`, `.buffer_size`, `.offset`, `.start_position`, `.idx`,
-/// `.step`, `.mode` and `.turbo_seed`.
+/// `.step`, `.mode`, `.turbo_seed` and the optional reference ring origin.
 ///
 /// Used by: Gemma 3, AFMoE, Gemma 4, Muse Glimmer.
 pub(crate) fn snapshot_rotating(
@@ -291,6 +291,18 @@ pub(crate) fn snapshot_rotating(
         state.buffer_size,
     );
     push_i32(snapshot, format!("{prefix}.{kind}.offset"), state.offset);
+    if let Some((offset, cursor)) = state.speculative_ring_origin {
+        push_i32(
+            snapshot,
+            format!("{prefix}.{kind}.ring_origin_offset"),
+            offset,
+        );
+        push_i32(
+            snapshot,
+            format!("{prefix}.{kind}.ring_origin_cursor"),
+            cursor,
+        );
+    }
     push_i32(
         snapshot,
         format!("{prefix}.{kind}.start_position"),
@@ -313,9 +325,11 @@ pub(crate) fn snapshot_rotating(
 
 /// Restore a sliding-window cache from `snapshot` under `prefix`.
 ///
-/// Every scalar falls back to the live cache's own value when absent, so a
-/// snapshot written by an earlier build that stored fewer fields still
-/// restores. The assignment itself goes through
+/// Ordinary scalars fall back to the live cache's own value when absent, so an
+/// unbuffered snapshot written by an earlier build still restores. A buffered
+/// snapshot without its reference ring origin is declined for a cold prefill,
+/// because its former physical reduction order cannot be reconstructed.
+/// The assignment itself goes through
 /// [`RotatingKVCache::restore_fp16_snapshot_state`], which validates the ring
 /// geometry against the copied buffers.
 ///
@@ -365,6 +379,14 @@ pub(crate) fn restore_rotating(
     let state = RotatingKVCacheSnapshotState {
         max_size,
         buffer_size: restore_i32(snapshot, format!("{prefix}.{kind}.buffer_size")).unwrap_or(0),
+        speculative_ring_origin: restore_i32(
+            snapshot,
+            format!("{prefix}.{kind}.ring_origin_offset"),
+        )
+        .zip(restore_i32(
+            snapshot,
+            format!("{prefix}.{kind}.ring_origin_cursor"),
+        )),
         offset: restore_i32(snapshot, format!("{prefix}.{kind}.offset"))
             .unwrap_or(snapshot.token_len() as i32),
         start_position: restore_i32(snapshot, format!("{prefix}.{kind}.start_position"))
@@ -416,6 +438,14 @@ pub(crate) fn rotating_truncatable_to(
     let state = RotatingKVCacheSnapshotState {
         max_size,
         buffer_size: restore_i32(snapshot, format!("{prefix}.{kind}.buffer_size")).unwrap_or(0),
+        speculative_ring_origin: restore_i32(
+            snapshot,
+            format!("{prefix}.{kind}.ring_origin_offset"),
+        )
+        .zip(restore_i32(
+            snapshot,
+            format!("{prefix}.{kind}.ring_origin_cursor"),
+        )),
         offset,
         start_position: restore_i32(snapshot, format!("{prefix}.{kind}.start_position"))
             .unwrap_or(0),

@@ -623,6 +623,9 @@ pub struct DetachedRotatingKVCache {
     pub(super) values: Option<UniquePtr<MlxArray>>,
     pub(super) max_size: i32,
     pub(super) offset: i32,
+    pub(super) buffer_size: i32,
+    pub(super) start_position: i32,
+    pub(super) speculative_ring_origin: Option<(i32, i32)>,
     pub(super) idx: i32,
     pub(super) step: i32,
     pub(super) mode: KVCacheMode,
@@ -704,6 +707,9 @@ impl RotatingKVCache {
             keys: self.keys.take(),
             values: self.values.take(),
             max_size: self.max_size,
+            buffer_size: std::mem::replace(&mut self.buffer_size, 0),
+            start_position: std::mem::replace(&mut self.start_position, 0),
+            speculative_ring_origin: self.speculative_ring_origin.take(),
             offset: std::mem::replace(&mut self.offset, 0),
             idx: std::mem::replace(&mut self.idx, 0),
             step: self.step,
@@ -739,6 +745,9 @@ impl RotatingKVCache {
         self.keys = detached.keys;
         self.values = detached.values;
         self.max_size = detached.max_size;
+        self.buffer_size = detached.buffer_size;
+        self.start_position = detached.start_position;
+        self.speculative_ring_origin = detached.speculative_ring_origin;
         self.offset = detached.offset;
         self.idx = detached.idx;
         self.step = detached.step;

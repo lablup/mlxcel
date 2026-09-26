@@ -187,6 +187,8 @@ pub struct Gemma4MtpTargetAdapter<'a> {
     /// restored `offset`. `0` (the default) preserves the cold full-prompt
     /// prefill byte-for-byte.
     prefill_start_offset: usize,
+    /// Serving prefill geometry; zero keeps a single prompt forward.
+    prefill_chunk_size: usize,
 }
 
 impl<'a> Gemma4MtpTargetAdapter<'a> {
@@ -229,6 +231,7 @@ impl<'a> Gemma4MtpTargetAdapter<'a> {
         let verify_arr = mlxcel_core::from_slice_i32(verify_input, &[1, verify_input.len() as i32]);
         let mut sinks = Gemma4SpeculativeSinks::with_hidden_and_shared_kv();
         sinks.tree_positions = tree_positions;
+        sinks.mtp_verify = true;
         // One forward returns the full `[1, K, vocab]` verify logits: the LM
         // head projects all K positions in one batched call, and the argmax
         // walk reads them after one eval. The projection deliberately does
@@ -339,7 +342,16 @@ impl<'a> Gemma4MtpTargetAdapter<'a> {
             seq_id,
             rotating_buffer_size: mtp_rotating_buffer_size(block_size),
             prefill_start_offset: 0,
+            prefill_chunk_size: mlxcel_core::generate::prefill_chunk_len(),
         }
+    }
+
+    /// Match the scheduler's classic prefill geometry on the corrected 31B
+    /// target. Other Gemma variants retain their existing prefill path.
+    #[must_use]
+    pub fn with_prefill_chunk_size(mut self, chunk_size: usize) -> Self {
+        self.prefill_chunk_size = chunk_size;
+        self
     }
 
     /// Set the adopted prompt-cache prefix length (issue #518).
@@ -644,24 +656,39 @@ impl<'a> MtpTarget for Gemma4MtpTargetAdapter<'a> {
         // defensive and never trims the last prompt position in practice.
         let offset = self.prefill_start_offset.min(prompt_tokens.len());
         let forward_tokens = &prompt_tokens[offset..];
-        let prompt_arr =
-            mlxcel_core::from_slice_i32(forward_tokens, &[1, forward_tokens.len() as i32]);
-
-        // Capture last-layer hidden + last full/SWA shared K/V slabs.
-        // Gemma 4 owns its own caches via `ModelOwnedSequenceState`;
-        // the wrapper resolves `seq_id` to the matching slot internally
-        // and the trait method does not take an external cache slice.
         let mut sinks = Gemma4SpeculativeSinks::with_hidden_and_shared_kv();
-        let logits = self.wrapper.forward_with_speculative_sinks(
-            &prompt_arr,
-            None,
-            None,
-            None,
-            self.seq_id,
-            None,
-            Some(&mut sinks),
-            None,
-        );
+        let logits = if self.wrapper.mtp_requires_linear_singleton() {
+            // Verify parity assumes equal prefix state. M=6449 prefill and
+            // thirteen M<=512 scheduler chunks do not produce identical KV.
+            let chunk_size = if self.prefill_chunk_size == 0 {
+                forward_tokens.len().max(1)
+            } else {
+                self.prefill_chunk_size
+            };
+            let mut chunks = forward_tokens.chunks(chunk_size).peekable();
+            let mut last = None;
+            while let Some(chunk) = chunks.next() {
+                let input = mlxcel_core::from_slice_i32(chunk, &[1, chunk.len() as i32]);
+                let capture = chunks.peek().is_none().then_some(&mut sinks);
+                let logits = self.wrapper.prefill_mtp_chunk(&input, self.seq_id, capture);
+                mlxcel_core::eval(&logits);
+                last = Some(logits);
+            }
+            last.expect("MTP prefill requires an uncached suffix")
+        } else {
+            let prompt_arr =
+                mlxcel_core::from_slice_i32(forward_tokens, &[1, forward_tokens.len() as i32]);
+            self.wrapper.forward_with_speculative_sinks(
+                &prompt_arr,
+                None,
+                None,
+                None,
+                self.seq_id,
+                None,
+                Some(&mut sinks),
+                None,
+            )
+        };
         self.wrapper
             .enable_mtp_rotating_cache_buffer(self.seq_id, self.rotating_buffer_size);
 
@@ -778,6 +805,19 @@ impl<'a> MtpTarget for Gemma4MtpTargetAdapter<'a> {
         logprobs_config: &mlxcel_core::sampling::LogprobsConfig,
     ) -> Result<VerifyForwardOutput, mlxcel_core::speculative::mtp::target::TreeVerifyUnsupported>
     {
+        if self.wrapper.mtp_requires_linear_singleton()
+            && tree
+                .depths()
+                .iter()
+                .enumerate()
+                .any(|(index, depth)| *depth != index as i32)
+        {
+            return Err(
+                mlxcel_core::speculative::mtp::target::TreeVerifyUnsupported {
+                    reason: "Gemma 4 31B exact verification requires a linear draft layout",
+                },
+            );
+        }
         let offset = self.wrapper.sequence_kv_offset(self.seq_id).max(0) as usize;
         let nodes = tree.len();
         // MLX additive masks are f32 with 0 to attend; the blocking value is
@@ -806,7 +846,8 @@ impl<'a> MtpTarget for Gemma4MtpTargetAdapter<'a> {
     /// contiguous tail to select from. So this reads cache state rather than
     /// returning a constant, and the round loop has to ask each round.
     fn tree_round_is_available(&self) -> bool {
-        self.wrapper.can_gather_speculative_cache(self.seq_id)
+        !self.wrapper.mtp_requires_linear_singleton()
+            && self.wrapper.can_gather_speculative_cache(self.seq_id)
     }
 
     /// Roll the target cache back to a draft tree's accepted **path**.
@@ -1003,6 +1044,13 @@ impl<'a> Gemma4VLMtpTargetAdapter<'a> {
         self.inner = self.inner.with_prefill_start_offset(prefill_start_offset);
         self
     }
+
+    /// Forward the scheduler's classic prefill chunk size to the text target.
+    #[must_use]
+    pub fn with_prefill_chunk_size(mut self, chunk_size: usize) -> Self {
+        self.inner = self.inner.with_prefill_chunk_size(chunk_size);
+        self
+    }
 }
 
 impl<'a> MtpTarget for Gemma4VLMtpTargetAdapter<'a> {
@@ -1125,6 +1173,13 @@ impl<'a> Gemma4UnifiedMtpTargetAdapter<'a> {
     #[must_use]
     pub fn with_prefill_start_offset(mut self, prefill_start_offset: usize) -> Self {
         self.inner = self.inner.with_prefill_start_offset(prefill_start_offset);
+        self
+    }
+
+    /// Forward the scheduler's classic prefill chunk size to the text target.
+    #[must_use]
+    pub fn with_prefill_chunk_size(mut self, chunk_size: usize) -> Self {
+        self.inner = self.inner.with_prefill_chunk_size(chunk_size);
         self
     }
 }

@@ -59,6 +59,7 @@ reference runtime) live alongside the snapshot:
 - [Fused decode-MoE kernel: design and roadmap](benchmark_results/fused-moe-decode-kernel-design.md)
 - [Gemma3n decode profile: is a compiled fusion justified?](benchmark_results/gemma3n-decode-profile.md)
 - [Gemma3n decode profile on M5 Max](benchmark_results/gemma3n-decode-profile-m5max.md)
+- [Gemma 4 31B QAT/non-QAT MTP exactness on M5 Max](benchmark_results/gemma4-31b-mtp-exactness-2026-09-26.md)
 
 Embedding and rerank throughput (`/v1/embeddings`, `/v1/rerank`) has its own
 ladder, driven by `scripts/bench_embeddings.py`:
@@ -427,6 +428,20 @@ cargo build --release --features metal,accelerate --example logit_trace
 MLXCEL_QMV_WIDE=0 \
 ./target/release/examples/logit_trace  MODEL CORPUS.txt 5 60 8 512 > b.tsv
 python3 scripts/compare_logit_traces.py b.tsv a.tsv
+```
+
+Gemma 4 verify changes need the actual MTP path. Set `MLXCEL_TRACE_GEMMA4=chain|block|verify`: `chain` runs each traced token as an M=1 decode; `block` reproduces the ordinary block arithmetic; `verify` enables the MTP verification corrections. Both block arms prefill through the real target adapter, including its rotating-cache buffer. `MLXCEL_TRACE_START_TOKEN` starts the measured continuation after a fixed corpus context. `MLXCEL_TRACE_CONTIGUOUS=1` prefills once and advances the same forced token stream across chunks, exercising buffered full-accept progression as context grows (rejection/rollback is covered by generation tests); it requires a Gemma 4 mode and nonzero start/prefill.
+
+```bash
+# Same 256 teacher-forced tokens in all arms, behind 1536 tokens of context.
+cargo build --profile test-fast --features metal,accelerate --example logit_trace
+for arm in chain block verify; do
+  MLXCEL_QMV_WIDE=0 MLXCEL_TRACE_GEMMA4="$arm" \
+  MLXCEL_TRACE_START_TOKEN=1536 MLXCEL_TRACE_CONTIGUOUS=1 \
+  ./target/test-fast/examples/logit_trace MODEL docs/architecture.md 4 64 8 1536 > "$arm.tsv"
+done
+python3 scripts/compare_logit_traces.py chain.tsv block.tsv --decided 2
+python3 scripts/compare_logit_traces.py chain.tsv verify.tsv --decided 2
 ```
 
 The metric to gate on is **disagreement on decided positions**: the fraction
@@ -1118,6 +1133,19 @@ enabling this pairing on generation 13.
 
 ### Gemma 4 31B + bf16 assistant
 
+**Current exactness (2026-09-26, #1983/#1279):** both QAT and non-QAT 31B now pass the startup probe after the automatic narrow-kernel retry on M5 Max, without `MLXCEL_MTP_ALLOW_INEXACT`. Non-QAT widths 2, 3 and 4 all pass. The fix matches full-attention query/mask geometry, sliding-cache physical ring order, and classic prefill chunking. It is limited to singleton linear verification; batched MTP falls back to classic; nonlinear tree rounds are disabled, so dispatch uses the supported linear path. See the [matched QAT/non-QAT measurements](benchmark_results/gemma4-31b-mtp-exactness-2026-09-26.md) for long-context logit metrics, greedy parity and current test-fast throughput. The static hardware preference remains subordinate to measured exactness and adaptive profitability.
+
+Current M5 Max / 128 GiB, test-fast profile, width 4, three 256-token outputs (one observation per scenario and arm):
+
+| Target | Classic after (tok/s range) | MTP (tok/s range) | Paired MTP/classic range | Greedy parity |
+| --- | ---: | ---: | ---: | --- |
+| 31B QAT 4-bit | 8.97–17.28 | 10.87–19.76 | 0.85–1.21x | 3/3 byte-identical |
+| 31B non-QAT 4-bit | 12.20–13.77 | 15.99–17.80 | 1.18–1.38x | 3/3 byte-identical |
+
+Run-order drift and thermal pressure limit throughput conclusions; these are observations, not a guaranteed speedup. See the linked report for individual samples, baseline comparisons and host evidence.
+
+The M3 Ultra figures below are **historical measurements before the exactness gate and this correction**. They describe that implementation's throughput and do not establish the speed of today's exact path.
+
 The 31B text target is batch-capable, which is the case the B=1 static gate
 (`mtp_b1_default`) governs. Until issue #1217 that gate ran the singleton path
 only where `has_neural_accelerator` held, on the reading that this pairing's
@@ -1146,7 +1174,7 @@ costs about 1.9x as much per extra block position and the two lines cross near
 K = 4, which is the only reason the block-4 round costs match. Do not carry a
 round cost between these two pairings at any other width.
 
-The gate now reads Apple GPU generation instead: on from generation 15 (M3, M4,
+The static gate introduced then reads Apple GPU generation: on from generation 15 (M3, M4,
 M5), classic decode on generation 13 (M1, M2). M4 is grouped by the shared
 `use_qmv_wide` dispatch rather than measured. Generation 13 was not re-measured
 for want of a host, and carrying the slope ratio above onto its

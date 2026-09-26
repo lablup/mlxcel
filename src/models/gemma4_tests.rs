@@ -50,6 +50,13 @@ pub(crate) fn build_synthetic_wrapper_with_layer(layer_type: &str) -> super::Gem
     cache_isolation::build_wrapper_with_layer(layer_type)
 }
 
+/// Tiny weights with 31B capability metadata, for dispatch-only tests.
+/// Never run inference through this fixture: its dimensions intentionally
+/// describe the production capability without allocating production weights.
+pub(crate) fn build_synthetic_wrapper_for_linear_mtp_only() -> super::Gemma4Wrapper {
+    cache_isolation::build_linear_mtp_dispatch_wrapper()
+}
+
 // -----------------------------------------------------------------
 // per-`SequenceId` cache isolation tests for `Gemma4Wrapper`.
 //
@@ -243,6 +250,18 @@ mod cache_isolation {
         let args = make_test_gemma4_args_with_layer(layer_type);
         let weights = make_test_gemma4_weight_map();
         Gemma4Wrapper::new(Gemma4Model::from_weights(&weights, &args).unwrap())
+    }
+
+    pub(super) fn build_linear_mtp_dispatch_wrapper() -> Gemma4Wrapper {
+        let args = make_test_gemma4_args_with_layer("sliding_attention");
+        let weights = make_test_gemma4_weight_map();
+        let mut model = Gemma4Model::from_weights(&weights, &args).unwrap();
+        model.config.num_attention_heads = 32;
+        model.config.num_key_value_heads = 16;
+        model.config.num_global_key_value_heads = Some(4);
+        model.config.head_dim = 256;
+        model.config.global_head_dim = Some(512);
+        Gemma4Wrapper::new(model)
     }
 
     fn array_to_vec_f32(arr: &mlxcel_core::MlxArray) -> Vec<f32> {
@@ -1150,6 +1169,26 @@ mod snapshot_prompt_cache {
 
     #[test]
     #[ignore = "requires serial MLX execution"]
+    fn gemma31b_buffered_mtp_cache_cannot_donate_prompt_snapshot() {
+        let source = super::build_synthetic_wrapper();
+        let seq = SequenceId::from_raw(919);
+        prefill(&source, seq, &[1, 2, 3, 4, 5]);
+        let snapshot = source.snapshot_sequence_state(seq, 5).unwrap();
+
+        // Populate the dispatch-only geometry fixture from a valid tiny-model
+        // snapshot. No forward call uses its synthetic head configuration.
+        let wrapper = super::build_synthetic_wrapper_for_linear_mtp_only();
+        wrapper.restore_sequence_state(seq, &snapshot).unwrap();
+        assert!(wrapper.mtp_requires_linear_singleton());
+        assert!(wrapper.snapshot_sequence_state(seq, 5).is_some());
+
+        wrapper.enable_mtp_rotating_cache_buffer(Some(seq), 4);
+        assert!(wrapper.snapshot_sequence_state(seq, 5).is_none());
+        assert_eq!(wrapper.sequence_kv_offset(Some(seq)), 5);
+    }
+
+    #[test]
+    #[ignore = "requires serial MLX execution"]
     fn gemma4_reports_truncatable_only_while_the_sliding_layer_is_unwrapped() {
         let wrapper = super::build_synthetic_wrapper();
 
@@ -1559,6 +1598,35 @@ mod mtp_hooks {
         assert!(
             !kv.contains_key("full_attention"),
             "fixture has zero full_attention layers, so the full_attention entry must be absent"
+        );
+    }
+}
+
+#[test]
+fn long_buffered_probe_is_limited_to_measured_31b_geometry() {
+    let args = cache_isolation::make_test_gemma4_args_with_layer("sliding_attention");
+    let mut config = parse_text_config(args.text_config);
+    config.sliding_window = 1024;
+    for (heads, kv, global_kv, dim, global_dim, expected) in [
+        (32, 16, 4, 256, 512, true), // measured 31B
+        (16, 8, 1, 256, 512, false), // Unified 12B
+        (32, 8, 2, 256, 512, false), // different KV geometry
+        (32, 16, 4, 128, 512, false),
+        (32, 16, 4, 256, 256, false),
+    ] {
+        config.num_attention_heads = heads;
+        config.num_key_value_heads = kv;
+        config.num_global_key_value_heads = Some(global_kv);
+        config.head_dim = dim;
+        config.global_head_dim = Some(global_dim);
+        assert_eq!(config.mtp_requires_linear_singleton(), expected);
+        assert_eq!(
+            config.mtp_probe_prompt_lengths(),
+            if expected {
+                vec![8, 8, 8, 1056]
+            } else {
+                vec![8, 8, 8]
+            }
         );
     }
 }

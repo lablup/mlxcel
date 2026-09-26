@@ -270,7 +270,8 @@ pub const DEFAULT_PREFILL_CHUNK: usize = 2048;
 /// multi-call prefill opt out via
 /// [`LanguageModel::supports_chunked_prefill`], mirroring mlx-vlm's
 /// `chunked_prefill_policy`.
-fn prefill_chunk_len() -> usize {
+/// Used by: CxxGenerator, Generator and Gemma 4 31B MTP prefill.
+pub fn prefill_chunk_len() -> usize {
     static CHUNK: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *CHUNK.get_or_init(|| {
         std::env::var("MLXCEL_PREFILL_CHUNK")

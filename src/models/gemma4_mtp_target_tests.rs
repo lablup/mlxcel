@@ -45,6 +45,38 @@ fn mtp_rotating_buffer_size_matches_upstream_clamp() {
 }
 
 #[test]
+fn gemma31b_adapter_disables_tree_rounds() {
+    let _runtime = crate::initialize_runtime();
+    let wrapper = crate::models::gemma4_tests::build_synthetic_wrapper_for_linear_mtp_only();
+    let adapter = Gemma4MtpTargetAdapter::new_with_block_size(&wrapper, None, 4);
+
+    assert!(!adapter.tree_round_is_available());
+}
+
+#[test]
+fn gemma31b_adapter_rejects_branched_tree_before_forward() {
+    let _runtime = crate::initialize_runtime();
+    let wrapper = crate::models::gemma4_tests::build_synthetic_wrapper_for_linear_mtp_only();
+    let adapter = Gemma4MtpTargetAdapter::new_with_block_size(&wrapper, None, 4);
+    let mut tree = mlxcel_core::speculative::mtp::tree::DraftTree::root(1);
+    tree.push_child(0, 2);
+    tree.push_child(0, 3);
+
+    let error = match adapter.verify_forward_tree(
+        &tree,
+        &SamplingConfig::greedy(),
+        &mlxcel_core::sampling::LogprobsConfig::default(),
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("31B exact verification must reject a branched tree before forwarding"),
+    };
+    assert_eq!(
+        error.reason,
+        "Gemma 4 31B exact verification requires a linear draft layout"
+    );
+}
+
+#[test]
 fn slice_shared_kv_with_zero_rejected_is_identity() {
     // Build a synthetic 4-tensor shared K/V vector to verify the
     // fast-path. We use the FFI `from_slice_f32` to build small tensors;
@@ -1429,4 +1461,35 @@ fn mtp_multi_token_verify_at_window_does_not_panic() {
         2,
         "K=2 verify must yield 2 per-position tokens"
     );
+}
+
+#[test]
+fn mtp_prefill_chunks_match_classic_last_logits_and_capture_final_seed() {
+    use mlxcel_core::generate::LanguageModel;
+    let _runtime = crate::initialize_runtime();
+    for chunk_size in [2, 3, 5] {
+        let classic =
+            crate::models::gemma4_tests::build_synthetic_wrapper_with_layer("full_attention");
+        let mtp = crate::models::gemma4_tests::build_synthetic_wrapper_with_layer("full_attention");
+        let prompt = [2, 5, 1, 7, 3, 6, 4];
+        let mut chunks = prompt.chunks(chunk_size).peekable();
+        let mut sinks = Gemma4SpeculativeSinks::with_hidden_and_shared_kv();
+        while let Some(chunk) = chunks.next() {
+            let input = mlxcel_core::from_slice_i32(chunk, &[1, chunk.len() as i32]);
+            let expected = classic.forward_last_logits(&input, &mut [], None, chunk.len() - 1);
+            let capture = chunks.peek().is_none().then_some(&mut sinks);
+            let actual = mtp.prefill_mtp_chunk(&input, None, capture);
+            assert_eq!(
+                mlxcel_core::array_to_raw_bytes(&actual),
+                mlxcel_core::array_to_raw_bytes(&expected)
+            );
+        }
+        assert_eq!(mtp.sequence_kv_offset(None), prompt.len() as i32);
+        let hidden = sinks.hidden_sink.unwrap().pop().unwrap();
+        assert_eq!(
+            mlxcel_core::array_shape(&hidden)[1],
+            ((prompt.len() - 1) % chunk_size + 1) as i32
+        );
+        assert!(!sinks.shared_kv_sink.unwrap().is_empty());
+    }
 }

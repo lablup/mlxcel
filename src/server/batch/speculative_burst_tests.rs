@@ -95,6 +95,50 @@ use super::speculative_burst::{
 // Test helpers
 // =============================================================================
 
+#[test]
+fn gemma31b_batched_mtp_declines_before_drafter_io_and_preserves_requests() {
+    let _runtime = crate::initialize_runtime();
+    let wrapper = crate::models::gemma4_tests::build_synthetic_wrapper_for_linear_mtp_only();
+    assert!(wrapper.mtp_requires_linear_singleton());
+    let model = crate::LoadedModel::Gemma4(wrapper);
+    let mut dispatch = make_mtp_dispatch();
+    if let crate::server::SpeculativeDispatch::Mtp {
+        draft_model_path, ..
+    } = &mut dispatch
+    {
+        *draft_model_path = std::path::PathBuf::from(
+            "/nonexistent/mlxcel-1983-dispatch-test/must-not-load-drafter",
+        );
+    }
+    let mut slot = WorkerDrafterSlot::from_dispatch(&dispatch);
+    let tokenizer = crate::tokenizer::MlxcelTokenizer::stub();
+    let (first, first_events) = make_test_sequence();
+    let (mut second, second_events) = make_test_sequence();
+    second.seq_id = SequenceId::from_raw(43);
+    let expected_prompts = [first.prompt_tokens.clone(), second.prompt_tokens.clone()];
+    let ctx = super::speculative_burst::BurstContext {
+        model: &model,
+        tokenizer: &tokenizer,
+        drafter_slot: &mut slot,
+        dispatch: &dispatch,
+        profile_probe_rounds: 0,
+        prefill_chunk_size: 512,
+    };
+    let requests = match super::speculative_burst::try_run_burst_batched(ctx, vec![first, second]) {
+        Err(requests) => requests,
+        Ok(_) => panic!("unsupported exactness layout must return requests for classic decode"),
+    };
+    assert_eq!(requests.len(), 2);
+    for (request, expected_prompt) in requests.iter().zip(expected_prompts) {
+        assert!(matches!(request.state, SequenceState::Queued));
+        assert_eq!(request.prompt_tokens, expected_prompt);
+        assert!(request.prefill_start.is_none());
+        assert!(request.generated_tokens.is_empty());
+    }
+    assert!(first_events.try_recv().is_err());
+    assert!(second_events.try_recv().is_err());
+}
+
 /// Build a minimal [`SequenceInfo`] in the `Queued` state with default
 /// sampling. Callers tweak individual fields before passing to
 /// [`should_burst_for_sequence`].
