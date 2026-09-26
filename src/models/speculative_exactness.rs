@@ -229,9 +229,28 @@ fn qmv_wide_switch_set(enabled: bool) {
     mlxcel_core::set_qmv_wide(enabled);
 }
 
+/// Whether flipping `qmv_wide` can change the kernel at all on this process.
+///
+/// `qmv_wide` is a Metal kernel; a build or host without the Metal backend
+/// ignores [`mlxcel_core::set_qmv_wide`] and reports it as enabled. Retrying
+/// there re-runs the whole probe for an identical verdict and then logs
+/// "disabling qmv_wide did not make it exact either", which reads as if the
+/// lever had been tried when it never existed (measured on GB10 / CUDA with
+/// Gemma 4 31B: same divergence, one extra probe).
+#[cfg(not(test))]
+fn qmv_wide_retry_applicable() -> bool {
+    mlxcel_core::metal_is_available()
+}
+
+#[cfg(test)]
+fn qmv_wide_retry_applicable() -> bool {
+    TEST_QMV_WIDE_APPLICABLE.with(|c| c.get())
+}
+
 #[cfg(test)]
 thread_local! {
     static TEST_QMV_WIDE: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    static TEST_QMV_WIDE_APPLICABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
 }
 
 #[cfg(test)]
@@ -268,7 +287,7 @@ fn retry_without_qmv_wide<F>(
 where
     F: FnMut() -> BlockChainExactness,
 {
-    if qmv_wide_pinned_by_operator() || !qmv_wide_switch_get() {
+    if !qmv_wide_retry_applicable() || qmv_wide_pinned_by_operator() || !qmv_wide_switch_get() {
         return None;
     }
 

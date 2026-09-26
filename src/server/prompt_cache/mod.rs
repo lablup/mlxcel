@@ -81,7 +81,8 @@ pub use policy::{
 };
 pub use snapshot_sizing::{
     MODEL_AWARE_SNAPSHOT_CONTEXT_TOKENS, MODEL_AWARE_SNAPSHOT_TARGET_ENTRIES,
-    SnapshotCapacityRecommendation, recommend_model_snapshot_capacity,
+    SnapshotCapacityRecommendation, recommend_model_kv_store_capacity,
+    recommend_model_snapshot_capacity,
 };
 pub use store::{PromptCacheStore, SnapshotDivergence, SnapshotLookupOutcome};
 pub use types::{BucketKey, InsertError};

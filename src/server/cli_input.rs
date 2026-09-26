@@ -2001,6 +2001,7 @@ pub(super) fn build_prompt_cache_config(
         min_prefix.unwrap_or(defaults.min_prefix_tokens),
     )
     .with_apc(apc);
+    cfg.capacity_bytes_explicit = capacity_bytes.is_some();
     if let Some(capacity_bytes) = snapshot_capacity_bytes {
         cfg = cfg.with_snapshot_capacity_bytes(capacity_bytes);
     }

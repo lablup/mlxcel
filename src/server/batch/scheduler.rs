@@ -105,14 +105,42 @@ impl BatchScheduler {
         // as `run_mtp_burst`: an unsupported pairing declines to classic
         // without surfacing a confusing drafter-load error.
         if !crate::server::batch::speculative_burst::mtp_capable_target(&self.model, block_size) {
-            tracing::warn!(
-                "MTP speculative dispatch declined: target is not \
-                 Gemma 4 (text, VLM, or Unified), Qwen 3.5 (text or VLM), Inkling, \
-                 or GLM-4.7-Flash (glm4_moe_lite), \
-                 or its verify block is not byte-identical to classic decode \
-                 at block_size={block_size} on this hardware (see the \
-                 exactness-probe log line above); falling back to classic decode",
-            );
+            // The verdict is fixed for the life of the process (the family
+            // does not change and the exactness probe is memoized), so say it
+            // once at WARN and keep later requests at DEBUG.
+            static DECLINE_LOGGED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            let first = !DECLINE_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed);
+            let reason = if crate::server::batch::speculative_burst::mtp_target_family_supported(
+                &self.model,
+            ) {
+                // A supported family only lands here when the block-vs-chain
+                // probe declined, so name the probe's verdict rather than
+                // suggesting the model type is wrong.
+                let probe = crate::models::speculative_exactness::decline_reason(block_size as u32)
+                    .map(|r| r.trim_end_matches('.').to_string())
+                    .unwrap_or_else(|| "the exactness probe declined".to_string());
+                format!(
+                    "the verify block is not byte-identical to classic decode at \
+                     block_size={block_size} on this hardware ({probe}). Set \
+                     MLXCEL_MTP_ALLOW_INEXACT=1 to engage MTP anyway and forfeit \
+                     temperature-0 byte-identity"
+                )
+            } else {
+                "target is not Gemma 4 (text, VLM, or Unified), Qwen 3.5 (text or VLM), \
+                 Inkling, or GLM-4.7-Flash (glm4_moe_lite)"
+                    .to_string()
+            };
+            if first {
+                tracing::warn!(
+                    "MTP speculative dispatch declined: {reason}; falling back to classic decode \
+                     (logged once per process)"
+                );
+            } else {
+                tracing::debug!(
+                    "MTP speculative dispatch declined: {reason}; falling back to classic decode"
+                );
+            }
             return Some(seq);
         }
 

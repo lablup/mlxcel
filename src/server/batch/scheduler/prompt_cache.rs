@@ -735,6 +735,7 @@ impl BatchScheduler {
             }
         };
         let entry = ModelSnapshotEntry::new(tokens, snapshot).with_origin(origin);
+        let entry_bytes = entry.size_bytes;
         let key_tokens = entry.tokens.clone();
         let key =
             Self::compose_prompt_cache_key(ctx, &key_tokens, self.rope_regime_for(encoded_span));
@@ -743,6 +744,7 @@ impl BatchScheduler {
                 tracing::debug!(
                     seq_id = %seq_id,
                     token_len = key_tokens.len(),
+                    entry_bytes,
                     bytes = store.stats().snapshot_bytes,
                     origin = ?origin,
                     "prompt-cache snapshot inserted"
@@ -761,6 +763,31 @@ impl BatchScheduler {
                 }
             }
             Err(err) => {
+                // An entry that cannot fit even alone means this conversation
+                // can never hit, and the only visible symptom is `cached=0` on
+                // every turn. Say so once at WARN with the knob that fixes it;
+                // it repeats on every request, so later ones stay at DEBUG.
+                static OVERSIZE_WARNED: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if let crate::server::prompt_cache::InsertError::OversizedEntry {
+                    entry_bytes,
+                    capacity_bytes,
+                } = &err
+                    && !OVERSIZE_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed)
+                {
+                    tracing::warn!(
+                        ?origin,
+                        entry_bytes,
+                        capacity_bytes,
+                        token_len = key_tokens.len(),
+                        "prompt-cache snapshot of {} tokens needs {entry_bytes} bytes but the \
+                         snapshot store holds {capacity_bytes}, so multi-turn reuse cannot hit \
+                         for this model. Raise --prompt-cache-snapshot-capacity-bytes (or \
+                         MLXCEL_PROMPT_CACHE_SNAPSHOT_CAPACITY_BYTES) above the entry size \
+                         times the number of conversations to keep (logged once per process)",
+                        key_tokens.len()
+                    );
+                }
                 tracing::debug!(?origin, "prompt-cache snapshot insert skipped: {err}");
                 self.batch_observability.record_prompt_cache_insert_reject();
                 self.batch_observability.record_prompt_cache_reject(
@@ -1304,6 +1331,30 @@ impl BatchScheduler {
                 // (it has no `CachePool` handle), which the
                 // `drain_store_paged_releases()` below returns to the pool
                 // (#122 sub-step a).
+                //
+                // Same observability rule as the snapshot store: an entry the
+                // whole KV store cannot hold turns every follow-up turn into a
+                // silent `cached=0`, so name the knob once at WARN.
+                static OVERSIZE_WARNED: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if let crate::server::prompt_cache::InsertError::OversizedEntry {
+                    entry_bytes,
+                    capacity_bytes,
+                } = &err
+                    && !OVERSIZE_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed)
+                {
+                    tracing::warn!(
+                        seq_id = %seq_id,
+                        entry_bytes,
+                        capacity_bytes,
+                        token_len = key_tokens.len(),
+                        "prompt-cache KV entry of {} tokens needs {entry_bytes} bytes but the \
+                         prompt-cache store holds {capacity_bytes}, so multi-turn reuse cannot \
+                         hit at this length. Raise --prompt-cache-capacity-bytes (or \
+                         MLXCEL_PROMPT_CACHE_CAPACITY_BYTES) (logged once per process)",
+                        key_tokens.len()
+                    );
+                }
                 tracing::debug!(
                     seq_id = %seq_id,
                     "prompt-cache donate-back skipped: {err:?}"

@@ -166,6 +166,24 @@ fn standard_elems(dims: &AttnDims) -> u64 {
         .saturating_mul(dims.head_dim)
 }
 
+/// K+V element count for a full-attention layer of a `layer_types` model.
+///
+/// Uses the dedicated global geometry when the config declares one
+/// (`global_head_dim`, with `num_global_key_value_heads` defaulting to the
+/// sliding layers' KV-head count) and the shared dims otherwise, so Gemma 3n
+/// and any config without the fields keep the previous figure.
+fn global_attention_elems(text: &Value, dims: &AttnDims) -> u64 {
+    match get_u64(text, &["global_head_dim"]).filter(|d| *d > 0) {
+        Some(head_dim) => {
+            let heads = get_u64(text, &["num_global_key_value_heads"])
+                .filter(|h| *h > 0)
+                .unwrap_or(dims.num_kv_heads);
+            2u64.saturating_mul(heads).saturating_mul(head_dim)
+        }
+        None => standard_elems(dims),
+    }
+}
+
 /// Count the attention (KV-holding) layers of a hybrid model, trying each
 /// layer-typing scheme mlxcel's hybrid models use. Returns `None` when no
 /// hybrid scheme is present (the model is not hybrid).
@@ -299,6 +317,11 @@ fn classify(text: &Value, model_type: &str) -> Option<(Vec<KvGroup>, KvArchKind)
         // 4a. Per-layer `layer_types` array (Gemma 3n / 4): each entry is
         //     "full_attention" (global) or "sliding_attention" (windowed).
         if let Some(arr) = text.get("layer_types").and_then(|v| v.as_array()) {
+            // Gemma 4 gives its full-attention layers their own KV geometry
+            // (`num_global_key_value_heads` x `global_head_dim`, 4 x 512 on
+            // the 31B against 16 x 256 for the sliding layers). Sizing them
+            // with the sliding dims doubles their footprint.
+            let global_elems = global_attention_elems(text, &dims);
             let mut global = 0u64;
             let mut sliding = 0u64;
             for e in arr {
@@ -312,7 +335,7 @@ fn classify(text: &Value, model_type: &str) -> Option<(Vec<KvGroup>, KvArchKind)
             if global > 0 {
                 groups.push(KvGroup {
                     layers: global,
-                    elems_per_token: elems,
+                    elems_per_token: global_elems,
                     window: None,
                 });
             }
@@ -461,6 +484,35 @@ pub fn estimate_kv_arch_from_config(
     int8_kv: bool,
     batch: u64,
 ) -> Option<KvArchEstimate> {
+    estimate_kv_arch_inner(config, ctx_len, int8_kv, batch, true)
+}
+
+/// [`estimate_kv_arch_from_config`] with every sliding-window cap lifted, so
+/// windowed layers are sized at the full `ctx_len`.
+///
+/// This is the footprint of a KV state captured before its rotating layers
+/// wrap, which is what a prompt-cache history-boundary snapshot holds: the
+/// prefill forward leaves every sliding layer unwrapped over the whole
+/// segment, and #1145's truncating restore depends on it. Measured on Gemma 4
+/// 31B at 3289 tokens: 2.97 GB, against 1.11 GB for the same conversation's
+/// window-capped completion snapshot.
+#[must_use]
+pub fn estimate_kv_arch_unwindowed_from_config(
+    config: &Value,
+    ctx_len: u64,
+    int8_kv: bool,
+    batch: u64,
+) -> Option<KvArchEstimate> {
+    estimate_kv_arch_inner(config, ctx_len, int8_kv, batch, false)
+}
+
+fn estimate_kv_arch_inner(
+    config: &Value,
+    ctx_len: u64,
+    int8_kv: bool,
+    batch: u64,
+    apply_windows: bool,
+) -> Option<KvArchEstimate> {
     // VLMs nest the decoder under `text_config`; `model_type` may live at the
     // top level (the VLM type) or inside `text_config` (the decoder type).
     let text = config.get("text_config").unwrap_or(config);
@@ -468,9 +520,16 @@ pub fn estimate_kv_arch_from_config(
         .or_else(|| get_str(config, "model_type"))
         .unwrap_or("");
 
-    let (groups, kind) = classify(text, model_type)?;
-    let (total_bytes, marginal_bytes_per_token) = sum_groups(&groups, ctx_len, int8_kv, batch);
+    let (mut groups, kind) = classify(text, model_type)?;
+    // The detail line describes the architecture, so it keeps the windows even
+    // when the byte figure below ignores them.
     let detail = detail_line(&groups, kind);
+    if !apply_windows {
+        for group in &mut groups {
+            group.window = None;
+        }
+    }
+    let (total_bytes, marginal_bytes_per_token) = sum_groups(&groups, ctx_len, int8_kv, batch);
     Some(KvArchEstimate {
         total_bytes,
         marginal_bytes_per_token,
@@ -575,6 +634,58 @@ mod tests {
         let elems = 2 * 64; // 1 kv_head × 64 head_dim
         let expected = elems * 4096 * FP16 + 3 * elems * 512 * FP16;
         assert_eq!(e.total_bytes, expected);
+    }
+
+    /// Gemma 4 31B's text config: 50 sliding layers at 16 x 256 and 10
+    /// full-attention layers at their own 4 x 512.
+    fn gemma4_31b_text() -> Value {
+        let mut layer_types = Vec::new();
+        for i in 0..60 {
+            layer_types.push(if (i + 1) % 6 == 0 {
+                "full_attention"
+            } else {
+                "sliding_attention"
+            });
+        }
+        json!({
+            "model_type": "gemma4",
+            "text_config": {
+                "model_type": "gemma4_text",
+                "num_hidden_layers": 60,
+                "num_attention_heads": 32,
+                "num_key_value_heads": 16,
+                "num_global_key_value_heads": 4,
+                "head_dim": 256,
+                "global_head_dim": 512,
+                "sliding_window": 1024,
+                "layer_types": layer_types,
+            },
+        })
+    }
+
+    #[test]
+    fn layer_types_global_layers_use_their_own_geometry() {
+        let e = est(&gemma4_31b_text(), 8192);
+        let sliding = 50 * 2 * 16 * 256 * 1024 * FP16;
+        let global = 10 * 2 * 4 * 512 * 8192 * FP16;
+        assert_eq!(e.total_bytes, sliding + global);
+        assert_eq!(e.marginal_bytes_per_token, 10 * 2 * 4 * 512 * FP16);
+    }
+
+    #[test]
+    fn unwindowed_estimate_sizes_every_layer_at_the_full_context() {
+        let cfg = gemma4_31b_text();
+        let e = estimate_kv_arch_unwindowed_from_config(&cfg, 3328, false, 1).expect("estimate");
+        // Per token: 50 x 16 x 256 x 2 + 10 x 4 x 512 x 2 elements, bf16.
+        let per_token = (50 * 2 * 16 * 256 + 10 * 2 * 4 * 512) * FP16;
+        assert_eq!(per_token, 901_120);
+        assert_eq!(e.total_bytes, per_token * 3328);
+        // Measured on the real checkpoint: a 3289-token boundary snapshot is
+        // 2_966_980_240 bytes. The estimate at the next 256 step is within 2%.
+        let measured_per_token = 2_966_980_240f64 / 3289.0;
+        assert!((measured_per_token / per_token as f64 - 1.0).abs() < 0.02);
+        // The architecture line still describes the windows.
+        assert_eq!(e.detail, est(&cfg, 3328).detail);
     }
 
     #[test]

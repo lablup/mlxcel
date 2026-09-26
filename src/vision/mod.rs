@@ -590,6 +590,10 @@ impl LanguageModel for VisionLanguageModel {
 mod tests;
 
 #[cfg(test)]
+#[path = "snapshot_forwarding_tests.rs"]
+mod snapshot_forwarding_tests;
+
+#[cfg(test)]
 #[path = "moondream3_vl_tests.rs"]
 mod moondream3_vl_tests;
 

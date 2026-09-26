@@ -38,6 +38,10 @@ pub struct PromptCacheConfig {
     /// Total byte budget across all entries. Inserts that would exceed this
     /// after eviction are rejected.
     pub capacity_bytes: usize,
+    /// Whether [`Self::capacity_bytes`] came from an operator flag/env.
+    /// Startup may raise the compiled-in default for a model whose single
+    /// conversation outgrows it, but never an operator cap.
+    pub capacity_bytes_explicit: bool,
     /// Upper bound on the number of live cache entries. Oldest entries are
     /// evicted first once this cap is hit.
     pub max_entries: usize,
@@ -194,6 +198,7 @@ impl PromptCacheConfig {
         Self {
             enabled,
             capacity_bytes,
+            capacity_bytes_explicit: false,
             max_entries,
             ttl,
             min_prefix_tokens,
@@ -265,6 +270,7 @@ impl Default for PromptCacheConfig {
         Self {
             enabled: true,
             capacity_bytes: Self::DEFAULT_CAPACITY_BYTES,
+            capacity_bytes_explicit: false,
             max_entries: Self::DEFAULT_MAX_ENTRIES,
             ttl: Duration::from_secs(Self::DEFAULT_TTL_SECONDS),
             min_prefix_tokens: Self::DEFAULT_MIN_PREFIX_TOKENS,
