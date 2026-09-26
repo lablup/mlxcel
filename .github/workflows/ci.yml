@@ -109,6 +109,7 @@ jobs:
       mlx_pin: ${{ steps.filter.outputs.mlx_pin }}
       xla_link: ${{ steps.filter.outputs.xla_link }}
       cuda_arch: ${{ steps.filter.outputs.cuda_arch }}
+      rocm: ${{ steps.filter.outputs.rocm }}
       webui_bundle: ${{ steps.filter.outputs.webui_bundle }}
     steps:
       - uses: actions/checkout@v7
@@ -159,6 +160,20 @@ jobs:
               - 'src/lib/mlxcel-core/build.rs'
               - 'src/lib/mlxcel-core/build_support/**'
               - 'build.rs'
+              - '.github/workflows/ci.yml'
+            # Everything that can change what the ROCm build compiles, links or
+            # runs: the HIP overlay, the shared MLX build inputs, the bridge
+            # sources the overlay is called through, and the pinned MLX commit.
+            # A pin bump must trigger this, because the ROCm half of every bump
+            # now lives in `patches-rocm/` and nothing else in CI links it.
+            rocm:
+              - 'src/lib/mlx-cpp/**'
+              - 'src/lib/mlxcel-core/build.rs'
+              - 'src/lib/mlxcel-core/build_support/**'
+              - 'src/lib/mlxcel-core/cpp/**'
+              - 'build.rs'
+              - '**/Cargo.toml'
+              - 'Cargo.lock'
               - '.github/workflows/ci.yml'
             webui_bundle:
               - 'webui/**'
@@ -1512,3 +1527,226 @@ jobs:
           cargo test -p mlxcel-core --profile test-fast --features cuda --lib -- \
             --test-threads=1 \
             global_scale
+
+  # ============================================================================
+  # ROCm build, link and generate (self-hosted gfx1151)
+  # ============================================================================
+  # Nothing else in CI compiles the ROCm feature at all. `cargo check` jobs do
+  # not carry it, the CUDA jobs point at NVIDIA runners, and the ROCm half of
+  # every MLX pin bump now lives in `src/lib/mlx-cpp/patches-rocm/`. Without
+  # this job a bump that breaks the HIP overlay reaches `main` unnoticed, which
+  # is exactly how the CUDA link regression in #1274 got in: `cargo check` was
+  # green on a tree that could not link a single test.
+  #
+  # So this job builds AND links AND generates. Each step catches a class the
+  # one before it cannot:
+  #   - `cargo build --release --features rocm` compiles the overlay and links
+  #     the binary, which `cargo check` would not do.
+  #   - The generate step runs a real forward pass on the GPU, which catches a
+  #     kernel that compiles and links but launches nothing (the `searchsorted`
+  #     and `hadamard` gaps in #1825 were of that shape).
+  #   - The device assertion catches a silent fall back to the CPU, which would
+  #     otherwise make a broken GPU path look like a passing job.
+  #
+  # The runner is a shared host with other GPU tenants, so the job takes one
+  # small checkpoint, one short generation and a persistent target directory
+  # rather than a clean build per run.
+  rocm-build:
+    name: ROCm build and generate
+    needs: changes
+    # `vars.ROCM_CI_ENABLED` is an activation switch, not a feature flag. A job
+    # targeting a self-hosted runner that does not exist is not skipped by
+    # GitHub, it is queued, for up to 24 hours. While it sits there the whole
+    # workflow run stays in progress, which means no job in that run has
+    # readable logs, and the check reads as "still running" to a reviewer. So
+    # every PR touching the HIP overlay would pay for the runner being absent.
+    # Parking the job behind a repository variable makes it genuinely inert
+    # until someone registers the runner and sets the variable to `true`, and
+    # `rocm-runner-status` below says which state it is in.
+    if: >-
+      github.repository == 'lablup/mlxcel'
+      && needs.changes.outputs.rocm == 'true'
+      && vars.ROCM_CI_ENABLED == 'true'
+    runs-on: [self-hosted, rocm-gfx1151]
+    permissions:
+      contents: read
+    # Generous because a cold runner builds MLX from source; a warm one reuses
+    # the persistent target directory and finishes in minutes.
+    timeout-minutes: 180
+    env:
+      # Set explicitly rather than detected. `rocminfo` needs `/dev/kfd`, which
+      # a containerised runner may not see, and detection failing would turn a
+      # build error into a confusing "no GPU agent" abort. This is also the
+      # value the host actually is, so a mismatch between the two is a real
+      # finding rather than a CI artefact (#1805).
+      MLX_ROCM_ARCHITECTURES: gfx1151
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Use a persistent target directory
+        run: |
+          # Separate from any other job's directory, so a ROCm check cannot
+          # invalidate another build's cache or be slowed by it.
+          CARGO_TARGET="$HOME/.cargo-target/mlxcel-rocm-ci"
+          mkdir -p "$CARGO_TARGET"
+          echo "CARGO_TARGET_DIR=$CARGO_TARGET" >> "$GITHUB_ENV"
+
+      - name: Report the ROCm toolchain
+        run: |
+          # Recorded in the log so a failure can be attributed to a host change
+          # rather than to the PR. Not a gate: a missing `rocminfo` is fine
+          # because the build does not need it when the architecture is set.
+          hipconfig --version || true
+          rocminfo 2>/dev/null | grep -E 'Name:|gfx' | head -20 || true
+
+      - name: Build and link with the ROCm feature
+        run: cargo build --release --features rocm
+
+      - name: Cache CI fixture weights
+        id: ci-fixture-cache
+        uses: actions/cache@v6
+        with:
+          path: models/qwen3-0.6b-4bit
+          key: ${{ runner.os }}-ci-fixture-qwen3-0.6b-4bit-v1
+      - name: Download CI fixture
+        if: steps.ci-fixture-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CI_FIXTURE_TAG: ci-fixtures/qwen3-0.6b-4bit-v1
+          CI_FIXTURE_ASSET: qwen3-0.6b-4bit.tar.gz
+        run: |
+          mkdir -p models
+          tmp_dir="$(mktemp -d)"
+          gh release download "$CI_FIXTURE_TAG" \
+            --pattern "$CI_FIXTURE_ASSET" \
+            --dir "$tmp_dir"
+          tar -xzf "$tmp_dir/$CI_FIXTURE_ASSET" -C models/
+          rm -rf "$tmp_dir"
+
+      - name: Generate on the GPU
+        env:
+          # Presence-enabled; prints the resolved backend on stderr, so the
+          # assertion below can tell a ROCm run from a CPU fall back (#1805).
+          MLXCEL_DEBUG_KERNEL_BACKEND: "1"
+        run: |
+          # `LD_LIBRARY_PATH` deliberately unset: the binary must find the ROCm
+          # libraries through the rpath its build script emits, not through the
+          # environment. Issue #1802 shipped without that rpath on two crates
+          # and their test binaries failed to start with
+          # `libamdhip64.so.7: cannot open shared object file`.
+          unset LD_LIBRARY_PATH
+          # stdout and stderr are kept in separate files on purpose. Merging
+          # them interleaves the `[mlx-rocm]` device lines into the generated
+          # text, and then a word count over the log passes on a run that
+          # generated nothing, because the diagnostics alone carry over a
+          # hundred words. That is the green-but-hollow shape this job exists
+          # to avoid, and the first draft of this step had it.
+          #
+          # `--show-reasoning` because a reasoning-capable checkpoint sends
+          # every token to the hidden channel on a prompt this short, leaving
+          # the content channel empty on a perfectly healthy run.
+          ./target/release/mlxcel generate \
+            -m models/qwen3-0.6b-4bit \
+            -p "Write one sentence about the ocean." \
+            -n 32 --temp 0 --show-reasoning \
+            > generate.out 2> generate.err
+          cat generate.out
+          cat generate.err
+
+      - name: Assert it ran on the GPU and generated text
+        run: |
+          # A CPU fall back still "succeeds" at generating, so the device is
+          # asserted separately from the output.
+          if ! grep -q 'custom kernel backend: rocm' generate.err; then
+            echo "expected the resolved kernel backend to be rocm" >&2
+            cat generate.err >&2
+            exit 1
+          fi
+          if ! grep -q '^HIP architecture gfx1151' generate.out; then
+            echo "expected the startup diagnostics to name gfx1151" >&2
+            cat generate.out >&2
+            exit 1
+          fi
+          # An AMD device reporting a CUDA compute capability is the #1805
+          # defect; assert it stays gone rather than trusting the unit test.
+          if grep -q 'CUDA compute capability' generate.out; then
+            echo "an AMD device must not report a CUDA compute capability" >&2
+            cat generate.out >&2
+            exit 1
+          fi
+          summary=$(grep -oE '^\[Generated [0-9]+ tokens' generate.out | head -1 || true)
+          if [ -z "$summary" ]; then
+            echo "no generation summary line; the decode loop did not finish" >&2
+            cat generate.out >&2
+            exit 1
+          fi
+          tokens=$(printf '%s' "$summary" | grep -oE '[0-9]+')
+          if [ "$tokens" -lt 16 ]; then
+            echo "generated only $tokens tokens, expected at least 16" >&2
+            exit 1
+          fi
+          # Generated text only: between the banner and the summary, minus the
+          # echoed prompt and any bracketed notice. A kernel that launches but
+          # computes nothing tends to emit an empty string or one repeated
+          # token, which this catches without pinning text that a legitimate
+          # numerics change may move.
+          text=$(sed -n '/^Generating\.\.\./,/^\[Generated /p' generate.out \
+                 | sed '1,2d;$d' | grep -v '^\[' || true)
+          words=$(printf '%s' "$text" | grep -oE '[A-Za-z]{2,}' | wc -l)
+          if [ "$words" -lt 8 ]; then
+            echo "generated text held $words word-like tokens, expected at least 8" >&2
+            printf '%s\n' "$text" >&2
+            exit 1
+          fi
+          echo "ROCm generation ran on gfx1151: $tokens tokens, $words word-like tokens"
+
+  # ============================================================================
+  # ROCm CI status (hosted)
+  # ============================================================================
+  # `rocm-build` above is parked until a `rocm-gfx1151` runner exists and
+  # `vars.ROCM_CI_ENABLED` is `true`. Parking it silently would be its own
+  # trap: a reviewer would see no ROCm check at all on a PR that changes the
+  # HIP overlay and reasonably conclude one ran. This job always reports which
+  # state the ROCm gate is in.
+  #
+  # It is advisory and never fails a PR. Whether a runner is attached is an
+  # infrastructure fact, not a defect in the change under review.
+  rocm-ci-status:
+    name: ROCm CI status
+    needs: changes
+    if: github.repository == 'lablup/mlxcel' && needs.changes.outputs.rocm == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Lets the runner query below actually answer for repository-level
+      # runners. Without it the token gets a 403 and the job can only say
+      # "cannot tell", which is a non-answer in exactly the situation this job
+      # exists for.
+      administration: read
+    timeout-minutes: 5
+    steps:
+      - name: Report the state of the ROCm gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ROCM_CI_ENABLED: ${{ vars.ROCM_CI_ENABLED }}
+        run: |
+          if [ "${ROCM_CI_ENABLED:-}" = "true" ]; then
+            echo "ROCm CI is enabled; the 'ROCm build and generate' job in this run is the authority."
+            exit 0
+          fi
+          # Not enabled. Say so, and say whether the runner it is waiting for
+          # is already there, so whoever registered it knows the variable is
+          # the only thing left.
+          runner_state="unknown (this token cannot list runners, or the runner is registered at the organization level, which is not visible from a repository token)"
+          if body=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runners" 2>/dev/null); then
+            if printf '%s' "$body" | grep -q '"name":"rocm-gfx1151"'; then
+              runner_state="registered at the repository level"
+            else
+              runner_state="not registered at the repository level"
+            fi
+          fi
+          echo "::warning title=ROCm gate parked::This PR changes paths that affect the ROCm build, but 'ROCm build and generate' did not run: vars.ROCM_CI_ENABLED is not 'true'. Runner rocm-gfx1151: ${runner_state}. Set the repository variable to 'true' once a runner is attached (lablup/mlxcel#1811)."
+          echo "ROCm gate parked. vars.ROCM_CI_ENABLED is not 'true'."
+          echo "Runner rocm-gfx1151: ${runner_state}"

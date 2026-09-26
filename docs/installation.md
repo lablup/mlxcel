@@ -361,7 +361,7 @@ MLXCEL_CXX_MARCH=none cargo build --release --features cuda
 
 **Experimental.** AMD GPU support on Linux was added in lablup/mlxcel#1802 and
 is tracked by lablup/mlxcel#1801. It is a source build only: there is no
-release artifact and no ROCm CI job yet, and the gaps listed below are open.
+release artifact and no ROCm CI job running yet, and the gaps listed below are open.
 
 The backend is not part of upstream MLX. mlxcel vendors the ROCm backend from
 the `rocm-support` branch of
@@ -453,7 +453,7 @@ the results are in
 [`docs/benchmark_results/rocm-correctness-gfx1151-2026-09-12.md`](benchmark_results/rocm-correctness-gfx1151-2026-09-12.md).
 
 ```bash
-MLXCEL_FUSED_MOE=0 ./target/release/mlxcel-server -m models/mlx/Qwen3-30B-A3B-4bit --port 8080 &
+./target/release/mlxcel-server -m models/mlx/Qwen3-30B-A3B-4bit --port 8080 &
 ./scripts/server_chat_smoke.sh --port 8080
 ```
 
@@ -469,18 +469,19 @@ thinking model that spends its whole budget inside the thinking block reports
 | Affine 4-bit / 8-bit checkpoints | Run natively. |
 | mxfp8 and mxfp4 checkpoints | Run natively, including MoE experts through `gather_qmm` (for example gpt-oss-20b-MXFP4-Q4). |
 | NVFP4 checkpoints | No native kernel; load-time conversion is tracked in lablup/mlxcel#1806. |
-| Affine MoE models (for example Qwen3-30B-A3B) | Set `MLXCEL_FUSED_MOE=0`; the fused MoE path aborts on ROCm until lablup/mlxcel#1803. |
+| Affine MoE models (for example Qwen3-30B-A3B) | Run natively. The fused MoE path used to abort on ROCm; lablup/mlxcel#1803 routes it to the MLX graph fallback, so `MLXCEL_FUSED_MOE=0` is no longer needed. |
 | mlxcel's fused kernels (sampling, fused norm, RoPE + KV append, paged attention) | Run as MLX graph fallbacks on the paths that have one (lablup/mlxcel#1803); ROCm ports are lablup/mlxcel#1814. |
 | GPU faults | May show up as NaN output or a hang instead of an error (lablup/mlxcel#1804). |
-| Memory estimation on UMA hosts | Reads host RAM, not the VRAM carve-out; set `MLXCEL_MEMORY_LIMIT` if a model that fits is refused (lablup/mlxcel#1805). |
-| Diagnostics | Print a CUDA compute capability line for the AMD device (lablup/mlxcel#1805). |
+| Memory estimation on UMA hosts | Correct. Measured on the tested configuration: the ROCm allocator reports a nonzero cap (76.80 GiB of the 96 GiB carve-out), which the estimator reads before it would ever reach host RAM, so nothing that fits the carve-out is refused for that reason (lablup/mlxcel#1805). |
+| Diagnostics | Report the AMD vendor, device name, `gfx` target and device memory, and no longer print a CUDA compute capability for it (lablup/mlxcel#1805). A binary whose compiled `gfx` list does not cover the device refuses to start rather than failing at the first kernel launch. |
 | `mlxcel-server` chat completions | Work for dense and affine MoE checkpoints, streaming and non-streaming; verified with `scripts/server_chat_smoke.sh`. |
 | Audio (speech to text, text to speech) | Works. The FFT primitive runs on hipFFT; `MLX_ROCM_FFT_CACHE_SIZE` bounds how many transform plans stay alive (lablup/mlxcel#1825). |
 | Windows, multiple GPUs, distributed inference | Not supported. |
 
 Decode throughput measured on the tested configuration, for orientation only
 (greedy, short prompt): Qwen3-0.6B-4bit about 250 tok/s, Qwen3-30B-A3B-4bit
-about 55 tok/s with `MLXCEL_FUSED_MOE=0`, gpt-oss-20b-MXFP4-Q4 about 3.6 tok/s
+about 55 tok/s (measured with `MLXCEL_FUSED_MOE=0`, before lablup/mlxcel#1803
+made that unnecessary; not re-measured since), gpt-oss-20b-MXFP4-Q4 about 3.6 tok/s
 (generic gather kernel). A benchmark page is tracked in lablup/mlxcel#1810.
 
 ## Runtime environment variables
@@ -793,5 +794,8 @@ check that the user is in the `video` and `render` groups so `rocminfo` can open
 `/dev/kfd`.
 
 **ROCm: `[cuda_kernel] No CUDA back-end.` followed by an abort**: a fused path
-without a ROCm fallback was reached. For MoE models set `MLXCEL_FUSED_MOE=0`;
-otherwise report the model in lablup/mlxcel#1803.
+without a ROCm fallback was reached. lablup/mlxcel#1803 routed the fused paths
+that had a graph fallback, MoE included, so this should no longer happen on a
+routed path; report the model and the traceback. The known remaining case is a
+direct call to the Gumbel-max or rejection sampler entry point, which aborts
+with `[metal_kernel] No Metal back-end.` instead (lablup/mlxcel#1885).
