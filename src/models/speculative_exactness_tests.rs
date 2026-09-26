@@ -125,11 +125,12 @@ fn a_diverging_probe_declines_unless_the_override_is_set() {
 /// The control flow is what this pins, not the kernel selection. On a build
 /// without the Metal backend the switch is inert, so the second call sees the
 /// same hardware as the first; the stateful closure stands in for the change
-/// the switch makes on hardware that has it. Both builds must reach the probe
-/// exactly twice and engage.
+/// the switch makes on hardware that has it. An unpinned process must reach
+/// the probe exactly twice and engage; an ambient operator pin skips retry.
 #[test]
 fn a_probe_that_only_diverges_under_qmv_wide_engages_after_the_retry() {
     let k = key(9005);
+    let initial_switch = super::qmv_wide_switch_get();
     let mut calls = 0;
     let decision = mtp_exactness_gate(k, || {
         calls += 1;
@@ -143,15 +144,21 @@ fn a_probe_that_only_diverges_under_qmv_wide_engages_after_the_retry() {
             BlockChainExactness::Equal
         }
     });
-    assert!(
-        decision,
-        "an exact retry without qmv_wide must engage MTP, not decline"
-    );
-    assert_eq!(calls, 2, "the gate must re-probe exactly once");
-    assert!(
-        !super::qmv_wide_switch_get(),
-        "an exact retry keeps narrow selected"
-    );
+    if super::qmv_wide_pinned_by_operator() {
+        assert_eq!(calls, 1, "an operator pin must skip the retry");
+        assert_eq!(decision, super::allow_inexact());
+        assert_eq!(super::qmv_wide_switch_get(), initial_switch);
+    } else {
+        assert!(
+            decision,
+            "an exact retry without qmv_wide must engage MTP, not decline"
+        );
+        assert_eq!(calls, 2, "the gate must re-probe exactly once");
+        assert!(
+            !super::qmv_wide_switch_get(),
+            "an exact retry keeps narrow selected"
+        );
+    }
 }
 
 /// The retry must not fire when the operator pinned the kernel themselves.
@@ -221,9 +228,14 @@ fn a_backend_without_qmv_wide_skips_the_retry() {
     if !super::allow_inexact() {
         let reason = reason.expect("a decline records its reason");
         assert!(
-            !reason.contains("qmv_wide"),
-            "the reason must not mention a retry that never ran: {reason}"
+            !reason.contains("Retry with qmv_wide disabled:"),
+            "the reason must not report a narrow measurement that never ran: {reason}"
         );
+        if super::qmv_wide_pinned_by_operator() {
+            assert!(reason.contains("retry was skipped"), "{reason}");
+        } else {
+            assert!(!reason.contains("qmv_wide"), "{reason}");
+        }
     }
 }
 
