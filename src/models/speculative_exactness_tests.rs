@@ -182,6 +182,47 @@ fn a_pinned_qmv_wide_skips_the_retry() {
     }
 }
 
+/// Without the Metal backend `qmv_wide` does not exist, so there is nothing
+/// to retry: the gate must decline on the first verdict instead of paying a
+/// second probe and logging a lever it never had (GB10 / CUDA, Gemma 4 31B).
+#[test]
+fn a_backend_without_qmv_wide_skips_the_retry() {
+    // Restore on drop so a failing assertion cannot leak the toggle into a
+    // later test on this thread (`--test-threads=1` shares one).
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            super::TEST_QMV_WIDE_APPLICABLE.with(|c| c.set(true));
+        }
+    }
+    let _restore = Restore;
+    super::TEST_QMV_WIDE_APPLICABLE.with(|c| c.set(false));
+    let k = key(9007);
+    let mut calls = 0;
+    let decision = mtp_exactness_gate(k, || {
+        calls += 1;
+        if calls == 1 {
+            BlockChainExactness::Diverges {
+                position: 0,
+                differing_bytes: 226_171,
+                total_bytes: 524_288,
+            }
+        } else {
+            BlockChainExactness::Equal
+        }
+    });
+    assert_eq!(calls, 1, "no qmv_wide lever means no re-probe");
+    assert_eq!(decision, super::allow_inexact());
+    let reason = super::decline_reason(9007);
+    if !super::allow_inexact() {
+        let reason = reason.expect("a decline records its reason");
+        assert!(
+            !reason.contains("qmv_wide"),
+            "the reason must not mention a retry that never ran: {reason}"
+        );
+    }
+}
+
 #[test]
 fn different_block_widths_are_measured_separately() {
     // The whole point of probing: byte-identity holds at one block width

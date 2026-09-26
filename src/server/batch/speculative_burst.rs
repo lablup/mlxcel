@@ -742,6 +742,30 @@ pub(crate) fn mtp_capable_target(model: &LoadedModel, block_size: usize) -> bool
     }
 }
 
+/// Whether `model` belongs to a family that has an MTP target adapter at all,
+/// before any exactness measurement.
+///
+/// [`mtp_capable_target`] folds the family check and the block-vs-chain probe
+/// into one answer; this is the family half alone, so a decline message can
+/// tell "wrong model" apart from "probe failed on this hardware".
+///
+/// Used by: `BatchScheduler::start_mtp_slice_b1`'s decline log.
+pub(crate) fn mtp_target_family_supported(model: &LoadedModel) -> bool {
+    matches!(
+        model,
+        LoadedModel::Gemma4(_)
+            | LoadedModel::Gemma4VLM(_)
+            | LoadedModel::Gemma4Unified(_)
+            | LoadedModel::Qwen35(_)
+            | LoadedModel::Qwen35Moe(_)
+            | LoadedModel::Qwen35VLM(_)
+            | LoadedModel::Qwen35MoeVLM(_)
+            | LoadedModel::Inkling(_)
+            | LoadedModel::InklingVLM(_)
+            | LoadedModel::Glm4MoeLite(_)
+    )
+}
+
 /// Whether an adopted prompt-cache prefix (`prefill_start_offset > 0`) can
 /// be reused by this family's MTP target adapter.
 ///

@@ -278,6 +278,39 @@ impl LanguageModel for MiniCPMV46VLModel {
         mlxcel_core::generate::LanguageModel::supports_batching(&self.text_model)
     }
 
+    // The Qwen 3.5 backbone reuses prompts only through model-state
+    // snapshots (its GatedDeltaNet state cannot come from the KV trie).
+    // Without these three forwards the wrapper answered the trait defaults,
+    // so the scheduler never stored a snapshot and every turn of a
+    // conversation re-prefilled from zero. Mirrors `Qwen35VLModel`.
+    fn supports_snapshot_reuse(&self) -> bool {
+        mlxcel_core::generate::LanguageModel::supports_snapshot_reuse(&self.text_model)
+    }
+
+    fn snapshot_sequence_state(
+        &self,
+        seq_id: SequenceId,
+        token_len: usize,
+    ) -> Option<mlxcel_core::generate::ModelStateSnapshot> {
+        mlxcel_core::generate::LanguageModel::snapshot_sequence_state(
+            &self.text_model,
+            seq_id,
+            token_len,
+        )
+    }
+
+    fn restore_sequence_state(
+        &self,
+        seq_id: SequenceId,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+    ) -> Result<(), String> {
+        mlxcel_core::generate::LanguageModel::restore_sequence_state(
+            &self.text_model,
+            seq_id,
+            snapshot,
+        )
+    }
+
     fn supports_batched_prefill(&self) -> bool {
         mlxcel_core::generate::LanguageModel::supports_batched_prefill(&self.text_model)
     }

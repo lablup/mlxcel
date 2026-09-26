@@ -1917,6 +1917,11 @@ const SRC_OFFLINE_GENERATE: &str = include_str!("../../commands/generate.rs");
 /// Qwen 3.5 MTP is B = 1 only (#1165).
 const MTP_DISPATCH_SITES: &[(&str, &str, &str)] = &[
     (
+        "mtp_target_family_supported (decline-message family check)",
+        SRC_SPECULATIVE_BURST,
+        "fn mtp_target_family_supported(",
+    ),
+    (
         "run_mtp_burst (variant gate + adapter selection)",
         SRC_SPECULATIVE_BURST,
         "fn run_mtp_burst(",

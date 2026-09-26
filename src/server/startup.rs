@@ -3169,6 +3169,28 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         config.prompt_cache.snapshot_capacity_bytes = rec.capacity_bytes;
     }
 
+    if config.prompt_cache.is_enabled()
+        && !config.prompt_cache.capacity_bytes_explicit
+        && let Some(rec) = crate::server::prompt_cache::recommend_model_kv_store_capacity(
+            &startup.model_path,
+            config.context_size,
+            config.prompt_cache.capacity_bytes,
+        )
+        && rec.capacity_bytes > config.prompt_cache.capacity_bytes
+    {
+        tracing::info!(
+            previous_capacity_bytes = config.prompt_cache.capacity_bytes,
+            recommended_capacity_bytes = rec.capacity_bytes,
+            representative_entry_bytes = rec.entry_bytes,
+            representative_tokens = rec.representative_tokens,
+            target_entries = rec.target_entries,
+            available_ceiling_bytes = rec.available_ceiling_bytes,
+            architecture = %rec.architecture,
+            "Applied model-aware prompt-cache KV store capacity default"
+        );
+        config.prompt_cache.capacity_bytes = rec.capacity_bytes;
+    }
+
     // hybrid SSM / linear-attention models cannot use APC because
     // their recurrent state cannot be reconstructed from a token-prefix hash.
     // Detect by reading model_type / architectures from config.json and
