@@ -548,6 +548,14 @@
       }
     }
   },
+  "gemma4_12b_final_startup": {
+    "target": "gemma-4-12b-it-4bit",
+    "drafter": "gemma-4-12b-it-assistant-4bit",
+    "allow_inexact": false,
+    "verdict": "passed after automatic narrow retry",
+    "health_seconds": 14.09,
+    "interpretation": "startup correctness smoke; not a performance measurement"
+  },
   "qwen_mtp": {
     "before-mtp": {
       "prompt_tokens": 498,
