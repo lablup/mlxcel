@@ -97,7 +97,7 @@ pub async fn audio_speech(
         Ok(Err(err)) => return audio_model_error_response(err).into_response(),
         Err(join_err) => {
             tracing::error!("audio synthesis task panicked: {join_err}");
-            return ErrorResponse::new("audio synthesis failed", "server_error").into_response();
+            return ErrorResponse::internal_server_error("audio synthesis failed").into_response();
         }
     };
     state
@@ -275,7 +275,7 @@ async fn compat_transcribe(
             Ok(Err(err)) => return audio_model_error_response(err).into_response(),
             Err(join_err) => {
                 tracing::error!("audio transcription task panicked: {join_err}");
-                return ErrorResponse::new("audio transcription failed", "server_error")
+                return ErrorResponse::internal_server_error("audio transcription failed")
                     .into_response();
             }
         }
@@ -303,7 +303,7 @@ async fn compat_transcribe(
         Ok(response) => response,
         Err(err) => {
             tracing::error!("failed to build transcription stream: {err}");
-            ErrorResponse::new("failed to build transcription stream", "server_error")
+            ErrorResponse::internal_server_error("failed to build transcription stream")
                 .into_response()
         }
     }
@@ -370,7 +370,7 @@ async fn transcribe(state: AppState, multipart: Multipart, translate: bool) -> R
         Ok(Err(err)) => return audio_model_error_response(err).into_response(),
         Err(join_err) => {
             tracing::error!("audio transcription task panicked: {join_err}");
-            return ErrorResponse::new("audio transcription failed", "server_error")
+            return ErrorResponse::internal_server_error("audio transcription failed")
                 .into_response();
         }
     };
@@ -490,7 +490,7 @@ fn build_audio_response(format: &AudioFormat, body: Vec<u8>) -> Response {
         Ok(response) => response,
         Err(err) => {
             tracing::error!("failed to build audio response: {err}");
-            ErrorResponse::new("failed to build audio response", "server_error").into_response()
+            ErrorResponse::internal_server_error("failed to build audio response").into_response()
         }
     }
 }
@@ -545,10 +545,9 @@ fn audio_kind_not_loaded(kind: AudioModelKind) -> ErrorResponse {
 fn audio_model_error_response(err: AudioModelError) -> ErrorResponse {
     match err {
         AudioModelError::KindNotLoaded(kind) => audio_kind_not_loaded(kind),
-        AudioModelError::Inference(message) => ErrorResponse::new(
-            format!("audio model inference failed: {message}"),
-            "server_error",
-        ),
+        AudioModelError::Inference(message) => {
+            ErrorResponse::internal_server_error(format!("audio model inference failed: {message}"))
+        }
         // A full bounded queue reuses the shared 503 admission envelope so the
         // audio path sheds load the same way the generation path does.
         AudioModelError::QueueFull => {
@@ -600,6 +599,7 @@ mod tests {
         let inference = audio_model_error_response(AudioModelError::Inference("boom".into()));
         assert_eq!(inference.error.error_type, "server_error");
         assert!(inference.error.message.contains("boom"));
+        assert_eq!(inference.status, StatusCode::INTERNAL_SERVER_ERROR);
 
         let not_loaded =
             audio_model_error_response(AudioModelError::KindNotLoaded(AudioModelKind::Tts));
