@@ -345,15 +345,15 @@ fn resolve_model_dir(name: &str) -> PathBuf {
     primary
 }
 
-/// Encode a prompt with a tokenizer, mirroring `tests/tensor_parallel_real_models.rs`.
-fn encode_prompt(tokenizer: &MlxcelTokenizer, prompt: &str) -> Vec<i32> {
+/// Encode a prompt with a tokenizer, returning a diagnostic error instead of
+/// panicking when the tokenizer rejects `--prompt`, mirroring `tokenize_prompt`
+/// in `bench_decode.rs`.
+fn encode_prompt(tokenizer: &MlxcelTokenizer, prompt: &str) -> Result<Vec<i32>> {
     let add_special = !tokenizer.prompt_carries_bos(prompt);
-    tokenizer
+    let ids = tokenizer
         .encode(prompt, add_special)
-        .expect("tokenizer.encode must succeed on a valid utf-8 prompt")
-        .into_iter()
-        .map(|t| t as i32)
-        .collect()
+        .map_err(|err| anyhow::anyhow!("--prompt failed to tokenize: {err}"))?;
+    Ok(ids.into_iter().map(|t| t as i32).collect())
 }
 
 /// Run the no-drafter baseline against a real on-disk target. Returns the
@@ -371,7 +371,7 @@ fn run_baseline(target_dir: &Path, prompt: &str, max_tokens: usize) -> Result<(f
     mlxcel_core::clear_memory_cache();
 
     let (model, tokenizer) = load_model(target_dir).context("load_model failed")?;
-    let prompt_tokens = encode_prompt(&tokenizer, prompt);
+    let prompt_tokens = encode_prompt(&tokenizer, prompt)?;
     eprintln!(
         "[bench/baseline] Prompt {} tokens, max_new {}",
         prompt_tokens.len(),
@@ -541,7 +541,7 @@ fn run_mtp(
         mlxcel::model_variant_label(&model)
     );
 
-    let prompt_tokens = encode_prompt(&tokenizer, prompt);
+    let prompt_tokens = encode_prompt(&tokenizer, prompt)?;
     eprintln!(
         "[bench/mtp] Prompt {} tokens, max_new {}",
         prompt_tokens.len(),
