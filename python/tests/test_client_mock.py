@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 import mlxcel
+from mlxcel._common import UDS_BASE, connect_base_url, native_base_url, normalize_base_url
 from mlxcel._sampling import build_params
 
 MODEL_ID = "mock-model"
@@ -262,6 +263,41 @@ def test_no_args_is_error() -> None:
 def test_base_url_and_socket_is_error() -> None:
     with pytest.raises(mlxcel.MlxcelError):
         mlxcel.LLM(base_url="http://x/v1", socket="/tmp/x.sock")
+
+
+# -- URL normalization -------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("base_url", "expected"),
+    [
+        ("http://localhost:8080", "http://localhost:8080/v1"),
+        ("http://localhost:8080/", "http://localhost:8080/v1"),
+        ("http://localhost:8080/v1", "http://localhost:8080/v1"),
+        ("http://localhost:8080/v1/", "http://localhost:8080/v1"),
+    ],
+)
+def test_normalize_base_url(base_url: str, expected: str) -> None:
+    assert normalize_base_url(base_url) == expected
+
+
+@pytest.mark.parametrize(
+    ("openai_base_url", "expected"),
+    [
+        ("http://localhost:8080/v1", "http://localhost:8080"),
+        ("http://localhost:8080", "http://localhost:8080"),
+    ],
+)
+def test_native_base_url(openai_base_url: str, expected: str) -> None:
+    assert native_base_url(openai_base_url) == expected
+
+
+def test_connect_base_url_normalizes_given_base_url() -> None:
+    assert connect_base_url("http://localhost:8080") == "http://localhost:8080/v1"
+
+
+def test_connect_base_url_defaults_to_socket_base() -> None:
+    assert connect_base_url(None) == f"{UDS_BASE}/v1"
 
 
 # -- sampling unit ----------------------------------------------------------
