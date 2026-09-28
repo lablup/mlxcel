@@ -14,6 +14,7 @@
 
 #include "sampling.h"
 #include "gpu_backend.h"
+#include "kernel_port.h"
 
 #include <mlx/fast.h>
 #include <mlx/ops.h>
@@ -350,13 +351,30 @@ inline GumbelKernelHolderCuda& get_gumbel_kernel_cuda() {
     return *holder;
 }
 
-} // namespace
 
+// This kernel's ports, in one place. `has_kernel_port` and
+// `select_kernel_port` both read it, so the support predicate below and the
+// dispatch in `gumbel_max_sample` cannot answer differently (#1801).
+const KernelPorts& gumbel_ports() {
+    static const KernelPorts ports{
+        .metal = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_gumbel_kernel().get();
+        },
+        .cuda = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_gumbel_kernel_cuda().get();
+        },
+        // No HIP port yet (#1814).
+        .rocm = nullptr,
+    };
+    return ports;
+}
+
+} // namespace
 bool gumbel_max_sample_supported() {
     if (mlx::core::default_device() != mlx::core::Device::gpu) {
         return false;
     }
-    return mlxcel::custom_kernels_available();
+    return mlxcel::has_kernel_port(gumbel_ports());
 }
 
 bool gumbel_max_sample_accepts(const mlx::core::array& logits) {
@@ -406,26 +424,13 @@ mlx::core::array gumbel_max_sample(
     const int vocab = logits.shape(1);
     const int num_splits = gumbel_num_splits(batch, vocab);
 
-    // Refuse before selecting a port, so the message names the real reason
-    // rather than the port that happened to be tried. mlxcel's Rust callers
-    // gate on `gumbel_max_sample_supported()`, which is this same predicate, so
-    // reaching here means a direct call; the bridge declares this function
-    // `Result`, so the throw becomes an `Err` instead of ending the process
-    // (issues #1803, #1885).
-    if (!mlxcel::custom_kernels_available()) {
-      throw std::runtime_error(
-          "[gumbel_max_sample] no custom kernel port for this GPU backend; "
-          "mlxcel's callers take the categorical fallback instead");
-    }
-
-    // Two ports exist, Metal and CUDA, and the backend picks between them. The
-    // guard above is what makes this a two-way choice rather than a three-way
-    // one: a backend with no port never reaches it. Both kernels share the
-    // template args, grid, and buffer contract.
-    const bool use_cuda =
-        mlxcel::gpu_kernel_backend() == mlxcel::GpuKernelBackend::Cuda;
-    auto& kernel =
-        use_cuda ? get_gumbel_kernel_cuda().get() : get_gumbel_kernel().get();
+    // Refuses when this backend has no port, naming the entry point and the
+    // fallback. Callers gate on `gumbel_max_sample_supported()`, which reads the
+    // same table, so reaching a refusal here means a direct call; the bridge
+    // declares this function `Result`, so it becomes an `Err` rather than ending
+    // the process (issues #1803, #1885).
+    auto& kernel = mlxcel::select_kernel_port(
+        "gumbel_max_sample", "categorical fallback", gumbel_ports());
 
     // One key per call, drawn from MLX's default (thread-local) PRNG key
     // sequence, which is exactly what `random::categorical` consumes. A call

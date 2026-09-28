@@ -14,6 +14,7 @@
 
 #include "fused_rope_append.h"
 #include "gpu_backend.h"
+#include "kernel_port.h"
 
 #include <mlx/fast.h>
 #include <mlx/ops.h>
@@ -370,10 +371,27 @@ inline FusedRopeKernelHolderCuda& get_fused_rope_kernel_cuda() {
     return holder;
 }
 
-} // namespace
 
+// This kernel's ports, in one place. `has_kernel_port` and
+// `select_kernel_port` both read it, so a support predicate and the dispatch
+// cannot answer differently (#1801).
+const mlxcel::KernelPorts& fused_rope_ports() {
+    static const mlxcel::KernelPorts ports{
+        .metal = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_fused_rope_kernel().get();
+        },
+        .cuda = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_fused_rope_kernel_cuda().get();
+        },
+        // No HIP port yet (#1814).
+        .rocm = nullptr,
+    };
+    return ports;
+}
+
+} // namespace
 bool fused_rope_qk_append_available() {
-    return mlxcel::custom_kernels_available();
+    return mlxcel::has_kernel_port(fused_rope_ports());
 }
 
 std::vector<mlx::core::array> fused_rope_qk_append(
@@ -419,24 +437,13 @@ std::vector<mlx::core::array> fused_rope_qk_append(
             "[fused_rope_qk_append] qkv trailing dim does not match the head geometry.");
     }
 
-    // Refuse before selecting a port, so the message names the real reason
-    // rather than the port that happened to be tried. mlxcel's callers gate on
-    // `fused_rope_qk_append_available()`, which is this same predicate, so reaching
-    // here means a direct call; the bridge declares this function `Result`, so
-    // the throw becomes an `Err` instead of ending the process (issue #1885).
-    if (!mlxcel::custom_kernels_available()) {
-      throw std::runtime_error(
-          "[fused_rope_qk_append] no custom kernel port for this GPU backend; "
-          "mlxcel's callers take the graph fallback instead");
-    }
 
-    // Two ports exist, Metal and CUDA, and the backend picks between them. The
-    // guard above is what makes this a two-way choice rather than a three-way
-    // one: a backend with no port never reaches it.
-    const bool use_cuda =
-        mlxcel::gpu_kernel_backend() == mlxcel::GpuKernelBackend::Cuda;
-    auto& kernel = use_cuda ? get_fused_rope_kernel_cuda().get()
-                            : get_fused_rope_kernel().get();
+    // Refuses when this backend has no port, naming the entry point and the
+    // fallback from the table rather than whichever port was tried. Callers gate
+    // on the same table, so a refusal here means a direct call; the bridge
+    // declares this function `Result`, so it becomes an `Err` (issues #1885, #1801).
+    auto& kernel = mlxcel::select_kernel_port(
+        "fused_rope_qk_append", "graph fallback", fused_rope_ports());
 
     std::vector<std::pair<std::string, TemplateArg>> template_args = {
         {"T", qkv.dtype()},

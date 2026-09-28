@@ -52,6 +52,14 @@ constexpr bool custom_kernels_available_for(GpuKernelBackend backend) {
       backend == GpuKernelBackend::Cuda;
 }
 
+// How many values `GpuKernelBackend` has.
+//
+// Pinned by a `static_assert` in `kernel_port.cpp`, so adding a backend fails
+// the build there with a message naming what to extend rather than leaving every
+// per-kernel port table silently short one field. Bumping this number is the
+// deliberate acknowledgement that those places were reviewed.
+constexpr int kGpuKernelBackendCount = 4;
+
 // Resolved once from the compiled-in backends and the runtime device. Set
 // MLXCEL_DEBUG_KERNEL_BACKEND to have the resolved value printed once.
 GpuKernelBackend gpu_kernel_backend();

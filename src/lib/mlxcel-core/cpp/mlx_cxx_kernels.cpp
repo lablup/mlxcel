@@ -5,6 +5,7 @@
 
 #include "mlx_cxx_internal.h"
 #include "../../mlx-cpp/turbo/gpu_backend.h"
+#include "../../mlx-cpp/turbo/kernel_port.h"
 
 // CUDA backend availability probe for the fused-kernel gates (#631). The
 // header is backend-agnostic: builds without CUDA link the no_cuda stub.
@@ -616,6 +617,23 @@ namespace {
         static SsmKernelHolderCuda holder;
         return holder;
     }
+
+// This kernel's ports, in one place. `has_kernel_port` and `select_kernel_port`
+// both read it, so a support predicate and the dispatch cannot answer
+// differently (#1801).
+const mlxcel::KernelPorts& ssm_ports() {
+    static const mlxcel::KernelPorts ports{
+        .metal = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_ssm_kernel().get();
+        },
+        .cuda = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_ssm_kernel_cuda().get();
+        },
+        // No HIP port yet (#1814).
+        .rocm = nullptr,
+    };
+    return ports;
+}
 
     // Compiled compute_dt: float32 promotion + softplus + clip → single fused kernel
     // Matches Python's @mx.compile compute_dt (casts dt to float32 before softplus for precision)
@@ -1587,24 +1605,10 @@ void ssm_update_kernel(
     // Compute dt with softplus + clip (promoted to float32 internally)
     auto dt_result = compute_dt_compiled(dt.inner, dt_bias.inner, time_step_min, time_step_max);
 
-    // Refuse before selecting a port, so the message names the real reason
-    // rather than the port that happened to be tried. mlxcel's callers gate on
-    // `ssm_kernel_available()`, which answers false wherever this one does, so
-    // reaching
-    // here means a direct call; the bridge declares this function `Result`, so
-    // the throw becomes an `Err` instead of ending the process (issue #1885).
-    if (!mlxcel::custom_kernels_available()) {
-      throw std::runtime_error(
-          "[ssm_update_kernel] no custom kernel port for this GPU backend; "
-          "mlxcel's callers take the graph fallback instead");
-    }
-
-    // Two ports exist, Metal and CUDA, and the backend picks between them. The
-    // guard above is what makes this a two-way choice rather than a three-way
-    // one: a backend with no port never reaches it.
-    const bool use_cuda =
-        mlxcel::gpu_kernel_backend() == mlxcel::GpuKernelBackend::Cuda;
-    auto& kernel = use_cuda ? get_ssm_kernel_cuda().get() : get_ssm_kernel().get();
+    // Refuses when this backend has no port, naming the entry point and the
+    // fallback from the table (issues #1885, #1801).
+    auto& kernel = mlxcel::select_kernel_port(
+        "ssm_update_kernel", "graph fallback", ssm_ports());
 
     // CustomKernelFunction signature:
     // (inputs, output_shapes, output_dtypes, grid, threadgroup, template_args, init_value, verbose, stream)
@@ -2123,6 +2127,23 @@ namespace {
         return holder;
     }
 
+// This kernel's ports, in one place. `has_kernel_port` and `select_kernel_port`
+// both read it, so a support predicate and the dispatch cannot answer
+// differently (#1801).
+const mlxcel::KernelPorts& moe_gateup_ports() {
+    static const mlxcel::KernelPorts ports{
+        .metal = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_moe_gateup_kernel().get();
+        },
+        .cuda = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_moe_gateup_kernel_cuda().get();
+        },
+        // No HIP port yet (#1814).
+        .rocm = nullptr,
+    };
+    return ports;
+}
+
     struct MoeDownKernelHolderCuda {
         std::optional<mlx::core::fast::CustomKernelFunction> kernel;
         bool initialized = false;
@@ -2143,6 +2164,23 @@ namespace {
         static MoeDownKernelHolderCuda holder;
         return holder;
     }
+
+// This kernel's ports, in one place. `has_kernel_port` and `select_kernel_port`
+// both read it, so a support predicate and the dispatch cannot answer
+// differently (#1801).
+const mlxcel::KernelPorts& moe_down_ports() {
+    static const mlxcel::KernelPorts ports{
+        .metal = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_moe_down_kernel().get();
+        },
+        .cuda = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_moe_down_kernel_cuda().get();
+        },
+        // No HIP port yet (#1814).
+        .rocm = nullptr,
+    };
+    return ports;
+}
 
     // fc1 + relu² -> act_g[K, Dff] for the squared-ReLU MoE (nemotron-h: the
     // experts are fc1 -> relu² -> fc2, not SwiGLU). One simdgroup per output
@@ -2220,6 +2258,7 @@ namespace {
 // activation: 0 = SwiGLU (silu), 1 = GeGLU (gelu tanh approx, gemma4). gate/up
 // use `gu_bits` (4/8), down uses `d_bits` (4/6/8); group_size shared.
 std::unique_ptr<MlxArray> run_fused_moe_two_kernel(
+    const char* entry_point,
     const MlxArray& x, const MlxArray& indices,
     const MlxArray& gate_w, const MlxArray& gate_s, const MlxArray& gate_b,
     const MlxArray& up_w,   const MlxArray& up_s,   const MlxArray& up_b,
@@ -2251,26 +2290,12 @@ std::unique_ptr<MlxArray> run_fused_moe_two_kernel(
         {"bits", d_bits}, {"group_size", group_size},
     };
 
-    // Refuse before selecting a port, so the message names the real reason
-    // rather than the port that happened to be tried. mlxcel's callers gate on
-    // `fused_moe_enabled()`, which folds in this same predicate, so reaching
-    // here means a direct call; the bridge declares this function `Result`, so
-    // the throw becomes an `Err` instead of ending the process (issue #1885).
-    if (!mlxcel::custom_kernels_available()) {
-      throw std::runtime_error(
-          "[fused_moe_expert_kernel] no custom kernel port for this GPU backend; "
-          "mlxcel's callers take the graph fallback instead");
-    }
-
-    // Two ports exist, Metal and CUDA, and the backend picks between them. The
-    // guard above is what makes this a two-way choice rather than a three-way
-    // one: a backend with no port never reaches it.
-    const bool use_cuda =
-        mlxcel::gpu_kernel_backend() == mlxcel::GpuKernelBackend::Cuda;
 
     // A) gate/up + activation -> act_g[K, Dff] (f32 for the down GEMV).
-    auto& kA = use_cuda ? get_moe_gateup_kernel_cuda().get()
-                        : get_moe_gateup_kernel().get();
+    // Refuses when this backend has no port, naming the caller's entry point so
+    // a refusal through `fused_moe_geglu_kernel` does not report
+    // `fused_moe_expert_kernel` (issues #1885, #1801).
+    auto& kA = mlxcel::select_kernel_port(entry_point, "graph fallback", moe_gateup_ports());
     std::vector<array> inA = {
         astype(x.inner, T), astype(indices.inner, uint32),
         gate_w.inner, astype(gate_s.inner, T), astype(gate_b.inner, T),
@@ -2289,8 +2314,7 @@ std::unique_ptr<MlxArray> run_fused_moe_two_kernel(
     // the all-f32 reference). Scores are passed in f32 for the same reason;
     // this also keeps the JIT signature uniform across models regardless of
     // the checkpoint's score dtype.
-    auto& kB = use_cuda ? get_moe_down_kernel_cuda().get()
-                        : get_moe_down_kernel().get();
+    auto& kB = mlxcel::select_kernel_port(entry_point, "graph fallback", moe_down_ports());
     std::vector<array> inB = {
         astype(indices.inner, uint32),
         down_w.inner, astype(down_s.inner, T), astype(down_b.inner, T),
@@ -2490,6 +2514,7 @@ std::unique_ptr<MlxArray> fused_moe_expert_kernel(
     int32_t gu_bits, int32_t d_bits, int32_t group_size
 ) {
     return run_fused_moe_two_kernel(
+        "fused_moe_expert_kernel",
         x, indices, gate_w, gate_s, gate_b, up_w, up_s, up_b,
         down_w, down_s, down_b, scores, din, dff, k, gu_bits, d_bits,
         group_size, /*act=*/0);
@@ -2507,6 +2532,7 @@ std::unique_ptr<MlxArray> fused_moe_geglu_kernel(
     int32_t gu_bits, int32_t d_bits, int32_t group_size
 ) {
     return run_fused_moe_two_kernel(
+        "fused_moe_geglu_kernel",
         x, indices, gate_w, gate_s, gate_b, up_w, up_s, up_b,
         down_w, down_s, down_b, scores, din, dff, k, gu_bits, d_bits,
         group_size, /*act=*/1);

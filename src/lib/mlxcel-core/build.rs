@@ -99,6 +99,8 @@ fn main() {
         // Resolves which GPU backend the custom kernels target (issue
         // #1803). Shared by the bridge and every turbo/ launcher.
         .file("../mlx-cpp/turbo/gpu_backend.cpp")
+        // The one place a fused kernel chooses its per-backend port (#1801).
+        .file("../mlx-cpp/turbo/kernel_port.cpp")
         .file("../mlx-cpp/turbo/sparse_v_sdpa.cpp")
         // Fused Turbo4Delegated cold-V weighted-sum kernel
         // launcher. Reads the packed cold V directly so the dequantised

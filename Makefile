@@ -801,7 +801,7 @@ verify-rocm-smoke: ## ROCm smoke: build, link and generate on the GPU, asserting
 # "does a real forward pass still run on this device" answer even while the
 # suite is red.
 .PHONY: verify-rocm
-verify-rocm: verify-versions verify-kernel-dtype-keys verify-llama-compat verify-fmt verify-clippy-rocm verify-rocm-smoke verify-test-rocm ## Run the ROCm gate locally on an AMD host (issue #1811)
+verify-rocm: verify-versions verify-kernel-dtype-keys verify-kernel-port-dispatch verify-llama-compat verify-fmt verify-clippy-rocm verify-rocm-smoke verify-test-rocm ## Run the ROCm gate locally on an AMD host (issue #1811)
 	@echo "$(GREEN)[verify-rocm] OK$(RESET)"
 
 .PHONY: verify-versions
@@ -813,6 +813,11 @@ verify-versions: ## Assert every version-tracking workspace crate carries the ro
 verify-kernel-dtype-keys: ## Assert every CUDA JIT kernel launch keys its cache on the input dtypes (issues #1053, #1054)
 	@echo "$(CYAN)[verify] kernel dtype cache keys...$(RESET)"
 	@python3 scripts/ci/check_kernel_dtype_keys.py
+
+.PHONY: verify-kernel-port-dispatch
+verify-kernel-port-dispatch: ## Assert every fused-kernel launcher chooses its port through select_kernel_port (issues #1801, #1885)
+	@echo "$(CYAN)[verify] kernel port dispatch...$(RESET)"
+	@python3 scripts/ci/check_kernel_port_dispatch.py
 
 .PHONY: verify-binary-assets
 verify-binary-assets: ## Assert every tracked binary file is declared with a size budget
@@ -959,7 +964,7 @@ bump-version: ## Release: set every version-tracking crate to VERSION and sync C
 	@$(MAKE) --no-print-directory verify-versions
 
 .PHONY: verify
-verify: verify-versions verify-kernel-dtype-keys verify-llama-compat verify-fmt verify-clippy verify-test ## Run the full CI-faithful gate locally (recommended before push)
+verify: verify-versions verify-kernel-dtype-keys verify-kernel-port-dispatch verify-llama-compat verify-fmt verify-clippy verify-test ## Run the full CI-faithful gate locally (recommended before push)
 	@echo "$(GREEN)[verify] OK: matches the nightly-verify GitHub Actions job$(RESET)"
 
 .PHONY: verify-clean

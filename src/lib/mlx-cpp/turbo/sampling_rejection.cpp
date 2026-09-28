@@ -14,6 +14,7 @@
 
 #include "sampling_rejection.h"
 #include "gpu_backend.h"
+#include "kernel_port.h"
 
 #include <mlx/fast.h>
 #include <mlx/ops.h>
@@ -741,6 +742,24 @@ inline RejectionKernelHolderCuda& get_rejection_kernel_cuda() {
     return *holder;
 }
 
+
+// This kernel's ports, in one place. `has_kernel_port` and
+// `select_kernel_port` both read it, so a support predicate and the dispatch
+// cannot answer differently (#1801).
+const mlxcel::KernelPorts& rejection_ports() {
+    static const mlxcel::KernelPorts ports{
+        .metal = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_rejection_kernel().get();
+        },
+        .cuda = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_rejection_kernel_cuda().get();
+        },
+        // No HIP port yet (#1814).
+        .rocm = nullptr,
+    };
+    return ports;
+}
+
 } // namespace
 
 bool rejection_sample_supported() {
@@ -773,21 +792,12 @@ RejectionSampleResult rejection_sample(
     const int batch = probs_filter.shape(0);
     const int rounds = max_rounds > 0 ? max_rounds : 1;
 
-    // Refuse before selecting a port; see the twin guard in `sampling.cpp` for
-    // why the message is phrased against the backend rather than the port
-    // (issues #1803, #1885).
-    if (!mlxcel::custom_kernels_available()) {
-      throw std::runtime_error(
-          "[fused_sample_rejection] no custom kernel port for this GPU backend; "
-          "mlxcel's callers take the argpartition fallback instead");
-    }
-
-    // Two ports exist, Metal and CUDA, and the backend picks between them. Both
-    // share the template args, grid, and buffer contract.
-    const bool use_cuda =
-        mlxcel::gpu_kernel_backend() == mlxcel::GpuKernelBackend::Cuda;
-    auto& kernel = use_cuda ? get_rejection_kernel_cuda().get()
-                            : get_rejection_kernel().get();
+    // Refuses when this backend has no port, naming the entry point and the
+    // fallback from the table rather than whichever port was tried. Callers gate
+    // on the same table, so a refusal here means a direct call; the bridge
+    // declares this function `Result`, so it becomes an `Err` (issues #1885, #1801).
+    auto& kernel = mlxcel::select_kernel_port(
+        "fused_sample_rejection", "argpartition fallback", rejection_ports());
 
     // One key per call, drawn from MLX's default (thread-local) PRNG key
     // sequence, the same stream `random::categorical` consumes. A call

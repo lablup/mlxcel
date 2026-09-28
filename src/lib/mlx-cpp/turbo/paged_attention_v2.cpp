@@ -15,6 +15,7 @@
 #include "paged_attention_v2.h"
 #include <stdexcept>
 #include "gpu_backend.h"
+#include "kernel_port.h"
 
 #include <mlx/fast.h>
 #include <mlx/ops.h>
@@ -523,6 +524,24 @@ inline PagedV2PartialHolder& get_partial_kernel(bool cuda) {
     return cuda ? cuda_holder : metal_holder;
 }
 
+
+// This kernel's ports, in one place. `has_kernel_port` and
+// `select_kernel_port` both read it, so a support predicate and the dispatch
+// cannot answer differently (#1801).
+const mlxcel::KernelPorts& paged_v2_partial_ports() {
+    static const mlxcel::KernelPorts ports{
+        .metal = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_partial_kernel(false).get();
+        },
+        .cuda = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_partial_kernel(true).get();
+        },
+        // No HIP port yet (#1814).
+        .rocm = nullptr,
+    };
+    return ports;
+}
+
 } // namespace
 
 int paged_attention_v2_q_heads_per_cta(int dim, int n_rep) {
@@ -599,21 +618,12 @@ std::vector<mlx::core::array> paged_attention_decode_v2_partial(
     int dims_per_thread = (dim + PAGED_V2_SIMD_WIDTH - 1) / PAGED_V2_SIMD_WIDTH;
     int num_warps = paged_attention_v2_num_warps(dim, q_heads);
 
-    // Refuse before selecting a port, so the message names the real reason
-    // rather than the port that happened to be tried. mlxcel's Rust callers
-    // gate on `custom_kernels_available()` and take a graph fallback, so
-    // reaching this means a direct call; the bridge declares this function
-    // `Result`, so the throw becomes an `Err` instead of ending the process
-    // (issue #1803).
-    if (!mlxcel::custom_kernels_available()) {
-      throw std::runtime_error(
-          "[paged_attention_decode_v2_partial] no custom kernel port for this GPU backend; "
-          "mlxcel's callers take the graph fallback instead");
-    }
-
-    const bool use_cuda =
-        mlxcel::gpu_kernel_backend() == mlxcel::GpuKernelBackend::Cuda;
-    auto& kernel = get_partial_kernel(use_cuda).get();
+    // Refuses when this backend has no port, naming the entry point and the
+    // fallback from the table rather than whichever port was tried. Callers gate
+    // on the same table, so a refusal here means a direct call; the bridge
+    // declares this function `Result`, so it becomes an `Err` (issues #1885, #1801).
+    auto& kernel = mlxcel::select_kernel_port(
+        "paged_attention_decode_v2_partial", "graph fallback", paged_v2_partial_ports());
 
     // `QType`/`KVType` are load-bearing even though the body never names them:
     // they exist to put the input dtypes into the JIT cache key (issue #1053).

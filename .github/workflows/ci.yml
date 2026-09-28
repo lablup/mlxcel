@@ -364,6 +364,32 @@ jobs:
       - name: Check every CUDA JIT launch keys its cache on the input dtypes
         run: python3 scripts/ci/check_kernel_dtype_keys.py
 
+  kernel-port-dispatch:
+    name: kernel port dispatch
+    # Not behind the `changes` filter, for the same reasons as the job above: no
+    # toolchain, seconds to run, and the defect it guards against is silent.
+    #
+    # The defect is specifically a convention decaying. Choosing a kernel's port
+    # with `use_cuda ? cuda : metal` reads "not CUDA" as "Metal", which was true
+    # with two backends and wrong with three: on ROCm the false arm threw and,
+    # because the bridge declarations were not `Result`, the throw crossed a
+    # `noexcept` extern into `std::terminate`. #1803 fixed the idiom and left
+    # nine sites shaped that way; #1885 and #2018 then guarded them by hand, one
+    # launcher at a time, months apart, each after it had already aborted a gate
+    # run, and the hand-written guards drifted in wording and twice named a
+    # predicate that did not exist. A convention that must be re-applied at every
+    # new launcher gets missed at some of them, and only the backend that lacks
+    # the port ever finds out. This job is what keeps the single helper single.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Check every fused-kernel launcher routes through select_kernel_port
+        run: python3 scripts/ci/check_kernel_port_dispatch.py
+
   binary-assets:
     name: binary assets
     # Deliberately not behind the `changes` filter, for the same reason as

@@ -23,6 +23,7 @@
 #include "paged_attention_v2.h"
 #include <stdexcept>
 #include "gpu_backend.h"
+#include "kernel_port.h"
 
 #include <mlx/fast.h>
 #include <mlx/ops.h>
@@ -184,6 +185,23 @@ inline PagedMergeHolder& get_merge_kernel(bool cuda) {
     return cuda ? cuda_holder : metal_holder;
 }
 
+// This kernel's ports, in one place. `has_kernel_port` and `select_kernel_port`
+// both read it, so a support predicate and the dispatch cannot answer
+// differently (#1801).
+const mlxcel::KernelPorts& paged_merge_ports() {
+    static const mlxcel::KernelPorts ports{
+        .metal = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_merge_kernel(false).get();
+        },
+        .cuda = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_merge_kernel(true).get();
+        },
+        // No HIP port yet (#1814).
+        .rocm = nullptr,
+    };
+    return ports;
+}
+
 } // namespace
 
 std::vector<mlx::core::array> paged_attention_merge_states(
@@ -202,21 +220,11 @@ std::vector<mlx::core::array> paged_attention_merge_states(
         num_outputs = 0;
     }
 
-    // Refuse before selecting a port, so the message names the real reason
-    // rather than the port that happened to be tried. mlxcel's Rust callers
-    // gate on `custom_kernels_available()` and take a graph fallback, so
-    // reaching this means a direct call; the bridge declares this function
-    // `Result`, so the throw becomes an `Err` instead of ending the process
-    // (issue #1803).
-    if (!mlxcel::custom_kernels_available()) {
-      throw std::runtime_error(
-          "[paged_attention_merge_states] no custom kernel port for this GPU backend; "
-          "mlxcel's callers take the graph fallback instead");
-    }
 
-    const bool use_cuda =
-        mlxcel::gpu_kernel_backend() == mlxcel::GpuKernelBackend::Cuda;
-    auto& kernel = get_merge_kernel(use_cuda).get();
+    // Refuses when this backend has no port, naming the entry point and the
+    // fallback from the table (issues #1885, #1801).
+    auto& kernel = mlxcel::select_kernel_port(
+        "paged_attention_merge_states", "graph fallback", paged_merge_ports());
 
     // `VType`/`LseType` key the JIT cache on the input dtypes; see the longer
     // note on the same additions in `paged_attention_v2.cpp` (issue #1053).
