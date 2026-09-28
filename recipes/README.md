@@ -6,9 +6,9 @@ This directory does not hold recipe files. Recipes themselves live at [mlxcel.ai
 
 ## What a snapshot is
 
-Each `recipes/registry/<version>.json` file is the exact output of `mlxcel arch --json` for that version, captured as `{"mlxcel_version": "<version>", "families": [...]}`. Every entry in `families` corresponds to a loadable family in `ALL_MODEL_TYPES` (plus a few standalone runtime families, such as detector-only checkpoints) and carries its detection keys, supported runtimes and modalities, Metal/CUDA backend status, tensor/pipeline parallel flags, speculative drafter support, and supported KV modes. See [`docs/supported-models.md`](../docs/supported-models.md) for the field-by-field description; the registry is a family-level contract, not a per-checkpoint qualification.
+Each `recipes/registry/<version>.json` file is the exact output of `mlxcel arch --json` for that version, captured as `{"mlxcel_version": "<version>", "families": [...]}`. Every entry in `families` corresponds to a loadable family in `ALL_MODEL_TYPES` (plus a few standalone runtime families, such as detector-only checkpoints) and carries its detection keys, supported runtimes and modalities, per-backend status (Metal and CUDA in the 0.7.0 and earlier snapshots; snapshots generated after ROCm support landed also carry a `rocm` entry), tensor/pipeline parallel flags, speculative drafter support, and supported KV modes. See [`docs/supported-models.md`](../docs/supported-models.md) for the field-by-field description; the registry is a family-level contract, not a per-checkpoint qualification.
 
-A snapshot describes the CLI as it existed when it was generated. Older snapshots are never deleted or rewritten by later runs, so the directory accumulates one file per version that was ever regenerated here.
+A snapshot describes the CLI as it existed when it was generated. A run only writes the file for the CLI's current version (rerunning at the same version overwrites that one file); snapshots for other versions are never deleted or rewritten, so the directory accumulates one file per version that was ever regenerated here.
 
 ## Regenerating the snapshot
 
