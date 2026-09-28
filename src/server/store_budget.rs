@@ -20,6 +20,14 @@ use std::time::Instant;
 
 use serde::Serialize;
 
+/// Upper bound on the initial `HashMap` capacity a bounded store allocates
+/// up front, so a large configured `max_entries` cannot force an oversized
+/// allocation before any entries actually arrive.
+///
+/// Used by: `conversation_store::StoreState::with_capacity`,
+/// `responses_store::StoreState::with_capacity`.
+pub(crate) const INITIAL_HASH_CAPACITY_LIMIT: usize = 4096;
+
 /// Count JSON bytes without allocating a second serialized copy of the value.
 ///
 /// The result is intentionally approximate for memory budgeting: it tracks the
