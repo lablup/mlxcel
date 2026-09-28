@@ -19,8 +19,8 @@
 
 set -uo pipefail
 
-MLXCEL="./target/release/mlxcel"
-MODEL="models/qwen3-4b-4bit"
+MLXCEL=${MLXCEL_BIN:-./target/release/mlxcel}
+MODEL=${MODEL:-models/qwen3-4b-4bit}
 CONTEXTS=(8192 16384 32768)
 DECODE_TOKENS=8
 OUTDIR="benchmarks/sparse_v_skip"
