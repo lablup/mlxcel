@@ -554,6 +554,21 @@ impl ErrorResponse {
         }
     }
 
+    /// Build a `500 Internal Server Error`. Used by routes that hit a
+    /// server-side failure (a panicked worker task, a malformed provider
+    /// result, a response-builder error) rather than a problem with the
+    /// request itself, so the status reflects the fault's true owner.
+    pub fn internal_server_error(message: impl Into<String>) -> Self {
+        Self {
+            error: ErrorDetail {
+                message: message.into(),
+                error_type: "server_error".into(),
+                code: None,
+            },
+            status: axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
     /// Build a `499 Client Closed Request`, the non-standard status nginx logs
     /// when the client went away before the response was ready.
     ///

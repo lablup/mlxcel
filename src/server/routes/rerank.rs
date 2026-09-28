@@ -25,7 +25,6 @@ use std::sync::Arc;
 use axum::{
     Json,
     extract::State,
-    http::StatusCode,
     response::{IntoResponse, Response},
 };
 use serde_json::Value;
@@ -67,12 +66,7 @@ pub(crate) fn rerank_error_response(err: RerankError) -> ErrorResponse {
         }
         RerankError::InvalidInput(message) => invalid_request(message),
         RerankError::Internal(message) => {
-            let mut response = ErrorResponse::new(
-                format!("rerank inference failed: {message}"),
-                "server_error",
-            );
-            response.status = StatusCode::INTERNAL_SERVER_ERROR;
-            response
+            ErrorResponse::internal_server_error(format!("rerank inference failed: {message}"))
         }
     }
 }
@@ -276,22 +270,16 @@ pub async fn create_rerank(State(state): State<AppState>, Json(body): Json<Value
         Ok(Err(err)) => return rerank_error_response(err).into_response(),
         Err(join_err) => {
             tracing::error!("rerank task panicked: {join_err}");
-            let mut response = ErrorResponse::new("rerank request failed", "server_error");
-            response.status = StatusCode::INTERNAL_SERVER_ERROR;
-            return response.into_response();
+            return ErrorResponse::internal_server_error("rerank request failed").into_response();
         }
     };
     if scored.scores.len() != request.documents.len() {
-        let mut response = ErrorResponse::new(
-            format!(
-                "reranker returned {} scores for {} documents",
-                scored.scores.len(),
-                request.documents.len()
-            ),
-            "server_error",
-        );
-        response.status = StatusCode::INTERNAL_SERVER_ERROR;
-        return response.into_response();
+        return ErrorResponse::internal_server_error(format!(
+            "reranker returned {} scores for {} documents",
+            scored.scores.len(),
+            request.documents.len()
+        ))
+        .into_response();
     }
 
     if let Some((index, score)) = scored
@@ -302,12 +290,10 @@ pub async fn create_rerank(State(state): State<AppState>, Json(body): Json<Value
         .find(|(_, score)| !score.is_finite() || !(0.0..=1.0).contains(score))
     {
         tracing::error!(index, score, "reranker returned an invalid relevance score");
-        let mut response = ErrorResponse::new(
+        return ErrorResponse::internal_server_error(
             "rerank inference returned an invalid numeric result",
-            "server_error",
-        );
-        response.status = StatusCode::INTERNAL_SERVER_ERROR;
-        return response.into_response();
+        )
+        .into_response();
     }
     state.metrics.record_request(
         scored.prompt_tokens,

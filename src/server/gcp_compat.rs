@@ -54,7 +54,7 @@ use std::collections::HashMap;
 use anyhow::{Context, Result, bail};
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::{HeaderMap, Method, StatusCode, header};
+use axum::http::{HeaderMap, Method, header};
 use axum::response::{IntoResponse, Response};
 use futures::StreamExt;
 use tower::ServiceExt;
@@ -271,10 +271,8 @@ pub(crate) async fn predict(
     // The composed router the socket serves; set by `create_app` before the
     // first request can reach this handler.
     let Some(app) = state.gcp_dispatch.get().cloned() else {
-        let mut err =
-            ErrorResponse::new("predict dispatch router is not initialised", "server_error");
-        err.status = StatusCode::INTERNAL_SERVER_ERROR;
-        return err.into_response();
+        return ErrorResponse::internal_server_error("predict dispatch router is not initialised")
+            .into_response();
     };
     let (aliases, direct) = dispatch_table(&state.config);
     let api_prefix = state.config.api_prefix.clone();

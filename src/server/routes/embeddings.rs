@@ -27,7 +27,6 @@ use std::sync::Arc;
 use axum::{
     Json,
     extract::State,
-    http::StatusCode,
     response::{IntoResponse, Response},
 };
 use serde_json::Value;
@@ -72,12 +71,7 @@ pub(crate) fn embedding_error_response(err: EmbeddingError) -> ErrorResponse {
         }
         EmbeddingError::InvalidInput(message) => invalid_request(message),
         EmbeddingError::Internal(message) => {
-            let mut response = ErrorResponse::new(
-                format!("embedding inference failed: {message}"),
-                "server_error",
-            );
-            response.status = StatusCode::INTERNAL_SERVER_ERROR;
-            response
+            ErrorResponse::internal_server_error(format!("embedding inference failed: {message}"))
         }
     }
 }
@@ -362,9 +356,8 @@ async fn embeddings_impl(state: AppState, body: Value, shape: EmbeddingShape) ->
         Ok(Err(err)) => return embedding_error_response(err).into_response(),
         Err(join_err) => {
             tracing::error!("embedding task panicked: {join_err}");
-            let mut response = ErrorResponse::new("embedding request failed", "server_error");
-            response.status = StatusCode::INTERNAL_SERVER_ERROR;
-            return response.into_response();
+            return ErrorResponse::internal_server_error("embedding request failed")
+                .into_response();
         }
     };
 
@@ -380,12 +373,10 @@ async fn embeddings_impl(state: AppState, body: Value, shape: EmbeddingShape) ->
             value_index,
             "embedding inference returned a non-finite value"
         );
-        let mut response = ErrorResponse::new(
+        return ErrorResponse::internal_server_error(
             "embedding inference returned an invalid numeric result",
-            "server_error",
-        );
-        response.status = StatusCode::INTERNAL_SERVER_ERROR;
-        return response.into_response();
+        )
+        .into_response();
     }
 
     state
