@@ -22,9 +22,9 @@ No alternative design was considered; this is direct unit coverage of pure funct
 - `pytest python/tests -m "not e2e" -q`: 43 passed before the change, 51 passed after (8 new tests, 2 e2e tests deselected as before).
 - `ruff check python` and `ruff format --check python`: clean.
 - `mypy python/src`: no issues in 7 source files.
-- Independent `pr-reviewer` and `pr-security-checker` passes found no CRITICAL, HIGH, or MEDIUM findings and made no fix commits; `pr-finalizer` confirmed no documentation references these internal helpers and made no changes.
+- Independent implementation, security, and performance review found no CRITICAL, HIGH, or MEDIUM findings and made no fix commits; a separate finalization pass confirmed no documentation references these internal helpers and made no changes.
 - `python3 scripts/ci/check_cross_repo_refs.py`: no bare cross-repo issue references introduced.
 
 ## Limits
 
-This PR does not change any production behavior; it only closes a coverage gap. `pr-reviewer` noted two optional LOW-severity gaps left for a future PR if ever needed: `connect_base_url("")` (empty string, not `None`) is not separately tested, and `native_base_url` on a URL ending in `/v1/` (trailing slash after `/v1`) returns the input unchanged rather than stripping it, which is undocumented but matches current caller behavior since callers always pass already-normalized URLs.
+This PR does not change any production behavior; it only closes a coverage gap. Review noted two optional LOW-severity gaps left for a future PR if ever needed: `connect_base_url("")` (empty string, not `None`) is not separately tested, and `native_base_url` on a URL ending in `/v1/` (trailing slash after `/v1`) returns the input unchanged rather than stripping it, which is undocumented but matches current caller behavior since callers always pass already-normalized URLs.

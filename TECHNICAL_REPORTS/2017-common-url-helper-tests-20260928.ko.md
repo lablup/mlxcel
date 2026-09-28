@@ -22,9 +22,9 @@
 - `pytest python/tests -m "not e2e" -q`: 변경 전 43개 통과, 변경 후 51개 통과(신규 테스트 8개 추가, e2e 테스트 2개는 이전과 동일하게 제외).
 - `ruff check python`, `ruff format --check python`: 이상 없음.
 - `mypy python/src`: 소스 파일 7개 모두 문제 없음.
-- 독립적으로 수행한 `pr-reviewer`, `pr-security-checker` 검토에서 CRITICAL, HIGH, MEDIUM 등급 발견 사항이 없었고 수정 커밋도 없었다. `pr-finalizer`는 이 내부 헬퍼를 참조하는 문서가 없음을 확인했고 변경하지 않았다.
+- 독립적으로 수행한 구현, 보안, 성능 검토에서 CRITICAL, HIGH, MEDIUM 등급 발견 사항이 없었고 수정 커밋도 없었다. 별도의 마무리 점검에서 이 내부 헬퍼를 참조하는 문서가 없음을 확인했고 변경하지 않았다.
 - `python3 scripts/ci/check_cross_repo_refs.py`: 순수 번호(bare) 형태의 크로스 저장소 이슈 참조가 새로 추가되지 않았음을 확인.
 
 ## 한계
 
-이 PR은 프로덕션 동작을 전혀 변경하지 않으며, 테스트 커버리지 공백만 메운다. `pr-reviewer`는 필요시 향후 PR에서 다룰 수 있는 LOW 등급 선택 사항 두 가지를 남겼다. `connect_base_url("")`(빈 문자열, `None`이 아닌 경우)는 별도로 테스트되지 않았고, `/v1/`(끝에 슬래시가 붙은 `/v1`)로 끝나는 URL에 대해 `native_base_url`은 입력을 그대로 반환한다. 이는 호출자가 항상 이미 정규화된 URL을 전달하기 때문에 현재 동작과 일치하지만 문서화되지는 않았다.
+이 PR은 프로덕션 동작을 전혀 변경하지 않으며, 테스트 커버리지 공백만 메운다. 검토 과정에서 필요시 향후 PR에서 다룰 수 있는 LOW 등급 선택 사항 두 가지를 남겼다. `connect_base_url("")`(빈 문자열, `None`이 아닌 경우)는 별도로 테스트되지 않았고, `/v1/`(끝에 슬래시가 붙은 `/v1`)로 끝나는 URL에 대해 `native_base_url`은 입력을 그대로 반환한다. 이는 호출자가 항상 이미 정규화된 URL을 전달하기 때문에 현재 동작과 일치하지만 문서화되지는 않았다.
