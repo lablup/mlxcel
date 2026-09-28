@@ -1587,8 +1587,21 @@ void ssm_update_kernel(
     // Compute dt with softplus + clip (promoted to float32 internally)
     auto dt_result = compute_dt_compiled(dt.inner, dt_bias.inner, time_step_min, time_step_max);
 
-    // Metal kernel on Apple, CUDA port elsewhere (mx.fast.metal_kernel throws
-    // "[metal_kernel] No Metal back-end" on the CUDA backend), cf. #631.
+    // Refuse before selecting a port, so the message names the real reason
+    // rather than the port that happened to be tried. mlxcel's callers gate on
+    // `ssm_kernel_available()`, which answers false wherever this one does, so
+    // reaching
+    // here means a direct call; the bridge declares this function `Result`, so
+    // the throw becomes an `Err` instead of ending the process (issue #1885).
+    if (!mlxcel::custom_kernels_available()) {
+      throw std::runtime_error(
+          "[ssm_update_kernel] no custom kernel port for this GPU backend; "
+          "mlxcel's callers take the graph fallback instead");
+    }
+
+    // Two ports exist, Metal and CUDA, and the backend picks between them. The
+    // guard above is what makes this a two-way choice rather than a three-way
+    // one: a backend with no port never reaches it.
     const bool use_cuda =
         mlxcel::gpu_kernel_backend() == mlxcel::GpuKernelBackend::Cuda;
     auto& kernel = use_cuda ? get_ssm_kernel_cuda().get() : get_ssm_kernel().get();
@@ -2238,8 +2251,20 @@ std::unique_ptr<MlxArray> run_fused_moe_two_kernel(
         {"bits", d_bits}, {"group_size", group_size},
     };
 
-    // mx.fast.metal_kernel throws on CUDA ("No Metal back-end"), so dispatch the
-    // cuda_kernel port there. metal::is_available() is false on a CUDA-only build.
+    // Refuse before selecting a port, so the message names the real reason
+    // rather than the port that happened to be tried. mlxcel's callers gate on
+    // `fused_moe_enabled()`, which folds in this same predicate, so reaching
+    // here means a direct call; the bridge declares this function `Result`, so
+    // the throw becomes an `Err` instead of ending the process (issue #1885).
+    if (!mlxcel::custom_kernels_available()) {
+      throw std::runtime_error(
+          "[fused_moe_expert_kernel] no custom kernel port for this GPU backend; "
+          "mlxcel's callers take the graph fallback instead");
+    }
+
+    // Two ports exist, Metal and CUDA, and the backend picks between them. The
+    // guard above is what makes this a two-way choice rather than a three-way
+    // one: a backend with no port never reaches it.
     const bool use_cuda =
         mlxcel::gpu_kernel_backend() == mlxcel::GpuKernelBackend::Cuda;
 

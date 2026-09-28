@@ -365,9 +365,20 @@ std::vector<mlx::core::array> fused_add_rms_norm(
     const int rows = static_cast<int>(x.size() / dim);
     const int threads = fused_norm_threads(dim);
 
-    // Metal kernel on Apple, CUDA port elsewhere. `fast::metal_kernel` throws
-    // "[metal_kernel] No Metal back-end" on the CUDA backend and vice versa;
-    // `metal::is_available()` is false on a CUDA-only build.
+    // Refuse before selecting a port, so the message names the real reason
+    // rather than the port that happened to be tried. mlxcel's callers gate on
+    // `fused_add_rms_norm_available()`, which is this same predicate, so reaching
+    // here means a direct call; the bridge declares this function `Result`, so
+    // the throw becomes an `Err` instead of ending the process (issue #1885).
+    if (!mlxcel::custom_kernels_available()) {
+      throw std::runtime_error(
+          "[fused_add_rms_norm] no custom kernel port for this GPU backend; "
+          "mlxcel's callers take the graph fallback instead");
+    }
+
+    // Two ports exist, Metal and CUDA, and the backend picks between them. The
+    // guard above is what makes this a two-way choice rather than a three-way
+    // one: a backend with no port never reaches it.
     const bool use_cuda =
         mlxcel::gpu_kernel_backend() == mlxcel::GpuKernelBackend::Cuda;
     auto& kernel =

@@ -606,7 +606,8 @@ impl Plamo2Mamba {
             self.time_step_limit.1,
             &mut output,
             &mut next_state,
-        );
+        )
+        .expect("ssm_kernel_available() reported a port, so the launcher must not refuse");
 
         (output, next_state)
     }

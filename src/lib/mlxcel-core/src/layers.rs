@@ -948,7 +948,8 @@ pub fn fused_add_rms_norm<N: FusedAddRmsNormSpec + ?Sized>(
             norm.norm_weight_bias(),
             &mut normed,
             &mut new_residual,
-        );
+        )
+        .expect("fused_add_rms_norm_eligible() checked the port, so the launcher must not refuse");
         return (normed, new_residual);
     }
     graph_add_rms_norm(norm, delta, residual)
@@ -994,7 +995,13 @@ fn fused_rope_append_backend_available() -> bool {
 /// eligibility test lives here and the fused branch is only taken when the
 /// launcher cannot throw: matching shapes and dtypes, a 1-D weight whose length
 /// is the trailing dimension, and a backend that has a custom-kernel JIT at all
-/// (false on a CPU-only build).
+/// (false on a CPU-only build, and on ROCm until the ports land).
+///
+/// One class is no longer in that list. A backend with no port used to reach
+/// the Metal arm and abort; issue #1885 made the launcher refuse and its bridge
+/// declaration `Result`, so that case is recoverable. The check stays here
+/// anyway, because deciding before building the call is cheaper than letting
+/// the launcher refuse, and because the other classes still cannot be.
 fn fused_add_rms_norm_eligible(delta: &MlxArray, residual: &MlxArray, weight: &MlxArray) -> bool {
     if !fused_add_rms_norm_backend_available() || ffi::array_ndim(weight) != 1 {
         return false;
@@ -3336,6 +3343,9 @@ impl FusedQKVLinear {
             &mut q,
             &mut k,
             &mut v,
+        )
+        .expect(
+            "fused_rope_append_backend_available() checked the port, so the launcher must not refuse",
         );
         Some((q, k, v))
     }

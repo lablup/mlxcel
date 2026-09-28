@@ -679,7 +679,11 @@ impl SwitchGeGLU {
         let x_flat = mlxcel_core::reshape(x, &[din]);
         let idx_flat = mlxcel_core::reshape(indices, &[k]);
         let sc_flat = mlxcel_core::reshape(scores, &[k]);
-        Some(mlxcel_core::fused_moe_geglu_kernel(
+        // The launcher refuses on a backend with no kernel port (issue #1885),
+        // and `None` is exactly this function's contract for "the fast path
+        // does not apply", so the caller takes the graph path. Deliberately not
+        // `expect`: a direct call on such a backend is legitimate.
+        mlxcel_core::fused_moe_geglu_kernel(
             &x_flat,
             &idx_flat,
             gate.weight.as_ref().unwrap(),
@@ -698,7 +702,8 @@ impl SwitchGeGLU {
             gate.bits,
             down.bits,
             gate.group_size,
-        ))
+        )
+        .ok()
     }
 
     fn from_weights(

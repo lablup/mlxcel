@@ -91,11 +91,15 @@ pub fn fused_moe_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED
         .get_or_init(|| fused_moe_enabled_from(std::env::var("MLXCEL_FUSED_MOE").ok().as_deref()))
-        // The fused MoE launcher has Metal and CUDA ports only, and its bridge
-        // function does not return `Result`, so on a backend without a port the
-        // `fast::cuda_kernel` throw ends the process rather than failing the
-        // call. Answering false here selects the same SwitchGLU path
-        // `MLXCEL_FUSED_MOE=0` selects (issue #1803).
+        // The fused MoE launcher has Metal and CUDA ports only. This term was
+        // load-bearing for safety under issue #1803, when the bridge function
+        // did not return `Result` and the throw on a portless backend ended the
+        // process; issue #1885 made it `Result`, and `forward_fused_kernel` now
+        // turns that refusal into the `None` it already returns for any
+        // unsupported config. The term stays because deciding here is cheaper
+        // and clearer than building the flattened arguments only to have the
+        // launcher refuse, and it selects the same SwitchGLU path
+        // `MLXCEL_FUSED_MOE=0` selects.
         && mlxcel_core::custom_kernels_available()
 }
 
@@ -1165,7 +1169,11 @@ impl SwitchGLU {
         let x_flat = mlxcel_core::reshape(x, &[din]);
         let idx_flat = mlxcel_core::reshape(indices, &[k]);
         let sc_flat = mlxcel_core::reshape(scores, &[k]);
-        Some(mlxcel_core::fused_moe_expert_kernel(
+        // The launcher refuses on a backend with no kernel port (issue #1885),
+        // and `None` is exactly this function's contract for "the fast path
+        // does not apply", so the caller takes the graph path. Deliberately not
+        // `expect`: a direct call on such a backend is legitimate.
+        mlxcel_core::fused_moe_expert_kernel(
             &x_flat,
             &idx_flat,
             gate.weight.as_ref().unwrap(),
@@ -1184,7 +1192,8 @@ impl SwitchGLU {
             gate.bits,
             down.bits,
             gate.group_size,
-        ))
+        )
+        .ok()
     }
 
     pub fn from_weights(

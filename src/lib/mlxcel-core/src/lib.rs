@@ -1505,7 +1505,7 @@ mod ffi {
             weight_bias: f32,
             normed_out: &mut UniquePtr<MlxArray>,
             new_residual_out: &mut UniquePtr<MlxArray>,
-        );
+        ) -> Result<()>;
 
         /// Whether the current backend has a fused-add-RMSNorm kernel at all
         /// (issue #905). False on a CPU-only build, where the custom-kernel JIT
@@ -1538,7 +1538,7 @@ mod ffi {
             q_out: &mut UniquePtr<MlxArray>,
             k_out: &mut UniquePtr<MlxArray>,
             v_out: &mut UniquePtr<MlxArray>,
-        );
+        ) -> Result<()>;
 
         /// Whether the current backend has a fused RoPE + append kernel at all
         /// (issue #905). False on a CPU-only build.
@@ -1801,7 +1801,7 @@ mod ffi {
             time_step_max: f32,
             output: &mut UniquePtr<MlxArray>,
             next_state: &mut UniquePtr<MlxArray>,
-        );
+        ) -> Result<()>;
 
         /// Whether the fused Mamba1 selective-scan kernel can run (Metal only;
         /// `MLXCEL_MAMBA1_SCAN_KERNEL=0` forces the graph scan).
@@ -1829,6 +1829,12 @@ mod ffi {
         /// `gu_bits` (power-of-2: 4/8), down uses `d_bits` (4/8/6); group_size
         /// is shared. Mixed widths support e.g. dots.llm1 (gate/up 4, down 6).
         #[allow(clippy::too_many_arguments)]
+        ///
+        /// `Result` because the launcher refuses on a backend with no kernel
+        /// port rather than falling into the Metal arm and aborting the process
+        /// on a C++ throw across a `noexcept` extern (issue #1885). Production
+        /// gates on the support predicate and takes the graph fallback, so the
+        /// `Err` is reachable only from a direct call.
         fn fused_moe_expert_kernel(
             x: &MlxArray,
             indices: &MlxArray,
@@ -1848,11 +1854,17 @@ mod ffi {
             gu_bits: i32,
             d_bits: i32,
             group_size: i32,
-        ) -> UniquePtr<MlxArray>;
+        ) -> Result<UniquePtr<MlxArray>>;
 
         /// Like `fused_moe_expert_kernel` but GeGLU (gelu tanh approx) instead
         /// of SwiGLU for the gate/up activation (gemma4 experts).
         #[allow(clippy::too_many_arguments)]
+        ///
+        /// `Result` because the launcher refuses on a backend with no kernel
+        /// port rather than falling into the Metal arm and aborting the process
+        /// on a C++ throw across a `noexcept` extern (issue #1885). Production
+        /// gates on the support predicate and takes the graph fallback, so the
+        /// `Err` is reachable only from a direct call.
         fn fused_moe_geglu_kernel(
             x: &MlxArray,
             indices: &MlxArray,
@@ -1872,7 +1884,7 @@ mod ffi {
             gu_bits: i32,
             d_bits: i32,
             group_size: i32,
-        ) -> UniquePtr<MlxArray>;
+        ) -> Result<UniquePtr<MlxArray>>;
 
         /// Fused xIELU activation (Apertus): one Metal launch covering the
         /// `apertus_xielu` elementwise graph (square/min/expm1/where/...). The

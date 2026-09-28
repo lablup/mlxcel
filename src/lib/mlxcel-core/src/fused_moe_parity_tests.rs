@@ -192,7 +192,8 @@ fn run_fused(case: &GegluMoeCase) -> UniquePtr<MlxArray> {
         case.bits,
         case.bits,
         case.group_size,
-    );
+    )
+    .expect("gpu_backend_or_skip() reported a port, so the launcher must not refuse");
     eval(&out);
     out
 }

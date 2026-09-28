@@ -419,6 +419,20 @@ std::vector<mlx::core::array> fused_rope_qk_append(
             "[fused_rope_qk_append] qkv trailing dim does not match the head geometry.");
     }
 
+    // Refuse before selecting a port, so the message names the real reason
+    // rather than the port that happened to be tried. mlxcel's callers gate on
+    // `fused_rope_qk_append_available()`, which is this same predicate, so reaching
+    // here means a direct call; the bridge declares this function `Result`, so
+    // the throw becomes an `Err` instead of ending the process (issue #1885).
+    if (!mlxcel::custom_kernels_available()) {
+      throw std::runtime_error(
+          "[fused_rope_qk_append] no custom kernel port for this GPU backend; "
+          "mlxcel's callers take the graph fallback instead");
+    }
+
+    // Two ports exist, Metal and CUDA, and the backend picks between them. The
+    // guard above is what makes this a two-way choice rather than a three-way
+    // one: a backend with no port never reaches it.
     const bool use_cuda =
         mlxcel::gpu_kernel_backend() == mlxcel::GpuKernelBackend::Cuda;
     auto& kernel = use_cuda ? get_fused_rope_kernel_cuda().get()
