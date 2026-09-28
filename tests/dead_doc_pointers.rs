@@ -13,9 +13,9 @@
 // limitations under the License.
 
 //! Issue #1658: `docs/model_tests.md` and `docs/testing.md` never existed in
-//! this tree, yet six source comments and one assertion message pointed
-//! readers at them. `src/main_tests.rs:252` (`supported_models_output_has_no_dead_doc_link`,
-//! added for issue #26) guards the same class of defect for rendered CLI
+//! this tree, yet five source comments and one assertion message pointed
+//! readers at them. `src/main_tests.rs`'s `supported_models_output_has_no_dead_doc_link`
+//! (added for issue #26) guards the same class of defect for rendered CLI
 //! output; this file guards it for the raw source text of the files that
 //! carried the dead pointers, which is a check that file cannot perform.
 //!
