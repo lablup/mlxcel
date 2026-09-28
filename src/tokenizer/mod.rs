@@ -2809,7 +2809,7 @@ mod tests {
     // shipped in `models/gemma-4-e4b-it-8bit/`. Skipped when the directory
     // is missing so the test suite stays portable; run on demand with
     // `cargo test -- --ignored` against a workspace that has the model
-    // downloaded (per `docs/testing.md`).
+    // downloaded (`mlxcel download mlx-community/gemma-4-e4b-it-8bit`).
 
     #[test]
     #[ignore = "requires models/gemma-4-e4b-it-8bit/; run with --ignored"]

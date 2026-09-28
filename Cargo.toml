@@ -51,8 +51,9 @@ path = "src/bin/mlx_server.rs"
 # Perf benchmark harness for the speculative drafter pairings.
 # Captures no-drafter baseline tok/s and scaffolds
 # the speculative numerator rows that follow-up will fill in. See
-# `src/bin/speculative_bench.rs` for the module docs and `docs/model_tests.md`
-# (`Speculative drafters`) for the deferral matrix.
+# `src/bin/speculative_bench.rs` for the module docs and
+# `docs/benchmark_results/model_tests.md` (`Speculative drafters`) for the
+# deferral matrix.
 [[bin]]
 name = "speculative_bench"
 path = "src/bin/speculative_bench.rs"

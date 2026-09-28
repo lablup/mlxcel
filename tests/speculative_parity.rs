@@ -1537,7 +1537,7 @@ const _: () = {
     assert!(
         !REACHABLE_PAIRINGS.is_empty(),
         "REACHABLE_PAIRINGS must declare at least one pairing; \
-         see docs/model_tests.md::Speculative drafters",
+         see docs/benchmark_results/model_tests.md::Speculative drafters",
     );
 };
 

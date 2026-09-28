@@ -38,7 +38,7 @@
 //! Each depth is measured twice: once with `--prompt-cache-enabled=true`
 //! and once with `--prompt-cache-enabled=false`. The delta between the
 //! two runs is the raw cache win; the printed markdown table is suitable
-//! for pasting into `docs/model_tests.md`.
+//! for pasting into `docs/benchmark_results/model_tests.md`.
 //!
 //! Like `prompt_cache_e2e`, the bench gracefully skips when the server
 //! never comes up (e.g. Blackwell GPUs where 4-bit QMM is unsupported).

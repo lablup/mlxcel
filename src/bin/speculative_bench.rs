@@ -20,8 +20,8 @@
 //! Captures **no-drafter baseline** throughput numbers for the two reachable
 //! target models (`models/qwen3.5-4b-4bit`, `models/gemma-4-31b-it-4bit`).
 //! These numbers are the denominator of every "speedup vs no-drafter" cell
-//! in `docs/model_tests.md::Speculative drafters` and can be
-//! captured today against real on-disk checkpoints.
+//! in `docs/benchmark_results/model_tests.md::Speculative drafters` and can
+//! be captured today against real on-disk checkpoints.
 //!
 //! ## MTP speculative path (Gemma 4 and Qwen 3.5 families)
 //!
@@ -747,7 +747,7 @@ fn summary_accepted_len(s: &MtpAcceptanceSummary) -> f64 {
 
 /// Render a Markdown perf table from the collected rows. Output goes to
 /// stdout; the parent script captures this and pastes it into
-/// `docs/model_tests.md`.
+/// `docs/benchmark_results/model_tests.md`.
 fn print_markdown_table(rows: &[Row]) {
     println!();
     println!("### Speculative drafter perf table");
