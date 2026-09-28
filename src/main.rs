@@ -115,19 +115,61 @@ enum Commands {
     #[command(verbatim_doc_comment)]
     Run(commands::RunArgs),
 
-    /// Generate text from a prompt
-    #[command(visible_alias = "gen")]
+    /// Generate text from a prompt and print the completion.
+    ///
+    /// With `-p/--prompt`, produces a single completion and exits, the
+    /// same behavior `mlxcel run -p` gives. Without `-p`, it drops into
+    /// the same interactive multi-turn chat REPL `mlxcel run` opens.
+    ///
+    /// Examples:
+    ///
+    ///     mlxcel generate -m models/llama-3.2-1b-instruct-4bit -p "Hello"
+    ///     mlxcel generate -m mlx-community/Qwen3-4B-4bit -p "Write a haiku" -n 128 --temp 0.7
+    #[command(verbatim_doc_comment, visible_alias = "gen")]
     Generate(GenerateArgs),
 
-    /// Start an OpenAI/llama-server compatible HTTP server
+    /// Start an OpenAI/llama-server compatible HTTP server.
+    ///
+    /// Serves the OpenAI-compatible chat, completions, embeddings, and
+    /// rerank endpoints (family-dependent) and accepts the same CLI flags
+    /// and `LLAMA_ARG_*` environment variables as `llama-server`, so
+    /// existing deployment scripts keep working. See below for multi-node
+    /// distributed setup and model-store resolution details.
+    ///
+    /// Examples:
+    ///
+    ///     mlxcel serve -m models/llama-3.2-1b-instruct-4bit
+    ///     mlxcel serve -m models/llama-3.2-1b-instruct-4bit --host 0.0.0.0 --port 8080
+    #[command(verbatim_doc_comment)]
     Serve(ServeArgs),
 
-    /// List downloaded models in the local store
-    #[command(visible_alias = "ls")]
+    /// List downloaded models in the local store.
+    ///
+    /// Enumerates models downloaded into the global store (or
+    /// `--models-dir`), mirroring `ollama list`. The default table shows
+    /// NAME / SIZE / MODIFIED; the supported model-architecture catalog
+    /// lives under the separate `mlxcel arch` verb.
+    ///
+    /// Examples:
+    ///
+    ///     mlxcel list
+    ///     mlxcel list -v
+    ///     mlxcel list --json
+    ///     mlxcel list --sort modified
+    #[command(verbatim_doc_comment, visible_alias = "ls")]
     List(ListArgs),
 
-    /// List supported model architectures
-    #[command(visible_alias = "supported")]
+    /// List supported model architectures.
+    ///
+    /// Reports the model-architecture catalog this build actually knows
+    /// how to load: the authoritative answer to "is this checkpoint
+    /// supported?" for the current binary.
+    ///
+    /// Examples:
+    ///
+    ///     mlxcel arch
+    ///     mlxcel arch --json
+    #[command(verbatim_doc_comment, visible_alias = "supported")]
     Arch(ArchArgs),
 
     /// Print a pre-load memory budget for a model without running generation.
@@ -145,7 +187,14 @@ enum Commands {
     #[command(verbatim_doc_comment)]
     Inspect(InspectArgs),
 
-    /// Download a HuggingFace model repository snapshot
+    /// Download a HuggingFace model repository snapshot.
+    ///
+    /// Fetches an `owner/name` repo-id into the global mlxcel store (or a
+    /// custom destination via `--local-dir`/`--models-dir`), reusing an
+    /// existing HuggingFace cache copy when one is already present instead
+    /// of re-fetching it. See the Examples section below for revision,
+    /// token, and file-filtering invocations.
+    #[command(verbatim_doc_comment)]
     Download(DownloadArgs),
 
     /// Detect objects in an image with an RT-DETRv2 model.
