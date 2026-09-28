@@ -132,8 +132,8 @@ pub(crate) fn run_embed(args: EmbedArgs) -> Result<()> {
     if args.prompts.is_empty() && args.images.is_empty() {
         bail!("nothing to embed: pass at least one -p/--prompt or --image");
     }
-    if let Some(empty) = args.prompts.iter().position(String::is_empty) {
-        bail!("prompt {empty} is empty");
+    if let Some(index) = args.prompts.iter().position(|p| p.trim().is_empty()) {
+        bail!("prompt {index} is empty");
     }
     for image in &args.images {
         if !image.is_file() {
@@ -330,5 +330,36 @@ mod tests {
             "[[1.000000, 0.500000], [0.250000, 0.000000]]"
         );
         assert_eq!(format_vector(&single(&[0.5])), "[0.500000]");
+    }
+
+    fn embed_args(prompts: Vec<String>) -> EmbedArgs {
+        EmbedArgs {
+            model: PathBuf::from("unused"),
+            prompts,
+            images: Vec::new(),
+            instruction: None,
+            dimensions: None,
+            pooling: None,
+            embd_normalize: None,
+            json: false,
+            max_length: None,
+            batch_size: 16,
+            models_dir: None,
+        }
+    }
+
+    #[test]
+    fn run_embed_rejects_whitespace_only_prompts_like_rerank() {
+        // Matches `run_rerank`'s `d.trim().is_empty()` guard (#1664): a
+        // whitespace-only prompt must fail validation the same way an
+        // actually-empty one does, before the checkpoint is ever resolved.
+        let err = run_embed(embed_args(vec!["   ".to_string()])).expect_err("must be rejected");
+        assert_eq!(err.to_string(), "prompt 0 is empty");
+
+        // The reported index must point at the offending entry, not just
+        // fire on the first one.
+        let err = run_embed(embed_args(vec!["hello".to_string(), "\t\n".to_string()]))
+            .expect_err("must be rejected");
+        assert_eq!(err.to_string(), "prompt 1 is empty");
     }
 }
