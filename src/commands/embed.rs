@@ -334,7 +334,12 @@ mod tests {
 
     fn embed_args(prompts: Vec<String>) -> EmbedArgs {
         EmbedArgs {
-            model: PathBuf::from("unused"),
+            // An absolute, nonexistent path rather than a bare name: a bare
+            // name is resolvable as a HuggingFace repo-id, so if the
+            // whitespace guard ever regressed this would silently reach
+            // `resolve_model_source_with_override` and try a network
+            // lookup instead of failing locally (PR #2019 review).
+            model: PathBuf::from("/nonexistent/mlxcel-embed-test-model"),
             prompts,
             images: Vec::new(),
             instruction: None,
