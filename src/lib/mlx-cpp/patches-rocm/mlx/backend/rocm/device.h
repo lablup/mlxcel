@@ -541,9 +541,21 @@ void CommandEncoder::launch_kernel(F&& func) {
       hipError_t be =
           hipStreamBeginCapture(hstream, hipStreamCaptureModeThreadLocal);
       if (be == hipSuccess) {
-        func(hstream);
+        // A launch that throws (a rejected hipModuleLaunchKernel) must not
+        // leave the stream capturing, or every later operation on it fails
+        // too. End the capture and retry eagerly below, which rethrows a
+        // genuine launch failure outside the capture.
+        bool launched = true;
+        try {
+          func(hstream);
+        } catch (...) {
+          launched = false;
+        }
         hipGraph_t child = nullptr;
         hipError_t ee = hipStreamEndCapture(hstream, &child);
+        if (!launched) {
+          ee = hipErrorStreamCaptureInvalidated;
+        }
         // Failures here fall back to the eager launch below; the graph
         // handles are released without checking (an already-failed capture
         // has nothing better to report) and the pending error is cleared.

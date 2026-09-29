@@ -497,6 +497,15 @@ void CommandEncoder::check_launch(const char* primitive) {
   if (status == hipSuccess) {
     return;
   }
+  // A failed allocation that was recovered from leaves hipErrorOutOfMemory
+  // pending too: the allocator retries after releasing its cache or falls
+  // back to managed memory, and hipBLASLt runs without a workspace when its
+  // hipMalloc fails. An allocation that was not recovered from has already
+  // thrown, and a kernel launch does not report this status, so it is not
+  // this primitive's launch failure.
+  if (status == hipErrorOutOfMemory) {
+    return;
+  }
   int dev = 0;
   bool context_gone = hipGetDevice(&dev) != hipSuccess;
   (void)hipGetLastError();
