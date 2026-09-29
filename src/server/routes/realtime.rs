@@ -36,10 +36,10 @@ use axum::routing::get;
 
 use crate::server::realtime_engine::{RealtimeSessionConfig, RealtimeVoiceChatEngine};
 use crate::server::realtime_protocol::{
-    AudioFormat, CLOSE_CODE_TRY_AGAIN_LATER, CODE_INFERENCE_ERROR, CODE_INVALID_REQUEST,
-    CODE_SERVER_BUSY, CODE_SESSION_INITIALIZATION_FAILED, ClientMessage, DEFAULT_FRAME_SAMPLES,
-    INPUT_SAMPLE_RATE, OUTPUT_SAMPLE_RATE, ServerEvent, SessionObject, new_session_id,
-    parse_append, parse_client_message, parse_session_request, to_wire_json,
+    AudioFormat, CLOSE_CODE_POLICY, CLOSE_CODE_TRY_AGAIN_LATER, CODE_INFERENCE_ERROR,
+    CODE_INVALID_REQUEST, CODE_SERVER_BUSY, CODE_SESSION_INITIALIZATION_FAILED, ClientMessage,
+    DEFAULT_FRAME_SAMPLES, INPUT_SAMPLE_RATE, OUTPUT_SAMPLE_RATE, ServerEvent, SessionObject,
+    new_session_id, parse_append, parse_client_message, parse_session_request, to_wire_json,
 };
 
 /// Route path of the realtime socket.
@@ -61,8 +61,29 @@ pub async fn realtime_ws(
     ws: WebSocketUpgrade,
     State(engine): State<Arc<RealtimeVoiceChatEngine>>,
 ) -> Response {
-    ws.on_upgrade(move |socket| run_connection(socket, engine))
+    // Clients send 80 ms appends (about 3.5 KB of base64); 1 MiB (about
+    // 24 s of audio per message) bounds what one message can make the
+    // server decode and push before the socket is read again.
+    ws.max_message_size(MAX_MESSAGE_BYTES)
+        .max_frame_size(MAX_MESSAGE_BYTES)
+        .on_upgrade(move |socket| run_connection(socket, engine))
 }
+
+/// Largest accepted WebSocket message or frame.
+pub const MAX_MESSAGE_BYTES: usize = 1 << 20;
+
+/// Longest session a client can request, and the limit applied when it
+/// requests none: the language-model and TTS caches grow every 80 ms frame,
+/// so an unbounded session on the only slot would grow until the device
+/// runs out of memory.
+pub const MAX_STREAMING_SECONDS: f32 = 600.0;
+
+/// How long a connection may stay open without sending `session.update`.
+pub const CONFIGURE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long a configured session may go without a client message (pings
+/// do not count) before it is closed and the slot is released.
+pub const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Why the message loop ended.
 enum Exit {
@@ -70,6 +91,8 @@ enum Exit {
     Finished,
     /// The client closed or the socket failed.
     Disconnected,
+    /// The client sent nothing for too long; the socket is closed with 1008.
+    TimedOut,
 }
 
 /// Holds the reservation; a task dropped mid-session (server shutdown)
@@ -78,15 +101,22 @@ struct Reservation {
     engine: Arc<RealtimeVoiceChatEngine>,
     session_id: String,
     configured: bool,
+    /// An `open` was sent to the engine (possibly still in flight), so a
+    /// session may exist on the engine thread even if `configured` is not
+    /// set yet; closing an inactive session is a no-op.
+    open_sent: bool,
     released: bool,
 }
 
 impl Reservation {
     async fn finish(&mut self) {
-        if self.configured
+        if (self.configured || self.open_sent)
             && let Err(err) = self.engine.close(&self.session_id).await
         {
-            tracing::warn!("failed to close realtime VoiceChat session: {err}");
+            // An `open` that failed left no session behind to close.
+            if self.configured {
+                tracing::warn!("failed to close realtime VoiceChat session: {err}");
+            }
         }
         self.engine.release(&self.session_id);
         self.released = true;
@@ -98,7 +128,7 @@ impl Drop for Reservation {
         if self.released {
             return;
         }
-        if self.configured {
+        if self.configured || self.open_sent {
             self.engine.close_detached(&self.session_id);
         }
         self.engine.release(&self.session_id);
@@ -140,6 +170,7 @@ async fn run_connection(mut socket: WebSocket, engine: Arc<RealtimeVoiceChatEngi
         engine: engine.clone(),
         session_id: session_id.clone(),
         configured: false,
+        open_sent: false,
         released: false,
     };
 
@@ -159,8 +190,10 @@ async fn run_connection(mut socket: WebSocket, engine: Arc<RealtimeVoiceChatEngi
         Exit::Disconnected
     };
     reservation.finish().await;
-    if matches!(exit, Exit::Finished) {
-        close_with(&mut socket, 1000, "").await;
+    match exit {
+        Exit::Finished => close_with(&mut socket, 1000, "").await,
+        Exit::TimedOut => close_with(&mut socket, CLOSE_CODE_POLICY, "idle timeout").await,
+        Exit::Disconnected => {}
     }
 }
 
@@ -168,9 +201,28 @@ async fn message_loop(socket: &mut WebSocket, reservation: &mut Reservation) -> 
     let engine = reservation.engine.clone();
     let session_id = reservation.session_id.clone();
     let mut frame_samples = DEFAULT_FRAME_SAMPLES;
+    let mut last_activity = tokio::time::Instant::now();
 
     loop {
-        let text = match socket.recv().await {
+        let limit = if reservation.configured {
+            IDLE_TIMEOUT
+        } else {
+            CONFIGURE_TIMEOUT
+        };
+        let Ok(received) = tokio::time::timeout_at(last_activity + limit, socket.recv()).await
+        else {
+            let reason = if reservation.configured {
+                "no client message within the idle timeout; closing the session"
+            } else {
+                "send session.update after connecting; closing the connection"
+            };
+            let _ = send_error(socket, CODE_INVALID_REQUEST, reason).await;
+            return Exit::TimedOut;
+        };
+        if matches!(received, Some(Ok(Message::Text(_) | Message::Binary(_)))) {
+            last_activity = tokio::time::Instant::now();
+        }
+        let text = match received {
             Some(Ok(Message::Text(text))) => text,
             Some(Ok(Message::Binary(_))) => {
                 if !send_error(
@@ -209,6 +261,7 @@ async fn message_loop(socket: &mut WebSocket, reservation: &mut Reservation) -> 
                         false,
                     )
                 } else {
+                    reservation.open_sent = true;
                     let (event, info) = configure(&engine, &session_id, &session).await;
                     if let Some(info) = info {
                         reservation.configured = true;
@@ -336,7 +389,13 @@ async fn configure(
     let config = RealtimeSessionConfig {
         system_prompt: request.system_prompt,
         seed: request.seed,
-        max_streaming_seconds: request.max_streaming_seconds,
+        // Clamp to the server limit and apply it when the client sets none.
+        // An invalid value is passed through so the session reports it.
+        max_streaming_seconds: Some(match request.max_streaming_seconds {
+            Some(s) if s.is_finite() && s > 0.0 => s.min(MAX_STREAMING_SECONDS),
+            Some(s) => s,
+            None => MAX_STREAMING_SECONDS,
+        }),
     };
     match engine.open(session_id, config).await {
         Ok(info) => (

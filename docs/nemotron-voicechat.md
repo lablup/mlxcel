@@ -137,6 +137,8 @@ Error codes:
 
 ### One session at a time
 
+Server limits protect the single session slot: a WebSocket message or frame may be at most 1 MiB (about 24 s of base64 PCM16; clients send 80 ms appends), a session lasts at most 600 s of audio (`session.max_streaming_seconds` may lower it, larger values are clamped, and the limit ends the stream with `inference_error`), a connection must send `session.update` within 30 s, and a configured session with no client message for 120 s (WebSocket pings do not count) gets an `invalid_request` error and close code 1008.
+
 The engine admits one connection. A second connection while a session is active receives `server_busy` and close code 1013. The reservation is released when the session ends: after `commit` or `cancel` (before the server's close frame), and when the client disconnects, in which case the server cancels the unflushed session first. The next connection is then admitted normally.
 
 ### Example

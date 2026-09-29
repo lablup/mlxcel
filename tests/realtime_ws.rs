@@ -394,3 +394,41 @@ async fn wrong_sample_rate_is_inference_error() {
     send(&mut socket, json!({"type": "session.ping"})).await;
     assert_eq!(next_event(&mut socket).await["type"], "session.pong");
 }
+
+#[tokio::test]
+async fn abrupt_disconnect_releases_reservation() {
+    let url = start_server().await;
+    let mut first = configured(&url).await;
+    send(
+        &mut first,
+        json!({"type": "input_audio_buffer.append", "audio": pcm16(640)}),
+    )
+    .await;
+    // Drop the TCP connection without a close frame, commit or cancel.
+    drop(first);
+    let mut next = None;
+    for _ in 0..50 {
+        let mut socket = connect(&url).await;
+        if next_event(&mut socket).await["type"] == "session.created" {
+            next = Some(socket);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let mut next = next.expect("an abrupt disconnect releases the reservation");
+    send(&mut next, json!({"type": "session.update", "session": {}})).await;
+    assert_eq!(next_event(&mut next).await["type"], "session.updated");
+}
+
+#[tokio::test]
+async fn whole_float_sample_rate_is_accepted() {
+    let url = start_server().await;
+    let mut socket = configured(&url).await;
+    send(
+        &mut socket,
+        json!({"type": "input_audio_buffer.append", "audio": pcm16(1280), "sample_rate": 16000.0}),
+    )
+    .await;
+    let event = next_event(&mut socket).await;
+    assert_ne!(event["type"], "error", "16000.0 must be accepted: {event}");
+}

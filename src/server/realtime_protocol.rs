@@ -39,6 +39,9 @@ pub const OUTPUT_SAMPLE_RATE: u32 = 22_050;
 /// WebSocket close code sent with `server_busy` ("Try Again Later").
 pub const CLOSE_CODE_TRY_AGAIN_LATER: u16 = 1013;
 
+/// WebSocket close code for a policy violation (idle timeout).
+pub const CLOSE_CODE_POLICY: u16 = 1008;
+
 /// `error.code` values.
 pub const CODE_INVALID_REQUEST: &str = "invalid_request";
 pub const CODE_SERVER_BUSY: &str = "server_busy";
@@ -350,9 +353,7 @@ pub fn parse_session_request(session: &Value) -> Result<SessionRequest, String> 
     };
     let seed = match get("seed") {
         None => 0,
-        Some(value) => value
-            .as_u64()
-            .or_else(|| value.as_str().and_then(|s| s.trim().parse().ok()))
+        Some(value) => whole_u64(value)
             .ok_or_else(|| "session.seed must be a non-negative integer".to_string())?,
     };
     let max_streaming_seconds = match get("max_streaming_seconds") {
@@ -373,6 +374,21 @@ pub fn parse_session_request(session: &Value) -> Result<SessionRequest, String> 
     })
 }
 
+/// A non-negative integer given as a JSON integer, a whole JSON float
+/// (`16000.0`, which Python clients commonly send; upstream's `int(...)`
+/// accepts it), or a numeric string.
+fn whole_u64(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| {
+            value
+                .as_f64()
+                .filter(|f| f.is_finite() && *f >= 0.0 && f.fract() == 0.0 && *f <= u64::MAX as f64)
+                .map(|f| f as u64)
+        })
+        .or_else(|| value.as_str().and_then(|s| s.trim().parse().ok()))
+}
+
 /// Decode the `audio` and `sample_rate` fields of an append (absent audio is
 /// empty, absent rate is 16000).
 pub fn parse_append(
@@ -386,9 +402,7 @@ pub fn parse_append(
     };
     let rate = match sample_rate {
         None | Some(Value::Null) => INPUT_SAMPLE_RATE,
-        Some(value) => value
-            .as_u64()
-            .or_else(|| value.as_str().and_then(|s| s.trim().parse().ok()))
+        Some(value) => whole_u64(value)
             .and_then(|r| u32::try_from(r).ok())
             .ok_or_else(|| "sample_rate must be an integer".to_string())?,
     };

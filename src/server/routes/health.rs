@@ -70,7 +70,11 @@ pub async fn health_check(State(state): State<AppState>) -> Response {
     let ready = if state.config.embedding_serving_mode.blocks_generation() {
         side_model_ready(&state)
     } else if state.model_provider.is_chat_unavailable()
-        && (state.audio_model.is_some() || state.realtime_engine.is_some())
+        && (state.audio_model.is_some()
+            || state
+                .realtime_engine
+                .as_ref()
+                .is_some_and(|engine| engine.is_alive()))
     {
         // Whisper and Kokoro checkpoints are primary audio-only models: their
         // dedicated worker has already loaded before the provider is installed,

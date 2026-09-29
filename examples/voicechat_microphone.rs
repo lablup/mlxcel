@@ -329,8 +329,6 @@ async fn main() -> Result<(), String> {
     let mut ready = false;
     let mut committed = false;
     let mut ticker = tokio::time::interval(Duration::from_millis(80));
-    let ctrl_c = tokio::signal::ctrl_c();
-    tokio::pin!(ctrl_c);
 
     loop {
         tokio::select! {
@@ -347,9 +345,23 @@ async fn main() -> Result<(), String> {
                     sink.send(Message::Text(msg.to_string())).await.map_err(|e| e.to_string())?;
                 }
             }
-            _ = &mut ctrl_c, if !committed => {
+            // A fresh Ctrl-C future per iteration: the first press commits
+            // (or quits before the session is ready), a second one quits.
+            _ = tokio::signal::ctrl_c() => {
+                if !ready || committed {
+                    eprintln!("\nquitting");
+                    break;
+                }
                 committed = true;
-                eprintln!("\ncommitting...");
+                eprintln!("\ncommitting (Ctrl-C again to quit now)...");
+                if !pending.is_empty() {
+                    let msg = json!({
+                        "type": "input_audio_buffer.append",
+                        "audio": pcm16_base64(&std::mem::take(&mut pending)),
+                        "sample_rate": INPUT_RATE,
+                    });
+                    sink.send(Message::Text(msg.to_string())).await.map_err(|e| e.to_string())?;
+                }
                 let msg = json!({ "type": "input_audio_buffer.commit", "pad_partial": true });
                 sink.send(Message::Text(msg.to_string())).await.map_err(|e| e.to_string())?;
             }
@@ -383,7 +395,13 @@ async fn main() -> Result<(), String> {
                         queue.drain(..excess);
                     }
                     "response.done" | "response.cancelled" => break,
-                    "error" => eprintln!("\nerror: {}", event["error"]),
+                    "error" => {
+                        eprintln!("\nerror: {}", event["error"]);
+                        if committed {
+                            // The flush failed; response.done will not come.
+                            break;
+                        }
+                    }
                     _ => {}
                 }
             }

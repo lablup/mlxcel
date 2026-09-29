@@ -173,6 +173,16 @@ impl RealtimeVoiceChatEngine {
     }
 
     /// The model name reported in `session.updated`.
+    /// Whether the engine thread is still running (a panic outside the
+    /// per-command guard ends it, after which every command fails).
+    pub fn is_alive(&self) -> bool {
+        self.handle
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .is_some_and(|h| !h.is_finished())
+    }
+
     pub fn model_id(&self) -> &str {
         &self.model_id
     }
