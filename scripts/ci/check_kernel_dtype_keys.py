@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Require every CUDA JIT kernel launch to key its cache on the input dtypes.
+"""Require every CUDA or HIP JIT kernel launch to key its cache on the input dtypes.
 
 Rationale
 ---------
 MLX generates a custom kernel's buffer parameter types from the *runtime* dtypes
-of its inputs, but the two backends disagree on whether those dtypes belong in
-the JIT cache key.
+of its inputs, but the backends disagree on whether those dtypes belong in the
+JIT cache key.
 
 * Metal (``mlx/backend/common/metal_kernel.cpp``) appends one
   ``get_type_string(arr.dtype())`` per input to the kernel name, with the
@@ -17,11 +17,18 @@ the JIT cache key.
   there. ``cu::get_jit_module`` then memoises the compiled module under exactly
   that name in a process-global map and invokes the source builder only on a
   cache miss.
+* ROCm (``fast::hip_kernel``, vendored at
+  ``src/lib/mlx-cpp/patches-rocm/mlx/backend/rocm/custom_kernel.cpp``) builds
+  the same name the same way, and ``rocm::get_jit_module``
+  (``rocm/jit_module.cpp``) memoises the module in a process-global map keyed
+  by the device index and that name, invoking the builder only on a miss. A
+  HIP launch therefore has exactly the CUDA exposure.
 
-So on CUDA a launch whose ``template_args`` are all ints hashes to one name for
-every input dtype. Whichever dtype compiles first wins for the life of the
-process, and every later call at a different dtype reads its buffers through the
-wrong pointer type and returns numbers unrelated to its inputs. Nothing throws.
+So on CUDA and ROCm a launch whose ``template_args`` are all ints hashes to one
+name for every input dtype. Whichever dtype compiles first wins for the life of
+the process, and every later call at a different dtype reads its buffers
+through the wrong pointer type and returns numbers unrelated to its inputs.
+Nothing throws.
 
 That produced issues #1053 (a sparse f16 decode off by a relative error of ~1.0)
 and #1054, and it silently affected the sampler, whose
@@ -35,30 +42,107 @@ enforces that.
 The rule
 --------
 Every ``std::vector<std::pair<std::string, TemplateArg>>`` initialiser in a file
-that also contains a ``cuda_kernel(`` call must name at least one input dtype,
-either inline (``{"KVType", k_pool.dtype()}``) or through a local bound from a
-``.dtype()`` earlier in the same file (``auto T = x.inner.dtype();`` then
+that also calls ``cuda_kernel(`` or ``hip_kernel(`` must name at least one input
+dtype, either inline (``{"KVType", k_pool.dtype()}``) or through a local bound
+from a ``.dtype()`` earlier in the same file (``auto T = x.inner.dtype();`` then
 ``{"T", T}``).
 
 There is deliberately no allowlist. Metal-only launchers are out of scope
 because Metal's key already carries the dtypes, and they are excluded by the
-absence of ``cuda_kernel(`` in the file rather than by a hand-maintained list
-that could go stale. Adding a CUDA port to a Metal-only launcher therefore
-brings it under the check automatically, which is the point: the failure mode
-this guards against is a *new* call site repeating the omission.
+absence of a CUDA or HIP launch in the file rather than by a hand-maintained
+list that could go stale. Adding a CUDA or HIP port to a Metal-only launcher
+therefore brings it under the check automatically, which is the point: the
+failure mode this guards against is a *new* call site repeating the omission.
+
+Scope, and why it is pinned (#1875)
+-----------------------------------
+Scoping by a token in the file is correct but invisible: a refactor that moves
+the launch somewhere else takes the file's ``template_args`` out of scope with
+it, and a check over zero files still prints OK. So the scope is fail-closed in
+three ways.
+
+1. Every C, C++, CUDA and Objective-C++ source *and header* under the
+   repository root is scanned, not a fixed pair of directories and not
+   ``*.cpp`` only, so a launch that moves into a header or a new directory is
+   still seen. Build output, dependency and hidden directories are skipped (see
+   ``PRUNED_DIRS``). A file counts as a launcher only when the token appears
+   outside comments, and the vendored MLX definitions of the entry points
+   themselves (``CustomKernelFunction hip_kernel(``) are not calls.
+2. The success line reports the in-scope count next to the scanned count, so a
+   drop in what is actually checked shows up in the CI log.
+3. The in-scope set is pinned in ``EXPECTED_IN_SCOPE``. A pinned file that
+   leaves it fails the check, and the message says whether it was deleted or
+   merely stopped launching (a launch moved into a helper leaves its
+   ``template_args`` behind, unchecked). A new launcher file that is not pinned
+   fails too, so the pin never goes stale, and an empty scope always fails.
+   Updating the pin is a one-line, reviewable change.
 
 Usage
 -----
-    scripts/ci/check_kernel_dtype_keys.py
+    scripts/ci/check_kernel_dtype_keys.py [--root DIR]
 
-Exits non-zero and names every offending initialiser.
+``--root`` points the check at another tree; the companion test
+``check_kernel_dtype_keys_test.sh`` uses it on mutated copies. Exits non-zero
+and names every offending initialiser and every scope change.
 """
+from __future__ import annotations
+
+import argparse
+import os
 import pathlib
 import re
 import sys
 
-# Directories holding the in-tree kernel launchers.
-SEARCH_DIRS = ("src/lib/mlx-cpp/turbo", "src/lib/mlxcel-core/cpp")
+# Every file that launches a CUDA or HIP JIT kernel today, relative to the
+# repository root. Change it deliberately, in the same change that adds,
+# removes or moves a launch.
+EXPECTED_IN_SCOPE = frozenset(
+    {
+        "src/lib/mlx-cpp/turbo/fused_norm.cpp",
+        "src/lib/mlx-cpp/turbo/fused_rope_append.cpp",
+        "src/lib/mlx-cpp/turbo/paged_attention.cpp",
+        "src/lib/mlx-cpp/turbo/paged_attention_v2.cpp",
+        "src/lib/mlx-cpp/turbo/paged_attention_v2_merge.cpp",
+        "src/lib/mlx-cpp/turbo/sampling.cpp",
+        "src/lib/mlx-cpp/turbo/sampling_rejection.cpp",
+        # The #1804 ROCm fault probe (`rocm_fault_probe_array`): a
+        # `fast::hip_kernel` launch in a file with no CUDA launch, so it was
+        # out of scope while only `cuda_kernel(` counted.
+        "src/lib/mlxcel-core/cpp/mlx_cxx_bridge.cpp",
+        "src/lib/mlxcel-core/cpp/mlx_cxx_kernels.cpp",
+    }
+)
+
+SOURCE_SUFFIXES = frozenset(
+    {
+        ".c", ".cc", ".cpp", ".cxx", ".cu",
+        ".h", ".hh", ".hpp", ".hxx", ".cuh", ".inc", ".ipp",
+        ".m", ".mm",
+    }
+)
+# Directory names never descended into: build output and dependencies. Hidden
+# directories (`.git`, `.venv`, ...) are skipped as well, and symlinked
+# directories (`models/`) are not followed.
+PRUNED_DIRS = frozenset({"target", "node_modules", "build", "site", "__pycache__"})
+
+# `fast::cuda_kernel(`, `mlx::core::fast::hip_kernel(`, `cuda_kernel (`. The
+# leading `\b` keeps `precompiled_cuda_kernel(` out: it loads a prebuilt
+# binary rather than JIT-compiling a source under a hashed name.
+LAUNCH_RE = re.compile(r"\b(cuda|hip)_kernel\s*\(")
+# The definition or declaration of the entry point itself, in the vendored MLX
+# tree: `CustomKernelFunction hip_kernel(`, `MLX_API CustomKernelFunction ...`.
+DEFINITION_PREFIX_RE = re.compile(r"CustomKernelFunction\s+(?:\w+::)*$")
+# C/C++ string literals (raw ones included, since kernel sources are raw
+# strings that contain `//`), character literals and comments. Only comments
+# are blanked; literals are matched so a `//` inside one is not taken for a
+# comment.
+LEXEME_RE = re.compile(
+    r'(?:u8|u|U|L)?R"(?P<delim>[^()\\\s"]{0,16})\(.*?\)(?P=delim)"'
+    r'|"(?:\\.|[^"\\\n])*"'
+    r"|'(?:\\.|[^'\\\n])*'"
+    r"|(?P<comment>//[^\n]*|/\*.*?\*/)",
+    re.S,
+)
 
 TEMPLATE_ARGS_RE = re.compile(
     r"std::vector<std::pair<std::string,\s*(?:mlx::core::fast::)?TemplateArg>>"
@@ -75,11 +159,42 @@ def repo_root() -> pathlib.Path:
     return pathlib.Path(__file__).resolve().parents[2]
 
 
-def check_file(path: pathlib.Path) -> list[str]:
-    src = path.read_text()
-    if "cuda_kernel(" not in src:
-        return []  # Metal-only launcher: Metal's cache key already carries dtypes.
+def without_comments(src: str) -> str:
+    """Blank out comments, keeping newlines so line structure holds."""
 
+    def blank(match: re.Match[str]) -> str:
+        if match.group("comment") is None:
+            return match.group(0)
+        return re.sub(r"[^\n]", " ", match.group(0))
+
+    return LEXEME_RE.sub(blank, src)
+
+
+def launches_jit_kernel(src: str) -> bool:
+    """True when the file calls `cuda_kernel(` or `hip_kernel(` in code."""
+    code = without_comments(src)
+    for match in LAUNCH_RE.finditer(code):
+        line_start = code.rfind("\n", 0, match.start()) + 1
+        if DEFINITION_PREFIX_RE.search(code[line_start : match.start()]):
+            continue
+        return True
+    return False
+
+
+def source_files(root: pathlib.Path) -> list[pathlib.Path]:
+    found = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(
+            d for d in dirnames if d not in PRUNED_DIRS and not d.startswith(".")
+        )
+        for name in sorted(filenames):
+            path = pathlib.Path(dirpath) / name
+            if path.suffix in SOURCE_SUFFIXES and path.is_file():
+                found.append(path)
+    return found
+
+
+def check_file(path: pathlib.Path, root: pathlib.Path, src: str) -> list[str]:
     dtype_locals = set(DTYPE_BINDING_RE.findall(src))
     failures = []
     for match in TEMPLATE_ARGS_RE.finditer(src):
@@ -92,7 +207,7 @@ def check_file(path: pathlib.Path) -> list[str]:
             if ".dtype()" in value or value.strip() in dtype_locals:
                 keyed_on_dtype = True
         if not keyed_on_dtype:
-            rel = path.relative_to(repo_root())
+            rel = path.relative_to(root).as_posix()
             failures.append(
                 f"{rel}:{line}: `{var}` names no input dtype; keys are "
                 f"{keys or '[]'}"
@@ -100,30 +215,90 @@ def check_file(path: pathlib.Path) -> list[str]:
     return failures
 
 
-def main() -> int:
-    root = repo_root()
+def scope_failures(root: pathlib.Path, in_scope: set[str]) -> list[str]:
     failures = []
-    scanned = 0
-    for directory in SEARCH_DIRS:
-        for path in sorted((root / directory).glob("*.cpp")):
-            scanned += 1
-            failures.extend(check_file(path))
-
-    if failures:
-        print("kernel-dtype-keys: FAIL")
-        for failure in failures:
-            print(f"  {failure}")
-        print()
-        print(
-            "Every CUDA JIT launch must key its cache on the input dtypes, or a\n"
-            "second dtype at the same geometry silently reuses the first one's\n"
-            "compiled module. Add the varying inputs' dtypes to `template_args`,\n"
-            'e.g. `{"KVType", k_pool.dtype()}`. They may stay unreferenced by the\n'
-            "kernel body; their job is the cache key. See issues #1053 and #1054."
+    if not in_scope:
+        failures.append(
+            "no scanned file launches a CUDA or HIP JIT kernel, so the check "
+            "would pass over nothing"
         )
+    for rel in sorted(EXPECTED_IN_SCOPE - in_scope):
+        if not (root / rel).exists():
+            failures.append(
+                f"{rel}: pinned in EXPECTED_IN_SCOPE but no longer exists. If it "
+                "was deleted or renamed on purpose, update the pin in the same "
+                "change."
+            )
+        else:
+            failures.append(
+                f"{rel}: pinned in EXPECTED_IN_SCOPE but no longer calls "
+                "`cuda_kernel(` or `hip_kernel(`. If its launch moved into a "
+                "helper, the `template_args` it still builds are no longer "
+                "checked: keep the launch here, or move the `template_args` "
+                "with it, then update the pin."
+            )
+    for rel in sorted(in_scope - EXPECTED_IN_SCOPE):
+        failures.append(
+            f"{rel}: launches a CUDA or HIP JIT kernel but is not pinned in "
+            "EXPECTED_IN_SCOPE. Add it, so that a later move out of scope is "
+            "caught."
+        )
+    return failures
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--root",
+        type=pathlib.Path,
+        default=repo_root(),
+        help="tree to check (default: this repository)",
+    )
+    args = parser.parse_args(argv)
+    root = args.root.resolve()
+    if not root.is_dir():
+        print(f"kernel-dtype-keys: FAIL\n  --root {root} is not a directory")
         return 1
 
-    print(f"kernel-dtype-keys: OK — {scanned} source files scanned.")
+    failures = []
+    scanned = 0
+    in_scope: set[str] = set()
+    for path in source_files(root):
+        scanned += 1
+        src = path.read_text(errors="replace")
+        if not launches_jit_kernel(src):
+            continue  # Metal-only (or no) launcher: Metal's key carries dtypes.
+        in_scope.add(path.relative_to(root).as_posix())
+        failures.extend(check_file(path, root, src))
+    scope = scope_failures(root, in_scope)
+    counts = (
+        f"{len(in_scope)} in scope (launching cuda_kernel or hip_kernel) of "
+        f"{scanned} source files scanned"
+    )
+
+    if failures or scope:
+        print("kernel-dtype-keys: FAIL")
+        print(f"  {counts}.")
+        for failure in failures:
+            print(f"  {failure}")
+        if failures:
+            print()
+            print(
+                "Every CUDA or HIP JIT launch must key its cache on the input\n"
+                "dtypes, or a second dtype at the same geometry silently reuses\n"
+                "the first one's compiled module. Add the varying inputs' dtypes\n"
+                'to `template_args`, e.g. `{"KVType", k_pool.dtype()}`. They may\n'
+                "stay unreferenced by the kernel body; their job is the cache\n"
+                "key. See issues #1053 and #1054."
+            )
+        if scope:
+            print()
+            print("kernel-dtype-keys: in-scope set changed (EXPECTED_IN_SCOPE, #1875):")
+            for failure in scope:
+                print(f"  {failure}")
+        return 1
+
+    print(f"kernel-dtype-keys: OK, {counts}.")
     return 0
 
 

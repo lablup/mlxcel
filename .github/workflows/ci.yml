@@ -353,7 +353,11 @@ jobs:
     # at the same geometry, reading buffers through the wrong pointer type.
     # Issues #1053 and #1054 are two symptoms of exactly that. macOS never sees
     # it, because Metal's key does carry the dtypes, so this job is the only
-    # place the omission is caught without CUDA hardware.
+    # place the omission is caught without CUDA hardware. ROCm's
+    # `fast::hip_kernel` keys its cache the same way, so HIP launches are held
+    # to the same rule (#1875). The second step is the checker's own negative
+    # coverage: it moves launches out of scope in a throwaway copy and asserts
+    # the checker fails, so a refactor cannot empty the scope silently.
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -361,8 +365,10 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - name: Check every CUDA JIT launch keys its cache on the input dtypes
+      - name: Check every CUDA and HIP JIT launch keys its cache on the input dtypes
         run: python3 scripts/ci/check_kernel_dtype_keys.py
+      - name: Check the dtype-key checker rejects a shrunk or moved scope
+        run: bash scripts/ci/check_kernel_dtype_keys_test.sh
 
   kernel-port-dispatch:
     name: kernel port dispatch

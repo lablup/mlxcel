@@ -810,10 +810,15 @@ verify-versions: ## Assert every version-tracking workspace crate carries the ro
 	@echo "$(CYAN)[verify] workspace crate versions...$(RESET)"
 	@python3 scripts/ci/check_crate_versions.py
 
+# check_kernel_dtype_keys_test.sh is the checker's own negative coverage
+# (#1875): it copies the launcher sources into a throwaway tree, moves a launch
+# into a header, a helper or a HIP-only file, and asserts the checker rejects
+# the copy, so a scope that has shrunk fails rather than printing OK.
 .PHONY: verify-kernel-dtype-keys
-verify-kernel-dtype-keys: ## Assert every CUDA JIT kernel launch keys its cache on the input dtypes (issues #1053, #1054)
+verify-kernel-dtype-keys: ## Assert every CUDA and HIP JIT kernel launch keys its cache on the input dtypes (issues #1053, #1054, #1875)
 	@echo "$(CYAN)[verify] kernel dtype cache keys...$(RESET)"
 	@python3 scripts/ci/check_kernel_dtype_keys.py
+	@bash scripts/ci/check_kernel_dtype_keys_test.sh
 
 .PHONY: verify-kernel-port-dispatch
 verify-kernel-port-dispatch: ## Assert every fused-kernel launcher chooses its port through select_kernel_port (issues #1801, #1885)
