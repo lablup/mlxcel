@@ -39,6 +39,58 @@ mlxcel generate -m models/NemotronLabs-VoiceChat-11B-4bit \
 
 prints `[user] <transcript>`, the assistant text, and `[function] <text>` when the function channel produced any, and writes `response.wav` (22050 Hz mono PCM16). `-p` is optional (no system prompt when omitted), `-n` is ignored because the output length equals the input timeline, `--extra-decoding-seconds` (default 3) sets the appended silence, and `--seed` (default 0) seeds the EAR-TTS sampling noise so two runs with the same seed are byte-identical. `--image` and `--video` are rejected.
 
+## Online session
+
+`NemotronVoiceChatModel::create_streaming_session(StreamingOptions)` returns a `VoiceChatStreamingSession` that turns PCM chunks of any size into 1280-sample (80 ms) frames and advances every network exactly one frame per frame from persistent state:
+
+| Stage | Persistent state |
+|---|---|
+| Log-mel | the sample tail the centered STFT still needs (frames are emitted once they trail the input edge by 1280 samples) |
+| FastConformer | per layer, the last 70 attention inputs and the last 8 conv inputs, plus a 16-frame mel cache for the causal subsampling stack |
+| RNNT | last emitted token and LSTM state |
+| Nemotron-H | Mamba2 state and attention KV caches |
+| EAR-TTS | backbone KV caches (rotating for the sliding layers) |
+| Codec | per-ConvNeXt-block causal overlap and the iSTFT overlap |
+
+```rust
+let mut session = model.create_streaming_session(StreamingOptions {
+    system_prompt: Some("Be concise and answer in one sentence.".into()),
+    seed: 0,
+    ..StreamingOptions::default()
+})?;
+for chunk in pcm_chunks {
+    for event in session.push_audio(chunk, 16_000)? { handle(event) }
+}
+for event in session.flush(true)? { handle(event) }
+```
+
+Events carry the audio frame index (the system-prompt prefix advances the timeline but emits nothing):
+
+| Event | Fields |
+|---|---|
+| `AssistantTextDelta` | `frame_index`, `token_id`, `delta`, cumulative `text` |
+| `FunctionDelta` | same shape, function channel |
+| `UserTranscriptDelta` | `frame_index`, `delta`, cumulative `text` |
+| `Audio` | `frame_index`, 1764 `samples` at 22.05 kHz, the frame's 31 `audio_codes` |
+| `Done` / `Cancelled` | `frame_index` |
+
+Text deltas skip the pad, silence, BOS and EOS ids; `delta` is the new suffix when the cumulative decode extends the previous one and otherwise the single-token decode, with the cumulative `text` authoritative. `push_audio` rejects a sample rate other than 16 kHz, non-finite samples, and a closed session; `flush(pad_partial)` optionally zero-pads and runs the partial frame, then closes with `Done`; `cancel()` drops pending audio and closes with `Cancelled`. `max_streaming_seconds` bounds a session (`ContextLimit`). A session is driven on one thread (MLX evaluation is thread-affine) and owns all of its state, so sessions created back to back on one model do not interact.
+
+`use_language_cache: false` recomputes the language model over the full fused-input history every frame and `use_perception_cache: false` recomputes log-mel and the encoder over a sliding sample window; both exist for diagnostics, as in the reference.
+
+With `profile: true` the session records per-frame wall-clock stage timings, each taken after forcing evaluation of that stage's outputs: `perception`, `rnnt`, `language`, `tts`, `codec`, `total`. `profile().summary(drop_first)` gives mean / p50 / p95 / max per stage, `processing_frames_per_second = 1000 / mean total`, and `realtime_factor = mean total / 80 ms` (above 1.0 is slower than real time).
+
+The CLI drives the session with `--stream`:
+
+```
+mlxcel generate -m models/NemotronLabs-VoiceChat-11B-4bit --audio question.wav \
+  --output-audio response_stream.wav -p "Be concise and answer in one sentence." --stream --profile
+```
+
+It pushes the input plus `--extra-decoding-seconds` of silence in 80 ms frames, prints assistant text as frames produce it, writes the concatenated audio events, and with `--profile` prints the summary JSON after dropping 5 cold frames. `--max-streaming-seconds` maps to `max_streaming_seconds`.
+
+The streamed encoder equals the offline encoder for the first frames and then drifts slightly, because the reference's cache-aware subsampling window is not the offline full-utterance convolution; the port keeps the reference rule, and the streamed frames match the reference streaming path to float precision.
+
 ## Validation
 
 Validated on `mlx-community/NemotronLabs-VoiceChat-11B-4bit` against the mlx-vlm reference on a synthesized "What is the capital of France?" question with the system prompt "Be concise and answer in one sentence." (env-gated tests under `tests/nemotron_voicechat_*_real.rs`, run with `MLXCEL_VOICECHAT_MODEL` and `MLXCEL_VOICECHAT_REF` set):
@@ -52,7 +104,7 @@ The codec is a lossy neural codec: a pure tone round-trips with a waveform SNR o
 
 ## Performance
 
-The real-time factor on the validation machine is not measured in this change.
+Measure with `mlxcel generate ... --stream --profile` (the `realtime_factor` of the summary). The table is filled in from a run on an otherwise idle validation machine.
 
 | Checkpoint | Real-time factor | Machine |
 |---|---|---|

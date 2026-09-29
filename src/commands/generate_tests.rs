@@ -597,6 +597,8 @@ fn sample_generate_args(model_path: PathBuf) -> crate::GenerateArgs {
             output_audio: None,
             speaker: "ethan".to_string(),
             extra_decoding_seconds: 3.0,
+            stream: false,
+            max_streaming_seconds: None,
             max_tokens: 16,
             profile: false,
             no_chat_template: false,

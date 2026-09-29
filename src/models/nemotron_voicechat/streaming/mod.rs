@@ -12,17 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod config;
-pub mod llm;
-pub mod model;
-pub mod session;
-pub mod streaming;
-pub mod tts;
+//! Cache-aware online VoiceChat session (issue #1378): 80 ms frame clock,
+//! persistent per-network caches, frame-aligned events, and a per-frame
+//! stage profiler.
+//!
+//! Port of upstream
+//! https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/nemotron_voicechat/streaming.py.
 
-pub use config::VoiceChatConfig;
-pub use model::NemotronVoiceChatModel;
-pub use session::VoiceChatResult;
-pub use streaming::{StreamingOptions, VoiceChatEvent, VoiceChatStreamingSession};
+mod buffer;
+mod events;
+mod perception;
+mod profile;
+mod session;
+
+pub use events::{StreamingOptions, TokenAccumulator, VoiceChatError, VoiceChatEvent};
+pub use profile::{FrameTiming, ProfileSummary, StageSummary, VoiceChatProfile, percentile};
+pub use session::VoiceChatStreamingSession;
 
 #[cfg(test)]
 mod tests;

@@ -75,6 +75,13 @@ pub(crate) fn run_voicechat_generation(args: &GenerateArgs) -> Result<()> {
     );
 
     let seed = args.sampling.seed.unwrap_or(0);
+    if generation.stream {
+        return run_streaming(&model, args, &samples, system_prompt, seed);
+    }
+    ensure!(
+        generation.max_streaming_seconds.is_none(),
+        "--max-streaming-seconds applies to --stream runs only"
+    );
     let run_started = std::time::Instant::now();
     let result = model
         .generate_offline(
@@ -109,5 +116,104 @@ pub(crate) fn run_voicechat_generation(args: &GenerateArgs) -> Result<()> {
         "{} timeline frames in {elapsed:.2}s",
         result.text_tokens.len()
     );
+    Ok(())
+}
+
+/// Number of cold frames the `--profile` summary drops (graph compilation
+/// and cache allocation land on the first frames).
+const PROFILE_COLD_FRAMES: usize = 5;
+
+/// `--stream`: push the input (plus `--extra-decoding-seconds` of silence)
+/// through the cache-aware online session in 80 ms frames, printing deltas
+/// as frames produce them, then flush.
+fn run_streaming(
+    model: &mlxcel::models::NemotronVoiceChatModel,
+    args: &GenerateArgs,
+    samples: &[f32],
+    system_prompt: Option<&str>,
+    seed: u64,
+) -> Result<()> {
+    use mlxcel::models::nemotron_voicechat::{StreamingOptions, VoiceChatEvent};
+    use std::io::Write;
+
+    let generation = &args.generation;
+    let options = StreamingOptions {
+        system_prompt: Some(system_prompt.unwrap_or_default().to_string()),
+        seed,
+        max_streaming_seconds: generation.max_streaming_seconds,
+        use_language_cache: true,
+        use_perception_cache: true,
+        profile: generation.profile,
+    };
+    let mut session = model.create_streaming_session(options)?;
+    let rate = model.config().input_sample_rate;
+    let mut input = samples.to_vec();
+    input.resize(
+        input.len() + (generation.extra_decoding_seconds * rate as f32).round() as usize,
+        0.0,
+    );
+
+    let mut audio: Vec<f32> = Vec::new();
+    let mut sample_rate = model.config().output_sample_rate;
+    let mut transcript = String::new();
+    let mut answer = String::new();
+    let mut function = String::new();
+    let mut handle = |events: Vec<VoiceChatEvent>| {
+        for event in events {
+            match event {
+                VoiceChatEvent::AssistantTextDelta { delta, text, .. } => {
+                    print!("{delta}");
+                    let _ = std::io::stdout().flush();
+                    answer = text;
+                }
+                VoiceChatEvent::FunctionDelta { text, .. } => function = text,
+                VoiceChatEvent::UserTranscriptDelta { text, .. } => transcript = text,
+                VoiceChatEvent::Audio {
+                    samples,
+                    sample_rate: rate,
+                    ..
+                } => {
+                    sample_rate = rate;
+                    audio.extend(samples);
+                }
+                VoiceChatEvent::Done { .. } | VoiceChatEvent::Cancelled { .. } => {}
+            }
+        }
+    };
+
+    let started = std::time::Instant::now();
+    let frame = session.frame_samples();
+    for chunk in input.chunks(frame) {
+        handle(session.push_audio(chunk, rate)?);
+    }
+    handle(session.flush(true)?);
+    let elapsed = started.elapsed().as_secs_f64();
+    println!();
+    println!("[user] {transcript}");
+    if !function.is_empty() {
+        println!("[function] {function}");
+    }
+    if answer.is_empty() {
+        eprintln!("(no assistant text)");
+    }
+
+    if let Some(out) = generation.output_audio.as_ref() {
+        let wav = mlxcel::audio::wav_writer::encode_wav_pcm16(&audio, sample_rate, 1);
+        std::fs::write(out, wav).with_context(|| format!("failed to write {}", out.display()))?;
+        eprintln!(
+            "Wrote {} ({} samples, {:.2}s at {sample_rate} Hz)",
+            out.display(),
+            audio.len(),
+            audio.len() as f64 / f64::from(sample_rate)
+        );
+    }
+    eprintln!(
+        "{} audio frames streamed in {elapsed:.2}s",
+        session.frame_index()
+    );
+    if generation.profile {
+        let summary = session.profile().summary(PROFILE_COLD_FRAMES);
+        eprintln!("{}", serde_json::to_string_pretty(&summary)?);
+    }
     Ok(())
 }

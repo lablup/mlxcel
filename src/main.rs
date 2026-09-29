@@ -573,6 +573,18 @@ pub(crate) struct GenerationOptions {
     #[arg(long, value_name = "SECONDS", default_value_t = 3.0)]
     pub(crate) extra_decoding_seconds: f32,
 
+    /// Nemotron VoiceChat: drive the cache-aware online session in 80 ms
+    /// frames instead of the offline timeline, printing text and transcript
+    /// deltas as each frame produces them. Combine with `--profile` for the
+    /// per-stage latency summary.
+    #[arg(long, default_value_t = false)]
+    pub(crate) stream: bool,
+
+    /// Nemotron VoiceChat `--stream`: stop with an error once the session
+    /// has consumed this many seconds of audio.
+    #[arg(long, value_name = "SECONDS")]
+    pub(crate) max_streaming_seconds: Option<f32>,
+
     /// Speaker voice for `--output-audio` (Qwen3-Omni talker; the released
     /// checkpoints ship ethan, chelsie, and aiden).
     #[arg(long, value_name = "NAME", default_value = "ethan")]
