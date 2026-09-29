@@ -504,44 +504,57 @@ __global__ void slice_update_op_kernel(
     int64_t output_offset) {
   Op op;
 
-  IdxT idx = (IdxT(blockIdx.x) * IdxT(blockDim.x) + IdxT(threadIdx.x)) * NWORK;
-  IdxT out_idx;
-  IdxT update_idx;
-
-  if constexpr (OUT_ROW_CONTIG) {
-    out_idx = idx;
-  } else {
-    out_idx = elem_to_loc<IdxT>(
-        idx, update_shape.data_, output_strides.data_, update_ndim);
-  }
-
-  if constexpr (!UPD_SCALAR) {
-    if constexpr (UPD_ROW_CONTIG) {
-      update_idx = idx;
-    } else {
-      update_idx = elem_to_loc<IdxT>(
-          idx, update_shape.data_, update_strides.data_, update_ndim);
-    }
-  } else {
-    update_idx = 0;
-  }
-
   out += output_offset;
 
-  for (int j = 0; j < NWORK && idx < update_size; j++) {
-    out[out_idx] = op(out[out_idx], updates[update_idx]);
-    idx++;
+  // Grid-stride over NWORK-element chunks: the launch site caps the grid at
+  // 65535 blocks, so a one-chunk-per-thread kernel would silently leave the
+  // tail of a large update unapplied. Each chunk starts at a multiple of
+  // NWORK and the launch site only picks NWORK when it divides the innermost
+  // dimension, so a chunk never crosses an innermost row and the per-element
+  // stride increments below stay valid.
+  const IdxT chunk_stride =
+      IdxT(gridDim.x) * IdxT(blockDim.x) * IdxT(NWORK);
+  for (IdxT base =
+           (IdxT(blockIdx.x) * IdxT(blockDim.x) + IdxT(threadIdx.x)) * NWORK;
+       base < update_size;
+       base += chunk_stride) {
+    IdxT idx = base;
+    IdxT out_idx;
+    IdxT update_idx;
 
     if constexpr (OUT_ROW_CONTIG) {
       out_idx = idx;
     } else {
-      out_idx += output_strides[update_ndim - 1];
+      out_idx = elem_to_loc<IdxT>(
+          idx, update_shape.data_, output_strides.data_, update_ndim);
     }
 
-    if constexpr (UPD_ROW_CONTIG) {
-      update_idx = idx;
-    } else if constexpr (!UPD_SCALAR) {
-      update_idx += update_strides[update_ndim - 1];
+    if constexpr (!UPD_SCALAR) {
+      if constexpr (UPD_ROW_CONTIG) {
+        update_idx = idx;
+      } else {
+        update_idx = elem_to_loc<IdxT>(
+            idx, update_shape.data_, update_strides.data_, update_ndim);
+      }
+    } else {
+      update_idx = 0;
+    }
+
+    for (int j = 0; j < NWORK && idx < update_size; j++) {
+      out[out_idx] = op(out[out_idx], updates[update_idx]);
+      idx++;
+
+      if constexpr (OUT_ROW_CONTIG) {
+        out_idx = idx;
+      } else {
+        out_idx += output_strides[update_ndim - 1];
+      }
+
+      if constexpr (UPD_ROW_CONTIG) {
+        update_idx = idx;
+      } else if constexpr (!UPD_SCALAR) {
+        update_idx += update_strides[update_ndim - 1];
+      }
     }
   }
 }
@@ -1389,6 +1402,9 @@ void SliceUpdate::eval_gpu(const std::vector<array>& inputs, array& out) {
   int64_t update_size = upd.size();
   int block_size = 256;
   int64_t adjusted_size = (update_size + nwork - 1) / nwork;
+  // The 65535-block clamp is safe only because slice_update_op_kernel is
+  // grid-stride: threads past the clamped grid's reach pick up the remaining
+  // NWORK-element chunks in later iterations (LOCAL_FIXES.md item 21).
   int num_blocks = static_cast<int>(
       std::min((adjusted_size + block_size - 1) / block_size, (int64_t)65535));
 

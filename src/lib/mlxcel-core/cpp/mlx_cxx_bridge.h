@@ -408,6 +408,15 @@ std::unique_ptr<MlxArray> slice_update(const MlxArray& src,
                                         rust::Slice<const int32_t> starts,
                                         rust::Slice<const int32_t> stops);
 
+// Reduce slice update: src[starts:stops] = op(src[starts:stops], update) with
+// reduce 0 = Sum, 1 = Prod, 2 = Max, 3 = Min. Throws std::invalid_argument
+// (a Rust Err) for any other reduce value. Test-only entry point.
+std::unique_ptr<MlxArray> slice_update_reduce(const MlxArray& src,
+                                              const MlxArray& update,
+                                              rust::Slice<const int32_t> starts,
+                                              rust::Slice<const int32_t> stops,
+                                              int32_t reduce);
+
 // Argmax along axis
 std::unique_ptr<MlxArray> argmax(const MlxArray& a, int32_t axis, bool keepdims);
 

@@ -1321,6 +1321,33 @@ std::unique_ptr<MlxArray> slice_update(const MlxArray& src,
     return std::make_unique<MlxArray>(mlx::core::slice_update(src.inner, update.inner, starts_shape, stops_shape));
 }
 
+std::unique_ptr<MlxArray> slice_update_reduce(const MlxArray& src,
+                                              const MlxArray& update,
+                                              rust::Slice<const int32_t> starts,
+                                              rust::Slice<const int32_t> stops,
+                                              int32_t reduce) {
+    Shape starts_shape(starts.begin(), starts.end());
+    Shape stops_shape(stops.begin(), stops.end());
+    switch (reduce) {
+        case 0:
+            return std::make_unique<MlxArray>(mlx::core::slice_update_add(
+                src.inner, update.inner, std::move(starts_shape), std::move(stops_shape)));
+        case 1:
+            return std::make_unique<MlxArray>(mlx::core::slice_update_prod(
+                src.inner, update.inner, std::move(starts_shape), std::move(stops_shape)));
+        case 2:
+            return std::make_unique<MlxArray>(mlx::core::slice_update_max(
+                src.inner, update.inner, std::move(starts_shape), std::move(stops_shape)));
+        case 3:
+            return std::make_unique<MlxArray>(mlx::core::slice_update_min(
+                src.inner, update.inner, std::move(starts_shape), std::move(stops_shape)));
+        default:
+            throw std::invalid_argument(
+                "slice_update_reduce: reduce must be 0 (Sum), 1 (Prod), 2 (Max) or 3 (Min), got " +
+                std::to_string(reduce));
+    }
+}
+
 std::unique_ptr<MlxArray> argmax(const MlxArray& a, int32_t axis, bool keepdims) {
     return std::make_unique<MlxArray>(mlx::core::argmax(a.inner, axis, keepdims));
 }

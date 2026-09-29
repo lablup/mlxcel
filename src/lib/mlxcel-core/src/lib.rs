@@ -548,6 +548,21 @@ mod ffi {
             stops: &[i32],
         ) -> UniquePtr<MlxArray>;
 
+        /// Reduce slice update: `src[starts:stops] = op(src[starts:stops], update)`
+        /// with `reduce` 0 = Sum, 1 = Prod, 2 = Max, 3 = Min (MLX's
+        /// `slice_update_add`, `slice_update_prod`, `slice_update_max`,
+        /// `slice_update_min`). Any other `reduce` value is an `Err` naming the
+        /// valid range. Test-only entry point: no model path uses the reduce
+        /// variants; `tests/rocm_slice_update_reduce.rs` drives the ROCm
+        /// `SliceUpdate` reduce kernel through it.
+        fn slice_update_reduce(
+            src: &MlxArray,
+            update: &MlxArray,
+            starts: &[i32],
+            stops: &[i32],
+            reduce: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
         /// Argmax along axis
         fn argmax(a: &MlxArray, axis: i32, keepdims: bool) -> UniquePtr<MlxArray>;
 
