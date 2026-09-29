@@ -1793,6 +1793,37 @@ fn llmjpvl_model_type_is_detected_for_both_released_backbones() {
 }
 
 #[test]
+fn mage_vl_model_type_is_detected_with_and_without_vision() {
+    // Mage-VL (#1365) keeps `MageVLM` even for a vision-stripped config: its
+    // decoder is nested under `text_config` with `language_model.*` keys,
+    // which the flat `qwen3` text route cannot read, so the loader (not the
+    // detector) drops the tower, as the Qwen2-VL family does (#1367).
+    for (name, vision) in [
+        (
+            "mage_vl_full",
+            json!({"model_type": "mage_vl_vision", "hidden_size": 1024}),
+        ),
+        ("mage_vl_stripped", json!({})),
+    ] {
+        let model_dir = temp_path(name);
+        fs::create_dir_all(&model_dir).unwrap();
+        let config = json!({
+            "architectures": ["MageVLForConditionalGeneration"],
+            "model_type": "mage_vl",
+            "image_token_id": 151655,
+            "text_config": {"model_type": "qwen3", "hidden_size": 2560, "num_hidden_layers": 36},
+            "vision_config": vision,
+        });
+        fs::write(model_dir.join("config.json"), config.to_string()).unwrap();
+
+        let detected = super::detection::get_model_type(&model_dir).unwrap();
+        assert_eq!(detected, ModelType::MageVLM, "{name}");
+
+        fs::remove_dir_all(model_dir).unwrap();
+    }
+}
+
+#[test]
 fn got_model_type_is_detected_for_both_released_layouts() {
     // GOT-OCR 2.0 writes its `model_type` in upper case (`"GOT"`), so this
     // depends on the lowercase normalization the detector applies before

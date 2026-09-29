@@ -436,6 +436,11 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // dispatch table total and the planner's supported-architecture
         // validation rejects this string.
         ModelType::LlmJpVLM => "llmjpvl",
+        // Mage-VL's decoder is a plain Qwen3, but the Mage-ViT tower has no
+        // sharded runtime and TP is refused for VLM-kind models earlier. The
+        // placeholder keeps the dispatch table total; the planner's
+        // supported-architecture validation rejects this string.
+        ModelType::MageVLM => "mage_vl",
         // GOT-OCR 2.0's decoder is Qwen2, but the vision tower has no sharded
         // runtime and TP is refused for VLM-kind models before this point. The
         // placeholder keeps the dispatch table total; the planner's

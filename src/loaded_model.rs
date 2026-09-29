@@ -117,6 +117,8 @@ pub enum LoadedModel {
     LlmJpVL(vision::LlmJpVlModel),
     /// GOT-OCR 2.0 (`GOT`): SAM ViT-B tower + linear projector + Qwen2-0.5B.
     GotOcrVLM(vision::GotOcrVlModel),
+    /// Mage-VL (`mage_vl`): Mage-ViT tower + 2x2 patch merger + Qwen3 decoder.
+    MageVLM(vision::MageVlModel),
     KimiVL(vision::KimiVLModel),
     LocateAnythingVLM(vision::LocateAnythingVLM),
     SmolVLM(vision::SmolVLMModel),
@@ -305,6 +307,7 @@ macro_rules! delegate_language_model {
             LoadedModel::InternVLChatVLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::LlmJpVL(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::GotOcrVLM(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::MageVLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::KimiVL(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::LocateAnythingVLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::SmolVLM(inner) => LanguageModel::$method(inner, $($arg),*),

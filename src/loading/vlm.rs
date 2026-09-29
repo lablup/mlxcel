@@ -86,6 +86,8 @@ mod llava;
 mod llmjp_vl;
 #[path = "vlm_locateanything.rs"]
 mod locateanything;
+#[path = "vlm_mage_vl.rs"]
+mod mage_vl;
 #[path = "vlm_minimax_m3_vl.rs"]
 mod minimax_m3_vl;
 #[path = "vlm_mllama.rs"]
@@ -141,6 +143,7 @@ pub(crate) use llava::load_llava_iree_host_preprocessor;
 pub(crate) use llava::{load_llava_bunny_vlm, load_llava_host_preprocessor, load_llava_vlm};
 pub(crate) use llmjp_vl::load_llmjp_vl;
 pub(crate) use locateanything::load_locateanything_vlm;
+pub(crate) use mage_vl::load_mage_vl;
 pub(crate) use minimax_m3_vl::load_minimax_m3_vl;
 pub(crate) use mllama::load_mllama_vlm;
 pub(crate) use muse_glimmer::{

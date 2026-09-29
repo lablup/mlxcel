@@ -292,6 +292,12 @@ fn print_preparation_summary(summary: VlmPreparationSummary) {
                 total_tokens
             );
         }
+        VlmPreparationSummary::MageVl {
+            images,
+            image_tokens,
+        } => {
+            println!("Mage-VL: expanded {images} image(s) into {image_tokens} image token(s)");
+        }
         VlmPreparationSummary::LlmJpVl {
             image_blocks,
             total_image_tokens,

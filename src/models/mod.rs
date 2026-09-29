@@ -472,6 +472,9 @@ pub enum ModelType {
     /// LLM-jp-VL (`llmjpvl`): SigLIP2 tower + pixel-shuffle `mlp1` + a
     /// Llama (llm-jp-4-vl-9B) or Qwen3 (Jagle-VL-2.2B) decoder.
     LlmJpVLM,
+    /// Mage-VL (`mage_vl`): Mage-ViT tower (interleaved 4:6:6 3D RoPE) + 2x2
+    /// LayerNorm/MLP patch merger + a plain Qwen3 decoder (1-D RoPE).
+    MageVLM,
     /// GOT-OCR 2.0 (`GOT`): SAM ViT-B tower + `Linear(1024, 1024)` projector +
     /// Qwen2-0.5B decoder, on a fixed 256-token image block.
     GotOcrVLM,
@@ -753,6 +756,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::YoutuVLM,
     ModelType::InternVLChatVLM,
     ModelType::LlmJpVLM,
+    ModelType::MageVLM,
     ModelType::GotOcrVLM,
     ModelType::LocateAnythingVLM,
     ModelType::SmolVLM,
@@ -1236,6 +1240,10 @@ impl ModelType {
                 "LLM-jp VL (SigLIP2 + pixel-shuffle mlp1 + Llama/Qwen3)",
                 "Other VLM",
             ),
+            ModelType::MageVLM => (
+                "Mage-VL (Mage-ViT 3D-RoPE + 2x2 merger + Qwen3)",
+                "Other VLM",
+            ),
             ModelType::GotOcrVLM => (
                 "GOT-OCR 2.0 (SAM ViT-B + linear projector + Qwen2-0.5B)",
                 "Other VLM",
@@ -1382,6 +1390,7 @@ mod metadata_tests {
             YoutuVLM,
             InternVLChatVLM,
             LlmJpVLM,
+            MageVLM,
             GotOcrVLM,
             LocateAnythingVLM,
             SmolVLM,

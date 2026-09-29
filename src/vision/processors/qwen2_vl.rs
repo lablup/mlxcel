@@ -565,6 +565,29 @@ mod tests {
         assert_eq!(mlxcel_core::array_shape(&mlx), vec![32, row_width as i32]);
     }
 
+    /// Mage-VL is the first caller with `temporal_patch_size = 1`: each image
+    /// must yield `t*h*w` rows of `3*P*P`, not the duplicated `2*t*h*w` the
+    /// Qwen2-VL checkpoints get.
+    #[test]
+    fn qwen2_vl_processor_temporal_patch_1_row_count() {
+        let processor = Qwen2VLProcessor::new_with_norm(16, 1, 2, [0.5; 3], [0.5; 3])
+            .with_pixel_bounds(3136, 4_000_000);
+        let image = DynamicImage::ImageRgb8(RgbImage::from_pixel(224, 224, Rgb([255, 0, 0])));
+        let (pixel_values, grids) = processor.preprocess_with_grid(&[image]);
+        assert_eq!(grids, vec![(1, 14, 14)]);
+        assert_eq!(
+            mlxcel_core::array_shape(&pixel_values),
+            vec![14 * 14, 3 * 16 * 16]
+        );
+        let (values, _) = processor.preprocess_values_with_grid(&[DynamicImage::ImageRgb8(
+            RgbImage::from_pixel(224, 224, Rgb([255, 0, 0])),
+        )]);
+        // Row 0 starts with channel 0 (red, (1 - 0.5) / 0.5 = 1) and its
+        // second 256-value block is channel 1 (green, -1).
+        assert!((values[0] - 1.0).abs() < 1e-6);
+        assert!((values[256] + 1.0).abs() < 1e-6);
+    }
+
     #[test]
     fn video_processor_config_reads_qwen_sidecar_bounds() {
         let config = serde_json::json!({

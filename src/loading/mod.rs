@@ -328,6 +328,7 @@ fn try_load_vlm_model_from_dir(
         ModelType::KimiVL | ModelType::KimiK25 => Some(load_kimi_vl_vlm(model_path)?),
         ModelType::KimiK3VLM => Some(load_kimi_k3_vlm(model_path)?),
         ModelType::LlmJpVLM => Some(load_llmjp_vl(model_path)?),
+        ModelType::MageVLM => Some(load_mage_vl(model_path)?),
         ModelType::GotOcrVLM => Some(load_got_ocr_vlm(model_path)?),
         ModelType::LocateAnythingVLM => Some(load_locateanything_vlm(model_path)?),
         ModelType::SmolVLM => Some(load_smolvlm_vlm(model_path)?),

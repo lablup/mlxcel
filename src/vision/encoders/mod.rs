@@ -38,6 +38,8 @@ pub mod jina_vlm;
 pub mod kimi_vl;
 pub mod lfm2_vl;
 pub mod llama4;
+pub mod mage_vl;
+pub mod mage_vl_rope;
 pub mod minicpmo;
 pub mod minicpmv4_6;
 pub mod minimax_m3_vl;
