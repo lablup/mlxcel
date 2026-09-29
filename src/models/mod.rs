@@ -128,6 +128,7 @@ pub mod florence2;
 pub mod gemma;
 pub mod gemma2;
 pub mod gemma3;
+pub mod gemma3_backbone;
 pub mod gemma3_embedding;
 pub mod gemma3n;
 pub mod gemma4;

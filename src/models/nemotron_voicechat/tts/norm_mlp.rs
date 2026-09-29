@@ -1,0 +1,170 @@
+// Copyright 2025-2026 Lablup Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Small building blocks shared by the EAR-TTS modules.
+//!
+//! Ports `OffsetRMSNorm`, `MLP` and `MLPLayer` from
+//! `mlx_vlm/models/nemotron_voicechat/tts.py`, plus the weight-map helpers
+//! and the `nn.Linear` bias semantics the other TTS files rely on.
+//!
+//! `OffsetRMSNorm` is deliberately not [`mlxcel_core::layers::GemmaRMSNorm`]:
+//! the reference upcasts the input to `f32`, builds `1 + weight` in `f32`,
+//! normalizes, and casts back, whereas `GemmaRMSNorm` builds `1 + weight` in
+//! the weight's dtype and normalizes in the input's. The two differ in the
+//! last bits for bf16 weights, which is visible in the sampled RVQ codes.
+
+use mlxcel_core::dtype;
+use mlxcel_core::layers::UnifiedLinear;
+use mlxcel_core::weights::WeightMap;
+use mlxcel_core::{MlxArray, UniquePtr};
+
+use crate::models::gemma3::{MLP, ModelArgs};
+
+/// Copy `key` out of `weights`, or report it missing.
+pub(crate) fn weight(weights: &WeightMap, key: &str) -> Result<UniquePtr<MlxArray>, String> {
+    weights
+        .get(key)
+        .map(|w| mlxcel_core::copy(w))
+        .ok_or_else(|| format!("Weight not found: {key}"))
+}
+
+/// Copy `key` and check its shape.
+pub(crate) fn weight_with_shape(
+    weights: &WeightMap,
+    key: &str,
+    expected: &[i32],
+) -> Result<UniquePtr<MlxArray>, String> {
+    let w = weight(weights, key)?;
+    let shape = mlxcel_core::array_shape(&w);
+    if shape != expected {
+        return Err(format!("{key}: expected shape {expected:?}, got {shape:?}"));
+    }
+    Ok(w)
+}
+
+/// A scalar array holding `value` in `dtype_id`, the equivalent of a Python
+/// float literal (weakly typed) meeting an array of that dtype.
+pub(crate) fn scalar(value: f64, dtype_id: i32) -> UniquePtr<MlxArray> {
+    mlxcel_core::full_f32(&[], value as f32, dtype_id)
+}
+
+/// `nn.Linear.__call__`: `addmm(bias, x, W.T)` when a bias exists, `x @ W.T`
+/// otherwise.
+///
+/// The crate's dense [`mlxcel_core::layers::Linear`] adds the bias after the
+/// matmul, which rounds twice for a bf16 output; MLX's `addmm` fuses the add
+/// into the GEMM epilogue and rounds once. Quantized layers keep
+/// [`UnifiedLinear::forward`].
+pub(crate) fn linear_forward(layer: &UnifiedLinear, x: &MlxArray) -> UniquePtr<MlxArray> {
+    match layer {
+        UnifiedLinear::Regular(linear) => match &linear.bias {
+            Some(bias) => {
+                let wt = mlxcel_core::transpose(&linear.weight);
+                mlxcel_core::addmm(bias, x, &wt, 1.0, 1.0)
+            }
+            None => layer.forward(x),
+        },
+        UnifiedLinear::Quantized { .. } => layer.forward(x),
+    }
+}
+
+/// `OffsetRMSNorm`: RMSNorm in `f32` with weight `1 + w`, cast back to the
+/// input dtype.
+pub struct OffsetRmsNorm {
+    adjusted_weight: UniquePtr<MlxArray>,
+    eps: f32,
+}
+
+impl OffsetRmsNorm {
+    /// Build from the stored offset `w` (any float dtype).
+    pub fn new(offset_weight: &MlxArray, eps: f32) -> Self {
+        let w32 = mlxcel_core::astype(offset_weight, dtype::FLOAT32);
+        let adjusted_weight = mlxcel_core::add(&scalar(1.0, dtype::FLOAT32), &w32);
+        Self {
+            adjusted_weight,
+            eps,
+        }
+    }
+
+    /// Load `{prefix}.weight` with `hidden` entries.
+    pub fn from_weights(
+        weights: &WeightMap,
+        prefix: &str,
+        hidden: usize,
+        eps: f32,
+    ) -> Result<Self, String> {
+        let w = weight_with_shape(weights, &format!("{prefix}.weight"), &[hidden as i32])?;
+        Ok(Self::new(&w, eps))
+    }
+
+    pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+        let dtype_id = mlxcel_core::array_dtype(x);
+        let x32 = mlxcel_core::astype(x, dtype::FLOAT32);
+        let y = mlxcel_core::fast_rms_norm(&x32, &self.adjusted_weight, self.eps);
+        mlxcel_core::astype(&y, dtype_id)
+    }
+}
+
+/// Minimal Gemma 3 args carrying only what [`MLP::from_weights`] reads
+/// (quantization group size and bits).
+pub(crate) fn mlp_args(group_size: i32, bits: i32) -> ModelArgs {
+    ModelArgs {
+        quantization: Some(crate::models::gemma3::Quantization { group_size, bits }),
+        ..ModelArgs::default()
+    }
+}
+
+/// Load a `gate_proj` / `up_proj` / `down_proj` GeGLU MLP (tanh GELU), the
+/// reference `MLP` module.
+pub(crate) fn load_mlp(weights: &WeightMap, prefix: &str, args: &ModelArgs) -> Result<MLP, String> {
+    MLP::from_weights(weights, args, prefix)
+}
+
+/// `MLPLayer`: `x + post_norm(mlp(pre_norm(x)))`.
+pub struct MlpLayer {
+    pre_norm: OffsetRmsNorm,
+    mlp: MLP,
+    post_norm: OffsetRmsNorm,
+}
+
+impl MlpLayer {
+    pub fn from_weights(
+        weights: &WeightMap,
+        prefix: &str,
+        hidden: usize,
+        eps: f32,
+        args: &ModelArgs,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            pre_norm: OffsetRmsNorm::from_weights(
+                weights,
+                &format!("{prefix}.pre_norm"),
+                hidden,
+                eps,
+            )?,
+            mlp: load_mlp(weights, &format!("{prefix}.mlp"), args)?,
+            post_norm: OffsetRmsNorm::from_weights(
+                weights,
+                &format!("{prefix}.post_norm"),
+                hidden,
+                eps,
+            )?,
+        })
+    }
+
+    pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+        let h = self.mlp.forward(&self.pre_norm.forward(x));
+        mlxcel_core::add(x, &self.post_norm.forward(&h))
+    }
+}

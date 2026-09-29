@@ -12,11 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! NemotronLabs VoiceChat: full-duplex speech model.
-
 pub mod config;
 pub mod llm;
 pub mod model;
+pub mod session;
+pub mod tts;
 
 pub use config::VoiceChatConfig;
 pub use model::NemotronVoiceChatModel;
+pub use session::VoiceChatResult;

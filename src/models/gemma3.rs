@@ -707,8 +707,26 @@ impl TransformerBlock {
         args: &ModelArgs,
         layer_idx: usize,
     ) -> Result<Self, String> {
-        let prefix = format!("model.layers.{}", layer_idx);
+        Self::from_weights_with_prefix(
+            weights,
+            args,
+            &format!("model.layers.{layer_idx}"),
+            layer_idx,
+        )
+    }
 
+    /// Load layer `layer_idx` from `{prefix}.*` instead of the text model's
+    /// `model.layers.{layer_idx}`.
+    ///
+    /// Used by: [`crate::models::gemma3_backbone::Gemma3Backbone`], which
+    /// hosts Gemma 3 layers under another model's key tree (the Nemotron
+    /// VoiceChat EAR-TTS backbone).
+    pub fn from_weights_with_prefix(
+        weights: &WeightMap,
+        args: &ModelArgs,
+        prefix: &str,
+        layer_idx: usize,
+    ) -> Result<Self, String> {
         let self_attn =
             Attention::from_weights(weights, args, &format!("{}.self_attn", prefix), layer_idx)?;
         let mlp = MLP::from_weights(weights, args, &format!("{}.mlp", prefix))?;
