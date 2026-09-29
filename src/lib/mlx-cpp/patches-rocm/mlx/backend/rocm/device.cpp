@@ -1374,15 +1374,28 @@ void ensure_device_flags(int device_index) {
   int prev = -1;
   const bool have_prev = hipGetDevice(&prev) == hipSuccess;
   const bool switched = !have_prev || prev != device_index;
-  if (switched) {
-    (void)hipSetDevice(device_index);
+  if (switched && hipSetDevice(device_index) != hipSuccess) {
+    // Could not bind the device, so the flags cannot be applied to it. Clear
+    // the error and do not record the device as flagged, so a later call can
+    // try again.
+    (void)hipGetLastError();
+    return;
   }
-  if (hipSetDeviceFlags(hipDeviceScheduleBlockingSync) != hipSuccess) {
+  const hipError_t flags_err = hipSetDeviceFlags(hipDeviceScheduleBlockingSync);
+  if (flags_err != hipSuccess) {
     // Not fatal (the device then keeps its default wait mode, as it would
     // have before this helper existed); clear the error so it does not
     // surface from an unrelated later call. Recorded as done either way so a
-    // failing device is not retried on every allocation.
+    // failing device is not retried on every allocation. Say so once on
+    // stderr: without blocking-sync a regression of #1876 would otherwise be
+    // silent.
     (void)hipGetLastError();
+    std::fprintf(
+        stderr,
+        "[mlxcel rocm] hipSetDeviceFlags(hipDeviceScheduleBlockingSync) failed "
+        "for device %d: %s\n",
+        device_index,
+        hipGetErrorString(flags_err));
   }
   if (switched && have_prev) {
     (void)hipSetDevice(prev);

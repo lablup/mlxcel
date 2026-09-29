@@ -113,8 +113,14 @@ fn fft_survives_plan_evictions_and_matches_cpu() {
 
     let deadline = Instant::now() + CHILD_BUDGET;
     let status = loop {
-        if let Some(status) = child.try_wait().expect("poll the child") {
-            break Some(status);
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {}
+            Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("poll the child: {err}");
+            }
         }
         if Instant::now() > deadline {
             let _ = child.kill();
