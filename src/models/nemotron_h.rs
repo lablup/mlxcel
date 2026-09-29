@@ -1694,6 +1694,29 @@ impl NemotronHModel {
         }
     }
 
+    /// Run every layer on pre-computed input embeddings and apply the final
+    /// `norm_f`, returning the normalized hidden state `[B, L, hidden]`
+    /// without the LM head. `caches` holds one entry per stateful layer
+    /// (from [`Self::make_caches`]).
+    ///
+    /// Used by: Nemotron VoiceChat (fused text/audio/function input with two
+    /// output heads, issue #1374)
+    pub fn forward_embeds_to_hidden(
+        &self,
+        inputs_embeds: &MlxArray,
+        caches: &mut [NemotronLayerCache],
+    ) -> UniquePtr<MlxArray> {
+        let h = self.forward_stage(inputs_embeds, 0..self.layers.len(), false, false, caches);
+        self.norm_f.forward(&h)
+    }
+
+    /// Apply the LM head to an already `norm_f`-normalized hidden state.
+    ///
+    /// Used by: Nemotron VoiceChat (text head beside its function head)
+    pub fn apply_lm_head(&self, hidden: &MlxArray) -> UniquePtr<MlxArray> {
+        self.lm_head.forward(hidden)
+    }
+
     /// Look up token embeddings without running the rest of the model.
     /// The VLM path needs raw embeddings to merge image features at
     /// `<image>` token positions before running the layer stack.

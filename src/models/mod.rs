@@ -203,6 +203,7 @@ pub mod nemotron;
 pub mod nemotron_h;
 pub mod nemotron_nas;
 pub mod nemotron_parse;
+pub mod nemotron_voicechat;
 pub mod olmo;
 pub mod olmo2;
 pub mod olmo3;
