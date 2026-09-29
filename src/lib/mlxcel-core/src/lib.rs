@@ -3698,6 +3698,9 @@ pub mod rocm_arch;
 // Deliberate ROCm GPU failures for tests (#1804): a typed wrapper over the
 // bridge's fault-probe fixture, so `tests/rocm_gpu_faults.rs` can provoke a
 // rejected launch and a queue fault without knowing the bridge's integers.
+// Test support only: a queue fault kills the device for the rest of the
+// process, so this is hidden from the public docs.
+#[doc(hidden)]
 pub mod rocm_faults;
 
 // The CUDA graph capture budget applied on GB10 (#1798): a pure policy over

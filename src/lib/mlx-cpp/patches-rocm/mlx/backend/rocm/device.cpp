@@ -8,11 +8,13 @@
 #include "mlx/utils.h"
 
 #include <chrono>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <future>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <sstream>
@@ -451,7 +453,25 @@ CommandEncoder::~CommandEncoder() {
 int gpu_watchdog_seconds() {
   static const int secs = [] {
     const char* e = std::getenv("MLX_ROCM_GPU_WATCHDOG_SECS");
-    return e ? std::max(0, std::atoi(e)) : 0;
+    if (!e || !*e) {
+      return 0;
+    }
+    // The whole string must be a non-negative decimal integer that fits an
+    // int. Anything else (trailing junk such as "10s", overflow, a negative
+    // value) leaves the watchdog off rather than guessing what was meant.
+    char* end = nullptr;
+    errno = 0;
+    long v = std::strtol(e, &end, 10);
+    if (end == e || *end != '\0' || errno == ERANGE || v < 0 ||
+        v > std::numeric_limits<int>::max()) {
+      std::fprintf(
+          stderr,
+          "[ROCm] ignoring invalid MLX_ROCM_GPU_WATCHDOG_SECS=\"%s\" "
+          "(expected a non-negative integer); the GPU watchdog stays off\n",
+          e);
+      return 0;
+    }
+    return static_cast<int>(v);
   }();
   return secs;
 }

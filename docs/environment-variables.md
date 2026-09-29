@@ -193,8 +193,10 @@ also read `MLX_ROCM_FFT_CACHE_SIZE` (default 8), the number of hipFFT plans kept
 alive. The default is low on purpose: past roughly a dozen live plans, creating
 the next one blocks inside hipFFT with the GPU idle (lablup/mlxcel#1825). Raise
 it only while measuring that limit. `MLX_ROCM_GPU_WATCHDOG_SECS` (default `0`,
-off) is the longest a single host wait for GPU work may block before it fails
-with an error (lablup/mlxcel#1804). A GPU fault is reported without it, in
+off) is the longest, in whole seconds, a single host wait for GPU work may
+block before it fails with an error (lablup/mlxcel#1804). A value that is not a
+non-negative integer (for example `10s`) is ignored with a stderr warning and
+leaves the watchdog off. A GPU fault is reported without it, in
 about a second; the watchdog is for a kernel that never finishes, which cannot
 be told from a slow one, so it is opt-in and must exceed the longest prefill
 the server accepts. The stream stays wedged behind the kernel either way, so a
