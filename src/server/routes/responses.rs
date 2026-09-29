@@ -1321,6 +1321,14 @@ mod tests {
     }
 
     #[test]
+    fn responses_accepts_p_less_bool() {
+        let request: CreateResponseRequest =
+            serde_json::from_str(r#"{"model":"m","input":"hi","p_less":true}"#).unwrap();
+        let translated = responses_request_to_chat(&request, None, None).unwrap();
+        assert_eq!(translated.chat_request.params.p_less, Some(true));
+    }
+
+    #[test]
     fn responses_rejects_negative_top_n_sigma() {
         let request: CreateResponseRequest =
             serde_json::from_str(r#"{"model":"m","input":"hi","top_n_sigma":-2.0}"#).unwrap();

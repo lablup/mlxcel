@@ -2277,3 +2277,20 @@ fn classic_mark_first_token_stamps_the_decode_state_and_on_token_does_not_restam
         result.generation_only_ms
     );
 }
+
+#[test]
+fn sampling_config_eq_distinguishes_p_less() {
+    let a = SamplingConfig::with_temperature(0.7);
+    let b = SamplingConfig {
+        p_less: true,
+        ..a.clone()
+    };
+    assert!(!super::speculative_burst::sampling_config_eq(&a, &b));
+    // Greedy rows differing only in an inert p_less still share a window.
+    let g = SamplingConfig::greedy();
+    let gp = SamplingConfig {
+        p_less: true,
+        ..g.clone()
+    };
+    assert!(super::speculative_burst::sampling_config_eq(&g, &gp));
+}

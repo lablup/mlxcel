@@ -125,6 +125,8 @@ pub(crate) struct RequestOptionOverrides {
     /// Top-n-sigma logit-filter override. Validated at the request layer
     /// (finite, `>= 0.0`) before it reaches here.
     pub top_n_sigma: Option<f32>,
+    /// p-less truncation override (#1373). Absent resolves to `false`.
+    pub p_less: Option<bool>,
     /// Locally typical sampling override. Validated at the request layer
     /// (finite, in `(0.0, 1.0]`) on the OpenAI-shaped endpoints; the native
     /// `/completion` route sanitizes out-of-domain values itself.
@@ -343,6 +345,8 @@ pub(crate) fn build_server_generate_options_with_live(
         // --typical-p default applies when the request omits the field,
         // matching llama-server's sampling-params surface.
         typical_p: overrides.typical_p.unwrap_or(config.default_typical_p),
+        // p_less has no server-wide default: absent means disabled.
+        p_less: overrides.p_less.unwrap_or(false),
         // b10621 window semantics (#1436): the server-wide --repeat-last-n
         // default (64) bounds the repetition/frequency/presence penalties for
         // every request that does not carry its own repeat_last_n. Before

@@ -982,6 +982,14 @@ pub struct SamplingConfig {
     /// path (`temperature == 0.0 || top_k == 1`) skips the filter entirely.
     /// See [`crate::sampling::apply_row_filters`].
     pub top_n_sigma: f32,
+    /// Hyperparameter-free p-less truncation (`false` = disabled, the
+    /// default). Keeps every token whose probability is at least the
+    /// collision probability `L = sum_v p(v)^2` of the temperature-scaled
+    /// distribution and masks the rest to `-inf`. The argmax always
+    /// survives (`L <= p_max`). Runs after `top_n_sigma` and before
+    /// `typical_p`; the greedy path skips it. See
+    /// [`crate::sampling::apply_row_filters`].
+    pub p_less: bool,
     /// Locally typical sampling (`1.0` = disabled, the default). Keeps the
     /// tokens whose surprisal `-log p` is closest to the row entropy,
     /// accumulating probability mass in that typicality order until it
@@ -1089,6 +1097,7 @@ impl Default for SamplingConfig {
             xtc_threshold: 0.1,
             xtc_special_token_ids: Vec::new(),
             top_n_sigma: 0.0,
+            p_less: false,
             typical_p: 1.0,
             penalty_last_n: -1,
             mirostat: 0,
@@ -1128,6 +1137,7 @@ impl SamplingConfig {
             xtc_threshold: 0.1,
             xtc_special_token_ids: Vec::new(),
             top_n_sigma: 0.0,
+            p_less: false,
             typical_p: 1.0,
             penalty_last_n: -1,
             mirostat: 0,
@@ -1169,6 +1179,13 @@ impl SamplingConfig {
         } else {
             0.0
         }
+    }
+
+    /// Whether p-less truncation will actually run: `false` when the config
+    /// is greedy or mirostat replaces the chain. Batch-uniformity gates
+    /// compare THIS value so inert differences do not split a batch.
+    pub fn effective_p_less(&self) -> bool {
+        self.p_less && !self.is_greedy_path() && self.effective_mirostat() == 0
     }
 
     /// The typical-p value the sampler will actually apply: `1.0` (disabled)

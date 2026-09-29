@@ -1374,6 +1374,7 @@ fn build_native_generate_options_with_live(
                     1.0
                 }
             }),
+            p_less: request.p_less,
             // b10621 ignore_eos (#1436): a bool field, absent falls back to
             // the server-wide --ignore-eos default.
             ignore_eos: request.ignore_eos,
@@ -1510,6 +1511,16 @@ mod tests {
 
     fn native_request(json: &str) -> NativeCompletionRequest {
         serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn native_completion_maps_p_less() {
+        let request = native_request(r#"{"prompt":"hi","p_less":true}"#);
+        let options = build_native_generate_options(&ServerConfig::default(), &request, None);
+        assert!(options.sampling.p_less);
+        let request = native_request(r#"{"prompt":"hi"}"#);
+        let options = build_native_generate_options(&ServerConfig::default(), &request, None);
+        assert!(!options.sampling.p_less);
     }
 
     #[test]

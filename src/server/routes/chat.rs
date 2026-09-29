@@ -2576,6 +2576,7 @@ pub(crate) fn build_generate_options_with_live(
             xtc_threshold: params.xtc_threshold,
             top_n_sigma: params.top_n_sigma,
             typical_p: params.typical_p,
+            p_less: params.p_less,
             // b10621 repeat_last_n / mlx-lm repetition_context_size: the
             // usize deserialization already rejects negatives (upstream's
             // schema floor is 0), so only the i32 clamp remains.
@@ -2776,6 +2777,15 @@ mod tests {
         assert!(validate_top_n_sigma(Some(0.0)).is_ok());
         assert!(validate_top_n_sigma(Some(1.0)).is_ok());
         assert!(validate_top_n_sigma(Some(100.0)).is_ok());
+    }
+
+    #[test]
+    fn chat_accepts_p_less_bool() {
+        let request: ChatCompletionRequest = serde_json::from_str(
+            r#"{"model":"m","messages":[{"role":"user","content":"hi"}],"p_less":true}"#,
+        )
+        .unwrap();
+        assert_eq!(request.params.p_less, Some(true));
     }
 
     #[test]

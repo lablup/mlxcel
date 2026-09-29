@@ -959,6 +959,9 @@ pub struct FusedSampleParams {
     /// RNG-free, so it stays fused-eligible: [`apply_row_filters`] applies it
     /// to the whole `[B, V]` batch before the single fused dispatch.
     pub top_n_sigma: f32,
+    /// p-less truncation (`false` disables). Row-wise, history-free and
+    /// RNG-free, applied by [`apply_row_filters`] after `top_n_sigma`.
+    pub p_less: bool,
     /// Locally typical sampling cutoff (`1.0` disables). Row-wise,
     /// history-free and RNG-free like `top_n_sigma`, and applied by the same
     /// [`apply_row_filters`] hook before the single fused dispatch.
@@ -980,6 +983,7 @@ impl FusedSampleParams {
             top_p: config.top_p,
             min_p: config.min_p,
             top_n_sigma: config.effective_top_n_sigma(),
+            p_less: config.effective_p_less(),
             typical_p: config.effective_typical_p(),
         }
     }
@@ -995,6 +999,7 @@ impl FusedSampleParams {
             && self.top_p.to_bits() == other.top_p.to_bits()
             && self.min_p.to_bits() == other.min_p.to_bits()
             && self.top_n_sigma.to_bits() == other.top_n_sigma.to_bits()
+            && self.p_less == other.p_less
             && self.typical_p.to_bits() == other.typical_p.to_bits()
     }
 }
@@ -1181,8 +1186,9 @@ fn token_ids_to_host(tokens: &MlxArray) -> Vec<i32> {
 /// top_n_sigma -> p_less (#1373) -> typical_p (#1377)
 /// ```
 ///
-/// (`p_less` lands in its own issue; its slot in this function fixes the
-/// order here so it cannot accidentally reorder the chain).
+/// `p_less` (#1373) reads `params.temperature` because it is defined on the
+/// tempered distribution; the fused chain still applies the temperature
+/// itself afterwards.
 ///
 /// Returns the input pointer unchanged, adding NO graph nodes, when every
 /// filter is disabled or when the config is greedy (`temperature == 0.0 ||
@@ -1210,7 +1216,9 @@ pub fn apply_row_filters(
     if params.top_n_sigma > 0.0 && params.top_n_sigma.is_finite() {
         logits = top_n_sigma_filter(&logits, params.top_n_sigma);
     }
-    // p_less (#1373) slot: runs here, after top_n_sigma, when it lands.
+    if params.p_less {
+        logits = p_less_filter(&logits, params.temperature);
+    }
     if params.typical_p.is_finite() && params.typical_p > 0.0 && params.typical_p < 1.0 {
         // b10621's default sampler chain is `... top_n_sigma; top_k; typ_p;
         // top_p; min_p ...`: typical sampling runs on the RENORMALIZED top-k
@@ -1262,6 +1270,9 @@ fn apply_extended_chain(
     let top_n_sigma = config.effective_top_n_sigma();
     if top_n_sigma > 0.0 {
         x = top_n_sigma_filter(&x, top_n_sigma);
+    }
+    if config.effective_p_less() {
+        x = p_less_filter(&x, config.temperature);
     }
     if config.top_k > 1 {
         let vocab = ffi::array_shape(&x).last().copied().unwrap_or(0);
@@ -1615,6 +1626,32 @@ pub(crate) fn top_n_sigma_filter(logits: &MlxArray, n_sigma: f32) -> UniquePtr<M
     // runs in and doubling the `[B, V]` tensor. Same masking convention as
     // `min_p_filter` / `top_k_filter` otherwise: kept entries pass through
     // from the original logits.
+    let neg_inf = ffi::full_f32(&[1], f32::NEG_INFINITY, ffi::array_dtype(logits));
+    ffi::where_cond(&keep, logits, &neg_inf)
+}
+
+/// p-less filter: keep every token whose probability under the
+/// temperature-scaled softmax is at least the row's collision probability
+/// `L = sum_v p(v)^2`, and mask the rest to `-inf`.
+///
+/// `L <= max_v p(v)` always holds, so the argmax survives; a sharply peaked
+/// row collapses to its argmax while a flat row keeps most of the
+/// vocabulary. `L > 0` for any row with a finite entry, so already-masked
+/// entries (probability exactly 0) stay masked. Statistics are computed in
+/// float32; the mask fill keeps the ORIGINAL logits dtype (same convention
+/// as [`top_n_sigma_filter`]). The filter takes the temperature explicitly
+/// because it is defined on the tempered distribution, while the fused chain
+/// applies the temperature again later (unchanged). Rows are independent.
+///
+/// Used by: [`apply_row_filters`], [`apply_extended_chain`], unit tests
+pub(crate) fn p_less_filter(logits: &MlxArray, temperature: f32) -> UniquePtr<MlxArray> {
+    let mut f = ffi::astype(logits, dtype::FLOAT32);
+    if temperature != 1.0 {
+        f = crate::ops::divide_scalar(&f, temperature);
+    }
+    let probs = ffi::softmax(&f, -1);
+    let l = ffi::sum_axis(&ffi::multiply(&probs, &probs), -1, true);
+    let keep = ffi::greater_equal(&probs, &l);
     let neg_inf = ffi::full_f32(&[1], f32::NEG_INFINITY, ffi::array_dtype(logits));
     ffi::where_cond(&keep, logits, &neg_inf)
 }
@@ -4765,6 +4802,166 @@ mod tests {
         };
         assert!(!base.matches(&diff));
         assert!(diff.matches(&diff));
+    }
+
+    // ---- p_less (#1373) ----
+
+    /// Deterministic pseudo-random N(0, 1)-ish source (sum of uniforms), so
+    /// the tests need no RNG dependency.
+    struct TestRng(u64);
+    impl TestRng {
+        fn next_unit(&mut self) -> f64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((self.0 >> 11) as f64) / ((1u64 << 53) as f64)
+        }
+        fn normal(&mut self) -> f64 {
+            (0..12).map(|_| self.next_unit()).sum::<f64>() - 6.0
+        }
+    }
+
+    fn host_probs(row: &[f32], t: f32) -> Vec<f64> {
+        let scaled: Vec<f64> = row.iter().map(|x| *x as f64 / t as f64).collect();
+        let m = scaled.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let exps: Vec<f64> = scaled.iter().map(|x| (x - m).exp()).collect();
+        let z: f64 = exps.iter().sum();
+        exps.iter().map(|e| e / z).collect()
+    }
+
+    fn p_less_row(row: &[f32], t: f32) -> Vec<f32> {
+        let logits = ffi::from_slice_f32(row, &[1, row.len() as i32]);
+        to_vec_f32(&p_less_filter(&logits, t))
+    }
+
+    #[test]
+    fn p_less_filter_matches_host_reference() {
+        let mut rng = TestRng(7);
+        let temps = [0.5f32, 0.7, 1.0, 1.3, 2.0];
+        for i in 0..40 {
+            let v = 8 + ((rng.next_unit() * 192.0) as usize);
+            let t = temps[i % temps.len()];
+            let row: Vec<f32> = (0..v).map(|_| (rng.normal() * 3.0) as f32).collect();
+            let out = p_less_row(&row, t);
+            let p = host_probs(&row, t);
+            let l: f64 = p.iter().map(|x| x * x).sum();
+            for (j, pj) in p.iter().enumerate() {
+                if (pj - l).abs() > 1e-5 {
+                    assert_eq!(
+                        out[j].is_finite(),
+                        *pj >= l,
+                        "row {i} token {j} p={pj} L={l}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn p_less_filter_argmax_always_survives() {
+        let mut rng = TestRng(11);
+        for i in 0..50 {
+            let v = 4 + ((rng.next_unit() * 100.0) as usize);
+            let t = 0.3 + rng.next_unit() as f32 * 3.0;
+            let row: Vec<f32> = (0..v).map(|_| (rng.normal() * 2.0) as f32).collect();
+            let am = row
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .unwrap()
+                .0;
+            let out = p_less_row(&row, t);
+            assert!(out[am].is_finite(), "row {i}: argmax was masked");
+            assert_eq!(out[am], row[am]);
+        }
+    }
+
+    #[test]
+    fn p_less_filter_peaked_keeps_top_only() {
+        let out = p_less_row(&[10.0, 0.0, 0.0, 0.0, 0.0], 1.0);
+        assert_eq!(kept_indices(&out), vec![0]);
+    }
+
+    #[test]
+    fn p_less_filter_higher_temp_keeps_more() {
+        let row = [4.0f32, 2.0, 1.0, 0.5, 0.0, -1.0];
+        let counts: Vec<usize> = [0.5f32, 1.0, 2.0, 5.0]
+            .iter()
+            .map(|t| kept_indices(&p_less_row(&row, *t)).len())
+            .collect();
+        assert!(counts.windows(2).all(|w| w[0] <= w[1]), "{counts:?}");
+    }
+
+    #[test]
+    fn p_less_filter_rows_independent() {
+        let logits = ffi::from_slice_f32(
+            &[10.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.9, 0.8, 0.7, 0.6],
+            &[2, 5],
+        );
+        let v = to_vec_f32(&p_less_filter(&logits, 1.0));
+        assert_eq!(kept_indices(&v[..5]), vec![0]);
+        assert!(kept_indices(&v[5..]).len() > 1);
+    }
+
+    #[test]
+    fn p_less_filter_ignores_neg_inf_entries() {
+        let base = p_less_row(&[4.0, 2.0, 1.0, 0.5, 0.0], 1.0);
+        let padded = p_less_row(
+            &[
+                4.0,
+                2.0,
+                1.0,
+                0.5,
+                0.0,
+                f32::NEG_INFINITY,
+                f32::NEG_INFINITY,
+            ],
+            1.0,
+        );
+        assert_eq!(kept_indices(&base), kept_indices(&padded[..5]));
+        assert_eq!(padded[5], f32::NEG_INFINITY);
+        assert_eq!(padded[6], f32::NEG_INFINITY);
+    }
+
+    #[test]
+    fn p_less_skipped_on_greedy_and_disabled_returns_input_pointer() {
+        let logits = ffi::from_slice_f32(&[10.0, 0.0, 0.0, 0.0, 0.0], &[1, 5]);
+        let ptr = &*logits as *const MlxArray;
+        let mut cfg = SamplingConfig::with_temperature(0.7);
+        let out = apply_row_filters(logits, &FusedSampleParams::from_config(&cfg));
+        assert_eq!(&*out as *const MlxArray, ptr);
+        cfg.p_less = true;
+        cfg.temperature = 0.0;
+        assert!(!FusedSampleParams::from_config(&cfg).p_less);
+    }
+
+    #[test]
+    fn fused_sample_params_matches_compares_p_less() {
+        let base = FusedSampleParams::from_config(&SamplingConfig::with_temperature(0.7));
+        let diff = FusedSampleParams {
+            p_less: true,
+            ..base
+        };
+        assert!(!base.matches(&diff));
+        assert!(diff.matches(&diff));
+    }
+
+    #[test]
+    fn batched_fused_sample_honors_p_less() {
+        const B: usize = 128;
+        let mut flat = Vec::with_capacity(B * 5);
+        for _ in 0..B {
+            flat.extend_from_slice(&[10.0f32, 0.0, 0.0, 0.0, 0.0]);
+        }
+        let logits = ffi::from_slice_f32(&flat, &[B as i32, 1, 5]);
+        let cfg = SamplingConfig {
+            temperature: 1.0,
+            p_less: true,
+            ..Default::default()
+        };
+        let tokens = batched_fused_sample(&logits, &FusedSampleParams::from_config(&cfg));
+        assert!(tokens.iter().all(|t| *t == 0), "{tokens:?}");
     }
 
     #[test]

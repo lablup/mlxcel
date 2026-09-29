@@ -286,6 +286,10 @@ pub struct SerializableSamplingState {
     /// peer's frame to the disabled baseline `1.0`.
     #[serde(default = "default_typical_p_disabled")]
     pub typical_p: f32,
+    /// p-less truncation (#1373). `#[serde(default)]` so a frame from an
+    /// older peer resolves to disabled.
+    #[serde(default)]
+    pub p_less: bool,
     /// Penalty window (#1436). The default fn resolves an older peer's frame
     /// to the pre-#1436 full-history behavior (`-1`), not the f32-style zero
     /// default, which would DISABLE the penalties it was applying.

@@ -590,6 +590,16 @@ mod tests {
     }
 
     #[test]
+    fn completions_accepts_p_less_bool() {
+        let request: CompletionRequest =
+            serde_json::from_str(r#"{"model":"m","prompt":"hi","p_less":true}"#).unwrap();
+        assert_eq!(request.params.p_less, Some(true));
+        let request: CompletionRequest =
+            serde_json::from_str(r#"{"model":"m","prompt":"hi"}"#).unwrap();
+        assert_eq!(request.params.p_less, None);
+    }
+
+    #[test]
     fn completions_accepts_positive_top_n_sigma() {
         let request: CompletionRequest =
             serde_json::from_str(r#"{"model":"m","prompt":"hi","top_n_sigma":1.5}"#).unwrap();

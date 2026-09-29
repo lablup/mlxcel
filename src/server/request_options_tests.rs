@@ -124,6 +124,10 @@ fn build_server_generate_options_uses_server_defaults() {
     assert_eq!(options.sampling.xtc_threshold, 0.1);
     // Like XTC, top-n-sigma is request-only: absent resolves to disabled.
     assert_eq!(options.sampling.top_n_sigma, 0.0);
+    assert!(
+        !options.sampling.p_less,
+        "an absent p_less resolves to false"
+    );
     // typical_p follows the classic sampler knobs: the server default
     // applies (and defaults to the disabled 1.0).
     assert_eq!(options.sampling.typical_p, config.default_typical_p);
@@ -211,6 +215,7 @@ fn build_server_generate_options_applies_request_overrides() {
             xtc_threshold: Some(0.2),
             top_n_sigma: Some(2.5),
             typical_p: Some(0.35),
+            p_less: Some(true),
             penalty_last_n: Some(32),
             ignore_eos: Some(true),
             stop_sequences: Some(vec!["stop".to_string()]),
@@ -244,6 +249,7 @@ fn build_server_generate_options_applies_request_overrides() {
     assert_eq!(options.sampling.xtc_threshold, 0.2);
     assert_eq!(options.sampling.top_n_sigma, 2.5);
     assert_eq!(options.sampling.typical_p, 0.35);
+    assert!(options.sampling.p_less);
     assert_eq!(options.sampling.penalty_last_n, 32);
     assert!(options.ignore_eos);
     assert_eq!(options.stop_sequences, Some(vec!["stop".to_string()]));

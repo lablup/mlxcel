@@ -33,6 +33,7 @@ fn sample_params() -> ResolvedSamplingParams {
         xtc_threshold: 0.15,
         top_n_sigma: 1.5,
         typical_p: 0.4,
+        p_less: false,
         penalty_last_n: -1,
         stop_token_ids: vec![1, 2],
         mirostat: 0,
@@ -149,4 +150,23 @@ fn build_sampling_config_threads_top_n_sigma_in_both_branches() {
     let config = build_sampling_config(greedy_params);
     assert_eq!(config.temperature, 0.0);
     assert_eq!(config.top_n_sigma, 1.5);
+}
+
+#[test]
+fn build_sampling_config_threads_p_less_in_both_branches() {
+    let mut params = sample_params();
+    params.p_less = true;
+    let config = build_sampling_config(params);
+    assert!(config.p_less);
+
+    let mut greedy_params = sample_params();
+    greedy_params.p_less = true;
+    greedy_params.temperature = 0.0;
+    let config = build_sampling_config(greedy_params);
+    assert_eq!(config.temperature, 0.0);
+    assert!(config.p_less);
+    // The greedy path skips the filter, so the effective value is off.
+    assert!(!config.effective_p_less());
+
+    assert!(!build_sampling_config(sample_params()).p_less);
 }

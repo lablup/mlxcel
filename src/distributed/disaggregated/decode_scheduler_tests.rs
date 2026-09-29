@@ -36,6 +36,7 @@ fn default_sampling() -> SerializableSamplingState {
         presence_penalty: 0.0,
         top_n_sigma: 0.0,
         typical_p: 1.0,
+        p_less: false,
         penalty_last_n: -1,
         stop_token_ids: Vec::new(),
         token_bias: Vec::new(),

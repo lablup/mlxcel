@@ -49,6 +49,9 @@ pub struct ResolvedSamplingParams {
     /// Top-n-sigma logit filter (`0.0` = disabled). Non-negative and finite,
     /// enforced at the request layer.
     pub top_n_sigma: f32,
+    /// p-less truncation (#1373): keep tokens with probability at least the
+    /// row's collision probability. A bool, so there is no range to validate.
+    pub p_less: bool,
     /// Locally typical sampling cutoff (`1.0` = disabled). In `(0.0, 1.0]`
     /// and finite, enforced at the request layer.
     pub typical_p: f32,
@@ -113,6 +116,7 @@ pub fn build_sampling_config(params: ResolvedSamplingParams) -> SamplingConfig {
             // row-filter hook gates on `temperature == 0.0 || top_k == 1`),
             // so the config faithfully mirrors what the request resolved.
             top_n_sigma: params.top_n_sigma,
+            p_less: params.p_less,
             typical_p: params.typical_p,
             penalty_last_n: params.penalty_last_n,
             stop_token_ids: params.stop_token_ids,
@@ -148,6 +152,7 @@ pub fn build_sampling_config(params: ResolvedSamplingParams) -> SamplingConfig {
             xtc_probability: params.xtc_probability,
             xtc_threshold: params.xtc_threshold,
             top_n_sigma: params.top_n_sigma,
+            p_less: params.p_less,
             typical_p: params.typical_p,
             penalty_last_n: params.penalty_last_n,
             stop_token_ids: params.stop_token_ids,

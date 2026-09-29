@@ -230,6 +230,7 @@ fn sampling_round_trips_through_the_serializable_mirror() {
     config.dry_sequence_breakers = vec![198];
     config.top_n_sigma = 1.5;
     config.typical_p = 0.5;
+    config.p_less = true;
     config.penalty_last_n = 32;
     config.token_bias.insert(41, 0.25);
     config.token_bias.insert(42, f32::NEG_INFINITY);
@@ -259,6 +260,7 @@ fn sampling_round_trips_through_the_serializable_mirror() {
     assert_eq!(restored.stop_token_ids, vec![13, 14]);
     assert_eq!(restored.dry_sequence_breakers, vec![198]);
     assert_eq!(restored.top_n_sigma, 1.5);
+    assert!(restored.p_less);
     assert_eq!(restored.typical_p, 0.5);
     assert_eq!(restored.penalty_last_n, 32);
     assert_eq!(
@@ -451,4 +453,18 @@ fn sampling_state_round_trips_the_1485_fields() {
     assert_eq!(back.adaptive_decay, 0.85);
     assert_eq!(back.min_keep, 3);
     assert_eq!(back.dry_breaker_heads.get(&7), Some(&vec![vec![8, 9]]));
+}
+
+#[test]
+fn sampling_state_from_an_older_peer_without_p_less_defaults_to_disabled() {
+    let mut value = serde_json::to_value(sampling_to_serializable(&SamplingConfig::greedy()))
+        .expect("serialize sampling state");
+    value
+        .as_object_mut()
+        .expect("sampling state serializes as an object")
+        .remove("p_less");
+    let state: SerializableSamplingState =
+        serde_json::from_value(value).expect("deserialize legacy sampling state");
+    assert!(!state.p_less);
+    assert!(!sampling_from_serializable(&state).p_less);
 }

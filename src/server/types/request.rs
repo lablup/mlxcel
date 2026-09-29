@@ -777,6 +777,12 @@ pub struct SamplingParams {
     /// maximum. Must be finite and `>= 0.0`; validated at the request layer.
     pub top_n_sigma: Option<f32>,
 
+    /// Hyperparameter-free p-less truncation (#1373): keeps every token
+    /// whose probability is at least the row's collision probability
+    /// `sum(p^2)` of the temperature-scaled distribution. Absent or `false`
+    /// leaves the token stream unchanged.
+    pub p_less: Option<bool>,
+
     /// Locally typical sampling cutoff (`1.0` = disabled). Keeps the tokens
     /// whose surprisal is closest to the row entropy until `typical_p`
     /// probability mass accumulates. Must be finite and in `(0.0, 1.0]`;
@@ -1425,6 +1431,9 @@ pub struct NativeCompletionRequest {
     /// server-wide `--typical` default exactly like an upstream request
     /// value replaces the server default.
     pub typical_p: Option<f32>,
+    /// p-less truncation (#1373), a mlxcel extension beyond b10621. Absent
+    /// resolves to `false`.
+    pub p_less: Option<bool>,
     /// Top-n-sigma logit filter. b10621 declares the field without limits
     /// and its sampler treats every value `<= 0.0` (default `-1.0`) as
     /// disabled, so the route maps non-positive and non-finite values to the

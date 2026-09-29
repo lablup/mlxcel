@@ -1248,6 +1248,7 @@ fn resolved_cli_sampling_params(
         xtc_threshold: 0.1,
         top_n_sigma: args.sampling.top_n_sigma,
         typical_p: args.sampling.typical_p,
+        p_less: args.sampling.p_less,
         penalty_last_n: args.sampling.repeat_last_n,
         stop_token_ids,
         mirostat: 0,

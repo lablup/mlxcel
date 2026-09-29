@@ -815,6 +815,11 @@ pub(crate) struct SamplingOptions {
     )]
     pub(crate) typical_p: f32,
 
+    /// Hyperparameter-free p-less sampling: keep tokens whose probability is
+    /// at least the sum of squared probabilities of the tempered distribution
+    #[arg(long = "p-less")]
+    pub(crate) p_less: bool,
+
     /// Repetition penalty multiplier
     #[arg(long, default_value_t = 1.0, value_name = "FLOAT")]
     pub(crate) repetition_penalty: f32,
