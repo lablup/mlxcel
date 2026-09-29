@@ -165,7 +165,7 @@ impl Conv1d {
         groups: usize,
         bias: bool,
     ) -> Result<Self, String> {
-        if groups == 0 || in_channels % groups != 0 {
+        if groups == 0 || !in_channels.is_multiple_of(groups) {
             return Err(format!(
                 "codec conv {prefix}: {in_channels} channels not divisible by {groups} groups"
             ));

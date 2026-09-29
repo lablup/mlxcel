@@ -30,7 +30,10 @@
 //! non-flush step returns exactly `waveform_to_token_ratio` samples, the
 //! flush step returns 8 more, and the concatenated stream equals
 //! [`NemotronCodec::decode`] of all frames delayed by
-//! [`NemotronCodec::stream_delay_samples`] (8) samples.
+//! [`NemotronCodec::stream_delay_samples`] (8) samples, except the first and
+//! last 6 samples of the full decode, where the full decode's overlap-add
+//! window envelope covers fewer frames than the stream's (which counts the
+//! zero pre-roll and the flush tail). The reference behaves the same way.
 //!
 //! Used by: NemotronLabs VoiceChat TTS (offline decode and TTS prompt codes).
 

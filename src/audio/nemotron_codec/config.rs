@@ -122,7 +122,7 @@ impl CodecConfig {
         if self.downsample_rates.contains(&0) || self.channel_multipliers.contains(&0) {
             return Err("codec config: rates and multipliers must be positive".to_string());
         }
-        if self.hop_length > self.n_fft || self.n_fft % self.hop_length != 0 {
+        if self.hop_length > self.n_fft || !self.n_fft.is_multiple_of(self.hop_length) {
             return Err(format!(
                 "codec config: n_fft ({}) must be a multiple of hop_length ({})",
                 self.n_fft, self.hop_length

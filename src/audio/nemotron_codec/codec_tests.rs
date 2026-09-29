@@ -150,7 +150,7 @@ fn to_mlx_layout(cfg: &CodecConfig, torch: &WeightMap) -> WeightMap {
                 mlxcel_core::copy(value)
             } else if let Some(rest) = key.split(".decoder.layers.").nth(1) {
                 let layer: usize = rest.split('.').next().unwrap().parse().unwrap();
-                if layer < region && layer % stage_width == 0 && !key.contains("dwconv") {
+                if layer < region && layer.is_multiple_of(stage_width) && !key.contains("dwconv") {
                     mlxcel_core::transpose_axes(value, &[1, 2, 0])
                 } else {
                     mlxcel_core::transpose_axes(value, &[0, 2, 1])
@@ -271,8 +271,16 @@ fn decode_step_stream_matches_full_decode_after_delay() {
     }
     assert!(cache.is_empty(), "flush must drop every cache entry");
     assert_eq!(stream.len(), full.len() + delay);
-    let err = max_abs(&stream[delay..], &full);
-    assert!(err < 1e-4, "stream vs full max abs {err}");
+    // The reference guarantees equality away from the two ends: the first and
+    // last (n_fft - hop) / 2 = 6 samples of the full decode use a thinner
+    // overlap-add window envelope than the stream (zero pre-roll / flush tail).
+    let edge = 6;
+    let stream = &stream[delay..];
+    let err = max_abs(
+        &stream[edge..full.len() - edge],
+        &full[edge..full.len() - edge],
+    );
+    assert!(err < 1e-5, "stream vs full interior max abs {err}");
 }
 
 #[test]
