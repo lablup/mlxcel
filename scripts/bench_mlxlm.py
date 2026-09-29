@@ -93,6 +93,14 @@ def detect_rocm_gpu():
     `mem_info_vram_total`), so that both harnesses tag one host the same way
     and `scripts/compare_bench_csv.py` can pair their files (issue #1810).
     """
+    # bench_decode.sh checks for an NVIDIA GPU first; do the same so a host
+    # with both vendors gets one label from both harnesses.
+    if shutil.which("nvidia-smi"):
+        try:
+            if subprocess.run(["nvidia-smi"], capture_output=True, timeout=60).returncode == 0:
+                return None
+        except (OSError, subprocess.SubprocessError):
+            pass
     root = os.environ.get("ROCM_PATH", "/opt/rocm")
     rocminfo = shutil.which("rocminfo") or os.path.join(root, "bin", "rocminfo")
     if not os.access(rocminfo, os.X_OK):

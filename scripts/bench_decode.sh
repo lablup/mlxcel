@@ -252,7 +252,7 @@ BIG_MODEL_THRESHOLD_BYTES=$((10 * 1024 * 1024 * 1024))
 # MLXCEL_DEBUG_KERNEL_BACKEND=1), the running `gfx` target
 # (`HIP architecture gfx1151; compiled for [...]`) and the device with its
 # memory (`GPU: <name> (Amd), <N> GiB device memory.`). scripts/ci/rocm_smoke.sh
-# asserts the same lines. The probe loads the smallest candidate checkpoint and
+# asserts the same lines. The probe loads the smallest checkpoint in MODELS_DIR and
 # generates one token, a few seconds on the Strix Halo host, and runs only on a
 # Linux host where nvidia-smi finds no GPU, so the Metal and CUDA paths never
 # pay for it and never change. `rocminfo` is the fallback when the probe run
@@ -333,10 +333,16 @@ sysfs_vram_bytes() {
   return 0
 }
 
+# $1 is the model the sweep will measure (empty in `all` mode). The probe
+# prefers the smallest checkpoint in MODELS_DIR even in single-model mode: it
+# runs before bench_one's SKIP:oom_estimate guard, so probing with the named
+# model would load a checkpoint the guard might refuse, and a large one twice.
 probe_runtime() {
-  local model="$1" out="" gpu
+  local named="$1" model out="" gpu
   [[ "$(uname)" == "Linux" ]] || return 0
   nvidia-smi &>/dev/null && return 0
+  model=$(smallest_checkpoint)
+  [[ -n "$model" ]] || model="$named"
   if [[ -n "$model" ]]; then
     >&2 echo "Runtime probe: $(basename "$model") (1 token, reads the backend and device lines)"
     out=$(MLXCEL_DEBUG_KERNEL_BACKEND=1 run_with_timeout "$PROBE_TIMEOUT" \
@@ -355,7 +361,8 @@ probe_runtime() {
   # another backend is, and the rocminfo agent list is not consulted then.
   if [[ -z "$PROBE_BACKEND" || "$ROCM_DETECTED" == "1" ]]; then
     local ri
-    ri=$(rocm_tool rocminfo) && gpu=$("$ri" 2>/dev/null | rocminfo_first_gpu) || gpu=""
+    # Bounded: rocminfo can block when the KFD driver is wedged.
+    ri=$(rocm_tool rocminfo) && gpu=$(run_with_timeout 60 "$ri" 2>/dev/null | rocminfo_first_gpu) || gpu=""
     if [[ -n "${gpu:-}" ]]; then
       if [[ -z "$PROBE_BACKEND" ]]; then
         ROCM_DETECTED=1
@@ -372,6 +379,10 @@ probe_runtime() {
     fi
     ROCM_VERSION=$(detect_rocm_version)
     HIP_VERSION=$(detect_hip_version)
+    # These land in CSV fields unquoted; a comma or quote would shift columns.
+    ROCM_DEVICE_NAME=$(printf '%s' "$ROCM_DEVICE_NAME" | tr -d ',"')
+    ROCM_VERSION=$(printf '%s' "$ROCM_VERSION" | tr -d ',"')
+    HIP_VERSION=$(printf '%s' "$HIP_VERSION" | tr -d ',"')
   fi
   [[ -n "$DEVICE_MEMORY_BYTES" ]] || DEVICE_MEMORY_BYTES=0
 }
@@ -1216,9 +1227,9 @@ fi
 
 # Backend, hardware tag and memory budget. Resolved here rather than at load
 # because on a Linux host without an NVIDIA GPU they come from a probe run,
-# which needs a model: the named one, or the smallest checkpoint in the store.
+# which needs a model: the smallest checkpoint in the store, else the named one.
 if [[ "$MODEL_ARG" == "all" ]]; then
-  resolve_platform "$(smallest_checkpoint)"
+  resolve_platform ""
 else
   resolve_platform "${MODEL_ARG%/}"
 fi
