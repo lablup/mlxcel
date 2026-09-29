@@ -19,7 +19,8 @@
 //! depthwise-striding subsampling (8x in time), a Transformer-XL relative
 //! positional encoding (`xscaling` off), and `n_layers` Conformer blocks with
 //! the `chunked_limited` attention mask. The VoiceChat `Perception` wrapper
-//! (encoder + `proj` linear into the LLM width) lives in [`perception`].
+//! (encoder + `proj` linear into the LLM width) lives in [`perception`]; the
+//! cache-aware incremental encoder is [`ConformerStreamingState`].
 //!
 //! Numerics follow the reference: weights stay in the checkpoint dtype (bf16)
 //! and the f32 mel input promotes every op to f32, so the encoder output is f32.
@@ -35,6 +36,7 @@ mod block;
 pub mod config;
 mod layers;
 pub mod perception;
+mod streaming;
 mod subsampling;
 
 use mlxcel_core::weights::WeightMap;
@@ -44,9 +46,10 @@ pub use attention::{
     NEG_INF, RelPositionMultiHeadAttention, chunked_limited_mask, chunked_limited_visible,
     rel_pos_embedding, rel_shift,
 };
-pub use block::ConformerBlock;
+pub use block::{BlockStreamOutput, ConformerBlock};
 pub use config::{ConformerArgs, ConvContextSize};
 pub use perception::VoiceChatPerception;
+pub use streaming::{ConformerStreamingState, PRE_ENCODE_MEL_CACHE};
 pub use subsampling::CausalDwStridingSubsampling;
 
 pub struct FastConformerEncoder {
@@ -138,3 +141,6 @@ impl FastConformerEncoder {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod streaming_tests;

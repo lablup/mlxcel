@@ -18,7 +18,7 @@ use mlxcel_core::weights::WeightMap;
 use super::*;
 
 /// Deterministic pseudo-random values in `[-scale, scale]`.
-fn rand_vec(n: usize, seed: &mut u64, scale: f32) -> Vec<f32> {
+pub(super) fn rand_vec(n: usize, seed: &mut u64, scale: f32) -> Vec<f32> {
     (0..n)
         .map(|_| {
             *seed = seed
@@ -29,7 +29,7 @@ fn rand_vec(n: usize, seed: &mut u64, scale: f32) -> Vec<f32> {
         .collect()
 }
 
-fn put(w: &mut WeightMap, key: &str, shape: &[i32], seed: &mut u64, scale: f32) {
+pub(super) fn put(w: &mut WeightMap, key: &str, shape: &[i32], seed: &mut u64, scale: f32) {
     let n = shape.iter().product::<i32>() as usize;
     w.insert(
         key.to_string(),
@@ -37,7 +37,7 @@ fn put(w: &mut WeightMap, key: &str, shape: &[i32], seed: &mut u64, scale: f32) 
     );
 }
 
-fn tiny_args() -> ConformerArgs {
+pub(super) fn tiny_args() -> ConformerArgs {
     ConformerArgs {
         feat_in: 16,
         n_layers: 2,
@@ -51,7 +51,7 @@ fn tiny_args() -> ConformerArgs {
 }
 
 /// Torch-layout weights for [`tiny_args`] under `prefix`.
-fn tiny_weights(prefix: &str) -> WeightMap {
+pub(super) fn tiny_weights(prefix: &str) -> WeightMap {
     let a = tiny_args();
     let (d, ch, ff) = (8, 4, 16);
     let freq = a.subsampled_length(a.feat_in) as i32;
@@ -191,7 +191,7 @@ fn to_mlx_layout(torch: &WeightMap) -> WeightMap {
         .collect()
 }
 
-fn mel(frames: i32, feat: i32) -> UniquePtr<MlxArray> {
+pub(super) fn mel(frames: i32, feat: i32) -> UniquePtr<MlxArray> {
     let mut s = 99u64;
     let n = (frames * feat) as usize;
     mlxcel_core::from_slice_f32(&rand_vec(n, &mut s, 2.0), &[1, frames, feat])

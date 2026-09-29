@@ -36,6 +36,9 @@
 //! one already-preemphasized, already-padded `n_fft` segment, so a streaming
 //! wrapper can feed frames incrementally without duplicating the DSP.
 //!
+//! [`StreamingLogMel`] (in `nemotron_mel_stream.rs`) is the incremental
+//! variant used by the streaming session.
+//!
 //! Used by: NemotronLabs VoiceChat speech perception.
 
 use std::f64::consts::PI;
@@ -45,6 +48,11 @@ use serde::Deserialize;
 
 use super::fft::real_fft_magnitude;
 use super::whisper_mel::{hz_to_mel_slaney, mel_to_hz_slaney, reflect_pad};
+
+#[path = "nemotron_mel_stream.rs"]
+mod stream;
+
+pub use stream::StreamingLogMel;
 
 /// Mel-spectrogram featurizer settings (`audio_config.preprocessor`).
 ///
@@ -327,3 +335,7 @@ fn normalize_all_features(x: &mut [f32]) {
 #[cfg(test)]
 #[path = "nemotron_mel_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "nemotron_mel_stream_tests.rs"]
+mod stream_tests;

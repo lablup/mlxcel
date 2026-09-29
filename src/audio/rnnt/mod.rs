@@ -25,11 +25,13 @@
 //! advances. The state only changes on a non-blank symbol.
 //!
 //! The per-frame work is [`RnntDecoder::step_frame`] over an explicit
-//! [`RnntState`], so a streaming session can keep the state across chunks.
+//! [`RnntState`], so a streaming session can keep the state across chunks;
+//! [`RnntStreamState`] adds the streamed transcript and its delta rule.
 //!
 //! Used by: NemotronLabs VoiceChat user transcript.
 
 mod lstm;
+mod stream;
 pub mod vocab;
 
 use mlxcel_core::layers::UnifiedLinear;
@@ -38,6 +40,7 @@ use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
 
 pub use lstm::{LstmState, StackedLstm};
+pub use stream::{RnntStreamState, transcript_delta};
 pub use vocab::{
     decode_pieces, is_lang_tag, is_special_piece, is_special_token, load_vocabulary_json,
 };
@@ -304,3 +307,6 @@ impl RnntDecoder {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod stream_tests;

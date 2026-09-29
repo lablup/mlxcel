@@ -193,3 +193,63 @@ impl RelPositionMultiHeadAttention {
         self.linear_out.forward(&o)
     }
 }
+
+impl RelPositionMultiHeadAttention {
+    /// Cache-aware step (`RelPositionMultiHeadAttention.stream`): the `c` new
+    /// frames `q_in: [B, c, d]` attend to the whole key window
+    /// `kv_in: [B, L, d]` (cache followed by the new frames) without a mask,
+    /// because the window is exactly the allowed left context.
+    /// `pos_emb: [1, 2L - 1, d]` is [`rel_pos_embedding`]`(L)`, the reference's
+    /// `RelPositionalEncoding.pos_emb_for(L)`.
+    pub fn stream(
+        &self,
+        q_in: &MlxArray,
+        kv_in: &MlxArray,
+        pos_emb: &MlxArray,
+    ) -> Result<UniquePtr<MlxArray>, String> {
+        let q_shape = mlxcel_core::array_shape(q_in);
+        let kv_shape = mlxcel_core::array_shape(kv_in);
+        if q_shape.len() != 3 || kv_shape.len() != 3 || kv_shape[1] < q_shape[1] {
+            return Err(format!(
+                "streaming attention expects q [B, c, d] and kv [B, L >= c, d], got {q_shape:?} / {kv_shape:?}"
+            ));
+        }
+        let (batch, c, ksz) = (q_shape[0], q_shape[1], kv_shape[1]);
+        let heads = |t: &MlxArray, len: i32, b: i32| {
+            let r = mlxcel_core::reshape(t, &[b, len, self.n_heads, self.head_dim]);
+            mlxcel_core::transpose_axes(&r, &[0, 2, 1, 3])
+        };
+        let q = heads(&self.linear_q.forward(q_in), c, batch);
+        let k = heads(&self.linear_k.forward(kv_in), ksz, batch);
+        let v = heads(&self.linear_v.forward(kv_in), ksz, batch);
+        let p = self.linear_pos.forward(pos_emb);
+        let pos_len = mlxcel_core::array_shape(&p)[1];
+        if pos_len != 2 * ksz - 1 {
+            return Err(format!(
+                "streaming attention pos_emb has {pos_len} rows, expected {}",
+                2 * ksz - 1
+            ));
+        }
+        let p = heads(&p, pos_len, 1);
+
+        let q_u = mlxcel_core::add(&q, &self.pos_bias_u);
+        let q_v = mlxcel_core::add(&q, &self.pos_bias_v);
+        let bd = mlxcel_core::matmul(&q_v, &mlxcel_core::swap_axes(&p, -2, -1));
+        let bd = rel_shift(&bd);
+        let bd_shape = mlxcel_core::array_shape(&bd);
+        let bd = mlxcel_core::slice(
+            &bd,
+            &[0, 0, 0, 0],
+            &[bd_shape[0], bd_shape[1], bd_shape[2], ksz],
+        );
+        let bd = mlxcel_core::multiply_scalar(&bd, self.scale);
+        let bd_ptr: *const MlxArray = &*bd;
+        // SAFETY: `bd_ptr` points at `bd`, which outlives the call.
+        let o = unsafe {
+            mlxcel_core::fast_scaled_dot_product_attention(&q_u, &k, &v, self.scale, bd_ptr)
+        };
+        let o = mlxcel_core::transpose_axes(&o, &[0, 2, 1, 3]);
+        let o = mlxcel_core::reshape(&o, &[batch, c, self.n_heads * self.head_dim]);
+        Ok(self.linear_out.forward(&o))
+    }
+}

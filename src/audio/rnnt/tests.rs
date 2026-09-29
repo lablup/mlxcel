@@ -18,8 +18,8 @@ use mlxcel_core::weights::WeightMap;
 use super::*;
 
 const H: usize = 4;
-const ENC: usize = 6;
-const VOCAB: usize = 5; // blank = 5
+pub(super) const ENC: usize = 6;
+pub(super) const VOCAB: usize = 5; // blank = 5
 
 fn rand_vec(n: usize, seed: &mut u64, scale: f32) -> Vec<f32> {
     (0..n)
@@ -97,7 +97,7 @@ fn weights(out_bias: &[f32; VOCAB + 1]) -> WeightMap {
     w
 }
 
-fn decoder(out_bias: &[f32; VOCAB + 1]) -> RnntDecoder {
+pub(super) fn decoder(out_bias: &[f32; VOCAB + 1]) -> RnntDecoder {
     RnntDecoder::from_weights(
         &weights(out_bias),
         "dec",
@@ -108,7 +108,7 @@ fn decoder(out_bias: &[f32; VOCAB + 1]) -> RnntDecoder {
     .unwrap()
 }
 
-fn encoded(frames: i32) -> UniquePtr<MlxArray> {
+pub(super) fn encoded(frames: i32) -> UniquePtr<MlxArray> {
     let data = rand_vec(frames as usize * ENC, &mut 3u64, 1.0);
     mlxcel_core::from_slice_f32(&data, &[1, frames, ENC as i32])
 }

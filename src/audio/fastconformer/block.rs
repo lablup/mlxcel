@@ -136,6 +136,50 @@ impl ConformerConvolution {
         let h = mlxcel_core::silu(&self.norm.forward(&h));
         self.pointwise_conv2.forward(&h, "pointwise2")
     }
+
+    /// Cache-aware causal step: prepend the cached last `conv_left` GLU
+    /// frames (zeros on the first call) instead of zero padding, run the
+    /// depthwise conv unpadded, and return the new cache tail.
+    fn stream(
+        &self,
+        x: &MlxArray,
+        cache: Option<&MlxArray>,
+        conv_left: i32,
+    ) -> Result<(UniquePtr<MlxArray>, UniquePtr<MlxArray>), String> {
+        let h = self.pointwise_conv1.forward(x, "pointwise1")?;
+        let g = glu_last_axis(&h);
+        let g_shape = mlxcel_core::array_shape(&g);
+        let zeros;
+        let cache = match cache {
+            Some(c) => c,
+            None => {
+                zeros = mlxcel_core::zeros(
+                    &[g_shape[0], conv_left, g_shape[2]],
+                    mlxcel_core::array_dtype(&g),
+                );
+                &*zeros
+            }
+        };
+        let din = mlxcel_core::concatenate(cache, &g, 1);
+        let len = mlxcel_core::array_shape(&din)[1];
+        let next = mlxcel_core::slice(
+            &din,
+            &[0, len - conv_left, 0],
+            &[g_shape[0], len, g_shape[2]],
+        );
+        let h = self.depthwise_conv.forward(&din, "depthwise")?;
+        let h = mlxcel_core::silu(&self.norm.forward(&h));
+        Ok((self.pointwise_conv2.forward(&h, "pointwise2")?, next))
+    }
+}
+
+/// Output of [`ConformerBlock::stream`].
+pub struct BlockStreamOutput {
+    pub output: UniquePtr<MlxArray>,
+    /// Last `left_cache` attention-input frames (`None` when `left_cache == 0`).
+    pub attn_cache: Option<UniquePtr<MlxArray>>,
+    /// Last `conv_left` GLU-output frames.
+    pub conv_cache: UniquePtr<MlxArray>,
 }
 
 pub struct ConformerBlock {
@@ -198,5 +242,60 @@ impl ConformerBlock {
             .forward(&self.norm_feed_forward2.forward(&x));
         let x = mlxcel_core::add(&x, &half(ff2));
         Ok(self.norm_out.forward(&x))
+    }
+
+    /// Cache-aware step (`_stream_block` in the reference `streaming.py`):
+    /// the new frames `x: [B, c, d]` attend to `attn_cache ++ LN(x)` with
+    /// `pos_emb` built for that window length, and the causal conv continues
+    /// from `conv_cache`. The causal convolution module is required.
+    pub fn stream(
+        &self,
+        x: &MlxArray,
+        pos_emb: &MlxArray,
+        attn_cache: Option<&MlxArray>,
+        conv_cache: Option<&MlxArray>,
+        left_cache: usize,
+        conv_left: usize,
+    ) -> Result<BlockStreamOutput, String> {
+        if self.conv.pad != (conv_left as i32, 0) {
+            return Err(format!(
+                "streaming needs a causal conv module (pad ({conv_left}, 0)), got {:?}",
+                self.conv.pad
+            ));
+        }
+        let half = |h: UniquePtr<MlxArray>| mlxcel_core::multiply_scalar(&h, 0.5);
+        let ff1 = self
+            .feed_forward1
+            .forward(&self.norm_feed_forward1.forward(x));
+        let residual = mlxcel_core::add(x, &half(ff1));
+
+        let xn = self.norm_self_att.forward(&residual);
+        let kv = match attn_cache {
+            Some(cache) => mlxcel_core::concatenate(cache, &xn, 1),
+            None => mlxcel_core::copy(&xn),
+        };
+        let attn = self.self_attn.stream(&xn, &kv, pos_emb)?;
+        let residual = mlxcel_core::add(&residual, &attn);
+        let kv_shape = mlxcel_core::array_shape(&kv);
+        let attn_next = (left_cache > 0).then(|| {
+            let start = (kv_shape[1] - left_cache as i32).max(0);
+            mlxcel_core::slice(&kv, &[0, start, 0], &kv_shape)
+        });
+
+        let (conv, conv_next) = self.conv.stream(
+            &self.norm_conv.forward(&residual),
+            conv_cache,
+            conv_left as i32,
+        )?;
+        let residual = mlxcel_core::add(&residual, &conv);
+        let ff2 = self
+            .feed_forward2
+            .forward(&self.norm_feed_forward2.forward(&residual));
+        let residual = mlxcel_core::add(&residual, &half(ff2));
+        Ok(BlockStreamOutput {
+            output: self.norm_out.forward(&residual),
+            attn_cache: attn_next,
+            conv_cache: conv_next,
+        })
     }
 }
