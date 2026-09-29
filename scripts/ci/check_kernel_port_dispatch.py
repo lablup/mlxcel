@@ -90,10 +90,6 @@ UNCONVERTED: set[str] = set()
 # yet, so the entry disappears when that predicate lands rather than when someone
 # remembers to look.
 BACKEND_ENUMERATION_TODO = {
-    # Gates the fused paged-decode kernel. `paged_attention.cpp` has a
-    # `KernelPorts` table but exports no `*_available()` for the bridge to call,
-    # so there is nothing narrower to ask yet (#1814).
-    "src/lib/mlxcel-core/src/ffi_tests.rs",
     # Gates MLX's own `gather_mm`, not an mlxcel port, so no port table applies.
     # `gpu_backend_available()` would be the honest predicate, but whether MLX's
     # ROCm backend implements the grouped-GEMM path is unverified here and

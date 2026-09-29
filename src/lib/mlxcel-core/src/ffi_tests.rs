@@ -810,10 +810,12 @@ fn test_fused_paged_decode_matches_gather_over_200_steps() {
 fn test_fused_paged_decode_gqa_and_batched() {
     use crate::cache::{PagedBlockPool, PagedSequenceState};
 
-    // The fused paged-decode kernel dispatches a Metal JIT body on Apple and a
-    // CUDA JIT body on NVIDIA (#634); on a CPU-only build neither backend can
-    // launch it, so skip there rather than aborting the process.
-    if !crate::metal_is_available() && !crate::cuda_is_available() {
+    // The fused paged-decode kernel has a Metal JIT body and a CUDA JIT body
+    // (#634) and no HIP port yet (#1814). ROCm skips visibly through the shared
+    // helper; a CPU-only build, where no backend can launch it, skips here.
+    // Both read the kernels' own port tables, so a new port runs this test.
+    crate::test_support::kernel_ports::require_paged_attention_port!();
+    if !crate::paged_attention_kernels_available() {
         return;
     }
 
@@ -917,9 +919,10 @@ fn test_fused_paged_decode_gqa_and_batched() {
 fn test_fused_paged_decode_native_vs_fallback_matrix() {
     use crate::cache::{PagedBlockPool, PagedSequenceState};
 
-    if !crate::metal_is_available() && !crate::cuda_is_available() {
-        // No GPU backend can launch the fused kernel; the CPU build has no
-        // native path to compare (it always gathers). Nothing to verify.
+    crate::test_support::kernel_ports::require_paged_attention_port!();
+    if !crate::paged_attention_kernels_available() {
+        // No port of the fused kernel on this backend (a CPU-only build); the
+        // native path cannot run, so there is nothing to compare.
         return;
     }
 
