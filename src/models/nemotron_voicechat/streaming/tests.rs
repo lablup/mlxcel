@@ -15,48 +15,121 @@
 //! Unit tests for the streaming session's model-free parts: frame
 //! buffering, the text-delta rule, events, and the profiler summary.
 
-use super::buffer::FrameBuffer;
+use super::buffer::{FrameBuffer, InputLifecycle};
 use super::{FrameTiming, TokenAccumulator, VoiceChatEvent, VoiceChatProfile, percentile};
+
+/// Push through an `InputLifecycle` whose per-frame step only counts.
+fn counting_push(
+    lifecycle: &mut InputLifecycle,
+    n: usize,
+    frames: &mut usize,
+) -> Result<usize, &'static str> {
+    lifecycle
+        .push(&vec![0.5; n], "closed", |_| {
+            *frames += 1;
+            Ok::<_, &'static str>(vec![()])
+        })
+        .map(|events| events.len())
+}
 
 #[test]
 fn push_audio_buffers_arbitrary_chunk_boundaries() {
-    let mut buffer = FrameBuffer::new(1280);
+    let mut lifecycle = InputLifecycle::new(1280);
+    let mut frames = 0;
     let counts: Vec<usize> = [300, 1000, 1280, 2000]
         .iter()
-        .map(|&n| buffer.push(&vec![0.5; n]).len())
+        .map(|&n| counting_push(&mut lifecycle, n, &mut frames).unwrap())
         .collect();
     assert_eq!(counts, [0, 1, 1, 1]);
-    assert_eq!(buffer.pending_len(), 4580 - 3 * 1280);
-    let tail = buffer.take_partial(true).expect("padded partial frame");
-    assert_eq!(tail.len(), 1280);
-    assert_eq!(tail[..1].to_vec(), vec![0.5]);
-    assert_eq!(tail[1279], 0.0);
-    assert_eq!(buffer.pending_len(), 0);
+    let flushed = lifecycle
+        .flush(true, |frame| {
+            assert_eq!(frame.len(), 1280);
+            frames += 1;
+            Ok::<_, &'static str>(vec![()])
+        })
+        .expect("first flush runs")
+        .unwrap();
+    assert_eq!(flushed.len(), 1, "flush(pad) runs the partial frame");
+    assert_eq!(frames, 4);
 }
 
 #[test]
 fn flush_without_padding_drops_partial_frame() {
-    let mut buffer = FrameBuffer::new(1280);
-    assert!(buffer.push(&[0.1; 700]).is_empty());
-    assert!(buffer.take_partial(false).is_none());
-    assert_eq!(buffer.pending_len(), 0);
+    let mut lifecycle = InputLifecycle::new(1280);
+    let mut frames = 0;
+    assert_eq!(counting_push(&mut lifecycle, 700, &mut frames), Ok(0));
+    let flushed = lifecycle
+        .flush(false, |_| Ok::<Vec<()>, &'static str>(vec![()]))
+        .unwrap()
+        .unwrap();
+    assert!(flushed.is_empty());
+}
+
+#[test]
+fn closed_session_rejects_push_and_close_is_idempotent() {
+    let mut lifecycle = InputLifecycle::new(1280);
+    let mut frames = 0;
     assert!(
-        buffer.take_partial(true).is_none(),
-        "empty buffer yields no frame"
+        lifecycle
+            .flush(true, |_| Ok::<Vec<()>, &'static str>(vec![]))
+            .is_some()
     );
+    assert!(lifecycle.is_closed());
+    assert_eq!(
+        counting_push(&mut lifecycle, 1280, &mut frames),
+        Err("closed")
+    );
+    assert!(
+        lifecycle
+            .flush(true, |_| Ok::<Vec<()>, &'static str>(vec![]))
+            .is_none()
+    );
+    assert!(!lifecycle.cancel(), "cancel after close is a no-op");
+
+    let mut other = InputLifecycle::new(1280);
+    assert!(other.cancel());
+    assert!(!other.cancel());
+    assert_eq!(counting_push(&mut other, 10, &mut frames), Err("closed"));
+    assert_eq!(frames, 0);
+}
+
+#[test]
+fn failing_frame_keeps_later_frames_pending() {
+    let mut lifecycle = InputLifecycle::new(4);
+    let mut seen = Vec::new();
+    let mut calls = 0;
+    // Three whole frames in one push; the second one fails (a context limit).
+    let result = lifecycle.push(&[1.0; 12], "limit", |frame| {
+        calls += 1;
+        if calls == 2 {
+            return Err("limit");
+        }
+        seen.push(frame.to_vec());
+        Ok(vec![()])
+    });
+    assert_eq!(result, Err("limit"));
+    // The third frame was not consumed and runs on the next push.
+    let next = lifecycle.push(&[], "closed", |frame| {
+        seen.push(frame.to_vec());
+        Ok::<_, &'static str>(vec![()])
+    });
+    assert_eq!(next.map(|e| e.len()), Ok(1));
+    assert_eq!(seen.len(), 2);
 }
 
 #[test]
 fn frames_keep_sample_order_across_pushes() {
     let mut buffer = FrameBuffer::new(4);
     let samples: Vec<f32> = (0..10).map(|i| i as f32).collect();
-    let mut frames = buffer.push(&samples[..3]);
-    frames.extend(buffer.push(&samples[3..]));
-    assert_eq!(
-        frames,
-        vec![vec![0.0, 1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0, 7.0]]
-    );
+    buffer.append(&samples[..3]);
+    assert!(buffer.pop_frame().is_none());
+    buffer.append(&samples[3..]);
+    assert_eq!(buffer.pop_frame(), Some(vec![0.0, 1.0, 2.0, 3.0]));
+    assert_eq!(buffer.pop_frame(), Some(vec![4.0, 5.0, 6.0, 7.0]));
+    assert_eq!(buffer.pop_frame(), None);
+    assert_eq!(buffer.pending_len(), 2);
     assert_eq!(buffer.take_partial(true), Some(vec![8.0, 9.0, 0.0, 0.0]));
+    assert_eq!(buffer.pending_len(), 0);
 }
 
 #[test]

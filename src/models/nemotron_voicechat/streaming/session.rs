@@ -32,7 +32,7 @@ use std::time::Instant;
 
 use mlxcel_core::{MlxArray, UniquePtr};
 
-use super::buffer::FrameBuffer;
+use super::buffer::InputLifecycle;
 use super::events::{StreamingOptions, TokenAccumulator, VoiceChatError, VoiceChatEvent};
 use super::perception::StreamingPerception;
 use super::profile::{FrameTiming, VoiceChatProfile};
@@ -63,7 +63,7 @@ pub struct VoiceChatStreamingSession<'m> {
     model: &'m NemotronVoiceChatModel,
     frame_samples: usize,
     max_frames: Option<u64>,
-    buffer: FrameBuffer,
+    input: InputLifecycle,
     perception: StreamingPerception<'m>,
     rnnt: RnntStreamState,
     language: LanguageState,
@@ -79,7 +79,6 @@ pub struct VoiceChatStreamingSession<'m> {
     function_ids: Vec<i32>,
     timeline_index: u64,
     frame_index: u64,
-    closed: bool,
     profiling: bool,
     profile: VoiceChatProfile,
 }
@@ -127,7 +126,7 @@ impl<'m> VoiceChatStreamingSession<'m> {
             model,
             frame_samples,
             max_frames,
-            buffer: FrameBuffer::new(frame_samples),
+            input: InputLifecycle::new(frame_samples),
             perception,
             rnnt: RnntStreamState::new(&model.rnnt),
             language,
@@ -142,7 +141,6 @@ impl<'m> VoiceChatStreamingSession<'m> {
             function_ids: Vec::new(),
             timeline_index: 0,
             frame_index: 0,
-            closed: false,
             profiling: options.profile,
             profile: VoiceChatProfile::new(f64::from(frame_duration) * 1000.0),
         };
@@ -162,7 +160,7 @@ impl<'m> VoiceChatStreamingSession<'m> {
 
     /// Whether `flush` or `cancel` closed the session.
     pub fn is_closed(&self) -> bool {
-        self.closed
+        self.input.is_closed()
     }
 
     /// Samples per frame (1280 at 16 kHz).
@@ -368,10 +366,20 @@ impl<'m> VoiceChatStreamingSession<'m> {
         Ok(events)
     }
 
+    /// Run `f` with the input lifecycle moved out of `self`, so the
+    /// per-frame step can borrow the rest of the session mutably.
+    fn with_input<T>(&mut self, f: impl FnOnce(&mut InputLifecycle, &mut Self) -> T) -> T {
+        let mut input = std::mem::replace(&mut self.input, InputLifecycle::new(1));
+        let out = f(&mut input, self);
+        self.input = input;
+        out
+    }
+
     /// Buffer mono 16 kHz PCM and run one timeline step per complete
-    /// 1280-sample frame, returning the events of those frames.
+    /// 1280-sample frame, returning the events of those frames. When a
+    /// frame fails, the frames behind it stay buffered.
     pub fn push_audio(&mut self, samples: &[f32], sample_rate: u32) -> Result<Vec<VoiceChatEvent>> {
-        if self.closed {
+        if self.input.is_closed() {
             return Err(VoiceChatError::Closed);
         }
         if sample_rate != self.model.config.input_sample_rate {
@@ -385,25 +393,23 @@ impl<'m> VoiceChatStreamingSession<'m> {
                 "audio contains a non-finite sample".to_string(),
             ));
         }
-        let mut events = Vec::new();
-        for frame in self.buffer.push(samples) {
-            events.extend(self.step_audio_frame(&frame)?);
-        }
-        Ok(events)
+        self.with_input(|input, session| {
+            input.push(samples, VoiceChatError::Closed, |frame| {
+                session.step_audio_frame(frame)
+            })
+        })
     }
 
     /// Finish the input: optionally zero-pad and run the partial frame,
     /// clear the codec overlap state, close, and emit `Done`.
     pub fn flush(&mut self, pad_partial: bool) -> Result<Vec<VoiceChatEvent>> {
-        if self.closed {
+        let Some(result) = self.with_input(|input, session| {
+            input.flush(pad_partial, |frame| session.step_audio_frame(frame))
+        }) else {
             return Ok(Vec::new());
-        }
-        let mut events = Vec::new();
-        if let Some(frame) = self.buffer.take_partial(pad_partial) {
-            events.extend(self.step_audio_frame(&frame)?);
-        }
-        self.closed = true;
+        };
         self.codec_cache.clear();
+        let mut events = result?;
         events.push(VoiceChatEvent::Done {
             frame_index: self.frame_index,
         });
@@ -412,11 +418,9 @@ impl<'m> VoiceChatStreamingSession<'m> {
 
     /// Stop without finishing the input; emits `Cancelled`.
     pub fn cancel(&mut self) -> Vec<VoiceChatEvent> {
-        if self.closed {
+        if !self.input.cancel() {
             return Vec::new();
         }
-        self.closed = true;
-        self.buffer.clear();
         self.codec_cache.clear();
         vec![VoiceChatEvent::Cancelled {
             frame_index: self.frame_index,

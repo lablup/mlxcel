@@ -24,6 +24,9 @@
 pub(crate) struct FrameBuffer {
     frame_samples: usize,
     pending: Vec<f32>,
+    /// Start of the unconsumed samples in `pending`; consumed samples are
+    /// compacted away once per push, so draining N frames is linear.
+    read: usize,
 }
 
 impl FrameBuffer {
@@ -31,30 +34,43 @@ impl FrameBuffer {
         Self {
             frame_samples: frame_samples.max(1),
             pending: Vec::new(),
+            read: 0,
         }
     }
 
-    /// Append `samples` and drain every complete frame.
-    pub(crate) fn push(&mut self, samples: &[f32]) -> Vec<Vec<f32>> {
-        self.pending.extend_from_slice(samples);
-        let whole = self.pending.len() / self.frame_samples;
-        let mut frames = Vec::with_capacity(whole);
-        for _ in 0..whole {
-            frames.push(self.pending.drain(..self.frame_samples).collect());
+    /// Append `samples` without releasing anything.
+    pub(crate) fn append(&mut self, samples: &[f32]) {
+        if self.read > 0 {
+            self.pending.drain(..self.read);
+            self.read = 0;
         }
-        frames
+        self.pending.extend_from_slice(samples);
+    }
+
+    /// Release the next complete frame, leaving the rest pending, so a
+    /// failing frame does not lose the frames behind it.
+    pub(crate) fn pop_frame(&mut self) -> Option<Vec<f32>> {
+        let end = self.read + self.frame_samples;
+        if end > self.pending.len() {
+            return None;
+        }
+        let frame = self.pending[self.read..end].to_vec();
+        self.read = end;
+        Some(frame)
     }
 
     /// Samples waiting for a full frame.
     #[cfg(test)]
     pub(crate) fn pending_len(&self) -> usize {
-        self.pending.len()
+        self.pending.len() - self.read
     }
 
     /// Take the partial frame: zero-padded to a whole frame when `pad` and
     /// non-empty, otherwise dropped. The buffer is empty afterwards.
     pub(crate) fn take_partial(&mut self, pad: bool) -> Option<Vec<f32>> {
-        let mut frame = std::mem::take(&mut self.pending);
+        let mut frame = self.pending.split_off(self.read);
+        self.pending.clear();
+        self.read = 0;
         if !pad || frame.is_empty() {
             return None;
         }
@@ -65,5 +81,75 @@ impl FrameBuffer {
     /// Drop anything pending (cancel).
     pub(crate) fn clear(&mut self) {
         self.pending.clear();
+        self.read = 0;
+    }
+}
+
+/// Input-side lifecycle of a streaming session: frame buffering and the
+/// closed flag. The per-frame work is injected, so the push / flush /
+/// cancel contract is testable without a checkpoint.
+#[derive(Debug, Clone)]
+pub(crate) struct InputLifecycle {
+    buffer: FrameBuffer,
+    closed: bool,
+}
+
+impl InputLifecycle {
+    pub(crate) fn new(frame_samples: usize) -> Self {
+        Self {
+            buffer: FrameBuffer::new(frame_samples),
+            closed: false,
+        }
+    }
+
+    pub(crate) fn is_closed(&self) -> bool {
+        self.closed
+    }
+
+    /// Buffer `samples` and run `step` once per complete frame. Frames
+    /// behind a failing one stay pending.
+    pub(crate) fn push<E, Err>(
+        &mut self,
+        samples: &[f32],
+        closed_error: Err,
+        mut step: impl FnMut(&[f32]) -> Result<Vec<E>, Err>,
+    ) -> Result<Vec<E>, Err> {
+        if self.closed {
+            return Err(closed_error);
+        }
+        self.buffer.append(samples);
+        let mut events = Vec::new();
+        while let Some(frame) = self.buffer.pop_frame() {
+            events.extend(step(&frame)?);
+        }
+        Ok(events)
+    }
+
+    /// Close; with `pad_partial`, run `step` on the zero-padded partial
+    /// frame first. `None` when already closed.
+    pub(crate) fn flush<E, Err>(
+        &mut self,
+        pad_partial: bool,
+        mut step: impl FnMut(&[f32]) -> Result<Vec<E>, Err>,
+    ) -> Option<Result<Vec<E>, Err>> {
+        if self.closed {
+            return None;
+        }
+        let events = match self.buffer.take_partial(pad_partial) {
+            Some(frame) => step(&frame),
+            None => Ok(Vec::new()),
+        };
+        self.closed = true;
+        Some(events)
+    }
+
+    /// Close and drop pending audio; `false` when already closed.
+    pub(crate) fn cancel(&mut self) -> bool {
+        if self.closed {
+            return false;
+        }
+        self.closed = true;
+        self.buffer.clear();
+        true
     }
 }
