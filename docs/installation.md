@@ -457,6 +457,8 @@ To check the HTTP server rather than the CLI, start it and run the chat smoke
 script against it. Both a dense and an affine MoE checkpoint pass on `gfx1151`;
 the results are in
 [`docs/benchmark_results/rocm-correctness-gfx1151-2026-09-12.md`](benchmark_results/rocm-correctness-gfx1151-2026-09-12.md).
+A sliding-window model, two SSM hybrids and a VLM were added in
+[`docs/benchmark_results/rocm-correctness-gfx1151-2026-09-30.md`](benchmark_results/rocm-correctness-gfx1151-2026-09-30.md).
 
 ```bash
 ./target/release/mlxcel-server -m models/mlx/Qwen3-30B-A3B-4bit --port 8080 &
