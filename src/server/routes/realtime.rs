@@ -28,12 +28,16 @@
 
 use std::sync::Arc;
 
-use axum::Router;
 use axum::extract::State;
+use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
-use axum::response::Response;
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use axum::{Json, Router};
+use serde_json::json;
 
+use crate::server::CorsPolicy;
 use crate::server::realtime_engine::{RealtimeSessionConfig, RealtimeVoiceChatEngine};
 use crate::server::realtime_protocol::{
     AudioFormat, CLOSE_CODE_POLICY, CLOSE_CODE_TRY_AGAIN_LATER, CODE_INFERENCE_ERROR,
@@ -45,22 +49,52 @@ use crate::server::realtime_protocol::{
 /// Route path of the realtime socket.
 pub const REALTIME_PATH: &str = "/v1/realtime";
 
-/// A router serving only [`REALTIME_PATH`], with the engine as its state.
-/// `server/app.rs` merges it inside the auth and `--api-prefix` layers.
-pub fn realtime_router<S>(engine: Arc<RealtimeVoiceChatEngine>) -> Router<S>
+/// State of the realtime router: the engine and the origin policy the
+/// upgrade is checked against.
+#[derive(Clone)]
+struct RealtimeRouteState {
+    engine: Arc<RealtimeVoiceChatEngine>,
+    cors: Arc<CorsPolicy>,
+}
+
+/// A router serving only [`REALTIME_PATH`]. `server/app.rs` merges it inside
+/// the auth and `--api-prefix` layers, so a request failing both the API key
+/// and the origin check gets 401. `cors` is the server's `--cors-origins` /
+/// `--allowed-origins` policy: browsers do not apply CORS to WebSocket
+/// upgrades, so the handler checks `Origin` itself (#2042).
+pub fn realtime_router<S>(engine: Arc<RealtimeVoiceChatEngine>, cors: Arc<CorsPolicy>) -> Router<S>
 where
     S: Clone + Send + Sync + 'static,
 {
     Router::new()
         .route(REALTIME_PATH, get(realtime_ws))
-        .with_state(engine)
+        .with_state(RealtimeRouteState { engine, cors })
 }
 
-/// Upgrade handler.
-pub async fn realtime_ws(
-    ws: WebSocketUpgrade,
-    State(engine): State<Arc<RealtimeVoiceChatEngine>>,
+/// Upgrade handler. A disallowed `Origin` gets 403 before the upgrade is
+/// even validated, so no reservation is taken and no session is created.
+async fn realtime_ws(
+    State(state): State<RealtimeRouteState>,
+    headers: HeaderMap,
+    ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Response {
+    let origin = headers.get(header::ORIGIN);
+    if !state.cors.permits_websocket_origin(origin) {
+        let shown = origin.map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned());
+        tracing::warn!("rejected /v1/realtime upgrade from origin {shown:?}");
+        let body = json!({
+            "error": {
+                "message": "origin not allowed for /v1/realtime",
+                "type": "invalid_request_error",
+            }
+        });
+        return (StatusCode::FORBIDDEN, Json(body)).into_response();
+    }
+    let ws = match ws {
+        Ok(ws) => ws,
+        Err(rejection) => return rejection.into_response(),
+    };
+    let engine = state.engine;
     // Clients send 80 ms appends (about 3.5 KB of base64); 1 MiB (about
     // 24 s of audio per message) bounds what one message can make the
     // server decode and push before the socket is read again.

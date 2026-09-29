@@ -249,6 +249,83 @@ fn the_mlxcel_allow_list_reflects_only_a_matching_origin() {
 }
 
 #[test]
+fn websocket_origin_matrix() {
+    // #2042: every OriginPolicy variant against an absent Origin, an allowed
+    // value, a disallowed value and `null`. Credentials never matter.
+    let non_utf8 = HeaderValue::from_bytes(b"http://localhost\xff").expect("obs-text is valid");
+    for credentials in [true, false] {
+        let wildcard = policy("*", credentials);
+        assert_eq!(wildcard.origins, OriginPolicy::Wildcard);
+        assert!(wildcard.permits_websocket_origin(None));
+        for any in ["https://evil.example", "null", "http://localhost:3000"] {
+            assert!(
+                wildcard.permits_websocket_origin(Some(&origin(any))),
+                "{any}"
+            );
+        }
+        assert!(wildcard.permits_websocket_origin(Some(&non_utf8)));
+
+        let localhost = policy("localhost", credentials);
+        assert_eq!(localhost.origins, OriginPolicy::Localhost);
+        assert!(localhost.permits_websocket_origin(None));
+        for ok in [
+            "http://localhost:3000",
+            "http://127.0.0.1",
+            "http://[::1]:8080",
+        ] {
+            assert!(
+                localhost.permits_websocket_origin(Some(&origin(ok))),
+                "{ok}"
+            );
+        }
+        for bad in [
+            "https://localhost.evil.com",
+            "https://evil.example",
+            "null",
+            "localhost",
+        ] {
+            assert!(
+                !localhost.permits_websocket_origin(Some(&origin(bad))),
+                "{bad}"
+            );
+        }
+        assert!(!localhost.permits_websocket_origin(Some(&non_utf8)));
+
+        let literal = policy("https://app.example.com", credentials);
+        assert!(matches!(literal.origins, OriginPolicy::Literal(_)));
+        assert!(literal.permits_websocket_origin(None));
+        assert!(literal.permits_websocket_origin(Some(&origin("https://app.example.com"))));
+        for bad in ["https://evil.example", "https://APP.example.com", "null"] {
+            assert!(
+                !literal.permits_websocket_origin(Some(&origin(bad))),
+                "{bad}"
+            );
+        }
+        assert!(!literal.permits_websocket_origin(Some(&non_utf8)));
+        let null_literal = policy("null", credentials);
+        assert!(null_literal.permits_websocket_origin(Some(&origin("null"))));
+        assert!(!null_literal.permits_websocket_origin(Some(&origin("https://a.example"))));
+
+        let list = parse_allowed_origins(&origins(&[
+            "https://app.example.com",
+            "http://localhost:3000",
+        ]))
+        .unwrap();
+        let allow = CorsPolicy::resolve("*", "GET", "*", credentials, Some(list)).expect("valid");
+        assert!(matches!(allow.origins, OriginPolicy::AllowList(_)));
+        assert!(allow.permits_websocket_origin(None));
+        for ok in ["https://app.example.com", "http://localhost:3000"] {
+            assert!(allow.permits_websocket_origin(Some(&origin(ok))), "{ok}");
+        }
+        for bad in ["https://evil.example", "http://localhost:3001", "null"] {
+            assert!(!allow.permits_websocket_origin(Some(&origin(bad))), "{bad}");
+        }
+        assert!(!allow.permits_websocket_origin(Some(&non_utf8)));
+    }
+    assert!(CorsPolicy::default().permits_websocket_origin(Some(&origin("https://evil.example"))));
+}
+
+#[test]
 fn preflight_headers_carry_the_configured_methods_and_credentials() {
     let p = CorsPolicy::resolve("*", "GET, POST", "X-Custom", false, None).expect("valid");
     let headers = p.preflight_headers();

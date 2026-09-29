@@ -558,9 +558,12 @@ fn build_routes(state: &AppState) -> Router<AppState> {
 
     // Nemotron VoiceChat (#1376): the realtime WebSocket exists only when the
     // engine does. Merged here so the API-key and `--api-prefix` layers wrap
-    // it like every other route; the upgrade request carries the key.
+    // it like every other route; the upgrade request carries the key. The
+    // route checks `Origin` against the CORS policy itself (#2042), which
+    // also covers router-mode sub-apps built without the CORS layer.
     if let Some(engine) = state.realtime_engine.clone() {
-        app = app.merge(routes::realtime::realtime_router(engine));
+        let cors = std::sync::Arc::new(state.config.cors_policy.clone());
+        app = app.merge(routes::realtime::realtime_router(engine, cors));
     }
 
     app
