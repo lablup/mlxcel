@@ -107,13 +107,15 @@ fn voicechat_stream_perception_matches_reference() {
     })
     .unwrap();
     let perception =
-        VoiceChatPerception::from_weights(&weights, "stt_model.perception", &enc_args).unwrap();
+        VoiceChatPerception::from_weights(&weights, "stt_model.perception", &enc_args, (64, 4))
+            .unwrap();
     let rnnt = RnntDecoder::from_weights(
         &weights,
         "stt_model.rnnt_decoder",
         "stt_model.rnnt_joint",
         &predict,
         &joint,
+        (64, 4),
     )
     .unwrap();
 

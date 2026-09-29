@@ -147,7 +147,9 @@ impl RnntDecoder {
         joint_prefix: &str,
         predict: &PredictArgs,
         joint: &JointArgs,
+        quantization: (i32, i32),
     ) -> Result<Self, String> {
+        let (group_size, bits) = quantization;
         let activation = match joint.activation.to_ascii_lowercase().as_str() {
             "relu" => Activation::Relu,
             "sigmoid" => Activation::Sigmoid,
@@ -175,7 +177,12 @@ impl RnntDecoder {
             predict.pred_rnn_layers,
         )?;
         let linear = |name: &str| {
-            UnifiedLinear::from_weights(weights, &format!("{joint_prefix}.{name}"), 64, 4)
+            UnifiedLinear::from_weights(
+                weights,
+                &format!("{joint_prefix}.{name}"),
+                group_size,
+                bits,
+            )
         };
         Ok(Self {
             embed,
@@ -218,6 +225,17 @@ impl RnntDecoder {
         })
     }
 
+    /// Joint network: `out(activation(enc_proj + pred_proj))`, flattened.
+    fn joint_logits(&self, enc_proj: &MlxArray, pred_proj: &MlxArray) -> UniquePtr<MlxArray> {
+        let joint = mlxcel_core::add(enc_proj, pred_proj);
+        let joint = match self.activation {
+            Activation::Relu => mlxcel_core::relu(&joint),
+            Activation::Sigmoid => mlxcel_core::sigmoid(&joint),
+            Activation::Tanh => mlxcel_core::tanh(&joint),
+        };
+        mlxcel_core::reshape(&self.out.forward(&joint), &[-1])
+    }
+
     /// Greedy symbols for one encoder frame `enc_frame: [1, 1, encoder_hidden]`.
     ///
     /// Returns every non-blank token emitted for this frame (special pieces
@@ -234,13 +252,7 @@ impl RnntDecoder {
         let mut emitted = Vec::new();
         while emitted.len() < max_symbols {
             let cached = self.prediction(state, dtype);
-            let joint = mlxcel_core::add(&enc_proj, &cached.pred_proj);
-            let joint = match self.activation {
-                Activation::Relu => mlxcel_core::relu(&joint),
-                Activation::Sigmoid => mlxcel_core::sigmoid(&joint),
-                Activation::Tanh => mlxcel_core::tanh(&joint),
-            };
-            let logits = mlxcel_core::reshape(&self.out.forward(&joint), &[-1]);
+            let logits = self.joint_logits(&enc_proj, &cached.pred_proj);
             let token_arr = mlxcel_core::argmax(&logits, 0, false);
             mlxcel_core::try_eval(&token_arr).map_err(|e| format!("RNNT joint failed: {e}"))?;
             let token = mlxcel_core::item_i32(&token_arr);

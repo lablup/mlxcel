@@ -44,6 +44,13 @@ use crate::tokenizer::{MlxcelTokenizer, load_tokenizer};
 /// Default RNNT symbol cap per encoder frame (`audio_config.max_symbols`).
 const DEFAULT_MAX_SYMBOLS: usize = 10;
 
+/// `(group_size, bits)` handed to the speech front end (perception and RNNT
+/// joint) and the language model: the checkpoint's top-level `quantization`
+/// default, or `(64, 4)` when the config carries none.
+pub(crate) fn front_end_quantization(config: &VoiceChatConfig) -> (i32, i32) {
+    config.default_quantization().unwrap_or((64, 4))
+}
+
 /// A loaded VoiceChat checkpoint.
 pub struct NemotronVoiceChatModel {
     pub(crate) config: VoiceChatConfig,
@@ -148,15 +155,21 @@ impl NemotronVoiceChatModel {
             mlxcel_core::weights::load_weights_from_dir(model_path).map_err(anyhow::Error::msg)?;
         check_projection_width(&weights, text_config.hidden_size)?;
         let msg = anyhow::Error::msg;
-        let perception =
-            VoiceChatPerception::from_weights(&weights, "stt_model.perception", &conformer_args)
-                .map_err(msg)?;
+        let quant = front_end_quantization(&config);
+        let perception = VoiceChatPerception::from_weights(
+            &weights,
+            "stt_model.perception",
+            &conformer_args,
+            quant,
+        )
+        .map_err(msg)?;
         let rnnt = RnntDecoder::from_weights(
             &weights,
             "stt_model.rnnt_decoder",
             "stt_model.rnnt_joint",
             &predict_args,
             &joint_args,
+            quant,
         )
         .map_err(msg)?;
         let mut tts = RvqEarTtsModel::from_weights(&weights, "tts_model.tts_model", &tts_config)

@@ -62,6 +62,11 @@ fn joint_args() -> JointArgs {
 
 /// Torch-named weights; the output layer is zero so logits equal `out_bias`.
 fn weights(out_bias: &[f32; VOCAB + 1]) -> WeightMap {
+    weights_with_enc(out_bias, ENC)
+}
+
+/// [`weights`] with a joint `enc` input width of `enc_width`.
+fn weights_with_enc(out_bias: &[f32; VOCAB + 1], enc_width: usize) -> WeightMap {
     let mut s = 11u64;
     let mut w = WeightMap::new();
     let (h, g) = (H as i32, 4 * H as i32);
@@ -78,7 +83,7 @@ fn weights(out_bias: &[f32; VOCAB + 1]) -> WeightMap {
         put(&mut w, &format!("{p}.bias_ih_l{n}"), &[g], &mut s);
         put(&mut w, &format!("{p}.bias_hh_l{n}"), &[g], &mut s);
     }
-    put(&mut w, "joint.enc.weight", &[3, ENC as i32], &mut s);
+    put(&mut w, "joint.enc.weight", &[3, enc_width as i32], &mut s);
     put(&mut w, "joint.enc.bias", &[3], &mut s);
     put(&mut w, "joint.pred.weight", &[3, h], &mut s);
     put(&mut w, "joint.pred.bias", &[3], &mut s);
@@ -104,6 +109,7 @@ pub(super) fn decoder(out_bias: &[f32; VOCAB + 1]) -> RnntDecoder {
         "joint",
         &predict_args(),
         &joint_args(),
+        (64, 4),
     )
     .unwrap()
 }
@@ -294,7 +300,54 @@ fn args_deserialize_checkpoint_objects() {
         ..joint_args()
     };
     assert!(
-        RnntDecoder::from_weights(&weights(&[0.0; 6]), "dec", "joint", &predict_args(), &bad)
-            .is_err()
+        RnntDecoder::from_weights(
+            &weights(&[0.0; 6]),
+            "dec",
+            "joint",
+            &predict_args(),
+            &bad,
+            (64, 4)
+        )
+        .is_err()
     );
+}
+
+#[test]
+fn rnnt_joint_loads_non_default_quantization() {
+    const WIDE: usize = 64;
+    let bias = [0.1, -0.2, 0.3, 0.0, 0.05, 0.4];
+    let (mut quant, mut reference) = (weights_with_enc(&bias, WIDE), weights_with_enc(&bias, WIDE));
+    let joint_enc = quant.remove("joint.enc.weight").unwrap();
+    reference.remove("joint.enc.weight");
+    crate::audio::fastconformer::tests::insert_quantized(
+        &mut quant,
+        &mut reference,
+        "joint.enc",
+        &joint_enc,
+        32,
+        8,
+    );
+    let args = JointArgs {
+        encoder_hidden: WIDE,
+        ..joint_args()
+    };
+    let load = |w: &WeightMap, q: (i32, i32)| {
+        RnntDecoder::from_weights(w, "dec", "joint", &predict_args(), &args, q)
+    };
+    let frame = mlxcel_core::from_slice_f32(&rand_vec(WIDE, &mut 5u64, 1.0), &[1, 1, WIDE as i32]);
+    let pred = mlxcel_core::zeros(&[1, 1, 3], mlxcel_core::dtype::FLOAT32);
+    let logits = |d: &RnntDecoder| array_to_vec_f32(&d.joint_logits(&d.enc.forward(&frame), &pred));
+    let expected = logits(&load(&reference, (64, 4)).unwrap());
+    let got = logits(&load(&quant, (32, 8)).unwrap());
+    assert_eq!(expected.len(), got.len());
+    let diff = |a: &[f32], b: &[f32]| {
+        a.iter()
+            .zip(b)
+            .fold(0.0f32, |m, (p, q)| m.max((p - q).abs()))
+    };
+    assert!(diff(&expected, &got) < 1e-4);
+    // (64, 4) would read one scale column per 64 inputs; the checkpoint has
+    // one per 32 (running it aborts inside MLX, so check the layout).
+    let scales = mlxcel_core::array_shape(quant.get("joint.enc.scales").unwrap());
+    assert_eq!(scales, vec![3, WIDE as i32 / 32]);
 }
