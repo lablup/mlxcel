@@ -2252,6 +2252,17 @@ mod ffi {
         /// [`crate::hardware::gpu_backend_kind`], which maps it to an enum.
         fn gpu_backend_kind() -> i32;
 
+        /// Test-only (issue #1804): a lazy array whose evaluation fails on
+        /// the GPU. `kind` 0 launches a kernel with a 2048-thread block, which
+        /// HIP rejects synchronously; `kind` 1 launches a kernel that writes
+        /// far outside its buffer, an asynchronous queue fault after which the
+        /// device context is unusable for the rest of the process. Built
+        /// through the same custom-kernel path the fused ports use, so
+        /// [`try_eval`] on the result exercises the real launch, wait and
+        /// error path. Errors on backends other than ROCm. Prefer the typed
+        /// wrapper [`crate::rocm_faults::fault_probe_array`].
+        fn rocm_fault_probe_array(kind: i32) -> Result<UniquePtr<MlxArray>>;
+
         /// True when this backend has a BitLinear kernel port, that is Metal,
         /// CUDA or ROCm (issues #1803, #1862). Separate from
         /// `custom_kernels_available` on purpose: kernels are ported one at a
@@ -3683,6 +3694,11 @@ pub mod dtype;
 // machine, whichever backend they are on.
 pub mod cuda_arch;
 pub mod rocm_arch;
+
+// Deliberate ROCm GPU failures for tests (#1804): a typed wrapper over the
+// bridge's fault-probe fixture, so `tests/rocm_gpu_faults.rs` can provoke a
+// rejected launch and a queue fault without knowing the bridge's integers.
+pub mod rocm_faults;
 
 // The CUDA graph capture budget applied on GB10 (#1798): a pure policy over
 // the compute capability plus the env-wins applier, re-exported through

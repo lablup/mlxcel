@@ -1387,6 +1387,17 @@ bool custom_kernels_available();
 // `device_info()` keys happen to be present.
 int32_t gpu_backend_kind();
 
+// Test-only (lablup/mlxcel#1804): a lazy array whose evaluation fails on the
+// GPU in a chosen way, built through the same custom-kernel path the fused
+// ports use, so a test can check that a ROCm failure reaches Rust as an `Err`
+// from `try_eval` rather than a hang or an unwritten buffer. No production
+// path calls it. `kind` 0 launches a kernel with a 2048-thread block, which
+// HIP rejects synchronously and the device survives; `kind` 1 launches a
+// kernel that writes far outside its buffer, an asynchronous queue fault after
+// which the HIP device context is unusable for the rest of the process. Throws
+// on backends other than ROCm.
+std::unique_ptr<MlxArray> rocm_fault_probe_array(int32_t kind);
+
 
 // True when this backend has a BitLinear kernel port: Metal, CUDA or ROCm
 // (issues #1803, #1862).

@@ -136,7 +136,10 @@ inline void launch_module_kernel(
         std::static_pointer_cast<void>(held));
   } else {
     encoder.launch_kernel([&](hipStream_t stream) {
-      (void)hipModuleLaunchKernel(
+      // A rejected launch (oversized block, too much shared memory) is a
+      // synchronous error; throw it here so the caller's eval fails instead
+      // of consuming an output nothing wrote (lablup/mlxcel#1804).
+      CHECK_HIP_ERROR(hipModuleLaunchKernel(
           kernel,
           grid.x,
           grid.y,
@@ -147,7 +150,7 @@ inline void launch_module_kernel(
           smem_bytes,
           stream,
           args.args(),
-          nullptr);
+          nullptr));
     });
   }
 }

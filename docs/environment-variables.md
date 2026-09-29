@@ -192,7 +192,15 @@ ROCm builds (`--features rocm`) read `ROCM_PATH` (default `/opt/rocm`) and
 also read `MLX_ROCM_FFT_CACHE_SIZE` (default 8), the number of hipFFT plans kept
 alive. The default is low on purpose: past roughly a dozen live plans, creating
 the next one blocks inside hipFFT with the GPU idle (lablup/mlxcel#1825). Raise
-it only while measuring that limit.
+it only while measuring that limit. `MLX_ROCM_GPU_WATCHDOG_SECS` (default `0`,
+off) is the longest a single host wait for GPU work may block before it fails
+with an error (lablup/mlxcel#1804). A GPU fault is reported without it, in
+about a second; the watchdog is for a kernel that never finishes, which cannot
+be told from a slow one, so it is opt-in and must exceed the longest prefill
+the server accepts. The stream stays wedged behind the kernel either way, so a
+watchdog failure still means restarting the process. It does not apply under
+`MLX_EVENT_BLOCKING`, whose blocking waits return promptly on a fault but have
+no poll loop to time.
 
 ## OpenXLA / StableHLO backend variables
 

@@ -7,6 +7,8 @@
 #include <hip/hip_runtime.h>
 #include <rocblas/rocblas.h>
 
+#include <cstdio>
+
 namespace mlx::core {
 
 namespace rocm {
@@ -53,8 +55,22 @@ class HipHandle {
 
   void reset() {
     if (handle_ != nullptr) {
-      CHECK_HIP_ERROR(Destroy(handle_));
+      // Destructor path: report, never throw. Once the device has faulted
+      // every destroy returns the fault, and a throw from a destructor would
+      // terminate the process while it is already failing or exiting
+      // (lablup/mlxcel#1804). One line per handle type, not per handle.
+      hipError_t status = Destroy(handle_);
       handle_ = nullptr;
+      if (status != hipSuccess) {
+        static bool reported = false;
+        if (!reported) {
+          reported = true;
+          fprintf(
+              stderr,
+              "[mlx-rocm] releasing a HIP handle failed: %s\n",
+              hipGetErrorString(status));
+        }
+      }
     }
   }
 

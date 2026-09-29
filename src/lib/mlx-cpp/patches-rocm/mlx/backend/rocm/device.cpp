@@ -411,6 +411,12 @@ void Device::clear_encoders() {
   encoders_.clear();
 }
 
+CommandEncoder* Device::find_encoder(Stream s) {
+  std::lock_guard<std::mutex> lk(encoders_mtx_);
+  auto it = encoders_.find(s.index);
+  return it == encoders_.end() ? nullptr : it->second.get();
+}
+
 CommandEncoder::CommandEncoder(Device& d)
     : device_(d),
       stream_(d),
@@ -424,18 +430,108 @@ CommandEncoder::CommandEncoder(Device& d)
 }
 
 CommandEncoder::~CommandEncoder() {
+  // Destructor path: a failed destroy has nowhere to go, and on a device that
+  // has faulted every one of these returns the fault.
   for (auto& [key, pool] : exec_pool_) {
     for (auto& slot : pool) {
-      hipGraphExecDestroy(slot.exec);
+      (void)hipGraphExecDestroy(slot.exec);
       if (slot.source_graph) {
-        hipGraphDestroy(slot.source_graph);
+        (void)hipGraphDestroy(slot.source_graph);
       }
     }
   }
   if (build_graph_) {
-    hipGraphDestroy(build_graph_);
+    (void)hipGraphDestroy(build_graph_);
     build_graph_ = nullptr;
   }
+}
+
+// --- GPU failure reporting (lablup/mlxcel#1804) -----------------------------
+
+int gpu_watchdog_seconds() {
+  static const int secs = [] {
+    const char* e = std::getenv("MLX_ROCM_GPU_WATCHDOG_SECS");
+    return e ? std::max(0, std::atoi(e)) : 0;
+  }();
+  return secs;
+}
+
+std::string describe_device_error(hipError_t status, const char* where) {
+  std::ostringstream oss;
+  if (status == kWatchdogExpired) {
+    oss << "[ROCm] GPU watchdog: a host wait (" << where << ") exceeded "
+        << "MLX_ROCM_GPU_WATCHDOG_SECS=" << gpu_watchdog_seconds()
+        << " seconds. The GPU stream is still busy or stuck; work queued "
+        << "behind it will not complete, so restart the process to use the "
+        << "GPU again.";
+    return oss.str();
+  }
+  oss << "[ROCm] GPU stream failed while " << where << ": "
+      << hipGetErrorString(status) << " (" << hipGetErrorName(status) << ", "
+      << static_cast<int>(status) << ").";
+  // After a queue fault the runtime fails every HIP call on every thread,
+  // hipGetDevice included; say so rather than let the caller retry.
+  int dev = 0;
+  bool context_gone = hipGetDevice(&dev) != hipSuccess;
+  (void)hipGetLastError();
+  if (context_gone) {
+    oss << " The HIP runtime reported the faulting kernel on stderr. The "
+        << "device context is unusable for the rest of the process (every "
+        << "HIP call now returns this error), so restart the process to use "
+        << "the GPU again.";
+  }
+  return oss.str();
+}
+
+void CommandEncoder::set_device_error(hipError_t status, const char* where) {
+  // Keep the earliest error, as the Metal completion handler does.
+  if (error_.valid()) {
+    return;
+  }
+  error_.set_message(
+      std::make_shared<std::string>(describe_device_error(status, where)));
+}
+
+void CommandEncoder::check_launch(const char* primitive) {
+  hipError_t status = hipGetLastError();
+  if (status == hipSuccess) {
+    return;
+  }
+  int dev = 0;
+  bool context_gone = hipGetDevice(&dev) != hipSuccess;
+  (void)hipGetLastError();
+  if (context_gone) {
+    std::string where = std::string("launching ") + primitive;
+    set_device_error(status, where.c_str());
+    error_.check();
+  }
+  std::ostringstream oss;
+  oss << "[ROCm] launching " << primitive
+      << " failed: " << hipGetErrorString(status) << " ("
+      << hipGetErrorName(status) << ", " << static_cast<int>(status) << ").";
+  throw std::runtime_error(oss.str());
+}
+
+std::unordered_map<int, Device>& get_devices();
+
+Error& record_stream_error(Stream s, hipError_t status, const char* where) {
+  if (s.device.type == mlx::core::Device::gpu) {
+    auto& devices = get_devices();
+    if (auto it = devices.find(s.device.index); it != devices.end()) {
+      if (auto* encoder = it->second.find_encoder(s)) {
+        encoder->set_device_error(status, where);
+        return encoder->error();
+      }
+    }
+  }
+  // Leaked on purpose: Event::set_error stores a raw pointer, so the object
+  // must outlive every event that could point at it.
+  static Error* fallback = new Error();
+  if (!fallback->valid()) {
+    fallback->set_message(
+        std::make_shared<std::string>(describe_device_error(status, where)));
+  }
+  return *fallback;
 }
 
 void CommandEncoder::add_temporary(const array& arr) {
@@ -904,7 +1000,9 @@ bool CommandEncoder::decode_capture_end_record(int slot) {
   // Stream capture records WITHOUT executing — run the exec once to actually
   // compute the record token's logits/state.
   CHECK_HIP_ERROR(hipGraphLaunch(exec, stream_));
-  worker_->commit(stream_);
+  if (hipError_t st = worker_->commit(stream_); st != hipSuccess) {
+    set_device_error(st, "queuing the completion callback of a graph launch");
+  }
   return true;
 }
 
@@ -914,7 +1012,9 @@ bool CommandEncoder::decode_capture_replay(int slot) {
     return false;
   device_.make_current();
   CHECK_HIP_ERROR(hipGraphLaunch(decode_cap_exec_[slot], stream_));
-  worker_->commit(stream_);
+  if (hipError_t st = worker_->commit(stream_); st != hipSuccess) {
+    set_device_error(st, "queuing the completion callback of a graph replay");
+  }
   return true;
 }
 
@@ -1121,18 +1221,52 @@ void CommandEncoder::commit() {
 
   node_count_ = 0;
 
-  // Put completion handlers in a batch.
-  worker_->commit(stream_);
+  // Put completion handlers in a batch. On a stream that has failed the
+  // callback cannot be queued and the handlers never run; record that so
+  // synchronize() and the event waiters fail instead of blocking on them.
+  if (hipError_t st = worker_->commit(stream_); st != hipSuccess) {
+    set_device_error(st, "queuing the completion callback of a commit");
+  }
 }
 
 void CommandEncoder::synchronize() {
-  (void)hipStreamSynchronize(stream_);
+  using namespace std::chrono_literals;
+  // Mirrors the Metal encoder: wait, then throw the stream's error. Every
+  // HIP status is checked because a failed stream returns its fault from
+  // each of these calls and never runs the completion handlers, so the
+  // promise below would otherwise be waited on forever (lablup/mlxcel#1804).
+  auto fail = [this](hipError_t st, const char* where) {
+    set_device_error(st, where);
+    error_.check();
+    throw std::runtime_error(describe_device_error(st, where));
+  };
+  if (hipError_t st = hipStreamSynchronize(stream_); st != hipSuccess) {
+    fail(st, "synchronizing the stream");
+  }
   auto p = std::make_shared<std::promise<void>>();
   std::future<void> f = p->get_future();
   add_completed_handler([p = std::move(p)]() { p->set_value(); });
   commit();
-  f.wait();
-  (void)hipStreamSynchronize(stream_);
+  if (error_.valid()) {
+    error_.check(); // the callback could not be queued
+  }
+  // The handler fires right after the stream drains, so poll the future at a
+  // fine grain and the stream (in case it faults meanwhile) about once a
+  // millisecond.
+  for (int polls = 1; f.wait_for(100us) != std::future_status::ready;
+       polls++) {
+    if (polls % 10 != 0) {
+      continue;
+    }
+    hipError_t st = hipStreamQuery(stream_);
+    if (st != hipSuccess && st != hipErrorNotReady) {
+      fail(st, "waiting for the stream's completion handlers");
+    }
+  }
+  if (hipError_t st = hipStreamSynchronize(stream_); st != hipSuccess) {
+    fail(st, "synchronizing the stream");
+  }
+  error_.check();
   // Stream is fully drained. Non-cached (no-reuse) execs reference these Packs
   // until now; cached-exec Packs live in their ExecSlot (clr#138) and are NOT
   // in these vectors, so clearing here is safe.

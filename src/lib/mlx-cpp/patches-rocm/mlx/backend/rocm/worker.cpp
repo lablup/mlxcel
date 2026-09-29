@@ -35,10 +35,10 @@ void Worker::signal(void* data) {
   w->cond_.notify_one();
 }
 
-void Worker::commit(hipStream_t stream) {
+hipError_t Worker::commit(hipStream_t stream) {
   // Move pending tasks into tasks
   if (pending_tasks_.empty()) {
-    return;
+    return hipSuccess;
   }
   {
     std::lock_guard lock(mtx_);
@@ -52,10 +52,12 @@ void Worker::commit(hipStream_t stream) {
   // arena makes freeing/reusing those buffers safe across the record token.
   if (g_decode_capturing.load(std::memory_order_relaxed)) {
     signal(this);
-    return;
+    return hipSuccess;
   }
-  // Use hipLaunchHostFunc to signal when stream operations complete
-  (void)hipLaunchHostFunc(stream, signal, this);
+  // Use hipLaunchHostFunc to signal when stream operations complete. A stream
+  // that has faulted rejects the callback (and would never run it anyway);
+  // the batch is left pending and the status goes back to the encoder.
+  return hipLaunchHostFunc(stream, signal, this);
 }
 
 void Worker::thread_fn() {

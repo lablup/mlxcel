@@ -5,6 +5,7 @@
 #include "mlx/array.h"
 #include "mlx/backend/rocm/lru_cache.h"
 #include "mlx/backend/rocm/utils.h"
+#include "mlx/error.h"
 #include "mlx/stream.h"
 
 #include <hip/hip_runtime.h>
@@ -41,6 +42,36 @@ bool use_hip_graphs();
 
 // Inline (graph-splitting) launch counter; see device.cpp diagnostics.
 extern std::atomic<long> g_inline_launches_;
+
+// --- GPU failure reporting (ml-explore/mlx#3742, lablup/mlxcel#1804) ---
+//
+// The HIP runtime on ROCm 7 does not abort the process on a GPU memory fault:
+// it puts the whole device context into an error state, every later HIP call
+// on any thread returns the fault (hipErrorIllegalAddress), and no queued
+// hipLaunchHostFunc callback ever runs. This backend signals completion with
+// exactly those callbacks, so without care a waiter spins forever. Each
+// CommandEncoder therefore owns an Error, as the Metal encoder does; a wait or
+// query that finds the stream failed records the status there and attaches it
+// to the event, and Event::wait() throws it through Event::check_error().
+
+// One line describing |status| observed while |where|; names the HIP error
+// and, when the device context is gone, says so.
+std::string describe_device_error(hipError_t status, const char* where);
+
+// Record |status| as the failure of stream |s| (keeping an earlier one) and
+// return the Error events signaled on |s| should point at. Does not bind the
+// device and makes no HIP call that could fail, so it is safe on a dead device
+// and from const queries. A CPU stream, or a stream whose encoder does not
+// exist, gets a process-wide fallback Error.
+Error& record_stream_error(Stream s, hipError_t status, const char* where);
+
+// MLX_ROCM_GPU_WATCHDOG_SECS: longest a single host wait for GPU work may block
+// before it fails with kWatchdogExpired. 0 (the default) disables it. A kernel
+// that never finishes cannot be told from a slow one, so this is an opt-in
+// bound for servers that prefer a failed request to a stuck one; the stream
+// stays wedged behind the kernel either way.
+int gpu_watchdog_seconds();
+constexpr hipError_t kWatchdogExpired = hipErrorLaunchTimeOut;
 // Diagnostics: tag inline launches by the primitive currently in eval_gpu.
 void set_current_prim(const char* name);
 void record_inline_launch();
@@ -196,8 +227,28 @@ class CommandEncoder {
     return stream_;
   }
 
-  // Wait until kernels and completion handlers are finished
+  // Wait until kernels and completion handlers are finished. Throws the
+  // stream's error if it has failed instead of waiting for handlers that a
+  // failed stream never runs.
   void synchronize();
+
+  // Errors observed on this stream. Events signaled on this stream point at
+  // this object once the stream fails, so it has to outlive them: it lives as
+  // long as the encoder, which its Device keeps for the life of the process.
+  Error& error() {
+    return error_;
+  }
+
+  // Record |status| as this stream's failure, keeping an earlier one. Does
+  // not throw; callers throw through error().check() or Event::check_error().
+  void set_device_error(hipError_t status, const char* where);
+
+  // Read and clear the calling thread's pending HIP error after |primitive|
+  // launched its kernels, and throw it as that primitive's launch failure.
+  // Kernels launched with hipLaunchKernelGGL or <<<>>> report a synchronous
+  // failure no other way. If the pending error is the device's fault state
+  // rather than this launch, the stream is poisoned and that is thrown.
+  void check_launch(const char* primitive);
 
  private:
   struct GraphNode {
@@ -214,6 +265,7 @@ class CommandEncoder {
   Device& device_;
   HipStream stream_;
   std::unique_ptr<Worker> worker_;
+  Error error_;
   int node_count_{0};
   std::vector<std::shared_ptr<array::Data>> temporaries_;
   std::unordered_set<const array::Data*> temporary_ptrs_;
@@ -319,6 +371,10 @@ class Device {
 
   CommandEncoder& get_command_encoder(Stream s);
   void clear_encoders();
+
+  // The encoder for |s| if one exists, without binding the device or creating
+  // one. For the error path, which must not make a HIP call that can fail.
+  CommandEncoder* find_encoder(Stream s);
 
   int hip_device() const {
     return device_;
@@ -488,19 +544,21 @@ void CommandEncoder::launch_kernel(F&& func) {
         func(hstream);
         hipGraph_t child = nullptr;
         hipError_t ee = hipStreamEndCapture(hstream, &child);
+        // Failures here fall back to the eager launch below; the graph
+        // handles are released without checking (an already-failed capture
+        // has nothing better to report) and the pending error is cleared.
         if (ee == hipSuccess && child) {
           size_t nn = 0;
-          hipGraphGetNodes(child, nullptr, &nn);
+          (void)hipGraphGetNodes(child, nullptr, &nn);
           if (nn > 0) {
             add_child_graph_node(child, "lib");
-            hipGraphDestroy(child);
+            (void)hipGraphDestroy(child);
             return;
           }
-          hipGraphDestroy(child);
-        } else if (child)
-          hipGraphDestroy(child);
-        if (child)
-          hipGraphDestroy(child);
+          (void)hipGraphDestroy(child);
+        } else if (child) {
+          (void)hipGraphDestroy(child);
+        }
         (void)hipGetLastError();
       } else {
         if (std::getenv("MLX_GRAPH_SPLIT_LOG"))

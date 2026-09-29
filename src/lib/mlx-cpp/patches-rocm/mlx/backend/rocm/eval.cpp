@@ -74,7 +74,20 @@ void eval(array& arr) {
     if (arr.is_tracer()) {
       inputs = arr.inputs();
     }
-    arr.primitive().eval_gpu(arr.inputs(), outputs);
+    try {
+      arr.primitive().eval_gpu(arr.inputs(), outputs);
+    } catch (...) {
+      // A launch that threw (CHECK_HIP_ERROR) has been reported; clear the
+      // thread's pending HIP error so the next primitive is not blamed for it.
+      (void)hipGetLastError();
+      throw;
+    }
+    // Kernels launched through hipLaunchKernelGGL or <<<>>> return nothing, so
+    // a synchronous launch failure (bad block size, no code object for this
+    // gfx) only reaches the thread's pending HIP error. Read it here, on the
+    // launching thread, and throw it as this primitive's error instead of
+    // letting the output be consumed unwritten (lablup/mlxcel#1804).
+    encoder.check_launch(arr.primitive().name());
   }
 
   for (auto& in : arr.inputs()) {

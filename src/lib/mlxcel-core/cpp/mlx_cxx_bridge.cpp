@@ -5081,6 +5081,56 @@ int32_t gpu_backend_kind() {
     return static_cast<int32_t>(mlxcel::gpu_kernel_backend());
 }
 
+// Test-only fixture for lablup/mlxcel#1804; see the header. The kernels go
+// through `fast::hip_kernel`, so the launch, the wait and the error attach are
+// the production ones; only the kernel bodies are contrived.
+std::unique_ptr<MlxArray> rocm_fault_probe_array(int32_t kind) {
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+    using namespace mlx::core;
+    if (kind != 0 && kind != 1) {
+        throw std::invalid_argument(
+            "rocm_fault_probe_array: kind must be 0 (oversized block) or 1 "
+            "(out-of-bounds write)");
+    }
+    const bool out_of_bounds = kind == 1;
+    // 2^40 bytes past the output is outside every mapping on the tested
+    // hosts; the write raises HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION and
+    // the runtime retires the queue. `volatile` keeps the store.
+    const std::string source = out_of_bounds
+        ? "  volatile float* far = reinterpret_cast<volatile float*>(\n"
+          "      reinterpret_cast<char*>(out) + (1ll << 40));\n"
+          "  far[thread_index()] = inp[thread_index()];\n"
+          "  out[thread_index()] = 0.0f;\n"
+        : "  out[thread_index()] = inp[thread_index()] + 1.0f;\n";
+    // HIP allows at most 1024 threads per block; 2048 is rejected at launch.
+    // The buffers are sized to the block so an accepted launch (there is
+    // none) would still stay in bounds.
+    const int threads = out_of_bounds ? 64 : 2048;
+    auto kernel = fast::hip_kernel(
+        out_of_bounds ? "mlxcel_fault_probe_out_of_bounds"
+                      : "mlxcel_fault_probe_oversized_block",
+        {"inp"},
+        {"out"},
+        source);
+    array inp = zeros({threads}, float32);
+    auto outputs = kernel(
+        {inp},
+        {{threads}},
+        {float32},
+        std::make_tuple(threads, 1, 1),
+        std::make_tuple(threads, 1, 1),
+        {},
+        std::nullopt,
+        false,
+        Device::gpu);
+    return std::make_unique<MlxArray>(std::move(outputs.at(0)));
+#else
+    (void)kind;
+    throw std::runtime_error(
+        "rocm_fault_probe_array is only available on the ROCm backend");
+#endif
+}
+
 // True when this backend has a BitLinear kernel port. Metal, CUDA and, since
 // issue #1862, ROCm. Kept apart from `custom_kernels_available` because kernels
 // are ported one at a time: ROCm has this one and not the rest.
@@ -5836,7 +5886,9 @@ static bool rejection_path_selected(
 // owning request's own eval exists to report. Status, the event's signal and
 // its error pointer answer the question without either effect. Metal's
 // completion handler and the CPU scheduler both store an event's error before
-// they signal it (CUDA attaches none), so an error is visible by the time
+// they signal it, and the ROCm event layer attaches the stream's error in the
+// same `is_signaled()` query that reports a failed event as signaled (issue
+// #1804; CUDA attaches none), so an error is visible by the time
 // `is_signaled()` is.
 enum class StashedLaunch { InFlight, Landed, Failed };
 

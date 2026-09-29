@@ -30,8 +30,11 @@ class Worker {
   void add_task(std::function<void()> task);
 
   // Inform worker thread to run current batches after kernels in |stream|
-  // finish running.
-  void commit(hipStream_t stream);
+  // finish running. Returns the status of queuing that notification: on a
+  // stream that has failed it cannot be queued, the batch stays pending
+  // forever, and the caller records the failure on the stream so waiters do
+  // not block on handlers that will never run (lablup/mlxcel#1804).
+  [[nodiscard]] hipError_t commit(hipStream_t stream);
 
  private:
   static void signal(void*);
