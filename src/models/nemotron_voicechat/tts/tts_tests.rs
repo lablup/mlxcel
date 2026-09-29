@@ -402,3 +402,24 @@ fn prompt_masks_first_and_second_to_last_frames() {
     assert_eq!(to_i32(&prompt.last_frame()), vec![16, 16]);
     assert!(TtsPrompt::from_codec_codes(&codec, 4, &cfg, 12).is_err());
 }
+
+#[test]
+fn native_sum_reduces_the_requested_axis() {
+    let mut key = 41u64;
+    let x = rand(&mut key, &[2, 3, 4], 1.0);
+    for axis in 0..3usize {
+        let got = super::norm_mlp::native_sum_axis(&x, axis);
+        let want = mlxcel_core::sum_axis(&x, axis as i32, false);
+        assert_eq!(
+            mlxcel_core::array_shape(&got),
+            mlxcel_core::array_shape(&want)
+        );
+        for (a, b) in to_vec(&got).iter().zip(to_vec(&want)) {
+            assert!((a - b).abs() < 1e-5, "axis {axis}: {a} vs {b}");
+        }
+    }
+    let xb = mlxcel_core::astype(&x, dtype::BFLOAT16);
+    let got = super::norm_mlp::native_sum_axis(&xb, 1);
+    assert_eq!(mlxcel_core::array_dtype(&got), dtype::BFLOAT16);
+    assert_eq!(mlxcel_core::array_shape(&got), vec![2, 4]);
+}

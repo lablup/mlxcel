@@ -35,7 +35,7 @@ use mlxcel_core::dtype;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
-use super::norm_mlp::{scalar, weight_with_shape};
+use super::norm_mlp::{native_sum_axis, scalar, weight_with_shape};
 
 /// Per-codebook RVQ tables.
 pub struct RvqCodebooks {
@@ -72,7 +72,7 @@ impl RvqCodebooks {
         for idx in 0..q {
             let emb = mlxcel_core::slice(&all, &[idx, 0, 0], &[idx + 1, c, l]);
             let emb = mlxcel_core::reshape(&emb, &[c, l]);
-            let norm = mlxcel_core::sum_axis(&mlxcel_core::multiply(&emb, &emb), -1, false);
+            let norm = native_sum_axis(&mlxcel_core::multiply(&emb, &emb), 1);
             padded.push(mlxcel_core::concatenate(&emb, &zero_row, 0));
             norms.push(norm);
             embs.push(emb);

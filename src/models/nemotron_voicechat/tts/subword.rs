@@ -39,7 +39,7 @@ use mlxcel_core::{MlxArray, UniquePtr};
 
 use super::char_encoder::CharEncoder;
 use super::config::CharEncoderConfig;
-use super::norm_mlp::{weight, weight_with_shape};
+use super::norm_mlp::{native_sum_axis, weight, weight_with_shape};
 
 /// Read an integer tensor into host `i32`s.
 pub(crate) fn to_host_i32(arr: &MlxArray) -> Vec<i32> {
@@ -301,7 +301,7 @@ impl CharAwareSubwordEncoder {
         let embeds = mlxcel_core::take(&self.embed_tokens, &char_ids, 0);
         let hidden = self.encoder.forward(&embeds, &mask);
         let masked = mlxcel_core::multiply(&hidden, &mlxcel_core::expand_dims(&mask, -1));
-        let summed = mlxcel_core::sum_axis(&masked, 1, false);
+        let summed = native_sum_axis(&masked, 1);
         let divisor = mlxcel_core::from_slice_i32(&divisor, &[n, 1]);
         let pooled = mlxcel_core::divide(&summed, &divisor);
         let projected = self.proj_embedding.forward(&pooled);

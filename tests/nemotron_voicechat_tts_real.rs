@@ -253,6 +253,10 @@ fn ear_tts_matches_reference() {
             "free-running full-timeline codes: {exact}/{} exact, first diverging position {first_bad:?}",
             (total - 1) * q
         );
+        assert_eq!(
+            first_bad, None,
+            "full-timeline codes diverge from the TTS replay dump"
+        );
 
         let (_, _, forced) = run(&s, Some(get(r, "generated_codes")));
         let forced_exact: Vec<usize> = (1..total)
@@ -287,6 +291,9 @@ fn ear_tts_matches_reference() {
         want.len()
     );
     assert_eq!(replaced.len(), want.len());
+    // The run is seeded and mirrors the reference's op order and global-RNG
+    // call sequence, so the sampled codes are reproducible bit for bit.
+    assert_eq!(exact, want.len(), "session codes differ from the reference");
     assert!(
         replaced
             .iter()
