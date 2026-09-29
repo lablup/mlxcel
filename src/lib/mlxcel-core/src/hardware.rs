@@ -215,6 +215,126 @@ pub fn gpu_backend_kind() -> GpuBackendKind {
     })
 }
 
+/// A quantization mode, as MLX names it.
+///
+/// The closed set MLX's `string_to_quantization_mode` parses; the string form
+/// is [`QuantMode::as_str`], which matches
+/// [`crate::layers::SUPPORTED_QUANTIZATION_MODES`] entry for entry (a test
+/// holds the two together).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum QuantMode {
+    Affine,
+    Mxfp4,
+    Mxfp8,
+    Nvfp4,
+}
+
+impl QuantMode {
+    /// Every mode, in the order of `SUPPORTED_QUANTIZATION_MODES`.
+    pub const ALL: [QuantMode; 4] = [
+        QuantMode::Affine,
+        QuantMode::Mxfp4,
+        QuantMode::Mxfp8,
+        QuantMode::Nvfp4,
+    ];
+
+    /// The mode string MLX parses (`"affine"`, `"mxfp4"`, `"mxfp8"`, `"nvfp4"`).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            QuantMode::Affine => "affine",
+            QuantMode::Mxfp4 => "mxfp4",
+            QuantMode::Mxfp8 => "mxfp8",
+            QuantMode::Nvfp4 => "nvfp4",
+        }
+    }
+
+    /// Parse an MLX mode string. Exact comparison, like
+    /// [`crate::layers::validate_quantization_mode`]: `None` for anything MLX
+    /// itself would not parse.
+    #[must_use]
+    pub fn from_mlx_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|mode| mode.as_str() == name)
+    }
+}
+
+impl std::fmt::Display for QuantMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Whether a backend can run a [`QuantMode`], and if not, what to do about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuantModeSupport {
+    /// The backend has kernels for this mode; load it as the checkpoint ships.
+    Native,
+    /// No kernels for this mode, but a load-time conversion to the named mode
+    /// (which is `Native` on the same backend) keeps the model runnable.
+    ConvertTo(QuantMode),
+    /// No kernels and no conversion: the load must fail with a message.
+    Unsupported,
+}
+
+impl GpuBackendKind {
+    /// Human-readable backend name for load messages.
+    #[must_use]
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            GpuBackendKind::None => "CPU (no GPU backend)",
+            GpuBackendKind::Metal => "Metal",
+            GpuBackendKind::Cuda => "CUDA",
+            GpuBackendKind::Rocm => "ROCm",
+        }
+    }
+
+    /// The backend quantization capability table (issue #1806).
+    ///
+    /// This is the one place that answers "can this backend run mode M
+    /// natively?". Load-time policy consults it through
+    /// [`quant_mode_support`] (the NVFP4 repack route in the binary crate's
+    /// `models/sanitize.rs`, and the per-layer guard in
+    /// [`crate::layers`]); nothing else may key a quantization decision on a
+    /// build feature.
+    ///
+    /// Rows, and the evidence behind each:
+    ///
+    /// - Metal, CUDA: every mode native. This is the behavior before the table
+    ///   existed, and it must not change.
+    /// - `None` (a CPU-only build, or ROCm with no visible device): every mode
+    ///   native, because MLX's CPU backend implements all four
+    ///   (`mlx/backend/cpu/quantized.cpp` handles the group-16 E4M3 scale that
+    ///   NVFP4 needs). Also unchanged.
+    /// - ROCm: affine native. mxfp8 and mxfp4 native after the scale-type and
+    ///   `gather_qmm` fixes in `patches-rocm/LOCAL_FIXES.md` (items 8, 10, 11),
+    ///   measured against a dequantized f32 reference and on
+    ///   gpt-oss-20b-MXFP4-Q4 (lablup/mlxcel#1818; #1808 tracks the rest of
+    ///   mxfp4). NVFP4 converts to affine: the ROCm qmv dispatch implements
+    ///   group sizes 32, 64 and 128 only and throws for NVFP4's 16, and there
+    ///   is no E4M3 block-scale path.
+    #[must_use]
+    pub const fn quant_mode_support(self, mode: QuantMode) -> QuantModeSupport {
+        match (self, mode) {
+            (GpuBackendKind::Rocm, QuantMode::Nvfp4) => {
+                QuantModeSupport::ConvertTo(QuantMode::Affine)
+            }
+            (GpuBackendKind::Rocm, QuantMode::Affine | QuantMode::Mxfp4 | QuantMode::Mxfp8) => {
+                QuantModeSupport::Native
+            }
+            (GpuBackendKind::None | GpuBackendKind::Metal | GpuBackendKind::Cuda, _) => {
+                QuantModeSupport::Native
+            }
+        }
+    }
+}
+
+/// [`GpuBackendKind::quant_mode_support`] for the backend MLX resolved in this
+/// process.
+#[must_use]
+pub fn quant_mode_support(mode: QuantMode) -> QuantModeSupport {
+    gpu_backend_kind().quant_mode_support(mode)
+}
+
 /// Hardware capabilities detected at runtime.
 #[derive(Debug, Clone)]
 pub struct HardwareCapabilities {
@@ -1874,6 +1994,98 @@ mod tests {
             assert_eq!(
                 hw.unified_memory_gb, 0,
                 "unified_memory_gb must stay 0 off Apple; read device_memory_bytes instead"
+            );
+        }
+    }
+
+    // --- Quantization capability table (issue #1806) ---
+
+    #[test]
+    fn quant_mode_names_match_the_mlx_mode_allowlist() {
+        let names: Vec<&str> = QuantMode::ALL.iter().map(|m| m.as_str()).collect();
+        assert_eq!(names, crate::layers::SUPPORTED_QUANTIZATION_MODES);
+        for mode in QuantMode::ALL {
+            assert_eq!(QuantMode::from_mlx_name(mode.as_str()), Some(mode));
+            assert_eq!(mode.to_string(), mode.as_str());
+        }
+        // Exact, like MLX's own parser.
+        assert_eq!(QuantMode::from_mlx_name("NVFP4"), None);
+        assert_eq!(QuantMode::from_mlx_name(" affine"), None);
+        assert_eq!(QuantMode::from_mlx_name(""), None);
+    }
+
+    /// Metal, CUDA and the no-GPU column must report every mode native: that is
+    /// the behavior before the table existed, and the table must not change it.
+    #[test]
+    fn quant_table_keeps_metal_cuda_and_cpu_native() {
+        for backend in [
+            GpuBackendKind::None,
+            GpuBackendKind::Metal,
+            GpuBackendKind::Cuda,
+        ] {
+            for mode in QuantMode::ALL {
+                assert_eq!(
+                    backend.quant_mode_support(mode),
+                    QuantModeSupport::Native,
+                    "{backend:?} {mode}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn quant_table_rocm_row() {
+        let rocm = GpuBackendKind::Rocm;
+        assert_eq!(
+            rocm.quant_mode_support(QuantMode::Affine),
+            QuantModeSupport::Native
+        );
+        assert_eq!(
+            rocm.quant_mode_support(QuantMode::Mxfp8),
+            QuantModeSupport::Native
+        );
+        assert_eq!(
+            rocm.quant_mode_support(QuantMode::Mxfp4),
+            QuantModeSupport::Native
+        );
+        assert_eq!(
+            rocm.quant_mode_support(QuantMode::Nvfp4),
+            QuantModeSupport::ConvertTo(QuantMode::Affine)
+        );
+    }
+
+    /// Structural rules over the whole table, walking `GpuBackendKind::ALL` so
+    /// a new backend kind is covered the moment it exists: affine is native
+    /// everywhere (it is every conversion's last resort), and a conversion
+    /// target is itself native on the same backend, so no conversion chains.
+    #[test]
+    fn quant_table_conversions_land_on_native_modes() {
+        for backend in GpuBackendKind::ALL {
+            assert_eq!(
+                backend.quant_mode_support(QuantMode::Affine),
+                QuantModeSupport::Native,
+                "{backend:?} must run affine natively"
+            );
+            assert!(!backend.display_name().is_empty());
+            for mode in QuantMode::ALL {
+                if let QuantModeSupport::ConvertTo(target) = backend.quant_mode_support(mode) {
+                    assert_ne!(target, mode, "{backend:?} {mode} converts to itself");
+                    assert_eq!(
+                        backend.quant_mode_support(target),
+                        QuantModeSupport::Native,
+                        "{backend:?} {mode} converts to {target}, which is not native there"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn quant_mode_support_reads_the_running_backend() {
+        for mode in QuantMode::ALL {
+            assert_eq!(
+                quant_mode_support(mode),
+                gpu_backend_kind().quant_mode_support(mode)
             );
         }
     }

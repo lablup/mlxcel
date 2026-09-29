@@ -462,6 +462,12 @@ impl ExpertLinear {
             // is unaffected.
             mlxcel_core::layers::validate_quantization_biases(mode, quant_biases.is_some())
                 .map_err(|e| format!("{prefix}: {e}"))?;
+            // A mode the running backend has no kernel for (issue #1806).
+            mlxcel_core::layers::validate_quantization_mode_runnable(
+                mode,
+                mlxcel_core::hardware::gpu_backend_kind(),
+            )
+            .map_err(|e| format!("{prefix}: {e}"))?;
 
             Ok(Self::Quantized {
                 weight,

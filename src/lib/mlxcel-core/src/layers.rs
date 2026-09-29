@@ -1687,6 +1687,54 @@ pub fn validate_quantization_mode(mode: &str) -> Result<(), String> {
     ))
 }
 
+/// Refuse a quantized layer whose mode the running backend has no kernel for
+/// (issue #1806).
+///
+/// Reads the backend capability table
+/// ([`crate::hardware::GpuBackendKind::quant_mode_support`]). A `Native` mode
+/// passes. Anything else fails the load here, with a message naming the mode,
+/// the backend and the way out, instead of reaching `quantized_matmul` /
+/// `gather_qmm`, whose unsupported-dispatch throw crosses the cxx bridge as an
+/// uncatchable abort at the first forward pass. A `ConvertTo` mode that reaches
+/// a layer loader means the checkpoint took no load-time conversion route: the
+/// conversions run before the model is built (the ModelOpt NVFP4 repack in the
+/// binary crate's `models/sanitize.rs` converts to affine on such a backend),
+/// so what arrives here in that mode is a layout none of them handles, for
+/// example an MLX-native NVFP4 export.
+///
+/// An unparseable mode is left to [`validate_quantization_mode`], so the two
+/// checks never both report the same string.
+///
+/// Used by: the shared dense and embedding loaders (through
+///          `reconcile_quantization_layout_logged`), and in the consuming crate
+///          `crate::models::switch_layers::SwitchLinear` (MoE experts) and
+///          `crate::models::gpt_oss::ExpertLinear`
+pub fn validate_quantization_mode_runnable(
+    mode: &str,
+    backend: crate::hardware::GpuBackendKind,
+) -> Result<(), String> {
+    use crate::hardware::{QuantMode, QuantModeSupport};
+    let Some(parsed) = QuantMode::from_mlx_name(mode) else {
+        return Ok(());
+    };
+    let name = backend.display_name();
+    match backend.quant_mode_support(parsed) {
+        QuantModeSupport::Native => Ok(()),
+        QuantModeSupport::ConvertTo(target) => Err(format!(
+            "quantization mode {parsed} has no native kernel on the {name} backend, and this \
+             checkpoint's {parsed} layout has no load-time conversion to {target} (mlxcel \
+             converts ModelOpt NVFP4 checkpoints automatically; this layer is in another \
+             layout). Re-quantize the model to {target} (for example with `mlx_lm.convert -q`) \
+             or run it on a backend with native {parsed} kernels"
+        )),
+        QuantModeSupport::Unsupported => Err(format!(
+            "quantization mode {parsed} is not supported on the {name} backend and cannot be \
+             converted at load. Re-quantize the model to a mode this backend runs (for example \
+             affine with `mlx_lm.convert -q`) or run it on another backend"
+        )),
+    }
+}
+
 /// Reject a declared mode that contradicts the `.biases` plane the checkpoint
 /// actually ships.
 ///
@@ -2029,6 +2077,10 @@ fn reconcile_quantization_layout_logged(
 ) -> Result<ReconciledQuant, String> {
     let layout = reconcile_quantization_layout(weight_shape, scales_shape, group_size, bits, mode)
         .map_err(|e| format!("{e} (prefix: {prefix})"))?;
+    // Kept out of the pure reconciler, whose shape tests must not depend on
+    // the host's backend.
+    validate_quantization_mode_runnable(mode, crate::hardware::gpu_backend_kind())
+        .map_err(|e| format!("{prefix}: {e}"))?;
     if layout.reconciled {
         tracing::warn!(
             target: "mlxcel::quant",
@@ -6546,6 +6598,66 @@ mod tests {
                         panic!("QuantizedMultiLinear::new must reject {group_size} / {bits}")
                     });
             assert!(err.contains(field), "unhelpful error: {err}");
+        }
+    }
+
+    /// Issue #1806: the per-layer guard passes exactly the table's `Native`
+    /// entries, and leaves an unparseable mode to `validate_quantization_mode`.
+    #[test]
+    fn quantization_mode_runnable_follows_the_capability_table() {
+        use crate::hardware::{GpuBackendKind, QuantMode, QuantModeSupport};
+        for backend in GpuBackendKind::ALL {
+            for mode in QuantMode::ALL {
+                let result = validate_quantization_mode_runnable(mode.as_str(), backend);
+                match backend.quant_mode_support(mode) {
+                    QuantModeSupport::Native => assert!(result.is_ok(), "{backend:?} {mode}"),
+                    _ => {
+                        let err = result.expect_err("a non-native mode must be refused");
+                        assert!(err.contains(mode.as_str()), "{err}");
+                        assert!(err.contains(backend.display_name()), "{err}");
+                    }
+                }
+            }
+            assert!(validate_quantization_mode_runnable("optiq", backend).is_ok());
+        }
+        let err = validate_quantization_mode_runnable("nvfp4", GpuBackendKind::Rocm).unwrap_err();
+        assert!(
+            err.contains("affine"),
+            "the message must name the way out: {err}"
+        );
+    }
+
+    /// Issue #1806: an MLX-native NVFP4 layer (group 16, no biases, E4M3
+    /// scales) reaching the shared loader on a backend with no NVFP4 kernel is
+    /// a load error naming the layer, not an abort at the first matmul. On a
+    /// backend that runs NVFP4 the same layer still loads. Builds the layer
+    /// only; no kernel runs, so this is safe on every backend.
+    #[test]
+    fn shared_loader_refuses_nvfp4_where_the_backend_cannot_run_it() {
+        use crate::hardware::{QuantMode, QuantModeSupport, quant_mode_support};
+        let prefix = "model.layers.0.mlp.down_proj";
+        let mut weights = crate::weights::WeightMap::new();
+        // out 2, in 32: 32 * 4 bits / 32 = 4 packed u32 words, 32 / 16 = 2 groups.
+        weights.insert(
+            format!("{prefix}.weight"),
+            ffi::from_slice_u32(&[0u32; 8], &[2, 4]),
+        );
+        weights.insert(
+            format!("{prefix}.scales"),
+            ffi::from_bytes(&[0x38u8; 4], &[2, 2], crate::dtype::UINT8),
+        );
+        let loaded = UnifiedLinear::from_weights(&weights, prefix, 16, 4);
+        match quant_mode_support(QuantMode::Nvfp4) {
+            QuantModeSupport::Native => {
+                loaded.expect("a backend with native NVFP4 must keep loading it");
+            }
+            _ => {
+                let err = loaded
+                    .err()
+                    .expect("NVFP4 must be refused at load on this backend");
+                assert!(err.contains(prefix), "the error must name the layer: {err}");
+                assert!(err.contains("nvfp4"), "{err}");
+            }
         }
     }
 

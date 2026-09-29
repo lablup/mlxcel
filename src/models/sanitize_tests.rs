@@ -198,6 +198,88 @@ impl Drop for EnvRestore {
     }
 }
 
+/// Whether the running backend has native NVFP4 kernels, per the quantization
+/// capability table (issue #1806). Tests that assert the native route skip,
+/// with the reason printed, where it does not.
+fn backend_runs_native_nvfp4(test: &str) -> bool {
+    use mlxcel_core::hardware::{QuantMode, QuantModeSupport, gpu_backend_kind};
+    let backend = gpu_backend_kind();
+    match backend.quant_mode_support(QuantMode::Nvfp4) {
+        QuantModeSupport::Native => true,
+        support => {
+            eprintln!(
+                "skipping {test}: the {} backend has no native NVFP4 kernel ({support:?})",
+                backend.display_name()
+            );
+            false
+        }
+    }
+}
+
+/// The weight map the dense-affine NVFP4 route leaves for
+/// `write_gemma4_nvfp4_repack_fixture`: affine 4-bit at group 32 with zero
+/// points, no native sidecar, and values that dequantize back to 1.0.
+fn assert_dense_affine_nvfp4_repack(weights: &WeightMap, out_dim: usize) {
+    let expected_key = "language_model.model.layers.0.mlp.gate_proj.weight";
+    let expected_scale_key = "language_model.model.layers.0.mlp.gate_proj.weight_scale";
+    let expected_scale2_key = "language_model.model.layers.0.mlp.gate_proj.weight_scale_2";
+    let expected_scales_key = "language_model.model.layers.0.mlp.gate_proj.scales";
+    let expected_biases_key = "language_model.model.layers.0.mlp.gate_proj.biases";
+    let expected_global_scale_key = "language_model.model.layers.0.mlp.gate_proj.global_scale";
+
+    assert!(weights.contains_key(expected_key));
+    assert!(!weights.contains_key(expected_scale_key));
+    assert!(!weights.contains_key(expected_scale2_key));
+    assert!(
+        !weights.contains_key(expected_global_scale_key),
+        "Dense-affine rollback should not emit the native global_scale sidecar"
+    );
+    assert!(
+        weights.contains_key(expected_scales_key),
+        "Dense-affine rollback should emit affine scales"
+    );
+    assert!(
+        weights.contains_key(expected_biases_key),
+        "Dense-affine rollback should emit affine biases"
+    );
+
+    let w = weights.get(expected_key).unwrap();
+    assert_eq!(mlxcel_core::array_dtype(w), dtype::UINT32);
+    assert_eq!(mlxcel_core::array_shape(w), vec![out_dim as i32, 4i32]);
+
+    let scales = weights.get(expected_scales_key).unwrap();
+    let biases = weights.get(expected_biases_key).unwrap();
+    assert_eq!(
+        mlxcel_core::array_shape(scales),
+        vec![out_dim as i32, 1i32],
+        "Expected affine scales shape [2, 1] for group_size=32"
+    );
+    assert_eq!(
+        mlxcel_core::array_shape(biases),
+        vec![out_dim as i32, 1i32],
+        "Expected affine biases shape [2, 1] for group_size=32"
+    );
+
+    let biases_ptr = biases.as_ref().unwrap() as *const _;
+    let dequantized = unsafe { mlxcel_core::dequantize(w, scales, biases_ptr, 32, 4, "affine") };
+    let dequantized_f32 = mlxcel_core::astype(&dequantized, dtype::FLOAT32);
+    mlxcel_core::eval(&dequantized_f32);
+    assert_eq!(
+        mlxcel_core::array_shape(&dequantized_f32),
+        vec![out_dim as i32, 32i32],
+        "Expected shape [2, 32]"
+    );
+
+    let w_bytes = mlxcel_core::array_to_raw_bytes(&dequantized_f32);
+    for chunk in w_bytes.chunks_exact(4) {
+        let v = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        assert!(
+            (v - 1.0f32).abs() < 5e-2,
+            "Expected value close to 1.0 after dense-affine rollback, got {v}"
+        );
+    }
+}
+
 fn write_gemma4_nvfp4_repack_fixture(dir: &Path) -> usize {
     std::fs::write(
         dir.join("config.json"),
@@ -415,6 +497,9 @@ fn load_and_sanitize_weights_selectively_keeps_gemma4_text_tensors() {
 /// explicit dense-affine rollback remains covered by a separate non-CUDA test.
 #[test]
 fn load_and_sanitize_weights_repacks_nvfp4_gemma4_checkpoint() {
+    if !backend_runs_native_nvfp4("load_and_sanitize_weights_repacks_nvfp4_gemma4_checkpoint") {
+        return;
+    }
     let _env_guard = env_lock();
     let _nvfp4_env = EnvRestore::clear(NVFP4_REPACK_ENV_KEYS);
     let dir = temp_model_dir("gemma4_nvfp4");
@@ -524,65 +609,30 @@ fn load_and_sanitize_weights_dense_repack_env_keeps_non_cuda_affine_rollback() {
     let out_dim = write_gemma4_nvfp4_repack_fixture(&dir);
 
     let weights = super::sanitize::load_and_sanitize_weights(&dir).unwrap();
+    assert_dense_affine_nvfp4_repack(&weights, out_dim);
 
-    let expected_key = "language_model.model.layers.0.mlp.gate_proj.weight";
-    let expected_scale_key = "language_model.model.layers.0.mlp.gate_proj.weight_scale";
-    let expected_scale2_key = "language_model.model.layers.0.mlp.gate_proj.weight_scale_2";
-    let expected_scales_key = "language_model.model.layers.0.mlp.gate_proj.scales";
-    let expected_biases_key = "language_model.model.layers.0.mlp.gate_proj.biases";
-    let expected_global_scale_key = "language_model.model.layers.0.mlp.gate_proj.global_scale";
+    std::fs::remove_dir_all(&dir).unwrap();
+}
 
-    assert!(weights.contains_key(expected_key));
-    assert!(!weights.contains_key(expected_scale_key));
-    assert!(!weights.contains_key(expected_scale2_key));
-    assert!(
-        !weights.contains_key(expected_global_scale_key),
-        "Dense-affine rollback should not emit the native global_scale sidecar"
-    );
-    assert!(
-        weights.contains_key(expected_scales_key),
-        "Dense-affine rollback should emit affine scales"
-    );
-    assert!(
-        weights.contains_key(expected_biases_key),
-        "Dense-affine rollback should emit affine biases"
-    );
-
-    let w = weights.get(expected_key).unwrap();
-    assert_eq!(mlxcel_core::array_dtype(w), dtype::UINT32);
-    assert_eq!(mlxcel_core::array_shape(w), vec![out_dim as i32, 4i32]);
-
-    let scales = weights.get(expected_scales_key).unwrap();
-    let biases = weights.get(expected_biases_key).unwrap();
-    assert_eq!(
-        mlxcel_core::array_shape(scales),
-        vec![out_dim as i32, 1i32],
-        "Expected affine scales shape [2, 1] for group_size=32"
-    );
-    assert_eq!(
-        mlxcel_core::array_shape(biases),
-        vec![out_dim as i32, 1i32],
-        "Expected affine biases shape [2, 1] for group_size=32"
-    );
-
-    let biases_ptr = biases.as_ref().unwrap() as *const _;
-    let dequantized = unsafe { mlxcel_core::dequantize(w, scales, biases_ptr, 32, 4, "affine") };
-    let dequantized_f32 = mlxcel_core::astype(&dequantized, dtype::FLOAT32);
-    mlxcel_core::eval(&dequantized_f32);
-    assert_eq!(
-        mlxcel_core::array_shape(&dequantized_f32),
-        vec![out_dim as i32, 32i32],
-        "Expected shape [2, 32]"
-    );
-
-    let w_bytes = mlxcel_core::array_to_raw_bytes(&dequantized_f32);
-    for chunk in w_bytes.chunks_exact(4) {
-        let v = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-        assert!(
-            (v - 1.0f32).abs() < 5e-2,
-            "Expected value close to 1.0 after dense-affine rollback, got {v}"
-        );
+/// Issue #1806: on a backend with no native NVFP4 kernel (ROCm), a ModelOpt
+/// NVFP4 checkpoint converts to affine 4-bit with no environment variables
+/// set. On a backend with native NVFP4 the default stays the direct transcode,
+/// which `load_and_sanitize_weights_repacks_nvfp4_gemma4_checkpoint` covers.
+#[test]
+fn load_and_sanitize_weights_converts_nvfp4_to_affine_by_default_where_not_native() {
+    if backend_runs_native_nvfp4(
+        "load_and_sanitize_weights_converts_nvfp4_to_affine_by_default_where_not_native",
+    ) {
+        return;
     }
+    let _env_guard = env_lock();
+    let _nvfp4_env = EnvRestore::clear(NVFP4_REPACK_ENV_KEYS);
+    let dir = temp_model_dir("gemma4_nvfp4_default_affine");
+    std::fs::create_dir_all(&dir).unwrap();
+    let out_dim = write_gemma4_nvfp4_repack_fixture(&dir);
+
+    let weights = super::sanitize::load_and_sanitize_weights(&dir).unwrap();
+    assert_dense_affine_nvfp4_repack(&weights, out_dim);
 
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -595,6 +645,8 @@ fn load_and_sanitize_weights_dense_repack_env_keeps_non_cuda_affine_rollback() {
 /// fall back instead of reading garbage or throwing across the FFI boundary.
 #[test]
 fn load_and_sanitize_weights_skips_nvfp4_triplet_with_non_scalar_weight_scale_2() {
+    let _env_guard = env_lock();
+    let _nvfp4_env = EnvRestore::clear(NVFP4_REPACK_ENV_KEYS);
     let dir = temp_model_dir("gemma4_nvfp4_bad_scale2");
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -666,7 +718,28 @@ fn load_and_sanitize_weights_skips_nvfp4_triplet_with_non_scalar_weight_scale_2(
         ],
     );
 
-    let weights = super::sanitize::load_and_sanitize_weights(&dir).unwrap();
+    let loaded = super::sanitize::load_and_sanitize_weights(&dir);
+    if !backend_runs_native_nvfp4(
+        "load_and_sanitize_weights_skips_nvfp4_triplet_with_non_scalar_weight_scale_2 (skip half)",
+    ) {
+        // Issue #1806: where NVFP4 cannot run, a layer that cannot be converted
+        // fails the load, naming the layer and the reason, instead of being
+        // left behind as packed NVFP4 that would abort at the first matmul.
+        let err = loaded
+            .err()
+            .expect("an unconvertible NVFP4 layer must fail the load on this backend");
+        assert!(
+            err.contains("language_model.model.layers.0.mlp.gate_proj"),
+            "the error must name the layer: {err}"
+        );
+        assert!(
+            err.contains("weight_scale_2"),
+            "the error must give the reason: {err}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+        return;
+    }
+    let weights = loaded.unwrap();
 
     // The malformed weight_scale_2 must be dropped, and the triplet must not
     // be repacked into a quantized layout: it falls back exactly like the

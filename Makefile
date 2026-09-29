@@ -793,8 +793,9 @@ verify-rocm-smoke: ## ROCm smoke: build, link and generate on the GPU, asserting
 
 # Order matters here, and not in the usual cheap-first way. `verify-rocm-smoke`
 # runs BEFORE `verify-test-rocm` because make stops at the first failing
-# prerequisite, and the ROCm test gate currently has known failures (the nvfp4
-# abort of #1806 and the sampler aborts of #1885). With the test gate first the
+# prerequisite, and the ROCm test gate currently has known failures (for
+# example the mlxcel-core tests of the fused paged-attention kernels, which have
+# no ROCm port yet, #1814). With the test gate first the
 # smoke was never reached at all, which was measured rather than reasoned: the
 # first full run of this target ended without the smoke having executed once.
 # The smoke is also the fastest high-signal part, so a developer gets the

@@ -504,8 +504,9 @@ fn nvfp4_native_repack_forced() -> bool {
 ///   fallback; re-derives block scales so it drifts slightly from the
 ///   checkpoint.
 /// - `DenseAffine`: a dense f16 matrix is reconstructed and re-quantized into
-///   the MLX affine 4-bit format. Kept as the explicit non-CUDA rollback and
-///   comparison path via `MLXCEL_NVFP4_DENSE_REPACK=1`.
+///   the MLX affine 4-bit format. The default on a backend with no native
+///   NVFP4 kernel (issue #1806), and the explicit rollback and comparison path
+///   everywhere else via `MLXCEL_NVFP4_DENSE_REPACK=1`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Nvfp4RepackStrategy {
     DirectTranscode,
@@ -513,62 +514,173 @@ enum Nvfp4RepackStrategy {
     DenseAffine,
 }
 
-/// Pure decision function for which NVFP4 repack path to take, given the
-/// build flag and the two override env vars. All three call sites in
-/// [`repack_nvfp4_weights_to_quantized`] (the log label, the direct-transcode
-/// gate, and the dense-path quantize-mode choice) must go through this single
+/// The NVFP4 load route: which repack path, why, and what happens to a layer
+/// that cannot take it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Nvfp4LoadRoute {
+    strategy: Nvfp4RepackStrategy,
+    /// Why this route was chosen, for the one-line load log.
+    reason: String,
+    /// True when the backend cannot run NVFP4 at all, so a layer the route
+    /// cannot convert must fail the load (it would otherwise reach the backend
+    /// as NVFP4 and abort at the first forward pass). False where a native
+    /// NVFP4 kernel exists, which keeps the historical skip-with-a-message.
+    conversion_required: bool,
+}
+
+/// Pure decision function for the NVFP4 load route, given the backend and the
+/// two override env vars. All three call sites in
+/// [`repack_nvfp4_weights_to_quantized`] (the log line, the direct-transcode
+/// gate, and the dense-path quantize-mode choice) go through this single
 /// function so they can never disagree.
+///
+/// This is the NVFP4 half of the load-time convert-or-reject policy (issue
+/// #1806), and the backend's ability comes only from the capability table,
+/// [`mlxcel_core::hardware::GpuBackendKind::quant_mode_support`], read for the
+/// backend MLX resolved at runtime rather than a build feature.
 ///
 /// Precedence (highest first):
 ///
-/// 1. `dense_forced` (`MLXCEL_NVFP4_DENSE_REPACK`) wins over the direct route.
-///    It forces the dense f16 repack route on any build; this is the existing
-///    debug/parity fallback from issue #693. On CUDA, and on non-CUDA when
-///    `native_forced` is also set, that dense route targets native NVFP4. On
-///    non-CUDA with only `dense_forced`, it targets affine 4-bit, preserving
-///    the pre-#705 comparison and rollback path.
-/// 2. Otherwise the default applies: native direct transcode on every build.
-///    This extends the CUDA default to Metal/CPU after the issue #705 prefill
-///    recovery.
+/// 1. The capability table. A backend with no native NVFP4 kernel
+///    (`ConvertTo(Affine)`, ROCm today) always takes `DenseAffine`, whatever
+///    the env vars say, because every other route produces a group-16 NVFP4
+///    layout that backend cannot run. `MLXCEL_NVFP4_DENSE_REPACK` names this
+///    same route, so it keeps working there; `MLXCEL_NVFP4_NATIVE_REPACK` is
+///    ignored and the reason says so. An `Unsupported` entry, or a conversion
+///    target other than affine, has no route and fails the load.
+/// 2. On a backend with native NVFP4, `dense_forced`
+///    (`MLXCEL_NVFP4_DENSE_REPACK`) wins over the direct route. It forces the
+///    dense f16 repack route; this is the existing debug/parity fallback from
+///    issue #693. On CUDA, and elsewhere when `native_forced` is also set, that
+///    dense route targets native NVFP4. Otherwise it targets affine 4-bit,
+///    preserving the pre-#705 comparison and rollback path.
+/// 3. Otherwise the default applies: native direct transcode. This extends the
+///    CUDA default to Metal/CPU after the issue #705 prefill recovery.
+///
+/// Rows 2 and 3 are exactly the pre-#1806 function with the CUDA *build* flag
+/// replaced by the CUDA *runtime* backend, so Metal and CUDA choose the same
+/// routes they always did.
 fn nvfp4_repack_strategy(
-    cuda_build: bool,
+    backend: mlxcel_core::hardware::GpuBackendKind,
     native_forced: bool,
     dense_forced: bool,
-) -> Nvfp4RepackStrategy {
-    if dense_forced {
-        if cuda_build || native_forced {
-            Nvfp4RepackStrategy::DenseNative
+) -> Result<Nvfp4LoadRoute, String> {
+    use mlxcel_core::hardware::{GpuBackendKind, QuantMode, QuantModeSupport};
+    let name = backend.display_name();
+    match backend.quant_mode_support(QuantMode::Nvfp4) {
+        QuantModeSupport::Native => {}
+        QuantModeSupport::ConvertTo(QuantMode::Affine) => {
+            let mut reason = format!(
+                "the {name} backend has no native NVFP4 kernel, so the weights are converted \
+                 to affine 4-bit at load"
+            );
+            if native_forced {
+                reason.push_str(
+                    "; MLXCEL_NVFP4_NATIVE_REPACK is ignored because native NVFP4 cannot run here",
+                );
+            }
+            return Ok(Nvfp4LoadRoute {
+                strategy: Nvfp4RepackStrategy::DenseAffine,
+                reason,
+                conversion_required: true,
+            });
+        }
+        QuantModeSupport::ConvertTo(target) => {
+            return Err(format!(
+                "NVFP4 checkpoint cannot be loaded on the {name} backend: it has no native NVFP4 \
+                 kernel, and the capability table names a conversion to {target} that mlxcel does \
+                 not implement for NVFP4 (only affine 4-bit is)"
+            ));
+        }
+        QuantModeSupport::Unsupported => {
+            return Err(format!(
+                "NVFP4 checkpoint cannot be loaded on the {name} backend: NVFP4 is not supported \
+                 there and cannot be converted at load. Use an affine-quantized export of the \
+                 model, or run it on Metal or CUDA"
+            ));
+        }
+    }
+
+    let dense_targets_native = backend == GpuBackendKind::Cuda;
+    let (strategy, reason) = if dense_forced {
+        if dense_targets_native || native_forced {
+            let why = if dense_targets_native {
+                "the CUDA dense target is native NVFP4"
+            } else {
+                "MLXCEL_NVFP4_NATIVE_REPACK selects the native target"
+            };
+            (
+                Nvfp4RepackStrategy::DenseNative,
+                format!("MLXCEL_NVFP4_DENSE_REPACK forces the dense f16 route, and {why}"),
+            )
         } else {
-            Nvfp4RepackStrategy::DenseAffine
+            (
+                Nvfp4RepackStrategy::DenseAffine,
+                "MLXCEL_NVFP4_DENSE_REPACK forces the dense f16 route to affine 4-bit".to_string(),
+            )
         }
     } else {
-        Nvfp4RepackStrategy::DirectTranscode
-    }
+        (
+            Nvfp4RepackStrategy::DirectTranscode,
+            format!("the {name} backend runs NVFP4 natively; bit-exact transcode (the default)"),
+        )
+    };
+    Ok(Nvfp4LoadRoute {
+        strategy,
+        reason,
+        conversion_required: false,
+    })
 }
 
-/// Reads the CUDA feature flag and both override env vars and resolves the
-/// current [`Nvfp4RepackStrategy`] via [`nvfp4_repack_strategy`].
-fn current_nvfp4_repack_strategy() -> Nvfp4RepackStrategy {
+/// Reads the runtime backend and both override env vars and resolves the
+/// current [`Nvfp4LoadRoute`] via [`nvfp4_repack_strategy`].
+fn current_nvfp4_repack_strategy() -> Result<Nvfp4LoadRoute, String> {
     nvfp4_repack_strategy(
-        cfg!(feature = "cuda"),
+        mlxcel_core::hardware::gpu_backend_kind(),
         nvfp4_native_repack_forced(),
         nvfp4_dense_repack_forced(),
     )
 }
 
+/// A ModelOpt NVFP4 layer the chosen route cannot repack.
+///
+/// Where the backend runs NVFP4 natively this keeps the historical behavior:
+/// print a "Skipping" line and leave the layer as it is. Where it does not
+/// (`route.conversion_required`), the layer would reach the backend in a layout
+/// it cannot run, so the load fails here with the layer name and the reason
+/// (issue #1806).
+fn nvfp4_layer_not_repacked(
+    route: &Nvfp4LoadRoute,
+    prefix: &str,
+    reason: &str,
+) -> Result<(), String> {
+    if route.conversion_required {
+        return Err(format!(
+            "NVFP4 layer {prefix} cannot be converted to affine 4-bit on the {} backend, which \
+             has no native NVFP4 kernel: {reason}. The checkpoint is malformed or uses a layout \
+             mlxcel does not convert; use an affine-quantized export of the model, or run it on \
+             Metal or CUDA",
+            mlxcel_core::hardware::gpu_backend_kind().display_name(),
+        ));
+    }
+    eprintln!("Skipping NVFP4 repack for {prefix}: {reason}");
+    Ok(())
+}
+
 /// Repack ModelOpt NVFP4-packed weights to an MLX quantized layout in-place.
 ///
 /// Detects weight groups by the presence of `{prefix}.weight_scale_2` keys.
-/// The default is a direct triplet transcode (issues #693/#705): the
-/// packed FP4 U8 bytes reinterpret to MLX native NVFP4 U32 words, the per-block
-/// E4M3 scales are preserved verbatim, and `weight_scale_2` is kept as a
-/// per-linear global-scale sidecar. This never materializes a dense f16 matrix
-/// and is bit-exact to the checkpoint. `MLXCEL_NVFP4_DENSE_REPACK=1` forces the
-/// older dense f16 fallback. On non-CUDA, that dense fallback targets affine
-/// 4-bit unless `MLXCEL_NVFP4_NATIVE_REPACK=1` is also set, preserving an
-/// explicit affine rollback path after direct native became the default. See
-/// [`nvfp4_repack_strategy`] for the exact precedence between the two env vars
-/// and the CUDA feature flag.
+/// Where the backend runs NVFP4 natively, the default is a direct triplet
+/// transcode (issues #693/#705): the packed FP4 U8 bytes reinterpret to MLX
+/// native NVFP4 U32 words, the per-block E4M3 scales are preserved verbatim,
+/// and `weight_scale_2` is kept as a per-linear global-scale sidecar. This
+/// never materializes a dense f16 matrix and is bit-exact to the checkpoint.
+/// `MLXCEL_NVFP4_DENSE_REPACK=1` forces the older dense f16 fallback. Off CUDA,
+/// that dense fallback targets affine 4-bit unless `MLXCEL_NVFP4_NATIVE_REPACK=1`
+/// is also set. Where the backend has no native NVFP4 kernel (ROCm), every
+/// layer is converted to affine 4-bit and a layer that cannot be converted
+/// fails the load (issue #1806). See [`nvfp4_repack_strategy`] for the exact
+/// precedence.
 ///
 /// After repacking the auxiliary keys `weight_scale`, `weight_scale_2`, and
 /// `input_scale` are removed from the weight map. The direct path additionally
@@ -576,7 +688,7 @@ fn current_nvfp4_repack_strategy() -> Nvfp4RepackStrategy {
 fn repack_nvfp4_weights_to_quantized(
     weights: &mut mlxcel_core::weights::WeightMap,
     config: Option<&Value>,
-) {
+) -> Result<(), String> {
     // Collect prefixes first to avoid borrowing conflicts during mutation.
     let fp4_prefixes: Vec<String> = weights
         .keys()
@@ -585,18 +697,21 @@ fn repack_nvfp4_weights_to_quantized(
         .collect();
 
     if fp4_prefixes.is_empty() {
-        return;
+        return Ok(());
     }
 
-    let strategy = current_nvfp4_repack_strategy();
+    let route = current_nvfp4_repack_strategy()?;
+    let strategy = route.strategy;
     let target = match strategy {
         Nvfp4RepackStrategy::DirectTranscode => "MLX native NVFP4 via direct triplet transcode",
-        Nvfp4RepackStrategy::DenseNative => "MLX native NVFP4 via dense f16 requantize (forced)",
-        Nvfp4RepackStrategy::DenseAffine => "MLX affine 4-bit fallback",
+        Nvfp4RepackStrategy::DenseNative => "MLX native NVFP4 via dense f16 requantize",
+        Nvfp4RepackStrategy::DenseAffine => "MLX affine 4-bit via dense f16 requantize",
     };
+    // One line per load: source mode, chosen route, reason (issue #1806).
     eprintln!(
-        "Repacking {} ModelOpt NVFP4 weight groups to {target}...",
+        "Repacking {} ModelOpt NVFP4 weight groups (source mode nvfp4) to {target}: {}",
         fp4_prefixes.len(),
+        route.reason,
     );
 
     for prefix in fp4_prefixes {
@@ -610,7 +725,12 @@ fn repack_nvfp4_weights_to_quantized(
 
         // Verify all required keys exist before proceeding.
         if !weights.contains_key(&weight_key) || !weights.contains_key(&scale_key) {
-            // Remove orphaned scale2 key and continue.
+            // A packed weight with no block scales cannot be converted; with
+            // no weight at all there is nothing to run, so the orphaned scale2
+            // key is simply dropped.
+            if weights.contains_key(&weight_key) {
+                nvfp4_layer_not_repacked(&route, &prefix, &format!("{scale_key} is missing"))?;
+            }
             weights.remove(&scale2_key);
             continue;
         }
@@ -658,28 +778,37 @@ fn repack_nvfp4_weights_to_quantized(
         };
 
         let Some(scale2_val) = scale2_val else {
-            eprintln!(
-                "Skipping NVFP4 repack for {prefix}: {scale2_key} has {scale2_size} \
-                 elements (expected a single-element scalar weight_scale_2)"
-            );
+            nvfp4_layer_not_repacked(
+                &route,
+                &prefix,
+                &format!(
+                    "{scale2_key} has {scale2_size} elements (expected a single-element scalar \
+                     weight_scale_2)"
+                ),
+            )?;
             weights.remove(&scale2_key);
             continue;
         };
 
         // Validate weight tensor is 2-D with positive dimensions.
         if weight_shape.len() < 2 {
-            eprintln!(
-                "Skipping NVFP4 repack for {prefix}: weight tensor is {}-D (expected 2-D)",
-                weight_shape.len()
-            );
+            nvfp4_layer_not_repacked(
+                &route,
+                &prefix,
+                &format!("weight tensor is {}-D (expected 2-D)", weight_shape.len()),
+            )?;
             weights.remove(&scale2_key);
             continue;
         }
         if weight_shape[0] <= 0 || weight_shape[1] <= 0 {
-            eprintln!(
-                "Skipping NVFP4 repack for {prefix}: non-positive dimensions [{}, {}]",
-                weight_shape[0], weight_shape[1]
-            );
+            nvfp4_layer_not_repacked(
+                &route,
+                &prefix,
+                &format!(
+                    "non-positive dimensions [{}, {}]",
+                    weight_shape[0], weight_shape[1]
+                ),
+            )?;
             weights.remove(&scale2_key);
             continue;
         }
@@ -693,9 +822,11 @@ fn repack_nvfp4_weights_to_quantized(
 
         // in_dim must be a multiple of group_size for scale indexing to be valid.
         if !in_dim.is_multiple_of(group_size) {
-            eprintln!(
-                "Skipping NVFP4 repack for {prefix}: in_dim {in_dim} is not a multiple of source group_size {group_size}"
-            );
+            nvfp4_layer_not_repacked(
+                &route,
+                &prefix,
+                &format!("in_dim {in_dim} is not a multiple of source group_size {group_size}"),
+            )?;
             weights.remove(&scale2_key);
             continue;
         }
@@ -705,20 +836,26 @@ fn repack_nvfp4_weights_to_quantized(
         let expected_weight_bytes = out_dim * packed_dim;
         let expected_scale_bytes = out_dim * num_groups * 4; // F32 = 4 bytes each
         if weight_bytes.len() < expected_weight_bytes {
-            eprintln!(
-                "Skipping NVFP4 repack for {prefix}: weight_bytes length {} < expected {}",
-                weight_bytes.len(),
-                expected_weight_bytes
-            );
+            nvfp4_layer_not_repacked(
+                &route,
+                &prefix,
+                &format!(
+                    "weight_bytes length {} < expected {expected_weight_bytes}",
+                    weight_bytes.len()
+                ),
+            )?;
             weights.remove(&scale2_key);
             continue;
         }
         if scale_bytes.len() < expected_scale_bytes {
-            eprintln!(
-                "Skipping NVFP4 repack for {prefix}: scale_bytes length {} < expected {}",
-                scale_bytes.len(),
-                expected_scale_bytes
-            );
+            nvfp4_layer_not_repacked(
+                &route,
+                &prefix,
+                &format!(
+                    "scale_bytes length {} < expected {expected_scale_bytes}",
+                    scale_bytes.len()
+                ),
+            )?;
             weights.remove(&scale2_key);
             continue;
         }
@@ -860,9 +997,11 @@ fn repack_nvfp4_weights_to_quantized(
             let Some(affine_group_size) =
                 nvfp4_affine_group_size_for_in_dim(in_dim, configured_group_size)
             else {
-                eprintln!(
-                    "Skipping NVFP4 repack for {prefix}: in_dim {in_dim} is not compatible with affine group sizes 32/64/128"
-                );
+                nvfp4_layer_not_repacked(
+                    &route,
+                    &prefix,
+                    &format!("in_dim {in_dim} is not compatible with affine group sizes 32/64/128"),
+                )?;
                 weights.remove(&scale2_key);
                 continue;
             };
@@ -893,14 +1032,19 @@ fn repack_nvfp4_weights_to_quantized(
         weights.remove(&scale2_key);
         weights.remove(&input_scale_key); // may not exist; remove is a no-op then
     }
+    Ok(())
 }
 
+/// Normalize ModelOpt NVFP4 keys and repack the quantized groups for the
+/// running backend. Fails the load when the backend cannot run NVFP4 and a
+/// layer cannot be converted (issue #1806); see
+/// [`repack_nvfp4_weights_to_quantized`].
 pub(crate) fn sanitize_gemma4_nvfp4_weights(
     weights: &mut mlxcel_core::weights::WeightMap,
     config: Option<&Value>,
-) {
+) -> Result<(), String> {
     normalize_nvfp4_keys(weights);
-    repack_nvfp4_weights_to_quantized(weights, config);
+    repack_nvfp4_weights_to_quantized(weights, config)
 }
 
 /// Drop k_proj / v_proj / k_norm weight entries that belong to KV-shared
@@ -1644,7 +1788,7 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
     // checkpoints before tied-embedding sanitization so that lookups succeed
     // and downstream linears stay on quantized_matmul.
     if is_gemma4 {
-        sanitize_gemma4_nvfp4_weights(&mut weights, parsed_config.as_ref());
+        sanitize_gemma4_nvfp4_weights(&mut weights, parsed_config.as_ref())?;
     }
 
     let mut is_quantized = false;
@@ -2297,37 +2441,154 @@ mod tests {
         assert!(!nvfp4_native_repack_forced());
     }
 
+    fn route_of(
+        backend: mlxcel_core::hardware::GpuBackendKind,
+        native_forced: bool,
+        dense_forced: bool,
+    ) -> Nvfp4RepackStrategy {
+        nvfp4_repack_strategy(backend, native_forced, dense_forced)
+            .expect("every backend in the table has an NVFP4 route")
+            .strategy
+    }
+
     /// Issue #694: `nvfp4_repack_strategy` is a pure function of
-    /// `(cuda_build, native_forced, dense_forced)`, so this exercises the
-    /// full 2x2x2 matrix directly without touching env vars or `cfg!`. It
-    /// runs identically regardless of which build this test binary happens
-    /// to be compiled under (including this CUDA build).
+    /// `(backend, native_forced, dense_forced)`, so this exercises the full
+    /// matrix directly without touching env vars or the host's backend. It runs
+    /// identically on every host. Issue #1806 replaced the CUDA build flag with
+    /// the runtime backend; the Metal and CUDA rows are the pre-#1806 matrix
+    /// unchanged.
     #[test]
     fn nvfp4_repack_strategy_matrix() {
         use Nvfp4RepackStrategy::*;
+        use mlxcel_core::hardware::GpuBackendKind::{Cuda, Metal};
 
         // Default behavior (both overrides unset): issue #705 extends the CUDA
         // direct transcode default to non-CUDA after the prefill gap recovery.
-        assert_eq!(nvfp4_repack_strategy(true, false, false), DirectTranscode);
-        assert_eq!(nvfp4_repack_strategy(false, false, false), DirectTranscode);
+        assert_eq!(route_of(Cuda, false, false), DirectTranscode);
+        assert_eq!(route_of(Metal, false, false), DirectTranscode);
 
         // MLXCEL_NVFP4_NATIVE_REPACK is retained as a compatibility no-op for
         // the direct route; both CUDA and non-CUDA already default there.
-        assert_eq!(nvfp4_repack_strategy(false, true, false), DirectTranscode);
-        assert_eq!(nvfp4_repack_strategy(true, true, false), DirectTranscode);
+        assert_eq!(route_of(Metal, true, false), DirectTranscode);
+        assert_eq!(route_of(Cuda, true, false), DirectTranscode);
 
         // MLXCEL_NVFP4_DENSE_REPACK forces the dense route on any build. CUDA
         // keeps native NVFP4, while non-CUDA without the native override falls
         // back to affine for explicit rollback/comparison.
-        assert_eq!(nvfp4_repack_strategy(true, false, true), DenseNative);
-        assert_eq!(nvfp4_repack_strategy(false, false, true), DenseAffine);
+        assert_eq!(route_of(Cuda, false, true), DenseNative);
+        assert_eq!(route_of(Metal, false, true), DenseAffine);
 
         // Both overrides forced at once: MLXCEL_NVFP4_DENSE_REPACK wins the
         // top-level route (dense, not direct transcode) on both builds, but
         // the dense route still targets native NVFP4 because
         // MLXCEL_NVFP4_NATIVE_REPACK is also set.
-        assert_eq!(nvfp4_repack_strategy(true, true, true), DenseNative);
-        assert_eq!(nvfp4_repack_strategy(false, true, true), DenseNative);
+        assert_eq!(route_of(Cuda, true, true), DenseNative);
+        assert_eq!(route_of(Metal, true, true), DenseNative);
+    }
+
+    /// Issue #1806: ROCm has no native NVFP4 kernel, so every override
+    /// combination converts to affine 4-bit, and a layer the conversion cannot
+    /// handle must fail the load rather than be skipped.
+    #[test]
+    fn nvfp4_repack_strategy_converts_to_affine_on_rocm() {
+        use mlxcel_core::hardware::GpuBackendKind::Rocm;
+        for native_forced in [false, true] {
+            for dense_forced in [false, true] {
+                let route = nvfp4_repack_strategy(Rocm, native_forced, dense_forced).unwrap();
+                assert_eq!(
+                    route.strategy,
+                    Nvfp4RepackStrategy::DenseAffine,
+                    "ROCm (native_forced={native_forced}, dense_forced={dense_forced})"
+                );
+                assert!(route.conversion_required);
+                assert!(route.reason.contains("no native NVFP4 kernel"));
+                assert_eq!(
+                    route
+                        .reason
+                        .contains("MLXCEL_NVFP4_NATIVE_REPACK is ignored"),
+                    native_forced,
+                    "the reason must say when the native override is ignored"
+                );
+            }
+        }
+    }
+
+    /// Issue #1806 acceptance: every backend whose table row keeps NVFP4
+    /// native chooses exactly the route the pre-#1806 function chose for it,
+    /// with the historical skip behavior, and every other backend converts or
+    /// refuses. Walks `GpuBackendKind::ALL`, so a new backend kind cannot slip
+    /// through a wildcard.
+    #[test]
+    fn nvfp4_repack_strategy_keeps_pre_1806_routes_where_native() {
+        use mlxcel_core::hardware::{GpuBackendKind, QuantMode, QuantModeSupport};
+        // The pre-#1806 function, verbatim, with its `cuda_build` input.
+        fn pre_1806(
+            cuda_build: bool,
+            native_forced: bool,
+            dense_forced: bool,
+        ) -> Nvfp4RepackStrategy {
+            if dense_forced {
+                if cuda_build || native_forced {
+                    Nvfp4RepackStrategy::DenseNative
+                } else {
+                    Nvfp4RepackStrategy::DenseAffine
+                }
+            } else {
+                Nvfp4RepackStrategy::DirectTranscode
+            }
+        }
+        for backend in GpuBackendKind::ALL {
+            for native_forced in [false, true] {
+                for dense_forced in [false, true] {
+                    let route = nvfp4_repack_strategy(backend, native_forced, dense_forced);
+                    match backend.quant_mode_support(QuantMode::Nvfp4) {
+                        QuantModeSupport::Native => {
+                            let route = route.unwrap();
+                            assert_eq!(
+                                route.strategy,
+                                pre_1806(
+                                    backend == GpuBackendKind::Cuda,
+                                    native_forced,
+                                    dense_forced
+                                ),
+                                "{backend:?} (native_forced={native_forced}, dense_forced={dense_forced})"
+                            );
+                            assert!(!route.conversion_required, "{backend:?}");
+                        }
+                        QuantModeSupport::ConvertTo(QuantMode::Affine) => {
+                            let route = route.unwrap();
+                            assert_eq!(route.strategy, Nvfp4RepackStrategy::DenseAffine);
+                            assert!(route.conversion_required);
+                        }
+                        _ => {
+                            assert!(route.is_err(), "{backend:?} has no NVFP4 route");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Issue #1806: where conversion is required, an unconvertible layer is a
+    /// load error naming the layer and the reason; elsewhere it stays a skip.
+    #[test]
+    fn nvfp4_layer_not_repacked_fails_only_when_conversion_is_required() {
+        let prefix = "language_model.model.layers.3.mlp.down_proj";
+        let required = Nvfp4LoadRoute {
+            strategy: Nvfp4RepackStrategy::DenseAffine,
+            reason: String::new(),
+            conversion_required: true,
+        };
+        let err = nvfp4_layer_not_repacked(&required, prefix, "in_dim 24 is odd").unwrap_err();
+        assert!(err.contains(prefix), "{err}");
+        assert!(err.contains("in_dim 24 is odd"), "{err}");
+        assert!(err.contains("affine"), "{err}");
+
+        let optional = Nvfp4LoadRoute {
+            conversion_required: false,
+            ..required
+        };
+        assert!(nvfp4_layer_not_repacked(&optional, prefix, "in_dim 24 is odd").is_ok());
     }
 
     // --- f8_e4m3_to_f32 tests ---

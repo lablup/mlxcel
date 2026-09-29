@@ -391,7 +391,8 @@ pub(crate) fn load_gemma4_vlm(model_path: &Path) -> Result<LoadedModel> {
     // bind on the VLM path (issue #749). This is a no-op for MLX-community
     // Gemma 4 VLM checkpoints: they carry no `model.language_model.` keys and no
     // `weight_scale_2` sidecars, so both stages inside skip immediately.
-    models::sanitize_gemma4_nvfp4_weights(&mut weights, Some(&full_config));
+    models::sanitize_gemma4_nvfp4_weights(&mut weights, Some(&full_config))
+        .map_err(|e| anyhow::anyhow!("Failed to load Gemma4 VLM weights: {}", e))?;
     // Drop k_proj/v_proj/k_norm weight entries for KV-shared layers before
     // building the model.  The weight loader already materialized them via
     // eval_all, but releasing the entries here prevents the model constructor

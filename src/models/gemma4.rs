@@ -4330,7 +4330,7 @@ impl Gemma4Model {
             )
         };
         if is_quantized {
-            super::sanitize::sanitize_gemma4_nvfp4_weights(&mut weights, Some(&config_value));
+            super::sanitize::sanitize_gemma4_nvfp4_weights(&mut weights, Some(&config_value))?;
         }
         // Strip k_proj/v_proj/k_norm entries for KV-shared layers so the
         // model constructor does not attempt to allocate them.  This applies
@@ -4583,7 +4583,7 @@ impl Gemma4StageModel {
             )
         };
         if is_quantized {
-            super::sanitize::sanitize_gemma4_nvfp4_weights(&mut weights, Some(&config_value));
+            super::sanitize::sanitize_gemma4_nvfp4_weights(&mut weights, Some(&config_value))?;
         }
         // Strip k_proj/v_proj/k_norm entries for KV-shared layers so the
         // model constructor does not attempt to allocate them.  Required on

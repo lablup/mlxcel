@@ -2384,12 +2384,40 @@ fn random_block_float_weight(
     (quantized_weights_w(&q), quantized_weights_scales(&q))
 }
 
+/// Whether the running backend has native NVFP4 kernels, per the capability
+/// table (issue #1806). The native-NVFP4 tests below run group-16 `nvfp4`
+/// through FFI calls that return no `Result`, so on a backend without the
+/// kernel (ROCm) MLX's dispatch throw would terminate the whole test binary and
+/// hide every later test. They skip there with the reason printed instead; the
+/// load path converts NVFP4 to affine on that backend, so native NVFP4 is never
+/// reached in production either.
+fn backend_runs_native_nvfp4(test: &str) -> bool {
+    use crate::hardware::{QuantMode, QuantModeSupport, gpu_backend_kind};
+    let backend = gpu_backend_kind();
+    match backend.quant_mode_support(QuantMode::Nvfp4) {
+        QuantModeSupport::Native => true,
+        support => {
+            eprintln!(
+                "skipping {test}: the {} backend has no native NVFP4 kernel ({support:?} in the \
+                 quantization capability table)",
+                backend.display_name()
+            );
+            false
+        }
+    }
+}
+
 /// `quantized_linear_forward_global_scale` is the UnifiedLinear fast path for
 /// native-NVFP4 sidecars: qmm, `apply_global_scale`, and the optional dense
 /// linear bias are issued through one FFI call while preserving the exact
 /// op-at-a-time semantics.
 #[test]
 fn quantized_linear_forward_global_scale_matches_manual_sidecar_path() {
+    if !backend_runs_native_nvfp4(
+        "quantized_linear_forward_global_scale_matches_manual_sidecar_path",
+    ) {
+        return;
+    }
     random_seed(7051);
     let (group_size, bits, mode) = (16, 4, "nvfp4");
     let hidden = 128;
@@ -2978,6 +3006,11 @@ fn compiled_qgelu_mlp_global_scale_non_nvfp4_multi_token_fallback_matches_refere
 /// the op-at-a-time sidecar reference.
 #[test]
 fn compiled_qgelu_mlp_global_scale_native_nvfp4_prefill_matches_reference() {
+    if !backend_runs_native_nvfp4(
+        "compiled_qgelu_mlp_global_scale_native_nvfp4_prefill_matches_reference",
+    ) {
+        return;
+    }
     random_seed(705);
     let (group_size, bits, mode) = (16, 4, "nvfp4");
     let hidden = 128;
