@@ -47,14 +47,15 @@ pub(crate) fn run_voicechat_generation(args: &GenerateArgs) -> Result<()> {
         .as_ref()
         .context("Nemotron VoiceChat requires --audio <input.wav> (16 kHz mono speech)")?;
     ensure!(
-        generation.extra_decoding_seconds.is_finite() && generation.extra_decoding_seconds >= 0.0,
-        "--extra-decoding-seconds must be a finite, non-negative number"
+        generation.extra_decoding_seconds.is_finite()
+            && (0.0..=mlxcel::models::nemotron_voicechat::session::MAX_EXTRA_DECODING_SECONDS)
+                .contains(&generation.extra_decoding_seconds),
+        "--extra-decoding-seconds must be between 0 and {} seconds",
+        mlxcel::models::nemotron_voicechat::session::MAX_EXTRA_DECODING_SECONDS
     );
-    let system_prompt = generation
-        .prompt
-        .as_deref()
-        .map(str::trim)
-        .filter(|p| !p.is_empty());
+    // `-p` is the system prompt as given; an empty `-p` (or none, which the
+    // router maps to an empty prompt) means no system prompt.
+    let system_prompt = generation.prompt.as_deref();
 
     let (samples, rate) =
         mlxcel::audio::feature_extractor::load_wav_file(audio_path).map_err(anyhow::Error::msg)?;

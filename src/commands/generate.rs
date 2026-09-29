@@ -2526,11 +2526,25 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
     // Nemotron VoiceChat (issue #1374): `-p` is an optional system prompt
     // and the `--audio` timeline is the whole input, so a run without `-p`
     // is a one-shot run with no system prompt, not interactive chat.
-    if args.generation.prompt.is_none()
-        && args.generation.audio.is_some()
-        && super::generate_voicechat::is_voicechat_checkpoint(&args.model.model)
-    {
-        args.generation.prompt = Some(String::new());
+    // `-m` may still be a repo id here, so resolve it (the REPL would resolve
+    // it too) before asking whether it is a VoiceChat checkpoint, and refuse
+    // a VoiceChat run without `--audio` before the REPL loads the weights.
+    if args.generation.prompt.is_none() && args.generation.layout_detections.is_none() {
+        let resolved = resolve_model_source_with_override(
+            &args.model.model,
+            args.model.models_dir.as_deref(),
+            args.model.revision.as_deref(),
+        )?;
+        if super::generate_voicechat::is_voicechat_checkpoint(&resolved) {
+            ensure!(
+                args.generation.audio.is_some(),
+                "Nemotron VoiceChat has no interactive chat surface; run a turn with: mlxcel \
+                 generate -m <model> --audio question.wav --output-audio answer.wav \
+                 [-p '<system prompt>']"
+            );
+            args.model.model = resolved;
+            args.generation.prompt = Some(String::new());
+        }
     }
     if args.generation.prompt.is_none() {
         ensure!(

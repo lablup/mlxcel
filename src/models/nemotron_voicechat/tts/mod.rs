@@ -46,6 +46,7 @@ pub use config::{CharEncoderConfig, MogConfig, TtsConfig};
 pub use model::{RvqEarTtsModel, TtsCaches, TtsStepOutput};
 pub use mog_head::top_p_logits;
 pub use norm_mlp::OffsetRmsNorm;
+pub(crate) use subword::to_host_i32 as host_i32;
 
 #[cfg(test)]
 #[path = "tts_tests.rs"]

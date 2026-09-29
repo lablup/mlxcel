@@ -227,6 +227,15 @@ pub fn run_chat(mut opts: ChatOptions) -> Result<()> {
              mlxcel generate -m <model> --image <image> -p '<CAPTION>' (or <OD>, <OCR>, ...)"
         ));
     }
+    if matches!(model, mlxcel::LoadedModel::NemotronVoiceChat(_)) {
+        // Nemotron VoiceChat (issue #1374) is a full-duplex speech model:
+        // its input is an audio timeline, not a chat transcript.
+        return Err(anyhow!(
+            "Nemotron VoiceChat is a speech-to-speech model without a text chat surface; run a \
+             turn instead: mlxcel generate -m <model> --audio question.wav --output-audio \
+             answer.wav [-p '<system prompt>']"
+        ));
+    }
     if matches!(model, mlxcel::LoadedModel::NemotronParseVLM(_)) {
         // Nemotron-Parse is a page-parsing seq2seq model (issue #1369) with no
         // conversational surface, for the same reason as Florence-2 above.

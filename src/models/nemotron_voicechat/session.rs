@@ -56,14 +56,16 @@ pub struct VoiceChatResult {
     pub audio_codes: Vec<Vec<i32>>,
 }
 
-pub(crate) fn host_i32(arr: &MlxArray) -> Vec<i32> {
-    let arr = mlxcel_core::astype(arr, mlxcel_core::dtype::INT32);
-    mlxcel_core::eval(&arr);
-    mlxcel_core::array_to_raw_bytes(&arr)
-        .chunks_exact(4)
-        .map(|b| i32::from_ne_bytes([b[0], b[1], b[2], b[3]]))
-        .collect()
-}
+/// Longest silence `generate_offline` appends after the input.
+pub const MAX_EXTRA_DECODING_SECONDS: f32 = 600.0;
+
+/// Longest input (after the appended silence) one offline turn accepts. The
+/// encoder builds a dense `[T, T]` attention mask over the whole utterance,
+/// as the reference does, so the offline path is bounded; long sessions
+/// belong to the streaming path.
+pub const MAX_OFFLINE_INPUT_SECONDS: f32 = 1200.0;
+
+pub(crate) use super::tts::host_i32;
 
 pub(crate) fn host_f32(arr: &MlxArray) -> Vec<f32> {
     let arr = mlxcel_core::astype(arr, mlxcel_core::dtype::FLOAT32);
@@ -152,11 +154,22 @@ impl NemotronVoiceChatModel {
         extra_decoding_seconds: f32,
         seed: u64,
     ) -> Result<VoiceChatResult, String> {
-        if !(extra_decoding_seconds.is_finite() && extra_decoding_seconds >= 0.0) {
-            return Err("extra_decoding_seconds must be finite and non-negative".to_string());
+        if !(extra_decoding_seconds.is_finite()
+            && (0.0..=MAX_EXTRA_DECODING_SECONDS).contains(&extra_decoding_seconds))
+        {
+            return Err(format!(
+                "extra_decoding_seconds must be between 0 and {MAX_EXTRA_DECODING_SECONDS}"
+            ));
         }
         mlxcel_core::random_seed(seed);
         let rate = self.config.input_sample_rate as f32;
+        let total_seconds = waveform.len() as f32 / rate + extra_decoding_seconds;
+        if total_seconds > MAX_OFFLINE_INPUT_SECONDS {
+            return Err(format!(
+                "nemotron_voicechat: offline input of {total_seconds:.0} s exceeds the \
+                 {MAX_OFFLINE_INPUT_SECONDS} s limit"
+            ));
+        }
         let mut samples = waveform.to_vec();
         samples.resize(
             samples.len() + (extra_decoding_seconds * rate).round() as usize,

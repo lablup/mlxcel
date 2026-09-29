@@ -2760,6 +2760,21 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         "effective KV cache mode"
     );
 
+    // Nemotron VoiceChat (issue #1374) is a full-duplex speech model with no
+    // chat or completions surface; its `LanguageModel` forward exists for
+    // trait completeness only. Refuse it before any worker loads the
+    // checkpoint rather than serving nonsense on the chat endpoints.
+    if matches!(
+        crate::models::get_model_type(&startup.model_path),
+        Ok(crate::models::ModelType::NemotronVoiceChat)
+    ) {
+        anyhow::bail!(
+            "Nemotron VoiceChat is a full-duplex speech model without a chat or completions \
+             surface and cannot be served yet; run an offline turn with: mlxcel generate -m \
+             <model> --audio question.wav --output-audio answer.wav"
+        );
+    }
+
     // Florence-2 (issue #1073): the encoder-decoder (seq2seq) family is
     // served on its dedicated worker loop (`server/florence2_worker.rs`),
     // which the model worker thread branches into after loading the

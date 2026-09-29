@@ -77,6 +77,52 @@ fn whole_config<T: DeserializeOwned + Default>(value: &Value, name: &str) -> any
         .map_err(|e| anyhow::anyhow!("nemotron_voicechat {name}: {e}"))
 }
 
+/// The four networks exchange tensors whose widths come from different
+/// sub-configs; a mismatch would otherwise surface as an MLX shape error
+/// (a process abort) deep inside the first timeline step.
+pub(crate) fn check_sub_configs(
+    text: &NemotronHConfig,
+    tts: &TtsConfig,
+    codec: &CodecConfig,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        tts.num_quantizers == codec.num_quantizers && tts.codebook_size == codec.codebook_size,
+        "nemotron_voicechat: tts_config ({} codebooks of {}) disagrees with codec_config \
+         ({} codebooks of {})",
+        tts.num_quantizers,
+        tts.codebook_size,
+        codec.num_quantizers,
+        codec.codebook_size
+    );
+    anyhow::ensure!(
+        text.hidden_size > 0,
+        "nemotron_voicechat: text_config.hidden_size must be positive"
+    );
+    Ok(())
+}
+
+/// `stt_model.perception.proj` must map the encoder into the LLM width,
+/// because its output is added to the LLM token embeddings.
+fn check_projection_width(
+    weights: &mlxcel_core::weights::WeightMap,
+    hidden_size: usize,
+) -> anyhow::Result<()> {
+    let key = "stt_model.perception.proj.weight";
+    let weight = weights
+        .get(key)
+        .ok_or_else(|| anyhow::anyhow!("nemotron_voicechat: missing {key}"))?;
+    let out = mlxcel_core::array_shape(weight)
+        .first()
+        .copied()
+        .unwrap_or_default();
+    anyhow::ensure!(
+        usize::try_from(out).ok() == Some(hidden_size),
+        "nemotron_voicechat: {key} projects to {out}, but text_config.hidden_size is \
+         {hidden_size}"
+    );
+    Ok(())
+}
+
 impl NemotronVoiceChatModel {
     /// Load every network of the checkpoint at `model_path`.
     pub fn load(model_path: &Path) -> anyhow::Result<Self> {
@@ -96,8 +142,11 @@ impl NemotronVoiceChatModel {
         let tts_config: TtsConfig = whole_config(&config.tts_config, "tts_config")?;
         let codec_config: CodecConfig = whole_config(&config.codec_config, "codec_config")?;
 
+        check_sub_configs(&text_config, &tts_config, &codec_config)?;
+
         let mut weights =
             mlxcel_core::weights::load_weights_from_dir(model_path).map_err(anyhow::Error::msg)?;
+        check_projection_width(&weights, text_config.hidden_size)?;
         let msg = anyhow::Error::msg;
         let perception =
             VoiceChatPerception::from_weights(&weights, "stt_model.perception", &conformer_args)

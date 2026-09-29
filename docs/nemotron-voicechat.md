@@ -63,4 +63,6 @@ The real-time factor on the validation machine is not measured in this change.
 
 - Only the checkpoint's built-in `Aria` voice; a `speaker` other than `Aria` is rejected at load.
 - Batch size 1.
+- Offline turns are capped at 20 minutes of input (plus at most 600 s of `--extra-decoding-seconds`): the encoder builds a dense attention mask over the whole utterance, as the reference does.
+- No chat surface: interactive `mlxcel generate` without `--audio`, `mlxcel chat`, and `mlxcel serve` refuse the checkpoint with a pointer to the offline command. The `/v1/realtime` WebSocket session is tracked in #1376.
 - The converted MLX safetensors layout only; the original NeMo `.nemo` checkpoint is not loaded.

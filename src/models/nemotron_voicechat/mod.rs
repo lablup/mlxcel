@@ -21,3 +21,6 @@ pub mod tts;
 pub use config::VoiceChatConfig;
 pub use model::NemotronVoiceChatModel;
 pub use session::VoiceChatResult;
+
+#[cfg(test)]
+mod tests;
