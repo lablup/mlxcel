@@ -170,7 +170,14 @@ The whole run produced 61 `response.audio.delta` events (frames 0 to 60, 1764 sa
 
 The session is the same computation as `mlxcel generate --stream` for the same input, system prompt and seed: the transcript, the answer text, the frame count and the audio agree. The two outputs are not byte-identical files because they quantize differently: the CLI's WAV writer scales by 32768 while the wire format scales by 32767, as the reference does, so each sample may differ by one quantization step.
 
-A microphone client is not shipped yet; there is no echo cancellation in the model loop, so use headphones with any live client.
+`examples/voicechat_microphone.rs` holds a live exchange: it captures the default (or `--input-device`) microphone, downmixes and resamples it to 16 kHz, sends an append every 80 ms, plays the `response.audio.delta` stream through the default (or `--output-device`) speaker via a ring buffer, prints the transcript and the answer as they arrive, and commits on Ctrl-C. `--list-devices` lists the audio devices. It needs the `voicechat-mic` feature, which compiles the cpal audio-device crate for this example only:
+
+```
+cargo run --release --features voicechat-mic --example voicechat_microphone -- \
+  ws://127.0.0.1:8080/v1/realtime --system-prompt "Be concise and answer in one sentence."
+```
+
+There is no acoustic echo cancellation and the model keeps listening while it speaks, so use headphones; through open speakers it hears its own answer.
 
 ## Validation
 

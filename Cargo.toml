@@ -129,6 +129,12 @@ surgery = ["dep:mlxcel-surgery"]
 # Bundled offline browser shell for the administrative WebUI epic (#1836).
 # Enabled in default shipping builds; --no-default-features excludes the assets and optional embedding dependencies.
 webui = ["dep:rust-embed", "dep:mime_guess"]
+# Live microphone / speaker client for the Nemotron VoiceChat `/v1/realtime`
+# endpoint (`examples/voicechat_microphone.rs`, issue #1376). Default OFF: the
+# audio-device crate (CoreAudio / ALSA / WASAPI bindings) is compiled only by
+# `cargo run --example voicechat_microphone --features voicechat-mic`, never by
+# the library, the server, or CI.
+voicechat-mic = ["dep:cpal"]
 
 [dependencies]
 # MLX - mlxcel-core (direct C++ bindings via cxx)
@@ -273,6 +279,8 @@ fancy-regex = "0.17.0"
 toml = "0.8"
 rust-embed = { version = "=8.12.0", features = ["debug-embed"], optional = true }
 mime_guess = { version = "2.0.5", optional = true }
+# Audio devices for the `voicechat-mic` example feature only.
+cpal = { version = "0.18.2", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 # Used for the RDMA-aware transport backend capability probe (io_uring on
@@ -391,6 +399,10 @@ required-features = ["xla-iree"]
 [[test]]
 name = "molmo2_xla_vision_parity"
 required-features = ["xla-iree"]
+
+[[example]]
+name = "voicechat_microphone"
+required-features = ["voicechat-mic"]
 
 [[example]]
 name = "webui_static_harness"
