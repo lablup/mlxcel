@@ -468,6 +468,12 @@ streaming and non-streaming. It counts the reasoning channel as output, so a
 thinking model that spends its whole budget inside the thinking block reports
 `channel=reasoning only` rather than looking like an empty response.
 
+Decode and prefill throughput on `gfx1151`, against mlx-lm on the same host, is
+in
+[`docs/benchmark_results/rocm-baseline-gfx1151-2026-09-30.md`](benchmark_results/rocm-baseline-gfx1151-2026-09-30.md);
+`scripts/bench_decode.sh` recognises a ROCm host on its own (see
+[Benchmarks](benchmarks.md#rocm-hosts-issue-1810)).
+
 ### Current status
 
 | Area | Status on ROCm |
