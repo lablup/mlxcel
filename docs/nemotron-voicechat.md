@@ -149,9 +149,24 @@ cargo run --release --example voicechat_file_client -- \
   --system-prompt "Be concise and answer in one sentence." --seed 0
 ```
 
-A `websocat` session (`websocat ws://127.0.0.1:8080/v1/realtime`, client lines prefixed with `>`, audio payloads shortened):
+An excerpt of a real session with the 4-bit checkpoint (the file client driving "What is the capital of France?" plus 3 s of silence with the system prompt above; client messages prefixed with `>`, `event_id`s and audio payloads elided). A `websocat ws://127.0.0.1:8080/v1/realtime` session exchanges the same frames:
 
-TRANSCRIPT_PLACEHOLDER
+```
+{"type":"session.created","session":{"id":"sess_…","state":"configuring","input_audio_format":{"type":"pcm16","sample_rate":16000},"output_audio_format":{"type":"pcm16","sample_rate":22050}}}
+> {"type":"session.update","session":{"system_prompt":"Be concise and answer in one sentence.","seed":0}}
+{"type":"session.updated","session":{"id":"sess_…","state":"ready","model":"nemotronlabs-voicechat-11b-4bit","frame_samples":1280,"input_audio_format":{"type":"pcm16","sample_rate":16000},"output_audio_format":{"type":"pcm16","sample_rate":22050}}}
+> {"type":"input_audio_buffer.append","audio":"…","sample_rate":16000}
+{"type":"response.audio.delta","frame_index":0,"delta":"…","format":"pcm16","sample_rate":22050,"channels":1,"audio_codes":[…31 ints…]}
+{"type":"conversation.item.input_audio_transcription.delta","frame_index":5,"delta":"What","transcript":"What"}
+{"type":"conversation.item.input_audio_transcription.delta","frame_index":19,"delta":" France","transcript":"What is the capital of France"}
+{"type":"response.text.delta","frame_index":24,"token_id":…,"delta":"The","text":"The"}
+{"type":"response.text.delta","frame_index":30,"token_id":…,"delta":".","text":"The capital of France is Paris."}
+> {"type":"input_audio_buffer.commit"}
+{"type":"input_audio_buffer.committed"}
+{"type":"response.done","frame_index":61}
+```
+
+The whole run produced 61 `response.audio.delta` events (frames 0 to 60, 1764 samples each), 6 transcript deltas, 7 text deltas and `response.done`, then the server closed the socket with code 1000. A second connection opened during the session received `server_busy` and close code 1013; a connection opened after the first closed was configured normally.
 
 The session is the same computation as `mlxcel generate --stream` for the same input, system prompt and seed: the transcript, the answer text, the frame count and the audio agree. The two outputs are not byte-identical files because they quantize differently: the CLI's WAV writer scales by 32768 while the wire format scales by 32767, as the reference does, so each sample may differ by one quantization step.
 
