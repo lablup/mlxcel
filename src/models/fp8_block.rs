@@ -42,6 +42,19 @@
 //! `fp8_block_requantize_round_trip_stays_within_half_an_e4m3_step` holds the
 //! pin to the first behavior.
 //!
+//! The requantization runs on the default device, and on ROCm that device's
+//! `quantize` is not bit-identical to the CPU: it produces the same E8M0
+//! scales but rounds ties differently, so some weight bytes differ by one
+//! step (3.3% of them on the random weights first measured for issue #1807),
+//! with the same RMS error against the source. That is
+//! left as is on purpose (issue #1807). On gfx1151 a vendor FP8 block
+//! checkpoint traced with GPU-quantized and with CPU-quantized weights, both
+//! computed on the GPU, disagreed at 0 of 346 decided positions
+//! (`--decided 2.0`), and every disagreement sat at a reference top-two gap
+//! of 0.375 or less. Quantizing on the CPU stream instead would stretch the
+//! 0.8B checkpoint's load from under a second to about four minutes. The
+//! measurement is in `docs/benchmark_results/rocm-fp8-block-gfx1151-2026-09-30.md`.
+//!
 //! This module deliberately lives outside `sanitize.rs`: that file is already
 //! 3k lines, and the FP8 path is a self-contained pre-pass with its own tests.
 //!

@@ -153,6 +153,18 @@ bool ScaledDotProductAttention::use_fallback(
     bool output_logsumexp,
     bool force_fused,
     Stream s) {
+  // mlxcelverse: the fused kernels need a GPU stream. Without this guard a
+  // CPU-stream call (MLXCEL_DEVICE=cpu on a ROCm build) built the primitive,
+  // whose eval_cpu throws "NYI". Upstream CUDA checks the same thing first in
+  // has_fused_kernel.
+  if (s.device != Device::gpu) {
+    if (force_fused) {
+      throw std::invalid_argument(
+          "[scaled_dot_product_attention] force_fused=True but the fused "
+          "ROCm kernels require a GPU stream.");
+    }
+    return true;
+  }
   // Vector + scalar flash reject output_logsumexp. WMMA flash can emit LSE and
   // must be counted here or MLX_SDPA_FLASH_VJP never attaches (frontend only
   // requests LSE when VJP is non-fallback, and VJP needs LSE forward).

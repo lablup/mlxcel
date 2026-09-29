@@ -1579,6 +1579,10 @@ pub(crate) fn nvfp4_expert_plane(prefix: &str) -> WeightMap {
 }
 
 #[cfg(test)]
+#[path = "switch_layers_mxfp_tests.rs"]
+mod mxfp_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

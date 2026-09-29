@@ -312,6 +312,12 @@ impl GpuBackendKind {
     ///   evidence is `tests/rocm_mxfp4_quant.rs` (#1808): GPU `quantize`,
     ///   `quantized_matmul` and `gather_qmm` against CPU references, each
     ///   seen to fail with its overlay fix reverted while #1808 was worked.
+    ///   For mxfp8 it is `models::switch_layers::mxfp_tests` in the `mlxcel`
+    ///   crate (#1807): `gather_qmm` sorted and unsorted and
+    ///   `quantized_matmul` against a host-decoded reference, the gather cases
+    ///   seen to fail with item 10 reverted, plus a vendor FP8 block
+    ///   checkpoint requantized to mxfp8 at load and traced against the CPU
+    ///   device (`docs/benchmark_results/rocm-fp8-block-gfx1151-2026-09-30.md`).
     ///   NVFP4 converts to affine: the ROCm qmv dispatch implements group
     ///   sizes 32, 64 and 128 only and throws for NVFP4's 16, and there is no
     ///   E4M3 block-scale path.

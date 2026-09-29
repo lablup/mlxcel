@@ -158,6 +158,15 @@ fn main() -> Result<()> {
     let rope_override = mlxcel::cli::rope_args::install_from_env()
         .map_err(|message| anyhow::anyhow!("{message}"))?;
 
+    // Resolve the device the same way the CLI and server do, so
+    // `MLXCEL_DEVICE=cpu` selects the CPU here too. Without this call the
+    // override is never read and a "CPU reference" trace silently runs on the
+    // GPU (issue #1807, where the CPU device stands in for a Metal baseline).
+    let runtime = mlxcel::initialize_runtime_checked().map_err(|err| anyhow::anyhow!("{err}"))?;
+    if let Some(invalid) = runtime.invalid_device_override.as_deref() {
+        eprintln!("ignoring invalid MLXCEL_DEVICE override {invalid:?}; using gpu");
+    }
+
     let text = std::fs::read_to_string(text_file)
         .with_context(|| format!("reading corpus {text_file}"))?;
     // LoRA arms (#1439): `MLXCEL_TRACE_LORA=PATH:SCALE[,PATH:SCALE...]`
@@ -227,6 +236,7 @@ fn main() -> Result<()> {
         .unwrap_or_default();
 
     println!("# model\t{model_dir}");
+    println!("# device\t{}", runtime.device);
     if let Some(over) = rope_override.as_ref() {
         println!("# rope_override\t{}", over.describe());
     }
