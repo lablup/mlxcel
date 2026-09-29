@@ -194,12 +194,14 @@ The codec is a lossy neural codec: a pure tone round-trips with a waveform SNR o
 
 ## Performance
 
-Measure with `mlxcel generate ... --stream --profile` (the `realtime_factor` of the summary). The table is filled in from a run on an otherwise idle validation machine.
+Measure with `mlxcel generate ... --stream --profile` (the `realtime_factor` of the summary, defined as mean per-frame processing time divided by the 80 ms frame; above 1.0 means slower than real time). The table comes from an otherwise idle validation machine: the "What is the capital of France?" prompt with 3 s of extra decoding (56 frames, the first 5 dropped as cold), one warm-up run, then three measured runs per checkpoint. The three runs agreed within 0.01.
 
-| Checkpoint | Real-time factor | Machine |
-|---|---|---|
-| 4-bit | TBD (to be measured) | TBD |
-| 8-bit | TBD (to be measured) | TBD |
+| Checkpoint | Real-time factor | Frame time p50 / p95 | Machine |
+|---|---|---|---|
+| 4-bit | 1.04 | 82.7 ms / 83.8 ms | Apple M1 Ultra (128 GB), Metal |
+| 8-bit | 1.12 | 89.3 ms / 90.7 ms | Apple M1 Ultra (128 GB), Metal |
+
+Neither checkpoint keeps up with real time on this machine: each 80 ms frame takes slightly longer than 80 ms, so a live session falls behind by about 4% (4-bit) or 12% (8-bit) of the elapsed audio. Per-stage p50 for the 4-bit checkpoint: perception 22.7 ms, RNNT 0.4 ms, language 16.1 ms, TTS 36.0 ms, codec 7.4 ms; the 8-bit checkpoint differs only in the language stage (22.4 ms). TTS is the largest stage and the first place to look for speedups.
 
 ## Limits
 
