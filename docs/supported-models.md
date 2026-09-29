@@ -9,8 +9,9 @@ source of truth is the code, not this prose page:
 - VLM loading routes: `src/loading/vlm*.rs`
 
 `ModelType` spans text and non-VLM language models, VLM variants, a
-speech-to-text encoder-decoder (Whisper), a text-to-speech model (Kokoro), and
-the embedding families served through `/v1/embeddings`.
+speech-to-text encoder-decoder (Whisper), a text-to-speech model (Kokoro), a
+full-duplex speech-to-speech model (Nemotron VoiceChat), and the embedding
+families served through `/v1/embeddings`.
 These are architecture/runtime variants, not a guarantee that every checkpoint
 under a marketing family name is supported.
 
@@ -627,6 +628,12 @@ mlxcel loads the Kokoro-82M model (a StyleTTS2 phoneme-to-mel acoustic model wit
 Detection works without a top-level `model_type`: the loader recognizes a Kokoro checkpoint by the `istftnet` config block or the `kokoro-v1_0.safetensors` weight filename, so `-m <kokoro-dir>` resolves to the TTS provider. The `voice` request field selects a pack from `voices/<name>.safetensors` (54 voices; default `af_heart`), validated against the available packs with a safe fallback. `speed` scales the predicted durations (larger is faster and shorter). `response_format` accepts `wav` today (returned via the shared WAV writer); other containers are a follow-up.
 
 The grapheme-to-phoneme front-end is a self-contained American-English phonemizer: text is normalized (lower-cased, integers spoken, common punctuation kept), each word is looked up in a bundled lexicon, and out-of-vocabulary words fall back to deterministic letter-to-sound rules. It emits the IPA symbols in Kokoro's vocab and needs no external binary or download. Non-English voices in the checkpoint still load and synthesize, but their phonemes come from the English front-end, so pronunciation quality is limited; per-language g2p (the analogue of upstream Kokoro's `misaki[xx]` packages) is future work. Like Whisper, the model loads and runs every synthesis on one dedicated MLX worker thread, so loading a Kokoro checkpoint serves text-to-speech only.
+
+## Speech-to-speech (full duplex)
+
+mlxcel loads NemotronLabs VoiceChat (`model_type: "nemotron_voicechat"`, `mlx-community/NemotronLabs-VoiceChat-11B-{bf16,8bit,4bit}`), a full-duplex speech model that listens, transcribes, answers in text, and speaks the answer on one 80 ms timeline. One checkpoint holds four networks: a cache-aware FastConformer speech encoder with an RNNT transcript branch, a 56-layer Nemotron-H LLM with a text head and a function-channel head, an EAR-TTS speech decoder (Gemma-3-style backbone, character-aware subword conditioning, mixture-of-Gaussians RVQ refinement) in the built-in `Aria` voice, and a 31-codebook neural codec at 22.05 kHz.
+
+`mlxcel generate -m <voicechat> --audio question.wav --output-audio response.wav -p "<system prompt>"` runs one offline turn: it prints `[user] <transcript>` and the assistant text, and writes the answer speech. `-p` is the system prompt (optional), the output length follows the input timeline plus `--extra-decoding-seconds` (default 3) of appended silence, `-n` is ignored, and `--seed` (default 0) makes the sampled speech reproducible. Validated against `mlx-community/NemotronLabs-VoiceChat-11B-4bit`: text and function ids match the mlx-vlm reference exactly. See [Nemotron VoiceChat](nemotron-voicechat.md) for the architecture, the timeline, and the validation details.
 
 ## Embedding models
 

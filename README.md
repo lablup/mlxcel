@@ -38,7 +38,7 @@ See [Server features](docs/server-features.md) for the route and deployment map 
 - **Compatibility without overclaiming.** `mlxcel-server` accepts a broad `llama-server` flag and `LLAMA_ARG_*` environment surface, while the checked-in manifest records every supported, aliased, not-applicable, or intentional-difference case.
 - **Serving features enabled for real workloads.** Continuous batching, prompt-prefix caching, and automatic prefix caching are on by default. Speculative decoding, KV-cache compression, router mode, live LoRA, and distributed modes are available where the model and backend support them.
 - **Reproducible model surgery.** Default builds support YAML load-time weight edits through `--surgery` / `MLXCEL_SURGERY`, including `scale`, `add`, `prune`, `replace`, and `interpolate`.
-- **Broad architecture coverage.** Dense transformers, sparse MoE, hybrid SSM, VLM/OCR, block diffusion, embeddings, rerankers, ASR, and TTS are represented. Run `mlxcel arch` for the binary's architecture catalog and consult [Supported models](docs/supported-models.md) for checkpoint-level notes.
+- **Broad architecture coverage.** Dense transformers, sparse MoE, hybrid SSM, VLM/OCR, block diffusion, embeddings, rerankers, ASR, TTS, and full-duplex speech-to-speech (Nemotron VoiceChat) are represented. Run `mlxcel arch` for the binary's architecture catalog and consult [Supported models](docs/supported-models.md) for checkpoint-level notes.
 
 ## Quick start
 
@@ -306,6 +306,7 @@ Install with `pip install ./python`. See [Python client](docs/python-client.md) 
 - [OpenAI Responses API](docs/responses-api.md)
 - [Embeddings and reranking](docs/embeddings.md)
 - [Audio API](docs/audio-api.md)
+- [Nemotron VoiceChat (full-duplex speech)](docs/nemotron-voicechat.md)
 - [TurboQuant KV cache](docs/turbo-kv-cache.md)
 - [Speculative-decoding acceptance](docs/speculative-acceptance.md)
 - [Adaptive MTP policy API](docs/mtp-policy-api.md)

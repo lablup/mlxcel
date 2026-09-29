@@ -523,7 +523,8 @@ pub(crate) struct GenerationOptions {
     /// Audio file path for audio-language models (e.g. Gemma4 with audio).
     /// May be combined with `--video` on `gemma4_unified` checkpoints, which
     /// merge video frames and audio into one prompt; other families reject
-    /// that combination.
+    /// that combination. Nemotron VoiceChat checkpoints require it: the WAV
+    /// is the user's side of the duplex timeline and `-p` is the system prompt.
     #[arg(long, value_name = "PATH")]
     pub(crate) audio: Option<PathBuf>,
 
@@ -559,11 +560,18 @@ pub(crate) struct GenerationOptions {
     pub(crate) video_max_frames: usize,
 
     /// Write synthesized speech for the generated answer to this WAV path
-    /// (24 kHz mono PCM16). Qwen3-Omni models only; the talker + code2wav
-    /// speech stack is loaded lazily after text generation completes.
-    /// Text-only prompts for now (no --image / --audio / --video).
+    /// (mono PCM16). Qwen3-Omni: 24 kHz, the talker + code2wav speech stack
+    /// is loaded lazily after text generation completes, text-only prompts
+    /// for now (no --image / --audio / --video). Nemotron VoiceChat: 22.05 kHz
+    /// assistant speech for the whole `--audio` timeline.
     #[arg(long, value_name = "PATH")]
     pub(crate) output_audio: Option<PathBuf>,
+
+    /// Seconds of silence appended to the `--audio` input so a Nemotron
+    /// VoiceChat model can finish answering after the user stops speaking.
+    /// Ignored by every other family.
+    #[arg(long, value_name = "SECONDS", default_value_t = 3.0)]
+    pub(crate) extra_decoding_seconds: f32,
 
     /// Speaker voice for `--output-audio` (Qwen3-Omni talker; the released
     /// checkpoints ship ethan, chelsie, and aiden).

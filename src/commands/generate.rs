@@ -2523,6 +2523,15 @@ pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
     // / streaming-generation path as the one-shot flow below. Advanced
     // parallelism / speculative / surgery flags are not applied in the
     // interactive scope (per #96: "scoped to the CLI run/generate path only").
+    // Nemotron VoiceChat (issue #1374): `-p` is an optional system prompt
+    // and the `--audio` timeline is the whole input, so a run without `-p`
+    // is a one-shot run with no system prompt, not interactive chat.
+    if args.generation.prompt.is_none()
+        && args.generation.audio.is_some()
+        && super::generate_voicechat::is_voicechat_checkpoint(&args.model.model)
+    {
+        args.generation.prompt = Some(String::new());
+    }
     if args.generation.prompt.is_none() {
         ensure!(
             args.generation.output_audio.is_none(),
@@ -2581,6 +2590,14 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         args.model.models_dir.as_deref(),
         args.model.revision.as_deref(),
     )?;
+
+    // Nemotron VoiceChat (issue #1374) is a full-duplex speech model with
+    // its own timeline loop: `-p` is its system prompt and the output length
+    // follows the `--audio` input, so none of the text-generation setup below
+    // applies. Route it before any of that runs.
+    if super::generate_voicechat::is_voicechat_checkpoint(&args.model.model) {
+        return super::generate_voicechat::run_voicechat_generation(&args);
+    }
 
     validate_tensor_parallel_args(&args)?;
     validate_pipeline_parallel_args(&args)?;

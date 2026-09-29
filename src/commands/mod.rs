@@ -30,6 +30,7 @@ mod generate_florence2;
 mod generate_llada2;
 mod generate_nemotron_parse;
 mod generate_vlm;
+mod generate_voicechat;
 pub(crate) mod inspect;
 pub(crate) mod models;
 pub(crate) mod rerank;

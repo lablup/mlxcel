@@ -596,6 +596,7 @@ fn sample_generate_args(model_path: PathBuf) -> crate::GenerateArgs {
             video_max_frames: mlxcel::video::DEFAULT_FALLBACK_MAX_FRAMES,
             output_audio: None,
             speaker: "ethan".to_string(),
+            extra_decoding_seconds: 3.0,
             max_tokens: 16,
             profile: false,
             no_chat_template: false,

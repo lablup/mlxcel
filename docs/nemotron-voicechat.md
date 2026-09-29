@@ -1,0 +1,65 @@
+# Nemotron VoiceChat
+
+NemotronLabs VoiceChat (`model_type: "nemotron_voicechat"`, `architectures: ["NemotronVoiceChatForConditionalGeneration"]`) is a full-duplex speech-to-speech model. It consumes 16 kHz audio in 80 ms frames and, on every frame, emits an assistant text token, a function-channel token, a user-transcript update, and 80 ms of 22.05 kHz assistant speech, all on one shared timeline. Silence and overlapping speech are part of the timeline; there is no voice-activity gate.
+
+Checkpoints: `mlx-community/NemotronLabs-VoiceChat-11B-bf16`, `-8bit`, `-4bit`. The quantized conversions quantize only the LLM (embedding table, both heads, Nemotron-H mixer projections); the speech encoder, RNNT branch, EAR-TTS and codec stay bf16.
+
+## Architecture
+
+| Network | Weights | What it does |
+|---|---|---|
+| Log-mel frontend | none | Preemphasis 0.97, 25 ms / 10 ms symmetric Hann STFT (n_fft 512, reflect-padded), 128 Slaney mel bins, `ln(x + 2^-24)`, no normalization. |
+| FastConformer encoder | `stt_model.perception.encoder` | Causal depthwise-striding subsampling (8x, 10 ms mel frames become 80 ms frames), 24 conformer blocks with relative-position attention limited to 70 frames of left context, causal depthwise convolution, LayerNorm conv norm. |
+| Perception projection | `stt_model.perception.proj` | 1024 to 4480, the LLM's audio channel. |
+| RNNT branch | `stt_model.rnnt_decoder`, `stt_model.rnnt_joint` | Two-layer LSTM prediction net and joint network; greedy decoding over the SentencePiece `rnnt_vocabulary` gives the user transcript. |
+| Duplex LLM | `stt_model.embed_tokens`, `stt_model.llm`, `stt_model.lm_head`, `stt_model.function_head` | Nemotron-H (56 layers, Mamba2 / attention / MLP pattern) run on one fused embedding per position: `E(prev_text) + audio + 2 * E(prev_function)`, with a text head and a function head, both greedy. |
+| EAR-TTS | `tts_model.tts_model`, `tts_model.audio_prompt_latents.Aria` | 28-layer Gemma-3-style backbone (sliding and global attention, no embedding scaling) conditioned on the current text token through a character-aware subword encoder and gated fusion, with classifier-free guidance (batch 2). A mixture-of-Gaussians head refines 31 residual codebooks in 8 masked iterations. |
+| Codec | `tts_model.audio_codec` | ConvNeXt encoder/decoder with probabilistic residual VQ (31 codebooks of 1024), iSTFT output at n_fft 16 / hop 4; one code frame is 1764 samples (80 ms at 22.05 kHz). |
+
+The mlxcel modules are `src/audio/nemotron_mel.rs`, `src/audio/fastconformer/`, `src/audio/rnnt/`, `src/audio/nemotron_codec/`, `src/models/gemma3_backbone.rs`, and `src/models/nemotron_voicechat/` (config, LLM glue, TTS, model loader, offline session). The port follows the mlx-vlm / mlx-audio reference implementation.
+
+## Offline timeline
+
+1. The input WAV is resampled to 16 kHz mono and `--extra-decoding-seconds` of silence are appended.
+2. Log-mel and the FastConformer produce one 4480-wide audio embedding per 80 ms frame.
+3. A non-empty system prompt becomes `[BOS] + tokens + [EOS]`; those token embeddings occupy the first timeline positions on the audio channel.
+4. EAR-TTS is warmed once with the `Aria` prompt latents and the codec encoding of silence.
+5. At every position the LLM emits a text and a function token (pad over the prompt prefix); every position after the first advances EAR-TTS by one frame of 31 codes. An EOS text token resets the fed-back codes to silence.
+6. The prompt prefix is dropped, control codes are replaced by the per-codebook silence code, and the codec decodes the whole answer. The RNNT branch transcribes the user audio.
+
+The language model keeps persistent Nemotron-H caches across positions. The reference defaults its offline path to recomputing the full history at every position; both modes give identical tokens and codes on the reference, and the cached mode bounds the per-position work.
+
+## CLI
+
+```
+mlxcel generate -m models/NemotronLabs-VoiceChat-11B-4bit \
+  --audio question.wav --output-audio response.wav \
+  -p "Be concise and answer in one sentence."
+```
+
+prints `[user] <transcript>`, the assistant text, and `[function] <text>` when the function channel produced any, and writes `response.wav` (22050 Hz mono PCM16). `-p` is optional (no system prompt when omitted), `-n` is ignored because the output length equals the input timeline, `--extra-decoding-seconds` (default 3) sets the appended silence, and `--seed` (default 0) seeds the EAR-TTS sampling noise so two runs with the same seed are byte-identical. `--image` and `--video` are rejected.
+
+## Validation
+
+Validated on `mlx-community/NemotronLabs-VoiceChat-11B-4bit` against the mlx-vlm reference on a synthesized "What is the capital of France?" question with the system prompt "Be concise and answer in one sentence." (env-gated tests under `tests/nemotron_voicechat_*_real.rs`, run with `MLXCEL_VOICECHAT_MODEL` and `MLXCEL_VOICECHAT_REF` set):
+
+- The transcript is "What is the capital of France?" and the answer is "The capital of France is Paris.", as in the reference.
+- Text and function ids match the reference exactly at every timeline position.
+- The FastConformer output matches the reference within 1e-6 (max abs); the codec reproduces the reference codes exactly and its decode within 1e-7.
+
+The codec is a lossy neural codec: a pure tone round-trips with a waveform SNR of about 0.7 dB in the reference too, so round-trip parity is checked against the reference reconstruction rather than an SNR threshold.
+
+## Performance
+
+The real-time factor on the validation machine is not measured in this change.
+
+| Checkpoint | Real-time factor | Machine |
+|---|---|---|
+| 4-bit | TBD (to be measured) | TBD |
+| 8-bit | TBD (to be measured) | TBD |
+
+## Limits
+
+- Only the checkpoint's built-in `Aria` voice; a `speaker` other than `Aria` is rejected at load.
+- Batch size 1.
+- The converted MLX safetensors layout only; the original NeMo `.nemo` checkpoint is not loaded.
