@@ -19,18 +19,21 @@
 
 use std::sync::Arc;
 
+use axum::http::HeaderValue;
 use base64::Engine as _;
 use futures::{SinkExt, StreamExt};
 use mlxcel::models::nemotron_voicechat::VoiceChatEvent;
 use mlxcel::models::nemotron_voicechat::streaming::VoiceChatError;
+use mlxcel::server::CorsPolicy;
 use mlxcel::server::realtime_engine::{
     RealtimeModel, RealtimeSession, RealtimeSessionConfig, RealtimeSessionInfo,
     RealtimeVoiceChatEngine,
 };
 use serde_json::{Value, json};
 use tokio::net::TcpStream;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -116,9 +119,15 @@ impl RealtimeSession for FakeSession {
 
 /// Serve the realtime router on a free port; returns the socket URL.
 async fn start_server() -> String {
+    start_server_with_policy(CorsPolicy::default()).await
+}
+
+/// [`start_server`] with an explicit origin policy (#2042).
+async fn start_server_with_policy(policy: CorsPolicy) -> String {
     let engine = RealtimeVoiceChatEngine::spawn_with_loader("fake-voicechat", || Ok(FakeModel))
         .expect("fake engine");
-    let app = mlxcel::server::routes::realtime::realtime_router::<()>(Arc::new(engine));
+    let app =
+        mlxcel::server::routes::realtime::realtime_router::<()>(Arc::new(engine), Arc::new(policy));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -431,4 +440,60 @@ async fn whole_float_sample_rate_is_accepted() {
     .await;
     let event = next_event(&mut socket).await;
     assert_ne!(event["type"], "error", "16000.0 must be accepted: {event}");
+}
+
+/// Connect with an optional `Origin` header; the handshake result as is.
+async fn connect_from(url: &str, origin: Option<&str>) -> Result<Socket, WsError> {
+    let mut request = url.into_client_request().unwrap();
+    if let Some(origin) = origin {
+        let value = HeaderValue::from_str(origin).unwrap();
+        request.headers_mut().insert("origin", value);
+    }
+    Ok(tokio_tungstenite::connect_async(request).await?.0)
+}
+
+fn assert_forbidden(result: Result<Socket, WsError>) {
+    let err = result.expect_err("a disallowed origin must not upgrade");
+    assert!(
+        matches!(&err, WsError::Http(r) if r.status() == 403),
+        "{err:?}"
+    );
+}
+
+/// Retry until any previous session's reservation is released.
+async fn created_after_release(url: &str, origin: Option<&str>) -> Socket {
+    for _ in 0..50 {
+        let mut socket = connect_from(url, origin).await.expect("origin upgrades");
+        if next_event(&mut socket).await["type"] == "session.created" {
+            return socket;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("no session.created for origin {origin:?}");
+}
+
+#[tokio::test]
+async fn disallowed_origin_is_rejected_before_session() {
+    let allowed = vec![HeaderValue::from_static("https://app.example.com")];
+    let policy = CorsPolicy::resolve("*", "GET", "*", true, Some(allowed)).unwrap();
+    let url = start_server_with_policy(policy).await;
+    assert_forbidden(connect_from(&url, Some("https://evil.example")).await);
+
+    // The rejected attempt held no reservation; allowed and absent Origin pass.
+    let mut first = connect_from(&url, Some("https://app.example.com"))
+        .await
+        .unwrap();
+    assert_eq!(next_event(&mut first).await["type"], "session.created");
+    drop(first);
+    created_after_release(&url, None).await;
+}
+
+#[tokio::test]
+async fn localhost_policy_gates_and_default_policy_accepts_any_origin() {
+    let policy = CorsPolicy::resolve("localhost", "GET", "*", true, None).unwrap();
+    let url = start_server_with_policy(policy).await;
+    assert_forbidden(connect_from(&url, Some("https://localhost.evil.com")).await);
+    created_after_release(&url, Some("http://localhost:3000")).await;
+    let url = start_server().await;
+    created_after_release(&url, Some("https://evil.example")).await;
 }

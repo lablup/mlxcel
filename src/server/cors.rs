@@ -165,6 +165,27 @@ impl CorsPolicy {
         }
     }
 
+    /// Whether a WebSocket upgrade carrying `origin` may proceed (#2042).
+    ///
+    /// Browsers do not apply CORS to WebSocket upgrades, so the server has to
+    /// check `Origin` itself. An absent `Origin` is accepted: browsers always
+    /// send one on an upgrade, and non-browser clients do not. A present value
+    /// (including `null`) must satisfy the same origin rule the HTTP routes
+    /// reflect: any value under `Wildcard`, a localhost host under
+    /// `Localhost`, byte equality under `Literal`, membership under
+    /// `AllowList`. `credentials` plays no part.
+    pub(crate) fn permits_websocket_origin(&self, origin: Option<&HeaderValue>) -> bool {
+        let Some(value) = origin else {
+            return true;
+        };
+        match &self.origins {
+            OriginPolicy::Wildcard => true,
+            OriginPolicy::Localhost => origin_is_localhost(value),
+            OriginPolicy::Literal(literal) => literal.as_bytes() == value.as_bytes(),
+            OriginPolicy::AllowList(list) => list.contains(value),
+        }
+    }
+
     /// The three headers b10621 adds to a preflight response.
     pub(crate) fn preflight_headers(&self) -> [(HeaderName, HeaderValue); 3] {
         [

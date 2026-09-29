@@ -223,25 +223,18 @@ inline std::pair<dim3, dim3> get_grid_and_block(int dim0, int dim1, int dim2) {
   return {grid_dims, block_dims};
 }
 
-// Get the num_blocks and block_dims for a kernel
-inline std::tuple<dim3, uint> get_launch_args(
-    size_t size,
-    const Shape& shape,
-    const Strides& strides,
-    bool large,
-    int work_per_thread = 1) {
-  size_t adjusted_size = (size + work_per_thread - 1) / work_per_thread;
-  int block_size = 256;
-  int num_blocks = (adjusted_size + block_size - 1) / block_size;
-  num_blocks = std::min(num_blocks, 65535);
-  return {dim3(num_blocks), block_size};
-}
-
-inline std::tuple<dim3, uint>
-get_launch_args(const array& arr, bool large, int work_per_thread = 1) {
-  return get_launch_args(
-      arr.size(), arr.shape(), arr.strides(), large, work_per_thread);
-}
+// get_launch_args is deliberately unavailable in this backend (mlxcel
+// patches-rocm LOCAL_FIXES.md item 19). The fork's version capped the grid at
+// 65535 blocks of 256 threads and returned it with no sign that the kernel had
+// to be grid-stride, so a one-index-per-thread kernel launched with it left
+// every element past 65535 * 256 unwritten. It had no caller. Upstream CUDA's
+// helper of the same name does not cap x, so a kernel ported from
+// mlx/backend/cuda that calls it would inherit the truncation silently. No
+// kernel here used it; launch sites compute their geometry themselves, and a
+// grid clamped at a launch site is only correct if that kernel is grid-stride
+// (see hadamard.hip, sort.hip). Any call to this name fails to compile.
+template <typename... Args>
+void get_launch_args(Args&&...) = delete;
 
 // Ceil division utility
 template <typename T>
