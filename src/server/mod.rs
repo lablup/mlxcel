@@ -50,6 +50,7 @@ pub mod media_root;
 pub mod model_meta;
 pub mod model_provider;
 pub mod model_source;
+pub(crate) mod nemotron_parse_worker;
 pub mod prompt_cache;
 mod read_budget;
 pub mod reasoning_format;

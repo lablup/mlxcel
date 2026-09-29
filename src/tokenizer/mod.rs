@@ -1848,6 +1848,21 @@ fn is_diffusion_gemma_model(model_path: &Path) -> bool {
     )
 }
 
+/// Drop the padding and truncation a `tokenizer.json` may carry.
+///
+/// `transformers`' fast tokenizers never apply them on a plain encode: the
+/// serialized values only seed defaults, and every call re-sets padding and
+/// truncation from its own (off by default) arguments. The `tokenizers` crate
+/// applies them on every `encode` instead. A checkpoint that serializes
+/// `padding: Fixed(9000)` (Nemotron-Parse does) would otherwise turn every
+/// prompt into 9000 ids, and a serialized `max_length` would silently cut
+/// long prompts.
+pub(crate) fn clear_serialized_padding_and_truncation(tokenizer: &mut tokenizers::Tokenizer) {
+    tokenizer.with_padding(None);
+    // Clearing truncation cannot fail: only a `Some` config is validated.
+    let _ = tokenizer.with_truncation(None);
+}
+
 pub fn load_tokenizer(model_path: &Path) -> Result<MlxcelTokenizer> {
     // Model-specific override: some official checkpoints ship a stale
     // tokenizer.json that does not match their weights (starmie-era
@@ -1875,6 +1890,7 @@ pub fn load_tokenizer(model_path: &Path) -> Result<MlxcelTokenizer> {
             tokenizers::Tokenizer::from_file(&tokenizer_json_path)
                 .map_err(|e| anyhow::anyhow!(e))?
         };
+        clear_serialized_padding_and_truncation(&mut tokenizer);
         ensure_bos_post_processor(&mut tokenizer, model_path);
         return Ok(MlxcelTokenizer::HuggingFace(tokenizer));
     }
@@ -1947,6 +1963,29 @@ mod tests {
         remote_tokenizer_repo_for_model, remote_tokenizer_repo_for_model_type,
     };
     use tokenizers::{AddedToken, Tokenizer, models::bpe::BPE};
+
+    /// A `tokenizer.json` that serializes fixed padding and a max length
+    /// (Nemotron-Parse ships `padding: Fixed(9000)`) must encode like
+    /// `transformers` does: neither is applied to a plain encode.
+    #[test]
+    fn serialized_padding_and_truncation_are_not_applied_on_load() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let json = serde_json::json!({
+            "version": "1.0",
+            "truncation": {"direction": "Right", "max_length": 2, "strategy": "LongestFirst", "stride": 0},
+            "padding": {"strategy": {"Fixed": 16}, "direction": "Right", "pad_to_multiple_of": null,
+                        "pad_id": 0, "pad_type_id": 0, "pad_token": "<pad>"},
+            "added_tokens": [],
+            "normalizer": null,
+            "pre_tokenizer": {"type": "Whitespace"},
+            "post_processor": null,
+            "decoder": null,
+            "model": {"type": "WordLevel", "vocab": {"<pad>": 0, "a": 1, "b": 2, "c": 3}, "unk_token": "<pad>"}
+        });
+        std::fs::write(dir.path().join("tokenizer.json"), json.to_string()).unwrap();
+        let tokenizer = load_tokenizer(dir.path()).expect("tokenizer loads");
+        assert_eq!(tokenizer.encode("a b c", false).unwrap(), vec![1, 2, 3]);
+    }
 
     /// Write a minimal Qwen2 slow-tokenizer directory: a byte-level `vocab.json`
     /// covering the ASCII letters plus a `Ġ` (space) marker, one merge, and two

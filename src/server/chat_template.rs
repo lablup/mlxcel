@@ -370,6 +370,18 @@ impl ChatTemplateProcessor {
             .or(config_template)
             .or(jinja_template)
             .or(json_template);
+        // Nemotron-Parse (issue #1369): the Hub checkpoint ships a
+        // `chat_template.jinja` that prints `message['content']` raw. For the
+        // image request this family requires, content is a typed list, so the
+        // shipped template would render the list itself (base64 page bytes
+        // included) as the decoder seed. The built-in template renders the
+        // text parts only, which is what the shipped one does for a plain
+        // string, so it replaces the checkpoint's for this family.
+        let template = if builtin_template_overrides_checkpoint(model_path) {
+            None
+        } else {
+            template
+        };
 
         // A conversion can legitimately lose the template. Fall back to a
         // built-in only after every declared source has come up empty, so this
@@ -2019,10 +2031,22 @@ const GOT_OCR_CHAT_TEMPLATE: &str = concat!(
 /// the normalized path (mixed casing, tolerated JSON) silently fall back to
 /// the generic `User:`/`Assistant:` template, which for Florence-2 rejects
 /// every request at the task-marker parse.
+/// Families whose built-in template replaces any template the checkpoint
+/// ships (see the Nemotron-Parse note in the loader above).
+fn builtin_template_overrides_checkpoint(model_path: &Path) -> bool {
+    matches!(
+        crate::models::get_model_type(model_path),
+        Ok(crate::models::ModelType::NemotronParseVLM)
+    )
+}
+
 fn builtin_chat_template(model_path: &Path) -> Option<&'static str> {
     match crate::models::get_model_type(model_path).ok()? {
         crate::models::ModelType::JinaVLM => Some(JINA_VLM_CHAT_TEMPLATE),
         crate::models::ModelType::Florence2VLM => Some(FLORENCE2_CHAT_TEMPLATE),
+        // Same text-verbatim contract: the rendered text is the task prompt
+        // that seeds the decoder, and the page travels out-of-band.
+        crate::models::ModelType::NemotronParseVLM => Some(FLORENCE2_CHAT_TEMPLATE),
         crate::models::ModelType::GotOcrVLM => Some(GOT_OCR_CHAT_TEMPLATE),
         _ => None,
     }
@@ -2560,6 +2584,44 @@ mod tests {
             )
             .expect("render");
         assert_eq!(rendered, "<CAPTION_TO_PHRASE_GROUNDING> a green car");
+    }
+
+    /// Nemotron-Parse (issue #1369): the Hub checkpoint ships a
+    /// `chat_template.jinja` that prints `message['content']` raw, which for
+    /// the typed image request would render the whole content list as the
+    /// decoder seed. The built-in text-only template must win, so only the
+    /// task prompt reaches the worker.
+    #[test]
+    fn a_nemotron_parse_checkpoint_template_is_replaced_by_the_text_only_builtin() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"model_type": "nemotron_parse"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("chat_template.jinja"),
+            "{% for message in messages %}{{ message['content'] }}{% endfor %}",
+        )
+        .unwrap();
+
+        let processor = ChatTemplateProcessor::from_model_path(dir.path())
+            .expect("template resolution succeeds")
+            .expect("a built-in template is supplied");
+        let prompt = "</s><s><predict_bbox><predict_classes><output_markdown>";
+        let rendered = processor
+            .apply_raw(
+                &serde_json::json!([{
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+                        {"type": "text", "text": prompt},
+                    ],
+                }]),
+                None,
+            )
+            .expect("render");
+        assert_eq!(rendered, prompt);
     }
 
     /// Built-in template selection must ride the same normalization as model

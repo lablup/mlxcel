@@ -1102,6 +1102,8 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         "molmo_point" => Ok(ModelType::MolmoPointVLM),
         // Florence-2 (DaViT tower + BART encoder-decoder text stack).
         "florence2" => Ok(ModelType::Florence2VLM),
+        // Nemotron-Parse (C-RADIO ViT-H encoder + pre-norm mBART decoder).
+        "nemotron_parse" => Ok(ModelType::NemotronParseVLM),
         // Speech-to-text (encoder-decoder ASR).
         "whisper" => Ok(ModelType::Whisper),
         _ => Err(anyhow::anyhow!(

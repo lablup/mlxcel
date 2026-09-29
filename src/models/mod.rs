@@ -202,6 +202,7 @@ pub(crate) mod muse_glimmer_layers;
 pub mod nemotron;
 pub mod nemotron_h;
 pub mod nemotron_nas;
+pub mod nemotron_parse;
 pub mod olmo;
 pub mod olmo2;
 pub mod olmo3;
@@ -351,6 +352,9 @@ pub use muse_glimmer::{
 pub use nemotron::NemotronModel;
 pub use nemotron_h::NemotronHModel;
 pub use nemotron_nas::NemotronNASModel;
+pub use nemotron_parse::{
+    NemotronParseConfig, NemotronParseModel, NemotronParseRunOutput, NemotronParseVlmModel,
+};
 pub use olmo::OlmoModel;
 pub use olmo2::OLMo2Model;
 pub use olmo3::OLMo3Model;
@@ -482,6 +486,10 @@ pub enum ModelType {
     /// text stack. Encoder-decoder (seq2seq), so it is served through its own
     /// task pipeline (CLI early exit), not the autoregressive decode loop.
     Florence2VLM,
+    /// Nemotron-Parse (`nemotron_parse`): C-RADIO ViT-H tower + compression
+    /// neck + pre-norm mBART decoder. Encoder-decoder (seq2seq), served on
+    /// the same dedicated paths as Florence-2.
+    NemotronParseVLM,
     Gemma3n,    // Gemma 3n (text-only)
     Gemma3nVLM, // Gemma 3n VLM (MobileNetV5 + Gemma3n)
     Phi,        // Phi 1/2
@@ -754,6 +762,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Moondream3VLM,
     ModelType::Moondream2VLM,
     ModelType::Florence2VLM,
+    ModelType::NemotronParseVLM,
     ModelType::Gemma3n,
     ModelType::Gemma3nVLM,
     ModelType::Phi,
@@ -1251,6 +1260,10 @@ impl ModelType {
                 "Florence-2 (DaViT + BART seq2seq, task prompts)",
                 "Other VLM",
             ),
+            ModelType::NemotronParseVLM => (
+                "Nemotron-Parse (C-RADIO ViT-H + mBART seq2seq OCR)",
+                "Other VLM",
+            ),
             ModelType::MiniCPMOVLM => (
                 "MiniCPM-o (dynamic SigLIP + resampler + Qwen3-VL text)",
                 "Other VLM",
@@ -1378,6 +1391,7 @@ mod metadata_tests {
             Moondream3VLM,
             Moondream2VLM,
             Florence2VLM,
+            NemotronParseVLM,
             Gemma3n,
             Gemma3nVLM,
             Phi,

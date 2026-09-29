@@ -132,6 +132,11 @@ pub enum LoadedModel {
     /// its dedicated seq2seq worker before the batched/paged scheduler; the
     /// `LanguageModel` delegation below exists for trait completeness.
     Florence2VLM(models::Florence2VlmModel),
+    /// Nemotron-Parse (issue #1369): C-RADIO ViT-H + neck encoder and a
+    /// pre-norm mBART decoder. Seq2seq, routed exactly like Florence-2: the
+    /// CLI early-exits to its page driver and the server serves it on its
+    /// dedicated single-stream worker.
+    NemotronParseVLM(models::NemotronParseVlmModel),
     Gemma3n(models::Gemma3nModel),
     Gemma3nVLM(vision::Gemma3nVLModel),
     Phi(models::PhiModel),
@@ -310,6 +315,7 @@ macro_rules! delegate_language_model {
             LoadedModel::Moondream3VLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Moondream2VLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Florence2VLM(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::NemotronParseVLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Gemma3n(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Gemma3nVLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Phi(inner) => LanguageModel::$method(inner, $($arg),*),

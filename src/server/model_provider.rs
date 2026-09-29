@@ -170,6 +170,7 @@ fn uses_single_stream_queue_admission(model_path: &std::path::Path) -> bool {
             crate::models::ModelType::DiffusionGemma
                 | crate::models::ModelType::Llada2Moe
                 | crate::models::ModelType::Florence2VLM
+                | crate::models::ModelType::NemotronParseVLM
         )
     })
 }

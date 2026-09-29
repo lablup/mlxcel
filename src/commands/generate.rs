@@ -2973,6 +2973,16 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
                 &user_prompt,
             );
         }
+        // Nemotron-Parse (issue #1369) is encoder-decoder too: the page is
+        // encoded once and the decoder, seeded with the raw `-p` task prompt,
+        // cross-attends to it. Same early exit as Florence-2.
+        if let mlxcel::LoadedModel::NemotronParseVLM(parse_model) = &model {
+            return super::generate_nemotron_parse::run_nemotron_parse_generation(
+                parse_model,
+                &args,
+                &user_prompt,
+            );
+        }
         // Layout-aware Falcon-OCR (issue #848): one page becomes a sequence of
         // per-region OCR runs, each with its own crop and category prompt, so
         // it cannot share the single-prompt loop below. Detections were parsed

@@ -1013,6 +1013,7 @@ fn inspect_registry_id(model_type: ModelType) -> &'static str {
         ModelType::Moondream3VLM => "moondream3_vlm",
         ModelType::Moondream2VLM => "moondream2_vlm",
         ModelType::Florence2VLM => "florence2_vlm",
+        ModelType::NemotronParseVLM => "nemotron_parse_vlm",
         ModelType::Gemma3n => "gemma3n",
         ModelType::Gemma3nVLM => "gemma3n_vlm",
         ModelType::Phi => "phi",

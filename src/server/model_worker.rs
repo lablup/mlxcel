@@ -454,6 +454,16 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                         );
                         return;
                     }
+                    // Nemotron-Parse (issue #1369): the same seq2seq split as
+                    // Florence-2, on its own batch-1 page-parsing loop.
+                    LoadedModel::NemotronParseVLM(parse_model) => {
+                        single_stream_queue_admission.store(true, Ordering::Release);
+                        crate::server::nemotron_parse_worker::run_nemotron_parse_worker_loop(
+                            &parse_model,
+                            request_rx,
+                        );
+                        return;
+                    }
                     other => other,
                 };
 
@@ -1249,6 +1259,14 @@ pub(crate) fn spawn_legacy_model_worker(
                     single_stream_queue_admission.store(true, Ordering::Release);
                     crate::server::florence2_worker::run_florence2_worker_loop(
                         &florence2, request_rx,
+                    );
+                    return;
+                }
+                LoadedModel::NemotronParseVLM(parse_model) => {
+                    single_stream_queue_admission.store(true, Ordering::Release);
+                    crate::server::nemotron_parse_worker::run_nemotron_parse_worker_loop(
+                        &parse_model,
+                        request_rx,
                     );
                     return;
                 }

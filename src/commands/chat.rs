@@ -227,6 +227,15 @@ pub fn run_chat(mut opts: ChatOptions) -> Result<()> {
              mlxcel generate -m <model> --image <image> -p '<CAPTION>' (or <OD>, <OCR>, ...)"
         ));
     }
+    if matches!(model, mlxcel::LoadedModel::NemotronParseVLM(_)) {
+        // Nemotron-Parse is a page-parsing seq2seq model (issue #1369) with no
+        // conversational surface, for the same reason as Florence-2 above.
+        return Err(anyhow!(
+            "Nemotron-Parse is a document-parsing model without a chat surface; parse a page \
+             instead: mlxcel generate -m <model> --image <page> -p \
+             '</s><s><predict_bbox><predict_classes><output_markdown><predict_no_text_in_pic>'"
+        ));
+    }
     let tokenizer = Arc::new(load_tokenizer(&model_path)?);
     println!(
         "Model loaded in {:.2}s.",

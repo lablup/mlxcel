@@ -164,6 +164,33 @@ fn whisper_model_type_is_detected() {
     fs::remove_dir_all(model_dir).unwrap();
 }
 
+/// Nemotron-Parse keeps its geometry under `encoder` / `decoder` sub-configs
+/// and ships an empty `vision_config`; detection keys off the top-level
+/// `model_type` alone (issue #1369).
+#[test]
+fn nemotron_parse_model_type_is_detected() {
+    let model_dir = temp_path("nemotron_parse_vlm");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "nemotron_parse",
+            "architectures": ["NemotronParseForConditionalGeneration"],
+            "is_encoder_decoder": true,
+            "image_size": [2048, 1664],
+            "decoder": {"model_type": "nemotron_parse_text", "d_model": 1024},
+            "encoder": {"patch_size": 16, "max_resolution": 2048},
+            "vision_config": {}
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::NemotronParseVLM);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
 #[test]
 fn florence2_model_type_is_detected() {
     // Florence-2 declares `model_type: "florence2"` at the top level. The

@@ -2766,9 +2766,11 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     // checkpoint, before any decoder-only scheduler starts. The #856-era
     // startup refusal is gone; the flag below only gates the text-only
     // warmup, which cannot run against an image-task model.
-    let is_florence2 = matches!(
+    // Nemotron-Parse (issue #1369) is an image-only seq2seq model served on
+    // its own worker too; a text warmup cannot run against it either.
+    let is_image_seq2seq = matches!(
         crate::models::get_model_type(&startup.model_path),
-        Ok(crate::models::ModelType::Florence2VLM)
+        Ok(crate::models::ModelType::Florence2VLM | crate::models::ModelType::NemotronParseVLM)
     );
 
     // Issue #688 (M1/M2 hardening): disable CUDA graph capture for hazard-family
@@ -3252,12 +3254,14 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         batch_observability.clone(),
     )?);
 
-    if startup.warmup && is_florence2 {
+    if startup.warmup && is_image_seq2seq {
         // The warmup prompt is the text literal "Hello"; the Florence-2
         // seq2seq worker rejects any request that is not a task marker with
         // exactly one image, so a warmup attempt would only log a spurious
         // failure. The worker warms on its first real request instead.
-        tracing::info!("Skipping text warmup for Florence-2 (image-task seq2seq model)");
+        tracing::info!(
+            "Skipping text warmup for image-task seq2seq model (Florence-2 / Nemotron-Parse)"
+        );
     } else if startup.warmup {
         tracing::info!("Warming up model...");
         match warmup_model(model_provider.as_ref()) {

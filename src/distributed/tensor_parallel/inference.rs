@@ -463,6 +463,9 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // inference, because the planner's supported-architecture validation
         // rejects this string. Placeholder keeps the dispatch table total.
         ModelType::Florence2VLM => "florence2",
+        // Nemotron-Parse: same seq2seq routing as Florence-2 (CLI driver and
+        // dedicated server worker); placeholder keeps the table total.
+        ModelType::NemotronParseVLM => "nemotron_parse",
         // Whisper is an ASR model served through the audio endpoints, never
         // routed to tensor-parallel text inference; the loader rejects it
         // earlier. Return a placeholder so the dispatch table stays total.

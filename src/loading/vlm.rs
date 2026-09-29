@@ -94,6 +94,8 @@ mod mllama;
 mod muse_glimmer;
 #[path = "vlm_nemotron_h_nano_omni.rs"]
 mod nemotron_h_nano_omni;
+#[path = "vlm_nemotron_parse.rs"]
+mod nemotron_parse;
 #[path = "vlm_paddleocr.rs"]
 mod paddleocr;
 #[path = "vlm_pixtral.rs"]
@@ -145,6 +147,7 @@ pub(crate) use muse_glimmer::{
     ensure_supported_muse_weight_map, load_muse_glimmer_vlm, normalize_muse_glimmer_weights,
 };
 pub(crate) use nemotron_h_nano_omni::load_nemotron_h_nano_omni_vlm;
+pub(crate) use nemotron_parse::load_nemotron_parse_vlm;
 pub(crate) use paddleocr::load_paddleocr_vl;
 pub(crate) use pixtral::{load_mistral3_vlm, load_pixtral_vlm};
 #[cfg(feature = "xla-iree")]
