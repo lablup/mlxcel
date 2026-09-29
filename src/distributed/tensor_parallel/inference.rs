@@ -286,6 +286,10 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // the planner's supported-architecture validation rejects this string
         // before any TP load is attempted. It keeps the dispatch table total.
         ModelType::Gpt2 => "gpt2",
+        // nanochat is not tensor-parallel enabled: weightless norms and the
+        // `c_q` / `c_k` / `c_v` key names have no shard rules, so the planner
+        // rejects this string. It keeps the dispatch table total.
+        ModelType::NanoChat => "nanochat",
         // GPT-BigCode shares GPT-2's fused `c_attn` key names, and its
         // multi-query KV block cannot be split across ranks anyway, but this
         // string is not rejected here: `generate_shard_plan`'s architecture

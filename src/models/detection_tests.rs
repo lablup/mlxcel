@@ -2034,3 +2034,31 @@ fn iquestcoder_architecture_is_untouched_by_the_loop_guard() {
         ModelType::IQuestCoder
     );
 }
+
+#[test]
+fn nanochat_model_type_is_detected() {
+    // nanochat declares `NanoChatForCausalLM` and a Llama-like config
+    // (`num_key_value_heads`, `rope_theta`), so detection must key off
+    // `model_type` alone. Both MLX conversions and the transformers export use it.
+    let model_dir = temp_path("nanochat_text");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "nanochat",
+            "architectures": ["NanoChatForCausalLM"],
+            "hidden_size": 1280,
+            "num_attention_heads": 10,
+            "num_hidden_layers": 20,
+            "intermediate_size": 5120,
+            "vocab_size": 65536,
+            "logits_soft_cap": 15.0
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::NanoChat);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}

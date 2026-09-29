@@ -967,6 +967,7 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         "olmo3" => Ok(ModelType::Olmo3),
         "openelm" => Ok(ModelType::OpenElm),
         "gpt2" => Ok(ModelType::Gpt2),
+        "nanochat" => Ok(ModelType::NanoChat),
         "gpt_bigcode" => Ok(ModelType::GptBigCode),
         "gpt_neox" => Ok(ModelType::GptNeoX),
         "helium" => Ok(ModelType::Helium),

@@ -1897,6 +1897,15 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
         .as_ref()
         .is_some_and(|c| c.get("model_type").and_then(|m| m.as_str()) == Some("bitnet"));
 
+    // nanochat keeps the residual stream unnormalized (every norm is weightless
+    // and only feeds the sublayers), so hidden magnitudes grow past the f16 max
+    // of 65504 by layer 16 of d20: measured maxabs 64000 at layer 15, NaN from
+    // layer 16 on, and every greedy token id collapses to 0. bf16 has the f32
+    // exponent range and matches the reference.
+    let is_nanochat = parsed_config
+        .as_ref()
+        .is_some_and(|c| c.get("model_type").and_then(|m| m.as_str()) == Some("nanochat"));
+
     let mut weights = if is_gemma4 {
         load_gemma4_text_weights(model_dir)?
     } else {
@@ -1998,7 +2007,7 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
     // 85.3 s to 4.8 s, decode 118.1 to 49.2 ms/token, with 17 * 23 answered
     // identically and the same token count generated in both dtypes. Ampere and
     // later keep the guard, so their behavior is unchanged.
-    if bf16_to_f16_at_load(is_quantized, parsed_config.as_ref()) && !is_bitnet {
+    if bf16_to_f16_at_load(is_quantized, parsed_config.as_ref()) && !is_bitnet && !is_nanochat {
         let had_bf16 = if keep_gemma3n_bf16 {
             convert_bf16_weights_with_keep(&mut weights, gemma3n_bf16_key)
         } else {
@@ -2233,9 +2242,11 @@ fn is_f16_fragile_below_ampere(config: &Value) -> bool {
                 .and_then(Value::as_str)
         })
         .unwrap_or("");
-    // Squaring activations are the one measured failure. BitNet's relu^2 is not
-    // listed because the text loader excludes it separately through `is_bitnet`.
-    const MEASURED_FRAGILE: &[&str] = &["apertus"];
+    // Squaring activations and an unnormalized residual stream are the measured
+    // failures. BitNet's relu^2 is not listed because the text loader excludes
+    // it separately through `is_bitnet`; nanochat is listed here as well as
+    // excluded through `is_nanochat`, since its residual overflows f16.
+    const MEASURED_FRAGILE: &[&str] = &["apertus", "nanochat"];
     MEASURED_FRAGILE
         .iter()
         .any(|needle| model_type.contains(needle))
