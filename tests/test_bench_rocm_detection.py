@@ -203,6 +203,83 @@ class HardwareTagTests(unittest.TestCase):
         self.assertEqual(bench_mlxlm.rocm_hardware_names(gpu)[0], "amd-gfx1100")
 
 
+class ProbeRuntimeTests(unittest.TestCase):
+    """probe_runtime end to end, against a stub `mlxcel` (no GPU, no model load)."""
+
+    FUNCS = [
+        "probe_kernel_backend", "probe_gfx_target", "probe_gpu_name",
+        "probe_device_memory_bytes", "rocminfo_first_gpu", "rocm_tool",
+        "detect_rocm_version", "detect_hip_version", "sysfs_vram_bytes",
+        "probe_runtime", "smallest_checkpoint", "estimate_model_size",
+        "run_with_timeout",
+    ]
+
+    def _probe(self, stub_output: str, stub_rc: int = 0, rocminfo: str = "") -> dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            for name, size in (("big", 4096), ("small", 1024)):
+                d = tmp_path / "models" / name
+                d.mkdir(parents=True)
+                (d / "config.json").write_text("{}")
+                (d / "model.safetensors").write_bytes(b"0" * size)
+            # Records which checkpoint the probe loaded.
+            stub = tmp_path / "mlxcel"
+            stub.write_text(
+                "#!/bin/bash\necho \"$3\" > " + shlex.quote(str(tmp_path / "loaded")) + "\n"
+                "cat <<'OUT'\n" + stub_output + "OUT\n"
+                f"exit {stub_rc}\n"
+            )
+            stub.chmod(0o755)
+            script = (
+                "nvidia-smi() { return 1; }\nuname() { echo Linux; }\n"
+                "run_with_timeout() { shift; \"$@\"; }\n"
+                "detect_rocm_version() { echo 7.2.0; }\ndetect_hip_version() { echo 7.2.53; }\n"
+                "sysfs_vram_bytes() { echo 0; }\n"
+                "ROCM_DETECTED=0 ROCM_GFX= ROCM_DEVICE_NAME= ROCM_VERSION= HIP_VERSION=\n"
+                "DEVICE_MEMORY_BYTES=0 DEVICE_MEMORY_SOURCE= PROBE_BACKEND= PROBE_TIMEOUT=10\n"
+                f"MLXCEL={shlex.quote(str(stub))} MODELS_DIR={shlex.quote(str(tmp_path / 'models'))}\n"
+            )
+            if rocminfo:
+                script += (
+                    "rocm_tool() { echo rocminfo_stub; }\n"
+                    "rocminfo_stub() { cat <<'RI'\n" + rocminfo + "RI\n}\n"
+                    "run_with_timeout() { shift; \"$@\"; }\n"
+                )
+            else:
+                script += "rocm_tool() { return 1; }\n"
+            script += (
+                "probe_runtime ''\n"
+                "echo \"$ROCM_DETECTED|$ROCM_GFX|$ROCM_DEVICE_NAME|$DEVICE_MEMORY_BYTES|$HIP_VERSION\"\n"
+            )
+            out = _run(self.FUNCS, script)
+            loaded = (tmp_path / "loaded").read_text().strip()
+        detected, gfx, name, mem, hip = out.splitlines()[-1].split("|")
+        return {
+            "detected": detected, "gfx": gfx, "name": name, "mem": int(mem),
+            "hip": hip, "loaded": os.path.basename(loaded),
+        }
+
+    def test_rocm_probe_uses_smallest_checkpoint_and_reads_device(self) -> None:
+        r = self._probe(ROCM_PROBE_OUTPUT)
+        self.assertEqual(r["loaded"], "small")
+        self.assertEqual(r["detected"], "1")
+        self.assertEqual(r["gfx"], "gfx1151")
+        self.assertEqual(r["name"], "AMD Radeon 8060S Graphics")
+        self.assertEqual(r["mem"], 96 * 1024**3)
+        self.assertEqual(r["hip"], "7.2.53")
+
+    def test_other_backend_is_not_rocm(self) -> None:
+        r = self._probe("[mlxcel] custom kernel backend: cpu\n")
+        self.assertEqual(r["detected"], "0")
+        self.assertEqual(r["mem"], 0)
+
+    def test_failed_probe_falls_back_to_rocminfo(self) -> None:
+        r = self._probe("error: load failed\n", stub_rc=1, rocminfo=ROCMINFO_OUTPUT)
+        self.assertEqual(r["detected"], "1")
+        self.assertEqual(r["gfx"], "gfx1151")
+        self.assertEqual(r["name"], "AMD Radeon 8060S Graphics")
+
+
 class BackendAndMemoryTests(unittest.TestCase):
     def test_rocm_backend_and_device_memory_budget(self) -> None:
         script = (
