@@ -139,6 +139,19 @@ class ProbeParserTests(unittest.TestCase):
         self.assertEqual(_run(["rocminfo_first_gpu"], "rocminfo_first_gpu", cpu_only), "")
 
 
+class MissingToolTests(unittest.TestCase):
+    def test_absent_version_sources_do_not_exit_the_script(self) -> None:
+        # The helpers run inside command substitutions under
+        # `set -euo pipefail`; a host without the version file or hipconfig
+        # must yield an empty field, not end the sweep silently.
+        script = (
+            "ROCM_PATH=/nonexistent-rocm\nPATH=/usr/bin:/bin\n"
+            "hipconfig() { return 1; }\n"
+            "v=$(detect_rocm_version); h=$(detect_hip_version); echo \"[$v][$h]\""
+        )
+        self.assertEqual(_run(["rocm_tool", "detect_rocm_version", "detect_hip_version"], script), "[][]")
+
+
 class HardwareTagTests(unittest.TestCase):
     def _short(self, full: str) -> str:
         script = f"detect_hardware_full() {{ echo {shlex.quote(full)}; }}\ndetect_hardware_short"

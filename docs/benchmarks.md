@@ -195,8 +195,11 @@ gfx1151 baseline records how it checked
 ```bash
 MODELS_DIR=models/mlx ./scripts/bench_decode.sh all --cooldown 30 --big-cooldown 30
 MLXLM_PYTHON=<mlx-rocm-venv>/bin/python LD_LIBRARY_PATH=/opt/rocm/lib \
-    MODELS_DIR=models/mlx ./scripts/bench_mlxlm.py all --cooldown 30 --big-cooldown 30
+    MODELS_DIR=models/mlx ./scripts/bench_mlxlm.py all --cooldown 30 --big-cooldown 60 --big-threshold-gb 10
 ```
+
+`bench_mlxlm.py`'s `--big-cooldown` replaces the normal cooldown after a big
+model where `bench_decode.sh` adds it, so 60 there matches 30 + 30 here.
 
 ### An op-level number is not a decode number (issue #901)
 

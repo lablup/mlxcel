@@ -307,15 +307,16 @@ detect_rocm_version() {
   for f in "$root/.info/version" "$root"/core*/.info/version; do
     if [[ -f "$f" ]]; then
       head -1 "$f" | tr -d '[:space:]'
-      return
+      return 0
     fi
   done
+  return 0
 }
 
 detect_hip_version() {
   local bin
   bin=$(rocm_tool hipconfig) || return 0
-  "$bin" --version 2>/dev/null | tail -1 | sed 's/-.*//'
+  "$bin" --version 2>/dev/null | tail -1 | sed 's/-.*//' || true
 }
 
 # The kernel's own figure for the device's memory. Used when the probe run did
@@ -325,8 +326,11 @@ sysfs_vram_bytes() {
   for f in /sys/class/drm/card*/device/mem_info_vram_total; do
     [[ -r "$f" ]] || continue
     v=$(cat "$f" 2>/dev/null)
-    [[ "$v" =~ ^[0-9]+$ && "$v" -gt 0 ]] && { echo "$v"; return; }
+    [[ "$v" =~ ^[0-9]+$ && "$v" -gt 0 ]] && { echo "$v"; return 0; }
   done
+  # Every helper here runs under `set -euo pipefail` inside a command
+  # substitution, so a missing figure must not become a silent script exit.
+  return 0
 }
 
 probe_runtime() {
@@ -351,7 +355,7 @@ probe_runtime() {
   # another backend is, and the rocminfo agent list is not consulted then.
   if [[ -z "$PROBE_BACKEND" || "$ROCM_DETECTED" == "1" ]]; then
     local ri
-    ri=$(rocm_tool rocminfo) && gpu=$("$ri" 2>/dev/null | rocminfo_first_gpu)
+    ri=$(rocm_tool rocminfo) && gpu=$("$ri" 2>/dev/null | rocminfo_first_gpu) || gpu=""
     if [[ -n "${gpu:-}" ]]; then
       if [[ -z "$PROBE_BACKEND" ]]; then
         ROCM_DETECTED=1

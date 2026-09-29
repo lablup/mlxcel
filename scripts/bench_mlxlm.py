@@ -131,25 +131,30 @@ def detect_rocm_gpu():
     return {"gfx": gfx, "name": market or "AMD_GPU", "rocm_version": version, "vram_bytes": vram}
 
 
+def _host_memory_bytes():
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (ValueError, OSError, AttributeError):
+        return 0
+
+
 def rocm_hardware_names(gpu):
     """(short, full) tags for an AMD GPU, identical to bench_decode.sh's."""
     full = f"{gpu['name']}_{gpu['gfx']}"
     if gpu["rocm_version"]:
         full += f"_ROCm{gpu['rocm_version']}"
-    if gpu["vram_bytes"]:
-        full += f"_{gpu['vram_bytes'] / 1073741824:.0f}GB"
-    else:
-        full += "_"
+    # Device memory, as bench_decode.sh records it; host memory when the
+    # device reports none, which is also that script's fallback.
+    mem = gpu["vram_bytes"] or _host_memory_bytes()
+    full += f"_{mem / 1073741824:.0f}GB" if mem else "_"
     full = full.replace(" ", "_")
     short = "strixhalo-gfx1151" if gpu["gfx"] == "gfx1151" else f"amd-{gpu['gfx']}"
     return short, full
 
 
-def detect_hardware():
-    if sys.platform.startswith("linux"):
-        gpu = detect_rocm_gpu()
-        if gpu is not None:
-            return rocm_hardware_names(gpu)
+def detect_hardware(rocm_gpu=None):
+    if rocm_gpu is not None:
+        return rocm_hardware_names(rocm_gpu)
     try:
         chip = subprocess.run(
             ["sysctl", "-n", "machdep.cpu.brand_string"],
@@ -500,9 +505,9 @@ def main():
     ap.add_argument("--suffix", default="", help="Optional CSV filename suffix")
     args = ap.parse_args()
 
-    hw_short, hw_full = detect_hardware()
-    today = date.today().isoformat()
     rocm_gpu = detect_rocm_gpu() if sys.platform.startswith("linux") else None
+    hw_short, hw_full = detect_hardware(rocm_gpu)
+    today = date.today().isoformat()
     # On a ROCm APU the GPU's budget is its carve-out, not the 128 GB Apple
     # default above; an explicit PYLM_BENCH_MAX_GB still wins.
     global MEMORY_LIMIT_BYTES
