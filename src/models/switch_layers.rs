@@ -631,11 +631,8 @@ impl SwitchLinear {
                     .map_err(|e| format!("{prefix}: {e}"))?;
                 // And a mode the running backend has no kernel for is refused
                 // here rather than aborting in `gather_qmm` (issue #1806).
-                mlxcel_core::layers::validate_quantization_mode_runnable(
-                    mode,
-                    mlxcel_core::hardware::gpu_backend_kind(),
-                )
-                .map_err(|e| format!("{prefix}: {e}"))?;
+                mlxcel_core::layers::validate_quantization_mode_for_running_backend(mode)
+                    .map_err(|e| format!("{prefix}: {e}"))?;
 
                 // Infer the actual bit width from the packed weight and scales
                 // shapes (group_size fixed): mixed-precision checkpoints such as

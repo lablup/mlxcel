@@ -308,8 +308,10 @@ impl GpuBackendKind {
     /// - ROCm: affine native. mxfp8 and mxfp4 native after the scale-type and
     ///   `gather_qmm` fixes in `patches-rocm/LOCAL_FIXES.md` (items 8, 10, 11),
     ///   measured against a dequantized f32 reference and on
-    ///   gpt-oss-20b-MXFP4-Q4 (lablup/mlxcel#1818; #1808 tracks the rest of
-    ///   mxfp4). NVFP4 converts to affine: the ROCm qmv dispatch implements
+    ///   gpt-oss-20b-MXFP4-Q4 (lablup/mlxcel#1818). For mxfp4 the committed
+    ///   evidence is `tests/rocm_mxfp4_quant.rs` (#1808): GPU `quantize`,
+    ///   `quantized_matmul` and `gather_qmm` against CPU references, each
+    ///   failing with its overlay fix reverted. NVFP4 converts to affine: the ROCm qmv dispatch implements
     ///   group sizes 32, 64 and 128 only and throws for NVFP4's 16, and there
     ///   is no E4M3 block-scale path.
     #[must_use]

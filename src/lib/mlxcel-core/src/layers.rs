@@ -1768,12 +1768,8 @@ pub fn validate_quantization_mode(mode: &str) -> Result<(), String> {
 /// An unparseable mode is left to [`validate_quantization_mode`], so the two
 /// checks never both report the same string.
 ///
-/// Used by: the shared dense and embedding loaders (through
-///          `reconcile_quantization_layout_logged`),
-///          [`QuantizedMultiLinear::from_weights`] (MLA), and in the consuming
-///          crate `crate::models::switch_layers::SwitchLinear` (MoE experts),
-///          `crate::models::gpt_oss::ExpertLinear` and `kimi_linear`'s private
-///          `MultiLinear`
+/// Used by: [`validate_quantization_mode_for_running_backend`], which every
+///          quantized layer loader calls with the running backend
 pub fn validate_quantization_mode_runnable(
     mode: &str,
     backend: crate::hardware::GpuBackendKind,
@@ -1805,6 +1801,71 @@ pub fn validate_quantization_mode_runnable(
              affine with `mlx_lm.convert -q`) or run it on another backend"
         )),
     }
+}
+
+/// The load-log line for a quantized layer in `mode` that `backend` runs
+/// natively, or `None` when there is no route to report (issue #1808).
+///
+/// A line is due only for a block-float mode (affine is every backend's
+/// baseline) that the capability table marks `Native` on a backend where some
+/// mode is not native, which is ROCm today. There the same checkpoint could
+/// have been converted or refused, so the log states which route it took, as
+/// the NVFP4 repack line in the binary crate's `models/sanitize.rs` does for
+/// the conversion route. Metal, CUDA and the CPU run every mode natively, have
+/// no route to choose, and get no line, so their load output is unchanged.
+#[must_use]
+pub fn native_quantization_route_line(
+    mode: &str,
+    backend: crate::hardware::GpuBackendKind,
+) -> Option<String> {
+    use crate::hardware::{QuantMode, QuantModeSupport};
+    let parsed = QuantMode::from_mlx_name(mode)?;
+    let has_other_routes = QuantMode::ALL
+        .into_iter()
+        .any(|m| backend.quant_mode_support(m) != QuantModeSupport::Native);
+    if parsed == QuantMode::Affine
+        || !has_other_routes
+        || backend.quant_mode_support(parsed) != QuantModeSupport::Native
+    {
+        return None;
+    }
+    Some(format!(
+        "Quantization mode {parsed}: running on native {} kernels, no load-time conversion \
+         (backend quantization capability table)",
+        backend.display_name()
+    ))
+}
+
+/// [`validate_quantization_mode_runnable`] against the backend MLX resolved in
+/// this process, plus the load log: the first layer of each mode that passes
+/// prints [`native_quantization_route_line`] to stderr, once per process, so a
+/// load log says whether a block-float checkpoint ran natively or was
+/// converted (issue #1808).
+///
+/// Used by: the shared dense and embedding loaders (through
+///          `reconcile_quantization_layout_logged`),
+///          [`QuantizedMultiLinear::from_weights`] (MLA), and in the consuming
+///          crate `crate::models::switch_layers::SwitchLinear` (MoE experts),
+///          `crate::models::gpt_oss::ExpertLinear` and `kimi_linear`'s private
+///          `MultiLinear`
+pub fn validate_quantization_mode_for_running_backend(mode: &str) -> Result<(), String> {
+    use crate::hardware::QuantMode;
+    use std::sync::atomic::AtomicBool;
+    static LOGGED: [AtomicBool; QuantMode::ALL.len()] =
+        [const { AtomicBool::new(false) }; QuantMode::ALL.len()];
+
+    let backend = crate::hardware::gpu_backend_kind();
+    validate_quantization_mode_runnable(mode, backend)?;
+    if let Some(line) = native_quantization_route_line(mode, backend) {
+        let slot = QuantMode::ALL
+            .iter()
+            .position(|m| m.as_str() == mode)
+            .expect("a route line implies a parsed mode");
+        if !LOGGED[slot].swap(true, Ordering::Relaxed) {
+            eprintln!("{line}");
+        }
+    }
+    Ok(())
 }
 
 /// Reject a declared mode that contradicts the `.biases` plane the checkpoint
@@ -2151,8 +2212,7 @@ fn reconcile_quantization_layout_logged(
         .map_err(|e| format!("{e} (prefix: {prefix})"))?;
     // Kept out of the pure reconciler, whose shape tests must not depend on
     // the host's backend.
-    validate_quantization_mode_runnable(mode, crate::hardware::gpu_backend_kind())
-        .map_err(|e| format!("{prefix}: {e}"))?;
+    validate_quantization_mode_for_running_backend(mode).map_err(|e| format!("{prefix}: {e}"))?;
     if layout.reconciled {
         tracing::warn!(
             target: "mlxcel::quant",
@@ -3820,7 +3880,7 @@ impl QuantizedMultiLinear {
         validate_quantization_biases(mode, biases.is_some())
             .map_err(|e| format!("{prefix}: {e}"))?;
         // A mode the running backend has no kernel for (issue #1806).
-        validate_quantization_mode_runnable(mode, crate::hardware::gpu_backend_kind())
+        validate_quantization_mode_for_running_backend(mode)
             .map_err(|e| format!("{prefix}: {e}"))?;
 
         Ok(Self {
@@ -6739,6 +6799,44 @@ mod tests {
             err.contains("affine"),
             "the message must name the way out: {err}"
         );
+    }
+
+    /// Issue #1808: the load log names the native route for a block-float
+    /// mode only on a backend that has another route to choose (ROCm), and
+    /// says nothing for affine, for a mode that backend refuses, for an
+    /// unparseable mode, or on a backend that runs every mode natively, so
+    /// Metal, CUDA and CPU load output stays as it was.
+    #[test]
+    fn native_route_line_only_where_a_route_was_chosen() {
+        use crate::hardware::{GpuBackendKind, QuantMode, QuantModeSupport};
+        for backend in GpuBackendKind::ALL {
+            let all_native = QuantMode::ALL
+                .into_iter()
+                .all(|m| backend.quant_mode_support(m) == QuantModeSupport::Native);
+            for mode in QuantMode::ALL {
+                let line = native_quantization_route_line(mode.as_str(), backend);
+                let expected = mode != QuantMode::Affine
+                    && !all_native
+                    && backend.quant_mode_support(mode) == QuantModeSupport::Native;
+                assert_eq!(line.is_some(), expected, "{backend:?} {mode}: {line:?}");
+                if let Some(line) = line {
+                    assert!(line.contains(mode.as_str()), "{line}");
+                    assert!(line.contains(backend.display_name()), "{line}");
+                    assert!(line.contains("native"), "{line}");
+                }
+            }
+            assert_eq!(native_quantization_route_line("optiq", backend), None);
+        }
+        let rocm = native_quantization_route_line("mxfp4", GpuBackendKind::Rocm)
+            .expect("mxfp4 is native on ROCm, which also converts nvfp4");
+        assert!(rocm.contains("ROCm"), "{rocm}");
+        for backend in [
+            GpuBackendKind::Metal,
+            GpuBackendKind::Cuda,
+            GpuBackendKind::None,
+        ] {
+            assert_eq!(native_quantization_route_line("mxfp4", backend), None);
+        }
     }
 
     /// Issue #1806: an MLX-native NVFP4 layer (group 16, no biases, E4M3

@@ -282,11 +282,8 @@ impl MultiLinear {
             mlxcel_core::layers::validate_quantization_biases(mode, biases.is_some())
                 .map_err(|e| format!("{prefix}: {e}"))?;
             // A mode the running backend has no kernel for (issue #1806).
-            mlxcel_core::layers::validate_quantization_mode_runnable(
-                mode,
-                mlxcel_core::hardware::gpu_backend_kind(),
-            )
-            .map_err(|e| format!("{prefix}: {e}"))?;
+            mlxcel_core::layers::validate_quantization_mode_for_running_backend(mode)
+                .map_err(|e| format!("{prefix}: {e}"))?;
         }
 
         Ok(Self {

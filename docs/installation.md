@@ -479,7 +479,7 @@ in
 | Area | Status on ROCm |
 |------|----------------|
 | Affine 4-bit / 8-bit checkpoints | Run natively. |
-| mxfp8 and mxfp4 checkpoints | Run natively, including MoE experts through `gather_qmm` (for example gpt-oss-20b-MXFP4-Q4). |
+| mxfp8 and mxfp4 checkpoints | Run natively, including MoE experts through `gather_qmm` (for example gpt-oss-20b-MXFP4-Q4). The load log says so once per mode (`Quantization mode mxfp4: running on native ROCm kernels, no load-time conversion ...`). mxfp4 `quantize`, `quantized_matmul` and `gather_qmm` are checked against CPU references by `tests/rocm_mxfp4_quant.rs` (lablup/mlxcel#1808). |
 | NVFP4 checkpoints | No native kernel. ModelOpt NVFP4 checkpoints (for example the Gemma 4 NVFP4 exports) are converted to affine 4-bit at load with no environment variables, and the load log names the route and the reason. A layer that cannot be converted fails the load with its name and the reason. MLX-native NVFP4 exports (`"mode": "nvfp4"` in `config.json`, such as `mlx-community/*-nvfp4`) have no load-time conversion and are refused at load; use an affine export instead (lablup/mlxcel#1806). |
 | Affine MoE models (for example Qwen3-30B-A3B) | Run natively. The fused MoE path used to abort on ROCm; lablup/mlxcel#1803 routes it to the MLX graph fallback, so `MLXCEL_FUSED_MOE=0` is no longer needed. |
 | mlxcel's fused kernels (sampling, fused norm, RoPE + KV append, paged attention) | Run as MLX graph fallbacks on the paths that have one (lablup/mlxcel#1803); ROCm ports are lablup/mlxcel#1814. |
@@ -493,8 +493,9 @@ in
 Decode throughput measured on the tested configuration, for orientation only
 (greedy, short prompt): Qwen3-0.6B-4bit about 250 tok/s, Qwen3-30B-A3B-4bit
 about 55 tok/s (measured with `MLXCEL_FUSED_MOE=0`, before lablup/mlxcel#1803
-made that unnecessary; not re-measured since), gpt-oss-20b-MXFP4-Q4 about 3.6 tok/s
-(generic gather kernel). A benchmark page is tracked in lablup/mlxcel#1810.
+made that unnecessary; not re-measured since), gpt-oss-20b-MXFP4-Q4 about 8 tok/s
+(generic gather kernel; 8.07 tok/s in the baseline page linked above, up from the
+3.6 tok/s lablup/mlxcel#1818 measured).
 
 ## Runtime environment variables
 
