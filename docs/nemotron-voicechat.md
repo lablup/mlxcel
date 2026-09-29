@@ -181,6 +181,8 @@ cargo run --release --features voicechat-mic --example voicechat_microphone -- \
 
 There is no acoustic echo cancellation and the model keeps listening while it speaks, so use headphones; through open speakers it hears its own answer.
 
+On macOS the terminal needs Microphone access (System Settings > Privacy & Security > Microphone); without it opening the input stream fails, and the example reports the device name and this hint.
+
 ## Validation
 
 Validated on `mlx-community/NemotronLabs-VoiceChat-11B-4bit` against the mlx-vlm reference on a synthesized "What is the capital of France?" question with the system prompt "Be concise and answer in one sentence." (env-gated tests under `tests/nemotron_voicechat_*_real.rs`, run with `MLXCEL_VOICECHAT_MODEL` and `MLXCEL_VOICECHAT_REF` set):

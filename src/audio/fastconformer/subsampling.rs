@@ -83,7 +83,9 @@ impl CausalDwStridingSubsampling {
         weights: &WeightMap,
         prefix: &str,
         args: &ConformerArgs,
+        quantization: (i32, i32),
     ) -> Result<Self, String> {
+        let (group_size, bits) = quantization;
         let channels = args.subsampling_conv_channels as i32;
         let (left, right) = args.subsampling_padding();
         let pad = Some((left as i32, right as i32));
@@ -109,7 +111,7 @@ impl CausalDwStridingSubsampling {
             convs.push(conv(base + 1, channels, 1, 1, None, true)?);
         }
 
-        let out = UnifiedLinear::from_weights(weights, &format!("{prefix}.out"), 64, 4)?;
+        let out = UnifiedLinear::from_weights(weights, &format!("{prefix}.out"), group_size, bits)?;
         if let Some(w) = weights.get(&format!("{prefix}.out.weight"))
             && weights.get(&format!("{prefix}.out.scales")).is_none()
         {

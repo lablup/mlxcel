@@ -65,15 +65,24 @@ impl FastConformerEncoder {
         weights: &WeightMap,
         prefix: &str,
         args: &ConformerArgs,
+        quantization: (i32, i32),
     ) -> Result<Self, String> {
         args.validate()?;
         let pre_encode = CausalDwStridingSubsampling::from_weights(
             weights,
             &format!("{prefix}.pre_encode"),
             args,
+            quantization,
         )?;
         let layers = (0..args.n_layers)
-            .map(|i| ConformerBlock::from_weights(weights, &format!("{prefix}.layers.{i}"), args))
+            .map(|i| {
+                ConformerBlock::from_weights(
+                    weights,
+                    &format!("{prefix}.layers.{i}"),
+                    args,
+                    quantization,
+                )
+            })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             pre_encode,
@@ -140,7 +149,7 @@ impl FastConformerEncoder {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(test)]
 mod streaming_tests;

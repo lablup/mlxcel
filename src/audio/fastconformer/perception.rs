@@ -42,19 +42,28 @@ pub struct VoiceChatPerception {
 
 impl VoiceChatPerception {
     /// Load `{prefix}.encoder.*` and `{prefix}.proj.*`
-    /// (e.g. `prefix = "stt_model.perception"`).
+    /// (e.g. `prefix = "stt_model.perception"`). `quantization` is the
+    /// checkpoint's `(group_size, bits)` for quantized linears.
     pub fn from_weights(
         weights: &WeightMap,
         prefix: &str,
         args: &ConformerArgs,
+        quantization: (i32, i32),
     ) -> Result<Self, String> {
+        let (group_size, bits) = quantization;
         Ok(Self {
             encoder: FastConformerEncoder::from_weights(
                 weights,
                 &format!("{prefix}.encoder"),
                 args,
+                quantization,
             )?,
-            proj: UnifiedLinear::from_weights(weights, &format!("{prefix}.proj"), 64, 4)?,
+            proj: UnifiedLinear::from_weights(
+                weights,
+                &format!("{prefix}.proj"),
+                group_size,
+                bits,
+            )?,
         })
     }
 

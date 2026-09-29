@@ -20,7 +20,7 @@ use mlxcel_core::{MlxArray, UniquePtr};
 
 use super::config::VoiceChatConfig;
 use super::llm::{VoiceChatLanguageModel, take_llm_weights};
-use super::model::check_sub_configs;
+use super::model::{check_sub_configs, front_end_quantization};
 use super::tts::TtsConfig;
 use crate::audio::nemotron_codec::CodecConfig;
 use crate::models::nemotron_h::NemotronHConfig;
@@ -196,4 +196,15 @@ fn sub_config_mismatch_is_an_error() {
         ..CodecConfig::default()
     };
     assert!(check_sub_configs(&text, &tts, &codec).is_err());
+}
+
+#[test]
+fn front_end_quantization_follows_checkpoint_config() {
+    let quantized = VoiceChatConfig::from_json(
+        r#"{"text_config": {}, "quantization": {"group_size": 32, "bits": 8}}"#,
+    )
+    .unwrap();
+    assert_eq!(front_end_quantization(&quantized), (32, 8));
+    let dense = VoiceChatConfig::from_json(r#"{"text_config": {}}"#).unwrap();
+    assert_eq!(front_end_quantization(&dense), (64, 4));
 }

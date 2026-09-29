@@ -211,7 +211,8 @@ fn subsampling_lengths_128_mel_frames_give_17() {
     assert_eq!(symmetric.subsampled_length(128), 16);
 
     let enc =
-        FastConformerEncoder::from_weights(&tiny_weights("enc"), "enc", &tiny_args()).unwrap();
+        FastConformerEncoder::from_weights(&tiny_weights("enc"), "enc", &tiny_args(), (64, 4))
+            .unwrap();
     let (out, len) = enc.forward(&mel(128, 16), 128).unwrap();
     assert_eq!(len, 17);
     assert_eq!(mlxcel_core::array_shape(&out), vec![1, 17, 8]);
@@ -288,8 +289,8 @@ fn block_output_shape_and_layout_gate_is_idempotent() {
     let torch = tiny_weights("enc");
     let mlx = to_mlx_layout(&torch);
     let args = tiny_args();
-    let a = FastConformerEncoder::from_weights(&torch, "enc", &args).unwrap();
-    let b = FastConformerEncoder::from_weights(&mlx, "enc", &args).unwrap();
+    let a = FastConformerEncoder::from_weights(&torch, "enc", &args, (64, 4)).unwrap();
+    let b = FastConformerEncoder::from_weights(&mlx, "enc", &args, (64, 4)).unwrap();
     let input = mel(40, 16);
     let (out_a, len) = a.forward(&input, 40).unwrap();
     let (out_b, _) = b.forward(&input, 40).unwrap();
@@ -299,7 +300,7 @@ fn block_output_shape_and_layout_gate_is_idempotent() {
     assert!(va.iter().all(|v| v.is_finite()));
     assert_eq!(va, vb);
 
-    let block = ConformerBlock::from_weights(&torch, "enc.layers.0", &args).unwrap();
+    let block = ConformerBlock::from_weights(&torch, "enc.layers.0", &args, (64, 4)).unwrap();
     let x = mlxcel_core::from_slice_f32(&rand_vec(5 * 8, &mut 3u64, 1.0), &[1, 5, 8]);
     let pe = rel_pos_embedding(5, 8);
     let mask = chunked_limited_mask(5, 70, 0);
@@ -313,7 +314,7 @@ fn perception_projects_and_returns_encoder_output() {
     let mut s = 5u64;
     put(&mut w, "p.proj.weight", &[12, 8], &mut s, 0.3);
     put(&mut w, "p.proj.bias", &[12], &mut s, 0.1);
-    let perception = VoiceChatPerception::from_weights(&w, "p", &tiny_args()).unwrap();
+    let perception = VoiceChatPerception::from_weights(&w, "p", &tiny_args(), (64, 4)).unwrap();
     let out = perception.forward(&mel(24, 16), 24).unwrap();
     assert_eq!(out.length, 4);
     assert_eq!(mlxcel_core::array_shape(&out.projected), vec![1, 4, 12]);
@@ -324,14 +325,14 @@ fn perception_projects_and_returns_encoder_output() {
 fn bad_inputs_and_weights_fail_cleanly() {
     let args = tiny_args();
     let w = tiny_weights("enc");
-    let enc = FastConformerEncoder::from_weights(&w, "enc", &args).unwrap();
+    let enc = FastConformerEncoder::from_weights(&w, "enc", &args, (64, 4)).unwrap();
     assert!(enc.forward(&mel(10, 12), 10).is_err());
     // A config whose frequency width disagrees with `pre_encode.out`.
     let wrong = ConformerArgs {
         feat_in: 32,
         ..tiny_args()
     };
-    let err = FastConformerEncoder::from_weights(&w, "enc", &wrong)
+    let err = FastConformerEncoder::from_weights(&w, "enc", &wrong, (64, 4))
         .err()
         .unwrap();
     assert!(err.contains("pre_encode.out.weight"), "{err}");
@@ -339,7 +340,7 @@ fn bad_inputs_and_weights_fail_cleanly() {
         conv_norm_type: "batch_norm".to_string(),
         ..tiny_args()
     };
-    assert!(FastConformerEncoder::from_weights(&w, "enc", &batch_norm).is_err());
+    assert!(FastConformerEncoder::from_weights(&w, "enc", &batch_norm, (64, 4)).is_err());
 }
 
 #[test]
@@ -357,4 +358,100 @@ fn config_accepts_flat_and_nested_context_sizes() {
     .unwrap();
     assert_eq!(explicit.conv_padding().unwrap(), (4, 4));
     assert_eq!(explicit.default_att_context(), [56, 13]);
+}
+
+/// Affine-dequantize a quantized triple to dense f32 weights.
+pub(crate) fn dequantize_triple(
+    w: &MlxArray,
+    scales: &MlxArray,
+    biases: &MlxArray,
+    group_size: i32,
+    bits: i32,
+) -> UniquePtr<MlxArray> {
+    // SAFETY: `biases` is a valid array that outlives the call.
+    unsafe { mlxcel_core::dequantize(w, scales, biases, group_size, bits, "affine") }
+}
+
+/// Quantize dense `w` and insert the `.weight` / `.scales` / `.biases` triple
+/// under `key` in `quant`, plus the dequantized dense weight in `dense`.
+pub(crate) fn insert_quantized(
+    quant: &mut WeightMap,
+    dense: &mut WeightMap,
+    key: &str,
+    w: &MlxArray,
+    group_size: i32,
+    bits: i32,
+) {
+    let q = mlxcel_core::quantize_weights(w, group_size, bits);
+    let (qw, scales) = (
+        mlxcel_core::quantized_weights_w(&q),
+        mlxcel_core::quantized_weights_scales(&q),
+    );
+    let biases = mlxcel_core::quantized_weights_biases(&q);
+    dense.insert(
+        format!("{key}.weight"),
+        dequantize_triple(&qw, &scales, &biases, group_size, bits),
+    );
+    quant.insert(format!("{key}.weight"), qw);
+    quant.insert(format!("{key}.scales"), scales);
+    quant.insert(format!("{key}.biases"), biases);
+}
+
+#[test]
+fn attention_loads_non_default_quantization() {
+    const D: i32 = 64;
+    let mut seed = 21u64;
+    let mut dense_src = WeightMap::new();
+    let (mut quant, mut reference) = (WeightMap::new(), WeightMap::new());
+    for name in [
+        "linear_q",
+        "linear_k",
+        "linear_v",
+        "linear_out",
+        "linear_pos",
+    ] {
+        put(&mut dense_src, name, &[D, D], &mut seed, 0.3);
+        let w = dense_src.remove(name).unwrap();
+        insert_quantized(
+            &mut quant,
+            &mut reference,
+            &format!("att.{name}"),
+            &w,
+            32,
+            8,
+        );
+    }
+    for (name, scale) in [("pos_bias_u", 0.2), ("pos_bias_v", 0.2)] {
+        let mut b = WeightMap::new();
+        put(&mut b, name, &[4, 16], &mut seed, scale);
+        let b = b.remove(name).unwrap();
+        quant.insert(format!("att.{name}"), mlxcel_core::copy(&b));
+        reference.insert(format!("att.{name}"), b);
+    }
+
+    let t = 5;
+    let x = mlxcel_core::from_slice_f32(&rand_vec((t * D) as usize, &mut seed, 1.0), &[1, t, D]);
+    let pos = rel_pos_embedding(t as usize, D as usize);
+    let run = |weights: &WeightMap, quantization: (i32, i32)| {
+        RelPositionMultiHeadAttention::from_weights(weights, "att", 4, D as usize, quantization)
+            .map(|att| array_to_vec_f32(&att.forward(&x, &pos, None)))
+    };
+    let expected = run(&reference, (64, 4)).unwrap();
+    let got = run(&quant, (32, 8)).unwrap();
+    let max_diff = |a: &[f32], b: &[f32]| {
+        assert_eq!(a.len(), b.len());
+        a.iter()
+            .zip(b)
+            .fold(0.0f32, |m, (p, q)| m.max((p - q).abs()))
+    };
+    assert!(max_diff(&expected, &got) < 1e-4);
+    assert!(expected.iter().any(|v| v.abs() > 1e-3));
+
+    // The old hard-coded (64, 4) cannot describe this checkpoint: the scales
+    // hold one column per 32 inputs, not per 64. Running it through the
+    // quantized matmul raises an uncatchable MLX C++ exception (abort), so
+    // the mismatch is asserted on the stored layout instead.
+    let scales = mlxcel_core::array_shape(quant.get("att.linear_q.scales").unwrap());
+    assert_eq!(scales, vec![D, D / 32]);
+    assert_ne!(scales[1], D / 64);
 }

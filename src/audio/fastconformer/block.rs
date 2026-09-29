@@ -45,10 +45,25 @@ struct FeedForward {
 }
 
 impl FeedForward {
-    fn from_weights(weights: &WeightMap, prefix: &str) -> Result<Self, String> {
+    fn from_weights(
+        weights: &WeightMap,
+        prefix: &str,
+        quantization: (i32, i32),
+    ) -> Result<Self, String> {
+        let (group_size, bits) = quantization;
         Ok(Self {
-            linear1: UnifiedLinear::from_weights(weights, &format!("{prefix}.linear1"), 64, 4)?,
-            linear2: UnifiedLinear::from_weights(weights, &format!("{prefix}.linear2"), 64, 4)?,
+            linear1: UnifiedLinear::from_weights(
+                weights,
+                &format!("{prefix}.linear1"),
+                group_size,
+                bits,
+            )?,
+            linear2: UnifiedLinear::from_weights(
+                weights,
+                &format!("{prefix}.linear2"),
+                group_size,
+                bits,
+            )?,
         })
     }
 
@@ -199,22 +214,32 @@ impl ConformerBlock {
         weights: &WeightMap,
         prefix: &str,
         args: &ConformerArgs,
+        quantization: (i32, i32),
     ) -> Result<Self, String> {
         let norm = |name: &str| LayerNorm::from_weights(weights, &format!("{prefix}.{name}"));
         Ok(Self {
             norm_feed_forward1: norm("norm_feed_forward1")?,
-            feed_forward1: FeedForward::from_weights(weights, &format!("{prefix}.feed_forward1"))?,
+            feed_forward1: FeedForward::from_weights(
+                weights,
+                &format!("{prefix}.feed_forward1"),
+                quantization,
+            )?,
             norm_self_att: norm("norm_self_att")?,
             self_attn: RelPositionMultiHeadAttention::from_weights(
                 weights,
                 &format!("{prefix}.self_attn"),
                 args.n_heads,
                 args.d_model,
+                quantization,
             )?,
             norm_conv: norm("norm_conv")?,
             conv: ConformerConvolution::from_weights(weights, &format!("{prefix}.conv"), args)?,
             norm_feed_forward2: norm("norm_feed_forward2")?,
-            feed_forward2: FeedForward::from_weights(weights, &format!("{prefix}.feed_forward2"))?,
+            feed_forward2: FeedForward::from_weights(
+                weights,
+                &format!("{prefix}.feed_forward2"),
+                quantization,
+            )?,
             norm_out: norm("norm_out")?,
         })
     }

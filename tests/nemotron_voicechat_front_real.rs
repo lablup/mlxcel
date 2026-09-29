@@ -100,13 +100,15 @@ fn load_front(model_dir: &Path) -> Front {
     })
     .unwrap();
     let perception =
-        VoiceChatPerception::from_weights(&weights, "stt_model.perception", &encoder).unwrap();
+        VoiceChatPerception::from_weights(&weights, "stt_model.perception", &encoder, (64, 4))
+            .unwrap();
     let rnnt = RnntDecoder::from_weights(
         &weights,
         "stt_model.rnnt_decoder",
         "stt_model.rnnt_joint",
         &predict,
         &joint,
+        (64, 4),
     )
     .unwrap();
     Front {

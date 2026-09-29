@@ -184,6 +184,41 @@ impl Resampler {
     }
 }
 
+/// Wrap an input-device failure with the device name and, on macOS, the
+/// microphone-permission hint (a process without Microphone access gets bare
+/// CoreAudio errors such as "Unknown property" or a hung stream).
+fn input_error(device: &cpal::Device, err: impl std::fmt::Display) -> String {
+    let mut msg = format!("input device {device}: {err}.");
+    if cfg!(target_os = "macos") {
+        msg.push_str(
+            " On macOS, grant Microphone access to this terminal in System Settings > Privacy & \
+             Security > Microphone and restart the terminal.",
+        );
+    }
+    msg
+}
+
+/// The device's default input config, or its first supported config (at the
+/// maximum sample rate) when the default cannot be queried.
+fn input_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig, String> {
+    let default_err = match device.default_input_config() {
+        Ok(cfg) => return Ok(cfg),
+        Err(e) => e,
+    };
+    let fallback = device
+        .supported_input_configs()
+        .ok()
+        .and_then(|mut configs| configs.next())
+        .map(|range| range.with_max_sample_rate());
+    match fallback {
+        Some(cfg) => {
+            eprintln!("default input config unavailable ({default_err}); using a supported config");
+            Ok(cfg)
+        }
+        None => Err(input_error(device, default_err)),
+    }
+}
+
 fn build_input<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
@@ -212,7 +247,7 @@ where
             |err| eprintln!("input stream error: {err}"),
             None,
         )
-        .map_err(|e| e.to_string())
+        .map_err(|e| input_error(device, e))
 }
 
 fn build_output<T>(
@@ -270,7 +305,7 @@ async fn main() -> Result<(), String> {
     }
     let input = pick_device(&host, args.input_device.as_deref(), true)?;
     let output = pick_device(&host, args.output_device.as_deref(), false)?;
-    let in_cfg = input.default_input_config().map_err(|e| e.to_string())?;
+    let in_cfg = input_config(&input)?;
     let out_cfg = output.default_output_config().map_err(|e| e.to_string())?;
     eprintln!(
         "input: {input} ({} Hz), output: {output} ({} Hz). Use headphones: there is no echo \
@@ -322,7 +357,7 @@ async fn main() -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    in_stream.play().map_err(|e| e.to_string())?;
+    in_stream.play().map_err(|e| input_error(&input, e))?;
     out_stream.play().map_err(|e| e.to_string())?;
     let mut to_device = Resampler::new(OUTPUT_RATE, out_cfg.sample_rate());
     let mut pending: Vec<f32> = Vec::new();

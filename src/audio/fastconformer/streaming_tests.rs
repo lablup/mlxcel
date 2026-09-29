@@ -18,7 +18,7 @@ use super::tests::{mel, tiny_args, tiny_weights};
 use super::*;
 
 fn encoder() -> FastConformerEncoder {
-    FastConformerEncoder::from_weights(&tiny_weights("enc"), "enc", &tiny_args()).unwrap()
+    FastConformerEncoder::from_weights(&tiny_weights("enc"), "enc", &tiny_args(), (64, 4)).unwrap()
 }
 
 fn frame(x: &MlxArray, t: i32) -> Vec<f32> {
