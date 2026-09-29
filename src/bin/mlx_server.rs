@@ -223,7 +223,14 @@ fn parse_unit_interval(s: &str) -> Result<f32, String> {
 /// compatibility with existing scripts and llama-server drop-in usage.
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Download a HuggingFace model repository snapshot
+    /// Download a HuggingFace model repository snapshot.
+    ///
+    /// Fetches an `owner/name` repo-id into the global mlxcel store (or a
+    /// custom destination via `--local-dir`/`--models-dir`), reusing an
+    /// existing HuggingFace cache copy when one is already present instead
+    /// of re-fetching it. See the Examples section below for revision,
+    /// token, and file-filtering invocations.
+    #[command(verbatim_doc_comment)]
     Download(DownloadArgs),
 }
 

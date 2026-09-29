@@ -181,9 +181,9 @@ enum Commands {
     ///
     /// Examples:
     ///
-    ///     mlxcel inspect models/llama-3.2-1b-instruct-4bit
-    ///     mlxcel inspect models/llama-3.2-1b-instruct-4bit --max-tokens 32768
-    ///     mlxcel inspect models/llama-3.2-1b-instruct-4bit --cache-type-k int8 --cache-type-v int8
+    ///     mlxcel inspect -m models/llama-3.2-1b-instruct-4bit
+    ///     mlxcel inspect -m models/llama-3.2-1b-instruct-4bit --max-tokens 32768
+    ///     mlxcel inspect -m models/llama-3.2-1b-instruct-4bit --cache-type-k int8 --cache-type-v int8
     #[command(verbatim_doc_comment)]
     Inspect(InspectArgs),
 
