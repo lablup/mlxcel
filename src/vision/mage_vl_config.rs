@@ -173,9 +173,9 @@ impl MageVlVisionConfig {
             ));
         }
         if self.num_attention_heads == 0
-            || self.hidden_size % self.num_attention_heads != 0
-            || (self.head_dim() / 2) % 16 != 0
-            || self.head_dim() % 2 != 0
+            || !self.hidden_size.is_multiple_of(self.num_attention_heads)
+            || !(self.head_dim() / 2).is_multiple_of(16)
+            || !self.head_dim().is_multiple_of(2)
         {
             return Err(format!(
                 "Mage-VL vision tower needs head_dim/2 divisible by 16 for the 4:6:6 rotary \
