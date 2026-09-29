@@ -2407,6 +2407,14 @@ void paged_attention_merge_states(
     std::unique_ptr<MlxArray>& v_out,
     std::unique_ptr<MlxArray>& lse_out);
 
+// True when the resolved GPU backend has ports of all three paged-attention
+// kernels (v1 decode, v2 partial, merge), and of the merge kernel alone,
+// respectively. Read from the kernels' own `KernelPorts` tables through
+// `has_kernel_port`, so a predicate cannot disagree with the dispatch. Metal and
+// CUDA today; ROCm answers false until lablup/mlxcel#1814.
+bool paged_attention_kernels_available();
+bool paged_attention_merge_available();
+
 // Query heads one v2 CTA processes together, forwarded from
 // `mlxcel::turbo::paged_attention_v2_q_heads_per_cta` (issue #898). Always
 // divides `n_rep`. The Rust plan derives its CTA count from this so the plan

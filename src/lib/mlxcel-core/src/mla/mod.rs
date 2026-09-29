@@ -140,12 +140,11 @@ pub fn split_kv_enabled() -> bool {
     *ENABLED.get_or_init(|| parse_enabled(std::env::var(SPLIT_KV_ENV).ok().as_deref()))
         && absorbed_enabled()
         // The split path ends in `paged_attention_merge_states`, a custom
-        // kernel with Metal and CUDA ports only. On a backend without them the
-        // launcher would reach `fast::cuda_kernel`, whose throw crosses the
-        // cxx bridge into a `noexcept` extern and ends the process. Declining
-        // here takes the `absorbed_decode` fallback the caller already has
-        // for a plan that declines (issue #1803).
-        && crate::ffi::custom_kernels_available()
+        // kernel with Metal and CUDA ports only. On a backend without one the
+        // launch would be refused. Declining here takes the `absorbed_decode`
+        // fallback the caller already has for a plan that declines (issue
+        // #1803). The predicate reads the merge kernel's own port table.
+        && crate::ffi::paged_attention_merge_available()
 }
 
 /// The per-layer MLA shape the absorbed path needs.

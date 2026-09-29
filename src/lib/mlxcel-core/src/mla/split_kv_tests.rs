@@ -50,6 +50,7 @@ fn run_split(fx: &MlaFixture, chunk_len: i32) -> Vec<f32> {
 
 #[test]
 fn split_kv_matches_the_decompressed_reference_at_every_chunk_length() {
+    crate::test_support::kernel_ports::require_paged_merge_port!();
     let _guard = serial();
     // 37 rows: 8 gives a ragged last chunk of 5, 16 gives 5, 37 gives exactly
     // one chunk (the no-merge case), 64 exceeds the range entirely.
@@ -64,6 +65,7 @@ fn split_kv_matches_the_decompressed_reference_at_every_chunk_length() {
 
 #[test]
 fn split_kv_agrees_with_the_unsplit_stage_1_path() {
+    crate::test_support::kernel_ports::require_paged_merge_port!();
     let _guard = serial();
     // The regrouping property `paged_v2::launch_tests::merge_is_associative_across_regroupings`
     // pins for the kernel, restated at the MLA caller: how the range was cut
@@ -88,6 +90,7 @@ fn split_kv_agrees_with_the_unsplit_stage_1_path() {
 
 #[test]
 fn split_kv_records_its_own_path() {
+    crate::test_support::kernel_ports::require_paged_merge_port!();
     let _guard = serial();
     let _ = crate::mla::stats::take();
     let fx = MlaFixture::new(TINY, 1, 1, 20, 0x4242);
@@ -122,6 +125,7 @@ fn split_kv_declines_a_multi_token_step() {
 /// show that the log2 unit conversion is the thing making it correct.
 #[test]
 fn merge_rejects_natural_log_lse_units() {
+    crate::test_support::kernel_ports::require_paged_merge_port!();
     let _guard = serial();
     const HEADS: usize = 3;
     const DIM: usize = 5;

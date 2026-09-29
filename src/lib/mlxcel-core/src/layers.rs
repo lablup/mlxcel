@@ -5759,12 +5759,12 @@ pub(crate) fn paged_decode_backend() -> PagedDecodeBackend {
     use std::sync::OnceLock;
     static BACKEND: OnceLock<PagedDecodeBackend> = OnceLock::new();
     *BACKEND.get_or_init(|| {
-        // Asked first, so a backend with no fused kernel port can never be
-        // read as one that has it. `cuda_is_available()` is false on a ROCm
-        // build today, so this is belt and braces rather than a live fix, but
-        // the old order made correctness depend on that staying true
-        // (issue #1803).
-        if !crate::custom_kernels_available() {
+        // Asked first, so a backend with no paged-attention kernel port can
+        // never be read as one that has it. `cuda_is_available()` is false on
+        // a ROCm build today, so this is belt and braces rather than a live
+        // fix, but the old order made correctness depend on that staying true
+        // (issue #1803). The predicate reads the kernels' own port tables.
+        if !crate::paged_attention_kernels_available() {
             PagedDecodeBackend::Other
         } else if crate::metal_is_available() {
             PagedDecodeBackend::Metal

@@ -544,6 +544,10 @@ const mlxcel::KernelPorts& paged_v2_partial_ports() {
 
 } // namespace
 
+bool paged_attention_v2_partial_available() {
+    return mlxcel::has_kernel_port(paged_v2_partial_ports());
+}
+
 int paged_attention_v2_q_heads_per_cta(int dim, int n_rep) {
     if (n_rep < 1) {
         n_rep = 1;

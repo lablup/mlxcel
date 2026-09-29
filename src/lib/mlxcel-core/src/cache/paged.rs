@@ -1997,13 +1997,13 @@ impl PagedBlockPool {
             select_paged_v2_dispatch,
         };
 
-        // Both fused paths end in custom kernels with Metal and CUDA ports
-        // only. On a backend without them the launcher would reach
-        // `fast::cuda_kernel`, whose throw crosses the cxx bridge into a
-        // `noexcept` extern and ends the process, so decline before planning
-        // and let the caller's gather-then-SDPA fallback serve the step
-        // (issue #1803).
-        if !crate::ffi::custom_kernels_available() {
+        // Both fused paths end in the paged-attention kernels, which have
+        // Metal and CUDA ports only. On a backend without them the launch
+        // would be refused, so decline before planning and let the caller's
+        // gather-then-SDPA fallback serve the step (issue #1803). The
+        // predicate reads the kernels' own port tables, so a ROCm port
+        // (#1814) turns this path on without another edit here.
+        if !crate::ffi::paged_attention_kernels_available() {
             return Ok((
                 None,
                 PagedDecodeOutcome::NotServable(

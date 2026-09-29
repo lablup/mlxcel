@@ -204,6 +204,10 @@ const mlxcel::KernelPorts& paged_merge_ports() {
 
 } // namespace
 
+bool paged_attention_merge_states_available() {
+    return mlxcel::has_kernel_port(paged_merge_ports());
+}
+
 std::vector<mlx::core::array> paged_attention_merge_states(
     const mlx::core::array& v_in,
     const mlx::core::array& lse_in,

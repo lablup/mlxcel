@@ -440,6 +440,10 @@ const mlxcel::KernelPorts& paged_attention_ports() {
 
 } // namespace
 
+bool paged_attention_decode_available() {
+    return mlxcel::has_kernel_port(paged_attention_ports());
+}
+
 int paged_attention_num_splits_cap(int dim) {
     if (dim <= 0) {
         return 1;

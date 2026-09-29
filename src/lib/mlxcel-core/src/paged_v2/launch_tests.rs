@@ -283,6 +283,7 @@ fn run_with_chunk(batch: &Batch, pages_per_chunk: i32) -> Vec<f32> {
 
 #[test]
 fn single_chunk_matches_a_host_reference() {
+    crate::test_support::kernel_ports::require_paged_attention_port!();
     let batch = Batch::new(16, 4, 2, 64, &[40, 33], &[0, 0], dtype::FLOAT32, 0x51);
     let got = run_with_chunk(&batch, 64); // one chunk per request, no merge
     let err = max_rel_error(&got, &batch.reference());
@@ -291,6 +292,7 @@ fn single_chunk_matches_a_host_reference() {
 
 #[test]
 fn many_chunks_merge_to_the_same_answer() {
+    crate::test_support::kernel_ports::require_paged_attention_port!();
     let batch = Batch::new(16, 4, 2, 64, &[40, 33], &[0, 0], dtype::FLOAT32, 0x51);
     // One page per chunk: 3 chunks for request 0, 3 for request 1, so the merge
     // kernel is exercised with a variable-length grouping.
@@ -307,6 +309,7 @@ fn many_chunks_merge_to_the_same_answer() {
 
 #[test]
 fn chunk_size_does_not_change_the_answer() {
+    crate::test_support::kernel_ports::require_paged_attention_port!();
     let batch = Batch::new(
         32,
         8,
@@ -327,6 +330,7 @@ fn chunk_size_does_not_change_the_answer() {
 
 #[test]
 fn gqa_groups_read_the_right_kv_head() {
+    crate::test_support::kernel_ports::require_paged_attention_port!();
     // n_rep = 8: the CTA's q-head group split is exercised, and a mis-mapped
     // KV head would show up as a large error rather than a subtle one.
     let batch = Batch::new(16, 8, 1, 64, &[70], &[0], dtype::FLOAT32, 0x1234);
@@ -338,6 +342,7 @@ fn gqa_groups_read_the_right_kv_head() {
 
 #[test]
 fn a_trimmed_window_attends_only_to_visible_tokens() {
+    crate::test_support::kernel_ports::require_paged_attention_port!();
     // logical_start lands mid-page, so first_page_offset is non-zero and the
     // retired pages are absent from the CSR view entirely.
     let batch = Batch::new(16, 4, 2, 64, &[100, 64], &[37, 16], dtype::FLOAT32, 0x77);
@@ -352,6 +357,7 @@ fn a_trimmed_window_attends_only_to_visible_tokens() {
 
 #[test]
 fn an_empty_request_yields_zeros_without_poisoning_its_neighbours() {
+    crate::test_support::kernel_ports::require_paged_attention_port!();
     // Request 1 is fully trimmed: its chunk produces an all-empty partial
     // (lse = -inf), which must merge to zeros rather than NaN.
     let batch = Batch::new(
@@ -386,6 +392,7 @@ fn an_empty_request_yields_zeros_without_poisoning_its_neighbours() {
 
 #[test]
 fn f16_pools_match_the_gather_reference() {
+    crate::test_support::kernel_ports::require_paged_attention_port!();
     // The realistic dtype: f16 pool, f16 query, compared against the
     // gather-then-SDPA path the tree already trusts (ADR 0001 strategy A).
     let batch = Batch::new(32, 8, 2, 128, &[300, 129], &[0, 0], dtype::FLOAT16, 0x2026);
@@ -416,6 +423,7 @@ fn f16_pools_match_the_gather_reference() {
 
 #[test]
 fn two_pool_dtypes_at_one_geometry_do_not_share_a_compiled_kernel() {
+    crate::test_support::kernel_ports::require_paged_attention_port!();
     // Issue #1053. Both backends generate the kernel's buffer parameter types
     // from the runtime dtypes of the inputs, but only Metal folds those dtypes
     // into the JIT cache key. On CUDA the key was
@@ -506,6 +514,7 @@ fn the_entry_point_declines_a_batch_with_no_visible_tokens() {
 
 #[test]
 fn merge_kernel_matches_the_closed_form() {
+    crate::test_support::kernel_ports::require_paged_merge_port!();
     // Three output rows over 6 partials with a ragged grouping, including an
     // empty partial (lse = -inf) and a row with a single partial.
     let heads = 3usize;
@@ -571,6 +580,7 @@ fn merge_kernel_matches_the_closed_form() {
 
 #[test]
 fn merge_kernel_returns_zeros_for_an_all_empty_row() {
+    crate::test_support::kernel_ports::require_paged_merge_port!();
     let heads = 2usize;
     let dim = 4usize;
     let indptr = vec![0i32, 2];
@@ -593,6 +603,7 @@ fn merge_kernel_returns_zeros_for_an_all_empty_row() {
 
 #[test]
 fn merge_is_associative_across_regroupings() {
+    crate::test_support::kernel_ports::require_paged_merge_port!();
     // The property issue #903 depends on: merging (a, b) then c equals merging
     // a then (b, c), so a cascade can decompose the same partials differently.
     let heads = 2usize;

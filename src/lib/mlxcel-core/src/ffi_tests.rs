@@ -671,6 +671,7 @@ fn test_pooled_paged_decode_matches_dense_over_200_steps() {
 /// exercises its block-table indexing rather than a contiguous run.
 #[test]
 fn test_fused_paged_decode_matches_gather_over_200_steps() {
+    crate::test_support::kernel_ports::require_paged_attention_port!();
     use crate::cache::{PagedBlockPool, PagedSequenceState};
 
     const STEPS: usize = 200;

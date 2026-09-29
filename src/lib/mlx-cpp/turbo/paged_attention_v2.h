@@ -161,4 +161,11 @@ std::vector<mlx::core::array> paged_attention_merge_states(
     const mlx::core::array& lse_in,
     const mlx::core::array& o_indptr);
 
+// True when the resolved GPU backend has a port of the partial kernel, and of
+// the merge kernel, respectively. Each reads the `KernelPorts` table its
+// launcher dispatches through, so a predicate and its dispatch cannot disagree.
+// Metal and CUDA today; ROCm answers false until lablup/mlxcel#1814 ports them.
+bool paged_attention_v2_partial_available();
+bool paged_attention_merge_states_available();
+
 } // namespace mlxcel::turbo

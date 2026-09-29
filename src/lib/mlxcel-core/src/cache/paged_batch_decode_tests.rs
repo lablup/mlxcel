@@ -232,6 +232,7 @@ fn run_step(
 
 #[test]
 fn batched_decode_matches_the_gather_path_above_the_floor() {
+    crate::test_support::kernel_ports::require_paged_attention_port!();
     // 4 x 1024 = 4096 visible tokens, exactly the dispatch floor, so v2 runs.
     let (out, reference, stats) = run_step(&[1024, 1024, 1024, 1024], 8, 2, 64, 0xA11CE);
     assert!(
@@ -278,6 +279,7 @@ fn below_the_floor_the_batch_still_answers_correctly() {
 
 #[test]
 fn a_single_sequence_above_its_floor_takes_the_fused_path() {
+    crate::test_support::kernel_ports::require_paged_attention_port!();
     // The single-sequence decode path (`decode_single_step` -> the model's
     // one-sequence `forward`) reaches this entry point with a batch of one. Two
     // of the five scenarios in the issue's benchmark matrix are that shape, so
@@ -305,6 +307,7 @@ fn a_short_single_sequence_stays_on_gather() {
 
 #[test]
 fn a_batched_launch_just_under_a_nominal_1k_prompt_fuses() {
+    crate::test_support::kernel_ports::require_paged_attention_port!();
     // The exact shape the production benchmark delivered for its nominal 1K
     // scenario: 4 requests of 956 tokens. The first floor formulation summed to
     // 3824 and declined it; the two-regime floor requires 4 x 512 = 2048.
@@ -348,6 +351,7 @@ fn the_step_is_written_exactly_once() {
 
 #[test]
 fn a_steady_step_reuses_the_page_table() {
+    crate::test_support::kernel_ports::require_paged_attention_port!();
     let (pool, states) = fresh_pool(1, 2, 64);
     let mut rng = Rng::new(0x5EED);
     let mut caches: Vec<KVCache> = (0..4)
@@ -468,6 +472,7 @@ fn outcome_for(prompt_len: usize, slabbed: bool) -> PagedDecodeOutcome {
 
 #[test]
 fn a_multi_slab_layer_reports_the_knob_that_would_fix_it() {
+    crate::test_support::kernel_ports::require_paged_attention_port!();
     // The decline that silently disabled the whole fused path in the first #899
     // production benchmark. It has to name the slab counts and the knob, not
     // just return `None`.
@@ -489,6 +494,7 @@ fn a_multi_slab_layer_reports_the_knob_that_would_fix_it() {
 
 #[test]
 fn a_below_floor_launch_reports_both_numbers() {
+    crate::test_support::kernel_ports::require_paged_attention_port!();
     match outcome_for(64, true) {
         PagedDecodeOutcome::BelowFloor {
             batch,
@@ -505,6 +511,7 @@ fn a_below_floor_launch_reports_both_numbers() {
 
 #[test]
 fn a_fused_launch_reports_its_shape() {
+    crate::test_support::kernel_ports::require_paged_attention_port!();
     match outcome_for(8192, true) {
         PagedDecodeOutcome::Fused {
             batch,
