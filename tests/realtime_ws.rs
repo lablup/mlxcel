@@ -453,7 +453,7 @@ async fn connect_from(url: &str, origin: Option<&str>) -> Result<Socket, WsError
 }
 
 fn assert_forbidden(result: Result<Socket, WsError>) {
-    let err = result.err().expect("a disallowed origin must not upgrade");
+    let err = result.expect_err("a disallowed origin must not upgrade");
     assert!(
         matches!(&err, WsError::Http(r) if r.status() == 403),
         "{err:?}"
