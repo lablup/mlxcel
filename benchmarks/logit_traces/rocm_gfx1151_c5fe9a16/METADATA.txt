@@ -1,0 +1,13 @@
+host: AMD Ryzen AI MAX+ 395 with Radeon 8060S (gfx1151, RDNA 3.5, 40 CUs), 96 GiB VRAM carve-out, 31 GiB host RAM
+os: Debian GNU/Linux 13 (trixie), kernel 6.18.12+deb13-amd64
+rocm: 10.0.0 packages (HIP 7.15.26333, AMD clang 23), ROCM_PATH=/opt/rocm
+mlxcel_commit: c5fe9a16 on branch update/issue-1809-rocm-correctness-gate (lablup/mlxcel#1809), which is origin/main 4595b06f plus three commits: two that add the paged-attention port predicates and gate the paged-attention tests on them, and one that fixes get_2d_grid_dims in src/lib/mlx-cpp/patches-rocm (LOCAL_FIXES.md item 22). The PR's later commits add only documentation and these traces. Built with --features rocm, release profile, no RUSTFLAGS.
+mlx_pin: 81ba1c6a0e50a9268b931579c2d4f1158b9aab5a
+rocm_overlay_fork: NripeshN/mlx rocm-support @ 75915908dfe5028335d318b10340313744fd3a8d (src/lib/mlx-cpp/patches-rocm/UPSTREAM), plus the local fixes in LOCAL_FIXES.md
+logit_trace_sha256: 75d3089ac97eb4972c6728ea7c54d226ed154377872ec54deafe784ac8791f33
+corpus: tests/fixtures/wikitext2_excerpt.txt sha256 16721fc1057d69efc8493718fcad562de9e4554ce05369876cd06dcba431394e
+args: w1='1 128 8 0' w8='8 80 8 512' w256='256 2 8 0' (CHUNK_TOKENS MAX_CHUNKS TOPK PREFILL); w8ctx1536='8 40 8 1536' with MLXCEL_TRACE_START_TOKEN=1536 (gemma-3-4b-it only: every chunk sees 1536 tokens of context, past its 1024-token sliding window)
+checkpoints (mlx-community, Hugging Face revision): Qwen2.5-7B-Instruct-4bit@c26a38f6a37d0a51b4e9a1eb3026530fa35d9fed, gemma-3-4b-it-4bit@93724907d4ed1745d2fe50baadf3b0b01a65abf2, granite-4.0-h-tiny-4bit@02c8783da0cb171942e30a7dde8acce11fe82e0d, Qwen2.5-VL-3B-Instruct-4bit@46d4cf06a06ffc1a766c214174f9cbed2f45bcab, NVIDIA-Nemotron-3-Nano-30B-A3B-4bit@832f602eba5d22436c258c1462bdedc5afddb42b
+env: LD_LIBRARY_PATH unset; MLXCEL_KEEP_BF16 unset; MLXCEL_FUSED_MOE unset
+tags: 'default' = no MoE or kernel override. On ROCm the MoE layers of granite-4.0-h-tiny run gather_qmm (no fused MoE port), Nemotron-H runs forward_nonfused, and the Mamba2 layers of both run the SSD graph path at every width (no ssm_update port)
+gpu: another unit's processes shared the GPU during the runs; these are correctness traces, not timings
