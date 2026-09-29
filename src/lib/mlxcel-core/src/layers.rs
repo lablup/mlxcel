@@ -1857,11 +1857,9 @@ pub fn validate_quantization_mode_for_running_backend(mode: &str) -> Result<(), 
     let backend = crate::hardware::gpu_backend_kind();
     validate_quantization_mode_runnable(mode, backend)?;
     if let Some(line) = native_quantization_route_line(mode, backend) {
-        let slot = QuantMode::ALL
-            .iter()
-            .position(|m| m.as_str() == mode)
-            .expect("a route line implies a parsed mode");
-        if !LOGGED[slot].swap(true, Ordering::Relaxed) {
+        // A route line implies a parsed mode, so the slot always exists.
+        let slot = QuantMode::ALL.iter().position(|m| m.as_str() == mode);
+        if slot.is_some_and(|slot| !LOGGED[slot].swap(true, Ordering::Relaxed)) {
             eprintln!("{line}");
         }
     }

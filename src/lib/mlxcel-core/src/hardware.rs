@@ -311,9 +311,10 @@ impl GpuBackendKind {
     ///   gpt-oss-20b-MXFP4-Q4 (lablup/mlxcel#1818). For mxfp4 the committed
     ///   evidence is `tests/rocm_mxfp4_quant.rs` (#1808): GPU `quantize`,
     ///   `quantized_matmul` and `gather_qmm` against CPU references, each
-    ///   failing with its overlay fix reverted. NVFP4 converts to affine: the ROCm qmv dispatch implements
-    ///   group sizes 32, 64 and 128 only and throws for NVFP4's 16, and there
-    ///   is no E4M3 block-scale path.
+    ///   seen to fail with its overlay fix reverted while #1808 was worked.
+    ///   NVFP4 converts to affine: the ROCm qmv dispatch implements group
+    ///   sizes 32, 64 and 128 only and throws for NVFP4's 16, and there is no
+    ///   E4M3 block-scale path.
     #[must_use]
     pub const fn quant_mode_support(self, mode: QuantMode) -> QuantModeSupport {
         match (self, mode) {
