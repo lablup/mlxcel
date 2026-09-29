@@ -182,36 +182,19 @@ inline dim3 get_2d_grid_dims(const Shape& shape, const Strides& strides) {
   return dim3(std::get<0>(dims), std::get<1>(dims), std::get<2>(dims));
 }
 
+// Delegates to the shared helper, as the CUDA backend does
+// (`mlx/backend/cuda/kernel_utils.cu`). The fork carried an older local copy
+// that removed a dimension from the divisor only when the whole dimension
+// divided it and never divided the product by what was left, so a shape such
+// as [1, 48, 24, 24] with divisor 24 * 24 returned 576 blocks instead of 48.
+// `strided_scan` then launched twelve times the blocks it needed, and every
+// extra block read and wrote past the end of the array (a GPU memory fault at
+// [1, 48, 24, 24], silent out-of-bounds writes at smaller overshoots). See
+// LOCAL_FIXES.md item 22.
 inline dim3
 get_2d_grid_dims(const Shape& shape, const Strides& strides, size_t divisor) {
-  // Compute the 2d grid dimensions such that the total size of the grid is
-  // divided by divisor.
-  size_t grid_x = 1;
-  size_t grid_y = 1;
-  for (size_t i = 0; i < shape.size(); ++i) {
-    if (strides[i] == 0) {
-      continue;
-    }
-
-    // No need to add this shape we can just remove it from the divisor.
-    if (divisor % shape[i] == 0) {
-      divisor /= shape[i];
-      continue;
-    }
-
-    if (grid_x * shape[i] < UINT32_MAX) {
-      grid_x *= shape[i];
-    } else {
-      grid_y *= shape[i];
-    }
-  }
-  if (grid_y > UINT32_MAX || grid_x > UINT32_MAX) {
-    throw std::runtime_error("Unable to safely factor shape.");
-  }
-  if (grid_y > grid_x) {
-    std::swap(grid_x, grid_y);
-  }
-  return dim3(static_cast<uint32_t>(grid_x), static_cast<uint32_t>(grid_y), 1);
+  Dims dims = get_2d_grid_dims_common(shape, strides, divisor);
+  return dim3(std::get<0>(dims), std::get<1>(dims), std::get<2>(dims));
 }
 
 inline std::pair<dim3, dim3> get_grid_and_block(int dim0, int dim1, int dim2) {
