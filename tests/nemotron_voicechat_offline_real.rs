@@ -103,7 +103,11 @@ fn offline_turn_matches_reference() {
         rms(&want_audio)
     );
     assert!(rms(&result.audio) > 1e-3, "answer audio must not be silent");
-    if code_diff == 0 {
+    assert_eq!(
+        code_diff, 0,
+        "seeded EAR-TTS codes must reproduce the reference"
+    );
+    {
         let max_abs = result
             .audio
             .iter()

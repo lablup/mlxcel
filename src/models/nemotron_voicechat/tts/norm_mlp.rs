@@ -59,28 +59,7 @@ pub(crate) fn scalar(value: f64, dtype_id: i32) -> UniquePtr<MlxArray> {
     mlxcel_core::full_f32(&[], value as f32, dtype_id)
 }
 
-/// `mx.sum(x, axis=axis)` with MLX's native reduction for every dtype.
-///
-/// [`mlxcel_core::sum_axis`] widens half-precision inputs to `f32`, reduces
-/// and rounds once, which differs from the native bf16 `mx.sum` the
-/// reference runs (the codec port measured about 20% of bf16 codebook norms
-/// differing, enough to flip RVQ `argmin` codes). A pure-reduction `einsum`
-/// lowers to the native `sum`. Rank is limited to 8.
-pub(crate) fn native_sum_axis(x: &MlxArray, axis: usize) -> UniquePtr<MlxArray> {
-    const LETTERS: &str = "abcdefgh";
-    let rank = mlxcel_core::array_shape(x).len().min(LETTERS.len());
-    let input = &LETTERS[..rank];
-    let output: String = input
-        .chars()
-        .enumerate()
-        .filter(|&(i, _)| i != axis)
-        .map(|(_, c)| c)
-        .collect();
-    let spec = format!("{input}->{output}");
-    let operands = [x as *const MlxArray];
-    // SAFETY: the operand pointer borrows `x`, which outlives the call.
-    unsafe { mlxcel_core::einsum(&spec, &operands) }
-}
+pub(crate) use crate::audio::native_reduce::native_sum_axis;
 
 /// `nn.Linear.__call__`: `addmm(bias, x, W.T)` when a bias exists, `x @ W.T`
 /// otherwise.

@@ -44,7 +44,8 @@ prints `[user] <transcript>`, the assistant text, and `[function] <text>` when t
 Validated on `mlx-community/NemotronLabs-VoiceChat-11B-4bit` against the mlx-vlm reference on a synthesized "What is the capital of France?" question with the system prompt "Be concise and answer in one sentence." (env-gated tests under `tests/nemotron_voicechat_*_real.rs`, run with `MLXCEL_VOICECHAT_MODEL` and `MLXCEL_VOICECHAT_REF` set):
 
 - The transcript is "What is the capital of France?" and the answer is "The capital of France is Paris.", as in the reference.
-- Text and function ids match the reference exactly at every timeline position.
+- Text and function ids match the reference exactly at every timeline position, and with `--seed 0` the 31 EAR-TTS codes of every frame match the reference too (the port draws the same MLX global-RNG sequence), so the decoded answer audio matches the reference waveform.
+- Transcribing the generated answer audio back through the same checkpoint yields "The capital of France is Paris".
 - The FastConformer output matches the reference within 1e-6 (max abs); the codec reproduces the reference codes exactly and its decode within 1e-7.
 
 The codec is a lossy neural codec: a pure tone round-trips with a waveform SNR of about 0.7 dB in the reference too, so round-trip parity is checked against the reference reconstruction rather than an SNR threshold.

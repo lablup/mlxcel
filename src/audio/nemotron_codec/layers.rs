@@ -45,11 +45,7 @@ pub(crate) fn scalar_like(value: f32, like: &MlxArray) -> UniquePtr<MlxArray> {
 /// reduction to the native `sum`, matching the reference bit for bit.
 pub(crate) fn native_sum_last(x: &MlxArray, keepdims: bool) -> UniquePtr<MlxArray> {
     let shape = mlxcel_core::array_shape(x);
-    let letters = &"abcdefgh"[..shape.len().min(8)];
-    let spec = format!("{letters}->{}", &letters[..letters.len().saturating_sub(1)]);
-    let operands = [x as *const MlxArray];
-    // SAFETY: the operand pointer borrows `x`, which outlives the call.
-    let summed = unsafe { mlxcel_core::einsum(&spec, &operands) };
+    let summed = crate::audio::native_reduce::native_sum_axis(x, shape.len().saturating_sub(1));
     if keepdims {
         let mut kept = shape;
         if let Some(last) = kept.last_mut() {
