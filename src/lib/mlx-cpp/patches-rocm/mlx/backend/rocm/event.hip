@@ -318,7 +318,18 @@ hipError_t AtomicEvent::wait(hipStream_t stream, uint64_t value) {
 }
 
 hipError_t AtomicEvent::wait(Stream s, uint64_t value) {
-  assert(s.device.type != mlx::core::Device::cpu);
+  if (s.device == mlx::core::Device::cpu) {
+    // The CPU stream's task blocks on the counter; a failed signaling stream
+    // throws inside the task, which the scheduler records as the CPU stream's
+    // error (the Event layer goes through scheduler::wait_event instead).
+    scheduler::enqueue(s, [*this, value]() mutable {
+      if (hipError_t st = wait(value); st != hipSuccess) {
+        throw std::runtime_error(describe_device_error(
+            st, "waiting on a CPU stream for a stream's completion signal"));
+      }
+    });
+    return hipSuccess;
+  }
   auto& encoder = get_command_encoder(s);
   encoder.commit();
   return wait(encoder.stream(), value);
@@ -348,7 +359,12 @@ void AtomicEvent::signal(hipStream_t stream, uint64_t value) {
 }
 
 void AtomicEvent::signal(Stream s, uint64_t value) {
-  assert(s.device.type != mlx::core::Device::cpu);
+  if (s.device == mlx::core::Device::cpu) {
+    // Fence::update signals from CPU streams too; land the value from the
+    // stream's own task so it is ordered after the work it fences.
+    scheduler::enqueue(s, [*this, value]() mutable { signal(value); });
+    return;
+  }
   auto& encoder = get_command_encoder(s);
   encoder.commit();
   signal(encoder.stream(), value);

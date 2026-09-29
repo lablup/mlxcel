@@ -79,12 +79,14 @@ class AtomicEvent {
   // a CPU stream has no HIP status to fail with.
   [[nodiscard]] hipError_t wait(uint64_t value);
   [[nodiscard]] hipError_t wait(hipStream_t stream, uint64_t value);
-  // GPU-stream variant of wait(): commits |s| first and keeps the counter
-  // alive until the stream drains. |s| must be a GPU stream.
+  // Stream variant of wait(): a GPU stream is committed first and the host
+  // blocks; a CPU stream gets the wait as a scheduler task, whose failure is
+  // recorded as that stream's error, and hipSuccess is returned here.
   [[nodiscard]] hipError_t wait(Stream s, uint64_t value);
   void signal(uint64_t value);
   void signal(hipStream_t stream, uint64_t value);
-  // GPU-stream variant of signal(). |s| must be a GPU stream.
+  // Stream variant of signal(): from a GPU stream through the host callback,
+  // from a CPU stream (Fence::update) as a scheduler task on that stream.
   void signal(Stream s, uint64_t value);
   bool is_signaled(uint64_t value) const;
   // hipSuccess while the signal can still arrive, otherwise the failure status
