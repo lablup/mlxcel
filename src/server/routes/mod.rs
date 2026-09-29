@@ -40,6 +40,7 @@ pub mod mtp_policy;
 pub mod native_completion;
 pub mod prompt_inspection;
 pub mod props;
+pub mod realtime;
 pub mod rerank;
 pub mod responses;
 pub mod settings;
@@ -51,6 +52,10 @@ pub mod transcription_compat;
 #[cfg(test)]
 #[path = "availability_tests.rs"]
 mod availability_tests;
+
+#[cfg(test)]
+#[path = "realtime_route_tests.rs"]
+mod realtime_route_tests;
 
 #[cfg(test)]
 #[path = "stream_route_tests.rs"]
@@ -122,6 +127,9 @@ pub(crate) fn chat_unavailable_message(state: &AppState) -> Option<String> {
     if state.rerank_model.is_some() {
         routes.push("/v1/rerank");
         side_model_flags.push("--reranker-model <path>");
+    }
+    if state.realtime_engine.is_some() {
+        routes.push(realtime::REALTIME_PATH);
     }
     if let Some(audio) = state.audio_model.as_ref() {
         if audio.supports(AudioModelKind::Stt) {

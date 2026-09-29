@@ -556,6 +556,13 @@ fn build_routes(state: &AppState) -> Router<AppState> {
         app = app.route(&gcp.path_predict, post(crate::server::gcp_compat::predict));
     }
 
+    // Nemotron VoiceChat (#1376): the realtime WebSocket exists only when the
+    // engine does. Merged here so the API-key and `--api-prefix` layers wrap
+    // it like every other route; the upgrade request carries the key.
+    if let Some(engine) = state.realtime_engine.clone() {
+        app = app.merge(routes::realtime::realtime_router(engine));
+    }
+
     app
 }
 

@@ -231,7 +231,8 @@ toktrie_hf_tokenizers = "1.7"
 
 # HTTP Server
 tokio = { version = "1.52", features = ["full"] }
-axum = { version = "0.7", features = ["json", "macros", "multipart"] }
+# `ws`: the `/v1/realtime` VoiceChat WebSocket (#1376).
+axum = { version = "0.7", features = ["json", "macros", "multipart", "ws"] }
 tokio-stream = "0.1"
 tokio-util = "0.7"
 futures = "0.3"
@@ -363,6 +364,9 @@ rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem
 # graph through axum and hyper-util.
 http-body-util = "0.1"
 criterion = "0.5"
+# WebSocket client for the `/v1/realtime` tests and the VoiceChat file client
+# example (#1376). Same version axum's `ws` feature already pulls in.
+tokio-tungstenite = "0.24"
 
 [[bench]]
 name = "audio_fft"

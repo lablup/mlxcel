@@ -91,6 +91,72 @@ It pushes the input plus `--extra-decoding-seconds` of silence in 80 ms frames, 
 
 The streamed encoder equals the offline encoder for the first frames and then drifts slightly, because the reference's cache-aware subsampling window is not the offline full-utterance convolution; the port keeps the reference rule, and the streamed frames match the reference streaming path to float precision.
 
+## Realtime WebSocket (`/v1/realtime`)
+
+`mlxcel-server -m models/NemotronLabs-VoiceChat-11B-4bit --port 8080` (or `mlxcel serve`) loads the checkpoint on a dedicated realtime engine thread and serves the online session over a WebSocket at `/v1/realtime`. The chat worker, the batch scheduler and the text warmup are not started for this checkpoint; `/v1/chat/completions`, `/v1/completions`, `/v1/responses` and `/v1/messages` answer `501 Not Implemented` with a message naming `/v1/realtime`. `--api-key` applies to the upgrade request (send `Authorization: Bearer <key>`), and `--api-prefix` prefixes the path like every other route. The protocol follows the mlx-vlm reference server (`mlx_vlm/server/realtime.py`).
+
+All MLX work runs on the engine thread: the socket task sends `open`, `push`, `flush`, `cancel` and `close` commands over a channel and awaits a one-shot reply, and the engine serializes each event (base64 audio included) before replying. The MLX buffer cache is cleared when a session closes, not per frame.
+
+### Client messages (JSON text frames)
+
+| `type` | Fields | Behavior |
+|---|---|---|
+| `session.update` | `session.system_prompt` (string; absent uses the checkpoint default, which is empty), `session.seed` (non-negative integer, default 0), `session.max_streaming_seconds` (number, optional), `session.model` (optional, see below) | Opens the streaming session (warms EAR-TTS and prefills the system prompt), answered with `session.updated`. A second `session.update` on a configured connection is an `invalid_request` error. |
+| `input_audio_buffer.append` | `audio` (base64 little-endian PCM16 mono), `sample_rate` (default 16000; any other rate is rejected by the session) | Decoded to f32 by `/ 32768` and pushed in 1280-sample slices, one engine call per slice; each slice's events are sent before the next slice runs. |
+| `input_audio_buffer.commit` | `pad_partial` (default true) | Answered with `input_audio_buffer.committed`; the session is flushed (the partial frame zero-padded when `pad_partial`), its events end with `response.done`, and the server closes the socket (code 1000). |
+| `session.cancel`, `response.cancel` | | Emits `response.cancelled` and closes the socket (code 1000). |
+| `session.ping` | | `session.pong`. |
+
+Before `session.update`, every message other than `session.update` and `session.ping` is answered with an `invalid_request` error "send session.update before audio". After it, an unknown `type` is an `invalid_request` error. A frame that is not a JSON object is an `invalid_request` error and the loop continues. The server runs one model, so `session.model` may be omitted; any value opens the served checkpoint and `session.updated` reports the served id (`--alias`, else the model directory name).
+
+### Server events
+
+Every event carries `event_id` (`event_` plus 16 hex digits).
+
+| `type` | Fields |
+|---|---|
+| `session.created` | `session.id` (`sess_` plus 16 hex digits), `session.state: "configuring"`, `session.input_audio_format {type: "pcm16", sample_rate: 16000}`, `session.output_audio_format {type: "pcm16", sample_rate: 22050}` |
+| `session.updated` | `session.id`, `session.state: "ready"`, `session.model`, `session.frame_samples: 1280`, both formats |
+| `conversation.item.input_audio_transcription.delta` | `frame_index`, `delta`, cumulative `transcript` |
+| `response.text.delta` | `frame_index`, `token_id`, `delta`, cumulative `text` |
+| `response.function.delta` | `frame_index`, `token_id`, `delta`, cumulative `text` |
+| `response.audio.delta` | `frame_index`, `delta` (base64 PCM16 of `round(clip(x, -1, 1) * 32767)`, 1764 samples), `format: "pcm16"`, `sample_rate: 22050`, `channels: 1`, `audio_codes` (the frame's 31 codec codes) |
+| `input_audio_buffer.committed` | |
+| `response.done` / `response.cancelled` | `frame_index` |
+| `session.pong` | |
+| `error` | `error.code`, `error.message` |
+
+Error codes:
+
+| `error.code` | When |
+|---|---|
+| `invalid_request` | Unknown `type`, a non-object frame, audio before `session.update`, a second `session.update`. |
+| `server_busy` | Another connection holds the session; the socket is then closed with code 1013 (try again later). |
+| `session_initialization_failed` | `session.update` failed (an invalid field such as a negative seed or a non-positive `max_streaming_seconds`); the connection stays open and may retry. |
+| `inference_error` | An append whose `audio` is not valid base64 or has an odd byte count, a non-integer `sample_rate`, a rate other than 16 kHz, a stream past `max_streaming_seconds`, or a model failure. The loop continues; a failed append stops at the failing slice. |
+
+### One session at a time
+
+The engine admits one connection. A second connection while a session is active receives `server_busy` and close code 1013. The reservation is released when the session ends: after `commit` or `cancel` (before the server's close frame), and when the client disconnects, in which case the server cancels the unflushed session first. The next connection is then admitted normally.
+
+### Example
+
+`examples/voicechat_file_client.rs` drives a WAV file through the socket (16 kHz resampling, `--extra-seconds` of silence, default 3, then `commit`), prints the transcript and answer, and writes the received audio as a 22.05 kHz PCM16 WAV:
+
+```
+cargo run --release --example voicechat_file_client -- \
+  ws://127.0.0.1:8080/v1/realtime question.wav response_ws.wav \
+  --system-prompt "Be concise and answer in one sentence." --seed 0
+```
+
+A `websocat` session (`websocat ws://127.0.0.1:8080/v1/realtime`, client lines prefixed with `>`, audio payloads shortened):
+
+TRANSCRIPT_PLACEHOLDER
+
+The session is the same computation as `mlxcel generate --stream` for the same input, system prompt and seed: the transcript, the answer text, the frame count and the audio agree. The two outputs are not byte-identical files because they quantize differently: the CLI's WAV writer scales by 32768 while the wire format scales by 32767, as the reference does, so each sample may differ by one quantization step.
+
+A microphone client is not shipped yet; there is no echo cancellation in the model loop, so use headphones with any live client.
+
 ## Validation
 
 Validated on `mlx-community/NemotronLabs-VoiceChat-11B-4bit` against the mlx-vlm reference on a synthesized "What is the capital of France?" question with the system prompt "Be concise and answer in one sentence." (env-gated tests under `tests/nemotron_voicechat_*_real.rs`, run with `MLXCEL_VOICECHAT_MODEL` and `MLXCEL_VOICECHAT_REF` set):
@@ -116,5 +182,5 @@ Measure with `mlxcel generate ... --stream --profile` (the `realtime_factor` of 
 - Only the checkpoint's built-in `Aria` voice; a `speaker` other than `Aria` is rejected at load.
 - Batch size 1.
 - Offline turns are capped at 20 minutes of input (plus at most 600 s of `--extra-decoding-seconds`): the encoder builds a dense attention mask over the whole utterance, as the reference does.
-- No chat surface: interactive `mlxcel generate` without `--audio`, `mlxcel chat`, and `mlxcel serve` refuse the checkpoint with a pointer to the offline command. The `/v1/realtime` WebSocket session is tracked in #1376.
+- No chat surface: interactive `mlxcel generate` without `--audio` and `mlxcel chat` refuse the checkpoint with a pointer to the offline command, and `mlxcel serve` serves only the `/v1/realtime` WebSocket, one session at a time.
 - The converted MLX safetensors layout only; the original NeMo `.nemo` checkpoint is not loaded.

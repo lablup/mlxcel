@@ -2760,20 +2760,16 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         "effective KV cache mode"
     );
 
-    // Nemotron VoiceChat (issue #1374) is a full-duplex speech model with no
-    // chat or completions surface; its `LanguageModel` forward exists for
-    // trait completeness only. Refuse it before any worker loads the
-    // checkpoint rather than serving nonsense on the chat endpoints.
-    if matches!(
+    // Nemotron VoiceChat (issues #1374, #1376) is a full-duplex speech model
+    // with no chat or completions surface. It is served on the `/v1/realtime`
+    // WebSocket by a dedicated engine thread (spawned below, next to the audio
+    // wiring); the chat provider skips its worker for this model type, the
+    // text warmup is skipped, and the chat routes answer 501 naming the
+    // socket.
+    let is_voicechat = matches!(
         crate::models::get_model_type(&startup.model_path),
         Ok(crate::models::ModelType::NemotronVoiceChat)
-    ) {
-        anyhow::bail!(
-            "Nemotron VoiceChat is a full-duplex speech model without a chat or completions \
-             surface and cannot be served yet; run an offline turn with: mlxcel generate -m \
-             <model> --audio question.wav --output-audio answer.wav"
-        );
-    }
+    );
 
     // Florence-2 (issue #1073): the encoder-decoder (seq2seq) family is
     // served on its dedicated worker loop (`server/florence2_worker.rs`),
@@ -3269,7 +3265,11 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         batch_observability.clone(),
     )?);
 
-    if startup.warmup && is_image_seq2seq {
+    if startup.warmup && is_voicechat {
+        // No chat worker exists to warm, and the engine thread warms EAR-TTS
+        // itself when a session opens.
+        tracing::info!("Skipping text warmup for Nemotron VoiceChat (served on /v1/realtime)");
+    } else if startup.warmup && is_image_seq2seq {
         // The warmup prompt is the text literal "Hello"; the Florence-2
         // seq2seq worker rejects any request that is not a task marker with
         // exactly one image, so a warmup attempt would only log a spurious
@@ -3413,6 +3413,30 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
             _ => None,
         };
 
+    // Realtime VoiceChat wiring (#1376): load the checkpoint on the engine's
+    // own thread and block until it is ready, so `/health` is truthful once
+    // the listener binds. A failed load is fatal: the operator asked to serve
+    // this checkpoint and it has no other route to fall back to.
+    let realtime_engine = if is_voicechat {
+        let model_id = config
+            .model_alias
+            .clone()
+            .unwrap_or_else(|| model_provider.model_id().to_string());
+        tracing::info!(
+            "Detected Nemotron VoiceChat checkpoint; loading it on the realtime engine thread \
+             for /v1/realtime"
+        );
+        let engine = crate::server::realtime_engine::RealtimeVoiceChatEngine::spawn(
+            &startup.model_path,
+            model_id,
+        )
+        .map_err(|err| anyhow::anyhow!("failed to load Nemotron VoiceChat: {err:#}"))?;
+        tracing::info!("Nemotron VoiceChat ready; serving the /v1/realtime WebSocket");
+        Some(Arc::new(engine))
+    } else {
+        None
+    };
+
     // Embedding wiring (#1353): `--embedding-model` loads a second checkpoint
     // on its own worker thread; without it, an `-m` that detects as an
     // embedding kind is served on `/v1/embeddings` instead of chat (the chat
@@ -3484,7 +3508,8 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     .with_conversation_store(conversation_store)
     .with_audio_model(audio_model)
     .with_embedding_model(embedding_model)
-    .with_rerank_model(rerank_model);
+    .with_rerank_model(rerank_model)
+    .with_realtime_engine(realtime_engine);
     #[cfg(feature = "webui")]
     let state = state.with_webui_startup(Arc::new(startup.clone()));
     let app = match webui_policy {

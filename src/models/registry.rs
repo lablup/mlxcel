@@ -138,7 +138,6 @@ const EMBED: &[Runtime] = &[Runtime::Embed];
 const RERANK: &[Runtime] = &[Runtime::Rerank];
 const ASR: &[Runtime] = &[Runtime::Asr];
 const TTS: &[Runtime] = &[Runtime::Tts];
-const GENERATE_ONLY: &[Runtime] = &[Runtime::Generate];
 const DETECT: &[Runtime] = &[Runtime::Detect];
 
 const TEXT: &[Modality] = &[Modality::Text];
@@ -450,7 +449,9 @@ impl ModelType {
             ModelType::SequenceClassifier => RERANK,
             ModelType::Whisper => ASR,
             ModelType::Kokoro => TTS,
-            ModelType::NemotronVoiceChat => GENERATE_ONLY,
+            // `mlxcel generate` runs an offline turn; `mlxcel serve` exposes
+            // the `/v1/realtime` WebSocket (#1376).
+            ModelType::NemotronVoiceChat => GENERATE_SERVE,
             ModelType::Qwen3 | ModelType::Qwen3VL => GENERATE_SERVE_RERANK,
             _ => GENERATE_SERVE,
         };

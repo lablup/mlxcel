@@ -69,12 +69,16 @@ pub async fn health_check(State(state): State<AppState>) -> Response {
     // there is whether the worker the mode selected came up.
     let ready = if state.config.embedding_serving_mode.blocks_generation() {
         side_model_ready(&state)
-    } else if state.model_provider.is_chat_unavailable() && state.audio_model.is_some() {
+    } else if state.model_provider.is_chat_unavailable()
+        && (state.audio_model.is_some() || state.realtime_engine.is_some())
+    {
         // Whisper and Kokoro checkpoints are primary audio-only models: their
         // dedicated worker has already loaded before the provider is installed,
         // while the deliberately unused chat worker records a terminal state.
         // Treat that combination as ready so the documented `-m <checkpoint>`
-        // audio server can pass container health checks.
+        // audio server can pass container health checks. The realtime
+        // VoiceChat engine (#1376) likewise finishes loading before startup
+        // installs it.
         true
     } else {
         state.model_provider.is_loaded()

@@ -162,6 +162,15 @@ curl http://localhost:8080/v1/audio/transcriptions \
 
 Kokoro-82M checkpoints serve `POST /v1/audio/speech`. See [Audio API](docs/audio-api.md) for model layout, request formats, limits, streaming, and current backend constraints.
 
+A Nemotron VoiceChat checkpoint serves the full-duplex `/v1/realtime` WebSocket (base64 PCM16 in at 16 kHz, text, transcript and 22.05 kHz speech events out, one session at a time). `examples/voicechat_file_client.rs` drives a WAV file through it; the protocol is in [Nemotron VoiceChat](docs/nemotron-voicechat.md#realtime-websocket-v1realtime).
+
+```bash
+mlxcel-server -m models/NemotronLabs-VoiceChat-11B-4bit --port 8080
+cargo run --release --example voicechat_file_client -- \
+  ws://127.0.0.1:8080/v1/realtime question.wav answer.wav \
+  --system-prompt "Be concise and answer in one sentence."
+```
+
 ### Manage downloaded models
 
 ```bash

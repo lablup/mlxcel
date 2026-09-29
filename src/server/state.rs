@@ -556,6 +556,10 @@ pub struct AppState {
     /// `--reranker-model`); while it is `None` the route returns a structured
     /// `501 Not Implemented`.
     pub rerank_model: Option<Arc<dyn RerankModelProvider>>,
+    /// Realtime VoiceChat engine serving the `/v1/realtime` WebSocket
+    /// (#1376). `Some` only when `-m` is a Nemotron VoiceChat checkpoint;
+    /// the route is mounted only then.
+    pub realtime_engine: Option<Arc<super::realtime_engine::RealtimeVoiceChatEngine>>,
     /// Resumable-stream sessions for the b10621 `/v1/stream` lifecycle
     /// (#1444): streaming requests carrying `X-Conversation-Id` buffer their
     /// SSE bytes here for replay, lookup, and deletion.
@@ -778,6 +782,7 @@ impl AppState {
             audio_model: None,
             embedding_model: None,
             rerank_model: None,
+            realtime_engine: None,
             stream_sessions: Arc::new(super::stream_session::StreamSessionManager::new()),
             completion_controls: Arc::new(
                 super::completion_control::CompletionControlRegistry::new(),
@@ -847,6 +852,7 @@ impl AppState {
             audio_model: None,
             embedding_model: None,
             rerank_model: None,
+            realtime_engine: None,
             stream_sessions: Arc::new(super::stream_session::StreamSessionManager::new()),
             completion_controls: Arc::new(
                 super::completion_control::CompletionControlRegistry::new(),
@@ -949,6 +955,16 @@ impl AppState {
         provider: Option<Arc<dyn EmbeddingModelProvider>>,
     ) -> Self {
         self.embedding_model = provider;
+        self
+    }
+
+    /// Attach the realtime VoiceChat engine; mounts `/v1/realtime`.
+    #[must_use]
+    pub fn with_realtime_engine(
+        mut self,
+        engine: Option<Arc<super::realtime_engine::RealtimeVoiceChatEngine>>,
+    ) -> Self {
+        self.realtime_engine = engine;
         self
     }
 

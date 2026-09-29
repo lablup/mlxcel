@@ -369,7 +369,7 @@ where
 
 /// Extract a human-readable message from a caught panic payload, falling back to
 /// a generic per-direction message when the payload is not a string.
-fn panic_message(payload: &(dyn std::any::Any + Send), label: &str) -> String {
+pub(crate) fn panic_message(payload: &(dyn std::any::Any + Send), label: &str) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         (*s).to_string()
     } else if let Some(s) = payload.downcast_ref::<String>() {

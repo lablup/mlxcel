@@ -290,8 +290,10 @@ where
                 ))
             }
         });
+    // `with_upgrades`: the `/v1/realtime` WebSocket (#1376) takes the
+    // connection over after its 101 response. Plain HTTP is unaffected.
     if let Err(e) = ConnBuilder::new(TokioExecutor::new())
-        .serve_connection(TokioIo::new(io), service)
+        .serve_connection_with_upgrades(TokioIo::new(io), service)
         .await
     {
         // A client that disconnects mid-stream, or one that hits the

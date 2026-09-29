@@ -171,6 +171,7 @@ fn uses_single_stream_queue_admission(model_path: &std::path::Path) -> bool {
                 | crate::models::ModelType::Llada2Moe
                 | crate::models::ModelType::Florence2VLM
                 | crate::models::ModelType::NemotronParseVLM
+                | crate::models::ModelType::NemotronVoiceChat
         )
     })
 }
@@ -652,8 +653,38 @@ impl ModelProvider {
             .as_deref()
             .is_some_and(|reranker| reranker == model_path.as_path())
         {
+            let reason = format!(
+                "Chat generation is disabled: {} is served as a reranker on /v1/rerank, so the \
+                 chat worker did not load a second copy of its weights",
+                model_path.display()
+            );
             return Self::new_without_chat_model(
                 model_path,
+                "model-worker-rerank-only",
+                reason,
+                batch_metrics,
+                batch_observability,
+                decode_hang_timeout,
+            );
+        }
+
+        // Nemotron VoiceChat (#1376) has no chat or completions surface; the
+        // realtime engine thread (`server/realtime_engine.rs`) owns the only
+        // copy of its weights and serves `/v1/realtime`. Starting the chat
+        // worker would load the 11B checkpoint a second time for nothing.
+        if matches!(
+            crate::models::get_model_type(&model_path),
+            Ok(crate::models::ModelType::NemotronVoiceChat)
+        ) {
+            let reason = format!(
+                "Chat generation is disabled: {} is a Nemotron VoiceChat checkpoint served on the \
+                 /v1/realtime WebSocket",
+                model_path.display()
+            );
+            return Self::new_without_chat_model(
+                model_path,
+                "model-worker-realtime-only",
+                reason,
                 batch_metrics,
                 batch_observability,
                 decode_hang_timeout,
@@ -770,7 +801,9 @@ impl ModelProvider {
     /// Build a provider whose chat worker never loads a model.
     ///
     /// Used when `-m` names the checkpoint `--reranker-model` already owns
-    /// (#1356), so the reranker worker keeps the only copy of those weights.
+    /// (#1356), so the reranker worker keeps the only copy of those weights,
+    /// and for a Nemotron VoiceChat checkpoint, whose realtime engine owns
+    /// them (#1376). `reason` is logged once when the worker exits.
     /// The worker thread starts, logs why chat is unavailable and exits, which
     /// drops the request receiver and records a terminal no-chat state. Failed
     /// chat loads record the same state (`-m <embedding checkpoint>` reaches
@@ -778,6 +811,8 @@ impl ModelProvider {
     /// `/health` keeps its existing `loading model` behavior.
     fn new_without_chat_model(
         model_path: PathBuf,
+        thread_name: &str,
+        reason: String,
         batch_metrics: Arc<BatchMetrics>,
         batch_observability: Arc<BatchObservability>,
         decode_hang_timeout: Duration,
@@ -788,16 +823,13 @@ impl ModelProvider {
             .unwrap_or_else(|| "unknown".to_string());
         let (request_tx, request_rx) = mpsc::channel::<ModelRequest>();
         let chat_unavailable = Arc::new(AtomicBool::new(true));
-        let display_path = model_path.display().to_string();
-        let worker_handle = thread::Builder::new()
-            .name("model-worker-rerank-only".to_string())
-            .spawn(move || {
-                drop(request_rx);
-                tracing::info!(
-                    "Chat generation is disabled: {display_path} is served as a reranker on \
-                     /v1/rerank, so the chat worker did not load a second copy of its weights"
-                );
-            })?;
+        let worker_handle =
+            thread::Builder::new()
+                .name(thread_name.to_string())
+                .spawn(move || {
+                    drop(request_rx);
+                    tracing::info!("{reason}");
+                })?;
         let (worker_handle, worker_exit) = observe_worker_exit(worker_handle);
         Ok(Self {
             request_tx,
