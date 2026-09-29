@@ -229,10 +229,10 @@ inline std::pair<dim3, dim3> get_grid_and_block(int dim0, int dim1, int dim2) {
 // to be grid-stride, so a one-index-per-thread kernel launched with it left
 // every element past 65535 * 256 unwritten. It had no caller. Upstream CUDA's
 // helper of the same name does not cap x, so a kernel ported from
-// mlx/backend/cuda that calls it would inherit the truncation silently. The
-// kernels here compute their own geometry next to their loops instead
-// (binary.hip, unary.hip, hadamard.hip, sort.hip), and a grid clamped there is
-// only correct because the kernel is grid-stride. Any call fails to compile.
+// mlx/backend/cuda that calls it would inherit the truncation silently. No
+// kernel here used it; launch sites compute their geometry themselves, and a
+// grid clamped at a launch site is only correct if that kernel is grid-stride
+// (see hadamard.hip, sort.hip). Any call to this name fails to compile.
 template <typename... Args>
 void get_launch_args(Args&&...) = delete;
 
