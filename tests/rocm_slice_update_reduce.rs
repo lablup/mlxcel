@@ -24,12 +24,16 @@
 //! the same op on the CPU device, exactly, on int32 data. The above-threshold
 //! cases fail with the kernel change reverted (checked on gfx1151).
 //!
-//! The arrays are large (the NWORK=4 case holds about 67M int32 elements per
-//! array), so run the binary on its own and serially:
+//! The arrays are large: the NWORK=4 case holds five arrays of about 67M
+//! int32 elements (source, update, the GPU op's private source copy, and the
+//! two results), about 1.3 GB, so run the binary on its own and serially:
 //!
 //! ```sh
 //! cargo test --features rocm --test rocm_slice_update_reduce -- --test-threads=1
 //! ```
+//!
+//! Every test moves the process-global default device, so each holds
+//! `streams::lock_default_device` for its whole body.
 //!
 //! Skips on any other backend.
 
@@ -109,7 +113,6 @@ fn assert_gpu_matches_cpu(
     stops: &[i32],
     reduce: i32,
 ) {
-    let _lock = lock_default_device();
     let cpu = reduce_on(false, src, update, starts, stops, reduce);
     // The GPU op gets a private copy of the source. ROCm's
     // `SliceUpdate::eval_gpu` donates the source buffer whenever the buffer
@@ -166,6 +169,7 @@ fn contiguous_sum_nwork1_above_clamp() {
         eprintln!("skipping: not running on a ROCm device");
         return;
     }
+    let _lock = lock_default_device();
     // Odd: NWORK=1.
     contiguous_sum(16_777_217, 1);
 }
@@ -176,6 +180,7 @@ fn contiguous_sum_nwork2_above_clamp() {
         eprintln!("skipping: not running on a ROCm device");
         return;
     }
+    let _lock = lock_default_device();
     // 2 x an odd number: NWORK=2.
     contiguous_sum(33_554_434, 2);
 }
@@ -186,6 +191,7 @@ fn contiguous_sum_nwork4_above_clamp() {
         eprintln!("skipping: not running on a ROCm device");
         return;
     }
+    let _lock = lock_default_device();
     // 4 x an odd number: NWORK=4.
     contiguous_sum(67_108_868, 4);
 }
@@ -199,6 +205,7 @@ fn strided_max_above_clamp() {
         eprintln!("skipping: not running on a ROCm device");
         return;
     }
+    let _lock = lock_default_device();
     const SIDE: i32 = 4099;
     const COLS: i32 = SIDE - 2;
     let n = SIDE * COLS;
@@ -226,6 +233,43 @@ fn strided_max_above_clamp() {
     );
 }
 
+/// Sum through a transposed (non-row-contiguous) `[4099, 4097]` update into
+/// columns 1..4098 of a `[4099, 4099]` output: both the output and the update
+/// index come from `elem_to_loc` at the top of every chunk (NWORK=1).
+#[test]
+fn transposed_update_sum_above_clamp() {
+    if !on_rocm() {
+        eprintln!("skipping: not running on a ROCm device");
+        return;
+    }
+    let _lock = lock_default_device();
+    const SIDE: i32 = 4099;
+    const COLS: i32 = SIDE - 2;
+    let n = SIDE * COLS;
+    assert!(i64::from(n) > CLAMPED_THREADS);
+    let src = {
+        let _guard = DefaultDeviceGuard::gpu();
+        let out = mlxcel_core::reshape(&arange(0, SIDE * SIDE), &[SIDE, SIDE]);
+        mlxcel_core::eval(&out);
+        out
+    };
+    // `[COLS, SIDE]` transposed to `[SIDE, COLS]`: a strided view, not a copy.
+    let update = {
+        let _guard = DefaultDeviceGuard::gpu();
+        let out = mlxcel_core::transpose(&mlxcel_core::reshape(&arange(1, n + 1), &[COLS, SIDE]));
+        mlxcel_core::eval(&out);
+        out
+    };
+    assert_gpu_matches_cpu(
+        &format!("transposed-update Sum, {n} elements, NWORK=1"),
+        &src,
+        &update,
+        &[0, 1],
+        &[SIDE, SIDE - 1],
+        SUM,
+    );
+}
+
 /// Sum with a scalar update broadcast over 16,777,217 elements: the update
 /// index stays 0 on every grid-stride iteration.
 #[test]
@@ -234,6 +278,7 @@ fn scalar_sum_above_clamp() {
         eprintln!("skipping: not running on a ROCm device");
         return;
     }
+    let _lock = lock_default_device();
     let n: i32 = 16_777_217;
     assert!(i64::from(n) > CLAMPED_THREADS);
     let src = arange(0, n + 8);
@@ -262,6 +307,7 @@ fn every_reduce_below_clamp() {
         eprintln!("skipping: not running on a ROCm device");
         return;
     }
+    let _lock = lock_default_device();
     let src = {
         let _guard = DefaultDeviceGuard::gpu();
         // Values 1..=3 with sign changes, so Prod stays small and Max and Min
@@ -304,6 +350,7 @@ fn unknown_reduce_code_is_an_error() {
         eprintln!("skipping: not running on a ROCm device");
         return;
     }
+    let _lock = lock_default_device();
     let src = arange(0, 16);
     let update = arange(0, 4);
     let msg = mlxcel_core::slice_update_reduce(&src, &update, &[2], &[6], 4)
