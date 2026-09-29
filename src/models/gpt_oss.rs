@@ -1416,6 +1416,28 @@ mod tests {
     /// reaches it. The assertions are on the load result and no forward pass is
     /// run, so a regression fails cleanly here rather than aborting the test
     /// binary.
+    /// Issue #1806: gpt-oss threads its declared mode into the experts, so an
+    /// NVFP4 expert plane on a backend with no NVFP4 kernel must fail the load
+    /// naming the layer rather than abort in `gather_qmm`.
+    #[test]
+    fn gpt_oss_expert_linear_refuses_a_mode_the_backend_cannot_run() {
+        use mlxcel_core::hardware::{QuantMode, QuantModeSupport, quant_mode_support};
+        let prefix = "model.layers.0.mlp.experts.down_proj";
+        let plane = crate::models::switch_layers::nvfp4_expert_plane(prefix);
+        let loaded = ExpertLinear::from_weights(&plane, prefix, 16, 4, "nvfp4");
+        match quant_mode_support(QuantMode::Nvfp4) {
+            QuantModeSupport::Native => {
+                loaded.expect("a backend with native NVFP4 must keep loading it");
+            }
+            _ => {
+                let err = loaded
+                    .err()
+                    .expect("NVFP4 experts must be refused on this backend");
+                assert!(err.contains(prefix) && err.contains("nvfp4"), "{err}");
+            }
+        }
+    }
+
     #[test]
     fn gpt_oss_expert_linear_rejects_params_that_would_abort_gather_qmm() {
         let prefix = "model.layers.0.mlp.experts.gate_up_proj";

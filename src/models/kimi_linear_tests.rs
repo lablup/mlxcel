@@ -328,8 +328,30 @@ fn kimi_linear_multi_linear_infers_its_quantization_mode_from_the_biases_plane()
     // With no zero points the pair picks which block-float mode it is, on the
     // same rule the shared `UnifiedLinear` / `UnifiedEmbedding` loaders use.
     assert_eq!(load(GROUP_SIZE, BITS, false).mode, "mxfp4");
-    assert_eq!(load(16, 4, false).mode, "nvfp4");
     assert_eq!(load(64, 8, false).mode, "mxfp8");
+    // nvfp4 loads only where the backend can run it; elsewhere the load is
+    // refused naming the layer (issue #1806).
+    {
+        use mlxcel_core::hardware::{QuantMode, QuantModeSupport, quant_mode_support};
+        if quant_mode_support(QuantMode::Nvfp4) == QuantModeSupport::Native {
+            assert_eq!(load(16, 4, false).mode, "nvfp4");
+        } else {
+            let mut weights = WeightMap::new();
+            insert_stacked_quantized_expert_plane(
+                &mut weights,
+                PREFIX,
+                HEADS,
+                OUT,
+                PACKED_IN,
+                NUM_GROUPS,
+            );
+            weights.remove(&format!("{PREFIX}.biases"));
+            let err = MultiLinear::from_weights(&weights, PREFIX, 16, 4)
+                .err()
+                .expect("nvfp4 must be refused on this backend");
+            assert!(err.contains(PREFIX) && err.contains("nvfp4"), "{err}");
+        }
+    }
 
     // A dense projection never reaches `quantized_matmul`, so the mode is inert
     // there and must not be resolved from a pair the checkpoint does not carry.

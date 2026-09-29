@@ -1706,9 +1706,11 @@ pub fn validate_quantization_mode(mode: &str) -> Result<(), String> {
 /// checks never both report the same string.
 ///
 /// Used by: the shared dense and embedding loaders (through
-///          `reconcile_quantization_layout_logged`), and in the consuming crate
-///          `crate::models::switch_layers::SwitchLinear` (MoE experts) and
-///          `crate::models::gpt_oss::ExpertLinear`
+///          `reconcile_quantization_layout_logged`),
+///          [`QuantizedMultiLinear::from_weights`] (MLA), and in the consuming
+///          crate `crate::models::switch_layers::SwitchLinear` (MoE experts),
+///          `crate::models::gpt_oss::ExpertLinear` and `kimi_linear`'s private
+///          `MultiLinear`
 pub fn validate_quantization_mode_runnable(
     mode: &str,
     backend: crate::hardware::GpuBackendKind,
@@ -1720,13 +1722,20 @@ pub fn validate_quantization_mode_runnable(
     let name = backend.display_name();
     match backend.quant_mode_support(parsed) {
         QuantModeSupport::Native => Ok(()),
-        QuantModeSupport::ConvertTo(target) => Err(format!(
-            "quantization mode {parsed} has no native kernel on the {name} backend, and this \
-             checkpoint's {parsed} layout has no load-time conversion to {target} (mlxcel \
-             converts ModelOpt NVFP4 checkpoints automatically; this layer is in another \
-             layout). Re-quantize the model to {target} (for example with `mlx_lm.convert -q`) \
-             or run it on a backend with native {parsed} kernels"
-        )),
+        QuantModeSupport::ConvertTo(target) => {
+            let converted = if parsed == QuantMode::Nvfp4 {
+                " (mlxcel converts ModelOpt NVFP4 checkpoints automatically; this layer is in \
+                 another layout)"
+            } else {
+                ""
+            };
+            Err(format!(
+                "quantization mode {parsed} has no native kernel on the {name} backend, and this \
+                 checkpoint's {parsed} layout has no load-time conversion to {target}{converted}. \
+                 Re-quantize the model to {target} (for example with `mlx_lm.convert -q`) or run \
+                 it on a backend with native {parsed} kernels"
+            ))
+        }
         QuantModeSupport::Unsupported => Err(format!(
             "quantization mode {parsed} is not supported on the {name} backend and cannot be \
              converted at load. Re-quantize the model to a mode this backend runs (for example \
@@ -3710,6 +3719,9 @@ impl QuantizedMultiLinear {
         // an uncatchable abort at the first forward pass rather than a load
         // error.
         validate_quantization_biases(mode, biases.is_some())
+            .map_err(|e| format!("{prefix}: {e}"))?;
+        // A mode the running backend has no kernel for (issue #1806).
+        validate_quantization_mode_runnable(mode, crate::hardware::gpu_backend_kind())
             .map_err(|e| format!("{prefix}: {e}"))?;
 
         Ok(Self {
@@ -6976,10 +6988,22 @@ mod tests {
             (16, 1, false, 64, 8, "mxfp8"),
         ] {
             let weights = mla_quantized_weights("embed_q", packed_in, num_groups, with_biases);
-            let loaded = QuantizedMultiLinear::from_weights(&weights, "embed_q", group_size, bits)
-                .unwrap_or_else(|e| {
-                    panic!("an honest {expected} embed_q must load, got: {e}");
-                });
+            let result = QuantizedMultiLinear::from_weights(&weights, "embed_q", group_size, bits);
+            // Issue #1806: a mode the running backend cannot run is refused at
+            // load, naming the layer, so only runnable modes reach the asserts.
+            let runnable = crate::hardware::QuantMode::from_mlx_name(expected)
+                .map(crate::hardware::quant_mode_support)
+                == Some(crate::hardware::QuantModeSupport::Native);
+            if !runnable {
+                let err = result
+                    .err()
+                    .expect("a non-runnable mode must be refused at load");
+                assert!(err.contains("embed_q") && err.contains(expected), "{err}");
+                continue;
+            }
+            let loaded = result.unwrap_or_else(|e| {
+                panic!("an honest {expected} embed_q must load, got: {e}");
+            });
             assert_eq!(
                 loaded.mode, expected,
                 "a plane with biases present = {with_biases} at {group_size} / {bits} is {expected}"
@@ -7047,9 +7071,19 @@ mod tests {
         ] {
             for with_biases in [true, false] {
                 let weights = mla_quantized_weights("embed_q", packed_in, num_groups, with_biases);
-                let loaded =
-                    QuantizedMultiLinear::from_weights(&weights, "embed_q", group_size, bits)
-                        .unwrap_or_else(|e| panic!("{group_size} / {bits} is a real export: {e}"));
+                let result =
+                    QuantizedMultiLinear::from_weights(&weights, "embed_q", group_size, bits);
+                // Issue #1806: a mode the running backend cannot run (nvfp4 on
+                // ROCm) is refused at load; that refusal is its own test.
+                let mode = infer_quantization_mode(with_biases, group_size, bits);
+                if validate_quantization_mode_runnable(mode, crate::hardware::gpu_backend_kind())
+                    .is_err()
+                {
+                    assert!(result.is_err(), "{mode} must be refused on this backend");
+                    continue;
+                }
+                let loaded = result
+                    .unwrap_or_else(|e| panic!("{group_size} / {bits} is a real export: {e}"));
                 validate_quantization_biases(loaded.mode, loaded.biases.is_some()).unwrap_or_else(
                     |e| {
                         panic!(

@@ -518,6 +518,8 @@ enum Nvfp4RepackStrategy {
 /// that cannot take it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Nvfp4LoadRoute {
+    /// The backend the route was decided for; load errors name it.
+    backend: mlxcel_core::hardware::GpuBackendKind,
     strategy: Nvfp4RepackStrategy,
     /// Why this route was chosen, for the one-line load log.
     reason: String,
@@ -559,7 +561,10 @@ struct Nvfp4LoadRoute {
 ///
 /// Rows 2 and 3 are exactly the pre-#1806 function with the CUDA *build* flag
 /// replaced by the CUDA *runtime* backend, so Metal and CUDA choose the same
-/// routes they always did.
+/// routes they always did. The one input that moves is a CUDA build that finds
+/// no device (`GpuBackendKind::None`, running on the CPU): with
+/// `MLXCEL_NVFP4_DENSE_REPACK=1` its dense route now targets affine like every
+/// other non-CUDA backend instead of native NVFP4. The CPU runs both.
 fn nvfp4_repack_strategy(
     backend: mlxcel_core::hardware::GpuBackendKind,
     native_forced: bool,
@@ -580,6 +585,7 @@ fn nvfp4_repack_strategy(
                 );
             }
             return Ok(Nvfp4LoadRoute {
+                backend,
                 strategy: Nvfp4RepackStrategy::DenseAffine,
                 reason,
                 conversion_required: true,
@@ -626,6 +632,7 @@ fn nvfp4_repack_strategy(
         )
     };
     Ok(Nvfp4LoadRoute {
+        backend,
         strategy,
         reason,
         conversion_required: false,
@@ -640,6 +647,67 @@ fn current_nvfp4_repack_strategy() -> Result<Nvfp4LoadRoute, String> {
         nvfp4_native_repack_forced(),
         nvfp4_dense_repack_forced(),
     )
+}
+
+/// Reconstruct the dense `[out_dim, in_dim]` f32 matrix of a ModelOpt NVFP4
+/// triplet: `e2m1(nibble) * block_scale * weight_scale_2`, low nibble first.
+///
+/// This is the default ROCm load path (issue #1806), so rows are split across
+/// threads and each 16-element block reads its scale once. Every element is
+/// computed with the same expression and order as the historical serial loop,
+/// so the output is bit-identical to it. The caller has checked that
+/// `weight_bytes` holds `out_dim * in_dim / 2` bytes and `scale_bytes` holds
+/// `out_dim * in_dim / 16` little-endian f32 scales.
+fn dequantize_modelopt_nvfp4_rows(
+    weight_bytes: &[u8],
+    scale_bytes: &[u8],
+    scale2_val: f32,
+    out_dim: usize,
+    in_dim: usize,
+) -> Vec<f32> {
+    let group_size = NVFP4_SOURCE_GROUP_SIZE;
+    let packed_dim = in_dim / 2;
+    let num_groups = in_dim / group_size;
+    let mut out = vec![0f32; out_dim * in_dim];
+    if out.is_empty() {
+        return out;
+    }
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, 16);
+    let rows_per_thread = out_dim.div_ceil(threads).max(1);
+    std::thread::scope(|scope| {
+        for (chunk_idx, chunk) in out.chunks_mut(rows_per_thread * in_dim).enumerate() {
+            scope.spawn(move || {
+                let first_row = chunk_idx * rows_per_thread;
+                for (offset, row_out) in chunk.chunks_mut(in_dim).enumerate() {
+                    let row = first_row + offset;
+                    let row_bytes = &weight_bytes[row * packed_dim..(row + 1) * packed_dim];
+                    for group in 0..num_groups {
+                        let s = (row * num_groups + group) * 4;
+                        let scale_val = f32::from_le_bytes([
+                            scale_bytes[s],
+                            scale_bytes[s + 1],
+                            scale_bytes[s + 2],
+                            scale_bytes[s + 3],
+                        ]);
+                        let base = group * group_size;
+                        for col in base..base + group_size {
+                            let byte = row_bytes[col / 2];
+                            let nibble = if col % 2 == 0 {
+                                byte & 0x0F
+                            } else {
+                                (byte >> 4) & 0x0F
+                            };
+                            row_out[col] = fp4_e2m1_to_f32(nibble) * scale_val * scale2_val;
+                        }
+                    }
+                }
+            });
+        }
+    });
+    out
 }
 
 /// A ModelOpt NVFP4 layer the chosen route cannot repack.
@@ -660,7 +728,7 @@ fn nvfp4_layer_not_repacked(
              has no native NVFP4 kernel: {reason}. The checkpoint is malformed or uses a layout \
              mlxcel does not convert; use an affine-quantized export of the model, or run it on \
              Metal or CUDA",
-            mlxcel_core::hardware::gpu_backend_kind().display_name(),
+            route.backend.display_name(),
         ));
     }
     eprintln!("Skipping NVFP4 repack for {prefix}: {reason}");
@@ -689,6 +757,20 @@ fn repack_nvfp4_weights_to_quantized(
     weights: &mut mlxcel_core::weights::WeightMap,
     config: Option<&Value>,
 ) -> Result<(), String> {
+    if !weights.keys().any(|k| k.ends_with(".weight_scale_2")) {
+        return Ok(());
+    }
+    let route = current_nvfp4_repack_strategy()?;
+    repack_nvfp4_weights_with_route(weights, config, &route)
+}
+
+/// [`repack_nvfp4_weights_to_quantized`] with the route already decided, so
+/// tests can drive the ROCm conversion (and its load errors) on any host.
+fn repack_nvfp4_weights_with_route(
+    weights: &mut mlxcel_core::weights::WeightMap,
+    config: Option<&Value>,
+    route: &Nvfp4LoadRoute,
+) -> Result<(), String> {
     // Collect prefixes first to avoid borrowing conflicts during mutation.
     let fp4_prefixes: Vec<String> = weights
         .keys()
@@ -700,7 +782,6 @@ fn repack_nvfp4_weights_to_quantized(
         return Ok(());
     }
 
-    let route = current_nvfp4_repack_strategy()?;
     let strategy = route.strategy;
     let target = match strategy {
         Nvfp4RepackStrategy::DirectTranscode => "MLX native NVFP4 via direct triplet transcode",
@@ -729,13 +810,21 @@ fn repack_nvfp4_weights_to_quantized(
             // no weight at all there is nothing to run, so the orphaned scale2
             // key is simply dropped.
             if weights.contains_key(&weight_key) {
-                nvfp4_layer_not_repacked(&route, &prefix, &format!("{scale_key} is missing"))?;
+                nvfp4_layer_not_repacked(route, &prefix, &format!("{scale_key} is missing"))?;
             }
             weights.remove(&scale2_key);
             continue;
         }
 
-        let (weight_shape, weight_bytes, scale_bytes, scale2_size, scale2_val) = {
+        let (
+            weight_shape,
+            weight_dtype,
+            scale_shape,
+            weight_bytes,
+            scale_bytes,
+            scale2_size,
+            scale2_val,
+        ) = {
             let weight_arr = weights.get(&weight_key).unwrap();
             let scale_arr = weights.get(&scale_key).unwrap();
             let scale2_arr = weights.get(&scale2_key).unwrap();
@@ -744,6 +833,8 @@ fn repack_nvfp4_weights_to_quantized(
             mlxcel_core::eval(scale2_arr);
 
             let weight_shape = mlxcel_core::array_shape(weight_arr);
+            let weight_dtype = mlxcel_core::array_dtype(weight_arr);
+            let scale_shape = mlxcel_core::array_shape(scale_arr);
             let weight_bytes = mlxcel_core::array_to_raw_bytes(weight_arr);
             // The checkpoint stores the block scales as F8_E4M3; the Gemma 4
             // loader decodes them to f16 at load time (MLX has no native float8
@@ -770,6 +861,8 @@ fn repack_nvfp4_weights_to_quantized(
 
             (
                 weight_shape,
+                weight_dtype,
+                scale_shape,
                 weight_bytes,
                 scale_bytes,
                 scale2_size,
@@ -779,7 +872,7 @@ fn repack_nvfp4_weights_to_quantized(
 
         let Some(scale2_val) = scale2_val else {
             nvfp4_layer_not_repacked(
-                &route,
+                route,
                 &prefix,
                 &format!(
                     "{scale2_key} has {scale2_size} elements (expected a single-element scalar \
@@ -793,7 +886,7 @@ fn repack_nvfp4_weights_to_quantized(
         // Validate weight tensor is 2-D with positive dimensions.
         if weight_shape.len() < 2 {
             nvfp4_layer_not_repacked(
-                &route,
+                route,
                 &prefix,
                 &format!("weight tensor is {}-D (expected 2-D)", weight_shape.len()),
             )?;
@@ -802,7 +895,7 @@ fn repack_nvfp4_weights_to_quantized(
         }
         if weight_shape[0] <= 0 || weight_shape[1] <= 0 {
             nvfp4_layer_not_repacked(
-                &route,
+                route,
                 &prefix,
                 &format!(
                     "non-positive dimensions [{}, {}]",
@@ -823,7 +916,7 @@ fn repack_nvfp4_weights_to_quantized(
         // in_dim must be a multiple of group_size for scale indexing to be valid.
         if !in_dim.is_multiple_of(group_size) {
             nvfp4_layer_not_repacked(
-                &route,
+                route,
                 &prefix,
                 &format!("in_dim {in_dim} is not a multiple of source group_size {group_size}"),
             )?;
@@ -832,12 +925,41 @@ fn repack_nvfp4_weights_to_quantized(
         }
         let num_groups = in_dim / group_size;
 
+        // Where the layer must be converted, a layout the conversion would
+        // misread fails the load instead of being turned into wrong weights.
+        // The native route keeps its historical, looser checks.
+        if route.conversion_required {
+            let problem = if weight_shape.len() != 2 {
+                Some(format!(
+                    "weight tensor is {}-D (expected 2-D)",
+                    weight_shape.len()
+                ))
+            } else if weight_dtype != mlxcel_core::dtype::UINT8 {
+                Some(format!(
+                    "weight dtype {weight_dtype} is not packed U8 FP4 nibbles"
+                ))
+            } else if scale_shape != [out_dim as i32, num_groups as i32] {
+                Some(format!(
+                    "weight_scale shape {scale_shape:?} is not [{out_dim}, {num_groups}]"
+                ))
+            } else if i32::try_from(in_dim).is_err() {
+                Some(format!("in_dim {in_dim} does not fit an MLX shape"))
+            } else {
+                None
+            };
+            if let Some(problem) = problem {
+                nvfp4_layer_not_repacked(route, &prefix, &problem)?;
+                weights.remove(&scale2_key);
+                continue;
+            }
+        }
+
         // Validate raw byte buffer lengths match expected sizes before indexing.
         let expected_weight_bytes = out_dim * packed_dim;
         let expected_scale_bytes = out_dim * num_groups * 4; // F32 = 4 bytes each
         if weight_bytes.len() < expected_weight_bytes {
             nvfp4_layer_not_repacked(
-                &route,
+                route,
                 &prefix,
                 &format!(
                     "weight_bytes length {} < expected {expected_weight_bytes}",
@@ -849,7 +971,7 @@ fn repack_nvfp4_weights_to_quantized(
         }
         if scale_bytes.len() < expected_scale_bytes {
             nvfp4_layer_not_repacked(
-                &route,
+                route,
                 &prefix,
                 &format!(
                     "scale_bytes length {} < expected {expected_scale_bytes}",
@@ -950,62 +1072,59 @@ fn repack_nvfp4_weights_to_quantized(
             continue;
         }
 
-        let mut dequant_f32 = Vec::with_capacity(out_dim * in_dim);
-
-        for row in 0..out_dim {
-            for col in 0..in_dim {
-                let byte_idx = row * packed_dim + col / 2;
-                let nibble = if col % 2 == 0 {
-                    weight_bytes[byte_idx] & 0x0F // low nibble
-                } else {
-                    (weight_bytes[byte_idx] >> 4) & 0x0F // high nibble
-                };
-                let fp4_val = fp4_e2m1_to_f32(nibble);
-
-                // Block scale (normalized to F32, 4-byte little-endian).
-                let group_idx = col / group_size;
-                let scale_flat_idx = row * num_groups + group_idx;
-                let scale_val = f32::from_le_bytes([
-                    scale_bytes[scale_flat_idx * 4],
-                    scale_bytes[scale_flat_idx * 4 + 1],
-                    scale_bytes[scale_flat_idx * 4 + 2],
-                    scale_bytes[scale_flat_idx * 4 + 3],
-                ]);
-
-                dequant_f32.push(fp4_val * scale_val * scale2_val);
-            }
-        }
-
-        // Create a temporary f16 array with shape [out_dim, in_dim], then
-        // repack it immediately to MLX native NVFP4 so downstream linears stay
-        // on quantized_matmul instead of dense f16 matmul.
-        let new_shape = vec![out_dim as i32, in_dim as i32];
-        let new_arr = mlxcel_core::from_slice_f32(&dequant_f32, &new_shape);
-        let dense_f16 = mlxcel_core::astype(&new_arr, mlxcel_core::dtype::FLOAT16);
-        // Reached only when `strategy` is `DenseNative` or `DenseAffine` (the
-        // `DirectTranscode` branch above always `continue`s), so this matches
-        // on the same `strategy` value the direct-transcode gate used.
-        let quantized = if strategy == Nvfp4RepackStrategy::DenseNative {
-            mlxcel_core::quantize_weights_with_mode(
-                &dense_f16,
-                NVFP4_SOURCE_GROUP_SIZE as i32,
-                NVFP4_NATIVE_BITS,
-                NVFP4_NATIVE_MODE,
-            )
-        } else {
+        // The affine target group size depends only on in_dim, so an
+        // incompatible layer is refused before any dense work is paid for.
+        let affine_group_size = if strategy == Nvfp4RepackStrategy::DenseAffine {
             let configured_group_size = gemma4_configured_group_size(config);
-            let Some(affine_group_size) =
-                nvfp4_affine_group_size_for_in_dim(in_dim, configured_group_size)
+            let Some(group) = nvfp4_affine_group_size_for_in_dim(in_dim, configured_group_size)
             else {
                 nvfp4_layer_not_repacked(
-                    &route,
+                    route,
                     &prefix,
                     &format!("in_dim {in_dim} is not compatible with affine group sizes 32/64/128"),
                 )?;
                 weights.remove(&scale2_key);
                 continue;
             };
-            mlxcel_core::quantize_weights(&dense_f16, affine_group_size as i32, NVFP4_AFFINE_BITS)
+            Some(group)
+        } else {
+            None
+        };
+
+        let dequant_f32 = dequantize_modelopt_nvfp4_rows(
+            &weight_bytes,
+            &scale_bytes,
+            scale2_val,
+            out_dim,
+            in_dim,
+        );
+        drop(weight_bytes);
+        drop(scale_bytes);
+
+        // Create a temporary f16 array with shape [out_dim, in_dim], then
+        // repack it immediately so downstream linears stay on
+        // quantized_matmul instead of dense f16 matmul. The host buffer and
+        // the f32 array are released as soon as the f16 copy exists, which
+        // keeps the per-layer peak to one f32 copy plus the f16 matrix.
+        let new_shape = vec![out_dim as i32, in_dim as i32];
+        let new_arr = mlxcel_core::from_slice_f32(&dequant_f32, &new_shape);
+        drop(dequant_f32);
+        let dense_f16 = mlxcel_core::astype(&new_arr, mlxcel_core::dtype::FLOAT16);
+        mlxcel_core::eval(&dense_f16);
+        drop(new_arr);
+        // Reached only when `strategy` is `DenseNative` or `DenseAffine` (the
+        // `DirectTranscode` branch above always `continue`s), so this matches
+        // on the same `strategy` value the direct-transcode gate used.
+        let quantized = match affine_group_size {
+            None => mlxcel_core::quantize_weights_with_mode(
+                &dense_f16,
+                NVFP4_SOURCE_GROUP_SIZE as i32,
+                NVFP4_NATIVE_BITS,
+                NVFP4_NATIVE_MODE,
+            ),
+            Some(group) => {
+                mlxcel_core::quantize_weights(&dense_f16, group as i32, NVFP4_AFFINE_BITS)
+            }
         };
         let quantized_weight = mlxcel_core::quantized_weights_w(&quantized);
         let quantized_scales = mlxcel_core::quantized_weights_scales(&quantized);
@@ -2575,6 +2694,7 @@ mod tests {
     fn nvfp4_layer_not_repacked_fails_only_when_conversion_is_required() {
         let prefix = "language_model.model.layers.3.mlp.down_proj";
         let required = Nvfp4LoadRoute {
+            backend: mlxcel_core::hardware::GpuBackendKind::Rocm,
             strategy: Nvfp4RepackStrategy::DenseAffine,
             reason: String::new(),
             conversion_required: true,
@@ -2583,12 +2703,147 @@ mod tests {
         assert!(err.contains(prefix), "{err}");
         assert!(err.contains("in_dim 24 is odd"), "{err}");
         assert!(err.contains("affine"), "{err}");
+        assert!(
+            err.contains("ROCm"),
+            "the error names the route's backend: {err}"
+        );
 
         let optional = Nvfp4LoadRoute {
             conversion_required: false,
             ..required
         };
         assert!(nvfp4_layer_not_repacked(&optional, prefix, "in_dim 24 is odd").is_ok());
+    }
+
+    /// The ROCm route (`DenseAffine`, conversion required) driven on any
+    /// host through `repack_nvfp4_weights_with_route`, so the conversion and
+    /// its load errors are covered by Metal and CUDA CI too (issue #1806).
+    fn rocm_route() -> Nvfp4LoadRoute {
+        nvfp4_repack_strategy(mlxcel_core::hardware::GpuBackendKind::Rocm, false, false)
+            .expect("ROCm converts NVFP4")
+    }
+
+    /// A ModelOpt triplet `[2, 32]` of 1.0s: nibble 0x2 is E2M1 1.0, block
+    /// scales 1.0 as f16, `weight_scale_2` 1.0.
+    fn modelopt_triplet(
+        prefix: &str,
+        scale2: &[f32],
+        with_scales: bool,
+    ) -> mlxcel_core::weights::WeightMap {
+        let mut weights = mlxcel_core::weights::WeightMap::new();
+        weights.insert(
+            format!("{prefix}.weight"),
+            mlxcel_core::from_bytes(&[0x22u8; 32], &[2, 16], mlxcel_core::dtype::UINT8),
+        );
+        if with_scales {
+            let one = mlxcel_core::from_slice_f32(&[1.0; 4], &[2, 2]);
+            weights.insert(
+                format!("{prefix}.weight_scale"),
+                mlxcel_core::astype(&one, mlxcel_core::dtype::FLOAT16),
+            );
+        }
+        weights.insert(
+            format!("{prefix}.weight_scale_2"),
+            mlxcel_core::from_slice_f32(scale2, &[scale2.len() as i32]),
+        );
+        weights
+    }
+
+    #[test]
+    fn rocm_route_converts_a_modelopt_triplet_to_affine() {
+        let prefix = "model.layers.0.mlp.up_proj";
+        let mut weights = modelopt_triplet(prefix, &[1.0], true);
+        repack_nvfp4_weights_with_route(&mut weights, None, &rocm_route()).unwrap();
+        assert!(
+            weights.contains_key(&format!("{prefix}.biases")),
+            "affine zero points"
+        );
+        assert!(!weights.contains_key(&format!("{prefix}.global_scale")));
+        assert!(!weights.contains_key(&format!("{prefix}.weight_scale")));
+        assert!(!weights.contains_key(&format!("{prefix}.weight_scale_2")));
+        let w = weights.get(&format!("{prefix}.weight")).unwrap();
+        assert_eq!(mlxcel_core::array_dtype(w), mlxcel_core::dtype::UINT32);
+        // Affine 4-bit at group 32: [2, 32 * 4 / 32] words, one scale per row.
+        assert_eq!(mlxcel_core::array_shape(w), vec![2, 4]);
+        let scales = weights.get(&format!("{prefix}.scales")).unwrap();
+        assert_eq!(mlxcel_core::array_shape(scales), vec![2, 1]);
+    }
+
+    #[test]
+    fn rocm_route_fails_the_load_for_an_unconvertible_layer() {
+        let prefix = "model.layers.1.mlp.down_proj";
+        let mut bad_scale2 = modelopt_triplet(prefix, &[1.0, 1.0], true);
+        let err = repack_nvfp4_weights_with_route(&mut bad_scale2, None, &rocm_route())
+            .expect_err("a non-scalar weight_scale_2 cannot be converted");
+        assert!(
+            err.contains(prefix) && err.contains("weight_scale_2"),
+            "{err}"
+        );
+
+        let mut no_scales = modelopt_triplet(prefix, &[1.0], false);
+        let err = repack_nvfp4_weights_with_route(&mut no_scales, None, &rocm_route())
+            .expect_err("a packed weight without block scales cannot be converted");
+        assert!(
+            err.contains(prefix) && err.contains("weight_scale"),
+            "{err}"
+        );
+
+        let mut wrong_dtype = modelopt_triplet(prefix, &[1.0], true);
+        wrong_dtype.insert(
+            format!("{prefix}.weight"),
+            mlxcel_core::from_slice_f32(&[0.0; 32], &[2, 16]),
+        );
+        let err = repack_nvfp4_weights_with_route(&mut wrong_dtype, None, &rocm_route())
+            .expect_err("a non-U8 weight is not packed FP4");
+        assert!(err.contains(prefix) && err.contains("dtype"), "{err}");
+
+        // The same malformed layer on a native route keeps the historical skip.
+        let native =
+            nvfp4_repack_strategy(mlxcel_core::hardware::GpuBackendKind::Metal, false, false)
+                .unwrap();
+        let mut skipped = modelopt_triplet(prefix, &[1.0, 1.0], true);
+        repack_nvfp4_weights_with_route(&mut skipped, None, &native).unwrap();
+        assert!(!skipped.contains_key(&format!("{prefix}.scales")));
+    }
+
+    /// The threaded, per-block reconstruction must equal the historical
+    /// per-element serial loop bit for bit, or the dense-affine rollback on
+    /// Metal would drift.
+    #[test]
+    fn threaded_nvfp4_dequant_matches_the_serial_loop_bit_for_bit() {
+        let (out_dim, in_dim) = (37usize, 96usize);
+        let packed_dim = in_dim / 2;
+        let num_groups = in_dim / NVFP4_SOURCE_GROUP_SIZE;
+        let weight_bytes: Vec<u8> = (0..out_dim * packed_dim)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 7) as u8)
+            .collect();
+        let scale_bytes: Vec<u8> = (0..out_dim * num_groups)
+            .flat_map(|i| (0.013f32 * (i % 29) as f32 + 0.25).to_le_bytes())
+            .collect();
+        let scale2 = 0.731f32;
+        let mut serial = Vec::with_capacity(out_dim * in_dim);
+        for row in 0..out_dim {
+            for col in 0..in_dim {
+                let byte = weight_bytes[row * packed_dim + col / 2];
+                let nibble = if col % 2 == 0 {
+                    byte & 0x0F
+                } else {
+                    (byte >> 4) & 0x0F
+                };
+                let s = (row * num_groups + col / NVFP4_SOURCE_GROUP_SIZE) * 4;
+                let scale = f32::from_le_bytes([
+                    scale_bytes[s],
+                    scale_bytes[s + 1],
+                    scale_bytes[s + 2],
+                    scale_bytes[s + 3],
+                ]);
+                serial.push(fp4_e2m1_to_f32(nibble) * scale * scale2);
+            }
+        }
+        let threaded =
+            dequantize_modelopt_nvfp4_rows(&weight_bytes, &scale_bytes, scale2, out_dim, in_dim);
+        let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&threaded), bits(&serial));
     }
 
     // --- f8_e4m3_to_f32 tests ---

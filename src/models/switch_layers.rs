@@ -1554,6 +1554,21 @@ pub fn group_mask_scores(scores: &MlxArray, n_group: i32, topk_group: i32) -> Un
     mlxcel_core::reshape(&grouped, &[n, n_experts])
 }
 
+/// An NVFP4 expert plane (group 16, 4-bit, no zero points): 3 experts, out
+/// 4, in 64, so 8 packed words and 4 groups per row. Loader-only fixture;
+/// no kernel runs on it.
+#[cfg(test)]
+pub(crate) fn nvfp4_expert_plane(prefix: &str) -> WeightMap {
+    let mut plane = WeightMap::new();
+    for (leaf, last) in [("weight", 8), ("scales", 4)] {
+        plane.insert(
+            format!("{prefix}.{leaf}"),
+            mlxcel_core::from_slice_f32(&vec![0.0; (3 * 4 * last) as usize], &[3, 4, last]),
+        );
+    }
+    plane
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2052,6 +2067,28 @@ mod tests {
         );
         SwitchLinear::from_weights_with_mode(&regular, prefix, group, 4, "optiq")
             .expect("a non-quantized expert plane must not be gated on the declared mode");
+    }
+
+    /// Issue #1806: a stacked NVFP4 expert plane on a backend with no NVFP4
+    /// kernel fails the load naming the layer, instead of aborting in
+    /// `gather_qmm`; where the backend runs NVFP4 it still loads.
+    #[test]
+    fn switch_linear_refuses_a_mode_the_backend_cannot_run() {
+        use mlxcel_core::hardware::{QuantMode, QuantModeSupport, quant_mode_support};
+        let prefix = "model.layers.0.mlp.switch_mlp.up_proj";
+        let plane = nvfp4_expert_plane(prefix);
+        let loaded = SwitchLinear::from_weights_with_mode(&plane, prefix, 16, 4, "nvfp4");
+        match quant_mode_support(QuantMode::Nvfp4) {
+            QuantModeSupport::Native => {
+                loaded.expect("a backend with native NVFP4 must keep loading it");
+            }
+            _ => {
+                let err = loaded
+                    .err()
+                    .expect("NVFP4 experts must be refused on this backend");
+                assert!(err.contains(prefix) && err.contains("nvfp4"), "{err}");
+            }
+        }
     }
 
     #[test]

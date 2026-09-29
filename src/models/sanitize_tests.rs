@@ -598,9 +598,13 @@ fn load_and_sanitize_weights_repacks_nvfp4_gemma4_checkpoint() {
 /// Non-CUDA rollback coverage for issue #705: direct native NVFP4 is now the
 /// default, but `MLXCEL_NVFP4_DENSE_REPACK=1` still preserves the previous
 /// dense-affine route for prefill-sensitive A/B comparisons.
-#[cfg(not(feature = "cuda"))]
 #[test]
 fn load_and_sanitize_weights_dense_repack_env_keeps_non_cuda_affine_rollback() {
+    // The dense target is keyed on the runtime backend (issue #1806): CUDA's
+    // dense route targets native NVFP4, every other backend's targets affine.
+    if mlxcel_core::hardware::gpu_backend_kind() == mlxcel_core::hardware::GpuBackendKind::Cuda {
+        return;
+    }
     let _env_guard = env_lock();
     let _nvfp4_env =
         EnvRestore::set_with_clear(NVFP4_REPACK_ENV_KEYS, "MLXCEL_NVFP4_DENSE_REPACK", "1");
