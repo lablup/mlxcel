@@ -139,6 +139,10 @@ pub enum LoadedModel {
     /// CLI early-exits to its page driver and the server serves it on its
     /// dedicated single-stream worker.
     NemotronParseVLM(models::NemotronParseVlmModel),
+    /// Nemotron VoiceChat (issue #1374): full-duplex speech model. The CLI
+    /// routes it to its offline timeline loop before the autoregressive
+    /// loop; the `LanguageModel` delegation exists for trait completeness.
+    NemotronVoiceChat(models::NemotronVoiceChatModel),
     Gemma3n(models::Gemma3nModel),
     Gemma3nVLM(vision::Gemma3nVLModel),
     Phi(models::PhiModel),
@@ -319,6 +323,7 @@ macro_rules! delegate_language_model {
             LoadedModel::Moondream2VLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Florence2VLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::NemotronParseVLM(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::NemotronVoiceChat(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Gemma3n(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Gemma3nVLM(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Phi(inner) => LanguageModel::$method(inner, $($arg),*),

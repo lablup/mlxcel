@@ -127,6 +127,12 @@ impl VoiceChatLanguageModel {
         self.llm.make_caches()
     }
 
+    /// The wrapped Nemotron-H model (text head only), for the generic
+    /// `LanguageModel` delegation.
+    pub fn backbone(&self) -> &NemotronHModel {
+        &self.llm
+    }
+
     /// Hidden size of the backbone (4480 for the released checkpoints).
     pub fn hidden_size(&self) -> usize {
         self.llm.hidden_size()

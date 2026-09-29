@@ -315,6 +315,9 @@ fn try_load_vlm_model_from_dir(
         ModelType::Moondream2VLM => Some(load_moondream2_vlm(model_path)?),
         ModelType::Florence2VLM => Some(load_florence2_vlm(model_path)?),
         ModelType::NemotronParseVLM => Some(load_nemotron_parse_vlm(model_path)?),
+        ModelType::NemotronVoiceChat => Some(LoadedModel::NemotronVoiceChat(
+            crate::models::NemotronVoiceChatModel::load(model_path)?,
+        )),
         ModelType::Gemma3nVLM => Some(load_gemma3n_vlm(model_path)?),
         ModelType::Phi4MMVLM => Some(load_phi4mm_vlm(model_path)?),
         ModelType::Phi4SigLipVLM => Some(load_phi4_siglip_vlm(model_path)?),

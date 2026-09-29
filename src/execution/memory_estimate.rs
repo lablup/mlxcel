@@ -1117,6 +1117,7 @@ fn inspect_registry_id(model_type: ModelType) -> &'static str {
         ModelType::RecurrentGemma => "recurrent_gemma",
         ModelType::Whisper => "whisper",
         ModelType::Kokoro => "kokoro",
+        ModelType::NemotronVoiceChat => "nemotron_voicechat",
         ModelType::Bert => "bert",
         ModelType::XlmRoberta => "xlm_roberta",
         ModelType::ModernBert => "modernbert",

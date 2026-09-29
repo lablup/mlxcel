@@ -478,6 +478,9 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // Kokoro is a TTS model served through /v1/audio/speech, never routed
         // to tensor-parallel text inference; placeholder keeps the table total.
         ModelType::Kokoro => "kokoro",
+        // Nemotron VoiceChat runs its own duplex timeline, never tensor-parallel
+        // text inference; placeholder keeps the table total.
+        ModelType::NemotronVoiceChat => "nemotron_voicechat",
         // Embedding families are served through /v1/embeddings on their own
         // worker and never reach tensor-parallel text inference; the loader
         // rejects them earlier. Placeholder keeps the table total.

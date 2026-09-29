@@ -411,6 +411,7 @@ pub use whisper::WhisperModel;
 pub use youtu_vl_lm::YoutuLanguageModel;
 
 pub use kokoro::KokoroModel;
+pub use nemotron_voicechat::NemotronVoiceChatModel;
 
 /// Supported model types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -669,6 +670,12 @@ pub enum ModelType {
     // Text-to-speech (StyleTTS2 acoustic model + built-in iSTFTNet vocoder)
     Kokoro,
 
+    /// Nemotron VoiceChat (`nemotron_voicechat`): full-duplex speech model
+    /// (FastConformer + RNNT, Nemotron-H with text and function heads,
+    /// EAR-TTS, neural codec). Runs its own timeline loop, not the
+    /// autoregressive decode loop.
+    NemotronVoiceChat,
+
     // Embedding models served through /v1/embeddings (epic #1348). Detected by
     // encoder-only `model_type`, embedding `architectures[0]`, a
     // `modules.json` Pooling entry or a `1_Pooling/config.json`.
@@ -894,6 +901,8 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Whisper,
     // Text-to-speech
     ModelType::Kokoro,
+    // Speech-to-speech (full duplex)
+    ModelType::NemotronVoiceChat,
     // Embedding models
     ModelType::Bert,
     ModelType::XlmRoberta,
@@ -1151,6 +1160,12 @@ impl ModelType {
 
             // ----- Text-to-speech (TTS) -----
             ModelType::Kokoro => ("Kokoro (StyleTTS2 + iSTFTNet)", "Text-to-speech"),
+
+            // ----- Speech-to-speech (full duplex) -----
+            ModelType::NemotronVoiceChat => (
+                "Nemotron VoiceChat (FastConformer + Nemotron-H + EAR-TTS + codec, full duplex)",
+                "Speech",
+            ),
 
             // ----- Embedding models (/v1/embeddings) -----
             ModelType::Bert => ("BERT / MiniLM encoder", "Embedding"),
@@ -1504,6 +1519,7 @@ mod metadata_tests {
             RecurrentGemma,
             Whisper,
             Kokoro,
+            NemotronVoiceChat,
             Bert,
             XlmRoberta,
             ModernBert,

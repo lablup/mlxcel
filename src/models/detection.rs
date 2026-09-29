@@ -1002,6 +1002,9 @@ pub(crate) fn detect_model_type_with_probes<P: ModelDetectionProbes + ?Sized>(
         }
         "plamo2" => Ok(ModelType::Plamo2),
         "granitemoehybrid" => Ok(ModelType::GraniteMoeHybrid),
+        // Nemotron VoiceChat nests a `nemotron_h` text_config; the top-level
+        // type must win before any text_config fallback routes it to NemotronH.
+        "nemotron_voicechat" => Ok(ModelType::NemotronVoiceChat),
         "nemotron_h" => Ok(ModelType::NemotronH),
         "nemotron_h_nano_omni" | "nemotronh_nano_omni_reasoning_v3" => {
             Ok(ModelType::NemotronHNanoOmniVLM)

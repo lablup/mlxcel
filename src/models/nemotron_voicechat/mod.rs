@@ -14,4 +14,9 @@
 
 //! NemotronLabs VoiceChat: full-duplex speech model.
 
+pub mod config;
 pub mod llm;
+pub mod model;
+
+pub use config::VoiceChatConfig;
+pub use model::NemotronVoiceChatModel;

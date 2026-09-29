@@ -192,6 +192,35 @@ fn nemotron_parse_model_type_is_detected() {
 }
 
 #[test]
+fn nemotron_voicechat_model_type_is_detected() {
+    // The VoiceChat checkpoint nests a `nemotron_h` text_config; detection
+    // must route on the top-level `nemotron_voicechat` value (issue #1374).
+    let model_dir = temp_path("nemotron_voicechat");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "nemotron_voicechat",
+            "architectures": ["NemotronVoiceChatForConditionalGeneration"],
+            "text_config": {
+                "model_type": "nemotron_h",
+                "hidden_size": 4480,
+                "hybrid_override_pattern": "M-M*"
+            },
+            "audio_config": {"output_dim": 4480},
+            "tts_config": {"hidden_size": 1152},
+            "codec_config": {"sample_rate": 22050}
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::NemotronVoiceChat);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
 fn florence2_model_type_is_detected() {
     // Florence-2 declares `model_type: "florence2"` at the top level. The
     // real checkpoint's `vision_config.model_type` is an empty string, so

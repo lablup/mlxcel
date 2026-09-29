@@ -138,6 +138,7 @@ const EMBED: &[Runtime] = &[Runtime::Embed];
 const RERANK: &[Runtime] = &[Runtime::Rerank];
 const ASR: &[Runtime] = &[Runtime::Asr];
 const TTS: &[Runtime] = &[Runtime::Tts];
+const GENERATE_ONLY: &[Runtime] = &[Runtime::Generate];
 const DETECT: &[Runtime] = &[Runtime::Detect];
 
 const TEXT: &[Modality] = &[Modality::Text];
@@ -412,6 +413,7 @@ impl ModelType {
             ModelType::RecurrentGemma => "recurrent_gemma",
             ModelType::Whisper => "whisper",
             ModelType::Kokoro => "kokoro",
+            ModelType::NemotronVoiceChat => "nemotron_voicechat",
             ModelType::Bert => "bert",
             ModelType::XlmRoberta => "xlm_roberta",
             ModelType::ModernBert => "modernbert",
@@ -447,6 +449,7 @@ impl ModelType {
             ModelType::SequenceClassifier => RERANK,
             ModelType::Whisper => ASR,
             ModelType::Kokoro => TTS,
+            ModelType::NemotronVoiceChat => GENERATE_ONLY,
             ModelType::Qwen3 | ModelType::Qwen3VL => GENERATE_SERVE_RERANK,
             _ => GENERATE_SERVE,
         };
@@ -465,7 +468,7 @@ impl ModelType {
             | ModelType::ColIdefics3
             | ModelType::ColQwen25 => OutputKind::Embeddings,
             ModelType::SequenceClassifier => OutputKind::Scores,
-            ModelType::Kokoro => OutputKind::Audio,
+            ModelType::Kokoro | ModelType::NemotronVoiceChat => OutputKind::Audio,
             _ => OutputKind::Tokens,
         };
         let modalities_in = modalities_for(self);
@@ -532,6 +535,7 @@ impl ModelType {
             ModelType::SequenceClassifier => "reranker",
             ModelType::Whisper => "asr",
             ModelType::Kokoro => "tts",
+            ModelType::NemotronVoiceChat => "speech_to_speech",
             ModelType::DiffusionGemma | ModelType::Llada2Moe => "diffusion",
             ModelType::BailingMoeLinear
             | ModelType::KimiLinear
@@ -828,6 +832,7 @@ fn model_type_keys(model_type: ModelType) -> &'static [&'static str] {
         ModelType::NemotronParseVLM => &["nemotron_parse"],
         ModelType::Whisper => &["whisper"],
         ModelType::Kokoro => &["kokoro"],
+        ModelType::NemotronVoiceChat => &["nemotron_voicechat"],
         ModelType::Bert => &["bert"],
         ModelType::XlmRoberta => &["xlm-roberta", "xlm_roberta"],
         ModelType::ModernBert => &["modernbert"],
@@ -848,7 +853,7 @@ fn model_type_keys(model_type: ModelType) -> &'static [&'static str] {
 
 fn modalities_for(model_type: ModelType) -> &'static [Modality] {
     match model_type {
-        ModelType::Whisper => AUDIO,
+        ModelType::Whisper | ModelType::NemotronVoiceChat => AUDIO,
         ModelType::Qwen3VLEmbedding
         | ModelType::LlamaNemotronVLEmbedding
         | ModelType::ColIdefics3
