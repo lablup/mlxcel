@@ -15,6 +15,8 @@
 #include "sparse_v_sdpa.h"
 
 #include <mlx/fast.h>
+
+#include "kernel_port.h"
 #include <mlx/ops.h>
 
 #include <mutex>
@@ -217,6 +219,22 @@ inline SparseVKernelHolder& get_sparse_v_kernel() {
     return holder;
 }
 
+// This kernel's ports, in one place (#1801). Metal only: the packed-V weighted sum is a Metal JIT kernel.
+const mlxcel::KernelPorts& sparse_v_ports() {
+    static const mlxcel::KernelPorts ports{
+        .metal = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_sparse_v_kernel().get();
+        },
+        // No CUDA or HIP port. Callers reach this only through
+        // `cache::turbo::sparse_v::kernel_enabled()`, which is false off macOS,
+        // so the refusal below is unreachable in practice; it exists so that a
+        // caller which skips that gate gets an error and not an abort.
+        .cuda = nullptr,
+        .rocm = nullptr,
+    };
+    return ports;
+}
+
 } // namespace
 
 mlx::core::array sparse_v_weighted_sum(
@@ -236,7 +254,8 @@ mlx::core::array sparse_v_weighted_sum(
     int bhq = w_shape[0];
     int tq = w_shape[1];
 
-    auto& kernel = get_sparse_v_kernel().get();
+    auto& kernel = mlxcel::select_kernel_port(
+        "sparse_v", "graph fallback", sparse_v_ports());
 
     std::vector<std::pair<std::string, TemplateArg>> template_args = {
         {"Dim", dim},

@@ -64,8 +64,19 @@ fn tolerance_for(dtype: i32) -> (f64, f64) {
     }
 }
 
-fn gpu_available() -> bool {
-    crate::metal_is_available() || crate::cuda_is_available()
+/// Whether this build has a `fused_add_rms_norm` port to compare against the
+/// graph.
+///
+/// Deliberately not `metal_is_available() || cuda_is_available()`, which is how
+/// this read before #1801. That spelling names the two backends that happen to
+/// have a port today, so on a third backend it reads as a missing term rather
+/// than as what it is, and "add `rocm_is_available()`" is the natural and wrong
+/// conclusion: ROCm has a GPU but `fused_norm_ports().rocm` is still null
+/// (#1814), so widening the gate would run these tests into the launcher's
+/// refusal. Asking the kernel's own predicate cannot drift from the port table
+/// the dispatch reads, and a backend that gains the port needs no edit here.
+fn kernel_available() -> bool {
+    crate::fused_add_rms_norm_available()
 }
 
 fn flatten_f32(arr: &MlxArray) -> Vec<f32> {
@@ -163,7 +174,8 @@ fn run_fused(
         weight_bias,
         &mut normed,
         &mut new_residual,
-    );
+    )
+    .expect("kernel_available() checked the port table, so the launcher must not refuse");
     eval(&normed);
     eval(&new_residual);
     (normed, new_residual)
@@ -188,7 +200,7 @@ const SHAPES: &[(i32, i32)] = &[(1, 128), (1, 2048), (5, 4096), (33, 2048), (1, 
 
 #[test]
 fn fused_add_rms_norm_matches_graph_across_dtypes_and_shapes() {
-    if !gpu_available() {
+    if !kernel_available() {
         return;
     }
     for &dt in &[dtype::FLOAT32, dtype::FLOAT16, dtype::BFLOAT16] {
@@ -224,7 +236,7 @@ fn fused_add_rms_norm_matches_graph_across_dtypes_and_shapes() {
 /// over layer.
 #[test]
 fn fused_add_rms_norm_residual_output_is_the_plain_sum() {
-    if !gpu_available() {
+    if !kernel_available() {
         return;
     }
     for &dt in &[dtype::FLOAT32, dtype::FLOAT16, dtype::BFLOAT16] {
@@ -259,7 +271,7 @@ fn fused_add_rms_norm_residual_output_is_the_plain_sum() {
 /// the kernel, which is the same rounding `GemmaRMSNorm::new` performs.
 #[test]
 fn fused_add_rms_norm_gemma_weight_bias_matches_precomputed_one_plus_w() {
-    if !gpu_available() {
+    if !kernel_available() {
         return;
     }
     for &dt in &[dtype::FLOAT32, dtype::FLOAT16, dtype::BFLOAT16] {
@@ -288,7 +300,7 @@ fn fused_add_rms_norm_gemma_weight_bias_matches_precomputed_one_plus_w() {
 /// went through the layer or the kernel.
 #[test]
 fn gemma_rms_norm_layer_agrees_with_weight_bias_one() {
-    if !gpu_available() {
+    if !kernel_available() {
         return;
     }
     let dt = dtype::FLOAT16;
@@ -314,7 +326,7 @@ fn gemma_rms_norm_layer_agrees_with_weight_bias_one() {
 /// RMSNorm convention.
 #[test]
 fn fused_add_rms_norm_matches_graph_with_lora_scaled_weight() {
-    if !gpu_available() {
+    if !kernel_available() {
         return;
     }
     let dt = dtype::FLOAT16;
@@ -346,7 +358,7 @@ fn fused_add_rms_norm_matches_graph_with_lora_scaled_weight() {
 /// the standard-RMSNorm test above.
 #[test]
 fn fused_add_rms_norm_gemma_matches_graph_with_surgery_scaled_weight() {
-    if !gpu_available() {
+    if !kernel_available() {
         return;
     }
     let dt = dtype::BFLOAT16;
@@ -375,7 +387,7 @@ fn fused_add_rms_norm_gemma_matches_graph_with_surgery_scaled_weight() {
 /// helper's output must then be byte-identical to `graph_add_rms_norm`).
 #[test]
 fn fused_add_rms_norm_helper_respects_the_kill_switch() {
-    if !gpu_available() {
+    if !kernel_available() {
         return;
     }
     // Expectation follows the documented precedence: an explicit truthy or
@@ -434,7 +446,7 @@ fn fused_add_rms_norm_helper_respects_the_kill_switch() {
 /// iteration.
 #[test]
 fn fused_add_rms_norm_greedy_argmax_parity_over_steps() {
-    if !gpu_available() {
+    if !kernel_available() {
         return;
     }
     let dt = dtype::FLOAT16;

@@ -1346,7 +1346,17 @@ impl NemotronHMoE {
             mlxcel_core::copy(x)
         };
 
-        let use_fused = !self.has_latent_proj();
+        // `custom_kernels_available()` because the fused MoE kernels are Metal
+        // and CUDA only, and nothing else on this path checks for a port:
+        // `fused_moe_forward` has no `metal::is_available()` fallback of its own,
+        // unlike `fused_xielu`. So on a backend without a port the launcher
+        // refuses and this selects `forward_nonfused` instead, which is what the
+        // non-quantized arm below already does (#1801).
+        //
+        // Added defensively rather than in response to an observed abort: no
+        // Nemotron-H checkpoint was available to run on the ROCm host, so the
+        // path was traced rather than executed.
+        let use_fused = !self.has_latent_proj() && mlxcel_core::custom_kernels_available();
 
         // Try fused MoE forward (quantized path only, no latent projection)
         let result = if use_fused {
@@ -1411,6 +1421,7 @@ impl NemotronHMoE {
                         *group_size,
                         *bits,
                     )
+                    .expect("use_fused checked the port, so the launcher must not refuse")
                 }
             } else {
                 // Non-quantized without latent projection

@@ -47,8 +47,11 @@ const N_KV_HEADS: i32 = 8;
 const HEAD_DIM: i32 = 128;
 const ROPE_BASE: f32 = 500000.0;
 
-fn gpu_available() -> bool {
-    crate::metal_is_available() || crate::cuda_is_available()
+/// Whether this build has a `fused_rope_qk_append` port to compare against the
+/// graph. See the note on `kernel_available` in `fused_norm_parity_tests.rs`
+/// for why this asks the kernel rather than naming backends.
+fn kernel_available() -> bool {
+    crate::fused_rope_qk_append_available()
 }
 
 fn flatten_f32(arr: &MlxArray) -> Vec<f32> {
@@ -144,7 +147,8 @@ fn run_fused(
         &mut q,
         &mut k,
         &mut v,
-    );
+    )
+    .expect("kernel_available() checked the port table, so the launcher must not refuse");
     eval(&q);
     eval(&k);
     eval(&v);
@@ -191,7 +195,7 @@ const OFFSETS: &[i32] = &[0, 1, 7, 63, 511, 4096, 131071];
 
 #[test]
 fn fused_rope_append_matches_graph_rope_across_offsets() {
-    if !gpu_available() {
+    if !kernel_available() {
         return;
     }
     for (i, &offset) in OFFSETS.iter().enumerate() {
@@ -214,7 +218,7 @@ fn fused_rope_append_matches_graph_rope_across_offsets() {
 /// same rotation as the decode steps that follow it.
 #[test]
 fn fused_rope_append_multi_token_positions_are_absolute() {
-    if !gpu_available() {
+    if !kernel_available() {
         return;
     }
     for &(seq, offset) in &[(4i32, 0i32), (7, 1), (16, 4093), (3, 131069)] {
@@ -232,7 +236,7 @@ fn fused_rope_append_multi_token_positions_are_absolute() {
 /// and the two output layouts; a decode batch shares one position base.
 #[test]
 fn fused_rope_append_matches_graph_rope_batched() {
-    if !gpu_available() {
+    if !kernel_available() {
         return;
     }
     let qkv = random_qkv(808, 4, 2);
@@ -252,7 +256,7 @@ fn fused_rope_append_matches_graph_rope_batched() {
 /// flag for real, so it has to be pinned.
 #[test]
 fn fused_rope_append_traditional_matches_graph_rope() {
-    if !gpu_available() {
+    if !kernel_available() {
         return;
     }
     for &offset in &[0i32, 13, 2048] {
@@ -270,7 +274,7 @@ fn fused_rope_append_traditional_matches_graph_rope() {
 /// elements.
 #[test]
 fn fused_rope_append_partial_rope_dims_copies_the_tail() {
-    if !gpu_available() {
+    if !kernel_available() {
         return;
     }
     for &rope_dims in &[64i32, 96, 32] {
@@ -298,7 +302,7 @@ fn fused_rope_append_partial_rope_dims_copies_the_tail() {
 /// honest until then.
 #[test]
 fn fused_rope_append_paged_layout_is_the_dense_layout_transposed() {
-    if !gpu_available() {
+    if !kernel_available() {
         return;
     }
     let qkv = random_qkv(1313, 2, 5);
@@ -326,7 +330,7 @@ fn fused_rope_append_paged_layout_is_the_dense_layout_transposed() {
 /// checks above could absorb.
 #[test]
 fn fused_rope_append_leaves_v_bit_identical() {
-    if !gpu_available() {
+    if !kernel_available() {
         return;
     }
     let qkv = random_qkv(1414, 1, 3);
@@ -355,7 +359,7 @@ fn fused_rope_append_leaves_v_bit_identical() {
 /// rewritten weight has to flow through unchanged.
 #[test]
 fn fused_rope_append_matches_graph_with_scaled_projection() {
-    if !gpu_available() {
+    if !kernel_available() {
         return;
     }
     let base = random_qkv(1515, 1, 2);

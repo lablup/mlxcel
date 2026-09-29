@@ -37,12 +37,21 @@
 //! the old kernel's uninitialized read was observable.
 //!
 //! GPU-only: on CPU-only builds `fast::rms_norm` takes the fallback path and
-//! these tests return early, matching `fused_norm_parity_tests.rs`.
+//! these tests return early. The gate is any GPU backend, not the narrower
+//! "has an mlxcel port" the parity tests use; see `gpu_available` below.
 
 use super::*;
 
+/// Whether a GPU backend exists at all.
+///
+/// Unlike the fused-kernel parity tests, what is under test here is MLX's own
+/// `fast::rms_norm` dispatch config, not an mlxcel port, so there is no port
+/// table to ask and the gate is the plain "is there a GPU". Spelling it
+/// `metal_is_available() || cuda_is_available()`, as this did before #1801,
+/// skipped the sweep on ROCm for no reason: the broken band is a property of
+/// the reduction's `N_READS` tiling, which every backend has.
 fn gpu_available() -> bool {
-    crate::metal_is_available() || crate::cuda_is_available()
+    crate::gpu_backend_available()
 }
 
 fn flatten_f32(arr: &MlxArray) -> Vec<f32> {

@@ -80,6 +80,17 @@ bool has_kernel_port(const KernelPorts& ports);
 // naming whichever port happened to be tried. The bridge function that reaches
 // here must be declared `-> Result<...>` in the cxx bridge, or the throw
 // crosses a `noexcept` extern and ends the process instead of failing the call.
+//
+// Changing that declaration changes every Rust call site, and the two shapes
+// are not caught alike. A launcher returning a value becomes `Result<T>`, so
+// the old `let x = ffi::f(...)` stops compiling and `cargo check` finds it. A
+// void launcher becomes `Result<()>`, and an ignored `Result<()>` is only the
+// `unused_must_use` lint: `cargo check` stays green and the refusal is
+// swallowed at runtime. Those sites surface solely under `-D warnings` clippy,
+// and PR-time CI's `clippy` job lints `-p mlxcel` only, so a missed call in
+// mlxcel-core reaches main. `make verify` and `make verify-rocm` are the gates
+// that catch it, because both lint `--workspace --all-targets`; run one of them,
+// not a hand-written `-p mlxcel` clippy, after touching a launcher's signature.
 mlx::core::fast::CustomKernelFunction& select_kernel_port(
     const char* entry_point,
     const char* fallback,

@@ -1138,7 +1138,8 @@ pub fn residual_add3_layer_norm(
     let mut h = UniquePtr::null();
     // SAFETY: `bias_ptr` is null or points at `norm.bias`, which outlives the call.
     unsafe {
-        ffi::fused_add3_layer_norm(a, b, x, weight, bias_ptr, norm.eps, &mut x_new, &mut h);
+        ffi::fused_add3_layer_norm(a, b, x, weight, bias_ptr, norm.eps, &mut x_new, &mut h)
+            .expect("the caller checked metal_is_available(), so the launcher must not refuse");
     }
     (x_new, h)
 }

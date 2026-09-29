@@ -259,7 +259,11 @@ impl MLP {
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let up = self.up_proj.forward(x);
         let activated = if fused_xielu_enabled() {
+            // `Result` since #1801, but never `Err` here: the C++ entry point
+            // returns an elementwise fallback before it resolves a port when
+            // Metal is unavailable (`mlx_cxx_kernels.cpp:463`).
             mlxcel_core::fused_xielu(&up, self.alpha_p, self.alpha_n, self.beta, self.eps)
+                .expect("fused_xielu falls back rather than refusing, so this cannot be Err")
         } else {
             apertus_xielu(&up, self.alpha_p, self.alpha_n, self.beta, self.eps)
         };
@@ -801,7 +805,11 @@ mod tests {
         let x = mlxcel_core::astype(&x_f32, BF16);
 
         let reference = apertus_xielu(&x, alpha_p, alpha_n, beta, eps);
-        let fused = mlxcel_core::fused_xielu(&x, alpha_p, alpha_n, beta, eps);
+        // Cannot be `Err`: the entry point returns the elementwise fallback
+        // before resolving a port when Metal is unavailable, which is the very
+        // property the doc comment above relies on.
+        let fused = mlxcel_core::fused_xielu(&x, alpha_p, alpha_n, beta, eps)
+            .expect("fused_xielu falls back rather than refusing");
 
         let equal = mlxcel_core::array_equal(&reference, &fused, true);
         mlxcel_core::eval(&equal);

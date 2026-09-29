@@ -236,6 +236,22 @@ namespace {
         return holder;
     }
 
+// The only kernel ported to all three backends (#1862).
+const mlxcel::KernelPorts& bitlinear_ports() {
+    static const mlxcel::KernelPorts ports{
+        .metal = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_bitlinear_kernel().get();
+        },
+        .cuda = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_bitlinear_kernel_cuda().get();
+        },
+        .rocm = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_bitlinear_kernel_hip().get();
+        },
+    };
+    return ports;
+}
+
 }
 
 std::unique_ptr<MlxArray> bitlinear_matmul(
@@ -255,27 +271,11 @@ std::unique_ptr<MlxArray> bitlinear_matmul(
     for (size_t i = 0; i + 1 < xs.size(); ++i) total_batch *= (int)xs[i];
     auto x2d = reshape(astype(x.inner, T), {total_batch, in_features});
 
-    // mx.fast.metal_kernel throws on CUDA, so dispatch the cuda_kernel port
-    // there. metal::is_available() is false on a CUDA-only build.
-    // Three real ports now (issues #1803, #1862), so the choice names the
-    // backend rather than negating Metal. `None` is the only value left with no
-    // kernel, and the bridge declares this function `Result`, so its throw
-    // reaches the caller as an error instead of ending the process.
-    auto& kernel = [&]() -> mlx::core::fast::CustomKernelFunction& {
-        switch (mlxcel::gpu_kernel_backend()) {
-            case mlxcel::GpuKernelBackend::Metal:
-                return get_bitlinear_kernel().get();
-            case mlxcel::GpuKernelBackend::Cuda:
-                return get_bitlinear_kernel_cuda().get();
-            case mlxcel::GpuKernelBackend::Rocm:
-                return get_bitlinear_kernel_hip().get();
-            case mlxcel::GpuKernelBackend::None:
-                break;
-        }
-        throw std::runtime_error(
-            "[bitlinear_matmul] no BitLinear kernel port for this GPU backend; "
-            "BitNet needs Metal, CUDA or ROCm");
-    }();
+    // The only kernel with all three ports (issues #1803, #1862). It used to
+    // spell the switch out here; the table says the same thing in one line per
+    // backend and shares the refusal with every other launcher (#1801).
+    auto& kernel = mlxcel::select_kernel_port(
+        "bitlinear_matmul", "graph fallback", bitlinear_ports());
     std::vector<std::pair<std::string, mlx::core::fast::TemplateArg>> ta = {
         {"T", T},
         {"in_features", in_features},
@@ -411,6 +411,20 @@ namespace {
         return holder;
     }
 
+// This kernel's ports, in one place (#1801). Metal only: the fused xIELU activation is a Metal JIT kernel.
+const mlxcel::KernelPorts& xielu_ports() {
+    static const mlxcel::KernelPorts ports{
+        .metal = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_xielu_kernel().get();
+        },
+        // No CUDA or HIP port yet (#1814). Written out so that adding one is a
+        // line here rather than a restructure at the call site.
+        .cuda = nullptr,
+        .rocm = nullptr,
+    };
+    return ports;
+}
+
     // Elementwise fallback mirroring src/models/apertus.rs::apertus_xielu. Used
     // when the Metal back-end is unavailable (e.g. a CUDA-only build, where
     // mx.fast.metal_kernel throws "[metal_kernel] No Metal back-end"). Keeps the
@@ -461,7 +475,8 @@ std::unique_ptr<MlxArray> fused_xielu(
     auto bb = full({1}, beta, float32);
     auto ee = full({1}, eps, float32);
 
-    auto& kernel = get_xielu_kernel().get();
+    auto& kernel = mlxcel::select_kernel_port(
+        "fused_xielu", "graph fallback", xielu_ports());
     std::vector<std::pair<std::string, mlx::core::fast::TemplateArg>> ta = {
         {"T", T},
         {"n", (int)n},
@@ -1717,6 +1732,20 @@ namespace {
         static Mamba1ScanKernelHolder holder;
         return holder;
     }
+
+// This kernel's ports, in one place (#1801). Metal only: the Mamba1 selective scan is a Metal JIT kernel.
+const mlxcel::KernelPorts& mamba1_scan_ports() {
+    static const mlxcel::KernelPorts ports{
+        .metal = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_mamba1_scan_kernel().get();
+        },
+        // No CUDA or HIP port yet (#1814). Written out so that adding one is a
+        // line here rather than a restructure at the call site.
+        .cuda = nullptr,
+        .rocm = nullptr,
+    };
+    return ports;
+}
 }
 
 bool mamba1_scan_kernel_available() {
@@ -1772,7 +1801,8 @@ void mamba1_selective_scan(
     int rows_per_group = 8;
     int grid_y = ((dm + rows_per_group - 1) / rows_per_group) * rows_per_group;
 
-    auto results = get_mamba1_scan_kernel().get()(
+    auto results = mlxcel::select_kernel_port(
+        "mamba1_selective_scan", "graph fallback", mamba1_scan_ports())(
         inputs,
         output_shapes,
         output_dtypes,
@@ -2244,12 +2274,28 @@ const mlxcel::KernelPorts& moe_down_ports() {
         return holder;
     }
 
+// This kernel's ports, in one place (#1801). Metal only: the fc1 ReLU-squared MoE kernel is Metal only.
+const mlxcel::KernelPorts& moe_fc1_relu2_ports() {
+    static const mlxcel::KernelPorts ports{
+        .metal = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_moe_fc1_relu2_kernel().get();
+        },
+        // No CUDA or HIP port yet (#1814). Written out so that adding one is a
+        // line here rather than a restructure at the call site.
+        .cuda = nullptr,
+        .rocm = nullptr,
+    };
+    return ports;
+}
+
     // Definitions for the forward declarations above fused_moe_forward.
     mlx::core::fast::CustomKernelFunction& moe_fc1_relu2_kernel_fn() {
-        return get_moe_fc1_relu2_kernel().get();
+        return mlxcel::select_kernel_port(
+            "fused_moe_forward", "graph fallback", moe_fc1_relu2_ports());
     }
     mlx::core::fast::CustomKernelFunction& moe_down_kernel_fn() {
-        return get_moe_down_kernel().get();
+        return mlxcel::select_kernel_port(
+            "fused_moe_forward", "graph fallback", moe_down_ports());
     }
 }
 
@@ -2859,6 +2905,20 @@ namespace {
         static Add3LayerNormKernelHolder holder;
         return holder;
     }
+
+// This kernel's ports, in one place (#1801). Metal only: the fused add3 + LayerNorm is a Metal JIT kernel.
+const mlxcel::KernelPorts& add3_layer_norm_ports() {
+    static const mlxcel::KernelPorts ports{
+        .metal = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_add3_layer_norm_kernel().get();
+        },
+        // No CUDA or HIP port yet (#1814). Written out so that adding one is a
+        // line here rather than a restructure at the call site.
+        .cuda = nullptr,
+        .rocm = nullptr,
+    };
+    return ports;
+}
 }
 
 void fused_add3_layer_norm(
@@ -2886,7 +2946,8 @@ void fused_add3_layer_norm(
     array bias_arr = bias ? astype(bias->inner, T) : zeros({1}, T);
     const int b_stride = bias && bias->inner.ndim() == 1 ? 1 : 0;
 
-    auto& kernel = get_add3_layer_norm_kernel().get();
+    auto& kernel = mlxcel::select_kernel_port(
+        "fused_add3_layer_norm", "graph fallback", add3_layer_norm_ports());
     std::vector<std::pair<std::string, mlx::core::fast::TemplateArg>> ta = {
         {"T", T},
         {"D", D},

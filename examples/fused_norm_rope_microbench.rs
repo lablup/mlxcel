@@ -67,8 +67,9 @@ use std::time::{Duration, Instant};
 
 use mlxcel_core::{
     MlxArray, UniquePtr, add, astype, contiguous, dtype, eval, fast_rms_norm, fast_rope,
-    from_slice_f32, fused_add_rms_norm, fused_rope_qk_append, random_normal, random_seed, reshape,
-    slice_last_dim, synchronize_default, transpose_axes,
+    from_slice_f32, fused_add_rms_norm, fused_add_rms_norm_available, fused_rope_qk_append,
+    fused_rope_qk_append_available, random_normal, random_seed, reshape, slice_last_dim,
+    synchronize_default, transpose_axes,
 };
 
 /// Hidden sizes from the issue's sweep: 2048 (small dense), 4096 (8B-class),
@@ -173,6 +174,10 @@ fn bench_add_rms_norm(rows: &mut Vec<Row>, dt: i32) {
                     0.0,
                     &mut normed,
                     &mut new_residual,
+                )
+                .expect(
+                    "main gates this bench on fused_add_rms_norm_available(), so the launcher \
+                     must not refuse",
                 );
                 add(&normed, &new_residual)
             });
@@ -246,6 +251,10 @@ fn bench_rope_append(rows: &mut Vec<Row>, dt: i32) {
                 fused_rope_qk_append(
                     &qkv, n_heads, n_kv_heads, head_dim, head_dim, ROPE_BASE, 1.0, false, offset,
                     0, &mut q, &mut k, &mut v,
+                )
+                .expect(
+                    "main gates this bench on fused_rope_qk_append_available(), so the launcher \
+                     must not refuse",
                 );
                 // Group q by its KV group so the consume-the-outputs add stays
                 // valid under GQA: q reshapes to [B, n_kv, ratio, D], which
@@ -269,13 +278,22 @@ fn bench_rope_append(rows: &mut Vec<Row>, dt: i32) {
     }
 }
 
+/// The resolved backend, for the report's header column.
+///
+/// Reads the one backend resolver rather than testing `metal_is_available()`
+/// then `cuda_is_available()` and calling the remainder "cpu", which is how
+/// this read before #1801: on ROCm that spelling reported "cpu" and printed
+/// "no GPU backend available", both false. Whether the benchmark can run is a
+/// separate question, asked per kernel in `main`.
 fn backend_name() -> &'static str {
-    if mlxcel_core::metal_is_available() {
-        "metal"
-    } else if mlxcel_core::cuda_is_available() {
-        "cuda"
-    } else {
-        "cpu"
+    match mlxcel_core::hardware::gpu_backend_kind() {
+        mlxcel_core::hardware::GpuBackendKind::Metal => "metal",
+        mlxcel_core::hardware::GpuBackendKind::Cuda => "cuda",
+        mlxcel_core::hardware::GpuBackendKind::Rocm => "rocm",
+        mlxcel_core::hardware::GpuBackendKind::None => "cpu",
+        // `#[non_exhaustive]`: a new backend reports its own name once this arm
+        // learns it, and reads as unknown until then rather than as CPU.
+        _ => "unknown",
     }
 }
 
@@ -283,10 +301,14 @@ fn main() {
     random_seed(905);
 
     let backend = backend_name();
-    if backend == "cpu" {
+    // Both kernels JIT through the resolved backend's `fast::*_kernel`, so the
+    // question is not "is there a GPU" but "does this backend have each port".
+    // Asking the launchers' own predicates means a backend that gains one of
+    // the two ports benchmarks that one instead of declining both.
+    if !fused_add_rms_norm_available() && !fused_rope_qk_append_available() {
         eprintln!(
-            "fused_norm_rope_microbench: no GPU backend available; both kernels JIT through \
-             fast::metal_kernel / cuda_kernel and cannot run here."
+            "fused_norm_rope_microbench: backend={backend} has no port for either kernel, so \
+             there is nothing to compare against the graph here."
         );
         return;
     }
@@ -306,8 +328,12 @@ fn main() {
     println!();
 
     let mut rows = Vec::new();
-    bench_add_rms_norm(&mut rows, dt);
-    bench_rope_append(&mut rows, dt);
+    if fused_add_rms_norm_available() {
+        bench_add_rms_norm(&mut rows, dt);
+    }
+    if fused_rope_qk_append_available() {
+        bench_rope_append(&mut rows, dt);
+    }
 
     println!(
         "{:<14} {:>7} {:>6} {:>12} {:>12} {:>9}",

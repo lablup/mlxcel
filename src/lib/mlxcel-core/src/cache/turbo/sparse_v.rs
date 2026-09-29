@@ -832,7 +832,8 @@ pub fn attention_sparse_v_turbo4_fused(
         head_dim,
         n_rep,
         threshold_value,
-    );
+    )
+    .expect("kernel_enabled() gated this call, so the launcher must not refuse");
 
     // 4. Reshape back to [B, Hq, Tq, D] and apply the inverse Turbo4
     //    rotation: out = signs1 * WHT(signs2 * out_pre).
@@ -1024,7 +1025,8 @@ pub fn attention_turbo4_delegated_fused(
             head_dim,
             n_rep,
             threshold_value,
-        );
+        )
+        .expect("kernel_enabled() gated this call, so the launcher must not refuse");
         let out_cold_pre = ffi::reshape(&out_cold_pre_flat, &[b, hq, tq, head_dim]);
         // Apply inverse Turbo4 rotation `signs1 · WHT(signs2 · ·)` on the
         // small `[B, Hq, Tq, D]` output. This is the exact rotation
@@ -1248,12 +1250,15 @@ fn dequantize_v_turbo4_rotated_fused(
 
     let centroids_vec: Vec<f32> = params.codebook.centroids.as_ref().to_vec();
     let codebook = ffi::from_slice_f32(&centroids_vec, &[centroids_vec.len() as i32]);
-    Some(ffi::turbo4_delegated_bulk_dequant_rotated(
-        v_packed,
-        v_rescale,
-        &codebook,
-        params.head_dim as i32,
-    ))
+    Some(
+        ffi::turbo4_delegated_bulk_dequant_rotated(
+            v_packed,
+            v_rescale,
+            &codebook,
+            params.head_dim as i32,
+        )
+        .expect("kernel_enabled() gated this call, so the launcher must not refuse"),
+    )
 }
 
 /// Steel-attention-envelope fused dequant + SDPA path for
@@ -1427,7 +1432,8 @@ pub fn attention_turbo4_delegated_steel(
         cold_offset,
         hot_offset,
         threshold_value,
-    );
+    )
+    .expect("kernel_enabled() gated this call, so the launcher must not refuse");
     // Take ownership of both output tensors out of the wrapper struct. After
     // both calls the wrapper's slots are empty; the wrapper drop is a no-op.
     let out_cold_pre_flat = ffi::steel_outputs_take_cold(steel_outs.pin_mut());

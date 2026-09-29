@@ -678,7 +678,7 @@ mod ffi {
             eps: f32,
             x_out: &mut UniquePtr<MlxArray>,
             h_out: &mut UniquePtr<MlxArray>,
-        );
+        ) -> Result<()>;
 
         /// Compiled three-way add `(a + b) + c` as one fused kernel.
         /// Byte-identical to two chained `add` calls (same association order);
@@ -1779,7 +1779,7 @@ mod ffi {
             norm_topk_prob: bool,
             group_size: i32,
             bits: i32,
-        ) -> UniquePtr<MlxArray>;
+        ) -> Result<UniquePtr<MlxArray>>;
 
         // SSM (Mamba2) fused Metal kernel.
         /// Check if SSM Metal kernel is available
@@ -1898,7 +1898,7 @@ mod ffi {
             alpha_n: f32,
             beta: f32,
             eps: f32,
-        ) -> UniquePtr<MlxArray>;
+        ) -> Result<UniquePtr<MlxArray>>;
 
         /// BitLinear ternary matmul (BitNet b1.58). `packed_weights` is
         /// [out_features/4, in_features] uint8 (2-bit ternary, 4 rows/byte),
@@ -2990,7 +2990,7 @@ mod ffi {
             dim: i32,
             n_rep: i32,
             threshold: f32,
-        ) -> UniquePtr<MlxArray>;
+        ) -> Result<UniquePtr<MlxArray>>;
 
         // -------------------------------------------------------------------
         // Fused Turbo4Delegated cold-V weighted-sum kernel.
@@ -3038,7 +3038,7 @@ mod ffi {
             dim: i32,
             n_rep: i32,
             threshold: f32,
-        ) -> UniquePtr<MlxArray>;
+        ) -> Result<UniquePtr<MlxArray>>;
 
         /// Fused bulk rotated dequant for the Swift-LM-style
         /// Turbo4Delegated dequant-first SDPA path.
@@ -3055,7 +3055,7 @@ mod ffi {
             v_rescale: &MlxArray,
             codebook: &MlxArray,
             dim: i32,
-        ) -> UniquePtr<MlxArray>;
+        ) -> Result<UniquePtr<MlxArray>>;
 
         // Steel-attention-envelope fused Turbo4Delegated SDPA
         // kernel launcher. One Metal dispatch performs the entire post-Q·K
@@ -3115,7 +3115,7 @@ mod ffi {
             cold_offset: i32,
             hot_offset: i32,
             threshold: f32,
-        ) -> UniquePtr<Turbo4DelegatedSteelOutputs>;
+        ) -> Result<UniquePtr<Turbo4DelegatedSteelOutputs>>;
 
         /// Take (move out) the unrotated cold weighted sum from a steel SDPA
         /// outputs struct. After this call the struct's `out_cold_pre` slot

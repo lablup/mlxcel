@@ -33,6 +33,8 @@
 - 런처 아홉 개 변환: `gumbel_max_sample`, `rejection_sample`, `fused_add_rms_norm`, `fused_rope_qk_append`, `ssm_update_kernel`, `run_fused_moe_two_kernel`, `paged_attention_decode`, `paged_attention_decode_v2_partial`, `paged_attention_merge_states`. 헬퍼 밖에 백엔드 비교가 남아 있지 않습니다.
 - `scripts/ci/check_kernel_port_dispatch.py` (신규), `verify`와 `verify-rocm` 양쪽에 들어간 `verify-kernel-port-dispatch` 타깃, 그리고 무조건 실행되는 호스티드 CI 잡.
 - `run_fused_moe_two_kernel`이 호출자의 진입점 이름을 받아, PR #2018이 넣은 오라벨을 고칩니다.
+- 검사기 규칙 3. Metal 전용 런처를 손으로 되돌려 넣었는데도 검사가 통과하는 것을 보고 추가했습니다. 규칙 1과 2는 다중 포트 런처가 잘못되는 방식을 기술하는데, 단일 포트 런처는 해소 과정 없이 `get_x_kernel().get()`에 바로 닿는 방식으로 잘못되고 둘 중 어느 규칙도 그것을 보지 못합니다. 규칙 3이 이 브랜치의 이전 조사 전부가 놓쳤던 런처 다섯을 찾아냈고, 그 결과 면제 목록이 비었습니다.
+- 검사기 규칙 4와 그것이 다스리는 Rust 쪽 게이트: 패리티 테스트 헬퍼들, 벤치마크 예제 하나, 그리고 그것들이 가드하는 런처 호출 지점.
 
 ## 기술적 선택과 그 이유
 
@@ -54,13 +56,34 @@
 
 ### 의도적으로 제외한 런처 둘
 
-`turbo4_delegated_sdpa.cpp`와 `sparse_v_sdpa.cpp`는 Metal 전용이고 지금 거부가 아예 없습니다. 거부를 넣는 것은 기계적 편집이 아니라 동작 변경입니다. `sparse_v_available()`이 환경변수 임계값인 `turbo::sparse_v::is_enabled()`와 `KVCacheMode::Turbo4Asym`만 보고 백엔드나 포트 항이 없어서, 그 런처가 Apple 밖에서 도달 가능한지가 미해결입니다. 둘 다 검사기에 그 이유와 함께 적혀 있습니다.
+`turbo4_delegated_sdpa.cpp`와 `sparse_v_sdpa.cpp`는 Metal 전용이고 자체 거부가 없습니다. 안전하기 위해 그것이 필요하지도 않습니다. 둘 다 `cache::turbo::sparse_v::kernel_enabled()`(정의는 `sparse_v.rs:151`, 호출을 막는 가드는 `:751`, `:929`, `:1243`, `:1318`, 그리고 모듈 자체 패리티 테스트의 `:1568`)를 통해서만 도달하는데, 그 함수가 macOS 밖에서 무조건 false를 반환합니다. Metal 디바이스 없이 JIT 커널을 디스패치하면 행이 걸리기 때문입니다.
+
+이 보고서는 원래 그 런처들의 Apple 밖 도달 가능성이 미해결이라고 적고 잠재 abort를 유력하게 다뤘습니다. 그것은 틀렸고, **어떻게 틀렸는지가 기록할 값이 있습니다.** 그 주장은 `sparse_v_available()`에서 나왔습니다. 그 술어는 실제로 환경변수 임계값과 KV 캐시 모드만 보고 백엔드 항이 없습니다. 다만 한 층 아래의 커널 수준 게이트를 찾지 못했습니다. 서로 다른 질문에 답하는 두 술어였고, 상위 것만 grep했습니다.
+
+이후 다시 읽는 대신 gfx1151 호스트에서 **실행으로** 확인했습니다. `--kv-cache-mode turbo4-asym`이 28개 중 24개 레이어에 적용되고, `MLXCEL_TURBO4_ASYM_DEQUANT_SDPA=0`으로 sparse-V 분기를 강제해도 abort 없이 정상 생성됩니다.
+
+따라서 테이블 편입은 버그 수정이 아니라 일관성 개선입니다. 여전히 참인 것은 그 안전성이 런처가 아니라 Rust 층 게이트에 기댄다는 점이고, 그 게이트를 건너뛰는 호출자는 오류가 아니라 abort를 받습니다.
+
+### Rust 게이트는 지금 답할 수 있는 백엔드가 아니라 질문의 이름을 답니다
+
+테스트 헬퍼 셋과 예제 하나가 `metal_is_available() || cuda_is_available()`로 게이트하고 있었습니다. 그 조건 자체는 틀리지 않았고, 정확히 그 점이 문제입니다. 지금 포트를 가진 두 백엔드의 이름을 부르기 때문에, 세 번째 백엔드에서 읽으면 항이 빠진 것처럼 읽힙니다. 자연스러운 수리는 `rocm_is_available()`를 더하는 것이고 그것은 두 겹으로 틀립니다. 그 함수는 존재하지 않으며, 존재한다 해도 `fused_norm_ports().rocm`과 `fused_rope_ports().rocm`은 아직 null이므로 게이트를 넓히면 테스트가 포트 테이블을 지나 런처의 거부로 걸어 들어갑니다. 이 브랜치가 방금 잡을 수 있는 오류로 바꿔놓은 바로 그 거부입니다.
+
+서로 다른 두 질문이 하나의 이름을 쓰고 있었습니다. "이 백엔드에 이 커널의 포트가 있는가"는 이제 `fused_add_rms_norm_available()` / `fused_rope_qk_append_available()`이며, 디스패치가 읽는 것과 같은 테이블 위에서 `has_kernel_port`를 읽습니다. "GPU가 있기는 한가"는 이제 `gpu_backend_available()`입니다. 이 구분은 표면적이지 않습니다. `rms_norm_small_axis_tests.rs`는 mlxcel 포트가 아니라 MLX 자신의 `fast::rms_norm` 디스패치 구성을 시험하므로, 좁은 게이트가 이유 없이 ROCm에서 그것을 건너뛰고 있었습니다. 올바른 술어 아래에서 두 스윕 모두 gfx1151에서 실행되고 통과하는데, 이는 이름을 바로잡은 결과로 복원된 것이 아니라 새로 생긴 커버리지입니다.
+
+규칙 4가 그 표기를 다시 들어오지 못하게 막습니다. 면제 둘은 미뤄둔 관례가 아니라 없는 술어이고, 각각 이름이 붙어 있습니다. `ffi_tests.rs`는 융합 paged-decode 커널을 게이트하는데 이 커널은 `KernelPorts` 테이블은 있지만 브리지가 부를 `*_available()`을 내보내지 않습니다. `grouped_gemm_numeric_tests.rs`는 MLX 자신의 `gather_mm`을 게이트하고, 여기서는 `gpu_backend_available()`이 정직한 술어이겠지만 MLX의 ROCm 백엔드가 grouped-GEMM 경로를 구현하는지가 여기서 검증되지 않았습니다. 가정 위에서 게이트를 넓히는 것이 #1806의 abort에 도달한 방식이므로, 둘 다 #1814를 기다립니다.
 
 ## 검증
 
 - gfx1151 전체 ROCm 게이트: 실패 타깃 하나 `-p mlxcel-core --lib`로 이 브랜치 이전과 동일합니다. 그 실패는 이슈 #1806의 nvfp4 abort이며 실행 전체에서 유일한 `terminate called`입니다.
-- `cargo fmt --all -- --check`, `cargo clippy -p mlxcel --lib --tests -- -D warnings`(CI가 돌리는 명령), shellcheck를 error 심각도로 붙인 `actionlint`: 전부 깨끗합니다.
-- 세 방어선 각각을 동작한다고 가정하지 않고 **음성 대조로 확인**했습니다. 2-way 디스패치를 되돌려 넣거나 거부를 손으로 쓰면 검사기가 파일과 줄을 지목하며 실패합니다. `Vulkan` enumerator를 추가하면 의도한 메시지와 함께 `static_assert`에서 빌드가 깨집니다.
+- `cargo fmt --all -- --check`, shellcheck를 error 심각도로 붙인 `actionlint`, 그리고 `clippy --workspace --all-targets --features rocm -- -D warnings`: 전부 깨끗합니다.
+- 네 방어선 각각을 동작한다고 가정하지 않고 **음성 대조로 확인**했습니다. 2-way 디스패치를 되돌려 넣거나, 거부를 손으로 쓰거나, 홀더에 직접 닿으면 검사기가 파일과 줄을 지목하며 실패합니다. 규칙 4는 `a || b`, `!a && !b`, 경로 접두사 없는 역순의 세 표기로 대조했고 셋 다 잡았습니다. `Vulkan` enumerator를 추가하면 의도한 메시지와 함께 `static_assert`에서 빌드가 깨집니다.
+- `rms_norm_small_axis_tests`는 스위트 결과에서 추론하지 않고 직접 실행했습니다. nvfp4 abort가 테스트 바이너리를 끝내기 때문에 알파벳 순으로 그 뒤에 오는 테스트는 러너에 도달하지 못합니다. 두 스윕 모두 gfx1151에서 통과합니다.
+
+### 어느 clippy 호출이 게이트인가
+
+런처를 `Result`로 바꾸는 일은 같은 방식으로 잡히지 않는 두 경우로 갈립니다. 값을 반환하는 런처는 `Result<T>`가 되므로 모든 호출 지점이 컴파일되지 않고 `cargo check`가 찾아냅니다. void 런처는 `Result<()>`가 되고, 무시된 `Result<()>`는 `unused_must_use` 린트일 뿐입니다. `cargo check`는 초록으로 남고 거부는 런타임에 삼켜집니다.
+
+이 브랜치에서 네 번을 되돌렸습니다. `cargo clippy -p mlxcel --lib --tests`는 PR 시점 CI가 돌리는 것이고 앞선 통과들이 쓴 명령인데, mlxcel-core도 예제도 빌드하지 않으므로 다섯 지점이 린트되지 않은 채로 깨끗하다고 보고했습니다. mlxcel-core 패리티 테스트 둘, `layers.rs` 하나, 벤치마크 예제 둘이고 전부 `Result<()>`였습니다. `make verify`와 `make verify-rocm`은 `--workspace --all-targets`를 린트하고 전부 찾아냈습니다. 이 메모는 이제 선언 요구사항 옆 `kernel_port.h`에 있습니다. 다음 런처를 변환하는 사람이 읽고 있을 자리이기 때문입니다.
 
 ### 남겨둘 만한 방법론
 
@@ -70,6 +93,8 @@
 
 - **Metal과 CUDA를 실행하지 않았습니다.** 이 호스트에 없습니다. 동작이 변하지 않는다는 근거는, 포트가 있는 백엔드라면 해석되는 커널이 옛 식이 해석하던 것과 같은 객체이고, 새 throw 경로는 테이블 항목이 null이어야 하는데 그 백엔드들에서는 null이 아니라는 것입니다.
 - **리팩터링 후 거부 경로를 다시 프로브하지 않았습니다.** 이 변경 전 PR #2018에서 실행으로 확인했고, 메시지 텍스트가 형태를 유지한 채 헬퍼로 옮겨졌습니다. 게이트는 ROCm에서 더 앞에서 폴백하는 런처들을 통해서만 성공 경로를 지납니다.
+- **`verify-rocm-smoke`를 최종 트리에서 돌리지 못했습니다.** 이 단계가 적재하는 0.6B 픽스처가 `/tmp` 아래 있었고 이 호스트는 재부팅 때 그곳을 비웁니다. 남은 로컬 체크포인트가 없습니다. `verify-rocm`의 나머지 단계는 전부 최종 트리에서 돌렸습니다. 스모크는 이 브랜치 작업 중 규칙 4 변경 이전에 마지막으로 통과했고, 그 변경들 중 generate 실행이 지나는 코드 경로를 건드리는 것은 없습니다. `MLXCEL_ROCM_SMOKE_MODEL`을 로컬 체크포인트로 지정하면 이 항목이 닫힙니다.
+- **MLX의 ROCm 백엔드가 `gather_mm`을 구현하는지.** 이것이 `grouped_gemm_numeric_tests.rs`를 `gpu_backend_available()`이 아니라 좁은 게이트와 규칙 4의 면제 목록에 남겨두는 이유입니다. MLX에 대한 질문이고 게이트를 넓힌 채 그 세 테스트를 돌리면 답할 수 있으며, 게이트를 넓혀 머지 게이트에서 무슨 일이 나는지 보는 방식으로는 의도적으로 답하지 않았습니다.
 
 ## 남은 작업
 

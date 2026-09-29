@@ -15,6 +15,8 @@
 #include "turbo4_delegated_sdpa.h"
 
 #include <mlx/fast.h>
+
+#include "kernel_port.h"
 #include <mlx/ops.h>
 
 #include <mutex>
@@ -187,6 +189,22 @@ inline Turbo4DelegatedKernelHolder& get_turbo4_delegated_kernel() {
     return holder;
 }
 
+// This kernel's ports, in one place (#1801). Metal only: the cold-V weighted sum is a Metal JIT kernel.
+const mlxcel::KernelPorts& turbo4_delegated_ports() {
+    static const mlxcel::KernelPorts ports{
+        .metal = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_turbo4_delegated_kernel().get();
+        },
+        // No CUDA or HIP port. Callers reach this only through
+        // `cache::turbo::sparse_v::kernel_enabled()`, which is false off macOS,
+        // so the refusal below is unreachable in practice; it exists so that a
+        // caller which skips that gate gets an error and not an abort.
+        .cuda = nullptr,
+        .rocm = nullptr,
+    };
+    return ports;
+}
+
 // Bulk rotated dequant kernel for the Swift-LM-style dequant-first SDPA path.
 // Each thread owns one output coordinate `(b, h, t, d)`, unpacks one 4-bit
 // codebook index, applies the precomputed token rescale, and writes rotated V.
@@ -240,6 +258,22 @@ struct Turbo4BulkDequantRotatedKernelHolder {
 inline Turbo4BulkDequantRotatedKernelHolder& get_turbo4_bulk_dequant_rotated_kernel() {
     static Turbo4BulkDequantRotatedKernelHolder holder;
     return holder;
+}
+
+// This kernel's ports, in one place (#1801). Metal only: the rotated bulk dequant is a Metal JIT kernel.
+const mlxcel::KernelPorts& turbo4_bulk_dequant_rotated_ports() {
+    static const mlxcel::KernelPorts ports{
+        .metal = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_turbo4_bulk_dequant_rotated_kernel().get();
+        },
+        // No CUDA or HIP port. Callers reach this only through
+        // `cache::turbo::sparse_v::kernel_enabled()`, which is false off macOS,
+        // so the refusal below is unreachable in practice; it exists so that a
+        // caller which skips that gate gets an error and not an abort.
+        .cuda = nullptr,
+        .rocm = nullptr,
+    };
+    return ports;
 }
 
 } // namespace (cold-only kernel internals)
@@ -628,6 +662,22 @@ inline Turbo4DelegatedSteelKernelHolder& get_turbo4_delegated_steel_kernel() {
     return holder;
 }
 
+// This kernel's ports, in one place (#1801). Metal only: the steel SDPA is a Metal JIT kernel.
+const mlxcel::KernelPorts& turbo4_delegated_steel_ports() {
+    static const mlxcel::KernelPorts ports{
+        .metal = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_turbo4_delegated_steel_kernel().get();
+        },
+        // No CUDA or HIP port. Callers reach this only through
+        // `cache::turbo::sparse_v::kernel_enabled()`, which is false off macOS,
+        // so the refusal below is unreachable in practice; it exists so that a
+        // caller which skips that gate gets an error and not an abort.
+        .cuda = nullptr,
+        .rocm = nullptr,
+    };
+    return ports;
+}
+
 } // namespace
 
 mlx::core::array turbo4_delegated_cold_weighted_sum(
@@ -647,7 +697,8 @@ mlx::core::array turbo4_delegated_cold_weighted_sum(
     int bhq = w_shape[0];
     int tq = w_shape[1];
 
-    auto& kernel = get_turbo4_delegated_kernel().get();
+    auto& kernel = mlxcel::select_kernel_port(
+        "turbo4_delegated", "graph fallback", turbo4_delegated_ports());
 
     std::vector<std::pair<std::string, TemplateArg>> template_args = {
         {"Dim", dim},
@@ -706,7 +757,8 @@ mlx::core::array turbo4_delegated_bulk_dequant_rotated(
     int t = p_shape[2];
     int bht = b * h * t;
 
-    auto& kernel = get_turbo4_bulk_dequant_rotated_kernel().get();
+    auto& kernel = mlxcel::select_kernel_port(
+        "turbo4_bulk_dequant_rotated", "graph fallback", turbo4_bulk_dequant_rotated_ports());
 
     std::vector<std::pair<std::string, TemplateArg>> template_args = {
         {"Dim", dim},
@@ -773,7 +825,8 @@ std::vector<mlx::core::array> turbo4_delegated_steel_sdpa(
     int bhq = s_shape[0];
     int tq = s_shape[1];
 
-    auto& kernel = get_turbo4_delegated_steel_kernel().get();
+    auto& kernel = mlxcel::select_kernel_port(
+        "turbo4_delegated_steel", "graph fallback", turbo4_delegated_steel_ports());
 
     std::vector<std::pair<std::string, TemplateArg>> template_args = {
         {"Dim", dim},
