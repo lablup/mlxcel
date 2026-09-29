@@ -69,6 +69,27 @@ def harness_of(path):
     return "vlm" if "_vlm_" in os.path.basename(path) else "text"
 
 
+# Runtimes the harnesses write: bench_decode.sh names its CSVs after the GPU
+# backend, bench_mlxlm.py writes `pylm`.
+RUNTIMES = ("metal", "cuda", "rocm", "pylm")
+
+
+def runtime_and_host(path):
+    """(runtime, host) from a harness filename, or (None, None).
+
+    Both harnesses name their output `<runtime>_<host>_...`, so the first two
+    `_`-separated fields are the runtime and the host tag whatever the host is.
+    This used to recognise only `m5max` and `m1ultra` (and treat every runtime
+    that was not `pylm` as `metal`), so on any other host, GB10, V100 or the
+    gfx1151 ROCm box, the superseded-baseline scan returned nothing and its
+    warning was silently off.
+    """
+    parts = os.path.basename(path).split("_")
+    if len(parts) < 3 or parts[0] not in RUNTIMES or not parts[1]:
+        return None, None
+    return parts[0], parts[1]
+
+
 def load_rows(path, alias):
     rows = {}
     with open(path, encoding="utf-8") as fh:
@@ -103,9 +124,7 @@ def newer_readings_elsewhere(before_path, after_path, names, alias, before_rows)
     files is correct and still misses that, so the scan is over every CSV for
     the same host and harness, not just the two being compared.
     """
-    base = os.path.basename(before_path)
-    host = "m5max" if "m5max" in base else "m1ultra" if "m1ultra" in base else None
-    runtime = "pylm" if base.startswith("pylm") else "metal"
+    runtime, host = runtime_and_host(before_path)
     if host is None:
         return {}
     harness = harness_of(before_path)
