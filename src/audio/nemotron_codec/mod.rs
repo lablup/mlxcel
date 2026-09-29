@@ -183,8 +183,12 @@ impl NemotronCodec {
         flush: bool,
     ) -> Result<UniquePtr<MlxArray>, String> {
         let codes = self.validate_codes(codes)?;
+        crate::audio::stage_probe::mark("codec.validate", &[]);
         let latents = self.prvq.decode(&codes);
-        self.decode_latents(&latents, cache, flush)
+        crate::audio::stage_probe::mark("codec.prvq", &[&latents]);
+        let waveform = self.decode_latents(&latents, cache, flush)?;
+        crate::audio::stage_probe::mark("codec.decoder_istft", &[&waveform]);
+        Ok(waveform)
     }
 
     /// Check `[B, Q, T]` shape and code range on the host (codes are tiny),
@@ -207,6 +211,7 @@ impl NemotronCodec {
         }
         let ids = mlxcel_core::astype(codes, mlxcel_core::dtype::INT32);
         mlxcel_core::try_eval(&ids).map_err(|e| format!("codec codes eval failed: {e}"))?;
+        crate::audio::stage_probe::count_sync(1);
         let limit = self.config.codebook_size as i32;
         let bytes = mlxcel_core::array_to_raw_bytes(&ids);
         if let Some(bad) = bytes

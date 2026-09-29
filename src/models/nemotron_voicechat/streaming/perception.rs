@@ -80,7 +80,9 @@ impl<'m> StreamingPerception<'m> {
                 mel,
                 conformer,
             } => {
+                crate::audio::stage_probe::restart_clock();
                 let mel_frames = mel.push(frame)?;
+                crate::audio::stage_probe::mark("perception.mel", &[&mel_frames]);
                 let mut chunks = conformer.push(&mel_frames, false, true)?;
                 let shape = chunks.first().map(|c| mlxcel_core::array_shape(c));
                 if chunks.len() != 1 || shape.as_ref().is_none_or(|s| s.len() != 3 || s[1] != 1) {
@@ -96,7 +98,9 @@ impl<'m> StreamingPerception<'m> {
                 }
                 let encoded = chunks.remove(0);
                 let projected = model.perception.project(&encoded);
+                crate::audio::stage_probe::mark("perception.project", &[&projected]);
                 conformer.materialize(&[&projected, &encoded]);
+                crate::audio::stage_probe::mark("perception.materialize", &[]);
                 Ok(PerceptionFrame { projected, encoded })
             }
             Self::Window {

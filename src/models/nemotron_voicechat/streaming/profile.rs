@@ -19,13 +19,22 @@
 //! Every stage is timed after forcing evaluation of its outputs, so a stage
 //! is not billed for lazy work that a later stage happens to trigger.
 //!
+//! Each frame also records how many host round trips the pipeline made
+//! (`host_syncs`) and, when sub-stage attribution is on
+//! ([`super::StreamingOptions::profile_stages`]), the wall time of the named
+//! sub-stages inside perception, language, EAR-TTS and the codec. Sub-stage
+//! timing forces extra evaluations, so its frame totals are slower than a
+//! plain `--profile` run and are for attribution only (issue #2045).
+//!
 //! Used by: [`super::VoiceChatStreamingSession`], `mlxcel generate --stream
 //! --profile`
+
+use std::collections::BTreeMap;
 
 use serde::Serialize;
 
 /// Wall-clock stage latency of one 80 ms audio frame, in milliseconds.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize)]
 pub struct FrameTiming {
     pub frame_index: u64,
     pub perception_ms: f64,
@@ -34,6 +43,11 @@ pub struct FrameTiming {
     pub tts_ms: f64,
     pub codec_ms: f64,
     pub total_ms: f64,
+    /// Host round trips (`eval`, `item`, readbacks) the frame needed.
+    pub host_syncs: u32,
+    /// Sub-stage wall times (empty unless sub-stage attribution is on).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub sub_stages: BTreeMap<String, f64>,
 }
 
 /// Mean / p50 / p95 / max of one stage.
@@ -43,6 +57,13 @@ pub struct StageSummary {
     pub p50_ms: f64,
     pub p95_ms: f64,
     pub max_ms: f64,
+}
+
+/// Mean and max of a per-frame count.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize)]
+pub struct CountSummary {
+    pub mean: f64,
+    pub max: u32,
 }
 
 /// Aggregate of a profile after dropping cold frames.
@@ -61,6 +82,11 @@ pub struct ProfileSummary {
     pub tts: StageSummary,
     pub codec: StageSummary,
     pub total: StageSummary,
+    /// Host round trips per frame.
+    pub host_syncs: CountSummary,
+    /// Per sub-stage statistics (present only with sub-stage attribution).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub sub_stages: BTreeMap<String, StageSummary>,
 }
 
 /// Collected frame timings.
@@ -111,6 +137,24 @@ impl VoiceChatProfile {
         let collect = |f: fn(&FrameTiming) -> f64| frames.iter().map(f).collect::<Vec<_>>();
         let total = stage(&collect(|t| t.total_ms));
         let mean_total = total.mean_ms;
+        let host_syncs = CountSummary {
+            mean: if frames.is_empty() {
+                0.0
+            } else {
+                frames.iter().map(|t| f64::from(t.host_syncs)).sum::<f64>() / frames.len() as f64
+            },
+            max: frames.iter().map(|t| t.host_syncs).max().unwrap_or(0),
+        };
+        let mut per_stage: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+        for t in frames {
+            for (name, ms) in &t.sub_stages {
+                per_stage.entry(name.clone()).or_default().push(*ms);
+            }
+        }
+        let sub_stages = per_stage
+            .into_iter()
+            .map(|(name, values)| (name, stage(&values)))
+            .collect();
         ProfileSummary {
             frames: frames.len(),
             dropped_cold_frames: drop_first.min(self.frames.len()),
@@ -131,6 +175,8 @@ impl VoiceChatProfile {
             tts: stage(&collect(|t| t.tts_ms)),
             codec: stage(&collect(|t| t.codec_ms)),
             total,
+            host_syncs,
+            sub_stages,
         }
     }
 }

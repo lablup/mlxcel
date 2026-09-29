@@ -123,6 +123,19 @@ pub(crate) fn run_voicechat_generation(args: &GenerateArgs) -> Result<()> {
 /// and cache allocation land on the first frames).
 const PROFILE_COLD_FRAMES: usize = 5;
 
+/// `MLXCEL_VOICECHAT_PROFILE_STAGES=1` adds sub-stage attribution to
+/// `--stream --profile` (extra forced evaluations; attribution only).
+const PROFILE_STAGES_ENV: &str = "MLXCEL_VOICECHAT_PROFILE_STAGES";
+
+/// `MLXCEL_VOICECHAT_PROFILE_FRAMES=<path>` also writes every frame's
+/// timings (cold frames included) as a JSON array, for steady-state
+/// analysis of long inputs.
+const PROFILE_FRAMES_ENV: &str = "MLXCEL_VOICECHAT_PROFILE_FRAMES";
+
+fn profile_stages_requested() -> bool {
+    std::env::var(PROFILE_STAGES_ENV).is_ok_and(|v| !v.is_empty() && v != "0")
+}
+
 /// `--stream`: push the input (plus `--extra-decoding-seconds` of silence)
 /// through the cache-aware online session in 80 ms frames, printing deltas
 /// as frames produce them, then flush.
@@ -144,6 +157,7 @@ fn run_streaming(
         use_language_cache: true,
         use_perception_cache: true,
         profile: generation.profile,
+        profile_stages: generation.profile && profile_stages_requested(),
     };
     let mut session = model.create_streaming_session(options)?;
     let rate = model.config().input_sample_rate;
@@ -214,6 +228,11 @@ fn run_streaming(
     if generation.profile {
         let summary = session.profile().summary(PROFILE_COLD_FRAMES);
         eprintln!("{}", serde_json::to_string_pretty(&summary)?);
+        if let Some(path) = std::env::var_os(PROFILE_FRAMES_ENV) {
+            let frames = serde_json::to_string(&session.profile().frames)?;
+            std::fs::write(&path, frames)
+                .with_context(|| format!("failed to write {}", path.to_string_lossy()))?;
+        }
     }
     Ok(())
 }

@@ -164,6 +164,7 @@ impl<'a> ConformerStreamingState<'a> {
         // SAFETY: every pointer refers to an array borrowed from `extra` or
         // owned by `self`, all of which outlive this call.
         unsafe { mlxcel_core::eval_all(&ptrs) };
+        crate::audio::stage_probe::count_sync(1);
     }
 
     fn append_pending(&mut self, mel: &MlxArray) -> Result<(), String> {
@@ -209,6 +210,7 @@ impl<'a> ConformerStreamingState<'a> {
             let scale = (self.encoder.args().d_model as f32).sqrt();
             sub = mlxcel_core::multiply_scalar(&sub, scale);
         }
+        crate::audio::stage_probe::mark("perception.pre_encode", &[&sub]);
         let sub_shape = mlxcel_core::array_shape(&sub);
         let sub_len = sub_shape[1] as i64;
 
@@ -237,7 +239,9 @@ impl<'a> ConformerStreamingState<'a> {
             ));
         }
         let h = mlxcel_core::slice(&sub, &[0, lo_c, 0], &[sub_shape[0], hi_c, sub_shape[2]]);
-        self.stream_layers(&h).map(Some)
+        let out = self.stream_layers(&h)?;
+        crate::audio::stage_probe::mark("perception.layers", &[&out]);
+        Ok(Some(out))
     }
 
     /// Run already-subsampled frames `h: [1, c, d_model]` through every layer,

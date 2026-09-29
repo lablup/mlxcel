@@ -38,6 +38,7 @@ use super::perception::StreamingPerception;
 use super::profile::{FrameTiming, VoiceChatProfile};
 use crate::audio::nemotron_codec::CausalConv1dCache;
 use crate::audio::rnnt::RnntStreamState;
+use crate::audio::stage_probe;
 use crate::models::nemotron_h::NemotronLayerCache;
 use crate::models::nemotron_voicechat::model::NemotronVoiceChatModel;
 use crate::models::nemotron_voicechat::session::host_i32;
@@ -80,6 +81,7 @@ pub struct VoiceChatStreamingSession<'m> {
     timeline_index: u64,
     frame_index: u64,
     profiling: bool,
+    profile_stages: bool,
     profile: VoiceChatProfile,
 }
 
@@ -142,6 +144,7 @@ impl<'m> VoiceChatStreamingSession<'m> {
             timeline_index: 0,
             frame_index: 0,
             profiling: options.profile,
+            profile_stages: options.profile && options.profile_stages,
             profile: VoiceChatProfile::new(f64::from(frame_duration) * 1000.0),
         };
         session.prefill_prompt(options.system_prompt.as_deref())?;
@@ -224,6 +227,7 @@ impl<'m> VoiceChatStreamingSession<'m> {
             .lm
             .fused_input(self.last_text, audio_embedding, self.last_function);
         let start = Instant::now();
+        stage_probe::restart_clock();
         let out = self.language_step(fused);
         let (text_id, function_id) = if generate_channels {
             (out.text, out.function)
@@ -235,6 +239,7 @@ impl<'m> VoiceChatStreamingSession<'m> {
         self.last_function = function_id;
 
         let start = Instant::now();
+        stage_probe::restart_clock();
         let code = if self.timeline_index == 0 {
             self.model.assets.silence_frame()
         } else {
@@ -250,6 +255,7 @@ impl<'m> VoiceChatStreamingSession<'m> {
         };
         self.timeline_index += 1;
         mlxcel_core::eval(&code);
+        stage_probe::count_sync(1);
         let tts_ms = ms_since(start);
         if !generate_channels {
             return Ok((
@@ -291,13 +297,16 @@ impl<'m> VoiceChatStreamingSession<'m> {
         let mut codec_ms = 0.0;
         if decode_audio {
             let start = Instant::now();
+            stage_probe::restart_clock();
             let clean = self.model.assets.replace_control_codes(&code);
+            stage_probe::mark("codec.replace_control", &[&clean]);
             let codes_t = mlxcel_core::transpose_axes(&clean, &[0, 2, 1]);
             let samples = self
                 .model
                 .codec
                 .decode_step(&codes_t, &mut self.codec_cache, false)?;
             let samples = crate::models::nemotron_voicechat::session::host_f32(&samples);
+            stage_probe::count_sync(1);
             codec_ms = ms_since(start);
             let expected = self.model.codec.waveform_to_token_ratio();
             if samples.len() != expected {
@@ -312,6 +321,7 @@ impl<'m> VoiceChatStreamingSession<'m> {
                 sample_rate: self.model.config.output_sample_rate,
                 audio_codes: host_i32(&clean),
             });
+            stage_probe::count_sync(1);
         }
         Ok((
             events,
@@ -328,6 +338,9 @@ impl<'m> VoiceChatStreamingSession<'m> {
             && self.frame_index >= max_frames
         {
             return Err(VoiceChatError::ContextLimit { max_frames });
+        }
+        if self.profiling {
+            stage_probe::begin_frame(self.profile_stages);
         }
         let frame_start = Instant::now();
         let perception = self.perception.step(frame)?;
@@ -352,6 +365,8 @@ impl<'m> VoiceChatStreamingSession<'m> {
         let (timeline_events, timing) = self.timeline_step(&perception.projected, true, true)?;
         events.extend(timeline_events);
         if self.profiling {
+            let total_ms = ms_since(frame_start);
+            let probe = stage_probe::end_frame();
             self.profile.frames.push(FrameTiming {
                 frame_index: self.frame_index,
                 perception_ms,
@@ -359,7 +374,13 @@ impl<'m> VoiceChatStreamingSession<'m> {
                 language_ms: timing.language_ms,
                 tts_ms: timing.tts_ms,
                 codec_ms: timing.codec_ms,
-                total_ms: ms_since(frame_start),
+                total_ms,
+                host_syncs: probe.host_syncs,
+                sub_stages: probe
+                    .stages
+                    .into_iter()
+                    .map(|(name, ms)| (name.to_string(), ms))
+                    .collect(),
             });
         }
         self.frame_index += 1;

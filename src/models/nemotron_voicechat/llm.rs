@@ -171,6 +171,7 @@ impl VoiceChatLanguageModel {
         caches: &mut [NemotronLayerCache],
     ) -> DuplexTokens {
         let hidden = self.llm.forward_embeds_to_hidden(inputs_embeds, caches);
+        crate::audio::stage_probe::mark("language.backbone", &[&hidden]);
         let shape = mlxcel_core::array_shape(&hidden);
         let last = if shape[1] > 1 {
             mlxcel_core::slice(
@@ -185,9 +186,12 @@ impl VoiceChatLanguageModel {
         let function_logits = self.function_head.forward(&last);
         let text = mlxcel_core::argmax(&text_logits, -1, false);
         let function = mlxcel_core::argmax(&function_logits, -1, false);
-        DuplexTokens {
+        crate::audio::stage_probe::mark("language.heads", &[&text, &function]);
+        let tokens = DuplexTokens {
             text: mlxcel_core::item_i32(&text),
             function: mlxcel_core::item_i32(&function),
-        }
+        };
+        crate::audio::stage_probe::count_sync(2);
+        tokens
     }
 }

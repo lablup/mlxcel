@@ -44,6 +44,7 @@ pub mod phi4mm;
 pub mod preprocessing;
 pub mod qwen3_omni_moe;
 pub mod rnnt;
+pub(crate) mod stage_probe;
 pub mod wav_writer;
 pub mod whisper_mel;
 

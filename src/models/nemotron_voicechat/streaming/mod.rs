@@ -26,7 +26,9 @@ mod profile;
 mod session;
 
 pub use events::{StreamingOptions, TokenAccumulator, VoiceChatError, VoiceChatEvent};
-pub use profile::{FrameTiming, ProfileSummary, StageSummary, VoiceChatProfile, percentile};
+pub use profile::{
+    CountSummary, FrameTiming, ProfileSummary, StageSummary, VoiceChatProfile, percentile,
+};
 pub use session::VoiceChatStreamingSession;
 
 #[cfg(test)]

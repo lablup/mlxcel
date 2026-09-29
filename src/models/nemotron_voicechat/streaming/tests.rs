@@ -188,6 +188,8 @@ fn profile_summary_percentiles() {
             tts_ms: total / 8.0,
             codec_ms: 2.0,
             total_ms: *total,
+            host_syncs: i as u32 + 7,
+            sub_stages: [("tts.backbone".to_string(), total / 16.0)].into(),
         });
     }
     let summary = profile.summary(1);
@@ -198,6 +200,21 @@ fn profile_summary_percentiles() {
     assert_eq!(summary.total.max_ms, 100.0);
     assert!((summary.realtime_factor - 70.0 / 80.0).abs() < 1e-12);
     assert!((summary.processing_frames_per_second - 1000.0 / 70.0).abs() < 1e-9);
+    // The cold frame (7 syncs) is dropped; the rest have 8, 9, 10, 11.
+    assert_eq!(summary.host_syncs.mean, 9.5);
+    assert_eq!(summary.host_syncs.max, 11);
+    assert_eq!(summary.sub_stages["tts.backbone"].mean_ms, 70.0 / 16.0);
+    let json = serde_json::to_value(&summary).unwrap();
+    assert!(json.get("sub_stages").is_some());
+    let mut plain = profile.clone();
+    for f in &mut plain.frames {
+        f.sub_stages.clear();
+    }
+    let json = serde_json::to_value(plain.summary(1)).unwrap();
+    assert!(
+        json.get("sub_stages").is_none(),
+        "sub_stages stays out of plain --profile output"
+    );
     assert_eq!(profile.summary(10).frames, 0);
 }
 

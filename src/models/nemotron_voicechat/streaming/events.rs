@@ -94,6 +94,11 @@ pub struct StreamingOptions {
     pub use_perception_cache: bool,
     /// Record per-frame stage timings.
     pub profile: bool,
+    /// With `profile`, also time named sub-stages inside perception,
+    /// language, EAR-TTS and the codec. This forces extra evaluations, so
+    /// the frame totals of such a run are for attribution, not for the
+    /// real-time factor.
+    pub profile_stages: bool,
 }
 
 impl Default for StreamingOptions {
@@ -105,6 +110,7 @@ impl Default for StreamingOptions {
             use_language_cache: true,
             use_perception_cache: true,
             profile: false,
+            profile_stages: false,
         }
     }
 }

@@ -255,6 +255,7 @@ impl RnntDecoder {
             let logits = self.joint_logits(&enc_proj, &cached.pred_proj);
             let token_arr = mlxcel_core::argmax(&logits, 0, false);
             mlxcel_core::try_eval(&token_arr).map_err(|e| format!("RNNT joint failed: {e}"))?;
+            crate::audio::stage_probe::count_sync(1);
             let token = mlxcel_core::item_i32(&token_arr);
             if token == self.blank_id {
                 break;
