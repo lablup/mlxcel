@@ -361,7 +361,7 @@ fn bounded_catalog_detection_reports_unknown_when_weight_index_is_required() {
     let path = write_model(&root, "kimi", "kimi_k3");
     std::fs::write(
         path.join("config.json"),
-        r#"{"model_type":"kimi_k3","vision_config":{}}"#,
+        r#"{"model_type":"kimi_k3","vision_config":{"hidden_size":1024}}"#,
     )
     .expect("config");
     std::fs::remove_file(path.join("model.safetensors")).expect("remove direct shard");

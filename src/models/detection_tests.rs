@@ -21,14 +21,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn has_vision_config_detects_vlm_configs() {
-    assert!(has_vision_config(&json!({ "vision_config": {} })));
+    assert!(has_vision_config(
+        &json!({ "vision_config": { "hidden_size": 1024 } })
+    ));
+    assert!(!has_vision_config(&json!({ "vision_config": {} })));
     assert!(!has_vision_config(&json!({ "text_config": {} })));
 }
 
 #[test]
 fn detect_text_or_vlm_prefers_vlm_when_vision_config_exists() {
     let vlm = detect_text_or_vlm(
-        &json!({ "vision_config": {} }),
+        &json!({ "vision_config": { "hidden_size": 1024 } }),
         ModelType::Gemma3,
         ModelType::Gemma3VLM,
     );
