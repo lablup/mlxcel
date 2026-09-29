@@ -936,6 +936,11 @@ pub fn compute_qwen_vl_media_embeddings(
     image_cache_keys: Option<&[Option<CacheKey>]>,
     caches: Option<&ModelVisionCaches>,
 ) -> Result<(InputEmbeddings, InsertedQwenVlmTokens)> {
+    if let Some(model_path) = qwen.text_only_source() {
+        return Err(crate::multimodal::qwen_vl::text_only_media_error(
+            model_path,
+        ));
+    }
     let info = qwen.prompt_info();
     let media_order = qwen_media_order_from_prompt(
         prompt_tokens,

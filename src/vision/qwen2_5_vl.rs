@@ -35,7 +35,10 @@ use mlxcel_core::{MlxArray, UniquePtr};
 /// - Windowed attention with selective full-attention layers
 pub struct Qwen25VLModel {
     pub text_model: crate::models::Qwen2VLModel,
-    pub vision_encoder: encoders::qwen2_5_vl::Qwen25VLVisionEncoder,
+    /// `None` for a vision-stripped checkpoint loaded text-only (#1367).
+    pub vision_encoder: Option<encoders::qwen2_5_vl::Qwen25VLVisionEncoder>,
+    /// Model directory of a text-only load, used in the media rejection error.
+    pub text_only_path: Option<String>,
     pub processor: processors::qwen2_vl::Qwen2VLProcessor,
     pub image_token_id: i32,
     pub video_token_id: i32,
@@ -91,7 +94,11 @@ impl Qwen25VLModel {
         } else {
             let embed_dtype = mlxcel_core::array_dtype(&inputs_embeds);
             let pv = mlxcel_core::astype(pixel_values, embed_dtype);
-            let vision_output = self.vision_encoder.forward_with_grid(&pv, grid_thw);
+            let vision_output = self
+                .vision_encoder
+                .as_ref()
+                .expect(crate::multimodal::qwen_vl::NO_VISION_TOWER_GUARD)
+                .forward_with_grid(&pv, grid_thw);
 
             // Populate the cache on miss so subsequent turns can skip the
             // vision tower. Materialize before copying so we cache a concrete

@@ -209,15 +209,6 @@ pub enum Qwen35UnsupportedConfig {
     )]
     MropeInterleavedWrongType(String),
 
-    /// Top-level `language_model_only` is `true` on a VLM wrapper config.
-    #[error(
-        "Qwen3.5-family config declares language_model_only=true, which mlxcel does not \
-         implement. The Qwen3.5 VLM loader always builds the vision tower from the checkpoint's \
-         model.visual.* weights, which a vision-stripped build does not ship. Upstream has the \
-         same gap (Blaizzy/mlx-vlm#1812)."
-    )]
-    LanguageModelOnly,
-
     /// Top-level `language_model_only` is present but is not a JSON boolean.
     #[error(
         "Qwen3.5-family config declares language_model_only={0}, which is not a JSON boolean. \
@@ -255,9 +246,9 @@ const MAX_ERROR_VALUE_CHARS: usize = 64;
 ///
 /// `full_config` is the whole `config.json`, not `text_config`:
 /// `language_model_only` lives at the top level next to `vision_config`.
-/// Only the VLM loader calls this. On the text-only path a vision-stripped
-/// checkpoint is exactly what the caller asked for, so the flag is not an
-/// error there.
+/// Only the VLM loader calls this. `language_model_only: true` is accepted
+/// (detection sends such configs to the text loader, #1367); only a
+/// non-boolean value is refused.
 ///
 /// A present-but-wrong-typed value (the JSON string `"true"`, the number `1`,
 /// an object, ...) is rejected rather than read as absent via `.as_bool()`:
@@ -268,8 +259,9 @@ pub fn validate_qwen35_wrapper_config(
 ) -> Result<(), Qwen35UnsupportedConfig> {
     if let Some(value) = full_config.get("language_model_only") {
         match value.as_bool() {
-            Some(true) => return Err(Qwen35UnsupportedConfig::LanguageModelOnly),
-            Some(false) => {}
+            // `true` is a supported vision-stripped build (#1367): detection
+            // routes it to the text loader, so it is not an error here.
+            Some(true | false) => {}
             None => {
                 return Err(Qwen35UnsupportedConfig::LanguageModelOnlyWrongType(
                     truncate_for_error(&value.to_string(), MAX_ERROR_VALUE_CHARS),

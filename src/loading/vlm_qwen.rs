@@ -44,11 +44,58 @@ use super::{
     strip_language_model_prefix, wrap_qwen35_vlm,
 };
 
+/// Vision config for a checkpoint loaded with no vision tower (#1367): the
+/// `vision_config` object when the file still carries one, with the one field
+/// the structs require (`hidden_size`) filled in. Only the processor geometry
+/// (`patch_size`, `spatial_merge_size`, ...) is read from it, so a missing or
+/// empty block falls back to the family defaults.
+fn text_only_vision_config<T: serde::de::DeserializeOwned>(
+    full_config: &serde_json::Value,
+    label: &str,
+) -> Result<T> {
+    let mut value = full_config
+        .get("vision_config")
+        .filter(|v| v.is_object())
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    if let Some(map) = value.as_object_mut() {
+        map.entry("hidden_size").or_insert(serde_json::json!(0));
+    }
+    serde_json::from_value(value).map_err(|e| anyhow::anyhow!("Failed to parse {label}: {e}"))
+}
+
+/// Parse the vision config when a tower is being loaded, else the text-only
+/// stand-in of [`text_only_vision_config`].
+fn qwen_vision_config<T: serde::de::DeserializeOwned>(
+    full_config: &serde_json::Value,
+    has_vision: bool,
+    label: &str,
+) -> Result<T> {
+    if has_vision {
+        parse_required_vlm_subconfig(full_config, "vision_config", label)
+    } else {
+        text_only_vision_config(full_config, label)
+    }
+}
+
+/// Load the vision tower unless the checkpoint is text-only.
+fn load_qwen_vision_encoder<E>(
+    has_vision: bool,
+    build: impl FnOnce() -> Result<E>,
+) -> Result<Option<E>> {
+    if has_vision {
+        build().map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
 /// Load a Qwen2-VL model (custom ViT + Qwen2 language model with MRoPE)
 pub(crate) fn load_qwen2_vl(model_path: &Path) -> Result<LoadedModel> {
     use vision::encoders::qwen2_vl::{Qwen2VLVisionConfig, Qwen2VLVisionEncoder};
 
     let (config_str, full_config) = read_sanitized_vlm_config(model_path)?;
+    let has_vision = models::vlm_has_vision(&full_config, model_path);
 
     // Text config is at root level for Qwen2-VL (not inside text_config sub-object)
     let text_config: models::qwen2_vl::Qwen2VLConfig =
@@ -56,7 +103,7 @@ pub(crate) fn load_qwen2_vl(model_path: &Path) -> Result<LoadedModel> {
 
     // Vision config is in vision_config sub-object
     let mut vision_config: Qwen2VLVisionConfig =
-        parse_required_vlm_subconfig(&full_config, "vision_config", "Qwen2VL vision config")?;
+        qwen_vision_config(&full_config, has_vision, "Qwen2VL vision config")?;
 
     inherit_qwen_vision_quantization(&mut vision_config, &full_config);
 
@@ -70,9 +117,10 @@ pub(crate) fn load_qwen2_vl(model_path: &Path) -> Result<LoadedModel> {
         .map_err(|e| anyhow::anyhow!("Failed to load Qwen2VL text model: {}", e))?;
 
     // Build vision encoder
-    let vision_encoder =
+    let vision_encoder = load_qwen_vision_encoder(has_vision, || {
         Qwen2VLVisionEncoder::from_weights(&weights, &vision_config, "vision_tower")
-            .map_err(|e| anyhow::anyhow!("Failed to load Qwen2VL vision encoder: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to load Qwen2VL vision encoder: {}", e))
+    })?;
 
     // Build image processor
     let processor = qwen_vl_processor(model_path, &vision_config)?;
@@ -90,6 +138,7 @@ pub(crate) fn load_qwen2_vl(model_path: &Path) -> Result<LoadedModel> {
     let vlm = vision::Qwen2VLModel {
         text_model,
         vision_encoder,
+        text_only_path: (!has_vision).then(|| model_path.display().to_string()),
         processor,
         image_token_id: token_ids.image_token_id,
         video_token_id: token_ids.video_token_id,
@@ -245,12 +294,13 @@ pub(crate) fn load_qwen2_5_vl(model_path: &Path) -> Result<LoadedModel> {
     };
 
     let (config_str, full_config) = read_sanitized_vlm_config(model_path)?;
+    let has_vision = models::vlm_has_vision(&full_config, model_path);
 
     let text_config: models::qwen2_vl::Qwen2VLConfig =
         parse_vlm_config(&config_str, "Qwen2.5VL text config")?;
 
     let mut vision_config: Qwen25VLVisionConfig =
-        parse_required_vlm_subconfig(&full_config, "vision_config", "Qwen2.5VL vision config")?;
+        qwen_vision_config(&full_config, has_vision, "Qwen2.5VL vision config")?;
 
     inherit_qwen_vision_quantization(&mut vision_config, &full_config);
 
@@ -270,9 +320,10 @@ pub(crate) fn load_qwen2_5_vl(model_path: &Path) -> Result<LoadedModel> {
     let text_model = models::Qwen2VLModel::from_weights(&weights, &text_config)
         .map_err(|e| anyhow::anyhow!("Failed to load Qwen2.5VL text model: {}", e))?;
 
-    let vision_encoder =
+    let vision_encoder = load_qwen_vision_encoder(has_vision, || {
         Qwen25VLVisionEncoder::from_weights(&weights, &vision_config, "vision_tower")
-            .map_err(|e| anyhow::anyhow!("Failed to load Qwen2.5VL vision encoder: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to load Qwen2.5VL vision encoder: {}", e))
+    })?;
 
     let processor = qwen_vl_processor(model_path, &vision_config)?;
     let token_ids = qwen_vl_token_ids(
@@ -287,6 +338,7 @@ pub(crate) fn load_qwen2_5_vl(model_path: &Path) -> Result<LoadedModel> {
     let vlm = vision::Qwen25VLModel {
         text_model,
         vision_encoder,
+        text_only_path: (!has_vision).then(|| model_path.display().to_string()),
         processor,
         image_token_id: token_ids.image_token_id,
         video_token_id: token_ids.video_token_id,
@@ -302,13 +354,14 @@ pub(crate) fn load_qwen3_vl(model_path: &Path) -> Result<LoadedModel> {
     use vision::encoders::qwen3_vl::{Qwen3VLVisionConfig, Qwen3VLVisionEncoder};
 
     let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
+    let has_vision = models::vlm_has_vision(&full_config, model_path);
 
     let mut text_config: models::qwen3_vl::Qwen3VLConfig =
         parse_required_vlm_subconfig(&full_config, "text_config", "Qwen3VL text config")?;
     inherit_qwen_text_quantization(&mut text_config, &full_config);
 
     let mut vision_config: Qwen3VLVisionConfig =
-        parse_required_vlm_subconfig(&full_config, "vision_config", "Qwen3VL vision config")?;
+        qwen_vision_config(&full_config, has_vision, "Qwen3VL vision config")?;
     inherit_qwen_vision_quantization(&mut vision_config, &full_config);
 
     let mut weights = remap_qwen3_vl_weights(load_vlm_weights_common(model_path, None)?, false);
@@ -317,9 +370,10 @@ pub(crate) fn load_qwen3_vl(model_path: &Path) -> Result<LoadedModel> {
     let text_model = models::Qwen3VLModel::from_weights(&weights, &text_config)
         .map_err(|e| anyhow::anyhow!("Failed to load Qwen3VL text model: {}", e))?;
 
-    let vision_encoder =
+    let vision_encoder = load_qwen_vision_encoder(has_vision, || {
         Qwen3VLVisionEncoder::from_weights(&weights, &vision_config, "vision_tower")
-            .map_err(|e| anyhow::anyhow!("Failed to load Qwen3VL vision encoder: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to load Qwen3VL vision encoder: {}", e))
+    })?;
 
     let processor =
         qwen_vl_processor_with_norm(model_path, &vision_config, [0.5, 0.5, 0.5], [0.5, 0.5, 0.5])?;
@@ -335,6 +389,7 @@ pub(crate) fn load_qwen3_vl(model_path: &Path) -> Result<LoadedModel> {
     let vlm = vision::Qwen3VLModel {
         text_model,
         vision_encoder,
+        text_only_path: (!has_vision).then(|| model_path.display().to_string()),
         processor,
         image_token_id: token_ids.image_token_id,
         video_token_id: token_ids.video_token_id,
@@ -349,13 +404,14 @@ pub(crate) fn load_qwen3_vl_moe(model_path: &Path) -> Result<LoadedModel> {
     use vision::encoders::qwen3_vl::{Qwen3VLVisionConfig, Qwen3VLVisionEncoder};
 
     let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
+    let has_vision = models::vlm_has_vision(&full_config, model_path);
 
     let mut text_config: models::qwen3_vl_moe::Qwen3VLMoeConfig =
         parse_required_vlm_subconfig(&full_config, "text_config", "Qwen3VLMoe text config")?;
     inherit_qwen_text_quantization(&mut text_config, &full_config);
 
     let mut vision_config: Qwen3VLVisionConfig =
-        parse_required_vlm_subconfig(&full_config, "vision_config", "Qwen3VLMoe vision config")?;
+        qwen_vision_config(&full_config, has_vision, "Qwen3VLMoe vision config")?;
     inherit_qwen_vision_quantization(&mut vision_config, &full_config);
 
     let mut weights = remap_qwen3_vl_weights(load_vlm_weights_common(model_path, None)?, true);
@@ -364,9 +420,10 @@ pub(crate) fn load_qwen3_vl_moe(model_path: &Path) -> Result<LoadedModel> {
     let text_model = models::Qwen3VLMoeModel::from_weights(&weights, &text_config)
         .map_err(|e| anyhow::anyhow!("Failed to load Qwen3VLMoe text model: {}", e))?;
 
-    let vision_encoder =
+    let vision_encoder = load_qwen_vision_encoder(has_vision, || {
         Qwen3VLVisionEncoder::from_weights(&weights, &vision_config, "vision_tower")
-            .map_err(|e| anyhow::anyhow!("Failed to load Qwen3VLMoe vision encoder: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to load Qwen3VLMoe vision encoder: {}", e))
+    })?;
 
     let processor =
         qwen_vl_processor_with_norm(model_path, &vision_config, [0.5, 0.5, 0.5], [0.5, 0.5, 0.5])?;
@@ -382,6 +439,7 @@ pub(crate) fn load_qwen3_vl_moe(model_path: &Path) -> Result<LoadedModel> {
     let vlm = vision::Qwen3VLMoeModel {
         text_model,
         vision_encoder,
+        text_only_path: (!has_vision).then(|| model_path.display().to_string()),
         processor,
         image_token_id: token_ids.image_token_id,
         video_token_id: token_ids.video_token_id,

@@ -162,7 +162,8 @@ impl ColQwen25Model {
 
         let vlm = Qwen25VLModel {
             text_model,
-            vision_encoder,
+            vision_encoder: Some(vision_encoder),
+            text_only_path: None,
             processor,
             image_token_id: token_id("image_token_id", DEFAULT_IMAGE_TOKEN_ID),
             video_token_id: token_id("video_token_id", DEFAULT_VIDEO_TOKEN_ID),

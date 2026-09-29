@@ -74,8 +74,28 @@ impl QwenVlMRopeSnapshot {
     }
 }
 
+/// Panic message for a media call that reached a text-only Qwen-VL model.
+/// `compute_qwen_vl_media_embeddings` rejects such requests first with
+/// [`text_only_media_error`], so this only fires on a wiring bug.
+pub const NO_VISION_TOWER_GUARD: &str =
+    "Qwen-VL vision tower is absent (text-only checkpoint); callers must check text_only_source()";
+
+/// Error for an image or video request against a Qwen-VL model that was loaded
+/// without its vision tower (#1367).
+#[must_use]
+pub fn text_only_media_error(model_path: &str) -> anyhow::Error {
+    anyhow::anyhow!("model {model_path} was loaded without a vision tower (text-only checkpoint)")
+}
+
 pub trait QwenVlRuntime {
     fn prompt_info(&self) -> QwenVlmPromptInfo<'_>;
+
+    /// `Some(model_path)` when the model was loaded without a vision tower, so
+    /// any image or video request has to be refused (#1367).
+    fn text_only_source(&self) -> Option<&str> {
+        None
+    }
+
     fn input_embeddings(
         &self,
         input_ids: &MlxArray,
@@ -153,7 +173,7 @@ pub use super::batched_dispatch::forward_batched_with_seq_ids_dispatch;
 /// uses the default `forward_batched_with_context_and_ids` trait impl
 /// (i.e. all of them except Qwen3.5). Calls the shared helper.
 macro_rules! impl_qwen_vl_runtime_loop_dispatch {
-    ($ty:ty) => {
+    ($ty:ty $(, $text_only:ident)?) => {
         impl QwenVlRuntime for $ty {
             fn prompt_info(&self) -> QwenVlmPromptInfo<'_> {
                 QwenVlmPromptInfo {
@@ -164,6 +184,15 @@ macro_rules! impl_qwen_vl_runtime_loop_dispatch {
                     video_token_id: self.video_token_id,
                 }
             }
+
+            $(
+                fn text_only_source(&self) -> Option<&str> {
+                    // `$text_only` only selects this override for wrappers
+                    // whose struct carries `text_only_path`.
+                    let _ = stringify!($text_only);
+                    self.text_only_path.as_deref()
+                }
+            )?
 
             fn input_embeddings(
                 &self,
@@ -197,8 +226,8 @@ macro_rules! impl_qwen_vl_runtime_loop_dispatch {
 
 // Runtimes without cache wiring (yet) — they fall back to the default
 // trait method which just routes through `input_embeddings`.
-impl_qwen_vl_runtime_loop_dispatch!(vision::Qwen2VLModel);
-impl_qwen_vl_runtime_loop_dispatch!(vision::Qwen3VLMoeModel);
+impl_qwen_vl_runtime_loop_dispatch!(vision::Qwen2VLModel, text_only);
+impl_qwen_vl_runtime_loop_dispatch!(vision::Qwen3VLMoeModel, text_only);
 impl_qwen_vl_runtime_loop_dispatch!(vision::Glm4vModel);
 impl_qwen_vl_runtime_loop_dispatch!(vision::Glm4vMoeModel);
 impl_qwen_vl_runtime_loop_dispatch!(vision::GlmOcrModel);
@@ -213,6 +242,10 @@ impl QwenVlRuntime for vision::Qwen25VLModel {
             image_token_id: self.image_token_id,
             video_token_id: self.video_token_id,
         }
+    }
+
+    fn text_only_source(&self) -> Option<&str> {
+        self.text_only_path.as_deref()
     }
 
     fn input_embeddings(
@@ -266,6 +299,10 @@ impl QwenVlRuntime for vision::Qwen3VLModel {
             image_token_id: self.image_token_id,
             video_token_id: self.video_token_id,
         }
+    }
+
+    fn text_only_source(&self) -> Option<&str> {
+        self.text_only_path.as_deref()
     }
 
     fn input_embeddings(

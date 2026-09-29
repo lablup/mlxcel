@@ -267,10 +267,12 @@ pub use deepseek_v3::DeepSeekV3Model;
 pub use deepseek_v4::DeepSeekV4Model;
 pub use deepseek_v32::DeepSeekV32Model;
 pub(crate) use detection::is_sequence_classification_architecture;
+pub(crate) use detection::vlm_has_vision;
 #[cfg(feature = "webui")]
 pub(crate) use detection::{
-    ModelDetectionProbes, config_has_embedding_architecture, detect_model_type_with_probes,
-    embedding_variant_for_model_type, is_encoder_only_model_type, modules_json_value_has_pooling,
+    ModelDetectionProbes, VLM_VISION_WEIGHT_PREFIXES, config_has_embedding_architecture,
+    detect_model_type_with_probes, embedding_variant_for_model_type, is_encoder_only_model_type,
+    modules_json_value_has_pooling,
 };
 pub use detection::{get_model_type, model_type_has_native_video, model_type_is_vision_capable};
 pub use diffusion_gemma::DiffusionGemmaModel;
@@ -1580,6 +1582,9 @@ mod inkling_detection_tests;
 #[cfg(test)]
 #[path = "iquestloopcoder_tests.rs"]
 mod iquestloopcoder_tests;
+#[cfg(test)]
+#[path = "vlm_text_only_detection_tests.rs"]
+mod vlm_text_only_detection_tests;
 
 #[cfg(test)]
 #[path = "gemma3n_helpers_tests.rs"]

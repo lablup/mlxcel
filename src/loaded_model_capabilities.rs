@@ -166,6 +166,18 @@ impl LoadedModel {
         self.vlm_runtime().is_some()
     }
 
+    /// Whether image or video input can reach a vision tower. `false` for a
+    /// non-VLM and for a Qwen-VL family model loaded from a vision-stripped
+    /// checkpoint (#1367).
+    #[must_use]
+    pub fn has_vision_tower(&self) -> bool {
+        match self.vlm_runtime() {
+            Some(VlmRuntimeRef::Qwen(qwen)) => qwen.text_only_source().is_none(),
+            Some(_) => true,
+            None => false,
+        }
+    }
+
     /// Whether the loaded runtime has a public `input_audio` preparation path.
     #[must_use]
     pub fn supports_audio_input(&self) -> bool {

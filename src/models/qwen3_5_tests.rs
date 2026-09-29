@@ -816,20 +816,14 @@ fn mrope_interleaved_wrong_type_is_a_named_error_not_absent() {
 }
 
 #[test]
-fn language_model_only_true_is_a_named_error() {
+fn language_model_only_true_is_accepted() {
     let mut wrapper = qwen3_8_27b_wrapper_config();
     wrapper
         .as_object_mut()
         .expect("wrapper config is an object")
         .insert("language_model_only".to_string(), serde_json::json!(true));
-    let err = validate_qwen35_wrapper_config(&wrapper)
-        .expect_err("a vision-stripped build has no code path and must not load");
-    assert_eq!(err, Qwen35UnsupportedConfig::LanguageModelOnly);
-    let message = err.to_string();
-    assert!(
-        message.contains("language_model_only"),
-        "error must name the key, got: {message}"
-    );
+    validate_qwen35_wrapper_config(&wrapper)
+        .expect("a vision-stripped build is supported and must not be rejected (#1367)");
 }
 
 /// Verified on a release binary before this fix: `language_model_only:

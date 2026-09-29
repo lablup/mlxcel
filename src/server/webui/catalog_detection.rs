@@ -17,7 +17,7 @@ use std::path::Path;
 use serde_json::Value;
 
 use crate::models::{
-    ModelDetectionProbes, ModelType, config_has_embedding_architecture,
+    ModelDetectionProbes, ModelType, VLM_VISION_WEIGHT_PREFIXES, config_has_embedding_architecture,
     embedding_variant_for_model_type, is_encoder_only_model_type,
     is_sequence_classification_architecture, modules_json_value_has_pooling,
 };
@@ -97,6 +97,19 @@ impl ModelDetectionProbes for BoundedCatalogDetectionProbes {
         _config: &Value,
     ) -> anyhow::Result<bool> {
         bounded_weight_prefix(model_path, "vision_tower.")
+    }
+
+    /// Catalog metadata never reads SafeTensors headers, so a checkpoint
+    /// without a bounded index keeps its config-declared VLM answer.
+    fn vlm_has_vision_weights(&self, model_path: &Path) -> anyhow::Result<bool> {
+        let Some(keys) = bounded_weight_keys(model_path).ok().flatten() else {
+            return Ok(true);
+        };
+        Ok(keys.iter().any(|key| {
+            VLM_VISION_WEIGHT_PREFIXES
+                .iter()
+                .any(|prefix| key.starts_with(prefix))
+        }))
     }
 }
 

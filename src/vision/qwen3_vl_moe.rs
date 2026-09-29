@@ -31,7 +31,10 @@ use mlxcel_core::{MlxArray, UniquePtr};
 /// Same vision pipeline as Qwen3-VL, but the text model uses mixture-of-experts layers.
 pub struct Qwen3VLMoeModel {
     pub text_model: crate::models::Qwen3VLMoeModel,
-    pub vision_encoder: encoders::qwen3_vl::Qwen3VLVisionEncoder,
+    /// `None` for a vision-stripped checkpoint loaded text-only (#1367).
+    pub vision_encoder: Option<encoders::qwen3_vl::Qwen3VLVisionEncoder>,
+    /// Model directory of a text-only load, used in the media rejection error.
+    pub text_only_path: Option<String>,
     pub processor: processors::qwen2_vl::Qwen2VLProcessor,
     pub image_token_id: i32,
     pub video_token_id: i32,
@@ -52,7 +55,11 @@ impl Qwen3VLMoeModel {
         // Encode images through vision tower (returns hidden_states + deepstack features)
         let embed_dtype = mlxcel_core::array_dtype(&inputs_embeds);
         let pv = mlxcel_core::astype(pixel_values, embed_dtype);
-        let vision_output = self.vision_encoder.forward_with_grid(&pv, grid_thw);
+        let vision_output = self
+            .vision_encoder
+            .as_ref()
+            .expect(crate::multimodal::qwen_vl::NO_VISION_TOWER_GUARD)
+            .forward_with_grid(&pv, grid_thw);
         let image_features = &vision_output.hidden_states;
 
         // Merge vision features at image token positions (LLaVA-style)

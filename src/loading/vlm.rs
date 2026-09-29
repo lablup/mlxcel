@@ -868,3 +868,7 @@ fn remap_qwen3_vl_weights(raw_weights: WeightMap, moe_experts: bool) -> WeightMa
 #[cfg(test)]
 #[path = "vlm_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "vlm_qwen_text_only_tests.rs"]
+mod qwen_text_only_tests;
