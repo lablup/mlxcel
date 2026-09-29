@@ -132,7 +132,7 @@ struct OrderedArray {
 // created the null stream's queue with completion signals that cannot carry
 // the handler hipFree's device-wide sync attaches, so that wait never woke.
 // rocm::ensure_device_flags() now runs before the first queue exists
-// (lablup/mlxcel#1876, LOCAL_FIXES.md entry 18 and the device-flags entry).
+// (lablup/mlxcel#1876, LOCAL_FIXES.md entries 18 and 20).
 // MLX_ROCM_FFT_CACHE_SIZE overrides the capacity.
 auto& fft_plan_cache() {
   static rocm::LRUBytesKeyCache<std::string, std::shared_ptr<HipFFTPlan>> cache(
