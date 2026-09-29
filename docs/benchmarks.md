@@ -78,7 +78,9 @@ three depending on which script wrote it. They are now separate:
 | `mlxcel_commit` | the same two | the 8-character source revision measured, `-dirty` when tracked files were modified |
 | `mlx_commit` | the same two | the 8-character pinned MLX C++ revision the binary links |
 | `mlx_version` | historical CSVs only | the MLX library version, back when the column was hardcoded to it |
-| `baseline_version` | `bench_mlxlm.py` | the Python baseline, as `mlx-lm-<v>` or `mlx-vlm-<v>` |
+| `baseline_version` | `bench_mlxlm.py` | the Python baseline, as `mlx-lm-<v>` or `mlx-vlm-<v>`; on a ROCm host `+mlx-<v>` follows, since MLX there is a source build whose version carries its commit |
+| `mlx_rocm_overlay_commit` | `bench_decode.sh`, ROCm rows only | the 8-character source commit of the MLX ROCm overlay (`src/lib/mlx-cpp/patches-rocm/UPSTREAM`); `mlx_commit` stays the upstream pin |
+| `hip_version` | `bench_decode.sh`, ROCm rows only | the HIP runtime version from `hipconfig --version`; the ROCm release is in the `hardware` string |
 
 Do not drop these when transcribing the speculative or batched-serving tables by
 hand.
@@ -173,6 +175,28 @@ lines before you read the numbers. Issue #899 shipped a production benchmark
 that compared the fallback against itself across a full sweep and returned a
 clean-looking null result, because nothing said which path had run; a sampling
 sweep whose two arms report the same path is measuring nothing.
+
+### ROCm hosts (issue #1810)
+
+On Linux, when `nvidia-smi` finds no GPU, `bench_decode.sh` spends a one-token
+`mlxcel generate` run on the smallest checkpoint (or the named one) and reads the
+backend, `gfx` target, device name and device memory from the lines `generate`
+prints, with `rocminfo` as the fallback. A ROCm run is then written as
+`benchmarks/rocm_<hw>_<date>.csv`, where `<hw>` is `strixhalo-gfx1151` on the
+Radeon 8060S host and `amd-<gfx>` elsewhere, and the 85% memory guard is taken
+against device memory: on the UMA carve-out the GPU has 96 GiB while the host
+sees about 31 GiB. `bench_mlxlm.py` tags the host the same way, so the pair
+compares with `compare_bench_csv.py --reference`. MLX has no ROCm wheel, so the
+Python baseline needs a source build of MLX with the ROCm backend: point
+`MLXLM_PYTHON` at its interpreter. Stop other GPU tenants first; the published
+gfx1151 baseline records how it checked
+([rocm-baseline-gfx1151-2026-09-30.md](benchmark_results/rocm-baseline-gfx1151-2026-09-30.md)).
+
+```bash
+MODELS_DIR=models/mlx ./scripts/bench_decode.sh all --cooldown 30 --big-cooldown 30
+MLXLM_PYTHON=<mlx-rocm-venv>/bin/python LD_LIBRARY_PATH=/opt/rocm/lib \
+    MODELS_DIR=models/mlx ./scripts/bench_mlxlm.py all --cooldown 30 --big-cooldown 30
+```
 
 ### An op-level number is not a decode number (issue #901)
 
