@@ -70,6 +70,22 @@ assert_not_contains() {
   fi
 }
 
+# Replace one literal string in a file, failing when it matches nothing, so a
+# case cannot pass because its mutation silently stopped applying. Python
+# rather than `sed -i`, whose flag differs between GNU and BSD sed.
+replace_in() {
+  python3 - "$@" <<'PY'
+import pathlib
+import sys
+
+path, old, new = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+text = path.read_text()
+if old not in text:
+    raise SystemExit(f"fixture mutation: {old!r} not found in {path}")
+path.write_text(text.replace(old, new))
+PY
+}
+
 # Write a launcher whose one `template_args` initialiser names no dtype.
 # $1 file, $2 entry point (cuda_kernel or hip_kernel), $3 extra entry line.
 write_launcher() {
@@ -100,7 +116,7 @@ fi
 
 # The rule itself still bites: dropping the dtype key from a real launch fails.
 dir="$(make_tree dtype-key-dropped)"
-sed -i '/{"LogitsType", logits.dtype()},/d' "$dir/$sampling"
+replace_in "$dir/$sampling" '{"LogitsType", logits.dtype()},' ''
 if run_case dtype-key-dropped "$dir" 1; then
   assert_contains dtype-key-dropped "$sampling:"
   assert_contains dtype-key-dropped "names no input dtype; keys are ['TgSize', 'NumSplits']"
@@ -125,7 +141,7 @@ fi
 # the `template_args` stay behind. The pin names the file that left, and the
 # helper that arrived.
 dir="$(make_tree launch-moved-to-helper)"
-sed -i 's/mlx::core::fast::cuda_kernel(/mlxcel::make_jit_kernel(/' "$dir/$sampling"
+replace_in "$dir/$sampling" 'mlx::core::fast::cuda_kernel(' 'mlxcel::make_jit_kernel('
 cat >"$dir/src/lib/mlxcel-core/cpp/jit_helper.cpp" <<'CPP'
 mlx::core::fast::CustomKernelFunction make_jit_kernel(const std::string& name) {
     return mlx::core::fast::cuda_kernel(name, {"x"}, {"out"}, "");
@@ -139,7 +155,7 @@ fi
 
 # A launch that is commented out is not a launch: its file leaves scope.
 dir="$(make_tree launch-commented-out)"
-sed -i 's|kernel = mlx::core::fast::cuda_kernel(|// kernel = mlx::core::fast::cuda_kernel(|' "$dir/$sampling"
+replace_in "$dir/$sampling" 'kernel = mlx::core::fast::cuda_kernel(' '// kernel = mlx::core::fast::cuda_kernel('
 if run_case launch-commented-out "$dir" 1; then
   assert_contains launch-commented-out "$sampling: pinned in EXPECTED_IN_SCOPE but no longer calls"
 fi
@@ -216,6 +232,30 @@ inline void metal_only(int n) {
 }
 CPP
 run_case token-in-comment "$dir" 0
+
+# A `.hip` translation unit is scanned, and a nested directory named like a
+# build directory is not skipped: only top-level ones are.
+dir="$(make_tree hip-file-in-nested-build-dir)"
+write_launcher "$dir/src/lib/mlx-cpp/turbo/build/launch.hip" hip_kernel
+if run_case hip-file-in-nested-build-dir "$dir" 1; then
+  assert_contains hip-file-in-nested-build-dir "src/lib/mlx-cpp/turbo/build/launch.hip:5:"
+fi
+
+# In a git work tree the file list comes from git: an ignored local checkout
+# (`references/mlx` has MLX's own launchers) is out, while an untracked but
+# not ignored launcher is in.
+dir="$(make_tree git-work-tree)"
+git -C "$dir" init -q
+printf '/references/\n' >"$dir/.gitignore"
+write_launcher "$dir/references/mlx/python/src/fast.cpp" cuda_kernel
+if run_case git-work-tree-ignored "$dir" 0; then
+  assert_contains git-work-tree-ignored "9 in scope"
+fi
+write_launcher "$dir/src/lib/mlx-cpp/turbo/untracked_launch.h" cuda_kernel
+if run_case git-work-tree-untracked "$dir" 1; then
+  assert_contains git-work-tree-untracked "src/lib/mlx-cpp/turbo/untracked_launch.h:5:"
+  assert_not_contains git-work-tree-untracked "references/"
+fi
 
 # An empty scope never passes, whatever the pin says.
 mkdir -p "$work/empty-tree/src"

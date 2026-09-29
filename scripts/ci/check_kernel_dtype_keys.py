@@ -61,13 +61,17 @@ the launch somewhere else takes the file's ``template_args`` out of scope with
 it, and a check over zero files still prints OK. So the scope is fail-closed in
 three ways.
 
-1. Every C, C++, CUDA and Objective-C++ source *and header* under the
-   repository root is scanned, not a fixed pair of directories and not
-   ``*.cpp`` only, so a launch that moves into a header or a new directory is
-   still seen. Build output, dependency and hidden directories are skipped (see
-   ``PRUNED_DIRS``). A file counts as a launcher only when the token appears
-   outside comments, and the vendored MLX definitions of the entry points
-   themselves (``CustomKernelFunction hip_kernel(``) are not calls.
+1. Every C, C++, CUDA, HIP and Objective-C++ source *and header* in the
+   repository is scanned, not a fixed pair of directories and not ``*.cpp``
+   only, so a launch that moves into a header or a new directory is still
+   seen. In a git work tree the file list is ``git ls-files`` (tracked plus
+   untracked, minus ``.gitignore``d), so build output and local reference
+   checkouts such as ``references/mlx``, which has launchers of its own, stay
+   out without a hand-kept prune list; any other tree is walked with only
+   top-level build and dependency directories skipped (``PRUNED_DIRS``). A
+   file counts as a launcher only when the token appears outside comments, and
+   the vendored MLX definitions of the entry points themselves
+   (``CustomKernelFunction hip_kernel(``) are not calls.
 2. The success line reports the in-scope count next to the scanned count, so a
    drop in what is actually checked shows up in the CI log.
 3. The in-scope set is pinned in ``EXPECTED_IN_SCOPE``. A pinned file that
@@ -76,6 +80,13 @@ three ways.
    ``template_args`` behind, unchecked). A new launcher file that is not pinned
    fails too, so the pin never goes stale, and an empty scope always fails.
    Updating the pin is a one-line, reviewable change.
+
+Limits: the rule reads only *named* ``std::vector<...TemplateArg>``
+initialisers, so a launch that passes ``template_args`` inline (the #1804 ROCm
+fault probe passes ``{}``, at a fixed float32) is in scope but has nothing to
+check. A launch reached without a direct call in the file (a function pointer,
+or a macro defined elsewhere) does not put that file in scope; the pin catches a
+pinned file that switches to such a form, not a new file that starts with one.
 
 Usage
 -----
@@ -91,6 +102,7 @@ import argparse
 import os
 import pathlib
 import re
+import subprocess
 import sys
 
 # Every file that launches a CUDA or HIP JIT kernel today, relative to the
@@ -117,12 +129,13 @@ SOURCE_SUFFIXES = frozenset(
     {
         ".c", ".cc", ".cpp", ".cxx", ".cu",
         ".h", ".hh", ".hpp", ".hxx", ".cuh", ".inc", ".ipp",
-        ".m", ".mm",
+        ".hip", ".m", ".mm",
     }
 )
-# Directory names never descended into: build output and dependencies. Hidden
-# directories (`.git`, `.venv`, ...) are skipped as well, and symlinked
-# directories (`models/`) are not followed.
+# Outside a git work tree only (the companion test's throwaway copies): the
+# top-level directories not descended into, along with top-level hidden ones.
+# Symlinked directories (`models/`) are never followed. Inside a work tree
+# `.gitignore` decides instead.
 PRUNED_DIRS = frozenset({"target", "node_modules", "build", "site", "__pycache__"})
 
 # `fast::cuda_kernel(`, `mlx::core::fast::hip_kernel(`, `cuda_kernel (`. The
@@ -139,7 +152,9 @@ DEFINITION_PREFIX_RE = re.compile(r"CustomKernelFunction\s+(?:\w+::)*$")
 LEXEME_RE = re.compile(
     r'(?:u8|u|U|L)?R"(?P<delim>[^()\\\s"]{0,16})\(.*?\)(?P=delim)"'
     r'|"(?:\\.|[^"\\\n])*"'
-    r"|'(?:\\.|[^'\\\n])*'"
+    # `(?<!...)` keeps a digit separator (`1'000`, `0xFF'FF`) from opening a
+    # character literal that would swallow the code after it.
+    r"|(?<![0-9A-Fa-f])'(?:\\.|[^'\\\n])*'"
     r"|(?P<comment>//[^\n]*|/\*.*?\*/)",
     re.S,
 )
@@ -181,17 +196,46 @@ def launches_jit_kernel(src: str) -> bool:
     return False
 
 
-def source_files(root: pathlib.Path) -> list[pathlib.Path]:
+def git_files(root: pathlib.Path) -> list[pathlib.Path] | None:
+    """Tracked and untracked, non-ignored files when `root` is a work tree's top."""
+    try:
+        top = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        if pathlib.Path(top).resolve() != root:
+            return None
+        listed = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "-z", "--cached", "--others",
+             "--exclude-standard"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return [root / rel for rel in sorted(set(listed.split("\0"))) if rel]
+
+
+def walked_files(root: pathlib.Path) -> list[pathlib.Path]:
     found = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(
-            d for d in dirnames if d not in PRUNED_DIRS and not d.startswith(".")
-        )
-        for name in sorted(filenames):
-            path = pathlib.Path(dirpath) / name
-            if path.suffix in SOURCE_SUFFIXES and path.is_file():
-                found.append(path)
+        if pathlib.Path(dirpath) == root:
+            dirnames[:] = [
+                d for d in dirnames if d not in PRUNED_DIRS and not d.startswith(".")
+            ]
+        dirnames.sort()
+        found.extend(pathlib.Path(dirpath) / name for name in sorted(filenames))
     return found
+
+
+def source_files(root: pathlib.Path) -> list[pathlib.Path]:
+    candidates = git_files(root)
+    if candidates is None:
+        candidates = walked_files(root)
+    # `is_file` drops tracked files deleted from the work tree, and symlinks
+    # to directories.
+    return [
+        p for p in candidates if p.suffix in SOURCE_SUFFIXES and p.is_file()
+    ]
 
 
 def check_file(path: pathlib.Path, root: pathlib.Path, src: str) -> list[str]:
