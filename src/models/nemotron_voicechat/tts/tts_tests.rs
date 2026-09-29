@@ -423,3 +423,35 @@ fn native_sum_reduces_the_requested_axis() {
     assert_eq!(mlxcel_core::array_dtype(&got), dtype::BFLOAT16);
     assert_eq!(mlxcel_core::array_shape(&got), vec![2, 4]);
 }
+
+/// Issue #2045: only projections fed by f32 activations are held as f32.
+#[test]
+fn f32_promotion_keeps_norms_and_the_subword_path_as_stored() {
+    use super::model::promotes_to_f32;
+    for key in [
+        "backbone.layers.3.self_attn.q_proj.weight",
+        "backbone.layers.3.mlp.down_proj.weight",
+        "mog_head.mlp_stack.1.mlp.gate_proj.weight",
+        "mog_head.proj_logits.weight",
+        "mog_head.proj_else.weight",
+        "embed_code.weight",
+        "gated_fusion_audio_text.audio_proj.bias",
+    ] {
+        assert!(promotes_to_f32(key), "{key}");
+    }
+    for key in [
+        "backbone.layers.3.input_layernorm.weight",
+        "backbone.layers.3.self_attn.q_norm.weight",
+        "backbone.norm.weight",
+        "mog_head.mlp_stack.1.pre_norm.weight",
+        "mog_head.proj_mus.weight",
+        "mog_head.low_mat",
+        "embed_subword.backbone.encoder.layers.0.mlp.up_proj.weight",
+        "gated_fusion_audio_text.text_proj.weight",
+        "gated_fusion_audio_text.gate",
+        "null_emb",
+        "rvq_embs",
+    ] {
+        assert!(!promotes_to_f32(key), "{key}");
+    }
+}

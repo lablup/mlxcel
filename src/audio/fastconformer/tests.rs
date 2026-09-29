@@ -455,3 +455,40 @@ fn attention_loads_non_default_quantization() {
     assert_eq!(scales, vec![D, D / 32]);
     assert_ne!(scales[1], D / 64);
 }
+
+/// Issue #2045 (P1): perception holds its bf16 weights as f32, which must be
+/// bit-identical to MLX promoting the bf16 weights inside every op.
+#[test]
+fn perception_f32_weights_match_the_promoted_bf16_path() {
+    let mut w = tiny_weights("p.encoder");
+    let mut s = 5u64;
+    put(&mut w, "p.proj.weight", &[12, 8], &mut s, 0.3);
+    put(&mut w, "p.proj.bias", &[12], &mut s, 0.1);
+    let w: WeightMap = w
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.clone(),
+                mlxcel_core::astype(v, mlxcel_core::dtype::BFLOAT16),
+            )
+        })
+        .collect();
+    let perception = VoiceChatPerception::from_weights(&w, "p", &tiny_args(), (64, 4)).unwrap();
+    let encoder =
+        FastConformerEncoder::from_weights(&w, "p.encoder", &tiny_args(), (64, 4)).unwrap();
+    let proj = mlxcel_core::layers::UnifiedLinear::from_weights(&w, "p.proj", 64, 4).unwrap();
+    let input = mel(24, 16);
+    let out = perception.forward(&input, 24).unwrap();
+    let (encoded, _) = encoder.forward(&input, 24).unwrap();
+    let projected = proj.forward(&encoded);
+    let bytes = |a: &mlxcel_core::MlxArray| {
+        mlxcel_core::eval(a);
+        mlxcel_core::array_to_raw_bytes(a)
+    };
+    assert_eq!(
+        mlxcel_core::array_dtype(&out.encoded),
+        mlxcel_core::dtype::FLOAT32
+    );
+    assert_eq!(bytes(&out.encoded), bytes(&encoded));
+    assert_eq!(bytes(&out.projected), bytes(&projected));
+}

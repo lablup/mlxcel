@@ -67,6 +67,27 @@ pub struct RvqEarTtsModel {
     schedule: Vec<usize>,
 }
 
+/// Whether the EAR-TTS weight `key` (relative to the model prefix) only
+/// ever meets f32 activations through a promoting matmul, so it can be held
+/// as f32 without changing any output (see [`crate::audio::f32_weights`]):
+/// the backbone and MoG-head projections, the code embedding and the audio
+/// branch of the gated fusion. Norm weights (`1 + w` is built in the stored
+/// dtype), the bf16 subword path (`embed_subword`, `text_proj`) and the
+/// gathered MoG tables (`proj_mus`, `low_mat`) stay as stored.
+pub(crate) fn promotes_to_f32(key: &str) -> bool {
+    let projection = key.ends_with("_proj.weight") || key.ends_with("_proj.bias");
+    let mog_output = ["proj_logits", "proj_logs", "proj_else"]
+        .iter()
+        .any(|name| {
+            key == format!("mog_head.{name}.weight") || key == format!("mog_head.{name}.bias")
+        });
+    (key.starts_with("backbone.layers.") && projection)
+        || (key.starts_with("mog_head.mlp_stack.") && projection)
+        || mog_output
+        || key.starts_with("embed_code.")
+        || key.starts_with("gated_fusion_audio_text.audio_proj.")
+}
+
 fn bool_column(values: &[bool]) -> UniquePtr<MlxArray> {
     let ints: Vec<i32> = values.iter().map(|&v| i32::from(v)).collect();
     let arr = mlxcel_core::from_slice_i32(&ints, &[1, values.len() as i32, 1]);
@@ -82,6 +103,11 @@ impl RvqEarTtsModel {
     ) -> Result<Self, String> {
         let (gs, bits) = (config.group_size(), config.bits());
         let h = config.hidden_size as i32;
+        let key_prefix = format!("{prefix}.");
+        let promoted = crate::audio::f32_weights::promoted_subset(weights, &key_prefix, |key| {
+            promotes_to_f32(&key[key_prefix.len()..])
+        });
+        let weights = &promoted;
         let schedule = config.mask_schedule();
         if schedule.iter().sum::<usize>() != config.num_quantizers {
             return Err(format!(

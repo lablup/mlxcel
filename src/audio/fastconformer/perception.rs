@@ -44,6 +44,11 @@ impl VoiceChatPerception {
     /// Load `{prefix}.encoder.*` and `{prefix}.proj.*`
     /// (e.g. `prefix = "stt_model.perception"`). `quantization` is the
     /// checkpoint's `(group_size, bits)` for quantized linears.
+    ///
+    /// Half-precision encoder and `proj` weights are held as f32: the f32
+    /// mel input promotes every op to f32, which casts each weight on every
+    /// call, and casting once at load gives bit-identical outputs without
+    /// that per-frame traffic (see [`crate::audio::f32_weights`]).
     pub fn from_weights(
         weights: &WeightMap,
         prefix: &str,
@@ -51,6 +56,16 @@ impl VoiceChatPerception {
         quantization: (i32, i32),
     ) -> Result<Self, String> {
         let (group_size, bits) = quantization;
+        let encoder_prefix = format!("{prefix}.encoder.");
+        let proj_prefix = format!("{prefix}.proj.");
+        let mut promoted =
+            crate::audio::f32_weights::promoted_subset(weights, &encoder_prefix, |_| true);
+        promoted.extend(crate::audio::f32_weights::promoted_subset(
+            weights,
+            &proj_prefix,
+            |_| true,
+        ));
+        let weights = &promoted;
         Ok(Self {
             encoder: FastConformerEncoder::from_weights(
                 weights,

@@ -29,6 +29,7 @@
 mod attention;
 pub mod config;
 pub mod encoder;
+pub(crate) mod f32_weights;
 pub mod fastconformer;
 pub mod feature_extractor;
 pub(crate) mod fft;

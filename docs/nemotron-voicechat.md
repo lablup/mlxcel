@@ -196,14 +196,18 @@ The codec is a lossy neural codec: a pure tone round-trips with a waveform SNR o
 
 ## Performance
 
-Measure with `mlxcel generate ... --stream --profile` (the `realtime_factor` of the summary, defined as mean per-frame processing time divided by the 80 ms frame; above 1.0 means slower than real time). The table comes from an otherwise idle validation machine: the "What is the capital of France?" prompt with 3 s of extra decoding (56 frames, the first 5 dropped as cold), one warm-up run, then three measured runs per checkpoint. The three runs agreed within 0.01.
+Measure with `mlxcel generate ... --stream --profile` (the `realtime_factor` of the summary, defined as mean per-frame processing time divided by the 80 ms frame; above 1.0 means slower than real time). The table comes from an otherwise idle validation machine: the "What is the capital of France?" prompt with 3 s of extra decoding (56 frames, the first 5 dropped as cold), one warm-up run, then three measured runs per checkpoint. The three runs agreed within 0.003.
 
 | Checkpoint | Real-time factor | Frame time p50 / p95 | Machine |
 |---|---|---|---|
-| 4-bit | 1.04 | 82.7 ms / 83.8 ms | Apple M1 Ultra (128 GB), Metal |
-| 8-bit | 1.12 | 89.3 ms / 90.7 ms | Apple M1 Ultra (128 GB), Metal |
+| 4-bit | 0.87 | 69.0 ms / 70.4 ms | Apple M1 Ultra (128 GB), Metal |
+| 8-bit | 0.94 | 75.3 ms / 76.4 ms | Apple M1 Ultra (128 GB), Metal |
 
-Neither checkpoint keeps up with real time on this machine: each 80 ms frame takes slightly longer than 80 ms, so a live session falls behind by about 4% (4-bit) or 12% (8-bit) of the elapsed audio. Per-stage p50 for the 4-bit checkpoint: perception 22.7 ms, RNNT 0.4 ms, language 16.1 ms, TTS 36.0 ms, codec 7.4 ms; the 8-bit checkpoint differs only in the language stage (22.4 ms). TTS is the largest stage and the first place to look for speedups.
+Both checkpoints keep up with real time on this machine. Per-stage p50 for the 4-bit checkpoint: perception 17.0 ms, RNNT 0.4 ms, language 16.0 ms, TTS 28.1 ms, codec 7.3 ms; the 8-bit checkpoint differs only in the language stage (22.2 ms). A 4-bit run with 12 s of extra decoding (168 frames) holds the same speed after the encoder's 70-frame attention window fills: frames 71 and later average 69.8 ms (real-time factor 0.87).
+
+The encoder, the EAR-TTS backbone and the MoG head run f32 activations against the checkpoint's bf16 weights, as the reference does. MLX would cast those weights to f32 inside every matmul and convolution on every frame, so the loader holds them as f32 instead: the conversion is exact and the outputs are bit-identical, at the cost of about 2.7 GB of extra resident memory (1.2 GB encoder, 1.2 GB TTS backbone, 0.3 GB MoG head). Norm weights and the bf16 subword path stay as stored.
+
+The summary also reports `host_syncs`, the host round trips per frame (about 8). For attribution inside the stages, set `MLXCEL_VOICECHAT_PROFILE_STAGES=1`: the summary gains a `sub_stages` map (for example `perception.layers`, `tts.backbone`, `tts.mog_head`, `codec.decoder_istft`). Those timers force evaluation at every boundary, so that run's frame totals are slower and are not the real-time factor. `MLXCEL_VOICECHAT_PROFILE_FRAMES=<path>` writes every frame's timings (cold frames included) as JSON for steady-state analysis of long inputs.
 
 ## Limits
 
