@@ -36,6 +36,7 @@ pub mod gemma3n;
 pub mod inkling_dmel;
 pub mod inkling_processor;
 pub mod inkling_tower;
+pub mod nemotron_codec;
 pub mod nemotron_h_nano_omni;
 pub mod nemotron_mel;
 pub mod phi4mm;
