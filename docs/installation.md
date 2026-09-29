@@ -481,7 +481,7 @@ thinking model that spends its whole budget inside the thinking block reports
 | Memory estimation on UMA hosts | Correct. Measured on the tested configuration: the ROCm allocator reports a nonzero cap (76.80 GiB of the 96 GiB carve-out), which the estimator reads before it would ever reach host RAM, so nothing that fits the carve-out is refused for that reason (lablup/mlxcel#1805). |
 | Diagnostics | Report the AMD vendor, device name, `gfx` target and device memory, and no longer print a CUDA compute capability for it (lablup/mlxcel#1805). A binary whose compiled `gfx` list does not cover the device refuses to start rather than failing at the first kernel launch. |
 | `mlxcel-server` chat completions | Work for dense and affine MoE checkpoints, streaming and non-streaming; verified with `scripts/server_chat_smoke.sh`. |
-| Audio (speech to text, text to speech) | Works. The FFT primitive runs on hipFFT; `MLX_ROCM_FFT_CACHE_SIZE` bounds how many transform plans stay alive (lablup/mlxcel#1825). |
+| Audio (speech to text, text to speech) | Works. The FFT primitive runs on hipFFT; plans are cached up to `MLX_ROCM_FFT_CACHE_SIZE` (default 128, as on CUDA; lablup/mlxcel#1825, #1876). |
 | Windows, multiple GPUs, distributed inference | Not supported. |
 
 Decode throughput measured on the tested configuration, for orientation only

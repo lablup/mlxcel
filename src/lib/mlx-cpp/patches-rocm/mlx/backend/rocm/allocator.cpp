@@ -130,6 +130,9 @@ inline void* unified_malloc(size_t size, bool& is_managed) {
   void* data = nullptr;
   hipError_t err;
   ensure_mlx_device_current();
+  // Often the first HIP work in the process, ahead of rocm::device(): put the
+  // device in blocking-sync mode before any queue exists on it (#1876).
+  ensure_current_device_flags();
 
   if (use_finegrained()) {
     err = hipExtMallocWithFlags(&data, size, hipDeviceMallocFinegrained);
@@ -326,6 +329,9 @@ RocmAllocator::RocmAllocator()
         }
       }
       (void)hipSetDevice(i);
+      // The free stream below is a queue on device i; flag the device first
+      // (#1876). This loop already switches to every pooled device.
+      ensure_device_flags(i);
       hipMemPool_t pool = nullptr;
       if (hipDeviceGetDefaultMemPool(&pool, i) == hipSuccess) {
         mem_pools_[i] = pool;
@@ -925,11 +931,17 @@ void* Buffer::raw_ptr() {
   auto& cbuf = *static_cast<rocm::RocmBuffer*>(ptr_);
 
   if (cbuf.device == -1) {
+    // The null-stream query creates the null stream's queue on first use, and
+    // a host read can come before rocm::device() ever runs. Flag the device
+    // the query is about to touch first, or that queue keeps completion
+    // signals a later hipFree waits on forever (#1876).
+    rocm::ensure_current_device_flags();
     if (hipStreamQuery(nullptr) != hipSuccess) {
       (void)hipStreamSynchronize(nullptr);
     }
   } else {
     // Discrete: host shadow (CUDA: move_to_unified_memory).
+    rocm::ensure_current_device_flags();
     (void)hipDeviceSynchronize();
     rocm::allocator().ensure_host_shadow(cbuf);
     return cbuf.host_shadow;

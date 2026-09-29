@@ -24,6 +24,8 @@ void init() {
   auto d = mlx::core::default_device();
   if (d.type == mlx::core::Device::gpu) {
     (void)hipSetDevice(d.index);
+    // Before the hipFree below or anything else can create a queue (#1876).
+    rocm::ensure_device_flags(d.index);
   }
   hipFree(nullptr);
 }

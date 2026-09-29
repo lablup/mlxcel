@@ -189,10 +189,11 @@ CUDA builds also use non-`MLXCEL_*` variables such as `CUDA_HOME` and
 ROCm builds (`--features rocm`) read `ROCM_PATH` (default `/opt/rocm`) and
 `MLX_ROCM_ARCHITECTURES` (the `gfx` targets, default detected with `rocminfo`); see
 [Installation](installation.md#linux-with-amd-rocm-experimental). At runtime they
-also read `MLX_ROCM_FFT_CACHE_SIZE` (default 8), the number of hipFFT plans kept
-alive. The default is low on purpose: past roughly a dozen live plans, creating
-the next one blocks inside hipFFT with the GPU idle (lablup/mlxcel#1825). Raise
-it only while measuring that limit. `MLX_ROCM_GPU_WATCHDOG_SECS` (default `0`,
+also read `MLX_ROCM_FFT_CACHE_SIZE` (default 128, as on CUDA), the number of
+hipFFT plans the plan cache keeps; a smaller value only trades memory for plan
+rebuilds. It used to default to 8 to dodge a hang at the first plan eviction,
+which turned out to be a device-flag ordering bug in the backend, now fixed
+(lablup/mlxcel#1876). `MLX_ROCM_GPU_WATCHDOG_SECS` (default `0`,
 off) is the longest, in whole seconds, a single host wait for GPU work may
 block before it fails with an error (lablup/mlxcel#1804). A value that is not a
 non-negative integer (for example `10s`) is ignored with a stderr warning and

@@ -1345,19 +1345,73 @@ std::unordered_map<int, Device>& get_devices() {
   return devices;
 }
 
+void ensure_device_flags(int device_index) {
+  if (device_index < 0) {
+    return;
+  }
+  // Lock-free fast path for the common indices: this runs on every unified
+  // allocation and every host read of a unified buffer.
+  static std::atomic<uint64_t> flagged_low{0};
+  const bool low = device_index < 64;
+  const uint64_t bit = low ? (uint64_t{1} << device_index) : 0;
+  if (low && (flagged_low.load(std::memory_order_acquire) & bit)) {
+    return;
+  }
+  static std::mutex mu;
+  static std::vector<int> flagged_high;
+  std::lock_guard<std::mutex> lock(mu);
+  if (low ? (flagged_low.load(std::memory_order_relaxed) & bit) != 0
+          : std::find(flagged_high.begin(), flagged_high.end(), device_index) !=
+              flagged_high.end()) {
+    return;
+  }
+  // Per index, not one process-wide bool: if device 0 were flagged first a
+  // global gate would leave device 1 unflagged. hipSetDeviceFlags applies to
+  // the current device, so switch only when the caller is on another one and
+  // switch back after. Never iterate every device: creating a context or queue
+  // on the other GPU of a multi-GPU host is what wedges the discrete GPU's
+  // queue over a TB5 link, so touch only this device.
+  int prev = -1;
+  const bool have_prev = hipGetDevice(&prev) == hipSuccess;
+  const bool switched = !have_prev || prev != device_index;
+  if (switched) {
+    (void)hipSetDevice(device_index);
+  }
+  if (hipSetDeviceFlags(hipDeviceScheduleBlockingSync) != hipSuccess) {
+    // Not fatal (the device then keeps its default wait mode, as it would
+    // have before this helper existed); clear the error so it does not
+    // surface from an unrelated later call. Recorded as done either way so a
+    // failing device is not retried on every allocation.
+    (void)hipGetLastError();
+  }
+  if (switched && have_prev) {
+    (void)hipSetDevice(prev);
+  }
+  if (low) {
+    flagged_low.fetch_or(bit, std::memory_order_release);
+  } else {
+    flagged_high.push_back(device_index);
+  }
+}
+
+void ensure_current_device_flags() {
+  int current = -1;
+  if (hipGetDevice(&current) == hipSuccess) {
+    ensure_device_flags(current);
+  }
+}
+
 Device& device(mlx::core::Device device) {
   auto& devices = get_devices();
   auto it = devices.find(device.index);
   if (it == devices.end()) {
-    // Set blocking sync flags on THIS device (per index, not a single global
-    // bool: if device 0 were touched first the global gate would leave device 1
-    // unflagged). Must happen while this device is current and before its
-    // context is created — i.e. before the Device is constructed. Iterating
-    // every device would create a context/queue on the other GPU too; on a
-    // multi-GPU host that cross-device coexistence is what wedges the discrete
-    // GPU's queue over a TB5 link, so touch only this device.
-    hipSetDevice(device.index);
-    hipSetDeviceFlags(hipDeviceScheduleBlockingSync);
+    // Bind this device (callers rely on it being current afterwards) and make
+    // sure it is in blocking-sync mode before the Device and its streams are
+    // constructed. The first unified allocation usually got there first, since
+    // the allocator runs before the first stream exists; see
+    // ensure_device_flags() for why the order matters.
+    (void)hipSetDevice(device.index);
+    ensure_device_flags(device.index);
     it = devices.try_emplace(device.index, device.index).first;
   }
   return it->second;

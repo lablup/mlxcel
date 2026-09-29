@@ -8,6 +8,7 @@
 #include <stdexcept>
 
 #include "mlx/array.h"
+#include "mlx/backend/rocm/device.h"
 #include "mlx/io/load.h"
 
 namespace mlx::core::rocm {
@@ -80,6 +81,9 @@ bool staged_write(io::Writer& out, const array& a) {
   // stream is drained. Sync the device so the DMA cannot observe a half-written
   // buffer: MLX ROCm streams are hipStreamNonBlocking, so a plain hipMemcpy on
   // the NULL stream does NOT order against them.
+  // A checkpoint save can be the first sync on this thread's device; flag it
+  // before the sync touches the null stream (#1876).
+  rocm::ensure_current_device_flags();
   if (hipDeviceSynchronize() != hipSuccess) {
     (void)hipGetLastError();
     return false;

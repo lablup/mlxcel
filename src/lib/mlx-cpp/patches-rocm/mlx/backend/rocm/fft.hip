@@ -125,19 +125,19 @@ struct OrderedArray {
   std::vector<int> order;
 };
 
-// Deliberately much smaller than the CUDA file's 128. Measured on gfx1151 with
-// ROCm 10.0.0: once enough hipFFT plans are alive at the same time, creating the
-// next one blocks forever inside the library, with the GPU idle and the calling
-// thread asleep. A probe cycling 26 distinct transform shapes reproduces it at
-// capacity 16, 24, 32 and 128, and passes every time at 8. A plan also outlives
-// its cache entry while an execution that captured it is still pending, so the
-// live count can exceed the capacity and the cap has to leave headroom. The
-// root cause inside rocFFT is not identified; this bounds it. Raise it with
-// MLX_ROCM_FFT_CACHE_SIZE when measuring.
+// Same capacity as the CUDA file. This was once 8: past that, the first plan
+// eviction hung inside hipfftDestroy (rocFFT's hipFree never returned). The
+// cause was not rocFFT or the number of live plans but a late
+// hipSetDeviceFlags(hipDeviceScheduleBlockingSync): the allocator had already
+// created the null stream's queue with completion signals that cannot carry
+// the handler hipFree's device-wide sync attaches, so that wait never woke.
+// rocm::ensure_device_flags() now runs before the first queue exists
+// (lablup/mlxcel#1876, LOCAL_FIXES.md entry 18 and the device-flags entry).
+// MLX_ROCM_FFT_CACHE_SIZE overrides the capacity.
 auto& fft_plan_cache() {
   static rocm::LRUBytesKeyCache<std::string, std::shared_ptr<HipFFTPlan>> cache(
       "MLX_ROCM_FFT_CACHE_SIZE",
-      /* default_capacity */ 8);
+      /* default_capacity */ 128);
   return cache;
 }
 
@@ -306,8 +306,14 @@ void execute_fft(
   hipfftHandle handle = plan->handle;
 
   // hipFFT is not a graph kernel node; launch_kernel splits the graph and runs
-  // this on the encoder stream, ordered after what came before. The captured
-  // plan keeps the cache entry alive for the duration of the call.
+  // this on the encoder stream, ordered after what came before. launch_kernel
+  // calls the lambda synchronously and drops it on return, so the captured
+  // plan lives only as long as the enqueue, not the asynchronous execution.
+  // An eviction later is still safe for that execution: hipfftDestroy frees
+  // the plan's device memory through hipFree, which synchronizes the device
+  // first. That argument covers the eager launch; the opt-in
+  // MLX_GRAPH_PREFILL_REPLAY=1 path, which records the call into a graph that
+  // launches later, was not examined.
   encoder.launch_kernel([handle,
                          plan,
                          in_ptr,

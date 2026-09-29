@@ -482,6 +482,20 @@ class Device {
   std::mutex encoders_mtx_;
 };
 
+// Put `device_index` in blocking-sync wait mode (hipDeviceScheduleBlockingSync)
+// once per process, before MLX creates the first HIP queue on it. Thread-safe;
+// touches only that device, and leaves the calling thread's current device as
+// it found it. Call it before any HIP call that can create a queue on a device
+// (a null-stream query, sync, copy or launch, or a stream creation) on a path
+// that can run before rocm::device(): the order is what matters. CLR types a
+// queue's completion signals by the wait mode in force when the queue is
+// created and never re-types them, so a queue created before the flag keeps
+// signals that cannot carry the completion handlers a later hipFree or device
+// sync attaches, and that wait never returns (lablup/mlxcel#1876).
+void ensure_device_flags(int device_index);
+// ensure_device_flags() for the calling thread's current HIP device.
+void ensure_current_device_flags();
+
 Device& device(mlx::core::Device device);
 CommandEncoder& get_command_encoder(Stream s);
 void clear_all_encoders();
