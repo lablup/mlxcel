@@ -57,7 +57,7 @@ fn periodic_hann(n: usize) -> Vec<f32> {
         .collect()
 }
 
-fn hz_to_mel_slaney(freq: f64) -> f64 {
+pub(crate) fn hz_to_mel_slaney(freq: f64) -> f64 {
     let f_sp = 200.0 / 3.0;
     let min_log_hz = 1000.0;
     let min_log_mel = min_log_hz / f_sp;
@@ -69,7 +69,7 @@ fn hz_to_mel_slaney(freq: f64) -> f64 {
     }
 }
 
-fn mel_to_hz_slaney(mel: f64) -> f64 {
+pub(crate) fn mel_to_hz_slaney(mel: f64) -> f64 {
     let f_sp = 200.0 / 3.0;
     let min_log_hz = 1000.0;
     let min_log_mel = min_log_hz / f_sp;
@@ -122,7 +122,7 @@ fn whisper_mel_filters(n_mels: usize) -> Vec<f32> {
 /// Reflect-pad `audio` by `pad` samples on each side (numpy `reflect`: the edge
 /// sample is not repeated). Falls back to clamped indices for inputs shorter
 /// than the pad width so very short clips do not panic.
-fn reflect_pad(audio: &[f32], pad: usize) -> Vec<f32> {
+pub(crate) fn reflect_pad(audio: &[f32], pad: usize) -> Vec<f32> {
     let n = audio.len();
     let mut out = Vec::with_capacity(n + 2 * pad);
     if n == 0 {
