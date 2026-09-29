@@ -679,6 +679,18 @@ impl SwitchLinear {
                     bits
                 };
 
+                // 1-bit dense linears and embeddings run on mlxcel's own
+                // kernels (issue #1370), but expert stacks go through MLX's
+                // `gather_qmm`, which has no 1-bit kernel and would abort at
+                // the first routed forward pass. No public checkpoint ships a
+                // 1-bit expert stack, so refuse it at load.
+                if effective_bits == 1 {
+                    return Err(format!(
+                        "{prefix}: 1-bit quantization is supported for dense linears and \
+                         embeddings only; 1-bit MoE expert stacks (gather_qmm) are not supported"
+                    ));
+                }
+
                 // The fallback above keeps the declared `bits` whenever the
                 // shapes solve to something outside the supported widths, which
                 // stores a triple MLX will reject. Refuse it here instead, using
@@ -1572,6 +1584,33 @@ pub(crate) fn nvfp4_expert_plane(prefix: &str) -> WeightMap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 1-bit expert stacks would reach MLX's `gather_qmm`, which has no 1-bit
+    /// kernel; they are refused at load with the prefix named (issue #1370).
+    #[test]
+    fn switch_linear_rejects_one_bit_with_prefix() {
+        let mut weights = WeightMap::new();
+        // 2 experts, 8 output rows, K = 256: packed_in = 8 words, 2 groups of 128.
+        let words = vec![0x5555_5555_u32; 2 * 8 * 8];
+        let planes = vec![0.01_f32; 2 * 8 * 2];
+        weights.insert(
+            "moe.gate_proj.weight".into(),
+            mlxcel_core::from_slice_u32(&words, &[2, 8, 8]),
+        );
+        weights.insert(
+            "moe.gate_proj.scales".into(),
+            mlxcel_core::from_slice_f32(&planes, &[2, 8, 2]),
+        );
+        weights.insert(
+            "moe.gate_proj.biases".into(),
+            mlxcel_core::from_slice_f32(&planes, &[2, 8, 2]),
+        );
+        let err = SwitchLinear::from_weights_with_mode(&weights, "moe.gate_proj", 128, 1, "affine")
+            .err()
+            .expect("1-bit expert stack must be refused");
+        assert!(err.contains("moe.gate_proj"), "{err}");
+        assert!(err.contains("1-bit"), "{err}");
+    }
 
     #[test]
     fn expert_scales_broadcast_over_multiple_tokens_and_experts() {

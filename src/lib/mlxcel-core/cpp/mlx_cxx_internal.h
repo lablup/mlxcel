@@ -103,4 +103,19 @@ inline array gelu_tanh_approx(const array& x) {
     return mlx::core::multiply(x, cdf);
 }
 
+// Affine 1-bit quantization (issue #1370), defined in mlx_cxx_one_bit.cpp.
+// MLX has no kernel for `bits == 1`, so every bridge primitive that would hand
+// such a triple to `mlx::core::quantized_matmul` / `dequantize` routes here
+// instead when `is_one_bit_affine` holds and a `.biases` plane is present.
+bool is_one_bit_affine(int32_t bits, rust::Str mode);
+array one_bit_dequantize_impl(
+    const array& w, const array& scales, const array& biases, int group_size);
+// `transpose == true` is `x @ W^T` (the linear layout); `false` is `x @ W`.
+array one_bit_matmul_impl(
+    const array& x, const array& w, const array& scales, const array& biases,
+    int group_size, bool transpose, bool force_fallback);
+array one_bit_embedding_impl(
+    const array& w, const array& scales, const array& biases,
+    const array& indices, int group_size);
+
 }  // namespace mlx_cxx

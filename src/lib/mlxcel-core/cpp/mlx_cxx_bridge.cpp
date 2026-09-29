@@ -1527,6 +1527,12 @@ std::unique_ptr<MlxArray> quantized_linear_forward(
 ) {
     bool is_affine = (mode.size() == 6 && std::memcmp(mode.data(), "affine", 6) == 0);
     array result = [&]() {
+        // MLX has no 1-bit kernel; see mlx_cxx_one_bit.cpp (issue #1370).
+        if (biases && is_one_bit_affine(bits, mode)) {
+            return one_bit_matmul_impl(
+                x.inner, weight.inner, scales.inner, biases->inner,
+                group_size, true, false);
+        }
         if (is_affine) {
             if (biases) {
                 return mlx::core::quantized_matmul(
@@ -1564,6 +1570,12 @@ std::unique_ptr<MlxArray> quantized_linear_forward_global_scale(
 ) {
     bool is_affine = (mode.size() == 6 && std::memcmp(mode.data(), "affine", 6) == 0);
     array result = [&]() {
+        // MLX has no 1-bit kernel; see mlx_cxx_one_bit.cpp (issue #1370).
+        if (biases && is_one_bit_affine(bits, mode)) {
+            return one_bit_matmul_impl(
+                x.inner, weight.inner, scales.inner, biases->inner,
+                group_size, true, false);
+        }
         if (is_affine) {
             if (biases) {
                 return mlx::core::quantized_matmul(
@@ -3445,6 +3457,12 @@ std::unique_ptr<MlxArray> quantized_matmul(
     rust::Str mode
 ) {
     bool is_affine = (mode.size() == 6 && std::memcmp(mode.data(), "affine", 6) == 0);
+    // MLX has no 1-bit kernel; see mlx_cxx_one_bit.cpp (issue #1370).
+    if (biases && is_one_bit_affine(bits, mode)) {
+        return std::make_unique<MlxArray>(one_bit_matmul_impl(
+            x.inner, w.inner, scales.inner, biases->inner,
+            group_size, transpose, false));
+    }
     if (is_affine) {
         if (biases) {
             return std::make_unique<MlxArray>(mlx::core::quantized_matmul(
@@ -3503,6 +3521,13 @@ std::unique_ptr<MlxArray> dequantize(
     // nothing measurable. Re-check this when the pinned MLX commit moves; the
     // regression test is
     // `mlxcel-core::ffi_tests::dequantize_commutes_with_output_axis_slice_on_strided_inputs`.
+    // MLX has no 1-bit kernel; see mlx_cxx_one_bit.cpp (issue #1370). The
+    // graph there reads `biases` through ordinary ops, so the contiguity
+    // guard below does not apply to it.
+    if (biases && is_one_bit_affine(bits, mode)) {
+        return std::make_unique<MlxArray>(
+            one_bit_dequantize_impl(w.inner, scales.inner, biases->inner, group_size));
+    }
     std::optional<array> biases_opt =
         biases ? std::optional(mlx::core::contiguous(biases->inner)) : std::nullopt;
     std::string mode_str(mode.data(), mode.size());
@@ -3528,6 +3553,12 @@ std::unique_ptr<MlxArray> quantized_embedding(
     int32_t bits,
     rust::Str mode
 ) {
+    // MLX has no 1-bit kernel; see mlx_cxx_one_bit.cpp (issue #1370).
+    if (biases && is_one_bit_affine(bits, mode)) {
+        return std::make_unique<MlxArray>(one_bit_embedding_impl(
+            weight.inner, scales.inner, biases->inner, indices.inner, group_size));
+    }
+
     // Save original indices shape for reshaping later
     auto idx_shape = indices.inner.shape();
 

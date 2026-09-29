@@ -92,6 +92,7 @@ fn main() {
         .file("cpp/mlx_cxx_kernels.cpp")
         .file("cpp/mlx_cxx_nemotron.cpp")
         .file("cpp/mlx_cxx_ext.cpp")
+        .file("cpp/mlx_cxx_one_bit.cpp")
         // Fused Sparse-V SDPA kernel launcher. Lives under
         // `src/lib/mlx-cpp/turbo/` so the MLX-upstream-commit upgrade
         // checklist ("Bumping the MLX upstream pin" in CONTRIBUTING.md)
@@ -273,6 +274,7 @@ fn main() {
     println!("cargo:rerun-if-changed=cpp/mlx_cxx_kernels.cpp");
     println!("cargo:rerun-if-changed=cpp/mlx_cxx_nemotron.cpp");
     println!("cargo:rerun-if-changed=cpp/mlx_cxx_ext.cpp");
+    println!("cargo:rerun-if-changed=cpp/mlx_cxx_one_bit.cpp");
     println!("cargo:rerun-if-changed=cpp/qmm_naive_tile_probe.cpp");
     println!("cargo:rerun-if-changed=cpp/grouped_gemm_arch_probe.cpp");
     println!("cargo:rerun-if-changed=metal/fused_attention_metal4.metal");

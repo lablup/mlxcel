@@ -1920,6 +1920,36 @@ mod ffi {
             invert_weight_scales: bool,
         ) -> Result<UniquePtr<MlxArray>>;
 
+        /// Affine 1-bit quantized linear `x @ dequant(weight)^T` (issue
+        /// #1370). `weight` is `uint32 [N, K / 32]` (bit `j` of word `c` is
+        /// column `32c + j`), `scales` / `biases` are `[N, K / group_size]`,
+        /// `group_size` is 32, 64 or 128. Dispatches the fused Metal qmv
+        /// (fewer than 16 rows) or qmm kernel, or the dequantize graph when
+        /// `force_fallback` is set, `MLXCEL_ONE_BIT_KERNEL=0`, or the backend
+        /// has no port. `Err` on an inconsistent triple.
+        ///
+        /// The load path does not call this directly: the `quantized_matmul`,
+        /// `quantized_linear_forward` and `dequantize` bridge primitives
+        /// route an affine `bits == 1` triple to the same implementation.
+        fn one_bit_quantized_matmul(
+            x: &MlxArray,
+            weight: &MlxArray,
+            scales: &MlxArray,
+            biases: &MlxArray,
+            group_size: i32,
+            force_fallback: bool,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        /// Dense `[..., N, K]` weight of an affine 1-bit packed triple, in
+        /// the dtype of `scales` (issue #1370). The reference the kernels are
+        /// tested against. `Err` on an inconsistent triple.
+        fn one_bit_dequantize(
+            weight: &MlxArray,
+            scales: &MlxArray,
+            biases: &MlxArray,
+            group_size: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
         /// Fused gated-delta single-token decode step.
         /// Combines: decay → kv_mem → delta → state_update → output into one C++ call.
         /// Replaces ~26 FFI round-trips with 1.
@@ -2229,6 +2259,11 @@ mod ffi {
         /// *this* kernel" stopped being the same question the moment ROCm got
         /// its first port.
         fn bitlinear_kernel_available() -> bool;
+
+        /// True when this backend has a fused affine 1-bit kernel port
+        /// (Metal). Other backends run 1-bit weights through the dequantize
+        /// graph (issue #1370).
+        fn one_bit_kernel_available() -> bool;
 
         /// True when the MLX Metal backend is available at runtime (macOS
         /// Apple Silicon). False on CUDA-only and CPU-only builds. Mirrors the
@@ -3719,6 +3754,13 @@ pub(crate) mod test_support;
 #[cfg(test)]
 #[path = "ffi_tests.rs"]
 mod ffi_tests;
+
+// Affine 1-bit quantization (issue #1370): fused Metal qmv / qmm parity against
+// a host f64 oracle, the dequantize reference, load validation and layer
+// routing.
+#[cfg(test)]
+#[path = "one_bit_tests.rs"]
+mod one_bit_tests;
 
 // CUDA architecture-list parsing and the coverage/mismatch predicate. Pure
 // functions over strings and tuples, so these run on every host including

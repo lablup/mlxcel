@@ -1862,6 +1862,31 @@ std::unique_ptr<MlxArray> bitlinear_matmul(
     bool invert_weight_scales
 );
 
+// Affine 1-bit quantized matmul `x @ dequant(W)^T` (issue #1370). Runs the
+// fused Metal qmv / qmm kernels, or the dequantize graph when
+// `force_fallback` is set, `MLXCEL_ONE_BIT_KERNEL=0`, or the backend has no
+// port. Throws on an inconsistent packed triple.
+std::unique_ptr<MlxArray> one_bit_quantized_matmul(
+    const MlxArray& x,
+    const MlxArray& weight,
+    const MlxArray& scales,
+    const MlxArray& biases,
+    int32_t group_size,
+    bool force_fallback
+);
+
+// Dense `[..., N, K]` weight of an affine 1-bit packed triple, in the dtype of
+// `scales`.
+std::unique_ptr<MlxArray> one_bit_dequantize(
+    const MlxArray& weight,
+    const MlxArray& scales,
+    const MlxArray& biases,
+    int32_t group_size
+);
+
+// True when this backend has a fused 1-bit kernel port (Metal today).
+bool one_bit_kernel_available();
+
 // Fused MoE forward: gate + switch_mlp + score weighting + optional shared expert
 // Combines ~25 FFI calls into a single C++ function
 // Used by: NemotronH, NemotronNAS

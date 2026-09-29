@@ -126,6 +126,19 @@ impl QuantizedWeight {
         }
     }
 
+    /// Whether this is an affine 1-bit triple (issue #1370).
+    ///
+    /// MLX has no kernel at this width. The bridge primitives
+    /// (`quantized_matmul`, `quantized_linear_forward`, `dequantize`,
+    /// `quantized_embedding`) route such a triple to mlxcel's own 1-bit
+    /// kernels, but the fused C++ helpers that call MLX's `quantized_matmul`
+    /// internally do not, so every accessor that feeds one of them answers
+    /// `None` for a 1-bit weight and the caller takes its graph fallback.
+    #[must_use]
+    pub fn is_one_bit(&self) -> bool {
+        self.bits == 1 && self.mode == "affine"
+    }
+
     /// Get raw pointer to the optional NVFP4 `weight_scale_2` sidecar (null if
     /// absent). Used by the fused compiled paths that fold the per-projection
     /// global scale in place of `apply_global_scale` (issue #698).
@@ -335,6 +348,8 @@ impl QuantizedEmbedding {
         // it, because `infer_quantization_mode` derives the mode from exactly
         // this predicate.
         validate_quantization_biases(mode, biases.is_some())
+            .map_err(|e| format!("{e} (prefix: {prefix})"))?;
+        validate_one_bit_layout(layout.bits, layout.group_size, mode, biases.is_some())
             .map_err(|e| format!("{e} (prefix: {prefix})"))?;
 
         Ok(Self {
@@ -1352,7 +1367,7 @@ impl Linear {
 /// (e.g. Qwen3.5/3.6 MoE router gates).
 ///
 /// Returns an error only when the inferred bits are not in
-/// [`SUPPORTED_AFFINE_BITS`] — in that case `group_size` itself is likely
+/// [`LOADABLE_AFFINE_BITS`] — in that case `group_size` itself is likely
 /// wrong.
 fn infer_quantization_bits(
     weight_shape: &[i32],
@@ -1392,8 +1407,8 @@ fn infer_quantization_bits(
     if inferred_bits == caller_bits {
         return Ok(caller_bits);
     }
-    if !SUPPORTED_AFFINE_BITS.contains(&inferred_bits) {
-        let accepted = SUPPORTED_AFFINE_BITS
+    if !LOADABLE_AFFINE_BITS.contains(&inferred_bits) {
+        let accepted = LOADABLE_AFFINE_BITS
             .iter()
             .map(i32::to_string)
             .collect::<Vec<_>>()
@@ -1629,6 +1644,54 @@ pub const SUPPORTED_AFFINE_BITS: [i32; 6] = [2, 3, 4, 5, 6, 8];
 ///
 /// Used by: [`validate_affine_quantization_group_size`]
 pub const SUPPORTED_AFFINE_GROUP_SIZES: [i32; 3] = [32, 64, 128];
+
+/// Affine widths a loaded checkpoint may use: MLX's own set plus 1 bit, which
+/// mlxcel runs with its own kernels (issue #1370).
+///
+/// Kept apart from [`SUPPORTED_AFFINE_BITS`] because that constant answers a
+/// producer's question ("what can MLX's affine quantize kernel emit"), which
+/// 1 bit is not: `split-mtp` and gemma4's per-module override validation read
+/// it and must keep refusing a width nothing in the tree can produce.
+///
+/// Used by: [`infer_quantization_bits`]
+pub const LOADABLE_AFFINE_BITS: [i32; 7] = [1, 2, 3, 4, 5, 6, 8];
+
+/// Reject a 1-bit layout mlxcel's 1-bit kernels cannot run (issue #1370).
+///
+/// Called with the reconciled `bits` / `group_size`, after
+/// [`reconcile_quantization_layout`], by every loader that stores a dense
+/// quantized projection or embedding. A no-op for any other width.
+///
+/// 1-bit is affine-only: MLX defines no 1-bit block-float mode, and a 1-bit
+/// plane without `.biases` would otherwise be classified `mxfp4` by
+/// [`infer_quantization_mode`] and aborted on inside MLX at the first forward
+/// pass. The kernels also need `group_size` to be a multiple of 32 so that a
+/// packed word never straddles a group, which [`SUPPORTED_AFFINE_GROUP_SIZES`]
+/// guarantees.
+pub fn validate_one_bit_layout(
+    bits: i32,
+    group_size: i32,
+    mode: &str,
+    has_biases: bool,
+) -> Result<(), String> {
+    if bits != 1 {
+        return Ok(());
+    }
+    if mode != "affine" || !has_biases {
+        return Err(format!(
+            "1-bit weights are affine-only: quantization.bits is 1 but the tensors describe \
+             mode {mode:?} (.biases present: {has_biases}); mlxcel runs 1-bit checkpoints only \
+             with a .scales and a .biases plane"
+        ));
+    }
+    if !SUPPORTED_AFFINE_GROUP_SIZES.contains(&group_size) {
+        return Err(format!(
+            "1-bit weights need group_size 32, 64 or 128, got {group_size}: the 1-bit kernels \
+             read one scale and bias per packed 32-bit word"
+        ));
+    }
+    Ok(())
+}
 
 /// Reject a declared quantization mode MLX cannot parse.
 ///
@@ -2336,6 +2399,8 @@ impl UnifiedLinear {
             // mode (gpt-oss) can.
             validate_quantization_biases(mode, biases.is_some())
                 .map_err(|e| format!("{e} (prefix: {prefix})"))?;
+            validate_one_bit_layout(effective_bits, effective_group_size, mode, biases.is_some())
+                .map_err(|e| format!("{e} (prefix: {prefix})"))?;
 
             // Optional native-NVFP4 global-scale sidecar (`weight_scale_2`).
             // Emitted by the direct ModelOpt transcode (issue #693); absent for
@@ -2396,6 +2461,9 @@ impl UnifiedLinear {
             {
                 None
             }
+            // The same fused consumers hand the triple to MLX's
+            // `quantized_matmul`, which has no 1-bit kernel (issue #1370).
+            UnifiedLinear::Quantized { weight, .. } if weight.is_one_bit() => None,
             UnifiedLinear::Quantized { weight, .. } => Some(weight),
             UnifiedLinear::Regular(_) => None,
         }
@@ -2485,7 +2553,11 @@ impl UnifiedLinear {
                 }
 
                 // Large-M prefill on measured hardware: dense f16 GEMM (#1994).
-                if let Some(y) = prefill_dense_gemm_forward(x, weight, bias.as_ref()) {
+                // Not for 1-bit weights, whose prefill has its own tiled kernel
+                // behind `quantized_linear_forward` (issue #1370).
+                if !weight.is_one_bit()
+                    && let Some(y) = prefill_dense_gemm_forward(x, weight, bias.as_ref())
+                {
                     return y;
                 }
 
@@ -2568,6 +2640,8 @@ impl UnifiedLinear {
             {
                 None
             }
+            // No MLX 1-bit kernel behind the compiled consumers (issue #1370).
+            Self::Quantized { weight, .. } if weight.is_one_bit() => None,
             Self::Quantized { weight, .. } => Some(weight),
             Self::Regular(_) => None,
         }
@@ -2602,6 +2676,9 @@ impl UnifiedLinear {
             return None;
         }
         match self {
+            // The fused launcher calls MLX's `quantized_matmul`, which has no
+            // 1-bit kernel (issue #1370): take the caller's graph path.
+            Self::Quantized { weight, .. } if weight.is_one_bit() => None,
             Self::Quantized { weight, .. } => {
                 let mut q = cxx::UniquePtr::null();
                 let mut k = cxx::UniquePtr::null();
@@ -3091,6 +3168,11 @@ impl FusedQKVLinear {
             } else {
                 bits
             };
+            let qkv_has_biases = [&q_prefix, &k_prefix, &v_prefix]
+                .iter()
+                .all(|p| weights.contains_key(&format!("{p}.biases")));
+            validate_one_bit_layout(effective_bits, group_size, mode, qkv_has_biases)
+                .map_err(|e| format!("{e} (prefix: {q_prefix})"))?;
 
             // Concatenate along axis 0 (output dimension)
             let qkv_weight = {
@@ -3594,6 +3676,21 @@ impl FusedQKVLinear {
     }
 }
 
+/// Refuse a 1-bit per-head MLA projection at load (issue #1370).
+///
+/// The 1-bit support covers dense linears and embeddings; no public checkpoint
+/// ships a 1-bit MLA stack, so this path has no kernel coverage and no test,
+/// and is refused rather than left to run untested.
+fn reject_one_bit_multi_linear(bits: i32, prefix: &str) -> Result<(), String> {
+    if bits == 1 {
+        return Err(format!(
+            "{prefix}: 1-bit quantization is supported for dense linears and embeddings only, \
+             not for per-head MLA projections"
+        ));
+    }
+    Ok(())
+}
+
 /// Quantized per-head linear layer for MLA (Multi-head Latent Attention)
 /// Weight shape: [num_heads, output_dim, input_dim_packed]
 /// Used in GLM4 MoE Lite, DeepSeek-V2, etc.
@@ -3649,6 +3746,7 @@ impl QuantizedMultiLinear {
         bits: i32,
     ) -> Result<Self, String> {
         validate_quantization_params(group_size, bits)?;
+        reject_one_bit_multi_linear(bits, "QuantizedMultiLinear::new")?;
         let mode = infer_quantization_mode(biases.is_some(), group_size, bits);
         validate_quantization_biases(mode, biases.is_some())?;
         Ok(Self {
@@ -3693,6 +3791,7 @@ impl QuantizedMultiLinear {
         let biases_name = format!("{}.biases", prefix);
 
         validate_quantization_params(group_size, bits).map_err(|e| format!("{prefix}: {e}"))?;
+        reject_one_bit_multi_linear(bits, prefix)?;
 
         let weight = weights
             .get(&weight_name)
@@ -3826,7 +3925,10 @@ impl SwiGLUMLP {
 
     /// Forward pass
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        if self.use_compiled {
+        // The compiled helper calls MLX's `quantized_matmul` internally, which
+        // has no 1-bit kernel (issue #1370); the per-projection path below
+        // goes through the routed bridge primitive.
+        if self.use_compiled && !self.gate_proj.is_one_bit() {
             // Use compiled version with kernel fusion
             // Falls back to non-compiled for non-affine modes inside C++
             unsafe {
@@ -8563,11 +8665,13 @@ mod tests {
     /// `group_size` that happens to satisfy the arithmetic).
     #[test]
     fn infer_bits_rejects_non_canonical_widths() {
-        // packed_in * 32 / (num_groups * group_size) = 32*4 / (32*2) = 2 is valid,
-        // so use a combination that yields 1 (invalid).
-        // packed_in=32, num_groups=32, group_size=32 → 32*32/(32*32) = 1.
-        let err = infer_quantization_bits(&[16, 32], &[16, 32], 32, 4);
-        assert!(err.is_err(), "bits=1 should be rejected");
+        // 1 bit is a loadable width since issue #1370, so use 7, which MLX has
+        // no kernel for and mlxcel does not add one for:
+        // packed_in=7, num_groups=1, group_size=32 → 7*32/(1*32) = 7.
+        let err = infer_quantization_bits(&[16, 7], &[16, 1], 32, 4);
+        assert!(err.is_err(), "bits=7 should be rejected");
+        // packed_in=32, num_groups=32, group_size=32 → 1, now accepted.
+        assert_eq!(infer_quantization_bits(&[16, 32], &[16, 32], 32, 4), Ok(1));
     }
 
     /// Empty/zero shapes are treated as pass-through (defensive — real arrays

@@ -676,6 +676,7 @@ Only the cross-encoder kind is detectable from a checkpoint alone, so it is the 
 | FP16 / BF16 | supported | BF16 handling is platform/model dependent; Apple Silicon paths commonly convert to FP16 for execution. |
 | 4-bit affine MLX checkpoints | supported | Primary path for many `mlx-community` checkpoints. CUDA coverage depends on MLX kernel support for the target GPU. |
 | 8-bit affine | supported | Used for weights and/or KV cache depending on path. |
+| 1-bit affine (`bits: 1`, `group_size` 32/64/128, `.scales` + `.biases`) | supported on Metal; dequantize fallback elsewhere | MLX has no 1-bit kernel, so mlxcel runs these with its own fused Metal qmv (fewer than 16 rows) and tiled qmm kernels. Dense linears and embeddings only: 1-bit MoE expert stacks, 1-bit MLA per-head projections, and 1-bit planes without `.biases` are refused at load. CUDA and ROCm run the dequantize graph until a kernel port lands. `MLXCEL_ONE_BIT_KERNEL=0` forces the dequantize graph on Metal too. Validated on `prism-ml/Bonsai-1.7B-mlx-1bit` and `prism-ml/Bonsai-8B-mlx-1bit` (`qwen3`). |
 | NVFP4 / MXFP4 / MXFP8 | supported where implemented | Used by specific families such as GPT-OSS and recent quantized checkpoints. |
 
 Do not infer quality or speed from the ability to load a quantized checkpoint.
