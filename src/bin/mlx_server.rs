@@ -173,10 +173,20 @@ struct Cli {
     /// `--usage`, and clap's built-in help argument cannot carry an alias
     /// through the derive. Declared first so it lands before any
     /// `next_help_heading` group (#1448).
+    //
+    // `disable_help_flag` propagates to subcommands in clap 4.6, but this
+    // hand-declared arg does not automatically follow, so without
+    // `global = true` below `download` had no help flag of its own
+    // (`mlxcel-server download --help` failed with "unexpected argument").
+    // `global = true` makes this same arg reachable as
+    // `mlxcel-server download --help`/`-h`/`--usage` too (#2025). This is a
+    // plain `//` comment, not `///`, specifically so it does not change the
+    // rendered `--help` text for this argument.
     #[arg(
         short = 'h',
         long = "help",
         visible_alias = "usage",
+        global = true,
         action = clap::ArgAction::Help
     )]
     help: Option<bool>,
@@ -3665,5 +3675,24 @@ mod tests {
         let err = Cli::try_parse_from(["mlxcel-server", "download", "-1"])
             .expect_err("`download -1` has no numeric option to bind to");
         assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn the_download_subcommand_accepts_all_three_help_spellings() {
+        // The hand-declared `-h`/`--help`/`--usage` arg on `Cli` (b10621's
+        // spelling, #1448) did not carry `global = true`, so
+        // `disable_help_flag` left `download` with no help flag of its own:
+        // `mlxcel-server download --help` failed with `UnknownArgument`
+        // instead of printing help (#2025).
+        for flag in ["--help", "-h", "--usage"] {
+            let err = Cli::try_parse_from(["mlxcel-server", "download", flag])
+                .expect_err("a help flag must short-circuit parsing, not succeed");
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::DisplayHelp,
+                "`download {flag}` must trigger DisplayHelp, got {:?}",
+                err.kind()
+            );
+        }
     }
 }
