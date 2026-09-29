@@ -159,3 +159,41 @@ fn wrong_cache_count_is_rejected() {
             .is_err()
     );
 }
+
+#[test]
+fn gelu_approx_matches_mlx_nn_bit_for_bit() {
+    // Expected values from mlx 0.32 for the same inputs. bf16: exactly what
+    // the compiled `mlx.nn.gelu_approx` returns (per-op rounding dominates:
+    // the bf16 value at -3.0 is -0.00586, not the f32 -0.00364). f32: the
+    // uncompiled per-op expression; the compiled kernel differs from it by
+    // one ulp at 4.1 (4.0999565) because it evaluates the fused graph.
+    let x = [-3.0f32, -1.3, -0.2, 0.0, 0.7, 1.9, 4.1];
+    let xs = mlxcel_core::from_slice_f32(&x, &[7]);
+    let want_f32 = [
+        -0.003_637_433,
+        -0.126_071_02,
+        -0.084_148_57,
+        0.0,
+        0.530_570_15,
+        1.845_451_2,
+        4.099_957,
+    ];
+    assert_eq!(to_vec(&gelu_approx(&xs)), want_f32);
+    let xb = mlxcel_core::astype(&xs, dtype::BFLOAT16);
+    let got = gelu_approx(&xb);
+    assert_eq!(mlxcel_core::array_dtype(&got), dtype::BFLOAT16);
+    // Exact bf16 values, written in f64 so every digit is significant.
+    let want_bf16: Vec<f32> = [
+        -0.005_859_375_f64,
+        -0.126_953_125,
+        -0.084_472_656_25,
+        0.0,
+        0.531_25,
+        1.835_937_5,
+        4.093_75,
+    ]
+    .iter()
+    .map(|&v| v as f32)
+    .collect();
+    assert_eq!(to_vec(&got), want_bf16);
+}

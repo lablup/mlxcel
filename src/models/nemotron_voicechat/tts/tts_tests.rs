@@ -382,7 +382,8 @@ fn control_codes_become_silence() {
     assert_eq!(assets.control_codes, vec![1000, 1001, 1002]);
     let codes = mlxcel_core::from_slice_i32(&[5, 1001, 6, 1000, 1002, 2], &[1, 2, 3]);
     let out = to_i32(&assets.replace_control_codes(&codes));
-    assert_eq!(out, vec![5, 8, 6, 7, 9, 2]);
+    // Frame 1: 1000 in codebook 0 -> 7, 1002 in codebook 1 -> 8.
+    assert_eq!(out, vec![5, 8, 6, 7, 8, 2]);
 }
 
 #[test]

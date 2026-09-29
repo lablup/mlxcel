@@ -29,7 +29,7 @@ use mlxcel_core::layers::UnifiedLinear;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
-use crate::models::gemma3::{MLP, ModelArgs};
+use crate::models::gemma3_backbone::gelu_approx;
 
 /// Copy `key` out of `weights`, or report it missing.
 pub(crate) fn weight(weights: &WeightMap, key: &str) -> Result<UniquePtr<MlxArray>, String> {
@@ -116,25 +116,44 @@ impl OffsetRmsNorm {
     }
 }
 
-/// Minimal Gemma 3 args carrying only what [`MLP::from_weights`] reads
-/// (quantization group size and bits).
-pub(crate) fn mlp_args(group_size: i32, bits: i32) -> ModelArgs {
-    ModelArgs {
-        quantization: Some(crate::models::gemma3::Quantization { group_size, bits }),
-        ..ModelArgs::default()
-    }
+/// The reference `MLP`: `down_proj(gelu_approx(gate_proj(x)) * up_proj(x))`,
+/// with the op-for-op [`gelu_approx`] rather than the crate's fused GeGLU.
+pub struct GeluMlp {
+    gate_proj: UnifiedLinear,
+    up_proj: UnifiedLinear,
+    down_proj: UnifiedLinear,
 }
 
-/// Load a `gate_proj` / `up_proj` / `down_proj` GeGLU MLP (tanh GELU), the
-/// reference `MLP` module.
-pub(crate) fn load_mlp(weights: &WeightMap, prefix: &str, args: &ModelArgs) -> Result<MLP, String> {
-    MLP::from_weights(weights, args, prefix)
+impl GeluMlp {
+    pub fn from_weights(
+        weights: &WeightMap,
+        prefix: &str,
+        group_size: i32,
+        bits: i32,
+    ) -> Result<Self, String> {
+        let lin = |name: &str| {
+            UnifiedLinear::from_weights(weights, &format!("{prefix}.{name}"), group_size, bits)
+        };
+        Ok(Self {
+            gate_proj: lin("gate_proj")?,
+            up_proj: lin("up_proj")?,
+            down_proj: lin("down_proj")?,
+        })
+    }
+
+    pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+        let gated = mlxcel_core::multiply(
+            &gelu_approx(&self.gate_proj.forward(x)),
+            &self.up_proj.forward(x),
+        );
+        self.down_proj.forward(&gated)
+    }
 }
 
 /// `MLPLayer`: `x + post_norm(mlp(pre_norm(x)))`.
 pub struct MlpLayer {
     pre_norm: OffsetRmsNorm,
-    mlp: MLP,
+    mlp: GeluMlp,
     post_norm: OffsetRmsNorm,
 }
 
@@ -144,7 +163,8 @@ impl MlpLayer {
         prefix: &str,
         hidden: usize,
         eps: f32,
-        args: &ModelArgs,
+        group_size: i32,
+        bits: i32,
     ) -> Result<Self, String> {
         Ok(Self {
             pre_norm: OffsetRmsNorm::from_weights(
@@ -153,7 +173,7 @@ impl MlpLayer {
                 hidden,
                 eps,
             )?,
-            mlp: load_mlp(weights, &format!("{prefix}.mlp"), args)?,
+            mlp: GeluMlp::from_weights(weights, &format!("{prefix}.mlp"), group_size, bits)?,
             post_norm: OffsetRmsNorm::from_weights(
                 weights,
                 &format!("{prefix}.post_norm"),

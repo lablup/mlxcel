@@ -29,7 +29,7 @@ use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
 use super::config::MogConfig;
-use super::norm_mlp::{MlpLayer, OffsetRmsNorm, mlp_args, scalar, weight, weight_with_shape};
+use super::norm_mlp::{MlpLayer, OffsetRmsNorm, scalar, weight, weight_with_shape};
 
 /// Keep the smallest set of logits whose probability mass exceeds `top_p`
 /// (ties at the boundary included); everything else becomes `-inf`.
@@ -80,7 +80,6 @@ impl MogHead {
         group_size: i32,
         bits: i32,
     ) -> Result<Self, String> {
-        let args = mlp_args(group_size, bits);
         let layers = (0..cfg.num_layers)
             .map(|idx| {
                 MlpLayer::from_weights(
@@ -88,7 +87,8 @@ impl MogHead {
                     &format!("{prefix}.mlp_stack.{idx}"),
                     hidden,
                     cfg.eps,
-                    &args,
+                    group_size,
+                    bits,
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;

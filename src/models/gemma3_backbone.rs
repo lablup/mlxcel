@@ -28,18 +28,63 @@
 //! (`crate::models::nemotron_voicechat::tts`), whose backbone lives under
 //! `tts_model.tts_model.backbone`.
 //!
-//! The layers reuse [`TransformerBlock`] unchanged, so the per-layer RoPE
-//! base/scale rule, fused QKV projection, and SDPA dispatch are the same as
-//! the Gemma 3 text model's. One consequence worth knowing: the global
+//! The layers reuse [`TransformerBlock`]'s weights and attention unchanged,
+//! so the per-layer RoPE base/scale rule, fused QKV projection, and SDPA
+//! dispatch are the same as the Gemma 3 text model's. The MLP activation is
+//! the one exception: it runs [`gelu_approx`], an op-for-op port of
+//! `mlx.nn.gelu_approx`, instead of the text model's fused GeGLU kernel,
+//! because the two round differently and a host that samples from the
+//! backbone state (the EAR-TTS RVQ `argmin`) sees the difference. One
+//! consequence of the reuse worth knowing: the global
 //! layers resolve their RoPE base through `rope_overrides`, so an operator
 //! `--rope-freq-base` override installed for a process also reaches a
 //! backbone loaded in that process.
 
-use crate::models::gemma3::{Cache, ModelArgs, TransformerBlock};
+use crate::models::gemma3::{Cache, CacheInterface, ModelArgs, TransformerBlock};
 use mlxcel_core::layers::{GemmaRMSNorm, KVCache, RotatingKVCache};
 use mlxcel_core::utils::create_sliding_window_prefill_mask;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
+
+/// `mlx.nn.gelu_approx`, op for op:
+/// `0.5 * x * (1 + tanh(sqrt(2 / pi) * (x + 0.044715 * x ** 3)))`, with every
+/// literal in `x`'s dtype (Python's weak scalars) and the cube taken with
+/// `power`.
+///
+/// The crate's fused GeGLU (`compiled_geglu_approx_activation`) cubes with
+/// two multiplies, groups the halving differently, and for bf16 rounds only
+/// once; it disagrees with the reference on about half of all bf16 elements
+/// and on the last bits of `f32` ones.
+pub fn gelu_approx(x: &MlxArray) -> UniquePtr<MlxArray> {
+    let d = mlxcel_core::array_dtype(x);
+    let lit = |v: f64| mlxcel_core::full_f32(&[], v as f32, d);
+    let cube = mlxcel_core::power(x, &lit(3.0));
+    let inner = mlxcel_core::add(x, &mlxcel_core::multiply(&lit(0.044715), &cube));
+    let inner = mlxcel_core::multiply(&lit((2.0 / std::f64::consts::PI).sqrt()), &inner);
+    let cdf = mlxcel_core::add(&lit(1.0), &mlxcel_core::tanh(&inner));
+    mlxcel_core::multiply(&mlxcel_core::multiply(&lit(0.5), x), &cdf)
+}
+
+/// One Gemma 3 decoder layer with the reference MLP activation.
+fn layer_forward(
+    layer: &TransformerBlock,
+    x: &MlxArray,
+    cache: &mut dyn CacheInterface,
+    mask: Option<&MlxArray>,
+) -> UniquePtr<MlxArray> {
+    let attn = layer
+        .self_attn
+        .forward(&layer.input_layernorm.forward(x), cache, mask);
+    let h = mlxcel_core::compiled_clip_residual(x, &layer.post_attention_layernorm.forward(&attn));
+    let normed = layer.pre_feedforward_layernorm.forward(&h);
+    let mlp = &layer.mlp;
+    let gated = mlxcel_core::multiply(
+        &gelu_approx(&mlp.gate_proj.forward(&normed)),
+        &mlp.up_proj.forward(&normed),
+    );
+    let ff = mlp.down_proj.forward(&gated);
+    mlxcel_core::compiled_clip_residual(&h, &layer.post_feedforward_layernorm.forward(&ff))
+}
 
 /// Per-layer attention caches for a [`Gemma3Backbone`].
 ///
@@ -183,7 +228,7 @@ impl Gemma3Backbone {
             } else {
                 sliding_mask.as_deref()
             };
-            h = layer.forward(&h, caches.caches[idx].as_interface(), mask);
+            h = layer_forward(layer, &h, caches.caches[idx].as_interface(), mask);
         }
         Ok(self.norm.forward(&h))
     }

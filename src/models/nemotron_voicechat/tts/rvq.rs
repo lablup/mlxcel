@@ -139,14 +139,15 @@ impl RvqCodebooks {
             .map(|idx| mlxcel_core::astype(&Self::column(code, idx), dtype::INT32))
             .collect();
         let mut residual = mlxcel_core::copy(residual);
-        for idx in start..start + count {
+        for (offset, piece) in pieces[start..start + count].iter_mut().enumerate() {
+            let idx = start + offset;
             let emb = &self.embs[idx];
             let dots = mlxcel_core::matmul(&residual, &mlxcel_core::transpose(emb));
             let dots = mlxcel_core::multiply(&scalar(2.0, mlxcel_core::array_dtype(&dots)), &dots);
             let distances = mlxcel_core::subtract(&self.norms[idx], &dots);
             let selected = mlxcel_core::argmin(&distances, -1, false);
             residual = mlxcel_core::subtract(&residual, &mlxcel_core::take(emb, &selected, 0));
-            pieces[idx] = mlxcel_core::astype(&selected, dtype::INT32);
+            *piece = mlxcel_core::astype(&selected, dtype::INT32);
         }
         Ok(mlxcel_core::stack_owned(&pieces, -1))
     }

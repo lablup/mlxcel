@@ -33,7 +33,7 @@
 //! 1, with PAD as the text over the system-prompt prefix, silence fed back
 //! after EOS, and the prefix trimmed plus control codes replaced at the end.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use mlxcel::models::nemotron_voicechat::tts::{
     RvqEarTtsModel, SpeechDecoderAssets, TtsConfig, TtsPrompt,
@@ -94,7 +94,7 @@ struct Setup {
     prompt_frames: usize,
 }
 
-fn setup(model_dir: &PathBuf, reference: &WeightMap, ref_path: &PathBuf) -> Setup {
+fn setup(model_dir: &Path, reference: &WeightMap, ref_path: &Path) -> Setup {
     let raw = std::fs::read_to_string(model_dir.join("config.json")).expect("config.json");
     let root: serde_json::Value = serde_json::from_str(&raw).expect("parse config.json");
     let mut config: TtsConfig =

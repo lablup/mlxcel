@@ -28,8 +28,7 @@ use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
 use super::config::CharEncoderConfig;
-use super::norm_mlp::{OffsetRmsNorm, load_mlp, mlp_args, scalar};
-use crate::models::gemma3::MLP;
+use super::norm_mlp::{GeluMlp, OffsetRmsNorm, scalar};
 
 struct SelfAttention {
     q_proj: UnifiedLinear,
@@ -55,7 +54,11 @@ impl SelfAttention {
         let lin = |name: &str| {
             UnifiedLinear::from_weights(weights, &format!("{prefix}.{name}"), group_size, bits)
         };
-        if cfg.num_key_value_heads == 0 || cfg.num_attention_heads % cfg.num_key_value_heads != 0 {
+        if cfg.num_key_value_heads == 0
+            || !cfg
+                .num_attention_heads
+                .is_multiple_of(cfg.num_key_value_heads)
+        {
             return Err(format!(
                 "{prefix}: num_attention_heads {} is not a multiple of num_key_value_heads {}",
                 cfg.num_attention_heads, cfg.num_key_value_heads
@@ -113,7 +116,7 @@ struct EncoderLayer {
     self_attn: SelfAttention,
     pre_self_attn_layernorm: OffsetRmsNorm,
     post_self_attn_layernorm: OffsetRmsNorm,
-    mlp: MLP,
+    mlp: GeluMlp,
     pre_feedforward_layernorm: OffsetRmsNorm,
     post_feedforward_layernorm: OffsetRmsNorm,
 }
@@ -144,11 +147,7 @@ impl EncoderLayer {
             )?,
             pre_self_attn_layernorm: norm("pre_self_attn_layernorm")?,
             post_self_attn_layernorm: norm("post_self_attn_layernorm")?,
-            mlp: load_mlp(
-                weights,
-                &format!("{prefix}.mlp"),
-                &mlp_args(group_size, bits),
-            )?,
+            mlp: GeluMlp::from_weights(weights, &format!("{prefix}.mlp"), group_size, bits)?,
             pre_feedforward_layernorm: norm("pre_feedforward_layernorm")?,
             post_feedforward_layernorm: norm("post_feedforward_layernorm")?,
         })
