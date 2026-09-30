@@ -919,4 +919,50 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn patch_embed_both_conv_layouts_yield_identical_weight() {
+        use super::VisionEmbeddings;
+        use crate::models::embedding_test_support::{Rng, mlx_test_guard};
+        use crate::vision::llmjp_vl_test_support::{
+            VIT_HIDDEN, VIT_PATCH_SIZE, tiny_vision_config, tiny_vision_weights,
+            tiny_vision_weights_mlx_layout, to_vec,
+        };
+
+        let _guard = mlx_test_guard();
+        let prefix = "vt";
+        let cfg = tiny_vision_config();
+        // Distinct values everywhere, so any permutation other than
+        // [0, 2, 3, 1] changes the element order.
+        let hf = tiny_vision_weights(&mut Rng::new(0x2058), prefix);
+        let mlx = tiny_vision_weights_mlx_layout(&mut Rng::new(0x2058), prefix);
+        // `out_ch > kH` (8 > 2) and `in_ch != kH`, so the HF map takes the
+        // sanitize branch and the MLX map does not.
+        let from_hf = VisionEmbeddings::from_weights(&hf, "vt.embeddings", &cfg, 0, 0)
+            .expect("HF layout loads");
+        let from_mlx = VisionEmbeddings::from_weights(&mlx, "vt.embeddings", &cfg, 0, 0)
+            .expect("MLX layout loads");
+
+        let expected_shape = vec![
+            VIT_HIDDEN as i32,
+            VIT_PATCH_SIZE as i32,
+            VIT_PATCH_SIZE as i32,
+            3,
+        ];
+        assert_eq!(
+            mlxcel_core::array_shape(&from_hf.patch_embedding_weight),
+            expected_shape
+        );
+        assert_eq!(
+            mlxcel_core::array_shape(&from_mlx.patch_embedding_weight),
+            expected_shape
+        );
+        // A transpose performs no arithmetic, so the comparison is exact.
+        let a = to_vec(&from_hf.patch_embedding_weight);
+        let b = to_vec(&from_mlx.patch_embedding_weight);
+        assert_eq!(
+            a, b,
+            "the sanitized HF weight must equal the MLX-layout weight"
+        );
+    }
 }

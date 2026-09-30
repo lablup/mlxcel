@@ -214,6 +214,12 @@ fn the_three_framing_ids_are_suppressed_from_the_output() {
 
 #[test]
 fn either_patch_embedding_conv_layout_produces_the_same_features() {
+    // Both towers must be built and run on one default device. Sibling tests
+    // move the process-global default device to the CPU under
+    // `lock_default_device()`; without this guard one tower could run on the
+    // CPU and the other on Metal, and the last-bit CPU/Metal difference (about
+    // 1.9e-8) broke the exact comparison below (#2058).
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
     // The released bf16 originals ship the HF `[O, I, kH, kW]` layout
     // (`[1152, 3, 16, 16]`); an MLX conversion would ship `[O, kH, kW, I]`.
     // `VisionEmbeddings::from_weights` sanitizes the first into the second, so
