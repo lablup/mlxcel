@@ -18,6 +18,13 @@ in the parity test; re-derive them with the checkpoint's own
 
 Rendered with Pillow 12 and macOS Arial / Arial Bold.
 
+The page is black text on white, so every rendered pixel is gray (R == G ==
+B). It is saved as 8-bit grayscale with ``optimize=True``, which keeps the
+file under the 32 KB ceiling on ``tests/fixtures/*.png`` in
+``scripts/ci/check_binary_assets.py``. Decoding it to RGB (PIL ``convert``, or
+``DynamicImage::to_rgb8`` in the processor) gives exactly the pixels of the RGB
+render, so the grayscale encoding does not change what either side sees.
+
 Usage:
     python3 tests/fixtures/generate_nemotron_parse_page.py <out.png>
 """
@@ -46,7 +53,7 @@ def main() -> None:
     for line in LINES:
         draw.text((100, y), line, font=body, fill="black")
         y += 60
-    img.save(sys.argv[1])
+    img.convert("L").save(sys.argv[1], optimize=True)
 
 
 if __name__ == "__main__":

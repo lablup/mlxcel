@@ -160,40 +160,107 @@ fn wrong_cache_count_is_rejected() {
     );
 }
 
+/// `mlx.nn.gelu_approx` as the pinned MLX source defines it
+/// (`python/mlx/nn/layers/activations.py`):
+///
+/// ```python
+/// return 0.5 * x * (1 + mx.tanh(math.sqrt(2 / math.pi) * (x + 0.044715 * x**3)))
+/// ```
+///
+/// transcribed with Python's evaluation order and scalar rules: `*` and `+`
+/// are left-associative, so the leading factor is `(0.5 * x)`; `x**3` is
+/// `mx.power`; and every Python float becomes a weak scalar, which the MLX
+/// bindings build as `array(float(v), x.dtype)` (an `f32` rounding first, then
+/// a cast to `x`'s dtype). This is written from that line, not from
+/// [`gelu_approx`], so the comparison below checks the port against the
+/// upstream definition on whatever backend runs the test.
+///
+/// Upstream wraps the function in `@partial(mx.compile, shapeless=True)`.
+/// Both the port and this reference are the uncompiled expression: the
+/// compiled kernel evaluates the fused graph and can round the last `f32` bit
+/// differently (one ulp at x = 4.1 on Metal with mlx 0.32, as #2037 measured),
+/// while its bf16 results matched the uncompiled expression exactly there.
+fn mlx_nn_gelu_approx_reference(x: &MlxArray) -> UniquePtr<MlxArray> {
+    use mlxcel_core::{add, multiply, power, tanh};
+    let weak = |v: f64| mlxcel_core::full_f32(&[], v as f32, mlxcel_core::array_dtype(x));
+    let x_cubed = power(x, &weak(3.0)); // x**3
+    let poly = add(x, &multiply(&weak(0.044715), &x_cubed)); // x + 0.044715 * x**3
+    let arg = multiply(&weak((2.0 / std::f64::consts::PI).sqrt()), &poly); // math.sqrt(2 / math.pi) * (...)
+    let one_plus = add(&weak(1.0), &tanh(&arg)); // 1 + mx.tanh(...)
+    let half_x = multiply(&weak(0.5), x); // 0.5 * x
+    multiply(&half_x, &one_plus) // (0.5 * x) * (...)
+}
+
+/// The same formula in `f64` on the host: backend-independent, and only
+/// accurate to the tolerance its callers allow.
+fn gelu_approx_f64(x: f64) -> f64 {
+    0.5 * x * (1.0 + ((2.0 / std::f64::consts::PI).sqrt() * (x + 0.044715 * x.powi(3))).tanh())
+}
+
+fn bits(a: &MlxArray) -> Vec<u32> {
+    to_vec(a).iter().map(|v| v.to_bits()).collect()
+}
+
 #[test]
 fn gelu_approx_matches_mlx_nn_bit_for_bit() {
-    // Expected values from mlx 0.32 for the same inputs. bf16: exactly what
-    // the compiled `mlx.nn.gelu_approx` returns (per-op rounding dominates:
-    // the bf16 value at -3.0 is -0.00586, not the f32 -0.00364). f32: the
-    // uncompiled per-op expression; the compiled kernel differs from it by
-    // one ulp at 4.1 (4.0999565) because it evaluates the fused graph.
+    // Bit-for-bit against the upstream expression, evaluated at run time on
+    // the same device with the same ops. Hardcoding values instead ties the
+    // test to one backend's `tanh`/`power` kernels: Metal and ROCm disagree by
+    // one f32 ulp at x = 4.1 (4.099957 vs 4.0999565), and both are correct
+    // for their backend. A dense grid over [-8, 8] makes a changed op
+    // (`x * x * x` for `power`, a literal rounded in another dtype, a single
+    // rounding at the end, the fused GeGLU kernel) show up as a differing ulp
+    // somewhere even when a handful of points happen to round the same way:
+    // on ROCm, `x * x * x` differs from `power` at only 2 of these 4097 f32
+    // inputs.
+    let grid: Vec<f32> = (0..=4096)
+        .map(|i| -8.0 + 16.0 * i as f32 / 4096.0)
+        .collect();
+    let xs = mlxcel_core::from_slice_f32(&grid, &[grid.len() as i32]);
+    for (name, dt) in [
+        ("f32", dtype::FLOAT32),
+        ("bf16", dtype::BFLOAT16),
+        ("f16", dtype::FLOAT16),
+    ] {
+        let x = mlxcel_core::astype(&xs, dt);
+        let got = gelu_approx(&x);
+        assert_eq!(mlxcel_core::array_dtype(&got), dt, "{name}: dtype");
+        let want = mlx_nn_gelu_approx_reference(&x);
+        let (got, want) = (bits(&got), bits(&want));
+        let mismatches: Vec<_> = grid
+            .iter()
+            .zip(got.iter().zip(&want))
+            .filter(|(_, (g, w))| g != w)
+            .map(|(x, (g, w))| (*x, f32::from_bits(*g), f32::from_bits(*w)))
+            .collect();
+        assert!(
+            mismatches.is_empty(),
+            "{name}: {} of {} elements differ from mlx.nn.gelu_approx (x, got, want): {:?}",
+            mismatches.len(),
+            grid.len(),
+            &mismatches[..mismatches.len().min(8)]
+        );
+    }
+
+    // Backend-independent sanity values, so the check above cannot pass by
+    // comparing a wrong formula with an equally wrong reference. Tolerances:
+    // f32 per-op rounding stays within 1e-6 here; bf16 rounds after every op,
+    // which moves the value at -3.0 from -0.00364 to -0.00586 on every
+    // backend, so its bound is a few bf16 ulps of the largest intermediate.
     let x = [-3.0f32, -1.3, -0.2, 0.0, 0.7, 1.9, 4.1];
-    let xs = mlxcel_core::from_slice_f32(&x, &[7]);
-    let want_f32 = [
-        -0.003_637_433,
-        -0.126_071_02,
-        -0.084_148_57,
-        0.0,
-        0.530_570_15,
-        1.845_451_2,
-        4.099_957,
-    ];
-    assert_eq!(to_vec(&gelu_approx(&xs)), want_f32);
-    let xb = mlxcel_core::astype(&xs, dtype::BFLOAT16);
-    let got = gelu_approx(&xb);
-    assert_eq!(mlxcel_core::array_dtype(&got), dtype::BFLOAT16);
-    // Exact bf16 values, written in f64 so every digit is significant.
-    let want_bf16: Vec<f32> = [
-        -0.005_859_375_f64,
-        -0.126_953_125,
-        -0.084_472_656_25,
-        0.0,
-        0.531_25,
-        1.835_937_5,
-        4.093_75,
-    ]
-    .iter()
-    .map(|&v| v as f32)
-    .collect();
-    assert_eq!(to_vec(&got), want_bf16);
+    let xs = mlxcel_core::from_slice_f32(&x, &[x.len() as i32]);
+    for (name, dt, abs, rel) in [
+        ("f32", dtype::FLOAT32, 1e-6, 1e-6),
+        ("bf16", dtype::BFLOAT16, 4e-3, 1e-2),
+    ] {
+        let got = to_vec(&gelu_approx(&mlxcel_core::astype(&xs, dt)));
+        for (&xi, &g) in x.iter().zip(&got) {
+            let want = gelu_approx_f64(f64::from(xi));
+            let err = (f64::from(g) - want).abs();
+            assert!(
+                err <= abs + rel * want.abs(),
+                "{name}: gelu_approx({xi}) = {g}, expected {want} (error {err})"
+            );
+        }
+    }
 }
