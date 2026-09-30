@@ -562,8 +562,13 @@ def cmd_records(args: argparse.Namespace) -> int:
     numbers = [int(n) for n in re.findall(r"(?m)^(\d+)\. \*\*", fixes)]
     if not numbers:
         errors.append("LOCAL_FIXES.md: no numbered entries")
-    elif numbers != list(range(1, len(numbers) + 1)):
-        errors.append(f"LOCAL_FIXES.md: entries are numbered {numbers}, expected 1..{len(numbers)} in order")
+    elif sorted(numbers) != list(range(1, len(numbers) + 1)):
+        # Entries are grouped by section (core, kernels, build), so a new
+        # kernel fix can sit above an older build fix; what matters is that
+        # every number is used exactly once with no gap.
+        errors.append(
+            f"LOCAL_FIXES.md: entries are numbered {numbers}; expected each of 1..{len(numbers)} exactly once"
+        )
 
     # Residual record.
     res = parse_residual((root / RESIDUAL_FILE).read_text())

@@ -20,9 +20,9 @@ State checked on 2026-09-30. The fork's `rocm-support` head is `75915908` (merge
 | [08 launch-geometry helpers](08-launch-geometry-helpers/pr.md) | 19, 22 | yes | none | ready for manual submission | not submitted |
 | [09 SDPA fallback on CPU streams](09-sdpa-cpu-stream-fallback/pr.md) | 23 | yes | none | ready for manual submission | not submitted |
 | [10 HIP header dependencies](10-hip-header-dependencies/pr.md) | 26 | yes | none | ready for manual submission | not submitted |
-| 11 (reserved) mxfp4 qmv nondeterminism | 27 | | | pending: lablup/mlxcel#2072 is still in progress; package it here once it lands | not submitted |
+| [11 CPU-stream BLAS over fine-grained memory](11-cpu-blas-finegrained/pr.md) | 27 | yes (also on top of 01 to 10) | none | ready for manual submission | not submitted |
 
-Packages are grouped the way the fork would review them: all of 01 is `quantized/qmm.hip`, 03 and 04 are the two halves of `indexing.hip` (scatter/gather and slice update), 08 is the two `kernel_utils.hpp` grid helpers. All ten patches also apply in sequence (01 to 10) with `git am`, so they can be submitted in any order that respects 07's dependency.
+Packages are grouped the way the fork would review them: all of 01 is `quantized/qmm.hip`, 03 and 04 are the two halves of `indexing.hip` (scatter/gather and slice update), 08 is the two `kernel_utils.hpp` grid helpers. All eleven patches also apply in sequence (01 to 11) with `git am`, so they can be submitted in any order that respects 07's dependency.
 
 Each directory holds the patch (`git format-patch` output, authored by the maintainer, no AI attribution), `pr.md` (PR title, a header table for the submitter, and the PR body below a rule), and the reproduction (`repro.py`, `repro.hip` or `repro.sh`).
 
@@ -39,8 +39,8 @@ Each directory holds the patch (`git format-patch` output, authored by the maint
 
 Verified while preparing (2026-09-30):
 
-- Every patch was produced by a 3-way merge of the mlxcel commit that made the fix onto the fork file, with retarget-only hunks and item 9 left out and mlxcel-specific comments rewritten. `git apply --check` passes for each package on `75915908` (07 on `75915908` plus 05 and 06), and `git am` of all ten in order succeeds.
-- After applying all ten, the fork's `mlx/backend/rocm/` differs from mlxcel's overlay only by the retarget items (2 to 6), items 7, 9 and 15, and comment wording.
+- Every patch was produced by a 3-way merge of the mlxcel commit that made the fix onto the fork file, with retarget-only hunks and item 9 left out and mlxcel-specific comments rewritten. `git apply --check` passes for each package on `75915908` (07 on `75915908` plus 05 and 06), and `git am` of all eleven in order succeeds.
+- After applying 01 to 10, the fork's `mlx/backend/rocm/` differs from mlxcel's overlay only by the retarget items (2 to 6), items 7, 9 and 15, and comment wording.
 - The evidence in each PR body comes from the mlxcel change and its tests, measured on gfx1151 (Radeon 8060S, HIP 7.15) with the backend retargeted onto MLX `81ba1c6a`; each body says so.
 
 Not verified, to do before submitting each PR:

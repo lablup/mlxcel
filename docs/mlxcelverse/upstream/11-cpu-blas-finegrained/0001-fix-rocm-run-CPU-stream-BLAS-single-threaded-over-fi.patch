@@ -1,0 +1,62 @@
+From 2218ea125668d430ec9bccf7b86b94eeb7e5bceb Mon Sep 17 00:00:00 2001
+From: Jeongkyu Shin <jshin@lablup.com>
+Date: Wed, 30 Sep 2026 16:48:44 +0900
+Subject: [PATCH] fix(rocm): run CPU-stream BLAS single-threaded over
+ fine-grained memory
+
+On an APU unified_malloc gives every array fine-grained device memory, CPU-stream arrays included, and Buffer::raw_ptr() hands the CPU that same pointer, so MLX's CPU backend calls BLAS with its output in fine-grained memory. Multithreaded OpenBLAS (Debian 0.3.29, 32 threads) then returns wrong output columns: each wrong column is the last column of one thread's share, whose 64-byte line the next thread also writes. A CPU-stream matmul(x, w.T) of [1, 2880] x [2880, 2880]^T was wrong in 35 of 60 calls; a standalone cblas_sgemm of that shape was wrong in 37 of 50 calls with inputs and output from hipExtMallocWithFlags(hipDeviceMallocFinegrained), in 10 of 300 with only the output there, and exact with malloc or hipHostMalloc buffers or with 1, 2 or 4 threads.
+
+The allocator now calls openblas_set_num_threads(1) once, on its first fine-grained allocation. The symbol is declared weak, so a build linked against another BLAS still links and nothing changes there. GPU work and MLX's own CPU kernels (quantized and bf16/f16 matmuls) do not use BLAS; float32 CPU-stream BLAS gets slower (this gemv went from about 0.2 s to 1.4 s per call). Giving BLAS a cacheable scratch output instead would need a change at every BLAS and LAPACK call site in the CPU backend.
+---
+ mlx/backend/rocm/allocator.cpp | 24 ++++++++++++++++++++++++
+ 1 file changed, 24 insertions(+)
+
+diff --git a/mlx/backend/rocm/allocator.cpp b/mlx/backend/rocm/allocator.cpp
+index 4489295f..d49c4cfc 100644
+--- a/mlx/backend/rocm/allocator.cpp
++++ b/mlx/backend/rocm/allocator.cpp
+@@ -25,6 +25,10 @@
+ #include <string>
+ #include <vector>
+ 
++// OpenBLAS's thread-count setter, weak so a build linked against another BLAS
++// still links (the pointer is then null and nothing changes).
++extern "C" void openblas_set_num_threads(int) __attribute__((weak));
++
+ namespace mlx::core {
+ 
+ namespace rocm {
+@@ -123,6 +127,25 @@ static void ensure_mlx_device_current() {
+   }
+ }
+ 
++// The CPU stream's BLAS and LAPACK calls write their results straight into
++// buffers from this allocator. Multithreaded OpenBLAS (0.3.29, 32 threads on
++// the gfx1151 host) returns wrong columns when its output is fine-grained
++// device memory: a standalone cblas_sgemm of [1, 2880] x [2880, 2880]^T was
++// wrong in 37 of 50 calls with inputs and output in fine-grained memory and in
++// 10 of 300 with only the output there, and exact in every call with one
++// thread or with a malloc'd output. One BLAS thread keeps
++// the CPU stream correct; GPU work is unaffected. Runs once, on the first
++// fine-grained allocation, which precedes any CPU-stream BLAS call writing
++// such a buffer.
++inline void single_thread_cpu_blas_for_finegrained() {
++  static std::once_flag once;
++  std::call_once(once, [] {
++    if (openblas_set_num_threads != nullptr) {
++      openblas_set_num_threads(1);
++    }
++  });
++}
++
+ // CUDA unified_malloc: managed if supported else host pinned.
+ // ROCm discrete training: prefer real VRAM (hipMalloc) so we never spill GTT.
+ // APU: fine-grained coherent. Managed only as explicit fallback.
+@@ -134,6 +157,7 @@ inline void* unified_malloc(size_t size, bool& is_managed) {
+   if (use_finegrained()) {
+     err = hipExtMallocWithFlags(&data, size, hipDeviceMallocFinegrained);
+     if (err == hipSuccess) {
++      single_thread_cpu_blas_for_finegrained();
+       is_managed = true;
+       return data;
+     }
