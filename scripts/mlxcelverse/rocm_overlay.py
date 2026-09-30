@@ -364,6 +364,11 @@ class Git:
     def fetch(self, remote: str, *refspecs: str) -> None:
         if not self.fetch_enabled:
             raise ToolError(f"missing objects and --no-fetch given (wanted {refspecs} from {remote})")
+        for spec in refspecs:
+            # A value starting with "-" would be parsed as a git option
+            # (for example --upload-pack=...), so refuse it outright.
+            if spec.startswith("-"):
+                raise ToolError(f"refusing to fetch {spec!r}: not a commit or ref")
         print(f"fetching {' '.join(refspecs)} from {remote} ...", file=sys.stderr)
         self.run("fetch", "-q", "--no-tags", remote, *refspecs)
 
@@ -861,8 +866,10 @@ def cmd_sync(args: argparse.Namespace) -> int:
         print(f"[rocm-overlay] sync CONFLICT: {c}", file=sys.stderr)
 
     if args.check:
-        diffs = compare_trees(ctx.overlay.root, out.root)
-        shutil.rmtree(out.root.parent)
+        try:
+            diffs = compare_trees(ctx.overlay.root, out.root)
+        finally:
+            shutil.rmtree(out.root.parent, ignore_errors=True)
         if diffs:
             for d in diffs:
                 print(f"[rocm-overlay] sync --check: {d}", file=sys.stderr)
