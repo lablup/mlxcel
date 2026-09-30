@@ -219,9 +219,11 @@ no poll loop to time.
 more than one row (4-, 6- or 8-bit, group 64): unset uses the fused WMMA kernel
 where the device has native WMMA and is not a low-CU iGPU, `0` never uses it,
 and `1` uses it wherever the shape fits. `MLX_ROCM_WMMA_QMM_MAX_M` is the row
-count from which such a GEMM instead goes to dequantize + hipBLASLt; it
-defaults to `128` on RDNA 3.5 (`gfx1150` to `gfx1152`) and to no ceiling
-elsewhere, and `MLX_ROCM_WMMA_QMM=1` ignores it. On gfx1151 dequantize +
+count from which such a GEMM instead goes to dequantize + hipBLASLt, where
+that route is enabled (`MLX_ROCM_QMM_DEQUANT_GEMM` not `0`) and is not the fp8
+path; it defaults to `128` on RDNA 3.5 (`gfx1150` to `gfx1152`) and to no
+ceiling elsewhere, a value that is not a positive integer keeps that default,
+and `MLX_ROCM_WMMA_QMM=1` ignores it. On gfx1151 dequantize +
 hipBLASLt was faster than the WMMA kernel on every bf16 shape measured from 128
 rows up, which raised bf16 prefill there by 5% (Qwen3-30B-A3B, whose experts do
 not take this path) to 2.9x (Gemma 3 4B at 2048 tokens); see

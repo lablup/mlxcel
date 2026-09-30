@@ -54,6 +54,7 @@ bool quantized_matmul_runs_dequant_gemm(
     int,
     int,
     int,
+    int,
     Dtype,
     Dtype,
     std::optional<Dtype>,

@@ -3394,6 +3394,7 @@ __global__ void __launch_bounds__(128) qmm_wmma_dense_kernel(
 namespace rocm {
 
 bool quantized_matmul_runs_dequant_gemm(
+    int device_index,
     int M,
     int N,
     int K,
@@ -3402,11 +3403,14 @@ bool quantized_matmul_runs_dequant_gemm(
     std::optional<Dtype> biases_dtype,
     int group_size,
     int bits) {
-  if (M < 1 || N < 1 || K < 1 ||
+  // One row is never claimed: `matmul` sends a single row with a transposed
+  // weight to gemv (gemms/gemv.hip), not hipBLASLt.
+  if (M < 2 || N < 1 || K < 1 ||
       !(x_dtype == float16 || x_dtype == bfloat16)) {
     return false;
   }
-  auto& d = rocm::device(mlx::core::Device(mlx::core::Device::gpu));
+  auto& d = rocm::device(
+      mlx::core::Device(mlx::core::Device::gpu, device_index));
   // The same inputs QuantizedMatmul::eval_gpu derives for one transposed
   // affine GEMM with no batch dimensions.
   const bool bits_supported_by_qmv =
@@ -3433,7 +3437,8 @@ bool quantized_matmul_runs_dequant_gemm(
       d);
   // dequant_rocblas_gemm and matmul's gemm_rocblas both try hipBLASLt first
   // and fall back to different rocBLAS calls, so only the hipBLASLt case is
-  // claimed.
+  // claimed. The claim assumes the hipBLASLt launch itself does not throw,
+  // which would send each side to its own rocBLAS fallback.
   return route == QmmRoute::DequantGemm && is_hipblaslt_available();
 }
 

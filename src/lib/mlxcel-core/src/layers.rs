@@ -6389,33 +6389,31 @@ mod tests {
             let x = ffi::astype(&seeded(&[1, rows, k], 11), dt);
             let wide = quantized_4bit(&ffi::astype(&seeded(&[1024, k], 7), dt));
             let bias = ffi::astype(&seeded(&[1024], 13), dt);
+            // 1024 rows x 512 columns is exactly 512 tiles: MLX tiles the two
+            // paths differently there, so it must stay on qmm.
+            let narrow = quantized_4bit(&ffi::astype(&seeded(&[512, k], 7), dt));
+            assert!(
+                !prefill_dense_gemm_eligible(&x, &narrow, 1),
+                "dtype {dt}: narrow N"
+            );
+            assert!(
+                !prefill_dense_gemm_eligible(&x, &wide, 1025),
+                "dtype {dt}: min rows"
+            );
+
             // On ROCm eligibility also depends on the device's qmm route
-            // (#2081). gfx1151 is the device it was measured on, where both
-            // dtypes take dequantize + hipBLASLt at 1024 rows unless an
-            // `MLX_ROCM_*` override moves them; elsewhere a refused shape
-            // skips the byte check instead of failing it.
+            // (#2081). On the measured route both dtypes take dequantize +
+            // hipBLASLt at 1024 rows; elsewhere a refused shape skips the byte
+            // check instead of failing it.
             let eligible = prefill_dense_gemm_eligible(&x, &wide, 1024);
             let rocm = crate::hardware::gpu_backend_kind() == crate::hardware::GpuBackendKind::Rocm;
-            let measured_route = crate::rocm_arch::device_gfx_target() == Some("gfx1151")
-                && [
-                    "MLX_ROCM_WMMA_QMM",
-                    "MLX_ROCM_WMMA_QMM_MAX_M",
-                    "MLX_ROCM_QMM_DEQUANT_GEMM",
-                    "MLX_ROCM_QMM_DEQUANT_M_THRESHOLD",
-                ]
-                .iter()
-                .all(|name| std::env::var_os(name).is_none());
-            if rocm && !measured_route && !eligible {
+            if rocm && !rocm_measured_route() && !eligible {
                 eprintln!(
                     "skipping dtype {dt} byte check: this ROCm device's qmm route differs from dequantize + hipBLASLt (lablup/mlxcel#2081)"
                 );
                 continue;
             }
             assert!(eligible, "dtype {dt}");
-            assert!(
-                !prefill_dense_gemm_eligible(&x, &wide, 1025),
-                "dtype {dt}: min rows"
-            );
             for b in [None, Some(&bias)] {
                 let bias_ptr = b
                     .map(|b| b.as_ref().unwrap() as *const MlxArray)
@@ -6440,14 +6438,6 @@ mod tests {
                     b.is_some()
                 );
             }
-
-            // 1024 rows x 512 columns is exactly 512 tiles: MLX tiles the two
-            // paths differently there, so it must stay on qmm.
-            let narrow = quantized_4bit(&ffi::astype(&seeded(&[512, k], 7), dt));
-            assert!(
-                !prefill_dense_gemm_eligible(&x, &narrow, 1),
-                "dtype {dt}: narrow N"
-            );
         }
 
         if crate::hardware::gpu_backend_kind() == crate::hardware::GpuBackendKind::Rocm {
@@ -6463,19 +6453,36 @@ mod tests {
         );
     }
 
+    /// True on gfx1151, the device the ROCm qmm routes were measured on
+    /// (#2081), when no environment variable that moves a route is set.
+    fn rocm_measured_route() -> bool {
+        crate::rocm_arch::device_gfx_target() == Some("gfx1151")
+            && [
+                "MLX_ROCM_WMMA_QMM",
+                "MLX_ROCM_WMMA_QMM_MAX_M",
+                "MLX_ROCM_QMM_DEQUANT_GEMM",
+                "MLX_ROCM_QMM_DEQUANT_M_THRESHOLD",
+                "MLX_NO_HIPBLASLT",
+            ]
+            .iter()
+            .all(|name| std::env::var_os(name).is_none())
+    }
+
     /// ROCm half of [`prefill_dense_gemm_matches_qmm_bytes_where_eligible`]:
     /// shapes that pass the tile rule but reach different `quantized_matmul`
-    /// routes. On gfx1151 bf16 at 64 rows takes the fused WMMA kernel, whose
-    /// bytes differ, so the rule must refuse it; f16 at 64 rows and bf16 at
-    /// 256 rows take dequantize + hipBLASLt and must be accepted and match.
-    /// A batch axis above 1 makes `quantized_matmul` batch the GEMM, so it is
-    /// refused whatever the bytes.
+    /// routes. Everywhere, a shape the rule accepts must match. On the
+    /// measured route, bf16 at 64 rows takes the fused WMMA kernel, whose
+    /// bytes differ, so the rule must refuse it, while f16 at 64 rows and bf16
+    /// at 256 rows take dequantize + hipBLASLt and must be accepted. A batch
+    /// axis above 1 makes `quantized_matmul` batch the GEMM, so it is refused
+    /// whatever the bytes.
     fn prefill_dense_gemm_rocm_route_guard(k: i32) {
+        let measured = rocm_measured_route();
         let mut refused_differing = 0;
-        for (dt, rows, n) in [
-            (crate::dtype::BFLOAT16, 64, 8448),
-            (crate::dtype::FLOAT16, 64, 8448),
-            (crate::dtype::BFLOAT16, 256, 4096),
+        for (dt, rows, n, expect_eligible) in [
+            (crate::dtype::BFLOAT16, 64, 8448, false),
+            (crate::dtype::FLOAT16, 64, 8448, true),
+            (crate::dtype::BFLOAT16, 256, 4096, true),
         ] {
             let x = ffi::astype(&seeded(&[1, rows, k], 17), dt);
             let w = quantized_4bit(&ffi::astype(&seeded(&[n, k], 19), dt));
@@ -6493,18 +6500,31 @@ mod tests {
             };
             let same = raw_bytes(&dense_gemm(&x, &w, None)) == raw_bytes(&want);
             let eligible = prefill_dense_gemm_eligible(&x, &w, 1);
+            eprintln!(
+                "rocm route guard: dtype {dt} rows {rows} N {n}: eligible {eligible}, same bytes {same}"
+            );
             assert!(
                 !eligible || same,
                 "dtype {dt} rows {rows} N {n}: eligible, but dense GEMM differs from qmm"
             );
+            if measured {
+                assert_eq!(
+                    eligible, expect_eligible,
+                    "dtype {dt} rows {rows} N {n}: eligibility on gfx1151"
+                );
+            }
             if !same {
                 refused_differing += 1;
             }
-            eprintln!(
-                "rocm route guard: dtype {dt} rows {rows} N {n}: eligible {eligible}, same bytes {same}"
+        }
+        if measured {
+            // The bf16 64-row case must really differ, or this guard would
+            // pass with the route check removed.
+            assert!(
+                refused_differing >= 1,
+                "no differing shape exercised the route check"
             );
         }
-        eprintln!("rocm route guard: {refused_differing} differing shape(s) refused");
 
         let batched_x = ffi::astype(&seeded(&[2, 512, k], 23), crate::dtype::BFLOAT16);
         let w = quantized_4bit(&ffi::astype(&seeded(&[1024, k], 7), crate::dtype::BFLOAT16));

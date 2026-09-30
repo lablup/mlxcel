@@ -52,14 +52,16 @@ MLX_API std::vector<array> moe_swiglu_sorted_vjp(
     const array& dy,
     StreamOrDevice s = {});
 
-// True when QuantizedMatmul on a transposed affine weight, for one [M, K]
-// input with no batch dimensions, dequantizes the weight in the input dtype and
-// runs the GEMM through hipBLASLt. That is the path `matmul` takes for a dense
-// f16 or bf16 weight, so on this route `dequantize` + `matmul` returns the same
-// bytes as `quantized_matmul`; on the others (the fused WMMA kernel, the fp8
-// path, qmv) it does not. Reads the same route selection QuantizedMatmul uses,
-// including its environment overrides (lablup/mlxcel#2081).
+// True when QuantizedMatmul on GPU `device_index`, for a transposed affine
+// weight and one [M, K] input with no batch dimensions (M >= 2), dequantizes
+// the weight in the input dtype and runs the GEMM through hipBLASLt. That is
+// the path `matmul` takes for a dense f16 or bf16 weight, so on this route
+// `dequantize` + `matmul` returns the same bytes as `quantized_matmul`; on the
+// others (the fused WMMA kernel, the fp8 path, qmv) it does not. Reads the same
+// route selection QuantizedMatmul uses, including its environment overrides
+// (lablup/mlxcel#2081).
 MLX_API bool quantized_matmul_runs_dequant_gemm(
+    int device_index,
     int M,
     int N,
     int K,

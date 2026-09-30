@@ -32,7 +32,7 @@ Across the 50 cells of the sweep (M 2 to 2048; K x N of 4096 x 4096, 4096 x 1024
 
 ## Model prefill
 
-`mlxcel-bench-decode --prompt-tokens {512, 2048} -n 8 --warmup-tokens 4 --ignore-eos`, one binary, the default against `MLX_ROCM_WMMA_QMM=1` (which restores the old dispatch), three ABBA runs per cell. Prefill tok/s, mean (range):
+`mlxcel-bench-decode --prompt-tokens {512, 2048} -n 8 --warmup-tokens 4 --ignore-eos`, one binary, the default against `MLX_ROCM_WMMA_QMM=1` (which removes the ceiling, the old dispatch on this device), three ABBA runs per cell. Prefill tok/s, mean (range):
 
 | Model | Scales | pp512 before | pp512 after | pp2048 before | pp2048 after |
 |---|---|---:|---:|---:|---:|
@@ -41,7 +41,7 @@ Across the 50 cells of the sweep (M 2 to 2048; K x N of 4096 x 4096, 4096 x 1024
 | Qwen3-30B-A3B-4bit | bf16 | 311 (305-315) | 326 (321-334) | 283 (282-284) | 297 (296-299) |
 | Meta-Llama-3.1-8B-Instruct-4bit | f16 | 969 (879-1032) | 1008 (994-1026) | 1149 (1143-1153) | 1132 (1124-1137) |
 
-Decode is unchanged in every cell (M is 1, which never took the WMMA kernel). MLX peak memory is within 0.1 GB of before except Qwen3-0.6B at 512 tokens, 1.04 to 1.46 GB, because the dequantize route allocates a bf16 copy of each weight matrix, which `LOCAL_FIXES.md` item 28 bounds. Qwen3-30B-A3B gains least because only its attention projections take this path; its experts go through `gather_qmm`. Llama 3.1 8B is the control: its scales are f16, so no GEMM of it reaches the changed code, and its -1.5% at 2048 tokens has no path to explain it.
+Decode is unchanged in every cell (M is 1, which never took the WMMA kernel). MLX peak memory is within 0.1 GB of before except Qwen3-0.6B at 512 tokens, 1.04 to 1.46 GB, because the dequantize route allocates a bf16 copy of each weight matrix, which `LOCAL_FIXES.md` item 28 bounds. Qwen3-30B-A3B gains least because only its attention projections take this path; its experts go through `gather_qmm`. Llama 3.1 8B is the control: its scales are f16, so no GEMM of it reaches the changed code, and its -1.5% at 2048 tokens has no path to explain it. No dense bf16-scale checkpoint above 4B was available on the host, so peak memory for one is not measured here; the dequantized-weight cache holds 8 matrices or 256 MB, so every model measured here dequantizes each projection again per prefill chunk, and the transient copies grow with the projection size.
 
 ## The dense prefill path on ROCm
 

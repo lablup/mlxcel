@@ -5219,8 +5219,9 @@ bool quantized_matmul_matches_dense_gemm(
 ) {
 #ifdef MLXCEL_BRIDGE_ROCM_BACKEND
     using namespace mlx::core;
+    const Device device = default_device();
     if (mlxcel::gpu_kernel_backend() != mlxcel::GpuKernelBackend::Rocm ||
-        default_device() != Device::gpu) {
+        device.type != Device::gpu) {
         return true;
     }
     const auto& xs = x.inner.shape();
@@ -5238,7 +5239,7 @@ bool quantized_matmul_matches_dense_gemm(
     std::optional<Dtype> biases_dtype =
         biases ? std::optional<Dtype>(biases->inner.dtype()) : std::nullopt;
     return rocm::quantized_matmul_runs_dequant_gemm(
-        xs[xs.size() - 2], ws[0], xs.back(), x.inner.dtype(),
+        device.index, xs[xs.size() - 2], ws[0], xs.back(), x.inner.dtype(),
         scales.inner.dtype(), biases_dtype, group_size, bits);
 #else
     (void)x;
