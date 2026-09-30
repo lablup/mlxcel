@@ -133,7 +133,9 @@ struct OrderedArray {
 // the handler hipFree's device-wide sync attaches, so that wait never woke.
 // rocm::ensure_device_flags() now runs before the first queue exists
 // (lablup/mlxcel#1876, LOCAL_FIXES.md entries 18 and 20).
-// MLX_ROCM_FFT_CACHE_SIZE overrides the capacity.
+// MLX_ROCM_FFT_CACHE_SIZE overrides the capacity: a positive integer up to
+// INT_MAX; any other value warns once and keeps the default
+// (capacity_from_env in lru_cache.h, lablup/mlxcel#2051).
 auto& fft_plan_cache() {
   static rocm::LRUBytesKeyCache<std::string, std::shared_ptr<HipFFTPlan>> cache(
       "MLX_ROCM_FFT_CACHE_SIZE",
