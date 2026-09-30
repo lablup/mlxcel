@@ -1,7 +1,7 @@
 host: AMD Ryzen AI MAX+ 395 with Radeon 8060S (gfx1151, RDNA 3.5), 96 GiB VRAM carve-out, 30 GiB host RAM
 os: Debian GNU/Linux 13 (trixie), kernel 6.18.12+deb13-amd64
 rocm: HIP 7.15.26333, ROCM_PATH=/opt/rocm
-mlxcel: branch feature/issue-1807-mxfp8-rocm-e2e on 81ba1c6a (lablup/mlxcel#1807), built with --features rocm
+mlxcel: branch feature/issue-1807-mxfp8-rocm-e2e (lablup/mlxcel#1807), final build on d1128266 (see 'binaries'), built with --features rocm
 mlx_pin: 81ba1c6a0e50a9268b931579c2d4f1158b9aab5a
 checkpoint: Lazarus-Ai/ReAligned-Qwen3.5-0.8B-FP8 @ db97e6a70bef791fb44a7e054fc7a9d8f50f090d (model.safetensors sha256 1c68f282d08454fd3f7ca1b15605e8da280ffe672deae0b1bf97459f09fd08e7), local dir models/fp8/ReAligned-Qwen3.5-0.8B-FP8
 corpus: tests/fixtures/wikitext2_excerpt.txt sha256 16721fc1057d69efc8493718fcad562de9e4554ce05369876cd06dcba431394e

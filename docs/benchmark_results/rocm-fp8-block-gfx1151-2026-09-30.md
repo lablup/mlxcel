@@ -31,9 +31,11 @@ Relative L2 error against the host reference, worst case over all gather and den
 
 | Backend | bf16 | f16 | f32 |
 |---|---|---|---|
-| ROCm gfx1151 | 1.8e-3 | 2.3e-4 | 2.9e-7 |
-| MLX CPU backend (same test binary, CPU default device) | 7.9e-3 | 1.0e-3 | 1.3e-7 |
-| Test bound | 2e-2 | 4e-3 | 1e-5 |
+| ROCm gfx1151 | 1.8e-3 | 2.2e-4 | 2.9e-7 |
+| MLX CPU backend (same test binary, CPU default device) | 7.9e-3 | 1.0e-3 | 1.2e-7 |
+| Test bound | 2e-2 | 4e-3 | 2e-3 |
+
+The f32 bound is wider than these numbers need because on CUDA sm80 and later the sorted prefill case takes MLX's grouped GEMM, which runs f32 through TF32 tensor cores by default (`MLX_ENABLE_TF32`), rounding activations to a 10-bit mantissa.
 
 With item 10 reverted in the overlay and the test binary rebuilt, both gather tests fail at their first case (`DecodeUnsorted bf16`) with non-finite output.
 
@@ -54,7 +56,7 @@ All 14 disagreements are at reference gaps under 0.5, and in every one the CPU's
 
 ## 3. GPU-quantized against CPU-quantized weights
 
-ROCm `quantize` produces the same E8M0 scales as the CPU but rounds ties differently. To see whether that moves decoded tokens, the three widths were traced on the GPU twice: once as shipped, and once with `requantize_block_fp8_weights` temporarily quantizing on the CPU stream (a local experiment switch, not committed). Both arms compute on the GPU; only the packed weights differ. The ROCm traces are deterministic: a rerun of `w1` and `w256` was byte-identical, so every difference below comes from the weights.
+ROCm `quantize` produces the same E8M0 scales as the CPU but rounds ties differently. To see whether that moves decoded tokens, the three widths were traced on the GPU twice: once as shipped, and once with `requantize_block_fp8_weights` temporarily quantizing on the CPU stream (a local experiment switch, not committed). Both arms compute on the GPU; only the packed weights differ. The table compares the shipped arm (`rocm_*`, candidate) against the CPU-quantized arm (`rocm_cpuquant_*`, reference), so "reference" below means the CPU-quantized weights. The ROCm traces are deterministic: a rerun of `w1` and `w256` was byte-identical, so every difference below comes from the weights.
 
 | Width | Positions | Top-1 disagreements | Decided disagreements (`--decided 2.0`) | Largest gap at a disagreement |
 |---|---|---|---|---|
@@ -89,6 +91,8 @@ M=models/fp8/ReAligned-Qwen3.5-0.8B-FP8
 # hours on the CPU; METADATA.txt describes running the chunks in parallel
 MLXCEL_DEVICE=cpu ./target/release/examples/logit_trace $M tests/fixtures/wikitext2_excerpt.txt 32 8 8 0 > cpu_w32.tsv
 python3 scripts/compare_logit_traces.py cpu_w32.tsv rocm_w32.tsv --decided 2.0
+# section 3, per width W in w1 w8 w256 (traces committed under benchmarks/logit_traces/fp8_block_gfx1151/)
+python3 scripts/compare_logit_traces.py realigned-qwen3.5-0.8b-fp8_rocm_cpuquant_$W.tsv realigned-qwen3.5-0.8b-fp8_rocm_$W.tsv --decided 2.0
 cargo test --features rocm --lib models::switch_layers::mxfp_tests -- --test-threads=1
 cargo test --features rocm --test cpu_device_sdpa
 ```

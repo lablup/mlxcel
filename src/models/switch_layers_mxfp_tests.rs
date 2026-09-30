@@ -49,7 +49,7 @@
 //! * `implicit_lhs = true` (`use_sorted_rhs_schedule`: sorted, `M == 1`,
 //!   `B >= 16`, `B / E >= 4`) with `implicit_x_batch_stride = K`, the sorted
 //!   prefill case (`B = 128`, `E = 8`), and with stride 0, the sorted
-//!   shared-activation case;
+//!   shared-activation case (`B = 32`, `E = 8`);
 //! * `N = 320`, so the second column block runs its `col >= N` bound check.
 //!
 //! This is the default path. The opt-in expert-batched kernel from item 9
@@ -113,15 +113,21 @@ impl Mode {
 /// The bound comes from rounding to the activation dtype (unit roundoff 2^-9
 /// for bf16, 2^-11 for f16), with room for where a backend rounds its
 /// partial sums. Measured on gfx1151 across every case below: at most
-/// 1.8e-3 (bf16), 2.3e-4 (f16) and 2.9e-7 (f32). MLX's CPU backend, which
+/// 1.8e-3 (bf16), 2.2e-4 (f16) and 2.9e-7 (f32). MLX's CPU backend, which
 /// rounds partials to the activation dtype, measured up to 7.9e-3, 1.0e-3
-/// and 1.3e-7, so the bounds sit about 2.5x above the least accurate correct
-/// backend seen. The defect these tests exist for, fp weights read with the
-/// affine formula (`LOCAL_FIXES.md` item 10), measured between 1.0 and 1e34.
+/// and 1.2e-7, so the bf16 and f16 bounds sit about 2.5x above the least
+/// accurate correct backend seen. The f32 bound is not set by those numbers:
+/// on CUDA sm80 and later the sorted prefill case takes MLX's grouped GEMM
+/// (`B >= 8 * E`), which with `MLX_ENABLE_TF32` at its default of on runs
+/// f32 through TF32 tensor cores, rounding the activations to a 10-bit
+/// mantissa (unit roundoff 2^-11, about 4.9e-4). 2e-3 covers that with room
+/// and is still three orders of magnitude below the defect these tests exist
+/// for, fp weights read with the affine formula (`LOCAL_FIXES.md` item 10),
+/// which measured between 1.0 and 1e34.
 const ACTIVATIONS: [(i32, &str, f64); 3] = [
     (dtype::BFLOAT16, "bf16", 2e-2),
     (dtype::FLOAT16, "f16", 4e-3),
-    (dtype::FLOAT32, "f32", 1e-5),
+    (dtype::FLOAT32, "f32", 2e-3),
 ];
 
 /// Deterministic values in `[-1, 1)`, with the magnitude stepped per group
@@ -262,8 +268,10 @@ enum GatherCase {
     /// `SwitchGLU` prefill above the sort threshold: 32 tokens x 4 experts,
     /// sorted through `gather_sort`, which selects the sorted rhs schedule.
     PrefillSorted,
-    /// One shared activation row gathered against 16 sorted expert slots,
-    /// the sorted schedule with a zero activation stride.
+    /// One shared activation row gathered against 32 sorted expert slots,
+    /// four per expert, the sorted schedule with a zero activation stride.
+    /// The slot count is load-bearing: the ROCm schedule needs `B >= 16` and
+    /// `B / E >= 4`, so 16 slots over 8 experts would miss it.
     SortedSharedActivation,
     /// Four rows per gathered batch (`M = 4`).
     MultiRow,
@@ -296,7 +304,7 @@ fn run_gather(
     // `slots_per_x` is how many consecutive gathered slots read one
     // activation batch entry: `top_k` for the unsorted layouts (MLX
     // broadcasts `[tokens, 1]` against `[tokens, top_k]`), 1 once
-    // `gather_sort` has expanded the tokens, all 16 for the shared row.
+    // `gather_sort` has expanded the tokens, all 32 for the shared row.
     let (x, indices, sorted, slots_per_x) = match case {
         GatherCase::DecodeUnsorted | GatherCase::PrefillUnsorted | GatherCase::MultiRow => {
             let (tokens, top_k, rows) = match case {
@@ -330,9 +338,9 @@ fn run_gather(
         }
         GatherCase::SortedSharedActivation => {
             let x = mlxcel_core::from_slice_f32(&synthetic(k, 13), &[1, 1, k as i32]);
-            let slots: Vec<u32> = (0..16).map(|i| (i / 4) as u32).collect();
-            let indices = mlxcel_core::from_slice_u32(&slots, &[16]);
-            (mlxcel_core::astype(&x, act_dtype), indices, true, 16)
+            let slots: Vec<u32> = (0..32).map(|i| (i / 4) as u32).collect();
+            let indices = mlxcel_core::from_slice_u32(&slots, &[32]);
+            (mlxcel_core::astype(&x, act_dtype), indices, true, 32)
         }
     };
 

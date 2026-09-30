@@ -5,7 +5,7 @@ Teacher-forced logit traces from `examples/logit_trace` on a Radeon 8060S (`gfx1
 ## Arms
 
 - `rocm`: the GPU as shipped, at `w1` (`1 128 8 0`), `w8` (`8 80 8 512`), `w256` (`256 2 8 0`) and `w32` (`32 8 8 0`).
-- `rocm_cpuquant`: the GPU with the load-time mxfp8 quantization moved to the CPU stream by a temporary switch, at `w1`, `w8` and `w256`. Compare with `rocm` at the same width to isolate the effect of GPU tie rounding in `quantize`.
+- `rocm_cpuquant`: the GPU with the load-time mxfp8 quantization moved to the CPU stream by a temporary switch, at `w1`, `w8` and `w256`. Compare with `rocm` at the same width, `rocm_cpuquant` as the reference argument as in the write-up, to isolate the effect of GPU tie rounding in `quantize`.
 - `cpu`: `MLXCEL_DEVICE=cpu`, the reference device in place of Metal, at `w32` only; compare it with `rocm_w32`.
 
 ```bash
