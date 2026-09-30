@@ -55,7 +55,11 @@ pub struct ModelStateTensor {
 }
 
 impl ModelStateTensor {
-    /// Capture a materialized copy of `array` under `name`.
+    /// Capture `array` under `name` through `ffi::copy`. The copy is lazy
+    /// and, once evaluated, shares `array`'s buffer rather than duplicating
+    /// it. It stays unchanged because a later `slice_update` of `array`
+    /// copies instead of writing in place while this copy still references
+    /// `array` or its buffer (#2052).
     pub fn new(name: impl Into<String>, array: &MlxArray) -> Self {
         Self {
             name: name.into(),

@@ -563,6 +563,19 @@ mod ffi {
             reduce: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
+        /// Dynamic-start slice update: `src` with `update` written at the
+        /// offsets held in the int array `start`, one per entry of `axes`
+        /// (MLX's `slice_update(src, update, start, axes)`, which builds the
+        /// `DynamicSliceUpdate` primitive). Test-only entry point: no model
+        /// path uses it; `tests/rocm_slice_update_source.rs` drives the ROCm
+        /// `DynamicSliceUpdate::eval_gpu` through it.
+        fn slice_update_dynamic(
+            src: &MlxArray,
+            update: &MlxArray,
+            start: &MlxArray,
+            axes: &[i32],
+        ) -> Result<UniquePtr<MlxArray>>;
+
         /// Argmax along axis
         fn argmax(a: &MlxArray, axis: i32, keepdims: bool) -> UniquePtr<MlxArray>;
 

@@ -417,6 +417,14 @@ std::unique_ptr<MlxArray> slice_update_reduce(const MlxArray& src,
                                               rust::Slice<const int32_t> stops,
                                               int32_t reduce);
 
+// Dynamic-start slice update: src with update written at the offsets in the
+// int array start, along axes (the DynamicSliceUpdate primitive). MLX's
+// validation errors surface as a Rust Err. Test-only entry point.
+std::unique_ptr<MlxArray> slice_update_dynamic(const MlxArray& src,
+                                               const MlxArray& update,
+                                               const MlxArray& start,
+                                               rust::Slice<const int32_t> axes);
+
 // Argmax along axis
 std::unique_ptr<MlxArray> argmax(const MlxArray& a, int32_t axis, bool keepdims);
 

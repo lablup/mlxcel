@@ -18,13 +18,6 @@
 #define MLX_PROFILER_RANGE(message)
 #endif
 
-#if defined(MLX_USE_ROCM)
-namespace mlx::core::rocm {
-// True from HIP-graph capture start until the captured graph is destroyed.
-bool graph_active();
-} // namespace mlx::core::rocm
-#endif
-
 namespace mlx::core {
 
 void AsStrided::eval_gpu(const std::vector<array>& inputs, array& out) {
@@ -142,29 +135,14 @@ void DynamicSliceUpdate::eval_gpu(
     return;
   }
 
-  // Donate the input buffer when uniquely owned, else copy. During HIP-graph
-  // capture the async pipeline inflates the buffer's use_count, forcing a full
-  // copy into a FRESH buffer — the captured graph then reconstructs
-  // (frozen capture input + current row) every replay and loses accumulation
-  // (e.g. a growing KV cache → frozen/repeated tokens). For a contiguous,
-  // fully-materialized buffer the in-place donation is the intended semantics,
-  // so force it while a graph is being captured.
+  // Copy or donate the input to the output. copy_gpu donates only when
+  // is_donatable(in, out) holds, which requires the source array itself, not
+  // just its data buffer, to have no other reference (LOCAL_FIXES.md item 24).
   auto s = stream();
-  bool can_donate = in.data_shared_ptr() != nullptr && in.flags().contiguous &&
-      in.data_size() == in.size() &&
-      (in.data_shared_ptr().use_count() == 1
-#if defined(MLX_USE_ROCM)
-       || mlx::core::rocm::graph_active()
-#endif
-      );
-  if (can_donate) {
-    out.copy_shared_buffer(in);
-  } else {
-    auto ctype = in.flags().contiguous && in.size() == in.data_size()
-        ? CopyType::Vector
-        : CopyType::General;
-    copy_gpu(in, out, in.data_size() == 1 ? CopyType::Scalar : ctype, s);
-  }
+  auto ctype = in.flags().contiguous && in.size() == in.data_size()
+      ? CopyType::Vector
+      : CopyType::General;
+  copy_gpu(in, out, in.data_size() == 1 ? CopyType::Scalar : ctype, s);
 
   auto out_offset =
       compute_dynamic_offset(start_indices, out.strides(), axes_, s);

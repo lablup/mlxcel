@@ -1340,18 +1340,14 @@ void SliceUpdate::eval_gpu(const std::vector<array>& inputs, array& out) {
     return;
   }
 
-  // Donate the input buffer when uniquely owned, else copy.
-  bool can_donate = in.data_shared_ptr() != nullptr &&
-      in.data_shared_ptr().use_count() == 1 && in.flags().contiguous &&
-      in.data_size() == in.size();
-  if (can_donate) {
-    out.copy_shared_buffer(in);
-  } else {
-    auto ctype = in.flags().contiguous && in.size() == in.data_size()
-        ? CopyType::Vector
-        : CopyType::General;
-    copy_gpu(in, out, in.data_size() == 1 ? CopyType::Scalar : ctype, stream());
-  }
+  // Copy or donate the input to the output. copy_gpu donates only when
+  // is_donatable(in, out) holds, which requires the source array itself, not
+  // just its data buffer, to have no other reference: a caller still holding
+  // the source must not see the update (LOCAL_FIXES.md item 24).
+  auto ctype = in.flags().contiguous && in.size() == in.data_size()
+      ? CopyType::Vector
+      : CopyType::General;
+  copy_gpu(in, out, in.data_size() == 1 ? CopyType::Scalar : ctype, stream());
 
   // Calculate out strides, initial offset
   auto [data_offset, out_strides] =

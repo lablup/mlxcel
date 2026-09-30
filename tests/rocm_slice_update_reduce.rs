@@ -24,9 +24,9 @@
 //! the same op on the CPU device, exactly, on int32 data. The above-threshold
 //! cases fail with the kernel change reverted (checked on gfx1151).
 //!
-//! The arrays are large: the NWORK=4 case holds five arrays of about 67M
-//! int32 elements (source, update, the GPU op's private source copy, and the
-//! two results), about 1.3 GB, so run the binary on its own and serially:
+//! The arrays are large: the NWORK=4 case holds four arrays of about 67M
+//! int32 elements (source, update, and the two results), about 1.1 GB, so run
+//! the binary on its own and serially:
 //!
 //! ```sh
 //! cargo test --features rocm --test rocm_slice_update_reduce -- --test-threads=1
@@ -113,22 +113,11 @@ fn assert_gpu_matches_cpu(
     stops: &[i32],
     reduce: i32,
 ) {
+    // The GPU op runs first on the same `src` the CPU reference then reads:
+    // `SliceUpdate::eval_gpu` must not write into a source the caller still
+    // holds (issue #2052, `tests/rocm_slice_update_source.rs`).
+    let gpu = reduce_on(true, src, update, starts, stops, reduce);
     let cpu = reduce_on(false, src, update, starts, stops, reduce);
-    // The GPU op gets a private copy of the source. ROCm's
-    // `SliceUpdate::eval_gpu` donates the source buffer whenever the buffer
-    // has one owner, without checking that the source array itself is still
-    // referenced (upstream's `array::is_donatable` checks both, issue #2052),
-    // so it writes the result into `src` in place. Reusing `src` afterwards, for the CPU
-    // reference or the next case, would compare against mutated input.
-    let gpu = {
-        let private_src = {
-            let _guard = DefaultDeviceGuard::gpu();
-            let out = mlxcel_core::copy(src);
-            mlxcel_core::eval(&out);
-            out
-        };
-        reduce_on(true, &private_src, update, starts, stops, reduce)
-    };
     let equal = {
         let _guard = DefaultDeviceGuard::cpu();
         let eq = mlxcel_core::array_equal(&gpu, &cpu, false);

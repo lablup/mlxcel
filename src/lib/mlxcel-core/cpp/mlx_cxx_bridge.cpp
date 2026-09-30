@@ -1348,6 +1348,15 @@ std::unique_ptr<MlxArray> slice_update_reduce(const MlxArray& src,
     }
 }
 
+std::unique_ptr<MlxArray> slice_update_dynamic(const MlxArray& src,
+                                               const MlxArray& update,
+                                               const MlxArray& start,
+                                               rust::Slice<const int32_t> axes) {
+    std::vector<int> axes_vec(axes.begin(), axes.end());
+    return std::make_unique<MlxArray>(mlx::core::slice_update(
+        src.inner, update.inner, start.inner, std::move(axes_vec)));
+}
+
 std::unique_ptr<MlxArray> argmax(const MlxArray& a, int32_t axis, bool keepdims) {
     return std::make_unique<MlxArray>(mlx::core::argmax(a.inner, axis, keepdims));
 }

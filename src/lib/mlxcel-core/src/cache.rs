@@ -7749,6 +7749,44 @@ mod tests {
         assert_eq!(f32_rows(&full_k), full_before, "wrapped overwrite copied");
     }
 
+    /// A prompt-cache snapshot taken in steady state keeps its rows when the
+    /// next token overwrites a ring slot (#2052). The snapshot is what
+    /// `ModelStateSnapshot::push_tensor` captures: a lazy copy of the live
+    /// keys array, not yet evaluated when the next write runs. A backend
+    /// that donates the keys buffer to that write while the copy still
+    /// references the array (ROCm before #2052) writes the new token into
+    /// the snapshot.
+    #[test]
+    fn rotating_steady_state_snapshot_survives_the_next_wrap_write() {
+        if !ffi::default_device_is_gpu() {
+            return;
+        }
+        let mut c = RotatingKVCache::new(4);
+        // Token 5 is the first steady-state write; it leaves the keys in a
+        // buffer nothing else shares.
+        for t in 1..=5 {
+            let (k, _) = c.update_and_fetch(row(t as f32), row(10.0 * t as f32));
+            ffi::eval(&k);
+        }
+        let mut snap = crate::generate::ModelStateSnapshot::new("test", 5);
+        snap.push_tensor("k", c.keys.as_ref().unwrap());
+        snap.push_tensor("v", c.values.as_ref().unwrap());
+        // Token 6 overwrites slot 1 (token 2), which the snapshot still holds.
+        let (k, v) = c.update_and_fetch(row(6.0), row(60.0));
+        assert_eq!(f32_rows(&k), vec![5.0, 6.0, 3.0, 4.0]);
+        assert_eq!(f32_rows(&v), vec![50.0, 60.0, 30.0, 40.0]);
+        assert_eq!(
+            f32_rows(snap.tensor("k").unwrap()),
+            vec![5.0, 2.0, 3.0, 4.0],
+            "snapshot keys kept token 2"
+        );
+        assert_eq!(
+            f32_rows(snap.tensor("v").unwrap()),
+            vec![50.0, 20.0, 30.0, 40.0],
+            "snapshot values kept token 2"
+        );
+    }
+
     /// The `MLXCEL_DIAG_SKIP_DECODE_KV_WRITE` path returns exactly the live
     /// window a normal fetch of the same cache would, and writes nothing.
     #[test]
