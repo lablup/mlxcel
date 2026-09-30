@@ -168,7 +168,6 @@ impl EnvRestore {
         guard
     }
 
-    #[cfg(not(feature = "cuda"))]
     fn set_with_clear(keys: &[&'static str], key: &'static str, value: &str) -> Self {
         let guard = Self::clear(keys);
         // SAFETY: same `env_lock()` serialization as `clear`; callers keep the
