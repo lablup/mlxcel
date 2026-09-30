@@ -638,3 +638,46 @@ fn jamba_mamba_prefill_rows_match_token_by_token_decode() {
         }
     }
 }
+
+/// Issue #1981: on a backend with a fused Mamba1 scan port (Metal, CUDA), a
+/// Jamba prefill must not walk the per-step graph scan. That loop issues
+/// several small ops per timestep per Mamba layer, and on CUDA it was about
+/// two thirds of a 3.3k-token prefill. Checked for f32 and bf16 weights (the
+/// published checkpoints are bf16), for a prefill and the decode step after it.
+#[test]
+fn jamba_mamba_prefill_takes_the_fused_scan_where_a_port_exists() {
+    use mlxcel_core::cache::SequenceId;
+    use mlxcel_core::generate::LanguageModel;
+    use mlxcel_core::hardware::{GpuBackendKind, gpu_backend_kind};
+
+    // Not skipped under `MLXCEL_MAMBA1_SCAN_KERNEL=0`: that setting brings the
+    // per-step loop back, which is exactly what this test must catch.
+    if !matches!(
+        gpu_backend_kind(),
+        GpuBackendKind::Metal | GpuBackendKind::Cuda
+    ) {
+        return;
+    }
+    for weight_dtype in [dtype::FLOAT32, dtype::BFLOAT16] {
+        let weights: WeightMap = mamba_weights()
+            .into_iter()
+            .map(|(k, v)| (k, mlxcel_core::astype(&v, weight_dtype)))
+            .collect();
+        let model = JambaModel::from_weights(mamba_config(), weights)
+            .expect("Mamba Jamba fixture must load");
+        let seq = SequenceId::from_raw(1_981_000 + weight_dtype as u64);
+        model.prepare_sequence_state(seq);
+
+        let before = super::GRAPH_SCAN_STEPS.with(|n| n.get());
+        let prompt: Vec<i32> = (0..48).map(|i| (i * 7 + 3) % VOCAB).collect();
+        let x = mlxcel_core::from_slice_i32(&prompt, &[1, prompt.len() as i32]);
+        let _ = to_f32(&model.forward_with_sequence_id(&x, Some(seq), &mut [], None));
+        let x = mlxcel_core::from_slice_i32(&[5], &[1, 1]);
+        let _ = to_f32(&model.forward_with_sequence_id(&x, Some(seq), &mut [], None));
+        let walked = super::GRAPH_SCAN_STEPS.with(|n| n.get()) - before;
+        assert_eq!(
+            walked, 0,
+            "dtype {weight_dtype}: prefill and decode walked {walked} graph-scan timesteps instead of the fused kernel"
+        );
+    }
+}

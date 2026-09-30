@@ -1861,14 +1861,28 @@ mod ffi {
             next_state: &mut UniquePtr<MlxArray>,
         ) -> Result<()>;
 
-        /// Whether the fused Mamba1 selective-scan kernel can run (Metal only;
-        /// `MLXCEL_MAMBA1_SCAN_KERNEL=0` forces the graph scan).
+        /// Whether the fused Mamba1 selective-scan kernel can run (Metal and
+        /// CUDA; `MLXCEL_MAMBA1_SCAN_KERNEL=0` forces the graph scan).
         fn mamba1_scan_kernel_available() -> bool;
 
-        /// Mamba1 selective scan fused over the sequence (issue #2005).
+        /// Whether the fused scan can serve these inputs: it is available,
+        /// `N <= 32`, and on CUDA all six inputs share one floating dtype (the
+        /// condition under which the CUDA kernel is bit-identical to the graph
+        /// scan, issue #1981). Callers take the graph scan when this is false.
+        fn mamba1_scan_kernel_accepts(
+            x: &MlxArray,
+            delta: &MlxArray,
+            b: &MlxArray,
+            c: &MlxArray,
+            a: &MlxArray,
+            d: &MlxArray,
+        ) -> bool;
+
+        /// Mamba1 selective scan fused over the sequence (issues #2005, #1981).
         /// x, delta `[B, L, D]`, b, c `[B, L, N]`, a `[D, N]` (= -exp(A_log)),
         /// d `[D]`, state_in `[B, D, N]`. Writes y `[B, L, D]` in x's dtype and
-        /// the final state `[B, D, N]` in float32.
+        /// the final state `[B, D, N]`: float32 on Metal, x's dtype on CUDA,
+        /// where every step rounds like the graph scan.
         /// Used by: Jamba, Mamba, Falcon-Mamba
         #[allow(clippy::too_many_arguments)]
         fn mamba1_selective_scan(

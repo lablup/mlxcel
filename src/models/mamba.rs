@@ -358,7 +358,13 @@ impl MambaBlock {
         // then one Metal kernel walks every timestep with the state in float32
         // registers, for prefill and decode alike. The per-step graph scan
         // below remains for other backends and `MLXCEL_MAMBA1_SCAN_KERNEL=0`.
-        let (y, current_state) = if mlxcel_core::mamba1_scan_kernel_available() {
+        // The CUDA port (issue #1981) is not used here yet: it reproduces the
+        // rounding of Jamba's whole-sequence graph scan, but this graph path
+        // projects one timestep at a time, so switching would change CUDA
+        // output and needs its own validation.
+        let metal = mlxcel_core::hardware::gpu_backend_kind()
+            == mlxcel_core::hardware::GpuBackendKind::Metal;
+        let (y, current_state) = if metal && mlxcel_core::mamba1_scan_kernel_available() {
             let delta_bc = self.x_proj.forward(&x_conv);
             let rank = self.time_step_rank as i32;
             let n = self.state_size as i32;

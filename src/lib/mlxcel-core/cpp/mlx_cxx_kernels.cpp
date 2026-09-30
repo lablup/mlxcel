@@ -1733,15 +1733,128 @@ namespace {
         return holder;
     }
 
-// This kernel's ports, in one place (#1801). Metal only: the Mamba1 selective scan is a Metal JIT kernel.
+    // CUDA port (issue #1981). Same launch shape as the Metal kernel: one warp
+    // per (batch, channel d), lane n owns state[d, n]. It is not a copy of the
+    // Metal numerics, though. The CUDA callers used to run the per-step graph
+    // scan, which rounds every intermediate and the carried state to the
+    // activation dtype, and greedy output must not move when the kernel takes
+    // over. So each step runs the graph's ops in T and in the graph's order:
+    // correctly rounded multiplies and adds that the compiler may not fuse,
+    // MLX's own `Exp` device op, and for y_t the graph's gemv (float products,
+    // `cg::reduce` over the 32 lanes with lanes past N contributing 0, since
+    // gemv's n_per_thread is 1 for K = N < 64, then rounded to T). With
+    // uniform-dtype inputs the result is bit-identical to the graph scan
+    // (`mamba1_scan_parity_tests` checks this on CUDA).
+    static const char* MAMBA1_SCAN_CUDA_HEADER = R"(
+#include "mlx/backend/cuda/device/unary_ops.cuh"
+
+#include <cooperative_groups/reduce.h>
+
+namespace mlx::core::cu {
+// The graph runs each multiply and add as its own kernel, so every product is
+// rounded before it is added. Inlined here, `a * b + c` would be contracted
+// into one fma (nvrtc's default --fmad=true) and round once. The `_rn` forms
+// are the same correctly rounded operations with contraction forbidden.
+template <typename T>
+__device__ __forceinline__ T mamba1_mul(T a, T b) {
+  if constexpr (cuda::std::is_same_v<T, float>) {
+    return __fmul_rn(a, b);
+  } else {
+    return __hmul_rn(a, b);
+  }
+}
+template <typename T>
+__device__ __forceinline__ T mamba1_add(T a, T b) {
+  if constexpr (cuda::std::is_same_v<T, float>) {
+    return __fadd_rn(a, b);
+  } else {
+    return __hadd_rn(a, b);
+  }
+}
+} // namespace mlx::core::cu
+)";
+
+    static const char* MAMBA1_SCAN_CUDA_SOURCE = R"(
+        auto block = cg::this_thread_block();
+        auto warp = cg::tiled_partition<32>(block);
+        const int lane = threadIdx.x;
+        const int d = blockIdx.y * blockDim.y + threadIdx.y;
+        const int b = blockIdx.z;
+        // d is uniform across a warp, so a warp returns whole and the
+        // reduction below never sees a partial warp.
+        if (d >= Dm) {
+            return;
+        }
+        const int L = X_shape[1];
+        const bool active = lane < N;
+
+        T s = static_cast<T>(0.0f);
+        T a = static_cast<T>(0.0f);
+        if (active) {
+            s = state_in[((size_t)b * Dm + d) * N + lane];
+            a = A[d * N + lane];
+        }
+        const T dp = Dp[d];
+
+        for (int t = 0; t < L; ++t) {
+            const size_t row = (size_t)b * L + t;
+            const T dt = DT[row * Dm + d];
+            const T xv = X[row * Dm + d];
+            float contrib = 0.0f;
+            if (active) {
+                // new_state = (delta * x) * B;  dtA = exp(delta * A)
+                const T input = mamba1_mul(mamba1_mul(dt, xv), Bm[row * N + lane]);
+                const T decay = Exp{}(mamba1_mul(dt, a));
+                // state = state * dtA + new_state
+                s = mamba1_add(mamba1_mul(s, decay), input);
+                contrib = static_cast<float>(s) * static_cast<float>(Cm[row * N + lane]);
+            }
+            const float y = cg::reduce(warp, contrib, cg::plus<float>{});
+            if (lane == 0) {
+                // y = (state @ C) + D * x
+                Y[row * Dm + d] = mamba1_add(static_cast<T>(y), mamba1_mul(dp, xv));
+            }
+        }
+        if (active) {
+            state_out[((size_t)b * Dm + d) * N + lane] = s;
+        }
+    )";
+
+    struct Mamba1ScanKernelHolderCuda {
+        std::optional<mlx::core::fast::CustomKernelFunction> kernel;
+        bool initialized = false;
+
+        mlx::core::fast::CustomKernelFunction& get() {
+            if (!initialized) {
+                kernel = mlx::core::fast::cuda_kernel(
+                    "mamba1_selective_scan_cu",
+                    {"X", "DT", "Bm", "Cm", "A", "Dp", "state_in"},
+                    {"Y", "state_out"},
+                    MAMBA1_SCAN_CUDA_SOURCE,
+                    MAMBA1_SCAN_CUDA_HEADER
+                );
+                initialized = true;
+            }
+            return *kernel;
+        }
+    };
+
+    static Mamba1ScanKernelHolderCuda& get_mamba1_scan_kernel_cuda() {
+        static Mamba1ScanKernelHolderCuda holder;
+        return holder;
+    }
+
+// This kernel's ports, in one place (#1801). Metal and CUDA (#1981); the two
+// differ in how they round (see the CUDA source above).
 const mlxcel::KernelPorts& mamba1_scan_ports() {
     static const mlxcel::KernelPorts ports{
         .metal = +[]() -> mlx::core::fast::CustomKernelFunction& {
             return get_mamba1_scan_kernel().get();
         },
-        // No CUDA or HIP port yet (#1814). Written out so that adding one is a
-        // line here rather than a restructure at the call site.
-        .cuda = nullptr,
+        .cuda = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_mamba1_scan_kernel_cuda().get();
+        },
+        // No HIP port yet (#1814).
         .rocm = nullptr,
     };
     return ports;
@@ -1749,17 +1862,44 @@ const mlxcel::KernelPorts& mamba1_scan_ports() {
 }
 
 bool mamba1_scan_kernel_available() {
-#ifdef __APPLE__
     // MLXCEL_MAMBA1_SCAN_KERNEL=0 forces the graph scan (A/B, rollback).
     if (const char* e = std::getenv("MLXCEL_MAMBA1_SCAN_KERNEL")) {
         if (e[0] == '0' && e[1] == '\0') {
             return false;
         }
     }
-    return mlx::core::metal::is_available();
-#else
-    return false;
-#endif
+    return mlxcel::has_kernel_port(mamba1_scan_ports());
+}
+
+bool mamba1_scan_kernel_accepts(
+    const MlxArray& x,
+    const MlxArray& delta,
+    const MlxArray& b,
+    const MlxArray& c,
+    const MlxArray& a,
+    const MlxArray& d
+) {
+    using namespace mlx::core;
+    if (!mamba1_scan_kernel_available()) {
+        return false;
+    }
+    // One lane per state column.
+    if (b.inner.ndim() == 0 || b.inner.shape().back() > 32) {
+        return false;
+    }
+    if (mlxcel::gpu_kernel_backend() != mlxcel::GpuKernelBackend::Cuda) {
+        return true;
+    }
+    auto t = x.inner.dtype();
+    if (!issubdtype(t, floating)) {
+        return false;
+    }
+    for (const MlxArray* other : {&delta, &b, &c, &a, &d}) {
+        if (other->inner.dtype() != t) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void mamba1_selective_scan(
@@ -1781,6 +1921,11 @@ void mamba1_selective_scan(
     int dm = shape[2];
     int n = b.inner.shape().back();
     auto t = x.inner.dtype();
+    // Metal carries the state in float32. CUDA rounds everything, the state
+    // included, to T like the graph scan; the caller's float32 zeros for a
+    // fresh sequence cast exactly, and a carried state is already T.
+    const bool cuda = mlxcel::gpu_kernel_backend() == mlxcel::GpuKernelBackend::Cuda;
+    const Dtype state_t = cuda ? t : float32;
 
     std::vector<std::pair<std::string, mlx::core::fast::TemplateArg>> template_args = {
         {"T", t},
@@ -1792,12 +1937,12 @@ void mamba1_selective_scan(
         astype(delta.inner, t),
         astype(b.inner, t),
         astype(c.inner, t),
-        astype(a.inner, float32),
+        astype(a.inner, state_t),
         astype(d.inner, t),
-        astype(state_in.inner, float32),
+        astype(state_in.inner, state_t),
     };
     std::vector<Shape> output_shapes = {Shape{batch, seq, dm}, Shape{batch, dm, n}};
-    std::vector<Dtype> output_dtypes = {t, float32};
+    std::vector<Dtype> output_dtypes = {t, state_t};
     int rows_per_group = 8;
     int grid_y = ((dm + rows_per_group - 1) / rows_per_group) * rows_per_group;
 

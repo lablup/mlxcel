@@ -23,12 +23,19 @@
 //!    is summation order inside `simd_sum`), for fresh and carried state, a
 //!    single step and several, two state widths, and a channel count that is
 //!    not a multiple of the threadgroup's eight rows.
-//! 2. With bf16 inputs the kernel is at least as close to the f32 reference as
-//!    the graph scan it replaces, which rounds the state to bf16 every step.
+//! 2. With bf16 inputs the Metal kernel is at least as close to the f32
+//!    reference as the graph scan it replaces, which rounds the state to bf16
+//!    every step.
 //!
-//! Metal-only: the kernel JITs through `mx.fast.metal_kernel`, so the tests
-//! return early wherever `mamba1_scan_kernel_available()` is false.
+//! The CUDA port (#1981) instead rounds every step exactly as the graph scan
+//! does, so on CUDA the kernel is compared with MLX's own graph scan and must
+//! match it bit for bit, in f32, f16 and bf16.
+//!
+//! The tests return early wherever `mamba1_scan_kernel_available()` is false
+//! (ROCm, CPU-only builds).
 
+use crate::hardware::{GpuBackendKind, gpu_backend_kind};
+use crate::utils::slice_axis;
 use crate::{MlxArray, UniquePtr, ffi};
 
 fn seeded(len: usize, seed: u64, scale: f32, offset: f32) -> Vec<f32> {
@@ -178,7 +185,10 @@ fn f32_kernel_matches_scalar_reference() {
 
 #[test]
 fn bf16_kernel_is_no_less_accurate_than_the_graph_scan() {
-    if !ffi::mamba1_scan_kernel_available() {
+    // A property of the Metal kernel's float32 state. The CUDA port rounds
+    // like the graph scan by design; `cuda_kernel_is_bit_identical_to_the_graph_scan`
+    // pins that instead.
+    if !ffi::mamba1_scan_kernel_available() || gpu_backend_kind() != GpuBackendKind::Metal {
         return;
     }
     let (batch, seq, dm, n) = (1, 64, 24, 16);
@@ -205,4 +215,140 @@ fn bf16_kernel_is_no_less_accurate_than_the_graph_scan() {
         kernel_err <= graph_err,
         "kernel RMS error {kernel_err} must not exceed the bf16 graph scan's {graph_err}"
     );
+}
+
+/// The per-step graph scan Jamba runs without the kernel
+/// (`JambaMambaMixer::ssm_step`), built from the same MLX ops in the same
+/// order, all inputs in `dtype`. `carried` false passes no state, as a fresh
+/// sequence does.
+fn graph_scan(
+    k: &Case,
+    batch: usize,
+    seq: usize,
+    dm: usize,
+    n: usize,
+    dtype: i32,
+    carried: bool,
+) -> (Vec<f32>, Vec<f32>) {
+    let arr = |v: &[f32], shape: &[i32]| ffi::astype(&ffi::from_slice_f32(v, shape), dtype);
+    let (b, l, d, n_) = (batch as i32, seq as i32, dm as i32, n as i32);
+    let x = arr(&k.x, &[b, l, d]);
+    let delta = arr(&k.dt, &[b, l, d]);
+    let bm = arr(&k.b, &[b, l, n_]);
+    let cm = arr(&k.c, &[b, l, n_]);
+    let a = arr(&k.a, &[d, n_]);
+    let dp = arr(&k.d, &[d]);
+
+    let delta_x = ffi::reshape(&ffi::multiply(&delta, &x), &[b, l, d, 1]);
+    let new_state = ffi::multiply(&delta_x, &ffi::reshape(&bm, &[b, l, 1, n_]));
+    let dt_a = ffi::exp(&ffi::multiply(&ffi::reshape(&delta, &[b, l, d, 1]), &a));
+
+    let mut state = carried.then(|| arr(&k.s0, &[b, d, n_]));
+    let mut ys = Vec::with_capacity(seq);
+    for t in 0..l {
+        let ns_t = ffi::squeeze_axis(&slice_axis(&new_state, 1, t, t + 1), 1);
+        let updated = match state {
+            Some(ref prev) => {
+                let dt_a_t = ffi::squeeze_axis(&slice_axis(&dt_a, 1, t, t + 1), 1);
+                ffi::add(&ffi::multiply(prev, &dt_a_t), &ns_t)
+            }
+            None => ns_t,
+        };
+        let c_t = ffi::reshape(
+            &ffi::squeeze_axis(&slice_axis(&cm, 1, t, t + 1), 1),
+            &[b, n_, 1],
+        );
+        ys.push(ffi::squeeze_axis(&ffi::matmul(&updated, &c_t), -1));
+        state = Some(updated);
+    }
+    let y = crate::ops::stack_owned(&ys, 1);
+    let y = ffi::add(&y, &ffi::multiply(&ffi::reshape(&dp, &[1, 1, d]), &x));
+    (to_vec(&y), to_vec(state.as_ref().expect("seq >= 1")))
+}
+
+/// Issue #1981: the CUDA kernel replaces the per-step graph scan on the
+/// serving path, and greedy output must not move. With uniform-dtype inputs
+/// it has to reproduce the graph scan exactly, output rows and final state.
+#[test]
+fn cuda_kernel_is_bit_identical_to_the_graph_scan() {
+    if !ffi::mamba1_scan_kernel_available() || gpu_backend_kind() != GpuBackendKind::Cuda {
+        return;
+    }
+    let (batch, dm) = (2, 24);
+    for dtype in [
+        crate::dtype::BFLOAT16,
+        crate::dtype::FLOAT16,
+        crate::dtype::FLOAT32,
+    ] {
+        for n in [8, 16] {
+            for seq in [1, 7, 33] {
+                for carried in [false, true] {
+                    let mut k = make_case(batch, seq, dm, n, carried);
+                    // The kernel reads A and the state in the activation
+                    // dtype on CUDA; give the graph the same values.
+                    let round = |v: &mut Vec<f32>| {
+                        let a = ffi::astype(&ffi::from_slice_f32(v, &[v.len() as i32]), dtype);
+                        *v = to_vec(&a);
+                    };
+                    round(&mut k.a);
+                    round(&mut k.s0);
+                    let what = format!("dtype {dtype} n {n} seq {seq} carried {carried}");
+                    let (want_y, want_s) = graph_scan(&k, batch, seq, dm, n, dtype, carried);
+                    let (y, s) = run_kernel(&k, batch, seq, dm, n, dtype);
+                    let diff = |got: &[f32], want: &[f32]| {
+                        got.iter()
+                            .zip(want)
+                            .filter(|(g, w)| g.to_bits() != w.to_bits())
+                            .count()
+                    };
+                    assert_eq!(y.len(), want_y.len(), "{what}: y length");
+                    assert_eq!(
+                        diff(&y, &want_y),
+                        0,
+                        "{what}: y differs from the graph scan"
+                    );
+                    assert_eq!(
+                        diff(&s, &want_s),
+                        0,
+                        "{what}: state differs from the graph scan"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The CUDA kernel serves only inputs it can reproduce exactly; anything else
+/// keeps the graph scan.
+#[test]
+fn cuda_kernel_declines_mixed_dtype_inputs() {
+    if !ffi::mamba1_scan_kernel_available() || gpu_backend_kind() != GpuBackendKind::Cuda {
+        return;
+    }
+    let bf = |shape: &[i32]| {
+        ffi::astype(
+            &ffi::from_slice_f32(&vec![0.5; shape.iter().product::<i32>() as usize], shape),
+            crate::dtype::BFLOAT16,
+        )
+    };
+    let (x, dt, b, c, a, d) = (
+        bf(&[1, 4, 8]),
+        bf(&[1, 4, 8]),
+        bf(&[1, 4, 16]),
+        bf(&[1, 4, 16]),
+        bf(&[8, 16]),
+        bf(&[8]),
+    );
+    assert!(ffi::mamba1_scan_kernel_accepts(&x, &dt, &b, &c, &a, &d));
+    let a32 = ffi::astype(&a, crate::dtype::FLOAT32);
+    assert!(!ffi::mamba1_scan_kernel_accepts(&x, &dt, &b, &c, &a32, &d));
+    let wide = bf(&[1, 4, 64]);
+    assert!(!ffi::mamba1_scan_kernel_accepts(
+        &x,
+        &dt,
+        &wide,
+        &wide,
+        &bf(&[8, 64]),
+        &d
+    ));
 }

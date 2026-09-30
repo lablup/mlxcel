@@ -492,6 +492,14 @@ impl JambaAttention {
     }
 }
 
+// Timesteps walked by the per-step graph scan on this thread (tests only).
+// Issue #1981: on a backend with a fused-scan port the prefill must not take
+// that loop, which issues several small ops per timestep per Mamba layer.
+#[cfg(test)]
+thread_local! {
+    pub(super) static GRAPH_SCAN_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 // Jamba Mamba Mixer.
 #[allow(dead_code)]
 struct JambaMambaMixer {
@@ -553,11 +561,13 @@ impl JambaMambaMixer {
         // delta = softplus(dt_proj(delta))
         let delta = mlxcel_core::softplus(&self.dt_proj.forward(&delta));
 
-        // Fused selective scan (issue #2005): one Metal kernel walks every
-        // timestep with the state in float32 registers, for prefill and decode
-        // alike so the two stay numerically consistent. The graph scan below
-        // remains for other backends and `MLXCEL_MAMBA1_SCAN_KERNEL=0`.
-        if mlxcel_core::mamba1_scan_kernel_available() {
+        // Fused selective scan: one kernel walks every timestep of the layer,
+        // for prefill and decode alike so the two stay numerically consistent.
+        // On Metal (issue #2005) it carries the state in float32 registers; on
+        // CUDA (issue #1981) it rounds each step exactly as the graph scan
+        // below does, so output is unchanged there. The graph scan remains for
+        // ROCm, mixed-dtype inputs and `MLXCEL_MAMBA1_SCAN_KERNEL=0`.
+        if mlxcel_core::mamba1_scan_kernel_accepts(x, &delta, &b, &c, a, &self.d_param) {
             let zeros;
             let state_in = match state {
                 Some(s) => s,
@@ -588,6 +598,9 @@ impl JambaMambaMixer {
             );
             return (y, state_out);
         }
+
+        #[cfg(test)]
+        GRAPH_SCAN_STEPS.with(|n| n.set(n.get() + seq_len as usize));
 
         // new_state = (delta * x)[..., None] * B[..., None, :]
         let delta_x = mlxcel_core::multiply(&delta, x);
