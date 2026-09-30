@@ -1,0 +1,180 @@
+{
+  "name": "Meta-Llama-3.1-8B-Instruct-4bit_t0.7",
+  "model_type": "llama",
+  "temperature": 0.7,
+  "clock": "boottime",
+  "prompt_tokens": 512,
+  "generated_tokens": 128,
+  "profiled_decode_tok_s": 39.6,
+  "profiled_prefill_tok_s": 1070.44,
+  "plain_decode_tok_s": null,
+  "plain_prefill_tok_s": null,
+  "profiler_decode_slowdown_pct": null,
+  "decode_dispatches": 65978,
+  "dispatches_per_token": 515.5,
+  "decode_wall_ms": 3232.651,
+  "decode_gpu_sum_ms": 2997.054,
+  "decode_gpu_busy_ms": 2997.054,
+  "gpu_ms_per_token": 23.4145,
+  "host_gap_ms_per_token": 1.8406,
+  "host_gap_pct_of_wall": 7.29,
+  "plain_wall_ms_per_token": null,
+  "plain_host_gap_ms_per_token_est": null,
+  "checks": {
+    "kernels_straddling_decode_start": 0,
+    "idle_gap_before_first_decode_dispatch_us": 29615.3,
+    "last_dispatch_before_decode": "void mlx::core::rocm::binary_ss<mlx::core::rocm::Subtract, unsigned int, unsigned int, unsigned int, 4>(unsigned int con"
+  },
+  "top_kernels": [
+    {
+      "kernel": "void mlx::core::rocm::qmv_wide_kernel<__half, __half, 64, 4>(__half const*, unsigned char const*, __half const*, __half const*, __half*, int, int, int, bool)",
+      "class": "qmv",
+      "calls_per_token": 159.74,
+      "share_pct": 94.7
+    },
+    {
+      "kernel": "void mlx::core::rocm::kernel_sdpav_1pass<__half, false, 128>(__half const*, __half const*, __half const*, __half*, __half const*, mlx::core::rocm::AttnParams)",
+      "class": "sdpa",
+      "calls_per_token": 31.75,
+      "share_pct": 1.97
+    },
+    {
+      "kernel": "void mlx::core::rocm::rms_norm_kernel<__half, 256, 4>(__half const*, __half const*, __half*, float, unsigned int, long)",
+      "class": "rms_norm",
+      "calls_per_token": 64.49,
+      "share_pct": 1.15
+    },
+    {
+      "kernel": "void mlx::core::rocm::binary_vv<mlx::core::rocm::Add, __half, __half, unsigned int, 4>(__half const*, __half const*, __half*, unsigned int)",
+      "class": "binary",
+      "calls_per_token": 63.5,
+      "share_pct": 0.55
+    },
+    {
+      "kernel": "void mlx::core::rocm::copy_gg_byval<__half, __half, long>(__half const*, __half*, long, mlx::core::rocm::hip_array<int, 10>, mlx::core::rocm::hip_array<long, 10>, mlx::core::rocm::hip_array<long, 10>, int)",
+      "class": "copy",
+      "calls_per_token": 64.5,
+      "share_pct": 0.5
+    },
+    {
+      "kernel": "void mlx::core::rocm::rope_single_freqs_1d<__half, false, true>(__half const*, __half*, int const*, float const*, float, long, unsigned int, unsigned int, long)",
+      "class": "rope",
+      "calls_per_token": 63.5,
+      "share_pct": 0.43
+    },
+    {
+      "kernel": "void mlx::core::rocm::Cf2ISigmoidADf2IBroadcastACEf2IBroadcastCAFf2IMultiplyDEGf2IBroadcastFBHf2IBroadcastBFIf2OMultiplyGH_VV_f2f2_6142509188972423790_contiguous<unsigned int, 16>(__half const*, __half const*, __half*, unsigned int)",
+      "class": "compiled",
+      "calls_per_token": 31.75,
+      "share_pct": 0.3
+    },
+    {
+      "kernel": "void mlx::core::rocm::contiguous_scan<float, float, mlx::core::rocm::Sum, 4, false, false>(float const*, float*, int)",
+      "class": "scan",
+      "calls_per_token": 0.99,
+      "share_pct": 0.11
+    },
+    {
+      "kernel": "void mlx::core::rocm::unary_v<mlx::core::rocm::Exp, float, float, unsigned int, 4>(float const*, float*, unsigned int)",
+      "class": "unary",
+      "calls_per_token": 0.99,
+      "share_pct": 0.03
+    },
+    {
+      "kernel": "void mlx::core::rocm::ternary_g<mlx::core::rocm::Select, float, long, 4>(bool const*, float const*, float const*, float*, long, mlx::core::rocm::hip_array<int, 10>, mlx::core::rocm::hip_array<long, 10>, mlx::core::rocm::hip_array<long, 10>, mlx::core::rocm::hip_array<long, 10>, int)",
+      "class": "ternary",
+      "calls_per_token": 0.99,
+      "share_pct": 0.02
+    }
+  ],
+  "class_share_pct": {
+    "qmv": 94.7,
+    "sdpa": 1.97,
+    "rms_norm": 1.15,
+    "binary": 0.64,
+    "copy": 0.55,
+    "rope": 0.43,
+    "compiled": 0.3,
+    "scan": 0.11,
+    "gather_scatter": 0.04,
+    "reduce": 0.03,
+    "unary": 0.03,
+    "ternary": 0.02,
+    "random": 0.02,
+    "sort": 0.01,
+    "dequantize": 0.01
+  },
+  "role_share_pct": {
+    "unattributed": 97.13,
+    "add_rms_join": 0.85,
+    "add_rms_join_post_attn": 0.83,
+    "rope_append": 0.82,
+    "sampler_tail": 0.37,
+    "moe_expert_gemv": 0.0,
+    "moe_activation": 0.0,
+    "moe_weighted_sum": 0.0,
+    "moe_gather_indices": 0.0,
+    "ssm_step": 0.0,
+    "paged_attention": 0.0
+  },
+  "role_dispatches_per_token": {
+    "unattributed": 229.2,
+    "rope_append": 127.5,
+    "add_rms_join_post_attn": 63.5,
+    "add_rms_join": 63.5,
+    "sampler_tail": 31.8,
+    "moe_expert_gemv": 0.0,
+    "moe_activation": 0.0,
+    "moe_weighted_sum": 0.0,
+    "moe_gather_indices": 0.0,
+    "ssm_step": 0.0,
+    "paged_attention": 0.0
+  },
+  "port_units": {
+    "2063": {
+      "port": "fused_add_rms_norm + fused_rope_qk_append",
+      "fallback_share_pct": 1.65,
+      "fallback_dispatches_per_token": 191.0,
+      "reached_default_share_pct": 0.0,
+      "reached_default_dispatches_per_token": 0.0,
+      "reached_optin_share_pct": 0.83,
+      "note": "both paths ship off (FUSED_ADD_RMSNORM_DEFAULT / FUSED_ROPE_APPEND_DEFAULT false); only the post-attention join calls the fused norm; rope_scaling builds a frequency table, which the RoPE kernel cannot take"
+    },
+    "2064": {
+      "port": "samplers (gumbel_max_sample, rejection_sample)",
+      "fallback_share_pct": 0.37,
+      "fallback_dispatches_per_token": 31.8,
+      "reached_default_share_pct": 0.37,
+      "reached_default_dispatches_per_token": 31.8,
+      "reached_optin_share_pct": 0.37,
+      "note": "sampled run: the draw is the fallback chain"
+    },
+    "2065": {
+      "port": "fused MoE decode (moe_gateup, moe_down)",
+      "fallback_share_pct": 0.0,
+      "fallback_dispatches_per_token": 0.0,
+      "reached_default_share_pct": 0.0,
+      "reached_default_dispatches_per_token": 0.0,
+      "reached_optin_share_pct": 0.0,
+      "note": "llama does not call forward_fused_kernel"
+    },
+    "2067": {
+      "port": "SSM update (ssm_update_kernel)",
+      "fallback_share_pct": 0.0,
+      "fallback_dispatches_per_token": 0.0,
+      "reached_default_share_pct": 0.0,
+      "reached_default_dispatches_per_token": 0.0,
+      "reached_optin_share_pct": 0.0,
+      "note": "no Mamba2 layer"
+    },
+    "2068": {
+      "port": "paged attention (v1, v2, merge)",
+      "fallback_share_pct": 0.0,
+      "fallback_dispatches_per_token": 0.0,
+      "reached_default_share_pct": 0.0,
+      "reached_default_dispatches_per_token": 0.0,
+      "reached_optin_share_pct": 0.0,
+      "note": "the bench decodes into a dense KVCache; the paged path is not taken"
+    }
+  }
+}

@@ -1,0 +1,396 @@
+== Meta-Llama-3.1-8B-Instruct-4bit_greedy plain
+2026-09-30T17:41:01+0900 waiting for 90s of idle GPU and no compiler
+2026-09-30T17:41:03+0900 idle streak reset after 1s: gpu=[3292996:mlxcel-bench-de] compilers=[]
+2026-09-30T17:41:48+0900 idle streak reset after 10s: gpu=[3320768:mlxcel-bench-de] compilers=[]
+2026-09-30T17:42:34+0900 idle streak reset after 10s: gpu=[3349635:mlxcel-bench-de] compilers=[]
+2026-09-30T17:43:18+0900 idle streak reset after 10s: gpu=[3377917:mlxcel-bench-de] compilers=[]
+2026-09-30T17:44:04+0900 idle streak reset after 11s: gpu=[3406710:mlxcel-bench-de] compilers=[]
+2026-09-30T17:44:51+0900 idle streak reset after 11s: gpu=[3436308:mlxcel-bench-de] compilers=[]
+2026-09-30T17:45:31+0900 idle streak reset after 10s: gpu=[3461649:mlxcel-bench-de] compilers=[]
+2026-09-30T17:46:14+0900 idle streak reset after 11s: gpu=[3488911:mlxcel-bench-de] compilers=[]
+2026-09-30T17:47:00+0900 idle streak reset after 12s: gpu=[] compilers=[3518044:cargo]
+2026-09-30T17:58:15+0900 idle streak reset after 19s: gpu=[3935133:mlxcel-bench-de] compilers=[]
+2026-09-30T17:58:37+0900 idle streak reset after 11s: gpu=[3948181:mlxcel-bench-de] compilers=[]
+2026-09-30T17:58:59+0900 idle streak reset after 11s: gpu=[3961800:mlxcel-bench-de] compilers=[]
+2026-09-30T17:59:21+0900 idle streak reset after 11s: gpu=[3976292:mlxcel-bench-de] compilers=[]
+2026-09-30T17:59:42+0900 idle streak reset after 11s: gpu=[3989594:mlxcel-bench-de] compilers=[]
+2026-09-30T18:00:04+0900 idle streak reset after 11s: gpu=[4002750:mlxcel-bench-de] compilers=[]
+2026-09-30T18:00:25+0900 idle streak reset after 10s: gpu=[4016457:mlxcel-bench-de] compilers=[]
+2026-09-30T18:00:47+0900 idle streak reset after 10s: gpu=[4030174:mlxcel-bench-de] compilers=[]
+2026-09-30T18:01:10+0900 idle streak reset after 12s: gpu=[4043876:mlxcel-bench-de] compilers=[]
+2026-09-30T18:01:55+0900 idle streak reset after 10s: gpu=[4073428:mlxcel-bench-de] compilers=[]
+2026-09-30T18:02:35+0900 idle streak reset after 11s: gpu=[4098431:mlxcel-bench-de] compilers=[]
+2026-09-30T18:02:56+0900 idle streak reset after 10s: gpu=[4112360:mlxcel-bench-de] compilers=[]
+2026-09-30T18:03:20+0900 idle streak reset after 11s: gpu=[4127198:mlxcel-bench-de] compilers=[]
+2026-09-30T18:03:43+0900 idle streak reset after 11s: gpu=[4141078:mlxcel-bench-de] compilers=[]
+2026-09-30T18:04:04+0900 idle streak reset after 11s: gpu=[4155838:mlxcel-bench-de] compilers=[]
+2026-09-30T18:04:26+0900 idle streak reset after 10s: gpu=[4169702:mlxcel-bench-de] compilers=[]
+2026-09-30T18:04:49+0900 idle streak reset after 11s: gpu=[4184084:mlxcel-bench-de] compilers=[]
+2026-09-30T18:05:11+0900 idle streak reset after 10s: gpu=[4524:mlxcel-bench-de] compilers=[]
+2026-09-30T18:05:34+0900 idle streak reset after 11s: gpu=[18514:mlxcel-bench-de] compilers=[]
+2026-09-30T18:05:56+0900 idle streak reset after 10s: gpu=[33064:mlxcel-bench-de] compilers=[]
+2026-09-30T18:06:55+0900 idle streak reset after 36s: gpu=[70252:mlxcel-bench-de] compilers=[]
+2026-09-30T18:07:17+0900 idle streak reset after 10s: gpu=[84344:mlxcel-bench-de] compilers=[]
+2026-09-30T18:07:39+0900 idle streak reset after 11s: gpu=[98466:mlxcel-bench-de] compilers=[]
+2026-09-30T18:08:00+0900 idle streak reset after 10s: gpu=[111681:mlxcel-bench-de] compilers=[]
+2026-09-30T18:08:22+0900 idle streak reset after 10s: gpu=[125819:mlxcel-bench-de] compilers=[]
+2026-09-30T18:08:44+0900 idle streak reset after 10s: gpu=[139951:mlxcel-bench-de] compilers=[]
+2026-09-30T18:09:07+0900 idle streak reset after 11s: gpu=[154265:mlxcel-bench-de] compilers=[]
+2026-09-30T18:09:28+0900 idle streak reset after 10s: gpu=[168248:mlxcel-bench-de] compilers=[]
+2026-09-30T18:09:50+0900 idle streak reset after 10s: gpu=[182367:mlxcel-bench-de] compilers=[]
+2026-09-30T18:10:13+0900 idle streak reset after 11s: gpu=[196536:mlxcel-bench-de] compilers=[]
+2026-09-30T18:10:35+0900 idle streak reset after 11s: gpu=[211637:mlxcel-bench-de] compilers=[]
+2026-09-30T18:10:58+0900 idle streak reset after 11s: gpu=[226794:mlxcel-bench-de] compilers=[]
+2026-09-30T18:11:20+0900 idle streak reset after 10s: gpu=[241001:mlxcel-bench-de] compilers=[]
+2026-09-30T18:12:20+0900 idle streak reset after 36s: gpu=[279121:mlxcel] compilers=[]
+2026-09-30T18:12:45+0900 idle streak reset after 11s: gpu=[295124:mlxcel-bench-de] compilers=[]
+2026-09-30T18:13:07+0900 idle streak reset after 10s: gpu=[308966:mlxcel] compilers=[]
+2026-09-30T18:13:30+0900 idle streak reset after 11s: gpu=[323893:mlxcel] compilers=[]
+2026-09-30T18:13:53+0900 idle streak reset after 11s: gpu=[338559:mlxcel] compilers=[]
+2026-09-30T18:14:16+0900 idle streak reset after 11s: gpu=[353825:mlxcel] compilers=[]
+2026-09-30T18:14:40+0900 idle streak reset after 11s: gpu=[377038:mlxcel] compilers=[]
+2026-09-30T18:15:03+0900 idle streak reset after 10s: gpu=[404143:mlxcel] compilers=[]
+2026-09-30T18:15:27+0900 idle streak reset after 10s: gpu=[432193:mlxcel] compilers=[]
+2026-09-30T18:15:49+0900 idle streak reset after 11s: gpu=[447198:mlxcel] compilers=[]
+2026-09-30T18:16:13+0900 idle streak reset after 11s: gpu=[462265:?] compilers=[]
+2026-09-30T18:16:35+0900 idle streak reset after 10s: gpu=[476239:mlxcel] compilers=[]
+2026-09-30T18:16:58+0900 idle streak reset after 11s: gpu=[490996:mlxcel] compilers=[]
+2026-09-30T18:17:20+0900 idle streak reset after 10s: gpu=[505312:mlxcel] compilers=[]
+2026-09-30T18:17:44+0900 idle streak reset after 10s: gpu=[520633:mlxcel] compilers=[]
+2026-09-30T18:18:06+0900 idle streak reset after 10s: gpu=[535163:mlxcel] compilers=[]
+2026-09-30T18:18:30+0900 idle streak reset after 10s: gpu=[550738:mlxcel] compilers=[]
+2026-09-30T18:18:54+0900 idle streak reset after 11s: gpu=[567404:mlxcel-bench-de] compilers=[]
+2026-09-30T18:19:17+0900 idle streak reset after 10s: gpu=[581810:mlxcel] compilers=[]
+2026-09-30T18:19:40+0900 idle streak reset after 10s: gpu=[597299:mlxcel] compilers=[]
+2026-09-30T18:20:04+0900 idle streak reset after 10s: gpu=[612787:mlxcel] compilers=[]
+2026-09-30T18:21:46+0900 idle streak reset after 64s: gpu=[678718:mlxcel] compilers=[]
+2026-09-30T18:22:10+0900 idle streak reset after 11s: gpu=[694166:mlxcel] compilers=[]
+2026-09-30T18:22:33+0900 idle streak reset after 11s: gpu=[709598:mlxcel] compilers=[]
+2026-09-30T18:22:57+0900 idle streak reset after 11s: gpu=[724238:?] compilers=[]
+2026-09-30T18:23:19+0900 idle streak reset after 10s: gpu=[739325:mlxcel] compilers=[]
+2026-09-30T18:23:45+0900 idle streak reset after 12s: gpu=[755854:mlxcel-bench-de] compilers=[]
+2026-09-30T18:24:58+0900 idle streak reset after 46s: gpu=[] compilers=[802788:cargo]
+2026-09-30T18:29:01+0900 idle streak reset after 10s: gpu=[962091:rocminfo] compilers=[962050:cargo]
+2026-09-30T18:29:37+0900 idle streak reset after 1s: gpu=[] compilers=[984576:cargo]
+2026-09-30T18:36:35+0900 idle streak reset after 36s: gpu=[] compilers=[1246167:cargo]
+2026-09-30T18:47:26+0900 idle streak reset after 53s: gpu=[1660523:rocminfo] compilers=[1660484:cargo]
+2026-09-30T18:54:27+0900 idle streak reset after 53s: gpu=[] compilers=[1935991:cargo]
+2026-09-30T18:54:43+0900 idle streak reset after 10s: gpu=[1945971:rocm_inflight_b] compilers=[1945068:cargo]
+2026-09-30T18:54:50+0900 idle streak reset after 4s: gpu=[1950516:rocm_inflight_b] compilers=[]
+2026-09-30T18:55:27+0900 idle streak reset after 22s: gpu=[1973989:rocm_inflight_b] compilers=[1973929:cargo]
+2026-09-30T18:56:54+0900 idle streak reset after 56s: gpu=[] compilers=[2028086:cargo]
+2026-09-30T19:06:57+0900 idle streak reset after 27s: gpu=[2397046:mlxcel] compilers=[]
+2026-09-30T19:07:16+0900 idle streak reset after 4s: gpu=[] compilers=[2410732:cargo]
+2026-09-30T19:08:27+0900 idle streak reset after 11s: gpu=[2455665:mlxcel] compilers=[]
+2026-09-30T19:08:49+0900 idle streak reset after 10s: gpu=[2470457:mlxcel] compilers=[]
+2026-09-30T19:09:37+0900 idle streak reset after 11s: gpu=[2501066:mlxcel] compilers=[]
+2026-09-30T19:10:25+0900 idle streak reset after 11s: gpu=[2531600:mlxcel] compilers=[]
+2026-09-30T19:10:56+0900 idle streak reset after 12s: gpu=[2552023:mlxcel-bench-de] compilers=[]
+2026-09-30T19:11:17+0900 idle streak reset after 10s: gpu=[2566474:mlxcel] compilers=[]
+2026-09-30T19:12:02+0900 idle streak reset after 11s: gpu=[2595551:mlxcel] compilers=[]
+2026-09-30T19:12:48+0900 idle streak reset after 10s: gpu=[2625290:mlxcel] compilers=[]
+2026-09-30T19:13:21+0900 idle streak reset after 12s: gpu=[2645538:mlxcel-bench-de] compilers=[]
+2026-09-30T19:13:42+0900 idle streak reset after 10s: gpu=[2659792:mlxcel] compilers=[]
+2026-09-30T19:14:46+0900 idle streak reset after 11s: gpu=[2700493:mlxcel] compilers=[]
+2026-09-30T19:16:42+0900 idle streak reset after 50s: gpu=[] compilers=[2772984:cargo]
+2026-09-30T19:19:20+0900 idle streak reset after 1s: gpu=[] compilers=[2876056:cargo,2877134:hipcc,2877135:hipcc,2877136:hipcc,2877140:hipcc,2877150:hipcc,2877151:hipcc,2877152:hipcc,2877160:hipcc,2877167:clang++,2877168:clang++,2877169:clang++,2877170:clang++,2877172:clang++,2877175:clang++,2877176:clang++,2877178:clang++,2877179:clang-23,2877180:clang-23,2877181:clang-23,2877182:clang-23,2877183:clang-23,2877184:clang-23,2877185:clang-23,2877186:clang-23]
+2026-09-30T19:36:18+0900 idle for 90s: kfd proc empty and no compiler in every 1 Hz sample
+2026-09-30T19:36:18+0900 attempt 1/5: start: target/release/mlxcel-bench-decode -m models/mlx/Meta-Llama-3.1-8B-Instruct-4bit -p profile -n 128 --warmup-tokens 20 --ignore-eos --prompt-tokens 512 --temperature 0 --top-p 1.0
+2026-09-30T19:36:18+0900 sample 1: clean gpu=[3506769:mlxcel-bench-de]
+2026-09-30T19:36:20+0900 sample 2: clean gpu=[3506769:mlxcel-bench-de]
+2026-09-30T19:36:21+0900 sample 3: clean gpu=[3506769:mlxcel-bench-de]
+2026-09-30T19:36:23+0900 sample 4: clean gpu=[3506769:mlxcel-bench-de]
+2026-09-30T19:36:24+0900 sample 5: clean gpu=[3506769:mlxcel-bench-de]
+2026-09-30T19:36:26+0900 sample 6: clean gpu=[3506769:mlxcel-bench-de]
+2026-09-30T19:36:27+0900 sample 7: clean gpu=[3506769:mlxcel-bench-de]
+2026-09-30T19:36:29+0900 sample 8: clean gpu=[3506769:mlxcel-bench-de]
+2026-09-30T19:36:30+0900 monitor: 8 samples
+2026-09-30T19:36:30+0900 attempt 1: CLEAN, exit 0
+== Meta-Llama-3.1-8B-Instruct-4bit_greedy profiled
+2026-09-30T19:36:30+0900 waiting for 90s of idle GPU and no compiler
+2026-09-30T19:38:39+0900 idle for 90s: kfd proc empty and no compiler in every 1 Hz sample
+2026-09-30T19:38:39+0900 attempt 1/5: start: /usr/bin/rocprofv3 --kernel-trace --hip-graph-trace --stats -f csv -d <trace-dir>/Meta-Llama-3.1-8B-Instruct-4bit_greedy -o Meta-Llama-3.1-8B-Instruct-4bit_greedy -- target/release/mlxcel-bench-decode -m models/mlx/Meta-Llama-3.1-8B-Instruct-4bit -p profile -n 128 --warmup-tokens 20 --ignore-eos --prompt-tokens 512 --temperature 0 --top-p 1.0
+2026-09-30T19:38:40+0900 sample 1: clean gpu=[3594851:mlxcel-bench-de]
+2026-09-30T19:38:41+0900 sample 2: clean gpu=[3594851:mlxcel-bench-de]
+2026-09-30T19:38:43+0900 sample 3: clean gpu=[3594851:mlxcel-bench-de]
+2026-09-30T19:38:44+0900 sample 4: clean gpu=[3594851:mlxcel-bench-de]
+2026-09-30T19:38:46+0900 sample 5: clean gpu=[3594851:mlxcel-bench-de]
+2026-09-30T19:38:47+0900 monitor: 5 samples
+2026-09-30T19:38:47+0900 attempt 1: CLEAN, exit 0
+== Qwen3-30B-A3B-4bit_greedy plain
+2026-09-30T19:38:47+0900 waiting for 90s of idle GPU and no compiler
+2026-09-30T19:40:56+0900 idle for 90s: kfd proc empty and no compiler in every 1 Hz sample
+2026-09-30T19:40:56+0900 attempt 1/5: start: target/release/mlxcel-bench-decode -m models/mlx/Qwen3-30B-A3B-4bit -p profile -n 128 --warmup-tokens 20 --ignore-eos --prompt-tokens 512 --temperature 0 --top-p 1.0
+2026-09-30T19:40:56+0900 sample 1: clean gpu=[3679867:mlxcel-bench-de]
+2026-09-30T19:40:58+0900 sample 2: clean gpu=[3679867:mlxcel-bench-de]
+2026-09-30T19:40:59+0900 sample 3: clean gpu=[3679867:mlxcel-bench-de]
+2026-09-30T19:41:01+0900 sample 4: clean gpu=[3679867:mlxcel-bench-de]
+2026-09-30T19:41:02+0900 sample 5: clean gpu=[3679867:mlxcel-bench-de]
+2026-09-30T19:41:04+0900 sample 6: clean gpu=[3679867:mlxcel-bench-de]
+2026-09-30T19:41:05+0900 sample 7: clean gpu=[3679867:mlxcel-bench-de]
+2026-09-30T19:41:06+0900 sample 8: clean gpu=[3679867:mlxcel-bench-de]
+2026-09-30T19:41:08+0900 sample 9: clean gpu=[3679867:mlxcel-bench-de]
+2026-09-30T19:41:09+0900 sample 10: clean gpu=[3679867:mlxcel-bench-de]
+2026-09-30T19:41:11+0900 sample 11: clean gpu=[3679867:mlxcel-bench-de]
+2026-09-30T19:41:12+0900 sample 12: clean gpu=[3679867:mlxcel-bench-de]
+2026-09-30T19:41:14+0900 sample 13: clean gpu=[3679867:mlxcel-bench-de]
+2026-09-30T19:41:15+0900 sample 14: clean gpu=[3679867:mlxcel-bench-de]
+2026-09-30T19:41:17+0900 sample 15: clean gpu=[3679867:mlxcel-bench-de]
+2026-09-30T19:41:18+0900 monitor: 15 samples
+2026-09-30T19:41:18+0900 attempt 1: CLEAN, exit 0
+== Qwen3-30B-A3B-4bit_greedy profiled
+2026-09-30T19:41:18+0900 waiting for 90s of idle GPU and no compiler
+2026-09-30T19:43:28+0900 idle for 90s: kfd proc empty and no compiler in every 1 Hz sample
+2026-09-30T19:43:28+0900 attempt 1/5: start: /usr/bin/rocprofv3 --kernel-trace --hip-graph-trace --stats -f csv -d <trace-dir>/Qwen3-30B-A3B-4bit_greedy -o Qwen3-30B-A3B-4bit_greedy -- target/release/mlxcel-bench-decode -m models/mlx/Qwen3-30B-A3B-4bit -p profile -n 128 --warmup-tokens 20 --ignore-eos --prompt-tokens 512 --temperature 0 --top-p 1.0
+2026-09-30T19:43:28+0900 sample 1: clean gpu=[3776000:mlxcel-bench-de]
+2026-09-30T19:43:30+0900 sample 2: clean gpu=[3776000:mlxcel-bench-de]
+2026-09-30T19:43:31+0900 sample 3: clean gpu=[3776000:mlxcel-bench-de]
+2026-09-30T19:43:33+0900 sample 4: clean gpu=[3776000:mlxcel-bench-de]
+2026-09-30T19:43:34+0900 sample 5: clean gpu=[3776000:mlxcel-bench-de]
+2026-09-30T19:43:36+0900 sample 6: clean gpu=[3776000:mlxcel-bench-de]
+2026-09-30T19:43:37+0900 sample 7: clean gpu=[3776000:mlxcel-bench-de]
+2026-09-30T19:43:39+0900 sample 8: clean gpu=[3776000:mlxcel-bench-de]
+2026-09-30T19:43:40+0900 sample 9: clean gpu=[3776000:mlxcel-bench-de]
+2026-09-30T19:43:42+0900 sample 10: clean gpu=[3776000:mlxcel-bench-de]
+2026-09-30T19:43:43+0900 monitor: 10 samples
+2026-09-30T19:43:43+0900 attempt 1: CLEAN, exit 0
+== granite-4.0-h-tiny-4bit_greedy plain
+2026-09-30T19:43:43+0900 waiting for 90s of idle GPU and no compiler
+2026-09-30T19:45:53+0900 idle for 90s: kfd proc empty and no compiler in every 1 Hz sample
+2026-09-30T19:45:53+0900 attempt 1/5: start: target/release/mlxcel-bench-decode -m models/mlx/granite-4.0-h-tiny-4bit -p profile -n 128 --warmup-tokens 20 --ignore-eos --prompt-tokens 512 --temperature 0 --top-p 1.0
+2026-09-30T19:45:54+0900 sample 1: clean gpu=[3867773:mlxcel-bench-de]
+2026-09-30T19:45:55+0900 sample 2: clean gpu=[3867773:mlxcel-bench-de]
+2026-09-30T19:45:56+0900 sample 3: clean gpu=[3867773:mlxcel-bench-de]
+2026-09-30T19:45:58+0900 sample 4: clean gpu=[3867773:mlxcel-bench-de]
+2026-09-30T19:45:59+0900 sample 5: clean gpu=[3867773:mlxcel-bench-de]
+2026-09-30T19:46:01+0900 sample 6: clean gpu=[3867773:mlxcel-bench-de]
+2026-09-30T19:46:02+0900 monitor: 6 samples
+2026-09-30T19:46:02+0900 attempt 1: CLEAN, exit 0
+== granite-4.0-h-tiny-4bit_greedy profiled
+2026-09-30T19:46:02+0900 waiting for 90s of idle GPU and no compiler
+2026-09-30T19:48:09+0900 idle streak reset after 88s: gpu=[] compilers=[3952605:cargo]
+2026-09-30T19:57:49+0900 idle streak reset after 11s: gpu=[115642:mlxcel] compilers=[]
+2026-09-30T19:58:14+0900 idle streak reset after 11s: gpu=[131217:mlxcel] compilers=[]
+2026-09-30T19:58:37+0900 idle streak reset after 11s: gpu=[146038:mlxcel] compilers=[]
+2026-09-30T19:59:00+0900 idle streak reset after 11s: gpu=[160622:mlxcel] compilers=[]
+2026-09-30T19:59:35+0900 idle streak reset after 10s: gpu=[183308:mlxcel] compilers=[]
+2026-09-30T20:00:00+0900 idle streak reset after 11s: gpu=[199352:mlxcel] compilers=[]
+2026-09-30T20:00:23+0900 idle streak reset after 11s: gpu=[213916:mlxcel] compilers=[]
+2026-09-30T20:00:45+0900 idle streak reset after 10s: gpu=[228706:mlxcel] compilers=[]
+2026-09-30T20:01:10+0900 idle streak reset after 11s: gpu=[244306:mlxcel] compilers=[]
+2026-09-30T20:01:35+0900 idle streak reset after 12s: gpu=[260114:?] compilers=[]
+2026-09-30T20:01:57+0900 idle streak reset after 10s: gpu=[275069:mlxcel] compilers=[]
+2026-09-30T20:02:21+0900 idle streak reset after 11s: gpu=[290015:mlxcel] compilers=[]
+2026-09-30T20:02:44+0900 idle streak reset after 11s: gpu=[305416:mlxcel] compilers=[]
+2026-09-30T20:03:41+0900 idle streak reset after 33s: gpu=[] compilers=[341168:cargo]
+2026-09-30T20:28:31+0900 idle streak reset after 6s: gpu=[1286793:logit_trace] compilers=[]
+2026-09-30T20:59:38+0900 idle streak reset after 16s: gpu=[2549366:mlxcel_core-480] compilers=[]
+2026-09-30T21:03:05+0900 idle for 90s: kfd proc empty and no compiler in every 1 Hz sample
+2026-09-30T21:03:05+0900 attempt 1/5: start: /usr/bin/rocprofv3 --kernel-trace --hip-graph-trace --stats -f csv -d <trace-dir>/granite-4.0-h-tiny-4bit_greedy -o granite-4.0-h-tiny-4bit_greedy -- target/release/mlxcel-bench-decode -m models/mlx/granite-4.0-h-tiny-4bit -p profile -n 128 --warmup-tokens 20 --ignore-eos --prompt-tokens 512 --temperature 0 --top-p 1.0
+2026-09-30T21:03:05+0900 sample 1: clean gpu=[2679179:mlxcel-bench-de]
+2026-09-30T21:03:07+0900 sample 2: clean gpu=[2679179:mlxcel-bench-de]
+2026-09-30T21:03:08+0900 sample 3: clean gpu=[2679179:mlxcel-bench-de]
+2026-09-30T21:03:10+0900 sample 4: clean gpu=[2679179:mlxcel-bench-de,2682448:mlxcel-bench-de]
+2026-09-30T21:03:11+0900 sample 5: CONTENDED foreign_gpu=[2682448:mlxcel-bench-de] compilers=[]
+2026-09-30T21:03:13+0900 sample 6: clean gpu=[2679179:mlxcel-bench-de]
+2026-09-30T21:03:14+0900 monitor: 6 samples
+2026-09-30T21:03:14+0900 attempt 1: REJECTED (contended), exit 0; rerunning
+2026-09-30T21:03:14+0900 waiting for 90s of idle GPU and no compiler
+2026-09-30T21:04:01+0900 idle streak reset after 32s: gpu=[2713606:mlxcel-bench-de] compilers=[]
+2026-09-30T21:06:20+0900 idle streak reset after 42s: gpu=[2802676:mlxcel-bench-de] compilers=[]
+2026-09-30T21:10:02+0900 idle streak reset after 9s: gpu=[] compilers=[2947450:cargo]
+2026-09-30T21:10:43+0900 idle streak reset after 6s: gpu=[] compilers=[2973938:cargo]
+2026-09-30T21:15:18+0900 idle for 90s: kfd proc empty and no compiler in every 1 Hz sample
+2026-09-30T21:15:18+0900 attempt 2/5: start: /usr/bin/rocprofv3 --kernel-trace --hip-graph-trace --stats -f csv -d <trace-dir>/granite-4.0-h-tiny-4bit_greedy -o granite-4.0-h-tiny-4bit_greedy -- target/release/mlxcel-bench-decode -m models/mlx/granite-4.0-h-tiny-4bit -p profile -n 128 --warmup-tokens 20 --ignore-eos --prompt-tokens 512 --temperature 0 --top-p 1.0
+2026-09-30T21:15:19+0900 sample 1: clean gpu=[3151933:mlxcel-bench-de]
+2026-09-30T21:15:20+0900 sample 2: clean gpu=[3151933:mlxcel-bench-de]
+2026-09-30T21:15:22+0900 sample 3: clean gpu=[3151933:mlxcel-bench-de]
+2026-09-30T21:15:23+0900 sample 4: clean gpu=[3151933:mlxcel-bench-de]
+2026-09-30T21:15:25+0900 sample 5: clean gpu=[3151933:mlxcel-bench-de]
+2026-09-30T21:15:27+0900 sample 6: clean gpu=[3151933:mlxcel-bench-de]
+2026-09-30T21:15:28+0900 sample 7: clean gpu=[3151933:mlxcel-bench-de]
+2026-09-30T21:15:29+0900 monitor: 7 samples
+2026-09-30T21:15:29+0900 attempt 2: CLEAN, exit 0
+== NVIDIA-Nemotron-3-Nano-30B-A3B-4bit_greedy plain
+2026-09-30T21:15:29+0900 waiting for 90s of idle GPU and no compiler
+2026-09-30T21:17:39+0900 idle for 90s: kfd proc empty and no compiler in every 1 Hz sample
+2026-09-30T21:17:39+0900 attempt 1/5: start: target/release/mlxcel-bench-decode -m models/mlx/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit -p profile -n 128 --warmup-tokens 20 --ignore-eos --prompt-tokens 512 --temperature 0 --top-p 1.0
+2026-09-30T21:17:40+0900 sample 1: clean gpu=[3239105:mlxcel-bench-de]
+2026-09-30T21:17:41+0900 sample 2: clean gpu=[3239105:mlxcel-bench-de]
+2026-09-30T21:17:43+0900 sample 3: clean gpu=[3239105:mlxcel-bench-de]
+2026-09-30T21:17:44+0900 sample 4: clean gpu=[3239105:mlxcel-bench-de]
+2026-09-30T21:17:46+0900 sample 5: clean gpu=[3239105:mlxcel-bench-de]
+2026-09-30T21:17:47+0900 sample 6: clean gpu=[3239105:mlxcel-bench-de]
+2026-09-30T21:17:49+0900 sample 7: clean gpu=[3239105:mlxcel-bench-de]
+2026-09-30T21:17:50+0900 sample 8: clean gpu=[3239105:mlxcel-bench-de]
+2026-09-30T21:17:52+0900 sample 9: clean gpu=[3239105:mlxcel-bench-de]
+2026-09-30T21:17:53+0900 sample 10: clean gpu=[3239105:mlxcel-bench-de]
+2026-09-30T21:17:55+0900 sample 11: clean gpu=[3239105:mlxcel-bench-de]
+2026-09-30T21:17:56+0900 sample 12: clean gpu=[3239105:mlxcel-bench-de]
+2026-09-30T21:17:58+0900 sample 13: clean gpu=[3239105:mlxcel-bench-de]
+2026-09-30T21:17:59+0900 sample 14: clean gpu=[3239105:mlxcel-bench-de]
+2026-09-30T21:18:01+0900 sample 15: clean gpu=[3239105:mlxcel-bench-de]
+2026-09-30T21:18:02+0900 monitor: 15 samples
+2026-09-30T21:18:02+0900 attempt 1: CLEAN, exit 0
+== NVIDIA-Nemotron-3-Nano-30B-A3B-4bit_greedy profiled
+2026-09-30T21:18:02+0900 waiting for 90s of idle GPU and no compiler
+2026-09-30T21:20:12+0900 idle for 90s: kfd proc empty and no compiler in every 1 Hz sample
+2026-09-30T21:20:12+0900 attempt 1/5: start: /usr/bin/rocprofv3 --kernel-trace --hip-graph-trace --stats -f csv -d <trace-dir>/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit_greedy -o NVIDIA-Nemotron-3-Nano-30B-A3B-4bit_greedy -- target/release/mlxcel-bench-decode -m models/mlx/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit -p profile -n 128 --warmup-tokens 20 --ignore-eos --prompt-tokens 512 --temperature 0 --top-p 1.0
+2026-09-30T21:20:12+0900 sample 1: clean gpu=[3334557:mlxcel-bench-de]
+2026-09-30T21:20:14+0900 sample 2: clean gpu=[3334557:mlxcel-bench-de]
+2026-09-30T21:20:15+0900 sample 3: clean gpu=[3334557:mlxcel-bench-de]
+2026-09-30T21:20:17+0900 sample 4: clean gpu=[3334557:mlxcel-bench-de]
+2026-09-30T21:20:18+0900 sample 5: clean gpu=[3334557:mlxcel-bench-de]
+2026-09-30T21:20:20+0900 sample 6: clean gpu=[3334557:mlxcel-bench-de]
+2026-09-30T21:20:21+0900 sample 7: clean gpu=[3334557:mlxcel-bench-de]
+2026-09-30T21:20:22+0900 sample 8: clean gpu=[3334557:mlxcel-bench-de]
+2026-09-30T21:20:24+0900 sample 9: clean gpu=[3334557:mlxcel-bench-de]
+2026-09-30T21:20:26+0900 sample 10: clean gpu=[3334557:mlxcel-bench-de]
+2026-09-30T21:20:27+0900 sample 11: clean gpu=[3334557:mlxcel-bench-de]
+2026-09-30T21:20:29+0900 sample 12: clean gpu=[3334557:mlxcel-bench-de]
+2026-09-30T21:20:30+0900 monitor: 12 samples
+2026-09-30T21:20:30+0900 attempt 1: CLEAN, exit 0
+== Meta-Llama-3.1-8B-Instruct-4bit_t0.7 profiled
+2026-09-30T21:21:37+0900 waiting for 90s of idle GPU and no compiler
+2026-09-30T21:23:41+0900 idle streak reset after 85s: gpu=[3438825:mlxcel_core-480] compilers=[]
+2026-09-30T21:24:28+0900 idle streak reset after 29s: gpu=[3467939:mlxcel_core-480] compilers=[]
+2026-09-30T21:25:50+0900 idle streak reset after 7s: gpu=[] compilers=[3518517:cargo]
+2026-09-30T21:36:48+0900 idle for 90s: kfd proc empty and no compiler in every 1 Hz sample
+2026-09-30T21:36:48+0900 attempt 1/5: start: /usr/bin/rocprofv3 --kernel-trace --hip-graph-trace --stats -f csv -d <trace-dir>/Meta-Llama-3.1-8B-Instruct-4bit_t0.7 -o Meta-Llama-3.1-8B-Instruct-4bit_t0.7 -- target/release/mlxcel-bench-decode -m models/mlx/Meta-Llama-3.1-8B-Instruct-4bit -p profile -n 128 --warmup-tokens 20 --ignore-eos --prompt-tokens 512 --temperature 0.7 --top-p 1.0
+2026-09-30T21:36:48+0900 sample 1: clean gpu=[]
+2026-09-30T21:36:50+0900 sample 2: clean gpu=[3927313:mlxcel-bench-de]
+2026-09-30T21:36:51+0900 sample 3: clean gpu=[3927313:mlxcel-bench-de]
+2026-09-30T21:36:53+0900 sample 4: clean gpu=[3927313:mlxcel-bench-de]
+2026-09-30T21:36:54+0900 sample 5: clean gpu=[3927313:mlxcel-bench-de]
+2026-09-30T21:36:55+0900 monitor: 5 samples
+2026-09-30T21:36:55+0900 attempt 1: CLEAN, exit 0
+== Qwen3-30B-A3B-4bit_t0.7 profiled
+2026-09-30T21:36:58+0900 waiting for 90s of idle GPU and no compiler
+2026-09-30T21:37:27+0900 idle streak reset after 20s: gpu=[3950066:mlxcel-bench-de] compilers=[]
+2026-09-30T21:37:33+0900 idle streak reset after 1s: gpu=[3953075:mlxcel-bench-de] compilers=[]
+2026-09-30T21:40:45+0900 idle streak reset after 1s: gpu=[4080625:mlxcel-bench-de] compilers=[]
+2026-09-30T21:41:18+0900 idle streak reset after 1s: gpu=[4102225:mlxcel-bench-de] compilers=[]
+2026-09-30T21:42:36+0900 idle streak reset after 43s: gpu=[4153829:mlxcel-bench-de] compilers=[]
+2026-09-30T21:42:51+0900 idle streak reset after 2s: gpu=[4164387:mlxcel-bench-de] compilers=[]
+2026-09-30T21:43:06+0900 idle streak reset after 1s: gpu=[4173488:mlxcel-bench-de] compilers=[]
+2026-09-30T21:45:00+0900 idle streak reset after 58s: gpu=[56029:rocminfo] compilers=[55997:cargo]
+2026-09-30T21:48:42+0900 idle for 90s: kfd proc empty and no compiler in every 1 Hz sample
+2026-09-30T21:48:42+0900 attempt 1/5: start: /usr/bin/rocprofv3 --kernel-trace --hip-graph-trace --stats -f csv -d <trace-dir>/Qwen3-30B-A3B-4bit_t0.7 -o Qwen3-30B-A3B-4bit_t0.7 -- target/release/mlxcel-bench-decode -m models/mlx/Qwen3-30B-A3B-4bit -p profile -n 128 --warmup-tokens 20 --ignore-eos --prompt-tokens 512 --temperature 0.7 --top-p 1.0
+2026-09-30T21:48:42+0900 sample 1: clean gpu=[]
+2026-09-30T21:48:44+0900 sample 2: clean gpu=[195614:mlxcel-bench-de]
+2026-09-30T21:48:45+0900 sample 3: clean gpu=[195614:mlxcel-bench-de]
+2026-09-30T21:48:47+0900 sample 4: clean gpu=[195614:mlxcel-bench-de]
+2026-09-30T21:48:48+0900 sample 5: clean gpu=[195614:mlxcel-bench-de]
+2026-09-30T21:48:50+0900 sample 6: clean gpu=[195614:mlxcel-bench-de]
+2026-09-30T21:48:51+0900 monitor: 6 samples
+2026-09-30T21:48:51+0900 attempt 1: CLEAN, exit 0
+== granite-4.0-h-tiny-4bit_t0.7 profiled
+2026-09-30T21:49:00+0900 waiting for 90s of idle GPU and no compiler
+2026-09-30T21:51:11+0900 idle for 90s: kfd proc empty and no compiler in every 1 Hz sample
+2026-09-30T21:51:11+0900 attempt 1/5: start: /usr/bin/rocprofv3 --kernel-trace --hip-graph-trace --stats -f csv -d <trace-dir>/granite-4.0-h-tiny-4bit_t0.7 -o granite-4.0-h-tiny-4bit_t0.7 -- target/release/mlxcel-bench-decode -m models/mlx/granite-4.0-h-tiny-4bit -p profile -n 128 --warmup-tokens 20 --ignore-eos --prompt-tokens 512 --temperature 0.7 --top-p 1.0
+2026-09-30T21:51:11+0900 sample 1: clean gpu=[]
+2026-09-30T21:51:13+0900 sample 2: clean gpu=[283739:mlxcel-bench-de]
+2026-09-30T21:51:14+0900 sample 3: clean gpu=[283739:mlxcel-bench-de]
+2026-09-30T21:51:16+0900 sample 4: clean gpu=[283739:mlxcel-bench-de]
+2026-09-30T21:51:17+0900 sample 5: clean gpu=[283739:mlxcel-bench-de]
+2026-09-30T21:51:19+0900 sample 6: clean gpu=[283739:mlxcel-bench-de]
+2026-09-30T21:51:21+0900 sample 7: clean gpu=[283739:mlxcel-bench-de]
+2026-09-30T21:51:22+0900 monitor: 7 samples
+2026-09-30T21:51:22+0900 attempt 1: CLEAN, exit 0
+== NVIDIA-Nemotron-3-Nano-30B-A3B-4bit_t0.7 profiled
+2026-09-30T21:51:44+0900 waiting for 90s of idle GPU and no compiler
+2026-09-30T21:53:55+0900 idle for 90s: kfd proc empty and no compiler in every 1 Hz sample
+2026-09-30T21:53:55+0900 attempt 1/5: start: /usr/bin/rocprofv3 --kernel-trace --hip-graph-trace --stats -f csv -d <trace-dir>/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit_t0.7 -o NVIDIA-Nemotron-3-Nano-30B-A3B-4bit_t0.7 -- target/release/mlxcel-bench-decode -m models/mlx/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit -p profile -n 128 --warmup-tokens 20 --ignore-eos --prompt-tokens 512 --temperature 0.7 --top-p 1.0
+2026-09-30T21:53:56+0900 sample 1: clean gpu=[]
+2026-09-30T21:53:57+0900 sample 2: clean gpu=[373616:mlxcel-bench-de]
+2026-09-30T21:53:59+0900 sample 3: clean gpu=[373616:mlxcel-bench-de]
+2026-09-30T21:54:01+0900 sample 4: clean gpu=[373616:mlxcel-bench-de]
+2026-09-30T21:54:02+0900 sample 5: clean gpu=[373616:mlxcel-bench-de]
+2026-09-30T21:54:04+0900 sample 6: clean gpu=[373616:mlxcel-bench-de]
+2026-09-30T21:54:05+0900 sample 7: clean gpu=[373616:mlxcel-bench-de]
+2026-09-30T21:54:07+0900 sample 8: clean gpu=[373616:mlxcel-bench-de]
+2026-09-30T21:54:08+0900 sample 9: clean gpu=[373616:mlxcel-bench-de]
+2026-09-30T21:54:10+0900 sample 10: clean gpu=[373616:mlxcel-bench-de]
+2026-09-30T21:54:11+0900 sample 11: clean gpu=[373616:mlxcel-bench-de]
+2026-09-30T21:54:13+0900 sample 12: clean gpu=[373616:mlxcel-bench-de]
+2026-09-30T21:54:14+0900 monitor: 12 samples
+2026-09-30T21:54:14+0900 attempt 1: CLEAN, exit 0
+== Meta-Llama-3.1-8B-Instruct-4bit_t0.7-p0.95 profiled
+2026-09-30T21:54:29+0900 waiting for 90s of idle GPU and no compiler
+2026-09-30T21:55:27+0900 idle streak reset after 40s: gpu=[] compilers=[421923:cargo]
+2026-09-30T22:00:22+0900 idle for 90s: kfd proc empty and no compiler in every 1 Hz sample
+2026-09-30T22:00:22+0900 attempt 1/5: start: /usr/bin/rocprofv3 --kernel-trace --hip-graph-trace --stats -f csv -d <trace-dir>/Meta-Llama-3.1-8B-Instruct-4bit_t0.7-p0.95 -o Meta-Llama-3.1-8B-Instruct-4bit_t0.7-p0.95 -- target/release/mlxcel-bench-decode -m models/mlx/Meta-Llama-3.1-8B-Instruct-4bit -p profile -n 128 --warmup-tokens 20 --ignore-eos --prompt-tokens 512 --temperature 0.7 --top-p 0.95
+2026-09-30T22:00:23+0900 sample 1: clean gpu=[]
+2026-09-30T22:00:24+0900 sample 2: clean gpu=[]
+2026-09-30T22:00:26+0900 sample 3: clean gpu=[615714:mlxcel-bench-de]
+2026-09-30T22:00:28+0900 sample 4: clean gpu=[615714:mlxcel-bench-de]
+2026-09-30T22:00:29+0900 sample 5: clean gpu=[615714:mlxcel-bench-de]
+2026-09-30T22:00:31+0900 sample 6: clean gpu=[615714:mlxcel-bench-de]
+2026-09-30T22:00:32+0900 sample 7: clean gpu=[615714:mlxcel-bench-de]
+2026-09-30T22:00:34+0900 sample 8: clean gpu=[615714:mlxcel-bench-de]
+2026-09-30T22:00:35+0900 sample 9: clean gpu=[615714:mlxcel-bench-de]
+2026-09-30T22:00:36+0900 monitor: 9 samples
+2026-09-30T22:00:36+0900 attempt 1: CLEAN, exit 0
+== Qwen3-30B-A3B-4bit_t0.7-p0.95 profiled
+2026-09-30T22:00:40+0900 waiting for 90s of idle GPU and no compiler
+2026-09-30T22:02:50+0900 idle for 90s: kfd proc empty and no compiler in every 1 Hz sample
+2026-09-30T22:02:50+0900 attempt 1/5: start: /usr/bin/rocprofv3 --kernel-trace --hip-graph-trace --stats -f csv -d <trace-dir>/Qwen3-30B-A3B-4bit_t0.7-p0.95 -o Qwen3-30B-A3B-4bit_t0.7-p0.95 -- target/release/mlxcel-bench-decode -m models/mlx/Qwen3-30B-A3B-4bit -p profile -n 128 --warmup-tokens 20 --ignore-eos --prompt-tokens 512 --temperature 0.7 --top-p 0.95
+2026-09-30T22:02:50+0900 sample 1: clean gpu=[]
+2026-09-30T22:02:52+0900 sample 2: clean gpu=[706229:mlxcel-bench-de]
+2026-09-30T22:02:53+0900 sample 3: clean gpu=[706229:mlxcel-bench-de]
+2026-09-30T22:02:55+0900 sample 4: clean gpu=[706229:mlxcel-bench-de]
+2026-09-30T22:02:56+0900 sample 5: clean gpu=[706229:mlxcel-bench-de]
+2026-09-30T22:02:58+0900 sample 6: clean gpu=[706229:mlxcel-bench-de]
+2026-09-30T22:02:59+0900 sample 7: clean gpu=[706229:mlxcel-bench-de]
+2026-09-30T22:03:00+0900 monitor: 7 samples
+2026-09-30T22:03:00+0900 attempt 1: CLEAN, exit 0
+== granite-4.0-h-tiny-4bit_t0.7-p0.95 profiled
+2026-09-30T22:03:11+0900 waiting for 90s of idle GPU and no compiler
+2026-09-30T22:05:22+0900 idle for 90s: kfd proc empty and no compiler in every 1 Hz sample
+2026-09-30T22:05:22+0900 attempt 1/5: start: /usr/bin/rocprofv3 --kernel-trace --hip-graph-trace --stats -f csv -d <trace-dir>/granite-4.0-h-tiny-4bit_t0.7-p0.95 -o granite-4.0-h-tiny-4bit_t0.7-p0.95 -- target/release/mlxcel-bench-decode -m models/mlx/granite-4.0-h-tiny-4bit -p profile -n 128 --warmup-tokens 20 --ignore-eos --prompt-tokens 512 --temperature 0.7 --top-p 0.95
+2026-09-30T22:05:22+0900 sample 1: clean gpu=[]
+2026-09-30T22:05:24+0900 sample 2: clean gpu=[795125:mlxcel-bench-de]
+2026-09-30T22:05:25+0900 sample 3: clean gpu=[795125:mlxcel-bench-de]
+2026-09-30T22:05:27+0900 sample 4: clean gpu=[795125:mlxcel-bench-de]
+2026-09-30T22:05:28+0900 sample 5: clean gpu=[795125:mlxcel-bench-de]
+2026-09-30T22:05:30+0900 sample 6: clean gpu=[795125:mlxcel-bench-de]
+2026-09-30T22:05:32+0900 sample 7: clean gpu=[795125:mlxcel-bench-de]
+2026-09-30T22:05:33+0900 sample 8: clean gpu=[795125:mlxcel-bench-de]
+2026-09-30T22:05:34+0900 monitor: 8 samples
+2026-09-30T22:05:34+0900 attempt 1: CLEAN, exit 0
+== NVIDIA-Nemotron-3-Nano-30B-A3B-4bit_t0.7-p0.95 profiled
+2026-09-30T22:05:58+0900 waiting for 90s of idle GPU and no compiler
+2026-09-30T22:06:12+0900 idle streak reset after 9s: gpu=[] compilers=[810466:cargo,811295:rustc]
+2026-09-30T22:07:07+0900 idle streak reset after 21s: gpu=[] compilers=[847093:cargo]
+2026-09-30T22:11:17+0900 idle for 90s: kfd proc empty and no compiler in every 1 Hz sample
+2026-09-30T22:11:17+0900 attempt 1/5: start: /usr/bin/rocprofv3 --kernel-trace --hip-graph-trace --stats -f csv -d <trace-dir>/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit_t0.7-p0.95 -o NVIDIA-Nemotron-3-Nano-30B-A3B-4bit_t0.7-p0.95 -- target/release/mlxcel-bench-decode -m models/mlx/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit -p profile -n 128 --warmup-tokens 20 --ignore-eos --prompt-tokens 512 --temperature 0.7 --top-p 0.95
+2026-09-30T22:11:18+0900 sample 1: clean gpu=[]
+2026-09-30T22:11:19+0900 sample 2: clean gpu=[1010629:mlxcel-bench-de]
+2026-09-30T22:11:20+0900 sample 3: clean gpu=[1010629:mlxcel-bench-de]
+2026-09-30T22:11:22+0900 sample 4: clean gpu=[1010629:mlxcel-bench-de]
+2026-09-30T22:11:23+0900 sample 5: clean gpu=[1010629:mlxcel-bench-de]
+2026-09-30T22:11:25+0900 sample 6: clean gpu=[1010629:mlxcel-bench-de]
+2026-09-30T22:11:26+0900 sample 7: clean gpu=[1010629:mlxcel-bench-de]
+2026-09-30T22:11:27+0900 sample 8: clean gpu=[1010629:mlxcel-bench-de]
+2026-09-30T22:11:29+0900 sample 9: clean gpu=[1010629:mlxcel-bench-de]
+2026-09-30T22:11:30+0900 sample 10: clean gpu=[1010629:mlxcel-bench-de]
+2026-09-30T22:11:32+0900 sample 11: clean gpu=[1010629:mlxcel-bench-de]
+2026-09-30T22:11:33+0900 sample 12: clean gpu=[1010629:mlxcel-bench-de]
+2026-09-30T22:11:35+0900 sample 13: clean gpu=[1010629:mlxcel-bench-de]
+2026-09-30T22:11:36+0900 monitor: 13 samples
+2026-09-30T22:11:36+0900 attempt 1: CLEAN, exit 0
+== rerun of Qwen3-30B-A3B-4bit_t0.7: the 21:48 attempt overlapped a CPU-heavy analysis process of this unit, which the guard does not watch; replaced
+== Qwen3-30B-A3B-4bit_t0.7 profiled
+2026-09-30T22:12:05+0900 waiting for 90s of idle GPU and no compiler
+2026-09-30T22:14:17+0900 idle for 90s: kfd proc empty and no compiler in every 1 Hz sample
+2026-09-30T22:14:17+0900 attempt 1/5: start: /usr/bin/rocprofv3 --kernel-trace --hip-graph-trace --stats -f csv -d <trace-dir>/Qwen3-30B-A3B-4bit_t0.7 -o Qwen3-30B-A3B-4bit_t0.7 -- target/release/mlxcel-bench-decode -m models/mlx/Qwen3-30B-A3B-4bit -p profile -n 128 --warmup-tokens 20 --ignore-eos --prompt-tokens 512 --temperature 0.7 --top-p 1.0
+2026-09-30T22:14:18+0900 sample 1: clean gpu=[]
+2026-09-30T22:14:19+0900 sample 2: clean gpu=[1108964:mlxcel-bench-de]
+2026-09-30T22:14:21+0900 sample 3: clean gpu=[1108964:mlxcel-bench-de]
+2026-09-30T22:14:22+0900 sample 4: clean gpu=[1108964:mlxcel-bench-de]
+2026-09-30T22:14:24+0900 sample 5: clean gpu=[1108964:mlxcel-bench-de]
+2026-09-30T22:14:25+0900 sample 6: clean gpu=[1108964:mlxcel-bench-de]
+2026-09-30T22:14:27+0900 sample 7: clean gpu=[1108964:mlxcel-bench-de]
+2026-09-30T22:14:29+0900 sample 8: clean gpu=[1108964:mlxcel-bench-de]
+2026-09-30T22:14:30+0900 monitor: 8 samples
+2026-09-30T22:14:30+0900 attempt 1: CLEAN, exit 0

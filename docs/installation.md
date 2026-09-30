@@ -504,6 +504,9 @@ in
 [`docs/benchmark_results/rocm-baseline-gfx1151-2026-09-30.md`](benchmark_results/rocm-baseline-gfx1151-2026-09-30.md);
 `scripts/bench_decode.sh` recognises a ROCm host on its own (see
 [Benchmarks](benchmarks.md#rocm-hosts-issue-1810)).
+Where that decode time goes, per kernel, and the order the #1814 kernel ports
+should land in, is in
+[`docs/benchmark_results/rocm-decode-profile-gfx1151-2026-09-30.md`](benchmark_results/rocm-decode-profile-gfx1151-2026-09-30.md).
 
 #### Memory footprint
 

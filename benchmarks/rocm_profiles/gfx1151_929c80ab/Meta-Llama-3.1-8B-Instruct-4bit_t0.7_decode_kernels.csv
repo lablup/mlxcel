@@ -1,0 +1,38 @@
+kernel,class,roles,port_units,calls,calls_per_token,total_ns,avg_ns,share_pct
+"void mlx::core::rocm::qmv_wide_kernel<__half, __half, 64, 4>(__half const*, unsigned char const*, __half const*, __half const*, __half*, int, int, int, bool)",qmv,,,20447,159.74,2838094833,138803,94.696
+"void mlx::core::rocm::kernel_sdpav_1pass<__half, false, 128>(__half const*, __half const*, __half const*, __half*, __half const*, mlx::core::rocm::AttnParams)",sdpa,,,4064,31.75,59003854,14519,1.969
+"void mlx::core::rocm::rms_norm_kernel<__half, 256, 4>(__half const*, __half const*, __half*, float, unsigned int, long)",rms_norm,add_rms_join;add_rms_join_post_attn,2063,8255,64.49,34316389,4157,1.145
+"void mlx::core::rocm::binary_vv<mlx::core::rocm::Add, __half, __half, unsigned int, 4>(__half const*, __half const*, __half*, unsigned int)",binary,add_rms_join;add_rms_join_post_attn,2063,8128,63.5,16538053,2035,0.552
+"void mlx::core::rocm::copy_gg_byval<__half, __half, long>(__half const*, __half*, long, mlx::core::rocm::hip_array<int, 10>, mlx::core::rocm::hip_array<long, 10>, mlx::core::rocm::hip_array<long, 10>, int)",copy,rope_append,2063,8256,64.5,15124796,1832,0.505
+"void mlx::core::rocm::rope_single_freqs_1d<__half, false, true>(__half const*, __half*, int const*, float const*, float, long, unsigned int, unsigned int, long)",rope,rope_append,2063,8128,63.5,13005851,1600,0.434
+"void mlx::core::rocm::Cf2ISigmoidADf2IBroadcastACEf2IBroadcastCAFf2IMultiplyDEGf2IBroadcastFBHf2IBroadcastBFIf2OMultiplyGH_VV_f2f2_6142509188972423790_contiguous<unsigned int, 16>(__half const*, __half const*, __half*, unsigned int)",compiled,,,4064,31.75,9066642,2231,0.303
+"void mlx::core::rocm::contiguous_scan<float, float, mlx::core::rocm::Sum, 4, false, false>(float const*, float*, int)",scan,sampler_tail,2064,127,0.99,3404982,26811,0.114
+"void mlx::core::rocm::unary_v<mlx::core::rocm::Exp, float, float, unsigned int, 4>(float const*, float*, unsigned int)",unary,sampler_tail,2064,127,0.99,816052,6426,0.027
+"void mlx::core::rocm::ternary_g<mlx::core::rocm::Select, float, long, 4>(bool const*, float const*, float const*, float*, long, mlx::core::rocm::hip_array<int, 10>, mlx::core::rocm::hip_array<long, 10>, mlx::core::rocm::hip_array<long, 10>, mlx::core::rocm::hip_array<long, 10>, int)",ternary,sampler_tail,2064,127,0.99,602525,4744,0.020
+"void mlx::core::rocm::copy_v<__half, float, unsigned int, 4>(__half const*, float*, unsigned int)",copy,sampler_tail,2064,254,1.98,497509,1959,0.017
+"mlx::core::rocm::rbitsc_kernel(unsigned int const*, unsigned char*, unsigned int, unsigned int, bool, unsigned int)",random,sampler_tail,2064,254,1.98,485315,1911,0.016
+"void mlx::core::rocm::searchsorted_kernel<float, true>(float const*, float const*, unsigned int*, long, unsigned int, long)",sort,sampler_tail,2064,127,0.99,426444,3358,0.014
+"void mlx::core::rocm::all_reduce_kernel<float, float, mlx::core::rocm::Max, 4>(float const*, float*, unsigned long, unsigned long)",reduce,sampler_tail,2064,254,1.98,423072,1666,0.014
+"void mlx::core::rocm::all_reduce_kernel<float, float, mlx::core::rocm::Sum, 4>(float const*, float*, unsigned long, unsigned long)",reduce,sampler_tail,2064,254,1.98,413842,1629,0.014
+"void mlx::core::rocm::gather_rows_kernel<__half, int>(__half const*, int const*, __half*, long, unsigned int, int)",gather_scatter,,,254,1.98,393617,1550,0.013
+"void mlx::core::rocm::copy_v<__half, __half, unsigned int, 4>(__half const*, __half*, unsigned int)",copy,sampler_tail,2064,127,0.99,385365,3034,0.013
+"void mlx::core::rocm::binary_vs<mlx::core::rocm::Subtract, float, float, unsigned int, 4>(float const*, float const*, float*, unsigned int)",binary,sampler_tail,2064,127,0.99,336662,2651,0.011
+"void mlx::core::rocm::binary_ss<mlx::core::rocm::Equal, float, bool, unsigned int, 4>(float const*, float const*, bool*, unsigned int)",binary,sampler_tail,2064,254,1.98,311876,1228,0.010
+"void mlx::core::rocm::binary_ss<mlx::core::rocm::Multiply, float, float, unsigned int, 4>(float const*, float const*, float*, unsigned int)",binary,sampler_tail,2064,254,1.98,276992,1091,0.009
+"void mlx::core::rocm::gather_axis_kernel<__half, int, 1, true, true>(__half const*, int const*, __half*, long, long, long, mlx::core::rocm::hip_array<int, 10>, mlx::core::rocm::hip_array<long, 10>, mlx::core::rocm::hip_array<long, 10>, int, int, long, long)",gather_scatter,sampler_tail,2064,127,0.99,267903,2109,0.009
+"void mlx::core::rocm::binary_vs<mlx::core::rocm::Equal, float, bool, unsigned int, 4>(float const*, float const*, bool*, unsigned int)",binary,sampler_tail,2064,127,0.99,265699,2092,0.009
+"void mlx::core::rocm::binary_vs<mlx::core::rocm::Divide, __half, __half, unsigned int, 4>(__half const*, __half const*, __half*, unsigned int)",binary,sampler_tail,2064,127,0.99,254672,2005,0.008
+"void mlx::core::rocm::gather_rows_kernel<unsigned int, int>(unsigned int const*, int const*, unsigned int*, long, unsigned int, int)",gather_scatter,,,127,0.99,230030,1811,0.008
+"void mlx::core::rocm::scatter_axis_kernel<__half, int, false, 1, true, true>(__half const*, int const*, __half*, long, long, long, mlx::core::rocm::hip_array<int, 10>, mlx::core::rocm::hip_array<long, 10>, mlx::core::rocm::hip_array<long, 10>, mlx::core::rocm::hip_array<long, 10>, int, int, long, long, long)",gather_scatter,sampler_tail,2064,127,0.99,227550,1792,0.008
+"void mlx::core::rocm::binary_vv<mlx::core::rocm::Add, float, float, unsigned int, 4>(float const*, float const*, float*, unsigned int)",binary,sampler_tail,2064,127,0.99,208510,1642,0.007
+"void mlx::core::rocm::copy_v<bool, float, unsigned int, 4>(bool const*, float*, unsigned int)",copy,sampler_tail,2064,127,0.99,185511,1461,0.006
+"void mlx::core::rocm::affine_dequantize_packed_kernel<__half, 4>(unsigned char const*, __half const*, __half const*, __half*, unsigned long, int)",dequantize,,,127,0.99,171156,1348,0.006
+"void mlx::core::rocm::binary_ss<mlx::core::rocm::Divide, float, float, unsigned int, 4>(float const*, float const*, float*, unsigned int)",binary,sampler_tail,2064,127,0.99,169674,1336,0.006
+"void mlx::core::rocm::binary_ss<mlx::core::rocm::LogicalOr, bool, bool, unsigned int, 4>(bool const*, bool const*, bool*, unsigned int)",binary,sampler_tail,2064,127,0.99,163906,1291,0.005
+"void mlx::core::rocm::binary_ss<mlx::core::rocm::Subtract, float, float, unsigned int, 4>(float const*, float const*, float*, unsigned int)",binary,sampler_tail,2064,127,0.99,153249,1207,0.005
+"void mlx::core::rocm::binary_ss<mlx::core::rocm::Minimum, float, float, unsigned int, 4>(float const*, float const*, float*, unsigned int)",binary,sampler_tail,2064,127,0.99,151853,1196,0.005
+"void mlx::core::rocm::copy_s<__half, __half, unsigned int, 4>(__half const*, __half*, unsigned int)",copy,,,64,0.5,140506,2195,0.005
+"void mlx::core::rocm::copy_v<float, __half, unsigned int, 4>(float const*, __half*, unsigned int)",copy,sampler_tail,2064,127,0.99,140419,1106,0.005
+"void mlx::core::rocm::copy_v<unsigned int, float, unsigned int, 4>(unsigned int const*, float*, unsigned int)",copy,sampler_tail,2064,127,0.99,136540,1075,0.005
+"void mlx::core::rocm::binary_ss<mlx::core::rocm::Subtract, unsigned int, unsigned int, unsigned int, 4>(unsigned int const*, unsigned int const*, unsigned int*, unsigned int)",binary,sampler_tail,2064,127,0.99,131368,1034,0.004
+"void mlx::core::rocm::binary_ss<mlx::core::rocm::Add, float, float, unsigned int, 4>(float const*, float const*, float*, unsigned int)",binary,sampler_tail,2064,127,0.99,130405,1027,0.004

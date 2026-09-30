@@ -1,0 +1,179 @@
+{
+  "name": "Qwen3-30B-A3B-4bit_greedy",
+  "model_type": "qwen3_moe",
+  "temperature": 0.0,
+  "clock": "boottime",
+  "prompt_tokens": 512,
+  "generated_tokens": 128,
+  "profiled_decode_tok_s": 58.86,
+  "profiled_prefill_tok_s": 316.76,
+  "plain_decode_tok_s": 61.99,
+  "plain_prefill_tok_s": 215.72,
+  "profiler_decode_slowdown_pct": 5.32,
+  "decode_dispatches": 197138,
+  "dispatches_per_token": 1540.1,
+  "decode_wall_ms": 2174.624,
+  "decode_gpu_sum_ms": 1709.857,
+  "decode_gpu_busy_ms": 1709.857,
+  "gpu_ms_per_token": 13.3583,
+  "host_gap_ms_per_token": 3.631,
+  "host_gap_pct_of_wall": 21.37,
+  "plain_wall_ms_per_token": 16.1316,
+  "plain_host_gap_ms_per_token_est": 2.7734,
+  "checks": {
+    "kernels_straddling_decode_start": 0,
+    "idle_gap_before_first_decode_dispatch_us": 49311.5,
+    "last_dispatch_before_decode": "void mlx::core::rocm::arg_reduce_final<hip_bfloat16, mlx::core::rocm::ArgMax<hip_bfloat16>, 256>(hip_bfloat16 const*, un"
+  },
+  "top_kernels": [
+    {
+      "kernel": "void mlx::core::rocm::gather_qmv_wide_kernel<hip_bfloat16, hip_bfloat16, 64>(hip_bfloat16 const*, unsigned char const*, hip_bfloat16 const*, hip_bfloat16 const*, unsigned int const*, unsigned int const*, mlx::core::rocm::hip_array<int, 10>, mlx::core::rocm::hip_array<long, 10>, mlx::core::rocm::hip_array<long, 10>, int, hip_bfloat16*, int, int, int, int, int, bool, bool, long)",
+      "class": "gather_qmv",
+      "calls_per_token": 142.88,
+      "share_pct": 42.12
+    },
+    {
+      "kernel": "void mlx::core::rocm::qmv_wide_kernel<hip_bfloat16, hip_bfloat16, 64, 4>(hip_bfloat16 const*, unsigned char const*, hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16*, int, int, int, bool)",
+      "class": "qmv",
+      "calls_per_token": 143.87,
+      "share_pct": 33.05
+    },
+    {
+      "kernel": "void mlx::core::rocm::kernel_sdpav_1pass<hip_bfloat16, false, 128>(hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16*, hip_bfloat16 const*, mlx::core::rocm::AttnParams)",
+      "class": "sdpa",
+      "calls_per_token": 47.62,
+      "share_pct": 4.55
+    },
+    {
+      "kernel": "void mlx::core::rocm::block_sort_kernel<hip_bfloat16, unsigned int, true, 32, 8>(hip_bfloat16 const*, unsigned int*, int, long, long, long, long)",
+      "class": "sort",
+      "calls_per_token": 47.62,
+      "share_pct": 4.32
+    },
+    {
+      "kernel": "void mlx::core::rocm::rms_norm_kernel<hip_bfloat16, 256, 4>(hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16*, float, unsigned int, long)",
+      "class": "rms_norm",
+      "calls_per_token": 191.49,
+      "share_pct": 3.89
+    },
+    {
+      "kernel": "void mlx::core::rocm::CV2ISigmoidADV2IBroadcastACEV2IBroadcastCAFV2IMultiplyDEGV2IBroadcastFBHV2IBroadcastBFIV2OMultiplyGH_VV_V2V2_6142509188972423790_contiguous<unsigned int, 16>(hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16*, unsigned int)",
+      "class": "compiled",
+      "calls_per_token": 47.62,
+      "share_pct": 1.63
+    },
+    {
+      "kernel": "void mlx::core::rocm::binary_vv<mlx::core::rocm::Add, hip_bfloat16, hip_bfloat16, unsigned int, 4>(hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16*, unsigned int)",
+      "class": "binary",
+      "calls_per_token": 95.25,
+      "share_pct": 1.33
+    },
+    {
+      "kernel": "void mlx::core::rocm::softmax_kernel<hip_bfloat16, hip_bfloat16, 256, 4>(hip_bfloat16 const*, hip_bfloat16*, int)",
+      "class": "softmax",
+      "calls_per_token": 47.62,
+      "share_pct": 1.32
+    },
+    {
+      "kernel": "void mlx::core::rocm::copy_gg_byval<hip_bfloat16, hip_bfloat16, long>(hip_bfloat16 const*, hip_bfloat16*, long, mlx::core::rocm::hip_array<int, 10>, mlx::core::rocm::hip_array<long, 10>, mlx::core::rocm::hip_array<long, 10>, int)",
+      "class": "copy",
+      "calls_per_token": 96.75,
+      "share_pct": 1.04
+    },
+    {
+      "kernel": "void mlx::core::rocm::rope_single_1d<hip_bfloat16, false, true>(hip_bfloat16 const*, hip_bfloat16*, int const*, float, float, long, unsigned int, unsigned int)",
+      "class": "rope",
+      "calls_per_token": 95.25,
+      "share_pct": 0.98
+    }
+  ],
+  "class_share_pct": {
+    "gather_qmv": 42.12,
+    "qmv": 33.05,
+    "sdpa": 4.55,
+    "sort": 4.32,
+    "rms_norm": 3.89,
+    "copy": 3.68,
+    "binary": 2.43,
+    "compiled": 1.63,
+    "softmax": 1.32,
+    "reduce": 1.31,
+    "rope": 0.98,
+    "gather_scatter": 0.62,
+    "arg_reduce": 0.09,
+    "dequantize": 0.01
+  },
+  "role_share_pct": {
+    "unattributed": 48.4,
+    "moe_expert_gemv": 42.12,
+    "moe_weighted_sum": 2.13,
+    "add_rms_join": 1.82,
+    "add_rms_join_post_attn": 1.8,
+    "moe_activation": 1.63,
+    "rope_append": 1.02,
+    "moe_gather_indices": 0.91,
+    "sampler_tail": 0.17,
+    "ssm_step": 0.0,
+    "paged_attention": 0.0
+  },
+  "role_dispatches_per_token": {
+    "unattributed": 721.8,
+    "rope_append": 96.0,
+    "add_rms_join_post_attn": 95.2,
+    "moe_gather_indices": 142.9,
+    "moe_expert_gemv": 142.9,
+    "moe_activation": 47.6,
+    "moe_weighted_sum": 190.5,
+    "add_rms_join": 95.2,
+    "sampler_tail": 7.9,
+    "ssm_step": 0.0,
+    "paged_attention": 0.0
+  },
+  "port_units": {
+    "2063": {
+      "port": "fused_add_rms_norm + fused_rope_qk_append",
+      "fallback_share_pct": 2.82,
+      "fallback_dispatches_per_token": 191.2,
+      "reached_default_share_pct": 0.0,
+      "reached_default_dispatches_per_token": 0.0,
+      "reached_optin_share_pct": 0.0,
+      "note": "qwen3_moe never calls fused_add_rms_norm or forward_fused_rope_append"
+    },
+    "2064": {
+      "port": "samplers (gumbel_max_sample, rejection_sample)",
+      "fallback_share_pct": 0.17,
+      "fallback_dispatches_per_token": 7.9,
+      "reached_default_share_pct": 0.0,
+      "reached_default_dispatches_per_token": 0.0,
+      "reached_optin_share_pct": 0.0,
+      "note": "greedy argmax dispatches neither sampler kernel"
+    },
+    "2065": {
+      "port": "fused MoE decode (moe_gateup, moe_down)",
+      "fallback_share_pct": 46.79,
+      "fallback_dispatches_per_token": 523.9,
+      "reached_default_share_pct": 46.79,
+      "reached_default_dispatches_per_token": 523.9,
+      "reached_optin_share_pct": 46.79,
+      "note": "forward_fused_kernel caller"
+    },
+    "2067": {
+      "port": "SSM update (ssm_update_kernel)",
+      "fallback_share_pct": 0.0,
+      "fallback_dispatches_per_token": 0.0,
+      "reached_default_share_pct": 0.0,
+      "reached_default_dispatches_per_token": 0.0,
+      "reached_optin_share_pct": 0.0,
+      "note": "no Mamba2 layer"
+    },
+    "2068": {
+      "port": "paged attention (v1, v2, merge)",
+      "fallback_share_pct": 0.0,
+      "fallback_dispatches_per_token": 0.0,
+      "reached_default_share_pct": 0.0,
+      "reached_default_dispatches_per_token": 0.0,
+      "reached_optin_share_pct": 0.0,
+      "note": "the bench decodes into a dense KVCache; the paged path is not taken"
+    }
+  }
+}

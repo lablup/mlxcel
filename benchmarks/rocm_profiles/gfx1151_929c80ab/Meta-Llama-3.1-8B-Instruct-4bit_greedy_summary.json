@@ -1,0 +1,175 @@
+{
+  "name": "Meta-Llama-3.1-8B-Instruct-4bit_greedy",
+  "model_type": "llama",
+  "temperature": 0.0,
+  "clock": "boottime",
+  "prompt_tokens": 512,
+  "generated_tokens": 128,
+  "profiled_decode_tok_s": 39.78,
+  "profiled_prefill_tok_s": 1069.42,
+  "plain_decode_tok_s": 37.08,
+  "plain_prefill_tok_s": 1075.86,
+  "profiler_decode_slowdown_pct": -6.79,
+  "decode_dispatches": 62930,
+  "dispatches_per_token": 491.6,
+  "decode_wall_ms": 3217.899,
+  "decode_gpu_sum_ms": 2987.895,
+  "decode_gpu_busy_ms": 2987.895,
+  "gpu_ms_per_token": 23.3429,
+  "host_gap_ms_per_token": 1.7969,
+  "host_gap_pct_of_wall": 7.15,
+  "plain_wall_ms_per_token": 26.9687,
+  "plain_host_gap_ms_per_token_est": 3.6258,
+  "checks": {
+    "kernels_straddling_decode_start": 0,
+    "idle_gap_before_first_decode_dispatch_us": 30510.9,
+    "last_dispatch_before_decode": "void mlx::core::rocm::arg_reduce_final<__half, mlx::core::rocm::ArgMax<__half>, 256>(__half const*, unsigned int const*,"
+  },
+  "top_kernels": [
+    {
+      "kernel": "void mlx::core::rocm::qmv_wide_kernel<__half, __half, 64, 4>(__half const*, unsigned char const*, __half const*, __half const*, __half*, int, int, int, bool)",
+      "class": "qmv",
+      "calls_per_token": 159.74,
+      "share_pct": 94.81
+    },
+    {
+      "kernel": "void mlx::core::rocm::kernel_sdpav_1pass<__half, false, 128>(__half const*, __half const*, __half const*, __half*, __half const*, mlx::core::rocm::AttnParams)",
+      "class": "sdpa",
+      "calls_per_token": 31.75,
+      "share_pct": 2.14
+    },
+    {
+      "kernel": "void mlx::core::rocm::rms_norm_kernel<__half, 256, 4>(__half const*, __half const*, __half*, float, unsigned int, long)",
+      "class": "rms_norm",
+      "calls_per_token": 64.49,
+      "share_pct": 1.15
+    },
+    {
+      "kernel": "void mlx::core::rocm::binary_vv<mlx::core::rocm::Add, __half, __half, unsigned int, 4>(__half const*, __half const*, __half*, unsigned int)",
+      "class": "binary",
+      "calls_per_token": 63.5,
+      "share_pct": 0.55
+    },
+    {
+      "kernel": "void mlx::core::rocm::copy_gg_byval<__half, __half, long>(__half const*, __half*, long, mlx::core::rocm::hip_array<int, 10>, mlx::core::rocm::hip_array<long, 10>, mlx::core::rocm::hip_array<long, 10>, int)",
+      "class": "copy",
+      "calls_per_token": 64.5,
+      "share_pct": 0.51
+    },
+    {
+      "kernel": "void mlx::core::rocm::rope_single_freqs_1d<__half, false, true>(__half const*, __half*, int const*, float const*, float, long, unsigned int, unsigned int, long)",
+      "class": "rope",
+      "calls_per_token": 63.5,
+      "share_pct": 0.43
+    },
+    {
+      "kernel": "void mlx::core::rocm::Cf2ISigmoidADf2IBroadcastACEf2IBroadcastCAFf2IMultiplyDEGf2IBroadcastFBHf2IBroadcastBFIf2OMultiplyGH_VV_f2f2_6142509188972423790_contiguous<unsigned int, 16>(__half const*, __half const*, __half*, unsigned int)",
+      "class": "compiled",
+      "calls_per_token": 31.75,
+      "share_pct": 0.3
+    },
+    {
+      "kernel": "void mlx::core::rocm::arg_reduce_partial<__half, mlx::core::rocm::ArgMax<__half>, 256>(__half const*, __half*, unsigned int*, unsigned long, mlx::core::rocm::hip_array<int, 10>, mlx::core::rocm::hip_array<long, 10>, int, long, int, int)",
+      "class": "arg_reduce",
+      "calls_per_token": 0.99,
+      "share_pct": 0.02
+    },
+    {
+      "kernel": "void mlx::core::rocm::copy_v<__half, __half, unsigned int, 4>(__half const*, __half*, unsigned int)",
+      "class": "copy",
+      "calls_per_token": 0.99,
+      "share_pct": 0.01
+    },
+    {
+      "kernel": "void mlx::core::rocm::gather_rows_kernel<__half, int>(__half const*, int const*, __half*, long, unsigned int, int)",
+      "class": "gather_scatter",
+      "calls_per_token": 1.98,
+      "share_pct": 0.01
+    }
+  ],
+  "class_share_pct": {
+    "qmv": 94.81,
+    "sdpa": 2.14,
+    "rms_norm": 1.15,
+    "binary": 0.56,
+    "copy": 0.54,
+    "rope": 0.43,
+    "compiled": 0.3,
+    "gather_scatter": 0.04,
+    "arg_reduce": 0.03,
+    "dequantize": 0.0
+  },
+  "role_share_pct": {
+    "unattributed": 97.41,
+    "add_rms_join": 0.85,
+    "add_rms_join_post_attn": 0.83,
+    "rope_append": 0.83,
+    "sampler_tail": 0.08,
+    "moe_expert_gemv": 0.0,
+    "moe_activation": 0.0,
+    "moe_weighted_sum": 0.0,
+    "moe_gather_indices": 0.0,
+    "ssm_step": 0.0,
+    "paged_attention": 0.0
+  },
+  "role_dispatches_per_token": {
+    "unattributed": 229.2,
+    "rope_append": 127.5,
+    "add_rms_join_post_attn": 63.5,
+    "add_rms_join": 63.5,
+    "sampler_tail": 7.9,
+    "moe_expert_gemv": 0.0,
+    "moe_activation": 0.0,
+    "moe_weighted_sum": 0.0,
+    "moe_gather_indices": 0.0,
+    "ssm_step": 0.0,
+    "paged_attention": 0.0
+  },
+  "port_units": {
+    "2063": {
+      "port": "fused_add_rms_norm + fused_rope_qk_append",
+      "fallback_share_pct": 1.66,
+      "fallback_dispatches_per_token": 191.0,
+      "reached_default_share_pct": 0.0,
+      "reached_default_dispatches_per_token": 0.0,
+      "reached_optin_share_pct": 0.83,
+      "note": "both paths ship off (FUSED_ADD_RMSNORM_DEFAULT / FUSED_ROPE_APPEND_DEFAULT false); only the post-attention join calls the fused norm; rope_scaling builds a frequency table, which the RoPE kernel cannot take"
+    },
+    "2064": {
+      "port": "samplers (gumbel_max_sample, rejection_sample)",
+      "fallback_share_pct": 0.08,
+      "fallback_dispatches_per_token": 7.9,
+      "reached_default_share_pct": 0.0,
+      "reached_default_dispatches_per_token": 0.0,
+      "reached_optin_share_pct": 0.0,
+      "note": "greedy argmax dispatches neither sampler kernel"
+    },
+    "2065": {
+      "port": "fused MoE decode (moe_gateup, moe_down)",
+      "fallback_share_pct": 0.0,
+      "fallback_dispatches_per_token": 0.0,
+      "reached_default_share_pct": 0.0,
+      "reached_default_dispatches_per_token": 0.0,
+      "reached_optin_share_pct": 0.0,
+      "note": "llama does not call forward_fused_kernel"
+    },
+    "2067": {
+      "port": "SSM update (ssm_update_kernel)",
+      "fallback_share_pct": 0.0,
+      "fallback_dispatches_per_token": 0.0,
+      "reached_default_share_pct": 0.0,
+      "reached_default_dispatches_per_token": 0.0,
+      "reached_optin_share_pct": 0.0,
+      "note": "no Mamba2 layer"
+    },
+    "2068": {
+      "port": "paged attention (v1, v2, merge)",
+      "fallback_share_pct": 0.0,
+      "fallback_dispatches_per_token": 0.0,
+      "reached_default_share_pct": 0.0,
+      "reached_default_dispatches_per_token": 0.0,
+      "reached_optin_share_pct": 0.0,
+      "note": "the bench decodes into a dense KVCache; the paged path is not taken"
+    }
+  }
+}
