@@ -1844,17 +1844,28 @@ __device__ __forceinline__ T mamba1_add(T a, T b) {
         return holder;
     }
 
-// This kernel's ports, in one place (#1801). Metal and CUDA (#1981); the two
-// differ in how they round (see the CUDA source above).
+// This kernel's ports, in one place (#1801). The two variants round
+// differently, so each has its own table and a backend's variant is the table
+// it has a port in: float32 state (Metal, #2005) or graph-exact rounding in
+// the activation dtype (CUDA, #1981; see the CUDA source above). No HIP port of
+// either yet (#1814).
 const mlxcel::KernelPorts& mamba1_scan_ports() {
     static const mlxcel::KernelPorts ports{
         .metal = +[]() -> mlx::core::fast::CustomKernelFunction& {
             return get_mamba1_scan_kernel().get();
         },
+        .cuda = nullptr,
+        .rocm = nullptr,
+    };
+    return ports;
+}
+
+const mlxcel::KernelPorts& mamba1_scan_graph_exact_ports() {
+    static const mlxcel::KernelPorts ports{
+        .metal = nullptr,
         .cuda = +[]() -> mlx::core::fast::CustomKernelFunction& {
             return get_mamba1_scan_kernel_cuda().get();
         },
-        // No HIP port yet (#1814).
         .rocm = nullptr,
     };
     return ports;
@@ -1868,7 +1879,8 @@ bool mamba1_scan_kernel_available() {
             return false;
         }
     }
-    return mlxcel::has_kernel_port(mamba1_scan_ports());
+    return mlxcel::has_kernel_port(mamba1_scan_ports()) ||
+        mlxcel::has_kernel_port(mamba1_scan_graph_exact_ports());
 }
 
 bool mamba1_scan_kernel_accepts(
@@ -1892,7 +1904,9 @@ bool mamba1_scan_kernel_accepts(
     if (b.inner.ndim() == 0 || b.inner.shape().back() > 32) {
         return false;
     }
-    if (mlxcel::gpu_kernel_backend() != mlxcel::GpuKernelBackend::Cuda) {
+    // The float32-state variant casts whatever it is given. The graph-exact
+    // variant is exact only when every input already has the activation dtype.
+    if (!mlxcel::has_kernel_port(mamba1_scan_graph_exact_ports())) {
         return true;
     }
     auto t = x.inner.dtype();
@@ -1926,11 +1940,14 @@ void mamba1_selective_scan(
     int dm = shape[2];
     int n = b.inner.shape().back();
     auto t = x.inner.dtype();
-    // Metal carries the state in float32. CUDA rounds everything, the state
-    // included, to T like the graph scan; the caller's float32 zeros for a
-    // fresh sequence cast exactly, and a carried state is already T.
-    const bool cuda = mlxcel::gpu_kernel_backend() == mlxcel::GpuKernelBackend::Cuda;
-    const Dtype state_t = cuda ? t : float32;
+    // The float32-state variant carries the state in float32. The graph-exact
+    // variant rounds everything, the state included, to T like the graph scan;
+    // the caller's float32 zeros for a fresh sequence cast exactly, and a
+    // carried state is already T.
+    const bool graph_exact = mlxcel::has_kernel_port(mamba1_scan_graph_exact_ports());
+    const Dtype state_t = graph_exact ? t : float32;
+    const mlxcel::KernelPorts& ports =
+        graph_exact ? mamba1_scan_graph_exact_ports() : mamba1_scan_ports();
 
     std::vector<std::pair<std::string, mlx::core::fast::TemplateArg>> template_args = {
         {"T", t},
@@ -1952,7 +1969,7 @@ void mamba1_selective_scan(
     int grid_y = ((dm + rows_per_group - 1) / rows_per_group) * rows_per_group;
 
     auto results = mlxcel::select_kernel_port(
-        "mamba1_selective_scan", "graph fallback", mamba1_scan_ports())(
+        "mamba1_selective_scan", "graph fallback", ports)(
         inputs,
         output_shapes,
         output_dtypes,

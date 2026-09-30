@@ -28,7 +28,7 @@ main에서 스캔이 차지하는 몫은 스캔을 `delta`, `B`, `C`를 소비�
 
 ## 2. 변경 사항
 
-- **`mlx_cxx_kernels.cpp`**: `mamba1_selective_scan`의 `mx.fast.cuda_kernel` 포트를 커널의 `KernelPorts` 표에 Metal 포트와 나란히 넣었다. `mamba1_scan_kernel_available()`은 이제 이 표를 읽는다(`MLXCEL_MAMBA1_SCAN_KERNEL=0`은 그대로 존중). 새 함수 `mamba1_scan_kernel_accepts(x, delta, b, c, a, d)`는 커널을 써도 되는 호출인지 판정한다. 커널이 있고, 기본 장치가 GPU이고, `N <= 32`이며, CUDA에서는 입력 6개의 부동소수점 dtype이 모두 같아야 한다. CUDA에서는 상태를 활성값 dtype으로 주고받고 Metal에서는 float32를 유지한다.
+- **`mlx_cxx_kernels.cpp`**: `mamba1_selective_scan`의 `mx.fast.cuda_kernel` 포트를 추가했다. 두 변형은 반올림 방식이 달라서 `KernelPorts` 표를 따로 둔다(float32 상태의 Metal 커널은 `mamba1_scan_ports`, CUDA 커널은 `mamba1_scan_graph_exact_ports`). 런처는 실행 중인 백엔드의 포트가 어느 표에 있는지로 변형을 고르고 백엔드 종류를 직접 비교하지 않는다(`scripts/ci/check_kernel_port_dispatch.py`가 검사하는 규칙). `mamba1_scan_kernel_available()`은 이제 두 표를 읽는다(`MLXCEL_MAMBA1_SCAN_KERNEL=0`은 그대로 존중). 새 함수 `mamba1_scan_kernel_accepts(x, delta, b, c, a, d)`는 커널을 써도 되는 호출인지 판정한다. 커널이 있고, 기본 장치가 GPU이고, `N <= 32`이며, CUDA에서는 입력 6개의 부동소수점 dtype이 모두 같아야 한다. CUDA에서는 상태를 활성값 dtype으로 주고받고 Metal에서는 float32를 유지한다.
 - **`jamba.rs`**: `JambaMambaMixer::ssm_step`은 `mamba1_scan_kernel_accepts`가 참이면 프리필과 디코드 모두 커널을 호출한다. 테스트 전용 thread-local 카운터가 그래프 루프를 돈 타임스텝 수를 센다.
 - **`mamba.rs`**: 융합 경로는 계속 Metal 전용이다. Mamba의 그래프 경로는 `x_proj`를 타임스텝 하나씩 계산하고 커널 경로는 시퀀스 전체를 한 번에 투영하므로, CUDA에서 바꾸면 출력이 달라진다.
 - **테스트**: `cuda_kernel_is_bit_identical_to_the_graph_scan`, `cuda_kernel_declines_mixed_dtype_inputs`, `jamba_mamba_prefill_takes_the_fused_scan_where_a_port_exists`를 추가했다. Metal 커널의 정확도 테스트는 Metal에서만 돌게 했다.
