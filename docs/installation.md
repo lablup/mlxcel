@@ -420,6 +420,31 @@ make release-rocm
 naming the conflict. The first build compiles the MLX device code with `hipcc`,
 which takes a few minutes on top of the Rust build.
 
+Incremental builds track headers: `hipcc` writes a dependency file next to
+each HIP object, so after you change a header under
+`src/lib/mlx-cpp/patches-rocm/`, the next build recompiles exactly the `.hip`
+files that include it, directly or transitively, and a build with no change
+recompiles none. The overlay reaches the build tree through CMake's
+`configure_file`, which rewrites a copy only when its content differs, so a
+bare `touch` of an overlay header rebuilds nothing; its content has to change.
+
+To force a clean HIP rebuild anyway (for example after upgrading ROCm, or to
+rule out a stale object while bisecting), delete the HIP objects of the build
+profile you use and touch any overlay file so that Cargo reruns the build
+script:
+
+```bash
+rm -rf target/release/build/mlxcel-core-*/out/build/_deps/mlx-build/mlx/backend/rocm/hip_objs
+touch src/lib/mlx-cpp/patches-rocm/mlx/backend/rocm/CMakeLists.txt
+cargo build --release --features rocm
+```
+
+Replace `release` with the profile directory you build (`debug`, `test-fast`,
+and so on). Without the `touch`, Cargo sees no changed input, skips the build
+script and keeps linking the old kernels. `cargo clean -p mlxcel-core
+--release` (or `--profile <name>`) also forces it, but rebuilds the whole MLX
+C++ library too.
+
 ### HIP architecture selection
 
 The build compiles MLX device code for the `gfx` targets that `rocminfo`

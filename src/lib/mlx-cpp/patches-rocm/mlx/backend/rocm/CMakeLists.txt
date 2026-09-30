@@ -201,6 +201,35 @@ else()
   endif()
 endif()
 
+# Header dependencies of the HIP objects. The custom commands below are opaque
+# to CMake, so on its own it only knows that each object depends on its .hip
+# file, and a warm build would keep objects compiled against an old version of
+# a header they include (kernel_utils.hpp, device.h, lru_cache.h, ...). hipcc
+# writes one depfile per object (-MD -MF) and DEPFILE hands it to the
+# generator, which then tracks every header the object read, directly or
+# transitively. hipcc reads this directory's files where they are (the .hip
+# file's own directory and -I${PROJECT_SOURCE_DIR}), so the depfile names them
+# by absolute path here, not wherever they were copied from. DEPFILE needs
+# CMake 3.20 with the Makefile generators; CMP0116 NEW makes Ninja interpret
+# relative depfile paths against this binary directory, as the Makefile
+# generators do. Older CMake falls back to making every object depend on every
+# header of this backend, which rebuilds all HIP objects on any header change:
+# slow, but never stale. MLX's top-level CMakeLists.txt requires 3.25 today, so
+# the fallback only guards against a lower minimum.
+if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.20)
+  if(POLICY CMP0116)
+    cmake_policy(SET CMP0116 NEW)
+  endif()
+  set(HIP_USE_DEPFILE ON)
+  set(HIP_HEADER_DEPS "")
+else()
+  set(HIP_USE_DEPFILE OFF)
+  file(
+    GLOB_RECURSE HIP_HEADER_DEPS CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/*.h" "${CMAKE_CURRENT_SOURCE_DIR}/*.hpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/*.cuh")
+endif()
+
 # Compile each HIP file to object file using custom commands Use -fno-gpu-rdc to
 # avoid needing device link step
 set(HIP_OBJECTS "")
@@ -218,12 +247,22 @@ foreach(hip_src ${HIP_SOURCES})
     set(hip_obj "${HIP_OBJ_DIR}/${hip_name}.o")
   endif()
 
+  if(HIP_USE_DEPFILE)
+    set(hip_dep_flags -MD -MF ${hip_obj}.d)
+    set(hip_depfile_arg DEPFILE ${hip_obj}.d)
+  else()
+    set(hip_dep_flags "")
+    set(hip_depfile_arg "")
+  endif()
+
   add_custom_command(
     OUTPUT ${hip_obj}
     COMMAND
       ${CMAKE_HIP_COMPILER} -c ${hip_src} -o ${hip_obj} -fPIC -DMLX_USE_ROCM
       ${HIP_ARCH_FLAGS} ${HIP_INCLUDE_FLAGS} -std=c++17 -parallel-jobs=${NPROC}
-    DEPENDS ${hip_src}
+      ${hip_dep_flags}
+    DEPENDS ${hip_src} ${HIP_HEADER_DEPS}
+    ${hip_depfile_arg}
     COMMENT "Compiling HIP source ${hip_src}"
     VERBATIM)
 
