@@ -427,11 +427,14 @@ files that include it, directly or transitively, and a build with no change
 recompiles none. The overlay reaches the build tree through CMake's
 `configure_file`, which rewrites a copy only when its content differs, so a
 bare `touch` of an overlay header rebuilds nothing; its content has to change.
+The dependency files also list ROCm and system headers, so updating those
+rebuilds every HIP object on its own. They do not list headers that only the
+device compilation includes (today only rocWMMA's), nor the compiler itself.
 
-To force a clean HIP rebuild anyway (for example after upgrading ROCm, or to
-rule out a stale object while bisecting), delete the HIP objects of the build
-profile you use and touch any overlay file so that Cargo reruns the build
-script:
+To force a clean HIP rebuild anyway (for example after upgrading `hipcc` or
+rocWMMA, or to rule out a stale object while bisecting), delete the HIP objects
+of the build profile you use and touch any overlay file so that Cargo reruns
+the build script:
 
 ```bash
 rm -rf target/release/build/mlxcel-core-*/out/build/_deps/mlx-build/mlx/backend/rocm/hip_objs

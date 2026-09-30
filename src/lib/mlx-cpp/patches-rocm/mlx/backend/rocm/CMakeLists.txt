@@ -212,10 +212,11 @@ endif()
 # by absolute path here, not wherever they were copied from. DEPFILE needs
 # CMake 3.20 with the Makefile generators; CMP0116 NEW makes Ninja interpret
 # relative depfile paths against this binary directory, as the Makefile
-# generators do. Older CMake falls back to making every object depend on every
-# header of this backend, which rebuilds all HIP objects on any header change:
-# slow, but never stale. MLX's top-level CMakeLists.txt requires 3.25 today, so
-# the fallback only guards against a lower minimum.
+# generators do (the 3.25 minimum in MLX's top-level CMakeLists.txt already
+# implies NEW; the explicit set keeps it under a lower minimum). Older CMake
+# falls back to making every object depend on every header under mlx/, which
+# rebuilds all HIP objects on any header change: slow, but not stale for MLX
+# headers. With the 3.25 minimum the fallback is not reachable today.
 if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.20)
   if(POLICY CMP0116)
     cmake_policy(SET CMP0116 NEW)
@@ -226,8 +227,8 @@ else()
   set(HIP_USE_DEPFILE OFF)
   file(
     GLOB_RECURSE HIP_HEADER_DEPS CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/*.h" "${CMAKE_CURRENT_SOURCE_DIR}/*.hpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/*.cuh")
+    "${PROJECT_SOURCE_DIR}/mlx/*.h" "${PROJECT_SOURCE_DIR}/mlx/*.hpp"
+    "${PROJECT_SOURCE_DIR}/mlx/*.cuh")
 endif()
 
 # Compile each HIP file to object file using custom commands Use -fno-gpu-rdc to
