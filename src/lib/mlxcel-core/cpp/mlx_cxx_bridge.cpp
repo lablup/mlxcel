@@ -1352,9 +1352,37 @@ std::unique_ptr<MlxArray> slice_update_dynamic(const MlxArray& src,
                                                const MlxArray& update,
                                                const MlxArray& start,
                                                rust::Slice<const int32_t> axes) {
-    std::vector<int> axes_vec(axes.begin(), axes.end());
+    // The start offsets are data, and the GPU kernels write at them without a
+    // bounds check, so clamp each one to where the update still fits. That
+    // keeps this safe Rust entry point from writing outside `src`.
+    const int ndim = static_cast<int>(src.inner.ndim());
+    const int dim_diff = ndim - static_cast<int>(update.inner.ndim());
+    if (start.inner.size() != axes.size()) {
+        throw std::invalid_argument(
+            "slice_update_dynamic: start must hold one offset per axis");
+    }
+    std::vector<int> axes_vec;
+    std::vector<int32_t> upper;
+    for (int32_t ax : axes) {
+        const int a = ax < 0 ? ax + ndim : ax;
+        if (a < 0 || a >= ndim) {
+            throw std::invalid_argument(
+                "slice_update_dynamic: axis " + std::to_string(ax) +
+                " is out of range for a " + std::to_string(ndim) + "-d source");
+        }
+        const int u = a >= dim_diff ? update.inner.shape(a - dim_diff) : 1;
+        upper.push_back(std::max(0, src.inner.shape(a) - std::min(u, src.inner.shape(a))));
+        axes_vec.push_back(a);
+    }
+    auto lo = mlx::core::array(0, mlx::core::int32);
+    auto hi = mlx::core::array(
+        upper.data(), mlx::core::Shape{static_cast<int>(upper.size())}, mlx::core::int32);
+    auto start_c = mlx::core::clip(
+        mlx::core::reshape(mlx::core::astype(start.inner, mlx::core::int32),
+                           mlx::core::Shape{static_cast<int>(upper.size())}),
+        lo, hi);
     return std::make_unique<MlxArray>(mlx::core::slice_update(
-        src.inner, update.inner, start.inner, std::move(axes_vec)));
+        src.inner, update.inner, start_c, std::move(axes_vec)));
 }
 
 std::unique_ptr<MlxArray> argmax(const MlxArray& a, int32_t axis, bool keepdims) {

@@ -29,7 +29,8 @@
 //! values. The cases cover the None reduce (the path every mlxcel KV cache
 //! write takes through `ffi::slice_update`), the Sum and Max reduce kernels
 //! (through the test-only `slice_update_reduce` bridge), and
-//! `DynamicSliceUpdate` (through the test-only `slice_update_dynamic` bridge).
+//! `DynamicSliceUpdate` (through the test-only `slice_update_dynamic` bridge,
+//! whose start clamping is checked too).
 //! A last case drops the source before evaluating, the case donation exists
 //! for, and checks the output. With the old donation check every held-source
 //! case fails on gfx1151.
@@ -193,6 +194,34 @@ fn dynamic_slice_update_leaves_held_source_unchanged() {
     }
     assert_eq!(values(&out), want, "DynamicSliceUpdate output");
     assert_source_intact("DynamicSliceUpdate", &src, &original);
+}
+
+/// The bridge clamps a dynamic start to where the update fits, so an
+/// out-of-range offset writes the last slot rather than past the buffer.
+#[test]
+fn dynamic_slice_update_clamps_an_out_of_range_start() {
+    if !on_rocm() {
+        eprintln!("skipping: not running on a ROCm device");
+        return;
+    }
+    let _lock = lock_default_device();
+    let src = source(&[16]);
+    let upd = update(&[-1, -2], &[2]);
+    let starts = [(1000, 14), (-5, 0)];
+    for (start, landed) in starts {
+        let start_arr = update(&[start], &[1]);
+        let out = {
+            let _guard = DefaultDeviceGuard::gpu();
+            let out = mlxcel_core::slice_update_dynamic(&src, &upd, &start_arr, &[0])
+                .expect("slice_update_dynamic builds the graph");
+            mlxcel_core::eval(&out);
+            out
+        };
+        let mut want: Vec<i32> = (0..16).collect();
+        want[landed] = -1;
+        want[landed + 1] = -2;
+        assert_eq!(values(&out), want, "start {start} lands at {landed}");
+    }
 }
 
 /// The donation the check still allows: the source is dropped before the

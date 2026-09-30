@@ -895,6 +895,9 @@ fn pooling_cache_remainder_survives_an_overlapping_tail_write() {
     // hands `r_kv` the new tail instead of the remainder it captured.
     // 2 tokens of width 2 leave remainder 2 at ratio 4; 7 more make 9: two
     // full windows (rows 0..8) and a new remainder of 1 written at row 0.
+    // Hold the default device so a concurrent CPU-guarded test cannot move
+    // this one off the GPU.
+    let _lock = mlxcel_core::streams::lock_default_device();
     let vals: Vec<f32> = (0..18).map(|v| v as f32).collect();
     let mut cache = PoolingCache::new(4);
     let head = mlxcel_core::from_slice_f32(&vals[..4], &[1, 2, 2]);
@@ -957,11 +960,12 @@ fn tiny_model_chunked_prefill_with_pool_remainder_matches_cpu() {
         "CPU logits must be finite"
     );
     // On gfx1151 the fixed build agrees with the CPU within 1e-5 relative;
-    // the old donation moved the first logit by about 9e-3 relative.
+    // the old donation moved the first logit by about 9e-3 relative. 3e-3
+    // leaves room for CUDA's default TF32 matmuls.
     assert_close(
         &on_default,
         &on_cpu,
-        1e-3,
+        3e-3,
         "chunked prefill, default device vs CPU",
     );
 }

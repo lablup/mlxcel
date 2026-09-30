@@ -57,9 +57,10 @@ pub struct ModelStateTensor {
 impl ModelStateTensor {
     /// Capture `array` under `name` through `ffi::copy`. The copy is lazy
     /// and, once evaluated, shares `array`'s buffer rather than duplicating
-    /// it. It stays unchanged because a later `slice_update` of `array`
-    /// copies instead of writing in place while this copy still references
-    /// `array` or its buffer (#2052).
+    /// it. Rows inside the captured window stay unchanged because a later
+    /// `slice_update` of `array` copies instead of writing in place while
+    /// this copy still references `array` or its buffer (#2052); the in-place
+    /// decode write (`inplace_slice_write`) only fills rows past the window.
     pub fn new(name: impl Into<String>, array: &MlxArray) -> Self {
         Self {
             name: name.into(),
