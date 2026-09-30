@@ -201,6 +201,44 @@ MLXLM_PYTHON=<mlx-rocm-venv>/bin/python LD_LIBRARY_PATH=/opt/rocm/lib \
 `bench_mlxlm.py`'s `--big-cooldown` replaces the normal cooldown after a big
 model where `bench_decode.sh` adds it, so 60 there matches 30 + 30 here.
 
+`scripts/rocm_gpu_guard.sh -- <command>` is that check as a script: it waits
+for 90 s with `/sys/class/kfd/kfd/proc` empty and no compiler process, runs the
+command under a 1 Hz monitor, reruns it if any sample shows another GPU process
+or a compiler, and appends every sample to `--log`, which is the evidence a
+published page cites.
+
+### ROCm per-kernel decode profile (issue #2061)
+
+`scripts/rocm_decode_profile.sh` answers where ROCm decode time goes, per
+kernel. For each model it takes one plain `mlxcel-bench-decode` run and one
+under `rocprofv3 --kernel-trace --hip-graph-trace --stats -f csv`, both at the
+default pp512/tg128 shape and both through `rocm_gpu_guard.sh`. The bench runs
+with `MLXCEL_BENCH_PHASE_MARKS=1`, which prints the host-clock time of its
+warmup, measured prefill, measured decode and end
+(`src/bin/bench_decode/phase_marks.rs`), and
+`scripts/rocm_decode_profile.py` keeps the dispatches that start inside the
+measured decode. From those it writes a per-kernel table
+(`<run>_decode_kernels.csv`: calls, GPU time, share of decode GPU time, kernel
+class, #1814 port unit) and a summary (`<run>_summary.json`: decode GPU time and
+host gap per token, profiler overhead, share per port unit), next to
+rocprofv3's own whole-process `<run>_kernel_stats.csv`.
+
+```bash
+cargo build --release --features rocm --bin mlxcel-bench-decode
+scripts/rocm_decode_profile.sh models/mlx/Meta-Llama-3.1-8B-Instruct-4bit models/mlx/Qwen3-30B-A3B-4bit
+scripts/rocm_decode_profile.sh --temperature 0.7 --top-p 0.95 --no-plain models/mlx/Meta-Llama-3.1-8B-Instruct-4bit
+python3 scripts/rocm_decode_profile.py report benchmarks/rocm_profiles/gfx1151_<commit>
+```
+
+Results go to `benchmarks/rocm_profiles/gfx1151_<commit>/`; the full traces go
+to a temporary directory (`--trace-dir` to keep them) because they run to
+hundreds of MB. Read shares rather than absolute times from the profiled run:
+the tracer slows decode, and the summary records by how much against the plain
+run. `--temperature` and `--top-p` exist so a profile can see the sampler; the
+greedy default never dispatches it. The published profile and how each kernel
+name was attributed to a port unit are in
+[rocm-decode-profile-gfx1151-2026-09-30.md](benchmark_results/rocm-decode-profile-gfx1151-2026-09-30.md).
+
 ### An op-level number is not a decode number (issue #901)
 
 `examples/rejection_sampling_microbench.rs` reports two speedups per row, and

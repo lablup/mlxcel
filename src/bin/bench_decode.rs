@@ -40,6 +40,9 @@ use mlxcel::vision::merge::InputEmbeddings;
 use mlxcel::{CxxGenerator, LanguageModel, LoadedModel, SamplingConfig};
 use mlxcel_core::cache::KVCacheMode;
 
+#[path = "bench_decode/phase_marks.rs"]
+mod phase_marks;
+
 /// Same-process benchmark for `scripts/bench_decode.sh`.
 #[derive(Parser, Debug)]
 #[command(name = "mlxcel-bench-decode")]
@@ -69,6 +72,18 @@ struct Args {
     /// per-model decode tok/s incomparable across the table.
     #[arg(long)]
     ignore_eos: bool,
+
+    /// Sampling temperature for both passes. The default 0 is greedy argmax,
+    /// which is what the published sweeps measure; a positive value routes
+    /// the draw through the categorical sampler (and its fused kernel where
+    /// the backend has one), so a profile can see what sampling costs (#2061).
+    #[arg(long, default_value_t = 0.0)]
+    temperature: f32,
+
+    /// Nucleus (top-p) threshold for both passes. 1.0 disables it. Only has an
+    /// effect with a positive `--temperature`.
+    #[arg(long, default_value_t = 1.0)]
+    top_p: f32,
 
     /// Generated tokens in the warmup pass.
     #[arg(long, default_value_t = 20)]
@@ -302,11 +317,17 @@ fn prepare_prompt(
 /// both the model's built-in ids and the ones read from the checkpoint config
 /// are covered; biasing only one of the two leaves the other able to end the
 /// run early.
-fn sampling_config(model_path: &Path, model: &LoadedModel, ignore_eos: bool) -> SamplingConfig {
+fn sampling_config(
+    model_path: &Path,
+    model: &LoadedModel,
+    ignore_eos: bool,
+    temperature: f32,
+    top_p: f32,
+) -> SamplingConfig {
     let mut config = build_sampling_config(ResolvedSamplingParams {
-        temperature: 0.0,
+        temperature,
         top_k: 0,
-        top_p: 1.0,
+        top_p,
         min_p: 0.0,
         seed: None,
         repetition_penalty: 1.0,
@@ -387,7 +408,7 @@ fn measured(
     max_tokens: usize,
     sampling: &SamplingConfig,
     kv_cache_mode: KVCacheMode,
-) -> Result<mlxcel::GenerationStats> {
+) -> Result<(mlxcel::GenerationStats, phase_marks::Stamp)> {
     let mut generator = CxxGenerator::new_with_kv_mode(model.num_layers(), kv_cache_mode);
     let (_tokens, stats) = if let Some(embeddings) = prepared.embeddings.as_ref() {
         let (input_embeds, mask) = mlxcel::vlm_runtime::prepared_embedding_refs(embeddings)?;
@@ -402,8 +423,11 @@ fn measured(
     } else {
         generator.generate_with_stats(model, &prepared.tokens, max_tokens, sampling)
     };
+    // Read the clocks before the trailing synchronize: the decode loop has
+    // already waited on its last token, so this is where `decode_time_ms` ends.
+    let end = phase_marks::Stamp::now();
     mlxcel_core::synchronize_default();
-    Ok(stats)
+    Ok((stats, end))
 }
 
 /// Print the MLX allocator counters at a phase boundary (issue #2062).
@@ -510,7 +534,13 @@ fn main() -> Result<()> {
     let mut run_peak = mlxcel_core::get_peak_memory();
     print_memory_phase("after load")?;
     let tokenizer = load_tokenizer(&args.model).unwrap_or(loaded_tokenizer);
-    let sampling = sampling_config(&args.model, &model, args.ignore_eos);
+    let sampling = sampling_config(
+        &args.model,
+        &model,
+        args.ignore_eos,
+        args.temperature,
+        args.top_p,
+    );
 
     // `--prompt-tokens N` synthesizes a deterministic long prompt for prefill
     // benchmarking; otherwise the short-prompt `--prompt` path runs unchanged.
@@ -540,11 +570,15 @@ fn main() -> Result<()> {
         }
     };
 
+    let phase_marks = phase_marks::enabled();
     let prepared = make_prepared()?;
     // Per-phase peaks (issue #2062): reset the high-water mark at each phase
     // boundary and fold the phase peaks into `run_peak`, so the whole-run
     // figure printed at the end is unchanged while each phase is attributable.
     mlxcel_core::reset_peak_memory();
+    if phase_marks {
+        phase_marks::Stamp::now().print("warmup_start");
+    }
     warmup(
         &model,
         &prepared,
@@ -564,7 +598,18 @@ fn main() -> Result<()> {
     // VLM it re-runs the vision encoder against now-warm MLX/Metal state.
     let prepared = make_prepared()?;
     mlxcel_core::reset_peak_memory();
-    let stats = measured(&model, &prepared, args.max_tokens, &sampling, kv_cache_mode)?;
+    if phase_marks {
+        phase_marks::Stamp::now().print("measured_start");
+    }
+    let (stats, measured_end) =
+        measured(&model, &prepared, args.max_tokens, &sampling, kv_cache_mode)?;
+    if phase_marks {
+        // The generator times its decode loop itself; its start is that long
+        // before the loop returned.
+        let decode_ns = (stats.decode_time_ms * 1e6) as u128;
+        measured_end.earlier_by(decode_ns).print("decode_start");
+        measured_end.print("measured_end");
+    }
     run_peak = run_peak.max(mlxcel_core::get_peak_memory());
     print_memory_phase("after measured pass")?;
 
