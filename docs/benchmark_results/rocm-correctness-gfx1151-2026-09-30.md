@@ -4,9 +4,10 @@ Second run for issue #1809, extending [the 2026-09-12 matrix](rocm-correctness-g
 
 What this run establishes, and what it does not:
 
-- **Established on ROCm:** all five checkpoints load and generate, and all sixteen teacher-forced traces complete with no NaN. Getting there found and fixed one ROCm backend defect, a strided-scan launch that wrote past the end of its array and faulted the GPU on both SSM hybrids.
+- **Established on ROCm:** all five checkpoints load and generate, and all sixteen teacher-forced traces, plus the two `w1ctx512` traces, complete with no NaN. Getting there found and fixed one ROCm backend defect, a strided-scan launch that wrote past the end of its array and faulted the GPU on both SSM hybrids.
 - **Established against Metal:** the Metal half was traced on an Apple M5 Max and compared pair by pair. Fifteen of the sixteen pairs pass the first run's criterion, zero disagreements on decided positions at `--decided 2.0`. The sixteenth, `nemotron-3-nano-30b-a3b` at `w1`, is inconclusive: its reference has no position with a 2.0 gap, the same `0 / 0` case the first run recorded for two of its `w1` rows. No pair fails. Across all sixteen the backends disagree on the top-1 token at 155 of 6720 positions and at none of the 2696 decided ones, and the largest reference gap at any disagreement is 1.250 logits (`nemotron-3-nano-30b-a3b` `w256`, the Metal token at ROCm's rank 2).
-- **Not like-for-like:** the Metal reference is an M5 (Apple GPU generation 17, NAX kernels), not the M1 Ultra of the first run; every Nemotron-H pair compares Metal's `fused_moe_forward` with ROCm's `forward_nonfused`; and the VLM rows trace only the language model. The expected fused-SSM-kernel against SSD-graph pairing at `w1` did not occur: no trace here reaches that kernel on Metal. [What is not like-for-like](#what-is-not-like-for-like) says what each of these changes.
+- **Not like-for-like:** the Metal reference is an M5 (Apple GPU generation 17, NAX kernels), not the M1 Ultra of the first run; every Nemotron-H pair compares Metal's `fused_moe_forward` with ROCm's `forward_nonfused`; and the VLM rows trace only the language model. The hybrid `w1` rows are graph against graph: without a prefill no single-token step has SSM state, so Metal does not take its fused SSM update kernel there. [What is not like-for-like](#what-is-not-like-for-like) says what each of these changes.
+- **The fused SSM kernel, added:** two more rows, `w1ctx512` for `granite-4.0-h-tiny` and `nemotron-3-nano-30b-a3b`, prefill 512 tokens before each single-token forward, so Metal runs its fused SSM update kernel and ROCm runs the SSD graph with state. Both pass the same criterion: 0 / 60 and 0 / 71 decided mismatches, largest gap at a disagreement 0.125 and 0.250. Both halves of these two rows are at `3c9edea0`, a later commit than the other sixteen pairs. [The fused SSM kernel against the graph with state](#the-fused-ssm-kernel-against-the-graph-with-state) has the numbers.
 
 ## Environment
 
@@ -119,7 +120,7 @@ What that changes:
 Both sides ran `default`, with no MoE or kernel override. The trace directory's README named two pairings where `default` means a different computation on each backend. Checked against the code at `d1128266`, one of them holds and one does not:
 
 - `nemotron-3-nano-30b-a3b` at every width: Metal takes `fused_moe_forward` (its C++ graph path, since `MLXCEL_FUSED_MOE_RELU2` was unset); ROCm takes `forward_nonfused`, because `use_fused` in `src/models/nemotron_h.rs` requires `custom_kernels_available()`. No environment variable selects `forward_nonfused` on Metal, so there is no Metal control for this pairing. All three Nemotron-H pairs measure two MoE implementations as well as two backends. Its `w8` and `w256` pairs pass with 287 and 216 decided positions, and the three Nemotron-H pairs hold the three largest disagreement gaps of the run (1.250, 0.750, 0.688).
-- `granite-4.0-h-tiny` and `nemotron-3-nano-30b-a3b` at `w1`: the README expected Metal to run the fused SSM update kernel for these single-token steps and ROCm the SSD graph. That is not what these traces ran. The fused step is taken only when the cache already holds an SSM state (`ssm_step_kernel` in `src/models/granitemoehybrid.rs`; `forward_fused` in `src/models/nemotron_h.rs` also needs a conv state), and `logit_trace` builds fresh caches for every chunk. A `w1` chunk has `PREFILL` 0, so its one token always meets an empty cache, and Metal falls back to the same `ssm_step` graph ROCm runs. `w8` and `w256` chunks are 8 and 256 tokens, which never take the single-token branch. So the Mamba2 layers run the same SSD graph code on both backends at every width, and the hybrid `w1` pairs are backend against backend. The flip side: no trace in this matrix exercises the fused SSM update kernel on Metal, so the Metal-only decode kernel that ROCm lacks (#1814) is not compared here at all. A decode-shaped trace with state (single-token chunks after a prefill) would be needed for that.
+- `granite-4.0-h-tiny` and `nemotron-3-nano-30b-a3b` at `w1`: the README expected Metal to run the fused SSM update kernel for these single-token steps and ROCm the SSD graph. That is not what these traces ran. The fused step is taken only when the cache already holds an SSM state (`ssm_step_kernel` in `src/models/granitemoehybrid.rs`; `forward_fused` in `src/models/nemotron_h.rs` also needs a conv state), and `logit_trace` builds fresh caches for every chunk. A `w1` chunk has `PREFILL` 0, so its one token always meets an empty cache, and Metal falls back to the same `ssm_step` graph ROCm runs. `w8` and `w256` chunks are 8 and 256 tokens, which never take the single-token branch. So the Mamba2 layers run the same SSD graph code on both backends at every width, and the hybrid `w1` pairs are graph against graph. The fused SSM update kernel on Metal is compared only by the two `w1ctx512` rows in [the next section](#the-fused-ssm-kernel-against-the-graph-with-state).
 
 granite's MoE runs `SwitchGLU::forward` (`gather_qmm`) on both backends, so every granite pair, like the dense, sliding-window and VLM pairs, runs the same model code on both sides; what differs is the backend and, on Metal, the NAX kernel selection above.
 
@@ -130,6 +131,47 @@ granite's MoE runs `SwitchGLU::forward` (`gather_qmm`) on both backends, so ever
 ### Nemotron-H traces carry loader lines on stdout
 
 `src/models/nemotron_h.rs` prints five `[NemotronH] ...` loading messages with `println!`, so they land in the trace on stdout, on both backends, ahead of the `#` header. `compare_logit_traces.py` does not skip them and exits with `ValueError: not enough values to unpack`. The three Nemotron-H comparisons above were run on copies with those five lines removed (`grep -v '^\[NemotronH\] '`), which drops no data row; the committed traces are unchanged. The other four models print nothing to stdout.
+
+## The fused SSM kernel against the graph with state
+
+The sixteen pairs above never run Metal's fused SSM update kernel, so two rows were added that do. `w1ctx512` = `1 128 8 512` with `MLXCEL_TRACE_START_TOKEN=512`: every one of the 128 chunks prefills the 512 corpus tokens before it into a fresh cache (the prefill's rows are discarded) and then traces one token. That single-token forward meets an existing SSM state, which is the condition for the fused step: `seq_len == 1 && ssm_kernel_available()` with an `ssm_state` in the cache (`src/models/granitemoehybrid.rs`, where `ssm_step_kernel` is taken; `src/models/nemotron_h.rs`, where `forward_fused` also needs a `conv_state`). On Metal granite's Mamba2 layers therefore call `ssm_update_kernel` through `ssm_step_kernel`, and Nemotron-H's call `fused_mamba2_forward`, which fuses the single-token mixer (input projection, convolution, the same `ssm_update_kernel`, output projection); on ROCm `ssm_kernel_available()` is false, so the same forward runs `ssm_step`, the SSD graph, with the prefilled state. It is the only pairing in this document that compares that kernel with the graph.
+
+Apple has no runtime switch that forces the graph path, so fused against graph could not be A/B tested on Metal itself. The routing above is read from the code, not observed.
+
+### Traces and commits
+
+- Metal: `benchmarks/logit_traces/metal_m5_3c9edea0/`, the same M5 Max, built at `3c9edea0` with `cargo build --release --features metal,accelerate --example logit_trace` (binary sha256 `decf1fa9...`, metallib `dca1bb42...` as before). The same two rows were first traced at `d1128266` (`metal_m5_d1128266/*_w1ctx512.tsv`); every data row of those is byte-identical to the `3c9edea0` traces, so the results below hold against either.
+- ROCm: `benchmarks/logit_traces/rocm_gfx1151_3c9edea0/`, built at `3c9edea0` (`origin/main`, the #2082 merge) with `cargo build --release --features rocm --example logit_trace`, binary sha256 `00686315e5fbd9a4fcb9aad26a525b4d89ed60e37acf7a855edbcec2f1a66ae6`. The build ran on this PR's branch at `8e650514`, which differs from `3c9edea0` only under `benchmarks/` and `docs/`.
+
+Both halves share a commit, but it is later than the `c5fe9a16` / `d1128266` pair of the other sixteen rows, and between them main merged ROCm fixes. Where they sit relative to the SSM-with-state path:
+
+- #2070 (LOCAL_FIXES item 24): `SliceUpdate` and `DynamicSliceUpdate` no longer donate a source that is still referenced. Near the path, not on it: the Mamba2 conv state is carried by `concatenate` and the SSM state by `ssm_step`'s return value, neither through `SliceUpdate`; the attention layers' KV-cache writes after the prefill do go through `slice_update`, but they drop the source before evaluation, a pattern #2070 still donates and which it did not find affected (its live cases were DeepSeek-V4 pooling windows and rotating-cache snapshots).
+- #2076 (LOCAL_FIXES item 26): HIP objects rebuild when an included header changes. Build-only, but it matters here: the SSD graph's `segsum` scan depends on the `get_2d_grid_dims` header fix (item 22), and before #2076 an incremental build could keep a HIP object compiled against the old header.
+- #2079 (LOCAL_FIXES item 27): CPU-stream BLAS runs single-threaded over fine-grained memory. Only for ops on a CPU stream; `logit_trace` runs on the GPU stream (the trace header reads `# device GPU`).
+- #2071 (LOCAL_FIXES item 23): `ScaledDotProductAttention::use_fallback` checks the stream device. Only for SDPA on a CPU stream. The same PR made `logit_trace` print a `# device` header line, so the `3c9edea0` traces on both sides have one more line than the `d1128266` ones; `compare_logit_traces.py` reads every `#` line as metadata, so it needs no filtering.
+- #2073 (FFT cache size validation) and #2078 (overlay records, a comment in `rope.hip`) are not on this path.
+
+### Results
+
+`python3 scripts/compare_logit_traces.py <metal.tsv> <rocm.tsv> --decided 2.0`, Metal as the reference, both Nemotron-H files filtered with `grep -v '^\[NemotronH\] '` for the comparison only. Run against the `d1128266` Metal traces instead, every figure is the same. Columns as in [Results against Metal](#results-against-metal).
+
+| Model | Width | Top-1 disagreement | Decided mismatches | Rate | Largest gap | Logit delta p50 / p90 / p99 / max | Perplexity Metal / ROCm | Perplexity delta | Verdict |
+|---|---|---|---|---|---|---|---|---|---|
+| granite-4.0-h-tiny | w1ctx512 | 4 / 128 (3.125%) | 0 / 60 | 0.000% | 0.125 | 0.1250 / 0.3750 / 0.7500 / 1.0000 | 7.090 / 7.234 | +2.024% | pass, rounding class |
+| nemotron-3-nano-30b-a3b | w1ctx512 | 7 / 128 (5.469%) | 0 / 71 | 0.000% | 0.250 | 0.1250 / 0.3750 / 0.6250 / 0.6250 | 7.489 / 7.489 | -0.003% | pass, rounding class |
+
+At the lower thresholds, as `disagreements / decided positions`:
+
+| Model | Width | gap >= 0.5 | gap >= 1.0 | gap >= 2.0 |
+|---|---|---|---|---|
+| granite-4.0-h-tiny | w1ctx512 | 0 / 104 | 0 / 84 | 0 / 60 |
+| nemotron-3-nano-30b-a3b | w1ctx512 | 0 / 106 | 0 / 89 | 0 / 71 |
+
+Every disagreement in both rows is at a reference gap under 0.5 and puts the Metal token at ROCm's rank 2, so the result does not depend on the threshold: both rows are zero at 0.5, 1.0 and 2.0. The perplexities, 7.09 and 7.49 on Metal, are those of a model with 512 tokens of context, unlike the no-context `w1` rows.
+
+granite's +2.024% is the largest perplexity shift after its own `w1` row, so it was checked per position as that one was: ROCm's NLL is higher by 0.020 nats on average with a standard error of 0.020 (about 1.0 standard error), higher at 66 of 128 positions and lower at 58, with the largest single-position difference 2.25 nats. That is within noise for 128 positions. Nemotron-H's mean NLL shift is 0.000 nats (standard error 0.009).
+
+What these rows establish: over 128 decode steps with a 512-token state, ROCm's SSD graph with state and Metal's fused SSM update kernel agree at every decided position, for both hybrids. For Nemotron-H the pair also differs in the MoE path (`fused_moe_forward` on Metal, `forward_nonfused` on ROCm), as every Nemotron-H pair does. What they do not establish: they compare the kernel with the graph across two backends, not the kernel with the graph on one backend; the kernel-against-kernel comparison needs the ROCm port in #1814.
 
 ## ROCm rows
 
@@ -156,7 +198,7 @@ ROCm side only, as first recorded. Perplexity and top-1 accuracy are against the
 
 The `w1` perplexities are huge because each `w1` chunk is a single token scored with no context and no BOS (#1785); the first run's `w1` traces look the same (`llama-3.1-8b-instruct` `w1` on ROCm: 719878), and the Metal `w1` perplexities are of the same size (for example granite 127568, Nemotron-H 14895). It is a property of the shape, the same on both backends, and says nothing about the backend.
 
-Which paths ROCm took, from the code at `c5fe9a16`: granite's MoE goes through `SwitchGLU::forward` (`gather_qmm`) on every backend; Nemotron-H's MoE takes `forward_nonfused` on ROCm because `custom_kernels_available()` is false there; the Mamba2 layers of both hybrids run the SSD graph path at every width because `ssm_kernel_available()` is false on ROCm. Metal would run the fused SSM update for a single-token step with state, but no trace here has one, so Metal ran the same graph. [What is not like-for-like](#what-is-not-like-for-like) covers what this does to the comparison.
+Which paths ROCm took, from the code at `c5fe9a16`: granite's MoE goes through `SwitchGLU::forward` (`gather_qmm`) on every backend; Nemotron-H's MoE takes `forward_nonfused` on ROCm because `custom_kernels_available()` is false there; the Mamba2 layers of both hybrids run the SSD graph path at every width because `ssm_kernel_available()` is false on ROCm. Metal runs the fused SSM update only for a single-token step with state; none of these sixteen rows has one, so Metal ran the same graph. The two `w1ctx512` rows, which do, are in [their own section](#the-fused-ssm-kernel-against-the-graph-with-state). [What is not like-for-like](#what-is-not-like-for-like) covers what this does to the comparison.
 
 ## Generation on ROCm
 
@@ -209,6 +251,7 @@ The remaining three failures belong to other work and are left as they are. The 
 cargo build --release --features rocm --example logit_trace --bin mlxcel
 ./target/release/examples/logit_trace models/mlx/granite-4.0-h-tiny-4bit tests/fixtures/wikitext2_excerpt.txt 8 80 8 512 > rocm_w8.tsv
 MLXCEL_TRACE_START_TOKEN=1536 ./target/release/examples/logit_trace models/mlx/gemma-3-4b-it-4bit tests/fixtures/wikitext2_excerpt.txt 8 40 8 1536 > rocm_w8ctx1536.tsv
+MLXCEL_TRACE_START_TOKEN=512 ./target/release/examples/logit_trace models/mlx/granite-4.0-h-tiny-4bit tests/fixtures/wikitext2_excerpt.txt 1 128 8 512 > rocm_w1ctx512.tsv
 cargo test --features rocm --test rocm_strided_scan -- --test-threads=1
 MLXCEL_FUSED_MOE_RELU2=1 ./target/release/mlxcel generate -m models/mlx/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit -p "The capital of France is" -n 24 -t 0 --no-chat-template
 ```
@@ -222,13 +265,16 @@ python3 scripts/compare_logit_traces.py ${M}_granite-4.0-h-tiny_default_w8.tsv $
 python3 scripts/compare_logit_traces.py \
     <(grep -v '^\[NemotronH\] ' ${M}_nemotron-3-nano-30b-a3b_default_w256.tsv) \
     <(grep -v '^\[NemotronH\] ' ${R}_nemotron-3-nano-30b-a3b_default_w256.tsv) --decided 2.0
+M2=benchmarks/logit_traces/metal_m5_3c9edea0/metal_m5_3c9edea0
+R2=benchmarks/logit_traces/rocm_gfx1151_3c9edea0/rocm_gfx1151_3c9edea0
+python3 scripts/compare_logit_traces.py ${M2}_granite-4.0-h-tiny_default_w1ctx512.tsv ${R2}_granite-4.0-h-tiny_default_w1ctx512.tsv --decided 2.0
 ```
 
 The Metal traces were produced with the loop in `benchmarks/logit_traces/rocm_gfx1151_c5fe9a16/README.md`, built with `cargo build --release --features metal,accelerate --example logit_trace` at `d1128266`; `metal_m5_d1128266/METADATA.txt` and `RUNS.txt` record the host, hashes, arguments and the exit status and row count of every run.
 
 ## Open
 
-- The second acceptance criterion of #1809 (decided-position mismatch reported per model and width against Metal) is now met for all nine models: fifteen of these sixteen pairs pass and `nemotron-3-nano-30b-a3b` `w1` is inconclusive, with the same checkpoint's `w8` and `w256` pairs passing.
-- The fused SSM update kernel on Metal is not covered by any trace in either run, because no trace takes a single-token step with SSM state. Comparing it against ROCm's graph needs a decode-shaped trace (single-token chunks after a prefill) of a hybrid; that also needs the ROCm port in #1814 to compare kernel against kernel.
+- The second acceptance criterion of #1809 (decided-position mismatch reported per model and width against Metal) is now met for all nine models: fifteen of these sixteen pairs pass and `nemotron-3-nano-30b-a3b` `w1` is inconclusive, with the same checkpoint's `w8` and `w256` pairs passing. The two `w1ctx512` rows, which cover the fused SSM update kernel on Metal, also pass.
+- Kernel against kernel for the SSM update still needs the ROCm port in #1814; the `w1ctx512` rows compare Metal's kernel with ROCm's graph.
 - `src/models/nemotron_h.rs` prints its loading messages to stdout, which puts five non-trace lines into every Nemotron-H trace and stops `compare_logit_traces.py`. Either the loader should log to stderr or the comparison script should skip them.
 - No noise floor was measured; the first run's reasoning for not needing one still applies.

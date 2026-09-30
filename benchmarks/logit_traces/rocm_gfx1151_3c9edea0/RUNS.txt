@@ -1,0 +1,2 @@
+rocm_gfx1151_3c9edea0_granite-4.0-h-tiny_default_w1ctx512              exit=0 rows=135 elapsed=137s
+rocm_gfx1151_3c9edea0_nemotron-3-nano-30b-a3b_default_w1ctx512         exit=0 rows=140 elapsed=248s
