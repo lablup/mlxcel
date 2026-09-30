@@ -6,7 +6,7 @@
 | Patch | [`0001-feat-rocm-implement-Hadamard-for-power-of-two-sizes-.patch`](0001-feat-rocm-implement-Hadamard-for-power-of-two-sizes-.patch), apply with `git am` |
 | Applies cleanly | yes, to `75915908` |
 | Depends on | none (conflicts only textually with the FFT PR in `CMakeLists.txt` and `primitives.cpp`, adjacent lines) |
-| mlxcel records | `src/lib/mlx-cpp/patches-rocm/LOCAL_FIXES.md` items 16 |
+| mlxcel records | `src/lib/mlx-cpp/patches-rocm/LOCAL_FIXES.md` item 16 |
 | Reproduction | `repro.py` |
 | Status | ready for manual submission |
 

@@ -80,7 +80,7 @@ export_args=(export-tree --dest "$src" --rocm-from "$rocm_from")
 if [ -n "$mlx_commit" ]; then
   export_args+=(--mlx-commit "$mlx_commit")
 fi
-python3 "$here/rocm_overlay.py" "${export_args[@]}" "${git_args[@]}"
+python3 "$here/rocm_overlay.py" "${export_args[@]}" ${git_args[@]+"${git_args[@]}"}
 
 echo "[api-drift] configuring (log: $work/configure.log)"
 if ! cmake -S "$src" -B "$build" -G "Unix Makefiles" \

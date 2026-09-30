@@ -6,7 +6,7 @@
 | Patch | [`0001-fix-rocm-fall-back-from-fused-SDPA-on-CPU-streams.patch`](0001-fix-rocm-fall-back-from-fused-SDPA-on-CPU-streams.patch), apply with `git am` |
 | Applies cleanly | yes, to `75915908` |
 | Depends on | none |
-| mlxcel records | `src/lib/mlx-cpp/patches-rocm/LOCAL_FIXES.md` items 23 |
+| mlxcel records | `src/lib/mlx-cpp/patches-rocm/LOCAL_FIXES.md` item 23 |
 | Reproduction | `repro.py` |
 | Status | ready for manual submission |
 

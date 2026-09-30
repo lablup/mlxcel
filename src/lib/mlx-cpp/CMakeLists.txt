@@ -90,8 +90,9 @@ function(mlx_apply_source_overlays mlx_source_dir)
   # backend vendored from NripeshN/mlx (mlx/backend/rocm/) plus the MLX core
   # files it hooks, merged at the pinned commit. Copied only for ROCm builds so
   # Metal and CUDA never compile a ROCm-modified core file. Only CMakeLists.txt
-  # and mlx/ are overlays; README.md, UPSTREAM and LOCAL_FIXES.md next to them
-  # are records. See patches-rocm/README.md for the pin-bump procedure.
+  # and mlx/ are overlays; README.md, UPSTREAM, LOCAL_FIXES.md and
+  # CORE_RESIDUAL.diff next to them are records. See patches-rocm/README.md for
+  # the pin-bump procedure.
   if(MLX_BUILD_ROCM)
     set(_rocm_root "${CMAKE_CURRENT_SOURCE_DIR}/patches-rocm")
     if(NOT EXISTS "${_rocm_root}/mlx/backend/rocm")

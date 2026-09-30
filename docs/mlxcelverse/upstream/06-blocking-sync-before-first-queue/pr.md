@@ -6,7 +6,7 @@
 | Patch | [`0001-fix-rocm-set-blocking-sync-before-the-first-HIP-queu.patch`](0001-fix-rocm-set-blocking-sync-before-the-first-HIP-queu.patch), apply with `git am` |
 | Applies cleanly | yes, to `75915908` |
 | Depends on | none (the FFT PR depends on this one) |
-| mlxcel records | `src/lib/mlx-cpp/patches-rocm/LOCAL_FIXES.md` items 20 |
+| mlxcel records | `src/lib/mlx-cpp/patches-rocm/LOCAL_FIXES.md` item 20 |
 | Reproduction | `repro.hip` (standalone HIP program, no MLX) |
 | Status | ready for manual submission |
 

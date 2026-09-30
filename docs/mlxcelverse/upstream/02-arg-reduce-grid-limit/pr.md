@@ -6,7 +6,7 @@
 | Patch | [`0001-fix-rocm-keep-ArgReduce-s-grid-inside-the-per-dimens.patch`](0001-fix-rocm-keep-ArgReduce-s-grid-inside-the-per-dimens.patch), apply with `git am` |
 | Applies cleanly | yes, to `75915908` |
 | Depends on | none |
-| mlxcel records | `src/lib/mlx-cpp/patches-rocm/LOCAL_FIXES.md` items 11 |
+| mlxcel records | `src/lib/mlx-cpp/patches-rocm/LOCAL_FIXES.md` item 11 |
 | Reproduction | `repro.py` |
 | Status | ready for manual submission |
 

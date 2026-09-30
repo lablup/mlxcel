@@ -6,7 +6,7 @@
 | Patch | [`0001-fix-rocm-track-header-dependencies-of-HIP-objects.patch`](0001-fix-rocm-track-header-dependencies-of-HIP-objects.patch), apply with `git am` |
 | Applies cleanly | yes, to `75915908` |
 | Depends on | none |
-| mlxcel records | `src/lib/mlx-cpp/patches-rocm/LOCAL_FIXES.md` items 26 |
+| mlxcel records | `src/lib/mlx-cpp/patches-rocm/LOCAL_FIXES.md` item 26 |
 | Reproduction | `repro.sh` (needs a configured build directory) |
 | Status | ready for manual submission |
 
