@@ -105,7 +105,8 @@ def classify(name: str) -> str:
 # --------------------------------------------------------------------------
 # Inputs
 # --------------------------------------------------------------------------
-@dataclass
+# slots: a full kernel trace is millions of rows, so keep each one small.
+@dataclass(slots=True)
 class Dispatch:
     name: str
     start: int

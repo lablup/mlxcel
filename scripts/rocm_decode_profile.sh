@@ -89,6 +89,21 @@ if [[ -z "$TAG" ]]; then
 fi
 GUARD_LOG="$OUT/guard.log"
 
+# guard.log is published evidence; keep local paths out of it. Runs on every
+# exit (guard exit 75, a rocprofv3 or cp failure, a signal), and replaces the
+# paths literally so '#' and regex characters in them are harmless.
+scrub_guard_log() {
+  [[ -f "$GUARD_LOG" ]] || return 0
+  ROOT_PFX="$ROOT/" TRACE_PFX="$TRACE_DIR" python3 - "$GUARD_LOG" <<'PY' || true
+import os, sys
+path = sys.argv[1]
+text = open(path, errors="surrogateescape").read()
+text = text.replace(os.environ["ROOT_PFX"], "").replace(os.environ["TRACE_PFX"], "<trace-dir>")
+open(path, "w", errors="surrogateescape").write(text)
+PY
+}
+trap scrub_guard_log EXIT
+
 bench_args() {
   printf '%s\n' -m "$1" -p "profile" -n "$MAX_TOKENS" --warmup-tokens "$WARMUP_TOKENS" \
     --ignore-eos --prompt-tokens "$PROMPT_TOKENS" --temperature "$TEMPERATURE" --top-p "$TOP_P"
@@ -127,7 +142,5 @@ for model in "${MODELS[@]}"; do
     --temperature "$TEMPERATURE" \
     || echo "summarize failed for $name; rerun it on $run_dir/${name}_kernel_trace.csv" >&2
 done
-# guard.log is published evidence; keep local paths out of it.
-sed -i "s#${ROOT}/##g; s#${TRACE_DIR}#<trace-dir>#g" "$GUARD_LOG"
 echo "traces: $TRACE_DIR" >&2
 echo "results: $OUT" >&2

@@ -21,7 +21,9 @@
 # evidence is the log itself. Exit status: COMMAND's status from the first clean
 # attempt; 75 when every attempt was contended or --max-wait ran out, in which
 # case nothing COMMAND printed should be used. COMMAND's stdout and stderr pass
-# through unchanged, so callers capture them as usual.
+# through unchanged, so callers capture them as usual. INT and TERM stop COMMAND
+# and the monitor and exit 130 / 143. The three numeric options take plain
+# non-negative integers.
 #
 # The sampling interval is one second: a GPU job shorter than that can in
 # principle be missed. The compiler list matches /proc/<pid>/comm exactly.
@@ -40,20 +42,34 @@ KFD_PROC_DIR="${ROCM_GPU_GUARD_KFD_DIR:-/sys/class/kfd/kfd/proc}"
 COMPILER_RE="${ROCM_GPU_GUARD_COMPILER_RE:-^(cargo|rustc|clang|clang\+\+|clang-[0-9]+|hipcc|nvcc|cc1|cc1plus|ld|ld\.lld|ld\.gold|ld\.bfd|lld|collect2)$}"
 
 usage() {
-  sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --idle-secs)    IDLE_SECS="$2"; shift 2 ;;
-    --max-attempts) MAX_ATTEMPTS="$2"; shift 2 ;;
-    --max-wait)     MAX_WAIT="$2"; shift 2 ;;
-    --log)          LOG="$2"; shift 2 ;;
+    --idle-secs|--max-attempts|--max-wait|--log)
+      [[ $# -ge 2 ]] || { echo "rocm_gpu_guard: $1 needs a value" >&2; exit 2; }
+      case "$1" in
+        --idle-secs)    IDLE_SECS="$2" ;;
+        --max-attempts) MAX_ATTEMPTS="$2" ;;
+        --max-wait)     MAX_WAIT="$2" ;;
+        --log)          LOG="$2" ;;
+      esac
+      shift 2 ;;
     -h|--help)      usage; exit 0 ;;
     --)             shift; break ;;
     *)              echo "rocm_gpu_guard: unknown option $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+for opt in IDLE_SECS MAX_ATTEMPTS MAX_WAIT; do
+  if ! [[ "${!opt}" =~ ^[0-9]+$ ]]; then
+    flag="--$(tr 'A-Z_' 'a-z-' <<<"$opt")"
+    echo "rocm_gpu_guard: $flag needs a non-negative integer, got '${!opt}'" >&2
+    exit 2
+  fi
+done
+# Force base 10 so a value such as 08 is not read as octal.
+IDLE_SECS=$((10#$IDLE_SECS)); MAX_ATTEMPTS=$((10#$MAX_ATTEMPTS)); MAX_WAIT=$((10#$MAX_WAIT))
 [[ $# -gt 0 ]] || { echo "rocm_gpu_guard: no command given" >&2; usage >&2; exit 2; }
 [[ -d "$KFD_PROC_DIR" ]] || { echo "rocm_gpu_guard: $KFD_PROC_DIR not found (no ROCm KFD driver?)" >&2; exit 2; }
 
@@ -93,10 +109,14 @@ compilers() {
 
 # True when $1 is $2 or a descendant of it.
 descends_from() {
-  local pid="$1" root="$2" ppid
+  local pid="$1" root="$2" ppid stat
   while [[ -n "$pid" && "$pid" != 0 && "$pid" != 1 ]]; do
     [[ "$pid" == "$root" ]] && return 0
-    ppid=$(awk '{print $4}' "/proc/$pid/stat" 2>/dev/null) || return 1
+    # comm (field 2) may contain spaces and parentheses; the fields that
+    # follow the last ')' are "state ppid ...".
+    stat=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
+    stat="${stat##*) }"
+    read -r _ ppid _ <<<"$stat"
     pid="$ppid"
   done
   return 1
@@ -104,12 +124,13 @@ descends_from() {
 
 # Holders in $2 (a kfd_holders reading) that are not $1 or its descendants.
 foreign_holders() {
-  local root="$1" entry pid out=()
-  local IFS=,
-  for entry in $2; do
+  local root="$1" entry pid out=() entries
+  IFS=, read -r -a entries <<<"$2"
+  for entry in ${entries[@]+"${entries[@]}"}; do
     pid="${entry%%:*}"
     descends_from "$pid" "$root" || out+=("$entry")
   done
+  local IFS=,
   echo "${out[*]}"
 }
 
@@ -133,6 +154,20 @@ wait_idle() {
   done
   note "idle for ${quiet}s: kfd proc empty and no compiler in every 1 Hz sample"
 }
+
+cmd_pid="" mon_pid=""
+# On INT or TERM stop the command and the monitor instead of orphaning them.
+on_signal() {
+  local sig="$1" code="$2"
+  trap - INT TERM
+  note "caught SIG${sig}: stopping command and monitor"
+  [[ -n "$mon_pid" ]] && kill "$mon_pid" 2>/dev/null || true
+  [[ -n "$cmd_pid" ]] && kill -TERM "$cmd_pid" 2>/dev/null || true
+  wait 2>/dev/null || true
+  exit "$code"
+}
+trap 'on_signal INT 130' INT
+trap 'on_signal TERM 143' TERM
 
 attempt=0
 while (( attempt < MAX_ATTEMPTS )); do

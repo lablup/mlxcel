@@ -27,6 +27,7 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -93,6 +94,50 @@ class GuardTests(unittest.TestCase):
                           env_extra={"ROCM_GPU_GUARD_COMPILER_RE": "^(bash)$"})
             self.assertEqual(r.returncode, 75, r.stderr)
             self.assertIn("gave up after", r.stderr)
+
+    def test_option_values_must_be_plain_non_negative_integers(self):
+        with tempfile.TemporaryDirectory() as kfd:
+            for flag, bad in (("--idle-secs", "abc"), ("--max-attempts", "-1"),
+                              ("--max-wait", "1.5"), ("--idle-secs", "")):
+                r = run_guard(kfd, flag, bad, "--", "true")
+                self.assertEqual(r.returncode, 2, (flag, bad, r.stderr))
+                self.assertIn(f"{flag} needs a non-negative integer", r.stderr)
+            r = run_guard(kfd, "--idle-secs")
+            self.assertEqual(r.returncode, 2)
+            self.assertIn("needs a value", r.stderr)
+
+    def test_a_leading_zero_is_decimal_not_octal(self):
+        with tempfile.TemporaryDirectory() as kfd:
+            r = run_guard(kfd, "--idle-secs", "08", "--max-wait", "1", "--", "true")
+            self.assertEqual(r.returncode, 75, r.stderr)
+            self.assertNotIn("value too great", r.stderr)
+
+    def test_sigterm_stops_the_command_and_the_guard(self):
+        with tempfile.TemporaryDirectory() as kfd, tempfile.TemporaryDirectory() as out:
+            pidfile = pathlib.Path(out) / "cmd.pid"
+            env = dict(os.environ, ROCM_GPU_GUARD_KFD_DIR=kfd,
+                       ROCM_GPU_GUARD_COMPILER_RE=NO_COMPILERS)
+            p = subprocess.Popen(
+                ["bash", str(GUARD), "--idle-secs", "1", "--", "bash", "-c",
+                 f"echo $$ > {pidfile}; exec sleep 30"],
+                env=env, stderr=subprocess.PIPE, text=True)
+            for _ in range(100):
+                if pidfile.exists() and pidfile.read_text().strip():
+                    break
+                time.sleep(0.1)
+            else:
+                p.kill()
+                self.fail("guarded command never started")
+            cmd_pid = int(pidfile.read_text())
+            p.terminate()
+            _, err = p.communicate(timeout=30)
+            self.assertEqual(p.returncode, 143, err)
+            self.assertIn("caught SIGTERM", err)
+            for _ in range(50):
+                if not os.path.exists(f"/proc/{cmd_pid}"):
+                    break
+                time.sleep(0.1)
+            self.assertFalse(os.path.exists(f"/proc/{cmd_pid}"), "command outlived the guard")
 
 
 def k(op: str) -> str:
@@ -193,6 +238,11 @@ class WindowTests(unittest.TestCase):
         d = [rdp.Dispatch("a", 0, 10), rdp.Dispatch("b", 5, 15), rdp.Dispatch("c", 20, 30)]
         self.assertEqual(rdp.busy_ns(d, 0, 100), 25)
         self.assertEqual(rdp.busy_ns(d, 8, 25), 12)
+
+    def test_dispatch_is_slotted(self):
+        d = rdp.Dispatch("a", 1, 4)
+        self.assertFalse(hasattr(d, "__dict__"))
+        self.assertEqual(d.dur, 3)
 
     def test_summarize_cuts_the_decode_window_by_the_phase_marks(self):
         with tempfile.TemporaryDirectory() as tmp:
