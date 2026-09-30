@@ -38,6 +38,10 @@ Current GitHub-facing docs:
 22. `embeddings.md` - the `/v1/embeddings` and `/v1/rerank` endpoints plus `mlxcel embed` and `mlxcel rerank`: embedding and reranker detection, pooling and scoring, multimodal and late-interaction inputs, request/response schemas, server flags, error codes, and family-registration guidance.
 23. `llama-server-compat.md` - the verified llama-server b10621 compatibility boundary: how to read the machine-readable manifest under `compat/llama-server/b10621/`, the compatibility-policy states, the area sharding used by epic #1431, the CI gates, and the deterministic regeneration procedure.
 
+## mlxcelverse maintenance
+
+`mlxcelverse/rocm-overlay.md` is the procedure for keeping the ROCm overlay in step with the MLX pin and with the NripeshN/mlx fork it is vendored from, including the `scripts/mlxcelverse/` tools and the `make verify-rocm-overlay` gate. `mlxcelverse/upstream/` holds the overlay's fork-side fixes prepared as pull requests for NripeshN/mlx, submitted by hand; its README is the index.
+
 ## Architecture Decision Records
 
 `adr/` holds numbered Architecture Decision Records, one significant decision per file, immutable once Accepted. See `adr/README.md` for the index.

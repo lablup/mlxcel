@@ -410,8 +410,8 @@ void RoPE::eval_gpu(
   // in-place rotate. But if the input is donatable we can rotate the first
   // dims_ channels IN PLACE and leave the tail untouched — no copy at all, and
   // `out` simply adopts the input's (possibly strided) layout. Downstream ops
-  // (SDPA) accept non-contiguous q/k, so this is safe. (Port of
-  // ml-explore/mlx#3704, "RoPE without copy".)
+  // (SDPA) accept non-contiguous q/k, so this is safe. (Port of ml-explore/mlx
+  // PR #3704, "RoPE without copy".)
   if (dims_ < D) {
     donated = true;
     if (in.is_donatable() && in.flags().row_contiguous) {

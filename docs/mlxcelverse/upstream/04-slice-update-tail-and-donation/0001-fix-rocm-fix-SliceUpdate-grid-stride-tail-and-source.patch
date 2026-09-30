@@ -1,0 +1,198 @@
+From a7f221302c69d4430d42c3b16362b13522c8162f Mon Sep 17 00:00:00 2001
+From: Jeongkyu Shin <jshin@lablup.com>
+Date: Wed, 30 Sep 2026 15:50:29 +0900
+Subject: [PATCH] fix(rocm): fix SliceUpdate grid-stride tail and source
+ donation
+
+SliceUpdate::eval_gpu's reduce path (Sum, Prod, Max, Min, as built by slice_update_add/prod/max/min and x.at[a:b].add(...)) clamps its grid at 65535 blocks of 256 threads, but slice_update_op_kernel handled one NWORK-element chunk per thread and never read gridDim. Every element past 65535 * 256 * NWORK (16,776,960 for NWORK=1) kept the input value, with no error. The kernel now loops over chunks with a stride of gridDim.x * blockDim.x * NWORK and recomputes the output and update indices for each chunk; a chunk starts at a multiple of NWORK, which divides the innermost dimension, so it never crosses a row.
+
+SliceUpdate::eval_gpu and DynamicSliceUpdate::eval_gpu gave the source's buffer to the output whenever the buffer had one owner, without checking whether the source array itself was still referenced. A second handle to the array, or an unevaluated node that reads it, holds the array but not its buffer, so the update was written into an array that could still be read. Both now go through copy_gpu, which donates only when is_donatable(in, out) holds, as upstream CUDA's SliceUpdate and the upstream DynamicSliceUpdate do. DynamicSliceUpdate also forced donation whenever rocm::graph_active() was set; that override is removed because it donated buffers other arrays shared, and it could not fire while use_hip_graphs() returns false. If HIP graphs are turned back on, accumulation under capture has to be handled in the capture.
+---
+ mlx/backend/gpu/primitives.cpp | 36 +++----------
+ mlx/backend/rocm/indexing.hip  | 96 +++++++++++++++++++---------------
+ 2 files changed, 61 insertions(+), 71 deletions(-)
+
+diff --git a/mlx/backend/gpu/primitives.cpp b/mlx/backend/gpu/primitives.cpp
+index 65df8579..e2a37bba 100644
+--- a/mlx/backend/gpu/primitives.cpp
++++ b/mlx/backend/gpu/primitives.cpp
+@@ -18,13 +18,6 @@
+ #define MLX_PROFILER_RANGE(message)
+ #endif
+ 
+-#if defined(MLX_USE_ROCM)
+-namespace mlx::core::rocm {
+-// True from HIP-graph capture start until the captured graph is destroyed.
+-bool graph_active();
+-} // namespace mlx::core::rocm
+-#endif
+-
+ namespace mlx::core {
+ 
+ void AsStrided::eval_gpu(const std::vector<array>& inputs, array& out) {
+@@ -142,29 +135,14 @@ void DynamicSliceUpdate::eval_gpu(
+     return;
+   }
+ 
+-  // Donate the input buffer when uniquely owned, else copy. During HIP-graph
+-  // capture the async pipeline inflates the buffer's use_count, forcing a full
+-  // copy into a FRESH buffer — the captured graph then reconstructs
+-  // (frozen capture input + current row) every replay and loses accumulation
+-  // (e.g. a growing KV cache → frozen/repeated tokens). For a contiguous,
+-  // fully-materialized buffer the in-place donation is the intended semantics,
+-  // so force it while a graph is being captured.
++  // Copy or donate the input to the output. copy_gpu donates only when
++  // is_donatable(in, out) holds, which requires the source array itself, not
++  // just its data buffer, to have no other reference.
+   auto s = stream();
+-  bool can_donate = in.data_shared_ptr() != nullptr && in.flags().contiguous &&
+-      in.data_size() == in.size() &&
+-      (in.data_shared_ptr().use_count() == 1
+-#if defined(MLX_USE_ROCM)
+-       || mlx::core::rocm::graph_active()
+-#endif
+-      );
+-  if (can_donate) {
+-    out.copy_shared_buffer(in);
+-  } else {
+-    auto ctype = in.flags().contiguous && in.size() == in.data_size()
+-        ? CopyType::Vector
+-        : CopyType::General;
+-    copy_gpu(in, out, in.data_size() == 1 ? CopyType::Scalar : ctype, s);
+-  }
++  auto ctype = in.flags().contiguous && in.size() == in.data_size()
++      ? CopyType::Vector
++      : CopyType::General;
++  copy_gpu(in, out, in.data_size() == 1 ? CopyType::Scalar : ctype, s);
+ 
+   auto out_offset =
+       compute_dynamic_offset(start_indices, out.strides(), axes_, s);
+diff --git a/mlx/backend/rocm/indexing.hip b/mlx/backend/rocm/indexing.hip
+index d117d439..74d43787 100644
+--- a/mlx/backend/rocm/indexing.hip
++++ b/mlx/backend/rocm/indexing.hip
+@@ -466,44 +466,57 @@ __global__ void slice_update_op_kernel(
+     int64_t output_offset) {
+   Op op;
+ 
+-  IdxT idx = (IdxT(blockIdx.x) * IdxT(blockDim.x) + IdxT(threadIdx.x)) * NWORK;
+-  IdxT out_idx;
+-  IdxT update_idx;
+-
+-  if constexpr (OUT_ROW_CONTIG) {
+-    out_idx = idx;
+-  } else {
+-    out_idx = elem_to_loc<IdxT>(
+-        idx, update_shape.data_, output_strides.data_, update_ndim);
+-  }
+-
+-  if constexpr (!UPD_SCALAR) {
+-    if constexpr (UPD_ROW_CONTIG) {
+-      update_idx = idx;
+-    } else {
+-      update_idx = elem_to_loc<IdxT>(
+-          idx, update_shape.data_, update_strides.data_, update_ndim);
+-    }
+-  } else {
+-    update_idx = 0;
+-  }
+-
+   out += output_offset;
+ 
+-  for (int j = 0; j < NWORK && idx < update_size; j++) {
+-    out[out_idx] = op(out[out_idx], updates[update_idx]);
+-    idx++;
++  // Grid-stride over NWORK-element chunks: the launch site caps the grid at
++  // 65535 blocks, so a one-chunk-per-thread kernel would silently leave the
++  // tail of a large update unapplied. Each chunk starts at a multiple of
++  // NWORK and the launch site only picks NWORK when it divides the innermost
++  // dimension, so a chunk never crosses an innermost row and the per-element
++  // stride increments below stay valid.
++  const IdxT chunk_stride =
++      IdxT(gridDim.x) * IdxT(blockDim.x) * IdxT(NWORK);
++  for (IdxT base =
++           (IdxT(blockIdx.x) * IdxT(blockDim.x) + IdxT(threadIdx.x)) * NWORK;
++       base < update_size;
++       base += chunk_stride) {
++    IdxT idx = base;
++    IdxT out_idx;
++    IdxT update_idx;
+ 
+     if constexpr (OUT_ROW_CONTIG) {
+       out_idx = idx;
+     } else {
+-      out_idx += output_strides[update_ndim - 1];
++      out_idx = elem_to_loc<IdxT>(
++          idx, update_shape.data_, output_strides.data_, update_ndim);
++    }
++
++    if constexpr (!UPD_SCALAR) {
++      if constexpr (UPD_ROW_CONTIG) {
++        update_idx = idx;
++      } else {
++        update_idx = elem_to_loc<IdxT>(
++            idx, update_shape.data_, update_strides.data_, update_ndim);
++      }
++    } else {
++      update_idx = 0;
+     }
+ 
+-    if constexpr (UPD_ROW_CONTIG) {
+-      update_idx = idx;
+-    } else if constexpr (!UPD_SCALAR) {
+-      update_idx += update_strides[update_ndim - 1];
++    for (int j = 0; j < NWORK && idx < update_size; j++) {
++      out[out_idx] = op(out[out_idx], updates[update_idx]);
++      idx++;
++
++      if constexpr (OUT_ROW_CONTIG) {
++        out_idx = idx;
++      } else {
++        out_idx += output_strides[update_ndim - 1];
++      }
++
++      if constexpr (UPD_ROW_CONTIG) {
++        update_idx = idx;
++      } else if constexpr (!UPD_SCALAR) {
++        update_idx += update_strides[update_ndim - 1];
++      }
+     }
+   }
+ }
+@@ -1236,18 +1249,14 @@ void SliceUpdate::eval_gpu(const std::vector<array>& inputs, array& out) {
+     return;
+   }
+ 
+-  // Donate the input buffer when uniquely owned, else copy.
+-  bool can_donate = in.data_shared_ptr() != nullptr &&
+-      in.data_shared_ptr().use_count() == 1 && in.flags().contiguous &&
+-      in.data_size() == in.size();
+-  if (can_donate) {
+-    out.copy_shared_buffer(in);
+-  } else {
+-    auto ctype = in.flags().contiguous && in.size() == in.data_size()
+-        ? CopyType::Vector
+-        : CopyType::General;
+-    copy_gpu(in, out, in.data_size() == 1 ? CopyType::Scalar : ctype, stream());
+-  }
++  // Copy or donate the input to the output. copy_gpu donates only when
++  // is_donatable(in, out) holds, which requires the source array itself, not
++  // just its data buffer, to have no other reference: a caller still holding
++  // the source must not see the update.
++  auto ctype = in.flags().contiguous && in.size() == in.data_size()
++      ? CopyType::Vector
++      : CopyType::General;
++  copy_gpu(in, out, in.data_size() == 1 ? CopyType::Scalar : ctype, stream());
+ 
+   // Calculate out strides, initial offset
+   auto [data_offset, out_strides] =
+@@ -1298,6 +1307,9 @@ void SliceUpdate::eval_gpu(const std::vector<array>& inputs, array& out) {
+   int64_t update_size = upd.size();
+   int block_size = 256;
+   int64_t adjusted_size = (update_size + nwork - 1) / nwork;
++  // The 65535-block clamp is safe only because slice_update_op_kernel is
++  // grid-stride: threads past the clamped grid's reach pick up the remaining
++  // NWORK-element chunks in later iterations.
+   int num_blocks = static_cast<int>(
+       std::min((adjusted_size + block_size - 1) / block_size, (int64_t)65535));
+ 

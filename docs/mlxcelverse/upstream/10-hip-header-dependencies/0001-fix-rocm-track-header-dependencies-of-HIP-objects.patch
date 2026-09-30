@@ -1,0 +1,77 @@
+From 5fac1196929e1389ba90e987fafe6640b295f5a6 Mon Sep 17 00:00:00 2001
+From: Jeongkyu Shin <jshin@lablup.com>
+Date: Wed, 30 Sep 2026 15:50:29 +0900
+Subject: [PATCH] fix(rocm): track header dependencies of HIP objects
+
+Each .hip file is compiled by its own add_custom_command whose only dependency was the .hip source, so CMake never learned which headers an object includes, and an incremental build recompiled no HIP object when only a header changed (kernel_utils.hpp, device.h, lru_cache.h, reduce/reduce.hpp and so on). Fresh builds were correct; reused build trees could link kernels compiled against an old header.
+
+Each command now passes -MD -MF <object>.d to hipcc and DEPFILE <object>.d to add_custom_command (CMake 3.20 or newer, with CMP0116 set to NEW where it exists). Older CMake falls back to making every HIP object depend on every header under mlx/, which rebuilds them all on any header change; with the 3.25 minimum in the top-level CMakeLists.txt that branch is not reachable today.
+
+Measured with CMake 3.31.6 and Unix Makefiles on a build of this backend with two more .hip files than this branch (41 HIP objects): before, editing kernel_utils.hpp recompiled none of them; after, it recompiled the 39 whose depfiles name it, an edit to reduce/reduce.hpp recompiled exactly its 7 includers, and a rebuild with no change recompiled none. The depfile comes from the host compilation, so a header included only on the device side is not listed; rocwmma/rocwmma.hpp in flash_attention_wmma.hip is the one such include today.
+---
+ mlx/backend/rocm/CMakeLists.txt | 40 ++++++++++++++++++++++++++++++++-
+ 1 file changed, 39 insertions(+), 1 deletion(-)
+
+diff --git a/mlx/backend/rocm/CMakeLists.txt b/mlx/backend/rocm/CMakeLists.txt
+index f1854457..1bbcc13c 100644
+--- a/mlx/backend/rocm/CMakeLists.txt
++++ b/mlx/backend/rocm/CMakeLists.txt
+@@ -199,6 +199,34 @@ else()
+   endif()
+ endif()
+ 
++# Header dependencies of the HIP objects. The custom commands below are opaque
++# to CMake, so on its own it only knows that each object depends on its .hip
++# file, and a warm build would keep objects compiled against an old version of
++# a header they include (kernel_utils.hpp, device.h, lru_cache.h, ...). hipcc
++# writes one depfile per object (-MD -MF) and DEPFILE hands it to the
++# generator, which then tracks every header the object read, directly or
++# transitively, by absolute path. DEPFILE needs
++# CMake 3.20 with the Makefile generators; CMP0116 NEW makes Ninja interpret
++# relative depfile paths against this binary directory, as the Makefile
++# generators do (the 3.25 minimum in MLX's top-level CMakeLists.txt already
++# implies NEW; the explicit set keeps it under a lower minimum). Older CMake
++# falls back to making every object depend on every header under mlx/, which
++# rebuilds all HIP objects on any header change: slow, but not stale for MLX
++# headers. With the 3.25 minimum the fallback is not reachable today.
++if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.20)
++  if(POLICY CMP0116)
++    cmake_policy(SET CMP0116 NEW)
++  endif()
++  set(HIP_USE_DEPFILE ON)
++  set(HIP_HEADER_DEPS "")
++else()
++  set(HIP_USE_DEPFILE OFF)
++  file(
++    GLOB_RECURSE HIP_HEADER_DEPS CONFIGURE_DEPENDS
++    "${PROJECT_SOURCE_DIR}/mlx/*.h" "${PROJECT_SOURCE_DIR}/mlx/*.hpp"
++    "${PROJECT_SOURCE_DIR}/mlx/*.cuh")
++endif()
++
+ # Compile each HIP file to object file using custom commands Use -fno-gpu-rdc to
+ # avoid needing device link step
+ set(HIP_OBJECTS "")
+@@ -216,12 +244,22 @@ foreach(hip_src ${HIP_SOURCES})
+     set(hip_obj "${HIP_OBJ_DIR}/${hip_name}.o")
+   endif()
+ 
++  if(HIP_USE_DEPFILE)
++    set(hip_dep_flags -MD -MF ${hip_obj}.d)
++    set(hip_depfile_arg DEPFILE ${hip_obj}.d)
++  else()
++    set(hip_dep_flags "")
++    set(hip_depfile_arg "")
++  endif()
++
+   add_custom_command(
+     OUTPUT ${hip_obj}
+     COMMAND
+       ${CMAKE_HIP_COMPILER} -c ${hip_src} -o ${hip_obj} -fPIC -DMLX_USE_ROCM
+       ${HIP_ARCH_FLAGS} ${HIP_INCLUDE_FLAGS} -std=c++17 -parallel-jobs=${NPROC}
+-    DEPENDS ${hip_src}
++      ${hip_dep_flags}
++    DEPENDS ${hip_src} ${HIP_HEADER_DEPS}
++    ${hip_depfile_arg}
+     COMMENT "Compiling HIP source ${hip_src}"
+     VERBATIM)
+ 

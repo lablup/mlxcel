@@ -1,0 +1,27 @@
+From 4956e775308f1b72d23315a6fdfb29008df04574 Mon Sep 17 00:00:00 2001
+From: Jeongkyu Shin <jshin@lablup.com>
+Date: Wed, 30 Sep 2026 15:50:29 +0900
+Subject: [PATCH] fix(rocm): fall back from fused SDPA on CPU streams
+
+ScaledDotProductAttention::use_fallback decided from the shapes alone whether a fused kernel applies, so a call on a CPU stream with a decode-shaped query built the fused primitive, whose eval_cpu throws "NYI". use_fallback now returns true for a CPU stream before the shape checks, as the CUDA backend's use_fallback does.
+---
+ mlx/backend/rocm/scaled_dot_product_attention.cpp | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/mlx/backend/rocm/scaled_dot_product_attention.cpp b/mlx/backend/rocm/scaled_dot_product_attention.cpp
+index 3cd24ce3..3c22b7ec 100644
+--- a/mlx/backend/rocm/scaled_dot_product_attention.cpp
++++ b/mlx/backend/rocm/scaled_dot_product_attention.cpp
+@@ -151,6 +151,12 @@ bool ScaledDotProductAttention::use_fallback(
+     bool /*is_training*/,
+     bool output_logsumexp,
+     Stream s) {
++  // The fused kernels need a GPU stream. Without this check a call on a CPU
++  // stream with a shape the fused kernels accept builds the fused primitive,
++  // whose eval_cpu throws "NYI". The CUDA backend checks the stream first too.
++  if (s.device == Device::cpu) {
++    return true;
++  }
+   // Vector + scalar flash reject output_logsumexp. WMMA flash can emit LSE and
+   // must be counted here or MLX_SDPA_FLASH_VJP never attaches (frontend only
+   // requests LSE when VJP is non-fallback, and VJP needs LSE forward).

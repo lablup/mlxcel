@@ -1,0 +1,221 @@
+From ab584361d1861610250b1bb13e404a05389dce5b Mon Sep 17 00:00:00 2001
+From: Jeongkyu Shin <jshin@lablup.com>
+Date: Wed, 30 Sep 2026 15:50:29 +0900
+Subject: [PATCH] fix(rocm): set blocking-sync before the first HIP queue is
+ created
+
+rocm::device() set hipSetDeviceFlags(hipDeviceScheduleBlockingSync), but the allocator runs first: the first unified allocation's host read calls hipStreamQuery(nullptr) in allocator::Buffer::raw_ptr(), which creates the null stream's queue while active wait is still on, and CLR gives that queue non-interrupt completion signals. After the flag flips, CLR (HwQueueTracker::ActiveSignal in rocvirtual.cpp) no longer swaps such a signal for an interrupt one when a command needs a completion handler, and ROCr rejects async handlers on non-interrupt signals (hsa_amd_signal_async_handler() failed to set the handler! under AMD_LOG_LEVEL=4). The marker a device-wide sync enqueues on the null stream then never signals its waiter, and hipFree hangs in Device::SyncAllStreams. hipFFT's plan destroy was the first thing to hit it, but any hipFree or device-wide sync with pending null-stream work can.
+
+rocm::ensure_device_flags() sets the flag once per device index, thread-safe and touching only that device, and runs before every path that can create a queue ahead of rocm::device(): unified_malloc, both branches of raw_ptr(), the async-pool free streams in the RocmAllocator constructor, gpu::init() and staged_write's device sync. rocm::device() uses it too. If hipSetDevice fails the device is not recorded, so a later call retries; if hipSetDeviceFlags fails one line goes to stderr, so a hang of this kind is not silent.
+
+Measured on gfx1151 with HIP 7.15.26333: with the fix, hipSetDeviceFlags precedes the first "Created SWq" line in the AMD_LOG_LEVEL=3 log. A standalone HIP program without MLX (null-stream query, then the flag, then hipMalloc, a synchronous hipMemcpy, a null-stream kernel and hipFree in a loop) hangs at its first hipFree and completes without the early query.
+---
+ mlx/backend/rocm/allocator.cpp  | 12 +++++
+ mlx/backend/rocm/device.cpp     | 85 +++++++++++++++++++++++++++++----
+ mlx/backend/rocm/device.h       | 14 ++++++
+ mlx/backend/rocm/eval.cpp       |  2 +
+ mlx/backend/rocm/host_stage.cpp |  4 ++
+ 5 files changed, 108 insertions(+), 9 deletions(-)
+
+diff --git a/mlx/backend/rocm/allocator.cpp b/mlx/backend/rocm/allocator.cpp
+index 4489295f..bf49ba4b 100644
+--- a/mlx/backend/rocm/allocator.cpp
++++ b/mlx/backend/rocm/allocator.cpp
+@@ -130,6 +130,9 @@ inline void* unified_malloc(size_t size, bool& is_managed) {
+   void* data = nullptr;
+   hipError_t err;
+   ensure_mlx_device_current();
++  // Often the first HIP work in the process, ahead of rocm::device(): put the
++  // device in blocking-sync mode before any queue exists on it.
++  ensure_current_device_flags();
+ 
+   if (use_finegrained()) {
+     err = hipExtMallocWithFlags(&data, size, hipDeviceMallocFinegrained);
+@@ -326,6 +329,9 @@ RocmAllocator::RocmAllocator()
+         }
+       }
+       (void)hipSetDevice(i);
++      // The free stream below is a queue on device i; flag the device first.
++      // This loop already switches to every pooled device.
++      ensure_device_flags(i);
+       hipMemPool_t pool = nullptr;
+       if (hipDeviceGetDefaultMemPool(&pool, i) == hipSuccess) {
+         mem_pools_[i] = pool;
+@@ -925,11 +931,17 @@ void* Buffer::raw_ptr() {
+   auto& cbuf = *static_cast<rocm::RocmBuffer*>(ptr_);
+ 
+   if (cbuf.device == -1) {
++    // The null-stream query creates the null stream's queue on first use, and
++    // a host read can come before rocm::device() ever runs. Flag the device
++    // the query is about to touch first, or that queue keeps completion
++    // signals a later hipFree waits on forever.
++    rocm::ensure_current_device_flags();
+     if (hipStreamQuery(nullptr) != hipSuccess) {
+       (void)hipStreamSynchronize(nullptr);
+     }
+   } else {
+     // Discrete: host shadow (CUDA: move_to_unified_memory).
++    rocm::ensure_current_device_flags();
+     (void)hipDeviceSynchronize();
+     rocm::allocator().ensure_host_shadow(cbuf);
+     return cbuf.host_shadow;
+diff --git a/mlx/backend/rocm/device.cpp b/mlx/backend/rocm/device.cpp
+index f71cd702..25c294d7 100644
+--- a/mlx/backend/rocm/device.cpp
++++ b/mlx/backend/rocm/device.cpp
+@@ -1182,19 +1182,86 @@ std::unordered_map<int, Device>& get_devices() {
+   return devices;
+ }
+ 
++void ensure_device_flags(int device_index) {
++  if (device_index < 0) {
++    return;
++  }
++  // Lock-free fast path for the common indices: this runs on every unified
++  // allocation and every host read of a unified buffer.
++  static std::atomic<uint64_t> flagged_low{0};
++  const bool low = device_index < 64;
++  const uint64_t bit = low ? (uint64_t{1} << device_index) : 0;
++  if (low && (flagged_low.load(std::memory_order_acquire) & bit)) {
++    return;
++  }
++  static std::mutex mu;
++  static std::vector<int> flagged_high;
++  std::lock_guard<std::mutex> lock(mu);
++  if (low ? (flagged_low.load(std::memory_order_relaxed) & bit) != 0
++          : std::find(flagged_high.begin(), flagged_high.end(), device_index) !=
++              flagged_high.end()) {
++    return;
++  }
++  // Per index, not one process-wide bool: if device 0 were flagged first a
++  // global gate would leave device 1 unflagged. hipSetDeviceFlags applies to
++  // the current device, so switch only when the caller is on another one and
++  // switch back after. Never iterate every device: creating a context or queue
++  // on the other GPU of a multi-GPU host is what wedges the discrete GPU's
++  // queue over a TB5 link, so touch only this device.
++  int prev = -1;
++  const bool have_prev = hipGetDevice(&prev) == hipSuccess;
++  const bool switched = !have_prev || prev != device_index;
++  if (switched && hipSetDevice(device_index) != hipSuccess) {
++    // Could not bind the device, so the flags cannot be applied to it. Clear
++    // the error and do not record the device as flagged, so a later call can
++    // try again.
++    (void)hipGetLastError();
++    return;
++  }
++  const hipError_t flags_err = hipSetDeviceFlags(hipDeviceScheduleBlockingSync);
++  if (flags_err != hipSuccess) {
++    // Not fatal (the device then keeps its default wait mode, as it would
++    // have before this helper existed); clear the error so it does not
++    // surface from an unrelated later call. Recorded as done either way so a
++    // failing device is not retried on every allocation. Say so once on
++    // stderr: without blocking-sync a hang in hipFree would otherwise be
++    // silent.
++    (void)hipGetLastError();
++    std::fprintf(
++        stderr,
++        "[ROCm] hipSetDeviceFlags(hipDeviceScheduleBlockingSync) failed "
++        "for device %d: %s\n",
++        device_index,
++        hipGetErrorString(flags_err));
++  }
++  if (switched && have_prev) {
++    (void)hipSetDevice(prev);
++  }
++  if (low) {
++    flagged_low.fetch_or(bit, std::memory_order_release);
++  } else {
++    flagged_high.push_back(device_index);
++  }
++}
++
++void ensure_current_device_flags() {
++  int current = -1;
++  if (hipGetDevice(&current) == hipSuccess) {
++    ensure_device_flags(current);
++  }
++}
++
+ Device& device(mlx::core::Device device) {
+   auto& devices = get_devices();
+   auto it = devices.find(device.index);
+   if (it == devices.end()) {
+-    // Set blocking sync flags on THIS device (per index, not a single global
+-    // bool: if device 0 were touched first the global gate would leave device 1
+-    // unflagged). Must happen while this device is current and before its
+-    // context is created — i.e. before the Device is constructed. Iterating
+-    // every device would create a context/queue on the other GPU too; on a
+-    // multi-GPU host that cross-device coexistence is what wedges the discrete
+-    // GPU's queue over a TB5 link, so touch only this device.
+-    hipSetDevice(device.index);
+-    hipSetDeviceFlags(hipDeviceScheduleBlockingSync);
++    // Bind this device (callers rely on it being current afterwards) and make
++    // sure it is in blocking-sync mode before the Device and its streams are
++    // constructed. The first unified allocation usually got there first, since
++    // the allocator runs before the first stream exists; see
++    // ensure_device_flags() for why the order matters.
++    (void)hipSetDevice(device.index);
++    ensure_device_flags(device.index);
+     it = devices.try_emplace(device.index, device.index).first;
+   }
+   return it->second;
+diff --git a/mlx/backend/rocm/device.h b/mlx/backend/rocm/device.h
+index fad1f176..94293b36 100644
+--- a/mlx/backend/rocm/device.h
++++ b/mlx/backend/rocm/device.h
+@@ -398,6 +398,20 @@ class Device {
+   std::mutex encoders_mtx_;
+ };
+ 
++// Put `device_index` in blocking-sync wait mode (hipDeviceScheduleBlockingSync)
++// once per process, before MLX creates the first HIP queue on it. Thread-safe;
++// touches only that device, and leaves the calling thread's current device as
++// it found it. Call it before any HIP call that can create a queue on a device
++// (a null-stream query, sync, copy or launch, or a stream creation) on a path
++// that can run before rocm::device(): the order is what matters. CLR types a
++// queue's completion signals by the wait mode in force when the queue is
++// created and never re-types them, so a queue created before the flag keeps
++// signals that cannot carry the completion handlers a later hipFree or device
++// sync attaches, and that wait never returns.
++void ensure_device_flags(int device_index);
++// ensure_device_flags() for the calling thread's current HIP device.
++void ensure_current_device_flags();
++
+ Device& device(mlx::core::Device device);
+ CommandEncoder& get_command_encoder(Stream s);
+ void clear_all_encoders();
+diff --git a/mlx/backend/rocm/eval.cpp b/mlx/backend/rocm/eval.cpp
+index 0bb032b1..a0988394 100644
+--- a/mlx/backend/rocm/eval.cpp
++++ b/mlx/backend/rocm/eval.cpp
+@@ -24,6 +24,8 @@ void init() {
+   auto d = mlx::core::default_device();
+   if (d.type == mlx::core::Device::gpu) {
+     (void)hipSetDevice(d.index);
++    // Before the hipFree below or anything else can create a queue.
++    rocm::ensure_device_flags(d.index);
+   }
+   hipFree(nullptr);
+ }
+diff --git a/mlx/backend/rocm/host_stage.cpp b/mlx/backend/rocm/host_stage.cpp
+index f0b555aa..96d6e89f 100644
+--- a/mlx/backend/rocm/host_stage.cpp
++++ b/mlx/backend/rocm/host_stage.cpp
+@@ -8,6 +8,7 @@
+ #include <stdexcept>
+ 
+ #include "mlx/array.h"
++#include "mlx/backend/rocm/device.h"
+ #include "mlx/io/load.h"
+ 
+ namespace mlx::core::rocm {
+@@ -80,6 +81,9 @@ bool staged_write(io::Writer& out, const array& a) {
+   // stream is drained. Sync the device so the DMA cannot observe a half-written
+   // buffer: MLX ROCm streams are hipStreamNonBlocking, so a plain hipMemcpy on
+   // the NULL stream does NOT order against them.
++  // A checkpoint save can be the first sync on this thread's device; flag it
++  // before the sync touches the null stream.
++  rocm::ensure_current_device_flags();
+   if (hipDeviceSynchronize() != hipSuccess) {
+     (void)hipGetLastError();
+     return false;

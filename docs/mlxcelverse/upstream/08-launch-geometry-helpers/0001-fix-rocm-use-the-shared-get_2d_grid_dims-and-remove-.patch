@@ -1,0 +1,101 @@
+From eede8b3fb337945c30577630b993452a1d8adddc Mon Sep 17 00:00:00 2001
+From: Jeongkyu Shin <jshin@lablup.com>
+Date: Wed, 30 Sep 2026 15:50:29 +0900
+Subject: [PATCH] fix(rocm): use the shared get_2d_grid_dims and remove
+ get_launch_args
+
+kernel_utils.hpp carried its own body for get_2d_grid_dims(shape, strides, divisor), an older form that removed a dimension from the divisor only when the whole dimension divided it and never divided the grid by the remainder. Scan::eval_gpu sizes the strided_scan grid with it, so for [1, 48, 24, 24] scanned along axis 2 it returned 576 blocks where 48 cover the array, and every extra block read and wrote axis_size * stride elements past the end (an HSA_STATUS_ERROR_MEMORY_FAULT in strided_scan at that shape, which is the segsum of a 48-head Mamba2 layer over a 24-token chunk; silent out-of-bounds writes where the overshoot stays in mapped memory). The overload now delegates to get_2d_grid_dims_common, as the non-divisor overload beside it and the CUDA backend do.
+
+get_launch_args fixed the block at 256 threads, ignored shape, strides and large, and capped the grid at 65535 blocks, with nothing saying the kernel had to be grid-stride; a one-index-per-thread kernel launched with it leaves every element past 65535 * 256 unwritten. Upstream CUDA's helper of the same name does not cap x, so a kernel ported from mlx/backend/cuda with its call intact would compile here and inherit the truncation. Nothing calls it, so it is replaced by a deleted template with a comment, and a ported call fails to compile at the explanation.
+---
+ mlx/backend/rocm/kernel_utils.hpp | 68 ++++++++++---------------------
+ 1 file changed, 21 insertions(+), 47 deletions(-)
+
+diff --git a/mlx/backend/rocm/kernel_utils.hpp b/mlx/backend/rocm/kernel_utils.hpp
+index a6bfd48e..4ab4e834 100644
+--- a/mlx/backend/rocm/kernel_utils.hpp
++++ b/mlx/backend/rocm/kernel_utils.hpp
+@@ -182,36 +182,17 @@ inline dim3 get_2d_grid_dims(const Shape& shape, const Strides& strides) {
+   return dim3(std::get<0>(dims), std::get<1>(dims), std::get<2>(dims));
+ }
+ 
++// Delegates to the shared helper, as the CUDA backend does
++// (`mlx/backend/cuda/kernel_utils.cu`). The local copy this replaces removed a dimension from the divisor only when the whole dimension
++// divided it and never divided the product by what was left, so a shape such
++// as [1, 48, 24, 24] with divisor 24 * 24 returned 576 blocks instead of 48.
++// `strided_scan` then launched twelve times the blocks it needed, and every
++// extra block read and wrote past the end of the array (a GPU memory fault at
++// [1, 48, 24, 24], silent out-of-bounds writes at smaller overshoots).
+ inline dim3
+ get_2d_grid_dims(const Shape& shape, const Strides& strides, size_t divisor) {
+-  // Compute the 2d grid dimensions such that the total size of the grid is
+-  // divided by divisor.
+-  size_t grid_x = 1;
+-  size_t grid_y = 1;
+-  for (size_t i = 0; i < shape.size(); ++i) {
+-    if (strides[i] == 0) {
+-      continue;
+-    }
+-
+-    // No need to add this shape we can just remove it from the divisor.
+-    if (divisor % shape[i] == 0) {
+-      divisor /= shape[i];
+-      continue;
+-    }
+-
+-    if (grid_x * shape[i] < UINT32_MAX) {
+-      grid_x *= shape[i];
+-    } else {
+-      grid_y *= shape[i];
+-    }
+-  }
+-  if (grid_y > UINT32_MAX || grid_x > UINT32_MAX) {
+-    throw std::runtime_error("Unable to safely factor shape.");
+-  }
+-  if (grid_y > grid_x) {
+-    std::swap(grid_x, grid_y);
+-  }
+-  return dim3(static_cast<uint32_t>(grid_x), static_cast<uint32_t>(grid_y), 1);
++  Dims dims = get_2d_grid_dims_common(shape, strides, divisor);
++  return dim3(std::get<0>(dims), std::get<1>(dims), std::get<2>(dims));
+ }
+ 
+ inline std::pair<dim3, dim3> get_grid_and_block(int dim0, int dim1, int dim2) {
+@@ -223,25 +204,18 @@ inline std::pair<dim3, dim3> get_grid_and_block(int dim0, int dim1, int dim2) {
+   return {grid_dims, block_dims};
+ }
+ 
+-// Get the num_blocks and block_dims for a kernel
+-inline std::tuple<dim3, uint> get_launch_args(
+-    size_t size,
+-    const Shape& shape,
+-    const Strides& strides,
+-    bool large,
+-    int work_per_thread = 1) {
+-  size_t adjusted_size = (size + work_per_thread - 1) / work_per_thread;
+-  int block_size = 256;
+-  int num_blocks = (adjusted_size + block_size - 1) / block_size;
+-  num_blocks = std::min(num_blocks, 65535);
+-  return {dim3(num_blocks), block_size};
+-}
+-
+-inline std::tuple<dim3, uint>
+-get_launch_args(const array& arr, bool large, int work_per_thread = 1) {
+-  return get_launch_args(
+-      arr.size(), arr.shape(), arr.strides(), large, work_per_thread);
+-}
++// get_launch_args is deliberately unavailable in this backend. The version
++// that was here capped the grid at
++// 65535 blocks of 256 threads and returned it with no sign that the kernel had
++// to be grid-stride, so a one-index-per-thread kernel launched with it left
++// every element past 65535 * 256 unwritten. It had no caller. Upstream CUDA's
++// helper of the same name does not cap x, so a kernel ported from
++// mlx/backend/cuda that calls it would inherit the truncation silently. No
++// kernel here used it; launch sites compute their geometry themselves, and a
++// grid clamped at a launch site is only correct if that kernel is grid-stride
++// (see binary.hip, unary.hip). Any call to this name fails to compile.
++template <typename... Args>
++void get_launch_args(Args&&...) = delete;
+ 
+ // Ceil division utility
+ template <typename T>

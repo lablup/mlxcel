@@ -804,7 +804,7 @@ verify-rocm-smoke: ## ROCm smoke: build, link and generate on the GPU, asserting
 # "does a real forward pass still run on this device" answer even while the
 # suite is red.
 .PHONY: verify-rocm
-verify-rocm: verify-versions verify-kernel-dtype-keys verify-kernel-port-dispatch verify-llama-compat verify-fmt verify-clippy-rocm verify-rocm-smoke verify-test-rocm ## Run the ROCm gate locally on an AMD host (issue #1811)
+verify-rocm: verify-versions verify-kernel-dtype-keys verify-kernel-port-dispatch verify-llama-compat verify-rocm-overlay verify-fmt verify-clippy-rocm verify-rocm-smoke verify-test-rocm ## Run the ROCm gate locally on an AMD host (issue #1811)
 	@echo "$(GREEN)[verify-rocm] OK$(RESET)"
 
 .PHONY: verify-versions
@@ -826,6 +826,23 @@ verify-kernel-dtype-keys: ## Assert every CUDA and HIP JIT kernel launch keys it
 verify-kernel-port-dispatch: ## Assert every fused-kernel launcher chooses its port through select_kernel_port (issues #1801, #1885)
 	@echo "$(CYAN)[verify] kernel port dispatch...$(RESET)"
 	@python3 scripts/ci/check_kernel_port_dispatch.py
+
+# Offline half of the mlxcelverse ROCm overlay checks (issue #1813). It reads
+# only files in this repository: patches-rocm/UPSTREAM must name the build's MLX
+# pin (so a pin bump that skips the ROCm retarget fails here, on any host, not
+# first on an AMD machine), the README counts must be the real ones,
+# LOCAL_FIXES.md must be numbered without gaps, and CORE_RESIDUAL.diff must have
+# been generated for the current commits and core file contents. It is in both
+# `verify` and `verify-rocm` because pin bumps are usually made on a Mac. The
+# online checks (`rocm_overlay.py drift`, `sync_from_fork.sh`,
+# `check_api_drift.sh`) fetch or build and stay manual; see
+# docs/mlxcelverse/rocm-overlay.md. rocm_overlay_test.sh is the tool's own
+# negative coverage on a synthetic fork and pin history.
+.PHONY: verify-rocm-overlay
+verify-rocm-overlay: ## Assert the ROCm overlay records agree with the MLX pin and the tree (issue #1813)
+	@echo "$(CYAN)[verify] ROCm overlay records...$(RESET)"
+	@python3 scripts/mlxcelverse/rocm_overlay.py records
+	@bash scripts/mlxcelverse/rocm_overlay_test.sh
 
 .PHONY: verify-binary-assets
 verify-binary-assets: ## Assert every tracked binary file is declared with a size budget
@@ -972,7 +989,7 @@ bump-version: ## Release: set every version-tracking crate to VERSION and sync C
 	@$(MAKE) --no-print-directory verify-versions
 
 .PHONY: verify
-verify: verify-versions verify-kernel-dtype-keys verify-kernel-port-dispatch verify-llama-compat verify-fmt verify-clippy verify-test ## Run the full CI-faithful gate locally (recommended before push)
+verify: verify-versions verify-kernel-dtype-keys verify-kernel-port-dispatch verify-llama-compat verify-rocm-overlay verify-fmt verify-clippy verify-test ## Run the full CI-faithful gate locally (recommended before push)
 	@echo "$(GREEN)[verify] OK: matches the nightly-verify GitHub Actions job$(RESET)"
 
 .PHONY: verify-clean

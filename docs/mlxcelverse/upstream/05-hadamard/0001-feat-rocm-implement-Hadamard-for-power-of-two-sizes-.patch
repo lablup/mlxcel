@@ -1,0 +1,215 @@
+From 90edcab36a61ab33bf12ed3a4329774af48990c2 Mon Sep 17 00:00:00 2001
+From: Jeongkyu Shin <jshin@lablup.com>
+Date: Wed, 30 Sep 2026 15:50:29 +0900
+Subject: [PATCH] feat(rocm): implement Hadamard for power-of-two sizes up to
+ 8192
+
+Hadamard was a NO_GPU stub. hadamard.hip adds a single-stage radix-2 butterfly in shared memory for m == 1 and a power-of-two last axis up to 8192, which covers the head dimensions (64, 128, 256) of Hadamard-rotated KV caches. Larger n and the m in {12, 20, 28} families throw a message naming the limit rather than returning a wrong answer; the CUDA backend covers them by generating a radix-m codelet through NVRTC. The scale is the primitive's scale_ (MLX defaults it to 1/sqrt(n)), accumulation is in float for every element type, and like the CUDA kernel the grid is clamped at 65535 blocks with a grid-stride loop.
+
+Checked against the Metal backend on an M1 Ultra: norm ratio 1.000000 within 1e-5 at n = 64, 128 and 256; float16 relative RMS about 2.0e-4 (Metal 3.8e-4 to 5.0e-4, because this kernel keeps the butterfly in float and rounds once); float32 relative RMS about 1e-7.
+---
+ mlx/backend/rocm/CMakeLists.txt |   1 +
+ mlx/backend/rocm/hadamard.hip   | 169 ++++++++++++++++++++++++++++++++
+ mlx/backend/rocm/primitives.cpp |   1 -
+ 3 files changed, 170 insertions(+), 1 deletion(-)
+ create mode 100644 mlx/backend/rocm/hadamard.hip
+
+diff --git a/mlx/backend/rocm/CMakeLists.txt b/mlx/backend/rocm/CMakeLists.txt
+index f1854457..f7eeeb8e 100644
+--- a/mlx/backend/rocm/CMakeLists.txt
++++ b/mlx/backend/rocm/CMakeLists.txt
+@@ -148,6 +148,7 @@ set(HIP_SOURCES
+     ${CMAKE_CURRENT_SOURCE_DIR}/copy/copy_general_input.hip
+     ${CMAKE_CURRENT_SOURCE_DIR}/copy/copy_general_dynamic.hip
+     ${CMAKE_CURRENT_SOURCE_DIR}/distributed.hip
++    ${CMAKE_CURRENT_SOURCE_DIR}/hadamard.hip
+     ${CMAKE_CURRENT_SOURCE_DIR}/indexing.hip
+     ${CMAKE_CURRENT_SOURCE_DIR}/layer_norm.hip
+     ${CMAKE_CURRENT_SOURCE_DIR}/logsumexp.hip
+diff --git a/mlx/backend/rocm/hadamard.hip b/mlx/backend/rocm/hadamard.hip
+new file mode 100644
+index 00000000..61631994
+--- /dev/null
++++ b/mlx/backend/rocm/hadamard.hip
+@@ -0,0 +1,169 @@
++// Copyright © 2025 Apple Inc.
++
++// Hadamard transform for the ROCm backend.
++//
++// The CUDA backend builds this kernel through NVRTC with a generated codelet
++// for the radix-m matrix, which lets it cover every size MLX accepts, that is
++// n = m * 2^k for m in {1, 12, 20, 28}. This port is compiled ahead of time and
++// covers m == 1 with n a power of two up to 8192, which includes the head
++// dimensions (64, 128, 256) that Hadamard-rotated KV caches use. The n > 8192
++// case is where the CUDA path splits the transform into two stages; this file
++// throws for it, and for m != 1, rather than returning a wrong answer.
++//
++// The scale comes from the primitive, not from this file. MLX defaults it to
++// 1/sqrt(n), the orthonormal scaling that makes the transform an involution:
++// hadamard_transform(hadamard_transform(x)) returns x. A kernel that hardcoded
++// a different scale would pass a round-trip test that only checks shape or
++// finiteness while silently corrupting values.
++//
++// The involution is a property of that one scale, not of the transform. For the
++// unscaled sign matrix H, H * H = n * I, so applying scale s twice gives
++// s^2 * n * I: the round trip is the identity only at s = 1/sqrt(n). At any
++// other scale the inverse scale is 1/(s * n) and the forward norm ratio is
++// s * sqrt(n).
++
++#include "mlx/backend/rocm/device.h"
++#include "mlx/backend/rocm/allocator.h"
++#include "mlx/backend/rocm/kernel_utils.hpp"
++#include "mlx/backend/common/hadamard.h"
++#include "mlx/backend/gpu/copy.h"
++#include "mlx/dtype_utils.h"
++#include "mlx/primitives.h"
++
++#include <hip/hip_runtime.h>
++
++#include <algorithm>
++#include <cassert>
++#include <sstream>
++#include <stdexcept>
++
++namespace mlx::core {
++
++namespace rocm {
++
++// Largest transform this single-stage kernel accepts. It is bounded by shared
++// memory: the buffer holds `n` floats, so 8192 needs 32 KiB of the 64 KiB a
++// gfx11 workgroup has. It is also the size at which the CUDA path switches to
++// its two-stage decomposition, so the two backends agree on where the simple
++// path ends.
++constexpr int MAX_HADAMARD_N = 8192;
++constexpr int HADAMARD_BLOCK_THREADS = 256;
++
++// One block per transform, grid-stride over transforms so a capped grid still
++// covers every row. Accumulation is in float regardless of the element type,
++// which matches what the CUDA kernel does and keeps the fp16 round-trip inside
++// a single rounding of the input.
++template <typename T>
++__global__ void hadamard_pow2_kernel(
++    const T* in,
++    T* out,
++    float scale,
++    int n,
++    int64_t num_transforms) {
++  extern __shared__ float buf[];
++
++  for (int64_t transform = blockIdx.x; transform < num_transforms;
++       transform += gridDim.x) {
++    const int64_t base = transform * static_cast<int64_t>(n);
++
++    for (int idx = threadIdx.x; idx < n; idx += blockDim.x) {
++      buf[idx] = static_cast<float>(in[base + idx]);
++    }
++    __syncthreads();
++
++    // Iterative radix-2 butterfly. At stage `h` the pair (j, j + h) is
++    // combined, where j skips the elements already paired at this stage.
++    for (int h = 1; h < n; h <<= 1) {
++      for (int i = threadIdx.x; i < n / 2; i += blockDim.x) {
++        const int k = i & (h - 1);
++        const int j = ((i - k) << 1) + k;
++        const float a = buf[j];
++        const float b = buf[j + h];
++        buf[j] = a + b;
++        buf[j + h] = a - b;
++      }
++      __syncthreads();
++    }
++
++    for (int idx = threadIdx.x; idx < n; idx += blockDim.x) {
++      out[base + idx] = static_cast<T>(buf[idx] * scale);
++    }
++    __syncthreads();
++  }
++}
++
++} // namespace rocm
++
++namespace {
++
++void hadamard_pow2_contiguous(
++    const array& x,
++    array& y,
++    int n,
++    float scale,
++    const Stream& s) {
++  auto& encoder = rocm::get_command_encoder(s);
++
++  const int64_t num_transforms = x.size() / n;
++  // Clamp like the CUDA backend does; the kernel is grid-stride, so the two
++  // together cover the whole input.
++  const int num_blocks =
++      static_cast<int>(std::min<int64_t>(num_transforms, 65535));
++  const int block_threads = std::min(rocm::HADAMARD_BLOCK_THREADS, n / 2);
++  const size_t shared_bytes = static_cast<size_t>(n) * sizeof(float);
++
++  encoder.set_input_array(x);
++  encoder.set_output_array(y);
++
++  dispatch_float_types(x.dtype(), "[hadamard]", [&](auto type_tag) {
++    using T = hip_type_t<MLX_GET_TYPE(type_tag)>;
++    encoder.add_kernel_node(
++        &rocm::hadamard_pow2_kernel<T>,
++        dim3(num_blocks),
++        dim3(block_threads),
++        shared_bytes,
++        gpu_ptr<T>(x),
++        gpu_ptr<T>(y),
++        scale,
++        n,
++        num_transforms);
++  });
++}
++
++} // namespace
++
++void Hadamard::eval_gpu(const std::vector<array>& inputs, array& out) {
++  assert(inputs.size() == 1);
++
++  auto& in = inputs[0];
++  if (in.dtype() != float16 && in.dtype() != bfloat16 &&
++      in.dtype() != float32) {
++    throw std::invalid_argument("[hadamard] Unsupported type.");
++  }
++
++  // n = m * 2^k where m is in {1, 12, 20, 28}.
++  auto [n, m] = decompose_hadamard(in.shape().back());
++  if (m != 1 || n > rocm::MAX_HADAMARD_N) {
++    std::ostringstream msg;
++    msg << "[hadamard] ROCm supports a power-of-two last axis up to "
++        << rocm::MAX_HADAMARD_N << "; got " << in.shape().back()
++        << " (m=" << m << ", n=" << n << ").";
++    throw std::invalid_argument(msg.str());
++  }
++
++  auto& s = stream();
++  auto& encoder = rocm::get_command_encoder(s);
++  if (in.flags().row_contiguous) {
++    if (in.is_donatable()) {
++      out.copy_shared_buffer(in);
++    } else {
++      out.set_data(mlx::core::rocm::malloc_async(out.nbytes(), encoder));
++    }
++    hadamard_pow2_contiguous(in, out, n, scale_, s);
++  } else {
++    copy_gpu(in, out, CopyType::General, s);
++    hadamard_pow2_contiguous(out, out, n, scale_, s);
++  }
++}
++
++} // namespace mlx::core
+diff --git a/mlx/backend/rocm/primitives.cpp b/mlx/backend/rocm/primitives.cpp
+index 0815bdb2..6ec2764e 100644
+--- a/mlx/backend/rocm/primitives.cpp
++++ b/mlx/backend/rocm/primitives.cpp
+@@ -30,7 +30,6 @@ namespace mlx::core {
+ 
+ NO_GPU(BlockMaskedMM)
+ NO_GPU(FFT)
+-NO_GPU(Hadamard)
+ NO_GPU_MULTI(LUF)
+ NO_GPU_MULTI(QRF)
+ NO_GPU(QQMatmul)
