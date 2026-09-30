@@ -35,6 +35,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <limits>
 #include <list>
 #include <mutex>
 #include <unordered_map>
@@ -820,6 +821,116 @@ inline bool should_use_dequant_gemm_path(
     return M >= std::max(8, threshold - 4);
   }
   return false;
+}
+
+// Where QuantizedMatmul::eval_gpu sends one GEMM. Shared by the dispatch and by
+// rocm::quantized_matmul_runs_dequant_gemm, so the answer that predicate gives
+// can never drift from what eval_gpu launches (lablup/mlxcel#2081).
+enum class QmmRoute {
+  WmmaDense, // qmm_wmma_dense_kernel, fused dequant + rocWMMA
+  DequantFp8Gemm, // dequant_fp8_gemm (weight and activation in e4m3)
+  DequantGemm, // dequantize (cached) + dequant_rocblas_gemm in the x dtype
+  Other, // qmv, batched qmv and the tiled kernels below
+};
+
+struct QmmRouteInputs {
+  int M;
+  int N;
+  int K;
+  int batch_count;
+  int x_batch_count;
+  int w_batch_count;
+  bool transpose;
+  QuantizationMode mode;
+  Dtype x_dtype;
+  Dtype scales_dtype;
+  std::optional<Dtype> biases_dtype;
+  int group_size;
+  int bits;
+  bool force_dequant_gemm;
+  bool should_prefer_dequant;
+};
+
+// MLX_ROCM_WMMA_QMM: unset = default, "0" = off, "1" = force on.
+inline int wmma_qmm_env() {
+  static const int value = [] {
+    const char* e = std::getenv("MLX_ROCM_WMMA_QMM");
+    if (!e)
+      return -1;
+    if (e[0] == '0')
+      return 0;
+    if (e[0] == '1')
+      return 1;
+    return -1;
+  }();
+  return value;
+}
+
+// Rows at and above which a GEMM the dispatch would otherwise hand to
+// dequantize + hipBLASLt stays there instead of taking qmm_wmma_dense_kernel
+// (lablup/mlxcel#2081). Measured on gfx1151 (Radeon 8060S, RDNA 3.5), bf16,
+// 4-bit g64: the fused kernel wins only on some shapes up to 64 rows, while
+// dequantize + hipBLASLt is faster on every shape tried from 128 rows up
+// (1.0x to 3.1x at 128 to 512 rows, 2.4x to 5.1x at 1024 and 2048), which
+// took Gemma 3 4B 4-bit prefill from 961 to 2815 tok/s at 2048 tokens. Other
+// tiers were not measured and keep the kernel at every row count unless
+// MLX_ROCM_WMMA_QMM_MAX_M sets a ceiling; MLX_ROCM_WMMA_QMM=1 removes it.
+inline int wmma_qmm_max_m(rocm::Device& d) {
+  static const int env_value =
+      parse_positive_int_env("MLX_ROCM_WMMA_QMM_MAX_M", -1);
+  if (env_value > 0) {
+    return env_value;
+  }
+  return detect_rocm_hw_info(d).tier == rocm::RocmArchTier::Rdna35
+      ? 128
+      : std::numeric_limits<int>::max();
+}
+
+inline QmmRoute select_qmm_route(const QmmRouteInputs& in, rocm::Device& d) {
+  const bool single =
+      in.batch_count == 1 && in.x_batch_count == 1 && in.w_batch_count == 1;
+  const bool affine = in.mode == QuantizationMode::Affine;
+  const bool dequant = affine && d.is_rocblas_available() &&
+      use_rocblas_dequant_path() &&
+      (in.force_dequant_gemm || in.should_prefer_dequant);
+  // fp8 e4m3 path (RDNA4 prefill), capability-gated on the hipBLASLt probe.
+  // Evaluated only where it decides the route, so a device that never reaches
+  // it is not probed.
+  auto fp8 = [&] {
+    return dequant && in.x_dtype == bfloat16 && single && in.M >= 64 &&
+        rocm::device_has_fp8_gemm(d.hip_device());
+  };
+
+  // Low-CU iGPUs (gfx1152 4-8 CU) skip WMMA-QMM unless forced: fat 64x128
+  // tiles thrash the tiny L2 and have produced garbage/NaN under APU memory
+  // pressure.
+  const int env = wmma_qmm_env();
+  const bool want_wmma =
+      env == 1 || (env < 0 && !detect_rocm_hw_info(d).is_low_cu_igpu);
+  const bool wmma_shape = in.transpose && affine &&
+      in.x_dtype == bfloat16 && in.scales_dtype == bfloat16 &&
+      (!in.biases_dtype.has_value() || *in.biases_dtype == bfloat16) &&
+      single && in.M > 1 && (in.N % 16 == 0) && in.group_size == 64 &&
+      (in.K % 64 == 0) &&
+      (in.bits == 4 || in.bits == 6 || in.bits == 8) && d.has_native_wmma();
+  if (want_wmma && wmma_shape) {
+    // The ceiling only hands the GEMM to the bf16 dequant + hipBLASLt path it
+    // was measured against; where the fallback would be the fp8 path the
+    // fused kernel stays.
+    const bool hipblaslt_is_faster =
+        env != 1 && dequant && in.M >= wmma_qmm_max_m(d) && !fp8();
+    if (!hipblaslt_is_faster) {
+      return QmmRoute::WmmaDense;
+    }
+    return QmmRoute::DequantGemm;
+  }
+  if (fp8()) {
+    return QmmRoute::DequantFp8Gemm;
+  }
+  if (dequant) {
+    return QmmRoute::DequantGemm;
+  }
+  return QmmRoute::Other;
 }
 
 struct DequantCacheKey {
@@ -3280,6 +3391,54 @@ __global__ void __launch_bounds__(128) qmm_wmma_dense_kernel(
 
 } // namespace rocm
 
+namespace rocm {
+
+bool quantized_matmul_runs_dequant_gemm(
+    int M,
+    int N,
+    int K,
+    Dtype x_dtype,
+    Dtype scales_dtype,
+    std::optional<Dtype> biases_dtype,
+    int group_size,
+    int bits) {
+  if (M < 1 || N < 1 || K < 1 ||
+      !(x_dtype == float16 || x_dtype == bfloat16)) {
+    return false;
+  }
+  auto& d = rocm::device(mlx::core::Device(mlx::core::Device::gpu));
+  // The same inputs QuantizedMatmul::eval_gpu derives for one transposed
+  // affine GEMM with no batch dimensions.
+  const bool bits_supported_by_qmv =
+      bits == 2 || bits == 4 || bits == 8 || bits == 5 || bits == 6;
+  const bool should_prefer_dequant =
+      should_use_dequant_gemm_path(M, N, K, 1, true, true, false, d);
+  const QmmRoute route = select_qmm_route(
+      QmmRouteInputs{
+          M,
+          N,
+          K,
+          1,
+          1,
+          1,
+          true,
+          QuantizationMode::Affine,
+          x_dtype,
+          scales_dtype,
+          biases_dtype,
+          group_size,
+          bits,
+          !bits_supported_by_qmv,
+          should_prefer_dequant},
+      d);
+  // dequant_rocblas_gemm and matmul's gemm_rocblas both try hipBLASLt first
+  // and fall back to different rocBLAS calls, so only the hipBLASLt case is
+  // claimed.
+  return route == QmmRoute::DequantGemm && is_hipblaslt_available();
+}
+
+} // namespace rocm
+
 void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
   auto& s = stream();
   auto& d = rocm::device(s.device);
@@ -3330,37 +3489,34 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
   bool force_dequant_gemm = !transpose_ || !bits_supported_by_qmv ||
       ((batch_count > 1) && !can_use_batched_qmv) ||
       (w.ndim() > 2 && !w_singleton_batch && !can_use_batched_qmv);
-  bool dequant_gemm_supported_mode = (mode_ == QuantizationMode::Affine);
   bool should_prefer_dequant = should_use_dequant_gemm_path(
       M, N, K, batch_count, non_batched, transpose_, can_use_batched_qmv, d);
+  const QmmRoute route = select_qmm_route(
+      QmmRouteInputs{
+          M,
+          N,
+          K,
+          batch_count,
+          x_batch_count,
+          w_batch_count,
+          transpose_,
+          mode_,
+          x.dtype(),
+          scales.dtype(),
+          biases.has_value() ? std::optional<Dtype>(biases->dtype())
+                             : std::nullopt,
+          group_size_,
+          bits_,
+          force_dequant_gemm,
+          should_prefer_dequant},
+      d);
 
   // Fused WMMA quantized GEMM (q4/q6/q8): graph-addable single node, no dequant
-  // materialization. Default ON where the device has native WMMA (opt out with
-  // MLX_ROCM_WMMA_QMM=0); dispatch below falls to rocBLAS when WMMA is absent or
-  // the shape doesn't qualify. Single (non-batched) bf16 affine prefill.
-  // Low-CU iGPUs (gfx1152 4–8 CU): skip WMMA-QMM — fat 64×128 tiles thrash the
-  // tiny L2 and have produced garbage/NaN under APU memory pressure; QMV/dequant
-  // paths are safer. Force on with MLX_ROCM_WMMA_QMM=1.
+  // materialization. Single (non-batched) bf16 affine GEMM on a device with
+  // native WMMA, below the row ceiling in select_qmm_route (opt out with
+  // MLX_ROCM_WMMA_QMM=0, force on wherever it fits with MLX_ROCM_WMMA_QMM=1).
   {
-    static const int wmma_qmm_env = [] {
-      const char* e = std::getenv("MLX_ROCM_WMMA_QMM");
-      if (!e)
-        return -1; // default
-      if (e[0] == '0')
-        return 0;
-      if (e[0] == '1')
-        return 1;
-      return -1;
-    }();
-    auto hw_early = detect_rocm_hw_info(d);
-    const bool want_wmma = (wmma_qmm_env == 1) ||
-        (wmma_qmm_env < 0 && !hw_early.is_low_cu_igpu);
-    if (want_wmma && transpose_ && mode_ == QuantizationMode::Affine &&
-        x.dtype() == bfloat16 && scales.dtype() == bfloat16 &&
-        (!biases.has_value() || biases->dtype() == bfloat16) &&
-        batch_count == 1 && x_batch_count == 1 && w_batch_count == 1 && M > 1 &&
-        (N % 16 == 0) && group_size_ == 64 && (K % 64 == 0) &&
-        (bits_ == 4 || bits_ == 6 || bits_ == 8) && d.has_native_wmma()) {
+    if (route == QmmRoute::WmmaDense) {
       dim3 block(128, 1, 1);
       dim3 grid((M + 63) / 64, (N + 127) / 128, 1);
       const bool hb = biases.has_value();
@@ -3391,9 +3547,7 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
 
   // Dequant + rocBLAS GEMM path
   // Disable with MLX_ROCM_QMM_DEQUANT_GEMM=0 if needed
-  if (dequant_gemm_supported_mode && d.is_rocblas_available() &&
-      use_rocblas_dequant_path() &&
-      (force_dequant_gemm || should_prefer_dequant)) {
+  if (route == QmmRoute::DequantGemm || route == QmmRoute::DequantFp8Gemm) {
     if (!((x_batch_count == 1) || (x_batch_count == batch_count))) {
       throw std::runtime_error(
           "Unsupported x batch shape for dequant GEMM fallback");
@@ -3409,9 +3563,7 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
     // fp8 e4m3 path (RDNA4 prefill): dequantize the weight straight to e4m3 and
     // cast the activation, then run the GEMM on fp8 matrix cores. Capability-
     // gated — devices without e4m3 kernels stay on the bf16 dequant path below.
-    if ((mode_ == QuantizationMode::Affine) && (x.dtype() == bfloat16) &&
-        (batch_count == 1) && (x_batch_count == 1) && (w_batch_count == 1) &&
-        (M >= 64) && rocm::device_has_fp8_gemm(d.hip_device())) {
+    if (route == QmmRoute::DequantFp8Gemm) {
       dequant_fp8_gemm(
           enc,
           transpose_,

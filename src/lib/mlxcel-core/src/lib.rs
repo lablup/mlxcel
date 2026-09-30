@@ -2344,6 +2344,22 @@ mod ffi {
         /// its first port.
         fn bitlinear_kernel_available() -> bool;
 
+        /// Whether `quantized_matmul` for this transposed affine projection
+        /// runs the same dense GEMM as `dequantize` + `matmul`, so the two
+        /// return the same bytes (lablup/mlxcel#2081). Reads the
+        /// QuantizedMatmul route on ROCm; true on every other backend, whose
+        /// rule is the output-tile count in
+        /// [`crate::layers::prefill_dense_gemm_eligible`]. `biases` may be
+        /// null.
+        unsafe fn quantized_matmul_matches_dense_gemm(
+            x: &MlxArray,
+            weight: &MlxArray,
+            scales: &MlxArray,
+            biases: *const MlxArray,
+            group_size: i32,
+            bits: i32,
+        ) -> bool;
+
         /// True when this backend has a fused affine 1-bit kernel port
         /// (Metal). Other backends run 1-bit weights through the dequantize
         /// graph (issue #1370).

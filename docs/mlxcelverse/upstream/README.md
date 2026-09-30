@@ -34,6 +34,7 @@ Each directory holds the patch (`git format-patch` output, authored by the maint
 | 7 (GPU fault reporting) | Deferred. It is built on `Event::error()`, which ml-explore/mlx added in #3742 (`06f154bc`, 2026-08-17); the fork's MLX base predates it, so the patch does not apply. The wait changes that end a hang on a faulted queue (`HipEvent::wait`, `AtomicEvent`, `CommandEncoder::synchronize`) could be split out for the current fork, but that would be a different change from the one mlxcel ships and verified. Package it once the fork merges MLX at or past #3742. |
 | 9 (expert-batched gather qmv opt-in) | Held. It disables a path that returns wrong bf16 results on gfx1151 but has no root cause yet; LOCAL_FIXES.md says to propose it only after one. |
 | 15 (`SearchSorted`) | Not applicable yet: the primitive arrived in ml-explore/mlx#4035 (`5ec30acd`, 2026-08-10), after the fork's MLX base, so the fork has no `SearchSorted` to implement. Package it once the fork merges MLX at or past #4035. |
+| 29 (bf16 GEMMs leave the WMMA kernel from 128 rows on RDNA 3.5) | Not packaged yet. The row ceiling was measured on gfx1151 only, and the exported `quantized_matmul_runs_dequant_gemm` exists for mlxcel's dense prefill check; a fork PR would carry the ceiling alone, with measurements from at least one more RDNA 3 or RDNA 3.5 device. |
 
 ## What was verified, and what the submitter still has to do
 

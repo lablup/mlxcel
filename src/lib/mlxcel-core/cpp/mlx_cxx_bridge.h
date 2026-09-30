@@ -1420,6 +1420,22 @@ std::unique_ptr<MlxArray> rocm_fault_probe_array(int32_t kind);
 // (issues #1803, #1862).
 bool bitlinear_kernel_available();
 
+// Whether `quantized_matmul(x, weight, scales, biases)` with a transposed
+// affine weight runs the same dense GEMM that `dequantize` + `matmul` runs, so
+// the two return the same bytes (lablup/mlxcel#2081). On ROCm this reads the
+// QuantizedMatmul route (the fused WMMA kernel, the fp8 path and qmv differ;
+// dequantize + hipBLASLt matches), and x with a batch axis above 1 answers
+// false. Every other backend, and a ROCm build running on the CPU, answers
+// true: their eligibility rule is the output-tile count on the Rust side.
+bool quantized_matmul_matches_dense_gemm(
+    const MlxArray& x,
+    const MlxArray& weight,
+    const MlxArray& scales,
+    const MlxArray* biases,
+    int32_t group_size,
+    int32_t bits
+);
+
 // Fused sampling: top-k + top-p + min-p on the untempered distribution, then
 // one temperature scaling, then the categorical draw, in a single function
 // call to minimize FFI round-trips (chain order per issue #1379).

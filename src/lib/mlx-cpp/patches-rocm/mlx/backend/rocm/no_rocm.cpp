@@ -50,6 +50,18 @@ std::vector<array> moe_swiglu_sorted_vjp(
   throw std::runtime_error("moe_swiglu_sorted_vjp requires ROCm");
 }
 
+bool quantized_matmul_runs_dequant_gemm(
+    int,
+    int,
+    int,
+    Dtype,
+    Dtype,
+    std::optional<Dtype>,
+    int,
+    int) {
+  return false;
+}
+
 } // namespace rocm
 
 namespace fast {

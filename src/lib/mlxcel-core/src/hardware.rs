@@ -644,7 +644,9 @@ pub const PREFILL_DENSE_GEMM_ENV: &str = "MLXCEL_PREFILL_DEQUANT_MIN_M";
 /// -2.5% / -0.2%, with +0.5 to 0.8 GB of peak memory, so M5 stays off. M2
 /// through M4 differ in GPU microarchitecture and were not measured, and later
 /// or non-Apple devices report `Unknown`; they keep `quantized_matmul` until a
-/// measurement adds them here.
+/// measurement adds them here. On ROCm there is nothing to add: the dense path
+/// is only eligible where `quantized_matmul` already runs the same dequantize +
+/// hipBLASLt GEMM (#2081), which it does with a cached dequantized weight.
 #[must_use]
 pub fn prefill_dense_gemm_min_rows_default(r#gen: AppleSiliconGen) -> Option<i64> {
     (r#gen == AppleSiliconGen::M1).then_some(PREFILL_DENSE_GEMM_MIN_ROWS)

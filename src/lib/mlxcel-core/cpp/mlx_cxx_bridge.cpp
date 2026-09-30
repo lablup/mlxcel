@@ -5,6 +5,10 @@
 #include "../../mlx-cpp/turbo/gpu_backend.h"
 
 #include "mlx/primitives.h"
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+// `quantized_matmul_runs_dequant_gemm` (lablup/mlxcel#2081).
+#include "mlx/backend/rocm/rocm.h"
+#endif
 
 #include "sampling.h" // Gumbel-max categorical sampling kernel (#900).
 #include "sampling_rejection.h" // Dual-pivot rejection sampling kernel (#901).
@@ -5200,6 +5204,51 @@ std::unique_ptr<MlxArray> rocm_fault_probe_array(int32_t kind) {
 // are ported one at a time: ROCm has this one and not the rest.
 bool bitlinear_kernel_available() {
     return mlxcel::gpu_kernel_backend() != mlxcel::GpuKernelBackend::None;
+}
+
+// See the header. Only ROCm routes `quantized_matmul` to kernels whose bytes
+// depend on the shape in a way the tile rule on the Rust side does not
+// capture, so every other backend answers true and keeps its eligibility.
+bool quantized_matmul_matches_dense_gemm(
+    const MlxArray& x,
+    const MlxArray& weight,
+    const MlxArray& scales,
+    const MlxArray* biases,
+    int32_t group_size,
+    int32_t bits
+) {
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+    using namespace mlx::core;
+    if (mlxcel::gpu_kernel_backend() != mlxcel::GpuKernelBackend::Rocm ||
+        default_device() != Device::gpu) {
+        return true;
+    }
+    const auto& xs = x.inner.shape();
+    const auto& ws = weight.inner.shape();
+    if (xs.size() < 2 || ws.size() != 2) {
+        return false;
+    }
+    // QuantizedMatmul batches over every axis before the last two, and a
+    // batched GEMM is not the single GEMM `matmul` runs on the same rows.
+    for (size_t i = 0; i + 2 < xs.size(); ++i) {
+        if (xs[i] != 1) {
+            return false;
+        }
+    }
+    std::optional<Dtype> biases_dtype =
+        biases ? std::optional<Dtype>(biases->inner.dtype()) : std::nullopt;
+    return rocm::quantized_matmul_runs_dequant_gemm(
+        xs[xs.size() - 2], ws[0], xs.back(), x.inner.dtype(),
+        scales.inner.dtype(), biases_dtype, group_size, bits);
+#else
+    (void)x;
+    (void)weight;
+    (void)scales;
+    (void)biases;
+    (void)group_size;
+    (void)bits;
+    return true;
+#endif
 }
 
 // Top-p (nucleus) filtering.
