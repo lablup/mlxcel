@@ -208,6 +208,17 @@ ok
 u="$(fresh unnamed)"
 subst "$u/mlx/backend/rocm/b.hip" '^b line 2$' 'b line 2 unrecorded'
 expect 1 "mlx/backend/rocm/b.hip differs from the fork" -- tg "$u" drift
+# A local-only backend file whose name only appears as the tail of another
+# path (`mlx/core.cpp` in LOCAL_FIXES.md) is not named by it.
+v="$(fresh tail-name)"
+echo "local core helper" >"$v/mlx/backend/rocm/core.cpp"
+subst "$v/README.md" '\(3 files\)' '(4 files)'
+expect 1 "mlx/backend/rocm/core.cpp differs from the fork" -- tg "$v" drift
+# Finder's .DS_Store is neither an overlay file nor a stray record.
+d="$(fresh finder)"
+echo x >"$d/.DS_Store"
+echo x >"$d/mlx/.DS_Store"
+expect 0 "records OK" -- t "$d" records
 
 # ---- records negatives ----------------------------------------------------------
 n="$(fresh numbering)"
@@ -232,7 +243,7 @@ expect 1 "compile errors: 1" -- t "$ov" api-report --build-log "$tmp/build.log" 
 report_out="$(t "$ov" api-report --build-log "$tmp/build.log" --defined "$tmp/defined.txt" --undefined "$tmp/undefined.txt" --source-dir "$tmp/src" || true)"
 grep -q '^  mlx::core::SearchSorted::eval_gpu' <<<"$report_out" || fail "api-report missed the undefined eval_gpu"
 grep -q '^  mlx/backend/rocm/compiled.cpp:120:8: cannot decompose' <<<"$report_out" || fail "api-report did not relativize or dedupe the error"
-if grep -q 'Add::eval_gpu\|hipMalloc' <<<"$report_out"; then fail "api-report listed a defined or non-MLX symbol"; fi
+if grep -qE 'Add::eval_gpu|hipMalloc' <<<"$report_out"; then fail "api-report listed a defined or non-MLX symbol"; fi
 ok
 : >"$tmp/clean.log"
 expect 0 "undefined mlx::core symbols: 0" -- t "$ov" api-report --build-log "$tmp/clean.log" --defined "$tmp/defined.txt" --undefined "$tmp/defined.txt"

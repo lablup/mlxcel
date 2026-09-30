@@ -63,7 +63,7 @@ The general procedure is "Bumping the MLX upstream pin" in `CONTRIBUTING.md`. Fo
 5. Update `LOCAL_FIXES.md` (its title names the fork commit) and `docs/mlxcelverse/upstream/README.md`.
 6. `make verify-rocm`, and the same "ROCm overlay" section in the PR body.
 
-`sync_from_fork.sh --check` against the recorded commit reproduces the committed overlay byte for byte; if it does not, the overlay has changed outside the procedure.
+`sync_from_fork.sh --check` against the recorded commit reproduces the committed overlay byte for byte. That holds by construction, because the local fixes are carried as the overlay's own difference from the fork rather than replayed from a separate patch list, so it confirms only that a sync to an unchanged fork commit is a no-op; it cannot detect an unrecorded local change. That is `drift`'s job: every backend file that differs from the fork must be named in `LOCAL_FIXES.md`, and every core-file residual must be recorded in `CORE_RESIDUAL.diff`. `--check` without a commit compares against the head of the fork branch and fails once the fork has moved past `UPSTREAM`.
 
 ## The "ROCm overlay" section of a bump or sync PR
 

@@ -65,6 +65,11 @@ PIN_SCRIPT = REPO_ROOT / "scripts" / "ci" / "mlx_pinned_commit.sh"
 # Files at the overlay root that are records, never copied into MLX.
 RECORDS = ("README.md", "UPSTREAM", "LOCAL_FIXES.md", "CORE_RESIDUAL.diff")
 RESIDUAL_FILE = "CORE_RESIDUAL.diff"
+# Files a desktop drops into any directory it shows (Finder on macOS, where
+# `make verify` runs). Neither overlay files nor records; CMake copies them
+# into the MLX tree harmlessly, so they must not fail the records check or
+# count as core files.
+IGNORED_NAMES = (".DS_Store",)
 BACKEND_PREFIX = "mlx/backend/rocm/"
 UPSTREAM_KEYS = (
     "source",
@@ -152,7 +157,7 @@ class Overlay:
             if not p.is_file():
                 continue
             rel = p.relative_to(self.root).as_posix()
-            if rel in RECORDS:
+            if rel in RECORDS or p.name in IGNORED_NAMES:
                 continue
             out.append(rel)
         return out
@@ -436,12 +441,25 @@ def ensure_recorded_commits(ctx: Context, up: dict[str, str]) -> None:
 
 
 def local_fixes_mentions(overlay: Overlay, path: str) -> bool:
-    """True if LOCAL_FIXES.md names `path`, by full path, backend-relative path
-    or file name (not as part of a longer name)."""
+    """True if LOCAL_FIXES.md names `path`: by full path, by backend-relative
+    path when that has a directory (`quantized/qmm.hip`), or by bare file name
+    when no other overlay file has that name. A short name only counts on its
+    own, not as the tail of a longer path, so `mlx/device.cpp` does not name
+    `mlx/backend/rocm/device.cpp` and the top-level `CMakeLists.txt` does not
+    name `mlx/backend/rocm/CMakeLists.txt`."""
     content = (overlay.root / "LOCAL_FIXES.md").read_text()
-    rel = path[len(BACKEND_PREFIX):] if path.startswith(BACKEND_PREFIX) else path
-    for candidate in {path, rel, Path(path).name}:
-        if re.search(rf"(?<![\w.-]){re.escape(candidate)}(?![\w-])", content):
+    if re.search(rf"(?<![\w.-]){re.escape(path)}(?![\w-])", content):
+        return True
+    name = Path(path).name
+    short = []
+    if path.startswith(BACKEND_PREFIX):
+        rel = path[len(BACKEND_PREFIX):]
+        if "/" in rel:
+            short.append(rel)
+    if not any(Path(f).name == name and f != path for f in overlay.files()):
+        short.append(name)
+    for candidate in short:
+        if re.search(rf"(?<![\w./-]){re.escape(candidate)}(?![\w-])", content):
             return True
     return False
 
@@ -458,7 +476,7 @@ def cmd_records(args: argparse.Namespace) -> int:
     # Stray files at the overlay root are neither copied nor records.
     for p in sorted(root.iterdir()):
         name = p.name
-        if name in RECORDS or name in ("CMakeLists.txt", "mlx"):
+        if name in RECORDS or name in IGNORED_NAMES or name in ("CMakeLists.txt", "mlx"):
             continue
         errors.append(
             f"{name}: not a record ({', '.join(RECORDS)}) and not an overlay path (CMakeLists.txt, mlx/); "
