@@ -171,6 +171,6 @@ MLXCEL_FUSED_MOE=0 ./target/release/mlxcel-server -m models/mlx/Qwen3-30B-A3B-4b
 
 - Fused MoE has no ROCm kernel, so MoE models run through `gather_qmm` (#1803).
 - `FFT`, `Hadamard` and `SearchSorted` are `NO_GPU` stubs, so audio, TurboQuant KV cache and stochastic speculative decoding abort (#1825).
-- Only affine 4-bit was traced. mxfp4, mxfp8 and nvfp4 coverage is #1806, #1807 and #1808.
+- Only affine 4-bit was traced. mxfp4, mxfp8 and nvfp4 coverage is #1806, #1807 and #1808. Update: mxfp8 through a vendor FP8 block checkpoint is traced in `rocm-fp8-block-gfx1151-2026-09-30.md` (#1807), against the CPU device rather than Metal.
 - Prefill through the sorted large-row `gather_qmm` path is slow on both dtypes (#1814).
 - The model matrix in #1809 also names a sliding-window model, an SSM hybrid pair and a VLM. Those rows are not in this run; they wait on #1803 and #1805. (Since traced on ROCm, with the Metal side pending, in [the 2026-09-30 run](rocm-correctness-gfx1151-2026-09-30.md).)

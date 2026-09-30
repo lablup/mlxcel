@@ -1,0 +1,13 @@
+host: AMD Ryzen AI MAX+ 395 with Radeon 8060S (gfx1151, RDNA 3.5), 96 GiB VRAM carve-out, 30 GiB host RAM
+os: Debian GNU/Linux 13 (trixie), kernel 6.18.12+deb13-amd64
+rocm: HIP 7.15.26333, ROCM_PATH=/opt/rocm
+mlxcel: branch feature/issue-1807-mxfp8-rocm-e2e on 81ba1c6a (lablup/mlxcel#1807), built with --features rocm
+mlx_pin: 81ba1c6a0e50a9268b931579c2d4f1158b9aab5a
+checkpoint: Lazarus-Ai/ReAligned-Qwen3.5-0.8B-FP8 @ db97e6a70bef791fb44a7e054fc7a9d8f50f090d (model.safetensors sha256 1c68f282d08454fd3f7ca1b15605e8da280ffe672deae0b1bf97459f09fd08e7), local dir models/fp8/ReAligned-Qwen3.5-0.8B-FP8
+corpus: tests/fixtures/wikitext2_excerpt.txt sha256 16721fc1057d69efc8493718fcad562de9e4554ce05369876cd06dcba431394e
+args: w1='1 128 8 0' w8='8 80 8 512' w256='256 2 8 0' w32='32 8 8 0' (CHUNK_TOKENS MAX_CHUNKS TOPK PREFILL)
+arms: 'rocm' = GPU as shipped; 'rocm_cpuquant' = GPU compute with load-time mxfp8 quantization moved to the CPU stream by a temporary, uncommitted switch in requantize_block_fp8_weights (the only difference is the packed weights); 'cpu' = MLXCEL_DEVICE=cpu, the MLX CPU backend in the same build
+binaries: the rocm and rocm_cpuquant arms ran a logit_trace built with the temporary switch compiled in (unset for 'rocm'); the cpu arm ran builds with the SDPA CPU-stream guard (LOCAL_FIXES item 23), which the GPU path does not reach; the rocm arms rerun on the final rebased build (on d1128266) were byte-identical to the earlier ones, and rocm_w32 is from that final build
+cpu_w32: the CPU arm is the w32 width ('32 8 8 0', 256 positions). The CPU backend in this build needs about 2.7 minutes per traced token for this checkpoint, single-threaded in MLX's scalar fp_qmm_t, so chunk 0 came from a '32 4 8 0' run stopped after that chunk and chunks 1 to 7 each from their own process with MLXCEL_TRACE_START_TOKEN=32*c and MAX_CHUNKS=1, run in parallel and assembled with their chunk index restored (see the '# assembled' header line). Positions and targets match the rocm w32 trace line for line. A w256 CPU arm was started and abandoned after 6.8 CPU-hours without finishing its first 256-token forward
+determinism: rerunning the rocm w1 and w256 arms produced byte-identical traces
+gpu: a parallel benchmark unit may have used the GPU during the rocm arms; the traces are deterministic (see above), so this affects timings only

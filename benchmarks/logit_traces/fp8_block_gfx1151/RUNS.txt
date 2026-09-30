@@ -1,0 +1,8 @@
+realigned-qwen3.5-0.8b-fp8_rocm_w1                 exit=0 rows=135 elapsed=6s
+realigned-qwen3.5-0.8b-fp8_rocm_w8                 exit=0 rows=647 elapsed=100s
+realigned-qwen3.5-0.8b-fp8_rocm_w256               exit=0 rows=519 elapsed=5s
+realigned-qwen3.5-0.8b-fp8_rocm_w32                exit=0 rows=263 elapsed=3s
+realigned-qwen3.5-0.8b-fp8_rocm_cpuquant_w1        exit=0 rows=135 elapsed=250s
+realigned-qwen3.5-0.8b-fp8_rocm_cpuquant_w8        exit=0 rows=647 elapsed=342s
+realigned-qwen3.5-0.8b-fp8_rocm_cpuquant_w256      exit=0 rows=519 elapsed=247s
+realigned-qwen3.5-0.8b-fp8_cpu_w32                 assembled from 8 processes (chunk 0 and chunks 1-7), each about 8 min load plus about 90 min for one 32-token chunk; rows=264 including the assembly note

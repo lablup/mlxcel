@@ -1,0 +1,8 @@
+f051bb260bf9af6dbd2746e4a85405c286bbf400bde419aaa054eeb9b9f1fc4e  realigned-qwen3.5-0.8b-fp8_cpu_w32.tsv
+6fdccfdfda2496292b406c103636326b7fa2b002edf989e5453e9794750f117c  realigned-qwen3.5-0.8b-fp8_rocm_cpuquant_w1.tsv
+bd1b6ac470780743ad020b8b7515e1eb3ed5de9eb6c97f6d5d1b3721089cfeb0  realigned-qwen3.5-0.8b-fp8_rocm_cpuquant_w256.tsv
+2760480204ace73d70b391643c0d0494489c1d96b9725f499cd0f06aea1dc640  realigned-qwen3.5-0.8b-fp8_rocm_cpuquant_w8.tsv
+437a6b5cf0d444a9a5eb6947de5bfc6b39b7fdf62cd22de0bda45a481aca796a  realigned-qwen3.5-0.8b-fp8_rocm_w1.tsv
+1d541638d1838b812124a3fffc7f268b5e0ce0b89932aa9aa88cf0af43783781  realigned-qwen3.5-0.8b-fp8_rocm_w256.tsv
+e131add474f676e7c505424889ffbdfa2ca93b6686d3d18023a504f3d9683832  realigned-qwen3.5-0.8b-fp8_rocm_w32.tsv
+82e259b030c9431089fbbeac007d299bad1857da9021e86cb6c73e57bcede868  realigned-qwen3.5-0.8b-fp8_rocm_w8.tsv
