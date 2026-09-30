@@ -10,7 +10,7 @@
 
 ## 요약
 
-paged 백엔드와 KV 블록 예산(기본값 `--kv-cache-budget auto`)을 쓰는 상태에서, 풀이 가득 찬 채로 디코드 중인 행이 블록 경계를 넘으면 `PagedBlockPool::acquire_block`이 "block budget exhausted"를 반환했다. 이 쓰기는 모델 forward 안에서 일어나고(`write_paged`가 `.expect`를 호출), 그 결과 모델 워커가 panic하여 서버가 모든 요청에 503을 돌려주었다. 이제 디코드는 forward 실행 전에 해당 틱이 새로 만들 블록을 먼저 확보한다. 이때 admission의 회수 루프(콜드 prompt-cache prefix 먼저, 그다음 선점)를 그대로 재사용한다. 실제 서버 테스트에서 같은 예산 때문에 워커가 죽거나 멈추는 경로가 세 가지 더 드러나, 이 PR에서 함께 고쳤다.
+paged 백엔드와 KV 블록 예산(기본값 `--kv-cache-budget auto`)을 쓰는 상태에서, 풀이 가득 찬 채로 디코드 중인 행이 블록 경계를 넘으면 `PagedBlockPool::acquire_block`이 "block budget exhausted"를 반환했다. 이 쓰기는 모델 forward 안에서 일어나고(`write_paged`가 `.expect`를 호출), 그 결과 모델 워커가 panic하여 서버가 모든 요청에 503을 돌려주었다. 이제 디코드는 forward 실행 전에 해당 틱이 새로 만들 블록을 먼저 확보한다. 이때 admission의 회수 루프(콜드 prompt-cache prefix 먼저, 그다음 선점)를 그대로 재사용한다. 실제 서버 테스트에서 같은 예산 때문에 워커가 죽거나 멈추거나 livelock에 빠지는 경로가 다섯 가지 더 드러나(longest-first 선점, 같은 우선순위 admission 간 상호 선점, 헛도는 연기, 예산 관문이 없는 배치 prefill, 디코드에 블록을 빼앗기는 chunked prefill), 이 PR에서 함께 고쳤다.
 
 ## 문제 정의
 
@@ -32,7 +32,7 @@ prefill admission(`admit_paged_prefill`)은 블록을 회수했지만, 스케줄
 - 단위 테스트: `block_reclaim_tests.rs`에 11개 케이스가 있다. 캐시된 prefix로 가득 찬 풀에서 디코드 행이 블록 경계를 넘는 경우, 회수 없이는 append가 실패하고("block budget exhausted") 회수가 있으면 LRU 엔트리 정확히 하나를 제거한 뒤 성공한다. 예산에 여유가 있으면 아무것도 제거하거나 선점하지 않는다. 제거할 엔트리가 없으면 선점한다. 회수할 것이 전혀 없으면 행을 제외하며 panic은 없다. 나머지 케이스는 블록 중간 위치의 행이 제외되지 않는 경우, admission 우선순위 제한, chunked prefill 예약(디코드가 예약된 블록을 가져가지 않고 제거를 선택), 연기, 배치 윈도우의 예산 차감을 다룬다. `paged_append_need_tests.rs`에는 copy-on-write 분기를 포함해 3개, `scheduler_tests.rs`에는 선택자 케이스 3개가 있다.
 - `cargo test --release --features cuda --lib -- server::batch server::prompt_cache models::sanitize_tests --test-threads=1`: 674개 통과. mlxcel-core `cache::paged`: 132개 통과. `cargo clippy --release --features cuda --lib --tests -- -D warnings`와 `cargo fmt --all` 모두 문제없다.
 - GB10, `--kv-cache-budget 600000000 --decode-storage-backend paged --max-batch-size 4`(4444블록)에서 prefix 하나를 먼저 캐시에 올려 둔 뒤, 600토큰을 생성하는 3턴 대화 3개를 동시에 실행했다. 9턴 모두 오류나 panic 없이 완료되었고, 디코드 회수 패스 16회와 선점 12회가 있었다. 이 브랜치의 이전 단계에서는 같은 부하가 위에 나열한 실패 모드를 각각 일으켰다.
-- 같은 서버에서 캐시된 prefix가 남아 있는 상태로 1099토큰 프롬프트에 2200토큰을 생성했다. 디코드가 선점 없이 LRU prefix 세 개를 제거했고(각 패스마다 `evicted_prefixes=1`), 요청은 완료되었다.
+- 같은 서버에서 캐시된 prefix가 남아 있는 상태로 1099토큰 프롬프트에 2200토큰을 생성했다. 로그에는 디코드 회수 패스 세 번이 기록되었고 각각 `evicted_prefixes=1`, `preempted=0`이었으며, 요청은 완료되었다.
 - 기본 실행(auto 예산, 753620블록)에서 3턴 대화 2개를 실행했다. 2턴과 3턴이 prompt cache를 적중했고(캐시 토큰 1376개와 1696개), 회수나 선점 로그는 하나도 없었다.
 
 ## 남은 작업
