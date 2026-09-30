@@ -193,7 +193,8 @@ also read `MLX_ROCM_FFT_CACHE_SIZE` (default 128, as on CUDA), the number of
 hipFFT plans the plan cache keeps; a smaller value only trades memory for plan
 rebuilds. It must be a positive integer up to 2147483647; any other value
 (for example `0`, `-1`, `8abc` or an empty string) is ignored with a stderr
-warning and the default is used (lablup/mlxcel#2051). It used to default to 8 to dodge a hang at the first plan eviction,
+warning and the default is used (lablup/mlxcel#2051). It used to default to 8
+to dodge a hang at the first plan eviction,
 which turned out to be a device-flag ordering bug in the backend, now fixed
 (lablup/mlxcel#1876). `MLX_ROCM_GPU_WATCHDOG_SECS` (default `0`,
 off) is the longest, in whole seconds, a single host wait for GPU work may
