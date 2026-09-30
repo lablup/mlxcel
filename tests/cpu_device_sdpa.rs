@@ -107,6 +107,8 @@ fn sdpa_takes_the_fallback_on_the_cpu_device() {
             let v = cast(heads * kv_len * dim, 3, &shape_kv);
             // The entry point every attention layer calls, which reaches
             // `fast::scaled_dot_product_attention` and so `use_fallback`.
+            // SAFETY: `q`, `k` and `v` are live arrays built above, and a null
+            // mask pointer is the documented "no mask" argument.
             let out = unsafe {
                 mlxcel_core::fast_scaled_dot_product_attention(&q, &k, &v, scale, std::ptr::null())
             };

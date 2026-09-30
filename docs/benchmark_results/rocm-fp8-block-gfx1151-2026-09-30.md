@@ -32,8 +32,10 @@ Relative L2 error against the host reference, worst case over all gather and den
 | Backend | bf16 | f16 | f32 |
 |---|---|---|---|
 | ROCm gfx1151 | 1.8e-3 | 2.2e-4 | 2.9e-7 |
-| MLX CPU backend (same test binary, CPU default device) | 7.9e-3 | 1.0e-3 | 1.2e-7 |
+| MLX CPU backend (same test binary, CPU default device, reduced matrix, see below) | 8.2e-3 | 1.0e-3 | not run |
 | Test bound | 2e-2 | 4e-3 | 2e-3 |
+
+The CPU row is the arm `mxfp_matmuls_match_host_reference_on_cpu_device` runs. MLX's CPU `fp_qmm_t` is scalar, so the full matrix took about 38 s and held the default-device lock for that time on every backend. The arm now runs both modes with the unsorted prefill, sorted shared-activation and multi-row gather cases and the dense `M = 1` and `M = 4` cases, in bf16 and f16, on a 64-wide output, in about 2.5 s. The first CPU measurement, over the full matrix (all five gather cases, dense `M = 1, 4, 64`, f32 included, 320-wide output), gave 7.9e-3 (bf16), 1.0e-3 (f16) and 1.2e-7 (f32).
 
 The f32 bound is wider than these numbers need because on CUDA sm80 and later the sorted prefill case takes MLX's grouped GEMM, which runs f32 through TF32 tensor cores by default (`MLX_ENABLE_TF32`), rounding activations to a 10-bit mantissa.
 
