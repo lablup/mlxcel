@@ -104,6 +104,18 @@ g merge -q --no-edit "$P2" >/dev/null
 F4="$(g rev-parse HEAD)"
 g checkout -q main
 
+# F5: a hostile fork tree. Git stores and lists a `..` entry verbatim, so
+# mlx/backend/rocm/../../../../escaped would land next to the sync output
+# directory. Built with mktree because no index can hold such a path.
+evil="$(echo pwned | g hash-object -w --stdin)"
+t="$(printf '100644 blob %s\tescaped\n' "$evil" | g mktree)"
+for _ in 1 2 3; do t="$(printf '040000 tree %s\t..\n' "$t" | g mktree)"; done
+t="$( { g ls-tree "$F1:mlx/backend/rocm"; printf '040000 tree %s\t..\n' "$t"; } | g mktree)"
+t="$( { g ls-tree "$F1:mlx/backend" | grep -v '	rocm$'; printf '040000 tree %s\trocm\n' "$t"; } | g mktree)"
+t="$( { g ls-tree "$F1:mlx" | grep -v '	backend$'; printf '040000 tree %s\tbackend\n' "$t"; } | g mktree)"
+t="$( { g ls-tree "$F1" | grep -v '	mlx$'; printf '040000 tree %s\tmlx\n' "$t"; } | g mktree)"
+F5="$(echo F5 | g commit-tree "$t" -p "$F1")"
+
 # ---- the overlay as committed at pin P1, fork F1 ----------------------------
 ov="$tmp/overlay"
 mkdir -p "$ov/mlx/backend/rocm"
@@ -183,6 +195,9 @@ grep -q "^commit: $F2$" "$o/UPSTREAM" || fail "sync did not update UPSTREAM"
 expect 1 "CONFLICT: mlx/backend/rocm/a.hip" -- tg "$ov" sync --fork-commit "$F3" --out "$tmp/sync-f3"
 grep -q '^<<<<<<< overlay$' "$tmp/sync-f3/mlx/backend/rocm/a.hip" || fail "conflict markers missing"
 expect 2 "does not contain" -- tg "$ov" sync --fork-commit "$F4" --out "$tmp/sync-f4"
+expect 2 "refusing unsafe path" -- tg "$ov" sync --fork-commit "$F5" --out "$tmp/sync-f5"
+expect 2 "refusing unsafe path" -- tg "$ov" export-tree --mlx-commit "$P1" --rocm-from "fork:$F5" --dest "$tmp/export-f5"
+if [ -n "$(find "$tmp" -name escaped -print -quit)" ]; then fail "a hostile tree path escaped the output directory"; fi
 
 # ---- a pin bump ---------------------------------------------------------------
 MLX_PIN_CMAKE_FILE="$tmp/pin-p2.cmake" expect 1 "A pin bump has to retarget" -- t "$ov" records

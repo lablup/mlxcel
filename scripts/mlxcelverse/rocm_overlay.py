@@ -130,6 +130,31 @@ def normalize_patch(patch: str) -> str:
     return re.sub(r"(?m)^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@", "@@", patch)
 
 
+def safe_dest(root: Path, rel: str) -> Path:
+    """`root / rel` for a path read from a git tree, refusing anything that
+    would land outside `root`. Tree entries come from fetched objects (the fork
+    or a --fork-url), and git stores and lists a `..` entry verbatim, so a
+    hostile tree could otherwise make sync or export-tree write, or delete, a
+    file anywhere the user can. Rejects absolute paths, empty, `.`, `..` and
+    `.git` components, and a destination that resolves outside `root` through
+    a symlink already on disk (export-tree extracts MLX, symlinks included)."""
+    parts = rel.split("/")
+    if (
+        not rel
+        or rel.startswith("/")
+        or "\\" in rel
+        or "\0" in rel
+        or any(part in ("", ".", "..") or part.lower() == ".git" for part in parts)
+    ):
+        raise ToolError(f"refusing unsafe path {rel!r} from a git tree")
+    dest = root / rel
+    base = root.resolve()
+    resolved = dest.resolve()
+    if resolved != base and base not in resolved.parents:
+        raise ToolError(f"refusing {rel!r}: it resolves to {resolved}, outside {base}")
+    return dest
+
+
 def patch_stats(patch: str) -> tuple[int, int]:
     plus = minus = 0
     for line in patch.splitlines():
@@ -357,13 +382,15 @@ class Git:
             return None
         return proc.stdout
 
+    # -z: names come back raw, not C-quoted (core.quotePath quotes non-ASCII
+    # and control characters), so they can be looked up and validated as is.
     def ls_tree(self, sha: str, prefix: str) -> list[str]:
-        out = self.run("ls-tree", "-r", "--name-only", sha, "--", prefix).stdout
-        return [line for line in text(out).splitlines() if line]
+        out = self.run("ls-tree", "-r", "-z", "--name-only", sha, "--", prefix).stdout
+        return [name for name in text(out).split("\0") if name]
 
     def changed_paths(self, a: str, b: str) -> list[str]:
-        out = self.run("diff", "--name-only", "--no-renames", a, b).stdout
-        return [line for line in text(out).splitlines() if line]
+        out = self.run("diff", "-z", "--name-only", "--no-renames", a, b).stdout
+        return [name for name in text(out).split("\0") if name]
 
     def is_ancestor(self, a: str, b: str) -> bool:
         return self.run("merge-base", "--is-ancestor", a, b, check=False).returncode == 0
@@ -759,7 +786,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
     changed: list[str] = []
 
     def write(rel: str, data: bytes) -> None:
-        dest = out.root / rel
+        dest = safe_dest(out.root, rel)
         if dest.is_file() and dest.read_bytes() == data:
             return
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -794,7 +821,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                     conflicts.append(f"{path}: {n} conflict(s)")
         elif in_ours and in_old and not in_new:
             if ctx.overlay.read(path) == git.show(f1, path):
-                (out.root / path).unlink()
+                safe_dest(out.root, path).unlink()
                 changed.append(path)
             else:
                 conflicts.append(f"{path}: the fork deleted it but the overlay changes it; kept, decide by hand")
@@ -890,7 +917,7 @@ def cmd_retarget(args: argparse.Namespace) -> int:
             conflicts.append(f"{path}: not in MLX at {new_pin[:8]} (moved or removed upstream); resolve by hand")
             continue
         merged, n = merge3(ctx.overlay.read(path), ob or b"", nb, ("overlay", "old-pin", "new-pin"))
-        (ctx.overlay.root / path).write_bytes(merged)
+        safe_dest(ctx.overlay.root, path).write_bytes(merged)
         if n:
             conflicts.append(f"{path}: {n} conflict(s)")
         elif ob != nb:
@@ -924,13 +951,13 @@ def cmd_export_tree(args: argparse.Namespace) -> int:
     subprocess.run(["tar", "-x", "-C", str(dest)], input=archive, check=True)
     core = ctx.overlay.core_files()
     for rel in core:
-        target = dest / rel
+        target = safe_dest(dest, rel)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(ctx.overlay.read(rel))
     if args.rocm_from == "overlay":
         backend_src = "overlay"
         for rel in ctx.overlay.backend_files():
-            target = dest / rel
+            target = safe_dest(dest, rel)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(ctx.overlay.read(rel))
     elif args.rocm_from.startswith("fork:"):
@@ -938,7 +965,7 @@ def cmd_export_tree(args: argparse.Namespace) -> int:
         git.ensure_commit(fork, "fork")
         backend_src = f"fork {fork[:8]}"
         for rel in git.ls_tree(fork, BACKEND_PREFIX):
-            target = dest / rel
+            target = safe_dest(dest, rel)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(git.show(fork, rel) or b"")
     else:
