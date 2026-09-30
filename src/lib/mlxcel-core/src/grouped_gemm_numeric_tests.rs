@@ -38,7 +38,11 @@
 //! `cutlass_grouped_gemm_unaligned` for the sorted single-row case that
 //! non-quantized MoE decode takes.
 //!
-//! GPU-only (Metal or CUDA); these skip on a CPU-only build.
+//! GPU-only; these skip on a CPU-only build. They run on every GPU backend
+//! (`gpu_backend_available()`), ROCm included: MLX's ROCm overlay implements
+//! `GatherMM` itself (`gather_batched_gemm_kernel`, and hipBLASLt for the
+//! sorted single-row segments), and all three passed on gfx1151 with the
+//! kernels confirmed in a `rocprofv3` trace (#2061).
 
 use super::*;
 
@@ -184,7 +188,7 @@ impl Case {
 /// `n = 703` the unaligned arm, which are separate template instantiations.
 #[test]
 fn gather_mm_matches_dense_per_expert_reference() {
-    if !crate::metal_is_available() && !crate::cuda_is_available() {
+    if !crate::gpu_backend_available() {
         return;
     }
 
@@ -283,7 +287,7 @@ fn gather_mm_matches_dense_per_expert_reference() {
 /// every element of a slab by a whole multiple rather than by a rounding error.
 #[test]
 fn gather_mm_selects_the_indexed_expert() {
-    if !crate::metal_is_available() && !crate::cuda_is_available() {
+    if !crate::gpu_backend_available() {
         return;
     }
 
@@ -350,7 +354,7 @@ fn gather_mm_selects_the_indexed_expert() {
 /// ever reached a tensor-core configuration.
 #[test]
 fn gather_mm_half_precision_matches_reference() {
-    if !crate::metal_is_available() && !crate::cuda_is_available() {
+    if !crate::gpu_backend_available() {
         return;
     }
 

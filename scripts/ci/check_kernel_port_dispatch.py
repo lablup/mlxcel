@@ -58,10 +58,10 @@ And on the Rust side, for every ``.rs`` file:
    ``*_available()`` predicate for "does this backend have this port", or
    ``gpu_backend_available()`` for "is there a GPU at all".
 
-Rust files listed in ``BACKEND_ENUMERATION_TODO`` are exempt from rule 4, each
-with the predicate it is waiting on. Unlike ``UNCONVERTED`` these are not a
-convention that was skipped: they need a support predicate to be exported first
-(#1814).
+Rust files listed in ``BACKEND_ENUMERATION_TODO`` (empty since #2061) are
+exempt from rule 4, each with the predicate it is waiting on. Unlike
+``UNCONVERTED`` these are not a convention that was skipped: they need a support
+predicate to be exported first (#1814).
 """
 
 from __future__ import annotations
@@ -88,15 +88,10 @@ UNCONVERTED: set[str] = set()
 #
 # Not a general exemption list: every entry names a predicate that does not exist
 # yet, so the entry disappears when that predicate lands rather than when someone
-# remembers to look.
-BACKEND_ENUMERATION_TODO = {
-    # Gates MLX's own `gather_mm`, not an mlxcel port, so no port table applies.
-    # `gpu_backend_available()` would be the honest predicate, but whether MLX's
-    # ROCm backend implements the grouped-GEMM path is unverified here and
-    # widening the gate on an assumption is how the abort in #1806 was reached
-    # (#1814).
-    "src/lib/mlxcel-core/src/grouped_gemm_numeric_tests.rs",
-}
+# remembers to look. Empty since #2061, which ran the last entry's tests
+# (`grouped_gemm_numeric_tests.rs`, MLX's own `gather_mm`) on gfx1151, saw them
+# pass, and moved them to `gpu_backend_available()`.
+BACKEND_ENUMERATION_TODO: set[str] = set()
 
 # The helper's own translation units, which are allowed to name the backend.
 HELPERS = {
