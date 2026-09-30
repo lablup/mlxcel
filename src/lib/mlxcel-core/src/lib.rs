@@ -1865,10 +1865,11 @@ mod ffi {
         /// CUDA; `MLXCEL_MAMBA1_SCAN_KERNEL=0` forces the graph scan).
         fn mamba1_scan_kernel_available() -> bool;
 
-        /// Whether the fused scan can serve these inputs: it is available,
-        /// `N <= 32`, and on CUDA all six inputs share one floating dtype (the
-        /// condition under which the CUDA kernel is bit-identical to the graph
-        /// scan, issue #1981). Callers take the graph scan when this is false.
+        /// Whether the fused scan can serve these inputs: it is available, the
+        /// default device is the GPU, `N <= 32`, and on CUDA all six inputs
+        /// share one floating dtype (the condition under which the CUDA kernel
+        /// is bit-identical to the graph scan, issue #1981). Callers take the
+        /// graph scan when this is false.
         fn mamba1_scan_kernel_accepts(
             x: &MlxArray,
             delta: &MlxArray,

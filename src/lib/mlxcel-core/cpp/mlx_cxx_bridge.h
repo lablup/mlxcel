@@ -1952,9 +1952,10 @@ bool ssm_kernel_available();
 // rounds it, and state_out is in x's dtype.
 bool mamba1_scan_kernel_available();
 // Whether the fused scan can serve these inputs: the kernel is available, the
-// state width fits one warp or simdgroup (n <= 32), and on CUDA all six inputs
-// share one floating dtype (the condition under which the CUDA kernel is
-// bit-identical to the graph scan it replaces).
+// default device is the GPU, the state width fits one warp or simdgroup
+// (n <= 32), and on CUDA all six inputs share one floating dtype (the
+// condition under which the CUDA kernel is bit-identical to the graph scan it
+// replaces).
 bool mamba1_scan_kernel_accepts(
     const MlxArray& x,
     const MlxArray& delta,

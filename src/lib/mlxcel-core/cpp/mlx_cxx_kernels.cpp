@@ -1883,6 +1883,11 @@ bool mamba1_scan_kernel_accepts(
     if (!mamba1_scan_kernel_available()) {
         return false;
     }
+    // Custom kernels run only on the GPU stream; with MLXCEL_DEVICE=cpu the
+    // graph scan runs on the CPU instead of the launch throwing.
+    if (default_device() != Device::gpu) {
+        return false;
+    }
     // One lane per state column.
     if (b.inner.ndim() == 0 || b.inner.shape().back() > 32) {
         return false;
