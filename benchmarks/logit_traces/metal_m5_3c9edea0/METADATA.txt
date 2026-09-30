@@ -1,0 +1,17 @@
+host: Apple M5 Max (Mac17,7), 40-core GPU / 128 GiB
+os: macOS 27.0 (26A428)
+mlxcel_commit: 3c9edea0eccd958d5cbf02946ad551acd7b8fed2 (origin/main, #2082), the commit the ROCm half of these two rows is built at
+mlx_pin: 81ba1c6a0e50a9268b931579c2d4f1158b9aab5a
+metallib_sha256: dca1bb428fd549cdc38060af471792a3901f5453c722cf8beacef45cec8e07d8
+logit_trace_sha256: decf1fa9b48d6b8f8d88cbc30e77b1c108629d3a62d7a3d38d5cdb6349042e4e
+build: cargo build --release --features metal,accelerate --example logit_trace
+corpus: tests/fixtures/wikitext2_excerpt.txt sha256 16721fc1057d69efc8493718fcad562de9e4554ce05369876cd06dcba431394e
+checkpoints (mlx-community, Hugging Face revision): granite-4.0-h-tiny-4bit@02c8783da0cb171942e30a7dde8acce11fe82e0d, NVIDIA-Nemotron-3-Nano-30B-A3B-4bit@832f602eba5d22436c258c1462bdedc5afddb42b (every file verified against the Hub tree API)
+args: w1ctx512='1 128 8 512' with MLXCEL_TRACE_START_TOKEN=512 (CHUNK_TOKENS MAX_CHUNKS TOPK PREFILL)
+env: no MoE or kernel override set; MLXCEL_KEEP_BF16 unset
+tags: 'default' = MLXCEL_FUSED_MOE unset (fused MoE ON for nemotron-3-nano-30b-a3b)
+metal path: M5 Max is Apple GPU gen 17 (NAX kernels available)
+ssm path: each chunk prefills 512 tokens, so every traced single-token forward has an ssm_state and runs the fused Metal ssm_update_kernel; ROCm has no port for it (#1814) and runs the SSD graph with state
+header: logit_trace at this commit prints a '# device' line, so each file has one more row than its metal_m5_d1128266 counterpart
+cross-check: the data rows (all non-'#' lines) are byte-identical to metal_m5_d1128266's w1ctx512 traces for both models
+perplexity: granite-4.0-h-tiny 7.0901, nemotron-3-nano-30b-a3b 7.4894
