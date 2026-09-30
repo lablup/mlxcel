@@ -412,8 +412,8 @@ mod tests {
         // cached without bound. Free 64 buffers of distinct sizes (about
         // 16 MiB in all) under a 1 MiB limit: every allocation after the
         // first misses the cache, and a miss must trim it back to the limit.
-        // The 8 MiB threshold leaves room for the last buffer freed after the
-        // final miss and for buffers other tests free meanwhile; without the
+        // The 8 MiB threshold leaves room for buffers other tests free
+        // between that last miss and the read; without the
         // bound the cache holds all 16 MiB. Metal and CUDA enforce the limit
         // too; the no-gpu CPU backend reports an empty cache.
         const LIMIT: u64 = 1024 * 1024;
@@ -427,8 +427,14 @@ mod tests {
             eval(&arr);
             drop(arr);
         }
+        // One more miss right before the read, so buffers other tests freed
+        // since the loop are trimmed away too.
+        let last: Vec<f32> = vec![1.0; 64 * 1024 + 4 * 1024 * 64];
+        let last = from_slice_f32(&last, &[last.len() as i32]);
+        eval(&last);
         crate::synchronize_default();
         let cached = cache_memory();
+        drop(last);
         let _ = set_cache_limit(original);
         clear_cache();
         assert!(

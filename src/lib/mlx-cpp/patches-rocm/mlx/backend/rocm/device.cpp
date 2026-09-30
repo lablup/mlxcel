@@ -952,10 +952,14 @@ void CommandEncoder::maybe_commit() {
     return;
   }
   if (needs_commit()) {
-    const size_t bytes = batch_bytes_;
-    commit();
-    throttle_inflight(bytes);
+    commit_and_throttle();
   }
+}
+
+void CommandEncoder::commit_and_throttle() {
+  const size_t bytes = batch_bytes_;
+  commit();
+  throttle_inflight(bytes);
 }
 
 bool CommandEncoder::needs_commit() {
@@ -1316,6 +1320,7 @@ void CommandEncoder::synchronize() {
   // promise below would otherwise be waited on forever (lablup/mlxcel#1804).
   auto fail = [this](hipError_t st, const char* where) {
     set_device_error(st, where);
+    release_inflight();
     error_.check();
     throw std::runtime_error(describe_device_error(st, where));
   };

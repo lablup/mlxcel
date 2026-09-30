@@ -503,9 +503,13 @@ Buffer RocmAllocator::malloc_async(size_t size, int device, void* stream_v) {
     // active + cache anyway and already pays for a HIP allocation, while
     // free() and cache hits stay free of hipFree (see free() for why). The
     // footprint only grows on a miss, so active + cache stays within the
-    // live set plus max_pool_size_ plus the one request being served.
+    // live set plus max_pool_size_ plus the one request being served. Trim
+    // to three quarters of the limit, not to the limit itself: every
+    // release is a blocking hipFree, and the slack lets one trim cover the
+    // next several misses of a workload whose shapes keep changing.
     if (get_cache_memory() > max_pool_size_) {
-      buffer_cache_.release_cached_buffers(get_cache_memory() - max_pool_size_);
+      buffer_cache_.release_cached_buffers(
+          get_cache_memory() - max_pool_size_ / 4 * 3);
     }
     // Scalar pool first (CUDA).
     if (size <= static_cast<size_t>(small_block_size)) {

@@ -509,7 +509,7 @@ in
 Two defaults keep the allocator's footprint close to the weights
 (lablup/mlxcel#2062). Measured on `gfx1151` at pp512/tg128, the MLX peak for
 Meta-Llama-3.1-8B-Instruct-4bit went from 20.60 GB to 6.14 GB and for
-Qwen3-30B-A3B-4bit from 23.56 GB to 18.57 GB, with decode throughput
+Qwen3-30B-A3B-4bit from 23.56 GB to 18.58 GB, with decode throughput
 unchanged and prefill within 2%; the breakdown and every knob compared are in
 [`docs/benchmark_results/rocm-memory-gfx1151-2026-09-30.md`](benchmark_results/rocm-memory-gfx1151-2026-09-30.md).
 
@@ -520,7 +520,8 @@ unchanged and prefill within 2%; the breakdown and every knob compared are in
   finishes on the GPU, and the host could encode far ahead of the GPU. The
   backend now commits a batch once it has allocated a quarter of this budget
   and waits for the oldest batch while more than the budget is in flight, so
-  the transients stay within about this many MiB. `0` restores the unbounded behavior.
+  the transients stay within roughly this many MiB (the count is of
+  allocations, so it is approximate). `0` restores the unbounded behavior.
 - **Buffer-cache bound, `MLXCEL_CACHE_LIMIT` (default 2 GiB on ROCm).** Freed
   buffers are cached for reuse, and the ROCm allocator only reuses a buffer of
   exactly the requested size, with a cache limit that defaulted to its memory

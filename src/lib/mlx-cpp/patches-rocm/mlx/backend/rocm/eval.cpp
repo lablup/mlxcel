@@ -120,7 +120,7 @@ void eval(array& arr) {
 }
 
 void finalize(Stream s) {
-  rocm::get_command_encoder(s).commit();
+  rocm::get_command_encoder(s).commit_and_throttle();
 }
 
 void synchronize(Stream s) {

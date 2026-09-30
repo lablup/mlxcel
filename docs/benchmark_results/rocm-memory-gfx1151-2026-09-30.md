@@ -1,6 +1,6 @@
 # ROCm allocator memory: Radeon 8060S (gfx1151), 2026-09-30
 
-Where the ROCm backend's peak memory went on a UMA host, which knobs move it, and the bounded defaults that shipped with it (issue #2062, part of #1814). Before the change, a pp512/tg128 run of `Meta-Llama-3.1-8B-Instruct-4bit` (4.75 GB of weights once loaded) peaked at 20.60 GB, and `Qwen3-30B-A3B-4bit` (17.17 GB) at 23.56 GB. With the defaults the peaks are 6.14 GB and 18.57 GB, and decode throughput is unchanged.
+Where the ROCm backend's peak memory went on a UMA host, which knobs move it, and the bounded defaults that shipped with it (issue #2062, part of #1814). Before the change, a pp512/tg128 run of `Meta-Llama-3.1-8B-Instruct-4bit` (4.75 GB of weights once loaded) peaked at 20.60 GB, and `Qwen3-30B-A3B-4bit` (17.17 GB) at 23.56 GB. With the defaults the peaks are 6.14 GB and 18.58 GB, and decode throughput is unchanged.
 
 Raw harness rows (three runs per model and configuration): [`data/rocm-memory-gfx1151-2026-09-30/`](data/rocm-memory-gfx1151-2026-09-30/).
 
@@ -68,18 +68,18 @@ Measured pass peak, VRAM delta, and throughput, one run each:
 | `MLX_ROCM_QMM_DEQUANT_GEMM=0` | 6.78 GB | 7.16 GB | 51.75 / 37.19 | 23.56 GB | 24.09 GB | 263.29 / 61.14 |
 | `MLXCEL_CACHE_CLEAR_INTERVAL=0` | 20.60 GB | 21.19 GB | 1063.32 / 36.96 | not run | | |
 
-No knob bounded the peak without giving up prefill. MLX's two limits did nothing on ROCm: `set_cache_limit` was not enforced, and `set_memory_limit` only acts through the scheduler's task accounting, which the eager path bypassed. More frequent commits alone (`MLX_MAX_OPS_PER_BUFFER=50`) did nothing either, because the host never waited on them. The periodic cache clear does not fire in a 128-token run (its cadence is 256 tokens). Prefill on the MoE model varies widely from run to run (from 203 to 320 tok/s over the runs on this page), so its differences in this table are noise.
+No knob bounded the peak without giving up prefill. MLX's two limits did nothing on ROCm: `set_cache_limit` was not enforced, and `set_memory_limit` only acts through the scheduler's task accounting, which the eager path bypassed. More frequent commits alone (`MLX_MAX_OPS_PER_BUFFER=50`) did nothing either, because the host never waited on them. The periodic cache clear does not fire in a 128-token run (its cadence is 256 tokens). Prefill on the MoE model varies widely from run to run (from 203 to 315 tok/s over the runs on this page), so its differences in this table are noise.
 
 ## What shipped
 
 Two bounds, one per mechanism; both are documented in `docs/installation.md` (Linux with AMD ROCm, Memory footprint):
 
-1. **In-flight bound (overlay, `LOCAL_FIXES.md` item 28).** `gpu::eval` counts what each operation allocates, the eager path commits a batch once it has allocated a quarter of `MLX_ROCM_MAX_INFLIGHT_MB` (default 1024), and the host waits for the oldest committed batch while the committed ones exceed the budget. `0` restores the old behavior.
-2. **Cache bound.** The overlay's `malloc_async` now trims the cache to its limit on a cache miss, so `set_cache_limit` works, and mlxcel applies `MLXCEL_CACHE_LIMIT=2GB` by default on ROCm builds (`src/execution/runtime.rs`); an explicit value, including `0` or `none`, still wins.
+1. **In-flight bound (overlay, `LOCAL_FIXES.md` item 28).** `gpu::eval` counts what each operation allocates, the eager path commits a batch once it has allocated a quarter of `MLX_ROCM_MAX_INFLIGHT_MB` (default 1024), and the host waits for the oldest committed batch while the committed ones exceed the budget. The last batch of each eval is counted too. `0` restores the old behavior.
+2. **Cache bound.** The overlay's `malloc_async` now trims the cache to three quarters of its limit on a cache miss once it is over the limit, so `set_cache_limit` works, and mlxcel applies `MLXCEL_CACHE_LIMIT=2GB` by default on ROCm builds (`src/execution/runtime.rs`); an explicit value, including `0` or `none`, still wins.
 
 ### Choosing the in-flight budget
 
-With the 2 GiB cache default, one run each. This sweep and the next ran on the first version of the bound, whose host wait spun on `hipEventQuery`; the shipped version sleeps in `hipEventSynchronize` (see `LOCAL_FIXES.md` item 28), and the harness table further down is the shipped version.
+With the 2 GiB cache default, one run each. This sweep and the next ran on the first version of the bound, whose host wait spun on `hipEventQuery`, which did not count the last batch of each eval, and whose cache trim went down to the limit rather than to three quarters of it; the shipped version is what the harness table further down measured.
 
 | `MLX_ROCM_MAX_INFLIGHT_MB` | Llama peak | Llama VRAM delta | Llama prefill / decode | Qwen peak | Qwen VRAM delta | Qwen prefill / decode |
 |---:|---:|---:|---:|---:|---:|---:|
@@ -108,20 +108,20 @@ Decode stayed within 2% of the unbounded run at every value, down to 128 MiB, so
 
 ## Before and after, through the harness
 
-Three runs each through `scripts/bench_decode.sh`, alternating. "Before" is the same binary with both bounds off (`MLXCEL_CACHE_LIMIT=none MLX_ROCM_MAX_INFLIGHT_MB=0`), which reproduced the origin/main figures exactly (20.60 GB and 23.56 GB peak, 21.19 GB and 24.09 GB VRAM delta). Medians; the peak and the VRAM delta were identical in all three runs of each row:
+Three runs each through `scripts/bench_decode.sh`, alternating. "Before" is the same binary with both bounds off (`MLXCEL_CACHE_LIMIT=none MLX_ROCM_MAX_INFLIGHT_MB=0`), which reproduced the origin/main figures exactly (20.60 GB and 23.56 GB peak, 21.19 GB and 24.09 to 24.11 GB VRAM delta). Medians; the peak and the VRAM delta varied by at most 0.14 GB across the three runs of each row:
 
 | Model | Setting | MLX peak | VRAM delta | Steady state (active + cache after the measured pass) | Prefill tok/s | Decode tok/s |
 |---|---|---:|---:|---:|---:|---:|
-| Llama-3.1-8B-Instruct-4bit | before | 20.60 GB | 21.19 GB | 5.17 GB | 1067.08 | 37.04 |
-| Llama-3.1-8B-Instruct-4bit | defaults | 6.14 GB | 6.73 GB | 5.18 GB | 1049.42 | 37.67 |
-| Qwen3-30B-A3B-4bit | before | 23.56 GB | 24.09 GB | 17.57 GB | 254.10 | 61.84 |
-| Qwen3-30B-A3B-4bit | defaults | 18.57 GB | 19.15 GB | 17.67 GB | 259.73 | 61.76 |
+| Llama-3.1-8B-Instruct-4bit | before | 20.60 GB | 21.19 GB | 5.16 GB | 1064.83 | 37.02 |
+| Llama-3.1-8B-Instruct-4bit | defaults | 6.14 GB | 6.73 GB | 5.18 GB | 1045.87 | 37.57 |
+| Qwen3-30B-A3B-4bit | before | 23.56 GB | 24.11 GB | 17.67 GB | 300.07 | 61.79 |
+| Qwen3-30B-A3B-4bit | defaults | 18.58 GB | 19.16 GB | 17.56 GB | 303.75 | 61.69 |
 
-Decode changes by +1.7% and -0.1%, inside the 2% bound. Prefill changes by -1.7% on the 8B, the host now waiting on the GPU instead of queueing far ahead; the MoE model's +2.2% is noise (its prefill ranged from 216.61 to 319.99 tok/s over the three runs with the defaults and 248.43 to 255.91 without). The steady state was already close to the weights, because `generate_with_stats` clears the cache after prefill; the peak is what moved.
+Decode changes by +1.5% and -0.2%, inside the 2% bound. Prefill changes by -1.8% on the 8B, the host now waiting on the GPU instead of queueing far ahead; the MoE model's +1.2% is noise (its prefill ranged from 264.33 to 315.02 tok/s over the three runs with the defaults and 291.52 to 306.43 without). The steady state was already close to the weights, because `generate_with_stats` clears the cache after prefill; the peak is what moved.
 
 ## The pre-load memory estimate
 
-On ROCm the estimate behind `mlxcel inspect` and `--estimate-memory` reads the allocator's `memory_limit()` as available memory (#1805). Neither bound changes it: the cache default goes through `set_cache_limit`, and the in-flight budget is internal to the backend, so `memory_limit()` is still 76.80 GiB and every estimate is what it was. `runtime_tests::the_cache_default_leaves_the_memory_limit_the_estimator_reads` checks that runtime bring-up leaves it alone. What the estimate predicts is another matter, and the change moves reality toward it. `mlxcel inspect --max-tokens 640` (the pp512/tg128 context) estimates 5.58 GB for the 8B and 20.72 GB for the MoE model (weights and KV cache times 1.20 plus an activation term) and reports 76.80 GiB available for both, as before. The measured peaks were 20.60 GB and 23.56 GB before and are 6.14 GB and 18.57 GB now: the 8B still peaks 0.56 GB above its estimate (it was 15 GB above), and the MoE model now peaks below its estimate. Recalibrating the 1.20 factor for ROCm is not part of this change.
+On ROCm the estimate behind `mlxcel inspect` and `--estimate-memory` reads the allocator's `memory_limit()` as available memory (#1805). Neither bound changes it: the cache default goes through `set_cache_limit`, and the in-flight budget is internal to the backend, so `memory_limit()` is still 76.80 GiB and every estimate is what it was. `runtime_tests::the_cache_default_leaves_the_memory_limit_the_estimator_reads` checks that runtime bring-up leaves it alone. What the estimate predicts is another matter, and the change moves reality toward it. `mlxcel inspect --max-tokens 640` (the pp512/tg128 context) estimates 5.58 GB for the 8B and 20.72 GB for the MoE model (weights and KV cache times 1.20 plus an activation term) and reports 76.80 GiB available for both, as before. The measured peaks were 20.60 GB and 23.56 GB before and are 6.14 GB and 18.58 GB now: the 8B still peaks 0.56 GB above its estimate (it was 15 GB above), and the MoE model now peaks below its estimate. Recalibrating the 1.20 factor for ROCm is not part of this change.
 
 ## Reproducing
 

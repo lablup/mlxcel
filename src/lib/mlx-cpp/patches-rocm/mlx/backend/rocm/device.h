@@ -225,6 +225,10 @@ class CommandEncoder {
 
   void add_completed_handler(std::function<void()> task);
   void maybe_commit();
+  // commit(), then apply the in-flight bound to the batch just committed.
+  // Used by maybe_commit and by gpu::finalize, so the last batch of every
+  // eval (and every async_eval) is counted too.
+  void commit_and_throttle();
   bool needs_commit();
   void commit();
 
