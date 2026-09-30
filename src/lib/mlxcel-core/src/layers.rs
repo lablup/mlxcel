@@ -6463,6 +6463,8 @@ mod tests {
                 "MLX_ROCM_QMM_DEQUANT_GEMM",
                 "MLX_ROCM_QMM_DEQUANT_M_THRESHOLD",
                 "MLX_NO_HIPBLASLT",
+                "MLX_ROCM_FORCE_LOW_CU",
+                "MLX_ROCM_FORCE_WARP_SIZE",
             ]
             .iter()
             .all(|name| std::env::var_os(name).is_none())
