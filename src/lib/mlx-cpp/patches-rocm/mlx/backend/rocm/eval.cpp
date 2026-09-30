@@ -76,6 +76,10 @@ void eval(array& arr) {
     if (arr.is_tracer()) {
       inputs = arr.inputs();
     }
+    // What this primitive allocates (outputs, scratch such as the qmm
+    // dequant weight) stays pinned until its batch completes; count it so the
+    // eager path can bound it (lablup/mlxcel#2062).
+    const size_t allocated_before = rocm::thread_allocated_bytes();
     try {
       arr.primitive().eval_gpu(arr.inputs(), outputs);
     } catch (...) {
@@ -90,6 +94,7 @@ void eval(array& arr) {
     // launching thread, and throw it as this primitive's error instead of
     // letting the output be consumed unwritten (lablup/mlxcel#1804).
     encoder.check_launch(arr.primitive().name());
+    encoder.add_batch_bytes(rocm::thread_allocated_bytes() - allocated_before);
   }
 
   for (auto& in : arr.inputs()) {

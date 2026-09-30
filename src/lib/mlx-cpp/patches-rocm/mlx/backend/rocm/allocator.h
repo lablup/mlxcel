@@ -180,6 +180,13 @@ class RocmAllocator : public allocator::Allocator {
 
 RocmAllocator& allocator();
 
+// Bytes this thread has taken from RocmAllocator::malloc / malloc_async since
+// the thread started (cache hits included). Monotonic and thread-local, so a
+// caller can difference two reads around a primitive's eval_gpu and learn how
+// much new memory that primitive's outputs and scratch pinned, unaffected by
+// the worker thread freeing completed batches meanwhile (lablup/mlxcel#2062).
+size_t thread_allocated_bytes();
+
 class CommandEncoder;
 Buffer malloc_async(size_t size, CommandEncoder& encoder);
 

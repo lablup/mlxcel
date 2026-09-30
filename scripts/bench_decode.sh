@@ -87,6 +87,10 @@
 #   --no-dedup restores the pre-#1615 behavior exactly (every directory
 #   measured, no alias rows). Single-model mode is never affected by dedup.
 #
+# BENCH_RAW_DIR=<dir> also writes each model's full runner output to
+# <dir>/<model>.log, including the MLX allocator memory lines (`[Memory] ...`,
+# `MLX peak memory`) that the CSV does not carry (issue #2062).
+#
 # Filename convention:
 #   {backend}_{hardware}_{YYYY-MM-DD}.csv                (text suite, 'all')
 #   {backend}_{hardware}_vlm_{YYYY-MM-DD}.csv            (VLM suite, 'all --vlm')
@@ -1063,6 +1067,14 @@ bench_one() {
       --warmup-tokens "$WARMUP_TOKENS" \
       ${eos_args[@]+"${eos_args[@]}"} \
       ${extra_args[@]+"${extra_args[@]}"} 2>&1) || rc=$?
+
+  # Keep the runner's full output when asked (issue #2062). The CSV carries
+  # throughput only; the `[Memory]` phase lines and the `MLX peak memory`
+  # line are in this log.
+  if [[ -n "${BENCH_RAW_DIR:-}" ]]; then
+    mkdir -p "$BENCH_RAW_DIR"
+    printf '%s\n' "$raw" > "$BENCH_RAW_DIR/${model_name}.log"
+  fi
 
   if [[ "$rc" -ne 0 ]]; then
     if is_oom_failure "$rc" "$raw"; then

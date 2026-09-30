@@ -504,6 +504,41 @@ in
 `scripts/bench_decode.sh` recognises a ROCm host on its own (see
 [Benchmarks](benchmarks.md#rocm-hosts-issue-1810)).
 
+#### Memory footprint
+
+Two defaults keep the allocator's footprint close to the weights
+(lablup/mlxcel#2062). Measured on `gfx1151` at pp512/tg128, the MLX peak for
+Meta-Llama-3.1-8B-Instruct-4bit went from 20.60 GB to 6.14 GB and for
+Qwen3-30B-A3B-4bit from 23.56 GB to 18.57 GB, with decode throughput
+unchanged and prefill within 2%; the breakdown and every knob compared are in
+[`docs/benchmark_results/rocm-memory-gfx1151-2026-09-30.md`](benchmark_results/rocm-memory-gfx1151-2026-09-30.md).
+
+- **In-flight bound, `MLX_ROCM_MAX_INFLIGHT_MB` (default 1024).** Most of
+  the old peak was not cache: a prefill allocates a transient for every
+  operation (for an f16 4-bit model on the dequantize-and-GEMM path, an f16
+  copy of each weight matrix), each one is released only when its command batch
+  finishes on the GPU, and the host could encode far ahead of the GPU. The
+  backend now commits a batch once it has allocated a quarter of this budget
+  and waits for the oldest batch while more than the budget is in flight, so
+  the transients stay within about this many MiB. `0` restores the unbounded behavior.
+- **Buffer-cache bound, `MLXCEL_CACHE_LIMIT` (default 2 GiB on ROCm).** Freed
+  buffers are cached for reuse, and the ROCm allocator only reuses a buffer of
+  exactly the requested size, with a cache limit that defaulted to its memory
+  limit (76.8 GiB here). A ROCm build now caps the cache at 2 GiB unless
+  `MLXCEL_CACHE_LIMIT` says otherwise; `0` or `none` removes the cap. Before
+  this change the allocator ignored the cache limit altogether, so
+  `MLXCEL_CACHE_LIMIT` had no effect on ROCm. Decode throughput did not move
+  between 128 MiB and no cap on either model; prefill lost 16% on the 8B at
+  128 MiB, because each f16 weight copy is reallocated once the cache cannot
+  hold it, and nothing measurable from 512 MiB up. 2 GiB is four times that
+  smallest free value, which leaves room for the larger weight copies of
+  bigger models.
+
+The allocator's peak counts live buffers only, so the most the allocator
+holds is the peak plus the cache limit. The memory limit the pre-load
+estimate reads (`memory_limit()`, 76.80 GiB) is unchanged by either default,
+so `mlxcel inspect` and `--estimate-memory` give the same answers as before.
+
 ### Current status
 
 | Area | Status on ROCm |

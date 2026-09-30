@@ -20,6 +20,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -214,6 +215,14 @@ class CommandEncoder {
 
   void add_temporary(const array& arr);
 
+  // Record |bytes| of new allocations made by the primitive just encoded (its
+  // outputs and scratch). They stay pinned until this batch completes, so the
+  // eager path commits once a batch has pinned enough, and waits for older
+  // batches once too much is pinned in flight (lablup/mlxcel#2062).
+  void add_batch_bytes(size_t bytes) {
+    batch_bytes_ += bytes;
+  }
+
   void add_completed_handler(std::function<void()> task);
   void maybe_commit();
   bool needs_commit();
@@ -262,6 +271,17 @@ class CommandEncoder {
   void insert_graph_dependencies(std::vector<GraphNode> nodes);
   void add_child_graph_node(hipGraph_t child, const std::string& key);
 
+  // In-flight memory bound for the eager path (lablup/mlxcel#2062).
+  // Raw events rather than HipEvent: HipEvent returns its handle to a
+  // function-local static pool on destruction, and an encoder can outlive
+  // that pool at process exit.
+  struct InflightBatch {
+    hipEvent_t done; // recorded after the batch's kernels
+    size_t bytes;
+  };
+  void throttle_inflight(size_t committed_bytes);
+  void release_inflight();
+
   Device& device_;
   HipStream stream_;
   std::unique_ptr<Worker> worker_;
@@ -269,6 +289,14 @@ class CommandEncoder {
   int node_count_{0};
   std::vector<std::shared_ptr<array::Data>> temporaries_;
   std::unordered_set<const array::Data*> temporary_ptrs_;
+  // Bytes newly allocated by the primitives of the open batch.
+  size_t batch_bytes_{0};
+  // MLX_ROCM_MAX_INFLIGHT_MB in bytes; 0 disables the bound.
+  size_t inflight_budget_{0};
+  // Batches committed by the byte or op bound and not yet known complete.
+  std::deque<InflightBatch> inflight_;
+  size_t inflight_bytes_{0};
+  std::vector<hipEvent_t> spare_events_;
 
   // --- Automatic graph-batching state (mirrors CUDA CommandEncoder) ---
   hipGraph_t build_graph_{nullptr};

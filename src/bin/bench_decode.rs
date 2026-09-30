@@ -406,6 +406,34 @@ fn measured(
     Ok(stats)
 }
 
+/// Print the MLX allocator counters at a phase boundary (issue #2062).
+///
+/// `active` is live arrays, `cache` is freed buffers the allocator keeps for
+/// reuse, and `phase peak` is the high-water mark of `active` since the last
+/// reset. The allocator's peak counts live buffers only, never the cache, so
+/// `active + cache` is the allocator's footprint and the peak alone is not.
+fn print_memory_phase(phase: &str) -> Result<()> {
+    mlxcel_core::synchronize_default();
+    let snap = mlxcel_core::memory::snapshot();
+    let gb = |b: u64| b as f64 / 1e9;
+    println!(
+        "[Memory] {phase}: active {:.2} GB, cache {:.2} GB, active+cache {:.2} GB, phase peak {:.2} GB",
+        gb(snap.active_bytes),
+        gb(snap.cache_bytes),
+        gb(snap.active_bytes.saturating_add(snap.cache_bytes)),
+        gb(snap.peak_bytes),
+    );
+    io::stdout().flush()?;
+    Ok(())
+}
+
+fn describe_cache_limit(limit: Option<usize>) -> String {
+    match limit {
+        Some(bytes) => format!("{:.2} GB", bytes as f64 / 1e9),
+        None => "none applied (allocator default)".to_string(),
+    }
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -455,9 +483,15 @@ fn main() -> Result<()> {
     // This must happen before any generator/cache construction.
     args.turbo.apply_to_environment();
 
-    let _runtime = mlxcel::initialize_runtime();
+    let runtime = mlxcel::initialize_runtime();
     mlxcel_core::synchronize_default();
     mlxcel_core::clear_memory_cache();
+    // Which buffer-cache bound this run measured under: the backend default
+    // (ROCm, issue #2062), an explicit `MLXCEL_CACHE_LIMIT`, or none.
+    println!(
+        "[Memory] cache limit: {}",
+        describe_cache_limit(runtime.cache_limit_bytes)
+    );
 
     // Isolate the cold-load phase: reset the MLX high-water mark so the peak
     // reported right after load reflects weight loading and any repack
@@ -473,7 +507,8 @@ fn main() -> Result<()> {
         "[Load] wall: {:.3} s  MLX peak: {load_peak_gb:.2} GB",
         load_wall.as_secs_f64()
     );
-    io::stdout().flush()?;
+    let mut run_peak = mlxcel_core::get_peak_memory();
+    print_memory_phase("after load")?;
     let tokenizer = load_tokenizer(&args.model).unwrap_or(loaded_tokenizer);
     let sampling = sampling_config(&args.model, &model, args.ignore_eos);
 
@@ -506,6 +541,10 @@ fn main() -> Result<()> {
     };
 
     let prepared = make_prepared()?;
+    // Per-phase peaks (issue #2062): reset the high-water mark at each phase
+    // boundary and fold the phase peaks into `run_peak`, so the whole-run
+    // figure printed at the end is unchanged while each phase is attributable.
+    mlxcel_core::reset_peak_memory();
     warmup(
         &model,
         &prepared,
@@ -514,6 +553,8 @@ fn main() -> Result<()> {
         kv_cache_mode,
     )?;
     drop(prepared);
+    run_peak = run_peak.max(mlxcel_core::get_peak_memory());
+    print_memory_phase("after warmup (prefill + warmup tokens)")?;
 
     // Some VLM models store single-use state on the model during prepare_prompt
     // (e.g., Gemma 3n caches per_layer_inputs that the first prefill takes()
@@ -522,17 +563,17 @@ fn main() -> Result<()> {
     // prompt before the measured pass. For text-only models this is cheap; for
     // VLM it re-runs the vision encoder against now-warm MLX/Metal state.
     let prepared = make_prepared()?;
+    mlxcel_core::reset_peak_memory();
     let stats = measured(&model, &prepared, args.max_tokens, &sampling, kv_cache_mode)?;
+    run_peak = run_peak.max(mlxcel_core::get_peak_memory());
+    print_memory_phase("after measured pass")?;
 
     println!("[Profile Results]");
     stats.print();
     // MLX allocator high-water mark for the whole run (model load + prefill +
     // decode). This is the number an OOM budget must fit, independent of how
     // much the cudaMallocAsync pool has returned to the OS (issue #672).
-    println!(
-        "  MLX peak memory:  {:.2} GB",
-        mlxcel_core::get_peak_memory() as f64 / 1e9
-    );
+    println!("  MLX peak memory:  {:.2} GB", run_peak as f64 / 1e9);
     io::stdout().flush()?;
 
     mlxcel_core::clear_memory_cache();

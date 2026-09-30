@@ -1,0 +1,109 @@
+# [Memory] and MLX peak lines from each harness run (BENCH_RAW_DIR logs). 'after' = defaults; 'prior' = MLXCEL_CACHE_LIMIT=none MLX_ROCM_MAX_INFLIGHT_MB=0.
+## llama-after-1
+[Memory] cache limit: 2.15 GB
+[Memory] after load: active 0.00 GB, cache 0.00 GB, active+cache 0.00 GB, phase peak 0.00 GB
+[Memory] after warmup (prefill + warmup tokens): active 4.75 GB, cache 0.68 GB, active+cache 5.43 GB, phase peak 5.11 GB
+[Memory] after measured pass: active 4.75 GB, cache 0.43 GB, active+cache 5.18 GB, phase peak 6.14 GB
+Prefill:          493.47 ms (1037.55 tok/s)
+Decode:           3382.11 ms (37.85 tok/s)
+MLX peak memory:  6.14 GB
+mem_info_vram_used delta 6.73 GB, mem_info_gtt_used delta 0.01 GB, VmHWM 0.85 GB, window 19:06:55-19:07:09 KST, other GPU processes: 0, compilers: 0
+## llama-after-2
+[Memory] cache limit: 2.15 GB
+[Memory] after load: active 0.00 GB, cache 0.00 GB, active+cache 0.00 GB, phase peak 0.00 GB
+[Memory] after warmup (prefill + warmup tokens): active 4.75 GB, cache 0.68 GB, active+cache 5.43 GB, phase peak 5.11 GB
+[Memory] after measured pass: active 4.75 GB, cache 0.42 GB, active+cache 5.18 GB, phase peak 6.14 GB
+Prefill:          487.89 ms (1049.42 tok/s)
+Decode:           3397.85 ms (37.67 tok/s)
+MLX peak memory:  6.14 GB
+mem_info_vram_used delta 6.73 GB, mem_info_gtt_used delta 0.01 GB, VmHWM 0.84 GB, window 19:10:23-19:10:38 KST, other GPU processes: 0, compilers: 0
+## llama-after-3
+[Memory] cache limit: 2.15 GB
+[Memory] after load: active 0.00 GB, cache 0.00 GB, active+cache 0.00 GB, phase peak 0.00 GB
+[Memory] after warmup (prefill + warmup tokens): active 4.75 GB, cache 0.67 GB, active+cache 5.43 GB, phase peak 5.10 GB
+[Memory] after measured pass: active 4.75 GB, cache 0.38 GB, active+cache 5.13 GB, phase peak 6.14 GB
+Prefill:          483.12 ms (1059.77 tok/s)
+Decode:           3417.23 ms (37.46 tok/s)
+MLX peak memory:  6.14 GB
+mem_info_vram_used delta 6.73 GB, mem_info_gtt_used delta 0.01 GB, VmHWM 0.84 GB, window 19:12:47-19:13:03 KST, other GPU processes: 0, compilers: 0
+## llama-prior-1
+[Memory] cache limit: none applied (allocator default)
+[Memory] after load: active 0.00 GB, cache 0.00 GB, active+cache 0.00 GB, phase peak 0.00 GB
+[Memory] after warmup (prefill + warmup tokens): active 4.75 GB, cache 1.64 GB, active+cache 6.39 GB, phase peak 6.19 GB
+[Memory] after measured pass: active 4.75 GB, cache 0.42 GB, active+cache 5.17 GB, phase peak 20.60 GB
+Prefill:          478.05 ms (1071.02 tok/s)
+Decode:           3444.80 ms (37.16 tok/s)
+MLX peak memory:  20.60 GB
+mem_info_vram_used delta 21.19 GB, mem_info_gtt_used delta 0.01 GB, VmHWM 0.85 GB, window 19:08:25-19:08:33 KST, other GPU processes: 0, compilers: 0
+## llama-prior-2
+[Memory] cache limit: none applied (allocator default)
+[Memory] after load: active 0.00 GB, cache 0.00 GB, active+cache 0.00 GB, phase peak 0.00 GB
+[Memory] after warmup (prefill + warmup tokens): active 4.75 GB, cache 1.64 GB, active+cache 6.39 GB, phase peak 6.19 GB
+[Memory] after measured pass: active 4.75 GB, cache 0.42 GB, active+cache 5.17 GB, phase peak 20.60 GB
+Prefill:          480.06 ms (1066.53 tok/s)
+Decode:           3481.03 ms (36.77 tok/s)
+MLX peak memory:  20.60 GB
+mem_info_vram_used delta 21.19 GB, mem_info_gtt_used delta 0.01 GB, VmHWM 0.85 GB, window 19:10:53-19:11:01 KST, other GPU processes: 0, compilers: 0
+## llama-prior-3
+[Memory] cache limit: none applied (allocator default)
+[Memory] after load: active 0.00 GB, cache 0.00 GB, active+cache 0.00 GB, phase peak 0.00 GB
+[Memory] after warmup (prefill + warmup tokens): active 4.75 GB, cache 1.64 GB, active+cache 6.39 GB, phase peak 6.19 GB
+[Memory] after measured pass: active 4.75 GB, cache 0.42 GB, active+cache 5.17 GB, phase peak 20.60 GB
+Prefill:          479.82 ms (1067.08 tok/s)
+Decode:           3455.49 ms (37.04 tok/s)
+MLX peak memory:  20.60 GB
+mem_info_vram_used delta 21.19 GB, mem_info_gtt_used delta 0.01 GB, VmHWM 0.85 GB, window 19:13:18-19:13:25 KST, other GPU processes: 0, compilers: 0
+## qwen-after-1
+[Memory] cache limit: 2.15 GB
+[Memory] after load: active 0.00 GB, cache 0.00 GB, active+cache 0.00 GB, phase peak 0.00 GB
+[Memory] after warmup (prefill + warmup tokens): active 17.17 GB, cache 0.64 GB, active+cache 17.81 GB, phase peak 17.56 GB
+[Memory] after measured pass: active 17.17 GB, cache 0.50 GB, active+cache 17.67 GB, phase peak 18.57 GB
+Prefill:          2363.65 ms (216.61 tok/s)
+Decode:           2072.70 ms (61.76 tok/s)
+MLX peak memory:  18.57 GB
+mem_info_vram_used delta 19.15 GB, mem_info_gtt_used delta 0.01 GB, VmHWM 0.86 GB, window 19:08:48-19:09:20 KST, other GPU processes: 0, compilers: 0
+## qwen-after-2
+[Memory] cache limit: 2.15 GB
+[Memory] after load: active 0.00 GB, cache 0.00 GB, active+cache 0.00 GB, phase peak 0.00 GB
+[Memory] after warmup (prefill + warmup tokens): active 17.17 GB, cache 0.62 GB, active+cache 17.79 GB, phase peak 17.56 GB
+[Memory] after measured pass: active 17.17 GB, cache 0.50 GB, active+cache 17.67 GB, phase peak 18.57 GB
+Prefill:          1971.25 ms (259.73 tok/s)
+Decode:           2072.23 ms (61.77 tok/s)
+MLX peak memory:  18.57 GB
+mem_info_vram_used delta 19.15 GB, mem_info_gtt_used delta 0.01 GB, VmHWM 0.86 GB, window 19:11:16-19:11:45 KST, other GPU processes: 0, compilers: 0
+## qwen-after-3
+[Memory] cache limit: 2.15 GB
+[Memory] after load: active 0.00 GB, cache 0.00 GB, active+cache 0.00 GB, phase peak 0.00 GB
+[Memory] after warmup (prefill + warmup tokens): active 17.17 GB, cache 0.62 GB, active+cache 17.80 GB, phase peak 17.56 GB
+[Memory] after measured pass: active 17.17 GB, cache 0.50 GB, active+cache 17.67 GB, phase peak 18.57 GB
+Prefill:          1600.04 ms (319.99 tok/s)
+Decode:           2074.94 ms (61.69 tok/s)
+MLX peak memory:  18.57 GB
+mem_info_vram_used delta 19.15 GB, mem_info_gtt_used delta 0.01 GB, VmHWM 0.86 GB, window 19:13:41-19:14:29 KST, other GPU processes: 0, compilers: 0
+## qwen-prior-1
+[Memory] cache limit: none applied (allocator default)
+[Memory] after load: active 0.00 GB, cache 0.00 GB, active+cache 0.00 GB, phase peak 0.00 GB
+[Memory] after warmup (prefill + warmup tokens): active 17.17 GB, cache 0.62 GB, active+cache 17.79 GB, phase peak 17.56 GB
+[Memory] after measured pass: active 17.17 GB, cache 0.40 GB, active+cache 17.57 GB, phase peak 23.56 GB
+Prefill:          2000.72 ms (255.91 tok/s)
+Decode:           2068.43 ms (61.88 tok/s)
+MLX peak memory:  23.56 GB
+mem_info_vram_used delta 24.09 GB, mem_info_gtt_used delta 0.01 GB, VmHWM 0.86 GB, window 19:09:35-19:10:08 KST, other GPU processes: 0, compilers: 0
+## qwen-prior-2
+[Memory] cache limit: none applied (allocator default)
+[Memory] after load: active 0.00 GB, cache 0.00 GB, active+cache 0.00 GB, phase peak 0.00 GB
+[Memory] after warmup (prefill + warmup tokens): active 17.17 GB, cache 0.62 GB, active+cache 17.80 GB, phase peak 17.56 GB
+[Memory] after measured pass: active 17.17 GB, cache 0.48 GB, active+cache 17.65 GB, phase peak 23.56 GB
+Prefill:          2060.92 ms (248.43 tok/s)
+Decode:           2069.73 ms (61.84 tok/s)
+MLX peak memory:  23.56 GB
+mem_info_vram_used delta 24.09 GB, mem_info_gtt_used delta 0.01 GB, VmHWM 0.86 GB, window 19:12:01-19:12:32 KST, other GPU processes: 0, compilers: 0
+## qwen-prior-3
+[Memory] cache limit: none applied (allocator default)
+[Memory] after load: active 0.00 GB, cache 0.00 GB, active+cache 0.00 GB, phase peak 0.00 GB
+[Memory] after warmup (prefill + warmup tokens): active 17.17 GB, cache 0.62 GB, active+cache 17.79 GB, phase peak 17.56 GB
+[Memory] after measured pass: active 17.17 GB, cache 0.39 GB, active+cache 17.56 GB, phase peak 23.56 GB
+Prefill:          2014.99 ms (254.10 tok/s)
+Decode:           2077.77 ms (61.60 tok/s)
+MLX peak memory:  23.56 GB
+mem_info_vram_used delta 24.09 GB, mem_info_gtt_used delta 0.01 GB, VmHWM 0.86 GB, window 19:14:45-19:15:27 KST, other GPU processes: 0, compilers: 0

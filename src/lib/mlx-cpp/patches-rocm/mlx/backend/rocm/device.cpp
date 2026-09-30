@@ -19,6 +19,7 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace mlx::core::rocm {
@@ -62,6 +63,46 @@ std::atomic<bool> g_decode_capturing{false};
 void set_current_prim(const char*) {}
 void record_inline_launch() {
   g_inline_launches_.fetch_add(1, std::memory_order_relaxed);
+}
+
+// MLX_ROCM_MAX_INFLIGHT_MB: how much newly allocated memory (outputs and
+// scratch of encoded primitives) the eager path lets committed-but-unfinished
+// command batches pin, in MiB (lablup/mlxcel#2062). A batch's buffers are only
+// released by its completion handler, and the host encodes much faster than
+// the GPU runs a prefill, so without a bound the temporaries of many batches
+// are live at once: 15.85 GB of them, mostly the f16 weight copies of the
+// dequantize-and-GEMM qmm path, on top of 4.75 GB of 4-bit weights for
+// Llama-3.1-8B at 512 prompt tokens on gfx1151.
+// A batch is committed once it has pinned a quarter of the budget, and the
+// host waits for the oldest committed batch while more than the budget is in
+// flight. 0 turns the bound off (the previous behavior: commit every
+// MLX_MAX_OPS_PER_BUFFER ops, never wait).
+constexpr size_t default_max_inflight_mb = 1024;
+
+size_t max_inflight_bytes() {
+  static const size_t bytes = [] {
+    size_t mb = default_max_inflight_mb;
+    if (const char* e = std::getenv("MLX_ROCM_MAX_INFLIGHT_MB"); e && *e) {
+      // Whole string a non-negative decimal integer small enough to scale to
+      // bytes; anything else keeps the default rather than guessing.
+      char* end = nullptr;
+      errno = 0;
+      unsigned long long v = std::strtoull(e, &end, 10);
+      if (end == e || *end != '\0' || errno == ERANGE || e[0] == '-' ||
+          v > (std::numeric_limits<size_t>::max() >> 20)) {
+        std::fprintf(
+            stderr,
+            "[ROCm] ignoring invalid MLX_ROCM_MAX_INFLIGHT_MB=\"%s\" "
+            "(expected a non-negative integer); using %zu\n",
+            e,
+            default_max_inflight_mb);
+      } else {
+        mb = static_cast<size_t>(v);
+      }
+    }
+    return mb << 20;
+  }();
+  return bytes;
 }
 
 // Per-arch op/MB caps for the build graph. Tunable via env.
@@ -424,6 +465,7 @@ CommandEncoder::CommandEncoder(Device& d)
       stream_(d),
       worker_(std::make_unique<Worker>(d.hip_device())) {
   std::tie(max_ops_per_graph_, max_mb_per_graph_) = get_graph_limits();
+  inflight_budget_ = max_inflight_bytes();
   if (use_hip_graphs()) {
     device_.make_current();
     CHECK_HIP_ERROR(hipGraphCreate(&build_graph_, 0));
@@ -434,6 +476,10 @@ CommandEncoder::CommandEncoder(Device& d)
 CommandEncoder::~CommandEncoder() {
   // Destructor path: a failed destroy has nowhere to go, and on a device that
   // has faulted every one of these returns the fault.
+  release_inflight();
+  for (hipEvent_t ev : spare_events_) {
+    (void)hipEventDestroy(ev);
+  }
   for (auto& [key, pool] : exec_pool_) {
     for (auto& slot : pool) {
       (void)hipGraphExecDestroy(slot.exec);
@@ -905,14 +951,17 @@ void CommandEncoder::maybe_commit() {
     }
     return;
   }
-  if (node_count_ >= env::max_ops_per_buffer(default_max_ops_per_buffer)) {
+  if (needs_commit()) {
+    const size_t bytes = batch_bytes_;
     commit();
+    throttle_inflight(bytes);
   }
 }
 
 bool CommandEncoder::needs_commit() {
   if (!use_hip_graphs()) {
-    return node_count_ >= env::max_ops_per_buffer(default_max_ops_per_buffer);
+    return node_count_ >= env::max_ops_per_buffer(default_max_ops_per_buffer) ||
+        (inflight_budget_ > 0 && batch_bytes_ >= inflight_budget_ / 4);
   }
   // Decode-mode: never split mid-forward — the whole single-token forward
   // becomes one graph, committed once at finalize, refreshed via ExecUpdate.
@@ -1065,6 +1114,7 @@ void CommandEncoder::commit() {
     add_completed_handler([temporaries = std::move(temporaries_)]() {});
   }
   temporary_ptrs_.clear();
+  batch_bytes_ = 0;
 
   if (use_hip_graphs() && node_count_ > 0) {
     if (!from_nodes_.empty()) {
@@ -1296,6 +1346,7 @@ void CommandEncoder::synchronize() {
     fail(st, "synchronizing the stream");
   }
   error_.check();
+  release_inflight();
   // Stream is fully drained. Non-cached (no-reuse) execs reference these Packs
   // until now; cached-exec Packs live in their ExecSlot (clr#138) and are NOT
   // in these vectors, so clearing here is safe.
@@ -1303,6 +1354,89 @@ void CommandEncoder::synchronize() {
   graph_node_args_prev_.clear();
   if (use_hip_graphs())
     flush_graph_deferred_frees();
+}
+
+namespace {
+
+// Host wait for |ev|. Blocking (the device is in blocking-sync mode, so the
+// thread sleeps) unless MLX_ROCM_GPU_WATCHDOG_SECS is set, in which case it
+// polls and gives up with kWatchdogExpired at the deadline, like the other
+// host waits. A faulted stream ends either wait with its fault.
+hipError_t wait_inflight_event(hipEvent_t ev) {
+  const int secs = gpu_watchdog_seconds();
+  if (secs <= 0) {
+    return hipEventSynchronize(ev);
+  }
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(secs);
+  for (;;) {
+    hipError_t st = hipEventQuery(ev);
+    if (st != hipErrorNotReady) {
+      return st;
+    }
+    if (std::chrono::steady_clock::now() > deadline) {
+      return kWatchdogExpired;
+    }
+    std::this_thread::sleep_for(std::chrono::microseconds(50));
+  }
+}
+
+} // namespace
+
+// Bound the memory that committed, unfinished batches pin (see
+// max_inflight_bytes). |committed_bytes| is what the batch just committed
+// allocated. Records an event after it, forgets batches that have finished,
+// and blocks on the oldest while the rest still exceed the budget. A failed
+// wait is recorded as this stream's error, which the next synchronize or
+// event wait throws, and ends the tracking.
+void CommandEncoder::throttle_inflight(size_t committed_bytes) {
+  if (inflight_budget_ == 0 || committed_bytes == 0 || error_.valid() ||
+      g_decode_capturing.load(std::memory_order_relaxed) ||
+      stream_capturing()) {
+    return;
+  }
+  hipEvent_t done = nullptr;
+  if (!spare_events_.empty()) {
+    done = spare_events_.back();
+    spare_events_.pop_back();
+  } else if (
+      hipEventCreateWithFlags(&done, hipEventDisableTiming) != hipSuccess) {
+    (void)hipGetLastError();
+    return; // untracked: this batch is bounded by its own size only
+  }
+  if (hipError_t st = hipEventRecord(done, stream_); st != hipSuccess) {
+    spare_events_.push_back(done);
+    set_device_error(st, "recording an in-flight command batch");
+    release_inflight();
+    return;
+  }
+  inflight_.push_back(InflightBatch{done, committed_bytes});
+  inflight_bytes_ += committed_bytes;
+  while (!inflight_.empty()) {
+    hipError_t st = hipEventQuery(inflight_.front().done);
+    if (st == hipErrorNotReady) {
+      if (inflight_bytes_ <= inflight_budget_) {
+        return;
+      }
+      st = wait_inflight_event(inflight_.front().done);
+    }
+    if (st != hipSuccess) {
+      set_device_error(st, "waiting for an in-flight command batch");
+      release_inflight();
+      return;
+    }
+    inflight_bytes_ -= inflight_.front().bytes;
+    spare_events_.push_back(inflight_.front().done);
+    inflight_.pop_front();
+  }
+}
+
+void CommandEncoder::release_inflight() {
+  for (auto& b : inflight_) {
+    spare_events_.push_back(b.done);
+  }
+  inflight_.clear();
+  inflight_bytes_ = 0;
 }
 
 // Global flag: true while any stream on this process is recording a HIP graph.

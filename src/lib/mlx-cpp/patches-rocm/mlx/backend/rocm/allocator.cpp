@@ -424,6 +424,14 @@ static void free_rocm_buffer_cb(RocmBuffer* buf) {
   allocator().free_rocm_buffer(buf);
 }
 
+namespace {
+thread_local size_t t_allocated_bytes = 0;
+} // namespace
+
+size_t thread_allocated_bytes() {
+  return t_allocated_bytes;
+}
+
 // CUDA: Buffer malloc(size) { return malloc_async(size, -1, nullptr); }
 Buffer RocmAllocator::malloc(size_t size) {
   if (!rocm_available()) {
@@ -434,6 +442,7 @@ Buffer RocmAllocator::malloc(size_t size) {
   if (decode_arena_.active && size > 0) {
     std::lock_guard lock(mutex_);
     if (RocmBuffer* b = arena_alloc(size)) {
+      t_allocated_bytes += size;
       return Buffer{b};
     }
   }
@@ -445,6 +454,7 @@ Buffer RocmAllocator::malloc_async(size_t size, int device, void* stream_v) {
   if (decode_arena_.active && size > 0) {
     std::lock_guard lock(mutex_);
     if (RocmBuffer* b = arena_alloc(size)) {
+      t_allocated_bytes += size;
       return Buffer{b};
     }
   }
@@ -485,6 +495,18 @@ Buffer RocmAllocator::malloc_async(size_t size, int device, void* stream_v) {
   std::unique_lock lock(mutex_);
   RocmBuffer* buf = buffer_cache_.reuse_from_cache(size);
   if (!buf) {
+    // Honour set_cache_limit() on a miss (lablup/mlxcel#2062). The cache is
+    // exact-size (min_utilization 1.0), so buffers of sizes no longer asked
+    // for stay in it until clear_cache(); before this trim the limit was
+    // stored and never read, so MLX's set_cache_limit (MLXCEL_CACHE_LIMIT)
+    // bounded nothing on ROCm. Only a miss trims: a miss is about to grow
+    // active + cache anyway and already pays for a HIP allocation, while
+    // free() and cache hits stay free of hipFree (see free() for why). The
+    // footprint only grows on a miss, so active + cache stays within the
+    // live set plus max_pool_size_ plus the one request being served.
+    if (get_cache_memory() > max_pool_size_) {
+      buffer_cache_.release_cached_buffers(get_cache_memory() - max_pool_size_);
+    }
     // Scalar pool first (CUDA).
     if (size <= static_cast<size_t>(small_block_size)) {
       buf = scalar_pool_.malloc();
@@ -588,8 +610,10 @@ Buffer RocmAllocator::malloc_async(size_t size, int device, void* stream_v) {
 
   active_memory_ += buf->size;
   peak_memory_ = std::max(active_memory_, peak_memory_);
-  // No eager max_pool_size_ trim here — that was the free/alloc storm.
-  // clear_cache() / set_cache_limit() still shrink explicitly.
+  t_allocated_bytes += buf->size;
+  // No eager max_pool_size_ trim on every call: that was the free/alloc
+  // storm. The miss path above trims to max_pool_size_; clear_cache() still
+  // empties the cache.
   return Buffer{buf};
 }
 
@@ -711,8 +735,8 @@ void RocmAllocator::free(Buffer buffer, bool force) {
   // 100% hipFree. CUDA frees immediately when cache >= max_pool_size_; on
   // ROCm that is catastrophic — the bwd→Adam transition drops tens of GB of
   // same-sized activations that the *next* step needs, and hipFree is a
-  // blocking drain. Bound HBM only from malloc_async (memory_limit_ pressure
-  // + max_pool_size_ trim there), where a miss already has to wait.
+  // blocking drain. Bound HBM only from malloc_async (the hbm_cap reclaim
+  // and the max_pool_size_ trim on a miss), where a miss already has to wait.
   buffer_cache_.recycle_to_cache(buf);
 }
 

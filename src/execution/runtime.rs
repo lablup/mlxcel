@@ -35,9 +35,28 @@ const MEMORY_LIMIT_ENV: &str = "MLXCEL_MEMORY_LIMIT";
 /// memory pool stays bounded without the per-decode `clear_memory_cache`
 /// churn that defeats CUDA-graph reuse (ml-explore/mlx#2358). Accepts the
 /// shared size grammar of [`parse_memory_size`]: plain bytes, `NK`/`NKB`,
-/// `NM`/`NMB` or `NG`/`NGB`. Unset means "do not override MLX's default
-/// cache behavior".
+/// `NM`/`NMB` or `NG`/`NGB`; `0` or `none` disables the bound. Unset means
+/// [`DEFAULT_CACHE_LIMIT_BYTES`]: none on Metal and CUDA, a fixed bound on
+/// ROCm (issue #2062).
 const CACHE_LIMIT_ENV: &str = "MLXCEL_CACHE_LIMIT";
+
+/// Buffer-cache bound applied when `MLXCEL_CACHE_LIMIT` is unset (issue
+/// #2062): 2 GiB on ROCm builds, where the MLX ROCm allocator's own default
+/// lets freed buffers accumulate up to its memory limit (80% of the larger of
+/// device memory and host RAM, 76.8 GiB on the 96 GiB gfx1151 carve-out) and
+/// its cache only reuses a buffer of exactly the requested size, so on a UMA
+/// host freed memory the model will not ask for again is held from the OS and
+/// every other GPU tenant. Measured on gfx1151, decode throughput did not
+/// move between 128 MiB and no bound, while prefill lost 16% at 128 MiB on
+/// Llama-3.1-8B-4bit (its f16 weight copies no longer survive in the cache)
+/// and nothing measurable from 512 MiB up; 2 GiB is four times that smallest
+/// free value, for the larger weight copies of bigger models. See
+/// `docs/benchmark_results/rocm-memory-gfx1151-2026-09-30.md`. Metal and CUDA
+/// keep MLX's own default (`None`).
+#[cfg(feature = "rocm")]
+const DEFAULT_CACHE_LIMIT_BYTES: Option<u64> = Some(2 * 1024 * 1024 * 1024);
+#[cfg(not(feature = "rocm"))]
+const DEFAULT_CACHE_LIMIT_BYTES: Option<u64> = None;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeDevice {
@@ -89,9 +108,10 @@ pub struct RuntimeSetup {
     /// (issue #55). `None` when the env var was unset or invalid and
     /// MLX's default limit is in effect.
     pub memory_limit_bytes: Option<usize>,
-    /// Buffer-cache bound applied via `MLXCEL_CACHE_LIMIT` (issue #627).
-    /// `None` when the env var was unset/invalid and MLX's default cache
-    /// behavior is in effect.
+    /// Buffer-cache bound applied at startup: `MLXCEL_CACHE_LIMIT` (issue
+    /// #627) or, when that is unset, the backend default (2 GiB on ROCm,
+    /// issue #2062). `None` when no bound was applied and MLX's default
+    /// cache behavior is in effect.
     pub cache_limit_bytes: Option<usize>,
     pub invalid_device_override: Option<String>,
 }
@@ -242,9 +262,10 @@ pub fn initialize_runtime() -> RuntimeSetup {
     // Silicon.
     let memory_limit_bytes = resolve_memory_limit();
 
-    // Issue #627: apply optional buffer-cache bound. Meaningful mainly on
-    // CUDA, where the periodic decode-loop clear is disabled by default and
-    // this cap is the intended mechanism for bounding cache growth instead.
+    // Issue #627: apply the buffer-cache bound. On CUDA it is opt-in and
+    // replaces the periodic decode-loop clear that CUDA disables by default;
+    // on ROCm it has a default (issue #2062) because the allocator's own
+    // default holds freed memory up to its 76.8 GiB limit on a UMA host.
     let cache_limit_bytes = resolve_cache_limit();
 
     RuntimeSetup {
@@ -340,23 +361,46 @@ fn resolve_memory_limit() -> Option<usize> {
     Some(clamp_to_usize(bytes))
 }
 
-/// Resolve the MLX buffer-cache bound from MLXCEL_CACHE_LIMIT (issue #627).
+/// Resolve and apply the MLX buffer-cache bound (issues #627, #2062).
 ///
-/// Returns the limit applied, or `None` when unset/disabled. On CUDA this is
-/// the intended replacement for the periodic decode-loop `clear_memory_cache`
-/// (disabled by default there): it keeps the memory pool bounded without the
-/// per-step churn that defeats CUDA-graph reuse (ml-explore/mlx#2358).
+/// Returns the limit applied, or `None` when none was. On CUDA an explicit
+/// `MLXCEL_CACHE_LIMIT` is the intended replacement for the periodic
+/// decode-loop `clear_memory_cache` (disabled by default there): it keeps the
+/// memory pool bounded without the per-step churn that defeats CUDA-graph
+/// reuse (ml-explore/mlx#2358). On ROCm an unset variable applies
+/// [`DEFAULT_CACHE_LIMIT_BYTES`]; see [`cache_limit_bytes`] for the rules.
 fn resolve_cache_limit() -> Option<usize> {
-    let raw = std::env::var(CACHE_LIMIT_ENV).ok();
-    let bytes = match raw.as_deref() {
-        Some("0") | Some("none") | Some("NONE") | None | Some("") => return None,
-        Some(s) => parse_memory_size(s)?,
-    };
-    if bytes == 0 {
-        return None;
-    }
+    let bytes = cache_limit_bytes(
+        std::env::var(CACHE_LIMIT_ENV).ok().as_deref(),
+        DEFAULT_CACHE_LIMIT_BYTES,
+    )?;
     mlxcel_core::memory::set_cache_limit(bytes);
     Some(clamp_to_usize(bytes))
+}
+
+/// The cache bound for a raw `MLXCEL_CACHE_LIMIT` value and a backend
+/// default. Pure, so every case is unit-tested on every backend.
+///
+/// - unset or empty: `default`
+/// - `0` or `none` (any case): `None`, the operator's way to turn off a
+///   default bound
+/// - a size in the [`parse_memory_size`] grammar: that size (`0B`-style
+///   spellings that parse to zero also disable)
+/// - anything unparseable: `default`, so a typo cannot silently remove the
+///   ROCm bound
+fn cache_limit_bytes(raw: Option<&str>, default: Option<u64>) -> Option<u64> {
+    let s = match raw.map(str::trim) {
+        None | Some("") => return default,
+        Some(s) => s,
+    };
+    if s == "0" || s.eq_ignore_ascii_case("none") {
+        return None;
+    }
+    match parse_memory_size(s) {
+        Some(0) => None,
+        Some(bytes) => Some(bytes),
+        None => default,
+    }
 }
 
 /// The one size grammar behind every size-valued mlxcel environment variable
