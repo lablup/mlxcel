@@ -485,7 +485,8 @@ To check the HTTP server rather than the CLI, start it and run the chat smoke
 script against it. Both a dense and an affine MoE checkpoint pass on `gfx1151`;
 the results are in
 [`docs/benchmark_results/rocm-correctness-gfx1151-2026-09-12.md`](benchmark_results/rocm-correctness-gfx1151-2026-09-12.md).
-A sliding-window model, two SSM hybrids and a VLM were added in
+A sliding-window model, two SSM hybrids and a VLM were added, and compared
+against an Apple M5 Max Metal reference, in
 [`docs/benchmark_results/rocm-correctness-gfx1151-2026-09-30.md`](benchmark_results/rocm-correctness-gfx1151-2026-09-30.md).
 
 ```bash

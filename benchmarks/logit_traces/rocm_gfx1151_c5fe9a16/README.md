@@ -2,7 +2,7 @@
 
 Teacher-forced logit traces from `examples/logit_trace` on the Radeon 8060S (`gfx1151`), for the five checkpoints the first matrix run (`../rocm_gfx1151_bec64748/`) did not cover: a second dense model, a sliding-window model, two SSM hybrids and a VLM. They extend the correctness matrix in `docs/benchmark_results/rocm-correctness-gfx1151-2026-09-30.md`. `METADATA.txt` records the host, versions, commit, checkpoint revisions and binary hash; `RUNS.txt` has the exit status and row count of every run; `SHA256SUMS` covers every trace.
 
-**There is no Metal reference for these traces yet.** No Metal host was reachable from the ROCm host, so the Metal side of every row here is pending. Nothing in this directory has been compared across backends; the traces are the ROCm half of each pair, committed so a Metal host can complete the comparison without rerunning the ROCm side.
+**The Metal reference is `../metal_m5_d1128266/`**, traced on an Apple M5 Max (Apple GPU generation 17, NAX path available) at mlxcel `d1128266`, the merge commit of the PR that added this directory, with the same corpus, arguments and checkpoint revisions. The per-pair comparison is in `docs/benchmark_results/rocm-correctness-gfx1151-2026-09-30.md`: fifteen of the sixteen pairs have no disagreement on a decided position at `--decided 2.0`, and `nemotron-3-nano-30b-a3b` `w1` is inconclusive because its reference has no decided position. The reference host is not the M1 Ultra of the first run, and the document says what that changes.
 
 ## What was traced
 
@@ -18,9 +18,9 @@ Widths, as `CHUNK_TOKENS MAX_CHUNKS TOPK PREFILL`: `w1` = `1 128 8 0`, `w8` = `8
 
 Every trace is `default`: no MoE or kernel override is set. granite's MoE goes through `SwitchGLU::forward` (`gather_qmm`) on every backend, since that family does not call the fused MoE decode kernel. On ROCm Nemotron-H runs `forward_nonfused`, and the Mamba2 layers of both hybrids run the SSD graph path at every width, because neither the fused MoE nor the SSM update kernel has a ROCm port (lablup/mlxcel#1814).
 
-## Producing the Metal half
+## How the Metal half was produced
 
-On an Apple host, at the commit this directory was merged in, with the same five checkpoint revisions (`METADATA.txt`):
+On an Apple host, at the commit this directory was merged in, with the same five checkpoint revisions (`METADATA.txt`). This is the loop `../metal_m5_d1128266/` was produced with:
 
 ```bash
 cargo build --release --features metal,accelerate --example logit_trace
@@ -38,7 +38,7 @@ done
 MLXCEL_TRACE_START_TOKEN=1536 $T models/mlx/gemma-3-4b-it-4bit $C 8 40 8 1536 > ${P}_gemma-3-4b-it_default_w8ctx1536.tsv
 ```
 
-Then, for each pair:
+Then, for each pair. The Nemotron-H traces on both sides begin with five `[NemotronH] ...` loader lines that the loader prints to stdout; remove them first (`grep -v '^\[NemotronH\] '`), or the script stops with a `ValueError`:
 
 ```bash
 python3 scripts/compare_logit_traces.py <metal.tsv> benchmarks/logit_traces/rocm_gfx1151_c5fe9a16/rocm_gfx1151_c5fe9a16_<tag>_default_<width>.tsv --decided 2.0
@@ -46,9 +46,9 @@ python3 scripts/compare_logit_traces.py <metal.tsv> benchmarks/logit_traces/rocm
 
 Record the host, OS, commit, pin and binary hash in a `METADATA.txt` beside the Metal traces, as `../metal_m1u_bec64748/` does. An M1 Ultra (Apple GPU generation 13) is the reference host of the first run; an M5-class host takes different kernels (NAX), so say which generation was used.
 
-Two pairings are not like-for-like even when both sides run `default`, and the comparison should say so rather than read them as backend numerics alone:
+Two pairings were expected not to be like-for-like even when both sides run `default`:
 
-- `granite-4.0-h-tiny` and `nemotron-3-nano-30b-a3b` at `w1`: Metal runs the fused SSM update kernel for single-token steps, ROCm runs the SSD graph.
+- `granite-4.0-h-tiny` and `nemotron-3-nano-30b-a3b` at `w1`: expected here to compare Metal's fused SSM update kernel with ROCm's SSD graph. The code at `d1128266` shows it does not: the fused step needs an SSM state already in the cache, `logit_trace` builds a fresh cache per chunk, and a `w1` chunk has no prefill, so Metal runs the same SSD graph. No trace in this set reaches the fused SSM kernel.
 - `nemotron-3-nano-30b-a3b`: Metal takes `fused_moe_forward` (its C++ graph path unless `MLXCEL_FUSED_MOE_RELU2` is set), ROCm takes `forward_nonfused`. No environment variable selects `forward_nonfused` on Metal.
 
 If the merged commit changes model code relative to `c5fe9a16`, retrace the ROCm side at the same commit before comparing; the four things that must match are the commit, the corpus, the arguments and the checkpoint revision.
