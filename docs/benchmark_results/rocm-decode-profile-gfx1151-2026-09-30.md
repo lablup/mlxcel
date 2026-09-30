@@ -10,6 +10,8 @@ Raw results, one set per run (`benchmarks/rocm_profiles/gfx1151_929c80ab/`):
 - `<run>_bench.log`, `<run>_plain_bench.log`: the bench's output under the profiler and without it;
 - `guard.log`: every idle-GPU check and 1 Hz sample behind every run.
 
+When the guard rejects an attempt and reruns it, the run's `_bench.log` keeps both attempts' output (granite greedy); the last one is the accepted run, and it is the only one `rocm_decode_profile.py` reads and the one rocprofv3's files hold.
+
 The full kernel traces (20 to 60 MB each) are not committed; `scripts/rocm_decode_profile.sh` regenerates all of the above.
 
 ## Environment
@@ -33,7 +35,7 @@ The full kernel traces (20 to 60 MB each) are not committed; `scripts/rocm_decod
 
 **Decode window.** `MLXCEL_BENCH_PHASE_MARKS=1` makes the bench print, on both `CLOCK_MONOTONIC` and `CLOCK_BOOTTIME`, the start of the warmup, the start of the measured pass, the start of the measured decode and its end (`src/bin/bench_decode/phase_marks.rs`). The decode start is the end minus the generator's own `decode_time_ms`. `scripts/rocm_decode_profile.py` keeps the dispatches that start inside that window. Two checks say the cut is clean: the prefill ends in a blocking `eval` of the first token, and in every run no kernel straddles the cut and the device sits idle for 2 to 57 ms before the first decode dispatch; the last dispatch before the cut is always the first token's sampling (`arg_reduce_final` in greedy runs). rocprofv3 stamps dispatches on the same clock the marks use (both clocks agree on this host, which had not suspended).
 
-**Numbers.** Per token means per generated token, the denominator of the bench's tok/s. GPU time per token is the union of kernel intervals in the window; host gap per token is the window's wall time minus that. Shares are of the sum of kernel durations in the window (one queue, so union and sum agree to within 0.01%).
+**Numbers.** Per token means per generated token, the denominator of the bench's tok/s. The first of the 128 tokens comes out of the prefill, so the decode window holds 127 forward passes, and a per-token call count reads 127/128 of the per-step count (Qwen3's 144 expert GEMVs per step show as 142.9 per token). GPU time per token is the union of kernel intervals in the window; host gap per token is the window's wall time minus that. Shares are of the sum of kernel durations in the window (one queue, so union and sum agree to within 0.01%).
 
 **Profiler cost.** Each greedy run was also taken without the profiler, under the same guard. The profiler adds host time per dispatch and barely changes kernel durations, so it hurts in proportion to dispatch count:
 
@@ -87,12 +89,12 @@ A kernel name says which primitive ran, not which mlxcel op asked for it: a `bin
 | `ssm_step` | inside a Mamba2 mixer (between the `qmv` before a `depthwise_conv1d_kernel`, in_proj, and the `qmv` after it, out_proj), everything that is not conv, SiLU or the gated norm | `ssm_step` (`granitemoehybrid.rs:474`, `nemotron_h.rs:672`), the graph `ssm_update_kernel` replaces |
 | `ssm_conv`, `ssm_silu`, `ssm_gated_norm` | the conv1d and its state copies; the compiled SiLU kernels; the last `rms_norm_kernel` of the mixer and what follows it | the rest of the mixer, which the SSM kernel does not replace |
 
-Checks on the rules: the SSD step comes out at 46.6 dispatches per Mamba2 layer on granite and 49.6 on Nemotron, which run the same `ssm_step` graph; the MoE roles give Qwen3 exactly 3 expert GEMVs, 3 aranges and 4 weighted-sum dispatches per layer; every rule's dispatch count is a whole multiple of its layer count per token. Router top-k (`block_sort_kernel`, `softmax_kernel`) is deliberately left out of MoE, because `forward_fused_kernel` takes `topk_indices` and `scores` from the caller. No A/B was run: on ROCm none of these paths has a kernel to switch to, so there is nothing to toggle.
+Checks on the rules, per decode step (127 in the window): the SSD step comes out at exactly 47 dispatches per Mamba2 layer on granite and 50 on Nemotron (46.6 and 49.6 per generated token), whose `ssm_step` graphs are built by separate but parallel code; the MoE roles give Qwen3 exactly 3 expert GEMVs, 3 aranges and 4 weighted-sum dispatches per layer; the SSM and MoE roles' dispatch counts are whole multiples of their layer counts per step. Router top-k (`block_sort_kernel`, `softmax_kernel`) is deliberately left out of MoE, because `forward_fused_kernel` takes `topk_indices` and `scores` from the caller. No A/B was run: on ROCm none of these paths has a kernel to switch to, so there is nothing to toggle.
 
 Which of those roles each port would actually take over depends on whether mlxcel calls the ported kernel for that model with its shipped settings. `reach()` in the same script encodes that from the source at `929c80ab`:
 
 - **#2063** (`fused_add_rms_norm`, `fused_rope_qk_append`): both paths ship off on every backend (`FUSED_ADD_RMSNORM_DEFAULT` and `FUSED_ROPE_APPEND_DEFAULT` are `false`, `layers.rs:808` and `:820`, after #905 measured no decode win on Metal), and only `llama3.rs` (with `gemma.rs` and `iquestloopcoder.rs`, not profiled) calls them. With the opt-in on, Llama 3.1 would reach only the post-attention join (`llama3.rs:1201`): its `rope_scaling` builds a frequency table, which routes around the RoPE kernel (`llama3.rs:669`).
-- **#2064** (`gumbel_max_sample`, `rejection_sample`): greedy argmax calls neither. A sampled run would reach the whole sampler tail (both kernels are on by default where ported), minus the few logit-bias dispatches `--ignore-eos` adds.
+- **#2064** (`gumbel_max_sample`, `rejection_sample`): greedy argmax calls neither. A sampled run would reach the whole sampler tail (both kernels are on by default where ported) except the few logit-bias dispatches `--ignore-eos` adds; the table counts the whole tail, so its #2064 figures are slightly high.
 - **#2065** (`moe_gateup`, `moe_down`): reached by `qwen3_moe` (`qwen3_moe.rs:223`, single-token decode). Not by granite, whose `block_sparse_moe` calls `SwitchGLU::forward` and never `forward_fused_kernel`, and not by Nemotron-H, whose `fused_moe_forward` default branch is `gather_qmm`; its kernel branch needs `MLXCEL_FUSED_MOE_RELU2` and `moe_fc1_relu2` (#2069).
 - **#2067** (`ssm_update_kernel`): reached by both hybrids, since `ssm_kernel_available()` gates every single-token SSD step (`granitemoehybrid.rs:440`, `nemotron_h.rs:537` and `:635`).
 - **#2068** (paged attention): not on this path at all. The bench decodes one sequence into a dense `KVCache`; no paged kernel or paged graph fallback appears in any trace.
@@ -121,7 +123,7 @@ A share is an upper bound on what a port saves, since the ported kernel costs so
 - **#2067** replaces about 47 dispatches per layer, mostly 1 to 2 us f32 elementwise kernels, with one kernel whose memory traffic is the SSM state: 48 heads x 64 x 128 x 4 bytes, read and written, is 3.1 MB per granite layer, 113 MB per token, about 0.6 ms at the GEMVs' 180 GB/s, against the 3.42 ms per token the graph takes now (2.9 ms on Nemotron). It also removes 1679 and 1141 dispatches per token, more than half of each model's dispatches, which is where the hybrids' 5 ms per token host gap comes from.
 - **#2065** covers 46.8% of Qwen3's GPU time, but 42.1 points of it are the expert GEMVs, already running at 181 GB/s. A fused kernel still reads the same weights, so what it can recover is the rest (activation, weighted sum, index building: 4.7%, 0.62 ms per token) plus about 430 of the 524 dispatches per token. That is less than on Metal and CUDA, where `gather_qmm` left the GPU idle (`switch_layers.rs`, `FUSED_MOE_MAX_DFF_METAL`). Granite and Nemotron carry 25 to 29% of fallback MoE cost that this port as scoped does not reach; wiring granite's `block_sparse_moe` through `forward_fused_kernel` would.
 - **#2064** is zero in greedy decode, 0.4 to 0.7% with temperature alone, and 1.2 to 3.8% with top-p, where a full-vocabulary sort (`rocprim` radix sort, `block_sort_kernel`) and scans run every token; the top-p runs also add 0.7 to 1.4 ms per token of host gap over the temperature-only runs (profiled).
-- **#2063** is zero with shipped settings on every backend. Turned on, the most it could reach here is Llama's post-attention join, 0.83% of decode.
+- **#2063** is zero with shipped settings on every backend. Turned on, the most it could reach here is Llama's post-attention join, 0.83% of decode (0.89% in the top-p run).
 - **#2068** has nothing to act on in single-stream decode. Its value is the batched paged serving path, which this profile does not measure, and the 36 paged-attention test skips on ROCm.
 
 ## Ranked port order
@@ -132,7 +134,7 @@ By share of decode GPU time reached with shipped settings, weighed by how much o
 2. **#2065 fused MoE decode** (item 5): 46.8% of Qwen3 decode GPU time reached, but bandwidth-bound GEMVs are most of it; about 5% plus 430 dispatches per token recoverable. Worth more if granite's MoE is wired to it.
 3. **#2064 samplers** (item 4): 0.4 to 3.8% of decode GPU time plus 32 to 64 dispatches per token in sampled decode, zero in greedy.
 4. **#2068 paged attention** (item 8): no share in single-stream decode; ahead of #2063 only because it has a path (batched serving) and 36 skipped tests that this profile does not measure, not because of a measured share.
-5. **#2063 fused add-RMSNorm and RoPE-append** (item 3): zero with shipped settings on every backend; at most 0.83% of Llama decode if opted in.
+5. **#2063 fused add-RMSNorm and RoPE-append** (item 3): zero with shipped settings on every backend; at most 0.83 to 0.89% of Llama decode if opted in.
 
 This reverses #1814's order for items 3 and 7: implied order 7, 5, 4, 8, 3.
 
