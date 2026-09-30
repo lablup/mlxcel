@@ -28,7 +28,8 @@ use mlxcel_core::generate::SamplingConfig;
 use super::{
     MAX_CONSECUTIVE_EVAL_FAILURES, advance_eval_failure_count, build_handoff_thinking_state,
     effective_decode_storage_backend, eval_failures_reached_limit,
-    resolve_max_batch_prefill_tokens, select_eviction_victim_from, vlm_prefix_sharing_allowed,
+    resolve_max_batch_prefill_tokens, select_block_reclaim_victim_from,
+    select_eviction_victim_from, vlm_prefix_sharing_allowed,
 };
 use crate::server::batch::active::ActiveBatch;
 use crate::server::batch::generation_bounds::GenerationBounds;
@@ -754,6 +755,72 @@ fn eviction_selects_lowest_priority_then_longest() {
         select_eviction_victim_from(batch.iter_sequences(), PreemptionPolicy::LowestPriority);
 
     assert_eq!(victim.unwrap().as_u64(), 3);
+}
+
+/// Issue #1982: block-budget reclaim preempts the least-progressed row, so the
+/// row closest to finishing is never the one discarded. Priority still wins.
+#[test]
+fn block_reclaim_victim_is_lowest_priority_then_least_progressed() {
+    let mut batch = ActiveBatch::new(4);
+    let (mut leader, _r1) = make_test_sequence_with_priority(1, RequestPriority::Normal);
+    leader.state = SequenceState::Decoding;
+    leader.generated_tokens = vec![1; 500];
+    let (mut fresh, _r2) = make_test_sequence_with_priority(2, RequestPriority::Normal);
+    fresh.state = SequenceState::Decoding;
+    fresh.generated_tokens = vec![1; 3];
+    let (mut high, _r3) = make_test_sequence_with_priority(3, RequestPriority::High);
+    high.state = SequenceState::Decoding;
+    batch.add(leader).unwrap();
+    batch.add(fresh).unwrap();
+    batch.add(high).unwrap();
+
+    // Fewest generated tokens among the lowest priority, never the leader,
+    // and never the High row even though it has generated nothing.
+    let victim = select_block_reclaim_victim_from(batch.iter_sequences(), None);
+    assert_eq!(victim.unwrap().as_u64(), 2);
+}
+
+/// Prefill admission only displaces strictly lower-priority rows.
+#[test]
+fn block_reclaim_victim_respects_the_admission_priority_limit() {
+    let mut batch = ActiveBatch::new(4);
+    let (mut normal, _r1) = make_test_sequence_with_priority(1, RequestPriority::Normal);
+    normal.state = SequenceState::Decoding;
+    let (mut low, _r2) = make_test_sequence_with_priority(2, RequestPriority::Low);
+    low.state = SequenceState::Decoding;
+    low.generated_tokens = vec![1; 50];
+    batch.add(normal).unwrap();
+    batch.add(low).unwrap();
+
+    let for_normal =
+        select_block_reclaim_victim_from(batch.iter_sequences(), Some(RequestPriority::Normal));
+    assert_eq!(
+        for_normal.unwrap().as_u64(),
+        2,
+        "only the Low row is eligible"
+    );
+    let for_low =
+        select_block_reclaim_victim_from(batch.iter_sequences(), Some(RequestPriority::Low));
+    assert_eq!(for_low, None, "nothing ranks below Low");
+}
+
+/// On a full tie the newest id is preempted: preemption reallocates ids, so a
+/// re-admitted row always carries a newer id than the rows it raced.
+#[test]
+fn block_reclaim_victim_tie_breaks_to_newest_id() {
+    for _ in 0..EVICTION_TIE_ITERATIONS {
+        let mut batch = ActiveBatch::new(4);
+        let mut receivers = Vec::new();
+        for id in [4, 9, 6] {
+            let (mut seq, rx) = make_test_sequence_with_priority(id, RequestPriority::Normal);
+            seq.state = SequenceState::Decoding;
+            seq.generated_tokens = vec![7; 10];
+            batch.add(seq).unwrap();
+            receivers.push(rx);
+        }
+        let victim = select_block_reclaim_victim_from(batch.iter_sequences(), None);
+        assert_eq!(victim.unwrap().as_u64(), 9);
+    }
 }
 
 /// Rebuild count for the eviction tie-break determinism tests.

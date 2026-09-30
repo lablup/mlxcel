@@ -67,11 +67,17 @@ impl BatchScheduler {
     /// acceptable for preemptive scheduling (the client sees a retry)
     /// and is consistent with vLLM's eviction semantics.
     pub(super) fn try_evict_for_preemption(&mut self) -> bool {
-        let victim_id = match self.select_eviction_victim() {
-            Some(id) => id,
-            None => return false,
-        };
+        match self.select_eviction_victim() {
+            Some(victim_id) => self.preempt_sequence(victim_id),
+            None => false,
+        }
+    }
 
+    /// Preempt `victim_id`: drop its KV, reset it for re-prefill under a fresh
+    /// id, and re-queue it. Returns `true` when a sequence left the batch.
+    /// Shared by slot preemption ([`Self::try_evict_for_preemption`]) and paged
+    /// block reclaim, which choose their victims differently (issue #1982).
+    pub(super) fn preempt_sequence(&mut self, victim_id: SequenceId) -> bool {
         if let Some(mut victim) = self.active_batch.remove(victim_id) {
             tracing::info!(
                 "Preempting sequence {} (priority={:?}, {} tokens generated)",
@@ -235,6 +241,17 @@ impl BatchScheduler {
         // dispatch entirely. This matches the null-guard pattern upstream
         // `mlx-lm` added to `BatchKVCache.filter` when the filtered index
         // list is empty.
+        if seq_ids.is_empty() {
+            self.batch_observability.record_decode_step(0);
+            return;
+        }
+
+        // Reserve the pool blocks this tick will mint before the forward runs
+        // (#1982): a paged write that cannot acquire a block panics mid-forward.
+        // Under budget pressure this evicts cold prompt-cache prefixes, then
+        // preempts, and drops rows that still cannot grow.
+        let reserved = self.reserve_decode_step_blocks(seq_ids);
+        let seq_ids = reserved.as_deref().unwrap_or(seq_ids);
         if seq_ids.is_empty() {
             self.batch_observability.record_decode_step(0);
             return;
@@ -499,6 +516,11 @@ impl BatchScheduler {
             return;
         };
         if !self.lookahead_safe() {
+            return;
+        }
+        // The prime appends a KV position; skip it when that would need a
+        // paged block the budget cannot give (#1982).
+        if !self.prime_fits_block_budget(seq_ids) {
             return;
         }
         // A sequence that just finished (EOS / length) leaves the batch next

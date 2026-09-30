@@ -900,6 +900,44 @@ pub(crate) fn select_eviction_victim_from<'a>(
     }
 }
 
+/// Victim order for paged block-budget reclaim (issue #1982), used by both
+/// prefill admission and decode when the pool budget is exhausted.
+///
+/// Lowest priority first, then the row with the FEWEST generated tokens, then
+/// the newest `seq_id`. This deliberately inverts the progress axis of
+/// [`select_eviction_victim_from`]: under block pressure a longest-first
+/// victim is the row closest to finishing, so every reclaim discards the most
+/// work and, once the budget cannot hold all rows to completion, no row ever
+/// finishes (a GB10 run with a 4444-block budget and three concurrent 600-token
+/// generations logged 179 preemptions and one completion in ten minutes).
+/// Evicting the least-progressed row lets the leader run to completion.
+/// Preemption reallocates the victim's id, so the leader keeps the smallest id
+/// and the newest-id tie-break can never select it over a re-admitted row.
+/// Rows with a structured-output constraint are excluded, as in
+/// [`select_eviction_victim_from`].
+///
+/// `below`, when set, restricts victims to rows of strictly lower priority.
+/// Prefill admission passes the queued request's priority: without it, two
+/// equal-priority requests that cannot both fit preempt each other right
+/// after every prefill and neither decodes (the same GB10 run logged over
+/// 1,600 such preemptions of rows with 1 generated token). Decode passes
+/// `None`, since a growing row may displace any less-progressed row.
+pub(crate) fn select_block_reclaim_victim_from<'a>(
+    sequences: impl Iterator<Item = &'a SequenceInfo>,
+    below: Option<RequestPriority>,
+) -> Option<SequenceId> {
+    sequences
+        .filter(|seq| seq.structured.is_none())
+        .filter(|seq| below.is_none_or(|limit| seq.priority < limit))
+        .min_by(|a, b| {
+            a.priority
+                .cmp(&b.priority)
+                .then_with(|| a.generated_tokens.len().cmp(&b.generated_tokens.len()))
+                .then_with(|| b.seq_id.as_u64().cmp(&a.seq_id.as_u64()))
+        })
+        .map(|seq| seq.seq_id)
+}
+
 fn validate_dense_detached_kv_modes_against_table(
     dense: &mlxcel_core::cache::DetachedCacheSet,
     expected: &[KVCacheMode],
@@ -928,6 +966,7 @@ fn validate_dense_detached_kv_modes_against_table(
 }
 
 mod admission;
+mod block_reclaim;
 mod config;
 mod decode_tick;
 mod handoff;

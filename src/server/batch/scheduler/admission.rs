@@ -688,32 +688,12 @@ impl BatchScheduler {
         }
     }
 
-    /// Reclaim paged pool blocks until at least `need` are acquirable, or no
-    /// further reclamation is possible. First evicts cold prompt-cache prefixes
-    /// (LRU; releasing their pins frees real blocks), then preempts running
-    /// sequences (which re-prefill on resume). Returns whether `need` blocks are
-    /// now acquirable.
-    pub(super) fn reclaim_paged_blocks(&mut self, need: usize) -> bool {
-        let room = |pool: &CachePool| pool.free_paged_block_budget().is_none_or(|f| f >= need);
-        // 1. Evict cold cross-request prefixes; releasing their pins frees blocks.
-        if let Some(store) = self.prompt_cache.clone() {
-            while !room(&self.cache_pool) {
-                if store.evict_one_lru() == 0 {
-                    break; // nothing left to evict
-                }
-                self.drain_store_paged_releases();
-            }
-        }
-        if room(&self.cache_pool) {
-            return true;
-        }
-        // 2. Preempt running sequences (drop their KV; they re-prefill on resume).
-        while !room(&self.cache_pool) {
-            if !self.try_evict_for_preemption() {
-                break; // no preemptible victim left
-            }
-        }
-        room(&self.cache_pool)
+    /// Paged pool blocks a new prefill may still pin without reclaiming, or
+    /// `None` when no block budget is configured. Before the pool is created
+    /// nothing is allocated, so the whole budget is free.
+    pub(super) fn paged_prefill_room(&self) -> Option<usize> {
+        let total = self.cache_pool.paged_block_budget()?;
+        Some(self.available_paged_blocks().unwrap_or(total))
     }
 
     /// Paged block-budget admission gate. Returns `Some(seq)` to proceed with
@@ -743,11 +723,11 @@ impl BatchScheduler {
         }
         // Acquirable blocks (budget − live). `None` means the pool is not yet
         // created (nothing allocated ⇒ the whole budget is free).
-        let free = self.cache_pool.free_paged_block_budget().unwrap_or(total);
+        let free = self.available_paged_blocks().unwrap_or(total);
         if need <= free {
             return Some(seq);
         }
-        if self.reclaim_paged_blocks(need) {
+        if self.reclaim_paged_blocks(need, seq.priority) {
             return Some(seq);
         }
         // Still no room — defer to a later tick. Decodes in flight will free

@@ -78,6 +78,9 @@
 pub mod batch_quant;
 mod detach;
 mod paged;
+#[cfg(test)]
+#[path = "cache/paged_append_need_tests.rs"]
+mod paged_append_need_tests;
 /// Whole-batch decode over pool-backed KV caches, the production paged decode
 /// path (issue #899).
 pub mod paged_batch_decode;
@@ -7014,6 +7017,20 @@ impl CachePool {
         self.paged_pool
             .as_ref()
             .and_then(|pool| pool.borrow().free_block_budget())
+    }
+
+    /// Pool blocks appending `token_count` tokens to every layer of sequence
+    /// `id` would acquire (see [`PagedBlockPool::blocks_to_append`]). `0` for a
+    /// dense or model-owned sequence, an unknown id, or when no paged pool
+    /// exists. The scheduler uses it to reserve decode budget (issue #1982).
+    pub fn paged_blocks_to_append(&self, id: SequenceId, token_count: usize) -> usize {
+        let Some(pool) = self.paged_pool.as_ref() else {
+            return 0;
+        };
+        let Some(state) = self.active.get(&id).and_then(|seq| seq.paged.as_ref()) else {
+            return 0;
+        };
+        pool.borrow().blocks_to_append(&state.borrow(), token_count)
     }
 
     /// Read-only access to the underlying [`PagedBlockPool`].

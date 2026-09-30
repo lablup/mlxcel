@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use super::block_reclaim::take_paged_room;
 use super::*;
 use mlxcel_core::prefill_span::PrefillSpan;
 
@@ -149,7 +150,17 @@ impl BatchScheduler {
         // was deferred or rejected and this tick is done.
         let seq = match self.admit_paged_prefill(seq) {
             Some(s) => s,
-            None => return,
+            None => {
+                // A deferred head waits for running rows to free blocks, so
+                // the tick must advance them: `decide_action` keeps choosing
+                // Prefill while the queue is non-empty, and without this decode
+                // step the deferral spins without ever freeing a block (#1982).
+                let ids = self.active_batch.sequence_ids();
+                if !ids.is_empty() {
+                    self.execute_decode_step(&ids);
+                }
+                return;
+            }
         };
 
         // speculative-decoding burst path.
@@ -322,6 +333,16 @@ impl BatchScheduler {
         {
             return false;
         }
+        // The batched path runs no paged block-budget admission of its own, so
+        // a head that does not fit the free budget takes `execute_prefill`,
+        // whose `admit_paged_prefill` reclaims, defers, or rejects it (#1982).
+        if let (Some(head_len), Some(room)) = (
+            self.prefill_queue.peek_prompt_len(),
+            self.paged_prefill_room(),
+        ) && self.estimate_prefill_blocks(head_len) > room
+        {
+            return false;
+        }
         let budget = self.max_batch_prefill_tokens;
         if budget == 0 {
             return true;
@@ -374,11 +395,20 @@ impl BatchScheduler {
         let lora_partitioned = self.lora_runtime.is_some();
         let mut seqs: Vec<SequenceInfo> = Vec::with_capacity(batch_size);
         let mut window_max_len = 0usize;
+        // Paged block budget still free for this window (#1982). Each row pins
+        // its prompt's blocks, so the drain stops before a row that would not
+        // fit; it stays queued and is admitted (with reclaim) on a later tick.
+        // `batched_prefill_admits_head` already routed a head that does not
+        // fit to the single-sequence admission path.
+        let mut paged_room = self.paged_prefill_room();
         while seqs.len() < batch_size {
             let Some(next_len) = self.prefill_queue.peek_prompt_len() else {
                 break;
             };
             if !batched_window_admits(seqs.len(), window_max_len, next_len, budget) {
+                break;
+            }
+            if !take_paged_room(&mut paged_room, self.estimate_prefill_blocks(next_len)) {
                 break;
             }
             let next_lora = self.prefill_queue.peek_lora_scales().flatten();
