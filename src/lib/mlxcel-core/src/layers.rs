@@ -5748,13 +5748,14 @@ pub(crate) fn resolve_paged_v2_dispatch(
 
 /// The backend the fused kernel would run on, cached for the decode hot path.
 ///
-/// The fused kernel has a Metal JIT body and a CUDA JIT body (#634), so it is a
-/// native candidate whenever either backend is available at runtime
-/// ([`crate::metal_is_available`] / [`crate::cuda_is_available`], the same gates
-/// the model dispatch and C++ kernel selection use). This correctly falls to
-/// gather only for a CPU-only build or a machine with no usable GPU, neither of
-/// which a compile-time `target_os` check would catch. Metal is probed first so
-/// the Apple path is unchanged. Detection is process-static, so it is read once.
+/// The fused kernel has a Metal JIT body and a CUDA JIT body (#634) and no HIP
+/// port yet (#1814). It is a native candidate only when
+/// [`crate::paged_attention_decode_available`] says the resolved backend has a
+/// port in the kernel's own table; then [`crate::metal_is_available`] /
+/// [`crate::cuda_is_available`] name which one. A CPU-only build, a machine
+/// with no usable GPU and a ROCm build all fall to gather, none of which a
+/// compile-time `target_os` check would catch. Metal is probed first so the
+/// Apple path is unchanged. Detection is process-static, so it is read once.
 pub(crate) fn paged_decode_backend() -> PagedDecodeBackend {
     use std::sync::OnceLock;
     static BACKEND: OnceLock<PagedDecodeBackend> = OnceLock::new();
@@ -5763,8 +5764,8 @@ pub(crate) fn paged_decode_backend() -> PagedDecodeBackend {
         // never be read as one that has it. `cuda_is_available()` is false on
         // a ROCm build today, so this is belt and braces rather than a live
         // fix, but the old order made correctness depend on that staying true
-        // (issue #1803). The predicate reads the kernels' own port tables.
-        if !crate::paged_attention_kernels_available() {
+        // (issue #1803). The predicate reads the kernel's own port table.
+        if !crate::paged_attention_decode_available() {
             PagedDecodeBackend::Other
         } else if crate::metal_is_available() {
             PagedDecodeBackend::Metal

@@ -344,7 +344,7 @@ fn the_selected_rows_decode_back_to_the_intended_positions() {
 
 #[test]
 fn the_fused_output_matches_a_dense_reference_restricted_to_the_selection() {
-    crate::test_support::kernel_ports::require_paged_attention_port!();
+    crate::test_support::kernel_ports::require_paged_v2_port!();
     let fx = Fixture::new(Case::default_case(), 0x5eed_0001);
     let (got, outcome) = run_fused(&fx, dtype::FLOAT32);
     assert!(outcome.is_fused(), "{}", outcome.describe());
@@ -358,7 +358,7 @@ fn the_fused_output_matches_a_dense_reference_restricted_to_the_selection() {
 
 #[test]
 fn the_fused_output_differs_from_full_dense_attention() {
-    crate::test_support::kernel_ports::require_paged_attention_port!();
+    crate::test_support::kernel_ports::require_paged_v2_port!();
     // The load-bearing negative control. A kernel that ignored the page list
     // and swept the whole live window would still pass a "close to reference"
     // test whenever the selection is broad, so the sparse answer is required to
@@ -375,7 +375,7 @@ fn the_fused_output_differs_from_full_dense_attention() {
 
 #[test]
 fn changing_one_selected_position_changes_the_output() {
-    crate::test_support::kernel_ports::require_paged_attention_port!();
+    crate::test_support::kernel_ports::require_paged_v2_port!();
     let fx = Fixture::new(Case::default_case(), 0x5eed_0003);
     let (base, _) = run_fused(&fx, dtype::FLOAT32);
 
@@ -416,7 +416,7 @@ fn changing_one_selected_position_changes_the_output() {
 
 #[test]
 fn an_f16_cache_matches_the_reference_within_its_own_precision() {
-    crate::test_support::kernel_ports::require_paged_attention_port!();
+    crate::test_support::kernel_ports::require_paged_v2_port!();
     // The realistic dtype: the production allocations are f16, so the pool the
     // kernel reads is f16 and the tolerance is set by the storage, not the
     // kernel.
@@ -430,7 +430,7 @@ fn an_f16_cache_matches_the_reference_within_its_own_precision() {
 
 #[test]
 fn a_k_allocation_with_a_side_head_is_addressed_by_the_same_row_list() {
-    crate::test_support::kernel_ports::require_paged_attention_port!();
+    crate::test_support::kernel_ports::require_paged_v2_port!();
     // MiniMax-M3's shape: the index key rides at head `kv_heads` of the K
     // allocation, so K is one head wider than V. At batch 1 the row bases
     // coincide and the extra head sits past every row the selection names.
@@ -445,7 +445,7 @@ fn a_k_allocation_with_a_side_head_is_addressed_by_the_same_row_list() {
 
 #[test]
 fn the_plan_splits_and_merges_without_changing_the_answer() {
-    crate::test_support::kernel_ports::require_paged_attention_port!();
+    crate::test_support::kernel_ports::require_paged_v2_port!();
     // A wider selection forces the plan past one chunk per request, so the
     // merge pass runs. The answer must not move.
     let mut case = Case::default_case();

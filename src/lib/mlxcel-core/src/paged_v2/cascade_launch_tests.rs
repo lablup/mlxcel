@@ -449,7 +449,7 @@ fn run_cascade_variant(
 
 #[test]
 fn cascade_matches_the_flat_launch_on_an_exact_f32_pool() {
-    crate::test_support::kernel_ports::require_paged_attention_port!();
+    crate::test_support::kernel_ports::require_paged_v2_port!();
     // 8 shared pages of 8 tokens each, three members with different tails.
     let batch = CascadeBatch::new(8, 8, 2, 16, 8, &[5, 11, 3], &[], dtype::FLOAT32, 0x5EED);
     let plan = plan_for(&batch, 4);
@@ -475,7 +475,7 @@ fn cascade_matches_the_flat_launch_on_an_exact_f32_pool() {
 
 #[test]
 fn cascade_matches_the_flat_launch_with_an_f16_pool() {
-    crate::test_support::kernel_ports::require_paged_attention_port!();
+    crate::test_support::kernel_ports::require_paged_v2_port!();
     let batch = CascadeBatch::new(
         16,
         8,
@@ -498,7 +498,7 @@ fn cascade_matches_the_flat_launch_with_an_f16_pool() {
 
 #[test]
 fn a_non_sharing_request_rides_along_unchanged() {
-    crate::test_support::kernel_ports::require_paged_attention_port!();
+    crate::test_support::kernel_ports::require_paged_v2_port!();
     // Two members plus two loners: the loners take a merge group of one, which
     // the merge kernel resolves to the identity.
     let batch = CascadeBatch::new(
@@ -525,7 +525,7 @@ fn a_non_sharing_request_rides_along_unchanged() {
 
 #[test]
 fn member_major_head_stacking_reads_the_wrong_kv_head() {
-    crate::test_support::kernel_ports::require_paged_attention_port!();
+    crate::test_support::kernel_ports::require_paged_v2_port!();
     // Negative control for the level-0 permutation. Needs GQA (n_rep > 1) and
     // more than one member, because with n_rep == 1 the two orders coincide.
     let batch = CascadeBatch::new(8, 4, 2, 16, 6, &[5, 9], &[], dtype::FLOAT32, 0xC0FFEE);
@@ -547,7 +547,7 @@ fn member_major_head_stacking_reads_the_wrong_kv_head() {
 
 #[test]
 fn merge_rejects_natural_log_lse_units_on_the_cascade_path() {
-    crate::test_support::kernel_ports::require_paged_attention_port!();
+    crate::test_support::kernel_ports::require_paged_v2_port!();
     // The same clause `mla::split_kv_tests::merge_rejects_natural_log_lse_units`
     // pins for the MLA caller, restated on cascade partials: issue #898's merge
     // kernel takes log2 LSE, and a natural-log LSE merges without complaint

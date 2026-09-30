@@ -258,6 +258,8 @@ pub enum SparseDecodeOutcome {
     PlanRejected(String),
     /// The caller declined before building a selection: a cache mode whose
     /// rows are not raw K/V, a multi-token step, or a shape it does not handle.
+    /// Also returned by [`run_sparse_decode`] when the backend has no port of
+    /// the v2 kernels.
     NotServable(&'static str),
 }
 
@@ -443,6 +445,17 @@ pub fn run_sparse_decode(
     }
     match prepare(inputs, selection) {
         Err(outcome) => (None, outcome),
+        // After `prepare`, so the shape and sparsity declines still report
+        // themselves on every backend. The launch needs the v2 partial and
+        // merge kernels; without a port for them it would be refused on every
+        // layer of every step and read as a rejected plan, so decline here as
+        // not servable and let the caller's gather path run (#1809, #1814).
+        Ok(_) if !crate::ffi::paged_attention_v2_available() => (
+            None,
+            SparseDecodeOutcome::NotServable(
+                "the GPU backend has no fused paged-attention kernel port",
+            ),
+        ),
         Ok(prepared) => launch(inputs, selection, &prepared),
     }
 }

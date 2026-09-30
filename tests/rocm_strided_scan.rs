@@ -26,12 +26,19 @@
 //! `NVIDIA-Nemotron-3-Nano-30B-A3B`, ended in a GPU memory fault inside
 //! `strided_scan`.
 //!
-//! Each case compares the GPU scan with the CPU stream exactly. The inputs are
-//! small integers stored as f32, so every partial sum is exact in f32 and the
-//! two devices must agree bit for bit whatever their summation order. The
-//! second case is sized so the old grid overshoots by 16x on a 25 MB array,
-//! which faults rather than landing in mapped memory; it fails with the
-//! header change reverted (checked on gfx1151).
+//! Each case compares the GPU scan with the CPU stream exactly, in all four
+//! reverse/inclusive combinations. The inputs are small integers stored as f32,
+//! so every partial sum is exact in f32 and the two devices must agree bit for
+//! bit whatever their summation order; that part checks the scan itself.
+//!
+//! An oversized grid does not corrupt the in-bounds result: the extra blocks
+//! only touch memory past the end of the array. So the old defect is caught by
+//! the fault it causes, not by a value mismatch, and only where the overshoot
+//! leaves mapped memory. The second case is sized for that: the old grid
+//! overshoots by 16x on a 25 MB array, and with the header change reverted it
+//! faults in `strided_scan` (checked on gfx1151). The first case is the
+//! model's shape, which faulted inside the model but may land in mapped memory
+//! in isolation.
 //!
 //! ```sh
 //! cargo test --features rocm --test rocm_strided_scan -- --test-threads=1
@@ -54,7 +61,7 @@ fn on_rocm() -> bool {
 /// Small integers in `[-3, 3]` as f32, so every prefix sum is exact.
 fn small_ints(shape: &[i32]) -> UniquePtr<MlxArray> {
     let n: i32 = shape.iter().product();
-    let data: Vec<f32> = (0..n).map(|i| ((i * 7 + 3) % 7 - 3) as f32).collect();
+    let data: Vec<f32> = (0..n).map(|i| (i % 7 - 3) as f32).collect();
     mlxcel_core::from_slice_f32(&data, shape)
 }
 

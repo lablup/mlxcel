@@ -18,24 +18,28 @@
 //! The ROCm test gate (`make verify-test-rocm`) runs every GPU test on gfx1151.
 //! The paged-attention kernels (v1 decode, v2 partial, merge) have Metal and
 //! CUDA ports and no HIP port yet; that port is lablup/mlxcel#1814. Their tests
-//! call the launchers directly, get the launcher's refusal, and fail, which
-//! reads as a correctness failure when it is a missing port.
+//! either launch the kernels directly and get the launcher's refusal, or go
+//! through a production path that declines on the missing port before it
+//! reaches the decision the test checks (the batched paged decode's floor and
+//! multi-slab reports, for example). Either way they fail for a missing port,
+//! which reads as a correctness failure.
 //!
 //! A skip here is narrow on purpose, so it cannot hide a real defect:
 //!
-//! - It asks the kernel's own support predicate, which reads the same
-//!   `KernelPorts` table the launcher dispatches through (`has_kernel_port`).
-//!   When #1814 fills the `.rocm` entry, the predicate turns true and every
-//!   skipped test runs again with no edit to the tests.
+//! - It asks the support predicate of exactly the kernels the test needs, which
+//!   reads the same `KernelPorts` table the launcher dispatches through
+//!   (`has_kernel_port`). When #1814 fills a `.rocm` entry, the predicates that
+//!   depend on it turn true and those tests run again with no edit, even if the
+//!   kernels are ported one at a time.
 //! - It skips only on ROCm. On Metal or CUDA a `false` predicate is itself a
 //!   defect (those ports exist), so the test runs and fails there rather than
 //!   passing silently.
-//! - It prints the skip, with the issue number, so the gate log says which
-//!   tests did not run and why.
+//! - It prints the skip, as `skipping <module>:<line>: ROCm has no <kernels>
+//!   kernel port yet (lablup/mlxcel#1814) ...`, so the gate log says which tests
+//!   did not run and why.
 //!
-//! Every paged-attention test that needs a port starts with
-//! [`require_paged_attention_port!`] or [`require_paged_merge_port!`]; `grep`
-//! for either to list them.
+//! Every such test starts with one of the `require_paged_*_port!` macros below;
+//! `grep` for `require_paged_` to list them.
 
 use std::io::Write;
 
@@ -45,8 +49,8 @@ use crate::hardware::{GpuBackendKind, gpu_backend_kind};
 pub(crate) const PAGED_ATTENTION_ROCM_PORT_ISSUE: &str = "lablup/mlxcel#1814";
 
 /// True, after printing why, when the calling test should return early: the
-/// backend is ROCm and `available` (the kernel's port predicate) is false.
-pub(crate) fn skip_for_missing_rocm_port(kernel: &str, available: bool, test: &str) -> bool {
+/// backend is ROCm and `available` (the kernels' port predicate) is false.
+pub(crate) fn skip_for_missing_rocm_port(kernels: &str, available: bool, test: &str) -> bool {
     if available || gpu_backend_kind() != GpuBackendKind::Rocm {
         return false;
     }
@@ -55,20 +59,18 @@ pub(crate) fn skip_for_missing_rocm_port(kernel: &str, available: bool, test: &s
     // in the gate log instead of reading as a pass.
     let _ = writeln!(
         std::io::stderr(),
-        "skipping {test}: ROCm has no {kernel} kernel port yet ({PAGED_ATTENTION_ROCM_PORT_ISSUE}); \
+        "skipping {test}: ROCm has no {kernels} kernel port yet ({PAGED_ATTENTION_ROCM_PORT_ISSUE}); \
          the test runs again once the port table has a .rocm entry"
     );
     true
 }
 
-/// Return early from a test that launches the paged-attention kernels (v1
-/// decode, v2 partial, merge) when ROCm has no port of them. See the module
-/// docs for why this is the only such skip and when it goes away.
-macro_rules! require_paged_attention_port {
-    () => {
+/// Shared body of the `require_paged_*_port!` macros.
+macro_rules! require_port {
+    ($kernels:literal, $predicate:ident) => {
         if $crate::test_support::kernel_ports::skip_for_missing_rocm_port(
-            "paged-attention",
-            $crate::ffi::paged_attention_kernels_available(),
+            $kernels,
+            $crate::ffi::$predicate(),
             concat!(module_path!(), ":", line!()),
         ) {
             return;
@@ -76,19 +78,51 @@ macro_rules! require_paged_attention_port {
     };
 }
 
-/// As [`require_paged_attention_port!`], for a test that launches only the
-/// merge kernel (MLA split-KV).
+/// Return early on ROCm without all three paged-attention kernels (v1 decode,
+/// v2 partial, merge): the batched paged decode, which may take either path.
+macro_rules! require_paged_attention_port {
+    () => {
+        $crate::test_support::kernel_ports::require_port!(
+            "paged-attention (v1 decode, v2 partial, merge)",
+            paged_attention_kernels_available
+        )
+    };
+}
+
+/// Return early on ROCm without the v1 paged decode kernel.
+macro_rules! require_paged_decode_port {
+    () => {
+        $crate::test_support::kernel_ports::require_port!(
+            "paged-attention v1 decode",
+            paged_attention_decode_available
+        )
+    };
+}
+
+/// Return early on ROCm without the v2 partial and merge kernels: the flat,
+/// cascade and sparse v2 launches.
+macro_rules! require_paged_v2_port {
+    () => {
+        $crate::test_support::kernel_ports::require_port!(
+            "paged-attention v2 (partial, merge)",
+            paged_attention_v2_available
+        )
+    };
+}
+
+/// Return early on ROCm without the merge kernel: MLA split-KV and the merge
+/// kernel's own tests.
 macro_rules! require_paged_merge_port {
     () => {
-        if $crate::test_support::kernel_ports::skip_for_missing_rocm_port(
+        $crate::test_support::kernel_ports::require_port!(
             "paged-attention merge",
-            $crate::ffi::paged_attention_merge_available(),
-            concat!(module_path!(), ":", line!()),
-        ) {
-            return;
-        }
+            paged_attention_merge_available
+        )
     };
 }
 
 pub(crate) use require_paged_attention_port;
+pub(crate) use require_paged_decode_port;
 pub(crate) use require_paged_merge_port;
+pub(crate) use require_paged_v2_port;
+pub(crate) use require_port;

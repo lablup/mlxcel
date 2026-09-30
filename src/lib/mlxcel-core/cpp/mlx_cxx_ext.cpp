@@ -287,6 +287,15 @@ bool paged_attention_merge_available() {
     return mlxcel::turbo::paged_attention_merge_states_available();
 }
 
+bool paged_attention_decode_available() {
+    return mlxcel::turbo::paged_attention_decode_available();
+}
+
+bool paged_attention_v2_available() {
+    return mlxcel::turbo::paged_attention_v2_partial_available() &&
+        mlxcel::turbo::paged_attention_merge_states_available();
+}
+
 int32_t paged_attention_v2_q_heads_per_cta(int32_t dim, int32_t n_rep) {
     return static_cast<int32_t>(mlxcel::turbo::paged_attention_v2_q_heads_per_cta(
         static_cast<int>(dim), static_cast<int>(n_rep)));

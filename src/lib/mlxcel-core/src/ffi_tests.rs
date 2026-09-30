@@ -671,7 +671,7 @@ fn test_pooled_paged_decode_matches_dense_over_200_steps() {
 /// exercises its block-table indexing rather than a contiguous run.
 #[test]
 fn test_fused_paged_decode_matches_gather_over_200_steps() {
-    crate::test_support::kernel_ports::require_paged_attention_port!();
+    crate::test_support::kernel_ports::require_paged_decode_port!();
     use crate::cache::{PagedBlockPool, PagedSequenceState};
 
     const STEPS: usize = 200;
@@ -812,10 +812,12 @@ fn test_fused_paged_decode_gqa_and_batched() {
 
     // The fused paged-decode kernel has a Metal JIT body and a CUDA JIT body
     // (#634) and no HIP port yet (#1814). ROCm skips visibly through the shared
-    // helper; a CPU-only build, where no backend can launch it, skips here.
-    // Both read the kernels' own port tables, so a new port runs this test.
-    crate::test_support::kernel_ports::require_paged_attention_port!();
-    if !crate::paged_attention_kernels_available() {
+    // helper, which reads the kernel's port table, so a HIP port runs this
+    // test. A build with no GPU backend cannot launch it and skips here; on
+    // Metal and CUDA the test always runs, so a wrongly false predicate there
+    // fails it instead of passing.
+    crate::test_support::kernel_ports::require_paged_decode_port!();
+    if crate::hardware::gpu_backend_kind() == crate::hardware::GpuBackendKind::None {
         return;
     }
 
@@ -919,10 +921,10 @@ fn test_fused_paged_decode_gqa_and_batched() {
 fn test_fused_paged_decode_native_vs_fallback_matrix() {
     use crate::cache::{PagedBlockPool, PagedSequenceState};
 
-    crate::test_support::kernel_ports::require_paged_attention_port!();
-    if !crate::paged_attention_kernels_available() {
-        // No port of the fused kernel on this backend (a CPU-only build); the
-        // native path cannot run, so there is nothing to compare.
+    crate::test_support::kernel_ports::require_paged_decode_port!();
+    if crate::hardware::gpu_backend_kind() == crate::hardware::GpuBackendKind::None {
+        // No GPU backend (a CPU-only build): the native path cannot run, so
+        // there is nothing to compare.
         return;
     }
 
