@@ -191,8 +191,8 @@ pub enum DraftPolicy {
     /// `MIN_COOLDOWN` (4) rounds, doubling up to `MAX_COOLDOWN` (32), before the
     /// next drafted round probes again.
     Graded,
-    /// Narrow (`GATED_NARROW_DRAFT`, 2 proposals) until two narrow blocks in a
-    /// row land whole, then full (`max_draft`). While paused it keeps looking up and
+    /// Narrow (`GATED_NARROW_DRAFT`, 2 proposals) until a narrow block lands
+    /// whole, then full (`max_draft`). While paused it keeps looking up and
     /// checks each proposal against the tokens decoding emits next; proposing
     /// resumes only once `SHADOW_CONFIRM` (2) proposed tokens in a row came
     /// true, and until a round lands a whole narrow block, a round that lands
@@ -303,14 +303,11 @@ const MISSES_BEFORE_COOLDOWN: usize = 3;
 /// widest block below the 4-row multirow instantiation on CUDA).
 const GATED_NARROW_DRAFT: usize = 2;
 /// Accepted-proposal average at which [`DraftPolicy::Gated`] switches from the
-/// narrow to the full block. From the starting average, two narrow blocks in
-/// a row that land whole (four confirmed tokens) reach exactly this; one is
-/// not enough, because prose also restates short fragments of the prompt, and
-/// on GB10 a full block that misses costs about two narrow ones (Qwen3-8B
-/// email: two full blocks landed nothing right after one clean narrow block).
-/// Once full blocks have landed several tokens, it takes a run of misses to
-/// fall back below.
-const GATED_FULL_AT: f64 = 1.75;
+/// narrow to the full block. A narrow block that lands whole lifts the average
+/// from its starting value to exactly this, so one clean narrow round is
+/// enough, and the first full block that lands nothing drops it back below;
+/// once full blocks have landed several tokens, it takes a run of misses.
+const GATED_FULL_AT: f64 = 1.5;
 /// Accepted-proposal average a [`DraftPolicy::Gated`] governor starts from and
 /// resumes with: below [`GATED_FULL_AT`], so the first block is narrow.
 const GATED_START_EMA: f64 = 1.0;

@@ -693,19 +693,13 @@ fn gated_pause_has_no_length_and_ends_on_a_confirmed_proposal() {
 }
 
 #[test]
-fn gated_block_widens_after_two_whole_narrow_blocks_and_narrows_after_misses() {
+fn gated_block_widens_after_a_whole_narrow_block_and_narrows_after_misses() {
     let mut g = DraftGovernor::new(&gated(7));
     g.record(GATED_NARROW_DRAFT);
     assert_eq!(
         g.budget(),
-        GATED_NARROW_DRAFT,
-        "one clean narrow block is not enough: prose restates short fragments"
-    );
-    g.record(GATED_NARROW_DRAFT);
-    assert_eq!(
-        g.budget(),
         7,
-        "two narrow blocks in a row that landed whole earn the full one"
+        "a narrow block that landed whole earns the full one"
     );
     g.record(5);
     assert_eq!(g.budget(), 7);
@@ -745,7 +739,6 @@ fn gated_respects_a_max_draft_below_the_narrow_block() {
 #[test]
 fn shadow_confirmation_is_ignored_unless_paused_and_gated() {
     let mut g = DraftGovernor::new(&gated(7));
-    g.record(2);
     g.record(2);
     g.shadow_confirmed();
     assert_eq!(g.budget(), 7, "a drafting governor keeps its full block");
