@@ -31,9 +31,12 @@ use mlxcel_core::sampling::LogprobsConfig;
 
 /// Default `--kv-admission-watermark` (issue #2088): the fraction of the
 /// paged KV block budget a prefill admission keeps free for decode growth
-/// while rows are decoding. Chosen by measurement on GB10; see the
-/// `--kv-admission-watermark` entry in `docs/`.
-pub const DEFAULT_KV_ADMISSION_WATERMARK: f64 = 0.0;
+/// while rows are decoding. The smallest value on the measured grid (0.01 to
+/// 0.15) that lowered preemptions without losing a turn: on GB10 with
+/// meta-llama-3.1-8b-instruct-4bit at a 4444-block budget, three concurrent
+/// 3-turn conversations went from 10 preemptions to 6 in both repeats. See
+/// `docs/CONTINUOUS_BATCHING.md`.
+pub const DEFAULT_KV_ADMISSION_WATERMARK: f64 = 0.01;
 
 /// Largest accepted `--kv-admission-watermark`. Above half the budget the
 /// server would mostly admit one sequence at a time.

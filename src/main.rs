@@ -1800,11 +1800,13 @@ pub(crate) struct ServeArgs {
     /// Under a tight `--kv-cache-budget`, admitting a request into exactly the
     /// free blocks leaves the decoding rows no room to grow, so the next decode
     /// ticks preempt them and they re-prefill from scratch. With a watermark,
-    /// admission waits (and evicts cold prompt-cache prefixes) until the free
-    /// blocks cover the request plus this share of the budget. It applies only
+    /// admission waits until the free blocks cover the request plus this share
+    /// of the budget, evicting cold prompt-cache prefixes (and, for a
+    /// higher-priority request, preempting strictly lower-priority rows) to
+    /// make that room. It applies only
     /// while rows are decoding, so a request that fits the budget is never
-    /// refused. `0` disables it. Ignored without a block budget. Also reads
-    /// `MLXCEL_KV_ADMISSION_WATERMARK`.
+    /// refused. `0` disables it. Ignored without a block budget. Defaults to
+    /// 0.01. Also reads `MLXCEL_KV_ADMISSION_WATERMARK`.
     #[arg(
         long = "kv-admission-watermark",
         env = "MLXCEL_KV_ADMISSION_WATERMARK",

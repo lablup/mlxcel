@@ -22,6 +22,7 @@ token, then streams the new tokens out. Relevant flags:
 | `--max-queue-depth N` | 32 | Maximum queued (not yet admitted) requests. |
 | `--prefill-chunk-size N` | 512 | Token chunk size for prefill; bounds prefill's effect on decode latency. |
 | `--prefill-grant-interval N` | 16 | Decode ticks a parked chunked prefill yields before it is granted one; bounds an admitted long prompt's time to first token. `0` disables the grant (unbounded wait). |
+| `--kv-admission-watermark F` | 0.01 | Fraction of the paged KV block budget (`0.0` to `0.5`) a prefill admission keeps free while rows are decoding, so they can grow without being preempted. `0` disables it. See below. |
 | `--enable-preemption` | off | Allow evicting a lower-priority sequence to admit a waiting one. |
 | `--no-batch` | off | Disable batching and serve sequentially (the legacy single worker). |
 | `--no-prompt-cache` | off | Disable the prompt-prefix KV cache (it is on by default). |
@@ -138,6 +139,46 @@ full-context sequences run into an OOM abort. On the dense decode backend the
 budget is inert. Disable the guard with `--kv-cache-budget none`. Memory-
 constrained hosts can also lower `--parallel` or cap `--ctx-size` (see the
 context-sizing note in [environment-variables.md](environment-variables.md)).
+
+### Decode headroom under a tight budget (`--kv-admission-watermark`)
+
+When the budget is small relative to the concurrent work, admitting a request
+into exactly the free blocks leaves the running rows nowhere to grow. The next
+decode ticks then preempt the least-progressed row, which re-prefills from
+scratch when it is admitted again. `--kv-admission-watermark F` keeps the
+fraction `F` of the block budget free at admission: a request is admitted only
+when the free blocks minus `F * budget` cover it. To make that room it evicts
+cold prompt-cache prefixes and, for a higher-priority request, preempts
+strictly lower-priority rows (as admission already does for the request
+itself) before it waits. The watermark applies
+only while a decode batch is live, so a request that fits the budget is never
+refused; it waits for running rows to finish instead. `0` disables it, and it
+is inert without a block budget.
+
+The default, 0.01, is the smallest value on the measured grid that lowered
+preemptions without losing a turn. On GB10 with meta-llama-3.1-8b-instruct-4bit,
+`--kv-cache-budget 600000000` (4444 blocks), `--max-batch-size 4`, and three
+concurrent 3-turn conversations of 600-token generations, each value run twice
+with identical results:
+
+| Watermark | Preemptions | Decode reclaim passes | Turns completed | Wall time |
+|-----------|-------------|-----------------------|-----------------|-----------|
+| 0 | 10 | 43 | 9 / 9 | 103-104 s |
+| 0.01 | 6 | 6 | 9 / 9 | 90-91 s |
+| 0.02 | 6 | 6 | 9 / 9 | 89-90 s |
+| 0.05 | 5 | 5 | 9 / 9 | 89-90 s |
+| 0.10 | 1 | 2 | 9 / 9 | 86 s (one run) |
+| 0.15 | 1 | 3 | 9 / 9 | 88 s (one run) |
+
+Raise it when a tight budget preempts often and the extra queueing latency
+for new requests is acceptable.
+
+Two more rules keep the budget accounting honest (issue #2088). A request
+that adopted a cached prefix is charged only for the blocks its suffix will
+mint, since the adopted blocks are already in use. When a running row needs a
+block and none is free, the reclaim order is: evict a cold prompt-cache
+prefix, then drop a queued request's adopted prefix (it re-prefills cold when
+admitted), then preempt a running row.
 
 ### How a chunked prefill shares ticks with decode (`--prefill-grant-interval`)
 
