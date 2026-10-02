@@ -192,10 +192,15 @@ impl MogHead {
             mlxcel_core::astype(&mlxcel_core::reshape(&component, &[-1]), dtype::INT32);
 
         let flat_x = mlxcel_core::reshape(&x, &[-1, h]);
-        let mus = mlxcel_core::take(&self.mus, &flat_component, 0);
+        // The gathered tables stay as stored (bf16); cast the gathered slabs
+        // to the activation dtype so `mu` stays f32 on CUDA builds, whose
+        // promotion table resolves bf16 + f32 to bf16 (issue #2087). Exact,
+        // and a no-op when the dtypes already match.
+        let act = mlxcel_core::array_dtype(&flat_x);
+        let mus = mlxcel_core::astype(&mlxcel_core::take(&self.mus, &flat_component, 0), act);
         let mu = mlxcel_core::matmul(&mus, &mlxcel_core::expand_dims(&flat_x, -1));
         let mu = mlxcel_core::squeeze_axis(&mu, -1);
-        let low = mlxcel_core::take(&self.low_mat, &flat_component, 0);
+        let low = mlxcel_core::astype(&mlxcel_core::take(&self.low_mat, &flat_component, 0), act);
         let mu = mlxcel_core::matmul(&low, &mlxcel_core::expand_dims(&mu, -1));
         let mu = mlxcel_core::reshape(&mlxcel_core::squeeze_axis(&mu, -1), &[b, t, self.out_size]);
 

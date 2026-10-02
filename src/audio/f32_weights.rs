@@ -26,6 +26,14 @@
 //! bit-identical, and each frame skips the cast traffic. The price is twice
 //! the resident size of the promoted weights.
 //!
+//! On CUDA builds the precast is required, not only faster: mlxcel's CUDA
+//! overlay of MLX's promotion table (`src/lib/mlx-cpp/patches-cuda/dtype.cpp`,
+//! kept for the single-dtype bf16 decode graph of issue #636) resolves bf16
+//! with f32 to bf16, so a bf16 weight left as stored would demote the f32
+//! activation stream instead of promoting the weight (issue #2087). Code that
+//! needs f32 from a stored bf16 tensor outside these subsets casts it
+//! explicitly.
+//!
 //! A weight may be promoted only when every op that reads it promotes it
 //! against an f32 activation. Weights combined with other weights in their
 //! own dtype first (for example Gemma's `1 + weight` norms) or read by a
@@ -104,6 +112,55 @@ mod tests {
         mlxcel_core::astype(a, dtype::FLOAT32)
     }
 
+    /// The bf16 weight `w` as upstream MLX promotes it against an f32
+    /// activation. Off CUDA that is MLX's own promotion inside the op, so `w`
+    /// is passed as is and the tests compare the precast with it. The CUDA
+    /// overlay resolves bf16 with f32 to bf16 instead (see
+    /// `mixed_bf16_f32_promotion_follows_the_build`), so there the upstream
+    /// promotion is spelled out as an unevaluated in-graph `astype`.
+    fn as_promoted(w: &MlxArray) -> UniquePtr<MlxArray> {
+        if cfg!(feature = "cuda") {
+            f32_of(w)
+        } else {
+            mlxcel_core::copy(w)
+        }
+    }
+
+    /// Issue #2087 probe: the dtype an f32 activation meets a bf16 operand in.
+    /// Upstream MLX gives f32. mlxcel's CUDA overlay
+    /// (`src/lib/mlx-cpp/patches-cuda/dtype.cpp`, issue #636) gives bf16 on
+    /// every device of a CUDA build, because the promotion table is compiled
+    /// into the library; ROCm and Metal use the upstream table. Production
+    /// code must therefore cast explicitly wherever it needs f32 from a stored
+    /// bf16 tensor, and this test fails loudly if either rule changes.
+    #[test]
+    fn mixed_bf16_f32_promotion_follows_the_build() {
+        let x = rand(1, &[2, 16]);
+        let w = bf16(&rand(2, &[16, 16]));
+        let g = bf16(&rand(3, &[16]));
+        let want = if cfg!(feature = "cuda") {
+            dtype::BFLOAT16
+        } else {
+            dtype::FLOAT32
+        };
+        let outputs = [
+            ("add(f32, bf16)", mlxcel_core::add(&x, &g)),
+            ("add(bf16, f32)", mlxcel_core::add(&g, &x)),
+            ("matmul(f32, bf16)", mlxcel_core::matmul(&x, &w)),
+            ("matmul(bf16, f32)", mlxcel_core::matmul(&w, &f32_of(&w))),
+            (
+                "rms_norm(f32, bf16)",
+                mlxcel_core::fast_rms_norm(&x, &g, 1e-5),
+            ),
+        ];
+        for (name, out) in &outputs {
+            assert_eq!(mlxcel_core::array_dtype(out), want, "{name}");
+        }
+        // An explicit cast is backend independent and exact.
+        let cast = mlxcel_core::add(&x, &f32_of(&g));
+        assert_eq!(mlxcel_core::array_dtype(&cast), dtype::FLOAT32);
+    }
+
     #[test]
     fn precast_matmul_and_addmm_match_the_promoted_graph() {
         let w = bf16(&rand(1, &[48, 64]));
@@ -112,11 +169,17 @@ mod tests {
         let b32 = f32_of(&b);
         for rows in [1, 2, 7] {
             let x = rand(3 + rows as u64, &[1, rows, 64]);
-            let promoted = mlxcel_core::matmul(&x, &mlxcel_core::transpose(&w));
+            let promoted = mlxcel_core::matmul(&x, &mlxcel_core::transpose(&as_promoted(&w)));
             let precast = mlxcel_core::matmul(&x, &mlxcel_core::transpose(&w32));
             assert_eq!(mlxcel_core::array_dtype(&promoted), dtype::FLOAT32);
             assert_eq!(bytes(&promoted), bytes(&precast));
-            let promoted = mlxcel_core::addmm(&b, &x, &mlxcel_core::transpose(&w), 1.0, 1.0);
+            let promoted = mlxcel_core::addmm(
+                &as_promoted(&b),
+                &x,
+                &mlxcel_core::transpose(&as_promoted(&w)),
+                1.0,
+                1.0,
+            );
             let precast = mlxcel_core::addmm(&b32, &x, &mlxcel_core::transpose(&w32), 1.0, 1.0);
             assert_eq!(bytes(&promoted), bytes(&precast));
         }
@@ -127,17 +190,18 @@ mod tests {
         let x = rand(9, &[1, 12, 16]);
         for (shape, groups) in [([32, 1, 16], 1), ([16, 9, 1], 16)] {
             let w = bf16(&rand(10, &shape));
-            let promoted = mlxcel_core::try_conv1d(&x, &w, 1, 0, 1, groups).unwrap();
+            let promoted = mlxcel_core::try_conv1d(&x, &as_promoted(&w), 1, 0, 1, groups).unwrap();
             let precast = mlxcel_core::try_conv1d(&x, &f32_of(&w), 1, 0, 1, groups).unwrap();
             assert_eq!(bytes(&promoted), bytes(&precast));
         }
         let g = bf16(&rand(11, &[16]));
         let beta = bf16(&rand(12, &[16]));
         let (g32, beta32) = (f32_of(&g), f32_of(&beta));
-        // SAFETY: all four pointers refer to arrays that outlive the calls.
+        let (gp, betap) = (as_promoted(&g), as_promoted(&beta));
+        // SAFETY: every pointer refers to an array that outlives the calls.
         let (promoted, precast) = unsafe {
             (
-                mlxcel_core::fast_layer_norm(&x, &*g, &*beta, 1e-5),
+                mlxcel_core::fast_layer_norm(&x, &*gp, &*betap, 1e-5),
                 mlxcel_core::fast_layer_norm(&x, &*g32, &*beta32, 1e-5),
             )
         };

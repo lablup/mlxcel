@@ -113,6 +113,10 @@ impl RvqCodebooks {
         let mut result = mlxcel_core::zeros(&[s[0], s[1], self.latent_size], dtype::FLOAT32);
         for (idx, table) in self.padded.iter().enumerate() {
             let rows = mlxcel_core::take(table, &Self::column(code, idx as i32), 0);
+            // Cast the gathered rows explicitly: CUDA builds resolve
+            // bf16 + f32 to bf16 (issue #2087). The cast is exact and is the
+            // same `astype` upstream promotion inserts elsewhere.
+            let rows = mlxcel_core::astype(&rows, dtype::FLOAT32);
             result = mlxcel_core::add(&result, &rows);
         }
         Ok(result)

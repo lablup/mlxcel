@@ -321,27 +321,41 @@ fn mog_infer_shapes_are_finite_with_guidance() {
         w.insert(k, v);
     };
     for l in 0..2 {
-        put(format!("m.mlp_stack.{l}.pre_norm.weight"), &[h], 0.1);
-        put(format!("m.mlp_stack.{l}.post_norm.weight"), &[h], 0.1);
+        put(format!("mog_head.mlp_stack.{l}.pre_norm.weight"), &[h], 0.1);
         put(
-            format!("m.mlp_stack.{l}.mlp.gate_proj.weight"),
+            format!("mog_head.mlp_stack.{l}.post_norm.weight"),
+            &[h],
+            0.1,
+        );
+        put(
+            format!("mog_head.mlp_stack.{l}.mlp.gate_proj.weight"),
             &[16, h],
             0.3,
         );
-        put(format!("m.mlp_stack.{l}.mlp.up_proj.weight"), &[16, h], 0.3);
         put(
-            format!("m.mlp_stack.{l}.mlp.down_proj.weight"),
+            format!("mog_head.mlp_stack.{l}.mlp.up_proj.weight"),
+            &[16, h],
+            0.3,
+        );
+        put(
+            format!("mog_head.mlp_stack.{l}.mlp.down_proj.weight"),
             &[h, 16],
             0.3,
         );
     }
-    put("m.mlp_stack.2.weight".into(), &[h], 0.1);
-    put("m.proj_logits.weight".into(), &[5, h], 0.3);
-    put("m.proj_mus.weight".into(), &[15, h], 0.3);
-    put("m.proj_logs.weight".into(), &[1, h], 0.3);
-    put("m.proj_else.weight".into(), &[out, h], 0.3);
-    put("m.low_mat".into(), &[5, out, 3], 0.3);
-    let head = MogHead::from_weights(&w, "m", h as usize, out as usize, &cfg, 64, 4).unwrap();
+    put("mog_head.mlp_stack.2.weight".into(), &[h], 0.1);
+    put("mog_head.proj_logits.weight".into(), &[5, h], 0.3);
+    put("mog_head.proj_mus.weight".into(), &[15, h], 0.3);
+    put("mog_head.proj_logs.weight".into(), &[1, h], 0.3);
+    put("mog_head.proj_else.weight".into(), &[out, h], 0.3);
+    put("mog_head.low_mat".into(), &[5, out, 3], 0.3);
+    // Load the weights as `RvqEarTtsModel` does: the projections are held
+    // as f32 and the gathered tables (`proj_mus`, `low_mat`) as stored, so
+    // the f32 result also depends on the head casting the gathered slabs
+    // (issue #2087: CUDA builds resolve bf16 + f32 to bf16).
+    let w = crate::audio::f32_weights::promoted_subset(&w, "", super::model::promotes_to_f32);
+    let head =
+        MogHead::from_weights(&w, "mog_head", h as usize, out as usize, &cfg, 64, 4).unwrap();
     let x = rand(&mut key, &[2, 1, h], 1.0);
     let (mu, logs) = head.infer(&x, 0.2, 0.95).unwrap();
     assert_eq!(mlxcel_core::array_shape(&mu), vec![1, 1, out]);
