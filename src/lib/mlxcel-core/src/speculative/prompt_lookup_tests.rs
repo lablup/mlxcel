@@ -20,6 +20,14 @@ fn cfg(ngram_max: usize, ngram_min: usize, max_draft: usize) -> PromptLookupConf
         ngram_min,
         max_draft,
         adaptive: true,
+        policy: DraftPolicy::Graded,
+    }
+}
+
+fn gated(max_draft: usize) -> PromptLookupConfig {
+    PromptLookupConfig {
+        policy: DraftPolicy::Gated,
+        ..cfg(3, 2, max_draft)
     }
 }
 
@@ -97,6 +105,7 @@ fn tokens_per_forward_excludes_the_prefill_token() {
         paused_rounds: 0,
         proposed_draft_tokens: 28,
         accepted_draft_tokens: 20,
+        shadow_confirmations: 0,
     };
     // 25 generated: 1 from prefill, 24 over 4 rounds.
     assert!((stats.tokens_per_forward(25) - 6.0).abs() < 1e-9);
@@ -438,8 +447,8 @@ fn induction_parity(
             let prompt = lcg_tokens(seed, 48, INDUCTION_VOCAB as u64);
             let expected = reference(model, &prompt);
             assert_eq!(expected.len(), 96, "seed {seed}: the reference ran short");
-            for config in [
-                PromptLookupConfig::default(),
+            let bases = [
+                cfg(3, 2, 7),
                 cfg(3, 1, 7),
                 cfg(4, 2, 3),
                 // Six-token matches are rare in a random prompt and appear
@@ -449,9 +458,15 @@ fn induction_parity(
                 cfg(6, 6, 7),
                 PromptLookupConfig {
                     adaptive: false,
-                    ..PromptLookupConfig::default()
+                    ..cfg(3, 2, 7)
                 },
-            ] {
+            ];
+            let policies = [DraftPolicy::Graded, DraftPolicy::Gated];
+            for config in policies.iter().flat_map(|&policy| {
+                bases
+                    .iter()
+                    .map(move |&base| PromptLookupConfig { policy, ..base })
+            }) {
                 let mut generator = PromptLookupGenerator::new(config);
                 let (tokens, _) = generator.generate(model, &prompt, 96, sampling);
                 assert_eq!(
@@ -465,6 +480,7 @@ fn induction_parity(
                 total.paused_rounds += stats.paused_rounds;
                 total.proposed_draft_tokens += stats.proposed_draft_tokens;
                 total.accepted_draft_tokens += stats.accepted_draft_tokens;
+                total.shadow_confirmations += stats.shadow_confirmations;
             }
         }
     }
@@ -488,6 +504,10 @@ fn assert_both_regimes(totals: &[PromptLookupStats; 2]) {
     assert!(
         missing.paused_rounds > 0,
         "the missing model never paused the governor: {missing:?}"
+    );
+    assert!(
+        totals.iter().any(|stats| stats.shadow_confirmations > 0),
+        "no paused gated governor ever resumed on a confirmed proposal: {totals:?}"
     );
 }
 
@@ -635,4 +655,133 @@ fn warmup_runs_every_verify_width_and_rolls_each_back() {
     generator.warm_up_verify_widths(&model, &prompt);
     assert_eq!(*model.widths.borrow(), vec![5, 2, 3, 4, 5]);
     assert_eq!(generator.caches[0].offset, prompt.len() as i32);
+}
+
+#[test]
+fn gated_governor_starts_narrow_on_probation() {
+    let mut g = DraftGovernor::new(&gated(7));
+    assert_eq!(g.budget(), GATED_NARROW_DRAFT);
+    // The first round of a reply has nothing behind it: one miss pauses.
+    g.record(0);
+    assert_eq!(g.budget(), 0);
+    assert!(g.probes_while_paused());
+}
+
+#[test]
+fn gated_pause_has_no_length_and_ends_on_a_confirmed_proposal() {
+    let mut g = DraftGovernor::new(&gated(7));
+    g.record(0);
+    for _ in 0..1000 {
+        assert_eq!(g.budget(), 0, "a gated pause must not expire on its own");
+    }
+    g.shadow_confirmed();
+    assert!(!g.probes_while_paused());
+    assert_eq!(g.budget(), GATED_NARROW_DRAFT, "it resumes narrow");
+    // Resumed on probation: one more miss pauses again at once.
+    g.record(0);
+    assert_eq!(g.budget(), 0);
+}
+
+#[test]
+fn gated_block_widens_after_a_whole_narrow_block_and_narrows_after_misses() {
+    let mut g = DraftGovernor::new(&gated(7));
+    g.record(GATED_NARROW_DRAFT);
+    assert_eq!(
+        g.budget(),
+        7,
+        "a narrow block that landed whole earns the full one"
+    );
+    g.record(5);
+    assert_eq!(g.budget(), 7);
+    // Off probation now, so misses shrink the block before they pause it.
+    g.record(0);
+    g.record(0);
+    assert_eq!(g.budget(), GATED_NARROW_DRAFT);
+    g.record(0);
+    assert_eq!(g.budget(), 0, "the third miss in a row pauses");
+}
+
+#[test]
+fn gated_block_never_uses_the_widths_between_narrow_and_full() {
+    let mut g = DraftGovernor::new(&gated(7));
+    for accepted in [2, 7, 3, 1, 0, 1, 2, 6, 0, 4, 1, 2, 2, 0, 5] {
+        let budget = g.budget();
+        assert!(
+            budget == 0 || budget == GATED_NARROW_DRAFT || budget == 7,
+            "budget {budget}"
+        );
+        if budget > 0 {
+            g.record(accepted.min(budget));
+        } else {
+            g.shadow_confirmed();
+        }
+    }
+}
+
+#[test]
+fn gated_respects_a_max_draft_below_the_narrow_block() {
+    let mut g = DraftGovernor::new(&gated(1));
+    assert_eq!(g.budget(), 1);
+    g.record(1);
+    assert_eq!(g.budget(), 1);
+}
+
+#[test]
+fn shadow_confirmation_is_ignored_unless_paused_and_gated() {
+    let mut g = DraftGovernor::new(&gated(7));
+    g.record(2);
+    g.shadow_confirmed();
+    assert_eq!(g.budget(), 7, "a drafting governor keeps its full block");
+
+    let mut graded = DraftGovernor::new(&cfg(3, 2, 7));
+    for _ in 0..MISSES_BEFORE_COOLDOWN {
+        graded.record(0);
+    }
+    assert!(!graded.probes_while_paused());
+    graded.shadow_confirmed();
+    assert_eq!(
+        pause_len(&mut graded),
+        MIN_COOLDOWN,
+        "graded pauses are unchanged"
+    );
+
+    let mut fixed = DraftGovernor::new(&PromptLookupConfig {
+        adaptive: false,
+        ..gated(7)
+    });
+    fixed.record(0);
+    assert_eq!(fixed.budget(), 7);
+    assert!(!fixed.probes_while_paused());
+}
+
+#[test]
+fn shadow_probe_settles_on_the_first_two_emitted_tokens() {
+    let probe = ShadowProbe {
+        start: 3,
+        proposal: vec![7, 8, 9],
+    };
+    assert_eq!(probe.settle(&[1, 2, 3]), None, "nothing emitted yet");
+    assert_eq!(probe.settle(&[1, 2, 3, 7]), None, "one token is not enough");
+    assert_eq!(probe.settle(&[1, 2, 3, 7, 8]), Some(true));
+    assert_eq!(
+        probe.settle(&[1, 2, 3, 7, 8, 0]),
+        Some(true),
+        "only the first two count"
+    );
+    assert_eq!(
+        probe.settle(&[1, 2, 3, 6]),
+        Some(false),
+        "settles at the first miss"
+    );
+    assert_eq!(probe.settle(&[1, 2, 3, 7, 6]), Some(false));
+}
+
+#[test]
+fn default_policy_follows_the_build() {
+    let expected = if cfg!(feature = "cuda") {
+        DraftPolicy::Gated
+    } else {
+        DraftPolicy::Graded
+    };
+    assert_eq!(PromptLookupConfig::default().policy, expected);
 }

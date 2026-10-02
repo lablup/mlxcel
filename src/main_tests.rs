@@ -128,6 +128,8 @@ fn prompt_lookup_flags_parse_into_the_generator_config() {
         "--prompt-lookup-max-draft",
         "5",
         "--prompt-lookup-no-adaptive",
+        "--prompt-lookup-policy",
+        "graded",
     ]);
     let Commands::Generate(args) = cli.command else {
         panic!("expected generate command");
@@ -140,7 +142,44 @@ fn prompt_lookup_flags_parse_into_the_generator_config() {
             ngram_min: 1,
             max_draft: 5,
             adaptive: false,
+            policy: mlxcel::DraftPolicy::Graded,
         }
+    );
+}
+
+#[test]
+fn prompt_lookup_policy_auto_follows_the_build_and_names_override_it() {
+    let pick = |args: &'static [&'static str]| {
+        let Commands::Generate(args) = parse_cli(args).command else {
+            panic!("expected generate command");
+        };
+        args.prompt_lookup.config().policy
+    };
+    assert_eq!(
+        pick(&[
+            "mlxcel",
+            "generate",
+            "-m",
+            "m",
+            "-p",
+            "hi",
+            "--prompt-lookup"
+        ]),
+        mlxcel::DraftPolicy::default_for_backend()
+    );
+    assert_eq!(
+        pick(&[
+            "mlxcel",
+            "generate",
+            "-m",
+            "m",
+            "-p",
+            "hi",
+            "--prompt-lookup",
+            "--prompt-lookup-policy",
+            "gated"
+        ]),
+        mlxcel::DraftPolicy::Gated
     );
 }
 
@@ -153,6 +192,7 @@ fn prompt_lookup_tuning_flags_require_prompt_lookup() {
         &["--prompt-lookup-ngram-min", "1"][..],
         &["--prompt-lookup-max-draft", "5"][..],
         &["--prompt-lookup-no-adaptive"][..],
+        &["--prompt-lookup-policy", "gated"][..],
     ] {
         let mut args = vec!["mlxcel", "generate", "-m", "models/foo", "-p", "hi"];
         args.extend_from_slice(flag);

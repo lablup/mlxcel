@@ -53,9 +53,12 @@
 //! two and a half one-token steps. On prose, where lookup matches a common
 //! token and the target rarely agrees, proposing every round made decoding a
 //! quarter slower than plain decode. [`DraftGovernor`] keeps the block short
-//! while recent rounds land few tokens and, after repeated misses, stops
-//! proposing for a few rounds (doubling up to a cap) before trying again.
-//! Edits keep landing five or six tokens a round, so they keep the full block.
+//! while recent rounds land few tokens and stops proposing after repeated
+//! misses. Edits keep landing five or six tokens a round, so they keep the full
+//! block. How it shortens and when it resumes is a [`DraftPolicy`], because the
+//! cost of a verify width depends on the backend's kernels: the
+//! [`DraftPolicy::Graded`] rules were tuned on an M4 Pro, the
+//! [`DraftPolicy::Gated`] rules on GB10.
 //!
 //! ## Acceptance
 //!
@@ -145,6 +148,9 @@ pub struct PromptLookupConfig {
     /// Shorten or pause proposals while they stop landing, see
     /// [`DraftGovernor`]. `false` proposes up to `max_draft` every round.
     pub adaptive: bool,
+    /// How the adaptive governor sizes blocks and decides when to resume.
+    /// Ignored when `adaptive` is `false`.
+    pub policy: DraftPolicy,
 }
 
 impl Default for PromptLookupConfig {
@@ -154,6 +160,49 @@ impl Default for PromptLookupConfig {
             ngram_min: DEFAULT_NGRAM_MIN,
             max_draft: DEFAULT_MAX_DRAFT,
             adaptive: true,
+            policy: DraftPolicy::default_for_backend(),
+        }
+    }
+}
+
+/// How [`DraftGovernor`] sizes verify blocks and decides when to resume
+/// proposing after a run of misses.
+///
+/// The two policies answer one question differently: how much a drafted round
+/// that lands nothing costs against a plain step. On an M4 Pro a wide block
+/// is cheap, so [`Self::Graded`] grades the block with the recent acceptance
+/// and probes again after a short pause. On GB10 (CUDA, affine 4-bit, MLX pin
+/// `81ba1c6a`) a synchronous verify forward measured, in pipelined one-token
+/// steps for Qwen3-1.7B / Qwen3-8B: width 2 at 1.35 / 1.14, width 3 at
+/// 1.62 / 1.41, width 4 at 2.26 / 1.85, widths 5 to 7 rising to 3.59 / 3.28,
+/// and width 8 and up flat at 3.34 / 2.51 (`qmv`'s multirow instantiations at
+/// 2, 4 and 8 rows, then `qmm_sm80` from 8 rows). Widths 5 to 7 cost more than
+/// 8, and a miss also drains the pipeline, so [`Self::Gated`] uses only a
+/// narrow or a full block and spends no verify forward to find out whether a
+/// copy has resumed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DraftPolicy {
+    /// PR #2074's rules: the block is twice the recent accepted average plus
+    /// two, and a pause after `MISSES_BEFORE_COOLDOWN` (3) misses lasts
+    /// `MIN_COOLDOWN` (4) rounds, doubling up to `MAX_COOLDOWN` (32), before the
+    /// next drafted round probes again.
+    Graded,
+    /// Narrow (`GATED_NARROW_DRAFT`, 2 proposals) until a narrow block lands
+    /// whole, then full (`max_draft`). While paused it keeps looking up and
+    /// checks each proposal against the tokens decoding emits next; proposing
+    /// resumes only once `SHADOW_CONFIRM` (2) proposed tokens in a row came
+    /// true, and a resumed round that lands nothing pauses again at once.
+    Gated,
+}
+
+impl DraftPolicy {
+    /// [`Self::Gated`] on CUDA builds, where it was measured, and
+    /// [`Self::Graded`] everywhere else, where it was tuned.
+    pub const fn default_for_backend() -> Self {
+        if cfg!(feature = "cuda") {
+            Self::Gated
+        } else {
+            Self::Graded
         }
     }
 }
@@ -237,13 +286,29 @@ pub fn supports_prompt_lookup<M: LanguageModel>(model: &M) -> bool {
     prompt_lookup_unsupported_reason(model).is_none()
 }
 
-/// Smallest pause, in rounds, after proposals stop landing.
+/// Smallest pause, in rounds, after proposals stop landing ([`DraftPolicy::Graded`]).
 const MIN_COOLDOWN: usize = 4;
-/// Largest pause. Kept short so an edit that writes a new passage and then
-/// resumes copying is back on full blocks within a line or two.
+/// Largest pause ([`DraftPolicy::Graded`]). Kept short so an edit that writes
+/// a new passage and then resumes copying is back on full blocks within a line
+/// or two.
 const MAX_COOLDOWN: usize = 32;
 /// Consecutive drafted rounds that land nothing before a pause.
 const MISSES_BEFORE_COOLDOWN: usize = 3;
+/// Proposals in a [`DraftPolicy::Gated`] narrow block (verify width 3, the
+/// widest block below the 4-row multirow instantiation on CUDA).
+const GATED_NARROW_DRAFT: usize = 2;
+/// Accepted-proposal average at which [`DraftPolicy::Gated`] switches from the
+/// narrow to the full block. A narrow block that lands whole lifts the average
+/// from its starting value to exactly this, so one clean narrow round is
+/// enough; a full block that lands nothing twice drops it back.
+const GATED_FULL_AT: f64 = 1.5;
+/// Accepted-proposal average a [`DraftPolicy::Gated`] governor starts from and
+/// resumes with: below [`GATED_FULL_AT`], so the first block is narrow.
+const GATED_START_EMA: f64 = 1.0;
+/// Proposed tokens in a row a paused [`DraftPolicy::Gated`] governor must see
+/// come true before it proposes again. One is not enough on prose: the token
+/// after a two-token match is often a common one that happens to recur.
+pub(crate) const SHADOW_CONFIRM: usize = 2;
 /// Consecutive rounds without a proposal before the decode loop pipelines.
 ///
 /// A pipelined step is submitted before the host knows the token it follows,
@@ -256,48 +321,81 @@ const PLAIN_ROUNDS_BEFORE_PIPELINE: usize = 2;
 /// Decides, round by round, how many lookup tokens to propose.
 ///
 /// Tracks an exponential moving average of the proposals each drafted round
-/// landed and caps the next block at twice that plus two, so a run of full
-/// matches keeps the full block and a run of one-token landings verifies
-/// five-wide blocks instead of eight. Lookup landings are all-or-nothing more
-/// often than not (a copy either resumes or it does not), so the cap leaves
-/// room past the average. After [`MISSES_BEFORE_COOLDOWN`] drafted rounds in
-/// a row land nothing, it stops proposing for a cooldown that doubles on every
-/// repeat up to [`MAX_COOLDOWN`] and resets once a round lands a token.
+/// landed. Under [`DraftPolicy::Graded`] it caps the next block at twice that
+/// plus two, so a run of full matches keeps the full block and a run of
+/// one-token landings verifies five-wide blocks instead of eight (lookup
+/// landings are all-or-nothing more often than not, so the cap leaves room
+/// past the average); after [`MISSES_BEFORE_COOLDOWN`] drafted rounds in a row
+/// land nothing, it stops proposing for a cooldown that doubles on every repeat
+/// up to [`MAX_COOLDOWN`] and resets once a round lands a token. Under
+/// [`DraftPolicy::Gated`] the block is narrow or full, and a pause has no
+/// length: it ends when [`Self::shadow_confirmed`] reports a proposal that came
+/// true without being verified.
 #[derive(Debug, Clone)]
 pub(crate) struct DraftGovernor {
     max_draft: usize,
     adaptive: bool,
+    policy: DraftPolicy,
     accepted_ema: f64,
     misses: usize,
+    /// [`DraftPolicy::Graded`]: paused rounds left, and the next pause length.
     cooldown: usize,
     next_cooldown: usize,
+    /// [`DraftPolicy::Gated`]: proposing at all, and whether the next miss
+    /// pauses outright because this run of drafted rounds has landed nothing
+    /// since it resumed.
+    drafting: bool,
+    probation: bool,
 }
 
 impl DraftGovernor {
     pub(crate) fn new(config: &PromptLookupConfig) -> Self {
+        let accepted_ema = match config.policy {
+            // Optimistic start: the first match in an edit should get the
+            // whole block.
+            DraftPolicy::Graded => config.max_draft as f64,
+            // A first block that misses on prose costs a narrow verify, not
+            // a full one; an edit earns the full block one round later.
+            DraftPolicy::Gated => GATED_START_EMA,
+        };
         Self {
             max_draft: config.max_draft,
             adaptive: config.adaptive,
-            // Optimistic start: the first match in an edit should get the
-            // whole block.
-            accepted_ema: config.max_draft as f64,
+            policy: config.policy,
+            accepted_ema,
             misses: 0,
             cooldown: 0,
             next_cooldown: MIN_COOLDOWN,
+            drafting: true,
+            // The first drafted round of a reply has no evidence behind it.
+            probation: true,
         }
     }
 
     /// Proposals allowed this round; `0` means run a plain decode step. A
-    /// paused round counts down the pause.
+    /// paused [`DraftPolicy::Graded`] round counts down the pause.
     pub(crate) fn budget(&mut self) -> usize {
         if !self.adaptive {
             return self.max_draft;
         }
-        if self.cooldown > 0 {
-            self.cooldown -= 1;
-            return 0;
+        match self.policy {
+            DraftPolicy::Graded => {
+                if self.cooldown > 0 {
+                    self.cooldown -= 1;
+                    return 0;
+                }
+                ((2.0 * self.accepted_ema).round() as usize + 2).clamp(1, self.max_draft)
+            }
+            DraftPolicy::Gated => {
+                if !self.drafting {
+                    0
+                } else if self.accepted_ema >= GATED_FULL_AT {
+                    self.max_draft
+                } else {
+                    GATED_NARROW_DRAFT.min(self.max_draft)
+                }
+            }
         }
-        ((2.0 * self.accepted_ema).round() as usize + 2).clamp(1, self.max_draft)
     }
 
     /// Record a drafted round that landed `accepted` proposals.
@@ -306,17 +404,78 @@ impl DraftGovernor {
             return;
         }
         self.accepted_ema = 0.5 * self.accepted_ema + 0.5 * accepted as f64;
-        if accepted > 0 {
-            self.misses = 0;
-            self.next_cooldown = MIN_COOLDOWN;
-            return;
+        match self.policy {
+            DraftPolicy::Graded => {
+                if accepted > 0 {
+                    self.misses = 0;
+                    self.next_cooldown = MIN_COOLDOWN;
+                    return;
+                }
+                self.misses += 1;
+                if self.misses >= MISSES_BEFORE_COOLDOWN {
+                    self.misses = 0;
+                    self.cooldown = self.next_cooldown;
+                    self.next_cooldown = (self.next_cooldown * 2).min(MAX_COOLDOWN);
+                }
+            }
+            DraftPolicy::Gated => {
+                if accepted > 0 {
+                    self.misses = 0;
+                    self.probation = false;
+                    return;
+                }
+                self.misses += 1;
+                if self.probation || self.misses >= MISSES_BEFORE_COOLDOWN {
+                    self.drafting = false;
+                    self.misses = 0;
+                }
+            }
         }
-        self.misses += 1;
-        if self.misses >= MISSES_BEFORE_COOLDOWN {
+    }
+
+    /// Whether the decode loop should keep looking up while this governor is
+    /// paused and report proposals that come true via
+    /// [`Self::shadow_confirmed`].
+    pub(crate) fn probes_while_paused(&self) -> bool {
+        self.adaptive && self.policy == DraftPolicy::Gated && !self.drafting
+    }
+
+    /// A paused [`DraftPolicy::Gated`] governor saw a lookup proposal come
+    /// true for [`SHADOW_CONFIRM`] tokens: resume with a narrow block, on
+    /// probation.
+    pub(crate) fn shadow_confirmed(&mut self) {
+        if self.probes_while_paused() {
+            self.drafting = true;
+            self.probation = true;
             self.misses = 0;
-            self.cooldown = self.next_cooldown;
-            self.next_cooldown = (self.next_cooldown * 2).min(MAX_COOLDOWN);
+            self.accepted_ema = GATED_START_EMA;
         }
+    }
+}
+
+/// A lookup proposal made while proposals are paused, tested against the
+/// tokens decoding goes on to emit instead of against a verify forward.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ShadowProbe {
+    /// Context length when the proposal was made: `proposal[i]` claims the
+    /// token that lands at `context[start + i]`.
+    pub(crate) start: usize,
+    pub(crate) proposal: Vec<i32>,
+}
+
+impl ShadowProbe {
+    /// `Some(true)` once the first [`SHADOW_CONFIRM`] proposed tokens all came
+    /// true, `Some(false)` at the first one that did not, and `None` while
+    /// decoding has not emitted that far yet.
+    pub(crate) fn settle(&self, context: &[i32]) -> Option<bool> {
+        for (i, &claimed) in self.proposal.iter().take(SHADOW_CONFIRM).enumerate() {
+            match context.get(self.start + i) {
+                None => return None,
+                Some(&emitted) if emitted != claimed => return Some(false),
+                Some(_) => {}
+            }
+        }
+        Some(true)
     }
 }
 
@@ -433,13 +592,18 @@ pub struct PromptLookupStats {
     pub rounds: usize,
     /// Rounds whose lookup found a match and verified a draft block.
     pub drafted_rounds: usize,
-    /// One-token rounds run without looking up a proposal, because the
-    /// [`DraftGovernor`] paused proposals or `max_tokens` left no room.
+    /// One-token rounds that verified no proposal because the
+    /// [`DraftGovernor`] paused proposals or `max_tokens` left no room. A
+    /// paused [`DraftPolicy::Gated`] round still looks up, to test the
+    /// proposal against what decoding emits next.
     pub paused_rounds: usize,
     /// Tokens proposed across all rounds.
     pub proposed_draft_tokens: usize,
     /// Proposals the target accepted.
     pub accepted_draft_tokens: usize,
+    /// Times a paused [`DraftPolicy::Gated`] governor resumed because a
+    /// lookup proposal came true without being verified.
+    pub shadow_confirmations: usize,
 }
 
 impl PromptLookupStats {
@@ -459,7 +623,8 @@ impl PromptLookupStats {
     pub fn summary_line(&self, generated_tokens: usize) -> String {
         format!(
             "[Prompt lookup] rounds={} drafted_rounds={} paused_rounds={} proposed={} \
-             accepted={} acceptance_rate={:.4} tokens_per_forward={:.4}",
+             accepted={} acceptance_rate={:.4} tokens_per_forward={:.4} \
+             shadow_confirmations={}",
             self.rounds,
             self.drafted_rounds,
             self.paused_rounds,
@@ -467,6 +632,7 @@ impl PromptLookupStats {
             self.accepted_draft_tokens,
             self.acceptance_rate(),
             self.tokens_per_forward(generated_tokens),
+            self.shadow_confirmations,
         )
     }
 }
@@ -701,13 +867,44 @@ impl PromptLookupGenerator {
         let mut in_flight: Option<UniquePtr<ffi::MlxArray>> = None;
         // Rounds in a row, this one included, whose lookup proposed nothing.
         let mut plain_streak = 0usize;
+        // A proposal looked up while a `DraftPolicy::Gated` governor is
+        // paused, waiting for decoding to show whether it comes true. Long
+        // enough to settle even when `max_draft` is shorter.
+        let mut shadow: Option<ShadowProbe> = None;
+        let shadow_config = PromptLookupConfig {
+            max_draft: self.config.max_draft.max(SHADOW_CONFIRM),
+            ..self.config
+        };
 
         while !done {
+            if let Some(confirmed) = shadow
+                .as_ref()
+                .and_then(|probe| probe.settle(&self.context))
+            {
+                shadow = None;
+                if confirmed {
+                    governor.shadow_confirmed();
+                    self.stats.shadow_confirmations += 1;
+                }
+            }
             // Never propose past `max_tokens`: every accepted proposal is
             // emitted, and the round also emits one target token.
             let remaining = max_tokens - self.generated_tokens.len();
             let budget = governor.budget().min(remaining.saturating_sub(1));
             let draft = if budget == 0 {
+                // Paused: look up anyway and let the next tokens decoding
+                // emits say whether proposing would have paid, at the cost of
+                // a host-side hash probe instead of a verify forward.
+                if shadow.is_none() && governor.probes_while_paused() {
+                    index.extend(&self.context);
+                    let proposal = index.find(&self.context, &shadow_config);
+                    if proposal.len() >= SHADOW_CONFIRM {
+                        shadow = Some(ShadowProbe {
+                            start: self.context.len(),
+                            proposal,
+                        });
+                    }
+                }
                 Vec::new()
             } else {
                 index.extend(&self.context);

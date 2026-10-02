@@ -414,6 +414,43 @@ pub(crate) struct PromptLookupOptions {
     /// proposals while they stop landing (for A/B measurement)
     #[arg(long, requires = "prompt_lookup")]
     pub(crate) prompt_lookup_no_adaptive: bool,
+
+    /// How proposals are shortened and resumed: `gated` (narrow or full
+    /// blocks, resume only after a looked-up proposal comes true unverified;
+    /// tuned on CUDA), `graded` (block follows recent acceptance, probe again
+    /// after a short pause; tuned on Apple Silicon), or `auto` (`gated` on
+    /// CUDA builds, `graded` otherwise)
+    #[arg(
+        long,
+        value_enum,
+        requires = "prompt_lookup",
+        default_value_t = PromptLookupPolicyArg::Auto,
+        value_name = "POLICY"
+    )]
+    pub(crate) prompt_lookup_policy: PromptLookupPolicyArg,
+}
+
+/// `--prompt-lookup-policy` values; see [`mlxcel::DraftPolicy`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum PromptLookupPolicyArg {
+    /// The build's default: `gated` on CUDA, `graded` elsewhere.
+    #[default]
+    Auto,
+    /// Block follows recent acceptance; probe again after a short pause.
+    Graded,
+    /// Narrow or full blocks; resume only after an unverified proposal came
+    /// true.
+    Gated,
+}
+
+impl PromptLookupPolicyArg {
+    fn resolve(self) -> mlxcel::DraftPolicy {
+        match self {
+            Self::Auto => mlxcel::DraftPolicy::default_for_backend(),
+            Self::Graded => mlxcel::DraftPolicy::Graded,
+            Self::Gated => mlxcel::DraftPolicy::Gated,
+        }
+    }
 }
 
 impl Default for PromptLookupOptions {
@@ -425,6 +462,7 @@ impl Default for PromptLookupOptions {
             prompt_lookup_ngram_min: config.ngram_min,
             prompt_lookup_max_draft: config.max_draft,
             prompt_lookup_no_adaptive: !config.adaptive,
+            prompt_lookup_policy: PromptLookupPolicyArg::Auto,
         }
     }
 }
@@ -436,6 +474,7 @@ impl PromptLookupOptions {
             ngram_min: self.prompt_lookup_ngram_min,
             max_draft: self.prompt_lookup_max_draft,
             adaptive: !self.prompt_lookup_no_adaptive,
+            policy: self.prompt_lookup_policy.resolve(),
         }
     }
 }

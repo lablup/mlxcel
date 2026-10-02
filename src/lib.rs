@@ -80,7 +80,7 @@ pub use mlxcel_core::generate::{
 };
 pub use mlxcel_core::speculative::SpeculativeGenerator;
 pub use mlxcel_core::speculative::prompt_lookup::{
-    PromptLookupConfig, PromptLookupGenerator, prompt_lookup_unsupported_reason,
+    DraftPolicy, PromptLookupConfig, PromptLookupGenerator, prompt_lookup_unsupported_reason,
     supports_prompt_lookup,
 };
 #[cfg(feature = "xla-diagnostics")]
