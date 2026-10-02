@@ -47,6 +47,14 @@
 //!      bucket that naturally ages out. Documented, not silently masked.
 //!    * `<think>` block stripping across turns — invalidated by the
 //!      `preserve_thinking=true` default.
+//!    * Templates that rewrite an earlier turn depending on the reply's
+//!      reasoning (AI21 Jamba-Reasoning keeps its thinking instruction on an
+//!      earlier user turn only when the following assistant message carries
+//!      `reasoning_content`, issue #2089). An echoed trace is forwarded under
+//!      both `reasoning` and `reasoning_content`, so such a turn re-renders
+//!      exactly as it was generated. A client that echoes only `content`
+//!      still gets the rewritten (shorter) turn; that is the template's own
+//!      rule and the follow-up misses the cache by design.
 //!    * Tool-schema hashing: [`super::prompt_cache::key::tools_digest`] is
 //!      order-preserving, so reordering tools invalidates the cache. This
 //!      is intentional: HuggingFace templates iterate tools in order and
@@ -1871,12 +1879,25 @@ fn build_raw_json_messages_with_thinking(
             //   carries an inline `<think>` block. Forwarding it on top of an
             //   inline block would double-inject the same reasoning into
             //   templates that render both channels.
+            //
+            // The value goes out under both spellings the wire accepts (issue
+            // #2089). The wire layer folds `reasoning` and `reasoning_content`
+            // into one field, but a template reads one of them: Gemma 4 reads
+            // `reasoning`, while Qwen3-style and AI21 Jamba-Reasoning templates
+            // read `message.reasoning_content`. Emitting only `reasoning` hid
+            // an echoed trace from the second group, and Jamba's template keys
+            // the thinking instruction on an earlier user turn to that field,
+            // so the turn re-rendered shorter than it had been generated and
+            // every follow-up missed the prompt cache. Templates that accept
+            // both read them as alternatives (`reasoning or
+            // reasoning_content`), so this never renders the trace twice.
             if !stripped
                 && let Some(reasoning) = m.reasoning.as_ref()
                 && !reasoning.is_empty()
                 && !raw_content.contains("<think>")
             {
                 msg["reasoning"] = serde_json::Value::String(reasoning.clone());
+                msg["reasoning_content"] = serde_json::Value::String(reasoning.clone());
             }
 
             msg
@@ -2113,3 +2134,7 @@ fn build_chat_messages_with_thinking(
 #[cfg(test)]
 #[path = "chat_request_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "chat_request_reasoning_content_tests.rs"]
+mod reasoning_content_tests;

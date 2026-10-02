@@ -524,6 +524,12 @@ answers.
 
 The scratchpad is no longer dropped: Chat Completions surfaces it as `reasoning_content` and, by default, an identical OpenRouter-compatible `reasoning` alias on both streaming deltas and non-streaming assistant messages. Both fields are omitted when the model produces no reasoning. Set `--reasoning-alias-field none` (or `MLXCEL_REASONING_ALIAS_FIELD=none`) to retain only `reasoning_content` when response bytes matter. This applies to every thinking family, including Qwen-style `<think>` models. To turn thinking off rather than only suppress its alias, pass `chat_template_kwargs={"enable_thinking": false}` per request, or set the server default via `--chat-template-kwargs` or `LLAMA_ARG_CHAT_TEMPLATE_KWARGS`. A per-request value always wins over the server default.
 
+#### AI21 Jamba-Reasoning
+
+`AI21-Jamba-Reasoning-3B` (model type `jamba`) always primes `<think>` in its chat template, so every reply starts in `reasoning_content`. The answer reaches `content` once the model writes `</think>`; a `max_tokens` budget that ends the decode first returns an empty `content` with `finish_reason` of `length`, as for the other primed-thinking families. Short factual answers measured 150 to 450 completion tokens at temperature 0 on this checkpoint, so set `max_tokens` to at least 1024.
+
+For multi-turn chat, echo each assistant turn's `reasoning_content` (or `reasoning`) back with its `content`. The template keeps its thinking instruction on an earlier user turn only when the reply that follows carries `reasoning_content`, and the server forwards an echoed trace under both field names, so the turn re-renders as it was generated and the follow-up reuses the prompt cache. A client that echoes only `content` gets the earlier user turn rendered without the instruction, which is the template's own rule, and that follow-up re-prefills from the start.
+
 ### CLI reasoning display (`--show-reasoning`)
 
 `mlxcel generate` and `mlxcel run` decode with special tokens intact, so a
