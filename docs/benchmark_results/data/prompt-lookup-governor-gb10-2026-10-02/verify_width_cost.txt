@@ -1,0 +1,49 @@
+# examples/verify_width_cost on GB10, release build, 2026-10-02 16:40 KST, load at start: 1.29 2.66 3.91
+## qwen3-1.7b-4bit
+pipelined step: 5.174 ms
+sync width  1: 6.343 ms = 1.23 pipelined steps
+sync width  2: 7.112 ms = 1.37 pipelined steps
+sync width  3: 9.085 ms = 1.76 pipelined steps
+sync width  4: 12.546 ms = 2.43 pipelined steps
+sync width  5: 15.731 ms = 3.04 pipelined steps
+sync width  6: 17.966 ms = 3.47 pipelined steps
+sync width  7: 19.875 ms = 3.84 pipelined steps
+sync width  8: 20.250 ms = 3.91 pipelined steps
+sync width  9: 20.143 ms = 3.89 pipelined steps
+sync width 10: 20.814 ms = 4.02 pipelined steps
+## qwen3-4b-4bit
+pipelined step: 11.566 ms
+sync width  1: 12.842 ms = 1.11 pipelined steps
+sync width  2: 14.505 ms = 1.25 pipelined steps
+sync width  3: 18.626 ms = 1.61 pipelined steps
+sync width  4: 25.173 ms = 2.18 pipelined steps
+sync width  5: 34.199 ms = 2.96 pipelined steps
+sync width  6: 38.732 ms = 3.35 pipelined steps
+sync width  7: 44.027 ms = 3.81 pipelined steps
+sync width  8: 45.642 ms = 3.95 pipelined steps
+sync width  9: 45.773 ms = 3.96 pipelined steps
+sync width 10: 46.305 ms = 4.00 pipelined steps
+## qwen3-8b-4bit
+pipelined step: 18.998 ms
+sync width  1: 20.397 ms = 1.07 pipelined steps
+sync width  2: 21.941 ms = 1.15 pipelined steps
+sync width  3: 30.278 ms = 1.59 pipelined steps
+sync width  4: 39.829 ms = 2.10 pipelined steps
+sync width  5: 54.370 ms = 2.86 pipelined steps
+sync width  6: 64.075 ms = 3.37 pipelined steps
+sync width  7: 73.161 ms = 3.85 pipelined steps
+sync width  8: 62.687 ms = 3.30 pipelined steps
+sync width  9: 62.338 ms = 3.28 pipelined steps
+sync width 10: 62.267 ms = 3.28 pipelined steps
+## meta-llama-3.1-8b-instruct-4bit
+pipelined step: 18.773 ms
+sync width  1: 20.311 ms = 1.08 pipelined steps
+sync width  2: 21.823 ms = 1.16 pipelined steps
+sync width  3: 30.139 ms = 1.61 pipelined steps
+sync width  4: 39.042 ms = 2.08 pipelined steps
+sync width  5: 52.522 ms = 2.80 pipelined steps
+sync width  6: 60.868 ms = 3.24 pipelined steps
+sync width  7: 69.254 ms = 3.69 pipelined steps
+sync width  8: 55.426 ms = 2.95 pipelined steps
+sync width  9: 55.387 ms = 2.95 pipelined steps
+sync width 10: 55.712 ms = 2.97 pipelined steps

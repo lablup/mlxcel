@@ -1,0 +1,9 @@
+Summarize these meeting notes as a short bulleted list. Reuse the wording of the notes where you can.
+
+Meeting notes, platform team weekly sync:
+- The staging cluster migration to the new node pool finished on Tuesday; two services still pin the old image tag and need a redeploy before Friday.
+- Latency on the search endpoint regressed by about 30 percent after the cache change; Daniel will roll back the cache change and open a ticket to profile the cold path.
+- The on-call rotation for next month is published; Chloe asked everyone to confirm their shifts by Wednesday.
+- Budget review: the GPU reservation is under-used at night, so we will try scheduling batch evaluation jobs between midnight and six in the morning.
+- Hiring: two onsite interviews for the infrastructure engineer role are scheduled for next week, and Brian will prepare the system design question.
+- Action items: redeploy the two pinned services, roll back the cache change, confirm on-call shifts, draft the night batch schedule, prepare the interview question.

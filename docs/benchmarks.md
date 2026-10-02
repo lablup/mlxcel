@@ -149,6 +149,14 @@ BENCH_MEM_OVERHEAD_FACTOR=1.209 ./scripts/bench_decode.sh all --cooldown 30 --bi
 # transcribe it into benchmarks/{backend}_{hw}_spec_{date}.csv.
 ./target/release/speculative_bench --sweep --max-tokens 128
 
+# Prompt lookup (`generate --prompt-lookup`): plain decoding against both
+# drafting policies, arms interleaved per repetition, plus the verify-width
+# cost the policies are built on. Method and GB10 results:
+# docs/benchmark_results/prompt-lookup-governor-gb10-2026-10-02.md.
+CASES=qwen3-8b-4bit:edit_json:400,qwen3-8b-4bit:story:800 REPS=3 BENCH_OUT=out-ab \
+    python3 docs/benchmark_results/data/prompt-lookup-governor-gb10-2026-10-02/harness/ab.py
+cargo run --release --features cuda --example verify_width_cost -- models/mlx/qwen3-8b-4bit
+
 # Batched serving ladder, against a server started with
 # --parallel 4 --max-batch-prefill 4. Writes no CSV; transcribe into
 # benchmarks/{backend}_{hw}_batch_{date}.csv.

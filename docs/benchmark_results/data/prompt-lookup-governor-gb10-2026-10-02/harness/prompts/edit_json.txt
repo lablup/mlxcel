@@ -1,0 +1,9 @@
+Add a field "active": true to every object in this JSON array, right after the "email" field. Reply with the complete updated JSON array only, no explanation.
+
+[
+  {"id": 101, "name": "Alice Kim", "email": "alice.kim@example.com", "role": "engineer", "team": "platform", "joined": "2021-03-14"},
+  {"id": 102, "name": "Brian Lee", "email": "brian.lee@example.com", "role": "designer", "team": "product", "joined": "2022-07-01"},
+  {"id": 103, "name": "Chloe Park", "email": "chloe.park@example.com", "role": "manager", "team": "platform", "joined": "2019-11-20"},
+  {"id": 104, "name": "Daniel Choi", "email": "daniel.choi@example.com", "role": "engineer", "team": "infra", "joined": "2023-01-09"},
+  {"id": 105, "name": "Eunji Han", "email": "eunji.han@example.com", "role": "analyst", "team": "data", "joined": "2020-05-27"}
+]

@@ -1,0 +1,27 @@
+Rename the variable `total` to `running_sum` everywhere in this Python function. Reply with the complete updated function only, no explanation.
+
+```python
+def summarize_orders(orders, tax_rate=0.08, discount_threshold=100.0):
+    total = 0.0
+    count = 0
+    skipped = []
+    for order in orders:
+        if order.get("status") != "paid":
+            skipped.append(order["id"])
+            continue
+        amount = float(order["amount"])
+        if amount > discount_threshold:
+            amount *= 0.95
+        total += amount
+        count += 1
+    tax = total * tax_rate
+    total_with_tax = total + tax
+    average = total / count if count else 0.0
+    return {
+        "total": round(total, 2),
+        "tax": round(tax, 2),
+        "total_with_tax": round(total_with_tax, 2),
+        "average": round(average, 2),
+        "skipped": skipped,
+    }
+```

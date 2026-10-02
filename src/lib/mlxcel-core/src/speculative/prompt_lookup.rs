@@ -172,17 +172,21 @@ impl Default for PromptLookupConfig {
 /// that lands nothing costs against a plain step. On an M4 Pro a wide block
 /// is cheap, so [`Self::Graded`] grades the block with the recent acceptance
 /// and probes again after a short pause. On GB10 (CUDA, affine 4-bit, MLX pin
-/// `81ba1c6a`) a synchronous verify forward measured, in pipelined one-token
-/// steps for Qwen3-1.7B / Qwen3-8B: width 2 at 1.35 / 1.14, width 3 at
-/// 1.62 / 1.41, width 4 at 2.26 / 1.85, widths 5 to 7 rising to 3.59 / 3.28,
-/// and width 8 and up flat at 3.34 / 2.51 (`examples/verify_width_cost.rs`).
+/// `81ba1c6a`, release build) a synchronous verify forward measured, in
+/// pipelined one-token steps for Qwen3-1.7B / Qwen3-8B: width 2 at
+/// 1.37 / 1.15, width 3 at 1.76 / 1.59, width 4 at 2.43 / 2.10, width 7 at
+/// 3.84 / 3.85, and width 8 and up at 3.91 / 3.30
+/// (`examples/verify_width_cost.rs`; all four benchmarked models in
+/// `docs/benchmark_results/data/prompt-lookup-governor-gb10-2026-10-02/`).
 /// Below 8 rows the affine path runs `qmv`'s multirow kernel, instantiated at
 /// 2, 4 and 8 accumulator rows, so 5 to 7 rows pay for the 8-row
-/// instantiation; from 8 rows it switches to `qmm_sm80`, which is cheaper than
-/// that. A miss also drains the pipeline. So [`Self::Gated`] budgets only a
-/// narrow or a full block (a lookup near the end of the context, or the
-/// `max_tokens` limit, can still return fewer tokens) and spends no verify
-/// forward to find out whether a copy has resumed.
+/// instantiation; from 8 rows it switches to `qmm_sm80`. A block between
+/// narrow and full therefore buys a few more proposals for close to a full
+/// block's price (on the 8B models, more than a full block's), and a miss
+/// also drains the pipeline. So [`Self::Gated`] budgets only a narrow or a
+/// full block (a lookup near the end of the context, or the `max_tokens`
+/// limit, can still return fewer tokens) and spends no verify forward to find
+/// out whether a copy has resumed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DraftPolicy {
