@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{DecodeStorageBackend, ReasoningAliasField, ServerConfig};
+use super::{
+    DEFAULT_KV_ADMISSION_WATERMARK, DecodeStorageBackend, ReasoningAliasField, ServerConfig,
+    parse_kv_admission_watermark,
+};
 use crate::memory_estimate::PagedBudgetDirective;
 
 #[test]
@@ -73,4 +76,19 @@ fn server_config_default_matches_llama_server_compatibility_defaults() {
     // Serving-throughput default guard: `auto` paged KV budget pairs with the
     // batched-decode default so admission sheds load instead of OOMing (#628).
     assert_eq!(config.kv_cache_budget, Some(PagedBudgetDirective::Auto));
+    assert_eq!(
+        config.kv_admission_watermark,
+        DEFAULT_KV_ADMISSION_WATERMARK
+    );
+}
+
+#[test]
+fn kv_admission_watermark_parser_accepts_fractions_up_to_half() {
+    assert_eq!(parse_kv_admission_watermark("0"), Ok(0.0));
+    assert_eq!(parse_kv_admission_watermark(" 0.1 "), Ok(0.1));
+    assert_eq!(parse_kv_admission_watermark("0.5"), Ok(0.5));
+    assert!(parse_kv_admission_watermark("0.6").is_err());
+    assert!(parse_kv_admission_watermark("-0.1").is_err());
+    assert!(parse_kv_admission_watermark("NaN").is_err());
+    assert!(parse_kv_admission_watermark("ten").is_err());
 }

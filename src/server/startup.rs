@@ -565,6 +565,10 @@ pub struct ServerStartupConfig {
     /// semantics. `None` (the default) keeps the pool unbounded.
     pub kv_cache_budget: Option<crate::memory_estimate::PagedBudgetDirective>,
 
+    /// Paged KV admission watermark (`--kv-admission-watermark`, issue
+    /// #2088). `None` keeps [`crate::server::DEFAULT_KV_ADMISSION_WATERMARK`].
+    pub kv_admission_watermark: Option<f64>,
+
     /// maximum number of responses kept in the
     /// [`crate::server::responses_store::ResponsesStore`]. `0` disables
     /// response persistence entirely, in which case `GET /v1/responses/:id`
@@ -812,6 +816,7 @@ impl Default for ServerStartupConfig {
             // pairs with the batched-decode default. Disable with
             // `--kv-cache-budget none`.
             kv_cache_budget: Some(crate::memory_estimate::PagedBudgetDirective::Auto),
+            kv_admission_watermark: None,
             responses_store_max_entries: 1024,
             responses_store_max_bytes: super::responses_store::DEFAULT_RESPONSES_STORE_MAX_BYTES,
             responses_store_ttl_secs: 3600,
@@ -1764,6 +1769,12 @@ pub(super) fn build_server_config(
         // forward the paged KV block-budget directive verbatim; the worker
         // resolves it to a concrete block count once the model is loaded.
         kv_cache_budget: startup.kv_cache_budget,
+        // issue #2088: resolve the admission watermark to its default here.
+        kv_admission_watermark: crate::server::clamp_kv_admission_watermark(
+            startup
+                .kv_admission_watermark
+                .unwrap_or(crate::server::DEFAULT_KV_ADMISSION_WATERMARK),
+        ),
         // forward the experimental VLM prefix-cache toggle (#124 step c).
         enable_vlm_prefix_cache: startup.enable_vlm_prefix_cache,
         // forward the validated CORS allow-list (#244); `None` keeps permissive.

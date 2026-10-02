@@ -81,3 +81,21 @@ fn shared_partial_tail_counts_the_copy_on_write_fork() {
     pool.retain_block(aligned.layers[0].block_ids[1]).unwrap();
     assert_eq!(pool.blocks_to_append(&aligned, 1), 2);
 }
+
+#[test]
+fn reaching_a_prompt_length_charges_only_the_suffix() {
+    // Issue #2088: a sequence that adopted a cached prefix of 9 tokens (3
+    // blocks per layer, the last one partial) holds those blocks already, so
+    // prefilling a 13-token prompt mints one block per layer, not the 4 per
+    // layer the whole prompt would need.
+    let layout = layout();
+    let mut pool = PagedBlockPool::new(layout.clone());
+    let state = state_with_len(&mut pool, &layout, 9);
+    assert_eq!(pool.blocks_to_reach(&state, 13), 2);
+    assert_eq!(pool.blocks_to_reach(&state, 12), 0);
+    assert_eq!(pool.blocks_to_reach(&state, 9), 0);
+    assert_eq!(pool.blocks_to_reach(&state, 4), 0, "shorter than held");
+    // A fresh sequence is charged the whole prompt.
+    let fresh = PagedSequenceState::new(&layout);
+    assert_eq!(pool.blocks_to_reach(&fresh, 13), 8);
+}

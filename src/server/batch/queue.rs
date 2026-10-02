@@ -23,6 +23,8 @@
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 
+use mlxcel_core::cache::SequenceId;
+
 use super::sequence::{RequestPriority, SequenceInfo};
 
 /// Default maximum queue depth when no explicit limit is given.
@@ -224,6 +226,41 @@ impl PrefillQueue {
     /// Maximum number of entries this queue will hold (across all lanes).
     pub fn max_size(&self) -> usize {
         self.max_size
+    }
+
+    /// Id of the first queued sequence matching `predicate`, scanning from the
+    /// lowest-priority lane's newest entry toward the highest-priority lane's
+    /// oldest, so the request served last is found first (issue #2088).
+    pub fn find_lowest_first<F>(&self, mut predicate: F) -> Option<SequenceId>
+    where
+        F: FnMut(&SequenceInfo) -> bool,
+    {
+        self.low
+            .iter()
+            .rev()
+            .chain(self.normal.iter().rev())
+            .chain(self.high.iter().rev())
+            .find(|seq| predicate(seq))
+            .map(|seq| seq.seq_id)
+    }
+
+    /// Mutable access to the queued sequence `id`, if it is queued.
+    pub fn get_mut(&mut self, id: SequenceId) -> Option<&mut SequenceInfo> {
+        self.high
+            .iter_mut()
+            .chain(self.normal.iter_mut())
+            .chain(self.low.iter_mut())
+            .find(|seq| seq.seq_id == id)
+    }
+
+    /// Remove and return the queued sequence `id`, if it is queued.
+    pub fn remove(&mut self, id: SequenceId) -> Option<SequenceInfo> {
+        for lane in [&mut self.high, &mut self.normal, &mut self.low] {
+            if let Some(pos) = lane.iter().position(|seq| seq.seq_id == id) {
+                return lane.remove(pos);
+            }
+        }
+        None
     }
 
     /// Remove and return all queued sequences whose cancellation flag is set.

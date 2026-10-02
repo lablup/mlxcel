@@ -143,6 +143,7 @@ pub const CLASSIFIED_SERVER_CONFIG_FIELDS: &[&str] = &[
     "context_shift",
     "n_keep",
     "kv_cache_budget",
+    "kv_admission_watermark",
     "enable_vlm_prefix_cache",
     "cors_policy",
     "serving_mode",
@@ -512,6 +513,7 @@ fn read_only_reason(field: &str) -> &'static str {
         | "context_shift"
         | "n_keep"
         | "kv_cache_budget"
+        | "kv_admission_watermark"
         | "enable_vlm_prefix_cache" => SCHEDULER_REASON,
         // b10621 `--sleep-idle-seconds` (#1440): the serving worker reads the
         // window when it builds its scheduler, so changing it live would only
@@ -648,6 +650,7 @@ fn read_only_value(config: &ServerConfig, field: &str) -> Value {
         "context_shift" => json!(config.context_shift),
         "n_keep" => json!(config.n_keep),
         "kv_cache_budget" => debug(&config.kv_cache_budget),
+        "kv_admission_watermark" => json!(config.kv_admission_watermark),
         "enable_vlm_prefix_cache" => json!(config.enable_vlm_prefix_cache),
         "cors_policy" => debug(&config.cors_policy),
         "serving_mode" => debug(&config.serving_mode),
@@ -733,7 +736,8 @@ fn read_only_kind(field: &str) -> KnobKind {
         | "default_dynatemp_range"
         | "default_dynatemp_exponent"
         | "default_adaptive_target"
-        | "default_adaptive_decay" => KnobKind::Float,
+        | "default_adaptive_decay"
+        | "kv_admission_watermark" => KnobKind::Float,
         "api_keys" | "lora_adapters" | "lora_runtime" => KnobKind::Object,
         "reasoning_budget_message"
         | "model_alias"

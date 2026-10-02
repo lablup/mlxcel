@@ -62,7 +62,8 @@ use crate::models::gemma4_mtp_target::{
 use crate::server::ServerGenerateOptions;
 use crate::server::batch::observability::{BatchObservability, apc_trace_enabled};
 use crate::server::config::{
-    DecodeStorageBackend, PreemptionPolicy, PromptCacheRequestContext, ReasoningBudgetOverride,
+    DEFAULT_KV_ADMISSION_WATERMARK, DecodeStorageBackend, PreemptionPolicy,
+    PromptCacheRequestContext, ReasoningBudgetOverride, clamp_kv_admission_watermark,
 };
 use crate::server::model_provider::model_worker::{
     StreamingDecodeState, build_generation_result_with_cache, merge_config_stop_tokens,
@@ -396,6 +397,10 @@ pub struct BatchScheduler {
     /// step with the arbitration it feeds. Nothing else in the scheduler needs
     /// to remember to reset it.
     decode_ticks_since_prefill_grant: u32,
+    /// Fraction of the paged KV block budget a prefill admission leaves free
+    /// for the running rows' decode growth while a decode batch is live
+    /// (issue #2088, `--kv-admission-watermark`). 0 disables it.
+    paged_admission_watermark: f64,
 
     // -- Shutdown flag --
     shutdown_requested: bool,
@@ -966,6 +971,7 @@ fn validate_dense_detached_kv_modes_against_table(
 }
 
 mod admission;
+mod admission_watermark;
 mod block_reclaim;
 mod config;
 mod decode_tick;
@@ -975,6 +981,7 @@ mod mtp_dispatch;
 mod paged_layout;
 mod prefill;
 mod prompt_cache;
+mod queued_adoption;
 mod run_loop;
 mod shared_budget;
 mod speculative_finalize;

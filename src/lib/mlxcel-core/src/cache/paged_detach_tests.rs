@@ -345,6 +345,74 @@ fn free_block_budget_rises_when_blocks_are_freed() {
     );
 }
 
+/// Two layers whose free lists diverge (issue #2088): sequence `a` writes 2
+/// blocks on layer 0 only and is released, sequence `b` keeps 2 live blocks
+/// on layer 1. Layer 0 then owns 2 free blocks and layer 1 owns none.
+fn diverged_free_lists(budget: usize) -> (PagedBlockPool, PagedKvLayout) {
+    let layout = PagedKvLayout::uniform(2, 4, 128).unwrap();
+    let mut pool = PagedBlockPool::new(layout.clone());
+    pool.set_block_budget(Some(budget));
+    let mut a = PagedSequenceState::new(&layout);
+    pool.append_tokens(&mut a, 0, 8).unwrap();
+    let mut b = PagedSequenceState::new(&layout);
+    pool.append_tokens(&mut b, 1, 8).unwrap();
+    pool.release_sequence(&mut a).unwrap();
+    assert_eq!(pool.allocated_block_count(), 4);
+    assert_eq!(pool.live_block_count(), 2);
+    (pool, layout)
+}
+
+#[test]
+fn free_block_budget_counts_per_layer_free_lists() {
+    // Budget 4 is fully minted, so layer 1 can neither reuse a free block (all
+    // free ones belong to layer 0) nor mint one. The pool-wide `budget - live`
+    // figure is 2 here, which made admission and decode reservation believe a
+    // layer-1 write would succeed; the per-layer figure reports no room.
+    let (mut pool, layout) = diverged_free_lists(4);
+    let mut fresh = PagedSequenceState::new(&layout);
+    let err = pool.append_tokens(&mut fresh, 1, 1).unwrap_err();
+    assert!(err.contains("budget exhausted"), "got: {err}");
+    assert_eq!(
+        pool.free_block_budget(),
+        Some(0),
+        "no uniform per-layer step fits while layer 1 cannot acquire"
+    );
+}
+
+#[test]
+fn free_block_budget_on_diverged_free_lists_is_acquirable() {
+    // Budget 6 leaves 2 blocks of mint headroom: layer 0 reuses its 2 free
+    // blocks and layer 1 mints 2, so 2 blocks per layer (4 total) are
+    // acquirable. The figure must match exactly what the pool hands out.
+    let (mut pool, layout) = diverged_free_lists(6);
+    assert_eq!(pool.free_block_budget(), Some(4));
+    let mut fresh = PagedSequenceState::new(&layout);
+    for layer in 0..2 {
+        pool.append_tokens(&mut fresh, layer, 8)
+            .expect("the reported blocks are acquirable on every layer");
+    }
+    assert_eq!(pool.free_block_budget(), Some(0));
+    assert!(pool.append_tokens(&mut fresh, 1, 1).is_err());
+}
+
+#[test]
+fn free_block_budget_on_uniform_free_lists_matches_budget_minus_live() {
+    // Uniform layers: the per-layer figure equals the historical
+    // `budget - live` whenever that is a multiple of the layer count.
+    let layout = PagedKvLayout::uniform(2, 4, 128).unwrap();
+    let mut pool = PagedBlockPool::new(layout.clone());
+    pool.set_block_budget(Some(10));
+    let mut a = PagedSequenceState::new(&layout);
+    let mut b = PagedSequenceState::new(&layout);
+    for layer in 0..2 {
+        pool.append_tokens(&mut a, layer, 8).unwrap();
+        pool.append_tokens(&mut b, layer, 4).unwrap();
+    }
+    pool.release_sequence(&mut a).unwrap();
+    assert_eq!(pool.live_block_count(), 2);
+    assert_eq!(pool.free_block_budget(), Some(8));
+}
+
 #[test]
 fn cache_pool_budget_set_before_pool_creation_applies_on_creation() {
     // The scheduler may set the budget before the first paged allocation lazily

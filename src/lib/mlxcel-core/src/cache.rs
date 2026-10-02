@@ -7008,8 +7008,9 @@ impl CachePool {
         self.paged_slab_blocks
     }
 
-    /// Blocks still **acquirable** before the paged budget is hit
-    /// (`budget − live`), or `None` when unbounded / no paged pool. `Some(0)`
+    /// Blocks still **acquirable** before the paged budget is hit, counted
+    /// per layer (see [`PagedBlockPool::free_block_budget`]), or `None` when
+    /// unbounded / no paged pool. `Some(0)`
     /// means every budgeted block is in use; the admission gate must reclaim
     /// (evict cold prefixes, then preempt) or defer. Eviction raises this even
     /// though allocated rows are retained, because freed blocks are reusable.
@@ -7031,6 +7032,18 @@ impl CachePool {
             return 0;
         };
         pool.borrow().blocks_to_append(&state.borrow(), token_count)
+    }
+
+    /// Pool blocks a prefill growing every layer of sequence `id` to
+    /// `total_len` positions would acquire (see
+    /// [`PagedBlockPool::blocks_to_reach`]). A sequence that adopted a cached
+    /// prefix is charged only for its suffix. `None` when `id` has no paged
+    /// state or no paged pool exists, so callers can fall back to a
+    /// whole-prompt estimate (issue #2088).
+    pub fn paged_blocks_to_reach(&self, id: SequenceId, total_len: usize) -> Option<usize> {
+        let pool = self.paged_pool.as_ref()?;
+        let state = self.active.get(&id).and_then(|seq| seq.paged.as_ref())?;
+        Some(pool.borrow().blocks_to_reach(&state.borrow(), total_len))
     }
 
     /// Read-only access to the underlying [`PagedBlockPool`].

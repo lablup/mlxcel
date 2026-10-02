@@ -1794,6 +1794,25 @@ pub(crate) struct ServeArgs {
     )]
     kv_cache_budget: Option<mlxcel::memory_estimate::PagedBudgetDirective>,
 
+    /// Fraction of the paged KV block budget a prefill admission keeps free
+    /// for running rows to keep decoding (issue #2088), in `0.0..=0.5`.
+    ///
+    /// Under a tight `--kv-cache-budget`, admitting a request into exactly the
+    /// free blocks leaves the decoding rows no room to grow, so the next decode
+    /// ticks preempt them and they re-prefill from scratch. With a watermark,
+    /// admission waits (and evicts cold prompt-cache prefixes) until the free
+    /// blocks cover the request plus this share of the budget. It applies only
+    /// while rows are decoding, so a request that fits the budget is never
+    /// refused. `0` disables it. Ignored without a block budget. Also reads
+    /// `MLXCEL_KV_ADMISSION_WATERMARK`.
+    #[arg(
+        long = "kv-admission-watermark",
+        env = "MLXCEL_KV_ADMISSION_WATERMARK",
+        value_name = "FRACTION",
+        value_parser = mlxcel::server::parse_kv_admission_watermark
+    )]
+    kv_admission_watermark: Option<f64>,
+
     /// Maximum number of responses persisted by the OpenAI
     /// `/v1/responses` store (in-memory). `0` disables persistence
     /// entirely, in which case `GET /v1/responses/:id` and

@@ -688,12 +688,44 @@ impl BatchScheduler {
         }
     }
 
+    /// Pool blocks `seq`'s prefill will mint (issue #2088). A sequence that
+    /// adopted a cached prefix at enqueue already holds that prefix's blocks,
+    /// and they count as live, so charging the whole prompt counted them twice:
+    /// a request whose adopted prefix exceeded half the budget could never be
+    /// admitted, even into an empty batch. The charge is the suffix measured
+    /// from the sequence's paged state, and at least one block per layer after
+    /// an adoption, because a hit covering the whole prompt re-runs its last
+    /// token into the shared tail block, which forks it. Falls back to the
+    /// whole-prompt estimate for a sequence without paged state. The batched
+    /// window keeps the peek-based estimate: over-charging there only ends the
+    /// window early and routes the head through this gate.
+    pub(super) fn prefill_block_need(&self, seq: &SequenceInfo) -> usize {
+        let estimate = self.estimate_prefill_blocks(seq.prompt_tokens.len());
+        if estimate == 0 {
+            return 0;
+        }
+        let Some(suffix) = self
+            .cache_pool
+            .paged_blocks_to_reach(seq.seq_id, seq.prompt_tokens.len())
+        else {
+            return estimate;
+        };
+        if seq.already_cached_tokens > 0 {
+            suffix.max(self.model.num_layers())
+        } else {
+            suffix
+        }
+    }
+
     /// Paged pool blocks a new prefill may still pin without reclaiming, or
     /// `None` when no block budget is configured. Before the pool is created
-    /// nothing is allocated, so the whole budget is free.
+    /// nothing is allocated, so the whole budget is free. The admission
+    /// watermark (issue #2088) is already taken off, so the single-sequence
+    /// gate and the batched-prefill window charge against the same figure.
     pub(super) fn paged_prefill_room(&self) -> Option<usize> {
         let total = self.cache_pool.paged_block_budget()?;
-        Some(self.available_paged_blocks().unwrap_or(total))
+        let free = self.available_paged_blocks().unwrap_or(total);
+        Some(free.saturating_sub(self.paged_admission_headroom()))
     }
 
     /// Paged block-budget admission gate. Returns `Some(seq)` to proceed with
@@ -706,9 +738,9 @@ impl BatchScheduler {
             Some(t) => t,
             None => return Some(seq),
         };
-        let need = self.estimate_prefill_blocks(seq.prompt_tokens.len());
+        let need = self.prefill_block_need(&seq);
         if need == 0 {
-            return Some(seq); // model does not use the paged pool
+            return Some(seq); // no paged pool, or nothing left to write
         }
         // If it cannot fit the entire budget, reject — deferring forever would
         // wedge the queue behind a request that can never run.
@@ -721,17 +753,16 @@ impl BatchScheduler {
             );
             return None;
         }
-        // Acquirable blocks (budget − live). `None` means the pool is not yet
-        // created (nothing allocated ⇒ the whole budget is free).
-        let free = self.available_paged_blocks().unwrap_or(total);
-        if need <= free {
+        // Acquirable blocks minus the admission watermark (issue #2088).
+        if need <= self.paged_prefill_room().unwrap_or(total) {
             return Some(seq);
         }
         if self.reclaim_paged_blocks(need, seq.priority) {
             return Some(seq);
         }
-        // Still no room — defer to a later tick. Decodes in flight will free
-        // blocks as their sequences finish; this request retries then.
+        // Still no room (or no room beyond the watermark): defer to a later
+        // tick. Decodes in flight free blocks as their sequences finish, and
+        // the watermark lifts once the batch is empty; this request retries.
         if let Err(rejected) = self.prefill_queue.enqueue(seq) {
             self.prompt_cache_seq_ctx.remove(&rejected.seq_id);
             self.release_sequence_caches(rejected.seq_id);

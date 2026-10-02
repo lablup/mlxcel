@@ -215,6 +215,7 @@ fn sample_input() -> ServerStartupInput {
         max_kv_size: 0,
         // paged KV pool block-budget directive (None = unbounded, the default).
         kv_cache_budget: None,
+        kv_admission_watermark: None,
         // experimental VLM prefix-cache toggle off in tests (#124 step c).
         enable_vlm_prefix_cache: false,
         // CORS allow-list unset in tests (#244): permissive default.
