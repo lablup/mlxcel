@@ -121,6 +121,10 @@ pub use cli_input::{
     resolve_n_parallel,
 };
 pub use config::{
+    DEFAULT_KV_ADMISSION_WATERMARK, MAX_KV_ADMISSION_WATERMARK, clamp_kv_admission_watermark,
+    parse_kv_admission_watermark,
+};
+pub use config::{
     DecodeStorageBackend, LiveSettings, PipelineParallelRuntimeConfig, PreemptionPolicy,
     ReasoningAliasField, RemotePipelineStageConfig, ServerConfig, ServerGenerateOptions,
 };

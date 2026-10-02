@@ -782,6 +782,8 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         // clap into a `PagedBudgetDirective` (`Bytes`/`Auto`); resolved to a
         // block count on the worker thread.
         kv_cache_budget: args.kv_cache_budget,
+        // paged KV admission watermark (#2088).
+        kv_admission_watermark: args.kv_admission_watermark,
         // experimental VLM prompt-prefix cache toggle (#124 step c).
         enable_vlm_prefix_cache: args.enable_vlm_prefix_cache,
         // CORS allow-list origins (#244); validated in into_startup_config.

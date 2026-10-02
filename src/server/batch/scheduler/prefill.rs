@@ -1209,6 +1209,20 @@ impl BatchScheduler {
                 (chunk.to_vec(), None)
             };
 
+        // Reserve this chunk's blocks before its forward (issue #2088). A
+        // MixedStep tick has just run a decode step, and nothing else restores
+        // the set-aside once the pool falls below it; a failed acquire inside
+        // the forward is fatal for the worker.
+        if !self.reserve_prefill_chunk_blocks(seq.seq_id, eff_chunk.len()) {
+            let total = self.cache_pool.paged_block_budget().unwrap_or_default();
+            self.abort_sequence(
+                seq,
+                &format!(
+                    "KV cache budget exhausted: no free blocks in the {total}-block KV cache budget to continue the chunked prefill"
+                ),
+            );
+            return false;
+        }
         let eff_len = eff_chunk.len() as i32;
         let input = mlxcel_core::from_slice_i32(&eff_chunk, &[1, eff_len]);
         let logits = {

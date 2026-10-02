@@ -154,6 +154,11 @@ pub(crate) struct WorkerSchedulerConfig {
     /// the scheduler's pool through
     /// [`crate::server::batch::BatchScheduler::with_paged_block_budget`].
     pub kv_cache_budget: Option<crate::memory_estimate::PagedBudgetDirective>,
+    /// paged KV admission watermark (issue #2088, `--kv-admission-watermark`):
+    /// the fraction of the block budget a prefill admission keeps free while
+    /// rows decode. Installed through
+    /// [`crate::server::batch::BatchScheduler::with_paged_admission_watermark`].
+    pub kv_admission_watermark: f64,
     /// experimental VLM prompt-prefix cache toggle (#124 step c,
     /// `--enable-vlm-prefix-cache`).
     ///
@@ -759,6 +764,8 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                 .with_context_retention(sched_config.context_retention)
                 // install the resolved paged KV block budget (epic #116 #122 b3).
                 .with_paged_block_budget(paged_block_budget)
+                // keep decode headroom at admission under that budget (#2088).
+                .with_paged_admission_watermark(sched_config.kv_admission_watermark)
                 // install the resolved paged KV slab size (#899).
                 .with_paged_slab_blocks(paged_slab_blocks)
                 // experimental VLM prompt-prefix cache sharing (#124 step c).

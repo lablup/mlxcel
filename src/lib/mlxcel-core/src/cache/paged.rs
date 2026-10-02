@@ -801,19 +801,61 @@ impl PagedBlockPool {
     }
 
     /// Physical blocks still **acquirable** before the budget is hit, or `None`
-    /// when unbounded. This is `budget − live_block_count`: a fresh
-    /// `acquire_block` succeeds whenever fewer than `budget` blocks are live,
-    /// because it can either reuse a freed (allocated-but-not-live) block or
-    /// mint a new one while `allocated < budget`. Eviction / preemption that
-    /// drops a block's refcount to 0 therefore *raises* this figure even though
-    /// `allocated_block_count` is unchanged (the freed row is retained for
-    /// reuse). The scheduler gates prefill admission on this value and reclaims
-    /// (evict cold prefixes, then preempt) until it covers the sequence's need.
-    /// `Some(0)` means every budgeted block is in use — admission must reclaim
-    /// or defer.
+    /// when unbounded, counted the way the scheduler spends them: the same
+    /// number of blocks on every layer (issue #2088).
+    ///
+    /// A freed block keeps its layer: [`Self::release_block`] pushes it onto
+    /// that layer's free list, and [`Self::acquire_block`] for layer `L` reuses
+    /// only `free_lists[L]` before minting a new block, which the budget caps
+    /// pool-wide. The pool-wide `budget - live` figure therefore over-reports
+    /// as soon as the free lists diverge: with every free block on layer 0 and
+    /// nothing left to mint, a layer-1 acquire fails while `budget - live` is
+    /// positive. Re-tagging a free block to another layer is not an option,
+    /// because pool rows are per-layer slabs and the moved block would need a
+    /// new row on its new layer, so the budget would stop bounding memory.
+    ///
+    /// Every scheduler demand is uniform across layers (an admission charges
+    /// `ceil(len / block_size) * num_layers`, a decode tick sums
+    /// [`Self::blocks_to_append`] over equal-length layers), so this returns
+    /// `n * num_layers` for the largest `n` such that every layer can acquire
+    /// `n` blocks: the free blocks a layer already owns, plus a share of the
+    /// mint headroom `budget - allocated`. With uniform free lists it equals
+    /// `budget - live` rounded down to a multiple of `num_layers`, which
+    /// changes no uniform comparison. Layers that have never minted a block
+    /// (none yet, or a layer the model never writes) are left out of the
+    /// per-layer constraint, and the result never exceeds `budget - live`.
+    ///
+    /// Eviction / preemption that drops a block's refcount to 0 raises this
+    /// figure even though `allocated_block_count` is unchanged (the freed row
+    /// is retained for reuse). The scheduler gates prefill admission and the
+    /// decode reservation on this value and reclaims (evict cold prefixes, then
+    /// preempt) until it covers the need. `Some(0)` means no further uniform
+    /// step fits; admission must reclaim or defer.
     pub fn free_block_budget(&self) -> Option<usize> {
-        self.block_budget
-            .map(|max| max.saturating_sub(self.live_block_count()))
+        let max = self.block_budget?;
+        let num_layers = self.layout.num_layers;
+        let mut minted = vec![false; num_layers];
+        let mut live = 0usize;
+        for record in self.blocks.values() {
+            if let Some(flag) = minted.get_mut(record.layer_idx) {
+                *flag = true;
+            }
+            if record.is_in_use() {
+                live += 1;
+            }
+        }
+        debug_assert_eq!(
+            live + self.free_lists.iter().map(Vec::len).sum::<usize>(),
+            self.blocks.len(),
+            "every refcount-0 block sits on exactly one layer free list"
+        );
+        let pool_wide = max.saturating_sub(live);
+        let free_per_layer: Vec<usize> = (0..num_layers)
+            .filter(|&layer| minted[layer])
+            .map(|layer| self.free_lists[layer].len())
+            .collect();
+        let headroom = max.saturating_sub(self.blocks.len());
+        Some(uniform_acquirable_blocks(&free_per_layer, headroom, num_layers).min(pool_wide))
     }
 
     /// Blocks appending `token_count` tokens to every layer of `state` would
@@ -827,23 +869,38 @@ impl PagedBlockPool {
     /// a decode tick's rows and reclaims budget before the forward runs, since
     /// a failed acquire inside the forward is fatal.
     pub fn blocks_to_append(&self, state: &PagedSequenceState, token_count: usize) -> usize {
+        state
+            .layers
+            .iter()
+            .map(|layer| self.layer_blocks_to_append(layer, token_count))
+            .sum()
+    }
+
+    /// Blocks growing every layer of `state` to `total_len` positions would
+    /// acquire (issue #2088): [`Self::blocks_to_append`] with each layer's own
+    /// remaining count. Prefill admission charges this instead of the whole
+    /// prompt, because a sequence that adopted a cached prefix already holds
+    /// those blocks (they are live) and only mints the suffix.
+    pub fn blocks_to_reach(&self, state: &PagedSequenceState, total_len: usize) -> usize {
+        state
+            .layers
+            .iter()
+            .map(|layer| self.layer_blocks_to_append(layer, total_len.saturating_sub(layer.len)))
+            .sum()
+    }
+
+    fn layer_blocks_to_append(&self, layer: &PagedLayerState, token_count: usize) -> usize {
         if token_count == 0 {
             return 0;
         }
         let block_size = self.layout.block_size.max(1);
-        state
-            .layers
-            .iter()
-            .map(|layer| {
-                let required = (layer.len + token_count).div_ceil(block_size);
-                let fresh = required.saturating_sub(layer.block_ids.len());
-                let cow = layer
-                    .block_ids
-                    .get(layer.len / block_size)
-                    .is_some_and(|&tail| self.refcount(tail) > 1);
-                fresh + usize::from(cow)
-            })
-            .sum()
+        let required = (layer.len + token_count).div_ceil(block_size);
+        let fresh = required.saturating_sub(layer.block_ids.len());
+        let cow = layer
+            .block_ids
+            .get(layer.len / block_size)
+            .is_some_and(|&tail| self.refcount(tail) > 1);
+        fresh + usize::from(cow)
     }
 
     /// Whether the pool's cache mode requires Turbo4 sidecar storage.
@@ -2548,6 +2605,46 @@ impl PagedBlockPool {
         }
         Ok(())
     }
+}
+
+/// Blocks a uniform per-layer demand can acquire (issue #2088): `n *
+/// num_layers` for the largest `n` such that the layers in `free_per_layer`
+/// can each take `n` blocks, using their own free blocks first and minting
+/// the rest from the shared `headroom`. An empty `free_per_layer` (no layer
+/// has minted a block yet) leaves only the headroom as the limit.
+fn uniform_acquirable_blocks(
+    free_per_layer: &[usize],
+    headroom: usize,
+    num_layers: usize,
+) -> usize {
+    if free_per_layer.is_empty() {
+        return headroom;
+    }
+    // Blocks to mint so that every constrained layer holds `n` free blocks.
+    let mint_cost = |n: usize| -> usize {
+        free_per_layer
+            .iter()
+            .map(|&free| n.saturating_sub(free))
+            .fold(0usize, usize::saturating_add)
+    };
+    // `mint_cost(hi + 1) > headroom` because the layer with the most free
+    // blocks alone needs `headroom + 1` mints there.
+    let mut lo = 0usize;
+    let mut hi = free_per_layer
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(0)
+        .saturating_add(headroom);
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        if mint_cost(mid) <= headroom {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    lo.saturating_mul(num_layers)
 }
 
 /// Normalize a write block into the layout-A slot update shape

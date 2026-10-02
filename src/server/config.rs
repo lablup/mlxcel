@@ -29,6 +29,44 @@ use crate::server::prompt_cache::key::MultimodalDigest;
 use mlxcel_core::lang_analyzer::LangBiasConfig;
 use mlxcel_core::sampling::LogprobsConfig;
 
+/// Default `--kv-admission-watermark` (issue #2088): the fraction of the
+/// paged KV block budget a prefill admission keeps free for decode growth
+/// while rows are decoding. The smallest value on the measured grid (0.01 to
+/// 0.15) that lowered preemptions without losing a turn: on GB10 with
+/// meta-llama-3.1-8b-instruct-4bit at a 4444-block budget, three concurrent
+/// 3-turn conversations went from 10 preemptions to 6 in both repeats. See
+/// `docs/CONTINUOUS_BATCHING.md`.
+pub const DEFAULT_KV_ADMISSION_WATERMARK: f64 = 0.01;
+
+/// Largest accepted `--kv-admission-watermark`. Above half the budget the
+/// server would mostly admit one sequence at a time.
+pub const MAX_KV_ADMISSION_WATERMARK: f64 = 0.5;
+
+/// Clamp an admission watermark into `0.0..=MAX_KV_ADMISSION_WATERMARK`; NaN
+/// disables it.
+#[must_use]
+pub fn clamp_kv_admission_watermark(fraction: f64) -> f64 {
+    if fraction.is_nan() {
+        return 0.0;
+    }
+    fraction.clamp(0.0, MAX_KV_ADMISSION_WATERMARK)
+}
+
+/// clap value parser for `--kv-admission-watermark`: a fraction of the block
+/// budget in `0.0..=MAX_KV_ADMISSION_WATERMARK`.
+pub fn parse_kv_admission_watermark(s: &str) -> Result<f64, String> {
+    let value: f64 = s
+        .trim()
+        .parse()
+        .map_err(|_| format!("`{s}` is not a number; expected a fraction such as 0.1"))?;
+    if !(0.0..=MAX_KV_ADMISSION_WATERMARK).contains(&value) {
+        return Err(format!(
+            "`{s}` is out of range; expected a fraction in 0.0..={MAX_KV_ADMISSION_WATERMARK}"
+        ));
+    }
+    Ok(value)
+}
+
 /// Storage backend used by the server batch scheduler for decode-time state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DecodeStorageBackend {
@@ -980,6 +1018,11 @@ pub struct ServerConfig {
     /// [`crate::server::batch::BatchScheduler::with_paged_block_budget`]. Only
     /// meaningful for pool-backed (Fp16, dense-natural-backend) sequences.
     pub kv_cache_budget: Option<crate::memory_estimate::PagedBudgetDirective>,
+    /// Paged KV admission watermark (issue #2088, `--kv-admission-watermark`):
+    /// the fraction of the block budget a prefill admission keeps free for
+    /// the running rows' decode growth while a decode batch is live. `0.0`
+    /// disables it. Inert without a block budget.
+    pub kv_admission_watermark: f64,
     /// `--enable-vlm-prefix-cache` (#124 step c). Default off. When on, the
     /// scheduler permits VLM (image/audio) chat requests to adopt and donate
     /// KV prefixes for multi-turn same-image conversations; text-only and
@@ -1157,6 +1200,7 @@ impl Default for ServerConfig {
             // default with an `auto` paged KV budget so admission sheds load
             // instead of OOMing. Disable with `--kv-cache-budget none`.
             kv_cache_budget: Some(crate::memory_estimate::PagedBudgetDirective::Auto),
+            kv_admission_watermark: DEFAULT_KV_ADMISSION_WATERMARK,
             enable_vlm_prefix_cache: false,
             cors_policy: crate::server::CorsPolicy::default(),
             serving_mode: crate::distributed::disaggregated::ServingMode::Hybrid,

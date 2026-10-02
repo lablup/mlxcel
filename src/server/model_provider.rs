@@ -775,6 +775,8 @@ impl ModelProvider {
                 },
                 // forward the --kv-cache-budget directive to the worker.
                 config.kv_cache_budget,
+                // forward the --kv-admission-watermark fraction (#2088).
+                config.kv_admission_watermark,
                 // experimental VLM prompt-prefix cache toggle (#124 step c).
                 config.enable_vlm_prefix_cache,
                 // disaggregated serving role from `--node-role` (#126 B2).
@@ -1161,6 +1163,7 @@ impl ModelProvider {
             // legacy wrapper: b10621 defaults (shift disabled, keep 0).
             Default::default(),
             kv_cache_budget,
+            crate::server::DEFAULT_KV_ADMISSION_WATERMARK,
             enable_vlm_prefix_cache,
             serving_mode,
             decode_peers,
@@ -1219,6 +1222,7 @@ impl ModelProvider {
         // b10621 context-retention policy at the KV bound (#1472).
         context_retention: crate::server::batch::ContextRetentionPolicy,
         kv_cache_budget: Option<crate::memory_estimate::PagedBudgetDirective>,
+        kv_admission_watermark: f64,
         enable_vlm_prefix_cache: bool,
         serving_mode: crate::distributed::disaggregated::ServingMode,
         decode_peers: Vec<std::net::SocketAddr>,
@@ -1288,6 +1292,7 @@ impl ModelProvider {
             // paged KV pool block-budget directive; resolved to a block count
             // on the worker thread once the model geometry is known.
             kv_cache_budget,
+            kv_admission_watermark,
             // experimental VLM prompt-prefix cache toggle (#124 step c).
             enable_vlm_prefix_cache,
             // disaggregated serving role from `--node-role` (#126 B2). The
@@ -1414,6 +1419,7 @@ impl ModelProvider {
             context_size_total: 0,          // model default in minimal test path
             explicit_max_kv_size: None,     // unset in minimal test path
             kv_cache_budget: None,          // unbounded in minimal test path
+            kv_admission_watermark: 0.0,    // inert without a budget
             enable_vlm_prefix_cache: false, // off in minimal test path
             // minimal test path is single-node.
             serving_mode: crate::distributed::disaggregated::ServingMode::Hybrid,

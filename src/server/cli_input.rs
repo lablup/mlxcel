@@ -541,6 +541,10 @@ pub struct ServerStartupInput {
     /// resolved to a concrete block count on the worker thread.
     pub kv_cache_budget: Option<crate::memory_estimate::PagedBudgetDirective>,
 
+    /// `--kv-admission-watermark` (issue #2088): fraction of the paged block
+    /// budget kept free at admission while rows decode. `None` = the default.
+    pub kv_admission_watermark: Option<f64>,
+
     /// `--enable-vlm-prefix-cache` (#124 step c). Default off. Enables
     /// experimental VLM prompt-prefix cache sharing for multi-turn same-image
     /// conversations; forwarded verbatim to the scheduler.
@@ -1179,6 +1183,7 @@ impl ServerStartupInput {
             // forward the paged KV block-budget directive verbatim (resolved
             // to a block count on the worker thread).
             kv_cache_budget: self.kv_cache_budget,
+            kv_admission_watermark: self.kv_admission_watermark,
             // forward the experimental VLM prefix-cache toggle (#124 step c).
             enable_vlm_prefix_cache: self.enable_vlm_prefix_cache,
             // forward the resolved CORS policy: the b10621 flags, or the

@@ -976,6 +976,27 @@ struct ServerArgs {
     )]
     kv_cache_budget: Option<mlxcel::memory_estimate::PagedBudgetDirective>,
 
+    /// Fraction of the paged KV block budget a prefill admission keeps free
+    /// for running rows to keep decoding (issue #2088), in `0.0..=0.5`.
+    ///
+    /// Under a tight `--kv-cache-budget`, admitting a request into exactly the
+    /// free blocks leaves the decoding rows no room to grow, so the next decode
+    /// ticks preempt them and they re-prefill from scratch. With a watermark,
+    /// admission waits until the free blocks cover the request plus this share
+    /// of the budget, evicting cold prompt-cache prefixes (and, for a
+    /// higher-priority request, preempting strictly lower-priority rows) to
+    /// make that room. It applies only
+    /// while rows are decoding, so a request that fits the budget is never
+    /// refused. `0` disables it. Ignored without a block budget. Defaults to
+    /// 0.01. Also reads `MLXCEL_KV_ADMISSION_WATERMARK`.
+    #[arg(
+        long = "kv-admission-watermark",
+        env = "MLXCEL_KV_ADMISSION_WATERMARK",
+        value_name = "FRACTION",
+        value_parser = mlxcel::server::parse_kv_admission_watermark
+    )]
+    kv_admission_watermark: Option<f64>,
+
     /// Maximum number of responses persisted by the OpenAI
     /// `/v1/responses` store (in-memory). `0` disables persistence
     /// entirely. Also reads `LLAMA_ARG_RESPONSES_STORE_MAX_ENTRIES`.
@@ -2707,6 +2728,8 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         // paged KV pool block-budget directive (#122 b3); clap parses it into
         // a `PagedBudgetDirective`, resolved to a block count on the worker.
         kv_cache_budget: args.kv_cache_budget,
+        // paged KV admission watermark (#2088).
+        kv_admission_watermark: args.kv_admission_watermark,
         // experimental VLM prompt-prefix cache toggle (#124 step c).
         enable_vlm_prefix_cache: args.enable_vlm_prefix_cache,
         // CORS allow-list origins (#244); validated in into_startup_config.

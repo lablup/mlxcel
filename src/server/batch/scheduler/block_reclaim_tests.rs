@@ -28,9 +28,12 @@ use mlxcel_core::cache::{CachePool, KVCache, PagedKvLayout, SequenceId, Sequence
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::{MlxArray, UniquePtr};
 
+use super::super::admission_watermark::{admission_watermark_blocks, admit_with_watermark};
 use super::{
-    PagedBlockReclaimer, RequestPriority, reclaim_blocks, reserve_decode_blocks, take_paged_room,
+    PagedBlockReclaimer, RequestPriority, reclaim_blocks, reserve_chunk_blocks,
+    reserve_decode_blocks, take_paged_room,
 };
+use crate::server::config::clamp_kv_admission_watermark;
 use crate::server::prompt_cache::{
     CacheEntry, DetachedKvSet, PromptCacheConfig, PromptCacheStore,
     key::{MultimodalDigest, PromptCacheKey},
@@ -79,6 +82,10 @@ struct Harness {
     store: Arc<PromptCacheStore>,
     active: Vec<SequenceId>,
     preempted: Vec<SequenceId>,
+    /// Queued requests holding an adopted prefix's blocks, oldest first.
+    queued: Vec<SequenceId>,
+    /// Queued requests whose adopted prefix was dropped.
+    dropped: Vec<SequenceId>,
     /// Blocks set aside for a parked chunked prefill, like
     /// `BatchScheduler::chunked_prefill_reserved_blocks`.
     reserved: usize,
@@ -102,6 +109,8 @@ impl Harness {
             ))),
             active: Vec::new(),
             preempted: Vec::new(),
+            queued: Vec::new(),
+            dropped: Vec::new(),
             reserved: 0,
         }
     }
@@ -152,10 +161,8 @@ impl Harness {
 }
 
 impl PagedBlockReclaimer for Harness {
-    fn free_blocks(&self) -> Option<usize> {
-        self.pool
-            .free_paged_block_budget()
-            .map(|free| free.saturating_sub(self.reserved))
+    fn pool_free_blocks(&self) -> Option<usize> {
+        self.pool.free_paged_block_budget()
     }
 
     fn evict_cold_prefix(&mut self) -> bool {
@@ -165,6 +172,16 @@ impl PagedBlockReclaimer for Harness {
         for paged in self.store.drain_pending_paged_releases() {
             self.pool.release_detached_paged(paged);
         }
+        true
+    }
+
+    fn drop_queued_prefix(&mut self) -> bool {
+        // Newest queued request first, like `PrefillQueue::find_lowest_first`.
+        let Some(id) = self.queued.pop() else {
+            return false;
+        };
+        self.pool.release(id);
+        self.dropped.push(id);
         true
     }
 
@@ -328,7 +345,7 @@ fn admission_floor_zero_may_preempt_every_lower_priority_row() {
     let mut h = Harness::new(4);
     h.decoding(BLOCK);
     h.decoding(BLOCK);
-    let outcome = reclaim_blocks(&mut h, 4, 0, Some(RequestPriority::High));
+    let outcome = reclaim_blocks(&mut h, 4, 0, Some(RequestPriority::High), false);
     assert!(outcome.fits);
     assert_eq!(outcome.preempted, 2);
     assert!(h.active.is_empty());
@@ -339,11 +356,14 @@ fn admission_floor_zero_may_preempt_every_lower_priority_row() {
 struct NoPreempt<'a>(&'a mut Harness);
 
 impl PagedBlockReclaimer for NoPreempt<'_> {
-    fn free_blocks(&self) -> Option<usize> {
-        self.0.free_blocks()
+    fn pool_free_blocks(&self) -> Option<usize> {
+        self.0.pool_free_blocks()
     }
     fn evict_cold_prefix(&mut self) -> bool {
         self.0.evict_cold_prefix()
+    }
+    fn drop_queued_prefix(&mut self) -> bool {
+        self.0.drop_queued_prefix()
     }
     fn preempt_one(&mut self, _below: Option<RequestPriority>) -> bool {
         false
@@ -402,7 +422,7 @@ fn admission_never_preempts_rows_of_equal_priority() {
     let mut h = Harness::new(4);
     h.decoding(BLOCK);
     h.decoding(BLOCK);
-    let outcome = reclaim_blocks(&mut h, 4, 0, Some(RequestPriority::Normal));
+    let outcome = reclaim_blocks(&mut h, 4, 0, Some(RequestPriority::Normal), false);
     assert!(!outcome.fits);
     assert_eq!(outcome.preempted, 0);
     assert_eq!(h.active.len(), 2);
@@ -423,4 +443,214 @@ fn a_row_short_only_by_the_chunked_prefill_reservation_waits_instead_of_failing(
     assert!(reservation.run.is_empty());
     assert!(reservation.shed.is_empty());
     assert_eq!(reservation.deferred, vec![row]);
+}
+
+/// A parked chunked prefill `seq` that has written `written` tokens on every
+/// layer and still has `remaining` to go, with its reservation set aside the
+/// way `BatchScheduler::chunked_prefill_reserved_blocks` does.
+fn park_chunked_prefill(h: &mut Harness, written: usize, remaining: usize) -> SequenceId {
+    let id = h.pool.allocate(&h.model).unwrap();
+    h.append_all_layers(id, written).unwrap();
+    h.reserved = h.pool.paged_blocks_to_append(id, remaining);
+    id
+}
+
+#[test]
+fn mixed_step_decode_then_chunk_share_the_last_blocks() {
+    // MixedStep tick order (issue #2088): decode first, then the chunk. Budget
+    // 6: the decode row holds 2 blocks at a boundary, the parked prefill holds
+    // 2 and needs 2 more, and nothing else is free. The decode row may not take
+    // the chunk's 2 blocks (it waits a tick), and the chunk reservation then
+    // finds them without reclaiming anything.
+    let mut h = Harness::new(6);
+    let row = h.decoding(BLOCK);
+    let chunked = park_chunked_prefill(&mut h, BLOCK, BLOCK);
+    assert_eq!(h.reserved, 2);
+
+    let decode = reserve_decode_blocks(&mut h, &[row], 1);
+    assert_eq!(
+        decode.deferred,
+        vec![row],
+        "decode leaves the chunk's blocks"
+    );
+    assert!(decode.shed.is_empty());
+
+    let need = h.pool.paged_blocks_to_append(chunked, BLOCK);
+    let chunk = reserve_chunk_blocks(&mut h, need);
+    assert!(chunk.fits);
+    assert_eq!((chunk.evicted, chunk.preempted), (0, 0));
+    h.append_all_layers(chunked, BLOCK)
+        .expect("the chunk writes all of its blocks");
+}
+
+#[test]
+fn mixed_step_chunk_reclaims_when_decode_left_the_pool_below_its_reservation() {
+    // Budget 8: the parked prefill holds 2 blocks and needs 2 more, but two
+    // mid-block decode rows hold the other 6 (a row that needs no new block
+    // always runs, so nothing stopped them). The set-aside figure saturates at
+    // 0 and hides the shortfall; without the chunk reservation the chunk's
+    // write would hit "block budget exhausted" inside the forward.
+    let mut h = Harness::new(8);
+    let chunked = park_chunked_prefill(&mut h, BLOCK, BLOCK);
+    let first = h.decoding(BLOCK + 1);
+    let second = h.decoding(BLOCK - 1);
+    assert_eq!(h.pool.free_paged_block_budget(), Some(0));
+    assert_eq!(h.free_blocks(), Some(0));
+
+    let decode = reserve_decode_blocks(&mut h, &[first, second], 1);
+    assert_eq!(
+        decode.run,
+        vec![first, second],
+        "mid-block rows still decode"
+    );
+
+    let need = h.pool.paged_blocks_to_append(chunked, BLOCK);
+    let err = h.pool.append_paged_tokens(chunked, 0, BLOCK).unwrap_err();
+    assert!(err.contains("block budget exhausted"), "{err}");
+
+    let chunk = reserve_chunk_blocks(&mut h, need);
+    assert!(
+        chunk.fits,
+        "preempting a decode row restores the reservation"
+    );
+    assert_eq!(chunk.preempted, 1);
+    assert_eq!(h.preempted, vec![second]);
+    h.append_all_layers(chunked, BLOCK)
+        .expect("the chunk runs instead of being dropped");
+}
+
+#[test]
+fn chunk_reservation_evicts_cold_prefixes_before_preempting() {
+    // Budget 8: decode row (2) + parked prefill (2) + a cached prefix (4) fill
+    // the pool while the prefill still needs 2 blocks. Evicting the prefix is
+    // enough; the decode row keeps running.
+    let mut h = Harness::new(8);
+    let row = h.decoding(BLOCK);
+    let chunked = park_chunked_prefill(&mut h, BLOCK, BLOCK);
+    h.cache_prefix(2 * BLOCK, 1);
+    assert_eq!(h.pool.free_paged_block_budget(), Some(0));
+
+    let need = h.pool.paged_blocks_to_append(chunked, BLOCK);
+    let chunk = reserve_chunk_blocks(&mut h, need);
+    assert!(chunk.fits);
+    assert_eq!((chunk.evicted, chunk.preempted), (1, 0));
+    assert!(h.is_active(row));
+    h.append_all_layers(chunked, BLOCK).unwrap();
+}
+
+#[test]
+fn admission_defers_when_free_blocks_minus_the_watermark_cannot_cover_it() {
+    // Budget 12, one decoding row holding 2 blocks: 10 free. A 4-block
+    // request fits the free blocks, but not with a 7-block watermark kept for
+    // decode growth, and nothing is reclaimable, so admission defers.
+    let mut h = Harness::new(12);
+    h.decoding(BLOCK);
+    assert_eq!(h.free_blocks(), Some(10));
+    assert!(admit_with_watermark(&mut h, 4, 0, RequestPriority::Normal));
+    assert!(!admit_with_watermark(&mut h, 4, 7, RequestPriority::Normal));
+    assert!(
+        h.preempted.is_empty(),
+        "equal-priority rows are never preempted"
+    );
+    assert!(admit_with_watermark(&mut h, 4, 6, RequestPriority::Normal));
+}
+
+#[test]
+fn admission_watermark_evicts_cold_prefixes_to_restore_headroom() {
+    // Budget 12: a decoding row (2) and a cached prefix (4) leave 6 free. A
+    // 4-block request with a 4-block watermark needs 8 free, so the cold
+    // prefix is evicted and the request is admitted.
+    let mut h = Harness::new(12);
+    h.decoding(BLOCK);
+    h.cache_prefix(2 * BLOCK, 1);
+    assert!(admit_with_watermark(&mut h, 4, 4, RequestPriority::Normal));
+    assert_eq!(h.store.len(), 0);
+    assert!(h.preempted.is_empty());
+}
+
+#[test]
+fn admission_watermark_applies_only_while_rows_decode() {
+    assert_eq!(admission_watermark_blocks(4444, 0.1, true), 445);
+    assert_eq!(
+        admission_watermark_blocks(4444, 0.1, false),
+        0,
+        "an empty batch has no decode growth to protect"
+    );
+    assert_eq!(admission_watermark_blocks(4444, 0.0, true), 0);
+    assert_eq!(clamp_kv_admission_watermark(-1.0), 0.0);
+    assert_eq!(clamp_kv_admission_watermark(0.9), 0.5);
+    assert_eq!(clamp_kv_admission_watermark(f64::NAN), 0.0);
+}
+
+/// A queued request that adopted a `tokens`-long prefix whose prompt-cache
+/// entry has since been evicted: its pins are the blocks' only owner.
+fn queued_adoption(h: &mut Harness, tokens: usize) -> SequenceId {
+    let id = h.pool.allocate(&h.model).unwrap();
+    h.append_all_layers(id, tokens).unwrap();
+    h.queued.push(id);
+    id
+}
+
+#[test]
+fn decode_drops_a_queued_adoption_before_shedding_the_last_row() {
+    // Budget 6: the only running row sits at a block boundary (2 blocks) and a
+    // queued request's adopted prefix holds the other 4. Nothing is cached and
+    // the floor keeps the row from preempting itself, so before #2088 the row
+    // was shed (GB10 run at a 0.15 watermark). Dropping the queued adoption
+    // frees the blocks; the queued request re-prefills cold when admitted.
+    let mut h = Harness::new(6);
+    let row = h.decoding(BLOCK);
+    let queued = queued_adoption(&mut h, 2 * BLOCK);
+    assert_eq!(h.free_blocks(), Some(0));
+
+    let reservation = reserve_decode_blocks(&mut h, &[row], 1);
+    assert_eq!(reservation.run, vec![row]);
+    assert!(reservation.shed.is_empty());
+    let outcome = reservation.reclaim.expect("reclaim ran");
+    assert_eq!(
+        (
+            outcome.evicted,
+            outcome.dropped_adoptions,
+            outcome.preempted
+        ),
+        (0, 1, 0)
+    );
+    assert_eq!(h.dropped, vec![queued]);
+    h.append_all_layers(row, 1).unwrap();
+}
+
+#[test]
+fn queued_adoptions_go_after_cold_prefixes_and_before_running_rows() {
+    // Budget 10: two rows at a boundary (4 blocks), a cached prefix (2) and a
+    // queued adoption (4). One boundary crossing needs 4 blocks: evicting the
+    // prefix gives 2, dropping the adoption gives the rest, and no row is
+    // preempted.
+    let mut h = Harness::new(10);
+    let first = h.decoding(BLOCK);
+    let second = h.decoding(BLOCK);
+    h.cache_prefix(BLOCK, 1);
+    queued_adoption(&mut h, 2 * BLOCK);
+
+    let reservation = reserve_decode_blocks(&mut h, &[first, second], 1);
+    assert_eq!(reservation.run, vec![first, second]);
+    let outcome = reservation.reclaim.expect("reclaim ran");
+    assert_eq!(
+        (
+            outcome.evicted,
+            outcome.dropped_adoptions,
+            outcome.preempted
+        ),
+        (1, 1, 0)
+    );
+    assert!(h.preempted.is_empty());
+}
+
+#[test]
+fn admission_never_drops_another_requests_adoption() {
+    // A queued request waits rather than cost another one its cache hit.
+    let mut h = Harness::new(6);
+    h.decoding(BLOCK);
+    queued_adoption(&mut h, 2 * BLOCK);
+    assert!(!admit_with_watermark(&mut h, 2, 0, RequestPriority::Normal));
+    assert!(h.dropped.is_empty());
 }

@@ -30,11 +30,28 @@ use super::*;
 
 /// The scheduler operations the block reclaim loop drives.
 pub(super) trait PagedBlockReclaimer {
-    /// Blocks still acquirable before the budget is hit, `None` when unbounded.
-    fn free_blocks(&self) -> Option<usize>;
+    /// Blocks the pool can still hand out before the budget is hit, before
+    /// anything is set aside for a parked chunked prefill. `None` when
+    /// unbounded.
+    fn pool_free_blocks(&self) -> Option<usize>;
+    /// Blocks still acquirable by anything other than the parked chunked
+    /// prefill: [`Self::pool_free_blocks`] minus [`Self::reserved_blocks`],
+    /// `None` when unbounded. Saturates at 0, so it cannot show how far the
+    /// pool has fallen below the reservation; [`reserve_chunk_blocks`] reads
+    /// the pool figure for that reason.
+    fn free_blocks(&self) -> Option<usize> {
+        self.pool_free_blocks()
+            .map(|free| free.saturating_sub(self.reserved_blocks()))
+    }
     /// Evict the least recently used prompt-cache entry and return its pinned
     /// blocks to the pool. `false` when there was nothing to evict.
     fn evict_cold_prefix(&mut self) -> bool;
+    /// Drop the cached prefix one queued (not yet admitted) request adopted at
+    /// enqueue, so it re-prefills cold when admitted. Adoption pins the
+    /// prefix's blocks, and once the prompt-cache entry is evicted those pins
+    /// are the only owner, so neither eviction nor preemption can reach them.
+    /// `false` when no queued request holds an adoption it can give up.
+    fn drop_queued_prefix(&mut self) -> bool;
     /// Preempt one running sequence (it re-prefills on resume), restricted to
     /// rows of priority strictly below `below` when set. `false` when no
     /// eligible victim exists.
@@ -59,13 +76,18 @@ pub(super) struct ReclaimOutcome {
     pub fits: bool,
     /// Prompt-cache entries evicted.
     pub evicted: usize,
+    /// Queued requests whose adopted prefix was dropped.
+    pub dropped_adoptions: usize,
     /// Running sequences preempted.
     pub preempted: usize,
 }
 
 /// Reclaim pool blocks until at least `need` are acquirable, or no further
 /// reclamation is possible. Evicts cold prompt-cache prefixes first, then
+/// (when `drop_queued` is set) drops prefixes queued requests adopted, then
 /// preempts running sequences while more than `preempt_floor` remain active.
+/// The order is by what each step throws away: an unused cache entry, a
+/// queued request's cache hit, a running request's work.
 /// The scheduler picks preemption victims with
 /// [`select_block_reclaim_victim_from`] (least progress first), so the row
 /// closest to finishing is never the one discarded.
@@ -75,12 +97,15 @@ pub(super) struct ReclaimOutcome {
 /// strictly lower-priority rows. Decode passes a floor of 1 and no priority
 /// limit: the rows asking for blocks are themselves in the batch, and
 /// preempting the last one to make room for itself would only re-prefill it
-/// back to the same point.
+/// back to the same point. Decode and the chunk reservation set `drop_queued`
+/// (the alternative is shedding or preempting); admission does not, since a
+/// queued request can simply wait rather than cost another one its hit.
 pub(super) fn reclaim_blocks<R: PagedBlockReclaimer + ?Sized>(
     r: &mut R,
     need: usize,
     preempt_floor: usize,
     preempt_below: Option<RequestPriority>,
+    drop_queued: bool,
 ) -> ReclaimOutcome {
     let room = |r: &R| r.free_blocks().is_none_or(|free| free >= need);
     let mut outcome = ReclaimOutcome::default();
@@ -88,7 +113,15 @@ pub(super) fn reclaim_blocks<R: PagedBlockReclaimer + ?Sized>(
     while !room(r) && r.evict_cold_prefix() {
         outcome.evicted += 1;
     }
-    // 2. Preempt running sequences (drop their KV; they re-prefill on resume).
+    // 2. Drop queued requests' adopted prefixes (issue #2088).
+    while drop_queued && !room(r) && r.drop_queued_prefix() {
+        outcome.dropped_adoptions += 1;
+        // The entry a dropped adoption came from may now be evictable.
+        while !room(r) && r.evict_cold_prefix() {
+            outcome.evicted += 1;
+        }
+    }
+    // 3. Preempt running sequences (drop their KV; they re-prefill on resume).
     while !room(r) && r.active_len() > preempt_floor && r.preempt_one(preempt_below) {
         outcome.preempted += 1;
     }
@@ -145,7 +178,7 @@ pub(super) fn reserve_decode_blocks<R: PagedBlockReclaimer + ?Sized>(
             ..DecodeReservation::default()
         };
     }
-    let outcome = reclaim_blocks(r, need, 1, None);
+    let outcome = reclaim_blocks(r, need, 1, None, true);
     let mut run: Vec<SequenceId> = ids.iter().copied().filter(|&id| r.is_active(id)).collect();
     let mut shed = Vec::new();
     let mut deferred = Vec::new();
@@ -173,6 +206,66 @@ pub(super) fn reserve_decode_blocks<R: PagedBlockReclaimer + ?Sized>(
     }
 }
 
+/// Views a reclaimer with nothing set aside, so [`reclaim_blocks`] measures
+/// room against the pool figure. Used when the blocks being reserved are the
+/// parked chunked prefill's own.
+struct Unreserved<'a, R: ?Sized>(&'a mut R);
+
+impl<R: PagedBlockReclaimer + ?Sized> PagedBlockReclaimer for Unreserved<'_, R> {
+    fn pool_free_blocks(&self) -> Option<usize> {
+        self.0.pool_free_blocks()
+    }
+    fn evict_cold_prefix(&mut self) -> bool {
+        self.0.evict_cold_prefix()
+    }
+    fn drop_queued_prefix(&mut self) -> bool {
+        self.0.drop_queued_prefix()
+    }
+    fn preempt_one(&mut self, below: Option<RequestPriority>) -> bool {
+        self.0.preempt_one(below)
+    }
+    fn active_len(&self) -> usize {
+        self.0.active_len()
+    }
+    fn blocks_to_append(&self, id: SequenceId, tokens: usize) -> usize {
+        self.0.blocks_to_append(id, tokens)
+    }
+    fn is_active(&self, id: SequenceId) -> bool {
+        self.0.is_active(id)
+    }
+    fn reserved_blocks(&self) -> usize {
+        0
+    }
+}
+
+/// Reserve the `need` blocks the parked chunked prefill's next chunk will
+/// write, right before that chunk's forward (issue #2088).
+///
+/// The chunk is otherwise protected only by the set-aside in
+/// [`PagedBlockReclaimer::free_blocks`]. That figure saturates at 0, so once
+/// the pool has fallen below the reservation (a decode row that needed no new
+/// block still ran, a write the estimate undercounted, a padded chunk) every
+/// other consumer sees "no room" and defers, but nothing restores the
+/// reservation, and the chunk then hits an exhausted pool inside the forward.
+/// This runs the shared reclaim loop against the pool figure: cold prefixes
+/// first, then running rows with a preemption floor of 0 and no priority
+/// limit. The chunk's admission already checked the whole prompt, so its
+/// blocks are owed to it, and a lower floor is what keeps a single deferred
+/// decode row and the chunk from waiting on each other forever.
+pub(super) fn reserve_chunk_blocks<R: PagedBlockReclaimer + ?Sized>(
+    r: &mut R,
+    need: usize,
+) -> ReclaimOutcome {
+    let mut view = Unreserved(r);
+    if view.free_blocks().is_none_or(|free| free >= need) {
+        return ReclaimOutcome {
+            fits: true,
+            ..ReclaimOutcome::default()
+        };
+    }
+    reclaim_blocks(&mut view, need, 0, None, true)
+}
+
 /// Charge `need` blocks against a batched-prefill window's remaining paged
 /// budget. `room == None` means no budget is configured and always admits.
 /// Returns `false`, leaving `room` untouched, when the row does not fit.
@@ -188,8 +281,8 @@ pub(super) fn take_paged_room(room: &mut Option<usize>, need: usize) -> bool {
 }
 
 impl PagedBlockReclaimer for BatchScheduler {
-    fn free_blocks(&self) -> Option<usize> {
-        self.available_paged_blocks()
+    fn pool_free_blocks(&self) -> Option<usize> {
+        self.cache_pool.free_paged_block_budget()
     }
 
     fn evict_cold_prefix(&mut self) -> bool {
@@ -201,6 +294,10 @@ impl PagedBlockReclaimer for BatchScheduler {
         }
         self.drain_store_paged_releases();
         true
+    }
+
+    fn drop_queued_prefix(&mut self) -> bool {
+        self.drop_queued_adoption()
     }
 
     fn preempt_one(&mut self, below: Option<RequestPriority>) -> bool {
@@ -232,12 +329,33 @@ impl BatchScheduler {
     /// checked the whole prompt against the budget, but the blocks are only
     /// acquired chunk by chunk, so decode growth and later admissions between
     /// chunks must leave them free or the next chunk hits an exhausted pool.
+    /// Counts the next chunk's tile padding too (issue #2088): a padded chunk
+    /// writes its pad positions before trimming them, so a terminal chunk can
+    /// mint a block the unpadded remainder would not.
     pub(super) fn chunked_prefill_reserved_blocks(&self) -> usize {
         self.chunked_prefill_seq.as_ref().map_or(0, |seq| {
-            let remaining = seq.prompt_tokens.len().saturating_sub(seq.prefill_offset);
+            let total = seq.prompt_tokens.len();
+            let remaining = total.saturating_sub(seq.prefill_offset);
+            let pad =
+                next_chunked_prefill_range(total, seq.prefill_offset, self.prefill_chunk_size)
+                    .map_or(0, |range| {
+                        let len = range.end - range.start;
+                        self.prefill_write_len(len) - len
+                    });
             self.cache_pool
-                .paged_blocks_to_append(seq.seq_id, remaining)
+                .paged_blocks_to_append(seq.seq_id, remaining + pad)
         })
+    }
+
+    /// Positions a prefill chunk of `len` prompt tokens writes into the KV
+    /// cache: `len` rounded up to the neural-accelerator tile when the chunk
+    /// is padded (M5+ Metal), `len` otherwise.
+    pub(super) fn prefill_write_len(&self, len: usize) -> usize {
+        if self.model.supports_padded_prefill() && should_align_prefill() {
+            align_to_na_tile(len)
+        } else {
+            len
+        }
     }
 
     /// Paged blocks acquirable without reclaim once the parked chunked
@@ -246,18 +364,47 @@ impl BatchScheduler {
     /// (prefill admission, decode reservation, lookahead prime) reads this
     /// rather than the raw pool figure (#1982).
     pub(super) fn available_paged_blocks(&self) -> Option<usize> {
-        self.cache_pool
-            .free_paged_block_budget()
-            .map(|free| free.saturating_sub(self.chunked_prefill_reserved_blocks()))
+        PagedBlockReclaimer::free_blocks(self)
     }
 
-    /// Reclaim paged pool blocks until at least `need` are acquirable, or no
-    /// further reclamation is possible, for admitting a prefill of
-    /// `priority`. Only strictly lower-priority rows may be preempted; an
-    /// equal-priority request waits for running rows to finish instead. See
-    /// [`reclaim_blocks`]. Returns whether `need` blocks are now acquirable.
-    pub(super) fn reclaim_paged_blocks(&mut self, need: usize, priority: RequestPriority) -> bool {
-        reclaim_blocks(self, need, 0, Some(priority)).fits
+    /// Reserve the blocks the parked chunked prefill `seq_id` writes for a
+    /// chunk of `write_len` positions, right before its forward (issue
+    /// #2088). Returns whether the chunk may run.
+    ///
+    /// Called from `continue_chunked_prefill`, so it covers both ways a chunk
+    /// runs beside a live decode batch: the `MLXCEL_MIXED_STEP` tick, where
+    /// the decode step has just run and may have left the pool below the
+    /// chunk's reservation, and the #1011 prefill grant. A no-op returning
+    /// `true` when no budget is configured or the pool has room. Under
+    /// pressure it tears down any prebuilt lookahead (preemption changes batch
+    /// membership) and runs [`reserve_chunk_blocks`]. `false` means even
+    /// preempting every running row and evicting every cold prefix left too
+    /// few blocks; the caller fails the request instead of letting the forward
+    /// hit an exhausted pool.
+    pub(super) fn reserve_prefill_chunk_blocks(
+        &mut self,
+        seq_id: SequenceId,
+        write_len: usize,
+    ) -> bool {
+        let need = self.cache_pool.paged_blocks_to_append(seq_id, write_len);
+        let free_before = self.cache_pool.free_paged_block_budget();
+        if free_before.is_none_or(|free| free >= need) {
+            return true;
+        }
+        self.discard_lookahead();
+        let outcome = reserve_chunk_blocks(self, need);
+        tracing::info!(
+            %seq_id,
+            need,
+            free_before = free_before.unwrap_or_default(),
+            free_after = self.cache_pool.free_paged_block_budget().unwrap_or_default(),
+            evicted_prefixes = outcome.evicted,
+            dropped_adoptions = outcome.dropped_adoptions,
+            preempted = outcome.preempted,
+            fits = outcome.fits,
+            "Chunked prefill reclaimed paged KV blocks"
+        );
+        outcome.fits
     }
 
     /// Reserve pool blocks for the decode tick over `seq_ids` (#1982). Returns
@@ -290,6 +437,7 @@ impl BatchScheduler {
                 free_before = free_before.unwrap_or_default(),
                 free_after = self.available_paged_blocks().unwrap_or_default(),
                 evicted_prefixes = outcome.evicted,
+                dropped_adoptions = outcome.dropped_adoptions,
                 preempted = outcome.preempted,
                 shed = reservation.shed.len(),
                 deferred = reservation.deferred.len(),

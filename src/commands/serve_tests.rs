@@ -45,6 +45,7 @@ fn sample_args() -> crate::ServeArgs {
         ctx_size: 8192,
         max_kv_size: 0,
         kv_cache_budget: None,
+        kv_admission_watermark: None,
         enable_vlm_prefix_cache: false,
         allowed_origins: Vec::new(),
         n_predict: 128,

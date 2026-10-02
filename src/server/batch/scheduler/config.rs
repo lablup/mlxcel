@@ -124,6 +124,7 @@ impl BatchScheduler {
             // `with_prefill_grant_interval` overrides this later with an
             // explicit CLI value when one was passed.
             prefill_grant_interval: resolve_prefill_grant_interval(None),
+            paged_admission_watermark: DEFAULT_KV_ADMISSION_WATERMARK,
             decode_ticks_since_prefill_grant: 0,
             shutdown_requested: false,
             consecutive_decode_eval_failures: 0,
@@ -217,6 +218,15 @@ impl BatchScheduler {
     /// wait); `Some(n)` sets an explicit interval.
     pub fn with_prefill_grant_interval(mut self, configured: Option<usize>) -> Self {
         self.prefill_grant_interval = resolve_prefill_grant_interval(configured);
+        self
+    }
+
+    /// Install the paged KV admission watermark (issue #2088,
+    /// `--kv-admission-watermark`): the fraction of the block budget a prefill
+    /// admission keeps free for decode growth while rows are decoding. Clamped
+    /// to `0.0..=MAX_KV_ADMISSION_WATERMARK`; inert without a block budget.
+    pub fn with_paged_admission_watermark(mut self, fraction: f64) -> Self {
+        self.paged_admission_watermark = clamp_kv_admission_watermark(fraction);
         self
     }
 
