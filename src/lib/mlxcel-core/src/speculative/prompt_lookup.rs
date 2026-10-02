@@ -195,7 +195,8 @@ pub enum DraftPolicy {
     /// whole, then full (`max_draft`). While paused it keeps looking up and
     /// checks each proposal against the tokens decoding emits next; proposing
     /// resumes only once `SHADOW_CONFIRM` (2) proposed tokens in a row came
-    /// true, and a resumed round that lands nothing pauses again at once.
+    /// true, and until a round lands a whole narrow block, a round that lands
+    /// nothing pauses again at once.
     Gated,
 }
 
@@ -350,8 +351,8 @@ pub(crate) struct DraftGovernor {
     cooldown: usize,
     next_cooldown: usize,
     /// [`DraftPolicy::Gated`]: proposing at all, and whether the next miss
-    /// pauses outright because this run of drafted rounds has landed nothing
-    /// since it resumed.
+    /// pauses outright because no round since the last resume has landed a
+    /// whole narrow block.
     drafting: bool,
     probation: bool,
 }
@@ -427,9 +428,15 @@ impl DraftGovernor {
                 }
             }
             DraftPolicy::Gated => {
+                // Probation ends on a round that lands a whole narrow block:
+                // one stray token is what prose lands too, and on GB10 a run
+                // of such rounds (8B email: 6 drafted, 3 tokens landed) cost
+                // more than it emitted.
+                if accepted >= GATED_NARROW_DRAFT.min(self.max_draft) {
+                    self.probation = false;
+                }
                 if accepted > 0 {
                     self.misses = 0;
-                    self.probation = false;
                     return;
                 }
                 self.misses += 1;

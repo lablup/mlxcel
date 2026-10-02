@@ -889,3 +889,26 @@ fn gated_shadow_probe_confirms_exactly_the_resumed_copy() {
         );
     }
 }
+
+#[test]
+fn gated_probation_ends_only_on_a_whole_narrow_block() {
+    let mut g = DraftGovernor::new(&gated(7));
+    // One stray token is not evidence of a copy: still on probation.
+    g.record(1);
+    assert_eq!(g.budget(), GATED_NARROW_DRAFT);
+    g.record(0);
+    assert_eq!(
+        g.budget(),
+        0,
+        "a miss on probation pauses even after a partial round"
+    );
+
+    let mut g = DraftGovernor::new(&gated(7));
+    g.record(GATED_NARROW_DRAFT);
+    g.record(0);
+    assert_eq!(
+        g.budget(),
+        GATED_NARROW_DRAFT,
+        "off probation, one miss narrows the block instead of pausing"
+    );
+}
