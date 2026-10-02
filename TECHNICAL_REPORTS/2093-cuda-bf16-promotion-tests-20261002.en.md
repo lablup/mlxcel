@@ -1,4 +1,4 @@
-# Technical Report: Issue #2087 - The six lib tests that failed under `--features cuda`
+# Technical Report: PR #2093 - Cast bf16 tables explicitly where the CUDA overlay demotes (issue #2087)
 
 **Date**: 2026-10-02
 
