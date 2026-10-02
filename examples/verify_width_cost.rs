@@ -40,6 +40,13 @@ fn main() {
 
     let path = std::env::args().nth(1).expect("model path");
     let (model, _) = mlxcel::load_model(Path::new(&path)).unwrap();
+    // The rounds below roll a rejected block back with a cache trim; on a
+    // model that cannot do that the cache would grow `w` tokens per round and
+    // skew every ratio without saying so.
+    assert!(
+        mlxcel::supports_prompt_lookup(&model),
+        "{path}: verify blocks cannot be rolled back on this model"
+    );
     let prompt: Vec<i32> = (0..300).map(|i| 1000 + (i * 37) % 5000).collect();
 
     let median = |mut v: Vec<f64>| {

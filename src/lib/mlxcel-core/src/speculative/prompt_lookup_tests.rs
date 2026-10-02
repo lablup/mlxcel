@@ -436,9 +436,10 @@ fn sequential_reference<M: LanguageModel>(
 
 /// Run prompt lookup on both [`INDUCTION_MODELS`] over several prompts and
 /// configurations, assert every reply equals `reference(model, prompt)`, and
-/// return the summed acceptance accounting per model.
+/// return the summed acceptance accounting per model, for `policy` only.
 fn induction_parity(
     sampling: &SamplingConfig,
+    policy: DraftPolicy,
     reference: impl Fn(&InductionModel, &[i32]) -> Vec<i32>,
 ) -> [PromptLookupStats; 2] {
     let mut totals = [PromptLookupStats::default(); 2];
@@ -461,12 +462,10 @@ fn induction_parity(
                     ..cfg(3, 2, 7)
                 },
             ];
-            let policies = [DraftPolicy::Graded, DraftPolicy::Gated];
-            for config in policies.iter().flat_map(|&policy| {
-                bases
-                    .iter()
-                    .map(move |&base| PromptLookupConfig { policy, ..base })
-            }) {
+            for config in bases
+                .iter()
+                .map(|&base| PromptLookupConfig { policy, ..base })
+            {
                 let mut generator = PromptLookupGenerator::new(config);
                 let (tokens, _) = generator.generate(model, &prompt, 96, sampling);
                 assert_eq!(
@@ -487,9 +486,11 @@ fn induction_parity(
     totals
 }
 
-/// Both acceptance regimes showed up: blocks that land and blocks that are
-/// trimmed, and governor pauses long enough for the loop to pipeline.
-fn assert_both_regimes(totals: &[PromptLookupStats; 2]) {
+/// Both acceptance regimes showed up under `policy`: blocks that land and
+/// blocks that are trimmed, governor pauses long enough for the loop to
+/// pipeline, and, for [`DraftPolicy::Gated`] only, resumes on a confirmed
+/// proposal.
+fn assert_both_regimes(policy: DraftPolicy, totals: &[PromptLookupStats; 2]) {
     for stats in totals {
         assert!(
             stats.accepted_draft_tokens > 0,
@@ -505,10 +506,14 @@ fn assert_both_regimes(totals: &[PromptLookupStats; 2]) {
         missing.paused_rounds > 0,
         "the missing model never paused the governor: {missing:?}"
     );
-    assert!(
-        totals.iter().any(|stats| stats.shadow_confirmations > 0),
-        "no paused gated governor ever resumed on a confirmed proposal: {totals:?}"
-    );
+    let confirmations: usize = totals.iter().map(|stats| stats.shadow_confirmations).sum();
+    match policy {
+        DraftPolicy::Gated => assert!(
+            confirmations > 0,
+            "no paused gated governor ever resumed on a confirmed proposal: {totals:?}"
+        ),
+        _ => assert_eq!(confirmations, 0, "only a gated governor probes: {totals:?}"),
+    }
 }
 
 /// The rollback contract: after every verify round the caches must hold
@@ -518,16 +523,19 @@ fn assert_both_regimes(totals: &[PromptLookupStats; 2]) {
 #[test]
 fn rollback_keeps_a_cache_dependent_target_identical_to_plain_decoding() {
     let sampling = SamplingConfig::greedy();
-    let totals = induction_parity(&sampling, |model, prompt| {
-        let plain = crate::generate::CxxGenerator::new(1).generate(model, prompt, 96, &sampling);
-        assert_eq!(
-            plain,
-            sequential_reference(model, prompt, 96, &sampling),
-            "greedy plain decoding is the sequential reference"
-        );
-        plain
-    });
-    assert_both_regimes(&totals);
+    for policy in [DraftPolicy::Graded, DraftPolicy::Gated] {
+        let totals = induction_parity(&sampling, policy, |model, prompt| {
+            let plain =
+                crate::generate::CxxGenerator::new(1).generate(model, prompt, 96, &sampling);
+            assert_eq!(
+                plain,
+                sequential_reference(model, prompt, 96, &sampling),
+                "greedy plain decoding is the sequential reference"
+            );
+            plain
+        });
+        assert_both_regimes(policy, &totals);
+    }
 }
 
 /// Same contract on the per-position sampler path: a repetition penalty
@@ -542,10 +550,12 @@ fn rollback_matches_plain_decoding_under_a_repetition_penalty() {
         ..SamplingConfig::greedy()
     };
     assert!(sampling.needs_token_history());
-    let totals = induction_parity(&sampling, |model, prompt| {
-        sequential_reference(model, prompt, 96, &sampling)
-    });
-    assert_both_regimes(&totals);
+    for policy in [DraftPolicy::Graded, DraftPolicy::Gated] {
+        let totals = induction_parity(&sampling, policy, |model, prompt| {
+            sequential_reference(model, prompt, 96, &sampling)
+        });
+        assert_both_regimes(policy, &totals);
+    }
 }
 
 /// A dense-cache target that nonetheless owns its sequence state, the shape
@@ -784,4 +794,98 @@ fn default_policy_follows_the_build() {
         DraftPolicy::Graded
     };
     assert_eq!(PromptLookupConfig::default().policy, expected);
+}
+
+/// Vocabulary of [`ScriptModel`].
+const SCRIPT_VOCAB: usize = 1024;
+
+/// Target that emits a fixed script by absolute position: the logits after
+/// position `p` peak at `script[p + 1]`. Every token is unique except where
+/// the script copies its own prompt, so a lookup proposal is right exactly
+/// when it is aligned with the copy.
+struct ScriptModel {
+    script: Vec<i32>,
+}
+
+impl LanguageModel for ScriptModel {
+    fn forward(
+        &self,
+        input_ids: &ffi::MlxArray,
+        caches: &mut [KVCache],
+        _mask: Option<&ffi::MlxArray>,
+    ) -> UniquePtr<ffi::MlxArray> {
+        let seq_len = ffi::array_shape(input_ids)[1];
+        let offset = caches[0].offset as usize;
+        let kv = || ffi::ones(&[1, 1, seq_len, 1], crate::dtype::FLOAT32);
+        caches[0].update(kv(), kv());
+        let mut logits = vec![0.0f32; seq_len as usize * SCRIPT_VOCAB];
+        for row in 0..seq_len as usize {
+            let next = self.script[offset + row + 1] as usize;
+            logits[row * SCRIPT_VOCAB + next] = 10.0;
+        }
+        ffi::from_slice_f32(&logits, &[1, seq_len, SCRIPT_VOCAB as i32])
+    }
+
+    fn make_caches(&self) -> Vec<KVCache> {
+        vec![KVCache::new()]
+    }
+
+    fn num_layers(&self) -> usize {
+        1
+    }
+
+    fn eos_token_ids(&self) -> Vec<i32> {
+        Vec::new()
+    }
+}
+
+/// A reply that starts copying its prompt, breaks off for one token, and
+/// resumes the copy: the first drafted round misses on probation, the
+/// governor pauses, and a shadow probe must notice the resumed copy.
+///
+/// Prompt `100..=119`; reply `300, 100, 101, 999, 102, 103, ..., 119`. After
+/// `100 101` the lookup proposes `102 103`, the target emits `999`, and that
+/// probation miss pauses. Two rounds later `102 103` matches again and the
+/// probe made there proposes `104 105`, which come true, so drafting resumes
+/// and copies the rest. A probe recorded one position early or late compares
+/// `104` with `103` or `105` and never confirms.
+fn copy_break_copy_script() -> (Vec<i32>, usize) {
+    let prompt: Vec<i32> = (100..120).collect();
+    let mut script = prompt.clone();
+    script.extend([300, 100, 101, 999]);
+    script.extend(102..120);
+    // Room for the model to look one position past the last emitted token.
+    script.push(0);
+    (script, prompt.len())
+}
+
+#[test]
+fn gated_shadow_probe_confirms_exactly_the_resumed_copy() {
+    let (script, prompt_len) = copy_break_copy_script();
+    let model = ScriptModel {
+        script: script.clone(),
+    };
+    let expected = &script[prompt_len..script.len() - 1];
+    let penalty = SamplingConfig {
+        repetition_penalty: 1.1,
+        penalty_last_n: 8,
+        ..SamplingConfig::greedy()
+    };
+    // Pipelined plain rounds, and the synchronous path a history-reading
+    // sampler forces.
+    for sampling in [SamplingConfig::greedy(), penalty] {
+        let mut generator = PromptLookupGenerator::new(gated(7));
+        let (tokens, _) =
+            generator.generate(&model, &script[..prompt_len], expected.len(), &sampling);
+        assert_eq!(tokens, expected, "{sampling:?}");
+        let stats = generator.stats();
+        assert_eq!(
+            stats.shadow_confirmations, 1,
+            "the resumed copy is confirmed once: {stats:?}"
+        );
+        assert!(
+            stats.drafted_rounds >= 3 && stats.accepted_draft_tokens >= 10,
+            "drafting resumed and copied the rest: {stats:?}"
+        );
+    }
 }

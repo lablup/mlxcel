@@ -175,12 +175,16 @@ impl Default for PromptLookupConfig {
 /// `81ba1c6a`) a synchronous verify forward measured, in pipelined one-token
 /// steps for Qwen3-1.7B / Qwen3-8B: width 2 at 1.35 / 1.14, width 3 at
 /// 1.62 / 1.41, width 4 at 2.26 / 1.85, widths 5 to 7 rising to 3.59 / 3.28,
-/// and width 8 and up flat at 3.34 / 2.51 (`qmv`'s multirow instantiations at
-/// 2, 4 and 8 rows, then `qmm_sm80` from 8 rows). Widths 5 to 7 cost more than
-/// 8, and a miss also drains the pipeline, so [`Self::Gated`] uses only a
-/// narrow or a full block and spends no verify forward to find out whether a
-/// copy has resumed.
+/// and width 8 and up flat at 3.34 / 2.51 (`examples/verify_width_cost.rs`).
+/// Below 8 rows the affine path runs `qmv`'s multirow kernel, instantiated at
+/// 2, 4 and 8 accumulator rows, so 5 to 7 rows pay for the 8-row
+/// instantiation; from 8 rows it switches to `qmm_sm80`, which is cheaper than
+/// that. A miss also drains the pipeline. So [`Self::Gated`] budgets only a
+/// narrow or a full block (a lookup near the end of the context, or the
+/// `max_tokens` limit, can still return fewer tokens) and spends no verify
+/// forward to find out whether a copy has resumed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DraftPolicy {
     /// PR #2074's rules: the block is twice the recent accepted average plus
     /// two, and a pause after `MISSES_BEFORE_COOLDOWN` (3) misses lasts
@@ -300,7 +304,8 @@ const GATED_NARROW_DRAFT: usize = 2;
 /// Accepted-proposal average at which [`DraftPolicy::Gated`] switches from the
 /// narrow to the full block. A narrow block that lands whole lifts the average
 /// from its starting value to exactly this, so one clean narrow round is
-/// enough; a full block that lands nothing twice drops it back.
+/// enough, and the first full block that lands nothing drops it back below;
+/// once full blocks have landed several tokens, it takes a run of misses.
 const GATED_FULL_AT: f64 = 1.5;
 /// Accepted-proposal average a [`DraftPolicy::Gated`] governor starts from and
 /// resumes with: below [`GATED_FULL_AT`], so the first block is narrow.
@@ -315,7 +320,10 @@ pub(crate) const SHADOW_CONFIRM: usize = 2;
 /// so it cannot carry a proposal: the first proposal after a pipelined run
 /// waits one step. Edits that miss for a token or two at each changed field
 /// (a JSON id, a renamed identifier) would pay that step at every field, so
-/// only a run of plain rounds switches to pipelining.
+/// only a run of plain rounds switches to pipelining. A paused
+/// [`DraftPolicy::Gated`] governor pipelines at once: it cannot propose until
+/// a shadow probe settles, which takes at least [`SHADOW_CONFIRM`] emitted
+/// tokens, so there is no proposal for a pipelined step to delay.
 const PLAIN_ROUNDS_BEFORE_PIPELINE: usize = 2;
 
 /// Decides, round by round, how many lookup tokens to propose.
@@ -868,11 +876,11 @@ impl PromptLookupGenerator {
         // Rounds in a row, this one included, whose lookup proposed nothing.
         let mut plain_streak = 0usize;
         // A proposal looked up while a `DraftPolicy::Gated` governor is
-        // paused, waiting for decoding to show whether it comes true. Long
-        // enough to settle even when `max_draft` is shorter.
+        // paused, waiting for decoding to show whether it comes true. Exactly
+        // as long as settling reads, whatever `max_draft` is.
         let mut shadow: Option<ShadowProbe> = None;
         let shadow_config = PromptLookupConfig {
-            max_draft: self.config.max_draft.max(SHADOW_CONFIRM),
+            max_draft: SHADOW_CONFIRM,
             ..self.config
         };
 
@@ -944,7 +952,7 @@ impl PromptLookupGenerator {
             if draft.is_empty()
                 && pipeline
                 && remaining > 1
-                && plain_streak > PLAIN_ROUNDS_BEFORE_PIPELINE
+                && (plain_streak > PLAIN_ROUNDS_BEFORE_PIPELINE || governor.probes_while_paused())
             {
                 let input = ffi::from_slice_i32(&[current_token], &[1, 1]);
                 let logits = model.forward(&input, &mut self.caches, None);
@@ -1046,6 +1054,7 @@ impl PromptLookupGenerator {
             drafted_rounds = self.stats.drafted_rounds,
             proposed_draft_tokens = self.stats.proposed_draft_tokens,
             accepted_draft_tokens = self.stats.accepted_draft_tokens,
+            shadow_confirmations = self.stats.shadow_confirmations,
             generated_tokens = self.generated_tokens.len(),
             "prompt-lookup decode finished"
         );
