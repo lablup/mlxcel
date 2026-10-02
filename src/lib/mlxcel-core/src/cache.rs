@@ -2337,7 +2337,8 @@ impl KVCache {
     /// touched. This mirrors speculative decoding's "rewind one block" pattern
     /// from `update_turbo4_asym` and avoids paying for a re-quantize on the
     /// common short-rewind case.
-    /// Used by: speculative decoding cache rewinds
+    /// A pool-backed cache rewinds its block table in the shared pool instead.
+    /// Used by: speculative decoding cache rewinds, padded-prefill pad trims
     pub fn trim(&mut self, n: i32) -> i32 {
         // Clamp against the live window length, not the monotonic offset:
         // after a `trim_front`-induced live_start advance we must not roll
@@ -2350,12 +2351,23 @@ impl KVCache {
             return 0;
         }
         // Pool-backed caches keep no dense `keys`/`values` buffers (#121); the
-        // block table is the authoritative store and is trimmed through the
-        // pool API (`CachePool::trim_paged_tokens` / `rewind_paged_tokens`),
-        // never the dense buffer slicing below (which would `unwrap` a `None`
-        // buffer). Treat a dense-side trim as a no-op for them.
-        if self.paged_backing.is_some() {
-            return 0;
+        // block table is the authoritative store, so rewind it instead of the
+        // dense buffer slicing below (which would `unwrap` a `None` buffer).
+        // `offset` moves with it: it is the next RoPE position and has to agree
+        // with the pool's write position.
+        if let Some(backing) = self.paged_backing.as_ref() {
+            let trimmed = backing
+                .pool
+                .borrow_mut()
+                .rewind_tokens(
+                    &mut backing.state.borrow_mut(),
+                    backing.layer_idx,
+                    n as usize,
+                )
+                .expect("PagedBlockPool::rewind_tokens failed for pool-backed cache")
+                as i32;
+            self.offset -= trimmed;
+            return trimmed;
         }
         // Turbo4Delegated: hot-first trim. Tokens to remove from cold = max(0, n - hot_len).
         // We adjust cold_offset and offset, then fall through to the per-mode buffer slicing
