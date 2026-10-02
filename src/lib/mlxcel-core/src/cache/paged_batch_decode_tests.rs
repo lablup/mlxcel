@@ -230,6 +230,62 @@ fn run_step(
     (to_vec_f32(&out), to_vec_f32(&reference), stats)
 }
 
+/// A tile-padded prefill writes its pad rows and then trims them. The trim has
+/// to reach the pool: while it was a no-op, decode read the pad rows as context
+/// and rotated the next token at the padded position.
+#[test]
+fn trim_drops_padded_prefill_rows_from_a_pool_backed_cache() {
+    let (kv_heads, head_dim, real, padded) = (2, 64, 37, 64);
+    let (pool, states) = fresh_pool(1, kv_heads as usize, head_dim as usize);
+    let mut cache = KVCache::new_paged(pool.clone(), states[0].clone(), 0);
+    let mut rng = Rng::new(7);
+    let k = random_array(&mut rng, &[1, kv_heads, padded, head_dim]);
+    let v = random_array(&mut rng, &[1, kv_heads, padded, head_dim]);
+    let real_rows = |a: &MlxArray| {
+        to_vec_f32(&ffi::slice(
+            a,
+            &[0, 0, 0, 0],
+            &[1, kv_heads, real, head_dim],
+        ))
+    };
+    let (k_real, v_real) = (real_rows(&k), real_rows(&v));
+    cache.update(k, v);
+
+    assert_eq!(cache.trim(padded - real), padded - real);
+    assert_eq!(
+        cache.offset, real,
+        "the next RoPE position is the real length"
+    );
+    assert_eq!(states[0].borrow().layer(0).unwrap().len, real as usize);
+    assert_eq!(
+        pool.borrow().allocated_block_count(),
+        2,
+        "37 tokens span two 32-token blocks"
+    );
+
+    // The next token lands right after the real rows, and the window decode
+    // gathers is the real rows plus that token.
+    let k_next = random_array(&mut rng, &[1, kv_heads, 1, head_dim]);
+    let v_next = random_array(&mut rng, &[1, kv_heads, 1, head_dim]);
+    let (k_next_rows, v_next_rows) = (to_vec_f32(&k_next), to_vec_f32(&v_next));
+    let (k_seen, v_seen) = cache.update_and_fetch(k_next, v_next);
+    assert_eq!(
+        ffi::array_shape(&k_seen),
+        vec![1, kv_heads, real + 1, head_dim]
+    );
+    assert_eq!(real_rows(&k_seen), k_real);
+    assert_eq!(real_rows(&v_seen), v_real);
+    let last_row = |a: &MlxArray| {
+        to_vec_f32(&ffi::slice(
+            a,
+            &[0, 0, real, 0],
+            &[1, kv_heads, real + 1, head_dim],
+        ))
+    };
+    assert_eq!(last_row(&k_seen), k_next_rows);
+    assert_eq!(last_row(&v_seen), v_next_rows);
+}
+
 #[test]
 fn batched_decode_matches_the_gather_path_above_the_floor() {
     crate::test_support::kernel_ports::require_paged_attention_port!();

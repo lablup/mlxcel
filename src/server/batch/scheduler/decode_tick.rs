@@ -422,10 +422,10 @@ impl BatchScheduler {
     /// teardown before the synchronous path, a completion, or a prompt-cache
     /// donation runs, so slot reuse and detach always see clean caches.
     ///
-    /// Pool-backed paged sequences rewind through the pool block table (one
-    /// token per layer, releasing any tail block); dense (and dense-natural
-    /// paged mirror) sequences trim the dense KV tail and re-mirror the shorter
-    /// length into the paged bookkeeping state.
+    /// Every cache trims through [`KVCache::trim`], which rewinds the pool block
+    /// table for a pool-backed sequence and the dense KV tail otherwise, moving
+    /// `offset` with it in both cases. Dense-natural paged mirrors then re-mirror
+    /// the shorter length into the paged bookkeeping state.
     ///
     /// `positions` is the number of speculative appends to unwind: `1` for a
     /// teardown before the step-n+1 prime forward has run (admission,
@@ -436,33 +436,9 @@ impl BatchScheduler {
         if positions == 0 {
             return;
         }
-        let num_layers = self.model.num_layers();
+        let want = positions as i32;
         for &seq_id in ids {
-            let paged_backed = self
-                .cache_pool
-                .get(seq_id)
-                .map(|s| s.caches.iter().any(|c| c.is_paged_backed()))
-                .unwrap_or(false);
-            if paged_backed {
-                for layer in 0..num_layers {
-                    // A failed rewind silently leaks the speculative KV
-                    // position(s), which would corrupt a later donation of this
-                    // sequence's cache; surface it so the leak is diagnosable.
-                    if let Err(err) = self
-                        .cache_pool
-                        .rewind_paged_tokens(seq_id, layer, positions)
-                    {
-                        tracing::warn!(
-                            seq_id = %seq_id,
-                            layer,
-                            positions,
-                            "lookahead teardown: paged rewind failed, speculative KV \
-                             position may leak: {err}"
-                        );
-                    }
-                }
-            } else if let Some(caches) = self.cache_pool.get_caches_mut(seq_id) {
-                let want = positions as i32;
+            if let Some(caches) = self.cache_pool.get_caches_mut(seq_id) {
                 for (layer, cache) in caches.iter_mut().enumerate() {
                     // KVCache::trim clamps to the live window and returns the
                     // count actually removed; a short trim means a speculative
@@ -475,13 +451,13 @@ impl BatchScheduler {
                             layer,
                             requested = want,
                             trimmed,
-                            "lookahead teardown: dense trim removed fewer positions \
+                            "lookahead teardown: trim removed fewer positions \
                              than requested, KV may be out of sync"
                         );
                     }
                 }
                 // Re-mirror the shorter dense length into any paged bookkeeping
-                // (no-op for a pure dense pool).
+                // (no-op for a pure dense pool and for pool-backed sequences).
                 self.sync_sequence_storage(seq_id);
             }
         }
