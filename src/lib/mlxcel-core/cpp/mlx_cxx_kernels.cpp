@@ -1732,18 +1732,19 @@ void ssm_update_kernel(
         {"H", h},
         {"G", g},
     };
-    // The hipRTC module cache is keyed on the name plus this list, while the
-    // generated signature takes every input's runtime dtype, so an input whose
-    // dtype is not named here could reuse a module compiled for another dtype
+    // The CUDA and HIP JIT caches key a module on the kernel name plus this
+    // list, while the generated signature takes every input's runtime dtype,
+    // so an input whose dtype is not named here can reuse a module compiled
+    // for another dtype and read its buffer through the wrong pointer type
     // (scripts/ci/check_kernel_dtype_keys.py). T and U cover X, D (cast to T
-    // below) and state_in, and dt is always float32 from compute_dt; A_log, B
-    // and C are not tied to T, so the HIP port names them too. Appended on
-    // ROCm only, which leaves the Metal and CUDA kernel names unchanged.
-    if (mlxcel::gpu_kernel_backend() == mlxcel::GpuKernelBackend::Rocm) {
-        template_args.push_back({"TA", A_log.inner.dtype()});
-        template_args.push_back({"TB", B.inner.dtype()});
-        template_args.push_back({"TC", C.inner.dtype()});
-    }
+    // below) and state_in, and dt is always float32 from compute_dt. A_log, B
+    // and C are not tied to T: Nemotron-H stores A_log in f32 next to bf16
+    // activations, granite in bf16 (#2067). The kernels never name TA, TB or
+    // TC, so this changes module names only, not the arithmetic; Metal
+    // already keys its name on every input dtype.
+    template_args.push_back({"TA", A_log.inner.dtype()});
+    template_args.push_back({"TB", B.inner.dtype()});
+    template_args.push_back({"TC", C.inner.dtype()});
 
     std::vector<array> inputs = {
         hidden_states.inner, A_log.inner, B.inner, C.inner,

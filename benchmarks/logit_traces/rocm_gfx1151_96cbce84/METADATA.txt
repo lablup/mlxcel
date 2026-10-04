@@ -1,0 +1,15 @@
+host: AMD Ryzen AI MAX+ 395 with Radeon 8060S (gfx1151, RDNA 3.5), 96 GiB VRAM carve-out, 31 GiB host RAM
+os: Debian GNU/Linux 13 (trixie), kernel 6.18.12+deb13-amd64
+rocm: 10.0.0 packages (HIP 7.15.26333), ROCM_PATH=/opt/rocm
+mlxcel_commit: 96cbce84 (branch update/issue-2067-rocm-ssm-update-port, on origin/main c0b71344), the first commit of the #2067 PR. The PR's next commit names the A_log, B and C dtypes in the SSM launch's template arguments on every backend instead of on ROCm only; on ROCm the launch, its arguments and its cache key are the same in both commits, so these traces stand for the PR head as well.
+mlx_pin: 81ba1c6a0e50a9268b931579c2d4f1158b9aab5a
+rocm_overlay_fork: NripeshN/mlx rocm-support @ 75915908dfe5028335d318b10340313744fd3a8d (src/lib/mlx-cpp/patches-rocm/UPSTREAM), plus the local fixes in LOCAL_FIXES.md
+logit_trace_sha256: 4c1ecae4dd823f08c6e9aa997cbfcfe535a3aef3a9c85dca63669327a6ee078e
+build: cargo build --release --features rocm --example logit_trace
+corpus: tests/fixtures/wikitext2_excerpt.txt sha256 16721fc1057d69efc8493718fcad562de9e4554ce05369876cd06dcba431394e
+checkpoints: the same local directories as ../rocm_gfx1151_3c9edea0/ (granite-4.0-h-tiny-4bit@02c8783da0cb171942e30a7dde8acce11fe82e0d, NVIDIA-Nemotron-3-Nano-30B-A3B-4bit@832f602eba5d22436c258c1462bdedc5afddb42b)
+args: w1ctx512='1 128 8 512' with MLXCEL_TRACE_START_TOKEN=512; w1='1 128 8 0' (CHUNK_TOKENS MAX_CHUNKS TOPK PREFILL)
+tags: 'default' = no override, so each w1ctx512 single-token forward meets the prefilled SSM state and takes the HIP ssm_update_kernel (granite through ssm_step_kernel, Nemotron-H through fused_mamba2_forward). 'ssmkernel0' = MLXCEL_SSM_KERNEL=0, the same binary forced onto the SSD graph (ssm_step). w1 chunks have no prefill, so they never meet a state and run the graph on both tags.
+env: LD_LIBRARY_PATH unset; MLXCEL_KEEP_BF16 unset; MLXCEL_FUSED_MOE unset; MLXCEL_DEVICE unset (trace header reads '# device GPU')
+gpu: correctness traces, not timings; a parallel development unit may have used the GPU during a run
+metal_reference: ../metal_m5_3c9edea0/ (w1ctx512); graph references: ../rocm_gfx1151_3c9edea0/ (w1ctx512), ../rocm_gfx1151_c5fe9a16/ (w1)
