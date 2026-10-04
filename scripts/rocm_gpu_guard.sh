@@ -123,11 +123,20 @@ descends_from() {
 }
 
 # Holders in $2 (a kfd_holders reading) that are not $1 or its descendants.
+#
+# A holder whose /proc entry is gone has already exited and been reaped: the
+# kernel tears a process's /sys/class/kfd/kfd/proc entry down from a deferred
+# work item, so it outlives the process by a moment. Its parentage can no
+# longer be read, and it is not using the GPU, so it is not contention. Without
+# this, the command's own children (bench_decode.sh's rocminfo probe, the bench
+# binary itself) read as foreign in the sample taken just after they exit, and
+# most attempts were rejected (#2065).
 foreign_holders() {
   local root="$1" entry pid out=() entries
   IFS=, read -r -a entries <<<"$2"
   for entry in ${entries[@]+"${entries[@]}"}; do
     pid="${entry%%:*}"
+    [[ -e "/proc/$pid" ]] || continue
     descends_from "$pid" "$root" || out+=("$entry")
   done
   local IFS=,
