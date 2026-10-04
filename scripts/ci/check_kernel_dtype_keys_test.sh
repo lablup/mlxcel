@@ -141,7 +141,9 @@ fi
 # the `template_args` stay behind. The pin names the file that left, and the
 # helper that arrived.
 dir="$(make_tree launch-moved-to-helper)"
+# The sampler holds a CUDA and a HIP launch (#2064); both move.
 replace_in "$dir/$sampling" 'mlx::core::fast::cuda_kernel(' 'mlxcel::make_jit_kernel('
+replace_in "$dir/$sampling" 'mlx::core::fast::hip_kernel(' 'mlxcel::make_jit_kernel('
 cat >"$dir/src/lib/mlxcel-core/cpp/jit_helper.cpp" <<'CPP'
 mlx::core::fast::CustomKernelFunction make_jit_kernel(const std::string& name) {
     return mlx::core::fast::cuda_kernel(name, {"x"}, {"out"}, "");
@@ -156,6 +158,7 @@ fi
 # A launch that is commented out is not a launch: its file leaves scope.
 dir="$(make_tree launch-commented-out)"
 replace_in "$dir/$sampling" 'kernel = mlx::core::fast::cuda_kernel(' '// kernel = mlx::core::fast::cuda_kernel('
+replace_in "$dir/$sampling" 'kernel = mlx::core::fast::hip_kernel(' '// kernel = mlx::core::fast::hip_kernel('
 if run_case launch-commented-out "$dir" 1; then
   assert_contains launch-commented-out "$sampling: pinned in EXPECTED_IN_SCOPE but no longer calls"
 fi

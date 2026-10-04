@@ -149,7 +149,9 @@ namespace mlxcel::turbo {
 inline constexpr int REJECTION_MAX_ROUNDS = 32;
 
 // True when the rejection kernel can run on the active backend: a GPU default
-// device plus an available Metal or CUDA backend. A CPU-only build, or a
+// device whose backend has a port in `rejection_ports()` (Metal, CUDA and, since
+// #2064, ROCm). The predicate reads the same table as the dispatch, so the two
+// cannot disagree. A CPU-only build, or a
 // process under `MLXCEL_DEVICE=cpu`, returns false and the caller keeps the
 // `argpartition` chain.
 bool rejection_sample_supported();

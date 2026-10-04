@@ -15,6 +15,7 @@
 #include "sampling.h"
 #include "gpu_backend.h"
 #include "kernel_port.h"
+#include "sampling_gumbel_hip.h"
 
 #include <mlx/fast.h>
 #include <mlx/ops.h>
@@ -29,6 +30,7 @@
 
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -351,6 +353,39 @@ inline GumbelKernelHolderCuda& get_gumbel_kernel_cuda() {
     return *holder;
 }
 
+// HIP counterpart (issue #2064), reached only on a ROCm build. The body lives
+// in `sampling_gumbel_hip.h`; the launch stays in `gumbel_max_sample` below,
+// shared with the other two ports. On a build without the ROCm backend
+// `fast::hip_kernel` is not declared, and `gumbel_ports()` never resolves this
+// entry there (`select_kernel_port` reads the running backend), so the throw is
+// unreachable and exists only to keep the table shape uniform.
+struct GumbelKernelHolderHip {
+    std::optional<mlx::core::fast::CustomKernelFunction> kernel;
+    std::once_flag init_flag;
+
+    mlx::core::fast::CustomKernelFunction& get() {
+        std::call_once(init_flag, [this] {
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+            kernel = mlx::core::fast::hip_kernel(
+                "mlxcel_gumbel_max_sample",
+                {"logits", "rng_key", "temp"},
+                {"vals", "idxs"},
+                std::string(GUMBEL_MAX_SAMPLE_HIP_SOURCE));
+#else
+            throw std::runtime_error(
+                "[gumbel_max_sample] this build has no ROCm backend");
+#endif
+        });
+        return *kernel;
+    }
+};
+
+inline GumbelKernelHolderHip& get_gumbel_kernel_hip() {
+    // Leaked on purpose, for the reason given at `get_gumbel_kernel`.
+    static GumbelKernelHolderHip* holder = new GumbelKernelHolderHip();
+    return *holder;
+}
+
 
 // This kernel's ports, in one place. `has_kernel_port` and
 // `select_kernel_port` both read it, so the support predicate below and the
@@ -363,8 +398,9 @@ const KernelPorts& gumbel_ports() {
         .cuda = +[]() -> mlx::core::fast::CustomKernelFunction& {
             return get_gumbel_kernel_cuda().get();
         },
-        // No HIP port yet (#1814).
-        .rocm = nullptr,
+        .rocm = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_gumbel_kernel_hip().get();
+        },
     };
     return ports;
 }

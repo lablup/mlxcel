@@ -1824,6 +1824,7 @@ std::unique_ptr<MlxArray> random_bernoulli_p(float p, rust::Slice<const int32_t>
 std::unique_ptr<MlxArray> random_randint(int32_t low, int32_t high, rust::Slice<const int32_t> shape, int32_t dtype, const MlxArray* key);
 std::unique_ptr<MlxArray> random_truncated_normal(float lower, float upper, rust::Slice<const int32_t> shape, int32_t dtype, const MlxArray* key);
 std::unique_ptr<MlxArray> random_gumbel(rust::Slice<const int32_t> shape, int32_t dtype, const MlxArray* key);
+std::unique_ptr<MlxArray> random_bits(rust::Slice<const int32_t> shape, int32_t width, const MlxArray* key);
 std::unique_ptr<MlxArray> random_laplace(rust::Slice<const int32_t> shape, int32_t dtype, const MlxArray* key);
 std::unique_ptr<MlxArray> random_permutation(int32_t x, const MlxArray* key);
 std::unique_ptr<MlxArray> random_permutation_array(const MlxArray& a, int32_t axis, const MlxArray* key);

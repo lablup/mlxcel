@@ -301,8 +301,10 @@ fn main() {
     // Gumbel-max categorical sampling kernel launcher (#900).
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sampling.h");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sampling.cpp");
+    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sampling_gumbel_hip.h");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sampling_rejection.h");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sampling_rejection.cpp");
+    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sampling_rejection_hip.h");
     // Fused residual-add RMSNorm and fused RoPE + KV-append kernel launchers (#905).
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/fused_norm.h");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/fused_norm.cpp");

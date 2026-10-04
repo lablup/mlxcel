@@ -5307,7 +5307,7 @@ namespace {
 }
 
 // True when the no-filter sampling path will use the Gumbel-max kernel: the
-// backend supports it (GPU default device with Metal or CUDA available) and
+// default device is the GPU, its backend has a port in `gumbel_ports()`, and
 // `MLXCEL_SAMPLING_GUMBEL` is not falsy.
 bool sampling_gumbel_available() {
     static const bool env_enabled = parse_sampling_gumbel_env();
@@ -7391,6 +7391,14 @@ std::unique_ptr<MlxArray> random_truncated_normal(float lower, float upper, rust
 std::unique_ptr<MlxArray> random_gumbel(rust::Slice<const int32_t> shape, int32_t dtype, const MlxArray* key) {
     std::optional<mlx::core::array> opt_key = key ? std::make_optional(key->inner) : std::nullopt;
     return std::make_unique<MlxArray>(mlx::core::random::gumbel(to_shape(shape), to_dtype(dtype), opt_key));
+}
+
+// Raw random words from `random::bits`. With a null key it draws from the
+// default key sequence exactly as the fused samplers' launchers do, which is
+// how `sampling_fixed_key_tests` recovers the key a launch will use (#2064).
+std::unique_ptr<MlxArray> random_bits(rust::Slice<const int32_t> shape, int32_t width, const MlxArray* key) {
+    std::optional<mlx::core::array> opt_key = key ? std::make_optional(key->inner) : std::nullopt;
+    return std::make_unique<MlxArray>(mlx::core::random::bits(to_shape(shape), width, opt_key));
 }
 
 std::unique_ptr<MlxArray> random_laplace(rust::Slice<const int32_t> shape, int32_t dtype, const MlxArray* key) {
