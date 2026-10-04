@@ -1708,6 +1708,11 @@ void ssm_update_kernel(
 ) {
     using namespace mlx::core;
 
+    if (hidden_states.inner.ndim() != 4 || B.inner.ndim() != 4) {
+        throw std::invalid_argument(
+            "[ssm_update_kernel] hidden_states and B must be rank 4 "
+            "([batch, 1, heads, head_dim] and [batch, 1, groups, state])");
+    }
     auto shape = hidden_states.inner.shape();
     int n = shape[0];  // batch
     int h = shape[2];  // num_heads
@@ -1715,6 +1720,25 @@ void ssm_update_kernel(
     auto b_shape = B.inner.shape();
     int hb = b_shape[2]; // n_groups
     int ds = b_shape[3]; // state_dim
+    // The kernel trusts these shapes as template constants and indexes raw
+    // buffers with them, so a checkpoint config the graph path would reject
+    // inside reshape/repeat (a state width that is not a multiple of 32, heads
+    // that do not divide into groups, a mismatched state) would read or leave
+    // unwritten GPU memory instead. Refuse it here; the bridge returns the
+    // throw to Rust as an error.
+    if (C.inner.shape() != B.inner.shape() || shape[1] != 1 ||
+        b_shape[0] != n || b_shape[1] != 1 || hb <= 0 || h % hb != 0 ||
+        ds < 32 || ds % 32 != 0 ||
+        A_log.inner.size() != static_cast<size_t>(h) ||
+        D.inner.size() != static_cast<size_t>(h) ||
+        dt.inner.size() != static_cast<size_t>(n) * h ||
+        state_in.inner.size() != static_cast<size_t>(n) * h * dh * ds) {
+        throw std::invalid_argument(
+            "[ssm_update_kernel] unsupported shapes for the fused SSM step "
+            "(single token, state width a multiple of 32, heads divisible by "
+            "groups, state [batch, heads, head_dim, state]); use the ssm_step "
+            "graph path");
+    }
     int g = h / hb;      // heads per group
 
     auto input_type = hidden_states.inner.dtype();

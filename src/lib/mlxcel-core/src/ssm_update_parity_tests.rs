@@ -358,6 +358,56 @@ fn ssm_update_kernel_keys_on_a_log_dtype() {
     check(&GRANITE_TINY, 2072, dtype::BFLOAT16, dtype::FLOAT32);
 }
 
+/// Shapes the kernel cannot index safely are refused on the host, as an error
+/// the caller sees, rather than launched: a state width that is not a multiple
+/// of 32 would leave state columns unwritten, and heads that do not divide
+/// into groups would read past B and C.
+#[test]
+fn ssm_update_kernel_refuses_unsupported_shapes() {
+    let _guard = crate::test_support::env_lock::env_lock();
+    if skip() {
+        return;
+    }
+    let bad = [
+        Shape {
+            name: "state 48",
+            state_dim: 48,
+            ..PADDED_ROWS
+        },
+        Shape {
+            name: "4 heads in 3 groups",
+            groups: 3,
+            ..PADDED_ROWS
+        },
+    ];
+    for s in &bad {
+        let case = make_case(s, 2074, dtype::FLOAT32, dtype::FLOAT32);
+        let mut out = UniquePtr::null();
+        let mut state = UniquePtr::null();
+        let result = ssm_update_kernel(
+            &case.x,
+            &case.a_log,
+            &case.b,
+            &case.c,
+            &case.d,
+            &case.dt,
+            &case.dt_bias,
+            &case.state,
+            s.dt_limits.0,
+            s.dt_limits.1,
+            &mut out,
+            &mut state,
+        );
+        let err = result.expect_err(s.name);
+        assert!(
+            err.what().contains("unsupported shapes"),
+            "{}: unexpected error {}",
+            s.name,
+            err.what()
+        );
+    }
+}
+
 /// `MLXCEL_SSM_KERNEL=0` and its older alias `MLXCEL_SSM_CUDA_KERNEL=0` each
 /// turn the predicate off, on every backend with a port.
 #[test]
@@ -367,6 +417,9 @@ fn ssm_kernel_kill_switches_turn_predicate_off() {
         .iter()
         .map(|name| (*name, std::env::var(name).ok()))
         .collect();
+    // SAFETY (every env mutation in this test): the crate-wide env_lock guard
+    // is held for the whole window, and every other test in this crate that
+    // mutates the environment takes the same lock.
     for name in KILL_SWITCHES {
         unsafe { std::env::remove_var(name) };
     }
