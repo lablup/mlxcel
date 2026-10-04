@@ -1446,8 +1446,6 @@ namespace {
 // holders are defined further down, after this function).
 mlx::core::fast::CustomKernelFunction& moe_fc1_relu2_kernel_fn();
 mlx::core::fast::CustomKernelFunction& moe_down_kernel_fn();
-const mlxcel::KernelPorts& moe_fc1_relu2_ports();
-const mlxcel::KernelPorts& moe_down_ports();
 }  // namespace
 
 std::unique_ptr<MlxArray> fused_moe_forward(
@@ -1534,20 +1532,28 @@ std::unique_ptr<MlxArray> fused_moe_forward(
     // where that narrower routed-expert slice dominates; the default path below
     // stays on gather_qmm.
     //
-    // The opt-in needs both kernels it launches. On a backend missing either
-    // port (ROCm has the down port since #2065 but no fc1_relu2 port until
-    // #2069) it declines to the gather_qmm branch below rather than reaching
+    // The opt-in needs both kernels it launches (Metal and ROCm have both
+    // since #2069). On a backend missing either port (CUDA has no fc1_relu2
+    // port) it declines to the gather_qmm branch below rather than reaching
     // `select_kernel_port` and refusing the whole forward.
     bool fused_relu2 = x_shape[0] == 1 && (bits == 4 || bits == 8) &&
         std::getenv("MLXCEL_FUSED_MOE_RELU2") &&
-        mlxcel::has_kernel_port(moe_fc1_relu2_ports()) &&
-        mlxcel::has_kernel_port(moe_down_ports());
+        fused_moe_relu2_kernels_available();
     array result = x.inner;  // placeholder; overwritten in both branches
     if (fused_relu2) {
         int din = (int)x_shape[1];
         int dff = (int)fc1_weight.inner.shape()[1];
         int k = top_k;
+        // Rows per block, as in run_fused_moe_two_kernel, including its ROCm
+        // default of 2 (#2065): both kernels of this branch share `sgy`, and
+        // the down kernel is the one #2065 measured slower than gather_qmm at
+        // 8 on gfx1151. The build flag is the backend in a ROCm build, so no
+        // runtime backend comparison is needed.
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+        int sgy = 2;
+#else
         int sgy = 8;
+#endif
         if (const char* s = std::getenv("MLXCEL_FUSED_MOE_SGY")) {
             int v = std::atoi(s);
             if (v >= 1 && v <= 32) sgy = v;
@@ -2792,16 +2798,94 @@ const mlxcel::KernelPorts& moe_down_ports() {
         return holder;
     }
 
-// This kernel's ports, in one place (#1801). Metal only: the fc1 ReLU-squared MoE kernel is Metal only.
+    // ROCm port of the fc1 + relu² kernel (#2069), written from the Metal
+    // source above in the shape of MOE_GATEUP_HIP_SOURCE: one 32-lane
+    // wavefront per output row on threadIdx.x, `sgy` rows per block on
+    // threadIdx.y, the expert slot on grid.z. `simd_sum` becomes the 16..1
+    // `__shfl_down` fold with the width stated, and lane 0 holds the sum. The
+    // template args are the Metal ones (T, K, Din, Dff, bits, group_size), so
+    // the hipRTC cache key carries the activation dtype `T`; `indices` is
+    // always uint32 and the weights always packed uint32.
+    static const char* MOE_FC1_RELU2_HIP_SOURCE = R"(
+        // 32-lane wavefront only; see MOE_GATEUP_HIP_SOURCE for why the
+        // explicit shuffle width, not this guard, is what holds on AMD
+        // clang 23.
+        #if defined(__AMDGCN_WAVEFRONT_SIZE__) && __AMDGCN_WAVEFRONT_SIZE__ != 32
+        #error "moe_fc1_relu2_kernel_hip assumes a 32-lane wavefront"
+        #endif
+        #if defined(__AMDGCN_WAVEFRONT_SIZE) && __AMDGCN_WAVEFRONT_SIZE != 32
+        #error "moe_fc1_relu2_kernel_hip assumes a 32-lane wavefront"
+        #endif
+        uint32_t lane  = threadIdx.x;                          // 0..31 (one wavefront)
+        uint32_t f     = blockIdx.y * blockDim.y + threadIdx.y; // output row 0..Dff-1
+        uint32_t eslot = blockIdx.z;                           // 0..K-1
+        if (f >= (uint32_t)Dff) return;                        // wavefront-uniform
+        uint32_t e = indices[eslot];
+
+        constexpr uint32_t vpw   = 32u / bits;
+        constexpr uint32_t wmask = (1u << bits) - 1u;
+        constexpr uint32_t Din_p = Din / vpw;
+        constexpr uint32_t G     = Din / group_size;
+
+        uint32_t row = e * Dff + f;
+        const uint32_t* wr = fc1_w + row * Din_p;
+        const T*        sr = fc1_s + row * G;
+        const T*        br = fc1_b + row * G;
+        float acc = 0.0f;
+        for (uint32_t p = lane; p < Din_p; p += 32u) {
+            uint32_t base = p * vpw;
+            uint32_t grp  = base / group_size;
+            float s = (float)sr[grp], b = (float)br[grp];
+            uint32_t pk = wr[p];
+            for (uint32_t j = 0; j < vpw; ++j) {
+                acc += (float)x[base + j] * ((float)((pk >> (j * bits)) & wmask) * s + b);
+            }
+        }
+        #pragma unroll
+        for (int o = 16; o > 0; o >>= 1) acc += __shfl_down(acc, o, 32);
+        if (lane == 0u) {
+            float r = acc > 0.0f ? acc : 0.0f;   // relu
+            act_g[eslot * Dff + f] = r * r;       // ^2
+        }
+    )";
+
+    struct MoeFc1Relu2KernelHolderHip {
+        std::optional<mlx::core::fast::CustomKernelFunction> kernel;
+        bool initialized = false;
+        mlx::core::fast::CustomKernelFunction& get() {
+            if (!initialized) {
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+                kernel = mlx::core::fast::hip_kernel(
+                    "moe_fc1_relu2_kernel_hip",
+                    {"x", "indices", "fc1_w", "fc1_s", "fc1_b"},
+                    {"act_g"},
+                    MOE_FC1_RELU2_HIP_SOURCE);
+#else
+                throw std::runtime_error(
+                    "[fused_moe_forward] this build has no ROCm backend");
+#endif
+                initialized = true;
+            }
+            return *kernel;
+        }
+    };
+    static MoeFc1Relu2KernelHolderHip& get_moe_fc1_relu2_kernel_hip() {
+        static MoeFc1Relu2KernelHolderHip holder;
+        return holder;
+    }
+
+// This kernel's ports, in one place (#1801). Metal and ROCm (#2069).
 const mlxcel::KernelPorts& moe_fc1_relu2_ports() {
     static const mlxcel::KernelPorts ports{
         .metal = +[]() -> mlx::core::fast::CustomKernelFunction& {
             return get_moe_fc1_relu2_kernel().get();
         },
-        // No CUDA or HIP port yet (#1814). Written out so that adding one is a
-        // line here rather than a restructure at the call site.
+        // No CUDA port (#1814). Written out so that adding one is a line here
+        // rather than a restructure at the call site.
         .cuda = nullptr,
-        .rocm = nullptr,
+        .rocm = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_moe_fc1_relu2_kernel_hip().get();
+        },
     };
     return ports;
 }
@@ -2827,6 +2911,14 @@ bool fused_moe_kernels_available() {
 
 bool moe_down_kernel_available() {
     return mlxcel::has_kernel_port(moe_down_ports());
+}
+
+// Whether `fused_moe_forward`'s opt-in `MLXCEL_FUSED_MOE_RELU2` branch can run:
+// it launches the fc1 squared-ReLU kernel and the down kernel, so it needs
+// both ports. Metal and ROCm (#2069); CUDA has no fc1_relu2 port.
+bool fused_moe_relu2_kernels_available() {
+    return mlxcel::has_kernel_port(moe_fc1_relu2_ports()) &&
+        mlxcel::has_kernel_port(moe_down_ports());
 }
 
 namespace {

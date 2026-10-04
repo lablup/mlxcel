@@ -2364,6 +2364,13 @@ mod ffi {
         /// the fc1 squared-ReLU port and declines to `gather_qmm` without it.
         fn moe_down_kernel_available() -> bool;
 
+        /// True when this backend has both kernels of [`fused_moe_forward`]'s
+        /// opt-in `MLXCEL_FUSED_MOE_RELU2` branch (the fc1 squared-ReLU kernel
+        /// and the down kernel), that is Metal or ROCm (issue #2069). The
+        /// branch reads this same predicate, so where it is false the flag
+        /// leaves the `gather_qmm` routed path in place.
+        fn fused_moe_relu2_kernels_available() -> bool;
+
         /// Whether `quantized_matmul` for this transposed affine projection
         /// runs the same dense GEMM as `dequantize` + `matmul`, so the two
         /// return the same bytes (lablup/mlxcel#2081). Reads the
@@ -3966,6 +3973,13 @@ mod sdpa_plan_bucket_tests;
 #[cfg(test)]
 #[path = "fused_moe_parity_tests.rs"]
 mod fused_moe_parity_tests;
+
+// Parity for `fused_moe_forward`'s opt-in squared-ReLU kernel branch
+// (`MLXCEL_FUSED_MOE_RELU2`, ROCm port in #2069) against a dense f32 reference
+// and the `gather_qmm` branch. Metal and ROCm; skips elsewhere.
+#[cfg(test)]
+#[path = "fused_moe_relu2_parity_tests.rs"]
+mod fused_moe_relu2_parity_tests;
 
 // Statistical-correctness, determinism, and routing tests for the Gumbel-max
 // sampling kernel (#900). The kernel replaces `random::categorical` with a

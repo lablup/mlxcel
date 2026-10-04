@@ -1427,6 +1427,10 @@ bool bitlinear_kernel_available();
 // reuses. Metal, CUDA and ROCm.
 bool fused_moe_kernels_available();
 bool moe_down_kernel_available();
+// Both kernels of `fused_moe_forward`'s opt-in `MLXCEL_FUSED_MOE_RELU2` branch:
+// the fc1 squared-ReLU kernel and the down kernel. Metal and ROCm
+// (lablup/mlxcel#2069).
+bool fused_moe_relu2_kernels_available();
 
 // Whether `quantized_matmul(x, weight, scales, biases)` with a transposed
 // affine weight runs the same dense GEMM that `dequantize` + `matmul` runs, so

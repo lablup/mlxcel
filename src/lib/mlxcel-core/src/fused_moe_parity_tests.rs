@@ -61,7 +61,7 @@ use super::*;
 /// `([e, rows, cols/pack] u32, [e, rows, cols/gs] bf16, [e, rows, cols/gs]
 /// bf16)`. Quantization groups run along `cols`, so quantizing the flattened
 /// 2-D matrix is exactly equivalent to quantizing each expert separately.
-fn random_quantized_expert_stack(
+pub(crate) fn random_quantized_expert_stack(
     e: i32,
     rows: i32,
     cols: i32,
@@ -331,7 +331,7 @@ fn activation(act: MoeAct, gate: &MlxArray, up: &MlxArray) -> UniquePtr<MlxArray
     }
 }
 
-fn flatten_f32(arr: &MlxArray) -> Vec<f32> {
+pub(crate) fn flatten_f32(arr: &MlxArray) -> Vec<f32> {
     let a = astype(arr, dtype::FLOAT32);
     eval(&a);
     array_to_raw_bytes(&a)
@@ -347,7 +347,7 @@ fn raw_bytes(arr: &MlxArray) -> Vec<u8> {
 
 /// RMS of (a - b) normalized by the RMS of b, plus the max absolute deviation
 /// normalized the same way. Returns (nrms, nmax).
-fn normalized_deviation(a: &[f32], b: &[f32]) -> (f64, f64) {
+pub(crate) fn normalized_deviation(a: &[f32], b: &[f32]) -> (f64, f64) {
     assert_eq!(a.len(), b.len());
     let mut diff_sq = 0f64;
     let mut ref_sq = 0f64;

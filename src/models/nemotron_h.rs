@@ -1350,8 +1350,9 @@ impl NemotronHMoE {
         // the one fused MoE kernel `fused_moe_forward` can reach (its opt-in
         // `MLXCEL_FUSED_MOE_RELU2` branch reuses it for fc2). Metal, CUDA and,
         // since issue #2065, ROCm. The opt-in branch also needs the fc1
-        // squared-ReLU port and checks for both itself, declining to its
-        // `gather_qmm` branch without them; the default branch launches no
+        // squared-ReLU port (Metal, and ROCm since #2069) and checks for both
+        // itself through `fused_moe_relu2_kernels_available()`, declining to
+        // its `gather_qmm` branch without them; the default branch launches no
         // custom kernel today. The term stays rather than being dropped for
         // that reason, so that a kernel added to the default branch later
         // cannot silently widen this gate to a backend without its port; on
