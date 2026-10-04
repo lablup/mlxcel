@@ -64,6 +64,14 @@ fn custom_kernel_gates_decline_on_the_cpu_device() {
         "Mamba must take the graph scan on the CPU device"
     );
     assert!(
+        !mlxcel_core::fused_moe_kernels_available(),
+        "SwitchGLU must take gather_qmm on the CPU device"
+    );
+    assert!(
+        !mlxcel_core::moe_down_kernel_available(),
+        "Nemotron-H must take forward_nonfused on the CPU device"
+    );
+    assert!(
         !mlxcel_core::fused_moe_relu2_kernels_available(),
         "MLXCEL_FUSED_MOE_RELU2 must decline to gather_qmm on the CPU device"
     );

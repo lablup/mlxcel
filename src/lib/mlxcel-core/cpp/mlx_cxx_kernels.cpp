@@ -3098,13 +3098,19 @@ const mlxcel::KernelPorts& moe_fc1_relu2_ports() {
 // Support predicates for the fused decode-MoE kernels (#2065), read from the
 // kernels' own tables so a gate and the dispatch cannot disagree. Metal, CUDA
 // and ROCm today.
+// Both also require the GPU as the default device: custom kernels run only on
+// the GPU stream, so under `MLXCEL_DEVICE=cpu` the fused path would build a
+// launch whose `eval_cpu` throws, after the bridge call had already returned
+// Ok (#2069 review; the port tables alone say nothing about the device).
 bool fused_moe_kernels_available() {
     return mlxcel::has_kernel_port(moe_gateup_ports()) &&
-        mlxcel::has_kernel_port(moe_down_ports());
+        mlxcel::has_kernel_port(moe_down_ports()) &&
+        mlx::core::default_device() == mlx::core::Device::gpu;
 }
 
 bool moe_down_kernel_available() {
-    return mlxcel::has_kernel_port(moe_down_ports());
+    return mlxcel::has_kernel_port(moe_down_ports()) &&
+        mlx::core::default_device() == mlx::core::Device::gpu;
 }
 
 // Whether `fused_moe_forward`'s opt-in `MLXCEL_FUSED_MOE_RELU2` branch can run:
