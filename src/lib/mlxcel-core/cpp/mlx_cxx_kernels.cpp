@@ -3595,8 +3595,10 @@ void fused_mamba2_forward(
 //   has no bias, exactly what `fast::layer_norm` passes), so the compiler
 //   sees the same expression.
 // Covers the single-row kernel only (D <= 6656, MLX's `looped_limit`); the
-// caller falls back to the unfused pair above that, off Metal, or on mixed
-// dtypes. `residual_add3_layer_norm_matches_the_unfused_pair` pins the identity.
+// caller falls back to the unfused pair above that, on a backend without a
+// port (CUDA, CPU), or on mixed dtypes. ROCm has its own port (#2069, see
+// ADD3_LN_HIP_SOURCE), byte-identical to ROCm's pair rather than to Metal's.
+// `residual_add3_layer_norm_matches_the_unfused_pair` pins the identity.
 // Used by: Cohere2
 namespace {
     static const char* ADD3_LN_METAL_HEADER = R"(
@@ -3713,19 +3715,184 @@ namespace {
         return holder;
     }
 
-// This kernel's ports, in one place (#1801). Metal only: the fused add3 + LayerNorm is a Metal JIT kernel.
+    // ROCm port (#2069). Byte identity is with the ROCm unfused pair, so the
+    // structure here is not the Metal kernel's: on ROCm `compiled_add3` is a
+    // hipRTC elementwise kernel whose Add widens to float and rounds each sum
+    // to T (the overlay's compiled.cpp), and `fast::layer_norm` is the
+    // overlay's `layer_norm_kernel<T, 256, 4>` (layer_norm.hip), which this
+    // reproduces: 256 threads per row, each accumulating its strided groups
+    // of 4 elements in order, `__shfl_xor` folds of 16..1 inside each 32-lane
+    // wavefront, the eight wavefront sums folded again by wavefront 0, the
+    // centred sum of squares the same way, `1.0f / sqrtf(var / D + eps)`, and
+    // `T(w * norm + b)` with the bias read from memory (a zero with stride 0
+    // when the norm has no bias, as `fast::layer_norm` passes). The
+    // expressions are written as layer_norm.hip writes them, so hipRTC's
+    // contraction choices (both compile device code at -O3 with the default
+    // fp-contract) land the same way. The residual is kept in registers
+    // instead of being re-read from `x_out`; its values are the T values
+    // written there. `D <= 6656` (the caller's cap) bounds the register array
+    // at 28 floats per thread.
+    static const char* ADD3_LN_HIP_SOURCE = R"(
+        // The folds below assume 32-lane wavefronts and a 256-thread block of
+        // eight of them, as layer_norm.hip's WARP_SIZE does on RDNA. Every
+        // shuffle states width 32; see MOE_GATEUP_HIP_SOURCE for why the
+        // guard alone is inert on AMD clang 23.
+        #if defined(__AMDGCN_WAVEFRONT_SIZE__) && __AMDGCN_WAVEFRONT_SIZE__ != 32
+        #error "mlxcel_add3_layer_norm_hip assumes a 32-lane wavefront"
+        #endif
+        #if defined(__AMDGCN_WAVEFRONT_SIZE) && __AMDGCN_WAVEFRONT_SIZE != 32
+        #error "mlxcel_add3_layer_norm_hip assumes a 32-lane wavefront"
+        #endif
+        constexpr int BLOCK_DIM = 256;
+        constexpr int N_READS = 4;
+        constexpr int WAVE = 32;
+        constexpr int CHUNKS = (D + BLOCK_DIM * N_READS - 1) / (BLOCK_DIM * N_READS);
+        __shared__ float shared_sum[BLOCK_DIM / WAVE + 1];
+
+        const size_t row = blockIdx.x;
+        const size_t base = row * D;
+        const int lane = threadIdx.x % WAVE;
+        const int warp_id = threadIdx.x / WAVE;
+
+        // Residual in T, as compiled_add3 rounds it: (a + b) then + x.
+        float xv[CHUNKS * N_READS];
+        #pragma unroll
+        for (int c = 0; c < CHUNKS; ++c) {
+            const int i = threadIdx.x * N_READS + c * BLOCK_DIM * N_READS;
+            #pragma unroll
+            for (int j = 0; j < N_READS; ++j) {
+                if (i + j < D) {
+                    const size_t k = base + i + j;
+                    T s = T(static_cast<float>(ra[k]) + static_cast<float>(rb[k]));
+                    T xn = T(static_cast<float>(s) + static_cast<float>(rx[k]));
+                    x_out[k] = xn;
+                    xv[c * N_READS + j] = static_cast<float>(xn);
+                }
+            }
+        }
+
+        // Sum for mean.
+        float sum = 0;
+        #pragma unroll
+        for (int c = 0; c < CHUNKS; ++c) {
+            const int i = threadIdx.x * N_READS + c * BLOCK_DIM * N_READS;
+            #pragma unroll
+            for (int j = 0; j < N_READS && i + j < D; ++j) {
+                sum += xv[c * N_READS + j];
+            }
+        }
+        float warp_sum = sum;
+        for (int offset = WAVE / 2; offset > 0; offset /= 2) {
+            warp_sum += __shfl_xor(warp_sum, offset, WAVE);
+        }
+        if (lane == 0) {
+            shared_sum[warp_id] = warp_sum;
+        }
+        __syncthreads();
+        if (warp_id == 0) {
+            sum = (lane < (BLOCK_DIM + WAVE - 1) / WAVE) ? shared_sum[lane] : 0;
+            for (int offset = WAVE / 2; offset > 0; offset /= 2) {
+                sum += __shfl_xor(sum, offset, WAVE);
+            }
+        }
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            shared_sum[0] = sum;
+        }
+        __syncthreads();
+        float mean = shared_sum[0] / D;
+
+        // Centred sum of squares.
+        float var_sum = 0;
+        #pragma unroll
+        for (int c = 0; c < CHUNKS; ++c) {
+            const int i = threadIdx.x * N_READS + c * BLOCK_DIM * N_READS;
+            #pragma unroll
+            for (int j = 0; j < N_READS && i + j < D; ++j) {
+                float t = xv[c * N_READS + j] - mean;
+                var_sum += t * t;
+            }
+        }
+        warp_sum = var_sum;
+        for (int offset = WAVE / 2; offset > 0; offset /= 2) {
+            warp_sum += __shfl_xor(warp_sum, offset, WAVE);
+        }
+        if (lane == 0) {
+            shared_sum[warp_id] = warp_sum;
+        }
+        __syncthreads();
+        if (warp_id == 0) {
+            var_sum = (lane < (BLOCK_DIM + WAVE - 1) / WAVE) ? shared_sum[lane] : 0;
+            for (int offset = WAVE / 2; offset > 0; offset /= 2) {
+                var_sum += __shfl_xor(var_sum, offset, WAVE);
+            }
+        }
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            shared_sum[0] = var_sum;
+        }
+        __syncthreads();
+        float normalizer = 1.0f / sqrtf(shared_sum[0] / D + eps[0]);
+
+        #pragma unroll
+        for (int c = 0; c < CHUNKS; ++c) {
+            const int i = threadIdx.x * N_READS + c * BLOCK_DIM * N_READS;
+            #pragma unroll
+            for (int j = 0; j < N_READS && i + j < D; ++j) {
+                int idx = i + j;
+                float norm = (xv[c * N_READS + j] - mean) * normalizer;
+                float wi = static_cast<float>(w[idx * W_STRIDE]);
+                float bi = static_cast<float>(bias[idx * B_STRIDE]);
+                h_out[base + idx] = static_cast<T>(wi * norm + bi);
+            }
+        }
+    )";
+
+    struct Add3LayerNormKernelHolderHip {
+        std::optional<mlx::core::fast::CustomKernelFunction> kernel;
+        bool initialized = false;
+        mlx::core::fast::CustomKernelFunction& get() {
+            if (!initialized) {
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+                kernel = mlx::core::fast::hip_kernel(
+                    "mlxcel_add3_layer_norm_hip",
+                    {"ra", "rb", "rx", "w", "bias", "eps"},
+                    {"x_out", "h_out"},
+                    ADD3_LN_HIP_SOURCE);
+#else
+                throw std::runtime_error(
+                    "[fused_add3_layer_norm] this build has no ROCm backend");
+#endif
+                initialized = true;
+            }
+            return *kernel;
+        }
+    };
+    static Add3LayerNormKernelHolderHip& get_add3_layer_norm_kernel_hip() {
+        static Add3LayerNormKernelHolderHip holder;
+        return holder;
+    }
+
+// This kernel's ports, in one place (#1801). Metal and ROCm (#2069); each is
+// byte-identical to its own backend's unfused pair, not to the other's.
 const mlxcel::KernelPorts& add3_layer_norm_ports() {
     static const mlxcel::KernelPorts ports{
         .metal = +[]() -> mlx::core::fast::CustomKernelFunction& {
             return get_add3_layer_norm_kernel().get();
         },
-        // No CUDA or HIP port yet (#1814). Written out so that adding one is a
-        // line here rather than a restructure at the call site.
+        // No CUDA port (#1814). Written out so that adding one is a line here
+        // rather than a restructure at the call site.
         .cuda = nullptr,
-        .rocm = nullptr,
+        .rocm = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_add3_layer_norm_kernel_hip().get();
+        },
     };
     return ports;
 }
+}
+
+bool fused_add3_layer_norm_available() {
+    return mlxcel::has_kernel_port(add3_layer_norm_ports());
 }
 
 void fused_add3_layer_norm(
@@ -3743,9 +3910,18 @@ void fused_add3_layer_norm(
     const auto& shape = x.inner.shape();
     const int D = shape.back();
     const int64_t rows = x.inner.size() / D;
+    // Threads per row. Metal: MLX's single-row layer_norm geometry, 8 reads
+    // per thread. ROCm: the overlay's layer_norm_kernel block of 256, which
+    // the HIP port's reduction tree depends on. A ROCm build has no Metal
+    // backend, so the build flag is the backend here, as in
+    // run_fused_moe_two_kernel.
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+    const int tg = 256;
+#else
     const int simd = 32;
     const int n_reads = 8;
     const int tg = simd * (((D + n_reads - 1) / n_reads + simd - 1) / simd);
+#endif
 
     // The zero `fast::layer_norm` passes when there is no bias, read through a
     // stride-0 pointer as upstream does. One element rather than 0-d, because

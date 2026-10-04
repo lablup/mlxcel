@@ -694,10 +694,15 @@ mod ffi {
         /// output = silu(gate) * x
         fn compiled_swiglu_activation(gate: &MlxArray, x: &MlxArray) -> UniquePtr<MlxArray>;
 
-        /// Residual add fused with the next LayerNorm in one Metal launch:
+        /// True when this backend has a port of [`fused_add3_layer_norm`],
+        /// that is Metal or ROCm (issue #2069). Read from the kernel's port
+        /// table, the one the launcher dispatches through.
+        fn fused_add3_layer_norm_available() -> bool;
+
+        /// Residual add fused with the next LayerNorm in one kernel launch:
         /// `x_out = (a + b) + x`, `h_out = layer_norm(x_out, weight, bias)`.
-        /// Byte-identical to `compiled_add3` + `fast_layer_norm`. Metal only,
-        /// last dimension <= 6656; call it through
+        /// Byte-identical to `compiled_add3` + `fast_layer_norm` on the same
+        /// backend. Metal and ROCm, last dimension <= 6656; call it through
         /// [`crate::layers::residual_add3_layer_norm`], which checks both.
         /// Used by: Cohere2
         unsafe fn fused_add3_layer_norm(

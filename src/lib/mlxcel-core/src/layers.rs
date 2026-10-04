@@ -1125,8 +1125,9 @@ impl LayerNorm {
 }
 
 /// Largest normalized dimension MLX's single-row `layer_norm` kernel handles
-/// (`looped_limit` in `mlx/backend/metal/normalization.cpp`). The fused kernel
-/// copies that kernel, so it covers the same range.
+/// (`looped_limit` in `mlx/backend/metal/normalization.cpp`). The Metal kernel
+/// copies that kernel, so it covers the same range. The ROCm port (#2069) keeps
+/// its row in registers sized from this bound (28 floats per thread).
 const FUSED_ADD3_LAYER_NORM_MAX_DIM: i32 = 6656;
 
 fn fused_add3_layer_norm_enabled() -> bool {
@@ -1145,9 +1146,10 @@ fn fused_add3_layer_norm_enabled() -> bool {
 /// A parallel-residual block ends in `(attn + mlp) + x` and the next block
 /// starts with a LayerNorm of that sum. Unfused that is a compiled add kernel
 /// and a norm kernel, two dependent dispatches (two barrier levels) per layer
-/// boundary on the decode critical path. On Metal this runs one kernel whose
-/// outputs are byte-identical to that pair; elsewhere, or when the shapes and
-/// dtypes fall outside what the kernel covers, it runs the pair itself.
+/// boundary on the decode critical path. On Metal and ROCm (#2069) this runs one
+/// kernel whose outputs are byte-identical to that backend's pair; elsewhere,
+/// or when the shapes and dtypes fall outside what the kernel covers, it runs
+/// the pair itself.
 /// `MLXCEL_FUSED_ADD_NORM=0` forces the unfused pair.
 ///
 /// Used by: Cohere2
@@ -1162,7 +1164,7 @@ pub fn residual_add3_layer_norm(
     let dim = shape.last().copied().unwrap_or(0);
     let weight = norm.weight.as_ref().unwrap();
     let fusable = fused_add3_layer_norm_enabled()
-        && ffi::metal_is_available()
+        && ffi::fused_add3_layer_norm_available()
         && dim > 0
         && dim <= FUSED_ADD3_LAYER_NORM_MAX_DIM
         && matches!(
@@ -1193,8 +1195,9 @@ pub fn residual_add3_layer_norm(
     let mut h = UniquePtr::null();
     // SAFETY: `bias_ptr` is null or points at `norm.bias`, which outlives the call.
     unsafe {
-        ffi::fused_add3_layer_norm(a, b, x, weight, bias_ptr, norm.eps, &mut x_new, &mut h)
-            .expect("the caller checked metal_is_available(), so the launcher must not refuse");
+        ffi::fused_add3_layer_norm(a, b, x, weight, bias_ptr, norm.eps, &mut x_new, &mut h).expect(
+            "the caller checked fused_add3_layer_norm_available(), so the launcher must not refuse",
+        );
     }
     (x_new, h)
 }
@@ -9753,7 +9756,10 @@ mod metal4_attention_switch_tests {
     }
 }
 
-#[cfg(all(test, feature = "metal"))]
+// Not limited to Metal builds since #2069: ROCm has a port too, and elsewhere
+// the wrapper runs the unfused pair, which the comparison then checks against
+// itself.
+#[cfg(test)]
 mod residual_add3_layer_norm_tests {
     use super::*;
     use crate::dtype;
@@ -9767,17 +9773,35 @@ mod residual_add3_layer_norm_tests {
 
     /// The fused kernel's contract is byte identity with `compiled_add3`
     /// followed by `LayerNorm::forward`, the pair it replaces, not closeness.
-    /// Covers f16 and bf16, with and without a bias, several rows, and a width
-    /// that is not a multiple of the 8 reads per thread (the kernel's tail
-    /// branch). A tolerance check here would let a reordered reduction pass.
+    /// Covers f16, bf16 and f32, with and without a bias, several rows, widths
+    /// that are not a multiple of the 8 reads per thread (the Metal kernel's
+    /// tail branch) or of the ROCm port's 1024-element stride, and the widest
+    /// row the kernel takes (`FUSED_ADD3_LAYER_NORM_MAX_DIM`). A tolerance
+    /// check here would let a reordered reduction pass. On a backend with a
+    /// port (Metal, ROCm since #2069) the kernel path must be the one taken.
     #[test]
     fn residual_add3_layer_norm_matches_the_unfused_pair() {
+        use crate::hardware::{GpuBackendKind, gpu_backend_kind};
+        if matches!(
+            gpu_backend_kind(),
+            GpuBackendKind::Metal | GpuBackendKind::Rocm
+        ) {
+            assert!(
+                ffi::fused_add3_layer_norm_available(),
+                "Metal and ROCm have a fused add3 + LayerNorm port"
+            );
+        }
         for (dt, dim, rows, with_bias) in [
             (dtype::FLOAT16, 4096, 1, false),
             (dtype::FLOAT16, 4096, 5, false),
             (dtype::FLOAT16, 4100, 3, true),
             (dtype::BFLOAT16, 4096, 2, true),
             (dtype::FLOAT16, 96, 4, false),
+            (dtype::FLOAT32, 4096, 2, true),
+            (dtype::FLOAT32, 1025, 3, false),
+            (dtype::BFLOAT16, FUSED_ADD3_LAYER_NORM_MAX_DIM, 2, true),
+            (dtype::FLOAT16, FUSED_ADD3_LAYER_NORM_MAX_DIM, 1, false),
+            (dtype::BFLOAT16, 5, 2, false),
         ] {
             let shape = [1, rows, dim];
             let a = normal(&shape, dt, 1, 1.0);

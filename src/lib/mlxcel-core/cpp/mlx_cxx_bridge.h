@@ -572,10 +572,14 @@ std::unique_ptr<MlxArray> compiled_swiglu_activation(
     const MlxArray& x
 );
 
-// Residual add fused with the next LayerNorm, one Metal launch:
+// Residual add fused with the next LayerNorm, one kernel launch:
 // x_out = (a + b) + x, h_out = layer_norm(x_out, weight, bias). Byte-identical to
-// compiled_add3 followed by fast::layer_norm. Metal only, D <= 6656; the Rust
-// wrapper (layers::residual_add3_layer_norm) checks that. Used by: Cohere2
+// compiled_add3 followed by fast::layer_norm on the same backend. Metal and
+// ROCm (lablup/mlxcel#2069), D <= 6656; the Rust wrapper
+// (layers::residual_add3_layer_norm) checks both, the backend through
+// fused_add3_layer_norm_available(), which reads the kernel's port table.
+// Used by: Cohere2
+bool fused_add3_layer_norm_available();
 void fused_add3_layer_norm(
     const MlxArray& a,
     const MlxArray& b,
