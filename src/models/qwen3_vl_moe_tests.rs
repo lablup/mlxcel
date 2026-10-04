@@ -147,7 +147,7 @@ fn qwen3_vl_moe_switch_linear_rejects_quantization_params_that_would_abort_gathe
 /// must now decline the fused kernel, while Dff 64 on the same geometry must
 /// still dispatch it. The positive half launches the kernel, which aborts on a
 /// backend without a port (issue #1803), so it is gated on
-/// `custom_kernels_available()`.
+/// `fused_moe_kernels_available()`.
 #[test]
 fn qwen3_vl_moe_fused_kernel_declines_experts_wider_than_the_dff_bound() {
     if std::env::var_os("MLXCEL_FUSED_MOE_MAX_DFF").is_some() {
@@ -189,7 +189,7 @@ fn qwen3_vl_moe_fused_kernel_declines_experts_wider_than_the_dff_bound() {
         "Dff 8256 is above both default bounds, so the fused kernel must decline"
     );
 
-    if !mlxcel_core::custom_kernels_available() {
+    if !mlxcel_core::fused_moe_kernels_available() {
         eprintln!(
             "skipping the positive control: this backend has no fused MoE kernel port (#1803)"
         );

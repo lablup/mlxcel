@@ -91,16 +91,19 @@ pub fn fused_moe_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED
         .get_or_init(|| fused_moe_enabled_from(std::env::var("MLXCEL_FUSED_MOE").ok().as_deref()))
-        // The fused MoE launcher has Metal and CUDA ports only. This term was
-        // load-bearing for safety under issue #1803, when the bridge function
-        // did not return `Result` and the throw on a portless backend ended the
-        // process; issue #1885 made it `Result`, and `forward_fused_kernel` now
-        // turns that refusal into the `None` it already returns for any
-        // unsupported config. The term stays because deciding here is cheaper
-        // and clearer than building the flattened arguments only to have the
-        // launcher refuse, and it selects the same SwitchGLU path
+        // Reads the fused MoE kernels' own port tables (gate-up and down), so
+        // this gate opens exactly where the launcher has both ports: Metal,
+        // CUDA, and ROCm since issue #2065. It was a backend-wide
+        // `custom_kernels_available()` before, which kept a ROCm port
+        // unreachable. Load-bearing for safety under issue #1803, when the
+        // bridge function did not return `Result`; issue #1885 made it
+        // `Result`, and `forward_fused_kernel` turns a refusal into the `None`
+        // it already returns for any unsupported config. The term stays
+        // because deciding here is cheaper and clearer than building the
+        // flattened arguments only to have the launcher refuse, and on a
+        // backend without the ports it selects the same SwitchGLU path
         // `MLXCEL_FUSED_MOE=0` selects.
-        && mlxcel_core::custom_kernels_available()
+        && mlxcel_core::fused_moe_kernels_available()
 }
 
 /// Pure decision behind [`fused_moe_enabled`], split out so it can be unit-tested

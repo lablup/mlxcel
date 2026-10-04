@@ -351,7 +351,7 @@ fn fused_geometry_block(dff: i32) -> SparseMoeBlock {
 /// guard passes, so the decline above is the bound and nothing else. It
 /// launches the kernel, which on a backend without a port throws across an
 /// infallible bridge and ends the process (issue #1803), so it runs only when
-/// `custom_kernels_available()` says a port exists.
+/// `fused_moe_kernels_available()` says both ports exist.
 #[test]
 fn qwen3_moe_fused_kernel_declines_experts_wider_than_the_dff_bound() {
     if std::env::var_os("MLXCEL_FUSED_MOE_MAX_DFF").is_some() {
@@ -388,7 +388,7 @@ fn qwen3_moe_fused_kernel_declines_experts_wider_than_the_dff_bound() {
         "a single token over too-wide experts must dispatch to gather_qmm"
     );
 
-    if !mlxcel_core::custom_kernels_available() {
+    if !mlxcel_core::fused_moe_kernels_available() {
         eprintln!(
             "skipping the positive control: this backend has no fused MoE kernel port (#1803)"
         );

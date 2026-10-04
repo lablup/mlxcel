@@ -1346,17 +1346,18 @@ impl NemotronHMoE {
             mlxcel_core::copy(x)
         };
 
-        // `custom_kernels_available()` because the fused MoE kernels are Metal
-        // and CUDA only, and nothing else on this path checks for a port:
-        // `fused_moe_forward` has no `metal::is_available()` fallback of its own,
-        // unlike `fused_xielu`. So on a backend without a port the launcher
-        // refuses and this selects `forward_nonfused` instead, which is what the
-        // non-quantized arm below already does (#1801).
-        //
-        // Added defensively rather than in response to an observed abort: no
-        // Nemotron-H checkpoint was available to run on the ROCm host, so the
-        // path was traced rather than executed.
-        let use_fused = !self.has_latent_proj() && mlxcel_core::custom_kernels_available();
+        // `moe_down_kernel_available()` reads the down kernel's own port table,
+        // the one fused MoE kernel `fused_moe_forward` can reach (its opt-in
+        // `MLXCEL_FUSED_MOE_RELU2` branch reuses it for fc2). Metal, CUDA and,
+        // since issue #2065, ROCm. The opt-in branch also needs the fc1
+        // squared-ReLU port and checks for both itself, declining to its
+        // `gather_qmm` branch without them; the default branch launches no
+        // custom kernel today. The term stays rather than being dropped for
+        // that reason, so that a kernel added to the default branch later
+        // cannot silently widen this gate to a backend without its port; on
+        // such a backend this selects `forward_nonfused`, as the non-quantized
+        // arm below already does (#1801).
+        let use_fused = !self.has_latent_proj() && mlxcel_core::moe_down_kernel_available();
 
         // Try fused MoE forward (quantized path only, no latent projection)
         let result = if use_fused {

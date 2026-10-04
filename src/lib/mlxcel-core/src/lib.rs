@@ -2348,6 +2348,20 @@ mod ffi {
         /// its first port.
         fn bitlinear_kernel_available() -> bool;
 
+        /// True when this backend has both fused decode-MoE kernel ports
+        /// (gate-up and down), that is Metal, CUDA or ROCm (issues #1803,
+        /// #2065). Read from the kernels' own port tables, so the
+        /// `MLXCEL_FUSED_MOE` gate and the launchers behind it
+        /// ([`fused_moe_expert_kernel`], [`fused_moe_geglu_kernel`]) cannot
+        /// disagree.
+        fn fused_moe_kernels_available() -> bool;
+
+        /// True when this backend has the fused decode-MoE down kernel port
+        /// alone, which Nemotron-H's [`fused_moe_forward`] reuses for its fc2
+        /// (issue #2065). Its opt-in `MLXCEL_FUSED_MOE_RELU2` branch also needs
+        /// the fc1 squared-ReLU port and declines to `gather_qmm` without it.
+        fn moe_down_kernel_available() -> bool;
+
         /// Whether `quantized_matmul` for this transposed affine projection
         /// runs the same dense GEMM as `dequantize` + `matmul`, so the two
         /// return the same bytes (lablup/mlxcel#2081). Reads the

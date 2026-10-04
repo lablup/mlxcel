@@ -1420,6 +1420,14 @@ std::unique_ptr<MlxArray> rocm_fault_probe_array(int32_t kind);
 // (issues #1803, #1862).
 bool bitlinear_kernel_available();
 
+// Fused decode-MoE port predicates (lablup/mlxcel#2065), read from the
+// kernels' own `KernelPorts` tables through `has_kernel_port`: the gate-up and
+// down pair that `fused_moe_expert_kernel` and `fused_moe_geglu_kernel`
+// launch, and the down kernel alone, which Nemotron-H's `fused_moe_forward`
+// reuses. Metal, CUDA and ROCm.
+bool fused_moe_kernels_available();
+bool moe_down_kernel_available();
+
 // Whether `quantized_matmul(x, weight, scales, biases)` with a transposed
 // affine weight runs the same dense GEMM that `dequantize` + `matmul` runs, so
 // the two return the same bytes (lablup/mlxcel#2081). On ROCm this reads the
