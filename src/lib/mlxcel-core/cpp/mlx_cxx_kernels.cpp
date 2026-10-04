@@ -2848,8 +2848,12 @@ std::unique_ptr<MlxArray> run_fused_moe_two_kernel(
 
     // SGY = simdgroups per threadgroup (one per output row). 8 is the measured
     // sweet spot on qwen3-30b-a3b (M1 Ultra); env-overridable for other
-    // hardware. It feeds an MLX template arg, which JIT-specializes at runtime.
-    int sgy = 8;
+    // hardware. It sets the threadgroup shape, so it never changes the result
+    // (`fused_moe_geglu_kernel_bitwise_invariant_across_sgy`). On ROCm the
+    // default is 2: on gfx1151 qwen3-30b-a3b decode measured about 62.3 tok/s
+    // at 2 against about 59.9 at 8 and about 61 on gather_qmm (#2065), so 8
+    // would make the port slower than the fallback it replaces.
+    int sgy = mlxcel::gpu_kernel_backend() == mlxcel::GpuKernelBackend::Rocm ? 2 : 8;
     if (const char* s = std::getenv("MLXCEL_FUSED_MOE_SGY")) {
         int v = std::atoi(s);
         if (v >= 1 && v <= 32) sgy = v;
