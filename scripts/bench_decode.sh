@@ -1177,6 +1177,15 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Both values end up in the auto-generated filename, so only plain decimals.
+for _sampling_opt in "--temperature:$TEMPERATURE" "--top-p:$TOP_P"; do
+  _value="${_sampling_opt#*:}"
+  if [[ -n "$_value" && ! "$_value" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    echo "Error: ${_sampling_opt%%:*} takes a non-negative decimal, got '$_value'" >&2
+    exit 1
+  fi
+done
+
 if [[ -z "$MODEL_ARG" ]]; then
   echo "Error: model path or 'all' required" >&2
   usage >&2

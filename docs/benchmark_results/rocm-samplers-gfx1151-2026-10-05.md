@@ -8,7 +8,7 @@ The Gumbel-max port exposed a fault in the vendored `fast::hip_kernel`: it decla
 
 ## Environment
 
-AMD Ryzen AI MAX+ 395 with Radeon 8060S (`gfx1151`, RDNA 3.5), 96 GiB VRAM carve-out, Debian 13, ROCm 10.0.0. Before: `main` at `57d8ed29`. After: `85e39880` (the PR's second commit; later commits change docs, the benchmark script and tests only). MLX pin `81ba1c6a`, ROCm overlay `75915908`, `cargo build --release --features rocm`. Checkpoint `mlx-community/Meta-Llama-3.1-8B-Instruct-4bit` (vocab 128256).
+AMD Ryzen AI MAX+ 395 with Radeon 8060S (`gfx1151`, RDNA 3.5), 96 GiB VRAM carve-out, Debian 13, ROCm 10.0.0. Before: `main` at `57d8ed29`. After: `85e39880` (the PR's second commit). Later commits add the benchmark script's `--temperature` / `--top-p` options (the runs used them, with each binary copied into place), docs, tests, a debug log string, two test-only bridge predicates, and the overlay's 0-d argument gating, none of which a sampler launch with 1-d and 2-d inputs reaches. MLX pin `81ba1c6a`, ROCm overlay `75915908`, `cargo build --release --features rocm`. Checkpoint `mlx-community/Meta-Llama-3.1-8B-Instruct-4bit` (vocab 128256).
 
 ## Decode throughput
 
@@ -19,7 +19,9 @@ AMD Ryzen AI MAX+ 395 with Radeon 8060S (`gfx1151`, RDNA 3.5), 96 GiB VRAM carve
 | `--temperature 0.8` | Gumbel-max kernel | 37.91 / 37.67 / 38.32, median 37.91 | 37.59 / 38.26 / 39.25, median 38.26 | 1.01x, inside the spread |
 | `--temperature 0.8 --top-p 0.95` | rejection kernel | 36.26 / 33.98 / 32.81, median 33.98 | 37.82 / 37.56 / 37.06, median 37.56 | 1.11x |
 
-The Gumbel-max row is not a measurable change: the arms overlap and the medians differ by 0.9%, against a spread of 1.7% before and 4.4% after. The top-p row is: every after run is faster than every before run. The before arm also drifted down across its three runs (36.3 to 32.8), which the after arm did not. The cause was not isolated; the chain runs an `argsort` over all 128256 entries per token for top-p, which is what the rejection kernel replaces. Greedy decode reaches neither kernel and was not rerun.
+`compare_bench_csv.py --before <before csv> --after <after csv>`, which keeps the last row per model and so compares the third runs, reports 1.024x and 1.130x.
+
+The Gumbel-max row is not a measurable change: the arms overlap and the medians differ by 0.9%, against a spread of 1.7% before and 4.4% after. The top-p row is: every after run is faster than every before run, by 1.04x, 1.11x and 1.13x in the three interleaved pairs. The before arm also drifted down across its three runs (36.3 to 32.8), which the after arm did not. The cause was not isolated; the chain runs an `argsort` over all 128256 entries per token for top-p, which is what the rejection kernel replaces. Greedy decode reaches neither kernel and was not rerun.
 
 The issue's second command (`--top-k 40 --top-p 0.95`) does not reach the rejection kernel at this vocabulary: the routing policy sends top-k with top-p to the kernel only up to vocab 32768 (`REJECTION_JOINT_VOCAB_MAX`, measured on M1 Ultra), so that configuration runs the stock chain before and after. Top-p alone is the routed configuration and is the one measured. Whether the joint cap is right on ROCm was not measured.
 
@@ -44,5 +46,6 @@ With the Philox counter (`row + 1`) or the drawn word (`c1` for `c0`) changed in
 cargo build --release --features rocm --bin mlxcel --bin mlxcel-bench-decode
 cargo test --release --features rocm -p mlxcel-core --lib sampling_ -- --test-threads=1
 cargo test --release --features rocm --test sampling_gumbel_kill_switch --test sampling_rejection_kill_switch
+python3 scripts/compare_bench_csv.py --before benchmarks/rocm_strixhalo-gfx1151_2026-10-05_samplers-before_t0.8p0.95.csv --after benchmarks/rocm_strixhalo-gfx1151_2026-10-05_samplers-after_t0.8p0.95.csv
 scripts/rocm_gpu_guard.sh -- scripts/bench_decode.sh models/mlx/Meta-Llama-3.1-8B-Instruct-4bit --temperature 0.8 --top-p 0.95
 ```
