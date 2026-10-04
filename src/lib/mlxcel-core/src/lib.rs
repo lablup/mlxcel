@@ -2502,6 +2502,11 @@ mod ffi {
         /// The env value is read once per process.
         fn sampling_gumbel_available() -> bool;
 
+        /// The backend half of [`sampling_gumbel_available`], ignoring
+        /// `MLXCEL_SAMPLING_GUMBEL`: true when the default device is the GPU
+        /// and its backend has a Gumbel-max port.
+        fn sampling_gumbel_backend_supported() -> bool;
+
         /// Threadgroups the Gumbel-max kernel cooperates on one row with, for a
         /// `[batch, vocab]` launch. Always a power of two in `[1, 64]`. Exposed
         /// so tests can pin that the sampled id does not depend on it.
@@ -2558,6 +2563,11 @@ mod ffi {
         /// min-p active) takes the rejection kernel: the backend supports it
         /// and `MLXCEL_SAMPLING_REJECTION` is not falsy. Read once per process.
         fn sampling_rejection_available() -> bool;
+
+        /// The backend half of [`sampling_rejection_available`], ignoring
+        /// `MLXCEL_SAMPLING_REJECTION`: true when the default device is the GPU
+        /// and its backend has a rejection-sampling port.
+        fn sampling_rejection_backend_supported() -> bool;
 
         /// Pure routing policy (#901): would `fused_sample` send this
         /// configuration to the rejection kernel, ignoring backend support and

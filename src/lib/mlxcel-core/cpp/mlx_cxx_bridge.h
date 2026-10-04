@@ -1524,6 +1524,7 @@ std::unique_ptr<MlxArray> gumbel_max_sample(
 // True when `fused_sample`'s no-filter path takes the Gumbel-max kernel:
 // backend support plus a non-falsy `MLXCEL_SAMPLING_GUMBEL`.
 bool sampling_gumbel_available();
+bool sampling_gumbel_backend_supported();
 
 // Threadgroups the Gumbel-max kernel puts on one row for this launch shape.
 // Exposed so tests can pin that the sampled id does not depend on it.
@@ -1572,6 +1573,7 @@ std::unique_ptr<MlxArray> sampling_rejection_probe(
 // True when `fused_sample`'s filtered path takes the rejection kernel: backend
 // support plus a non-falsy `MLXCEL_SAMPLING_REJECTION`.
 bool sampling_rejection_available();
+bool sampling_rejection_backend_supported();
 
 // Pure routing policy: would this configuration go to the rejection kernel,
 // ignoring backend support and the env switch? The kernel replaces a sort, so

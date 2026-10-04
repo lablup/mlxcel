@@ -36,10 +36,10 @@
 // - The initial best score is `-__builtin_huge_valf()`. hipRTC compiles this
 //   body with only the headers `fast::hip_kernel` prepends, and `INFINITY` is a
 //   `<cmath>` macro that is not guaranteed among them.
-// - Every logits read is an explicit `(float)` conversion. `hip_bfloat16`, the
-//   type MLX substitutes for bfloat16 on ROCm, converts to float only through
-//   an `explicit` operator, so the implicit conversion the CUDA text relies on
-//   for `__nv_bfloat16` would not compile here.
+// - `temp[0]` gains a redundant `(float)` (it is float32). The logits read
+//   keeps the CUDA text's explicit `(float)`, which is required here:
+//   `hip_bfloat16`, the type MLX substitutes for bfloat16 on ROCm, converts to
+//   float only through an `explicit` operator.
 //
 // No wave32 guard, deliberately. The guard that the shuffle-based #1814 ports
 // carry protects a lane fold that starts at 16 and so silently drops half of a

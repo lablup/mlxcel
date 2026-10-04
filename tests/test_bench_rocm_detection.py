@@ -103,7 +103,7 @@ class ProbeParserTests(unittest.TestCase):
         self.assertEqual(_run(["probe_kernel_backend"], "probe_kernel_backend", ROCM_PROBE_OUTPUT), "rocm")
 
     def test_kernel_backend_with_fallback_suffix(self) -> None:
-        line = "[mlxcel] custom kernel backend: rocm (no custom kernel ports; using MLX graph fallbacks)\n"
+        line = "[mlxcel] custom kernel backend: rocm (not every kernel family is ported; the rest use MLX graph fallbacks)\n"
         self.assertEqual(_run(["probe_kernel_backend"], "probe_kernel_backend", line), "rocm")
 
     def test_gfx_target(self) -> None:

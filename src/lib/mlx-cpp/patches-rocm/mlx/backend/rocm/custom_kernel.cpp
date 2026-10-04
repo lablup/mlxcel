@@ -360,13 +360,17 @@ void CustomKernel::eval_gpu(
     const array& in = checked_inputs[i];
     auto& shape_info = shape_infos_[i];
     args.append(in);
-    if (std::get<0>(shape_info)) {
+    // `build_kernel` declares these only for an input with ndim > 0; append
+    // them under the same condition so a scalar input cannot shift every
+    // later argument.
+    const bool has_dims = in.ndim() > 0;
+    if (has_dims && std::get<0>(shape_info)) {
       args.append_ndim(in.shape());
     }
-    if (std::get<1>(shape_info)) {
+    if (has_dims && std::get<1>(shape_info)) {
       args.append_ndim(in.strides());
     }
-    if (std::get<2>(shape_info)) {
+    if (has_dims && std::get<2>(shape_info)) {
       args.append<int32_t>(in.ndim());
     }
   }

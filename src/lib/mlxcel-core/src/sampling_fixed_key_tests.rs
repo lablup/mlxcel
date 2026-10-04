@@ -197,6 +197,10 @@ fn histogram_of(vocab: usize, n: usize, mut draw: impl FnMut() -> Vec<u32>) -> V
             if drawn >= n {
                 break;
             }
+            assert!(
+                (id as usize) < vocab,
+                "sampler returned id {id} for vocab {vocab}"
+            );
             counts[id as usize] += 1;
             drawn += 1;
         }
@@ -390,6 +394,63 @@ fn rejection_kernel_draws_the_keyed_token_under_min_p() {
             "{label}: only {checked} of {rows} rows were decided; the test lost its power"
         );
     }
+}
+
+#[test]
+fn rejection_kernel_draws_stay_inside_the_filtered_support() {
+    let _dispatch = crate::sampling_dispatch::dispatch_test_guard();
+    if !sampling_rejection_available() {
+        return;
+    }
+    // Rounds past the first (the pivot and bisection logic) are not
+    // reproducible on the host bit for bit, because the kernel's f32 sums may
+    // differ in their last bits. What is deterministic whatever the round
+    // count: every row converges and every drawn token is inside the filter's
+    // support, computed here from the same probabilities the kernel reads. The
+    // host side is a slight superset (a relative 1e-5 slack on the top-p
+    // cutoff), so rounding at the boundary cannot fail a correct kernel.
+    let rows = 40usize;
+    let vocab = 3001usize;
+    let host = row_logits(rows, vocab, 3.0, 0x0902);
+    let logits = from_slice_f32(&host, &[rows as i32, vocab as i32]);
+    let filter = f32_values(&softmax(&logits, -1));
+    let mut multi_round = 0usize;
+    for (top_k, top_p) in [(0i32, 0.9f32), (40, 1.0), (0, 0.5)] {
+        for launch in 0..4u64 {
+            random_seed(0x5EED_2064_0200 + launch);
+            let stacked = sampling_rejection_probe(&logits, 1.0, top_k, top_p, 0.0, 32);
+            let flat = u32_values(&stacked);
+            let (ids, ok, used) = (&flat[..rows], &flat[rows..2 * rows], &flat[2 * rows..]);
+            for row in 0..rows {
+                let label = format!("top_k={top_k} top_p={top_p} launch {launch} row {row}");
+                assert_eq!(ok[row], 1, "{label}: did not converge");
+                multi_round += usize::from(used[row] > 1);
+                let f = &filter[row * vocab..(row + 1) * vocab];
+                let id = ids[row] as usize;
+                assert!(id < vocab, "{label}: id {id} out of range");
+                let p = f[id];
+                if top_k > 0 {
+                    let above = f.iter().filter(|&&q| q > p).count();
+                    assert!(
+                        above < top_k as usize,
+                        "{label}: id {id} has {above} tokens above it"
+                    );
+                }
+                if top_p < 1.0 {
+                    let total: f64 = f.iter().map(|&q| f64::from(q)).sum();
+                    let exclusive: f64 = f.iter().filter(|&&q| q > p).map(|&q| f64::from(q)).sum();
+                    assert!(
+                        exclusive <= f64::from(top_p) * total * (1.0 + 1e-5),
+                        "{label}: id {id} starts at mass {exclusive}, past top_p {top_p}"
+                    );
+                }
+            }
+        }
+    }
+    assert!(
+        multi_round > 0,
+        "no row needed a second round; the bisection went untested"
+    );
 }
 
 // -- 2. statistical, against the graph sampler --

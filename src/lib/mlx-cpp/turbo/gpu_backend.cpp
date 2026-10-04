@@ -77,7 +77,7 @@ GpuKernelBackend gpu_kernel_backend() {
           backend_name(resolved),
           custom_kernels_available_for(resolved)
               ? ""
-              : " (no custom kernel ports; using MLX graph fallbacks)");
+              : " (not every kernel family is ported; the rest use MLX graph fallbacks)");
     }
     return resolved;
   }();

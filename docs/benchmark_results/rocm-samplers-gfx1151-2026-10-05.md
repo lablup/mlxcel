@@ -1,6 +1,6 @@
 # HIP ports of the fused samplers on gfx1151 (2026-10-05)
 
-lablup/mlxcel#2064, part of #1814. Before this change both fused samplers took the MLX graph on ROCm: `gumbel_ports()` and `rejection_ports()` had no `.rocm` entry, and `rejection_sample_supported()` answered with `custom_kernels_available()`, which is Metal-or-CUDA by definition, so a filled slot would have stayed unreachable. Sampled decode therefore ran `random::categorical` on the no-filter path and the `argpartition` / `argsort` / `cumsum` chain on the filtered path. The decode profile ([rocm-decode-profile-gfx1151-2026-09-30.md](rocm-decode-profile-gfx1151-2026-09-30.md)) put the whole sampler tail at 0 of greedy decode GPU time and 0.4 to 3.8% of sampled decode GPU time.
+lablup/mlxcel#2064, part of #1814. Before this change both fused samplers took the MLX graph on ROCm: `gumbel_ports()` and `rejection_ports()` had no `.rocm` entry, and `rejection_sample_supported()` answered with `custom_kernels_available()`, which is Metal-or-CUDA by definition, so a filled slot would have stayed unreachable. Sampled decode therefore ran `random::categorical` on the no-filter path and the `argpartition` / `argsort` / `cumsum` chain on the filtered path. The decode profile ([rocm-decode-profile-gfx1151-2026-09-30.md](rocm-decode-profile-gfx1151-2026-09-30.md)) put the whole sampler tail at 0% of greedy decode GPU time and 0.4 to 3.8% of sampled decode GPU time.
 
 The ports (`sampling_gumbel_hip.h`, `sampling_rejection_hip.h` in `src/lib/mlx-cpp/turbo/`) are the CUDA bodies with the same inputs, outputs, grid, template arguments and Philox-4x32-10 counter and key layout, so a seed reproduces a ROCm stream as it does on CUDA and Metal. Neither kernel has a lane-level operation (every reduction and the rejection kernel's scan go through shared memory with a barrier per step), so neither carries a wave32 guard. `rejection_sample_supported()` now reads `has_kernel_port(rejection_ports())`.
 
@@ -8,7 +8,7 @@ The Gumbel-max port exposed a fault in the vendored `fast::hip_kernel`: it decla
 
 ## Environment
 
-AMD Ryzen AI MAX+ 395 with Radeon 8060S (`gfx1151`, RDNA 3.5), 96 GiB VRAM carve-out, Debian 13, ROCm 10.0.0. Before: `main` at `57d8ed29`. After: `85e39880` (the PR's second commit; later commits change tests and docs only). MLX pin `81ba1c6a`, ROCm overlay `75915908`, `cargo build --release --features rocm`. Checkpoint `mlx-community/Meta-Llama-3.1-8B-Instruct-4bit` (vocab 128256).
+AMD Ryzen AI MAX+ 395 with Radeon 8060S (`gfx1151`, RDNA 3.5), 96 GiB VRAM carve-out, Debian 13, ROCm 10.0.0. Before: `main` at `57d8ed29`. After: `85e39880` (the PR's second commit; later commits change docs, the benchmark script and tests only). MLX pin `81ba1c6a`, ROCm overlay `75915908`, `cargo build --release --features rocm`. Checkpoint `mlx-community/Meta-Llama-3.1-8B-Instruct-4bit` (vocab 128256).
 
 ## Decode throughput
 
@@ -43,5 +43,6 @@ With the Philox counter (`row + 1`) or the drawn word (`c1` for `c0`) changed in
 ```bash
 cargo build --release --features rocm --bin mlxcel --bin mlxcel-bench-decode
 cargo test --release --features rocm -p mlxcel-core --lib sampling_ -- --test-threads=1
+cargo test --release --features rocm --test sampling_gumbel_kill_switch --test sampling_rejection_kill_switch
 scripts/rocm_gpu_guard.sh -- scripts/bench_decode.sh models/mlx/Meta-Llama-3.1-8B-Instruct-4bit --temperature 0.8 --top-p 0.95
 ```
