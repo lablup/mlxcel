@@ -1865,9 +1865,15 @@ mod ffi {
             next_state: &mut UniquePtr<MlxArray>,
         ) -> Result<()>;
 
-        /// Whether the fused Mamba1 selective-scan kernel can run (Metal and
-        /// CUDA; `MLXCEL_MAMBA1_SCAN_KERNEL=0` forces the graph scan).
+        /// Whether the fused Mamba1 selective-scan kernel can run (Metal,
+        /// CUDA and ROCm; `MLXCEL_MAMBA1_SCAN_KERNEL=0` forces the graph
+        /// scan).
         fn mamba1_scan_kernel_available() -> bool;
+
+        /// Whether the kernel that can run is the float32-state variant
+        /// (Metal, and ROCm since issue #2069) rather than CUDA's graph-exact
+        /// one (#1981). Mamba / Falcon-Mamba take only this variant.
+        fn mamba1_scan_float_state_kernel_available() -> bool;
 
         /// Whether the fused scan can serve these inputs: it is available, the
         /// default device is the GPU, `N <= 32`, and on CUDA all six inputs

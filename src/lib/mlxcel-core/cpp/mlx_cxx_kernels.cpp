@@ -2077,18 +2077,109 @@ __device__ __forceinline__ T mamba1_add(T a, T b) {
         return holder;
     }
 
+    // ROCm port (#2069) of the float32-state variant, written from
+    // MAMBA1_SCAN_METAL_SOURCE: one 32-lane wavefront per (batch, channel d)
+    // on threadIdx.x, eight channels per block on threadIdx.y, lane n owns
+    // state[d, n], and `simd_sum` becomes the 16..1 `__shfl_down` fold with
+    // the width stated (lane 0 holds y). It is this variant and not the CUDA
+    // graph-exact one because graph-exact is out of reach on ROCm: the graph
+    // scan's `state @ C` has K = N (8 or 16, below gemv's K % 32 == 0
+    // requirement), so the overlay sends it to rocBLAS, whose reduction order
+    // a custom kernel cannot reproduce. The template args are the Metal ones
+    // (T, N, Dm); `A` and the state arrive as float32 for this variant, every
+    // other input as T.
+    static const char* MAMBA1_SCAN_HIP_SOURCE = R"(
+        // 32-lane wavefront only; see MOE_GATEUP_HIP_SOURCE for why the
+        // explicit shuffle width, not this guard, is what holds on AMD
+        // clang 23.
+        #if defined(__AMDGCN_WAVEFRONT_SIZE__) && __AMDGCN_WAVEFRONT_SIZE__ != 32
+        #error "mamba1_selective_scan_hip assumes a 32-lane wavefront"
+        #endif
+        #if defined(__AMDGCN_WAVEFRONT_SIZE) && __AMDGCN_WAVEFRONT_SIZE != 32
+        #error "mamba1_selective_scan_hip assumes a 32-lane wavefront"
+        #endif
+        const int lane = threadIdx.x;
+        const int d = blockIdx.y * blockDim.y + threadIdx.y;
+        const int b = blockIdx.z;
+        // d is uniform across a wavefront, so a wavefront returns whole and
+        // the fold below never sees a partial one.
+        if (d >= Dm) {
+            return;
+        }
+        const int L = X_shape[1];
+        const bool active = lane < N;
+
+        float s = 0.0f;
+        float a = 0.0f;
+        if (active) {
+            s = static_cast<float>(state_in[((size_t)b * Dm + d) * N + lane]);
+            a = static_cast<float>(A[d * N + lane]);
+        }
+        const float dp = static_cast<float>(Dp[d]);
+
+        for (int t = 0; t < L; ++t) {
+            const size_t row = (size_t)b * L + t;
+            const float dt = static_cast<float>(DT[row * Dm + d]);
+            const float xv = static_cast<float>(X[row * Dm + d]);
+            float contrib = 0.0f;
+            if (active) {
+                const float bv = static_cast<float>(Bm[row * N + lane]);
+                const float cv = static_cast<float>(Cm[row * N + lane]);
+                s = expf(dt * a) * s + dt * xv * bv;
+                contrib = s * cv;
+            }
+            float y = contrib;
+            #pragma unroll
+            for (int o = 16; o > 0; o >>= 1) y += __shfl_down(y, o, 32);
+            if (lane == 0) {
+                Y[row * Dm + d] = static_cast<T>(y + xv * dp);
+            }
+        }
+        if (active) {
+            state_out[((size_t)b * Dm + d) * N + lane] = s;
+        }
+    )";
+
+    struct Mamba1ScanKernelHolderHip {
+        std::optional<mlx::core::fast::CustomKernelFunction> kernel;
+        bool initialized = false;
+
+        mlx::core::fast::CustomKernelFunction& get() {
+            if (!initialized) {
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+                kernel = mlx::core::fast::hip_kernel(
+                    "mamba1_selective_scan_hip",
+                    {"X", "DT", "Bm", "Cm", "A", "Dp", "state_in"},
+                    {"Y", "state_out"},
+                    MAMBA1_SCAN_HIP_SOURCE);
+#else
+                throw std::runtime_error(
+                    "[mamba1_selective_scan] this build has no ROCm backend");
+#endif
+                initialized = true;
+            }
+            return *kernel;
+        }
+    };
+
+    static Mamba1ScanKernelHolderHip& get_mamba1_scan_kernel_hip() {
+        static Mamba1ScanKernelHolderHip holder;
+        return holder;
+    }
+
 // This kernel's ports, in one place (#1801). The two variants round
 // differently, so each has its own table and a backend's variant is the table
-// it has a port in: float32 state (Metal, #2005) or graph-exact rounding in
-// the activation dtype (CUDA, #1981; see the CUDA source above). No HIP port of
-// either yet (#1814).
+// it has a port in: float32 state (Metal, #2005; ROCm, #2069) or graph-exact
+// rounding in the activation dtype (CUDA, #1981; see the CUDA source above).
 const mlxcel::KernelPorts& mamba1_scan_ports() {
     static const mlxcel::KernelPorts ports{
         .metal = +[]() -> mlx::core::fast::CustomKernelFunction& {
             return get_mamba1_scan_kernel().get();
         },
         .cuda = nullptr,
-        .rocm = nullptr,
+        .rocm = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_mamba1_scan_kernel_hip().get();
+        },
     };
     return ports;
 }
@@ -2114,6 +2205,11 @@ bool mamba1_scan_kernel_available() {
     }
     return mlxcel::has_kernel_port(mamba1_scan_ports()) ||
         mlxcel::has_kernel_port(mamba1_scan_graph_exact_ports());
+}
+
+bool mamba1_scan_float_state_kernel_available() {
+    return mamba1_scan_kernel_available() &&
+        mlxcel::has_kernel_port(mamba1_scan_ports());
 }
 
 bool mamba1_scan_kernel_accepts(

@@ -535,7 +535,8 @@ fn rows(arr: &mlxcel_core::MlxArray) -> Vec<f32> {
 }
 
 /// Issue #2007: a multi-token forward through `MambaBlock` (the prefill path,
-/// which on Metal projects the whole sequence and runs the fused scan kernel)
+/// which on Metal and ROCm projects the whole sequence and runs the fused scan
+/// kernel)
 /// must give, row for row, what feeding the same inputs one token at a time
 /// gives, fresh and continuing from an existing conv and SSM state, with and
 /// without the Falcon-Mamba mixer norm.

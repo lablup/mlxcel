@@ -639,7 +639,8 @@ fn jamba_mamba_prefill_rows_match_token_by_token_decode() {
     }
 }
 
-/// Issue #1981: on a backend with a fused Mamba1 scan port (Metal, CUDA), a
+/// Issue #1981: on a backend with a fused Mamba1 scan port (Metal, CUDA, and
+/// ROCm since #2069), a
 /// Jamba prefill must not walk the per-step graph scan. That loop issues
 /// several small ops per timestep per Mamba layer, and on CUDA it was about
 /// two thirds of a 3.3k-token prefill. Checked for f32 and bf16 weights (the
@@ -654,7 +655,7 @@ fn jamba_mamba_prefill_takes_the_fused_scan_where_a_port_exists() {
     // per-step loop back, which is exactly what this test must catch.
     if !matches!(
         gpu_backend_kind(),
-        GpuBackendKind::Metal | GpuBackendKind::Cuda
+        GpuBackendKind::Metal | GpuBackendKind::Cuda | GpuBackendKind::Rocm
     ) {
         return;
     }

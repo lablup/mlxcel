@@ -1984,10 +1984,13 @@ bool ssm_kernel_available();
 // Mamba1 selective scan fused over the sequence (Jamba, issue #2005).
 // x, delta: [batch, seq, d]; b, c: [batch, seq, n]; a: [d, n] (= -exp(A_log));
 // d: [d]; state_in: [batch, d, n]. y: [batch, seq, d] in x's dtype. On Metal
-// the state is carried and returned in float32. On CUDA (issue #1981) every
-// intermediate is rounded to x's dtype exactly as the per-step graph scan
-// rounds it, and state_out is in x's dtype.
+// and ROCm (issue #2069) the state is carried and returned in float32. On CUDA
+// (issue #1981) every intermediate is rounded to x's dtype exactly as the
+// per-step graph scan rounds it, and state_out is in x's dtype.
 bool mamba1_scan_kernel_available();
+// Whether the available variant is the float32-state one (Metal, ROCm), the
+// variant Mamba / Falcon-Mamba take; CUDA's graph-exact variant answers false.
+bool mamba1_scan_float_state_kernel_available();
 // Whether the fused scan can serve these inputs: the kernel is available, the
 // default device is the GPU, the state width fits one warp or simdgroup
 // (n <= 32), and on CUDA all six inputs share one floating dtype (the
