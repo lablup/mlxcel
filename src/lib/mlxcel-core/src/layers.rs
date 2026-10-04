@@ -5587,8 +5587,9 @@ pub enum PagedDecodeDispatch {
 }
 
 /// Compute backend the pooled decode runs on. The fused kernel has a Metal JIT
-/// body (ADR 0001, measured on Apple Silicon) and a CUDA JIT body (#634). Both
-/// are native candidates; the selector applies backend-specific thresholds.
+/// body (ADR 0001, measured on Apple Silicon), a CUDA JIT body (#634) and a HIP
+/// JIT body (#2068). All three are native candidates; the selector applies
+/// backend-specific thresholds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PagedDecodeBackend {
     /// Apple Silicon Metal (the fused kernel's original home).
@@ -5597,11 +5598,12 @@ pub enum PagedDecodeBackend {
     /// pool blocks with no gather pass, so its advantage grows with context;
     /// the Metal-measured batch/context ceilings do not apply.
     Cuda,
+    /// AMD ROCm (the HIP port of the CUDA kernel, #2068). It follows the CUDA
+    /// rule, since it is the same kernel: native wherever the kernel can serve
+    /// the layer, with the same `gridDim.z` guard in front of the launch.
+    Rocm,
     /// Any backend with no fused kernel port, which today means CPU-only
-    /// builds and ROCm (issue #1803). Always gather. ROCm is a real GPU here,
-    /// not a CPU, and gets its own variant when its kernels are ported
-    /// (issue #1814); until then the answer is the same, so it shares this one
-    /// rather than pretending the ports exist.
+    /// builds and machines with no usable GPU. Always gather.
     Other,
 }
 
@@ -5669,6 +5671,10 @@ pub fn select_pooled_paged_dispatch(
         // Metal-measured batch and context ceilings do not apply because the
         // CUDA win grows with context rather than eroding at long context.
         PagedDecodeBackend::Cuda => slab_count <= NATIVE_MAX_SLABS,
+        // ROCm (#2068) runs the HIP port of the CUDA kernel, which reads the
+        // pool the same way, so it takes the CUDA rule. No ROCm-measured
+        // batch or context ceiling exists to justify a narrower island.
+        PagedDecodeBackend::Rocm => slab_count <= NATIVE_MAX_SLABS,
         PagedDecodeBackend::Other => false,
     };
     if native {
@@ -5791,14 +5797,15 @@ pub(crate) fn resolve_paged_v2_dispatch(
 
 /// The backend the fused kernel would run on, cached for the decode hot path.
 ///
-/// The fused kernel has a Metal JIT body and a CUDA JIT body (#634) and no HIP
-/// port yet (#1814). It is a native candidate only when
+/// The fused kernel has a Metal JIT body, a CUDA JIT body (#634) and a HIP JIT
+/// body (#2068). It is a native candidate only when
 /// [`crate::paged_attention_decode_available`] says the resolved backend has a
 /// port in the kernel's own table; then [`crate::metal_is_available`] /
-/// [`crate::cuda_is_available`] name which one. A CPU-only build, a machine
-/// with no usable GPU and a ROCm build all fall to gather, none of which a
-/// compile-time `target_os` check would catch. Metal is probed first so the
-/// Apple path is unchanged. Detection is process-static, so it is read once.
+/// [`crate::cuda_is_available`] / [`crate::hardware::gpu_backend_kind`] name
+/// which one. A CPU-only build and a machine with no usable GPU fall to gather,
+/// neither of which a compile-time `target_os` check would catch. Metal is
+/// probed first and CUDA second so those paths are unchanged. Detection is
+/// process-static, so it is read once.
 pub(crate) fn paged_decode_backend() -> PagedDecodeBackend {
     use std::sync::OnceLock;
     static BACKEND: OnceLock<PagedDecodeBackend> = OnceLock::new();
@@ -5814,6 +5821,8 @@ pub(crate) fn paged_decode_backend() -> PagedDecodeBackend {
             PagedDecodeBackend::Metal
         } else if crate::cuda_is_available() {
             PagedDecodeBackend::Cuda
+        } else if crate::hardware::gpu_backend_kind() == crate::hardware::GpuBackendKind::Rocm {
+            PagedDecodeBackend::Rocm
         } else {
             PagedDecodeBackend::Other
         }
@@ -5848,7 +5857,7 @@ impl PagedDispatchCache {
     /// Bit carrying the decision alongside the packed key: set means
     /// [`PagedDecodeDispatch::Native`], clear means [`PagedDecodeDispatch::Gather`].
     /// The key uses bits `0..=49` ([`Self::pack_key`]: the backend tag now needs
-    /// two bits for the Metal/Cuda/Other trichotomy), so bit `50` is free.
+    /// two bits for the Metal/Cuda/Rocm/Other tags), so bit `50` is free.
     const DECISION_BIT: u64 = 1u64 << 50;
     /// Mask covering the packed-key bits (`0..=49`), used to compare a cell's
     /// key half against a freshly packed key while ignoring the decision bit.
@@ -5878,6 +5887,7 @@ impl PagedDispatchCache {
             PagedDecodeBackend::Metal => 0u64,
             PagedDecodeBackend::Cuda => 1u64,
             PagedDecodeBackend::Other => 2u64,
+            PagedDecodeBackend::Rocm => 3u64,
         };
         b | (v << 16) | (s << 32) | (k << 48)
     }
@@ -9423,8 +9433,8 @@ mod tests {
 
     use super::{
         NativePagedOverride, PAGED_DISPATCH_CACHE_EMPTY, PagedDecodeBackend, PagedDecodeDispatch,
-        PagedDispatchCache, parse_native_paged_override, resolve_dispatch_decision,
-        select_pooled_paged_dispatch,
+        PagedDispatchCache, paged_decode_backend, parse_native_paged_override,
+        resolve_dispatch_decision, select_pooled_paged_dispatch,
     };
 
     #[test]
@@ -9520,6 +9530,57 @@ mod tests {
                 "CUDA multi-slab (slabs={slabs}) must decline to gather"
             );
         }
+    }
+
+    #[test]
+    fn selector_rocm_backend_follows_the_cuda_rule() {
+        // ROCm (#2068) runs the HIP port of the CUDA kernel, so it takes the
+        // CUDA rule: native on every single-slab shape, including the b=1 and
+        // long-context regimes Metal routes to gather, and gather past one
+        // slab. Compared against CUDA shape by shape so the two cannot drift.
+        for &(b, ctx) in &[
+            (1usize, 128usize),
+            (1, 65536),
+            (3, 4096),
+            (4, 4097),
+            (16, 131072),
+        ] {
+            for &slabs in &[0usize, 1, 2, 8] {
+                let rocm = select_pooled_paged_dispatch(b, ctx, slabs, PagedDecodeBackend::Rocm);
+                assert_eq!(
+                    rocm,
+                    select_pooled_paged_dispatch(b, ctx, slabs, PagedDecodeBackend::Cuda),
+                    "ROCm must match CUDA at b={b} ctx={ctx} slabs={slabs}"
+                );
+                let expected = if slabs <= 1 {
+                    PagedDecodeDispatch::Native
+                } else {
+                    PagedDecodeDispatch::Gather
+                };
+                assert_eq!(rocm, expected, "ROCm b={b} ctx={ctx} slabs={slabs}");
+            }
+        }
+    }
+
+    #[test]
+    fn paged_decode_backend_names_the_resolved_backend() {
+        // The backend the fused kernel would run on agrees with the resolved
+        // GPU backend wherever that backend has the v1 port. Before #2068 a
+        // ROCm build answered `Other` even with a port in the table, so the
+        // native path was unreachable there.
+        use crate::hardware::{GpuBackendKind, gpu_backend_kind};
+        let backend = paged_decode_backend();
+        if !crate::paged_attention_decode_available() {
+            assert_eq!(backend, PagedDecodeBackend::Other);
+            return;
+        }
+        let expected = match gpu_backend_kind() {
+            GpuBackendKind::Metal => PagedDecodeBackend::Metal,
+            GpuBackendKind::Cuda => PagedDecodeBackend::Cuda,
+            GpuBackendKind::Rocm => PagedDecodeBackend::Rocm,
+            _ => PagedDecodeBackend::Other,
+        };
+        assert_eq!(backend, expected);
     }
 
     #[test]
@@ -9693,6 +9754,18 @@ mod tests {
             PagedDecodeDispatch::Gather,
             "Other must be gather (no kernel)"
         );
+        // ROCm (#2068) at the same shape: native like CUDA, so a ROCm tag that
+        // aliased Metal's or Other's cell would return their cached gather.
+        assert_eq!(
+            cache.select(1, 512, 1, PagedDecodeBackend::Rocm),
+            PagedDecodeDispatch::Native,
+            "ROCm single-slab b=1 must be native (not an aliased Metal/Other gather)"
+        );
+        assert_eq!(
+            cache.select(1, 512, 1, PagedDecodeBackend::Other),
+            PagedDecodeDispatch::Gather,
+            "Other must be gather after a ROCm query (not the aliased ROCm native)"
+        );
         // Re-query CUDA: still native, proving the Metal/Other writes did not
         // clobber the CUDA cell (each backend keeps its own last-key cell only
         // for the most recent distinct key, so this also confirms recompute
@@ -9706,9 +9779,10 @@ mod tests {
 
     #[test]
     fn dispatch_cache_cuda_pack_key_roundtrips_without_collision() {
-        // The 2-bit backend tag (Metal=0, Cuda=1, Other=2) must produce three
-        // distinct packed keys for one identical shape, and each must stay clear
-        // of the decision bit and the empty sentinel.
+        // The 2-bit backend tag (Metal=0, Cuda=1, Other=2, Rocm=3) must
+        // produce four distinct packed keys for one identical shape, and each
+        // must stay clear of the decision bit and the empty sentinel, also at
+        // the saturated shape where every field is all ones.
         let shape = (4usize, 4096usize, 1usize);
         let k_metal =
             PagedDispatchCache::pack_key(shape.0, shape.1, shape.2, PagedDecodeBackend::Metal);
@@ -9716,10 +9790,24 @@ mod tests {
             PagedDispatchCache::pack_key(shape.0, shape.1, shape.2, PagedDecodeBackend::Cuda);
         let k_other =
             PagedDispatchCache::pack_key(shape.0, shape.1, shape.2, PagedDecodeBackend::Other);
+        let k_rocm =
+            PagedDispatchCache::pack_key(shape.0, shape.1, shape.2, PagedDecodeBackend::Rocm);
+        let k_rocm_saturated = PagedDispatchCache::pack_key(
+            usize::MAX,
+            usize::MAX,
+            usize::MAX,
+            PagedDecodeBackend::Rocm,
+        );
         assert_ne!(k_metal, k_cuda, "Metal and CUDA keys must differ");
         assert_ne!(k_cuda, k_other, "CUDA and Other keys must differ");
         assert_ne!(k_metal, k_other, "Metal and Other keys must differ");
         for k in [k_metal, k_cuda, k_other] {
+            assert_ne!(
+                k, k_rocm,
+                "ROCm's key must differ from every other backend's"
+            );
+        }
+        for k in [k_metal, k_cuda, k_other, k_rocm, k_rocm_saturated] {
             assert_eq!(
                 k & PagedDispatchCache::DECISION_BIT,
                 0,

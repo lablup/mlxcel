@@ -1514,8 +1514,7 @@ mod ffi {
         /// and the merge kernel. Answered from the kernels' own `KernelPorts`
         /// tables (`has_kernel_port`), the ones their launchers dispatch
         /// through, so this cannot say yes to a launch that would refuse.
-        /// Metal and CUDA today; ROCm answers `false` until lablup/mlxcel#1814
-        /// ports them.
+        /// True on Metal, CUDA and ROCm (the HIP ports, #2068).
         fn paged_attention_kernels_available() -> bool;
 
         /// True when the resolved GPU backend has a port of the merge kernel

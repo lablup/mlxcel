@@ -795,9 +795,9 @@ verify-rocm-smoke: ## ROCm smoke: build, link and generate on the GPU, asserting
 # runs BEFORE `verify-test-rocm` because make stops at the first failing
 # prerequisite, and the ROCm test gate can still carry known failures while
 # the backend is experimental. (The mlxcel-core tests of the fused
-# paged-attention kernels, which have no ROCm port yet, no longer fail: they
-# skip through `test_support::kernel_ports` and print a `skipping ... #1814`
-# line, #1809.) With the test gate first the
+# paged-attention kernels used to skip here through
+# `test_support::kernel_ports`, printing a `skipping ... #1814` line, #1809;
+# since the HIP ports, #2068, they run.) With the test gate first the
 # smoke was never reached at all, which was measured rather than reasoned: the
 # first full run of this target ended without the smoke having executed once.
 # The smoke is also the fastest high-signal part, so a developer gets the

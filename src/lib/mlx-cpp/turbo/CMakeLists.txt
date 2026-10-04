@@ -40,6 +40,7 @@ set(MLXCEL_TURBO_KERNEL_HEADERS
     ${CMAKE_CURRENT_SOURCE_DIR}/turbo4_delegated_sdpa.h
     ${CMAKE_CURRENT_SOURCE_DIR}/paged_attention.h
     ${CMAKE_CURRENT_SOURCE_DIR}/paged_attention_v2.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/paged_attention_hip.h
     ${CMAKE_CURRENT_SOURCE_DIR}/sampling.h
     ${CMAKE_CURRENT_SOURCE_DIR}/sampling_rejection.h
     ${CMAKE_CURRENT_SOURCE_DIR}/fused_norm.h

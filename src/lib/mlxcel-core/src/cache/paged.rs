@@ -2085,11 +2085,11 @@ impl PagedBlockPool {
         };
 
         // Both fused paths end in the paged-attention kernels, which have
-        // Metal and CUDA ports only. On a backend without them the launch
+        // Metal, CUDA and HIP ports. On a backend without them the launch
         // would be refused, so decline before planning and let the caller's
         // gather-then-SDPA fallback serve the step (issue #1803). The
-        // predicate reads the kernels' own port tables, so a ROCm port
-        // (#1814) turns this path on without another edit here.
+        // predicate reads the kernels' own port tables, which is how the HIP
+        // ports (#2068) turned this path on for ROCm with no edit here.
         if !crate::ffi::paged_attention_kernels_available() {
             return Ok((
                 None,
@@ -2315,8 +2315,13 @@ impl PagedBlockPool {
         // bare UniquePtr, so a failed launch would abort rather than error;
         // decline here and let the caller take the gather fallback (#634
         // security review). Unreachable for the single-slab island's small
-        // batches, kept as a guard for external library callers.
-        if crate::layers::paged_decode_backend() == crate::layers::PagedDecodeBackend::Cuda {
+        // batches, kept as a guard for external library callers. The HIP port
+        // (#2068) uses the same grid, so ROCm keeps the CUDA bound rather than
+        // relying on a device-reported limit.
+        if matches!(
+            crate::layers::paged_decode_backend(),
+            crate::layers::PagedDecodeBackend::Cuda | crate::layers::PagedDecodeBackend::Rocm
+        ) {
             let q_shape = ffi::array_shape(q);
             let grid_z = i64::from(q_shape.first().copied().unwrap_or(0).max(0))
                 * i64::from(q_shape.get(1).copied().unwrap_or(0).max(0));
