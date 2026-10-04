@@ -360,8 +360,9 @@ fn ssm_update_kernel_keys_on_a_log_dtype() {
 
 /// Shapes the kernel cannot index safely are refused on the host, as an error
 /// the caller sees, rather than launched: a state width that is not a multiple
-/// of 32 would leave state columns unwritten, and heads that do not divide
-/// into groups would read past B and C.
+/// of 32 (or under 32) would leave state columns unwritten, heads that do not
+/// divide into groups would read past B and C, and a per-head parameter of the
+/// wrong length would be read past its end.
 #[test]
 fn ssm_update_kernel_refuses_unsupported_shapes() {
     let _guard = crate::test_support::env_lock::env_lock();
@@ -375,13 +376,26 @@ fn ssm_update_kernel_refuses_unsupported_shapes() {
             ..PADDED_ROWS
         },
         Shape {
+            name: "state 16",
+            state_dim: 16,
+            ..PADDED_ROWS
+        },
+        Shape {
             name: "4 heads in 3 groups",
             groups: 3,
             ..PADDED_ROWS
         },
+        // Valid shape; `D` is given one element too many below.
+        Shape {
+            name: "D of length heads + 1",
+            ..PADDED_ROWS
+        },
     ];
     for s in &bad {
-        let case = make_case(s, 2074, dtype::FLOAT32, dtype::FLOAT32);
+        let mut case = make_case(s, 2074, dtype::FLOAT32, dtype::FLOAT32);
+        if s.name.starts_with("D of length") {
+            case.d = uniform(0.5, 1.5, &[s.heads + 1]);
+        }
         let mut out = UniquePtr::null();
         let mut state = UniquePtr::null();
         let result = ssm_update_kernel(

@@ -6,7 +6,7 @@ The port (`SSM_HIP_SOURCE` in `src/lib/mlxcel-core/cpp/mlx_cxx_kernels.cpp`) is 
 
 ## Environment
 
-AMD Ryzen AI MAX+ 395 with Radeon 8060S (`gfx1151`, RDNA 3.5), 96 GiB VRAM carve-out, Debian 13, ROCm 10.0.0 (HIP 7.15.26333). mlxcel `844bd94c` (the PR branch on `origin/main` `c0b71344`), MLX pin `81ba1c6a`, ROCm overlay `75915908`, `cargo build --release --features rocm`. Checkpoints: `mlx-community/granite-4.0-h-tiny-4bit` and `mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit`, the same local directories as the earlier correctness rows.
+AMD Ryzen AI MAX+ 395 with Radeon 8060S (`gfx1151`, RDNA 3.5), 96 GiB VRAM carve-out, Debian 13, ROCm 10.0.0 (HIP 7.15.26333). mlxcel `844bd94c` (the PR branch on `origin/main` `c0b71344`) for the decode and logit rows; the later commits of the PR add only the CPU-device check in `ssm_kernel_available()` and host shape checks in front of the same launch, and the greedy 128-token output of both models was re-checked identical after them, MLX pin `81ba1c6a`, ROCm overlay `75915908`, `cargo build --release --features rocm`. Checkpoints: `mlx-community/granite-4.0-h-tiny-4bit` and `mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit`, the same local directories as the earlier correctness rows.
 
 ## Decode throughput
 
@@ -26,6 +26,8 @@ Run-to-run spread is under 1% for granite and under 3% for Nemotron-H in either 
 `ssm_update_parity_tests` (`src/lib/mlxcel-core/src/ssm_update_parity_tests.rs`) compares the kernel's output and new state with a float32 MLX-op reference of the single-token SSD step at the granite-4.0-h-tiny shape (48 heads of 64, one group, state 128) and the Nemotron-H shape (64 heads of 64, eight groups, state 128, batch 2, clipped dt), f32 and bf16. Tolerances, normalized RMS / max: f32 1e-5 / 1e-4, bf16 1.6e-2 / 7e-2; the f32 state is held to the f32 budget in both. It passes on gfx1151. It fails with normalized RMS 0.65 to 0.89 when the lane fold starts at 8 instead of 16.
 
 A third test runs the same shape with `A_log` first in bf16 and then in f32 in one process. Nemotron-H stores `A_log` in f32 next to bf16 activations and granite in bf16, and the generated kernel signature takes each input's runtime dtype, so the launch now names the `A_log`, `B` and `C` dtypes in its template arguments (the cache key on CUDA and ROCm). Without them the second launch reuses the bf16 module and the test fails at normalized RMS 0.80.
+
+The f32 test also runs a head size of 60, which leaves rows past `Dh` in the last threadgroup of 8. `ssm_update_kernel_refuses_unsupported_shapes` pins that shapes the kernel cannot index (a state width that is not a multiple of 32, heads that do not divide into groups; the host also checks rank, a single token, the batch and every input's element count) throw `std::invalid_argument` before any launch, and a fifth test that `MLXCEL_SSM_KERNEL=0` and `MLXCEL_SSM_CUDA_KERNEL=0` each turn the predicate off. The CPU-device rule is not covered by a test: switching the process's default device inside the shared test binary would move other tests to the CPU.
 
 ### Model logits: kernel against kernel
 
