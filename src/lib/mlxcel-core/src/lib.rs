@@ -1963,12 +1963,20 @@ mod ffi {
             group_size: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
-        /// Fused xIELU activation (Apertus): one Metal launch covering the
-        /// `apertus_xielu` elementwise graph (square/min/expm1/where/...). The
-        /// per-layer scalars `alpha_p` / `alpha_n` (post-softplus) and `beta` /
-        /// `eps` are passed by value. Greedy temp-0 byte-identical to the
-        /// elementwise path on Apple Silicon; falls back to an equivalent
-        /// elementwise graph on non-Metal back-ends. Gated by `MLXCEL_FUSED_XIELU`.
+        /// True when [`fused_xielu`] runs its fused kernel on this backend,
+        /// that is Metal or ROCm (issue #2069), rather than the elementwise
+        /// fallback. Read from the kernel's port table, the one the dispatch
+        /// reads.
+        fn fused_xielu_kernel_available() -> bool;
+
+        /// Fused xIELU activation (Apertus): one kernel launch (Metal, ROCm)
+        /// covering the `apertus_xielu` elementwise graph
+        /// (square/min/expm1/where/...). The per-layer scalars `alpha_p` /
+        /// `alpha_n` (post-softplus) and `beta` / `eps` are passed by value.
+        /// Byte-identical to the elementwise path on the same backend; falls
+        /// back to an equivalent elementwise graph where
+        /// [`fused_xielu_kernel_available`] is false (CUDA, CPU). Gated by
+        /// `MLXCEL_FUSED_XIELU`.
         fn fused_xielu(
             x: &MlxArray,
             alpha_p: f32,

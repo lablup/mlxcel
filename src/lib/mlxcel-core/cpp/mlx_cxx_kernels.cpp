@@ -411,25 +411,95 @@ namespace {
         return holder;
     }
 
-// This kernel's ports, in one place (#1801). Metal only: the fused xIELU activation is a Metal JIT kernel.
+    // ROCm port (#2069), written from XIELU_METAL_SOURCE. Byte identity with
+    // apertus_xielu is kept the same way, but against the ROCm graph's own
+    // rounding points: each of that graph's ops is one HIP elementwise kernel
+    // that widens its T operands to float, computes one float op and rounds
+    // back once (`hip_bfloat16(float)` / `__float2half`, both nearest-even;
+    // see the overlay's device/binary_ops.hpp and unary_ops.hpp). So every
+    // intermediate below is one float op rounded through T, and expm1 is the
+    // device library's `expm1f` the graph's Expm1 calls, not the Metal
+    // header's copy of MLX's routine. For T = float the casts are no-ops and
+    // `fp contract(off)` is what stops `selected + x * beta` from becoming one
+    // FMA (one rounding instead of the graph's two). The scalars arrive as
+    // f32 and round to T once, as `full_f32(.., dtype)` does in the graph.
+    // Elementwise with no cross-lane step, so the wavefront size does not
+    // enter; the guard is the #1814 port rule (see MOE_GATEUP_HIP_SOURCE).
+    static const char* XIELU_HIP_SOURCE = R"(
+        #if defined(__AMDGCN_WAVEFRONT_SIZE__) && __AMDGCN_WAVEFRONT_SIZE__ != 32
+        #error "xielu_fused_hip assumes a 32-lane wavefront"
+        #endif
+        #if defined(__AMDGCN_WAVEFRONT_SIZE) && __AMDGCN_WAVEFRONT_SIZE != 32
+        #error "xielu_fused_hip assumes a 32-lane wavefront"
+        #endif
+        {
+        #pragma clang fp contract(off)
+        uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+        if (i >= (uint32_t)n) { return; }
+        float xx = static_cast<float>(x[i]);
+        float ap = static_cast<float>(static_cast<T>(alpha_p[0]));
+        float an = static_cast<float>(static_cast<T>(alpha_n[0]));
+        float bb = static_cast<float>(static_cast<T>(beta[0]));
+        float ee = static_cast<float>(static_cast<T>(eps[0]));
+        float pos_x_sq = static_cast<float>(static_cast<T>(xx * xx));       // square(x)
+        float pos_core = static_cast<float>(static_cast<T>(pos_x_sq * ap)); // * alpha_p
+        // minimum(x, eps), NaN-propagating as the graph's Minimum is.
+        float clamped = (isnan(xx) || xx < ee) ? xx : ee;
+        float em = static_cast<float>(static_cast<T>(expm1f(clamped)));     // expm1
+        float neg_sub = static_cast<float>(static_cast<T>(em - xx));        // - x
+        float neg_core = static_cast<float>(static_cast<T>(neg_sub * an));  // * alpha_n
+        float selected = (xx > 0.0f) ? pos_core : neg_core;                 // where(x > 0)
+        float bx = static_cast<float>(static_cast<T>(xx * bb));             // x * beta
+        out[i] = static_cast<T>(selected + bx);                             // add
+        }
+    )";
+
+    struct XieluKernelHolderHip {
+        std::optional<mlx::core::fast::CustomKernelFunction> kernel;
+        bool initialized = false;
+        mlx::core::fast::CustomKernelFunction& get() {
+            if (!initialized) {
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+                kernel = mlx::core::fast::hip_kernel(
+                    "xielu_fused_hip",
+                    {"x", "alpha_p", "alpha_n", "beta", "eps"},
+                    {"out"},
+                    XIELU_HIP_SOURCE);
+#else
+                throw std::runtime_error(
+                    "[fused_xielu] this build has no ROCm backend");
+#endif
+                initialized = true;
+            }
+            return *kernel;
+        }
+    };
+    static XieluKernelHolderHip& get_xielu_kernel_hip() {
+        static XieluKernelHolderHip holder;
+        return holder;
+    }
+
+// This kernel's ports, in one place (#1801). Metal and ROCm (#2069).
 const mlxcel::KernelPorts& xielu_ports() {
     static const mlxcel::KernelPorts ports{
         .metal = +[]() -> mlx::core::fast::CustomKernelFunction& {
             return get_xielu_kernel().get();
         },
-        // No CUDA or HIP port yet (#1814). Written out so that adding one is a
-        // line here rather than a restructure at the call site.
+        // No CUDA port (#1814): CUDA takes xielu_elementwise. Written out so
+        // that adding one is a line here rather than a restructure at the
+        // call site.
         .cuda = nullptr,
-        .rocm = nullptr,
+        .rocm = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_xielu_kernel_hip().get();
+        },
     };
     return ports;
 }
 
     // Elementwise fallback mirroring src/models/apertus.rs::apertus_xielu. Used
-    // when the Metal back-end is unavailable (e.g. a CUDA-only build, where
-    // mx.fast.metal_kernel throws "[metal_kernel] No Metal back-end"). Keeps the
-    // FFI entry total so the MLXCEL_FUSED_XIELU flag never crashes a non-Metal
-    // build; the per-op result is identical to the Rust reference.
+    // on a backend with no port in xielu_ports() (CUDA, and a CPU-only build).
+    // Keeps the FFI entry total so the MLXCEL_FUSED_XIELU flag never refuses
+    // there; the per-op result is identical to the Rust reference.
     static mlx::core::array xielu_elementwise(
         const mlx::core::array& x, float alpha_p, float alpha_n,
         float beta, float eps) {
@@ -447,6 +517,13 @@ const mlxcel::KernelPorts& xielu_ports() {
     }
 }
 
+// Whether `fused_xielu` runs the fused kernel on this backend (Metal, ROCm)
+// rather than its elementwise fallback. Read from the table the dispatch
+// reads (#2069).
+bool fused_xielu_kernel_available() {
+    return mlxcel::has_kernel_port(xielu_ports());
+}
+
 std::unique_ptr<MlxArray> fused_xielu(
     const MlxArray& x,
     float alpha_p,
@@ -458,9 +535,10 @@ std::unique_ptr<MlxArray> fused_xielu(
     auto T = x.inner.dtype();
     auto xs = x.inner.shape();
 
-    // Non-Metal back-ends: mx.fast.metal_kernel throws, so use the elementwise
-    // fallback (correct, just not fused). Apertus is a macOS/Metal target.
-    if (!mlx::core::metal::is_available()) {
+    // A backend with no port (CUDA, CPU) takes the elementwise fallback
+    // (correct, just not fused) instead of refusing. The same table drives
+    // the dispatch below, so the two cannot disagree.
+    if (!fused_xielu_kernel_available()) {
         return std::make_unique<MlxArray>(
             xielu_elementwise(x.inner, alpha_p, alpha_n, beta, eps));
     }

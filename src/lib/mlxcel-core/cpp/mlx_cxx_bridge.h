@@ -1901,7 +1901,10 @@ std::unique_ptr<MlxArray> fused_moe_geglu_kernel(
 
 // Fused xIELU activation (Apertus). Collapses the ~11 elementwise ops in
 // apertus_xielu into one launch over the MLP intermediate buffer. Falls back to
-// an equivalent elementwise graph on non-Metal back-ends.
+// an equivalent elementwise graph on a backend with no port in `xielu_ports()`
+// (CUDA, CPU); `fused_xielu_kernel_available` answers which (Metal, ROCm since
+// lablup/mlxcel#2069).
+bool fused_xielu_kernel_available();
 std::unique_ptr<MlxArray> fused_xielu(
     const MlxArray& x,
     float alpha_p,
