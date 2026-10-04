@@ -2316,9 +2316,11 @@ mod ffi {
         fn gpu_backend_available() -> bool;
 
         /// True when the resolved GPU backend has mlxcel's fused kernel ports,
-        /// that is Metal or CUDA (issue #1803). ROCm has a GPU but no ports
-        /// yet, so it answers `false` and callers take the MLX graph fallback
-        /// their family already has. This is deliberately narrower than
+        /// that is Metal or CUDA (issue #1803). ROCm has a GPU and HIP ports
+        /// for some kernels only (#1814), so it answers `false`; a ported
+        /// kernel's own predicate (for example `bitlinear_kernel_available`,
+        /// `fused_moe_kernels_available`) reads its port table and is what
+        /// gates it there. This is deliberately narrower than
         /// `gpu_backend_available`, which only says a GPU exists: conflating
         /// the two is what sent ROCm into `fast::cuda_kernel` and aborted the
         /// process.

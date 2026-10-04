@@ -38,9 +38,10 @@ enum class GpuKernelBackend {
   None = 0,
   Metal = 1,
   Cuda = 2,
-  // ROCm is a real GPU backend with no `fast::hip_kernel` ports yet (issue
-  // #1814). Callers treat it like `None` and take the graph fallback; they must
-  // not call `fast::cuda_kernel`.
+  // ROCm is a real GPU backend with `fast::hip_kernel` ports for some kernels
+  // only (issue #1814). Backend-wide checks treat it like `None`; a ported
+  // kernel's own `has_kernel_port` predicate opens it there. Callers must not
+  // call `fast::cuda_kernel`.
   Rocm = 3,
 };
 

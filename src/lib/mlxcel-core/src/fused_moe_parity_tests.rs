@@ -554,11 +554,12 @@ fn fused_moe_kernel_source_structure() {
         3,
         "all three MOE_DOWN kernel ports must emit f32 partials (score in f32)"
     );
-    // Each fused-MoE HIP source refuses to compile for a wave64 target, under
-    // both spellings of the wavefront macro, and every shuffle in it states a
-    // width of 32: the native `__shfl_down` defaults to the device wavefront,
-    // so an implied width would fold 64 lanes on a wave64 part while the
-    // ladder above covers only 32 (#2065).
+    // Each fused-MoE HIP source carries the #1814 wave32 guard under both
+    // spellings of the wavefront macro, and every shuffle in it states a width
+    // of 32: the native `__shfl_down` defaults to the device wavefront, so an
+    // implied width would fold 64 lanes on a wave64 part while the ladder
+    // above covers only 32. The width is the load-bearing half: AMD clang 23
+    // defines neither macro, so the guard does not fire there (#2065).
     for name in ["MOE_GATEUP_HIP_SOURCE", "MOE_DOWN_HIP_SOURCE"] {
         let start = src
             .find(&format!("{name} = R\"("))

@@ -2484,11 +2484,15 @@ namespace {
     // Precise `expf`/`tanhf` as in CUDA; hipRTC compiles at -O3 without
     // fast-math, so they stay the precise library calls.
     static const char* MOE_GATEUP_HIP_SOURCE = R"(
-        // The fold below starts at 16, which is correct only for a 32-lane
-        // wavefront; on a wave64 target (CDNA: gfx90a, gfx942) it would drop
-        // half the lanes and still return a finite, plausible, wrong result.
-        // Preprocessor checks, not `static_assert(warpSize == 32)`, which does
-        // not compile in HIP (see the bitlinear HIP source).
+        // The fold below starts at 16 and covers one 32-lane row. Every
+        // shuffle states width 32, so on a wave64 target (CDNA: gfx90a,
+        // gfx942) it stays inside its own 32-lane half instead of folding
+        // half the row. The preprocessor guard is the #1814 port rule, not
+        // `static_assert(warpSize == 32)`, which does not compile in HIP. It
+        // is inert on AMD clang 23 (HIP 7.15), which defines neither macro
+        // for gfx942 or gfx1151 (checked with `hipcc -E -dM`, #2065), so the
+        // explicit width is what keeps the fold correct there; wave64 is not
+        // tested.
         #if defined(__AMDGCN_WAVEFRONT_SIZE__) && __AMDGCN_WAVEFRONT_SIZE__ != 32
         #error "moe_gateup_kernel_hip assumes a 32-lane wavefront"
         #endif
