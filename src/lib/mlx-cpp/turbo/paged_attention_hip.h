@@ -39,16 +39,10 @@
 // - The KV reads keep the CUDA text's explicit `(float)`: `hip_bfloat16`, the
 //   type MLX substitutes for bfloat16 on ROCm, converts to float only through
 //   an `explicit` operator.
-// - The geometry the CUDA bodies read from `<input>_shape` comes from template
-//   arguments instead (`NumQHeads`, `NumKVHeads`, `PoolBlockSize`, which the
-//   launchers pass on every backend) or, for the merge kernel's head count,
-//   from `gridDim.y`. The vendored `fast::hip_kernel` declares
-//   `<input>_shape` as a pointer while the launch passes the shape by value, so
-//   a HIP body that names one faults the queue (fixed by lablup/mlxcel#2100,
-//   LOCAL_FIXES item 30). The `static_assert`s at the end of this file keep
-//   every such name out of these bodies, comments included, because the
-//   overlay decides whether to declare the argument by searching the source
-//   text.
+// - The geometry is read from `<input>_shape` exactly as the CUDA bodies read
+//   it. That relies on the overlay passing shapes by value, which it does
+//   since lablup/mlxcel#2100 (`patches-rocm/LOCAL_FIXES.md` item 30); before
+//   that fix a HIP body that named `<input>_shape` faulted the queue.
 //
 // Wave32 guard. The v1 and v2-partial bodies fold a dot product across 32
 // lanes with an XOR butterfly that starts at 16. They carry the `#error` guard
@@ -62,8 +56,6 @@
 // merge body has no lane-level operation (one thread per output element, no
 // shuffle and no barrier), so it is correct for any wavefront size and carries
 // no guard: an `#error` there would only reject a correct kernel.
-
-#include <string_view>
 
 namespace mlxcel::turbo {
 
@@ -84,9 +76,9 @@ inline constexpr const char* PAGED_ATTENTION_DECODE_HIP_SOURCE = R"(
     uint32_t sg = threadIdx.y;                        // 0 .. NumSplits-1
     uint32_t bhq = blockIdx.z;                        // 0 .. B*Hq-1
 
-    uint32_t hq_count = (uint32_t)NumQHeads;          // Hq
-    uint32_t block_size = (uint32_t)PoolBlockSize;    // tokens per block
-    uint32_t hkv_count = (uint32_t)NumKVHeads;        // Hkv
+    uint32_t hq_count = (uint32_t)q_shape[1];         // Hq
+    uint32_t block_size = (uint32_t)k_pool_shape[1];  // tokens per block
+    uint32_t hkv_count = (uint32_t)k_pool_shape[2];   // Hkv
     uint32_t dim = (uint32_t)Dim;
     uint32_t dpt = (uint32_t)DimsPerThread;           // dims this lane owns
     uint32_t d0 = lane * dpt;                         // first dim of this lane
@@ -229,8 +221,8 @@ inline constexpr const char* PAGED_ATTENTION_V2_PARTIAL_HIP_SOURCE = R"(
     uint32_t d0 = lane * dpt;
     uint32_t page_size = (uint32_t)PageSize;
 
-    uint32_t hq_count = (uint32_t)NumQHeads;
-    uint32_t hkv_count = (uint32_t)NumKVHeads;
+    uint32_t hq_count = (uint32_t)q_shape[1];
+    uint32_t hkv_count = (uint32_t)k_pool_shape[2];
 
     uint32_t kv_head = yblk / (uint32_t)QGroups;
     uint32_t q_group = yblk - kv_head * (uint32_t)QGroups;
@@ -393,9 +385,8 @@ inline constexpr const char* PAGED_ATTENTION_V2_PARTIAL_HIP_SOURCE = R"(
 )";
 
 // v2 merge (port of `PAGED_ATTENTION_MERGE_CUDA_SOURCE`). Grid `(Dim, H, M)`
-// over threadgroup `(Dim, 1, 1)` yields blocks `(1, H, M)`, so `gridDim.y` is
-// the head count the CUDA body reads from the partials' shape. No barrier, so
-// the early `return` is safe.
+// over threadgroup `(Dim, 1, 1)` yields blocks `(1, H, M)`. No barrier, so the
+// early `return` is safe.
 inline constexpr const char* PAGED_ATTENTION_MERGE_HIP_SOURCE = R"(
     const float neg_inf = -__builtin_huge_valf();
 
@@ -404,7 +395,7 @@ inline constexpr const char* PAGED_ATTENTION_MERGE_HIP_SOURCE = R"(
     uint32_t o = blockIdx.z;
 
     uint32_t dim = (uint32_t)Dim;
-    uint32_t heads = (uint32_t)gridDim.y;
+    uint32_t heads = (uint32_t)v_in_shape[1];
     if (d >= dim || h >= heads) {
         return;
     }
@@ -435,31 +426,5 @@ inline constexpr const char* PAGED_ATTENTION_MERGE_HIP_SOURCE = R"(
         out_lse[o * heads + h] = l > 0.0f ? (m + log2f(l)) : neg_inf;
     }
 )";
-
-// `fast::hip_kernel` declares `<input>_shape`, `<input>_strides` and
-// `<input>_ndim` arguments for every input whose name it finds followed by one
-// of those suffixes anywhere in the source text, comments included, and the
-// vendored overlay declares the first two with a type the launch does not pass
-// (see the file comment). None of these bodies may name one.
-namespace paged_attention_hip_detail {
-constexpr bool names_no_shape_metadata(std::string_view src) {
-    return src.find("_shape") == std::string_view::npos &&
-        src.find("_strides") == std::string_view::npos &&
-        src.find("_ndim") == std::string_view::npos;
-}
-} // namespace paged_attention_hip_detail
-
-static_assert(
-    paged_attention_hip_detail::names_no_shape_metadata(
-        PAGED_ATTENTION_DECODE_HIP_SOURCE),
-    "the v1 HIP body must not name <input>_shape/_strides/_ndim");
-static_assert(
-    paged_attention_hip_detail::names_no_shape_metadata(
-        PAGED_ATTENTION_V2_PARTIAL_HIP_SOURCE),
-    "the v2 partial HIP body must not name <input>_shape/_strides/_ndim");
-static_assert(
-    paged_attention_hip_detail::names_no_shape_metadata(
-        PAGED_ATTENTION_MERGE_HIP_SOURCE),
-    "the merge HIP body must not name <input>_shape/_strides/_ndim");
 
 } // namespace mlxcel::turbo

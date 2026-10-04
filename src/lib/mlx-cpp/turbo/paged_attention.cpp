@@ -570,22 +570,11 @@ mlx::core::array paged_attention_decode(
     // int-only args, two callers that share this geometry but differ in pool
     // dtype get one compiled module and the later one reads through the wrong
     // pointer type. Metal already folds the dtypes into its key.
-    //
-    // `NumQHeads`/`NumKVHeads`/`PoolBlockSize` carry the geometry the Metal and
-    // CUDA bodies read from `q_shape`/`k_pool_shape`, for the HIP body, which
-    // cannot read `<input>_shape` (see `paged_attention_hip.h`). They are
-    // passed on every backend, because a launch that branches on the backend
-    // kind is what `make verify-kernel-port-dispatch` rejects; the Metal and
-    // CUDA bodies never name them, so there they only extend the module name
-    // with values that are fixed per model (issue #2068).
     std::vector<std::pair<std::string, TemplateArg>> template_args = {
         {"Dim", dim},
         {"NRep", n_rep},
         {"DimsPerThread", dims_per_thread},
         {"NumSplits", num_splits},
-        {"NumQHeads", hq},
-        {"NumKVHeads", hkv},
-        {"PoolBlockSize", kp_shape[1]},
         {"QType", q.dtype()},
         {"KVType", k_pool.dtype()},
         {"VType", v_pool.dtype()},

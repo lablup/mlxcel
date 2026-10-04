@@ -697,14 +697,6 @@ std::vector<mlx::core::array> paged_attention_decode_v2_partial(
     // the `{"T", T}` the fused decode-MoE kernels have always passed, which is
     // why those kernels never had the defect. Do not drop these because the
     // kernel body does not reference them.
-    //
-    // `NumQHeads`/`NumKVHeads` carry the head counts the Metal and CUDA bodies
-    // read from `q_shape`/`k_pool_shape`, for the HIP body, which cannot read
-    // `<input>_shape` (see `paged_attention_hip.h`). They are passed on every
-    // backend because a launch that branches on the backend kind is what
-    // `make verify-kernel-port-dispatch` rejects; the Metal and CUDA bodies
-    // never name them, so there they only extend the module name with values
-    // that are fixed per model (issue #2068).
     std::vector<std::pair<std::string, TemplateArg>> template_args = {
         {"Dim", dim},
         {"PageSize", page_size},
@@ -713,8 +705,6 @@ std::vector<mlx::core::array> paged_attention_decode_v2_partial(
         {"QGroups", q_groups},
         {"DimsPerThread", dims_per_thread},
         {"NumWarps", num_warps},
-        {"NumQHeads", hq},
-        {"NumKVHeads", hkv},
         {"QType", q.dtype()},
         {"KVType", k_pool.dtype()},
         {"VType", v_pool.dtype()},
