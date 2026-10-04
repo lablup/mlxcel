@@ -26,9 +26,12 @@
 //! ```
 //!
 //! with B and C shared by the heads of a group. The reference below composes
-//! exactly that from MLX ops in float32 (the graph path also promotes to
-//! float32), and the kernel's output and new state are compared with it at the
-//! granite-4.0-h-tiny and Nemotron-H mixer shapes, in f32 and bf16.
+//! exactly that from MLX ops in float32, as the kernel computes it (the graph
+//! path promotes x, B, C and dt to float32 too, but forms `-exp(A_log)` in
+//! `A_log`'s own dtype, so for a bf16 `A_log` it rounds A where the kernel does
+//! not). The kernel's output and new state are compared with it at the
+//! granite-4.0-h-tiny and Nemotron-H mixer shapes, in f32 and bf16, and at a
+//! head size that leaves padded rows in the last threadgroup.
 //!
 //! Tolerances are normalized RMS and normalized max deviation (both divided by
 //! the reference's RMS): f32 1e-5 / 1e-4 and bf16 1.6e-2 / 7e-2, the bf16
@@ -36,8 +39,9 @@
 //! every case, as the models carry it, so it is held to the f32 budget even
 //! when the activations are bf16.
 //!
-//! These tests return early only on a build with no GPU backend, or when the
-//! `MLXCEL_SSM_KERNEL=0` / `MLXCEL_SSM_CUDA_KERNEL=0` kill switch is set. On
+//! These tests return early only on a build with no GPU backend, when the
+//! default device is the CPU, or when the `MLXCEL_SSM_KERNEL=0` /
+//! `MLXCEL_SSM_CUDA_KERNEL=0` kill switch is set. On
 //! Metal, CUDA and ROCm a false `ssm_kernel_available()` is itself a defect
 //! (each has a port), so the test fails there instead of skipping.
 //!
@@ -73,6 +77,10 @@ fn skip() -> bool {
     let backend = gpu_backend_kind();
     if backend == GpuBackendKind::None {
         eprintln!("skipping ssm_update_parity_tests: no GPU backend in this build");
+        return true;
+    }
+    if !default_device_is_gpu() {
+        eprintln!("skipping ssm_update_parity_tests: the default device is the CPU");
         return true;
     }
     if kill_switch_set() {
@@ -132,11 +140,12 @@ struct Shape {
     head_dim: i32,
     groups: i32,
     state_dim: i32,
-    /// `time_step_limit` of the model.
+    /// The `(min, max)` clip applied to `softplus(dt + dt_bias)`.
     dt_limits: (f32, f32),
 }
 
-/// granite-4.0-h-tiny: 48 heads of 64, one group, state 128, no dt clip.
+/// granite-4.0-h-tiny: 48 heads of 64, one group, state 128, with granite's
+/// default `time_step_limit` of `(0.001, 100.0)`.
 const GRANITE_TINY: Shape = Shape {
     name: "granite-4.0-h-tiny",
     batch: 1,
@@ -144,12 +153,14 @@ const GRANITE_TINY: Shape = Shape {
     head_dim: 64,
     groups: 1,
     state_dim: 128,
-    dt_limits: (0.0, f32::INFINITY),
+    dt_limits: (0.001, 100.0),
 };
 
 /// Nemotron-3-Nano-30B-A3B: 64 heads of 64 in 8 groups, state 128. Run at
-/// batch 2 with a clipping dt window so the group/batch indexing and the clip
-/// are both exercised.
+/// batch 2 with a dt window of `(1e-3, 0.1)` (the checkpoint's
+/// `time_step_min` / `time_step_max`; its `time_step_limit` is `(0, inf)`),
+/// narrow enough to clip, so the group/batch indexing and the clip are both
+/// exercised.
 const NEMOTRON_H: Shape = Shape {
     name: "nemotron-h",
     batch: 2,
@@ -158,6 +169,18 @@ const NEMOTRON_H: Shape = Shape {
     groups: 8,
     state_dim: 128,
     dt_limits: (1e-3, 0.1),
+};
+
+/// A head size that is not a multiple of the threadgroup's 8 rows, so the last
+/// threadgroup has rows past `Dh` that must return before touching memory.
+const PADDED_ROWS: Shape = Shape {
+    name: "head_dim 60",
+    batch: 1,
+    heads: 4,
+    head_dim: 60,
+    groups: 2,
+    state_dim: 64,
+    dt_limits: (0.0, f32::INFINITY),
 };
 
 struct Case {
@@ -307,6 +330,7 @@ fn ssm_update_kernel_matches_graph_step_f32() {
     }
     check(&GRANITE_TINY, 2067, dtype::FLOAT32, dtype::FLOAT32);
     check(&NEMOTRON_H, 2068, dtype::FLOAT32, dtype::FLOAT32);
+    check(&PADDED_ROWS, 2073, dtype::FLOAT32, dtype::FLOAT32);
 }
 
 #[test]

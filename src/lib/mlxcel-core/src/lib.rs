@@ -1839,10 +1839,11 @@ mod ffi {
             bits: i32,
         ) -> Result<UniquePtr<MlxArray>>;
 
-        // SSM (Mamba2) fused Metal kernel.
+        // SSM (Mamba2) fused kernel.
         /// Whether the fused single-token SSM update kernel can run: the
         /// resolved GPU backend has a port in `ssm_ports()` (Metal, CUDA,
-        /// ROCm) and neither `MLXCEL_SSM_KERNEL=0` nor its older alias
+        /// ROCm), the default device is the GPU, and neither
+        /// `MLXCEL_SSM_KERNEL=0` nor its older alias
         /// `MLXCEL_SSM_CUDA_KERNEL=0` is set.
         fn ssm_kernel_available() -> bool;
 

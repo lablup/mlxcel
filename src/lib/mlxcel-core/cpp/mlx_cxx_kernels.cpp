@@ -637,18 +637,19 @@ namespace {
     // outputs, grid and template arguments as the CUDA port above; the body
     // differs in the lane reduction only. `__shfl_down_sync` is a HIP
     // compatibility shim that ignores its mask, so the native
-    // `__shfl_down(var, delta, width)` is used with the width stated. The fold
-    // starts at 16 because one 32-lane wavefront owns one (head, row) pair:
-    // the launch's threadgroup is (32, 8, 1), so each `threadIdx.y` row is one
-    // wave on a wave32 target. On a wave64 target (CDNA: gfx90a, gfx942) a
-    // 64-lane wave would span two rows and this fold would mix them, which is
-    // why the source refuses to compile there.
+    // `__shfl_down(var, delta, width)` is used with the width stated. One
+    // (head, row) pair is reduced by the 32 lanes that share a `threadIdx.y`
+    // (the threadgroup is (32, 8, 1)), and the explicit width of 32 keeps the
+    // fold inside those 32 lanes: on a wave32 target (gfx11, gfx12) they are
+    // the whole wave, and on a wave64 target (CDNA) the width splits the wave
+    // into two 32-lane segments that are again exactly two rows.
     static const char* SSM_HIP_SOURCE = R"(
-        // A fold that starts at 16 is correct only for a 32-lane wavefront;
-        // on wave64 it would return a finite, plausible, wrong sum. Checked
-        // with the preprocessor because `static_assert(warpSize == 32)` does
-        // not compile in HIP (`warpSize` is not a constant expression). Both
-        // macro spellings are checked; the trailing-underscore one is older.
+        // The wave32 guard every #1814 port carries (#2067 port
+        // requirements), spelled as the bitlinear port spells it because
+        // `static_assert(warpSize == 32)` does not compile in HIP. It is a
+        // no-op with ROCm 10's AMD clang 23, which defines neither macro for
+        // gfx1151, gfx942 or gfx90a. This fold does not rely on it: the
+        // shuffle width of 32 keeps it inside one row on wave64 as well.
         #if defined(__AMDGCN_WAVEFRONT_SIZE__) && __AMDGCN_WAVEFRONT_SIZE__ != 32
         #error "ssm_kernel_hip assumes a 32-lane wavefront"
         #endif
@@ -1678,10 +1679,16 @@ bool ssm_kernel_available() {
             return false;
         }
     }
-    // Read from the same table the dispatch in ssm_update_kernel selects
-    // from, so the Rust gates (`seq_len == 1 && ssm_kernel_available()`) can
-    // `expect` the launch: a true here means select_kernel_port will not
-    // refuse.
+    // Custom kernels run only on the GPU stream; with MLXCEL_DEVICE=cpu the
+    // model gates then take the ssm_step graph on the CPU instead of the
+    // launch throwing (the same check as mamba1_scan_kernel_accepts).
+    if (mlx::core::default_device() != mlx::core::Device::gpu) {
+        return false;
+    }
+    // Otherwise read from the same table the dispatch in ssm_update_kernel
+    // selects from, so the Rust gates (`seq_len == 1 &&
+    // ssm_kernel_available()`) can `expect` the launch: a true here means
+    // select_kernel_port will not refuse.
     return mlxcel::has_kernel_port(ssm_ports());
 }
 

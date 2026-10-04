@@ -2,7 +2,7 @@
 
 lablup/mlxcel#2067, part of #1814. Before this change every single-token Mamba2 decode step on ROCm ran the ~55-op SSD graph (`ssm_step`), because `ssm_ports()` had no `.rocm` entry and `ssm_kernel_available()` answered with `cu::is_available()` off Apple. The decode profile ([rocm-decode-profile-gfx1151-2026-09-30.md](rocm-decode-profile-gfx1151-2026-09-30.md)) put that graph at 29.8% of granite-4.0-h-tiny's and 20.0% of Nemotron-H's decode GPU time, the largest share of any #1814 port.
 
-The port (`SSM_HIP_SOURCE` in `src/lib/mlxcel-core/cpp/mlx_cxx_kernels.cpp`) is the CUDA kernel with `__shfl_down(acc, o, 32)` for the lane fold and a preprocessor guard that refuses to compile for a wave64 target. `ssm_kernel_available()` now returns `has_kernel_port(ssm_ports())` on every platform, so the model gates (`seq_len == 1 && ssm_kernel_available()` in granitemoehybrid, falcon_h1, plamo2 and nemotron_h) reach it with no model-side change. `MLXCEL_SSM_KERNEL=0` forces the graph on every backend; `MLXCEL_SSM_CUDA_KERNEL=0` is kept as an alias.
+The port (`SSM_HIP_SOURCE` in `src/lib/mlxcel-core/cpp/mlx_cxx_kernels.cpp`) is the CUDA kernel with `__shfl_down(acc, o, 32)` for the lane fold. It carries the `__AMDGCN_WAVEFRONT_SIZE` `#error` guard the #1814 ports share, which is inert with ROCm 10's AMD clang 23 (it defines neither macro for gfx1151, gfx942 or gfx90a); the fold does not need it, because the shuffle width of 32 keeps each reduction inside the 32 lanes of one row on a wave64 target too. `ssm_kernel_available()` now returns `has_kernel_port(ssm_ports())` on every platform, so the model gates (`seq_len == 1 && ssm_kernel_available()` in granitemoehybrid, falcon_h1, plamo2 and nemotron_h) reach it with no model-side change. On Nemotron-H that gate (`nemotron_h.rs`, `NemotronHMamba2Mixer::forward`) selects `fused_mamba2_forward`, which runs the whole single-token mixer (input projection, convolution, this kernel, gated norm, output projection) as one C++ call, so its decode figures below measure that path against the Rust graph mixer, not the SSM step alone. The predicate also answers false when the default device is the CPU (`MLXCEL_DEVICE=cpu`), where a custom kernel cannot run. `MLXCEL_SSM_KERNEL=0` forces the graph on every backend; `MLXCEL_SSM_CUDA_KERNEL=0` is kept as an alias.
 
 ## Environment
 
@@ -55,9 +55,20 @@ The `w1` rows (`1 128 8 0`) have no prefill, so their single token never meets a
 ```bash
 cargo build --release --features rocm --bin mlxcel --bin mlxcel-bench-decode --example logit_trace
 cargo test --release --features rocm -p mlxcel-core --lib ssm_update_parity_tests -- --test-threads=1
-for m in granite-4.0-h-tiny-4bit NVIDIA-Nemotron-3-Nano-30B-A3B-4bit; do
-  MLXCEL_SSM_KERNEL=0 scripts/rocm_gpu_guard.sh -- env MODELS_DIR=models/mlx ./scripts/bench_decode.sh models/mlx/$m --output off.csv
-  scripts/rocm_gpu_guard.sh -- env MODELS_DIR=models/mlx ./scripts/bench_decode.sh models/mlx/$m --output on.csv
+# bench_decode.sh truncates --output, so every run writes its own file.
+for i in 1 2 3; do
+  if [ $((i % 2)) = 1 ]; then arms="off on"; else arms="on off"; fi
+  for m in granite-4.0-h-tiny-4bit NVIDIA-Nemotron-3-Nano-30B-A3B-4bit; do
+    for arm in $arms; do
+      if [ $arm = off ]; then e=MLXCEL_SSM_KERNEL=0; else e=MLXCEL_SSM_KERNEL=1; fi
+      env $e scripts/rocm_gpu_guard.sh -- env MODELS_DIR=models/mlx \
+        ./scripts/bench_decode.sh models/mlx/$m --no-cooldown --output $arm-${m%%-*}-r$i.csv
+    done
+  done
+done
+for arm in off on; do
+  head -1 $arm-granite-r1.csv > $arm.csv
+  for f in $arm-*-r*.csv; do tail -n +2 "$f" >> $arm.csv; done
 done
 python3 scripts/compare_bench_csv.py --before off.csv --after on.csv
 ```
