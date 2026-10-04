@@ -1957,7 +1957,9 @@ std::unique_ptr<MlxArray> fused_moe_forward(
     int32_t bits
 );
 
-// Check if SSM Metal kernel is available (Metal GPU only)
+// Whether the fused single-token SSM update kernel can run: the GPU backend
+// has a port in ssm_ports() (Metal, CUDA, ROCm) and MLXCEL_SSM_KERNEL=0 (or
+// its older alias MLXCEL_SSM_CUDA_KERNEL=0) is not set.
 bool ssm_kernel_available();
 
 // Mamba1 selective scan fused over the sequence (Jamba, issue #2005).

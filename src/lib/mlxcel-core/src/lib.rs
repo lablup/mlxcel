@@ -1840,12 +1840,15 @@ mod ffi {
         ) -> Result<UniquePtr<MlxArray>>;
 
         // SSM (Mamba2) fused Metal kernel.
-        /// Check if SSM Metal kernel is available
+        /// Whether the fused single-token SSM update kernel can run: the
+        /// resolved GPU backend has a port in `ssm_ports()` (Metal, CUDA,
+        /// ROCm) and neither `MLXCEL_SSM_KERNEL=0` nor its older alias
+        /// `MLXCEL_SSM_CUDA_KERNEL=0` is set.
         fn ssm_kernel_available() -> bool;
 
         /// Fused SSM update kernel for single-token decode
-        /// Replaces ~55 individual ops with a single Metal kernel call
-        /// Used by: NemotronH, NemotronNAS, Mamba2
+        /// Replaces ~55 individual ops with a single kernel launch
+        /// Used by: GraniteMoeHybrid, Falcon-H1, PLaMo 2, NemotronH
         fn ssm_update_kernel(
             hidden_states: &MlxArray,
             a_log: &MlxArray,
@@ -3969,6 +3972,13 @@ mod fused_norm_parity_tests;
 #[cfg(test)]
 #[path = "mamba1_scan_parity_tests.rs"]
 mod mamba1_scan_parity_tests;
+
+// Kernel-against-graph parity for the fused single-token Mamba2 SSM update
+// (#2067) at the granite-4.0-h-tiny and Nemotron-H shapes, f32 and bf16, plus
+// the `MLXCEL_SSM_KERNEL` kill switch. GPU-only; they skip on CPU-only builds.
+#[cfg(test)]
+#[path = "ssm_update_parity_tests.rs"]
+mod ssm_update_parity_tests;
 
 // Numeric regression tests for `fast::rms_norm` on the small-axis CUDA dispatch
 // band (#830/#831): the deleted pre-#3792 overlay read past its shared scratch

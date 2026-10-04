@@ -633,6 +633,99 @@ namespace {
         return holder;
     }
 
+    // ROCm port (issue #2067). Same computation, thread mapping, inputs,
+    // outputs, grid and template arguments as the CUDA port above; the body
+    // differs in the lane reduction only. `__shfl_down_sync` is a HIP
+    // compatibility shim that ignores its mask, so the native
+    // `__shfl_down(var, delta, width)` is used with the width stated. The fold
+    // starts at 16 because one 32-lane wavefront owns one (head, row) pair:
+    // the launch's threadgroup is (32, 8, 1), so each `threadIdx.y` row is one
+    // wave on a wave32 target. On a wave64 target (CDNA: gfx90a, gfx942) a
+    // 64-lane wave would span two rows and this fold would mix them, which is
+    // why the source refuses to compile there.
+    static const char* SSM_HIP_SOURCE = R"(
+        // A fold that starts at 16 is correct only for a 32-lane wavefront;
+        // on wave64 it would return a finite, plausible, wrong sum. Checked
+        // with the preprocessor because `static_assert(warpSize == 32)` does
+        // not compile in HIP (`warpSize` is not a constant expression). Both
+        // macro spellings are checked; the trailing-underscore one is older.
+        #if defined(__AMDGCN_WAVEFRONT_SIZE__) && __AMDGCN_WAVEFRONT_SIZE__ != 32
+        #error "ssm_kernel_hip assumes a 32-lane wavefront"
+        #endif
+        #if defined(__AMDGCN_WAVEFRONT_SIZE) && __AMDGCN_WAVEFRONT_SIZE != 32
+        #error "ssm_kernel_hip assumes a 32-lane wavefront"
+        #endif
+        uint32_t n = blockIdx.z;                    // batch * heads
+        uint32_t h_idx = n % H;
+        uint32_t g_idx = n / G;
+        constexpr int n_per_t = Ds / 32;
+
+        // Wave-uniform: all 32 lanes of a wave share threadIdx.y.
+        uint32_t d_idx = blockIdx.y * blockDim.y + threadIdx.y;
+        if (d_idx >= (uint32_t)Dh) return;
+
+        auto x = X + n * Dh;
+        out += n * Dh;
+        auto i_state = state_in + n * Dh * Ds;
+        auto o_state = state_out + n * Dh * Ds;
+
+        auto C_ = C + g_idx * Ds;
+        auto B_ = B + g_idx * Ds;
+
+        uint32_t ds_idx = threadIdx.x;              // lane 0..31
+
+        float dt_ = (float)dt[n];
+        float A = -expf((float)A_log[h_idx]);
+        float dA = expf(A * dt_);
+
+        float acc = 0.0f;
+        float x_ = (float)x[d_idx];
+
+        for (int i = 0; i < n_per_t; ++i) {
+            int s_idx = n_per_t * (int)ds_idx + i;
+            int idx = (int)d_idx * Ds + s_idx;
+            float dB_by_x = x_ * dt_ * (float)B_[s_idx];
+            float state = dA * (float)i_state[idx] + dB_by_x;
+            o_state[idx] = (U)state;
+            acc += state * (float)C_[s_idx];
+        }
+        #pragma unroll
+        for (int o = 16; o > 0; o >>= 1) {
+            acc += __shfl_down(acc, o, 32);
+        }
+        if (ds_idx == 0u) {
+            out[d_idx] = (T)(acc + x_ * (float)D[h_idx]);
+        }
+    )";
+
+    struct SsmKernelHolderHip {
+        std::optional<mlx::core::fast::CustomKernelFunction> kernel;
+        bool initialized = false;
+
+        mlx::core::fast::CustomKernelFunction& get() {
+            if (!initialized) {
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+                kernel = mlx::core::fast::hip_kernel(
+                    "ssm_kernel_hip",
+                    {"X", "A_log", "B", "C", "D", "dt", "state_in"},
+                    {"out", "state_out"},
+                    SSM_HIP_SOURCE
+                );
+#else
+                throw std::runtime_error(
+                    "[ssm_update_kernel] this build has no ROCm backend");
+#endif
+                initialized = true;
+            }
+            return *kernel;
+        }
+    };
+
+    static SsmKernelHolderHip& get_ssm_kernel_hip() {
+        static SsmKernelHolderHip holder;
+        return holder;
+    }
+
 // This kernel's ports, in one place. `has_kernel_port` and `select_kernel_port`
 // both read it, so a support predicate and the dispatch cannot answer
 // differently (#1801).
@@ -644,8 +737,9 @@ const mlxcel::KernelPorts& ssm_ports() {
         .cuda = +[]() -> mlx::core::fast::CustomKernelFunction& {
             return get_ssm_kernel_cuda().get();
         },
-        // No HIP port yet (#1814).
-        .rocm = nullptr,
+        .rocm = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_ssm_kernel_hip().get();
+        },
     };
     return ports;
 }
@@ -1574,19 +1668,21 @@ std::unique_ptr<MlxArray> fused_moe_forward(
 }
 
 bool ssm_kernel_available() {
-#ifdef __APPLE__
-    return mlx::core::metal::is_available();
-#else
-    // CUDA port of the fused SSM decode kernel (#631); previously the hybrid
-    // SSM models fell back to the ~55-op graph path on every decode step.
-    // MLXCEL_SSM_CUDA_KERNEL=0 forces that graph path (debug / A-B bench).
-    if (const char* e = std::getenv("MLXCEL_SSM_CUDA_KERNEL")) {
-        if (e[0] == '0' && e[1] == '\0') {
+    // MLXCEL_SSM_KERNEL=0 forces the ~55-op ssm_step graph path on every
+    // backend (debug / A-B bench). MLXCEL_SSM_CUDA_KERNEL=0 is the name the
+    // switch had while the CUDA port (#631) was the only one off Apple; it is
+    // kept as an alias so existing scripts still work (#2067).
+    for (const char* name : {"MLXCEL_SSM_KERNEL", "MLXCEL_SSM_CUDA_KERNEL"}) {
+        const char* e = std::getenv(name);
+        if (e != nullptr && e[0] == '0' && e[1] == '\0') {
             return false;
         }
     }
-    return mlx::core::cu::is_available();
-#endif
+    // Read from the same table the dispatch in ssm_update_kernel selects
+    // from, so the Rust gates (`seq_len == 1 && ssm_kernel_available()`) can
+    // `expect` the launch: a true here means select_kernel_port will not
+    // refuse.
+    return mlxcel::has_kernel_port(ssm_ports());
 }
 
 void ssm_update_kernel(
@@ -1636,6 +1732,18 @@ void ssm_update_kernel(
         {"H", h},
         {"G", g},
     };
+    // The hipRTC module cache is keyed on the name plus this list, while the
+    // generated signature takes every input's runtime dtype, so an input whose
+    // dtype is not named here could reuse a module compiled for another dtype
+    // (scripts/ci/check_kernel_dtype_keys.py). T and U cover X, D (cast to T
+    // below) and state_in, and dt is always float32 from compute_dt; A_log, B
+    // and C are not tied to T, so the HIP port names them too. Appended on
+    // ROCm only, which leaves the Metal and CUDA kernel names unchanged.
+    if (mlxcel::gpu_kernel_backend() == mlxcel::GpuKernelBackend::Rocm) {
+        template_args.push_back({"TA", A_log.inner.dtype()});
+        template_args.push_back({"TB", B.inner.dtype()});
+        template_args.push_back({"TC", C.inner.dtype()});
+    }
 
     std::vector<array> inputs = {
         hidden_states.inner, A_log.inner, B.inner, C.inner,
