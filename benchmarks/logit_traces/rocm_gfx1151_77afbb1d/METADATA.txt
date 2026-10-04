@@ -1,0 +1,17 @@
+host: AMD Ryzen AI MAX+ 395 with Radeon 8060S (gfx1151, RDNA 3.5), 96 GiB VRAM carve-out, 31 GiB host RAM
+os: Debian GNU/Linux 13 (trixie), kernel 6.18.12+deb13-amd64
+rocm: 10.0.0 packages (HIP 7.15.26333), ROCM_PATH=/opt/rocm
+mlxcel_commit: 77afbb1d (branch update/issue-2065-rocm-fused-moe-ports, lablup/mlxcel#2098, on origin/main 57d8ed29). The HIP ports of moe_gateup and moe_down, the table predicates, and the ROCm SGY default of 2.
+mlx_pin: 81ba1c6a0e50a9268b931579c2d4f1158b9aab5a
+rocm_overlay_fork: NripeshN/mlx rocm-support @ 75915908dfe5028335d318b10340313744fd3a8d (src/lib/mlx-cpp/patches-rocm/UPSTREAM), plus the local fixes in LOCAL_FIXES.md
+logit_trace_sha256: ba41ee7a57f1c4e0999112d071062239241a571eca59aa8aa20751e480fd8a14
+baseline_logit_trace_sha256: 31bd9eb0ab06c232fc0e374a4675d6c92f380f145ffc1c495dce043f05b240f8 (origin/main 57d8ed29, used for the main-vs-branch rows in the results page; those traces are not committed here)
+build: cargo build --release --features rocm --example logit_trace
+corpus: tests/fixtures/wikitext2_excerpt.txt sha256 16721fc1057d69efc8493718fcad562de9e4554ce05369876cd06dcba431394e
+checkpoints: the same local directories as ../rocm_gfx1151_bec64748/ (Qwen3-30B-A3B-4bit@d388dead, Mixtral-8x7B-Instruct-v0.1-4bit@4e8f7045) and ../rocm_gfx1151_96cbce84/ (NVIDIA-Nemotron-3-Nano-30B-A3B-4bit@832f602eba5d22436c258c1462bdedc5afddb42b)
+args: w1='1 128 8 0'; w8='8 80 8 512'; w1ctx512='1 128 8 512' with MLXCEL_TRACE_START_TOKEN=512 (CHUNK_TOKENS MAX_CHUNKS TOPK PREFILL)
+tags: 'default' = no override. 'fused0' = MLXCEL_FUSED_MOE=0 (gather_qmm). The fused MoE kernels run only on a single-token forward, so on Qwen3-30B-A3B only the w1 'default' trace takes the HIP kernels; its w8 'default' and 'fused0' traces are identical. Mixtral-8x7B's experts (Dff 14336) are above the 8192 MLXCEL_FUSED_MOE_MAX_DFF default, so its 'default' runs gather_qmm. Nemotron-H's 'default' runs fused_moe_forward (gather_qmm routed experts) where main ran forward_nonfused.
+filtering: the Nemotron-H files are stored with the five '[NemotronH] ' loader lines removed (grep -v '^\['), so they compare directly; the older Nemotron-H sets keep those lines.
+env: LD_LIBRARY_PATH unset; MLXCEL_KEEP_BF16 unset; MLXCEL_FUSED_MOE unset except on 'fused0'; MLXCEL_FUSED_MOE_SGY unset (ROCm default 2)
+gpu: correctness traces, not timings; another development unit may have used the GPU during a run
+references: ../metal_m1u_bec64748/ (Qwen3, Mixtral), ../rocm_gfx1151_bec64748/ (ROCm gather_qmm 'fused0'), ../rocm_gfx1151_c5fe9a16/ (Nemotron-H w1, w8 on forward_nonfused), ../rocm_gfx1151_96cbce84/ (Nemotron-H w1ctx512 on main), ../metal_m5_d1128266/ (Nemotron-H Metal)
