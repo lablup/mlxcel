@@ -363,8 +363,11 @@ impl MambaBlock {
         // whole-sequence graph scan, but this graph path projects one timestep
         // at a time, so switching would change CUDA output and needs its own
         // validation. The predicate reads the float32-state variant's port
-        // table, so it answers for exactly the backends that have that variant.
-        let (y, current_state) = if mlxcel_core::mamba1_scan_float_state_kernel_available() {
+        // table, so it answers for exactly the backends that have that variant;
+        // `mamba1_scan_kernel_accepts` then checks the inputs themselves (one
+        // lane per state column, so a state wider than 32 takes the graph scan,
+        // and the GPU stream), as Jamba's gate does.
+        let fused_inputs = if mlxcel_core::mamba1_scan_float_state_kernel_available() {
             let delta_bc = self.x_proj.forward(&x_conv);
             let rank = self.time_step_rank as i32;
             let n = self.state_size as i32;
@@ -374,7 +377,13 @@ impl MambaBlock {
             let delta = mlxcel_core::softplus(&self.dt_proj.forward(&self.mixer_norm(&delta_raw)));
             let b = self.mixer_norm(&b_raw);
             let c = self.mixer_norm(&c_raw);
-
+            mlxcel_core::mamba1_scan_kernel_accepts(&x_conv, &delta, &b, &c, &a, &self.d_param)
+                .then_some((delta, b, c))
+        } else {
+            None
+        };
+        let (y, current_state) = if let Some((delta, b, c)) = fused_inputs {
+            let n = self.state_size as i32;
             let zeros;
             let state_in = match state_cache {
                 Some(s) => s,

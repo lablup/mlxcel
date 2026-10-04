@@ -9782,6 +9782,15 @@ mod residual_add3_layer_norm_tests {
     #[test]
     fn residual_add3_layer_norm_matches_the_unfused_pair() {
         use crate::hardware::{GpuBackendKind, gpu_backend_kind};
+        // With the gate off the wrapper runs the unfused pair, and the test
+        // would compare that pair with itself and pass whatever the kernel does.
+        if !fused_add3_layer_norm_enabled() {
+            eprintln!(
+                "skipping: MLXCEL_FUSED_ADD_NORM disables the fused add3 + LayerNorm kernel, \
+                 so there is nothing to compare against the unfused pair"
+            );
+            return;
+        }
         if matches!(
             gpu_backend_kind(),
             GpuBackendKind::Metal | GpuBackendKind::Rocm

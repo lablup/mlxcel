@@ -275,7 +275,8 @@ fn as_f32_vec(arr: &mlxcel_core::MlxArray) -> Vec<f32> {
 /// f32, f16 and bf16: within the `fused_norm_parity_tests.rs` budget, and
 /// reported as byte-identical or not. Inputs cover the edge values of
 /// `fused_xielu_matches_elementwise_bit_for_bit` plus a pseudo-random spread
-/// over [-12, 12), where `alpha_p * x^2` still fits in f16.
+/// over [-12, 12), where `alpha_p * x^2` still fits in f16. On ROCm every
+/// dtype must also be byte-identical.
 #[test]
 fn fused_xielu_kernel_matches_graph_every_dtype() {
     let backend = gpu_backend_kind();
@@ -333,5 +334,17 @@ fn fused_xielu_kernel_matches_graph_every_dtype() {
             nrms < rms_budget && nmax < max_budget,
             "fused xIELU deviates from the graph (dtype {dt}): nrms={nrms:e} nmax={nmax:e}"
         );
+        // ROCm's kernel rounds each intermediate where the ROCm graph does,
+        // so it is held to byte identity in every dtype (the claim
+        // docs/environment-variables.md makes). Metal is pinned to identity
+        // for bf16 by `apertus::tests::fused_xielu_matches_elementwise_bit_for_bit`
+        // and to the tolerance above for f32 and f16.
+        if backend == GpuBackendKind::Rocm {
+            assert_eq!(
+                differing, 0,
+                "fused xIELU on ROCm must be byte-identical to the graph (dtype {dt}): \
+                 {differing} of {n} elements differ"
+            );
+        }
     }
 }

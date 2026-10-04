@@ -425,6 +425,10 @@ namespace {
     // f32 and round to T once, as `full_f32(.., dtype)` does in the graph.
     // Elementwise with no cross-lane step, so the wavefront size does not
     // enter; the guard is the #1814 port rule (see MOE_GATEUP_HIP_SOURCE).
+    // The element count is read from `x_shape[0]` (x arrives flattened)
+    // rather than a template argument, so hipRTC compiles one kernel per
+    // dtype instead of one per activation size (the ROCm JIT cache has no
+    // eviction).
     static const char* XIELU_HIP_SOURCE = R"(
         #if defined(__AMDGCN_WAVEFRONT_SIZE__) && __AMDGCN_WAVEFRONT_SIZE__ != 32
         #error "xielu_fused_hip assumes a 32-lane wavefront"
@@ -435,7 +439,7 @@ namespace {
         {
         #pragma clang fp contract(off)
         uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
-        if (i >= (uint32_t)n) { return; }
+        if (i >= (uint32_t)x_shape[0]) { return; }
         float xx = static_cast<float>(x[i]);
         float ap = static_cast<float>(static_cast<T>(alpha_p[0]));
         float an = static_cast<float>(static_cast<T>(alpha_n[0]));
@@ -519,9 +523,12 @@ const mlxcel::KernelPorts& xielu_ports() {
 
 // Whether `fused_xielu` runs the fused kernel on this backend (Metal, ROCm)
 // rather than its elementwise fallback. Read from the table the dispatch
-// reads (#2069).
+// reads (#2069), and false off the GPU stream: custom kernels run only on the
+// GPU, so with MLXCEL_DEVICE=cpu the elementwise fallback runs on the CPU
+// instead of the launch throwing (the same check as ssm_kernel_available).
 bool fused_xielu_kernel_available() {
-    return mlxcel::has_kernel_port(xielu_ports());
+    return mlx::core::default_device() == mlx::core::Device::gpu &&
+        mlxcel::has_kernel_port(xielu_ports());
 }
 
 std::unique_ptr<MlxArray> fused_xielu(
@@ -555,9 +562,13 @@ std::unique_ptr<MlxArray> fused_xielu(
 
     auto& kernel = mlxcel::select_kernel_port(
         "fused_xielu", "graph fallback", xielu_ports());
+    // Metal bakes the element count into the kernel; the ROCm source reads it
+    // from `x_shape[0]` so its JIT key is the dtype alone.
     std::vector<std::pair<std::string, mlx::core::fast::TemplateArg>> ta = {
         {"T", T},
+#ifndef MLXCEL_BRIDGE_ROCM_BACKEND
         {"n", (int)n},
+#endif
     };
     std::vector<array> inputs = {xflat, ap, an, bb, ee};
     const int tg = 256;
@@ -1602,8 +1613,13 @@ std::unique_ptr<MlxArray> fused_moe_forward(
 
     // Experimental fused squared-ReLU decode path (#268), behind its own flag
     // MLXCEL_FUSED_MOE_RELU2 (NOT the default MLXCEL_FUSED_MOE): fc1 + relu² ->
-    // act_g[K, Dff], then reuse moe_down for fc2 * score. Correct and
-    // byte-identical, but measured performance-NEUTRAL on nemotron-h-30b. MoE
+    // act_g[K, Dff], then reuse moe_down for fc2 * score. Correct, and
+    // reported byte-identical to the gather_qmm branch on Metal (#268). The
+    // ROCm port (#2069) is not byte-identical to gather_qmm: it lands closer
+    // to an all-f32 dense reference than gather_qmm does, and within
+    // gather_qmm's own distance from that reference (see
+    // fused_moe_relu2_parity_tests). Measured performance-NEUTRAL on
+    // nemotron-h-30b. MoE
     // is its largest block, but this kernel replaces only the already-efficient
     // routed fc1/fc2 GEMVs; the router, shared expert, and combine remain. Kept
     // wired behind the dedicated flag so it stays referenceable for a model
@@ -2207,8 +2223,12 @@ bool mamba1_scan_kernel_available() {
         mlxcel::has_kernel_port(mamba1_scan_graph_exact_ports());
 }
 
+// The float32-state variant (Metal, ROCm since #2069), on the GPU stream:
+// with MLXCEL_DEVICE=cpu Mamba's gate takes the graph scan instead of the
+// launch throwing (the same check as mamba1_scan_kernel_accepts).
 bool mamba1_scan_float_state_kernel_available() {
     return mamba1_scan_kernel_available() &&
+        mlx::core::default_device() == mlx::core::Device::gpu &&
         mlxcel::has_kernel_port(mamba1_scan_ports());
 }
 
@@ -3089,9 +3109,12 @@ bool moe_down_kernel_available() {
 
 // Whether `fused_moe_forward`'s opt-in `MLXCEL_FUSED_MOE_RELU2` branch can run:
 // it launches the fc1 squared-ReLU kernel and the down kernel, so it needs
-// both ports. Metal and ROCm (#2069); CUDA has no fc1_relu2 port.
+// both ports. Metal and ROCm (#2069); CUDA has no fc1_relu2 port. False off
+// the GPU stream (MLXCEL_DEVICE=cpu), where custom kernels cannot run, so the
+// branch declines to gather_qmm there too.
 bool fused_moe_relu2_kernels_available() {
-    return mlxcel::has_kernel_port(moe_fc1_relu2_ports()) &&
+    return mlx::core::default_device() == mlx::core::Device::gpu &&
+        mlxcel::has_kernel_port(moe_fc1_relu2_ports()) &&
         mlxcel::has_kernel_port(moe_down_ports());
 }
 
@@ -3726,9 +3749,13 @@ namespace {
     // centred sum of squares the same way, `1.0f / sqrtf(var / D + eps)`, and
     // `T(w * norm + b)` with the bias read from memory (a zero with stride 0
     // when the norm has no bias, as `fast::layer_norm` passes). The
-    // expressions are written as layer_norm.hip writes them, so hipRTC's
-    // contraction choices (both compile device code at -O3 with the default
-    // fp-contract) land the same way. The residual is kept in registers
+    // expressions are written as layer_norm.hip writes them, so the
+    // compilers' contraction choices should land the same way. That is not
+    // guaranteed: layer_norm.hip is built by hipcc with no explicit -O or
+    // -ffp-contract flag and this source by hipRTC, so identity is what
+    // `residual_add3_layer_norm_matches_the_unfused_pair` pins on the
+    // toolchain at hand, and a compiler upgrade can break it (the test then
+    // fails). The residual is kept in registers
     // instead of being re-read from `x_out`; its values are the T values
     // written there. `D <= 6656` (the caller's cap) bounds the register array
     // at 28 floats per thread.
@@ -3891,8 +3918,12 @@ const mlxcel::KernelPorts& add3_layer_norm_ports() {
 }
 }
 
+// Read from the table the launcher selects from, and false off the GPU stream
+// (MLXCEL_DEVICE=cpu), where custom kernels cannot run and the caller runs the
+// unfused pair instead.
 bool fused_add3_layer_norm_available() {
-    return mlxcel::has_kernel_port(add3_layer_norm_ports());
+    return mlx::core::default_device() == mlx::core::Device::gpu &&
+        mlxcel::has_kernel_port(add3_layer_norm_ports());
 }
 
 void fused_add3_layer_norm(

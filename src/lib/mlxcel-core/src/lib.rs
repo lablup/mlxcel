@@ -1984,8 +1984,9 @@ mod ffi {
         /// covering the `apertus_xielu` elementwise graph
         /// (square/min/expm1/where/...). The per-layer scalars `alpha_p` /
         /// `alpha_n` (post-softplus) and `beta` / `eps` are passed by value.
-        /// Byte-identical to the elementwise path on the same backend; falls
-        /// back to an equivalent elementwise graph where
+        /// Byte-identical to the elementwise path where tested: Metal in bf16,
+        /// ROCm (gfx1151) in f32, f16 and bf16; Metal f32 and f16 are held to
+        /// a tolerance only. Falls back to an equivalent elementwise graph where
         /// [`fused_xielu_kernel_available`] is false (CUDA, CPU). Gated by
         /// `MLXCEL_FUSED_XIELU`.
         fn fused_xielu(

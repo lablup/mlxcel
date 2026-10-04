@@ -21,8 +21,9 @@
 //!
 //! 1. With f32 inputs the kernel reproduces the reference (the only difference
 //!    is summation order inside `simd_sum`), for fresh and carried state, a
-//!    single step and several, three state widths (up to a full 32 lanes), and a channel count that is
-//!    not a multiple of the threadgroup's eight rows.
+//!    single step and several, three state widths (up to a full 32 lanes),
+//!    and a channel count that is not a multiple of the threadgroup's eight
+//!    rows.
 //! 2. With bf16 inputs the float32-state kernel (Metal, and ROCm since #2069)
 //!    is at least as close to the f32 reference as the graph scan it
 //!    replaces, which rounds the state to bf16 every step.
