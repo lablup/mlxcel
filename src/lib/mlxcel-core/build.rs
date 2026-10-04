@@ -308,8 +308,10 @@ fn main() {
     // Fused residual-add RMSNorm and fused RoPE + KV-append kernel launchers (#905).
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/fused_norm.h");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/fused_norm.cpp");
+    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/fused_norm_hip.h");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/fused_rope_append.h");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/fused_rope_append.cpp");
+    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/fused_rope_append_hip.h");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/kv_inplace_write.h");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/kv_inplace_write.cpp");
     println!("cargo:rerun-if-env-changed=MLX_CUDA_ARCHITECTURES");

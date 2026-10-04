@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! The custom-kernel gates decline on the CPU device of a GPU build
-//! (lablup/mlxcel#2069).
+//! (lablup/mlxcel#2069, #2063).
 //!
 //! Custom kernels (`fast::metal_kernel`, `fast::hip_kernel`) run only on the
 //! GPU stream; on a CPU stream their `eval_cpu` throws "Custom kernels only
@@ -74,6 +74,14 @@ fn custom_kernel_gates_decline_on_the_cpu_device() {
     assert!(
         !mlxcel_core::fused_moe_relu2_kernels_available(),
         "MLXCEL_FUSED_MOE_RELU2 must decline to gather_qmm on the CPU device"
+    );
+    assert!(
+        !mlxcel_core::fused_add_rms_norm_available(),
+        "MLXCEL_FUSED_ADD_RMSNORM=1 must take graph_add_rms_norm on the CPU device"
+    );
+    assert!(
+        !mlxcel_core::fused_rope_qk_append_available(),
+        "MLXCEL_FUSED_ROPE_APPEND=1 must take the fast_rope graph on the CPU device"
     );
 
     // The entry points behind the first two gates run on the CPU instead of

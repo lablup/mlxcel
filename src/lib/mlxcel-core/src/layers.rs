@@ -1025,22 +1025,29 @@ pub fn graph_add_rms_norm<N: FusedAddRmsNormSpec + ?Sized>(
     (normed, new_residual)
 }
 
-/// Whether this backend has a fused-add-RMSNorm kernel, asked once.
+/// Whether the fused-add-RMSNorm kernel can run now: the default device is the
+/// GPU and the backend has a port (Metal, CUDA, ROCm since #2063).
 ///
-/// The FFI answer reaches `metal::is_available()` / `cu::is_available()` in
+/// The port half is asked once. The FFI answer reaches the backend probes in
 /// C++, and the backend cannot change mid-process, so re-asking at every
 /// residual join of every layer of every token would be pure overhead on the
-/// path the fusion exists to make cheaper.
+/// path the fusion exists to make cheaper. The device half is not cached: a
+/// custom kernel throws on the CPU stream, and `MLXCEL_DEVICE=cpu` or a
+/// `DefaultDeviceGuard` moves the default device, so it is read on every call
+/// (one FFI read of MLX's default device). The C++ predicate also checks the
+/// device, which is why the cached call is made only while the GPU is the
+/// default: initialised then, it records the port table alone.
 fn fused_add_rms_norm_backend_available() -> bool {
     static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *AVAILABLE.get_or_init(ffi::fused_add_rms_norm_available)
+    ffi::default_device_is_gpu() && *AVAILABLE.get_or_init(ffi::fused_add_rms_norm_available)
 }
 
-/// Whether this backend has a fused RoPE + append kernel, asked once. Same
-/// reasoning as [`fused_add_rms_norm_backend_available`].
+/// Whether the fused RoPE + append kernel can run now. Same split between a
+/// cached port check and a per-call device check as
+/// [`fused_add_rms_norm_backend_available`].
 fn fused_rope_append_backend_available() -> bool {
     static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *AVAILABLE.get_or_init(ffi::fused_rope_qk_append_available)
+    ffi::default_device_is_gpu() && *AVAILABLE.get_or_init(ffi::fused_rope_qk_append_available)
 }
 
 /// Whether the fused kernel can serve this call.
@@ -1049,8 +1056,9 @@ fn fused_rope_append_backend_available() -> bool {
 /// and an exception crossing the cxx boundary is not recoverable, so the
 /// eligibility test lives here and the fused branch is only taken when the
 /// launcher cannot throw: matching shapes and dtypes, a 1-D weight whose length
-/// is the trailing dimension, and a backend that has a custom-kernel JIT at all
-/// (false on a CPU-only build, and on ROCm until the ports land).
+/// is the trailing dimension, and a backend that has a port of this kernel on
+/// the current default device (false on a CPU-only build and on the CPU device
+/// of a GPU build).
 ///
 /// One class is no longer in that list. A backend with no port used to reach
 /// the Metal arm and abort; issue #1885 made the launcher refuse and its bridge

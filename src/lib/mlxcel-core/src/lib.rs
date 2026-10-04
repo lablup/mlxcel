@@ -1570,8 +1570,10 @@ mod ffi {
             new_residual_out: &mut UniquePtr<MlxArray>,
         ) -> Result<()>;
 
-        /// Whether the current backend has a fused-add-RMSNorm kernel at all
-        /// (issue #905). False on a CPU-only build, where the custom-kernel JIT
+        /// Whether the fused-add-RMSNorm kernel can run (issue #905): the
+        /// backend has a port in `fused_norm_ports()` (Metal, CUDA, and ROCm
+        /// since #2063) and the default device is the GPU. False on a CPU-only
+        /// build and on the CPU device of a GPU build, where a custom kernel
         /// throws.
         fn fused_add_rms_norm_available() -> bool;
 
@@ -1603,8 +1605,10 @@ mod ffi {
             v_out: &mut UniquePtr<MlxArray>,
         ) -> Result<()>;
 
-        /// Whether the current backend has a fused RoPE + append kernel at all
-        /// (issue #905). False on a CPU-only build.
+        /// Whether the fused RoPE + append kernel can run (issue #905): the
+        /// backend has a port in `fused_rope_ports()` (Metal, CUDA, and ROCm
+        /// since #2063) and the default device is the GPU. False on a CPU-only
+        /// build and on the CPU device of a GPU build.
         fn fused_rope_qk_append_available() -> bool;
 
         /// A second handle to the same MLX array node: same id, same

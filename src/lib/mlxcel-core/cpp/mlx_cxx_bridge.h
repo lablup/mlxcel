@@ -2517,9 +2517,9 @@ void fused_add_rms_norm(
     std::unique_ptr<MlxArray>& normed_out,
     std::unique_ptr<MlxArray>& new_residual_out);
 
-// Whether the current backend has a fused-add-RMSNorm kernel at all (issue
-// #905). False on a CPU-only build, where both `metal_kernel` and `cuda_kernel`
-// throw; the Rust helper consults this before committing to the fused path.
+// Whether the fused-add-RMSNorm kernel can run (issue #905): a port for this
+// backend (Metal, CUDA, ROCm since #2063) and the GPU as the default device.
+// The Rust helper consults this before committing to the fused path.
 bool fused_add_rms_norm_available();
 
 // Fused q/k RoPE + KV-append-layout kernel launcher (issue #905).
@@ -2555,8 +2555,9 @@ void fused_rope_qk_append(
     std::unique_ptr<MlxArray>& k_out,
     std::unique_ptr<MlxArray>& v_out);
 
-// Whether the current backend has a fused RoPE + KV-append kernel at all
-// (issue #905). False on a CPU-only build.
+// Whether the fused RoPE + KV-append kernel can run (issue #905): a port for
+// this backend (Metal, CUDA, ROCm since #2063) and the GPU as the default
+// device.
 bool fused_rope_qk_append_available();
 
 // Wraps `mlxcel::turbo::inplace_slice_write` (#1959): `dst` with `rows` written
