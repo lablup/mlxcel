@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include "gpu_backend.h"
 #include "kernel_port.h"
+#include "paged_attention_hip.h"
 
 #include <mlx/fast.h>
 #include <mlx/ops.h>
@@ -366,7 +367,8 @@ constexpr const char* PAGED_ATTENTION_DECODE_CUDA_SOURCE = R"(
 
 // Apple Silicon SIMD width. Each SIMD group is 32 lanes that partition the head
 // dimension; `NumSplits` SIMD groups split the token range. On CUDA the same
-// constant is the warp width.
+// constant is the warp width, and on ROCm the wavefront width of the wave32
+// targets the HIP port is built for (`paged_attention_hip.h`).
 constexpr int PAGED_ATTENTION_SIMD_WIDTH = 32;
 
 // Thread-safe lazy-initialised holder for the JIT-compiled kernel. Mirrors the
@@ -420,6 +422,38 @@ inline PagedAttentionKernelHolderCuda& get_paged_attention_kernel_cuda() {
     return holder;
 }
 
+// HIP counterpart (issue #2068): the CUDA port compiled through hipRTC, body in
+// `paged_attention_hip.h`. On a build without the ROCm backend
+// `fast::hip_kernel` is not declared, and `paged_attention_ports()` never
+// resolves this entry there (`select_kernel_port` reads the running backend),
+// so the throw is unreachable and exists only to keep the table shape uniform.
+struct PagedAttentionKernelHolderHip {
+    std::optional<mlx::core::fast::CustomKernelFunction> kernel;
+    std::once_flag init_flag;
+
+    mlx::core::fast::CustomKernelFunction& get() {
+        std::call_once(init_flag, [this] {
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+            kernel = mlx::core::fast::hip_kernel(
+                "mlxcel_paged_attention_decode",
+                {"q", "k_pool", "v_pool", "rows", "row_offsets", "logical_starts",
+                 "visible_lens", "scale"},
+                {"out"},
+                std::string(PAGED_ATTENTION_DECODE_HIP_SOURCE));
+#else
+            throw std::runtime_error(
+                "[paged_attention_decode] this build has no ROCm backend");
+#endif
+        });
+        return *kernel;
+    }
+};
+
+inline PagedAttentionKernelHolderHip& get_paged_attention_kernel_hip() {
+    static PagedAttentionKernelHolderHip holder;
+    return holder;
+}
+
 
 // This kernel's ports, in one place. `has_kernel_port` and
 // `select_kernel_port` both read it, so a support predicate and the dispatch
@@ -432,8 +466,9 @@ const mlxcel::KernelPorts& paged_attention_ports() {
         .cuda = +[]() -> mlx::core::fast::CustomKernelFunction& {
             return get_paged_attention_kernel_cuda().get();
         },
-        // No HIP port yet (#1814).
-        .rocm = nullptr,
+        .rocm = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_paged_attention_kernel_hip().get();
+        },
     };
     return ports;
 }
@@ -474,6 +509,23 @@ mlx::core::array paged_attention_decode(
 
     const auto& q_shape = q.shape();       // [B, Hq, 1, Dim]
     const auto& kp_shape = k_pool.shape(); // [num_blocks, block_size, Hkv, Dim]
+
+    // Shapes the kernel bodies cannot index are refused here, on every
+    // backend, instead of being read out of bounds (issue #2068; #2067 did the
+    // same for the SSM update kernel). The bridge declares this function
+    // `Result`, so the throw reaches Rust as an `Err`.
+    // `v_pool` may hold fewer rows than `k_pool` (the MiniMax-M3 sparse launch
+    // reshapes both allocations to `[rows, 1, 1, D]`, and K carries the
+    // index-key side head), so axis 0 is not compared. The bodies address V
+    // with K's block size and head stride, so axes 1 to 3 must match.
+    if (q.ndim() != 4 || k_pool.ndim() != 4 || v_pool.ndim() != 4 ||
+        q_shape[2] != 1 || q_shape[3] < 1 || kp_shape[3] != q_shape[3] ||
+        kp_shape[1] < 1 || kp_shape[2] < 1 || v_pool.shape(1) != kp_shape[1] ||
+        v_pool.shape(2) != kp_shape[2] || v_pool.shape(3) != kp_shape[3]) {
+        throw std::invalid_argument(
+            "[paged_attention_decode] expects q [B, Hq, 1, D] and k_pool, v_pool "
+            "[blocks, block_size, heads, D]");
+    }
 
     int batch = q_shape[0];
     int hq = q_shape[1];

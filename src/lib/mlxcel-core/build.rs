@@ -294,6 +294,8 @@ fn main() {
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/paged_attention.h");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/paged_attention.cpp");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/paged_attention.metal");
+    // HIP bodies of the three paged-attention kernels (#2068).
+    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/paged_attention_hip.h");
 
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/paged_attention_v2.h");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/paged_attention_v2.cpp");

@@ -2480,7 +2480,7 @@ void paged_attention_merge_states(
 // tables through `has_kernel_port`, so a predicate cannot disagree with the
 // dispatch: all three kernels (v1 decode, v2 partial, merge); the merge kernel
 // alone; the v1 decode kernel alone; and the v2 pair (partial and merge).
-// Metal and CUDA today; ROCm answers false until lablup/mlxcel#1814.
+// True on Metal, CUDA and ROCm (the HIP ports, lablup/mlxcel#2068).
 bool paged_attention_kernels_available();
 bool paged_attention_merge_available();
 bool paged_attention_decode_available();

@@ -16,13 +16,19 @@
 //! no port of that kernel (lablup/mlxcel#1809).
 //!
 //! The ROCm test gate (`make verify-test-rocm`) runs every GPU test on gfx1151.
-//! The paged-attention kernels (v1 decode, v2 partial, merge) have Metal and
-//! CUDA ports and no HIP port yet; that port is lablup/mlxcel#1814. Their tests
-//! either launch the kernels directly and get the launcher's refusal, or go
-//! through a production path that declines on the missing port before it
-//! reaches the decision the test checks (the batched paged decode's floor and
-//! multi-slab reports, for example). Either way they fail for a missing port,
-//! which reads as a correctness failure.
+//! The paged-attention kernels (v1 decode, v2 partial, merge) had Metal and
+//! CUDA ports and no HIP port until lablup/mlxcel#2068 (part of #1814), and
+//! these skips were written for that gap. Without a port the tests either
+//! launch the kernels directly and get the launcher's refusal, or go through a
+//! production path that declines on the missing port before it reaches the
+//! decision the test checks (the batched paged decode's floor and multi-slab
+//! reports, for example). Either way they fail for a missing port, which reads
+//! as a correctness failure.
+//!
+//! With the HIP ports in the tables every predicate below is true on ROCm, so
+//! nothing skips there any more. The macros stay, so that a kernel added to
+//! this family, or a backend added later, skips visibly here too instead of
+//! failing.
 //!
 //! A skip here is narrow on purpose, so it cannot hide a real defect:
 //!
