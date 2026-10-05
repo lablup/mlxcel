@@ -908,13 +908,23 @@ jobs:
           set -euo pipefail
           : > "$WEBUI_ACTIVITY_GATE_STARTED"
           echo "Activity gate body started at $(date -u +%FT%TZ), $(( $(date +%s) - WEBUI_ACTIVITY_WAIT_START ))s after the host GPU lock wait began"
+          # PROBE (#1949 runner evidence, never merged): criterion 5, synthetic load makes the precheck wait and refuse.
+          load_pids=""
+          for i in $(seq 1 "$(nproc)"); do python3 -c 'while True: pass' & load_pids="$load_pids $!"; done
+          rc=0
+          python3 scripts/webui/activity_gate_host.py precheck --installed-dir "$RUNNER_TEMP/mlxcel-webui-installed" --run-root "$RUNNER_TEMP" --host-state "$RUNNER_TEMP/probe-loaded-host-state.json" --quiet-timeout 60 || rc=$?
+          kill $load_pids; wait $load_pids 2>/dev/null || true
+          echo "PROBE: precheck under synthetic load exited $rc (want 1)"
+          test "$rc" -eq 1
+          sleep 15
+          echo "PROBE: precheck with the load removed"
           python3 scripts/webui/activity_gate_host.py precheck \
             --installed-dir "$RUNNER_TEMP/mlxcel-webui-installed" \
             --run-root "$RUNNER_TEMP" \
             --host-state "$RUNNER_TEMP/webui-activity-host-state.json" \
             --quiet-timeout 600
+          # PROBE: criterion 1, a gate run killed mid-activity (no finally runs) must leave nothing after the reap step.
           full_evidence="$RUNNER_TEMP/webui-activity-performance-full.json"
-          summary_evidence="$RUNNER_TEMP/webui-activity-performance-summary.json"
           python3 scripts/webui/verify_activity_performance.py \
             --server-bin "$RUNNER_TEMP/mlxcel-webui-installed/mlxcel-server-webui" \
             --model "$RUNNER_TEMP/mlxcel-webui-activity-fixtures/qwen3-0.6b-4bit" \
@@ -929,11 +939,16 @@ jobs:
             --activity-timeout 1800 \
             --pid-file "$RUNNER_TEMP/webui-activity-gate.pid" \
             --host-state "$RUNNER_TEMP/webui-activity-host-state.json" \
-            --perf-mode visible-only-headed
-          python3 scripts/webui/summarize_activity_evidence.py \
-            --input "$full_evidence" \
-            --output "$summary_evidence" \
-            --expect-hidden-native not-run
+            --perf-mode visible-only-headed &
+          verifier=$!
+          for i in $(seq 1 600); do grep -q activity-script "$RUNNER_TEMP/webui-activity-gate.pid" 2>/dev/null && break; sleep 1; done
+          sleep 30
+          echo "PROBE: owned processes before the kill:"; cat "$RUNNER_TEMP/webui-activity-gate.pid"
+          pgrep -af 'mlxcel-server-webui|chrom|Xvfb|openbox|activity-performance' || true
+          nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader
+          kill -9 "$verifier"; wait "$verifier" 2>/dev/null || true
+          echo "PROBE: verifier SIGKILLed mid-activity; failing the gate deliberately"
+          exit 1
           GATE
           (
             # This flock serializes cooperating CI steps only; gpu-lock below covers development sessions on the host, and the precheck at the top of the gate body fails closed on any other GPU compute work.
@@ -966,6 +981,14 @@ jobs:
             --installed-dir "$RUNNER_TEMP/mlxcel-webui-installed" \
             --run-root "$RUNNER_TEMP" \
             --pid-file "$RUNNER_TEMP/webui-activity-gate.pid"
+      - name: PROBE check nothing is left after the reap
+        if: always()
+        run: |
+          sleep 5
+          echo "nvidia-smi compute apps:"; nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader | tee /tmp/probe-gpu.txt
+          echo "pgrep -af mlxcel-server-webui:"; pgrep -af mlxcel-server-webui | grep -v pgrep | tee /tmp/probe-server.txt || true
+          echo "browser/display leftovers:"; pgrep -af 'chrom|Xvfb|openbox|activity-performance' | grep -v pgrep || true
+          test ! -s /tmp/probe-gpu.txt && test ! -s /tmp/probe-server.txt && echo "PROBE: nothing left behind"
       - name: Upload installed-artifact WebUI evidence
         if: always()
         uses: actions/upload-artifact@v7
