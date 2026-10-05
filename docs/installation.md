@@ -751,7 +751,7 @@ A Linux build with no GPU feature compiles MLX without any GPU backend, so MLX's
 CARGO_TARGET_DIR=target/cpu cargo test -p mlxcel-core --profile test-fast --lib --no-run
 ```
 
-Measured on GB10 (2026-10, lablup/mlxcel#2108): about 2.5 minutes cold, including the CPU-only MLX tree, and about 6 seconds to rebuild and relink after a one-file change in the bridge or in `mlxcel-core`. CI does not run this step yet.
+Measured on GB10 (2026-10, lablup/mlxcel#2108): about 2.5 minutes cold, including the CPU-only MLX tree, and about 6 seconds to rebuild and relink after a one-file change in the bridge or in `mlxcel-core`. CI runs the same command as the `CPU-only link` job in `.github/workflows/ci.yml`, on the GB10 runner with its own persistent target directory (`$HOME/.cargo-target/mlxcel-cpu-link-ci`), whenever a pull request changes Rust sources, manifests, or the bridge C++ under `src/lib/mlx-cpp/` or `src/lib/mlxcel-core/cpp/` (lablup/mlxcel#2111).
 
 ## Why the gate says `--workspace`
 

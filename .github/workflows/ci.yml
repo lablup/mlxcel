@@ -62,9 +62,10 @@ on:
     branches: [main]
 
 concurrency:
-  # One CI run per branch, because four jobs below land on GB10, the single
+  # One CI run per branch, because seven jobs below land on GB10, the single
   # self-hosted Linux runner that also serves the release build: `clippy`,
-  # `xla-compile`, `xla-link`, and `cuda-sm70-compile`. Without a group, a run
+  # `cpu-link`, `webui-installed-artifact`, `xla-compile`, `xla-link`,
+  # `cuda-sm70-compile`, and `cuda-blockfloat`. Without a group, a run
   # for a commit nobody is waiting on any more does not merely sit idle, it
   # holds a place in line ahead of the runs that matter. Measured over
   # 2026-09-10 KST: 113 runs created, 14 open at once, 11 of those stacked on
@@ -110,6 +111,7 @@ jobs:
       xla_link: ${{ steps.filter.outputs.xla_link }}
       cuda_arch: ${{ steps.filter.outputs.cuda_arch }}
       rocm: ${{ steps.filter.outputs.rocm }}
+      cpu_link: ${{ steps.filter.outputs.cpu_link }}
       workflows: ${{ steps.filter.outputs.workflows }}
       webui_bundle: ${{ steps.filter.outputs.webui_bundle }}
     steps:
@@ -201,6 +203,20 @@ jobs:
               - 'build.rs'
               - '**/Cargo.toml'
               - 'Cargo.lock'
+            # What can break the CPU-only link of `mlxcel-core`: the Rust
+            # sources and manifests, plus the bridge C++ that `rust` above does
+            # not match. The bug that motivated the `cpu-link` job lived in
+            # `src/lib/mlx-cpp/turbo/` (#2108). No overlay excludes: that job
+            # costs seconds warm, unlike the CUDA jobs those excludes protect.
+            cpu_link:
+              - '**/*.rs'
+              - '**/Cargo.toml'
+              - 'Cargo.lock'
+              - 'build.rs'
+              - 'rust-toolchain.toml'
+              - 'src/lib/mlx-cpp/**'
+              - 'src/lib/mlxcel-core/cpp/**'
+              - 'src/lib/mlxcel-core/build_support/**'
             # The workflow files themselves. Deliberately NOT folded into the
             # filters above: those gate what gets compiled, and a workflow edit
             # compiles nothing. What a workflow edit needs is the lint job and
@@ -319,6 +335,40 @@ jobs:
             --lib \
             --tests \
             -- -D warnings
+
+  cpu-link:
+    name: CPU-only link
+    needs: changes
+    # Links the `mlxcel-core` test binary with no GPU feature. A Linux build
+    # without one compiles MLX with no GPU backend, so bridge C++ that calls a
+    # GPU-only MLX helper without the `MLXCEL_BRIDGE_GPU_BACKEND` guard fails
+    # only here, at link time: `cargo check` does not link, and every other
+    # GB10 job passes `--features cuda` (#2108). `--no-run` links without
+    # running the tests. The repository guard reads as on `clippy` above.
+    if: >-
+      github.repository == 'lablup/mlxcel'
+      && (needs.changes.outputs.cpu_link == 'true' || contains(github.event.pull_request.labels.*.name, 'ci:full'))
+    runs-on: GB10
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Use a persistent target directory
+        run: |
+          # Its own directory: a CPU-only MLX tree would otherwise evict the
+          # CUDA build in any directory it shared. Measured on GB10 for #2108,
+          # about 2.5 minutes cold (including the CPU-only MLX tree) and about
+          # 6 seconds to relink after a one-file change.
+          CARGO_TARGET="$HOME/.cargo-target/mlxcel-cpu-link-ci"
+          mkdir -p "$CARGO_TARGET"
+          echo "CARGO_TARGET_DIR=$CARGO_TARGET" >> "$GITHUB_ENV"
+
+      - name: Link the CPU-only mlxcel-core test binary
+        run: cargo test -p mlxcel-core --profile test-fast --lib --no-run
 
   crate-versions:
     name: crate versions
@@ -650,6 +700,13 @@ jobs:
       # inferring it, which is what makes the job reviewable and what keeps it
       # right if this ever runs on something other than a GB10.
       MLX_CUDA_ARCHITECTURES: "121"
+      # `test-fast` sets `incremental = true`, and this job's persistent target directory once kept
+      # incremental state that linked with undefined `serde_json` generics from one codegen unit
+      # on five consecutive attempts until that state was cleared by hand (run 36988516810,
+      # #2111). This job builds each artifact once per run and gains little from incremental
+      # reuse, so it opts out. Cleaning and retrying on a link failure was rejected: it hides the
+      # cause and pays a full rebuild. Other GB10 target directories keep the profile default.
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v7
         with:
@@ -820,40 +877,73 @@ jobs:
       # overhead keeps running headed here while the hidden acceptance is recorded as not run.
       # The visibility backoff itself stays covered by webui/src/state/sync.test.ts and the
       # visibilitychange case in webui/tests/browser.spec.ts. See docs/webui-integration-matrix.md.
+      # Lock order: the cooperative CI flock, then the host `gpu-lock` that development sessions on
+      # this runner take (`/usr/local/bin/gpu-lock`, a flock on `/tmp/gpu-lock-$(id -u)/lock`; the
+      # runner is the same uid with PrivateTmp=no), then the fail-closed nvidia-smi check. Without
+      # the middle lock a development session's GPU job made the nvidia-smi check fail the gate
+      # (run 36982300183, #2111). On a host without gpu-lock the gate behaves as before. When the
+      # lock is not free within 600 seconds the step fails closed and prints its holder.
+      #
+      # The gate body is written to one script so it can run either under `gpu-lock run` or
+      # directly. Keep it contiguous: a quiet-host wait (#1949) belongs at its top, after the
+      # locks and before the nvidia-smi check. The step timeout covers both 600-second lock waits
+      # on top of the 45 minutes the gate itself was given.
       - name: Run Activity performance gate with the hidden acceptance deferred
-        timeout-minutes: 45
+        timeout-minutes: 65
         env:
           MLXCEL_REQUIRE_MODELS: '1'
         run: |
           set -euo pipefail
           mkdir -p "$HOME/.cache/mlxcel/ci-locks"
+          gate_script="$RUNNER_TEMP/webui-activity-gate.sh"
+          export WEBUI_ACTIVITY_GATE_STARTED="$RUNNER_TEMP/webui-activity-gate.started"
+          rm -f "$WEBUI_ACTIVITY_GATE_STARTED"
+          cat > "$gate_script" <<'GATE'
+          set -euo pipefail
+          : > "$WEBUI_ACTIVITY_GATE_STARTED"
+          echo "Activity gate body started at $(date -u +%FT%TZ), $(( $(date +%s) - WEBUI_ACTIVITY_WAIT_START ))s after the host GPU lock wait began"
+          gpu_process_count="$(nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits | awk '$1 ~ /^[0-9]+$/ {count++} END {print count + 0}')"
+          if [ "$gpu_process_count" -ne 0 ]; then
+            echo "::error::GPU compute processes are already present before Activity gate"
+            exit 1
+          fi
+          full_evidence="$RUNNER_TEMP/webui-activity-performance-full.json"
+          summary_evidence="$RUNNER_TEMP/webui-activity-performance-summary.json"
+          python3 scripts/webui/verify_activity_performance.py \
+            --server-bin "$RUNNER_TEMP/mlxcel-webui-installed/mlxcel-server-webui" \
+            --model "$RUNNER_TEMP/mlxcel-webui-activity-fixtures/qwen3-0.6b-4bit" \
+            --checkpoint-revision "ci-fixtures/qwen3-0.6b-4bit-v1" \
+            --source-sha "${{ github.sha }}" \
+            --features cuda,webui \
+            --evidence "$full_evidence" \
+            --work-dir "$RUNNER_TEMP" \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --node-bin "$(command -v node)" \
+            --virtual-display \
+            --activity-timeout 1800 \
+            --perf-mode visible-only-headed
+          python3 scripts/webui/summarize_activity_evidence.py \
+            --input "$full_evidence" \
+            --output "$summary_evidence" \
+            --expect-hidden-native not-run
+          GATE
           (
-            # This flock serializes cooperating CI steps only; the nvidia-smi check below fails closed if non-cooperating GPU compute work is already present.
+            # This flock serializes cooperating CI steps only; gpu-lock below covers development sessions on the host, and the nvidia-smi check in the gate body fails closed on any other GPU compute work.
             flock -w 600 -x 9 || { echo "::error::timed out waiting for cooperative WebUI Activity GPU lock"; exit 1; }
-            gpu_process_count="$(nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits | awk '$1 ~ /^[0-9]+$/ {count++} END {print count + 0}')"
-            if [ "$gpu_process_count" -ne 0 ]; then
-              echo "::error::GPU compute processes are already present before Activity gate"
-              exit 1
+            WEBUI_ACTIVITY_WAIT_START="$(date +%s)"
+            export WEBUI_ACTIVITY_WAIT_START
+            if command -v gpu-lock >/dev/null 2>&1; then
+              echo "Host gpu-lock holder at $(date -u +%FT%TZ): $(gpu-lock status); waiting up to 600s for it"
+              rc=0
+              gpu-lock run --tag webui-activity --wait 600 -- bash "$gate_script" || rc=$?
+              if [ "$rc" -ne 0 ] && [ ! -e "$WEBUI_ACTIVITY_GATE_STARTED" ]; then
+                echo "::error::could not obtain the host gpu-lock within 600s (gpu-lock exit $rc); holder: $(gpu-lock status)"
+                exit 1
+              fi
+              exit "$rc"
             fi
-            full_evidence="$RUNNER_TEMP/webui-activity-performance-full.json"
-            summary_evidence="$RUNNER_TEMP/webui-activity-performance-summary.json"
-            python3 scripts/webui/verify_activity_performance.py \
-              --server-bin "$RUNNER_TEMP/mlxcel-webui-installed/mlxcel-server-webui" \
-              --model "$RUNNER_TEMP/mlxcel-webui-activity-fixtures/qwen3-0.6b-4bit" \
-              --checkpoint-revision "ci-fixtures/qwen3-0.6b-4bit-v1" \
-              --source-sha "${{ github.sha }}" \
-              --features cuda,webui \
-              --evidence "$full_evidence" \
-              --work-dir "$RUNNER_TEMP" \
-              --repo-root "$GITHUB_WORKSPACE" \
-              --node-bin "$(command -v node)" \
-              --virtual-display \
-              --activity-timeout 1800 \
-              --perf-mode visible-only-headed
-            python3 scripts/webui/summarize_activity_evidence.py \
-              --input "$full_evidence" \
-              --output "$summary_evidence" \
-              --expect-hidden-native not-run
+            echo "gpu-lock is not installed on this runner; running the Activity gate without the host GPU lock"
+            bash "$gate_script"
           ) 9>"$HOME/.cache/mlxcel/ci-locks/webui-activity-gpu.lock"
       - name: Upload installed-artifact WebUI evidence
         if: always()
