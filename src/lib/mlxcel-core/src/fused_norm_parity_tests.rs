@@ -614,3 +614,58 @@ fn fused_add_rms_norm_is_byte_identical_to_the_rocm_graph() {
         );
     }
 }
+
+/// Signed zeros, which decode reaches whenever a normalized element underflows
+/// in f16 (`x * inv_mean` below half the smallest subnormal) or a norm weight
+/// is zero. The graph multiplies in the activation dtype (`w * normalized`),
+/// which keeps IEEE's sign of zero; the port first multiplied in f32 and
+/// rounded, and hipRTC's code for that dropped the sign, so a Llama 3.1 trace
+/// with the fusion on differed from the graph at 5 of 128 decode positions.
+#[test]
+fn fused_add_rms_norm_keeps_the_rocm_graph_sign_of_zero() {
+    use crate::hardware::{GpuBackendKind, gpu_backend_kind};
+    if gpu_backend_kind() != GpuBackendKind::Rocm {
+        return;
+    }
+    let Some(_device) = gpu_kernel_or_skip() else {
+        return;
+    };
+    let dim = 128usize;
+    let mut residual = vec![0f32; dim];
+    let mut weight = vec![1f32; dim];
+    // One large element sets a small normalizer, so the tiny ones underflow.
+    residual[0] = 1000.0;
+    let tiny = [-0.0f32, 0.0, -1e-6, -5e-8, -3e-8, -1e-4, 1e-4, -6e-5, -1e-7];
+    for (i, t) in tiny.iter().enumerate() {
+        residual[1 + i] = *t;
+    }
+    for i in 20..40 {
+        weight[i] = 0.0;
+        residual[i] = -0.5;
+    }
+    for i in 40..60 {
+        weight[i] = -0.0;
+        residual[i] = 0.5;
+    }
+    for &dt in &[dtype::FLOAT32, dtype::FLOAT16, dtype::BFLOAT16] {
+        let r = astype(&from_slice_f32(&residual, &[1, dim as i32]), dt);
+        let d = astype(&from_slice_f32(&vec![0f32; dim], &[1, dim as i32]), dt);
+        let w = astype(&from_slice_f32(&weight, &[dim as i32]), dt);
+        eval(&r);
+        eval(&d);
+        eval(&w);
+        let (normed, new_residual) = run_fused(&d, &r, &w, EPS, 0.0);
+        let norm = RMSNorm::new(copy(&w), EPS);
+        let (want_normed, want_residual) = crate::layers::graph_add_rms_norm(&norm, &d, &r);
+        assert_eq!(
+            raw_bytes(&new_residual),
+            raw_bytes(&want_residual),
+            "new_residual dt={dt}: signed zeros differ from the ROCm graph"
+        );
+        assert_eq!(
+            raw_bytes(&normed),
+            raw_bytes(&want_normed),
+            "normed dt={dt}: signed zeros differ from the ROCm graph"
+        );
+    }
+}

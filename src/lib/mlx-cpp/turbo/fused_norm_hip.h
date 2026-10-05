@@ -48,6 +48,14 @@
 //   `threadIdx.x / 32`, so on a 64-lane wavefront (CDNA) the shuffle stays in
 //   its half and both halves reduce separately into `local_sums`, which is the
 //   intended result. Wave64 has not been run.
+// - The gain multiply runs in `T` (`gain * scaled`, both `T`), as the
+//   graph's `w * normalized` does, instead of in f32 followed by one rounding.
+//   For f16, bf16 and f32 the two give the same value, but not the same zero:
+//   hipRTC's code for the f32 form returned +0 where the product is -0 (an
+//   underflowed negative element, or a zero weight times a negative one),
+//   which the graph keeps, and that was enough to move Llama 3.1 logits at 5
+//   of 128 decode positions with the fusion on. A weight dtype other than
+//   `T` is rounded to `T` first.
 // - `1.0f / sqrtf(...)` for `rsqrtf(...)`: the overlay's `rms_norm_row` uses
 //   the correctly rounded division for the same reason Metal uses
 //   `metal::precise::rsqrt`, and matching it keeps the normalizer identical up
@@ -141,9 +149,9 @@ inline constexpr const char* FUSED_ADD_RMS_NORM_HIP_SOURCE = R"(
             if (d < dim) {
                 float sr = (float)new_residual[base + d];
                 float wv = (float)weight[d];
-                float gain = (wbias == 0.0f) ? wv : (float)(TW)(wbias + wv);
-                float scaled = (float)(T)(sr * inv_mean);
-                normed[base + d] = (T)(gain * scaled);
+                T gain = (wbias == 0.0f) ? (T)wv : (T)(float)(TW)(wbias + wv);
+                T scaled = (T)(sr * inv_mean);
+                normed[base + d] = gain * scaled;
             }
         }
     }
