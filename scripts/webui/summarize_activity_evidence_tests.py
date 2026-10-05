@@ -92,6 +92,18 @@ class SummarizeActivityEvidenceTests(unittest.TestCase):
         self.assertNotIn('"path"', encoded)
         self.assertNotIn('"log"', encoded)
 
+    def test_host_state_in_the_full_evidence_neither_blocks_nor_leaks_into_the_summary(self) -> None:
+        # activity_gate_host.py precheck records the host it measured on (#1949); that stays in
+        # the full evidence only, process paths included.
+        data = visible_only_evidence()
+        data["host_state"] = {
+            "gate_start": {"quiet": {"runnable_mean": 1.2, "threshold": 5.0}, "loadavg": {"one": 0.4}, "reaped_leaks": [{"pid": 7, "cwd": "/secret/mlxcel-activity-performance-x (deleted)"}], "gpu_processes": []},
+            "after_activity": {"one": 2.5, "runnable": "3/900"},
+        }
+        result = summarize.build_summary(data, "not-run")
+        self.assertEqual(result, summarize.build_summary(visible_only_evidence(), "not-run"))
+        self.assertNotIn("/secret", json.dumps(result))
+
     def test_summary_rejects_nonpassing_or_non_native_hidden_input(self) -> None:
         data = full_evidence()
         data["status"] = "failed"

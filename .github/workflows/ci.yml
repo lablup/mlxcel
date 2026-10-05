@@ -777,6 +777,7 @@ jobs:
           python3 scripts/webui/verify_single_model_tests.py
           python3 scripts/webui/verify_activity_performance_tests.py
           python3 scripts/webui/summarize_activity_evidence_tests.py
+          python3 scripts/webui/activity_gate_host_tests.py
       - name: Verify the installed Rust artifact serves the bundled WebUI
         env:
           WEBUI_INSTALLED_EVIDENCE: ${{ runner.temp }}/webui-installed-evidence.json
@@ -879,17 +880,21 @@ jobs:
       # visibilitychange case in webui/tests/browser.spec.ts. See docs/webui-integration-matrix.md.
       # Lock order: the cooperative CI flock, then the host `gpu-lock` that development sessions on
       # this runner take (`/usr/local/bin/gpu-lock`, a flock on `/tmp/gpu-lock-$(id -u)/lock`; the
-      # runner is the same uid with PrivateTmp=no), then the fail-closed nvidia-smi check. Without
+      # runner is the same uid with PrivateTmp=no), then the fail-closed precheck below. Without
       # the middle lock a development session's GPU job made the nvidia-smi check fail the gate
       # (run 36982300183, #2111). On a host without gpu-lock the gate behaves as before. When the
       # lock is not free within 600 seconds the step fails closed and prints its holder.
       #
       # The gate body is written to one script so it can run either under `gpu-lock run` or
-      # directly. Keep it contiguous: a quiet-host wait (#1949) belongs at its top, after the
-      # locks and before the nvidia-smi check. The step timeout covers both 600-second lock waits
-      # on top of the 45 minutes the gate itself was given.
+      # directly. Its first command, `activity_gate_host.py precheck` (#1949), stops a server an
+      # earlier run of this job leaked, or anything left working in a verifier run directory
+      # (orphaned, or its RUNNER_TEMP directory deleted), waits up to 600 seconds for the host to be quiet enough to measure (the
+      # instantaneous runnable-task count, not a load average: a concurrent compile on this host
+      # moved the score by more than the 2 percent budget), and then fails closed, naming each
+      # process, if any GPU compute process remains. The step timeout covers both 600-second lock
+      # waits and the 600-second quiet wait on top of the 45 minutes the gate itself was given.
       - name: Run Activity performance gate with the hidden acceptance deferred
-        timeout-minutes: 65
+        timeout-minutes: 75
         env:
           MLXCEL_REQUIRE_MODELS: '1'
         run: |
@@ -902,11 +907,11 @@ jobs:
           set -euo pipefail
           : > "$WEBUI_ACTIVITY_GATE_STARTED"
           echo "Activity gate body started at $(date -u +%FT%TZ), $(( $(date +%s) - WEBUI_ACTIVITY_WAIT_START ))s after the host GPU lock wait began"
-          gpu_process_count="$(nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits | awk '$1 ~ /^[0-9]+$/ {count++} END {print count + 0}')"
-          if [ "$gpu_process_count" -ne 0 ]; then
-            echo "::error::GPU compute processes are already present before Activity gate"
-            exit 1
-          fi
+          python3 scripts/webui/activity_gate_host.py precheck \
+            --installed-dir "$RUNNER_TEMP/mlxcel-webui-installed" \
+            --run-root "$RUNNER_TEMP" \
+            --host-state "$RUNNER_TEMP/webui-activity-host-state.json" \
+            --quiet-timeout 600
           full_evidence="$RUNNER_TEMP/webui-activity-performance-full.json"
           summary_evidence="$RUNNER_TEMP/webui-activity-performance-summary.json"
           python3 scripts/webui/verify_activity_performance.py \
@@ -921,6 +926,8 @@ jobs:
             --node-bin "$(command -v node)" \
             --virtual-display \
             --activity-timeout 1800 \
+            --pid-file "$RUNNER_TEMP/webui-activity-gate.pid" \
+            --host-state "$RUNNER_TEMP/webui-activity-host-state.json" \
             --perf-mode visible-only-headed
           python3 scripts/webui/summarize_activity_evidence.py \
             --input "$full_evidence" \
@@ -928,7 +935,7 @@ jobs:
             --expect-hidden-native not-run
           GATE
           (
-            # This flock serializes cooperating CI steps only; gpu-lock below covers development sessions on the host, and the nvidia-smi check in the gate body fails closed on any other GPU compute work.
+            # This flock serializes cooperating CI steps only; gpu-lock below covers development sessions on the host, and the precheck at the top of the gate body fails closed on any other GPU compute work.
             flock -w 600 -x 9 || { echo "::error::timed out waiting for cooperative WebUI Activity GPU lock"; exit 1; }
             WEBUI_ACTIVITY_WAIT_START="$(date +%s)"
             export WEBUI_ACTIVITY_WAIT_START
@@ -945,6 +952,18 @@ jobs:
             echo "gpu-lock is not installed on this runner; running the Activity gate without the host GPU lock"
             bash "$gate_script"
           ) 9>"$HOME/.cache/mlxcel/ci-locks/webui-activity-gpu.lock"
+      # The verifier's servers and display start their own sessions, so neither a step timeout,
+      # a cancellation nor a killed verifier reaches them, and a survivor holds GPU memory into
+      # the next job (#1949). Reap by the pid file the verifier writes and by this job's identity;
+      # a leak fails this run instead of the next one. Nothing to do is the normal outcome.
+      - name: Reap Activity gate processes
+        if: always()
+        timeout-minutes: 5
+        run: |
+          python3 scripts/webui/activity_gate_host.py reap \
+            --installed-dir "$RUNNER_TEMP/mlxcel-webui-installed" \
+            --run-root "$RUNNER_TEMP" \
+            --pid-file "$RUNNER_TEMP/webui-activity-gate.pid"
       - name: Upload installed-artifact WebUI evidence
         if: always()
         uses: actions/upload-artifact@v7
@@ -976,6 +995,7 @@ jobs:
           name: webui-activity-performance-diagnostics-${{ runner.os }}
           path: |
             ${{ runner.temp }}/webui-activity-performance-full.json
+            ${{ runner.temp }}/webui-activity-host-state.json
             ${{ runner.temp }}/mlxcel-activity-performance-*/activity-performance.log
             ${{ runner.temp }}/mlxcel-activity-performance-*/*.log
           if-no-files-found: warn

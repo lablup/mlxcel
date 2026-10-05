@@ -276,6 +276,71 @@ class ActivityPerformanceHelperTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             verify.stop_server_strict(owned)
 
+    def test_terminate_owned_survives_a_process_that_outlives_sigkill(self) -> None:
+        # A process stuck in the kernel can outlive SIGKILL's wait; the cleanup in `finally`
+        # must report it rather than raise and abandon the processes after it (#1949).
+        class Stuck:
+            pid = 999_999_999
+            returncode = None
+            def poll(self):
+                return None
+            def wait(self, timeout=None):
+                raise verify.subprocess.TimeoutExpired("stuck", timeout)
+        later = mock.Mock()
+        later.poll.return_value = 0
+        later.pid = 999_999_998
+        signals = []
+        def fake_killpg(pgid, sig):
+            signals.append((pgid, sig))
+            if pgid == later.pid:
+                raise ProcessLookupError
+        owned = [verify.OwnedProcess("later", later), verify.OwnedProcess("stuck", Stuck())]
+        with mock.patch.object(verify.os, "killpg", side_effect=fake_killpg), mock.patch.object(verify, "KILL_WAIT", 0.2, create=True), mock.patch.object(verify, "TERM_WAIT", 0.2, create=True):
+            results = verify.terminate_owned(owned)
+        self.assertEqual([r["label"] for r in results], ["stuck", "later"])
+        self.assertTrue(results[0]["forced"])
+        self.assertFalse(results[0]["process_group_empty"])
+        self.assertIn((Stuck.pid, verify.signal.SIGKILL), signals)
+        self.assertTrue(results[1]["process_group_empty"])
+
+    def test_terminate_owned_empties_the_group_a_quick_exit_left_behind(self) -> None:
+        # The leader exits inside the SIGTERM wait and leaves a member that ignores SIGTERM;
+        # recording process_group_empty is not enough, the member has to be stopped (#1949).
+        proc = verify.subprocess.Popen(["sh", "-c", "trap '' TERM; sleep 60 & exit 0"], start_new_session=True)
+        try:
+            proc.wait(timeout=10)
+            self.assertFalse(verify.process_group_empty(proc.pid, 0.3), "the fixture must leave a live group member")
+            results = verify.terminate_owned([verify.OwnedProcess("quick-exit", proc)])
+            self.assertTrue(results[0]["process_group_empty"])
+            self.assertTrue(results[0]["forced"])
+            self.assertTrue(verify.process_group_empty(proc.pid, 0.5))
+        finally:
+            try:
+                verify.os.killpg(proc.pid, verify.signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    def test_record_owned_pid_appends_reapable_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "gate.pid"
+            verify.record_owned_pid(None, mock.Mock())
+            self.assertFalse(path.exists())
+            proc = verify.subprocess.Popen(["sleep", "30"], start_new_session=True)
+            try:
+                verify.record_owned_pid(path, verify.OwnedProcess("xvfb", proc))
+                verify.record_owned_pid(path, verify.OwnedProcess("mlxcel-server", proc))
+                records = json.loads(path.read_text())["records"]
+                self.assertEqual([r["label"] for r in records], ["xvfb", "mlxcel-server"])
+                self.assertEqual(records[0]["pid"], proc.pid)
+                self.assertEqual(records[0]["pgid"], proc.pid)
+                if sys.platform.startswith("linux"):
+                    self.assertIsInstance(records[0]["start_ticks"], int)
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+                self.assertEqual([p.name for p in Path(tmp).iterdir()], ["gate.pid"])
+            finally:
+                proc.kill()
+                proc.wait()
+
     def test_validate_activity_output_requires_all_modes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "activity.json"
