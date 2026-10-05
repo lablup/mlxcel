@@ -331,6 +331,8 @@ def require_tool(name: str) -> str:
     return path
 
 def start_virtual_display(work: Path) -> tuple[str, list[OwnedProcess]]:
+    # Both run in `work` so the workflow's reap step can identify them by directory even if
+    # the verifier dies before recording them in its pid file.
     xvfb = require_tool("Xvfb")
     openbox = require_tool("openbox")
     display_num = 90 + (os.getpid() % 100)
@@ -341,7 +343,7 @@ def start_virtual_display(work: Path) -> tuple[str, list[OwnedProcess]]:
     try:
         xvfb_file = open_private_append(xvfb_log)
         try:
-            xvfb_proc = subprocess.Popen([xvfb, display, "-screen", "0", "1600x1100x24", "-nolisten", "tcp"], stdout=xvfb_file, stderr=subprocess.STDOUT, start_new_session=True)
+            xvfb_proc = subprocess.Popen([xvfb, display, "-screen", "0", "1600x1100x24", "-nolisten", "tcp"], cwd=work, stdout=xvfb_file, stderr=subprocess.STDOUT, start_new_session=True)
         except Exception:
             xvfb_file.close()
             raise
@@ -353,7 +355,7 @@ def start_virtual_display(work: Path) -> tuple[str, list[OwnedProcess]]:
             raise RuntimeError(f"Xvfb exited early with {xvfb_proc.returncode}; log={xvfb_log}")
         openbox_file = open_private_append(openbox_log)
         try:
-            openbox_proc = subprocess.Popen([openbox], env={**os.environ, "DISPLAY": display}, stdout=openbox_file, stderr=subprocess.STDOUT, start_new_session=True)
+            openbox_proc = subprocess.Popen([openbox], cwd=work, env={**os.environ, "DISPLAY": display}, stdout=openbox_file, stderr=subprocess.STDOUT, start_new_session=True)
         except Exception:
             openbox_file.close()
             raise
@@ -371,11 +373,14 @@ def start_virtual_display(work: Path) -> tuple[str, list[OwnedProcess]]:
 TERM_WAIT = 8.0
 KILL_WAIT = 5.0
 
-def signal_group(pgid: int, sig: int) -> None:
+def signal_group(pgid: int, sig: int, errors: list[str] | None = None) -> None:
     try:
         os.killpg(pgid, sig)
     except ProcessLookupError:
         pass
+    except PermissionError as exc:
+        if errors is not None:
+            errors.append(f"{signal.Signals(sig).name}: {exc}")
 
 def terminate_owned(processes: list[OwnedProcess]) -> list[dict[str, Any]]:
     """Stop each owned process group; runs from `finally`, so it never raises for a survivor.
@@ -387,13 +392,14 @@ def terminate_owned(processes: list[OwnedProcess]) -> list[dict[str, Any]]:
     for owned in reversed(processes):
         proc = owned.proc
         forced = False
+        errors: list[str] = []
         if proc.poll() is None:
-            signal_group(proc.pid, signal.SIGTERM)
+            signal_group(proc.pid, signal.SIGTERM, errors)
             try:
                 proc.wait(timeout=TERM_WAIT)
             except subprocess.TimeoutExpired:
                 forced = True
-                signal_group(proc.pid, signal.SIGKILL)
+                signal_group(proc.pid, signal.SIGKILL, errors)
                 try:
                     proc.wait(timeout=KILL_WAIT)
                 except subprocess.TimeoutExpired:
@@ -402,16 +408,16 @@ def terminate_owned(processes: list[OwnedProcess]) -> list[dict[str, Any]]:
         # and for the server that would be GPU memory held into the next job.
         group_empty = process_group_empty(proc.pid, 0.5)
         if not group_empty:
-            signal_group(proc.pid, signal.SIGTERM)
+            signal_group(proc.pid, signal.SIGTERM, errors)
             group_empty = process_group_empty(proc.pid, 2.0)
         if not group_empty:
             forced = True
-            signal_group(proc.pid, signal.SIGKILL)
+            signal_group(proc.pid, signal.SIGKILL, errors)
             group_empty = process_group_empty(proc.pid, KILL_WAIT)
         close = getattr(owned, "_log_file", None)
         if close:
             close.close()
-        results.append({"label": owned.label, "exit_code": proc.returncode, "forced": forced, "process_group_empty": group_empty, "log": str(owned.log_path) if owned.log_path else None})
+        results.append({"label": owned.label, "exit_code": proc.returncode, "forced": forced, "process_group_empty": group_empty, "log": str(owned.log_path) if owned.log_path else None, **({"signal_errors": errors} if errors else {})})
     return results
 
 def proc_start_ticks(pid: int) -> int | None:
@@ -431,11 +437,18 @@ def record_owned_pid(path: Path | None, owned: OwnedProcess) -> None:
     if path is None:
         return
     records = json.loads(path.read_text()).get("records", []) if path.exists() else []
-    records.append({"label": owned.label, "pid": owned.proc.pid, "pgid": owned.proc.pid, "start_ticks": proc_start_ticks(owned.proc.pid), "recorded_at": now()})
+    records.append({"label": owned.label, "pid": owned.proc.pid, "pgid": owned.proc.pid, "start_ticks": proc_start_ticks(owned.proc.pid), "boot_id": boot_id(), "recorded_at": now()})
     staging = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     staging.unlink(missing_ok=True)
     write_private(staging, json.dumps({"records": records}, sort_keys=True) + "\n")
     os.replace(staging, path)
+
+def boot_id() -> str | None:
+    """Lets the reap step ignore a pid file that outlived a reboot."""
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except OSError:
+        return None
 
 def read_loadavg() -> dict[str, Any] | None:
     try:
@@ -612,8 +625,13 @@ def run_activity_script(h: Harness, model_id: str, inference_id: str) -> tuple[d
     command = [h.args.node_bin, "webui/scripts/activity-performance.mjs"]
     with open_private_append(log_path) as log_file:
         proc = subprocess.Popen(command, cwd=h.args.repo_root, env=env, stdout=log_file, stderr=subprocess.STDOUT, start_new_session=True)
+        # The longest phase, so the likeliest one to be cut off by a step timeout. The browser
+        # Playwright launches leads a group of its own; the reap step finds it by its HOME.
+        record_owned_pid(getattr(h.args, "pid_file", None), OwnedProcess("activity-script", proc))
         try:
             returncode = proc.wait(timeout=h.args.activity_timeout)
+            # Taken before the output is validated, so a noisy verdict keeps the load it ran under.
+            h.evidence.setdefault("host_state", {})["after_activity"] = read_loadavg()
         except subprocess.TimeoutExpired as exc:
             stop_process_group(proc)
             raise AssertionError(f"activity-performance.mjs timed out after {h.args.activity_timeout}s; log={log_path}") from exc
@@ -728,7 +746,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         runtime_loaded = runtime_snapshot(h.base_prefixed, key, identity["model_id"])
         h.record("runtime_observations", {"stage": "loaded", "entry": loaded, "runtime": runtime_loaded})
         activity, activity_output, activity_log = run_activity_script(h, identity["model_id"], identity["inference_id"])
-        h.evidence.setdefault("host_state", {})["after_activity"] = read_loadavg()
         h.record("activity_performance", {"status": "passed", "output": str(activity_output), "output_sha256": sha256(activity_output), "log": str(activity_log), "summary": {"status": activity.get("status"), "hidden_native": activity.get("hidden_native"), "summaries": activity.get("summaries")}})
         latest = wait_entry(h.base_prefixed, key, identity["model_id"], lambda item: isinstance(item.get("identity"), dict), "latest revision before unload", timeout=30)
         latest_identity = entry_identity(latest)
