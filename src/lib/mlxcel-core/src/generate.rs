@@ -419,6 +419,14 @@ pub(crate) fn resolve_kv_cache_layer_modes(mode: KVCacheMode, n_layers: usize) -
 /// history-free sampler keeps sampling straight from the lazy graph, in the
 /// same order as before, and returns `None`.
 ///
+/// Diagnostics on the history path see the split: the decode-graph hooks
+/// (`MLXCEL_EXPORT_DECODE_DOT`, `MLXCEL_TRACE_ASTYPE`, `MLXCEL_CAPTURE_DECODE`)
+/// cover only the sampler, because the forward is already submitted, and the
+/// pipeline profiles count the wait for `y` as sample time rather than item
+/// wait. Under `MLXCEL_FORCE_SYNC` the forward is still submitted
+/// asynchronously here; the loop's synchronous eval of the sample waits for
+/// it right after.
+///
 /// Used by: `CxxGenerator::generate_streaming`,
 /// `CxxGenerator::generate_streaming_with_embeddings`,
 /// `CxxGenerator::generate_with_stats_and_embeddings`,
@@ -1974,7 +1982,10 @@ impl CxxGenerator {
                     && let Some(mode) = trace_astype.as_deref()
                 {
                     // Count on the unevaluated decode+sampler graph so no
-                    // conversion is hidden by a prior eval.
+                    // conversion is hidden by a prior eval. With a
+                    // history-reading sampler the forward is already
+                    // submitted here (`sample_next_step`), so the count covers
+                    // the sampler alone.
                     let count = ffi::count_astype_nodes_pair(&next_tok, &next_log);
                     eprintln!("[ASTYPE] decode astype_nodes={count}");
                     if mode.contains("break") || mode == "2" {

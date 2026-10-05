@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! Cache-dependent toy targets and a sequential reference decoder, shared by
-//! the decode-loop tests (`generate_tests.rs`, `speculative/prompt_lookup_tests.rs`).
+//! the decode-loop tests (`generate_history_tests.rs`, `speculative/prompt_lookup_tests.rs`).
 //!
 //! A decode loop is right when it emits exactly what [`sequential_reference`]
 //! emits for the same model and sampler: one forward per token, every sample
