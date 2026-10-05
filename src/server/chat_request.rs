@@ -52,9 +52,16 @@
 //!      earlier user turn only when the following assistant message carries
 //!      `reasoning_content`, issue #2089). An echoed trace is forwarded under
 //!      both `reasoning` and `reasoning_content`, so such a turn re-renders
-//!      exactly as it was generated. A client that echoes only `content`
-//!      still gets the rewritten (shorter) turn; that is the template's own
-//!      rule and the follow-up misses the cache by design.
+//!      exactly as it was generated. A client that echoes only `content` gets
+//!      the trace re-injected by the chat routes before this module renders
+//!      (issue #2110, [`super::reasoning_echo`]): the server remembers the
+//!      reasoning each reply returned, keyed by model, `template_sig`,
+//!      session, the preceding messages and the reply content, and fills it
+//!      back into a matching content-only assistant turn exactly as if the
+//!      client had echoed it. The turn still renders shorter, and the
+//!      follow-up misses the cache, when that entry is gone (evicted, server
+//!      restarted, `cache_prompt: false`, prompt cache off) or the client
+//!      edited the reply, an earlier message, the kwargs or the session key.
 //!    * Tool-schema hashing: [`super::prompt_cache::key::tools_digest`] is
 //!      order-preserving, so reordering tools invalidates the cache. This
 //!      is intentional: HuggingFace templates iterate tools in order and

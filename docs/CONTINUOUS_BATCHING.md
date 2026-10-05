@@ -320,6 +320,10 @@ that requires greedy-token equality with bounded logit RMS when TF32 is
 disabled. Do not generalize that evidence to VLM front ends, model-owned caches,
 Turbo/quantized-KV modes, or all CUDA reduction geometries.
 
+#### Reasoning models whose clients echo only `content`
+
+Some chat templates render an earlier turn differently depending on whether the following assistant message carries `reasoning_content`. AI21 Jamba-Reasoning keeps its thinking instruction on an earlier user turn only in that case, so a client that sends back only `content` (the OpenAI SDK default) re-renders that turn shorter than it was generated and the follow-up misses the prompt cache. While the prompt cache is on, the chat route (`/v1/chat/completions`, streaming and non-streaming) remembers the exact `reasoning_content` it returned for each plain reply and puts it back into a later content-only assistant turn, as if the client had echoed it (issue #2110). A stored trace is found only by a request with the same model, template signature (template, kwargs, tools), session (`prompt_cache_key`, then `user`), identical preceding messages and identical assistant `content`; any edit misses, a miss changes nothing, and reasoning the client echoed itself always wins. The store holds only a 32-byte key and the reasoning text, is bounded to 16 MiB and 4096 entries with least-recently-used eviction (`MLXCEL_REASONING_ECHO_MAX_BYTES`, `0` disables), and is empty after a restart. It is not consulted under `cache_prompt: false`, `--reasoning-format none` or `deepseek-legacy` (the trace already travels inline in `content`), or `--skip-chat-parsing`, and it does not cover `/v1/responses`, `/v1/messages`, or the prompt-inspection routes.
+
 #### The fused decode kernel
 
 Since v0.4.4 a batched paged decode step runs as **one fused attention launch

@@ -129,32 +129,7 @@ pub(crate) fn build_prompt_cache_request_context(
     if request.resolve_cache_prompt() == Some(false) {
         return None;
     }
-    // Share the kwargs resolution with `prepare_chat_request_with_cache` so the
-    // digest sees the same canonicalized map as the rendering pipeline. Calling
-    // the helper rather than re-deriving the merge here keeps a mapped
-    // `reasoning_effort` (issue #1164) inside `template_sig`, so two requests
-    // that differ only in reasoning effort land in different cache buckets
-    // instead of sharing one and re-prefilling past the divergence point.
-    let merged_kwargs = resolve_effective_kwargs(
-        &state.chat_template,
-        request,
-        live.chat_template_kwargs.as_ref(),
-        &request.merged_extra_body(),
-    );
-
-    let template_signature = template_sig(
-        state.chat_template.template_source(),
-        &merged_kwargs,
-        request.tool_choice.as_ref(),
-        request.tools.as_deref(),
-        // The dimension only matters when this request actually has a trailing
-        // assistant message: hashing the flag unconditionally would split every
-        // bucket in the store the first time an operator passes
-        // `--no-prefill-assistant`.
-        state.prefill_assistant()
-            && crate::server::assistant_prefill::resolve(request, true)
-                .is_ok_and(|prefill| prefill.is_some()),
-    );
+    let template_signature = chat_template_signature(state, live, request);
     let session_key =
         resolve_session_key(request.resolve_prompt_cache_key(), request.resolve_user()).to_string();
     // Digest the resolved multimodal payload. Empty slices (text-only) hash to
@@ -177,6 +152,43 @@ pub(crate) fn build_prompt_cache_request_context(
         history_prompt: history_prompt.map(str::to_string),
         history_prefix_tokens: None,
     })
+}
+
+/// The prompt-cache `template_sig` for a chat request.
+///
+/// Shared by [`build_prompt_cache_request_context`] and the reasoning re-echo
+/// scope (issue #2110), which must key on exactly the bucket the request's
+/// cache entries live in.
+pub(crate) fn chat_template_signature(
+    state: &AppState,
+    live: &LiveSettings,
+    request: &ChatCompletionRequest,
+) -> String {
+    // Share the kwargs resolution with `prepare_chat_request_with_cache` so the
+    // digest sees the same canonicalized map as the rendering pipeline. Calling
+    // the helper rather than re-deriving the merge here keeps a mapped
+    // `reasoning_effort` (issue #1164) inside `template_sig`, so two requests
+    // that differ only in reasoning effort land in different cache buckets
+    // instead of sharing one and re-prefilling past the divergence point.
+    let merged_kwargs = resolve_effective_kwargs(
+        &state.chat_template,
+        request,
+        live.chat_template_kwargs.as_ref(),
+        &request.merged_extra_body(),
+    );
+    template_sig(
+        state.chat_template.template_source(),
+        &merged_kwargs,
+        request.tool_choice.as_ref(),
+        request.tools.as_deref(),
+        // The dimension only matters when this request actually has a trailing
+        // assistant message: hashing the flag unconditionally would split every
+        // bucket in the store the first time an operator passes
+        // `--no-prefill-assistant`.
+        state.prefill_assistant()
+            && crate::server::assistant_prefill::resolve(request, true)
+                .is_ok_and(|prefill| prefill.is_some()),
+    )
 }
 
 /// Cache-key template dimension for the two raw-prompt routes (#1473).
@@ -646,9 +658,18 @@ pub(crate) async fn non_stream_chat_completion(
     // true. The store is built by startup.rs only when configured, so
     // `state.prompt_cache.is_some()` is the operator-visible flag here.
     let prompt_cache_enabled = state.prompt_cache.is_some();
+    // Re-inject reasoning this server generated for content-only assistant
+    // turns (issue #2110). Only the render sees the filled copy: the cache
+    // context, tool parsing and the record below all read the request as the
+    // client sent it.
+    let echo_scope = crate::server::reasoning_echo::chat_scope(&state, &live, &request);
+    let render_request = match echo_scope.as_ref() {
+        Some(scope) => state.reasoning_echo.fill(scope, &request),
+        None => std::borrow::Cow::Borrowed(&request),
+    };
     let mut prepared = prepare_chat_request_with_cache(
         &state.chat_template,
-        &request,
+        &render_request,
         live.chat_template_kwargs.as_ref(),
         prompt_cache_enabled,
         state.should_render_history_boundary_snapshot(),
@@ -910,6 +931,13 @@ pub(crate) async fn non_stream_chat_completion(
             || tool_calls::content_with_thinking_block(&result.text, &answer, reasoning.as_deref()),
             reasoning.clone(),
         );
+        record_reasoning_echo(
+            &state,
+            echo_scope.as_ref(),
+            &request,
+            &shaped.content,
+            shaped.reasoning_content.as_deref(),
+        );
         let reasoning_only = log_if_reasoning_only(
             &result.text,
             &shaped.content,
@@ -963,6 +991,13 @@ pub(crate) async fn non_stream_chat_completion(
     if let Some(ref ctx) = warmup_ctx {
         submit_next_turn_warmup(&state, &live, &request, ctx, &cleaned_text);
     }
+    record_reasoning_echo(
+        &state,
+        echo_scope.as_ref(),
+        &request,
+        &shaped.content,
+        shaped.reasoning_content.as_deref(),
+    );
 
     let reasoning_only = log_if_reasoning_only(
         &result.text,
@@ -988,6 +1023,23 @@ pub(crate) async fn non_stream_chat_completion(
         .with_reasoning_only(reasoning_only)
         .with_timings(timings.clone()),
     ))
+}
+
+/// Remember the reasoning a plain (non-tool-call) chat reply returned, so a
+/// client that echoes only the reply's `content` gets it re-injected on the
+/// next turn (issue #2110). `request` is the request as the client sent it.
+fn record_reasoning_echo(
+    state: &AppState,
+    scope: Option<&crate::server::reasoning_echo::ReasoningEchoScope>,
+    request: &ChatCompletionRequest,
+    content: &str,
+    reasoning: Option<&str>,
+) {
+    if let (Some(scope), Some(reasoning)) = (scope, reasoning) {
+        state
+            .reasoning_echo
+            .record(scope, &request.messages, content, reasoning);
+    }
 }
 
 /// Submit a background prompt-cache warm-up for the next turn (issue #1144).
@@ -1081,6 +1133,11 @@ struct StreamCallbackState {
     /// what it echoes back as the assistant turn. Only appended to when a
     /// warm-up is actually possible for this request.
     warmup_content: String,
+    /// Every `delta.content` fragment and every `delta.reasoning_content`
+    /// fragment, in order, for the reasoning re-echo store (issue #2110). Only
+    /// appended to when the request has an echo scope.
+    echo_content: String,
+    echo_reasoning: String,
     /// Stream filter that splits reasoning/content and strips structural tokens.
     stream_filter: StreamFilter,
     /// Per-`feed()` logprob buffer, drained in lockstep with the filter's
@@ -1402,9 +1459,16 @@ async fn stream_chat_completion(
     // both endpoints default preserve_thinking=true identically when the
     // cache is installed.
     let prompt_cache_enabled = state.prompt_cache.is_some();
+    // Reasoning re-injection for content-only history (issue #2110), as in the
+    // non-streaming path: only the render sees the filled copy.
+    let echo_scope = crate::server::reasoning_echo::chat_scope(&state, &live, &request);
+    let render_request = match echo_scope.as_ref() {
+        Some(scope) => state.reasoning_echo.fill(scope, &request),
+        None => std::borrow::Cow::Borrowed(&request),
+    };
     let prepared = prepare_chat_request_with_cache(
         &state.chat_template,
-        &request,
+        &render_request,
         live.chat_template_kwargs.as_ref(),
         prompt_cache_enabled,
         state.should_render_history_boundary_snapshot(),
@@ -1568,6 +1632,10 @@ async fn stream_chat_completion(
     // nothing extra.
     let warmup_state = warmup_enabled.then(|| state.clone());
     let warmup_request = warmup_enabled.then(|| request.clone());
+    // The streamed reply's reasoning is recorded for the next turn (#2110)
+    // under the request's messages as the client sent them.
+    let echo_record = echo_scope.map(|scope| (scope, request.messages.clone()));
+    let echo_enabled = echo_record.is_some();
 
     // Spawn a blocking task to handle generation
     tokio::task::spawn_blocking(move || {
@@ -1644,6 +1712,8 @@ async fn stream_chat_completion(
         let cb_state = std::sync::Arc::new(std::sync::Mutex::new(StreamCallbackState {
             accumulated: String::new(),
             warmup_content: String::new(),
+            echo_content: String::new(),
+            echo_reasoning: String::new(),
             stream_filter: if primed_open_thinking {
                 StreamFilter::new_primed_open_thinking()
             } else {
@@ -1757,6 +1827,9 @@ async fn stream_chat_completion(
                             && !reasoning_text.is_empty()
                         {
                             if reasoning_format.emits_reasoning_content() {
+                                if echo_enabled {
+                                    cb.echo_reasoning.push_str(&reasoning_text);
+                                }
                                 pending.push(
                                     ChatCompletionChunk::reasoning_content_with_alias_field(
                                         request_id_inner.clone(),
@@ -1803,6 +1876,9 @@ async fn stream_chat_completion(
                         {
                             if warmup_enabled {
                                 cb.warmup_content.push_str(&text);
+                            }
+                            if echo_enabled {
+                                cb.echo_content.push_str(&text);
                             }
                             let logprobs = if logprobs_enabled {
                                 lp_data.as_ref().map(|lp| {
@@ -1877,6 +1953,13 @@ async fn stream_chat_completion(
             .ok()
             .map(|mut cb| cb.stream_filter.flush())
             .unwrap_or_default();
+        // Copies of the flushed tail for the reasoning re-echo record (#2110),
+        // taken before the chunks below move the strings.
+        let remaining_echo = if echo_enabled {
+            (remaining.reasoning.clone(), remaining.content.clone())
+        } else {
+            (None, None)
+        };
         // Tracks whether either branch below pushes real `delta.content`, so
         // `cb.saw_content` (read at finish time, see its doc comment) reflects
         // this end-of-stream flush too, not just the main per-token loop.
@@ -1923,6 +2006,14 @@ async fn stream_chat_completion(
         {
             cb.saw_content |= remaining_had_content;
             cb.saw_reasoning_content |= remaining_had_reasoning;
+            if echo_enabled {
+                if remaining_had_reasoning && let Some(text) = remaining_echo.0.as_deref() {
+                    cb.echo_reasoning.push_str(text);
+                }
+                if let Some(text) = remaining_echo.1.as_deref() {
+                    cb.echo_content.push_str(text);
+                }
+            }
         }
 
         if let Ok(r) = &result {
@@ -2028,6 +2119,19 @@ async fn stream_chat_completion(
                 .map(|cb| cb.warmup_content.clone())
                 .unwrap_or_default();
             submit_next_turn_warmup(state, &live, request, ctx, &reply);
+        }
+
+        // Record the streamed reasoning for the next turn (issue #2110), from
+        // exactly the deltas the client received. A tool-calling turn is
+        // echoed back with its tool calls, which the store never fills.
+        if finish_reason != "tool_calls"
+            && result.is_ok()
+            && let Some((scope, messages)) = &echo_record
+            && let Ok(cb) = cb_state.lock()
+        {
+            state
+                .reasoning_echo
+                .record(scope, messages, &cb.echo_content, &cb.echo_reasoning);
         }
 
         // Whether the whole stream produced tokens but `delta.content` never

@@ -56,6 +56,7 @@ mod read_budget;
 pub mod realtime_engine;
 pub mod realtime_protocol;
 mod realtime_session;
+pub(crate) mod reasoning_echo;
 pub mod reasoning_format;
 mod request_options;
 pub mod rerank_model;
