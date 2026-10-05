@@ -4580,7 +4580,7 @@ __device__ inline void find_sorted_expert_run(
 // rows instead of once per row; the lanes reduce once per row at the end.
 //
 // mlxcelverse: the index arrays are read through the gather's batch shape and
-// strides (gather_index_loc), like every other gather kernel here. The kernel
+// strides (gather_index_loc), as the launched per-row gather kernels do. The kernel
 // used to read lhs_indices[b] and rhs_indices[b] as flat arrays, which is
 // wrong whenever MLX broadcasts the indices (for example x [T, 1, K] with
 // sorted rhs_indices [T, 1], a [T, T] batch), and read past both arrays

@@ -24,7 +24,7 @@ All three are per-row gather kernels that reread an expert's weights for every r
 
 The kernel read `lhs_indices[b]` and `rhs_indices[b]` as flat `[B]` arrays. MLX broadcasts the two index arrays against the activation's batch shape without copying them, so an index array can have stride 0 along a broadcast axis. `x` as `[T, 1, K]` with sorted `rhs_indices` of shape `[T, 1]` (the call that found item 9) gives a `[T, T]` batch with rhs strides `(1, 0)` and implicit lhs strides `(0, 1)`, and the kernel read both arrays past their end. `SwitchGLU`'s sorted path passes flat `[B]` indices, so models never hit it: forcing the old kernel on for granite's `w256` trace gave 0 decided mismatches against Metal. The bf16-only symptom came from the gate, which sent only bf16 to the kernel.
 
-`tests/rocm_gather_qmm_expert_batched.rs` reproduces it: with the old kernel the `BroadcastRows` case (`x` `[T, 1, 1, K]`, `rhs` `[T, top_k]`) had a relative L2 error of 1.415 against the dequantized f32 reference, where the unsorted path had 2.3e-3. The kernel now reads both arrays through the batch shape and strides, as the other gather kernels in `qmm.hip` do.
+`tests/rocm_gather_qmm_expert_batched.rs` reproduces it: with the old kernel the `BroadcastRows` case (`x` `[T, 1, 1, K]`, `rhs` `[T, top_k]`) had a relative L2 error of 1.415 against the dequantized f32 reference, where the unsorted path had 2.3e-3. The kernel now reads both arrays through the batch shape and strides, as the launched per-row gather kernels in `qmm.hip` do.
 
 ## The kernel was slower than the path it replaces
 
@@ -66,4 +66,4 @@ Build cost: the f16 arm adds two instantiations (4 and 8 bits). `qmm.hip` alone,
 
 ## Not measured
 
-gpt-oss-20b is unchanged (mxfp4, #2106). Models with more than 64 experts (Qwen3-30B-A3B, Nemotron-3-Nano) do not reach the kernel. Wave64 (CDNA) parts are untested; the kernel's 16-lane reduction stays inside a wave on both widths. The four-rows-per-load factor was not tuned.
+gpt-oss-20b is unchanged (mxfp4, #2106). Models with more than 64 experts (Qwen3-30B-A3B, Nemotron-3-Nano) do not reach the kernel. Wave64 (CDNA) parts are untested; the kernel's 16-lane reduction stays inside a wave on both widths. Prompts shorter than 512 tokens, near the gate's `B >= 64` threshold, were not measured, nor were the other MoE families the gate reaches with at most 64 experts (no such checkpoint on this host). The four-rows-per-load factor was not tuned.

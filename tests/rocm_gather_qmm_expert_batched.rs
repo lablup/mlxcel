@@ -108,7 +108,7 @@ fn dtype_name(dt: i32) -> &'static str {
 /// Relative L2 error a correct kernel stays under from rounding the output
 /// (and the activations) to `dt`: unit roundoff 2^-9 for bf16 and 2^-11 for
 /// f16, with room for where the partial sums are rounded. Measured on gfx1151:
-/// about 4.6e-3 (bf16) and 5.8e-4 (f16) on both paths.
+/// about 2.3e-3 (bf16) and 2.8e-4 (f16) on both paths.
 fn absolute_bound(dt: i32) -> f32 {
     match dt {
         dtype::FLOAT16 => 2e-3,
@@ -415,6 +415,11 @@ fn check_shape(shape: Shape, bits: i32, dt: i32) {
         assert!(
             err_unsorted <= absolute_bound(dt),
             "{label}: the unsorted path's relative error {err_unsorted} exceeds {}",
+            absolute_bound(dt)
+        );
+        assert!(
+            err_batched <= absolute_bound(dt),
+            "{label}: expert-batched relative error {err_batched} exceeds {}",
             absolute_bound(dt)
         );
         // Both round an f32 accumulation to `dt`; only the summation order
