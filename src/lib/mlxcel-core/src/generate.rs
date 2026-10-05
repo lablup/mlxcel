@@ -406,6 +406,46 @@ pub(crate) fn resolve_kv_cache_layer_modes(mode: KVCacheMode, n_layers: usize) -
     crate::cache::turbo::resolve_layer_modes(mode, n_layers, requested)
 }
 
+/// Build the sample for step t+1 of a pipelined decode loop from its
+/// `next_logits`, where `y` is the still-unread sample of step t.
+///
+/// A sampler that reads the emitted history (`needs_history`: repetition,
+/// frequency or presence penalties, DRY) must see token t when it samples
+/// t+1, as mlx-lm's `generate_step` and llama.cpp's `common_sampler_accept`
+/// do (#2090). On that path this submits the step t+1 forward first, so the
+/// device keeps working through the host read, then reads `y`, records it in
+/// `token_history`, and only then builds the sample. It returns the token it
+/// read, so the loop reuses it rather than reading or recording it twice. A
+/// history-free sampler keeps sampling straight from the lazy graph, in the
+/// same order as before, and returns `None`.
+///
+/// Used by: `CxxGenerator::generate_streaming`,
+/// `CxxGenerator::generate_streaming_with_embeddings`,
+/// `CxxGenerator::generate_with_stats_and_embeddings`,
+/// `CxxGenerator::generate_with_stats`
+fn sample_next_step(
+    next_logits: &MlxArray,
+    y: &MlxArray,
+    sampling: &SamplingConfig,
+    needs_history: bool,
+    token_history: &mut Vec<i32>,
+    sampler_state: &mut Option<SamplerState>,
+) -> ((UniquePtr<MlxArray>, UniquePtr<MlxArray>), Option<i32>) {
+    if !needs_history {
+        return (
+            sample_token_optimized(next_logits, sampling, token_history),
+            None,
+        );
+    }
+    ffi::async_eval(next_logits);
+    let current = ffi::item_i32(y);
+    token_history.push(current);
+    (
+        sample_token_optimized_with_state(next_logits, sampling, token_history, sampler_state),
+        Some(current),
+    )
+}
+
 /// Trait for language models that can be used for generation
 pub trait LanguageModel {
     /// Forward pass through the model
@@ -1871,6 +1911,8 @@ impl CxxGenerator {
 
         let mut n = 0;
         loop {
+            // The token of `y`, when sampling the next step already read it.
+            let mut current_token: Option<i32> = None;
             // Start next step (if not at max)
             let build_start = if profile_pipeline {
                 Some(std::time::Instant::now())
@@ -1906,16 +1948,15 @@ impl CxxGenerator {
                 } else {
                     None
                 };
-                let (next_tok, next_log) = if needs_history {
-                    sample_token_optimized_with_state(
-                        &next_logits,
-                        sampling,
-                        &token_history,
-                        &mut sampler_state,
-                    )
-                } else {
-                    sample_token_optimized(&next_logits, sampling, &token_history)
-                };
+                let ((next_tok, next_log), read) = sample_next_step(
+                    &next_logits,
+                    &y,
+                    sampling,
+                    needs_history,
+                    &mut token_history,
+                    &mut sampler_state,
+                );
+                current_token = read;
                 if let Some(start) = detail_start {
                     sample_ns_total += start.elapsed().as_nanos();
                 }
@@ -1993,7 +2034,7 @@ impl CxxGenerator {
             } else {
                 None
             };
-            let token_val = ffi::item_i32(&y);
+            let token_val = current_token.unwrap_or_else(|| ffi::item_i32(&y));
             if let Some(ws) = wait_start {
                 wait_ns_total += ws.elapsed().as_nanos();
                 profile_count += 1;
@@ -2005,7 +2046,7 @@ impl CxxGenerator {
             }
 
             self.generated_tokens.push(token_val);
-            if needs_history {
+            if needs_history && current_token.is_none() {
                 token_history.push(token_val);
             }
 
@@ -2182,19 +2223,20 @@ impl CxxGenerator {
         // Decode loop — identical to standard generation (no embeddings needed)
         let mut n = 0;
         loop {
+            // The token of `y`, when sampling the next step already read it.
+            let mut current_token: Option<i32> = None;
             let (next_y, next_logprobs) = if n + 1 < max_tokens {
                 let next_input = ffi::reshape_token_for_forward(&y);
                 let next_logits = model.forward(&next_input, &mut self.caches, None);
-                let (next_tok, next_log) = if needs_history {
-                    sample_token_optimized_with_state(
-                        &next_logits,
-                        sampling,
-                        &token_history,
-                        &mut sampler_state,
-                    )
-                } else {
-                    sample_token_optimized(&next_logits, sampling, &token_history)
-                };
+                let ((next_tok, next_log), read) = sample_next_step(
+                    &next_logits,
+                    &y,
+                    sampling,
+                    needs_history,
+                    &mut token_history,
+                    &mut sampler_state,
+                );
+                current_token = read;
                 ffi::async_eval_pair(&next_tok, &next_log);
                 (Some(next_tok), Some(next_log))
             } else {
@@ -2209,7 +2251,7 @@ impl CxxGenerator {
                 break;
             }
 
-            let token_val = ffi::item_i32(&y);
+            let token_val = current_token.unwrap_or_else(|| ffi::item_i32(&y));
 
             // Check EOS before sending to callback (avoid outputting stop tokens)
             if eos_tokens.contains(&token_val) {
@@ -2217,7 +2259,7 @@ impl CxxGenerator {
             }
 
             self.generated_tokens.push(token_val);
-            if needs_history {
+            if needs_history && current_token.is_none() {
                 token_history.push(token_val);
             }
 
@@ -2398,6 +2440,8 @@ impl CxxGenerator {
 
         let mut n = 0;
         loop {
+            // The token of `y`, when sampling the next step already read it.
+            let mut current_token: Option<i32> = None;
             let next_y = if n + 1 < max_tokens {
                 let detail_start = profile_pipeline_detail.then(Instant::now);
                 let next_input = ffi::reshape_token_for_forward(&y);
@@ -2412,16 +2456,15 @@ impl CxxGenerator {
                 }
 
                 let detail_start = profile_pipeline_detail.then(Instant::now);
-                let (next_tok, _next_log) = if needs_history {
-                    sample_token_optimized_with_state(
-                        &next_logits,
-                        sampling,
-                        &token_history,
-                        &mut sampler_state,
-                    )
-                } else {
-                    sample_token_optimized(&next_logits, sampling, &token_history)
-                };
+                let ((next_tok, _next_log), read) = sample_next_step(
+                    &next_logits,
+                    &y,
+                    sampling,
+                    needs_history,
+                    &mut token_history,
+                    &mut sampler_state,
+                );
+                current_token = read;
                 if let Some(start) = detail_start {
                     sample_ns_total += start.elapsed().as_nanos();
                 }
@@ -2445,7 +2488,7 @@ impl CxxGenerator {
             }
 
             let wait_start = profile_pipeline_detail.then(Instant::now);
-            let token_val = ffi::item_i32(&y);
+            let token_val = current_token.unwrap_or_else(|| ffi::item_i32(&y));
             if let Some(start) = wait_start {
                 wait_ns_total += start.elapsed().as_nanos();
             }
@@ -2453,7 +2496,7 @@ impl CxxGenerator {
                 break;
             }
             self.generated_tokens.push(token_val);
-            if needs_history {
+            if needs_history && current_token.is_none() {
                 token_history.push(token_val);
             }
 
@@ -2672,6 +2715,8 @@ impl CxxGenerator {
 
         let mut n = 0;
         loop {
+            // The token of `y`, when sampling the next step already read it.
+            let mut current_token: Option<i32> = None;
             // Start next step computation (if not at max)
             let next_y = if n + 1 < max_tokens {
                 let detail_start = profile_pipeline_detail.then(Instant::now);
@@ -2687,16 +2732,15 @@ impl CxxGenerator {
                 }
 
                 let detail_start = profile_pipeline_detail.then(Instant::now);
-                let (next_tok, _next_log) = if needs_history {
-                    sample_token_optimized_with_state(
-                        &next_logits,
-                        sampling,
-                        &token_history,
-                        &mut sampler_state,
-                    )
-                } else {
-                    sample_token_optimized(&next_logits, sampling, &token_history)
-                };
+                let ((next_tok, _next_log), read) = sample_next_step(
+                    &next_logits,
+                    &y,
+                    sampling,
+                    needs_history,
+                    &mut token_history,
+                    &mut sampler_state,
+                );
+                current_token = read;
                 if let Some(start) = detail_start {
                     sample_ns_total += start.elapsed().as_nanos();
                 }
@@ -2724,7 +2768,7 @@ impl CxxGenerator {
 
             // Extract current token value (syncs y)
             let wait_start = profile_pipeline_detail.then(Instant::now);
-            let token_val = ffi::item_i32(&y);
+            let token_val = current_token.unwrap_or_else(|| ffi::item_i32(&y));
             if let Some(start) = wait_start {
                 wait_ns_total += start.elapsed().as_nanos();
             }
@@ -2735,7 +2779,7 @@ impl CxxGenerator {
             }
 
             self.generated_tokens.push(token_val);
-            if needs_history {
+            if needs_history && current_token.is_none() {
                 token_history.push(token_val);
             }
 
@@ -3869,3 +3913,7 @@ mod tests {
         assert!(!composed.token_bias.contains(1));
     }
 }
+
+#[cfg(test)]
+#[path = "generate_history_tests.rs"]
+mod history_tests;
