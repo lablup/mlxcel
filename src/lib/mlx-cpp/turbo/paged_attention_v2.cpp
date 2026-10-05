@@ -642,12 +642,14 @@ std::vector<mlx::core::array> paged_attention_decode_v2_partial(
 
     // Shapes the kernel bodies cannot index are refused here, on every
     // backend, instead of being read out of bounds (issue #2068).
-    // `v_pool` may be narrower than `k_pool` in heads (MiniMax-M3 keeps an
-    // index key at head `Hkv` of the K allocation; the sparse launch accepts
-    // that layout at batch 1), so only its rank and head dimension are checked.
+    // `v_pool` may hold fewer rows than `k_pool` (the MiniMax-M3 sparse launch
+    // reshapes both allocations to `[rows, 1, 1, D]`, and K carries the
+    // index-key side head), so axis 0 is not compared. The bodies address V
+    // with K's block size and head stride, so axes 1 to 3 must match.
     if (q.ndim() != 4 || k_pool.ndim() != 4 || v_pool.ndim() != 4 ||
-        q_shape[2] != 1 || kp_shape[3] != q_shape[3] ||
-        v_pool.shape(3) != q_shape[3] || kp_shape[1] < 1 || kp_shape[2] < 1) {
+        q_shape[2] != 1 || q_shape[3] < 1 || kp_shape[3] != q_shape[3] ||
+        kp_shape[1] < 1 || kp_shape[2] < 1 || v_pool.shape(1) != kp_shape[1] ||
+        v_pool.shape(2) != kp_shape[2] || v_pool.shape(3) != kp_shape[3]) {
         throw std::invalid_argument(
             "[paged_attention_decode_v2_partial] expects q [B, Hq, 1, D] and "
             "k_pool, v_pool [blocks, page_size, heads, D]");

@@ -251,11 +251,13 @@ std::vector<mlx::core::array> paged_attention_merge_states(
     const auto& v_shape = v_in.shape(); // [N, H, Dim]
 
     // Shapes the kernel bodies cannot index are refused here, on every
-    // backend, instead of being read out of bounds (issue #2068). The HIP body
-    // takes the head count from the grid, so `lse_in` must agree with `v_in`
-    // on it.
+    // backend, instead of being read out of bounds (issue #2068). Every body
+    // indexes `lse_in` with the head count it reads from `v_in`, so `lse_in`
+    // must be `[N, H]` with `v_in`'s N and H. The threadgroup is `(D, 1, 1)`,
+    // so D must be a launchable block width.
     if (v_in.ndim() != 3 || lse_in.ndim() != 2 || o_indptr.ndim() != 1 ||
-        lse_in.shape(0) != v_shape[0] || lse_in.shape(1) != v_shape[1]) {
+        lse_in.shape(0) != v_shape[0] || lse_in.shape(1) != v_shape[1] ||
+        v_shape[2] < 1 || v_shape[2] > 1024) {
         throw std::invalid_argument(
             "[paged_attention_merge_states] expects v_in [N, H, D], lse_in "
             "[N, H] and o_indptr [M + 1]");

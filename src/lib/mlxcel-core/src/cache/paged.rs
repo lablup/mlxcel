@@ -2311,10 +2311,10 @@ impl PagedBlockPool {
         };
 
         // The CUDA launch places batch * query_heads in gridDim.z, which CUDA
-        // caps at 65535 (Metal has no such cap). The bridge entry returns a
-        // bare UniquePtr, so a failed launch would abort rather than error;
-        // decline here and let the caller take the gather fallback (#634
-        // security review). Unreachable for the single-slab island's small
+        // caps at 65535 (Metal has no such cap). The limit is hit when the
+        // graph is evaluated, not when the bridge call returns, so the
+        // launcher's `Result` cannot report it; decline here and let the
+        // caller take the gather fallback (#634 security review). Unreachable for the single-slab island's small
         // batches, kept as a guard for external library callers. The HIP port
         // (#2068) uses the same grid, so ROCm keeps the CUDA bound rather than
         // relying on a device-reported limit.
