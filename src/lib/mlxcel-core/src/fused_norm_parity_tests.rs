@@ -550,12 +550,15 @@ fn argmax_index(logits: &MlxArray) -> usize {
     best
 }
 
-/// On ROCm the port reproduces the graph it replaces exactly, not within a
-/// tolerance: the launch uses the overlay's 256-thread `rms_norm_kernel` block,
+/// On ROCm the port follows the graph it replaces rather than the Metal
+/// kernel: the launch uses the overlay's 256-thread `rms_norm_kernel` block,
 /// and the body copies its strided sums, 32-wide folds, `1.0f / sqrtf` and
-/// rounding points (`fused_norm_hip.h`). Byte identity is the stronger pin,
-/// and it is what makes "turning the fusion on changes no logits" true on this
-/// backend. Rows wider than one 1024-element sweep (4096) and narrower than
+/// rounding points (`fused_norm_hip.h`), so it is byte-identical, a much
+/// tighter pin than the tolerance tests above: a port sized from the row
+/// (`fused_norm_threads`) fails it at 4096 wide. The second half spreads the
+/// residual rows' scale over e^-8 to e^8, where a port that took the row
+/// length as a compile-time constant left about 1% of f32 rows a normalizer
+/// ulp off. Rows wider than one 1024-element sweep (4096) and narrower than
 /// one block (128) are both covered.
 #[test]
 fn fused_add_rms_norm_is_byte_identical_to_the_rocm_graph() {
@@ -584,5 +587,30 @@ fn fused_add_rms_norm_is_byte_identical_to_the_rocm_graph() {
                 "normed dt={dt} rows={rows} dim={dim} differs from the ROCm graph rms_norm"
             );
         }
+        // Wide dynamic range: per-row residual scales exp(2 * N(0, 1)).
+        let (rows, dim) = (1024, 4096);
+        let (delta, residual, weight) = random_case(5100, rows, dim, dt);
+        random_seed(5101);
+        let noise = unsafe { random_normal(&[rows, 1], dtype::FLOAT32, std::ptr::null()) };
+        let row_scale = exp(&multiply(&noise, &full_f32(&[1], 2.0, dtype::FLOAT32)));
+        let residual = astype(
+            &multiply(&astype(&residual, dtype::FLOAT32), &row_scale),
+            dt,
+        );
+        eval(&residual);
+        let (normed, new_residual) = run_fused(&delta, &residual, &weight, EPS, 0.0);
+        let norm = RMSNorm::new(copy(&weight), EPS);
+        let (want_normed, want_residual) =
+            crate::layers::graph_add_rms_norm(&norm, &delta, &residual);
+        assert_eq!(
+            raw_bytes(&new_residual),
+            raw_bytes(&want_residual),
+            "new_residual dt={dt} with spread row scales differs from the ROCm graph add"
+        );
+        assert_eq!(
+            raw_bytes(&normed),
+            raw_bytes(&want_normed),
+            "normed dt={dt} with spread row scales differs from the ROCm graph rms_norm"
+        );
     }
 }

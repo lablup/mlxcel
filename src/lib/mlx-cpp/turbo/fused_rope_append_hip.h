@@ -40,14 +40,35 @@
 // is what keeps them together at the large unreduced angles of a long context
 // (about 1.3e5 rad for the `p = 0` pair at position 131071).
 //
-// The two rotation outputs are written as explicit `fmaf` calls, in the
-// contraction that reproduces the hipcc-compiled `rope.hip` on gfx1151. Left
-// as `x1 * sintheta + x2 * costheta`, hipRTC's contraction of the second
-// output differed from the graph's and moved about one f32 element in ten by
-// one ulp against `fast_rope` (the first output already matched). Spelled out,
-// the port is byte-identical to the graph in f32, f16 and bf16, which
-// `fused_rope_append_is_byte_identical_to_the_rocm_graph` pins; a compiler
-// change on the graph side would show there first.
+// The two rotation outputs are written as explicit `fmaf` calls under
+// `fp contract(off)`, in the contraction that reproduces the hipcc-compiled
+// `rope.hip` on gfx1151, because hipcc did not contract the same expression
+// the same way in its two kernels: for one token of one sequence (batch-1
+// decode) the graph runs `rope_single_1d`, whose second output matches
+// `fma(x2, cos, x1 * sin)`, and otherwise `rope`, whose second output matches
+// `fma(x1, sin, x2 * cos)`. The body picks the same form from the same
+// condition (`B == 1 && L == 1`; the projection output is row-contiguous, as
+// the graph's q and k are there). Left to hipRTC's own contraction, about one
+// f32 element in ten moved by one ulp against `fast_rope`, and with only one
+// form spelled out the other shape still did. `fp contract(off)` keeps hipRTC
+// from contracting the remaining products into neighbouring operations.
+//
+// f16 needs one more step. The graph's f16 instantiations round each fused
+// result to f16 once, as a mixed-precision fma with an f16 destination
+// would, while `(T)fmaf(...)` rounds it to f32 first; the double rounding
+// disagrees on roughly one element in 2^13, which a 186-token window of 48
+// heads always hits. For f16 the body therefore forms the same fused results
+// in double (the products of two floats are exact there) and converts once
+// (`__half`'s templated constructor converts a double to `_Float16`
+// directly). f32 and bf16 keep the `fmaf` value: f32 needs no second
+// rounding, and the graph's bf16 store rounds the f32 value too.
+//
+// With that, a stress run of 432 cases (batch 1 to 3, windows of 1 to 300
+// tokens, offsets up to 131000, both conventions, full and partial rotary
+// dims, values scaled up to 181x) matched the graph bit for bit in f32, f16
+// and bf16, and `fused_rope_append_is_byte_identical_to_the_rocm_graph` pins
+// representative cases; a compiler change on the graph side would show there
+// first.
 //
 // No wavefront guard, deliberately, as for `GUMBEL_MAX_SAMPLE_HIP_SOURCE`
 // (#2064): no thread reads another thread's value, through a shuffle or
@@ -57,6 +78,11 @@
 namespace mlxcel::turbo {
 
 inline constexpr const char* FUSED_ROPE_APPEND_HIP_SOURCE = R"(
+    // The braces make the pragma the start of a compound statement, which is
+    // the only place clang accepts it inside the function MLX wraps around
+    // this body (the wrapper may emit declarations ahead of it).
+    {
+    #pragma clang fp contract(off)
     uint32_t p = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t t = blockIdx.y * blockDim.y + threadIdx.y;
     uint32_t z = blockIdx.z * blockDim.z + threadIdx.z;
@@ -134,6 +160,8 @@ inline constexpr const char* FUSED_ROPE_APPEND_HIP_SOURCE = R"(
     float x2 = (float)qkv[in_base + i2];
     float r1 = x1;
     float r2 = x2;
+    double e1 = x1;
+    double e2 = x2;
     if (rotate) {
         float d = (float)p / (float)rhalf;
         float inv_freq = exp2f(-d * (float)rope_params[0]);
@@ -142,16 +170,40 @@ inline constexpr const char* FUSED_ROPE_APPEND_HIP_SOURCE = R"(
         float sintheta;
         float costheta;
         sincosf(theta, &sintheta, &costheta);
-        r1 = fmaf(x1, costheta, -(x2 * sintheta));
-        r2 = fmaf(x1, sintheta, x2 * costheta);
+        // The graph's two kernels fuse different products of the second
+        // output; see the header comment. `e1` / `e2` are the same fused
+        // results before their f32 rounding (the products are exact in
+        // double), for the f16 store below.
+        float p1 = x2 * sintheta;
+        r1 = fmaf(x1, costheta, -p1);
+        e1 = (double)x1 * (double)costheta - (double)p1;
+        if (batch == 1u && seq == 1u) {
+            float p2 = x1 * sintheta;
+            r2 = fmaf(x2, costheta, p2);
+            e2 = (double)x2 * (double)costheta + (double)p2;
+        } else {
+            float p2 = x2 * costheta;
+            r2 = fmaf(x1, sintheta, p2);
+            e2 = (double)x1 * (double)sintheta + (double)p2;
+        }
     }
 
-    if (kind == 0u) {
-        q_out[out_base + i1] = (T)r1;
-        q_out[out_base + i2] = (T)r2;
+    T o1;
+    T o2;
+    if constexpr (__is_same(T, __half)) {
+        o1 = (T)e1;
+        o2 = (T)e2;
     } else {
-        k_out[out_base + i1] = (T)r1;
-        k_out[out_base + i2] = (T)r2;
+        o1 = (T)r1;
+        o2 = (T)r2;
+    }
+    if (kind == 0u) {
+        q_out[out_base + i1] = o1;
+        q_out[out_base + i2] = o2;
+    } else {
+        k_out[out_base + i1] = o1;
+        k_out[out_base + i2] = o2;
+    }
     }
 )";
 

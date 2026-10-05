@@ -30,9 +30,16 @@
 // `rms_norm_kernel` in `rms_norm.hip`):
 //
 // - The launch in `fused_norm.cpp` fixes `Threads` at 256 on ROCm, the
-//   overlay's `BLOCK_DIM`, instead of sizing it from the row. With the same
-//   per-thread strided sweep, the same 32-wide xor folds and zero-padded
-//   group sums, the sum of squares is the graph's term for term.
+//   overlay's `BLOCK_DIM`, instead of sizing it from the row, so the
+//   per-thread strided sweep, the 32-wide xor folds and the group sums follow
+//   the graph's reduction tree.
+//
+// - The row length comes from `weight_shape[0]` at run time rather than from
+//   the `Dim` constant, as the graph's kernel takes it. With the constant,
+//   hipRTC compiled the 4096-wide sweep so that 44 of 4096 f32 rows in a
+//   stress run (row scales spread over e^-8 to e^8) came out a normalizer ulp
+//   from the graph's; with the runtime length, none did, at widths 128, 2048,
+//   3584 and 4096 in f32, f16 and bf16.
 //
 // - `__shfl_xor(v, o, 32)` for `__shfl_xor_sync(mask, v, o)`. HIP's `_sync`
 //   form is a compatibility shim that ignores its mask, and the native form
@@ -72,7 +79,12 @@ inline constexpr const char* FUSED_ADD_RMS_NORM_HIP_SOURCE = R"(
     uint32_t lane = threadIdx.x % 32u;
     uint32_t sg = threadIdx.x / 32u;
 
-    const uint32_t dim = (uint32_t)Dim;
+    // The row length is read from the weight's shape at run time, not from
+    // the `Dim` template constant (which stays in the cache key): with a
+    // compile-time 4096, hipRTC compiled the sweep differently enough that
+    // about 1% of f32 rows came out a normalizer ulp away from the graph,
+    // whose `rms_norm_kernel` takes the length as a runtime argument.
+    const uint32_t dim = (uint32_t)weight_shape[0];
     const uint32_t tg = (uint32_t)Threads;
     const uint64_t base = (uint64_t)row * (uint64_t)dim;
 

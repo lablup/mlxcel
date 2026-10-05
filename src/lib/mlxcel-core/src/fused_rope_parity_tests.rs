@@ -447,6 +447,15 @@ fn fused_rope_append_gate_follows_the_kill_switch() {
 /// takes both sides with the same `sincosf`, so it reproduces the graph's
 /// `fast_rope` exactly rather than within the cross-backend tolerance above.
 /// Byte identity is the stronger pin, including at the long-context angle.
+///
+/// The graph runs two differently compiled kernels: `rope_single_1d` for one
+/// row-contiguous token of one sequence (batch-1 decode, the case that
+/// matters most) and `rope` otherwise, and the two round their second output
+/// differently. Both shapes are covered here; the batch-1 single-token cases
+/// are the ones a port that matched only `rope` failed. The two long windows
+/// are where an f16 port that rounded through f32 failed (see
+/// `fused_rope_append_hip.h`): about one f16 element in eight thousand lands
+/// on the other side, so short windows rarely show it.
 #[test]
 fn fused_rope_append_is_byte_identical_to_the_rocm_graph() {
     use crate::hardware::{GpuBackendKind, gpu_backend_kind};
@@ -462,17 +471,28 @@ fn fused_rope_append_is_byte_identical_to_the_rocm_graph() {
         array_to_raw_bytes(&c)
     };
     for &dt in &[dtype::FLOAT32, dtype::FLOAT16, dtype::BFLOAT16] {
-        for &(seq, offset, traditional) in &[
-            (1i32, 0i32, false),
-            (1, 4096, false),
-            (1, 131071, false),
-            (5, 29, false),
-            (3, 2048, true),
+        for &(batch, seq, offset, traditional) in &[
+            (1i32, 1i32, 512i32, false),
+            (1, 1, 4096, false),
+            (1, 1, 131071, false),
+            (1, 1, 777, true),
+            (1, 5, 29, false),
+            (1, 512, 0, false),
+            (2, 1, 0, false),
+            (2, 1, 4096, false),
+            (2, 1, 131071, false),
+            (2, 5, 29, false),
+            (2, 3, 2048, true),
+            (3, 186, 4555, false),
+            (1, 64, 9110, true),
         ] {
-            let qkv = random_qkv_as(1700 + seq as u64 + offset as u64, 2, seq, dt);
+            let seed = 1700 + (batch * 7 + seq) as u64 + offset as u64;
+            let qkv = random_qkv_as(seed, batch, seq, dt);
             let (q, k, v) = run_fused(&qkv, HEAD_DIM, traditional, offset, 0);
             let (want_q, want_k, want_v) = reference_graph(&qkv, HEAD_DIM, traditional, offset);
-            let label = format!("dt={dt} seq={seq} offset={offset} traditional={traditional}");
+            let label = format!(
+                "dt={dt} batch={batch} seq={seq} offset={offset} traditional={traditional}"
+            );
             assert_eq!(as_contiguous(&q), as_contiguous(&want_q), "q {label}");
             assert_eq!(as_contiguous(&k), as_contiguous(&want_k), "k {label}");
             assert_eq!(as_contiguous(&v), as_contiguous(&want_v), "v {label}");
