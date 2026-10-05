@@ -58,6 +58,20 @@ Qwen3-30B-A3B has 128 experts, so the gate never sends it to this kernel; its ro
 
 Every after run is faster than every before run on both models. Decode does not reach the kernel (a decode step has `B = top_k`, below the gate's 64): granite's decode medians are 0.1% apart, and Mixtral's spread (8.68 to 10.71 tok/s across all six runs) is the noise of a 26 GB checkpoint on a 31 GiB host that the fused-MoE page also recorded.
 
+### Short prompts, near the gate
+
+Prefill time in ms for short prompts (`--prompt-tokens T --max-tokens 4`, kernel off/on alternated, guarded), to check the gate's lower edge (`B >= 64`, `B / E >= 4`):
+
+| Model | T (B) | Off | On |
+|---|---|---|---|
+| granite-4.0-h-tiny-4bit | 44 (264, just above `B / E >= 4`) | 102.4 / 102.9 / 121.2 | 82.7 / 84.2 / 84.9 |
+| granite-4.0-h-tiny-4bit | 64 (384) | 126.6 / 127.1 / 129.7 | 95.9 / 96.7 / 97.5 |
+| granite-4.0-h-tiny-4bit | 160 (960) | 236.7 / 250.6 / 296.5 | 148.8 / 162.5 / 170.1 |
+| Mixtral-8x7B-Instruct-v0.1-4bit | 32 (64, the `B >= 64` floor) | 1709.7 / 1716.2 | 616.9 / 669.3 |
+| Mixtral-8x7B-Instruct-v0.1-4bit | 64 (128) | 2845.0 / 2888.2 | 836.5 / 855.2 |
+
+The kernel is faster at every size, including at both limits of the gate.
+
 ## Decision
 
 The issue's rule: enable by default only if every eligible dtype matches the unsorted path within that path's own error against a dequantized f32 reference, and 512-token prefill improves on every eligible model measured with no decode change. Both hold (bf16 and f16 are the eligible dtypes; granite and Mixtral the eligible models on this host), so the kernel is on by default. `MLX_ROCM_GATHER_QMV_EXPERT_BATCHED=0` turns it off.
@@ -66,4 +80,4 @@ Build cost: the f16 arm adds two instantiations (4 and 8 bits). `qmm.hip` alone,
 
 ## Not measured
 
-gpt-oss-20b is unchanged (mxfp4, #2106). Models with more than 64 experts (Qwen3-30B-A3B, Nemotron-3-Nano) do not reach the kernel. Wave64 (CDNA) parts are untested; the kernel's 16-lane reduction stays inside a wave on both widths. Prompts shorter than 512 tokens, near the gate's `B >= 64` threshold, were not measured, nor were the other MoE families the gate reaches with at most 64 experts (no such checkpoint on this host). The four-rows-per-load factor was not tuned.
+gpt-oss-20b is unchanged (mxfp4, #2106). Models with more than 64 experts (Qwen3-30B-A3B, Nemotron-3-Nano) do not reach the kernel. Wave64 (CDNA) parts are untested; the kernel's 16-lane reduction stays inside a wave on both widths. The other MoE families the gate reaches with at most 64 experts were not measured (no such checkpoint on this host). The four-rows-per-load factor was not tuned.
