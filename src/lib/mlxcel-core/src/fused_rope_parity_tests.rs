@@ -111,10 +111,26 @@ fn normalized_deviation(a: &[f32], b: &[f32]) -> (f64, f64) {
 /// means the trig calls have drifted apart again, not that the tolerance is
 /// too tight.
 fn assert_close(label: &str, got: &MlxArray, want: &MlxArray) {
+    assert_close_within(label, got, want, 2e-3, 1.2e-2);
+}
+
+/// [`assert_close`] for a bf16 activation: the f16 budget above is about one
+/// bf16 ulp on a 2-sigma element, so a single rounding flip on a backend where
+/// the two paths contract differently would fail it. The bf16 budget is the
+/// one `fused_norm_parity_tests.rs` uses for the same ulp reason.
+fn assert_close_for(label: &str, got: &MlxArray, want: &MlxArray, dt: i32) {
+    if dt == dtype::BFLOAT16 {
+        assert_close_within(label, got, want, 1.6e-2, 7e-2);
+    } else {
+        assert_close(label, got, want);
+    }
+}
+
+fn assert_close_within(label: &str, got: &MlxArray, want: &MlxArray, rms_tol: f64, max_tol: f64) {
     let (nrms, nmax) = normalized_deviation(&flatten_f32(got), &flatten_f32(want));
     assert!(
-        nrms < 2e-3 && nmax < 1.2e-2,
-        "{label}: normalized rms {nrms:.3e} (tol 2.0e-3), normalized max {nmax:.3e} (tol 1.2e-2)"
+        nrms < rms_tol && nmax < max_tol,
+        "{label}: normalized rms {nrms:.3e} (tol {rms_tol:.1e}), normalized max {nmax:.3e} (tol {max_tol:.1e})"
     );
 }
 
@@ -247,9 +263,24 @@ fn fused_rope_append_matches_graph_rope_every_dtype() {
             let (q, k, v) = run_fused(&qkv, HEAD_DIM, false, offset, 0);
             let (want_q, want_k, want_v) = reference_graph(&qkv, HEAD_DIM, false, offset);
             assert_eq!(array_dtype(&q), dt, "q keeps the activation dtype");
-            assert_close(&format!("q dt={dt} seq={seq} offset={offset}"), &q, &want_q);
-            assert_close(&format!("k dt={dt} seq={seq} offset={offset}"), &k, &want_k);
-            assert_close(&format!("v dt={dt} seq={seq} offset={offset}"), &v, &want_v);
+            assert_close_for(
+                &format!("q dt={dt} seq={seq} offset={offset}"),
+                &q,
+                &want_q,
+                dt,
+            );
+            assert_close_for(
+                &format!("k dt={dt} seq={seq} offset={offset}"),
+                &k,
+                &want_k,
+                dt,
+            );
+            assert_close_for(
+                &format!("v dt={dt} seq={seq} offset={offset}"),
+                &v,
+                &want_v,
+                dt,
+            );
         }
     }
 }

@@ -8,7 +8,7 @@ AMD Ryzen AI MAX+ 395 with Radeon 8060S (`gfx1151`, RDNA 3.5), 96 GiB VRAM carve
 
 ## What each port matches
 
-Each HIP body (`src/lib/mlx-cpp/turbo/fused_norm_hip.h`, `fused_rope_append_hip.h`) follows the ROCm graph it replaces rather than the Metal or CUDA kernel, so turning a fusion on changes no bit of the output. The launch, the template arguments and the dtype cache key are the CUDA ones.
+Each HIP body (`src/lib/mlx-cpp/turbo/fused_norm_hip.h`, `fused_rope_append_hip.h`) follows the ROCm graph it replaces rather than the Metal or CUDA kernel, so turning a fusion on changes no bit of the output. The launch, the template arguments and the dtype cache key are the CUDA ones, except that ROCm fixes the norm's `Threads` at 256.
 
 | Kernel | Graph it replaces on ROCm | What the port copies |
 |---|---|---|
@@ -22,7 +22,7 @@ Tests, all on gfx1151 (`cargo test --release --features rocm -p mlxcel-core --li
 - The existing tolerance tests (f32 1e-6 / 1e-5, f16 2e-3 / 1.2e-2, bf16 1.6e-2 / 7e-2 normalized RMS / max for the norm; 2e-3 / 1.2e-2 for RoPE) now run on ROCm; before, they returned early while the predicate was false, and now they fail if a GPU backend's predicate is false.
 - `fused_add_rms_norm_is_byte_identical_to_the_rocm_graph`: f32, f16, bf16 at widths 128 to 4096, plus 1024 rows of width 4096 with row scales spread over e^-8 to e^8. Fails with the row-sized thread count and with the compile-time row length.
 - `fused_add_rms_norm_keeps_the_rocm_graph_sign_of_zero`: underflowing elements and zero weights in three dtypes.
-- `fused_rope_append_matches_graph_rope_every_dtype` (new tolerance sweep, f32 / f16 / bf16) and `fused_rope_append_is_byte_identical_to_the_rocm_graph` (batch 1 and 2, windows of 1 to 512 tokens, offsets to 131071, both conventions). Fails with only the multi-token FMA form and with the f32 rounding of f16.
+- `fused_rope_append_matches_graph_rope_every_dtype` (new tolerance sweep, f32 / f16 / bf16, with the norm tests' bf16 budget for bf16) and `fused_rope_append_is_byte_identical_to_the_rocm_graph` (batch 1 and 2, windows of 1 to 512 tokens, offsets to 131071, both conventions). Fails with only the multi-token FMA form and with the f32 rounding of f16.
 - A one-off stress run of 432 RoPE cases (batch 1 to 3, windows of 1 to 300 tokens, offsets to 131000, full and partial rotary dims, values scaled up to 181x) and a 4096-row norm run at four widths matched the graph bit for bit in all three dtypes. They are not committed tests.
 
 ## Correctness on models

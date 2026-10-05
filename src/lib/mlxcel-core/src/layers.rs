@@ -1045,20 +1045,37 @@ pub fn graph_add_rms_norm<N: FusedAddRmsNormSpec + ?Sized>(
 /// path the fusion exists to make cheaper. The device half is not cached: a
 /// custom kernel throws on the CPU stream, and `MLXCEL_DEVICE=cpu` or a
 /// `DefaultDeviceGuard` moves the default device, so it is read on every call
-/// (one FFI read of MLX's default device). The C++ predicate also checks the
-/// device, which is why the cached call is made only while the GPU is the
-/// default: initialised then, it records the port table alone.
+/// (one FFI read of MLX's default device). The C++ predicate checks the device
+/// too, and another thread can move it between the two reads, so only a `true`
+/// answer is cached: a `false` taken in that window would otherwise switch the
+/// fusion off for the rest of the process.
 fn fused_add_rms_norm_backend_available() -> bool {
-    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    ffi::default_device_is_gpu() && *AVAILABLE.get_or_init(ffi::fused_add_rms_norm_available)
+    static PORTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    gpu_port_available(&PORTED, ffi::fused_add_rms_norm_available)
 }
 
 /// Whether the fused RoPE + append kernel can run now. Same split between a
 /// cached port check and a per-call device check as
 /// [`fused_add_rms_norm_backend_available`].
 fn fused_rope_append_backend_available() -> bool {
-    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    ffi::default_device_is_gpu() && *AVAILABLE.get_or_init(ffi::fused_rope_qk_append_available)
+    static PORTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    gpu_port_available(&PORTED, ffi::fused_rope_qk_append_available)
+}
+
+/// The GPU-default check, then `predicate`, which is asked until it first
+/// answers `true` and not after.
+fn gpu_port_available(ported: &std::sync::OnceLock<()>, predicate: fn() -> bool) -> bool {
+    if !ffi::default_device_is_gpu() {
+        return false;
+    }
+    if ported.get().is_some() {
+        return true;
+    }
+    let available = predicate();
+    if available {
+        let _ = ported.set(());
+    }
+    available
 }
 
 /// Whether the fused kernel can serve this call.
