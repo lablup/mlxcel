@@ -845,6 +845,13 @@ fn dense_gemm(
 /// parallel block. Flip this constant only on a backend that measures a win.
 /// See `docs/benchmark_results/fused-norm-rope-m1ultra-2026-07-31.md` and
 /// `docs/benchmark_results/fused-add-rmsnorm-decode-m1ultra-2026-09-27.md`.
+///
+/// ROCm (#2063) measured the same: with the HIP port, whose output is
+/// byte-identical to the graph, Llama 3.1 8B decode on gfx1151 was 37.85 tok/s
+/// off and 37.95 on (medians of five), and Qwen2.5 7B gained 1.5% with a size
+/// that drifted between runs as much as the off arm's spread. Not a clear win,
+/// so ROCm keeps the shared default. See
+/// `docs/benchmark_results/rocm-fused-norm-rope-gfx1151-2026-10-05.md`.
 pub(crate) const FUSED_ADD_RMSNORM_DEFAULT: bool = false;
 
 /// Default for the fused q/k RoPE + KV-append-layout decode path. Same
@@ -857,6 +864,10 @@ pub(crate) const FUSED_ADD_RMSNORM_DEFAULT: bool = false;
 /// That is the single reproducible signal in the sweep and it points the wrong
 /// way, which is the stronger reason to leave this unwired until a backend or
 /// shape is found where it wins.
+///
+/// ROCm (#2063) did not find one: on gfx1151 Qwen2.5 7B decode gained 0.6% with
+/// this kernel alone and 1.7% with both fusions (medians of seven), inside the
+/// drift between runs. Same results page as [`FUSED_ADD_RMSNORM_DEFAULT`].
 pub(crate) const FUSED_ROPE_APPEND_DEFAULT: bool = false;
 
 /// Whether the fused residual-add + RMSNorm path (#905) is enabled.

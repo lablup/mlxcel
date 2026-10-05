@@ -1,0 +1,12 @@
+rocm_gfx1151_3f0e51af_llama-3.1-8b-instruct_addrms_w1ctx512              exit=0 rows=128
+rocm_gfx1151_3f0e51af_llama-3.1-8b-instruct_addrms_w1                    exit=0 rows=128
+rocm_gfx1151_3f0e51af_llama-3.1-8b-instruct_addrms_w8                    exit=0 rows=640
+rocm_gfx1151_3f0e51af_llama-3.1-8b-instruct_fusedoff_w1ctx512            exit=0 rows=128
+rocm_gfx1151_3f0e51af_llama-3.1-8b-instruct_fusedoff_w1                  exit=0 rows=128
+rocm_gfx1151_3f0e51af_llama-3.1-8b-instruct_fusedoff_w8                  exit=0 rows=640
+rocm_gfx1151_3f0e51af_qwen2.5-7b-instruct_addrms-rope_w1ctx512           exit=0 rows=128
+rocm_gfx1151_3f0e51af_qwen2.5-7b-instruct_addrms-rope_w1                 exit=0 rows=128
+rocm_gfx1151_3f0e51af_qwen2.5-7b-instruct_addrms-rope_w8                 exit=0 rows=640
+rocm_gfx1151_3f0e51af_qwen2.5-7b-instruct_fusedoff_w1ctx512              exit=0 rows=128
+rocm_gfx1151_3f0e51af_qwen2.5-7b-instruct_fusedoff_w1                    exit=0 rows=128
+rocm_gfx1151_3f0e51af_qwen2.5-7b-instruct_fusedoff_w8                    exit=0 rows=640
