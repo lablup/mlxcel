@@ -32,6 +32,16 @@ pub fn resolve_metal_backend(is_macos: bool, override_value: Option<&str>) -> Re
     }
 }
 
+/// Used by: mlxcel-core's C++ bridge (`MLXCEL_BRIDGE_GPU_BACKEND`, #2108).
+/// Whether MLX builds any GPU backend, and with it the GPU-side helpers such as
+/// `copy_gpu_inplace` that a bridge file may only reference in that case.
+/// `metal_backend` is the resolved value above, not the Cargo feature; `cuda`
+/// and `rocm` are the Cargo features, which `build_mlx` maps one-to-one onto
+/// `MLX_BUILD_CUDA` and `MLX_BUILD_ROCM`.
+pub fn gpu_backend_enabled(metal_backend: bool, cuda: bool, rocm: bool) -> bool {
+    metal_backend || cuda || rocm
+}
+
 #[cfg(test)]
 #[path = "metal_backend_tests.rs"]
 mod tests;

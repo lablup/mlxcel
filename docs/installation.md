@@ -743,6 +743,16 @@ covered is a defect that reproduces only under release LTO or `codegen-units = 1
 Reach for `cargo test --release --features metal,accelerate` by hand when you
 are chasing one of those.
 
+### CPU-only link check
+
+A Linux build with no GPU feature compiles MLX without any GPU backend, so MLX's GPU-side helpers (for example `copy_gpu_inplace`) do not exist in it. Bridge C++ under `src/lib/mlx-cpp/turbo/` and `src/lib/mlxcel-core/cpp/` that calls one must sit behind `MLXCEL_BRIDGE_GPU_BACKEND`, which `mlxcel-core/build.rs` defines exactly when MLX builds Metal, CUDA or ROCm. A missed guard is a link error that only this configuration shows: `cargo check` does not link, and every GB10 CI job passes `--features cuda`. Check it locally with a separate target directory so it does not evict a CUDA cache:
+
+```bash
+CARGO_TARGET_DIR=target/cpu cargo test -p mlxcel-core --profile test-fast --lib --no-run
+```
+
+Measured on GB10 (2026-10, lablup/mlxcel#2108): about 2.5 minutes cold, including the CPU-only MLX tree, and about 6 seconds to rebuild and relink after a one-file change in the bridge or in `mlxcel-core`. CI does not run this step yet.
+
 ## Why the gate says `--workspace`
 
 `make verify-clippy` and `make verify-test` pass `--workspace`, and dropping it

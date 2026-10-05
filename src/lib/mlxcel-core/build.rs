@@ -181,6 +181,21 @@ fn main() {
         bridge.define("MLXCEL_BRIDGE_ROCM_BACKEND", None);
     }
 
+    // Any GPU backend (#2108). MLX defines its GPU-side helpers, such as
+    // `copy_gpu_inplace` in `mlx/backend/gpu/copy.cpp`, only when it builds a
+    // GPU backend, so a bridge file that calls them must not reference them in
+    // a CPU-only Linux build or the final link fails. Keyed on the resolved
+    // `metal_backend` (not the Cargo feature, see above) and on the CUDA and
+    // ROCm features, which are exactly the conditions under which `build_mlx`
+    // turns a GPU backend on.
+    if metal_backend::gpu_backend_enabled(
+        metal_backend,
+        env::var_os("CARGO_FEATURE_CUDA").is_some(),
+        env::var_os("CARGO_FEATURE_ROCM").is_some(),
+    ) {
+        bridge.define("MLXCEL_BRIDGE_GPU_BACKEND", None);
+    }
+
     // Add optimization flags for release builds
     #[cfg(not(debug_assertions))]
     {

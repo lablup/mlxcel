@@ -15,7 +15,11 @@
 #include "kv_inplace_write.h"
 
 #include <mlx/backend/common/slicing.h>
+// `copy_gpu_inplace` exists only in an MLX build with a GPU backend; build.rs
+// defines MLXCEL_BRIDGE_GPU_BACKEND exactly then (#2108).
+#ifdef MLXCEL_BRIDGE_GPU_BACKEND
 #include <mlx/backend/gpu/copy.h>
+#endif
 #include <mlx/primitives.h>
 #include <mlx/utils.h>
 
@@ -41,6 +45,12 @@ class InplaceSliceWrite : public mx::UnaryPrimitive {
   }
 
   void eval_gpu(const std::vector<mx::array>& inputs, mx::array& out) override {
+#ifndef MLXCEL_BRIDGE_GPU_BACKEND
+    // CPU-only build: there is no GPU stream to reach this, and
+    // `inplace_slice_write` already refuses a non-GPU default device.
+    throw std::runtime_error(
+        "[inplace_slice_write] this build has no GPU backend");
+#else
     const auto& dst = inputs[0];
     const auto& rows = inputs[1];
     // Adopt dst's buffer unconditionally: this is the whole point, and the
@@ -62,6 +72,7 @@ class InplaceSliceWrite : public mx::UnaryPrimitive {
         /* o_offset = */ data_offset,
         mx::CopyType::GeneralGeneral,
         stream());
+#endif
   }
 
   const char* name() const override {
