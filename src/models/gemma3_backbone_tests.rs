@@ -264,3 +264,75 @@ fn gelu_approx_matches_mlx_nn_bit_for_bit() {
         }
     }
 }
+
+/// Issue #2109: widening reproduces the stored-dtype `1 + w` exactly, for
+/// random bf16 norm weights and the edge values around `w = -1`, and the
+/// widened backbone keeps an f32 stream through every norm.
+#[test]
+fn widened_norms_hold_the_stored_one_plus_w_in_f32() {
+    let args = tiny_args();
+    let mut weights = tiny_weights("bb", &args);
+    // bf16 norms; the projections stay f32, as the TTS loader holds them.
+    for (k, w) in weights.iter_mut() {
+        if k.contains("norm") {
+            *w = mlxcel_core::astype(w, dtype::BFLOAT16);
+        }
+    }
+    let edges = [
+        -1.0f32,
+        -0.99609375,
+        -1.0078125,
+        0.0,
+        300.0,
+        -300.0,
+        1e-3,
+        65504.0,
+    ];
+    weights.insert(
+        "bb.norm.weight".to_string(),
+        mlxcel_core::astype(&mlxcel_core::from_slice_f32(&edges, &[8]), dtype::BFLOAT16),
+    );
+    let mut backbone = Gemma3Backbone::from_weights(&weights, "bb", &args).unwrap();
+    let stored = Gemma3Backbone::from_weights(&weights, "bb", &args).unwrap();
+    backbone.widen_norms_to_f32();
+
+    let bytes = |a: &MlxArray| {
+        mlxcel_core::eval(a);
+        mlxcel_core::array_to_raw_bytes(a)
+    };
+    let check = |got: &GemmaRMSNorm, want: &GemmaRMSNorm| {
+        assert_eq!(
+            mlxcel_core::array_dtype(got.adjusted_weight()),
+            dtype::FLOAT32
+        );
+        let widened = mlxcel_core::astype(want.adjusted_weight(), dtype::FLOAT32);
+        assert_eq!(bytes(got.adjusted_weight()), bytes(&widened));
+    };
+    for (got, want) in backbone.layers.iter().zip(&stored.layers) {
+        check(&got.input_layernorm, &want.input_layernorm);
+        check(
+            &got.post_attention_layernorm,
+            &want.post_attention_layernorm,
+        );
+        check(
+            &got.pre_feedforward_layernorm,
+            &want.pre_feedforward_layernorm,
+        );
+        check(
+            &got.post_feedforward_layernorm,
+            &want.post_feedforward_layernorm,
+        );
+        check(&got.self_attn.q_norm, &want.self_attn.q_norm);
+        check(&got.self_attn.k_norm, &want.self_attn.k_norm);
+    }
+    check(&backbone.norm, &stored.norm);
+
+    let mut key = 5u64;
+    let x = rand(&mut key, &[2, 3, 8], 1.0);
+    let normed = backbone.layers[0].input_layernorm.forward(&x);
+    assert_eq!(mlxcel_core::array_dtype(&normed), dtype::FLOAT32);
+    let out = backbone
+        .forward_embeds(&x, &mut backbone.make_caches())
+        .unwrap();
+    assert_eq!(mlxcel_core::array_dtype(&out), dtype::FLOAT32);
+}
