@@ -62,12 +62,13 @@
 //   to the order of the sum.
 //
 // The wavefront `#error` guard below is the one #1814 asks of every shuffle-
-// based port. It is inert with the AMD clang in ROCm 7 (clang 23), which
-// defines neither `__AMDGCN_WAVEFRONT_SIZE` spelling for gfx1151 or gfx942
-// (checked with `hipcc -E -dM` in #2065), so it does not protect anything on
-// current toolchains; the explicit width of 32 is what keeps the reduction
-// correct. It is kept so an older compiler that does define the macro refuses
-// a wave64 build rather than running an untested one.
+// based port. It is inert with HIP 7.15's AMD clang 23, which defines neither
+// `__AMDGCN_WAVEFRONT_SIZE` spelling for gfx1151 or gfx942 (checked with
+// `hipcc -E -dM` in #2065), so it does not protect anything on current
+// toolchains; the explicit width of 32 is what keeps the reduction correct.
+// With a compiler that does define the macro it would fail the hipRTC compile
+// at the first launch on a wave64 device (an error at evaluation, not a
+// fallback) rather than run an untested kernel.
 //
 // The bf16 reads keep the CUDA text's explicit `(float)`, which is required:
 // `hip_bfloat16`, the type MLX substitutes for bfloat16 on ROCm, converts to

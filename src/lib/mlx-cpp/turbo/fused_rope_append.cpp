@@ -471,6 +471,10 @@ std::vector<mlx::core::array> fused_rope_qk_append(
     }
     const int batch = qkv.shape()[0];
     const int seq = qkv.shape()[1];
+    if (batch <= 0 || seq <= 0) {
+        throw std::invalid_argument(
+            "[fused_rope_qk_append] qkv must have a positive batch and window.");
+    }
     const int expected = (num_heads + 2 * num_kv_heads) * head_dim;
     if (qkv.shape()[2] != expected) {
         throw std::invalid_argument(

@@ -1101,7 +1101,11 @@ fn fused_add_rms_norm_eligible(delta: &MlxArray, residual: &MlxArray, weight: &M
     let Some(&trailing) = d_shape.last() else {
         return false;
     };
-    ffi::array_shape(weight)[0] == trailing
+    // An empty input would launch a zero-size grid, and a zero-width row would
+    // divide by zero in the launcher; the graph handles both.
+    trailing > 0
+        && d_shape.iter().all(|&d| d > 0)
+        && ffi::array_shape(weight)[0] == trailing
         && ffi::array_shape(residual) == d_shape
         && ffi::array_dtype(delta) == ffi::array_dtype(residual)
 }
@@ -3602,6 +3606,8 @@ impl FusedQKVLinear {
         let qkv = self.qkv_proj.project_concat(x);
         let qkv_shape = ffi::array_shape(&qkv);
         if qkv_shape.len() != 3
+            || qkv_shape[0] <= 0
+            || qkv_shape[1] <= 0
             || qkv_shape[2] != (self.n_heads + 2 * self.n_kv_heads) * self.head_dim
         {
             return None;

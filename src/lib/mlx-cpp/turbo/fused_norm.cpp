@@ -415,6 +415,10 @@ std::vector<mlx::core::array> fused_add_rms_norm(
             "[fused_add_rms_norm] x must be at least 1-D and weight exactly 1-D.");
     }
     const int dim = x.shape().back();
+    if (dim <= 0 || x.size() == 0) {
+        throw std::invalid_argument(
+            "[fused_add_rms_norm] x must be non-empty with a positive last dim.");
+    }
     if (weight.shape()[0] != dim) {
         throw std::invalid_argument(
             "[fused_add_rms_norm] weight length must equal the last dim of x.");
