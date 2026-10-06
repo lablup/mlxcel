@@ -43,7 +43,10 @@
 //!   a little slack for the different summation order), the bar the issue sets
 //!   for enabling the kernel by default, and both stay under a bound that
 //!   rounding to the activation dtype alone meets;
-//! * two sorted runs agree bit for bit.
+//! * two sorted runs agree bit for bit;
+//! * for mxfp4 at gpt-oss-20b's `K = 2880`, the sorted call with the kernel
+//!   switched off (the per-row kernel) differs from it somewhere, so the
+//!   gate is known to reach the kernel.
 //!
 //! Shapes: a Mixtral-like layer (8 experts, top 2, `K = 4096`, with an output
 //! width of 516 so the last column block is partial) and a 64-expert layer at
@@ -351,6 +354,9 @@ fn gather_qmm(
     scheme: Scheme,
     sorted: bool,
 ) -> UniquePtr<MlxArray> {
+    // SAFETY: every reference outlives the call; `biases_ptr` borrows `quant`
+    // and is null only for mxfp4, where the bridge documents it as nullable;
+    // a null `lhs_indices` selects the implicit lhs.
     let y = unsafe {
         mlxcel_core::gather_qmm(
             &inp.x,
@@ -427,6 +433,8 @@ fn check_shape(shape: Shape, scheme: Scheme, dt: i32) {
     };
     drop(w);
     let dense = {
+        // SAFETY: as in `gather_qmm`: `biases_ptr` borrows `quant`, and null
+        // (mxfp4) is the bridge's documented no-biases value.
         let d = unsafe {
             mlxcel_core::dequantize(
                 &quant.packed,
@@ -466,6 +474,28 @@ fn check_shape(shape: Shape, scheme: Scheme, dt: i32) {
         let batched = gather_qmm(&format!("{label} sorted"), &inp, &quant, scheme, true);
         let again = gather_qmm(&format!("{label} sorted rerun"), &inp, &quant, scheme, true);
         let unsorted = gather_qmm(&format!("{label} unsorted"), &inp, &quant, scheme, false);
+        if mode == "mxfp4" && k >= 2048 {
+            // The per-row kernel sums each output in another order, so over a
+            // long reduction the sorted call must differ from it somewhere
+            // when the gate sends mxfp4 to the expert-batched kernel; equal
+            // bytes mean it did not. At K = 512 the f32 sums can round to the
+            // same bf16 values everywhere (measured), so the narrow shape
+            // skips this check.
+            force_expert_batched(false);
+            let per_row = gather_qmm(
+                &format!("{label} sorted, kernel off"),
+                &inp,
+                &quant,
+                scheme,
+                true,
+            );
+            force_expert_batched(true);
+            assert!(
+                mlxcel_core::array_to_raw_bytes(&batched)
+                    != mlxcel_core::array_to_raw_bytes(&per_row),
+                "{label}: the sorted call did not reach the expert-batched kernel"
+            );
+        }
         assert_eq!(
             mlxcel_core::array_shape(&batched),
             inp.out_shape,
