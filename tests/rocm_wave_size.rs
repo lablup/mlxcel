@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! The wavefront width the ROCm port tables are checked against, on the real
-//! device (issue #2147, `patches-rocm/LOCAL_FIXES.md` item 31).
+//! device (issue #2147, `patches-rocm/LOCAL_FIXES.md` item 32).
 //!
 //! Every shuffle-based HIP port is held to 32-lane devices, because its
 //! `#error` guard on `__AMDGCN_WAVEFRONT_SIZE` is inert with AMD clang 23. The
