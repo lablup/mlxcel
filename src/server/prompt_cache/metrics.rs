@@ -59,7 +59,10 @@ pub enum PromptCacheRejectReason {
     /// capturable state).
     EmptySet,
     /// A pool-level operation failed: paged clone, dense truncate, paged
-    /// trim, snapshot restore, or the final `adopt`/`adopt_paged` call.
+    /// trim, snapshot restore, or the final `adopt`/`adopt_paged` call. Also
+    /// recorded when a snapshot hit covers the whole prompt and the model
+    /// refuses to truncate it by the one token prefill must re-run (#1760),
+    /// so the request falls back to a cold prefill.
     LayoutConstraints,
     /// The paged pool's block-size floor pushed the adoptable/donatable
     /// length below `min_prefix_tokens`.

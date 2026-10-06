@@ -58,7 +58,7 @@ fn put(weights: &mut WeightMap, key: &str, shape: &[i32], value: f32) {
     weights.insert(key.to_string(), tensor(shape, value));
 }
 
-fn tiny_gemma3_args() -> Gemma3ModelArgs {
+pub(super) fn tiny_gemma3_args() -> Gemma3ModelArgs {
     Gemma3ModelArgs {
         model_type: "gemma3_text".to_string(),
         hidden_size: HIDDEN as usize,
@@ -80,7 +80,7 @@ fn tiny_gemma3_args() -> Gemma3ModelArgs {
     }
 }
 
-fn tiny_gemma3_weights() -> WeightMap {
+pub(super) fn tiny_gemma3_weights() -> WeightMap {
     let mut w: WeightMap = WeightMap::new();
     put(&mut w, "model.embed_tokens.weight", &[VOCAB, HIDDEN], 0.05);
     put(
@@ -150,13 +150,13 @@ fn tiny_gemma3_weights() -> WeightMap {
     w
 }
 
-fn tiny_gemma3() -> Gemma3Wrapper {
+pub(super) fn tiny_gemma3() -> Gemma3Wrapper {
     let args = tiny_gemma3_args();
     let weights = tiny_gemma3_weights();
     Gemma3Wrapper::new(Gemma3Model::from_weights(&weights, &args).expect("tiny gemma3 loads"))
 }
 
-fn test_store() -> Arc<PromptCacheStore> {
+pub(super) fn test_store() -> Arc<PromptCacheStore> {
     Arc::new(PromptCacheStore::with_config(PromptCacheConfig::new(
         true,
         1 << 20,
@@ -168,10 +168,19 @@ fn test_store() -> Arc<PromptCacheStore> {
 
 /// A scheduler shaped like the default server: batching on, paged decode
 /// storage, prompt cache installed.
-fn scheduler(store: Arc<PromptCacheStore>) -> BatchScheduler {
+pub(super) fn scheduler(store: Arc<PromptCacheStore>) -> BatchScheduler {
+    scheduler_with_model(tiny_gemma3(), store)
+}
+
+/// [`scheduler`] around a caller-built Gemma 3 (for example one whose only
+/// layer is a sliding one).
+pub(super) fn scheduler_with_model(
+    model: Gemma3Wrapper,
+    store: Arc<PromptCacheStore>,
+) -> BatchScheduler {
     let (_tx, rx) = mpsc::channel();
     let sched = BatchScheduler::with_config(
-        LoadedModel::Gemma3(tiny_gemma3()),
+        LoadedModel::Gemma3(model),
         MlxcelTokenizer::stub(),
         vec![EOS_ID],
         rx,
@@ -190,7 +199,7 @@ fn scheduler(store: Arc<PromptCacheStore>) -> BatchScheduler {
     sched
 }
 
-fn cache_ctx() -> PromptCacheRequestContext {
+pub(super) fn cache_ctx() -> PromptCacheRequestContext {
     PromptCacheRequestContext {
         model_id: "tiny-gemma3".to_string(),
         lora_id: None,
@@ -202,7 +211,7 @@ fn cache_ctx() -> PromptCacheRequestContext {
     }
 }
 
-fn options() -> ServerGenerateOptions {
+pub(super) fn options() -> ServerGenerateOptions {
     ServerGenerateOptions {
         n_indent: 0,
         t_max_predict_ms: None,
@@ -230,7 +239,10 @@ fn options() -> ServerGenerateOptions {
     }
 }
 
-fn enqueue(sched: &mut BatchScheduler, prompt_tokens: Vec<i32>) -> mpsc::Receiver<GenerateEvent> {
+pub(super) fn enqueue(
+    sched: &mut BatchScheduler,
+    prompt_tokens: Vec<i32>,
+) -> mpsc::Receiver<GenerateEvent> {
     let (tx, rx) = mpsc::channel();
     sched.enqueue_request(
         "prompt".to_string(),
@@ -246,7 +258,10 @@ fn enqueue(sched: &mut BatchScheduler, prompt_tokens: Vec<i32>) -> mpsc::Receive
     rx
 }
 
-fn run_to_completion(sched: &mut BatchScheduler, rx: &mpsc::Receiver<GenerateEvent>) {
+pub(super) fn run_to_completion(
+    sched: &mut BatchScheduler,
+    rx: &mpsc::Receiver<GenerateEvent>,
+) -> crate::server::model_provider::GenerationResult {
     for _ in 0..8 {
         match sched.decide_action() {
             BatchSchedulerAction::Prefill(id) => sched.execute_prefill(id),
@@ -263,7 +278,7 @@ fn run_to_completion(sched: &mut BatchScheduler, rx: &mpsc::Receiver<GenerateEve
             Ok(GenerateEvent::Token(_, _))
             | Ok(GenerateEvent::TokenWithLogprobs(_, _, _))
             | Ok(GenerateEvent::Prefill(_)) => {}
-            Ok(GenerateEvent::Done(_)) => return,
+            Ok(GenerateEvent::Done(result)) => return result,
             Ok(GenerateEvent::Error(err)) => panic!("unexpected generation error: {err}"),
             Err(err) => panic!("generation did not finish: {err}"),
         }
@@ -271,7 +286,7 @@ fn run_to_completion(sched: &mut BatchScheduler, rx: &mpsc::Receiver<GenerateEve
 }
 
 /// Tokens the tiny model can actually embed (`vocab_size == 8`).
-fn prompt(n: usize) -> Vec<i32> {
+pub(super) fn prompt(n: usize) -> Vec<i32> {
     (0..n).map(|i| (i % 6) as i32).collect()
 }
 

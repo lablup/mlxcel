@@ -494,16 +494,22 @@ impl BatchScheduler {
             self.prompt_cache_seq_ctx.insert(seq_id, ctx);
         }
 
-        // Guard against a degenerate cache hit where the adopted prefix
-        // covers the entire tokenized prompt. This can legitimately happen
-        // when a client replays an identical prompt. Back off one token so
-        // the prefill path still runs and the sampler sees fresh logits.
+        // A cache hit never adopts the whole prompt: `try_adopt_cached_prefix`
+        // stops one token short (`whole_prompt_reuse_cap`, #1760) so the
+        // prefill's forward over the last prompt token lands on a cache that
+        // does not already hold it. Backing the prefill cursor off here
+        // instead, as this guard used to, left the restored cache holding all
+        // `len` tokens and then appended the last one a second time. The
+        // guard stays as a backstop for the sampler (prefill must forward at
+        // least one token), and a hit reaching it is a broken invariant.
         let prefill_start_offset =
             if prefill_start_offset >= prompt_tokens.len() && !prompt_tokens.is_empty() {
-                tracing::debug!(
+                tracing::warn!(
                     seq_id = %seq_id,
-                    "prompt-cache hit covered the entire prompt; re-running the \
-                     last token through prefill to produce a sampling logit"
+                    adopted = prefill_start_offset,
+                    prompt_len = prompt_tokens.len(),
+                    "prompt-cache adopt covered the entire prompt, which the reuse cap \
+                     should prevent; re-running the last token on top of the adopted cache"
                 );
                 prompt_tokens.len() - 1
             } else {
