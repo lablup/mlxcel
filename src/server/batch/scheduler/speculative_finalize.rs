@@ -221,6 +221,7 @@ impl BatchScheduler {
                 prefill_chunk_size: self.prefill_chunk_size,
                 // Classic-step probes are a B=1 profiling concern (#736).
                 profile_probe_rounds: 0,
+                prefill_boundary: None,
             };
             match crate::server::batch::speculative_burst::try_run_burst_batched(ctx, window) {
                 Ok(crate::server::batch::speculative_burst::BatchedBurstFinalized { rows }) => {
@@ -321,6 +322,9 @@ impl BatchScheduler {
                 return self.start_mtp_slice_b1(seq);
             }
 
+            // Classic prefill splits a chat prompt at its history boundary;
+            // the row-wise Gemma 4 prefill mirrors that partition (#2160).
+            let prefill_boundary = self.history_boundary_split(&seq);
             let ctx = crate::server::batch::speculative_burst::BurstContext {
                 model: &self.model,
                 tokenizer: &self.tokenizer,
@@ -336,6 +340,7 @@ impl BatchScheduler {
                     .as_ref()
                     .map(|p| p.profile_probe_rounds())
                     .unwrap_or(0),
+                prefill_boundary,
             };
             match crate::server::batch::speculative_burst::try_run_burst_b1(ctx, seq) {
                 Ok(finalized) => {

@@ -236,6 +236,9 @@ impl BatchScheduler {
             .unwrap_or(0);
         let model_eos = self.model.eos_token_ids();
 
+        // Classic prefill splits a chat prompt at its history boundary; the
+        // row-wise Gemma 4 prefill mirrors that partition (#2160).
+        let prefill_boundary = self.history_boundary_split(&seq);
         // Slice 0: prefill + seed + first bonus, streamed immediately.
         let started = match &self.model {
             LoadedModel::Gemma4(wrapper) => {
@@ -245,7 +248,8 @@ impl BatchScheduler {
                     block_size,
                 )
                 .with_prefill_start_offset(prefill_start_offset)
-                .with_prefill_chunk_size(self.prefill_chunk_size);
+                .with_prefill_chunk_size(self.prefill_chunk_size)
+                .with_prefill_boundary(prefill_boundary);
                 Ok(
                     crate::server::batch::speculative_slice::begin_slice_session(
                         adapter,
@@ -267,7 +271,8 @@ impl BatchScheduler {
                     block_size,
                 )
                 .with_prefill_start_offset(prefill_start_offset)
-                .with_prefill_chunk_size(self.prefill_chunk_size);
+                .with_prefill_chunk_size(self.prefill_chunk_size)
+                .with_prefill_boundary(prefill_boundary);
                 Ok(
                     crate::server::batch::speculative_slice::begin_slice_session(
                         adapter,
@@ -289,7 +294,8 @@ impl BatchScheduler {
                     block_size,
                 )
                 .with_prefill_start_offset(prefill_start_offset)
-                .with_prefill_chunk_size(self.prefill_chunk_size);
+                .with_prefill_chunk_size(self.prefill_chunk_size)
+                .with_prefill_boundary(prefill_boundary);
                 Ok(
                     crate::server::batch::speculative_slice::begin_slice_session(
                         adapter,

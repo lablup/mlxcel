@@ -1199,6 +1199,34 @@ impl BatchScheduler {
         Ok(())
     }
 
+    /// The history boundary [`Self::capture_history_boundary_snapshot`] would
+    /// split `seq`'s prefill at, read without consuming it.
+    ///
+    /// A speculative burst bypasses the classic prefill, so it never runs that
+    /// capture. Gemma 4's row-wise MTP prefill splits its own forwards at the
+    /// returned boundary instead, which keeps its prompt KV built from the same
+    /// partition as the classic decode it must match byte for byte (#2160).
+    /// Same gates as the capture, in the same order; keep the two in step.
+    ///
+    /// Used by: `start_mtp_slice_b1`, the B=1 MTP burst.
+    pub(super) fn history_boundary_split(&self, seq: &SequenceInfo) -> Option<usize> {
+        if !self.model.supports_snapshot_reuse()
+            || !self.prompt_cache_active()
+            || seq.vlm_embeddings.is_some()
+        {
+            return None;
+        }
+        let tokens = self
+            .prompt_cache_seq_ctx
+            .get(&seq.seq_id)?
+            .history_prefix_tokens
+            .as_ref()?;
+        let boundary = tokens.len();
+        (boundary_capture_applies(boundary, seq.prefill_start_offset, seq.prompt_tokens.len())
+            && seq.prompt_tokens[..boundary] == tokens[..])
+            .then_some(boundary)
+    }
+
     /// Donate a finished sequence's KV cache back to the store so future
     /// requests sharing a prefix can adopt it.
     ///

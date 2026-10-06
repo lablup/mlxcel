@@ -123,6 +123,7 @@ fn gemma31b_batched_mtp_declines_before_drafter_io_and_preserves_requests() {
         dispatch: &dispatch,
         profile_probe_rounds: 0,
         prefill_chunk_size: 512,
+        prefill_boundary: None,
     };
     let requests = match super::speculative_burst::try_run_burst_batched(ctx, vec![first, second]) {
         Err(requests) => requests,

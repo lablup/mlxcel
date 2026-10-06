@@ -1099,6 +1099,9 @@ pub(crate) struct BurstContext<'a> {
     /// the DFlash and batched burst arms.
     pub(crate) profile_probe_rounds: usize,
     pub(crate) prefill_chunk_size: usize,
+    /// Classic history-boundary prefill split for the B=1 sequence (issue
+    /// #2160); `None` for batched bursts and requests without one.
+    pub(crate) prefill_boundary: Option<usize>,
 }
 
 impl<'a> BurstContext<'a> {
@@ -1115,6 +1118,7 @@ impl<'a> BurstContext<'a> {
             dispatch: self.dispatch,
             profile_probe_rounds: self.profile_probe_rounds,
             prefill_chunk_size: self.prefill_chunk_size,
+            prefill_boundary: self.prefill_boundary,
         }
     }
 }
@@ -1324,7 +1328,8 @@ fn run_mtp_burst(
             let adapter =
                 Gemma4MtpTargetAdapter::new_with_block_size(wrapper, Some(seq.seq_id), block_size)
                     .with_prefill_start_offset(prefill_start_offset)
-                    .with_prefill_chunk_size(ctx.prefill_chunk_size);
+                    .with_prefill_chunk_size(ctx.prefill_chunk_size)
+                    .with_prefill_boundary(ctx.prefill_boundary);
             drive_mtp_generator(
                 adapter,
                 owned_drafter,
@@ -1346,7 +1351,8 @@ fn run_mtp_burst(
                     block_size,
                 )
                 .with_prefill_start_offset(prefill_start_offset)
-                .with_prefill_chunk_size(ctx.prefill_chunk_size);
+                .with_prefill_chunk_size(ctx.prefill_chunk_size)
+                .with_prefill_boundary(ctx.prefill_boundary);
             drive_mtp_generator(
                 adapter,
                 owned_drafter,
@@ -1368,7 +1374,8 @@ fn run_mtp_burst(
                     block_size,
                 )
                 .with_prefill_start_offset(prefill_start_offset)
-                .with_prefill_chunk_size(ctx.prefill_chunk_size);
+                .with_prefill_chunk_size(ctx.prefill_chunk_size)
+                .with_prefill_boundary(ctx.prefill_boundary);
             drive_mtp_generator(
                 adapter,
                 owned_drafter,

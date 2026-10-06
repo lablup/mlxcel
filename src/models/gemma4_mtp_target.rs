@@ -189,6 +189,44 @@ pub struct Gemma4MtpTargetAdapter<'a> {
     prefill_start_offset: usize,
     /// Serving prefill geometry; zero keeps a single prompt forward.
     prefill_chunk_size: usize,
+    /// Chat history boundary the classic scheduler splits its prefill at
+    /// (issue #1143); see [`mtp_prefill_ranges`].
+    prefill_boundary: Option<usize>,
+}
+
+/// Token ranges the row-wise MTP prefill forwards, in order.
+///
+/// Classic serving does not prefill a chat prompt in one forward when the
+/// prompt cache is on: `capture_history_boundary_snapshot` first forwards
+/// `[start..boundary]` as one segment, then the suffix runs in
+/// `prefill_chunk_size` chunks from the boundary. KV built from a different
+/// partition differs in the last bit, so a verify that is byte-exact per
+/// block still drifts from classic decode once a flipped key matters (#2160,
+/// measured on one of three 256-token chat prompts per pair before this).
+/// `chunk_size == 0` means one forward for whatever follows the boundary.
+pub(crate) fn mtp_prefill_ranges(
+    start: usize,
+    len: usize,
+    chunk_size: usize,
+    boundary: Option<usize>,
+) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut cursor = start.min(len);
+    if let Some(boundary) = boundary.filter(|b| *b > cursor && *b < len) {
+        ranges.push(cursor..boundary);
+        cursor = boundary;
+    }
+    let step = if chunk_size == 0 {
+        len.max(1)
+    } else {
+        chunk_size
+    };
+    while cursor < len {
+        let end = (cursor + step).min(len);
+        ranges.push(cursor..end);
+        cursor = end;
+    }
+    ranges
 }
 
 impl<'a> Gemma4MtpTargetAdapter<'a> {
@@ -343,7 +381,17 @@ impl<'a> Gemma4MtpTargetAdapter<'a> {
             rotating_buffer_size: mtp_rotating_buffer_size(block_size),
             prefill_start_offset: 0,
             prefill_chunk_size: mlxcel_core::generate::prefill_chunk_len(),
+            prefill_boundary: None,
         }
+    }
+
+    /// Split the row-wise prefill at the chat history boundary the classic
+    /// scheduler would split at, so both build the prompt KV from the same
+    /// partition. Ignored outside the row-wise (linear singleton) prefill.
+    #[must_use]
+    pub fn with_prefill_boundary(mut self, boundary: Option<usize>) -> Self {
+        self.prefill_boundary = boundary;
+        self
     }
 
     /// Match the scheduler's classic prefill geometry on the corrected 31B
@@ -659,13 +707,19 @@ impl<'a> MtpTarget for Gemma4MtpTargetAdapter<'a> {
         let mut sinks = Gemma4SpeculativeSinks::with_hidden_and_shared_kv();
         let logits = if self.wrapper.mtp_requires_linear_singleton() {
             // Verify parity assumes equal prefix state. M=6449 prefill and
-            // thirteen M<=512 scheduler chunks do not produce identical KV.
-            let chunk_size = if self.prefill_chunk_size == 0 {
-                forward_tokens.len().max(1)
-            } else {
-                self.prefill_chunk_size
-            };
-            let mut chunks = forward_tokens.chunks(chunk_size).peekable();
+            // thirteen M<=512 scheduler chunks do not produce identical KV,
+            // and neither does a chat prompt prefilled without the classic
+            // history-boundary split.
+            let ranges = mtp_prefill_ranges(
+                offset,
+                prompt_tokens.len(),
+                self.prefill_chunk_size,
+                self.prefill_boundary,
+            );
+            let mut chunks = ranges
+                .into_iter()
+                .map(|range| &prompt_tokens[range])
+                .peekable();
             let mut last = None;
             while let Some(chunk) = chunks.next() {
                 let input = mlxcel_core::from_slice_i32(chunk, &[1, chunk.len() as i32]);
@@ -1051,6 +1105,13 @@ impl<'a> Gemma4VLMtpTargetAdapter<'a> {
         self.inner = self.inner.with_prefill_chunk_size(chunk_size);
         self
     }
+
+    /// Forward the classic history-boundary split to the text target.
+    #[must_use]
+    pub fn with_prefill_boundary(mut self, boundary: Option<usize>) -> Self {
+        self.inner = self.inner.with_prefill_boundary(boundary);
+        self
+    }
 }
 
 impl<'a> MtpTarget for Gemma4VLMtpTargetAdapter<'a> {
@@ -1180,6 +1241,13 @@ impl<'a> Gemma4UnifiedMtpTargetAdapter<'a> {
     #[must_use]
     pub fn with_prefill_chunk_size(mut self, chunk_size: usize) -> Self {
         self.inner = self.inner.with_prefill_chunk_size(chunk_size);
+        self
+    }
+
+    /// Forward the classic history-boundary split to the text target.
+    #[must_use]
+    pub fn with_prefill_boundary(mut self, boundary: Option<usize>) -> Self {
+        self.inner = self.inner.with_prefill_boundary(boundary);
         self
     }
 }
