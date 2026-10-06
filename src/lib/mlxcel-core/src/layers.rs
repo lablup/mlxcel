@@ -8464,9 +8464,10 @@ mod tests {
         let full = attention_dispatch(&q, &k, &v, scale, Some(mask.as_ref().unwrap()), softcap);
         let chunked =
             chunked_query_attention(&q, &k, &v, scale, Some(mask.as_ref().unwrap()), softcap, 2);
+        let diff = max_abs_diff(&full, &chunked);
         assert!(
-            max_abs_diff(&full, &chunked) < 1e-5,
-            "softcap GQA chunked SDPA diverged from unchunked"
+            diff < 1e-5,
+            "softcap GQA chunked SDPA diverged from unchunked by {diff}"
         );
     }
 
@@ -8481,9 +8482,10 @@ mod tests {
 
         let full = attention_dispatch(&q, &k, &v, scale, Some(&mask), 0.0);
         let chunked = chunked_query_attention(&q, &k, &v, scale, Some(&mask), 0.0, 2);
+        let diff = max_abs_diff(&full, &chunked);
         assert!(
-            max_abs_diff(&full, &chunked) < 1e-5,
-            "broadcast-mask chunked SDPA diverged from unchunked"
+            diff < 1e-5,
+            "broadcast-mask chunked SDPA diverged from unchunked by {diff}"
         );
     }
 

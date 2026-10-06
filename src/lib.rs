@@ -147,15 +147,17 @@ pub use loading::{
     read_generation_config_defaults, read_model_context_window,
 };
 
-/// Pin f32 GEMMs to full precision for this test process (issue #1259).
+/// Pin f32 GEMMs to full precision for this test process (issues #1065,
+/// #1088, #1259).
 ///
-/// MLX selects its reduced-precision NAX matmul kernel as
-/// `is_nax_available() && (enable_tf32() || dtype != float32)`, and
-/// `MLX_ENABLE_TF32` defaults to 1 in `mlx/utils.h`, so on Apple GPU
-/// generation 17 an f32 GEMM runs at TF32-class precision. The suite's
-/// algorithm-equivalence tests (chunked vs sequential, prefill vs the
-/// single-token chain, absorbed vs decompressed) assert full-f32 agreement
-/// and break under that default, on this hardware only. Shipped numerics
+/// `MLX_ENABLE_TF32` defaults to 1 in `mlx/utils.h`, and MLX then runs an
+/// f32 GEMM at TF32-class precision on CUDA Ampere and later (cuBLAS
+/// `CUBLAS_COMPUTE_32F_FAST_TF32`) and on Apple GPU generation 17 (NAX).
+/// The suite's algorithm-equivalence tests (chunked vs sequential, prefill
+/// vs the single-token chain, absorbed vs decompressed) assert full-f32
+/// agreement and break under that default on both backends; see the
+/// mirror of this pin in `mlxcel-core`'s `lib.rs` and its sentinel test
+/// `tf32_pin_tests`. Shipped numerics
 /// stay on MLX defaults and are covered by the runtime exactness probes
 /// instead. This runs before `main`, before MLX latches the value into its
 /// process-wide static; an explicit operator setting wins.
