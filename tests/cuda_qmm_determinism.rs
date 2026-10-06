@@ -34,6 +34,13 @@
 //! ```
 //!
 //! `MLXCEL_TEST_QMM_MODEL_DIR` overrides the default 4-bit model directory.
+//!
+//! The second test covers issue #2128 on a Qwen3 checkpoint
+//! (`MLXCEL_TEST_QWEN3_MODEL_DIR`): its decode passes 256 KV positions, where
+//! one-row SDPA moves to cuDNN, whose stream-K engine makes Qwen3 temp-0
+//! output differ run to run unless `MLXCEL_SDPA_DETERMINISTIC=1`, which this
+//! binary sets unless the environment already does. The model-free
+//! reproduction is `tests/cuda_sdpa_determinism.rs`.
 
 #![cfg(feature = "cuda")]
 
@@ -44,7 +51,23 @@ use std::path::Path;
 use mlxcel::generate::LanguageModel;
 use mlxcel_core::layers::KVCache;
 
-const DEFAULT_MODEL_DIR: &str = "models/llama-3.2-1b-instruct-4bit";
+const DEFAULT_MODEL_DIR: &str = "models/mlx/llama-3.2-1b-instruct-4bit";
+const DEFAULT_QWEN3_MODEL_DIR: &str = "models/mlx/qwen3-0.6b-4bit";
+
+static DETERMINISTIC_SDPA: std::sync::Once = std::sync::Once::new();
+
+/// Turn on `MLXCEL_SDPA_DETERMINISTIC` (#2128) before any test in this binary
+/// reaches MLX, unless the caller set it explicitly. MLX reads it once.
+fn enable_deterministic_sdpa() {
+    DETERMINISTIC_SDPA.call_once(|| {
+        if std::env::var_os("MLXCEL_SDPA_DETERMINISTIC").is_none() {
+            // SAFETY: every test calls this first, and `Once` makes the others
+            // wait until it returns, so no thread reads the environment while
+            // it is written.
+            unsafe { std::env::set_var("MLXCEL_SDPA_DETERMINISTIC", "1") };
+        }
+    });
+}
 
 /// Byte-level hash of an array's contents after forcing evaluation.
 fn hash_array(arr: &mlxcel_core::UniquePtr<mlxcel_core::MlxArray>) -> u64 {
@@ -58,40 +81,38 @@ fn hash_array(arr: &mlxcel_core::UniquePtr<mlxcel_core::MlxArray>) -> u64 {
 
 /// Repeats an identical prefill + fixed-token decode sequence with fresh KV
 /// caches and asserts that the raw logits of every step are byte-identical
-/// across iterations. The prefill length must be >= 8 so the quantized
-/// matmuls take the qmm_sm80 tile path (M * B < 8 dispatches to qmv, which
-/// was never affected).
-#[test]
-fn temp0_quantized_forward_is_bitwise_deterministic() {
-    let model_dir = std::env::var("MLXCEL_TEST_QMM_MODEL_DIR")
-        .unwrap_or_else(|_| DEFAULT_MODEL_DIR.to_string());
-    if !Path::new(&model_dir).exists() {
-        eprintln!("skipping cuda_qmm_determinism: {model_dir} not present");
+/// across iterations. Skips when the checkpoint is absent.
+fn assert_forward_is_repeatable(
+    model_dir: &str,
+    iters: usize,
+    prefill_len: usize,
+    decode_steps: usize,
+    issue: &str,
+) {
+    enable_deterministic_sdpa();
+    if !Path::new(model_dir).exists() {
+        eprintln!("skipping: {model_dir} not present");
         return;
     }
 
-    const ITERS: usize = 10;
-    const PREFILL_LEN: usize = 64;
-    const DECODE_STEPS: usize = 8;
-
-    let (model, _) = mlxcel::load_model(Path::new(&model_dir)).expect("load model");
+    let (model, _) = mlxcel::load_model(Path::new(model_dir)).expect("load model");
 
     // Fixed, sampling-free input schedule so every iteration performs the
     // identical computation regardless of what the logits contain.
-    let prompt: Vec<i32> = (0..PREFILL_LEN)
+    let prompt: Vec<i32> = (0..prefill_len)
         .map(|i| 100 + (i as i32 * 37) % 900)
         .collect();
 
     let mut reference: Option<Vec<u64>> = None;
-    for iter in 0..ITERS {
+    for iter in 0..iters {
         let mut caches: Vec<KVCache> = model.make_caches();
-        let mut step_hashes = Vec::with_capacity(1 + DECODE_STEPS);
+        let mut step_hashes = Vec::with_capacity(1 + decode_steps);
 
-        let input = mlxcel_core::from_slice_i32(&prompt, &[1, PREFILL_LEN as i32]);
+        let input = mlxcel_core::from_slice_i32(&prompt, &[1, prefill_len as i32]);
         let logits = model.forward(&input, &mut caches, None);
         step_hashes.push(hash_array(&logits));
 
-        for s in 0..DECODE_STEPS {
+        for s in 0..decode_steps {
             let tok = [500 + (s as i32 * 13) % 400];
             let input = mlxcel_core::from_slice_i32(&tok, &[1, 1]);
             let logits = model.forward(&input, &mut caches, None);
@@ -108,11 +129,42 @@ fn temp0_quantized_forward_is_bitwise_deterministic() {
                     .position(|(a, b)| a != b);
                 assert_eq!(
                     &step_hashes, reference,
-                    "iteration {iter} produced different logits than iteration 0 \
-                     (first divergent step: {first_bad:?}, 0 = prefill); \
-                     qmm_sm80 output is non-deterministic (issue #910)"
+                    "{model_dir}: iteration {iter} produced different logits than iteration 0 \
+                     (first divergent step: {first_bad:?}, 0 = prefill; {issue})"
                 );
             }
         }
     }
+}
+
+/// The prefill length must be >= 8 so the quantized matmuls take the qmm_sm80
+/// tile path (M * B < 8 dispatches to qmv, which was never affected).
+#[test]
+fn temp0_quantized_forward_is_bitwise_deterministic() {
+    let model_dir = std::env::var("MLXCEL_TEST_QMM_MODEL_DIR")
+        .unwrap_or_else(|_| DEFAULT_MODEL_DIR.to_string());
+    assert_forward_is_repeatable(
+        &model_dir,
+        10,
+        64,
+        8,
+        "qmm_sm80 output is non-deterministic, issue #910",
+    );
+}
+
+/// Issue #2128: 64 prompt positions plus 400 decode steps take the KV cache
+/// past 256 positions, where one-row SDPA moves to cuDNN by default. Without
+/// `MLXCEL_SDPA_DETERMINISTIC`, Qwen3-1.7B's logits diverged between two
+/// in-process repeats from decode step 225 to 247 in every comparison made.
+#[test]
+fn temp0_qwen3_decode_past_the_cudnn_sdpa_threshold_is_bitwise_deterministic() {
+    let model_dir = std::env::var("MLXCEL_TEST_QWEN3_MODEL_DIR")
+        .unwrap_or_else(|_| DEFAULT_QWEN3_MODEL_DIR.to_string());
+    assert_forward_is_repeatable(
+        &model_dir,
+        3,
+        64,
+        400,
+        "MLXCEL_SDPA_DETERMINISTIC does not make decode SDPA deterministic, issue #2128",
+    );
 }

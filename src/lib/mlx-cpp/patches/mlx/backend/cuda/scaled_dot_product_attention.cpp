@@ -161,12 +161,33 @@ inline bool is_kv_cache_slice(const array& kv) {
   return T_kv % kv_cache_step == 0;
 }
 
+// mlxcel (#2128): MLXCEL_SDPA_DETERMINISTIC=1 makes SDPA bitwise
+// reproducible at some decode cost. The cuDNN engines the heuristics pick for
+// the one-row decode step (from 256 KV positions) and for some other graphs use
+// stream-K work distribution (knob CUDNN_KNOB_TYPE_STREAM_K, id 38, `_k38=<n>`
+// in the engine tag), which combines partial key reductions in completion
+// order, so the output rounds differently from call to call. cuDNN 9.27 does
+// not mark those engines NONDETERMINISTIC. On GB10 the head_dim 128 decode
+// graph rounded differently in about 1 call in 100, and Qwen3 temp-0 output
+// changed from run to run. Off by default because stream-K is also what keeps a
+// one-row decode fast at long context: barring it on cuDNN cost 0.67x to 0.92x
+// decode at 3K to 16K keys, while `sdpa_vector`, whose KV split reduces in a
+// fixed order, cost 0.87x to 1.00x. So with the switch on, decode takes
+// `sdpa_vector` and every other cuDNN graph bars stream-K engines.
+inline bool sdpa_deterministic() {
+  static bool on = env::get_var("MLXCEL_SDPA_DETERMINISTIC", 0) != 0;
+  return on;
+}
+
 bool use_cudnn_for_decoding(
     const array& q,
     const array& k,
     const array& v,
     bool has_arr_mask) {
   if (q.shape(2) != 1) {
+    return false;
+  }
+  if (sdpa_deterministic()) {
     return false;
   }
   if (has_arr_mask) {
@@ -495,6 +516,31 @@ enum UIDS {
   D_O,
 };
 
+// See sdpa_deterministic(): with the switch on, bar stream-K candidates when a
+// stream-K-off one exists, and build as before when every candidate uses it.
+inline bool engine_uses_stream_k(const std::string& tag) {
+  auto at = tag.find("_k38=");
+  return at != std::string::npos && tag.compare(at, 6, "_k38=0") != 0;
+}
+
+void deselect_stream_k_engines(DnnGraph& graph) {
+  if (!sdpa_deterministic()) {
+    return;
+  }
+  std::vector<std::string> barred;
+  int64_t n = graph.get_execution_plan_count();
+  for (int64_t i = 0; i < n; ++i) {
+    std::string tag;
+    graph.get_plan_name_at_index(i, tag);
+    if (engine_uses_stream_k(tag)) {
+      barred.push_back(tag);
+    }
+  }
+  if (!barred.empty() && static_cast<int64_t>(barred.size()) < n) {
+    graph.deselect_engines(barred);
+  }
+}
+
 DnnGraph build_sdpa_graph(
     cudnnHandle_t handle,
     const array& q,
@@ -542,6 +588,7 @@ DnnGraph build_sdpa_graph(
   CHECK_CUDNN_ERROR(graph.prepare());
   graph.select_behavior_notes(
       {fe::BehaviorNote_t::SUPPORTS_CUDA_GRAPH_NATIVE_API});
+  deselect_stream_k_engines(graph);
   CHECK_CUDNN_ERROR(graph.build());
   return graph;
 }
