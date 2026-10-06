@@ -218,8 +218,12 @@ impl ConversationRef {
 
 /// Typed input item — `type` discriminator. Mirrors the OpenAI
 /// `ResponseInputItem` union covered by Phase 1.
+///
+/// An item without `type` that carries a `role` is an EasyInputMessage and
+/// is read as `message`; any other untyped shape keeps the missing-`type`
+/// error.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(try_from = "serde_json::Value")]
 pub enum ResponseInputItem {
     /// Plain message — content is a string or content-part array.
     Message {
@@ -242,6 +246,67 @@ pub enum ResponseInputItem {
     /// Reasoning trace from a prior turn (rehydrated). Phase 1 records
     /// the text but does not push it through the thinking-token machinery.
     Reasoning { content: Vec<ReasoningContentPart> },
+}
+
+/// Wire form of [`ResponseInputItem`] once `type` is known to be present.
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum TaggedInputItem {
+    Message {
+        role: ResponseInputRole,
+        content: ResponseInputContent,
+        #[serde(default)]
+        name: Option<String>,
+    },
+    FunctionCall {
+        call_id: String,
+        name: String,
+        arguments: String,
+    },
+    FunctionCallOutput {
+        call_id: String,
+        output: ResponseToolOutput,
+    },
+    Reasoning {
+        content: Vec<ReasoningContentPart>,
+    },
+}
+
+impl TryFrom<serde_json::Value> for ResponseInputItem {
+    type Error = serde_json::Error;
+
+    fn try_from(mut value: serde_json::Value) -> Result<Self, Self::Error> {
+        if let serde_json::Value::Object(map) = &mut value
+            && !map.contains_key("type")
+            && map.contains_key("role")
+        {
+            map.insert("type".to_string(), serde_json::json!("message"));
+        }
+        Ok(match serde_json::from_value::<TaggedInputItem>(value)? {
+            TaggedInputItem::Message {
+                role,
+                content,
+                name,
+            } => Self::Message {
+                role,
+                content,
+                name,
+            },
+            TaggedInputItem::FunctionCall {
+                call_id,
+                name,
+                arguments,
+            } => Self::FunctionCall {
+                call_id,
+                name,
+                arguments,
+            },
+            TaggedInputItem::FunctionCallOutput { call_id, output } => {
+                Self::FunctionCallOutput { call_id, output }
+            }
+            TaggedInputItem::Reasoning { content } => Self::Reasoning { content },
+        })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -280,9 +345,9 @@ impl ResponseInputContent {
             ResponseInputContent::Parts(parts) => parts
                 .iter()
                 .filter_map(|p| match p {
-                    ResponseInputPart::InputText { text } | ResponseInputPart::Text { text } => {
-                        Some(text.as_str())
-                    }
+                    ResponseInputPart::InputText { text }
+                    | ResponseInputPart::Text { text }
+                    | ResponseInputPart::OutputText { text } => Some(text.as_str()),
                     _ => None,
                 })
                 .collect::<Vec<_>>()

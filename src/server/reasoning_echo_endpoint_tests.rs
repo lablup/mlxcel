@@ -275,3 +275,28 @@ async fn messages_without_thinking_records_nothing() {
         "{prompt2:?}"
     );
 }
+
+/// Clients replay `response.output` items without a `type` and with
+/// `output_text` parts on the assistant turn; both shapes must be accepted.
+#[tokio::test]
+async fn responses_accepts_untyped_items_and_output_text_parts() {
+    let h = harness();
+    let (prompt, _) = h
+        .post(
+            "/v1/responses",
+            responses_body(
+                false,
+                json!([
+                    {"role": "user", "content": "What is the capital of France?"},
+                    {"role": "assistant", "content": [{"type": "output_text", "text": "Paris."}]},
+                    {"role": "user", "content": "And Germany?"},
+                ]),
+            ),
+            &["Berlin."],
+        )
+        .await;
+    assert!(
+        prompt.contains("<|im_start|>assistant\nParis.<|im_end|>"),
+        "{prompt:?}"
+    );
+}

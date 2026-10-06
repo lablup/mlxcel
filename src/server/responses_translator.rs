@@ -322,9 +322,12 @@ fn lower_tool_output_parts(parts: &[ResponseInputPart]) -> Result<(String, Vec<I
 
     for part in parts {
         match part {
-            ResponseInputPart::InputText { text } | ResponseInputPart::Text { text } => {
+            ResponseInputPart::InputText { text }
+            | ResponseInputPart::Text { text }
+            | ResponseInputPart::OutputText { text } => {
                 lines.push(text.clone());
             }
+            ResponseInputPart::Refusal { refusal } => lines.push(refusal.clone()),
             ResponseInputPart::InputImage { .. } => {
                 let lowered = ContentPart::try_from(part)?;
                 let ContentPart::ImageUrl { image_url } = lowered else {
@@ -415,6 +418,15 @@ fn input_items_to_messages(items: &[ResponseInputItem]) -> Result<Vec<Message>, 
                         (MessageContent::Text(text.clone()), Vec::new())
                     }
                     ResponseInputContent::Parts(parts) => {
+                        if converted_role != Role::Assistant
+                            && let Some(part_type) = parts
+                                .iter()
+                                .find_map(ResponseInputPart::assistant_only_type)
+                        {
+                            return Err(format!(
+                                "input part type '{part_type}' is not supported by this server"
+                            ));
+                        }
                         let (lowered, images) = lower_parts(parts, converted_role != Role::User)?;
                         if converted_role == Role::User {
                             (MessageContent::Parts(lowered), Vec::new())
