@@ -545,6 +545,7 @@ impl BatchScheduler {
             prefill_offset: 0,
             prefill_start_offset,
             already_cached_tokens,
+            eos_terminated: false,
             response_tx,
             cancelled,
             created_at: Instant::now(),

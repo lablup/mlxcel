@@ -170,6 +170,7 @@ fn make_test_sequence() -> (SequenceInfo, mpsc::Receiver<GenerateEvent>) {
         prefill_offset: 0,
         prefill_start_offset: 0,
         already_cached_tokens: 0,
+        eos_terminated: false,
         response_tx: tx,
         cancelled: Arc::new(AtomicBool::new(false)),
         created_at: Instant::now(),

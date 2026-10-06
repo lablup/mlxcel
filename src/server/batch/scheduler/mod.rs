@@ -1028,6 +1028,10 @@ mod scheduler_model_owned_cache_tests;
 #[path = "../scheduler_whole_prompt_hit_tests.rs"]
 mod scheduler_whole_prompt_hit_tests;
 
+#[cfg(test)]
+#[path = "../scheduler_completion_snapshot_tests.rs"]
+mod scheduler_completion_snapshot_tests;
+
 /// Resolve a request's context-retention values against the server policy
 /// (#1472), pure so the arithmetic is unit-testable without a scheduler.
 ///

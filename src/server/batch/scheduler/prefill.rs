@@ -1585,10 +1585,12 @@ impl BatchScheduler {
                 result.generation_time_ms,
             );
             let _ = seq.response_tx.send(GenerateEvent::Done(result));
+            // The first token was sampled here and never forwarded, so the
+            // state holds the prompt only (#1754).
             self.donate_finished_sequence_cache(
                 seq.seq_id,
                 &seq.prompt_tokens,
-                &seq.generated_tokens,
+                seq.generated_in_state(),
                 true,
             );
             self.prompt_cache_seq_ctx.remove(&seq.seq_id);

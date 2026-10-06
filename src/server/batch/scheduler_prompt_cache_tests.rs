@@ -573,6 +573,7 @@ fn sequence_info_fields_transport_cache_hit_metadata() {
         prefill_offset: 0,
         prefill_start_offset: 73,
         already_cached_tokens: 73,
+        eos_terminated: false,
         response_tx: tx,
         cancelled: Arc::new(AtomicBool::new(false)),
         created_at: Instant::now(),

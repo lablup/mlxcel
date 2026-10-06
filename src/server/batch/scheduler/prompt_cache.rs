@@ -1216,6 +1216,13 @@ impl BatchScheduler {
     /// `ModelOwned` sequences carry no detachable cross-request KV; families
     /// that opt into snapshot reuse donate a copied model-owned snapshot, while
     /// the rest are skipped.
+    ///
+    /// `generated_tokens` must be the generated tokens the model state holds,
+    /// which for the classic decode and prefill finishes is
+    /// [`SequenceInfo::generated_in_state`] (#1754). The speculative burst
+    /// arms still pass their whole committed tail: whether a burst's final
+    /// committed token is in the state depends on the drafter's verify
+    /// rollback, which #1754 did not measure.
     pub(super) fn donate_finished_sequence_cache(
         &mut self,
         seq_id: SequenceId,
@@ -1238,9 +1245,17 @@ impl BatchScheduler {
         };
 
         // Tokens stored against both KV entries and recurrent snapshots are
-        // the full prompt + generated tail, so the next turn can restore the
-        // exact previous conversation prefix and prefill only the appended
-        // user turn.
+        // the prompt plus the generated tokens the state actually consumed,
+        // so the next turn can restore the exact previous conversation prefix
+        // and prefill only what follows it. Callers pass
+        // `SequenceInfo::generated_in_state`, not `generated_tokens` (#1754):
+        // decode never forwards the last sampled token, so an entry keyed by
+        // the full tail claims a token its state does not hold, and an
+        // exact-entry restore resumes prefill one position past that state.
+        // The chat routes rarely reach that exact entry, because the next
+        // turn re-renders the assistant reply, but the raw completion routes
+        // and the warm-up extend (which restores the longest stored snapshot
+        // and forwards only the delta after it) do.
         let mut tokens = Vec::with_capacity(prompt_tokens.len() + generated_tokens.len());
         tokens.extend_from_slice(prompt_tokens);
         tokens.extend_from_slice(generated_tokens);

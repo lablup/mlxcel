@@ -348,6 +348,13 @@ pub struct SequenceInfo {
     /// (e.g. chunked prefill continuation math) without affecting the stat.
     pub already_cached_tokens: usize,
 
+    /// Generation ended on a merged EOS token (#1754). The EOS is sampled but
+    /// never pushed to `generated_tokens`, and the step that sampled it had
+    /// already forwarded every pushed token, so the model state holds all of
+    /// them. Every other finish leaves the last pushed token unforwarded; see
+    /// [`SequenceInfo::generated_in_state`].
+    pub eos_terminated: bool,
+
     // -- thinking-token budget --
     /// Per-sequence thinking-budget state. Drives forced `</think>` injection
     /// when the in-block token count reaches the configured cap. Set to
@@ -387,6 +394,27 @@ pub struct SequenceInfo {
 }
 
 impl SequenceInfo {
+    /// The generated tokens whose K/V (or recurrent state) the model actually
+    /// holds once the sequence has finished (#1754).
+    ///
+    /// Decode forwards `generated_tokens.last()` on the step after it was
+    /// sampled, so the most recently pushed token is never in the state when
+    /// generation stops on the length budget, a stop string, a structured
+    /// stop, the repetition guard, a cancellation, or inside prefill. The one
+    /// exception is a merged-EOS stop ([`Self::eos_terminated`]): the EOS is
+    /// not pushed, so the last pushed token was forwarded by the step that
+    /// sampled the EOS. A prompt-cache donation must store exactly this
+    /// prefix, or an exact-entry restore resumes prefill one position past the
+    /// state it installed.
+    pub(crate) fn generated_in_state(&self) -> &[i32] {
+        if self.eos_terminated {
+            &self.generated_tokens
+        } else {
+            let held = self.generated_tokens.len().saturating_sub(1);
+            &self.generated_tokens[..held]
+        }
+    }
+
     /// Convenience: returns the number of generated tokens so far.
     pub fn completion_count(&self) -> usize {
         self.generated_tokens.len()

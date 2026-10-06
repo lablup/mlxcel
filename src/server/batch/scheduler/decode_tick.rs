@@ -368,6 +368,21 @@ impl BatchScheduler {
         if self.lookahead_force_sync {
             return None;
         }
+        // Model-owned families (SSM / hybrid / mixed-cache) carry no KV tail
+        // that `apply_lookahead_trim` can unwind, so they stay synchronous.
+        // Key that on the model's NATURAL backend, not the allocated one
+        // (#1754, the #1346 lesson). Under the paged decode override a
+        // model-owned family (Gemma 3, AFMoE, Llama 4) is allocated on
+        // `PagedKvCache` for shadow accounting, with an empty cache vector,
+        // so the per-sequence backend check below let it pipeline while the
+        // teardown trim reached none of its real state. Every teardown then
+        // left the speculative append in the model's own caches: a
+        // prompt-cache snapshot held one or two tokens more than it claimed,
+        // and a teardown mid-generation (an admission or a preemption)
+        // re-forwarded the same token on the sync path.
+        if self.model.sequence_state_layout().backend == SequenceStateBackend::ModelOwned {
+            return None;
+        }
         // Speculative decoding drives its own decode loop.
         if self.should_dispatch_speculative() {
             return None;
@@ -1015,6 +1030,7 @@ impl BatchScheduler {
                 {
                     tracing::error!("State transition error: {err}");
                 }
+                seq.eos_terminated = true;
                 continue;
             }
 
@@ -1216,6 +1232,7 @@ impl BatchScheduler {
                 {
                     tracing::error!("State transition error: {err}");
                 }
+                seq.eos_terminated = true;
                 continue;
             }
 
@@ -1529,6 +1546,7 @@ impl BatchScheduler {
             {
                 tracing::error!("State transition error: {err}");
             }
+            seq.eos_terminated = true;
             return;
         }
 
@@ -1759,10 +1777,13 @@ impl BatchScheduler {
                             | FinishReason::Cancelled,
                     )
                 );
+                // Only the generated tokens the model state actually holds
+                // (#1754): every finish but a merged-EOS stop leaves the last
+                // pushed token unforwarded.
                 self.donate_finished_sequence_cache(
                     id,
                     &seq.prompt_tokens,
-                    &seq.generated_tokens,
+                    seq.generated_in_state(),
                     healthy,
                 );
                 // `donate_finished_sequence_cache` already removed the
