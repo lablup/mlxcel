@@ -1,0 +1,29 @@
+stage	pair	MLXCEL_QMV_MULTIROW	MLXCEL_SDPA_VECTOR_LARGE_D	extra_env	verdict	bytes_differing	first_divergence
+base	12b	0	0		fail	269030	layer 0 (sliding_attention) MLP output at position 0
+base	12b	0	unset		fail	299412	layer 0 (sliding_attention) attention output at position 0
+base	12b	unset	0		fail	269030	layer 0 (sliding_attention) MLP output at position 0
+base	12b	unset	unset		fail	299412	layer 0 (sliding_attention) attention output at position 0
+base	31b	0	0		fail	226703	layer 56 (sliding_attention) attention output at position 3
+base	31b	0	unset		fail	243000	layer 6 (sliding_attention) attention output at position 2
+base	31b	unset	0		fail	226703	layer 56 (sliding_attention) attention output at position 3
+base	31b	unset	unset		fail	243000	layer 6 (sliding_attention) attention output at position 2
+baseqg	12b	0	0	MLXCEL_COMPILED_QGELU_MLP=0	fail	286146	layer 5 (full_attention) attention output at position 0
+baseqg	12b	0	unset	MLXCEL_COMPILED_QGELU_MLP=0	fail	272392	layer 0 (sliding_attention) attention output at position 0
+baseqg	12b	unset	0	MLXCEL_COMPILED_QGELU_MLP=0	fail	286146	layer 5 (full_attention) attention output at position 0
+baseqg	12b	unset	unset	MLXCEL_COMPILED_QGELU_MLP=0	fail	272392	layer 0 (sliding_attention) attention output at position 0
+v1	12b	0	0		pass		
+v1	12b	0	unset		fail	219979	layer 44 (sliding_attention) attention output at position 3
+v1	12b	unset	0		pass		
+v1	12b	unset	unset		fail	219979	layer 44 (sliding_attention) attention output at position 3
+v1	31b	0	0		fail	226703	layer 56 (sliding_attention) attention output at position 3
+v1	31b	0	unset		fail	243000	layer 6 (sliding_attention) attention output at position 2
+v1	31b	unset	0		fail	226703	layer 56 (sliding_attention) attention output at position 3
+v1	31b	unset	unset		fail	243000	layer 6 (sliding_attention) attention output at position 2
+final	12b	0	0		pass (draws 8,8,8,1056)		
+final	12b	0	unset		pass (draws 8,8,8,1056)		
+final	12b	unset	0		pass (draws 8,8,8,1056)		
+final	12b	unset	unset		pass (draws 8,8,8,1056)		
+final	31b	0	0		pass (draws 8,8,8,1056)		
+final	31b	0	unset		pass (draws 8,8,8,1056)		
+final	31b	unset	0		pass (draws 8,8,8,1056)		
+final	31b	unset	unset		pass (draws 8,8,8,1056)		

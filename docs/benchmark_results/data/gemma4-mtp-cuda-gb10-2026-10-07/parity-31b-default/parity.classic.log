@@ -1,0 +1,43 @@
+2026-10-06T18:26:57.362783Z  WARN mlxcel::server::startup: CORS is set to allow all origins ('*') and no API key is set; this can be a security risk (cross-origin attacks). Set --api-key, or narrow --cors-origins / --allowed-origins
+2026-10-06T18:26:57.362829Z  INFO mlxcel::server::startup: effective KV cache mode kv_cache_mode=fp16 kv_bits=0
+2026-10-06T18:26:57.363915Z  INFO mlxcel::loading: Gemma 4 detected: disabling CUDA graph capture (MLX_USE_CUDA_GRAPHS=0) to avoid the decode-path graph hazard from issue #688. Set MLX_USE_CUDA_GRAPHS explicitly to override.
+2026-10-06T18:26:57.364866Z  INFO mlxcel::server::startup: resolved context and batch geometry (0 = the checkpoint's own trained context) ctx_size=0 ctx_size_per_slot=0 context_slots=1 kv_unified=false n_parallel=1 prefill_chunk_size=512 max_kv_size=None
+2026-10-06T18:26:57.364961Z  INFO mlxcel::server::startup: Runtime device: NVIDIA GPU (CUDA)
+2026-10-06T18:26:57.364965Z  INFO mlxcel::server::startup: CUDA graph-cache LRU capacity: MLX_CUDA_GRAPH_CACHE_SIZE=2000 (mlxcel raises MLX's default of 400 to 2000 so long-lived, shape-diverse decode does not hit the cache-thrashing abort from issue #818, unless an operator override is set)
+2026-10-06T18:26:57.364967Z  INFO mlxcel::server::startup: Wired memory limit: 121.7 GB
+2026-10-06T18:26:57.989013Z  INFO mlxcel::tokenizer: tokenizer.json lacks the Gemma BOS post-processor; installed the standard `<bos> $A` TemplateProcessing (issue #686) model_path=/home/inureyes/models/mlx/gemma-4-31b-it-4bit bos_token="<bos>" bos_id=2
+2026-10-06T18:26:57.989043Z  INFO mlxcel::server::startup: DRY sequence breakers active (b10621 semantics: breaker token data derived from the vocabulary per request) breakers=["\n", ":", "\"", "*"]
+2026-10-06T18:26:57.989868Z  INFO mlxcel::server::startup: Applied model-aware prompt-cache snapshot capacity default previous_snapshot_capacity_bytes=536870912 recommended_snapshot_capacity_bytes=25041615346 representative_snapshot_bytes=7381975040 representative_tokens=8192 target_entries=6 kv_bytes_at_representative_tokens=7381975040 fixed_state_bytes=0 available_ceiling_bytes=25041615346 architecture=sliding-window: 50 layer(s) capped at 1024 tokens, 10 global
+2026-10-06T18:26:57.990392Z  INFO mlxcel::server::startup: Prompt-prefix cache store enabled (+ APC, snapshots) capacity_bytes=2147483648 max_entries=1024 ttl_seconds=3600 snapshot_capacity_bytes=25041615346 snapshot_max_entries=4096 snapshot_ttl_seconds=7200 min_prefix_tokens=32 apc_enabled=true apc_block_size=16 apc_hash=sha256
+2026-10-06T18:26:58.645466Z  INFO mlxcel::tokenizer: tokenizer.json lacks the Gemma BOS post-processor; installed the standard `<bos> $A` TemplateProcessing (issue #686) model_path=/home/inureyes/models/mlx/gemma-4-31b-it-4bit bos_token="<bos>" bos_id=2
+2026-10-06T18:26:58.646605Z  INFO mlxcel::server::startup: Warming up model...
+2026-10-06T18:26:58.646637Z  INFO mlxcel::server::model_provider::model_worker: Model worker thread starting, loading model...
+2026-10-06T18:27:06.108131Z  INFO mlxcel::tokenizer: tokenizer.json lacks the Gemma BOS post-processor; installed the standard `<bos> $A` TemplateProcessing (issue #686) model_path=/home/inureyes/models/mlx/gemma-4-31b-it-4bit bos_token="<bos>" bos_id=2
+2026-10-06T18:27:06.108175Z  INFO mlxcel::server::model_provider::model_worker: Model gemma-4-31b-it-4bit loaded in 7.462s (resident after load: 17.15 GB) worker_model_id=gemma-4-31b-it-4bit load_seconds=7.461516307 active_bytes=18417268704 peak_bytes=18417276896 cache_bytes=8192 limit_bytes=124128081510
+2026-10-06T18:27:06.108196Z  INFO mlxcel::server::model_provider::model_worker: EOS tokens from config: [1, 106, 50]
+2026-10-06T18:27:06.108208Z  INFO mlxcel::server::model_provider::model_worker: Starting BatchScheduler (max_batch_size=1, max_queue_depth=32, prefill_chunk_size=512, max_batch_prefill=4, decode_storage=auto)
+2026-10-06T18:27:06.108951Z  INFO mlxcel::server::model_provider::model_worker: Paged KV block budget: 1944775 blocks (60 layers, 32-token blocks)
+2026-10-06T18:27:06.109020Z  INFO mlxcel::server::model_provider::model_worker: Paged KV slab size: 256 blocks per layer (fused decode serves a layer only while its rows fit one slab)
+2026-10-06T18:27:06.109069Z  INFO mlxcel::server::batch::scheduler::paged_layout: resolved KV cache mode applied to model caches kv_cache_mode_effective=fp16 kv_cache_mode_applied_layers=60 kv_cache_mode_total_layers=60
+2026-10-06T18:27:06.110563Z  INFO prefill{seq_id=seq-0 prompt_len=2 cached=0 start=0}: mlxcel_core::sampling_dispatch: sampling dispatch: argmax: greedy path (temperature 0, top_k 1); no sampling kernel involved
+2026-10-06T18:27:06.626793Z  INFO prefill{seq_id=seq-0 prompt_len=2 cached=0 start=0}: mlxcel::server::batch::scheduler::prefill: prompt-cache: request completed during prefill: cached=0/2 prompt tokens, total 517ms prompt_tokens=2 cached_tokens=0 generation_time_ms=517
+2026-10-06T18:27:06.626833Z  INFO mlxcel::server::startup: Warmup complete
+2026-10-06T18:27:06.627547Z  INFO mlxcel::server::startup: model_type=Gemma4VLM: enabling native video_url content block support
+2026-10-06T18:27:06.628708Z  WARN mlxcel::server::startup: The loaded model accepts video input, but `ffmpeg` and `ffprobe` are not both on PATH, so every video request will be refused. The check is cached for the life of the process: restart the server after installing ffmpeg.
+2026-10-06T18:27:06.630577Z  INFO mlxcel::server::startup: Starting mlxcel server on http://127.0.0.1:18961
+2026-10-06T18:27:06.630594Z  INFO mlxcel::server::startup: Detected 1 GPU(s)
+2026-10-06T18:27:06.630597Z  INFO mlxcel::server::startup: CUDA compute capability 12.1 (sm_121); compiled for [121] (cubin)
+2026-10-06T18:27:06.630599Z  INFO mlxcel::server::startup: Endpoints:
+2026-10-06T18:27:06.630600Z  INFO mlxcel::server::startup:   POST /v1/chat/completions  - OpenAI chat completions
+2026-10-06T18:27:06.630601Z  INFO mlxcel::server::startup:   POST /v1/completions       - OpenAI text completions
+2026-10-06T18:27:06.630603Z  INFO mlxcel::server::startup:   GET  /v1/models            - List models
+2026-10-06T18:27:06.630604Z  INFO mlxcel::server::startup:   POST /completion           - llama-server native completion
+2026-10-06T18:27:06.630605Z  INFO mlxcel::server::startup:   POST /tokenize             - Tokenize text
+2026-10-06T18:27:06.630607Z  INFO mlxcel::server::startup:   POST /detokenize           - Detokenize tokens
+2026-10-06T18:27:06.630608Z  INFO mlxcel::server::startup:   GET  /props                - Server properties
+2026-10-06T18:27:06.630610Z  INFO mlxcel::server::startup:   GET  /slots                - Slot status
+2026-10-06T18:27:06.630611Z  INFO mlxcel::server::startup:   GET  /health               - Health check
+2026-10-06T18:27:07.089063Z  INFO mlxcel::server::chat_request: prompt cache on + preserve_thinking unset: defaulting preserve_thinking=true for prefix stability (override via chat_template_kwargs.preserve_thinking=false) session=__mlxcel_anon__
+2026-10-06T18:27:38.146307Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/31 prompt tokens, total 31056ms prompt_tokens=31 cached_tokens=0 generation_time_ms=31056
+2026-10-06T18:28:09.307539Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/35 prompt tokens, total 31157ms prompt_tokens=35 cached_tokens=0 generation_time_ms=31157
+2026-10-06T18:28:41.106708Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/40 prompt tokens, total 31795ms prompt_tokens=40 cached_tokens=0 generation_time_ms=31795
