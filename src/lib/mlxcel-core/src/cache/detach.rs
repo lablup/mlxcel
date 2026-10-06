@@ -703,6 +703,7 @@ impl RotatingKVCache {
     ///
     /// Used by: sliding-window prompt prefix cache detach/adopt (B9; dense counterpart is [`KVCache::clone_handle`]).
     pub fn clone_handle(&mut self) -> DetachedRotatingKVCache {
+        self.clear_decode_undo();
         let handle = DetachedRotatingKVCache {
             keys: self.keys.take(),
             values: self.values.take(),
@@ -742,6 +743,7 @@ impl RotatingKVCache {
         if !self.is_empty() {
             return Err("RotatingKVCache::install_detached: target cache is not empty".into());
         }
+        self.clear_decode_undo();
         self.keys = detached.keys;
         self.values = detached.values;
         self.max_size = detached.max_size;

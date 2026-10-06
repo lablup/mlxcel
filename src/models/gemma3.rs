@@ -33,7 +33,8 @@ use crate::models::model_owned::{
 };
 use crate::models::rope_utils::{RopeScalingSpec, printable_label};
 use mlxcel_core::cache::{
-    CachePool, KVCacheMode, RotatingPagedDecodeMetadata, SequenceId, SequenceStateLayout,
+    CachePool, DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS, KVCacheMode, RotatingPagedDecodeMetadata,
+    SequenceId, SequenceStateLayout, flush_decode_undo_rows,
 };
 use mlxcel_core::generate::{DecodeBatchContext, ModelStateSnapshot};
 use mlxcel_core::layers::{
@@ -936,6 +937,36 @@ impl Cache {
         }
     }
 
+    /// Unwind the last `n` single-token decode appends (issue #2159). A
+    /// global layer's cursor trim is exact (its slots are never reused); a
+    /// sliding layer restores the rows its undo log kept.
+    pub(crate) fn rewind_decode_appends(&mut self, n: i32) -> Result<(), String> {
+        match self {
+            Cache::Standard(cache) => {
+                let offset = cache.offset;
+                let trimmed = cache.trim(n);
+                if trimmed == n {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "global decode rewind of {n}: trimmed {trimmed} (offset was {offset})"
+                    ))
+                }
+            }
+            Cache::Rotating(cache) => cache.rewind_decode_writes(n),
+        }
+    }
+
+    /// Schedule the pending undo-row copies of every sliding layer in
+    /// `caches` (see [`flush_decode_undo_rows`]). No MLX call when nothing is
+    /// pending, which is always the case for a cache without an undo log.
+    pub(crate) fn flush_decode_undo<'a>(caches: impl IntoIterator<Item = &'a mut Cache>) {
+        flush_decode_undo_rows(caches.into_iter().filter_map(|cache| match cache {
+            Cache::Rotating(rotating) => Some(rotating),
+            Cache::Standard(_) => None,
+        }));
+    }
+
     pub(crate) fn as_interface(&mut self) -> &mut dyn CacheInterface {
         match self {
             Cache::Standard(c) => c,
@@ -1518,14 +1549,58 @@ impl Gemma3Wrapper {
         }
     }
 
+    /// Caches for one scheduler sequence. When the decode lookahead can be
+    /// rewound, every sliding layer logs its newest single-token writes deep
+    /// enough for any lookahead teardown (issue #2159).
     fn make_configured_caches(&self) -> Vec<Cache> {
+        let mut caches = self.make_fallback_caches();
+        if self.supports_lookahead_rewind() {
+            for cache in &mut caches {
+                if let Cache::Rotating(rotating) = cache {
+                    rotating.set_decode_undo_depth(DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS);
+                }
+            }
+        }
+        caches
+    }
+
+    /// Caches for the CLI fallback slot, which has no decode lookahead and so
+    /// keeps no undo log.
+    fn make_fallback_caches(&self) -> Vec<Cache> {
         self.model
             .make_caches_with_modes(Some(&self.kv_cache_layer_modes))
     }
 
     pub fn reset_caches(&self) {
         self.sequence_state
-            .replace_internal(self.make_configured_caches());
+            .replace_internal(self.make_fallback_caches());
+    }
+
+    /// Every sliding layer stores plain FP16 K/V, the only storage the
+    /// rotating undo log covers (INT8 and Turbo4Asym keep sidecars).
+    fn supports_lookahead_rewind(&self) -> bool {
+        (0..self.model.layers.len()).all(|layer_idx| {
+            !self.is_sliding_layer(layer_idx)
+                || self.kv_cache_layer_modes.mode_for_layer(layer_idx) == KVCacheMode::Fp16
+        })
+    }
+
+    /// Run `f` on sequence `seq_id`'s caches (or the fallback slot), then
+    /// schedule the undo-row copies the forward it built recorded.
+    fn with_sequence_caches<R>(
+        &self,
+        seq_id: Option<SequenceId>,
+        f: impl FnOnce(&mut [Cache]) -> R,
+    ) -> R {
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.make_configured_caches(),
+            |caches| {
+                let out = f(caches);
+                Cache::flush_decode_undo(caches.iter_mut());
+                out
+            },
+        )
     }
 
     /// Whether layer `layer_idx` is a sliding-window (`Cache::Rotating`) layer.
@@ -1646,6 +1721,31 @@ impl mlxcel_core::generate::LanguageModel for Gemma3Wrapper {
         self.sequence_state
             .with_existing_sequence_state(seq_id, |caches| {
                 Self::rewind_padded_prefill(caches, excess)
+            })?
+    }
+
+    /// Gemma 3 decodes on the scheduler's lookahead pipeline (issue #2159).
+    /// Its global layers are plain `KVCache`s whose trim is exact, and its
+    /// sliding layers log the rows each decode write overwrites, so a
+    /// teardown restores a wrapped window exactly. Declined unless every
+    /// sliding layer is FP16, the only storage the log covers.
+    fn supports_decode_lookahead_rewind(&self) -> bool {
+        self.supports_lookahead_rewind()
+    }
+
+    fn rewind_decode_appends(&self, seq_id: SequenceId, n: i32) -> Result<(), String> {
+        self.sequence_state
+            .with_existing_sequence_state(seq_id, |caches| {
+                caches
+                    .iter_mut()
+                    .enumerate()
+                    .try_for_each(|(layer_idx, cache)| {
+                        cache.rewind_decode_appends(n).map_err(|err| {
+                            format!(
+                                "Gemma 3 decode rewind, sequence {seq_id}, layer {layer_idx}: {err}"
+                            )
+                        })
+                    })
             })?
     }
 
@@ -1795,11 +1895,9 @@ impl mlxcel_core::generate::LanguageModel for Gemma3Wrapper {
         _caches: &mut [mlxcel_core::layers::KVCache],
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        self.sequence_state.with_or_create_sequence_state(
-            seq_id,
-            || self.make_configured_caches(),
-            |sequence_caches| self.model.forward_with_caches(input_ids, sequence_caches),
-        )
+        self.with_sequence_caches(seq_id, |sequence_caches| {
+            self.model.forward_with_caches(input_ids, sequence_caches)
+        })
     }
 
     // The three last-logits entry points mirror `forward`,
@@ -1823,19 +1921,15 @@ impl mlxcel_core::generate::LanguageModel for Gemma3Wrapper {
         _mask: Option<&MlxArray>,
         last_pos: usize,
     ) -> UniquePtr<MlxArray> {
-        self.sequence_state.with_or_create_sequence_state(
-            seq_id,
-            || self.make_configured_caches(),
-            |sequence_caches| {
-                self.model.last_logits_with_caches_and_embeddings(
-                    input_ids,
-                    None,
-                    sequence_caches,
-                    None,
-                    last_pos,
-                )
-            },
-        )
+        self.with_sequence_caches(seq_id, |sequence_caches| {
+            self.model.last_logits_with_caches_and_embeddings(
+                input_ids,
+                None,
+                sequence_caches,
+                None,
+                last_pos,
+            )
+        })
     }
 
     fn forward_last_logits_with_embeddings_and_sequence_id(
@@ -1847,19 +1941,15 @@ impl mlxcel_core::generate::LanguageModel for Gemma3Wrapper {
         mask: Option<&MlxArray>,
         last_pos: usize,
     ) -> UniquePtr<MlxArray> {
-        self.sequence_state.with_or_create_sequence_state(
-            seq_id,
-            || self.make_configured_caches(),
-            |sequence_caches| {
-                self.model.last_logits_with_caches_and_embeddings(
-                    input_ids,
-                    input_embeddings,
-                    sequence_caches,
-                    mask,
-                    last_pos,
-                )
-            },
-        )
+        self.with_sequence_caches(seq_id, |sequence_caches| {
+            self.model.last_logits_with_caches_and_embeddings(
+                input_ids,
+                input_embeddings,
+                sequence_caches,
+                mask,
+                last_pos,
+            )
+        })
     }
 
     fn forward_with_embeddings_and_sequence_id(
@@ -1870,18 +1960,14 @@ impl mlxcel_core::generate::LanguageModel for Gemma3Wrapper {
         _caches: &mut [mlxcel_core::layers::KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        self.sequence_state.with_or_create_sequence_state(
-            seq_id,
-            || self.make_configured_caches(),
-            |sequence_caches| {
-                self.model.forward_with_caches_and_embeddings(
-                    input_ids,
-                    input_embeddings,
-                    sequence_caches,
-                    mask,
-                )
-            },
-        )
+        self.with_sequence_caches(seq_id, |sequence_caches| {
+            self.model.forward_with_caches_and_embeddings(
+                input_ids,
+                input_embeddings,
+                sequence_caches,
+                mask,
+            )
+        })
     }
 
     fn sync_sequence_storage(
@@ -1935,11 +2021,13 @@ impl mlxcel_core::generate::LanguageModel for Gemma3Wrapper {
             .with_batched_sequence_states(
                 seq_ids.expect("gemma3 batched decode requires sequence ids"),
                 |sequence_caches| {
-                    self.model.forward_batched_decode_with_caches(
+                    let logits = self.model.forward_batched_decode_with_caches(
                         input_ids,
                         sequence_caches,
                         context,
-                    )
+                    );
+                    Cache::flush_decode_undo(sequence_caches.iter_mut().flatten());
+                    logits
                 },
             )
             .expect("gemma3 batched decode requires sequence-local cache state")

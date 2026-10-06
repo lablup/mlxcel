@@ -683,6 +683,39 @@ pub trait LanguageModel {
         Ok(())
     }
 
+    /// Whether [`Self::rewind_decode_appends`] can unwind the speculative
+    /// single-token appends of the batch scheduler's decode lookahead from
+    /// this model's own per-sequence state (issue #2159).
+    ///
+    /// The scheduler pipelines decode for a family whose
+    /// [`Self::sequence_state_layout`] is model-owned only when this is
+    /// `true`; every other model-owned family stays on synchronous decode.
+    /// `true` promises that a rewind of up to
+    /// [`crate::cache::DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS`] appends is
+    /// exact for every layer, including a sliding window that has wrapped.
+    ///
+    /// Used by: server batch scheduler `lookahead_params`.
+    fn supports_decode_lookahead_rewind(&self) -> bool {
+        false
+    }
+
+    /// Unwind the last `n` single-token decode appends from the model-owned
+    /// state of scheduler sequence `seq_id`, leaving every layer as it was
+    /// before them (issue #2159).
+    ///
+    /// Called on every decode lookahead teardown for a model that reports
+    /// [`Self::supports_decode_lookahead_rewind`]. `Err` means the state may
+    /// no longer match the sequence's tokens; the scheduler fails the request
+    /// rather than decode or donate from it. The default refuses.
+    ///
+    /// Used by: server batch scheduler `apply_lookahead_trim`.
+    fn rewind_decode_appends(&self, seq_id: SequenceId, n: i32) -> Result<(), String> {
+        Err(format!(
+            "model-owned sequence {seq_id} cannot rewind {n} decode appends: the model does \
+             not implement rewind_decode_appends"
+        ))
+    }
+
     /// Reset model-owned fallback runtime state before a fresh single-row
     /// generation starts.
     ///

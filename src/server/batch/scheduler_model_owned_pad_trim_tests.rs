@@ -49,7 +49,7 @@ const INTERMEDIATE: i32 = 16;
 const HEAD_DIM: i32 = 4;
 const HEADS: i32 = 2;
 const LAYERS: usize = 2;
-const WINDOW: usize = 8;
+pub(super) const WINDOW: usize = 8;
 
 /// Deterministic, non-constant weights so every position's K/V differs.
 fn tensor(shape: &[i32], seed: u32) -> mlxcel_core::UniquePtr<mlxcel_core::MlxArray> {
@@ -64,7 +64,7 @@ fn tensor(shape: &[i32], seed: u32) -> mlxcel_core::UniquePtr<mlxcel_core::MlxAr
     mlxcel_core::from_slice_f32(&values, shape)
 }
 
-fn tiny_gemma3() -> Gemma3Wrapper {
+pub(super) fn tiny_gemma3() -> Gemma3Wrapper {
     let args = Gemma3ModelArgs {
         model_type: "gemma3_text".to_string(),
         hidden_size: HIDDEN as usize,

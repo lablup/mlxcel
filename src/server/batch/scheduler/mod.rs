@@ -816,8 +816,15 @@ fn lookahead_token_finishes(
 /// (admission, preemption, stale id set, cancellation in `finalize_completed`)
 /// unwinds one (step n only). Mirrors the count selection in
 /// [`BatchScheduler::pipelined_steady_decode`] and the `1`-position teardowns.
+///
+/// The two-append maximum is shared with model-owned families, which size the
+/// undo log of their sliding layers from it (#2159).
 fn lookahead_teardown_positions(next_prime_issued: bool) -> usize {
-    if next_prime_issued { 2 } else { 1 }
+    if next_prime_issued {
+        mlxcel_core::cache::DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS
+    } else {
+        1
+    }
 }
 
 /// Pick the preemption victim for `policy` out of a candidate iterator.
@@ -1029,6 +1036,10 @@ mod scheduler_completion_snapshot_tests;
 #[cfg(test)]
 #[path = "../scheduler_model_owned_pad_trim_tests.rs"]
 mod scheduler_model_owned_pad_trim_tests;
+
+#[cfg(test)]
+#[path = "../scheduler_model_owned_lookahead_tests.rs"]
+mod scheduler_model_owned_lookahead_tests;
 
 /// Resolve a request's context-retention values against the server policy
 /// (#1472), pure so the arithmetic is unit-testable without a scheduler.

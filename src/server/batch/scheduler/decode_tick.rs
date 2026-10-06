@@ -320,11 +320,13 @@ impl BatchScheduler {
                 // Stale id set or no longer eligible/safe: no step n+1 prime was
                 // issued, so undo the one speculative KV position and fall back
                 // to a clean sync step.
-                self.apply_lookahead_trim(&la.ids, lookahead_teardown_positions(false));
+                let failed =
+                    self.apply_lookahead_trim(&la.ids, lookahead_teardown_positions(false));
                 drop(la);
-                self.dispatch_sync_decode(seq_ids);
+                let live = Self::without_failed(seq_ids, &failed);
+                self.dispatch_sync_decode(&live);
                 let _decode_budget = mlxcel_core::DecodeCommandBufferBudget::enter();
-                self.maybe_prime_lookahead(seq_ids);
+                self.maybe_prime_lookahead(&live);
             }
             None => {
                 self.dispatch_sync_decode(seq_ids);
@@ -368,19 +370,19 @@ impl BatchScheduler {
         if self.lookahead_force_sync {
             return None;
         }
-        // Model-owned families (SSM / hybrid / mixed-cache) carry no KV tail
-        // that `apply_lookahead_trim` can unwind, so they stay synchronous.
-        // Key that on the model's NATURAL backend, not the allocated one
-        // (#1754, the #1346 lesson). Under the paged decode override a
-        // model-owned family (Gemma 3, AFMoE, Llama 4) is allocated on
-        // `PagedKvCache` for shadow accounting, with an empty cache vector,
-        // so the per-sequence backend check below let it pipeline while the
-        // teardown trim reached none of its real state. Every teardown then
-        // left the speculative append in the model's own caches: a
-        // prompt-cache snapshot held one or two tokens more than it claimed,
-        // and a teardown mid-generation (an admission or a preemption)
-        // re-forwarded the same token on the sync path.
-        if self.model.sequence_state_layout().backend == SequenceStateBackend::ModelOwned {
+        // Model-owned families keep their K/V in the model's own per-sequence
+        // state, which the pool trim in `apply_lookahead_trim` cannot reach.
+        // They pipeline only when the model can rewind that state itself
+        // (#2159, Gemma 3); the rest (SSM / hybrid / mixed-cache, Gemma 4,
+        // Llama 4, ...) stay synchronous. Key that on the model's NATURAL
+        // backend, not the allocated one (#1754, the #1346 lesson): under the
+        // paged decode override a model-owned family is allocated on
+        // `PagedKvCache` for shadow accounting with an empty cache vector, so
+        // an allocated-backend gate let it pipeline while the teardown reached
+        // none of its real state.
+        let model_owned =
+            self.model.sequence_state_layout().backend == SequenceStateBackend::ModelOwned;
+        if model_owned && !self.model.supports_decode_lookahead_rewind() {
             return None;
         }
         // Speculative decoding drives its own decode loop.
@@ -405,14 +407,16 @@ impl BatchScheduler {
             }
             // Dense and pool-backed paged sequences both have a trimmable KV
             // tail (dense via KVCache::trim, paged via the pool rewind API in
-            // apply_lookahead_trim). Model-owned families (SSM / hybrid /
-            // mixed-cache) carry no such tail, so they stay synchronous.
+            // apply_lookahead_trim). A model-owned family that passed the
+            // rewind gate above is allocated `ModelOwned` (no paged override,
+            // e.g. `--parallel 1`) or `PagedKvCache` (shadow accounting), and
+            // its own hook unwinds the state either way.
             match self.cache_pool.get(seq_id) {
                 Some(set)
                     if matches!(
                         set.backend,
                         SequenceStateBackend::DenseKvCache | SequenceStateBackend::PagedKvCache
-                    ) => {}
+                    ) || (model_owned && set.backend == SequenceStateBackend::ModelOwned) => {}
                 _ => return None,
             }
         }
@@ -447,11 +451,25 @@ impl BatchScheduler {
     /// preemption, stale id set, cancellation seen in `finalize_completed`),
     /// `2` for the steady-tick teardown that already issued the step-n+1 prime
     /// (both the step-n and step-n+1 appends).
-    pub(super) fn apply_lookahead_trim(&mut self, ids: &[SequenceId], positions: usize) {
+    ///
+    /// A model-owned family (natural backend) is rewound through
+    /// [`LanguageModel::rewind_decode_appends`], which reaches the model's own
+    /// per-sequence state (#2159). A sequence whose rewind fails is finished
+    /// with an error on the spot, so it is neither decoded nor donated from a
+    /// desynchronized state; its id is returned so a caller about to decode
+    /// the same id set can drop it. Empty on success.
+    pub(super) fn apply_lookahead_trim(
+        &mut self,
+        ids: &[SequenceId],
+        positions: usize,
+    ) -> Vec<SequenceId> {
+        let mut failed = Vec::new();
         if positions == 0 {
-            return;
+            return failed;
         }
         let want = positions as i32;
+        let model_owned =
+            self.model.sequence_state_layout().backend == SequenceStateBackend::ModelOwned;
         for &seq_id in ids {
             if let Some(caches) = self.cache_pool.get_caches_mut(seq_id) {
                 for (layer, cache) in caches.iter_mut().enumerate() {
@@ -471,11 +489,46 @@ impl BatchScheduler {
                         );
                     }
                 }
+                if model_owned && let Err(err) = self.model.rewind_decode_appends(seq_id, want) {
+                    tracing::error!(
+                        seq_id = %seq_id,
+                        positions = want,
+                        error = %err,
+                        "lookahead teardown: model-owned rewind failed, failing the request"
+                    );
+                    self.fail_desynchronized_sequence(seq_id, &err);
+                    failed.push(seq_id);
+                    continue;
+                }
                 // Re-mirror the shorter dense length into any paged bookkeeping
                 // (no-op for a pure dense pool and for pool-backed sequences).
                 self.sync_sequence_storage(seq_id);
             }
         }
+        failed
+    }
+
+    /// Finish `seq_id` with an error because its state no longer matches its
+    /// tokens (#2159). Unlike [`Self::abort_sequence_with_error`] this also
+    /// overrides a finish already recorded this tick (`length`, `stop`), which
+    /// would otherwise donate the desynchronized state to the prompt cache.
+    fn fail_desynchronized_sequence(&mut self, seq_id: SequenceId, err: &str) {
+        let Some(seq) = self.active_batch.get_mut(seq_id) else {
+            return;
+        };
+        let _ = seq.response_tx.send(GenerateEvent::Error(format!(
+            "decode lookahead teardown: {err}"
+        )));
+        seq.state = SequenceState::Finished(FinishReason::Error(err.to_string()));
+    }
+
+    /// `seq_ids` without the ids a failed teardown just finished.
+    fn without_failed(seq_ids: &[SequenceId], failed: &[SequenceId]) -> Vec<SequenceId> {
+        seq_ids
+            .iter()
+            .copied()
+            .filter(|id| !failed.contains(id))
+            .collect()
     }
 
     /// Tear down any live lookahead: trim the speculative KV position from each
@@ -494,7 +547,9 @@ impl BatchScheduler {
             // single generation stream, so the lazy slice the trim enqueues is
             // dependency-ordered after the append. The finishing path's eval
             // is defensive, not required for safety.
-            self.apply_lookahead_trim(&la.ids, lookahead_teardown_positions(false));
+            // A failed model-owned rewind already finished its sequence with
+            // an error; `finalize_completed` releases it.
+            let _ = self.apply_lookahead_trim(&la.ids, lookahead_teardown_positions(false));
         }
     }
 
@@ -555,7 +610,7 @@ impl BatchScheduler {
             // speculative KV position `lookahead_forward` just appended, the
             // same teardown the async-eval failure below performs, and let the
             // caller decode synchronously.
-            self.apply_lookahead_trim(seq_ids, lookahead_teardown_positions(false));
+            let _ = self.apply_lookahead_trim(seq_ids, lookahead_teardown_positions(false));
             return None;
         };
         // Same pre-fused row filters (top-n-sigma, typical_p) as `batched_fused_sample`,
@@ -593,7 +648,7 @@ impl BatchScheduler {
             // `generated_tokens` and the fallback synchronous decode runs on a
             // corrupted cache. Mirrors the one-position teardown the
             // stale/bootstrap fallbacks use.
-            self.apply_lookahead_trim(seq_ids, lookahead_teardown_positions(false));
+            let _ = self.apply_lookahead_trim(seq_ids, lookahead_teardown_positions(false));
             return None;
         }
         Some(DecodeLookahead {
@@ -705,9 +760,11 @@ impl BatchScheduler {
                 );
             }
             let positions = lookahead_teardown_positions(next.is_some());
-            self.apply_lookahead_trim(&la.ids, positions);
+            let failed = self.apply_lookahead_trim(&la.ids, positions);
             drop(next);
             drop(la);
+            let live = Self::without_failed(seq_ids, &failed);
+            let seq_ids = live.as_slice();
             // The sync re-dispatch below re-samples step n's token. fused_sample
             // draws from MLX's global RNG (random::categorical without an
             // explicit key), so at temperature > 0 the re-drawn token can

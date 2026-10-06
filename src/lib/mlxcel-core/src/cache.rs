@@ -76,6 +76,10 @@
 //! compressed-only memory target.
 
 pub mod batch_quant;
+mod decode_undo;
+#[cfg(test)]
+#[path = "cache/decode_undo_tests.rs"]
+mod decode_undo_tests;
 mod detach;
 mod paged;
 #[cfg(test)]
@@ -94,6 +98,7 @@ mod paged_pool_tests;
 #[cfg(test)]
 #[path = "cache/paged_turbo_tests.rs"]
 mod paged_turbo_tests;
+pub use decode_undo::{DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS, flush_decode_undo_rows};
 mod prefill_rewind;
 #[cfg(test)]
 #[path = "cache/prefill_rewind_tests.rs"]
@@ -4373,6 +4378,10 @@ pub struct RotatingKVCache {
     /// overwrites replace a slot that was valid a step ago and a snapshot may
     /// still hold it, so they keep the copying `slice_update`.
     inplace_marker: Option<InplaceWriteMarker>,
+    /// Rows and cursors of the newest single-token writes, for an exact
+    /// rewind after the ring wraps (issue #2159). `None` unless a caller
+    /// opted in through [`Self::set_decode_undo_depth`].
+    decode_undo: Option<decode_undo::DecodeUndoLog>,
 }
 
 /// Scalar state required to restore a [`RotatingKVCache`] snapshot.
@@ -4492,6 +4501,7 @@ impl RotatingKVCache {
             turbo_params: None,
             turbo_seed,
             inplace_marker: None,
+            decode_undo: None,
         }
     }
 
@@ -4532,7 +4542,10 @@ impl RotatingKVCache {
                 // if mis-configured. A future sub-issue can wire INT8 in.
                 self.update_and_fetch_fp16(new_keys, new_values)
             }
-            KVCacheMode::Turbo4Asym => self.update_and_fetch_turbo4_asym(new_keys, new_values),
+            KVCacheMode::Turbo4Asym => {
+                self.clear_decode_undo();
+                self.update_and_fetch_turbo4_asym(new_keys, new_values)
+            }
             KVCacheMode::Turbo4 => {
                 // Symmetric Turbo4 is not wired into RotatingKVCache
                 // by B9 / (RotatingKVCache currently supports only
@@ -4566,6 +4579,7 @@ impl RotatingKVCache {
         new_values: UniquePtr<MlxArray>,
     ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
         if self.buffer_size > 0 {
+            self.clear_decode_undo();
             return self.update_and_fetch_buffered_fp16(new_keys, new_values);
         }
 
@@ -4575,6 +4589,9 @@ impl RotatingKVCache {
         };
 
         if new_seq_len > 1 {
+            // A multi-token append rewrites the buffer layout, so no logged
+            // decode write describes the cache after it.
+            self.clear_decode_undo();
             return self.update_concat(new_keys, new_values, new_seq_len);
         }
 
@@ -4592,6 +4609,7 @@ impl RotatingKVCache {
     ///
     /// Used by: Gemma 4 MTP target caches near sliding-window rollover.
     pub fn enable_speculative_buffer(&mut self, buffer_size: i32) -> Result<(), String> {
+        self.clear_decode_undo();
         let buffer_size = buffer_size.max(0);
         if buffer_size > 0 && self.max_size <= 0 {
             return Err("RotatingKVCache speculative buffering requires a positive window".into());
@@ -4996,6 +5014,10 @@ impl RotatingKVCache {
             let shape = ffi::array_shape(keys);
             let buffer_size = shape[2];
             if buffer_size > self.max_size {
+                // Re-slicing an over-window buffer moves every slot; only a
+                // multi-token append (which already cleared the log) leaves
+                // one, but never keep an entry across a layout change.
+                self.clear_decode_undo();
                 let start = buffer_size - self.max_size;
                 let ks = ffi::array_shape(self.keys.as_ref().unwrap());
                 let vs = ffi::array_shape(self.values.as_ref().unwrap());
@@ -5086,11 +5108,15 @@ impl RotatingKVCache {
             }
         }
 
+        let idx_before = self.idx;
         if self.idx >= self.max_size {
             self.idx = 0;
         }
 
         let pos = self.idx;
+        if self.decode_undo.is_some() {
+            self.record_decode_write(&k_buffer, &v_buffer, pos, self.offset, idx_before);
+        }
         // Warmup slot that was never valid, in buffers this cache's own last
         // write produced (a growth concat or trim above gives new handles and
         // fails the check): write it in place (see `inplace_marker`).
@@ -5658,6 +5684,7 @@ impl RotatingKVCache {
         if state.buffer_size > 0 && state.speculative_ring_origin.is_none() {
             return Err("RotatingKVCache buffered snapshot lacks its reference ring origin".into());
         }
+        self.clear_decode_undo();
         self.keys = keys;
         self.values = values;
         self.max_size = state.max_size;
@@ -5709,6 +5736,15 @@ impl RotatingKVCache {
     }
 
     pub fn trim(&mut self, n: i32) -> i32 {
+        // A plain trim does not restore overwritten rows, so the logged
+        // writes stop describing the cache (use `rewind_decode_writes`).
+        self.clear_decode_undo();
+        self.trim_cursors(n)
+    }
+
+    /// Cursor rewind shared by [`Self::trim`] and
+    /// [`Self::rewind_decode_writes`]; leaves the undo log alone.
+    fn trim_cursors(&mut self, n: i32) -> i32 {
         let n = if self.buffer_size > 0 {
             n.min(self.idx).min(self.offset)
         } else {
@@ -5753,6 +5789,7 @@ impl RotatingKVCache {
     /// slot `0`.
     pub fn gather_within_tail(&mut self, tail_len: i32, kept: &[i32]) -> Result<(), String> {
         const WHO: &str = "RotatingKVCache::gather_within_tail";
+        self.clear_decode_undo();
         if !self.tail_is_in_logical_order() {
             return Err(format!(
                 "{WHO}: the ring has wrapped, so the tail is not contiguous and a selection \

@@ -22,13 +22,16 @@
 //! Gemma 3 (and every model-owned family allocated on the paged override) was
 //! off in the other direction as well: the decode lookahead pipelined it while
 //! its teardown trim could not reach the model's own caches, so the snapshot
-//! held one or two speculative positions beyond the claimed length.
+//! held one or two speculative positions beyond the claimed length. Gemma 3
+//! pipelines again since #2159, through a rewind of its own state, and these
+//! tests run it on the default (lookahead) path.
 //!
 //! Each test reads the stored entry back and compares its token count with
 //! the `offset` the snapshot itself carries.
 
 use super::scheduler_model_owned_cache_tests::{cache_ctx, options, prompt, scheduler, test_store};
 use super::*;
+use mlxcel_core::generate::LanguageModel;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, mpsc};
 
@@ -178,11 +181,14 @@ fn eos_stop_snapshot_keeps_every_pushed_token() {
     assert_eq!(stored, seen.len());
 }
 
-/// A model-owned family must never enter the decode lookahead pipeline, even
-/// when the paged override allocates it on `PagedKvCache`: its teardown trim
-/// cannot reach the model's own caches.
+/// Gemma 3 rewinds its own model-owned state on a lookahead teardown (#2159),
+/// so it pipelines even though the paged override allocates it on
+/// `PagedKvCache` with an empty cache vector. A model-owned family without
+/// that capability keeps the #1754 gate: see
+/// `scheduler_model_owned_lookahead_tests::model_owned_default_declines_the_lookahead_rewind`
+/// and `lookahead_is_gated_on_the_rewind_capability` (an INT8 sliding layer).
 #[test]
-fn model_owned_sequence_never_primes_the_decode_lookahead() {
+fn model_owned_sequence_primes_the_decode_lookahead_only_with_a_rewind() {
     let mut sched = scheduler(test_store());
     let (tx, _rx) = mpsc::channel();
     let mut opts = options();
@@ -215,8 +221,9 @@ fn model_owned_sequence_never_primes_the_decode_lookahead() {
         Some(SequenceStateBackend::PagedKvCache),
         "the allocated backend claims paged"
     );
+    assert!(sched.model.supports_decode_lookahead_rewind());
     assert!(
-        sched.lookahead_params(&[seq_id]).is_none(),
-        "a model-owned family stays on synchronous decode"
+        sched.lookahead_params(&[seq_id]).is_some(),
+        "Gemma 3 rewinds its own state, so it pipelines"
     );
 }

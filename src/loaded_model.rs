@@ -555,6 +555,21 @@ impl LanguageModel for LoadedModel {
         delegate_language_model!(self, trim_sequence_state(seq_id, excess))
     }
 
+    // #2159: the scheduler pipelines a model-owned family only through these
+    // two hooks; a dropped delegation silently turns the pipeline off (or, for
+    // the rewind, fails every teardown), the #1755 lesson.
+    fn supports_decode_lookahead_rewind(&self) -> bool {
+        delegate_language_model!(self, supports_decode_lookahead_rewind())
+    }
+
+    fn rewind_decode_appends(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+        n: i32,
+    ) -> Result<(), String> {
+        delegate_language_model!(self, rewind_decode_appends(seq_id, n))
+    }
+
     fn release_sequence_state(&self, caches: &mut [mlxcel_core::layers::KVCache]) {
         delegate_language_model!(self, release_sequence_state(caches))
     }
