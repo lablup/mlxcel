@@ -13,31 +13,40 @@ JIT cache key.
   ... Include them in the kernel name so that a given name always maps to the
   same source."
 * CUDA (``mlx/backend/cuda/custom_kernel.cpp``) builds its name as
-  ``"custom_kernel_" + name + template_arguments_hash(template_args)`` and stops
-  there. ``cu::get_jit_module`` then memoises the compiled module under exactly
-  that name in a process-global map and invokes the source builder only on a
-  cache miss.
+  ``"custom_kernel_" + name + template_arguments_hash(template_args)``, which
+  covers only the template args. Before upstream 9f5f7931
+  (ml-explore/mlx#4273) ``cu::get_jit_module`` memoised the compiled module
+  under exactly that name; since then, and at the current pin (81ba1c6a),
+  ``CustomKernel::eval_gpu`` passes ``name_ + "_" + hex(hash(source_))`` as the
+  module name, so the generated source, dtypes included, is in the key.
 * ROCm (``fast::hip_kernel``, vendored at
   ``src/lib/mlx-cpp/patches-rocm/mlx/backend/rocm/custom_kernel.cpp``) builds
-  the same name the same way, and ``rocm::get_jit_module``
-  (``rocm/jit_module.cpp``) memoises the module in a process-global map keyed
-  by the device index and that name, invoking the builder only on a miss. A
-  HIP launch therefore has exactly the CUDA exposure.
+  the same name the same way and, since #2149 (``LOCAL_FIXES.md``), keys the
+  module in ``rocm::get_jit_module`` by device index, that name and a hash of
+  the generated source, as CUDA does. Before that it keyed by the name alone.
 
-So on CUDA and ROCm a launch whose ``template_args`` are all ints hashes to one
-name for every input dtype. Whichever dtype compiles first wins for the life of
-the process, and every later call at a different dtype reads its buffers
-through the wrong pointer type and returns numbers unrelated to its inputs.
-Nothing throws.
+With a name-only module key, a launch whose ``template_args`` are all ints
+hashes to one name for every input dtype. Whichever dtype compiles first wins
+for the life of the process, and every later call at a different dtype reads
+its buffers through the wrong pointer type and returns numbers unrelated to
+its inputs. Nothing throws.
 
 That produced issues #1053 (a sparse f16 decode off by a relative error of ~1.0)
-and #1054, and it silently affected the sampler, whose
-``gumbel_max_sample_accepts`` admits float32, float16 and bfloat16 at one
-``NumSplits``.
+and #1054 on the CUDA backend of an older pin, and it silently affected the
+sampler, whose ``gumbel_max_sample_accepts`` admits float32, float16 and
+bfloat16 at one ``NumSplits``.
 
 ``template_arguments_hash`` *does* hash a ``Dtype`` template arg, so naming the
-input dtypes in ``template_args`` restores the discrimination. This check
-enforces that.
+input dtypes in ``template_args`` restores the discrimination under a name-only
+key. This check enforces that.
+
+Why the check stays now that every backend keys on the source: it is defense
+in depth, not the fix. A re-vendored ROCm fork, an MLX pin bump or a new
+backend can bring a name-only key back, and nothing else would notice until a
+model returned wrong numbers. The explicit keys cost nothing at runtime (the
+name feeds the source, which is hashed anyway), so no launch drops them: some
+are also referenced by their kernel bodies as type aliases, and the rest are
+cheap insurance against exactly that regression.
 
 The rule
 --------
@@ -83,8 +92,9 @@ three ways.
 
 Limits: the rule reads only *named* ``std::vector<...TemplateArg>``
 initialisers, so a launch that passes ``template_args`` inline (the #1804 ROCm
-fault probe passes ``{}``, at a fixed float32) is in scope but has nothing to
-check. A launch reached without a direct call in the file (a function pointer,
+fault probe passes ``{}``, at a fixed float32; the #2149 JIT-key probe passes
+``{}`` on purpose, so that only the backend's source-hash key separates its
+dtypes) is in scope but has nothing to check. A launch reached without a direct call in the file (a function pointer,
 or a macro defined elsewhere) does not put that file in scope; the pin catches a
 pinned file that switches to such a form, not a new file that starts with one.
 
@@ -117,9 +127,10 @@ EXPECTED_IN_SCOPE = frozenset(
         "src/lib/mlx-cpp/turbo/paged_attention_v2_merge.cpp",
         "src/lib/mlx-cpp/turbo/sampling.cpp",
         "src/lib/mlx-cpp/turbo/sampling_rejection.cpp",
-        # The #1804 ROCm fault probe (`rocm_fault_probe_array`): a
-        # `fast::hip_kernel` launch in a file with no CUDA launch, so it was
-        # out of scope while only `cuda_kernel(` counted.
+        # The #1804 ROCm fault probe (`rocm_fault_probe_array`) and the #2149
+        # JIT-key probe (`rocm_jit_key_probe`): `fast::hip_kernel` launches in
+        # a file with no CUDA launch, so it was out of scope while only
+        # `cuda_kernel(` counted.
         "src/lib/mlxcel-core/cpp/mlx_cxx_bridge.cpp",
         "src/lib/mlxcel-core/cpp/mlx_cxx_kernels.cpp",
     }

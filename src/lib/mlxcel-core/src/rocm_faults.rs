@@ -27,6 +27,10 @@
 //! An [`RocmFaultKind::OutOfBoundsWrite`] leaves the HIP device context
 //! unusable for the rest of the process, so a test that evaluates one must
 //! run in a process of its own (`tests/rocm_gpu_faults.rs` spawns itself).
+//!
+//! [`jit_key_probe_array`] serves `tests/rocm_custom_kernel_jit_key.rs` (issue
+//! #2149): a kernel whose generated source differs between calls only by the
+//! input dtype or 0-d-ness, which a name-keyed JIT cache confuses.
 
 use cxx::UniquePtr;
 
@@ -67,4 +71,26 @@ impl RocmFaultKind {
 /// kernels cannot be built.
 pub fn fault_probe_array(kind: RocmFaultKind) -> Result<UniquePtr<MlxArray>, cxx::Exception> {
     crate::ffi::rocm_fault_probe_array(kind.bridge_code())
+}
+
+/// A lazy f32 array of `input.size() + 1` elements from one custom-kernel
+/// launch that always uses the same kernel name and no template args (issue
+/// #2149): element 0 is the kernel's `inp_shape[0]` (`-1.0` for a 0-d input,
+/// which gets no `inp_shape` parameter) and element `1 + i` is `input[i]`
+/// converted to f32.
+///
+/// Only the generated source tells two calls apart, through the input's dtype
+/// and whether it is 0-d, so a JIT cache keyed by name alone serves the first
+/// compiled module to every later call: an f16 input is read as f32, and a 0-d
+/// input after a 1-d one launches with an argument list the module does not
+/// declare. A 0-d input after a 1-d one can fault the queue on such a build,
+/// so run that sequence in a process of its own.
+///
+/// # Errors
+///
+/// Returns the bridge's error on backends other than ROCm, and for an input
+/// that is not a float32, float16 or bfloat16 array, 0-d or 1-d with 1 to
+/// 1024 elements.
+pub fn jit_key_probe_array(input: &MlxArray) -> Result<UniquePtr<MlxArray>, cxx::Exception> {
+    crate::ffi::rocm_jit_key_probe(input)
 }

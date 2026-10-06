@@ -2397,6 +2397,17 @@ mod ffi {
         /// wrapper [`crate::rocm_faults::fault_probe_array`].
         fn rocm_fault_probe_array(kind: i32) -> Result<UniquePtr<MlxArray>>;
 
+        /// Test-only (issue #2149): one `fast::hip_kernel` launch under a
+        /// fixed name with no template args, returning an f32 array of
+        /// `input.size() + 1` elements: `inp_shape[0]` (-1 for a 0-d input)
+        /// followed by the input converted to f32. Two calls that differ only
+        /// in the input's dtype or 0-d-ness must not share a compiled module.
+        /// Errors on backends other than ROCm and for an input that is not a
+        /// float32, float16 or bfloat16 array, 0-d or 1-d with 1 to 1024
+        /// elements. Prefer the wrapper
+        /// [`crate::rocm_faults::jit_key_probe_array`].
+        fn rocm_jit_key_probe(input: &MlxArray) -> Result<UniquePtr<MlxArray>>;
+
         /// True when this backend has a BitLinear kernel port, that is Metal,
         /// CUDA or ROCm (issues #1803, #1862), read from the kernel's port
         /// table, so false on a wave64 ROCm device (#2147). Separate from
@@ -3893,6 +3904,8 @@ pub mod rocm_arch;
 // Deliberate ROCm GPU failures for tests (#1804): a typed wrapper over the
 // bridge's fault-probe fixture, so `tests/rocm_gpu_faults.rs` can provoke a
 // rejected launch and a queue fault without knowing the bridge's integers.
+// It also wraps the custom-kernel JIT-key probe (#2149) used by
+// `tests/rocm_custom_kernel_jit_key.rs`.
 // Test support only: a queue fault kills the device for the rest of the
 // process, so this is hidden from the public docs.
 #[doc(hidden)]

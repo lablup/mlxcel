@@ -5223,6 +5223,57 @@ std::unique_ptr<MlxArray> rocm_fault_probe_array(int32_t kind) {
 #endif
 }
 
+// Test-only fixture for lablup/mlxcel#2149; see the header. One kernel name
+// and no template args for every call, so only the generated source (the
+// input's dtype, and whether the input is 0-d) can tell two calls apart.
+std::unique_ptr<MlxArray> rocm_jit_key_probe(const MlxArray& input) {
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+    using namespace mlx::core;
+    const array& inp = input.inner;
+    const Dtype dtype = inp.dtype();
+    if (dtype != float32 && dtype != float16 && dtype != bfloat16) {
+        throw std::invalid_argument(
+            "rocm_jit_key_probe: input must be float32, float16 or bfloat16");
+    }
+    if (inp.ndim() > 1 || inp.size() < 1 || inp.size() > 1024) {
+        throw std::invalid_argument(
+            "rocm_jit_key_probe: input must be 0-d or 1-d with 1 to 1024 "
+            "elements");
+    }
+    // `build_kernel` declares `inp_shape` only for an input with ndim > 0.
+    // For a 0-d input, unqualified lookup of `inp_shape` falls through to
+    // this namespace-scope sentinel, so one source compiles either way.
+    const std::string header =
+        "namespace mlx::core::rocm {\n"
+        "__constant__ KernelShape inp_shape = {{-1, 0, 0, 0, 0, 0, 0, 0}};\n"
+        "} // namespace mlx::core::rocm\n";
+    const std::string source =
+        "  const int i = global_thread_index();\n"
+        "  out[1 + i] = static_cast<float>(inp[i]);\n"
+        "  if (i == 0) {\n"
+        "    out[0] = static_cast<float>(inp_shape[0]);\n"
+        "  }\n";
+    auto kernel = fast::hip_kernel(
+        "mlxcel_jit_key_probe", {"inp"}, {"out"}, source, header);
+    const int n = static_cast<int>(inp.size());
+    auto outputs = kernel(
+        {inp},
+        {{n + 1}},
+        {float32},
+        std::make_tuple(n, 1, 1),
+        std::make_tuple(n, 1, 1),
+        {},
+        std::nullopt,
+        false,
+        Device::gpu);
+    return std::make_unique<MlxArray>(std::move(outputs.at(0)));
+#else
+    (void)input;
+    throw std::runtime_error(
+        "rocm_jit_key_probe is only available on the ROCm backend");
+#endif
+}
+
 // See the header. Only ROCm routes `quantized_matmul` to kernels whose bytes
 // depend on the shape in a way the tile rule on the Rust side does not
 // capture, so every other backend answers true and keeps its eligibility.

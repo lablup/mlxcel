@@ -1,7 +1,9 @@
 // Copyright © 2025 Apple Inc.
 
+#include <functional>
 #include <iostream>
 #include <sstream>
+#include <string>
 
 #include "mlx/backend/common/compiled.h"
 #include "mlx/backend/gpu/copy.h"
@@ -342,12 +344,20 @@ void CustomKernel::eval_gpu(
     checked_inputs.push_back(check_input(in));
   }
 
-  // Compile the custom kernel
+  // Compile the custom kernel. The module is keyed by the name plus a hash of
+  // the generated source, as upstream CUDA does at the MLX pin: `name_` covers
+  // only `template_args`, while `build_kernel` also writes each input's and
+  // output's dtype and whether each input is 0-d into the source, so keying on
+  // `name_` alone served the first-compiled module to a later call that
+  // differed only there. The symbol inside the module keeps its plain name.
   std::string kernel_name =
       (is_precompiled_) ? name_ : "mlx::core::rocm::" + name_;
+  std::ostringstream module_name;
+  module_name << name_ << "_" << std::hex
+              << std::hash<std::string>{}(source_);
   rocm::JitModule& mod = rocm::get_jit_module(
       s.device,
-      name_,
+      module_name.str(),
       [&]() {
         return std::make_tuple(
             is_precompiled_, source_, std::vector{kernel_name});
