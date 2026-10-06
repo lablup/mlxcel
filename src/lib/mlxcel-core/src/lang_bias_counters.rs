@@ -76,7 +76,9 @@ impl Drop for ScopedOverride {
 
 /// Force the counters on or off for the calling thread until the returned
 /// guard is dropped, without touching the process environment or the cached
-/// process-wide setting. Guards nest; each drop restores what it replaced.
+/// process-wide setting. Guards nest; each drop restores what it replaced, so
+/// drop them in reverse creation order (an out-of-order drop restores a stale
+/// value).
 ///
 /// Test support: production configures the counters through
 /// `MLXCEL_LANG_BIAS_COUNTERS` only.

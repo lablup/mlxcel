@@ -25,8 +25,13 @@
 //! - Tracing field assertion — `lang_bias resolved` DEBUG event emitted with
 //!   `entries`, `languages`, and `policy` fields when bias is non-empty.
 //!
-//! Each test calls `reset_lang_bias_counters()` first to decouple from other
-//! tests that may run in the same process.
+//! - `byte_fragment_suppression_counter_tracks_opt_in_entries` and
+//!   `byte_fragment_len_counts_only_tagged_entries` — the byte-fragment
+//!   suppression counter and the tagged-entry count.
+//!
+//! Each counter test takes `counter_lock()`, which serializes on the global
+//! counters and arms the opt-in ones for the test thread only, then calls
+//! `reset_counters()` to start from zero.
 
 use mlxcel_core::{
     generate::SamplingConfig,

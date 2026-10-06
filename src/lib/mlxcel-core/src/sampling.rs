@@ -2994,6 +2994,9 @@ mod tests {
 
     #[test]
     fn config_supports_fused_batch_false_for_token_bias() {
+        // Pin the opt-in suppression counters off so an exported
+        // MLXCEL_LANG_BIAS_COUNTERS does not change the answer below.
+        let counters_off = crate::lang_bias_counters::scoped_override(false);
         let mut bias = TokenBiasMap::new();
         bias.insert(7, -1.0);
         let cfg = SamplingConfig {
@@ -3012,6 +3015,18 @@ mod tests {
         assert!(!row_supports_fused_batch_except_bias(
             &cfg, true, false, false
         ));
+        // With the counters on, a biased row needs the per-row sampler's
+        // pre-bias argmax read, so it leaves the fused path (#2187).
+        {
+            let _on = crate::lang_bias_counters::scoped_override(true);
+            assert!(!row_supports_fused_batch_except_bias(
+                &cfg, false, false, false
+            ));
+        }
+        assert!(row_supports_fused_batch_except_bias(
+            &cfg, false, false, false
+        ));
+        drop(counters_off);
 
         let penalised = SamplingConfig {
             repetition_penalty: 1.1,
