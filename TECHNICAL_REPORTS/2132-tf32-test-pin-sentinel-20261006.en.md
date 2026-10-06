@@ -29,7 +29,7 @@ MLX selects reduced-precision f32 GEMM on two backends: cuBLAS `CUBLAS_COMPUTE_3
 | qwen2.5-0.5b-bf16 | bf16 | run-to-run variation in both arms, not attributable |
 | qwen3-0.6b | 4-bit | run-to-run variation in both arms, not attributable |
 
-Decision: the production default stays on MLX's value. TF32 only reaches dense f32 GEMMs, which in practice means f32 checkpoints; the docs give `MLX_ENABLE_TF32=0` as the switch for f32-exact output.
+Decision: the production default stays on MLX's value. TF32 only reaches dense f32 GEMMs, which in practice means f32 checkpoints (and on CUDA mostly prefill-sized ones, since unbiased single-row matmuls go to gemv; read from MLX source, not measured); the docs give `MLX_ENABLE_TF32=0` as the switch for f32-exact output.
 
 ## Not verified
 
