@@ -846,6 +846,7 @@ std::unique_ptr<MlxArray> repeat(const MlxArray& a, int32_t repeats, int32_t axi
 // Arange
 std::unique_ptr<MlxArray> arange_f32(float start, float stop, float step);
 std::unique_ptr<MlxArray> arange_i32(int32_t start, int32_t stop, int32_t step);
+std::unique_ptr<MlxArray> arange_u32(int32_t stop);
 
 // Logical operations.
 std::unique_ptr<MlxArray> logical_not(const MlxArray& a);

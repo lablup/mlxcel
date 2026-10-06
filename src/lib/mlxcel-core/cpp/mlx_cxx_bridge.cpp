@@ -3169,6 +3169,13 @@ std::unique_ptr<MlxArray> arange_i32(int32_t start, int32_t stop, int32_t step) 
     return std::make_unique<MlxArray>(mlx::core::arange(start, stop, step));
 }
 
+// `[0, stop)` as uint32, built exactly as MLX's `indices_or_default` builds the
+// default `lhs_indices` of `gather_qmm` / `gather_mm` (issue #1713).
+std::unique_ptr<MlxArray> arange_u32(int32_t stop) {
+    return std::make_unique<MlxArray>(
+        mlx::core::arange(static_cast<double>(stop), mlx::core::uint32));
+}
+
 // Logical operations.
 std::unique_ptr<MlxArray> logical_not(const MlxArray& a) {
     return std::make_unique<MlxArray>(mlx::core::logical_not(a.inner));

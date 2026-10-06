@@ -988,6 +988,10 @@ mod ffi {
         /// Create range of i32 values
         fn arange_i32(start: i32, stop: i32, step: i32) -> UniquePtr<MlxArray>;
 
+        /// `[0, stop)` as uint32 in one node, the dtype MLX's gather ops use
+        /// for indices (so passing it adds no cast node).
+        fn arange_u32(stop: i32) -> UniquePtr<MlxArray>;
+
         // Logical operations.
         /// Element-wise logical NOT
         fn logical_not(a: &MlxArray) -> UniquePtr<MlxArray>;
