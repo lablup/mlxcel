@@ -376,6 +376,14 @@ impl LanguageModel for VisionLanguageModel {
         self.text_model.trim_internal_caches(excess)
     }
 
+    fn trim_sequence_state(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+        excess: i32,
+    ) -> Result<(), String> {
+        self.text_model.trim_sequence_state(seq_id, excess)
+    }
+
     fn release_sequence_state(&self, caches: &mut [KVCache]) {
         self.text_model.release_sequence_state(caches)
     }

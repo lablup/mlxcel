@@ -2726,6 +2726,16 @@ impl LanguageModel for BailingMoeLinearModel {
         false
     }
 
+    /// Opt out of NA tile-aligned padded prefill (issue #1755).
+    ///
+    /// The `BailingLinearCache::Linear` layers carry a `LinearAttentionCache`,
+    /// a recurrent GLA state that has already absorbed every pad token by the
+    /// time the forward returns; unlike a K/V cache it has no trailing slots to
+    /// drop, so no trim (sequence-aware or not) can restore it.
+    fn supports_padded_prefill(&self) -> bool {
+        false
+    }
+
     fn eos_token_ids(&self) -> Vec<i32> {
         self.eos_token_ids.clone()
     }

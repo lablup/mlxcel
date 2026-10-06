@@ -369,13 +369,17 @@ reproduces the cache as captured, wrapped ring and trimmed front included. Only
 the shorter-prefix variant declines.
 
 A snapshot is keyed on a token vector, so the cached state has to hold exactly
-those tokens and no others. That rules out the M5 neural-accelerator prefill
-alignment for a model-owned family: the scheduler pads the first chunk to a
-32-token tile and then trims the padding back out of the `CachePool`'s caches,
-and a model-owned sequence has none there, so the pad positions would stay in
-the model's own caches and run `offset` past the real token count. Gemma 3,
-Gemma 4, AFMoE and Llama 4 therefore answer `supports_padded_prefill()` with
-`false`. Pool-backed families are unaffected and keep the aligned path.
+those tokens and no others. The M5 neural-accelerator prefill alignment pads a
+chunk to a 32-token tile and then trims the padding back out of the
+`CachePool`'s caches, and a model-owned sequence has none there, so the pad
+positions would stay in the model's own caches and run `offset` past the real
+token count. The scheduler therefore also calls
+`LanguageModel::trim_sequence_state` for a model-owned family, which rewinds
+the model's own per-sequence state; the request is aborted if that rewind
+fails. Gemma 3 implements it (a sliding-window layer also cuts its physical
+ring buffer back, so no pad key survives the next decode step) and keeps the
+aligned path. Gemma 4, AFMoE and Llama 4 do not implement it yet and answer
+`supports_padded_prefill()` with `false`. Pool-backed families are unaffected.
 
 Snapshot reuse is deliberately conservative with quantized attention caches.
 Every family listed above serializes FP16 model-owned attention KV state only;

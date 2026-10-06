@@ -142,17 +142,37 @@ impl ModelStateSnapshot {
     }
 }
 
-/// Returns true when the current hardware is M5+ with a Neural Accelerator
-/// and tile-aligned prefill should be applied.
+/// Whether prefill should be padded to the 32-token Neural Accelerator tile.
 ///
-/// Set `MLXCEL_NO_PADDED_PREFILL=1` to disable tile alignment (debugging).
+/// True on M5+ hardware with a Neural Accelerator driven by the running macOS.
+/// Two debugging overrides apply, checked in this order:
+///
+/// - `MLXCEL_NO_PADDED_PREFILL` (presence) disables tile alignment.
+/// - `MLXCEL_FORCE_PADDED_PREFILL` (presence) enables it on any hardware, so
+///   the padded prefill and its cache trim can be exercised on hosts without a
+///   Neural Accelerator (issue #1755). Padding is pure overhead off M5.
+///
+/// Only the prefill padding decision follows these overrides; speculative
+/// verification alignment and the M5 numerical workarounds keep reading the
+/// hardware directly.
+///
+/// Used by: the CLI prefill paths in this module and the server batch
+/// scheduler's prefill sites.
 #[inline]
-fn should_align_prefill() -> bool {
-    if std::env::var("MLXCEL_NO_PADDED_PREFILL").is_ok() {
+pub fn prefill_tile_alignment_enabled() -> bool {
+    if std::env::var_os("MLXCEL_NO_PADDED_PREFILL").is_some() {
         return false;
+    }
+    if std::env::var_os("MLXCEL_FORCE_PADDED_PREFILL").is_some() {
+        return true;
     }
     let hw = hardware::get_hardware();
     hw.has_neural_accelerator && hw.macos_supports_na
+}
+
+#[inline]
+fn should_align_prefill() -> bool {
+    prefill_tile_alignment_enabled()
 }
 
 #[inline]
@@ -625,7 +645,43 @@ pub trait LanguageModel {
     /// Trim internal caches after padded prefill. Models with internal
     /// cache state (e.g. NemotronH) override this to trim their own caches
     /// so that padding positions do not corrupt subsequent decode steps.
+    ///
+    /// This reaches only the model's fallback (no `SequenceId`) state, which is
+    /// what the CLI generate paths use. The server scheduler addresses one
+    /// sequence at a time through [`Self::trim_sequence_state`].
     fn trim_internal_caches(&self, _excess: i32) {}
+
+    /// Drop the trailing `excess` pad positions a padded prefill wrote into the
+    /// model-owned state of scheduler sequence `seq_id` (issue #1755).
+    ///
+    /// The batch scheduler calls this after every padded prefill pass whenever
+    /// the model's own [`Self::sequence_state_layout`] is
+    /// [`crate::cache::SequenceStateBackend::ModelOwned`], because the
+    /// `CachePool` entry of such a sequence holds no per-layer `KVCache` for
+    /// its own trim to reach. On return the sequence's state must be what an
+    /// unpadded prefill of the same tokens would have left: every layer's
+    /// `offset` equal to the real token count, and no pad K/V left anywhere a
+    /// later step can read.
+    ///
+    /// The default covers a non-batching model, whose internal state is the
+    /// one sequence the scheduler is running, by delegating to
+    /// [`Self::trim_internal_caches`]. A batching model keeps one state per
+    /// `SequenceId`, which the default cannot address, so it returns `Err`; a
+    /// model-owned family that keeps [`Self::supports_padded_prefill`] `true`
+    /// must override this. The scheduler aborts the request on `Err` rather
+    /// than decode from a desynchronized offset.
+    ///
+    /// Used by: server batch scheduler prefill sites.
+    fn trim_sequence_state(&self, seq_id: SequenceId, excess: i32) -> Result<(), String> {
+        if self.supports_batching() {
+            return Err(format!(
+                "model-owned sequence {seq_id} cannot drop {excess} pad positions: the model \
+                 does not implement trim_sequence_state"
+            ));
+        }
+        self.trim_internal_caches(excess);
+        Ok(())
+    }
 
     /// Reset model-owned fallback runtime state before a fresh single-row
     /// generation starts.
@@ -765,8 +821,19 @@ pub trait LanguageModel {
 
     /// Whether this model supports tile-aligned padded prefill on M5+ hardware.
     ///
-    /// Pure transformer models return `true` (the default) because padding
-    /// tokens only affect the external KV cache which is trimmed afterwards.
+    /// Pure transformer models whose K/V lives in the external `KVCache` slice
+    /// return `true` (the default) because padding tokens only reach that
+    /// slice, which the caller trims afterwards.
+    ///
+    /// That reasoning does not hold for a family whose
+    /// [`Self::sequence_state_layout`] is model-owned: the scheduler's
+    /// `CachePool` entry for such a sequence holds no `KVCache`, so its trim
+    /// reaches nothing and the pad positions stay in the model's own caches.
+    /// A model-owned family may answer `true` only if it also implements
+    /// [`Self::trim_sequence_state`] (server) and [`Self::trim_internal_caches`]
+    /// (CLI) so that both rewind its own state; otherwise it must answer
+    /// `false` (issue #1755).
+    ///
     /// Hybrid SSM models (NemotronH, Jamba, Mamba, etc.) return `false`
     /// because padding tokens corrupt the internal recurrent state (conv /
     /// SSM state) in a way that cannot be safely trimmed, and the resulting

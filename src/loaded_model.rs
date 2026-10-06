@@ -543,6 +543,18 @@ impl LanguageModel for LoadedModel {
         delegate_language_model!(self, reset_runtime_state())
     }
 
+    fn trim_internal_caches(&self, excess: i32) {
+        delegate_language_model!(self, trim_internal_caches(excess))
+    }
+
+    fn trim_sequence_state(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+        excess: i32,
+    ) -> Result<(), String> {
+        delegate_language_model!(self, trim_sequence_state(seq_id, excess))
+    }
+
     fn release_sequence_state(&self, caches: &mut [mlxcel_core::layers::KVCache]) {
         delegate_language_model!(self, release_sequence_state(caches))
     }

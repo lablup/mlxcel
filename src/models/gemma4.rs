@@ -6338,9 +6338,9 @@ impl LanguageModel for Gemma4Wrapper {
         // a padded chunk back out of the `CachePool`'s caches, and a
         // `model_owned` family has none there, so the pad positions would
         // stay in this model's own caches and push `offset` past the real
-        // token count. See `Gemma3Wrapper::supports_padded_prefill`
-        // (`src/models/gemma3.rs`) for the full statement and the
-        // sequence-aware trim hook that would lift it (issue #1335).
+        // token count (issue #1335). Lifting it means implementing
+        // `LanguageModel::trim_sequence_state` and `trim_internal_caches` the
+        // way `Gemma3Wrapper` does (issue #1755).
         false
     }
 }

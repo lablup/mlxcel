@@ -42,7 +42,6 @@ use mlxcel_core::generate::{
 use mlxcel_core::generation_policy::{
     initial_token_history, merged_eos_token_ids, seed_rng_if_needed,
 };
-use mlxcel_core::hardware;
 use mlxcel_core::sampling::{
     FusedSampleParams, LogprobSource, TokenBiasMap, apply_row_filters, apply_token_bias_rows,
     batched_fused_sample_with_bias, compute_logprobs, compute_post_sampling_probs,
@@ -99,13 +98,7 @@ use super::tick_policy::{
     TickChoice, TickState, decide_tick, mixed_step_enabled, resolve_prefill_grant_interval,
 };
 
-/// Returns true when the current hardware is M5+ with Neural Accelerator
-/// support and tile-aligned prefill should be applied.
-#[inline]
-fn should_align_prefill() -> bool {
-    let hw = hardware::get_hardware();
-    hw.has_neural_accelerator && hw.macos_supports_na
-}
+use pad_trim::{should_align_prefill, trim_padded_prefill};
 
 pub(crate) const DEFAULT_PAGED_BLOCK_SIZE: usize = 32;
 
@@ -978,6 +971,7 @@ mod decode_tick;
 mod handoff;
 #[path = "../scheduler.rs"]
 mod mtp_dispatch;
+mod pad_trim;
 mod paged_layout;
 mod prefill;
 mod prompt_cache;
@@ -1031,6 +1025,10 @@ mod scheduler_whole_prompt_hit_tests;
 #[cfg(test)]
 #[path = "../scheduler_completion_snapshot_tests.rs"]
 mod scheduler_completion_snapshot_tests;
+
+#[cfg(test)]
+#[path = "../scheduler_model_owned_pad_trim_tests.rs"]
+mod scheduler_model_owned_pad_trim_tests;
 
 /// Resolve a request's context-retention values against the server policy
 /// (#1472), pure so the arithmetic is unit-testable without a scheduler.

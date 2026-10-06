@@ -1821,6 +1821,16 @@ impl LanguageModel for Qwen3NextModel {
         false
     }
 
+    /// Opt out of NA tile-aligned padded prefill (issue #1755).
+    ///
+    /// The `Qwen3NextCache::Linear` layers carry a `GatedDeltaCache`: a conv
+    /// window plus a recurrent gated-delta state that has already absorbed
+    /// every pad token by the time the forward returns. It has no trailing
+    /// slots to drop, so no trim (sequence-aware or not) can restore it.
+    fn supports_padded_prefill(&self) -> bool {
+        false
+    }
+
     fn eos_token_ids(&self) -> Vec<i32> {
         vec![151645] // Qwen3 EOS token
     }

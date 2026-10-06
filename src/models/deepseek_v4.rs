@@ -980,6 +980,20 @@ impl LanguageModel for DeepSeekV4Model {
         false
     }
 
+    /// Opt out of NA tile-aligned padded prefill (issue #1755).
+    ///
+    /// The per-sequence state lives in `V4LayerCache`, and two of its three
+    /// parts cannot be rewound by a pad width: the `PoolingCache`s fold every
+    /// `ratio` consecutive positions into one pooled entry, so pad
+    /// tokens are mixed into compressed K/V (and into the indexer pool) rather
+    /// than sitting in separable trailing slots. Only the `local`
+    /// `RotatingKVCache` could be cut back. Nothing here implements
+    /// `trim_sequence_state`, and the default trims only the fallback slot,
+    /// which is not the state the scheduler keys by `SequenceId`.
+    fn supports_padded_prefill(&self) -> bool {
+        false
+    }
+
     fn eos_token_ids(&self) -> Vec<i32> {
         self.eos_token_ids.clone()
     }

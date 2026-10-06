@@ -913,6 +913,29 @@ impl Cache {
         }
     }
 
+    /// Drop the trailing `excess` positions a tile-aligned padded prefill
+    /// wrote, leaving the state an unpadded prefill of the same tokens would
+    /// have left (issue #1755). A sliding layer also cuts its physical buffer
+    /// back, because a plain `trim` would leave the pad keys in the slots the
+    /// next decode step keeps.
+    ///
+    /// Used by: Gemma 3.
+    pub(crate) fn rewind_padded_prefill(&mut self, excess: i32) -> Result<(), String> {
+        match self {
+            Cache::Standard(cache) => {
+                let trimmed = cache.trim(excess);
+                if trimmed == excess {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "standard cache dropped {trimmed} of {excess} pad positions"
+                    ))
+                }
+            }
+            Cache::Rotating(cache) => cache.rewind_padded_prefill(excess),
+        }
+    }
+
     pub(crate) fn as_interface(&mut self) -> &mut dyn CacheInterface {
         match self {
             Cache::Standard(c) => c,
@@ -1504,6 +1527,26 @@ impl Gemma3Wrapper {
         self.sequence_state
             .replace_internal(self.make_configured_caches());
     }
+
+    /// Whether layer `layer_idx` is a sliding-window (`Cache::Rotating`) layer.
+    fn is_sliding_layer(&self, layer_idx: usize) -> bool {
+        let pattern = self.model.sliding_window_pattern;
+        (layer_idx % pattern) != (pattern - 1)
+    }
+
+    /// Rewind every layer of one sequence's caches by the pad width of a
+    /// padded prefill (issue #1755).
+    fn rewind_padded_prefill(caches: &mut [Cache], excess: i32) -> Result<(), String> {
+        if excess <= 0 {
+            return Ok(());
+        }
+        for (layer_idx, cache) in caches.iter_mut().enumerate() {
+            cache
+                .rewind_padded_prefill(excess)
+                .map_err(|err| format!("Gemma 3 pad trim, layer {layer_idx}: {err}"))?;
+        }
+        Ok(())
+    }
 }
 
 impl mlxcel_core::generate::LanguageModel for Gemma3Wrapper {
@@ -1566,28 +1609,44 @@ impl mlxcel_core::generate::LanguageModel for Gemma3Wrapper {
         true
     }
 
-    /// Opt out of NA tile-aligned padded prefill, as Gemma 4 already does
-    /// (`src/models/gemma4.rs`).
+    /// Gemma 3 takes NA tile-aligned padded prefill (issue #1755).
     ///
-    /// The contract on this method (see [`LanguageModel::supports_padded_prefill`])
-    /// requires that the caches be trimmed back to the real prompt length
-    /// after a padded chunk. The batch scheduler honours that by trimming the
-    /// `CachePool`'s `Vec<KVCache>`, and a `model_owned` family's pool entry is
-    /// `SequenceCacheSet::model_owned`, whose `caches` vector is empty, so the
-    /// trim reaches nothing and the pad positions stay in this model's own
-    /// caches. `offset` then runs ahead of the real token count by the pad
-    /// width (an M5-only, `should_align_prefill()`-gated defect), which puts
-    /// every later token at the wrong RoPE position and makes the cached state
-    /// disagree with the token vector a prompt-cache snapshot is keyed on
-    /// (issue #1335).
+    /// Its K/V lives in `ModelOwnedSequenceState`, so the scheduler's trim of
+    /// the `CachePool` entry reaches nothing (that entry holds no `KVCache`);
+    /// PR #1752 opted out for that reason. The pad positions are now dropped
+    /// from the model's own caches by [`Self::trim_sequence_state`] (server,
+    /// per `SequenceId`) and [`Self::trim_internal_caches`] (CLI fallback
+    /// slot), both through [`Cache::rewind_padded_prefill`], which leaves every
+    /// layer as an unpadded prefill would, `offset` included.
     ///
-    /// The general repair is a sequence-aware trim hook the scheduler can call
-    /// for model-owned families; `trim_internal_caches` takes no `SequenceId`
-    /// and is only wired into the CLI generate paths. Until that exists, the
-    /// three families joining snapshot reuse decline padding the same way
-    /// Gemma 4 does.
+    /// The text forwards ignore the caller's padding mask and build their own
+    /// causal and sliding-window masks over the padded chunk. Pad positions
+    /// trail the real ones, so causal attention already keeps them out of every
+    /// real row, and the sliding layers keep their window.
+    ///
+    /// A sliding layer stored as Turbo4Asym cannot be rewound (its V side is
+    /// packed into sidecars), so that configuration declines padding instead.
     fn supports_padded_prefill(&self) -> bool {
-        false
+        !(0..self.model.layers.len()).any(|layer_idx| {
+            self.is_sliding_layer(layer_idx)
+                && self.kv_cache_layer_modes.mode_for_layer(layer_idx) == KVCacheMode::Turbo4Asym
+        })
+    }
+
+    fn trim_internal_caches(&self, excess: i32) {
+        if let Err(err) = self
+            .sequence_state
+            .with_sequence_state(None, |caches| Self::rewind_padded_prefill(caches, excess))
+        {
+            tracing::error!("{err}");
+        }
+    }
+
+    fn trim_sequence_state(&self, seq_id: SequenceId, excess: i32) -> Result<(), String> {
+        self.sequence_state
+            .with_existing_sequence_state(seq_id, |caches| {
+                Self::rewind_padded_prefill(caches, excess)
+            })?
     }
 
     fn supports_paged_decode_backend(&self) -> bool {

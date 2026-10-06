@@ -94,6 +94,10 @@ mod paged_pool_tests;
 #[cfg(test)]
 #[path = "cache/paged_turbo_tests.rs"]
 mod paged_turbo_tests;
+mod prefill_rewind;
+#[cfg(test)]
+#[path = "cache/prefill_rewind_tests.rs"]
+mod prefill_rewind_tests;
 pub mod ring;
 /// Sparse attention expressed as a `page_size = 1` page table over a
 /// contiguous KV allocation (issue #904).

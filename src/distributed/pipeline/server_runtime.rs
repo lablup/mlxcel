@@ -124,6 +124,17 @@ impl LanguageModel for PipelineServerModel {
         true
     }
 
+    /// Opt out of NA tile-aligned padded prefill (issue #1755).
+    ///
+    /// Each sequence's K/V lives in the pipeline stages, behind the runtime,
+    /// and the runtime has no operation to rewind a sequence by a pad width.
+    /// The scheduler's own trim cannot reach it (this layout is model-owned),
+    /// so a padded prefill would leave every stage's offset ahead of the real
+    /// token count.
+    fn supports_padded_prefill(&self) -> bool {
+        false
+    }
+
     fn forward_with_sequence_id(
         &self,
         input_ids: &MlxArray,

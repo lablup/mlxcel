@@ -690,15 +690,16 @@ impl BatchScheduler {
                 &[i as i32 + 1, last_pos + 1, vocab],
             );
 
-            // Trim padding positions from this sequence's KV cache so that the
+            // Trim padding positions from this sequence's KV cache (and, for a
+            // model-owned family, from the model's own state) so that the
             // decode phase starts with the correct cache offset.
             let excess = (padded - actual_len) as i32;
             if excess > 0
                 && let Some(caches) = self.cache_pool.get_caches_mut(seq.seq_id)
+                && let Err(err) = trim_padded_prefill(&self.model, seq.seq_id, caches, excess)
             {
-                for c in caches.iter_mut() {
-                    c.trim(excess);
-                }
+                self.abort_sequence(seq, &err);
+                continue;
             }
 
             self.sync_sequence_storage(seq.seq_id);
@@ -813,6 +814,7 @@ impl BatchScheduler {
         // still borrows the cache pool, so capture the fallible eval outcome
         // here and act on it below once the borrow has ended.
         let mut prefill_eval: Option<Result<(), String>> = None;
+        let mut pad_trim: Result<(), String> = Ok(());
         let logits = {
             let caches = match self.cache_pool.get_caches_mut(seq.seq_id) {
                 Some(c) => c,
@@ -861,15 +863,11 @@ impl BatchScheduler {
             };
 
             // The sequence-aware last-logits hook already extracts the last
-            // real row. Trim padding from KV caches so decode begins at the
-            // correct cache offset.
+            // real row. Trim padding from KV caches (and from a model-owned
+            // family's own state) so decode begins at the correct cache offset.
             if pad_mask_opt.is_some() && effective_tokens.len() > actual_len {
-                let padded_len = effective_tokens.len();
-                // Trim padding positions from all KV caches.
-                let excess = (padded_len - actual_len) as i32;
-                for c in caches.iter_mut() {
-                    c.trim(excess);
-                }
+                let excess = (effective_tokens.len() - actual_len) as i32;
+                pad_trim = trim_padded_prefill(&self.model, seq.seq_id, caches, excess);
             }
             raw_logits
         };
@@ -881,6 +879,12 @@ impl BatchScheduler {
         {
             self.abort_sequence(seq, &msg);
             self.eval_failures_exhausted();
+            return;
+        }
+        // A pad trim that could not rewind the model's own state leaves its
+        // offset ahead of the token count; never decode from that (#1755).
+        if let Err(err) = pad_trim {
+            self.abort_sequence(seq, &err);
             return;
         }
 
@@ -983,6 +987,7 @@ impl BatchScheduler {
         // on it below once the borrow has ended. Deferred-init: every path that
         // reaches the check below assigns it exactly once; the others return.
         let prefill_eval: Option<Result<(), String>>;
+        let mut pad_trim: Result<(), String> = Ok(());
         let logits = {
             let caches = match self.cache_pool.get_caches_mut(seq.seq_id) {
                 Some(c) => c,
@@ -1030,12 +1035,11 @@ impl BatchScheduler {
                 logits
             };
 
-            // Trim padding positions from KV caches when the chunk was padded.
+            // Trim padding positions from KV caches (and from a model-owned
+            // family's own state) when the chunk was padded.
             if pad_mask_opt.is_some() && eff_chunk.len() > actual_chunk_len {
                 let excess = (eff_chunk.len() - actual_chunk_len) as i32;
-                for c in caches.iter_mut() {
-                    c.trim(excess);
-                }
+                pad_trim = trim_padded_prefill(&self.model, seq.seq_id, caches, excess);
             }
             logits
         };
@@ -1047,6 +1051,10 @@ impl BatchScheduler {
         {
             self.abort_sequence(seq, &msg);
             self.eval_failures_exhausted();
+            return;
+        }
+        if let Err(err) = pad_trim {
+            self.abort_sequence(seq, &err);
             return;
         }
 
@@ -1184,8 +1192,11 @@ impl BatchScheduler {
                     return false;
                 }
             };
+            // A model-owned family's pool entry holds no `KVCache` to read; its
+            // own offset equals the cursor, since every earlier padded chunk
+            // was rewound (#1755).
             if self.model.supports_batching() {
-                caches.first().map_or(0, |c| c.offset)
+                caches.first().map_or(offset as i32, |c| c.offset)
             } else {
                 offset as i32
             }
@@ -1242,11 +1253,13 @@ impl BatchScheduler {
                 actual_chunk_len.saturating_sub(1),
             );
 
-            // Trim padding positions from KV caches when the chunk was padded.
+            // Trim padding positions from KV caches (and from a model-owned
+            // family's own state) when the chunk was padded.
             if pad_mask_opt.is_some() && eff_chunk.len() > actual_chunk_len {
                 let excess = (eff_chunk.len() - actual_chunk_len) as i32;
-                for c in caches.iter_mut() {
-                    c.trim(excess);
+                if let Err(err) = trim_padded_prefill(&self.model, seq.seq_id, caches, excess) {
+                    self.abort_sequence(seq, &err);
+                    return false;
                 }
             }
             logits

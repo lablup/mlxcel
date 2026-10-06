@@ -1857,12 +1857,15 @@ impl LanguageModel for Llama4Wrapper {
         true
     }
 
-    /// Opt out of NA tile-aligned padded prefill for the reason spelled out on
-    /// `Gemma3Wrapper::supports_padded_prefill` (`src/models/gemma3.rs`): the
-    /// scheduler's post-pad trim only reaches `CachePool` caches, and a
-    /// `model_owned` family's pool entry holds none, so the pad positions would
-    /// stay in this model's own `ChunkedKVCache` / `KVCache` set and push
-    /// `offset` past the real token count (issue #1335).
+    /// Opt out of NA tile-aligned padded prefill: the scheduler's post-pad trim
+    /// only reaches `CachePool` caches, and a `model_owned` family's pool entry
+    /// holds none, so the pad positions would stay in this model's own
+    /// `ChunkedKVCache` / `KVCache` set and push `offset` past the real token
+    /// count (issue #1335).
+    ///
+    /// Lifting this means implementing `LanguageModel::trim_sequence_state` and
+    /// `trim_internal_caches` (issue #1755) with a rewind for `ChunkedKVCache`
+    /// that also handles a pad tail crossing a chunk boundary.
     fn supports_padded_prefill(&self) -> bool {
         false
     }

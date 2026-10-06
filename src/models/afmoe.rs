@@ -1823,12 +1823,15 @@ impl LanguageModel for AfmoeModel {
         false
     }
 
-    /// Opt out of NA tile-aligned padded prefill for the reason spelled out on
-    /// `Gemma3Wrapper::supports_padded_prefill` (`src/models/gemma3.rs`): the
-    /// scheduler's post-pad trim only reaches `CachePool` caches, and a
-    /// `model_owned` family's pool entry holds none, so the pad positions would
-    /// stay in this model's own caches and push `offset` past the real token
-    /// count (issue #1335).
+    /// Opt out of NA tile-aligned padded prefill: the scheduler's post-pad trim
+    /// only reaches `CachePool` caches, and a `model_owned` family's pool entry
+    /// holds none, so the pad positions would stay in this model's own caches
+    /// and push `offset` past the real token count (issue #1335).
+    ///
+    /// Lifting this means implementing `LanguageModel::trim_sequence_state` and
+    /// `trim_internal_caches` the way `Gemma3Wrapper` does (issue #1755); the
+    /// shared `Cache::rewind_padded_prefill` already covers this family's cache
+    /// enum, but the change has not been validated on an AFMoE checkpoint.
     fn supports_padded_prefill(&self) -> bool {
         false
     }

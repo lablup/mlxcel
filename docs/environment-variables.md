@@ -520,7 +520,8 @@ recommended as normal deployment settings.
 
 | Variable | Values | Default | Purpose |
 |----------|--------|---------|---------|
-| `MLXCEL_NO_PADDED_PREFILL` | presence disables | auto | Disables M5+/Neural-Accelerator prefill tile alignment. |
+| `MLXCEL_NO_PADDED_PREFILL` | presence disables | auto | Disables M5+/Neural-Accelerator prefill tile alignment in the CLI and in `mlxcel-server`. Takes precedence over `MLXCEL_FORCE_PADDED_PREFILL`. |
+| `MLXCEL_FORCE_PADDED_PREFILL` | presence enables | off | Forces 32-token prefill tile alignment on any hardware, CLI and server, so the padded prefill and its cache trim can be tested without an M5 Neural Accelerator. Pure overhead off M5; for validation only. |
 | `MLXCEL_FORCE_PADDED_PREFILL_MASK` | presence enables | off | Forces an explicit padded prefill mask path for debugging. |
 | `MLXCEL_LOG_NA_ATTENTION` | `sampled`, `all`, truthy | off | Logs Neural Accelerator attention dispatch decisions. |
 | `MLXCEL_ENABLE_FUSED_CAUSAL_PREFILL_ATTENTION` | presence enables | off | Enables an experimental Llama-family fused causal prefill path when supported. Ignored for a checkpoint whose `config.json` sets `rope_traditional`, or whose `rope_scaling` block selects a frequency table or a position scale: the launcher applies the split-half rotation from a plain `rope_theta` inside C++ and takes no flag, so such a model always uses the graph path and a one-time notice on stderr says so. |
