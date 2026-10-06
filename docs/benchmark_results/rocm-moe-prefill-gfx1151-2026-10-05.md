@@ -80,4 +80,4 @@ Build cost: the f16 arm adds two instantiations (4 and 8 bits). `qmm.hip` alone,
 
 ## Not measured
 
-gpt-oss-20b is unchanged (mxfp4, #2106). Models with more than 64 experts (Qwen3-30B-A3B, Nemotron-3-Nano) do not reach the kernel. Wave64 (CDNA) parts are untested; the kernel's 16-lane reduction stays inside a wave on both widths. The other MoE families the gate reaches with at most 64 experts were not measured (no such checkpoint on this host). The four-rows-per-load factor was not tuned.
+gpt-oss-20b is unchanged here (mxfp4); #2106 gave the kernel an mxfp4 arm, measured in [rocm-moe-prefill-mxfp4-gfx1151-2026-10-06.md](rocm-moe-prefill-mxfp4-gfx1151-2026-10-06.md). Models with more than 64 experts (Qwen3-30B-A3B, Nemotron-3-Nano) do not reach the kernel. Wave64 (CDNA) parts are untested; the kernel's 16-lane reduction stays inside a wave on both widths. The other MoE families the gate reaches with at most 64 experts were not measured (no such checkpoint on this host). The four-rows-per-load factor was not tuned.
