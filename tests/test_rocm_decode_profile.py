@@ -24,6 +24,7 @@ Run with:
 
 import os
 import pathlib
+import signal
 import subprocess
 import sys
 import tempfile
@@ -75,9 +76,12 @@ class GuardTests(unittest.TestCase):
     def hold_lock(self):
         """An outside process holding the guard lock until the test ends."""
         _TEST_LOCK.touch()
-        holder = subprocess.Popen(["flock", str(_TEST_LOCK), "sleep", "60"])
+        # flock's `sleep` child inherits the locked descriptor, so stop the
+        # whole process group, not just flock.
+        holder = subprocess.Popen(["flock", str(_TEST_LOCK), "sleep", "60"],
+                                  start_new_session=True)
         self.addCleanup(holder.wait)
-        self.addCleanup(holder.kill)
+        self.addCleanup(os.killpg, holder.pid, signal.SIGKILL)
         for _ in range(100):
             if not lock_is_free(_TEST_LOCK):
                 return holder
@@ -224,13 +228,57 @@ class GuardTests(unittest.TestCase):
             self.assertFalse(marker.exists())
 
     def test_a_guard_inside_a_guard_does_not_wait_for_the_lock(self):
+        self.hold_lock()
+        with tempfile.TemporaryDirectory() as kfd:
+            # The bash wrapper stands in for an outer guard: it is the inner
+            # guard's parent and names itself in ROCM_GPU_GUARD_LOCK_HELD. The
+            # trailing `exit` keeps bash from exec'ing the guard in its place.
+            inner = (f"ROCM_GPU_GUARD_LOCK_HELD=$$ bash {GUARD} --idle-secs 1 --max-wait 5"
+                     " -- true; exit $?")
+            r = subprocess.run(["bash", "-c", inner], env=guard_env(kfd),
+                               capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("lock held by outer guard", r.stderr)
+            self.assertNotIn("waiting for guard lock", r.stderr)
+
+    def test_a_held_variable_naming_a_non_ancestor_does_not_skip_the_lock(self):
         holder = self.hold_lock()
         with tempfile.TemporaryDirectory() as kfd:
-            r = run_guard(kfd, "--idle-secs", "1", "--max-wait", "5", "--", "true",
-                          env_extra={"ROCM_GPU_GUARD_LOCK_HELD": str(holder.pid)})
-            self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertIn(f"lock held by outer guard {holder.pid}", r.stderr)
-            self.assertNotIn("waiting for guard lock", r.stderr)
+            # The lock holder is alive but not this guard's ancestor, like a
+            # reused pid or an export leaked by a daemon.
+            for held in (str(holder.pid), "1", "self"):
+                r = run_guard(kfd, "--idle-secs", "1", "--max-wait", "2", "--", "true",
+                              env_extra={"ROCM_GPU_GUARD_LOCK_HELD": held})
+                self.assertEqual(r.returncode, 75, (held, r.stderr))
+                self.assertIn("gave up waiting for guard lock", r.stderr)
+
+    def test_sigterm_while_waiting_for_the_lock_stops_the_guard(self):
+        self.hold_lock()
+        with tempfile.TemporaryDirectory() as kfd, tempfile.TemporaryDirectory() as out:
+            marker = pathlib.Path(out) / "ran"
+            p = subprocess.Popen(["bash", str(GUARD), "--idle-secs", "1", "--", "touch",
+                                  str(marker)],
+                                 env=guard_env(kfd), stderr=subprocess.PIPE, text=True)
+            self.addCleanup(p.kill)
+            # Wait for the guard's background flock to be blocked on the lock.
+            for _ in range(100):
+                kids = subprocess.run(["pgrep", "-P", str(p.pid), "-x", "flock"],
+                                      capture_output=True, text=True).stdout.split()
+                if kids:
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("guard never started waiting for the lock")
+            p.terminate()
+            _, err = p.communicate(timeout=30)
+            self.assertEqual(p.returncode, 143, err)
+            self.assertIn("caught SIGTERM", err)
+            self.assertFalse(marker.exists())
+            for _ in range(50):
+                if not os.path.exists(f"/proc/{kids[0]}"):
+                    break
+                time.sleep(0.1)
+            self.assertFalse(os.path.exists(f"/proc/{kids[0]}"), "flock outlived the guard")
 
     def test_a_nested_guard_command_completes(self):
         with tempfile.TemporaryDirectory() as kfd:

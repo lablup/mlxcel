@@ -23,7 +23,7 @@
 # other instead of seeing each other's command as contention and rejecting
 # every attempt (#2146). COMMAND runs without the lock descriptor and with
 # ROCM_GPU_GUARD_LOCK_HELD set to the guard's pid; a guard that starts with
-# that variable naming a live process skips the lock, so nesting cannot
+# that variable naming one of its ancestors skips the lock, so nesting cannot
 # deadlock. flock (util-linux) is required: without it the guard exits 2.
 #
 # Every sample is appended to --log (default: stderr only), so the published
@@ -84,20 +84,10 @@ done
 IDLE_SECS=$((10#$IDLE_SECS)); MAX_ATTEMPTS=$((10#$MAX_ATTEMPTS)); MAX_WAIT=$((10#$MAX_WAIT))
 [[ $# -gt 0 ]] || { echo "rocm_gpu_guard: no command given" >&2; usage >&2; exit 2; }
 [[ -d "$KFD_PROC_DIR" ]] || { echo "rocm_gpu_guard: $KFD_PROC_DIR not found (no ROCm KFD driver?)" >&2; exit 2; }
-# An outer guard on this host already holds the lock for this process tree.
-OUTER_GUARD=""
-if [[ -n "${ROCM_GPU_GUARD_LOCK_HELD:-}" && -e "/proc/${ROCM_GPU_GUARD_LOCK_HELD}" ]]; then
-  OUTER_GUARD="$ROCM_GPU_GUARD_LOCK_HELD"
-fi
-if [[ -z "$OUTER_GUARD" ]] && ! command -v flock >/dev/null 2>&1; then
-  echo "rocm_gpu_guard: flock not found (util-linux)" >&2
-  exit 2
-fi
 # --max-wait counts from here. run_secs is the time COMMAND has run, which is
 # not waiting.
 SECONDS=0
 run_secs=0
-waited() { echo $((SECONDS - run_secs)); }
 
 note() {
   local line
@@ -148,6 +138,20 @@ descends_from() {
   return 1
 }
 
+# An outer guard holds the lock for this process tree only when
+# ROCM_GPU_GUARD_LOCK_HELD names one of this guard's ancestors. A stale value
+# (the outer guard is gone and its pid reused, or a daemon COMMAND left behind
+# carries the export) does not skip the lock.
+OUTER_GUARD=""
+held="${ROCM_GPU_GUARD_LOCK_HELD:-}"
+if [[ "$held" =~ ^[1-9][0-9]*$ && "$held" != "$$" ]] && descends_from "$$" "$held"; then
+  OUTER_GUARD="$held"
+fi
+if [[ -z "$OUTER_GUARD" ]] && ! command -v flock >/dev/null 2>&1; then
+  echo "rocm_gpu_guard: flock not found (util-linux)" >&2
+  exit 2
+fi
+
 # Holders in $2 (a kfd_holders reading) that are not $1 or its descendants.
 #
 # A holder whose /proc entry is gone has already exited and been reaped: the
@@ -180,7 +184,8 @@ wait_idle() {
       (( quiet > 0 )) && note "idle streak reset after ${quiet}s: gpu=[${holders}] compilers=[${comps}]"
       quiet=0
     fi
-    if (( MAX_WAIT > 0 && $(waited) >= MAX_WAIT )); then
+    # Spent budget is time since guard start minus time COMMAND ran.
+    if (( quiet < IDLE_SECS && MAX_WAIT > 0 && SECONDS - run_secs >= MAX_WAIT )); then
       note "gave up after ${MAX_WAIT}s of waiting without ${IDLE_SECS}s of idle"
       return 1
     fi
@@ -226,7 +231,7 @@ acquire_lock() {
   fi
   note "waiting for guard lock $LOCK"
   if (( MAX_WAIT > 0 )); then
-    local remaining=$((MAX_WAIT - $(waited)))
+    local remaining=$((MAX_WAIT - (SECONDS - run_secs)))
     (( remaining < 0 )) && remaining=0
     flock -w "$remaining" "$LOCK_FD" &
   else
@@ -244,8 +249,16 @@ acquire_lock() {
 
 if [[ -n "$OUTER_GUARD" ]]; then
   note "lock held by outer guard ${OUTER_GUARD}: not taking $LOCK"
+  # No lock to hold here; a placeholder descriptor keeps the closing
+  # redirections on COMMAND and the monitor below unconditional.
+  exec {LOCK_FD}</dev/null
 else
   acquire_lock || exit 75
+  # Do not hold the lock through an idle wait the budget cannot cover.
+  if (( MAX_WAIT > 0 && MAX_WAIT - (SECONDS - run_secs) < IDLE_SECS )); then
+    note "gave up: $((MAX_WAIT - (SECONDS - run_secs)))s of --max-wait left after the lock wait, shorter than ${IDLE_SECS}s of idle"
+    exit 75
+  fi
   export ROCM_GPU_GUARD_LOCK_HELD=$$
 fi
 
@@ -255,13 +268,10 @@ while (( attempt < MAX_ATTEMPTS )); do
   wait_idle || exit 75
   note "attempt ${attempt}/${MAX_ATTEMPTS}: start: $*"
   run_start=$SECONDS
-  # COMMAND gets no copy of the lock descriptor, so a daemon it leaves
-  # behind cannot keep the lock after this guard exits.
-  if [[ -n "$LOCK_FD" ]]; then
-    "$@" {LOCK_FD}<&- &
-  else
-    "$@" &
-  fi
+  # Neither COMMAND nor the monitor gets a copy of the lock descriptor, so a
+  # daemon COMMAND leaves behind, or the monitor's last `sleep 1`, cannot keep
+  # the lock after this guard exits.
+  "$@" {LOCK_FD}<&- &
   cmd_pid=$!
   # The monitor exits 1 if any of its samples was contended.
   (
@@ -280,7 +290,7 @@ while (( attempt < MAX_ATTEMPTS )); do
     done
     note "monitor: ${n} samples"
     exit "$contended"
-  ) &
+  ) {LOCK_FD}<&- &
   mon_pid=$!
   rc=0
   wait "$cmd_pid" || rc=$?
