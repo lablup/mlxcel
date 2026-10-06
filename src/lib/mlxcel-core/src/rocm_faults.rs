@@ -73,15 +73,16 @@ pub fn fault_probe_array(kind: RocmFaultKind) -> Result<UniquePtr<MlxArray>, cxx
     crate::ffi::rocm_fault_probe_array(kind.bridge_code())
 }
 
-/// A lazy f32 array of `input.size() + 1` elements from one custom-kernel
-/// launch that always uses the same kernel name and no template args (issue
-/// #2149): element 0 is the kernel's `inp_shape[0]` (`-1.0` for a 0-d input,
-/// which gets no `inp_shape` parameter) and element `1 + i` is `input[i]`
-/// converted to f32.
+/// A lazy array of `input.size() + 1` elements (f16 when `f16_output`, f32
+/// otherwise) from one custom-kernel launch that always uses the same kernel
+/// name and no template args (issue #2149): element 0 is the kernel's
+/// `inp_shape[0]` (`-1.0` for a 0-d input, which gets no `inp_shape`
+/// parameter) and element `1 + i` is `input[i]`.
 ///
-/// Only the generated source tells two calls apart, through the input's dtype
-/// and whether it is 0-d, so a JIT cache keyed by name alone serves the first
-/// compiled module to every later call: an f16 input is read as f32, and a 0-d
+/// Only the generated source tells two calls apart, through the input's dtype,
+/// the output's dtype and whether the input is 0-d, so a JIT cache keyed by
+/// name alone serves the first compiled module to every later call: an f16
+/// input is read as f32, an f16 output is written as f32, and a 0-d
 /// input after a 1-d one launches with an argument list the module does not
 /// declare. A 0-d input after a 1-d one can fault the queue on such a build,
 /// so run that sequence in a process of its own.
@@ -91,6 +92,9 @@ pub fn fault_probe_array(kind: RocmFaultKind) -> Result<UniquePtr<MlxArray>, cxx
 /// Returns the bridge's error on backends other than ROCm, and for an input
 /// that is not a float32, float16 or bfloat16 array, 0-d or 1-d with 1 to
 /// 1024 elements.
-pub fn jit_key_probe_array(input: &MlxArray) -> Result<UniquePtr<MlxArray>, cxx::Exception> {
-    crate::ffi::rocm_jit_key_probe(input)
+pub fn jit_key_probe_array(
+    input: &MlxArray,
+    f16_output: bool,
+) -> Result<UniquePtr<MlxArray>, cxx::Exception> {
+    crate::ffi::rocm_jit_key_probe(input, f16_output)
 }

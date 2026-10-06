@@ -5225,8 +5225,11 @@ std::unique_ptr<MlxArray> rocm_fault_probe_array(int32_t kind) {
 
 // Test-only fixture for lablup/mlxcel#2149; see the header. One kernel name
 // and no template args for every call, so only the generated source (the
-// input's dtype, and whether the input is 0-d) can tell two calls apart.
-std::unique_ptr<MlxArray> rocm_jit_key_probe(const MlxArray& input) {
+// input's dtype, the output's dtype, and whether the input is 0-d) can tell
+// two calls apart.
+std::unique_ptr<MlxArray> rocm_jit_key_probe(
+    const MlxArray& input,
+    bool f16_output) {
 #ifdef MLXCEL_BRIDGE_ROCM_BACKEND
     using namespace mlx::core;
     const array& inp = input.inner;
@@ -5259,7 +5262,7 @@ std::unique_ptr<MlxArray> rocm_jit_key_probe(const MlxArray& input) {
     auto outputs = kernel(
         {inp},
         {{n + 1}},
-        {float32},
+        {f16_output ? float16 : float32},
         std::make_tuple(n, 1, 1),
         std::make_tuple(n, 1, 1),
         {},
@@ -5269,6 +5272,7 @@ std::unique_ptr<MlxArray> rocm_jit_key_probe(const MlxArray& input) {
     return std::make_unique<MlxArray>(std::move(outputs.at(0)));
 #else
     (void)input;
+    (void)f16_output;
     throw std::runtime_error(
         "rocm_jit_key_probe is only available on the ROCm backend");
 #endif

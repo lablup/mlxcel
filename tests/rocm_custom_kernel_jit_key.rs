@@ -26,6 +26,8 @@
 //! - f32, then f16, then bf16 inputs: with a name-only key the f16 and bf16
 //!   buffers are read through `const float*` and the output is unrelated to
 //!   the input;
+//! - an f32 output, then an f16 output, at one f32 input: with a name-only
+//!   key the f16 buffer is written through `float*`;
 //! - a 1-d input, then a 0-d input, with the kernel reading `inp_shape`: with
 //!   a name-only key the 0-d launch passes no shape argument to a module that
 //!   declares one, so the output pointer is read from the wrong slot. That can
@@ -33,7 +35,7 @@
 //!   runs in a child process (this binary, re-invoked on an ignored test), as
 //!   `tests/rocm_gpu_faults.rs` does.
 //!
-//! Both fail on the name-keyed overlay (checked by reverting the fix) and pass
+//! All three fail on the name-keyed overlay (checked by reverting the fix) and pass
 //! with the source-hash key. Skips on any other backend. Run on a ROCm host
 //! with:
 //!
@@ -74,9 +76,14 @@ fn input(values: &[f32], shape: &[i32], dtype: i32) -> UniquePtr<MlxArray> {
     mlxcel_core::astype(&f32_array, dtype)
 }
 
-/// Evaluate the probe on `inp` and return its f32 output.
-fn probe(inp: &MlxArray) -> Result<Vec<f32>, String> {
-    let out = jit_key_probe_array(inp).map_err(|e| e.to_string())?;
+/// Evaluate the probe on `inp` (f16 output when `f16_output`) and return its
+/// output as f32.
+fn probe(inp: &MlxArray, f16_output: bool) -> Result<Vec<f32>, String> {
+    let raw = jit_key_probe_array(inp, f16_output).map_err(|e| e.to_string())?;
+    // Evaluate the probe on its own first, so the module lookup under test
+    // happens before the conversion below is part of the graph.
+    mlxcel_core::try_eval(&raw).map_err(|e| e.to_string())?;
+    let out = mlxcel_core::astype(&raw, dtype::FLOAT32);
     mlxcel_core::try_eval(&out).map_err(|e| e.to_string())?;
     let bytes = mlxcel_core::array_to_raw_bytes(&out);
     Ok(bytes
@@ -106,11 +113,32 @@ fn input_dtype_selects_its_own_module() {
         ("bfloat16", dtype::BFLOAT16),
     ] {
         let inp = input(&VALUES, &[n], dt);
-        let got = probe(&inp).unwrap_or_else(|e| panic!("{label} probe failed: {e}"));
+        let got = probe(&inp, false).unwrap_or_else(|e| panic!("{label} probe failed: {e}"));
         assert_eq!(
             got,
             expected(n as f32, &VALUES),
             "a {label} input must be read as {label}, not through the module compiled for an earlier dtype"
+        );
+    }
+}
+
+#[test]
+fn output_dtype_selects_its_own_module() {
+    if !on_rocm() {
+        eprintln!("skipping: not running on a ROCm device");
+        return;
+    }
+    let n = VALUES.len() as i32;
+    let inp = input(&VALUES, &[n], dtype::FLOAT32);
+    // f32 output first, so a name-keyed cache holds the `float*` module when
+    // the f16 output arrives.
+    for (label, f16_output) in [("float32", false), ("float16", true)] {
+        let got =
+            probe(&inp, f16_output).unwrap_or_else(|e| panic!("{label}-output probe failed: {e}"));
+        assert_eq!(
+            got,
+            expected(n as f32, &VALUES),
+            "a {label} output must be written as {label}, not through the module compiled for an earlier output dtype"
         );
     }
 }
@@ -235,9 +263,9 @@ fn child_scalar_after_vector() {
     }
 
     let vector = input(&VALUES[..4], &[4], dtype::FLOAT32);
-    report("vector", probe(&vector));
+    report("vector", probe(&vector, false));
     let scalar = input(&VALUES[..1], &[], dtype::FLOAT32);
-    report("scalar", probe(&scalar));
+    report("scalar", probe(&scalar, false));
 
     // A regression faults the queue, and HIP's teardown then waits on host
     // callbacks that never run, so leave without running it, as

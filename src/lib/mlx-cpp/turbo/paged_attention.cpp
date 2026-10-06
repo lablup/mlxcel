@@ -566,12 +566,15 @@ mlx::core::array paged_attention_decode(
     // `QType`/`KVType`/`VType` exist to key the JIT cache on the input dtypes
     // and are deliberately unreferenced by the kernel body (issue #1054, same
     // mechanism as #1053). CUDA names a custom kernel
-    // `"custom_kernel_" + name + template_arguments_hash(template_args)` and
-    // memoises the compiled module under that name process-wide, while the
-    // buffer parameter types are generated from the runtime input dtypes. With
-    // int-only args, two callers that share this geometry but differ in pool
-    // dtype get one compiled module and the later one reads through the wrong
-    // pointer type. Metal already folds the dtypes into its key.
+    // `"custom_kernel_" + name + template_arguments_hash(template_args)`, and
+    // at the time memoised the compiled module under that name process-wide,
+    // while the buffer parameter types are generated from the runtime input
+    // dtypes. With int-only args, two callers that share this geometry but
+    // differ in pool dtype got one compiled module and the later one read
+    // through the wrong pointer type. Metal folds the dtypes into its key, and
+    // CUDA (ml-explore/mlx#4273, in the current pin) and ROCm (#2149) now key
+    // the module on a hash of the generated source; these args stay as
+    // defense in depth (`scripts/ci/check_kernel_dtype_keys.py`).
     std::vector<std::pair<std::string, TemplateArg>> template_args = {
         {"Dim", dim},
         {"NRep", n_rep},

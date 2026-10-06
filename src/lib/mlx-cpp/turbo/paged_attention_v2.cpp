@@ -681,17 +681,18 @@ std::vector<mlx::core::array> paged_attention_decode_v2_partial(
     // they exist to put the input dtypes into the JIT cache key (issue #1053).
     //
     // Both backends generate the buffer parameter types from the *runtime*
-    // dtypes of `inputs`, but only Metal folds those dtypes into the cache key.
-    // `backend/common/metal_kernel.cpp` appends `get_type_string(arr.dtype())`
-    // per input to the kernel name; `backend/cuda/custom_kernel.cpp` builds its
-    // name as `"custom_kernel_" + name + template_arguments_hash(template_args)`
-    // and stops there, while `cu::get_jit_module` memoises the compiled module
-    // under exactly that name in a process-global map and only invokes the
-    // source builder on a miss. With int-only template args a `float` pool and
-    // an `f16` pool of the same geometry therefore hash to one name, and
-    // whichever dtype compiles first wins for the life of the process: the
-    // second one reads its buffer through the wrong pointer type and returns
-    // numbers unrelated to its inputs.
+    // dtypes of `inputs`. Metal folds those dtypes into the cache key
+    // (`backend/common/metal_kernel.cpp` appends `get_type_string(arr.dtype())`
+    // per input to the kernel name). `backend/cuda/custom_kernel.cpp` builds
+    // its name as `"custom_kernel_" + name + template_arguments_hash(...)`, and
+    // when #1053 was found `cu::get_jit_module` memoised the compiled module
+    // under exactly that name, so with int-only template args a `float` pool
+    // and an `f16` pool of the same geometry shared one module and the second
+    // read its buffer through the wrong pointer type. Upstream ml-explore/mlx
+    // #4273 (in the current pin) and, for ROCm, #2149 now also key the module
+    // on a hash of the generated source, so these args are defense in depth
+    // against a backend or fork that regresses to a name-only key
+    // (`scripts/ci/check_kernel_dtype_keys.py`).
     //
     // `template_arguments_hash` does hash a `Dtype` arg, so naming the dtypes
     // here restores the discrimination on CUDA. On Metal the key was already

@@ -1433,14 +1433,15 @@ void set_rocm_port_warp_size_for_tests(int32_t warp_size);
 std::unique_ptr<MlxArray> rocm_fault_probe_array(int32_t kind);
 
 // Test-only (lablup/mlxcel#2149): launches one `fast::hip_kernel` under a fixed
-// name with no template args and returns an f32 array of `input.size() + 1`
-// elements: element 0 is `inp_shape[0]` (-1 for a 0-d input, which has no
-// `inp_shape` parameter) and element `1 + i` is `(float)input[i]`. Calls that
-// differ only in the input's dtype or 0-d-ness must not share a compiled
+// name with no template args and returns an array of `input.size() + 1`
+// elements, f16 when `f16_output` and f32 otherwise: element 0 is
+// `inp_shape[0]` (-1 for a 0-d input, which has no `inp_shape` parameter) and
+// element `1 + i` is `(float)input[i]`. Calls that differ only in the input's
+// dtype, the output's dtype or the input's 0-d-ness must not share a compiled
 // module; with a name-keyed JIT cache they did. Takes a float32, float16 or
 // bfloat16 input that is 0-d or 1-d with 1 to 1024 elements. Throws on
 // backends other than ROCm.
-std::unique_ptr<MlxArray> rocm_jit_key_probe(const MlxArray& input);
+std::unique_ptr<MlxArray> rocm_jit_key_probe(const MlxArray& input, bool f16_output);
 
 
 // True when this backend has a BitLinear kernel port: Metal, CUDA or ROCm

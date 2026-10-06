@@ -43,10 +43,10 @@ key. This check enforces that.
 Why the check stays now that every backend keys on the source: it is defense
 in depth, not the fix. A re-vendored ROCm fork, an MLX pin bump or a new
 backend can bring a name-only key back, and nothing else would notice until a
-model returned wrong numbers. The explicit keys cost nothing at runtime (the
-name feeds the source, which is hashed anyway), so no launch drops them: some
-are also referenced by their kernel bodies as type aliases, and the rest are
-cheap insurance against exactly that regression.
+model returned wrong numbers. The explicit keys add no compiles (the source
+already differs per dtype, so the source hash splits those modules anyway), so
+no launch drops them: some are also referenced by their kernel bodies as type
+aliases, and the rest are cheap insurance against exactly that regression.
 
 The rule
 --------
@@ -94,9 +94,10 @@ Limits: the rule reads only *named* ``std::vector<...TemplateArg>``
 initialisers, so a launch that passes ``template_args`` inline (the #1804 ROCm
 fault probe passes ``{}``, at a fixed float32; the #2149 JIT-key probe passes
 ``{}`` on purpose, so that only the backend's source-hash key separates its
-dtypes) is in scope but has nothing to check. A launch reached without a direct call in the file (a function pointer,
-or a macro defined elsewhere) does not put that file in scope; the pin catches a
-pinned file that switches to such a form, not a new file that starts with one.
+dtypes) is in scope but has nothing to check. A launch reached without a
+direct call in the file (a function pointer, or a macro defined elsewhere) does
+not put that file in scope; the pin catches a pinned file that switches to such
+a form, not a new file that starts with one.
 
 Usage
 -----
