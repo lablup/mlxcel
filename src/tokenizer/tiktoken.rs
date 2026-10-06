@@ -575,6 +575,12 @@ impl TiktokenTokenizer {
             .or_else(|| self.encoder.get(token.as_bytes()).copied())
     }
 
+    /// Whether `id` is a special or ordinary token of this vocabulary
+    /// (see `MlxcelTokenizer::contains_id`).
+    pub fn contains_id(&self, id: u32) -> bool {
+        self.special_decoder.contains_key(&id) || self.decoder.contains_key(&id)
+    }
+
     /// The exclusive id bound this wrapper can decode (#1485; see
     /// `MlxcelTokenizer::vocab_size`).
     pub fn vocab_size(&self) -> usize {

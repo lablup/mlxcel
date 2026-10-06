@@ -28,6 +28,11 @@ use crate::server::types::{DetokenizeRequest, DetokenizeResponse, ErrorResponse}
 /// `tokens_to_str` does. An absent or empty `tokens` answers `{"content": ""}`
 /// instead of failing, which is upstream's behavior too (#1442).
 ///
+/// An id that is negative or not in the vocabulary answers HTTP 500 with
+/// `type: server_error`, matching llama.cpp's status and type (its message is
+/// an opaque "vector"; ours names the first bad id and the vocabulary size).
+/// The check runs before decoding, so no partial text is returned (#2127).
+///
 /// A token whose bytes are not valid UTF-8 on its own is joined with its
 /// neighbours before decoding, so a split multi-byte character round trips;
 /// bytes that still cannot form a character come back as U+FFFD, which is what
@@ -43,7 +48,18 @@ pub async fn detokenize(
         }));
     };
 
-    let ids: Vec<u32> = tokens.iter().map(|&x| x as u32).collect();
+    let mut ids: Vec<u32> = Vec::with_capacity(tokens.len());
+    for &token in tokens {
+        match u32::try_from(token) {
+            Ok(id) if state.tokenizer.contains_id(id) => ids.push(id),
+            _ => {
+                return Err(ErrorResponse::internal_server_error(format!(
+                    "token id {token} is out of vocabulary range (vocab_size {})",
+                    state.tokenizer.vocab_size()
+                )));
+            }
+        }
+    }
 
     let content = state.tokenizer.decode(&ids, false).map_err(|e| {
         ErrorResponse::new(

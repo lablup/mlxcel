@@ -409,6 +409,22 @@ impl MlxcelTokenizer {
         }
     }
 
+    /// Whether `id` names an entry of this vocabulary (#2127).
+    ///
+    /// This is a membership test, not a `< vocab_size()` comparison: the
+    /// HuggingFace `vocab_size()` counts entries rather than the largest id
+    /// plus one, and the other backends' id ranges can have holes, so an id
+    /// below the bound can still be unassigned and one above it can be an
+    /// added token. HuggingFace uses the same added-vocabulary-then-model
+    /// lookup `decode` performs, so added and special tokens count as valid.
+    pub fn contains_id(&self, id: u32) -> bool {
+        match self {
+            Self::HuggingFace(t) => t.id_to_token(id).is_some(),
+            Self::SentencePiece(t) => t.contains_id(id),
+            Self::Tiktoken(t) => t.contains_id(id),
+        }
+    }
+
     /// The number of ids this vocabulary can decode, i.e. the exclusive
     /// upper bound for iterating [`Self::token_piece_bytes`] (#1485).
     ///
@@ -665,6 +681,14 @@ impl MlxcelTokenizer {
 }
 
 impl SentencePieceTokenizer {
+    /// Whether `id` is a special token, an added token, or inside the
+    /// SentencePiece model's own id range (see `MlxcelTokenizer::contains_id`).
+    pub fn contains_id(&self, id: u32) -> bool {
+        self.id_to_special_token.contains_key(&id)
+            || self.added_token_contents.contains_key(&id)
+            || (id as usize) < self.processor.len()
+    }
+
     /// The exclusive id bound this wrapper can decode: the SentencePiece
     /// vocabulary size, extended past any added-token id living outside it
     /// (#1485; see `MlxcelTokenizer::vocab_size`).
@@ -1954,6 +1978,9 @@ pub fn load_tokenizer(model_path: &Path) -> Result<MlxcelTokenizer> {
         model_path
     ))
 }
+
+#[cfg(test)]
+mod contains_id_tests;
 
 #[cfg(test)]
 mod tests {
