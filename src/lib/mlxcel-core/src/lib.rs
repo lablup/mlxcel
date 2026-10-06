@@ -3872,6 +3872,11 @@ pub mod loop_detection;
 // Public so that the server batch scheduler can perform step-level sampling.
 pub mod sampling;
 
+// The opt-in gate for the B9 pre-bias suppression counters, read once from
+// `MLXCEL_LANG_BIAS_COUNTERS`, plus the per-thread scoped override tests use
+// instead of mutating the environment (#2187).
+pub mod lang_bias_counters;
+
 // Which sampling path a decode step actually took, announced at INFO (#901).
 // Public so every `fused_sample` call site can drain the report, and so the
 // microbenchmark and the server can read the cap-overflow counters.

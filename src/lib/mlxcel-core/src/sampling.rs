@@ -664,22 +664,9 @@ fn preprocess_logits_for_sampling(
 /// The token-bias stage shared by [`preprocess_penalty_stages`] and the
 /// mirostat bypass path (#1485): applies [`SamplingConfig::token_bias`] with
 /// the B9 observability counters, or returns the input unchanged (no new
-/// graph nodes) when the map is empty.
-/// Whether the B9 pre-bias suppression counters are collected.
-///
-/// Off by default: reading the pre-bias argmax id requires an `eval` plus a
-/// device-to-host read on every decode step, which breaks the async lookahead
-/// pipeline the decode loop depends on. `LANG_BIAS_APPLIED_TOTAL` is unaffected
-/// and stays always-on, since incrementing it costs nothing.
-fn lang_bias_counters_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("MLXCEL_LANG_BIAS_COUNTERS")
-            .map(|v| v != "0" && !v.is_empty())
-            .unwrap_or(false)
-    })
-}
-
+/// graph nodes) when the map is empty. `LANG_BIAS_APPLIED_TOTAL` is always
+/// counted; the pre-bias suppression counters only behind
+/// [`crate::lang_bias_counters`].
 fn apply_token_bias_stage(
     last_logits: UniquePtr<MlxArray>,
     config: &SamplingConfig,
@@ -699,7 +686,7 @@ fn apply_token_bias_stage(
     // qwen3-30b-a3b-4bit and +78% on qwen3-0.6b-4bit, paid by every request
     // that sets `logit_bias` or `ignore_eos`. The counters stay available for
     // diagnosing suppression behaviour via MLXCEL_LANG_BIAS_COUNTERS=1.
-    if lang_bias_counters_enabled() {
+    if crate::lang_bias_counters::enabled() {
         let top_arr = ffi::argmax_last_axis(&last_logits);
         ffi::eval(&top_arr);
         let top_id = ffi::item_i32(&top_arr);
@@ -1098,7 +1085,7 @@ pub fn row_supports_fused_batch_except_bias(
     needs_token_override: bool,
     needs_per_token_payload: bool,
 ) -> bool {
-    if !config.token_bias.is_empty() && lang_bias_counters_enabled() {
+    if !config.token_bias.is_empty() && crate::lang_bias_counters::enabled() {
         return false;
     }
     config_supports_fused_batch_except_bias(config)
