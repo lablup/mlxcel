@@ -49,7 +49,7 @@ def sha(text):
 
 def server_cmd(a, width):
     cmd = [a.server, "-m", a.target, "--port", str(a.port), "--ignore-eos",
-           "--max-batch-size", "1", "--parallel", "1"]
+           "--max-batch-size", "1", "--parallel", "1"] + a.server_arg
     if width is not None:
         cmd += ["--model-draft", a.drafter, "--draft-kind", "mtp",
                 "--draft-block-size", str(width)]
@@ -57,7 +57,10 @@ def server_cmd(a, width):
 
 
 def run_arm(a, tag, width, prompt):
-    gate_wait = hostgate.wait_quiet(log=sys.stderr)
+    # --no-gate skips only the sustained-quiet CPU wait (the CI runner shares
+    # this host); the driver and memory gates still run, and the record keeps
+    # ci_job_running and load1 so a noisy arm stays visible.
+    gate_wait = None if a.no_gate else hostgate.wait_quiet(log=sys.stderr)
     driver_wait, _window, nvrm_before = hostgate.driver_gate(log=sys.stderr)
     mem_wait, _avail = hostgate.mem_gate(log=sys.stderr)
     log_path = os.path.join(a.logdir, f"server.{tag}.log")
@@ -120,6 +123,12 @@ def main():
     ap.add_argument("--prompt-file", default=os.path.join(S1797, "prompt_retry.txt"))
     ap.add_argument("--port", type=int, default=18960)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--no-gate", action="store_true")
+    # The timed requests repeat the warm-up's prompt. With the prompt cache on,
+    # classic serves them from a whole-prompt hit while the MTP burst prefills
+    # cold, so the arms would differ in prefill work and in output bytes.
+    ap.add_argument("--server-arg", action="append", default=[],
+                    help="extra mlxcel-server argument for every arm (repeatable)")
     a = ap.parse_args()
     a.logdir = os.path.dirname(os.path.abspath(a.out))
     prompt = open(a.prompt_file).read()

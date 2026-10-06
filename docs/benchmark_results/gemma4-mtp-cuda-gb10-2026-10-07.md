@@ -42,7 +42,20 @@ The first bonus token is still sampled from an M=prompt LM-head projection in th
 
 ## Throughput
 
-THROUGHPUT_PLACEHOLDER
+Driver: `data/gemma4-mtp-cuda-gb10-2026-10-07/harness/mtp_rounds.py`, summarized by `harness/summarize.py`. Three interleaved rounds per pair, each round classic, MTP width 4, classic on one binary; one server per arm, `--ignore-eos --max-batch-size 1 --parallel 1 --no-cache-prompt`, the #1797 harness's 180-token prompt through `/v1/completions`, 200 tokens, one discarded warm-up and two timed requests per arm. The classic close/open pair is the null arm. The #1820 sustained-quiet CPU gate was skipped (`--no-gate`) because the CI runner on this host was busy with other units' jobs for over an hour; the driver and memory gates ran, `NV_ERR_NO_MEMORY` stayed at 0 on every arm, and `ci_job_running` is recorded per arm.
+
+| Pair | Round | Classic open | MTP | Classic close | MTP vs classic | Null (close vs open) | Accepted / proposed | Tokens per verify |
+|---|---|---|---|---|---|---|---|---|
+| 12B | 0 | 13.22 | 28.73 | 13.27 | +116.9% | +0.3% | 0.63 | 2.90 |
+| 12B | 1 | 13.18 | 27.17 | 13.20 | +106.0% | +0.2% | 0.63 | 2.90 |
+| 12B | 2 | 12.39 | 28.33 | 13.17 | +121.7% | +6.2% | 0.63 | 2.90 |
+| 31B | 0 | 8.33 | 15.81 | 8.23 | +90.9% | -1.2% | 0.64 | 2.94 |
+| 31B | 1 | 8.41 | 15.81 | 8.55 | +86.4% | +1.7% | 0.64 | 2.94 |
+| 31B | 2 | 8.46 | 14.80 | 8.03 | +79.6% | -5.1% | 0.64 | 2.94 |
+
+End-to-end tok/s. The speedup ranges (12B +106% to +122%, 31B +80% to +91%) lie far outside the null arm's spread (-5.1% to +6.2%), so both are resolved. Every arm of a pair produced the same output bytes (one sha per pair), which is a second parity check at 200 tokens.
+
+The prompt cache is off in these runs for a reason found while measuring: the timed requests repeat the warm-up's prompt, and with the cache on, classic serves them from a whole-prompt hit while the MTP burst (which never donates a buffered snapshot) prefills cold. A first run with the cache on gave a different classic text for the cached request than for the cold one, and the MTP text equalled the cold classic text. That is classic decode depending on cache state, not an MTP difference; it is outside #2160 and not changed here.
 
 ## Not covered here
 
