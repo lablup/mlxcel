@@ -42,7 +42,7 @@ The first bonus token is still sampled from an M=prompt LM-head projection in th
 
 ## Throughput
 
-Driver: `data/gemma4-mtp-cuda-gb10-2026-10-07/harness/mtp_rounds.py`, summarized by `harness/summarize.py`. Three interleaved rounds per pair, each round classic, MTP width 4, classic on one binary; one server per arm, `--ignore-eos --max-batch-size 1 --parallel 1 --no-cache-prompt`, the #1797 harness's 180-token prompt through `/v1/completions`, 200 tokens, one discarded warm-up and two timed requests per arm. The classic close/open pair is the null arm. The #1820 sustained-quiet CPU gate was skipped (`--no-gate`) because the CI runner on this host was busy with other units' jobs for over an hour; the driver and memory gates ran, `NV_ERR_NO_MEMORY` stayed at 0 on every arm, and `ci_job_running` is recorded per arm.
+Driver: `data/gemma4-mtp-cuda-gb10-2026-10-07/harness/mtp_rounds.py`, summarized by `harness/summarize.py`. Three interleaved rounds per pair, each round classic, MTP width 4, classic on one binary; one server per arm, `--ignore-eos --max-batch-size 1 --parallel 1 --no-cache-prompt`, the #1797 harness's `prompt_retry.txt` (180 Gemma tokens) through `/v1/completions`, 200 tokens, one discarded warm-up and two timed requests per arm. The classic close/open pair is the null arm. The #1820 sustained-quiet CPU gate was skipped (`--no-gate`) because the CI runner on this host was busy with other units' jobs for over an hour; the driver and memory gates ran, `NV_ERR_NO_MEMORY` stayed at 0 on every arm, and `ci_job_running` is recorded per arm.
 
 | Pair | Round | Classic open | MTP | Classic close | MTP vs classic | Null (close vs open) | Accepted / proposed | Tokens per verify |
 |---|---|---|---|---|---|---|---|---|
