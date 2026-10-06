@@ -35,8 +35,11 @@ use super::pad_trim::set_alignment_override_for_test;
 use crate::LoadedModel;
 use crate::models::gemma3::ModelArgs as Gemma3ModelArgs;
 use crate::models::{Gemma3Model, Gemma3Wrapper};
-use crate::server::config::{DecodeStorageBackend, PreemptionPolicy, ReasoningBudgetOverride};
+use crate::server::config::{
+    DecodeStorageBackend, PreemptionPolicy, PromptCacheRequestContext, ReasoningBudgetOverride,
+};
 use crate::server::model_provider::GenerateEvent;
+use crate::server::prompt_cache::{PromptCacheConfig, PromptCacheStore, key::MultimodalDigest};
 use crate::server::state::BatchMetrics;
 use crate::tokenizer::MlxcelTokenizer;
 
@@ -357,4 +360,87 @@ fn chunked_padded_prefill_matches_unpadded() {
     // 37 tokens in 16-token chunks, each padded to 32: the first chunk and two
     // continuation chunks are rewound, the continuations onto a rolled window.
     assert_padded_matches_unpadded(37, 16, DecodeStorageBackend::Dense);
+}
+
+/// Padded prefill and snapshot reuse together, the combination #1752 had to
+/// give up: a padded turn 1 donates a snapshot whose state holds exactly the
+/// keyed tokens, and turn 2 adopts it instead of re-prefilling the prefix.
+#[test]
+fn padded_prefill_keeps_snapshot_reuse() {
+    set_alignment_override_for_test(Some(true));
+    let store = Arc::new(PromptCacheStore::with_config(PromptCacheConfig::new(
+        true,
+        1 << 20,
+        32,
+        Duration::from_secs(600),
+        4,
+    )));
+    let mut sched =
+        scheduler(0, DecodeStorageBackend::Paged).with_prompt_cache(Some(store.clone()));
+    let ctx = PromptCacheRequestContext {
+        model_id: "tiny-gemma3".to_string(),
+        lora_id: None,
+        template_sig: "tpl".to_string(),
+        session_key: "session".to_string(),
+        mm_digest: MultimodalDigest::empty(),
+        history_prompt: None,
+        history_prefix_tokens: None,
+    };
+    let enqueue = |sched: &mut BatchScheduler, prompt: Vec<i32>| {
+        let mut opts = options(1);
+        opts.prompt_cache_ctx = Some(ctx.clone());
+        let (tx, rx) = mpsc::channel();
+        sched.enqueue_request(
+            "prompt".to_string(),
+            Some(prompt),
+            opts,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            tx,
+            Arc::new(AtomicBool::new(false)),
+            true,
+        );
+        rx
+    };
+
+    let first: Vec<i32> = (0..40).map(|i| i % 13).collect();
+    let rx = enqueue(&mut sched, first.clone());
+    for _ in 0..8 {
+        match sched.decide_action() {
+            BatchSchedulerAction::Prefill(id) => sched.execute_prefill(id),
+            BatchSchedulerAction::Decode(ids) => sched.execute_decode_step(&ids),
+            BatchSchedulerAction::Idle => break,
+            other => panic!("unexpected scheduler action {other:?}"),
+        }
+        sched.finalize_completed();
+        if sched.active_batch.is_empty() && sched.prefill_queue.is_empty() {
+            break;
+        }
+    }
+    loop {
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(GenerateEvent::Done(_)) => break,
+            Ok(GenerateEvent::Error(err)) => panic!("unexpected generation error: {err}"),
+            Ok(_) => {}
+            Err(err) => panic!("generation did not finish: {err}"),
+        }
+    }
+    assert_eq!(
+        store.stats().snapshot_entries,
+        1,
+        "the padded turn donated a snapshot"
+    );
+
+    let mut second = first.clone();
+    second.extend([1, 2, 3, 4]);
+    let _rx2 = enqueue(&mut sched, second);
+    let queued = sched.prefill_queue.dequeue().expect("turn 2 is queued");
+    set_alignment_override_for_test(None);
+    assert!(
+        queued.prefill_start_offset >= first.len(),
+        "turn 2 adopts the padded turn's snapshot, got start {}",
+        queued.prefill_start_offset
+    );
+    assert_eq!(store.stats().snapshot_hits, 1);
 }
