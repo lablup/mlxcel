@@ -257,15 +257,25 @@ const FUSED_ROPE_ENV_VARS_WITHOUT_TABLE_SUPPORT: usize = 2;
 ///
 /// The first two are presence-enabled, so `is_ok()` is the whole test.
 /// `MLXCEL_FUSED_ROPE_APPEND` is tri-state (`0` disables, `1` enables, unset
-/// takes the compiled-in default), so presence would report a lost kernel to
-/// someone who set it to `0` precisely to not use one. Asking the same gate the
-/// launcher asks keeps the notice tied to what actually happens.
+/// takes the compiled-in default), so it counts only when it holds an explicit
+/// truthy value: presence would report a lost kernel to someone who set it to
+/// `0` precisely to not use one, and asking the gate would report one to every
+/// Llama 3.1 run on a `rocm` build, where the default is on (#2145) and the
+/// user never asked for anything.
 fn fused_rope_launcher_requested(name: &str) -> bool {
     if name == FUSED_ROPE_APPEND_ENV {
-        mlxcel_core::layers::fused_rope_append_enabled()
+        fused_rope_append_explicitly_requested(std::env::var(name).ok().as_deref())
     } else {
         std::env::var(name).is_ok()
     }
+}
+
+/// Pure decision behind the `MLXCEL_FUSED_ROPE_APPEND` arm of
+/// [`fused_rope_launcher_requested`]: only an explicit truthy value counts.
+/// Unset and unrecognised values take the compiled-in default, which is not a
+/// request.
+pub(crate) fn fused_rope_append_explicitly_requested(value: Option<&str>) -> bool {
+    mlxcel_core::layers::fused_flag_explicit_value(value) == Some(true)
 }
 
 /// Print, at most once per process, that a checkpoint has been routed around a
@@ -289,8 +299,9 @@ fn fused_rope_launcher_requested(name: &str) -> bool {
 /// Correctness does not depend on this: [`Attention::forward`] bypasses the
 /// launchers regardless. What it buys is that the fallback is reported rather
 /// than silent, which is the one real cost the bypass carries. The notice fires
-/// only when a bypass reason holds *and* a variable asked for a fused path, so a
-/// user who never sets the variables never sees it.
+/// only when a bypass reason holds *and* a variable explicitly asked for a fused
+/// path, so a user who never sets the variables never sees it, including on a
+/// `rocm` build where `MLXCEL_FUSED_ROPE_APPEND` defaults to on.
 ///
 /// `eprintln!` rather than `tracing::warn!` on purpose: only the server installs
 /// a `tracing` subscriber, so a `warn!` here is a no-op in the `mlxcel` CLI,
@@ -536,7 +547,8 @@ impl Attention {
     /// 2. [`FusedQKVLinear::forward_split_rope`] (quantized projection, opt-in
     ///    through `MLXCEL_ENABLE_FUSED_QKV_SPLIT_ROPE`),
     /// 3. [`FusedQKVLinear::forward_fused_rope_append`] (dense decode, opt-in
-    ///    through `MLXCEL_FUSED_ROPE_APPEND`),
+    ///    through `MLXCEL_FUSED_ROPE_APPEND` on Metal and CUDA, on by default
+    ///    in a `rocm` build),
     /// 4. the graph fallback, which goes through [`Self::apply_rope`] and so
     ///    calls `fast_rope_with_freqs` when a table is present and `fast_rope`
     ///    otherwise.

@@ -816,11 +816,17 @@ fn dense_gemm(
 /// Default for the fused residual-add + RMSNorm decode path.
 ///
 /// **This is the one place to flip if the measurement does not justify the
-/// fusion.** `MLXCEL_FUSED_ADD_RMSNORM=0` disables it at runtime without a
-/// rebuild; setting this constant to `false` makes off the default and
-/// `MLXCEL_FUSED_ADD_RMSNORM=1` the opt-in.
+/// fusion.** The default is per build: off on Metal and CUDA builds, on in a
+/// `rocm` build. `MLXCEL_FUSED_ADD_RMSNORM=0` disables it at runtime without a
+/// rebuild and `MLXCEL_FUSED_ADD_RMSNORM=1` enables it, on every backend.
 ///
-/// Default-OFF: measured, and the measurement did not justify wiring it on.
+/// The feature flag is the backend here, the same way PR #2098 set the ROCm
+/// `MLXCEL_FUSED_MOE_SGY` default under `MLXCEL_BRIDGE_ROCM_BACKEND`: a `rocm`
+/// build compiles no Metal or CUDA backend, so no runtime backend comparison is
+/// needed (and `scripts/ci/check_kernel_port_dispatch.py` rejects one).
+///
+/// Metal and CUDA: default-OFF. Measured, and the measurement did not justify
+/// wiring it on.
 ///
 /// Op-level microbench on Apple M1 Ultra (Metal, f16, hidden {2048, 4096,
 /// 8192} x batch {1, 4, 8}, three repetitions) put the fused path at roughly
@@ -846,29 +852,35 @@ fn dense_gemm(
 /// See `docs/benchmark_results/fused-norm-rope-m1ultra-2026-07-31.md` and
 /// `docs/benchmark_results/fused-add-rmsnorm-decode-m1ultra-2026-09-27.md`.
 ///
-/// ROCm (#2063) measured the same: with the HIP port, whose output is
-/// byte-identical to the graph, Llama 3.1 8B decode on gfx1151 was 37.85 tok/s
-/// off and 37.95 on (medians of five), and Qwen2.5 7B gained 1.5% with a size
-/// that drifted between runs as much as the off arm's spread. Not a clear win,
-/// so ROCm keeps the shared default. See
-/// `docs/benchmark_results/rocm-fused-norm-rope-gfx1151-2026-10-05.md`.
-pub(crate) const FUSED_ADD_RMSNORM_DEFAULT: bool = false;
+/// ROCm: default-ON (#2145). The HIP port (#2063, PR #2107) is byte-identical
+/// to the ROCm graph it replaces (every on/off logit-trace pair identical), and
+/// on gfx1151 it was never slower in a median: Llama 3.1 8B decode 37.85 tok/s
+/// off and 37.95 on (medians of five), Qwen2.5 7B +1.5% alone and +1.7% with
+/// the RoPE fusion. The gains sit inside run-to-run drift, but the change costs
+/// no accuracy, so the maintainer turned both fusions on for ROCm. See
+/// `docs/benchmark_results/rocm-fused-norm-rope-gfx1151-2026-10-05.md`, which
+/// also has the re-measurement of the default-on build.
+pub(crate) const FUSED_ADD_RMSNORM_DEFAULT: bool = cfg!(feature = "rocm");
 
 /// Default for the fused q/k RoPE + KV-append-layout decode path. Same
-/// flip-here contract and the same measured outcome as
-/// [`FUSED_ADD_RMSNORM_DEFAULT`], so it also ships opt-in via
-/// `MLXCEL_FUSED_ROPE_APPEND=1`.
+/// flip-here contract and the same per-build default as
+/// [`FUSED_ADD_RMSNORM_DEFAULT`]: off on Metal and CUDA (opt in with
+/// `MLXCEL_FUSED_ROPE_APPEND=1`), on in a `rocm` build (opt out with `=0`).
 ///
-/// One cell was consistently below parity rather than merely noisy: hidden
-/// 8192 at batch 1 measured 0.94x, 0.90x and 0.89x across three repetitions.
-/// That is the single reproducible signal in the sweep and it points the wrong
-/// way, which is the stronger reason to leave this unwired until a backend or
-/// shape is found where it wins.
+/// Metal: one cell was consistently below parity rather than merely noisy:
+/// hidden 8192 at batch 1 measured 0.94x, 0.90x and 0.89x across three
+/// repetitions. That is the single reproducible signal in the sweep and it
+/// points the wrong way, which is the stronger reason to leave this unwired
+/// there until a shape is found where it wins.
 ///
-/// ROCm (#2063) did not find one: on gfx1151 Qwen2.5 7B decode gained 0.6% with
-/// this kernel alone and 1.7% with both fusions (medians of seven), inside the
-/// drift between runs. Same results page as [`FUSED_ADD_RMSNORM_DEFAULT`].
-pub(crate) const FUSED_ROPE_APPEND_DEFAULT: bool = false;
+/// ROCm (#2145): the HIP port (#2063) is byte-identical to the graph, and on
+/// gfx1151 Qwen2.5 7B decode gained 0.6% with this kernel alone and 1.7% with
+/// both fusions (medians of seven), inside the drift between runs but never
+/// slower, so it is on by default with the norm fusion. Llama 3.1's
+/// `rope_scaling` frequency table still routes around it (see
+/// `report_fused_rope_bypass_once` in `src/models/llama3.rs`). Same results
+/// page as [`FUSED_ADD_RMSNORM_DEFAULT`].
+pub(crate) const FUSED_ROPE_APPEND_DEFAULT: bool = cfg!(feature = "rocm");
 
 /// Whether the fused residual-add + RMSNorm path (#905) is enabled.
 ///
@@ -880,7 +892,9 @@ pub(crate) const FUSED_ROPE_APPEND_DEFAULT: bool = false;
 /// over long generation. The two differ only by the rounding of the residual
 /// sum feeding the sum of squares (see `fused_norm.cpp`), which is far below
 /// the argmax-flip scale, but a near-tie argmax can still land on the other
-/// side. That is a tie-break difference, not a regression.
+/// side. That is a tie-break difference, not a regression. The ROCm HIP port
+/// (#2063) measured byte-identical to the ROCm graph instead: every on/off
+/// logit-trace pair in its results page matched.
 pub fn fused_add_rmsnorm_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -906,13 +920,22 @@ pub fn fused_rope_append_enabled() -> bool {
 /// value takes `default` rather than silently disabling: a typo in a deployment
 /// script should not quietly change the decode graph.
 fn fused_flag_enabled_from(value: Option<&str>, default: bool) -> bool {
-    match value {
-        Some(v) => match v.trim().to_ascii_lowercase().as_str() {
-            "0" | "false" | "off" | "no" => false,
-            "1" | "true" | "on" | "yes" => true,
-            _ => default,
-        },
-        None => default,
+    fused_flag_explicit_value(value).unwrap_or(default)
+}
+
+/// The explicit setting a #905 kill-switch value spells, if any: `Some(false)`
+/// for `0`/`false`/`off`/`no`, `Some(true)` for `1`/`true`/`on`/`yes`
+/// (case-insensitive, trimmed), and `None` when the variable is unset or the
+/// value is unrecognised, which is when the compiled-in default applies.
+///
+/// Public so a caller can tell "the user asked for this" apart from "the build
+/// defaults to this": the Llama 3.1 RoPE bypass notice (#2145) must fire only
+/// for the former, now that the ROCm default is on.
+pub fn fused_flag_explicit_value(value: Option<&str>) -> Option<bool> {
+    match value?.trim().to_ascii_lowercase().as_str() {
+        "0" | "false" | "off" | "no" => Some(false),
+        "1" | "true" | "on" | "yes" => Some(true),
+        _ => None,
     }
 }
 
@@ -9385,6 +9408,45 @@ mod tests {
     /// recognised disable string turns the fusion off, an unset variable leaves
     /// the compiled-in default, and an unrecognised value must not silently
     /// change the decode graph.
+    #[test]
+    fn fused_905_defaults_are_on_for_rocm_builds_only() {
+        // #2145: a `rocm` build turns both fusions on by default; Metal and CUDA
+        // builds keep them off. Pinned against the feature rather than a
+        // literal so each backend's build checks its own default.
+        assert_eq!(FUSED_ADD_RMSNORM_DEFAULT, cfg!(feature = "rocm"));
+        assert_eq!(FUSED_ROPE_APPEND_DEFAULT, cfg!(feature = "rocm"));
+        #[cfg(feature = "rocm")]
+        {
+            assert!(fused_add_rmsnorm_enabled_from(None));
+            assert!(fused_rope_append_enabled_from(None));
+            // The kill switch still turns them off on ROCm.
+            assert!(!fused_add_rmsnorm_enabled_from(Some("0")));
+            assert!(!fused_rope_append_enabled_from(Some("0")));
+        }
+        #[cfg(not(feature = "rocm"))]
+        {
+            assert!(!fused_add_rmsnorm_enabled_from(None));
+            assert!(!fused_rope_append_enabled_from(None));
+            // And `=1` still opts in elsewhere.
+            assert!(fused_add_rmsnorm_enabled_from(Some("1")));
+            assert!(fused_rope_append_enabled_from(Some("1")));
+        }
+    }
+
+    #[test]
+    fn fused_flag_explicit_value_separates_a_setting_from_the_default() {
+        assert_eq!(fused_flag_explicit_value(None), None);
+        for v in ["", "maybe", "2"] {
+            assert_eq!(fused_flag_explicit_value(Some(v)), None, "{v:?}");
+        }
+        for v in ["0", "false", "off", "no", " OFF "] {
+            assert_eq!(fused_flag_explicit_value(Some(v)), Some(false), "{v:?}");
+        }
+        for v in ["1", "true", "on", "yes", " Yes "] {
+            assert_eq!(fused_flag_explicit_value(Some(v)), Some(true), "{v:?}");
+        }
+    }
+
     #[test]
     fn fused_905_flags_follow_the_default_and_respect_explicit_values() {
         // Unset means the compiled-in default, whichever way it is set. Asserting

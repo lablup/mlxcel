@@ -341,7 +341,8 @@ A speedup below 1.00 for either op is the signal to flip
 `FUSED_ADD_RMSNORM_DEFAULT` or `FUSED_ROPE_APPEND_DEFAULT` in
 `src/lib/mlxcel-core/src/layers.rs`, which leaves the kernel available and
 opt-in through `MLXCEL_FUSED_ADD_RMSNORM=1` / `MLXCEL_FUSED_ROPE_APPEND=1`
-instead of removing it.
+instead of removing it. Both constants are `cfg!(feature = "rocm")`: off on
+Metal and CUDA builds, on in a ROCm build (#2145).
 
 The op-level number is a lower bound on the end-to-end effect. Both fusions also
 remove a full-width intermediate from the MLX graph per call, which shows up as

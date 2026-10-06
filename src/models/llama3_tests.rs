@@ -39,7 +39,7 @@
 
 use super::{
     Attention, FUSED_CAUSAL_PREFILL_ENV, FUSED_QKV_SPLIT_ROPE_ENV, FUSED_ROPE_APPEND_ENV,
-    FUSED_ROPE_ENV_VARS, Llama3Model, ModelArgs,
+    FUSED_ROPE_ENV_VARS, Llama3Model, ModelArgs, fused_rope_append_explicitly_requested,
 };
 use crate::models::rope_utils::{RopeScalingKind, RopeScalingSpec};
 use crate::test_support::env_lock::env_lock;
@@ -384,6 +384,26 @@ fn the_fused_rope_env_vars_are_the_ones_the_code_actually_reads() {
     assert_eq!(FUSED_CAUSAL_PREFILL_ENV, FUSED_ROPE_ENV_VARS[0]);
     assert_eq!(FUSED_QKV_SPLIT_ROPE_ENV, FUSED_ROPE_ENV_VARS[1]);
     assert_eq!(FUSED_ROPE_APPEND_ENV, FUSED_ROPE_ENV_VARS[2]);
+}
+
+#[test]
+fn the_rope_append_bypass_notice_needs_an_explicit_truthy_value() {
+    // #2145: `MLXCEL_FUSED_ROPE_APPEND` defaults to on in a `rocm` build, so the
+    // bypass notice must not treat the default as a request. Unset is the case
+    // every default ROCm Llama 3.1 run hits; it must stay silent on every build.
+    assert!(!fused_rope_append_explicitly_requested(None));
+    for v in ["", "maybe", "2", "0", "false", "off", "no"] {
+        assert!(
+            !fused_rope_append_explicitly_requested(Some(v)),
+            "{v:?} is not a request for the fused RoPE + append launcher"
+        );
+    }
+    for v in ["1", "true", "on", "yes", " ON "] {
+        assert!(
+            fused_rope_append_explicitly_requested(Some(v)),
+            "{v:?} explicitly requests the fused RoPE + append launcher"
+        );
+    }
 }
 
 /// A genuinely quantized attention block, which is the only shape that can
