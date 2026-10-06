@@ -411,25 +411,99 @@ namespace {
         return holder;
     }
 
-// This kernel's ports, in one place (#1801). Metal only: the fused xIELU activation is a Metal JIT kernel.
+    // ROCm port (#2069), written from XIELU_METAL_SOURCE. Byte identity with
+    // apertus_xielu is kept the same way, but against the ROCm graph's own
+    // rounding points: each of that graph's ops is one HIP elementwise kernel
+    // that widens its T operands to float, computes one float op and rounds
+    // back once (`hip_bfloat16(float)` / `__float2half`, both nearest-even;
+    // see the overlay's device/binary_ops.hpp and unary_ops.hpp). So every
+    // intermediate below is one float op rounded through T, and expm1 is the
+    // device library's `expm1f` the graph's Expm1 calls, not the Metal
+    // header's copy of MLX's routine. For T = float the casts are no-ops and
+    // `fp contract(off)` is what stops `selected + x * beta` from becoming one
+    // FMA (one rounding instead of the graph's two). The scalars arrive as
+    // f32 and round to T once, as `full_f32(.., dtype)` does in the graph.
+    // Elementwise with no cross-lane step, so the wavefront size does not
+    // enter; the guard is the #1814 port rule (see MOE_GATEUP_HIP_SOURCE).
+    // The element count is read from `x_shape[0]` (x arrives flattened)
+    // rather than a template argument, so hipRTC compiles one kernel per
+    // dtype instead of one per activation size (the ROCm JIT cache has no
+    // eviction).
+    static const char* XIELU_HIP_SOURCE = R"(
+        #if defined(__AMDGCN_WAVEFRONT_SIZE__) && __AMDGCN_WAVEFRONT_SIZE__ != 32
+        #error "xielu_fused_hip assumes a 32-lane wavefront"
+        #endif
+        #if defined(__AMDGCN_WAVEFRONT_SIZE) && __AMDGCN_WAVEFRONT_SIZE != 32
+        #error "xielu_fused_hip assumes a 32-lane wavefront"
+        #endif
+        {
+        #pragma clang fp contract(off)
+        uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+        if (i >= (uint32_t)x_shape[0]) { return; }
+        float xx = static_cast<float>(x[i]);
+        float ap = static_cast<float>(static_cast<T>(alpha_p[0]));
+        float an = static_cast<float>(static_cast<T>(alpha_n[0]));
+        float bb = static_cast<float>(static_cast<T>(beta[0]));
+        float ee = static_cast<float>(static_cast<T>(eps[0]));
+        float pos_x_sq = static_cast<float>(static_cast<T>(xx * xx));       // square(x)
+        float pos_core = static_cast<float>(static_cast<T>(pos_x_sq * ap)); // * alpha_p
+        // minimum(x, eps), NaN-propagating as the graph's Minimum is.
+        float clamped = (isnan(xx) || xx < ee) ? xx : ee;
+        float em = static_cast<float>(static_cast<T>(expm1f(clamped)));     // expm1
+        float neg_sub = static_cast<float>(static_cast<T>(em - xx));        // - x
+        float neg_core = static_cast<float>(static_cast<T>(neg_sub * an));  // * alpha_n
+        float selected = (xx > 0.0f) ? pos_core : neg_core;                 // where(x > 0)
+        float bx = static_cast<float>(static_cast<T>(xx * bb));             // x * beta
+        out[i] = static_cast<T>(selected + bx);                             // add
+        }
+    )";
+
+    struct XieluKernelHolderHip {
+        std::optional<mlx::core::fast::CustomKernelFunction> kernel;
+        bool initialized = false;
+        mlx::core::fast::CustomKernelFunction& get() {
+            if (!initialized) {
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+                kernel = mlx::core::fast::hip_kernel(
+                    "xielu_fused_hip",
+                    {"x", "alpha_p", "alpha_n", "beta", "eps"},
+                    {"out"},
+                    XIELU_HIP_SOURCE);
+#else
+                throw std::runtime_error(
+                    "[fused_xielu] this build has no ROCm backend");
+#endif
+                initialized = true;
+            }
+            return *kernel;
+        }
+    };
+    static XieluKernelHolderHip& get_xielu_kernel_hip() {
+        static XieluKernelHolderHip holder;
+        return holder;
+    }
+
+// This kernel's ports, in one place (#1801). Metal and ROCm (#2069).
 const mlxcel::KernelPorts& xielu_ports() {
     static const mlxcel::KernelPorts ports{
         .metal = +[]() -> mlx::core::fast::CustomKernelFunction& {
             return get_xielu_kernel().get();
         },
-        // No CUDA or HIP port yet (#1814). Written out so that adding one is a
-        // line here rather than a restructure at the call site.
+        // No CUDA port (#1814): CUDA takes xielu_elementwise. Written out so
+        // that adding one is a line here rather than a restructure at the
+        // call site.
         .cuda = nullptr,
-        .rocm = nullptr,
+        .rocm = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_xielu_kernel_hip().get();
+        },
     };
     return ports;
 }
 
     // Elementwise fallback mirroring src/models/apertus.rs::apertus_xielu. Used
-    // when the Metal back-end is unavailable (e.g. a CUDA-only build, where
-    // mx.fast.metal_kernel throws "[metal_kernel] No Metal back-end"). Keeps the
-    // FFI entry total so the MLXCEL_FUSED_XIELU flag never crashes a non-Metal
-    // build; the per-op result is identical to the Rust reference.
+    // on a backend with no port in xielu_ports() (CUDA, and a CPU-only build).
+    // Keeps the FFI entry total so the MLXCEL_FUSED_XIELU flag never refuses
+    // there; the per-op result is identical to the Rust reference.
     static mlx::core::array xielu_elementwise(
         const mlx::core::array& x, float alpha_p, float alpha_n,
         float beta, float eps) {
@@ -447,6 +521,16 @@ const mlxcel::KernelPorts& xielu_ports() {
     }
 }
 
+// Whether `fused_xielu` runs the fused kernel on this backend (Metal, ROCm)
+// rather than its elementwise fallback. Read from the table the dispatch
+// reads (#2069), and false off the GPU stream: custom kernels run only on the
+// GPU, so with MLXCEL_DEVICE=cpu the elementwise fallback runs on the CPU
+// instead of the launch throwing (the same check as ssm_kernel_available).
+bool fused_xielu_kernel_available() {
+    return mlx::core::default_device() == mlx::core::Device::gpu &&
+        mlxcel::has_kernel_port(xielu_ports());
+}
+
 std::unique_ptr<MlxArray> fused_xielu(
     const MlxArray& x,
     float alpha_p,
@@ -458,9 +542,10 @@ std::unique_ptr<MlxArray> fused_xielu(
     auto T = x.inner.dtype();
     auto xs = x.inner.shape();
 
-    // Non-Metal back-ends: mx.fast.metal_kernel throws, so use the elementwise
-    // fallback (correct, just not fused). Apertus is a macOS/Metal target.
-    if (!mlx::core::metal::is_available()) {
+    // A backend with no port (CUDA, CPU) takes the elementwise fallback
+    // (correct, just not fused) instead of refusing. The same table drives
+    // the dispatch below, so the two cannot disagree.
+    if (!fused_xielu_kernel_available()) {
         return std::make_unique<MlxArray>(
             xielu_elementwise(x.inner, alpha_p, alpha_n, beta, eps));
     }
@@ -477,9 +562,13 @@ std::unique_ptr<MlxArray> fused_xielu(
 
     auto& kernel = mlxcel::select_kernel_port(
         "fused_xielu", "graph fallback", xielu_ports());
+    // Metal bakes the element count into the kernel; the ROCm source reads it
+    // from `x_shape[0]` so its JIT key is the dtype alone.
     std::vector<std::pair<std::string, mlx::core::fast::TemplateArg>> ta = {
         {"T", T},
+#ifndef MLXCEL_BRIDGE_ROCM_BACKEND
         {"n", (int)n},
+#endif
     };
     std::vector<array> inputs = {xflat, ap, an, bb, ee};
     const int tg = 256;
@@ -633,6 +722,100 @@ namespace {
         return holder;
     }
 
+    // ROCm port (issue #2067). Same computation, thread mapping, inputs,
+    // outputs, grid and template arguments as the CUDA port above; the body
+    // differs in the lane reduction only. `__shfl_down_sync` is a HIP
+    // compatibility shim that ignores its mask, so the native
+    // `__shfl_down(var, delta, width)` is used with the width stated. One
+    // (head, row) pair is reduced by the 32 lanes that share a `threadIdx.y`
+    // (the threadgroup is (32, 8, 1)), and the explicit width of 32 keeps the
+    // fold inside those 32 lanes: on a wave32 target (gfx11, gfx12) they are
+    // the whole wave, and on a wave64 target (CDNA) the width splits the wave
+    // into two 32-lane segments that are again exactly two rows.
+    static const char* SSM_HIP_SOURCE = R"(
+        // The wave32 guard every #1814 port carries (#2067 port
+        // requirements), spelled as the bitlinear port spells it because
+        // `static_assert(warpSize == 32)` does not compile in HIP. It is a
+        // no-op with ROCm 10's AMD clang 23, which defines neither macro for
+        // gfx1151, gfx942 or gfx90a. This fold does not rely on it: the
+        // shuffle width of 32 keeps it inside one row on wave64 as well.
+        #if defined(__AMDGCN_WAVEFRONT_SIZE__) && __AMDGCN_WAVEFRONT_SIZE__ != 32
+        #error "ssm_kernel_hip assumes a 32-lane wavefront"
+        #endif
+        #if defined(__AMDGCN_WAVEFRONT_SIZE) && __AMDGCN_WAVEFRONT_SIZE != 32
+        #error "ssm_kernel_hip assumes a 32-lane wavefront"
+        #endif
+        uint32_t n = blockIdx.z;                    // batch * heads
+        uint32_t h_idx = n % H;
+        uint32_t g_idx = n / G;
+        constexpr int n_per_t = Ds / 32;
+
+        // Wave-uniform: all 32 lanes of a wave share threadIdx.y.
+        uint32_t d_idx = blockIdx.y * blockDim.y + threadIdx.y;
+        if (d_idx >= (uint32_t)Dh) return;
+
+        auto x = X + n * Dh;
+        out += n * Dh;
+        auto i_state = state_in + n * Dh * Ds;
+        auto o_state = state_out + n * Dh * Ds;
+
+        auto C_ = C + g_idx * Ds;
+        auto B_ = B + g_idx * Ds;
+
+        uint32_t ds_idx = threadIdx.x;              // lane 0..31
+
+        float dt_ = (float)dt[n];
+        float A = -expf((float)A_log[h_idx]);
+        float dA = expf(A * dt_);
+
+        float acc = 0.0f;
+        float x_ = (float)x[d_idx];
+
+        for (int i = 0; i < n_per_t; ++i) {
+            int s_idx = n_per_t * (int)ds_idx + i;
+            int idx = (int)d_idx * Ds + s_idx;
+            float dB_by_x = x_ * dt_ * (float)B_[s_idx];
+            float state = dA * (float)i_state[idx] + dB_by_x;
+            o_state[idx] = (U)state;
+            acc += state * (float)C_[s_idx];
+        }
+        #pragma unroll
+        for (int o = 16; o > 0; o >>= 1) {
+            acc += __shfl_down(acc, o, 32);
+        }
+        if (ds_idx == 0u) {
+            out[d_idx] = (T)(acc + x_ * (float)D[h_idx]);
+        }
+    )";
+
+    struct SsmKernelHolderHip {
+        std::optional<mlx::core::fast::CustomKernelFunction> kernel;
+        bool initialized = false;
+
+        mlx::core::fast::CustomKernelFunction& get() {
+            if (!initialized) {
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+                kernel = mlx::core::fast::hip_kernel(
+                    "ssm_kernel_hip",
+                    {"X", "A_log", "B", "C", "D", "dt", "state_in"},
+                    {"out", "state_out"},
+                    SSM_HIP_SOURCE
+                );
+#else
+                throw std::runtime_error(
+                    "[ssm_update_kernel] this build has no ROCm backend");
+#endif
+                initialized = true;
+            }
+            return *kernel;
+        }
+    };
+
+    static SsmKernelHolderHip& get_ssm_kernel_hip() {
+        static SsmKernelHolderHip holder;
+        return holder;
+    }
+
 // This kernel's ports, in one place. `has_kernel_port` and `select_kernel_port`
 // both read it, so a support predicate and the dispatch cannot answer
 // differently (#1801).
@@ -644,8 +827,9 @@ const mlxcel::KernelPorts& ssm_ports() {
         .cuda = +[]() -> mlx::core::fast::CustomKernelFunction& {
             return get_ssm_kernel_cuda().get();
         },
-        // No HIP port yet (#1814).
-        .rocm = nullptr,
+        .rocm = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_ssm_kernel_hip().get();
+        },
     };
     return ports;
 }
@@ -1429,21 +1613,41 @@ std::unique_ptr<MlxArray> fused_moe_forward(
 
     // Experimental fused squared-ReLU decode path (#268), behind its own flag
     // MLXCEL_FUSED_MOE_RELU2 (NOT the default MLXCEL_FUSED_MOE): fc1 + relu² ->
-    // act_g[K, Dff], then reuse moe_down for fc2 * score. Correct and
-    // byte-identical, but measured performance-NEUTRAL on nemotron-h-30b. MoE
+    // act_g[K, Dff], then reuse moe_down for fc2 * score. Correct, and
+    // reported byte-identical to the gather_qmm branch on Metal (#268). The
+    // ROCm port (#2069) is not byte-identical to gather_qmm: it lands closer
+    // to an all-f32 dense reference than gather_qmm does, and within
+    // gather_qmm's own distance from that reference (see
+    // fused_moe_relu2_parity_tests). Measured performance-NEUTRAL on
+    // nemotron-h-30b. MoE
     // is its largest block, but this kernel replaces only the already-efficient
     // routed fc1/fc2 GEMVs; the router, shared expert, and combine remain. Kept
     // wired behind the dedicated flag so it stays referenceable for a model
     // where that narrower routed-expert slice dominates; the default path below
     // stays on gather_qmm.
+    //
+    // The opt-in needs both kernels it launches (Metal and ROCm have both
+    // since #2069). On a backend missing either port (CUDA has no fc1_relu2
+    // port) it declines to the gather_qmm branch below rather than reaching
+    // `select_kernel_port` and refusing the whole forward.
     bool fused_relu2 = x_shape[0] == 1 && (bits == 4 || bits == 8) &&
-        std::getenv("MLXCEL_FUSED_MOE_RELU2");
+        std::getenv("MLXCEL_FUSED_MOE_RELU2") &&
+        fused_moe_relu2_kernels_available();
     array result = x.inner;  // placeholder; overwritten in both branches
     if (fused_relu2) {
         int din = (int)x_shape[1];
         int dff = (int)fc1_weight.inner.shape()[1];
         int k = top_k;
+        // Rows per block, as in run_fused_moe_two_kernel, including its ROCm
+        // default of 2 (#2065): both kernels of this branch share `sgy`, and
+        // the down kernel is the one #2065 measured slower than gather_qmm at
+        // 8 on gfx1151. The build flag is the backend in a ROCm build, so no
+        // runtime backend comparison is needed.
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+        int sgy = 2;
+#else
         int sgy = 8;
+#endif
         if (const char* s = std::getenv("MLXCEL_FUSED_MOE_SGY")) {
             int v = std::atoi(s);
             if (v >= 1 && v <= 32) sgy = v;
@@ -1574,19 +1778,27 @@ std::unique_ptr<MlxArray> fused_moe_forward(
 }
 
 bool ssm_kernel_available() {
-#ifdef __APPLE__
-    return mlx::core::metal::is_available();
-#else
-    // CUDA port of the fused SSM decode kernel (#631); previously the hybrid
-    // SSM models fell back to the ~55-op graph path on every decode step.
-    // MLXCEL_SSM_CUDA_KERNEL=0 forces that graph path (debug / A-B bench).
-    if (const char* e = std::getenv("MLXCEL_SSM_CUDA_KERNEL")) {
-        if (e[0] == '0' && e[1] == '\0') {
+    // MLXCEL_SSM_KERNEL=0 forces the ~55-op ssm_step graph path on every
+    // backend (debug / A-B bench). MLXCEL_SSM_CUDA_KERNEL=0 is the name the
+    // switch had while the CUDA port (#631) was the only one off Apple; it is
+    // kept as an alias so existing scripts still work (#2067).
+    for (const char* name : {"MLXCEL_SSM_KERNEL", "MLXCEL_SSM_CUDA_KERNEL"}) {
+        const char* e = std::getenv(name);
+        if (e != nullptr && e[0] == '0' && e[1] == '\0') {
             return false;
         }
     }
-    return mlx::core::cu::is_available();
-#endif
+    // Custom kernels run only on the GPU stream; with MLXCEL_DEVICE=cpu the
+    // model gates then take the ssm_step graph on the CPU instead of the
+    // launch throwing (the same check as mamba1_scan_kernel_accepts).
+    if (mlx::core::default_device() != mlx::core::Device::gpu) {
+        return false;
+    }
+    // Otherwise read from the same table the dispatch in ssm_update_kernel
+    // selects from, so the Rust gates (`seq_len == 1 &&
+    // ssm_kernel_available()`) can `expect` the launch: a true here means
+    // select_kernel_port will not refuse.
+    return mlxcel::has_kernel_port(ssm_ports());
 }
 
 void ssm_update_kernel(
@@ -1605,6 +1817,11 @@ void ssm_update_kernel(
 ) {
     using namespace mlx::core;
 
+    if (hidden_states.inner.ndim() != 4 || B.inner.ndim() != 4) {
+        throw std::invalid_argument(
+            "[ssm_update_kernel] hidden_states and B must be rank 4 "
+            "([batch, 1, heads, head_dim] and [batch, 1, groups, state])");
+    }
     auto shape = hidden_states.inner.shape();
     int n = shape[0];  // batch
     int h = shape[2];  // num_heads
@@ -1612,6 +1829,25 @@ void ssm_update_kernel(
     auto b_shape = B.inner.shape();
     int hb = b_shape[2]; // n_groups
     int ds = b_shape[3]; // state_dim
+    // The kernel trusts these shapes as template constants and indexes raw
+    // buffers with them, so a checkpoint config the graph path would reject
+    // inside reshape/repeat (a state width that is not a multiple of 32, heads
+    // that do not divide into groups, a mismatched state) would read or leave
+    // unwritten GPU memory instead. Refuse it here; the bridge returns the
+    // throw to Rust as an error.
+    if (C.inner.shape() != B.inner.shape() || shape[1] != 1 ||
+        b_shape[0] != n || b_shape[1] != 1 || hb <= 0 || h % hb != 0 ||
+        ds < 32 || ds % 32 != 0 ||
+        A_log.inner.size() != static_cast<size_t>(h) ||
+        D.inner.size() != static_cast<size_t>(h) ||
+        dt.inner.size() != static_cast<size_t>(n) * h ||
+        state_in.inner.size() != static_cast<size_t>(n) * h * dh * ds) {
+        throw std::invalid_argument(
+            "[ssm_update_kernel] unsupported shapes for the fused SSM step "
+            "(single token, state width a multiple of 32, heads divisible by "
+            "groups, state [batch, heads, head_dim, state]); use the ssm_step "
+            "graph path");
+    }
     int g = h / hb;      // heads per group
 
     auto input_type = hidden_states.inner.dtype();
@@ -1636,6 +1872,19 @@ void ssm_update_kernel(
         {"H", h},
         {"G", g},
     };
+    // The CUDA and HIP JIT caches key a module on the kernel name plus this
+    // list, while the generated signature takes every input's runtime dtype,
+    // so an input whose dtype is not named here can reuse a module compiled
+    // for another dtype and read its buffer through the wrong pointer type
+    // (scripts/ci/check_kernel_dtype_keys.py). T and U cover X, D (cast to T
+    // below) and state_in, and dt is always float32 from compute_dt. A_log, B
+    // and C are not tied to T: Nemotron-H stores A_log in f32 next to bf16
+    // activations, granite in bf16 (#2067). The kernels never name TA, TB or
+    // TC, so this changes module names only, not the arithmetic; Metal
+    // already keys its name on every input dtype.
+    template_args.push_back({"TA", A_log.inner.dtype()});
+    template_args.push_back({"TB", B.inner.dtype()});
+    template_args.push_back({"TC", C.inner.dtype()});
 
     std::vector<array> inputs = {
         hidden_states.inner, A_log.inner, B.inner, C.inner,
@@ -1844,18 +2093,109 @@ __device__ __forceinline__ T mamba1_add(T a, T b) {
         return holder;
     }
 
+    // ROCm port (#2069) of the float32-state variant, written from
+    // MAMBA1_SCAN_METAL_SOURCE: one 32-lane wavefront per (batch, channel d)
+    // on threadIdx.x, eight channels per block on threadIdx.y, lane n owns
+    // state[d, n], and `simd_sum` becomes the 16..1 `__shfl_down` fold with
+    // the width stated (lane 0 holds y). It is this variant and not the CUDA
+    // graph-exact one because graph-exact is out of reach on ROCm: the graph
+    // scan's `state @ C` has K = N (8 or 16, below gemv's K % 32 == 0
+    // requirement), so the overlay sends it to rocBLAS, whose reduction order
+    // a custom kernel cannot reproduce. The template args are the Metal ones
+    // (T, N, Dm); `A` and the state arrive as float32 for this variant, every
+    // other input as T.
+    static const char* MAMBA1_SCAN_HIP_SOURCE = R"(
+        // 32-lane wavefront only; see MOE_GATEUP_HIP_SOURCE for why the
+        // explicit shuffle width, not this guard, is what holds on AMD
+        // clang 23.
+        #if defined(__AMDGCN_WAVEFRONT_SIZE__) && __AMDGCN_WAVEFRONT_SIZE__ != 32
+        #error "mamba1_selective_scan_hip assumes a 32-lane wavefront"
+        #endif
+        #if defined(__AMDGCN_WAVEFRONT_SIZE) && __AMDGCN_WAVEFRONT_SIZE != 32
+        #error "mamba1_selective_scan_hip assumes a 32-lane wavefront"
+        #endif
+        const int lane = threadIdx.x;
+        const int d = blockIdx.y * blockDim.y + threadIdx.y;
+        const int b = blockIdx.z;
+        // d is uniform across a wavefront, so a wavefront returns whole and
+        // the fold below never sees a partial one.
+        if (d >= Dm) {
+            return;
+        }
+        const int L = X_shape[1];
+        const bool active = lane < N;
+
+        float s = 0.0f;
+        float a = 0.0f;
+        if (active) {
+            s = static_cast<float>(state_in[((size_t)b * Dm + d) * N + lane]);
+            a = static_cast<float>(A[d * N + lane]);
+        }
+        const float dp = static_cast<float>(Dp[d]);
+
+        for (int t = 0; t < L; ++t) {
+            const size_t row = (size_t)b * L + t;
+            const float dt = static_cast<float>(DT[row * Dm + d]);
+            const float xv = static_cast<float>(X[row * Dm + d]);
+            float contrib = 0.0f;
+            if (active) {
+                const float bv = static_cast<float>(Bm[row * N + lane]);
+                const float cv = static_cast<float>(Cm[row * N + lane]);
+                s = expf(dt * a) * s + dt * xv * bv;
+                contrib = s * cv;
+            }
+            float y = contrib;
+            #pragma unroll
+            for (int o = 16; o > 0; o >>= 1) y += __shfl_down(y, o, 32);
+            if (lane == 0) {
+                Y[row * Dm + d] = static_cast<T>(y + xv * dp);
+            }
+        }
+        if (active) {
+            state_out[((size_t)b * Dm + d) * N + lane] = s;
+        }
+    )";
+
+    struct Mamba1ScanKernelHolderHip {
+        std::optional<mlx::core::fast::CustomKernelFunction> kernel;
+        bool initialized = false;
+
+        mlx::core::fast::CustomKernelFunction& get() {
+            if (!initialized) {
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+                kernel = mlx::core::fast::hip_kernel(
+                    "mamba1_selective_scan_hip",
+                    {"X", "DT", "Bm", "Cm", "A", "Dp", "state_in"},
+                    {"Y", "state_out"},
+                    MAMBA1_SCAN_HIP_SOURCE);
+#else
+                throw std::runtime_error(
+                    "[mamba1_selective_scan] this build has no ROCm backend");
+#endif
+                initialized = true;
+            }
+            return *kernel;
+        }
+    };
+
+    static Mamba1ScanKernelHolderHip& get_mamba1_scan_kernel_hip() {
+        static Mamba1ScanKernelHolderHip holder;
+        return holder;
+    }
+
 // This kernel's ports, in one place (#1801). The two variants round
 // differently, so each has its own table and a backend's variant is the table
-// it has a port in: float32 state (Metal, #2005) or graph-exact rounding in
-// the activation dtype (CUDA, #1981; see the CUDA source above). No HIP port of
-// either yet (#1814).
+// it has a port in: float32 state (Metal, #2005; ROCm, #2069) or graph-exact
+// rounding in the activation dtype (CUDA, #1981; see the CUDA source above).
 const mlxcel::KernelPorts& mamba1_scan_ports() {
     static const mlxcel::KernelPorts ports{
         .metal = +[]() -> mlx::core::fast::CustomKernelFunction& {
             return get_mamba1_scan_kernel().get();
         },
         .cuda = nullptr,
-        .rocm = nullptr,
+        .rocm = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_mamba1_scan_kernel_hip().get();
+        },
     };
     return ports;
 }
@@ -1881,6 +2221,15 @@ bool mamba1_scan_kernel_available() {
     }
     return mlxcel::has_kernel_port(mamba1_scan_ports()) ||
         mlxcel::has_kernel_port(mamba1_scan_graph_exact_ports());
+}
+
+// The float32-state variant (Metal, ROCm since #2069), on the GPU stream:
+// with MLXCEL_DEVICE=cpu Mamba's gate takes the graph scan instead of the
+// launch throwing (the same check as mamba1_scan_kernel_accepts).
+bool mamba1_scan_float_state_kernel_available() {
+    return mamba1_scan_kernel_available() &&
+        mlx::core::default_device() == mlx::core::Device::gpu &&
+        mlxcel::has_kernel_port(mamba1_scan_ports());
 }
 
 bool mamba1_scan_kernel_accepts(
@@ -2324,6 +2673,109 @@ namespace {
         return holder;
     }
 
+    // ---- ROCm ports of the two fused decode-MoE kernels (#2065). ----
+    // The CUDA bodies above with the warp shuffle changed, following the
+    // bitlinear HIP port (#1862): HIP's `__shfl_down_sync` is a compatibility
+    // shim that ignores its mask, so the native `__shfl_down(var, delta, width)`
+    // is used with the width stated. The launch geometry is the CUDA one (one
+    // 32-lane wavefront per output row on threadIdx.x, `sgy` rows per block on
+    // threadIdx.y, the expert slot on grid.z), and the template args are the
+    // same, so the hipRTC cache key carries `T` exactly as the CUDA key does.
+    // Precise `expf`/`tanhf` as in CUDA; hipRTC compiles at -O3 without
+    // fast-math, so they stay the precise library calls.
+    static const char* MOE_GATEUP_HIP_SOURCE = R"(
+        // The fold below starts at 16 and covers one 32-lane row. Every
+        // shuffle states width 32, so on a wave64 target (CDNA: gfx90a,
+        // gfx942) it stays inside its own 32-lane half instead of folding
+        // half the row. The preprocessor guard is the #1814 port rule, not
+        // `static_assert(warpSize == 32)`, which does not compile in HIP. It
+        // is inert on AMD clang 23 (HIP 7.15), which defines neither macro
+        // for gfx942 or gfx1151 (checked with `hipcc -E -dM`, #2065), so the
+        // explicit width is what keeps the fold correct there; wave64 is not
+        // tested.
+        #if defined(__AMDGCN_WAVEFRONT_SIZE__) && __AMDGCN_WAVEFRONT_SIZE__ != 32
+        #error "moe_gateup_kernel_hip assumes a 32-lane wavefront"
+        #endif
+        #if defined(__AMDGCN_WAVEFRONT_SIZE) && __AMDGCN_WAVEFRONT_SIZE != 32
+        #error "moe_gateup_kernel_hip assumes a 32-lane wavefront"
+        #endif
+        uint32_t lane  = threadIdx.x;                          // 0..31 (one wavefront)
+        uint32_t f     = blockIdx.y * blockDim.y + threadIdx.y; // output row 0..Dff-1
+        uint32_t eslot = blockIdx.z;                           // 0..K-1
+        if (f >= (uint32_t)Dff) return;                        // wavefront-uniform
+        uint32_t e = indices[eslot];
+
+        constexpr uint32_t vpw   = 32u / bits;
+        constexpr uint32_t wmask = (1u << bits) - 1u;
+        constexpr uint32_t Din_p = Din / vpw;
+        constexpr uint32_t G     = Din / group_size;
+
+        uint32_t row = e * Dff + f;
+        const uint32_t* gwr = gate_w + row * Din_p;
+        const T*        gsr = gate_s + row * G;
+        const T*        gbr = gate_b + row * G;
+        const uint32_t* uwr = up_w   + row * Din_p;
+        const T*        usr = up_s   + row * G;
+        const T*        ubr = up_b   + row * G;
+        float g = 0.0f, u = 0.0f;
+        for (uint32_t p = lane; p < Din_p; p += 32u) {
+            uint32_t base = p * vpw;
+            uint32_t grp  = base / group_size;
+            float gs = (float)gsr[grp], gb = (float)gbr[grp];
+            float us = (float)usr[grp], ub = (float)ubr[grp];
+            uint32_t gpk = gwr[p];
+            uint32_t upk = uwr[p];
+            for (uint32_t j = 0; j < vpw; ++j) {
+                float xv = (float)x[base + j];
+                g += xv * ((float)((gpk >> (j * bits)) & wmask) * gs + gb);
+                u += xv * ((float)((upk >> (j * bits)) & wmask) * us + ub);
+            }
+        }
+        #pragma unroll
+        for (int o = 16; o > 0; o >>= 1) {
+            g += __shfl_down(g, o, 32);
+            u += __shfl_down(u, o, 32);
+        }
+        if (lane == 0u) {
+            if (act == 1) {
+                // GeGLU (gelu tanh approx) * up (gemma4 experts).
+                float g3 = g * g * g;
+                float inner = 0.7978845608028654f * (g + 0.044715f * g3);
+                float gelu = 0.5f * g * (1.0f + tanhf(inner));
+                act_g[eslot * Dff + f] = gelu * u;
+            } else {
+                // SwiGLU (silu) * up, precise expf as in the CUDA port.
+                act_g[eslot * Dff + f] = (g / (1.0f + expf(-g))) * u;
+            }
+        }
+    )";
+
+    struct MoeGateUpKernelHolderHip {
+        std::optional<mlx::core::fast::CustomKernelFunction> kernel;
+        bool initialized = false;
+        mlx::core::fast::CustomKernelFunction& get() {
+            if (!initialized) {
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+                kernel = mlx::core::fast::hip_kernel(
+                    "moe_gateup_kernel_hip",
+                    {"x", "indices", "gate_w", "gate_s", "gate_b",
+                     "up_w", "up_s", "up_b"},
+                    {"act_g"},
+                    MOE_GATEUP_HIP_SOURCE);
+#else
+                throw std::runtime_error(
+                    "[fused_moe] this build has no ROCm backend");
+#endif
+                initialized = true;
+            }
+            return *kernel;
+        }
+    };
+    static MoeGateUpKernelHolderHip& get_moe_gateup_kernel_hip() {
+        static MoeGateUpKernelHolderHip holder;
+        return holder;
+    }
+
 // This kernel's ports, in one place. `has_kernel_port` and `select_kernel_port`
 // both read it, so a support predicate and the dispatch cannot answer
 // differently (#1801).
@@ -2335,8 +2787,9 @@ const mlxcel::KernelPorts& moe_gateup_ports() {
         .cuda = +[]() -> mlx::core::fast::CustomKernelFunction& {
             return get_moe_gateup_kernel_cuda().get();
         },
-        // No HIP port yet (#1814).
-        .rocm = nullptr,
+        .rocm = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_moe_gateup_kernel_hip().get();
+        },
     };
     return ports;
 }
@@ -2362,6 +2815,103 @@ const mlxcel::KernelPorts& moe_gateup_ports() {
         return holder;
     }
 
+    // ROCm port of the down kernel (#2065): the CUDA body with the shuffle
+    // changed as in MOE_GATEUP_HIP_SOURCE. Serves all three callers of
+    // `moe_down_ports()`: SwitchGLU and GeGLU through
+    // `run_fused_moe_two_kernel`, and Nemotron-H's opt-in squared-ReLU path
+    // through `moe_down_kernel_fn()`.
+    static const char* MOE_DOWN_HIP_SOURCE = R"(
+        // 32-lane wavefront only; see MOE_GATEUP_HIP_SOURCE.
+        #if defined(__AMDGCN_WAVEFRONT_SIZE__) && __AMDGCN_WAVEFRONT_SIZE__ != 32
+        #error "moe_down_kernel_hip assumes a 32-lane wavefront"
+        #endif
+        #if defined(__AMDGCN_WAVEFRONT_SIZE) && __AMDGCN_WAVEFRONT_SIZE != 32
+        #error "moe_down_kernel_hip assumes a 32-lane wavefront"
+        #endif
+        uint32_t lane  = threadIdx.x;                          // 0..31 (one wavefront)
+        uint32_t h     = blockIdx.y * blockDim.y + threadIdx.y; // output row 0..Din-1
+        uint32_t eslot = blockIdx.z;                           // 0..K-1
+        if (h >= (uint32_t)Din) return;                        // wavefront-uniform
+        uint32_t e = indices[eslot];
+
+        constexpr uint32_t Gd = Dff / group_size;
+        uint32_t row = e * Din + h;
+        const T*     dsr = down_s + row * Gd;
+        const T*     dbr = down_b + row * Gd;
+        const float* a   = act_g  + eslot * Dff;
+        float d = 0.0f;
+
+        if (bits == 6) {
+            // 6-bit: MLX packs 4 weights into 3 bytes; read the row as bytes.
+            // Layout matches quantized.h qdot: v0=b0&0x3f,
+            // v1=(b0>>6)|((b1&0x0f)<<2), v2=(b1>>4)|((b2&0x03)<<4), v3=b2>>2.
+            constexpr uint32_t packs   = Dff / 4u;
+            constexpr uint32_t row_u32 = Dff * 3u / 16u;
+            const uint8_t* wb = reinterpret_cast<const uint8_t*>(down_w + row * row_u32);
+            for (uint32_t p = lane; p < packs; p += 32u) {
+                uint32_t base = p * 4u;
+                uint32_t grp  = base / group_size;
+                float ds = (float)dsr[grp], db = (float)dbr[grp];
+                uint32_t b0 = wb[p * 3u], b1 = wb[p * 3u + 1u], b2 = wb[p * 3u + 2u];
+                uint32_t v0 = b0 & 0x3fu;
+                uint32_t v1 = (b0 >> 6) | ((b1 & 0x0fu) << 2);
+                uint32_t v2 = (b1 >> 4) | ((b2 & 0x03u) << 4);
+                uint32_t v3 = (b2 >> 2);
+                d += a[base + 0u] * ((float)v0 * ds + db);
+                d += a[base + 1u] * ((float)v1 * ds + db);
+                d += a[base + 2u] * ((float)v2 * ds + db);
+                d += a[base + 3u] * ((float)v3 * ds + db);
+            }
+        } else {
+            // Power-of-2 bits (4/8): vpw weights per 32-bit pack.
+            constexpr uint32_t vpw   = 32u / bits;
+            constexpr uint32_t wmask = (1u << bits) - 1u;
+            constexpr uint32_t Dff_p = Dff / vpw;
+            const uint32_t* dwr = down_w + row * Dff_p;
+            for (uint32_t p = lane; p < Dff_p; p += 32u) {
+                uint32_t base = p * vpw;
+                uint32_t grp  = base / group_size;
+                float ds = (float)dsr[grp], db = (float)dbr[grp];
+                uint32_t dpk = dwr[p];
+                for (uint32_t j = 0; j < vpw; ++j) {
+                    d += a[base + j] * ((float)((dpk >> (j * bits)) & wmask) * ds + db);
+                }
+            }
+        }
+        #pragma unroll
+        for (int o = 16; o > 0; o >>= 1) d += __shfl_down(d, o, 32);
+        if (lane == 0u) {
+            // f32 partial (score folded in f32), rounded to the activation
+            // dtype once by the host after the K-sum (#886).
+            out[eslot * Din + h] = (float)scores[eslot] * d;
+        }
+    )";
+
+    struct MoeDownKernelHolderHip {
+        std::optional<mlx::core::fast::CustomKernelFunction> kernel;
+        bool initialized = false;
+        mlx::core::fast::CustomKernelFunction& get() {
+            if (!initialized) {
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+                kernel = mlx::core::fast::hip_kernel(
+                    "moe_down_kernel_hip",
+                    {"indices", "down_w", "down_s", "down_b", "act_g", "scores"},
+                    {"out"},
+                    MOE_DOWN_HIP_SOURCE);
+#else
+                throw std::runtime_error(
+                    "[fused_moe] this build has no ROCm backend");
+#endif
+                initialized = true;
+            }
+            return *kernel;
+        }
+    };
+    static MoeDownKernelHolderHip& get_moe_down_kernel_hip() {
+        static MoeDownKernelHolderHip holder;
+        return holder;
+    }
+
 // This kernel's ports, in one place. `has_kernel_port` and `select_kernel_port`
 // both read it, so a support predicate and the dispatch cannot answer
 // differently (#1801).
@@ -2373,8 +2923,9 @@ const mlxcel::KernelPorts& moe_down_ports() {
         .cuda = +[]() -> mlx::core::fast::CustomKernelFunction& {
             return get_moe_down_kernel_cuda().get();
         },
-        // No HIP port yet (#1814).
-        .rocm = nullptr,
+        .rocm = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_moe_down_kernel_hip().get();
+        },
     };
     return ports;
 }
@@ -2441,16 +2992,94 @@ const mlxcel::KernelPorts& moe_down_ports() {
         return holder;
     }
 
-// This kernel's ports, in one place (#1801). Metal only: the fc1 ReLU-squared MoE kernel is Metal only.
+    // ROCm port of the fc1 + relu² kernel (#2069), written from the Metal
+    // source above in the shape of MOE_GATEUP_HIP_SOURCE: one 32-lane
+    // wavefront per output row on threadIdx.x, `sgy` rows per block on
+    // threadIdx.y, the expert slot on grid.z. `simd_sum` becomes the 16..1
+    // `__shfl_down` fold with the width stated, and lane 0 holds the sum. The
+    // template args are the Metal ones (T, K, Din, Dff, bits, group_size), so
+    // the hipRTC cache key carries the activation dtype `T`; `indices` is
+    // always uint32 and the weights always packed uint32.
+    static const char* MOE_FC1_RELU2_HIP_SOURCE = R"(
+        // 32-lane wavefront only; see MOE_GATEUP_HIP_SOURCE for why the
+        // explicit shuffle width, not this guard, is what holds on AMD
+        // clang 23.
+        #if defined(__AMDGCN_WAVEFRONT_SIZE__) && __AMDGCN_WAVEFRONT_SIZE__ != 32
+        #error "moe_fc1_relu2_kernel_hip assumes a 32-lane wavefront"
+        #endif
+        #if defined(__AMDGCN_WAVEFRONT_SIZE) && __AMDGCN_WAVEFRONT_SIZE != 32
+        #error "moe_fc1_relu2_kernel_hip assumes a 32-lane wavefront"
+        #endif
+        uint32_t lane  = threadIdx.x;                          // 0..31 (one wavefront)
+        uint32_t f     = blockIdx.y * blockDim.y + threadIdx.y; // output row 0..Dff-1
+        uint32_t eslot = blockIdx.z;                           // 0..K-1
+        if (f >= (uint32_t)Dff) return;                        // wavefront-uniform
+        uint32_t e = indices[eslot];
+
+        constexpr uint32_t vpw   = 32u / bits;
+        constexpr uint32_t wmask = (1u << bits) - 1u;
+        constexpr uint32_t Din_p = Din / vpw;
+        constexpr uint32_t G     = Din / group_size;
+
+        uint32_t row = e * Dff + f;
+        const uint32_t* wr = fc1_w + row * Din_p;
+        const T*        sr = fc1_s + row * G;
+        const T*        br = fc1_b + row * G;
+        float acc = 0.0f;
+        for (uint32_t p = lane; p < Din_p; p += 32u) {
+            uint32_t base = p * vpw;
+            uint32_t grp  = base / group_size;
+            float s = (float)sr[grp], b = (float)br[grp];
+            uint32_t pk = wr[p];
+            for (uint32_t j = 0; j < vpw; ++j) {
+                acc += (float)x[base + j] * ((float)((pk >> (j * bits)) & wmask) * s + b);
+            }
+        }
+        #pragma unroll
+        for (int o = 16; o > 0; o >>= 1) acc += __shfl_down(acc, o, 32);
+        if (lane == 0u) {
+            float r = acc > 0.0f ? acc : 0.0f;   // relu
+            act_g[eslot * Dff + f] = r * r;       // ^2
+        }
+    )";
+
+    struct MoeFc1Relu2KernelHolderHip {
+        std::optional<mlx::core::fast::CustomKernelFunction> kernel;
+        bool initialized = false;
+        mlx::core::fast::CustomKernelFunction& get() {
+            if (!initialized) {
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+                kernel = mlx::core::fast::hip_kernel(
+                    "moe_fc1_relu2_kernel_hip",
+                    {"x", "indices", "fc1_w", "fc1_s", "fc1_b"},
+                    {"act_g"},
+                    MOE_FC1_RELU2_HIP_SOURCE);
+#else
+                throw std::runtime_error(
+                    "[fused_moe_forward] this build has no ROCm backend");
+#endif
+                initialized = true;
+            }
+            return *kernel;
+        }
+    };
+    static MoeFc1Relu2KernelHolderHip& get_moe_fc1_relu2_kernel_hip() {
+        static MoeFc1Relu2KernelHolderHip holder;
+        return holder;
+    }
+
+// This kernel's ports, in one place (#1801). Metal and ROCm (#2069).
 const mlxcel::KernelPorts& moe_fc1_relu2_ports() {
     static const mlxcel::KernelPorts ports{
         .metal = +[]() -> mlx::core::fast::CustomKernelFunction& {
             return get_moe_fc1_relu2_kernel().get();
         },
-        // No CUDA or HIP port yet (#1814). Written out so that adding one is a
-        // line here rather than a restructure at the call site.
+        // No CUDA port (#1814). Written out so that adding one is a line here
+        // rather than a restructure at the call site.
         .cuda = nullptr,
-        .rocm = nullptr,
+        .rocm = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_moe_fc1_relu2_kernel_hip().get();
+        },
     };
     return ports;
 }
@@ -2464,6 +3093,35 @@ const mlxcel::KernelPorts& moe_fc1_relu2_ports() {
         return mlxcel::select_kernel_port(
             "fused_moe_forward", "graph fallback", moe_down_ports());
     }
+}
+
+// Support predicates for the fused decode-MoE kernels (#2065), read from the
+// kernels' own tables so a gate and the dispatch cannot disagree. Metal, CUDA
+// and ROCm today.
+// Both also require the GPU as the default device: custom kernels run only on
+// the GPU stream, so under `MLXCEL_DEVICE=cpu` the fused path would build a
+// launch whose `eval_cpu` throws, after the bridge call had already returned
+// Ok (#2069 review; the port tables alone say nothing about the device).
+bool fused_moe_kernels_available() {
+    return mlxcel::has_kernel_port(moe_gateup_ports()) &&
+        mlxcel::has_kernel_port(moe_down_ports()) &&
+        mlx::core::default_device() == mlx::core::Device::gpu;
+}
+
+bool moe_down_kernel_available() {
+    return mlxcel::has_kernel_port(moe_down_ports()) &&
+        mlx::core::default_device() == mlx::core::Device::gpu;
+}
+
+// Whether `fused_moe_forward`'s opt-in `MLXCEL_FUSED_MOE_RELU2` branch can run:
+// it launches the fc1 squared-ReLU kernel and the down kernel, so it needs
+// both ports. Metal and ROCm (#2069); CUDA has no fc1_relu2 port. False off
+// the GPU stream (MLXCEL_DEVICE=cpu), where custom kernels cannot run, so the
+// branch declines to gather_qmm there too.
+bool fused_moe_relu2_kernels_available() {
+    return mlx::core::default_device() == mlx::core::Device::gpu &&
+        mlxcel::has_kernel_port(moe_fc1_relu2_ports()) &&
+        mlxcel::has_kernel_port(moe_down_ports());
 }
 
 namespace {
@@ -2485,8 +3143,19 @@ std::unique_ptr<MlxArray> run_fused_moe_two_kernel(
 
     // SGY = simdgroups per threadgroup (one per output row). 8 is the measured
     // sweet spot on qwen3-30b-a3b (M1 Ultra); env-overridable for other
-    // hardware. It feeds an MLX template arg, which JIT-specializes at runtime.
+    // hardware. It sets the threadgroup shape, so it never changes the result
+    // (`fused_moe_geglu_kernel_bitwise_invariant_across_sgy`). On ROCm the
+    // default is 2: on gfx1151 qwen3-30b-a3b decode measured about 62.3 tok/s
+    // at 2 against about 59.9 at 8 and about 61 on gather_qmm (#2065), so 8
+    // would make the port slower than the fallback it replaces. A ROCm build
+    // has no Metal or CUDA backend, so the build flag is the backend here and
+    // no runtime backend comparison is needed (that is reserved for
+    // `select_kernel_port`).
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+    int sgy = 2;
+#else
     int sgy = 8;
+#endif
     if (const char* s = std::getenv("MLXCEL_FUSED_MOE_SGY")) {
         int v = std::atoi(s);
         if (v >= 1 && v <= 32) sgy = v;
@@ -2955,8 +3624,10 @@ void fused_mamba2_forward(
 //   has no bias, exactly what `fast::layer_norm` passes), so the compiler
 //   sees the same expression.
 // Covers the single-row kernel only (D <= 6656, MLX's `looped_limit`); the
-// caller falls back to the unfused pair above that, off Metal, or on mixed
-// dtypes. `residual_add3_layer_norm_matches_the_unfused_pair` pins the identity.
+// caller falls back to the unfused pair above that, on a backend without a
+// port (CUDA, CPU), or on mixed dtypes. ROCm has its own port (#2069, see
+// ADD3_LN_HIP_SOURCE), byte-identical to ROCm's pair rather than to Metal's.
+// `residual_add3_layer_norm_matches_the_unfused_pair` pins the identity.
 // Used by: Cohere2
 namespace {
     static const char* ADD3_LN_METAL_HEADER = R"(
@@ -3073,19 +3744,192 @@ namespace {
         return holder;
     }
 
-// This kernel's ports, in one place (#1801). Metal only: the fused add3 + LayerNorm is a Metal JIT kernel.
+    // ROCm port (#2069). Byte identity is with the ROCm unfused pair, so the
+    // structure here is not the Metal kernel's: on ROCm `compiled_add3` is a
+    // hipRTC elementwise kernel whose Add widens to float and rounds each sum
+    // to T (the overlay's compiled.cpp), and `fast::layer_norm` is the
+    // overlay's `layer_norm_kernel<T, 256, 4>` (layer_norm.hip), which this
+    // reproduces: 256 threads per row, each accumulating its strided groups
+    // of 4 elements in order, `__shfl_xor` folds of 16..1 inside each 32-lane
+    // wavefront, the eight wavefront sums folded again by wavefront 0, the
+    // centred sum of squares the same way, `1.0f / sqrtf(var / D + eps)`, and
+    // `T(w * norm + b)` with the bias read from memory (a zero with stride 0
+    // when the norm has no bias, as `fast::layer_norm` passes). The
+    // expressions are written as layer_norm.hip writes them, so the
+    // compilers' contraction choices should land the same way. That is not
+    // guaranteed: layer_norm.hip is built by hipcc with no explicit -O or
+    // -ffp-contract flag and this source by hipRTC, so identity is what
+    // `residual_add3_layer_norm_matches_the_unfused_pair` pins on the
+    // toolchain at hand, and a compiler upgrade can break it (the test then
+    // fails). The residual is kept in registers
+    // instead of being re-read from `x_out`; its values are the T values
+    // written there. `D <= 6656` (the caller's cap) bounds the register array
+    // at 28 floats per thread.
+    static const char* ADD3_LN_HIP_SOURCE = R"(
+        // The folds below assume 32-lane wavefronts and a 256-thread block of
+        // eight of them, as layer_norm.hip's WARP_SIZE does on RDNA. Every
+        // shuffle states width 32; see MOE_GATEUP_HIP_SOURCE for why the
+        // guard alone is inert on AMD clang 23.
+        #if defined(__AMDGCN_WAVEFRONT_SIZE__) && __AMDGCN_WAVEFRONT_SIZE__ != 32
+        #error "mlxcel_add3_layer_norm_hip assumes a 32-lane wavefront"
+        #endif
+        #if defined(__AMDGCN_WAVEFRONT_SIZE) && __AMDGCN_WAVEFRONT_SIZE != 32
+        #error "mlxcel_add3_layer_norm_hip assumes a 32-lane wavefront"
+        #endif
+        constexpr int BLOCK_DIM = 256;
+        constexpr int N_READS = 4;
+        constexpr int WAVE = 32;
+        constexpr int CHUNKS = (D + BLOCK_DIM * N_READS - 1) / (BLOCK_DIM * N_READS);
+        __shared__ float shared_sum[BLOCK_DIM / WAVE + 1];
+
+        const size_t row = blockIdx.x;
+        const size_t base = row * D;
+        const int lane = threadIdx.x % WAVE;
+        const int warp_id = threadIdx.x / WAVE;
+
+        // Residual in T, as compiled_add3 rounds it: (a + b) then + x.
+        float xv[CHUNKS * N_READS];
+        #pragma unroll
+        for (int c = 0; c < CHUNKS; ++c) {
+            const int i = threadIdx.x * N_READS + c * BLOCK_DIM * N_READS;
+            #pragma unroll
+            for (int j = 0; j < N_READS; ++j) {
+                if (i + j < D) {
+                    const size_t k = base + i + j;
+                    T s = T(static_cast<float>(ra[k]) + static_cast<float>(rb[k]));
+                    T xn = T(static_cast<float>(s) + static_cast<float>(rx[k]));
+                    x_out[k] = xn;
+                    xv[c * N_READS + j] = static_cast<float>(xn);
+                }
+            }
+        }
+
+        // Sum for mean.
+        float sum = 0;
+        #pragma unroll
+        for (int c = 0; c < CHUNKS; ++c) {
+            const int i = threadIdx.x * N_READS + c * BLOCK_DIM * N_READS;
+            #pragma unroll
+            for (int j = 0; j < N_READS && i + j < D; ++j) {
+                sum += xv[c * N_READS + j];
+            }
+        }
+        float warp_sum = sum;
+        for (int offset = WAVE / 2; offset > 0; offset /= 2) {
+            warp_sum += __shfl_xor(warp_sum, offset, WAVE);
+        }
+        if (lane == 0) {
+            shared_sum[warp_id] = warp_sum;
+        }
+        __syncthreads();
+        if (warp_id == 0) {
+            sum = (lane < (BLOCK_DIM + WAVE - 1) / WAVE) ? shared_sum[lane] : 0;
+            for (int offset = WAVE / 2; offset > 0; offset /= 2) {
+                sum += __shfl_xor(sum, offset, WAVE);
+            }
+        }
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            shared_sum[0] = sum;
+        }
+        __syncthreads();
+        float mean = shared_sum[0] / D;
+
+        // Centred sum of squares.
+        float var_sum = 0;
+        #pragma unroll
+        for (int c = 0; c < CHUNKS; ++c) {
+            const int i = threadIdx.x * N_READS + c * BLOCK_DIM * N_READS;
+            #pragma unroll
+            for (int j = 0; j < N_READS && i + j < D; ++j) {
+                float t = xv[c * N_READS + j] - mean;
+                var_sum += t * t;
+            }
+        }
+        warp_sum = var_sum;
+        for (int offset = WAVE / 2; offset > 0; offset /= 2) {
+            warp_sum += __shfl_xor(warp_sum, offset, WAVE);
+        }
+        if (lane == 0) {
+            shared_sum[warp_id] = warp_sum;
+        }
+        __syncthreads();
+        if (warp_id == 0) {
+            var_sum = (lane < (BLOCK_DIM + WAVE - 1) / WAVE) ? shared_sum[lane] : 0;
+            for (int offset = WAVE / 2; offset > 0; offset /= 2) {
+                var_sum += __shfl_xor(var_sum, offset, WAVE);
+            }
+        }
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            shared_sum[0] = var_sum;
+        }
+        __syncthreads();
+        float normalizer = 1.0f / sqrtf(shared_sum[0] / D + eps[0]);
+
+        #pragma unroll
+        for (int c = 0; c < CHUNKS; ++c) {
+            const int i = threadIdx.x * N_READS + c * BLOCK_DIM * N_READS;
+            #pragma unroll
+            for (int j = 0; j < N_READS && i + j < D; ++j) {
+                int idx = i + j;
+                float norm = (xv[c * N_READS + j] - mean) * normalizer;
+                float wi = static_cast<float>(w[idx * W_STRIDE]);
+                float bi = static_cast<float>(bias[idx * B_STRIDE]);
+                h_out[base + idx] = static_cast<T>(wi * norm + bi);
+            }
+        }
+    )";
+
+    struct Add3LayerNormKernelHolderHip {
+        std::optional<mlx::core::fast::CustomKernelFunction> kernel;
+        bool initialized = false;
+        mlx::core::fast::CustomKernelFunction& get() {
+            if (!initialized) {
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+                kernel = mlx::core::fast::hip_kernel(
+                    "mlxcel_add3_layer_norm_hip",
+                    {"ra", "rb", "rx", "w", "bias", "eps"},
+                    {"x_out", "h_out"},
+                    ADD3_LN_HIP_SOURCE);
+#else
+                throw std::runtime_error(
+                    "[fused_add3_layer_norm] this build has no ROCm backend");
+#endif
+                initialized = true;
+            }
+            return *kernel;
+        }
+    };
+    static Add3LayerNormKernelHolderHip& get_add3_layer_norm_kernel_hip() {
+        static Add3LayerNormKernelHolderHip holder;
+        return holder;
+    }
+
+// This kernel's ports, in one place (#1801). Metal and ROCm (#2069); each is
+// byte-identical to its own backend's unfused pair, not to the other's.
 const mlxcel::KernelPorts& add3_layer_norm_ports() {
     static const mlxcel::KernelPorts ports{
         .metal = +[]() -> mlx::core::fast::CustomKernelFunction& {
             return get_add3_layer_norm_kernel().get();
         },
-        // No CUDA or HIP port yet (#1814). Written out so that adding one is a
-        // line here rather than a restructure at the call site.
+        // No CUDA port (#1814). Written out so that adding one is a line here
+        // rather than a restructure at the call site.
         .cuda = nullptr,
-        .rocm = nullptr,
+        .rocm = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_add3_layer_norm_kernel_hip().get();
+        },
     };
     return ports;
 }
+}
+
+// Read from the table the launcher selects from, and false off the GPU stream
+// (MLXCEL_DEVICE=cpu), where custom kernels cannot run and the caller runs the
+// unfused pair instead.
+bool fused_add3_layer_norm_available() {
+    return mlx::core::default_device() == mlx::core::Device::gpu &&
+        mlxcel::has_kernel_port(add3_layer_norm_ports());
 }
 
 void fused_add3_layer_norm(
@@ -3103,9 +3947,18 @@ void fused_add3_layer_norm(
     const auto& shape = x.inner.shape();
     const int D = shape.back();
     const int64_t rows = x.inner.size() / D;
+    // Threads per row. Metal: MLX's single-row layer_norm geometry, 8 reads
+    // per thread. ROCm: the overlay's layer_norm_kernel block of 256, which
+    // the HIP port's reduction tree depends on. A ROCm build has no Metal
+    // backend, so the build flag is the backend here, as in
+    // run_fused_moe_two_kernel.
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+    const int tg = 256;
+#else
     const int simd = 32;
     const int n_reads = 8;
     const int tg = simd * (((D + n_reads - 1) / n_reads + simd - 1) / simd);
+#endif
 
     // The zero `fast::layer_norm` passes when there is no bias, read through a
     // stride-0 pointer as upstream does. One element rather than 0-d, because

@@ -563,10 +563,11 @@ impl JambaMambaMixer {
 
         // Fused selective scan: one kernel walks every timestep of the layer,
         // for prefill and decode alike so the two stay numerically consistent.
-        // On Metal (issue #2005) it carries the state in float32 registers; on
-        // CUDA (issue #1981) it rounds each step exactly as the graph scan
-        // below does, so output is unchanged there. The graph scan remains for
-        // ROCm, mixed-dtype inputs and `MLXCEL_MAMBA1_SCAN_KERNEL=0`.
+        // On Metal (issue #2005) and ROCm (issue #2069) it carries the state
+        // in float32 registers; on CUDA (issue #1981) it rounds each step
+        // exactly as the graph scan below does, so output is unchanged there.
+        // The graph scan remains for mixed-dtype inputs on CUDA, the CPU and
+        // `MLXCEL_MAMBA1_SCAN_KERNEL=0`.
         if mlxcel_core::mamba1_scan_kernel_accepts(x, &delta, &b, &c, a, &self.d_param) {
             let zeros;
             let state_in = match state {

@@ -1,0 +1,6 @@
+rocm_gfx1151_96cbce84_granite-4.0-h-tiny_default_w1ctx512                exit=0 rows=135 elapsed=120s
+rocm_gfx1151_96cbce84_granite-4.0-h-tiny_ssmkernel0_w1ctx512             exit=0 rows=135 elapsed=115s
+rocm_gfx1151_96cbce84_granite-4.0-h-tiny_default_w1                      exit=0 rows=135 elapsed=4s
+rocm_gfx1151_96cbce84_nemotron-3-nano-30b-a3b_default_w1ctx512           exit=0 rows=140 elapsed=235s
+rocm_gfx1151_96cbce84_nemotron-3-nano-30b-a3b_ssmkernel0_w1ctx512        exit=0 rows=140 elapsed=223s
+rocm_gfx1151_96cbce84_nemotron-3-nano-30b-a3b_default_w1                 exit=0 rows=140 elapsed=6s

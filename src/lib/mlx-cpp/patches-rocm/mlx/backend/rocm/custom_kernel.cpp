@@ -17,6 +17,12 @@ namespace mlx::core::fast {
 
 namespace {
 
+// `KernelShape` and `KernelStrides` in `default_header` hold this many entries,
+// the width `KernelArgs::append_ndim` pads to.
+static_assert(
+    rocm::JIT_MAX_NDIM == 8,
+    "resize KernelShape/KernelStrides in default_header with JIT_MAX_NDIM");
+
 // Inline the essential definitions for custom kernels
 // This avoids the need for include paths in JIT compilation
 constexpr const char* default_header = R"(
@@ -65,6 +71,34 @@ elem_to_loc(IdxT elem, const int* shape, const int64_t* strides, int ndim) {
     elem /= shape[i];
   }
   return loc;
+}
+
+// An input's `<name>_shape` and `<name>_strides` arrive BY VALUE, as the host
+// side passes them: `KernelArgs::append_ndim` pads the vector to JIT_MAX_NDIM
+// (8) entries and hands the launch a pointer to that storage, which
+// `hipModuleLaunchKernel` copies into the parameter. CUDA's custom kernels
+// declare the same arguments `const __grid_constant__ Shape` / `Strides`.
+struct KernelShape {
+  int32_t data[8];
+  __device__ int32_t operator[](int i) const {
+    return data[i];
+  }
+};
+
+struct KernelStrides {
+  int64_t data[8];
+  __device__ int64_t operator[](int i) const {
+    return data[i];
+  }
+};
+
+template <typename IdxT = int64_t>
+__device__ IdxT elem_to_loc(
+    IdxT elem,
+    const KernelShape& shape,
+    const KernelStrides& strides,
+    int ndim) {
+  return elem_to_loc<IdxT>(elem, shape.data, strides.data, ndim);
 }
 
 } // namespace mlx::core::rocm
@@ -118,10 +152,11 @@ std::string build_kernel(
     // Add input shape, strides and ndim if present in the source
     if (arr.ndim() > 0) {
       if (std::get<0>(shape_infos[i])) {
-        kernel_source << "    const int32_t* " << name << "_shape,\n";
+        // By value, not a pointer: see `KernelShape` in the header above.
+        kernel_source << "    const KernelShape " << name << "_shape,\n";
       }
       if (std::get<1>(shape_infos[i])) {
-        kernel_source << "    const int64_t* " << name << "_strides,\n";
+        kernel_source << "    const KernelStrides " << name << "_strides,\n";
       }
       if (std::get<2>(shape_infos[i])) {
         kernel_source << "    const int " << name << "_ndim,\n";
@@ -325,13 +360,17 @@ void CustomKernel::eval_gpu(
     const array& in = checked_inputs[i];
     auto& shape_info = shape_infos_[i];
     args.append(in);
-    if (std::get<0>(shape_info)) {
+    // `build_kernel` declares these only for an input with ndim > 0; append
+    // them under the same condition so a scalar input cannot shift every
+    // later argument.
+    const bool has_dims = in.ndim() > 0;
+    if (has_dims && std::get<0>(shape_info)) {
       args.append_ndim(in.shape());
     }
-    if (std::get<1>(shape_info)) {
+    if (has_dims && std::get<1>(shape_info)) {
       args.append_ndim(in.strides());
     }
-    if (std::get<2>(shape_info)) {
+    if (has_dims && std::get<2>(shape_info)) {
       args.append<int32_t>(in.ndim());
     }
   }

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "fused_rope_append.h"
+#include "fused_rope_append_hip.h"
 #include "gpu_backend.h"
 #include "kernel_port.h"
 
@@ -371,6 +372,38 @@ inline FusedRopeKernelHolderCuda& get_fused_rope_kernel_cuda() {
     return holder;
 }
 
+// HIP counterpart (issue #2063), reached only on a ROCm build. The body lives
+// in `fused_rope_append_hip.h`; the launch below is shared with the Metal and CUDA ports. On a
+// build without the ROCm backend `fast::hip_kernel` is not declared, and
+// `fused_rope_ports()` never resolves this entry there (`select_kernel_port`
+// reads the running backend), so the throw is unreachable and exists only to
+// keep the table shape uniform.
+struct FusedRopeKernelHolderHip {
+    std::optional<mlx::core::fast::CustomKernelFunction> kernel;
+    std::once_flag init_flag;
+
+    mlx::core::fast::CustomKernelFunction& get() {
+        std::call_once(init_flag, [this] {
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+            kernel = mlx::core::fast::hip_kernel(
+                "mlxcel_fused_rope_qk_append",
+                fused_rope_input_names(),
+                fused_rope_output_names(),
+                std::string(FUSED_ROPE_APPEND_HIP_SOURCE));
+#else
+            throw std::runtime_error(
+                "[fused_rope_qk_append] this build has no ROCm backend");
+#endif
+        });
+        return *kernel;
+    }
+};
+
+inline FusedRopeKernelHolderHip& get_fused_rope_kernel_hip() {
+    static FusedRopeKernelHolderHip holder;
+    return holder;
+}
+
 
 // This kernel's ports, in one place. `has_kernel_port` and
 // `select_kernel_port` both read it, so a support predicate and the dispatch
@@ -383,14 +416,21 @@ const mlxcel::KernelPorts& fused_rope_ports() {
         .cuda = +[]() -> mlx::core::fast::CustomKernelFunction& {
             return get_fused_rope_kernel_cuda().get();
         },
-        // No HIP port yet (#1814).
-        .rocm = nullptr,
+        .rocm = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_fused_rope_kernel_hip().get();
+        },
     };
     return ports;
 }
 
 } // namespace
 bool fused_rope_qk_append_available() {
+    // Custom kernels run only on the GPU stream; on a CPU default device
+    // (`MLXCEL_DEVICE=cpu` on a GPU build) their `eval_cpu` throws, so the
+    // caller must take the graph path there (#2069).
+    if (mlx::core::default_device() != mlx::core::Device::gpu) {
+        return false;
+    }
     return mlxcel::has_kernel_port(fused_rope_ports());
 }
 
@@ -431,6 +471,10 @@ std::vector<mlx::core::array> fused_rope_qk_append(
     }
     const int batch = qkv.shape()[0];
     const int seq = qkv.shape()[1];
+    if (batch <= 0 || seq <= 0) {
+        throw std::invalid_argument(
+            "[fused_rope_qk_append] qkv must have a positive batch and window.");
+    }
     const int expected = (num_heads + 2 * num_kv_heads) * head_dim;
     if (qkv.shape()[2] != expected) {
         throw std::invalid_argument(

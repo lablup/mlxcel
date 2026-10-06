@@ -23,7 +23,15 @@
 //! Runtime dtypes follow the reference rather than the checkpoint: the code
 //! embeddings are summed in `f32`, which promotes the fused inputs, the whole
 //! backbone, the KV caches and the MoG head to `f32` against bf16 weights;
-//! only the subword condition stays bf16.
+//! only the subword condition (with `null_emb`) stays bf16.
+//!
+//! On CUDA builds bf16 meeting f32 resolves to bf16 (see
+//! [`crate::audio::f32_weights`]), so every stored tensor that joins the f32
+//! stream is held or cast as f32 here (issue #2109): `bos_emb` and
+//! `audio_prompt_projection_W` are promoted at load, the backbone norms hold
+//! their `1 + w` widened to f32 ([`Gemma3Backbone::widen_norms_to_f32`]),
+//! and the gated fusion casts its text branch. Each is an exact widening, so
+//! builds with upstream promotion compute the same values.
 
 use std::collections::HashMap;
 
@@ -71,9 +79,12 @@ pub struct RvqEarTtsModel {
 /// ever meets f32 activations through a promoting matmul, so it can be held
 /// as f32 without changing any output (see [`crate::audio::f32_weights`]):
 /// the backbone and MoG-head projections, the code embedding and the audio
-/// branch of the gated fusion. Norm weights (`1 + w` is built in the stored
-/// dtype), the bf16 subword path (`embed_subword`, `text_proj`) and the
-/// gathered MoG tables (`proj_mus`, `low_mat`) stay as stored.
+/// branch of the gated fusion, plus `bos_emb` (masked, then added to the f32
+/// code embeddings) and `audio_prompt_projection_W` (matmul against them).
+/// Norm weights (`1 + w` is built in the stored dtype; the backbone widens
+/// the built `1 + w` instead), the bf16 subword path (`embed_subword`,
+/// `text_proj`, `null_emb`) and the gathered MoG tables (`proj_mus`,
+/// `low_mat`) stay as stored.
 pub(crate) fn promotes_to_f32(key: &str) -> bool {
     let projection = key.ends_with("_proj.weight") || key.ends_with("_proj.bias");
     let mog_output = ["proj_logits", "proj_logs", "proj_else"]
@@ -86,6 +97,8 @@ pub(crate) fn promotes_to_f32(key: &str) -> bool {
         || mog_output
         || key.starts_with("embed_code.")
         || key.starts_with("gated_fusion_audio_text.audio_proj.")
+        || key == "bos_emb"
+        || key == "audio_prompt_projection_W"
 }
 
 fn bool_column(values: &[bool]) -> UniquePtr<MlxArray> {
@@ -115,12 +128,14 @@ impl RvqEarTtsModel {
                 config.num_quantizers
             ));
         }
+        let mut backbone = Gemma3Backbone::from_weights(
+            weights,
+            &format!("{prefix}.backbone"),
+            &config.gemma_args(),
+        )?;
+        backbone.widen_norms_to_f32();
         Ok(Self {
-            backbone: Gemma3Backbone::from_weights(
-                weights,
-                &format!("{prefix}.backbone"),
-                &config.gemma_args(),
-            )?,
+            backbone,
             bos_emb: weight_with_shape(weights, &format!("{prefix}.bos_emb"), &[h])?,
             null_emb: weight_with_shape(weights, &format!("{prefix}.null_emb"), &[h])?,
             embed_code: UnifiedLinear::from_weights(
@@ -215,10 +230,25 @@ impl RvqEarTtsModel {
 
     /// Conditional subword embedding followed by the unconditional
     /// `null_emb` row: `[2, T, hidden]`.
-    fn guided_condition(&self, ids: &[i32], mask: &[bool]) -> Result<UniquePtr<MlxArray>, String> {
+    pub(crate) fn guided_condition(
+        &self,
+        ids: &[i32],
+        mask: &[bool],
+    ) -> Result<UniquePtr<MlxArray>, String> {
         let cond = self.embed_subword.forward(ids, mask, 1, ids.len())?;
         let null = mlxcel_core::broadcast_to(&self.null_emb, &mlxcel_core::array_shape(&cond));
         Ok(mlxcel_core::concatenate(&cond, &null, 0))
+    }
+
+    /// Gated fusion of the code embeddings (duplicated for the CFG pair)
+    /// with the guided condition: the backbone's input embeddings.
+    pub(crate) fn backbone_inputs(
+        &self,
+        code_embed: &MlxArray,
+        cond: &MlxArray,
+    ) -> UniquePtr<MlxArray> {
+        let doubled = mlxcel_core::concatenate(code_embed, code_embed, 0);
+        self.fusion.forward(&doubled, cond)
     }
 
     fn run_backbone(
@@ -227,8 +257,7 @@ impl RvqEarTtsModel {
         cond: &MlxArray,
         caches: &mut TtsCaches,
     ) -> Result<UniquePtr<MlxArray>, String> {
-        let doubled = mlxcel_core::concatenate(code_embed, code_embed, 0);
-        let inputs = self.fusion.forward(&doubled, cond);
+        let inputs = self.backbone_inputs(code_embed, cond);
         self.backbone.forward_embeds(&inputs, caches)
     }
 
@@ -265,6 +294,31 @@ impl RvqEarTtsModel {
                 audio_mask.len()
             ));
         }
+        if let Some(latent) = audio_prompt_latent {
+            let ls = mlxcel_core::array_shape(latent);
+            if ls != [1, t as i32, self.config.hidden_size as i32] {
+                return Err(format!(
+                    "audio prompt latent must be [1, {t}, {}], got {ls:?}",
+                    self.config.hidden_size
+                ));
+            }
+        }
+        let code_embed = self.prompt_embeds(code, audio_mask, audio_prompt_latent)?;
+        let cond = self.guided_condition(subword_ids, subword_mask)?;
+        self.run_backbone(&code_embed, &cond, caches)
+    }
+
+    /// Code-embedding stream of a warmup prompt (`[1, T, hidden]`): the
+    /// shifted prompt codes embedded, every pre-BOS frame replaced by the
+    /// speaker latent (or its frozen projection), plus `bos_emb` on each BOS
+    /// frame. Shapes are checked by [`Self::warmup`].
+    pub(crate) fn prompt_embeds(
+        &self,
+        code: &MlxArray,
+        audio_mask: &[bool],
+        audio_prompt_latent: Option<&MlxArray>,
+    ) -> Result<UniquePtr<MlxArray>, String> {
+        let t = audio_mask.len();
         let (tt, q) = (t as i32, self.config.num_quantizers as i32);
         let head = mlxcel_core::zeros(&[1, 1, q], mlxcel_core::array_dtype(code));
         let body = mlxcel_core::slice(code, &[0, 0, 0], &[1, tt - 1, q]);
@@ -282,24 +336,12 @@ impl RvqEarTtsModel {
             pre_bos.push(!seen_bos);
         }
         let projected = match audio_prompt_latent {
-            Some(latent) => {
-                let ls = mlxcel_core::array_shape(latent);
-                if ls != [1, tt, self.config.hidden_size as i32] {
-                    return Err(format!(
-                        "audio prompt latent must be [1, {t}, {}], got {ls:?}",
-                        self.config.hidden_size
-                    ));
-                }
-                mlxcel_core::astype(latent, act)
-            }
+            Some(latent) => mlxcel_core::astype(latent, act),
             None => mlxcel_core::matmul(&code_embed, &self.audio_prompt_projection_w),
         };
         let code_embed = mlxcel_core::where_cond(&bool_column(&pre_bos), &projected, &code_embed);
         let bos_term = mlxcel_core::multiply(&bool_column(&bos), &self.bos_emb);
-        let code_embed = mlxcel_core::add(&code_embed, &bos_term);
-
-        let cond = self.guided_condition(subword_ids, subword_mask)?;
-        self.run_backbone(&code_embed, &cond, caches)
+        Ok(mlxcel_core::add(&code_embed, &bos_term))
     }
 
     /// `generate_codes`: MaskGIT-style RVQ sampling from a guided backbone

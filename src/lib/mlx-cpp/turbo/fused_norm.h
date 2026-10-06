@@ -80,12 +80,13 @@ std::vector<mlx::core::array> fused_add_rms_norm(
     float eps,
     float weight_bias);
 
-// Whether the current backend has a fused-add-RMSNorm kernel at all.
+// Whether the fused-add-RMSNorm kernel can run: the backend has a port in
+// `fused_norm_ports()` and the default device is the GPU.
 //
-// `mlx::core::fast::metal_kernel` throws "[metal_kernel] No Metal back-end" on
-// a CPU-only build and `cuda_kernel` is equally unavailable there, so the Rust
-// helper has to know before it commits to the fused path. True on Metal and
-// CUDA, false on a CPU-only build.
+// The custom-kernel JIT throws on a CPU-only build, and a custom kernel throws
+// on the CPU stream of a GPU build, so the Rust helper has to know before it
+// commits to the fused path. True on Metal, CUDA and ROCm (#2063) with the GPU
+// as the default device; false on a CPU-only build or the CPU device.
 bool fused_add_rms_norm_available();
 
 } // namespace mlxcel::turbo

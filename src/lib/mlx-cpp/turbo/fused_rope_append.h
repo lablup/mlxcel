@@ -106,9 +106,9 @@ std::vector<mlx::core::array> fused_rope_qk_append(
     int positions_base,
     int dest_layout);
 
-// Whether the current backend has a fused RoPE + append kernel at all.
-//
-// False on a CPU-only build, where both `metal_kernel` and `cuda_kernel` throw.
+// Whether the fused RoPE + append kernel can run: the backend has a port in
+// `fused_rope_ports()` (Metal, CUDA, ROCm since #2063) and the default device
+// is the GPU. False on a CPU-only build and on the CPU device of a GPU build.
 bool fused_rope_qk_append_available();
 
 } // namespace mlxcel::turbo

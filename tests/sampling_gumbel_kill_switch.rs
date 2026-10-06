@@ -105,7 +105,7 @@ fn falsy_env_restores_the_categorical_sampling_path() {
         }
         Err(error) => {
             assert!(
-                !mlxcel_core::custom_kernels_available(),
+                !mlxcel_core::sampling_gumbel_backend_supported(),
                 "the launcher refused on a backend that reports a kernel port: {error}"
             );
             let message = error.to_string();

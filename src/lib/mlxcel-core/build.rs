@@ -181,6 +181,21 @@ fn main() {
         bridge.define("MLXCEL_BRIDGE_ROCM_BACKEND", None);
     }
 
+    // Any GPU backend (#2108). MLX defines its GPU-side helpers, such as
+    // `copy_gpu_inplace` in `mlx/backend/gpu/copy.cpp`, only when it builds a
+    // GPU backend, so a bridge file that calls them must not reference them in
+    // a CPU-only Linux build or the final link fails. Keyed on the resolved
+    // `metal_backend` (not the Cargo feature, see above) and on the CUDA and
+    // ROCm features, which are exactly the conditions under which `build_mlx`
+    // turns a GPU backend on.
+    if metal_backend::gpu_backend_enabled(
+        metal_backend,
+        env::var_os("CARGO_FEATURE_CUDA").is_some(),
+        env::var_os("CARGO_FEATURE_ROCM").is_some(),
+    ) {
+        bridge.define("MLXCEL_BRIDGE_GPU_BACKEND", None);
+    }
+
     // Add optimization flags for release builds
     #[cfg(not(debug_assertions))]
     {
@@ -294,6 +309,8 @@ fn main() {
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/paged_attention.h");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/paged_attention.cpp");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/paged_attention.metal");
+    // HIP bodies of the three paged-attention kernels (#2068).
+    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/paged_attention_hip.h");
 
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/paged_attention_v2.h");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/paged_attention_v2.cpp");
@@ -301,13 +318,17 @@ fn main() {
     // Gumbel-max categorical sampling kernel launcher (#900).
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sampling.h");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sampling.cpp");
+    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sampling_gumbel_hip.h");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sampling_rejection.h");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sampling_rejection.cpp");
+    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sampling_rejection_hip.h");
     // Fused residual-add RMSNorm and fused RoPE + KV-append kernel launchers (#905).
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/fused_norm.h");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/fused_norm.cpp");
+    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/fused_norm_hip.h");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/fused_rope_append.h");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/fused_rope_append.cpp");
+    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/fused_rope_append_hip.h");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/kv_inplace_write.h");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/kv_inplace_write.cpp");
     println!("cargo:rerun-if-env-changed=MLX_CUDA_ARCHITECTURES");

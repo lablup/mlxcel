@@ -845,6 +845,13 @@ fn dense_gemm(
 /// parallel block. Flip this constant only on a backend that measures a win.
 /// See `docs/benchmark_results/fused-norm-rope-m1ultra-2026-07-31.md` and
 /// `docs/benchmark_results/fused-add-rmsnorm-decode-m1ultra-2026-09-27.md`.
+///
+/// ROCm (#2063) measured the same: with the HIP port, whose output is
+/// byte-identical to the graph, Llama 3.1 8B decode on gfx1151 was 37.85 tok/s
+/// off and 37.95 on (medians of five), and Qwen2.5 7B gained 1.5% with a size
+/// that drifted between runs as much as the off arm's spread. Not a clear win,
+/// so ROCm keeps the shared default. See
+/// `docs/benchmark_results/rocm-fused-norm-rope-gfx1151-2026-10-05.md`.
 pub(crate) const FUSED_ADD_RMSNORM_DEFAULT: bool = false;
 
 /// Default for the fused q/k RoPE + KV-append-layout decode path. Same
@@ -857,6 +864,10 @@ pub(crate) const FUSED_ADD_RMSNORM_DEFAULT: bool = false;
 /// That is the single reproducible signal in the sweep and it points the wrong
 /// way, which is the stronger reason to leave this unwired until a backend or
 /// shape is found where it wins.
+///
+/// ROCm (#2063) did not find one: on gfx1151 Qwen2.5 7B decode gained 0.6% with
+/// this kernel alone and 1.7% with both fusions (medians of seven), inside the
+/// drift between runs. Same results page as [`FUSED_ADD_RMSNORM_DEFAULT`].
 pub(crate) const FUSED_ROPE_APPEND_DEFAULT: bool = false;
 
 /// Whether the fused residual-add + RMSNorm path (#905) is enabled.
@@ -1025,22 +1036,46 @@ pub fn graph_add_rms_norm<N: FusedAddRmsNormSpec + ?Sized>(
     (normed, new_residual)
 }
 
-/// Whether this backend has a fused-add-RMSNorm kernel, asked once.
+/// Whether the fused-add-RMSNorm kernel can run now: the default device is the
+/// GPU and the backend has a port (Metal, CUDA, ROCm since #2063).
 ///
-/// The FFI answer reaches `metal::is_available()` / `cu::is_available()` in
+/// The port half is asked once. The FFI answer reaches the backend probes in
 /// C++, and the backend cannot change mid-process, so re-asking at every
 /// residual join of every layer of every token would be pure overhead on the
-/// path the fusion exists to make cheaper.
+/// path the fusion exists to make cheaper. The device half is not cached: a
+/// custom kernel throws on the CPU stream, and `MLXCEL_DEVICE=cpu` or a
+/// `DefaultDeviceGuard` moves the default device, so it is read on every call
+/// (one FFI read of MLX's default device). The C++ predicate checks the device
+/// too, and another thread can move it between the two reads, so only a `true`
+/// answer is cached: a `false` taken in that window would otherwise switch the
+/// fusion off for the rest of the process.
 fn fused_add_rms_norm_backend_available() -> bool {
-    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *AVAILABLE.get_or_init(ffi::fused_add_rms_norm_available)
+    static PORTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    gpu_port_available(&PORTED, ffi::fused_add_rms_norm_available)
 }
 
-/// Whether this backend has a fused RoPE + append kernel, asked once. Same
-/// reasoning as [`fused_add_rms_norm_backend_available`].
+/// Whether the fused RoPE + append kernel can run now. Same split between a
+/// cached port check and a per-call device check as
+/// [`fused_add_rms_norm_backend_available`].
 fn fused_rope_append_backend_available() -> bool {
-    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *AVAILABLE.get_or_init(ffi::fused_rope_qk_append_available)
+    static PORTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    gpu_port_available(&PORTED, ffi::fused_rope_qk_append_available)
+}
+
+/// The GPU-default check, then `predicate`, which is asked until it first
+/// answers `true` and not after.
+fn gpu_port_available(ported: &std::sync::OnceLock<()>, predicate: fn() -> bool) -> bool {
+    if !ffi::default_device_is_gpu() {
+        return false;
+    }
+    if ported.get().is_some() {
+        return true;
+    }
+    let available = predicate();
+    if available {
+        let _ = ported.set(());
+    }
+    available
 }
 
 /// Whether the fused kernel can serve this call.
@@ -1049,8 +1084,9 @@ fn fused_rope_append_backend_available() -> bool {
 /// and an exception crossing the cxx boundary is not recoverable, so the
 /// eligibility test lives here and the fused branch is only taken when the
 /// launcher cannot throw: matching shapes and dtypes, a 1-D weight whose length
-/// is the trailing dimension, and a backend that has a custom-kernel JIT at all
-/// (false on a CPU-only build, and on ROCm until the ports land).
+/// is the trailing dimension, and a backend that has a port of this kernel on
+/// the current default device (false on a CPU-only build and on the CPU device
+/// of a GPU build).
 ///
 /// One class is no longer in that list. A backend with no port used to reach
 /// the Metal arm and abort; issue #1885 made the launcher refuse and its bridge
@@ -1065,7 +1101,11 @@ fn fused_add_rms_norm_eligible(delta: &MlxArray, residual: &MlxArray, weight: &M
     let Some(&trailing) = d_shape.last() else {
         return false;
     };
-    ffi::array_shape(weight)[0] == trailing
+    // An empty input would launch a zero-size grid, and a zero-width row would
+    // divide by zero in the launcher; the graph handles both.
+    trailing > 0
+        && d_shape.iter().all(|&d| d > 0)
+        && ffi::array_shape(weight)[0] == trailing
         && ffi::array_shape(residual) == d_shape
         && ffi::array_dtype(delta) == ffi::array_dtype(residual)
 }
@@ -1125,8 +1165,9 @@ impl LayerNorm {
 }
 
 /// Largest normalized dimension MLX's single-row `layer_norm` kernel handles
-/// (`looped_limit` in `mlx/backend/metal/normalization.cpp`). The fused kernel
-/// copies that kernel, so it covers the same range.
+/// (`looped_limit` in `mlx/backend/metal/normalization.cpp`). The Metal kernel
+/// copies that kernel, so it covers the same range. The ROCm port (#2069) keeps
+/// its row in registers sized from this bound (28 floats per thread).
 const FUSED_ADD3_LAYER_NORM_MAX_DIM: i32 = 6656;
 
 fn fused_add3_layer_norm_enabled() -> bool {
@@ -1145,9 +1186,10 @@ fn fused_add3_layer_norm_enabled() -> bool {
 /// A parallel-residual block ends in `(attn + mlp) + x` and the next block
 /// starts with a LayerNorm of that sum. Unfused that is a compiled add kernel
 /// and a norm kernel, two dependent dispatches (two barrier levels) per layer
-/// boundary on the decode critical path. On Metal this runs one kernel whose
-/// outputs are byte-identical to that pair; elsewhere, or when the shapes and
-/// dtypes fall outside what the kernel covers, it runs the pair itself.
+/// boundary on the decode critical path. On Metal and ROCm (#2069) this runs one
+/// kernel whose outputs are byte-identical to that backend's pair; elsewhere,
+/// or when the shapes and dtypes fall outside what the kernel covers, it runs
+/// the pair itself.
 /// `MLXCEL_FUSED_ADD_NORM=0` forces the unfused pair.
 ///
 /// Used by: Cohere2
@@ -1162,7 +1204,7 @@ pub fn residual_add3_layer_norm(
     let dim = shape.last().copied().unwrap_or(0);
     let weight = norm.weight.as_ref().unwrap();
     let fusable = fused_add3_layer_norm_enabled()
-        && ffi::metal_is_available()
+        && ffi::fused_add3_layer_norm_available()
         && dim > 0
         && dim <= FUSED_ADD3_LAYER_NORM_MAX_DIM
         && matches!(
@@ -1193,8 +1235,9 @@ pub fn residual_add3_layer_norm(
     let mut h = UniquePtr::null();
     // SAFETY: `bias_ptr` is null or points at `norm.bias`, which outlives the call.
     unsafe {
-        ffi::fused_add3_layer_norm(a, b, x, weight, bias_ptr, norm.eps, &mut x_new, &mut h)
-            .expect("the caller checked metal_is_available(), so the launcher must not refuse");
+        ffi::fused_add3_layer_norm(a, b, x, weight, bias_ptr, norm.eps, &mut x_new, &mut h).expect(
+            "the caller checked fused_add3_layer_norm_available(), so the launcher must not refuse",
+        );
     }
     (x_new, h)
 }
@@ -3563,6 +3606,8 @@ impl FusedQKVLinear {
         let qkv = self.qkv_proj.project_concat(x);
         let qkv_shape = ffi::array_shape(&qkv);
         if qkv_shape.len() != 3
+            || qkv_shape[0] <= 0
+            || qkv_shape[1] <= 0
             || qkv_shape[2] != (self.n_heads + 2 * self.n_kv_heads) * self.head_dim
         {
             return None;
@@ -5584,8 +5629,9 @@ pub enum PagedDecodeDispatch {
 }
 
 /// Compute backend the pooled decode runs on. The fused kernel has a Metal JIT
-/// body (ADR 0001, measured on Apple Silicon) and a CUDA JIT body (#634). Both
-/// are native candidates; the selector applies backend-specific thresholds.
+/// body (ADR 0001, measured on Apple Silicon), a CUDA JIT body (#634) and a HIP
+/// JIT body (#2068). All three are native candidates; the selector applies
+/// backend-specific thresholds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PagedDecodeBackend {
     /// Apple Silicon Metal (the fused kernel's original home).
@@ -5594,11 +5640,12 @@ pub enum PagedDecodeBackend {
     /// pool blocks with no gather pass, so its advantage grows with context;
     /// the Metal-measured batch/context ceilings do not apply.
     Cuda,
+    /// AMD ROCm (the HIP port of the CUDA kernel, #2068). It follows the CUDA
+    /// rule, since it is the same kernel: native wherever the kernel can serve
+    /// the layer, with the same `gridDim.z` guard in front of the launch.
+    Rocm,
     /// Any backend with no fused kernel port, which today means CPU-only
-    /// builds and ROCm (issue #1803). Always gather. ROCm is a real GPU here,
-    /// not a CPU, and gets its own variant when its kernels are ported
-    /// (issue #1814); until then the answer is the same, so it shares this one
-    /// rather than pretending the ports exist.
+    /// builds and machines with no usable GPU. Always gather.
     Other,
 }
 
@@ -5666,6 +5713,10 @@ pub fn select_pooled_paged_dispatch(
         // Metal-measured batch and context ceilings do not apply because the
         // CUDA win grows with context rather than eroding at long context.
         PagedDecodeBackend::Cuda => slab_count <= NATIVE_MAX_SLABS,
+        // ROCm (#2068) runs the HIP port of the CUDA kernel, which reads the
+        // pool the same way, so it takes the CUDA rule. No ROCm-measured
+        // batch or context ceiling exists to justify a narrower island.
+        PagedDecodeBackend::Rocm => slab_count <= NATIVE_MAX_SLABS,
         PagedDecodeBackend::Other => false,
     };
     if native {
@@ -5788,14 +5839,15 @@ pub(crate) fn resolve_paged_v2_dispatch(
 
 /// The backend the fused kernel would run on, cached for the decode hot path.
 ///
-/// The fused kernel has a Metal JIT body and a CUDA JIT body (#634) and no HIP
-/// port yet (#1814). It is a native candidate only when
+/// The fused kernel has a Metal JIT body, a CUDA JIT body (#634) and a HIP JIT
+/// body (#2068). It is a native candidate only when
 /// [`crate::paged_attention_decode_available`] says the resolved backend has a
 /// port in the kernel's own table; then [`crate::metal_is_available`] /
-/// [`crate::cuda_is_available`] name which one. A CPU-only build, a machine
-/// with no usable GPU and a ROCm build all fall to gather, none of which a
-/// compile-time `target_os` check would catch. Metal is probed first so the
-/// Apple path is unchanged. Detection is process-static, so it is read once.
+/// [`crate::cuda_is_available`] / [`crate::hardware::gpu_backend_kind`] name
+/// which one. A CPU-only build and a machine with no usable GPU fall to gather,
+/// neither of which a compile-time `target_os` check would catch. Metal is
+/// probed first and CUDA second so those paths are unchanged. Detection is
+/// process-static, so it is read once.
 pub(crate) fn paged_decode_backend() -> PagedDecodeBackend {
     use std::sync::OnceLock;
     static BACKEND: OnceLock<PagedDecodeBackend> = OnceLock::new();
@@ -5811,6 +5863,8 @@ pub(crate) fn paged_decode_backend() -> PagedDecodeBackend {
             PagedDecodeBackend::Metal
         } else if crate::cuda_is_available() {
             PagedDecodeBackend::Cuda
+        } else if crate::hardware::gpu_backend_kind() == crate::hardware::GpuBackendKind::Rocm {
+            PagedDecodeBackend::Rocm
         } else {
             PagedDecodeBackend::Other
         }
@@ -5845,7 +5899,7 @@ impl PagedDispatchCache {
     /// Bit carrying the decision alongside the packed key: set means
     /// [`PagedDecodeDispatch::Native`], clear means [`PagedDecodeDispatch::Gather`].
     /// The key uses bits `0..=49` ([`Self::pack_key`]: the backend tag now needs
-    /// two bits for the Metal/Cuda/Other trichotomy), so bit `50` is free.
+    /// two bits for the Metal/Cuda/Rocm/Other tags), so bit `50` is free.
     const DECISION_BIT: u64 = 1u64 << 50;
     /// Mask covering the packed-key bits (`0..=49`), used to compare a cell's
     /// key half against a freshly packed key while ignoring the decision bit.
@@ -5875,6 +5929,7 @@ impl PagedDispatchCache {
             PagedDecodeBackend::Metal => 0u64,
             PagedDecodeBackend::Cuda => 1u64,
             PagedDecodeBackend::Other => 2u64,
+            PagedDecodeBackend::Rocm => 3u64,
         };
         b | (v << 16) | (s << 32) | (k << 48)
     }
@@ -9420,8 +9475,8 @@ mod tests {
 
     use super::{
         NativePagedOverride, PAGED_DISPATCH_CACHE_EMPTY, PagedDecodeBackend, PagedDecodeDispatch,
-        PagedDispatchCache, parse_native_paged_override, resolve_dispatch_decision,
-        select_pooled_paged_dispatch,
+        PagedDispatchCache, paged_decode_backend, parse_native_paged_override,
+        resolve_dispatch_decision, select_pooled_paged_dispatch,
     };
 
     #[test]
@@ -9517,6 +9572,57 @@ mod tests {
                 "CUDA multi-slab (slabs={slabs}) must decline to gather"
             );
         }
+    }
+
+    #[test]
+    fn selector_rocm_backend_follows_the_cuda_rule() {
+        // ROCm (#2068) runs the HIP port of the CUDA kernel, so it takes the
+        // CUDA rule: native on every single-slab shape, including the b=1 and
+        // long-context regimes Metal routes to gather, and gather past one
+        // slab. Compared against CUDA shape by shape so the two cannot drift.
+        for &(b, ctx) in &[
+            (1usize, 128usize),
+            (1, 65536),
+            (3, 4096),
+            (4, 4097),
+            (16, 131072),
+        ] {
+            for &slabs in &[0usize, 1, 2, 8] {
+                let rocm = select_pooled_paged_dispatch(b, ctx, slabs, PagedDecodeBackend::Rocm);
+                assert_eq!(
+                    rocm,
+                    select_pooled_paged_dispatch(b, ctx, slabs, PagedDecodeBackend::Cuda),
+                    "ROCm must match CUDA at b={b} ctx={ctx} slabs={slabs}"
+                );
+                let expected = if slabs <= 1 {
+                    PagedDecodeDispatch::Native
+                } else {
+                    PagedDecodeDispatch::Gather
+                };
+                assert_eq!(rocm, expected, "ROCm b={b} ctx={ctx} slabs={slabs}");
+            }
+        }
+    }
+
+    #[test]
+    fn paged_decode_backend_names_the_resolved_backend() {
+        // The backend the fused kernel would run on agrees with the resolved
+        // GPU backend wherever that backend has the v1 port. Before #2068 a
+        // ROCm build answered `Other` even with a port in the table, so the
+        // native path was unreachable there.
+        use crate::hardware::{GpuBackendKind, gpu_backend_kind};
+        let backend = paged_decode_backend();
+        if !crate::paged_attention_decode_available() {
+            assert_eq!(backend, PagedDecodeBackend::Other);
+            return;
+        }
+        let expected = match gpu_backend_kind() {
+            GpuBackendKind::Metal => PagedDecodeBackend::Metal,
+            GpuBackendKind::Cuda => PagedDecodeBackend::Cuda,
+            GpuBackendKind::Rocm => PagedDecodeBackend::Rocm,
+            _ => PagedDecodeBackend::Other,
+        };
+        assert_eq!(backend, expected);
     }
 
     #[test]
@@ -9690,6 +9796,18 @@ mod tests {
             PagedDecodeDispatch::Gather,
             "Other must be gather (no kernel)"
         );
+        // ROCm (#2068) at the same shape: native like CUDA, so a ROCm tag that
+        // aliased Metal's or Other's cell would return their cached gather.
+        assert_eq!(
+            cache.select(1, 512, 1, PagedDecodeBackend::Rocm),
+            PagedDecodeDispatch::Native,
+            "ROCm single-slab b=1 must be native (not an aliased Metal/Other gather)"
+        );
+        assert_eq!(
+            cache.select(1, 512, 1, PagedDecodeBackend::Other),
+            PagedDecodeDispatch::Gather,
+            "Other must be gather after a ROCm query (not the aliased ROCm native)"
+        );
         // Re-query CUDA: still native, proving the Metal/Other writes did not
         // clobber the CUDA cell (each backend keeps its own last-key cell only
         // for the most recent distinct key, so this also confirms recompute
@@ -9703,9 +9821,10 @@ mod tests {
 
     #[test]
     fn dispatch_cache_cuda_pack_key_roundtrips_without_collision() {
-        // The 2-bit backend tag (Metal=0, Cuda=1, Other=2) must produce three
-        // distinct packed keys for one identical shape, and each must stay clear
-        // of the decision bit and the empty sentinel.
+        // The 2-bit backend tag (Metal=0, Cuda=1, Other=2, Rocm=3) must
+        // produce four distinct packed keys for one identical shape, and each
+        // must stay clear of the decision bit and the empty sentinel, also at
+        // the saturated shape where every field is all ones.
         let shape = (4usize, 4096usize, 1usize);
         let k_metal =
             PagedDispatchCache::pack_key(shape.0, shape.1, shape.2, PagedDecodeBackend::Metal);
@@ -9713,10 +9832,24 @@ mod tests {
             PagedDispatchCache::pack_key(shape.0, shape.1, shape.2, PagedDecodeBackend::Cuda);
         let k_other =
             PagedDispatchCache::pack_key(shape.0, shape.1, shape.2, PagedDecodeBackend::Other);
+        let k_rocm =
+            PagedDispatchCache::pack_key(shape.0, shape.1, shape.2, PagedDecodeBackend::Rocm);
+        let k_rocm_saturated = PagedDispatchCache::pack_key(
+            usize::MAX,
+            usize::MAX,
+            usize::MAX,
+            PagedDecodeBackend::Rocm,
+        );
         assert_ne!(k_metal, k_cuda, "Metal and CUDA keys must differ");
         assert_ne!(k_cuda, k_other, "CUDA and Other keys must differ");
         assert_ne!(k_metal, k_other, "Metal and Other keys must differ");
         for k in [k_metal, k_cuda, k_other] {
+            assert_ne!(
+                k, k_rocm,
+                "ROCm's key must differ from every other backend's"
+            );
+        }
+        for k in [k_metal, k_cuda, k_other, k_rocm, k_rocm_saturated] {
             assert_eq!(
                 k & PagedDispatchCache::DECISION_BIT,
                 0,
@@ -9753,7 +9886,10 @@ mod metal4_attention_switch_tests {
     }
 }
 
-#[cfg(all(test, feature = "metal"))]
+// Not limited to Metal builds since #2069: ROCm has a port too, and elsewhere
+// the wrapper runs the unfused pair, which the comparison then checks against
+// itself.
+#[cfg(test)]
 mod residual_add3_layer_norm_tests {
     use super::*;
     use crate::dtype;
@@ -9767,17 +9903,44 @@ mod residual_add3_layer_norm_tests {
 
     /// The fused kernel's contract is byte identity with `compiled_add3`
     /// followed by `LayerNorm::forward`, the pair it replaces, not closeness.
-    /// Covers f16 and bf16, with and without a bias, several rows, and a width
-    /// that is not a multiple of the 8 reads per thread (the kernel's tail
-    /// branch). A tolerance check here would let a reordered reduction pass.
+    /// Covers f16, bf16 and f32, with and without a bias, several rows, widths
+    /// that are not a multiple of the 8 reads per thread (the Metal kernel's
+    /// tail branch) or of the ROCm port's 1024-element stride, and the widest
+    /// row the kernel takes (`FUSED_ADD3_LAYER_NORM_MAX_DIM`). A tolerance
+    /// check here would let a reordered reduction pass. On a backend with a
+    /// port (Metal, ROCm since #2069) the kernel path must be the one taken.
     #[test]
     fn residual_add3_layer_norm_matches_the_unfused_pair() {
+        use crate::hardware::{GpuBackendKind, gpu_backend_kind};
+        // With the gate off the wrapper runs the unfused pair, and the test
+        // would compare that pair with itself and pass whatever the kernel does.
+        if !fused_add3_layer_norm_enabled() {
+            eprintln!(
+                "skipping: MLXCEL_FUSED_ADD_NORM disables the fused add3 + LayerNorm kernel, \
+                 so there is nothing to compare against the unfused pair"
+            );
+            return;
+        }
+        if matches!(
+            gpu_backend_kind(),
+            GpuBackendKind::Metal | GpuBackendKind::Rocm
+        ) {
+            assert!(
+                ffi::fused_add3_layer_norm_available(),
+                "Metal and ROCm have a fused add3 + LayerNorm port"
+            );
+        }
         for (dt, dim, rows, with_bias) in [
             (dtype::FLOAT16, 4096, 1, false),
             (dtype::FLOAT16, 4096, 5, false),
             (dtype::FLOAT16, 4100, 3, true),
             (dtype::BFLOAT16, 4096, 2, true),
             (dtype::FLOAT16, 96, 4, false),
+            (dtype::FLOAT32, 4096, 2, true),
+            (dtype::FLOAT32, 1025, 3, false),
+            (dtype::BFLOAT16, FUSED_ADD3_LAYER_NORM_MAX_DIM, 2, true),
+            (dtype::FLOAT16, FUSED_ADD3_LAYER_NORM_MAX_DIM, 1, false),
+            (dtype::BFLOAT16, 5, 2, false),
         ] {
             let shape = [1, rows, dim];
             let a = normal(&shape, dt, 1, 1.0);

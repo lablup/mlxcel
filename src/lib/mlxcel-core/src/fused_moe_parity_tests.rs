@@ -42,14 +42,18 @@
 //! change per-row addressing (`row = e * Dff + f`), only the range of `e`.
 //!
 //! GPU-only: the kernels JIT through `mx.fast.metal_kernel` /
-//! `mx.fast.cuda_kernel`, so the tests skip (return early) on CPU-only builds,
-//! matching the convention of the fused paged-decode tests in `ffi_tests.rs`.
+//! `mx.fast.cuda_kernel` / `mx.fast.hip_kernel`, so the tests skip (return
+//! early) wherever `fused_moe_kernels_available()` is false, matching the
+//! convention of the fused paged-decode tests in `ffi_tests.rs`.
 //!
 //! Run on CUDA (GB10 etc.):
 //!   MLX_CUDA_ARCHITECTURES=121 cargo test -p mlxcel-core --release \
 //!     --features cuda fused_moe_geglu
 //! Run on Apple Silicon:
 //!   cargo test -p mlxcel-core --release fused_moe_geglu
+//! Run on ROCm (gfx1151 etc.):
+//!   cargo test -p mlxcel-core --release --features rocm --lib \
+//!     fused_moe_parity_tests -- --test-threads=1
 
 use super::*;
 
@@ -57,7 +61,7 @@ use super::*;
 /// `([e, rows, cols/pack] u32, [e, rows, cols/gs] bf16, [e, rows, cols/gs]
 /// bf16)`. Quantization groups run along `cols`, so quantizing the flattened
 /// 2-D matrix is exactly equivalent to quantizing each expert separately.
-fn random_quantized_expert_stack(
+pub(crate) fn random_quantized_expert_stack(
     e: i32,
     rows: i32,
     cols: i32,
@@ -86,14 +90,25 @@ fn random_quantized_expert_stack(
     (w, s, b)
 }
 
-/// One randomized GeGLU MoE decode case: bf16 activations/scales/biases,
-/// 4-bit affine weights, K distinct experts, positive normalized scores.
+/// Gate/up activation the fused gate-up kernel applies (its `act` template
+/// arg): SwiGLU for the SwitchGLU families, tanh-approx GeGLU for Gemma4.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MoeAct {
+    SwiGlu,
+    GeGlu,
+}
+
+/// One randomized MoE decode case: bf16 activations/scales/biases, affine
+/// weights (gate/up at `gu_bits`, down at `d_bits`), K distinct experts,
+/// positive normalized scores.
 struct GegluMoeCase {
     din: i32,
     dff: i32,
     k: i32,
     group_size: i32,
-    bits: i32,
+    gu_bits: i32,
+    d_bits: i32,
+    act: MoeAct,
     x: UniquePtr<MlxArray>,       // [din] bf16
     indices: UniquePtr<MlxArray>, // [k] u32, distinct
     scores: UniquePtr<MlxArray>,  // [k] bf16 (pre-rounded so both paths see identical values)
@@ -109,8 +124,21 @@ struct GegluMoeCase {
 }
 
 fn build_geglu_case(seed: u64, din: i32, dff: i32, num_experts: i32, k: i32) -> GegluMoeCase {
+    build_moe_case(seed, din, dff, num_experts, k, MoeAct::GeGlu, 4, 4)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_moe_case(
+    seed: u64,
+    din: i32,
+    dff: i32,
+    num_experts: i32,
+    k: i32,
+    act: MoeAct,
+    gu_bits: i32,
+    d_bits: i32,
+) -> GegluMoeCase {
     let group_size = 64;
-    let bits = 4;
     random_seed(seed);
 
     let x_f32 = unsafe { random_normal(&[din], dtype::FLOAT32, std::ptr::null()) };
@@ -144,17 +172,20 @@ fn build_geglu_case(seed: u64, din: i32, dff: i32, num_experts: i32, k: i32) -> 
     eval(&scores);
 
     let (gate_w, gate_s, gate_b) =
-        random_quantized_expert_stack(num_experts, dff, din, group_size, bits);
-    let (up_w, up_s, up_b) = random_quantized_expert_stack(num_experts, dff, din, group_size, bits);
+        random_quantized_expert_stack(num_experts, dff, din, group_size, gu_bits);
+    let (up_w, up_s, up_b) =
+        random_quantized_expert_stack(num_experts, dff, din, group_size, gu_bits);
     let (down_w, down_s, down_b) =
-        random_quantized_expert_stack(num_experts, din, dff, group_size, bits);
+        random_quantized_expert_stack(num_experts, din, dff, group_size, d_bits);
 
     GegluMoeCase {
         din,
         dff,
         k,
         group_size,
-        bits,
+        gu_bits,
+        d_bits,
+        act,
         x,
         indices,
         scores,
@@ -170,10 +201,15 @@ fn build_geglu_case(seed: u64, din: i32, dff: i32, num_experts: i32, k: i32) -> 
     }
 }
 
-/// Invoke the fused two-dispatch GeGLU kernel exactly as
-/// `SwitchGeGLU::forward_fused_kernel` does and force evaluation.
+/// Invoke the fused two-dispatch kernel exactly as
+/// `SwitchGeGLU::forward_fused_kernel` (GeGLU) or
+/// `SwitchGLU::forward_fused_kernel` (SwiGLU) does and force evaluation.
 fn run_fused(case: &GegluMoeCase) -> UniquePtr<MlxArray> {
-    let out = fused_moe_geglu_kernel(
+    let launch = match case.act {
+        MoeAct::GeGlu => fused_moe_geglu_kernel,
+        MoeAct::SwiGlu => fused_moe_expert_kernel,
+    };
+    let out = launch(
         &case.x,
         &case.indices,
         &case.gate_w,
@@ -189,8 +225,8 @@ fn run_fused(case: &GegluMoeCase) -> UniquePtr<MlxArray> {
         case.din,
         case.dff,
         case.k,
-        case.bits,
-        case.bits,
+        case.gu_bits,
+        case.d_bits,
         case.group_size,
     )
     .expect("gpu_backend_or_skip() reported a port, so the launcher must not refuse");
@@ -209,7 +245,7 @@ fn reference_dense_f32(case: &GegluMoeCase) -> UniquePtr<MlxArray> {
     // bf16-dequantized reference would round every weight to bf16 and carry
     // MORE error than either production path (bf16 -> f32 is exact, so the
     // upcast does not change the stored values).
-    let dq = |w: &MlxArray, s: &MlxArray, b: &MlxArray| -> UniquePtr<MlxArray> {
+    let dq = |w: &MlxArray, s: &MlxArray, b: &MlxArray, bits: i32| -> UniquePtr<MlxArray> {
         let s32 = astype(s, dtype::FLOAT32);
         let b32 = astype(b, dtype::FLOAT32);
         unsafe {
@@ -218,14 +254,14 @@ fn reference_dense_f32(case: &GegluMoeCase) -> UniquePtr<MlxArray> {
                 &s32,
                 &b32 as &MlxArray as *const MlxArray,
                 case.group_size,
-                case.bits,
+                bits,
                 "affine",
             )
         }
     };
-    let gate_dq = dq(&case.gate_w, &case.gate_s, &case.gate_b); // [E, dff, din]
-    let up_dq = dq(&case.up_w, &case.up_s, &case.up_b); // [E, dff, din]
-    let down_dq = dq(&case.down_w, &case.down_s, &case.down_b); // [E, din, dff]
+    let gate_dq = dq(&case.gate_w, &case.gate_s, &case.gate_b, case.gu_bits); // [E, dff, din]
+    let up_dq = dq(&case.up_w, &case.up_s, &case.up_b, case.gu_bits); // [E, dff, din]
+    let down_dq = dq(&case.down_w, &case.down_s, &case.down_b, case.d_bits); // [E, din, dff]
 
     let gate_sel = take(&gate_dq, &case.indices, 0); // [k, dff, din]
     let up_sel = take(&up_dq, &case.indices, 0);
@@ -234,7 +270,7 @@ fn reference_dense_f32(case: &GegluMoeCase) -> UniquePtr<MlxArray> {
     let x_col = reshape(&astype(&case.x, dtype::FLOAT32), &[case.din, 1]);
     let g = squeeze_axis(&matmul(&gate_sel, &x_col), -1); // [k, dff]
     let u = squeeze_axis(&matmul(&up_sel, &x_col), -1); // [k, dff]
-    let act = compiled_geglu_approx_activation(&g, &u); // [k, dff] f32
+    let act = activation(case.act, &g, &u); // [k, dff] f32
 
     let act_col = reshape(&act, &[case.k, case.dff, 1]);
     let per_expert = squeeze_axis(&matmul(&down_sel, &act_col), -1); // [k, din]
@@ -252,7 +288,12 @@ fn reference_dense_f32(case: &GegluMoeCase) -> UniquePtr<MlxArray> {
 fn reference_gather_qmm(case: &GegluMoeCase) -> UniquePtr<MlxArray> {
     let x4 = reshape(&case.x, &[1, 1, 1, case.din]);
     let idx2 = reshape(&case.indices, &[1, case.k]);
-    let gq = |w: &MlxArray, s: &MlxArray, b: &MlxArray, x: &MlxArray| -> UniquePtr<MlxArray> {
+    let gq = |w: &MlxArray,
+              s: &MlxArray,
+              b: &MlxArray,
+              x: &MlxArray,
+              bits: i32|
+     -> UniquePtr<MlxArray> {
         unsafe {
             gather_qmm(
                 x,
@@ -263,16 +304,16 @@ fn reference_gather_qmm(case: &GegluMoeCase) -> UniquePtr<MlxArray> {
                 &idx2 as &MlxArray as *const MlxArray,
                 true,
                 case.group_size,
-                case.bits,
+                bits,
                 false,
                 "affine",
             )
         }
     };
-    let gate = gq(&case.gate_w, &case.gate_s, &case.gate_b, &x4); // [1, 1, k, dff]
-    let up = gq(&case.up_w, &case.up_s, &case.up_b, &x4);
-    let act = compiled_geglu_approx_activation(&gate, &up);
-    let down = gq(&case.down_w, &case.down_s, &case.down_b, &act); // [1, 1, k, din]
+    let gate = gq(&case.gate_w, &case.gate_s, &case.gate_b, &x4, case.gu_bits); // [1, 1, k, dff]
+    let up = gq(&case.up_w, &case.up_s, &case.up_b, &x4, case.gu_bits);
+    let act = activation(case.act, &gate, &up);
+    let down = gq(&case.down_w, &case.down_s, &case.down_b, &act, case.d_bits); // [1, 1, k, din]
 
     let per_expert = reshape(&down, &[case.k, case.din]);
     let w_col = reshape(&astype(&case.scores, dtype::FLOAT32), &[case.k, 1]);
@@ -282,7 +323,15 @@ fn reference_gather_qmm(case: &GegluMoeCase) -> UniquePtr<MlxArray> {
     out
 }
 
-fn flatten_f32(arr: &MlxArray) -> Vec<f32> {
+/// The gate/up activation both references apply, matching the kernel's `act`.
+fn activation(act: MoeAct, gate: &MlxArray, up: &MlxArray) -> UniquePtr<MlxArray> {
+    match act {
+        MoeAct::GeGlu => compiled_geglu_approx_activation(gate, up),
+        MoeAct::SwiGlu => compiled_swiglu_activation(gate, up),
+    }
+}
+
+pub(crate) fn flatten_f32(arr: &MlxArray) -> Vec<f32> {
     let a = astype(arr, dtype::FLOAT32);
     eval(&a);
     array_to_raw_bytes(&a)
@@ -298,7 +347,7 @@ fn raw_bytes(arr: &MlxArray) -> Vec<u8> {
 
 /// RMS of (a - b) normalized by the RMS of b, plus the max absolute deviation
 /// normalized the same way. Returns (nrms, nmax).
-fn normalized_deviation(a: &[f32], b: &[f32]) -> (f64, f64) {
+pub(crate) fn normalized_deviation(a: &[f32], b: &[f32]) -> (f64, f64) {
     assert_eq!(a.len(), b.len());
     let mut diff_sq = 0f64;
     let mut ref_sq = 0f64;
@@ -316,16 +365,29 @@ fn normalized_deviation(a: &[f32], b: &[f32]) -> (f64, f64) {
     )
 }
 
+/// The GPU backend's name, or `None` (skip) on a build without one. Every GPU
+/// backend has both fused MoE kernel ports since issue #2065 (Metal, CUDA,
+/// ROCm), so on a GPU backend `fused_moe_kernels_available()`, which reads the
+/// same tables the launcher dispatches through, must answer true: a `false`
+/// there is a defect the test reports instead of skipping past.
 fn gpu_backend_or_skip() -> Option<&'static str> {
-    if crate::metal_is_available() {
-        Some("metal")
-    } else if crate::cuda_is_available() {
-        Some("cuda")
-    } else {
-        // The fused kernels JIT through mx.fast.metal_kernel /
-        // mx.fast.cuda_kernel; a CPU-only build cannot launch either body.
-        None
-    }
+    use crate::hardware::{GpuBackendKind, gpu_backend_kind};
+    let name = match gpu_backend_kind() {
+        GpuBackendKind::Metal => "metal",
+        GpuBackendKind::Cuda => "cuda",
+        GpuBackendKind::Rocm => "rocm",
+        GpuBackendKind::None => {
+            // The kernels JIT through mx.fast.{metal,cuda,hip}_kernel; a
+            // CPU-only build cannot launch either body.
+            eprintln!("skipping: no GPU backend, so no fused MoE kernel port");
+            return None;
+        }
+    };
+    assert!(
+        crate::fused_moe_kernels_available(),
+        "{name} has both fused MoE kernel ports, so fused_moe_kernels_available() must be true"
+    );
+    Some(name)
 }
 
 /// Absolute ceiling on the `gather_qmm` fallback's own deviation from the
@@ -372,54 +434,81 @@ fn fused_moe_geglu_kernel_matches_references_gemma4_shape() {
     // Din/Dff/K/bits/group_size exactly as gemma-4-26b-a4b; E cut to 16.
     for seed in [886u64, 887, 888] {
         let case = build_geglu_case(seed, 2816, 704, 16, 8);
-        let fused = flatten_f32(&run_fused(&case));
-        let dense_raw = reference_dense_f32(&case);
-        let dense = flatten_f32(&dense_raw);
-        // The fused output has been rounded to bf16 once; apply the identical
-        // rounding to the dense reference before comparing so the assertion
-        // measures kernel math, not the unavoidable output-dtype quantum.
-        let dense_bf16 = flatten_f32(&astype(&dense_raw, dtype::BFLOAT16));
-        let gather = flatten_f32(&reference_gather_qmm(&case));
+        assert_fused_matches_references(&case, backend, "geglu 4/4-bit", seed);
+    }
+}
 
-        let (nrms_dense, nmax_dense) = normalized_deviation(&fused, &dense_bf16);
-        let (nrms_gather, nmax_gather) = normalized_deviation(&fused, &gather);
-        let (nrms_ref_jitter, nmax_ref_jitter) = normalized_deviation(&gather, &dense);
-        println!(
-            "fused_moe_geglu parity [{backend}, seed {seed}]: vs dense f32 (bf16-rounded) \
-             nrms={nrms_dense:e} nmax={nmax_dense:e}; vs gather_qmm nrms={nrms_gather:e} \
-             nmax={nmax_gather:e}; gather-vs-dense baseline nrms={nrms_ref_jitter:e} \
-             nmax={nmax_ref_jitter:e}"
-        );
-        assert!(
-            nrms_dense < 5e-4 && nmax_dense < 2e-2,
-            "fused vs bf16-rounded dense f32 reference deviates (seed {seed}): \
-             nrms={nrms_dense:e} nmax={nmax_dense:e}"
-        );
-        // The production fallback held to the same ground truth as the kernel.
-        assert!(
-            nrms_ref_jitter < GATHER_JITTER_NRMS_CEILING
-                && nmax_ref_jitter < GATHER_JITTER_NMAX_CEILING,
-            "gather_qmm fallback deviates from the dense f32 reference (seed {seed}): \
-             nrms={nrms_ref_jitter:e} nmax={nmax_ref_jitter:e}"
-        );
-        // Cross-path agreement. The fused kernel matches the dense reference
-        // to `nrms_dense` above, which pins its distance from `gather_qmm` to
-        // `gather_qmm`'s own bf16 jitter; a fixed constant here measures that
-        // jitter rather than either path. #964: the previous 5e-3 nrms bound
-        // sat below the ~1.16e-2 baseline the test already computed and was
-        // unsatisfiable at every seed and both shapes. Scale with the jitter
-        // this run measured, never tighter than the project's 5e-3 / 5e-2
-        // fp16-parity allowance (which binds on a backend whose fallback is
-        // closer to exact than Metal's).
-        let nrms_gather_limit = (GATHER_JITTER_NRMS_MARGIN * nrms_ref_jitter).max(5e-3);
-        let nmax_gather_limit = (GATHER_JITTER_NMAX_MARGIN * nmax_ref_jitter).max(5e-2);
-        assert!(
-            nrms_gather < nrms_gather_limit && nmax_gather < nmax_gather_limit,
-            "fused and gather_qmm disagree beyond the fallback's own jitter (seed {seed}): \
-             nrms={nrms_gather:e} (limit {nrms_gather_limit:e}) \
-             nmax={nmax_gather:e} (limit {nmax_gather_limit:e}); \
-             baseline nrms={nrms_ref_jitter:e} nmax={nmax_ref_jitter:e}"
-        );
+/// The parity assertions shared by every activation and bit-width case: the
+/// fused kernel against the bf16-rounded all-f32 dense reference (the sharp
+/// gate), the `gather_qmm` fallback against the same truth, and the two
+/// production paths against each other within the fallback's own jitter.
+fn assert_fused_matches_references(case: &GegluMoeCase, backend: &str, label: &str, seed: u64) {
+    let fused = flatten_f32(&run_fused(case));
+    let dense_raw = reference_dense_f32(case);
+    let dense = flatten_f32(&dense_raw);
+    // The fused output has been rounded to bf16 once; apply the identical
+    // rounding to the dense reference before comparing so the assertion
+    // measures kernel math, not the unavoidable output-dtype quantum.
+    let dense_bf16 = flatten_f32(&astype(&dense_raw, dtype::BFLOAT16));
+    let gather = flatten_f32(&reference_gather_qmm(case));
+
+    let (nrms_dense, nmax_dense) = normalized_deviation(&fused, &dense_bf16);
+    let (nrms_gather, nmax_gather) = normalized_deviation(&fused, &gather);
+    let (nrms_ref_jitter, nmax_ref_jitter) = normalized_deviation(&gather, &dense);
+    println!(
+        "fused_moe parity [{backend}, {label}, seed {seed}]: vs dense f32 (bf16-rounded) \
+         nrms={nrms_dense:e} nmax={nmax_dense:e}; vs gather_qmm nrms={nrms_gather:e} \
+         nmax={nmax_gather:e}; gather-vs-dense baseline nrms={nrms_ref_jitter:e} \
+         nmax={nmax_ref_jitter:e}"
+    );
+    assert!(
+        nrms_dense < 5e-4 && nmax_dense < 2e-2,
+        "fused vs bf16-rounded dense f32 reference deviates ({label}, seed {seed}): \
+         nrms={nrms_dense:e} nmax={nmax_dense:e}"
+    );
+    // The production fallback held to the same ground truth as the kernel.
+    assert!(
+        nrms_ref_jitter < GATHER_JITTER_NRMS_CEILING
+            && nmax_ref_jitter < GATHER_JITTER_NMAX_CEILING,
+        "gather_qmm fallback deviates from the dense f32 reference ({label}, seed {seed}): \
+         nrms={nrms_ref_jitter:e} nmax={nmax_ref_jitter:e}"
+    );
+    // Cross-path agreement. The fused kernel matches the dense reference
+    // to `nrms_dense` above, which pins its distance from `gather_qmm` to
+    // `gather_qmm`'s own bf16 jitter; a fixed constant here measures that
+    // jitter rather than either path. #964: the previous 5e-3 nrms bound
+    // sat below the ~1.16e-2 baseline the test already computed and was
+    // unsatisfiable at every seed and both shapes. Scale with the jitter
+    // this run measured, never tighter than the project's 5e-3 / 5e-2
+    // fp16-parity allowance (which binds on a backend whose fallback is
+    // closer to exact than Metal's).
+    let nrms_gather_limit = (GATHER_JITTER_NRMS_MARGIN * nrms_ref_jitter).max(5e-3);
+    let nmax_gather_limit = (GATHER_JITTER_NMAX_MARGIN * nmax_ref_jitter).max(5e-2);
+    assert!(
+        nrms_gather < nrms_gather_limit && nmax_gather < nmax_gather_limit,
+        "fused and gather_qmm disagree beyond the fallback's own jitter ({label}, seed {seed}): \
+         nrms={nrms_gather:e} (limit {nrms_gather_limit:e}) \
+         nmax={nmax_gather:e} (limit {nmax_gather_limit:e}); \
+         baseline nrms={nrms_ref_jitter:e} nmax={nmax_ref_jitter:e}"
+    );
+}
+
+/// SwitchGLU decode-shape parity for the SwiGLU arm of the gate-up kernel and
+/// every down-kernel bit width, which the Gemma4 GeGLU case above does not
+/// reach: 4-bit throughout, 8-bit throughout, and 4-bit gate/up with a 6-bit
+/// down (dots.llm1's mix, the down kernel's byte-packed branch). Din, Dff and
+/// K are Qwen3-30B-A3B's (2048, 768, 8); E is cut to 16 as above.
+#[test]
+fn fused_moe_swiglu_kernel_matches_references_every_down_width() {
+    let Some(backend) = gpu_backend_or_skip() else {
+        return;
+    };
+    for (gu_bits, d_bits) in [(4, 4), (8, 8), (4, 6)] {
+        let label = format!("swiglu {gu_bits}/{d_bits}-bit");
+        for seed in [30u64, 31] {
+            let case = build_moe_case(seed, 2048, 768, 16, 8, MoeAct::SwiGlu, gu_bits, d_bits);
+            assert_fused_matches_references(&case, backend, &label, seed);
+        }
     }
 }
 
@@ -457,14 +546,49 @@ fn fused_moe_kernel_source_structure() {
         src.contains("for (int o = 16; o > 0; o >>= 1)"),
         "warp reduction ladder must cover offsets 16..1"
     );
-    // The down kernels (CUDA and Metal) must write f32 partials, not round
-    // per-expert outputs to the activation dtype before the host K-sum.
+    // The down kernels (Metal, CUDA and HIP) must write f32 partials, not
+    // round per-expert outputs to the activation dtype before the host K-sum.
     assert_eq!(
         src.matches("out[eslot * Din + h] = (float)scores[eslot] * d;")
             .count(),
-        2,
-        "both MOE_DOWN kernel twins must emit f32 partials (score in f32)"
+        3,
+        "all three MOE_DOWN kernel ports must emit f32 partials (score in f32)"
     );
+    // Each fused-MoE HIP source carries the #1814 wave32 guard under both
+    // spellings of the wavefront macro, and every shuffle in it states a width
+    // of 32: the native `__shfl_down` defaults to the device wavefront, so an
+    // implied width would fold 64 lanes on a wave64 part while the ladder
+    // above covers only 32. The width is the load-bearing half: AMD clang 23
+    // defines neither macro, so the guard does not fire there (#2065).
+    for name in ["MOE_GATEUP_HIP_SOURCE", "MOE_DOWN_HIP_SOURCE"] {
+        let start = src
+            .find(&format!("{name} = R\"("))
+            .unwrap_or_else(|| panic!("{name} must exist"));
+        let body = &src[start..start + src[start..].find(")\";").expect("raw string end")];
+        for guard in [
+            "#if defined(__AMDGCN_WAVEFRONT_SIZE__) && __AMDGCN_WAVEFRONT_SIZE__ != 32",
+            "#if defined(__AMDGCN_WAVEFRONT_SIZE) && __AMDGCN_WAVEFRONT_SIZE != 32",
+        ] {
+            assert!(
+                body.contains(guard),
+                "{name} must carry the wave32 guard `{guard}`"
+            );
+        }
+        assert!(
+            !body.contains("__shfl_down_sync("),
+            "{name} must use the native __shfl_down, not the mask-ignoring shim"
+        );
+        let mut shuffles = 0usize;
+        for (off, _) in body.match_indices("__shfl_down(") {
+            shuffles += 1;
+            let call = &body[off..off + body[off..].find(')').expect("unterminated call")];
+            assert!(
+                call.ends_with(", 32"),
+                "{name}: __shfl_down without an explicit width of 32: {call})"
+            );
+        }
+        assert!(shuffles >= 1, "{name} must reduce with __shfl_down");
+    }
     assert!(
         !src.contains("out[eslot * Din + h] = (T)("),
         "MOE_DOWN must not round per-expert partials to the activation dtype"

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::resolve_metal_backend;
+use super::{gpu_backend_enabled, resolve_metal_backend};
 
 #[test]
 fn macos_default_enables_metal_without_a_cargo_feature() {
@@ -41,4 +41,24 @@ fn invalid_macos_override_retains_the_named_build_error() {
     let error = resolve_metal_backend(true, Some("maybe")).unwrap_err();
     assert!(error.contains(r#"Invalid MLXCEL_BUILD_METAL value "maybe""#));
     assert!(error.contains("1/0, on/off, true/false, yes/no"));
+}
+
+#[test]
+fn cpu_only_build_has_no_gpu_backend() {
+    // A Linux build with no GPU feature: the bridge must not reference
+    // `copy_gpu_inplace` (#2108).
+    assert!(!gpu_backend_enabled(false, false, false));
+}
+
+#[test]
+fn any_single_gpu_backend_enables_the_gpu_bridge_paths() {
+    assert!(gpu_backend_enabled(true, false, false));
+    assert!(gpu_backend_enabled(false, true, false));
+    assert!(gpu_backend_enabled(false, false, true));
+}
+
+#[test]
+fn macos_with_metal_disabled_and_no_other_backend_is_cpu_only() {
+    let metal = resolve_metal_backend(true, Some("OFF")).unwrap();
+    assert!(!gpu_backend_enabled(metal, false, false));
 }

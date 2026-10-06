@@ -52,9 +52,10 @@
 //!   shared-activation case (`B = 32`, `E = 8`);
 //! * `N = 320`, so the second column block runs its `col >= N` bound check.
 //!
-//! This is the default path. The opt-in expert-batched kernel from item 9
-//! (`MLX_ROCM_GATHER_QMV_EXPERT_BATCHED=1`) is affine-only and cannot be
-//! reached from a block-float mode, so no case targets it.
+//! This is the default path. The expert-batched kernel from item 9 (on by
+//! default for sorted affine bf16 and f16 prefill since lablup/mlxcel#2066)
+//! is affine-only and cannot be reached from a block-float mode, so no case
+//! targets it; `tests/rocm_gather_qmm_expert_batched.rs` covers it.
 //!
 //! The tests are not backend-gated: the tolerances are what a correct
 //! backend meets from output rounding alone, and

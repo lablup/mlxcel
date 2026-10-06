@@ -19,11 +19,15 @@
 //! into `ModelArgs` with the Apertus deltas (xIELU `qk_norm`/`post_norm`
 //! flags, llama3 `rope_scaling`, untied embeddings) and that the pure-scalar
 //! activation pieces (`softplus`, the xIELU branch formula) match
-//! hand-computed values. The MLX op path (`apertus_xielu`) and end-to-end
-//! generation are validated against a real `mlx-community` Apertus checkpoint,
-//! which needs a Metal device and is not exercised here.
+//! hand-computed values. `fused_xielu_kernel_matches_graph_every_dtype` adds
+//! the GPU check of the fused xIELU kernel against the MLX op path
+//! (`apertus_xielu`) in f32, f16 and bf16. End-to-end generation is validated
+//! against a real `mlx-community` Apertus checkpoint, which is not exercised
+//! here.
 
-use super::apertus::{ModelArgs, softplus};
+use super::apertus::{ModelArgs, apertus_xielu, softplus};
+use mlxcel_core::dtype;
+use mlxcel_core::hardware::{GpuBackendKind, gpu_backend_kind};
 
 /// A trimmed `Apertus-8B-Instruct-2509` config, with the fields the loader
 /// reads. Mirrors the real checkpoint's `config.json`.
@@ -241,5 +245,106 @@ fn xielu_factored_beta_x_matches_branch_local() {
             factored.to_bits(),
             "factored xIELU diverged at x={x}: branch_local={branch_local}, factored={factored}"
         );
+    }
+}
+
+/// Normalized (RMS, max) deviation budget per dtype, the one
+/// `fused_norm_parity_tests.rs` uses: about one ulp of the RMS element on
+/// average, a few on the largest.
+fn xielu_tolerance(dt: i32) -> (f64, f64) {
+    if dt == dtype::FLOAT32 {
+        (1e-6, 1e-5)
+    } else if dt == dtype::FLOAT16 {
+        (2e-3, 1.2e-2)
+    } else {
+        (1.6e-2, 7e-2)
+    }
+}
+
+fn as_f32_vec(arr: &mlxcel_core::MlxArray) -> Vec<f32> {
+    let a = mlxcel_core::astype(arr, dtype::FLOAT32);
+    mlxcel_core::eval(&a);
+    mlxcel_core::array_to_raw_bytes(&a)
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}
+
+/// The fused xIELU kernel (Metal, and ROCm since #2069) against the
+/// elementwise graph it replaces, on the same backend and the same inputs, in
+/// f32, f16 and bf16: within the `fused_norm_parity_tests.rs` budget, and
+/// reported as byte-identical or not. Inputs cover the edge values of
+/// `fused_xielu_matches_elementwise_bit_for_bit` plus a pseudo-random spread
+/// over [-12, 12), where `alpha_p * x^2` still fits in f16. On ROCm every
+/// dtype must also be byte-identical.
+#[test]
+fn fused_xielu_kernel_matches_graph_every_dtype() {
+    let backend = gpu_backend_kind();
+    if matches!(backend, GpuBackendKind::Metal | GpuBackendKind::Rocm) {
+        assert!(
+            mlxcel_core::fused_xielu_kernel_available(),
+            "{backend:?} has a fused xIELU port, so the kernel path must be taken"
+        );
+    } else {
+        eprintln!("skipping: {backend:?} has no fused xIELU port (elementwise fallback)");
+        return;
+    }
+    let (alpha_p, alpha_n, beta, eps) = (0.8731f32, 0.6042f32, 0.5f32, -1e-6f32);
+    let mut vals: Vec<f32> = vec![
+        0.0, -0.0, 1e-7, -1e-7, 5e-7, -5e-7, 1e-6, -1e-6, 2e-6, -2e-6, 1e-4, -1e-4, 0.001, -0.001,
+        0.5, -0.5, 1.0, -1.0, 2.5, -2.5, 8.0, -8.0, 42.0, -42.0, 90.0, -90.0,
+    ];
+    let mut state = 0x2069_u64;
+    for _ in 0..16384 {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let unit = (state >> 40) as f32 / (1u64 << 24) as f32;
+        vals.push(unit * 24.0 - 12.0);
+    }
+    let n = vals.len() as i32;
+    let x_f32 = mlxcel_core::from_slice_f32(&vals, &[1, 1, n]);
+    for dt in [dtype::FLOAT32, dtype::FLOAT16, dtype::BFLOAT16] {
+        let x = mlxcel_core::astype(&x_f32, dt);
+        let graph = apertus_xielu(&x, alpha_p, alpha_n, beta, eps);
+        let fused = mlxcel_core::fused_xielu(&x, alpha_p, alpha_n, beta, eps)
+            .expect("fused_xielu falls back rather than refusing");
+        assert_eq!(mlxcel_core::array_dtype(&fused), dt);
+        let (g, f) = (as_f32_vec(&graph), as_f32_vec(&fused));
+        let mut diff_sq = 0f64;
+        let mut ref_sq = 0f64;
+        let mut max_abs = 0f64;
+        let mut differing = 0usize;
+        for (a, b) in f.iter().zip(&g) {
+            let d = (*a as f64) - (*b as f64);
+            diff_sq += d * d;
+            ref_sq += (*b as f64) * (*b as f64);
+            max_abs = max_abs.max(d.abs());
+            differing += usize::from(a.to_bits() != b.to_bits());
+        }
+        let ref_rms = (ref_sq / g.len() as f64).sqrt().max(1e-20);
+        let nrms = (diff_sq / g.len() as f64).sqrt() / ref_rms;
+        let nmax = max_abs / ref_rms;
+        println!(
+            "xielu parity [{backend:?}, dtype {dt}]: nrms={nrms:e} nmax={nmax:e}, \
+             {differing} of {n} elements differ in bits"
+        );
+        let (rms_budget, max_budget) = xielu_tolerance(dt);
+        assert!(
+            nrms < rms_budget && nmax < max_budget,
+            "fused xIELU deviates from the graph (dtype {dt}): nrms={nrms:e} nmax={nmax:e}"
+        );
+        // ROCm's kernel rounds each intermediate where the ROCm graph does,
+        // so it is held to byte identity in every dtype (the claim
+        // docs/environment-variables.md makes). Metal is pinned to identity
+        // for bf16 by `apertus::tests::fused_xielu_matches_elementwise_bit_for_bit`
+        // and to the tolerance above for f32 and f16.
+        if backend == GpuBackendKind::Rocm {
+            assert_eq!(
+                differing, 0,
+                "fused xIELU on ROCm must be byte-identical to the graph (dtype {dt}): \
+                 {differing} of {n} elements differ"
+            );
+        }
     }
 }

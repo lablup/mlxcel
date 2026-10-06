@@ -30,8 +30,9 @@
 //! window's capacity for that reason, and the multi-token case pins that token
 //! `t` rotates at `positions_base + t`.
 //!
-//! GPU-only: the kernel JITs through `mx.fast.metal_kernel` / `cuda_kernel`, so
-//! these tests return early on a CPU-only build.
+//! GPU-only: the kernel JITs through `mx.fast.metal_kernel` / `cuda_kernel` /
+//! `hip_kernel`, so these tests skip on a CPU-only build and fail, rather than
+//! skip, on a GPU build whose predicate answers false.
 //!
 //! Run on Apple Silicon:
 //!   cargo test --release -p mlxcel-core --lib --features metal,accelerate \
@@ -47,11 +48,22 @@ const N_KV_HEADS: i32 = 8;
 const HEAD_DIM: i32 = 128;
 const ROPE_BASE: f32 = 500000.0;
 
-/// Whether this build has a `fused_rope_qk_append` port to compare against the
-/// graph. See the note on `kernel_available` in `fused_norm_parity_tests.rs`
-/// for why this asks the kernel rather than naming backends.
-fn kernel_available() -> bool {
-    crate::fused_rope_qk_append_available()
+/// The device lock for a test that runs the `fused_rope_qk_append` port, or
+/// `None` (skip) on a build without a GPU backend. Same contract as
+/// `gpu_kernel_or_skip` in `fused_norm_parity_tests.rs`: every GPU backend has
+/// the port since #2063, so a false predicate on one fails the test.
+fn gpu_kernel_or_skip() -> Option<crate::streams::DefaultDeviceLock> {
+    use crate::hardware::{GpuBackendKind, gpu_backend_kind};
+    if gpu_backend_kind() == GpuBackendKind::None {
+        eprintln!("skipping: no GPU backend, so no fused_rope_qk_append port");
+        return None;
+    }
+    let lock = crate::streams::lock_default_device();
+    assert!(
+        crate::fused_rope_qk_append_available(),
+        "every GPU backend has a fused_rope_qk_append port, so the predicate must be true"
+    );
+    Some(lock)
 }
 
 fn flatten_f32(arr: &MlxArray) -> Vec<f32> {
@@ -84,7 +96,8 @@ fn normalized_deviation(a: &[f32], b: &[f32]) -> (f64, f64) {
 /// The rotation is a pair of fp32 multiply-adds around a sine and a cosine that
 /// both paths compute from a bit-identical fp32 angle, using the same function
 /// as MLX's own RoPE kernel for that backend: `metal::fast::cos` / `sin` on
-/// Metal, libdevice `cosf` / `sinf` on CUDA (#1049). So the trig call itself
+/// Metal, libdevice `cosf` / `sinf` on CUDA (#1049), `sincosf` on ROCm
+/// (#2063). So the trig call itself
 /// contributes no divergence, and what is left is the final rounding to the
 /// activation dtype plus FMA contraction differing between two separately
 /// compiled kernels. One f16 ulp on a 4-sigma element is about 2e-3 relative to
@@ -98,10 +111,26 @@ fn normalized_deviation(a: &[f32], b: &[f32]) -> (f64, f64) {
 /// means the trig calls have drifted apart again, not that the tolerance is
 /// too tight.
 fn assert_close(label: &str, got: &MlxArray, want: &MlxArray) {
+    assert_close_within(label, got, want, 2e-3, 1.2e-2);
+}
+
+/// [`assert_close`] for a bf16 activation: the f16 budget above is about one
+/// bf16 ulp on a 2-sigma element, so a single rounding flip on a backend where
+/// the two paths contract differently would fail it. The bf16 budget is the
+/// one `fused_norm_parity_tests.rs` uses for the same ulp reason.
+fn assert_close_for(label: &str, got: &MlxArray, want: &MlxArray, dt: i32) {
+    if dt == dtype::BFLOAT16 {
+        assert_close_within(label, got, want, 1.6e-2, 7e-2);
+    } else {
+        assert_close(label, got, want);
+    }
+}
+
+fn assert_close_within(label: &str, got: &MlxArray, want: &MlxArray, rms_tol: f64, max_tol: f64) {
     let (nrms, nmax) = normalized_deviation(&flatten_f32(got), &flatten_f32(want));
     assert!(
-        nrms < 2e-3 && nmax < 1.2e-2,
-        "{label}: normalized rms {nrms:.3e} (tol 2.0e-3), normalized max {nmax:.3e} (tol 1.2e-2)"
+        nrms < rms_tol && nmax < max_tol,
+        "{label}: normalized rms {nrms:.3e} (tol {rms_tol:.1e}), normalized max {nmax:.3e} (tol {max_tol:.1e})"
     );
 }
 
@@ -111,10 +140,15 @@ fn assert_shape(label: &str, arr: &MlxArray, want: &[i32]) {
 
 /// A random row-contiguous fused-QKV projection output `[B, L, (Hq + 2*Hkv)*D]`.
 fn random_qkv(seed: u64, batch: i32, seq: i32) -> UniquePtr<MlxArray> {
+    random_qkv_as(seed, batch, seq, dtype::FLOAT16)
+}
+
+/// [`random_qkv`] in an explicit activation dtype.
+fn random_qkv_as(seed: u64, batch: i32, seq: i32, dt: i32) -> UniquePtr<MlxArray> {
     random_seed(seed);
     let cols = (N_HEADS + 2 * N_KV_HEADS) * HEAD_DIM;
     let raw = unsafe { random_normal(&[batch, seq, cols], dtype::FLOAT32, std::ptr::null()) };
-    let qkv = astype(&raw, dtype::FLOAT16);
+    let qkv = astype(&raw, dt);
     eval(&qkv);
     qkv
 }
@@ -148,7 +182,7 @@ fn run_fused(
         &mut k,
         &mut v,
     )
-    .expect("kernel_available() checked the port table, so the launcher must not refuse");
+    .expect("gpu_kernel_or_skip() checked the port table, so the launcher must not refuse");
     eval(&q);
     eval(&k);
     eval(&v);
@@ -195,9 +229,9 @@ const OFFSETS: &[i32] = &[0, 1, 7, 63, 511, 4096, 131071];
 
 #[test]
 fn fused_rope_append_matches_graph_rope_across_offsets() {
-    if !kernel_available() {
+    let Some(_device) = gpu_kernel_or_skip() else {
         return;
-    }
+    };
     for (i, &offset) in OFFSETS.iter().enumerate() {
         let qkv = random_qkv(600 + i as u64, 1, 1);
         let (q, k, v) = run_fused(&qkv, HEAD_DIM, false, offset, 0);
@@ -213,14 +247,52 @@ fn fused_rope_append_matches_graph_rope_across_offsets() {
     }
 }
 
+/// Every activation dtype a checkpoint decodes in. The kernel is keyed on `T`,
+/// so each dtype is a separately compiled kernel (a separate hipRTC cache entry
+/// on ROCm) and gets its own comparison; f16 alone would leave the f32 and bf16
+/// loads and stores untested. Offsets include the long-context angle where a
+/// trig mismatch between the two paths would show.
+#[test]
+fn fused_rope_append_matches_graph_rope_every_dtype() {
+    let Some(_device) = gpu_kernel_or_skip() else {
+        return;
+    };
+    for &dt in &[dtype::FLOAT32, dtype::FLOAT16, dtype::BFLOAT16] {
+        for &(seq, offset) in &[(1i32, 0i32), (1, 4096), (1, 131071), (3, 29)] {
+            let qkv = random_qkv_as(1600 + seq as u64 + offset as u64, 2, seq, dt);
+            let (q, k, v) = run_fused(&qkv, HEAD_DIM, false, offset, 0);
+            let (want_q, want_k, want_v) = reference_graph(&qkv, HEAD_DIM, false, offset);
+            assert_eq!(array_dtype(&q), dt, "q keeps the activation dtype");
+            assert_close_for(
+                &format!("q dt={dt} seq={seq} offset={offset}"),
+                &q,
+                &want_q,
+                dt,
+            );
+            assert_close_for(
+                &format!("k dt={dt} seq={seq} offset={offset}"),
+                &k,
+                &want_k,
+                dt,
+            );
+            assert_close_for(
+                &format!("v dt={dt} seq={seq} offset={offset}"),
+                &v,
+                &want_v,
+                dt,
+            );
+        }
+    }
+}
+
 /// Multi-token windows (prefill, or a speculative batch) must rotate token `t`
 /// at `positions_base + t`, which is what makes a resumed prefill land on the
 /// same rotation as the decode steps that follow it.
 #[test]
 fn fused_rope_append_multi_token_positions_are_absolute() {
-    if !kernel_available() {
+    let Some(_device) = gpu_kernel_or_skip() else {
         return;
-    }
+    };
     for &(seq, offset) in &[(4i32, 0i32), (7, 1), (16, 4093), (3, 131069)] {
         let qkv = random_qkv(700 + seq as u64 + offset as u64, 1, seq);
         let (q, k, v) = run_fused(&qkv, HEAD_DIM, false, offset, 0);
@@ -236,9 +308,9 @@ fn fused_rope_append_multi_token_positions_are_absolute() {
 /// and the two output layouts; a decode batch shares one position base.
 #[test]
 fn fused_rope_append_matches_graph_rope_batched() {
-    if !kernel_available() {
+    let Some(_device) = gpu_kernel_or_skip() else {
         return;
-    }
+    };
     let qkv = random_qkv(808, 4, 2);
     let (q, k, v) = run_fused(&qkv, HEAD_DIM, false, 37, 0);
     let (want_q, want_k, want_v) = reference_graph(&qkv, HEAD_DIM, false, 37);
@@ -256,9 +328,9 @@ fn fused_rope_append_matches_graph_rope_batched() {
 /// flag for real, so it has to be pinned.
 #[test]
 fn fused_rope_append_traditional_matches_graph_rope() {
-    if !kernel_available() {
+    let Some(_device) = gpu_kernel_or_skip() else {
         return;
-    }
+    };
     for &offset in &[0i32, 13, 2048] {
         let qkv = random_qkv(900 + offset as u64, 1, 3);
         let (q, k, _) = run_fused(&qkv, HEAD_DIM, true, offset, 0);
@@ -274,9 +346,9 @@ fn fused_rope_append_traditional_matches_graph_rope() {
 /// elements.
 #[test]
 fn fused_rope_append_partial_rope_dims_copies_the_tail() {
-    if !kernel_available() {
+    let Some(_device) = gpu_kernel_or_skip() else {
         return;
-    }
+    };
     for &rope_dims in &[64i32, 96, 32] {
         for &traditional in &[false, true] {
             let qkv = random_qkv(1100 + rope_dims as u64, 1, 2);
@@ -302,9 +374,9 @@ fn fused_rope_append_partial_rope_dims_copies_the_tail() {
 /// honest until then.
 #[test]
 fn fused_rope_append_paged_layout_is_the_dense_layout_transposed() {
-    if !kernel_available() {
+    let Some(_device) = gpu_kernel_or_skip() else {
         return;
-    }
+    };
     let qkv = random_qkv(1313, 2, 5);
     let (q_dense, k_dense, v_dense) = run_fused(&qkv, HEAD_DIM, false, 71, 0);
     let (q_paged, k_paged, v_paged) = run_fused(&qkv, HEAD_DIM, false, 71, 1);
@@ -330,9 +402,9 @@ fn fused_rope_append_paged_layout_is_the_dense_layout_transposed() {
 /// checks above could absorb.
 #[test]
 fn fused_rope_append_leaves_v_bit_identical() {
-    if !kernel_available() {
+    let Some(_device) = gpu_kernel_or_skip() else {
         return;
-    }
+    };
     let qkv = random_qkv(1414, 1, 3);
     let (_, _, v) = run_fused(&qkv, HEAD_DIM, false, 12345, 0);
 
@@ -359,9 +431,9 @@ fn fused_rope_append_leaves_v_bit_identical() {
 /// rewritten weight has to flow through unchanged.
 #[test]
 fn fused_rope_append_matches_graph_with_scaled_projection() {
-    if !kernel_available() {
+    let Some(_device) = gpu_kernel_or_skip() else {
         return;
-    }
+    };
     let base = random_qkv(1515, 1, 2);
     // Stand-in for a merged adapter: the projection output after the merge is a
     // scaled version of the checkpoint's, in the same dtype.
@@ -400,4 +472,61 @@ fn fused_rope_append_gate_follows_the_kill_switch() {
         expected,
         "gate does not match MLXCEL_FUSED_ROPE_APPEND"
     );
+}
+
+/// On ROCm the port computes the angle in the overlay's `rope.hip` order and
+/// takes both sides with the same `sincosf`, so it reproduces the graph's
+/// `fast_rope` exactly rather than within the cross-backend tolerance above.
+/// Byte identity is the stronger pin, including at the long-context angle.
+///
+/// The graph runs two differently compiled kernels: `rope_single_1d` for one
+/// row-contiguous token of one sequence (batch-1 decode, the case that
+/// matters most) and `rope` otherwise, and the two round their second output
+/// differently. Both shapes are covered here; the batch-1 single-token cases
+/// are the ones a port that matched only `rope` failed. The two long windows
+/// are where an f16 port that rounded through f32 failed (see
+/// `fused_rope_append_hip.h`): about one f16 element in eight thousand lands
+/// on the other side, so short windows rarely show it.
+#[test]
+fn fused_rope_append_is_byte_identical_to_the_rocm_graph() {
+    use crate::hardware::{GpuBackendKind, gpu_backend_kind};
+    if gpu_backend_kind() != GpuBackendKind::Rocm {
+        return;
+    }
+    let Some(_device) = gpu_kernel_or_skip() else {
+        return;
+    };
+    let as_contiguous = |a: &MlxArray| {
+        let c = contiguous(a, false);
+        eval(&c);
+        array_to_raw_bytes(&c)
+    };
+    for &dt in &[dtype::FLOAT32, dtype::FLOAT16, dtype::BFLOAT16] {
+        for &(batch, seq, offset, traditional) in &[
+            (1i32, 1i32, 512i32, false),
+            (1, 1, 4096, false),
+            (1, 1, 131071, false),
+            (1, 1, 777, true),
+            (1, 5, 29, false),
+            (1, 512, 0, false),
+            (2, 1, 0, false),
+            (2, 1, 4096, false),
+            (2, 1, 131071, false),
+            (2, 5, 29, false),
+            (2, 3, 2048, true),
+            (3, 186, 4555, false),
+            (1, 64, 9110, true),
+        ] {
+            let seed = 1700 + (batch * 7 + seq) as u64 + offset as u64;
+            let qkv = random_qkv_as(seed, batch, seq, dt);
+            let (q, k, v) = run_fused(&qkv, HEAD_DIM, traditional, offset, 0);
+            let (want_q, want_k, want_v) = reference_graph(&qkv, HEAD_DIM, traditional, offset);
+            let label = format!(
+                "dt={dt} batch={batch} seq={seq} offset={offset} traditional={traditional}"
+            );
+            assert_eq!(as_contiguous(&q), as_contiguous(&want_q), "q {label}");
+            assert_eq!(as_contiguous(&k), as_contiguous(&want_k), "k {label}");
+            assert_eq!(as_contiguous(&v), as_contiguous(&want_v), "v {label}");
+        }
+    }
 }

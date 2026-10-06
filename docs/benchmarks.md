@@ -209,6 +209,8 @@ MLXLM_PYTHON=<mlx-rocm-venv>/bin/python LD_LIBRARY_PATH=/opt/rocm/lib \
 `bench_mlxlm.py`'s `--big-cooldown` replaces the normal cooldown after a big
 model where `bench_decode.sh` adds it, so 60 there matches 30 + 30 here.
 
+`bench_decode.sh --temperature T [--top-p P]` measures sampled decode, which is where the fused samplers run (greedy never dispatches them); the CSV has no sampling column, so the auto-generated filename gains `_t<T>` and `_p<P>`.
+
 `scripts/rocm_gpu_guard.sh -- <command>` is that check as a script: it waits
 for 90 s with `/sys/class/kfd/kfd/proc` empty and no compiler process, runs the
 command under a 1 Hz monitor, reruns it if any sample shows another GPU process

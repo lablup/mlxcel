@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "fused_norm.h"
+#include "fused_norm_hip.h"
 #include "gpu_backend.h"
 #include "kernel_port.h"
 
@@ -246,12 +247,16 @@ constexpr const char* FUSED_ADD_RMS_NORM_CUDA_SOURCE = R"(
 constexpr int FUSED_NORM_N_READS = 4;
 constexpr int FUSED_NORM_SIMD_WIDTH = 32;
 constexpr int FUSED_NORM_MAX_THREADS = 1024;
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+// `BLOCK_DIM` of the overlay's `rms_norm_kernel` launch in `rms_norm.hip`.
+constexpr int FUSED_NORM_ROCM_THREADS = 256;
+#endif
 
 // Threadgroup width for a row of `dim` elements: enough lanes to cover the row
 // at `FUSED_NORM_N_READS` elements each, rounded up to a whole SIMD group and
 // clamped to the hardware threadgroup limit. Rows longer than
 // `FUSED_NORM_MAX_THREADS * FUSED_NORM_N_READS` loop.
-int fused_norm_threads(int dim) {
+[[maybe_unused]] int fused_norm_threads(int dim) {
     if (dim <= 0) {
         return FUSED_NORM_SIMD_WIDTH;
     }
@@ -324,6 +329,38 @@ inline FusedNormKernelHolderCuda& get_fused_norm_kernel_cuda() {
     return holder;
 }
 
+// HIP counterpart (issue #2063), reached only on a ROCm build. The body lives
+// in `fused_norm_hip.h`; the launch below is shared with the Metal and CUDA ports. On a
+// build without the ROCm backend `fast::hip_kernel` is not declared, and
+// `fused_norm_ports()` never resolves this entry there (`select_kernel_port`
+// reads the running backend), so the throw is unreachable and exists only to
+// keep the table shape uniform.
+struct FusedNormKernelHolderHip {
+    std::optional<mlx::core::fast::CustomKernelFunction> kernel;
+    std::once_flag init_flag;
+
+    mlx::core::fast::CustomKernelFunction& get() {
+        std::call_once(init_flag, [this] {
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+            kernel = mlx::core::fast::hip_kernel(
+                "mlxcel_fused_add_rms_norm",
+                fused_norm_input_names(),
+                fused_norm_output_names(),
+                std::string(FUSED_ADD_RMS_NORM_HIP_SOURCE));
+#else
+            throw std::runtime_error(
+                "[fused_add_rms_norm] this build has no ROCm backend");
+#endif
+        });
+        return *kernel;
+    }
+};
+
+inline FusedNormKernelHolderHip& get_fused_norm_kernel_hip() {
+    static FusedNormKernelHolderHip holder;
+    return holder;
+}
+
 
 // This kernel's ports, in one place. `has_kernel_port` and
 // `select_kernel_port` both read it, so a support predicate and the dispatch
@@ -336,14 +373,21 @@ const mlxcel::KernelPorts& fused_norm_ports() {
         .cuda = +[]() -> mlx::core::fast::CustomKernelFunction& {
             return get_fused_norm_kernel_cuda().get();
         },
-        // No HIP port yet (#1814).
-        .rocm = nullptr,
+        .rocm = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_fused_norm_kernel_hip().get();
+        },
     };
     return ports;
 }
 
 } // namespace
 bool fused_add_rms_norm_available() {
+    // Custom kernels run only on the GPU stream; on a CPU default device
+    // (`MLXCEL_DEVICE=cpu` on a GPU build) their `eval_cpu` throws, so the
+    // caller must take the graph path there (#2069).
+    if (mlx::core::default_device() != mlx::core::Device::gpu) {
+        return false;
+    }
     return mlxcel::has_kernel_port(fused_norm_ports());
 }
 
@@ -371,6 +415,10 @@ std::vector<mlx::core::array> fused_add_rms_norm(
             "[fused_add_rms_norm] x must be at least 1-D and weight exactly 1-D.");
     }
     const int dim = x.shape().back();
+    if (dim <= 0 || x.size() == 0) {
+        throw std::invalid_argument(
+            "[fused_add_rms_norm] x must be non-empty with a positive last dim.");
+    }
     if (weight.shape()[0] != dim) {
         throw std::invalid_argument(
             "[fused_add_rms_norm] weight length must equal the last dim of x.");
@@ -381,7 +429,18 @@ std::vector<mlx::core::array> fused_add_rms_norm(
     }
 
     const int rows = static_cast<int>(x.size() / dim);
+    // Threads per row. Metal and CUDA: enough lanes to cover the row at
+    // `N_READS` each. ROCm: the overlay's `rms_norm_kernel` block of 256
+    // (`rms_norm.hip`), whose per-thread strided sums and 32-wide folds the HIP
+    // body then reproduces term for term, so the fused sum of squares is the
+    // graph's bit for bit (#2063). A ROCm build has no Metal or CUDA backend,
+    // so the build flag is the backend here, as in `fused_add3_layer_norm`.
+    // `Threads` is a template arg, so each width compiles and caches apart.
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+    const int threads = FUSED_NORM_ROCM_THREADS;
+#else
     const int threads = fused_norm_threads(dim);
+#endif
 
 
     // Refuses when this backend has no port, naming the entry point and the

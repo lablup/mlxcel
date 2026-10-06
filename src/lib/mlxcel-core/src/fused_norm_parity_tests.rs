@@ -35,9 +35,10 @@
 //! of the dtype, because the fused and graph paths differ only in where the
 //! residual sum gets rounded, not in the arithmetic.
 //!
-//! GPU-only: the kernel JITs through `mx.fast.metal_kernel` / `cuda_kernel`, so
-//! these tests return early on a CPU-only build, matching the convention in
-//! `fused_moe_parity_tests.rs`.
+//! GPU-only: the kernel JITs through `mx.fast.metal_kernel` / `cuda_kernel` /
+//! `hip_kernel`, so these tests skip on a CPU-only build and fail, rather than
+//! skip, on a GPU build whose predicate answers false (see
+//! `gpu_kernel_or_skip`), matching `fused_moe_parity_tests.rs`.
 //!
 //! Run on Apple Silicon:
 //!   cargo test --release -p mlxcel-core --lib --features metal,accelerate \
@@ -64,19 +65,30 @@ fn tolerance_for(dtype: i32) -> (f64, f64) {
     }
 }
 
-/// Whether this build has a `fused_add_rms_norm` port to compare against the
-/// graph.
+/// The device lock for a test that runs the `fused_add_rms_norm` port, or
+/// `None` (skip) on a build without a GPU backend.
 ///
-/// Deliberately not `metal_is_available() || cuda_is_available()`, which is how
-/// this read before #1801. That spelling names the two backends that happen to
-/// have a port today, so on a third backend it reads as a missing term rather
-/// than as what it is, and "add `rocm_is_available()`" is the natural and wrong
-/// conclusion: ROCm has a GPU but `fused_norm_ports().rocm` is still null
-/// (#1814), so widening the gate would run these tests into the launcher's
-/// refusal. Asking the kernel's own predicate cannot drift from the port table
-/// the dispatch reads, and a backend that gains the port needs no edit here.
-fn kernel_available() -> bool {
-    crate::fused_add_rms_norm_available()
+/// Every GPU backend has this port since #2063 (Metal, CUDA, ROCm), so on a GPU
+/// build `fused_add_rms_norm_available()`, which reads the same table the
+/// launcher dispatches through, must answer true: a `false` there is a defect
+/// this reports instead of skipping past. Before #2063 these tests returned
+/// early on ROCm, so a missing port read as a pass.
+///
+/// The predicate also requires the GPU as the default device, which is
+/// process-global and which other tests in this binary move, so the lock is
+/// held for the whole test rather than only around the check.
+fn gpu_kernel_or_skip() -> Option<crate::streams::DefaultDeviceLock> {
+    use crate::hardware::{GpuBackendKind, gpu_backend_kind};
+    if gpu_backend_kind() == GpuBackendKind::None {
+        eprintln!("skipping: no GPU backend, so no fused_add_rms_norm port");
+        return None;
+    }
+    let lock = crate::streams::lock_default_device();
+    assert!(
+        crate::fused_add_rms_norm_available(),
+        "every GPU backend has a fused_add_rms_norm port, so the predicate must be true"
+    );
+    Some(lock)
 }
 
 fn flatten_f32(arr: &MlxArray) -> Vec<f32> {
@@ -175,7 +187,7 @@ fn run_fused(
         &mut normed,
         &mut new_residual,
     )
-    .expect("kernel_available() checked the port table, so the launcher must not refuse");
+    .expect("gpu_kernel_or_skip() checked the port table, so the launcher must not refuse");
     eval(&normed);
     eval(&new_residual);
     (normed, new_residual)
@@ -200,9 +212,9 @@ const SHAPES: &[(i32, i32)] = &[(1, 128), (1, 2048), (5, 4096), (33, 2048), (1, 
 
 #[test]
 fn fused_add_rms_norm_matches_graph_across_dtypes_and_shapes() {
-    if !kernel_available() {
+    let Some(_device) = gpu_kernel_or_skip() else {
         return;
-    }
+    };
     for &dt in &[dtype::FLOAT32, dtype::FLOAT16, dtype::BFLOAT16] {
         for (i, &(rows, dim)) in SHAPES.iter().enumerate() {
             let (delta, residual, weight) = random_case(1000 + i as u64, rows, dim, dt);
@@ -236,9 +248,9 @@ fn fused_add_rms_norm_matches_graph_across_dtypes_and_shapes() {
 /// over layer.
 #[test]
 fn fused_add_rms_norm_residual_output_is_the_plain_sum() {
-    if !kernel_available() {
+    let Some(_device) = gpu_kernel_or_skip() else {
         return;
-    }
+    };
     for &dt in &[dtype::FLOAT32, dtype::FLOAT16, dtype::BFLOAT16] {
         let (delta, residual, weight) = random_case(2024, 4, 2048, dt);
         let (_, new_residual) = run_fused(&delta, &residual, &weight, EPS, 0.0);
@@ -271,9 +283,9 @@ fn fused_add_rms_norm_residual_output_is_the_plain_sum() {
 /// the kernel, which is the same rounding `GemmaRMSNorm::new` performs.
 #[test]
 fn fused_add_rms_norm_gemma_weight_bias_matches_precomputed_one_plus_w() {
-    if !kernel_available() {
+    let Some(_device) = gpu_kernel_or_skip() else {
         return;
-    }
+    };
     for &dt in &[dtype::FLOAT32, dtype::FLOAT16, dtype::BFLOAT16] {
         for (i, &(rows, dim)) in SHAPES.iter().enumerate() {
             let (delta, residual, weight) = random_case(3000 + i as u64, rows, dim, dt);
@@ -300,9 +312,9 @@ fn fused_add_rms_norm_gemma_weight_bias_matches_precomputed_one_plus_w() {
 /// went through the layer or the kernel.
 #[test]
 fn gemma_rms_norm_layer_agrees_with_weight_bias_one() {
-    if !kernel_available() {
+    let Some(_device) = gpu_kernel_or_skip() else {
         return;
-    }
+    };
     let dt = dtype::FLOAT16;
     let (delta, residual, weight) = random_case(4242, 4, 2048, dt);
     let gemma = GemmaRMSNorm::new(copy(&weight), EPS);
@@ -326,9 +338,9 @@ fn gemma_rms_norm_layer_agrees_with_weight_bias_one() {
 /// RMSNorm convention.
 #[test]
 fn fused_add_rms_norm_matches_graph_with_lora_scaled_weight() {
-    if !kernel_available() {
+    let Some(_device) = gpu_kernel_or_skip() else {
         return;
-    }
+    };
     let dt = dtype::FLOAT16;
     let (delta, residual, weight) = random_case(777, 4, 4096, dt);
     // Stand-in for a fused adapter: the weight the model holds after the merge
@@ -358,9 +370,9 @@ fn fused_add_rms_norm_matches_graph_with_lora_scaled_weight() {
 /// the standard-RMSNorm test above.
 #[test]
 fn fused_add_rms_norm_gemma_matches_graph_with_surgery_scaled_weight() {
-    if !kernel_available() {
+    let Some(_device) = gpu_kernel_or_skip() else {
         return;
-    }
+    };
     let dt = dtype::BFLOAT16;
     let (delta, residual, weight) = random_case(778, 4, 4096, dt);
     let scaled = astype(
@@ -387,9 +399,9 @@ fn fused_add_rms_norm_gemma_matches_graph_with_surgery_scaled_weight() {
 /// helper's output must then be byte-identical to `graph_add_rms_norm`).
 #[test]
 fn fused_add_rms_norm_helper_respects_the_kill_switch() {
-    if !kernel_available() {
+    let Some(_device) = gpu_kernel_or_skip() else {
         return;
-    }
+    };
     // Expectation follows the documented precedence: an explicit truthy or
     // falsey value wins, and anything else (unset, or unrecognised) keeps the
     // compiled-in default. Deriving it as `!disabled` instead would silently
@@ -446,9 +458,9 @@ fn fused_add_rms_norm_helper_respects_the_kill_switch() {
 /// iteration.
 #[test]
 fn fused_add_rms_norm_greedy_argmax_parity_over_steps() {
-    if !kernel_available() {
+    let Some(_device) = gpu_kernel_or_skip() else {
         return;
-    }
+    };
     let dt = dtype::FLOAT16;
     let dim = 1024;
     let layers_n = 8;
@@ -536,4 +548,124 @@ fn argmax_index(logits: &MlxArray) -> usize {
         }
     }
     best
+}
+
+/// On ROCm the port follows the graph it replaces rather than the Metal
+/// kernel: the launch uses the overlay's 256-thread `rms_norm_kernel` block,
+/// and the body copies its strided sums, 32-wide folds, `1.0f / sqrtf` and
+/// rounding points (`fused_norm_hip.h`), so it is byte-identical, a much
+/// tighter pin than the tolerance tests above: a port sized from the row
+/// (`fused_norm_threads`) fails it at 4096 wide. The second half spreads the
+/// residual rows' scale over e^-8 to e^8, where a port that took the row
+/// length as a compile-time constant left about 1% of f32 rows a normalizer
+/// ulp off. Rows wider than one 1024-element sweep (4096) and narrower than
+/// one block (128) are both covered.
+#[test]
+fn fused_add_rms_norm_is_byte_identical_to_the_rocm_graph() {
+    use crate::hardware::{GpuBackendKind, gpu_backend_kind};
+    if gpu_backend_kind() != GpuBackendKind::Rocm {
+        return;
+    }
+    let Some(_device) = gpu_kernel_or_skip() else {
+        return;
+    };
+    for &dt in &[dtype::FLOAT32, dtype::FLOAT16, dtype::BFLOAT16] {
+        for (i, &(rows, dim)) in SHAPES.iter().enumerate() {
+            let (delta, residual, weight) = random_case(5000 + i as u64, rows, dim, dt);
+            let (normed, new_residual) = run_fused(&delta, &residual, &weight, EPS, 0.0);
+            let norm = RMSNorm::new(copy(&weight), EPS);
+            let (want_normed, want_residual) =
+                crate::layers::graph_add_rms_norm(&norm, &delta, &residual);
+            assert_eq!(
+                raw_bytes(&new_residual),
+                raw_bytes(&want_residual),
+                "new_residual dt={dt} rows={rows} dim={dim} differs from the ROCm graph add"
+            );
+            assert_eq!(
+                raw_bytes(&normed),
+                raw_bytes(&want_normed),
+                "normed dt={dt} rows={rows} dim={dim} differs from the ROCm graph rms_norm"
+            );
+        }
+        // Wide dynamic range: per-row residual scales exp(2 * N(0, 1)).
+        let (rows, dim) = (1024, 4096);
+        let (delta, residual, weight) = random_case(5100, rows, dim, dt);
+        random_seed(5101);
+        let noise = unsafe { random_normal(&[rows, 1], dtype::FLOAT32, std::ptr::null()) };
+        let row_scale = exp(&multiply(&noise, &full_f32(&[1], 2.0, dtype::FLOAT32)));
+        let residual = astype(
+            &multiply(&astype(&residual, dtype::FLOAT32), &row_scale),
+            dt,
+        );
+        eval(&residual);
+        let (normed, new_residual) = run_fused(&delta, &residual, &weight, EPS, 0.0);
+        let norm = RMSNorm::new(copy(&weight), EPS);
+        let (want_normed, want_residual) =
+            crate::layers::graph_add_rms_norm(&norm, &delta, &residual);
+        assert_eq!(
+            raw_bytes(&new_residual),
+            raw_bytes(&want_residual),
+            "new_residual dt={dt} with spread row scales differs from the ROCm graph add"
+        );
+        assert_eq!(
+            raw_bytes(&normed),
+            raw_bytes(&want_normed),
+            "normed dt={dt} with spread row scales differs from the ROCm graph rms_norm"
+        );
+    }
+}
+
+/// Signed zeros, which decode reaches whenever a normalized element underflows
+/// in f16 (`x * inv_mean` below half the smallest subnormal) or a norm weight
+/// is zero. The graph multiplies in the activation dtype (`w * normalized`),
+/// which keeps IEEE's sign of zero; the port first multiplied in f32 and
+/// rounded, and hipRTC's code for that dropped the sign, so a Llama 3.1 trace
+/// with the fusion on differed from the graph at 5 of 128 decode positions.
+#[test]
+fn fused_add_rms_norm_keeps_the_rocm_graph_sign_of_zero() {
+    use crate::hardware::{GpuBackendKind, gpu_backend_kind};
+    if gpu_backend_kind() != GpuBackendKind::Rocm {
+        return;
+    }
+    let Some(_device) = gpu_kernel_or_skip() else {
+        return;
+    };
+    let dim = 128usize;
+    let mut residual = vec![0f32; dim];
+    let mut weight = vec![1f32; dim];
+    // One large element sets a small normalizer, so the tiny ones underflow.
+    residual[0] = 1000.0;
+    let tiny = [-0.0f32, 0.0, -1e-6, -5e-8, -3e-8, -1e-4, 1e-4, -6e-5, -1e-7];
+    for (i, t) in tiny.iter().enumerate() {
+        residual[1 + i] = *t;
+    }
+    for i in 20..40 {
+        weight[i] = 0.0;
+        residual[i] = -0.5;
+    }
+    for i in 40..60 {
+        weight[i] = -0.0;
+        residual[i] = 0.5;
+    }
+    for &dt in &[dtype::FLOAT32, dtype::FLOAT16, dtype::BFLOAT16] {
+        let r = astype(&from_slice_f32(&residual, &[1, dim as i32]), dt);
+        let d = astype(&from_slice_f32(&vec![0f32; dim], &[1, dim as i32]), dt);
+        let w = astype(&from_slice_f32(&weight, &[dim as i32]), dt);
+        eval(&r);
+        eval(&d);
+        eval(&w);
+        let (normed, new_residual) = run_fused(&d, &r, &w, EPS, 0.0);
+        let norm = RMSNorm::new(copy(&w), EPS);
+        let (want_normed, want_residual) = crate::layers::graph_add_rms_norm(&norm, &d, &r);
+        assert_eq!(
+            raw_bytes(&new_residual),
+            raw_bytes(&want_residual),
+            "new_residual dt={dt}: signed zeros differ from the ROCm graph"
+        );
+        assert_eq!(
+            raw_bytes(&normed),
+            raw_bytes(&want_normed),
+            "normed dt={dt}: signed zeros differ from the ROCm graph"
+        );
+    }
 }

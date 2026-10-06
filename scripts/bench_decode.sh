@@ -155,6 +155,12 @@ NO_CHAT_TEMPLATE=0
 NO_DEDUP=0
 OUTPUT=""
 SUFFIX=""
+# Sampling for both passes (issue #2064). Empty means the runner's default,
+# greedy argmax, which never dispatches a sampler kernel; a sampled run is how
+# the Gumbel-max and rejection kernels are measured. The CSV schema does not
+# record either, so a non-greedy run also tags the auto-generated filename.
+TEMPERATURE=""
+TOP_P=""
 DATE=$(date '+%Y-%m-%d')
 # Version recorded in the CSV `mlxcel_version` column. This is the mlxcel
 # version from Cargo.toml (the /update-benchmarks staleness check compares
@@ -850,6 +856,13 @@ Options:
   --jit-preheat-timeout N  Timeout for CUDA JIT warmup in seconds (default: 600)
   --output PATH       Write CSV to specific file (overrides auto-naming)
   --suffix TAG        Append suffix to auto-generated filename (e.g. --suffix baseline)
+  --temperature T     Sampling temperature for both passes (default: the
+                      runner's 0, greedy). A positive value reaches the
+                      sampler kernels; the auto-generated filename gains
+                      `_t<T>` because the CSV has no sampling column.
+  --top-p P           Nucleus threshold, effective with a positive
+                      --temperature (default: the runner's 1.0, off). Tags
+                      the filename with `_p<P>`.
   --cooldown N        Sleep N seconds after every model to let the GPU cool
                       down (default: 0). Use on thermally constrained
                       hardware such as the MacBook Pro M5 Max where back-to-
@@ -941,6 +954,8 @@ default_output_path() {
     name="${name}_vlm"
   fi
   name="${name}_${DATE}"
+  [[ -n "$TEMPERATURE" ]] && name="${name}_t${TEMPERATURE}"
+  [[ -n "$TOP_P" ]] && name="${name}_p${TOP_P}"
   if [[ -n "$SUFFIX" ]]; then
     name="${name}_${SUFFIX}"
   fi
@@ -1055,6 +1070,8 @@ bench_one() {
   if [[ "$NO_CHAT_TEMPLATE" -eq 1 ]]; then
     extra_args+=(--no-chat-template)
   fi
+  [[ -n "$TEMPERATURE" ]] && extra_args+=(--temperature "$TEMPERATURE")
+  [[ -n "$TOP_P" ]] && extra_args+=(--top-p "$TOP_P")
 
   >&2 printf '>>> [bench]  %s (same-process warmup=%s) ...\n' "$model_name" "$WARMUP_TOKENS"
   local raw rc=0
@@ -1142,6 +1159,8 @@ while [[ $# -gt 0 ]]; do
     --jit-preheat-timeout) JIT_PREHEAT_TIMEOUT="$2"; shift 2 ;;
     --output)         OUTPUT="$2"; shift 2 ;;
     --suffix)         SUFFIX="$2"; shift 2 ;;
+    --temperature)    TEMPERATURE="$2"; shift 2 ;;
+    --top-p)          TOP_P="$2"; shift 2 ;;
     --cooldown)       COOLDOWN_SECS="$2"; shift 2 ;;
     --big-cooldown)   BIG_MODEL_COOLDOWN_SECS="$2"; shift 2 ;;
     --big-threshold-gb)
@@ -1156,6 +1175,15 @@ while [[ $# -gt 0 ]]; do
     -*)               echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
     *)                MODEL_ARG="$1"; shift ;;
   esac
+done
+
+# Both values end up in the auto-generated filename, so only plain decimals.
+for _sampling_opt in "--temperature:$TEMPERATURE" "--top-p:$TOP_P"; do
+  _value="${_sampling_opt#*:}"
+  if [[ -n "$_value" && ! "$_value" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    echo "Error: ${_sampling_opt%%:*} takes a non-negative decimal, got '$_value'" >&2
+    exit 1
+  fi
 done
 
 if [[ -z "$MODEL_ARG" ]]; then

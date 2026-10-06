@@ -41,6 +41,7 @@
 //! backbone loaded in that process.
 
 use crate::models::gemma3::{Cache, CacheInterface, ModelArgs, TransformerBlock};
+use mlxcel_core::dtype;
 use mlxcel_core::layers::{GemmaRMSNorm, KVCache, RotatingKVCache};
 use mlxcel_core::utils::create_sliding_window_prefill_mask;
 use mlxcel_core::weights::WeightMap;
@@ -84,6 +85,34 @@ fn layer_forward(
     );
     let ff = mlp.down_proj.forward(&gated);
     mlxcel_core::compiled_clip_residual(&h, &layer.post_feedforward_layernorm.forward(&ff))
+}
+
+/// Rebuild `norm` so its `1 + w` is the stored-dtype `1 + w` cast to f32.
+///
+/// [`GemmaRMSNorm::new`] adds one in the weight's dtype, so it is handed
+/// `a - 1` in f32, where `a` is the widened `1 + w`. Both steps are exact:
+/// for half-precision `w`, `a` is zero or a multiple of `2^-11` at least
+/// (`1 + w` near zero needs `w` near `-1`, where the half ulp is `2^-8` for
+/// bf16 and `2^-11` for f16), so for `|a| < 2^24` (far beyond any norm
+/// scale) `a - 1` fits the f32 significand and `1 + (a - 1)` gives back `a`. The rebuilt norm's `weight` field holds
+/// `a - 1`; every forward path reads only the adjusted weight.
+pub(crate) fn widen_norm_to_f32(norm: &mut GemmaRMSNorm) {
+    let adjusted = norm.adjusted_weight();
+    let stored = mlxcel_core::array_dtype(adjusted);
+    if stored != dtype::BFLOAT16 && stored != dtype::FLOAT16 {
+        return;
+    }
+    let wide = mlxcel_core::astype(adjusted, dtype::FLOAT32);
+    let offset = mlxcel_core::subtract(&wide, &mlxcel_core::full_f32(&[], 1.0, dtype::FLOAT32));
+    let rebuilt = GemmaRMSNorm::new(offset, norm.eps);
+    let ptrs = [
+        &*rebuilt.weight as *const MlxArray,
+        rebuilt.adjusted_weight() as *const MlxArray,
+    ];
+    // SAFETY: both pointers refer to arrays owned by `rebuilt`, which
+    // outlives the call.
+    unsafe { mlxcel_core::eval_all(&ptrs) };
+    *norm = rebuilt;
 }
 
 /// Per-layer attention caches for a [`Gemma3Backbone`].
@@ -159,6 +188,32 @@ impl Gemma3Backbone {
             sliding_window: args.sliding_window,
             sliding_window_pattern: args.sliding_window_pattern,
         })
+    }
+
+    /// Hold every norm's `1 + w` as f32: the `1 + w` built in the stored
+    /// dtype, widened exactly. For a backbone that runs an f32 stream against
+    /// half-precision weights (the Nemotron VoiceChat EAR-TTS, issue #2109).
+    ///
+    /// The reference builds `1 + w` in the weight's dtype and `fast::rms_norm`
+    /// promotes it against the f32 input. CUDA builds resolve bf16 with f32
+    /// to bf16 instead, which would demote the stream at every norm, so the
+    /// widened weight is precomputed here. The values the kernel reads are
+    /// unchanged under upstream promotion. Norms whose `1 + w` is already f32
+    /// are left alone; [`GemmaRMSNorm`] itself is shared and unchanged.
+    pub fn widen_norms_to_f32(&mut self) {
+        for layer in &mut self.layers {
+            for norm in [
+                &mut layer.input_layernorm,
+                &mut layer.post_attention_layernorm,
+                &mut layer.pre_feedforward_layernorm,
+                &mut layer.post_feedforward_layernorm,
+                &mut layer.self_attn.q_norm,
+                &mut layer.self_attn.k_norm,
+            ] {
+                widen_norm_to_f32(norm);
+            }
+        }
+        widen_norm_to_f32(&mut self.norm);
     }
 
     /// Number of transformer layers.

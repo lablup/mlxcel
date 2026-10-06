@@ -28,14 +28,14 @@ use super::rvq::RvqCodebooks;
 use super::subword::CharAwareSubwordEncoder;
 use super::{SpeechDecoderAssets, TtsPrompt};
 
-fn rand(key: &mut u64, shape: &[i32], scale: f32) -> UniquePtr<MlxArray> {
+pub(super) fn rand(key: &mut u64, shape: &[i32], scale: f32) -> UniquePtr<MlxArray> {
     *key += 1;
     let k = mlxcel_core::random_key(*key);
     let x = unsafe { mlxcel_core::random_normal(shape, dtype::FLOAT32, &*k) };
     mlxcel_core::multiply_scalar(&x, scale)
 }
 
-fn to_vec(a: &MlxArray) -> Vec<f32> {
+pub(super) fn to_vec(a: &MlxArray) -> Vec<f32> {
     mlxcel_core::utils::array_to_vec_f32(a)
 }
 
@@ -133,7 +133,7 @@ fn rvq_encode_step_recovers_exact_codewords() {
     assert_eq!(to_i32(&out), vec![1, 2, 4]);
 }
 
-fn tiny_char_cfg() -> CharEncoderConfig {
+pub(super) fn tiny_char_cfg() -> CharEncoderConfig {
     CharEncoderConfig {
         hidden_size: 8,
         intermediate_size: 16,
@@ -147,7 +147,7 @@ fn tiny_char_cfg() -> CharEncoderConfig {
 }
 
 /// Vocabulary: three single-char tokens (so a 4-row char table) plus words.
-fn tiny_vocab() -> HashMap<String, u32> {
+pub(super) fn tiny_vocab() -> HashMap<String, u32> {
     [
         ("b", 1u32),
         ("a", 0),
@@ -161,7 +161,11 @@ fn tiny_vocab() -> HashMap<String, u32> {
     .collect()
 }
 
-fn tiny_subword_weights(cfg: &CharEncoderConfig, out: i32, zero_flags: bool) -> WeightMap {
+pub(super) fn tiny_subword_weights(
+    cfg: &CharEncoderConfig,
+    out: i32,
+    zero_flags: bool,
+) -> WeightMap {
     let mut key = 21u64;
     let (h, i) = (cfg.hidden_size as i32, cfg.intermediate_size as i32);
     let mut w = WeightMap::new();
@@ -439,6 +443,9 @@ fn native_sum_reduces_the_requested_axis() {
 }
 
 /// Issue #2045: only projections fed by f32 activations are held as f32.
+/// Issue #2109 adds `bos_emb` and `audio_prompt_projection_W`, which meet the
+/// f32 code embeddings; `null_emb` joins the bf16 subword condition and the
+/// norms widen their built `1 + w` instead, so both stay as stored.
 #[test]
 fn f32_promotion_keeps_norms_and_the_subword_path_as_stored() {
     use super::model::promotes_to_f32;
@@ -450,6 +457,8 @@ fn f32_promotion_keeps_norms_and_the_subword_path_as_stored() {
         "mog_head.proj_else.weight",
         "embed_code.weight",
         "gated_fusion_audio_text.audio_proj.bias",
+        "bos_emb",
+        "audio_prompt_projection_W",
     ] {
         assert!(promotes_to_f32(key), "{key}");
     }

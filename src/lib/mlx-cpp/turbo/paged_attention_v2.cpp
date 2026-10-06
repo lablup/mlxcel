@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include "gpu_backend.h"
 #include "kernel_port.h"
+#include "paged_attention_hip.h"
 
 #include <mlx/fast.h>
 #include <mlx/ops.h>
@@ -455,7 +456,8 @@ constexpr const char* PAGED_ATTENTION_V2_PARTIAL_CUDA_SOURCE = R"(
     }
 )";
 
-// Apple Silicon SIMD width; the warp width on CUDA.
+// Apple Silicon SIMD width; the warp width on CUDA, and the wavefront width of
+// the wave32 targets the HIP port is built for (`paged_attention_hip.h`).
 constexpr int PAGED_V2_SIMD_WIDTH = 32;
 
 // Threadgroup-memory budget for `tg_acc`, matching the ~28 KB v1 ceiling.
@@ -489,39 +491,69 @@ const std::vector<std::string>& partial_output_names() {
     return names;
 }
 
-// Thread-safe lazy-initialised holders for the two JIT-compiled bodies, using
-// the `std::call_once` pattern of `paged_attention.cpp` / `sparse_v_sdpa.cpp`:
-// the server reaches first use concurrently from per-request blocking workers,
-// and `call_once` re-runs the initializer if MLX device lookup throws.
+// Compiles the partial body for one backend. Reached only through a port
+// table entry, so `backend` is always a backend that entry names; the `None`
+// arm and the non-ROCm-build throw keep the switch exhaustive and are
+// unreachable.
+mlx::core::fast::CustomKernelFunction make_partial_kernel(
+    mlxcel::GpuKernelBackend backend) {
+    switch (backend) {
+        case mlxcel::GpuKernelBackend::Metal:
+            return mlx::core::fast::metal_kernel(
+                "mlxcel_paged_attention_v2_partial",
+                partial_input_names(),
+                partial_output_names(),
+                std::string(PAGED_ATTENTION_V2_PARTIAL_SOURCE));
+        case mlxcel::GpuKernelBackend::Cuda:
+            return mlx::core::fast::cuda_kernel(
+                "mlxcel_paged_attention_v2_partial",
+                partial_input_names(),
+                partial_output_names(),
+                std::string(PAGED_ATTENTION_V2_PARTIAL_CUDA_SOURCE));
+        case mlxcel::GpuKernelBackend::Rocm:
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+            // Issue #2068: the CUDA body ported to HIP, in
+            // `paged_attention_hip.h`.
+            return mlx::core::fast::hip_kernel(
+                "mlxcel_paged_attention_v2_partial",
+                partial_input_names(),
+                partial_output_names(),
+                std::string(PAGED_ATTENTION_V2_PARTIAL_HIP_SOURCE));
+#else
+            throw std::runtime_error(
+                "[paged_attention_decode_v2_partial] this build has no ROCm backend");
+#endif
+        case mlxcel::GpuKernelBackend::None:
+            break;
+    }
+    throw std::logic_error(
+        "[paged_attention_decode_v2_partial] no kernel body for this backend");
+}
+
+// Thread-safe lazy-initialised holder for the JIT-compiled body, one per
+// backend, using the `std::call_once` pattern of `paged_attention.cpp` /
+// `sparse_v_sdpa.cpp`: the server reaches first use concurrently from
+// per-request blocking workers, and `call_once` re-runs the initializer if MLX
+// device lookup throws. The holder names its backend instead of carrying a
+// `use_cuda` flag, whose false arm read as Metal on any third backend
+// (issue #2068).
 struct PagedV2PartialHolder {
     std::optional<mlx::core::fast::CustomKernelFunction> kernel;
     std::once_flag init_flag;
-    bool cuda;
+    mlxcel::GpuKernelBackend backend;
 
-    explicit PagedV2PartialHolder(bool use_cuda) : cuda(use_cuda) {}
+    explicit PagedV2PartialHolder(mlxcel::GpuKernelBackend b) : backend(b) {}
 
     mlx::core::fast::CustomKernelFunction& get() {
-        std::call_once(init_flag, [this] {
-            kernel = cuda
-                ? mlx::core::fast::cuda_kernel(
-                      "mlxcel_paged_attention_v2_partial",
-                      partial_input_names(),
-                      partial_output_names(),
-                      std::string(PAGED_ATTENTION_V2_PARTIAL_CUDA_SOURCE))
-                : mlx::core::fast::metal_kernel(
-                      "mlxcel_paged_attention_v2_partial",
-                      partial_input_names(),
-                      partial_output_names(),
-                      std::string(PAGED_ATTENTION_V2_PARTIAL_SOURCE));
-        });
+        std::call_once(init_flag, [this] { kernel = make_partial_kernel(backend); });
         return *kernel;
     }
 };
 
-inline PagedV2PartialHolder& get_partial_kernel(bool cuda) {
-    static PagedV2PartialHolder metal_holder(false);
-    static PagedV2PartialHolder cuda_holder(true);
-    return cuda ? cuda_holder : metal_holder;
+template <mlxcel::GpuKernelBackend Backend>
+PagedV2PartialHolder& get_partial_kernel() {
+    static PagedV2PartialHolder holder(Backend);
+    return holder;
 }
 
 
@@ -531,13 +563,14 @@ inline PagedV2PartialHolder& get_partial_kernel(bool cuda) {
 const mlxcel::KernelPorts& paged_v2_partial_ports() {
     static const mlxcel::KernelPorts ports{
         .metal = +[]() -> mlx::core::fast::CustomKernelFunction& {
-            return get_partial_kernel(false).get();
+            return get_partial_kernel<mlxcel::GpuKernelBackend::Metal>().get();
         },
         .cuda = +[]() -> mlx::core::fast::CustomKernelFunction& {
-            return get_partial_kernel(true).get();
+            return get_partial_kernel<mlxcel::GpuKernelBackend::Cuda>().get();
         },
-        // No HIP port yet (#1814).
-        .rocm = nullptr,
+        .rocm = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_partial_kernel<mlxcel::GpuKernelBackend::Rocm>().get();
+        },
     };
     return ports;
 }
@@ -606,6 +639,21 @@ std::vector<mlx::core::array> paged_attention_decode_v2_partial(
 
     const auto& q_shape = q.shape();       // [B, Hq, 1, Dim]
     const auto& kp_shape = k_pool.shape(); // [num_blocks, PageSize, Hkv, Dim]
+
+    // Shapes the kernel bodies cannot index are refused here, on every
+    // backend, instead of being read out of bounds (issue #2068).
+    // `v_pool` may hold fewer rows than `k_pool` (the MiniMax-M3 sparse launch
+    // reshapes both allocations to `[rows, 1, 1, D]`, and K carries the
+    // index-key side head), so axis 0 is not compared. The bodies address V
+    // with K's block size and head stride, so axes 1 to 3 must match.
+    if (q.ndim() != 4 || k_pool.ndim() != 4 || v_pool.ndim() != 4 ||
+        q_shape[2] != 1 || q_shape[3] < 1 || kp_shape[3] != q_shape[3] ||
+        kp_shape[1] < 1 || kp_shape[2] < 1 || v_pool.shape(1) != kp_shape[1] ||
+        v_pool.shape(2) != kp_shape[2] || v_pool.shape(3) != kp_shape[3]) {
+        throw std::invalid_argument(
+            "[paged_attention_decode_v2_partial] expects q [B, Hq, 1, D] and "
+            "k_pool, v_pool [blocks, page_size, heads, D]");
+    }
 
     int hq = q_shape[1];
     int dim = q_shape[3];

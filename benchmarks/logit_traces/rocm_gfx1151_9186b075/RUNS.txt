@@ -1,0 +1,2 @@
+rocm_gfx1151_9186b075_nemotron-3-nano-30b-a3b_default_w1ctx512    exit=0 rows=135 elapsed=222s (loader lines filtered)
+rocm_gfx1151_9186b075_nemotron-3-nano-30b-a3b_relu2_w1ctx512      exit=0 rows=135 elapsed=220s (loader lines filtered)

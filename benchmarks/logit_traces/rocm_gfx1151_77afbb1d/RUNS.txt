@@ -1,0 +1,8 @@
+rocm_gfx1151_77afbb1d_qwen3-30b-a3b_default_w8                     exit=0 rows=647 elapsed=92s
+rocm_gfx1151_77afbb1d_qwen3-30b-a3b_fused0_w8                      exit=0 rows=647 elapsed=89s
+rocm_gfx1151_77afbb1d_qwen3-30b-a3b_default_w1                     exit=0 rows=135 elapsed=13s
+rocm_gfx1151_77afbb1d_qwen3-30b-a3b_fused0_w1                      exit=0 rows=135 elapsed=7s
+rocm_gfx1151_77afbb1d_nemotron-3-nano-30b-a3b_default_w8           exit=0 rows=647 elapsed=100s (loader lines filtered)
+rocm_gfx1151_77afbb1d_nemotron-3-nano-30b-a3b_default_w1           exit=0 rows=135 elapsed=13s (loader lines filtered)
+rocm_gfx1151_77afbb1d_nemotron-3-nano-30b-a3b_default_w1ctx512     exit=0 rows=135 elapsed=not timed (loader lines filtered)
+rocm_gfx1151_77afbb1d_mixtral-8x7b-instruct_default_w1             exit=0 rows=135 elapsed=35s

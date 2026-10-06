@@ -111,7 +111,7 @@ fn falsy_env_restores_the_argpartition_filter_chain() {
     // that reason before the kill switch is ever consulted, so asserting the
     // kill-switch text there would be asserting something that cannot happen
     // (issue #1885). Both arms are checked rather than skipping one.
-    let expected = if mlxcel_core::custom_kernels_available() {
+    let expected = if mlxcel_core::sampling_rejection_backend_supported() {
         "MLXCEL_SAMPLING_REJECTION"
     } else {
         "no rejection-sampling kernel port"
@@ -136,7 +136,7 @@ fn falsy_env_restores_the_argpartition_filter_chain() {
         }
         Err(error) => {
             assert!(
-                !mlxcel_core::custom_kernels_available(),
+                !mlxcel_core::sampling_rejection_backend_supported(),
                 "the launcher refused on a backend that reports a kernel port: {error}"
             );
             let message = error.to_string();

@@ -38,15 +38,19 @@ enum class GpuKernelBackend {
   None = 0,
   Metal = 1,
   Cuda = 2,
-  // ROCm is a real GPU backend with no `fast::hip_kernel` ports yet (issue
-  // #1814). Callers treat it like `None` and take the graph fallback; they must
-  // not call `fast::cuda_kernel`.
+  // ROCm is a real GPU backend whose `fast::hip_kernel` ports arrive one
+  // kernel at a time (issue #1814). A family-wide gate
+  // (`custom_kernels_available()`) treats it like `None` and takes the graph
+  // fallback; a kernel with a HIP port is gated on its own predicate, which
+  // reads its port table (`has_kernel_port`). Nothing may call
+  // `fast::cuda_kernel` here.
   Rocm = 3,
 };
 
-// True when this backend has custom kernel ports, that is Metal or CUDA. This
-// is the condition the launchers gate on; it is deliberately not "a GPU is
-// present", which is what the old idiom conflated it with.
+// True when this backend has every custom kernel family ported, that is Metal
+// or CUDA. Family-wide gates use it; a kernel with per-backend ports answers
+// through `has_kernel_port` on its own table instead. It is deliberately not
+// "a GPU is present", which is what the old idiom conflated it with.
 constexpr bool custom_kernels_available_for(GpuKernelBackend backend) {
   return backend == GpuKernelBackend::Metal ||
       backend == GpuKernelBackend::Cuda;

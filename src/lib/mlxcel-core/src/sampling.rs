@@ -4316,7 +4316,8 @@ mod tests {
     /// decision boundary the sampler observes, and that has shown up
     /// intermittently in nightly `make verify-test` runs. The routed kernel
     /// cases therefore hold the exact support and keep every positive
-    /// probability within one f32 ULP of the saved row. The non-routed stock
+    /// probability within two f32 ULPs of the saved row (one until gfx1151
+    /// ran them, see the assertion). The non-routed stock
     /// chain case uses the same support-preserving snapshot helper with a
     /// two-ULP ceiling because local CPU validation observed a two-ULP drift
     /// on one low-probability entry while preserving the same filtered
@@ -4398,7 +4399,14 @@ mod tests {
                 .collect();
             let ctx = format!("T=1.0 fused_sample_probs drifted for top_k={top_k} top_p={top_p}");
             if routed {
-                assert_probs_match_snapshot_within_ulp(&got, &expected, 1, &ctx);
+                // 2, not 1. These rows are the graph's softmax over the
+                // kernel's support (`fused_sample_probs` never launches the
+                // kernel), and they first ran on ROCm when the rejection
+                // kernel got its HIP port (#2064): gfx1151 lands 2 ulp from
+                // the Metal capture at token 26 of the (40, 0.9) row, with the
+                // support unchanged. The same reassociation drift the stock
+                // case below allows for.
+                assert_probs_match_snapshot_within_ulp(&got, &expected, 2, &ctx);
             } else {
                 // 4, not 2. The bound is a drift tripwire on the fused softmax,
                 // not the correctness gate: the support set is asserted just

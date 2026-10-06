@@ -4514,15 +4514,77 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
 
 namespace rocm {
 
+// Location of flat batch element `b` in an index array, given the collapsed
+// batch shape of the gather and that array's strides over it. MLX broadcasts
+// lhs_indices and rhs_indices to a common batch shape without copying, so an
+// index array can have stride 0 along a broadcast axis and must not be read as
+// a flat [B] array.
+__device__ __forceinline__ int64_t gather_index_loc(
+    int64_t b,
+    const rocm::Shape& batch_shape,
+    const rocm::Strides& strides,
+    int batch_ndim) {
+  if (batch_ndim == 1) {
+    return b * strides.data_[0];
+  }
+  return elem_to_loc(b, batch_shape.data_, strides.data_, batch_ndim);
+}
+
+// The run of batch elements routed to `expert` in the sorted rhs indices
+// (sorted in the flat order of the broadcast batch, which is what right_sorted
+// promises): [run_start, run_end), empty when no element is routed there. Two
+// binary searches over the strided index array; called by one thread per
+// block.
+__device__ inline void find_sorted_expert_run(
+    const uint32_t* __restrict__ rhs_indices,
+    const rocm::Shape& batch_shape,
+    const rocm::Strides& rhs_idx_strides,
+    int batch_ndim,
+    int B,
+    uint32_t expert,
+    int& run_start,
+    int& run_end) {
+  auto rhs_at = [&](int b) {
+    return rhs_indices[gather_index_loc(
+        b, batch_shape, rhs_idx_strides, batch_ndim)];
+  };
+  // First index whose value is not below `value` (or above it, when
+  // `inclusive`).
+  auto bound = [&](uint32_t value, bool inclusive) {
+    int lo = 0, hi = B;
+    while (lo < hi) {
+      int mid = (lo + hi) >> 1;
+      uint32_t v = rhs_at(mid);
+      if (v < value || (inclusive && v == value))
+        lo = mid + 1;
+      else
+        hi = mid;
+    }
+    return lo;
+  };
+  run_start = bound(expert, false);
+  run_end = bound(expert, true);
+}
+
 // ======================================================================
-// GPU-only expert-batched gather QMV for sorted indices.
+// GPU-only expert-batched gather QMV for sorted indices (affine, 4 or 8 bits).
 //
-// Grid: (M, ceil(N/cols_per_block), max_unique_experts)
-// Each block in z-dimension finds its expert by binary-searching the sorted
-// rhs_indices array. No CPU-side run computation needed.
+// Grid: (M, ceil(N/cols_per_block), E). Block z handles expert z: it finds
+// that expert's run of the sorted rhs_indices with two binary searches (no
+// host-side run computation) and returns at once when the run is empty.
 //
-// The kernel reads the weight column ONCE per expert and iterates over all
-// batch elements assigned to that expert, amortizing weight memory traffic.
+// Each column of the block is handled by THREADS_PER_COL lanes. A lane holds
+// the packed weights of its K slice for one 32-bit word at a time, with that
+// group's scale and bias, and applies them to TOKENS rows of the run before
+// loading the next word, so the expert's weights are read once per TOKENS
+// rows instead of once per row; the lanes reduce once per row at the end.
+//
+// mlxcelverse: the index arrays are read through the gather's batch shape and
+// strides (gather_index_loc), as the launched per-row gather kernels do. The kernel
+// used to read lhs_indices[b] and rhs_indices[b] as flat arrays, which is
+// wrong whenever MLX broadcasts the indices (for example x [T, 1, K] with
+// sorted rhs_indices [T, 1], a [T, T] batch), and read past both arrays
+// (LOCAL_FIXES.md item 9).
 // ======================================================================
 template <
     typename T,
@@ -4538,6 +4600,10 @@ __global__ void __launch_bounds__(1024) gather_qmv_expert_batched_kernel(
     const ScaleT* __restrict__ biases,
     const uint32_t* __restrict__ lhs_indices,
     const uint32_t* __restrict__ rhs_indices,  // SORTED
+    const rocm::Shape batch_shape,
+    const rocm::Strides lhs_idx_strides,
+    const rocm::Strides rhs_idx_strides,
+    int batch_ndim,
     T* __restrict__ out,
     int B,
     int M,
@@ -4547,199 +4613,112 @@ __global__ void __launch_bounds__(1024) gather_qmv_expert_batched_kernel(
     bool has_bias,
     bool implicit_lhs,
     int64_t implicit_x_batch_stride) {
+  static_assert(AFFINE && (BITS == 4 || BITS == 8),
+                "expert-batched gather qmv is affine 4/8-bit only");
+  // Values per packed 32-bit word, and rows sharing one load of a word.
+  constexpr int VALS = 32 / BITS;
+  constexpr int TOKENS = 4;
+  static_assert(GROUP_SIZE % VALS == 0, "a word must not straddle groups");
+
   const int lane = threadIdx.x;
   const int warp_idx = threadIdx.y;
   const int col = blockIdx.y * blockDim.y + warp_idx;
   const int row = blockIdx.x;
-  const int expert_slot = blockIdx.z;  // which unique expert this block handles
+  const uint32_t expert_id = blockIdx.z;
 
-  if (row >= M || col >= N) return;
-
-  // Find this expert's token range using the expert_slot as a run index.
-  // Since rhs_indices is sorted, run boundaries are where values change.
-  // We use a parallel scan: all threads cooperate to count unique experts
-  // up to expert_slot, then binary-search for the run boundaries.
-  //
-  // Fast path: lane 0 does a boundary skip using binary search.
-  int run_start = 0, run_end = 0;
-  uint32_t expert_id = 0;
-
-  if (lane == 0 && warp_idx == 0) {
-    // Skip to the expert_slot-th unique expert by jumping over run boundaries.
-    // Each boundary is where rhs_indices[i] != rhs_indices[i-1].
-    int pos = 0;
-    for (int skip = 0; skip < expert_slot && pos < B; ++skip) {
-      // Binary search for end of current run (first index where value differs)
-      uint32_t cur_val = rhs_indices[pos];
-      int lo = pos + 1, hi = B;
-      while (lo < hi) {
-        int mid = (lo + hi) >> 1;
-        if (rhs_indices[mid] == cur_val) lo = mid + 1;
-        else hi = mid;
-      }
-      pos = lo;
-    }
-    if (pos < B) {
-      run_start = pos;
-      expert_id = rhs_indices[pos];
-      // Binary search for end of this expert's run
-      int lo = pos + 1, hi = B;
-      while (lo < hi) {
-        int mid = (lo + hi) >> 1;
-        if (rhs_indices[mid] == expert_id) lo = mid + 1;
-        else hi = mid;
-      }
-      run_end = lo;
-    }
-  }
-
-  // Broadcast via shared memory
+  // One thread finds this block's run and shares it through LDS. Every thread
+  // reaches the barrier before any bounds exit.
   __shared__ int s_run_start, s_run_end;
-  __shared__ uint32_t s_expert_id;
   if (lane == 0 && warp_idx == 0) {
-    s_run_start = run_start;
-    s_run_end = run_end;
-    s_expert_id = expert_id;
+    int rs, re;
+    find_sorted_expert_run(
+        rhs_indices, batch_shape, rhs_idx_strides, batch_ndim, B, expert_id,
+        rs, re);
+    s_run_start = rs;
+    s_run_end = re;
   }
   __syncthreads();
-  run_start = s_run_start;
-  run_end = s_run_end;
-  expert_id = s_expert_id;
+  const int run_start = s_run_start;
+  const int run_end = s_run_end;
 
-  if (run_end <= run_start) return;  // this block has no work
+  if (row >= M || col >= N) return;
+  if (run_end <= run_start) return;  // no row is routed to this expert
   if (expert_id >= static_cast<uint32_t>(E)) return;
 
-  // Weight pointers for this expert (loaded ONCE, reused for all tokens in run)
-  const int num_groups = (K + GROUP_SIZE - 1) / GROUP_SIZE;
-  const int row_bytes = (K * BITS + 7) / 8;
-  int64_t w_expert_stride = static_cast<int64_t>(N) * row_bytes;
-  int64_t sb_expert_stride = static_cast<int64_t>(N) * num_groups;
-
-  const uint8_t* w_row = w + static_cast<int64_t>(expert_id) * w_expert_stride
-                        + static_cast<int64_t>(col) * row_bytes;
-  const ScaleT* scales_row = scales + static_cast<int64_t>(expert_id) * sb_expert_stride
-                            + static_cast<int64_t>(col) * num_groups;
+  const int num_groups = K / GROUP_SIZE;  // MLX requires K % GROUP_SIZE == 0
+  const int row_bytes = K * BITS / 8;
+  const int64_t w_expert_stride = static_cast<int64_t>(N) * row_bytes;
+  const int64_t sb_expert_stride = static_cast<int64_t>(N) * num_groups;
+  const uint8_t* w_row = w + static_cast<int64_t>(expert_id) * w_expert_stride +
+      static_cast<int64_t>(col) * row_bytes;
+  const ScaleT* scales_row = scales +
+      static_cast<int64_t>(expert_id) * sb_expert_stride +
+      static_cast<int64_t>(col) * num_groups;
   const ScaleT* biases_row = has_bias
-      ? (biases + static_cast<int64_t>(expert_id) * sb_expert_stride
-                + static_cast<int64_t>(col) * num_groups)
+      ? (biases + static_cast<int64_t>(expert_id) * sb_expert_stride +
+         static_cast<int64_t>(col) * num_groups)
       : nullptr;
 
-  // Process each batch element in the run
-  int64_t x_batch_stride = static_cast<int64_t>(M) * K;
-  for (int b = run_start; b < run_end; ++b) {
-    uint32_t lhs_idx = implicit_lhs ? 0u : lhs_indices[b];
-    int64_t x_offset = implicit_lhs
-        ? (static_cast<int64_t>(b) * implicit_x_batch_stride)
-        : (static_cast<int64_t>(lhs_idx) * x_batch_stride);
-    const T* x_row = x + x_offset + static_cast<int64_t>(row) * K;
+  const int64_t x_batch_stride = static_cast<int64_t>(M) * K;
+  auto x_row_of = [&](int b) {
+    int64_t x_offset;
+    if (implicit_lhs) {
+      x_offset = static_cast<int64_t>(b) * implicit_x_batch_stride;
+    } else {
+      uint32_t lhs_idx = lhs_indices[gather_index_loc(
+          b, batch_shape, lhs_idx_strides, batch_ndim)];
+      x_offset = static_cast<int64_t>(lhs_idx) * x_batch_stride;
+    }
+    return x + x_offset + static_cast<int64_t>(row) * K;
+  };
 
-    float acc = 0.0f;
+  for (int b0 = run_start; b0 < run_end; b0 += TOKENS) {
+    const int count = min(TOKENS, run_end - b0);
+    const T* x_rows[TOKENS];
+#pragma unroll
+    for (int t = 0; t < TOKENS; ++t) {
+      // Rows past the run repeat the first one; their sums are not stored.
+      x_rows[t] = x_row_of(t < count ? b0 + t : b0);
+    }
+    float acc[TOKENS];
+#pragma unroll
+    for (int t = 0; t < TOKENS; ++t) acc[t] = 0.0f;
 
-    for (int g = 0; g < num_groups; ++g) {
-      int k_start = g * GROUP_SIZE;
-      int k_end = min(k_start + GROUP_SIZE, K);
-
-      float scale = load_scale_value<ScaleT, GROUP_SIZE, AFFINE>(scales_row[g]);
-      float bias_val = has_bias ? static_cast<float>(biases_row[g]) : 0.0f;
-
-      if constexpr (AFFINE) {
-        float qx_acc = 0.0f;
-        float x_group_sum = 0.0f;
-
-        if constexpr (BITS == 4) {
-          int k_local = lane * 8;
-          int step = THREADS_PER_COL * 8;
-          for (; k_start + k_local + 7 < k_end; k_local += step) {
-            int k = k_start + k_local;
-            uint32_t w_packed = *reinterpret_cast<const uint32_t*>(&w_row[k / 2]);
-            float w0 = static_cast<float>(w_packed & 0xF);
-            float w1 = static_cast<float>((w_packed >> 4) & 0xF);
-            float w2 = static_cast<float>((w_packed >> 8) & 0xF);
-            float w3 = static_cast<float>((w_packed >> 12) & 0xF);
-            float w4 = static_cast<float>((w_packed >> 16) & 0xF);
-            float w5 = static_cast<float>((w_packed >> 20) & 0xF);
-            float w6 = static_cast<float>((w_packed >> 24) & 0xF);
-            float w7 = static_cast<float>((w_packed >> 28) & 0xF);
-            float x0 = static_cast<float>(x_row[k]);
-            float x1 = static_cast<float>(x_row[k + 1]);
-            float x2 = static_cast<float>(x_row[k + 2]);
-            float x3 = static_cast<float>(x_row[k + 3]);
-            float x4 = static_cast<float>(x_row[k + 4]);
-            float x5 = static_cast<float>(x_row[k + 5]);
-            float x6 = static_cast<float>(x_row[k + 6]);
-            float x7 = static_cast<float>(x_row[k + 7]);
-            qx_acc = fmaf(x0, w0, qx_acc);
-            qx_acc = fmaf(x1, w1, qx_acc);
-            qx_acc = fmaf(x2, w2, qx_acc);
-            qx_acc = fmaf(x3, w3, qx_acc);
-            qx_acc = fmaf(x4, w4, qx_acc);
-            qx_acc = fmaf(x5, w5, qx_acc);
-            qx_acc = fmaf(x6, w6, qx_acc);
-            qx_acc = fmaf(x7, w7, qx_acc);
-            if (has_bias)
-              x_group_sum += x0 + x1 + x2 + x3 + x4 + x5 + x6 + x7;
-          }
-          for (; k_start + k_local < k_end; k_local++) {
-            int k = k_start + k_local;
-            float x_val = static_cast<float>(x_row[k]);
-            uint8_t quant_val = unpack_packed_value_fast<BITS>(w_row, k, row_bytes);
-            qx_acc = fmaf(x_val, static_cast<float>(quant_val), qx_acc);
-            if (has_bias) x_group_sum += x_val;
-          }
-        } else if constexpr (BITS == 8) {
-          int k_local = lane * 4;
-          int step = THREADS_PER_COL * 4;
-          for (; k_start + k_local + 3 < k_end; k_local += step) {
-            int k = k_start + k_local;
-            uint32_t w_packed = *reinterpret_cast<const uint32_t*>(&w_row[k]);
-            float w0 = static_cast<float>(w_packed & 0xFF);
-            float w1 = static_cast<float>((w_packed >> 8) & 0xFF);
-            float w2 = static_cast<float>((w_packed >> 16) & 0xFF);
-            float w3 = static_cast<float>((w_packed >> 24) & 0xFF);
-            float x0 = static_cast<float>(x_row[k]);
-            float x1 = static_cast<float>(x_row[k + 1]);
-            float x2 = static_cast<float>(x_row[k + 2]);
-            float x3 = static_cast<float>(x_row[k + 3]);
-            qx_acc = fmaf(x0, w0, qx_acc);
-            qx_acc = fmaf(x1, w1, qx_acc);
-            qx_acc = fmaf(x2, w2, qx_acc);
-            qx_acc = fmaf(x3, w3, qx_acc);
-            if (has_bias) x_group_sum += x0 + x1 + x2 + x3;
-          }
-          for (; k_start + k_local < k_end; k_local++) {
-            int k = k_start + k_local;
-            float x_val = static_cast<float>(x_row[k]);
-            float w_val = static_cast<float>(w_row[k]);
-            qx_acc = fmaf(x_val, w_val, qx_acc);
-            if (has_bias) x_group_sum += x_val;
-          }
-        } else {
-          for (int k_local = lane; k_start + k_local < k_end; k_local += THREADS_PER_COL) {
-            int k = k_start + k_local;
-            float x_val = static_cast<float>(x_row[k]);
-            uint8_t quant_val = unpack_packed_value_fast<BITS>(w_row, k, row_bytes);
-            qx_acc = fmaf(x_val, static_cast<float>(quant_val), qx_acc);
-            if (has_bias) x_group_sum += x_val;
-          }
+    for (int k = lane * VALS; k < K; k += THREADS_PER_COL * VALS) {
+      const int g = k / GROUP_SIZE;
+      const float scale =
+          load_scale_value<ScaleT, GROUP_SIZE, AFFINE>(scales_row[g]);
+      const float bias_val =
+          has_bias ? static_cast<float>(biases_row[g]) : 0.0f;
+      const uint32_t packed =
+          *reinterpret_cast<const uint32_t*>(&w_row[k * BITS / 8]);
+      float wv[VALS];
+#pragma unroll
+      for (int j = 0; j < VALS; ++j) {
+        wv[j] = static_cast<float>((packed >> (BITS * j)) & ((1u << BITS) - 1));
+      }
+#pragma unroll
+      for (int t = 0; t < TOKENS; ++t) {
+        const T* xr = x_rows[t] + k;
+        float qx = 0.0f;
+        float xs = 0.0f;
+#pragma unroll
+        for (int j = 0; j < VALS; ++j) {
+          const float xv = static_cast<float>(xr[j]);
+          qx = fmaf(xv, wv[j], qx);
+          xs += xv;
         }
-
-        qx_acc = subgroup_reduce_sum_qmm<THREADS_PER_COL>(qx_acc);
-        x_group_sum = subgroup_reduce_sum_qmm<THREADS_PER_COL>(x_group_sum);
-        acc += scale * qx_acc + bias_val * x_group_sum;
-      } else {
-        float qx_acc = 0.0f;
-        for (int k_local = lane; k_start + k_local < k_end; k_local += THREADS_PER_COL) {
-          int k = k_start + k_local;
-          float x_val = static_cast<float>(x_row[k]);
-          uint8_t quant_val = unpack_packed_value_fast<BITS>(w_row, k, row_bytes);
-          qx_acc = fmaf(x_val, dequantize_value<BITS, false>(quant_val, 1.0f, 0.0f), qx_acc);
-        }
-        acc += scale * subgroup_reduce_sum_qmm<THREADS_PER_COL>(qx_acc);
+        acc[t] = fmaf(scale, qx, fmaf(bias_val, xs, acc[t]));
       }
     }
 
-    if (lane == 0) {
-      out[static_cast<int64_t>(b) * M * N + static_cast<int64_t>(row) * N + col] = static_cast<T>(acc);
+#pragma unroll
+    for (int t = 0; t < TOKENS; ++t) {
+      const float sum = subgroup_reduce_sum_qmm<THREADS_PER_COL>(acc[t]);
+      if (lane == 0 && t < count) {
+        out[static_cast<int64_t>(b0 + t) * M * N +
+            static_cast<int64_t>(row) * N + col] = static_cast<T>(sum);
+      }
     }
   }
 }
@@ -4748,6 +4727,9 @@ __global__ void __launch_bounds__(1024) gather_qmv_expert_batched_kernel(
 // quantized to int8 (xpack even/odd + per-group scale dxq + sum sxq) by a
 // prepass; expert weight nibbles fed to v_dot4_i32_iu8. Same run-find as the
 // fp32 expert kernel; only the inner matmul changes. THREADS_PER_COL = 32.
+// Not launched from GatherQMM::eval_gpu; it takes the same strided index reads
+// as gather_qmv_expert_batched_kernel so it cannot regain that defect if it
+// is wired up.
 template <typename T, typename ScaleT, int GROUP_SIZE>
 __global__ void __launch_bounds__(1024) gather_qmv_idot_expert_batched_kernel(
     const int32_t* __restrict__ xpack,
@@ -4758,6 +4740,10 @@ __global__ void __launch_bounds__(1024) gather_qmv_idot_expert_batched_kernel(
     const float* __restrict__ sxq,
     const uint32_t* __restrict__ lhs_indices,
     const uint32_t* __restrict__ rhs_indices,
+    const rocm::Shape batch_shape,
+    const rocm::Strides lhs_idx_strides,
+    const rocm::Strides rhs_idx_strides,
+    int batch_ndim,
     T* __restrict__ out,
     int B,
     int M,
@@ -4771,47 +4757,22 @@ __global__ void __launch_bounds__(1024) gather_qmv_idot_expert_batched_kernel(
   const int warp_idx = threadIdx.y;
   const int col = blockIdx.y * blockDim.y + warp_idx;
   const int row = blockIdx.x;
-  const int expert_slot = blockIdx.z;
-  if (row >= M || col >= N)
-    return;
+  const uint32_t expert_id = blockIdx.z;  // grid z = E, as for the fp kernel
 
-  int run_start = 0, run_end = 0;
-  uint32_t expert_id = 0;
-  if (lane == 0 && warp_idx == 0) {
-    int pos = 0;
-    for (int skip = 0; skip < expert_slot && pos < B; ++skip) {
-      uint32_t cur_val = rhs_indices[pos];
-      int lo = pos + 1, hi = B;
-      while (lo < hi) {
-        int mid = (lo + hi) >> 1;
-        if (rhs_indices[mid] == cur_val) lo = mid + 1;
-        else hi = mid;
-      }
-      pos = lo;
-    }
-    if (pos < B) {
-      run_start = pos;
-      expert_id = rhs_indices[pos];
-      int lo = pos + 1, hi = B;
-      while (lo < hi) {
-        int mid = (lo + hi) >> 1;
-        if (rhs_indices[mid] == expert_id) lo = mid + 1;
-        else hi = mid;
-      }
-      run_end = lo;
-    }
-  }
   __shared__ int s_run_start, s_run_end;
-  __shared__ uint32_t s_expert_id;
   if (lane == 0 && warp_idx == 0) {
-    s_run_start = run_start;
-    s_run_end = run_end;
-    s_expert_id = expert_id;
+    int rs, re;
+    find_sorted_expert_run(
+        rhs_indices, batch_shape, rhs_idx_strides, batch_ndim, B, expert_id,
+        rs, re);
+    s_run_start = rs;
+    s_run_end = re;
   }
   __syncthreads();
-  run_start = s_run_start;
-  run_end = s_run_end;
-  expert_id = s_expert_id;
+  const int run_start = s_run_start;
+  const int run_end = s_run_end;
+  if (row >= M || col >= N)
+    return;
   if (run_end <= run_start)
     return;
   if (expert_id >= static_cast<uint32_t>(E))
@@ -4836,7 +4797,10 @@ __global__ void __launch_bounds__(1024) gather_qmv_idot_expert_batched_kernel(
 
   int64_t x_batch_stride = static_cast<int64_t>(M) * K;
   for (int b = run_start; b < run_end; ++b) {
-    uint32_t lhs_idx = implicit_lhs ? 0u : lhs_indices[b];
+    uint32_t lhs_idx = implicit_lhs
+        ? 0u
+        : lhs_indices[gather_index_loc(
+              b, batch_shape, lhs_idx_strides, batch_ndim)];
     int64_t x_offset = implicit_lhs
         ? (static_cast<int64_t>(b) * implicit_x_batch_stride)
         : (static_cast<int64_t>(lhs_idx) * x_batch_stride);
@@ -6216,27 +6180,29 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
   void* out_ptr = gpu_ptr<void>(out);
 
   // GPU-only expert-batched kernel: when indices are sorted, each block finds
-  // its expert's token range on-GPU and processes them together. Weight data
-  // loaded once per expert column, reused across all tokens for that expert.
-  // max_unique_experts = min(B, E) is an upper bound on unique experts.
-  // Expert-batched kernel: beneficial when few experts have many tokens each.
-  // For high-expert-count models (E=512, top_k=10), most runs have 1-4 tokens,
-  // so the per-block run-finding overhead outweighs the shared weight benefit.
-  // Enable only when B/E is high enough (e.g., low expert count with long prompt).
+  // its expert's token range on-GPU and processes them together, reading the
+  // expert's weights once per group of rows instead of once per row.
+  // Beneficial when few experts have many tokens each. For high-expert-count
+  // models (E=512, top_k=10), most runs have 1-4 tokens, so it is limited to
+  // E <= 64 with at least 4 rows per expert on average (a prefill).
   bool use_expert_batched = transpose_ && right_sorted_ && (M == 1) &&
       (B >= 64) && (E > 0) && (E <= 64) && (B / E >= 4) &&
       mode_ == QuantizationMode::Affine &&
-      x.dtype() == bfloat16 && group_size_ == 64 && (bits_ == 4 || bits_ == 8);
-  // mlxcelverse: opt-in only. On gfx1151 this path returns wrong results for
-  // bf16 activations with sorted rhs indices (differs from the unsorted path by
-  // a relative error above 1.0), which models with <= 64 experts hit during
-  // prefill. Set MLX_ROCM_GATHER_QMV_EXPERT_BATCHED=1 to force it for debugging.
+      (x.dtype() == bfloat16 || x.dtype() == float16) && group_size_ == 64 &&
+      (bits_ == 4 || bits_ == 8);
+  // mlxcelverse: on by default since lablup/mlxcel#2066, which fixed its
+  // strided index reads (LOCAL_FIXES.md item 9) and measured 512-token prefill
+  // on gfx1151 at 1.7x (granite-4.0-h-tiny, bf16) and 4.8x (Mixtral-8x7B,
+  // f16) the per-row kernels. MLX_ROCM_GATHER_QMV_EXPERT_BATCHED=0 turns it
+  // off; the variable is read on every call.
   use_expert_batched = use_expert_batched &&
-      parse_warp_kernel_env("MLX_ROCM_GATHER_QMV_EXPERT_BATCHED", false);
+      parse_warp_kernel_env("MLX_ROCM_GATHER_QMV_EXPERT_BATCHED", true);
 
   if (use_expert_batched) {
-    int max_unique_experts = std::min(B, E);
-    int eb_threads_per_col = select_qmv_threads_per_col(K, N, bits_, max_unique_experts);
+    // The kernel is instantiated with THREADS_PER_COL = 16; the block's x
+    // dimension must match it. Grid z is one block row per expert; experts
+    // with no routed rows return after their run search.
+    constexpr int eb_threads_per_col = 16;
     int eb_cols_per_block = select_qmv_cols_per_block(K, N, bits_);
     int eb_max_cpb = rocm::kMaxThreadsPerBlock / eb_threads_per_col;
     while (eb_cols_per_block > eb_max_cpb) eb_cols_per_block /= 2;
@@ -6244,26 +6210,39 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
       eb_cols_per_block /= 2;
 
     dim3 eb_block(eb_threads_per_col, eb_cols_per_block);
-    dim3 eb_grid(M, (N + eb_cols_per_block - 1) / eb_cols_per_block, max_unique_experts);
+    dim3 eb_grid(M, (N + eb_cols_per_block - 1) / eb_cols_per_block, E);
 
     {
-      auto launch_eb = [&](auto bits_tag) {
+      // mlxcelverse: f16 shares the kernel (it is templated on the element
+      // type), as item 12 did for the warp-shared kernel: f16 checkpoints such
+      // as Mixtral-8x7B-4bit spent 99% of prefill in that per-row kernel.
+      auto launch_eb = [&](auto type_tag, auto bits_tag) {
+        using T = typename decltype(type_tag)::type;
         constexpr int BITS = decltype(bits_tag)::value;
         enc.add_kernel_node(
-            &rocm::gather_qmv_expert_batched_kernel<
-                hip_bfloat16, hip_bfloat16, BITS, 64, true, 16>,
+            &rocm::gather_qmv_expert_batched_kernel<T, T, BITS, 64, true, 16>,
             eb_grid, eb_block, 0u,
-            (const hip_bfloat16*)x_ptr,
+            (const T*)x_ptr,
             (const uint8_t*)w_ptr,
-            (const hip_bfloat16*)scales_ptr,
-            (const hip_bfloat16*)biases_ptr,
+            (const T*)scales_ptr,
+            (const T*)biases_ptr,
             li_ptr, ri_ptr,
-            (hip_bfloat16*)out_ptr,
+            batch_shape_param, lhs_idx_strides_param, rhs_idx_strides_param,
+            batch_ndim,
+            (T*)out_ptr,
             B, M, N, K, E, has_bias,
             use_sorted_rhs_schedule, implicit_x_batch_stride);
       };
-      if (bits_ == 4) launch_eb(std::integral_constant<int, 4>{});
-      else launch_eb(std::integral_constant<int, 8>{});
+      auto launch_eb_bits = [&](auto type_tag) {
+        if (bits_ == 4)
+          launch_eb(type_tag, std::integral_constant<int, 4>{});
+        else
+          launch_eb(type_tag, std::integral_constant<int, 8>{});
+      };
+      if (x.dtype() == float16)
+        launch_eb_bits(local_type_identity<__half>{});
+      else
+        launch_eb_bits(local_type_identity<hip_bfloat16>{});
     }
     return;
   }

@@ -64,8 +64,9 @@ fn generation_error_to_response(err: anyhow::Error) -> ErrorResponse {
 }
 
 use super::chat::{
-    build_generate_options_with_live, build_prompt_cache_request_context, parse_priority_header,
-    validate_top_n_sigma, validate_typical_p, validate_xtc_params,
+    build_generate_options_with_live, build_prompt_cache_request_context,
+    is_prompt_primed_open_thinking, parse_priority_header, validate_top_n_sigma,
+    validate_typical_p, validate_xtc_params,
 };
 use crate::server::request_options::{
     chat_carries_loop_amplifier, resolve_server_max_tokens_with_live,
@@ -242,9 +243,21 @@ async fn non_stream_create_response(
 
     let model_id = state.display_model_id().to_string();
     let prompt_cache_enabled = state.prompt_cache.is_some();
+    // Reasoning re-injection for content-only history (#2110, #2118), as on
+    // `/v1/chat/completions`: only the render sees the filled copy; the cache
+    // context, tool parsing and the record read the translated request as the
+    // client sent it. A `reasoning` input item maps to `Message.reasoning`, so
+    // client-sent reasoning still wins.
+    let echo_scope =
+        crate::server::reasoning_echo::chat_scope(&state, &live, &translated.chat_request);
+    let render_request = crate::server::reasoning_echo::render_request(
+        &state,
+        echo_scope.as_ref(),
+        &translated.chat_request,
+    );
     let prepared = prepare_chat_request_with_cache(
         &state.chat_template,
-        &translated.chat_request,
+        &render_request,
         live.chat_template_kwargs.as_ref(),
         prompt_cache_enabled,
         state.should_render_history_boundary_snapshot(),
@@ -262,6 +275,8 @@ async fn non_stream_create_response(
     // translator maps the tool fields onto the chat request. Structured output
     // alone no longer arms the family default.
     let amplified = chat_carries_loop_amplifier(&translated.chat_request);
+    let primed_open_thinking =
+        is_prompt_primed_open_thinking(&state.thinking_markers, &prepared.prompt);
     let mut options = build_generate_options_with_live(
         &translated.chat_request.params,
         &state.config,
@@ -279,6 +294,11 @@ async fn non_stream_create_response(
     // native renderer closes. `None` for every template-rendered request.
     options.pre_rendered_prompt_tokens = prepared.prompt_token_ids.take();
     options.reasoning_budget = budget_override;
+    // The prompt may already leave generation inside an open thinking block
+    // (a template that primes `<think>\n`, #2123): the scheduler's
+    // `ThinkingState` then counts reasoning from the first token, as on
+    // `/v1/chat/completions`.
+    options.thinking_enter_block_on_start = primed_open_thinking;
     options.structured = structured;
     // Wire the cross-request prompt-prefix KV cache (epic #116) into the
     // Responses path, mirroring the chat-completions handler. Built after
@@ -343,6 +363,18 @@ async fn non_stream_create_response(
         None
     };
     let (visible_text, _reasoning_text) = split_reasoning(&result.text, parsed_tools.as_ref());
+    // Remember the `reasoning` item this reply carries for a follow-up that
+    // echoes only the message item (#2118). A tool-calling turn is echoed back
+    // with its function calls, which the store never fills.
+    if !parsed_tools.as_ref().is_some_and(|p| p.has_tool_calls()) {
+        crate::server::reasoning_echo::record_reply(
+            &state,
+            echo_scope.as_ref(),
+            &translated.chat_request.messages,
+            &visible_text,
+            _reasoning_text.as_deref(),
+        );
+    }
 
     let completed_at = chrono::Utc::now().timestamp() as f64;
     let response = build_response_object(OutboundContext {
@@ -392,9 +424,21 @@ async fn stream_create_response(
 
     let model_id = state.display_model_id().to_string();
     let prompt_cache_enabled = state.prompt_cache.is_some();
+    // Reasoning re-injection for content-only history (#2110, #2118), as on
+    // `/v1/chat/completions`: only the render sees the filled copy; the cache
+    // context, tool parsing and the record read the translated request as the
+    // client sent it. A `reasoning` input item maps to `Message.reasoning`, so
+    // client-sent reasoning still wins.
+    let echo_scope =
+        crate::server::reasoning_echo::chat_scope(&state, &live, &translated.chat_request);
+    let render_request = crate::server::reasoning_echo::render_request(
+        &state,
+        echo_scope.as_ref(),
+        &translated.chat_request,
+    );
     let prepared = prepare_chat_request_with_cache(
         &state.chat_template,
-        &translated.chat_request,
+        &render_request,
         live.chat_template_kwargs.as_ref(),
         prompt_cache_enabled,
         state.should_render_history_boundary_snapshot(),
@@ -412,6 +456,8 @@ async fn stream_create_response(
     // translator maps the tool fields onto the chat request. Structured output
     // alone no longer arms the family default.
     let amplified = chat_carries_loop_amplifier(&translated.chat_request);
+    let primed_open_thinking =
+        is_prompt_primed_open_thinking(&state.thinking_markers, &prepared.prompt);
     let mut options = build_generate_options_with_live(
         &translated.chat_request.params,
         &state.config,
@@ -429,6 +475,11 @@ async fn stream_create_response(
     // native renderer closes. `None` for every template-rendered request.
     options.pre_rendered_prompt_tokens = prepared.prompt_token_ids.take();
     options.reasoning_budget = budget_override;
+    // The prompt may already leave generation inside an open thinking block
+    // (a template that primes `<think>\n`, #2123): the scheduler's
+    // `ThinkingState` then counts reasoning from the first token, as on
+    // `/v1/chat/completions`.
+    options.thinking_enter_block_on_start = primed_open_thinking;
     options.structured = structured;
     // Wire the prompt-prefix KV cache (epic #116) into the streaming Responses
     // path too, before `options`/`translated` move into the spawned task.
@@ -533,7 +584,14 @@ async fn stream_create_response(
         );
         let accumulated_raw = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let acc_clone = accumulated_raw.clone();
-        let stream_filter = std::sync::Arc::new(std::sync::Mutex::new(StreamFilter::new()));
+        // A primed prompt starts the filter inside the thinking block, so the
+        // close-only trace streams as reasoning rather than answer text
+        // (#2123), matching the non-streaming split.
+        let stream_filter = std::sync::Arc::new(std::sync::Mutex::new(if primed_open_thinking {
+            StreamFilter::new_primed_open_thinking()
+        } else {
+            StreamFilter::new()
+        }));
         let filter_for_callback = stream_filter.clone();
         let sender_clone = sender.clone();
         let emitter_arc = std::sync::Arc::new(std::sync::Mutex::new(emitter));
@@ -874,6 +932,19 @@ async fn stream_create_response(
         }
 
         let reasoning_text_for_response = em.completed_reasoning_text();
+
+        // Remember the streamed `reasoning` item for a follow-up that echoes
+        // only the message item (#2118), from exactly the text the stream
+        // delivered. Skipped for a tool-calling turn, as above.
+        if !parsed_tools.as_ref().is_some_and(|p| p.has_tool_calls()) {
+            crate::server::reasoning_echo::record_reply(
+                &state_for_task,
+                echo_scope.as_ref(),
+                &translated_for_task.chat_request.messages,
+                &message_text,
+                reasoning_text_for_response.as_deref(),
+            );
+        }
 
         if let Some(parsed) = parsed_tools.as_ref() {
             for call in &parsed.tool_calls {

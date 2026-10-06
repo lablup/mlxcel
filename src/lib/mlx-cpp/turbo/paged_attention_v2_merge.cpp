@@ -24,6 +24,7 @@
 #include <stdexcept>
 #include "gpu_backend.h"
 #include "kernel_port.h"
+#include "paged_attention_hip.h"
 
 #include <mlx/fast.h>
 #include <mlx/ops.h>
@@ -154,35 +155,65 @@ const std::vector<std::string>& merge_output_names() {
     return names;
 }
 
+// Compiles the merge body for one backend. Reached only through a port table
+// entry, so `backend` is always a backend that entry names; the `None` arm and
+// the non-ROCm-build throw keep the switch exhaustive and are unreachable.
+mlx::core::fast::CustomKernelFunction make_merge_kernel(
+    mlxcel::GpuKernelBackend backend) {
+    switch (backend) {
+        case mlxcel::GpuKernelBackend::Metal:
+            return mlx::core::fast::metal_kernel(
+                "mlxcel_paged_attention_merge_states",
+                merge_input_names(),
+                merge_output_names(),
+                std::string(PAGED_ATTENTION_MERGE_SOURCE));
+        case mlxcel::GpuKernelBackend::Cuda:
+            return mlx::core::fast::cuda_kernel(
+                "mlxcel_paged_attention_merge_states",
+                merge_input_names(),
+                merge_output_names(),
+                std::string(PAGED_ATTENTION_MERGE_CUDA_SOURCE));
+        case mlxcel::GpuKernelBackend::Rocm:
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+            // Issue #2068: the CUDA body ported to HIP, in
+            // `paged_attention_hip.h`.
+            return mlx::core::fast::hip_kernel(
+                "mlxcel_paged_attention_merge_states",
+                merge_input_names(),
+                merge_output_names(),
+                std::string(PAGED_ATTENTION_MERGE_HIP_SOURCE));
+#else
+            throw std::runtime_error(
+                "[paged_attention_merge_states] this build has no ROCm backend");
+#endif
+        case mlxcel::GpuKernelBackend::None:
+            break;
+    }
+    throw std::logic_error(
+        "[paged_attention_merge_states] no kernel body for this backend");
+}
+
+// One lazily compiled holder per backend, under the `std::call_once` contract
+// of `paged_attention_v2.cpp`. It names its backend instead of carrying a
+// `use_cuda` flag, whose false arm read as Metal on any third backend
+// (issue #2068).
 struct PagedMergeHolder {
     std::optional<mlx::core::fast::CustomKernelFunction> kernel;
     std::once_flag init_flag;
-    bool cuda;
+    mlxcel::GpuKernelBackend backend;
 
-    explicit PagedMergeHolder(bool use_cuda) : cuda(use_cuda) {}
+    explicit PagedMergeHolder(mlxcel::GpuKernelBackend b) : backend(b) {}
 
     mlx::core::fast::CustomKernelFunction& get() {
-        std::call_once(init_flag, [this] {
-            kernel = cuda
-                ? mlx::core::fast::cuda_kernel(
-                      "mlxcel_paged_attention_merge_states",
-                      merge_input_names(),
-                      merge_output_names(),
-                      std::string(PAGED_ATTENTION_MERGE_CUDA_SOURCE))
-                : mlx::core::fast::metal_kernel(
-                      "mlxcel_paged_attention_merge_states",
-                      merge_input_names(),
-                      merge_output_names(),
-                      std::string(PAGED_ATTENTION_MERGE_SOURCE));
-        });
+        std::call_once(init_flag, [this] { kernel = make_merge_kernel(backend); });
         return *kernel;
     }
 };
 
-inline PagedMergeHolder& get_merge_kernel(bool cuda) {
-    static PagedMergeHolder metal_holder(false);
-    static PagedMergeHolder cuda_holder(true);
-    return cuda ? cuda_holder : metal_holder;
+template <mlxcel::GpuKernelBackend Backend>
+PagedMergeHolder& get_merge_kernel() {
+    static PagedMergeHolder holder(Backend);
+    return holder;
 }
 
 // This kernel's ports, in one place. `has_kernel_port` and `select_kernel_port`
@@ -191,13 +222,14 @@ inline PagedMergeHolder& get_merge_kernel(bool cuda) {
 const mlxcel::KernelPorts& paged_merge_ports() {
     static const mlxcel::KernelPorts ports{
         .metal = +[]() -> mlx::core::fast::CustomKernelFunction& {
-            return get_merge_kernel(false).get();
+            return get_merge_kernel<mlxcel::GpuKernelBackend::Metal>().get();
         },
         .cuda = +[]() -> mlx::core::fast::CustomKernelFunction& {
-            return get_merge_kernel(true).get();
+            return get_merge_kernel<mlxcel::GpuKernelBackend::Cuda>().get();
         },
-        // No HIP port yet (#1814).
-        .rocm = nullptr,
+        .rocm = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_merge_kernel<mlxcel::GpuKernelBackend::Rocm>().get();
+        },
     };
     return ports;
 }
@@ -217,6 +249,20 @@ std::vector<mlx::core::array> paged_attention_merge_states(
     using mlx::core::fast::TemplateArg;
 
     const auto& v_shape = v_in.shape(); // [N, H, Dim]
+
+    // Shapes the kernel bodies cannot index are refused here, on every
+    // backend, instead of being read out of bounds (issue #2068). Every body
+    // indexes `lse_in` with the head count it reads from `v_in`, so `lse_in`
+    // must be `[N, H]` with `v_in`'s N and H. The threadgroup is `(D, 1, 1)`,
+    // so D must be a launchable block width.
+    if (v_in.ndim() != 3 || lse_in.ndim() != 2 || o_indptr.ndim() != 1 ||
+        lse_in.shape(0) != v_shape[0] || lse_in.shape(1) != v_shape[1] ||
+        v_shape[2] < 1 || v_shape[2] > 1024) {
+        throw std::invalid_argument(
+            "[paged_attention_merge_states] expects v_in [N, H, D], lse_in "
+            "[N, H] and o_indptr [M + 1]");
+    }
+
     int heads = v_shape[1];
     int dim = v_shape[2];
     int num_outputs = static_cast<int>(o_indptr.size()) - 1;

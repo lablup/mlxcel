@@ -15,6 +15,7 @@
 #include "sampling_rejection.h"
 #include "gpu_backend.h"
 #include "kernel_port.h"
+#include "sampling_rejection_hip.h"
 
 #include <mlx/fast.h>
 #include <mlx/ops.h>
@@ -28,6 +29,7 @@
 
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -742,6 +744,38 @@ inline RejectionKernelHolderCuda& get_rejection_kernel_cuda() {
     return *holder;
 }
 
+// HIP counterpart (issue #2064), reached only on a ROCm build. The body lives
+// in `sampling_rejection_hip.h`; the launch stays in `rejection_sample` below,
+// shared with the other two ports. Without the ROCm backend `fast::hip_kernel`
+// is not declared, and `rejection_ports()` never resolves this entry there, so
+// the throw is unreachable and keeps the table shape uniform.
+struct RejectionKernelHolderHip {
+    std::optional<mlx::core::fast::CustomKernelFunction> kernel;
+    std::once_flag init_flag;
+
+    mlx::core::fast::CustomKernelFunction& get() {
+        std::call_once(init_flag, [this] {
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+            kernel = mlx::core::fast::hip_kernel(
+                "mlxcel_rejection_sample",
+                {"probs", "probs_draw", "params", "rng_key"},
+                {"ids", "ok", "rounds"},
+                std::string(REJECTION_SAMPLE_HIP_SOURCE));
+#else
+            throw std::runtime_error(
+                "[fused_sample_rejection] this build has no ROCm backend");
+#endif
+        });
+        return *kernel;
+    }
+};
+
+inline RejectionKernelHolderHip& get_rejection_kernel_hip() {
+    // Leaked on purpose, for the reason given at `get_rejection_kernel`.
+    static RejectionKernelHolderHip* holder = new RejectionKernelHolderHip();
+    return *holder;
+}
+
 
 // This kernel's ports, in one place. `has_kernel_port` and
 // `select_kernel_port` both read it, so a support predicate and the dispatch
@@ -754,8 +788,9 @@ const mlxcel::KernelPorts& rejection_ports() {
         .cuda = +[]() -> mlx::core::fast::CustomKernelFunction& {
             return get_rejection_kernel_cuda().get();
         },
-        // No HIP port yet (#1814).
-        .rocm = nullptr,
+        .rocm = +[]() -> mlx::core::fast::CustomKernelFunction& {
+            return get_rejection_kernel_hip().get();
+        },
     };
     return ports;
 }
@@ -766,7 +801,12 @@ bool rejection_sample_supported() {
     if (mlx::core::default_device() != mlx::core::Device::gpu) {
         return false;
     }
-    return mlxcel::custom_kernels_available();
+    // The port table, not the backend kind: a backend-kind test answered
+    // false on ROCm whatever the table held, so a filled `.rocm` slot stayed
+    // unreachable (#2064). Reading the table keeps this predicate and the
+    // dispatch in `rejection_sample` from disagreeing, as in
+    // `gumbel_max_sample_supported()`.
+    return mlxcel::has_kernel_port(rejection_ports());
 }
 
 bool rejection_sample_accepts(const mlx::core::array& probs) {

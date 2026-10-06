@@ -43,9 +43,11 @@
 namespace mlxcel::turbo {
 
 // True when the Gumbel-max kernel can run on the active backend: a GPU default
-// device plus an available Metal or CUDA backend. A CPU-only build, or a
-// process running with `MLXCEL_DEVICE=cpu`, returns false and the caller must
-// keep the `categorical` graph path.
+// device whose backend has a port in `gumbel_ports()` (Metal, CUDA and, since
+// #2064, ROCm). The predicate reads the same table as the dispatch, so the two
+// cannot disagree. A CPU-only build, or a process running with
+// `MLXCEL_DEVICE=cpu`, returns false and the caller must keep the
+// `categorical` graph path.
 bool gumbel_max_sample_supported();
 
 // True when `logits` has a shape and dtype the kernel accepts: 2-D `[B, V]`

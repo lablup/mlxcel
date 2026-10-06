@@ -36,13 +36,18 @@
 //!    active, greedy stays byte-identical to `argmax`, and every filtered
 //!    configuration stays bit-identical to the pre-#900 categorical path.
 //!
-//! GPU-only: the kernel JITs through `mx.fast.metal_kernel` /
-//! `mx.fast.cuda_kernel`, so every test returns early on a CPU-only build,
+//! GPU-only: the kernel JITs through `mx.fast.metal_kernel`,
+//! `mx.fast.cuda_kernel` or `mx.fast.hip_kernel` (#2064), so every test returns
+//! early where the support predicate reports no port (a CPU-only build),
 //! matching the convention in `fused_moe_parity_tests.rs`.
 //!
 //! Run on Apple Silicon:
 //!   cargo test --release -p mlxcel-core --lib --features metal,accelerate \
 //!     sampling_gumbel_tests::
+//!
+//! Run on ROCm:
+//!   cargo test --release -p mlxcel-core --lib --features rocm \
+//!     sampling_gumbel_tests:: -- --test-threads=1
 
 use super::*;
 

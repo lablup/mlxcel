@@ -19,4 +19,5 @@
 //! production builds never see it.
 
 pub(crate) mod env_lock;
+pub(crate) mod induction;
 pub(crate) mod kernel_ports;

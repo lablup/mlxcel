@@ -109,10 +109,11 @@ async fn jamba_history_boundary_prefixes_the_next_turn_when_reasoning_is_echoed(
     );
 }
 
-/// Pins the documented limit: a client that echoes only `content` gets an
-/// earlier user turn without the instruction. That rewrite is the template's
-/// own rule, not a server render choice, so the boundary cannot prefix turn 2
-/// and the follow-up misses the prompt cache by design.
+/// Pins the renderer's side of the limit: a request whose assistant turn
+/// carries only `content` gets an earlier user turn without the instruction.
+/// That rewrite is the template's own rule. The chat routes avoid it by
+/// re-injecting the trace they generated before rendering (issue #2110, see
+/// `reasoning_echo_tests.rs`); this renderer sees whatever the route hands it.
 #[tokio::test]
 async fn jamba_content_only_echo_rewrites_the_earlier_user_turn() {
     let processor = ChatTemplateProcessor::with_template(jamba_reasoning_template());

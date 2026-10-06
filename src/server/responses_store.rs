@@ -380,9 +380,10 @@ fn response_input_content_size_bytes(content: &ResponseInputContent) -> usize {
 
 fn response_input_part_size_bytes(part: &ResponseInputPart) -> usize {
     match part {
-        ResponseInputPart::InputText { text } | ResponseInputPart::Text { text } => {
-            32usize.saturating_add(str_size_bytes(text))
-        }
+        ResponseInputPart::InputText { text }
+        | ResponseInputPart::Text { text }
+        | ResponseInputPart::OutputText { text } => 32usize.saturating_add(str_size_bytes(text)),
+        ResponseInputPart::Refusal { refusal } => 32usize.saturating_add(str_size_bytes(refusal)),
         ResponseInputPart::InputImage {
             image_url,
             detail,

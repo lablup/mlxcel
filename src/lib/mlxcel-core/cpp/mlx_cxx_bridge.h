@@ -572,10 +572,15 @@ std::unique_ptr<MlxArray> compiled_swiglu_activation(
     const MlxArray& x
 );
 
-// Residual add fused with the next LayerNorm, one Metal launch:
+// Residual add fused with the next LayerNorm, one kernel launch:
 // x_out = (a + b) + x, h_out = layer_norm(x_out, weight, bias). Byte-identical to
-// compiled_add3 followed by fast::layer_norm. Metal only, D <= 6656; the Rust
-// wrapper (layers::residual_add3_layer_norm) checks that. Used by: Cohere2
+// compiled_add3 followed by fast::layer_norm on the same backend. Metal and
+// ROCm (lablup/mlxcel#2069), D <= 6656; the Rust wrapper
+// (layers::residual_add3_layer_norm) checks both, the backend through
+// fused_add3_layer_norm_available(), which reads the kernel's port table and
+// is false off the GPU stream (MLXCEL_DEVICE=cpu).
+// Used by: Cohere2
+bool fused_add3_layer_norm_available();
 void fused_add3_layer_norm(
     const MlxArray& a,
     const MlxArray& b,
@@ -1420,6 +1425,18 @@ std::unique_ptr<MlxArray> rocm_fault_probe_array(int32_t kind);
 // (issues #1803, #1862).
 bool bitlinear_kernel_available();
 
+// Fused decode-MoE port predicates (lablup/mlxcel#2065), read from the
+// kernels' own `KernelPorts` tables through `has_kernel_port`: the gate-up and
+// down pair that `fused_moe_expert_kernel` and `fused_moe_geglu_kernel`
+// launch, and the down kernel alone, which Nemotron-H's `fused_moe_forward`
+// reuses. Metal, CUDA and ROCm.
+bool fused_moe_kernels_available();
+bool moe_down_kernel_available();
+// Both kernels of `fused_moe_forward`'s opt-in `MLXCEL_FUSED_MOE_RELU2` branch:
+// the fc1 squared-ReLU kernel and the down kernel. Metal and ROCm
+// (lablup/mlxcel#2069), on the GPU stream only.
+bool fused_moe_relu2_kernels_available();
+
 // Whether `quantized_matmul(x, weight, scales, biases)` with a transposed
 // affine weight runs the same dense GEMM that `dequantize` + `matmul` runs, so
 // the two return the same bytes (lablup/mlxcel#2081). On ROCm this reads the
@@ -1516,6 +1533,7 @@ std::unique_ptr<MlxArray> gumbel_max_sample(
 // True when `fused_sample`'s no-filter path takes the Gumbel-max kernel:
 // backend support plus a non-falsy `MLXCEL_SAMPLING_GUMBEL`.
 bool sampling_gumbel_available();
+bool sampling_gumbel_backend_supported();
 
 // Threadgroups the Gumbel-max kernel puts on one row for this launch shape.
 // Exposed so tests can pin that the sampled id does not depend on it.
@@ -1564,6 +1582,7 @@ std::unique_ptr<MlxArray> sampling_rejection_probe(
 // True when `fused_sample`'s filtered path takes the rejection kernel: backend
 // support plus a non-falsy `MLXCEL_SAMPLING_REJECTION`.
 bool sampling_rejection_available();
+bool sampling_rejection_backend_supported();
 
 // Pure routing policy: would this configuration go to the rejection kernel,
 // ignoring backend support and the env switch? The kernel replaces a sort, so
@@ -1816,6 +1835,7 @@ std::unique_ptr<MlxArray> random_bernoulli_p(float p, rust::Slice<const int32_t>
 std::unique_ptr<MlxArray> random_randint(int32_t low, int32_t high, rust::Slice<const int32_t> shape, int32_t dtype, const MlxArray* key);
 std::unique_ptr<MlxArray> random_truncated_normal(float lower, float upper, rust::Slice<const int32_t> shape, int32_t dtype, const MlxArray* key);
 std::unique_ptr<MlxArray> random_gumbel(rust::Slice<const int32_t> shape, int32_t dtype, const MlxArray* key);
+std::unique_ptr<MlxArray> random_bits(rust::Slice<const int32_t> shape, int32_t width, const MlxArray* key);
 std::unique_ptr<MlxArray> random_laplace(rust::Slice<const int32_t> shape, int32_t dtype, const MlxArray* key);
 std::unique_ptr<MlxArray> random_permutation(int32_t x, const MlxArray* key);
 std::unique_ptr<MlxArray> random_permutation_array(const MlxArray& a, int32_t axis, const MlxArray* key);
@@ -1886,7 +1906,10 @@ std::unique_ptr<MlxArray> fused_moe_geglu_kernel(
 
 // Fused xIELU activation (Apertus). Collapses the ~11 elementwise ops in
 // apertus_xielu into one launch over the MLP intermediate buffer. Falls back to
-// an equivalent elementwise graph on non-Metal back-ends.
+// an equivalent elementwise graph on a backend with no port in `xielu_ports()`
+// (CUDA, CPU); `fused_xielu_kernel_available` answers which (Metal, ROCm since
+// lablup/mlxcel#2069, and false off the GPU stream under MLXCEL_DEVICE=cpu).
+bool fused_xielu_kernel_available();
 std::unique_ptr<MlxArray> fused_xielu(
     const MlxArray& x,
     float alpha_p,
@@ -1957,16 +1980,23 @@ std::unique_ptr<MlxArray> fused_moe_forward(
     int32_t bits
 );
 
-// Check if SSM Metal kernel is available (Metal GPU only)
+// Whether the fused single-token SSM update kernel can run: the GPU backend
+// has a port in ssm_ports() (Metal, CUDA, ROCm), the default device is the
+// GPU, and MLXCEL_SSM_KERNEL=0 (or its older alias MLXCEL_SSM_CUDA_KERNEL=0)
+// is not set.
 bool ssm_kernel_available();
 
 // Mamba1 selective scan fused over the sequence (Jamba, issue #2005).
 // x, delta: [batch, seq, d]; b, c: [batch, seq, n]; a: [d, n] (= -exp(A_log));
 // d: [d]; state_in: [batch, d, n]. y: [batch, seq, d] in x's dtype. On Metal
-// the state is carried and returned in float32. On CUDA (issue #1981) every
-// intermediate is rounded to x's dtype exactly as the per-step graph scan
-// rounds it, and state_out is in x's dtype.
+// and ROCm (issue #2069) the state is carried and returned in float32. On CUDA
+// (issue #1981) every intermediate is rounded to x's dtype exactly as the
+// per-step graph scan rounds it, and state_out is in x's dtype.
 bool mamba1_scan_kernel_available();
+// Whether the available variant is the float32-state one (Metal, ROCm), the
+// variant Mamba / Falcon-Mamba take; CUDA's graph-exact variant answers false,
+// as does any backend off the GPU stream (MLXCEL_DEVICE=cpu).
+bool mamba1_scan_float_state_kernel_available();
 // Whether the fused scan can serve these inputs: the kernel is available, the
 // default device is the GPU, the state width fits one warp or simdgroup
 // (n <= 32), and on CUDA all six inputs share one floating dtype (the
@@ -2450,7 +2480,7 @@ void paged_attention_merge_states(
 // tables through `has_kernel_port`, so a predicate cannot disagree with the
 // dispatch: all three kernels (v1 decode, v2 partial, merge); the merge kernel
 // alone; the v1 decode kernel alone; and the v2 pair (partial and merge).
-// Metal and CUDA today; ROCm answers false until lablup/mlxcel#1814.
+// True on Metal, CUDA and ROCm (the HIP ports, lablup/mlxcel#2068).
 bool paged_attention_kernels_available();
 bool paged_attention_merge_available();
 bool paged_attention_decode_available();
@@ -2487,9 +2517,9 @@ void fused_add_rms_norm(
     std::unique_ptr<MlxArray>& normed_out,
     std::unique_ptr<MlxArray>& new_residual_out);
 
-// Whether the current backend has a fused-add-RMSNorm kernel at all (issue
-// #905). False on a CPU-only build, where both `metal_kernel` and `cuda_kernel`
-// throw; the Rust helper consults this before committing to the fused path.
+// Whether the fused-add-RMSNorm kernel can run (issue #905): a port for this
+// backend (Metal, CUDA, ROCm since #2063) and the GPU as the default device.
+// The Rust helper consults this before committing to the fused path.
 bool fused_add_rms_norm_available();
 
 // Fused q/k RoPE + KV-append-layout kernel launcher (issue #905).
@@ -2525,8 +2555,9 @@ void fused_rope_qk_append(
     std::unique_ptr<MlxArray>& k_out,
     std::unique_ptr<MlxArray>& v_out);
 
-// Whether the current backend has a fused RoPE + KV-append kernel at all
-// (issue #905). False on a CPU-only build.
+// Whether the fused RoPE + KV-append kernel can run (issue #905): a port for
+// this backend (Metal, CUDA, ROCm since #2063) and the GPU as the default
+// device.
 bool fused_rope_qk_append_available();
 
 // Wraps `mlxcel::turbo::inplace_slice_write` (#1959): `dst` with `rows` written

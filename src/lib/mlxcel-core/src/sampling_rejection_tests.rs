@@ -70,13 +70,18 @@
 //! limit that makes top-k slow is ever lifted, widening the policy is a
 //! one-constant change against tests that already prove the kernel right.
 //!
-//! GPU-only: the kernel JITs through `mx.fast.metal_kernel` /
-//! `mx.fast.cuda_kernel`, so every test returns early on a CPU-only build,
+//! GPU-only: the kernel JITs through `mx.fast.metal_kernel`,
+//! `mx.fast.cuda_kernel` or `mx.fast.hip_kernel` (#2064), so every test returns
+//! early where the support predicate reports no port (a CPU-only build),
 //! matching the convention in `sampling_gumbel_tests.rs`.
 //!
 //! Run on Apple Silicon:
 //!   cargo test --release -p mlxcel-core --lib --features metal,accelerate \
 //!     sampling_rejection_tests::
+//!
+//! Run on ROCm:
+//!   cargo test --release -p mlxcel-core --lib --features rocm \
+//!     sampling_rejection_tests:: -- --test-threads=1
 
 use super::*;
 use std::collections::BTreeSet;

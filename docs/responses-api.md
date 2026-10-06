@@ -200,6 +200,8 @@ Phase 1 emits events such as:
 - `response.completed`
 - failure/incomplete/error events on error paths
 
+Reasoning streams as `response.reasoning_text.delta` events inside a `reasoning` output item, ahead of the message item, and never as `output_text`. This holds when the chat template primes an open thinking block (for example a generation prompt ending in `<think>\n`), where the model writes only the close marker: the stream starts inside the reasoning item, as the non-streaming split does.
+
 ## Response and conversation stores
 
 The stores are in memory and are bounded by entry count, approximate retained

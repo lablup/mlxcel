@@ -133,7 +133,7 @@ pub(crate) fn softplus(x: f32) -> f32 {
 /// and `eps` are the fixed scalars. Element-wise:
 /// - `x > 0`:  `alpha_p * x^2 + beta * x`
 /// - `x <= 0`: `(expm1(min(x, eps)) - x) * alpha_n + beta * x`
-fn apertus_xielu(
+pub(crate) fn apertus_xielu(
     x: &MlxArray,
     alpha_p: f32,
     alpha_n: f32,
@@ -259,9 +259,10 @@ impl MLP {
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let up = self.up_proj.forward(x);
         let activated = if fused_xielu_enabled() {
-            // `Result` since #1801, but never `Err` here: the C++ entry point
-            // returns an elementwise fallback before it resolves a port when
-            // Metal is unavailable (`mlx_cxx_kernels.cpp:463`).
+            // `Result` since #1801, but never `Err` here: on a backend with no
+            // port in `xielu_ports()` (CUDA, CPU; Metal and ROCm have one) the
+            // C++ entry point returns its elementwise fallback before it
+            // resolves a port (`fused_xielu_kernel_available()`).
             mlxcel_core::fused_xielu(&up, self.alpha_p, self.alpha_n, self.beta, self.eps)
                 .expect("fused_xielu falls back rather than refusing, so this cannot be Err")
         } else {
@@ -771,15 +772,20 @@ mod tests {
     // bf16 dtype id for `astype` (see mlx_cxx_internal.h to_dtype()).
     const BF16: i32 = 12;
 
-    /// The fused xIELU Metal kernel must be bit-for-bit identical to the
-    /// elementwise `apertus_xielu` reference on the native bf16 path, so the
-    /// `MLXCEL_FUSED_XIELU` flag never perturbs greedy temp-0 decode. The kernel
-    /// keeps every intermediate in bf16 and reproduces MLX's expm1f, so each
-    /// sub-expression rounds exactly where the reference rounds. The test spans
-    /// the full activation domain: large/small positive, the `x > 0` boundary,
-    /// near-zero negatives that straddle `eps`, and large negatives that
-    /// saturate `expm1`. On a non-Metal back-end `fused_xielu` runs the
-    /// equivalent elementwise fallback, which is identical by construction.
+    /// The fused xIELU kernel must be bit-for-bit identical to the elementwise
+    /// `apertus_xielu` reference on the native bf16 path, so the
+    /// `MLXCEL_FUSED_XIELU` flag never perturbs greedy temp-0 decode. The Metal
+    /// kernel keeps every intermediate in bf16 and reproduces MLX's expm1f; the
+    /// ROCm kernel (#2069) rounds each intermediate through bf16 the way the
+    /// ROCm graph's elementwise kernels do and calls the same device `expm1f`.
+    /// Either way each sub-expression rounds exactly where the reference
+    /// rounds. The test spans the full activation domain: large/small
+    /// positive, the `x > 0` boundary, near-zero negatives that straddle `eps`,
+    /// and large negatives that saturate `expm1`. Where
+    /// `fused_xielu_kernel_available()` is false (CUDA, CPU) `fused_xielu` runs
+    /// the equivalent elementwise fallback, which is identical by construction;
+    /// `apertus_tests::fused_xielu_kernel_matches_graph_every_dtype` covers f16
+    /// and f32 as well.
     #[test]
     fn fused_xielu_matches_elementwise_bit_for_bit() {
         // Per-layer scalars in the range the Apertus-8B checkpoint produces:
@@ -806,7 +812,7 @@ mod tests {
 
         let reference = apertus_xielu(&x, alpha_p, alpha_n, beta, eps);
         // Cannot be `Err`: the entry point returns the elementwise fallback
-        // before resolving a port when Metal is unavailable, which is the very
+        // before resolving a port on a backend without one, which is the very
         // property the doc comment above relies on.
         let fused = mlxcel_core::fused_xielu(&x, alpha_p, alpha_n, beta, eps)
             .expect("fused_xielu falls back rather than refusing");

@@ -170,7 +170,17 @@ impl ModelProvider {
     pub(crate) fn scripted_streaming_for_route_tests(
         options_tx: mpsc::Sender<ServerGenerateOptions>,
     ) -> (Self, ScriptedStreamHandle) {
-        Self::scripted_streaming_for_route_tests_inner(options_tx, None)
+        Self::scripted_streaming_for_route_tests_inner(options_tx, None, None)
+    }
+
+    /// The same scripted provider, also forwarding each dispatched rendered
+    /// prompt, so a route test can assert what the chat template produced
+    /// (issue #2110).
+    pub(crate) fn scripted_streaming_for_route_tests_with_prompts(
+        options_tx: mpsc::Sender<ServerGenerateOptions>,
+        prompt_tx: mpsc::Sender<String>,
+    ) -> (Self, ScriptedStreamHandle) {
+        Self::scripted_streaming_for_route_tests_inner(options_tx, None, Some(prompt_tx))
     }
 
     /// The same scripted provider, answering as a request a drafter served
@@ -180,12 +190,13 @@ impl ModelProvider {
         options_tx: mpsc::Sender<ServerGenerateOptions>,
         speculative: SpeculativeStats,
     ) -> (Self, ScriptedStreamHandle) {
-        Self::scripted_streaming_for_route_tests_inner(options_tx, Some(speculative))
+        Self::scripted_streaming_for_route_tests_inner(options_tx, Some(speculative), None)
     }
 
     fn scripted_streaming_for_route_tests_inner(
         options_tx: mpsc::Sender<ServerGenerateOptions>,
         speculative: Option<SpeculativeStats>,
+        prompt_tx: Option<mpsc::Sender<String>>,
     ) -> (Self, ScriptedStreamHandle) {
         let (request_tx, request_rx) = mpsc::channel::<ModelRequest>();
         let (step_tx, step_rx) = mpsc::channel::<ScriptedStreamStep>();
@@ -199,6 +210,7 @@ impl ModelProvider {
             while let Ok(request) = request_rx.recv() {
                 match request {
                     ModelRequest::Generate {
+                        prompt,
                         options,
                         queue_reservation,
                         response_tx,
@@ -206,6 +218,9 @@ impl ModelProvider {
                         ..
                     } => {
                         drop(queue_reservation);
+                        if let Some(prompt_tx) = prompt_tx.as_ref() {
+                            let _ = prompt_tx.send(prompt);
+                        }
                         let _ = options_tx.send(options);
                         if let Ok(mut flags) = flags_for_worker.lock() {
                             flags.push(cancelled.clone());

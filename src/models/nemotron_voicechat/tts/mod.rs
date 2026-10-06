@@ -51,3 +51,7 @@ pub(crate) use subword::to_host_i32 as host_i32;
 #[cfg(test)]
 #[path = "tts_tests.rs"]
 mod tts_tests;
+
+#[cfg(test)]
+#[path = "tts_dtype_tests.rs"]
+mod tts_dtype_tests;

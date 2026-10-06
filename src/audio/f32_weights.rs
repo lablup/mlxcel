@@ -41,7 +41,8 @@
 //! why callers pass an explicit key filter.
 //!
 //! Used by: `VoiceChatPerception::from_weights` (FastConformer encoder and
-//! `proj`), `RvqEarTtsModel::from_weights` (backbone and MoG projections).
+//! `proj`), `RvqEarTtsModel::from_weights` (backbone and MoG projections,
+//! `bos_emb`, `audio_prompt_projection_W`).
 
 use mlxcel_core::dtype;
 use mlxcel_core::weights::WeightMap;

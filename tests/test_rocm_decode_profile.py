@@ -79,6 +79,17 @@ class GuardTests(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertNotIn("CONTENDED", r.stderr)
 
+    def test_a_kfd_entry_left_by_an_exited_process_is_not_contention(self):
+        with tempfile.TemporaryDirectory() as kfd:
+            # KFD removes a process's proc entry after the process is reaped, so
+            # for a moment the entry names a pid with no /proc directory. That
+            # is the command's own child finishing, not another GPU tenant.
+            cmd = f"true & p=$!; wait $p; mkdir -p {kfd}/$p; sleep 2.5; rmdir {kfd}/$p"
+            r = run_guard(kfd, "--idle-secs", "1", "--max-attempts", "1", "--",
+                          "bash", "-c", cmd)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertNotIn("CONTENDED", r.stderr)
+
     def test_a_busy_gpu_before_the_run_times_out_without_running(self):
         with tempfile.TemporaryDirectory() as kfd, tempfile.TemporaryDirectory() as out:
             os.mkdir(pathlib.Path(kfd) / "1")

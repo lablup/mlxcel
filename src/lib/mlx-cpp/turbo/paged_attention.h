@@ -90,8 +90,8 @@ int paged_attention_num_splits_cap(int dim);
 
 // True when the resolved GPU backend has a port of the v1 paged decode kernel
 // above. Read from the same `KernelPorts` table `paged_attention_decode`
-// dispatches through, so the two cannot disagree. Metal and CUDA today; ROCm
-// answers false until lablup/mlxcel#1814 ports it.
+// dispatches through, so the two cannot disagree. True on Metal, CUDA and ROCm
+// (the HIP port, lablup/mlxcel#2068).
 bool paged_attention_decode_available();
 
 } // namespace mlxcel::turbo

@@ -21,18 +21,21 @@
 //!
 //! 1. With f32 inputs the kernel reproduces the reference (the only difference
 //!    is summation order inside `simd_sum`), for fresh and carried state, a
-//!    single step and several, two state widths, and a channel count that is
-//!    not a multiple of the threadgroup's eight rows.
-//! 2. With bf16 inputs the Metal kernel is at least as close to the f32
-//!    reference as the graph scan it replaces, which rounds the state to bf16
-//!    every step.
+//!    single step and several, three state widths (up to a full 32 lanes),
+//!    and a channel count that is not a multiple of the threadgroup's eight
+//!    rows.
+//! 2. With bf16 inputs the float32-state kernel (Metal, and ROCm since #2069)
+//!    is at least as close to the f32 reference as the graph scan it
+//!    replaces, which rounds the state to bf16 every step.
 //!
 //! The CUDA port (#1981) instead rounds every step exactly as the graph scan
 //! does, so on CUDA the kernel is compared with MLX's own graph scan and must
 //! match it bit for bit, in f32, f16 and bf16.
 //!
 //! The tests return early wherever `mamba1_scan_kernel_available()` is false
-//! (ROCm, CPU-only builds).
+//! (CPU-only builds). On ROCm the graph-exact CUDA tests skip: ROCm runs the
+//! float32-state variant, because its graph scan's `state @ C` (K = N < 32)
+//! goes to rocBLAS, whose reduction order no custom kernel reproduces.
 
 use crate::hardware::{GpuBackendKind, gpu_backend_kind};
 use crate::utils::slice_axis;
@@ -168,7 +171,9 @@ fn f32_kernel_matches_scalar_reference() {
         return;
     }
     let (batch, dm) = (2, 24);
-    for n in [8, 16] {
+    // 32 fills a whole warp or wavefront, the widest state the kernel accepts:
+    // only there does every step of the 16..1 fold carry data.
+    for n in [8, 16, 32] {
         for seq in [1, 7] {
             for carried in [false, true] {
                 let k = make_case(batch, seq, dm, n, carried);
@@ -185,10 +190,10 @@ fn f32_kernel_matches_scalar_reference() {
 
 #[test]
 fn bf16_kernel_is_no_less_accurate_than_the_graph_scan() {
-    // A property of the Metal kernel's float32 state. The CUDA port rounds
-    // like the graph scan by design; `cuda_kernel_is_bit_identical_to_the_graph_scan`
-    // pins that instead.
-    if !ffi::mamba1_scan_kernel_available() || gpu_backend_kind() != GpuBackendKind::Metal {
+    // A property of the float32-state variant (Metal, ROCm). The CUDA port
+    // rounds like the graph scan by design;
+    // `cuda_kernel_is_bit_identical_to_the_graph_scan` pins that instead.
+    if !ffi::mamba1_scan_float_state_kernel_available() {
         return;
     }
     let (batch, seq, dm, n) = (1, 64, 24, 16);
@@ -351,4 +356,21 @@ fn cuda_kernel_declines_mixed_dtype_inputs() {
         &bf(&[8, 64]),
         &d
     ));
+}
+
+/// Metal and ROCm (#2069) have the float32-state port, so the tests above
+/// must not skip there: a backend that lost its port would otherwise pass
+/// them by returning early. `MLXCEL_MAMBA1_SCAN_KERNEL=0` is the one
+/// legitimate reason for the predicate to be false on those backends.
+#[test]
+fn float_state_kernel_is_available_where_ported() {
+    if !matches!(
+        gpu_backend_kind(),
+        GpuBackendKind::Metal | GpuBackendKind::Rocm
+    ) || std::env::var("MLXCEL_MAMBA1_SCAN_KERNEL").as_deref() == Ok("0")
+    {
+        return;
+    }
+    assert!(ffi::mamba1_scan_kernel_available());
+    assert!(ffi::mamba1_scan_float_state_kernel_available());
 }
