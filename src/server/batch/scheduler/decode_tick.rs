@@ -324,6 +324,9 @@ impl BatchScheduler {
                     self.apply_lookahead_trim(&la.ids, lookahead_teardown_positions(false));
                 drop(la);
                 let live = Self::without_failed(seq_ids, &failed);
+                if live.is_empty() {
+                    return;
+                }
                 self.dispatch_sync_decode(&live);
                 let _decode_budget = mlxcel_core::DecodeCommandBufferBudget::enter();
                 self.maybe_prime_lookahead(&live);
@@ -768,6 +771,9 @@ impl BatchScheduler {
             drop(next);
             drop(la);
             let live = Self::without_failed(seq_ids, &failed);
+            if live.is_empty() {
+                return;
+            }
             let seq_ids = live.as_slice();
             // The sync re-dispatch below re-samples step n's token. fused_sample
             // draws from MLX's global RNG (random::categorical without an
