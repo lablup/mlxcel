@@ -57,6 +57,10 @@ End-to-end tok/s. The speedup ranges (12B +106% to +122%, 31B +80% to +91%) lie 
 
 The prompt cache is off in these runs for a reason found while measuring: the timed requests repeat the warm-up's prompt, and with the cache on, classic serves them from a whole-prompt hit while the MTP burst (which never donates a buffered snapshot) prefills cold. A first run with the cache on gave a different classic text for the cached request than for the cold one, and the MTP text equalled the cold classic text. That is classic decode depending on cache state, not an MTP difference; it is outside #2160 and not changed here.
 
+## Pre-existing: `b1_batched_baseline_probe`
+
+The `#[ignore]` diagnostic `b1_batched_baseline_probe` (31B pair) compares the batched MTP adapter run at B=1 against the B=1 linear adapter. It fails on `origin/main` `9c0ae2e9` without this change: row 1 differs at token 1, reproduced twice. On this branch rows 1, 2 and 3 differ (at tokens 1, 9 and 17). The B=1 linear adapter is the path this PR made byte-identical to classic decode (probe, chat parity and the `greedy_parity_mtp_gemma4_*` tests); the batched adapter does not take the row-wise verify path and was already not decode-exact on CUDA. Serving never runs the batched adapter for these geometries, because the burst dispatch declines B>1 for `mtp_requires_linear_singleton` targets. The wider mismatch is the reference moving onto decode's kernels, not a regression in the batched path. Making the batched adapter row-wise is outside #2160.
+
 ## Not covered here
 
 - Metal. The 12B predicate arm and the RoPE and MLP changes are CUDA-gated; the attention gate refactor, the no-cursor sliding fallback and the history-boundary prefill split reach Metal 31B serving and are listed for the Apple Silicon pass (#2158).
