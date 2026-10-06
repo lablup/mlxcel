@@ -8,7 +8,7 @@
 // fixed floor of that round), and the LRU's lifetime miss counter then aborted
 // the process after 2 * MLX_CUDA_SDPA_CACHE_SIZE misses (lablup/mlxcel#1799).
 //
-// Two mlxcel changes sit on top of upstream 81ba1c6a:
+// Three mlxcel changes sit on top of upstream 81ba1c6a:
 //
 // 1. #1820, the general fix: a small multi-row call carrying an array mask over
 //    a fixed-size KV cache is canonicalized the way upstream already
@@ -26,8 +26,15 @@
 //    bypasses cuDNN and takes MLX's own ops fallback, which has no per-shape
 //    build cost. MLXCEL_SDPA_FALLBACK_MAX_QUERIES=0 restores upstream dispatch.
 //
-// The one-row decode step takes the vector kernel and never enters cuDNN, and
-// prefill keeps cuDNN unchanged (k_len == q_len, or more rows than the bound).
+// 3. #2128, opt-in determinism: MLXCEL_SDPA_DETERMINISTIC=1 keeps the one-row
+//    decode step off cuDNN and bars stream-K engines on the other forward
+//    graphs (see sdpa_deterministic()).
+//
+// Neither 1 nor 2 touches the one-row decode step: below 256 cache positions it
+// takes the vector kernel, and from 256 positions, k and v being slices of a
+// cache buffer whose extent is a multiple of 256, upstream's own
+// canonicalization sends it to cuDNN (use_cudnn_for_decoding) unless 3 is on.
+// Prefill keeps cuDNN unchanged (k_len == q_len, or more rows than the bound).
 
 #include "mlx/backend/cuda/cudnn_utils.h"
 #include "mlx/backend/cuda/device.h"
@@ -161,19 +168,23 @@ inline bool is_kv_cache_slice(const array& kv) {
   return T_kv % kv_cache_step == 0;
 }
 
-// mlxcel (#2128): MLXCEL_SDPA_DETERMINISTIC=1 makes SDPA bitwise
-// reproducible at some decode cost. The cuDNN engines the heuristics pick for
-// the one-row decode step (from 256 KV positions) and for some other graphs use
-// stream-K work distribution (knob CUDNN_KNOB_TYPE_STREAM_K, id 38, `_k38=<n>`
-// in the engine tag), which combines partial key reductions in completion
-// order, so the output rounds differently from call to call. cuDNN 9.27 does
-// not mark those engines NONDETERMINISTIC. On GB10 the head_dim 128 decode
-// graph rounded differently in about 1 call in 100, and Qwen3 temp-0 output
-// changed from run to run. Off by default because stream-K is also what keeps a
-// one-row decode fast at long context: barring it on cuDNN cost 0.67x to 0.92x
-// decode at 3K to 16K keys, while `sdpa_vector`, whose KV split reduces in a
-// fixed order, cost 0.87x to 1.00x. So with the switch on, decode takes
-// `sdpa_vector` and every other cuDNN graph bars stream-K engines.
+// mlxcel (#2128): MLXCEL_SDPA_DETERMINISTIC=1 makes the one-row decode SDPA
+// bitwise reproducible, at some decode cost. By default that call goes to
+// cuDNN from 256 KV positions, and on GB10 (cuDNN 9.27) the heuristics' first
+// engine for the head_dim 128 graph, `..._k38=1_...` (knob 38 is
+// CUDNN_KNOB_TYPE_STREAM_K), rounds differently in about 1 call in 100.
+// A contributor's analysis on #2128 locates the order dependence in an
+// unordered cross-warp reduction of the softmax denominator. The candidate
+// with stream-K off was bit-identical over 4000 calls of the same shape, but it
+// also differs in its tile and kernel-config knobs, so knob 38 is the measured
+// correlate rather than an isolated cause. cuDNN does not tag the engine
+// NONDETERMINISTIC. Qwen3 temp-0 output changed from run to
+// run as a result. Off by default because that engine is also the fast path at
+// long context: barring stream-K on cuDNN cost 0.67x to 0.94x decode at 3K to
+// 16K keys, while `sdpa_vector`, whose KV split reduces in a fixed order, cost
+// 0.87x to 1.01x. So with the switch on, decode takes `sdpa_vector`, and every
+// other forward cuDNN SDPA graph bars stream-K engines where a stream-K-off
+// one builds (a precaution: those graphs were not separately measured).
 inline bool sdpa_deterministic() {
   static bool on = env::get_var("MLXCEL_SDPA_DETERMINISTIC", 0) != 0;
   return on;
@@ -516,32 +527,66 @@ enum UIDS {
   D_O,
 };
 
-// See sdpa_deterministic(): with the switch on, bar stream-K candidates when a
-// stream-K-off one exists, and build as before when every candidate uses it.
+// See sdpa_deterministic(). A forward graph built with the switch on bars its
+// stream-K candidates when a stream-K-off one exists. Knob 38 is matched by
+// number because CUDNN_KNOB_TYPE_STREAM_K only exists from cuDNN 9.7 headers.
 inline bool engine_uses_stream_k(const std::string& tag) {
   auto at = tag.find("_k38=");
   return at != std::string::npos && tag.compare(at, 6, "_k38=0") != 0;
 }
 
-void deselect_stream_k_engines(DnnGraph& graph) {
-  if (!sdpa_deterministic()) {
-    return;
-  }
+// Once per process: the switch is on but this process built a graph it could
+// not keep off stream-K, so its output may still vary from run to run.
+void warn_stream_k_kept(const char* why) {
+  static std::once_flag warned;
+  std::call_once(warned, [&] {
+    fprintf(
+        stderr,
+        "[mlxcel-sdpa] warning: MLXCEL_SDPA_DETERMINISTIC=1 but a cuDNN SDPA "
+        "graph keeps a stream-K engine (%s); its output may not be bitwise "
+        "reproducible (issue #2128).\n",
+        why);
+  });
+}
+
+// Thrown when every stream-K-off candidate fails support or build, so that
+// only this case, not a genuine cuDNN refusal, falls back to the default
+// selection.
+struct StreamKOffUnbuildable : std::runtime_error {
+  StreamKOffUnbuildable()
+      : std::runtime_error("no buildable stream-K-off SDPA plan") {}
+};
+
+// Returns whether any candidate was barred.
+bool deselect_stream_k_engines(DnnGraph& graph) {
   std::vector<std::string> barred;
+  bool unnamed = false;
   int64_t n = graph.get_execution_plan_count();
   for (int64_t i = 0; i < n; ++i) {
     std::string tag;
     graph.get_plan_name_at_index(i, tag);
-    if (engine_uses_stream_k(tag)) {
+    if (tag.empty() || tag.rfind("INVALID", 0) == 0) {
+      unnamed = true;
+    } else if (engine_uses_stream_k(tag)) {
       barred.push_back(tag);
     }
   }
-  if (!barred.empty() && static_cast<int64_t>(barred.size()) < n) {
-    graph.deselect_engines(barred);
+  if (unnamed) {
+    warn_stream_k_kept("an engine tag could not be read");
   }
+  if (barred.empty()) {
+    return false;
+  }
+  if (static_cast<int64_t>(barred.size()) == n) {
+    warn_stream_k_kept("every candidate uses stream-K");
+    return false;
+  }
+  graph.deselect_engines(barred);
+  return true;
 }
 
-DnnGraph build_sdpa_graph(
+DnnGraph build_sdpa_graph_with(
+    bool bar_stream_k,
     cudnnHandle_t handle,
     const array& q,
     const array& k,
@@ -588,9 +633,74 @@ DnnGraph build_sdpa_graph(
   CHECK_CUDNN_ERROR(graph.prepare());
   graph.select_behavior_notes(
       {fe::BehaviorNote_t::SUPPORTS_CUDA_GRAPH_NATIVE_API});
-  deselect_stream_k_engines(graph);
+  if (bar_stream_k && !deselect_stream_k_engines(graph)) {
+    // Nothing was barred, so the build below is the plain one.
+    bar_stream_k = false;
+  }
+  if (bar_stream_k) {
+    // The remaining stream-K-off candidates can all still fail support or
+    // build (the behavior-note filter, shared memory, workspace). Report that
+    // to the caller instead of aborting; it rebuilds without the bar.
+    if (graph.build().is_bad()) {
+      throw StreamKOffUnbuildable();
+    }
+    return graph;
+  }
   CHECK_CUDNN_ERROR(graph.build());
   return graph;
+}
+
+// With MLXCEL_SDPA_DETERMINISTIC=1, build the graph without stream-K engines
+// and fall back to the default selection, with a one-time warning, when no
+// stream-K-off plan builds. The fallback uses a fresh graph because a barred
+// candidate stays barred in the one that failed.
+DnnGraph build_sdpa_graph(
+    cudnnHandle_t handle,
+    const array& q,
+    const array& k,
+    const array& v,
+    bool do_causal,
+    const std::optional<array>& mask_arr,
+    const std::optional<array>& sinks,
+    const std::optional<array>& seq_len_q,
+    const std::optional<array>& seq_len_kv,
+    bool output_logsumexp,
+    const array& o,
+    const std::optional<array>& stats) {
+  if (sdpa_deterministic()) {
+    try {
+      return build_sdpa_graph_with(
+          true,
+          handle,
+          q,
+          k,
+          v,
+          do_causal,
+          mask_arr,
+          sinks,
+          seq_len_q,
+          seq_len_kv,
+          output_logsumexp,
+          o,
+          stats);
+    } catch (const StreamKOffUnbuildable&) {
+      warn_stream_k_kept("no stream-K-off plan could be built");
+    }
+  }
+  return build_sdpa_graph_with(
+      false,
+      handle,
+      q,
+      k,
+      v,
+      do_causal,
+      mask_arr,
+      sinks,
+      seq_len_q,
+      seq_len_kv,
+      output_logsumexp,
+      o,
+      stats);
 }
 
 DnnGraph build_sdpa_backward_graph(
