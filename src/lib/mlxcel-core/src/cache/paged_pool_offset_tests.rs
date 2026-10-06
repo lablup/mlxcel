@@ -20,7 +20,7 @@
 //! CUDA and HIP), so a slab holding more than 2^32 elements silently read a
 //! different row of the same buffer. The server sizes that slab as
 //! `ceil(ctx / 32) * batch` blocks, so long contexts at a high `--parallel`
-//! reach it (Llama-3.1-8B: 131,072 blocks of `[32, 8, 128]`).
+//! reach it (Llama-3.1-8B: more than 131,072 blocks of `[32, 8, 128]`).
 //!
 //! The fast tests read the kernel sources and pin the widening in every body,
 //! on any host, because no single host can run all three backends, and check

@@ -288,7 +288,6 @@ std::vector<mlx::core::array> paged_attention_merge_states(
             "UINT32_MAX elements, which the merge kernel cannot index");
     }
 
-
     // Refuses when this backend has no port, naming the entry point and the
     // fallback from the table (issues #1885, #1801).
     auto& kernel = mlxcel::select_kernel_port(
