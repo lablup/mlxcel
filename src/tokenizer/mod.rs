@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod added_tokens;
 pub mod fim;
 pub mod pieces;
 mod spm_proto;
@@ -1635,24 +1636,7 @@ fn read_added_tokens_sorted(model_path: &Path) -> Result<Vec<(u32, tokenizers::A
         .and_then(|v| v.as_object());
 
     if let Some(decoder) = decoder {
-        for (id, entry) in decoder {
-            let id: u32 = id
-                .parse()
-                .map_err(|e| anyhow::anyhow!("added_tokens_decoder key {:?}: {}", id, e))?;
-            let content = entry
-                .get("content")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("added_tokens_decoder[{id}] has no content"))?;
-            let flag = |name: &str, default: bool| {
-                entry.get(name).and_then(|v| v.as_bool()).unwrap_or(default)
-            };
-            let token = AddedToken::from(content.to_string(), flag("special", false))
-                .single_word(flag("single_word", false))
-                .lstrip(flag("lstrip", false))
-                .rstrip(flag("rstrip", false))
-                .normalized(flag("normalized", false));
-            out.push((id, token));
-        }
+        out = added_tokens::parse_added_tokens_decoder(decoder)?;
     } else if let Ok(raw) = std::fs::read_to_string(model_path.join("added_tokens.json")) {
         let map: HashMap<String, u32> = serde_json::from_str(&raw)
             .map_err(|e| anyhow::anyhow!("Failed to parse added_tokens.json: {}", e))?;
@@ -1915,6 +1899,9 @@ pub fn load_tokenizer(model_path: &Path) -> Result<MlxcelTokenizer> {
                 .map_err(|e| anyhow::anyhow!(e))?
         };
         clear_serialized_padding_and_truncation(&mut tokenizer);
+        // Added tokens declared only in tokenizer_config.json (Granite Vision's
+        // `<image>`, issue #1683) are registered the way transformers does.
+        added_tokens::reconcile_config_added_tokens(&mut tokenizer, model_path);
         ensure_bos_post_processor(&mut tokenizer, model_path);
         return Ok(MlxcelTokenizer::HuggingFace(tokenizer));
     }

@@ -346,11 +346,17 @@ pub enum VlmPreparationSummary {
     GraniteVision {
         image_blocks: usize,
         total_image_tokens: i32,
+        /// No `<image>` placeholder was found; the runs were spliced after the
+        /// first token.
+        spliced: bool,
     },
     /// Granite 4 Vision expanded each `<image>` into `num_image_tokens` copies.
     Granite4Vision {
         image_blocks: usize,
         total_image_tokens: i32,
+        /// No `<image>` placeholder was found; the runs were spliced after the
+        /// first token.
+        spliced: bool,
     },
     /// DeepSeek-OCR expanded each `<image>` into its per-image placeholder run.
     DeepSeekOcr {
@@ -2211,6 +2217,7 @@ where
                 .map(|stats| VlmPreparationSummary::GraniteVision {
                     image_blocks: stats.image_blocks,
                     total_image_tokens: stats.total_image_tokens,
+                    spliced: stats.spliced,
                 });
 
             // Granite Vision runs every tile in one tower call; skip the
@@ -2242,6 +2249,7 @@ where
                 .map(|stats| VlmPreparationSummary::Granite4Vision {
                     image_blocks: stats.image_blocks,
                     total_image_tokens: stats.total_image_tokens,
+                    spliced: stats.spliced,
                 });
 
             let _ = active_caches;

@@ -398,20 +398,32 @@ fn print_preparation_summary(summary: VlmPreparationSummary) {
         VlmPreparationSummary::GraniteVision {
             image_blocks,
             total_image_tokens,
+            spliced,
         } => {
-            println!(
-                "Granite Vision: expanded {} <image> placeholder(s) ({} total image tokens)",
-                image_blocks, total_image_tokens
-            );
+            if spliced {
+                println!(
+                    "Granite Vision: no <image> placeholder in the prompt; spliced {image_blocks} image block(s) after the first token ({total_image_tokens} total image tokens)"
+                );
+            } else {
+                println!(
+                    "Granite Vision: expanded {image_blocks} <image> placeholder(s) ({total_image_tokens} total image tokens)"
+                );
+            }
         }
         VlmPreparationSummary::Granite4Vision {
             image_blocks,
             total_image_tokens,
+            spliced,
         } => {
-            println!(
-                "Granite 4 Vision: expanded {} <image> placeholder(s) ({} total image tokens)",
-                image_blocks, total_image_tokens
-            );
+            if spliced {
+                println!(
+                    "Granite 4 Vision: no <image> placeholder in the prompt; spliced {image_blocks} image block(s) after the first token ({total_image_tokens} total image tokens)"
+                );
+            } else {
+                println!(
+                    "Granite 4 Vision: expanded {image_blocks} <image> placeholder(s) ({total_image_tokens} total image tokens)"
+                );
+            }
         }
         VlmPreparationSummary::DeepSeekOcr {
             image_blocks,

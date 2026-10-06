@@ -78,3 +78,7 @@ mod llmjp_vl_prompt_parity_tests;
 #[cfg(test)]
 #[path = "moondream3_prompt_tests.rs"]
 mod moondream3_prompt_tests;
+
+#[cfg(test)]
+#[path = "granite_vision_prompt_parity_tests.rs"]
+mod granite_vision_prompt_parity_tests;

@@ -25,6 +25,11 @@ use crate::vision::processors::anyres::{AnyResTileInfo, num_image_tokens};
 pub struct InsertedGraniteVisionTokens {
     pub image_blocks: usize,
     pub total_image_tokens: i32,
+    /// `true` when the prompt carried no `<image>` placeholder and the runs were
+    /// spliced after the first token instead of expanded in place. That layout
+    /// puts the image outside the user turn; issue #1683 hid behind a summary
+    /// that reported it as an in-place expansion.
+    pub spliced: bool,
 }
 
 /// Expand each `<image>` placeholder in `prompt_tokens` into `num_image_tokens`
@@ -70,6 +75,7 @@ pub fn insert_granite_vision_image_tokens(
         return Some(InsertedGraniteVisionTokens {
             image_blocks: infos.len(),
             total_image_tokens: total,
+            spliced: false,
         });
     }
 
@@ -95,6 +101,7 @@ pub fn insert_granite_vision_image_tokens(
     Some(InsertedGraniteVisionTokens {
         image_blocks: infos.len(),
         total_image_tokens: total,
+        spliced: true,
     })
 }
 
@@ -135,6 +142,19 @@ mod tests {
         assert_eq!(stats.total_image_tokens, 4009);
         assert_eq!(tokens.iter().filter(|&&t| t == 49155).count(), 4009);
         assert_eq!(tokens.len(), 3 + 4009); // 1, 5, 6 + expanded run
+        assert!(!stats.spliced);
+    }
+
+    #[test]
+    fn missing_placeholder_is_reported_as_spliced() {
+        let proc = AnyResProcessor::new(pins(), 384);
+        let info = proc.tile_info(224, 224);
+        let mut tokens = vec![46, 5, 6];
+        let stats =
+            insert_granite_vision_image_tokens(&mut tokens, &[info], 49155, 27, 729).unwrap();
+        assert!(stats.spliced);
+        assert_eq!(tokens[0], 46);
+        assert_eq!(tokens[1], 49155);
     }
 
     #[test]
