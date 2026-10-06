@@ -23,14 +23,21 @@
 //! two speculative positions it may have to unwind, so a cache that opts in
 //! keeps a small log of the rows its last writes destroyed and restores them.
 //!
-//! Each logged write records the cursors it started from and, only when it
-//! overwrote a valid slot, a copy of that slot's `[B, H, 1, D]` K and V rows.
+//! Each logged write records the cursors it started from. A write that
+//! overwrites a valid slot inside a [`DecodeLookaheadAppendScope`] (the
+//! scheduler's speculative prime forward) also copies that slot's
+//! `[B, H, 1, D]` K and V rows; outside the scope (a synchronous step, the
+//! force-sync mode, a request the pipeline does not admit) no rows are copied,
+//! and such a write is simply not rewindable, which no teardown asks for.
+//!
 //! The copies are lazy MLX nodes that read the pre-write buffer. Left
-//! unevaluated they would keep that whole buffer alive and stop the write's
-//! `slice_update` from reusing it in place, so the model evaluates them right
-//! after building its forward ([`flush_decode_undo_rows`]), ahead of the
-//! forward's own evaluation on the same stream.
+//! unevaluated they keep that whole buffer alive and stop the write's
+//! `slice_update` from reusing it in place (on GB10 that cost Gemma 3 4B 12%
+//! of its wrapped-window decode rate), so the model schedules them right after
+//! building its forward ([`flush_decode_undo_rows`]), ahead of the forward's
+//! own evaluation on the same stream.
 
+use std::cell::Cell;
 use std::collections::VecDeque;
 
 use super::{KVCacheMode, RotatingKVCache};
@@ -41,6 +48,35 @@ use crate::{MlxArray, UniquePtr, ffi};
 /// step-n+1 append of a steady-tick teardown. A cache that logs this many
 /// writes can serve every lookahead teardown.
 pub const DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS: usize = 2;
+
+thread_local! {
+    static SPECULATIVE_APPEND: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Marks the single-token writes made while it lives as speculative appends
+/// that a lookahead teardown may unwind, so a logging cache copies the rows
+/// they overwrite. Thread-local: the scheduler builds each forward on its own
+/// thread. Nesting is not expected; the guard restores the previous state.
+///
+/// Used by: the batch scheduler's lookahead prime forward.
+#[must_use = "the scope ends when the guard is dropped"]
+pub struct DecodeLookaheadAppendScope {
+    previous: bool,
+}
+
+impl DecodeLookaheadAppendScope {
+    pub fn enter() -> Self {
+        Self {
+            previous: SPECULATIVE_APPEND.with(|flag| flag.replace(true)),
+        }
+    }
+}
+
+impl Drop for DecodeLookaheadAppendScope {
+    fn drop(&mut self) {
+        SPECULATIVE_APPEND.with(|flag| flag.set(self.previous));
+    }
+}
 
 /// Rows a decode write overwrote, copied out of the pre-write buffers.
 pub(crate) struct DecodeUndoRows {
@@ -59,8 +95,11 @@ pub(crate) struct DecodeUndoEntry {
     idx: i32,
     /// Physical slot the write landed on.
     slot: i32,
-    /// `None` for a warmup write onto a slot that was never valid; a rewind
-    /// zeroes such a slot again, as buffer growth left it.
+    /// The slot held a valid position before the write.
+    overwrote: bool,
+    /// The overwritten rows, for an overwrite inside a
+    /// [`DecodeLookaheadAppendScope`]. A warmup write (`!overwrote`) needs
+    /// none: a rewind zeroes its slot again, as buffer growth left it.
     rows: Option<DecodeUndoRows>,
 }
 
@@ -129,8 +168,10 @@ impl RotatingKVCache {
             return;
         };
         // A warmup write lands on a slot that was never valid, so the cursors
-        // alone undo it; only an overwrite needs the old rows.
-        let rows = (offset >= max_size).then(|| {
+        // alone undo it; only a speculative overwrite needs the old rows.
+        let overwrote = offset >= max_size;
+        let speculative = SPECULATIVE_APPEND.with(Cell::get);
+        let rows = (overwrote && speculative).then(|| {
             let k_shape = ffi::array_shape(keys);
             let v_shape = ffi::array_shape(values);
             let k_row = ffi::slice(
@@ -156,13 +197,14 @@ impl RotatingKVCache {
             offset,
             idx,
             slot: pos,
+            overwrote,
             rows,
         });
     }
 
     /// Append the still-unevaluated row copies to `out` and mark them
     /// evaluated. The caller must schedule every returned array.
-    fn take_pending_decode_undo_rows(&mut self, out: &mut Vec<*const MlxArray>) {
+    pub(super) fn take_pending_decode_undo_rows(&mut self, out: &mut Vec<*const MlxArray>) {
         let Some(log) = self.decode_undo.as_mut() else {
             return;
         };
@@ -183,7 +225,8 @@ impl RotatingKVCache {
     /// while the ring is still chronological below the window, where a cursor
     /// rewind is exact. Every refusal is an `Err` that leaves the cache
     /// untouched: speculative buffering, non-FP16 storage, a disabled log,
-    /// `n > offset`, or a write past the warmup that the log no longer holds.
+    /// `n > offset`, a write past the warmup that the log no longer holds, or
+    /// an overwrite made outside a [`DecodeLookaheadAppendScope`].
     ///
     /// Used by: Gemma 3 `rewind_decode_appends` (decode lookahead teardown).
     pub fn rewind_decode_writes(&mut self, n: i32) -> Result<(), String> {
@@ -254,6 +297,17 @@ impl RotatingKVCache {
             .entries
             .iter()
             .skip(undo)
+            .any(|e| e.overwrote && e.rows.is_none())
+        {
+            return Err(describe(
+                self,
+                "an overwrite outside a lookahead append scope kept no rows",
+            ));
+        }
+        if log
+            .entries
+            .iter()
+            .skip(undo)
             .any(|e| e.rows.is_some() && e.slot >= physical)
         {
             return Err(describe(self, "a logged slot lies outside the buffer"));
@@ -267,7 +321,7 @@ impl RotatingKVCache {
         for entry in log.entries.drain(undo..).rev() {
             match entry.rows {
                 Some(rows) => self.write_slots(entry.slot, &rows.keys, &rows.values),
-                None if entry.slot < physical => self.zero_slots(entry.slot, 1),
+                None if !entry.overwrote && entry.slot < physical => self.zero_slots(entry.slot, 1),
                 None => {}
             }
         }

@@ -98,7 +98,9 @@ mod paged_pool_tests;
 #[cfg(test)]
 #[path = "cache/paged_turbo_tests.rs"]
 mod paged_turbo_tests;
-pub use decode_undo::{DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS, flush_decode_undo_rows};
+pub use decode_undo::{
+    DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS, DecodeLookaheadAppendScope, flush_decode_undo_rows,
+};
 mod prefill_rewind;
 #[cfg(test)]
 #[path = "cache/prefill_rewind_tests.rs"]

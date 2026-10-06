@@ -668,6 +668,10 @@ impl BatchScheduler {
         seq_ids: &[SequenceId],
         input: &mlxcel_core::MlxArray,
     ) -> Option<UniquePtr<mlxcel_core::MlxArray>> {
+        // Every append this forward makes is speculative: a model-owned family
+        // that rewinds its own state (#2159) keeps the rows these writes
+        // overwrite, and only these (sync steps copy nothing).
+        let _speculative = mlxcel_core::cache::DecodeLookaheadAppendScope::enter();
         let logits = if seq_ids.len() == 1 {
             let seq_id = seq_ids[0];
             let caches = self.cache_pool.get_caches_mut(seq_id)?;

@@ -44,8 +44,10 @@ fn append(cache: &mut RotatingKVCache, count: i32, tag: f32) {
     );
 }
 
-/// One single-token decode write tagged as speculative.
+/// One single-token decode write tagged as speculative, made inside the
+/// lookahead append scope as the scheduler's prime forward makes it.
 fn speculative_write(cache: &mut RotatingKVCache) {
+    let _scope = DecodeLookaheadAppendScope::enter();
     append(cache, 1, 1000.0);
 }
 
@@ -260,4 +262,32 @@ fn flushed_rows_still_restore_exactly() {
     flush_decode_undo_rows([&mut cache]);
     cache.rewind_decode_writes(2).expect("rewind");
     assert_eq!(state(&cache), before);
+}
+
+#[test]
+fn overwrites_outside_the_lookahead_scope_copy_nothing_and_are_not_rewindable() {
+    // A synchronous step (no scope) after the wrap logs its cursors only.
+    let mut cache = cache_after(4, 3, 6);
+    append(&mut cache, 1, 0.0);
+    let mut pending = Vec::new();
+    cache.take_pending_decode_undo_rows(&mut pending);
+    assert!(pending.is_empty(), "no row copy outside the scope");
+    let before = (state(&cache), cache.decode_undo_len());
+    assert!(cache.rewind_decode_writes(1).is_err());
+    assert_eq!(
+        (state(&cache), cache.decode_undo_len()),
+        before,
+        "untouched"
+    );
+
+    // The scope records rows, and ends with its guard.
+    {
+        let _scope = DecodeLookaheadAppendScope::enter();
+        append(&mut cache, 1, 1000.0);
+    }
+    cache.take_pending_decode_undo_rows(&mut pending);
+    assert_eq!(pending.len(), 2, "one K and one V row copy");
+    append(&mut cache, 1, 0.0);
+    cache.take_pending_decode_undo_rows(&mut pending);
+    assert_eq!(pending.len(), 2, "the guard ended the scope");
 }
