@@ -1850,9 +1850,9 @@ where
                 .try_preprocess_with_spatial(images)
                 .map_err(|err| anyhow::anyhow!("Youtu-VL image preprocessing failed: {err}"))?;
 
-            // Splice image-token runs into the prompt when they aren't already
-            // present. We mirror the upstream `<vision_start> + image*N +
-            // <vision_end>` framing.
+            // Expand the template's `<|image_pad|>` placeholders (or splice
+            // framed runs when there are none) so the prompt carries one image
+            // token per merged feature, as the checkpoint's processor does.
             let preparation = insert_youtu_vl_image_tokens(
                 prompt_tokens,
                 &spatial_shapes,
@@ -1861,6 +1861,7 @@ where
                 youtu.vision_end_token_id,
                 youtu.image_token_id,
             )
+            .map_err(|err| anyhow::anyhow!("Youtu-VL prompt preparation failed: {err}"))?
             .map(|stats| VlmPreparationSummary::YoutuVL {
                 image_blocks: stats.image_blocks,
                 total_image_tokens: stats.total_image_tokens,
@@ -1875,8 +1876,9 @@ where
             let _ = image_cache_keys;
 
             let input_ids_arr = prompt_ids_array(prompt_tokens);
-            let embeddings =
-                youtu.get_input_embeddings(&input_ids_arr, &pixel_values, &spatial_shapes);
+            let embeddings = youtu
+                .get_input_embeddings(&input_ids_arr, &pixel_values, &spatial_shapes)
+                .map_err(|err| anyhow::anyhow!(err))?;
 
             Ok(Some(PreparedVlmEmbeddings {
                 embeddings,

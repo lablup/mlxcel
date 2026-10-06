@@ -65,7 +65,7 @@ impl YoutuVLModel {
         input_ids: &MlxArray,
         pixel_values: &MlxArray,
         spatial_shapes: &[(i32, i32)],
-    ) -> InputEmbeddings {
+    ) -> Result<InputEmbeddings, String> {
         // Text embeddings.
         let inputs_embeds = self.text_model.get_embed_tokens(input_ids);
 
@@ -82,30 +82,52 @@ impl YoutuVLModel {
         // Replace image tokens with vision features. Upstream falls back to
         // the video token when there are no image tokens; we do the same by
         // first checking which token id is present in the prompt.
-        let target_token_id = self.choose_target_token_id(input_ids);
+        let (target_token_id, placeholders) = self.choose_target_token_id(input_ids);
 
-        merge::merge_llava(
+        // The scatter below fills placeholders with features in order and
+        // silently drops whatever does not fit. Upstream raises when the two
+        // counts differ; do the same so a prompt that was not expanded to one
+        // token per merged feature (#1618) fails instead of describing only
+        // the image's first patch.
+        let features = vision_output.hidden_states.as_ref().unwrap();
+        let feature_rows = mlxcel_core::array_shape(features)[0];
+        if placeholders != feature_rows {
+            return Err(format!(
+                "Youtu-VL image features and image tokens do not match: {placeholders} placeholder token(s) for {feature_rows} feature(s)"
+            ));
+        }
+
+        Ok(merge::merge_llava(
             target_token_id,
-            vision_output.hidden_states.as_ref().unwrap(),
+            features,
             &inputs_embeds,
             input_ids,
-        )
+        ))
     }
 
     /// Pick the placeholder token id to merge against. Returns
     /// `image_token_id` when any image token appears in the prompt; otherwise
-    /// falls back to `video_token_id`. This mirrors the upstream behaviour
-    /// where the merge silently switches placeholder kinds when the caller
-    /// used a video token instead of an image token.
-    fn choose_target_token_id(&self, input_ids: &MlxArray) -> i32 {
-        // Compare the int-typed input ids to a scalar of the same dtype, then
-        // count matches via `sum_axis`. We materialize a single scalar count
-        // back to the host so the dispatch decision stays a plain Rust if/else.
-        let target = mlxcel_core::full_f32(
-            &[1],
-            self.image_token_id as f32,
-            mlxcel_core::array_dtype(input_ids),
-        );
+    /// falls back to `video_token_id`, together with how many positions carry
+    /// it. This mirrors the upstream behaviour where the merge silently
+    /// switches placeholder kinds when the caller used a video token instead
+    /// of an image token.
+    fn choose_target_token_id(&self, input_ids: &MlxArray) -> (i32, i32) {
+        let images = Self::count_token(input_ids, self.image_token_id);
+        if images > 0 {
+            (self.image_token_id, images)
+        } else {
+            (
+                self.video_token_id,
+                Self::count_token(input_ids, self.video_token_id),
+            )
+        }
+    }
+
+    /// Number of positions in `input_ids` equal to `token_id`, read back to
+    /// the host so dispatch stays a plain Rust branch.
+    fn count_token(input_ids: &MlxArray, token_id: i32) -> i32 {
+        let target =
+            mlxcel_core::full_f32(&[1], token_id as f32, mlxcel_core::array_dtype(input_ids));
         let cmp = mlxcel_core::equal(input_ids, &target);
         // `equal` returns a bool array; cast to int32 so `sum_axis` accumulates
         // a numeric count (mlx does not currently sum bool tensors directly).
@@ -113,11 +135,7 @@ impl YoutuVLModel {
         let flat = mlxcel_core::flatten(&cmp_int);
         let count = mlxcel_core::sum_axis(&flat, 0, false);
         mlxcel_core::eval(&count);
-        if mlxcel_core::item_i32(&count) > 0 {
-            self.image_token_id
-        } else {
-            self.video_token_id
-        }
+        mlxcel_core::item_i32(&count)
     }
 }
 

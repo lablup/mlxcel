@@ -26,12 +26,15 @@
 //!
 //! `models/mlx/youtu-vl-4b-instruct` has `patch_size=16`, `spatial_merge_size=2`
 //! and `window_size=256`, so `smart_resize` snaps every edge to a multiple of 32
-//! and the merged grid is one eighth of the pixel edge. The three fixture sizes
-//! therefore sit on three different points of the window path: 224 gives a 7x7
-//! merged grid, a single 8x8 window where `get_window_index` is the identity and
-//! the window inverse from #1600 / #1603 provably cannot change the result; 336
-//! resizes to 352 for an 11x11 merged grid and 448 gives 14x14, both of which
-//! are 2x2 windows and do exercise it.
+//! and the merged grid is one eighth of the pixel edge. 224 gives a 7x7 merged
+//! grid, a single 8x8 attention window; 336 resizes to 352 for an 11x11 merged
+//! grid and 448 gives 14x14, both of which are 2x2 windows.
+//!
+//! The solid orange fixture is also the one image that cannot catch a defect
+//! in how features reach their prompt slots: every merged token of a uniform
+//! image carries the same content, so a run that places only one feature
+//! (#1618, where the template's single `<|image_pad|>` was never expanded)
+//! still reads as orange. The two three-shape fixtures are what catch that.
 //!
 //! To run them:
 //! ```text
@@ -126,10 +129,9 @@ fn assert_mentions(body: &str, groups: &[&[&str]]) {
     );
 }
 
-/// The single-window control, and the test that pins issue #1610.
+/// The solid-color control, and the test that pins issue #1610.
 ///
-/// At 224x224 the merged grid is 7x7, one 8x8 window, so `get_window_index` is
-/// the identity and no window-permutation defect can reach this fixture. Before
+/// At 224x224 the merged grid is 7x7, one 8x8 window. Before
 /// the patch-order fix the model answered "The image is completely black and
 /// contains no visible content, objects, text, or details. It is a solid black
 /// square or rectangle with no variation in color or texture." for a solid
@@ -157,17 +159,13 @@ fn youtu_vl_describes_the_solid_color_fixture_as_a_solid_color() {
 
 /// Every object and every color at 448x448, a 14x14 merged grid.
 ///
-/// KNOWN FAILING, tracked by #1618. The patch-order fix in #1610
-/// changed this answer from "The image contains a single, solid black circle on
-/// a white background." to "The image contains a single, solid black circle on a
-/// plain white background.", which is still wrong: the fixture is a red square,
-/// a blue circle and a green triangle on light grey. At least one further defect
-/// remains in this family's vision path and it is out of scope for #1610. The
-/// assertion is deliberately left at the full correct answer rather than
-/// weakened to something this build can satisfy, so that fixing #1618
-/// is what turns it green.
+/// Pins issue #1618. Before it, the chat template's single `<|image_pad|>` was
+/// never expanded to one token per merged feature, so only the top-left feature
+/// reached the language model and the answer was "The image contains a single,
+/// solid black circle on a plain white background." The fixture is a red
+/// square, a blue circle and a green triangle on light grey.
 #[test]
-#[ignore = "known failing, blocked on #1618 (second Youtu-VL vision defect); also requires the local youtu-vl-4b-instruct checkpoint"]
+#[ignore = "requires the local youtu-vl-4b-instruct checkpoint"]
 fn youtu_vl_names_every_object_in_the_three_shape_image() {
     let Some(model_dir) = checkpoint_dir() else {
         return;
@@ -189,13 +187,10 @@ fn youtu_vl_names_every_object_in_the_three_shape_image() {
 /// The same scene at 336x336, which `smart_resize` lifts to 352 for an 11x11
 /// merged grid.
 ///
-/// KNOWN FAILING, tracked by #1618, for the same reason as the 448
-/// case. The patch-order fix moved this answer from "The image contains a
-/// single, solid black circle on a white background." to "The image contains a
-/// single white circle on a black background.": the polarity flipped, so the
-/// tower's output did change, but the scene is still not the one in the file.
+/// Pins issue #1618 for the same reason as the 448 case. Before it, the answer
+/// was "The image contains a single white circle on a black background."
 #[test]
-#[ignore = "known failing, blocked on #1618 (second Youtu-VL vision defect); also requires the local youtu-vl-4b-instruct checkpoint"]
+#[ignore = "requires the local youtu-vl-4b-instruct checkpoint"]
 fn youtu_vl_names_every_object_at_a_multi_window_grid() {
     let Some(model_dir) = checkpoint_dir() else {
         return;
