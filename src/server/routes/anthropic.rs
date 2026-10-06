@@ -263,9 +263,21 @@ async fn non_stream_messages(
 
     let model_id = state.display_model_id().to_string();
     let prompt_cache_enabled = state.prompt_cache.is_some();
+    // Reasoning re-injection for content-only history (#2110, #2118), as on
+    // `/v1/chat/completions`: only the render sees the filled copy; the cache
+    // context, tool parsing and the record read the translated request as the
+    // client sent it. An assistant `thinking` block maps to
+    // `Message.reasoning`, so client-sent thinking still wins.
+    let echo_scope =
+        crate::server::reasoning_echo::chat_scope(&state, &live, &translated.chat_request);
+    let render_request = crate::server::reasoning_echo::render_request(
+        &state,
+        echo_scope.as_ref(),
+        &translated.chat_request,
+    );
     let mut prepared = match prepare_chat_request_with_cache(
         &state.chat_template,
-        &translated.chat_request,
+        &render_request,
         live.chat_template_kwargs.as_ref(),
         prompt_cache_enabled,
         state.should_render_history_boundary_snapshot(),
@@ -387,6 +399,22 @@ async fn non_stream_messages(
         (text, matched)
     };
 
+    // Remember the `thinking` block this reply carries for a follow-up that
+    // echoes only its text block (#2118). Only a block the client actually
+    // received is recorded: without extended thinking the reasoning never
+    // leaves the server, so no client could have echoed it. A tool-calling
+    // turn is echoed back with its `tool_use` blocks, which the store never
+    // fills.
+    if include_thinking && parsed_tool_calls.is_none() {
+        crate::server::reasoning_echo::record_reply(
+            &state,
+            echo_scope.as_ref(),
+            &translated.chat_request.messages,
+            &final_text,
+            reasoning_text.as_deref(),
+        );
+    }
+
     let content_blocks = build_content_blocks(
         &final_text,
         reasoning_text.as_deref(),
@@ -432,9 +460,21 @@ async fn stream_messages(
 
     let model_id = state.display_model_id().to_string();
     let prompt_cache_enabled = state.prompt_cache.is_some();
+    // Reasoning re-injection for content-only history (#2110, #2118), as on
+    // `/v1/chat/completions`: only the render sees the filled copy; the cache
+    // context, tool parsing and the record read the translated request as the
+    // client sent it. An assistant `thinking` block maps to
+    // `Message.reasoning`, so client-sent thinking still wins.
+    let echo_scope =
+        crate::server::reasoning_echo::chat_scope(&state, &live, &translated.chat_request);
+    let render_request = crate::server::reasoning_echo::render_request(
+        &state,
+        echo_scope.as_ref(),
+        &translated.chat_request,
+    );
     let mut prepared = match prepare_chat_request_with_cache(
         &state.chat_template,
-        &translated.chat_request,
+        &render_request,
         live.chat_template_kwargs.as_ref(),
         prompt_cache_enabled,
         state.should_render_history_boundary_snapshot(),
@@ -555,6 +595,12 @@ async fn stream_messages(
         // Accumulated visible text (post-filter) for the stop-sequence scan.
         let visible_acc = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let visible_for_callback = visible_acc.clone();
+        // Accumulated `thinking` deltas, for the reasoning re-echo record
+        // (#2118). Only appended to when a thinking block is streamed and the
+        // request has an echo scope.
+        let record_thinking = include_thinking && echo_scope.is_some();
+        let thinking_acc = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let thinking_for_callback = thinking_acc.clone();
 
         let result = state
             .model_provider
@@ -586,6 +632,9 @@ async fn stream_messages(
                         if include_thinking
                             && let Some(reasoning) = emit.reasoning.filter(|s| !s.is_empty())
                         {
+                            if record_thinking && let Ok(mut t) = thinking_for_callback.lock() {
+                                t.push_str(&reasoning);
+                            }
                             em.open_thinking(&sender_clone);
                             em.emit_thinking_delta(&sender_clone, reasoning);
                         }
@@ -618,6 +667,9 @@ async fn stream_messages(
             && let Some(reasoning) = trailing.reasoning.filter(|s| !s.is_empty())
             && let Ok(mut em) = emitter.lock()
         {
+            if record_thinking && let Ok(mut t) = thinking_acc.lock() {
+                t.push_str(&reasoning);
+            }
             em.open_thinking(&sender);
             em.emit_thinking_delta(&sender, reasoning);
         }
@@ -723,6 +775,21 @@ async fn stream_messages(
             parsed_calls.is_some(),
             stop_sequence.as_deref(),
         );
+
+        // Remember the streamed `thinking` block for a follow-up that echoes
+        // only the text block (#2118), from exactly the deltas the client
+        // received; see the non-streaming arm for what is skipped.
+        if record_thinking && parsed_calls.is_none() {
+            let visible = visible_acc.lock().map(|g| g.clone()).unwrap_or_default();
+            let thinking = thinking_acc.lock().map(|g| g.clone()).unwrap_or_default();
+            crate::server::reasoning_echo::record_reply(
+                &state,
+                echo_scope.as_ref(),
+                &translated.chat_request.messages,
+                &visible,
+                Some(&thinking),
+            );
+        }
 
         let _ = sender.send_event(&AnthropicStreamEvent::MessageDelta {
             delta: AnthropicMessageDeltaBody {

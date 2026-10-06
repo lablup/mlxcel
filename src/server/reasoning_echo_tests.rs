@@ -364,3 +364,9 @@ fn oversized_trace_and_disabled_store_keep_nothing() {
 
 #[path = "reasoning_echo_route_tests.rs"]
 mod route;
+
+#[path = "reasoning_echo_endpoint_tests.rs"]
+mod endpoint;
+
+#[path = "reasoning_echo_warmup_tests.rs"]
+mod warmup;

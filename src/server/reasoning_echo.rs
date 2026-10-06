@@ -23,10 +23,14 @@
 //! history-boundary snapshot (#1143) stops prefixing the follow-up, and every
 //! turn misses the prompt cache.
 //!
-//! This store remembers, per finished chat completion, the exact reasoning text
-//! the response carried. On a later request, an assistant message that has no
-//! reasoning of its own gets that text back, exactly as if the client had
-//! echoed it, so the turn re-renders the way it was generated.
+//! This store remembers, per finished plain reply, the exact reasoning text the
+//! response carried: `reasoning_content` on `/v1/chat/completions`, the
+//! `reasoning` output item on `/v1/responses`, and the `thinking` block on
+//! `/v1/messages` (issue #2118). On a later request, an assistant message that
+//! has no reasoning of its own gets that text back, exactly as if the client
+//! had echoed it, so the turn re-renders the way it was generated. The chat
+//! route's next-turn warm-up (#1144) renders the reply with the same trace, so
+//! the warmed prefix is the one the filled follow-up renders.
 //!
 //! An entry is found only by a request that could itself have produced it. The
 //! key covers:
@@ -220,27 +224,32 @@ impl ReasoningEchoStore {
     /// an empty assistant turn. The preceding-message digest in the key keeps
     /// such entries apart, so an empty reply only ever matches the exact
     /// conversation that produced it.
+    ///
+    /// Returns whether the trace was stored, which is exactly whether a
+    /// follow-up that echoes `content` alone will get it back. The next-turn
+    /// warm-up (#1144) renders the reply with its reasoning only in that case,
+    /// so the warmed prefix matches the follow-up's filled render.
     pub(crate) fn record(
         &self,
         scope: &ReasoningEchoScope,
         prompt_messages: &[Message],
         content: &str,
         reasoning: &str,
-    ) {
+    ) -> bool {
         if !self.enabled()
             || reasoning.trim().is_empty()
             || prompt_messages
                 .last()
                 .is_some_and(|m| m.role == Role::Assistant)
         {
-            return;
+            return false;
         }
         if entry_cost(reasoning) > self.max_entry_bytes() {
             tracing::debug!(
                 bytes = reasoning.len(),
                 "reasoning echo: trace exceeds the per-entry cap; not stored"
             );
-            return;
+            return false;
         }
         let mut prefix = PrefixDigest::new();
         for message in prompt_messages {
@@ -249,7 +258,7 @@ impl ReasoningEchoStore {
         let key = entry_key(scope, &prefix.digest(), content);
         let reasoning: Arc<str> = Arc::from(reasoning);
         let Ok(mut inner) = self.inner.lock() else {
-            return;
+            return false;
         };
         inner.remove(&key);
         let tick = inner.next_tick;
@@ -258,6 +267,9 @@ impl ReasoningEchoStore {
         inner.recency.insert(tick, key);
         inner.entries.insert(key, Entry { reasoning, tick });
         inner.evict_until_within(self.max_bytes, self.max_entries);
+        // The new entry has the highest tick, so eviction reaches it only when
+        // it alone breaks a bound, which the per-entry cap above rules out.
+        inner.entries.contains_key(&key)
     }
 
     /// Fill `reasoning` on every assistant message that lacks it and whose
@@ -340,6 +352,48 @@ pub(crate) fn chat_scope(
         )
         .to_string(),
     })
+}
+
+/// The copy of `request` the chat template renders: `request` with stored
+/// reasoning filled into its content-only assistant turns when `scope` is set,
+/// otherwise `request` itself.
+///
+/// Every chat-shaped route (`/v1/chat/completions`, and the translated
+/// `/v1/responses` and `/v1/messages` requests) renders this copy and keeps
+/// the unfilled request for the prompt-cache context, tool parsing and
+/// [`record_reply`], so a re-injected turn never changes a later turn's key.
+pub(crate) fn render_request<'r>(
+    state: &super::AppState,
+    scope: Option<&ReasoningEchoScope>,
+    request: &'r ChatCompletionRequest,
+) -> Cow<'r, ChatCompletionRequest> {
+    match scope {
+        Some(scope) => state.reasoning_echo.fill(scope, request),
+        None => Cow::Borrowed(request),
+    }
+}
+
+/// Remember the reasoning a finished plain (non-tool-call) reply returned.
+///
+/// `prompt_messages` are the request's messages as the client sent them,
+/// `content` and `reasoning` are what the client received. Returns whether the
+/// trace was stored (see [`ReasoningEchoStore::record`]); `false` when there is
+/// no scope or no reasoning.
+pub(crate) fn record_reply(
+    state: &super::AppState,
+    scope: Option<&ReasoningEchoScope>,
+    prompt_messages: &[Message],
+    content: &str,
+    reasoning: Option<&str>,
+) -> bool {
+    match (scope, reasoning) {
+        (Some(scope), Some(reasoning)) => {
+            state
+                .reasoning_echo
+                .record(scope, prompt_messages, content, reasoning)
+        }
+        _ => false,
+    }
 }
 
 /// Whether `message` is an assistant turn the store may fill.

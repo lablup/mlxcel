@@ -242,9 +242,21 @@ async fn non_stream_create_response(
 
     let model_id = state.display_model_id().to_string();
     let prompt_cache_enabled = state.prompt_cache.is_some();
+    // Reasoning re-injection for content-only history (#2110, #2118), as on
+    // `/v1/chat/completions`: only the render sees the filled copy; the cache
+    // context, tool parsing and the record read the translated request as the
+    // client sent it. A `reasoning` input item maps to `Message.reasoning`, so
+    // client-sent reasoning still wins.
+    let echo_scope =
+        crate::server::reasoning_echo::chat_scope(&state, &live, &translated.chat_request);
+    let render_request = crate::server::reasoning_echo::render_request(
+        &state,
+        echo_scope.as_ref(),
+        &translated.chat_request,
+    );
     let prepared = prepare_chat_request_with_cache(
         &state.chat_template,
-        &translated.chat_request,
+        &render_request,
         live.chat_template_kwargs.as_ref(),
         prompt_cache_enabled,
         state.should_render_history_boundary_snapshot(),
@@ -343,6 +355,18 @@ async fn non_stream_create_response(
         None
     };
     let (visible_text, _reasoning_text) = split_reasoning(&result.text, parsed_tools.as_ref());
+    // Remember the `reasoning` item this reply carries for a follow-up that
+    // echoes only the message item (#2118). A tool-calling turn is echoed back
+    // with its function calls, which the store never fills.
+    if !parsed_tools.as_ref().is_some_and(|p| p.has_tool_calls()) {
+        crate::server::reasoning_echo::record_reply(
+            &state,
+            echo_scope.as_ref(),
+            &translated.chat_request.messages,
+            &visible_text,
+            _reasoning_text.as_deref(),
+        );
+    }
 
     let completed_at = chrono::Utc::now().timestamp() as f64;
     let response = build_response_object(OutboundContext {
@@ -392,9 +416,21 @@ async fn stream_create_response(
 
     let model_id = state.display_model_id().to_string();
     let prompt_cache_enabled = state.prompt_cache.is_some();
+    // Reasoning re-injection for content-only history (#2110, #2118), as on
+    // `/v1/chat/completions`: only the render sees the filled copy; the cache
+    // context, tool parsing and the record read the translated request as the
+    // client sent it. A `reasoning` input item maps to `Message.reasoning`, so
+    // client-sent reasoning still wins.
+    let echo_scope =
+        crate::server::reasoning_echo::chat_scope(&state, &live, &translated.chat_request);
+    let render_request = crate::server::reasoning_echo::render_request(
+        &state,
+        echo_scope.as_ref(),
+        &translated.chat_request,
+    );
     let prepared = prepare_chat_request_with_cache(
         &state.chat_template,
-        &translated.chat_request,
+        &render_request,
         live.chat_template_kwargs.as_ref(),
         prompt_cache_enabled,
         state.should_render_history_boundary_snapshot(),
@@ -874,6 +910,19 @@ async fn stream_create_response(
         }
 
         let reasoning_text_for_response = em.completed_reasoning_text();
+
+        // Remember the streamed `reasoning` item for a follow-up that echoes
+        // only the message item (#2118), from exactly the text the stream
+        // delivered. Skipped for a tool-calling turn, as above.
+        if !parsed_tools.as_ref().is_some_and(|p| p.has_tool_calls()) {
+            crate::server::reasoning_echo::record_reply(
+                &state_for_task,
+                echo_scope.as_ref(),
+                &translated_for_task.chat_request.messages,
+                &message_text,
+                reasoning_text_for_response.as_deref(),
+            );
+        }
 
         if let Some(parsed) = parsed_tools.as_ref() {
             for call in &parsed.tool_calls {

@@ -663,10 +663,8 @@ pub(crate) async fn non_stream_chat_completion(
     // context, tool parsing and the record below all read the request as the
     // client sent it.
     let echo_scope = crate::server::reasoning_echo::chat_scope(&state, &live, &request);
-    let render_request = match echo_scope.as_ref() {
-        Some(scope) => state.reasoning_echo.fill(scope, &request),
-        None => std::borrow::Cow::Borrowed(&request),
-    };
+    let render_request =
+        crate::server::reasoning_echo::render_request(&state, echo_scope.as_ref(), &request);
     let mut prepared = prepare_chat_request_with_cache(
         &state.chat_template,
         &render_request,
@@ -931,10 +929,10 @@ pub(crate) async fn non_stream_chat_completion(
             || tool_calls::content_with_thinking_block(&result.text, &answer, reasoning.as_deref()),
             reasoning.clone(),
         );
-        record_reasoning_echo(
+        crate::server::reasoning_echo::record_reply(
             &state,
             echo_scope.as_ref(),
-            &request,
+            &request.messages,
             &shaped.content,
             shaped.reasoning_content.as_deref(),
         );
@@ -984,20 +982,32 @@ pub(crate) async fn non_stream_chat_completion(
         reasoning.clone(),
     );
 
-    // Warm the next turn's history prefix in the background (issue #1144).
-    // Only the plain chat path does this: a tool-calling turn is echoed back as
-    // a tool result rather than as assistant content, so the reply text is not
-    // a reliable guess at the next prompt there.
-    if let Some(ref ctx) = warmup_ctx {
-        submit_next_turn_warmup(&state, &live, &request, ctx, &cleaned_text);
-    }
-    record_reasoning_echo(
+    // Record the reply's reasoning first (issue #2110), then warm the next
+    // turn's history prefix in the background (issue #1144). The warm-up
+    // renders what the next turn will render: this turn's filled request plus
+    // the reply, carrying its reasoning exactly when the store kept it for the
+    // follow-up's own fill (#2118). Only the plain chat path warms: a
+    // tool-calling turn is echoed back as a tool result rather than as
+    // assistant content, so the reply text is not a reliable guess at the next
+    // prompt there.
+    let stored = crate::server::reasoning_echo::record_reply(
         &state,
         echo_scope.as_ref(),
-        &request,
+        &request.messages,
         &shaped.content,
         shaped.reasoning_content.as_deref(),
     );
+    if let Some(ref ctx) = warmup_ctx {
+        let reply_reasoning = shaped.reasoning_content.as_deref().filter(|_| stored);
+        submit_next_turn_warmup(
+            &state,
+            &live,
+            &render_request,
+            ctx,
+            &cleaned_text,
+            reply_reasoning,
+        );
+    }
 
     let reasoning_only = log_if_reasoning_only(
         &result.text,
@@ -1025,23 +1035,6 @@ pub(crate) async fn non_stream_chat_completion(
     ))
 }
 
-/// Remember the reasoning a plain (non-tool-call) chat reply returned, so a
-/// client that echoes only the reply's `content` gets it re-injected on the
-/// next turn (issue #2110). `request` is the request as the client sent it.
-fn record_reasoning_echo(
-    state: &AppState,
-    scope: Option<&crate::server::reasoning_echo::ReasoningEchoScope>,
-    request: &ChatCompletionRequest,
-    content: &str,
-    reasoning: Option<&str>,
-) {
-    if let (Some(scope), Some(reasoning)) = (scope, reasoning) {
-        state
-            .reasoning_echo
-            .record(scope, &request.messages, content, reasoning);
-    }
-}
-
 /// Submit a background prompt-cache warm-up for the next turn (issue #1144).
 ///
 /// Called after a healthy completion, once the reply text the client will echo
@@ -1051,13 +1044,18 @@ fn record_reasoning_echo(
 /// still a hit on the next turn.
 ///
 /// `ctx` is the same prompt-cache context the request carried, so the warm-up
-/// lands in the bucket the next turn will look in.
+/// lands in the bucket the next turn will look in. `request` is the request as
+/// it was rendered (with any re-injected reasoning, #2110), and
+/// `reply_reasoning` is the reply's reasoning when the re-echo store kept it,
+/// so the probes render the reply the way a content-only follow-up will after
+/// its own fill (#2118).
 fn submit_next_turn_warmup(
     state: &AppState,
     live: &LiveSettings,
     request: &ChatCompletionRequest,
     ctx: &PromptCacheRequestContext,
     reply: &str,
+    reply_reasoning: Option<&str>,
 ) {
     if state.prompt_cache.is_none()
         || crate::server::prompt_cache::boundary_snapshot_disabled()
@@ -1081,6 +1079,7 @@ fn submit_next_turn_warmup(
         request,
         live.chat_template_kwargs.as_ref(),
         reply,
+        reply_reasoning,
     ) else {
         return;
     };
@@ -1462,10 +1461,8 @@ async fn stream_chat_completion(
     // Reasoning re-injection for content-only history (issue #2110), as in the
     // non-streaming path: only the render sees the filled copy.
     let echo_scope = crate::server::reasoning_echo::chat_scope(&state, &live, &request);
-    let render_request = match echo_scope.as_ref() {
-        Some(scope) => state.reasoning_echo.fill(scope, &request),
-        None => std::borrow::Cow::Borrowed(&request),
-    };
+    let render_request =
+        crate::server::reasoning_echo::render_request(&state, echo_scope.as_ref(), &request);
     let prepared = prepare_chat_request_with_cache(
         &state.chat_template,
         &render_request,
@@ -1631,7 +1628,10 @@ async fn stream_chat_completion(
     // warm-up is actually possible so the ordinary streaming path allocates
     // nothing extra.
     let warmup_state = warmup_enabled.then(|| state.clone());
-    let warmup_request = warmup_enabled.then(|| request.clone());
+    // The warm-up renders the request as this turn rendered it, with any
+    // re-injected reasoning (#2110), because that is what the next turn's own
+    // fill reproduces (#2118).
+    let warmup_request = warmup_enabled.then(|| render_request.as_ref().clone());
     // The streamed reply's reasoning is recorded for the next turn (#2110)
     // under the request's messages as the client sent them.
     let echo_record = echo_scope.map(|scope| (scope, request.messages.clone()));
@@ -1953,9 +1953,10 @@ async fn stream_chat_completion(
             .ok()
             .map(|mut cb| cb.stream_filter.flush())
             .unwrap_or_default();
-        // Copies of the flushed tail for the reasoning re-echo record (#2110),
-        // taken before the chunks below move the strings.
-        let remaining_echo = if echo_enabled {
+        // Copies of the flushed tail for the reasoning re-echo record (#2110)
+        // and the warm-up reply (#1144), taken before the chunks below move
+        // the strings.
+        let remaining_echo = if echo_enabled || warmup_enabled {
             (remaining.reasoning.clone(), remaining.content.clone())
         } else {
             (None, None)
@@ -2013,6 +2014,11 @@ async fn stream_chat_completion(
                 if let Some(text) = remaining_echo.1.as_deref() {
                     cb.echo_content.push_str(text);
                 }
+            }
+            // The flushed tail reached the client as content too, so the
+            // warm-up's guess at the echoed reply must include it.
+            if warmup_enabled && let Some(text) = remaining_echo.1.as_deref() {
+                cb.warmup_content.push_str(text);
             }
         }
 
@@ -2105,11 +2111,28 @@ async fn stream_chat_completion(
             warn_unmet_tool_choice(tool_choice.as_ref(), forced_format, &finish_reason);
         }
 
+        // Record the streamed reasoning for the next turn (issue #2110), from
+        // exactly the deltas the client received. A tool-calling turn is
+        // echoed back with its tool calls, which the store never fills.
+        let mut stored_reasoning: Option<String> = None;
+        if finish_reason != "tool_calls"
+            && result.is_ok()
+            && let Some((scope, messages)) = &echo_record
+            && let Ok(cb) = cb_state.lock()
+            && state
+                .reasoning_echo
+                .record(scope, messages, &cb.echo_content, &cb.echo_reasoning)
+        {
+            stored_reasoning = Some(cb.echo_reasoning.clone());
+        }
+
         // Warm the next turn's history prefix in the background (issue #1144).
         // Submitted after the stream's content is complete and before the
-        // terminal chunks, on the generation thread that is about to go idle.
-        // Skipped when the turn produced tool calls: that reply is echoed back
-        // as a tool result, not as assistant content.
+        // terminal chunks, on the generation thread that is about to go idle,
+        // and after the record above so the reply renders with the reasoning
+        // a content-only follow-up gets back from the store (#2118). Skipped
+        // when the turn produced tool calls: that reply is echoed back as a
+        // tool result, not as assistant content.
         if finish_reason != "tool_calls"
             && let (Some(state), Some(request), Some(ctx)) =
                 (&warmup_state, &warmup_request, &warmup_ctx)
@@ -2118,20 +2141,14 @@ async fn stream_chat_completion(
                 .lock()
                 .map(|cb| cb.warmup_content.clone())
                 .unwrap_or_default();
-            submit_next_turn_warmup(state, &live, request, ctx, &reply);
-        }
-
-        // Record the streamed reasoning for the next turn (issue #2110), from
-        // exactly the deltas the client received. A tool-calling turn is
-        // echoed back with its tool calls, which the store never fills.
-        if finish_reason != "tool_calls"
-            && result.is_ok()
-            && let Some((scope, messages)) = &echo_record
-            && let Ok(cb) = cb_state.lock()
-        {
-            state
-                .reasoning_echo
-                .record(scope, messages, &cb.echo_content, &cb.echo_reasoning);
+            submit_next_turn_warmup(
+                state,
+                &live,
+                request,
+                ctx,
+                &reply,
+                stored_reasoning.as_deref(),
+            );
         }
 
         // Whether the whole stream produced tokens but `delta.content` never
