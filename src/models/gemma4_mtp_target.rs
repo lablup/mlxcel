@@ -814,7 +814,7 @@ impl<'a> MtpTarget for Gemma4MtpTargetAdapter<'a> {
         {
             return Err(
                 mlxcel_core::speculative::mtp::target::TreeVerifyUnsupported {
-                    reason: "Gemma 4 31B exact verification requires a linear draft layout",
+                    reason: "Gemma 4 row-wise exact verification requires a linear draft layout",
                 },
             );
         }

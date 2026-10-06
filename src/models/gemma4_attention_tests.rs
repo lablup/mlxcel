@@ -158,3 +158,85 @@ fn buffered_ring_attention_matches_decode_after_wrap_and_partial_accept() {
         }
     }
 }
+
+/// #2160: the 12B geometry (16 query heads over 8 KV heads at head_dim 256,
+/// windowed) verified row-wise must reproduce classic M=1 decode byte for byte,
+/// with and without the MTP rotating buffer, before and after the window wraps.
+/// On CUDA a batched M=4 block leaves the single-query `sdpa_vector` kernel
+/// classic decode takes at this head_dim, which is what the row-wise path fixes.
+#[test]
+fn gemma4_12b_sliding_verify_rows_match_decode_byte_for_byte() {
+    const WINDOW: i32 = 32;
+    const WIDTH: i32 = 4;
+    const DIM: i32 = 256;
+    const HEADS: i32 = 16;
+    const KV_HEADS: i32 = 8;
+    let make = |heads: i32, count: i32, salt: i32| {
+        let data: Vec<f32> = (0..heads * count * DIM)
+            .map(|i| (((i * 31 + salt * 17) % 127) as f32 - 63.0) / 128.0)
+            .collect();
+        mlxcel_core::astype(
+            &mlxcel_core::from_slice_f32(&data, &[1, heads, count, DIM]),
+            mlxcel_core::dtype::BFLOAT16,
+        )
+    };
+    for buffered in [false, true] {
+        for prefill in [7, WINDOW + 9] {
+            // Unbuffered caches only stay in decode order while the block fits
+            // before the wrap; the buffered ring is the serving layout.
+            if !buffered && prefill + WIDTH > WINDOW {
+                continue;
+            }
+            let mut chain = mlxcel_core::cache::RotatingKVCache::new(WINDOW);
+            let mut block = mlxcel_core::cache::RotatingKVCache::new(WINDOW);
+            chain.update_and_fetch(make(KV_HEADS, prefill, 1), make(KV_HEADS, prefill, 2));
+            block.update_and_fetch(make(KV_HEADS, prefill, 1), make(KV_HEADS, prefill, 2));
+            if buffered {
+                block.enable_speculative_buffer(8).unwrap();
+            }
+            let rounds = if buffered { 12 } else { 1 };
+            for round in 0..rounds {
+                let cursor = block.speculative_ring_cursor();
+                assert_eq!(cursor.is_some(), buffered);
+                let q = make(HEADS, WIDTH, round + 3);
+                let k = make(KV_HEADS, WIDTH, round + 7);
+                let v = make(KV_HEADS, WIDTH, round + 11);
+                let (keys, values) =
+                    block.update_and_fetch(mlxcel_core::copy(&k), mlxcel_core::copy(&v));
+                let actual = attend_verify_rows(&q, &keys, &values, 0.0625, WINDOW, cursor)
+                    .expect("a windowed verify block takes the row-wise path");
+                let kept = if buffered { 2 } else { WIDTH };
+                for row in 0..kept {
+                    let (keys, values) = chain.update_and_fetch(
+                        slice_axis(&k, 2, row, row + 1),
+                        slice_axis(&v, 2, row, row + 1),
+                    );
+                    let expected = mlxcel_core::causal_attention(
+                        &slice_axis(&q, 2, row, row + 1),
+                        &keys,
+                        &values,
+                        0.0625,
+                        0.0,
+                        WINDOW,
+                    );
+                    assert_eq!(
+                        mlxcel_core::array_to_raw_bytes(&slice_axis(&actual, 2, row, row + 1)),
+                        mlxcel_core::array_to_raw_bytes(&expected),
+                        "buffered={buffered}, prefill={prefill}, round={round}, row={row}"
+                    );
+                }
+                if buffered {
+                    block.trim(WIDTH - 2);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn single_full_attention_query_keeps_ordinary_dispatch() {
+    let q = mlxcel_core::zeros(&[1, 2, 1, 512], mlxcel_core::dtype::FLOAT16);
+    let k = mlxcel_core::zeros(&[1, 1, 5, 512], mlxcel_core::dtype::FLOAT16);
+    assert!(attend_verify_rows(&q, &k, &k, 1.0, 0, None).is_none());
+    assert!(attend_verify_rows(&q, &k, &k, 1.0, 0, Some(3)).is_none());
+}

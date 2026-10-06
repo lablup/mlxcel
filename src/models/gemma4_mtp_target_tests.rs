@@ -72,7 +72,7 @@ fn gemma31b_adapter_rejects_branched_tree_before_forward() {
     };
     assert_eq!(
         error.reason,
-        "Gemma 4 31B exact verification requires a linear draft layout"
+        "Gemma 4 row-wise exact verification requires a linear draft layout"
     );
 }
 

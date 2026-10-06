@@ -5,6 +5,8 @@
 #include "../../mlx-cpp/turbo/gpu_backend.h"
 
 #include "mlx/primitives.h"
+// Backend-agnostic CUDA availability probe; non-CUDA builds link the stub.
+#include "mlx/backend/cuda/cuda.h"
 #ifdef MLXCEL_BRIDGE_ROCM_BACKEND
 // `quantized_matmul_runs_dequant_gemm` (lablup/mlxcel#2081).
 #include "mlx/backend/rocm/rocm.h"
@@ -2462,10 +2464,26 @@ std::unique_ptr<MlxArray> compiled_gelu_approx_mlp_forward(
         x_shape.size() >= 2 && x_shape[x_shape.size() - 2] == 1;
     // The pre-#680 always-compiled case, preserved bit-for-bit.
     const bool legacy_compiled_shape = (group_size == 64 && bits == 4);
+    // [#2160] A speculative verify block (M = draft width, at most 8 rows)
+    // must produce each row byte-identical to the single-token decode forward
+    // it stands for. On CUDA the fused compiled activation and the
+    // op-at-a-time `gelu_tanh_approx` below round differently, so a 4-row
+    // Gemma 4 12B verify block (8-bit MLP) diverged from decode at the first
+    // MLP. Rows inside CUDA's qmv window (`M * B < 8`, where each row of the
+    // matmul is bit-identical to its single-row launch) take the decode graph;
+    // the shapeless compile keeps each row's element-wise ops identical to an
+    // `l == 1` call. At 8 rows and up the matmul itself moves to qmm, so
+    // there is nothing to match. Metal keeps the #680 gate unchanged.
+    int64_t rows = 1;
+    for (size_t i = 0; i + 1 < x_shape.size(); ++i) {
+        rows *= x_shape[i];
+    }
+    const bool cuda_decode_sized_block =
+        rows < 8 && mlx::core::cu::is_available();
 
     if (compiled_qgelu_enabled && mode_str == "affine"
         && gate_biases && up_biases && down_biases
-        && (legacy_compiled_shape || is_single_token)) {
+        && (legacy_compiled_shape || is_single_token || cuda_decode_sized_block)) {
         auto& compiled_fn = get_compiled_qgelu_approx_mlp(group_size, bits, mode_str);
 
         auto result = compiled_fn({

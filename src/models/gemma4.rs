@@ -264,12 +264,27 @@ pub struct TextConfig {
 }
 
 impl TextConfig {
+    /// Whether MTP verify must reproduce classic decode one query row at a
+    /// time, which restricts it to B=1 linear blocks on rotating-buffered
+    /// caches. True for the 31B geometry everywhere, and for the 12B geometry
+    /// on CUDA, where an M=4 verify block leaves the single-query
+    /// `sdpa_vector` kernel classic decode uses at head_dim 256 (issue #2160).
     pub(crate) fn mtp_requires_linear_singleton(&self) -> bool {
-        self.num_attention_heads == 32
-            && self.num_key_value_heads == 16
-            && self.num_global_key_value_heads == Some(4)
-            && self.head_dim == 256
-            && self.global_head_dim == Some(512)
+        self.mtp_requires_linear_singleton_on(mlxcel_core::cuda_is_available())
+    }
+
+    /// [`Self::mtp_requires_linear_singleton`] with the backend made explicit,
+    /// so both answers are testable on one host. The 12B arm stays off on
+    /// Metal, whose 12B verify behavior is #1986's subject.
+    pub(crate) fn mtp_requires_linear_singleton_on(&self, cuda: bool) -> bool {
+        let geometry = |heads, kv_heads, global_kv_heads| {
+            self.num_attention_heads == heads
+                && self.num_key_value_heads == kv_heads
+                && self.num_global_key_value_heads == Some(global_kv_heads)
+                && self.head_dim == 256
+                && self.global_head_dim == Some(512)
+        };
+        geometry(32, 16, 4) || (cuda && geometry(16, 8, 1))
     }
 
     pub(crate) fn mtp_probe_prompt_lengths(&self) -> Vec<usize> {
@@ -1678,6 +1693,15 @@ pub struct Attention {
     pub(crate) store_full_length_kv: bool,
     pub(crate) use_k_eq_v: bool,
     pub(crate) window_size: i32,
+    /// MTP verify issues each query row as its own maskless M=1 attention
+    /// over the key prefix classic decode would see. Set from
+    /// [`TextConfig::mtp_requires_linear_singleton`], the same predicate that
+    /// restricts serving to B=1 linear verify on buffered caches.
+    pub(crate) mtp_row_verify: bool,
+    /// Row-wise verify also rotates Q and K one row at a time, so each row
+    /// takes the RoPE kernel decode takes. CUDA only: there MLX's `L = 1`
+    /// and `L > 1` RoPE kernels differ in the last bit (#2160).
+    pub(crate) mtp_row_rope: bool,
 }
 
 impl Attention {
@@ -1959,7 +1983,15 @@ impl Attention {
         // op-at-a-time chain otherwise), just sliced per row, so lockstep
         // rows stay bitwise-identical to the uniform rounds and near-tie
         // argmaxes cannot flip from a kernel-path change.
-        let queries = if let Some(positions) = tree_positions {
+        let row_rope = mtp_verify
+            && self.mtp_row_rope
+            && b == 1
+            && l > 1
+            && tree_positions.is_none()
+            && rope_offsets.is_none();
+        let queries = if row_rope {
+            self.head_rows_like_decode(&q_proj_out, &self.q_norm, self.n_heads, offset)
+        } else if let Some(positions) = tree_positions {
             // Draft-tree verify: each node rotates at its own depth. Runs of
             // consecutive positions go through the same kernels the uniform
             // path uses, so a linear tree is one call and is bit-identical
@@ -2040,7 +2072,16 @@ impl Attention {
             return (self.project_output(&attn_out, b, l), None);
         }
 
-        let (keys, values) = self.project_kv(x, b, l, offset, cache, rope_offsets, tree_positions);
+        let (keys, values) = self.project_kv(
+            x,
+            b,
+            l,
+            offset,
+            cache,
+            rope_offsets,
+            tree_positions,
+            row_rope,
+        );
         let attn_out = self.attend(&queries, &keys, &values, mask, mtp_verify, ring_cursor);
         let stored = if self.store_full_length_kv {
             Some((keys, values))
@@ -2062,43 +2103,28 @@ impl Attention {
     ) -> UniquePtr<MlxArray> {
         let query_len = mlxcel_core::array_shape(queries)[2];
         let local_mask = trim_mask_to_keys(mask, keys, query_len);
-        // The measured 31B geometry uses unfused full attention. M=K and
-        // M=1 then select different matmul reductions (first measured at
-        // layer 41 on the 31B QAT checkpoint). Keep projections batched, but
-        // reproduce each decode query's shape, visible key prefix and maskless
-        // dispatch. An all-zero mask still selects different reductions.
+        // Row-wise MTP verify (31B everywhere, 12B on CUDA; see
+        // `TextConfig::mtp_requires_linear_singleton`). A batched M=K block
+        // and classic M=1 decode select different kernels or reductions:
+        // unfused full attention at head_dim 512 picks different matmul
+        // reductions for M=K and M=1 (first measured at layer 41 on the 31B
+        // QAT checkpoint), and on CUDA only M<4 reaches the fused
+        // `sdpa_vector` kernel classic decode uses at head_dim 256 (#2160).
+        // Keep projections batched, but reproduce each decode query's shape,
+        // visible key prefix and maskless dispatch. An all-zero mask still
+        // selects different reductions.
         if mtp_verify
-            && self.n_heads == 32
-            && self.n_kv_heads == 4
-            && self.head_dim == 512
-            && self.window_size == 0
-            && query_len > 1
-        {
-            return verify_attention::attend_query_rows(
-                queries,
-                keys,
-                values,
-                None,
-                self.scale,
-                self.window_size,
-            );
-        }
-
-        if mtp_verify
-            && self.n_heads == 32
-            && self.n_kv_heads == 16
-            && self.head_dim == 256
-            && self.window_size > 0
-            && let Some(cursor) = ring_cursor
-        {
-            return verify_attention::attend_ring_rows(
+            && self.mtp_row_verify
+            && let Some(rows) = verify_attention::attend_verify_rows(
                 queries,
                 keys,
                 values,
                 self.scale,
                 self.window_size,
-                cursor,
-            );
+                ring_cursor,
+            )
+        {
+            return rows;
         }
 
         // When mask was discarded (undersized) or originally None,
@@ -2140,6 +2166,7 @@ impl Attention {
         self.o_proj.forward(&attn_out)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn project_kv(
         &self,
         x: &MlxArray,
@@ -2149,6 +2176,7 @@ impl Attention {
         cache: &mut dyn CacheInterface,
         rope_offsets: Option<&[i32]>,
         tree_positions: Option<&[i32]>,
+        row_rope: bool,
     ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
         let (raw_keys, raw_values) = match &self.projection {
             AttentionProjection::Fused(proj) => {
@@ -2185,7 +2213,9 @@ impl Attention {
             .k_norm
             .as_ref()
             .expect("k_norm must be Some for non-KV-shared layers");
-        let keys = if let Some(positions) = tree_positions {
+        let keys = if row_rope {
+            self.head_rows_like_decode(&raw_keys, k_norm, self.n_kv_heads, offset)
+        } else if let Some(positions) = tree_positions {
             if let Some(ref freqs) = self.proportional_rope_freqs {
                 let rotated_dims = 2 * ((self.proportional_partial_rotary_factor as f64
                     * self.head_dim as f64
@@ -2597,6 +2627,9 @@ impl Attention {
             } else {
                 0
             },
+            mtp_row_verify: config.mtp_requires_linear_singleton(),
+            mtp_row_rope: config.mtp_requires_linear_singleton()
+                && mlxcel_core::cuda_is_available(),
         })
     }
 }
@@ -5095,7 +5128,8 @@ impl Gemma4Wrapper {
             .replace_internal(self.make_configured_caches());
     }
 
-    /// The 31B attention geometry is validated only for B=1 linear verify.
+    /// Row-wise exact verify (31B everywhere, 12B on CUDA) is validated only
+    /// for B=1 linear verify.
     /// Used by: MTP scheduler dispatch and direct tree-target capability checks.
     pub fn mtp_requires_linear_singleton(&self) -> bool {
         self.model.config.mtp_requires_linear_singleton()

@@ -523,7 +523,7 @@ const REACHABLE_PAIRINGS: &[Pairing] = &[
     Pairing {
         name: "Gemma 4 Unified 12B + MTP assistant (b=4)",
         target_dir: "gemma-4-12b-it-4bit",
-        draft_dir: "gemma-4-12B-it-assistant-4bit",
+        draft_dir: "gemma-4-12b-it-assistant-4bit",
         kind: "mtp",
         block_size: 4,
     },

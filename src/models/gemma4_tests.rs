@@ -1603,22 +1603,28 @@ mod mtp_hooks {
 }
 
 #[test]
-fn long_buffered_probe_is_limited_to_measured_31b_geometry() {
+fn linear_singleton_geometry_is_31b_everywhere_and_12b_on_cuda() {
     let args = cache_isolation::make_test_gemma4_args_with_layer("sliding_attention");
     let mut config = parse_text_config(args.text_config);
     config.sliding_window = 1024;
-    for (heads, kv, global_kv, dim, global_dim, expected) in [
-        (32, 16, 4, 256, 512, true), // measured 31B
-        (16, 8, 1, 256, 512, false), // Unified 12B
-        (32, 8, 2, 256, 512, false), // different KV geometry
-        (32, 16, 4, 128, 512, false),
-        (32, 16, 4, 256, 256, false),
+    let cuda = mlxcel_core::cuda_is_available();
+    for (heads, kv, global_kv, dim, global_dim, on_metal, on_cuda) in [
+        (32, 16, 4, 256, 512, true, true),  // measured 31B
+        (16, 8, 1, 256, 512, false, true),  // 12B: CUDA only (#2160)
+        (32, 8, 2, 256, 512, false, false), // different KV geometry
+        (16, 8, 2, 256, 512, false, false),
+        (16, 8, 1, 128, 512, false, false),
+        (32, 16, 4, 128, 512, false, false),
+        (32, 16, 4, 256, 256, false, false),
     ] {
         config.num_attention_heads = heads;
         config.num_key_value_heads = kv;
         config.num_global_key_value_heads = Some(global_kv);
         config.head_dim = dim;
         config.global_head_dim = Some(global_dim);
+        assert_eq!(config.mtp_requires_linear_singleton_on(false), on_metal);
+        assert_eq!(config.mtp_requires_linear_singleton_on(true), on_cuda);
+        let expected = if cuda { on_cuda } else { on_metal };
         assert_eq!(config.mtp_requires_linear_singleton(), expected);
         assert_eq!(
             config.mtp_probe_prompt_lengths(),

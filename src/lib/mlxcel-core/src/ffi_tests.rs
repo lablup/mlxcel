@@ -2240,8 +2240,9 @@ fn compiled_qgelu_mlp_forward_8bit_decode_matches_reference() {
 
 #[test]
 fn compiled_qgelu_mlp_forward_8bit_multi_token_takes_fallback_and_matches_reference() {
-    // Same group_size=64/bits=8 weights, but a `[1, 3, H]` multi-token input:
-    // `is_single_token` is false and this is not the legacy 4-bit shape, so
+    // Same group_size=64/bits=8 weights, but a `[1, 16, H]` multi-token input:
+    // `is_single_token` is false, this is not the legacy 4-bit shape, and 16
+    // rows is past the CUDA verify-block window (#2160), so
     // `compiled_gelu_approx_mlp_forward` must take the op-at-a-time fallback
     // (prefill stays off the new 8-bit fusion, per the #680 gating). Assert
     // the fallback output still matches the reference, proving the compiled
@@ -2256,7 +2257,7 @@ fn compiled_qgelu_mlp_forward_8bit_multi_token_takes_fallback_and_matches_refere
     let (up_w, up_s, up_b) = random_quantized_weight(intermediate, hidden, group_size, bits);
     let (down_w, down_s, down_b) = random_quantized_weight(hidden, intermediate, group_size, bits);
 
-    let x = unsafe { random_normal(&[1, 3, hidden], dtype::FLOAT32, std::ptr::null()) };
+    let x = unsafe { random_normal(&[1, 16, hidden], dtype::FLOAT32, std::ptr::null()) };
 
     let fallback_out = unsafe {
         compiled_gelu_approx_mlp_forward(
@@ -2282,7 +2283,7 @@ fn compiled_qgelu_mlp_forward_8bit_multi_token_takes_fallback_and_matches_refere
 
     eval(&fallback_out);
     eval(&reference);
-    assert_eq!(array_shape(&fallback_out), vec![1, 3, hidden]);
+    assert_eq!(array_shape(&fallback_out), vec![1, 16, hidden]);
     assert_eq!(array_shape(&fallback_out), array_shape(&reference));
 
     let close = allclose(&fallback_out, &reference, 1e-5, 1e-5);
@@ -4557,6 +4558,114 @@ fn qmv_multirow_matches_per_row_qmv_bitwise() {
                     &full_bytes[j as usize * row_nbytes..(j as usize + 1) * row_nbytes],
                     "row {j} of multirow [{rows}x{k}] {bits}-bit gs{group_size} \
                      diverged from per-row qmv"
+                );
+            }
+        }
+    }
+}
+
+/// [#2160] Multirow qmv parity at Gemma 4 12B MLP shapes, in the `[1, 4, K]`
+/// layout an MTP verify block hands the MLP. Gemma 4 12B MTP verify needs each
+/// verify row to be byte-equal to the single-token `[1, 1, K]` decode forward;
+/// the checkpoint mixes 8-bit (MLP) and 4-bit (attention) affine projections at
+/// group 64 over bf16 activations, so both widths are checked at the up
+/// (3840 -> 15360) and down (15360 -> 3840) shapes.
+#[cfg(feature = "cuda")]
+#[test]
+fn qmv_multirow_matches_per_row_qmv_bitwise_gemma4_12b_mlp_shapes() {
+    random_seed(2160);
+    const ROWS: i32 = 4;
+    for &bits in &[8, 4] {
+        for &(k, n) in &[(3840, 15360), (15360, 3840)] {
+            let group_size = 64;
+            let (w, s, b) = random_quantized_weight(n, k, group_size, bits);
+            let x_f32 = unsafe { random_normal(&[1, ROWS, k], dtype::FLOAT32, std::ptr::null()) };
+            let x = astype(&x_f32, dtype::BFLOAT16);
+            eval(&x);
+            let qmm = |input: &MlxArray| {
+                let out = unsafe {
+                    quantized_matmul(
+                        input,
+                        &w,
+                        &s,
+                        b.as_ref().unwrap() as *const MlxArray,
+                        true,
+                        group_size,
+                        bits,
+                        "affine",
+                    )
+                };
+                eval(&out);
+                out
+            };
+            let block = qmm(&x);
+            assert_eq!(array_shape(&block), vec![1, ROWS, n]);
+            for j in 0..ROWS {
+                let row = qmm(&slice(&x, &[0, j, 0], &[1, j + 1, k]));
+                let block_row = slice(&block, &[0, j, 0], &[1, j + 1, n]);
+                assert_eq!(
+                    array_to_raw_bytes(&row),
+                    array_to_raw_bytes(&block_row),
+                    "row {j} of [1, {ROWS}, {k}] -> {n} {bits}-bit gs{group_size} bf16 \
+                     diverged from the single-row qmv"
+                );
+            }
+        }
+    }
+}
+
+/// [#2160] A small multi-row block through the quantized GeGLU MLP must give
+/// each row the bytes the single-token decode call gives it. On CUDA the 8-bit
+/// multi-token call used to take the op-at-a-time activation while decode took
+/// the fused compiled one, and the two round differently, which failed Gemma 4
+/// 12B's MTP verify-vs-chain probe at the first MLP.
+#[cfg(feature = "cuda")]
+#[test]
+fn compiled_qgelu_mlp_small_block_rows_match_single_token_bitwise() {
+    random_seed(2161);
+    let group_size = 64;
+    let hidden = 256;
+    let intermediate = 512;
+    for &bits in &[8, 4] {
+        let (gate_w, gate_s, gate_b) =
+            random_quantized_weight(intermediate, hidden, group_size, bits);
+        let (up_w, up_s, up_b) = random_quantized_weight(intermediate, hidden, group_size, bits);
+        let (down_w, down_s, down_b) =
+            random_quantized_weight(hidden, intermediate, group_size, bits);
+        let mlp = |x: &MlxArray| {
+            let out = unsafe {
+                compiled_gelu_approx_mlp_forward(
+                    x,
+                    &gate_w,
+                    &gate_s,
+                    gate_b.as_ref().unwrap() as *const MlxArray,
+                    &up_w,
+                    &up_s,
+                    up_b.as_ref().unwrap() as *const MlxArray,
+                    &down_w,
+                    &down_s,
+                    down_b.as_ref().unwrap() as *const MlxArray,
+                    group_size,
+                    bits,
+                    "affine",
+                )
+            };
+            eval(&out);
+            out
+        };
+        // Inside CUDA's qmv window (`M * B < 8`); 8 rows take qmm.
+        for &rows in &[2i32, 4, 7] {
+            let x_f32 =
+                unsafe { random_normal(&[1, rows, hidden], dtype::FLOAT32, std::ptr::null()) };
+            let x = astype(&x_f32, dtype::BFLOAT16);
+            eval(&x);
+            let block = mlp(&x);
+            for j in 0..rows {
+                let row = mlp(&slice(&x, &[0, j, 0], &[1, j + 1, hidden]));
+                assert_eq!(
+                    array_to_raw_bytes(&row),
+                    array_to_raw_bytes(&slice(&block, &[0, j, 0], &[1, j + 1, hidden])),
+                    "{bits}-bit row {j} of a {rows}-row block diverged from single-token decode"
                 );
             }
         }
