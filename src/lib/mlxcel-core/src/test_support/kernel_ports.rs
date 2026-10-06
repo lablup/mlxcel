@@ -74,6 +74,26 @@ pub(crate) fn skip_for_missing_rocm_port(kernels: &str, available: bool, test: &
     true
 }
 
+/// True, after printing why, when the backend is ROCm on a device whose
+/// wavefront is not 32 lanes, where every wave32-only port is held back
+/// (lablup/mlxcel#2147). A parity test that would otherwise assert its
+/// wave32-only port is present returns early on this instead.
+pub(crate) fn skip_for_wave32_only_rocm_port(kernels: &str) -> bool {
+    if gpu_backend_kind() != GpuBackendKind::Rocm {
+        return false;
+    }
+    let width = crate::ffi::rocm_device_warp_size();
+    if width == 32 {
+        return false;
+    }
+    let _ = writeln!(
+        std::io::stderr(),
+        "skipping: the {kernels} ROCm port is wave32-only and this device's wavefront is \
+         {width} lanes, so it is held back (lablup/mlxcel#2147)"
+    );
+    true
+}
+
 /// Shared body of the `require_paged_*_port!` macros.
 macro_rules! require_port {
     ($kernels:literal, $predicate:ident) => {

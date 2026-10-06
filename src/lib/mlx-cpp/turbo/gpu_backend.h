@@ -84,7 +84,7 @@ bool custom_kernels_available();
 // width could not be read and counts as "not 32".
 //
 // Pure so it can be tested without a wave64 device; `port_for` in
-// `kernel_port.cpp` is its only production caller.
+// `kernel_port.cpp` is its only caller outside the test bridge.
 constexpr bool rocm_port_allowed(bool any_wave_size, int warp_size) {
   return any_wave_size || warp_size == 32;
 }

@@ -407,6 +407,9 @@ impl MambaBlock {
                 state_in,
                 &mut y,
                 &mut state_out,
+            )
+            .expect(
+                "mamba1_scan_kernel_accepts() checked the port, so the launcher must not refuse",
             );
             (y, Some(state_out))
         } else if t == 1 {

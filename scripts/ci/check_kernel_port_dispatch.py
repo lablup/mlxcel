@@ -69,9 +69,11 @@ And for the ROCm wavefront hold (issue #2147):
    (CDNA) device, where no one has run it, on the strength of its HIP body
    having no lane-level operation. That claim is checked here rather than
    trusted: the marked tables are pinned in ``EXPECTED_ANY_WAVE`` with the HIP
-   source each compiles, a ``fast::hip_kernel`` call in the table's file must
-   compile that source, and the source (comments stripped) must contain no
-   shuffle, ballot or other lane intrinsic (``LANE_OPS``). Marking another table, or adding a shuffle to
+   source each compiles, the table's ``.rocm`` getter is followed to its
+   holder and must compile exactly that source with no further arguments (no
+   unscanned header), and the source (comments stripped, one raw literal) must
+   contain no shuffle, ballot, lane builtin or 32-lane index arithmetic
+   (``LANE_OPS``). Marking another table, or adding a shuffle to
    a marked one, fails until the pin is reviewed. The ``#error`` guards on
    ``__AMDGCN_WAVEFRONT_SIZE`` cannot do this job: AMD clang 23 defines neither
    spelling of the macro.
@@ -79,7 +81,7 @@ And for the ROCm wavefront hold (issue #2147):
    width the port tables are checked against, is called only from tests: a
    Rust file under ``tests/``, a ``*_tests.rs`` module or ``test_support/``.
    Its bridge declaration and C++ definitions are the only other places it
-   may appear (``SEAM_DEFINITIONS``).
+   may appear, an exact number of times per file (``SEAM_DEFINITIONS``).
 """
 
 from __future__ import annotations
@@ -131,23 +133,34 @@ EXPECTED_ANY_WAVE = {
     "xielu_ports": "XIELU_HIP_SOURCE",
 }
 
-# Cross-lane operations a body correct at any wavefront width cannot use.
+# Cross-lane operations a body correct at any wavefront width cannot use: the
+# HIP shuffle, vote and mask intrinsics, the AMDGCN lane builtins they lower
+# to, the wavefront-size macros and constants, and hard-coded 32-lane index
+# arithmetic on `threadIdx.x`.
 LANE_OPS = re.compile(
     r"__shfl\w*|__ballot\w*|__activemask|\b__any(?:_sync)?\s*\(|"
     r"\b__all(?:_sync)?\s*\(|__lane_id|\bwarpSize\b|__reduce_\w+_sync|"
-    r"__builtin_amdgcn_(?:ds_swizzle|mov_dpp|update_dpp|readlane|readfirstlane|"
-    r"ds_bpermute|ds_permute)")
+    r"__syncwarp|__match_\w+|\b__fns\w*\s*\(|__lanemask_\w+|__hip_move_dpp|"
+    r"__hip_ds_\w+|__AMDGCN_WAVEFRONT_SIZE\w*|"
+    r"__builtin_amdgcn_(?:ds_swizzle|mov_dpp\w*|update_dpp|readlane|"
+    r"readfirstlane|writelane|ds_bpermute|ds_permute|ballot\w*|permlane\w*|"
+    r"mbcnt_\w+|wavefrontsize|icmp|fcmp|wave_\w+)|"
+    r"threadIdx\.x\s*(?:%\s*32u?|&\s*31u?|>>\s*5u?|/\s*32u?)\b")
 ANY_WAVE_FLAG = re.compile(r"\.rocm_any_wave_size\s*=\s*true")
 CPP_LINE_COMMENT = re.compile(r"//[^\n]*")
 CPP_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)
 
-# The test seam of rule 6, and the files that declare or define it.
+# The test seam of rule 6, and how many times each file that declares or
+# defines it may name it outside comments: the declaration in each header, the
+# definition in each .cpp, and the bridge wrapper's one forwarding call. An
+# exact count rather than a file exemption, so a production call added
+# anywhere in those (large) files still fails.
 SEAM = re.compile(r"\bset_rocm_port_warp_size_for_tests\b")
 SEAM_DEFINITIONS = {
-    "src/lib/mlx-cpp/turbo/gpu_backend.h",
-    "src/lib/mlx-cpp/turbo/gpu_backend.cpp",
-    "src/lib/mlxcel-core/cpp/mlx_cxx_bridge.h",
-    "src/lib/mlxcel-core/cpp/mlx_cxx_bridge.cpp",
+    "src/lib/mlx-cpp/turbo/gpu_backend.h": 1,
+    "src/lib/mlx-cpp/turbo/gpu_backend.cpp": 1,
+    "src/lib/mlxcel-core/cpp/mlx_cxx_bridge.h": 1,
+    "src/lib/mlxcel-core/cpp/mlx_cxx_bridge.cpp": 2,
 }
 # The cxx bridge declaration in mlxcel-core's lib.rs.
 SEAM_DECLARATION = re.compile(r"\bfn\s+set_rocm_port_warp_size_for_tests\s*\(")
@@ -229,8 +242,85 @@ def hip_source_body(root: pathlib.Path, name: str) -> tuple[str, str] | None:
         end = text.find(f"){m.group(1)}\"", m.end())
         if end < 0:
             continue
+        rest = text[end + len(m.group(1)) + 2:].lstrip()
+        if not rest.startswith(";"):
+            # Adjacent literals concatenate; only the first would be scanned.
+            return None
         return text[m.end():end], path.relative_to(root).as_posix()
     return None
+
+
+def braced_block(text: str, open_idx: int) -> str:
+    """The text from the brace at ``open_idx`` to its matching close."""
+    depth = 0
+    for i in range(open_idx, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[open_idx:i + 1]
+    return text[open_idx:]
+
+
+def function_body(text: str, name: str) -> str | None:
+    """The body of the function or struct ``name`` defined in ``text``."""
+    # A struct first: its constructor would otherwise match as a function.
+    for pattern in (rf"\bstruct\s+{name}\b[^;{{]*\{{",
+                    rf"\b{name}\s*\([^;{{}}]*\)\s*(?:const\s*)?\{{"):
+        m = re.search(pattern, text)
+        if m:
+            return braced_block(text, m.end() - 1)
+    return None
+
+
+def rocm_entry_sources(text: str, table: str) -> tuple[list[str], str | None]:
+    """HIP sources compiled by a table's ``.rocm`` getter, and any problem.
+
+    Follows the getter named in the ``.rocm`` lambda to its definition, the
+    ``static <Holder> holder`` it returns, the holder struct, and one level of
+    helper functions those call, collecting every ``fast::hip_kernel`` call.
+    """
+    entry = re.search(r"\.rocm\s*=\s*\+\[\]\(\)[^{]*\{(.*?)\}\s*,", table, re.S)
+    if not entry:
+        return [], "no .rocm lambda to follow"
+    getter = re.search(r"\b(get_\w+)\s*(?:<[^>]*>)?\s*\(\s*\)", entry.group(1))
+    if not getter:
+        return [], "the .rocm lambda calls no get_*() holder accessor"
+    bodies: list[str] = []
+    getter_body = function_body(text, getter.group(1))
+    if getter_body is None:
+        return [], f"{getter.group(1)} is not defined in this file"
+    bodies.append(getter_body)
+    for holder in re.findall(r"\bstatic\s+(\w+)\s*\*?\s*holder\b", getter_body):
+        body = function_body(text, holder)
+        if body:
+            bodies.append(body)
+    # One level of helpers (for example a `make_*_kernel(backend)` factory).
+    for body in list(bodies):
+        for call in set(re.findall(r"\b([a-z_]\w*)\s*\(", body)):
+            if call in {"get", "if", "for", "while", "switch", "return",
+                        "sizeof", "static_cast", "call_once"}:
+                continue
+            helper = function_body(text, call)
+            if helper and helper not in bodies and "hip_kernel" in helper:
+                bodies.append(helper)
+    sources: list[str] = []
+    for body in bodies:
+        for call in LAUNCHES.finditer(body):
+            if call.group(1) != "hip":
+                continue
+            named = re.search(r"\b([A-Z][A-Z0-9_]*_HIP_SOURCE)\b(\s*\)?\s*\)\s*;)?",
+                              body[call.end():call.end() + 800])
+            if not named:
+                return [], "its fast::hip_kernel call names no *_HIP_SOURCE constant"
+            if not named.group(2):
+                return [], (f"its fast::hip_kernel call passes arguments after "
+                            f"{named.group(1)} (a header?), which this check "
+                            "does not scan for lane operations")
+            if named.group(1) not in sources:
+                sources.append(named.group(1))
+    return sources, None
 
 
 def check_any_wave_tables(root: pathlib.Path) -> tuple[list[str], int]:
@@ -262,21 +352,25 @@ def check_any_wave_tables(root: pathlib.Path) -> tuple[list[str], int]:
                 if not named:
                     continue
                 source = named.group(1)
-            # The pinned source must be what a `fast::hip_kernel` call in this
-            # file compiles, so the pin cannot point at an unrelated body.
-            compiled = any(
-                re.search(rf"\b{source}\b", text[c.end():c.end() + 800])
-                for c in LAUNCHES.finditer(text) if c.group(1) == "hip")
-            if not compiled:
+            # The pinned source must be the one the table's own `.rocm` getter
+            # compiles, followed from the getter to its holder, so pointing the
+            # entry at another holder cannot pass on the strength of the pinned
+            # body still being compiled elsewhere in the file.
+            compiled, problem = rocm_entry_sources(text, m.group(0))
+            if problem:
+                failures.append(f"{rel}:{line}: {name}: {problem}")
+                continue
+            if compiled != [source]:
                 failures.append(
-                    f"{rel}:{line}: {name} is pinned to {source}, but no "
-                    "fast::hip_kernel call in this file compiles it")
+                    f"{rel}:{line}: {name} is pinned to {source}, but its .rocm "
+                    f"entry compiles {compiled or 'no HIP source'}")
                 continue
             found = hip_source_body(root, source)
             if found is None:
                 failures.append(
                     f"{rel}:{line}: {name}'s HIP source {source} has no "
-                    "raw-string definition under src/lib")
+                    "single raw-string definition under src/lib (a source "
+                    "split across concatenated literals is not scanned)")
                 continue
             body, where = found
             code = CPP_LINE_COMMENT.sub("", CPP_BLOCK_COMMENT.sub("", body))
@@ -304,15 +398,16 @@ def check_seam_callers(root: pathlib.Path) -> list[str]:
         if path.suffix not in {".cpp", ".h", ".hpp", ".cc", ".hip", ".mm"}:
             continue
         rel = path.relative_to(root).as_posix()
-        if rel in SEAM_DEFINITIONS:
-            continue
         text = path.read_text(encoding="utf-8", errors="replace")
         code = CPP_LINE_COMMENT.sub("", CPP_BLOCK_COMMENT.sub("", text))
-        if SEAM.search(code):
+        found = len(SEAM.findall(code))
+        allowed = SEAM_DEFINITIONS.get(rel, 0)
+        if found > allowed:
             failures.append(
                 f"{rel}: calls set_rocm_port_warp_size_for_tests outside its "
-                "definition; it is a test seam, and production code must read "
-                "the hardware wavefront width")
+                f"definition ({found} uses, {allowed} expected); it is a test "
+                "seam, and production code must read the hardware wavefront "
+                "width")
     rust = []
     for pattern in ("src/**/*.rs", "examples/**/*.rs", "benches/**/*.rs", "crates/**/*.rs"):
         rust += sorted(root.glob(pattern))

@@ -1907,6 +1907,12 @@ mod ffi {
         /// the final state `[B, D, N]`: float32 on Metal, x's dtype on CUDA,
         /// where every step rounds like the graph scan.
         /// Used by: Jamba, Mamba, Falcon-Mamba
+        ///
+        /// `Result` because the launcher refuses through `select_kernel_port`
+        /// where the backend has no usable port (for example a wave64 ROCm
+        /// device, #2147); a throw across a non-`Result` extern would end the
+        /// process. Callers gate on `mamba1_scan_kernel_accepts`, which reads
+        /// the same tables, and `expect` the launch.
         #[allow(clippy::too_many_arguments)]
         fn mamba1_selective_scan(
             x: &MlxArray,
@@ -1918,7 +1924,7 @@ mod ffi {
             state_in: &MlxArray,
             y: &mut UniquePtr<MlxArray>,
             state_out: &mut UniquePtr<MlxArray>,
-        );
+        ) -> Result<()>;
 
         /// Fused MoE expert kernel for single-token decode. gate/up use
         /// `gu_bits` (power-of-2: 4/8), down uses `d_bits` (4/8/6); group_size

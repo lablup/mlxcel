@@ -83,6 +83,9 @@ fn gpu_kernel_or_skip() -> Option<crate::streams::DefaultDeviceLock> {
         eprintln!("skipping: no GPU backend, so no fused_add_rms_norm port");
         return None;
     }
+    if crate::test_support::kernel_ports::skip_for_wave32_only_rocm_port("fused_add_rms_norm") {
+        return None;
+    }
     let lock = crate::streams::lock_default_device();
     assert!(
         crate::fused_add_rms_norm_available(),

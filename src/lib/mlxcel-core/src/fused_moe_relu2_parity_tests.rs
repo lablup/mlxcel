@@ -192,7 +192,12 @@ fn relu2_backend_or_skip() -> Option<&'static str> {
     use crate::hardware::{GpuBackendKind, gpu_backend_kind};
     let name = match gpu_backend_kind() {
         GpuBackendKind::Metal => "metal",
-        GpuBackendKind::Rocm => "rocm",
+        GpuBackendKind::Rocm => {
+            if crate::test_support::kernel_ports::skip_for_wave32_only_rocm_port("relu2 MoE") {
+                return None;
+            }
+            "rocm"
+        }
         GpuBackendKind::Cuda => {
             assert!(
                 !crate::fused_moe_relu2_kernels_available(),

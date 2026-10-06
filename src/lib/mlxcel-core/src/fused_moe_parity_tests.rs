@@ -375,7 +375,12 @@ fn gpu_backend_or_skip() -> Option<&'static str> {
     let name = match gpu_backend_kind() {
         GpuBackendKind::Metal => "metal",
         GpuBackendKind::Cuda => "cuda",
-        GpuBackendKind::Rocm => "rocm",
+        GpuBackendKind::Rocm => {
+            if crate::test_support::kernel_ports::skip_for_wave32_only_rocm_port("fused MoE") {
+                return None;
+            }
+            "rocm"
+        }
         GpuBackendKind::None => {
             // The kernels JIT through mx.fast.{metal,cuda,hip}_kernel; a
             // CPU-only build cannot launch either body.

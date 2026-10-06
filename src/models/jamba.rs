@@ -596,6 +596,9 @@ impl JambaMambaMixer {
                 state_in,
                 &mut y,
                 &mut state_out,
+            )
+            .expect(
+                "mamba1_scan_kernel_accepts() checked the port, so the launcher must not refuse",
             );
             return (y, state_out);
         }

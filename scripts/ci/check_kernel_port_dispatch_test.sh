@@ -78,6 +78,8 @@ PY
 norm="src/lib/mlx-cpp/turbo/fused_norm.cpp"
 gumbel_hip="src/lib/mlx-cpp/turbo/sampling_gumbel_hip.h"
 rejection="src/lib/mlx-cpp/turbo/sampling_rejection.cpp"
+kernels="src/lib/mlxcel-core/cpp/mlx_cxx_kernels.cpp"
+bridge="src/lib/mlxcel-core/cpp/mlx_cxx_bridge.cpp"
 norm_rocm_entry='            return get_fused_norm_kernel_hip().get();
         },'
 gumbel_body_start='GUMBEL_MAX_SAMPLE_HIP_SOURCE = R"('
@@ -95,7 +97,6 @@ replace_in "$dir/$norm" "$norm_rocm_entry" "$norm_rocm_entry
         .rocm_any_wave_size = true,"
 if run_case mark-shuffle-port "$dir" 1; then
   assert_contains mark-shuffle-port "fused_norm_ports is marked rocm_any_wave_size, but FUSED_ADD_RMS_NORM_HIP_SOURCE"
-  assert_contains mark-shuffle-port "uses \`__shfl_xor\`"
   assert_contains mark-shuffle-port "not in EXPECTED_ANY_WAVE"
 fi
 
@@ -113,6 +114,29 @@ replace_in "$dir/$gumbel_hip" "$gumbel_body_start" "$gumbel_body_start
     unsigned long long probe = __ballot(1);"
 if run_case ballot-in-marked-body "$dir" 1; then
   assert_contains ballot-in-marked-body "uses \`__ballot\`"
+fi
+
+# The AMDGCN builtin a ballot lowers to is caught too.
+dir="$(make_tree builtin-ballot-in-marked-body)"
+replace_in "$dir/$gumbel_hip" "$gumbel_body_start" "$gumbel_body_start
+    unsigned probe = __builtin_amdgcn_ballot_w32(true);"
+if run_case builtin-ballot-in-marked-body "$dir" 1; then
+  assert_contains builtin-ballot-in-marked-body "uses \`__builtin_amdgcn_ballot_w32\`"
+fi
+
+# Pointing a marked table's .rocm entry at another holder fails, although the
+# pinned source is still compiled elsewhere in the same file.
+dir="$(make_tree marked-entry-swapped)"
+replace_in "$dir/$kernels" "            return get_xielu_kernel_hip().get();" "            return get_ssm_kernel_hip().get();"
+if run_case marked-entry-swapped "$dir" 1; then
+  assert_contains marked-entry-swapped "xielu_ports is pinned to XIELU_HIP_SOURCE, but its .rocm entry compiles ['SSM_HIP_SOURCE']"
+fi
+
+# A marked holder that passes more after the source (a header) is not trusted.
+dir="$(make_tree marked-with-header)"
+replace_in "$dir/$kernels" "                    XIELU_HIP_SOURCE);" "                    XIELU_HIP_SOURCE, XIELU_HEADER);"
+if run_case marked-with-header "$dir" 1; then
+  assert_contains marked-with-header "passes arguments after XIELU_HIP_SOURCE"
 fi
 
 # A lane intrinsic named only in a comment inside the body is not an operation.
@@ -147,6 +171,14 @@ replace_in "$dir/src/lib/mlx-cpp/turbo/kernel_port.cpp" "namespace mlxcel {" "na
 static int forced = (set_rocm_port_warp_size_for_tests(32), 0);"
 if run_case seam-in-cpp "$dir" 1; then
   assert_contains seam-in-cpp "kernel_port.cpp: calls set_rocm_port_warp_size_for_tests outside its definition"
+fi
+
+# ... including a second call inside the bridge file that defines it ...
+dir="$(make_tree seam-in-bridge)"
+replace_in "$dir/$bridge" "int32_t rocm_device_warp_size() {" "int32_t rocm_device_warp_size() {
+    mlxcel::set_rocm_port_warp_size_for_tests(32);"
+if run_case seam-in-bridge "$dir" 1; then
+  assert_contains seam-in-bridge "mlx_cxx_bridge.cpp: calls set_rocm_port_warp_size_for_tests outside its definition (3 uses, 2 expected)"
 fi
 
 # ... and a test module may call it.

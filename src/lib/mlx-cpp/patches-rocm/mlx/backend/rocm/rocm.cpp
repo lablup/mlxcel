@@ -22,13 +22,17 @@ int device_warp_size() {
   if (!is_available()) {
     return 0;
   }
+  // An error already pending on this thread belongs to someone else; only
+  // the one this query raises is cleared, so neither is misreported.
+  hipError_t pending = hipPeekAtLastError();
   int dev = 0;
   int warp = 0;
   if (hipGetDevice(&dev) != hipSuccess ||
       hipDeviceGetAttribute(&warp, hipDeviceAttributeWarpSize, dev) !=
           hipSuccess) {
-    // Clear the error so a later, unrelated HIP check does not report it.
-    (void)hipGetLastError();
+    if (pending == hipSuccess) {
+      (void)hipGetLastError();
+    }
     return 0;
   }
   return warp;

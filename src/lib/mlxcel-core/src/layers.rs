@@ -9923,13 +9923,13 @@ mod residual_add3_layer_norm_tests {
             );
             return;
         }
-        if matches!(
-            gpu_backend_kind(),
-            GpuBackendKind::Metal | GpuBackendKind::Rocm
-        ) {
+        // ROCm's port is wave32-only and held back on a wave64 device (#2147).
+        if gpu_backend_kind() == GpuBackendKind::Metal
+            || (gpu_backend_kind() == GpuBackendKind::Rocm && ffi::rocm_device_warp_size() == 32)
+        {
             assert!(
                 ffi::fused_add3_layer_norm_available(),
-                "Metal and ROCm have a fused add3 + LayerNorm port"
+                "Metal and wave32 ROCm have a fused add3 + LayerNorm port"
             );
         }
         for (dt, dim, rows, with_bias) in [

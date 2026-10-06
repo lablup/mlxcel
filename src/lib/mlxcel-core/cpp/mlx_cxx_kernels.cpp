@@ -289,7 +289,9 @@ std::unique_ptr<MlxArray> bitlinear_matmul(
     // spell the switch out here; the table says the same thing in one line per
     // backend and shares the refusal with every other launcher (#1801).
     auto& kernel = mlxcel::select_kernel_port(
-        "bitlinear_matmul", "graph fallback", bitlinear_ports());
+        "bitlinear_matmul",
+        "BitNet load-time refusal (bitlinear_matmul has no graph fallback)",
+        bitlinear_ports());
     std::vector<std::pair<std::string, mlx::core::fast::TemplateArg>> ta = {
         {"T", T},
         {"in_features", in_features},

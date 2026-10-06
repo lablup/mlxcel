@@ -87,6 +87,9 @@ fn skip() -> bool {
         eprintln!("skipping ssm_update_parity_tests: SSM kernel kill switch is set");
         return true;
     }
+    if crate::test_support::kernel_ports::skip_for_wave32_only_rocm_port("SSM update") {
+        return true;
+    }
     panic!(
         "ssm_kernel_available() is false on {backend:?}, which has a port in ssm_ports(); \
          the predicate and the port table disagree"

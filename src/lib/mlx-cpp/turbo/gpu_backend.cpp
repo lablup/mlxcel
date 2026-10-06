@@ -109,7 +109,8 @@ int rocm_hardware_warp_size() {
       std::fprintf(
           stderr,
           "[mlxcel] ROCm device wavefront is %d lanes%s; fused kernels "
-          "validated only on 32 lanes use their MLX graph fallbacks\n",
+          "validated only on 32 lanes use their MLX graph fallbacks, or are "
+          "refused at load where none exists (BitNet)\n",
           w,
           w == 0 ? " (query failed)" : "");
     }

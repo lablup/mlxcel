@@ -150,7 +150,8 @@ fn run_kernel(
     let s0 = ffi::from_slice_f32(&k.s0, &[b, d, n_]);
     let mut y: UniquePtr<MlxArray> = UniquePtr::null();
     let mut s: UniquePtr<MlxArray> = UniquePtr::null();
-    ffi::mamba1_selective_scan(&x, &dt, &bm, &cm, &a, &dp, &s0, &mut y, &mut s);
+    ffi::mamba1_selective_scan(&x, &dt, &bm, &cm, &a, &dp, &s0, &mut y, &mut s)
+        .expect("the caller checked the port, so the launcher must not refuse");
     assert_eq!(ffi::array_shape(&y), vec![b, l, d]);
     assert_eq!(ffi::array_shape(&s), vec![b, d, n_]);
     assert_eq!(ffi::array_dtype(&y), dtype);
@@ -368,6 +369,7 @@ fn float_state_kernel_is_available_where_ported() {
         gpu_backend_kind(),
         GpuBackendKind::Metal | GpuBackendKind::Rocm
     ) || std::env::var("MLXCEL_MAMBA1_SCAN_KERNEL").as_deref() == Ok("0")
+        || crate::test_support::kernel_ports::skip_for_wave32_only_rocm_port("Mamba1 scan")
     {
         return;
     }
