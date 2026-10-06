@@ -299,15 +299,28 @@ When `MLXCEL_PROMPT_CACHE_SNAPSHOT_CAPACITY_BYTES` and
 sizes six representative exact-prefix snapshots at `min(context_size, 8192)`
 tokens (8192 when `--ctx-size` is unset), including architecture-aware
 attention KV plus fixed recurrent state for hybrid snapshot families, and
-clamps that raise to one quarter of detected available memory. Sliding-window
-families (Gemma 3, Gemma 4) are sized with every layer at full length, because
+clamps that raise to one quarter of the memory left after the model's own
+estimated footprint. In bytes: `max(536870912, min(6 * entry, left / 4))`,
+where `entry` is the snapshot size at the representative length, raised to one
+`entry` when that fits in `left / 2`. The value is a cap on what the store may
+hold, not an allocation: resident memory grows only as snapshots are inserted.
+The raise applies to every snapshot-only family, recurrent (Qwen 3.5/3.8,
+Jamba, Falcon-H1, LFM2, Bailing linear, Nemotron-H, Mamba, Granite 4 hybrid,
+PLaMo 2) and attention-cache alike (Gemma 3, Gemma 4, Gemma 4 unified, Llama 4,
+AFMoE, Muse Glimmer, Inkling). The attention-cache families store O(context) KV per
+snapshot, so a fixed 512 MiB store rejected their long conversations as
+oversized: measured on GB10, Gemma 4 12B rose from 512 MiB to 15.75 GiB and a
+16k-token conversation went from 0 of 12 snapshot hits to 11 of 12, and Gemma 3
+4B (6.4 GiB) kept reusing past 20k tokens where the fixed store stopped.
+Sliding-window families (Gemma 3, Gemma 4) are sized with every layer at full length, because
 the history-boundary snapshot is taken before the sliding layers wrap: Gemma 4
 31B measures about 900 KB per token, so one 8192-token entry is about 7.4 GB.
 The raise never drops below one representative entry when that entry fits in
 half of the available memory. Both the top-level and the `text_config`
-`model_type` are matched, so VLM-packaged checkpoints (`gemma4` /
-`gemma4_text`, `qwen3_5` / `qwen3_5_text`) get the same default as their text
-models. An explicit env/CLI value is never replaced. For Qwen3.8-27B 4-bit this
+`model_type` are matched and a trailing `_text` is ignored, so VLM-packaged
+checkpoints (`gemma3_text`, `gemma4_text`, `gemma4_unified_text`,
+`llama4_text`, `muse_glimmer_text`, `qwen3_5_text`) get the same default as
+their text models. An explicit env/CLI value is never replaced. For Qwen3.8-27B 4-bit this
 avoids the old default that could fit only one roughly 500-600 MiB snapshot and
 then LRU-evict the live session chain.
 
@@ -340,11 +353,13 @@ for `/v1/responses` response history and conversation transcripts. The entry
 count and TTL limits still apply. A value of `0` leaves the route surface
 enabled but makes newly stored entries immediately evict themselves.
 
-The three `SNAPSHOT` variables budget a separate store: whole recurrent-state
-snapshots for SSM and linear-attention families, which cannot share KV blocks
-and are therefore kept as exact-prefix entries. A snapshot's size tracks model
-width rather than prompt length, from a few MiB on a small model to 300 MB or
-more on a 30B-class one. The implicit model-aware default covers the common
+The three `SNAPSHOT` variables budget a separate store: whole model-owned
+state snapshots, which cannot share KV blocks and are therefore kept as
+exact-prefix entries. For SSM and linear-attention families a snapshot's size
+tracks model width rather than prompt length, from a few MiB on a small model
+to 300 MB or more on a 30B-class one. For the attention-cache snapshot families
+(Gemma 3/4, Llama 4, AFMoE, Muse Glimmer) it grows with the conversation: about
+136 KiB per token on Gemma 3 4B and 192 KiB per token on Llama 4 Scout. The implicit model-aware default covers the common
 case, but explicit deployment caps should still be sized from measurement:
 serve one conversation, read `snapshot_bytes_per_entry` from
 `/v1/cache/stats`, and give the store enough headroom for the concurrent
