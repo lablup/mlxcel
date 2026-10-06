@@ -145,7 +145,8 @@ constexpr const char* PAGED_ATTENTION_DECODE_SOURCE = R"(
         uint block_idx = abs_pos / block_size;
         uint slot = abs_pos - block_idx * block_size;
         uint row = (uint)rows[row_off + block_idx];
-        uint base = (row * block_size + slot) * stride_kv + kv_head * dim;
+        // 64-bit: one slab can hold more than 2^32 elements (#2153).
+        ulong base = ((ulong)row * block_size + slot) * (ulong)stride_kv + kv_head * dim;
 
         float partial = 0.0f;
         for (uint j = 0; j < dpt; j++) {
@@ -298,7 +299,8 @@ constexpr const char* PAGED_ATTENTION_DECODE_CUDA_SOURCE = R"(
         uint32_t block_idx = abs_pos / block_size;
         uint32_t slot = abs_pos - block_idx * block_size;
         uint32_t row = (uint32_t)rows[row_off + block_idx];
-        uint32_t base = (row * block_size + slot) * stride_kv + kv_head * dim;
+        // 64-bit: one slab can hold more than 2^32 elements (#2153).
+        uint64_t base = ((uint64_t)row * block_size + slot) * (uint64_t)stride_kv + kv_head * dim;
 
         float partial = 0.0f;
         for (uint32_t j = 0; j < dpt; j++) {

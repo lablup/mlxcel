@@ -172,7 +172,8 @@ constexpr const char* PAGED_ATTENTION_V2_PARTIAL_SOURCE = R"(
         uint page_off = abs_pos / page_size;
         uint entry = abs_pos - page_off * page_size;
         uint row = (uint)indices[page_begin + page_off];
-        uint base = (row * page_size + entry) * stride_kv + kv_head * dim;
+        // 64-bit: one slab can hold more than 2^32 elements (#2153).
+        ulong base = ((ulong)row * page_size + entry) * (ulong)stride_kv + kv_head * dim;
 
         float k_reg[DimsPerThread];
         float v_reg[DimsPerThread];
@@ -367,7 +368,8 @@ constexpr const char* PAGED_ATTENTION_V2_PARTIAL_CUDA_SOURCE = R"(
         uint32_t page_off = abs_pos / page_size;
         uint32_t entry = abs_pos - page_off * page_size;
         uint32_t row = (uint32_t)indices[page_begin + page_off];
-        uint32_t base = (row * page_size + entry) * stride_kv + kv_head * dim;
+        // 64-bit: one slab can hold more than 2^32 elements (#2153).
+        uint64_t base = ((uint64_t)row * page_size + entry) * (uint64_t)stride_kv + kv_head * dim;
 
         float k_reg[DimsPerThread];
         float v_reg[DimsPerThread];

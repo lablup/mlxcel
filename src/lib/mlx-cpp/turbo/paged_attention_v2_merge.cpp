@@ -32,6 +32,7 @@
 #include <mlx/backend/cuda/cuda.h>
 #include <mlx/backend/metal/metal.h>
 
+#include <cstdint>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -271,6 +272,20 @@ std::vector<mlx::core::array> paged_attention_merge_states(
     int num_outputs = static_cast<int>(o_indptr.size()) - 1;
     if (num_outputs < 0) {
         num_outputs = 0;
+    }
+
+    // Every body indexes `v_in` and `out_v` in 32-bit unsigned arithmetic,
+    // which wraps past UINT32_MAX elements and would read or write a different
+    // row of the same buffer (issue #2153). The partials are `chunks * H * D`
+    // f32, far below that in practice, so this refuses instead of widening the
+    // bodies; callers treat a refused launch as "fall back to gather".
+    const uint64_t out_elems = static_cast<uint64_t>(num_outputs) *
+        static_cast<uint64_t>(heads) * static_cast<uint64_t>(dim);
+    if (static_cast<uint64_t>(v_in.size()) > UINT32_MAX ||
+        out_elems > UINT32_MAX) {
+        throw std::invalid_argument(
+            "[paged_attention_merge_states] v_in or the merged output exceeds "
+            "UINT32_MAX elements, which the merge kernel cannot index");
     }
 
 

@@ -176,6 +176,30 @@ fn validate_rejects_a_geometry_the_kernel_cannot_serve() {
     assert!(p.validate().is_err());
 }
 
+#[test]
+fn validate_rejects_a_merge_input_past_the_u32_index_range() {
+    // The merge kernel indexes `[num_chunks, Hq, D]` in 32 bits (issue #2153).
+    // At the grid bound of 65535 one-page chunks, Hq * D = 64 * 1024 stays
+    // inside u32 and 128 * 1024 does not.
+    let at = |q_heads: i32| {
+        let g = PagedDecodeGeometry {
+            q_heads,
+            kv_heads: q_heads,
+            head_dim: 1024,
+            page_size: 1,
+        };
+        PagedDecodePlan::with_chunk_size(g, &[MAX_CHUNKS], 1, 128, Source::Default)
+    };
+    let inside = at(64);
+    assert!(inside.workspace_partial_v_elems() <= u32::MAX as usize);
+    inside
+        .validate()
+        .expect("a u32-indexable merge input is valid");
+    let past = at(128);
+    let err = past.validate().expect_err("past u32 must be declined");
+    assert!(err.contains("u32"), "{err}");
+}
+
 // ---------------------------------------------------------------------------
 // The search
 // ---------------------------------------------------------------------------
