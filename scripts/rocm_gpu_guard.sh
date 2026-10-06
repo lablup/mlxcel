@@ -17,10 +17,21 @@
 #   3. reject the attempt if any sample shows a GPU process that is not COMMAND
 #      or one of its descendants, or a compiler, and go back to step 1.
 #
+# Guards serialize host-wide: each one takes an flock on ROCM_GPU_GUARD_LOCK
+# (default /tmp/mlxcel-rocm-gpu-guard.lock) before its first idle wait and
+# holds it until it exits, so two guards started together run one after the
+# other instead of seeing each other's command as contention and rejecting
+# every attempt (#2146). COMMAND runs without the lock descriptor and with
+# ROCM_GPU_GUARD_LOCK_HELD set to the guard's pid; a guard that starts with
+# that variable naming a live process skips the lock, so nesting cannot
+# deadlock. flock (util-linux) is required: without it the guard exits 2.
+#
 # Every sample is appended to --log (default: stderr only), so the published
 # evidence is the log itself. Exit status: COMMAND's status from the first clean
 # attempt; 75 when every attempt was contended or --max-wait ran out, in which
-# case nothing COMMAND printed should be used. COMMAND's stdout and stderr pass
+# case nothing COMMAND printed should be used. --max-wait (0: no limit) is one
+# budget for all waiting, the lock wait and every idle wait, counted from guard
+# start without the time COMMAND itself runs. COMMAND's stdout and stderr pass
 # through unchanged, so callers capture them as usual. INT and TERM stop COMMAND
 # and the monitor and exit 130 / 143. The three numeric options take plain
 # non-negative integers.
@@ -35,6 +46,7 @@ MAX_ATTEMPTS=5
 MAX_WAIT=0
 LOG=""
 KFD_PROC_DIR="${ROCM_GPU_GUARD_KFD_DIR:-/sys/class/kfd/kfd/proc}"
+LOCK="${ROCM_GPU_GUARD_LOCK:-/tmp/mlxcel-rocm-gpu-guard.lock}"
 # Build tools whose memory traffic or CPU load would distort a UMA measurement.
 # Driver processes (make, cmake, ninja, build scripts) are left out: they are
 # idle while their compiler children, which are listed, do the work.
@@ -42,7 +54,7 @@ KFD_PROC_DIR="${ROCM_GPU_GUARD_KFD_DIR:-/sys/class/kfd/kfd/proc}"
 COMPILER_RE="${ROCM_GPU_GUARD_COMPILER_RE:-^(cargo|rustc|clang|clang\+\+|clang-[0-9]+|hipcc|nvcc|cc1|cc1plus|ld|ld\.lld|ld\.gold|ld\.bfd|lld|collect2)$}"
 
 usage() {
-  sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -72,6 +84,20 @@ done
 IDLE_SECS=$((10#$IDLE_SECS)); MAX_ATTEMPTS=$((10#$MAX_ATTEMPTS)); MAX_WAIT=$((10#$MAX_WAIT))
 [[ $# -gt 0 ]] || { echo "rocm_gpu_guard: no command given" >&2; usage >&2; exit 2; }
 [[ -d "$KFD_PROC_DIR" ]] || { echo "rocm_gpu_guard: $KFD_PROC_DIR not found (no ROCm KFD driver?)" >&2; exit 2; }
+# An outer guard on this host already holds the lock for this process tree.
+OUTER_GUARD=""
+if [[ -n "${ROCM_GPU_GUARD_LOCK_HELD:-}" && -e "/proc/${ROCM_GPU_GUARD_LOCK_HELD}" ]]; then
+  OUTER_GUARD="$ROCM_GPU_GUARD_LOCK_HELD"
+fi
+if [[ -z "$OUTER_GUARD" ]] && ! command -v flock >/dev/null 2>&1; then
+  echo "rocm_gpu_guard: flock not found (util-linux)" >&2
+  exit 2
+fi
+# --max-wait counts from here. run_secs is the time COMMAND has run, which is
+# not waiting.
+SECONDS=0
+run_secs=0
+waited() { echo $((SECONDS - run_secs)); }
 
 note() {
   local line
@@ -144,7 +170,7 @@ foreign_holders() {
 }
 
 wait_idle() {
-  local quiet=0 waited=0 holders comps
+  local quiet=0 holders comps
   note "waiting for ${IDLE_SECS}s of idle GPU and no compiler"
   while (( quiet < IDLE_SECS )); do
     holders=$(kfd_holders); comps=$(compilers)
@@ -154,22 +180,22 @@ wait_idle() {
       (( quiet > 0 )) && note "idle streak reset after ${quiet}s: gpu=[${holders}] compilers=[${comps}]"
       quiet=0
     fi
-    if (( MAX_WAIT > 0 && waited >= MAX_WAIT )); then
-      note "gave up after ${waited}s without ${IDLE_SECS}s of idle"
+    if (( MAX_WAIT > 0 && $(waited) >= MAX_WAIT )); then
+      note "gave up after ${MAX_WAIT}s of waiting without ${IDLE_SECS}s of idle"
       return 1
     fi
     sleep 1
-    waited=$((waited + 1))
   done
   note "idle for ${quiet}s: kfd proc empty and no compiler in every 1 Hz sample"
 }
 
-cmd_pid="" mon_pid=""
+cmd_pid="" mon_pid="" lock_pid="" LOCK_FD=""
 # On INT or TERM stop the command and the monitor instead of orphaning them.
 on_signal() {
   local sig="$1" code="$2"
   trap - INT TERM
   note "caught SIG${sig}: stopping command and monitor"
+  [[ -n "$lock_pid" ]] && kill "$lock_pid" 2>/dev/null || true
   [[ -n "$mon_pid" ]] && kill "$mon_pid" 2>/dev/null || true
   [[ -n "$cmd_pid" ]] && kill -TERM "$cmd_pid" 2>/dev/null || true
   wait 2>/dev/null || true
@@ -178,12 +204,64 @@ on_signal() {
 trap 'on_signal INT 130' INT
 trap 'on_signal TERM 143' TERM
 
+# Take the host-wide guard lock, or return 1 when --max-wait runs out first.
+# The lock lives on the open file description, so a background flock on the
+# inherited descriptor locks it for this shell too, and `wait` keeps INT and
+# TERM handled while it blocks.
+acquire_lock() {
+  local start=$SECONDS rc=0
+  # Create the file only if it is missing, world-writable so every user can
+  # share it, and open it read-only: flock works on a read-only descriptor,
+  # while an O_CREAT open of another user's file in sticky /tmp fails under
+  # fs.protected_regular. A failed create (another guard just made it) is
+  # fine as long as the open below succeeds.
+  [[ -e "$LOCK" ]] || { (umask 000; : >>"$LOCK") 2>/dev/null || true; }
+  { exec {LOCK_FD}<"$LOCK"; } 2>/dev/null || {
+    echo "rocm_gpu_guard: cannot open guard lock $LOCK" >&2
+    exit 2
+  }
+  if flock -n "$LOCK_FD"; then
+    note "acquired guard lock $LOCK after 0s"
+    return 0
+  fi
+  note "waiting for guard lock $LOCK"
+  if (( MAX_WAIT > 0 )); then
+    local remaining=$((MAX_WAIT - $(waited)))
+    (( remaining < 0 )) && remaining=0
+    flock -w "$remaining" "$LOCK_FD" &
+  else
+    flock "$LOCK_FD" &
+  fi
+  lock_pid=$!
+  wait "$lock_pid" || rc=$?
+  lock_pid=""
+  if (( rc != 0 )); then
+    note "gave up waiting for guard lock $LOCK after $((SECONDS - start))s"
+    return 1
+  fi
+  note "acquired guard lock $LOCK after $((SECONDS - start))s"
+}
+
+if [[ -n "$OUTER_GUARD" ]]; then
+  note "lock held by outer guard ${OUTER_GUARD}: not taking $LOCK"
+else
+  acquire_lock || exit 75
+  export ROCM_GPU_GUARD_LOCK_HELD=$$
+fi
+
 attempt=0
 while (( attempt < MAX_ATTEMPTS )); do
   attempt=$((attempt + 1))
   wait_idle || exit 75
   note "attempt ${attempt}/${MAX_ATTEMPTS}: start: $*"
-  "$@" &
+  run_start=$SECONDS
+  # COMMAND gets no copy of the lock descriptor, so a daemon it leaves
+  # behind cannot keep the lock after this guard exits.
+  if [[ -n "$LOCK_FD" ]]; then
+    "$@" {LOCK_FD}<&- &
+  else
+    "$@" &
+  fi
   cmd_pid=$!
   # The monitor exits 1 if any of its samples was contended.
   (
@@ -208,6 +286,7 @@ while (( attempt < MAX_ATTEMPTS )); do
   wait "$cmd_pid" || rc=$?
   mon_rc=0
   wait "$mon_pid" || mon_rc=$?
+  run_secs=$((run_secs + SECONDS - run_start))
   if (( mon_rc != 0 )); then
     note "attempt ${attempt}: REJECTED (contended), exit ${rc}; rerunning"
     continue

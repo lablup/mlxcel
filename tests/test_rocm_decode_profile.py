@@ -41,15 +41,49 @@ import rocm_decode_profile as rdp  # noqa: E402
 NO_COMPILERS = "^no-such-compiler-for-tests$"
 
 
-def run_guard(kfd_dir, *args, env_extra=None):
+# The guard lock of the running test (GuardTests.setUp sets it), so no test
+# touches the host-wide lock that real guards on this machine share.
+_TEST_LOCK = None
+
+
+def guard_env(kfd_dir, env_extra=None):
     env = dict(os.environ, ROCM_GPU_GUARD_KFD_DIR=str(kfd_dir),
-               ROCM_GPU_GUARD_COMPILER_RE=NO_COMPILERS)
+               ROCM_GPU_GUARD_COMPILER_RE=NO_COMPILERS,
+               ROCM_GPU_GUARD_LOCK=str(_TEST_LOCK))
+    # A test run under a real guard must still exercise the lock.
+    env.pop("ROCM_GPU_GUARD_LOCK_HELD", None)
     env.update(env_extra or {})
-    return subprocess.run(["bash", str(GUARD), *args], env=env, capture_output=True,
-                          text=True, timeout=60)
+    return env
+
+
+def run_guard(kfd_dir, *args, env_extra=None):
+    return subprocess.run(["bash", str(GUARD), *args], env=guard_env(kfd_dir, env_extra),
+                          capture_output=True, text=True, timeout=60)
+
+
+def lock_is_free(path):
+    return subprocess.run(["flock", "-n", str(path), "true"]).returncode == 0
 
 
 class GuardTests(unittest.TestCase):
+    def setUp(self):
+        global _TEST_LOCK
+        lock_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(lock_dir.cleanup)
+        _TEST_LOCK = pathlib.Path(lock_dir.name) / "guard.lock"
+
+    def hold_lock(self):
+        """An outside process holding the guard lock until the test ends."""
+        _TEST_LOCK.touch()
+        holder = subprocess.Popen(["flock", str(_TEST_LOCK), "sleep", "60"])
+        self.addCleanup(holder.wait)
+        self.addCleanup(holder.kill)
+        for _ in range(100):
+            if not lock_is_free(_TEST_LOCK):
+                return holder
+            time.sleep(0.05)
+        self.fail("outside flock never took the lock")
+
     def test_idle_gpu_runs_the_command_and_passes_its_status(self):
         with tempfile.TemporaryDirectory() as kfd, tempfile.TemporaryDirectory() as out:
             log = pathlib.Path(out) / "guard.log"
@@ -126,8 +160,7 @@ class GuardTests(unittest.TestCase):
     def test_sigterm_stops_the_command_and_the_guard(self):
         with tempfile.TemporaryDirectory() as kfd, tempfile.TemporaryDirectory() as out:
             pidfile = pathlib.Path(out) / "cmd.pid"
-            env = dict(os.environ, ROCM_GPU_GUARD_KFD_DIR=kfd,
-                       ROCM_GPU_GUARD_COMPILER_RE=NO_COMPILERS)
+            env = guard_env(kfd)
             p = subprocess.Popen(
                 ["bash", str(GUARD), "--idle-secs", "1", "--", "bash", "-c",
                  f"echo $$ > {pidfile}; exec sleep 30"],
@@ -149,6 +182,77 @@ class GuardTests(unittest.TestCase):
                     break
                 time.sleep(0.1)
             self.assertFalse(os.path.exists(f"/proc/{cmd_pid}"), "command outlived the guard")
+
+    def test_two_guards_started_together_run_one_after_the_other(self):
+        with tempfile.TemporaryDirectory() as kfd, tempfile.TemporaryDirectory() as out:
+            log = pathlib.Path(out) / "guard.log"
+            procs = []
+            for name in ("first", "second"):
+                # Each command holds the GPU (its own pid in the KFD list) for
+                # about 2 s, so a guard running beside it would see it as foreign.
+                cmd = f": {name}; mkdir -p {kfd}/$$; sleep 2; rmdir {kfd}/$$"
+                procs.append(subprocess.Popen(
+                    ["bash", str(GUARD), "--idle-secs", "1", "--max-attempts", "2",
+                     "--log", str(log), "--", "bash", "-c", cmd],
+                    env=guard_env(kfd), stderr=subprocess.PIPE, text=True))
+            errs = [p.communicate(timeout=60)[1] for p in procs]
+            for p, err in zip(procs, errs):
+                self.assertEqual(p.returncode, 0, err)
+                self.assertNotIn("CONTENDED", err)
+            # Both guards append to one log, so its order is the order of events:
+            # a run starts only after the other one's CLEAN.
+            events = [ln for ln in log.read_text().splitlines()
+                      if ": start: " in ln or ": CLEAN" in ln]
+            self.assertEqual(len(events), 4, events)
+            self.assertIn(": start: ", events[0])
+            self.assertIn(": CLEAN", events[1])
+            self.assertIn(": start: ", events[2])
+            self.assertIn(": CLEAN", events[3])
+            self.assertTrue(any("waiting for guard lock" in e for e in errs), errs)
+
+    def test_a_held_lock_counts_against_max_wait_and_the_command_never_runs(self):
+        self.hold_lock()
+        with tempfile.TemporaryDirectory() as kfd, tempfile.TemporaryDirectory() as out:
+            marker = pathlib.Path(out) / "ran"
+            start = time.monotonic()
+            r = run_guard(kfd, "--idle-secs", "1", "--max-wait", "2", "--",
+                          "touch", str(marker))
+            self.assertEqual(r.returncode, 75, r.stderr)
+            self.assertLess(time.monotonic() - start, 10)
+            self.assertIn("gave up waiting for guard lock", r.stderr)
+            self.assertNotIn("attempt 1/", r.stderr)
+            self.assertFalse(marker.exists())
+
+    def test_a_guard_inside_a_guard_does_not_wait_for_the_lock(self):
+        holder = self.hold_lock()
+        with tempfile.TemporaryDirectory() as kfd:
+            r = run_guard(kfd, "--idle-secs", "1", "--max-wait", "5", "--", "true",
+                          env_extra={"ROCM_GPU_GUARD_LOCK_HELD": str(holder.pid)})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn(f"lock held by outer guard {holder.pid}", r.stderr)
+            self.assertNotIn("waiting for guard lock", r.stderr)
+
+    def test_a_nested_guard_command_completes(self):
+        with tempfile.TemporaryDirectory() as kfd:
+            r = run_guard(kfd, "--idle-secs", "1", "--max-wait", "10", "--",
+                          "bash", str(GUARD), "--idle-secs", "1", "--max-wait", "10",
+                          "--", "true")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("lock held by outer guard", r.stderr)
+            self.assertEqual(r.stderr.count("CLEAN"), 2, r.stderr)
+
+    def test_a_daemon_left_by_the_command_does_not_keep_the_lock(self):
+        with tempfile.TemporaryDirectory() as kfd, tempfile.TemporaryDirectory() as out:
+            pidfile = pathlib.Path(out) / "daemon.pid"
+            cmd = f"sleep 30 </dev/null >/dev/null 2>&1 & echo $! > {pidfile}"
+            r = run_guard(kfd, "--idle-secs", "1", "--", "bash", "-c", cmd)
+            daemon = int(pidfile.read_text())
+            try:
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertTrue(os.path.exists(f"/proc/{daemon}"))
+                self.assertTrue(lock_is_free(_TEST_LOCK), "the daemon holds the guard lock")
+            finally:
+                os.kill(daemon, 9)
 
 
 def k(op: str) -> str:

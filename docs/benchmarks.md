@@ -217,6 +217,8 @@ command under a 1 Hz monitor, reruns it if any sample shows another GPU process
 or a compiler, and appends every sample to `--log`, which is the evidence a
 published page cites.
 
+Guards on one host take turns: each holds an `flock` on `ROCM_GPU_GUARD_LOCK` (default `/tmp/mlxcel-rocm-gpu-guard.lock`) from before its first idle wait until it exits, so two guards started together run one after the other instead of rejecting each other's command as contention (issue #2146), and parallel jobs no longer need different `--idle-secs` values. Any user's guard can share the lock file: it is created world-writable if missing and opened read-only. `--max-wait` is one budget for the lock wait and the idle waits together, counted from guard start without the time the command runs; a guard that runs out of it while waiting for the lock exits 75 without running the command. The command runs without the lock descriptor and with `ROCM_GPU_GUARD_LOCK_HELD` set, so a guard nested inside it skips the lock rather than deadlocking. The guard needs `flock` (util-linux) and exits 2 without it.
+
 ### ROCm per-kernel decode profile (issue #2061)
 
 `scripts/rocm_decode_profile.sh` answers where ROCm decode time goes, per
