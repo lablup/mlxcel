@@ -1,6 +1,6 @@
 # HIP ports of the fused add-RMSNorm and RoPE + append kernels on gfx1151 (2026-10-05)
 
-lablup/mlxcel#2063, part of #1814. `fused_add_rms_norm` (#905) and `fused_rope_qk_append` (#905) had Metal and CUDA ports only, so on ROCm `MLXCEL_FUSED_ADD_RMSNORM=1` and `MLXCEL_FUSED_ROPE_APPEND=1` quietly kept the graph path. Both fusions ship off on every backend (`FUSED_ADD_RMSNORM_DEFAULT` and `FUSED_ROPE_APPEND_DEFAULT` in `src/lib/mlxcel-core/src/layers.rs`), and the decode profile ([rocm-decode-profile-gfx1151-2026-09-30.md](rocm-decode-profile-gfx1151-2026-09-30.md)) put the most they could take over at 0.83 to 0.89% of Llama 3.1 decode GPU time. This page records what the ports match, what turning them on does to decode, and why the ROCm default stays off.
+lablup/mlxcel#2063, part of #1814. `fused_add_rms_norm` (#905) and `fused_rope_qk_append` (#905) had Metal and CUDA ports only, so on ROCm `MLXCEL_FUSED_ADD_RMSNORM=1` and `MLXCEL_FUSED_ROPE_APPEND=1` quietly kept the graph path. Both fusions ship off on every backend (`FUSED_ADD_RMSNORM_DEFAULT` and `FUSED_ROPE_APPEND_DEFAULT` in `src/lib/mlxcel-core/src/layers.rs`), and the decode profile ([rocm-decode-profile-gfx1151-2026-09-30.md](rocm-decode-profile-gfx1151-2026-09-30.md)) put the most they could take over at 0.83 to 0.89% of Llama 3.1 decode GPU time. This page records what the ports match, what turning them on does to decode, and the ROCm default: the measurement below recommended keeping it off, and the maintainer then turned both fusions on for ROCm (#2145, see [Decision](#decision-2145)).
 
 ## Environment
 
@@ -61,13 +61,30 @@ How to read it:
 - **Qwen3-30B-A3B** calls neither kernel (`qwen3_moe.rs` has its own block), so its row is a control: +0.3%, noise.
 - **Qwen2.5 7B** is the one model that reaches both ports. Every on arm is above off in 6 of 7 rounds, but the size does not hold still: rounds 1 to 3 gave +0.95 to +3.5 tok/s, rounds 4 to 7 (run about two hours later on the same binary) mostly -0.4 to +1 (with -2.7 for `both` in round 4 and +2.7 for `add` in round 7), and `both` is not above `add`, which it would be if both ports saved time independently. An earlier run on the branch's first commit gave the same picture (7 rounds: off 46.54, add 46.84, rope 46.95, both 47.58 tok/s). The off arm's own spread (45.75 to 46.95) is about as wide as the median gain. A gain of 1 to 2% on Qwen2.5 is plausible from the removed dispatches (the RoPE port alone stands in for three slices, three reshape and transpose pairs and two `fast_rope` calls per layer, and #2099 showed that GPU-time shares understate paths made of many small ops), but this data does not establish it.
 
-## Recommendation
+## Recommendation (#2063)
 
-Keep `FUSED_ADD_RMSNORM_DEFAULT` and `FUSED_ROPE_APPEND_DEFAULT` at `false` on ROCm, as on Metal and CUDA. The measurement does not clearly support a flip: no change on Llama 3.1, and on Qwen2.5 a small positive median whose size changes with the time of day. Because the ports are byte-identical to the graph, opting in on ROCm costs nothing in output, so `MLXCEL_FUSED_ADD_RMSNORM=1 MLXCEL_FUSED_ROPE_APPEND=1` is safe for a deployment that measures a win on its own model. What would justify a ROCm default of on: a longer interleaved run on a quiet GPU (20 or more pairs) that shows Qwen2.5-class models (no `rope_scaling`, so both ports run) gaining at least 1% with the paired differences consistently positive, and Llama-class models not losing.
+The original recommendation, superseded by the decision below: keep `FUSED_ADD_RMSNORM_DEFAULT` and `FUSED_ROPE_APPEND_DEFAULT` at `false` on ROCm, as on Metal and CUDA. The measurement does not clearly support a flip: no change on Llama 3.1, and on Qwen2.5 a small positive median whose size changes with the time of day. Because the ports are byte-identical to the graph, opting in on ROCm costs nothing in output, so `MLXCEL_FUSED_ADD_RMSNORM=1 MLXCEL_FUSED_ROPE_APPEND=1` is safe for a deployment that measures a win on its own model. What would justify a ROCm default of on: a longer interleaved run on a quiet GPU (20 or more pairs) that shows Qwen2.5-class models (no `rope_scaling`, so both ports run) gaining at least 1% with the paired differences consistently positive, and Llama-class models not losing.
+
+## Decision (#2145)
+
+The maintainer turned both fusions on by default on ROCm: the ports cost no accuracy (every on/off trace pair is byte-identical) and no median above was slower. `FUSED_ADD_RMSNORM_DEFAULT` and `FUSED_ROPE_APPEND_DEFAULT` are now `cfg!(feature = "rocm")`, so a ROCm build runs both kernels with no environment variables set, Metal and CUDA builds keep them off, and `MLXCEL_FUSED_ADD_RMSNORM=0` / `MLXCEL_FUSED_ROPE_APPEND=0` still restore the graph. The Llama 3.1 `rope_scaling` bypass notice now prints only when `MLXCEL_FUSED_ROPE_APPEND` is explicitly set to a truthy value, so default ROCm runs stay quiet.
+
+Re-measurement of the default-on build (2026-10-07, commit `57b59629` on `main` `08e22698`, same host and toolchain as above): `scripts/bench_decode.sh` at pp512/tg128, default (no variables) against `MLXCEL_FUSED_ADD_RMSNORM=0 MLXCEL_FUSED_ROPE_APPEND=0`, arm order alternated per round, every run through `scripts/rocm_gpu_guard.sh` with its host-wide lock (#2146), 12 of 12 clean on the first attempt. Raw rows: `benchmarks/rocm_strixhalo-gfx1151_2026-10-07_fused-default-{on,off}.csv`.
+
+| Model | Arm | Decode tok/s, by round | Median | vs off | Paired (on minus off), by round | Prefill median |
+|---|---|---|---|---|---|---|
+| Llama-3.1-8B | default (on) | 37.86 38.09 38.10 | 38.09 | -0.2% | +0.02 -0.49 -0.05 | 1024.65 |
+| | off | 37.84 38.58 38.15 | 38.15 | | | 1014.37 |
+| Qwen2.5-7B | default (on) | 47.90 48.30 47.27 | 47.90 | +0.8% | +0.39 +0.30 -0.04 | 1609.96 |
+| | off | 47.51 48.00 47.31 | 47.51 | | | 1544.08 |
+
+Same reading as before: Llama 3.1, where only the norm port runs, is flat (its -0.2% comes from one off run at 38.58, above every other run of either arm); Qwen2.5, where both run, is slightly above off in two of three rounds, inside the run-to-run spread. Qwen2.5 prefill was 2.7 to 6.9% higher with the default in every round, a pattern the earlier run did not show and three rounds cannot separate from drift. No result here argues against the decision.
+
+Kernel trace (`rocprofv3 --kernel-trace`, 8-token `mlxcel generate`, no variables set): Qwen2.5 dispatched `fused_add_rms_norm` and `fused_rope_qk_append` 252 times each (28 layers x 9 forward passes) and no graph RoPE kernel; with both variables at `0` it dispatched `rope_single_1d` instead. Llama 3.1 dispatched the norm port 288 times (32 x 9) and kept `rope_single_freqs_1d` / `rope_freqs`. `logit_trace` `w8` traces of both models with the default and with both variables at `0` are byte-identical, file for file.
 
 ## Not covered
 
-Metal and CUDA (not available on this host); their kernel sources and table entries are untouched. Their predicates gained the GPU-device term: GPU behavior is unchanged, and `MLXCEL_DEVICE=cpu` now takes the graph path instead of throwing at the first launch. Gemma and IQuest Loop Coder also call `fused_add_rms_norm` but have no checkpoint here; the Gemma `(1 + w)` convention is covered by the tolerance tests only. Wave64 (CDNA) is untested.
+Metal and CUDA (not available on this host); their kernel sources and table entries are untouched. Their predicates gained the GPU-device term: GPU behavior is unchanged, and `MLXCEL_DEVICE=cpu` now takes the graph path instead of throwing at the first launch. Gemma and IQuest Loop Coder also call `fused_add_rms_norm`, and on ROCm now do so by default, but have no checkpoint here; the Gemma `(1 + w)` convention is covered by the tolerance tests only. Wave64 (CDNA) is untested.
 
 ## Reproducing
 
@@ -75,8 +92,10 @@ Metal and CUDA (not available on this host); their kernel sources and table entr
 cargo build --release --features rocm --bin mlxcel --bin mlxcel-bench-decode --example logit_trace
 cargo test --release --features rocm -p mlxcel-core --lib -- --test-threads=1 fused_norm_parity_tests fused_rope_parity_tests
 cargo test --release --features rocm --test cpu_device_custom_kernel_gates
-MLXCEL_FUSED_ADD_RMSNORM=1 MLXCEL_FUSED_ROPE_APPEND=1 \
-    scripts/rocm_gpu_guard.sh -- scripts/bench_decode.sh models/mlx/Qwen2.5-7B-Instruct-4bit --output /tmp/on.csv
+# On ROCm the fusions are on by default since #2145; the off arm sets both to 0.
+scripts/rocm_gpu_guard.sh -- scripts/bench_decode.sh models/mlx/Qwen2.5-7B-Instruct-4bit --output /tmp/on.csv
+MLXCEL_FUSED_ADD_RMSNORM=0 MLXCEL_FUSED_ROPE_APPEND=0 \
+    scripts/rocm_gpu_guard.sh -- scripts/bench_decode.sh models/mlx/Qwen2.5-7B-Instruct-4bit --output /tmp/off.csv
 ```
 
 The trace commands are in `benchmarks/logit_traces/rocm_gfx1151_3f0e51af/README.md`.
