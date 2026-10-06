@@ -252,6 +252,14 @@ class GuardTests(unittest.TestCase):
                 self.assertEqual(r.returncode, 75, (held, r.stderr))
                 self.assertIn("gave up waiting for guard lock", r.stderr)
 
+    def test_a_lock_path_that_is_not_a_regular_file_is_refused(self):
+        os.mkfifo(_TEST_LOCK)
+        with tempfile.TemporaryDirectory() as kfd:
+            # Opening a FIFO would block forever, past --max-wait.
+            r = run_guard(kfd, "--idle-secs", "1", "--max-wait", "2", "--", "true")
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertIn("is not a regular file", r.stderr)
+
     def test_sigterm_while_waiting_for_the_lock_stops_the_guard(self):
         self.hold_lock()
         with tempfile.TemporaryDirectory() as kfd, tempfile.TemporaryDirectory() as out:

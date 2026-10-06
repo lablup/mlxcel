@@ -24,7 +24,10 @@
 # every attempt (#2146). COMMAND runs without the lock descriptor and with
 # ROCM_GPU_GUARD_LOCK_HELD set to the guard's pid; a guard that starts with
 # that variable naming one of its ancestors skips the lock, so nesting cannot
-# deadlock. flock (util-linux) is required: without it the guard exits 2.
+# deadlock. Guards nested in one outer guard are not serialized among
+# themselves, and an environment reset (sudo without
+# --preserve-env=ROCM_GPU_GUARD_LOCK_HELD) makes a nested guard wait on its own
+# ancestor's lock. flock (util-linux) is required: without it the guard exits 2.
 #
 # Every sample is appended to --log (default: stderr only), so the published
 # evidence is the log itself. Exit status: COMMAND's status from the first clean
@@ -54,7 +57,7 @@ LOCK="${ROCM_GPU_GUARD_LOCK:-/tmp/mlxcel-rocm-gpu-guard.lock}"
 COMPILER_RE="${ROCM_GPU_GUARD_COMPILER_RE:-^(cargo|rustc|clang|clang\+\+|clang-[0-9]+|hipcc|nvcc|cc1|cc1plus|ld|ld\.lld|ld\.gold|ld\.bfd|lld|collect2)$}"
 
 usage() {
-  sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -221,6 +224,11 @@ acquire_lock() {
   # fs.protected_regular. A failed create (another guard just made it) is
   # fine as long as the open below succeeds.
   [[ -e "$LOCK" ]] || { (umask 000; : >>"$LOCK") 2>/dev/null || true; }
+  # Opening a FIFO blocks until a writer appears, past any --max-wait.
+  [[ -f "$LOCK" ]] || {
+    echo "rocm_gpu_guard: guard lock $LOCK is not a regular file" >&2
+    exit 2
+  }
   { exec {LOCK_FD}<"$LOCK"; } 2>/dev/null || {
     echo "rocm_gpu_guard: cannot open guard lock $LOCK" >&2
     exit 2
