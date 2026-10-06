@@ -25,10 +25,11 @@
 //! anyway.
 //!
 //! `models/mlx/youtu-vl-4b-instruct` has `patch_size=16`, `spatial_merge_size=2`
-//! and `window_size=256`, so `smart_resize` snaps every edge to a multiple of 32
-//! and the merged grid is one eighth of the pixel edge. 224 gives a 7x7 merged
-//! grid, a single 8x8 attention window; 336 resizes to 352 for an 11x11 merged
-//! grid and 448 gives 14x14, both of which are 2x2 windows.
+//! and `window_size=256`, so `smart_resize` rounds every edge up to a multiple
+//! of 32 (as `AutoProcessor` does, #1611) and the merged grid is one eighth of
+//! the resized edge. 224 gives a 7x7 merged grid, a single 8x8 attention window;
+//! 336 resizes to 352 for an 11x11 merged grid and 448 gives 14x14, both of
+//! which are 2x2 windows.
 //!
 //! The solid orange fixture is also the one image that cannot catch a defect
 //! in how features reach their prompt slots: every merged token of a uniform
