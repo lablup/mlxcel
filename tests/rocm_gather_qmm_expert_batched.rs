@@ -13,17 +13,19 @@
 // limitations under the License.
 
 //! The expert-batched `gather_qmm` kernel on ROCm matches the unsorted path
-//! and a dequantized f32 reference (issue #2066, `patches-rocm/LOCAL_FIXES.md`
-//! item 9).
+//! and a dequantized f32 reference (issues #2066 and #2106,
+//! `patches-rocm/LOCAL_FIXES.md` items 9 and 31).
 //!
 //! `GatherQMM::eval_gpu` in `patches-rocm/mlx/backend/rocm/quantized/qmm.hip`
-//! sends a sorted, transposed, affine, group-size-64, 4- or 8-bit call with
-//! `M == 1`, `B >= 64`, `E <= 64` and `B / E >= 4` to
-//! `gather_qmv_expert_batched_kernel`, which loads each expert's weights once
-//! for all of that expert's rows. Every case below satisfies that gate. The
-//! sorted call runs that kernel, and the same inputs with
+//! sends a sorted, transposed call with `M == 1`, `B >= 64`, `E <= 64` and
+//! `B / E >= 4` to `gather_qmv_expert_batched_kernel`, which loads each
+//! expert's weights once for all of that expert's rows, when it is affine at
+//! group size 64 and 4 or 8 bits (bf16 or f16 activations) or mxfp4 (group
+//! size 32, E8M0 scales, bf16 activations). Every case below satisfies that
+//! gate. The sorted call runs that kernel, and the same inputs with
 //! `sorted_indices = false` run the kernel the unsorted path uses (the wide
-//! or warp-shared gather qmv).
+//! or warp-shared gather qmv for affine, the per-row `gather_qmv_kernel` for
+//! mxfp4).
 //!
 //! The kernel used to read `lhs_indices[b]` and `rhs_indices[b]` as flat
 //! arrays. That holds for the `[B]` indices `SwitchGLU`'s sorted path builds,
@@ -41,13 +43,19 @@
 //!   a little slack for the different summation order), the bar the issue sets
 //!   for enabling the kernel by default, and both stay under a bound that
 //!   rounding to the activation dtype alone meets;
-//! * two sorted runs agree bit for bit.
+//! * two sorted runs agree bit for bit;
+//! * for mxfp4 at gpt-oss-20b's `K = 2880`, the sorted call with the kernel
+//!   switched off (the per-row kernel) differs from it somewhere, so the
+//!   gate is known to reach the kernel.
 //!
 //! Shapes: a Mixtral-like layer (8 experts, top 2, `K = 4096`, with an output
 //! width of 516 so the last column block is partial) and a 64-expert layer at
 //! `granite-4.0-h-tiny`'s widths (top 6, its `K = 1536` gate/up projection and
 //! its `K = 512` down projection), each with 4- and 8-bit weights and bf16 and
-//! f16 activations. The reference is computed per expert with dense f32
+//! f16 activations; and for mxfp4, gpt-oss-20b's expert layer (32 experts,
+//! top 4, `K = N = 2880`) and a narrow one whose output width of 516 leaves
+//! the last column block partial, with bf16 activations. The reference is
+//! computed per expert with dense f32
 //! matmuls on the GPU from weights dequantized to f32, so it shares no kernel
 //! with the quantized paths under test.
 //!
@@ -67,8 +75,28 @@ use mlxcel_core::hardware::{GpuBackendKind, gpu_backend_kind};
 use mlxcel_core::streams::{DefaultDeviceGuard, lock_default_device};
 use mlxcel_core::{MlxArray, UniquePtr, dtype};
 
-const GROUP_SIZE: i32 = 64;
-const MODE: &str = "affine";
+/// A quantization scheme the kernel handles.
+#[derive(Debug, Clone, Copy)]
+struct Scheme {
+    mode: &'static str,
+    group_size: i32,
+    bits: i32,
+}
+
+const fn affine(bits: i32) -> Scheme {
+    Scheme {
+        mode: "affine",
+        group_size: 64,
+        bits,
+    }
+}
+
+const MXFP4: Scheme = Scheme {
+    mode: "mxfp4",
+    group_size: 32,
+    bits: 4,
+};
+
 const ENV: &str = "MLX_ROCM_GATHER_QMV_EXPERT_BATCHED";
 
 fn on_rocm() -> bool {
@@ -141,7 +169,7 @@ struct Shape {
     n: i32,
 }
 
-const SHAPES: [Shape; 3] = [
+const AFFINE_SHAPES: [Shape; 3] = [
     Shape {
         name: "mixtral-like",
         experts: 8,
@@ -165,6 +193,25 @@ const SHAPES: [Shape; 3] = [
         tokens: 64,
         k: 512,
         n: 1536,
+    },
+];
+
+const MXFP4_SHAPES: [Shape; 2] = [
+    Shape {
+        name: "gpt-oss-20b experts",
+        experts: 32,
+        top_k: 4,
+        tokens: 64,
+        k: 2880,
+        n: 2880,
+    },
+    Shape {
+        name: "32-expert narrow",
+        experts: 32,
+        top_k: 4,
+        tokens: 64,
+        k: 512,
+        n: 516,
     },
 ];
 
@@ -285,33 +332,44 @@ fn inputs(shape: Shape, layout: Layout, dt: i32, seed: u32) -> Inputs {
     }
 }
 
-type Quantized = (
-    UniquePtr<MlxArray>,
-    UniquePtr<MlxArray>,
-    UniquePtr<MlxArray>,
-);
+/// Packed weights, scales and (affine only) biases.
+struct Quantized {
+    packed: UniquePtr<MlxArray>,
+    scales: UniquePtr<MlxArray>,
+    biases: Option<UniquePtr<MlxArray>>,
+}
+
+impl Quantized {
+    fn biases_ptr(&self) -> *const MlxArray {
+        self.biases
+            .as_ref()
+            .map_or(std::ptr::null(), |b| &**b as *const MlxArray)
+    }
+}
 
 fn gather_qmm(
     label: &str,
     inp: &Inputs,
     quant: &Quantized,
-    bits: i32,
+    scheme: Scheme,
     sorted: bool,
 ) -> UniquePtr<MlxArray> {
-    let (packed, scales, biases) = quant;
+    // SAFETY: every reference outlives the call; `biases_ptr` borrows `quant`
+    // and is null only for mxfp4, where the bridge documents it as nullable;
+    // a null `lhs_indices` selects the implicit lhs.
     let y = unsafe {
         mlxcel_core::gather_qmm(
             &inp.x,
-            packed,
-            scales,
-            &**biases as *const MlxArray,
+            &quant.packed,
+            &quant.scales,
+            quant.biases_ptr(),
             std::ptr::null(),
             &*inp.rhs as *const MlxArray,
             true,
-            GROUP_SIZE,
-            bits,
+            scheme.group_size,
+            scheme.bits,
             sorted,
-            MODE,
+            scheme.mode,
         )
     };
     eval_ok(label, &y);
@@ -347,26 +405,45 @@ fn reference(inp: &Inputs, dense: &MlxArray, k: i32, n: i32) -> UniquePtr<MlxArr
     y
 }
 
-fn check_shape(shape: Shape, bits: i32, dt: i32) {
+fn check_shape(shape: Shape, scheme: Scheme, dt: i32) {
     let Shape { experts, k, n, .. } = shape;
-    // Weights quantized from activation-dtype values, so scales and biases
-    // carry the activation dtype as they do in a checkpoint.
+    let Scheme {
+        mode,
+        group_size,
+        bits,
+    } = scheme;
+    // Weights quantized from activation-dtype values, so affine scales and
+    // biases carry the activation dtype as they do in a checkpoint.
     let w = normal(&[experts, n, k], dt);
-    let quant: Quantized = {
-        let q = mlxcel_core::quantize_weights_with_mode(&w, GROUP_SIZE, bits, MODE);
-        let quant = (
-            mlxcel_core::quantized_weights_w(&q),
-            mlxcel_core::quantized_weights_scales(&q),
-            mlxcel_core::quantized_weights_biases(&q),
-        );
-        eval_ok("quantize", &quant.0);
-        eval_ok("quantize", &quant.1);
-        eval_ok("quantize", &quant.2);
+    let quant = {
+        let q = mlxcel_core::quantize_weights_with_mode(&w, group_size, bits, mode);
+        let quant = Quantized {
+            packed: mlxcel_core::quantized_weights_w(&q),
+            scales: mlxcel_core::quantized_weights_scales(&q),
+            biases: mlxcel_core::quantized_weights_has_biases(&q)
+                .then(|| mlxcel_core::quantized_weights_biases(&q)),
+        };
+        assert_eq!(quant.biases.is_some(), mode == "affine", "{mode}: biases");
+        eval_ok("quantize", &quant.packed);
+        eval_ok("quantize", &quant.scales);
+        if let Some(b) = &quant.biases {
+            eval_ok("quantize", b);
+        }
         quant
     };
+    drop(w);
     let dense = {
+        // SAFETY: as in `gather_qmm`: `biases_ptr` borrows `quant`, and null
+        // (mxfp4) is the bridge's documented no-biases value.
         let d = unsafe {
-            mlxcel_core::dequantize(&quant.0, &quant.1, &*quant.2, GROUP_SIZE, bits, MODE)
+            mlxcel_core::dequantize(
+                &quant.packed,
+                &quant.scales,
+                quant.biases_ptr(),
+                group_size,
+                bits,
+                mode,
+            )
         };
         let d = mlxcel_core::astype(&d, dtype::FLOAT32);
         eval_ok("dequantize", &d);
@@ -388,15 +465,37 @@ fn check_shape(shape: Shape, bits: i32, dt: i32) {
             shape.name
         );
         let label = format!(
-            "{} {bits}-bit {} {layout:?} (B={b}, E={experts}, K={k}, N={n})",
+            "{} {mode} {bits}-bit {} {layout:?} (B={b}, E={experts}, K={k}, N={n})",
             shape.name,
             dtype_name(dt)
         );
 
         force_expert_batched(true);
-        let batched = gather_qmm(&format!("{label} sorted"), &inp, &quant, bits, true);
-        let again = gather_qmm(&format!("{label} sorted rerun"), &inp, &quant, bits, true);
-        let unsorted = gather_qmm(&format!("{label} unsorted"), &inp, &quant, bits, false);
+        let batched = gather_qmm(&format!("{label} sorted"), &inp, &quant, scheme, true);
+        let again = gather_qmm(&format!("{label} sorted rerun"), &inp, &quant, scheme, true);
+        let unsorted = gather_qmm(&format!("{label} unsorted"), &inp, &quant, scheme, false);
+        if mode == "mxfp4" && k >= 2048 {
+            // The per-row kernel sums each output in another order, so over a
+            // long reduction the sorted call must differ from it somewhere
+            // when the gate sends mxfp4 to the expert-batched kernel; equal
+            // bytes mean it did not. At K = 512 the f32 sums can round to the
+            // same bf16 values everywhere (measured), so the narrow shape
+            // skips this check.
+            force_expert_batched(false);
+            let per_row = gather_qmm(
+                &format!("{label} sorted, kernel off"),
+                &inp,
+                &quant,
+                scheme,
+                true,
+            );
+            force_expert_batched(true);
+            assert!(
+                mlxcel_core::array_to_raw_bytes(&batched)
+                    != mlxcel_core::array_to_raw_bytes(&per_row),
+                "{label}: the sorted call did not reach the expert-batched kernel"
+            );
+        }
         assert_eq!(
             mlxcel_core::array_shape(&batched),
             inp.out_shape,
@@ -442,12 +541,29 @@ fn expert_batched_gather_qmm_matches_unsorted_and_reference() {
     let _lock = lock_default_device();
     let _gpu = DefaultDeviceGuard::gpu();
     mlxcel_core::random_seed(2066);
-    for shape in SHAPES {
+    for shape in AFFINE_SHAPES {
         for bits in [4, 8] {
             for dt in [dtype::BFLOAT16, dtype::FLOAT16] {
-                check_shape(shape, bits, dt);
+                check_shape(shape, affine(bits), dt);
             }
         }
+    }
+    force_expert_batched(false);
+}
+
+/// mxfp4 at gpt-oss-20b's expert shape (issue #2106). bf16 is the only
+/// activation dtype the mxfp4 instantiation takes.
+#[test]
+fn mxfp4_expert_batched_gather_qmm_matches_unsorted_and_reference() {
+    if !on_rocm() {
+        eprintln!("skipping: not running on a ROCm device");
+        return;
+    }
+    let _lock = lock_default_device();
+    let _gpu = DefaultDeviceGuard::gpu();
+    mlxcel_core::random_seed(2106);
+    for shape in MXFP4_SHAPES {
+        check_shape(shape, MXFP4, dtype::BFLOAT16);
     }
     force_expert_batched(false);
 }

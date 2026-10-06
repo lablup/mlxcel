@@ -1868,6 +1868,19 @@ __device__ inline float fp4_e2m1_to_float(uint8_t val) {
   }
 }
 
+// mlxcelverse: an fp4 (e2m1) nibble decoded without a branch, as its value
+// times 2^-14. The sign bit and the three magnitude bits (two exponent bits,
+// one mantissa bit) land in an fp16's sign bit, low exponent bits and top
+// mantissa bit, so exponent 0 becomes the fp16 subnormal 0 or 2^-15 and the
+// rest are normal; v_cvt_f32_f16 widens both exactly. Callers multiply the
+// accumulated dot product by 2^14 (kFp4HalfBitsScale), which is exact.
+constexpr float kFp4HalfBitsScale = 16384.0f;
+__device__ __forceinline__ float fp4_e2m1_to_float_scaled(uint32_t nibble) {
+  const uint16_t h =
+      static_cast<uint16_t>(((nibble & 0x8u) << 12) | ((nibble & 0x7u) << 9));
+  return static_cast<float>(__builtin_bit_cast(_Float16, h));
+}
+
 __device__ __forceinline__ float fp8_e4m3_to_float(uint8_t val) {
   // Use a simple array lookup or bit manipulation.
   // Actually, MI300 supports hardware fp8 conversion:
@@ -4567,7 +4580,8 @@ __device__ inline void find_sorted_expert_run(
 }
 
 // ======================================================================
-// GPU-only expert-batched gather QMV for sorted indices (affine, 4 or 8 bits).
+// GPU-only expert-batched gather QMV for sorted indices (affine at 4 or 8
+// bits, or mxfp4).
 //
 // Grid: (M, ceil(N/cols_per_block), E). Block z handles expert z: it finds
 // that expert's run of the sorted rhs_indices with two binary searches (no
@@ -4585,6 +4599,11 @@ __device__ inline void find_sorted_expert_run(
 // wrong whenever MLX broadcasts the indices (for example x [T, 1, K] with
 // sorted rhs_indices [T, 1], a [T, T] batch), and read past both arrays
 // (LOCAL_FIXES.md item 9).
+//
+// mlxcelverse: AFFINE=false is mxfp4 (lablup/mlxcel#2106): one E8M0 byte of
+// scale per group of 32 and no biases. A word holds eight e2m1 nibbles, all in
+// one group; each is decoded as its value times 2^-14 and the row's dot product
+// for the word is scaled back by 2^14 with the group's scale.
 // ======================================================================
 template <
     typename T,
@@ -4613,8 +4632,10 @@ __global__ void __launch_bounds__(1024) gather_qmv_expert_batched_kernel(
     bool has_bias,
     bool implicit_lhs,
     int64_t implicit_x_batch_stride) {
-  static_assert(AFFINE && (BITS == 4 || BITS == 8),
-                "expert-batched gather qmv is affine 4/8-bit only");
+  static_assert(
+      (AFFINE && (BITS == 4 || BITS == 8)) ||
+          (!AFFINE && BITS == 4 && GROUP_SIZE == 32),
+      "expert-batched gather qmv is affine 4/8-bit or mxfp4 only");
   // Values per packed 32-bit word, and rows sharing one load of a word.
   constexpr int VALS = 32 / BITS;
   constexpr int TOKENS = 4;
@@ -4695,7 +4716,12 @@ __global__ void __launch_bounds__(1024) gather_qmv_expert_batched_kernel(
       float wv[VALS];
 #pragma unroll
       for (int j = 0; j < VALS; ++j) {
-        wv[j] = static_cast<float>((packed >> (BITS * j)) & ((1u << BITS) - 1));
+        const uint32_t q = (packed >> (BITS * j)) & ((1u << BITS) - 1);
+        if constexpr (AFFINE) {
+          wv[j] = static_cast<float>(q);
+        } else {
+          wv[j] = fp4_e2m1_to_float_scaled(q);
+        }
       }
 #pragma unroll
       for (int t = 0; t < TOKENS; ++t) {
@@ -4708,7 +4734,13 @@ __global__ void __launch_bounds__(1024) gather_qmv_expert_batched_kernel(
           qx = fmaf(xv, wv[j], qx);
           xs += xv;
         }
-        acc[t] = fmaf(scale, qx, fmaf(bias_val, xs, acc[t]));
+        if constexpr (AFFINE) {
+          acc[t] = fmaf(scale, qx, fmaf(bias_val, xs, acc[t]));
+        } else {
+          (void)xs;
+          (void)bias_val;
+          acc[t] = fmaf(scale, qx * kFp4HalfBitsScale, acc[t]);
+        }
       }
     }
 
@@ -6185,16 +6217,27 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
   // Beneficial when few experts have many tokens each. For high-expert-count
   // models (E=512, top_k=10), most runs have 1-4 tokens, so it is limited to
   // E <= 64 with at least 4 rows per expert on average (a prefill).
-  bool use_expert_batched = transpose_ && right_sorted_ && (M == 1) &&
-      (B >= 64) && (E > 0) && (E <= 64) && (B / E >= 4) &&
-      mode_ == QuantizationMode::Affine &&
+  // mlxcelverse: mxfp4 (group size 32, E8M0 scales, no biases) with bf16
+  // activations takes the same kernel since lablup/mlxcel#2106: gpt-oss-20b
+  // spent 99.8% of its prefill in the per-row gather_qmv_kernel. Only the
+  // bf16 instantiation is added (gpt-oss runs bf16 activations), to keep the
+  // ahead-of-time compile cost down; f16 mxfp4 and mxfp8 keep the per-row
+  // kernel.
+  const bool eb_affine = mode_ == QuantizationMode::Affine &&
       (x.dtype() == bfloat16 || x.dtype() == float16) && group_size_ == 64 &&
       (bits_ == 4 || bits_ == 8);
+  const bool eb_mxfp4 = mode_ == QuantizationMode::Mxfp4 &&
+      x.dtype() == bfloat16 && group_size_ == 32 && bits_ == 4;
+  bool use_expert_batched = transpose_ && right_sorted_ && (M == 1) &&
+      (B >= 64) && (E > 0) && (E <= 64) && (B / E >= 4) &&
+      (eb_affine || eb_mxfp4);
   // mlxcelverse: on by default since lablup/mlxcel#2066, which fixed its
   // strided index reads (LOCAL_FIXES.md item 9) and measured 512-token prefill
   // on gfx1151 at 1.7x (granite-4.0-h-tiny, bf16) and 4.8x (Mixtral-8x7B,
-  // f16) the per-row kernels. MLX_ROCM_GATHER_QMV_EXPERT_BATCHED=0 turns it
-  // off; the variable is read on every call.
+  // f16) the per-row kernels; lablup/mlxcel#2106 measured mxfp4 (gpt-oss-20b,
+  // bf16) at about 70x (LOCAL_FIXES.md item 31).
+  // MLX_ROCM_GATHER_QMV_EXPERT_BATCHED=0 turns it off for every scheme; the
+  // variable is read on every call.
   use_expert_batched = use_expert_batched &&
       parse_warp_kernel_env("MLX_ROCM_GATHER_QMV_EXPERT_BATCHED", true);
 
@@ -6239,10 +6282,26 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
         else
           launch_eb(type_tag, std::integral_constant<int, 8>{});
       };
-      if (x.dtype() == float16)
+      if (eb_mxfp4) {
+        enc.add_kernel_node(
+            &rocm::gather_qmv_expert_batched_kernel<
+                hip_bfloat16, uint8_t, 4, 32, false, 16>,
+            eb_grid, eb_block, 0u,
+            (const hip_bfloat16*)x_ptr,
+            (const uint8_t*)w_ptr,
+            (const uint8_t*)scales_ptr,
+            static_cast<const uint8_t*>(nullptr),
+            li_ptr, ri_ptr,
+            batch_shape_param, lhs_idx_strides_param, rhs_idx_strides_param,
+            batch_ndim,
+            (hip_bfloat16*)out_ptr,
+            B, M, N, K, E, false,
+            use_sorted_rhs_schedule, implicit_x_batch_stride);
+      } else if (x.dtype() == float16) {
         launch_eb_bits(local_type_identity<__half>{});
-      else
+      } else {
         launch_eb_bits(local_type_identity<hip_bfloat16>{});
+      }
     }
     return;
   }
