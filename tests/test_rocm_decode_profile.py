@@ -386,12 +386,15 @@ class RoleTests(unittest.TestCase):
 
 
 class ReachTests(unittest.TestCase):
-    def test_fused_norm_and_rope_ship_off_and_rope_tables_never_reach(self):
+    def test_fused_norm_and_rope_ship_on_for_rocm_and_rope_tables_never_reach(self):
+        # #2145: both fusions are on by default in a rocm build, so the roles
+        # they take over are reached with the shipped defaults.
         default, optin, _ = rdp.reach("2063", {"model_type": "llama",
                                                "rope_scaling": {"rope_type": "llama3"}}, False)
-        self.assertEqual(default, ())
+        self.assertEqual(default, ("add_rms_join_post_attn",))
         self.assertEqual(optin, ("add_rms_join_post_attn",))
-        _, optin, _ = rdp.reach("2063", {"model_type": "llama"}, False)
+        default, optin, _ = rdp.reach("2063", {"model_type": "llama"}, False)
+        self.assertEqual(default, ("add_rms_join_post_attn", "rope_append"))
         self.assertEqual(optin, ("add_rms_join_post_attn", "rope_append"))
 
     def test_moe_reach_follows_the_caller(self):

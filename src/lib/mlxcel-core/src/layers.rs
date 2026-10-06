@@ -9403,11 +9403,6 @@ mod tests {
         }
     }
 
-    /// The #905 kill switches are default-ON, which is the inverse of the
-    /// opt-in `MLXCEL_FUSED_QK_NORM` flag above, so they get their own pin: a
-    /// recognised disable string turns the fusion off, an unset variable leaves
-    /// the compiled-in default, and an unrecognised value must not silently
-    /// change the decode graph.
     #[test]
     fn fused_905_defaults_are_on_for_rocm_builds_only() {
         // #2145: a `rocm` build turns both fusions on by default; Metal and CUDA
@@ -9447,6 +9442,11 @@ mod tests {
         }
     }
 
+    /// The #905 kill switches default per build (on for `rocm`, off elsewhere),
+    /// unlike the always-opt-in `MLXCEL_FUSED_QK_NORM` flag above, so they get
+    /// their own pin: a recognised disable string turns the fusion off, an
+    /// unset variable leaves the compiled-in default, and an unrecognised value
+    /// must not silently change the decode graph.
     #[test]
     fn fused_905_flags_follow_the_default_and_respect_explicit_values() {
         // Unset means the compiled-in default, whichever way it is set. Asserting

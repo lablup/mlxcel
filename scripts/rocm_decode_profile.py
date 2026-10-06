@@ -367,12 +367,13 @@ def reach(unit: str, config: dict, sampled: bool) -> tuple[tuple[str, ...], tupl
     if unit == "2063":
         if mt != "llama":
             return (), (), f"{mt} never calls fused_add_rms_norm or forward_fused_rope_append"
-        optin = ("add_rms_join_post_attn",) + (() if rope_table else ("rope_append",))
-        note = ("both paths ship off (FUSED_ADD_RMSNORM_DEFAULT / FUSED_ROPE_APPEND_DEFAULT "
-                "false); only the post-attention join calls the fused norm")
+        reached = ("add_rms_join_post_attn",) + (() if rope_table else ("rope_append",))
+        note = ("both paths are on by default in a rocm build (FUSED_ADD_RMSNORM_DEFAULT / "
+                "FUSED_ROPE_APPEND_DEFAULT = cfg!(feature = \"rocm\"), #2145); only the "
+                "post-attention join calls the fused norm")
         if rope_table:
             note += "; rope_scaling builds a frequency table, which the RoPE kernel cannot take"
-        return (), optin, note
+        return reached, reached, note
     if unit == "2064":
         if sampled:
             return ("sampler_tail",), ("sampler_tail",), "sampled run: the draw is the fallback chain"
