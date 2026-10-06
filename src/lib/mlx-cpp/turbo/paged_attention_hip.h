@@ -52,10 +52,12 @@
 // gfx90a (#2067). The fold is written not to need it: the 32 lanes that share a
 // `threadIdx.y` are consecutive in the block's linear order, so on a wave64
 // target the explicit width of 32 should keep each butterfly inside its own
-// row (not run: this host has no wave64 device). The
+// row (not run: this host has no wave64 device), which is why both tables stay
+// wave32-only and `port_for` refuses them on a wider device (#2147). The
 // merge body has no lane-level operation (one thread per output element, no
-// shuffle and no barrier), so it is correct for any wavefront size and carries
-// no guard: an `#error` there would only reject a correct kernel.
+// shuffle and no barrier), so it is correct for any wavefront size, carries
+// no guard (an `#error` there would only reject a correct kernel), and
+// `paged_merge_ports()` is marked `rocm_any_wave_size`.
 
 namespace mlxcel::turbo {
 

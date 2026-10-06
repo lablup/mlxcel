@@ -25,10 +25,11 @@
 //! reports, for example). Either way they fail for a missing port, which reads
 //! as a correctness failure.
 //!
-//! With the HIP ports in the tables every predicate below is true on ROCm, so
-//! nothing skips there any more. The macros stay, so that a kernel added to
-//! this family, or a backend added later, skips visibly here too instead of
-//! failing.
+//! With the HIP ports in the tables every predicate below is true on a wave32
+//! ROCm device, so nothing skips there any more. On a wave64 (CDNA) device the
+//! v1 decode and v2 partial ports are held back (lablup/mlxcel#2147), and the
+//! tests that need them skip here. The macros also stay so that a kernel added
+//! to this family, or a backend added later, skips visibly instead of failing.
 //!
 //! A skip here is narrow on purpose, so it cannot hide a real defect:
 //!
@@ -40,9 +41,9 @@
 //! - It skips only on ROCm. On Metal or CUDA a `false` predicate is itself a
 //!   defect (those ports exist), so the test runs and fails there rather than
 //!   passing silently.
-//! - It prints the skip, as `skipping <module>:<line>: ROCm has no <kernels>
-//!   kernel port yet (lablup/mlxcel#1814) ...`, so the gate log says which tests
-//!   did not run and why.
+//! - It prints the skip, as `skipping <module>:<line>: ROCm selects no
+//!   <kernels> kernel port on this device ...`, so the gate log says which
+//!   tests did not run and why.
 //!
 //! Every such test starts with one of the `require_paged_*_port!` macros below;
 //! `grep` for `require_paged_` to list them.
@@ -65,8 +66,10 @@ pub(crate) fn skip_for_missing_rocm_port(kernels: &str, available: bool, test: &
     // in the gate log instead of reading as a pass.
     let _ = writeln!(
         std::io::stderr(),
-        "skipping {test}: ROCm has no {kernels} kernel port yet ({PAGED_ATTENTION_ROCM_PORT_ISSUE}); \
-         the test runs again once the port table has a .rocm entry"
+        "skipping {test}: ROCm selects no {kernels} kernel port on this device (no port yet, \
+         {PAGED_ATTENTION_ROCM_PORT_ISSUE}, or a wave32-only port held back on a wider wavefront, \
+         lablup/mlxcel#2147); the test runs again once the port table has a .rocm entry the \
+         device can take"
     );
     true
 }

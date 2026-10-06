@@ -160,7 +160,11 @@ namespace {
         // The fold below starts at 16, which is correct only for a 32-lane
         // wavefront. On a wave64 target (CDNA: gfx90a, gfx942) it would fold
         // half the lanes and the missing half would not be visible: the result
-        // stays finite and plausible, just wrong. Fail to compile instead.
+        // stays finite and plausible, just wrong. The guard below meant to fail
+        // the compile there, but it is inert on AMD clang 23 (HIP 7.15), which
+        // defines neither macro spelling. What keeps this port off a wave64
+        // device is the host-side check in `port_for` (`kernel_port.cpp`,
+        // #2147), which answers "no port" for this table there.
         //
         // Checked with the preprocessor, not `static_assert(warpSize == 32)`:
         // HIP's `warpSize` is an object with an `operator int()`, so that form
@@ -252,6 +256,16 @@ const mlxcel::KernelPorts& bitlinear_ports() {
     return ports;
 }
 
+}
+
+// True when this backend has a BitLinear kernel port. Metal, CUDA and, since
+// issue #1862, ROCm. Kept apart from `custom_kernels_available` because kernels
+// are ported one at a time: ROCm has this one and not the rest. Read from the
+// table `bitlinear_matmul` dispatches through, so it also answers false on a
+// wave64 ROCm device, where the wave32-only HIP port is held back (#2147) and
+// the BitNet loader refuses the checkpoint instead of failing mid-request.
+bool bitlinear_kernel_available() {
+    return mlxcel::has_kernel_port(bitlinear_ports());
 }
 
 std::unique_ptr<MlxArray> bitlinear_matmul(
@@ -424,18 +438,16 @@ namespace {
     // FMA (one rounding instead of the graph's two). The scalars arrive as
     // f32 and round to T once, as `full_f32(.., dtype)` does in the graph.
     // Elementwise with no cross-lane step, so the wavefront size does not
-    // enter; the guard is the #1814 port rule (see MOE_GATEUP_HIP_SOURCE).
+    // enter: `xielu_ports()` marks the port `rocm_any_wave_size` and it is
+    // not held back on wave64 (#2147). It carries no `#error` wave32 guard
+    // for the same reason as `GUMBEL_MAX_SAMPLE_HIP_SOURCE`: on a compiler
+    // that defined the wavefront macro, the guard would fail the hipRTC
+    // compile of a correct kernel on a wave64 device.
     // The element count is read from `x_shape[0]` (x arrives flattened)
     // rather than a template argument, so hipRTC compiles one kernel per
     // dtype instead of one per activation size (the ROCm JIT cache has no
     // eviction).
     static const char* XIELU_HIP_SOURCE = R"(
-        #if defined(__AMDGCN_WAVEFRONT_SIZE__) && __AMDGCN_WAVEFRONT_SIZE__ != 32
-        #error "xielu_fused_hip assumes a 32-lane wavefront"
-        #endif
-        #if defined(__AMDGCN_WAVEFRONT_SIZE) && __AMDGCN_WAVEFRONT_SIZE != 32
-        #error "xielu_fused_hip assumes a 32-lane wavefront"
-        #endif
         {
         #pragma clang fp contract(off)
         uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -496,6 +508,9 @@ const mlxcel::KernelPorts& xielu_ports() {
         .rocm = +[]() -> mlx::core::fast::CustomKernelFunction& {
             return get_xielu_kernel_hip().get();
         },
+        // Elementwise, no lane-level operation (see XIELU_HIP_SOURCE), so it
+        // may run at any wavefront width (#2147; not yet run on wave64).
+        .rocm_any_wave_size = true,
     };
     return ports;
 }
@@ -737,8 +752,9 @@ namespace {
         // requirements), spelled as the bitlinear port spells it because
         // `static_assert(warpSize == 32)` does not compile in HIP. It is a
         // no-op with ROCm 10's AMD clang 23, which defines neither macro for
-        // gfx1151, gfx942 or gfx90a. This fold does not rely on it: the
-        // shuffle width of 32 keeps it inside one row on wave64 as well.
+        // gfx1151, gfx942 or gfx90a. The shuffle width of 32 should keep the
+        // fold inside one row on wave64 as well, but that has not been run, so
+        // `port_for` holds this port to 32-lane devices (#2147).
         #if defined(__AMDGCN_WAVEFRONT_SIZE__) && __AMDGCN_WAVEFRONT_SIZE__ != 32
         #error "ssm_kernel_hip assumes a 32-lane wavefront"
         #endif
@@ -2105,9 +2121,9 @@ __device__ __forceinline__ T mamba1_add(T a, T b) {
     // (T, N, Dm); `A` and the state arrive as float32 for this variant, every
     // other input as T.
     static const char* MAMBA1_SCAN_HIP_SOURCE = R"(
-        // 32-lane wavefront only; see MOE_GATEUP_HIP_SOURCE for why the
-        // explicit shuffle width, not this guard, is what holds on AMD
-        // clang 23.
+        // 32-lane wavefront only. The guard is inert on AMD clang 23; the
+        // port is held to 32-lane devices by `port_for` (#2147), see
+        // MOE_GATEUP_HIP_SOURCE.
         #if defined(__AMDGCN_WAVEFRONT_SIZE__) && __AMDGCN_WAVEFRONT_SIZE__ != 32
         #error "mamba1_selective_scan_hip assumes a 32-lane wavefront"
         #endif
@@ -2690,9 +2706,11 @@ namespace {
         // half the row. The preprocessor guard is the #1814 port rule, not
         // `static_assert(warpSize == 32)`, which does not compile in HIP. It
         // is inert on AMD clang 23 (HIP 7.15), which defines neither macro
-        // for gfx942 or gfx1151 (checked with `hipcc -E -dM`, #2065), so the
-        // explicit width is what keeps the fold correct there; wave64 is not
-        // tested.
+        // for gfx942 or gfx1151 (checked with `hipcc -E -dM`, #2065). The
+        // explicit width should keep the fold correct on wave64, but that has
+        // not been run, so the protection is host-side: `port_for` answers "no
+        // port" for every wave32-only table on a device whose wavefront is not
+        // 32 lanes, and the caller takes its graph fallback (#2147).
         #if defined(__AMDGCN_WAVEFRONT_SIZE__) && __AMDGCN_WAVEFRONT_SIZE__ != 32
         #error "moe_gateup_kernel_hip assumes a 32-lane wavefront"
         #endif
@@ -3001,9 +3019,9 @@ const mlxcel::KernelPorts& moe_down_ports() {
     // the hipRTC cache key carries the activation dtype `T`; `indices` is
     // always uint32 and the weights always packed uint32.
     static const char* MOE_FC1_RELU2_HIP_SOURCE = R"(
-        // 32-lane wavefront only; see MOE_GATEUP_HIP_SOURCE for why the
-        // explicit shuffle width, not this guard, is what holds on AMD
-        // clang 23.
+        // 32-lane wavefront only. The guard is inert on AMD clang 23; the
+        // port is held to 32-lane devices by `port_for` (#2147), see
+        // MOE_GATEUP_HIP_SOURCE.
         #if defined(__AMDGCN_WAVEFRONT_SIZE__) && __AMDGCN_WAVEFRONT_SIZE__ != 32
         #error "moe_fc1_relu2_kernel_hip assumes a 32-lane wavefront"
         #endif
@@ -3768,8 +3786,9 @@ namespace {
     static const char* ADD3_LN_HIP_SOURCE = R"(
         // The folds below assume 32-lane wavefronts and a 256-thread block of
         // eight of them, as layer_norm.hip's WARP_SIZE does on RDNA. Every
-        // shuffle states width 32; see MOE_GATEUP_HIP_SOURCE for why the
-        // guard alone is inert on AMD clang 23.
+        // shuffle states width 32. The guard is inert on AMD clang 23; the
+        // port is held to 32-lane devices by `port_for` (#2147), see
+        // MOE_GATEUP_HIP_SOURCE.
         #if defined(__AMDGCN_WAVEFRONT_SIZE__) && __AMDGCN_WAVEFRONT_SIZE__ != 32
         #error "mlxcel_add3_layer_norm_hip assumes a 32-lane wavefront"
         #endif

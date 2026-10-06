@@ -230,6 +230,9 @@ const mlxcel::KernelPorts& paged_merge_ports() {
         .rocm = +[]() -> mlx::core::fast::CustomKernelFunction& {
             return get_merge_kernel<mlxcel::GpuKernelBackend::Rocm>().get();
         },
+        // The merge body has no lane-level operation (`paged_attention_hip.h`, "Wave32 guard"), so
+        // it may run at any wavefront width (#2147; not yet run on wave64).
+        .rocm_any_wave_size = true,
     };
     return ports;
 }

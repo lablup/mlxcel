@@ -26,6 +26,7 @@
 #include <mlx/backend/rocm/rocm.h>
 #endif
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 
@@ -86,6 +87,50 @@ GpuKernelBackend gpu_kernel_backend() {
 
 bool custom_kernels_available() {
   return custom_kernels_available_for(gpu_kernel_backend());
+}
+
+namespace {
+
+// `0` is "no override". Relaxed is enough: the value is a single int that a
+// test sets before the reads it wants to affect, with no other data riding on
+// it.
+std::atomic<int> rocm_port_warp_size_override{0};
+
+int rocm_hardware_warp_size() {
+  static const int warp_size = [] {
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+    if (!mlx::core::rocm::is_available()) {
+      return 0;
+    }
+    int w = mlx::core::rocm::device_warp_size();
+    if (w != 32) {
+      // Once per process, so an operator on CDNA can tell why decode runs
+      // without the fused kernels rather than reading it as a slowdown.
+      std::fprintf(
+          stderr,
+          "[mlxcel] ROCm device wavefront is %d lanes%s; fused kernels "
+          "validated only on 32 lanes use their MLX graph fallbacks\n",
+          w,
+          w == 0 ? " (query failed)" : "");
+    }
+    return w;
+#else
+    return 0;
+#endif
+  }();
+  return warp_size;
+}
+
+} // namespace
+
+int rocm_port_warp_size() {
+  int forced = rocm_port_warp_size_override.load(std::memory_order_relaxed);
+  return forced > 0 ? forced : rocm_hardware_warp_size();
+}
+
+void set_rocm_port_warp_size_for_tests(int warp_size) {
+  rocm_port_warp_size_override.store(
+      warp_size > 0 ? warp_size : 0, std::memory_order_relaxed);
 }
 
 } // namespace mlxcel

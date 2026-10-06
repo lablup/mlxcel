@@ -63,9 +63,18 @@ struct KernelPorts {
   KernelPortGetter metal = nullptr;
   KernelPortGetter cuda = nullptr;
   KernelPortGetter rocm = nullptr;
+  // True when the ROCm port is correct at any wavefront width, because its HIP
+  // body has no lane-level operation (no shuffle, ballot or per-warp slot).
+  // False, the default, holds the port to 32-lane devices: on a wave64 GPU
+  // (CDNA) `port_for` answers "no port" and callers take their graph fallback
+  // (issue #2147). A new port is therefore refused on wave64 unless its author
+  // says otherwise, and `make verify-kernel-port-dispatch` pins which tables
+  // say so and checks that their HIP source has no lane intrinsic.
+  bool rocm_any_wave_size = false;
 };
 
-// True when the resolved backend has a port in this table.
+// True when the resolved backend has a port in this table, and on ROCm the
+// device's wavefront width allows it (`rocm_port_allowed`).
 //
 // This is what a kernel's `*_available()` predicate should return, so that the
 // predicate and the dispatch cannot answer differently. A caller that gates on
@@ -76,7 +85,8 @@ bool has_kernel_port(const KernelPorts& ports);
 // The port for the resolved backend.
 //
 // Throws when there is none, naming `entry_point` and `fallback` so the message
-// says what is missing and what the caller should do instead, rather than
+// says what is missing (or, for a wave32-only ROCm port on a wider device, the
+// wavefront width) and what the caller should do instead, rather than
 // naming whichever port happened to be tried. The bridge function that reaches
 // here must be declared `-> Result<...>` in the cxx bridge, or the throw
 // crosses a `noexcept` extern and ends the process instead of failing the call.

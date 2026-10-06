@@ -445,6 +445,8 @@ jobs:
           persist-credentials: false
       - name: Check every fused-kernel launcher routes through select_kernel_port
         run: python3 scripts/ci/check_kernel_port_dispatch.py
+      - name: Check the port-dispatch checker rejects an unvalidated wave64 port
+        run: bash scripts/ci/check_kernel_port_dispatch_test.sh
 
   binary-assets:
     name: binary assets

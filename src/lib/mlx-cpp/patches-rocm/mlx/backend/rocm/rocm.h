@@ -16,6 +16,14 @@ namespace mlx::core::rocm {
 /* Check if the ROCm backend is available. */
 MLX_API bool is_available();
 
+// The wavefront width of the current HIP device as the hardware reports it
+// (`hipDeviceAttributeWarpSize`): 32 on RDNA, 64 on CDNA. Unlike
+// `Device::warp_size()`, it never follows `MLX_ROCM_FORCE_WARP_SIZE`, so a
+// caller deciding whether a kernel written for one width may run reads the
+// device, not a launch-width experiment. Returns 0 when the query fails
+// (lablup/mlxcel#2147).
+MLX_API int device_warp_size();
+
 // Deterministic bump arena (shared decode/train region). Opt-in for future
 // HIP-graph train capture — does NOT enable graphs by itself.
 // capacity_bytes: backing HBM region; returns false on alloc failure.

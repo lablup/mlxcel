@@ -14,6 +14,10 @@ bool is_available() {
   return false;
 }
 
+int device_warp_size() {
+  return 0;
+}
+
 bool train_arena_begin(size_t) {
   return false;
 }

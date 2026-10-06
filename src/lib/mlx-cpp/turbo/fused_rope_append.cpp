@@ -419,6 +419,9 @@ const mlxcel::KernelPorts& fused_rope_ports() {
         .rocm = +[]() -> mlx::core::fast::CustomKernelFunction& {
             return get_fused_rope_kernel_hip().get();
         },
+        // The HIP body has no lane-level operation (`fused_rope_append_hip.h`, "No wavefront guard"), so
+        // it may run at any wavefront width (#2147; not yet run on wave64).
+        .rocm_any_wave_size = true,
     };
     return ports;
 }

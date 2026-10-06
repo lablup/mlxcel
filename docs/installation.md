@@ -381,7 +381,9 @@ changes mlxcel carries on top of the fork.
 Tested configuration: AMD Ryzen AI MAX+ 395 with Radeon 8060S (`gfx1151`,
 RDNA 3.5) and a 96 GiB VRAM carve-out, Debian 13, ROCm 10.0.0 packages
 (HIP 7.15, AMD clang 23). Other RDNA 3, 3.5 and 4 parts are expected to build;
-CDNA parts (for example MI300) compile but carry no tuning.
+CDNA parts (for example MI300) compile but carry no tuning, and on them the
+fused kernels that reduce across a 32-lane wavefront fall back to the MLX
+graph until validated (see "Wave64 devices" below).
 
 ### Prerequisites
 
@@ -563,6 +565,7 @@ so `mlxcel inspect` and `--estimate-memory` give the same answers as before.
 | CPU device on a ROCm build (`MLXCEL_DEVICE=cpu`) | Runs, but slowly: on the tested host a Qwen3-0.6B-4bit decode step takes about two minutes, so it is a correctness reference and an escape hatch for a mismatched `gfx` build, not a serving mode. Before lablup/mlxcel#1807 every attention model aborted at the first token with `NYI`. BLAS work on this device (f32 matmul, convolution, linear algebra) runs on one OpenBLAS thread: with OpenBLAS's default thread count it intermittently wrote wrong output columns into the ROCm allocator's fine-grained memory (lablup/mlxcel#2072, `patches-rocm/LOCAL_FIXES.md` item 27). |
 | `mlxcel-server` chat completions | Work for dense and affine MoE checkpoints, streaming and non-streaming; verified with `scripts/server_chat_smoke.sh`. |
 | Audio (speech to text, text to speech) | Works. The FFT primitive runs on hipFFT; plans are cached up to `MLX_ROCM_FFT_CACHE_SIZE` (default 128, as on CUDA; lablup/mlxcel#1825, #1876); a value that is not a positive integer is ignored with a warning (#2051). |
+| Wave64 devices (CDNA: MI200 `gfx90a`, MI300 `gfx942`) | Not run. The fused HIP kernels that reduce across lanes (BitLinear, the two fused MoE kernels and the squared-ReLU one, the Mamba2 SSM update, the Mamba1 scan, the add3 LayerNorm, the fused residual-add RMSNorm, and the paged-attention v1 decode and v2 partial) have only run on 32-lane wavefronts, and their compile-time wavefront guards do nothing with AMD clang 23. So mlxcel selects them only when the device reports a 32-lane wavefront (the hardware value, which `MLX_ROCM_FORCE_WARP_SIZE` does not change); on a 64-lane device those paths use their MLX graph fallbacks, and stderr says so once per process (lablup/mlxcel#2147). The kernels with no cross-lane operation (xIELU, RoPE + KV append, the paged-attention merge, both samplers) are selected at any width. BitLinear has no graph fallback, so BitNet checkpoints are refused at load on a wave64 device. |
 | Windows, multiple GPUs, distributed inference | Not supported. |
 
 Decode throughput measured on the tested configuration, for orientation only

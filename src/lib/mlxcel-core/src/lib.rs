@@ -2358,6 +2358,28 @@ mod ffi {
         /// [`crate::hardware::gpu_backend_kind`], which maps it to an enum.
         fn gpu_backend_kind() -> i32;
 
+        /// Whether a ROCm kernel port may run on a device whose wavefront
+        /// is `warp_size` lanes wide (issue #2147): true when the port is
+        /// marked correct at any width, or the width is 32. A width of 0
+        /// (the query failed) counts as "not 32". The pure rule that every
+        /// port table lookup applies on ROCm, exposed so it is tested on
+        /// every backend.
+        fn rocm_port_allowed(any_wave_size: bool, warp_size: i32) -> bool;
+
+        /// The hardware wavefront width of the current HIP device: 32 on
+        /// RDNA, 64 on CDNA, 0 off ROCm or when the query fails. Never the
+        /// `MLX_ROCM_FORCE_WARP_SIZE` launch-width override (issue #2147).
+        fn rocm_device_warp_size() -> i32;
+
+        /// Test-only seam (issue #2147): replaces the wavefront width the
+        /// ROCm port tables are checked against for the rest of the process
+        /// (0 restores the hardware value), so the wave64 refusal can be
+        /// exercised on a wave32 host. `make verify-kernel-port-dispatch`
+        /// fails on a call outside test code. The port predicates' Rust
+        /// gates cache a `true` answer, so set it before the first
+        /// predicate call, in a test binary of its own.
+        fn set_rocm_port_warp_size_for_tests(warp_size: i32);
+
         /// Test-only (issue #1804): a lazy array whose evaluation fails on
         /// the GPU. `kind` 0 launches a kernel with a 2048-thread block, which
         /// HIP rejects synchronously; `kind` 1 launches a kernel that writes
@@ -2370,7 +2392,8 @@ mod ffi {
         fn rocm_fault_probe_array(kind: i32) -> Result<UniquePtr<MlxArray>>;
 
         /// True when this backend has a BitLinear kernel port, that is Metal,
-        /// CUDA or ROCm (issues #1803, #1862). Separate from
+        /// CUDA or ROCm (issues #1803, #1862), read from the kernel's port
+        /// table, so false on a wave64 ROCm device (#2147). Separate from
         /// `custom_kernels_available` on purpose: kernels are ported one at a
         /// time, so "this backend has fused kernels" and "this backend has
         /// *this* kernel" stopped being the same question the moment ROCm got
@@ -4076,6 +4099,13 @@ mod ssm_update_parity_tests;
 #[cfg(test)]
 #[path = "rms_norm_small_axis_tests.rs"]
 mod rms_norm_small_axis_tests;
+
+// The wavefront rule every ROCm port table lookup applies (#2147). Pure, so
+// it runs on every backend; the device-level tests are in the root crate's
+// `tests/rocm_wave_size.rs` and `tests/rocm_wave64_port_refusal.rs`.
+#[cfg(test)]
+#[path = "kernel_port_tests.rs"]
+mod kernel_port_tests;
 
 // RoPE-parity tests for the fused q/k RoPE + KV-append-layout kernel (#905):
 // position offsets including the absolute positions rotated/ring caches use,

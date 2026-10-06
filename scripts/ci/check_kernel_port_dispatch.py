@@ -62,10 +62,29 @@ Rust files listed in ``BACKEND_ENUMERATION_TODO`` (empty since #2061) are
 exempt from rule 4, each with the predicate it is waiting on. Unlike
 ``UNCONVERTED`` these are not a convention that was skipped: they need a support
 predicate to be exported first (#1814).
+
+And for the ROCm wavefront hold (issue #2147):
+
+5. A table marked ``.rocm_any_wave_size = true`` is selected on a 64-lane
+   (CDNA) device, where no one has run it, on the strength of its HIP body
+   having no lane-level operation. That claim is checked here rather than
+   trusted: the marked tables are pinned in ``EXPECTED_ANY_WAVE`` with the HIP
+   source each compiles, a ``fast::hip_kernel`` call in the table's file must
+   compile that source, and the source (comments stripped) must contain no
+   shuffle, ballot or other lane intrinsic (``LANE_OPS``). Marking another table, or adding a shuffle to
+   a marked one, fails until the pin is reviewed. The ``#error`` guards on
+   ``__AMDGCN_WAVEFRONT_SIZE`` cannot do this job: AMD clang 23 defines neither
+   spelling of the macro.
+6. ``set_rocm_port_warp_size_for_tests``, the seam that replaces the wavefront
+   width the port tables are checked against, is called only from tests: a
+   Rust file under ``tests/``, a ``*_tests.rs`` module or ``test_support/``.
+   Its bridge declaration and C++ definitions are the only other places it
+   may appear (``SEAM_DEFINITIONS``).
 """
 
 from __future__ import annotations
 
+import argparse
 import pathlib
 import re
 import sys
@@ -98,6 +117,40 @@ HELPERS = {
     "src/lib/mlx-cpp/turbo/kernel_port.cpp",
     "src/lib/mlx-cpp/turbo/gpu_backend.cpp",
 }
+
+# Tables allowed to run their ROCm port at any wavefront width (rule 5), each
+# mapped to the HIP source its `.rocm` entry compiles. Adding a table here says
+# its body was read and has no lane-level operation; validating a
+# shuffle-based port on a wave64 device and marking it is a separate,
+# per-kernel decision (#2147).
+EXPECTED_ANY_WAVE = {
+    "fused_rope_ports": "FUSED_ROPE_APPEND_HIP_SOURCE",
+    "paged_merge_ports": "PAGED_ATTENTION_MERGE_HIP_SOURCE",
+    "gumbel_ports": "GUMBEL_MAX_SAMPLE_HIP_SOURCE",
+    "rejection_ports": "REJECTION_SAMPLE_HIP_SOURCE",
+    "xielu_ports": "XIELU_HIP_SOURCE",
+}
+
+# Cross-lane operations a body correct at any wavefront width cannot use.
+LANE_OPS = re.compile(
+    r"__shfl\w*|__ballot\w*|__activemask|\b__any(?:_sync)?\s*\(|"
+    r"\b__all(?:_sync)?\s*\(|__lane_id|\bwarpSize\b|__reduce_\w+_sync|"
+    r"__builtin_amdgcn_(?:ds_swizzle|mov_dpp|update_dpp|readlane|readfirstlane|"
+    r"ds_bpermute|ds_permute)")
+ANY_WAVE_FLAG = re.compile(r"\.rocm_any_wave_size\s*=\s*true")
+CPP_LINE_COMMENT = re.compile(r"//[^\n]*")
+CPP_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)
+
+# The test seam of rule 6, and the files that declare or define it.
+SEAM = re.compile(r"\bset_rocm_port_warp_size_for_tests\b")
+SEAM_DEFINITIONS = {
+    "src/lib/mlx-cpp/turbo/gpu_backend.h",
+    "src/lib/mlx-cpp/turbo/gpu_backend.cpp",
+    "src/lib/mlxcel-core/cpp/mlx_cxx_bridge.h",
+    "src/lib/mlxcel-core/cpp/mlx_cxx_bridge.cpp",
+}
+# The cxx bridge declaration in mlxcel-core's lib.rs.
+SEAM_DECLARATION = re.compile(r"\bfn\s+set_rocm_port_warp_size_for_tests\s*\(")
 
 LAUNCHES = re.compile(r"fast::(metal|cuda|hip)_kernel\s*\(")
 BACKEND_COMPARE = re.compile(r"gpu_kernel_backend\(\)\s*==")
@@ -165,8 +218,132 @@ def check_rust_gates(root: pathlib.Path) -> tuple[list[str], int]:
     return failures, checked
 
 
+def hip_source_body(root: pathlib.Path, name: str) -> tuple[str, str] | None:
+    """The raw-string body of the HIP source constant ``name`` and its file."""
+    definition = re.compile(rf"\b{name}\s*=\s*R\"(\w*)\(")
+    for path in sorted(root.glob("src/lib/**/*.h")) + sorted(root.glob("src/lib/**/*.cpp")):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        m = definition.search(text)
+        if not m:
+            continue
+        end = text.find(f"){m.group(1)}\"", m.end())
+        if end < 0:
+            continue
+        return text[m.end():end], path.relative_to(root).as_posix()
+    return None
+
+
+def check_any_wave_tables(root: pathlib.Path) -> tuple[list[str], int]:
+    """Rule 5: a table marked any-wave compiles a HIP body with no lane op."""
+    failures: list[str] = []
+    marked: dict[str, str] = {}
+    for path in sorted(root.glob("src/lib/**/*.cpp")):
+        rel = path.relative_to(root).as_posix()
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for m in PORT_TABLE.finditer(text):
+            if not ANY_WAVE_FLAG.search(m.group(0)):
+                continue
+            name = re.match(r"KernelPorts&\s+(\w+)\(", m.group(0)).group(1)
+            marked[name] = rel
+            line = text.count("\n", 0, m.start()) + 1
+            source = EXPECTED_ANY_WAVE.get(name)
+            if source is None:
+                failures.append(
+                    f"{rel}:{line}: {name} is marked rocm_any_wave_size but is "
+                    "not in EXPECTED_ANY_WAVE; marking a port runs it on wave64 "
+                    "devices, so pin it there, with its HIP source, in the same "
+                    "change for review")
+                # Still read the body when the file compiles a single HIP
+                # source, so the message says what is wrong with it too.
+                launches = [c for c in LAUNCHES.finditer(text) if c.group(1) == "hip"]
+                named = re.search(r"\b([A-Z][A-Z0-9_]*_HIP_SOURCE)\b",
+                                  text[launches[0].end():launches[0].end() + 800]) \
+                    if len(launches) == 1 else None
+                if not named:
+                    continue
+                source = named.group(1)
+            # The pinned source must be what a `fast::hip_kernel` call in this
+            # file compiles, so the pin cannot point at an unrelated body.
+            compiled = any(
+                re.search(rf"\b{source}\b", text[c.end():c.end() + 800])
+                for c in LAUNCHES.finditer(text) if c.group(1) == "hip")
+            if not compiled:
+                failures.append(
+                    f"{rel}:{line}: {name} is pinned to {source}, but no "
+                    "fast::hip_kernel call in this file compiles it")
+                continue
+            found = hip_source_body(root, source)
+            if found is None:
+                failures.append(
+                    f"{rel}:{line}: {name}'s HIP source {source} has no "
+                    "raw-string definition under src/lib")
+                continue
+            body, where = found
+            code = CPP_LINE_COMMENT.sub("", CPP_BLOCK_COMMENT.sub("", body))
+            op = LANE_OPS.search(code)
+            if op:
+                failures.append(
+                    f"{rel}:{line}: {name} is marked rocm_any_wave_size, but "
+                    f"{source} ({where}) uses `{op.group(0)}`, a lane-level "
+                    "operation; a wave64 device would run it unvalidated. Drop "
+                    "the mark, or validate the port on wave64 and make the body "
+                    "width-independent")
+    for name in sorted(set(EXPECTED_ANY_WAVE) - set(marked)):
+        failures.append(
+            f"scripts/ci/check_kernel_port_dispatch.py: EXPECTED_ANY_WAVE pins "
+            f"{name}, but no port table by that name is marked "
+            "rocm_any_wave_size; it would now be refused on wave64. Update the "
+            "pin if that was intended")
+    return failures, len(marked)
+
+
+def check_seam_callers(root: pathlib.Path) -> list[str]:
+    """Rule 6: only tests replace the wavefront width the port tables read."""
+    failures: list[str] = []
+    for path in sorted(root.glob("src/lib/**/*")):
+        if path.suffix not in {".cpp", ".h", ".hpp", ".cc", ".hip", ".mm"}:
+            continue
+        rel = path.relative_to(root).as_posix()
+        if rel in SEAM_DEFINITIONS:
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        code = CPP_LINE_COMMENT.sub("", CPP_BLOCK_COMMENT.sub("", text))
+        if SEAM.search(code):
+            failures.append(
+                f"{rel}: calls set_rocm_port_warp_size_for_tests outside its "
+                "definition; it is a test seam, and production code must read "
+                "the hardware wavefront width")
+    rust = []
+    for pattern in ("src/**/*.rs", "examples/**/*.rs", "benches/**/*.rs", "crates/**/*.rs"):
+        rust += sorted(root.glob(pattern))
+    for path in rust:
+        rel = path.relative_to(root).as_posix()
+        if rel.endswith("_tests.rs") or "/test_support/" in rel or "/tests/" in rel:
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        code = blank_matches(text, RUST_COMMENT)
+        for m in SEAM.finditer(code):
+            line_start = code.rfind("\n", 0, m.start()) + 1
+            line_end = code.find("\n", m.end())
+            if SEAM_DECLARATION.search(code[line_start:line_end if line_end >= 0 else None]) \
+                    and rel == "src/lib/mlxcel-core/src/lib.rs":
+                continue
+            line = text.count("\n", 0, m.start()) + 1
+            failures.append(
+                f"{rel}:{line}: calls set_rocm_port_warp_size_for_tests outside "
+                "a test; it replaces the wavefront width every ROCm port table "
+                "is checked against, so only tests under tests/, *_tests.rs or "
+                "test_support/ may use it")
+    return failures
+
+
 def main() -> int:
-    root = pathlib.Path(__file__).resolve().parents[2]
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--root", type=pathlib.Path,
+        default=pathlib.Path(__file__).resolve().parents[2],
+        help="repository root to check (default: this checkout)")
+    root = parser.parse_args().root.resolve()
     failures: list[str] = []
     checked = 0
 
@@ -202,6 +379,9 @@ def main() -> int:
 
     rust_failures, rust_checked = check_rust_gates(root)
     failures += rust_failures
+    wave_failures, any_wave = check_any_wave_tables(root)
+    failures += wave_failures
+    failures += check_seam_callers(root)
 
     if failures:
         print("Kernel port dispatch check failed:\n", file=sys.stderr)
@@ -209,14 +389,16 @@ def main() -> int:
             print(f"  {f}", file=sys.stderr)
         print(
             "\nSee src/lib/mlx-cpp/turbo/kernel_port.h for the pattern and why "
-            "it exists (lablup/mlxcel#1801, #1803, #1885, #2018).",
+            "it exists (lablup/mlxcel#1801, #1803, #1885, #2018, #2147).",
             file=sys.stderr)
         return 1
 
     print(f"Kernel port dispatch check passed: {checked} launcher file(s) "
           f"route through select_kernel_port, {len(UNCONVERTED)} exempt; "
           f"{rust_checked} Rust file(s) free of backend-enumerating gates, "
-          f"{len(BACKEND_ENUMERATION_TODO)} awaiting a predicate.")
+          f"{len(BACKEND_ENUMERATION_TODO)} awaiting a predicate; "
+          f"{any_wave} any-wave ROCm table(s) free of lane operations, "
+          f"wave-size test seam used only by tests.")
     return 0
 
 

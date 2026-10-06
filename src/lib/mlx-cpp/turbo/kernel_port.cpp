@@ -34,6 +34,15 @@ KernelPortGetter port_for(const KernelPorts& ports, GpuKernelBackend backend) {
     case GpuKernelBackend::Cuda:
       return ports.cuda;
     case GpuKernelBackend::Rocm:
+      // The shuffle-based HIP ports have run on 32-lane wavefronts only, and
+      // their `#error` guards are inert on current compilers, so a wider
+      // device gets "no port" here rather than an unvalidated kernel
+      // (issue #2147). Checked only when a port exists, so a table with no
+      // ROCm entry never queries the device.
+      if (ports.rocm == nullptr ||
+          !rocm_port_allowed(ports.rocm_any_wave_size, rocm_port_warp_size())) {
+        return nullptr;
+      }
       return ports.rocm;
     case GpuKernelBackend::None:
       return nullptr;
@@ -58,8 +67,19 @@ mlx::core::fast::CustomKernelFunction& select_kernel_port(
     const char* entry_point,
     const char* fallback,
     const KernelPorts& ports) {
-  if (KernelPortGetter getter = port_for(ports, gpu_kernel_backend())) {
+  GpuKernelBackend backend = gpu_kernel_backend();
+  if (KernelPortGetter getter = port_for(ports, backend)) {
     return getter();
+  }
+  if (backend == GpuKernelBackend::Rocm && ports.rocm != nullptr) {
+    // The port exists and was held back by the wavefront width. Saying so
+    // keeps a CDNA user from reading this as a missing port.
+    throw std::runtime_error(
+        std::string("[") + entry_point +
+        "] the ROCm port is validated only on a 32-lane wavefront and this "
+        "device reports " +
+        std::to_string(rocm_port_warp_size()) +
+        " lanes; mlxcel's callers take the " + fallback + " instead");
   }
   // Named from the table rather than from whichever port was tried, which is
   // what made the old per-site messages misleading: `[metal_kernel] No Metal

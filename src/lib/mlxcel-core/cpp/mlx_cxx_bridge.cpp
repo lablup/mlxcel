@@ -5157,6 +5157,22 @@ int32_t gpu_backend_kind() {
     return static_cast<int32_t>(mlxcel::gpu_kernel_backend());
 }
 
+bool rocm_port_allowed(bool any_wave_size, int32_t warp_size) {
+    return mlxcel::rocm_port_allowed(any_wave_size, static_cast<int>(warp_size));
+}
+
+int32_t rocm_device_warp_size() {
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+    return static_cast<int32_t>(mlx::core::rocm::device_warp_size());
+#else
+    return 0;
+#endif
+}
+
+void set_rocm_port_warp_size_for_tests(int32_t warp_size) {
+    mlxcel::set_rocm_port_warp_size_for_tests(static_cast<int>(warp_size));
+}
+
 // Test-only fixture for lablup/mlxcel#1804; see the header. The kernels go
 // through `fast::hip_kernel`, so the launch, the wait and the error attach are
 // the production ones; only the kernel bodies are contrived.
@@ -5205,13 +5221,6 @@ std::unique_ptr<MlxArray> rocm_fault_probe_array(int32_t kind) {
     throw std::runtime_error(
         "rocm_fault_probe_array is only available on the ROCm backend");
 #endif
-}
-
-// True when this backend has a BitLinear kernel port. Metal, CUDA and, since
-// issue #1862, ROCm. Kept apart from `custom_kernels_available` because kernels
-// are ported one at a time: ROCm has this one and not the rest.
-bool bitlinear_kernel_available() {
-    return mlxcel::gpu_kernel_backend() != mlxcel::GpuKernelBackend::None;
 }
 
 // See the header. Only ROCm routes `quantized_matmul` to kernels whose bytes

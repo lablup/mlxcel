@@ -18,6 +18,22 @@ bool is_available() {
   return available == 1;
 }
 
+int device_warp_size() {
+  if (!is_available()) {
+    return 0;
+  }
+  int dev = 0;
+  int warp = 0;
+  if (hipGetDevice(&dev) != hipSuccess ||
+      hipDeviceGetAttribute(&warp, hipDeviceAttributeWarpSize, dev) !=
+          hipSuccess) {
+    // Clear the error so a later, unrelated HIP check does not report it.
+    (void)hipGetLastError();
+    return 0;
+  }
+  return warp;
+}
+
 bool train_arena_begin(size_t capacity_bytes) {
   if (!is_available() || capacity_bytes == 0) {
     return false;

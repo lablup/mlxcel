@@ -65,10 +65,10 @@
 // based port. It is inert with HIP 7.15's AMD clang 23, which defines neither
 // `__AMDGCN_WAVEFRONT_SIZE` spelling for gfx1151 or gfx942 (checked with
 // `hipcc -E -dM` in #2065), so it does not protect anything on current
-// toolchains; the explicit width of 32 is what keeps the reduction correct.
-// With a compiler that does define the macro it would fail the hipRTC compile
-// at the first launch on a wave64 device (an error at evaluation, not a
-// fallback) rather than run an untested kernel.
+// toolchains. The protection is host-side: `fused_norm_ports()` is not marked
+// `rocm_any_wave_size`, so `port_for` answers "no port" on a device whose
+// wavefront is not 32 lanes and the caller keeps the graph (#2147). The guard
+// stays for a compiler that does define the macro.
 //
 // The bf16 reads keep the CUDA text's explicit `(float)`, which is required:
 // `hip_bfloat16`, the type MLX substitutes for bfloat16 on ROCm, converts to

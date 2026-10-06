@@ -822,10 +822,15 @@ verify-kernel-dtype-keys: ## Assert every CUDA and HIP JIT kernel launch keys it
 	@python3 scripts/ci/check_kernel_dtype_keys.py
 	@bash scripts/ci/check_kernel_dtype_keys_test.sh
 
+# check_kernel_port_dispatch_test.sh is the negative coverage for the ROCm
+# wavefront rules (#2147): it marks a shuffle-based table any-wave, adds a
+# shuffle to a marked body and calls the wave-size test seam from production
+# code in a throwaway copy, and asserts the checker rejects each.
 .PHONY: verify-kernel-port-dispatch
-verify-kernel-port-dispatch: ## Assert every fused-kernel launcher chooses its port through select_kernel_port (issues #1801, #1885)
+verify-kernel-port-dispatch: ## Assert every fused-kernel launcher chooses its port through select_kernel_port, and only lane-free HIP ports run on wave64 (issues #1801, #1885, #2147)
 	@echo "$(CYAN)[verify] kernel port dispatch...$(RESET)"
 	@python3 scripts/ci/check_kernel_port_dispatch.py
+	@bash scripts/ci/check_kernel_port_dispatch_test.sh
 
 # Offline half of the mlxcelverse ROCm overlay checks (issue #1813). It reads
 # only files in this repository: patches-rocm/UPSTREAM must name the build's MLX

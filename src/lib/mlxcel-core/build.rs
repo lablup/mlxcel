@@ -299,6 +299,13 @@ fn main() {
     println!("cargo:rerun-if-changed=../mlx-cpp/patches-rocm");
     // Sparse-V fused-skip Metal kernel launchers.
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/CMakeLists.txt");
+    // The port-selection helpers every launcher includes (#1803, #2147). Not
+    // tracked before, so an edit to the wavefront hold in `port_for` left the
+    // bridge library stale until some other tracked file changed.
+    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/gpu_backend.h");
+    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/gpu_backend.cpp");
+    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/kernel_port.h");
+    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/kernel_port.cpp");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sparse_v_sdpa.h");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sparse_v_sdpa.cpp");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sparse_v_sdpa.metal");

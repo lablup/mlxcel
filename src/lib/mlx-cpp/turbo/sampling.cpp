@@ -401,6 +401,9 @@ const KernelPorts& gumbel_ports() {
         .rocm = +[]() -> mlx::core::fast::CustomKernelFunction& {
             return get_gumbel_kernel_hip().get();
         },
+        // The HIP body has no lane-level operation (`sampling_gumbel_hip.h`, "No wave32 guard"), so
+        // it may run at any wavefront width (#2147; not yet run on wave64).
+        .rocm_any_wave_size = true,
     };
     return ports;
 }

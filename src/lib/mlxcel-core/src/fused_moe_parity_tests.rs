@@ -558,8 +558,10 @@ fn fused_moe_kernel_source_structure() {
     // spellings of the wavefront macro, and every shuffle in it states a width
     // of 32: the native `__shfl_down` defaults to the device wavefront, so an
     // implied width would fold 64 lanes on a wave64 part while the ladder
-    // above covers only 32. The width is the load-bearing half: AMD clang 23
-    // defines neither macro, so the guard does not fire there (#2065).
+    // above covers only 32. AMD clang 23 defines neither macro, so the guard
+    // does not fire there (#2065); on a wave64 device the port is not
+    // selected at all, because `port_for` holds wave32-only tables to
+    // 32-lane devices (#2147).
     for name in ["MOE_GATEUP_HIP_SOURCE", "MOE_DOWN_HIP_SOURCE"] {
         let start = src
             .find(&format!("{name} = R\"("))

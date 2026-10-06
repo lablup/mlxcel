@@ -1410,6 +1410,17 @@ bool custom_kernels_available();
 // `device_info()` keys happen to be present.
 int32_t gpu_backend_kind();
 
+// Wavefront-width hold on ROCm ports (lablup/mlxcel#2147); see
+// `src/lib/mlx-cpp/turbo/gpu_backend.h`. `rocm_port_allowed` is the pure rule
+// `port_for` applies, `rocm_device_warp_size` the hardware width of the
+// current HIP device (0 off ROCm or when the query fails, never the
+// `MLX_ROCM_FORCE_WARP_SIZE` override), and
+// `set_rocm_port_warp_size_for_tests` the test-only seam that replaces the
+// width `port_for` sees (0 restores the hardware value).
+bool rocm_port_allowed(bool any_wave_size, int32_t warp_size);
+int32_t rocm_device_warp_size();
+void set_rocm_port_warp_size_for_tests(int32_t warp_size);
+
 // Test-only (lablup/mlxcel#1804): a lazy array whose evaluation fails on the
 // GPU in a chosen way, built through the same custom-kernel path the fused
 // ports use, so a test can check that a ROCm failure reaches Rust as an `Err`
@@ -1423,7 +1434,8 @@ std::unique_ptr<MlxArray> rocm_fault_probe_array(int32_t kind);
 
 
 // True when this backend has a BitLinear kernel port: Metal, CUDA or ROCm
-// (issues #1803, #1862).
+// (issues #1803, #1862). Read from the kernel's port table, so on a wave64
+// ROCm device, where that port is held back (#2147), it is false.
 bool bitlinear_kernel_available();
 
 // Fused decode-MoE port predicates (lablup/mlxcel#2065), read from the

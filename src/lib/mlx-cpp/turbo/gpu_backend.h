@@ -71,4 +71,43 @@ GpuKernelBackend gpu_kernel_backend();
 // custom_kernels_available_for(gpu_kernel_backend()).
 bool custom_kernels_available();
 
+// Whether a ROCm port may run on a device whose wavefront is `warp_size`
+// lanes wide (issue #2147).
+//
+// Every shuffle-based HIP port was written and validated on a 32-lane
+// wavefront (RDNA, gfx1151) only. Its `#error` guard on
+// `__AMDGCN_WAVEFRONT_SIZE` cannot catch a 64-lane device, because AMD clang 23
+// (HIP 7.15) defines neither spelling of that macro, so this host-side test is
+// what keeps such a port off CDNA (gfx90a, gfx942) until someone runs it
+// there. A port whose body has no lane-level operation says so with
+// `KernelPorts::rocm_any_wave_size` and is allowed at any width. `0` means the
+// width could not be read and counts as "not 32".
+//
+// Pure so it can be tested without a wave64 device; `port_for` in
+// `kernel_port.cpp` is its only production caller.
+constexpr bool rocm_port_allowed(bool any_wave_size, int warp_size) {
+  return any_wave_size || warp_size == 32;
+}
+
+// The wavefront width `port_for` holds a ROCm port against: the hardware value
+// of the current HIP device (`mlx::core::rocm::device_warp_size()`, which does
+// not follow `MLX_ROCM_FORCE_WARP_SIZE`), read once per process, or `0` on a
+// build without the ROCm backend or when the query fails.
+//
+// Read once, for the device that is current at the first call. A process that
+// later moves to a GPU of another wavefront width (a host mixing RDNA and CDNA
+// cards) keeps the first answer; that case is not handled.
+//
+// A test can replace the answer with `set_rocm_port_warp_size_for_tests`, so
+// the wave64 refusal can be exercised on a wave32 host.
+int rocm_port_warp_size();
+
+// Test seam for `rocm_port_warp_size` (issue #2147): a positive value replaces
+// the hardware answer for the rest of the process, `0` restores it. Only test
+// code may call it; `make verify-kernel-port-dispatch` fails on a call from
+// anywhere else. The Rust predicates cache a `true` port answer, so a test
+// that wants them to see the override sets it before the first predicate
+// call, in a process of its own.
+void set_rocm_port_warp_size_for_tests(int warp_size);
+
 } // namespace mlxcel
