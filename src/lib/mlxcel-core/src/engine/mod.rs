@@ -38,8 +38,17 @@ use crate::cache::{
     CachePool, DecodeLookaheadAppendScope, DetachedCacheSet, DetachedPagedCacheSet, SequenceId,
     SequenceStateBackend, SequenceStateLayout,
 };
+use crate::decode_finish::FinishCause;
 use crate::generate::{DecodeBatchContext, LanguageModel};
+use crate::sampling::{FusedSampleParams, TokenBiasMap, apply_row_filters, apply_token_bias_rows};
 use crate::{MlxArray, UniquePtr};
+
+pub mod rows;
+
+pub use rows::{
+    RowError, RowOutcome, StepRow, StepRowHooks, finish_row, fused_params, row_biases, row_logits,
+    sample_and_finish, sample_and_finish_row, tokens_to_host,
+};
 
 /// A per-sequence engine failure.
 ///
@@ -65,6 +74,11 @@ pub enum EngineError {
     /// A speculative-append rewind failed; the row is desynchronized (#2182).
     #[error("rewind: {0}")]
     Rewind(String),
+    /// Scheduling a pipelined step threw at the MLX boundary (#822). The
+    /// speculative appends of that forward are still in place; the caller
+    /// unwinds them with [`Engine::unwind_appends`].
+    #[error("eval: {0}")]
+    Eval(String),
 }
 
 /// What [`Engine::open`] needs to allocate a sequence.
@@ -95,13 +109,11 @@ pub struct StepBatch<'a> {
     pub context: Option<&'a DecodeBatchContext>,
 }
 
-/// Logits of one decode step, `[B, 1, vocab]` in `StepBatch::seq_ids` order.
-///
-/// The graph is lazy: nothing has been evaluated when this returns, so the
-/// caller chooses the eval boundary (host readback, `try_eval`, or the
-/// lookahead pipeline's `try_async_eval`).
+/// The result of [`Engine::step`]: one [`RowOutcome`] per row of the
+/// [`StepBatch`], in order.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StepOutput {
-    pub logits: UniquePtr<MlxArray>,
+    pub rows: Vec<RowOutcome>,
 }
 
 /// One prefill piece for one sequence.
@@ -246,29 +258,118 @@ impl<M: LanguageModel> Engine<M> {
             .map_err(EngineError::Open)
     }
 
-    /// One decode step for every row of `batch`.
+    /// One decode step for every row of `batch`: the forward, then each
+    /// row's sampling and finish step ([`sample_and_finish`]).
     ///
     /// A batch of one runs the model's single-row forward, which is what the
     /// provided batched entry does at `b == 1` and what the measured B=1
     /// throughput rests on; a larger batch runs the batched entry. After the
     /// forward each row's model-owned storage is mirrored into the pool
-    /// (`sync_sequence_storage`).
-    pub fn step(&mut self, batch: &StepBatch<'_>) -> Result<StepOutput, EngineError> {
+    /// (`sync_sequence_storage`), and every row that continues advances its
+    /// pool offset by one. `rows` must be the batch's rows in
+    /// `batch.seq_ids` order.
+    pub fn step<H: StepRowHooks>(
+        &mut self,
+        batch: &StepBatch<'_>,
+        rows: &mut [StepRow<'_, H>],
+    ) -> Result<StepOutput, EngineError> {
+        debug_assert_eq!(rows.len(), batch.seq_ids.len(), "one StepRow per batch row");
+        let logits = self.forward(batch)?;
+        let outcomes = sample_and_finish(&logits, rows);
+        self.advance_continuing(&outcomes);
+        Ok(StepOutput { rows: outcomes })
+    }
+
+    /// The submit half of a pipelined step: a speculative forward for
+    /// `batch`, the rows' token biases and the shared fused row filters
+    /// folded in, one fused `[B, vocab] -> [B]` draw, scheduled with
+    /// `async_eval` and returned as the lazy `[B]` device tokens so the GPU
+    /// runs ahead while the caller finishes the previous step on the host.
+    ///
+    /// The forward runs inside a [`DecodeLookaheadAppendScope`], so a
+    /// model-owned family that rewinds its own state (#2182) logs the rows
+    /// these writes overwrite. The caller collects with
+    /// [`Engine::finish_rows`] once the tokens are read back, or unwinds the
+    /// appends with [`Engine::unwind_appends`] when it tears the step down,
+    /// including after an `Err`: an [`EngineError::Eval`] leaves the
+    /// speculative appends in place.
+    pub fn submit(
+        &mut self,
+        batch: &StepBatch<'_>,
+        params: &FusedSampleParams,
+        biases: &[&TokenBiasMap],
+    ) -> Result<UniquePtr<MlxArray>, EngineError> {
+        let logits = {
+            let _speculative = DecodeLookaheadAppendScope::enter();
+            self.forward(batch)?
+        };
+        let last_logits = crate::slice_last_logits(&logits);
+        // Token bias in the per-row sampler's chain position (after the
+        // slice, before the filters), then the same pre-fused row filters as
+        // the synchronous fused path, so the pipelined draw samples from the
+        // identical distribution.
+        let last_logits = apply_token_bias_rows(last_logits, biases);
+        let last_logits = apply_row_filters(last_logits, params);
+        let tokens = crate::fused_sample(
+            &last_logits,
+            params.temperature,
+            params.top_k,
+            params.top_p,
+            params.min_p,
+        );
+        crate::report_sampling_dispatch();
+        crate::try_async_eval(&tokens).map_err(|e| EngineError::Eval(e.to_string()))?;
+        Ok(tokens)
+    }
+
+    /// The collect half of a pipelined step: `tokens[i]` is the host token
+    /// drawn for `rows[i]`; each row runs the finish step and every row that
+    /// continues advances its pool offset.
+    pub fn finish_rows<H: StepRowHooks>(
+        &mut self,
+        tokens: &[i32],
+        rows: &mut [StepRow<'_, H>],
+    ) -> Vec<RowOutcome> {
+        debug_assert_eq!(rows.len(), tokens.len(), "one token per row");
+        let outcomes: Vec<RowOutcome> = rows
+            .iter_mut()
+            .zip(tokens)
+            .map(|(row, &token)| finish_row(row, token, token, None, false))
+            .collect();
+        self.advance_continuing(&outcomes);
+        outcomes
+    }
+
+    /// Sample and finish a prefill's first token from its last-position
+    /// `logits` (`[1, 1, vocab]`) through the per-row chain. The pool offset
+    /// is the caller's: a prefill sets it from the prompt length.
+    pub fn complete_prefill<H: StepRowHooks>(
+        &mut self,
+        logits: &MlxArray,
+        row: &mut StepRow<'_, H>,
+    ) -> RowOutcome {
+        sample_and_finish_row(logits, row)
+    }
+
+    fn advance_continuing(&mut self, outcomes: &[RowOutcome]) {
+        for outcome in outcomes {
+            if outcome.error.is_some() || outcome.finish == Some(FinishCause::Eos) {
+                continue;
+            }
+            if let Some(set) = self.pool.get_mut(outcome.seq_id) {
+                set.current_offset += 1;
+            }
+        }
+    }
+
+    /// The forward for `batch`: `[B, 1, vocab]` lazy logits, with each row's
+    /// model-owned storage mirrored into the pool afterwards.
+    fn forward(&mut self, batch: &StepBatch<'_>) -> Result<UniquePtr<MlxArray>, EngineError> {
         let logits = self.forward_rows(batch)?;
         for &id in batch.seq_ids {
             self.sync_sequence_storage(id);
         }
-        Ok(StepOutput { logits })
-    }
-
-    /// [`Engine::step`] whose KV appends are speculative: the forward runs
-    /// inside a [`DecodeLookaheadAppendScope`] so a model-owned family that
-    /// rewinds its own state (#2182) logs the rows these writes overwrite.
-    /// The caller undoes the appends with [`Engine::unwind_appends`] when the
-    /// step is torn down.
-    pub fn step_speculative(&mut self, batch: &StepBatch<'_>) -> Result<StepOutput, EngineError> {
-        let _speculative = DecodeLookaheadAppendScope::enter();
-        self.step(batch)
+        Ok(logits)
     }
 
     fn forward_rows(&mut self, batch: &StepBatch<'_>) -> Result<UniquePtr<MlxArray>, EngineError> {

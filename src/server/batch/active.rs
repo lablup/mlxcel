@@ -112,6 +112,22 @@ impl ActiveBatch {
     }
 
     /// Iterate over all active sequences mutably.
+    /// Mutable access to every sequence of `ids`, in `ids` order, or `None`
+    /// when any of them is not in the batch. The engine samples and finishes a
+    /// decode step over these rows at once (#2172).
+    pub fn get_rows_mut(&mut self, ids: &[SequenceId]) -> Option<Vec<&mut SequenceInfo>> {
+        let mut rows: Vec<(usize, &mut SequenceInfo)> = self
+            .sequences
+            .iter_mut()
+            .filter_map(|(id, seq)| ids.iter().position(|want| want == id).map(|i| (i, seq)))
+            .collect();
+        if rows.len() != ids.len() {
+            return None;
+        }
+        rows.sort_by_key(|(i, _)| *i);
+        Some(rows.into_iter().map(|(_, seq)| seq).collect())
+    }
+
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut SequenceInfo> {
         self.sequences.values_mut()
     }

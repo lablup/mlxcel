@@ -837,57 +837,38 @@ impl BatchScheduler {
         // batched fused DECODE path shares one global-RNG draw across the whole
         // `[B, vocab]` batch and is out of scope here (see issue #347).
         seed_rng_if_needed(&seq.sampling);
-        // The one per-row sampling step (#2169), under the same state rule as
-        // every decode step: the sequence's `RowSampler` already holds the
-        // state a penalty, mirostat or adaptive-p config needs, so the first
-        // token updates it too. The structured-output mask runs on the prefill
-        // logits before the chain, so the very first emitted token already
-        // conforms to the schema. b10621 post_sampling_probs (#1485): one chain
-        // pass, one XTC gate, for both the draw and the report.
-        let want_distribution = seq.logprobs_config.enabled
-            && seq.logprobs_config.source == LogprobSource::PostSampling;
-        let constraint = seq.structured.clone();
-        let mut mask = constraint.as_ref().map(StructuredMask);
-        let draw = seq.sampler.draw(
-            &logits,
-            &seq.sampling,
-            &token_history,
-            mask.as_mut().map(|m| m as &mut dyn LogitMask),
-            want_distribution,
-        );
-        let TokenDraw {
-            token: first_token_arr,
-            adjusted_logits,
-            distribution: post_probs,
-        } = match draw {
-            Ok(draw) => draw,
-            Err(msg) => {
-                let _ = seq
-                    .response_tx
-                    .send(GenerateEvent::Error(format!("structured output: {msg}")));
-                if let Err(err) = seq
-                    .state
-                    .transition_to(SequenceState::Finished(FinishReason::Error(msg)))
-                {
-                    tracing::error!("State transition error: {err}");
-                }
-                self.prompt_cache_seq_ctx.remove(&seq.seq_id);
-                self.release_sequence_caches(seq.seq_id);
-                return;
-            }
-        };
-        // #822: force-evaluate the first sampled token through the fallible
-        // boundary. On an MLX throw, fail just this request; the infallible
-        // `item_i32` readback below would otherwise re-trigger the same throw
-        // and abort the process.
-        if let Err(msg) = self
-            .record_eval_outcome(mlxcel_core::try_eval(&first_token_arr).map_err(|e| e.to_string()))
-        {
-            self.abort_sequence(seq, &msg);
-            self.eval_failures_exhausted();
-            return;
-        }
-        let sampled_first_token = mlxcel_core::item_i32(&first_token_arr);
+        // Store merged EOS and token history on the sequence: the engine's row
+        // reads them for the first draw and the finish step, and
+        // `decode_single_step` reuses them without per-step reconstruction.
+        seq.merged_eos = eos_tokens;
+        seq.token_history = token_history;
+        // The finish step records the first token in the history exactly when
+        // the sampler reads one, the same rule the caller built it under.
+        debug_assert_eq!(needs_history, seq.sampling.needs_token_history());
+        // The first token takes the engine's per-row chain (#2169, #2168),
+        // under the same state rule as every decode step: the sequence's
+        // `RowSampler` already holds the state a penalty, mirostat or
+        // adaptive-p config needs, so the first token updates it too. The
+        // structured-output mask runs on the prefill logits before the chain,
+        // so the very first emitted token already conforms to the schema; the
+        // matcher then advances with the pre-override token. The
+        // thinking-budget override applies to the first token too: Qwen3 chat
+        // templates prime `<think>\n`, so it is already inside the reasoning
+        // block when `enter_block_on_start == true`. The row stamps the
+        // first-token time once the emitted token is known, and the finish
+        // step then runs on it: EOS (not pushed), push and history, the stop
+        // matcher (a short stop string can complete on this very token, and
+        // then its text is never emitted), a generation bound
+        // (`t_max_predict_ms: 0` with a newline in the first token, #1477),
+        // the structured stop, `max_tokens`, the context bound (a prompt
+        // admitted just under the KV bound can leave no room for a second
+        // token, #1472) and loop detection.
+        //
+        // The shared logical KV budget is checked first: the sequence is not
+        // yet in the active batch, so the prompt plus its first token count as
+        // this tick's additional tokens, and a request that cannot fit them
+        // finishes with `Length` before any token is drawn (the draw it used
+        // to make here was discarded unseen).
         if !self.shared_budget_has_prefill_first_token_room(seq.prompt_tokens.len()) {
             seq.retention.context_exhausted = true;
             if let Err(err) = seq
@@ -904,94 +885,40 @@ impl BatchScheduler {
             self.batch_observability.record_sequence_completed();
             return;
         }
-
-        // advance the matcher state with the just-sampled token.
-        // If consume_token errors, transition the sequence to Finished(Error)
-        // and surface a clean SSE error event rather than leaking
-        // non-conforming output.
-        let structured_stopped = if let Some(constraint) = seq.structured.clone() {
-            match Self::consume_structured_token(&constraint, sampled_first_token) {
-                Ok(stopped) => stopped,
-                Err(msg) => {
-                    let _ = seq
-                        .response_tx
-                        .send(GenerateEvent::Error(format!("structured output: {msg}")));
-                    if let Err(err) = seq
-                        .state
-                        .transition_to(SequenceState::Finished(FinishReason::Error(msg)))
-                    {
-                        tracing::error!("State transition error: {err}");
-                    }
-                    self.prompt_cache_seq_ctx.remove(&seq.seq_id);
-                    self.release_sequence_caches(seq.seq_id);
-                    return;
-                }
-            }
-        } else {
-            false
-        };
-
-        // thinking-budget override. Qwen3 chat templates prime
-        // `<think>\n`, so the first prefill-completion token is already
-        // inside the reasoning block when `enter_block_on_start == true`.
-        // #1485: `resolve` then confirms the emitted first token with the
-        // sampler feedback state (see the parallel comment in
-        // `execute_batched_decode`).
-        let (sampled_first_token, first_token) = seq.sampler.resolve(sampled_first_token, |t| {
-            Self::apply_thinking_budget(&mut seq.thinking, t)
-        });
-
-        seq.mark_first_token();
-
-        // if the budget fired and substituted the first token,
-        // drop the logprob below (computed against the sampled token) so the
-        // streamed metadata stays consistent with the emitted token text.
-        let override_fired = first_token != sampled_first_token;
-
-        // Optionally compute logprobs for the first token. When the override
-        // fired, the sampled token differs from the emitted `first_token`;
-        // suppress logprob emission in that case to keep token text and
-        // logprob metadata consistent.
-        let token_lp = if override_fired {
-            None
-        } else {
-            match seq.logprobs_config.source {
-                LogprobSource::PostSampling => post_probs.as_ref().map(|p| {
-                    compute_post_sampling_probs(p, first_token, seq.logprobs_config.top_k)
-                }),
-                LogprobSource::RawModel if seq.logprobs_config.enabled => {
-                    let raw_row = mlxcel_core::slice_last_logits(&logits);
-                    compute_logprobs(&raw_row, first_token, &seq.logprobs_config)
-                }
-                _ => compute_logprobs(&adjusted_logits, first_token, &seq.logprobs_config),
-            }
-        };
-
-        // Store merged EOS and token history on the sequence: the shared finish
-        // step below reads them, and decode_single_step reuses them without
-        // per-step reconstruction.
-        seq.merged_eos = eos_tokens;
-        seq.token_history = token_history;
-        // The finish step records the first token in the history exactly when
-        // the sampler reads one, the same rule the caller built it under.
-        debug_assert_eq!(needs_history, seq.sampling.needs_token_history());
-
-        // The shared post-sample finish step (#2168) on the first token: EOS
-        // (not pushed), push and history, the stop matcher (a short stop string
-        // can complete on this very token, and then its text is never emitted),
-        // a generation bound (`t_max_predict_ms: 0` with a newline in the first
-        // token, #1477), the structured stop, `max_tokens`, the context bound (a
-        // prompt admitted just under the KV bound can leave no room for a second
-        // token, #1472) and loop detection.
         let context = self.context_bound();
-        let prefill_finish = finish_decode_token(
-            &mut seq,
-            &self.tokenizer,
-            first_token,
-            token_lp,
-            structured_stopped,
-            context,
-        );
+        let outcome = {
+            let mut row = step_rows::step_row(&mut seq, &self.tokenizer, context, true);
+            self.engine.complete_prefill(&logits, &mut row)
+        };
+        match outcome.error {
+            Some(RowError::Structured(msg)) => {
+                let _ = seq
+                    .response_tx
+                    .send(GenerateEvent::Error(format!("structured output: {msg}")));
+                if let Err(err) = seq
+                    .state
+                    .transition_to(SequenceState::Finished(FinishReason::Error(msg)))
+                {
+                    tracing::error!("State transition error: {err}");
+                }
+                self.prompt_cache_seq_ctx.remove(&seq.seq_id);
+                self.release_sequence_caches(seq.seq_id);
+                return;
+            }
+            Some(RowError::Eval(msg)) => {
+                // #822: the first sampled token threw at the MLX boundary.
+                // Fail just this request and bump the backend health counter.
+                let _ = self.record_eval_outcome(Err(msg.clone()));
+                self.abort_sequence(seq, &msg);
+                self.eval_failures_exhausted();
+                return;
+            }
+            None => self.note_eval_success(),
+        }
+        let prefill_finish = outcome.finish;
+        if let Some(cause) = prefill_finish {
+            apply_finish_cause(&mut seq, cause);
+        }
         // Immediate EOS: the finish step already recorded `Stop`; nothing was
         // generated, so the result is built without decoding any text.
         if prefill_finish == Some(FinishCause::Eos) {

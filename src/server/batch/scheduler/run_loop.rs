@@ -22,7 +22,7 @@ use super::*;
 pub(super) struct StructuredMask<'a>(pub(super) &'a SharedStructuredConstraint);
 
 /// The shared, lockable structured-output constraint a sequence carries.
-type SharedStructuredConstraint =
+pub(super) type SharedStructuredConstraint =
     std::sync::Arc<std::sync::Mutex<crate::server::structured::StructuredOutputConstraint>>;
 
 impl LogitMask for StructuredMask<'_> {

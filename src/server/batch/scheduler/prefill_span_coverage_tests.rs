@@ -69,16 +69,12 @@ const DUTIES: &[(&str, &str, SpanDuty)] = &[
     // Prefill, opted out: one batched pass from offset 0 over the padded cohort,
     // where the pass span already equals the longest row's prompt.
     ("prefill.rs", "run_padded_batched_prefill", PrefillOptedOut),
-    // Decode.
-    ("decode_tick.rs", "lookahead_forward", DecodeMustNotAnnounce),
+    // Decode: the synchronous step (single and batched rows alike) and the
+    // lookahead pipeline's submit half.
+    ("decode_tick.rs", "run_engine_step", DecodeMustNotAnnounce),
     (
         "decode_tick.rs",
-        "execute_batched_decode",
-        DecodeMustNotAnnounce,
-    ),
-    (
-        "decode_tick.rs",
-        "decode_single_step",
+        "prime_lookahead_with_input",
         DecodeMustNotAnnounce,
     ),
 ];

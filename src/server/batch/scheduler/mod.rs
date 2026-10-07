@@ -36,7 +36,7 @@ use mlxcel_core::cache::{
     BatchKvQuantConfig, CachePool, DetachedPagedCacheSet, KVCacheMode, PagedKvLayout, SequenceId,
     SequenceStateBackend, SequenceStateLayout,
 };
-use mlxcel_core::engine::{Engine, PrefillStep, StepBatch};
+use mlxcel_core::engine::{Engine, PrefillStep, RowError, RowOutcome, StepBatch};
 use mlxcel_core::generate::{
     DecodeBatchContext, DecodeStorageBackend as CoreDecodeStorageBackend, LanguageModel,
 };
@@ -44,11 +44,9 @@ use mlxcel_core::generation_policy::{
     initial_token_history, merged_eos_token_ids, seed_rng_if_needed,
 };
 use mlxcel_core::sampling::{
-    FusedSampleParams, LogprobSource, TokenBiasMap, apply_row_filters, apply_token_bias_rows,
-    batched_fused_sample_with_bias, compute_logprobs, compute_post_sampling_probs,
-    row_supports_fused_batch_except_bias,
+    FusedSampleParams, TokenBiasMap, row_supports_fused_batch_except_bias,
 };
-use mlxcel_core::sampling_row_step::{LogitMask, RowSampler, TokenDraw};
+use mlxcel_core::sampling_row_step::{LogitMask, RowSampler};
 use mlxcel_core::sampling_token_bias::compose_token_bias;
 use mlxcel_core::streams::{
     install_thread_local_default_stream, new_thread_local_generation_stream,
@@ -86,7 +84,7 @@ use crate::vision::feature_cache::ModelVisionCaches;
 use crate::vlm_runtime::prepared_embedding_refs;
 
 use super::active::ActiveBatch;
-use super::finish::{ContextBound, finish_decode_token};
+use super::finish::{ContextBound, apply_finish_cause};
 use super::prefill_cohort::{
     PrefillCohortKind, PrefillRow, batched_window_admits, batched_window_admits_lora,
     default_batched_prefill_token_budget, plan_prefill_cohorts,
@@ -102,7 +100,6 @@ use super::tick_policy::{
 };
 
 use pad_trim::should_align_prefill;
-use run_loop::StructuredMask;
 
 pub(crate) const DEFAULT_PAGED_BLOCK_SIZE: usize = 32;
 
@@ -978,6 +975,7 @@ mod queued_adoption;
 mod run_loop;
 mod shared_budget;
 mod speculative_finalize;
+pub(crate) mod step_rows;
 
 #[cfg(test)]
 mod structure_tests;
