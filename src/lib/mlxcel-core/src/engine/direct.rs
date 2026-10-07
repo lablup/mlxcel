@@ -183,6 +183,9 @@ pub struct DirectEngine<M: LanguageModel> {
     /// pipeline's kill switch, [`super::lookahead::FORCE_SYNC_ENV`], probed
     /// once at construction).
     force_sync: bool,
+    /// Print the `[TTFT]` line when `MLXCEL_PROFILE_TTFT` is set; off by
+    /// default so a warmup run does not print a cold line of its own.
+    report_ttft: bool,
 }
 
 impl<M: LanguageModel> DirectEngine<M> {
@@ -196,6 +199,7 @@ impl<M: LanguageModel> DirectEngine<M> {
             token_bias: TokenBiasMap::default(),
             generation_stream: shared_thread_local_generation_stream(),
             force_sync: force_sync_requested(),
+            report_ttft: false,
         }
     }
 
@@ -230,6 +234,20 @@ impl<M: LanguageModel> DirectEngine<M> {
     pub fn with_force_sync(mut self, force_sync: bool) -> Self {
         self.force_sync = force_sync;
         self
+    }
+
+    /// Opt this client into the `[TTFT]` line (`MLXCEL_PROFILE_TTFT` must
+    /// also be set). `mlxcel generate --profile` and `mlxcel-bench-decode`'s
+    /// measured pass set it; their warmups do not.
+    #[must_use]
+    pub fn with_ttft_report(mut self, report: bool) -> Self {
+        self.report_ttft = report;
+        self
+    }
+
+    /// Whether this run prints the `[TTFT]` line.
+    fn ttft_profiled(&self) -> bool {
+        self.report_ttft && ttft_profile_enabled()
     }
 
     pub fn model(&self) -> &M {
@@ -285,6 +303,16 @@ impl<M: LanguageModel> DirectEngine<M> {
         self.engine.close(id);
     }
 
+    /// Record a finished prefill in `id`'s pool entry as the scheduler does:
+    /// the pool offset is the caller's after a prefill, `prompt_len + 1` once
+    /// the first token is sampled, and every continuing step advances it.
+    pub(super) fn mark_prefilled(&mut self, id: SequenceId, prompt_len: usize) {
+        if let Some(set) = self.engine.pool_mut().get_mut(id) {
+            set.prompt_len = prompt_len;
+            set.current_offset = prompt_len as i32 + 1;
+        }
+    }
+
     /// The fixed work between the first token and the decode loop.
     pub(super) fn prepare_decode(&mut self, id: SequenceId, max_tokens: usize) {
         self.prepare_turbo4_delegated_before_decode(id, max_tokens);
@@ -323,7 +351,7 @@ impl<M: LanguageModel> DirectEngine<M> {
         if request.max_tokens == 0 {
             return Ok(DirectRun::empty(request.prompt_tokens.len()));
         }
-        let profile_ttft = ttft_profile_enabled();
+        let profile_ttft = self.ttft_profiled();
         let setup_start = Instant::now();
         install_thread_local_default_stream(self.generation_stream.as_ref());
         let sampling = self.compose_sampling(request.sampling);
@@ -400,7 +428,7 @@ impl<M: LanguageModel> DirectEngine<M> {
         setup_ns: u128,
         mut on_token: F,
     ) -> Result<DirectRun, DirectEngineError> {
-        let profile_ttft = ttft_profile_enabled();
+        let profile_ttft = self.ttft_profiled();
         let prompt_tokens = request.prompt_tokens;
         let max_tokens = request.max_tokens;
         let eos = merged_eos_token_ids(self.model().eos_token_ids(), &sampling.stop_token_ids);
@@ -421,6 +449,7 @@ impl<M: LanguageModel> DirectEngine<M> {
         let eval_start = profile_ttft.then(Instant::now);
         let first = self.engine.complete_prefill(&logits, &mut state.row());
         let eval_ns = eval_start.map_or(0, |t| t.elapsed().as_nanos());
+        self.mark_prefilled(id, prompt_tokens.len());
         let post_start = profile_ttft.then(Instant::now);
         self.prepare_turbo4_delegated_before_decode(id, max_tokens);
         let post_ns = post_start.map_or(0, |t| t.elapsed().as_nanos());

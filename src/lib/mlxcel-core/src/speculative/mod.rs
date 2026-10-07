@@ -223,6 +223,16 @@ impl SpeculativeAcceptanceStats {
 /// Uses a draft model to propose candidate tokens and a main model to verify them.
 /// When the draft model's predictions match, multiple tokens are accepted per
 /// main model forward pass, improving throughput.
+///
+/// Deprecated (#2176): the last decode loop outside the batch-native engine,
+/// kept only for `mlxcel generate --draft-model` without `--draft-kind`, and
+/// removed in v0.8.0. Use the MTP or DFlash drafters, or prompt lookup on
+/// [`crate::engine::DirectEngine::generate_with_drafter`].
+#[deprecated(
+    since = "0.7.0",
+    note = "the classic draft-model loop is removed in v0.8.0 (#2176); use the MTP or DFlash \
+            drafters, or prompt lookup on DirectEngine::generate_with_drafter"
+)]
 pub struct SpeculativeGenerator {
     main_caches: Vec<KVCache>,
     draft_caches: Vec<KVCache>,
@@ -272,6 +282,8 @@ pub struct SpeculativeGenerator {
     pending_draft_context: Option<i32>,
 }
 
+// The deprecated loop's own implementation.
+#[allow(deprecated)]
 impl SpeculativeGenerator {
     /// Create a new speculative generator
     pub fn new(main_num_layers: usize, draft_num_layers: usize) -> Self {
@@ -951,10 +963,12 @@ fn trim_caches(caches: &mut [KVCache], n: i32) -> i32 {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 #[path = "distribution_tests.rs"]
 mod distribution_tests;
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::cache::KVCacheMode;

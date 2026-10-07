@@ -247,3 +247,76 @@ impl Drafter for PromptLookupDrafter {
         DrafterKind::PromptLookup
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::speculative::prompt_lookup::DraftPolicy;
+
+    /// What one scripted round did.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Round {
+        Drafted,
+        Paused,
+    }
+
+    /// Drive the drafter as the round loop does, with every proposal missing
+    /// (the target emits a different token at the first position) over a
+    /// four-token alphabet the lookup always matches, and record each round.
+    fn scripted_misses(policy: DraftPolicy, rounds: usize) -> (Vec<Round>, PromptLookupStats) {
+        let config = PromptLookupConfig {
+            ngram_max: 3,
+            ngram_min: 1,
+            max_draft: 4,
+            adaptive: true,
+            policy,
+        };
+        let sampling = SamplingConfig::greedy();
+        let hidden = crate::from_slice_i32(&[0], &[1]);
+        let mut drafter = PromptLookupDrafter::new(config);
+        let prompt = [1, 2, 3, 4, 1, 2, 3, 4, 1, 2];
+        let mut last = 3;
+        drafter
+            .prefill_from_target_hidden(&prompt, &hidden, last, &sampling)
+            .unwrap();
+        let mut seen = Vec::with_capacity(rounds);
+        for _ in 0..rounds {
+            let draft = drafter
+                .draft_block(last, None, config.max_draft, &sampling)
+                .unwrap();
+            let emitted = match draft.first() {
+                Some(&1) => 2,
+                Some(_) => 1,
+                None => (last % 4) + 1,
+            };
+            seen.push(if draft.is_empty() {
+                Round::Paused
+            } else {
+                Round::Drafted
+            });
+            drafter
+                .accept_verified_tokens(&hidden, &draft, 0, &[emitted], &sampling)
+                .unwrap();
+            last = emitted;
+        }
+        (seen, drafter.stats())
+    }
+
+    /// Under `Graded`, three drafted misses in a row pause proposals for
+    /// `MIN_COOLDOWN` (4) rounds, the next three for twice that, and every
+    /// paused round is counted in `paused_rounds`.
+    #[test]
+    fn graded_cooldown_counts_down_and_records_paused_rounds() {
+        use Round::{Drafted as D, Paused as P};
+        let (seen, stats) = scripted_misses(DraftPolicy::Graded, 19);
+        let mut expected = vec![D, D, D, P, P, P, P, D, D, D];
+        expected.extend([P; 8]);
+        expected.push(D);
+        assert_eq!(seen, expected);
+        assert_eq!(stats.rounds, 19);
+        assert_eq!(stats.paused_rounds, 12);
+        assert_eq!(stats.drafted_rounds, 7);
+        assert_eq!(stats.accepted_draft_tokens, 0);
+        assert!(stats.proposed_draft_tokens >= stats.drafted_rounds);
+    }
+}

@@ -30,7 +30,6 @@ use crate::ffi::MlxArray;
 use crate::hardware;
 use crate::layers::KVCache;
 use crate::loop_detection::LoopDetectionConfig;
-use crate::prefill_plan::{PrefillCaps, PrefillPlan};
 use crate::sampling::TokenBiasMap;
 use cxx::UniquePtr;
 
@@ -162,11 +161,6 @@ pub fn prefill_tile_alignment_enabled() -> bool {
     hw.has_neural_accelerator && hw.macos_supports_na
 }
 
-#[inline]
-fn should_align_prefill() -> bool {
-    prefill_tile_alignment_enabled()
-}
-
 /// Pad an embeddings tensor from `[batch, actual_len, hidden]` to
 /// `[batch, padded_len, hidden]` by appending zero rows.
 ///
@@ -209,21 +203,6 @@ pub fn logits_at_position(logits: &MlxArray, pos: usize) -> UniquePtr<MlxArray> 
 }
 
 pub use crate::prefill_plan::{DEFAULT_PREFILL_CHUNK, prefill_chunk_len};
-
-/// The plan for a single-sequence token prefill of `prompt_len` tokens under
-/// the chunk policy and this model's capabilities (see [`crate::prefill_plan`]).
-///
-/// Used by: the Gemma 4 MTP prefill mirror.
-pub fn plan_single_sequence_prefill<M: LanguageModel + ?Sized>(
-    model: &M,
-    prompt_len: usize,
-) -> PrefillPlan {
-    PrefillPlan::new(
-        prompt_len,
-        prefill_chunk_len(),
-        PrefillCaps::for_model(model, should_align_prefill()),
-    )
-}
 
 /// Per-layer KV cache modes for `n_layers` caches under the nominal `mode`,
 /// with the Boundary-V upgrade (`MLXCEL_KV_BOUNDARY_V_LAYERS`) applied.
@@ -431,9 +410,9 @@ pub trait LanguageModel {
     /// Not a decode rewind: [`Self::rewind_decode_appends`] unwinds the
     /// scheduler's speculative single-token appends exactly and stays separate.
     ///
-    /// Used by: `chunked_prefill_last_logits`, `prefill_embeddings_last_logits`,
-    /// the speculative verify padding, and the server scheduler's
-    /// `trim_padded_prefill`.
+    /// Used by: `Engine::prefill` / `Engine::score` (a padded plan piece's
+    /// `trim_excess`), the speculative verify padding, and the server
+    /// scheduler's `trim_padded_prefill`.
     fn trim_state(&self, seq: Option<SequenceId>, excess: i32) -> Result<(), String> {
         match seq {
             Some(seq_id) if self.supports_batching() => Err(format!(
@@ -1292,7 +1271,7 @@ impl GenerationStats {
 
 /// Named phases of the pre-first-token path, in nanoseconds.
 ///
-/// `MLXCEL_PROFILE_PIPELINE` instruments the decode loop only, so before issue
+/// The decode-loop profiling covers only the decode loop, so before issue
 /// #1545 the entire pre-first-token phase was one opaque number: the
 /// `Prefill:` line of `--profile`. On a CUDA host that number is not mostly
 /// prefill arithmetic. It also carries the lazy materialization of every
@@ -1385,6 +1364,7 @@ pub fn ttft_profile_enabled() -> bool {
 mod tests {
     use super::*;
     use crate::layers::KVCache;
+    use crate::prefill_plan::{PrefillCaps, PrefillPlan};
 
     /// Minimal model stub for testing forward_batched default implementation.
     /// Produces logits that are just the input token ID broadcast to a small

@@ -12,7 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
-- `mlxcel generate`, `--profile`, `--prompt-lookup`, `mlxcel-bench-decode`, `mlxcel-bench-engine`'s CLI arm and `speculative_bench`'s baseline decode on the batch-native engine's raw-completion client (`mlxcel_core::engine::DirectEngine`), the same loop `mlxcel run` and the server run at B=1 (#2176). `scripts/bench_decode.sh` records the path in a new trailing `decode_path` CSV column. The per-token pipeline diagnostics `MLXCEL_PROFILE_PIPELINE`, `MLXCEL_PROFILE_PIPELINE_DETAIL`, `MLXCEL_TRACE_DTYPE`, `MLXCEL_TRACE_ASTYPE`, `MLXCEL_EXPORT_DECODE_DOT` and `MLXCEL_CAPTURE_DECODE` no longer apply to `generate`.
+- `mlxcel generate`, `--profile`, `--prompt-lookup`, `mlxcel-bench-decode`, `mlxcel-bench-engine`'s CLI arm and `speculative_bench`'s baseline decode on the batch-native engine's raw-completion client (`mlxcel_core::engine::DirectEngine`), the same loop `mlxcel run` and the server run at B=1 (#2176). `scripts/bench_decode.sh` records the path in a new trailing `decode_path` CSV column. The per-token pipeline diagnostics `MLXCEL_PROFILE_PIPELINE`, `MLXCEL_PROFILE_PIPELINE_DETAIL`, `MLXCEL_TRACE_ASTYPE`, `MLXCEL_EXPORT_DECODE_DOT` and `MLXCEL_CAPTURE_DECODE` are removed with the loops that read them (`MLXCEL_TRACE_DTYPE` keeps only its fused Mamba2 prints); `mlxcel-bench-decode` now honors `MLXCEL_METAL_CAPTURE_PATH` around its measured pass, which `scripts/capture_moe_decode_trace.sh` uses for its `gputrace` mode.
 
 ## [v0.7.0] - 2026-09-09
 

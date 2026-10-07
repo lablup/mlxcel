@@ -377,6 +377,22 @@ fn tiny_model_decode_matches_prefill_and_last_logits() {
     for (a, b) in last_full.iter().zip(&row) {
         assert!((a - b).abs() < 1e-4);
     }
+
+    // The engine's prefill entry carries a sequence id and must take the same
+    // last-row projection.
+    let mut caches = LanguageModel::make_caches(&model);
+    let row = LanguageModel::forward_last_logits_with_sequence_id(
+        &model,
+        &x,
+        Some(mlxcel_core::cache::SequenceId::from_raw(7)),
+        &mut caches,
+        None,
+        9,
+    );
+    assert_eq!(mlxcel_core::array_shape(&row), vec![1, 1, 32]);
+    for (a, b) in last_full.iter().zip(&to_vec(&row)) {
+        assert!((a - b).abs() < 1e-4);
+    }
     assert_eq!(LanguageModel::num_layers(&model), 2);
     assert_eq!(
         LanguageModel::eos_token_ids(&model),

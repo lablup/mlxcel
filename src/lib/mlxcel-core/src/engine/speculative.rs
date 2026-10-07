@@ -128,8 +128,12 @@ impl<M: LanguageModel> DirectEngine<M> {
     /// and the proposal in one [`Engine::verify`], emits the longest agreeing
     /// prefix plus the target's own token at the first disagreement (or the
     /// bonus token after a full block), and unwinds the rest; a round with
-    /// no proposal is a plain [`Engine::step`]. Greedy output is identical
-    /// to [`DirectEngine::generate`]'s.
+    /// no proposal is a plain [`Engine::step`]. Greedy output equals
+    /// [`DirectEngine::generate`]'s wherever the multi-token verify forward
+    /// rounds as the one-token step does; where the target's top two logits
+    /// are close enough for the two kernels to disagree, the stream can take
+    /// the other token from there on (see the prompt-lookup module's
+    /// "Greedy exactness" section). On a stub model they are identical.
     ///
     /// `on_token` sees every emitted token in order, as in `generate`. The
     /// drafter is bound to the model, told the prompt and the first token,
@@ -249,6 +253,7 @@ impl<M: LanguageModel> DirectEngine<M> {
         let first = self
             .engine_mut()
             .complete_prefill(&logits, &mut state.row());
+        self.mark_prefilled(id, prompt_tokens.len());
         if let Some(error) = first.error {
             return Err(DirectEngineError::FirstToken(error.message().to_string()).into());
         }

@@ -387,12 +387,23 @@ fn measured(
     sampling: &SamplingConfig,
     kv_cache_mode: KVCacheMode,
 ) -> Result<(mlxcel::GenerationStats, phase_marks::Stamp)> {
-    let run = client(model, kv_cache_mode)
-        .generate(&request(prepared, max_tokens, sampling)?, |_| true)
-        .map_err(|err| anyhow::anyhow!("measured generation failed: {err}"))?;
+    let mut client = client(model, kv_cache_mode).with_ttft_report(true);
+    let request = request(prepared, max_tokens, sampling)?;
+    // `MLXCEL_METAL_CAPTURE_PATH` (with `MTL_CAPTURE_ENABLED=1`) traces the
+    // measured pass, its prefill included; the warmup already compiled the
+    // kernels. `scripts/capture_moe_decode_trace.sh` drives it.
+    let capture_path = std::env::var("MLXCEL_METAL_CAPTURE_PATH").ok();
+    if let Some(path) = capture_path.as_deref() {
+        mlxcel_core::metal_start_capture(path);
+    }
+    let run = client.generate(&request, |_| true);
     // Read the clocks before the trailing synchronize: the decode loop has
     // already waited on its last token, so this is where `decode_time_ms` ends.
     let end = phase_marks::Stamp::now();
+    if capture_path.is_some() {
+        mlxcel_core::metal_stop_capture();
+    }
+    let run = run.map_err(|err| anyhow::anyhow!("measured generation failed: {err}"))?;
     mlxcel_core::synchronize_default();
     Ok((run.stats, end))
 }

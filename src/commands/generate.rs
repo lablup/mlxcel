@@ -25,7 +25,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use mlxcel::{
-    GenerationStats, LanguageModel, RuntimeSetup, SamplingConfig, SpeculativeGenerator,
+    GenerationStats, LanguageModel, RuntimeSetup, SamplingConfig,
     distributed::{
         PipelineWorkerInput, RequestId,
         pipeline::{
@@ -1448,7 +1448,8 @@ fn generate_standard<M: LanguageModel>(
     kv_cache_mode: KVCacheMode,
     token_bias: TokenBiasMap,
 ) -> Result<(Vec<i32>, GenerationStats)> {
-    let mut client = raw_completion_client(model, kv_cache_mode, token_bias);
+    let mut client =
+        raw_completion_client(model, kv_cache_mode, token_bias).with_ttft_report(profile);
     let request = DirectRequest::text(prompt_tokens, max_tokens, sampling_config);
     if profile {
         run_raw_completion(&mut client, &request)
@@ -1467,7 +1468,8 @@ fn generate_with_embeddings<M: LanguageModel>(
     kv_cache_mode: KVCacheMode,
     token_bias: TokenBiasMap,
 ) -> Result<(Vec<i32>, GenerationStats)> {
-    let mut client = raw_completion_client(model, kv_cache_mode, token_bias);
+    let mut client =
+        raw_completion_client(model, kv_cache_mode, token_bias).with_ttft_report(profile);
     let (input_embeds, mask_ref) = prepared_embedding_refs(embeddings)?;
     let request = DirectRequest {
         prompt_tokens,
@@ -1937,8 +1939,11 @@ pub(super) fn run_generation_mode(
         // Axis B (B8): speculative decoding must apply the bias on the target
         // (main) model only: see `SpeculativeGenerator::with_token_bias` and
         // `draft_sampling` for the acceptance-rate rationale.
-        let mut spec_generator = SpeculativeGenerator::new(main_num_layers, draft_num_layers)
-            .with_token_bias(token_bias);
+        // The deprecated loop's one call site, behind the notice above.
+        #[allow(deprecated)]
+        let mut spec_generator =
+            mlxcel::SpeculativeGenerator::new(main_num_layers, draft_num_layers)
+                .with_token_bias(token_bias);
 
         let result = spec_generator.generate(
             model,

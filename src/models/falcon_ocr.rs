@@ -686,7 +686,7 @@ impl LanguageModel for FalconOcrTextModel {
     /// Falcon-OCR cannot be prefilled in chunks.
     ///
     /// The prompt-shaped hybrid mask and the temporal-position vector are both
-    /// computed once for the whole prompt, and `chunked_prefill_last_logits`
+    /// computed once for the whole prompt, and a chunked prefill plan
     /// re-enters `forward` with `mask = None` and a slice of the tokens, which
     /// would silently drop the bidirectional image block and misalign every
     /// position after the first chunk. This mirrors the upstream mlx-vlm

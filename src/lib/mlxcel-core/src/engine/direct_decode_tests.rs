@@ -255,10 +255,11 @@ fn eos_finish_matches_the_synchronous_loop() {
         "EOS is neither stored nor delivered"
     );
     assert_eq!(sync.delivered, vec![4, 5, 6]);
-    // The EOS step's forward appended 6 (prompt 2 + 4, 5, 6) and the offset
+    // The EOS step's forward appended 6 (prompt 2 + 4, 5, 6); the offset is
+    // `prompt_len + 1` after the first token, as the scheduler sets it, and
     // advanced only for the two steps that continued.
     assert_eq!(sync.kv_len, Some(5));
-    assert_eq!(sync.offset, 2);
+    assert_eq!(sync.offset, 5);
     // Prefill plus the steps fed 4, 5, 6; the pipeline also submitted the
     // forward fed by the EOS before it read it, and unwound it.
     assert_eq!(sync_fwd, 4);

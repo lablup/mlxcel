@@ -64,8 +64,8 @@
 //!
 //! ## Greedy exactness
 //!
-//! The prompt is prefilled by the same routine plain decoding uses
-//! ([`crate::generate::prefill_prompt_last_logits`]), so the caches and the
+//! The prompt is prefilled by the same prefill plan plain decoding uses
+//! ([`crate::engine::DirectEngine`]), so the caches and the
 //! first token match plain decoding exactly, and a round without a proposal
 //! is the same one-token forward. A round with proposals runs a multi-token
 //! forward, whose kernels may round differently from the one-token path; where
@@ -111,7 +111,7 @@ pub const NGRAM_MAX_LIMIT: usize = 16;
 /// proposal is a forward position the target computes.
 pub const MAX_DRAFT_LIMIT: usize = 64;
 
-/// Tunables for [`PromptLookupGenerator`].
+/// Tunables for [`PromptLookupDrafter`](super::prompt_lookup_drafter::PromptLookupDrafter).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PromptLookupConfig {
     /// Longest suffix n-gram tried first.
@@ -222,7 +222,7 @@ impl PromptLookupConfig {
     }
 }
 
-/// Why `model` cannot run under [`PromptLookupGenerator`], or `None` when it
+/// Why `model` cannot run under [`PromptLookupDrafter`](super::prompt_lookup_drafter::PromptLookupDrafter), or `None` when it
 /// can.
 ///
 /// Verification rolls rejected tokens back with `KVCache::trim`, which is only
@@ -264,7 +264,7 @@ pub fn prompt_lookup_unsupported_reason<M: LanguageModel>(model: &M) -> Option<&
     None
 }
 
-/// Whether `model` can run under [`PromptLookupGenerator`]. See
+/// Whether `model` can run under [`PromptLookupDrafter`](super::prompt_lookup_drafter::PromptLookupDrafter). See
 /// [`prompt_lookup_unsupported_reason`] for why not.
 pub fn supports_prompt_lookup<M: LanguageModel>(model: &M) -> bool {
     prompt_lookup_unsupported_reason(model).is_none()
@@ -568,7 +568,9 @@ impl NgramIndex {
     }
 }
 
-/// Acceptance accounting for one [`PromptLookupGenerator::generate`] call.
+/// Acceptance accounting for one
+/// [`DirectEngine::generate_with_drafter`](crate::engine::DirectEngine::generate_with_drafter)
+/// call under a prompt-lookup drafter.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct PromptLookupStats {
     /// Target forwards in the decode loop (one per round).

@@ -5263,14 +5263,15 @@ impl Gemma4Wrapper {
             .make_caches_with_modes(&self.kv_cache_layer_modes)
     }
 
-    /// Reset the wrapper's fallback cache slot (the `internal` slot used
-    /// by the CLI / single-row VLM-prefill path) to a fresh, empty set
-    /// of caches. Per-sequence cache slots in
-    /// [`ModelOwnedSequenceState`] are unaffected — those are owned by
-    /// the scheduler and dropped via `release_sequence_state_by_id`.
+    /// Reset the wrapper's fallback cache slot (the `internal` slot a
+    /// forward without a sequence id uses) to a fresh, empty set of caches.
+    /// Per-sequence cache slots in [`ModelOwnedSequenceState`] are
+    /// unaffected: the engine owns them and drops them via
+    /// `release_sequence_state_by_id`.
     ///
-    /// Used by: legacy CLI generate path (`mlxcel generate`) when starting
-    /// a fresh request that does not flow through the server scheduler.
+    /// Used by: `set_kv_cache_layer_modes` (rebuild under the new modes) and
+    /// `reset_runtime_state` (bare single-row runs outside an engine
+    /// sequence).
     pub fn reset_caches(&self) {
         self.sequence_state
             .replace_internal(self.make_configured_caches());
