@@ -27,7 +27,10 @@ spec.loader.exec_module(po)
 
 
 def server_cmd(a, width):
-    cmd = [a.server, "-m", a.target, "--port", str(a.port), "--ignore-eos",
+    # Each server holds the shared GPU lock only for its own lifetime, so the
+    # host gate's wait for an idle host does not hold the GPU from others.
+    lock = ["gpu-lock", "run", "--tag", a.lock_tag, "--"] if a.lock_tag else []
+    cmd = lock + [a.server, "-m", a.target, "--port", str(a.port), "--ignore-eos",
            "--max-batch-size", "1"]
     if width is not None:
         cmd += ["--model-draft", a.drafter, "--draft-kind", "dflash"]
@@ -48,17 +51,21 @@ def main():
     ap.add_argument("--drafter", required=True)
     ap.add_argument("--n", type=int, default=3)
     ap.add_argument("--rounds", type=int, default=3)
+    ap.add_argument("--start-round", type=int, default=0,
+                    help="resume an interrupted session at this round")
     ap.add_argument("--max-tokens", type=int, default=200)
     ap.add_argument("--prompt-file", default=os.path.join(po.S1797, "prompt_retry.txt"))
     ap.add_argument("--port", type=int, default=18935)
     ap.add_argument("--out", required=True)
     ap.add_argument("--logdir", default=None)
+    ap.add_argument("--lock-tag", default=None,
+                    help="wrap each server in `gpu-lock run --tag TAG`")
     a = ap.parse_args()
     a.logdir = a.logdir or os.path.dirname(os.path.abspath(a.out))
     os.makedirs(a.logdir, exist_ok=True)
     prompt = open(a.prompt_file).read()
     with open(a.out, "a") as f:
-        for rnd in range(a.rounds):
+        for rnd in range(a.start_round, a.rounds):
             order = ARMS[rnd % len(ARMS):] + ARMS[:rnd % len(ARMS)]
             for tag, width in order:
                 rec = po.run_arm(a, f"{tag}-r{rnd}", width, {}, prompt)

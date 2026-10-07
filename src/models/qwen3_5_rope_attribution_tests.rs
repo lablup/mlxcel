@@ -326,3 +326,54 @@ fn long_probe_draw_sees_the_verify_rope_hazard_and_passes_with_the_fix() {
         );
     }
 }
+
+/// What the per-row verify RoPE costs: wall time of a width-`L` verify
+/// forward (prefill once, then `MLXCEL_Q35_PROBE_ROUNDS` blocks, default 64,
+/// each rolled back so every block sees the same prefix) with the per-row
+/// RoPE off and on, interleaved over three repeats. Diagnostic only; it
+/// asserts nothing.
+#[test]
+#[ignore = "needs the real Qwen 3.5 4B checkpoint and a CUDA GPU; timing diagnostic"]
+fn verify_block_cost_with_and_without_row_rope() {
+    let Some((mut model, _dir)) = load_text_model() else {
+        return;
+    };
+    let rounds: usize = std::env::var("MLXCEL_Q35_PROBE_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(64);
+    let prompt: Vec<i32> = (0..160).map(|i| ((i * 7 + 5) % 151_000) as i32).collect();
+    for width in [2usize, 4] {
+        let block: Vec<i32> = (0..width)
+            .map(|i| ((i * 31 + 11) % 151_000) as i32)
+            .collect();
+        for repeat in 0..3 {
+            for on in [false, true] {
+                text_model_mut(&mut model).set_verify_rope_rows_for_test(on);
+                let text = text_model(&model);
+                let mut caches = text.make_speculative_caches();
+                let _ =
+                    text.forward_prefill_with_capture_layers(&ids_of(&prompt), &mut caches, &[]);
+                // Warm-up block, discarded.
+                let out = text.forward_speculative(&ids_of(&block), &mut caches, &[]);
+                mlxcel_core::eval(&out.logits);
+                text.rollback_speculative_cache(&mut caches, &out.gdn_states, &[0], width as i32);
+                let t0 = std::time::Instant::now();
+                for _ in 0..rounds {
+                    let out = text.forward_speculative(&ids_of(&block), &mut caches, &[]);
+                    mlxcel_core::eval(&out.logits);
+                    text.rollback_speculative_cache(
+                        &mut caches,
+                        &out.gdn_states,
+                        &[0],
+                        width as i32,
+                    );
+                }
+                let ms = t0.elapsed().as_secs_f64() * 1000.0 / rounds as f64;
+                eprintln!(
+                    "[2191] verify cost width {width} repeat {repeat} row_rope={on}: {ms:.3} ms per block"
+                );
+            }
+        }
+    }
+}

@@ -1,0 +1,18 @@
+
+running 1 test
+test models::qwen3_5::qwen3_5_rope_attribution_tests::verify_block_cost_with_and_without_row_rope ... [2191] verify cost width 2 repeat 0 row_rope=false: 20.849 ms per block
+[2191] verify cost width 2 repeat 0 row_rope=true: 20.628 ms per block
+[2191] verify cost width 2 repeat 1 row_rope=false: 20.543 ms per block
+[2191] verify cost width 2 repeat 1 row_rope=true: 20.711 ms per block
+[2191] verify cost width 2 repeat 2 row_rope=false: 20.609 ms per block
+[2191] verify cost width 2 repeat 2 row_rope=true: 20.749 ms per block
+[2191] verify cost width 4 repeat 0 row_rope=false: 30.696 ms per block
+[2191] verify cost width 4 repeat 0 row_rope=true: 31.185 ms per block
+[2191] verify cost width 4 repeat 1 row_rope=false: 30.797 ms per block
+[2191] verify cost width 4 repeat 1 row_rope=true: 31.180 ms per block
+[2191] verify cost width 4 repeat 2 row_rope=false: 30.829 ms per block
+[2191] verify cost width 4 repeat 2 row_rope=true: 31.198 ms per block
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9014 filtered out; finished in 24.02s
+
