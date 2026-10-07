@@ -1181,11 +1181,10 @@ fn current_cli_sampling_flags() -> CliSamplingFlagState {
 }
 
 fn short_cli_flag_was_set(name: char) -> bool {
-    let standalone = format!("-{name}");
-    std::env::args_os().any(|arg| {
-        let arg = arg.to_string_lossy();
-        arg == standalone || arg.starts_with(&standalone) && arg.len() > standalone.len()
-    })
+    super::cli_server::short_numeric_flag_in(
+        std::env::args_os().map(|arg| arg.to_string_lossy().into_owned()),
+        name,
+    )
 }
 
 fn resolved_cli_sampling_params(
@@ -2601,9 +2600,16 @@ fn chat_options_from_args(args: &GenerateArgs) -> Result<crate::commands::ChatOp
         &super::cli_server::cli_flag_was_set,
     );
     server.adapter = args.model.adapter.clone();
-    server.draft_model = args.model.draft_model.clone();
-    server.draft_kind = args.speculative.draft_kind.clone();
-    server.draft_block_size = args.speculative.draft_block_size;
+    if let Some((draft_model, draft_kind)) = repl_drafter(args) {
+        server.draft_model = Some(draft_model);
+        server.draft_kind = Some(draft_kind);
+        server.draft_block_size = args.speculative.draft_block_size;
+    } else if args.model.draft_model.is_some() {
+        eprintln!(
+            "Note: --draft-model is ignored in the chat REPL unless --draft-kind dflash|mtp is \
+             given; classic draft-model decoding runs only with -p."
+        );
+    }
     Ok(crate::commands::ChatOptions {
         model: args.model.model.clone(),
         models_dir: args.model.models_dir.clone(),
@@ -2614,6 +2620,19 @@ fn chat_options_from_args(args: &GenerateArgs) -> Result<crate::commands::ChatOp
         images: args.generation.image.clone(),
         image_soft_tokens: args.generation.image_soft_tokens,
     })
+}
+
+/// The drafter the chat REPL hands to the in-process server, if any. On
+/// `generate`, `--draft-model` alone names a classic draft model, which the
+/// server does not run (its classic dispatch decodes plainly), and the REPL
+/// before issue #2173 ignored speculative flags altogether. So the REPL uses
+/// a drafter only when `--draft-kind` explicitly names a server speculative
+/// path (`dflash` or `mtp`); `mlxcel run` passes `--draft-model` as is,
+/// because there it always means a server drafter.
+fn repl_drafter(args: &GenerateArgs) -> Option<(std::path::PathBuf, String)> {
+    let draft_model = args.model.draft_model.clone()?;
+    let kind = args.speculative.draft_kind.as_deref()?;
+    matches!(kind, "dflash" | "mtp").then(|| (draft_model, kind.to_string()))
 }
 
 pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {

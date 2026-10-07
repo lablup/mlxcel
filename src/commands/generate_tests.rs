@@ -19,10 +19,11 @@ use super::{
     apply_user_chat_template, apply_vlm_chat_template, build_cli_sampling_config_with_flags,
     cli_pipeline_requested, cli_video_content_part_count, estimate_delta_label_and_bytes,
     generated_suffix, generation_stats_from_duration, memory_preflight_ctx_len,
-    reject_dflash_drafter_offline, resolve_cli_pipeline_assignments, resolve_cli_prompt,
-    should_route_offline_mtp, strip_trailing_eos, validate_muse_glimmer_cli_unsupported_options,
-    validate_pipeline_parallel_args, validate_prompt_lookup_args, validate_tensor_parallel_args,
-    validate_xla_cli_image_cardinality, validate_xla_output_audio,
+    reject_dflash_drafter_offline, repl_drafter, resolve_cli_pipeline_assignments,
+    resolve_cli_prompt, should_route_offline_mtp, strip_trailing_eos,
+    validate_muse_glimmer_cli_unsupported_options, validate_pipeline_parallel_args,
+    validate_prompt_lookup_args, validate_tensor_parallel_args, validate_xla_cli_image_cardinality,
+    validate_xla_output_audio,
 };
 use mlxcel::server::chat_template::{ChatMessage, ChatTemplateProcessor, flatten_template_text};
 use mlxcel_core::cache::KVCacheMode;
@@ -1460,4 +1461,27 @@ fn validate_prompt_lookup_args_refuses_before_the_model_loads() {
         assert!(err.contains("text-only"), "{media}: {err}");
     }
     fs::remove_dir_all(args.model.model).unwrap();
+}
+
+#[test]
+fn the_repl_uses_a_drafter_only_with_an_explicit_server_kind() {
+    // issue #2173 review: on `generate`, `--draft-model` alone is a classic
+    // draft model, which the in-process server does not run, so the REPL
+    // passes a drafter only for `--draft-kind dflash|mtp`.
+    let mut args = sample_generate_args(PathBuf::from("/m"));
+    assert_eq!(repl_drafter(&args), None, "no drafter");
+    args.model.draft_model = Some(PathBuf::from("/d"));
+    assert_eq!(repl_drafter(&args), None, "classic draft model");
+    for kind in ["dflash", "mtp"] {
+        args.speculative.draft_kind = Some(kind.to_string());
+        assert_eq!(
+            repl_drafter(&args),
+            Some((PathBuf::from("/d"), kind.to_string()))
+        );
+    }
+    args.speculative.draft_kind = Some("internal-mtp".to_string());
+    assert_eq!(repl_drafter(&args), None, "not a server drafter kind");
+    args.model.draft_model = None;
+    args.speculative.draft_kind = Some("mtp".to_string());
+    assert_eq!(repl_drafter(&args), None, "a kind without a drafter");
 }

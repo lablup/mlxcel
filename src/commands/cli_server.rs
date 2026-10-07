@@ -30,13 +30,26 @@ pub(crate) fn cli_flag_was_set(long: &str, short: Option<char>) -> bool {
     if mlxcel::server::long_cli_flag_was_set(long) {
         return true;
     }
-    let Some(short) = short else {
-        return false;
-    };
+    short.is_some_and(|short| {
+        short_numeric_flag_in(
+            std::env::args_os().map(|arg| arg.to_string_lossy().into_owned()),
+            short,
+        )
+    })
+}
+
+/// Whether `args` holds the short numeric flag `-x`, as `-x` alone or with
+/// its value attached (`-x0.7`, `-x=0.7`). An argument that only starts with
+/// `-x`, such as the prompt in `-p -xylophone`, does not count: the attached
+/// part must be a number, which every short sampling flag takes.
+pub(crate) fn short_numeric_flag_in(args: impl IntoIterator<Item = String>, short: char) -> bool {
     let standalone = format!("-{short}");
-    std::env::args_os().any(|arg| {
-        let arg = arg.to_string_lossy();
-        arg.starts_with(&standalone) && !arg.starts_with("--")
+    args.into_iter().any(|arg| {
+        let Some(rest) = arg.strip_prefix(&standalone) else {
+            return false;
+        };
+        let value = rest.strip_prefix('=').unwrap_or(rest);
+        rest.is_empty() || value.parse::<f64>().is_ok()
     })
 }
 

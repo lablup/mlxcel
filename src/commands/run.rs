@@ -60,7 +60,7 @@ use mlxcel::cli::speculative_args::SpeculativeArgs;
 use mlxcel::server::chat_template::ChatMessage;
 use mlxcel::server::in_process::InProcessServer;
 
-use super::chat_transcript::{Turn, messages_json};
+use super::chat_transcript::{Turn, image_data_uris, messages_json};
 use mlxcel::cli::in_process_client::{
     CliServerSettings, ServerSamplingOptions, chat_request_body, completion_request_body,
 };
@@ -217,6 +217,9 @@ fn one_shot_stays_on_generate(generation: &GenerationOptions, model_path: &Path)
         || generation.recommend_quant
         || !generation.video.is_empty()
         || generation.audio.is_some()
+        // The raw completion path carries no media, so a raw prompt with
+        // images keeps `generate`'s raw-prompt image handling.
+        || (generation.no_chat_template && !generation.image.is_empty())
     {
         return true;
     }
@@ -284,6 +287,8 @@ fn run_once(args: RunArgs) -> Result<()> {
         return crate::commands::run_generate(args.into_generate_args());
     }
 
+    // Read `--image` files before the model loads, so a bad path fails fast.
+    let images = image_data_uris(&args.generation.image)?;
     let mut settings = args.server_settings()?;
     // One request has nothing to reuse, so the prompt cache stays off (ADR
     // 0007: on for chat clients, which `run -p` is not); the warmup is the
@@ -302,6 +307,10 @@ fn run_once(args: RunArgs) -> Result<()> {
         "Model loaded in {:.2}s.",
         load_start.elapsed().as_secs_f64()
     );
+    // The REPL's notice: without a chat template the server renders the
+    // prompt with its generic default format, which a base model rarely
+    // answers well.
+    super::cli_turn::warn_if_base_model(&model_path, args.generation.no_chat_template);
 
     let display = TurnDisplay {
         show_reasoning: args.generation.show_reasoning,
@@ -321,10 +330,10 @@ fn run_once(args: RunArgs) -> Result<()> {
                         role: "user".to_string(),
                         content: prompt.clone(),
                     },
-                    images: args.generation.image.clone(),
+                    images: images.clone(),
                 }],
                 args.generation.image_soft_tokens,
-            )?;
+            );
             let request = mlxcel::server::in_process::chat::chat_request_from_json(
                 chat_request_body(messages, &settings),
             )?;

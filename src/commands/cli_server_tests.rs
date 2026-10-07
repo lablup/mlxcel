@@ -186,3 +186,23 @@ fn request_fields_parse_as_a_chat_request() {
         "sampling defaults live on the server"
     );
 }
+
+fn args(argv: &[&str]) -> Vec<String> {
+    argv.iter().map(|arg| arg.to_string()).collect()
+}
+
+#[test]
+fn a_short_numeric_flag_is_found_alone_or_with_its_value_attached() {
+    assert!(short_numeric_flag_in(args(&["run", "-t", "0.7"]), 't'));
+    assert!(short_numeric_flag_in(args(&["run", "-t0.7"]), 't'));
+    assert!(short_numeric_flag_in(args(&["run", "-t=1"]), 't'));
+    assert!(!short_numeric_flag_in(args(&["run", "--temp", "1"]), 't'));
+    assert!(!short_numeric_flag_in(args(&["run"]), 't'));
+}
+
+#[test]
+fn a_prompt_that_starts_like_a_short_flag_is_not_that_flag() {
+    // issue #2173 review: `-p -tfoo` passes the prompt "-tfoo", not `-t`.
+    assert!(!short_numeric_flag_in(args(&["run", "-p", "-tfoo"]), 't'));
+    assert!(!short_numeric_flag_in(args(&["run", "-p", "-t=x"]), 't'));
+}

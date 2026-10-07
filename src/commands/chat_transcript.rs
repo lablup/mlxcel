@@ -15,7 +15,7 @@
 //! The chat transcript and its `/v1/chat/completions` `messages` form, shared
 //! by the chat REPL and `mlxcel run -p` (issue #2173).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use base64::Engine as _;
@@ -26,7 +26,11 @@ use serde_json::{Value, json};
 #[derive(Debug, Clone)]
 pub(crate) struct Turn {
     pub(crate) message: ChatMessage,
-    pub(crate) images: Vec<PathBuf>,
+    /// The message's images as `data:` URIs ([`image_data_uri`]). Each file
+    /// is read once, when it is attached, so the transcript re-sent on every
+    /// turn never touches the disk again and a file moved or deleted after
+    /// its turn cannot break the later turns.
+    pub(crate) images: Vec<String>,
 }
 
 /// The transcript's messages without their attachments.
@@ -40,18 +44,15 @@ pub(crate) fn transcript_messages(transcript: &[Turn]) -> Vec<ChatMessage> {
 /// (`--image-soft-tokens`) rides on every part as the server's
 /// `max_soft_tokens` extension, which the server validates against the Gemma 4
 /// budget ladder.
-pub(crate) fn messages_json(
-    transcript: &[Turn],
-    image_soft_tokens: Option<usize>,
-) -> Result<Value> {
+pub(crate) fn messages_json(transcript: &[Turn], image_soft_tokens: Option<usize>) -> Value {
     let mut messages = Vec::with_capacity(transcript.len());
     for turn in transcript {
         let content = if turn.images.is_empty() {
             json!(turn.message.content)
         } else {
             let mut parts = Vec::with_capacity(turn.images.len() + 1);
-            for path in &turn.images {
-                let mut image_url = json!({ "url": image_data_uri(path)? });
+            for uri in &turn.images {
+                let mut image_url = json!({ "url": uri });
                 if let Some(budget) = image_soft_tokens {
                     image_url["max_soft_tokens"] = json!(budget);
                 }
@@ -62,7 +63,15 @@ pub(crate) fn messages_json(
         };
         messages.push(json!({ "role": turn.message.role, "content": content }));
     }
-    Ok(Value::Array(messages))
+    Value::Array(messages)
+}
+
+/// Read each image file once into a `data:` URI, naming the file that fails.
+pub(crate) fn image_data_uris<P: AsRef<Path>>(paths: &[P]) -> Result<Vec<String>> {
+    paths
+        .iter()
+        .map(|path| image_data_uri(path.as_ref()))
+        .collect()
 }
 
 /// A `data:` URI for an image file, typed by its extension.

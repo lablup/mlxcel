@@ -221,3 +221,35 @@ fn run_lowers_advanced_groups_to_inert_defaults() {
     assert_eq!(gen_args.model.num_draft_tokens, 3);
     assert!(gen_args.speculative.draft_kind.is_none());
 }
+
+#[test]
+fn a_raw_prompt_with_images_stays_on_the_generate_flow() {
+    // The raw completion path carries no media, so `--no-chat-template`
+    // with `--image` keeps `generate`'s raw-prompt image handling instead of
+    // dropping the image (issue #2173 review).
+    let model = std::path::Path::new("/nonexistent/model");
+    let raw_with_image = parse_run(&[
+        "mlxcel",
+        "run",
+        "m",
+        "-p",
+        "x",
+        "--no-chat-template",
+        "--image",
+        "a.png",
+    ]);
+    assert!(super::one_shot_stays_on_generate(
+        &raw_with_image.generation,
+        model
+    ));
+    let templated_with_image = parse_run(&["mlxcel", "run", "m", "-p", "x", "--image", "a.png"]);
+    assert!(!super::one_shot_stays_on_generate(
+        &templated_with_image.generation,
+        model
+    ));
+    let raw_text = parse_run(&["mlxcel", "run", "m", "-p", "x", "--no-chat-template"]);
+    assert!(!super::one_shot_stays_on_generate(
+        &raw_text.generation,
+        model
+    ));
+}

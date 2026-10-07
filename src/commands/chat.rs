@@ -55,12 +55,14 @@ use rustyline::error::ReadlineError;
 use serde_json::json;
 
 use mlxcel::initialize_runtime_checked;
-use mlxcel::server::chat_template::{ChatMessage, ChatTemplateProcessor};
+use mlxcel::server::chat_template::ChatMessage;
 use mlxcel::server::in_process::InProcessServer;
 use mlxcel::server::in_process::chat::{chat_request_from_json, completion_request_from_json};
 
-use super::chat_transcript::{Turn, messages_json, transcript_messages};
-use super::cli_turn::{TurnDisplay, TurnPrinter, run_cancellable};
+use super::chat_transcript::{
+    Turn, image_data_uri, image_data_uris, messages_json, transcript_messages,
+};
+use super::cli_turn::{TurnDisplay, TurnPrinter, run_cancellable, warn_if_base_model};
 use mlxcel::cli::in_process_client::CliServerSettings;
 
 /// Triple-quote fence that opens / closes an ollama-style multiline input
@@ -168,6 +170,18 @@ pub fn run_chat(mut opts: ChatOptions) -> Result<()> {
     if let Some(err) = non_chat_family_error(&model_path) {
         return Err(err);
     }
+    // `--image` files are read once, before the model loads, so a bad path
+    // fails fast and the transcript holds the encoded bytes from then on.
+    let initial_images = if opts.no_chat_template {
+        if !opts.images.is_empty() {
+            eprintln!(
+                "Note: --image is ignored with --no-chat-template; raw turns carry no media."
+            );
+        }
+        Vec::new()
+    } else {
+        image_data_uris(&opts.images)?
+    };
     // issue #1350: the KV cache mode this family can really run, announced
     // once before the load banner.
     opts.server.kv_cache_mode = mlxcel::cli::turbo_args::resolve_and_announce_kv_cache_mode(
@@ -200,7 +214,7 @@ pub fn run_chat(mut opts: ChatOptions) -> Result<()> {
         show_reasoning: opts.show_reasoning,
     };
     let mut transcript: Vec<Turn> = Vec::new();
-    let mut pending_images = opts.images.clone();
+    let mut pending_images = initial_images;
     let mut conversation = 0u64;
     let session = std::process::id();
 
@@ -217,9 +231,20 @@ pub fn run_chat(mut opts: ChatOptions) -> Result<()> {
                 pending_images.clear();
                 continue;
             }
+            SlashOutcome::Image(_) if opts.no_chat_template => {
+                eprintln!("error: /image needs the chat template; raw turns carry no media.");
+                continue;
+            }
             SlashOutcome::Image(path) => {
-                println!("Image {} attached to the next message.", path.display());
-                pending_images.push(path);
+                // Read now, once: the transcript keeps the encoded image, so
+                // later turns never depend on the file still being there.
+                match image_data_uri(&path) {
+                    Ok(uri) => {
+                        println!("Image {} attached to the next message.", path.display());
+                        pending_images.push(uri);
+                    }
+                    Err(err) => eprintln!("error: {err:#}"),
+                }
                 continue;
             }
             SlashOutcome::Handled => continue,
@@ -246,7 +271,7 @@ pub fn run_chat(mut opts: ChatOptions) -> Result<()> {
                 })
             } else {
                 let mut body = mlxcel::cli::in_process_client::chat_request_body(
-                    messages_json(&transcript, opts.image_soft_tokens)?,
+                    messages_json(&transcript, opts.image_soft_tokens),
                     &opts.server,
                 );
                 body["prompt_cache_key"] = json!(cache_key);
@@ -283,38 +308,6 @@ pub fn run_chat(mut opts: ChatOptions) -> Result<()> {
 
     println!("Bye!");
     server.shutdown()
-}
-
-/// Say so when the checkpoint ships no chat template: it is likely a base
-/// model, and the server renders turns with its generic default format.
-fn warn_if_base_model(model_path: &Path, no_chat_template: bool) {
-    if no_chat_template {
-        return;
-    }
-    let has_template = ChatTemplateProcessor::from_model_path(model_path)
-        .ok()
-        .flatten()
-        .is_some();
-    let native = mlxcel::tokenizer::load_tokenizer(model_path)
-        .ok()
-        .is_some_and(|tokenizer| tokenizer.kimi_k3_control_ids().is_some());
-    if has_template || native {
-        return;
-    }
-    eprintln!(
-        "Note: this model ships no chat template and is likely a base (non-instruction-tuned) model."
-    );
-    eprintln!(
-        "      Chat responses will likely be incoherent or repetitive. Try an instruction-tuned"
-    );
-    eprintln!(
-        "      variant (Gemma \"-it\", Llama and Qwen2.5 \"-Instruct\", Qwen3 without \"-Base\")."
-    );
-    eprintln!(
-        "      Turns are rendered with the server's generic chat format; for raw text without"
-    );
-    eprintln!("      role markers, pass --no-chat-template.");
-    eprintln!();
 }
 
 /// Print the one-time greeting / help hint.
