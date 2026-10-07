@@ -142,6 +142,23 @@ pub struct ServerEngineRun {
     /// Why the prompt cache declined to store or adopt for this request, when
     /// it recorded a decline while the request ran.
     pub prompt_cache_reject: Option<&'static str>,
+    /// Pooled paged-attention kernel launches (fused v2 plus gather fallback,
+    /// summed over layers and steps) while this request ran, read from the
+    /// process-wide `mlxcel_core::cache::paged_batch_decode_stats` counters.
+    /// Zero on dense storage. Zero on paged storage too when the model keeps
+    /// its KV in model-owned per-sequence state (Gemma 3, Llama 4, Qwen 3.5):
+    /// at B=1 those families decode through their dense caches and only the
+    /// block table is paged, so this field is the evidence of which attention
+    /// a "paged" run actually used.
+    pub paged_decode_launches: u64,
+}
+
+/// Process-wide count of pooled paged-attention launches (fused kernel plus
+/// gather fallback). One probe request is in flight at a time, so the delta
+/// across a request belongs to it.
+fn paged_kernel_launches() -> u64 {
+    let stats = mlxcel_core::cache::paged_batch_decode_stats();
+    stats.v2_launches + stats.gather_fallbacks
 }
 
 impl ServerEngineRun {
@@ -171,6 +188,10 @@ impl ServerEngine {
     /// Build the server configuration, prompt cache store and model worker the
     /// way `start_server` does, then run the server's own one-token warmup.
     pub fn start(model_path: &Path, options: ServerEngineOptions) -> Result<Self> {
+        // `start_server` turns CUDA graph capture off for the families that
+        // need it (Gemma 4, #688) on the main thread before any worker exists;
+        // do the same so the worker's own load-site call is a no-op here too.
+        crate::loading::maybe_disable_cuda_graphs_for_model_for_path(model_path);
         let mut startup = ServerStartupConfig {
             model_path: model_path.to_path_buf(),
             decode_storage_backend: Some(match options.decode_storage {
@@ -226,9 +247,11 @@ impl ServerEngine {
         self.provider.prompt_cache().is_some()
     }
 
-    /// The decode storage the scheduler actually runs: paged only when paged
-    /// was requested (directly or through `Auto`) and the worker did not fall
-    /// back to dense.
+    /// The decode storage the scheduler resolved: paged only when paged was
+    /// requested (directly or through `Auto`) and the worker did not fall back
+    /// to dense. This is the sequence storage, not the attention kernel: a
+    /// model-owned family resolves to paged yet decodes through dense caches
+    /// at B=1, which [`ServerEngineRun::paged_decode_launches`] shows.
     #[must_use]
     pub fn effective_decode_storage(&self) -> DecodeStorageBackend {
         match self.options.decode_storage {
@@ -303,6 +326,7 @@ impl ServerEngine {
         };
         let live = self.config.live_settings();
         let before = self.observability.snapshot();
+        let paged_before = paged_kernel_launches();
         let mut first_token_at: Option<Instant> = None;
         let start = Instant::now();
         let result = self.provider.generate_with_live_with_prefill(
@@ -317,6 +341,7 @@ impl ServerEngine {
         )?;
         let done = Instant::now();
         let after = self.observability.snapshot();
+        let paged_after = paged_kernel_launches();
         // A request that finished inside prefill (immediate EOS) never stamps a
         // first token; its whole wall time is then prefill.
         let first = first_token_at.unwrap_or(done);
@@ -335,6 +360,7 @@ impl ServerEngine {
             prompt_cache_inserts: after
                 .prompt_cache_inserts
                 .saturating_sub(before.prompt_cache_inserts),
+            paged_decode_launches: paged_after.saturating_sub(paged_before),
             prompt_cache_reject: after
                 .prompt_cache_last_reject
                 .filter(|r| {

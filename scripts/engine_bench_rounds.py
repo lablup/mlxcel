@@ -14,10 +14,13 @@
 # limitations under the License.
 """Interleaved A/B rounds for mlxcel-bench-engine, with a null arm.
 
-Each round runs every arm once, in the order given, then runs the first arm a
-second time as the null arm (every arm with --null-every-arm). The first arm and its repeat use the same binary
-and the same flags, so their paired delta is the method's noise floor; an A/B
-delta inside the null spread is unresolved. Every arm is a fresh process, so
+Each round runs every arm once, then runs the first arm a second time as the
+null arm (every arm with --null-every-arm). The run order rotates by one
+position each round, so no arm always runs first or right after a given arm
+and a drift across the round (thermals, allocator growth) does not land on one
+arm. The first arm and its repeat use the same binary and the same flags, so
+their paired delta is the method's noise floor; an A/B delta inside the null
+spread is unresolved. Every arm is a fresh process, so
 process-wide settings (MLXCEL_PREFILL_CHUNK on the CLI path) can differ per
 arm, and no arm inherits another's allocator or kernel caches.
 
@@ -156,6 +159,8 @@ def main():
         out.write(json.dumps(header) + "\n")
         for r in range(a.rounds):
             schedule = list(a.arm) + [(null, flags_of[src]) for null, src in nulls.items()]
+            shift = r % len(schedule)
+            schedule = schedule[shift:] + schedule[:shift]
             for name, flags in schedule:
                 for rec in run_arm(a, name, flags, r, gate):
                     records.append(rec)

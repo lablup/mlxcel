@@ -205,7 +205,20 @@ fn main() -> Result<()> {
                 let run = engine.run(&request(&prompt.tokens, case, args.max_tokens, None))?;
                 let partition =
                     describe_prefill_partition(prompt.tokens.len(), run.cached_tokens, None, chunk);
-                PathStream::ran(run.tokens, &format!("{effective:?} pc=off {partition}"))
+                // Model-owned KV families resolve to paged storage but decode
+                // a lone sequence through their dense caches, so the kernel
+                // evidence goes next to the storage name.
+                let kernel = match (effective, run.paged_decode_launches) {
+                    (DecodeStorageBackend::Paged, 0) => {
+                        " paged-kernel-launches=0 (B=1 decode ran dense attention)".to_string()
+                    }
+                    (DecodeStorageBackend::Paged, n) => format!(" paged-kernel-launches={n}"),
+                    _ => String::new(),
+                };
+                PathStream::ran(
+                    run.tokens,
+                    &format!("{effective:?} pc=off {partition}{kernel}"),
+                )
             };
             report.push_stream(case.name, side, stream);
         }

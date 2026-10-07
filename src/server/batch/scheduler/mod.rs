@@ -254,7 +254,8 @@ fn common_prefix_len(a: &[i32], b: &[i32]) -> usize {
 /// * at or beyond the prompt length there is no suffix left to prefill, and
 ///   the sampler needs a non-empty final forward to produce fresh logits.
 ///
-/// Used by: `BatchScheduler::resolve_history_boundary`
+/// Used by: `BatchScheduler::resolve_history_boundary`,
+/// `engine_probe::ServerEngine::history_boundary`
 pub(crate) fn history_boundary_len(
     history: &[i32],
     prompt_tokens: &[i32],

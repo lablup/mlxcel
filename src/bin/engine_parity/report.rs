@@ -30,7 +30,8 @@ pub enum Side {
     Paged,
     /// (b) with the prompt cache on, first (cold) request.
     CacheMiss,
-    /// (b) with the prompt cache on, the same request again.
+    /// (b) with the prompt cache on, the same request after a priming request
+    /// stored its history prefix.
     CacheHit,
 }
 

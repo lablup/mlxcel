@@ -43,6 +43,10 @@ pub struct Measurement {
     decode_storage: &'static str,
     /// The scheduler's own millisecond-resolution figures, server path only.
     server_ms: Option<(u64, u64)>,
+    /// Pooled paged-attention launches during the measured request, server
+    /// path only. Zero on a `paged` row means the model decoded a lone
+    /// sequence through dense caches (model-owned KV families).
+    paged_decode_launches: Option<u64>,
 }
 
 fn model_name(path: &Path) -> String {
@@ -81,6 +85,7 @@ impl Measurement {
             prefill_chunk,
             decode_storage: "dense",
             server_ms: None,
+            paged_decode_launches: None,
         }
     }
 
@@ -105,6 +110,7 @@ impl Measurement {
             prefill_chunk,
             decode_storage: storage_name(storage),
             server_ms: Some((run.server_prompt_eval_ms, run.server_generation_ms)),
+            paged_decode_launches: Some(run.paged_decode_launches),
         }
     }
 
@@ -119,7 +125,10 @@ impl Measurement {
     /// Print the human-readable line and the machine-readable JSON line.
     pub fn emit(&self, label: &str, max_tokens: usize) {
         let server = self.server_ms.map_or_else(String::new, |(p, g)| {
-            format!("  (scheduler: prompt_eval {p} ms, generation {g} ms)")
+            format!(
+                "  (scheduler: prompt_eval {p} ms, generation {g} ms; paged kernel launches {})",
+                self.paged_decode_launches.unwrap_or(0)
+            )
         });
         println!(
             "[{:<6}] prompt {:>5} tok  TTFT {:>9.2} ms  decode {:>5} tok in {:>9.2} ms = {:>8.2} tok/s  \
@@ -140,6 +149,13 @@ impl Measurement {
                 self.path, self.generated_tokens
             );
         }
+        if self.decode_storage == "paged" && self.paged_decode_launches == Some(0) {
+            eprintln!(
+                "[engine-bench] warning: storage resolved to paged but no paged attention kernel \
+                 ran; this model keeps model-owned KV and decoded a lone sequence through dense \
+                 caches, so this row does not measure paged decode"
+            );
+        }
         let json = serde_json::json!({
             "path": self.path,
             "model": self.model,
@@ -156,6 +172,7 @@ impl Measurement {
             "label": label,
             "server_prompt_eval_ms": self.server_ms.map(|(p, _)| p),
             "server_generation_ms": self.server_ms.map(|(_, g)| g),
+            "paged_decode_launches": self.paged_decode_launches,
         });
         println!("[engine-bench] {json}");
     }
