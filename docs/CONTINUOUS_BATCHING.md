@@ -17,7 +17,11 @@ and every model forward, sampler draw and finish step the scheduler needs goes
 through `Engine::prefill`, `Engine::step` (one entry for every row count: a
 lone request is a batch of one) and the pipelined `submit` / `finish_rows` pair
 ([ADR 0007](adr/0007-unified-batch-native-engine.md), [ADR 0009](adr/0009-engine-step-api.md)).
-Admission, tick policy, preemption, the prompt cache, disaggregated handoff and
+A batch of one samples through the per-row chain; a larger batch whose rows
+share fused-compatible parameters takes one fused `[B, vocab] -> [B]` draw.
+Either way the sampled tokens are evaluated through the fallible MLX boundary
+before they are read, so an MLX throw finishes the affected request(s) with an
+`inference backend error` instead of aborting the server (#822). Admission, tick policy, preemption, the prompt cache, disaggregated handoff and
 the speculative burst generators stay in the scheduler. Relevant flags:
 
 | Flag | Default | Purpose |
@@ -427,11 +431,18 @@ sequence was opened.
   `_rotating_compat` routes they used to select on the paged backend were
   per-row C++ loops (block slices, a concat, one SDPA per row); the per-row
   `attend` loop is the same attention without the block concat, not
-  bit-identical to it. On the dense backend an FP16 Gemma 3 row runs the exact
-  ops it ran before; a Turbo4Asym global layer now takes the dequant-first
-  variant `KVCache::attend` selects, as Qwen3 does. Llama 4's RoPE layers
-  project once for the batch on both backends (before #2172 the dense backend
-  projected per row), with the per-row attention unchanged.
+  bit-identical to it. On the dense backend an FP16 or Int8 Gemma 3 row runs
+  the exact ops it ran before; a Gemma 3 global layer in any Turbo mode with a
+  dequant-first or compressed decode variant (Turbo4Asym, Turbo4Delegated, and
+  sparse-V behind its environment gates) now takes the variant
+  `KVCache::attend` selects, as Qwen3 does, instead of `update_and_fetch` plus
+  SDPA. Llama 4's RoPE layers run the whole block batched on both backends
+  (projections, residuals, the post-attention norm and the MoE feed-forward;
+  before #2172 the dense backend ran every row through the single-row block),
+  with the per-row attention unchanged. A real-checkpoint check
+  (`scheduler_real_batch_parity_tests`, gemma-3-1b-it-4bit under
+  `MLXCEL_SDPA_DETERMINISTIC=1`) gives two concurrent greedy requests the
+  same token streams as each request alone, on both backends.
 - Batched decode over Turbo caches takes the dequant-first variants that
   single-sequence decode already used, instead of a full dequant per step. The
   attention is the same exact math in a different op order, so it is not

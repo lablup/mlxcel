@@ -783,9 +783,8 @@ impl BatchScheduler {
             .map_err(|err| PieceFailure::Abort(err.to_string()))?;
         let tokens = &seq.prompt_tokens[piece.range.clone()];
         let input = mlxcel_core::from_slice_i32(tokens, &[1, piece.len() as i32]);
-        // #822: the forward is force-evaluated while `caches` still borrows
-        // the cache pool, so capture the fallible outcome and act on it below
-        // once the borrow has ended.
+        // #822: the engine force-evaluates the logits and reports the
+        // fallible outcome; it is recorded against the health counter here.
         let outcome = self
             .engine
             .prefill(&PrefillStep {
@@ -800,15 +799,14 @@ impl BatchScheduler {
             .map_err(|_| {
                 PieceFailure::Abort("Cache not found for sequence during prefill".into())
             })?;
-        let (logits, eval) = { (outcome.logits, outcome.eval) };
-        self.record_eval_outcome(eval)
+        self.record_eval_outcome(outcome.eval)
             .map_err(PieceFailure::EvalFailed)?;
         self.sync_sequence_storage(seq.seq_id);
         // H2: enforce the `--max-kv-size` cap at the end of the prefill before
         // the sequence transitions to decode.
         self.enforce_max_kv_size_for(seq.seq_id, seq.retention);
         seq.prefill_offset = piece.range.end;
-        Ok(logits)
+        Ok(outcome.logits)
     }
 
     /// Complete a prefill (full or chunked): sample the first token,

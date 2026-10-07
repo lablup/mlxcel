@@ -142,7 +142,6 @@ fn collapsed(body: &str) -> String {
 fn forwards_the_model(collapsed_body: &str) -> bool {
     [
         "self.engine.step(",
-        "self.engine.step_speculative(",
         "self.engine.submit(",
         "self.engine.prefill(",
         "self.engine.prefill_cohort(",

@@ -21,6 +21,11 @@ impl BatchScheduler {
             .engine
             .open(mlxcel_core::engine::SequenceSpec { layout_override })
             .map_err(|err| err.to_string())?;
+        // `open` runs the model's `prepare_sequence_state` before the mode
+        // upgrade below (main ran it after). That hook takes only the id and
+        // the model never holds the pool, so it cannot observe the pool
+        // caches' modes either way.
+        //
         // apply the configured KV cache mode (with
         // Boundary-V policy for Turbo4 modes) to the freshly allocated
         // per-layer caches. `model.make_caches()` always returns Fp16

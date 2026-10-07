@@ -29,7 +29,6 @@ use mlxcel_core::generation_policy::{
 use mlxcel_core::prefill_plan::{PrefillCaps, PrefillPlan};
 use mlxcel_core::sampling::LogprobsConfig;
 use mlxcel_core::sampling_row_step::{LogitMask, RowSampler};
-use mlxcel_core::utils::create_padded_prefill_mask;
 
 use crate::LoadedModel;
 
@@ -142,21 +141,9 @@ impl DirectEngine {
         let mut last_logits = None;
         for piece in plan.pieces() {
             let tokens = &prompt_tokens[piece.range.clone()];
-            let (input_tokens, pad_mask) = if piece.is_padded() {
-                let mut padded = tokens.to_vec();
-                padded.resize(piece.padded_len, 0);
-                let mask = plan.pad_mask_required().then(|| {
-                    create_padded_prefill_mask(
-                        piece.len() as i32,
-                        piece.padded_len as i32,
-                        piece.range.start as i32,
-                    )
-                });
-                (padded, mask)
-            } else {
-                (tokens.to_vec(), None)
-            };
-            let input = mlxcel_core::from_slice_i32(&input_tokens, &[1, piece.padded_len as i32]);
+            // A fresh sequence's KV state holds exactly the earlier pieces.
+            let (input, pad_mask) =
+                mlxcel_core::engine::piece_input(&plan, piece, tokens, piece.range.start as i32);
             let outcome = self
                 .engine
                 .prefill(&PrefillStep {

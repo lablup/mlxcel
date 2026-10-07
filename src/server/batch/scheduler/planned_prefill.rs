@@ -147,26 +147,13 @@ impl BatchScheduler {
         } else {
             piece.range.start as i32
         };
-        let (input_tokens, pad_mask) = if piece.is_padded() {
-            let mut padded = tokens.to_vec();
-            padded.resize(piece.padded_len, 0);
-            let mask = plan.pad_mask_required().then(|| {
-                create_padded_prefill_mask(piece.len() as i32, piece.padded_len as i32, kv_offset)
-            });
-            (padded, mask)
-        } else {
-            (tokens.to_vec(), None)
-        };
+        let (input, pad_mask) = mlxcel_core::engine::piece_input(plan, piece, tokens, kv_offset);
         if continuation && !self.reserve_prefill_chunk_blocks(seq.seq_id, piece.padded_len) {
             let total = self.engine.pool().paged_block_budget().unwrap_or_default();
             return Err(PieceFailure::Abort(format!(
                 "KV cache budget exhausted: no free blocks in the {total}-block KV cache budget to continue the chunked prefill"
             )));
         }
-        let input = mlxcel_core::from_slice_i32(&input_tokens, &[1, piece.padded_len as i32]);
-        // #822: the forward is force-evaluated while `caches` still borrows
-        // the cache pool, so the fallible outcome is captured here and acted
-        // on once the borrow has ended.
         // The engine runs the piece: forward, then (for a non-terminal piece)
         // the forced eval that releases its transients before the next piece's
         // graph is built and fails just this request on an MLX throw (#822),
@@ -180,7 +167,7 @@ impl BatchScheduler {
                 seq_id: seq.seq_id,
                 input: &input,
                 embeddings: None,
-                mask: pad_mask.as_ref().map(|m| m.as_ref().unwrap()),
+                mask: pad_mask.as_deref(),
                 last_pos: piece.last_real_pos(),
                 trim_excess: piece.trim_after().unwrap_or(0) as i32,
                 eval: !plan.is_terminal(piece),
@@ -188,19 +175,18 @@ impl BatchScheduler {
             .map_err(|_| {
                 PieceFailure::Abort("Cache not found for sequence during prefill".into())
             })?;
-        let (logits, eval, trim) = { (outcome.logits, outcome.eval, outcome.trim) };
-        self.record_eval_outcome(eval)
+        self.record_eval_outcome(outcome.eval)
             .map_err(PieceFailure::EvalFailed)?;
         // A pad trim that could not rewind the model's own state leaves its
         // offset ahead of the token count; never decode from that (#1755).
-        trim.map_err(PieceFailure::Abort)?;
+        outcome.trim.map_err(PieceFailure::Abort)?;
         self.sync_sequence_storage(seq.seq_id);
         // H2: enforce the `--max-kv-size` cap after every piece so the live
         // window stays bounded across a long prompt instead of engaging only
         // once the whole prefill completes. A cheap early-return with no cap.
         self.enforce_max_kv_size_for(seq.seq_id, seq.retention);
         seq.prefill_offset = piece.range.end;
-        Ok(logits)
+        Ok(outcome.logits)
     }
 
     /// Run the pieces of `plan` from `seq`'s cursor: every piece when `all`,
