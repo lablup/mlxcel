@@ -90,6 +90,8 @@ pub struct ChatOptions {
     pub show_reasoning: bool,
     /// Images attached to the first user message (`--image`).
     pub images: Vec<PathBuf>,
+    /// `--image-soft-tokens`: the Gemma 4 image budget sent with every image.
+    pub image_soft_tokens: Option<usize>,
 }
 
 /// Outcome of interpreting a single submitted line / block.
@@ -244,7 +246,7 @@ pub fn run_chat(mut opts: ChatOptions) -> Result<()> {
                 })
             } else {
                 let mut body = mlxcel::cli::in_process_client::chat_request_body(
-                    messages_json(&transcript)?,
+                    messages_json(&transcript, opts.image_soft_tokens)?,
                     &opts.server,
                 );
                 body["prompt_cache_key"] = json!(cache_key);

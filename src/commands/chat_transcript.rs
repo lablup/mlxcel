@@ -36,8 +36,14 @@ pub(crate) fn transcript_messages(transcript: &[Turn]) -> Vec<ChatMessage> {
 
 /// The transcript as a `messages` array. A message with images carries them
 /// as `image_url` parts with inline `data:` URIs, which every media-capable
-/// route accepts without a `--media-path` root.
-pub(crate) fn messages_json(transcript: &[Turn]) -> Result<Value> {
+/// route accepts without a `--media-path` root. `image_soft_tokens`
+/// (`--image-soft-tokens`) rides on every part as the server's
+/// `max_soft_tokens` extension, which the server validates against the Gemma 4
+/// budget ladder.
+pub(crate) fn messages_json(
+    transcript: &[Turn],
+    image_soft_tokens: Option<usize>,
+) -> Result<Value> {
     let mut messages = Vec::with_capacity(transcript.len());
     for turn in transcript {
         let content = if turn.images.is_empty() {
@@ -45,10 +51,11 @@ pub(crate) fn messages_json(transcript: &[Turn]) -> Result<Value> {
         } else {
             let mut parts = Vec::with_capacity(turn.images.len() + 1);
             for path in &turn.images {
-                parts.push(json!({
-                    "type": "image_url",
-                    "image_url": { "url": image_data_uri(path)? },
-                }));
+                let mut image_url = json!({ "url": image_data_uri(path)? });
+                if let Some(budget) = image_soft_tokens {
+                    image_url["max_soft_tokens"] = json!(budget);
+                }
+                parts.push(json!({ "type": "image_url", "image_url": image_url }));
             }
             parts.push(json!({ "type": "text", "text": turn.message.content }));
             Value::Array(parts)

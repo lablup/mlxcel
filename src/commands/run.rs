@@ -259,6 +259,7 @@ pub(crate) fn run_run(args: RunArgs) -> Result<()> {
             no_chat_template: args.generation.no_chat_template,
             show_reasoning: args.generation.show_reasoning,
             images: args.generation.image.clone(),
+            image_soft_tokens: args.generation.image_soft_tokens,
         };
         return crate::commands::run_chat(opts);
     }
@@ -314,13 +315,16 @@ fn run_once(args: RunArgs) -> Result<()> {
             )?;
             server.complete(request, cancel, |delta| printer.on_delta(delta))
         } else {
-            let messages = messages_json(&[Turn {
-                message: ChatMessage {
-                    role: "user".to_string(),
-                    content: prompt.clone(),
-                },
-                images: args.generation.image.clone(),
-            }])?;
+            let messages = messages_json(
+                &[Turn {
+                    message: ChatMessage {
+                        role: "user".to_string(),
+                        content: prompt.clone(),
+                    },
+                    images: args.generation.image.clone(),
+                }],
+                args.generation.image_soft_tokens,
+            )?;
             let request = mlxcel::server::in_process::chat::chat_request_from_json(
                 chat_request_body(messages, &settings),
             )?;

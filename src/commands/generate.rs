@@ -2612,6 +2612,7 @@ fn chat_options_from_args(args: &GenerateArgs) -> Result<crate::commands::ChatOp
         no_chat_template: args.generation.no_chat_template,
         show_reasoning: args.generation.show_reasoning,
         images: args.generation.image.clone(),
+        image_soft_tokens: args.generation.image_soft_tokens,
     })
 }
 

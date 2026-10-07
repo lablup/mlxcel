@@ -33,7 +33,7 @@ fn text_turns_are_plain_string_messages() {
         turn("assistant", "hello", Vec::new()),
     ];
     assert_eq!(
-        messages_json(&transcript).expect("json"),
+        messages_json(&transcript, None).expect("json"),
         json!([
             { "role": "user", "content": "hi" },
             { "role": "assistant", "content": "hello" },
@@ -46,7 +46,7 @@ fn image_turns_carry_data_uri_parts_before_the_text() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("pixel.jpg");
     std::fs::write(&path, [0xffu8, 0xd8, 0xff]).expect("write");
-    let messages = messages_json(&[turn("user", "what is this?", vec![path])]).expect("json");
+    let messages = messages_json(&[turn("user", "what is this?", vec![path])], None).expect("json");
     let parts = messages[0]["content"].as_array().expect("parts");
     assert_eq!(parts.len(), 2);
     assert_eq!(parts[0]["type"], "image_url");
@@ -58,6 +58,25 @@ fn image_turns_carry_data_uri_parts_before_the_text() {
     }))
     .expect("the server parses the parts");
     assert_eq!(request.image_urls().len(), 1);
+}
+
+#[test]
+fn image_soft_tokens_ride_on_every_image_part() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("pixel.png");
+    std::fs::write(&path, [0x89u8, 0x50, 0x4e, 0x47]).expect("write");
+    let messages =
+        messages_json(&[turn("user", "what is this?", vec![path])], Some(560)).expect("json");
+    assert_eq!(
+        messages[0]["content"][0]["image_url"]["max_soft_tokens"],
+        560
+    );
+    let request = mlxcel::server::in_process::chat::chat_request_from_json(json!({
+        "model": "m",
+        "messages": messages,
+    }))
+    .expect("the server parses the parts");
+    assert_eq!(request.image_soft_tokens(), Ok(Some(560)));
 }
 
 #[test]
