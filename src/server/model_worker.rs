@@ -1656,6 +1656,7 @@ pub(crate) fn prepare_request_vlm_embeddings(
             prompt_tokens,
             images,
             audio,
+            None,
             cancelled,
             observability,
         )? {
@@ -1841,13 +1842,23 @@ pub(crate) fn prepare_request_vlm_embeddings(
 
 /// Process every server `input_audio` clip through Inkling's bounded host WAV
 /// pipeline, compact valid dMel rows, and optional image-first HMLP merge.
-fn prepare_inkling_audio_embeddings(
+///
+/// `cli_layout` is `None` for a server request: its prompt carries the
+/// ordered media markers the chat route renders, so it is re-tokenized into
+/// one placeholder per clip and merged with the `Ordered` layout. `mlxcel
+/// generate` renders its own prompt without those markers and passes the
+/// layout its prompt form needs instead (`Structured` after its chat
+/// template, `Plain` under `--no-chat-template`); the prompt tokens are then
+/// used as they are (issue #2173, the layouts the CLI used before).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_inkling_audio_embeddings(
     model: &LoadedModel,
     tokenizer: &MlxcelTokenizer,
     prompt: &str,
     prompt_tokens: &mut Vec<i32>,
     images: &[Vec<u8>],
     audio_data: &[Vec<u8>],
+    cli_layout: Option<crate::vlm_runtime::InklingAudioPromptLayout>,
     cancelled: &AtomicBool,
     observability: &BatchObservability,
 ) -> Result<Option<InputEmbeddings>> {
@@ -1883,25 +1894,35 @@ fn prepare_inkling_audio_embeddings(
         inkling.audio_token_id(),
     )
     .map_err(|error| audio_feature_error(error.to_string(), cancelled, observability))?;
-    let prompt_ids = crate::vlm_runtime::resolve_inkling_prompt_token_ids(tokenizer)
-        .map_err(|error| audio_feature_error(error.to_string(), cancelled, observability))?;
-    *prompt_tokens = tokenize_inkling_ordered_media_prompt(
-        prompt,
-        tokenizer.prompt_carries_bos(prompt),
-        prompt_ids,
-        token_ids,
-        inkling.image_token_id(),
-        inkling.audio_token_id(),
-        images.len(),
-        audio_data.len(),
-        |text, add_special| {
-            tokenizer
-                .encode(text, add_special)
-                .map(|tokens| tokens.into_iter().map(|token| token as i32).collect())
-                .map_err(|error| anyhow!("Failed to tokenize ordered Inkling prompt: {error}"))
-        },
-    )
-    .map_err(|error| audio_feature_error(error.to_string(), cancelled, observability))?;
+    let layout = match cli_layout {
+        Some(layout) => layout,
+        None => {
+            let prompt_ids = crate::vlm_runtime::resolve_inkling_prompt_token_ids(tokenizer)
+                .map_err(|error| {
+                    audio_feature_error(error.to_string(), cancelled, observability)
+                })?;
+            *prompt_tokens = tokenize_inkling_ordered_media_prompt(
+                prompt,
+                tokenizer.prompt_carries_bos(prompt),
+                prompt_ids,
+                token_ids,
+                inkling.image_token_id(),
+                inkling.audio_token_id(),
+                images.len(),
+                audio_data.len(),
+                |text, add_special| {
+                    tokenizer
+                        .encode(text, add_special)
+                        .map(|tokens| tokens.into_iter().map(|token| token as i32).collect())
+                        .map_err(|error| {
+                            anyhow!("Failed to tokenize ordered Inkling prompt: {error}")
+                        })
+                },
+            )
+            .map_err(|error| audio_feature_error(error.to_string(), cancelled, observability))?;
+            crate::vlm_runtime::InklingAudioPromptLayout::Ordered
+        }
+    };
     let decoded_images = if images.is_empty() {
         Vec::new()
     } else {
@@ -1913,7 +1934,7 @@ fn prepare_inkling_audio_embeddings(
         &decoded_images,
         &dmel,
         token_ids,
-        crate::vlm_runtime::InklingAudioPromptLayout::Ordered,
+        layout,
     )
     .map_err(|error| audio_feature_error(error.to_string(), cancelled, observability))?;
     tracing::info!(
@@ -3057,7 +3078,17 @@ fn prepare_request_video_embeddings(
     use crate::multimodal::video;
 
     if let LoadedModel::InklingVLM(inkling) = model {
-        return prepare_inkling_video_embeddings(inkling, tokenizer, prompt_tokens, images, videos);
+        let prompt_layout = crate::vlm_runtime::InklingVideoPromptLayout::Structured(
+            crate::vlm_runtime::resolve_inkling_prompt_token_ids(tokenizer)?,
+        );
+        return prepare_inkling_video_embeddings(
+            inkling,
+            tokenizer,
+            prompt_tokens,
+            images,
+            videos,
+            prompt_layout,
+        );
     }
 
     // Encoder-free Gemma 4 Unified routes to its own video path (issue #164):
@@ -3220,12 +3251,17 @@ fn prepare_request_video_embeddings(
 /// Resolve server `video_url` inputs into Inkling's adjacent-frame temporal
 /// slots. The fd-backed decode boundary is identical to the other server video
 /// families, so canonical-path validation cannot be raced after admission.
-fn prepare_inkling_video_embeddings(
+///
+/// `prompt_layout` is `Structured` for every chat-rendered prompt (the server
+/// and `mlxcel generate`'s template render) and `Plain` for `mlxcel generate
+/// --no-chat-template`, whose prompt has no message parts (issue #2173).
+pub(crate) fn prepare_inkling_video_embeddings(
     inkling: &crate::vision::InklingVlModel,
     tokenizer: &MlxcelTokenizer,
     prompt_tokens: &mut Vec<i32>,
     images: &[Vec<u8>],
     videos: &[crate::server::media::ResolvedVideo],
+    prompt_layout: crate::vlm_runtime::InklingVideoPromptLayout,
 ) -> Result<Option<InputEmbeddings>> {
     use crate::multimodal::video;
 
@@ -3268,9 +3304,6 @@ fn prepare_inkling_video_embeddings(
     } else {
         decode_request_images(images)?
     };
-    let prompt_layout = crate::vlm_runtime::InklingVideoPromptLayout::Structured(
-        crate::vlm_runtime::resolve_inkling_prompt_token_ids(tokenizer)?,
-    );
     let (embeddings, stats) = crate::vlm_runtime::compute_inkling_video_embeddings(
         inkling,
         prompt_tokens,

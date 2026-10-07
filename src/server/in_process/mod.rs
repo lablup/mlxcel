@@ -48,7 +48,7 @@ use anyhow::{Context, Result};
 use crate::server::batch::BatchObservability;
 use crate::server::startup::{
     build_server_config, detect_model_media_support, load_chat_front, resolve_prompt_cache_store,
-    warmup_model,
+    run_startup_warmup,
 };
 use crate::server::{
     ApiKeys, AppState, BatchMetrics, ModelMediaSupport, ModelProvider, ServerConfig,
@@ -103,7 +103,9 @@ impl InProcessServer {
         )
         .context("failed to start the server model worker")?;
         if startup.warmup {
-            warmup_model(&provider).context("server warmup request failed")?;
+            // `start_server`'s decision: the same family skips, and a failed
+            // warmup is logged, not fatal.
+            run_startup_warmup(&model_path, &provider);
         }
         let state = AppState::with_observability(
             Arc::new(provider),

@@ -3154,7 +3154,9 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
             .transpose()
             .map_err(|err| anyhow::anyhow!("--image-soft-tokens: {err}"))?;
         // The server's media preparation (issue #2173): the same per-family
-        // dispatch the model worker runs for a chat request with these bytes.
+        // dispatch the model worker runs for a chat request with these bytes,
+        // with Inkling audio and video kept on the layouts this prompt form
+        // used before (Plain under --no-chat-template).
         let vlm_embeddings = mlxcel::server::local_media::prepare_local_vlm_embeddings(
             &model,
             &tokenizer,
@@ -3166,6 +3168,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
                 videos: &args.generation.video,
                 fps: args.generation.fps,
                 image_soft_tokens,
+                no_chat_template: args.generation.no_chat_template,
             },
         )?;
         print_generation_preamble(&user_prompt)?;

@@ -32,6 +32,8 @@ use anyhow::{Result, anyhow};
 use super::InProcessServer;
 use crate::server::GenerationResult;
 use crate::server::batch::RequestPriority;
+use crate::server::config::PromptCacheRequestContext;
+use crate::server::reasoning_format::ReasoningFormat;
 use crate::server::routes::chat::submit_next_turn_warmup;
 use crate::server::routes::chat_generation::{
     ChatGeneration, admit_chat_request, prepare_chat_generation,
@@ -39,6 +41,7 @@ use crate::server::routes::chat_generation::{
 use crate::server::tool_calls;
 use crate::server::tool_calls::stream_filter::{FilterOutput, StreamFilter};
 use crate::server::types::{ChatCompletionRequest, CompletionRequest, ErrorResponse};
+use crate::server::{LiveSettings, ServerConfig, ServerGenerateOptions};
 
 /// A piece of a streamed assistant turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,6 +117,64 @@ impl TurnText {
             on_delta(ChatDelta::Content(text));
         }
     }
+}
+
+/// The reasoning the re-echo store (#2110) may keep for a finished turn. The
+/// streaming handler adds to its echo buffer only the reasoning it sent as
+/// `reasoning_content`, so under `--reasoning-format none` (thoughts stay in
+/// `content`) nothing is stored. The in-process turn always collects the
+/// reasoning channel for the terminal, so it applies the same rule here.
+fn echoed_reasoning(format: ReasoningFormat, reasoning: &str) -> &str {
+    if format.emits_reasoning_content() {
+        reasoning
+    } else {
+        ""
+    }
+}
+
+/// The parsed tool calls a turn reports: all of them, or only the function a
+/// `tool_choice` names, as the streaming handler emits them.
+fn select_tool_calls(
+    parsed: Vec<tool_calls::ParsedToolCall>,
+    specific: Option<&str>,
+) -> Vec<ChatTurnToolCall> {
+    parsed
+        .into_iter()
+        .filter(|call| specific.is_none_or(|name| call.name == name))
+        .map(|call| ChatTurnToolCall {
+            name: call.name,
+            arguments: call.arguments,
+        })
+        .collect()
+}
+
+/// Whether a turn's end updates server state for the next turn: the
+/// reasoning re-echo record (#2110) and the next-turn warm-up (#1144). Both
+/// follow the streaming handler, so only a turn that finished without being
+/// cancelled and without tool calls counts.
+fn records_turn_end(cancelled: bool, finish_reason: &str) -> bool {
+    !cancelled && finish_reason != "tool_calls"
+}
+
+/// The worker options for a raw completion, built as the `/v1/completions`
+/// route builds them: no tool-shaped prompt, no thinking priming (the prompt
+/// is not chat-rendered, so the model must open its own thinking block), and
+/// the prompt-cache context the caller resolved from the server-wide switch.
+fn completion_options(
+    request: &CompletionRequest,
+    config: &ServerConfig,
+    live: &LiveSettings,
+    prompt_cache_ctx: Option<PromptCacheRequestContext>,
+) -> ServerGenerateOptions {
+    let mut options = crate::server::routes::chat::build_generate_options_with_live(
+        &request.params,
+        config,
+        live,
+        false,
+    );
+    options.thinking_enter_block_on_start = false;
+    options.prompt_cache_ctx = prompt_cache_ctx;
+    options
 }
 
 fn passthrough(token: &str) -> FilterOutput {
@@ -224,17 +285,8 @@ impl InProcessServer {
                 let specific = request
                     .tool_choice
                     .as_ref()
-                    .and_then(|choice| choice.specific_function())
-                    .map(str::to_string);
-                calls = parsed
-                    .tool_calls
-                    .into_iter()
-                    .filter(|call| specific.as_deref().is_none_or(|name| call.name == name))
-                    .map(|call| ChatTurnToolCall {
-                        name: call.name,
-                        arguments: call.arguments,
-                    })
-                    .collect();
+                    .and_then(|choice| choice.specific_function());
+                calls = select_tool_calls(parsed.tool_calls, specific);
                 if !calls.is_empty() {
                     finish_reason = "tool_calls".to_string();
                 }
@@ -242,19 +294,15 @@ impl InProcessServer {
         }
 
         let cancelled = cancel.load(Ordering::Acquire);
-        // The reasoning re-echo record (#2110) and the next-turn warm-up
-        // (#1144) follow the streaming handler: a finished, non-tool turn only.
-        if !cancelled && finish_reason != "tool_calls" {
+        if records_turn_end(cancelled, &finish_reason) {
             let mut stored_reasoning = None;
+            let echoed = echoed_reasoning(state.config.reasoning_format, &text.reasoning);
             if let Some(scope) = echo_scope.as_ref()
-                && state.reasoning_echo.record(
-                    scope,
-                    &request.messages,
-                    &text.content,
-                    &text.reasoning,
-                )
+                && state
+                    .reasoning_echo
+                    .record(scope, &request.messages, &text.content, echoed)
             {
-                stored_reasoning = Some(text.reasoning.clone());
+                stored_reasoning = Some(echoed.to_string());
             }
             if let Some(ctx) = warmup_ctx.as_ref()
                 && !crate::server::prompt_cache::boundary_snapshot_disabled()
@@ -298,17 +346,12 @@ impl InProcessServer {
             anyhow::bail!(reason);
         }
         let live = state.live();
-        // The completions route's option build: no tool-shaped prompt, no
-        // thinking priming, and the server-wide prompt-cache switch.
-        let mut options = crate::server::routes::chat::build_generate_options_with_live(
-            &request.params,
+        let options = completion_options(
+            &request,
             &state.config,
             &live,
-            false,
+            crate::server::routes::chat::build_raw_prompt_cache_context(state, None),
         );
-        options.thinking_enter_block_on_start = false;
-        options.prompt_cache_ctx =
-            crate::server::routes::chat::build_raw_prompt_cache_context(state, None);
         let mut text = TurnText {
             raw: String::new(),
             content: String::new(),
@@ -340,3 +383,7 @@ impl InProcessServer {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "chat_tests.rs"]
+mod tests;

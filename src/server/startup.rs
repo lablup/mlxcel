@@ -1964,6 +1964,47 @@ fn initialize_server_logging(startup: &ServerStartupConfig) -> Result<()> {
     Ok(())
 }
 
+/// Why the startup text warmup does not run for a model of `model_type`, or
+/// `None` when it runs. Shared by `start_server` and the in-process server
+/// (issue #2173) so both skip the same families.
+pub(crate) fn startup_warmup_skip_reason(
+    model_type: Option<crate::models::ModelType>,
+) -> Option<&'static str> {
+    use crate::models::ModelType;
+    match model_type? {
+        // Nemotron VoiceChat (issues #1374, #1376) has no chat worker to warm;
+        // its `/v1/realtime` engine thread warms EAR-TTS when a session opens.
+        ModelType::NemotronVoiceChat => {
+            Some("Skipping text warmup for Nemotron VoiceChat (served on /v1/realtime)")
+        }
+        // Florence-2 (issue #1073) and Nemotron-Parse (issue #1369) run on
+        // their seq2seq workers, which reject anything but a task marker with
+        // exactly one image, so the text literal "Hello" would only log a
+        // spurious failure. They warm on their first real request instead.
+        ModelType::Florence2VLM | ModelType::NemotronParseVLM => {
+            Some("Skipping text warmup for image-task seq2seq model (Florence-2 / Nemotron-Parse)")
+        }
+        _ => None,
+    }
+}
+
+/// Run the startup one-token warmup for the chat model at `model_path`,
+/// unless [`startup_warmup_skip_reason`] says its family cannot take it. A
+/// failed warmup is logged and never fatal: the first real request pays the
+/// cost instead.
+pub(crate) fn run_startup_warmup(model_path: &Path, model_provider: &ModelProvider) {
+    let model_type = crate::models::get_model_type(model_path).ok();
+    if let Some(reason) = startup_warmup_skip_reason(model_type) {
+        tracing::info!("{reason}");
+        return;
+    }
+    tracing::info!("Warming up model...");
+    match warmup_model(model_provider) {
+        Ok(()) => tracing::info!("Warmup complete"),
+        Err(err) => tracing::warn!("Warmup failed (non-fatal): {}", err),
+    }
+}
+
 pub(crate) fn warmup_model(model_provider: &ModelProvider) -> Result<()> {
     model_provider.generate(
         "Hello".to_string(),
@@ -2946,19 +2987,6 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         Ok(crate::models::ModelType::NemotronVoiceChat)
     );
 
-    // Florence-2 (issue #1073): the encoder-decoder (seq2seq) family is
-    // served on its dedicated worker loop (`server/florence2_worker.rs`),
-    // which the model worker thread branches into after loading the
-    // checkpoint, before any decoder-only scheduler starts. The #856-era
-    // startup refusal is gone; the flag below only gates the text-only
-    // warmup, which cannot run against an image-task model.
-    // Nemotron-Parse (issue #1369) is an image-only seq2seq model served on
-    // its own worker too; a text warmup cannot run against it either.
-    let is_image_seq2seq = matches!(
-        crate::models::get_model_type(&startup.model_path),
-        Ok(crate::models::ModelType::Florence2VLM | crate::models::ModelType::NemotronParseVLM)
-    );
-
     // Issue #688 (M1/M2 hardening): disable CUDA graph capture for hazard-family
     // models (Gemma 4) here, on the main startup thread, before any generation or
     // pipeline worker is spawned and before the first GPU eval latches MLX's
@@ -3305,24 +3333,8 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         batch_observability.clone(),
     )?);
 
-    if startup.warmup && is_voicechat {
-        // No chat worker exists to warm, and the engine thread warms EAR-TTS
-        // itself when a session opens.
-        tracing::info!("Skipping text warmup for Nemotron VoiceChat (served on /v1/realtime)");
-    } else if startup.warmup && is_image_seq2seq {
-        // The warmup prompt is the text literal "Hello"; the Florence-2
-        // seq2seq worker rejects any request that is not a task marker with
-        // exactly one image, so a warmup attempt would only log a spurious
-        // failure. The worker warms on its first real request instead.
-        tracing::info!(
-            "Skipping text warmup for image-task seq2seq model (Florence-2 / Nemotron-Parse)"
-        );
-    } else if startup.warmup {
-        tracing::info!("Warming up model...");
-        match warmup_model(model_provider.as_ref()) {
-            Ok(()) => tracing::info!("Warmup complete"),
-            Err(err) => tracing::warn!("Warmup failed (non-fatal): {}", err),
-        }
+    if startup.warmup {
+        run_startup_warmup(&startup.model_path, model_provider.as_ref());
     }
 
     // Warn if operator requested a distinct /metrics port — not yet wired.
