@@ -44,12 +44,14 @@ See [Server features](docs/server-features.md) for the route and deployment map 
 
 ### Install with Homebrew
 
-The Homebrew formula installs the latest released `mlxcel` and `mlxcel-server` binaries on macOS and Linux:
+The Homebrew formula installs the latest released `mlxcel` and `mlxcel-server` binaries on macOS Apple Silicon:
 
 ```bash
 brew tap lablup/tap
 brew install lablup/tap/mlxcel
 ```
+
+Linux builds are CUDA-specific and are not published to the tap. See the [latest release](https://github.com/lablup/mlxcel/releases/latest) for the `mlxcel-linux-*-cuda13` archives, or [Build from source](#build-from-source).
 
 ### Run a model
 
