@@ -46,8 +46,9 @@
 //! # What each parity case covers
 //!
 //! * [`assert_single_sequence_parity`] — the scheduler's **single-sequence**
-//!   path. A lone request decodes via `decode_single_step` (`scheduler.rs`: `if
-//!   seq_ids.len() <= 1 { decode_single_step }`), i.e. single-sequence
+//!   path. A lone request decodes via `decode_single_step`
+//!   (`dispatch_sync_decode`: `if seq_ids.len() <= 1 { decode_single_step }`),
+//!   which runs `Engine::step` over a batch of one, i.e. the single-sequence
 //!   `model.forward`, whose pool intercept (`update_and_fetch` / `update`)
 //!   writes to and gathers from the pool.
 //! * [`assert_batched_decode_parity`] — the **batched** decode wiring (`B == 2`)
@@ -217,7 +218,7 @@ fn scheduler_paged_layout(num_layers: usize) -> SequenceStateLayout {
 
 /// Run prefill + `DECODE_STEPS` greedy decode steps via single-sequence
 /// `model.forward` (the scheduler's `execute_full_prefill` + `decode_single_step`
-/// path), returning each emitted token with the logit row that selected it. The
+/// path, whose decode is `Engine::step` at B=1), returning each emitted token with the logit row that selected it. The
 /// first trace row therefore compares the prefill terminal logits, and later
 /// rows compare the decode logits from the preceding step.
 fn run_single_sequence_trace(

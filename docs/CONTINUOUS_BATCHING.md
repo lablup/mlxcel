@@ -97,7 +97,8 @@ when a `--max-batch-size 1` run matches the CLI but the default server does not.
 it: it runs one prompt and sampling config through `CxxGenerator` and through
 the scheduler at B=1 with dense and with paged storage, and prints the first
 divergent token per pair. Epic #2166 ([ADR 0007](adr/0007-unified-batch-native-engine.md))
-removes the divergence by putting both paths on one engine.
+removes the divergence by putting both paths on one engine: the server runs on
+`Engine` since #2172, and the CLI generator follows in #2173.
 
 > Backend note (CUDA / Blackwell, e.g. GB10): batched decode used to be a
 > throughput wash on CUDA because the `M*B < 8` quantized matmul fell back to

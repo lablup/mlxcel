@@ -17,8 +17,8 @@ use super::*;
 /// A sequence's structured-output constraint as the mask hook of its
 /// per-row sampling step ([`RowSampler::draw`], #2169).
 ///
-/// Used by: `BatchScheduler::execute_batched_decode`,
-/// `BatchScheduler::decode_single_step`, `BatchScheduler::finish_prefill`
+/// Used by: `SequenceStepHooks::logit_mask` (`step_rows.rs`), which the engine
+/// step and the prefill completion both sample through
 pub(super) struct StructuredMask<'a>(pub(super) &'a SharedStructuredConstraint);
 
 /// The shared, lockable structured-output constraint a sequence carries.
