@@ -13,9 +13,50 @@
 // limitations under the License.
 
 use super::*;
+use crate::engine::{DirectEngine, DirectRequest, SpeculativeRunError};
+use crate::ffi;
+use crate::generate::{LanguageModel, SamplingConfig};
+use crate::layers::KVCache;
+use crate::speculative::prompt_lookup_drafter::PromptLookupDrafter;
 use crate::test_support::induction::{
     INDUCTION_MODELS, INDUCTION_VOCAB, InductionModel, lcg_tokens, sequential_reference,
 };
+use cxx::UniquePtr;
+
+/// Plain decoding on the engine's raw-completion client: the reference every
+/// lookup run must reproduce token for token.
+fn plain<M: LanguageModel>(
+    model: &M,
+    prompt: &[i32],
+    max_tokens: usize,
+    sampling: &SamplingConfig,
+) -> Vec<i32> {
+    DirectEngine::new(model, 0)
+        .run(prompt, max_tokens, sampling)
+        .expect("plain decoding runs")
+}
+
+/// Prompt lookup on the engine: the token-only round loop driving a
+/// [`PromptLookupDrafter`] under `config`, returning the tokens and the
+/// drafter's acceptance accounting.
+fn lookup<M: LanguageModel>(
+    model: &M,
+    config: PromptLookupConfig,
+    prompt: &[i32],
+    max_tokens: usize,
+    sampling: &SamplingConfig,
+) -> (Vec<i32>, PromptLookupStats) {
+    let mut drafter = PromptLookupDrafter::new(config);
+    let run = DirectEngine::new(model, 0)
+        .generate_with_drafter(
+            &DirectRequest::text(prompt, max_tokens, sampling),
+            &mut drafter,
+            config.max_draft,
+            |_| true,
+        )
+        .expect("prompt lookup runs");
+    (run.run.tokens, drafter.stats())
+}
 
 fn cfg(ngram_max: usize, ngram_min: usize, max_draft: usize) -> PromptLookupConfig {
     PromptLookupConfig {
@@ -286,28 +327,36 @@ fn loop_guard_stops_mid_block_where_plain_decoding_stops() {
         ..SamplingConfig::greedy()
     };
     let prompt = [1, 2, 3, 3];
-    let mut plain = crate::generate::CxxGenerator::new(1);
-    let expected = plain.generate(&ConstantModel, &prompt, 64, &sampling);
+    let expected = plain(&ConstantModel, &prompt, 64, &sampling);
     assert_eq!(
         expected,
         vec![3; 8],
         "plain decoding stops on the 8th repeat"
     );
 
-    let mut generator = PromptLookupGenerator::new(PromptLookupConfig::default());
-    let (tokens, _) = generator.generate(&ConstantModel, &prompt, 64, &sampling);
+    let (tokens, stats) = lookup(
+        &ConstantModel,
+        PromptLookupConfig::default(),
+        &prompt,
+        64,
+        &sampling,
+    );
     assert_eq!(tokens, expected);
     assert!(
-        generator.stats().accepted_draft_tokens > 0,
+        stats.accepted_draft_tokens > 0,
         "the run verified lookup blocks"
     );
 }
 
 #[test]
 fn without_the_loop_guard_lookup_runs_to_max_tokens() {
-    let mut generator = PromptLookupGenerator::new(PromptLookupConfig::default());
-    let (tokens, _) =
-        generator.generate(&ConstantModel, &[1, 2, 3, 3], 64, &SamplingConfig::greedy());
+    let (tokens, _) = lookup(
+        &ConstantModel,
+        PromptLookupConfig::default(),
+        &[1, 2, 3, 3],
+        64,
+        &SamplingConfig::greedy(),
+    );
     assert_eq!(tokens, vec![3; 64]);
 }
 
@@ -339,9 +388,8 @@ fn induction_parity(
                 cfg(3, 1, 7),
                 cfg(4, 2, 3),
                 // Six-token matches are rare in a random prompt and appear
-                // once the reply repeats itself, so the loop first pipelines a
-                // long run of plain rounds and then switches to verifying with
-                // a step still in flight.
+                // once the reply repeats itself, so the loop first runs a
+                // long run of plain rounds and then switches to verifying.
                 cfg(6, 6, 7),
                 PromptLookupConfig {
                     adaptive: false,
@@ -352,14 +400,12 @@ fn induction_parity(
                 .iter()
                 .map(|&base| PromptLookupConfig { policy, ..base })
             {
-                let mut generator = PromptLookupGenerator::new(config);
-                let (tokens, _) = generator.generate(model, &prompt, 96, sampling);
+                let (tokens, stats) = lookup(model, config, &prompt, 96, sampling);
                 assert_eq!(
                     tokens, expected,
                     "earliest={} seed {seed} {config:?}",
                     model.earliest
                 );
-                let stats = generator.stats();
                 total.rounds += stats.rounds;
                 total.drafted_rounds += stats.drafted_rounds;
                 total.paused_rounds += stats.paused_rounds;
@@ -373,9 +419,8 @@ fn induction_parity(
 }
 
 /// Both acceptance regimes showed up under `policy`: blocks that land and
-/// blocks that are trimmed, governor pauses long enough for the loop to
-/// pipeline, and, for [`DraftPolicy::Gated`] only, resumes on a confirmed
-/// proposal.
+/// blocks that are trimmed, governor pauses, and, for [`DraftPolicy::Gated`]
+/// only, resumes on a confirmed proposal.
 fn assert_both_regimes(policy: DraftPolicy, totals: &[PromptLookupStats; 2]) {
     for stats in totals {
         assert!(
@@ -387,17 +432,27 @@ fn assert_both_regimes(policy: DraftPolicy, totals: &[PromptLookupStats; 2]) {
             "no proposal was rejected, so no trim was exercised: {stats:?}"
         );
     }
-    let missing = &totals[1];
-    assert!(
-        missing.paused_rounds > 0,
-        "the missing model never paused the governor: {missing:?}"
-    );
     let confirmations: usize = totals.iter().map(|stats| stats.shadow_confirmations).sum();
     match policy {
-        DraftPolicy::Gated => assert!(
-            confirmations > 0,
-            "no paused gated governor ever resumed on a confirmed proposal: {totals:?}"
-        ),
+        // A gated governor pauses on its first miss while on probation, so
+        // the missing model always exercises the pause and the resume. The
+        // graded governor pauses only after three misses in a row; on the
+        // engine loop every proposal is looked up from the complete context
+        // (the old loop proposed from a context missing its in-flight token
+        // while pipelining), so the missing model's misses no longer cluster
+        // and its graded pause is not guaranteed here. The governor's own
+        // tests pin that pause.
+        DraftPolicy::Gated => {
+            let missing = &totals[1];
+            assert!(
+                missing.paused_rounds > 0,
+                "the missing model never paused the gated governor: {missing:?}"
+            );
+            assert!(
+                confirmations > 0,
+                "no paused gated governor ever resumed on a confirmed proposal: {totals:?}"
+            );
+        }
         _ => assert_eq!(confirmations, 0, "only a gated governor probes: {totals:?}"),
     }
 }
@@ -405,14 +460,13 @@ fn assert_both_regimes(policy: DraftPolicy, totals: &[PromptLookupStats; 2]) {
 /// The rollback contract: after every verify round the caches must hold
 /// exactly the emitted tokens, so a cache-dependent target produces plain
 /// decoding's reply token for token, through accepted blocks, rejected tails,
-/// and the pipelined plain rounds between them.
+/// and the plain rounds between them.
 #[test]
 fn rollback_keeps_a_cache_dependent_target_identical_to_plain_decoding() {
     let sampling = SamplingConfig::greedy();
     for policy in [DraftPolicy::Graded, DraftPolicy::Gated] {
         let totals = induction_parity(&sampling, policy, |model, prompt| {
-            let plain =
-                crate::generate::CxxGenerator::new(1).generate(model, prompt, 96, &sampling);
+            let plain = plain(model, prompt, 96, &sampling);
             assert_eq!(
                 plain,
                 sequential_reference(model, prompt, 96, &sampling),
@@ -438,8 +492,7 @@ fn rollback_matches_plain_decoding_under_a_repetition_penalty() {
     assert!(sampling.needs_token_history());
     for policy in [DraftPolicy::Graded, DraftPolicy::Gated] {
         let totals = induction_parity(&sampling, policy, |model, prompt| {
-            let plain =
-                crate::generate::CxxGenerator::new(1).generate(model, prompt, 96, &sampling);
+            let plain = plain(model, prompt, 96, &sampling);
             assert_eq!(
                 plain,
                 sequential_reference(model, prompt, 96, &sampling),
@@ -493,26 +546,36 @@ fn model_owned_sequence_state_is_refused_even_when_other_flags_allow_it() {
 }
 
 #[test]
-#[should_panic(expected = "trimmable external KV caches")]
 fn generate_refuses_a_model_without_external_caches() {
-    let mut generator = PromptLookupGenerator::new(PromptLookupConfig::default());
-    let _ = generator.generate(
-        &ModelOwnedStateModel,
-        &[1, 2, 3],
-        8,
-        &SamplingConfig::greedy(),
-    );
+    let mut drafter = PromptLookupDrafter::new(PromptLookupConfig::default());
+    let greedy = SamplingConfig::greedy();
+    let err = DirectEngine::new(&ModelOwnedStateModel, 0)
+        .generate_with_drafter(
+            &DirectRequest::text(&[1, 2, 3], 8, &greedy),
+            &mut drafter,
+            4,
+            |_| true,
+        )
+        .expect_err("a model without trimmable external caches is refused");
+    assert_eq!(err, SpeculativeRunError::NotTrimmable);
 }
 
 #[test]
-#[should_panic(expected = "mirostat or adaptive-p")]
 fn generate_refuses_a_sampler_with_feedback_state() {
     let sampling = SamplingConfig {
         mirostat: 2,
         ..SamplingConfig::with_temperature(0.8)
     };
-    let mut generator = PromptLookupGenerator::new(PromptLookupConfig::default());
-    let _ = generator.generate(&ConstantModel, &[1, 2, 3], 8, &sampling);
+    let mut drafter = PromptLookupDrafter::new(PromptLookupConfig::default());
+    let err = DirectEngine::new(&ConstantModel, 0)
+        .generate_with_drafter(
+            &DirectRequest::text(&[1, 2, 3], 8, &sampling),
+            &mut drafter,
+            4,
+            |_| true,
+        )
+        .expect_err("a feedback sampler is refused");
+    assert_eq!(err, SpeculativeRunError::SamplerFeedbackState);
 }
 
 /// Records the width of every forward and keeps the tokens in its cache, so
@@ -554,10 +617,18 @@ fn warmup_runs_every_verify_width_and_rolls_each_back() {
         widths: std::cell::RefCell::new(Vec::new()),
     };
     let prompt = [1, 2, 3, 4, 5];
-    let mut generator = PromptLookupGenerator::new(cfg(3, 2, 4));
-    generator.warm_up_verify_widths(&model, &prompt);
+    let mut client = DirectEngine::new(&model, 0);
+    client
+        .warm_up_verify_widths(&prompt, 4)
+        .expect("the warmup runs");
     assert_eq!(*model.widths.borrow(), vec![5, 2, 3, 4, 5]);
-    assert_eq!(generator.caches[0].offset, prompt.len() as i32);
+    // Every width was rolled back: a plain run afterwards prefills the whole
+    // prompt again on a fresh sequence and sees no leftover positions.
+    model.widths.borrow_mut().clear();
+    client
+        .run(&prompt, 1, &SamplingConfig::greedy())
+        .expect("plain run");
+    assert_eq!(*model.widths.borrow(), vec![5]);
 }
 
 #[test]
@@ -764,14 +835,17 @@ fn gated_shadow_probe_confirms_exactly_the_resumed_copy() {
         penalty_last_n: 8,
         ..SamplingConfig::greedy()
     };
-    // Pipelined plain rounds, and the synchronous path a history-reading
-    // sampler forces.
+    // The batched-argmax verify path, and the per-position sampler path a
+    // history-reading sampler forces.
     for sampling in [SamplingConfig::greedy(), penalty] {
-        let mut generator = PromptLookupGenerator::new(gated(7));
-        let (tokens, _) =
-            generator.generate(&model, &script[..prompt_len], expected.len(), &sampling);
+        let (tokens, stats) = lookup(
+            &model,
+            gated(7),
+            &script[..prompt_len],
+            expected.len(),
+            &sampling,
+        );
         assert_eq!(tokens, expected, "{sampling:?}");
-        let stats = generator.stats();
         assert_eq!(
             stats.shadow_confirmations, 1,
             "the resumed copy is confirmed once: {stats:?}"

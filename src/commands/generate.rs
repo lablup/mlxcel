@@ -1917,6 +1917,21 @@ pub(super) fn run_generation_mode(
             resolved_kind,
         );
 
+        // Deprecated since #2176: the classic draft-model loop is the last
+        // decode loop outside the engine. It is removed in the next minor
+        // release (see CHANGELOG, Unreleased); the engine-side speculative
+        // paths are `--draft-kind mtp`, `--draft-kind dflash` and
+        // `--prompt-lookup`.
+        eprintln!(
+            "WARNING: the classic draft-model speculative path (--draft-model without \
+             --draft-kind mtp or dflash) is deprecated and will be removed in the next minor \
+             release; use --draft-kind mtp or --draft-kind dflash with a matching drafter, or \
+             --prompt-lookup for drafter-free speculation."
+        );
+        tracing::warn!(
+            drafter = %draft_model_path.display(),
+            "classic SpeculativeGenerator path is deprecated (#2176)"
+        );
         let draft_num_layers = draft_model.num_layers();
         let main_num_layers = model.num_layers();
         // Axis B (B8): speculative decoding must apply the bias on the target
@@ -1989,10 +2004,11 @@ pub(super) fn validate_prompt_lookup_args(args: &GenerateArgs) -> Result<()> {
     Ok(())
 }
 
-/// Offline prompt-lookup speculative decoding (`--prompt-lookup`).
+/// Offline prompt-lookup speculative decoding (`--prompt-lookup`), on the
+/// engine's token-only speculative loop with the prompt-lookup drafter.
 ///
 /// Refuses the model families whose state cannot be rewound after a rejected
-/// block, and multimodal prompts, whose embeddings the generator cannot take.
+/// block, and multimodal prompts, whose embeddings the loop does not take.
 /// Runs one short warmup generation first, as `generate_standard` does, so the
 /// timed run does not pay for kernel compilation, then one forward at every
 /// verify width so the widths the warmup's own proposals missed are compiled
@@ -2021,32 +2037,38 @@ fn run_prompt_lookup(
         .validate()
         .map_err(|err| anyhow!("--prompt-lookup: {err}"))?;
 
-    let mut generator = mlxcel::PromptLookupGenerator::new(config)
-        .with_kv_cache_mode(kv_cache_mode)
-        .with_token_bias(token_bias);
+    // The engine's token-only speculative loop driving the prompt-lookup
+    // drafter (#2176): the same client plain `generate` runs, with the
+    // request's KV mode and token bias.
+    let mut client = raw_completion_client(model, kv_cache_mode, token_bias);
+    let mut drafter = mlxcel::PromptLookupDrafter::new(config);
     let warmup_tokens = args.generation.max_tokens.min(16);
-    let _ = generator.generate(model, prompt_tokens, warmup_tokens, sampling_config);
+    let warmup = DirectRequest::text(prompt_tokens, warmup_tokens, sampling_config);
+    client
+        .generate_with_drafter(&warmup, &mut drafter, config.max_draft, |_| true)
+        .map_err(|err| anyhow!("--prompt-lookup warmup failed: {err}"))?;
     // The warmup generation compiles only the verify widths its own proposals
     // used; a reply with nothing to copy uses none, and the timed run would
     // then pay each width's first-use cost mid-decode.
-    generator.warm_up_verify_widths(model, prompt_tokens);
+    client
+        .warm_up_verify_widths(prompt_tokens, config.max_draft)
+        .map_err(|err| anyhow!("--prompt-lookup verify-width warmup failed: {err}"))?;
+    let request = DirectRequest::text(prompt_tokens, args.generation.max_tokens, sampling_config);
     let start_time = Instant::now();
-    let (tokens, measured) = generator.generate(
-        model,
-        prompt_tokens,
-        args.generation.max_tokens,
-        sampling_config,
-    );
+    let run = client
+        .generate_with_drafter(&request, &mut drafter, config.max_draft, |_| true)
+        .map_err(|err| anyhow!("--prompt-lookup generation failed: {err}"))?;
     let total_time = start_time.elapsed();
+    let tokens = run.run.tokens;
     // Diagnostics go to stderr on their own line: stdout still holds the
     // echoed prompt without a trailing newline, and the reply follows it.
     eprintln!();
-    eprintln!("{}", generator.stats().summary_line(tokens.len()));
-    // `--profile` prints the prefill / decode split the generator measured,
-    // as the plain path does; otherwise the one-line rate covers the whole
+    eprintln!("{}", drafter.stats().summary_line(tokens.len()));
+    // `--profile` prints the prefill / decode split the loop measured, as
+    // the plain path does; otherwise the one-line rate covers the whole
     // call, prefill included, like `generate_standard`.
     let stats = if args.generation.profile {
-        measured
+        run.run.stats
     } else {
         generation_stats_from_duration(prompt_tokens.len(), tokens.len(), total_time)
     };

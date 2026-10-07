@@ -77,9 +77,9 @@ pub use mlxcel_core::generate;
 pub use mlxcel_core::generate::{CxxGenerator, GenerationStats, LanguageModel, SamplingConfig};
 pub use mlxcel_core::speculative::SpeculativeGenerator;
 pub use mlxcel_core::speculative::prompt_lookup::{
-    DraftPolicy, PromptLookupConfig, PromptLookupGenerator, prompt_lookup_unsupported_reason,
-    supports_prompt_lookup,
+    DraftPolicy, PromptLookupConfig, prompt_lookup_unsupported_reason, supports_prompt_lookup,
 };
+pub use mlxcel_core::speculative::prompt_lookup_drafter::PromptLookupDrafter;
 #[cfg(feature = "xla-diagnostics")]
 pub use multimodal::host_preprocessor::LlavaHostReferenceCapture;
 #[cfg(feature = "xla-iree")]

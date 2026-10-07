@@ -174,6 +174,10 @@ impl SpeculativeArgs {
                  InternalMtp drafter is auto-detected from the target \
                  checkpoint. Pass --draft-kind dflash or --draft-kind mtp."
             )),
+            "prompt-lookup" => Err(anyhow::anyhow!(
+                "--draft-kind=prompt-lookup takes no drafter checkpoint; pass \
+                 --prompt-lookup instead (see --prompt-lookup-* for its settings)."
+            )),
             other => Err(anyhow::anyhow!(
                 "--draft-kind={other:?} is not recognised; accepted values: {}",
                 user_selectable_kinds().join(", ")
@@ -184,12 +188,13 @@ impl SpeculativeArgs {
 
 /// Set of drafter kinds the CLI accepts. This is a subset of
 /// [`KNOWN_DRAFTER_KINDS`] that excludes `internal-mtp` because that
-/// variant is auto-detected, not user-selectable.
+/// variant is auto-detected, not user-selectable, and `prompt-lookup`,
+/// which has its own `--prompt-lookup` flag and takes no checkpoint.
 pub fn user_selectable_kinds() -> Vec<&'static str> {
     KNOWN_DRAFTER_KINDS
         .iter()
         .copied()
-        .filter(|k| *k != "internal-mtp")
+        .filter(|k| *k != "internal-mtp" && *k != "prompt-lookup")
         .collect()
 }
 

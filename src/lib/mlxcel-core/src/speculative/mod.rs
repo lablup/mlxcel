@@ -59,10 +59,11 @@
 //!   its residual resample, shared by every speculative verify path.
 //! - [`prompt_lookup`] — drafter-free speculation that proposes the tokens
 //!   following an earlier occurrence of the sequence's tail. See
-//!   [`prompt_lookup::PromptLookupGenerator`].
+//!   [`prompt_lookup_drafter::PromptLookupDrafter`].
 
 pub mod mtp;
 pub mod prompt_lookup;
+pub mod prompt_lookup_drafter;
 pub mod stochastic_accept;
 
 use crate::cache::can_trim_prompt_cache;

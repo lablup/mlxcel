@@ -46,6 +46,7 @@ use crate::{MlxArray, UniquePtr};
 mod direct;
 mod prefill;
 pub mod rows;
+mod speculative;
 
 pub use direct::{BareHooks, DirectEngine, DirectEngineError, DirectRequest, DirectRun};
 pub use prefill::{PrefillOutcome, PrefillStep, piece_input, trim_padded_prefill};
@@ -55,6 +56,7 @@ pub use rows::{
     row_biases, row_logits, sample_and_finish, sample_and_finish_row, shared_fused_params,
     tokens_to_host,
 };
+pub use speculative::{SpeculativeRounds, SpeculativeRun, SpeculativeRunError};
 
 /// A per-sequence engine failure.
 ///

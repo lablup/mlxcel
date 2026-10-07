@@ -200,6 +200,33 @@ impl<M: LanguageModel> DirectEngine<M> {
         self.engine.into_parts().0
     }
 
+    pub(super) fn engine_mut(&mut self) -> &mut Engine<M> {
+        &mut self.engine
+    }
+
+    pub(super) fn generation_stream(&self) -> Option<&UniquePtr<MlxThreadLocalStream>> {
+        self.generation_stream.as_ref()
+    }
+
+    /// Open a sequence under this client's KV mode.
+    pub(super) fn open_sequence(&mut self) -> Result<SequenceId, DirectEngineError> {
+        let id = self
+            .engine
+            .open(SequenceSpec::default())
+            .map_err(DirectEngineError::Open)?;
+        self.apply_kv_cache_mode(id);
+        Ok(id)
+    }
+
+    pub(super) fn close_sequence(&mut self, id: SequenceId) {
+        self.engine.close(id);
+    }
+
+    /// The fixed work between the first token and the decode loop.
+    pub(super) fn prepare_decode(&mut self, id: SequenceId, max_tokens: usize) {
+        self.prepare_turbo4_delegated_before_decode(id, max_tokens);
+    }
+
     /// Prefill `prompt_tokens` and decode up to `max_tokens` under
     /// `sampling`, returning the generated tokens.
     pub fn run(
@@ -232,11 +259,7 @@ impl<M: LanguageModel> DirectEngine<M> {
         let setup_start = Instant::now();
         install_thread_local_default_stream(self.generation_stream.as_ref());
         let sampling = self.compose_sampling(request.sampling);
-        let id = self
-            .engine
-            .open(SequenceSpec::default())
-            .map_err(DirectEngineError::Open)?;
-        self.apply_kv_cache_mode(id);
+        let id = self.open_sequence()?;
         let setup_ns = if profile_ttft {
             setup_start.elapsed().as_nanos()
         } else {
@@ -249,7 +272,10 @@ impl<M: LanguageModel> DirectEngine<M> {
 
     /// The effective sampling config: the caller's own non-empty bias wins,
     /// else the cached map is injected, else the config is borrowed as is.
-    fn compose_sampling<'a>(&self, sampling: &'a SamplingConfig) -> Cow<'a, SamplingConfig> {
+    pub(super) fn compose_sampling<'a>(
+        &self,
+        sampling: &'a SamplingConfig,
+    ) -> Cow<'a, SamplingConfig> {
         if self.token_bias.is_empty() || !sampling.token_bias.is_empty() {
             Cow::Borrowed(sampling)
         } else {
@@ -451,7 +477,7 @@ impl<M: LanguageModel> DirectEngine<M> {
 
     /// Every piece of the cold text plan the scheduler would build for this
     /// prompt, returning the `[1, 1, vocab]` logits of its last position.
-    fn prefill_text(
+    pub(super) fn prefill_text(
         &mut self,
         id: SequenceId,
         prompt_tokens: &[i32],

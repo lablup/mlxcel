@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Deprecated
+
+- The classic draft-model speculative path (`mlxcel generate --draft-model <dir>` without `--draft-kind mtp` or `--draft-kind dflash`, the `SpeculativeGenerator` loop) prints a deprecation notice and will be removed in the next minor release (v0.8.0). It is the last decode loop outside the batch-native engine (epic #2166, #2176); use `--draft-kind mtp` or `--draft-kind dflash` with a matching drafter, or `--prompt-lookup` for drafter-free speculation, which now runs on the engine.
+
+### Changed
+
+- `mlxcel generate`, `--profile`, `--prompt-lookup`, `mlxcel-bench-decode`, `mlxcel-bench-engine`'s CLI arm and `speculative_bench`'s baseline decode on the batch-native engine's raw-completion client (`mlxcel_core::engine::DirectEngine`), the same loop `mlxcel run` and the server run at B=1 (#2176). `scripts/bench_decode.sh` records the path in a new trailing `decode_path` CSV column. The per-token pipeline diagnostics `MLXCEL_PROFILE_PIPELINE`, `MLXCEL_PROFILE_PIPELINE_DETAIL`, `MLXCEL_TRACE_DTYPE`, `MLXCEL_TRACE_ASTYPE`, `MLXCEL_EXPORT_DECODE_DOT` and `MLXCEL_CAPTURE_DECODE` no longer apply to `generate`.
+
 ## [v0.7.0] - 2026-09-09
 
 ### llama-server b10621 compatibility, complete
