@@ -109,6 +109,9 @@ use std::time::{Duration, Instant};
 
 use common::{repo_binary_path, repo_model_dir};
 
+#[path = "speculative_parity/gemma4_batched.rs"]
+mod gemma4_batched;
+
 /// Fixed prompt submitted to both the speculative and the drafter-less
 /// server in the byte-equality phase. Deterministic content, no system
 /// prompt, so the only variable between the two runs is whether the
@@ -1546,88 +1549,98 @@ const _: () = {
 /// so the whole run stays on the uniform path) and compare against the B = 1
 /// adapter reference. Any mismatch here implicates the batched adapter's
 /// baseline mechanics rather than the divergent-round geometry.
+///
+/// Issue #2190: runs both row-wise pairs (31B, and the 12B, which takes the
+/// row-wise path on CUDA). The B = 1 linear adapter is decode-exact since
+/// #2185, so this is also the batched adapter's B = 1 decode-exactness gate.
 #[test]
-#[ignore = "real-model heavy diagnostic (Gemma-4-31B target + drafter)"]
+#[ignore = "real-model heavy diagnostic (Gemma-4-31B and 12B targets + drafters)"]
 fn b1_batched_baseline_probe() {
     use mlxcel::models::gemma4_mtp_target::{
         Gemma4MtpBatchedTargetAdapter, Gemma4MtpTargetAdapter,
     };
-    use mlxcel::{LoadedModel, initialize_runtime, load_model};
+    use mlxcel::{initialize_runtime, load_model};
     use mlxcel_core::drafter::{DrafterKind, load_drafter};
     use mlxcel_core::generate::SamplingConfig;
     use mlxcel_core::speculative::mtp::{MtpBatchedGenerator, MtpGenerator};
 
-    let pairing = &REACHABLE_PAIRINGS[1];
-    let (target_path, draft_path, present) = pairing_present(pairing);
-    if !present {
-        eprintln!("Skipping b1_batched_baseline_probe");
-        return;
-    }
     let _runtime = initialize_runtime();
-    let (loaded_target, _tok) = load_model(&target_path).expect("target model must load");
-    let wrapper: &mlxcel::models::Gemma4Wrapper = match &loaded_target {
-        LoadedModel::Gemma4(w) => w,
-        LoadedModel::Gemma4VLM(vlm) => &vlm.text_model,
-        _ => panic!("requires a Gemma 4 family target"),
-    };
-    let block_size = pairing.block_size as usize;
-    let sampling = SamplingConfig::greedy();
-    let max_tokens = 24_usize;
-    let prompts: Vec<Vec<i32>> = vec![
-        vec![2, 105, 2364, 107, 9259, 108],
-        vec![2, 105, 2364, 107, 1596, 108],
-        vec![2, 105, 2364, 107, 6176, 108],
-        vec![2, 105, 2364, 107, 3030, 108],
-    ];
     let mut failures = Vec::new();
-    for (row, prompt) in prompts.iter().enumerate() {
-        let seq_id = mlxcel_core::cache::SequenceId::from_raw(3000 + row as u64);
-        let adapter = Gemma4MtpTargetAdapter::new(wrapper, Some(seq_id));
-        let (mut drafter, _) =
-            load_drafter(&draft_path, Some(DrafterKind::Mtp)).expect("MTP drafter must load");
-        drafter
-            .bind(wrapper as &dyn mlxcel_core::generate::LanguageModel)
-            .expect("drafter bind");
-        let mut generator = MtpGenerator::new(adapter, drafter, block_size);
-        let no_cancel = std::sync::atomic::AtomicBool::new(false);
-        let logprobs_config = mlxcel_core::sampling::LogprobsConfig::default();
-        let (reference, _, _) = generator.generate(
-            prompt,
-            max_tokens,
-            &sampling,
-            &[],
-            &no_cancel,
-            &logprobs_config,
-        );
+    let mut ran = 0;
+    for pairing in [
+        &REACHABLE_PAIRINGS[1],
+        &REACHABLE_PAIRINGS[UNIFIED_12B_MTP_PAIRING],
+    ] {
+        let (target_path, draft_path, present) = pairing_present(pairing);
+        if !present {
+            eprintln!("Skipping b1_batched_baseline_probe for {}", pairing.name);
+            continue;
+        }
+        ran += 1;
+        mlxcel_core::synchronize_default();
+        mlxcel_core::clear_memory_cache();
+        let (loaded_target, _tok) = load_model(&target_path).expect("target model must load");
+        let wrapper = gemma4_text_wrapper(&loaded_target);
+        let block_size = pairing.block_size as usize;
+        let sampling = SamplingConfig::greedy();
+        let max_tokens = 24_usize;
+        let prompts: Vec<Vec<i32>> = vec![
+            vec![2, 105, 2364, 107, 9259, 108],
+            vec![2, 105, 2364, 107, 1596, 108],
+            vec![2, 105, 2364, 107, 6176, 108],
+            vec![2, 105, 2364, 107, 3030, 108],
+        ];
+        for (row, prompt) in prompts.iter().enumerate() {
+            let seq_id = mlxcel_core::cache::SequenceId::from_raw(3000 + row as u64);
+            let adapter = Gemma4MtpTargetAdapter::new(wrapper, Some(seq_id));
+            let (mut drafter, _) =
+                load_drafter(&draft_path, Some(DrafterKind::Mtp)).expect("MTP drafter must load");
+            drafter
+                .bind(wrapper as &dyn mlxcel_core::generate::LanguageModel)
+                .expect("drafter bind");
+            let mut generator = MtpGenerator::new(adapter, drafter, block_size);
+            let no_cancel = std::sync::atomic::AtomicBool::new(false);
+            let logprobs_config = mlxcel_core::sampling::LogprobsConfig::default();
+            let (reference, _, _) = generator.generate(
+                prompt,
+                max_tokens,
+                &sampling,
+                &[],
+                &no_cancel,
+                &logprobs_config,
+            );
+            mlxcel_core::generate::LanguageModel::release_sequence_state_by_id(wrapper, seq_id);
 
-        let batch_adapter = Gemma4MtpBatchedTargetAdapter::new(wrapper, 1);
-        let (mut batched_drafter, _) =
-            load_drafter(&draft_path, Some(DrafterKind::Mtp)).expect("drafter must load");
-        batched_drafter
-            .bind(wrapper as &dyn mlxcel_core::generate::LanguageModel)
-            .expect("batched drafter bind");
-        let mut batched_generator =
-            MtpBatchedGenerator::new(batch_adapter, batched_drafter, block_size);
-        let run = batched_generator
-            .run_batched(std::slice::from_ref(prompt), &sampling, max_tokens)
-            .expect("B=1 batched MTP run must succeed");
-        let got = &run.tokens[0];
-        let first_mismatch = got
-            .iter()
-            .zip(reference.iter())
-            .position(|(g, w)| g != w)
-            .or_else(|| (got.len() != reference.len()).then(|| got.len().min(reference.len())));
-        eprintln!(
-            "[b1-batched probe] row {row}: accept_lens {:?}\n  b1-batched ({}): {:?}\n  b1 ref     ({}): {:?}\n  first_mismatch: {:?}",
-            run.accept_lens[0],
-            got.len(),
-            got,
-            reference.len(),
-            reference,
-            first_mismatch,
-        );
-        if let Some(i) = first_mismatch {
-            failures.push(format!("row {row} mismatch at {i}"));
+            let batch_adapter = Gemma4MtpBatchedTargetAdapter::new(wrapper, 1);
+            let (mut batched_drafter, _) =
+                load_drafter(&draft_path, Some(DrafterKind::Mtp)).expect("drafter must load");
+            batched_drafter
+                .bind(wrapper as &dyn mlxcel_core::generate::LanguageModel)
+                .expect("batched drafter bind");
+            let mut batched_generator =
+                MtpBatchedGenerator::new(batch_adapter, batched_drafter, block_size);
+            let run = batched_generator
+                .run_batched(std::slice::from_ref(prompt), &sampling, max_tokens)
+                .expect("B=1 batched MTP run must succeed");
+            let got = &run.tokens[0];
+            let first_mismatch = got
+                .iter()
+                .zip(reference.iter())
+                .position(|(g, w)| g != w)
+                .or_else(|| (got.len() != reference.len()).then(|| got.len().min(reference.len())));
+            eprintln!(
+                "[b1-batched probe] {} row {row}: accept_lens {:?}\n  b1-batched ({}): {:?}\n  b1 ref     ({}): {:?}\n  first_mismatch: {:?}",
+                pairing.name,
+                run.accept_lens[0],
+                got.len(),
+                got,
+                reference.len(),
+                reference,
+                first_mismatch,
+            );
+            if let Some(i) = first_mismatch {
+                failures.push(format!("{} row {row} mismatch at {i}", pairing.name));
+            }
         }
     }
     assert!(
@@ -1635,6 +1648,17 @@ fn b1_batched_baseline_probe() {
         "B=1 batched baseline drift:\n{}",
         failures.join("\n")
     );
+    eprintln!("[b1-batched probe] PASS on {ran} pair(s)");
+}
+
+/// The text wrapper of a Gemma 4 family target (text, VLM or Unified).
+fn gemma4_text_wrapper(loaded: &mlxcel::LoadedModel) -> &mlxcel::models::Gemma4Wrapper {
+    match loaded {
+        mlxcel::LoadedModel::Gemma4(w) => w,
+        mlxcel::LoadedModel::Gemma4VLM(vlm) => &vlm.text_model,
+        mlxcel::LoadedModel::Gemma4Unified(unified) => &unified.text_model,
+        _ => panic!("requires a Gemma 4 family target"),
+    }
 }
 
 /// Issue #203 diagnostic v2: EQUAL-length forced-geometry probe. Row 0 runs

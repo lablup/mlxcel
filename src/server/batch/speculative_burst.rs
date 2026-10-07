@@ -2589,7 +2589,8 @@ fn run_mtp_burst_batched(
     let (tokens_per_row, decode_ms, recovered_drafter) = match ctx.model {
         LoadedModel::Gemma4(wrapper) => {
             let adapter =
-                Gemma4MtpBatchedTargetAdapter::new_with_block_size(wrapper, batch_size, block_size);
+                Gemma4MtpBatchedTargetAdapter::new_with_block_size(wrapper, batch_size, block_size)
+                    .with_prefill_chunk_size(ctx.prefill_chunk_size);
             drive_mtp_batched_generator(
                 adapter,
                 owned_drafter,
@@ -2601,7 +2602,8 @@ fn run_mtp_burst_batched(
         }
         LoadedModel::Gemma4VLM(vlm) => {
             let adapter =
-                Gemma4VLMtpBatchedTargetAdapter::new_with_block_size(vlm, batch_size, block_size);
+                Gemma4VLMtpBatchedTargetAdapter::new_with_block_size(vlm, batch_size, block_size)
+                    .with_prefill_chunk_size(ctx.prefill_chunk_size);
             drive_mtp_batched_generator(
                 adapter,
                 owned_drafter,
@@ -2614,7 +2616,8 @@ fn run_mtp_burst_batched(
         LoadedModel::Gemma4Unified(unified) => {
             let adapter = Gemma4UnifiedMtpBatchedTargetAdapter::new_with_block_size(
                 unified, batch_size, block_size,
-            );
+            )
+            .with_prefill_chunk_size(ctx.prefill_chunk_size);
             drive_mtp_batched_generator(
                 adapter,
                 owned_drafter,
