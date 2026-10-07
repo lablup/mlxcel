@@ -390,7 +390,9 @@ pub fn sample_token_optimized(
 /// Produces byte-identical logits to [`sample_token_optimized`] for the same
 /// history, so penalty-adjusted greedy sampling selects identical token ids.
 ///
-/// Used by: `BatchScheduler` decode steps, `CxxGenerator` decode loops
+/// Used by: [`crate::sampling_row_step::RowSampler`] (the CLI decode loops and
+/// the server's batched, single-step, and first-token sampling), and the
+/// prompt-lookup speculative loop
 pub fn sample_token_optimized_with_state(
     logits: &MlxArray,
     config: &SamplingConfig,
@@ -491,7 +493,8 @@ fn sample_token_optimized_core_full(
 /// This is what the native `/completion` route's `post_sampling_probs` view
 /// reports.
 ///
-/// Used by: `BatchScheduler` decode steps for `post_sampling_probs` requests
+/// Used by: [`crate::sampling_row_step::RowSampler`] when a server request asks
+/// for `post_sampling_probs`
 pub fn sample_token_with_state_and_distribution(
     logits: &MlxArray,
     config: &SamplingConfig,
@@ -1029,17 +1032,16 @@ pub fn config_supports_fused_batch(config: &SamplingConfig) -> bool {
 /// [`apply_token_bias_rows`] call in the same chain position the per-row
 /// sampler uses: after the last-position slice, before [`apply_row_filters`].
 ///
-/// Used by: `BatchScheduler::batched_decode_fused_params` (the synchronous
-/// fused branch and the lookahead pipeline, both of which apply the bias)
+/// A thin delegate to [`crate::sampling_row_step::RowSampler::fused_eligible`]
+/// (#2169), which derives the answer from the per-row step's own stage list.
+/// That includes the B9 counters rule: while the pre-bias suppression
+/// counters are on, a biased config is not eligible, because only the per-row
+/// sampler reads the pre-bias argmax.
+///
+/// Used by: [`config_supports_fused_batch`],
+/// [`row_supports_fused_batch_except_bias`]
 pub fn config_supports_fused_batch_except_bias(config: &SamplingConfig) -> bool {
-    !config.needs_token_history()
-        && config.xtc_probability <= 0.0
-        // #1485: mirostat carries per-sequence feedback state and replaces
-        // the chain; the extended chain (dynatemp / min_keep / adaptive-p)
-        // needs per-row Rust filter arithmetic the fused dispatch has no
-        // parameters for. Both must take the per-row sampler.
-        && config.effective_mirostat() == 0
-        && !config.needs_extended_chain()
+    crate::sampling_row_step::RowSampler::fused_eligible(config)
 }
 
 /// Per-row eligibility for the batched fused fast path.
@@ -1073,10 +1075,10 @@ pub fn row_supports_fused_batch(
 /// [`row_supports_fused_batch`] for callers that apply the row's token bias
 /// themselves (see [`config_supports_fused_batch_except_bias`]).
 ///
-/// The opt-in `MLXCEL_LANG_BIAS_COUNTERS` suppression counters read the
-/// pre-bias argmax back to the host on every step, which the pipelined decode
-/// path cannot afford, so a biased row goes back to the per-row sampler while
-/// they are enabled. Unbiased rows are unaffected either way.
+/// The sampler-stage half, including the opt-in `MLXCEL_LANG_BIAS_COUNTERS`
+/// rule (a biased row goes back to the per-row sampler while they are on), is
+/// [`crate::sampling_row_step::RowSampler::fused_eligible`]; this adds the
+/// per-row obligations that are not sampler stages.
 ///
 /// Used by: `BatchScheduler::batched_decode_fused_params`
 pub fn row_supports_fused_batch_except_bias(
@@ -1085,10 +1087,7 @@ pub fn row_supports_fused_batch_except_bias(
     needs_token_override: bool,
     needs_per_token_payload: bool,
 ) -> bool {
-    if !config.token_bias.is_empty() && crate::lang_bias_counters::enabled() {
-        return false;
-    }
-    config_supports_fused_batch_except_bias(config)
+    crate::sampling_row_step::RowSampler::fused_eligible(config)
         && !needs_logit_mask
         && !needs_token_override
         && !needs_per_token_payload
@@ -2096,10 +2095,19 @@ impl SamplerState {
     /// structures a penalty needs are maintained, so a repetition-only config
     /// never touches the count map and a frequency-only config never touches
     /// the sorted set.
+    ///
+    /// The aggregates serve only the full-history window
+    /// (`penalty_last_n < 0`): a positive window rebuilds over its slice and a
+    /// zero window disables the stage (see [`preprocess_penalty_stages`]), so
+    /// neither maintains them. `RowSampler` creates the state for every
+    /// history-reading config (#2169), and this keeps a windowed config from
+    /// absorbing a prompt and a history it never reads.
     pub fn for_config(config: &SamplingConfig) -> Self {
+        let full_history = config.penalty_last_n < 0;
         Self {
-            track_seen: config.repetition_penalty != 1.0,
-            track_counts: config.frequency_penalty != 0.0 || config.presence_penalty != 0.0,
+            track_seen: full_history && config.repetition_penalty != 1.0,
+            track_counts: full_history
+                && (config.frequency_penalty != 0.0 || config.presence_penalty != 0.0),
             ..Self::default()
         }
     }
@@ -2229,6 +2237,16 @@ impl SamplerState {
         {
             a.weighted_sum = orig_p + a.decay * a.weighted_sum;
             a.total_weight = 1.0 + a.decay * a.total_weight;
+        }
+    }
+
+    /// Confirm the last draw as emitted unchanged: [`Self::accept_token`] with
+    /// the sampled token adaptive-p parked as `pending`, without the caller
+    /// reading that token on the host. A no-op when no pair is pending (every
+    /// other config).
+    pub fn accept_pending_token(&mut self) {
+        if let Some((token, _)) = self.adaptive.as_ref().and_then(|a| a.pending) {
+            self.accept_token(token);
         }
     }
 }
@@ -3824,6 +3842,28 @@ mod tests {
         assert_eq!(s.seen_sorted, vec![7, 8]);
         assert_eq!(s.counts.get(&1), None);
         assert_eq!(s.counts.get(&7), Some(&1));
+    }
+
+    #[test]
+    fn sampler_state_skips_aggregates_outside_the_full_history_window() {
+        // A positive or zero penalty window never reads the incremental
+        // aggregates (#1436), so a state created for such a config (the
+        // per-row step creates one for every history-reading config, #2169)
+        // must not absorb the history into them.
+        for penalty_last_n in [8, 0] {
+            let cfg = SamplingConfig {
+                repetition_penalty: 1.2,
+                frequency_penalty: 0.5,
+                presence_penalty: 0.1,
+                penalty_last_n,
+                ..Default::default()
+            };
+            let mut s = SamplerState::for_config(&cfg);
+            s.sync(&[1, 2, 2, 3]);
+            assert_eq!(s.absorbed_len, 4, "window {penalty_last_n}");
+            assert!(s.seen_sorted.is_empty(), "window {penalty_last_n}");
+            assert!(s.counts.is_empty(), "window {penalty_last_n}");
+        }
     }
 
     #[test]

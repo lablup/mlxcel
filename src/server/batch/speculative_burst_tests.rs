@@ -179,7 +179,7 @@ fn make_test_sequence() -> (SequenceInfo, mpsc::Receiver<GenerateEvent>) {
         prefill_start: None,
         first_token_time: None,
         token_history: Vec::new(),
-        sampler_state: None,
+        sampler: Default::default(),
         merged_eos: Vec::new(),
         thinking: ThinkingState::disabled(),
         structured: None,

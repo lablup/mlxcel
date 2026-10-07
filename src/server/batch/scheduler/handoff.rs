@@ -348,6 +348,7 @@ impl BatchScheduler {
             .allocate_sequence_state()
             .map_err(|e| anyhow::anyhow!("prefill-role handoff: allocate sequence: {e}"))?;
         let decode_state = StreamingDecodeState::new(&self.tokenizer, &prompt_tokens);
+        let sampler = RowSampler::new(&sampling);
         let seq = SequenceInfo {
             retention: Default::default(),
             seq_id,
@@ -384,7 +385,7 @@ impl BatchScheduler {
             prefill_start: None,
             first_token_time: None,
             token_history: Vec::new(),
-            sampler_state: None,
+            sampler,
             merged_eos: Vec::new(),
             thinking,
             structured: None,
@@ -468,6 +469,7 @@ impl BatchScheduler {
         let decode_state = StreamingDecodeState::new(&self.tokenizer, &detok_seed);
         let prefill_offset = prompt_tokens.len();
 
+        let sampler = RowSampler::new(&sampling);
         let seq = SequenceInfo {
             retention: Default::default(),
             seq_id,
@@ -504,7 +506,7 @@ impl BatchScheduler {
             prefill_start: None,
             first_token_time: Some(Instant::now()),
             token_history,
-            sampler_state: None,
+            sampler,
             merged_eos,
             thinking,
             structured: None,

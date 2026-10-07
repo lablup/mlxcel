@@ -219,7 +219,7 @@ fn make_seq_with(
         prefill_start: None,
         first_token_time: None,
         token_history: Vec::new(),
-        sampler_state: None,
+        sampler: Default::default(),
         merged_eos: Vec::new(),
         thinking: crate::server::thinking_budget::ThinkingState::disabled(),
         structured: None,

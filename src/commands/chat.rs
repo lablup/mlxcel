@@ -72,6 +72,7 @@ use mlxcel::tokenizer::{MlxcelTokenizer, load_tokenizer};
 use mlxcel::{LanguageModel, SamplingConfig, Session, initialize_runtime_checked, select_backend};
 use mlxcel_core::cache::KVCacheMode;
 use mlxcel_core::sampling::TokenBiasMap;
+use mlxcel_core::sampling_token_bias::compose_token_bias;
 
 /// Triple-quote fence that opens / closes an ollama-style multiline input
 /// block.
@@ -324,14 +325,19 @@ pub fn run_chat(mut opts: ChatOptions) -> Result<()> {
 
     // issue #350: suppress this model's reserved multimodal placeholder ids
     // (audio / image / video span markers) in the interactive chat generator,
-    // mirroring `run_generation_mode` for the one-shot path. `CxxGenerator`'s
-    // `compose_sampling` injects this cached bias whenever the per-call sampling
-    // config carries no token bias of its own (the chat config's stays empty),
-    // so a placeholder id can never leak into a chat reply. Zero-cost for
-    // non-multimodal models: the suppressed set is empty, the bias map stays
-    // empty, and `apply_token_bias` short-circuits.
-    let mut output_suppression = TokenBiasMap::new();
-    output_suppression.suppress_tokens(&model.output_suppressed_token_ids());
+    // mirroring `run_generation_mode` for the one-shot path. The chat REPL has
+    // no request or language bias, so the shared composition (#2169) reduces
+    // to the suppression. `CxxGenerator`'s `compose_sampling` injects this
+    // cached bias whenever the per-call sampling config carries no token bias
+    // of its own (the chat config's stays empty), so a placeholder id can
+    // never leak into a chat reply. Zero-cost for non-multimodal models: the
+    // suppressed set is empty, the bias map stays empty, and
+    // `apply_token_bias` short-circuits.
+    let output_suppression = compose_token_bias(
+        TokenBiasMap::new(),
+        &TokenBiasMap::new(),
+        &model.output_suppressed_token_ids(),
+    );
 
     // One inference session for the whole chat (issue #448, ADR 0004). Under
     // default features `select_backend()` folds to MLX and the session wraps the
