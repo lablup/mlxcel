@@ -62,6 +62,7 @@ use crate::ffi::MlxArray;
 use crate::mla::MlaGeometry;
 use crate::mla::absorb::MlaAbsorbedProjections;
 use crate::mla::decode::absorbed_decode;
+use crate::mla::{MlaSplitPlan, absorbed_decode_split_kv};
 
 /// Bytes one token of the compressed-latent cache costs, per layer.
 ///
@@ -272,9 +273,15 @@ impl<'a> MlaLatentCache<'a> {
     /// rows, `mask` is the optional additive causal or padding mask. Returns
     /// `[B, H, L, v_head_dim]`.
     ///
-    /// Used by: the MLA families once they move onto the latent cache (#907
-    /// Stage 2); `mla::decode_tests` pins it against the decompressed
-    /// reference.
+    /// A single-token unmasked step takes the Stage 2 split-KV decode when
+    /// [`crate::mla::split_kv_enabled`] is on and its plan accepts the shape,
+    /// and Stage 1 [`absorbed_decode`] otherwise, the same order the model
+    /// forward ran before this entry existed.
+    ///
+    /// Used by: `models::deepseek_v2::Attention::forward_absorbed` (decode
+    /// steps; prefill up-projects the window through the model's `kv_b_proj`
+    /// and stays in the model); `mla::decode_tests` pins it against the
+    /// decompressed reference.
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn attend(
@@ -288,6 +295,23 @@ impl<'a> MlaLatentCache<'a> {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         let (ckv_all, kpe_all) = self.update_and_fetch(ckv, kpe);
+        let q_shape = crate::ffi::array_shape(q_nope);
+        if mask.is_none() && q_shape.len() == 4 && q_shape[2] == 1 && crate::mla::split_kv_enabled()
+        {
+            let plan = MlaSplitPlan::heuristic(
+                q_shape[0].max(0) as usize,
+                q_shape[1].max(0) as usize,
+                self.seq_len(),
+                crate::paged_v2::device_target_ctas(),
+            );
+            // A plan that declines falls through to Stage 1 rather than
+            // failing the step.
+            if let Ok(out) =
+                absorbed_decode_split_kv(q_nope, q_pe, &ckv_all, &kpe_all, proj, scale, &plan)
+            {
+                return out;
+            }
+        }
         absorbed_decode(q_nope, q_pe, &ckv_all, &kpe_all, proj, scale, mask)
     }
 

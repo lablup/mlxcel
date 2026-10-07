@@ -26,7 +26,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use super::*;
-use crate::cache::{PagedBlockPool, PagedKvLayout, PagedSequenceState, paged_batch_decode_stats};
+use crate::cache::{
+    KVCacheMode, PagedBlockPool, PagedKvLayout, PagedSequenceState, paged_batch_decode_stats,
+};
 use crate::dtype;
 
 const PAGE: usize = 32;
@@ -334,4 +336,64 @@ fn batched_paged_decode_is_one_pooled_launch() {
     );
     assert_eq!(c0.offset, 13);
     assert_eq!(c1.offset, 13);
+}
+
+/// Batched decode over Turbo4Asym caches takes the same dequant-first route a
+/// lone sequence takes (#2171): each row of [`attend_batched`] is bit-identical
+/// to that row's single-sequence dequant-first call, and stays within float
+/// noise of the full-dequant `update_and_fetch` plus SDPA pair the batched
+/// loop ran before. Pins the behavior change ADR 0008 records, so a future
+/// batched Turbo route cannot silently diverge from the single-sequence one.
+#[test]
+fn batched_turbo4_asym_rows_match_single_sequence_dequant_first() {
+    let mut rng = Rng::new(0x2174);
+    let mode = KVCacheMode::Turbo4Asym;
+    let mut c0 = KVCache::new_with_mode(mode);
+    let mut c1 = KVCache::new_with_mode(mode);
+    let mut s0 = KVCache::new_with_mode(mode);
+    let mut s1 = KVCache::new_with_mode(mode);
+    let mut f0 = KVCache::new_with_mode(mode);
+    let mut f1 = KVCache::new_with_mode(mode);
+    for (c, s, f) in [(&mut c0, &mut s0, &mut f0), (&mut c1, &mut s1, &mut f1)] {
+        let (q, k, v) = step(&mut rng, 1, 6);
+        c.attend(&q, ffi::copy(&k), ffi::copy(&v), SCALE, None);
+        s.attend(&q, ffi::copy(&k), ffi::copy(&v), SCALE, None);
+        reference(f, &q, k, v, None);
+    }
+
+    let (q, k, v) = step(&mut rng, 2, 1);
+    let mut single_rows = Vec::new();
+    let mut full_rows = Vec::new();
+    for (b, (s, f)) in [(&mut s0, &mut f0), (&mut s1, &mut f1)]
+        .into_iter()
+        .enumerate()
+    {
+        let q_b = slice_row(&q, b);
+        single_rows.push(s.update_and_turbo4_asym_dequant_sdpa_attention(
+            &q_b,
+            slice_row(&k, b),
+            slice_row(&v, b),
+            SCALE,
+            None,
+        ));
+        full_rows.push(reference(f, &q_b, slice_row(&k, b), slice_row(&v, b), None));
+    }
+    let single = crate::concatenate(&single_rows[0], &single_rows[1], 0);
+    let full = crate::concatenate(&full_rows[0], &full_rows[1], 0);
+
+    let mut caches: Vec<&mut KVCache> = vec![&mut c0, &mut c1];
+    let got = attend_batched(&q, &k, &v, &mut caches, SCALE, None);
+    let got = to_vec_f32(&got);
+    assert_eq!(
+        got,
+        to_vec_f32(&single),
+        "batched row left the dequant-first route"
+    );
+    let drift = relative_rms(&got, &to_vec_f32(&full));
+    assert!(
+        drift < 1e-2,
+        "dequant-first drifted {drift} from the full-dequant reference"
+    );
+    assert_eq!(c0.offset, 7);
+    assert_eq!(c1.offset, 7);
 }

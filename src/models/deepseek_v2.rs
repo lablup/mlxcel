@@ -25,9 +25,7 @@
 use crate::models::switch_layers::validate_expert_quantization_params;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::mla::{
-    self, MlaAbsorbedProjections, MlaDecodePath, MlaGeometry, MlaLatentCache, MlaSplitPlan,
-};
+use mlxcel_core::mla::{self, MlaAbsorbedProjections, MlaDecodePath, MlaGeometry, MlaLatentCache};
 use mlxcel_core::utils::{repeat_kv, silu, slice_axis};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, concatenate};
@@ -536,32 +534,17 @@ impl MLAAttention {
 
         let mut view = MlaLatentCache::wrap(cache, geometry)
             .expect("supports() was checked immediately before this wrap");
-        let (ckv_all, kpe_all) = view.update_and_fetch(ckv, k_pe);
-        let kv_len = view.seq_len();
 
         let output = if l == 1 {
-            // Stage 2 first when asked for, Stage 1 otherwise. A split plan that
-            // declines falls through to Stage 1 rather than failing the step.
-            let split = if mla::split_kv_enabled() {
-                let plan = MlaSplitPlan::heuristic(
-                    b.max(0) as usize,
-                    self.num_heads,
-                    kv_len,
-                    mlxcel_core::paged_v2::device_target_ctas(),
-                );
-                mla::absorbed_decode_split_kv(
-                    q_nope, &q_pe, &ckv_all, &kpe_all, proj, self.scale, &plan,
-                )
-                .ok()
-            } else {
-                None
-            };
-            split.unwrap_or_else(|| {
-                // Decode sees the whole cache, so no mask, matching the
-                // `causal_attention` call the decompressed path makes here.
-                mla::absorbed_decode(q_nope, &q_pe, &ckv_all, &kpe_all, proj, self.scale, None)
-            })
+            // The latent cache's own attention entry (#2171, ADR 0008): it
+            // appends this step's rows and runs Stage 2 split-KV when asked
+            // for, Stage 1 otherwise. Decode sees the whole cache, so no mask,
+            // matching the `causal_attention` call the decompressed path makes
+            // here.
+            view.attend(q_nope, &q_pe, ckv, k_pe, proj, self.scale, None)
         } else {
+            let (ckv_all, kpe_all) = view.update_and_fetch(ckv, k_pe);
+            let kv_len = view.seq_len();
             mla::stats::record(MlaDecodePath::AbsorbedPrefill);
             // Up-project the live latent window back into per-head K and V.
             // `kv_b_proj` wants `[B, S, kv_lora_rank]`, the shape before the
