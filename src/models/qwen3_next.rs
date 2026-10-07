@@ -27,6 +27,8 @@
 
 #[path = "qwen3_next_helpers.rs"]
 mod helpers;
+#[path = "qwen3_next_verify_rope.rs"]
+pub(crate) mod verify_rope;
 
 #[cfg(test)]
 #[path = "qwen3_next_helpers_tests.rs"]
@@ -589,6 +591,12 @@ pub(crate) struct Qwen3NextAttention {
     rope_base: f32,
     /// Optional interleaved MRoPE for VLM (Qwen3.5 VLM)
     pub(crate) mrope: Option<super::qwen3_vl::InterleavedMRoPE>,
+    /// Rotate a `B = 1` verify block's Q and K one row at a time, as classic
+    /// decode does, instead of in one call. Set once at construction from
+    /// `cuda_is_available()`: on CUDA, MLX rotates an `L = 1` row with its
+    /// `rope_single` kernel and a wider block with the general `rope` kernel,
+    /// and the two occasionally round a bf16 element differently (#2191).
+    pub(crate) verify_rope_rows: bool,
 }
 
 impl Qwen3NextAttention {
@@ -643,7 +651,10 @@ impl Qwen3NextAttention {
             position_ids,
             target_verify,
         );
-        self.o_proj.forward(&output)
+        let out = self.o_proj.forward(&output);
+        #[cfg(test)]
+        verify_rope::capture::record("o_proj", &out);
+        out
     }
 
     pub(crate) fn forward_hidden_with_position_ids(
@@ -746,6 +757,25 @@ impl Qwen3NextAttention {
                 super::qwen3_vl::apply_multimodal_rotary_pos_emb(&q_rot, &k_rot, &cos, &sin);
             queries = mlxcel_core::concatenate(&q_embed, &q_pass, -1);
             keys = mlxcel_core::concatenate(&k_embed, &k_pass, -1);
+        } else if target_verify && l > 1 && b == 1 && self.verify_rope_rows {
+            // Verify block on CUDA: rotate each row through the same `L = 1`
+            // call classic decode makes for that token, so the block's
+            // rotated K, which the KV cache keeps for every accepted token,
+            // is byte-identical to the chain's (#2191). `B > 1` blocks keep
+            // the block call: batched classic decode does not take the
+            // single-row kernel either.
+            queries = verify_rope::fast_rope_rows_like_decode(
+                &queries,
+                self.rope_dims,
+                self.rope_base,
+                offset,
+            );
+            keys = verify_rope::fast_rope_rows_like_decode(
+                &keys,
+                self.rope_dims,
+                self.rope_base,
+                offset,
+            );
         } else {
             // Standard RoPE with offset
             queries = mlxcel_core::fast_rope(
@@ -758,6 +788,12 @@ impl Qwen3NextAttention {
             );
             keys =
                 mlxcel_core::fast_rope(&keys, self.rope_dims, false, self.rope_base, 1.0, offset);
+        }
+
+        #[cfg(test)]
+        {
+            verify_rope::capture::record("q_rope", &queries);
+            verify_rope::capture::record("k_rope", &keys);
         }
 
         // Update KV cache
@@ -783,6 +819,9 @@ impl Qwen3NextAttention {
                 )
             }
         };
+
+        #[cfg(test)]
+        verify_rope::capture::record("attn", &attn_out);
 
         // Transpose back and reshape
         let output = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);
@@ -887,6 +926,7 @@ impl Qwen3NextAttention {
             rope_dims: config.rope_dims(),
             rope_base: config.rope_theta,
             mrope: None,
+            verify_rope_rows: mlxcel_core::cuda_is_available(),
         })
     }
 }

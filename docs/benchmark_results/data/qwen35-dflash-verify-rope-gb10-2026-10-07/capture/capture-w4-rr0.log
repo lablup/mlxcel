@@ -1,0 +1,80 @@
+
+running 1 test
+test models::qwen3_5::qwen3_5_rope_attribution_tests::post_rope_capture_bisect_on_the_real_transcript ... [2191] pos 198 round 18 row 3: first differing sub-op fa6:q_rope; logits 0 bytes; fa6:q_rope=1 fa7:q_rope=1
+[2191] pos 235 round 34 row 0: first differing sub-op fa1:q_rope; logits 0 bytes; fa1:q_rope=1
+[2191] pos 239 round 36 row 0: first differing sub-op fa2:q_rope; logits 0 bytes; fa2:q_rope=1
+[2191] pos 261 round 47 row 1: first differing sub-op fa0:k_rope; logits 0 bytes; fa0:k_rope=1
+[2191] pos 274 round 54 row 0: first differing sub-op fa0:attn; logits 0 bytes; fa0:attn=1
+[2191] pos 285 round 58 row 0: first differing sub-op fa1:q_rope; logits 0 bytes; fa1:q_rope=1
+[2191] pos 291 round 60 row 1: first differing sub-op fa0:attn; logits 236123 bytes; fa0:attn=1 fa0:o_proj=87 fa0:mlp=1354 fa1:q_rope=3237 fa1:k_rope=825 fa1:attn=2629 fa1:o_proj=2353 fa1:mlp=2450
+[2191] pos 292 round 60 row 2: first differing sub-op fa1:q_rope; logits 222977 bytes; fa1:q_rope=3044 fa1:k_rope=759 fa1:attn=2366 fa1:o_proj=2226 fa1:mlp=2372 fa2:q_rope=3568 fa2:k_rope=881 fa2:attn=3035
+[2191] pos 293 round 60 row 3: first differing sub-op fa1:q_rope; logits 227481 bytes; fa1:q_rope=3065 fa1:k_rope=717 fa1:attn=2543 fa1:o_proj=2241 fa1:mlp=2319 fa2:q_rope=3491 fa2:k_rope=835 fa2:attn=2676
+[2191] pos 294 round 61 row 0: first differing sub-op fa1:q_rope; logits 234523 bytes; fa1:q_rope=3337 fa1:k_rope=826 fa1:attn=2740 fa1:o_proj=2329 fa1:mlp=2432 fa2:q_rope=3595 fa2:k_rope=903 fa2:attn=2827
+[2191] pos 295 round 61 row 1: first differing sub-op fa1:q_rope; logits 233518 bytes; fa1:q_rope=3197 fa1:k_rope=757 fa1:attn=2689 fa1:o_proj=2321 fa1:mlp=2398 fa2:q_rope=3559 fa2:k_rope=837 fa2:attn=2636
+[2191] pos 296 round 61 row 2: first differing sub-op fa1:q_rope; logits 235583 bytes; fa1:q_rope=3167 fa1:k_rope=718 fa1:attn=2614 fa1:o_proj=2301 fa1:mlp=2403 fa2:q_rope=3629 fa2:k_rope=892 fa2:attn=3080
+[2191] pos 297 round 61 row 3: first differing sub-op fa1:q_rope; logits 237924 bytes; fa1:q_rope=3211 fa1:k_rope=764 fa1:attn=2585 fa1:o_proj=2311 fa1:mlp=2415 fa2:q_rope=3669 fa2:k_rope=881 fa2:attn=3195
+[2191] pos 298 round 62 row 0: first differing sub-op fa1:q_rope; logits 236444 bytes; fa1:q_rope=3164 fa1:k_rope=803 fa1:attn=2524 fa1:o_proj=2244 fa1:mlp=2345 fa2:q_rope=3512 fa2:k_rope=871 fa2:attn=3059
+[2191] pos 299 round 62 row 1: first differing sub-op fa1:q_rope; logits 239945 bytes; fa1:q_rope=3372 fa1:k_rope=791 fa1:attn=2828 fa1:o_proj=2284 fa1:mlp=2427 fa2:q_rope=3496 fa2:k_rope=848 fa2:attn=2857
+[2191] pos 300 round 62 row 2: first differing sub-op fa1:q_rope; logits 210117 bytes; fa1:q_rope=3397 fa1:k_rope=843 fa1:attn=2940 fa1:o_proj=2348 fa1:mlp=2489 fa2:q_rope=3646 fa2:k_rope=895 fa2:attn=3457
+[2191] pos 301 round 63 row 0: first differing sub-op fa1:q_rope; logits 251409 bytes; fa1:q_rope=3243 fa1:k_rope=815 fa1:attn=2804 fa1:o_proj=2319 fa1:mlp=2436 fa2:q_rope=3637 fa2:k_rope=921 fa2:attn=3160
+[2191] pos 302 round 63 row 1: first differing sub-op fa1:q_rope; logits 234011 bytes; fa1:q_rope=3051 fa1:k_rope=716 fa1:attn=2476 fa1:o_proj=2165 fa1:mlp=2342 fa2:q_rope=3366 fa2:k_rope=795 fa2:attn=2753
+[2191] pos 303 round 63 row 2: first differing sub-op fa1:q_rope; logits 230256 bytes; fa1:q_rope=3237 fa1:k_rope=790 fa1:attn=2712 fa1:o_proj=2269 fa1:mlp=2391 fa2:q_rope=3410 fa2:k_rope=835 fa2:attn=2751
+[2191] pos 304 round 63 row 3: first differing sub-op fa1:q_rope; logits 239333 bytes; fa1:q_rope=3212 fa1:k_rope=749 fa1:attn=2745 fa1:o_proj=2337 fa1:mlp=2370 fa2:q_rope=3451 fa2:k_rope=873 fa2:attn=3077
+[2191] pos 305 round 64 row 0: first differing sub-op fa1:q_rope; logits 232120 bytes; fa1:q_rope=3288 fa1:k_rope=793 fa1:attn=2843 fa1:o_proj=2299 fa1:mlp=2387 fa2:q_rope=3550 fa2:k_rope=866 fa2:attn=3132
+[2191] pos 306 round 64 row 1: first differing sub-op fa1:q_rope; logits 234804 bytes; fa1:q_rope=3310 fa1:k_rope=823 fa1:attn=3228 fa1:o_proj=2432 fa1:mlp=2439 fa2:q_rope=3424 fa2:k_rope=851 fa2:attn=3066
+[2191] pos 307 round 64 row 2: first differing sub-op fa1:q_rope; logits 255925 bytes; fa1:q_rope=3449 fa1:k_rope=859 fa1:attn=3262 fa1:o_proj=2381 fa1:mlp=2514 fa2:q_rope=3587 fa2:k_rope=898 fa2:attn=3323
+[2191] pos 308 round 64 row 3: first differing sub-op fa1:q_rope; logits 219387 bytes; fa1:q_rope=3324 fa1:k_rope=853 fa1:attn=3156 fa1:o_proj=2407 fa1:mlp=2440 fa2:q_rope=3600 fa2:k_rope=891 fa2:attn=3133
+[2191] pos 309 round 65 row 0: first differing sub-op fa1:q_rope; logits 212547 bytes; fa1:q_rope=3254 fa1:k_rope=807 fa1:attn=3072 fa1:o_proj=2257 fa1:mlp=2383 fa2:q_rope=3575 fa2:k_rope=870 fa2:attn=3256
+[2191] pos 310 round 65 row 1: first differing sub-op fa1:q_rope; logits 234301 bytes; fa1:q_rope=3303 fa1:k_rope=811 fa1:attn=3120 fa1:o_proj=2269 fa1:mlp=2398 fa2:q_rope=3524 fa2:k_rope=878 fa2:attn=3246
+[2191] pos 311 round 65 row 2: first differing sub-op fa1:q_rope; logits 228913 bytes; fa1:q_rope=3370 fa1:k_rope=823 fa1:attn=3015 fa1:o_proj=2292 fa1:mlp=2380 fa2:q_rope=3691 fa2:k_rope=916 fa2:attn=3601
+[2191] pos 312 round 66 row 0: first differing sub-op fa1:q_rope; logits 226624 bytes; fa1:q_rope=3078 fa1:k_rope=761 fa1:attn=2867 fa1:o_proj=2261 fa1:mlp=2381 fa2:q_rope=3295 fa2:k_rope=838 fa2:attn=3265
+[2191] pos 313 round 66 row 1: first differing sub-op fa1:q_rope; logits 232943 bytes; fa1:q_rope=3019 fa1:k_rope=745 fa1:attn=2411 fa1:o_proj=2225 fa1:mlp=2360 fa2:q_rope=3486 fa2:k_rope=873 fa2:attn=2807
+[2191] pos 314 round 66 row 2: first differing sub-op fa1:q_rope; logits 220572 bytes; fa1:q_rope=3365 fa1:k_rope=856 fa1:attn=3295 fa1:o_proj=2423 fa1:mlp=2528 fa2:q_rope=3568 fa2:k_rope=852 fa2:attn=3207
+[2191] pos 315 round 66 row 3: first differing sub-op fa1:q_rope; logits 222102 bytes; fa1:q_rope=3130 fa1:k_rope=786 fa1:attn=3137 fa1:o_proj=2386 fa1:mlp=2360 fa2:q_rope=3423 fa2:k_rope=843 fa2:attn=3031
+[2191] pos 316 round 67 row 0: first differing sub-op fa1:q_rope; logits 225283 bytes; fa1:q_rope=3311 fa1:k_rope=840 fa1:attn=3016 fa1:o_proj=2309 fa1:mlp=2423 fa2:q_rope=3575 fa2:k_rope=897 fa2:attn=3212
+[2191] pos 317 round 67 row 1: first differing sub-op fa1:q_rope; logits 215717 bytes; fa1:q_rope=3180 fa1:k_rope=761 fa1:attn=2603 fa1:o_proj=2274 fa1:mlp=2377 fa2:q_rope=3518 fa2:k_rope=888 fa2:attn=2624
+[2191] pos 318 round 67 row 2: first differing sub-op fa1:q_rope; logits 224186 bytes; fa1:q_rope=3172 fa1:k_rope=772 fa1:attn=2376 fa1:o_proj=2223 fa1:mlp=2369 fa2:q_rope=3463 fa2:k_rope=864 fa2:attn=2533
+[2191] pos 319 round 67 row 3: first differing sub-op fa0:attn; logits 226816 bytes; fa0:attn=1 fa0:o_proj=7 fa0:mlp=1102 fa1:q_rope=3193 fa1:k_rope=789 fa1:attn=2844 fa1:o_proj=2279 fa1:mlp=2382
+[2191] pos 320 round 68 row 0: first differing sub-op fa1:q_rope; logits 245416 bytes; fa1:q_rope=3212 fa1:k_rope=796 fa1:attn=2670 fa1:o_proj=2246 fa1:mlp=2383 fa2:q_rope=3441 fa2:k_rope=854 fa2:attn=2953
+[2191] pos 321 round 68 row 1: first differing sub-op fa1:q_rope; logits 241715 bytes; fa1:q_rope=3252 fa1:k_rope=780 fa1:attn=2600 fa1:o_proj=2223 fa1:mlp=2377 fa2:q_rope=3441 fa2:k_rope=842 fa2:attn=3025
+[2191] pos 322 round 68 row 2: first differing sub-op fa1:q_rope; logits 237862 bytes; fa1:q_rope=3250 fa1:k_rope=801 fa1:attn=3150 fa1:o_proj=2311 fa1:mlp=2458 fa2:q_rope=3636 fa2:k_rope=914 fa2:attn=3231
+[2191] pos 323 round 68 row 3: first differing sub-op fa1:q_rope; logits 235963 bytes; fa1:q_rope=3435 fa1:k_rope=831 fa1:attn=3223 fa1:o_proj=2366 fa1:mlp=2458 fa2:q_rope=3522 fa2:k_rope=895 fa2:attn=3384
+[2191] pos 324 round 69 row 0: first differing sub-op fa1:q_rope; logits 227473 bytes; fa1:q_rope=3290 fa1:k_rope=829 fa1:attn=3216 fa1:o_proj=2297 fa1:mlp=2408 fa2:q_rope=3747 fa2:k_rope=910 fa2:attn=3570
+[2191] pos 325 round 69 row 1: first differing sub-op fa1:q_rope; logits 226375 bytes; fa1:q_rope=3168 fa1:k_rope=783 fa1:attn=3158 fa1:o_proj=2301 fa1:mlp=2390 fa2:q_rope=3340 fa2:k_rope=827 fa2:attn=3266
+[2191] pos 326 round 69 row 2: first differing sub-op fa1:q_rope; logits 230346 bytes; fa1:q_rope=3192 fa1:k_rope=782 fa1:attn=3179 fa1:o_proj=2341 fa1:mlp=2245 fa2:q_rope=3487 fa2:k_rope=859 fa2:attn=3556
+[2191] pos 327 round 70 row 0: first differing sub-op fa1:q_rope; logits 228793 bytes; fa1:q_rope=3393 fa1:k_rope=816 fa1:attn=3170 fa1:o_proj=2359 fa1:mlp=2498 fa2:q_rope=3716 fa2:k_rope=941 fa2:attn=3600
+[2191] pos 328 round 70 row 1: first differing sub-op fa1:q_rope; logits 235942 bytes; fa1:q_rope=3009 fa1:k_rope=749 fa1:attn=3007 fa1:o_proj=2237 fa1:mlp=2297 fa2:q_rope=3479 fa2:k_rope=853 fa2:attn=3443
+[2191] pos 329 round 70 row 2: first differing sub-op fa1:q_rope; logits 215084 bytes; fa1:q_rope=3267 fa1:k_rope=820 fa1:attn=2961 fa1:o_proj=2248 fa1:mlp=2353 fa2:q_rope=3509 fa2:k_rope=863 fa2:attn=3029
+[2191] pos 330 round 70 row 3: first differing sub-op fa1:q_rope; logits 236895 bytes; fa1:q_rope=2968 fa1:k_rope=776 fa1:attn=2690 fa1:o_proj=2306 fa1:mlp=2311 fa2:q_rope=3466 fa2:k_rope=824 fa2:attn=2970
+[2191] pos 331 round 71 row 0: first differing sub-op fa1:q_rope; logits 215774 bytes; fa1:q_rope=3069 fa1:k_rope=750 fa1:attn=2918 fa1:o_proj=2345 fa1:mlp=2396 fa2:q_rope=3414 fa2:k_rope=872 fa2:attn=3232
+[2191] pos 332 round 72 row 0: first differing sub-op fa1:q_rope; logits 225671 bytes; fa1:q_rope=2913 fa1:k_rope=781 fa1:attn=2580 fa1:o_proj=2207 fa1:mlp=2333 fa2:q_rope=3414 fa2:k_rope=853 fa2:attn=2966
+[2191] pos 333 round 72 row 1: first differing sub-op fa1:q_rope; logits 231649 bytes; fa1:q_rope=3090 fa1:k_rope=723 fa1:attn=2549 fa1:o_proj=2291 fa1:mlp=2375 fa2:q_rope=3468 fa2:k_rope=872 fa2:attn=3131
+[2191] pos 334 round 72 row 2: first differing sub-op fa1:q_rope; logits 222903 bytes; fa1:q_rope=3221 fa1:k_rope=745 fa1:attn=2990 fa1:o_proj=2325 fa1:mlp=2367 fa2:q_rope=3613 fa2:k_rope=879 fa2:attn=3388
+[2191] pos 335 round 73 row 0: first differing sub-op fa1:q_rope; logits 211619 bytes; fa1:q_rope=3163 fa1:k_rope=746 fa1:attn=3062 fa1:o_proj=2290 fa1:mlp=2326 fa2:q_rope=3430 fa2:k_rope=856 fa2:attn=3253
+[2191] pos 336 round 73 row 1: first differing sub-op fa1:q_rope; logits 223357 bytes; fa1:q_rope=2970 fa1:k_rope=710 fa1:attn=2840 fa1:o_proj=2246 fa1:mlp=2322 fa2:q_rope=3373 fa2:k_rope=885 fa2:attn=3127
+[2191] pos 337 round 73 row 2: first differing sub-op fa1:q_rope; logits 219504 bytes; fa1:q_rope=3095 fa1:k_rope=765 fa1:attn=3029 fa1:o_proj=2280 fa1:mlp=2418 fa2:q_rope=3522 fa2:k_rope=860 fa2:attn=3431
+[2191] pos 338 round 73 row 3: first differing sub-op fa1:q_rope; logits 222052 bytes; fa1:q_rope=3391 fa1:k_rope=844 fa1:attn=3276 fa1:o_proj=2309 fa1:mlp=2453 fa2:q_rope=3626 fa2:k_rope=893 fa2:attn=3505
+[2191] pos 339 round 74 row 0: first differing sub-op fa1:q_rope; logits 210254 bytes; fa1:q_rope=3257 fa1:k_rope=809 fa1:attn=3245 fa1:o_proj=2276 fa1:mlp=2378 fa2:q_rope=3515 fa2:k_rope=848 fa2:attn=3429
+[2191] pos 340 round 74 row 1: first differing sub-op fa1:q_rope; logits 212707 bytes; fa1:q_rope=3755 fa1:k_rope=911 fa1:attn=3784 fa1:o_proj=2606 fa1:mlp=2641 fa2:q_rope=4280 fa2:k_rope=1075 fa2:attn=4229
+[2191] pos 341 round 74 row 2: first differing sub-op fa1:q_rope; logits 218107 bytes; fa1:q_rope=3062 fa1:k_rope=755 fa1:attn=3263 fa1:o_proj=2298 fa1:mlp=2323 fa2:q_rope=3367 fa2:k_rope=824 fa2:attn=3283
+[2191] pos 342 round 75 row 0: first differing sub-op fa1:q_rope; logits 214661 bytes; fa1:q_rope=3109 fa1:k_rope=725 fa1:attn=3284 fa1:o_proj=2325 fa1:mlp=2322 fa2:q_rope=3426 fa2:k_rope=832 fa2:attn=3431
+[2191] pos 343 round 75 row 1: first differing sub-op fa1:q_rope; logits 231094 bytes; fa1:q_rope=3101 fa1:k_rope=719 fa1:attn=3067 fa1:o_proj=2246 fa1:mlp=2347 fa2:q_rope=3480 fa2:k_rope=868 fa2:attn=3266
+[2191] pos 344 round 75 row 2: first differing sub-op fa1:q_rope; logits 231950 bytes; fa1:q_rope=3164 fa1:k_rope=765 fa1:attn=3118 fa1:o_proj=2311 fa1:mlp=2415 fa2:q_rope=3660 fa2:k_rope=905 fa2:attn=3525
+[2191] pos 345 round 75 row 3: first differing sub-op fa1:q_rope; logits 219313 bytes; fa1:q_rope=3191 fa1:k_rope=825 fa1:attn=3133 fa1:o_proj=2393 fa1:mlp=2408 fa2:q_rope=3577 fa2:k_rope=882 fa2:attn=3367
+[2191] pos 346 round 76 row 0: first differing sub-op fa1:q_rope; logits 230391 bytes; fa1:q_rope=3353 fa1:k_rope=811 fa1:attn=2962 fa1:o_proj=2300 fa1:mlp=2422 fa2:q_rope=3432 fa2:k_rope=871 fa2:attn=3365
+[2191] pos 347 round 76 row 1: first differing sub-op fa1:q_rope; logits 214315 bytes; fa1:q_rope=3033 fa1:k_rope=773 fa1:attn=2961 fa1:o_proj=2209 fa1:mlp=2346 fa2:q_rope=3482 fa2:k_rope=859 fa2:attn=3081
+[2191] pos 348 round 76 row 2: first differing sub-op fa1:q_rope; logits 214931 bytes; fa1:q_rope=3442 fa1:k_rope=891 fa1:attn=3231 fa1:o_proj=2438 fa1:mlp=2450 fa2:q_rope=3690 fa2:k_rope=899 fa2:attn=3175
+[2191] pos 349 round 76 row 3: first differing sub-op fa1:q_rope; logits 216119 bytes; fa1:q_rope=3198 fa1:k_rope=853 fa1:attn=3093 fa1:o_proj=2388 fa1:mlp=2380 fa2:q_rope=3564 fa2:k_rope=868 fa2:attn=3181
+[2191] pos 350 round 77 row 0: first differing sub-op fa1:q_rope; logits 229352 bytes; fa1:q_rope=3236 fa1:k_rope=818 fa1:attn=2983 fa1:o_proj=2320 fa1:mlp=2398 fa2:q_rope=3461 fa2:k_rope=883 fa2:attn=3335
+[2191] pos 351 round 77 row 1: first differing sub-op fa1:q_rope; logits 229182 bytes; fa1:q_rope=3239 fa1:k_rope=811 fa1:attn=2785 fa1:o_proj=2270 fa1:mlp=2375 fa2:q_rope=3524 fa2:k_rope=854 fa2:attn=3047
+[2191] pos 352 round 77 row 2: first differing sub-op fa1:q_rope; logits 226966 bytes; fa1:q_rope=3238 fa1:k_rope=795 fa1:attn=3014 fa1:o_proj=2238 fa1:mlp=2389 fa2:q_rope=3356 fa2:k_rope=855 fa2:attn=3118
+[2191] pos 353 round 77 row 3: first differing sub-op fa1:q_rope; logits 227978 bytes; fa1:q_rope=3241 fa1:k_rope=786 fa1:attn=3349 fa1:o_proj=2349 fa1:mlp=2348 fa2:q_rope=3508 fa2:k_rope=888 fa2:attn=3564
+[2191] pos 354 round 78 row 0: first differing sub-op fa1:q_rope; logits 221957 bytes; fa1:q_rope=3280 fa1:k_rope=819 fa1:attn=3395 fa1:o_proj=2327 fa1:mlp=2417 fa2:q_rope=3667 fa2:k_rope=921 fa2:attn=3484
+[2191] pos 355 round 78 row 1: first differing sub-op fa0:attn; logits 214552 bytes; fa0:attn=1 fa1:q_rope=3075 fa1:k_rope=755 fa1:attn=3032 fa1:o_proj=2276 fa1:mlp=2377 fa2:q_rope=3483 fa2:k_rope=860
+[2191] pos 356 round 78 row 2: first differing sub-op fa1:q_rope; logits 230782 bytes; fa1:q_rope=3296 fa1:k_rope=788 fa1:attn=3403 fa1:o_proj=2362 fa1:mlp=2404 fa2:q_rope=3724 fa2:k_rope=934 fa2:attn=3860
+[2191] pos 357 round 78 row 3: first differing sub-op fa1:q_rope; logits 224919 bytes; fa1:q_rope=3448 fa1:k_rope=803 fa1:attn=3454 fa1:o_proj=2404 fa1:mlp=2427 fa2:q_rope=3569 fa2:k_rope=891 fa2:attn=3633
+[2191] SUMMARY block 4: 67 of 200 kept rows differ in logit bytes; first differing sub-op over the first 200 rows: {"attn": 4, "k_rope": 1, "q_rope": 68}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9012 filtered out; finished in 17.39s
+

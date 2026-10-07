@@ -1,0 +1,10 @@
+
+running 2 tests
+test models::qwen3_5::qwen3_5_rope_attribution_tests::op_level_compiled_silu_block_versus_rows ... [2191] compiled_silu block-vs-rows: 0 differing bytes
+ok
+test models::qwen3_5::qwen3_5_rope_attribution_tests::op_level_fast_rope_block_versus_decode_rows ... [2191] op H=16 L=4 offset=37 seed=1: block differs in 1 bytes, per-row in 0
+[2191] op-level total: block-vs-decode 1 differing bytes, per-row-vs-decode 0
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 9011 filtered out; finished in 0.51s
+

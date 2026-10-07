@@ -1,0 +1,12 @@
+[gate] busy: ['rustc', 'Runner.Worker'] foreign_models: [] ci_job=True load1=3.78
+[gate] busy: ['cargo-clippy', 'rustc', 'Runner.Worker'] foreign_models: [] ci_job=True load1=4.98
+[gate] busy: ['cargo-clippy', 'cc1plus', 'cmake', 'rustc', 'Runner.Worker'] foreign_models: [] ci_job=True load1=7.36
+[gate] busy: ['cargo-clippy', 'cicc', 'cmake', 'nvcc', 'ptxas', 'rustc', 'Runner.Worker'] foreign_models: [] ci_job=True load1=6.83
+[gate] busy: ['cargo-clippy', 'cc1plus', 'cicc', 'cmake', 'fatbinary', 'gcc', 'nvcc', 'rustc', 'Runner.Worker'] foreign_models: [] ci_job=True load1=6.30
+[gate] busy: ['cargo-clippy', 'cicc', 'cmake', 'nvcc', 'ptxas', 'rustc', 'Runner.Worker'] foreign_models: [] ci_job=True load1=5.62
+[gate] busy: ['cargo-clippy', 'cc1plus', 'cicc', 'cmake', 'gcc', 'nvcc', 'rustc', 'Runner.Worker'] foreign_models: [] ci_job=True load1=5.31
+[gate] busy: ['cargo-clippy', 'cc1plus', 'cicc', 'cmake', 'fatbinary', 'gcc', 'nvcc', 'rustc', 'Runner.Worker'] foreign_models: [] ci_job=True load1=5.15
+[gate] busy: ['cargo-clippy', 'cc1plus', 'cmake', 'gcc', 'nvcc', 'ptxas', 'rustc', 'Runner.Worker'] foreign_models: [] ci_job=True load1=5.18
+[gate] busy: ['cargo-clippy', 'cc1plus', 'cicc', 'cmake', 'gcc', 'nvcc', 'Runner.Worker'] foreign_models: [] ci_job=True load1=4.78
+[gate] busy: ['cargo-clippy', 'clippy-driver', 'Runner.Worker'] foreign_models: [] ci_job=True load1=3.01
+[gate] busy: ['cargo-clippy', 'clippy-driver', 'Runner.Worker'] foreign_models: [] ci_job=True load1=3.44
