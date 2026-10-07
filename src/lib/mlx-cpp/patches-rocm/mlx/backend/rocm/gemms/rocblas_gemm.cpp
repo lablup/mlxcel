@@ -2,6 +2,7 @@
 
 #include "mlx/backend/rocm/gemms/rocblas_gemm.h"
 #include "mlx/backend/rocm/device.h"
+#include "mlx/backend/rocm/env_int.h"
 #include "mlx/backend/rocm/gemms/naive_gemm.h"
 #include "mlx/backend/rocm/kernel_utils.hpp"
 #include "mlx/types/half_types.h"
@@ -13,6 +14,7 @@
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 
 namespace mlx::core::rocm {
 
@@ -35,25 +37,21 @@ rocblas_datatype to_rocblas_dtype(Dtype dtype) {
   }
 }
 
-int parse_non_negative_int_env(const char* env_name, int default_value) {
-  const char* raw = std::getenv(env_name);
-  if (raw == nullptr || *raw == '\0') {
-    return default_value;
-  }
-
-  char* end = nullptr;
-  long value = std::strtol(raw, &end, 10);
-  if (end == raw || *end != '\0' || value < 0) {
-    return default_value;
-  }
-  return static_cast<int>(value);
-}
-
 int gemm_solution_index_f32(bool batched) {
-  static int single_index =
-      parse_non_negative_int_env("MLX_ROCM_GEMM_F32_SOLUTION_INDEX", 0);
-  static int batched_index = parse_non_negative_int_env(
-      "MLX_ROCM_GEMM_F32_BATCHED_SOLUTION_INDEX", -1);
+  static const int single_index = env_int_or_default(
+      "MLX_ROCM_GEMM_F32_SOLUTION_INDEX",
+      0,
+      0,
+      std::numeric_limits<int>::max(),
+      "a non-negative integer");
+  // -1: use the non-batched index.
+  static const int batched_index = env_int_or_default(
+      "MLX_ROCM_GEMM_F32_BATCHED_SOLUTION_INDEX",
+      -1,
+      0,
+      std::numeric_limits<int>::max(),
+      "a non-negative integer",
+      "MLX_ROCM_GEMM_F32_SOLUTION_INDEX");
   if (!batched) {
     return single_index;
   }
@@ -61,10 +59,20 @@ int gemm_solution_index_f32(bool batched) {
 }
 
 int gemm_solution_index_bf16(bool batched) {
-  static int single_index =
-      parse_non_negative_int_env("MLX_ROCM_GEMM_BF16_SOLUTION_INDEX", 0);
-  static int batched_index = parse_non_negative_int_env(
-      "MLX_ROCM_GEMM_BF16_BATCHED_SOLUTION_INDEX", -1);
+  static const int single_index = env_int_or_default(
+      "MLX_ROCM_GEMM_BF16_SOLUTION_INDEX",
+      0,
+      0,
+      std::numeric_limits<int>::max(),
+      "a non-negative integer");
+  // -1: use the non-batched index.
+  static const int batched_index = env_int_or_default(
+      "MLX_ROCM_GEMM_BF16_BATCHED_SOLUTION_INDEX",
+      -1,
+      0,
+      std::numeric_limits<int>::max(),
+      "a non-negative integer",
+      "MLX_ROCM_GEMM_BF16_SOLUTION_INDEX");
   if (!batched) {
     return single_index;
   }

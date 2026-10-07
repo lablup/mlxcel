@@ -42,9 +42,10 @@ static std::atomic<bool> g_graph_decode_mode{false};
 
 bool use_hip_graphs() {
   // The rebuild-every-eval graph-build path is a net loss vs eager (and the
-  // prefill variant segfaults on RDNA3.5). Decode uses build-once
-  // capture/replay (decode_capture_*) and prefill uses the WMMA GEMM — neither
-  // goes through here — so this path is permanently off.
+  // prefill variant segfaults on RDNA3.5), so it is permanently off. Decode
+  // uses build-once capture/replay (decode_capture_*), and prefill does not go
+  // through this path either; its GEMM route is chosen by select_qmm_route in
+  // quantized/qmm.hip.
   //
   // Train graphs: also hard-off until a TrainArena (see RocmAllocator
   // train_arena_*) wraps the step tape with stable addresses. Flipping this

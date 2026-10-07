@@ -2,6 +2,7 @@
 
 #include "mlx/backend/gpu/copy.h"
 #include "mlx/backend/rocm/device.h"
+#include "mlx/backend/rocm/env_int.h"
 #include "mlx/backend/rocm/gemms/naive_gemm.h"
 #include "mlx/backend/rocm/gemms/hipblaslt_gemm.h"
 #include "mlx/backend/rocm/gemms/rocblas_gemm.h"
@@ -431,20 +432,6 @@ inline bool parse_warp_kernel_env(const char* env_name, bool default_value) {
   return default_value;
 }
 
-inline int parse_positive_int_env(const char* env_name, int default_value) {
-  const char* raw = std::getenv(env_name);
-  if (raw == nullptr || *raw == '\0') {
-    return default_value;
-  }
-
-  char* end = nullptr;
-  long value = std::strtol(raw, &end, 10);
-  if (end == raw || *end != '\0' || value <= 0) {
-    return default_value;
-  }
-  return static_cast<int>(value);
-}
-
 inline size_t parse_non_negative_size_t_env(
     const char* env_name,
     size_t default_value) {
@@ -459,20 +446,6 @@ inline size_t parse_non_negative_size_t_env(
     return default_value;
   }
   return static_cast<size_t>(value);
-}
-
-inline int parse_non_negative_int_env(const char* env_name, int default_value) {
-  const char* raw = std::getenv(env_name);
-  if (raw == nullptr || *raw == '\0') {
-    return default_value;
-  }
-
-  char* end = nullptr;
-  long value = std::strtol(raw, &end, 10);
-  if (end == raw || *end != '\0' || value < 0) {
-    return default_value;
-  }
-  return static_cast<int>(value);
 }
 
 // Check if rocBLAS dequant fast path should be used
@@ -788,8 +761,13 @@ inline bool should_use_dequant_gemm_path(
     bool transpose,
     bool can_use_batched_qmv,
     rocm::Device& d) {
-  int env_threshold =
-      parse_positive_int_env("MLX_ROCM_QMM_DEQUANT_M_THRESHOLD", -1);
+  static const int env_threshold = rocm::env_int_or_default(
+      "MLX_ROCM_QMM_DEQUANT_M_THRESHOLD",
+      -1,
+      1,
+      std::numeric_limits<int>::max(),
+      "a positive integer",
+      "the built-in crossover");
   if (env_threshold > 0) {
     return M >= env_threshold;
   }
@@ -876,8 +854,13 @@ inline int wmma_qmm_env() {
 // tiers were not measured and keep the kernel at every row count unless
 // MLX_ROCM_WMMA_QMM_MAX_M sets a ceiling; MLX_ROCM_WMMA_QMM=1 removes it.
 inline int wmma_qmm_max_m(rocm::Device& d) {
-  static const int env_value =
-      parse_positive_int_env("MLX_ROCM_WMMA_QMM_MAX_M", -1);
+  static const int env_value = rocm::env_int_or_default(
+      "MLX_ROCM_WMMA_QMM_MAX_M",
+      -1,
+      1,
+      std::numeric_limits<int>::max(),
+      "a positive integer",
+      "the per-device default");
   if (env_value > 0) {
     return env_value;
   }
@@ -979,18 +962,13 @@ struct DequantCacheEntry {
 };
 
 inline int dequant_cache_capacity() {
-  static int capacity = []() {
-    const char* raw = std::getenv("MLX_ROCM_QMM_DEQUANT_CACHE_SIZE");
-    if (raw == nullptr || *raw == '\0') {
-      return 8;
-    }
-    char* end = nullptr;
-    long value = std::strtol(raw, &end, 10);
-    if (end == raw || *end != '\0' || value < 0) {
-      return 8;
-    }
-    return static_cast<int>(value);
-  }();
+  // 0 turns the cache off.
+  static const int capacity = rocm::env_int_or_default(
+      "MLX_ROCM_QMM_DEQUANT_CACHE_SIZE",
+      8,
+      0,
+      std::numeric_limits<int>::max(),
+      "a non-negative integer");
   return capacity;
 }
 
@@ -1001,10 +979,20 @@ inline size_t dequant_cache_max_bytes() {
 }
 
 inline int qmm_gemm_solution_index_f32(bool batched) {
-  static int single_index =
-      parse_non_negative_int_env("MLX_ROCM_GEMM_F32_SOLUTION_INDEX", 0);
-  static int batched_index = parse_non_negative_int_env(
-      "MLX_ROCM_GEMM_F32_BATCHED_SOLUTION_INDEX", -1);
+  static const int single_index = rocm::env_int_or_default(
+      "MLX_ROCM_GEMM_F32_SOLUTION_INDEX",
+      0,
+      0,
+      std::numeric_limits<int>::max(),
+      "a non-negative integer");
+  // -1: use the non-batched index.
+  static const int batched_index = rocm::env_int_or_default(
+      "MLX_ROCM_GEMM_F32_BATCHED_SOLUTION_INDEX",
+      -1,
+      0,
+      std::numeric_limits<int>::max(),
+      "a non-negative integer",
+      "MLX_ROCM_GEMM_F32_SOLUTION_INDEX");
   if (!batched) {
     return single_index;
   }
@@ -1012,10 +1000,20 @@ inline int qmm_gemm_solution_index_f32(bool batched) {
 }
 
 inline int qmm_gemm_solution_index_bf16(bool batched) {
-  static int single_index =
-      parse_non_negative_int_env("MLX_ROCM_GEMM_BF16_SOLUTION_INDEX", 0);
-  static int batched_index = parse_non_negative_int_env(
-      "MLX_ROCM_GEMM_BF16_BATCHED_SOLUTION_INDEX", -1);
+  static const int single_index = rocm::env_int_or_default(
+      "MLX_ROCM_GEMM_BF16_SOLUTION_INDEX",
+      0,
+      0,
+      std::numeric_limits<int>::max(),
+      "a non-negative integer");
+  // -1: use the non-batched index.
+  static const int batched_index = rocm::env_int_or_default(
+      "MLX_ROCM_GEMM_BF16_BATCHED_SOLUTION_INDEX",
+      -1,
+      0,
+      std::numeric_limits<int>::max(),
+      "a non-negative integer",
+      "MLX_ROCM_GEMM_BF16_SOLUTION_INDEX");
   if (!batched) {
     return single_index;
   }
@@ -3841,10 +3839,17 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
   // TILE_N is passed as a runtime argument — no template instantiation needed.
   auto hw_info = detect_rocm_hw_info(enc.device());
   auto arch_tuning = rocm::get_arch_tuning(hw_info);
-  int tile_n = arch_tuning.qmv_tile_n;
-  // Allow env override for benchmarking
-  if (auto env = std::getenv("MLX_ROCM_QMV_TILE_N"); env && *env)
-    tile_n = std::atoi(env);
+  // Env override for benchmarking; 0 (unset) keeps the per-arch value. The
+  // block is (warp, tile_n), and the tiled kernels' launch bounds allow at
+  // most TILE_N_MAX columns.
+  static const int env_tile_n = rocm::env_int_or_default(
+      "MLX_ROCM_QMV_TILE_N",
+      0,
+      1,
+      rocm::TILE_N_MAX,
+      "an integer from 1 to 32",
+      "the per-architecture default");
+  int tile_n = env_tile_n > 0 ? env_tile_n : arch_tuning.qmv_tile_n;
   // Ensure N alignment
   while (tile_n > 1 && N % tile_n != 0) tile_n /= 2;
 
@@ -6110,10 +6115,12 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
     const char* e = std::getenv("MLX_ROCM_GROUPED_PREFILL");
     return e && std::atoi(e) != 0;  // opt-in; WIP, regresses until kernel+GPU-grouping land
   }();
-  static const int kGroupedPrefillMinB = [] {
-    const char* e = std::getenv("MLX_ROCM_GROUPED_PREFILL_MIN_B");
-    return e ? std::atoi(e) : 64;
-  }();
+  static const int kGroupedPrefillMinB = rocm::env_int_or_default(
+      "MLX_ROCM_GROUPED_PREFILL_MIN_B",
+      64,
+      1,
+      std::numeric_limits<int>::max(),
+      "a positive integer");
   if (kGroupedPrefillEnabled && M == 1 && B >= kGroupedPrefillMinB && transpose_ &&
       E > 0 && batch_ndim == 1 &&
       mode_ == QuantizationMode::Affine && x.dtype() == bfloat16 &&
@@ -6177,12 +6184,20 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
       // routing imbalance, far fewer empty blocks than ceil(B/64), and crucially
       // NO max_run_len readback (that needed a full pipeline-draining
       // enc.synchronize() per gather_qmm call, which tanked small-input PP/s).
-      static const int gridx_mult = [] {
-        const char* e = std::getenv("MLX_GRIDX_MULT");
-        return e ? std::max(1, std::atoi(e)) : 4;
-      }();
+      static const int gridx_mult = rocm::env_int_or_default(
+          "MLX_GRIDX_MULT",
+          4,
+          1,
+          std::numeric_limits<int>::max(),
+          "a positive integer");
       const int avg_tiles = ((B + E - 1) / E + 63) / 64;
-      int grid_x = std::max(1, std::min((B + 63) / 64, avg_tiles * gridx_mult));
+      // In 64 bits: a large MLX_GRIDX_MULT must clamp to the tile count, not
+      // overflow.
+      int grid_x = std::max(
+          1,
+          static_cast<int>(std::min<int64_t>(
+              (B + 63) / 64,
+              static_cast<int64_t>(avg_tiles) * gridx_mult)));
       dim3 wmma_block(128, 1, 1);          // 4 warps
       dim3 wmma_grid(grid_x, (N + 127) / 128, E);
       enc.add_kernel_node_ex(

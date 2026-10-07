@@ -224,13 +224,30 @@ and `1` uses it wherever the shape fits. `MLX_ROCM_WMMA_QMM_MAX_M` is the row
 count from which such a GEMM instead goes to dequantize + hipBLASLt, where
 that route is enabled (`MLX_ROCM_QMM_DEQUANT_GEMM` not `0`) and is not the fp8
 path; it defaults to `128` on RDNA 3.5 (`gfx1150` to `gfx1152`) and to no
-ceiling elsewhere, a value that is not a positive integer keeps that default,
-and `MLX_ROCM_WMMA_QMM=1` ignores it. On gfx1151 dequantize +
+ceiling elsewhere, a value that is not an integer from 1 to 2147483647 is
+ignored with a stderr warning and keeps that default, and
+`MLX_ROCM_WMMA_QMM=1` ignores it. On gfx1151 dequantize +
 hipBLASLt was faster than the WMMA kernel on every bf16 shape measured from 128
 rows up, which raised bf16 prefill there by 5% (Qwen3-30B-A3B, whose experts do
 not take this path) to 2.9x (Gemma 3 4B at 2048 tokens); see
 `docs/benchmark_results/rocm-bf16-qmm-route-gfx1151-2026-09-30.md`
 (lablup/mlxcel#2081).
+The other integer knobs of the ROCm GEMM paths follow the same rule: a value
+that is not a whole decimal integer in the range below (for example `12abc`,
+`-1`, or `4294967297`, which used to wrap) prints one stderr line,
+`[ROCm] ignoring invalid NAME="value" (expected ...); using ...`, and the
+default applies (lablup/mlxcel#2152). An unset or empty variable takes the
+default silently. `MLX_ROCM_QMM_DEQUANT_M_THRESHOLD` (1 to 2147483647, default
+the built-in crossover) is the row count from which a quantized GEMM prefers
+dequantize + GEMM. `MLX_ROCM_QMM_DEQUANT_CACHE_SIZE` (0 to 2147483647, default
+8, `0` turns it off) is the number of dequantized weights kept for reuse.
+`MLX_ROCM_GEMM_F32_SOLUTION_INDEX` and `MLX_ROCM_GEMM_BF16_SOLUTION_INDEX` (0
+to 2147483647, default 0) pick a rocBLAS solution, and their `_BATCHED_`
+variants (same range) fall back to them. `MLX_ROCM_QMV_TILE_N` (1 to 32,
+default per architecture) sets the columns per block of the tiled qmv kernel,
+halved until it divides the output width. `MLX_ROCM_GROUPED_PREFILL_MIN_B`
+(default 64), `MLX_ROCM_MOE_SEG_MIN` (default 1) and `MLX_GRIDX_MULT` (default
+4) take 1 to 2147483647.
 
 ## OpenXLA / StableHLO backend variables
 
