@@ -34,6 +34,7 @@ use mlxcel::cli::turbo_args::{
     TurboKvCacheArgs, resolve_and_announce_kv_cache_mode, resolve_kv_cache_mode,
 };
 use mlxcel::sampling::{ResolvedSamplingParams, build_sampling_config};
+use mlxcel::server::chat_front::load_model_chat_template;
 use mlxcel::server::chat_template::{ChatMessage, ChatTemplateProcessor};
 // The long-prompt corpus is shared with `mlxcel-bench-engine`, so
 // `--prompt-tokens N` is the same prompt in both benchmarks (issue #2167).
@@ -158,6 +159,7 @@ fn apply_vlm_chat_template(
 
 fn load_cli_prompt(
     model_path: &Path,
+    tokenizer: &MlxcelTokenizer,
     user_prompt: &str,
     no_chat_template: bool,
     num_images: usize,
@@ -166,9 +168,9 @@ fn load_cli_prompt(
         return user_prompt.to_string();
     }
 
-    let processor = ChatTemplateProcessor::from_model_path(model_path)
-        .ok()
-        .flatten();
+    // The template front `mlxcel generate` and the server share (#2176), so
+    // the benchmark times the prompt they decode.
+    let processor = load_model_chat_template(model_path, tokenizer);
     processor.map_or_else(
         || user_prompt.to_string(),
         |processor| {
@@ -220,7 +222,13 @@ fn prepare_prompt(
     no_chat_template: bool,
     image_paths: &[PathBuf],
 ) -> Result<PreparedPrompt> {
-    let prompt = load_cli_prompt(model_path, user_prompt, no_chat_template, image_paths.len());
+    let prompt = load_cli_prompt(
+        model_path,
+        tokenizer,
+        user_prompt,
+        no_chat_template,
+        image_paths.len(),
+    );
     let mut tokens = tokenize_prompt(tokenizer, &prompt)?;
 
     if image_paths.is_empty() {

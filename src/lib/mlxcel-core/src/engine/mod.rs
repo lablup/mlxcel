@@ -43,9 +43,11 @@ use crate::generate::LanguageModel;
 use crate::sampling::{FusedSampleParams, TokenBiasMap, batched_fused_sample_tokens};
 use crate::{MlxArray, UniquePtr};
 
+mod direct;
 mod prefill;
 pub mod rows;
 
+pub use direct::{BareHooks, DirectEngine, DirectEngineError, DirectRequest, DirectRun};
 pub use prefill::{PrefillOutcome, PrefillStep, piece_input, trim_padded_prefill};
 use rows::fail_batch;
 pub use rows::{

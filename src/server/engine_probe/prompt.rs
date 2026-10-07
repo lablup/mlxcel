@@ -18,7 +18,7 @@
 //! and tokenized once here and the resulting ids are handed to the CLI
 //! generator and to the server engine alike. Two prompt shapes exist:
 //!
-//! - a chat prompt, rendered through the checkpoint's chat template the way
+//! - a chat prompt, rendered through the checkpoint's chat template exactly as
 //!   `mlxcel generate` renders a single user turn, plus the history-only
 //!   render the server's prompt cache uses to find the history boundary
 //!   (issue #1143);
@@ -30,7 +30,8 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use crate::server::chat_template::{ChatMessage, ChatTemplateProcessor};
+use crate::server::chat_front::load_model_chat_template;
+use crate::server::chat_template::ChatMessage;
 use crate::server::chat_template_kwargs::ChatTemplateKwargs;
 use crate::tokenizer::MlxcelTokenizer;
 
@@ -124,11 +125,10 @@ pub struct ChatPrompt {
 }
 
 /// Render `user_prompt` as one user turn through the checkpoint's chat
-/// template (or verbatim when `raw` is set or no template exists), the way
-/// `mlxcel-bench-decode` renders a text prompt. Unlike the server and
-/// `mlxcel generate`, it does not default `enable_thinking=true` for a
-/// tokenizer with think markers; that known divergence goes away in Phase 6
-/// (#2176, docs/CONTINUOUS_BATCHING.md "Token-exactness").
+/// template (or verbatim when `raw` is set or no template exists), through
+/// the one template front the server, `mlxcel generate` and
+/// `mlxcel-bench-decode` share (`server::chat_front`, #2176), so every arm of
+/// the harness compares the same prompt.
 pub fn render_chat_prompt(
     model_path: &Path,
     tokenizer: &MlxcelTokenizer,
@@ -138,9 +138,7 @@ pub fn render_chat_prompt(
     let processor = if raw {
         None
     } else {
-        ChatTemplateProcessor::from_model_path(model_path)
-            .ok()
-            .flatten()
+        load_model_chat_template(model_path, tokenizer)
     };
     let Some(processor) = processor else {
         return Ok(ChatPrompt {

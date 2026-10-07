@@ -242,7 +242,7 @@ fn trim_caches_to_actual_len(caches: &mut [KVCache], actual_len: usize, padded_l
 /// `[batch, padded_len, hidden]` by appending zero rows.
 ///
 /// Used by the VLM tile-alignment path to match the padded token sequence.
-fn pad_embeddings(embeds: &MlxArray, padded_len: usize) -> UniquePtr<MlxArray> {
+pub(crate) fn pad_embeddings(embeds: &MlxArray, padded_len: usize) -> UniquePtr<MlxArray> {
     let shape = ffi::array_shape(embeds);
     let batch = shape[0];
     let actual_seq = shape[1] as usize;

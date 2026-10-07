@@ -15,46 +15,45 @@
 //! The CLI decode path, called the way its two real callers call it.
 //!
 //! [`generate_like_cli`] is `mlxcel generate`'s text path without
-//! `--profile` (`generate_standard` in `src/commands/generate.rs`): an
-//! inference session from [`select_backend`], a one-token warmup, a reset,
-//! then [`Session::generate`] on `CxxGenerator`. [`bench_like_bench_decode`]
-//! is `mlxcel-bench-decode`'s warmup and measured pass, which time
-//! `CxxGenerator::generate_with_stats`, so the numbers it returns are the ones
-//! `scripts/bench_decode.sh` records.
-//!
-//! [`Session::generate`]: crate::backend::Session::generate
+//! `--profile` (`generate_standard` in `src/commands/generate.rs`): the
+//! raw-completion client of the engine over the borrowed model
+//! ([`mlxcel_core::engine::DirectEngine`], #2176), a one-token warmup, then
+//! the completion. [`bench_like_bench_decode`] is `mlxcel-bench-decode`'s
+//! warmup and measured pass, which time `CxxGenerator::generate_with_stats`
+//! until Phase 6's benchmark stage moves them onto the same client, so the
+//! numbers it returns are the ones `scripts/bench_decode.sh` records.
 
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use mlxcel_core::cache::KVCacheMode;
+use mlxcel_core::engine::DirectEngine;
 use mlxcel_core::generate::{GenerationStats, LanguageModel, SamplingConfig};
 use mlxcel_core::sampling::TokenBiasMap;
 
-use crate::backend::select_backend;
 use crate::{CxxGenerator, LoadedModel};
 
 /// Generate through the `mlxcel generate` text path and return the tokens.
 pub fn generate_like_cli(
     model: &LoadedModel,
-    model_path: &Path,
+    _model_path: &Path,
     prompt_tokens: &[i32],
     max_tokens: usize,
     sampling: &SamplingConfig,
     kv_cache_mode: KVCacheMode,
 ) -> Result<Vec<i32>> {
-    let mut session = select_backend().create_session(
-        model_path,
-        model.num_layers(),
-        kv_cache_mode,
-        TokenBiasMap::default(),
-    )?;
-    // Same one-token warmup and reset `generate_standard` runs before the
-    // generation it reports.
-    let _ = session.generate(model, prompt_tokens, 1, sampling);
-    session.reset_with_model(model);
-    Ok(session.generate(model, prompt_tokens, max_tokens, sampling))
+    let mut client = DirectEngine::with_default_chunk(model)
+        .with_kv_cache_mode(kv_cache_mode)
+        .with_token_bias(TokenBiasMap::default());
+    // Same one-token warmup `generate_standard` runs before the generation it
+    // reports; the sequence is closed in between, so nothing carries over.
+    client
+        .run(prompt_tokens, 1, sampling)
+        .context("warmup generation failed")?;
+    client
+        .run(prompt_tokens, max_tokens, sampling)
+        .context("generation failed")
 }
 
 /// Run `mlxcel-bench-decode`'s warmup pass and measured pass and return the

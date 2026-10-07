@@ -779,3 +779,103 @@ fn prefill_cohort_covers_every_row() {
         Err(EngineError::MissingSequence(_))
     ));
 }
+
+/// The raw-completion client (#2176) runs the same open, prefill, first
+/// token, step and close sequence by hand-driven engine calls, over an
+/// owned model and over a borrowed one, and closes its sequence afterwards.
+#[test]
+fn direct_engine_matches_a_hand_driven_sequence_and_closes_it() {
+    let prompt = [3, 5, 1];
+    let greedy = SamplingConfig::greedy();
+
+    // Hand-driven: the echo model repeats its input, so greedy decode from
+    // the last prompt token yields that token until the budget is spent.
+    let mut engine = engine();
+    let id = engine.open(SequenceSpec::default()).unwrap();
+    let mut row = Row::greedy(id);
+    row.max_tokens = 4;
+    let input = from_slice_i32(&prompt, &[1, 3]);
+    let outcome = engine
+        .prefill(&PrefillStep {
+            seq_id: id,
+            input: &input,
+            embeddings: None,
+            mask: None,
+            last_pos: 2,
+            trim_excess: 0,
+            eval: false,
+        })
+        .unwrap();
+    engine.complete_prefill(&outcome.logits, &mut row.row());
+    while row.generated.len() < 4 {
+        let last = *row.generated.last().unwrap();
+        let input = from_slice_i32(&[last], &[1, 1]);
+        engine
+            .step(
+                &StepBatch {
+                    seq_ids: &[id],
+                    input: &input,
+                },
+                &mut [row.row()],
+            )
+            .unwrap();
+    }
+    let expected = row.generated.clone();
+    assert_eq!(expected, vec![1, 1, 1, 1]);
+
+    let mut owned = DirectEngine::new(EchoModel::new(), 0);
+    let mut seen = Vec::new();
+    let run = owned
+        .generate(&DirectRequest::text(&prompt, 4, &greedy), |t| {
+            seen.push(t);
+            true
+        })
+        .unwrap();
+    assert_eq!(run.tokens, expected);
+    assert_eq!(seen, expected, "every appended token reaches the callback");
+    assert_eq!(run.stats.generated_tokens, 4);
+    assert_eq!(run.stats.prompt_tokens, 3);
+    assert_eq!(
+        owned.model().single_calls.get(),
+        4,
+        "one prefill plus three steps"
+    );
+
+    let model = EchoModel::new();
+    let mut borrowed = DirectEngine::new(&model, 0);
+    assert_eq!(borrowed.run(&prompt, 4, &greedy).unwrap(), expected);
+    assert_eq!(model.single_calls.get(), 4);
+    // A second run starts from a fresh sequence: same output, no leftover.
+    assert_eq!(borrowed.run(&prompt, 4, &greedy).unwrap(), expected);
+    assert_eq!(borrowed.into_model().single_calls.get(), 8);
+}
+
+/// The callback can stop a run early, and an EOS token is neither stored
+/// nor delivered.
+#[test]
+fn direct_engine_honors_the_callback_and_withholds_eos() {
+    let greedy = SamplingConfig::greedy();
+    let mut client = DirectEngine::new(EchoModel::new(), 0);
+    let mut seen = Vec::new();
+    let run = client
+        .generate(&DirectRequest::text(&[2, 4], 10, &greedy), |t| {
+            seen.push(t);
+            seen.len() < 2
+        })
+        .unwrap();
+    assert_eq!(run.tokens, vec![4, 4]);
+    assert_eq!(seen, vec![4, 4]);
+    assert_eq!(client.model().single_calls.get(), 2);
+
+    // The echo model's EOS is 7: a prompt ending in it finishes at once.
+    let mut seen = Vec::new();
+    let run = client
+        .generate(&DirectRequest::text(&[7], 10, &greedy), |t| {
+            seen.push(t);
+            true
+        })
+        .unwrap();
+    assert!(run.tokens.is_empty());
+    assert!(seen.is_empty());
+    assert_eq!(client.model().single_calls.get(), 3, "the prefill only");
+}

@@ -49,6 +49,7 @@ use mlxcel::{
     vlm_runtime::prepared_embedding_refs,
 };
 use mlxcel_core::cache::KVCacheMode;
+use mlxcel_core::engine::{DirectEngine, DirectRequest};
 use mlxcel_core::generation_policy::{
     initial_token_history, merged_eos_token_ids, seed_rng_if_needed,
 };
@@ -904,33 +905,14 @@ fn load_cli_prompt(
     no_chat_template: bool,
     media: &CliPromptMedia,
 ) -> Result<String> {
+    // The template front the server renders with (`server::chat_front`,
+    // #2176): the checkpoint's template with the `enable_thinking` default a
+    // think-marker tokenizer gets (mlx-lm PR #1114), except for a Gemma 4
+    // template that wants thinking off (issue #686).
     let processor = if no_chat_template {
         None
     } else {
-        let mut processor = ChatTemplateProcessor::from_model_path(model_path)
-            .ok()
-            .flatten();
-        // CLI/server parity (upstream mlx-lm PR #1114): a tokenizer with a
-        // recognized think-marker pair defaults `enable_thinking=true`.
-        // Without this, templates that branch on `enable_thinking is defined
-        // and enable_thinking is false` (Qwen3 family) render an empty
-        // `<think>\n\n</think>` block; models not trained with that block
-        // (e.g. the Qwen3-Omni Instruct thinker) emit an immediate
-        // end-of-text after it.
-        //
-        // Exception (issue #686): the Gemma-4 thinking-channel template's
-        // thinking-OFF branch already renders a well-formed CLOSED priming
-        // scaffold that makes the model answer directly, matching
-        // transformers' no-`enable_thinking` default. Forcing thinking on there
-        // instead yields a bare `<|turn>model\n` that greedy-collapses to
-        // `<pad>`, so keep its default at false.
-        if let Some(p) = processor.as_mut()
-            && tokenizer.infer_thinking_markers().has_thinking()
-            && !p.wants_thinking_default_off()
-        {
-            p.set_default_enable_thinking(true);
-        }
-        processor
+        mlxcel::server::chat_front::load_model_chat_template(model_path, tokenizer)
     };
 
     resolve_cli_prompt(user_prompt, no_chat_template, processor.as_ref(), media)
@@ -1391,37 +1373,46 @@ fn print_generation_result(
     Ok(())
 }
 
-fn generate_standard<M: LanguageModel>(
+/// The raw-completion client `mlxcel generate` decodes on (ADR 0007, #2176):
+/// an `Engine` over the borrowed model, one sequence, the request's KV mode and
+/// token bias. The one chunk policy (`MLXCEL_PREFILL_CHUNK`) sizes its prefill
+/// pieces, as it does for the server.
+fn raw_completion_client<M: LanguageModel>(
     model: &M,
-    model_path: &Path,
-    prompt_tokens: &[i32],
-    max_tokens: usize,
-    sampling_config: &SamplingConfig,
-    profile: bool,
     kv_cache_mode: KVCacheMode,
     token_bias: TokenBiasMap,
+) -> DirectEngine<&M> {
+    DirectEngine::with_default_chunk(model)
+        .with_kv_cache_mode(kv_cache_mode)
+        .with_token_bias(token_bias)
+}
+
+/// One raw completion on the engine, timed the way `--profile` reports it.
+fn run_raw_completion<M: LanguageModel>(
+    client: &mut DirectEngine<&M>,
+    request: &DirectRequest<'_>,
 ) -> Result<(Vec<i32>, GenerationStats)> {
-    // Route generation through the inference-session seam (issue #448, ADR 0004).
-    // Under default features `select_backend()` folds to MLX and the session
-    // wraps the same `CxxGenerator`, so the delegated generation methods run the
-    // identical decode loop and CLI output is byte-identical. Axis B (B8): the
-    // resolved token-bias is threaded into the session; an empty map preserves
-    // bit-exact baseline via the generator's `compose_sampling`. `model_path` is
-    // threaded for a session-driven backend (issue #449 OpenXLA) that loads its
-    // own weights/config; MLX ignores it.
-    let mut session = select_backend().create_session(
-        model_path,
-        model.num_layers(),
-        kv_cache_mode,
-        token_bias,
-    )?;
+    let run = client
+        .generate(request, |_| true)
+        .map_err(|err| anyhow!("generation failed: {err}"))?;
+    Ok((run.tokens, run.stats))
+}
 
-    if profile {
-        return Ok(session.generate_with_stats(model, prompt_tokens, max_tokens, sampling_config));
-    }
-
-    let _ = session.generate(model, prompt_tokens, 1, sampling_config);
-    session.reset_with_model(model);
+/// The plain (non-`--profile`) path: a one-token warmup so the reported rate
+/// does not pay for kernel compilation, then the completion timed as a whole,
+/// prefill included, which is what the `[Generated N tokens ...]` line has
+/// always reported.
+fn run_raw_completion_warm<M: LanguageModel>(
+    client: &mut DirectEngine<&M>,
+    request: &DirectRequest<'_>,
+) -> Result<(Vec<i32>, GenerationStats)> {
+    let warmup = DirectRequest {
+        max_tokens: 1,
+        ..*request
+    };
+    client
+        .generate(&warmup, |_| true)
+        .map_err(|err| anyhow!("warmup generation failed: {err}"))?;
 
     let capture_path = std::env::var("MLXCEL_METAL_CAPTURE_PATH").ok();
     if let Some(ref path) = capture_path {
@@ -1433,23 +1424,41 @@ fn generate_standard<M: LanguageModel>(
     }
 
     let start_time = Instant::now();
-    let tokens = session.generate(model, prompt_tokens, max_tokens, sampling_config);
+    let run = client.generate(request, |_| true);
     let total_time = start_time.elapsed();
-    let generated_len = tokens.len();
 
     if capture_path.is_some() {
         mlxcel_core::metal_stop_capture();
     }
 
+    let run = run.map_err(|err| anyhow!("generation failed: {err}"))?;
+    let generated_len = run.tokens.len();
     Ok((
-        tokens,
-        generation_stats_from_duration(prompt_tokens.len(), generated_len, total_time),
+        run.tokens,
+        generation_stats_from_duration(request.prompt_tokens.len(), generated_len, total_time),
     ))
+}
+
+fn generate_standard<M: LanguageModel>(
+    model: &M,
+    prompt_tokens: &[i32],
+    max_tokens: usize,
+    sampling_config: &SamplingConfig,
+    profile: bool,
+    kv_cache_mode: KVCacheMode,
+    token_bias: TokenBiasMap,
+) -> Result<(Vec<i32>, GenerationStats)> {
+    let mut client = raw_completion_client(model, kv_cache_mode, token_bias);
+    let request = DirectRequest::text(prompt_tokens, max_tokens, sampling_config);
+    if profile {
+        run_raw_completion(&mut client, &request)
+    } else {
+        run_raw_completion_warm(&mut client, &request)
+    }
 }
 
 fn generate_with_embeddings<M: LanguageModel>(
     model: &M,
-    model_path: &Path,
     prompt_tokens: &[i32],
     embeddings: &InputEmbeddings,
     max_tokens: usize,
@@ -1458,40 +1467,25 @@ fn generate_with_embeddings<M: LanguageModel>(
     kv_cache_mode: KVCacheMode,
     token_bias: TokenBiasMap,
 ) -> Result<(Vec<i32>, GenerationStats)> {
-    // Axis B (B8): same session wiring as the text-only path above (issue #448).
-    // `model_path` is threaded for the session-driven OpenXLA backend (#449).
-    let mut session = select_backend().create_session(
-        model_path,
-        model.num_layers(),
-        kv_cache_mode,
-        token_bias,
-    )?;
+    let mut client = raw_completion_client(model, kv_cache_mode, token_bias);
     let (input_embeds, mask_ref) = prepared_embedding_refs(embeddings)?;
-
-    if profile {
-        return Ok(session.generate_with_stats_and_embeddings(
-            model,
-            prompt_tokens,
-            Some(input_embeds),
-            mask_ref,
-            max_tokens,
-            sampling_config,
-        ));
-    }
-
-    let start_time = Instant::now();
-    let tokens = session.generate_streaming_with_embeddings(
-        model,
+    let request = DirectRequest {
         prompt_tokens,
-        Some(input_embeds),
-        mask_ref,
+        embeddings: Some(input_embeds),
+        mask: mask_ref,
         max_tokens,
-        sampling_config,
-        |_| true,
-    );
+        sampling: sampling_config,
+    };
+    if profile {
+        return run_raw_completion(&mut client, &request);
+    }
+    // The embedding path never warmed up: the vision tower's single-use state
+    // would not survive a second prefill, and the reported rate covers the
+    // whole call, prefill included, as before.
+    let start_time = Instant::now();
+    let (tokens, _) = run_raw_completion(&mut client, &request)?;
     let total_time = start_time.elapsed();
     let generated_len = tokens.len();
-
     Ok((
         tokens,
         generation_stats_from_duration(prompt_tokens.len(), generated_len, total_time),
@@ -1952,7 +1946,6 @@ pub(super) fn run_generation_mode(
     } else if let Some(embeddings) = vlm_embeddings {
         generate_with_embeddings(
             model,
-            &args.model.model,
             prompt_tokens,
             embeddings,
             args.generation.max_tokens,
@@ -1964,7 +1957,6 @@ pub(super) fn run_generation_mode(
     } else {
         generate_standard(
             model,
-            &args.model.model,
             prompt_tokens,
             args.generation.max_tokens,
             sampling_config,
@@ -3069,7 +3061,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
     let (generated_tokens, stats) = if pipeline_requested {
         // Axis B (B8): pipeline-parallel text generation samples via
         // `sample_token_optimized` directly and does not go through the
-        // CxxGenerator/SpeculativeGenerator wrappers. We inject the token-bias
+        // engine client or the speculative generators. We inject the token-bias
         // on the composed `SamplingConfig` before the pipeline is started.
         // The shared composition (#2169): the config's own bias (none on the
         // CLI) wins, else the `--lang-bias` map. No output suppression here:
@@ -3104,7 +3096,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         }
         // Block-diffusion models generate by canvas denoising, not
         // autoregressive decoding: route them to the diffusion engine BEFORE
-        // the standard CxxGenerator loop (issue #217, phase 1).
+        // the raw-completion engine client (issue #217, phase 1).
         if let mlxcel::LoadedModel::DiffusionGemma(diffusion_model) = &model {
             return super::generate_diffusion::run_diffusion_generation(
                 diffusion_model,
@@ -3115,7 +3107,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
             );
         }
         // LLaDA-2 MoE generates by block-wise unmasking, not autoregressive
-        // decode: route it to its own driver before the CxxGenerator loop.
+        // decode: route it to its own driver before the engine client.
         if let mlxcel::LoadedModel::Llada2Moe(llada2_model) = &model {
             return super::generate_llada2::run_llada2_generation(
                 llada2_model,

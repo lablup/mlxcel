@@ -3862,6 +3862,9 @@ pub mod weights;
 
 // Token generation
 pub mod generate;
+// `LanguageModel` for `&M`, so a raw-completion client can open an
+// `Engine<&M>` over a model its caller keeps (#2176).
+mod language_model_ref;
 
 // Inference-session contract (issue #448, ADR 0004). The engine-neutral
 // `InferenceSession` trait plus the MLX `MlxInferenceSession` that wraps
