@@ -342,7 +342,7 @@ fn verify_block_cost_with_and_without_row_rope() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(64);
-    let prompt: Vec<i32> = (0..160).map(|i| ((i * 7 + 5) % 151_000) as i32).collect();
+    let prompt: Vec<i32> = (0..160).map(|i| (i * 7 + 5) % 151_000).collect();
     for width in [2usize, 4] {
         let block: Vec<i32> = (0..width)
             .map(|i| ((i * 31 + 11) % 151_000) as i32)
