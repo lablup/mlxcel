@@ -235,6 +235,8 @@ impl BatchScheduler {
             .map(|p| p.profile_probe_rounds())
             .unwrap_or(0);
         let model_eos = self.model.eos_token_ids();
+        // The burst stream stops at the KV bound as classic decode does (#1472).
+        let context_bound = self.context_bound();
 
         // Classic prefill splits a chat prompt at its history boundary; the
         // row-wise Gemma 4 prefill mirrors that partition (#2160).
@@ -261,6 +263,7 @@ impl BatchScheduler {
                         probe_rounds,
                         prefill_start_offset,
                         &token_history,
+                        context_bound,
                     ),
                 )
             }
@@ -284,6 +287,7 @@ impl BatchScheduler {
                         probe_rounds,
                         prefill_start_offset,
                         &token_history,
+                        context_bound,
                     ),
                 )
             }
@@ -307,6 +311,7 @@ impl BatchScheduler {
                         probe_rounds,
                         prefill_start_offset,
                         &token_history,
+                        context_bound,
                     ),
                 )
             }
@@ -331,6 +336,7 @@ impl BatchScheduler {
                         probe_rounds,
                         prefill_start_offset,
                         &token_history,
+                        context_bound,
                     ),
                 )
             }
@@ -351,6 +357,7 @@ impl BatchScheduler {
                         probe_rounds,
                         prefill_start_offset,
                         &token_history,
+                        context_bound,
                     ),
                 )
             }
@@ -375,6 +382,7 @@ impl BatchScheduler {
                         probe_rounds,
                         prefill_start_offset,
                         &token_history,
+                        context_bound,
                     ),
                 )
             }
@@ -395,6 +403,7 @@ impl BatchScheduler {
                         probe_rounds,
                         prefill_start_offset,
                         &token_history,
+                        context_bound,
                     ),
                 )
             }
@@ -415,6 +424,7 @@ impl BatchScheduler {
                         probe_rounds,
                         prefill_start_offset,
                         &token_history,
+                        context_bound,
                     ),
                 )
             }

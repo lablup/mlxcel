@@ -116,11 +116,80 @@ static std::pair<int, int> get_graph_limits() {
   return {ops, mb};
 }
 
+namespace {
+
+// gcnArchName without any ":sramecc+:xnack-" style suffix.
+std::string base_arch_name(const char* gcn_arch_name) {
+  std::string base_arch = gcn_arch_name;
+  size_t colon_pos = base_arch.find(':');
+  if (colon_pos != std::string::npos) {
+    base_arch = base_arch.substr(0, colon_pos);
+  }
+  return base_arch;
+}
+
+// Architectures with a rocBLAS Tensile library (TensileLibrary_lazy_*.dat).
+const std::vector<std::string>& rocblas_archs() {
+  static const std::vector<std::string> archs = {
+      "gfx908",
+      "gfx90a",
+      "gfx942",
+      "gfx950",
+      "gfx1030",
+      "gfx1100",
+      "gfx1101",
+      "gfx1102",
+      "gfx1150",
+      "gfx1151",
+      "gfx1152",
+      "gfx1200",
+      "gfx1201"};
+  return archs;
+}
+
+// rocWMMA arch allowlist. Keep in sync with detect_rocm_hw_info() in
+// mlx/backend/rocm/quantized/qmm.hip. RDNA3.5: gfx1150/1151/1152 all have
+// WMMA; Device used to omit 1150/1152 which forced flash/qmm off on those
+// parts (incl. reduced-CU gfx1152 instances).
+const std::vector<std::string>& rocwmma_archs() {
+  static const std::vector<std::string> archs = {
+      "gfx908",
+      "gfx90a",
+      "gfx942",
+      "gfx1100",
+      "gfx1101",
+      "gfx1102",
+      "gfx1103",
+      "gfx1150",
+      "gfx1151",
+      "gfx1152",
+      "gfx1153",
+      "gfx1200",
+      "gfx1201",
+  };
+  return archs;
+}
+
+bool arch_in(const std::vector<std::string>& archs, const std::string& arch) {
+  return std::find(archs.begin(), archs.end(), arch) != archs.end();
+}
+
+} // namespace
+
 Device::Device(int device) : device_(device) {
   make_current();
   {
     hipDeviceProp_t p;
     if (hipGetDeviceProperties(&p, device_) == hipSuccess) {
+      arch_name_ = p.gcnArchName;
+      const std::string base_arch = base_arch_name(p.gcnArchName);
+      rocblas_arch_supported_ = arch_in(rocblas_archs(), base_arch);
+      has_native_wmma_ = arch_in(rocwmma_archs(), base_arch);
+      // CDNA2 (gfx90a) + CDNA3 (gfx942) only: clean v_mfma_f32_16x16x16bf16
+      // and a working hipBLASLt pointer-offset GEMM. gfx1151 (RDNA3.5) pegs on
+      // the offset path; gfx908 (CDNA1) bf16 MFMA differs; RDNA/others use
+      // WMMA.
+      cdna_mfma_ok_ = (base_arch == "gfx90a" || base_arch == "gfx942");
       fprintf(
           stderr,
           "[mlx-rocm] bound HIP device %d: %s (%s) cus=%d warp=%d lds=%dKB\n",
@@ -161,9 +230,20 @@ Device::Device(int device) : device_(device) {
               fw);
         }
       }
+    } else {
+      arch_name_ = "unknown";
     }
   }
-  // rocBLAS initialization is now lazy - done in get_rocblas_handle()
+  if (!rocblas_arch_supported_) {
+    std::cerr << "Warning: rocBLAS does not support GPU architecture '"
+              << arch_name_ << "'. "
+              << "Matrix multiplication operations will not be available. "
+              << "Supported architectures: gfx908, gfx90a, gfx942, gfx950, "
+              << "gfx1030, gfx1100, gfx1101, gfx1102, gfx1150, gfx1151, "
+              << "gfx1152, gfx1200, gfx1201." << std::endl;
+  }
+  // The rocBLAS handle itself is created on the first acquire_rocblas() or
+  // is_rocblas_available() call, under rocblas_mtx_.
 }
 
 Device::~Device() {
@@ -173,248 +253,68 @@ Device::~Device() {
 }
 
 rocblas_handle Device::get_rocblas_handle() {
-  if (!rocblas_initialized_) {
-    rocblas_initialized_ = true;
-    make_current();
-
-    // Check if the GPU architecture is supported by rocBLAS
-    hipDeviceProp_t props;
-    hipGetDeviceProperties(&props, device_);
-    std::string arch_name = props.gcnArchName;
-
-    // List of architectures supported by rocBLAS (based on TensileLibrary
-    // files). These are the architectures that have TensileLibrary_lazy_*.dat.
-    static const std::vector<std::string> supported_archs = {
-        "gfx908",
-        "gfx90a",
-        "gfx942",
-        "gfx950",
-        "gfx1030",
-        "gfx1100",
-        "gfx1101",
-        "gfx1102",
-        "gfx1150",
-        "gfx1151",
-        "gfx1152",
-        "gfx1200",
-        "gfx1201"};
-
-    // Extract base architecture name (remove any suffix like :sramecc+:xnack-)
-    std::string base_arch = arch_name;
-    size_t colon_pos = base_arch.find(':');
-    if (colon_pos != std::string::npos) {
-      base_arch = base_arch.substr(0, colon_pos);
-    }
-
-    bool arch_supported = false;
-    for (const auto& supported : supported_archs) {
-      if (base_arch == supported) {
-        arch_supported = true;
-        break;
-      }
-    }
-
-    if (!arch_supported) {
-      rocblas_available_ = false;
-      rocblas_ = nullptr;
-      std::cerr << "Warning: rocBLAS does not support GPU architecture '"
-                << arch_name << "'. "
-                << "Matrix multiplication operations will not be available. "
-                << "Supported architectures: gfx908, gfx90a, gfx942, gfx950, "
-                << "gfx1030, gfx1100, gfx1101, gfx1102, gfx1150, gfx1151, "
-                << "gfx1152, gfx1200, gfx1201." << std::endl;
-    } else {
-      rocblas_status status = rocblas_create_handle(&rocblas_);
-      if (status != rocblas_status_success) {
-        rocblas_available_ = false;
-        rocblas_ = nullptr;
-        std::cerr
-            << "Warning: rocBLAS initialization failed (status "
-            << static_cast<int>(status)
-            << "). Matrix multiplication operations will not be available."
-            << std::endl;
-      }
-    }
+  // rocblas_mtx_ is held by the caller.
+  if (rocblas_ready_.load(std::memory_order_acquire)) {
+    return rocblas_;
   }
-  if (!rocblas_available_) {
+  if (!rocblas_arch_supported_) {
     throw std::runtime_error(
         "rocBLAS is not available on this GPU architecture. "
         "Matrix multiplication operations are not supported.");
   }
+  make_current();
+  rocblas_handle handle = nullptr;
+  rocblas_status status = rocblas_create_handle(&handle);
+  if (status != rocblas_status_success || handle == nullptr) {
+    if (!rocblas_warned_) {
+      rocblas_warned_ = true;
+      std::cerr << "Warning: rocBLAS initialization failed (status "
+                << static_cast<int>(status)
+                << "). Matrix multiplication operations will not be available."
+                << std::endl;
+    }
+    // Nothing is cached: the next caller retries the create.
+    throw std::runtime_error(
+        "rocblas_create_handle failed (status " +
+        std::to_string(static_cast<int>(status)) + ")");
+  }
+  rocblas_ = handle;
+  // A fresh handle is bound to the null stream; the first lease rebinds it.
+  rocblas_stream_ = nullptr;
+  rocblas_ready_.store(true, std::memory_order_release);
   return rocblas_;
 }
 
+RocblasLease Device::acquire_rocblas(hipStream_t stream) {
+  std::unique_lock<std::mutex> lock(rocblas_mtx_);
+  rocblas_handle handle = get_rocblas_handle();
+  if (rocblas_stream_ != stream) {
+    rocblas_status status = rocblas_set_stream(handle, stream);
+    if (status != rocblas_status_success) {
+      throw std::runtime_error(
+          "rocblas_set_stream failed (status " +
+          std::to_string(static_cast<int>(status)) + ")");
+    }
+    rocblas_stream_ = stream;
+  }
+  return RocblasLease(std::move(lock), handle);
+}
+
 bool Device::is_rocblas_available() {
-  if (!rocblas_initialized_) {
-    try {
-      get_rocblas_handle();
-    } catch (...) {
-    }
+  if (!rocblas_arch_supported_) {
+    return false;
   }
-  return rocblas_available_;
-}
-
-bool Device::is_rocblas_bf16_available() {
-  if (!rocblas_bf16_probed_) {
-    rocblas_bf16_probed_ = true;
-    rocblas_bf16_available_ = false;
-
-    if (!is_rocblas_available()) {
-      return false;
-    }
-
-    // Probe: run a tiny bf16 GEMM and check if the GPU survives.
-    // rocBLAS may claim support but crash if the Tensile .co files
-    // are corrupt or missing specific kernel variants.
-    make_current();
-    void* a_ptr = nullptr;
-    void* b_ptr = nullptr;
-    void* c_ptr = nullptr;
-    hipError_t err;
-
-    err = hipMalloc(&a_ptr, 4 * 4 * 2); // 4x4 bf16
-    if (err != hipSuccess)
-      return false;
-    err = hipMalloc(&b_ptr, 4 * 4 * 2);
-    if (err != hipSuccess) {
-      hipFree(a_ptr);
-      return false;
-    }
-    err = hipMalloc(&c_ptr, 4 * 4 * 2);
-    if (err != hipSuccess) {
-      hipFree(a_ptr);
-      hipFree(b_ptr);
-      return false;
-    }
-
-    (void)hipMemset(a_ptr, 0, 4 * 4 * 2);
-    (void)hipMemset(b_ptr, 0, 4 * 4 * 2);
-    (void)hipMemset(c_ptr, 0, 4 * 4 * 2);
-
-    float alpha = 1.0f, beta = 0.0f;
-    rocblas_status status = rocblas_gemm_ex(
-        rocblas_,
-        rocblas_operation_none,
-        rocblas_operation_none,
-        4,
-        4,
-        4,
-        &alpha,
-        a_ptr,
-        rocblas_datatype_bf16_r,
-        4,
-        b_ptr,
-        rocblas_datatype_bf16_r,
-        4,
-        &beta,
-        c_ptr,
-        rocblas_datatype_bf16_r,
-        4,
-        c_ptr,
-        rocblas_datatype_bf16_r,
-        4,
-        rocblas_datatype_f32_r,
-        rocblas_gemm_algo_standard,
-        0,
-        0);
-
-    // Sync and check if the GPU is still alive
-    hipError_t sync_err = hipDeviceSynchronize();
-    // Clear any lingering error
-    (void)hipGetLastError();
-
-    hipFree(a_ptr);
-    hipFree(b_ptr);
-    hipFree(c_ptr);
-
-    if (status == rocblas_status_success && sync_err == hipSuccess) {
-      rocblas_bf16_available_ = true;
-    } else {
-      // GPU may be in a bad state — need to reset
-      (void)hipDeviceReset();
-      // Re-initialize device
-      make_current();
-      // Re-create rocBLAS handle
-      if (rocblas_) {
-        rocblas_destroy_handle(rocblas_);
-        rocblas_ = nullptr;
-      }
-      rocblas_status rs = rocblas_create_handle(&rocblas_);
-      if (rs != rocblas_status_success) {
-        rocblas_available_ = false;
-      }
-      std::cerr << "Warning: rocBLAS bfloat16 GEMM probe failed on this GPU. "
-                << "Using fallback kernels for bf16 matmul." << std::endl;
-    }
+  // A ready device answers without the mutex, so a thread holding a
+  // RocblasLease can ask without deadlocking.
+  if (rocblas_ready_.load(std::memory_order_acquire)) {
+    return true;
   }
-  return rocblas_bf16_available_;
-}
-
-bool Device::has_native_wmma() {
-  if (!wmma_probed_) {
-    wmma_probed_ = true;
-
-    hipDeviceProp_t props;
-    if (hipGetDeviceProperties(&props, device_) != hipSuccess) {
-      has_native_wmma_ = false;
-      return has_native_wmma_;
-    }
-
-    // Strip any ":sramecc+:xnack-" style suffix from gcnArchName.
-    std::string base_arch = props.gcnArchName;
-    size_t colon_pos = base_arch.find(':');
-    if (colon_pos != std::string::npos) {
-      base_arch = base_arch.substr(0, colon_pos);
-    }
-
-    // rocWMMA arch allowlist. Keep in sync with detect_rocm_hw_info() in
-    // mlx/backend/rocm/quantized/qmm.hip. RDNA3.5: gfx1150/1151/1152 all have
-    // WMMA; Device used to omit 1150/1152 which forced flash/qmm off on those
-    // parts (incl. reduced-CU gfx1152 instances).
-    static const std::vector<std::string> rocwmma_archs = {
-        "gfx908",
-        "gfx90a",
-        "gfx942",
-        "gfx1100",
-        "gfx1101",
-        "gfx1102",
-        "gfx1103",
-        "gfx1150",
-        "gfx1151",
-        "gfx1152",
-        "gfx1153",
-        "gfx1200",
-        "gfx1201",
-    };
-    for (const auto& a : rocwmma_archs) {
-      if (base_arch == a) {
-        has_native_wmma_ = true;
-        break;
-      }
-    }
+  std::lock_guard<std::mutex> lock(rocblas_mtx_);
+  try {
+    get_rocblas_handle();
+  } catch (...) {
   }
-  return has_native_wmma_;
-}
-
-bool Device::supports_cdna_mfma_gemm() {
-  if (!cdna_mfma_probed_) {
-    cdna_mfma_probed_ = true;
-    hipDeviceProp_t props;
-    if (hipGetDeviceProperties(&props, device_) != hipSuccess) {
-      cdna_mfma_ok_ = false;
-      return cdna_mfma_ok_;
-    }
-    std::string base_arch = props.gcnArchName;
-    size_t colon_pos = base_arch.find(':');
-    if (colon_pos != std::string::npos) {
-      base_arch = base_arch.substr(0, colon_pos);
-    }
-    // CDNA2 (gfx90a) + CDNA3 (gfx942) only: clean v_mfma_f32_16x16x16bf16 and a
-    // working hipBLASLt pointer-offset GEMM. gfx1151 (RDNA3.5) pegs on the
-    // offset path; gfx908 (CDNA1) bf16 MFMA differs; RDNA/others use WMMA.
-    cdna_mfma_ok_ = (base_arch == "gfx90a" || base_arch == "gfx942");
-  }
-  return cdna_mfma_ok_;
+  return rocblas_ready_.load(std::memory_order_acquire);
 }
 
 void Device::make_current() {
@@ -425,13 +325,6 @@ void Device::make_current() {
   if (current != device_) {
     CHECK_HIP_ERROR(hipSetDevice(device_));
     current = device_;
-  }
-}
-
-void Device::set_rocblas_stream(hipStream_t stream) {
-  if (rocblas_stream_ != stream) {
-    rocblas_set_stream(get_rocblas_handle(), stream);
-    rocblas_stream_ = stream;
   }
 }
 

@@ -408,7 +408,11 @@ arbitrary KV blocks, so they keep the hybrid-SSM/APC exclusion. Families that
 opt into `supports_snapshot_reuse()` instead use a separate exact-prefix
 snapshot bucket: on a healthy finish the scheduler copies the model-owned
 state, and on the next turn it restores that state only when the stored token
-vector is a whole prefix of the incoming request in the same session. The
+vector is a whole prefix of the incoming request in the same session. A
+speculative burst that finishes partway through a verified batch (a stop
+string, generation bound, context bound or repetition loop before the batch's
+last token) does not donate, because the model-owned state is already ahead of
+the committed tokens. The
 unmatched suffix is still prefilled normally, with no recurrent state
 truncation or cross-session sharing. The supported snapshot families are
 Mamba, Mamba2, Jamba, Nemotron-H, Qwen 3.5 / 3.6 text, MoE, and VLM wrappers,

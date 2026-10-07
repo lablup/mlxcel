@@ -390,6 +390,34 @@ class CommandEncoder {
       nullptr}; // their source graphs (owned)
 };
 
+// Exclusive use of a Device's rocBLAS handle, bound to one stream, for as
+// long as the lease lives. rocBLAS binds the stream on the handle rather than
+// per call, and the overlay keeps one handle per device, so the lease holds
+// the device's rocBLAS mutex from the stream bind through the GEMM enqueue:
+// another thread cannot rebind the handle to its stream in between. Only the
+// host-side enqueue is serialized; the GEMMs still run concurrently on their
+// streams. Obtain one with Device::acquire_rocblas(stream) inside the
+// launch_kernel lambda that issues the rocBLAS calls and keep it alive until
+// the last of them returns. Move-only; the mutex is released on destruction,
+// including on unwind.
+class RocblasLease {
+ public:
+  RocblasLease(std::unique_lock<std::mutex> lock, rocblas_handle handle)
+      : lock_(std::move(lock)), handle_(handle) {}
+  RocblasLease(RocblasLease&&) = default;
+  RocblasLease& operator=(RocblasLease&&) = default;
+  RocblasLease(const RocblasLease&) = delete;
+  RocblasLease& operator=(const RocblasLease&) = delete;
+
+  rocblas_handle handle() const {
+    return handle_;
+  }
+
+ private:
+  std::unique_lock<std::mutex> lock_;
+  rocblas_handle handle_;
+};
+
 class Device {
  public:
   explicit Device(int device);
@@ -412,24 +440,35 @@ class Device {
     return device_;
   }
 
-  rocblas_handle get_rocblas_handle();
-  void set_rocblas_stream(hipStream_t stream);
+  // The only way to a rocBLAS call. Locks rocblas_mtx_, creates the device's
+  // one handle on first use (throwing std::runtime_error with the rocBLAS
+  // status if that fails, so the next call retries, or if this architecture
+  // has no rocBLAS support), binds `stream` on it when it differs from the
+  // last bound stream, and returns the lease that keeps the mutex held. Call
+  // it inside the launch_kernel lambda, right before the first rocBLAS call,
+  // and issue every call in that lambda through lease.handle().
+  RocblasLease acquire_rocblas(hipStream_t stream);
 
-  // Check if rocBLAS is available for the current GPU architecture
+  // True once this device's rocBLAS handle exists, false if the architecture
+  // is unsupported; otherwise tries to create the handle and reports whether
+  // that worked. Does not lock once the handle is ready, so it is safe to
+  // call while holding a RocblasLease.
   bool is_rocblas_available();
 
-  // Check if rocBLAS bf16 GEMM works on this device (probed at init)
-  bool is_rocblas_bf16_available();
-
   // True iff this device's gcnArchName is on the rocWMMA arch allowlist
-  // (CDNA1/2/3 + RDNA3 dGPU + RDNA3.5 gfx1150–1152 + RDNA4). Lazy-cached.
-  bool has_native_wmma();
+  // (CDNA1/2/3 + RDNA3 dGPU + RDNA3.5 gfx1150–1152 + RDNA4). Computed at
+  // construction.
+  bool has_native_wmma() const {
+    return has_native_wmma_;
+  }
 
   // True iff CDNA2 (gfx90a) or CDNA3 (gfx942): clean bf16 MFMA
   // (v_mfma_f32_16x16x16bf16) AND a working hipBLASLt pointer-offset GEMM.
   // gfx1151 pegs on offset GEMMs, gfx908 bf16 MFMA differs, RDNA uses WMMA —
-  // all fall back. Lazy-cached.
-  bool supports_cdna_mfma_gemm();
+  // all fall back. Computed at construction.
+  bool supports_cdna_mfma_gemm() const {
+    return cdna_mfma_ok_;
+  }
 
   // Max shared memory (LDS) a single block may use on this device, in bytes,
   // queried from hipDeviceProp at construction. RDNA3/3.5 report 64 KB; RDNA4
@@ -491,17 +530,27 @@ class Device {
   }
 
  private:
+  // Returns the device's rocBLAS handle, creating it on the first call. The
+  // caller must hold rocblas_mtx_. Throws on an unsupported architecture or a
+  // failed rocblas_create_handle; nothing is cached on failure.
+  rocblas_handle get_rocblas_handle();
+
   int device_;
+  // Guards rocblas_, rocblas_stream_ and rocblas_warned_, and is held by every
+  // RocblasLease. Several worker threads share one Device, each on its own
+  // stream, and rocBLAS binds the stream on the shared handle.
+  std::mutex rocblas_mtx_;
+  // Set (release) only after rocblas_ holds a created handle; read (acquire)
+  // without the mutex by is_rocblas_available().
+  std::atomic<bool> rocblas_ready_{false};
   rocblas_handle rocblas_{nullptr};
   hipStream_t rocblas_stream_{nullptr};
-  bool rocblas_initialized_{false};
-  bool rocblas_available_{true};
-  bool rocblas_bf16_probed_{false};
-  bool rocblas_bf16_available_{false};
-  bool wmma_probed_{false};
+  bool rocblas_warned_{false};
+  // Architecture facts from hipDeviceProp, computed once in the constructor.
+  bool rocblas_arch_supported_{false};
   bool has_native_wmma_{false};
-  bool cdna_mfma_probed_{false};
   bool cdna_mfma_ok_{false};
+  std::string arch_name_;
   int max_shared_memory_per_block_{65536};
   int warp_size_{64};
   int num_cus_{0};

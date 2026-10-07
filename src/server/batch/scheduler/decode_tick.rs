@@ -15,41 +15,13 @@
 use super::*;
 
 impl BatchScheduler {
-    /// Finish a sequence when a b10621 generation bound fired.
-    ///
-    /// Call this immediately after streaming a decoded piece, after applying
-    /// any string-stop result. That ordering preserves `StopSequence` when a
-    /// string stop and `n_indent` / `t_max_predict_ms` land on the same piece.
-    pub(super) fn finish_on_generation_bound(seq: &mut SequenceInfo) {
-        if !seq.state.is_finished()
-            && seq.bound_stopped()
-            && let Err(err) = seq
-                .state
-                .transition_to(SequenceState::Finished(FinishReason::Length))
-        {
-            tracing::error!("State transition error: {err}");
+    /// The scheduler's KV bound and context-shift setting, as the shared
+    /// finish step's context-bound stop (#1472) reads them.
+    pub(super) fn context_bound(&self) -> ContextBound {
+        ContextBound {
+            max_kv_size: self.max_kv_size,
+            context_shift: self.context_retention.context_shift,
         }
-    }
-
-    /// Whether a bounded sequence must stop now because its next token would
-    /// not fit the KV window with context shifting disabled (#1472).
-    ///
-    /// Token-count based (`prompt + generated + 1 >= bound`), mirroring
-    /// upstream's `slot.prompt.n_tokens() + 1 >= slot.n_ctx`: with shifting
-    /// disabled nothing ever trims, so the token count IS the live KV window,
-    /// including for the paged and Turbo cache modes whose trim operation is
-    /// a recorded no-op. VLM sequences are exempt, as upstream exempts
-    /// multimodal from the context machinery (their KV length is the
-    /// embedding count, not the text token count).
-    pub(super) fn context_bound_stop_due(
-        seq: &SequenceInfo,
-        max_kv_size: Option<usize>,
-        context_shift: bool,
-    ) -> bool {
-        !context_shift
-            && seq.vlm_embeddings.is_none()
-            && max_kv_size
-                .is_some_and(|max| seq.prompt_tokens.len() + seq.generated_tokens.len() + 1 >= max)
     }
 
     // ------------------------------------------------------------------
@@ -1059,115 +1031,25 @@ impl BatchScheduler {
                 false
             };
 
+            let context = self.context_bound();
             let seq = match self.active_batch.get_mut(seq_id) {
                 Some(s) => s,
                 None => continue,
             };
 
-            if seq.merged_eos.contains(&token_val) {
-                if let Err(err) = seq
-                    .state
-                    .transition_to(SequenceState::Finished(FinishReason::Stop))
-                {
-                    tracing::error!("State transition error: {err}");
-                }
-                seq.eos_terminated = true;
+            // The shared post-sample finish step (#2168): EOS (not pushed), push and
+            // history, stop string, generation bound, structured stop, budget, context
+            // bound, repetition loop, then the cache-clear cadence when unfinished.
+            if finish_decode_token(
+                seq,
+                &self.tokenizer,
+                token_val,
+                token_lp,
+                structured_stopped,
+                context,
+            ) == Some(FinishCause::Eos)
+            {
                 continue;
-            }
-
-            seq.generated_tokens.push(token_val);
-
-            // Incrementally update token_history
-            if seq.sampling.needs_token_history() {
-                seq.token_history.push(token_val);
-            }
-
-            // Stream through the request's stop matcher (issue #1466): text that
-            // could still become a stop string is held back, and a completed
-            // stop string ends the sequence with the match excluded.
-            let stop_word = match seq.decode_state.on_token(token_val, &self.tokenizer) {
-                Some(new_text) => seq.stream_decoded_text(new_text, Some(token_val), token_lp),
-                None => None,
-            };
-
-            if stop_word.is_some()
-                && let Err(err) = seq
-                    .state
-                    .transition_to(SequenceState::Finished(FinishReason::StopSequence))
-            {
-                tracing::error!("State transition error: {err}");
-            }
-
-            Self::finish_on_generation_bound(seq);
-
-            if !seq.state.is_finished()
-                && structured_stopped
-                && let Err(err) = seq
-                    .state
-                    .transition_to(SequenceState::Finished(FinishReason::Stop))
-            {
-                tracing::error!("State transition error: {err}");
-            }
-
-            if !seq.state.is_finished()
-                && seq.generated_tokens.len() >= seq.max_tokens
-                && let Err(err) = seq
-                    .state
-                    .transition_to(SequenceState::Finished(FinishReason::Length))
-            {
-                tracing::error!("State transition error: {err}");
-            }
-
-            // b10621 context guard (#1472): with context shifting disabled, a
-            // bounded sequence stops before its next token would overflow the
-            // KV window, reported as `truncated: true` with `stop_type:
-            // "limit"` rather than silently discarding old tokens.
-            if !seq.state.is_finished()
-                && Self::context_bound_stop_due(
-                    seq,
-                    self.max_kv_size,
-                    self.context_retention.context_shift,
-                )
-            {
-                seq.retention.context_exhausted = true;
-                if let Err(err) = seq
-                    .state
-                    .transition_to(SequenceState::Finished(FinishReason::Length))
-                {
-                    tracing::error!("State transition error: {err}");
-                }
-            }
-
-            // Loop / repetition guard (issue #432): end early when the raw
-            // generated stream collapses into a short repeated pattern. Skip if
-            // the length limit already finished this sequence; the detector is
-            // a zero-overhead no-op when loop detection is disabled (default).
-            if !seq.state.is_finished()
-                && mlxcel_core::detect_repetition_loop(
-                    &seq.generated_tokens,
-                    &seq.sampling.loop_detection,
-                )
-            {
-                match seq
-                    .state
-                    .transition_to(SequenceState::Finished(FinishReason::RepetitionLoop))
-                {
-                    Ok(()) => tracing::info!(
-                        generated = seq.generated_tokens.len(),
-                        "loop detection: ending generation early (repetition loop)"
-                    ),
-                    Err(err) => tracing::error!("State transition error: {err}"),
-                }
-            }
-
-            // Periodic cache clearing, backend-aware cadence (#627): disabled by
-            // default on CUDA (clear churns the pool and defeats CUDA-graph
-            // reuse, mlx#2358), 256 on Metal, MLXCEL_CACHE_CLEAR_INTERVAL overrides.
-            if mlxcel_core::memory::should_clear_cache_at(
-                seq.generated_tokens.len(),
-                mlxcel_core::memory::cache_clear_interval(),
-            ) {
-                mlxcel_core::clear_memory_cache();
             }
 
             if let Some(cache_set) = self.cache_pool.get_mut(seq_id) {
@@ -1261,110 +1143,20 @@ impl BatchScheduler {
         );
         for (i, &seq_id) in seq_ids.iter().enumerate() {
             let token_val = tokens[i];
+            let context = self.context_bound();
             let seq = match self.active_batch.get_mut(seq_id) {
                 Some(s) => s,
                 None => continue,
             };
 
-            if seq.merged_eos.contains(&token_val) {
-                if let Err(err) = seq
-                    .state
-                    .transition_to(SequenceState::Finished(FinishReason::Stop))
-                {
-                    tracing::error!("State transition error: {err}");
-                }
-                seq.eos_terminated = true;
+            // The shared post-sample finish step (#2168), the same one the per-row
+            // loop runs. The fast path excludes structured output and logprobs, not
+            // stop strings, bounds or loop detection, so a request finishes the same
+            // way whichever decode kernel its batch took.
+            if finish_decode_token(seq, &self.tokenizer, token_val, None, false, context)
+                == Some(FinishCause::Eos)
+            {
                 continue;
-            }
-
-            seq.generated_tokens.push(token_val);
-
-            // The gate guarantees no penalty config reaches the fast path, so
-            // this is a no-op today; it is kept for exact parity with the
-            // per-row loop in case the gate ever admits history-tracking
-            // configs.
-            if seq.sampling.needs_token_history() {
-                seq.token_history.push(token_val);
-            }
-
-            // Same stop-string enforcement as the per-row loop (issue #1466).
-            // The fast path excludes penalty-bearing configs, not stop strings,
-            // so it must honor them or a request would silently change behavior
-            // depending on which decode kernel the batch happened to take.
-            let stop_word = match seq.decode_state.on_token(token_val, &self.tokenizer) {
-                Some(new_text) => seq.stream_decoded_text(new_text, Some(token_val), None),
-                None => None,
-            };
-
-            if stop_word.is_some()
-                && let Err(err) = seq
-                    .state
-                    .transition_to(SequenceState::Finished(FinishReason::StopSequence))
-            {
-                tracing::error!("State transition error: {err}");
-            }
-
-            Self::finish_on_generation_bound(seq);
-
-            if !seq.state.is_finished()
-                && seq.generated_tokens.len() >= seq.max_tokens
-                && let Err(err) = seq
-                    .state
-                    .transition_to(SequenceState::Finished(FinishReason::Length))
-            {
-                tracing::error!("State transition error: {err}");
-            }
-
-            // b10621 context guard (#1472): with context shifting disabled, a
-            // bounded sequence stops before its next token would overflow the
-            // KV window, reported as `truncated: true` with `stop_type:
-            // "limit"` rather than silently discarding old tokens.
-            if !seq.state.is_finished()
-                && Self::context_bound_stop_due(
-                    seq,
-                    self.max_kv_size,
-                    self.context_retention.context_shift,
-                )
-            {
-                seq.retention.context_exhausted = true;
-                if let Err(err) = seq
-                    .state
-                    .transition_to(SequenceState::Finished(FinishReason::Length))
-                {
-                    tracing::error!("State transition error: {err}");
-                }
-            }
-
-            // Loop / repetition guard (issue #432): end early when the raw
-            // generated stream collapses into a short repeated pattern. Skip if
-            // the length limit already finished this sequence; the detector is
-            // a zero-overhead no-op when loop detection is disabled (default).
-            if !seq.state.is_finished()
-                && mlxcel_core::detect_repetition_loop(
-                    &seq.generated_tokens,
-                    &seq.sampling.loop_detection,
-                )
-            {
-                match seq
-                    .state
-                    .transition_to(SequenceState::Finished(FinishReason::RepetitionLoop))
-                {
-                    Ok(()) => tracing::info!(
-                        generated = seq.generated_tokens.len(),
-                        "loop detection: ending generation early (repetition loop)"
-                    ),
-                    Err(err) => tracing::error!("State transition error: {err}"),
-                }
-            }
-
-            // Periodic cache clearing, backend-aware cadence (#627): disabled by
-            // default on CUDA (clear churns the pool and defeats CUDA-graph
-            // reuse, mlx#2358), 256 on Metal, MLXCEL_CACHE_CLEAR_INTERVAL overrides.
-            if mlxcel_core::memory::should_clear_cache_at(
-                seq.generated_tokens.len(),
-                mlxcel_core::memory::cache_clear_interval(),
-            ) {
-                mlxcel_core::clear_memory_cache();
             }
 
             if let Some(cache_set) = self.cache_pool.get_mut(seq_id) {
@@ -1553,114 +1345,25 @@ impl BatchScheduler {
             false
         };
 
+        let context = self.context_bound();
         let seq = match self.active_batch.get_mut(seq_id) {
             Some(s) => s,
             None => return,
         };
 
-        if seq.merged_eos.contains(&token_val) {
-            if let Err(err) = seq
-                .state
-                .transition_to(SequenceState::Finished(FinishReason::Stop))
-            {
-                tracing::error!("State transition error: {err}");
-            }
-            seq.eos_terminated = true;
+        // The shared post-sample finish step (#2168): EOS (not pushed), push and
+        // history, stop string, generation bound, structured stop, budget, context
+        // bound, repetition loop, then the cache-clear cadence when unfinished.
+        if finish_decode_token(
+            seq,
+            &self.tokenizer,
+            token_val,
+            token_lp,
+            structured_stopped,
+            context,
+        ) == Some(FinishCause::Eos)
+        {
             return;
-        }
-
-        seq.generated_tokens.push(token_val);
-
-        // Incrementally update token_history instead of rebuilding from scratch
-        if seq.sampling.needs_token_history() {
-            seq.token_history.push(token_val);
-        }
-
-        // Stop-string enforcement for the single-step decode path (issue #1466).
-        let stop_word = match seq.decode_state.on_token(token_val, &self.tokenizer) {
-            Some(new_text) => seq.stream_decoded_text(new_text, Some(token_val), token_lp),
-            None => None,
-        };
-
-        if stop_word.is_some()
-            && let Err(err) = seq
-                .state
-                .transition_to(SequenceState::Finished(FinishReason::StopSequence))
-        {
-            tracing::error!("State transition error: {err}");
-        }
-
-        // The common one-request decode dispatch reaches this single-step
-        // path rather than either batched loop. Keep b10621's generation
-        // bounds in the shared post-stream finalizer so all three paths stop
-        // with `stop_type: "limit"` (#1431 post-merge audit).
-        Self::finish_on_generation_bound(seq);
-
-        if !seq.state.is_finished()
-            && structured_stopped
-            && let Err(err) = seq
-                .state
-                .transition_to(SequenceState::Finished(FinishReason::Stop))
-        {
-            tracing::error!("State transition error: {err}");
-        }
-
-        if !seq.state.is_finished()
-            && seq.generated_tokens.len() >= seq.max_tokens
-            && let Err(err) = seq
-                .state
-                .transition_to(SequenceState::Finished(FinishReason::Length))
-        {
-            tracing::error!("State transition error: {err}");
-        }
-
-        // b10621 context guard (#1472): see the batched-loop twin above.
-        if !seq.state.is_finished()
-            && Self::context_bound_stop_due(
-                seq,
-                self.max_kv_size,
-                self.context_retention.context_shift,
-            )
-        {
-            seq.retention.context_exhausted = true;
-            if let Err(err) = seq
-                .state
-                .transition_to(SequenceState::Finished(FinishReason::Length))
-            {
-                tracing::error!("State transition error: {err}");
-            }
-        }
-
-        // Loop / repetition guard (issue #432): end early when the raw
-        // generated stream collapses into a short repeated pattern. Skip if the
-        // length limit already finished this sequence; the detector is a
-        // zero-overhead no-op when loop detection is disabled (default).
-        if !seq.state.is_finished()
-            && mlxcel_core::detect_repetition_loop(
-                &seq.generated_tokens,
-                &seq.sampling.loop_detection,
-            )
-        {
-            match seq
-                .state
-                .transition_to(SequenceState::Finished(FinishReason::RepetitionLoop))
-            {
-                Ok(()) => tracing::info!(
-                    generated = seq.generated_tokens.len(),
-                    "loop detection: ending generation early (repetition loop)"
-                ),
-                Err(err) => tracing::error!("State transition error: {err}"),
-            }
-        }
-
-        // Periodic cache clearing, backend-aware cadence (#627): disabled by
-        // default on CUDA (clear churns the pool and defeats CUDA-graph
-        // reuse, mlx#2358), 256 on Metal, MLXCEL_CACHE_CLEAR_INTERVAL overrides.
-        if mlxcel_core::memory::should_clear_cache_at(
-            seq.generated_tokens.len(),
-            mlxcel_core::memory::cache_clear_interval(),
-        ) {
-            mlxcel_core::clear_memory_cache();
         }
 
         if let Some(cache_set) = self.cache_pool.get_mut(seq_id) {

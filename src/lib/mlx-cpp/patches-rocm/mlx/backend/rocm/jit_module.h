@@ -112,6 +112,9 @@ class JitModule {
  private:
   hipModule_t module_{nullptr};
   std::unordered_map<std::string, std::pair<hipFunction_t, bool>> kernels_;
+  // [mlxcel #2183] Guards the lazy configured-flag fill in get_kernel, as the
+  // CUDA overlay's kernels_mtx_ does (#1566).
+  std::mutex kernels_mtx_;
 };
 
 // Launch a module (JIT/CustomKernel) function, batching it into the HIP graph
@@ -154,8 +157,6 @@ inline void launch_module_kernel(
     });
   }
 }
-
-std::unordered_map<std::string, JitModule>& get_jit_module_cache();
 
 JitModule& get_jit_module(
     const mlx::core::Device& device,
