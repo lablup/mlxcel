@@ -101,6 +101,7 @@ use super::tick_policy::{
 };
 
 use pad_trim::{should_align_prefill, trim_padded_prefill};
+use run_loop::StructuredMask;
 
 pub(crate) const DEFAULT_PAGED_BLOCK_SIZE: usize = 32;
 
@@ -987,7 +988,6 @@ mod prefill;
 mod prompt_cache;
 mod queued_adoption;
 mod run_loop;
-use run_loop::StructuredMask;
 mod shared_budget;
 mod speculative_finalize;
 

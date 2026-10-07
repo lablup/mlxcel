@@ -207,20 +207,13 @@ impl RowSampler {
     }
 
     /// Confirm the last draw unchanged, without reading it on the host.
+    ///
+    /// Adaptive-p parks the token it drew; accepting that same id is what
+    /// `resolve(sampled, |t| t)` does. Every other sampler has nothing to
+    /// confirm.
     fn accept_drawn(&mut self) {
-        let Some(state) = self.state.as_mut() else {
-            return;
-        };
-        // Adaptive-p parks the token it drew; accepting that same id is what
-        // `resolve(sampled, |t| t)` does. Every other sampler has nothing to
-        // confirm.
-        let pending = state
-            .adaptive
-            .as_ref()
-            .and_then(|adaptive| adaptive.pending)
-            .map(|(token, _)| token);
-        if let Some(token) = pending {
-            state.accept_token(token);
+        if let Some(state) = self.state.as_mut() {
+            state.accept_pending_token();
         }
     }
 

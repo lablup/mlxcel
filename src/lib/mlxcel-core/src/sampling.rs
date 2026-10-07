@@ -390,7 +390,9 @@ pub fn sample_token_optimized(
 /// Produces byte-identical logits to [`sample_token_optimized`] for the same
 /// history, so penalty-adjusted greedy sampling selects identical token ids.
 ///
-/// Used by: `BatchScheduler` decode steps, `CxxGenerator` decode loops
+/// Used by: [`crate::sampling_row_step::RowSampler`] (the CLI decode loops and
+/// the server's batched, single-step, and first-token sampling), and the
+/// prompt-lookup speculative loop
 pub fn sample_token_optimized_with_state(
     logits: &MlxArray,
     config: &SamplingConfig,
@@ -491,7 +493,8 @@ fn sample_token_optimized_core_full(
 /// This is what the native `/completion` route's `post_sampling_probs` view
 /// reports.
 ///
-/// Used by: `BatchScheduler` decode steps for `post_sampling_probs` requests
+/// Used by: [`crate::sampling_row_step::RowSampler`] when a server request asks
+/// for `post_sampling_probs`
 pub fn sample_token_with_state_and_distribution(
     logits: &MlxArray,
     config: &SamplingConfig,
@@ -2234,6 +2237,16 @@ impl SamplerState {
         {
             a.weighted_sum = orig_p + a.decay * a.weighted_sum;
             a.total_weight = 1.0 + a.decay * a.total_weight;
+        }
+    }
+
+    /// Confirm the last draw as emitted unchanged: [`Self::accept_token`] with
+    /// the sampled token adaptive-p parked as `pending`, without the caller
+    /// reading that token on the host. A no-op when no pair is pending (every
+    /// other config).
+    pub fn accept_pending_token(&mut self) {
+        if let Some((token, _)) = self.adaptive.as_ref().and_then(|a| a.pending) {
+            self.accept_token(token);
         }
     }
 }
