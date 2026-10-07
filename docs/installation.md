@@ -543,8 +543,12 @@ unchanged and prefill within 2%; the breakdown and every knob compared are in
 
 The allocator's peak counts live buffers only, so the most the allocator
 holds is the peak plus the cache limit. The memory limit the pre-load
-estimate reads (`memory_limit()`, 76.80 GiB) is unchanged by either default,
-so `mlxcel inspect` and `--estimate-memory` give the same answers as before.
+estimate reads (`memory_limit()`, 76.80 GiB) is unchanged by either default.
+The estimate's total does include the in-flight budget on ROCm builds, as its
+own `Backend in-flight` line in `mlxcel inspect` (lablup/mlxcel#2155): with it
+the estimate is above the measured peak for Llama-3.1-8B, Qwen2.5-7B and
+Qwen3-30B-A3B at 640 and 4096 tokens and budgets from 256 to 4096 MiB, where
+the 1.20 headroom factor alone fell short for the dense models.
 
 ### Current status
 

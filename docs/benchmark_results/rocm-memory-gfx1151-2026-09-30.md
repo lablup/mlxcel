@@ -123,6 +123,37 @@ Decode changes by +1.5% and -0.2%, inside the 2% bound. Prefill changes by -1.8%
 
 On ROCm the estimate behind `mlxcel inspect` and `--estimate-memory` reads the allocator's `memory_limit()` as available memory (#1805). Neither bound changes it: the cache default goes through `set_cache_limit`, and the in-flight budget is internal to the backend, so `memory_limit()` is still 76.80 GiB and every estimate is what it was. `runtime_tests::the_cache_default_leaves_the_memory_limit_the_estimator_reads` checks that runtime bring-up leaves it alone. What the estimate predicts is another matter, and the change moves reality toward it. `mlxcel inspect --max-tokens 640` (the pp512/tg128 context) estimates 5.58 GB for the 8B and 20.72 GB for the MoE model (weights and KV cache times 1.20 plus an activation term) and reports 76.80 GiB available for both, as before. The measured peaks were 20.60 GB and 23.56 GB before and are 6.14 GB and 18.58 GB now: the 8B still peaks 0.56 GB above its estimate (it was 15 GB above), and the MoE model now peaks below its estimate. Recalibrating the 1.20 factor for ROCm is not part of this change.
 
+## Estimate against peak
+
+Added 2026-10-07 (lablup/mlxcel#2155). The 5.58 GB above is `total_bytes / 1e9`: `mlxcel inspect` prints the same estimate as 5.20 GiB (5,579,686,809 bytes), so the 8B's 0.56 GB gap was real in either unit. Since then a ROCm build adds the in-flight budget to the estimate as its own term, `Backend in-flight` in `mlxcel inspect` (`backend_inflight_bytes` in `--json`): `MLX_ROCM_MAX_INFLIGHT_MB` MiB, read the way the backend reads it, 0 when it is `0`. The 1.20 factor is unchanged, because the excess tracks the budget and not the model size (the sweep above: 5.28 to 9.36 GB for the 8B between 256 and 4096 MiB). Metal and CUDA builds add nothing.
+
+Raw lines: [`data/rocm-memory-gfx1151-2026-09-30/estimate-vs-peak-2026-10-07.txt`](data/rocm-memory-gfx1151-2026-09-30/estimate-vs-peak-2026-10-07.txt). Peaks were measured again with a release build of main at `97f35bca` plus this change (the change touches only the estimate, not what runs), one run per row, each inside `scripts/rocm_gpu_guard.sh --idle-secs 30` and accepted only from a clean attempt (4 attempts were rejected as contended and rerun): `mlxcel-bench-decode -p "Hello, how are you today?" -n 128 --warmup-tokens 20 --ignore-eos --prompt-tokens N` with N = context minus 128, against `mlxcel inspect --max-tokens <context> --json`. The peak is printed in GB to two decimals, so the "Peak bound" column adds the 0.005 GB the rounding can hide. All figures are bytes.
+
+| Model | Context | Budget (MiB) | Peak bound | Estimate before | Estimate now | Now minus peak |
+|---|---:|---:|---:|---:|---:|---:|
+| Llama-3.1-8B-Instruct-4bit | 640 | 1024 (default) | 6,145,000,000 | 5,579,686,809 | 6,653,428,633 | 508,428,633 |
+| Llama-3.1-8B-Instruct-4bit | 640 | 256 | 5,185,000,000 | 5,579,686,809 | 5,848,122,265 | 663,122,265 |
+| Llama-3.1-8B-Instruct-4bit | 640 | 4096 | 9,235,000,000 | 5,579,686,809 | 9,874,654,105 | 639,654,105 |
+| Llama-3.1-8B-Instruct-4bit | 4096 | 1024 (default) | 6,955,000,000 | 6,103,135,948 | 7,176,877,772 | 221,877,772 |
+| Llama-3.1-8B-Instruct-4bit | 4096 | 256 | 6,025,000,000 | 6,103,135,948 | 6,371,571,404 | 346,571,404 |
+| Llama-3.1-8B-Instruct-4bit | 4096 | 4096 | 10,115,000,000 | 6,103,135,948 | 10,398,103,244 | 283,103,244 |
+| Qwen3-30B-A3B-4bit | 640 | 1024 (default) | 18,665,000,000 | 20,717,224,703 | 21,790,966,527 | 3,125,966,527 |
+| Qwen3-30B-A3B-4bit | 640 | 256 | 17,845,000,000 | 20,717,224,703 | 20,985,660,159 | 3,140,660,159 |
+| Qwen3-30B-A3B-4bit | 640 | 4096 | 21,815,000,000 | 20,717,224,703 | 25,012,191,999 | 3,197,191,999 |
+| Qwen3-30B-A3B-4bit | 4096 | 1024 (default) | 18,915,000,000 | 21,109,811,558 | 22,183,553,382 | 3,268,553,382 |
+| Qwen3-30B-A3B-4bit | 4096 | 256 | 18,785,000,000 | 21,109,811,558 | 21,378,247,014 | 2,593,247,014 |
+| Qwen3-30B-A3B-4bit | 4096 | 4096 | 19,265,000,000 | 21,109,811,558 | 25,404,778,854 | 6,139,778,854 |
+| Qwen2.5-7B-Instruct-4bit | 640 | 1024 (default) | 5,915,000,000 | 5,240,405,811 | 6,314,147,635 | 399,147,635 |
+| Qwen2.5-7B-Instruct-4bit | 640 | 256 | 4,855,000,000 | 5,240,405,811 | 5,508,841,267 | 653,841,267 |
+| Qwen2.5-7B-Instruct-4bit | 640 | 4096 | 9,125,000,000 | 5,240,405,811 | 9,535,373,107 | 410,373,107 |
+| Qwen2.5-7B-Instruct-4bit | 4096 | 1024 (default) | 6,175,000,000 | 5,469,414,809 | 6,543,156,633 | 368,156,633 |
+| Qwen2.5-7B-Instruct-4bit | 4096 | 256 | 5,415,000,000 | 5,469,414,809 | 5,737,850,265 | 322,850,265 |
+| Qwen2.5-7B-Instruct-4bit | 4096 | 4096 | 9,455,000,000 | 5,469,414,809 | 9,764,382,105 | 309,382,105 |
+
+The estimate before the change was below the peak in 9 of the 18 rows (every dense row except the 256 MiB ones, and the MoE model at 640 tokens and 4096 MiB); now it is above it in all 18, by at least 0.22 GB. `memory_estimate_inflight_tests::measured::rocm_estimate_covers_every_measured_gfx1151_peak` pins this table: it rebuilds each estimate from the checkpoint's config and weight size (the figures equal the `inspect` column byte for byte) and fails if any row is uncovered, or if no row would be uncovered without the term. The MoE model's margin stays large because its 17.17 GB of weights make the 1.20 factor alone worth 3.4 GB.
+
+Side effect: the server's model-aware prompt-cache defaults (`src/server/prompt_cache/snapshot_sizing.rs`, the snapshot store and the KV store) are sized from the estimate's slack, so on ROCm their ceiling, a quarter of the slack, falls by a quarter of the budget (268,435,456 bytes by default). At the 8192-token representative length on this host (76.80 GiB available) the ceilings move from 18.93 to 18.66 GB for the 8B, 15.22 to 14.95 GB for the MoE model and 19.18 to 18.91 GB for Qwen2.5-7B, while six representative entries need 6.44, 4.83 and 2.82 GB, so the chosen capacities do not change. A capacity can only change where the ceiling binds, by at most the larger of a quarter of the budget and one entry, and never below the compiled-in default. The paged KV `auto` budget subtracts the reserve as well, so it never admits a KV size the estimate then rejects.
+
 ## Reproducing
 
 ```bash

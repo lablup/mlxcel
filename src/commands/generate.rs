@@ -288,6 +288,7 @@ fn log_estimate_vs_actual_delta(est: &MemoryEstimate, snap: &mlxcel_core::memory
         weights_bytes = est.weights_bytes,
         kv_cache_bytes = est.kv_cache_bytes,
         runtime_headroom_bytes = est.runtime_headroom_bytes,
+        backend_inflight_bytes = est.backend_inflight_bytes,
         "Memory estimate vs actual delta",
     );
 }
