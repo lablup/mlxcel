@@ -52,7 +52,7 @@ use mlxcel_core::streams::{
     install_thread_local_default_stream, new_thread_local_generation_stream,
 };
 use mlxcel_core::utils::create_padded_prefill_mask;
-use mlxcel_core::{MlxThreadLocalStream, UniquePtr};
+use mlxcel_core::{FinishCause, MlxThreadLocalStream, UniquePtr};
 
 use crate::LoadedModel;
 use crate::models::gemma4_mtp_target::{
@@ -84,6 +84,7 @@ use crate::vision::feature_cache::ModelVisionCaches;
 use crate::vlm_runtime::prepared_embedding_refs;
 
 use super::active::ActiveBatch;
+use super::finish::{ContextBound, finish_decode_token};
 use super::prefill_cohort::{
     PrefillCohortKind, PrefillRow, batched_window_admits, batched_window_admits_lora,
     default_batched_prefill_token_budget, plan_prefill_cohorts,

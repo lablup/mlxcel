@@ -2195,32 +2195,22 @@ fn context_shift_trim_depth_matches_the_b10621_shift_arithmetic() {
 
 #[test]
 fn context_bound_stop_fires_only_with_shifting_disabled_and_a_bound() {
-    use super::BatchScheduler;
+    use crate::server::batch::finish::ContextBound;
 
-    let (mut seq, _rx) = make_test_sequence(90);
-    seq.prompt_tokens = vec![0; 60];
-    seq.generated_tokens = vec![1; 3];
-
+    let bound = |max_kv_size, context_shift| ContextBound {
+        max_kv_size,
+        context_shift,
+    };
     // 60 + 3 + 1 >= 64: the next token would not fit a 64-token bound.
-    assert!(BatchScheduler::context_bound_stop_due(
-        &seq,
-        Some(64),
-        false
-    ));
+    assert!(bound(Some(64), false).stop_due(60, 3, false));
     // One more token of headroom: not yet.
-    assert!(!BatchScheduler::context_bound_stop_due(
-        &seq,
-        Some(65),
-        false
-    ));
+    assert!(!bound(Some(65), false).stop_due(60, 3, false));
     // Shifting enabled: the trim handles it instead.
-    assert!(!BatchScheduler::context_bound_stop_due(
-        &seq,
-        Some(64),
-        true
-    ));
+    assert!(!bound(Some(64), true).stop_due(60, 3, false));
     // No bound configured: unbounded legacy behavior.
-    assert!(!BatchScheduler::context_bound_stop_due(&seq, None, false));
+    assert!(!bound(None, false).stop_due(60, 3, false));
+    // VLM sequences are exempt, as upstream exempts multimodal.
+    assert!(!bound(Some(64), false).stop_due(60, 3, true));
 }
 
 #[test]
@@ -2235,22 +2225,43 @@ fn a_context_bound_stop_is_reported_as_truncated_with_stop_type_limit() {
     assert_eq!(result.finish_reason, "length");
 }
 
-#[test]
-fn generation_deadline_finalizer_stops_single_sequence_decode_as_length() {
-    use super::BatchScheduler;
-
-    let (mut seq, _rx) = make_test_sequence(92);
+/// A decoding sequence on the byte-fallback stub tokenizer, so each byte id
+/// decodes to its own piece in the shared finish step (#2168).
+fn byte_decoding_sequence(
+    id_val: u64,
+) -> (
+    SequenceInfo,
+    mpsc::Receiver<GenerateEvent>,
+    crate::tokenizer::MlxcelTokenizer,
+) {
+    let tokenizer = crate::tokenizer::MlxcelTokenizer::stub_all_byte_fallback();
+    let (mut seq, rx) = make_test_sequence(id_val);
+    seq.decode_state = StreamingDecodeState::new(&tokenizer, &seq.prompt_tokens);
     seq.state = SequenceState::Decoding;
+    (seq, rx, tokenizer)
+}
+
+#[test]
+fn generation_deadline_stops_single_sequence_decode_as_length() {
+    use crate::server::batch::finish::{ContextBound, finish_decode_token};
+    use mlxcel_core::FinishCause;
+
+    let (mut seq, _rx, tokenizer) = byte_decoding_sequence(92);
     seq.bounds = GenerationBounds::new(0, Some(0));
+    let context = ContextBound::default();
 
     // The deadline starts with the first decoded piece and, like b10621, is
     // evaluated only when a later newline-bearing piece arrives.
-    seq.stream_decoded_text("prefix".to_owned(), Some(10), None);
+    assert_eq!(
+        finish_decode_token(&mut seq, &tokenizer, i32::from(b'p'), None, false, context),
+        None
+    );
     std::thread::sleep(Duration::from_millis(2));
-    seq.stream_decoded_text("\n".to_owned(), Some(11), None);
+    assert_eq!(
+        finish_decode_token(&mut seq, &tokenizer, i32::from(b'\n'), None, false, context),
+        Some(FinishCause::Length)
+    );
     assert!(seq.bound_stopped());
-
-    BatchScheduler::finish_on_generation_bound(&mut seq);
     assert!(matches!(
         seq.state,
         SequenceState::Finished(FinishReason::Length)
@@ -2258,20 +2269,31 @@ fn generation_deadline_finalizer_stops_single_sequence_decode_as_length() {
 }
 
 #[test]
-fn generation_bound_finalizer_preserves_a_prior_string_stop() {
-    use super::BatchScheduler;
+fn a_string_stop_outranks_a_fired_generation_bound() {
+    use crate::server::batch::finish::{ContextBound, finish_decode_token};
+    use mlxcel_core::FinishCause;
 
-    let (mut seq, _rx) = make_test_sequence(93);
-    seq.state = SequenceState::Decoding;
+    let (mut seq, _rx, tokenizer) = byte_decoding_sequence(93);
     seq.bounds = GenerationBounds::new(0, Some(0));
+    seq.stop_matcher = StopMatcher::new(["z".to_owned()]);
     seq.stream_decoded_text("prefix".to_owned(), Some(10), None);
     std::thread::sleep(Duration::from_millis(2));
     seq.stream_decoded_text("\n".to_owned(), Some(11), None);
-    seq.state
-        .transition_to(SequenceState::Finished(FinishReason::StopSequence))
-        .expect("string stop transition succeeds");
+    assert!(seq.bound_stopped());
 
-    BatchScheduler::finish_on_generation_bound(&mut seq);
+    // The finish step reads the stop string before the bound, as upstream
+    // evaluates stop strings first.
+    assert_eq!(
+        finish_decode_token(
+            &mut seq,
+            &tokenizer,
+            i32::from(b'z'),
+            None,
+            false,
+            ContextBound::default()
+        ),
+        Some(FinishCause::StopSequence)
+    );
     assert!(matches!(
         seq.state,
         SequenceState::Finished(FinishReason::StopSequence)

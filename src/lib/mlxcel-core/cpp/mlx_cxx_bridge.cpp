@@ -5296,6 +5296,56 @@ std::unique_ptr<MlxArray> rocm_jit_key_probe(
 #endif
 }
 
+// Test-only fixture for lablup/mlxcel#2183; see the header. Each `variant` is
+// its own kernel name, so its first launch in a process is a JIT cache miss
+// that compiles through hiprtc and inserts a new module, and every later
+// launch of it is a hit.
+std::unique_ptr<MlxArray> rocm_jit_race_probe_array(
+    const MlxArray& input,
+    int32_t variant) {
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+    using namespace mlx::core;
+    const array& inp = input.inner;
+    if (inp.dtype() != float32) {
+        throw std::invalid_argument(
+            "rocm_jit_race_probe_array: input must be float32");
+    }
+    if (inp.ndim() != 1 || inp.size() < 1 || inp.size() > 1024) {
+        throw std::invalid_argument(
+            "rocm_jit_race_probe_array: input must be 1-d with 1 to 1024 "
+            "elements");
+    }
+    if (variant < 0) {
+        throw std::invalid_argument(
+            "rocm_jit_race_probe_array: variant must be non-negative");
+    }
+    const std::string source =
+        "  out[thread_index()] = inp[thread_index()] * 2.0f + 1.0f;\n";
+    auto kernel = fast::hip_kernel(
+        "mlxcel_jit_race_probe_v" + std::to_string(variant),
+        {"inp"},
+        {"out"},
+        source);
+    const int n = static_cast<int>(inp.size());
+    auto outputs = kernel(
+        {inp},
+        {{n}},
+        {float32},
+        std::make_tuple(n, 1, 1),
+        std::make_tuple(n, 1, 1),
+        {},
+        std::nullopt,
+        false,
+        Device::gpu);
+    return std::make_unique<MlxArray>(std::move(outputs.at(0)));
+#else
+    (void)input;
+    (void)variant;
+    throw std::runtime_error(
+        "rocm_jit_race_probe_array is only available on the ROCm backend");
+#endif
+}
+
 // See the header. Only ROCm routes `quantized_matmul` to kernels whose bytes
 // depend on the shape in a way the tile rule on the Rust side does not
 // capture, so every other backend answers true and keeps its eligibility.

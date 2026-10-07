@@ -1443,6 +1443,16 @@ std::unique_ptr<MlxArray> rocm_fault_probe_array(int32_t kind);
 // backends other than ROCm.
 std::unique_ptr<MlxArray> rocm_jit_key_probe(const MlxArray& input, bool f16_output);
 
+// Test-only (lablup/mlxcel#2183): launches one `fast::hip_kernel` named
+// `mlxcel_jit_race_probe_v<variant>` in one block of `input.size()` threads and
+// returns a float32 array of that size whose element `i` is
+// `input[i] * 2 + 1`. The first launch of a variant in a process compiles and
+// inserts a JIT module, later launches find it, so threads launching the same
+// or different variants at once exercise the JIT module cache's locking.
+// Takes a 1-d float32 input of 1 to 1024 elements and a non-negative variant.
+// Throws on backends other than ROCm.
+std::unique_ptr<MlxArray> rocm_jit_race_probe_array(const MlxArray& input, int32_t variant);
+
 
 // True when this backend has a BitLinear kernel port: Metal, CUDA or ROCm
 // (issues #1803, #1862). Read from the kernel's port table, so on a wave64

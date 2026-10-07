@@ -27,6 +27,7 @@
 use std::borrow::Cow;
 
 use crate::cache::{CachePool, KVCacheMode, SequenceId};
+use crate::decode_finish::{FinishCause, FinishInput, NoStopHooks, finish_step};
 use crate::ffi;
 use crate::ffi::{MlxArray, MlxThreadLocalStream};
 use crate::generation_policy::{
@@ -34,7 +35,7 @@ use crate::generation_policy::{
 };
 use crate::hardware;
 use crate::layers::KVCache;
-use crate::loop_detection::{LoopDetectionConfig, detect_repetition_loop};
+use crate::loop_detection::LoopDetectionConfig;
 use crate::prefill_plan::{PrefillCaps, PrefillInput, PrefillPlan};
 use crate::sampling::{
     SamplerState, TokenBiasMap, sample_token_optimized, sample_token_optimized_with_state,
@@ -500,6 +501,49 @@ fn sample_next_step(
         sample_token_optimized_with_state(next_logits, sampling, token_history, sampler_state),
         Some(current),
     )
+}
+
+/// The post-sample finish step of the `CxxGenerator` decode loops: the shared
+/// [`finish_step`] (#2168) with [`NoStopHooks`], because the CLI has no stop
+/// strings, generation bounds or context bound.
+///
+/// `history` is `Some` only when the loop must record the token itself, that
+/// is when [`sample_next_step`] did not already read and record it.
+///
+/// Used by: `CxxGenerator::generate_streaming`,
+/// `CxxGenerator::generate_streaming_with_embeddings`,
+/// `CxxGenerator::generate_with_stats_and_embeddings`,
+/// `CxxGenerator::generate_with_stats`
+#[inline]
+fn cli_finish_step(
+    token: i32,
+    eos: &[i32],
+    generated: &mut Vec<i32>,
+    history: Option<&mut Vec<i32>>,
+    max_tokens: usize,
+    loop_detection: &LoopDetectionConfig,
+) -> Option<FinishCause> {
+    finish_step(
+        FinishInput {
+            token,
+            eos,
+            generated,
+            history,
+            max_tokens,
+            structured_stopped: false,
+            loop_detection,
+        },
+        &mut NoStopHooks,
+    )
+}
+
+/// Whether a streaming CLI loop hands the token that ended generation to its
+/// callback. An EOS token is never emitted, and a repetition loop withholds
+/// its looping token (it stays in `generated_tokens`); the token that spends
+/// the budget is emitted.
+#[inline]
+fn cli_emits_final_token(cause: FinishCause) -> bool {
+    !matches!(cause, FinishCause::Eos | FinishCause::RepetitionLoop)
 }
 
 /// Trait for language models that can be used for generation
@@ -2163,7 +2207,8 @@ impl CxxGenerator {
                 ffi::eval(&y);
             }
 
-            // Check if we've reached max
+            // `max_tokens == 0` emits nothing. Otherwise the finish step below
+            // ends the loop on the token that spends the budget.
             if n >= max_tokens {
                 break;
             }
@@ -2180,36 +2225,30 @@ impl CxxGenerator {
                 profile_count += 1;
             }
 
-            // Check EOS before sending to callback (avoid outputting stop tokens)
-            if eos_tokens.contains(&token_val) {
-                break;
-            }
-
-            self.generated_tokens.push(token_val);
-            if needs_history && current_token.is_none() {
-                token_history.push(token_val);
-            }
-
-            // Loop / repetition guard: end generation early when the raw
-            // generated stream collapses into a short repeated pattern (e.g.
-            // Gemma 4 token-repetition collapse). A disabled config (the
-            // default) short-circuits with zero overhead.
-            if detect_repetition_loop(&self.generated_tokens, &sampling.loop_detection) {
-                break;
-            }
-
-            // Invoke callback; abort if it returns false
-            if !on_token(token_val) {
-                break;
-            }
-
-            // Periodic cache clearing. Backend-aware cadence (#627): Metal
-            // trims the buffer cache cheaply, but on CUDA the clear churns the
-            // memory pool and defeats CUDA-graph reuse (mlx#2358), so it is
-            // disabled by default there and the cache is bounded via
-            // MLXCEL_CACHE_LIMIT instead. MLXCEL_CACHE_CLEAR_INTERVAL overrides.
-            if crate::memory::should_clear_cache_at(n, crate::memory::cache_clear_interval()) {
-                ffi::clear_memory_cache();
+            // The shared post-sample finish step (#2168): EOS, push, budget, loop
+            // detection and the cache-clear cadence. EOS is never pushed or emitted,
+            // a repetition loop withholds its looping token, and the token that
+            // spends the budget is still delivered before the loop ends.
+            match cli_finish_step(
+                token_val,
+                &eos_tokens,
+                &mut self.generated_tokens,
+                (needs_history && current_token.is_none()).then_some(&mut token_history),
+                max_tokens,
+                &sampling.loop_detection,
+            ) {
+                None => {
+                    // Invoke callback; abort if it returns false
+                    if !on_token(token_val) {
+                        break;
+                    }
+                }
+                Some(cause) => {
+                    if cli_emits_final_token(cause) {
+                        let _ = on_token(token_val);
+                    }
+                    break;
+                }
             }
 
             // Move to next
@@ -2359,41 +2398,38 @@ impl CxxGenerator {
                 ffi::eval(&y);
             }
 
+            // `max_tokens == 0` emits nothing. Otherwise the finish step below
+            // ends the loop on the token that spends the budget.
             if n >= max_tokens {
                 break;
             }
 
             let token_val = current_token.unwrap_or_else(|| ffi::item_i32(&y));
 
-            // Check EOS before sending to callback (avoid outputting stop tokens)
-            if eos_tokens.contains(&token_val) {
-                break;
-            }
-
-            self.generated_tokens.push(token_val);
-            if needs_history && current_token.is_none() {
-                token_history.push(token_val);
-            }
-
-            // Loop / repetition guard: end generation early when the raw
-            // generated stream collapses into a short repeated pattern (e.g.
-            // Gemma 4 token-repetition collapse). A disabled config (the
-            // default) short-circuits with zero overhead.
-            if detect_repetition_loop(&self.generated_tokens, &sampling.loop_detection) {
-                break;
-            }
-
-            if !on_token(token_val) {
-                break;
-            }
-
-            // Periodic cache clearing. Backend-aware cadence (#627): Metal
-            // trims the buffer cache cheaply, but on CUDA the clear churns the
-            // memory pool and defeats CUDA-graph reuse (mlx#2358), so it is
-            // disabled by default there and the cache is bounded via
-            // MLXCEL_CACHE_LIMIT instead. MLXCEL_CACHE_CLEAR_INTERVAL overrides.
-            if crate::memory::should_clear_cache_at(n, crate::memory::cache_clear_interval()) {
-                ffi::clear_memory_cache();
+            // The shared post-sample finish step (#2168): EOS, push, budget, loop
+            // detection and the cache-clear cadence. EOS is never pushed or emitted,
+            // a repetition loop withholds its looping token, and the token that
+            // spends the budget is still delivered before the loop ends.
+            match cli_finish_step(
+                token_val,
+                &eos_tokens,
+                &mut self.generated_tokens,
+                (needs_history && current_token.is_none()).then_some(&mut token_history),
+                max_tokens,
+                &sampling.loop_detection,
+            ) {
+                None => {
+                    // Invoke callback; abort if it returns false
+                    if !on_token(token_val) {
+                        break;
+                    }
+                }
+                Some(cause) => {
+                    if cli_emits_final_token(cause) {
+                        let _ = on_token(token_val);
+                    }
+                    break;
+                }
             }
 
             match (next_y, next_logprobs) {
@@ -2567,6 +2603,8 @@ impl CxxGenerator {
             if n == 0 {
                 ffi::eval(&y);
             }
+            // `max_tokens == 0` emits nothing. Otherwise the finish step below
+            // ends the loop on the token that spends the budget.
             if n >= max_tokens {
                 break;
             }
@@ -2576,28 +2614,19 @@ impl CxxGenerator {
             if let Some(start) = wait_start {
                 wait_ns_total += start.elapsed().as_nanos();
             }
-            if eos_tokens.contains(&token_val) {
+            // The shared post-sample finish step (#2168): EOS (never stored), push,
+            // budget, loop detection and the cache-clear cadence.
+            if cli_finish_step(
+                token_val,
+                &eos_tokens,
+                &mut self.generated_tokens,
+                (needs_history && current_token.is_none()).then_some(&mut token_history),
+                max_tokens,
+                &sampling.loop_detection,
+            )
+            .is_some()
+            {
                 break;
-            }
-            self.generated_tokens.push(token_val);
-            if needs_history && current_token.is_none() {
-                token_history.push(token_val);
-            }
-
-            // Loop / repetition guard: end generation early when the raw
-            // generated stream collapses into a short repeated pattern (e.g.
-            // Gemma 4 token-repetition collapse). A disabled config (the
-            // default) short-circuits with zero overhead.
-            if detect_repetition_loop(&self.generated_tokens, &sampling.loop_detection) {
-                break;
-            }
-            // Periodic cache clearing. Backend-aware cadence (#627): Metal
-            // trims the buffer cache cheaply, but on CUDA the clear churns the
-            // memory pool and defeats CUDA-graph reuse (mlx#2358), so it is
-            // disabled by default there and the cache is bounded via
-            // MLXCEL_CACHE_LIMIT instead. MLXCEL_CACHE_CLEAR_INTERVAL overrides.
-            if crate::memory::should_clear_cache_at(n, crate::memory::cache_clear_interval()) {
-                ffi::clear_memory_cache();
             }
             if let Some(ny) = next_y {
                 y = ny;
@@ -2811,7 +2840,8 @@ impl CxxGenerator {
                 ffi::eval(&y);
             }
 
-            // Check if we've reached max
+            // `max_tokens == 0` emits nothing. Otherwise the finish step below
+            // ends the loop on the token that spends the budget.
             if n >= max_tokens {
                 break;
             }
@@ -2823,31 +2853,19 @@ impl CxxGenerator {
                 wait_ns_total += start.elapsed().as_nanos();
             }
 
-            // Check EOS before storing (avoid including stop tokens in output)
-            if eos_tokens.contains(&token_val) {
+            // The shared post-sample finish step (#2168): EOS (never stored), push,
+            // budget, loop detection and the cache-clear cadence.
+            if cli_finish_step(
+                token_val,
+                &eos_tokens,
+                &mut self.generated_tokens,
+                (needs_history && current_token.is_none()).then_some(&mut token_history),
+                max_tokens,
+                &sampling.loop_detection,
+            )
+            .is_some()
+            {
                 break;
-            }
-
-            self.generated_tokens.push(token_val);
-            if needs_history && current_token.is_none() {
-                token_history.push(token_val);
-            }
-
-            // Loop / repetition guard: end generation early when the raw
-            // generated stream collapses into a short repeated pattern (e.g.
-            // Gemma 4 token-repetition collapse). A disabled config (the
-            // default) short-circuits with zero overhead.
-            if detect_repetition_loop(&self.generated_tokens, &sampling.loop_detection) {
-                break;
-            }
-
-            // Periodic cache clearing. Backend-aware cadence (#627): Metal
-            // trims the buffer cache cheaply, but on CUDA the clear churns the
-            // memory pool and defeats CUDA-graph reuse (mlx#2358), so it is
-            // disabled by default there and the cache is bounded via
-            // MLXCEL_CACHE_LIMIT instead. MLXCEL_CACHE_CLEAR_INTERVAL overrides.
-            if crate::memory::should_clear_cache_at(n, crate::memory::cache_clear_interval()) {
-                ffi::clear_memory_cache();
             }
 
             // Move to next
@@ -4009,3 +4027,7 @@ mod tests {
 #[cfg(test)]
 #[path = "generate_history_tests.rs"]
 mod history_tests;
+
+#[cfg(test)]
+#[path = "generate_finish_tests.rs"]
+mod finish_tests;

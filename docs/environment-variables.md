@@ -445,6 +445,8 @@ The OpenAI audio endpoints (`/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1
 
 N-gram tail repetition detection ends a generation early when the raw generated token stream collapses into a short repeated pattern (a single token such as `様様様様`, or a short block such as `abcdabcd...`). It runs on the raw stream, so it also catches loops inside the reasoning/thought channel and tool-call JSON, not just the final answer. The wire `finish_reason` is `stop`, the same as vLLM. Sampling penalties (`repeat_penalty`, DRY) cannot recover once the logits collapse, which is why this is a stop condition rather than a logit reshaper.
 
+Every decode path runs the detector at the same point of the shared post-sample finish step (after the stop-string, generation-bound, structured-output, `max_tokens` and context-bound checks): the CLI loops, classic server decode, and the speculative MTP and DFlash burst streams. Before #2168 a looping request served by a speculative burst ran to `max_tokens`.
+
 The detector mirrors vLLM's `SamplingParams` fields, with the same JSON names on the OpenAI chat surface:
 
 | Field | Meaning |

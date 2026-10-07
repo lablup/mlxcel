@@ -1276,8 +1276,6 @@ void dequant_rocblas_gemm(
   void* c_ptr = gpu_ptr<void>(c);
 
   enc.launch_kernel([&, a_ptr, b_ptr, c_ptr](hipStream_t stream) {
-    enc.device().set_rocblas_stream(stream);
-    rocblas_handle handle = enc.device().get_rocblas_handle();
 
     rocblas_operation op_a = to_rocblas_op(transpose_a);
     rocblas_operation op_b = to_rocblas_op(transpose_b);
@@ -1303,6 +1301,11 @@ void dequant_rocblas_gemm(
         // Fall through to rocBLAS below.
       }
     }
+
+    // Taken after the hipBLASLt attempt so hipBLASLt GEMMs never hold the
+    // rocBLAS lease.
+    auto lease = enc.device().acquire_rocblas(stream);
+    rocblas_handle handle = lease.handle();
 
     switch (dtype) {
       case float32: {
@@ -1519,8 +1522,8 @@ void dequant_rocblas_gemm_batched(
   void* c_ptr = gpu_ptr<void>(c);
 
   enc.launch_kernel([&, a_ptr, b_ptr, c_ptr](hipStream_t stream) {
-    enc.device().set_rocblas_stream(stream);
-    rocblas_handle handle = enc.device().get_rocblas_handle();
+    auto lease = enc.device().acquire_rocblas(stream);
+    rocblas_handle handle = lease.handle();
 
     rocblas_operation op_a = to_rocblas_op(transpose_a);
     rocblas_operation op_b = to_rocblas_op(transpose_b);

@@ -2410,6 +2410,17 @@ mod ffi {
         /// [`crate::rocm_faults::jit_key_probe_array`].
         fn rocm_jit_key_probe(input: &MlxArray, f16_output: bool) -> Result<UniquePtr<MlxArray>>;
 
+        /// Test-only (issue #2183): one `fast::hip_kernel` launch named
+        /// `mlxcel_jit_race_probe_v<variant>` returning a float32 array whose
+        /// element `i` is `input[i] * 2 + 1`. The first launch of a variant
+        /// in a process misses the JIT module cache and compiles; later
+        /// launches hit it. Errors on backends other than ROCm, for an input
+        /// that is not a 1-d float32 array of 1 to 1024 elements, and for a
+        /// negative variant. Prefer the wrapper
+        /// [`crate::rocm_faults::jit_race_probe_array`].
+        fn rocm_jit_race_probe_array(input: &MlxArray, variant: i32)
+        -> Result<UniquePtr<MlxArray>>;
+
         /// True when this backend has a BitLinear kernel port, that is Metal,
         /// CUDA or ROCm (issues #1803, #1862), read from the kernel's port
         /// table, so false on a wave64 ROCm device (#2147). Separate from
@@ -3436,6 +3447,9 @@ pub use session::{InferenceSession, MlxInferenceSession, SessionCapabilities};
 // Re-export N-gram loop-detection so the server control plane and CLI decode
 // loops can configure and run early-stop on degenerate token-repetition.
 pub use loop_detection::{LoopDetectionConfig, detect_repetition_loop};
+// Re-export the shared post-sample finish step (#2168) so the server batch
+// scheduler and the CLI decode loops run one finish decision.
+pub use decode_finish::{FinishCause, FinishHooks, FinishInput, NoStopHooks, finish_step};
 // Re-export B9 observability counter accessors so the server `/metrics` handler
 // can read process-wide lang-bias counters without a struct dependency.
 // Includes the byte-fragment suppression counter added.
@@ -3867,6 +3881,11 @@ pub mod generation_policy;
 // Public so the server batch scheduler and CLI decode loops can end a
 // degenerate generation early (e.g. Gemma 4 token-repetition collapse).
 pub mod loop_detection;
+
+// The one post-sample finish step (EOS, stop strings, bounds, budget, context
+// bound, loop detection, cache-clear cadence) shared by every CLI and server
+// decode site (#2168).
+pub mod decode_finish;
 
 // Shared sampling and token-penalty policy helpers.
 // Public so that the server batch scheduler can perform step-level sampling.
