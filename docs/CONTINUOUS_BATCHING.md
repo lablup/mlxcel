@@ -99,6 +99,16 @@ with a direct `Engine` run (arm `d:engine`) and with `CxxGenerator` (arm
 the harness's own render, so a divergence can be placed on the scheduler's
 policy, the storage, or the engine.
 
+The harness's own render (`engine_probe::prompt::render_chat_prompt`) and
+`mlxcel-bench-decode`'s render apply the checkpoint template without the
+`enable_thinking=true` default that the server (`startup::load_chat_front`) and
+`mlxcel generate` set when the tokenizer has a think-marker pair (Gemma 4
+excepted, issue #686). On a thinking checkpoint such as Qwen3, the arms on the
+harness render therefore see a different prompt than `e:run` and `f:server`,
+which both render through the server. This is a known divergence that Phase 6
+(#2176) removes when those paths move onto the server request path; it does
+not touch the `e:run` and `f:server` comparison.
+
 Two server features still change near-tie greedy tokens and are tracked as
 measured divergences rather than covered by the invariant: a prompt-cache hit
 forwards only the suffix of a cached prefix (the chat REPL runs with the cache
