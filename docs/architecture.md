@@ -98,8 +98,8 @@ The ROCm overlay is vendored from the `rocm-support` branch of NripeshN/mlx
 retargeted to, and `patches-rocm/LOCAL_FIXES.md` lists every change mlxcel
 carries on top of it. `docs/mlxcelverse/rocm-overlay.md` is the procedure for
 following both upstreams (pin bumps, fork syncs, and the `scripts/mlxcelverse/`
-tools), and `docs/mlxcelverse/upstream/` holds the fixes prepared as pull
-requests for the fork. Reorganizing the whole tree under an `mlxcelverse`
+tools), and `docs/mlxcelverse/upstream/` holds fork-side fix packages kept as
+historical reference (not submitted; fixes stay in the overlay). Reorganizing the whole tree under an `mlxcelverse`
 directory name, with no change to build output, is tracked in
 lablup/mlxcel#1816.
 
