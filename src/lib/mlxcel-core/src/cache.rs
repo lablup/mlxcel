@@ -120,7 +120,7 @@ pub mod turbo;
 #[path = "cache/turbo_tests.rs"]
 mod turbo_tests;
 
-pub use attend::attend_batched;
+pub use attend::{KvAttention, attend_batched, attend_batched_rows};
 pub use batch_quant::{
     BatchKvQuantConfig, BatchQuantizedKVCache, BatchTurboQuantKVCache, DEFAULT_KV_GROUP_SIZE,
     KvQuantScheme,
@@ -702,6 +702,16 @@ impl KVCache {
     #[inline]
     pub fn is_paged_backed(&self) -> bool {
         self.paged_backing.is_some()
+    }
+
+    /// Whether this cache stores plain FP16 rows in its own dense buffers:
+    /// FP16 mode and no pool backing. The layout a model may stack or slice
+    /// across rows directly (`keys` / `values` are the whole state).
+    ///
+    /// Used by: `models::gemma4_verify_rows` (batched MTP verify stacking).
+    #[inline]
+    pub fn is_dense_fp16(&self) -> bool {
+        self.mode == KVCacheMode::Fp16 && self.paged_backing.is_none()
     }
 
     /// Override the Turbo4Delegated hot-tail fold threshold for this cache.

@@ -300,7 +300,6 @@ fn step_of_one_runs_the_single_row_forward() {
             &StepBatch {
                 seq_ids: &[id],
                 input: &input,
-                context: None,
             },
             &mut [row.row()],
         )
@@ -338,7 +337,6 @@ fn step_of_many_runs_the_batched_forward_in_row_order() {
             &StepBatch {
                 seq_ids: &ids,
                 input: &input,
-                context: None,
             },
             &mut views,
         )
@@ -368,7 +366,6 @@ fn fused_and_per_row_paths_agree_for_greedy_rows() {
     let batch = StepBatch {
         seq_ids: &[a, b],
         input: &input,
-        context: None,
     };
     let mut fused = [Row::greedy(a), Row::greedy(b)];
     {
@@ -405,7 +402,6 @@ fn mask_override_and_matcher_run_in_the_per_row_chain() {
     let batch = StepBatch {
         seq_ids: &[id],
         input: &input,
-        context: None,
     };
     let out = engine.step(&batch, &mut [row.row()]).unwrap();
     // The mask forced token 4, the override emitted 5, and the matcher saw
@@ -428,7 +424,6 @@ fn a_failed_row_never_touches_its_neighbours() {
     let batch = StepBatch {
         seq_ids: &[a, b, c],
         input: &input,
-        context: None,
     };
     let out = {
         let mut views: Vec<_> = rows.iter_mut().map(Row::row).collect();
@@ -467,7 +462,6 @@ fn step_names_the_missing_row() {
                 &StepBatch {
                     seq_ids: &[gone],
                     input: &input,
-                    context: None,
                 },
                 &mut [row.row()],
             )
@@ -482,7 +476,6 @@ fn step_names_the_missing_row() {
             &StepBatch {
                 seq_ids: &[a, gone],
                 input: &input,
-                context: None,
             },
             &mut views,
         ),
@@ -494,7 +487,6 @@ fn step_names_the_missing_row() {
             &StepBatch {
                 seq_ids: &[],
                 input: &input,
-                context: None,
             },
             &mut no_rows,
         ),
@@ -514,7 +506,6 @@ fn submit_then_finish_rows_is_one_pipelined_step() {
     let batch = StepBatch {
         seq_ids: &[a, b],
         input: &input,
-        context: None,
     };
     let params = crate::sampling::FusedSampleParams::from_config(&rows[0].sampling);
     let biases: Vec<&crate::sampling::TokenBiasMap> =
@@ -544,7 +535,6 @@ fn speculative_step_is_undone_by_unwind_appends() {
     let batch = StepBatch {
         seq_ids: &[a, b],
         input: &input,
-        context: None,
     };
     let params = crate::sampling::FusedSampleParams::from_config(&SamplingConfig::greedy());
     let bias = crate::sampling::TokenBiasMap::default();

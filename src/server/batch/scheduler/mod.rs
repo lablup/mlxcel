@@ -37,9 +37,7 @@ use mlxcel_core::cache::{
     SequenceStateBackend, SequenceStateLayout,
 };
 use mlxcel_core::engine::{Engine, PrefillStep, RowError, RowOutcome, StepBatch};
-use mlxcel_core::generate::{
-    DecodeBatchContext, DecodeStorageBackend as CoreDecodeStorageBackend, LanguageModel,
-};
+use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::generation_policy::{
     initial_token_history, merged_eos_token_ids, seed_rng_if_needed,
 };

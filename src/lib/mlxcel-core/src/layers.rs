@@ -5763,8 +5763,10 @@ pub fn select_pooled_paged_dispatch(
 ///   values (`0` / `false` / `off` / `no`) as its kill switch: setting it
 ///   restores the pre-#899 gather-then-SDPA behaviour end to end.
 ///
-/// The separate `DecodeBatchContext::use_native_paged_kernel` request still
-/// governs the *dense-compat* block-table decode, which is a different path.
+/// The dense-compat block-table entries (`paged_decode_attention_dense_compat`
+/// and `_rotating_compat`) are not governed by it; since #2172 no production
+/// forward calls them (the model-owned families attend through their caches,
+/// ADR 0009), and they remain as the reference pair their FFI tests pin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NativePagedOverride {
     /// Force the fused kernel, bypassing the adaptive selector (the original

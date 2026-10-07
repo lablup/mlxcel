@@ -131,7 +131,7 @@ mod snapshot_prompt_cache {
     use mlxcel_core::{MlxArray, UniquePtr};
 
     const HIDDEN: i32 = 8;
-    const VOCAB: i32 = 16;
+    pub(super) const VOCAB: i32 = 16;
     const INTER: i32 = 8;
     const HEAD_DIM: i32 = 4;
     const HEADS: i32 = 2;
@@ -254,7 +254,7 @@ mod snapshot_prompt_cache {
         w
     }
 
-    fn build_wrapper() -> Llama4Wrapper {
+    pub(super) fn build_wrapper() -> Llama4Wrapper {
         let args = synthetic_args();
         let weights = synthetic_weights();
         Llama4Wrapper::new(
@@ -274,7 +274,7 @@ mod snapshot_prompt_cache {
         mlxcel_core::from_slice_f32(&data, &[1, KV_HEADS, n, HEAD_DIM])
     }
 
-    fn to_vec_f32(arr: &MlxArray) -> Vec<f32> {
+    pub(super) fn to_vec_f32(arr: &MlxArray) -> Vec<f32> {
         let arr_f32 = mlxcel_core::astype(arr, mlxcel_core::dtype::FLOAT32);
         mlxcel_core::eval(&arr_f32);
         mlxcel_core::array_to_raw_bytes(&arr_f32)
@@ -283,17 +283,17 @@ mod snapshot_prompt_cache {
             .collect()
     }
 
-    fn ids(range: std::ops::Range<i32>) -> Vec<i32> {
+    pub(super) fn ids(range: std::ops::Range<i32>) -> Vec<i32> {
         range.map(|i| i.rem_euclid(VOCAB - 1) + 1).collect()
     }
 
-    fn prefill(wrapper: &Llama4Wrapper, seq: SequenceId, tokens: &[i32]) {
+    pub(super) fn prefill(wrapper: &Llama4Wrapper, seq: SequenceId, tokens: &[i32]) {
         wrapper.prepare_sequence_state(seq);
         let prompt = mlxcel_core::from_slice_i32(tokens, &[1, tokens.len() as i32]);
         let _ = wrapper.forward_with_sequence_id(&prompt, Some(seq), &mut [], None);
     }
 
-    fn decode(wrapper: &Llama4Wrapper, seq: SequenceId, token: i32) -> Vec<f32> {
+    pub(super) fn decode(wrapper: &Llama4Wrapper, seq: SequenceId, token: i32) -> Vec<f32> {
         let input = mlxcel_core::from_slice_i32(&[token], &[1, 1]);
         let logits = wrapper.forward_with_sequence_id(&input, Some(seq), &mut [], None);
         to_vec_f32(logits.as_ref().expect("logits"))
@@ -464,5 +464,231 @@ mod snapshot_prompt_cache {
             err.contains("does not match configured cache mode"),
             "unexpected error: {err}"
         );
+    }
+}
+
+// -----------------------------------------------------------------
+// The cache-owned attention entry (issue #2172, ADR 0008 / ADR 0009).
+//
+// `CxxAttention::forward_llama4` used to spell out `update_and_fetch` plus a
+// three-way SDPA choice, and the batched decode selected a dense-pointer paged
+// kernel from the scheduler's `DecodeBatchContext`. Both now hand the
+// projected Q/K/V to `Llama4Cache::attend` (`ChunkedKVCache::attend` for an
+// iGQA chunked layer, `KVCache::attend` for a dense one). The first module
+// pins that the entry runs the same ops the block ran for FP16 storage, bit
+// for bit, prefill and front-trimmed decode alike; the second pins the
+// batched decode of the synthetic model against single-row decode.
+mod cache_attend_entry {
+    use super::super::Llama4Cache;
+    use mlxcel_core::cache::KvAttention;
+    use mlxcel_core::layers::{ChunkedKVCache, KVCache};
+    use mlxcel_core::{MlxArray, UniquePtr};
+
+    const HEADS: i32 = 2;
+    const KV_HEADS: i32 = 1;
+    const DIM: i32 = 4;
+    const SCALE: f32 = 0.5;
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn next_f32(&mut self) -> f32 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            ((self.0 >> 40) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0
+        }
+        fn array(&mut self, shape: &[i32]) -> UniquePtr<MlxArray> {
+            let n: usize = shape.iter().map(|d| *d as usize).product();
+            let data: Vec<f32> = (0..n).map(|_| self.next_f32()).collect();
+            let f32_arr = mlxcel_core::from_slice_f32(&data, shape);
+            mlxcel_core::astype(&f32_arr, mlxcel_core::dtype::FLOAT16)
+        }
+        fn step(
+            &mut self,
+            len: i32,
+        ) -> (
+            UniquePtr<MlxArray>,
+            UniquePtr<MlxArray>,
+            UniquePtr<MlxArray>,
+        ) {
+            (
+                self.array(&[1, HEADS, len, DIM]),
+                self.array(&[1, KV_HEADS, len, DIM]),
+                self.array(&[1, KV_HEADS, len, DIM]),
+            )
+        }
+    }
+
+    fn to_vec_f32(arr: &MlxArray) -> Vec<f32> {
+        let arr_f32 = mlxcel_core::astype(arr, mlxcel_core::dtype::FLOAT32);
+        mlxcel_core::eval(&arr_f32);
+        mlxcel_core::array_to_raw_bytes(&arr_f32)
+            .chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect()
+    }
+
+    /// What `forward_llama4` did before #2172, verbatim.
+    fn block_reference(
+        cache: &mut Llama4Cache,
+        q: &MlxArray,
+        k: UniquePtr<MlxArray>,
+        v: UniquePtr<MlxArray>,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let l = mlxcel_core::array_shape(q)[2];
+        let (cache_k, cache_v) = cache.update_and_fetch(k, v);
+        if l > 1 && mask.is_none() {
+            mlxcel_core::causal_attention(q, &cache_k, &cache_v, SCALE, 0.0, 0)
+        } else if let Some(m) = mask {
+            unsafe {
+                mlxcel_core::layers::attention_from_ptr(
+                    q,
+                    &cache_k,
+                    &cache_v,
+                    SCALE,
+                    m as *const _,
+                    0.0,
+                    0,
+                )
+            }
+        } else {
+            unsafe {
+                mlxcel_core::layers::attention_from_ptr(
+                    q,
+                    &cache_k,
+                    &cache_v,
+                    SCALE,
+                    std::ptr::null(),
+                    0.0,
+                    0,
+                )
+            }
+        }
+    }
+
+    fn assert_entry_matches_block(
+        mut got: Llama4Cache,
+        mut want: Llama4Cache,
+        prefill: i32,
+        decode_steps: usize,
+        label: &str,
+    ) {
+        let mut rng = Rng(0x2172_9 | 1);
+        let (q, k, v) = rng.step(prefill);
+        let (k2, v2) = (mlxcel_core::copy(&k), mlxcel_core::copy(&v));
+        let a = got.attend(&q, k, v, SCALE, None);
+        let b = block_reference(&mut want, &q, k2, v2, None);
+        assert_eq!(to_vec_f32(&a), to_vec_f32(&b), "{label}: prefill differs");
+        for i in 0..decode_steps {
+            // The per-step front trim the model runs on its chunked layers.
+            got.maybe_trim_front();
+            want.maybe_trim_front();
+            let (q, k, v) = rng.step(1);
+            let (k2, v2) = (mlxcel_core::copy(&k), mlxcel_core::copy(&v));
+            let a = got.attend(&q, k, v, SCALE, None);
+            let b = block_reference(&mut want, &q, k2, v2, None);
+            assert_eq!(
+                to_vec_f32(&a),
+                to_vec_f32(&b),
+                "{label}: decode {i} differs"
+            );
+            assert_eq!(
+                (got.offset(), got.start_position()),
+                (want.offset(), want.start_position()),
+                "{label}: cursors at {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn chunked_fp16_layer_takes_the_route_the_block_ran_past_a_front_trim() {
+        let chunk = 8;
+        assert_entry_matches_block(
+            Llama4Cache::Chunked(ChunkedKVCache::new(chunk)),
+            Llama4Cache::Chunked(ChunkedKVCache::new(chunk)),
+            6,
+            5,
+            "chunked fp16",
+        );
+    }
+
+    #[test]
+    fn dense_fp16_layer_takes_the_route_the_block_ran() {
+        assert_entry_matches_block(
+            Llama4Cache::Regular(KVCache::new()),
+            Llama4Cache::Regular(KVCache::new()),
+            6,
+            4,
+            "dense fp16",
+        );
+    }
+}
+
+mod batched_decode_entry {
+    use super::snapshot_prompt_cache::*;
+    use mlxcel_core::cache::SequenceId;
+    use mlxcel_core::generate::LanguageModel;
+    use mlxcel_core::layers::KVCache;
+
+    const SEQ_BASE: u64 = 2_172_100;
+
+    /// Batched decode (`forward_batched_with_ids`, the entry `Engine::step`
+    /// takes for `B > 1`) of two sequences whose chunked layers have trimmed
+    /// their front agrees with single-row decode of twin sequences. The RoPE
+    /// layers take the batched-projection route (`forward_batched_decode_rows`),
+    /// the NoPE layer the per-row block; both attend through
+    /// `Llama4Cache::attend`.
+    #[test]
+    fn batched_decode_matches_single_row_decode_past_the_chunk() {
+        let wrapper = build_wrapper();
+        let vocab = VOCAB as usize;
+        let prompts = [ids(0..20), ids(4..17)];
+        let batched = [
+            SequenceId::from_raw(SEQ_BASE + 1),
+            SequenceId::from_raw(SEQ_BASE + 2),
+        ];
+        let single = [
+            SequenceId::from_raw(SEQ_BASE + 3),
+            SequenceId::from_raw(SEQ_BASE + 4),
+        ];
+        for row in 0..2 {
+            prefill(&wrapper, batched[row], &prompts[row]);
+            prefill(&wrapper, single[row], &prompts[row]);
+        }
+
+        for (step, pair) in [(1, 2), (5, 7), (3, 3)].into_iter().enumerate() {
+            let want = [
+                decode(&wrapper, single[0], pair.0),
+                decode(&wrapper, single[1], pair.1),
+            ];
+            let input = mlxcel_core::from_slice_i32(&[pair.0, pair.1], &[2, 1]);
+            let mut c0: Vec<KVCache> = Vec::new();
+            let mut c1: Vec<KVCache> = Vec::new();
+            let mut batch_caches = [c0.as_mut_slice(), c1.as_mut_slice()];
+            let logits = wrapper.forward_batched_with_ids(
+                &input,
+                Some(&batched[..]),
+                &mut batch_caches,
+                None,
+            );
+            assert_eq!(mlxcel_core::array_shape(&logits), vec![2, 1, VOCAB]);
+            let got = to_vec_f32(&logits);
+            for row in 0..2 {
+                for (i, (&g, &w)) in got[row * vocab..(row + 1) * vocab]
+                    .iter()
+                    .zip(want[row].iter())
+                    .enumerate()
+                {
+                    let abs = (g - w).abs();
+                    let rel = abs / w.abs().max(1.0);
+                    assert!(
+                        abs < 1e-3 || rel < 1e-3,
+                        "step {step} row {row} logit[{i}]: batched={g}, single={w}, abs={abs}, rel={rel}"
+                    );
+                }
+            }
+        }
     }
 }

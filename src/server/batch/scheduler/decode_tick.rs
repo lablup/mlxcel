@@ -318,32 +318,6 @@ impl BatchScheduler {
         }
     }
 
-    /// Batched decode-storage context for the active backend. Shared by the
-    /// synchronous batched decode and the lookahead prime so both drive the
-    /// identical dense / native-paged execution path.
-    ///
-    /// Only the model-owned families (Gemma 3, Llama 4) still select a kernel
-    /// from this. `KVCache`-backed families decide inside
-    /// `KVCache::attend` from the storage the pool wired for the sequence
-    /// (#2171, ADR 0008), so for them the value is informational.
-    pub(super) fn decode_batch_context(&self) -> DecodeBatchContext {
-        match self.decode_storage_backend {
-            DecodeStorageBackend::Auto | DecodeStorageBackend::Dense => {
-                debug_assert_ne!(
-                    self.decode_storage_backend,
-                    DecodeStorageBackend::Auto,
-                    "scheduler should normalize decode storage backend before decode dispatch"
-                );
-                DecodeBatchContext::dense()
-            }
-            DecodeStorageBackend::Paged => DecodeBatchContext {
-                storage_backend: CoreDecodeStorageBackend::Paged,
-                paged_block_size: DEFAULT_PAGED_BLOCK_SIZE as i32,
-                use_native_paged_kernel: true,
-            },
-        }
-    }
-
     /// Whether the active decode batch is eligible for the lookahead pipeline
     /// this tick, returning the shared fused sampling params on success. A
     /// `None` return routes the tick to the synchronous path. The gate is
@@ -578,12 +552,7 @@ impl BatchScheduler {
         // A row left the batch between the gate and here: nothing was
         // appended yet, so the caller just decodes synchronously.
         let biases = biases?;
-        let decode_context = self.decode_batch_context();
-        let batch = StepBatch {
-            seq_ids,
-            input,
-            context: Some(&decode_context),
-        };
+        let batch = StepBatch { seq_ids, input };
         match self.engine.submit(&batch, params, &biases) {
             Ok(tokens) => Some(DecodeLookahead {
                 ids: seq_ids.to_vec(),
@@ -791,13 +760,8 @@ impl BatchScheduler {
         seq_ids: &[SequenceId],
         input: &mlxcel_core::MlxArray,
     ) {
-        let decode_context = self.decode_batch_context();
         let context = self.context_bound();
-        let batch = StepBatch {
-            seq_ids,
-            input,
-            context: Some(&decode_context),
-        };
+        let batch = StepBatch { seq_ids, input };
         let stepped = {
             let Some(seqs) = self.active_batch.get_rows_mut(seq_ids) else {
                 tracing::warn!("a sequence left the active batch before its decode step");

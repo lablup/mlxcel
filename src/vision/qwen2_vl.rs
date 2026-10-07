@@ -22,7 +22,6 @@ use crate::multimodal::qwen_vl::{
     compute_qwen_vl_mrope_position_ids, forward_batched_with_seq_ids_dispatch,
 };
 use mlxcel_core::cache::SequenceId;
-use mlxcel_core::generate::DecodeBatchContext;
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -165,13 +164,12 @@ impl LanguageModel for Qwen2VLModel {
     /// `forward_batched`, which loops calling `forward()` without ids;
     /// that path silently produces wrong attention positions for VL
     /// rows in a batch.
-    fn forward_batched_with_context_and_ids(
+    fn forward_batched_with_ids(
         &self,
         input_ids: &MlxArray,
         seq_ids: Option<&[SequenceId]>,
         batch_caches: &mut [&mut [KVCache]],
         mask: Option<&MlxArray>,
-        context: Option<&DecodeBatchContext>,
     ) -> UniquePtr<MlxArray> {
         forward_batched_with_seq_ids_dispatch(
             &self.text_model,
@@ -179,7 +177,6 @@ impl LanguageModel for Qwen2VLModel {
             seq_ids,
             batch_caches,
             mask,
-            context,
         )
     }
 

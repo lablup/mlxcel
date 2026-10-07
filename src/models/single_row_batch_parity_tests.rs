@@ -105,13 +105,7 @@ fn run(env: &str, default: &str) {
     for step in 0..DECODE_STEPS {
         let next = mlxcel_core::from_slice_i32(&[token], &[1, 1]);
         let one = model.forward_with_sequence_id(&next, None, &mut single, None);
-        let row = model.forward_batched_with_context_and_ids(
-            &next,
-            None,
-            &mut [batched.as_mut_slice()],
-            None,
-            None,
-        );
+        let row = model.forward_batched_with_ids(&next, None, &mut [batched.as_mut_slice()], None);
         let (shape_one, bytes_one) = evaluated_bytes(&one);
         let (shape_row, bytes_row) = evaluated_bytes(&row);
         assert_eq!(

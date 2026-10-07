@@ -24,7 +24,6 @@ use crate::LanguageModel;
 use crate::audio;
 use crate::multimodal::batched_dispatch::forward_batched_with_seq_ids_dispatch;
 use mlxcel_core::cache::{KVCacheMode, SequenceId, SequenceStateLayout};
-use mlxcel_core::generate::DecodeBatchContext;
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -739,7 +738,7 @@ impl LanguageModel for Gemma4VLModel {
     /// Gemma 4 supports batched decode now that the inner
     /// [`crate::models::Gemma4Wrapper`] uses per-`SequenceId` cache
     /// isolation via `ModelOwnedSequenceState<Cache>`. The
-    /// `forward_batched_with_context_and_ids` override below routes each
+    /// `forward_batched_with_ids` override below routes each
     /// row through `forward_with_sequence_id` so per-sequence cache state
     /// resolves correctly even with mixed prompt lengths.
     fn supports_batching(&self) -> bool {
@@ -750,13 +749,12 @@ impl LanguageModel for Gemma4VLModel {
     /// mixed-length batch reaches the text model's seq-aware forward path
     /// independently. Mirrors the Qwen VL fix and shares the
     /// same helper (`multimodal::batched_dispatch`).
-    fn forward_batched_with_context_and_ids(
+    fn forward_batched_with_ids(
         &self,
         input_ids: &MlxArray,
         seq_ids: Option<&[SequenceId]>,
         batch_caches: &mut [&mut [KVCache]],
         mask: Option<&MlxArray>,
-        context: Option<&DecodeBatchContext>,
     ) -> UniquePtr<MlxArray> {
         forward_batched_with_seq_ids_dispatch(
             &self.text_model,
@@ -764,7 +762,6 @@ impl LanguageModel for Gemma4VLModel {
             seq_ids,
             batch_caches,
             mask,
-            context,
         )
     }
 }

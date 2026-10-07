@@ -21,12 +21,12 @@ use crate::models::kv_snapshot::{self, KvSnapshotNames};
 use crate::models::llama4_helpers::{
     create_chunked_attention_mask, get_weight_copy, load_quantized_linear,
 };
-use crate::models::model_owned::{
-    KvCacheLayerModes, ModelOwnedSequenceState, dispatch_paged_decode_from_backing_caches,
-};
+use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
 use crate::models::switch_layers::validate_expert_quantization_params;
-use mlxcel_core::cache::{CachePool, KVCacheMode, SequenceId, SequenceStateLayout};
-use mlxcel_core::generate::{DecodeBatchContext, LanguageModel, ModelStateSnapshot};
+use mlxcel_core::cache::{
+    CachePool, KVCacheMode, KvAttention, SequenceId, SequenceStateLayout, attend_batched_rows,
+};
+use mlxcel_core::generate::{LanguageModel, ModelStateSnapshot};
 use mlxcel_core::layers::{ChunkedKVCache, KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -49,6 +49,26 @@ pub enum Llama4Cache {
     Chunked(ChunkedKVCache),
     /// Regular cache for dense layers (every 4th layer: 3, 7, 11, ...)
     Regular(KVCache),
+}
+
+/// The attention entry for one Llama 4 layer row (ADR 0008, #2172):
+/// `ChunkedKVCache::attend` for an iGQA chunked layer, `KVCache::attend` for
+/// a dense one. Both are model-owned storage, never pool-backed, so the
+/// kernel is the dense one for the layer's mode.
+impl KvAttention for Llama4Cache {
+    fn attend(
+        &mut self,
+        q: &MlxArray,
+        keys: UniquePtr<MlxArray>,
+        values: UniquePtr<MlxArray>,
+        scale: f32,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        match self {
+            Llama4Cache::Chunked(c) => ChunkedKVCache::attend(c, q, keys, values, scale, mask),
+            Llama4Cache::Regular(c) => KVCache::attend(c, q, keys, values, scale, mask),
+        }
+    }
 }
 
 impl Llama4Cache {
@@ -113,36 +133,6 @@ impl Llama4Cache {
                 .unwrap_or(0),
             Llama4Cache::Regular(c) => c.seq_len().max(0) as usize,
         }
-    }
-
-    pub fn keys_ptr(&self) -> Option<*const MlxArray> {
-        match self {
-            Llama4Cache::Chunked(c) => c
-                .keys
-                .as_ref()
-                .and_then(|keys| keys.as_ref().map(|arr| arr as *const _)),
-            Llama4Cache::Regular(c) => c
-                .keys
-                .as_ref()
-                .and_then(|keys| keys.as_ref().map(|arr| arr as *const _)),
-        }
-    }
-
-    pub fn values_ptr(&self) -> Option<*const MlxArray> {
-        match self {
-            Llama4Cache::Chunked(c) => c
-                .values
-                .as_ref()
-                .and_then(|values| values.as_ref().map(|arr| arr as *const _)),
-            Llama4Cache::Regular(c) => c
-                .values
-                .as_ref()
-                .and_then(|values| values.as_ref().map(|arr| arr as *const _)),
-        }
-    }
-
-    pub fn is_chunked(&self) -> bool {
-        matches!(self, Llama4Cache::Chunked(_))
     }
 
     /// Copy this layer's state into `snapshot` under `prefix` (issue #1335).
@@ -676,40 +666,10 @@ impl CxxAttention {
             q = mlxcel_core::multiply(&q, &attn_scales);
         }
 
-        // Update KV cache and get cached keys/values
-        let (cache_k, cache_v) = cache.update_and_fetch(k, v);
-
-        // Scaled dot-product attention using cached K,V
-        let attn_out = if l > 1 && mask.is_none() {
-            // Prefill with no mask: use causal masking
-            mlxcel_core::causal_attention(&q, &cache_k, &cache_v, self.scale, 0.0, 0)
-        } else if let Some(m) = mask {
-            // Explicit mask provided
-            unsafe {
-                mlxcel_core::layers::attention_from_ptr(
-                    &q,
-                    &cache_k,
-                    &cache_v,
-                    self.scale,
-                    m as *const _,
-                    0.0,
-                    0,
-                )
-            }
-        } else {
-            // Single token, no mask needed
-            unsafe {
-                mlxcel_core::layers::attention_from_ptr(
-                    &q,
-                    &cache_k,
-                    &cache_v,
-                    self.scale,
-                    std::ptr::null(),
-                    0.0,
-                    0,
-                )
-            }
-        };
+        // The cache appends K/V and runs the attention for its storage
+        // (`Llama4Cache::attend`; ADR 0008, #2172): the causal helper for an
+        // unmasked prefill, else the masked or unmasked SDPA.
+        let attn_out = cache.attend(&q, k, v, self.scale, mask);
 
         // Transpose back and reshape
         let attn_out = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);
@@ -719,15 +679,24 @@ impl CxxAttention {
         self.o_proj.forward(&attn_out)
     }
 
-    fn forward_batched_decode_chunked(
+    /// Batched single-token decode for a RoPE layer: one Q/K/V projection
+    /// and one batched RoPE over the batch, then one attention per row
+    /// through the row's own cache (`attend_batched_rows`; ADR 0008, #2172).
+    ///
+    /// A NoPE layer (`use_rope == false`) scales its queries per position
+    /// through the temperature-tuning curve, which the batched projection
+    /// does not carry, so it declines (`None`) and the caller runs the row
+    /// loop. Before #2172 this route also required the scheduler's paged
+    /// context, so on the dense backend every row projected on its own; the
+    /// per-row attention is the same pair in both cases.
+    fn forward_batched_decode_rows(
         &self,
         x: &MlxArray,
         caches: &mut [&mut Llama4Cache],
-        context: &DecodeBatchContext,
-    ) -> Result<Option<UniquePtr<MlxArray>>, String> {
+    ) -> Option<UniquePtr<MlxArray>> {
         let shape = mlxcel_core::array_shape(x);
-        if shape[1] != 1 || !self.use_rope || !caches.iter().all(|cache| cache.is_chunked()) {
-            return Ok(None);
+        if shape[1] != 1 || !self.use_rope {
+            return None;
         }
 
         let batch = shape[0];
@@ -770,44 +739,12 @@ impl CxxAttention {
             k = mlxcel_core::fast_rms_norm(&k, &norm_weight, 1e-6);
         }
 
-        let Some(attn_out) = dispatch_paged_decode_from_backing_caches(
-            &q,
-            &k,
-            &v,
-            caches,
-            self.scale,
-            context,
-            |cache, k_i, v_i| {
-                let _ = cache.update_and_fetch(k_i, v_i);
-                Ok(())
-            },
-            |cache| {
-                cache
-                    .keys_ptr()
-                    .ok_or_else(|| "llama4 chunked cache missing key backing array".to_string())
-            },
-            |cache| {
-                cache
-                    .values_ptr()
-                    .ok_or_else(|| "llama4 chunked cache missing value backing array".to_string())
-            },
-            |cache| Ok(cache.visible_len() as i32),
-        )?
-        else {
-            return Ok(None);
-        };
-
-        tracing::debug!(
-            batch_size = batch,
-            block_size = context.paged_block_size,
-            native_kernel = context.use_native_paged_kernel,
-            "Llama4 chunked paged decode attention dispatch"
-        );
+        let attn_out = attend_batched_rows(&q, &k, &v, caches, self.scale, None);
 
         let attn_out = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);
         let attn_out =
             mlxcel_core::reshape(&attn_out, &[batch, seq_len, self.num_heads * self.head_dim]);
-        Ok(Some(self.o_proj.forward(&attn_out)))
+        Some(self.o_proj.forward(&attn_out))
     }
 
     /// Legacy forward pass with regular KVCache (kept for compatibility)
@@ -1094,20 +1031,13 @@ impl TransformerBlock {
         &self,
         x: &MlxArray,
         caches: &mut [&mut Llama4Cache],
-        decode_context: Option<&DecodeBatchContext>,
     ) -> UniquePtr<MlxArray> {
-        if let Some(context) = decode_context {
-            let normed = self.input_layernorm.forward(x);
-            if let Some(attn_out) = self
-                .self_attn
-                .forward_batched_decode_chunked(&normed, caches, context)
-                .expect("valid llama4 chunked paged decode inputs")
-            {
-                let h = mlxcel_core::add(x, &attn_out);
-                let normed = self.post_attention_layernorm.forward(&h);
-                let ff_out = self.feed_forward.forward(&normed);
-                return mlxcel_core::add(&h, &ff_out);
-            }
+        let normed = self.input_layernorm.forward(x);
+        if let Some(attn_out) = self.self_attn.forward_batched_decode_rows(&normed, caches) {
+            let h = mlxcel_core::add(x, &attn_out);
+            let normed = self.post_attention_layernorm.forward(&h);
+            let ff_out = self.feed_forward.forward(&normed);
+            return mlxcel_core::add(&h, &ff_out);
         }
 
         let shape = mlxcel_core::array_shape(x);
@@ -1347,7 +1277,6 @@ impl Llama4CxxModel {
         &self,
         input_ids: &MlxArray,
         batch_caches: &mut [Vec<Llama4Cache>],
-        decode_context: Option<&DecodeBatchContext>,
     ) -> UniquePtr<MlxArray> {
         let mut h = self.embed_tokens.forward(input_ids);
 
@@ -1364,7 +1293,7 @@ impl Llama4CxxModel {
                 .iter_mut()
                 .map(|caches| &mut caches[layer_idx])
                 .collect();
-            h = layer.forward_batched_decode_llama4(&h, &mut layer_caches, decode_context);
+            h = layer.forward_batched_decode_llama4(&h, &mut layer_caches);
         }
 
         let h = self.norm.forward(&h);
@@ -2047,13 +1976,12 @@ impl LanguageModel for Llama4Wrapper {
             })
     }
 
-    fn forward_batched_with_context_and_ids(
+    fn forward_batched_with_ids(
         &self,
         input_ids: &MlxArray,
         seq_ids: Option<&[SequenceId]>,
         batch_caches: &mut [&mut [KVCache]],
         mask: Option<&MlxArray>,
-        context: Option<&DecodeBatchContext>,
     ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(input_ids);
         if shape[1] != 1 || mask.is_some() {
@@ -2090,11 +2018,8 @@ impl LanguageModel for Llama4Wrapper {
             .with_batched_sequence_states(
                 seq_ids.expect("llama4 batched decode requires sequence ids"),
                 |sequence_caches| {
-                    self.model.forward_batched_decode_with_caches(
-                        input_ids,
-                        sequence_caches,
-                        context,
-                    )
+                    self.model
+                        .forward_batched_decode_with_caches(input_ids, sequence_caches)
                 },
             )
             .expect("llama4 batched decode requires sequence-local cache state")

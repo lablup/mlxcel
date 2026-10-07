@@ -74,10 +74,7 @@ pub use execution::runtime::{
 };
 pub use execution::sampling;
 pub use mlxcel_core::generate;
-pub use mlxcel_core::generate::{
-    CxxGenerator, DecodeBatchContext, DecodeStorageBackend, GenerationStats, LanguageModel,
-    SamplingConfig,
-};
+pub use mlxcel_core::generate::{CxxGenerator, GenerationStats, LanguageModel, SamplingConfig};
 pub use mlxcel_core::speculative::SpeculativeGenerator;
 pub use mlxcel_core::speculative::prompt_lookup::{
     DraftPolicy, PromptLookupConfig, PromptLookupGenerator, prompt_lookup_unsupported_reason,

@@ -407,9 +407,8 @@ fn batched_attend_rejects_an_empty_batch() {
     attend_batched(&q, &k, &v, &mut caches, SCALE, None);
 }
 
-/// A one-row batch is what the lookahead prime and `forward_batched` hand over
-/// when no `DecodeBatchContext` exists. Dense storage matches the per-row
-/// `attend` bit for bit.
+/// A one-row batch is what the lookahead prime and `forward_batched` hand
+/// over. Dense storage matches the per-row `attend` bit for bit.
 #[test]
 fn batched_dense_one_row_matches_attend() {
     let mut rng = Rng::new(0x2178);
@@ -519,4 +518,271 @@ fn batched_mixed_storage_runs_each_row_on_its_own_route() {
         assert_eq!(paged.offset, 13);
         assert_eq!(dense.offset, 13);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Model-owned storages (issue #2172): the rotating and chunked entries, the
+// per-row batched loop, and the decode undo log behind `RotatingKVCache::attend`.
+// ---------------------------------------------------------------------------
+
+use crate::cache::{DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS, DecodeLookaheadAppendScope};
+
+/// The pair Gemma 3's sliding layers spelled out: `update_and_fetch`, then the
+/// causal helper for an unmasked multi-token step whose window fits, else the
+/// SDPA dispatcher with the window as its hint.
+fn rotating_reference(
+    cache: &mut RotatingKVCache,
+    q: &MlxArray,
+    k: UniquePtr<MlxArray>,
+    v: UniquePtr<MlxArray>,
+    mask: Option<&MlxArray>,
+) -> UniquePtr<MlxArray> {
+    let (ck, cv) = cache.update_and_fetch(k, v);
+    let q_len = ffi::array_shape(q)[2];
+    let k_len = ffi::array_shape(&ck)[2];
+    if mask.is_none() && q_len > 1 && k_len <= cache.max_size {
+        crate::causal_attention(q, &ck, &cv, SCALE, 0.0, 0)
+    } else {
+        crate::layers::attention(q, &ck, &cv, SCALE, mask, 0.0, cache.max_size)
+    }
+}
+
+/// The pair Llama 4's chunked layers spelled out: `update_and_fetch`, then the
+/// causal helper for an unmasked prefill, else the SDPA dispatcher.
+fn chunked_reference(
+    cache: &mut ChunkedKVCache,
+    q: &MlxArray,
+    k: UniquePtr<MlxArray>,
+    v: UniquePtr<MlxArray>,
+    mask: Option<&MlxArray>,
+) -> UniquePtr<MlxArray> {
+    let (ck, cv) = cache.update_and_fetch(k, v);
+    let q_len = ffi::array_shape(q)[2];
+    if q_len > 1 && mask.is_none() {
+        crate::causal_attention(q, &ck, &cv, SCALE, 0.0, 0)
+    } else {
+        crate::layers::attention(q, &ck, &cv, SCALE, mask, 0.0, 0)
+    }
+}
+
+fn rotating_state(cache: &RotatingKVCache) -> (i32, i32, Vec<f32>, Vec<f32>) {
+    (
+        cache.offset,
+        cache.idx,
+        to_vec_f32(cache.keys.as_ref().expect("keys")),
+        to_vec_f32(cache.values.as_ref().expect("values")),
+    )
+}
+
+#[test]
+fn rotating_attend_matches_update_and_fetch_plus_windowed_sdpa() {
+    let mut rng = Rng::new(0x2172_01);
+    let window = 6;
+    let mut got = RotatingKVCache::new(window);
+    let mut want = RotatingKVCache::new(window);
+
+    // A 4-token prefill fits the window: the causal helper.
+    let (q, k, v) = step(&mut rng, 1, 4);
+    let (k2, v2) = (ffi::copy(&k), ffi::copy(&v));
+    let a = got.attend(&q, k, v, SCALE, None);
+    let b = rotating_reference(&mut want, &q, k2, v2, None);
+    assert_eq!(to_vec_f32(&a), to_vec_f32(&b), "prefill output differs");
+
+    // Five decode steps: the ring wraps at the third.
+    for i in 0..5 {
+        let (q, k, v) = step(&mut rng, 1, 1);
+        let (k2, v2) = (ffi::copy(&k), ffi::copy(&v));
+        let a = got.attend(&q, k, v, SCALE, None);
+        let b = rotating_reference(&mut want, &q, k2, v2, None);
+        assert_eq!(to_vec_f32(&a), to_vec_f32(&b), "decode step {i} differs");
+        assert_eq!(
+            (got.offset, got.idx),
+            (want.offset, want.idx),
+            "cursors at {i}"
+        );
+    }
+    assert_eq!(got.offset, 9, "wrapped past the window");
+    assert_eq!(got.visible_len(), window);
+}
+
+#[test]
+fn rotating_attend_masked_step_matches_masked_sdpa() {
+    let mut rng = Rng::new(0x2172_02);
+    let mut got = RotatingKVCache::new(8);
+    let mut want = RotatingKVCache::new(8);
+    let (q, k, v) = step(&mut rng, 1, 3);
+    let (k2, v2) = (ffi::copy(&k), ffi::copy(&v));
+    got.attend(&q, k, v, SCALE, None);
+    rotating_reference(&mut want, &q, k2, v2, None);
+
+    // A two-token verify step with an explicit causal mask over 5 keys.
+    let (q, k, v) = step(&mut rng, 1, 2);
+    let (k2, v2) = (ffi::copy(&k), ffi::copy(&v));
+    let mask = crate::utils::create_causal_mask(2, 3);
+    let a = got.attend(&q, k, v, SCALE, Some(&mask));
+    let b = rotating_reference(&mut want, &q, k2, v2, Some(&mask));
+    assert_eq!(to_vec_f32(&a), to_vec_f32(&b), "masked output differs");
+    assert_eq!(got.offset, 5);
+}
+
+/// `RotatingKVCache::attend` writes through `update_and_fetch`, so a
+/// single-token write it makes inside the lookahead scope is logged with the
+/// rows it overwrote and a teardown can unwind it exactly (#2182).
+#[test]
+fn rotating_attend_logs_the_speculative_writes_for_rewind() {
+    let mut rng = Rng::new(0x2172_03);
+    let mut cache = RotatingKVCache::new(4);
+    cache.set_decode_undo_depth(DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS);
+    let (q, k, v) = step(&mut rng, 1, 3);
+    cache.attend(&q, k, v, SCALE, None);
+    for _ in 0..6 {
+        let (q, k, v) = step(&mut rng, 1, 1);
+        cache.attend(&q, k, v, SCALE, None);
+    }
+    assert_eq!(cache.offset, 9, "the ring has wrapped");
+    let before = rotating_state(&cache);
+
+    {
+        let _scope = DecodeLookaheadAppendScope::enter();
+        for _ in 0..DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS {
+            let (q, k, v) = step(&mut rng, 1, 1);
+            cache.attend(&q, k, v, SCALE, None);
+        }
+    }
+    assert_eq!(
+        cache.decode_undo_len(),
+        DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS,
+        "both speculative writes are logged"
+    );
+    cache
+        .rewind_decode_writes(DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS as i32)
+        .expect("writes made through attend are rewindable");
+    assert_eq!(rotating_state(&cache), before, "the rewound ring is exact");
+}
+
+/// A multi-token append through `attend` rewrites the ring, and the entry
+/// reports it to the log the same way a direct `update_and_fetch` does: the
+/// log is cleared, and the earlier speculative write is no longer rewindable.
+#[test]
+fn rotating_multi_token_attend_clears_the_undo_log() {
+    let mut rng = Rng::new(0x2172_04);
+    let mut cache = RotatingKVCache::new(4);
+    cache.set_decode_undo_depth(DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS);
+    let (q, k, v) = step(&mut rng, 1, 3);
+    cache.attend(&q, k, v, SCALE, None);
+    for _ in 0..6 {
+        let (q, k, v) = step(&mut rng, 1, 1);
+        cache.attend(&q, k, v, SCALE, None);
+    }
+    {
+        let _scope = DecodeLookaheadAppendScope::enter();
+        let (q, k, v) = step(&mut rng, 1, 1);
+        cache.attend(&q, k, v, SCALE, None);
+    }
+    // The log keeps the newest `depth` writes whatever their scope; the
+    // speculative one is the newest.
+    assert_eq!(
+        cache.decode_undo_len(),
+        DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS
+    );
+
+    let (q, k, v) = step(&mut rng, 1, 2);
+    cache.attend(&q, k, v, SCALE, None);
+    assert_eq!(
+        cache.decode_undo_len(),
+        0,
+        "a multi-token append clears the log"
+    );
+    assert!(
+        cache.rewind_decode_writes(1).is_err(),
+        "nothing left to rewind after the ring was rewritten"
+    );
+}
+
+#[test]
+fn chunked_attend_matches_update_and_fetch_plus_sdpa() {
+    let mut rng = Rng::new(0x2172_05);
+    let chunk = 8;
+    let mut got = ChunkedKVCache::new(chunk);
+    let mut want = ChunkedKVCache::new(chunk);
+
+    let (q, k, v) = step(&mut rng, 1, 6);
+    let (k2, v2) = (ffi::copy(&k), ffi::copy(&v));
+    let a = got.attend(&q, k, v, SCALE, None);
+    let b = chunked_reference(&mut want, &q, k2, v2, None);
+    assert_eq!(to_vec_f32(&a), to_vec_f32(&b), "prefill output differs");
+
+    // Five decode steps with the per-step front trim Llama 4 runs; the chunk
+    // is exceeded at the third, so the window slides.
+    for i in 0..5 {
+        got.maybe_trim_front();
+        want.maybe_trim_front();
+        let (q, k, v) = step(&mut rng, 1, 1);
+        let (k2, v2) = (ffi::copy(&k), ffi::copy(&v));
+        let a = got.attend(&q, k, v, SCALE, None);
+        let b = chunked_reference(&mut want, &q, k2, v2, None);
+        assert_eq!(to_vec_f32(&a), to_vec_f32(&b), "decode step {i} differs");
+        assert_eq!(
+            (got.offset, got.start_position),
+            (want.offset, want.start_position),
+            "cursors at {i}"
+        );
+    }
+    assert!(got.start_position > 0, "the front was trimmed");
+
+    // A masked two-token step over the trimmed window.
+    got.maybe_trim_front();
+    want.maybe_trim_front();
+    let visible = got.offset - got.start_position;
+    let (q, k, v) = step(&mut rng, 1, 2);
+    let (k2, v2) = (ffi::copy(&k), ffi::copy(&v));
+    let mask = crate::utils::create_causal_mask(2, visible);
+    let a = got.attend(&q, k, v, SCALE, Some(&mask));
+    let b = chunked_reference(&mut want, &q, k2, v2, Some(&mask));
+    assert_eq!(to_vec_f32(&a), to_vec_f32(&b), "masked output differs");
+}
+
+#[test]
+fn batched_rows_over_rotating_caches_match_per_row_attend() {
+    let mut rng = Rng::new(0x2172_06);
+    let window = 6;
+    let mut c0 = RotatingKVCache::new(window);
+    let mut c1 = RotatingKVCache::new(window);
+    let mut r0 = RotatingKVCache::new(window);
+    let mut r1 = RotatingKVCache::new(window);
+    // Rows of different lengths, the second wrapped.
+    for (c, r, len) in [(&mut c0, &mut r0, 4), (&mut c1, &mut r1, 9)] {
+        let (q, k, v) = step(&mut rng, 1, len);
+        let (k2, v2) = (ffi::copy(&k), ffi::copy(&v));
+        c.attend(&q, k, v, SCALE, None);
+        r.attend(&q, k2, v2, SCALE, None);
+    }
+
+    for i in 0..3 {
+        let (q, k, v) = step(&mut rng, 2, 1);
+        let mut rows = Vec::new();
+        for (b, r) in [&mut r0, &mut r1].into_iter().enumerate() {
+            rows.push(r.attend(
+                &slice_row(&q, b),
+                slice_row(&k, b),
+                slice_row(&v, b),
+                SCALE,
+                None,
+            ));
+        }
+        let want = crate::concatenate(&rows[0], &rows[1], 0);
+        let mut caches = [&mut c0, &mut c1];
+        let got = attend_batched_rows(&q, &k, &v, &mut caches, SCALE, None);
+        assert_eq!(ffi::array_shape(&got), vec![2, HEADS, 1, DIM]);
+        assert_eq!(to_vec_f32(&got), to_vec_f32(&want), "step {i} differs");
+    }
+}
+
+#[test]
+fn is_dense_fp16_names_the_stackable_layout() {
+    assert!(KVCache::new().is_dense_fp16());
+    assert!(!KVCache::new_with_mode(KVCacheMode::Int8).is_dense_fp16());
+    assert!(!KVCache::new_with_mode(KVCacheMode::Turbo4Asym).is_dense_fp16());
+    let (pool, states) = fresh_pool(1);
+    assert!(!KVCache::new_paged(pool, states[0].clone(), 0).is_dense_fp16());
 }

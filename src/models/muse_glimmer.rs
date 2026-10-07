@@ -20,7 +20,7 @@
 
 use crate::models::model_owned::ModelOwnedSequenceState;
 use mlxcel_core::cache::{SequenceId, SequenceStateLayout};
-use mlxcel_core::generate::{DecodeBatchContext, LanguageModel, ModelStateSnapshot};
+use mlxcel_core::generate::{LanguageModel, ModelStateSnapshot};
 use mlxcel_core::layers::{KVCache, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -500,23 +500,12 @@ impl LanguageModel for MuseGlimmerTextWrapper {
         self.forward_batched_without_sequence_ids(input_ids, batch_caches, mask)
     }
 
-    fn forward_batched_with_context(
-        &self,
-        input_ids: &MlxArray,
-        batch_caches: &mut [&mut [KVCache]],
-        mask: Option<&MlxArray>,
-        _context: Option<&DecodeBatchContext>,
-    ) -> UniquePtr<MlxArray> {
-        self.forward_batched_without_sequence_ids(input_ids, batch_caches, mask)
-    }
-
-    fn forward_batched_with_context_and_ids(
+    fn forward_batched_with_ids(
         &self,
         input_ids: &MlxArray,
         seq_ids: Option<&[SequenceId]>,
         batch_caches: &mut [&mut [KVCache]],
         mask: Option<&MlxArray>,
-        _context: Option<&DecodeBatchContext>,
     ) -> UniquePtr<MlxArray> {
         if let Some(seq_ids) = seq_ids {
             return self.forward_batched_with_sequence_ids(input_ids, seq_ids, batch_caches, mask);

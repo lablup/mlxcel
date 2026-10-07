@@ -41,11 +41,159 @@
 //! pool-backed caches for a sequence on the paged backend and dense caches
 //! otherwise, so the per-sequence storage policy the scheduler used to carry
 //! in `DecodeBatchContext` is the cache itself for these families.
+//!
+//! The model-owned families (issue #2172, epic #2166 Phase 4b) hold their
+//! per-sequence state as their own cache enums rather than a pool `KVCache`,
+//! and that state is never pool-backed, so for them the rule reduces to the
+//! dense rows of the table. [`RotatingKVCache::attend`] (Gemma 3's sliding
+//! layers) and [`ChunkedKVCache::attend`] (Llama 4's chunked layers) are the
+//! dense entries for those storages, [`KvAttention`] is the trait the model
+//! enums implement by matching to the inner cache, and [`attend_batched_rows`]
+//! is the per-row batched loop every non-pooled batch takes. The
+//! `DecodeBatchContext` those families used to read is gone: the
+//! dense-pointer "paged compat" kernels it selected
+//! (`paged_decode_attention_dense_compat`, `_rotating_compat`) were per-row
+//! loops of block slices, a concat and one SDPA call per row, so a batch now
+//! runs the same attention per row through its own cache without the concat
+//! copy, the change ADR 0008 already made for Qwen3 and Llama 3.
 
 use cxx::UniquePtr;
 
-use super::{KVCache, paged_batch_decode_attention, turbo};
+use super::{ChunkedKVCache, KVCache, RotatingKVCache, paged_batch_decode_attention, turbo};
 use crate::ffi::{self, MlxArray};
+
+/// One attention entry per KV storage: append the step's K/V and run
+/// attention through the kernel that suits the storage behind the cache.
+///
+/// Implemented by [`KVCache`], [`RotatingKVCache`] and [`ChunkedKVCache`] in
+/// the core, and by the model-owned cache enums (`gemma3::Cache`,
+/// `llama4::Llama4Cache`) by matching to the inner cache. Static dispatch: a
+/// batched caller is monomorphized over the enum, so there is no virtual call
+/// per layer per token (ADR 0004).
+///
+/// `q` is `[B, Hq, L, D]`; `new_keys` and `new_values` are `[B, Hkv, L, D]`
+/// with RoPE and any Q/K norm already applied; `mask` is the optional
+/// additive mask the model built. Returns `[B, Hq, L, D]`.
+pub trait KvAttention {
+    fn attend(
+        &mut self,
+        q: &MlxArray,
+        new_keys: UniquePtr<MlxArray>,
+        new_values: UniquePtr<MlxArray>,
+        scale: f32,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray>;
+}
+
+impl KvAttention for KVCache {
+    #[inline]
+    fn attend(
+        &mut self,
+        q: &MlxArray,
+        new_keys: UniquePtr<MlxArray>,
+        new_values: UniquePtr<MlxArray>,
+        scale: f32,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        KVCache::attend(self, q, new_keys, new_values, scale, mask)
+    }
+}
+
+impl KvAttention for RotatingKVCache {
+    #[inline]
+    fn attend(
+        &mut self,
+        q: &MlxArray,
+        new_keys: UniquePtr<MlxArray>,
+        new_values: UniquePtr<MlxArray>,
+        scale: f32,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        RotatingKVCache::attend(self, q, new_keys, new_values, scale, mask)
+    }
+}
+
+impl KvAttention for ChunkedKVCache {
+    #[inline]
+    fn attend(
+        &mut self,
+        q: &MlxArray,
+        new_keys: UniquePtr<MlxArray>,
+        new_values: UniquePtr<MlxArray>,
+        scale: f32,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        ChunkedKVCache::attend(self, q, new_keys, new_values, scale, mask)
+    }
+}
+
+impl RotatingKVCache {
+    /// Append this step's K/V and run attention over the window the ring
+    /// returns.
+    ///
+    /// A rotating cache is dense storage that is never pool-backed, so this
+    /// is the dense row of the ADR 0008 table. The write goes through
+    /// [`Self::update_and_fetch`], which stays the one write path: it is
+    /// where the decode undo log (#2182) records the rows a single-token write
+    /// inside a `DecodeLookaheadAppendScope` overwrites, and where every
+    /// multi-token or Turbo append clears that log, so a speculative write
+    /// made through this entry is as rewindable as one made through
+    /// `update_and_fetch` directly. No host sync and no allocation beyond the
+    /// shape reads.
+    ///
+    /// A multi-token unmasked step whose returned window fits the ring is a
+    /// prefill whose mask would be plain causal and takes the causal helper;
+    /// anything else runs the masked or unmasked SDPA with the ring's
+    /// `max_size` as the window hint (what Gemma 3 passed as `window_size`,
+    /// read only by the Metal 4 kernel).
+    ///
+    /// Used by: `models::gemma3::Cache::attend` (sliding layers),
+    /// [`attend_batched_rows`].
+    pub fn attend(
+        &mut self,
+        q: &MlxArray,
+        new_keys: UniquePtr<MlxArray>,
+        new_values: UniquePtr<MlxArray>,
+        scale: f32,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let q_len = query_len(q);
+        let (cache_k, cache_v) = self.update_and_fetch(new_keys, new_values);
+        let k_len = ffi::array_shape(&cache_k)[2];
+        if mask.is_none() && q_len > 1 && k_len <= self.max_size {
+            return crate::causal_attention(q, &cache_k, &cache_v, scale, 0.0, 0);
+        }
+        crate::layers::attention(q, &cache_k, &cache_v, scale, mask, 0.0, self.max_size)
+    }
+}
+
+impl ChunkedKVCache {
+    /// Append this step's K/V and run attention over the visible chunk.
+    ///
+    /// Dense storage, never pool-backed: the write goes through
+    /// [`Self::update_and_fetch`] and the attention is the causal helper for
+    /// an unmasked multi-token step, else the masked or unmasked SDPA, the
+    /// pair Llama 4's single-row forward spelled out. The caller still runs
+    /// [`Self::maybe_trim_front`] before the step, as before.
+    ///
+    /// Used by: `models::llama4::Llama4Cache::attend` (chunked layers),
+    /// [`attend_batched_rows`].
+    pub fn attend(
+        &mut self,
+        q: &MlxArray,
+        new_keys: UniquePtr<MlxArray>,
+        new_values: UniquePtr<MlxArray>,
+        scale: f32,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let q_len = query_len(q);
+        let (cache_k, cache_v) = self.update_and_fetch(new_keys, new_values);
+        if q_len > 1 && mask.is_none() {
+            return crate::causal_attention(q, &cache_k, &cache_v, scale, 0.0, 0);
+        }
+        crate::layers::attention(q, &cache_k, &cache_v, scale, mask, 0.0, 0)
+    }
+}
 
 impl KVCache {
     /// Append this step's K/V and run attention through the kernel that suits
@@ -199,7 +347,32 @@ pub fn attend_batched(
     {
         return out;
     }
+    attend_batched_rows(q_batched, k_batched, v_batched, caches, scale, mask)
+}
 
+/// Per-row batched attention: row `b` of the batch goes through
+/// `caches[b].attend` on its own storage and the outputs are concatenated on
+/// the batch axis.
+///
+/// This is the batched route for every storage that has no whole-batch
+/// launch: the model-owned enums of Gemma 3 and Llama 4, and the dense or
+/// declined batches [`attend_batched`] hands over. Same shapes and mask
+/// convention as [`attend_batched`]. One slice per row and one concat per
+/// extra row, which is what the per-row loops it replaced did.
+///
+/// Used by: [`attend_batched`], `models::gemma3::Attention::forward_batched_decode`,
+/// `models::llama4::CxxAttention::forward_batched_decode_rows`.
+pub fn attend_batched_rows<C: KvAttention>(
+    q_batched: &MlxArray,
+    k_batched: &MlxArray,
+    v_batched: &MlxArray,
+    caches: &mut [&mut C],
+    scale: f32,
+    mask: Option<&MlxArray>,
+) -> UniquePtr<MlxArray> {
+    let batch = caches.len();
+    assert!(batch > 0, "attend_batched_rows: empty batch");
+    let seq_len = query_len(q_batched);
     let mut outputs: Vec<UniquePtr<MlxArray>> = Vec::with_capacity(batch);
     for (b, cache) in caches.iter_mut().enumerate() {
         let q_b = slice_row(q_batched, b);

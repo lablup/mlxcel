@@ -354,7 +354,7 @@ fn read_first_i32(arr: &MlxArray) -> i32 {
 /// `forward_with_sequence_id` once per row with the correct id so that
 /// each row's per-sequence MRoPE state resolves independently — the
 /// exact regression the wrapper-level overrides on
-/// `forward_batched_with_context_and_ids` were added to fix.
+/// `forward_batched_with_ids` were added to fix.
 #[test]
 #[ignore = "requires serial MLX execution"]
 fn forward_batched_with_seq_ids_dispatch_routes_each_row_to_its_seq_id() {
@@ -377,7 +377,6 @@ fn forward_batched_with_seq_ids_dispatch_routes_each_row_to_its_seq_id() {
         &input_ids,
         Some(&seq_ids),
         batch_caches.as_mut_slice(),
-        None,
         None,
     );
     mlxcel_core::eval(&logits);
@@ -425,7 +424,6 @@ fn forward_batched_with_seq_ids_dispatch_single_row_uses_forward_with_sequence_i
         Some(&seq_ids),
         batch_caches.as_mut_slice(),
         None,
-        None,
     );
     mlxcel_core::eval(&logits);
 
@@ -435,7 +433,7 @@ fn forward_batched_with_seq_ids_dispatch_single_row_uses_forward_with_sequence_i
 }
 
 /// When `seq_ids` is `None` the helper must NOT bypass the model's
-/// batched fast path — falling through to `forward_batched_with_context`
+/// batched fast path — falling through to `forward_batched`
 /// preserves CLI/single-process callers that have never used per-seq
 /// dispatch (they still resolve via the legacy fallback slot).
 #[test]
@@ -454,11 +452,10 @@ fn forward_batched_with_seq_ids_dispatch_no_seq_ids_falls_through_to_batched() {
         None,
         batch_caches.as_mut_slice(),
         None,
-        None,
     );
     mlxcel_core::eval(&logits);
 
-    // Without seq_ids the trait default `forward_batched_with_context`
+    // Without seq_ids the trait default `forward_batched`
     // routes through `forward_batched`, which loops calling `forward()`
     // — so each row's call is logged under the sentinel id `-1`.
     let calls = model.calls();

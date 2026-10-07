@@ -137,11 +137,10 @@ fn batched_decode_with_sequence_ids_matches_isolated_rows() {
     let mut row1 = Vec::<KVCache>::new();
     let mut row_caches: Vec<&mut [KVCache]> = vec![row0.as_mut_slice(), row1.as_mut_slice()];
     let ids = [seq_a, seq_b];
-    let logits = batch.forward_batched_with_context_and_ids(
+    let logits = batch.forward_batched_with_ids(
         &batch_input(&[[4], [5]]),
         Some(&ids),
         &mut row_caches,
-        None,
         None,
     );
     mlxcel_core::eval(&logits);

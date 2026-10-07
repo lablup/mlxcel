@@ -23,7 +23,7 @@
 //! addresses the same problem in Python; the helpers below are the Rust
 //! analogue.
 //!
-//! Per-row batched dispatch on `LanguageModel::forward_batched_with_context_and_ids`
+//! Per-row batched dispatch on `LanguageModel::forward_batched_with_ids`
 //! lives in [`super::batched_dispatch::forward_batched_with_seq_ids_dispatch`]
 //! and is shared with the Qwen VL families. Both Qwen VL and
 //! Gemma 4's vision wrappers route their override through that helper so

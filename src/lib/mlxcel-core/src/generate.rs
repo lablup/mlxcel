@@ -1077,36 +1077,28 @@ pub trait LanguageModel {
         cache_pool.sync_paged_state_with_dense(seq_id)
     }
 
-    /// Batched decode with explicit runtime context from the scheduler.
+    /// Batched forward with the scheduler's sequence identities.
     ///
-    /// This extends `forward_batched()` without forcing all model families to
-    /// plumb scheduler-specific state through their existing dense path. The
-    /// default implementation ignores the context and delegates to
-    /// `forward_batched()`.
+    /// `seq_ids[i]` names the sequence whose per-model state row `i` uses; a
+    /// family whose per-sequence state lives inside the model (Gemma 3,
+    /// Llama 4, Qwen3.5, Muse Glimmer, the VLM wrappers) overrides this so
+    /// each row resolves its own state. The default ignores the ids and runs
+    /// `forward_batched`. Storage is a property of each row's cache
+    /// (`KVCache::attend`, ADR 0008), so there is no per-step storage hint:
+    /// the `DecodeBatchContext` argument this entry used to take was removed
+    /// in #2172 once no family read it.
     ///
-    /// Used by: BatchScheduler decode backend dispatch, paged decode profiling
-    fn forward_batched_with_context(
-        &self,
-        input_ids: &MlxArray,
-        batch_caches: &mut [&mut [KVCache]],
-        mask: Option<&MlxArray>,
-        context: Option<&DecodeBatchContext>,
-    ) -> UniquePtr<MlxArray> {
-        let _ = context;
-        self.forward_batched(input_ids, batch_caches, mask)
-    }
-
-    /// Batched forward with optional scheduler sequence identities.
-    fn forward_batched_with_context_and_ids(
+    /// Used by: `Engine::step` and `Engine::prefill_cohort` for every batch of
+    /// more than one row.
+    fn forward_batched_with_ids(
         &self,
         input_ids: &MlxArray,
         seq_ids: Option<&[SequenceId]>,
         batch_caches: &mut [&mut [KVCache]],
         mask: Option<&MlxArray>,
-        context: Option<&DecodeBatchContext>,
     ) -> UniquePtr<MlxArray> {
         let _ = seq_ids;
-        self.forward_batched_with_context(input_ids, batch_caches, mask, context)
+        self.forward_batched(input_ids, batch_caches, mask)
     }
 
     /// Batched decode: process B sequences in one forward pass.
@@ -1153,55 +1145,6 @@ pub trait LanguageModel {
             result = crate::concatenate(&result, &logits_i, 0);
         }
         result
-    }
-}
-
-/// Decode-time storage backend hint supplied by the runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DecodeStorageBackend {
-    Dense,
-    Paged,
-}
-
-/// Per-step storage policy the scheduler hands to batched decode.
-///
-/// Since #2171 (ADR 0008) the families whose per-sequence state is a
-/// [`crate::cache::KVCache`] (Qwen3, Llama 3 and the families that reuse their
-/// attention) read nothing from this: storage is chosen when `CachePool`
-/// builds the cache, and [`crate::cache::KVCache::attend`] picks the kernel
-/// from the storage behind it. The model-owned families (Gemma 3, Llama 4 and
-/// the `model_owned` dispatch helpers) still consume it for their
-/// dense-pointer paged kernels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DecodeBatchContext {
-    pub storage_backend: DecodeStorageBackend,
-    pub paged_block_size: i32,
-    pub use_native_paged_kernel: bool,
-}
-
-impl DecodeBatchContext {
-    pub fn dense() -> Self {
-        Self {
-            storage_backend: DecodeStorageBackend::Dense,
-            paged_block_size: 0,
-            use_native_paged_kernel: false,
-        }
-    }
-
-    pub fn paged(block_size: i32) -> Self {
-        Self::paged_with_native(block_size, true)
-    }
-
-    pub fn paged_with_native(block_size: i32, use_native_paged_kernel: bool) -> Self {
-        Self {
-            storage_backend: DecodeStorageBackend::Paged,
-            paged_block_size: block_size,
-            use_native_paged_kernel,
-        }
-    }
-
-    pub fn is_paged_decode(self) -> bool {
-        self.storage_backend == DecodeStorageBackend::Paged && self.paged_block_size > 0
     }
 }
 

@@ -293,7 +293,7 @@ mod snapshot_prompt_cache {
     use mlxcel_core::{MlxArray, UniquePtr};
 
     const HIDDEN: i32 = 4;
-    const VOCAB: i32 = 8;
+    pub(super) const VOCAB: i32 = 8;
     const INTERMEDIATE: i32 = 8;
     const HEAD_DIM: i32 = 2;
     const HEADS: i32 = 2;
@@ -414,11 +414,11 @@ mod snapshot_prompt_cache {
         w
     }
 
-    fn build_wrapper() -> Gemma3Wrapper {
+    pub(super) fn build_wrapper() -> Gemma3Wrapper {
         build_wrapper_with_window(8)
     }
 
-    fn build_wrapper_with_window(sliding_window: i32) -> Gemma3Wrapper {
+    pub(super) fn build_wrapper_with_window(sliding_window: i32) -> Gemma3Wrapper {
         let args = synthetic_args_with_window(sliding_window);
         let weights = synthetic_weights();
         Gemma3Wrapper::new(
@@ -426,7 +426,7 @@ mod snapshot_prompt_cache {
         )
     }
 
-    fn to_vec_f32(arr: &MlxArray) -> Vec<f32> {
+    pub(super) fn to_vec_f32(arr: &MlxArray) -> Vec<f32> {
         let arr_f32 = mlxcel_core::astype(arr, mlxcel_core::dtype::FLOAT32);
         mlxcel_core::eval(&arr_f32);
         mlxcel_core::array_to_raw_bytes(&arr_f32)
@@ -435,11 +435,11 @@ mod snapshot_prompt_cache {
             .collect()
     }
 
-    fn ids(range: std::ops::Range<i32>) -> Vec<i32> {
+    pub(super) fn ids(range: std::ops::Range<i32>) -> Vec<i32> {
         range.map(|i| i.rem_euclid(VOCAB - 1) + 1).collect()
     }
 
-    fn prefill(wrapper: &Gemma3Wrapper, seq: SequenceId, tokens: &[i32]) {
+    pub(super) fn prefill(wrapper: &Gemma3Wrapper, seq: SequenceId, tokens: &[i32]) {
         wrapper.prepare_sequence_state(seq);
         let prompt = mlxcel_core::from_slice_i32(tokens, &[1, tokens.len() as i32]);
         let _ = wrapper.forward_with_sequence_id(&prompt, Some(seq), &mut [], None);
@@ -457,13 +457,13 @@ mod snapshot_prompt_cache {
         to_vec_f32(logits.as_ref().expect("logits"))
     }
 
-    fn decode(wrapper: &Gemma3Wrapper, seq: SequenceId, token: i32) -> Vec<f32> {
+    pub(super) fn decode(wrapper: &Gemma3Wrapper, seq: SequenceId, token: i32) -> Vec<f32> {
         let input = mlxcel_core::from_slice_i32(&[token], &[1, 1]);
         let logits = wrapper.forward_with_sequence_id(&input, Some(seq), &mut [], None);
         to_vec_f32(logits.as_ref().expect("logits"))
     }
 
-    fn assert_logits_agree(got: &[f32], want: &[f32], what: &str) {
+    pub(super) fn assert_logits_agree(got: &[f32], want: &[f32], what: &str) {
         assert_eq!(got.len(), want.len(), "{what}: logit count");
         for (i, (&g, &w)) in got.iter().zip(want.iter()).enumerate() {
             let abs = (g - w).abs();
@@ -773,5 +773,236 @@ mod rotating_live_len {
             mask_keys, returned,
             "prefill mask key axis {mask_keys} must equal the {returned} keys the cache returned"
         );
+    }
+}
+
+// -----------------------------------------------------------------
+// The cache-owned attention entry (issue #2172, ADR 0008 / ADR 0009).
+//
+// Gemma 3's attention block used to spell out `update_and_fetch` plus SDPA
+// itself and, in the batched decode, pick a dense-pointer paged kernel from
+// the scheduler's `DecodeBatchContext`. Both forwards now hand the projected
+// Q/K/V to `Cache::attend`, which routes a global layer to `KVCache::attend`
+// and a sliding layer to `RotatingKVCache::attend`. The first module pins
+// that the entry runs the same ops the block ran for FP16 storage, bit for
+// bit, prefill and wrapped decode alike; the second pins the batched decode
+// of the synthetic model against single-row decode of the same sequences.
+mod cache_attend_entry {
+    use super::super::Cache;
+    use mlxcel_core::cache::{KVCacheMode, KvAttention};
+    use mlxcel_core::layers::{KVCache, RotatingKVCache};
+    use mlxcel_core::{MlxArray, UniquePtr};
+
+    const HEADS: i32 = 2;
+    const KV_HEADS: i32 = 1;
+    const DIM: i32 = 4;
+    const SCALE: f32 = 0.5;
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn next_f32(&mut self) -> f32 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            ((self.0 >> 40) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0
+        }
+        fn array(&mut self, shape: &[i32]) -> UniquePtr<MlxArray> {
+            let n: usize = shape.iter().map(|d| *d as usize).product();
+            let data: Vec<f32> = (0..n).map(|_| self.next_f32()).collect();
+            let f32_arr = mlxcel_core::from_slice_f32(&data, shape);
+            mlxcel_core::astype(&f32_arr, mlxcel_core::dtype::FLOAT16)
+        }
+        fn step(
+            &mut self,
+            len: i32,
+        ) -> (
+            UniquePtr<MlxArray>,
+            UniquePtr<MlxArray>,
+            UniquePtr<MlxArray>,
+        ) {
+            (
+                self.array(&[1, HEADS, len, DIM]),
+                self.array(&[1, KV_HEADS, len, DIM]),
+                self.array(&[1, KV_HEADS, len, DIM]),
+            )
+        }
+    }
+
+    fn to_vec_f32(arr: &MlxArray) -> Vec<f32> {
+        let arr_f32 = mlxcel_core::astype(arr, mlxcel_core::dtype::FLOAT32);
+        mlxcel_core::eval(&arr_f32);
+        mlxcel_core::array_to_raw_bytes(&arr_f32)
+            .chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect()
+    }
+
+    /// What `Attention::forward` did before #2172, verbatim: `window_size` is
+    /// the sliding window on a sliding layer and `0` on a global one.
+    fn block_reference(
+        cache: &mut Cache,
+        window_size: i32,
+        q: &MlxArray,
+        k: UniquePtr<MlxArray>,
+        v: UniquePtr<MlxArray>,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let l = mlxcel_core::array_shape(q)[2];
+        let (cache_k, cache_v) = match cache {
+            Cache::Standard(c) => c.update_and_fetch(k, v),
+            Cache::Rotating(c) => c.update_and_fetch(k, v),
+        };
+        let k_len = mlxcel_core::array_shape(&cache_k)[2];
+        if mask.is_none() && l > 1 && (window_size == 0 || k_len <= window_size) {
+            mlxcel_core::causal_attention(q, &cache_k, &cache_v, SCALE, 0.0, 0)
+        } else {
+            let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
+            unsafe {
+                mlxcel_core::layers::attention_from_ptr(
+                    q,
+                    &cache_k,
+                    &cache_v,
+                    SCALE,
+                    mask_ptr,
+                    0.0,
+                    window_size,
+                )
+            }
+        }
+    }
+
+    fn assert_entry_matches_block(
+        mut got: Cache,
+        mut want: Cache,
+        window_size: i32,
+        prefill: i32,
+        decode_steps: usize,
+        label: &str,
+    ) {
+        let mut rng = Rng(0x2172_7 | 1);
+        let (q, k, v) = rng.step(prefill);
+        let (k2, v2) = (mlxcel_core::copy(&k), mlxcel_core::copy(&v));
+        let a = got.attend(&q, k, v, SCALE, None);
+        let b = block_reference(&mut want, window_size, &q, k2, v2, None);
+        assert_eq!(to_vec_f32(&a), to_vec_f32(&b), "{label}: prefill differs");
+        for i in 0..decode_steps {
+            let (q, k, v) = rng.step(1);
+            let (k2, v2) = (mlxcel_core::copy(&k), mlxcel_core::copy(&v));
+            let a = got.attend(&q, k, v, SCALE, None);
+            let b = block_reference(&mut want, window_size, &q, k2, v2, None);
+            assert_eq!(
+                to_vec_f32(&a),
+                to_vec_f32(&b),
+                "{label}: decode {i} differs"
+            );
+            assert_eq!(got.offset(), want.offset(), "{label}: offset at {i}");
+        }
+    }
+
+    #[test]
+    fn global_fp16_layer_takes_the_route_the_block_ran() {
+        assert_entry_matches_block(
+            Cache::Standard(KVCache::new()),
+            Cache::Standard(KVCache::new()),
+            0,
+            5,
+            4,
+            "global fp16",
+        );
+    }
+
+    #[test]
+    fn sliding_fp16_layer_takes_the_route_the_block_ran_through_the_wrap() {
+        let window = 6;
+        assert_entry_matches_block(
+            Cache::Rotating(RotatingKVCache::new(window)),
+            Cache::Rotating(RotatingKVCache::new(window)),
+            window,
+            4,
+            6,
+            "sliding fp16",
+        );
+    }
+
+    /// A Turbo4Asym sliding layer dequantizes on read inside
+    /// `update_and_fetch`; the entry keeps that write path, so it is the same
+    /// ops for quantized sliding storage as for FP16.
+    #[test]
+    fn sliding_turbo4_asym_layer_takes_the_route_the_block_ran() {
+        let window = 32;
+        assert_entry_matches_block(
+            Cache::Rotating(RotatingKVCache::new_with_mode(
+                window,
+                KVCacheMode::Turbo4Asym,
+            )),
+            Cache::Rotating(RotatingKVCache::new_with_mode(
+                window,
+                KVCacheMode::Turbo4Asym,
+            )),
+            window,
+            8,
+            3,
+            "sliding turbo4asym",
+        );
+    }
+}
+
+mod batched_decode_entry {
+    use super::snapshot_prompt_cache::*;
+    use mlxcel_core::cache::SequenceId;
+    use mlxcel_core::generate::LanguageModel;
+    use mlxcel_core::layers::KVCache;
+
+    const SEQ_BASE: u64 = 2_172_000;
+
+    /// Batched decode (`forward_batched_with_ids`, the entry `Engine::step`
+    /// takes for `B > 1`) of two sequences whose sliding rings have wrapped
+    /// agrees with single-row decode of twin sequences: the batched route
+    /// projects once for the batch and attends per row through
+    /// `Cache::attend`, the single-row route through the same entry.
+    #[test]
+    fn batched_decode_matches_single_row_decode_past_the_window() {
+        let wrapper = build_wrapper_with_window(4);
+        let vocab = VOCAB as usize;
+        let prompts = [ids(0..10), ids(3..10)];
+        let batched = [
+            SequenceId::from_raw(SEQ_BASE + 1),
+            SequenceId::from_raw(SEQ_BASE + 2),
+        ];
+        let single = [
+            SequenceId::from_raw(SEQ_BASE + 3),
+            SequenceId::from_raw(SEQ_BASE + 4),
+        ];
+        for row in 0..2 {
+            prefill(&wrapper, batched[row], &prompts[row]);
+            prefill(&wrapper, single[row], &prompts[row]);
+        }
+
+        for (step, pair) in [(1, 2), (5, 7), (3, 3)].into_iter().enumerate() {
+            let want = [
+                decode(&wrapper, single[0], pair.0),
+                decode(&wrapper, single[1], pair.1),
+            ];
+            let input = mlxcel_core::from_slice_i32(&[pair.0, pair.1], &[2, 1]);
+            let mut c0: Vec<KVCache> = Vec::new();
+            let mut c1: Vec<KVCache> = Vec::new();
+            let mut batch_caches = [c0.as_mut_slice(), c1.as_mut_slice()];
+            let logits = wrapper.forward_batched_with_ids(
+                &input,
+                Some(&batched[..]),
+                &mut batch_caches,
+                None,
+            );
+            assert_eq!(mlxcel_core::array_shape(&logits), vec![2, 1, VOCAB]);
+            let got = to_vec_f32(&logits);
+            for row in 0..2 {
+                assert_logits_agree(
+                    &got[row * vocab..(row + 1) * vocab],
+                    &want[row],
+                    &format!("step {step} row {row}"),
+                );
+            }
+        }
     }
 }

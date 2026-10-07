@@ -205,7 +205,6 @@ impl DirectEngine {
             let batch = StepBatch {
                 seq_ids: std::slice::from_ref(&id),
                 input: &input,
-                context: None,
             };
             let out = {
                 let row = StepRow {

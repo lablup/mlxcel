@@ -39,7 +39,7 @@ use crate::cache::{
     SequenceStateBackend, SequenceStateLayout,
 };
 use crate::decode_finish::FinishCause;
-use crate::generate::{DecodeBatchContext, LanguageModel};
+use crate::generate::LanguageModel;
 use crate::sampling::{FusedSampleParams, TokenBiasMap, apply_row_filters, apply_token_bias_rows};
 use crate::{MlxArray, UniquePtr};
 
@@ -104,9 +104,6 @@ pub struct ClosedSequence {
 pub struct StepBatch<'a> {
     pub seq_ids: &'a [SequenceId],
     pub input: &'a MlxArray,
-    /// Storage hint for the model-owned families that still read it (Gemma 3,
-    /// Llama 4, `model_owned`); the `KVCache` families ignore it (ADR 0008).
-    pub context: Option<&'a DecodeBatchContext>,
 }
 
 /// The result of [`Engine::step`]: one [`RowOutcome`] per row of the
@@ -389,12 +386,11 @@ impl<M: LanguageModel> Engine<M> {
                     .pool
                     .get_batch_caches_mut(ids)
                     .map_err(EngineError::Batch)?;
-                Ok(self.model.forward_batched_with_context_and_ids(
+                Ok(self.model.forward_batched_with_ids(
                     batch.input,
                     Some(ids),
                     &mut batch_caches,
                     None,
-                    batch.context,
                 ))
             }
         }
@@ -496,13 +492,9 @@ impl<M: LanguageModel> Engine<M> {
                 batch_caches.len()
             )));
         }
-        Ok(self.model.forward_batched_with_context_and_ids(
-            input,
-            Some(seq_ids),
-            &mut batch_caches,
-            mask,
-            None,
-        ))
+        Ok(self
+            .model
+            .forward_batched_with_ids(input, Some(seq_ids), &mut batch_caches, mask))
     }
 
     /// Drop `excess` pad positions a padded prefill wrote for `id`, from the

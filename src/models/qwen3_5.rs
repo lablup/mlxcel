@@ -3746,16 +3746,15 @@ impl LanguageModel for Qwen35Model {
         batch_caches: &mut [&mut [KVCache]],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        self.forward_batched_with_context_and_ids(input_ids, None, batch_caches, mask, None)
+        self.forward_batched_with_ids(input_ids, None, batch_caches, mask)
     }
 
-    fn forward_batched_with_context_and_ids(
+    fn forward_batched_with_ids(
         &self,
         input_ids: &MlxArray,
         seq_ids: Option<&[SequenceId]>,
         batch_caches: &mut [&mut [KVCache]],
         mask: Option<&MlxArray>,
-        _context: Option<&mlxcel_core::generate::DecodeBatchContext>,
     ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(input_ids);
         if batch_caches.len() <= 1 || shape[1] <= 1 {
