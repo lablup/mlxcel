@@ -9,7 +9,7 @@ Raw data for `../../qwen35-dflash-verify-rope-gb10-2026-10-07.md`. Checkpoints `
 - `matrix/`: the attribution matrix, `block_versus_chain_byte_bisect_on_the_real_transcript` per cell, `w{2,4}-rr{0,1}-ld{1,0}-r{1,2,3}.log` (width, per-row RoPE off/on, `MLXCEL_SDPA_VECTOR_LARGE_D`, repeat). `summary.txt` is one line per cell.
 - `branch/`: step 1.1, a temporary `[2191] rope branch` log line per full-attention forward, from one classic server and one width-4 DFlash server (`MLXCEL_MTP_ALLOW_INEXACT=1`, since at the time the decline was still in place). The log line is not in the shipped code.
 - `served/`: `served_identity.py` output on the final binary: three `/v1/completions` prompts at temperature 0, 200 tokens, classic and DFlash at widths 2, 4, 8, 16 and unset (the server resolves 4), no environment overrides.
-- `throughput/`: `price_rope.py` output, three interleaved rounds of classic-a, DFlash at the resolved width, and classic-b (the null arm), three measured requests per arm after a discarded warm-up.
+- `throughput/`: `price_rope.py` output, three interleaved rounds of classic-a, DFlash at the resolved width, and classic-b (the null arm), three measured requests per arm after a discarded warm-up. Round 2 ran with `--ignore-ci-gate` (its records carry `ci_gate_ignored: true`), so their `ci_job_running: false` reflects the patched check, not an idle runner. `interrupted_*` is the first round-2 attempt, cut off by a harness timeout after one arm.
 
 ## Harness
 
