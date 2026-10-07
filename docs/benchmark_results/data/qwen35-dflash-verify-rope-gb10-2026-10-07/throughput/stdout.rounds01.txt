@@ -1,0 +1,7 @@
+[r0 classic-a] e2e 56.40..57.44 tok/s | sha ['2c76b0a181'] | declined=False
+[r0 dflash-auto] e2e 60.89..61.48 tok/s | sha ['2c76b0a181'] | declined=False
+[r0 classic-b] e2e 56.34..57.06 tok/s | sha ['2c76b0a181'] | declined=False
+[r1 dflash-auto] e2e 60.47..61.53 tok/s | sha ['2c76b0a181'] | declined=False
+[r1 classic-b] e2e 56.49..57.84 tok/s | sha ['2c76b0a181'] | declined=False
+[r1 classic-a] e2e 54.94..55.15 tok/s | sha ['2c76b0a181'] | declined=False
+[r2 classic-b] e2e 55.29..55.66 tok/s | sha ['2c76b0a181'] | declined=False

@@ -58,9 +58,16 @@ def main():
     ap.add_argument("--port", type=int, default=18935)
     ap.add_argument("--out", required=True)
     ap.add_argument("--logdir", default=None)
+    ap.add_argument("--ignore-ci-gate", action="store_true",
+                    help="do not treat a running CI job as busy; CPU-busy processes still gate")
     ap.add_argument("--lock-tag", default=None,
                     help="wrap each server in `gpu-lock run --tag TAG`")
     a = ap.parse_args()
+    if a.ignore_ci_gate:
+        # The shared runner on this host stayed busy for hours with other
+        # units' queued CI (#2185 hit the same). The compiler and foreign-model
+        # checks still apply; the classic-b null arm bounds what remains.
+        po.hostgate.ci_job_running = lambda: False
     a.logdir = a.logdir or os.path.dirname(os.path.abspath(a.out))
     os.makedirs(a.logdir, exist_ok=True)
     prompt = open(a.prompt_file).read()
@@ -71,6 +78,7 @@ def main():
                 rec = po.run_arm(a, f"{tag}-r{rnd}", width, {}, prompt)
                 rec["round"] = rnd
                 rec["arm_base"] = tag
+                rec["ci_gate_ignored"] = bool(a.ignore_ci_gate)
                 f.write(json.dumps(rec) + "\n")
                 f.flush()
                 rs = [r["e2e_tok_s"] for r in rec.get("runs", [])]
