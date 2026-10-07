@@ -1319,7 +1319,8 @@ pub(super) fn decode_generated_text(
 /// pair, Qwen-style `<think>` / `</think>`) emit their chain-of-thought inline
 /// with the answer, and `decode_generated_text` renders with special tokens so
 /// those raw markers reach the terminal (issue #884). Route the whole decoded
-/// reply through the shared `mlxcel::reasoning_stream` splitter so the channel
+/// reply through the server's `StreamFilter` (`mlxcel::reasoning_display`,
+/// issue #2173) so the channel
 /// is suppressed by default (only the final answer prints, no raw markers) and
 /// surfaced dimmed when `--show-reasoning` is set. A non-thinking model has no
 /// markers, so the filter is an inert passthrough and the returned string is
@@ -1347,13 +1348,13 @@ fn filter_reasoning_for_display(
     // generated text starts already inside the channel with no open marker, so
     // start the filter in the reasoning state to keep the primed thought body
     // and its raw close marker off the terminal.
-    let primed = mlxcel::reasoning_stream::prompt_primed_open_thinking(&markers, prompt);
-    mlxcel::reasoning_stream::render_full(&markers, generated_text, primed, show_reasoning, dim)
+    let primed = mlxcel::reasoning_display::prompt_primed_open_thinking(&markers, prompt);
+    mlxcel::reasoning_display::render_full(generated_text, primed, show_reasoning, dim)
 }
 
 /// Print the generation and its timing line.
 ///
-/// `reasoning_only` comes from [`mlxcel::reasoning_stream::is_reasoning_only`]:
+/// `reasoning_only` comes from [`mlxcel::reasoning_display::is_reasoning_only`]:
 /// the model generated normally but every token landed in the suppressed
 /// reasoning channel, so `generated_text` is empty here. Saying so is the whole
 /// point of the flag. A silent blank has twice been read as a broken model or a
@@ -3035,7 +3036,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
             &generated_text,
             args.generation.show_reasoning,
         );
-        let reasoning_only = mlxcel::reasoning_stream::is_reasoning_only(
+        let reasoning_only = mlxcel::reasoning_display::is_reasoning_only(
             &generated_text,
             !visible.trim().is_empty(),
             args.generation.show_reasoning,
@@ -3218,7 +3219,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         &generated_text,
         args.generation.show_reasoning,
     );
-    let reasoning_only = mlxcel::reasoning_stream::is_reasoning_only(
+    let reasoning_only = mlxcel::reasoning_display::is_reasoning_only(
         &generated_text,
         !visible.trim().is_empty(),
         args.generation.show_reasoning,

@@ -23,8 +23,9 @@
 //! - (d) a direct `Engine` run (#2172), and
 //! - (e) `mlxcel run -p`: the in-process server `run` starts, configured by
 //!   the same `CliServerSettings` and driven through the same chat request
-//!   path (template render, worker options, `StreamFilter`), greedy case only
-//!   (#2173),
+//!   path (template render, worker options, `StreamFilter`), against
+//! - (f) the same chat request on the `mlxcel-server` default configuration,
+//!   greedy case only (#2173),
 //!
 //! and prints, for every pair, `identical` or the first divergent token index
 //! with the id each side produced. On (b) it also compares a prompt-cache miss
@@ -48,7 +49,6 @@ use std::sync::atomic::AtomicBool;
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use mlxcel::cli::in_process_client::{CliServerSettings, chat_request_body};
-use mlxcel::server::DecodeStorageBackend;
 use mlxcel::server::engine_probe::cases::{
     cache_prime_len, default_dry_breaker_ids, greedy_case, seeded_penalties_case,
 };
@@ -61,6 +61,7 @@ use mlxcel::server::engine_probe::{
 };
 use mlxcel::server::in_process::InProcessServer;
 use mlxcel::server::in_process::chat::chat_request_from_json;
+use mlxcel::server::{DecodeStorageBackend, ServerStartupConfig};
 use mlxcel_core::cache::KVCacheMode;
 
 use report::{PairRow, PathStream, Report, Side};
@@ -313,49 +314,63 @@ fn main() -> Result<()> {
         engine.shutdown()?;
     }
 
-    // (e) `mlxcel run -p`, greedy: the settings `run` builds for
-    // `-p <prompt> --temp 0 -n <max-tokens>` and the request body it sends,
-    // through the same in-process server and chat request path. The prompt
-    // is rendered by the server, so the admitted length is reported next to
-    // the harness's own render.
+    // (e) `mlxcel run -p` and (f) `mlxcel-server`, greedy, on the same chat
+    // request: the user prompt as one message with `temperature: 0` and
+    // `max_tokens`, rendered by the server's chat request path (so its
+    // length can differ from the harness's own CLI-style render that arms
+    // (a) to (d) share). (e) is the in-process server `run` starts, from the
+    // settings `run -p --temp 0 -n N` builds; (f) is the same request path on
+    // the `mlxcel-server` default configuration (four slots, paged storage
+    // when the model supports it), prompt cache off on both (ADR 0007).
     if !args.no_chat_template {
-        let settings = CliServerSettings {
+        let run_settings = CliServerSettings {
             temperature: Some(0.0),
             max_tokens: Some(args.max_tokens),
             prompt_cache: false,
             warmup: true,
             ..CliServerSettings::default()
         };
-        let mut startup = settings.startup(&args.model);
-        // `--server-prefill-chunk` pins the chunk on every server arm; `run`
-        // itself keeps the server default.
-        if let Some(chunk) = args.server_prefill_chunk {
-            startup.prefill_chunk_size = chunk;
+        let mut server_startup = ServerStartupConfig::default();
+        server_startup.model_path = args.model.clone();
+        server_startup.prompt_cache.enabled = false;
+        let arms = [
+            (Side::Run, "run -p", run_settings.startup(&args.model)),
+            (Side::ServerChat, "mlxcel-server", server_startup),
+        ];
+        for (side, name, mut startup) in arms {
+            // `--server-prefill-chunk` pins the chunk on every server arm.
+            if let Some(chunk) = args.server_prefill_chunk {
+                startup.prefill_chunk_size = chunk;
+            }
+            let server = InProcessServer::start(&startup)?;
+            for case in &cases {
+                let stream = if case.name == "greedy" {
+                    let mut body = chat_request_body(
+                        serde_json::json!([{ "role": "user", "content": args.prompt }]),
+                        &CliServerSettings::default(),
+                    );
+                    body["temperature"] = serde_json::json!(0.0);
+                    body["max_tokens"] = serde_json::json!(args.max_tokens);
+                    let request = chat_request_from_json(body)?;
+                    let turn = server.chat(request, Arc::new(AtomicBool::new(false)), |_| {})?;
+                    PathStream::ran(
+                        turn.result.generated_token_ids,
+                        &format!(
+                            "{name} parallel={} pc=off prompt-tokens={} chunk={}",
+                            server.config().max_batch_size,
+                            turn.result.prompt_tokens,
+                            server.config().prefill_chunk_size
+                        ),
+                    )
+                } else {
+                    PathStream::not_applicable(
+                        "the chat-request arms cover the greedy case".to_string(),
+                    )
+                };
+                report.push_stream(case.name, side, stream);
+            }
+            server.shutdown()?;
         }
-        let server = InProcessServer::start(&startup)?;
-        for case in &cases {
-            let stream = if case.name == "greedy" {
-                let body = chat_request_body(
-                    serde_json::json!([{ "role": "user", "content": args.prompt }]),
-                    &settings,
-                );
-                let request = chat_request_from_json(body)?;
-                let turn = server.chat(request, Arc::new(AtomicBool::new(false)), |_| {})?;
-                PathStream::ran(
-                    turn.result.generated_token_ids,
-                    &format!(
-                        "run -p B=1 {:?} pc=off prompt-tokens={} chunk={}",
-                        DecodeStorageBackend::Dense,
-                        turn.result.prompt_tokens,
-                        server.config().prefill_chunk_size
-                    ),
-                )
-            } else {
-                PathStream::not_applicable("the run arm covers the greedy case".to_string())
-            };
-            report.push_stream(case.name, Side::Run, stream);
-        }
-        server.shutdown()?;
     }
 
     // (b) with the prompt cache on. Miss: the request arrives cold. Hit: a

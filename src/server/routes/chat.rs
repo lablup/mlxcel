@@ -1682,7 +1682,7 @@ async fn stream_chat_completion(
                         // content-carrying chunk (the placeholder push just
                         // above pushes an explicitly empty one, so it does not
                         // trip this). Read at finish time via
-                        // `reasoning_stream::is_reasoning_only`.
+                        // `reasoning_display::is_reasoning_only`.
                         if !cb.saw_content && pending.iter().any(chunk_carries_content) {
                             cb.saw_content = true;
                         }
@@ -2102,7 +2102,7 @@ pub(crate) fn is_prompt_primed_open_thinking(
     prompt: &str,
 ) -> bool {
     if markers.has_thinking() {
-        return crate::reasoning_stream::prompt_primed_open_thinking(markers, prompt);
+        return crate::reasoning_display::prompt_primed_open_thinking(markers, prompt);
     }
     legacy_primed_close_marker(prompt).is_some()
 }
@@ -2154,7 +2154,7 @@ pub(crate) fn primed_open_thinking_close_marker(
     prompt: &str,
 ) -> Option<String> {
     if markers.has_thinking() {
-        return crate::reasoning_stream::prompt_primed_open_close_marker(markers, prompt);
+        return crate::reasoning_display::prompt_primed_open_close_marker(markers, prompt);
     }
     legacy_primed_close_marker(prompt).map(str::to_string)
 }
@@ -2196,7 +2196,7 @@ fn primed_thinking_unclosed(raw_output: &str, primed: bool) -> bool {
 /// `deepseek-legacy`, which deliberately keep the thinking block inside
 /// `content` rather than emptying it.
 ///
-/// Reuses [`crate::reasoning_stream::is_reasoning_only`], the same predicate
+/// Reuses [`crate::reasoning_display::is_reasoning_only`], the same predicate
 /// the CLI's `generate` and `chat` REPL name this condition with (#1721), so
 /// the two surfaces agree on what counts. `show_reasoning` is fixed to
 /// `false`: unlike the CLI, the server never suppresses reasoning into a
@@ -2229,7 +2229,7 @@ fn log_if_reasoning_only(
     // `deepseek-legacy` keep them in `content`, which is then non-empty and
     // short-circuits below anyway. See `ReasoningFormat::emits_reasoning_content`.
     let reasoning_only = reasoning_content.is_some_and(|text| !text.trim().is_empty())
-        && crate::reasoning_stream::is_reasoning_only(
+        && crate::reasoning_display::is_reasoning_only(
             raw_generated_text,
             !content.trim().is_empty(),
             false,
@@ -2258,7 +2258,7 @@ fn log_if_reasoning_only(
 ///   client as `tool_calls` deltas instead. A model that answers with nothing
 ///   but a tool call -- the ordinary shape -- therefore ends with
 ///   `saw_content` false and a non-empty `result.text`, which
-///   [`crate::reasoning_stream::is_reasoning_only`] alone would report as
+///   [`crate::reasoning_display::is_reasoning_only`] alone would report as
 ///   reasoning-only on every such request. The non-streaming path excludes its
 ///   tool-calls arm for the same reason; this keeps the two surfaces agreeing.
 /// - The stream actually emitted reasoning. The field asserts the output stayed
@@ -2266,7 +2266,7 @@ fn log_if_reasoning_only(
 ///   other reason must not borrow that explanation. See
 ///   [`log_if_reasoning_only`], which gates on the shaped `reasoning_content`
 ///   for the same reason.
-/// - [`crate::reasoning_stream::is_reasoning_only`] agrees: tokens were
+/// - [`crate::reasoning_display::is_reasoning_only`] agrees: tokens were
 ///   produced and none of them reached `delta.content`.
 ///
 /// Used by: the streaming chat completion handler, at finish time.
@@ -2278,7 +2278,7 @@ fn stream_reasoning_only(
 ) -> bool {
     finish_reason != "tool_calls"
         && saw_reasoning_content
-        && crate::reasoning_stream::is_reasoning_only(generated_text, saw_content, false)
+        && crate::reasoning_display::is_reasoning_only(generated_text, saw_content, false)
 }
 
 /// Whether a streamed chunk carries non-empty `delta.reasoning_content`.
@@ -2964,7 +2964,7 @@ mod tests {
     fn log_if_reasoning_only_false_when_nothing_was_generated() {
         // Zero completion tokens is a different fact from a suppressed
         // channel, and must not borrow this explanation (mirrors
-        // `reasoning_stream::is_reasoning_only`'s own `reasoning_only_is_false_
+        // `reasoning_display::is_reasoning_only`'s own `reasoning_only_is_false_
         // when_nothing_was_generated` case).
         assert!(!log_if_reasoning_only("", "", None, 0, "stop"));
     }

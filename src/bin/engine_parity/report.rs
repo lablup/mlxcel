@@ -39,6 +39,9 @@ pub enum Side {
     /// (e) `mlxcel run -p`: the in-process server `run` starts (one slot,
     /// prompt cache off) driven through its chat request path (#2173).
     Run,
+    /// (f) the same chat request on the `mlxcel-server` default configuration
+    /// through the same request path, prompt cache off (#2173).
+    ServerChat,
 }
 
 impl Side {
@@ -51,18 +54,18 @@ impl Side {
             Self::CacheHit => "b:dense+pc:hit",
             Self::Engine => "d:engine",
             Self::Run => "e:run",
+            Self::ServerChat => "f:server",
         }
     }
 }
 
 /// The pairs compared per case, in print order.
-const PAIRS: [(Side, Side); 8] = [
+const PAIRS: [(Side, Side); 7] = [
     (Side::Cli, Side::Dense),
     (Side::Cli, Side::Paged),
     (Side::Dense, Side::Paged),
     (Side::Dense, Side::Engine),
-    (Side::Dense, Side::Run),
-    (Side::Paged, Side::Run),
+    (Side::ServerChat, Side::Run),
     (Side::Dense, Side::CacheMiss),
     (Side::CacheMiss, Side::CacheHit),
 ];

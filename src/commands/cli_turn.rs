@@ -85,7 +85,8 @@ impl TurnPrinter {
         if turn.cancelled {
             println!("[interrupted]");
         }
-        if !self.show_reasoning
+        if !turn.cancelled
+            && !self.show_reasoning
             && !self.saw_visible_text
             && turn
                 .reasoning
