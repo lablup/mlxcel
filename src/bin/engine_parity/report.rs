@@ -33,6 +33,9 @@ pub enum Side {
     /// (b) with the prompt cache on, the same request after a priming request
     /// stored its history prefix.
     CacheHit,
+    /// (d) a direct `mlxcel_core::engine::Engine` run, B=1, dense storage,
+    /// no scheduler (#2172).
+    Engine,
 }
 
 impl Side {
@@ -43,15 +46,17 @@ impl Side {
             Self::Paged => "c:paged",
             Self::CacheMiss => "b:dense+pc:miss",
             Self::CacheHit => "b:dense+pc:hit",
+            Self::Engine => "d:engine",
         }
     }
 }
 
 /// The pairs compared per case, in print order.
-const PAIRS: [(Side, Side); 5] = [
+const PAIRS: [(Side, Side); 6] = [
     (Side::Cli, Side::Dense),
     (Side::Cli, Side::Paged),
     (Side::Dense, Side::Paged),
+    (Side::Dense, Side::Engine),
     (Side::Dense, Side::CacheMiss),
     (Side::CacheMiss, Side::CacheHit),
 ];

@@ -11,7 +11,14 @@ serving roles that split prefill and decode across processes.
 The scheduler keeps up to `--parallel` sequences active at once. Each step it
 either admits and prefills queued prompts (chunked at `--prefill-chunk-size` so a
 long prompt does not stall decode) or advances the active batch by one decode
-token, then streams the new tokens out. Relevant flags:
+token, then streams the new tokens out. The scheduler decides what runs; the
+engine runs it. `mlxcel_core::engine::Engine` owns the model and the KV pool,
+and every model forward, sampler draw and finish step the scheduler needs goes
+through `Engine::prefill`, `Engine::step` (one entry for every row count: a
+lone request is a batch of one) and the pipelined `submit` / `finish_rows` pair
+([ADR 0007](adr/0007-unified-batch-native-engine.md), [ADR 0009](adr/0009-engine-step-api.md)).
+Admission, tick policy, preemption, the prompt cache, disaggregated handoff and
+the speculative burst generators stay in the scheduler. Relevant flags:
 
 | Flag | Default | Purpose |
 |------|---------|---------|
@@ -71,7 +78,11 @@ use scheduler-owned cache allocation, paged storage, prompt-cache adoption,
 chunked prefill, and batched decode paths that the CLI loop does not use. If a
 reproduction or oracle comparison needs the CLI-shaped single-request path, use
 `--no-batch` for the legacy worker or `--max-batch-size 1` to keep the scheduler
-while making `--decode-storage-backend auto` resolve to dense storage. These are
+while making `--decode-storage-backend auto` resolve to dense storage. Both are
+the same engine at B=1 (`--no-batch` is the scheduler at `max_batch_size = 1`),
+and `mlxcel-engine-parity` compares the server's dense B=1 stream with a direct
+`Engine` run (arm `d:engine`) so a divergence can be placed on the scheduler's
+policy or on the engine. These are
 diagnostic/oracle controls that narrow the server path toward the CLI; they do
 not turn every model family into an unmeasured token-exactness guarantee. To
 isolate only the decode storage backend while preserving the default admission
