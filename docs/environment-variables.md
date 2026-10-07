@@ -207,8 +207,9 @@ all being live at once, which put Meta-Llama-3.1-8B-Instruct-4bit at a 20.60 GB
 peak for 4.75 GB of weights (lablup/mlxcel#2062). `0` turns the bound off; a
 value that is not a non-negative integer is ignored with a stderr warning.
 On ROCm builds the pre-load memory estimate (`mlxcel inspect`,
-`--estimate-memory`, `--recommend-quant`, the paged KV `auto` budget and the
-prompt-cache capacity defaults) adds this budget to its total, read and parsed
+`--estimate-memory`, the paged KV `auto` budget and the prompt-cache capacity
+defaults; `--recommend-quant` reads only its weight and KV figures) adds this
+budget to its total, read and parsed
 the way the backend reads it, and `mlxcel inspect` prints it as
 `Backend in-flight` (`backend_inflight_bytes` in `--json`); Metal and CUDA
 builds add nothing (lablup/mlxcel#2155). With `0` the estimate adds nothing

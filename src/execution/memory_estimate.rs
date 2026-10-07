@@ -34,6 +34,10 @@
 //!   last-token logit buffer `batch × vocab × 2`, capturing the
 //!   batch / context / vocab growth the flat factor missed.
 //!   `MLXCEL_ACTIVATION_MULT` overrides the multiplier.
+//! - **Backend in-flight** (ROCm builds only, issue #2155) — the
+//!   `MLX_ROCM_MAX_INFLIGHT_MB` budget the ROCm backend lets committed but
+//!   unfinished command batches hold, parsed by
+//!   [`rocm_inflight_reserve_bytes`]. Every other build adds 0.
 //!
 //! The result feeds three callers that all use this exact function:
 //!
