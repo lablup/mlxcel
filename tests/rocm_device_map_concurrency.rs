@@ -140,17 +140,17 @@ fn check_exact(
 /// `arange(LEN) * 2 + 1` on the calling thread's default stream, checked
 /// exactly. Three primitives, so three `device()` lookups per evaluation.
 ///
-/// The constants are full-length host-written arrays rather than
-/// `multiply_scalar` and `full_like`: an 8-byte scalar read by an elementwise
-/// kernel while other threads evaluate on their own streams comes back as a
-/// value another scalar held earlier (#2213, found by this test,
-/// 9 of 10 runs with and without the #2197 fix), and that failure is not what
-/// this file guards. Full-length constants pass 10 of 10 on gfx1151.
+/// The constants are 8-byte host-written scalars (`multiply_scalar` and
+/// `full_like`). Until #2213 was fixed, a scalar read by an elementwise
+/// kernel while other threads evaluated on their own streams came back as a
+/// value another scalar held earlier (found by this test, 9 of 10 runs with
+/// and without the #2197 fix), and this file used full-length constants to
+/// keep that failure out of what it guards; `tests/rocm_scalar_pool_concurrency.rs`
+/// now guards it.
 fn launch_and_check(what: &str) -> Result<(), String> {
     let inp = mlxcel_core::arange_f32(0.0, LEN as f32, 1.0);
-    let twos = mlxcel_core::from_slice_f32(&[2.0; LEN as usize], &[LEN]);
-    let ones = mlxcel_core::from_slice_f32(&[1.0; LEN as usize], &[LEN]);
-    let doubled = mlxcel_core::multiply(&inp, &twos);
+    let doubled = mlxcel_core::multiply_scalar(&inp, 2.0);
+    let ones = mlxcel_core::full_like(&doubled, 1.0);
     let out = mlxcel_core::add(&doubled, &ones);
     check_exact(what, &out, |i| 2.0 * i as f32 + 1.0)
 }

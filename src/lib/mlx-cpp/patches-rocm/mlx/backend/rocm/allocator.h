@@ -35,7 +35,8 @@ struct RocmBuffer {
 };
 
 // ---------------------------------------------------------------------------
-// SmallSizePool — identical to CUDA (8-byte scalar freelist only).
+// SmallSizePool — CUDA's 8-byte scalar freelist, with every slot on its own
+// cache line (see small_block_stride in allocator.cpp, lablup/mlxcel#2213).
 // ---------------------------------------------------------------------------
 
 class SmallSizePool {
