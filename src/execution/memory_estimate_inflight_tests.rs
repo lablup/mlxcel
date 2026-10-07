@@ -12,12 +12,12 @@ const GIB: u64 = 1 << 30;
 /// `crate::test_support::env_lock::env_lock()` for longer than the guard.
 struct EnvGuard {
     key: &'static str,
-    previous: Option<String>,
+    previous: Option<std::ffi::OsString>,
 }
 
 impl EnvGuard {
     fn new(key: &'static str, value: Option<&str>) -> Self {
-        let previous = std::env::var(key).ok();
+        let previous = std::env::var_os(key);
         // SAFETY: the creating test holds the crate-wide env lock, which
         // serializes every env mutation in this test binary.
         unsafe {
