@@ -18,7 +18,7 @@ token, then streams the new tokens out. Relevant flags:
 | `--parallel N` | 4 | Maximum active (in-flight) sequences; caps the concurrent decode batch. |
 | `--max-batch-size N` | (= `--parallel`) | Maximum sequences decoded together in one batched step. |
 | `--max-batch-prefill N` | 4 | Requests batched into one prefill forward pass (families that support it). |
-| `--max-batch-prefill-tokens N` | (derived) | Padded-token budget bounding one batched prefill's transient memory. Unset derives `2 * max_batch_prefill * prefill_chunk_size`; `0` disables the cap. |
+| `--max-batch-prefill-tokens N` | (derived) | Padded-token budget bounding one batched prefill's transient memory. Unset derives `2 * max_batch_prefill * min(prefill_chunk_size, 512)`; `0` disables the cap. |
 | `--max-queue-depth N` | 32 | Maximum queued (not yet admitted) requests. |
 | `--prefill-chunk-size N` | 2048 | Token chunk size for prefill; bounds prefill's effect on decode latency. One policy with the CLI's `MLXCEL_PREFILL_CHUNK` (ADR 0007). |
 | `--prefill-grant-interval N` | 16 | Decode ticks a parked chunked prefill yields before it is granted one; bounds an admitted long prompt's time to first token. `0` disables the grant (unbounded wait). |
@@ -152,7 +152,7 @@ Since #2170 the CLI generator and the scheduler prefill through one `PrefillPlan
 
 Two prefills of the same prompt that forward the same pieces from the same KV state are bitwise identical under `MLXCEL_SDPA_DETERMINISTIC=1`. Two that partition the prompt differently are not: the CUDA quantized matmul routes a forward of fewer than 8 rows to the per-row `qmv` kernel and larger ones to the tiled `qmm` kernel, attention over a short query block tiles differently from the full causal pass, and the two reduce in different orders, so KV and logits differ in the last bit and a greedy stream can flip at a near-tie token. The split at the history boundary, `--prefill-chunk-size`, and a prompt-cache hit (which forwards only the suffix after the adopted prefix) are all partitions.
 
-So a prompt-cache hit reproduces the cold (miss) run of the same prompt exactly when its adopted prefix ends on one of the cold plan's split points (`PrefillPlan::reproduces`): the history boundary of a snapshot family, or a chunk edge. `make engine-parity` measures both shapes on GB10 (2026-10-07, 64 greedy and seeded tokens, the hit primed with the prompt's history prefix):
+So a prompt-cache hit reproduces the cold (miss) run of the same prompt exactly when its adopted prefix ends on one of the cold plan's split points (`PrefillPlan::reproduces`): the history boundary of a snapshot family, or a chunk edge. That is the plan half of the condition; the other half is that the adopted rows were themselves written by the same pieces, as a boundary snapshot of an earlier turn or a primed prefix forwarded as one piece are. Rows a donor wrote by decode steps, or inside a longer forward, are a different partition even when the adopted length is a split point. `make engine-parity` measures both shapes on GB10 (2026-10-07, 64 greedy and seeded tokens, the hit primed with the prompt's history prefix):
 
 | model | miss partition | hit partition | miss vs hit |
 |---|---|---|---|
@@ -162,7 +162,7 @@ So a prompt-cache hit reproduces the cold (miss) run of the same prompt exactly 
 | llama-3.2-1b-instruct-4bit (dense KV) | `prefill[0..75)` | `adopted[0..71)+prefill[71..75)` | greedy identical, seeded diverges at token 25 |
 | llama-3.2-1b-instruct-4bit, `--server-prefill-chunk 71` | `prefill[0..71)+prefill[71..75)` | `adopted[0..71)+prefill[71..75)` | identical, both cases |
 
-The dense-KV rows diverge because their cold plan has no split point at 45 or 71: the hit's 7-row and 4-row suffix forwards run through `qmv`, the cold run's 52-row and 75-row forwards through `qmm`. Giving every family the history-boundary split would make those two rows identical, but it would cost every cold chat prefill a second forward launch and make the prompt cache change the output of a single-turn request (off vs miss, today identical for dense-KV families), which the Phase 5 `mlxcel run` versus `mlxcel generate` comparison relies on; it was rejected for #2170. The invariant to rely on is therefore: cache off and a cold prefill with the cache on are identical for every family without a history-boundary split, a hit from a split point is identical to the miss, and a hit from inside a piece is a partition change of the #203 / #325 / #326 near-tie class, bounded by the `mlxcel_core::prefill_plan` tests and `scheduler_prompt_cache_tests::cache_hit_reproduces_miss_exactly_from_a_plan_split_point`.
+The dense-KV rows diverge because their cold plan has no split point at 45 or 71: the hit's 7-row and 4-row suffix forwards run through `qmv`, the cold run's 52-row and 75-row forwards through `qmm`. Giving every family the history-boundary split would make those two rows identical, but it would cost every cold chat prefill a second forward launch and make the prompt cache change the output of a single-turn request (off vs miss, today identical for dense-KV families), which the Phase 5 `mlxcel run` versus `mlxcel generate` comparison relies on; it was rejected for #2170. The invariant to rely on is therefore: cache off and a cold prefill with the cache on are identical for every family without a history-boundary split, a hit from a split point is identical to the miss, and a hit from inside a piece is a partition change of the #203 / #325 / #326 near-tie class, pinned by the `mlxcel_core::prefill_plan` tests and `scheduler_prompt_cache_plan_tests::cache_hit_reproduces_miss_exactly_from_a_plan_split_point` (the divergence of an inside-a-piece hit is measured in the table above, not asserted numerically by a test).
 
 ### Decode headroom under a tight budget (`--kv-admission-watermark`)
 
@@ -291,12 +291,13 @@ of `B >= 2` rows padded to `L` costs `B*L <= N` tokens, and since `L <= (B*L)/2`
 the mask stays within `N^2 / 2` elements, i.e. `~N^2` bytes at FP16 and
 `~2*N^2` at FP32.
 
-The default budget is derived, not fixed: `2 * max_batch_prefill * prefill_chunk_size`
-(the shipped `2 * 4 * 2048 = 16384`; the 2x headroom absorbs the padding slop of
-real chunk-sized prompts, whose chat template pushes them slightly over
-`prefill_chunk_size`), so a full batch of chunk-sized prompts stays
-eligible for batching while a window of longer prompts spills to the chunked
-path. At the default the FP32 mask is bounded to `2 * 4096^2` bytes, about 34 MiB,
+The default budget is derived, not fixed: `2 * max_batch_prefill * min(prefill_chunk_size, 512)`
+(the shipped `2 * 4 * 512 = 4096`; the 2x headroom absorbs the padding slop of
+real 512-token prompts, whose chat template pushes them slightly over 512), so a
+full batch of short prompts stays eligible for batching while a window of longer
+prompts spills to the chunked path. The per-row share is capped at 512 so the
+ADR 0007 chunk default (2048) does not quadruple the budget and multiply the
+worst-case mask sixteen times (#2170). At the default the FP32 mask is bounded to `2 * 4096^2` bytes, about 34 MiB,
 negligible beside model activation memory. `0` (the flag, or
 `MLXCEL_MAX_BATCH_PREFILL_TOKENS=0`) disables the cap for the pre-#715 unbounded
 behavior. The flag takes precedence over `MLXCEL_MAX_BATCH_PREFILL_TOKENS`, which
@@ -309,7 +310,7 @@ The analytic prediction for four concurrent 8k-token prompts on
 | config | prefill mask window | mask transient (analytic) | path |
 |--------|--------------------:|--------------------------:|------|
 | uncapped (`--max-batch-prefill-tokens 0`) | `[4, 8192, 8192]` FP32 | `4 * 8192^2 * 4 B` = 1024 MiB | single unchunked batched forward |
-| default cap (4096) | four `[≤512, 8192]` chunk masks | `512 * 8192 * 4 B` = 16 MiB (one at a time) | 8k prompts spill to the chunked single-sequence path |
+| default cap (4096) | four `[≤2048, 8192]` chunk masks | `2048 * 8192 * 4 B` = 64 MiB (one at a time) | 8k prompts spill to the chunked single-sequence path |
 
 The empirical A/B (server phys-footprint peak: RSS does not capture MLX Metal
 buffers on Apple Silicon, so use `/usr/bin/footprint -p <pid>` for

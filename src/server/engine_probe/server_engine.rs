@@ -67,7 +67,8 @@ pub struct ServerEngineOptions {
     /// records the fallback, which is what lets the probe report the storage
     /// it actually measured.
     pub decode_storage: DecodeStorageBackend,
-    /// `--prefill-chunk-size`; `None` keeps the server default (512).
+    /// `--prefill-chunk-size`; `None` keeps the server default (the shared
+    /// chunk policy, 2048 unless `MLXCEL_PREFILL_CHUNK` says otherwise).
     pub prefill_chunk_size: Option<usize>,
     /// Whether the cross-request prompt cache is enabled (`--no-prompt-cache`
     /// when `false`). The server default is enabled.

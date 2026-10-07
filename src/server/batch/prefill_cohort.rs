@@ -177,9 +177,9 @@ fn flush_sequential(cohorts: &mut Vec<PrefillCohort>, pending: &mut Vec<usize>) 
 // token budget bounds both transients: the mask is `B*L^2 = (B*L)*L` elements,
 // and for any window of `B >= 2` rows `L <= (B*L)/2`, so the mask stays within
 // `budget^2 / 2` elements (`~budget^2` bytes at FP16, `~2*budget^2` at FP32). At
-// the default budget of `2 * max_batch_prefill * prefill_chunk_size` (2 * 4 * 512
-// = 4096) that is at most ~34 MiB of FP32 mask, negligible beside model
-// activation memory.
+// the default budget of `2 * max_batch_prefill * min(prefill_chunk_size, 512)`
+// (2 * 4 * 512 = 4096) that is at most ~34 MiB of FP32 mask, negligible beside
+// model activation memory.
 // ---------------------------------------------------------------------------
 
 /// Whether a batched-prefill window that currently holds `count` rows padded to
@@ -254,11 +254,24 @@ pub(crate) fn batched_prefill_window_len(
     take
 }
 
+/// Per-row token basis of the derived batched-prefill budget: a row's share
+/// never exceeds this, whatever the prefill chunk.
+///
+/// The budget used to scale with `--prefill-chunk-size` alone, which was 512
+/// by default. ADR 0007 (#2170) moved the chunk default to 2048 for the
+/// single-sequence TTFT it measured; scaling the batched budget with it would
+/// have quadrupled the budget to 16384 and the worst-case cohort mask sixteen
+/// times (`~2 * budget^2` bytes, ~34 MiB to ~512 MiB of FP32), and let two 8k
+/// prompts batch unchunked where they spilled to the chunked path before. The
+/// cap keeps the #715 bound where it was measured.
+const BATCHED_PREFILL_ROW_TOKENS: usize = 512;
+
 /// Derived default padded-token budget for a batched-prefill window when the
 /// operator sets neither `--max-batch-prefill-tokens` nor
-/// `MLXCEL_MAX_BATCH_PREFILL_TOKENS`: `2 * max_batch_prefill * prefill_chunk_size`.
-/// Falls back to 512 tokens per row when chunking is disabled
-/// (`prefill_chunk_size == 0`).
+/// `MLXCEL_MAX_BATCH_PREFILL_TOKENS`:
+/// `2 * max_batch_prefill * min(prefill_chunk_size, 512)`. Falls back to 512
+/// tokens per row when chunking is disabled (`prefill_chunk_size == 0`); see
+/// [`BATCHED_PREFILL_ROW_TOKENS`] for the cap.
 ///
 /// The factor of 2 is headroom for padding slop: real "chunk-sized" prompts
 /// (chat template plus a nominal 512-token body) land slightly OVER
@@ -275,9 +288,9 @@ pub(crate) fn default_batched_prefill_token_budget(
     max_batch_prefill: usize,
 ) -> usize {
     let per_row = if prefill_chunk_size == 0 {
-        512
+        BATCHED_PREFILL_ROW_TOKENS
     } else {
-        prefill_chunk_size
+        prefill_chunk_size.min(BATCHED_PREFILL_ROW_TOKENS)
     };
     max_batch_prefill
         .max(1)
@@ -635,6 +648,17 @@ mod tests {
         assert_eq!(default_batched_prefill_token_budget(0, 4), 4096);
         assert_eq!(default_batched_prefill_token_budget(256, 8), 4096);
         assert_eq!(default_batched_prefill_token_budget(512, 1), 1024);
+        // The ADR 0007 chunk default (2048) and any larger chunk keep the
+        // 512-per-row basis, so the shipped budget stays 4096 (#2170).
+        assert_eq!(default_batched_prefill_token_budget(2048, 4), 4096);
+        assert_eq!(default_batched_prefill_token_budget(8192, 4), 4096);
+        assert_eq!(
+            default_batched_prefill_token_budget(
+                mlxcel_core::prefill_plan::DEFAULT_PREFILL_CHUNK,
+                4
+            ),
+            4096
+        );
     }
 
     // ── Runtime-LoRA window partitioning (#1439) ────────────────────────────

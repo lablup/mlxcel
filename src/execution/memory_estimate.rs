@@ -137,6 +137,18 @@ pub fn activation_prefill_tokens() -> u64 {
     mlxcel_core::prefill_plan::prefill_chunk_len() as u64
 }
 
+/// Prompt tokens one prefill forward spans at `ctx_len` under `chunk`
+/// ([`activation_prefill_tokens`]): `min(ctx_len, chunk)`, at least 1. A
+/// `chunk` of `0` (`MLXCEL_PREFILL_CHUNK=0`, a single-pass prefill) bounds
+/// nothing, so the whole context is one forward.
+fn activation_prefill_span(ctx_len: u64, chunk: u64) -> u64 {
+    if chunk == 0 {
+        ctx_len.max(1)
+    } else {
+        ctx_len.clamp(1, chunk)
+    }
+}
+
 /// Env var applied by `execution::runtime` as an MLX allocator soft cap.
 ///
 /// `mlxcel inspect` and the `serve --estimate-memory` preflight run before
@@ -775,7 +787,7 @@ fn resolve_activation_mult() -> f64 {
 /// weights-proportional headroom missed in the batch>1 / large-vocab regime.
 fn compute_activation_bytes(dims: &ActivationDims, ctx_len: u64, batch: u64, mult: f64) -> u64 {
     const ACT_DTYPE_BYTES: u64 = 2; // activations are FP16 even with int8 KV/weights
-    let prefill_tokens = ctx_len.clamp(1, activation_prefill_tokens());
+    let prefill_tokens = activation_prefill_span(ctx_len, activation_prefill_tokens());
     let per_token = dims.hidden.saturating_add(dims.intermediate);
     let streaming_base = per_token
         .saturating_mul(batch)
@@ -1611,10 +1623,13 @@ pub fn format_estimate(model_dir: &Path, est: &MemoryEstimate) -> String {
         .saturating_sub(est.backend_inflight_bytes);
     let _ = writeln!(
         out,
-        "  Activation:      {}  (batch {} × ≤{} prefill tokens × (hidden+intermediate) + logits)",
+        "  Activation:      {}  (batch {} × {} prefill tokens × (hidden+intermediate) + logits)",
         format_bytes(est.activation_bytes),
         est.batch,
-        activation_prefill_tokens(),
+        match activation_prefill_tokens() {
+            0 => "all".to_string(),
+            chunk => format!("≤{chunk}"),
+        },
     );
     let _ = writeln!(
         out,
@@ -2239,6 +2254,17 @@ mod tests {
         let streaming = 2 * prefill * (4096 + 11008) * 2; // mult × prefill × (h+i) × 2 bytes
         let logits = 32000 * 2; // vocab × batch(1) × 2 bytes
         assert_eq!(a, streaming + logits);
+    }
+
+    /// `MLXCEL_PREFILL_CHUNK=0` (single-pass prefill) must not panic the
+    /// estimate: `ctx.clamp(1, 0)` would, so a zero chunk spans the context.
+    #[test]
+    fn activation_prefill_span_handles_a_disabled_chunk() {
+        assert_eq!(activation_prefill_span(8192, 2048), 2048);
+        assert_eq!(activation_prefill_span(256, 2048), 256);
+        assert_eq!(activation_prefill_span(0, 2048), 1);
+        assert_eq!(activation_prefill_span(8192, 0), 8192);
+        assert_eq!(activation_prefill_span(0, 0), 1);
     }
 
     #[test]
