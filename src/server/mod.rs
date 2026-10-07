@@ -34,6 +34,7 @@ pub(crate) mod diffusion_worker;
 pub(crate) mod dry_breakers;
 pub mod embedding_model;
 pub mod embedding_worker;
+pub mod engine_probe;
 pub(crate) mod florence2_worker;
 pub mod gbnf;
 pub mod gcp_compat;

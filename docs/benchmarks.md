@@ -171,6 +171,19 @@ python3 scripts/bench_embeddings.py --bin target/release/mlxcel-server \
 # argument, the output log path, and no flags.
 ./scripts/bench_all_models.sh <output_file>
 
+# Single-stream (B=1) decode, CLI path (CxxGenerator) next to the server path
+# (the BatchScheduler, driven in-process), at a 256- and an 8192-token prompt.
+# One pass is a functional check; for numbers use the interleaved rounds with a
+# null arm. ADR 0007 lists the baseline and A/B commands it is decided by.
+make bench-engine MODEL=models/mlx/qwen3-1.7b-4bit
+scripts/engine_bench_rounds.py --model models/mlx/qwen3-1.7b-4bit --rounds 5 \
+    --null-every-arm --arm cli="--path cli" --arm server="--path server" \
+    --out baseline-qwen.jsonl
+
+# CLI vs server token parity (first divergent token per pair), same prompt and
+# SamplingConfig, B=1 dense and paged, MLXCEL_SDPA_DETERMINISTIC=1.
+make engine-parity MODEL=models/mlx/qwen3-1.7b-4bit
+
 # Sampling step, no model attached. Gumbel-max (#900) covers the no-filter
 # path; the rejection kernel (#901) covers top-k / top-p / min-p.
 cargo run --release --features metal,accelerate --example gumbel_sampling_microbench

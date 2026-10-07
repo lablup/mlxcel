@@ -255,7 +255,7 @@ fn common_prefix_len(a: &[i32], b: &[i32]) -> usize {
 ///   the sampler needs a non-empty final forward to produce fresh logits.
 ///
 /// Used by: `BatchScheduler::resolve_history_boundary`
-fn history_boundary_len(
+pub(crate) fn history_boundary_len(
     history: &[i32],
     prompt_tokens: &[i32],
     min_prefix_tokens: usize,

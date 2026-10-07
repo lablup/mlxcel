@@ -67,6 +67,22 @@ path = "src/bin/speculative_bench.rs"
 name = "mlxcel-bench-decode"
 path = "src/bin/bench_decode.rs"
 
+# Cross-path decode parity harness (issue #2167, ADR 0007): the same prompt and
+# sampling config through CxxGenerator and the in-process server scheduler at
+# B=1 (dense and paged), reporting the first divergent token per pair.
+# `make engine-parity`.
+[[bin]]
+name = "mlxcel-engine-parity"
+path = "src/bin/engine_parity.rs"
+
+# Single-stream decode benchmark for both decode paths (issue #2167, ADR 0007):
+# CxxGenerator next to the in-process server scheduler at B=1, with the
+# prefill-chunk and decode-storage knobs the ADR's A/Bs vary.
+# `make bench-engine`.
+[[bin]]
+name = "mlxcel-bench-engine"
+path = "src/bin/bench_engine.rs"
+
 [features]
 default = ["surgery", "webui"]
 metal = ["mlxcel-core/metal"]

@@ -1200,6 +1200,44 @@ bench-clean: ## Remove benchmark log
 	@rm -f $(BENCH_LOG)
 	@echo "Benchmark log removed."
 
+# ----------------------------------------------------------------------------
+# Unified-engine baseline tools (issue #2167, ADR 0007, epic #2166)
+# ----------------------------------------------------------------------------
+# `engine-parity` runs one prompt and SamplingConfig through the CLI decode
+# path (CxxGenerator) and the in-process server scheduler at B=1 with dense and
+# with paged decode storage, under MLXCEL_SDPA_DETERMINISTIC=1, and prints the
+# first divergent token per pair. Divergence is the recorded pre-epic baseline
+# and exits 0; PARITY_ARGS=--expect-identical turns it into a gate.
+#
+# `bench-engine` measures single-stream decode tok/s and TTFT on both paths at
+# a short (256-token) and a long (8192-token) synthesized prompt. Pass the A/B
+# knobs through BENCH_ENGINE_ARGS (`--prefill-chunk N`, `--decode-storage
+# dense|paged`, `--path cli|server`). For numbers, run interleaved rounds with
+# a null arm through scripts/engine_bench_rounds.py (ADR 0007 lists the exact
+# commands); a single `make bench-engine` pass is a functional check.
+#
+#   make engine-parity MODEL=models/mlx/qwen3-1.7b-4bit
+#   make bench-engine MODEL=models/mlx/llama-3.2-1b-instruct-4bit
+#
+# ENGINE_PROBE_FEATURES defaults to the platform's accelerator feature (CUDA on
+# Linux, Metal+Accelerate on macOS); set it to `rocm` on a ROCm host.
+ENGINE_PROBE_FEATURES ?= $(WEBUI_TEST_FEATURES)
+ENGINE_PROBE_FEATURE_FLAG := $(if $(ENGINE_PROBE_FEATURES),--features $(ENGINE_PROBE_FEATURES))
+PARITY_ARGS ?=
+BENCH_ENGINE_ARGS ?=
+
+.PHONY: engine-parity
+engine-parity: ## CLI vs server B=1 decode parity harness, bench baseline (MODEL=path, PARITY_ARGS=...)
+	@test -n "$(MODEL)" || { echo "usage: make engine-parity MODEL=<model dir> [PARITY_ARGS=--expect-identical]"; exit 2; }
+	$(CARGO) build --release $(ENGINE_PROBE_FEATURE_FLAG) --bin mlxcel-engine-parity
+	MLXCEL_SDPA_DETERMINISTIC=1 ./target/release/mlxcel-engine-parity --model "$(MODEL)" $(PARITY_ARGS)
+
+.PHONY: bench-engine
+bench-engine: ## B=1 decode benchmark, CLI vs in-process server, short+long context (MODEL=path)
+	@test -n "$(MODEL)" || { echo "usage: make bench-engine MODEL=<model dir> [BENCH_ENGINE_ARGS=...]"; exit 2; }
+	$(CARGO) build --release $(ENGINE_PROBE_FEATURE_FLAG) --bin mlxcel-bench-engine
+	./target/release/mlxcel-bench-engine --model "$(MODEL)" $(BENCH_ENGINE_ARGS)
+
 # ============================================================================
 # Webpage (Next.js static site)
 # ============================================================================

@@ -40,7 +40,8 @@
 //!   `(LoadedModel, MlxcelTokenizer)`) is retained unchanged for
 //!   `src/server/model_worker.rs` and the scheduler. Batched serving is treated
 //!   as an MLX capability the single-sequence session does not cover yet (the
-//!   KV / batching abstraction ADR 0004 defers).
+//!   KV / batching abstraction ADR 0004 defers, which ADR 0007 replaces with
+//!   the batch-native engine of epic #2166).
 //!
 //! # Why the seam abstracts the *engine*, not individual ops
 //!

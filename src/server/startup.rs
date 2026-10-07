@@ -1909,7 +1909,7 @@ fn initialize_server_logging(startup: &ServerStartupConfig) -> Result<()> {
     Ok(())
 }
 
-fn warmup_model(model_provider: &ModelProvider) -> Result<()> {
+pub(super) fn warmup_model(model_provider: &ModelProvider) -> Result<()> {
     model_provider.generate(
         "Hello".to_string(),
         ServerGenerateOptions {
@@ -2669,6 +2669,115 @@ fn validate_settings_endpoint_exposure(
     )
 }
 
+/// Size the cross-request prompt-prefix cache for this model and build its
+/// store, or `None` when the policy disables it.
+///
+/// Applies the model-aware capacity defaults and the hybrid-SSM APC rule to
+/// `config.prompt_cache` before building the store, so every caller serves
+/// with the same cache policy `start_server` does.
+///
+/// Used by: `start_server`, `engine_probe::ServerEngine::start`
+pub(super) fn resolve_prompt_cache_store(
+    config: &mut ServerConfig,
+    model_path: &Path,
+    batch_metrics: &Arc<BatchMetrics>,
+) -> Option<Arc<crate::server::prompt_cache::PromptCacheStore>> {
+    if config.prompt_cache.is_enabled()
+        && !config.prompt_cache.snapshot_capacity_bytes_explicit
+        && let Some(rec) = crate::server::prompt_cache::recommend_model_snapshot_capacity(
+            model_path,
+            config.context_size,
+            config.prompt_cache.snapshot_capacity_bytes,
+        )
+        && rec.capacity_bytes > config.prompt_cache.snapshot_capacity_bytes
+    {
+        tracing::info!(
+            previous_snapshot_capacity_bytes = config.prompt_cache.snapshot_capacity_bytes,
+            recommended_snapshot_capacity_bytes = rec.capacity_bytes,
+            representative_snapshot_bytes = rec.entry_bytes,
+            representative_tokens = rec.representative_tokens,
+            target_entries = rec.target_entries,
+            kv_bytes_at_representative_tokens = rec.kv_bytes_at_representative_tokens,
+            fixed_state_bytes = rec.fixed_state_bytes,
+            available_ceiling_bytes = rec.available_ceiling_bytes,
+            architecture = %rec.architecture,
+            "Applied model-aware prompt-cache snapshot capacity default"
+        );
+        config.prompt_cache.snapshot_capacity_bytes = rec.capacity_bytes;
+    }
+
+    if config.prompt_cache.is_enabled()
+        && !config.prompt_cache.capacity_bytes_explicit
+        && let Some(rec) = crate::server::prompt_cache::recommend_model_kv_store_capacity(
+            model_path,
+            config.context_size,
+            config.prompt_cache.capacity_bytes,
+        )
+        && rec.capacity_bytes > config.prompt_cache.capacity_bytes
+    {
+        tracing::info!(
+            previous_capacity_bytes = config.prompt_cache.capacity_bytes,
+            recommended_capacity_bytes = rec.capacity_bytes,
+            representative_entry_bytes = rec.entry_bytes,
+            representative_tokens = rec.representative_tokens,
+            target_entries = rec.target_entries,
+            available_ceiling_bytes = rec.available_ceiling_bytes,
+            architecture = %rec.architecture,
+            "Applied model-aware prompt-cache KV store capacity default"
+        );
+        config.prompt_cache.capacity_bytes = rec.capacity_bytes;
+    }
+
+    // hybrid SSM / linear-attention models cannot use APC because
+    // their recurrent state cannot be reconstructed from a token-prefix hash.
+    // Detect by reading model_type / architectures from config.json and
+    // force-disable APC at runtime (the whole-prefix prompt cache is still
+    // safe and stays enabled).
+    if config.prompt_cache.apc.enabled
+        && let Ok(Some(family)) =
+            crate::server::prompt_cache::detect_hybrid_ssm_from_path(model_path)
+    {
+        tracing::warn!(
+            model_type = %family,
+            "Detected hybrid SSM / linear-attention model family ({family}); \
+             auto-disabling APC because recurrent state cannot decompose \
+             into hashable blocks. Whole-prefix prompt cache is unaffected."
+        );
+        config.prompt_cache.apc.enabled = false;
+    }
+
+    // Cross-request prompt-prefix KV cache store.
+    // Gated on the config flag so a disabled policy reserves zero memory.
+    // wire BatchMetrics into the store so hits/misses/evictions
+    // are counted and exposed via /metrics.
+    if config.prompt_cache.is_enabled() {
+        let cache_metrics = Arc::new(crate::server::state::BatchMetricsCacheAdapter::new(
+            batch_metrics.clone(),
+        ));
+        let store = Arc::new(crate::server::prompt_cache::PromptCacheStore::with_metrics(
+            config.prompt_cache.clone(),
+            cache_metrics,
+        ));
+        tracing::info!(
+            capacity_bytes = config.prompt_cache.capacity_bytes,
+            max_entries = config.prompt_cache.max_entries,
+            ttl_seconds = config.prompt_cache.ttl.as_secs(),
+            snapshot_capacity_bytes = config.prompt_cache.snapshot_capacity_bytes,
+            snapshot_max_entries = config.prompt_cache.snapshot_max_entries,
+            snapshot_ttl_seconds = config.prompt_cache.snapshot_ttl.as_secs(),
+            min_prefix_tokens = config.prompt_cache.min_prefix_tokens,
+            apc_enabled = config.prompt_cache.apc.enabled,
+            apc_block_size = config.prompt_cache.apc.block_size,
+            apc_hash = %config.prompt_cache.apc.hash,
+            "Prompt-prefix cache store enabled (+ APC, snapshots)"
+        );
+        Some(store)
+    } else {
+        tracing::debug!("Prompt-prefix KV cache store disabled by config");
+        None
+    }
+}
+
 /// Start the server with the given startup configuration.
 ///
 /// Shared entry point used by both `mlxcel serve` and `mlxcel-server`.
@@ -3169,100 +3278,8 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     let batch_metrics = Arc::new(BatchMetrics::new());
     let batch_observability = Arc::new(BatchObservability::new());
 
-    if config.prompt_cache.is_enabled()
-        && !config.prompt_cache.snapshot_capacity_bytes_explicit
-        && let Some(rec) = crate::server::prompt_cache::recommend_model_snapshot_capacity(
-            &startup.model_path,
-            config.context_size,
-            config.prompt_cache.snapshot_capacity_bytes,
-        )
-        && rec.capacity_bytes > config.prompt_cache.snapshot_capacity_bytes
-    {
-        tracing::info!(
-            previous_snapshot_capacity_bytes = config.prompt_cache.snapshot_capacity_bytes,
-            recommended_snapshot_capacity_bytes = rec.capacity_bytes,
-            representative_snapshot_bytes = rec.entry_bytes,
-            representative_tokens = rec.representative_tokens,
-            target_entries = rec.target_entries,
-            kv_bytes_at_representative_tokens = rec.kv_bytes_at_representative_tokens,
-            fixed_state_bytes = rec.fixed_state_bytes,
-            available_ceiling_bytes = rec.available_ceiling_bytes,
-            architecture = %rec.architecture,
-            "Applied model-aware prompt-cache snapshot capacity default"
-        );
-        config.prompt_cache.snapshot_capacity_bytes = rec.capacity_bytes;
-    }
-
-    if config.prompt_cache.is_enabled()
-        && !config.prompt_cache.capacity_bytes_explicit
-        && let Some(rec) = crate::server::prompt_cache::recommend_model_kv_store_capacity(
-            &startup.model_path,
-            config.context_size,
-            config.prompt_cache.capacity_bytes,
-        )
-        && rec.capacity_bytes > config.prompt_cache.capacity_bytes
-    {
-        tracing::info!(
-            previous_capacity_bytes = config.prompt_cache.capacity_bytes,
-            recommended_capacity_bytes = rec.capacity_bytes,
-            representative_entry_bytes = rec.entry_bytes,
-            representative_tokens = rec.representative_tokens,
-            target_entries = rec.target_entries,
-            available_ceiling_bytes = rec.available_ceiling_bytes,
-            architecture = %rec.architecture,
-            "Applied model-aware prompt-cache KV store capacity default"
-        );
-        config.prompt_cache.capacity_bytes = rec.capacity_bytes;
-    }
-
-    // hybrid SSM / linear-attention models cannot use APC because
-    // their recurrent state cannot be reconstructed from a token-prefix hash.
-    // Detect by reading model_type / architectures from config.json and
-    // force-disable APC at runtime (the whole-prefix prompt cache is still
-    // safe and stays enabled).
-    if config.prompt_cache.apc.enabled
-        && let Ok(Some(family)) =
-            crate::server::prompt_cache::detect_hybrid_ssm_from_path(&startup.model_path)
-    {
-        tracing::warn!(
-            model_type = %family,
-            "Detected hybrid SSM / linear-attention model family ({family}); \
-             auto-disabling APC because recurrent state cannot decompose \
-             into hashable blocks. Whole-prefix prompt cache is unaffected."
-        );
-        config.prompt_cache.apc.enabled = false;
-    }
-
-    // Cross-request prompt-prefix KV cache store.
-    // Gated on the config flag so a disabled policy reserves zero memory.
-    // wire BatchMetrics into the store so hits/misses/evictions
-    // are counted and exposed via /metrics.
-    let prompt_cache_store = if config.prompt_cache.is_enabled() {
-        let cache_metrics = Arc::new(crate::server::state::BatchMetricsCacheAdapter::new(
-            batch_metrics.clone(),
-        ));
-        let store = Arc::new(crate::server::prompt_cache::PromptCacheStore::with_metrics(
-            config.prompt_cache.clone(),
-            cache_metrics,
-        ));
-        tracing::info!(
-            capacity_bytes = config.prompt_cache.capacity_bytes,
-            max_entries = config.prompt_cache.max_entries,
-            ttl_seconds = config.prompt_cache.ttl.as_secs(),
-            snapshot_capacity_bytes = config.prompt_cache.snapshot_capacity_bytes,
-            snapshot_max_entries = config.prompt_cache.snapshot_max_entries,
-            snapshot_ttl_seconds = config.prompt_cache.snapshot_ttl.as_secs(),
-            min_prefix_tokens = config.prompt_cache.min_prefix_tokens,
-            apc_enabled = config.prompt_cache.apc.enabled,
-            apc_block_size = config.prompt_cache.apc.block_size,
-            apc_hash = %config.prompt_cache.apc.hash,
-            "Prompt-prefix cache store enabled (+ APC, snapshots)"
-        );
-        Some(store)
-    } else {
-        tracing::debug!("Prompt-prefix KV cache store disabled by config");
-        None
-    };
+    let prompt_cache_store =
+        resolve_prompt_cache_store(&mut config, &startup.model_path, &batch_metrics);
 
     // `--timeout` is validated inside `new_with_server_config_and_prompt_cache` and
     // the resolved `Duration` is stashed on `ModelProvider`, where it flows into the drain loops.

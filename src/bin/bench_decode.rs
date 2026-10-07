@@ -35,6 +35,9 @@ use mlxcel::cli::turbo_args::{
 };
 use mlxcel::sampling::{ResolvedSamplingParams, build_sampling_config};
 use mlxcel::server::chat_template::{ChatMessage, ChatTemplateProcessor};
+// The long-prompt corpus is shared with `mlxcel-bench-engine`, so
+// `--prompt-tokens N` is the same prompt in both benchmarks (issue #2167).
+use mlxcel::server::engine_probe::prompt::{cap_prompt_len, synthesize_prompt_tokens};
 use mlxcel::tokenizer::{MlxcelTokenizer, load_tokenizer};
 use mlxcel::vision::merge::InputEmbeddings;
 use mlxcel::{CxxGenerator, LanguageModel, LoadedModel, SamplingConfig};
@@ -188,53 +191,6 @@ fn tokenize_prompt(tokenizer: &MlxcelTokenizer, prompt: &str) -> Result<Vec<i32>
     Ok(ids.into_iter().map(|id| id as i32).collect())
 }
 
-/// Fixed corpus paragraph repeated to synthesize long prompts. Kept constant
-/// so the `--prompt-tokens N` prompt is byte-identical across benchmark runs
-/// and models (only the tokenizer differs). Neutral prose with punctuation and
-/// varied vocabulary so the token stream resembles real text rather than a
-/// single repeated token.
-const LONG_PROMPT_CORPUS: &str = concat!(
-    "The measurement of large language model inference performance depends on ",
-    "both prefill and decode throughput. During prefill the entire prompt is ",
-    "processed in a single forward pass, so its cost grows with the prompt ",
-    "length and exercises the matrix-multiply kernels at large batch widths. ",
-    "During decode each new token is generated one step at a time, which ",
-    "stresses memory bandwidth and kernel launch overhead instead. A benchmark ",
-    "that only uses short prompts cannot separate these two regimes, because a ",
-    "few dozen prompt tokens are dominated by fixed launch costs. To study ",
-    "prefill behaviour honestly we therefore need prompts that are hundreds or ",
-    "thousands of tokens long, repeated deterministically so that every run ",
-    "observes the same input and the numbers stay comparable over time.\n\n",
-);
-
-/// Build a deterministic prompt of exactly `target_len` tokens by repeating
-/// [`LONG_PROMPT_CORPUS`], tokenizing once with the model's tokenizer, and
-/// truncating. Returns fewer than `target_len` tokens only if `target_len` is
-/// `0`.
-fn synthesize_prompt_tokens(tokenizer: &MlxcelTokenizer, target_len: usize) -> Result<Vec<i32>> {
-    if target_len == 0 {
-        return Ok(Vec::new());
-    }
-    // Estimate tokens per corpus copy (without special tokens) to size the
-    // repeated string, then over-provision so the final tokenization always
-    // yields at least `target_len` tokens before truncation.
-    let per_copy = tokenizer
-        .encode(LONG_PROMPT_CORPUS, false)
-        .map_err(|err| anyhow::anyhow!("tokenization failed: {err}"))?
-        .len()
-        .max(1);
-    let repeats = target_len / per_copy + 4;
-    let corpus = LONG_PROMPT_CORPUS.repeat(repeats);
-    let mut ids: Vec<i32> = tokenizer
-        .encode(&corpus, true)
-        .map_err(|err| anyhow::anyhow!("tokenization failed: {err}"))?
-        .into_iter()
-        .map(|id| id as i32)
-        .collect();
-    ids.truncate(target_len);
-    Ok(ids)
-}
-
 /// Prepare a synthesized long prompt of `target_len` tokens, capped at the
 /// model's context window minus a reservation for the tokens to be generated.
 /// Returns the prepared prompt and the effective (post-cap) token length.
@@ -244,13 +200,7 @@ fn prepare_long_prompt(
     max_context: Option<usize>,
     reserve_for_generation: usize,
 ) -> Result<(PreparedPrompt, usize)> {
-    let effective = match max_context {
-        Some(ctx) => {
-            let usable = ctx.saturating_sub(reserve_for_generation).max(1);
-            target_len.min(usable)
-        }
-        None => target_len,
-    };
+    let effective = cap_prompt_len(target_len, max_context, reserve_for_generation);
     let tokens = synthesize_prompt_tokens(tokenizer, effective)?;
     let actual = tokens.len();
     Ok((
