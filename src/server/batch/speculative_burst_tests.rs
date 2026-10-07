@@ -95,6 +95,70 @@ use super::speculative_burst::{
 // Test helpers
 // =============================================================================
 
+fn measured_row_wise_window() -> super::speculative_burst::RowWiseBatchedWindow {
+    // The issue #2190 GB10 measurement: B=2, ~190-token prompts, 200 tokens,
+    // K=4, the 31B's 1024-token sliding window.
+    super::speculative_burst::RowWiseBatchedWindow {
+        batch_size: 2,
+        max_prompt_len: 192,
+        max_tokens: 200,
+        block_size: 4,
+        sliding_window: 1024,
+        dense_fp16_caches: true,
+        measured_backend: true,
+    }
+}
+
+#[test]
+fn row_wise_batched_window_serves_the_measured_configuration() {
+    assert_eq!(measured_row_wise_window().decline_reason(), None);
+    let no_window = super::speculative_burst::RowWiseBatchedWindow {
+        sliding_window: 0,
+        max_tokens: 100_000,
+        ..measured_row_wise_window()
+    };
+    assert_eq!(no_window.decline_reason(), None);
+}
+
+#[test]
+fn row_wise_batched_window_declines_outside_its_exact_limits() {
+    let base = measured_row_wise_window();
+    let cases = [
+        super::speculative_burst::RowWiseBatchedWindow {
+            batch_size: super::speculative_burst::ROW_WISE_MTP_MAX_BATCH + 1,
+            ..base
+        },
+        super::speculative_burst::RowWiseBatchedWindow {
+            dense_fp16_caches: false,
+            ..base
+        },
+        super::speculative_burst::RowWiseBatchedWindow {
+            measured_backend: false,
+            ..base
+        },
+        super::speculative_burst::RowWiseBatchedWindow {
+            max_prompt_len: 1025,
+            max_tokens: 1,
+            ..base
+        },
+        // 192 + 4 * 301 = 1396 passes 1024 + 32: a finished row's advances
+        // could make the shared ring compact under a lagging live row.
+        super::speculative_burst::RowWiseBatchedWindow {
+            max_tokens: 300,
+            ..base
+        },
+    ];
+    for window in cases {
+        assert!(window.decline_reason().is_some(), "{window:?} must decline");
+    }
+    // The ceiling itself is inclusive: 192 + 4 * 216 = 1056.
+    let at_ceiling = super::speculative_burst::RowWiseBatchedWindow {
+        max_tokens: 215,
+        ..base
+    };
+    assert_eq!(at_ceiling.decline_reason(), None);
+}
+
 #[test]
 fn gemma31b_batched_mtp_declines_before_drafter_io_and_preserves_requests() {
     let _runtime = crate::initialize_runtime();
@@ -125,6 +189,7 @@ fn gemma31b_batched_mtp_declines_before_drafter_io_and_preserves_requests() {
         prefill_chunk_size: 512,
         prefill_boundary: None,
         context_bound: Default::default(),
+        prefill_boundaries: Vec::new(),
     };
     let requests = match super::speculative_burst::try_run_burst_batched(ctx, vec![first, second]) {
         Err(requests) => requests,

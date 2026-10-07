@@ -5838,6 +5838,12 @@ impl Gemma4Wrapper {
         }
     }
 
+    /// Whether every speculative cache this wrapper builds is dense FP16, the
+    /// only layout the batched MTP per-row prefill can stack (issue #2190).
+    pub(crate) fn speculative_caches_are_dense_fp16(&self) -> bool {
+        verify_rows::caches_are_dense_fp16(&self.make_configured_caches())
+    }
+
     /// Whether the layers run MTP verify row by row, which is
     /// [`Self::mtp_requires_linear_singleton`] as the layers recorded it at
     /// load time. The batched MTP adapter keys its exact prefill and verify

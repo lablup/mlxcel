@@ -214,6 +214,12 @@ impl BatchScheduler {
         if window.len() >= 2 {
             // ---- Batched B>1 burst ----
             let context_bound = self.context_bound();
+            // Each row's classic history-boundary split, so the row-wise
+            // Gemma 4 prefill builds the KV classic serving builds (#2190).
+            let prefill_boundaries = window
+                .iter()
+                .map(|row| self.history_boundary_split(row))
+                .collect();
             let ctx = crate::server::batch::speculative_burst::BurstContext {
                 model: &self.model,
                 tokenizer: &self.tokenizer,
@@ -224,6 +230,7 @@ impl BatchScheduler {
                 profile_probe_rounds: 0,
                 prefill_boundary: None,
                 context_bound,
+                prefill_boundaries,
             };
             match crate::server::batch::speculative_burst::try_run_burst_batched(ctx, window) {
                 Ok(crate::server::batch::speculative_burst::BatchedBurstFinalized { rows }) => {
@@ -345,6 +352,7 @@ impl BatchScheduler {
                     .unwrap_or(0),
                 prefill_boundary,
                 context_bound,
+                prefill_boundaries: Vec::new(),
             };
             match crate::server::batch::speculative_burst::try_run_burst_b1(ctx, seq) {
                 Ok(finalized) => {
