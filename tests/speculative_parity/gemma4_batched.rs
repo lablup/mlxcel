@@ -85,10 +85,29 @@ fn classic_greedy(
     tokens
 }
 
-/// Whether some round had rows accept different counts, i.e. the burst ran
-/// at least one round whose rows' valid ends no longer line up.
-fn has_divergent_round(accept_lens: &[Vec<u32>]) -> bool {
-    let rounds = accept_lens.iter().map(Vec::len).min().unwrap_or(0);
+/// Whether some round, while every row was still generating, had rows accept
+/// different counts, i.e. the burst ran at least one round whose rows' valid
+/// ends no longer line up. `accept_lens` keeps entries for rows that already
+/// finished, so only the rounds before the first row finished count.
+fn has_divergent_round(accept_lens: &[Vec<u32>], tokens: &[Vec<i32>]) -> bool {
+    let live_rounds = |accepts: &[u32], emitted: usize| {
+        // The first token comes from the prefill; each round adds accept + 1.
+        let mut produced = 1;
+        accepts
+            .iter()
+            .take_while(|&&a| {
+                let live = produced < emitted;
+                produced += a as usize + 1;
+                live
+            })
+            .count()
+    };
+    let rounds = accept_lens
+        .iter()
+        .zip(tokens)
+        .map(|(accepts, emitted)| live_rounds(accepts, emitted.len()))
+        .min()
+        .unwrap_or(0);
     (0..rounds).any(|i| accept_lens.iter().any(|row| row[i] != accept_lens[0][i]))
 }
 
@@ -107,6 +126,7 @@ fn greedy_parity_mtp_gemma4_batched_matches_classic() {
     use mlxcel_core::speculative::mtp::MtpBatchedGenerator;
     use mlxcel_core::speculative::mtp::target::MtpTarget;
 
+    super::common::apply_server_mlx_cache_defaults();
     let _runtime = initialize_runtime();
     let sampling = SamplingConfig::greedy();
     let mut failures = Vec::new();
@@ -187,7 +207,7 @@ fn greedy_parity_mtp_gemma4_batched_matches_classic() {
                         continue;
                     }
                 };
-                let divergent = has_divergent_round(&run.accept_lens);
+                let divergent = has_divergent_round(&run.accept_lens, &run.tokens);
                 eprintln!(
                     "[{label}] prompt lengths {:?}, divergent round: {divergent}",
                     prompts.iter().map(Vec::len).collect::<Vec<_>>()

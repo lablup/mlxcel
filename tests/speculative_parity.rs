@@ -756,6 +756,7 @@ async fn greedy_parity_dflash_qwen35_4b() {
 
     // ---- Phase 1: structural check (in-process) ----
     {
+        common::apply_server_mlx_cache_defaults();
         let _runtime = initialize_runtime();
         mlxcel_core::synchronize_default();
         mlxcel_core::clear_memory_cache();
@@ -888,6 +889,7 @@ async fn greedy_parity_mtp_gemma4_31b() {
 
     // ---- Phase 1: structural check (in-process) ----
     {
+        common::apply_server_mlx_cache_defaults();
         let _runtime = initialize_runtime();
         mlxcel_core::synchronize_default();
         mlxcel_core::clear_memory_cache();
@@ -986,6 +988,7 @@ async fn greedy_parity_mtp_gemma4_unified_12b() {
 
     // ---- Phase 1: structural check (in-process) ----
     {
+        common::apply_server_mlx_cache_defaults();
         let _runtime = initialize_runtime();
         mlxcel_core::synchronize_default();
         mlxcel_core::clear_memory_cache();
@@ -1074,6 +1077,7 @@ fn greedy_parity_mtp_gemma4_batched_b4_matches_b1() {
         return;
     }
 
+    common::apply_server_mlx_cache_defaults();
     let _runtime = initialize_runtime();
     mlxcel_core::synchronize_default();
     mlxcel_core::clear_memory_cache();
@@ -1233,6 +1237,7 @@ fn greedy_parity_mtp_gemma4_batched_b4_ragged_matches_b1() {
         return;
     }
 
+    common::apply_server_mlx_cache_defaults();
     let _runtime = initialize_runtime();
     mlxcel_core::synchronize_default();
     mlxcel_core::clear_memory_cache();
@@ -1397,6 +1402,7 @@ fn mtp_gemma4_ragged_throughput_probe() {
         return;
     }
 
+    common::apply_server_mlx_cache_defaults();
     let _runtime = initialize_runtime();
     mlxcel_core::synchronize_default();
     mlxcel_core::clear_memory_cache();
@@ -1564,6 +1570,7 @@ fn b1_batched_baseline_probe() {
     use mlxcel_core::generate::SamplingConfig;
     use mlxcel_core::speculative::mtp::{MtpBatchedGenerator, MtpGenerator};
 
+    common::apply_server_mlx_cache_defaults();
     let _runtime = initialize_runtime();
     let mut failures = Vec::new();
     let mut ran = 0;
@@ -1683,6 +1690,7 @@ fn divergent_hidden_probe_31b() {
         eprintln!("Skipping divergent_hidden_probe_31b");
         return;
     }
+    common::apply_server_mlx_cache_defaults();
     let _runtime = initialize_runtime();
     let (loaded_target, _tok) = load_model(&target_path).expect("target model must load");
     let wrapper: &mlxcel::models::Gemma4Wrapper = match &loaded_target {
