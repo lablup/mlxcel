@@ -31,6 +31,10 @@
 //! [`jit_key_probe_array`] serves `tests/rocm_custom_kernel_jit_key.rs` (issue
 //! #2149): a kernel whose generated source differs between calls only by the
 //! input dtype or 0-d-ness, which a name-keyed JIT cache confuses.
+//!
+//! [`jit_race_probe_array`] serves `tests/rocm_jit_module_concurrency.rs`
+//! (issue #2183): one kernel name per variant, so threads that launch new and
+//! already-compiled variants at once exercise the JIT module cache's locking.
 
 use cxx::UniquePtr;
 
@@ -97,4 +101,26 @@ pub fn jit_key_probe_array(
     f16_output: bool,
 ) -> Result<UniquePtr<MlxArray>, cxx::Exception> {
     crate::ffi::rocm_jit_key_probe(input, f16_output)
+}
+
+/// A lazy float32 array whose element `i` is `input[i] * 2 + 1`, from one
+/// custom-kernel launch named `mlxcel_jit_race_probe_v<variant>` (issue
+/// #2183).
+///
+/// Every variant is its own JIT module, so the first evaluation of a variant
+/// in a process compiles it through hiprtc and inserts it into the
+/// process-global module cache, and later evaluations find it there. Threads
+/// that evaluate the same new variant, or new variants while others reuse a
+/// compiled one, race on that cache unless it is locked.
+///
+/// # Errors
+///
+/// Returns the bridge's error on backends other than ROCm, for an input that
+/// is not a 1-d float32 array of 1 to 1024 elements, and for a negative
+/// `variant`.
+pub fn jit_race_probe_array(
+    input: &MlxArray,
+    variant: i32,
+) -> Result<UniquePtr<MlxArray>, cxx::Exception> {
+    crate::ffi::rocm_jit_race_probe_array(input, variant)
 }

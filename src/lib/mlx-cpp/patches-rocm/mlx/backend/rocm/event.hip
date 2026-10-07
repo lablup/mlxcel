@@ -29,27 +29,47 @@ namespace {
 // bound to the device current when it was created, and recording it on another
 // device's stream is invalid (hangs the queue on a multi-GPU host). So pool and
 // hand back events per device, creating new ones on the CURRENT device.
+// [mlxcel #2183] The cache is shared by every thread that evaluates GPU work
+// (server workers on their own streams, CPU-stream waits, completion
+// handlers), so it is locked. Unlocked, concurrent create/release corrupted
+// the vectors and handed one hipEvent_t to two events, or a destroyed one to a
+// record: 8 threads evaluating on their own streams failed within a few rounds
+// with "hipEventRecord(event_, stream) failed: invalid resource handle".
+// Upstream CUDA's CudaEventPool (mlx/backend/cuda/event.cu at the pin) instead
+// caches only on the thread that first used it; a lock keeps the cache for the
+// server's worker threads, where decode runs, and is uncontended otherwise.
+// hipEventCreateWithFlags runs outside the lock.
 struct HipEventPool {
   static HipEventHandle create(int flags) {
     int dev = 0;
     (void)hipGetDevice(&dev);
-    auto& cache = cache_for(dev, flags);
-    if (cache.empty()) {
-      return HipEventHandle(flags); // created on the current device
-    } else {
-      HipEventHandle ret = std::move(cache.back());
-      cache.pop_back();
-      return ret;
+    {
+      std::lock_guard<std::mutex> lock(mutex());
+      auto& cache = cache_for(dev, flags);
+      if (!cache.empty()) {
+        HipEventHandle ret = std::move(cache.back());
+        cache.pop_back();
+        return ret;
+      }
     }
+    return HipEventHandle(flags); // created on the current device
   }
 
   static void release(HipEventHandle event) {
+    std::lock_guard<std::mutex> lock(mutex());
     cache_for(event.device, event.flags).push_back(std::move(event));
   }
 
+ private:
+  // Callers hold mutex().
   static std::vector<HipEventHandle>& cache_for(int device, int flags) {
     static std::map<std::pair<int, int>, std::vector<HipEventHandle>> cache;
     return cache[{device, flags}];
+  }
+
+  static std::mutex& mutex() {
+    static std::mutex mu;
+    return mu;
   }
 };
 

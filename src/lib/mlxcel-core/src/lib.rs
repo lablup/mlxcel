@@ -2410,6 +2410,17 @@ mod ffi {
         /// [`crate::rocm_faults::jit_key_probe_array`].
         fn rocm_jit_key_probe(input: &MlxArray, f16_output: bool) -> Result<UniquePtr<MlxArray>>;
 
+        /// Test-only (issue #2183): one `fast::hip_kernel` launch named
+        /// `mlxcel_jit_race_probe_v<variant>` returning a float32 array whose
+        /// element `i` is `input[i] * 2 + 1`. The first launch of a variant
+        /// in a process misses the JIT module cache and compiles; later
+        /// launches hit it. Errors on backends other than ROCm, for an input
+        /// that is not a 1-d float32 array of 1 to 1024 elements, and for a
+        /// negative variant. Prefer the wrapper
+        /// [`crate::rocm_faults::jit_race_probe_array`].
+        fn rocm_jit_race_probe_array(input: &MlxArray, variant: i32)
+        -> Result<UniquePtr<MlxArray>>;
+
         /// True when this backend has a BitLinear kernel port, that is Metal,
         /// CUDA or ROCm (issues #1803, #1862), read from the kernel's port
         /// table, so false on a wave64 ROCm device (#2147). Separate from
