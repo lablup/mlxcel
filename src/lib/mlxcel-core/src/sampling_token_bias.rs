@@ -119,6 +119,30 @@ mod tests {
     }
 
     #[test]
+    fn output_suppression_beats_non_finite_request_bias() {
+        // A request bias of +inf, NaN, or an +inf/-inf pair that accumulates to
+        // NaN must not defeat the suppression of an output-illegal id.
+        let mut accumulated = TokenBiasMap::new();
+        accumulated.accumulate(5, f32::INFINITY);
+        accumulated.accumulate(5, f32::NEG_INFINITY);
+        assert!(accumulated.get(&5).is_some_and(|bias| bias.is_nan()));
+
+        let requests = [
+            map(&[(5, f32::INFINITY)]),
+            map(&[(5, f32::NAN)]),
+            accumulated,
+        ];
+        for request in requests {
+            let composed = compose_token_bias(request, &TokenBiasMap::new(), &[5]);
+            assert_eq!(composed.get(&5), Some(&f32::NEG_INFINITY));
+        }
+
+        let language = map(&[(5, f32::INFINITY)]);
+        let composed = compose_token_bias(TokenBiasMap::new(), &language, &[5]);
+        assert_eq!(composed.get(&5), Some(&f32::NEG_INFINITY));
+    }
+
+    #[test]
     fn byte_fragment_tags_survive_the_language_fallback() {
         let mut language = TokenBiasMap::new();
         language.insert_byte_fragment(11, f32::NEG_INFINITY);
