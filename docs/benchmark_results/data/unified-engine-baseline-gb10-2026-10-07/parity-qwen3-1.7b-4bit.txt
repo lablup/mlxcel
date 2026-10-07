@@ -1,0 +1,26 @@
+[engine-parity] model: models/mlx/qwen3-1.7b-4bit
+[engine-parity] prompt tokens: 52  MLXCEL_SDPA_DETERMINISTIC=1
+[engine-parity] paths:
+  greedy                 a:cli            259 tokens  cli
+  seeded-penalties-dry   a:cli            286 tokens  cli
+  greedy                 b:dense          259 tokens  Dense pc=off prefill[0..52)
+  seeded-penalties-dry   b:dense          286 tokens  Dense pc=off prefill[0..52)
+  greedy                 c:paged          259 tokens  Paged pc=off prefill[0..52) paged-kernel-launches=7308
+  seeded-penalties-dry   c:paged          286 tokens  Paged pc=off prefill[0..52) paged-kernel-launches=8008
+  greedy                 b:dense+pc:miss  259 tokens  Dense pc=on cached=0 forwarded=52 prefill[0..52)
+  greedy                 b:dense+pc:hit   298 tokens  Dense pc=on cached=45 forwarded=7 adopted[0..45)+prefill[45..52) primed[0..45)
+  seeded-penalties-dry   b:dense+pc:miss  286 tokens  Dense pc=on cached=0 forwarded=52 prefill[0..52)
+  seeded-penalties-dry   b:dense+pc:hit   258 tokens  Dense pc=on cached=45 forwarded=7 adopted[0..45)+prefill[45..52) primed[0..45)
+[engine-parity] pairs:
+  greedy                 a:cli            vs b:dense          identical
+  greedy                 a:cli            vs c:paged          identical
+  greedy                 b:dense          vs c:paged          identical
+  greedy                 b:dense          vs b:dense+pc:miss  identical
+  greedy                 b:dense+pc:miss  vs b:dense+pc:hit   diverge@0 (first token) left=4792 right=785
+  seeded-penalties-dry   a:cli            vs b:dense          identical
+  seeded-penalties-dry   a:cli            vs c:paged          identical
+  seeded-penalties-dry   b:dense          vs c:paged          identical
+  seeded-penalties-dry   b:dense          vs b:dense+pc:miss  identical
+  seeded-penalties-dry   b:dense+pc:miss  vs b:dense+pc:hit   diverge@11 left=264 right=279
+[engine-parity] summary: 10 pair(s), 8 identical, 2 diverged, 0 n/a
+wrote docs/benchmark_results/data/unified-engine-baseline-gb10-2026-10-07/parity-qwen3-1.7b-4bit.json

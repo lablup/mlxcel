@@ -1,0 +1,50 @@
+round 0 dense              server prompt   256 TTFT 12.41 ms  decode 281.50 tok/s
+round 0 dense              server prompt  8192 TTFT 522.32 ms  decode 216.64 tok/s
+round 0 paged              server prompt   256 TTFT 13.93 ms  decode 260.10 tok/s
+round 0 paged              server prompt  8192 TTFT 475.54 ms  decode 199.52 tok/s
+round 0 dense-null         server prompt   256 TTFT 12.81 ms  decode 282.35 tok/s
+round 0 dense-null         server prompt  8192 TTFT 511.07 ms  decode 219.00 tok/s
+round 1 paged              server prompt   256 TTFT 13.06 ms  decode 258.50 tok/s
+round 1 paged              server prompt  8192 TTFT 471.36 ms  decode 199.73 tok/s
+round 1 dense-null         server prompt   256 TTFT 13.55 ms  decode 282.88 tok/s
+round 1 dense-null         server prompt  8192 TTFT 518.87 ms  decode 217.61 tok/s
+round 1 dense              server prompt   256 TTFT 14.07 ms  decode 281.66 tok/s
+round 1 dense              server prompt  8192 TTFT 519.35 ms  decode 217.44 tok/s
+round 2 dense-null         server prompt   256 TTFT 12.69 ms  decode 282.61 tok/s
+round 2 dense-null         server prompt  8192 TTFT 513.20 ms  decode 217.47 tok/s
+round 2 dense              server prompt   256 TTFT 12.81 ms  decode 283.16 tok/s
+round 2 dense              server prompt  8192 TTFT 519.40 ms  decode 218.46 tok/s
+round 2 paged              server prompt   256 TTFT 13.87 ms  decode 253.83 tok/s
+round 2 paged              server prompt  8192 TTFT 475.97 ms  decode 200.22 tok/s
+round 3 dense              server prompt   256 TTFT 12.69 ms  decode 283.85 tok/s
+round 3 dense              server prompt  8192 TTFT 512.85 ms  decode 217.71 tok/s
+round 3 paged              server prompt   256 TTFT 13.78 ms  decode 253.66 tok/s
+round 3 paged              server prompt  8192 TTFT 469.89 ms  decode 198.98 tok/s
+round 3 dense-null         server prompt   256 TTFT 12.46 ms  decode 284.16 tok/s
+round 3 dense-null         server prompt  8192 TTFT 505.13 ms  decode 217.24 tok/s
+round 4 paged              server prompt   256 TTFT 13.54 ms  decode 263.73 tok/s
+round 4 paged              server prompt  8192 TTFT 474.13 ms  decode 201.49 tok/s
+round 4 dense-null         server prompt   256 TTFT 14.39 ms  decode 281.67 tok/s
+round 4 dense-null         server prompt  8192 TTFT 514.26 ms  decode 217.65 tok/s
+round 4 dense              server prompt   256 TTFT 12.46 ms  decode 284.07 tok/s
+round 4 dense              server prompt  8192 TTFT 506.28 ms  decode 217.38 tok/s
+
+arm medians (min..max) per path and prompt length
+  server prompt   256  dense              n=5  ttft_ms 12.69 (12.41..14.07)  decode_tok_s 283.16 (281.50..284.07)
+  server prompt   256  paged              n=5  ttft_ms 13.78 (13.06..13.93)  decode_tok_s 258.50 (253.66..263.73)
+  server prompt   256  dense-null         n=5  ttft_ms 12.81 (12.46..14.39)  decode_tok_s 282.61 (281.67..284.16)
+  server prompt  8192  dense              n=5  ttft_ms 519.35 (506.28..522.32)  decode_tok_s 217.44 (216.64..218.46)
+  server prompt  8192  paged              n=5  ttft_ms 474.13 (469.89..475.97)  decode_tok_s 199.73 (198.98..201.49)
+  server prompt  8192  dense-null         n=5  ttft_ms 513.20 (505.13..518.87)  decode_tok_s 217.61 (217.24..219.00)
+
+paired per-round deltas, arm vs reference (positive = higher than the reference)
+  server prompt   256  paged              vs dense          ttft_ms      median +8.59%  range -7.19%..+12.25%
+  server prompt   256  paged              vs dense          decode_tok_s median -8.22%  range -10.64%..-7.16%
+  server prompt   256  dense-null         vs dense          ttft_ms      median -0.90%  range -3.66%..+15.51%
+  server prompt   256  dense-null         vs dense          decode_tok_s median +0.11%  range -0.85%..+0.43%
+  server prompt  8192  paged              vs dense          ttft_ms      median -8.38%  range -9.24%..-6.35%
+  server prompt  8192  paged              vs dense          decode_tok_s median -8.14%  range -8.61%..-7.31%
+  server prompt  8192  dense-null         vs dense          ttft_ms      median -1.19%  range -2.15%..+1.58%
+  server prompt  8192  dense-null         vs dense          decode_tok_s median +0.08%  range -0.46%..+1.09%
+
+the *-null rows are the noise floor: an A/B delta whose range overlaps the null range is unresolved

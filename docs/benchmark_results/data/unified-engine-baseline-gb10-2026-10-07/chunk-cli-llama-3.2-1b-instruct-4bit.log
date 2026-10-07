@@ -1,0 +1,28 @@
+round 0 c2048              cli    prompt  8192 TTFT 397.36 ms  decode 221.32 tok/s
+round 0 c512               cli    prompt  8192 TTFT 514.18 ms  decode 221.24 tok/s
+round 0 c2048-null         cli    prompt  8192 TTFT 397.52 ms  decode 222.02 tok/s
+round 1 c512               cli    prompt  8192 TTFT 514.10 ms  decode 220.87 tok/s
+round 1 c2048-null         cli    prompt  8192 TTFT 398.94 ms  decode 220.25 tok/s
+round 1 c2048              cli    prompt  8192 TTFT 393.42 ms  decode 221.00 tok/s
+round 2 c2048-null         cli    prompt  8192 TTFT 395.37 ms  decode 219.86 tok/s
+round 2 c2048              cli    prompt  8192 TTFT 397.52 ms  decode 219.79 tok/s
+round 2 c512               cli    prompt  8192 TTFT 509.76 ms  decode 221.46 tok/s
+round 3 c2048              cli    prompt  8192 TTFT 398.63 ms  decode 221.14 tok/s
+round 3 c512               cli    prompt  8192 TTFT 519.57 ms  decode 221.52 tok/s
+round 3 c2048-null         cli    prompt  8192 TTFT 394.89 ms  decode 219.97 tok/s
+round 4 c512               cli    prompt  8192 TTFT 508.94 ms  decode 220.80 tok/s
+round 4 c2048-null         cli    prompt  8192 TTFT 398.20 ms  decode 220.60 tok/s
+round 4 c2048              cli    prompt  8192 TTFT 396.56 ms  decode 220.40 tok/s
+
+arm medians (min..max) per path and prompt length
+  cli    prompt  8192  c2048              n=5  ttft_ms 397.36 (393.42..398.63)  decode_tok_s 221.00 (219.79..221.32)
+  cli    prompt  8192  c512               n=5  ttft_ms 514.10 (508.94..519.57)  decode_tok_s 221.24 (220.80..221.52)
+  cli    prompt  8192  c2048-null         n=5  ttft_ms 397.52 (394.89..398.94)  decode_tok_s 220.25 (219.86..222.02)
+
+paired per-round deltas, arm vs reference (positive = higher than the reference)
+  cli    prompt  8192  c512               vs c2048          ttft_ms      median +29.40%  range +28.24%..+30.67%
+  cli    prompt  8192  c512               vs c2048          decode_tok_s median +0.17%  range -0.06%..+0.76%
+  cli    prompt  8192  c2048-null         vs c2048          ttft_ms      median +0.04%  range -0.94%..+1.40%
+  cli    prompt  8192  c2048-null         vs c2048          decode_tok_s median +0.03%  range -0.53%..+0.31%
+
+the *-null rows are the noise floor: an A/B delta whose range overlaps the null range is unresolved
