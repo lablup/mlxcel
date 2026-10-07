@@ -558,6 +558,56 @@ fn step_names_the_missing_row() {
     assert_eq!(seq_len(&engine, a), 0);
 }
 
+/// A row count that differs from the batch is refused before the forward, so
+/// no cache gains a position the sampler would never finish or advance.
+#[test]
+fn step_refuses_a_row_count_that_differs_from_the_batch() {
+    let mut engine = engine();
+    let a = engine.open(SequenceSpec::default()).unwrap();
+    let b = engine.open(SequenceSpec::default()).unwrap();
+    let input = from_slice_i32(&[1, 2], &[2, 1]);
+    let mut rows = [Row::greedy(a)];
+    let mut views: Vec<_> = rows.iter_mut().map(Row::row).collect();
+    assert!(matches!(
+        engine.step(
+            &StepBatch {
+                seq_ids: &[a, b],
+                input: &input,
+            },
+            &mut views,
+        ),
+        Err(EngineError::Batch(_))
+    ));
+    assert_eq!(engine.model().single_calls.get(), 0);
+    assert_eq!(engine.model().batched_calls.get(), 0);
+    for id in [a, b] {
+        assert_eq!(offset(&engine, id), 0);
+        assert_eq!(seq_len(&engine, id), 0);
+    }
+}
+
+/// A pipelined collect whose token count differs from the rows fails every
+/// row with one shared `BatchEval` and advances none.
+#[test]
+fn finish_rows_fails_every_row_on_a_token_count_mismatch() {
+    let mut engine = engine();
+    let a = engine.open(SequenceSpec::default()).unwrap();
+    let b = engine.open(SequenceSpec::default()).unwrap();
+    let mut rows = [Row::greedy(a), Row::greedy(b)];
+    let outcomes = {
+        let mut views: Vec<_> = rows.iter_mut().map(Row::row).collect();
+        engine.finish_rows(&[2], &mut views)
+    };
+    assert_eq!(outcomes.len(), 2);
+    for (outcome, id) in outcomes.iter().zip([a, b]) {
+        assert_eq!(outcome.seq_id, id);
+        assert!(matches!(outcome.error, Some(RowError::BatchEval(_))));
+        assert!(!outcome.eval_ok());
+        assert_eq!(offset(&engine, id), 0);
+    }
+    assert!(rows.iter().all(|row| row.generated.is_empty()));
+}
+
 #[test]
 fn submit_then_finish_rows_is_one_pipelined_step() {
     let mut engine = engine();

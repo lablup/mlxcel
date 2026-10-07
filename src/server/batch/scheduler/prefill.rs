@@ -903,7 +903,9 @@ impl BatchScheduler {
                 self.release_sequence_caches(seq.seq_id);
                 return;
             }
-            Some(RowError::Eval(mlx_msg)) => {
+            // A B=1 prefill never takes the fused draw, so `BatchEval` cannot
+            // occur here; it is one eval failure either way.
+            Some(RowError::Eval(mlx_msg) | RowError::BatchEval(mlx_msg)) => {
                 // #822: the first sampled token threw at the MLX boundary.
                 // Fail just this request and bump the backend health counter.
                 let msg = self.record_eval_failure(&mlx_msg);

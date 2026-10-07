@@ -47,6 +47,7 @@ mod prefill;
 pub mod rows;
 
 pub use prefill::{PrefillOutcome, PrefillStep, piece_input, trim_padded_prefill};
+use rows::fail_batch;
 pub use rows::{
     FusedRowGate, RowError, RowOutcome, StepRow, StepRowHooks, finish_row, fused_params,
     row_biases, row_logits, sample_and_finish, sample_and_finish_row, shared_fused_params,
@@ -239,7 +240,15 @@ impl<M: LanguageModel> Engine<M> {
         batch: &StepBatch<'_>,
         rows: &mut [StepRow<'_, H>],
     ) -> Result<StepOutput, EngineError> {
-        debug_assert_eq!(rows.len(), batch.seq_ids.len(), "one StepRow per batch row");
+        // Checked before the forward: a mismatch would append KV to rows the
+        // sampler never finishes or advances.
+        if rows.len() != batch.seq_ids.len() {
+            return Err(EngineError::Batch(format!(
+                "{} step rows for {} batch rows",
+                rows.len(),
+                batch.seq_ids.len()
+            )));
+        }
         let logits = self.forward(batch)?;
         let outcomes = sample_and_finish(&logits, rows);
         self.advance_continuing(&outcomes);
@@ -279,13 +288,24 @@ impl<M: LanguageModel> Engine<M> {
 
     /// The collect half of a pipelined step: `tokens[i]` is the host token
     /// drawn for `rows[i]`; each row runs the finish step and every row that
-    /// continues advances its pool offset.
+    /// continues advances its pool offset. A token count that differs from
+    /// the row count fails every row with [`RowError::BatchEval`] and advances
+    /// none.
     pub fn finish_rows<H: StepRowHooks>(
         &mut self,
         tokens: &[i32],
         rows: &mut [StepRow<'_, H>],
     ) -> Vec<RowOutcome> {
-        debug_assert_eq!(rows.len(), tokens.len(), "one token per row");
+        if tokens.len() != rows.len() {
+            return fail_batch(
+                rows,
+                &format!(
+                    "pipelined draw returned {} tokens for {} rows",
+                    tokens.len(),
+                    rows.len()
+                ),
+            );
+        }
         let outcomes: Vec<RowOutcome> = rows
             .iter_mut()
             .zip(tokens)

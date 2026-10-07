@@ -186,7 +186,7 @@ pub(crate) fn step_row<'s>(
 pub(crate) fn row_error_prefix(error: &RowError) -> &'static str {
     match error {
         RowError::Structured(_) => "structured output",
-        RowError::Eval(_) => "inference backend",
+        RowError::Eval(_) | RowError::BatchEval(_) => "inference backend",
     }
 }
 
@@ -200,7 +200,16 @@ impl BatchScheduler {
     /// [`Self::record_eval_failure`] gives every eval site: the stream sees
     /// `inference backend: inference backend error: {mlx}` and the finish
     /// reason `Error("inference backend error: {mlx}")`.
+    ///
+    /// A per-row [`RowError::Eval`] is one eval, so each one is recorded. The
+    /// rows of one fused draw share a single [`RowError::BatchEval`]: it is
+    /// recorded once for the slice, like every other single eval over many
+    /// rows (the padded cohort prefill), and every row carrying it is aborted
+    /// with that one message. Counting it per row would let one transient
+    /// throw on a batch of `MAX_CONSECUTIVE_EVAL_FAILURES` rows shut the
+    /// scheduler down.
     pub(super) fn apply_row_outcomes(&mut self, outcomes: &[RowOutcome]) -> bool {
+        let mut batch_failure: Option<String> = None;
         for outcome in outcomes {
             match &outcome.error {
                 None => self.note_eval_success(),
@@ -215,7 +224,21 @@ impl BatchScheduler {
                         return false;
                     }
                 }
-                Some(error) => Self::abort_sequence_with_error(
+                Some(error @ RowError::BatchEval(mlx_msg)) => {
+                    let first = batch_failure.is_none();
+                    let msg = batch_failure
+                        .get_or_insert_with(|| self.record_eval_failure(mlx_msg))
+                        .clone();
+                    Self::abort_sequence_with_error(
+                        self.active_batch.get_mut(outcome.seq_id),
+                        row_error_prefix(error),
+                        &msg,
+                    );
+                    if first && self.eval_failures_exhausted() {
+                        return false;
+                    }
+                }
+                Some(error @ RowError::Structured(_)) => Self::abort_sequence_with_error(
                     self.active_batch.get_mut(outcome.seq_id),
                     row_error_prefix(error),
                     error.message(),

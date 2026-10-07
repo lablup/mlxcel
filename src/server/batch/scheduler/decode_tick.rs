@@ -859,6 +859,12 @@ impl BatchScheduler {
             self.engine.finish_rows(tokens, &mut rows)
         };
         self.finish_rows_state(&outcomes);
+        // The gate keeps per-row failures off this path; a failed row here is
+        // the engine refusing a token count that does not match the rows, and
+        // it must finish with an error rather than stall.
+        if outcomes.iter().any(|outcome| outcome.error.is_some()) {
+            self.apply_row_outcomes(&outcomes);
+        }
     }
 
     pub(super) fn execute_decode_step_sequential_remaining(

@@ -96,12 +96,17 @@ pub enum RowError {
     Structured(String),
     /// Evaluating the row's sampled token threw at the MLX boundary (#822).
     Eval(String),
+    /// The fused draw's single evaluation threw, or its readback did not
+    /// return one token per row. Every row of that batch carries it, and it is
+    /// ONE eval failure for the caller's backend health counter, not one per
+    /// row.
+    BatchEval(String),
 }
 
 impl RowError {
     pub fn message(&self) -> &str {
         match self {
-            RowError::Structured(msg) | RowError::Eval(msg) => msg,
+            RowError::Structured(msg) | RowError::Eval(msg) | RowError::BatchEval(msg) => msg,
         }
     }
 }
@@ -135,8 +140,15 @@ impl RowOutcome {
     /// Whether an eval ran for this row and succeeded, for the caller's
     /// backend health counter: every row that was not failed by an eval.
     pub fn eval_ok(&self) -> bool {
-        !matches!(self.error, Some(RowError::Eval(_)))
+        !matches!(self.error, Some(RowError::Eval(_) | RowError::BatchEval(_)))
     }
+}
+
+/// Fail every row of `rows` with the same [`RowError::BatchEval`].
+pub(super) fn fail_batch<H: StepRowHooks>(rows: &[StepRow<'_, H>], msg: &str) -> Vec<RowOutcome> {
+    rows.iter()
+        .map(|row| RowOutcome::failed(row.seq_id, RowError::BatchEval(msg.to_string())))
+        .collect()
 }
 
 /// What the fused-eligibility rule reads from one row: its sampling config
@@ -210,8 +222,10 @@ pub fn fused_params<H: StepRowHooks>(rows: &[StepRow<'_, H>]) -> Option<FusedSam
 ///
 /// Both paths evaluate the sampled tokens through the fallible boundary
 /// before reading them back (#822). The fused draw is one evaluation for the
-/// whole batch, so a throw there fails every row of it with
-/// [`RowError::Eval`]; the per-row chain fails only the row that threw.
+/// whole batch, so a throw there, or a readback that does not hold one token
+/// per row, fails every row of it with [`RowError::BatchEval`], which the
+/// caller counts as a single eval failure; the per-row chain fails only the
+/// row that threw, with [`RowError::Eval`].
 pub fn sample_and_finish<H: StepRowHooks>(
     logits: &MlxArray,
     rows: &mut [StepRow<'_, H>],
@@ -221,15 +235,24 @@ pub fn sample_and_finish<H: StepRowHooks>(
     {
         let tokens = batched_fused_sample_tokens(logits, &params, &row_biases(rows));
         if let Err(err) = crate::try_eval(&tokens) {
-            let msg = err.to_string();
-            return rows
-                .iter()
-                .map(|row| RowOutcome::failed(row.seq_id, RowError::Eval(msg.clone())))
-                .collect();
+            return fail_batch(rows, &err.to_string());
+        }
+        let host = tokens_to_host(&tokens);
+        if host.len() != rows.len() {
+            // A short readback would let `zip` drop rows whose KV was
+            // appended but which are never finished or advanced.
+            return fail_batch(
+                rows,
+                &format!(
+                    "fused draw returned {} tokens for {} rows",
+                    host.len(),
+                    rows.len()
+                ),
+            );
         }
         return rows
             .iter_mut()
-            .zip(tokens_to_host(&tokens))
+            .zip(host)
             .map(|(row, token)| finish_row(row, token, token, None, false))
             .collect();
     }

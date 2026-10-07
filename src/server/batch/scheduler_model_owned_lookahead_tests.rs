@@ -477,3 +477,58 @@ fn a_row_eval_failure_carries_the_backend_error_wording() {
         vec!["inference backend: inference backend error: boom".to_string()]
     );
 }
+
+/// One fused-draw throw fails every row of the batch with the per-row
+/// wording, but it is ONE eval failure for the backend health counter: a
+/// batch whose row count would cross `MAX_CONSECUTIVE_EVAL_FAILURES` under
+/// per-row counting must not drain the scheduler.
+#[test]
+fn a_batch_eval_failure_counts_once_for_every_row() {
+    let mut sched = scheduler(tiny_gemma3(), DecodeStorageBackend::Dense, true);
+    let receivers: Vec<_> = (0..4)
+        .map(|seed| enqueue(&mut sched, 4, seed, 64))
+        .collect();
+    while sched.active_batch.len() < 4 {
+        assert!(tick(&mut sched), "the requests are still running");
+    }
+    let seq_ids = sched.active_batch.sequence_ids();
+    assert_eq!(seq_ids.len(), 4);
+    // Per-row counting would add 4 and cross the threshold.
+    sched.consecutive_decode_eval_failures = MAX_CONSECUTIVE_EVAL_FAILURES - 2;
+    let outcomes: Vec<_> = seq_ids
+        .iter()
+        .map(|&seq_id| mlxcel_core::engine::RowOutcome {
+            seq_id,
+            sampled: 0,
+            token: 0,
+            finish: None,
+            error: Some(mlxcel_core::engine::RowError::BatchEval("boom".to_string())),
+        })
+        .collect();
+    assert!(sched.apply_row_outcomes(&outcomes));
+    assert_eq!(
+        sched.consecutive_decode_eval_failures,
+        MAX_CONSECUTIVE_EVAL_FAILURES - 1
+    );
+    assert!(!sched.shutdown_requested);
+    for &seq_id in &seq_ids {
+        assert!(matches!(
+            sched.active_batch.get(seq_id).map(|s| &s.state),
+            Some(SequenceState::Finished(FinishReason::Error(msg)))
+                if msg == "inference backend error: boom"
+        ));
+    }
+    for rx in &receivers {
+        let errors: Vec<String> = rx
+            .try_iter()
+            .filter_map(|event| match event {
+                GenerateEvent::Error(msg) => Some(msg),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            errors,
+            vec!["inference backend: inference backend error: boom".to_string()]
+        );
+    }
+}
