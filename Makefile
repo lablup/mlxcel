@@ -804,7 +804,7 @@ verify-rocm-smoke: ## ROCm smoke: build, link and generate on the GPU, asserting
 # "does a real forward pass still run on this device" answer even while the
 # suite is red.
 .PHONY: verify-rocm
-verify-rocm: verify-versions verify-kernel-dtype-keys verify-kernel-port-dispatch verify-llama-compat verify-rocm-overlay verify-fmt verify-clippy-rocm verify-rocm-smoke verify-test-rocm ## Run the ROCm gate locally on an AMD host (issue #1811)
+verify-rocm: verify-versions verify-kernel-dtype-keys verify-kernel-port-dispatch verify-llama-compat verify-rocm-overlay verify-python-tooling verify-fmt verify-clippy-rocm verify-rocm-smoke verify-test-rocm ## Run the ROCm gate locally on an AMD host (issue #1811)
 	@echo "$(GREEN)[verify-rocm] OK$(RESET)"
 
 .PHONY: verify-versions
@@ -831,6 +831,16 @@ verify-kernel-port-dispatch: ## Assert every fused-kernel launcher chooses its p
 	@echo "$(CYAN)[verify] kernel port dispatch...$(RESET)"
 	@python3 scripts/ci/check_kernel_port_dispatch.py
 	@bash scripts/ci/check_kernel_port_dispatch_test.sh
+
+# The Python suites under tests/ test the bench, GPU guard, quality gate and
+# header scripts and the Makefile's dev test targets. None needs a GPU, a model
+# or the network. Before #2150 five of the seven ran nowhere, so a script change
+# could break its tests and merge green. rocm_gpu_guard.sh reads Linux /proc, so
+# its test class reports a skip (not a failure) on macOS.
+.PHONY: verify-python-tooling
+verify-python-tooling: ## Run the tests/ Python suites (bench, GPU guard, quality gate, header scripts) (issue #2150)
+	@echo "$(CYAN)[verify] python tooling tests...$(RESET)"
+	@python3 -m unittest discover -s tests -p 'test_*.py'
 
 # Offline half of the mlxcelverse ROCm overlay checks (issue #1813). It reads
 # only files in this repository: patches-rocm/UPSTREAM must name the build's MLX
@@ -995,7 +1005,7 @@ bump-version: ## Release: set every version-tracking crate to VERSION and sync C
 	@$(MAKE) --no-print-directory verify-versions
 
 .PHONY: verify
-verify: verify-versions verify-kernel-dtype-keys verify-kernel-port-dispatch verify-llama-compat verify-rocm-overlay verify-fmt verify-clippy verify-test ## Run the full CI-faithful gate locally (recommended before push)
+verify: verify-versions verify-kernel-dtype-keys verify-kernel-port-dispatch verify-llama-compat verify-rocm-overlay verify-python-tooling verify-fmt verify-clippy verify-test ## Run the full CI-faithful gate locally (recommended before push)
 	@echo "$(GREEN)[verify] OK: matches the nightly-verify GitHub Actions job$(RESET)"
 
 .PHONY: verify-clean
