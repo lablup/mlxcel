@@ -696,9 +696,6 @@ fn truncate_result_text(
     result.text.truncate(cut);
 }
 
-// We cannot derive `Debug` automatically because `InputEmbeddings` contains
-// `UniquePtr<MlxArray>` which is not `Debug`. A manual implementation keeps
-// the struct debuggable in logs.
 /// [`SequenceInfo::stream_decoded_text`] over the disjoint fields it touches,
 /// so the shared finish step (#2168) can stream a piece while it holds
 /// `generated_tokens` mutably. `decoded` is the generated-token count the
@@ -748,6 +745,9 @@ pub(crate) fn emit_decoded_piece(
     chunk.matched
 }
 
+// We cannot derive `Debug` automatically because `InputEmbeddings` contains
+// `UniquePtr<MlxArray>` which is not `Debug`. A manual implementation keeps
+// the struct debuggable in logs.
 impl std::fmt::Debug for SequenceInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SequenceInfo")
@@ -877,9 +877,11 @@ mod tests {
 
     // -- decode-site loop-detection wiring --
     //
-    // These replicate the exact guard the scheduler decode sites apply after
-    // pushing each token, driving the real `SequenceState` machine so the
-    // wiring (detector + transition), not just the pure helper, is exercised.
+    // The scheduler decode sites run their finish decision through
+    // `mlxcel_core::finish_step` (#2168). This helper mirrors only the
+    // repetition-loop step of it, driving the real `SequenceState` machine so
+    // the detector-plus-transition wiring, not just the pure helper, is
+    // exercised.
 
     fn apply_loop_guard(
         state: &mut SequenceState,
