@@ -220,7 +220,6 @@ void gemm_rocblas(
   }
 
   auto& device = encoder.device();
-  rocblas_handle handle = device.get_rocblas_handle();
 
   // rocBLAS uses column-major, so we swap A and B and compute B^T * A^T = (A *
   // B)^T But since we want row-major output, we compute C = A * B by doing C^T
@@ -239,7 +238,8 @@ void gemm_rocblas(
   void* out_ptr = gpu_ptr<void>(out);
 
   encoder.launch_kernel([&, a_ptr, b_ptr, out_ptr](hipStream_t stream) {
-    encoder.device().set_rocblas_stream(stream);
+    auto lease = device.acquire_rocblas(stream);
+    rocblas_handle handle = lease.handle();
 
     switch (a.dtype()) {
       case float32: {
@@ -483,7 +483,6 @@ void gemm_strided_batched_rocblas(
   }
 
   auto& device = encoder.device();
-  rocblas_handle handle = device.get_rocblas_handle();
 
   rocblas_operation trans_a =
       b_transposed ? rocblas_operation_transpose : rocblas_operation_none;
@@ -497,7 +496,8 @@ void gemm_strided_batched_rocblas(
   void* out_ptr = gpu_ptr<void>(out);
 
   encoder.launch_kernel([&, a_ptr, b_ptr, out_ptr](hipStream_t stream) {
-    encoder.device().set_rocblas_stream(stream);
+    auto lease = device.acquire_rocblas(stream);
+    rocblas_handle handle = lease.handle();
 
     switch (a.dtype()) {
       case float32: {
@@ -877,9 +877,8 @@ void gemm_and_bias(
                                a_ptr_base,
                                b_ptr_base,
                                out_ptr_base](hipStream_t stream) {
-          auto& device = encoder.device();
-          device.set_rocblas_stream(stream);
-          rocblas_handle handle = device.get_rocblas_handle();
+          auto lease = encoder.device().acquire_rocblas(stream);
+          rocblas_handle handle = lease.handle();
 
           rocblas_operation trans_a = b_transposed ? rocblas_operation_transpose
                                                    : rocblas_operation_none;
