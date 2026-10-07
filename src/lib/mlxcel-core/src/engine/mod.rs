@@ -43,9 +43,16 @@ use crate::generate::LanguageModel;
 use crate::sampling::{FusedSampleParams, TokenBiasMap, batched_fused_sample_tokens};
 use crate::{MlxArray, UniquePtr};
 
+mod direct;
+mod direct_decode;
+mod lookahead;
 mod prefill;
 pub mod rows;
+mod speculative;
+mod speculative_plain;
 
+pub use direct::{BareHooks, DirectEngine, DirectEngineError, DirectRequest, DirectRun};
+pub use lookahead::{FORCE_SYNC_ENV, force_sync_requested, lookahead_feedback_input};
 pub use prefill::{PrefillOutcome, PrefillStep, piece_input, trim_padded_prefill};
 use rows::fail_batch;
 pub use rows::{
@@ -53,6 +60,7 @@ pub use rows::{
     row_biases, row_logits, sample_and_finish, sample_and_finish_row, shared_fused_params,
     tokens_to_host,
 };
+pub use speculative::{SpeculativeRounds, SpeculativeRun, SpeculativeRunError};
 
 /// A per-sequence engine failure.
 ///
@@ -416,5 +424,9 @@ impl<M: LanguageModel> Engine<M> {
     }
 }
 
+#[cfg(test)]
+mod direct_decode_tests;
+#[cfg(test)]
+mod speculative_plain_tests;
 #[cfg(test)]
 mod tests;

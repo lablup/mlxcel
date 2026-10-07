@@ -648,7 +648,8 @@ impl LanguageModel for Gemma4VLModel {
     }
 
     fn reset_runtime_state(&self) {
-        // Used by: CxxGenerator single-row generation paths. Reset only the
+        // Used by: bare single-row runs outside an engine sequence (the engine
+        // resets through prepare_sequence_state / release_sequence_state_by_id). Reset only the
         // text backbone's fallback cache slot; the VLM per-layer-inputs
         // fallback is populated by `get_input_embeddings*` immediately before
         // `forward_with_embeddings*` consumes it.

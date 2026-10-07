@@ -777,9 +777,8 @@ pub struct ServerConfig {
     ///
     /// `None` means the server should auto-detect the drafter kind from
     /// `draft_model_path` via
-    /// [`mlxcel_core::drafter::resolve_drafter_kind`], OR run the
-    /// classic [`crate::SpeculativeGenerator`] path when no drafter is
-    /// configured. Stored as a raw `Option<String>` because parsing
+    /// [`mlxcel_core::drafter::resolve_drafter_kind`], OR run plain decode
+    /// when no drafter is configured. Stored as a raw `Option<String>` because parsing
     /// only succeeds for `dflash` / `mtp` (the `internal-mtp` variant of
     /// [`mlxcel_core::drafter::DrafterKind`] is auto-detected, not
     /// user-selectable) and the parse error must surface at the
@@ -938,7 +937,7 @@ pub struct ServerConfig {
     /// Resolved from `--cache-type-k`/`--cache-type-v` (llama-server split
     /// flags) or the legacy `--kv-cache-mode` shorthand.  Defaults to
     /// `KVCacheMode::Fp16` (bit-exact baseline). The model worker uses this
-    /// when constructing per-sequence `CxxGenerator` instances so that every
+    /// when opening engine sequences so that every
     /// sequence in the batch sees the same KV quantization policy.
     pub kv_cache_mode: mlxcel_core::cache::KVCacheMode,
 
@@ -1152,8 +1151,8 @@ impl Default for ServerConfig {
             draft_model_path: None,
             num_draft_tokens: 3,
             // default to "auto-detect from drafter config"
-            // when a drafter is supplied; the classic
-            // `SpeculativeGenerator` path runs when no drafter is set.
+            // when a drafter is supplied; plain decode runs when no
+            // drafter is set.
             draft_kind: None,
             draft_block_size: None,
             // Serving-throughput default: batched decode up to 4 sequences

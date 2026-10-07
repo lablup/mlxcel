@@ -14,11 +14,10 @@
 
 //! Single-stream (B=1) decode benchmark for both decode paths (issue #2167).
 //!
-//! `mlxcel-bench-decode` times only `CxxGenerator`, so the path the server
-//! decodes on has no decode benchmark. This binary measures both on the same
-//! synthesized prompt:
+//! Measures the engine's two front ends on the same synthesized prompt:
 //!
-//! - `cli`: `CxxGenerator::generate_with_stats` after a warmup pass, exactly
+//! - `cli`: the raw-completion client (`mlxcel_core::engine::DirectEngine`,
+//!   the loop `mlxcel generate` runs) after a warmup pass, exactly
 //!   `mlxcel-bench-decode`'s measured call, so its numbers are the ones that
 //!   tool reports for the same model, prompt length and token budget;
 //! - `server`: the `mlxcel-server` model worker and `BatchScheduler`, driven
@@ -57,7 +56,7 @@ enum PathArg {
     Both,
 }
 
-/// B=1 decode benchmark: `CxxGenerator` vs the in-process server scheduler.
+/// B=1 decode benchmark: the raw-completion client vs the in-process server scheduler.
 #[derive(Parser, Debug)]
 #[command(name = "mlxcel-bench-engine")]
 struct Args {
@@ -184,7 +183,8 @@ fn main() -> Result<()> {
                 args.warmup_tokens,
                 &cli_sampling,
                 KVCacheMode::Fp16,
-            );
+            )
+            .with_context(|| format!("cli arm failed at {target} prompt tokens"))?;
             let m = Measurement::from_cli(&args.model, *target, &stats, generated.len(), chunk);
             m.emit(&args.label, args.max_tokens);
             measurements.push(m);

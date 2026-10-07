@@ -21,13 +21,13 @@
 //! rerun by every later phase: the harness to show the token streams
 //! converge, the benchmark to show single-stream throughput holds.
 //!
-//! The drivers call the real code: [`cli_engine`] calls `CxxGenerator` the
-//! way `mlxcel generate` and `mlxcel-bench-decode` do, [`server_engine`]
-//! builds the `mlxcel-server` configuration and model worker and feeds the
-//! `BatchScheduler` through its request channel, and [`engine_direct`] (since
-//! Phase 4b, #2172) drives one sequence through `mlxcel_core::engine::Engine`
-//! with no scheduler, the shape Phase 5 gives the CLI. Nothing here
-//! reimplements a decode loop.
+//! The drivers call the real code: [`cli_engine`] runs the raw-completion
+//! client the way `mlxcel generate` and `mlxcel-bench-decode` do,
+//! [`server_engine`] builds the `mlxcel-server` configuration and model
+//! worker and feeds the `BatchScheduler` through its request channel, and
+//! [`engine_direct`] (since Phase 4b, #2172) is that same client,
+//! `mlxcel_core::engine::DirectEngine`, over the loaded model with no
+//! scheduler. Nothing here reimplements a decode loop.
 
 pub mod cases;
 pub mod cli_engine;

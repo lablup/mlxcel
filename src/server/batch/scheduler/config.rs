@@ -187,7 +187,7 @@ impl BatchScheduler {
             // Honor MLXCEL_FORCE_SYNC=1 as the pipeline kill switch, probed once
             // here (the server worker is long-lived, so a per-tick getenv would
             // be pure overhead).
-            lookahead_force_sync: std::env::var("MLXCEL_FORCE_SYNC").is_ok(),
+            lookahead_force_sync: mlxcel_core::engine::force_sync_requested(),
         }
     }
 

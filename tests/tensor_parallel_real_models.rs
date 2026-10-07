@@ -18,8 +18,8 @@ use std::path::Path;
 
 use common::repo_model_dir;
 use mlxcel::{
-    CxxGenerator, LanguageModel, SamplingConfig, distributed::ShardConfig, initialize_runtime,
-    load_model, load_model_with_tensor_parallel, tokenizer::MlxcelTokenizer,
+    LanguageModel, MlxInferenceSession, SamplingConfig, distributed::ShardConfig,
+    initialize_runtime, load_model, load_model_with_tensor_parallel, tokenizer::MlxcelTokenizer,
 };
 
 fn prompt_tokens(tokenizer: &MlxcelTokenizer, prompt: &str) -> Vec<i32> {
@@ -190,7 +190,7 @@ fn assert_tp_matches_single_rank(
         let (single_rank_model, tokenizer) = load_model(model_dir).unwrap();
         let prompt_tokens = prompt_tokens(&tokenizer, prompt);
         let sampling = SamplingConfig::greedy();
-        let mut single_rank_generator = CxxGenerator::new(single_rank_model.num_layers());
+        let mut single_rank_generator = MlxInferenceSession::new(single_rank_model.num_layers());
         let single_rank_tokens = single_rank_generator.generate(
             &single_rank_model,
             &prompt_tokens,
@@ -207,7 +207,8 @@ fn assert_tp_matches_single_rank(
             load_model_with_tensor_parallel(model_dir, None, &ShardConfig::with_tp_size(tp_size))
                 .unwrap();
         let sampling = SamplingConfig::greedy();
-        let mut tensor_parallel_generator = CxxGenerator::new(tensor_parallel_model.num_layers());
+        let mut tensor_parallel_generator =
+            MlxInferenceSession::new(tensor_parallel_model.num_layers());
         tensor_parallel_generator.generate(
             &tensor_parallel_model,
             &prompt_tokens,
@@ -267,7 +268,8 @@ fn assert_tp_generates_tokens(
             .unwrap();
     let prompt_tokens = prompt_tokens(&tokenizer, prompt);
     let sampling = SamplingConfig::greedy();
-    let mut tensor_parallel_generator = CxxGenerator::new(tensor_parallel_model.num_layers());
+    let mut tensor_parallel_generator =
+        MlxInferenceSession::new(tensor_parallel_model.num_layers());
     let generated = tensor_parallel_generator.generate(
         &tensor_parallel_model,
         &prompt_tokens,

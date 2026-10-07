@@ -90,9 +90,9 @@ fn seam_delegates_to_real_mlx_loader_on_missing_dir() {
 
 #[test]
 fn mlx_backend_creates_a_session_and_advertises_batched_serving() {
-    // The session is constructed without loading a checkpoint (the wrapped
-    // `CxxGenerator` only allocates KV caches), so this stays fast and bridge
-    // light, like the existing `CxxGenerator::new` unit tests.
+    // The session is constructed without loading a checkpoint (it opens its
+    // engine sequence only when a generation runs), so this stays fast and
+    // bridge light.
     // Held for the same reason as `select_backend_resolves_to_mlx_under_default_features`
     // above: under the opt-in `xla-backend` feature a racing `MLXCEL_BACKEND=xla`
     // mutation could hand this test an XLA backend, whose `supports_batched_serving()`

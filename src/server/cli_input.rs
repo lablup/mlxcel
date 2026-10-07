@@ -122,7 +122,7 @@ pub struct ServerStartupInput {
     /// explicit drafter-kind override from `--draft-kind`.
     /// `None` means "auto-detect from the drafter's `config.json`" when
     /// `draft_model_path` is supplied; otherwise the field is inert and
-    /// the classic [`crate::SpeculativeGenerator`] path is used.
+    /// plain decode runs.
     pub draft_kind: Option<String>,
     /// explicit draft-block-size override from
     /// `--draft-block-size`. `None` means "use the per-kind default"

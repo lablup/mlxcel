@@ -87,6 +87,8 @@ mlxcel inspect --json -m Qwen3.5-0.8B-4bit --max-tokens 32768 | python3 -m json.
 mlxcel generate -m Qwen3.5-0.8B-4bit -p "Hello" -n 32768 --estimate-memory
 ```
 
+`generate` is the raw-completion client of the same batch-native engine (`mlxcel_core::engine::DirectEngine`): no server worker or HTTP request path in between, the rendered prompt goes straight through the engine's prefill and decode, so it decodes with the same sampler, finish step and lookahead pipeline as the server's single-sequence row (`MLXCEL_FORCE_SYNC` turns the pipeline off). `--prompt-lookup` runs drafter-free speculative decoding on that engine for any model. The classic draft-model path (`--draft-model` without `--draft-kind mtp` or `dflash`) is deprecated and will be removed in v0.8.0.
+
 `mlxcel inspect --json` prints a single JSON object with byte-exact `weights_bytes`, `kv_bytes_total`, `activation_bytes`, `backend_inflight_bytes` (ROCm builds only, else 0), `headroom_bytes`, `budget_bytes`, `total_bytes`, `fits`, input flags, and per-token FP16/INT8 KV rates when the model config exposes KV geometry. TurboQuant per-token sizing is reported as `null` until the estimator models those widths directly.
 
 ### Start a server

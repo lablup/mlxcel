@@ -331,21 +331,6 @@ impl BatchScheduler {
         if self.lookahead_force_sync {
             return None;
         }
-        // Model-owned families keep their K/V in the model's own per-sequence
-        // state, which the pool trim in `apply_lookahead_trim` cannot reach.
-        // They pipeline only when the model can rewind that state itself
-        // (#2159, Gemma 3); the rest (SSM / hybrid / mixed-cache, Gemma 4,
-        // Llama 4, ...) stay synchronous. Key that on the model's NATURAL
-        // backend, not the allocated one (#1754, the #1346 lesson): under the
-        // paged decode override a model-owned family is allocated on
-        // `PagedKvCache` for shadow accounting with an empty cache vector, so
-        // an allocated-backend gate let it pipeline while the teardown reached
-        // none of its real state.
-        let model_owned =
-            self.engine.model().sequence_state_layout().backend == SequenceStateBackend::ModelOwned;
-        if model_owned && !self.engine.model().supports_decode_lookahead_rewind() {
-            return None;
-        }
         // Speculative decoding drives its own decode loop.
         if self.should_dispatch_speculative() {
             return None;
@@ -366,19 +351,12 @@ impl BatchScheduler {
             if seq.sampling.loop_detection.is_enabled() {
                 return None;
             }
-            // Dense and pool-backed paged sequences both have a trimmable KV
-            // tail (dense via KVCache::trim, paged via the pool rewind API in
-            // apply_lookahead_trim). A model-owned family that passed the
-            // rewind gate above is allocated `ModelOwned` (no paged override,
-            // e.g. `--parallel 1`) or `PagedKvCache` (shadow accounting), and
-            // its own hook unwinds the state either way.
-            match self.engine.pool().get(seq_id) {
-                Some(set)
-                    if matches!(
-                        set.backend,
-                        SequenceStateBackend::DenseKvCache | SequenceStateBackend::PagedKvCache
-                    ) || (model_owned && set.backend == SequenceStateBackend::ModelOwned) => {}
-                _ => return None,
+            // A trimmable KV tail (dense, or pool-backed paged), or a
+            // model-owned family that rewinds its own state (#2159), keyed on
+            // the model's natural backend (#1754): the one rule the
+            // raw-completion client's pipeline uses too.
+            if !self.engine.can_unwind_lookahead(seq_id) {
+                return None;
             }
         }
         Some(params)
@@ -611,8 +589,7 @@ impl BatchScheduler {
         // to match the synchronous from_slice_i32 dtype), keeping the GPU busy
         // through the host read below. This appends a second speculative KV
         // position per sequence (the overshoot the issue accepts).
-        let col = mlxcel_core::reshape_token_for_forward(&la.tokens);
-        let next_input = mlxcel_core::astype(&col, mlxcel_core::dtype::INT32);
+        let next_input = mlxcel_core::engine::lookahead_feedback_input(&la.tokens);
         let next = self.prime_lookahead_with_input(seq_ids, &next_input, params);
 
         // Step 2: read step n's tokens to host (the sync point) and finish-check.

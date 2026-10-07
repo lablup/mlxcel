@@ -20,8 +20,7 @@
 //! strings, generation bounds and the context bound never fire
 //! ([`NoStopHooks`]).
 
-use super::{cli_emits_final_token, cli_finish_step};
-use crate::decode_finish::FinishCause;
+use crate::decode_finish::{FinishCause, FinishInput, NoStopHooks, finish_step};
 use crate::loop_detection::LoopDetectionConfig;
 
 const EOS: i32 = 1;
@@ -30,15 +29,18 @@ fn bytes(s: &str) -> Vec<i32> {
     s.bytes().map(i32::from).collect()
 }
 
-/// What a streaming `CxxGenerator` loop produced.
+/// What a streaming single-sequence run produced.
 struct CliRun {
     emitted: Vec<i32>,
     generated: Vec<i32>,
     finish: Option<FinishCause>,
 }
 
-/// The per-token tail of `generate_streaming`: the zero-budget guard, the
-/// shared finish step, and the callback hand-off.
+/// The per-token tail of a bare single-sequence run (the engine client's
+/// `generate`): the zero-budget guard, the shared finish step with no stop
+/// strings or bounds, and the callback hand-off, which delivers every token
+/// the finish step appended (so never an EOS and never a repetition loop's
+/// withheld token, but the token that spends the budget).
 fn run_cli_stream(
     tokens: &[i32],
     max_tokens: usize,
@@ -51,17 +53,24 @@ fn run_cli_stream(
         if n >= max_tokens {
             break;
         }
-        match cli_finish_step(
-            token,
-            &[EOS],
-            &mut generated,
-            None,
-            max_tokens,
-            &loop_detection,
+        let before = generated.len();
+        match finish_step(
+            FinishInput {
+                token,
+                eos: &[EOS],
+                generated: &mut generated,
+                history: None,
+                max_tokens,
+                structured_stopped: false,
+                loop_detection: &loop_detection,
+            },
+            &mut NoStopHooks,
         ) {
             None => emitted.push(token),
             Some(cause) => {
-                if cli_emits_final_token(cause) {
+                // The client's callback rule: an appended token is streamed
+                // unless a repetition loop withheld it.
+                if generated.len() > before && cause != FinishCause::RepetitionLoop {
                     emitted.push(token);
                 }
                 finish = Some(cause);
@@ -122,16 +131,38 @@ fn stop_strings_bounds_and_the_context_bound_never_fire_on_the_cli() {
 }
 
 #[test]
-fn the_cli_records_history_only_when_the_loop_owns_it() {
+fn the_finish_step_records_history_only_when_handed_one() {
     let disabled = LoopDetectionConfig::disabled();
     let mut generated = Vec::new();
     let mut history = vec![7];
     assert_eq!(
-        cli_finish_step(5, &[EOS], &mut generated, Some(&mut history), 4, &disabled),
+        finish_step(
+            FinishInput {
+                token: 5,
+                eos: &[EOS],
+                generated: &mut generated,
+                history: Some(&mut history),
+                max_tokens: 4,
+                structured_stopped: false,
+                loop_detection: &disabled
+            },
+            &mut NoStopHooks
+        ),
         None
     );
     assert_eq!(
-        cli_finish_step(6, &[EOS], &mut generated, None, 4, &disabled),
+        finish_step(
+            FinishInput {
+                token: 6,
+                eos: &[EOS],
+                generated: &mut generated,
+                history: None,
+                max_tokens: 4,
+                structured_stopped: false,
+                loop_detection: &disabled
+            },
+            &mut NoStopHooks
+        ),
         None
     );
     assert_eq!(generated, vec![5, 6]);

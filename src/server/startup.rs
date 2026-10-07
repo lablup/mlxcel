@@ -1552,24 +1552,13 @@ pub(crate) fn load_chat_front(
     )?;
     let tokenizer = crate::tokenizer::load_tokenizer(&startup.model_path)?;
 
-    // align the chat-template `enable_thinking` Jinja kwarg
-    // default with upstream `TokenizerWrapper.apply_chat_template`'s
-    // `enable_thinking=self.has_thinking` behavior. When the underlying
-    // tokenizer recognizes a think marker pair (single-token `<think>` /
-    // `</think>`, single-token `<longcat_think>` variants, or multi-token
-    // `<|channel>thought` / `<channel|>` for Gemma 4 and friends), the
-    // server-side default flips to `true` so a request that does not set
-    // `chat_template_kwargs.enable_thinking` still sees thinking enabled
-    // by default. Per-request kwargs and the existing CLI/env defaults
-    // (`--chat-template-kwargs`, `LLAMA_ARG_CHAT_TEMPLATE_KWARGS`)
-    // continue to win on conflict via `merge_server_and_request`.
-    let thinking_markers = tokenizer.infer_thinking_markers();
-    // Issue #686: the Gemma-4 thinking-channel template's thinking-OFF branch
-    // is the correct interactive default (a CLOSED `<|channel>thought\n<channel|>`
-    // priming scaffold matching transformers' no-`enable_thinking` render), so
-    // the `has_thinking` heuristic below must not flip it on; forcing thinking
-    // there produces a bare `<|turn>model\n` that greedy-collapses to `<pad>`.
-    if thinking_markers.has_thinking() && !chat_template.wants_thinking_default_off() {
+    // The one `enable_thinking` default every front applies
+    // (`server::chat_front`, #2176): on when the tokenizer recognizes a think
+    // marker pair, except for a template that wants thinking off (issue
+    // #686). Per-request kwargs and `--chat-template-kwargs` still win via
+    // `merge_server_and_request`.
+    if crate::server::chat_front::apply_thinking_default(&mut chat_template, &tokenizer) {
+        let thinking_markers = tokenizer.infer_thinking_markers();
         tracing::info!(
             think_start = ?thinking_markers.think_start,
             think_end = ?thinking_markers.think_end,
@@ -1587,7 +1576,6 @@ pub(crate) fn load_chat_front(
              chat_template kwarg `enable_thinking=true` (\
              upstream PR #1114)"
         );
-        chat_template.set_default_enable_thinking(true);
     }
     Ok((tokenizer, chat_template))
 }
@@ -1747,10 +1735,9 @@ pub(super) fn build_server_config(
         num_draft_tokens: startup.draft_max,
         // forward the speculative-decoding selector flags
         // verbatim. Reconciliation against the drafter `config.json`
-        // and dispatch into `MtpGenerator` / `DFlashGenerator` / the
-        // classic `SpeculativeGenerator` happens later inside the
-        // continuous-batching worker, when both the drafter path and
-        // the resolved kind are known.
+        // and dispatch into `MtpGenerator` / `DFlashGenerator` / plain
+        // decode happens later inside the continuous-batching worker,
+        // when both the drafter path and the resolved kind are known.
         draft_kind: startup.draft_kind.clone(),
         draft_block_size: startup.draft_block_size,
         max_batch_size,

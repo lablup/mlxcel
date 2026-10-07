@@ -49,7 +49,7 @@
 mod common;
 
 use common::repo_model_dir;
-use mlxcel::{CxxGenerator, LanguageModel, SamplingConfig, initialize_runtime, load_model};
+use mlxcel::{LanguageModel, MlxInferenceSession, SamplingConfig, initialize_runtime, load_model};
 
 /// Decode `max_tokens` greedily and assert the text is usable.
 ///
@@ -93,7 +93,7 @@ fn assert_decode_is_finite(model_name: &str, max_tokens: usize) {
         .collect();
     assert!(!prompt_ids.is_empty());
 
-    let mut generator = CxxGenerator::new(model.num_layers());
+    let mut generator = MlxInferenceSession::new(model.num_layers());
     let tokens = generator.generate(&model, &prompt_ids, max_tokens, &SamplingConfig::greedy());
     assert!(
         !tokens.is_empty(),

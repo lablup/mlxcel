@@ -3649,7 +3649,8 @@ impl LanguageModel for Qwen35Model {
     }
 
     fn reset_runtime_state(&self) {
-        // Used by: CxxGenerator single-row generation paths. Qwen 3.5 Next
+        // Used by: bare single-row runs outside an engine sequence (the engine
+        // resets through prepare_sequence_state / release_sequence_state_by_id). Qwen 3.5 Next
         // owns mixed attention / GatedDelta cache state in
         // `ModelOwnedSequenceState`; reset the fallback cache slot for fresh
         // CLI / benchmark runs without touching scheduler-owned sequence

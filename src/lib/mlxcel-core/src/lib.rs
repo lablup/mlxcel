@@ -3862,10 +3862,13 @@ pub mod weights;
 
 // Token generation
 pub mod generate;
+// `LanguageModel` for `&M`, so a raw-completion client can open an
+// `Engine<&M>` over a model its caller keeps (#2176).
+mod language_model_ref;
 
 // Inference-session contract (issue #448, ADR 0004). The engine-neutral
-// `InferenceSession` trait plus the MLX `MlxInferenceSession` that wraps
-// `CxxGenerator`. The CLI single-sequence paths drive generation through this.
+// `InferenceSession` trait plus the MLX `MlxInferenceSession`, a one-sequence
+// client of the batch-native engine (`engine::DirectEngine`, ADR 0007).
 pub mod session;
 
 // Backend-neutral owned tensors produced by host-side multimodal preprocessing.

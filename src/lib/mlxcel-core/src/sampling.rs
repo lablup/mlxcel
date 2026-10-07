@@ -363,7 +363,7 @@ pub fn apply_token_bias_rows(
 /// increments are skipped entirely when the map is empty, preserving the
 /// zero-overhead baseline path.
 ///
-/// Used by: `CxxGenerator`, `SpeculativeGenerator`, `BatchScheduler`
+/// Used by: the engine's per-row chain, `SpeculativeGenerator`, `BatchScheduler`
 pub fn sample_token_optimized(
     logits: &MlxArray,
     config: &SamplingConfig,

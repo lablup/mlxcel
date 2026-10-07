@@ -58,6 +58,7 @@ pub(crate) mod test_support;
 mod model_metadata_tests;
 
 #[cfg(test)]
+#[allow(deprecated)]
 #[path = "lang_analyzer_tests.rs"]
 mod lang_analyzer_tests;
 
@@ -74,12 +75,14 @@ pub use execution::runtime::{
 };
 pub use execution::sampling;
 pub use mlxcel_core::generate;
-pub use mlxcel_core::generate::{CxxGenerator, GenerationStats, LanguageModel, SamplingConfig};
+pub use mlxcel_core::generate::{GenerationStats, LanguageModel, SamplingConfig};
+// Deprecated with the classic draft-model loop (#2176), removed in v0.8.0.
+#[allow(deprecated)]
 pub use mlxcel_core::speculative::SpeculativeGenerator;
 pub use mlxcel_core::speculative::prompt_lookup::{
-    DraftPolicy, PromptLookupConfig, PromptLookupGenerator, prompt_lookup_unsupported_reason,
-    supports_prompt_lookup,
+    DraftPolicy, PromptLookupConfig, prompt_lookup_unsupported_reason, supports_prompt_lookup,
 };
+pub use mlxcel_core::speculative::prompt_lookup_drafter::PromptLookupDrafter;
 #[cfg(feature = "xla-diagnostics")]
 pub use multimodal::host_preprocessor::LlavaHostReferenceCapture;
 #[cfg(feature = "xla-iree")]

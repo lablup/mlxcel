@@ -15,7 +15,7 @@
 //! The one per-row sampling step (issue #2169, ADR 0007 "Sampling step").
 //!
 //! Every decode path that samples one row at a time goes through
-//! [`RowSampler`]: the four `CxxGenerator` loops behind `mlxcel generate`,
+//! [`RowSampler`]: the engine's raw-completion client behind `mlxcel generate`,
 //! `mlxcel run` and the chat REPL, and the server, where the engine's per-row
 //! chain (`mlxcel_core::engine::sample_and_finish_row`, #2172) draws every
 //! decode row and the first token of a prefill. Before this module each side
@@ -111,7 +111,7 @@ impl TokenDraw {
 
 /// One sequence's sampling step and its [`SamplerState`].
 ///
-/// Used by: `CxxGenerator` decode loops, `engine::sample_and_finish_row`
+/// Used by: `engine::sample_and_finish_row`
 /// (the scheduler's decode steps and prefill completions)
 #[derive(Debug, Clone, Default)]
 pub struct RowSampler {

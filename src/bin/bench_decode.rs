@@ -23,7 +23,9 @@
 //! multi-token decode loop mostly amortized.
 //!
 //! This binary keeps the CLI-facing prompt/VLM preparation semantics but runs
-//! warmup and measured generation against one loaded model in one process.
+//! warmup and measured generation against one loaded model in one process,
+//! on the engine's raw-completion client, the loop `mlxcel generate` and the
+//! server's B=1 row run (ADR 0007, #2176).
 
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
@@ -34,14 +36,17 @@ use mlxcel::cli::turbo_args::{
     TurboKvCacheArgs, resolve_and_announce_kv_cache_mode, resolve_kv_cache_mode,
 };
 use mlxcel::sampling::{ResolvedSamplingParams, build_sampling_config};
+use mlxcel::server::chat_front::load_model_chat_template;
 use mlxcel::server::chat_template::{ChatMessage, ChatTemplateProcessor};
 // The long-prompt corpus is shared with `mlxcel-bench-engine`, so
 // `--prompt-tokens N` is the same prompt in both benchmarks (issue #2167).
 use mlxcel::server::engine_probe::prompt::{cap_prompt_len, synthesize_prompt_tokens};
 use mlxcel::tokenizer::{MlxcelTokenizer, load_tokenizer};
 use mlxcel::vision::merge::InputEmbeddings;
-use mlxcel::{CxxGenerator, LanguageModel, LoadedModel, SamplingConfig};
+use mlxcel::{LoadedModel, SamplingConfig};
 use mlxcel_core::cache::KVCacheMode;
+use mlxcel_core::engine::{DirectEngine, DirectRequest};
+use mlxcel_core::generate::LanguageModel;
 
 #[path = "bench_decode/phase_marks.rs"]
 mod phase_marks;
@@ -158,6 +163,7 @@ fn apply_vlm_chat_template(
 
 fn load_cli_prompt(
     model_path: &Path,
+    tokenizer: &MlxcelTokenizer,
     user_prompt: &str,
     no_chat_template: bool,
     num_images: usize,
@@ -166,9 +172,9 @@ fn load_cli_prompt(
         return user_prompt.to_string();
     }
 
-    let processor = ChatTemplateProcessor::from_model_path(model_path)
-        .ok()
-        .flatten();
+    // The template front `mlxcel generate` and the server share (#2176), so
+    // the benchmark times the prompt they decode.
+    let processor = load_model_chat_template(model_path, tokenizer);
     processor.map_or_else(
         || user_prompt.to_string(),
         |processor| {
@@ -220,7 +226,13 @@ fn prepare_prompt(
     no_chat_template: bool,
     image_paths: &[PathBuf],
 ) -> Result<PreparedPrompt> {
-    let prompt = load_cli_prompt(model_path, user_prompt, no_chat_template, image_paths.len());
+    let prompt = load_cli_prompt(
+        model_path,
+        tokenizer,
+        user_prompt,
+        no_chat_template,
+        image_paths.len(),
+    );
     let mut tokens = tokenize_prompt(tokenizer, &prompt)?;
 
     if image_paths.is_empty() {
@@ -317,6 +329,37 @@ fn sampling_config(
     config
 }
 
+/// The decode path this binary times, printed in `[Profile Results]` and
+/// recorded by `scripts/bench_decode.sh` in the `decode_path` CSV column:
+/// the engine's raw-completion client, the loop `mlxcel generate` and the
+/// server's B=1 row run (ADR 0007, #2176).
+const DECODE_PATH: &str = "engine";
+
+fn client(model: &LoadedModel, kv_cache_mode: KVCacheMode) -> DirectEngine<&LoadedModel> {
+    DirectEngine::with_default_chunk(model).with_kv_cache_mode(kv_cache_mode)
+}
+
+fn request<'a>(
+    prepared: &'a PreparedPrompt,
+    max_tokens: usize,
+    sampling: &'a SamplingConfig,
+) -> Result<DirectRequest<'a>> {
+    let (embeddings, mask) = match prepared.embeddings.as_ref() {
+        Some(embeddings) => {
+            let (input_embeds, mask) = mlxcel::vlm_runtime::prepared_embedding_refs(embeddings)?;
+            (Some(input_embeds), mask)
+        }
+        None => (None, None),
+    };
+    Ok(DirectRequest {
+        prompt_tokens: &prepared.tokens,
+        embeddings,
+        mask,
+        max_tokens,
+        sampling,
+    })
+}
+
 fn warmup(
     model: &LoadedModel,
     prepared: &PreparedPrompt,
@@ -327,27 +370,12 @@ fn warmup(
     if max_tokens == 0 {
         return Ok(());
     }
-
-    let mut generator = CxxGenerator::new_with_kv_mode(model.num_layers(), kv_cache_mode);
-    if let Some(embeddings) = prepared.embeddings.as_ref() {
-        let (input_embeds, mask) = mlxcel::vlm_runtime::prepared_embedding_refs(embeddings)?;
-        let _ = generator.generate_streaming_with_embeddings(
-            model,
-            &prepared.tokens,
-            Some(input_embeds),
-            mask,
-            max_tokens,
-            sampling,
-            |_| true,
-        );
-    } else {
-        let _ = generator.generate(model, &prepared.tokens, max_tokens, sampling);
-    }
-
-    // Reset any model-owned cache state (hybrid/recurrent models) before the
-    // measured pass.  Keeping the process alive preserves MLX/Metal warm state
-    // while avoiding semantic leakage from the warmup generation.
-    generator.reset_with_model(model);
+    // The warmup's sequence is closed when the run returns, so the measured
+    // pass starts from fresh model-owned state while the process keeps its
+    // warm allocator and kernel caches.
+    client(model, kv_cache_mode)
+        .generate(&request(prepared, max_tokens, sampling)?, |_| true)
+        .map_err(|err| anyhow::anyhow!("warmup generation failed: {err}"))?;
     mlxcel_core::synchronize_default();
     Ok(())
 }
@@ -359,25 +387,25 @@ fn measured(
     sampling: &SamplingConfig,
     kv_cache_mode: KVCacheMode,
 ) -> Result<(mlxcel::GenerationStats, phase_marks::Stamp)> {
-    let mut generator = CxxGenerator::new_with_kv_mode(model.num_layers(), kv_cache_mode);
-    let (_tokens, stats) = if let Some(embeddings) = prepared.embeddings.as_ref() {
-        let (input_embeds, mask) = mlxcel::vlm_runtime::prepared_embedding_refs(embeddings)?;
-        generator.generate_with_stats_and_embeddings(
-            model,
-            &prepared.tokens,
-            Some(input_embeds),
-            mask,
-            max_tokens,
-            sampling,
-        )
-    } else {
-        generator.generate_with_stats(model, &prepared.tokens, max_tokens, sampling)
-    };
+    let mut client = client(model, kv_cache_mode).with_ttft_report(true);
+    let request = request(prepared, max_tokens, sampling)?;
+    // `MLXCEL_METAL_CAPTURE_PATH` (with `MTL_CAPTURE_ENABLED=1`) traces the
+    // measured pass, its prefill included; the warmup already compiled the
+    // kernels. `scripts/capture_moe_decode_trace.sh` drives it.
+    let capture_path = std::env::var("MLXCEL_METAL_CAPTURE_PATH").ok();
+    if let Some(path) = capture_path.as_deref() {
+        mlxcel_core::metal_start_capture(path);
+    }
+    let run = client.generate(&request, |_| true);
     // Read the clocks before the trailing synchronize: the decode loop has
     // already waited on its last token, so this is where `decode_time_ms` ends.
     let end = phase_marks::Stamp::now();
+    if capture_path.is_some() {
+        mlxcel_core::metal_stop_capture();
+    }
+    let run = run.map_err(|err| anyhow::anyhow!("measured generation failed: {err}"))?;
     mlxcel_core::synchronize_default();
-    Ok((stats, end))
+    Ok((run.stats, end))
 }
 
 /// Print the MLX allocator counters at a phase boundary (issue #2062).
@@ -565,6 +593,7 @@ fn main() -> Result<()> {
 
     println!("[Profile Results]");
     stats.print();
+    println!("  Decode path:      {DECODE_PATH}");
     // MLX allocator high-water mark for the whole run (model load + prefill +
     // decode). This is the number an OOM budget must fit, independent of how
     // much the cudaMallocAsync pool has returned to the OS (issue #672).

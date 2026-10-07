@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Deprecated
+
+- The classic draft-model speculative path (`mlxcel generate --draft-model <dir>` without `--draft-kind mtp` or `--draft-kind dflash`, the `SpeculativeGenerator` loop) prints a deprecation notice and will be removed in the next minor release (v0.8.0). It is the last decode loop outside the batch-native engine (epic #2166, #2176); use `--draft-kind mtp` or `--draft-kind dflash` with a matching drafter, or `--prompt-lookup` for drafter-free speculation, which now runs on the engine.
+
+### Changed
+
+- `mlxcel generate`, `--profile`, `--prompt-lookup`, `mlxcel-bench-decode`, `mlxcel-bench-engine`'s CLI arm and `speculative_bench`'s baseline decode on the batch-native engine's raw-completion client (`mlxcel_core::engine::DirectEngine`), the same loop `mlxcel run` and the server run at B=1 (#2176). `scripts/bench_decode.sh` records the path in a new trailing `decode_path` CSV column. The per-token pipeline diagnostics `MLXCEL_PROFILE_PIPELINE`, `MLXCEL_PROFILE_PIPELINE_DETAIL`, `MLXCEL_TRACE_ASTYPE`, `MLXCEL_EXPORT_DECODE_DOT` and `MLXCEL_CAPTURE_DECODE` are removed with the loops that read them (`MLXCEL_TRACE_DTYPE` keeps only its fused Mamba2 prints); `mlxcel-bench-decode` now honors `MLXCEL_METAL_CAPTURE_PATH` around its measured pass, which `scripts/capture_moe_decode_trace.sh` uses for its `gputrace` mode.
+- `mlxcel generate`, `MlxInferenceSession` and the benchmarks pipeline the one-sequence decode (the next forward is submitted while the previous token is read back) whenever the server scheduler's rules admit it, and model-owned families that cannot rewind their own state pipeline too, as the retired generator did. Requests with a repetition, frequency or presence penalty, DRY, mirostat or adaptive-p stay on the synchronous chain, and `MLXCEL_FORCE_SYNC` now turns the pipeline off for these paths as well as the scheduler's. Greedy output is the same either way; a seeded stochastic run can differ between the two paths because the fused and per-row draws consume the RNG differently.
+- `--prompt-lookup` runs as a token-only drafter (`PromptLookupDrafter`) on the engine, so it works over any model whose KV state can drop a rejected block, and it pipelines its plain rounds as before. `PromptLookupGenerator` and `CxxGenerator` are removed from the public API (`MlxInferenceSession` and `mlxcel_core::engine::DirectEngine` replace them).
+- `mlxcel generate --profile` reports the sampler graph build and the first evaluation as one phase: the `[TTFT]` line's `sample` is 0 and `eval` carries both. The line is printed for the measured run only, not for the one-token warmup. `mlxcel-bench-decode` and the parity harness render the chat template through the same function as the server and `generate` (`server::chat_front`), so their prompts carry the same `enable_thinking` default.
+
 ## [v0.7.0] - 2026-09-09
 
 ### llama-server b10621 compatibility, complete

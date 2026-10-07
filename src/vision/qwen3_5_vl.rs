@@ -324,7 +324,8 @@ impl LanguageModel for Qwen35VLModel {
     }
 
     fn reset_runtime_state(&self) {
-        // Used by: CxxGenerator single-row generation paths. Reset the
+        // Used by: bare single-row runs outside an engine sequence (the engine
+        // resets through prepare_sequence_state / release_sequence_state_by_id). Reset the
         // hybrid text backbone's fallback mixed-cache slot while preserving
         // the MRoPE fallback written by VLM embedding preparation just before
         // generation starts.

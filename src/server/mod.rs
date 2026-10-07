@@ -21,6 +21,7 @@ pub mod audio_model;
 pub(crate) mod audio_worker;
 pub mod auth;
 pub mod batch;
+pub mod chat_front;
 mod chat_request;
 pub mod chat_template;
 pub mod chat_template_json;

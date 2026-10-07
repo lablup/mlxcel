@@ -16,7 +16,7 @@
 //!
 //! Runs one prompt and one `SamplingConfig` through
 //!
-//! - (a) `CxxGenerator`, the way `mlxcel generate` calls it,
+//! - (a) the engine's raw-completion client, the way `mlxcel generate` calls it,
 //! - (b) the server `BatchScheduler` in-process at B=1 with dense decode
 //!   storage, and
 //! - (c) the same at B=1 with paged decode storage,

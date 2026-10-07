@@ -145,6 +145,11 @@ pub enum DrafterKind {
     /// checkpoint inspection sub-H, not by drafter
     /// `model_type`.
     InternalMtp,
+    /// Prompt lookup (#2176): proposals come from n-gram matches in the
+    /// token context, so the drafter needs no checkpoint and no hidden
+    /// states (`crate::speculative::prompt_lookup_drafter`). Selected on the
+    /// CLI by `--prompt-lookup`, never by `--draft-kind`.
+    PromptLookup,
 }
 
 impl DrafterKind {
@@ -154,6 +159,7 @@ impl DrafterKind {
             DrafterKind::Dflash => "dflash",
             DrafterKind::Mtp => "mtp",
             DrafterKind::InternalMtp => "internal-mtp",
+            DrafterKind::PromptLookup => "prompt-lookup",
         }
     }
 }
@@ -178,6 +184,7 @@ impl std::str::FromStr for DrafterKind {
             "dflash" => Ok(DrafterKind::Dflash),
             "mtp" => Ok(DrafterKind::Mtp),
             "internal-mtp" => Ok(DrafterKind::InternalMtp),
+            "prompt-lookup" => Ok(DrafterKind::PromptLookup),
             other => Err(DrafterError::UnknownKind {
                 got: other.to_string(),
                 known: KNOWN_DRAFTER_KINDS.iter().map(|s| s.to_string()).collect(),
@@ -191,7 +198,7 @@ impl std::str::FromStr for DrafterKind {
 ///
 /// Mirrors upstream `KNOWN_DRAFTER_KINDS = {"dflash", "mtp"}` plus
 /// `"internal-mtp"` from the amendment for peer.
-pub const KNOWN_DRAFTER_KINDS: &[&str] = &["dflash", "mtp", "internal-mtp"];
+pub const KNOWN_DRAFTER_KINDS: &[&str] = &["dflash", "mtp", "internal-mtp", "prompt-lookup"];
 
 /// Default drafter kind selected when the drafter's `config.json` does not
 /// declare a recognised `model_type` and the caller did not pass an
@@ -975,6 +982,33 @@ pub trait Drafter {
         None
     }
 
+    /// Whether this drafter proposes from the token context alone and never
+    /// reads the target's hidden states, so the engine's token-only round
+    /// loop (`engine::DirectEngine::generate_with_drafter`) can drive it over
+    /// any model. Prompt lookup is such a drafter; the MTP and DFlash heads
+    /// are not.
+    fn drafts_from_tokens_only(&self) -> bool {
+        false
+    }
+
+    /// Whether the token-only round loop may pipeline its next round without
+    /// a proposal: submit that one-token forward from the still-unread
+    /// target token, before the host knows it. The round after a pipelined
+    /// one cannot carry a proposal (its lookup ran on a context that lacked
+    /// the in-flight token), so a drafter says yes only when a proposal is
+    /// unlikely to be lost. Asked after a [`Self::draft_block`] that returned
+    /// nothing. The default never pipelines.
+    fn pipelines_plain_rounds(&self) -> bool {
+        false
+    }
+
+    /// The round loop asked [`Self::draft_block`] for a proposal but runs no
+    /// forward for that call (it reads the in-flight step instead and asks
+    /// again next round): undo whatever per-round accounting the call did.
+    /// The default keeps none.
+    #[allow(unused_variables)]
+    fn retract_draft(&mut self, draft: &[i32]) {}
+
     /// Extend a **stateful** MTP drafter's cache after a verify round.
     ///
     /// **Qwen 3.5 MTP only.** Called by the MTP round loop after the
@@ -1322,6 +1356,13 @@ pub fn load_drafter(path: &Path, kind: Option<DrafterKind>) -> Result<LoadedDraf
             kind: resolved,
             issue: 640,
         }),
+        // Built in-process from a `PromptLookupConfig`; there is no
+        // checkpoint to load (`--prompt-lookup` on the CLI).
+        DrafterKind::PromptLookup => Err(DrafterError::LoadFailed {
+            reason: "prompt-lookup drafting needs no checkpoint; construct \
+                     speculative::prompt_lookup_drafter::PromptLookupDrafter directly"
+                .to_string(),
+        }),
     }
 }
 
@@ -1377,6 +1418,7 @@ mod tests {
             DrafterKind::Dflash,
             DrafterKind::Mtp,
             DrafterKind::InternalMtp,
+            DrafterKind::PromptLookup,
         ] {
             let s = kind.as_str();
             assert_eq!(
@@ -1409,6 +1451,7 @@ mod tests {
             DrafterKind::Dflash,
             DrafterKind::Mtp,
             DrafterKind::InternalMtp,
+            DrafterKind::PromptLookup,
         ] {
             assert!(
                 KNOWN_DRAFTER_KINDS.contains(&kind.as_str()),
