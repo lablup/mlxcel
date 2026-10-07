@@ -39,7 +39,22 @@ constexpr int page_size = 16384;
 constexpr int small_block_size = 8;
 
 // The small pool size in bytes. Multiple of page_size and small_block_size.
+// As in CUDA it sets the slot count (8192); the pool's memory is
+// small_block_count * small_block_stride bytes.
 constexpr int small_pool_size = 4 * page_size;
+constexpr int small_block_count = small_pool_size / small_block_size;
+
+// Distance between slots. CUDA packs them small_block_size apart; here every
+// slot gets its own 128-byte line, the L0, GL1 and L2 line of gfx11. The host
+// writes these slots (array(2.0f), full(shape, v), a one-token index) and a
+// kernel reads them; with 16 slots per line a kernel on another queue that
+// was reading a neighbour while this thread rewrote its slot and launched
+// read the line's old contents, the slot's previous value (gfx1151, ROCm
+// 7.15: 10 of 10 and 18 of 20 multi-threaded runs wrong, every wrong value
+// an earlier occupant's, no slot ever live twice, 0 of 20 with own lines;
+// lablup/mlxcel#2213). A line no other live scalar shares cannot be held by
+// a running kernel when its owner's host write lands.
+constexpr size_t small_block_stride = 128;
 
 // ---------------------------------------------------------------------------
 // Device helpers
@@ -222,11 +237,11 @@ SmallSizePool::SmallSizePool() {
   if (!rocm_available()) {
     return;
   }
-  auto num_blocks = small_pool_size / small_block_size;
+  auto num_blocks = small_block_count;
   buffer_ = new Block[num_blocks];
   next_free_ = buffer_;
 
-  data_ = unified_malloc(small_pool_size, data_managed_);
+  data_ = unified_malloc(num_blocks * small_block_stride, data_managed_);
 
   auto curr = next_free_;
   for (size_t i = 1; i < static_cast<size_t>(num_blocks); ++i) {
@@ -250,7 +265,7 @@ RocmBuffer* SmallSizePool::malloc() {
   Block* b = next_free_;
   uint64_t i = static_cast<uint64_t>(next_free_ - buffer_);
   next_free_ = next_free_->next;
-  b->buf.data = static_cast<char*>(data_) + i * small_block_size;
+  b->buf.data = static_cast<char*>(data_) + i * small_block_stride;
   b->buf.size = small_block_size;
   b->buf.device = -1;
   b->buf.is_managed = data_managed_;
@@ -270,10 +285,9 @@ bool SmallSizePool::in_pool(RocmBuffer* buf) {
   if (!buffer_) {
     return false;
   }
-  constexpr int num_blocks = (small_pool_size / small_block_size);
   auto* b = reinterpret_cast<Block*>(buf);
   int64_t block_num = b - buffer_;
-  return block_num >= 0 && block_num < num_blocks;
+  return block_num >= 0 && block_num < small_block_count;
 }
 
 // ---------------------------------------------------------------------------
