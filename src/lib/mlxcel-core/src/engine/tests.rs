@@ -855,7 +855,9 @@ fn direct_engine_matches_a_hand_driven_sequence_and_closes_it() {
 #[test]
 fn direct_engine_honors_the_callback_and_withholds_eos() {
     let greedy = SamplingConfig::greedy();
-    let mut client = DirectEngine::new(EchoModel::new(), 0);
+    // The synchronous loop's forward counts; the pipeline's, which submits
+    // one forward past a callback stop, are in `direct_decode_tests`.
+    let mut client = DirectEngine::new(EchoModel::new(), 0).with_force_sync(true);
     let mut seen = Vec::new();
     let run = client
         .generate(&DirectRequest::text(&[2, 4], 10, &greedy), |t| {

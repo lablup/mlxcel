@@ -152,6 +152,12 @@ impl<M: LanguageModel> DirectEngine<M> {
         if sampling.needs_sampler_feedback_state() {
             return Err(SpeculativeRunError::SamplerFeedbackState);
         }
+        if request.max_tokens == 0 {
+            return Ok(SpeculativeRun {
+                run: DirectRun::empty(request.prompt_tokens.len()),
+                rounds: SpeculativeRounds::default(),
+            });
+        }
         install_thread_local_default_stream(self.generation_stream());
         drafter.bind(self.model())?;
         let id = self.open_sequence()?;

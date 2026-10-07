@@ -335,7 +335,7 @@ mod tests {
         let model = Overrides;
         assert_eq!(through_ref(&model), (7, false, true, vec![9]));
         assert_eq!(
-            (&model).sequence_state_layout(),
+            <&Overrides as LanguageModel>::sequence_state_layout(&&model),
             model.sequence_state_layout()
         );
     }

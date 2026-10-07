@@ -23,11 +23,19 @@
 //! It uses the same prefill plan, sampler, finish step and merged EOS set the
 //! server's B=1 row uses, so a divergence between this client and the
 //! server's dense B=1 arm is scheduler policy, not engine execution.
+//!
+//! After the first token it decodes on the lookahead pipeline, the split
+//! step ([`Engine::submit`], [`Engine::finish_rows`], [`Engine::unwind_appends`])
+//! with step n+1's forward overlapping step n's host read, whenever the
+//! scheduler's eligibility rules admit the sequence, and on the synchronous
+//! [`Engine::step`] otherwise or under `MLXCEL_FORCE_SYNC` (`direct_decode`).
 
 use std::borrow::Cow;
 use std::time::Instant;
 
-use super::{Engine, EngineError, PrefillStep, SequenceSpec, StepBatch, StepRow, StepRowHooks};
+use super::direct_decode::DecodeState;
+use super::lookahead::force_sync_requested;
+use super::{Engine, EngineError, PrefillStep, SequenceSpec, StepRowHooks};
 use crate::cache::{KVCacheMode, SequenceId};
 use crate::decode_finish::{FinishCause, FinishHooks};
 use crate::ffi::MlxThreadLocalStream;
@@ -35,10 +43,10 @@ use crate::generate::{
     GenerationStats, LanguageModel, SamplingConfig, TtftPhases, pad_embeddings,
     prefill_tile_alignment_enabled, resolve_kv_cache_layer_modes, ttft_profile_enabled,
 };
-use crate::generation_policy::{initial_token_history, merged_eos_token_ids, seed_rng_if_needed};
+use crate::generation_policy::{merged_eos_token_ids, seed_rng_if_needed};
 use crate::prefill_plan::{PrefillCaps, PrefillInput, PrefillPlan, prefill_chunk_len};
-use crate::sampling::{LogprobsConfig, TokenBiasMap};
-use crate::sampling_row_step::{LogitMask, RowSampler};
+use crate::sampling::TokenBiasMap;
+use crate::sampling_row_step::LogitMask;
 use crate::streams::{install_thread_local_default_stream, shared_thread_local_generation_stream};
 use crate::{MlxArray, UniquePtr};
 
@@ -147,6 +155,19 @@ pub struct DirectRun {
     pub stats: GenerationStats,
 }
 
+impl DirectRun {
+    /// The run of a zero budget: nothing is prefilled or emitted.
+    pub(super) fn empty(prompt_tokens: usize) -> Self {
+        Self {
+            tokens: Vec::new(),
+            stats: GenerationStats {
+                prompt_tokens,
+                ..GenerationStats::default()
+            },
+        }
+    }
+}
+
 /// An [`Engine`] over one model, decoding one request at a time.
 pub struct DirectEngine<M: LanguageModel> {
     engine: Engine<M>,
@@ -158,6 +179,10 @@ pub struct DirectEngine<M: LanguageModel> {
     token_bias: TokenBiasMap,
     /// The per-thread generation stream the server worker and the CLI share.
     generation_stream: Option<UniquePtr<MlxThreadLocalStream>>,
+    /// Keep every decode step on the synchronous chain (the lookahead
+    /// pipeline's kill switch, [`super::lookahead::FORCE_SYNC_ENV`], probed
+    /// once at construction).
+    force_sync: bool,
 }
 
 impl<M: LanguageModel> DirectEngine<M> {
@@ -170,6 +195,7 @@ impl<M: LanguageModel> DirectEngine<M> {
             kv_cache_mode: KVCacheMode::Fp16,
             token_bias: TokenBiasMap::default(),
             generation_stream: shared_thread_local_generation_stream(),
+            force_sync: force_sync_requested(),
         }
     }
 
@@ -196,8 +222,23 @@ impl<M: LanguageModel> DirectEngine<M> {
         self
     }
 
+    /// Force (`true`) or allow (`false`) the synchronous decode chain,
+    /// overriding the `MLXCEL_FORCE_SYNC` probe. The pipelined and the
+    /// synchronous loop emit the same stream for every greedy request; see
+    /// `direct_decode` for when the pipeline applies.
+    #[must_use]
+    pub fn with_force_sync(mut self, force_sync: bool) -> Self {
+        self.force_sync = force_sync;
+        self
+    }
+
     pub fn model(&self) -> &M {
         self.engine.model()
+    }
+
+    /// Whether every decode step stays on the synchronous chain.
+    pub fn force_sync(&self) -> bool {
+        self.force_sync
     }
 
     pub fn kv_cache_mode(&self) -> KVCacheMode {
@@ -211,6 +252,10 @@ impl<M: LanguageModel> DirectEngine<M> {
     /// Hand the model back.
     pub fn into_model(self) -> M {
         self.engine.into_parts().0
+    }
+
+    pub(super) fn engine(&self) -> &Engine<M> {
+        &self.engine
     }
 
     pub(super) fn engine_mut(&mut self) -> &mut Engine<M> {
@@ -263,12 +308,16 @@ impl<M: LanguageModel> DirectEngine<M> {
     /// not a repetition loop's looping token (which stays in the returned
     /// stream but is withheld from the callback, as the CLI loop always
     /// did), but the token that spends the budget. The sequence is closed
-    /// on every return path, so a failed run leaves no state behind.
+    /// on every return path, so a failed run leaves no state behind. A zero
+    /// `max_tokens` emits nothing and runs no forward.
     pub fn generate<F: FnMut(i32) -> bool>(
         &mut self,
         request: &DirectRequest<'_>,
         on_token: F,
     ) -> Result<DirectRun, DirectEngineError> {
+        if request.max_tokens == 0 {
+            return Ok(DirectRun::empty(request.prompt_tokens.len()));
+        }
         let profile_ttft = ttft_profile_enabled();
         let setup_start = Instant::now();
         install_thread_local_default_stream(self.generation_stream.as_ref());
@@ -333,7 +382,7 @@ impl<M: LanguageModel> DirectEngine<M> {
         }
     }
 
-    fn run_open_sequence<F: FnMut(i32) -> bool>(
+    pub(super) fn run_open_sequence<F: FnMut(i32) -> bool>(
         &mut self,
         id: SequenceId,
         request: &DirectRequest<'_>,
@@ -345,10 +394,7 @@ impl<M: LanguageModel> DirectEngine<M> {
         let prompt_tokens = request.prompt_tokens;
         let max_tokens = request.max_tokens;
         let eos = merged_eos_token_ids(self.model().eos_token_ids(), &sampling.stop_token_ids);
-        let mut history = initial_token_history(prompt_tokens, sampling.needs_token_history());
-        let mut generated: Vec<i32> = Vec::new();
-        let mut sampler = RowSampler::new(sampling);
-        let logprobs = LogprobsConfig::default();
+        let mut state = DecodeState::new(id, prompt_tokens, sampling, eos, max_tokens);
 
         let prefill_start = Instant::now();
         let build_start = profile_ttft.then(Instant::now);
@@ -363,28 +409,10 @@ impl<M: LanguageModel> DirectEngine<M> {
         // The server reseeds right before a row's first token is sampled.
         seed_rng_if_needed(sampling);
         let eval_start = profile_ttft.then(Instant::now);
-        let first = {
-            let mut row = StepRow {
-                seq_id: id,
-                sampler: &mut sampler,
-                sampling,
-                token_history: &mut history,
-                generated: &mut generated,
-                eos: &eos,
-                max_tokens,
-                logprobs: &logprobs,
-                needs_mask: false,
-                needs_override: false,
-                hooks: BareHooks,
-            };
-            self.engine.complete_prefill(&logits, &mut row)
-        };
+        let first = self.engine.complete_prefill(&logits, &mut state.row());
         let eval_ns = eval_start.map_or(0, |t| t.elapsed().as_nanos());
         let post_start = profile_ttft.then(Instant::now);
         self.prepare_turbo4_delegated_before_decode(id, max_tokens);
-        // Prefill is encoded by now; raise the command-buffer input budget for
-        // the decode loop only (see `DecodeCommandBufferBudget`).
-        let _decode_budget = crate::DecodeCommandBufferBudget::enter();
         let post_ns = post_start.map_or(0, |t| t.elapsed().as_nanos());
         let prefill_time = prefill_start.elapsed();
         if profile_ttft {
@@ -406,60 +434,22 @@ impl<M: LanguageModel> DirectEngine<M> {
         crate::clear_memory_cache();
 
         let decode_start = Instant::now();
-        let mut continue_decode = true;
         if let Some(error) = first.error {
             return Err(DirectEngineError::FirstToken(error.message().to_string()));
         }
-        if delivers_to_callback(&generated, 0, &first) {
+        let mut continue_decode = true;
+        if delivers_to_callback(&state.generated, 0, &first) {
             continue_decode = on_token(first.token);
         }
         if first.finish.is_none() && continue_decode {
-            loop {
-                let last = *generated
-                    .last()
-                    .ok_or_else(|| DirectEngineError::Row("decode without a token".into()))?;
-                let input = crate::from_slice_i32(&[last], &[1, 1]);
-                let batch = StepBatch {
-                    seq_ids: std::slice::from_ref(&id),
-                    input: &input,
-                };
-                let before = generated.len();
-                let out = {
-                    let row = StepRow {
-                        seq_id: id,
-                        sampler: &mut sampler,
-                        sampling,
-                        token_history: &mut history,
-                        generated: &mut generated,
-                        eos: &eos,
-                        max_tokens,
-                        logprobs: &logprobs,
-                        needs_mask: false,
-                        needs_override: false,
-                        hooks: BareHooks,
-                    };
-                    self.engine
-                        .step(&batch, &mut [row])
-                        .map_err(DirectEngineError::Step)?
-                };
-                let outcome = out
-                    .rows
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| DirectEngineError::Row("step returned no row".into()))?;
-                if let Some(error) = outcome.error {
-                    return Err(DirectEngineError::Row(error.message().to_string()));
-                }
-                if delivers_to_callback(&generated, before, &outcome) && !on_token(outcome.token) {
-                    break;
-                }
-                if outcome.finish.is_some() {
-                    break;
-                }
-            }
+            // Prefill is encoded by now; the decode loop raises the
+            // command-buffer input budget around pipelined steps only (see
+            // `DecodeCommandBufferBudget` and `direct_decode`).
+            self.decode(&mut state, &mut on_token)?;
         }
         let decode_time = decode_start.elapsed();
 
+        let generated = state.generated;
         let prompt_count = prompt_tokens.len();
         let gen_count = generated.len();
         let prefill_ms = prefill_time.as_secs_f64() * 1000.0;

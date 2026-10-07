@@ -44,11 +44,14 @@ use crate::sampling::{FusedSampleParams, TokenBiasMap, batched_fused_sample_toke
 use crate::{MlxArray, UniquePtr};
 
 mod direct;
+mod direct_decode;
+mod lookahead;
 mod prefill;
 pub mod rows;
 mod speculative;
 
 pub use direct::{BareHooks, DirectEngine, DirectEngineError, DirectRequest, DirectRun};
+pub use lookahead::{FORCE_SYNC_ENV, force_sync_requested, lookahead_feedback_input};
 pub use prefill::{PrefillOutcome, PrefillStep, piece_input, trim_padded_prefill};
 use rows::fail_batch;
 pub use rows::{
@@ -420,5 +423,7 @@ impl<M: LanguageModel> Engine<M> {
     }
 }
 
+#[cfg(test)]
+mod direct_decode_tests;
 #[cfg(test)]
 mod tests;
