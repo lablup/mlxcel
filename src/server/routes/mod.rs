@@ -26,6 +26,7 @@ pub mod anthropic;
 pub mod audio;
 pub mod cache;
 pub mod chat;
+pub(crate) mod chat_generation;
 pub mod completions;
 pub mod control;
 pub mod detokenize;

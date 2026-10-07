@@ -86,7 +86,7 @@ fn generation_stats_from_duration(
     }
 }
 
-fn print_runtime_setup(runtime: &RuntimeSetup) {
+pub(super) fn print_runtime_setup(runtime: &RuntimeSetup) {
     if let Some(invalid) = runtime.invalid_device_override.as_deref() {
         eprintln!(
             "Ignoring invalid MLXCEL_DEVICE value {:?}; using gpu.",
@@ -1279,10 +1279,6 @@ fn build_cli_sampling_config_with_flags(
     flags: CliSamplingFlagState,
 ) -> SamplingConfig {
     build_sampling_config(resolved_cli_sampling_params(args, stop_token_ids, flags))
-}
-
-fn build_cli_chat_sampling_params(args: &GenerateArgs) -> ResolvedSamplingParams {
-    resolved_cli_sampling_params(args, Vec::new(), current_cli_sampling_flags())
 }
 
 pub(super) fn print_generation_preamble(user_prompt: &str) -> Result<()> {
@@ -2588,34 +2584,34 @@ fn install_surgery_pipeline_from_cli(args: &GenerateArgs) -> Result<()> {
 }
 
 /// Build [`ChatOptions`] for the interactive REPL from the parsed generate
-/// args. Reuses the same sampling-knob mapping `build_cli_sampling_config`
-/// uses (so the REPL and one-shot `generate` sample identically) and resolves
-/// the KV-cache mode through the shared `resolve_kv_cache_mode` helper.
+/// args. The REPL is a client of the in-process server (issue #2173), so the
+/// sampling flags become that server's options through the same mapping
+/// `mlxcel run` uses; the server-only sampling flags stay at their defaults
+/// because `generate` does not expose them.
 ///
-/// `stop_token_ids` is left empty here and filled in by `run_chat` from the
-/// model's config once the model directory is resolved, mirroring the one-shot
-/// path's `read_eos_token_ids(&args.model.model)`.
+/// [`ChatOptions`]: crate::commands::ChatOptions
 fn chat_options_from_args(args: &GenerateArgs) -> Result<crate::commands::ChatOptions> {
-    let kv_cache_mode = resolve_kv_cache_mode(
-        args.generation.turbo.cache_type_k.as_deref(),
-        args.generation.turbo.cache_type_v.as_deref(),
-        args.generation.turbo.kv_cache_mode.as_deref(),
-    )
-    .map_err(|e| anyhow::anyhow!("{}", e))?;
-
-    let sampling = build_cli_chat_sampling_params(args);
-
-    let mut opts = crate::commands::ChatOptions::new(
-        args.model.model.clone(),
+    let kv_cache_mode = super::cli_server::resolve_cli_kv_cache_mode(&args.generation.turbo)?;
+    let mut server = super::cli_server::settings_from_flags(
+        &args.sampling,
+        mlxcel::cli::in_process_client::ServerSamplingOptions::default(),
         args.generation.max_tokens,
-        sampling,
+        kv_cache_mode,
+        &super::cli_server::cli_flag_was_set,
     );
-    opts.models_dir = args.model.models_dir.clone();
-    opts.revision = args.model.revision.clone();
-    opts.kv_cache_mode = kv_cache_mode;
-    opts.no_chat_template = args.generation.no_chat_template;
-    opts.show_reasoning = args.generation.show_reasoning;
-    Ok(opts)
+    server.adapter = args.model.adapter.clone();
+    server.draft_model = args.model.draft_model.clone();
+    server.draft_kind = args.speculative.draft_kind.clone();
+    server.draft_block_size = args.speculative.draft_block_size;
+    Ok(crate::commands::ChatOptions {
+        model: args.model.model.clone(),
+        models_dir: args.model.models_dir.clone(),
+        revision: args.model.revision.clone(),
+        server,
+        no_chat_template: args.generation.no_chat_template,
+        show_reasoning: args.generation.show_reasoning,
+        images: args.generation.image.clone(),
+    })
 }
 
 pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {

@@ -1537,6 +1537,61 @@ pub(super) fn resolve_chat_template(
     Ok(ChatTemplateProcessor::from_model_path(model_path)?.unwrap_or_default())
 }
 
+/// Load the tokenizer and the chat template the way `start_server` does,
+/// including the `enable_thinking` default for checkpoints whose tokenizer
+/// recognizes a think marker pair. Shared with the in-process server
+/// ([`crate::server::in_process`]) so `mlxcel run` renders prompts exactly as
+/// `/v1/chat/completions` does (issue #2173).
+pub(crate) fn load_chat_front(
+    startup: &ServerStartupConfig,
+) -> Result<(crate::tokenizer::MlxcelTokenizer, ChatTemplateProcessor)> {
+    let mut chat_template = resolve_chat_template(
+        startup.chat_template.as_deref(),
+        startup.chat_template_file.as_deref(),
+        &startup.model_path,
+    )?;
+    let tokenizer = crate::tokenizer::load_tokenizer(&startup.model_path)?;
+
+    // align the chat-template `enable_thinking` Jinja kwarg
+    // default with upstream `TokenizerWrapper.apply_chat_template`'s
+    // `enable_thinking=self.has_thinking` behavior. When the underlying
+    // tokenizer recognizes a think marker pair (single-token `<think>` /
+    // `</think>`, single-token `<longcat_think>` variants, or multi-token
+    // `<|channel>thought` / `<channel|>` for Gemma 4 and friends), the
+    // server-side default flips to `true` so a request that does not set
+    // `chat_template_kwargs.enable_thinking` still sees thinking enabled
+    // by default. Per-request kwargs and the existing CLI/env defaults
+    // (`--chat-template-kwargs`, `LLAMA_ARG_CHAT_TEMPLATE_KWARGS`)
+    // continue to win on conflict via `merge_server_and_request`.
+    let thinking_markers = tokenizer.infer_thinking_markers();
+    // Issue #686: the Gemma-4 thinking-channel template's thinking-OFF branch
+    // is the correct interactive default (a CLOSED `<|channel>thought\n<channel|>`
+    // priming scaffold matching transformers' no-`enable_thinking` render), so
+    // the `has_thinking` heuristic below must not flip it on; forcing thinking
+    // there produces a bare `<|turn>model\n` that greedy-collapses to `<pad>`.
+    if thinking_markers.has_thinking() && !chat_template.wants_thinking_default_off() {
+        tracing::info!(
+            think_start = ?thinking_markers.think_start,
+            think_end = ?thinking_markers.think_end,
+            think_start_tokens_len = thinking_markers
+                .think_start_tokens
+                .as_ref()
+                .map(Vec::len)
+                .unwrap_or(0),
+            think_end_tokens_len = thinking_markers
+                .think_end_tokens
+                .as_ref()
+                .map(Vec::len)
+                .unwrap_or(0),
+            "Tokenizer recognizes a think marker pair; defaulting \
+             chat_template kwarg `enable_thinking=true` (\
+             upstream PR #1114)"
+        );
+        chat_template.set_default_enable_thinking(true);
+    }
+    Ok((tokenizer, chat_template))
+}
+
 /// Parse a preemption policy string from CLI into the enum.
 ///
 /// Accepts "longest-first" (default) and "lowest-priority" (case-insensitive).
@@ -1909,7 +1964,7 @@ fn initialize_server_logging(startup: &ServerStartupConfig) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn warmup_model(model_provider: &ModelProvider) -> Result<()> {
+pub(crate) fn warmup_model(model_provider: &ModelProvider) -> Result<()> {
     model_provider.generate(
         "Hello".to_string(),
         ServerGenerateOptions {
@@ -3166,12 +3221,7 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     if let Some(service_config) = distributed.remote_stage_service {
         return serve_remote_pipeline_stage(service_config).await;
     }
-    let mut chat_template = resolve_chat_template(
-        startup.chat_template.as_deref(),
-        startup.chat_template_file.as_deref(),
-        &startup.model_path,
-    )?;
-    let tokenizer = crate::tokenizer::load_tokenizer(&startup.model_path)?;
+    let (tokenizer, chat_template) = load_chat_front(&startup)?;
 
     // `--dry-sequence-breaker` carries b10621's string value domain since
     // #1485; the effective set (default set, replacement values, or the
@@ -3184,44 +3234,6 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
             breakers = ?config.default_dry_sequence_breakers,
             "DRY sequence breakers active (b10621 semantics: breaker token data derived from the vocabulary per request)"
         );
-    }
-
-    // align the chat-template `enable_thinking` Jinja kwarg
-    // default with upstream `TokenizerWrapper.apply_chat_template`'s
-    // `enable_thinking=self.has_thinking` behavior. When the underlying
-    // tokenizer recognizes a think marker pair (single-token `<think>` /
-    // `</think>`, single-token `<longcat_think>` variants, or multi-token
-    // `<|channel>thought` / `<channel|>` for Gemma 4 and friends), the
-    // server-side default flips to `true` so a request that does not set
-    // `chat_template_kwargs.enable_thinking` still sees thinking enabled
-    // by default. Per-request kwargs and the existing CLI/env defaults
-    // (`--chat-template-kwargs`, `LLAMA_ARG_CHAT_TEMPLATE_KWARGS`)
-    // continue to win on conflict via `merge_server_and_request`.
-    let thinking_markers = tokenizer.infer_thinking_markers();
-    // Issue #686: the Gemma-4 thinking-channel template's thinking-OFF branch
-    // is the correct interactive default (a CLOSED `<|channel>thought\n<channel|>`
-    // priming scaffold matching transformers' no-`enable_thinking` render), so
-    // the `has_thinking` heuristic below must not flip it on; forcing thinking
-    // there produces a bare `<|turn>model\n` that greedy-collapses to `<pad>`.
-    if thinking_markers.has_thinking() && !chat_template.wants_thinking_default_off() {
-        tracing::info!(
-            think_start = ?thinking_markers.think_start,
-            think_end = ?thinking_markers.think_end,
-            think_start_tokens_len = thinking_markers
-                .think_start_tokens
-                .as_ref()
-                .map(Vec::len)
-                .unwrap_or(0),
-            think_end_tokens_len = thinking_markers
-                .think_end_tokens
-                .as_ref()
-                .map(Vec::len)
-                .unwrap_or(0),
-            "Tokenizer recognizes a think marker pair; defaulting \
-             chat_template kwarg `enable_thinking=true` (\
-             upstream PR #1114)"
-        );
-        chat_template.set_default_enable_thinking(true);
     }
 
     // If the serving role is "router", start the lightweight HTTP router front-end

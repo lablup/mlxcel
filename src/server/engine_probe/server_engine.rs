@@ -14,12 +14,13 @@
 
 //! The server decode path, driven in-process at one sequence at a time.
 //!
-//! [`ServerEngine`] builds exactly what `start_server` builds, minus the HTTP
-//! listener: the [`ServerConfig`] comes from [`build_server_config`] over the
-//! default [`ServerStartupConfig`] (the `mlxcel-server` defaults), the prompt
-//! cache store from [`resolve_prompt_cache_store`], and the model worker from
-//! [`ModelProvider::new_with_server_config_and_prompt_cache`], which spawns the
-//! same `BatchScheduler` worker thread the server runs. Requests enter through
+//! [`ServerEngine`] starts the [`InProcessServer`] `mlxcel run` also uses
+//! (issue #2173), over the default [`ServerStartupConfig`] (the
+//! `mlxcel-server` defaults): the configuration from `build_server_config`,
+//! the prompt cache store from `resolve_prompt_cache_store`, and the model
+//! worker from `ModelProvider::new_with_server_config_and_prompt_cache`, which
+//! spawns the same `BatchScheduler` worker thread the server runs. Requests
+//! enter through
 //! the provider's request channel with pre-tokenized ids, so tokenization and
 //! HTTP stay outside the timed region while admission, prefill, decode and the
 //! finish step are the real scheduler code.
@@ -28,30 +29,20 @@
 //! while keeping the server's default admission width (`--parallel 4`). That
 //! width matters: paged decode storage is only available when the worker's
 //! `max_batch_size` is above one, so `--max-batch-size 1` would silently turn
-//! every paged run into a dense one.
-//!
-//! [`build_server_config`]: crate::server::startup::build_server_config
-//! [`resolve_prompt_cache_store`]: crate::server::startup::resolve_prompt_cache_store
+//! every paged run into a dense one. `mlxcel run` does start its server at
+//! `max_batch_size = 1`, which is why its storage is dense (ADR 0007).
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::path::Path;
+use std::time::Instant;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use mlxcel_core::generate::SamplingConfig;
 
-use crate::server::batch::{BatchObservability, RequestPriority};
+use crate::server::batch::RequestPriority;
 use crate::server::config::PromptCacheRequestContext;
+use crate::server::in_process::InProcessServer;
 use crate::server::prompt_cache::key::{MultimodalDigest, resolve_session_key};
-use crate::server::startup::{build_server_config, resolve_prompt_cache_store, warmup_model};
-use crate::server::{
-    ApiKeys, BatchMetrics, DecodeStorageBackend, ModelProvider, ServerConfig,
-    ServerGenerateOptions, ServerStartupConfig,
-};
-
-/// How long [`ServerEngine::shutdown`] waits for the worker thread to release
-/// the model before giving up.
-const WORKER_EXIT_TIMEOUT: Duration = Duration::from_secs(120);
+use crate::server::{DecodeStorageBackend, ServerGenerateOptions, ServerStartupConfig};
 
 /// Cache-key template dimension for probe requests. Probe requests never share
 /// a bucket with real chat or raw-prompt traffic.
@@ -178,10 +169,7 @@ impl ServerEngineRun {
 /// The in-process server engine. Dropping it shuts the worker down without
 /// waiting; call [`Self::shutdown`] to wait for the model to be released.
 pub struct ServerEngine {
-    provider: ModelProvider,
-    config: ServerConfig,
-    observability: Arc<BatchObservability>,
-    model_path: PathBuf,
+    server: InProcessServer,
     options: ServerEngineOptions,
 }
 
@@ -189,10 +177,6 @@ impl ServerEngine {
     /// Build the server configuration, prompt cache store and model worker the
     /// way `start_server` does, then run the server's own one-token warmup.
     pub fn start(model_path: &Path, options: ServerEngineOptions) -> Result<Self> {
-        // `start_server` turns CUDA graph capture off for the families that
-        // need it (Gemma 4, #688) on the main thread before any worker exists;
-        // do the same so the worker's own load-site call is a no-op here too.
-        crate::loading::maybe_disable_cuda_graphs_for_model_for_path(model_path);
         let mut startup = ServerStartupConfig {
             model_path: model_path.to_path_buf(),
             decode_storage_backend: Some(match options.decode_storage {
@@ -207,27 +191,8 @@ impl ServerEngine {
         if !options.prompt_cache {
             startup.prompt_cache.enabled = false;
         }
-        let mut config = build_server_config(&startup, ApiKeys::default());
-        let batch_metrics = Arc::new(BatchMetrics::new());
-        let observability = Arc::new(BatchObservability::new());
-        let store = resolve_prompt_cache_store(&mut config, model_path, &batch_metrics);
-        let provider = ModelProvider::new_with_server_config_and_prompt_cache(
-            model_path.to_path_buf(),
-            None,
-            &config,
-            store,
-            batch_metrics,
-            observability.clone(),
-        )
-        .context("failed to start the server model worker")?;
-        warmup_model(&provider).context("server warmup request failed")?;
-        Ok(Self {
-            provider,
-            config,
-            observability,
-            model_path: model_path.to_path_buf(),
-            options,
-        })
+        let server = InProcessServer::start(&startup)?;
+        Ok(Self { server, options })
     }
 
     /// The options this engine was started with.
@@ -239,13 +204,13 @@ impl ServerEngine {
     /// The prefill chunk the scheduler runs with.
     #[must_use]
     pub fn prefill_chunk_size(&self) -> usize {
-        self.config.prefill_chunk_size
+        self.server.config().prefill_chunk_size
     }
 
     /// Whether the prompt cache store is live for this engine.
     #[must_use]
     pub fn prompt_cache_enabled(&self) -> bool {
-        self.provider.prompt_cache().is_some()
+        self.server.prompt_cache_enabled()
     }
 
     /// The decode storage the scheduler resolved: paged only when paged was
@@ -258,7 +223,13 @@ impl ServerEngine {
         match self.options.decode_storage {
             DecodeStorageBackend::Dense => DecodeStorageBackend::Dense,
             DecodeStorageBackend::Auto | DecodeStorageBackend::Paged => {
-                if self.observability.snapshot().decode_storage_fallbacks > 0 {
+                if self
+                    .server
+                    .observability()
+                    .snapshot()
+                    .decode_storage_fallbacks
+                    > 0
+                {
                     DecodeStorageBackend::Dense
                 } else {
                     DecodeStorageBackend::Paged
@@ -274,7 +245,7 @@ impl ServerEngine {
     #[must_use]
     pub fn history_boundary(&self, history_tokens: &[i32], prompt_tokens: &[i32]) -> Option<usize> {
         if !self.prompt_cache_enabled()
-            || !self.provider.supports_snapshot_reuse()
+            || !self.server.provider().supports_snapshot_reuse()
             || crate::server::prompt_cache::boundary_snapshot_disabled()
         {
             return None;
@@ -282,7 +253,7 @@ impl ServerEngine {
         crate::server::batch::scheduler::history_boundary_len(
             history_tokens,
             prompt_tokens,
-            self.config.prompt_cache.min_prefix_tokens,
+            self.server.config().prompt_cache.min_prefix_tokens,
         )
     }
 
@@ -292,7 +263,7 @@ impl ServerEngine {
             .prompt_cache
             .as_ref()
             .map(|key| PromptCacheRequestContext {
-                model_id: self.model_path.display().to_string(),
+                model_id: self.server.model_path().display().to_string(),
                 lora_id: None,
                 template_sig: PROBE_TEMPLATE_SIG.to_string(),
                 session_key: resolve_session_key(Some(&key.session), None).to_string(),
@@ -325,12 +296,12 @@ impl ServerEngine {
             image_soft_tokens: None,
             pre_rendered_prompt_tokens: Some(request.prompt_tokens.to_vec()),
         };
-        let live = self.config.live_settings();
-        let before = self.observability.snapshot();
+        let live = self.server.config().live_settings();
+        let before = self.server.observability().snapshot();
         let paged_before = paged_kernel_launches();
         let mut first_token_at: Option<Instant> = None;
         let start = Instant::now();
-        let result = self.provider.generate_with_live_with_prefill(
+        let result = self.server.provider().generate_with_live_with_prefill(
             String::new(),
             options,
             &live,
@@ -341,7 +312,7 @@ impl ServerEngine {
             },
         )?;
         let done = Instant::now();
-        let after = self.observability.snapshot();
+        let after = self.server.observability().snapshot();
         let paged_after = paged_kernel_launches();
         // A request that finished inside prefill (immediate EOS) never stamps a
         // first token; its whole wall time is then prefill.
@@ -376,18 +347,7 @@ impl ServerEngine {
     /// Ask the worker to exit and wait until it has released the model, so a
     /// following engine (or the CLI path) does not hold two copies.
     pub fn shutdown(self) -> Result<()> {
-        self.provider.shutdown_worker();
-        let observer = self.provider.worker_exit_observer();
-        if !observer.wait_timeout(WORKER_EXIT_TIMEOUT) {
-            anyhow::bail!(
-                "server model worker did not exit within {}s",
-                WORKER_EXIT_TIMEOUT.as_secs()
-            );
-        }
-        if let Some(message) = observer.panic_message() {
-            anyhow::bail!("server model worker panicked: {message}");
-        }
-        Ok(())
+        self.server.shutdown()
     }
 }
 

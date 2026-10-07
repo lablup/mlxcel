@@ -36,6 +36,9 @@ pub enum Side {
     /// (d) a direct `mlxcel_core::engine::Engine` run, B=1, dense storage,
     /// no scheduler (#2172).
     Engine,
+    /// (e) `mlxcel run -p`: the in-process server `run` starts (one slot,
+    /// prompt cache off) driven through its chat request path (#2173).
+    Run,
 }
 
 impl Side {
@@ -47,16 +50,19 @@ impl Side {
             Self::CacheMiss => "b:dense+pc:miss",
             Self::CacheHit => "b:dense+pc:hit",
             Self::Engine => "d:engine",
+            Self::Run => "e:run",
         }
     }
 }
 
 /// The pairs compared per case, in print order.
-const PAIRS: [(Side, Side); 6] = [
+const PAIRS: [(Side, Side); 8] = [
     (Side::Cli, Side::Dense),
     (Side::Cli, Side::Paged),
     (Side::Dense, Side::Paged),
     (Side::Dense, Side::Engine),
+    (Side::Dense, Side::Run),
+    (Side::Paged, Side::Run),
     (Side::Dense, Side::CacheMiss),
     (Side::CacheMiss, Side::CacheHit),
 ];
