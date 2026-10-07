@@ -1630,6 +1630,10 @@ bool sampling_rejection_routes(
     float min_p
 );
 
+// The vocabulary ceiling `sampling_rejection_routes` applies to top-k and
+// top-p together on this build (`REJECTION_JOINT_VOCAB_MAX`, #2157).
+int32_t sampling_rejection_joint_vocab_max();
+
 // Threads per threadgroup the rejection kernel launches with.
 int32_t sampling_rejection_threadgroup_size();
 

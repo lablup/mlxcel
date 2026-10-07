@@ -92,6 +92,8 @@
 //!     --example rejection_sampling_microbench
 //! Run (CUDA):
 //!   cargo run --release --features cuda --example rejection_sampling_microbench
+//! Run (ROCm):
+//!   cargo run --release --features rocm --example rejection_sampling_microbench
 //!
 //! Options:
 //!   --iters N     timed repetitions per point (default 200)
@@ -105,12 +107,13 @@ use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
 use mlxcel_core::{
-    MlxArray, UniquePtr, array_to_raw_bytes, async_eval_pair, custom_kernels_available, eval,
-    from_slice_f32, fused_sample, fused_sample_categorical, fused_sample_rejection,
-    gpu_backend_available, matmul, random_seed, rejection_cap_overflow_launches,
-    rejection_cap_overflow_rows, reset_sampling_dispatch, sampling_dispatch_drain_pending,
-    sampling_dispatch_recorded_report, sampling_rejection_available, sampling_rejection_max_rounds,
-    sampling_rejection_probe, sampling_rejection_routes, synchronize_default,
+    MlxArray, UniquePtr, array_to_raw_bytes, async_eval_pair, eval, from_slice_f32, fused_sample,
+    fused_sample_categorical, fused_sample_rejection, gpu_backend_available, matmul, random_seed,
+    rejection_cap_overflow_launches, rejection_cap_overflow_rows, reset_sampling_dispatch,
+    sampling_dispatch_drain_pending, sampling_dispatch_recorded_report,
+    sampling_rejection_available, sampling_rejection_backend_supported,
+    sampling_rejection_joint_vocab_max, sampling_rejection_max_rounds, sampling_rejection_probe,
+    sampling_rejection_routes, synchronize_default,
 };
 
 /// Target duration for the synthetic forward in the pipelined mode. Roughly a
@@ -121,7 +124,9 @@ const PIPELINE_FORWARD_TARGET_US: f64 = 2000.0;
 /// Side length of the synthetic forward's square matmul.
 const FORWARD_DIM: i32 = 1024;
 
-const VOCABS: [i32; 3] = [32_768, 65_536, 152_064];
+/// 128256 (Llama 3) and 151936 (Qwen3) were added for the ROCm joint-cap
+/// measurement (#2157); 152064 is Qwen 2.5's.
+const VOCABS: [i32; 5] = [32_768, 65_536, 128_256, 151_936, 152_064];
 const BATCHES: [i32; 3] = [1, 4, 8];
 const TEMPERATURE: f32 = 1.0;
 
@@ -355,7 +360,9 @@ fn main() {
     // port predicate alone, deliberately not `sampling_rejection_available()`,
     // because the whole point of the isolated arm is to measure the kernel with
     // routing switched off, and that predicate folds in the routing kill switch.
-    if !custom_kernels_available() {
+    // `custom_kernels_available()` is Metal-or-CUDA by definition, so it must
+    // not be the gate: the ROCm port (#2064) would never be measured (#2157).
+    if !sampling_rejection_backend_supported() {
         eprintln!(
             "This GPU backend has no rejection-sampling kernel port; there is nothing to measure."
         );
@@ -479,8 +486,9 @@ fn main() {
     );
     println!(
         "routing policy: the kernel replaces a sort, so it is routed only where the stock chain \
-         sorts (top-p active), and top-k + top-p only at vocab <= 32768. A routed=no row is a \
-         path production does not take."
+         sorts (top-p active), and top-k + top-p only at vocab <= {} on this build. A routed=no \
+         row is a path production does not take.",
+        sampling_rejection_joint_vocab_max()
     );
     println!(
         "read pipe_x, not iso_x: iso synchronizes around every iteration and is structurally \

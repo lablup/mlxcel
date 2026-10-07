@@ -5790,11 +5790,36 @@ static bool gumbel_sample_applies(
 
 // Vocabulary ceiling for routing top-k and top-p together.
 //
-// 32768 is measured (1.27x - 1.64x across three repetitions); 152064 is measured
-// as a loss (0.71x - 0.83x); 65536 has not been measured for this combination and
-// is therefore excluded rather than interpolated. Raise it only against a
-// measurement, never to widen coverage.
+// M1 Ultra (#901): 32768 is measured (1.27x - 1.64x across three repetitions);
+// 152064 is measured as a loss (0.71x - 0.83x); 65536 has not been measured for
+// this combination and is therefore excluded rather than interpolated.
+//
+// gfx1151 (#2157, docs/benchmark_results/rocm-rejection-joint-cap-gfx1151-2026-10-07.md):
+// re-measured with the cap lifted on a measurement build, so `fused_sample`
+// routed every cell. Medians of three runs, top-k 40 + top-p 0.9, pipe_x by
+// batch {1, 4, 8} (iso_x for batch 1 in brackets):
+//
+//   vocab  32768   1.00  1.17  1.44   [2.23]
+//   vocab  65536   0.98  1.18  1.64   [1.59]
+//   vocab 128256   0.98  1.28  1.80   [0.96]
+//   vocab 151936   0.90  1.36  1.90   [0.92]
+//   vocab 152064   0.93  1.29  2.02   [0.92]
+//
+// Batches 4 and 8 win at every vocabulary, but batch 1, the single-stream
+// decode shape, does not clear 1.0 above 32768, and at 128256 and up the kernel
+// is slower in isolation too, because the round count (4 to 6) times a
+// single-threadgroup sweep outgrows the chain's whole-GPU `argpartition`. By the
+// rule the issue set (the largest vocabulary where every batch cell at and below
+// it has pipe_x >= 1.0), the ROCm value is 32768, the same as Metal's, so the
+// cap stays one constant for every backend. A backend that measures a different
+// crossover gets a build-flag branch here (`#ifdef MLXCEL_BRIDGE_ROCM_BACKEND`,
+// as the SGY default in `mlx_cxx_kernels.cpp` does), never a runtime backend
+// comparison. Raise it only against a measurement, never to widen coverage.
 constexpr int32_t REJECTION_JOINT_VOCAB_MAX = 32768;
+
+int32_t sampling_rejection_joint_vocab_max() {
+    return REJECTION_JOINT_VOCAB_MAX;
+}
 
 // Pure routing policy: would `fused_sample` send this configuration to the
 // rejection kernel, ignoring backend support and the env switch? Exposed so a
@@ -5829,8 +5854,12 @@ static std::string rejection_not_routed_reason(
               "measured slower: top-k alone 0.31x-0.97x, min-p alone "
               "0.47x-0.88x";
     } else {
-        os << "top-k and top-p together measured 0.71x-0.83x above vocab "
-           << REJECTION_JOINT_VOCAB_MAX << ", and this row has vocab " << vocab;
+        os << "top-k and top-p together route only up to vocab "
+           << REJECTION_JOINT_VOCAB_MAX
+           << ", the largest vocabulary measured to win at every batch size "
+              "(M1 Ultra 0.71x-0.83x at 152064; gfx1151 0.90x-0.98x at batch 1 "
+              "from 65536 up), and this row has vocab "
+           << vocab;
     }
     os << "; top_k " << top_k << ", top_p " << top_p << ", min_p " << min_p
        << ")";

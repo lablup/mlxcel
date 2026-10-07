@@ -983,6 +983,12 @@ fn a_starved_round_cap_falls_back_and_the_event_is_counted() {
 /// | min-p alone | 0.47x - 0.88x at 152K | no |
 /// | top-k + top-p | 1.27x - 1.64x at 32K, 0.71x - 0.83x at 152K | only at vocab <= 32768 |
 ///
+/// gfx1151 re-measured the joint row (#2157, vocab {32K, 64K, 128256, 151936,
+/// 152064}): batches 4 and 8 win everywhere, but batch 1 does not clear 1.0
+/// above 32768 (pipelined 0.90x - 0.98x), so ROCm keeps the same cap. The cap is
+/// one constant on every build; [`the_joint_vocab_cap_is_the_measured_crossover`]
+/// pins it.
+///
 /// The kernel replaces a sort, so it wins exactly where the stock chain sorts,
 /// which is when top-p is active. The `rounds` column of the microbenchmark
 /// shows why the joint case degrades with vocabulary: top-p accepts in one or
@@ -1021,13 +1027,16 @@ fn the_routing_policy_matches_the_measured_matrix() {
     }
 
     // The joint case is capped at the vocabulary where it was measured to win.
-    // 65536 is excluded because it has not been measured for this combination,
-    // not because it was measured to lose.
+    // On M1 Ultra 65536 is excluded because it has not been measured for this
+    // combination; on gfx1151 it was measured and batch 1 did not win (#2157).
+    // 128256 is the Llama 3 vocabulary that prompted the ROCm re-measurement.
     assert!(sampling_rejection_routes(4096, 40, 0.9, 0.0));
     assert!(sampling_rejection_routes(32_768, 40, 0.9, 0.0));
     assert!(!sampling_rejection_routes(65_536, 40, 0.9, 0.0));
+    assert!(!sampling_rejection_routes(128_256, 40, 0.9, 0.0));
     assert!(!sampling_rejection_routes(152_064, 40, 0.9, 0.0));
     assert!(sampling_rejection_routes(32_768, 40, 0.9, 0.05));
+    assert!(!sampling_rejection_routes(128_256, 40, 0.95, 0.0));
     assert!(!sampling_rejection_routes(152_064, 40, 0.9, 0.05));
 
     // A top-k that cannot bind is not a top-k: it leaves the chain's cost
@@ -1036,6 +1045,37 @@ fn the_routing_policy_matches_the_measured_matrix() {
     // `top_k == 1` is the greedy spelling; `fused_sample` takes `argmax` long
     // before it reaches this policy, so the value here is not load-bearing.
     assert!(sampling_rejection_routes(152_064, 1, 0.9, 0.0));
+}
+
+/// The joint top-k + top-p cap is the measured crossover on this build, and the
+/// routing policy turns exactly at it (#2157).
+///
+/// Both measurements put the crossover at 32768: M1 Ultra (#901) and gfx1151,
+/// where batch 1 read 0.98x pipelined at 65536 and 0.96x isolated at 128256.
+/// The value is a compile-time constant, so a backend that measures a different
+/// crossover changes it by build flag; this test is where that build's value
+/// gets pinned. Pure host arithmetic, so it runs on a CPU-only build too.
+#[test]
+fn the_joint_vocab_cap_is_the_measured_crossover() {
+    const MEASURED_CAP: i32 = 32_768;
+    let cap = sampling_rejection_joint_vocab_max();
+    assert_eq!(
+        cap,
+        MEASURED_CAP,
+        "REJECTION_JOINT_VOCAB_MAX moved without a measurement (rocm build: {})",
+        cfg!(feature = "rocm")
+    );
+
+    // The policy reads the same constant the accessor reports: the cells on
+    // either side of it decide differently.
+    assert!(sampling_rejection_routes(cap, 40, 0.9, 0.0));
+    assert!(!sampling_rejection_routes(cap + 1, 40, 0.9, 0.0));
+    assert!(sampling_rejection_routes(cap, 40, 0.95, 0.02));
+    assert!(!sampling_rejection_routes(cap + 1, 40, 0.95, 0.02));
+    // Above the cap top-p alone still routes, and a top-k that cannot bind
+    // does not bring the cap in.
+    assert!(sampling_rejection_routes(cap + 1, 0, 0.9, 0.0));
+    assert!(sampling_rejection_routes(cap + 1, cap + 1, 0.9, 0.0));
 }
 
 /// Which path `fused_sample` took for one configuration, decided by comparing
