@@ -82,6 +82,7 @@ three depending on which script wrote it. They are now separate:
 | `baseline_version` | `bench_mlxlm.py` | the Python baseline, as `mlx-lm-<v>` or `mlx-vlm-<v>`; on a ROCm host `+mlx-<v>` follows, since MLX there is a source build whose version carries its commit |
 | `mlx_rocm_overlay_commit` | `bench_decode.sh`, ROCm rows only | the 8-character source commit of the MLX ROCm overlay (`src/lib/mlx-cpp/patches-rocm/UPSTREAM`); `mlx_commit` stays the upstream pin |
 | `hip_version` | `bench_decode.sh`, ROCm rows only | the HIP runtime version from `hipconfig --version`; the ROCm release is in the `hardware` string |
+| `decode_path` | `bench_decode.sh` | the decode loop the runner timed: `engine` (the batch-native engine's raw-completion client, the loop `mlxcel generate` and the server's B=1 row run, epic #2166 Phase 6) on every row since #2176; empty on earlier rows, which timed the retired `CxxGenerator` |
 
 Do not drop these when transcribing the speculative or batched-serving tables by
 hand.

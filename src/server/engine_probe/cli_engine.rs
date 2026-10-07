@@ -19,20 +19,19 @@
 //! raw-completion client of the engine over the borrowed model
 //! ([`mlxcel_core::engine::DirectEngine`], #2176), a one-token warmup, then
 //! the completion. [`bench_like_bench_decode`] is `mlxcel-bench-decode`'s
-//! warmup and measured pass, which time `CxxGenerator::generate_with_stats`
-//! until Phase 6's benchmark stage moves them onto the same client, so the
-//! numbers it returns are the ones `scripts/bench_decode.sh` records.
+//! warmup and measured pass on the same client, so the numbers it returns are
+//! the ones `scripts/bench_decode.sh` records.
 
 use std::collections::BTreeSet;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use mlxcel_core::cache::KVCacheMode;
-use mlxcel_core::engine::DirectEngine;
+use mlxcel_core::engine::{DirectEngine, DirectRequest};
 use mlxcel_core::generate::{GenerationStats, LanguageModel, SamplingConfig};
 use mlxcel_core::sampling::TokenBiasMap;
 
-use crate::{CxxGenerator, LoadedModel};
+use crate::LoadedModel;
 
 /// Generate through the `mlxcel generate` text path and return the tokens.
 pub fn generate_like_cli(
@@ -65,19 +64,25 @@ pub fn bench_like_bench_decode(
     warmup_tokens: usize,
     sampling: &SamplingConfig,
     kv_cache_mode: KVCacheMode,
-) -> (Vec<i32>, GenerationStats) {
+) -> Result<(Vec<i32>, GenerationStats)> {
+    let mut client = DirectEngine::with_default_chunk(model).with_kv_cache_mode(kv_cache_mode);
     if warmup_tokens > 0 {
-        let mut warm = CxxGenerator::new_with_kv_mode(model.num_layers(), kv_cache_mode);
-        let _ = warm.generate(model, prompt_tokens, warmup_tokens, sampling);
-        // Reset model-owned state so the measured pass starts clean while the
-        // process keeps its warm allocator and kernel caches.
-        warm.reset_with_model(model);
+        // The warmup's sequence is closed when it returns, so the measured
+        // pass starts clean while the process keeps its warm allocator and
+        // kernel caches.
+        client
+            .run(prompt_tokens, warmup_tokens, sampling)
+            .context("warmup generation failed")?;
         mlxcel_core::synchronize_default();
     }
-    let mut generator = CxxGenerator::new_with_kv_mode(model.num_layers(), kv_cache_mode);
-    let measured = generator.generate_with_stats(model, prompt_tokens, max_tokens, sampling);
+    let run = client
+        .generate(
+            &DirectRequest::text(prompt_tokens, max_tokens, sampling),
+            |_| true,
+        )
+        .context("measured generation failed")?;
     mlxcel_core::synchronize_default();
-    measured
+    Ok((run.tokens, run.stats))
 }
 
 /// Suppress every end-of-generation token on the CLI path the way
