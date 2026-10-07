@@ -55,8 +55,9 @@
 //!   exactly as `execute_batched_decode` dispatches it. For pool-backed caches
 //!   this reaches the #899 whole-batch pooled decode helper, including its
 //!   gather fallback below the fused dispatch floor; if that helper declines,
-//!   the model's `is_paged_backed()` guard still keeps the dense-pointer native
-//!   kernel away from placeholder dense buffers.
+//!   `cache::attend_batched` runs each row through `KVCache::attend` on its own
+//!   storage (ADR 0008), so no dense-pointer kernel ever sees a placeholder
+//!   dense buffer.
 //!
 //! # Running
 //!

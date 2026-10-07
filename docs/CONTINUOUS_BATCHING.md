@@ -383,6 +383,33 @@ of total work: at 1024 tokens of context per request the kernel runs 0.91x at
 batch 1 but 1.41x at batch 4 and 1.47x at batch 8, since a batched launch
 spreads the same chunk count over more requests and amortizes the merge pass.
 
+#### Where the dense-versus-paged choice lives
+
+The kernel is picked by the cache, not by the model forward
+([ADR 0008](adr/0008-kv-attention-dispatch-in-the-cache.md), issue #2171).
+`KVCache::attend` appends the step's K/V and runs attention for the storage
+behind that cache, and `cache::attend_batched` does the same for one layer of a
+batch. Qwen3, Llama 3 and the families that reuse their attention (Qwen2,
+Qwen2.5, Helium, the VLM text backbones) call these and no longer branch on
+`is_paged_backed()` or read the scheduler's `DecodeBatchContext`; DeepSeek V2's
+absorbed decode goes through `MlaLatentCache::attend`. Gemma 3, Llama 4 and the
+other model-owned families keep their own dense-pointer paged kernels for now.
+
+- The pooled launch keys on `caches[0].is_paged_backed()` at an unmasked
+  single-token step, so a caller with no `DecodeBatchContext` (the lookahead
+  prime, `forward_batched`) reaches the fused launch too. A batch that mixes
+  pool-backed and dense rows declines before it writes and runs each row through
+  `attend` on its own storage.
+- Batched decode over Turbo caches takes the dequant-first variants that
+  single-sequence decode already used, instead of a full dequant per step. The
+  attention is the same exact math in a different op order, so it is not
+  bit-identical to the old batched route.
+- The FP16 layers of a non-FP16 paged layout (the Boundary-V layers a Turbo mode
+  keeps at FP16, and the last layer under `--kv-skip-last-layer`) hold dense
+  caches. They now run a per-row dense update plus SDPA instead of the removed
+  `paged_decode_attention_dense_compat` route: the same attention without the
+  concat copy, but not bit-identical to it.
+
 #### Seeing which path ran
 
 The server announces the first occurrence of each distinct dispatch outcome at

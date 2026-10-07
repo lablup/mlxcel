@@ -314,6 +314,11 @@ impl BatchScheduler {
     /// Batched decode-storage context for the active backend. Shared by the
     /// synchronous batched decode and the lookahead prime so both drive the
     /// identical dense / native-paged execution path.
+    ///
+    /// Only the model-owned families (Gemma 3, Llama 4) still select a kernel
+    /// from this. `KVCache`-backed families decide inside
+    /// `KVCache::attend` from the storage the pool wired for the sequence
+    /// (#2171, ADR 0008), so for them the value is informational.
     pub(super) fn decode_batch_context(&self) -> DecodeBatchContext {
         match self.decode_storage_backend {
             DecodeStorageBackend::Auto | DecodeStorageBackend::Dense => {

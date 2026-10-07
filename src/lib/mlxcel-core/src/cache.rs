@@ -75,6 +75,9 @@
 //! path and is intended as an opt-in performance comparison, not the default
 //! compressed-only memory target.
 
+/// One attention entry per cache: storage decides the kernel (issue #2171,
+/// ADR 0008).
+mod attend;
 pub mod batch_quant;
 mod decode_undo;
 #[cfg(test)]
@@ -117,6 +120,7 @@ pub mod turbo;
 #[path = "cache/turbo_tests.rs"]
 mod turbo_tests;
 
+pub use attend::attend_batched;
 pub use batch_quant::{
     BatchKvQuantConfig, BatchQuantizedKVCache, BatchTurboQuantKVCache, DEFAULT_KV_GROUP_SIZE,
     KvQuantScheme,
@@ -690,11 +694,11 @@ impl KVCache {
     /// Whether this cache writes/reads through a shared [`PagedBlockPool`]
     /// (built via [`Self::new_paged`]) instead of its own dense buffers.
     ///
-    /// The batched-decode dispatch in each transformer model uses this to skip
-    /// the native dense-pointer paged kernel (which reads `keys`/`values`, both
-    /// `None` here) and fall through to the per-sequence `update_and_fetch`
-    /// loop, whose pool intercept transparently writes to the pool and gathers
-    /// the visible window. See the model `forward_split_attention` dispatch.
+    /// Attention dispatch reads this inside [`Self::attend`] and
+    /// [`attend_batched`] (#2171, ADR 0008); model forwards no longer do. The
+    /// remaining readers are storage bookkeeping: `CachePool` detach, adopt
+    /// and length sync, the MLA latent-cache guard, and the disaggregated
+    /// handoff.
     #[inline]
     pub fn is_paged_backed(&self) -> bool {
         self.paged_backing.is_some()

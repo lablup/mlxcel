@@ -36,7 +36,10 @@ src/
 
 - `src/lib/mlxcel-core/src/lib.rs` — `cxx::bridge` definitions and crate exports.
 - `src/lib/mlxcel-core/src/cache.rs` and `src/lib/mlxcel-core/src/cache/` — FP16/INT8/TurboQuant KV cache variants,
-  paged cache layout, detach/adopt helpers, and cache tests.
+  paged cache layout, detach/adopt helpers, and cache tests. `cache/attend.rs`
+  holds `KVCache::attend` and `cache::attend_batched`, the one attention entry
+  that picks the dense or paged kernel from the storage behind the cache
+  ([ADR 0008](adr/0008-kv-attention-dispatch-in-the-cache.md)).
 - `src/lib/mlxcel-core/src/ops.rs`, `src/lib/mlxcel-core/src/dtype.rs`, `src/lib/mlxcel-core/src/streams.rs` — wrappers around common MLX
   operations and runtime concepts.
 - `src/lib/mlxcel-core/src/sampling.rs` — penalties and token sampling shared by CLI/server paths.
