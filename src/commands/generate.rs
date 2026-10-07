@@ -54,6 +54,7 @@ use mlxcel_core::generation_policy::{
 };
 use mlxcel_core::lang_analyzer::LangBiasConfig;
 use mlxcel_core::sampling::{TokenBiasMap, sample_token_optimized};
+use mlxcel_core::sampling_token_bias::compose_token_bias;
 
 use mlxcel::cli::speculative_args::resolve_draft_block_size_for_target;
 use mlxcel::cli::turbo_args::{resolve_and_announce_kv_cache_mode, resolve_kv_cache_mode};
@@ -1721,15 +1722,22 @@ pub(super) fn run_generation_mode(
     sampling_config: &SamplingConfig,
     vlm_embeddings: Option<&InputEmbeddings>,
     kv_cache_mode: KVCacheMode,
-    mut token_bias: TokenBiasMap,
+    language_bias: TokenBiasMap,
 ) -> Result<(Vec<i32>, GenerationStats)> {
-    // issue #350: mask this model's reserved multimodal placeholder tokens
-    // (audio / image / video span markers) to -inf in the output logits so
-    // they can never leak into generated text. Merged into the token-bias map
-    // here, before any generator is built, so it reaches every sub-path below
-    // (speculative, VLM-embedding, and standard). No-op for non-multimodal
-    // models whose suppressed set is empty.
-    token_bias.suppress_tokens(&model.output_suppressed_token_ids());
+    // The request's effective token bias, composed once by the rule the server
+    // uses too (#2169, `compose_token_bias`): `mlxcel generate` has no
+    // per-request `logit_bias`, so the `--lang-bias` map applies, and the
+    // model's reserved multimodal placeholder tokens (issue #350: audio /
+    // image / video span markers) are forced to -inf on top so they can never
+    // leak into generated text. Composed here, before any generator is built,
+    // so it reaches every sub-path below (speculative, VLM-embedding, and
+    // standard). An empty map for a non-multimodal model without
+    // `--lang-bias`.
+    let token_bias = compose_token_bias(
+        TokenBiasMap::new(),
+        &language_bias,
+        &model.output_suppressed_token_ids(),
+    );
 
     let output = if args.prompt_lookup.prompt_lookup {
         run_prompt_lookup(
@@ -3046,10 +3054,15 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         // `sample_token_optimized` directly and does not go through the
         // CxxGenerator/SpeculativeGenerator wrappers. We inject the token-bias
         // on the composed `SamplingConfig` before the pipeline is started.
+        // The shared composition (#2169): the config's own bias (none on the
+        // CLI) wins, else the `--lang-bias` map. No output suppression here:
+        // the pipeline path loads no `LoadedModel` to ask for its reserved ids.
         let mut pipeline_sampling = sampling_config.clone();
-        if !token_bias.is_empty() && pipeline_sampling.token_bias.is_empty() {
-            pipeline_sampling.token_bias = token_bias.clone();
-        }
+        pipeline_sampling.token_bias = compose_token_bias(
+            std::mem::take(&mut pipeline_sampling.token_bias),
+            &token_bias,
+            &[],
+        );
         let num_layers = resolve_cli_pipeline_num_layers(&args.model.model)?;
         print_generation_preamble(&user_prompt)?;
         generate_pipeline_text(

@@ -37,9 +37,8 @@ use crate::hardware;
 use crate::layers::KVCache;
 use crate::loop_detection::LoopDetectionConfig;
 use crate::prefill_plan::{PrefillCaps, PrefillInput, PrefillPlan};
-use crate::sampling::{
-    SamplerState, TokenBiasMap, sample_token_optimized, sample_token_optimized_with_state,
-};
+use crate::sampling::{TokenBiasMap, sample_token_optimized};
+use crate::sampling_row_step::RowSampler;
 use crate::streams::{install_thread_local_default_stream, shared_thread_local_generation_stream};
 use crate::utils::create_padded_prefill_mask;
 use cxx::UniquePtr;
@@ -458,15 +457,17 @@ pub(crate) fn resolve_kv_cache_layer_modes(mode: KVCacheMode, n_layers: usize) -
 /// Build the sample for step t+1 of a pipelined decode loop from its
 /// `next_logits`, where `y` is the still-unread sample of step t.
 ///
-/// A sampler that reads the emitted history (`needs_history`: repetition,
-/// frequency or presence penalties, DRY) must see token t when it samples
-/// t+1, as mlx-lm's `generate_step` and llama.cpp's `common_sampler_accept`
-/// do (#2090). On that path this submits the step t+1 forward first, so the
-/// device keeps working through the host read, then reads `y`, records it in
-/// `token_history`, and only then builds the sample. It returns the token it
-/// read, so the loop reuses it rather than reading or recording it twice. A
-/// history-free sampler keeps sampling straight from the lazy graph, in the
-/// same order as before, and returns `None`.
+/// A sampler that reads the emitted history
+/// ([`RowSampler::needs_host_token_before_sample`]: repetition, frequency or
+/// presence penalties, DRY) must see token t when it samples t+1, as mlx-lm's
+/// `generate_step` and llama.cpp's `common_sampler_accept` do (#2090). On that
+/// path this submits the step t+1 forward first, so the device keeps working
+/// through the host read, then reads `y`, records it in `token_history`, and
+/// only then builds the sample. It returns the token it read, so the loop
+/// reuses it rather than reading or recording it twice. A history-free sampler
+/// keeps sampling straight from the lazy graph, in the same order as before,
+/// and returns `None`; a feedback-only sampler (mirostat, adaptive-p) is one of
+/// those, and still carries its state from step to step inside `sampler`.
 ///
 /// Diagnostics on the history path see the split: the decode-graph hooks
 /// (`MLXCEL_EXPORT_DECODE_DOT`, `MLXCEL_TRACE_ASTYPE`, `MLXCEL_CAPTURE_DECODE`)
@@ -484,13 +485,14 @@ fn sample_next_step(
     next_logits: &MlxArray,
     y: &MlxArray,
     sampling: &SamplingConfig,
-    needs_history: bool,
+    sampler: &mut RowSampler,
     token_history: &mut Vec<i32>,
-    sampler_state: &mut Option<SamplerState>,
 ) -> ((UniquePtr<MlxArray>, UniquePtr<MlxArray>), Option<i32>) {
-    if !needs_history {
+    if !sampler.needs_host_token_before_sample() {
         return (
-            sample_token_optimized(next_logits, sampling, token_history),
+            sampler
+                .draw_and_accept(next_logits, sampling, token_history)
+                .into_token_and_logits(),
             None,
         );
     }
@@ -498,7 +500,9 @@ fn sample_next_step(
     let current = ffi::item_i32(y);
     token_history.push(current);
     (
-        sample_token_optimized_with_state(next_logits, sampling, token_history, sampler_state),
+        sampler
+            .draw_and_accept(next_logits, sampling, token_history)
+            .into_token_and_logits(),
         Some(current),
     )
 }
@@ -1851,6 +1855,15 @@ impl CxxGenerator {
     /// Compose the effective sampling config from the cached `token_bias` and
     /// the caller's [`SamplingConfig`].
     ///
+    /// This selects between two already-composed maps; it does not merge
+    /// sources. The cached map is the request's effective bias, built once
+    /// per request by [`crate::sampling_token_bias::compose_token_bias`]
+    /// (`run_generation_mode` and the chat REPL pass its result through
+    /// [`Self::with_token_bias`] or the inference session). A non-empty bias
+    /// on the per-call config comes from a caller that composed its own map
+    /// (the parity harness's `ignore_eos` arm, for one), and it replaces the
+    /// cached map, as it always has.
+    ///
     /// # Precedence and bit-exact baseline
     /// - If the caller already set a non-empty `sampling.token_bias`, the
     ///   caller's bias wins (returned borrow — zero allocation).
@@ -2054,20 +2067,17 @@ impl CxxGenerator {
         ffi::clear_memory_cache();
 
         // Build token history from prompt for penalty-based sampling
-        let needs_history = sampling.needs_token_history();
+        // The one per-row sampling step (#2169): it owns this generation's
+        // sampler state, feedback samplers (mirostat, adaptive-p) included,
+        // and says when the previous token must reach the history first.
+        let mut sampler = RowSampler::new(sampling);
+        let needs_history = sampler.needs_host_token_before_sample();
         let mut token_history = initial_token_history(prompt_tokens, needs_history);
-        // Per-sequence incremental penalty state, created lazily only when a
-        // repetition/frequency/presence penalty is active (see
-        // `sample_token_optimized_with_state`). Stays `None` on the no-penalty
-        // path, so that path keeps calling the original sampler unchanged.
-        let mut sampler_state: Option<SamplerState> = None;
 
         // Sample first token (logits already sliced to last real position when padded)
-        let (mut y, mut _logprobs) = if needs_history {
-            sample_token_optimized_with_state(&logits, sampling, &token_history, &mut sampler_state)
-        } else {
-            sample_token_optimized(&logits, sampling, &token_history)
-        };
+        let (mut y, mut _logprobs) = sampler
+            .draw_and_accept(&logits, sampling, &token_history)
+            .into_token_and_logits();
         ffi::async_eval(&y);
         self.prepare_turbo4_delegated_before_decode(max_tokens);
         // Prefill is encoded by now; raise the command-buffer input budget for
@@ -2129,14 +2139,8 @@ impl CxxGenerator {
                 } else {
                     None
                 };
-                let ((next_tok, next_log), read) = sample_next_step(
-                    &next_logits,
-                    &y,
-                    sampling,
-                    needs_history,
-                    &mut token_history,
-                    &mut sampler_state,
-                );
+                let ((next_tok, next_log), read) =
+                    sample_next_step(&next_logits, &y, sampling, &mut sampler, &mut token_history);
                 current_token = read;
                 if let Some(start) = detail_start {
                     sample_ns_total += start.elapsed().as_nanos();
@@ -2352,19 +2356,16 @@ impl CxxGenerator {
 
         ffi::clear_memory_cache();
 
-        let needs_history = sampling.needs_token_history();
+        // The one per-row sampling step (#2169): it owns this generation's
+        // sampler state, feedback samplers (mirostat, adaptive-p) included,
+        // and says when the previous token must reach the history first.
+        let mut sampler = RowSampler::new(sampling);
+        let needs_history = sampler.needs_host_token_before_sample();
         let mut token_history = initial_token_history(prompt_tokens, needs_history);
-        // Per-sequence incremental penalty state, created lazily only when a
-        // repetition/frequency/presence penalty is active (see
-        // `sample_token_optimized_with_state`). Stays `None` on the no-penalty
-        // path, so that path keeps calling the original sampler unchanged.
-        let mut sampler_state: Option<SamplerState> = None;
 
-        let (mut y, mut _logprobs) = if needs_history {
-            sample_token_optimized_with_state(&logits, sampling, &token_history, &mut sampler_state)
-        } else {
-            sample_token_optimized(&logits, sampling, &token_history)
-        };
+        let (mut y, mut _logprobs) = sampler
+            .draw_and_accept(&logits, sampling, &token_history)
+            .into_token_and_logits();
         ffi::async_eval(&y);
         self.prepare_turbo4_delegated_before_decode(max_tokens);
         // Prefill is encoded by now; raise the command-buffer input budget for
@@ -2379,14 +2380,8 @@ impl CxxGenerator {
             let (next_y, next_logprobs) = if n + 1 < max_tokens {
                 let next_input = ffi::reshape_token_for_forward(&y);
                 let next_logits = model.forward(&next_input, &mut self.caches, None);
-                let ((next_tok, next_log), read) = sample_next_step(
-                    &next_logits,
-                    &y,
-                    sampling,
-                    needs_history,
-                    &mut token_history,
-                    &mut sampler_state,
-                );
+                let ((next_tok, next_log), read) =
+                    sample_next_step(&next_logits, &y, sampling, &mut sampler, &mut token_history);
                 current_token = read;
                 ffi::async_eval_pair(&next_tok, &next_log);
                 (Some(next_tok), Some(next_log))
@@ -2484,13 +2479,12 @@ impl CxxGenerator {
         install_thread_local_default_stream(self.generation_stream.as_ref());
 
         let eos_tokens = merged_eos_token_ids(model.eos_token_ids(), &sampling.stop_token_ids);
-        let needs_history = sampling.needs_token_history();
+        // The one per-row sampling step (#2169): it owns this generation's
+        // sampler state, feedback samplers (mirostat, adaptive-p) included,
+        // and says when the previous token must reach the history first.
+        let mut sampler = RowSampler::new(sampling);
+        let needs_history = sampler.needs_host_token_before_sample();
         let mut token_history = initial_token_history(prompt_tokens, needs_history);
-        // Per-sequence incremental penalty state, created lazily only when a
-        // repetition/frequency/presence penalty is active (see
-        // `sample_token_optimized_with_state`). Stays `None` on the no-penalty
-        // path, so that path keeps calling the original sampler unchanged.
-        let mut sampler_state: Option<SamplerState> = None;
 
         // Prefill with embeddings, under the same plan as
         // generate_streaming_with_embeddings.
@@ -2507,11 +2501,9 @@ impl CxxGenerator {
         model.after_prefill();
         let ttft_build_ns = ttft_build_start.map_or(0, |t| t.elapsed().as_nanos());
         let ttft_sample_start = profile_ttft.then(Instant::now);
-        let (mut y, mut _logprobs) = if needs_history {
-            sample_token_optimized_with_state(&logits, sampling, &token_history, &mut sampler_state)
-        } else {
-            sample_token_optimized(&logits, sampling, &token_history)
-        };
+        let (mut y, mut _logprobs) = sampler
+            .draw_and_accept(&logits, sampling, &token_history)
+            .into_token_and_logits();
         let ttft_sample_ns = ttft_sample_start.map_or(0, |t| t.elapsed().as_nanos());
         let ttft_eval_start = profile_ttft.then(Instant::now);
         ffi::eval(&y);
@@ -2576,14 +2568,8 @@ impl CxxGenerator {
                 }
 
                 let detail_start = profile_pipeline_detail.then(Instant::now);
-                let ((next_tok, _next_log), read) = sample_next_step(
-                    &next_logits,
-                    &y,
-                    sampling,
-                    needs_history,
-                    &mut token_history,
-                    &mut sampler_state,
-                );
+                let ((next_tok, _next_log), read) =
+                    sample_next_step(&next_logits, &y, sampling, &mut sampler, &mut token_history);
                 current_token = read;
                 if let Some(start) = detail_start {
                     sample_ns_total += start.elapsed().as_nanos();
@@ -2723,13 +2709,12 @@ impl CxxGenerator {
         let eos_tokens = merged_eos_token_ids(model.eos_token_ids(), &sampling.stop_token_ids);
 
         // Build token history from prompt for penalty-based sampling
-        let needs_history = sampling.needs_token_history();
+        // The one per-row sampling step (#2169): it owns this generation's
+        // sampler state, feedback samplers (mirostat, adaptive-p) included,
+        // and says when the previous token must reach the history first.
+        let mut sampler = RowSampler::new(sampling);
+        let needs_history = sampler.needs_host_token_before_sample();
         let mut token_history = initial_token_history(prompt_tokens, needs_history);
-        // Per-sequence incremental penalty state, created lazily only when a
-        // repetition/frequency/presence penalty is active (see
-        // `sample_token_optimized_with_state`). Stays `None` on the no-penalty
-        // path, so that path keeps calling the original sampler unchanged.
-        let mut sampler_state: Option<SamplerState> = None;
 
         // PREFILL PHASE: the same plan as `generate_streaming` (chunked, tile
         // padded on M5+ hardware, or one forward).
@@ -2742,11 +2727,9 @@ impl CxxGenerator {
 
         // Sample first token and force sync to measure prefill accurately
         let ttft_sample_start = profile_ttft.then(Instant::now);
-        let (mut y, mut _logprobs) = if needs_history {
-            sample_token_optimized_with_state(&logits, sampling, &token_history, &mut sampler_state)
-        } else {
-            sample_token_optimized(&logits, sampling, &token_history)
-        };
+        let (mut y, mut _logprobs) = sampler
+            .draw_and_accept(&logits, sampling, &token_history)
+            .into_token_and_logits();
         let ttft_sample_ns = ttft_sample_start.map_or(0, |t| t.elapsed().as_nanos());
         let ttft_eval_start = profile_ttft.then(Instant::now);
         ffi::eval(&y);
@@ -2811,14 +2794,8 @@ impl CxxGenerator {
                 }
 
                 let detail_start = profile_pipeline_detail.then(Instant::now);
-                let ((next_tok, _next_log), read) = sample_next_step(
-                    &next_logits,
-                    &y,
-                    sampling,
-                    needs_history,
-                    &mut token_history,
-                    &mut sampler_state,
-                );
+                let ((next_tok, _next_log), read) =
+                    sample_next_step(&next_logits, &y, sampling, &mut sampler, &mut token_history);
                 current_token = read;
                 if let Some(start) = detail_start {
                     sample_ns_total += start.elapsed().as_nanos();

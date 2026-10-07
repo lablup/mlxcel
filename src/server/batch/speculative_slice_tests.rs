@@ -290,7 +290,7 @@ fn make_slice_sequence_with_id(
         prefill_start: Some(Instant::now()),
         first_token_time: None,
         token_history: Vec::new(),
-        sampler_state: None,
+        sampler: Default::default(),
         merged_eos: Vec::new(),
         thinking: ThinkingState::disabled(),
         structured: None,

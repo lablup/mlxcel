@@ -45,9 +45,10 @@ use mlxcel_core::generation_policy::{
 use mlxcel_core::sampling::{
     FusedSampleParams, LogprobSource, TokenBiasMap, apply_row_filters, apply_token_bias_rows,
     batched_fused_sample_with_bias, compute_logprobs, compute_post_sampling_probs,
-    row_supports_fused_batch_except_bias, sample_token_optimized,
-    sample_token_optimized_with_state, sample_token_with_state_and_distribution,
+    row_supports_fused_batch_except_bias,
 };
+use mlxcel_core::sampling_row_step::{LogitMask, RowSampler, TokenDraw};
+use mlxcel_core::sampling_token_bias::compose_token_bias;
 use mlxcel_core::streams::{
     install_thread_local_default_stream, new_thread_local_generation_stream,
 };
@@ -100,6 +101,7 @@ use super::tick_policy::{
 };
 
 use pad_trim::{should_align_prefill, trim_padded_prefill};
+use run_loop::StructuredMask;
 
 pub(crate) const DEFAULT_PAGED_BLOCK_SIZE: usize = 32;
 

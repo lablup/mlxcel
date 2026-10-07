@@ -14,6 +14,27 @@
 
 use super::*;
 
+/// A sequence's structured-output constraint as the mask hook of its
+/// per-row sampling step ([`RowSampler::draw`], #2169).
+///
+/// Used by: `BatchScheduler::execute_batched_decode`,
+/// `BatchScheduler::decode_single_step`, `BatchScheduler::finish_prefill`
+pub(super) struct StructuredMask<'a>(pub(super) &'a SharedStructuredConstraint);
+
+/// The shared, lockable structured-output constraint a sequence carries.
+type SharedStructuredConstraint =
+    std::sync::Arc<std::sync::Mutex<crate::server::structured::StructuredOutputConstraint>>;
+
+impl LogitMask for StructuredMask<'_> {
+    fn apply(
+        &mut self,
+        logits: UniquePtr<mlxcel_core::MlxArray>,
+        vocab_size: usize,
+    ) -> Result<UniquePtr<mlxcel_core::MlxArray>, String> {
+        BatchScheduler::apply_structured_mask(self.0, logits, vocab_size)
+    }
+}
+
 impl BatchScheduler {
     /// Apply thinking-budget enforcement to a freshly sampled
     /// token for a single sequence.

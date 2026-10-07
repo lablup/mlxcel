@@ -192,7 +192,7 @@ fn make_sequence(
         prefill_start: Some(Instant::now()),
         first_token_time: None,
         token_history: Vec::new(),
-        sampler_state: None,
+        sampler: Default::default(),
         merged_eos: vec![EOS],
         thinking: crate::server::thinking_budget::ThinkingState::disabled(),
         structured: None,
