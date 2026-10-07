@@ -8,6 +8,7 @@
 #include "mlx/backend/rocm/gemms/gemv.h"
 #include "mlx/backend/rocm/gemms/hipblaslt_gemm.h"
 #include "mlx/backend/rocm/gemms/naive_gemm.h"
+#include "mlx/backend/rocm/gemms/rocblas_gemm.h"
 #include "mlx/backend/rocm/kernel_utils.hpp"
 #include "mlx/backend/rocm/utils.h"
 #include "mlx/primitives.h"
@@ -177,48 +178,6 @@ std::pair<bool, int64_t> get_uniform_batch_stride(
   return {true, batch_strides.back()};
 }
 
-int gemm_solution_index_f32(bool batched) {
-  static const int single_index = rocm::env_int_or_default(
-      "MLX_ROCM_GEMM_F32_SOLUTION_INDEX",
-      0,
-      0,
-      std::numeric_limits<int>::max(),
-      "a non-negative integer");
-  // -1: use the non-batched index.
-  static const int batched_index = rocm::env_int_or_default(
-      "MLX_ROCM_GEMM_F32_BATCHED_SOLUTION_INDEX",
-      -1,
-      0,
-      std::numeric_limits<int>::max(),
-      "a non-negative integer",
-      "MLX_ROCM_GEMM_F32_SOLUTION_INDEX");
-  if (!batched) {
-    return single_index;
-  }
-  return batched_index >= 0 ? batched_index : single_index;
-}
-
-int gemm_solution_index_bf16(bool batched) {
-  static const int single_index = rocm::env_int_or_default(
-      "MLX_ROCM_GEMM_BF16_SOLUTION_INDEX",
-      0,
-      0,
-      std::numeric_limits<int>::max(),
-      "a non-negative integer");
-  // -1: use the non-batched index.
-  static const int batched_index = rocm::env_int_or_default(
-      "MLX_ROCM_GEMM_BF16_BATCHED_SOLUTION_INDEX",
-      -1,
-      0,
-      std::numeric_limits<int>::max(),
-      "a non-negative integer",
-      "MLX_ROCM_GEMM_BF16_SOLUTION_INDEX");
-  if (!batched) {
-    return single_index;
-  }
-  return batched_index >= 0 ? batched_index : single_index;
-}
-
 void gemm_rocblas(
     rocm::CommandEncoder& encoder,
     int M,
@@ -286,7 +245,7 @@ void gemm_rocblas(
       case float32: {
         float alpha_f = alpha;
         float beta_f = beta;
-        int solution_index = gemm_solution_index_f32(false);
+        int solution_index = rocm::gemm_solution_index_f32(false);
         static std::atomic<bool> solution_valid{true};
 
         if (solution_index > 0 &&
@@ -402,7 +361,7 @@ void gemm_rocblas(
       case bfloat16: {
         float alpha_f = alpha;
         float beta_f = beta;
-        int solution_index = gemm_solution_index_bf16(false);
+        int solution_index = rocm::gemm_solution_index_bf16(false);
         static std::atomic<bool> solution_valid{true};
 
         rocblas_gemm_algo algo = rocblas_gemm_algo_standard;
@@ -544,7 +503,7 @@ void gemm_strided_batched_rocblas(
       case float32: {
         float alpha_f = alpha;
         float beta_f = beta;
-        int solution_index = gemm_solution_index_f32(true);
+        int solution_index = rocm::gemm_solution_index_f32(true);
         static std::atomic<bool> solution_valid{true};
 
         if (solution_index > 0 &&
@@ -680,7 +639,7 @@ void gemm_strided_batched_rocblas(
       case bfloat16: {
         float alpha_f = alpha;
         float beta_f = beta;
-        int solution_index = gemm_solution_index_bf16(true);
+        int solution_index = rocm::gemm_solution_index_bf16(true);
         static std::atomic<bool> solution_valid{true};
 
         rocblas_gemm_algo algo = rocblas_gemm_algo_standard;

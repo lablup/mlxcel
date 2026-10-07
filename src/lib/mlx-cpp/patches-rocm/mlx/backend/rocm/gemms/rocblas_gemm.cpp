@@ -2,7 +2,6 @@
 
 #include "mlx/backend/rocm/gemms/rocblas_gemm.h"
 #include "mlx/backend/rocm/device.h"
-#include "mlx/backend/rocm/env_int.h"
 #include "mlx/backend/rocm/gemms/naive_gemm.h"
 #include "mlx/backend/rocm/kernel_utils.hpp"
 #include "mlx/types/half_types.h"
@@ -14,7 +13,6 @@
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
-#include <limits>
 
 namespace mlx::core::rocm {
 
@@ -35,48 +33,6 @@ rocblas_datatype to_rocblas_dtype(Dtype dtype) {
     default:
       throw std::runtime_error("Unsupported dtype for rocBLAS GEMM");
   }
-}
-
-int gemm_solution_index_f32(bool batched) {
-  static const int single_index = env_int_or_default(
-      "MLX_ROCM_GEMM_F32_SOLUTION_INDEX",
-      0,
-      0,
-      std::numeric_limits<int>::max(),
-      "a non-negative integer");
-  // -1: use the non-batched index.
-  static const int batched_index = env_int_or_default(
-      "MLX_ROCM_GEMM_F32_BATCHED_SOLUTION_INDEX",
-      -1,
-      0,
-      std::numeric_limits<int>::max(),
-      "a non-negative integer",
-      "MLX_ROCM_GEMM_F32_SOLUTION_INDEX");
-  if (!batched) {
-    return single_index;
-  }
-  return batched_index >= 0 ? batched_index : single_index;
-}
-
-int gemm_solution_index_bf16(bool batched) {
-  static const int single_index = env_int_or_default(
-      "MLX_ROCM_GEMM_BF16_SOLUTION_INDEX",
-      0,
-      0,
-      std::numeric_limits<int>::max(),
-      "a non-negative integer");
-  // -1: use the non-batched index.
-  static const int batched_index = env_int_or_default(
-      "MLX_ROCM_GEMM_BF16_BATCHED_SOLUTION_INDEX",
-      -1,
-      0,
-      std::numeric_limits<int>::max(),
-      "a non-negative integer",
-      "MLX_ROCM_GEMM_BF16_SOLUTION_INDEX");
-  if (!batched) {
-    return single_index;
-  }
-  return batched_index >= 0 ? batched_index : single_index;
 }
 
 } // namespace

@@ -39,12 +39,13 @@
 //! is set for the ceiling and cache cases so the dequantize route is eligible
 //! at every row count and only the ceiling decides the route.
 //!
-//! With the fix reverted (the four overlay sources restored from main,
-//! measured on gfx1151) 8 of the 14 cases fail: `MLX_ROCM_WMMA_QMM_MAX_M=4294967297`
-//! reports the dense route, and none of the eight invalid values
-//! (`4294967297`, `2147483648`, `-1`, `0` and `12abc` for the ceiling,
-//! `4294967304` for the cache, `abc` and `33` for the tile width) prints a
-//! warning.
+//! With the fix reverted (the overlay sources restored from main, measured on
+//! gfx1151) 9 of the 15 cases fail: `MLX_ROCM_WMMA_QMM_MAX_M=4294967297`
+//! reports the dense route, and none of the nine invalid values
+//! (`4294967297`, `2147483648`, `-1`, `0` and `12abc` for the ceiling, `0`
+//! for the threshold, `4294967304` for the cache, `abc` and `33` for the tile
+//! width) prints a warning. With only the threshold read made per call again,
+//! the threshold case fails with one warning per GEMM.
 //!
 //! Skips on any other backend. Run on a ROCm host with:
 //!
@@ -139,6 +140,20 @@ fn cases() -> Vec<Case> {
     for invalid in ["4294967297", "2147483648", "-1", "0", "12abc"] {
         cases.push(max_m(Some(invalid), true, false));
     }
+
+    // The threshold itself. Every probe and GEMM in the child reads it, so
+    // exactly one line also checks that it is read once, not per call.
+    cases.push(Case {
+        env: vec![(THRESHOLD, "0")],
+        watched: THRESHOLD,
+        warning: warning(
+            THRESHOLD,
+            "0",
+            "a positive integer",
+            "the built-in crossover",
+        ),
+        route_dense: Some(false),
+    });
 
     // The dequantized-weight cache: 0 is the documented off switch.
     cases.push(Case {
