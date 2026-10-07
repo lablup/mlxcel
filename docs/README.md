@@ -40,7 +40,7 @@ Current GitHub-facing docs:
 
 ## mlxcelverse maintenance
 
-`mlxcelverse/rocm-overlay.md` is the procedure for keeping the ROCm overlay in step with the MLX pin and with the NripeshN/mlx fork it is vendored from, including the `scripts/mlxcelverse/` tools and the `make verify-rocm-overlay` gate. `mlxcelverse/upstream/` holds the overlay's fork-side fixes prepared as pull requests for NripeshN/mlx, submitted by hand; its README is the index.
+`mlxcelverse/rocm-overlay.md` is the procedure for keeping the ROCm overlay in step with the MLX pin and with the NripeshN/mlx fork it is vendored from, including the `scripts/mlxcelverse/` tools and the `make verify-rocm-overlay` gate. `mlxcelverse/upstream/` holds fork-side fix packages kept as historical reference, not submitted: fixes to the fork stay in the overlay and no PRs go to NripeshN/mlx; its README is the index.
 
 ## Architecture Decision Records
 

@@ -26,6 +26,6 @@ The full procedure, and the one for syncing to a newer fork commit, is [docs/mlx
 
 ## On a fork sync
 
-`scripts/mlxcelverse/sync_from_fork.sh <fork-commit>` carries the local fixes onto a newer fork commit by 3-way merging each file, keeps `hadamard.hip` and `fft.hip`, and updates `UPSTREAM`; `sync_from_fork.sh --check` against the recorded commit reproduces this directory byte for byte. Fixes that apply to the fork are prepared as pull requests under [docs/mlxcelverse/upstream/](../../../../docs/mlxcelverse/upstream/README.md) and submitted by hand.
+`scripts/mlxcelverse/sync_from_fork.sh <fork-commit>` carries the local fixes onto a newer fork commit by 3-way merging each file, keeps `hadamard.hip` and `fft.hip`, and updates `UPSTREAM`; `sync_from_fork.sh --check` against the recorded commit reproduces this directory byte for byte. Fixes that apply to the fork stay in this overlay and are not submitted to it; [docs/mlxcelverse/upstream/](../../../../docs/mlxcelverse/upstream/README.md) holds patch packages made for some of them, kept as historical reference.
 
 Removing a file from `mlx/backend/rocm/` here also removes it from a cached MLX checkout on the next configure. Dropping one of the 15 core overlays does not restore the upstream file in a cached checkout, because the cache is keyed only by the pin; clear the `mlxcel-core` build directory (`cargo clean -p mlxcel-core`) after doing that.

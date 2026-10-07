@@ -1,6 +1,6 @@
 # Maintaining the ROCm overlay
 
-The ROCm part of mlxcelverse (`src/lib/mlx-cpp/patches-rocm/`, described in its [README](../../src/lib/mlx-cpp/patches-rocm/README.md)) has two moving upstreams: the MLX pin (ml-explore/mlx, bumped regularly) and the fork its backend is vendored from (NripeshN/mlx `rocm-support`). This page is the procedure for following both, the tools that support it, and how fixes go back to the fork. Tooling and procedure come from lablup/mlxcel#1813.
+The ROCm part of mlxcelverse (`src/lib/mlx-cpp/patches-rocm/`, described in its [README](../../src/lib/mlx-cpp/patches-rocm/README.md)) has two moving upstreams: the MLX pin (ml-explore/mlx, bumped regularly) and the fork its backend is vendored from (NripeshN/mlx `rocm-support`). This page is the procedure for following both, and the tools that support it. Tooling and procedure come from lablup/mlxcel#1813.
 
 ## The records
 
@@ -60,7 +60,7 @@ The general procedure is "Bumping the MLX upstream pin" in `CONTRIBUTING.md`. Fo
    - Conflicts are left in the files with markers and make the exit status 1.
 3. Resolve conflicts. Where the fork changed code a local fix also changed, decide whether the fork now fixes the problem (then drop the LOCAL_FIXES entry and its upstream package) or the fix still applies.
 4. `check_api_drift.sh` (or a `--features rocm` build), then `drift`, review, `drift --write`.
-5. Update `LOCAL_FIXES.md` (its title names the fork commit) and `docs/mlxcelverse/upstream/README.md`.
+5. Update `LOCAL_FIXES.md` (its title names the fork commit).
 6. `make verify-rocm`, and the same "ROCm overlay" section in the PR body.
 
 `sync_from_fork.sh --check` against the recorded commit reproduces the committed overlay byte for byte. That holds by construction, because the local fixes are carried as the overlay's own difference from the fork rather than replayed from a separate patch list, so it confirms only that a sync to an unchanged fork commit is a no-op; it cannot detect an unrecorded local change. That is `drift`'s job: every backend file that differs from the fork must be named in `LOCAL_FIXES.md`, and every core-file residual must be recorded in `CORE_RESIDUAL.diff`. `--check` without a commit compares against the head of the fork branch and fails once the fork has moved past `UPSTREAM`.
@@ -79,6 +79,6 @@ Put this in the PR body, and in the technical report when there is one (as secti
 - `make verify-rocm` on <gfx target>: <result, including known baseline failures>
 ```
 
-## Sending fixes back to the fork
+## Fork fixes stay here
 
-Fixes that apply to the fork itself (LOCAL_FIXES entries marked "Applies to the fork") are prepared as PR packages under [`docs/mlxcelverse/upstream/`](upstream/README.md): a `git format-patch` against the fork head, a PR title and body, and a reproduction. They are submitted by hand by the maintainer; no tool here pushes to, forks, or opens anything on NripeshN/mlx or ml-explore/mlx. The index there lists each package, its LOCAL_FIXES items, whether it applies cleanly, and its link once submitted, and summarizes the fork's contribution rules and ml-explore/mlx's AI usage policy.
+LOCAL_FIXES entries marked "Applies to the fork" are kept in the overlay and recorded in `LOCAL_FIXES.md`. Since 2026-10-06 no PRs to NripeshN/mlx are prepared or submitted (lablup/mlxcel#2144, which retired the plan from lablup/mlxcel#1813). [`docs/mlxcelverse/upstream/`](upstream/README.md) is historical reference: patch packages made for some entries before that decision.
