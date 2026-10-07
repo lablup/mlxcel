@@ -817,8 +817,12 @@ struct ServerArgs {
     )]
     rerank_batch_size: usize,
 
-    /// Prefill chunk size in tokens (0 = disabled, default: 512)
-    #[arg(long = "prefill-chunk-size", default_value_t = 512)]
+    /// Prefill chunk size in tokens (0 = disabled). Defaults to the shared
+    /// chunk policy: `MLXCEL_PREFILL_CHUNK`, else 2048 (ADR 0007).
+    #[arg(
+        long = "prefill-chunk-size",
+        default_value_t = mlxcel_core::prefill_plan::prefill_chunk_len()
+    )]
     prefill_chunk_size: usize,
 
     /// Decode ticks a parked chunked prefill yields before it is granted one
@@ -839,7 +843,7 @@ struct ServerArgs {
     #[arg(long = "prefill-grant-interval", value_name = "N")]
     prefill_grant_interval: Option<usize>,
 
-    /// Prefill batch size [llama-server alias for --prefill-chunk-size] [default: 512]
+    /// Prefill batch size [llama-server alias for --prefill-chunk-size] [default: 2048]
     #[arg(
         short = 'b',
         long = "batch-size",
@@ -928,7 +932,7 @@ struct ServerArgs {
     /// mask, an O(B*L^2) transient. This caps the drained window by total
     /// padded tokens (rows * L): rows past the budget spill to the next tick
     /// and prefill via the chunked single-sequence path. Unset derives the
-    /// default `2 * max_batch_prefill * prefill_chunk_size` (2 * 4 * 512 = 4096).
+    /// default `2 * max_batch_prefill * min(prefill_chunk_size, 512)` (2 * 4 * 512 = 4096).
     /// `0` disables the cap (uncapped). Env: `MLXCEL_MAX_BATCH_PREFILL_TOKENS`
     /// overrides both.
     #[arg(long = "max-batch-prefill-tokens")]

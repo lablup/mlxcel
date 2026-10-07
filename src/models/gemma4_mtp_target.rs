@@ -197,9 +197,9 @@ pub struct Gemma4MtpTargetAdapter<'a> {
 /// Token ranges the row-wise MTP prefill forwards, in order.
 ///
 /// Classic serving does not prefill a chat prompt in one forward when the
-/// prompt cache is on: `capture_history_boundary_snapshot` first forwards
-/// `[start..boundary]` as one segment, then the suffix runs in
-/// `prefill_chunk_size` chunks from the boundary. KV built from a different
+/// prompt cache is on: its `PrefillPlan` first forwards `[start..boundary]`
+/// as one segment, then the suffix runs in `prefill_chunk_size` chunks from
+/// the boundary. These are that plan's ranges. KV built from a different
 /// partition differs in the last bit, so a verify that is byte-exact per
 /// block still drifts from classic decode once a flipped key matters (#2160,
 /// measured on one of three 256-token chat prompts per pair before this).
@@ -210,23 +210,17 @@ pub(crate) fn mtp_prefill_ranges(
     chunk_size: usize,
     boundary: Option<usize>,
 ) -> Vec<std::ops::Range<usize>> {
-    let mut ranges = Vec::new();
-    let mut cursor = start.min(len);
-    if let Some(boundary) = boundary.filter(|b| *b > cursor && *b < len) {
-        ranges.push(cursor..boundary);
-        cursor = boundary;
-    }
-    let step = if chunk_size == 0 {
-        len.max(1)
-    } else {
-        chunk_size
+    // The classic partition itself (#2170): token input, chunkable, no tile
+    // padding (the row-wise forwards pad nothing).
+    let caps = mlxcel_core::prefill_plan::PrefillCaps {
+        supports_chunked_prefill: true,
+        supports_padded_prefill: false,
+        supports_maskless_padded_prefill: false,
+        align_prefill: false,
+        input: mlxcel_core::prefill_plan::PrefillInput::Tokens,
     };
-    while cursor < len {
-        let end = (cursor + step).min(len);
-        ranges.push(cursor..end);
-        cursor = end;
-    }
-    ranges
+    mlxcel_core::prefill_plan::PrefillPlan::with_prefix(len, start, boundary, chunk_size, caps)
+        .ranges()
 }
 
 impl<'a> Gemma4MtpTargetAdapter<'a> {

@@ -18,7 +18,7 @@
 //! A padded prefill writes `excess` pad positions after the real tokens. For a
 //! dense or paged sequence they sit in the `CachePool` entry's `KVCache`s; for
 //! a family whose own layout is model-owned they sit in the model's
-//! per-sequence state, which only [`LanguageModel::trim_sequence_state`] can
+//! per-sequence state, which only [`LanguageModel::trim_state`] can
 //! reach. [`trim_padded_prefill`] covers both, so no site can trim one and
 //! forget the other.
 
@@ -78,7 +78,7 @@ pub(super) fn trim_padded_prefill<M: LanguageModel + ?Sized>(
         cache.trim(excess);
     }
     if model.sequence_state_layout().backend == SequenceStateBackend::ModelOwned {
-        model.trim_sequence_state(seq_id, excess)?;
+        model.trim_state(Some(seq_id), excess)?;
     }
     Ok(())
 }

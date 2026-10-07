@@ -1169,7 +1169,7 @@ impl Default for ServerConfig {
             embedding_request_timeout_secs: DEFAULT_EMBEDDING_REQUEST_TIMEOUT_SECS,
             reranker_model_path: None,
             rerank_batch_size: DEFAULT_RERANK_BATCH_SIZE,
-            prefill_chunk_size: 512,
+            prefill_chunk_size: mlxcel_core::prefill_plan::prefill_chunk_len(),
             // #1011: unset -> scheduler resolves the env override / default.
             prefill_grant_interval: None,
             enable_preemption: false,
@@ -1178,7 +1178,7 @@ impl Default for ServerConfig {
             // Serving-throughput default: batched prefill of up to 4 pending
             // requests (#628). No-ops for families without batched prefill.
             max_batch_prefill: 4,
-            // #715: unset -> scheduler derives `max_batch_prefill * prefill_chunk_size`.
+            // #715: unset -> scheduler derives `2 * max_batch_prefill * min(prefill_chunk_size, 512)`.
             max_batch_prefill_tokens: None,
             decode_storage_backend: DecodeStorageBackend::Auto,
             pipeline_parallel_runtime: None,

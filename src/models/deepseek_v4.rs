@@ -988,8 +988,8 @@ impl LanguageModel for DeepSeekV4Model {
     /// tokens are mixed into compressed K/V (and into the indexer pool) rather
     /// than sitting in separable trailing slots. Only the `local`
     /// `RotatingKVCache` could be cut back. Nothing here implements
-    /// `trim_sequence_state`, and the default trims only the fallback slot,
-    /// which is not the state the scheduler keys by `SequenceId`.
+    /// `trim_state` for a `SequenceId`, and the default cannot reach the
+    /// state the scheduler keys by it.
     fn supports_padded_prefill(&self) -> bool {
         false
     }

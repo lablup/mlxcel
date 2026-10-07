@@ -3973,6 +3973,11 @@ pub mod rope_proportional;
 // that choice from inside a chunked prefill (Phi-3 / Phi-4 LongRoPE, #1358).
 pub mod prefill_span;
 
+// One description of how a prompt is prefilled: adopted prefix, history
+// boundary, chunking, tile padding and the trim that undoes it, shared by the
+// CLI generator and the server scheduler (ADR 0007, #2170).
+pub mod prefill_plan;
+
 pub mod runtime_lora;
 
 // Unicode-script classifier and language-steering index for Axis B.
