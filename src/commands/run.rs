@@ -82,10 +82,11 @@ pub(crate) const DEFAULT_MODEL: &str = "mlx-community/gemma-4-e2b-it-4bit";
 /// `run` takes a model (repo-id or local path) and either streams an
 /// interactive chat (no `-p`) or prints a one-shot completion (`-p "..."`).
 /// The model argument is **optional**: omitting it loads
-/// [`DEFAULT_MODEL`]. Sampling and generation flags are the *same* clap groups
+/// [`DEFAULT_MODEL`]. The generation and sampling groups are the clap groups
 /// [`GenerateArgs`] flattens ([`GenerationOptions`] / [`SamplingOptions`]), so
-/// `--help` and behavior stay in lock-step with `mlxcel generate` and no flag
-/// is duplicated.
+/// the shared flags read the same on both verbs; on `run` every sampling flag
+/// becomes an option of the in-process server (issue #2173), and
+/// [`ServerSamplingOptions`] adds the server sampling flags `generate` lacks.
 #[derive(Args, Debug)]
 #[command(next_help_heading = "Run Options")]
 pub(crate) struct RunArgs {
@@ -134,8 +135,9 @@ pub(crate) struct RunArgs {
     #[command(flatten)]
     pub(crate) generation: GenerationOptions,
 
-    /// Sampling options shared verbatim with `mlxcel generate` (temperature,
-    /// top-k/p, min-p, repetition + DRY penalties).
+    /// Sampling options shared with `mlxcel generate` (temperature, top-k/p,
+    /// min-p, repetition + DRY penalties), applied as the in-process server's
+    /// sampling options.
     #[command(flatten)]
     pub(crate) sampling: SamplingOptions,
 
