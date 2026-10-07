@@ -31,6 +31,11 @@ mod active;
 /// bursts (issue #1339): `DFlashTargetModel`, its per-family impls and the
 /// generic target drivers.
 pub(crate) mod dflash_target;
+/// The server side of the shared post-sample finish step (#2168): the
+/// `FinishHooks` over a sequence and the `FinishCause` to `FinishReason` map.
+pub(crate) mod finish;
+#[cfg(test)]
+mod finish_step_tests;
 /// b10621's per-request generation bounds (`n_indent`, `t_max_predict_ms`),
 /// issue #1477: stop rules that end a healthy request and report
 /// `stop_type: "limit"`.

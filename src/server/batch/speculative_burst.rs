@@ -203,6 +203,7 @@ use std::time::{Duration, Instant};
 // `mlxcel-core` cannot name, so core refuses that `model_type` and this
 // wrapper builds it and delegates every other kind back to core.
 use crate::models::drafter_loader::load_drafter;
+use mlxcel_core::FinishCause;
 use mlxcel_core::drafter::dflash::drafter::sampler_is_greedy;
 use mlxcel_core::drafter::{Drafter, DrafterKind};
 use mlxcel_core::generate::{LanguageModel, SamplingConfig};
@@ -222,6 +223,7 @@ use crate::models::gemma4_mtp_target::{
 };
 use crate::server::model_provider::{GenerateEvent, SpeculativeStats};
 
+use super::finish::{ContextBound, StepLimits, finish_reason_for, run_finish_step};
 use super::sequence::{FinishReason, SequenceInfo, SequenceState};
 
 /// Lazy-loaded drafter slot held on the scheduler.
@@ -1102,6 +1104,9 @@ pub(crate) struct BurstContext<'a> {
     /// Classic history-boundary prefill split for the B=1 sequence (issue
     /// #2160); `None` for batched bursts and requests without one.
     pub(crate) prefill_boundary: Option<usize>,
+    /// The scheduler's context bound (#1472), applied by the burst stream's
+    /// finish step exactly as classic decode applies it (#2168).
+    pub(crate) context_bound: ContextBound,
 }
 
 impl<'a> BurstContext<'a> {
@@ -1119,6 +1124,7 @@ impl<'a> BurstContext<'a> {
             profile_probe_rounds: self.profile_probe_rounds,
             prefill_chunk_size: self.prefill_chunk_size,
             prefill_boundary: self.prefill_boundary,
+            context_bound: self.context_bound,
         }
     }
 }
@@ -1945,7 +1951,7 @@ fn finalize_burst_success(
     // the first-token stamp must be the prefill's end, not the replay below;
     // the replay's own `mark_first_token` is then a no-op (issue #1592).
     seq.mark_first_token_at(prefill_end);
-    let mut stream = begin_burst_stream(ctx.model.eos_token_ids(), &seq);
+    let mut stream = begin_burst_stream(ctx.model.eos_token_ids(), &seq, ctx.context_bound);
     stream_burst_tokens(ctx.tokenizer, &mut seq, &mut stream, &tokens, &logprobs);
     finalize_burst_stream(ctx.tokenizer, seq, &stream, speculative)
 }
@@ -1959,50 +1965,74 @@ fn finalize_burst_success(
 /// drive the same three helpers ([`begin_burst_stream`],
 /// [`stream_burst_tokens`] (once, or once per slice), and
 /// [`finalize_burst_stream`]), so the client-visible event stream, the
-/// thinking-budget enforcement, and the EOS-vs-Length classification are
+/// thinking-budget enforcement, and the finish classification are
 /// identical regardless of how the tokens were produced.
 pub(crate) struct BurstStreamState {
     /// Merged EOS set (target EOS + per-request stop tokens), resolved once.
-    eos_set: std::collections::HashSet<i32>,
+    eos: Vec<i32>,
     /// Emission budget (`seq.max_tokens.max(1)`).
     max_tokens: usize,
-    /// Whether an EOS token (post thinking-budget override) terminated the
-    /// stream. Drives the `FinishReason::Stop` classification.
-    hit_eos: bool,
+    /// The scheduler's context bound, so a burst stops at the KV bound
+    /// exactly as classic decode does (#1472).
+    context: ContextBound,
+    /// Why the shared finish step (#2168) ended the stream, if it did.
+    /// `None` at finalize means the drafter / round loop stopped first.
+    finish: Option<FinishCause>,
     /// Whether the request asked for per-token logprobs.
     logprobs_enabled: bool,
-    /// Whether the stream reached a terminal condition (EOS or budget).
+    /// Whether the stream reached a terminal condition (any finish cause).
     /// Once set, further [`stream_burst_tokens`] calls are no-ops; the
     /// slice driver uses this to stop stepping the generator when the
     /// stream layer finished the request first (e.g. a thinking-budget
     /// forced `</think>` that is an EOS id).
     done: bool,
+    /// The finish step ended the stream before the last token of a batch
+    /// the generator had already produced (and forwarded into the target's
+    /// model-owned state). The model state then holds tokens past the
+    /// committed stream (`prompt + generated_tokens`), so the finish must
+    /// not donate its state to the prompt cache: a snapshot-reuse entry
+    /// keyed by the committed tokens would restore the uncommitted tail
+    /// into the next turn.
+    uncommitted_tail: bool,
+}
+
+impl BurstStreamState {
+    /// The cause the shared finish step recorded, if it ended the stream.
+    #[cfg(test)]
+    pub(crate) fn finish(&self) -> Option<FinishCause> {
+        self.finish
+    }
 }
 
 /// Resolve the per-request streaming state once, before the first tokens
 /// land. `model_eos_token_ids` is the target's EOS set
 /// (`LoadedModel::eos_token_ids()`); `seq.merged_eos` is empty on the burst
 /// path (the classic path populates it in `finish_prefill`), so the merged
-/// set is recomputed here from the sampling/model state.
+/// set is recomputed here from the sampling/model state. `context` is the
+/// scheduler's [`ContextBound`].
 pub(crate) fn begin_burst_stream(
     model_eos_token_ids: Vec<i32>,
     seq: &SequenceInfo,
+    context: ContextBound,
 ) -> BurstStreamState {
-    let merged_eos = merged_eos_token_ids(model_eos_token_ids, &seq.sampling.stop_token_ids);
     BurstStreamState {
-        eos_set: merged_eos.iter().copied().collect(),
+        eos: merged_eos_token_ids(model_eos_token_ids, &seq.sampling.stop_token_ids),
         max_tokens: seq.max_tokens.max(1),
-        hit_eos: false,
+        context,
+        finish: None,
         logprobs_enabled: seq.logprobs_config.enabled,
         done: false,
+        uncommitted_tail: false,
     }
 }
 
 /// Stream one batch of burst-produced tokens to `seq.response_tx`,
-/// committing them to `seq.generated_tokens` and applying the per-token
-/// thinking-budget + EOS + budget checks. Returns `true` when the stream
-/// reached a terminal condition (EOS or budget); the caller must then
-/// stop producing tokens and call [`finalize_burst_stream`].
+/// committing them to `seq.generated_tokens` through the shared finish step
+/// (#2168): the thinking-budget override first, then EOS, stop strings,
+/// generation bounds, the budget, the context bound and loop detection, the
+/// same checks in the same order as classic decode. Returns `true` when the
+/// stream reached a terminal condition; the caller must then stop producing
+/// tokens and call [`finalize_burst_stream`].
 ///
 /// `logprobs` is index-aligned 1:1 with `tokens` (this call's slice, not
 /// the whole request). An empty `logprobs` with logprobs enabled degrades
@@ -2032,11 +2062,6 @@ pub(crate) fn stream_burst_tokens(
     // plain `Token` events.
     let logprobs_on = stream.logprobs_enabled && !logprobs.is_empty();
     for (idx, token) in tokens.iter().copied().enumerate() {
-        if seq.generated_tokens.len() >= stream.max_tokens {
-            stream.done = true;
-            break;
-        }
-
         // thinking-budget enforcement, applied
         // per-emitted-token. See [`apply_burst_thinking_budget`].
         // `override_fired` gates logprob emission below: when the
@@ -2048,54 +2073,43 @@ pub(crate) fn stream_burst_tokens(
         // (`scheduler.rs::decode_single_step`).
         let (final_token, override_fired) = apply_burst_thinking_budget(&mut seq.thinking, token);
 
-        // EOS check before recording the token so EOS is reported as
-        // FinishReason::Stop, not Length, matching the classic
-        // `decode_single_step` semantics. The check uses the
-        // post-override `final_token` so a forced `</think>` that
-        // happens to be an EOS id is classified correctly.
-        if stream.eos_set.contains(&final_token) {
-            stream.hit_eos = true;
+        // `logprobs[idx]` mirrors the classic path's per-token
+        // `compute_logprobs(...)` result: `Some(lp)` emits
+        // `TokenWithLogprobs`, `None` emits plain `Token` (the classic path
+        // does the same when `compute_logprobs` returns `None`, e.g. on a
+        // sampler override). A fired thinking-budget override also forces
+        // plain `Token`.
+        let lp = if logprobs_on && !override_fired {
+            logprobs.get(idx).and_then(|lp| lp.clone())
+        } else {
+            None
+        };
+
+        // The EOS check runs on the post-override `final_token`, so a forced
+        // `</think>` that happens to be an EOS id is reported as `Stop`. A
+        // speculative request must not outrun its own stop strings, bounds
+        // (#1466, #1477) or repetition guard (#432) just because its tokens
+        // arrive several at a time.
+        let limits = StepLimits::Burst {
+            eos: &stream.eos,
+            max_tokens: stream.max_tokens,
+        };
+        if let Some(cause) = run_finish_step(
+            seq,
+            tokenizer,
+            final_token,
+            lp,
+            false,
+            stream.context,
+            limits,
+        ) {
+            stream.finish = Some(cause);
             stream.done = true;
+            // The generator already produced every token in `tokens`; any
+            // after `idx` sit in the model state but are never committed.
+            stream.uncommitted_tail = idx + 1 < tokens.len();
             break;
         }
-        seq.generated_tokens.push(final_token);
-        if let Some(new_text) = seq.decode_state.on_token(final_token, tokenizer) {
-            // `logprobs[idx]` mirrors the classic path's per-token
-            // `compute_logprobs(...)` result: `Some(lp)` → emit
-            // `TokenWithLogprobs`, `None` → emit plain `Token` (the
-            // classic path does the same when `compute_logprobs`
-            // returns `None`, e.g. on a sampler override). A fired
-            // thinking-budget override also forces plain `Token`.
-            let lp = if logprobs_on && !override_fired {
-                logprobs.get(idx).and_then(|lp| lp.clone())
-            } else {
-                None
-            };
-            // Same stop-string enforcement as the classic decode path
-            // (issue #1466): a speculative request must not outrun its own
-            // stop strings just because its tokens arrive several at a time.
-            if seq
-                .stream_decoded_text(new_text, Some(final_token), lp)
-                .is_some()
-            {
-                stream.done = true;
-                return true;
-            }
-            // A b10621 generation bound ends the burst too (#1477); a
-            // speculative request must not outrun its own bounds any more than
-            // it may outrun its stop strings.
-            if seq.bound_stopped() {
-                stream.done = true;
-                return true;
-            }
-        }
-    }
-    // Budget saturation terminates the stream even when the last committed
-    // token was the final in-budget one (the legacy loop discovered this at
-    // the top of the NEXT iteration; the slice driver needs it now so it
-    // stops stepping the generator).
-    if seq.generated_tokens.len() >= stream.max_tokens {
-        stream.done = true;
     }
     stream.done
 }
@@ -2116,17 +2130,14 @@ pub(crate) fn finalize_burst_stream(
     stream: &BurstStreamState,
     speculative: Option<SpeculativeStats>,
 ) -> FinalizeOutcome {
-    // Final state classification. A matched string stop sequence outranks the
-    // budget: the request ended because the caller's own stop string appeared,
-    // not because it ran out of tokens (issue #1466).
+    // Final state classification. A matched string stop sequence outranks
+    // everything else: the request ended because the caller's own stop string
+    // appeared (issue #1466). Otherwise the cause the shared finish step
+    // recorded maps exactly as on the classic path.
     let finish_reason = if seq.matched_stop().is_some() {
         FinishReason::StopSequence
-    } else if stream.hit_eos {
-        FinishReason::Stop
-    // A fired b10621 generation bound is a `limit` finish, ranked below a
-    // string stop and an EOS exactly as on the classic path (#1477).
-    } else if seq.bound_stopped() || seq.generated_tokens.len() >= stream.max_tokens {
-        FinishReason::Length
+    } else if let Some(cause) = stream.finish {
+        finish_reason_for(&mut seq, cause)
     } else {
         // The drafter / round loop bailed early without hitting EOS or
         // the budget — surface as Stop so the client sees a clean end
@@ -2134,22 +2145,26 @@ pub(crate) fn finalize_burst_stream(
         // still accurate.
         FinishReason::Stop
     };
-    // classify the finish for the prompt-cache donate gate
-    // BEFORE `finish_reason` is moved into `transition_to`. Mirrors the
-    // `healthy` gate in `scheduler.rs::finalize_completed` — only
-    // `Stop` / `StopSequence` / `Length` / `Cancelled` finishes donate their
-    // cache back. `finalize_burst_success` only ever classifies `Stop`,
-    // `StopSequence` or `Length` (the `Error` / `Cancelled` outcomes never
-    // reach this function), so this is always `true` here; computing it
-    // explicitly keeps the burst path's gate bit-identical to the classic
-    // path's and robust if the classification above ever gains a new arm.
-    let healthy_finish = matches!(
-        finish_reason,
-        FinishReason::Stop
-            | FinishReason::StopSequence
-            | FinishReason::Length
-            | FinishReason::Cancelled
-    );
+    // Classify the finish for the prompt-cache donate gate BEFORE
+    // `finish_reason` is moved into `transition_to`. The reason list mirrors
+    // the `healthy` gate in `scheduler.rs::finalize_completed`. On top of it,
+    // a stream the finish step truncated mid-batch never donates, whatever
+    // the cause: the generator had already forwarded the rest of that batch
+    // into the target's model-owned state, so the state is ahead of
+    // `prompt + generated_tokens`. Snapshot-reuse families snapshot the whole
+    // state under that shorter key, and a later whole-entry prompt-cache
+    // match would restore the uncommitted tail into the next turn. A finish
+    // on the last token of a batch leaves the state in step and donates as
+    // classic decode does.
+    let healthy_finish = !stream.uncommitted_tail
+        && matches!(
+            finish_reason,
+            FinishReason::Stop
+                | FinishReason::StopSequence
+                | FinishReason::Length
+                | FinishReason::RepetitionLoop
+                | FinishReason::Cancelled
+        );
     if let Err(err) = seq
         .state
         .transition_to(SequenceState::Finished(finish_reason))

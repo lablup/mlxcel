@@ -3447,6 +3447,9 @@ pub use session::{InferenceSession, MlxInferenceSession, SessionCapabilities};
 // Re-export N-gram loop-detection so the server control plane and CLI decode
 // loops can configure and run early-stop on degenerate token-repetition.
 pub use loop_detection::{LoopDetectionConfig, detect_repetition_loop};
+// Re-export the shared post-sample finish step (#2168) so the server batch
+// scheduler and the CLI decode loops run one finish decision.
+pub use decode_finish::{FinishCause, FinishHooks, FinishInput, NoStopHooks, finish_step};
 // Re-export B9 observability counter accessors so the server `/metrics` handler
 // can read process-wide lang-bias counters without a struct dependency.
 // Includes the byte-fragment suppression counter added.
@@ -3878,6 +3881,11 @@ pub mod generation_policy;
 // Public so the server batch scheduler and CLI decode loops can end a
 // degenerate generation early (e.g. Gemma 4 token-repetition collapse).
 pub mod loop_detection;
+
+// The one post-sample finish step (EOS, stop strings, bounds, budget, context
+// bound, loop detection, cache-clear cadence) shared by every CLI and server
+// decode site (#2168).
+pub mod decode_finish;
 
 // Shared sampling and token-penalty policy helpers.
 // Public so that the server batch scheduler can perform step-level sampling.

@@ -509,49 +509,25 @@ impl SequenceInfo {
         token_id: Option<i32>,
         logprobs: Option<TokenLogprobData>,
     ) -> Option<String> {
-        let meta = TokenMeta {
+        emit_decoded_piece(
+            &mut self.stop_matcher,
+            &mut self.bounds,
+            &self.response_tx,
+            self.generated_tokens.len(),
+            text,
             token_id,
-            decoded: Some(self.generated_tokens.len()),
-        };
-        // No stop strings: send the piece verbatim, exactly as every call site
-        // did before #1466, without building a `StopChunk` per decoded token.
-        // This is the overwhelmingly common case on the decode hot path.
-        if !self.stop_matcher.is_active() {
-            self.bounds.observe(&text, &text);
-            let event = match logprobs {
-                Some(lp) => GenerateEvent::TokenWithLogprobs(text, meta, lp),
-                None => GenerateEvent::Token(text, meta),
-            };
-            let _ = self.response_tx.send(event);
-            return None;
-        }
-
-        // b10621 sends one partial frame per decoded token even while a stop
-        // string is being matched: that frame carries empty content and the
-        // token's own id, and its `tokens_predicted` still counts the token
-        // (measured against the pinned binary, #1477). Emitting nothing here
-        // would drop the id and make the frame count disagree with the token
-        // count. Consumers that accumulate text ignore an empty piece.
-        let chunk = self.stop_matcher.push(&text);
-        // The generation bounds see the raw decoded text (what upstream appends
-        // to `generated_text`) and the emitted part separately (what arms its
-        // `has_new_line`); the two differ only mid stop-string match (#1477).
-        self.bounds.observe(&text, &chunk.emit);
-        let event = match logprobs {
-            Some(lp) => GenerateEvent::TokenWithLogprobs(chunk.emit, meta, lp),
-            None => GenerateEvent::Token(chunk.emit, meta),
-        };
-        let _ = self.response_tx.send(event);
-        chunk.matched
+            logprobs,
+        )
     }
 
     /// Whether a b10621 generation bound ended this request on the step just
     /// streamed (#1477).
     ///
-    /// Read right after [`stream_decoded_text`](Self::stream_decoded_text) by
-    /// every decode path, alongside the stop-string result: a string stop wins
+    /// The decode paths read the same flag through the shared finish step's
+    /// hooks (#2168), right after the stop-string check: a string stop wins
     /// when both land on the same piece, because upstream evaluates the stop
     /// strings first and stops feeding tokens there.
+    #[cfg(test)]
     pub(crate) fn bound_stopped(&self) -> bool {
         self.bounds.fired().is_some()
     }
@@ -720,6 +696,55 @@ fn truncate_result_text(
     result.text.truncate(cut);
 }
 
+/// [`SequenceInfo::stream_decoded_text`] over the disjoint fields it touches,
+/// so the shared finish step (#2168) can stream a piece while it holds
+/// `generated_tokens` mutably. `decoded` is the generated-token count the
+/// event reports ([`TokenMeta::decoded`]), which already includes the token.
+pub(crate) fn emit_decoded_piece(
+    stop_matcher: &mut StopMatcher,
+    bounds: &mut GenerationBounds,
+    response_tx: &mpsc::Sender<GenerateEvent>,
+    decoded: usize,
+    text: String,
+    token_id: Option<i32>,
+    logprobs: Option<TokenLogprobData>,
+) -> Option<String> {
+    let meta = TokenMeta {
+        token_id,
+        decoded: Some(decoded),
+    };
+    // No stop strings: send the piece verbatim, exactly as every call site
+    // did before #1466, without building a `StopChunk` per decoded token.
+    // This is the overwhelmingly common case on the decode hot path.
+    if !stop_matcher.is_active() {
+        bounds.observe(&text, &text);
+        let event = match logprobs {
+            Some(lp) => GenerateEvent::TokenWithLogprobs(text, meta, lp),
+            None => GenerateEvent::Token(text, meta),
+        };
+        let _ = response_tx.send(event);
+        return None;
+    }
+
+    // b10621 sends one partial frame per decoded token even while a stop
+    // string is being matched: that frame carries empty content and the
+    // token's own id, and its `tokens_predicted` still counts the token
+    // (measured against the pinned binary, #1477). Emitting nothing here
+    // would drop the id and make the frame count disagree with the token
+    // count. Consumers that accumulate text ignore an empty piece.
+    let chunk = stop_matcher.push(&text);
+    // The generation bounds see the raw decoded text (what upstream appends
+    // to `generated_text`) and the emitted part separately (what arms its
+    // `has_new_line`); the two differ only mid stop-string match (#1477).
+    bounds.observe(&text, &chunk.emit);
+    let event = match logprobs {
+        Some(lp) => GenerateEvent::TokenWithLogprobs(chunk.emit, meta, lp),
+        None => GenerateEvent::Token(chunk.emit, meta),
+    };
+    let _ = response_tx.send(event);
+    chunk.matched
+}
+
 // We cannot derive `Debug` automatically because `InputEmbeddings` contains
 // `UniquePtr<MlxArray>` which is not `Debug`. A manual implementation keeps
 // the struct debuggable in logs.
@@ -852,9 +877,11 @@ mod tests {
 
     // -- decode-site loop-detection wiring --
     //
-    // These replicate the exact guard the scheduler decode sites apply after
-    // pushing each token, driving the real `SequenceState` machine so the
-    // wiring (detector + transition), not just the pure helper, is exercised.
+    // The scheduler decode sites run their finish decision through
+    // `mlxcel_core::finish_step` (#2168). This helper mirrors only the
+    // repetition-loop step of it, driving the real `SequenceState` machine so
+    // the detector-plus-transition wiring, not just the pure helper, is
+    // exercised.
 
     fn apply_loop_guard(
         state: &mut SequenceState,
