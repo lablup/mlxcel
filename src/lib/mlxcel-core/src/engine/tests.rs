@@ -85,8 +85,9 @@ impl LanguageModel for EchoModel {
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         self.batched_calls.set(self.batched_calls.get() + 1);
+        let l = ffi::array_shape(input_ids)[1];
         for caches in batch_caches.iter_mut() {
-            Self::append(caches, 1);
+            Self::append(caches, l);
         }
         Self::echo_logits(input_ids)
     }
