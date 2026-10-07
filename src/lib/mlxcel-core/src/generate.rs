@@ -1159,7 +1159,15 @@ pub enum DecodeStorageBackend {
     Paged,
 }
 
-/// Optional scheduler/runtime context for batched decode dispatch.
+/// Per-step storage policy the scheduler hands to batched decode.
+///
+/// Since #2171 (ADR 0008) the families whose per-sequence state is a
+/// [`crate::cache::KVCache`] (Qwen3, Llama 3 and the families that reuse their
+/// attention) read nothing from this: storage is chosen when `CachePool`
+/// builds the cache, and [`crate::cache::KVCache::attend`] picks the kernel
+/// from the storage behind it. The model-owned families (Gemma 3, Llama 4 and
+/// the `model_owned` dispatch helpers) still consume it for their
+/// dense-pointer paged kernels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DecodeBatchContext {
     pub storage_backend: DecodeStorageBackend,

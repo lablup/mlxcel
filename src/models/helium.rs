@@ -50,7 +50,7 @@
 //! crossing the cxx bridge is an uncatchable `std::terminate`, not a Rust error,
 //! so a check that happens at the first forward pass is not a check.
 
-use mlxcel_core::generate::{DecodeBatchContext, LanguageModel};
+use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -950,19 +950,7 @@ impl LanguageModel for HeliumModel {
         batch_caches: &mut [&mut [KVCache]],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        self.inner
-            .forward_batched_impl(input_ids, batch_caches, mask, None)
-    }
-
-    fn forward_batched_with_context(
-        &self,
-        input_ids: &MlxArray,
-        batch_caches: &mut [&mut [KVCache]],
-        mask: Option<&MlxArray>,
-        context: Option<&DecodeBatchContext>,
-    ) -> UniquePtr<MlxArray> {
-        self.inner
-            .forward_batched_impl(input_ids, batch_caches, mask, context)
+        self.inner.forward_batched_impl(input_ids, batch_caches, mask)
     }
 
     fn supports_batched_prefill(&self) -> bool {

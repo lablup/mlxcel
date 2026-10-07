@@ -454,8 +454,8 @@ llama3 Fp16 dense-natural-cache allocations at B=1/B=2, plus a CUDA qwen3 arm
 that requires greedy-token equality and bounded logit RMS with TF32 disabled.
 That evidence does not claim byte identity for VLM front ends, model-owned
 caches, Turbo/quantized-KV modes, or every CUDA reduction geometry. The live
-batched path uses the native block-table decode kernel
-(`DecodeBatchContext::use_native_paged_kernel`, set by the scheduler); a
+batched path is the pooled paged decode of #899, dispatched from the cache
+itself (`KVCache::attend`, ADR 0008) rather than by the model forward; a
 gather-then-SDPA path is kept as a correctness reference. At batch 4 the native
 kernel runs at 276 tok/s for a 512-token prompt and 84 tok/s for a 4096-token
 prompt, versus 146 and 7.7 tok/s for the gather reference (1.9x and 10.9x). The

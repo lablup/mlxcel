@@ -59,6 +59,8 @@ use cxx::UniquePtr;
 
 use crate::cache::{KVCache, KVCacheMode};
 use crate::ffi::MlxArray;
+use crate::mla::absorb::MlaAbsorbedProjections;
+use crate::mla::decode::absorbed_decode;
 use crate::mla::MlaGeometry;
 
 /// Bytes one token of the compressed-latent cache costs, per layer.
@@ -252,6 +254,41 @@ impl<'a> MlaLatentCache<'a> {
         kpe: UniquePtr<MlxArray>,
     ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
         self.inner.update_and_fetch(ckv, kpe)
+    }
+
+    /// Append one step's latent and rope rows and run absorbed attention over
+    /// the live window: the MLA analogue of [`KVCache::attend`] (#2171).
+    ///
+    /// A latent cache keeps its own attention (`absorbed_decode`: the score is
+    /// split into the absorbed latent term and the rope term, and the kernel
+    /// sees the latent as both K and V), so it cannot share the dense
+    /// dispatch. It shares the entry: the caller hands over this step's rows
+    /// and the query halves, and never reads the cache back to choose a
+    /// kernel.
+    ///
+    /// `q_nope` is `[B, H, L, qk_nope_head_dim]` (not yet absorbed), `q_pe` is
+    /// `[B, H, L, qk_rope_head_dim]` (already rotated), `ckv` and `kpe` are
+    /// this step's `[B, 1, L, kv_lora_rank]` and `[B, 1, L, qk_rope_head_dim]`
+    /// rows, `mask` is the optional additive causal or padding mask. Returns
+    /// `[B, H, L, v_head_dim]`.
+    ///
+    /// Used by: the MLA families once they move onto the latent cache (#907
+    /// Stage 2); `mla::decode_tests` pins it against the decompressed
+    /// reference.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn attend(
+        &mut self,
+        q_nope: &MlxArray,
+        q_pe: &MlxArray,
+        ckv: UniquePtr<MlxArray>,
+        kpe: UniquePtr<MlxArray>,
+        proj: &MlaAbsorbedProjections,
+        scale: f32,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let (ckv_all, kpe_all) = self.update_and_fetch(ckv, kpe);
+        absorbed_decode(q_nope, q_pe, &ckv_all, &kpe_all, proj, scale, mask)
     }
 
     /// Bytes per token this cache costs, at the element size it stores.

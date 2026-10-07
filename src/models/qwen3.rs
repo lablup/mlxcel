@@ -18,10 +18,10 @@
 //! - Q/K normalization (RMSNorm after projection, before RoPE)
 //! - Explicit head_dim in config
 
-use mlxcel_core::cache::{BatchedAttentionMetadata, PagedDecodeMetadata};
-use mlxcel_core::generate::{DecodeBatchContext, LanguageModel};
+use mlxcel_core::cache::BatchedAttentionMetadata;
+use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{
-    FusedQKVLinear, KVCache, KVCacheMode, RMSNorm, UnifiedEmbedding, UnifiedLinear,
+    FusedQKVLinear, KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear,
 };
 use mlxcel_core::utils::pipeline_hint;
 use mlxcel_core::weights::WeightMap;
@@ -326,80 +326,12 @@ impl Attention {
             (q, k, v)
         };
 
-        // Decode-case (l == 1) attention dispatch for the Turbo quantized cache
-        // modes. Prefill (l > 1) builds the cache from scratch and falls through
-        // to the standard masked/causal paths below.
-        //
-        // Turbo4Asym (FP16 K + 4-bit V) decodes via dequant-first native SDPA by
-        // default: V is dequantized to FP16 transiently and fed with the FP16 K
-        // to native SDPA. This is exact and ~3-6x faster than the lossy sparse-V
-        // weighted-sum path, which stays reachable behind
-        // `MLXCEL_TURBO4_ASYM_DEQUANT_SDPA=0` for A/B and fallback. Symmetric
-        // Turbo4 and Turbo4Delegated mirror mlx-swift-lm's dequant-first policy.
-        // Each gate is parsed once and cached in a `OnceLock<bool>`.
-        let use_turbo4_asym_dequant_sdpa =
-            mlxcel_core::cache::turbo::sparse_v::turbo4_asym_dequant_sdpa_enabled();
-        let use_delegated_compressed =
-            mlxcel_core::cache::turbo::sparse_v::turbo4_delegated_compressed_attention_enabled();
-        let use_turbo4_dequant_sdpa =
-            mlxcel_core::cache::turbo::sparse_v::turbo4_dequant_sdpa_enabled();
-        // Single-sequence pooled paged decode (#899). The server takes this
-        // path whenever the active batch is one request: `decode_single_step`
-        // calls the single-sequence `forward`, never `forward_split_attention`.
-        // Without this branch the two single-sequence scenarios in the issue's
-        // benchmark matrix (16K and 32K) could never reach the fused kernel, and
-        // neither could any moment in a batched run where only one request is
-        // still decoding. The batch-1 launch is exactly the `[1, H, 1, D]` shape
-        // the whole-batch entry point already serves.
-        let pooled_single = if l == 1 && mask.is_none() && cache.is_paged_backed() {
-            mlxcel_core::cache::paged_batch_decode_attention(
-                &q,
-                &k,
-                &v,
-                &mut [&mut *cache],
-                self.scale,
-                0.0,
-            )
-        } else {
-            None
-        };
-
-        let attn_out = if let Some(out) = pooled_single {
-            out
-        } else if l == 1
-            && use_turbo4_asym_dequant_sdpa
-            && cache.turbo4_asym_dequant_sdpa_available()
-        {
-            // Default Turbo4Asym decode: dequantize the 4-bit V to FP16 and run
-            // native SDPA with the FP16 K. Exact full-dequant attention.
-            cache.update_and_turbo4_asym_dequant_sdpa_attention(&q, k, v, self.scale, mask)
-        } else if l == 1 && cache.sparse_v_available() {
-            // Sparse-V fallback: only taken when the dequant-SDPA gate above is
-            // disabled (`MLXCEL_TURBO4_ASYM_DEQUANT_SDPA=0`). The helper consumes
-            // k/v, fills the packed cache, and runs the fused kernel (or graph
-            // fallback). When `sparse_v_available` is true it always returns Some.
-            cache
-                .update_and_sparse_v_attention(&q, k, v, self.scale, mask)
-                .expect("update_and_sparse_v_attention returned None despite sparse_v_available")
-        } else if l == 1 && use_turbo4_dequant_sdpa && cache.turbo4_dequant_sdpa_available() {
-            cache.update_and_turbo4_dequant_sdpa_attention(&q, k, v, self.scale, mask)
-        } else if l == 1 && use_delegated_compressed && cache.turbo4_delegated_available() {
-            // The helper always produces an attention output: it routes
-            // through the fused Metal kernel when available and falls
-            // through to the graph-only reference path otherwise.
-            cache.update_and_turbo4_delegated_attention(&q, k, v, self.scale, mask)
-        } else if l > 1 && mask.is_none() {
-            let (cache_k, cache_v) = cache.update_and_fetch(k, v);
-            mlxcel_core::causal_attention(&q, &cache_k, &cache_v, self.scale, 0.0, 0)
-        } else {
-            let (cache_k, cache_v) = cache.update_and_fetch(k, v);
-            let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
-            unsafe {
-                mlxcel_core::layers::attention_from_ptr(
-                    &q, &cache_k, &cache_v, self.scale, mask_ptr, 0.0, 0,
-                )
-            }
-        };
+        // Attention dispatch is a property of the cache (#2171, ADR 0008): the
+        // cache appends this step's K/V and picks the kernel from the storage
+        // behind it (the pooled paged entry at a single unmasked token, the
+        // Turbo dequant-first variants, or fused SDPA). Prefill (l > 1) and
+        // masked steps never take the paged single-token kernel.
+        let attn_out = cache.attend(&q, k, v, self.scale, mask);
 
         // Transpose back and reshape
         let attn_out = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);
@@ -429,12 +361,10 @@ impl Attention {
         caches: &mut [&mut KVCache],
         metadata: &BatchedAttentionMetadata,
         mask: Option<&MlxArray>,
-        decode_context: Option<&DecodeBatchContext>,
     ) -> UniquePtr<MlxArray> {
         let b = caches.len();
         let seq_len = mlxcel_core::array_shape(q_batched)[1];
         debug_assert_eq!(metadata.len(), b);
-        let mut attn_outputs: Vec<UniquePtr<MlxArray>> = Vec::with_capacity(b);
 
         let q_batched = mlxcel_core::reshape(
             q_batched,
@@ -459,159 +389,23 @@ impl Attention {
         let (q_batched, k_batched) =
             self.apply_rope_batched(&q_batched, &k_batched, &metadata.rope_offsets);
 
-        // Pool-backed paged decode (#899): the whole batch in one fused launch.
-        // This is the production path for `--decode-storage paged`; it appends
-        // every sequence's new K/V to the shared `PagedBlockPool` and runs
-        // attention once over the batch, replacing the per-sequence
-        // `update_and_fetch` + `gather_visible` + SDPA loop below. It declines
-        // (leaving the pool untouched) for anything it cannot serve, including
-        // dense-backed batches, so the loop below is still reached unchanged.
-        // Multi-token steps (batched prefill, speculative / MTP verify) never
-        // enter it: `seq_len != 1`.
-        if seq_len == 1
-            && mask.is_none()
-            && decode_context.is_some_and(|context| context.is_paged_decode())
-            && let Some(attn_out) = mlxcel_core::cache::paged_batch_decode_attention(
-                &q_batched, &k_batched, &v_batched, caches, self.scale, 0.0,
-            )
-        {
-            let attn_out = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);
-            return mlxcel_core::reshape(
-                &attn_out,
-                &[b as i32, seq_len, self.num_heads * self.head_dim],
-            );
-        }
+        // One batched attention entry (#2171, ADR 0008): a single-token
+        // unmasked step over pool-backed caches is one whole-batch launch
+        // (#899); every other shape, and a batch that launch declines, runs
+        // each row through `KVCache::attend`, so a row decodes the same way
+        // whether it was scheduled alone or in a batch. Multi-token steps
+        // (batched prefill, speculative / MTP verify) never reach the paged
+        // single-token kernel.
+        let attn_out = mlxcel_core::cache::attend_batched(
+            &q_batched, &k_batched, &v_batched, caches, self.scale, mask,
+        );
 
-        let paged_decode = decode_context.and_then(|context| {
-            if seq_len != 1 || mask.is_some() || !context.is_paged_decode() {
-                return None;
-            }
-            if caches.iter().any(|cache| cache.mode != KVCacheMode::Fp16) {
-                return None;
-            }
-            // Pool-backed caches keep no dense `keys`/`values` buffers for the
-            // dense-compat paged kernel to read. Since #899 they are normally
-            // served by `paged_batch_decode_attention` above; reaching here
-            // means that path declined, so fall through to the per-sequence
-            // `update_and_fetch` loop below, whose pool intercept writes into
-            // the shared `PagedBlockPool` and gathers the visible window back.
-            if caches.iter().any(|cache| cache.is_paged_backed()) {
-                return None;
-            }
-            let metadata =
-                PagedDecodeMetadata::from_attention_metadata(metadata, context.paged_block_size)
-                    .ok()?;
-            Some((context.use_native_paged_kernel, metadata))
-        });
-
-        if let Some((use_native_kernel, paged_metadata)) = paged_decode {
-            tracing::debug!(
-                batch_size = b,
-                block_size = paged_metadata.block_size,
-                native_kernel = use_native_kernel,
-                "Qwen3 paged decode attention dispatch"
-            );
-            let mut cache_keys: Vec<*const MlxArray> = Vec::with_capacity(b);
-            let mut cache_values: Vec<*const MlxArray> = Vec::with_capacity(b);
-
-            for (i, cache) in caches.iter_mut().enumerate() {
-                let k_i = mlxcel_core::slice(
-                    &k_batched,
-                    &[i as i32, 0, 0, 0],
-                    &[i as i32 + 1, i32::MAX, i32::MAX, i32::MAX],
-                );
-                let v_i = mlxcel_core::slice(
-                    &v_batched,
-                    &[i as i32, 0, 0, 0],
-                    &[i as i32 + 1, i32::MAX, i32::MAX, i32::MAX],
-                );
-                cache.update(k_i, v_i);
-                cache_keys.push(cache.keys.as_ref().unwrap().as_ref().unwrap() as *const MlxArray);
-                cache_values
-                    .push(cache.values.as_ref().unwrap().as_ref().unwrap() as *const MlxArray);
-            }
-
-            let attn_out = if use_native_kernel {
-                mlxcel_core::layers::paged_decode_attention_dense_compat(
-                    &q_batched,
-                    &cache_keys,
-                    &cache_values,
-                    &paged_metadata,
-                    self.scale,
-                )
-            } else {
-                mlxcel_core::layers::paged_decode_attention_dense_fallback(
-                    &q_batched,
-                    &cache_keys,
-                    &cache_values,
-                    &paged_metadata,
-                    self.scale,
-                )
-            }
-            .expect("valid qwen3 paged decode attention inputs");
-
-            let attn_out = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);
-            return mlxcel_core::reshape(
-                &attn_out,
-                &[b as i32, seq_len, self.num_heads * self.head_dim],
-            );
-        }
-
-        for (i, cache) in caches.iter_mut().enumerate() {
-            // Slice [B, heads, T, dim] -> [1, heads, T, dim] for sequence i.
-            let q_i = mlxcel_core::slice(
-                &q_batched,
-                &[i as i32, 0, 0, 0],
-                &[i as i32 + 1, i32::MAX, i32::MAX, i32::MAX],
-            );
-            let k_i = mlxcel_core::slice(
-                &k_batched,
-                &[i as i32, 0, 0, 0],
-                &[i as i32 + 1, i32::MAX, i32::MAX, i32::MAX],
-            );
-            let v_i = mlxcel_core::slice(
-                &v_batched,
-                &[i as i32, 0, 0, 0],
-                &[i as i32 + 1, i32::MAX, i32::MAX, i32::MAX],
-            );
-
-            // Update KV cache
-            let (cache_k, cache_v) = cache.update_and_fetch(k_i, v_i);
-
-            let mask_i = mask.map(|m| {
-                let sliced =
-                    mlxcel_core::slice(m, &[i as i32, 0, 0], &[i as i32 + 1, seq_len, i32::MAX]);
-                mlxcel_core::squeeze_axis(&sliced, 0)
-            });
-
-            let attn_out = if seq_len > 1 && mask_i.is_none() {
-                mlxcel_core::causal_attention(&q_i, &cache_k, &cache_v, self.scale, 0.0, 0)
-            } else {
-                let mask_ptr = mask_i
-                    .as_ref()
-                    .map(|m| m.as_ref().unwrap() as *const _)
-                    .unwrap_or(std::ptr::null());
-                unsafe {
-                    mlxcel_core::layers::attention_from_ptr(
-                        &q_i, &cache_k, &cache_v, self.scale, mask_ptr, 0.0, 0,
-                    )
-                }
-            };
-
-            // Transpose back: [1, n_heads, T, head_dim] -> [1, T, n_heads * head_dim]
-            let attn_out = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);
-            let attn_out =
-                mlxcel_core::reshape(&attn_out, &[1, seq_len, self.num_heads * self.head_dim]);
-
-            attn_outputs.push(attn_out);
-        }
-
-        // Concatenate along batch dim: B * [1, T, hidden] -> [B, T, hidden]
-        let mut result = attn_outputs.remove(0);
-        for attn_out in attn_outputs {
-            result = mlxcel_core::concatenate(&result, &attn_out, 0);
-        }
-        result
+        // Transpose back: [B, n_heads, T, head_dim] -> [B, T, n_heads * head_dim]
+        let attn_out = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);
+        mlxcel_core::reshape(
+            &attn_out,
+            &[b as i32, seq_len, self.num_heads * self.head_dim],
+        )
     }
 
     pub fn from_weights(
@@ -783,7 +577,6 @@ impl TransformerBlock {
         x: &MlxArray,
         caches: &mut [&mut KVCache],
         mask: Option<&MlxArray>,
-        decode_context: Option<&DecodeBatchContext>,
     ) -> UniquePtr<MlxArray> {
         // Batched pre-attention norm
         let normed = self.input_layernorm.forward(x);
@@ -803,7 +596,6 @@ impl TransformerBlock {
             caches,
             &metadata,
             mask,
-            decode_context,
         );
 
         // Batched output projection
@@ -968,7 +760,6 @@ impl Qwen3Model {
         input_ids: &MlxArray,
         batch_caches: &mut [&mut [KVCache]],
         mask: Option<&MlxArray>,
-        decode_context: Option<&DecodeBatchContext>,
     ) -> UniquePtr<MlxArray> {
         let b = batch_caches.len();
 
@@ -983,7 +774,7 @@ impl Qwen3Model {
                 .map(|caches| &mut caches[layer_idx])
                 .collect();
 
-            h = self.layers[layer_idx].forward_batched(&h, &mut layer_caches, mask, decode_context);
+            h = self.layers[layer_idx].forward_batched(&h, &mut layer_caches, mask);
         }
 
         // Batched final norm: [B, 1, hidden_dim]
@@ -1155,17 +946,7 @@ impl LanguageModel for Qwen3Model {
         batch_caches: &mut [&mut [KVCache]],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        self.forward_batched_impl(input_ids, batch_caches, mask, None)
-    }
-
-    fn forward_batched_with_context(
-        &self,
-        input_ids: &MlxArray,
-        batch_caches: &mut [&mut [KVCache]],
-        mask: Option<&MlxArray>,
-        context: Option<&DecodeBatchContext>,
-    ) -> UniquePtr<MlxArray> {
-        self.forward_batched_impl(input_ids, batch_caches, mask, context)
+        self.forward_batched_impl(input_ids, batch_caches, mask)
     }
 
     fn supports_batched_prefill(&self) -> bool {

@@ -26,6 +26,7 @@
 //! real DeepSeek model.
 
 use super::*;
+use crate::cache::KVCache;
 use crate::dtype;
 use crate::mla::absorb::MlaAbsorbedProjections;
 use crate::mla::testkit::{MlaFixture, TINY, max_rel_error, serial, to_vec_f32};
