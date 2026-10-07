@@ -470,26 +470,24 @@ fn a_structured_stop_reports_stop_below_a_stop_string() {
     );
 }
 
-/// The burst stream had no repetition guard before #2168: a looping MTP or
-/// DFlash request streamed every token and finished `stop`, while the same
-/// request on classic decode stopped early with `RepetitionLoop`.
-#[test]
-fn a_repeating_burst_stream_finishes_on_the_repetition_loop() {
-    let s = scenarios()
-        .into_iter()
-        .find(|s| s.name == "repetition loop")
-        .expect("known scenario");
+/// Feed `tokens` to the burst stream as one generator batch (the
+/// run-to-completion arm, or one MTP round) and finalize. Returns the outcome
+/// and whether the stream ended and may donate its state to the prompt cache.
+struct BurstBatch {
+    outcome: Outcome,
+    done: bool,
+    healthy: bool,
+}
+
+fn burst_batch(s: &Scenario, tokens: &[i32]) -> BurstBatch {
     let tokenizer = MlxcelTokenizer::stub_all_byte_fallback();
-    let (mut seq, rx) = make_sequence(&tokenizer, &s, SequenceState::Prefilling);
+    let (mut seq, rx) = make_sequence(&tokenizer, s, SequenceState::Prefilling);
+    seq.merged_eos.clear();
     let mut stream = begin_burst_stream(vec![EOS], &seq, s.context);
-    let done = stream_burst_tokens(&tokenizer, &mut seq, &mut stream, &s.tokens, &[]);
-    assert!(done, "the loop terminates the stream");
-    assert_eq!(seq.generated_tokens, bytes("ababab"));
-    let outcome = finalize_burst_stream(&tokenizer, seq, &stream, None);
-    assert!(
-        outcome.healthy_finish,
-        "a loop finish donates like classic decode"
-    );
+    let done = stream_burst_tokens(&tokenizer, &mut seq, &mut stream, tokens, &[]);
+    let cause = stream.finish();
+    let generated = seq.generated_tokens.clone();
+    let healthy = finalize_burst_stream(&tokenizer, seq, &stream, None).healthy_finish;
     let result = rx
         .try_iter()
         .find_map(|event| match event {
@@ -497,7 +495,95 @@ fn a_repeating_burst_stream_finishes_on_the_repetition_loop() {
             _ => None,
         })
         .expect("the burst finalize sends one Done event");
+    let outcome = Outcome {
+        cause,
+        generated,
+        finish_reason: result.finish_reason,
+        stop_kind: result.stop_kind,
+    };
+    BurstBatch {
+        outcome,
+        done,
+        healthy,
+    }
+}
+
+fn named(name: &str) -> Scenario {
+    scenarios()
+        .into_iter()
+        .find(|s| s.name == name)
+        .expect("known scenario")
+}
+
+/// The burst stream had no repetition guard before #2168: a looping MTP or
+/// DFlash request streamed every token and finished `stop`, while the same
+/// request on classic decode stopped early with `RepetitionLoop`.
+#[test]
+fn a_repeating_burst_stream_finishes_on_the_repetition_loop() {
+    let s = named("repetition loop");
+    let BurstBatch {
+        outcome,
+        done,
+        healthy,
+    } = burst_batch(&s, &s.tokens);
+    assert!(done, "the loop terminates the stream");
+    assert_eq!(outcome.cause, Some(FinishCause::RepetitionLoop));
+    assert_eq!(outcome.generated, bytes("ababab"));
+    assert!(
+        !healthy,
+        "the generator already produced the trailing tokens, so the model \
+         state is ahead of the committed stream and must not be donated"
+    );
     let reference = drive_classic_decode(&s);
-    assert_eq!(result.finish_reason, reference.finish_reason);
-    assert_eq!(result.stop_kind, reference.stop_kind);
+    assert_eq!(outcome.finish_reason, reference.finish_reason);
+    assert_eq!(outcome.stop_kind, reference.stop_kind);
+}
+
+/// A loop that fires on the last token of the batch leaves the model state
+/// in step with the committed stream, so it donates like classic decode.
+#[test]
+fn a_burst_loop_on_the_last_batch_token_donates() {
+    let s = named("repetition loop");
+    let BurstBatch {
+        outcome, healthy, ..
+    } = burst_batch(&s, &bytes("ababab"));
+    assert_eq!(outcome.cause, Some(FinishCause::RepetitionLoop));
+    assert_eq!(outcome.generated, bytes("ababab"));
+    assert!(healthy, "a loop finish at the batch end donates");
+    assert_eq!(
+        outcome.finish_reason,
+        drive_classic_decode(&s).finish_reason
+    );
+}
+
+/// A stop string completing mid-batch leaves `z` in the model state but out
+/// of the committed stream: the finish is a stop sequence that never donates.
+#[test]
+fn a_mid_batch_burst_stop_string_does_not_donate() {
+    let s = named("stop string");
+    let BurstBatch {
+        outcome, healthy, ..
+    } = burst_batch(&s, &s.tokens);
+    assert_eq!(outcome.cause, Some(FinishCause::StopSequence));
+    // Classic decode records `FinishReason::StopSequence` for this stream
+    // (`the_cause_maps_onto_the_reference_finish_reasons`).
+    let reference = drive_classic_decode(&s);
+    assert_eq!(
+        (outcome.finish_reason, outcome.stop_kind),
+        (reference.finish_reason, reference.stop_kind)
+    );
+    assert!(!healthy, "the uncommitted `z` is in the model state");
+}
+
+/// `max_tokens` reached exactly at the batch end commits every produced
+/// token, so the finish stays healthy.
+#[test]
+fn a_burst_finishing_on_max_tokens_at_the_batch_end_donates() {
+    let s = named("max_tokens");
+    let BurstBatch {
+        outcome, healthy, ..
+    } = burst_batch(&s, &s.tokens[..3]);
+    assert_eq!(outcome.cause, Some(FinishCause::Length));
+    assert_eq!(outcome.generated, bytes("abc"));
+    assert!(healthy, "no produced token is left uncommitted");
 }

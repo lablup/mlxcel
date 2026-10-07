@@ -1986,6 +1986,14 @@ pub(crate) struct BurstStreamState {
     /// stream layer finished the request first (e.g. a thinking-budget
     /// forced `</think>` that is an EOS id).
     done: bool,
+    /// The finish step ended the stream before the last token of a batch
+    /// the generator had already produced (and forwarded into the target's
+    /// model-owned state). The model state then holds tokens past the
+    /// committed stream (`prompt + generated_tokens`), so the finish must
+    /// not donate its state to the prompt cache: a snapshot-reuse entry
+    /// keyed by the committed tokens would restore the uncommitted tail
+    /// into the next turn.
+    uncommitted_tail: bool,
 }
 
 impl BurstStreamState {
@@ -2014,6 +2022,7 @@ pub(crate) fn begin_burst_stream(
         finish: None,
         logprobs_enabled: seq.logprobs_config.enabled,
         done: false,
+        uncommitted_tail: false,
     }
 }
 
@@ -2096,6 +2105,9 @@ pub(crate) fn stream_burst_tokens(
         ) {
             stream.finish = Some(cause);
             stream.done = true;
+            // The generator already produced every token in `tokens`; any
+            // after `idx` sit in the model state but are never committed.
+            stream.uncommitted_tail = idx + 1 < tokens.len();
             break;
         }
     }
@@ -2133,23 +2145,26 @@ pub(crate) fn finalize_burst_stream(
         // still accurate.
         FinishReason::Stop
     };
-    // classify the finish for the prompt-cache donate gate
-    // BEFORE `finish_reason` is moved into `transition_to`. Mirrors the
-    // `healthy` gate in `scheduler.rs::finalize_completed` — only
-    // `Stop` / `StopSequence` / `Length` / `Cancelled` finishes donate their
-    // cache back. `finalize_burst_success` only ever classifies `Stop`,
-    // `StopSequence` or `Length` (the `Error` / `Cancelled` outcomes never
-    // reach this function), so this is always `true` here; computing it
-    // explicitly keeps the burst path's gate bit-identical to the classic
-    // path's and robust if the classification above ever gains a new arm.
-    let healthy_finish = matches!(
-        finish_reason,
-        FinishReason::Stop
-            | FinishReason::StopSequence
-            | FinishReason::Length
-            | FinishReason::RepetitionLoop
-            | FinishReason::Cancelled
-    );
+    // Classify the finish for the prompt-cache donate gate BEFORE
+    // `finish_reason` is moved into `transition_to`. The reason list mirrors
+    // the `healthy` gate in `scheduler.rs::finalize_completed`. On top of it,
+    // a stream the finish step truncated mid-batch never donates, whatever
+    // the cause: the generator had already forwarded the rest of that batch
+    // into the target's model-owned state, so the state is ahead of
+    // `prompt + generated_tokens`. Snapshot-reuse families snapshot the whole
+    // state under that shorter key, and a later whole-entry prompt-cache
+    // match would restore the uncommitted tail into the next turn. A finish
+    // on the last token of a batch leaves the state in step and donates as
+    // classic decode does.
+    let healthy_finish = !stream.uncommitted_tail
+        && matches!(
+            finish_reason,
+            FinishReason::Stop
+                | FinishReason::StopSequence
+                | FinishReason::Length
+                | FinishReason::RepetitionLoop
+                | FinishReason::Cancelled
+        );
     if let Err(err) = seq
         .state
         .transition_to(SequenceState::Finished(finish_reason))
