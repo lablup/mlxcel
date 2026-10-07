@@ -28,7 +28,7 @@ pub mod lang_bias;
 pub mod lora;
 pub mod models;
 pub mod multimodal;
-pub mod reasoning_stream;
+pub mod reasoning_display;
 pub mod rerank;
 pub mod server;
 #[cfg(feature = "surgery")]

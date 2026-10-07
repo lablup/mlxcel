@@ -12,131 +12,100 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Interactive multi-turn chat REPL (epic #92, issue #96).
+//! Interactive multi-turn chat REPL (epic #92, issue #96), a client of the
+//! in-process model server since epic #2166 Phase 5 (issue #2173).
 //!
 //! A line-edited, streaming chat loop in the spirit of `mlx_lm.chat` /
-//! `ollama run`. It is deliberately a thin orchestration layer over the
-//! **existing** generation machinery — it forks none of it:
+//! `ollama run`. The REPL keeps the terminal and the transcript; everything
+//! about generation is the server's:
 //!
-//! * model resolution → [`mlxcel::downloader::resolve_model_source`] (the same
-//!   `-m`-accepts-a-repo-id resolver `generate` / `serve` / `inspect` use,
-//!   issue #94),
-//! * tokenization → [`mlxcel::tokenizer::MlxcelTokenizer`] via
-//!   [`mlxcel::tokenizer::load_tokenizer`],
-//! * prompt rendering → [`ChatTemplateProcessor`] (the exact chat-template path
-//!   `generate` applies),
-//! * sampling → [`build_sampling_config`] over [`ResolvedSamplingParams`] (the
-//!   same `SamplingConfig` assembly `generate` uses),
-//! * token generation → [`Session::generate_streaming`] (which delegates to the
-//!   same `CxxGenerator` streaming decode loop the offline `generate` path drives),
-//! * incremental detokenization → [`StreamingDecodeState`] (the server's own
-//!   byte-fallback-safe streaming detokenizer, now shared).
+//! * model resolution: [`mlxcel::downloader::resolve_model_source_with_override`]
+//!   (the `-m`-accepts-a-repo-id resolver, issue #94);
+//! * the model worker: [`InProcessServer`], started at one slot with the CLI's
+//!   sampling flags as its defaults ([`super::cli_server`]);
+//! * each turn: [`InProcessServer::chat`], the `/v1/chat/completions` request
+//!   path (chat template, Kimi K3's native renderer, worker options, the
+//!   server's `StreamFilter` for reasoning, tool-call parsing, stop strings);
+//! * `--no-chat-template`: [`InProcessServer::complete`], the
+//!   `/v1/completions` path over the raw transcript.
 //!
 //! ## Multi-turn context
 //!
-//! The full conversation ([`ChatMessage`] history) is re-rendered through the
-//! chat template every turn and the resulting prompt is fed to
-//! `generate_streaming`. This is the correctness-first reuse path: the
-//! generator re-prefills the accumulated context on each turn (it owns and
-//! resets its KV cache per call), so context is preserved without
-//! reimplementing a bespoke cross-turn KV-append loop that would diverge from
-//! the canonical generation code. `/clear` simply empties the history.
+//! The whole transcript is sent every turn, as a chat client sends it. The
+//! server's prompt cache (on for the REPL, the server default) reuses the KV
+//! of the history prefix the previous turn left, so a follow-up prefills only
+//! the new messages. Each conversation carries its own `prompt_cache_key`;
+//! `/clear` empties the transcript and moves to a new key, so nothing cached
+//! for the old conversation is adopted again.
 //!
-//! ## Reusable entry point
+//! ## Interrupting a reply
 //!
-//! [`run_chat`] is a free function taking a self-contained [`ChatOptions`] so
-//! the forthcoming `mlxcel run` verb (issue #95) can dispatch straight into the
-//! REPL without going through `GenerateArgs`. The `generate` subcommand calls
-//! [`run_chat`] when invoked with no `-p/--prompt`.
+//! Ctrl-C while a reply streams cancels that request through the worker's
+//! cancellation path (the one a disconnected HTTP client uses) and returns to
+//! the prompt; the interrupted exchange is dropped from the transcript. A
+//! second Ctrl-C while that reply is still stopping ends the process.
+//! Ctrl-C at the prompt cancels the line, as before.
+//!
+//! ## Images
+//!
+//! The transcript, images included, is re-sent every turn, so the images in
+//! the conversation count against the server's per-request image cap
+//! ([`mlxcel::current_image_input_limits`]). `/image` and `--image` refuse an
+//! image that would go over it, instead of letting every later turn fail until
+//! `/clear`.
 
-use std::io::{self, IsTerminal, Write as IoWrite};
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::io::{self, IsTerminal};
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Result, anyhow};
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
+use serde_json::json;
 
-use mlxcel::cli::max_tokens::{
-    DEFAULT_CONTEXT_WINDOW_FALLBACK, UNLIMITED_MAX_TOKENS, resolve_unlimited_max_tokens,
+use mlxcel::initialize_runtime_checked;
+use mlxcel::server::chat_template::ChatMessage;
+use mlxcel::server::in_process::InProcessServer;
+use mlxcel::server::in_process::chat::{chat_request_from_json, completion_request_from_json};
+
+use super::chat_transcript::{
+    Turn, check_image_budget, image_data_uri, image_data_uris, messages_json, server_image_cap,
+    transcript_image_count, transcript_messages,
 };
-use mlxcel::reasoning_stream;
-use mlxcel::sampling::{ResolvedSamplingParams, build_sampling_config};
-use mlxcel::server::chat_template::{ChatMessage, ChatTemplateProcessor};
-use mlxcel::server::kimi_k3_chat::{K3RenderOptions, KimiK3Renderer};
-use mlxcel::server::model_provider::model_worker::StreamingDecodeState;
-use mlxcel::server::types::Role;
-use mlxcel::server::types::request::{Message, MessageContent};
-use mlxcel::tokenizer::{MlxcelTokenizer, load_tokenizer};
-use mlxcel::{LanguageModel, SamplingConfig, Session, initialize_runtime_checked, select_backend};
-use mlxcel_core::cache::KVCacheMode;
-use mlxcel_core::sampling::TokenBiasMap;
-use mlxcel_core::sampling_token_bias::compose_token_bias;
+use super::cli_turn::{
+    TurnDisplay, TurnPrinter, run_cancellable, shutdown_then_fail, warn_if_base_model,
+};
+use mlxcel::cli::in_process_client::CliServerSettings;
 
 /// Triple-quote fence that opens / closes an ollama-style multiline input
 /// block.
 const MULTILINE_FENCE: &str = "\"\"\"";
 
-/// Self-contained configuration for the interactive chat REPL.
-///
-/// Constructed by the `generate` subcommand (no-prompt path) and by the
-/// future `mlxcel run` verb (issue #95). Keeping this a plain options struct —
-/// rather than borrowing `GenerateArgs` — is what lets #95 reuse [`run_chat`]
-/// without dragging in the offline generate flag surface.
+/// Self-contained configuration for the interactive chat REPL, built by
+/// `mlxcel run` and by `mlxcel generate` without `-p`.
 #[derive(Debug, Clone)]
 pub struct ChatOptions {
-    /// Local model directory **or** a HuggingFace `owner/name` repo-id. Passed
-    /// verbatim to [`mlxcel::downloader::resolve_model_source_with_override`],
-    /// so a repo-id auto-downloads exactly like `generate -m <repo-id>`. A bare
-    /// name without a slash (e.g. `Qwen3-4B-4bit`) is resolved as
-    /// `mlx-community/<name>`; override the org with the `MLXCEL_DEFAULT_ORG`
-    /// environment variable.
+    /// Local model directory **or** a HuggingFace `owner/name` repo-id,
+    /// resolved like `generate -m`. A bare name without a slash resolves as
+    /// `mlx-community/<name>` (override the org with `MLXCEL_DEFAULT_ORG`).
     pub model: PathBuf,
-    /// Model-store root override (`--models-dir`, issue #107) threaded into the
-    /// `-m` resolver so a repo-id resolves to / downloads under this root. `None`
-    /// keeps the `MLXCEL_MODELS_DIR`-then-cache-root resolution.
+    /// Model-store root override (`--models-dir`, issue #107).
     pub models_dir: Option<PathBuf>,
-    /// Repository revision override (`--revision`, issue #1113) threaded into
-    /// the `-m` resolver. `None` means `main`. Only meaningful for a repo-id;
-    /// the resolver rejects it alongside an existing local path.
+    /// Repository revision override (`--revision`, issue #1113).
     pub revision: Option<String>,
-    /// Maximum number of tokens to generate per assistant turn.
-    pub max_tokens: usize,
-    /// Resolved sampling knobs (temperature / top-k / top-p / min-p /
-    /// penalties). The same struct `generate` builds its `SamplingConfig` from.
-    pub sampling: ResolvedSamplingParams,
-    /// KV-cache quantization mode for the generator.
-    pub kv_cache_mode: KVCacheMode,
-    /// When `true`, skip chat-template application and feed raw user text to
-    /// the model (mirrors `generate --no-chat-template`). Multi-turn context is
-    /// then concatenated as plain text.
+    /// What the in-process server is started with: sampling flags, `-n`,
+    /// the KV cache mode, the adapter and the speculative drafter.
+    pub(crate) server: CliServerSettings,
+    /// Send the raw transcript as a completion instead of rendering the chat
+    /// template (mirrors `generate --no-chat-template`).
     pub no_chat_template: bool,
-    /// When `true`, also print the model's reasoning channel (dimmed on a TTY)
-    /// instead of suppressing it. Mirrors `generate --show-reasoning`. The raw
-    /// channel markers are never printed regardless of this flag.
+    /// Also print the reasoning channel (dimmed on a TTY). The raw channel
+    /// markers never print.
     pub show_reasoning: bool,
-}
-
-impl ChatOptions {
-    /// Construct chat options with the conventional REPL defaults
-    /// (greedy-friendly sampling left to the caller; everything else inert).
-    ///
-    /// Callers typically build [`ResolvedSamplingParams`] from their own CLI
-    /// flags; this helper only fixes the non-sampling knobs so `mlxcel run`
-    /// (issue #95) and the `generate` no-prompt path share one default surface.
-    pub fn new(model: PathBuf, max_tokens: usize, sampling: ResolvedSamplingParams) -> Self {
-        Self {
-            model,
-            models_dir: None,
-            revision: None,
-            max_tokens,
-            sampling,
-            kv_cache_mode: KVCacheMode::Fp16,
-            no_chat_template: false,
-            show_reasoning: false,
-        }
-    }
+    /// Images attached to the first user message (`--image`).
+    pub images: Vec<PathBuf>,
+    /// `--image-soft-tokens`: the Gemma 4 image budget sent with every image.
+    pub image_soft_tokens: Option<usize>,
 }
 
 /// Outcome of interpreting a single submitted line / block.
@@ -150,293 +119,241 @@ enum Action {
 }
 
 /// Result of dispatching a slash command.
+#[derive(Debug, PartialEq, Eq)]
 enum SlashOutcome {
     /// Input was not a slash command — treat it as a user message.
     NotACommand,
     /// A command was handled; continue the loop (no conversation reset).
     Handled,
-    /// `/clear` — conversation was reset; the caller should also reset
-    /// generator state before the next turn.
+    /// `/clear` — the transcript was emptied; the caller also starts a new
+    /// server-side conversation.
     Cleared,
+    /// `/image <path>` — attach an image to the next message.
+    Image(PathBuf),
     /// `/bye` — leave the REPL cleanly.
     Exit,
 }
 
+/// Families the chat worker cannot hold a conversation with, and what to run
+/// instead. Checked before the weights load.
+fn non_chat_family_error(model_path: &Path) -> Option<anyhow::Error> {
+    use mlxcel::models::ModelType;
+    let model_type = mlxcel::models::get_model_type(model_path).ok()?;
+    let message = match model_type {
+        ModelType::DiffusionGemma | ModelType::Llada2Moe => {
+            "Block-diffusion models do not support interactive chat yet; use a one-shot prompt: \
+             mlxcel generate -m <model> -p \"...\""
+        }
+        ModelType::Florence2VLM => {
+            "Florence-2 is an image-task model without a chat surface; run a task instead: \
+             mlxcel generate -m <model> --image <image> -p '<CAPTION>' (or <OD>, <OCR>, ...)"
+        }
+        ModelType::NemotronVoiceChat => {
+            "Nemotron VoiceChat is a speech-to-speech model without a text chat surface; run a \
+             turn instead: mlxcel generate -m <model> --audio question.wav --output-audio \
+             answer.wav [-p '<system prompt>']"
+        }
+        ModelType::NemotronParseVLM => {
+            "Nemotron-Parse is a document-parsing model without a chat surface; parse a page \
+             instead: mlxcel generate -m <model> --image <page> -p \
+             '</s><s><predict_bbox><predict_classes><output_markdown><predict_no_text_in_pic>'"
+        }
+        _ => return None,
+    };
+    Some(anyhow!(message))
+}
+
 /// Run the interactive multi-turn chat REPL until the user exits.
-///
-/// Reusable entry point for both the `generate` no-prompt path and the
-/// `mlxcel run` verb (issue #95). Loads the model once, then loops: read a
-/// line (or a `"""` multiline block), interpret slash commands, render the
-/// accumulated conversation through the chat template, and stream the
-/// assistant reply token-by-token via the shared inference [`Session`].
 ///
 /// # Errors
 ///
-/// Returns an error if the model cannot be resolved / loaded, the tokenizer
-/// cannot be read, or the terminal line editor cannot be initialized. Per-turn
-/// generation never aborts the loop; a `/clear` or a fresh turn always recovers.
+/// Returns an error if the model cannot be resolved or served, or the
+/// terminal line editor cannot be initialized. A failed turn is reported and
+/// the loop continues.
 pub fn run_chat(mut opts: ChatOptions) -> Result<()> {
     let runtime = initialize_runtime_checked()?;
-    println!("Runtime device: {}", runtime.device);
-    if runtime.cpu_override {
-        println!(
-            "Running on the CPU because MLXCEL_DEVICE=cpu asked for it (GPU backend available: {}).",
-            mlxcel_core::gpu_backend_available()
-        );
-    }
+    super::generate::print_runtime_setup(&runtime);
 
-    // Reuse the exact `-m` resolver `generate` / `serve` / `inspect` use, so a
-    // repo-id auto-downloads into the global store (epic #92, issues #93/#94),
-    // honoring the `--models-dir` override (issue #107).
     let model_path = mlxcel::downloader::resolve_model_source_with_override(
         &opts.model,
         opts.models_dir.as_deref(),
         opts.revision.as_deref(),
     )?;
-
-    // issue #1350: substitute the KV cache mode this model family can really
-    // run before the session (and therefore its caches) is built, so the REPL
-    // and one-shot `generate` agree on what a given `--kv-cache-mode` means.
-    // Announced once here, before the load banner, rather than per turn.
-    opts.kv_cache_mode = mlxcel::cli::turbo_args::resolve_and_announce_kv_cache_mode(
-        opts.kv_cache_mode,
+    if let Some(err) = non_chat_family_error(&model_path) {
+        return Err(err);
+    }
+    // `--image` files are read once, before the model loads, so a bad path
+    // fails fast and the transcript holds the encoded bytes from then on.
+    let initial_images = if opts.no_chat_template {
+        if !opts.images.is_empty() {
+            eprintln!(
+                "Note: --image is ignored with --no-chat-template; raw turns carry no media."
+            );
+        }
+        Vec::new()
+    } else {
+        let images = image_data_uris(&opts.images)?;
+        // The first message carries them all, and the transcript re-sends
+        // them every turn, so more than the server's cap would fail turn one.
+        check_image_budget(0, images.len(), server_image_cap())
+            .map_err(|reason| anyhow!("--image: {reason}"))?;
+        images
+    };
+    // issue #1350: the KV cache mode this family can really run, announced
+    // once before the load banner.
+    opts.server.kv_cache_mode = mlxcel::cli::turbo_args::resolve_and_announce_kv_cache_mode(
+        opts.server.kv_cache_mode,
         &model_path,
     );
+    // The REPL keeps the server default: prompt cache on, no warmup beyond
+    // the first turn's own prefill.
+    opts.server.prompt_cache = true;
+    opts.server.warmup = false;
 
     println!("Loading model from {model_path:?}...");
     let load_start = Instant::now();
-    let (model, _tok_from_load) = select_backend().load_model(&model_path)?;
-    if matches!(
-        model,
-        mlxcel::LoadedModel::DiffusionGemma(_) | mlxcel::LoadedModel::Llada2Moe(_)
-    ) {
-        // The REPL drives the autoregressive CxxGenerator loop; the
-        // block-diffusion / block-unmasking engines are one-shot only.
-        return Err(anyhow!(
-            "Block-diffusion models do not support interactive chat yet; use a one-shot prompt: \
-             mlxcel generate -m <model> -p \"...\""
-        ));
-    }
-    if matches!(model, mlxcel::LoadedModel::Florence2VLM(_)) {
-        // Florence-2 is an image-task seq2seq model (issue #1073): its
-        // `LanguageModel` forward exists for trait completeness only, so the
-        // REPL's autoregressive loop would re-encode every step and answer
-        // nonsense. `generate` and the server route it to the task pipeline;
-        // there is no conversational surface to route a REPL to.
-        return Err(anyhow!(
-            "Florence-2 is an image-task model without a chat surface; run a task instead: \
-             mlxcel generate -m <model> --image <image> -p '<CAPTION>' (or <OD>, <OCR>, ...)"
-        ));
-    }
-    if matches!(model, mlxcel::LoadedModel::NemotronVoiceChat(_)) {
-        // Nemotron VoiceChat (issue #1374) is a full-duplex speech model:
-        // its input is an audio timeline, not a chat transcript.
-        return Err(anyhow!(
-            "Nemotron VoiceChat is a speech-to-speech model without a text chat surface; run a \
-             turn instead: mlxcel generate -m <model> --audio question.wav --output-audio \
-             answer.wav [-p '<system prompt>']"
-        ));
-    }
-    if matches!(model, mlxcel::LoadedModel::NemotronParseVLM(_)) {
-        // Nemotron-Parse is a page-parsing seq2seq model (issue #1369) with no
-        // conversational surface, for the same reason as Florence-2 above.
-        return Err(anyhow!(
-            "Nemotron-Parse is a document-parsing model without a chat surface; parse a page \
-             instead: mlxcel generate -m <model> --image <page> -p \
-             '</s><s><predict_bbox><predict_classes><output_markdown><predict_no_text_in_pic>'"
-        ));
-    }
-    let tokenizer = Arc::new(load_tokenizer(&model_path)?);
+    let server = InProcessServer::start(&opts.server.startup(&model_path))?;
     println!(
         "Model loaded in {:.2}s.",
         load_start.elapsed().as_secs_f64()
     );
-
-    // llama.cpp parity (issue #476): the default unlimited `-n -1` caps each
-    // reply at the model context window instead of a fixed number, so chat turns
-    // run until EOS or the window fills. Read the window once; `stream_turn`
-    // computes the per-turn budget (window - rendered prompt) so a growing
-    // transcript never overruns the context. An explicit `-n N` is honored
-    // verbatim every turn.
-    let context_window =
-        mlxcel::read_model_context_window(&model_path).unwrap_or(DEFAULT_CONTEXT_WINDOW_FALLBACK);
-    if opts.max_tokens == UNLIMITED_MAX_TOKENS {
-        println!(
-            "Per-turn output: unlimited (-1) -> until EOS or the model context window \
-             ({context_window} tokens)."
-        );
+    if opts.server.max_tokens.is_none() {
+        println!("Per-turn output: unlimited (-1) -> until EOS or the model context window.");
     }
+    warn_if_base_model(&server, opts.no_chat_template);
 
-    // Same chat-template discovery as `generate`'s `load_cli_prompt`. `None`
-    // (no template, or `--no-chat-template`) falls back to raw-text turns.
-    let processor = if opts.no_chat_template {
-        None
-    } else {
-        ChatTemplateProcessor::from_model_path(&model_path)
-            .ok()
-            .flatten()
+    let mut editor = match DefaultEditor::new() {
+        Ok(editor) => editor,
+        Err(e) => {
+            return shutdown_then_fail(
+                server,
+                anyhow!("Failed to initialize the interactive line editor: {e}"),
+            );
+        }
     };
-    // Kimi K3 ships no chat template; its XTML format is rendered in code and
-    // produces token ids directly (#1338). When it is active the template
-    // discovery above is irrelevant, so the "no chat template" advice below
-    // must not fire.
-    let native_k3 = if opts.no_chat_template {
-        None
-    } else {
-        KimiK3Renderer::new(Arc::clone(&tokenizer))
-    };
-    if native_k3.is_some() {
-        println!("Kimi K3 detected: rendering turns with the native XTML chat format.");
-    }
-    if processor.is_none() && native_k3.is_none() && !opts.no_chat_template {
-        eprintln!(
-            "Note: this model ships no chat template and is likely a base (non-instruction-tuned) model."
-        );
-        eprintln!(
-            "      Chat responses will likely be incoherent or repetitive — base models are not designed"
-        );
-        eprintln!("      for interactive conversation.");
-        eprintln!();
-        eprintln!(
-            "      Try an instruction-tuned variant instead. Naming conventions vary by family:"
-        );
-        eprintln!(
-            "      Gemma uses an \"-it\" suffix (e.g. gemma-4-e4b-it-4bit); Llama and Qwen2.5 use"
-        );
-        eprintln!(
-            "      \"-Instruct\"; Qwen3/Qwen3.5 use the plain name, with \"-Base\" marking the"
-        );
-        eprintln!("      non-instruct variant.");
-        eprintln!();
-        eprintln!(
-            "      Falling back to a generic User/Assistant prompt format to mitigate echo loops."
-        );
-        eprintln!("      For raw text mode without role markers, pass --no-chat-template;");
-        eprintln!("      for one-shot completion, use `mlxcel generate -p <prompt>`.");
-    }
-
-    // Build the SamplingConfig once via the shared assembly used by `generate`.
-    // Stop tokens come from the model's config, exactly like the offline path.
-    let mut sampling = opts.sampling.clone();
-    if sampling.stop_token_ids.is_empty() {
-        sampling.stop_token_ids = mlxcel::read_eos_token_ids(&model_path);
-    }
-    let sampling_config = build_sampling_config(sampling);
-
-    // issue #350: suppress this model's reserved multimodal placeholder ids
-    // (audio / image / video span markers) in the interactive chat generator,
-    // mirroring `run_generation_mode` for the one-shot path. The chat REPL has
-    // no request or language bias, so the shared composition (#2169) reduces
-    // to the suppression. `CxxGenerator`'s `compose_sampling` injects this
-    // cached bias whenever the per-call sampling config carries no token bias
-    // of its own (the chat config's stays empty), so a placeholder id can
-    // never leak into a chat reply. Zero-cost for non-multimodal models: the
-    // suppressed set is empty, the bias map stays empty, and
-    // `apply_token_bias` short-circuits.
-    let output_suppression = compose_token_bias(
-        TokenBiasMap::new(),
-        &TokenBiasMap::new(),
-        &model.output_suppressed_token_ids(),
-    );
-
-    // One inference session for the whole chat (issue #448, ADR 0004). Under
-    // default features `select_backend()` folds to MLX and the session wraps the
-    // same `CxxGenerator`, so `generate_streaming` runs the identical loop and
-    // resets its KV cache per call; re-rendering the full transcript each turn
-    // preserves context without forking the generation loop.
-    let mut session = select_backend().create_session(
-        &model_path,
-        model.num_layers(),
-        opts.kv_cache_mode,
-        output_suppression,
-    )?;
-
-    let mut editor = DefaultEditor::new()
-        .map_err(|e| anyhow!("Failed to initialize the interactive line editor: {e}"))?;
     let interactive = io::stdin().is_terminal();
-
     print_banner(interactive);
 
-    let mut conversation: Vec<ChatMessage> = Vec::new();
-    // Per-turn reasoning, index-aligned with `conversation`. The CLI transcript
-    // type carries only role and content, but the K3 history form renders a
-    // prior assistant turn's reasoning in its own channel, so it is kept
-    // alongside rather than folded into the content.
-    let mut reasonings: Vec<Option<String>> = Vec::new();
+    let display = TurnDisplay {
+        show_reasoning: opts.show_reasoning,
+    };
+    let mut transcript: Vec<Turn> = Vec::new();
+    let mut pending_images = initial_images;
+    let mut conversation = 0u64;
+    let session = std::process::id();
 
     loop {
-        let action = read_input(&mut editor, interactive);
-        match action {
-            Action::Exit => {
-                println!("Bye!");
-                break;
-            }
+        let user_text = match read_input(&mut editor, interactive) {
+            Action::Exit => break,
             Action::Empty => continue,
-            Action::Send(user_text) => {
-                match handle_slash_command(&user_text, &mut conversation) {
-                    SlashOutcome::Exit => {
-                        println!("Bye!");
-                        break;
-                    }
-                    SlashOutcome::Cleared => {
-                        // `/clear` already reset the transcript; also drop any
-                        // session-side state for a clean next prefill.
-                        reasonings.clear();
-                        session.reset_with_model(&model);
-                        continue;
-                    }
-                    SlashOutcome::Handled => continue,
-                    SlashOutcome::NotACommand => {}
+            Action::Send(text) => text,
+        };
+        match handle_slash_command(&user_text, &mut transcript) {
+            SlashOutcome::Exit => break,
+            SlashOutcome::Cleared => {
+                conversation += 1;
+                pending_images.clear();
+                continue;
+            }
+            SlashOutcome::Image(_) if opts.no_chat_template => {
+                eprintln!("error: /image needs the chat template; raw turns carry no media.");
+                continue;
+            }
+            SlashOutcome::Image(path) => {
+                // The whole transcript is re-sent every turn, so an image past
+                // the server's per-request cap would fail every later turn
+                // until `/clear`; refuse it here instead.
+                if let Err(reason) = check_image_budget(
+                    transcript_image_count(&transcript) + pending_images.len(),
+                    1,
+                    server_image_cap(),
+                ) {
+                    eprintln!("error: cannot attach {}: {reason}", path.display());
+                    continue;
                 }
+                // Read now, once: the transcript keeps the encoded image, so
+                // later turns never depend on the file still being there.
+                match image_data_uri(&path) {
+                    Ok(uri) => {
+                        println!("Image {} attached to the next message.", path.display());
+                        pending_images.push(uri);
+                    }
+                    Err(err) => eprintln!("error: {err:#}"),
+                }
+                continue;
+            }
+            SlashOutcome::Handled => continue,
+            SlashOutcome::NotACommand => {}
+        }
 
-                conversation.push(ChatMessage {
-                    role: "user".to_string(),
-                    content: user_text,
-                });
-                reasonings.push(None);
-
-                let prompt = match native_k3.as_ref() {
-                    Some(renderer) => render_k3_prompt(renderer, &conversation, &reasonings)?,
-                    None => TurnPrompt::Text(render_prompt(
-                        processor.as_ref(),
-                        &conversation,
-                        opts.no_chat_template,
-                    )),
-                };
-                let turn = stream_turn(
-                    &mut session,
-                    &model,
-                    &tokenizer,
-                    &prompt,
-                    opts.max_tokens,
-                    context_window,
-                    &sampling_config,
-                    opts.show_reasoning,
-                )?;
-
-                conversation.push(ChatMessage {
-                    role: "assistant".to_string(),
-                    content: turn.content,
-                });
-                reasonings.push(turn.reasoning);
+        transcript.push(Turn {
+            message: ChatMessage {
+                role: "user".to_string(),
+                content: user_text,
+            },
+            images: std::mem::take(&mut pending_images),
+        });
+        let mut printer = TurnPrinter::new(display);
+        let cache_key = format!("mlxcel-chat-{session}-{conversation}");
+        let outcome = run_cancellable(|cancel| {
+            if opts.no_chat_template {
+                let body = mlxcel::cli::in_process_client::completion_request_body(
+                    &concat_plaintext(&transcript_messages(&transcript)),
+                    &opts.server,
+                );
+                server.complete(completion_request_from_json(body)?, cancel, |delta| {
+                    printer.on_delta(delta)
+                })
+            } else {
+                let mut body = mlxcel::cli::in_process_client::chat_request_body(
+                    messages_json(&transcript, opts.image_soft_tokens),
+                    &opts.server,
+                );
+                body["prompt_cache_key"] = json!(cache_key);
+                server.chat(chat_request_from_json(body)?, cancel, |delta| {
+                    printer.on_delta(delta)
+                })
+            }
+        });
+        match outcome {
+            Ok(turn) => {
+                printer.finish(&turn, "Restart");
+                println!();
+                if turn.cancelled {
+                    // The interrupted exchange leaves the transcript, so the
+                    // next turn does not answer a half-finished reply.
+                    transcript.pop();
+                } else {
+                    transcript.push(Turn {
+                        message: ChatMessage {
+                            role: "assistant".to_string(),
+                            content: turn.content,
+                        },
+                        images: Vec::new(),
+                    });
+                }
+            }
+            Err(err) => {
+                println!();
+                eprintln!("error: {err:#}");
+                transcript.pop();
             }
         }
     }
 
-    mlxcel_core::clear_memory_cache();
-    Ok(())
+    println!("Bye!");
+    server.shutdown()
 }
 
 /// Print the one-time greeting / help hint.
 fn print_banner(interactive: bool) {
     println!();
     println!("mlxcel interactive chat. Type a message and press Enter.");
-    println!("Commands: /bye (exit), /clear (reset conversation), /? or /help (this list).");
+    println!("Commands: /bye (exit), /clear (reset conversation), /image <path>, /? or /help.");
     println!("Multiline: open and close a block with {MULTILINE_FENCE} on their own lines.");
+    println!("Ctrl-C while a reply streams stops that reply; a second Ctrl-C quits.");
     if !interactive {
-        // Piped / redirected stdin: rustyline still reads lines, but there is
-        // no TTY to edit on. Make the degraded mode explicit instead of looking
-        // hung.
+        // Piped / redirected stdin: say so instead of looking hung.
         eprintln!("(non-interactive stdin detected: reading messages until EOF)");
     }
     println!();
@@ -531,18 +448,28 @@ fn finalize_multiline(body: &str) -> Action {
 
 /// Handle a slash command, returning a [`SlashOutcome`] that tells the loop
 /// whether to send the input as a message, continue, reset, or exit.
-fn handle_slash_command(input: &str, conversation: &mut Vec<ChatMessage>) -> SlashOutcome {
+fn handle_slash_command(input: &str, transcript: &mut Vec<Turn>) -> SlashOutcome {
     if !input.starts_with('/') {
         return SlashOutcome::NotACommand;
     }
     // First whitespace-delimited token is the command.
-    let command = input.split_whitespace().next().unwrap_or(input);
+    let mut words = input.split_whitespace();
+    let command = words.next().unwrap_or(input);
     match command {
         "/bye" => SlashOutcome::Exit,
         "/clear" => {
-            conversation.clear();
+            transcript.clear();
             println!("Conversation cleared.");
             SlashOutcome::Cleared
+        }
+        "/image" => {
+            let path = input["/image".len()..].trim();
+            if path.is_empty() {
+                println!("Usage: /image <path>");
+                SlashOutcome::Handled
+            } else {
+                SlashOutcome::Image(PathBuf::from(path))
+            }
         }
         "/?" | "/help" => {
             print_help();
@@ -560,41 +487,9 @@ fn print_help() {
     println!("Available commands:");
     println!("  /bye           Exit the chat.");
     println!("  /clear         Reset the conversation (clears all prior turns).");
+    println!("  /image <path>  Attach an image to the next message (vision models).");
     println!("  /?, /help      Show this help.");
     println!("  {MULTILINE_FENCE} ... {MULTILINE_FENCE}   Wrap multiline input as one message.");
-}
-
-/// Render the accumulated conversation into a model prompt.
-///
-/// Three paths, in priority order:
-///
-/// 1. `--no-chat-template` (explicit user opt-in) → [`concat_plaintext`]: raw
-///    content-only concatenation, no role markers. Mirrors the offline
-///    `generate --no-chat-template` mode for completion-style usage.
-/// 2. A chat template is present → [`ChatTemplateProcessor::apply`]: the exact
-///    path `generate` uses for a single turn, generalized to the full
-///    transcript. Template render failure falls back to (3).
-/// 3. No template found and the user did not opt out →
-///    [`concat_userassistant_fallback`]: a minimal `User:` / `Assistant:`
-///    pseudo-template (issue #133). A bare concatenation here leaves base
-///    models without any structural cue and they collapse into raw-text echo
-///    loops; labeling turns and cueing the next assistant turn substantially
-///    reduces that pathology without claiming to give base models
-///    chat-grade behavior.
-fn render_prompt(
-    processor: Option<&ChatTemplateProcessor>,
-    conversation: &[ChatMessage],
-    no_chat_template: bool,
-) -> String {
-    if no_chat_template {
-        return concat_plaintext(conversation);
-    }
-    match processor {
-        Some(p) => p
-            .apply(conversation, None)
-            .unwrap_or_else(|_| concat_userassistant_fallback(conversation)),
-        None => concat_userassistant_fallback(conversation),
-    }
 }
 
 /// Raw, role-less concatenation for the explicit `--no-chat-template` path
@@ -609,259 +504,6 @@ fn concat_plaintext(conversation: &[ChatMessage]) -> String {
         out.push('\n');
     }
     out
-}
-
-/// Generic `User:` / `Assistant:` pseudo-template fallback for models that
-/// ship no chat template (issue #133).
-///
-/// This is *not* a true chat template — no BOS/EOS markers, no model-specific
-/// special tokens — and the upstream `processor.is_none()` warning still
-/// fires telling the user the model is likely a base / non-instruction-tuned
-/// variant. The point is narrower: a bare content-only concatenation leaves
-/// the model without any structural cue and base models tend to collapse
-/// into echo loops where they parrot the user's last line indefinitely. A
-/// minimal role-labeled format with a trailing `Assistant:` cue (no newline)
-/// nudges the model to produce an assistant turn next instead of continuing
-/// to complete its own prompt.
-fn concat_userassistant_fallback(conversation: &[ChatMessage]) -> String {
-    let mut out = String::new();
-    for msg in conversation {
-        match msg.role.as_str() {
-            "user" => out.push_str("User: "),
-            "assistant" => out.push_str("Assistant: "),
-            "system" => out.push_str("System: "),
-            other => {
-                // Unknown role (e.g. "tool"): still mark it so the model has
-                // something to anchor on rather than silently merging it into
-                // the prior turn.
-                out.push_str(other);
-                out.push_str(": ");
-            }
-        }
-        out.push_str(&msg.content);
-        out.push_str("\n\n");
-    }
-    // No trailing newline: the bare `Assistant:` token is the cue that asks
-    // the model for an assistant turn next.
-    out.push_str("Assistant:");
-    out
-}
-
-/// Tokenize, stream-generate, and print one assistant turn; return the decoded
-/// reply text (to append to the transcript).
-///
-/// Tokenization matches `generate::tokenize_prompt` (skip the extra BOS when
-/// the rendered prompt already embeds one). Generation goes through
-/// [`Session::generate_streaming`] — which delegates to the same
-/// `CxxGenerator::generate_streaming` loop the offline path uses — with a
-/// per-token callback that streams text via [`StreamingDecodeState`].
-#[allow(clippy::too_many_arguments)]
-fn stream_turn<M: LanguageModel>(
-    session: &mut Session,
-    model: &M,
-    tokenizer: &MlxcelTokenizer,
-    prompt: &TurnPrompt,
-    max_tokens: usize,
-    context_window: usize,
-    sampling_config: &SamplingConfig,
-    show_reasoning: bool,
-) -> Result<TurnReply> {
-    let prompt_text = prompt.text();
-    let prompt_tokens: Vec<i32> = match prompt {
-        // A native renderer already produced the exact ids; re-encoding its
-        // text form would re-recognize control-token spellings that came out
-        // of the user's own message.
-        TurnPrompt::Native { ids, .. } => ids.clone(),
-        TurnPrompt::Text(text) => {
-            // Same `add_special` rule every other tokenize site uses (#1347),
-            // so a template that emits its own BOS is not doubled.
-            let add_special = !tokenizer.prompt_carries_bos(text);
-            tokenizer
-                .encode(text, add_special)
-                .map_err(|e| anyhow!("Tokenization failed: {e}"))?
-                .iter()
-                .map(|&x| x as i32)
-                .collect()
-        }
-    };
-
-    // llama.cpp parity (issue #476): an unlimited `-n -1` becomes the remaining
-    // context (window minus this turn's rendered prompt) so the reply runs until
-    // EOS or the window fills; an explicit `-n N` is used verbatim. Resolved
-    // before the allocation below so the sentinel never reaches `with_capacity`.
-    let max_tokens = resolve_unlimited_max_tokens(max_tokens, context_window, prompt_tokens.len());
-
-    // Stream display through the shared incremental detokenizer (byte-fallback
-    // safe), then split the reasoning channel out of the visible output so a
-    // Gemma 4 (or Qwen-style) checkpoint's chain-of-thought and its raw
-    // `<|channel>thought` / `<channel|>` markers never print (issue #884). For a
-    // non-thinking model the filter is an inert passthrough, so output is
-    // byte-identical to the pre-#884 path. The raw generated ids are collected
-    // in parallel so the final turn text is decoded byte-exactly for history.
-    let mut decode_state = StreamingDecodeState::new(tokenizer, &prompt_tokens);
-    // Start the reasoning filter inside the channel when the rendered prompt
-    // primed an open thinking marker (Qwen-style `<think>\n`); otherwise the
-    // primed thought body and its raw `</think>` close marker would print, since
-    // the open marker is in the prompt rather than the generated tokens.
-    let markers = tokenizer.infer_thinking_markers();
-    let mut filter = if reasoning_stream::prompt_primed_open_thinking(&markers, prompt_text) {
-        reasoning_stream::ReasoningFilter::new_primed_open_thinking(&markers)
-    } else {
-        reasoning_stream::ReasoningFilter::new(&markers)
-    };
-    let mut generated_ids: Vec<u32> = Vec::with_capacity(max_tokens);
-    let mut stdout = io::stdout();
-    let dim = stdout.is_terminal();
-    // Whether anything ever reached the content channel. A turn that stays
-    // inside `<think>` to the end prints nothing at all, which reads as a hung
-    // or broken model rather than a suppressed channel, so the tail below says
-    // which one it was.
-    let mut saw_visible_text = false;
-
-    session.generate_streaming(
-        model,
-        &prompt_tokens,
-        max_tokens,
-        sampling_config,
-        |token_id| {
-            generated_ids.push(token_id as u32);
-            if let Some(text) = decode_state.on_token(token_id, tokenizer) {
-                let visible =
-                    reasoning_stream::render_visible(&filter.feed(&text), show_reasoning, dim);
-                if !visible.is_empty() {
-                    saw_visible_text |= !visible.trim().is_empty();
-                    print!("{visible}");
-                    let _ = stdout.flush();
-                }
-            }
-            true
-        },
-    );
-
-    // Flush the detokenizer's held-back tail (e.g. a multi-byte char split
-    // across the final tokens), then the reasoning filter's own buffered tail
-    // (a partial marker, or an unclosed thought block that stays hidden), so no
-    // visible text is lost or duplicated.
-    if let Some(tail) = decode_state.flush(tokenizer) {
-        let visible = reasoning_stream::render_visible(&filter.feed(&tail), show_reasoning, dim);
-        if !visible.is_empty() {
-            saw_visible_text |= !visible.trim().is_empty();
-            print!("{visible}");
-            let _ = stdout.flush();
-        }
-    }
-    let visible = reasoning_stream::render_visible(&filter.flush(), show_reasoning, dim);
-    if !visible.is_empty() {
-        saw_visible_text |= !visible.trim().is_empty();
-        print!("{visible}");
-        let _ = stdout.flush();
-    }
-    println!();
-    println!();
-
-    // Decode the full assistant turn (skip special tokens so template markers do
-    // not leak into the next turn's rendered history). Kept as the byte-exact
-    // turn text used for the transcript.
-    //
-    // A native XTML turn is the exception: its structure IS control tokens, so
-    // dropping them would splice the tag names into the answer
-    // (`reasoningthinkanswerresponse`). Decode those with the markers intact
-    // and split the channels below instead.
-    let native = matches!(prompt, TurnPrompt::Native { .. });
-    let reply = tokenizer
-        .decode(&generated_ids, !native)
-        .unwrap_or_default();
-
-    // The turn generated tokens but none of them left the reasoning channel, so
-    // nothing printed above. Say that, rather than leaving a blank turn.
-    if reasoning_stream::is_reasoning_only(&reply, saw_visible_text, show_reasoning) {
-        println!(
-            "[All {} generated tokens went to the reasoning channel; the content channel is empty. Restart with --show-reasoning to see them.]",
-            generated_ids.len()
-        );
-        println!();
-    }
-
-    if !native {
-        return Ok(TurnReply {
-            content: reply,
-            reasoning: None,
-        });
-    }
-
-    // Replay the raw turn through a fresh filter (the display one is spent) to
-    // split the channels for the transcript. The generation prompt primed the
-    // open think tag, so the filter starts inside it.
-    let mut split = reasoning_stream::ReasoningFilter::new_primed_open_thinking(&markers);
-    let first = split.feed(&reply);
-    let tail = split.flush();
-    let reasoning = format!("{}{}", first.reasoning, tail.reasoning);
-    Ok(TurnReply {
-        content: format!("{}{}", first.content, tail.content),
-        reasoning: (!reasoning.is_empty()).then_some(reasoning),
-    })
-}
-
-/// One turn's prompt: rendered text, or the token ids a native chat renderer
-/// produced together with their text form.
-enum TurnPrompt {
-    Text(String),
-    Native { text: String, ids: Vec<i32> },
-}
-
-impl TurnPrompt {
-    /// The prompt as text. For the native form this is the reference
-    /// rendering, used for the primed-open-thinking check and the slot banner,
-    /// never for tokenization.
-    fn text(&self) -> &str {
-        match self {
-            Self::Text(text) => text,
-            Self::Native { text, .. } => text,
-        }
-    }
-}
-
-/// One finished assistant turn, split into the transcript's content and the
-/// reasoning that belongs beside it.
-struct TurnReply {
-    content: String,
-    reasoning: Option<String>,
-}
-
-/// Render the accumulated conversation through the native Kimi K3 XTML
-/// renderer (#1338).
-///
-/// Thinking is on with the reference default effort, and no tools are
-/// declared: the REPL has no tool surface. A prior assistant turn is rendered
-/// with its own reasoning in the `think` channel, which is why the caller
-/// keeps `reasonings` alongside the transcript.
-fn render_k3_prompt(
-    renderer: &KimiK3Renderer,
-    conversation: &[ChatMessage],
-    reasonings: &[Option<String>],
-) -> Result<TurnPrompt> {
-    let messages: Vec<Message> = conversation
-        .iter()
-        .enumerate()
-        .map(|(index, message)| Message {
-            role: match message.role.as_str() {
-                "assistant" => Role::Assistant,
-                "system" => Role::System,
-                "tool" => Role::Tool,
-                _ => Role::User,
-            },
-            content: MessageContent::Text(message.content.clone()),
-            name: None,
-            tool_call_id: None,
-            tool_calls: None,
-            reasoning: reasonings.get(index).cloned().flatten(),
-        })
-        .collect();
-    let rendered = renderer.render(&messages, None, &K3RenderOptions::reference_defaults())?;
-    Ok(TurnPrompt::Native {
-        text: rendered.text,
-        ids: rendered.ids,
-    })
 }
 
 #[cfg(test)]

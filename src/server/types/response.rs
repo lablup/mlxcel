@@ -147,7 +147,7 @@ pub struct ChatMessage {
     /// `reasoning_budget`) before closing its thinking block leaves exactly
     /// this shape, and without this field it is indistinguishable from a
     /// clean, intentionally empty response. Mirrors
-    /// `reasoning_stream::is_reasoning_only`, which already names this
+    /// `reasoning_display::is_reasoning_only`, which already names this
     /// condition for the CLI (#1721); this is the same condition surfaced on
     /// the HTTP API, which previously only logged it, and only for the
     /// narrower primed-thinking case (#467). Never `Some(false)`; omitted

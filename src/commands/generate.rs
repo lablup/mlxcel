@@ -86,7 +86,7 @@ fn generation_stats_from_duration(
     }
 }
 
-fn print_runtime_setup(runtime: &RuntimeSetup) {
+pub(super) fn print_runtime_setup(runtime: &RuntimeSetup) {
     if let Some(invalid) = runtime.invalid_device_override.as_deref() {
         eprintln!(
             "Ignoring invalid MLXCEL_DEVICE value {:?}; using gpu.",
@@ -1017,7 +1017,7 @@ impl CliVideoFrames {
 
     /// Hand the frames to the run. They join `images` after the caller's own
     /// `--image` inputs, clip by clip, and `videos` empties so
-    /// `compute_vlm_embeddings` never sees a clip. Returns the per-clip layout
+    /// `prepare_local_vlm_embeddings` never sees a clip. Returns the per-clip layout
     /// the prompt renderer needs, in the same order, and the directory guard,
     /// which the caller holds until the vision tower has read the files.
     pub(crate) fn splice_into(
@@ -1044,7 +1044,7 @@ impl CliVideoFrames {
 ///
 /// `Ok(None)` for a family that consumes the clip itself, and for a request
 /// with no `--video` at all, so the native paths in
-/// `generate_vlm::compute_vlm_embeddings` keep seeing their video list. A
+/// `server::local_media::prepare_local_vlm_embeddings` keep seeing their video list. A
 /// checkpoint with no vision tower also returns `Ok(None)`: there is nowhere to
 /// send frames, and the refusal it already produces names that.
 ///
@@ -1181,11 +1181,10 @@ fn current_cli_sampling_flags() -> CliSamplingFlagState {
 }
 
 fn short_cli_flag_was_set(name: char) -> bool {
-    let standalone = format!("-{name}");
-    std::env::args_os().any(|arg| {
-        let arg = arg.to_string_lossy();
-        arg == standalone || arg.starts_with(&standalone) && arg.len() > standalone.len()
-    })
+    super::cli_server::short_numeric_flag_in(
+        std::env::args_os().map(|arg| arg.to_string_lossy().into_owned()),
+        name,
+    )
 }
 
 fn resolved_cli_sampling_params(
@@ -1281,10 +1280,6 @@ fn build_cli_sampling_config_with_flags(
     build_sampling_config(resolved_cli_sampling_params(args, stop_token_ids, flags))
 }
 
-fn build_cli_chat_sampling_params(args: &GenerateArgs) -> ResolvedSamplingParams {
-    resolved_cli_sampling_params(args, Vec::new(), current_cli_sampling_flags())
-}
-
 pub(super) fn print_generation_preamble(user_prompt: &str) -> Result<()> {
     println!("Generating...");
     print!("{}", user_prompt);
@@ -1323,7 +1318,8 @@ pub(super) fn decode_generated_text(
 /// pair, Qwen-style `<think>` / `</think>`) emit their chain-of-thought inline
 /// with the answer, and `decode_generated_text` renders with special tokens so
 /// those raw markers reach the terminal (issue #884). Route the whole decoded
-/// reply through the shared `mlxcel::reasoning_stream` splitter so the channel
+/// reply through the server's `StreamFilter` (`mlxcel::reasoning_display`,
+/// issue #2173) so the channel
 /// is suppressed by default (only the final answer prints, no raw markers) and
 /// surfaced dimmed when `--show-reasoning` is set. A non-thinking model has no
 /// markers, so the filter is an inert passthrough and the returned string is
@@ -1351,13 +1347,13 @@ fn filter_reasoning_for_display(
     // generated text starts already inside the channel with no open marker, so
     // start the filter in the reasoning state to keep the primed thought body
     // and its raw close marker off the terminal.
-    let primed = mlxcel::reasoning_stream::prompt_primed_open_thinking(&markers, prompt);
-    mlxcel::reasoning_stream::render_full(&markers, generated_text, primed, show_reasoning, dim)
+    let primed = mlxcel::reasoning_display::prompt_primed_open_thinking(&markers, prompt);
+    mlxcel::reasoning_display::render_full(generated_text, primed, show_reasoning, dim)
 }
 
 /// Print the generation and its timing line.
 ///
-/// `reasoning_only` comes from [`mlxcel::reasoning_stream::is_reasoning_only`]:
+/// `reasoning_only` comes from [`mlxcel::reasoning_display::is_reasoning_only`]:
 /// the model generated normally but every token landed in the suppressed
 /// reasoning channel, so `generated_text` is empty here. Saying so is the whole
 /// point of the flag. A silent blank has twice been read as a broken model or a
@@ -2588,34 +2584,55 @@ fn install_surgery_pipeline_from_cli(args: &GenerateArgs) -> Result<()> {
 }
 
 /// Build [`ChatOptions`] for the interactive REPL from the parsed generate
-/// args. Reuses the same sampling-knob mapping `build_cli_sampling_config`
-/// uses (so the REPL and one-shot `generate` sample identically) and resolves
-/// the KV-cache mode through the shared `resolve_kv_cache_mode` helper.
+/// args. The REPL is a client of the in-process server (issue #2173), so the
+/// sampling flags become that server's options through the same mapping
+/// `mlxcel run` uses; the server-only sampling flags stay at their defaults
+/// because `generate` does not expose them.
 ///
-/// `stop_token_ids` is left empty here and filled in by `run_chat` from the
-/// model's config once the model directory is resolved, mirroring the one-shot
-/// path's `read_eos_token_ids(&args.model.model)`.
+/// [`ChatOptions`]: crate::commands::ChatOptions
 fn chat_options_from_args(args: &GenerateArgs) -> Result<crate::commands::ChatOptions> {
-    let kv_cache_mode = resolve_kv_cache_mode(
-        args.generation.turbo.cache_type_k.as_deref(),
-        args.generation.turbo.cache_type_v.as_deref(),
-        args.generation.turbo.kv_cache_mode.as_deref(),
-    )
-    .map_err(|e| anyhow::anyhow!("{}", e))?;
-
-    let sampling = build_cli_chat_sampling_params(args);
-
-    let mut opts = crate::commands::ChatOptions::new(
-        args.model.model.clone(),
+    let kv_cache_mode = super::cli_server::resolve_cli_kv_cache_mode(&args.generation.turbo)?;
+    let mut server = super::cli_server::settings_from_flags(
+        &args.sampling,
+        mlxcel::cli::in_process_client::ServerSamplingOptions::default(),
         args.generation.max_tokens,
-        sampling,
+        kv_cache_mode,
+        &super::cli_server::cli_flag_was_set,
     );
-    opts.models_dir = args.model.models_dir.clone();
-    opts.revision = args.model.revision.clone();
-    opts.kv_cache_mode = kv_cache_mode;
-    opts.no_chat_template = args.generation.no_chat_template;
-    opts.show_reasoning = args.generation.show_reasoning;
-    Ok(opts)
+    server.adapter = args.model.adapter.clone();
+    if let Some((draft_model, draft_kind)) = repl_drafter(args) {
+        server.draft_model = Some(draft_model);
+        server.draft_kind = Some(draft_kind);
+        server.draft_block_size = args.speculative.draft_block_size;
+    } else if args.model.draft_model.is_some() {
+        eprintln!(
+            "Note: --draft-model is ignored in the chat REPL unless --draft-kind dflash|mtp is \
+             given; classic draft-model decoding runs only with -p."
+        );
+    }
+    Ok(crate::commands::ChatOptions {
+        model: args.model.model.clone(),
+        models_dir: args.model.models_dir.clone(),
+        revision: args.model.revision.clone(),
+        server,
+        no_chat_template: args.generation.no_chat_template,
+        show_reasoning: args.generation.show_reasoning,
+        images: args.generation.image.clone(),
+        image_soft_tokens: args.generation.image_soft_tokens,
+    })
+}
+
+/// The drafter the chat REPL hands to the in-process server, if any. On
+/// `generate`, `--draft-model` alone names a classic draft model, which the
+/// server does not run (its classic dispatch decodes plainly), and the REPL
+/// before issue #2173 ignored speculative flags altogether. So the REPL uses
+/// a drafter only when `--draft-kind` explicitly names a server speculative
+/// path (`dflash` or `mtp`); `mlxcel run` passes `--draft-model` as is,
+/// because there it always means a server drafter.
+fn repl_drafter(args: &GenerateArgs) -> Option<(std::path::PathBuf, String)> {
+    let draft_model = args.model.draft_model.clone()?;
+    let kind = args.speculative.draft_kind.as_deref()?;
+    matches!(kind, "dflash" | "mtp").then(|| (draft_model, kind.to_string()))
 }
 
 pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
@@ -2838,7 +2855,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
     // `--layout-detections`, the Muse Glimmer guard) so none of them changes
     // meaning, and before the prompt is rendered so the template emits one
     // image placeholder per frame. On the fallback path
-    // `compute_vlm_embeddings` never sees a video: the clip is already an
+    // `prepare_local_vlm_embeddings` never sees a video: the clip is already an
     // ordered run of `--image` inputs by then. Each clip's lead sentence is
     // rendered immediately ahead of that clip's own frames, as the server does
     // (issue #1766). The frame directory lives until this function returns,
@@ -3039,7 +3056,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
             &generated_text,
             args.generation.show_reasoning,
         );
-        let reasoning_only = mlxcel::reasoning_stream::is_reasoning_only(
+        let reasoning_only = mlxcel::reasoning_display::is_reasoning_only(
             &generated_text,
             !visible.trim().is_empty(),
             args.generation.show_reasoning,
@@ -3155,17 +3172,23 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
             .map(mlxcel::vision::processors::gemma4::validate_image_soft_tokens)
             .transpose()
             .map_err(|err| anyhow::anyhow!("--image-soft-tokens: {err}"))?;
-        let vlm_embeddings = generate_vlm::compute_vlm_embeddings(
+        // The server's media preparation (issue #2173): the same per-family
+        // dispatch the model worker runs for a chat request with these bytes,
+        // with Inkling audio and video kept on the layouts this prompt form
+        // used before (Plain under --no-chat-template).
+        let vlm_embeddings = mlxcel::server::local_media::prepare_local_vlm_embeddings(
             &model,
-            &mut prompt_tokens,
-            &prompt,
-            &args.generation.image,
-            args.generation.audio.as_deref(),
-            &args.generation.video,
-            args.generation.fps,
             &tokenizer,
-            image_soft_tokens,
-            args.generation.no_chat_template,
+            &prompt,
+            &mut prompt_tokens,
+            mlxcel::server::local_media::LocalMedia {
+                images: &args.generation.image,
+                audio: args.generation.audio.as_deref(),
+                videos: &args.generation.video,
+                fps: args.generation.fps,
+                image_soft_tokens,
+                no_chat_template: args.generation.no_chat_template,
+            },
         )?;
         print_generation_preamble(&user_prompt)?;
         let generation = run_generation_mode(
@@ -3222,7 +3245,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         &generated_text,
         args.generation.show_reasoning,
     );
-    let reasoning_only = mlxcel::reasoning_stream::is_reasoning_only(
+    let reasoning_only = mlxcel::reasoning_display::is_reasoning_only(
         &generated_text,
         !visible.trim().is_empty(),
         args.generation.show_reasoning,

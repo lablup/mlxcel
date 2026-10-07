@@ -125,7 +125,10 @@ pub struct ChatPrompt {
 
 /// Render `user_prompt` as one user turn through the checkpoint's chat
 /// template (or verbatim when `raw` is set or no template exists), the way
-/// `mlxcel generate` and `mlxcel-bench-decode` render a text prompt.
+/// `mlxcel-bench-decode` renders a text prompt. Unlike the server and
+/// `mlxcel generate`, it does not default `enable_thinking=true` for a
+/// tokenizer with think markers; that known divergence goes away in Phase 6
+/// (#2176, docs/CONTINUOUS_BATCHING.md "Token-exactness").
 pub fn render_chat_prompt(
     model_path: &Path,
     tokenizer: &MlxcelTokenizer,

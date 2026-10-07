@@ -1878,3 +1878,20 @@ fn webui_security_treats_bracketed_ipv6_loopback_as_loopback() {
         );
     }
 }
+
+#[test]
+fn startup_warmup_skips_only_the_families_without_a_text_chat_worker() {
+    use crate::models::ModelType;
+    use crate::server::startup::startup_warmup_skip_reason;
+
+    assert!(startup_warmup_skip_reason(Some(ModelType::NemotronVoiceChat)).is_some());
+    assert!(startup_warmup_skip_reason(Some(ModelType::Florence2VLM)).is_some());
+    assert!(startup_warmup_skip_reason(Some(ModelType::NemotronParseVLM)).is_some());
+    assert_eq!(startup_warmup_skip_reason(Some(ModelType::Qwen3)), None);
+    assert_eq!(startup_warmup_skip_reason(Some(ModelType::Llama)), None);
+    assert_eq!(
+        startup_warmup_skip_reason(None),
+        None,
+        "an undetected model type still warms"
+    );
+}

@@ -70,6 +70,8 @@ mlxcel run
 
 Thinking-capable checkpoints may generate reasoning before the final answer. `run` and `generate` hide reasoning from terminal output by default; pass `--show-reasoning` to display it without the raw marker tokens.
 
+`run` and its chat REPL are clients of the server engine: they start the `mlxcel-server` model worker in-process (one slot, no HTTP listener) and send each turn through the same `/v1/chat/completions` request path, so `mlxcel run -p` and the server give the same output for the same request. Sampling flags map onto the server options of the same name (`--temp`, `--top-k`, `--repeat-last-n`, `--frequency-penalty`, `--dry-sequence-breaker`, `--stop`, ...); with none given, the base sampler stays greedy unless `generation_config.json` sets one. `--draft-model` (with `--draft-kind dflash|mtp` when the drafter does not say) runs speculative decoding through the server's DFlash and MTP paths. In the REPL, `/clear` starts a new conversation, `/image <path>` attaches an image to the next message, and Ctrl-C stops the reply being generated without leaving the chat (a second Ctrl-C quits). The whole conversation is re-sent every turn, so `/image` and `--image` refuse an image once the conversation would hold more than the server's per-request image cap (16 by default); `/clear` starts over.
+
 With no `-n/--max-tokens`, generation continues until EOS or the effective context limit. Pass `-n N` to set a cap.
 
 ```bash

@@ -106,7 +106,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use mlxcel::vlm_runtime::{prepare_and_compute_vlm_embeddings, prepared_embedding_refs};
+use mlxcel::vlm_runtime::{prepare_vlm_embeddings, prepared_embedding_refs};
 use mlxcel::{CxxGenerator, LanguageModel, LoadedModel, SamplingConfig, load_model};
 use mlxcel_core::cache::KVCacheMode;
 use mlxcel_core::cache::turbo::{TurboQuantParams, turbo4_v_rotate};
@@ -1154,7 +1154,7 @@ fn measure_vlm_image_token_kurtosis(model_dir_name: &str) -> Option<(f64, f64, u
         .map(|&id| id as i32)
         .collect();
 
-    let prepared = prepare_and_compute_vlm_embeddings(
+    let prepared = prepare_vlm_embeddings(
         &model,
         &mut prompt_tokens,
         prompt_text,

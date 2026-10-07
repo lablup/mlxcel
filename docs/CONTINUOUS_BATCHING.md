@@ -73,32 +73,50 @@ Escape hatches restore the previous single-client behavior: `--parallel 1`
 (single decode slot), `--no-batch` (legacy sequential worker, no scheduler),
 `--max-batch-prefill 1` (sequential prefill), and `--no-prompt-cache`.
 
-### Token-exactness against `mlxcel generate`
+### Token-exactness: `mlxcel run` and the server
 
-The shipped continuous-batching defaults are a serving-throughput contract, not
-a token-exactness contract against `mlxcel generate` for every model at
-`temperature 0`. Front-end prompt rendering is shared, but the server can still
-use scheduler-owned cache allocation, paged storage, prompt-cache adoption,
-chunked prefill, and batched decode paths that the CLI loop does not use. If a
-reproduction or oracle comparison needs the CLI-shaped single-request path, use
-`--no-batch` for the legacy worker or `--max-batch-size 1` to keep the scheduler
-while making `--decode-storage-backend auto` resolve to dense storage. Both are
-the same engine at B=1 (`--no-batch` is the scheduler at `max_batch_size = 1`),
-and `mlxcel-engine-parity` compares the server's dense B=1 stream with a direct
-`Engine` run (arm `d:engine`) so a divergence can be placed on the scheduler's
-policy or on the engine. These are
-diagnostic/oracle controls that narrow the server path toward the CLI; they do
-not turn every model family into an unmeasured token-exactness guarantee. To
-isolate only the decode storage backend while preserving the default admission
-width, prefer `--decode-storage-backend dense`; that is the first bisect knob
-when a `--max-batch-size 1` run matches the CLI but the default server does not.
+`mlxcel run` (with and without `-p`) and its chat REPL are clients of the
+server engine since epic #2166 Phase 5 (issue #2173, [ADR 0007](adr/0007-unified-batch-native-engine.md)).
+They start the model worker in-process at one slot (`--parallel 1`,
+`--max-batch-size 1`, so decode storage resolves to dense) and submit each
+turn through the `/v1/chat/completions` request path: the same chat-template
+render, the same worker options, the same `StreamFilter` reasoning split, tool
+parsing and stop strings. No HTTP listener is opened. The CLI's sampling flags
+become that server's options (`mlxcel run --temp 0.7` resolves like
+`mlxcel-server --temp 0.7`), and the CLI keeps greedy as its base sampler when
+`generation_config.json` is silent.
 
-`make engine-parity MODEL=<dir>` measures this divergence instead of assuming
-it: it runs one prompt and sampling config through `CxxGenerator` and through
-the scheduler at B=1 with dense and with paged storage, and prints the first
-divergent token per pair. Epic #2166 ([ADR 0007](adr/0007-unified-batch-native-engine.md))
-removes the divergence by putting both paths on one engine: the server runs on
-`Engine` since #2172, and the CLI generator follows in #2173.
+The contract is an equivalence invariant rather than shared code: for the
+same chat request under `MLXCEL_SDPA_DETERMINISTIC=1`, greedy output from
+`mlxcel run -p` and from the server is identical. `make engine-parity
+MODEL=<dir>` checks it with arm `e:run` (the settings `run -p --temp 0` builds)
+against arm `f:server` (the same request on the `mlxcel-server` default
+configuration, four slots, paged storage when the model supports it), prompt
+cache off on both. On GB10 both pairs are identical for Qwen3-1.7B 4-bit and
+Llama-3.2-1B 4-bit. The same run compares the server at B=1, dense and paged,
+with a direct `Engine` run (arm `d:engine`) and with `CxxGenerator` (arm
+`a:cli`, the one-shot `mlxcel generate` decode loop until Phase 6, #2176) on
+the harness's own render, so a divergence can be placed on the scheduler's
+policy, the storage, or the engine.
+
+The harness's own render (`engine_probe::prompt::render_chat_prompt`) and
+`mlxcel-bench-decode`'s render apply the checkpoint template without the
+`enable_thinking=true` default that the server (`startup::load_chat_front`) and
+`mlxcel generate` set when the tokenizer has a think-marker pair (Gemma 4
+excepted, issue #686). On a thinking checkpoint such as Qwen3, the arms on the
+harness render therefore see a different prompt than `e:run` and `f:server`,
+which both render through the server. This is a known divergence that Phase 6
+(#2176) removes when those paths move onto the server request path; it does
+not touch the `e:run` and `f:server` comparison.
+
+Two server features still change near-tie greedy tokens and are tracked as
+measured divergences rather than covered by the invariant: a prompt-cache hit
+forwards only the suffix of a cached prefix (the chat REPL runs with the cache
+on, the server default; `run -p` runs with it off because one request has
+nothing to reuse), and continuous batching with other live sequences. To
+reproduce the single-request path on the server, use `--max-batch-size 1`
+(dense storage) or `--decode-storage-backend dense` while keeping the default
+admission width, and `--no-prompt-cache`.
 
 > Backend note (CUDA / Blackwell, e.g. GB10): batched decode used to be a
 > throughput wash on CUDA because the `M*B < 8` quantized matmul fell back to

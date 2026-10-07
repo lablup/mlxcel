@@ -315,7 +315,7 @@ fn muse_glimmer_loaded_model_delegates_text_and_runtime_capabilities() {
 fn muse_glimmer_text_only_request_bypasses_vision_cleanly() {
     let loaded = LoadedModel::MuseGlimmerVLM(tiny_vlm_model(vec![7, 8]));
     let mut prompt_tokens = vec![1, 2, 3];
-    let prepared = match crate::vlm_runtime::prepare_and_compute_vlm_embeddings(
+    let prepared = match crate::vlm_runtime::prepare_vlm_embeddings(
         &loaded,
         &mut prompt_tokens,
         "prompt",
@@ -334,7 +334,7 @@ fn muse_glimmer_text_only_request_bypasses_vision_cleanly() {
 fn muse_glimmer_image_request_expands_and_scatters_shared_runtime_embeddings() {
     let loaded = LoadedModel::MuseGlimmerVLM(tiny_vlm_model(vec![7, 8]));
     let mut prompt_tokens = vec![1, DEFAULT_IMAGE_PLACEHOLDER_TOKEN_ID, 2];
-    let prepared = match crate::vlm_runtime::prepare_and_compute_vlm_embeddings(
+    let prepared = match crate::vlm_runtime::prepare_vlm_embeddings(
         &loaded,
         &mut prompt_tokens,
         "prompt",
@@ -363,7 +363,7 @@ fn muse_glimmer_image_request_expands_and_scatters_shared_runtime_embeddings() {
 fn muse_glimmer_request_rejects_placeholder_image_mismatch() {
     let loaded = LoadedModel::MuseGlimmerVLM(tiny_vlm_model(vec![7, 8]));
     let mut prompt_tokens = vec![1, 2];
-    let err = match crate::vlm_runtime::prepare_and_compute_vlm_embeddings(
+    let err = match crate::vlm_runtime::prepare_vlm_embeddings(
         &loaded,
         &mut prompt_tokens,
         "prompt",
@@ -382,7 +382,7 @@ fn muse_glimmer_request_rejects_placeholder_image_mismatch() {
 fn muse_glimmer_request_rejects_reserved_video_token() {
     let loaded = LoadedModel::MuseGlimmerVLM(tiny_vlm_model(vec![7, 8]));
     let mut prompt_tokens = vec![1, MUSE_GLIMMER_VIDEO_TOKEN_ID, 2];
-    let err = match crate::vlm_runtime::prepare_and_compute_vlm_embeddings(
+    let err = match crate::vlm_runtime::prepare_vlm_embeddings(
         &loaded,
         &mut prompt_tokens,
         "prompt",
