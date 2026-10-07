@@ -221,7 +221,7 @@ impl BatchScheduler {
                 .map(|row| self.history_boundary_split(row))
                 .collect();
             let ctx = crate::server::batch::speculative_burst::BurstContext {
-                model: &self.model,
+                model: self.engine.model(),
                 tokenizer: &self.tokenizer,
                 drafter_slot: &mut self.speculative_drafter_slot,
                 dispatch: &self.speculative_dispatch,
@@ -336,7 +336,7 @@ impl BatchScheduler {
             let prefill_boundary = self.history_boundary_split(&seq);
             let context_bound = self.context_bound();
             let ctx = crate::server::batch::speculative_burst::BurstContext {
-                model: &self.model,
+                model: self.engine.model(),
                 tokenizer: &self.tokenizer,
                 drafter_slot: &mut self.speculative_drafter_slot,
                 dispatch: &self.speculative_dispatch,

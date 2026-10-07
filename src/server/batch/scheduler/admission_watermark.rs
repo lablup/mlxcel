@@ -60,7 +60,7 @@ impl BatchScheduler {
     /// Blocks the admission watermark currently keeps free (issue #2088); 0
     /// without a budget or while no row is decoding.
     pub(super) fn paged_admission_headroom(&self) -> usize {
-        self.cache_pool.paged_block_budget().map_or(0, |total| {
+        self.engine.pool().paged_block_budget().map_or(0, |total| {
             admission_watermark_blocks(
                 total,
                 self.paged_admission_watermark,

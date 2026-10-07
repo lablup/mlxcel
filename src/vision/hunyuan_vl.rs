@@ -33,7 +33,6 @@ use crate::LanguageModel;
 use crate::models::hunyuan_vl::HunyuanVlTextModel;
 use crate::multimodal::batched_dispatch::forward_batched_with_seq_ids_dispatch;
 use mlxcel_core::cache::SequenceId;
-use mlxcel_core::generate::DecodeBatchContext;
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -193,13 +192,12 @@ impl LanguageModel for HunyuanVlModel {
         self.text_model.release_mrope_sequence(seq_id);
     }
 
-    fn forward_batched_with_context_and_ids(
+    fn forward_batched_with_ids(
         &self,
         input_ids: &MlxArray,
         seq_ids: Option<&[SequenceId]>,
         batch_caches: &mut [&mut [KVCache]],
         mask: Option<&MlxArray>,
-        context: Option<&DecodeBatchContext>,
     ) -> UniquePtr<MlxArray> {
         forward_batched_with_seq_ids_dispatch(
             &self.text_model,
@@ -207,7 +205,6 @@ impl LanguageModel for HunyuanVlModel {
             seq_ids,
             batch_caches,
             mask,
-            context,
         )
     }
 

@@ -35,7 +35,7 @@
 //! Used by: `loading::load_youtu_vl_vlm`, `multimodal::vlm_runtime`.
 
 use mlxcel_core::cache::SequenceId;
-use mlxcel_core::generate::{DecodeBatchContext, LanguageModel};
+use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -195,32 +195,15 @@ impl LanguageModel for YoutuVLModel {
             .forward_batched(input_ids, batch_caches, mask)
     }
 
-    fn forward_batched_with_context(
-        &self,
-        input_ids: &MlxArray,
-        batch_caches: &mut [&mut [KVCache]],
-        mask: Option<&MlxArray>,
-        context: Option<&DecodeBatchContext>,
-    ) -> UniquePtr<MlxArray> {
-        self.text_model
-            .forward_batched_with_context(input_ids, batch_caches, mask, context)
-    }
-
-    fn forward_batched_with_context_and_ids(
+    fn forward_batched_with_ids(
         &self,
         input_ids: &MlxArray,
         seq_ids: Option<&[SequenceId]>,
         batch_caches: &mut [&mut [KVCache]],
         mask: Option<&MlxArray>,
-        context: Option<&DecodeBatchContext>,
     ) -> UniquePtr<MlxArray> {
-        self.text_model.forward_batched_with_context_and_ids(
-            input_ids,
-            seq_ids,
-            batch_caches,
-            mask,
-            context,
-        )
+        self.text_model
+            .forward_batched_with_ids(input_ids, seq_ids, batch_caches, mask)
     }
 
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {

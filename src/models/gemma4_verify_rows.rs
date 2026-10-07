@@ -358,9 +358,7 @@ pub(crate) fn stack_prefilled_rows(rows: Vec<Vec<Cache>>) -> Result<Vec<Cache>, 
 /// commits, so a quantized or paged KV mode declines instead of failing.
 pub(super) fn caches_are_dense_fp16(caches: &[Cache]) -> bool {
     caches.iter().all(|cache| match cache {
-        Cache::Standard(c) => {
-            c.mode == mlxcel_core::cache::KVCacheMode::Fp16 && !c.is_paged_backed()
-        }
+        Cache::Standard(c) => c.is_dense_fp16(),
         Cache::Rotating(c) => c.mode == mlxcel_core::cache::KVCacheMode::Fp16,
     })
 }
@@ -378,10 +376,7 @@ fn stack_layer(caches: Vec<Cache>) -> Result<Cache, String> {
     for cache in &caches {
         let (keys, values) = match cache {
             Cache::Standard(c) => {
-                if c.mode != mlxcel_core::cache::KVCacheMode::Fp16
-                    || c.is_paged_backed()
-                    || c.live_len() != c.offset
-                {
+                if !c.is_dense_fp16() || c.live_len() != c.offset {
                     return Err("only dense FP16 full-attention caches can be stacked".into());
                 }
                 (c.keys.as_deref(), c.values.as_deref())

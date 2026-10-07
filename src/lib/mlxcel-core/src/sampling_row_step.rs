@@ -16,9 +16,9 @@
 //!
 //! Every decode path that samples one row at a time goes through
 //! [`RowSampler`]: the four `CxxGenerator` loops behind `mlxcel generate`,
-//! `mlxcel run` and the chat REPL, and the three server sites (the per-row
-//! loop of `BatchScheduler::execute_batched_decode`, `decode_single_step`, and
-//! first-token sampling in `finish_prefill`). Before this module each side
+//! `mlxcel run` and the chat REPL, and the server, where the engine's per-row
+//! chain (`mlxcel_core::engine::sample_and_finish_row`, #2172) draws every
+//! decode row and the first token of a prefill. Before this module each side
 //! owned a copy of the step and the copies drifted: #2090 (the penalty history
 //! one token stale) hit only the CLI, and the CLI created `SamplerState` only
 //! for history-reading samplers, so mirostat and adaptive-p would have lost
@@ -111,8 +111,8 @@ impl TokenDraw {
 
 /// One sequence's sampling step and its [`SamplerState`].
 ///
-/// Used by: `CxxGenerator` decode loops, `BatchScheduler::execute_batched_decode`,
-/// `BatchScheduler::decode_single_step`, `BatchScheduler::finish_prefill`
+/// Used by: `CxxGenerator` decode loops, `engine::sample_and_finish_row`
+/// (the scheduler's decode steps and prefill completions)
 #[derive(Debug, Clone, Default)]
 pub struct RowSampler {
     state: Option<SamplerState>,

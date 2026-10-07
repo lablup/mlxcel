@@ -39,7 +39,10 @@ src/
   paged cache layout, detach/adopt helpers, and cache tests. `cache/attend.rs`
   holds `KVCache::attend` and `cache::attend_batched`, the one attention entry
   that picks the dense or paged kernel from the storage behind the cache
-  ([ADR 0008](adr/0008-kv-attention-dispatch-in-the-cache.md)).
+  ([ADR 0008](adr/0008-kv-attention-dispatch-in-the-cache.md)), plus the
+  `KvAttention` trait, `RotatingKVCache::attend`, `ChunkedKVCache::attend` and
+  `cache::attend_batched_rows` that the model-owned families (Gemma 3, Llama 4)
+  attend through ([ADR 0009](adr/0009-engine-step-api.md)).
 - `src/lib/mlxcel-core/src/ops.rs`, `src/lib/mlxcel-core/src/dtype.rs`, `src/lib/mlxcel-core/src/streams.rs` — wrappers around common MLX
   operations and runtime concepts.
 - `src/lib/mlxcel-core/src/sampling.rs` — penalties and token sampling shared by CLI/server paths.
@@ -49,7 +52,15 @@ src/
 - `src/lib/mlxcel-core/src/sampling_row_step.rs`: `RowSampler`, the one per-row sampling step
   (ADR 0007): the `SamplerState` lifecycle, the token-history ordering rule, the structured-output
   mask and post-draw override hooks, and fused-batch eligibility derived from the step's stage list.
-  The four `CxxGenerator` loops and the three server sampling sites all draw through it.
+  The four `CxxGenerator` loops and the engine step draw through it.
+- `src/lib/mlxcel-core/src/engine/`: `Engine`, the batch-native decode engine
+  ([ADR 0007](adr/0007-unified-batch-native-engine.md), [ADR 0009](adr/0009-engine-step-api.md)).
+  It owns the model and the `CachePool`; `open`, `prefill` (one plan piece), `step` (forward,
+  then every row's sampling and finish step, one entry for every row count), `submit` /
+  `finish_rows` (the lookahead's split form) and `close`. `engine/rows.rs` holds `StepRow`,
+  `StepRowHooks` and `RowOutcome`, through which the server supplies the structured-output
+  matcher, thinking budget, stop matcher and streaming per row and gets each row's token, finish
+  cause or row-only error back.
 - `src/lib/mlxcel-core/src/sampling_token_bias.rs`: `compose_token_bias`, the one precedence rule
   for request bias, language bias and output suppression, called once per request by the CLI and
   the server.
@@ -164,7 +175,10 @@ Important control surfaces:
    Jinja template and have a code-rendered format instead: Kimi K3's XTML renderer
    (`src/server/kimi_k3_chat.rs`) produces token ids directly and they reach the
    scheduler through the pre-tokenized request path.
-5. `src/server/batch/` schedules batched decode when enabled.
+5. `src/server/batch/` schedules batched decode when enabled: `BatchScheduler` decides what
+   runs each tick and drives the model only through `mlxcel_core::engine::Engine`
+   (`src/server/batch/scheduler/step_rows.rs` is the scheduler's side of an engine step row).
+   `--no-batch` is the same scheduler at `max_batch_size = 1`.
 6. Streaming responses are emitted as SSE frames.
 
 #### Panic and threading posture

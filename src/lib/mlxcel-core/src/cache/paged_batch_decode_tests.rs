@@ -336,8 +336,8 @@ fn below_the_floor_the_batch_still_answers_correctly() {
 #[test]
 fn a_single_sequence_above_its_floor_takes_the_fused_path() {
     crate::test_support::kernel_ports::require_paged_attention_port!();
-    // The single-sequence decode path (`decode_single_step` -> the model's
-    // one-sequence `forward`) reaches this entry point with a batch of one. Two
+    // The single-sequence decode path (`decode_single_step` -> `Engine::step`
+    // at B=1 -> the model's one-sequence `forward`) reaches this entry point with a batch of one. Two
     // of the five scenarios in the issue's benchmark matrix are that shape, so
     // a batch-1 launch above the single-request floor has to fuse.
     let (out, reference, stats) = run_step(&[4096], 8, 2, 64, 0x1EAF);

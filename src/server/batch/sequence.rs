@@ -448,18 +448,17 @@ impl SequenceInfo {
     /// streamed `prompt_ms` and the final `prompt_eval_ms` derive from one
     /// origin. Clamped at zero if `at` precedes `created_at`.
     pub(crate) fn mark_first_token_at(&mut self, at: Instant) {
-        if self.first_token_time.is_some() {
-            return;
-        }
-        self.first_token_time = Some(at);
-        self.decode_state.stamp_first_token(at);
-        let _ = self.response_tx.send(GenerateEvent::Prefill(PrefillStats {
-            prompt_tokens: self.prompt_tokens.len(),
-            cached_tokens: self.already_cached_tokens,
-            prompt_ms: at.saturating_duration_since(self.created_at).as_millis() as u64,
-            processed: self.prompt_tokens.len(),
-            first_token: true,
-        }));
+        stamp_first_token(
+            &mut self.first_token_time,
+            &mut self.decode_state,
+            &self.response_tx,
+            FirstTokenOrigin {
+                prompt_tokens: self.prompt_tokens.len(),
+                cached_tokens: self.already_cached_tokens,
+                created_at: self.created_at,
+            },
+            at,
+        );
     }
 
     /// Publish a mid-prefill progress observation (#1477).
@@ -1178,4 +1177,37 @@ mod tests {
         let action = BatchSchedulerAction::Idle;
         let _ = format!("{action:?}");
     }
+}
+
+/// The request facts a first-token stamp reports, copied out of the sequence
+/// so the stamp can run while its other fields are borrowed (#2172).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FirstTokenOrigin {
+    pub(crate) prompt_tokens: usize,
+    pub(crate) cached_tokens: usize,
+    pub(crate) created_at: Instant,
+}
+
+/// [`SequenceInfo::mark_first_token_at`] over the disjoint fields it touches:
+/// records the instant once, stamps the decode state and streams the prefill
+/// stats event. A second stamp is a no-op.
+pub(crate) fn stamp_first_token(
+    first_token_time: &mut Option<Instant>,
+    decode_state: &mut StreamingDecodeState,
+    response_tx: &mpsc::Sender<GenerateEvent>,
+    origin: FirstTokenOrigin,
+    at: Instant,
+) {
+    if first_token_time.is_some() {
+        return;
+    }
+    *first_token_time = Some(at);
+    decode_state.stamp_first_token(at);
+    let _ = response_tx.send(GenerateEvent::Prefill(PrefillStats {
+        prompt_tokens: origin.prompt_tokens,
+        cached_tokens: origin.cached_tokens,
+        prompt_ms: at.saturating_duration_since(origin.created_at).as_millis() as u64,
+        processed: origin.prompt_tokens,
+        first_token: true,
+    }));
 }

@@ -23,7 +23,6 @@ use crate::models::qwen3_5::{GdnRollbackSnapshot, VerifyOutput};
 use crate::models::qwen3_next::Qwen3NextCache;
 use crate::multimodal::qwen_vl::compute_qwen_vl_mrope_position_ids;
 use mlxcel_core::cache::{KVCacheMode, SequenceId};
-use mlxcel_core::generate::DecodeBatchContext;
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -334,24 +333,22 @@ impl LanguageModel for Qwen35VLModel {
 
     /// forward `seq_ids` to the underlying Qwen3.5 model so
     /// each row's MRoPE state resolves correctly in mixed VL+text
-    /// batches. `Qwen35Model::forward_batched_with_context_and_ids`
+    /// batches. `Qwen35Model::forward_batched_with_ids`
     /// already implements per-row dispatch and the batched-prefill fast
     /// path, so we forward straight through.
-    fn forward_batched_with_context_and_ids(
+    fn forward_batched_with_ids(
         &self,
         input_ids: &MlxArray,
         seq_ids: Option<&[SequenceId]>,
         batch_caches: &mut [&mut [KVCache]],
         mask: Option<&MlxArray>,
-        context: Option<&DecodeBatchContext>,
     ) -> UniquePtr<MlxArray> {
-        mlxcel_core::generate::LanguageModel::forward_batched_with_context_and_ids(
+        mlxcel_core::generate::LanguageModel::forward_batched_with_ids(
             &self.text_model,
             input_ids,
             seq_ids,
             batch_caches,
             mask,
-            context,
         )
     }
 

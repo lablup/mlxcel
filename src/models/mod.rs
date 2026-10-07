@@ -1633,6 +1633,9 @@ mod inkling_detection_tests;
 #[path = "iquestloopcoder_tests.rs"]
 mod iquestloopcoder_tests;
 #[cfg(test)]
+#[path = "single_row_batch_parity_tests.rs"]
+mod single_row_batch_parity_tests;
+#[cfg(test)]
 #[path = "vlm_text_only_detection_tests.rs"]
 mod vlm_text_only_detection_tests;
 

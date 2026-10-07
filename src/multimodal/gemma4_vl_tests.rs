@@ -361,7 +361,6 @@ fn forward_batched_with_seq_ids_dispatch_routes_each_row_to_its_seq_id() {
         Some(&seq_ids),
         batch_caches.as_mut_slice(),
         None,
-        None,
     );
     mlxcel_core::eval(&logits);
 
@@ -396,7 +395,6 @@ fn forward_batched_with_seq_ids_dispatch_single_row_uses_forward_with_sequence_i
         Some(&seq_ids),
         batch_caches.as_mut_slice(),
         None,
-        None,
     );
     mlxcel_core::eval(&logits);
 
@@ -405,7 +403,7 @@ fn forward_batched_with_seq_ids_dispatch_single_row_uses_forward_with_sequence_i
     assert_eq!(calls[0], (99, 42));
 }
 
-/// `seq_ids = None` must fall through to `forward_batched_with_context`.
+/// `seq_ids = None` must fall through to `forward_batched`.
 /// CLI/single-process callers (e.g. the legacy `mlxcel generate` path)
 /// rely on this fallback so they never have to plumb a fake seq id.
 #[test]
@@ -424,11 +422,10 @@ fn forward_batched_with_seq_ids_dispatch_no_seq_ids_falls_through_to_batched() {
         None,
         batch_caches.as_mut_slice(),
         None,
-        None,
     );
     mlxcel_core::eval(&logits);
 
-    // Without seq_ids the trait default `forward_batched_with_context`
+    // Without seq_ids the trait default `forward_batched`
     // routes through `forward_batched`, which loops calling `forward()` —
     // so each call is logged under the sentinel id `-1`.
     let calls = model.calls();

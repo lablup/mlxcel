@@ -11,7 +11,18 @@ serving roles that split prefill and decode across processes.
 The scheduler keeps up to `--parallel` sequences active at once. Each step it
 either admits and prefills queued prompts (chunked at `--prefill-chunk-size` so a
 long prompt does not stall decode) or advances the active batch by one decode
-token, then streams the new tokens out. Relevant flags:
+token, then streams the new tokens out. The scheduler decides what runs; the
+engine runs it. `mlxcel_core::engine::Engine` owns the model and the KV pool,
+and every model forward, sampler draw and finish step the scheduler needs goes
+through `Engine::prefill`, `Engine::step` (one entry for every row count: a
+lone request is a batch of one) and the pipelined `submit` / `finish_rows` pair
+([ADR 0007](adr/0007-unified-batch-native-engine.md), [ADR 0009](adr/0009-engine-step-api.md)).
+A batch of one samples through the per-row chain; a larger batch whose rows
+share fused-compatible parameters takes one fused `[B, vocab] -> [B]` draw.
+Either way the sampled tokens are evaluated through the fallible MLX boundary
+before they are read, so an MLX throw finishes the affected request(s) with an
+`inference backend error` instead of aborting the server (#822). Admission, tick policy, preemption, the prompt cache, disaggregated handoff and
+the speculative burst generators stay in the scheduler. Relevant flags:
 
 | Flag | Default | Purpose |
 |------|---------|---------|
@@ -71,7 +82,11 @@ use scheduler-owned cache allocation, paged storage, prompt-cache adoption,
 chunked prefill, and batched decode paths that the CLI loop does not use. If a
 reproduction or oracle comparison needs the CLI-shaped single-request path, use
 `--no-batch` for the legacy worker or `--max-batch-size 1` to keep the scheduler
-while making `--decode-storage-backend auto` resolve to dense storage. These are
+while making `--decode-storage-backend auto` resolve to dense storage. Both are
+the same engine at B=1 (`--no-batch` is the scheduler at `max_batch_size = 1`),
+and `mlxcel-engine-parity` compares the server's dense B=1 stream with a direct
+`Engine` run (arm `d:engine`) so a divergence can be placed on the scheduler's
+policy or on the engine. These are
 diagnostic/oracle controls that narrow the server path toward the CLI; they do
 not turn every model family into an unmeasured token-exactness guarantee. To
 isolate only the decode storage backend while preserving the default admission
@@ -82,7 +97,8 @@ when a `--max-batch-size 1` run matches the CLI but the default server does not.
 it: it runs one prompt and sampling config through `CxxGenerator` and through
 the scheduler at B=1 with dense and with paged storage, and prints the first
 divergent token per pair. Epic #2166 ([ADR 0007](adr/0007-unified-batch-native-engine.md))
-removes the divergence by putting both paths on one engine.
+removes the divergence by putting both paths on one engine: the server runs on
+`Engine` since #2172, and the CLI generator follows in #2173.
 
 > Backend note (CUDA / Blackwell, e.g. GB10): batched decode used to be a
 > throughput wash on CUDA because the `M*B < 8` quantized matmul fell back to
@@ -386,20 +402,48 @@ spreads the same chunk count over more requests and amortizes the merge pass.
 #### Where the dense-versus-paged choice lives
 
 The kernel is picked by the cache, not by the model forward
-([ADR 0008](adr/0008-kv-attention-dispatch-in-the-cache.md), issue #2171).
+([ADR 0008](adr/0008-kv-attention-dispatch-in-the-cache.md), issue #2171;
+[ADR 0009](adr/0009-engine-step-api.md), issue #2172).
 `KVCache::attend` appends the step's K/V and runs attention for the storage
 behind that cache, and `cache::attend_batched` does the same for one layer of a
 batch. Qwen3, Llama 3 and the families that reuse their attention (Qwen2,
-Qwen2.5, Helium, the VLM text backbones) call these and no longer branch on
-`is_paged_backed()` or read the scheduler's `DecodeBatchContext`; DeepSeek V2's
-absorbed decode goes through `MlaLatentCache::attend`. Gemma 3, Llama 4 and the
-other model-owned families keep their own dense-pointer paged kernels for now.
+Qwen2.5, Helium, the VLM text backbones) call these; DeepSeek V2's absorbed
+decode goes through `MlaLatentCache::attend`. The model-owned families hold
+their per-sequence state in their own cache enums and attend through the same
+rule: Gemma 3's `Cache::attend` routes a global layer to `KVCache::attend` and
+a sliding layer to `RotatingKVCache::attend` (whose write path stays
+`update_and_fetch`, where the #2182 decode undo log records every speculative
+write), and Llama 4's `Llama4Cache::attend` routes a chunked layer to
+`ChunkedKVCache::attend`. A batch over any of these runs
+`cache::attend_batched_rows`, one attention per row through the row's own
+cache. No model reads `is_paged_backed()`, and the scheduler no longer builds a
+per-step `DecodeBatchContext`: `forward_batched_with_ids` takes the ids and the
+caches only, and the storage policy is whatever `CachePool` wired when the
+sequence was opened.
 
 - The pooled launch keys on `caches[0].is_paged_backed()` at an unmasked
-  single-token step, so a caller with no `DecodeBatchContext` (the lookahead
-  prime, `forward_batched`) reaches the fused launch too. A batch that mixes
-  pool-backed and dense rows declines before it writes and runs each row through
-  `attend` on its own storage.
+  single-token step, so every batched caller (the synchronous step, the
+  lookahead prime, `forward_batched`) reaches the fused launch the same way. A
+  batch that mixes pool-backed and dense rows declines before it writes and
+  runs each row through `attend` on its own storage.
+- Model-owned state is never pool-backed, so Gemma 3 and Llama 4 always take
+  the dense rows of the table whichever `--decode-storage-backend` the server
+  runs. The dense-pointer `paged_decode_attention_dense_compat` and
+  `_rotating_compat` routes they used to select on the paged backend were
+  per-row C++ loops (block slices, a concat, one SDPA per row); the per-row
+  `attend` loop is the same attention without the block concat, not
+  bit-identical to it. On the dense backend an FP16 or Int8 Gemma 3 row runs
+  the exact ops it ran before; a Gemma 3 global layer in any Turbo mode with a
+  dequant-first or compressed decode variant (Turbo4Asym, Turbo4Delegated, and
+  sparse-V behind its environment gates) now takes the variant
+  `KVCache::attend` selects, as Qwen3 does, instead of `update_and_fetch` plus
+  SDPA. Llama 4's RoPE layers run the whole block batched on both backends
+  (projections, residuals, the post-attention norm and the MoE feed-forward;
+  before #2172 the dense backend ran every row through the single-row block),
+  with the per-row attention unchanged. A real-checkpoint check
+  (`scheduler_real_batch_parity_tests`, gemma-3-1b-it-4bit under
+  `MLXCEL_SDPA_DETERMINISTIC=1`) gives two concurrent greedy requests the
+  same token streams as each request alone, on both backends.
 - Batched decode over Turbo caches takes the dequant-first variants that
   single-sequence decode already used, instead of a full dequant per step. The
   attention is the same exact math in a different op order, so it is not

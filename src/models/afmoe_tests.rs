@@ -622,6 +622,21 @@ impl crate::models::gemma3::CacheInterface for StubCache {
             mlxcel_core::copy(&self.values),
         )
     }
+
+    fn attend(
+        &mut self,
+        q: &MlxArray,
+        k: UniquePtr<MlxArray>,
+        v: UniquePtr<MlxArray>,
+        scale: f32,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let (keys, values) = self.update_and_fetch(k, v);
+        if mask.is_none() && mlxcel_core::array_shape(q)[2] > 1 {
+            return mlxcel_core::causal_attention(q, &keys, &values, scale, 0.0, 0);
+        }
+        mlxcel_core::layers::attention(q, &keys, &values, scale, mask, 0.0, 0)
+    }
 }
 
 #[test]

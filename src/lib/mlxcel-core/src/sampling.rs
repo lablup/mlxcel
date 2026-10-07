@@ -1080,7 +1080,8 @@ pub fn row_supports_fused_batch(
 /// [`crate::sampling_row_step::RowSampler::fused_eligible`]; this adds the
 /// per-row obligations that are not sampler stages.
 ///
-/// Used by: `BatchScheduler::batched_decode_fused_params`
+/// Used by: [`crate::engine::shared_fused_params`] (the engine's fused branch
+/// and `BatchScheduler::batched_decode_fused_params`)
 pub fn row_supports_fused_batch_except_bias(
     config: &SamplingConfig,
     needs_logit_mask: bool,
@@ -1127,6 +1128,21 @@ pub fn batched_fused_sample_with_bias(
     params: &FusedSampleParams,
     biases: &[&TokenBiasMap],
 ) -> Vec<i32> {
+    token_ids_to_host(&batched_fused_sample_tokens(logits, params, biases))
+}
+
+/// The device half of [`batched_fused_sample_with_bias`]: the lazy `[B]`
+/// `uint32` token ids, not yet evaluated, so a caller can schedule them
+/// (`async_eval`, the lookahead pipeline) or evaluate them through the
+/// fallible boundary before reading them back (#822).
+///
+/// Used by: [`batched_fused_sample_with_bias`], `Engine::step` (fused branch),
+/// `Engine::submit`
+pub fn batched_fused_sample_tokens(
+    logits: &MlxArray,
+    params: &FusedSampleParams,
+    biases: &[&TokenBiasMap],
+) -> UniquePtr<MlxArray> {
     // [B, 1, vocab] -> [B, vocab]; a 2-D input is returned unchanged.
     let last_logits = ffi::slice_last_logits(logits);
     // Token bias before the filters, matching the per-row chain order in
@@ -1143,7 +1159,7 @@ pub fn batched_fused_sample_with_bias(
         params.min_p,
     );
     crate::sampling_dispatch::report_sampling_dispatch();
-    token_ids_to_host(&tokens)
+    tokens
 }
 
 /// Copy a 1-D `[B]` token-id array to host as `Vec<i32>` with a single

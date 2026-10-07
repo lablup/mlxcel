@@ -46,7 +46,7 @@ impl BatchScheduler {
                 .bind(target_lm)
                 .map_err(|e| format!("MTP drafter bind failed: {e}"))
         }
-        match &self.model {
+        match self.engine.model() {
             LoadedModel::Gemma4(wrapper) => compat_and_bind(drafter, wrapper),
             LoadedModel::Gemma4VLM(vlm) => compat_and_bind(drafter, vlm),
             LoadedModel::Gemma4Unified(unified) => compat_and_bind(drafter, unified),
@@ -104,7 +104,10 @@ impl BatchScheduler {
         // Variant gate BEFORE any drafter IO, same rationale and message
         // as `run_mtp_burst`: an unsupported pairing declines to classic
         // without surfacing a confusing drafter-load error.
-        if !crate::server::batch::speculative_burst::mtp_capable_target(&self.model, block_size) {
+        if !crate::server::batch::speculative_burst::mtp_capable_target(
+            self.engine.model(),
+            block_size,
+        ) {
             // The verdict is fixed for the life of the process (the family
             // does not change and the exactness probe is memoized), so say it
             // once at WARN and keep later requests at DEBUG.
@@ -112,7 +115,7 @@ impl BatchScheduler {
                 std::sync::atomic::AtomicBool::new(false);
             let first = !DECLINE_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed);
             let reason = if crate::server::batch::speculative_burst::mtp_target_family_supported(
-                &self.model,
+                self.engine.model(),
             ) {
                 // A supported family only lands here when the block-vs-chain
                 // probe declined, so name the probe's verdict rather than
@@ -166,7 +169,9 @@ impl BatchScheduler {
                 }
             };
         if prefill_start_offset > 0
-            && !crate::server::batch::speculative_burst::mtp_adopted_prefix_reusable(&self.model)
+            && !crate::server::batch::speculative_burst::mtp_adopted_prefix_reusable(
+                self.engine.model(),
+            )
         {
             tracing::debug!(
                 "MTP speculative slice declined for seq {}: prefill_start_offset={} but this \
@@ -234,7 +239,7 @@ impl BatchScheduler {
             .as_ref()
             .map(|p| p.profile_probe_rounds())
             .unwrap_or(0);
-        let model_eos = self.model.eos_token_ids();
+        let model_eos = self.engine.model().eos_token_ids();
         // The burst stream stops at the KV bound as classic decode does (#1472).
         let context_bound = self.context_bound();
 
@@ -242,7 +247,7 @@ impl BatchScheduler {
         // row-wise Gemma 4 prefill mirrors that partition (#2160).
         let prefill_boundary = self.history_boundary_split(&seq);
         // Slice 0: prefill + seed + first bonus, streamed immediately.
-        let started = match &self.model {
+        let started = match self.engine.model() {
             LoadedModel::Gemma4(wrapper) => {
                 let adapter = Gemma4MtpTargetAdapter::new_with_block_size(
                     wrapper,
@@ -516,7 +521,7 @@ impl BatchScheduler {
             slice = job.slices,
         )
         .entered();
-        let stepped = match &self.model {
+        let stepped = match self.engine.model() {
             LoadedModel::Gemma4(wrapper) => {
                 let adapter = Gemma4MtpTargetAdapter::new_with_block_size(
                     wrapper,
@@ -684,7 +689,7 @@ impl BatchScheduler {
         mut job: Box<crate::server::batch::speculative_slice::MtpSliceJob>,
     ) {
         if let Some(drafter) = job.take_drafter() {
-            let target_lm: Option<&dyn LanguageModel> = match &self.model {
+            let target_lm: Option<&dyn LanguageModel> = match self.engine.model() {
                 LoadedModel::Gemma4(wrapper) => Some(wrapper),
                 LoadedModel::Gemma4VLM(vlm) => Some(vlm),
                 LoadedModel::Gemma4Unified(unified) => Some(unified),
@@ -738,7 +743,7 @@ impl BatchScheduler {
         // its accumulated KV history instead): see
         // `MtpSliceJob::attach_drafter` for the full argument.
         if let Some(drafter) = job.take_drafter() {
-            let target_lm: Option<&dyn LanguageModel> = match &self.model {
+            let target_lm: Option<&dyn LanguageModel> = match self.engine.model() {
                 LoadedModel::Gemma4(wrapper) => Some(wrapper),
                 LoadedModel::Gemma4VLM(vlm) => Some(vlm),
                 LoadedModel::Gemma4Unified(unified) => Some(unified),

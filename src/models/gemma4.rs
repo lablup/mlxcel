@@ -6530,7 +6530,7 @@ impl LanguageModel for Gemma4Wrapper {
 
     /// Gemma 4 supports batched decode now that
     /// [`ModelOwnedSequenceState`] isolates per-`SequenceId` cache state.
-    /// The vision wrapper's `forward_batched_with_context_and_ids`
+    /// The vision wrapper's `forward_batched_with_ids`
     /// override (in `vision::Gemma4VLModel`) routes each row through
     /// [`Self::forward_with_sequence_id`] which resolves to a distinct
     /// per-sequence `Vec<Cache>` — no shared-RefCell leakage across rows.

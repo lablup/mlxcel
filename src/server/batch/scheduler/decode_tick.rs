@@ -68,7 +68,7 @@ impl BatchScheduler {
             //
             // For non-Qwen-VL models / text-only requests this returns
             // an empty snapshot and the rebind is a no-op.
-            let mrope_snapshot = self.model.take_qwen_vl_mrope_entry(victim.seq_id);
+            let mrope_snapshot = self.engine.model().take_qwen_vl_mrope_entry(victim.seq_id);
 
             // same lifecycle invariant for Gemma 4 E2B/E4B
             // `per_layer_inputs`. The tensor is projected exactly once
@@ -77,14 +77,18 @@ impl BatchScheduler {
             // would otherwise drop it and the re-prefill would observe
             // `per_layer_inputs == None` for an E2B/E4B request. Take
             // it out before `release_sequence_caches` drains the map.
-            let pli_snapshot = self.model.take_gemma4_per_layer_inputs_entry(victim.seq_id);
+            let pli_snapshot = self
+                .engine
+                .model()
+                .take_gemma4_per_layer_inputs_entry(victim.seq_id);
 
             // Issue #85: same for Gemma 3n VLM `per_layer_inputs`.
             // Without this round trip the re-prefill would panic in
             // `Gemma3nVLModel::forward_with_embeddings_and_sequence_id`
             // (per_layer_inputs missing for this sequence).
             let pli3n_snapshot = self
-                .model
+                .engine
+                .model()
                 .take_gemma3n_per_layer_inputs_entry(victim.seq_id);
 
             // Drop the victim's prompt-cache context. Preemption reallocates
@@ -132,16 +136,19 @@ impl BatchScheduler {
                     // the new seq id so re-prefill resolves the same
                     // per-row delta the original prefill computed
                     // (follow-up).
-                    self.model
+                    self.engine
+                        .model()
                         .install_qwen_vl_mrope_entry(new_id, mrope_snapshot);
                     // same for Gemma 4 `per_layer_inputs`.
                     // The tensor is reused unchanged across re-prefill
                     // because both depend only on the request's
                     // input_ids (no decode-time updates).
-                    self.model
+                    self.engine
+                        .model()
                         .install_gemma4_per_layer_inputs_entry(new_id, pli_snapshot);
                     // Issue #85: same for Gemma 3n `per_layer_inputs`.
-                    self.model
+                    self.engine
+                        .model()
                         .install_gemma3n_per_layer_inputs_entry(new_id, pli3n_snapshot);
                     if let Err(err) = victim.state.transition_to(SequenceState::Queued) {
                         tracing::error!("Eviction state transition error: {err}");
@@ -256,7 +263,7 @@ impl BatchScheduler {
     /// forward. This is the exact pre-#632 behavior and the pipeline's
     /// guaranteed fallback.
     pub(super) fn dispatch_sync_decode(&mut self, seq_ids: &[SequenceId]) {
-        if seq_ids.len() <= 1 || !self.model.supports_batching() {
+        if seq_ids.len() <= 1 || !self.engine.model().supports_batching() {
             for &seq_id in seq_ids {
                 self.decode_single_step(seq_id);
             }
@@ -311,32 +318,6 @@ impl BatchScheduler {
         }
     }
 
-    /// Batched decode-storage context for the active backend. Shared by the
-    /// synchronous batched decode and the lookahead prime so both drive the
-    /// identical dense / native-paged execution path.
-    ///
-    /// Only the model-owned families (Gemma 3, Llama 4) still select a kernel
-    /// from this. `KVCache`-backed families decide inside
-    /// `KVCache::attend` from the storage the pool wired for the sequence
-    /// (#2171, ADR 0008), so for them the value is informational.
-    pub(super) fn decode_batch_context(&self) -> DecodeBatchContext {
-        match self.decode_storage_backend {
-            DecodeStorageBackend::Auto | DecodeStorageBackend::Dense => {
-                debug_assert_ne!(
-                    self.decode_storage_backend,
-                    DecodeStorageBackend::Auto,
-                    "scheduler should normalize decode storage backend before decode dispatch"
-                );
-                DecodeBatchContext::dense()
-            }
-            DecodeStorageBackend::Paged => DecodeBatchContext {
-                storage_backend: CoreDecodeStorageBackend::Paged,
-                paged_block_size: DEFAULT_PAGED_BLOCK_SIZE as i32,
-                use_native_paged_kernel: true,
-            },
-        }
-    }
-
     /// Whether the active decode batch is eligible for the lookahead pipeline
     /// this tick, returning the shared fused sampling params on success. A
     /// `None` return routes the tick to the synchronous path. The gate is
@@ -361,8 +342,8 @@ impl BatchScheduler {
         // an allocated-backend gate let it pipeline while the teardown reached
         // none of its real state.
         let model_owned =
-            self.model.sequence_state_layout().backend == SequenceStateBackend::ModelOwned;
-        if model_owned && !self.model.supports_decode_lookahead_rewind() {
+            self.engine.model().sequence_state_layout().backend == SequenceStateBackend::ModelOwned;
+        if model_owned && !self.engine.model().supports_decode_lookahead_rewind() {
             return None;
         }
         // Speculative decoding drives its own decode loop.
@@ -391,7 +372,7 @@ impl BatchScheduler {
             // rewind gate above is allocated `ModelOwned` (no paged override,
             // e.g. `--parallel 1`) or `PagedKvCache` (shadow accounting), and
             // its own hook unwinds the state either way.
-            match self.cache_pool.get(seq_id) {
+            match self.engine.pool().get(seq_id) {
                 Some(set)
                     if matches!(
                         set.backend,
@@ -448,41 +429,20 @@ impl BatchScheduler {
             return failed;
         }
         let want = positions as i32;
-        let model_owned =
-            self.model.sequence_state_layout().backend == SequenceStateBackend::ModelOwned;
         for &seq_id in ids {
-            if let Some(caches) = self.cache_pool.get_caches_mut(seq_id) {
-                for (layer, cache) in caches.iter_mut().enumerate() {
-                    // KVCache::trim clamps to the live window and returns the
-                    // count actually removed; a short trim means a speculative
-                    // position was not unwound (e.g. an unexpectedly short cache),
-                    // which would desync the KV against generated_tokens.
-                    let trimmed = cache.trim(want);
-                    if trimmed != want {
-                        tracing::warn!(
-                            seq_id = %seq_id,
-                            layer,
-                            requested = want,
-                            trimmed,
-                            "lookahead teardown: trim removed fewer positions \
-                             than requested, KV may be out of sync"
-                        );
-                    }
-                }
-                if model_owned && let Err(err) = self.model.rewind_decode_appends(seq_id, want) {
-                    tracing::error!(
-                        seq_id = %seq_id,
-                        positions = want,
-                        error = %err,
-                        "lookahead teardown: model-owned rewind failed, failing the request"
-                    );
-                    self.fail_desynchronized_sequence(seq_id, &err);
-                    failed.push(seq_id);
-                    continue;
-                }
-                // Re-mirror the shorter dense length into any paged bookkeeping
-                // (no-op for a pure dense pool and for pool-backed sequences).
-                self.sync_sequence_storage(seq_id);
+            // The engine trims the pool caches (a short trim is logged there:
+            // a speculative position not unwound desyncs the KV against
+            // generated_tokens), rewinds a model-owned family's own state and
+            // re-mirrors the shorter length into any paged bookkeeping.
+            if let Err(err) = self.engine.unwind_appends(seq_id, want) {
+                tracing::error!(
+                    seq_id = %seq_id,
+                    positions = want,
+                    error = %err,
+                    "lookahead teardown: model-owned rewind failed, failing the request"
+                );
+                self.fail_desynchronized_sequence(seq_id, &err.to_string());
+                failed.push(seq_id);
             }
         }
         failed
@@ -564,116 +524,66 @@ impl BatchScheduler {
         self.decode_lookahead = self.prime_lookahead_with_input(seq_ids, &input, &params);
     }
 
-    /// Run one forward for `seq_ids` on `input` (`[B, 1]`), fused-sample the
-    /// next tokens on-device, schedule them with `async_eval`, and return the
-    /// prebuilt step. The forward appends one speculative KV position per
-    /// sequence (undone by [`Self::apply_lookahead_trim`]). Returns `None` if a
-    /// sequence's caches vanished. The caller decides whether to keep the step
-    /// (store it in `decode_lookahead`) or unwind it.
+    /// Submit one pipelined step for `seq_ids` on `input` (`[B, 1]`): the
+    /// engine runs the speculative forward, fused-samples the next tokens
+    /// on-device and schedules them with `async_eval`. The forward appends one
+    /// speculative KV position per sequence (undone by
+    /// [`Self::apply_lookahead_trim`]). Returns `None` if a sequence's caches
+    /// vanished or the schedule threw; the caller decides whether to keep the
+    /// step (store it in `decode_lookahead`) or unwind it.
     pub(super) fn prime_lookahead_with_input(
         &mut self,
         seq_ids: &[SequenceId],
         input: &mlxcel_core::MlxArray,
         params: &FusedSampleParams,
     ) -> Option<DecodeLookahead> {
-        let logits = self.lookahead_forward(seq_ids, input)?;
-        let last_logits = mlxcel_core::slice_last_logits(&logits);
-        // Token bias, in the per-row sampler's chain position (after the slice,
-        // before the filters). Without this the gate could not admit a biased
-        // row at all, which is what kept `ignore_eos` and `logit_bias` requests
-        // on the synchronous path.
-        let biased = self
-            .row_token_biases(seq_ids)
-            .map(|biases| apply_token_bias_rows(last_logits, &biases));
-        let Some(last_logits) = biased else {
-            // A row left the batch between the gate and here. Unwind the
-            // speculative KV position `lookahead_forward` just appended, the
-            // same teardown the async-eval failure below performs, and let the
-            // caller decode synchronously.
-            let _ = self.apply_lookahead_trim(seq_ids, lookahead_teardown_positions(false));
-            return None;
-        };
-        // Same pre-fused row filters (top-n-sigma, typical_p) as `batched_fused_sample`,
-        // so the pipelined lookahead samples from the identical distribution
-        // as the synchronous fused path it accelerates. A no-op adding no
-        // graph nodes while every filter is disabled.
-        let last_logits = apply_row_filters(last_logits, params);
-        let tokens = mlxcel_core::fused_sample(
-            &last_logits,
-            params.temperature,
-            params.top_k,
-            params.top_p,
-            params.min_p,
-        );
-        // Announce a newly-seen sampling dispatch outcome at INFO (#901).
-        mlxcel_core::report_sampling_dispatch();
-        // Schedule the sampled tokens (and thus the whole forward graph) without
-        // reading them to host, so the GPU runs ahead while the caller returns
-        // to the scheduler loop and reads the PREVIOUS step's tokens.
-        //
-        // #822: go through the fallible async boundary. An MLX throw at graph
-        // capture (e.g. a graph-cache abort) is recorded and priming is skipped;
-        // the caller then takes the synchronous decode path, which re-evaluates
-        // through the same guard and fails the affected request(s) cleanly. This
-        // speculative helper never aborts sequences itself, so the failure is
-        // handled once, in the sync path.
-        if self
-            .record_eval_outcome(mlxcel_core::try_async_eval(&tokens).map_err(|e| e.to_string()))
-            .is_err()
-        {
-            // #822: `lookahead_forward` already appended one speculative KV
-            // position per sequence before this async schedule. The async eval
-            // threw and was caught, so unwind that append before bailing;
-            // otherwise the untrimmed position desyncs the KV against
-            // `generated_tokens` and the fallback synchronous decode runs on a
-            // corrupted cache. Mirrors the one-position teardown the
-            // stale/bootstrap fallbacks use.
-            let _ = self.apply_lookahead_trim(seq_ids, lookahead_teardown_positions(false));
-            return None;
+        // Every row's token bias, in the per-row sampler's chain position.
+        // Without this the gate could not admit a biased row at all, which is
+        // what kept `ignore_eos` and `logit_bias` requests on the synchronous
+        // path.
+        let biases: Option<Vec<&TokenBiasMap>> = seq_ids
+            .iter()
+            .map(|&seq_id| {
+                self.active_batch
+                    .get(seq_id)
+                    .map(|seq| &seq.sampling.token_bias)
+            })
+            .collect();
+        // A row left the batch between the gate and here: nothing was
+        // appended yet, so the caller just decodes synchronously.
+        let biases = biases?;
+        let batch = StepBatch { seq_ids, input };
+        match self.engine.submit(&batch, params, &biases) {
+            Ok(tokens) => {
+                // The schedule itself succeeded; the collect half evaluates
+                // the tokens through its own guard.
+                self.note_eval_success();
+                Some(DecodeLookahead {
+                    ids: seq_ids.to_vec(),
+                    tokens,
+                })
+            }
+            Err(mlxcel_core::engine::EngineError::Eval(msg)) => {
+                // #822: the forward already appended one speculative KV
+                // position per sequence before the async schedule threw.
+                // Record the throw and unwind that append before bailing;
+                // otherwise the untrimmed position desyncs the KV against
+                // `generated_tokens` and the fallback synchronous decode runs
+                // on a corrupted cache. The caller then takes the synchronous
+                // path, which re-evaluates through the same guard and fails
+                // the affected request(s) cleanly, so the failure is handled
+                // once, there.
+                let _ = self.record_eval_outcome(Err(msg));
+                let _ = self.apply_lookahead_trim(seq_ids, lookahead_teardown_positions(false));
+                None
+            }
+            Err(err) => {
+                // A row left the batch between the gate and here, or its
+                // caches vanished: nothing was appended.
+                tracing::debug!("lookahead prime skipped: {err}");
+                None
+            }
         }
-        Some(DecodeLookahead {
-            ids: seq_ids.to_vec(),
-            tokens,
-        })
-    }
-
-    /// Forward pass for the lookahead pipeline, mirroring the synchronous decode
-    /// forward exactly: the B=1 per-sequence path
-    /// ([`Self::decode_single_step`]) or the batched path
-    /// ([`Self::execute_batched_decode`]) with the same decode-storage context.
-    /// Returns `None` if a sequence's caches vanished (the caller then skips
-    /// priming).
-    pub(super) fn lookahead_forward(
-        &mut self,
-        seq_ids: &[SequenceId],
-        input: &mlxcel_core::MlxArray,
-    ) -> Option<UniquePtr<mlxcel_core::MlxArray>> {
-        // Every append this forward makes is speculative: a model-owned family
-        // that rewinds its own state (#2159) keeps the rows these writes
-        // overwrite, and only these (sync steps copy nothing).
-        let _speculative = mlxcel_core::cache::DecodeLookaheadAppendScope::enter();
-        let logits = if seq_ids.len() == 1 {
-            let seq_id = seq_ids[0];
-            let caches = self.cache_pool.get_caches_mut(seq_id)?;
-            self.model
-                .forward_with_sequence_id(input, Some(seq_id), caches, None)
-        } else {
-            let decode_context = self.decode_batch_context();
-            let mut batch_caches = self.cache_pool.get_batch_caches_mut(seq_ids).ok()?;
-            let logits = self.model.forward_batched_with_context_and_ids(
-                input,
-                Some(seq_ids),
-                &mut batch_caches,
-                None,
-                Some(&decode_context),
-            );
-            drop(batch_caches);
-            logits
-        };
-        for &seq_id in seq_ids {
-            self.sync_sequence_storage(seq_id);
-        }
-        Some(logits)
     }
 
     /// Steady pipelined decode, ordered exactly like the CLI generation loop
@@ -706,7 +616,7 @@ impl BatchScheduler {
         let next = self.prime_lookahead_with_input(seq_ids, &next_input, params);
 
         // Step 2: read step n's tokens to host (the sync point) and finish-check.
-        let toks = lookahead_tokens_to_host(&la.tokens);
+        let toks = mlxcel_core::engine::tokens_to_host(&la.tokens);
         let mut finishing = toks.len() != seq_ids.len();
         if !finishing {
             for (i, &seq_id) in seq_ids.iter().enumerate() {
@@ -774,7 +684,7 @@ impl BatchScheduler {
         self.batch_observability.record_lookahead_step();
     }
 
-    /// Batched decode: one forward_batched() call for all active sequences.
+    /// Batched decode: one engine step for all active sequences.
     ///
     /// # Null/empty-cache safety
     ///
@@ -839,226 +749,54 @@ impl BatchScheduler {
             "execute_batched_decode: duplicate SequenceId in seq_ids"
         );
 
-        let decode_context = self.decode_batch_context();
-        let mut batch_caches = match self.cache_pool.get_batch_caches_mut(seq_ids) {
-            Ok(caches) => caches,
-            Err(err) => {
-                tracing::error!("{err} during batched decode");
+        self.run_engine_step(seq_ids, &input);
+    }
+
+    /// One engine step over `seq_ids`: the forward, then every row's sampling
+    /// and finish step inside the engine. The engine takes the fused
+    /// `[B, vocab] -> [B]` path when every row shares a fused-compatible
+    /// config and none needs a structured-output mask, a thinking-budget
+    /// override or a per-token logprobs payload, and the exact per-row chain
+    /// otherwise; a batch of one always runs the per-row chain. Each row's
+    /// outcome is then applied to its sequence (#822: a failed row finishes
+    /// alone).
+    pub(super) fn run_engine_step(
+        &mut self,
+        seq_ids: &[SequenceId],
+        input: &mlxcel_core::MlxArray,
+    ) {
+        let context = self.context_bound();
+        let batch = StepBatch { seq_ids, input };
+        let stepped = {
+            let Some(seqs) = self.active_batch.get_rows_mut(seq_ids) else {
+                tracing::warn!("a sequence left the active batch before its decode step");
                 return;
-            }
+            };
+            let tokenizer = &self.tokenizer;
+            let mut rows: Vec<_> = seqs
+                .into_iter()
+                .map(|seq| step_rows::step_row(seq, tokenizer, context, false))
+                .collect();
+            self.engine.step(&batch, &mut rows)
         };
-
-        let logits = self.model.forward_batched_with_context_and_ids(
-            &input,
-            Some(seq_ids),
-            &mut batch_caches,
-            None,
-            Some(&decode_context),
-        );
-        drop(batch_caches);
-
-        for &seq_id in seq_ids {
-            self.sync_sequence_storage(seq_id);
-        }
-
-        // Fast path: when every active row shares a fused-compatible sampling
-        // config and none needs a structured-output mask, a thinking-budget
-        // override, or a per-token logprobs payload, sample all B rows in ONE
-        // fused `[B, vocab] -> [B]` dispatch + eval instead of B per-row
-        // slice/sample/eval/extract round trips. The per-row loop below stays
-        // the exact fallback for every other case (structured output,
-        // row-specific logprobs, token-bias observability, thinking budgets,
-        // mixed sampling configs).
-        let fused_tokens = self
-            .batched_decode_fused_params(seq_ids)
-            .and_then(|params| {
-                let biases = self.row_token_biases(seq_ids)?;
-                Some(batched_fused_sample_with_bias(&logits, &params, &biases))
-            });
-        if let Some(tokens) = fused_tokens {
-            // #822: a completed fused decode is a successful eval (the graph is
-            // evaluated inside `batched_fused_sample`'s host readback), so clear
-            // the consecutive-failure run. This keeps isolated earlier failures
-            // from accumulating toward the shutdown threshold across a long run
-            // when the hot path stays on the fused branch. The fused readback
-            // itself still uses the infallible host-copy path; routing that
-            // through the fallible readback is tracked as a follow-up.
-            self.note_eval_success();
-            self.apply_fused_decode_tokens(seq_ids, &tokens);
-            return;
-        }
-
-        for (i, &seq_id) in seq_ids.iter().enumerate() {
-            let seq_logits =
-                mlxcel_core::slice(&logits, &[i as i32, 0, 0], &[i as i32 + 1, 1, i32::MAX]);
-
-            let constraint_clone = self
-                .active_batch
-                .get_mut(seq_id)
-                .and_then(|s| s.structured.clone());
-
-            // Use cached token_history (incrementally maintained) instead of
-            // rebuilding per step. Use cached merged_eos computed once at prefill.
-            //
-            // follow-up: we capture `sampled` separately from
-            // `final_id` so the structured-output matcher (below) can be
-            // advanced by the *pre-override* token. The matcher's mask
-            // describes which token ids are grammatically legal at this
-            // step; feeding it the post-override forced `</think>` would
-            // hand it a token outside its allowed set and cause a parser
-            // error or silent mis-advance.
-            let (sampled_token, token_val, token_lp) = {
-                // The one per-row sampling step (#2169). When the sequence has
-                // a structured-output constraint, its schema mask runs on the
-                // row's logits before the chain; a mask failure surfaces as a
-                // clean FinishReason::Error rather than silent non-conforming
-                // output. b10621 post_sampling_probs (#1485): the report and
-                // the draw come from ONE chain pass sharing one XTC gate.
-                let draw = {
-                    let seq = match self.active_batch.get_mut(seq_id) {
-                        Some(s) => s,
-                        None => continue,
-                    };
-                    let want_distribution = seq.logprobs_config.enabled
-                        && seq.logprobs_config.source == LogprobSource::PostSampling;
-                    let mut mask = constraint_clone.as_ref().map(StructuredMask);
-                    seq.sampler.draw(
-                        &seq_logits,
-                        &seq.sampling,
-                        &seq.token_history,
-                        mask.as_mut().map(|m| m as &mut dyn LogitMask),
-                        want_distribution,
-                    )
-                };
-                let TokenDraw {
-                    token: token_arr,
-                    adjusted_logits,
-                    distribution: post_probs,
-                } = match draw {
-                    Ok(draw) => draw,
-                    Err(msg) => {
-                        Self::abort_sequence_with_error(
-                            self.active_batch.get_mut(seq_id),
-                            "structured output",
-                            &msg,
-                        );
-                        continue;
-                    }
-                };
-                // #822: force-evaluate the sampled token through the fallible
-                // boundary now that the `active_batch` borrow has ended. On an
-                // MLX throw, fail just this row and keep serving the rest of the
-                // batch; the infallible `item_i32` readback below would otherwise
-                // re-trigger the same throw and abort the process.
-                if let Err(msg) = self.record_eval_outcome(
-                    mlxcel_core::try_eval(&token_arr).map_err(|e| e.to_string()),
-                ) {
-                    Self::abort_sequence_with_error(
-                        self.active_batch.get_mut(seq_id),
-                        "inference backend",
-                        &msg,
-                    );
-                    if self.eval_failures_exhausted() {
-                        return;
-                    }
-                    continue;
-                }
-                let sampled = mlxcel_core::item_i32(&token_arr);
-                let seq = match self.active_batch.get_mut(seq_id) {
-                    Some(s) => s,
-                    None => continue,
-                };
-                // apply the thinking-budget override first so that
-                // when the override fires (sampled != final_id) we can skip
-                // the log-softmax work entirely. The logprob metadata would
-                // be dropped anyway because the emitted `</think>` differs
-                // from the token the logits describe, so computing it first
-                // is wasted GPU work on the decode hot path.
-                //
-                // #1485: `resolve` then confirms the finally-emitted token
-                // with the sampler feedback state. Adaptive-p folds the
-                // ORIGINAL probability of the sampled token into its EMA only
-                // when the emitted token IS the sampled one (a thinking-budget
-                // override leaves the EMA untouched, upstream's accept-time id
-                // check); a no-op for every other config.
-                let (sampled, final_id) = seq.sampler.resolve(sampled, |t| {
-                    Self::apply_thinking_budget(&mut seq.thinking, t)
-                });
-                let lp = if final_id == sampled {
-                    match seq.logprobs_config.source {
-                        // b10621 post_sampling_probs (#1485): linear
-                        // probabilities from the post-chain distribution the
-                        // draw came from.
-                        LogprobSource::PostSampling => post_probs.as_ref().map(|p| {
-                            compute_post_sampling_probs(p, sampled, seq.logprobs_config.top_k)
-                        }),
-                        // b10621 pre-sampling n_probs (#1485): the raw model
-                        // logits, before bias, penalties and the chain.
-                        LogprobSource::RawModel if seq.logprobs_config.enabled => {
-                            let raw_row = mlxcel_core::slice_last_logits(&seq_logits);
-                            compute_logprobs(&raw_row, sampled, &seq.logprobs_config)
-                        }
-                        _ => compute_logprobs(&adjusted_logits, sampled, &seq.logprobs_config),
-                    }
-                } else {
-                    // Override fired; token text and logprob metadata must
-                    // stay consistent, so drop the logprob for this step.
-                    None
-                };
-                (sampled, final_id, lp)
-            };
-
-            // advance the matcher state with the *pre-override*
-            // sampled token (`sampled_token`), not the post-override
-            // `token_val`. The matcher derived its mask from the unaltered
-            // logits, so feeding it `final_id` after a thinking-budget
-            // override would hand it a token outside its allowed set and
-            // either cause a parser error or silently mis-advance. Mirrors
-            // the pattern in `finish_prefill` which uses
-            // `sampled_first_token`.
-            //
-            // If `consume_token` fails (matcher hit an error state),
-            // transition the sequence to `Finished(Error)` and skip
-            // emission so non-conforming output never reaches the client.
-            let structured_stopped = if let Some(constraint) = constraint_clone {
-                match Self::consume_structured_token(&constraint, sampled_token) {
-                    Ok(stopped) => stopped,
-                    Err(msg) => {
-                        Self::abort_sequence_with_error(
-                            self.active_batch.get_mut(seq_id),
-                            "structured output",
-                            &msg,
-                        );
-                        continue;
-                    }
-                }
-            } else {
-                false
-            };
-
-            let context = self.context_bound();
-            let seq = match self.active_batch.get_mut(seq_id) {
-                Some(s) => s,
-                None => continue,
-            };
-
-            // The shared post-sample finish step (#2168): EOS (not pushed), push and
-            // history, stop string, generation bound, structured stop, budget, context
-            // bound, repetition loop, then the cache-clear cadence when unfinished.
-            if finish_decode_token(
-                seq,
-                &self.tokenizer,
-                token_val,
-                token_lp,
-                structured_stopped,
-                context,
-            ) == Some(FinishCause::Eos)
-            {
-                continue;
+        match stepped {
+            Ok(out) => {
+                self.finish_rows_state(&out.rows);
+                self.apply_row_outcomes(&out.rows);
             }
+            Err(err) => tracing::error!("{err} during decode"),
+        }
+    }
 
-            if let Some(cache_set) = self.cache_pool.get_mut(seq_id) {
-                cache_set.current_offset += 1;
+    /// Apply each finished row's cause to its sequence state (the engine's
+    /// finish step reports the cause; the sequence's `FinishReason` and its
+    /// side effects are the scheduler's).
+    pub(super) fn finish_rows_state(&mut self, outcomes: &[RowOutcome]) {
+        for outcome in outcomes {
+            if let Some(cause) = outcome.finish
+                && let Some(seq) = self.active_batch.get_mut(outcome.seq_id)
+            {
+                apply_finish_cause(seq, cause);
             }
         }
     }
@@ -1073,100 +811,59 @@ impl BatchScheduler {
     /// row that needs per-row treatment returns `None`, which routes the caller
     /// to the unchanged per-row fallback loop.
     ///
-    /// The per-row obligations map onto the generic predicate
-    /// [`mlxcel_core::sampling::row_supports_fused_batch`] as: structured-output
-    /// mask -> `needs_logit_mask` (`seq.structured`); thinking-budget override
-    /// -> `needs_token_override` (`seq.thinking`); per-token logprobs ->
-    /// `needs_per_token_payload` (`seq.logprobs_config`).
+    /// This is the engine's own rule
+    /// ([`mlxcel_core::engine::shared_fused_params`]) over each row's
+    /// [`step_rows::fused_gate`], the same gate the engine's fused branch
+    /// reads through the step row, so the lookahead pipeline and the
+    /// synchronous step cannot disagree on which batches are fused. Token
+    /// bias is folded into the logits at both dispatch points, so a biased
+    /// row stays eligible (keeping it off the pipeline cost `ignore_eos` and
+    /// `logit_bias` requests 13% decode). A row that vanished from the batch
+    /// forces the per-row fallback, which carries its own missing-sequence
+    /// guards.
     pub(super) fn batched_decode_fused_params(
         &self,
         seq_ids: &[SequenceId],
     ) -> Option<FusedSampleParams> {
-        let mut shared: Option<FusedSampleParams> = None;
-        for &seq_id in seq_ids {
-            // A row that vanished from the batch forces the per-row fallback,
-            // which carries its own missing-sequence guards.
-            let seq = self.active_batch.get(seq_id)?;
-            // `_except_bias`: this scheduler folds every row's token bias into
-            // the logits itself (`row_token_biases` + `apply_token_bias_rows`)
-            // at both dispatch points, so a biased row no longer has to leave
-            // the fused path and, with it, the lookahead pipeline. That cost
-            // `ignore_eos` and `logit_bias` requests 13% decode.
-            if !row_supports_fused_batch_except_bias(
-                &seq.sampling,
-                seq.structured.is_some(),
-                !seq.thinking.is_disabled(),
-                seq.logprobs_config.enabled,
-            ) {
-                return None;
-            }
-            let params = FusedSampleParams::from_config(&seq.sampling);
-            match shared {
-                None => shared = Some(params),
-                Some(first) if !first.matches(&params) => return None,
-                Some(_) => {}
-            }
-        }
-        shared
+        mlxcel_core::engine::shared_fused_params(
+            seq_ids
+                .iter()
+                .map(|&seq_id| self.active_batch.get(seq_id).map(step_rows::fused_gate)),
+        )
     }
 
-    /// Every row's token bias, in `seq_ids` order, for the fused dispatch
-    /// points to fold into the logits.
-    ///
-    /// `None` when a sequence has left the batch: the tick then takes the
-    /// per-row path instead of sampling a batch whose bias list and forward
-    /// rows disagree.
-    ///
-    /// Used by: [`Self::execute_batched_decode`] fused branch,
-    /// [`Self::prime_lookahead_with_input`]
-    pub(super) fn row_token_biases(&self, seq_ids: &[SequenceId]) -> Option<Vec<&TokenBiasMap>> {
-        seq_ids
-            .iter()
-            .map(|&seq_id| {
-                self.active_batch
-                    .get(seq_id)
-                    .map(|seq| &seq.sampling.token_bias)
-            })
-            .collect()
-    }
-
-    /// Bookkeeping for the batched fused fast path.
-    ///
-    /// Consumes the `[B]` token ids produced by
-    /// [`mlxcel_core::sampling::batched_fused_sample`] and drives each
-    /// sequence's EOS check, token history, streaming decode, length limit,
-    /// periodic cache clear, and cache-offset advance. This mirrors the tail of
-    /// the per-row loop in [`Self::execute_batched_decode`] minus the per-row
-    /// sampling, structured-output, thinking-budget, and logprobs work that
-    /// [`Self::batched_decode_fused_params`] already excluded. `tokens[i]` is
-    /// the id sampled for `seq_ids[i]`.
+    /// Collect half of a pipelined step: `tokens[i]` is the id the engine's
+    /// fused draw produced for `seq_ids[i]`. Each row runs the engine's finish
+    /// step ([`mlxcel_core::engine::Engine::finish_rows`]): EOS check, token
+    /// history, streaming decode, length limit, periodic cache clear and the
+    /// cache-offset advance. The pipeline's gate already excluded structured
+    /// output, thinking budgets and logprobs, so no per-row sampling runs
+    /// here.
     pub(super) fn apply_fused_decode_tokens(&mut self, seq_ids: &[SequenceId], tokens: &[i32]) {
         debug_assert_eq!(
             seq_ids.len(),
             tokens.len(),
             "apply_fused_decode_tokens: token count must match seq_ids"
         );
-        for (i, &seq_id) in seq_ids.iter().enumerate() {
-            let token_val = tokens[i];
-            let context = self.context_bound();
-            let seq = match self.active_batch.get_mut(seq_id) {
-                Some(s) => s,
-                None => continue,
+        let context = self.context_bound();
+        let outcomes = {
+            let Some(seqs) = self.active_batch.get_rows_mut(seq_ids) else {
+                tracing::warn!("a sequence left the active batch before its pipelined step");
+                return;
             };
-
-            // The shared post-sample finish step (#2168), the same one the per-row
-            // loop runs. The fast path excludes structured output and logprobs, not
-            // stop strings, bounds or loop detection, so a request finishes the same
-            // way whichever decode kernel its batch took.
-            if finish_decode_token(seq, &self.tokenizer, token_val, None, false, context)
-                == Some(FinishCause::Eos)
-            {
-                continue;
-            }
-
-            if let Some(cache_set) = self.cache_pool.get_mut(seq_id) {
-                cache_set.current_offset += 1;
-            }
+            let tokenizer = &self.tokenizer;
+            let mut rows: Vec<_> = seqs
+                .into_iter()
+                .map(|seq| step_rows::step_row(seq, tokenizer, context, false))
+                .collect();
+            self.engine.finish_rows(tokens, &mut rows)
+        };
+        self.finish_rows_state(&outcomes);
+        // The gate keeps per-row failures off this path; a failed row here is
+        // the engine refusing a token count that does not match the rows, and
+        // it must finish with an error rather than stall.
+        if outcomes.iter().any(|outcome| outcome.error.is_some()) {
+            self.apply_row_outcomes(&outcomes);
         }
     }
 
@@ -1180,6 +877,8 @@ impl BatchScheduler {
         }
     }
 
+    /// Decode one token for a single sequence: a batch of one through the
+    /// same engine step the batched path runs.
     pub(super) fn decode_single_step(&mut self, seq_id: SequenceId) {
         if !self.shared_budget_has_decode_room(1) {
             self.finish_all_for_shared_kv_budget();
@@ -1207,173 +906,7 @@ impl BatchScheduler {
         self.enforce_max_kv_size_for(seq_id, retention);
 
         let input = mlxcel_core::from_slice_i32(&[last_token], &[1, 1]);
-        let logits = {
-            let caches = match self.cache_pool.get_caches_mut(seq_id) {
-                Some(c) => c,
-                None => {
-                    tracing::error!("Cache not found for {seq_id} during decode");
-                    return;
-                }
-            };
-            self.model
-                .forward_with_sequence_id(&input, Some(seq_id), caches, None)
-        };
-        self.sync_sequence_storage(seq_id);
-
-        let constraint_clone = self
-            .active_batch
-            .get_mut(seq_id)
-            .and_then(|s| s.structured.clone());
-
-        // Use cached token_history from SequenceInfo (incrementally maintained)
-        // and cached merged_eos (computed once during prefill) to avoid
-        // per-step allocation and reconstruction overhead.
-        //
-        // follow-up: we capture `sampled` separately from
-        // `final_id`. The structured-output matcher (below) must be
-        // advanced by the pre-override token because its mask was derived
-        // from the unaltered logits; passing the post-override forced
-        // `</think>` would feed it a token outside its allowed set.
-        let (sampled_token, token_val, token_lp) = {
-            // The one per-row sampling step (#2169): the structured-output
-            // mask (when the sequence has a constraint) runs before the chain
-            // and a mask failure aborts the sequence cleanly rather than
-            // emitting non-conforming output. b10621 post_sampling_probs
-            // (#1485): one chain pass, one XTC gate, for both the draw and the
-            // report.
-            let draw = {
-                let seq = match self.active_batch.get_mut(seq_id) {
-                    Some(s) => s,
-                    None => {
-                        tracing::warn!(
-                            "Sequence {seq_id} missing from active batch during decode tick"
-                        );
-                        return;
-                    }
-                };
-                let want_distribution = seq.logprobs_config.enabled
-                    && seq.logprobs_config.source == LogprobSource::PostSampling;
-                let mut mask = constraint_clone.as_ref().map(StructuredMask);
-                seq.sampler.draw(
-                    &logits,
-                    &seq.sampling,
-                    &seq.token_history,
-                    mask.as_mut().map(|m| m as &mut dyn LogitMask),
-                    want_distribution,
-                )
-            };
-            let TokenDraw {
-                token: token_arr,
-                adjusted_logits,
-                distribution: post_probs,
-            } = match draw {
-                Ok(draw) => draw,
-                Err(msg) => {
-                    Self::abort_sequence_with_error(
-                        self.active_batch.get_mut(seq_id),
-                        "structured output",
-                        &msg,
-                    );
-                    return;
-                }
-            };
-            // #822: force-evaluate the sampled token through the fallible
-            // boundary now that the `active_batch` borrow has ended. On an MLX
-            // throw, fail just this request; the infallible `item_i32` readback
-            // below would otherwise re-trigger the same throw and abort the
-            // process.
-            if let Err(msg) = self
-                .record_eval_outcome(mlxcel_core::try_eval(&token_arr).map_err(|e| e.to_string()))
-            {
-                Self::abort_sequence_with_error(
-                    self.active_batch.get_mut(seq_id),
-                    "inference backend",
-                    &msg,
-                );
-                self.eval_failures_exhausted();
-                return;
-            }
-            let sampled = mlxcel_core::item_i32(&token_arr);
-            let seq = match self.active_batch.get_mut(seq_id) {
-                Some(s) => s,
-                None => {
-                    tracing::warn!(
-                        "Sequence {seq_id} missing from active batch after decode sampling"
-                    );
-                    return;
-                }
-            };
-            // apply the thinking-budget override first so that
-            // when the override fires the log-softmax work is skipped: the
-            // logprob metadata for the sampled token would be dropped anyway
-            // (token text and logprob `token_id` must stay consistent), so
-            // computing it up-front wastes GPU time on every override step.
-            // #1485: `resolve` then confirms the emitted token with the
-            // sampler feedback state (see the parallel comment in
-            // `execute_batched_decode`).
-            let (sampled, final_id) = seq.sampler.resolve(sampled, |t| {
-                Self::apply_thinking_budget(&mut seq.thinking, t)
-            });
-            let lp = if final_id == sampled {
-                match seq.logprobs_config.source {
-                    LogprobSource::PostSampling => post_probs.as_ref().map(|p| {
-                        compute_post_sampling_probs(p, sampled, seq.logprobs_config.top_k)
-                    }),
-                    LogprobSource::RawModel if seq.logprobs_config.enabled => {
-                        let raw_row = mlxcel_core::slice_last_logits(&logits);
-                        compute_logprobs(&raw_row, sampled, &seq.logprobs_config)
-                    }
-                    _ => compute_logprobs(&adjusted_logits, sampled, &seq.logprobs_config),
-                }
-            } else {
-                None
-            };
-            (sampled, final_id, lp)
-        };
-
-        // advance the matcher state with the *pre-override*
-        // sampled token. See the parallel comment in
-        // `execute_batched_decode` for why this must not be `token_val`.
-        let structured_stopped = if let Some(constraint) = constraint_clone {
-            match Self::consume_structured_token(&constraint, sampled_token) {
-                Ok(stopped) => stopped,
-                Err(msg) => {
-                    Self::abort_sequence_with_error(
-                        self.active_batch.get_mut(seq_id),
-                        "structured output",
-                        &msg,
-                    );
-                    return;
-                }
-            }
-        } else {
-            false
-        };
-
-        let context = self.context_bound();
-        let seq = match self.active_batch.get_mut(seq_id) {
-            Some(s) => s,
-            None => return,
-        };
-
-        // The shared post-sample finish step (#2168): EOS (not pushed), push and
-        // history, stop string, generation bound, structured stop, budget, context
-        // bound, repetition loop, then the cache-clear cadence when unfinished.
-        if finish_decode_token(
-            seq,
-            &self.tokenizer,
-            token_val,
-            token_lp,
-            structured_stopped,
-            context,
-        ) == Some(FinishCause::Eos)
-        {
-            return;
-        }
-
-        if let Some(cache_set) = self.cache_pool.get_mut(seq_id) {
-            cache_set.current_offset += 1;
-        }
+        self.run_engine_step(std::slice::from_ref(&seq_id), &input);
     }
 
     // ------------------------------------------------------------------

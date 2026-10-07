@@ -217,11 +217,11 @@ fn model_owned_sequence_primes_the_decode_lookahead_only_with_a_rewind() {
         "the sequence is decoding"
     );
     assert_eq!(
-        sched.cache_pool.get(seq_id).map(|set| set.backend),
+        sched.engine.pool().get(seq_id).map(|set| set.backend),
         Some(SequenceStateBackend::PagedKvCache),
         "the allocated backend claims paged"
     );
-    assert!(sched.model.supports_decode_lookahead_rewind());
+    assert!(sched.engine.model().supports_decode_lookahead_rewind());
     assert!(
         sched.lookahead_params(&[seq_id]).is_some(),
         "Gemma 3 rewinds its own state, so it pipelines"

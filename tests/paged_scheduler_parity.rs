@@ -46,13 +46,14 @@
 //! # What each parity case covers
 //!
 //! * [`assert_single_sequence_parity`] — the scheduler's **single-sequence**
-//!   path. A lone request decodes via `decode_single_step` (`scheduler.rs`: `if
-//!   seq_ids.len() <= 1 { decode_single_step }`), i.e. single-sequence
+//!   path. A lone request decodes via `decode_single_step`
+//!   (`dispatch_sync_decode`: `if seq_ids.len() <= 1 { decode_single_step }`),
+//!   which runs `Engine::step` over a batch of one, i.e. the single-sequence
 //!   `model.forward`, whose pool intercept (`update_and_fetch` / `update`)
 //!   writes to and gathers from the pool.
 //! * [`assert_batched_decode_parity`] — the **batched** decode wiring (`B == 2`)
-//!   via `forward_batched_with_context_and_ids` + a paged [`DecodeBatchContext`],
-//!   exactly as `execute_batched_decode` dispatches it. For pool-backed caches
+//!   via `forward_batched_with_ids` over pool-backed caches, exactly as
+//!   `Engine::step` dispatches it. For pool-backed caches
 //!   this reaches the #899 whole-batch pooled decode helper, including its
 //!   gather fallback below the fused dispatch floor; if that helper declines,
 //!   `cache::attend_batched` runs each row through `KVCache::attend` on its own
@@ -83,7 +84,7 @@
 mod common;
 use common::repo_model_dir;
 
-use mlxcel::{DecodeBatchContext, LanguageModel, initialize_runtime, load_model};
+use mlxcel::{LanguageModel, initialize_runtime, load_model};
 use mlxcel_core::cache::{CachePool, PagedKvLayout, SequenceStateLayout};
 
 /// qwen3 checkpoint directory name (pool-backed family).
@@ -217,7 +218,7 @@ fn scheduler_paged_layout(num_layers: usize) -> SequenceStateLayout {
 
 /// Run prefill + `DECODE_STEPS` greedy decode steps via single-sequence
 /// `model.forward` (the scheduler's `execute_full_prefill` + `decode_single_step`
-/// path), returning each emitted token with the logit row that selected it. The
+/// path, whose decode is `Engine::step` at B=1), returning each emitted token with the logit row that selected it. The
 /// first trace row therefore compares the prefill terminal logits, and later
 /// rows compare the decode logits from the preceding step.
 fn run_single_sequence_trace(
@@ -320,11 +321,11 @@ fn assert_single_sequence_parity(model: &mlxcel::LoadedModel, label: &str) {
     );
 }
 
-/// The batched decode wiring (the #121 `is_paged_backed()` guard) must also
-/// match dense. Two identical pool-backed sequences are decoded together via
-/// `forward_batched_with_context_and_ids` + a paged `DecodeBatchContext` —
-/// exactly the dispatch `execute_batched_decode` performs — and both rows must
-/// reproduce the dense single-sequence reference.
+/// The batched decode wiring must also match dense. Two identical pool-backed
+/// sequences are decoded together via `forward_batched_with_ids`, exactly the
+/// dispatch `Engine::step` performs (the storage behind each cache picks the
+/// kernel, ADR 0008), and both rows must reproduce the dense single-sequence
+/// reference.
 fn assert_batched_decode_parity(model: &mlxcel::LoadedModel, label: &str) {
     if !model.supports_paged_decode_backend() {
         eprintln!("Skipping: {label} does not support the paged decode backend");
@@ -368,7 +369,6 @@ fn assert_batched_decode_parity(model: &mlxcel::LoadedModel, label: &str) {
     }
 
     // Batched greedy decode through the paged batched path.
-    let context = DecodeBatchContext::paged_with_native(BLOCK_SIZE as i32, true);
     let mut batched: [Vec<DecodeStepTrace>; 2] = [Vec::new(), Vec::new()];
     for _ in 0..DECODE_STEPS {
         let input = mlxcel_core::from_slice_i32(&[next[0], next[1]], &[2, 1]);
@@ -376,13 +376,7 @@ fn assert_batched_decode_parity(model: &mlxcel::LoadedModel, label: &str) {
             let mut batch_caches = paged_pool
                 .get_batch_caches_mut(&[id0, id1])
                 .expect("batch caches");
-            model.forward_batched_with_context_and_ids(
-                &input,
-                Some(&[id0, id1]),
-                &mut batch_caches,
-                None,
-                Some(&context),
-            )
+            model.forward_batched_with_ids(&input, Some(&[id0, id1]), &mut batch_caches, None)
         };
         mlxcel_core::eval(&logits);
         batched[0].push(DecodeStepTrace {

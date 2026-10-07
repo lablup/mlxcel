@@ -45,6 +45,7 @@ use mlxcel::server::engine_probe::cases::{
     cache_prime_len, default_dry_breaker_ids, greedy_case, seeded_penalties_case,
 };
 use mlxcel::server::engine_probe::cli_engine::generate_like_cli;
+use mlxcel::server::engine_probe::engine_direct::DirectEngine;
 use mlxcel::server::engine_probe::prompt::render_chat_prompt;
 use mlxcel::server::engine_probe::{
     ParityCase, ProbeCacheKey, ServerEngine, ServerEngineOptions, ServerEngineRequest,
@@ -242,6 +243,26 @@ fn main() -> Result<()> {
             )?;
             report.push_stream(case.name, Side::Cli, PathStream::ran(tokens, "cli"));
         }
+
+        // (d) the engine itself, B=1 on dense storage with no scheduler: the
+        // same model instance, moved into an `Engine`, one request at a time
+        // (#2172). Its prefill plan uses the one chunk policy (`MLXCEL_PREFILL_CHUNK`)
+        // unless `--server-prefill-chunk` pins the server's.
+        let chunk = args
+            .server_prefill_chunk
+            .unwrap_or_else(mlxcel_core::prefill_plan::prefill_chunk_len);
+        let mut direct = DirectEngine::new(model, chunk);
+        for case in &cases {
+            let tokens = direct
+                .run(&prompt.tokens, args.max_tokens, &case.sampling)
+                .with_context(|| format!("direct engine run failed for case {}", case.name))?;
+            report.push_stream(
+                case.name,
+                Side::Engine,
+                PathStream::ran(tokens, &format!("engine B=1 dense chunk={chunk}")),
+            );
+        }
+        drop(direct);
     }
     mlxcel_core::clear_memory_cache();
 

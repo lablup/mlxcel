@@ -626,7 +626,7 @@ mod cache_isolation {
     /// end-to-end fix is reachable. After this PR the server scheduler
     /// reaches this same code path because
     /// `Gemma4VLModel::supports_batching() == true` and its
-    /// `forward_batched_with_context_and_ids` override delegates to
+    /// `forward_batched_with_ids` override delegates to
     /// the same helper.
     #[test]
     #[ignore = "requires serial MLX execution"]
@@ -669,7 +669,7 @@ mod cache_isolation {
 
         // Now drive the BATCHED decode through the dispatch helper —
         // this is the exact code path the scheduler now reaches via
-        // `execute_batched_decode -> forward_batched_with_context_and_ids`
+        // `execute_batched_decode -> forward_batched_with_ids`
         // -> `Gemma4VLModel`'s override -> this helper.
         let decode_batched = mlxcel_core::from_slice_i32(&[5, 7], &[2, 1]);
         let mut row_a_caches: Vec<mlxcel_core::layers::KVCache> = Vec::new();
@@ -682,7 +682,6 @@ mod cache_isolation {
             &decode_batched,
             Some(&seq_ids),
             batch_caches.as_mut_slice(),
-            None,
             None,
         );
         let shape = mlxcel_core::array_shape(&logits_batched);

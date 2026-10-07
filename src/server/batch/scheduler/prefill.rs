@@ -260,7 +260,7 @@ impl BatchScheduler {
         match &self.mtp_policy {
             Some(policy) => policy.should_attempt_b1(),
             None => crate::server::batch::speculative_burst::mtp_b1_burst_enabled(
-                self.model.supports_batching(),
+                self.engine.model().supports_batching(),
             ),
         }
     }
@@ -288,7 +288,10 @@ impl BatchScheduler {
         };
         block_size >= 2
             && crate::server::batch::speculative_slice::mtp_tick_slice_enabled()
-            && crate::server::batch::speculative_burst::mtp_capable_target(&self.model, block_size)
+            && crate::server::batch::speculative_burst::mtp_capable_target(
+                self.engine.model(),
+                block_size,
+            )
             && !seq.prompt_tokens.is_empty()
             && crate::server::batch::speculative_burst::mtp_prefill_suffix_start(
                 seq.prefill_start_offset,
@@ -418,8 +421,8 @@ impl BatchScheduler {
         // BatchedCold cohort holds only cold rows is what keeps cache offsets
         // correct: an adopted prefix can never be folded into a batch and have
         // its KV resumed at the wrong position.
-        let can_batch = self.model.supports_batched_prefill();
-        let can_pad = self.model.supports_padded_prefill();
+        let can_batch = self.engine.model().supports_batched_prefill();
+        let can_pad = self.engine.model().supports_padded_prefill();
         let rows: Vec<PrefillRow> = seqs
             .iter()
             .map(|s| PrefillRow {
@@ -551,7 +554,7 @@ impl BatchScheduler {
 
         let b = seqs.len();
         let max_len = seqs.iter().map(|s| s.prompt_tokens.len()).max().unwrap();
-        let can_pad_prefill = self.model.supports_padded_prefill();
+        let can_pad_prefill = self.engine.model().supports_padded_prefill();
         if !can_pad_prefill && seqs.iter().any(|s| s.prompt_tokens.len() != max_len) {
             // Should not happen for a planner-approved cohort (it only batches
             // equal-length rows on equal-length-only models), but stay safe.
@@ -596,25 +599,6 @@ impl BatchScheduler {
         };
 
         let batch_ids: Vec<SequenceId> = seqs.iter().map(|seq| seq.seq_id).collect();
-        let mut batch_caches = match self.cache_pool.get_batch_caches_mut(&batch_ids) {
-            Ok(caches) => caches,
-            Err(err) => {
-                tracing::warn!("batched prefill: {err}, falling back");
-                // Re-queue all sequences for sequential processing.
-                for seq in seqs {
-                    self.execute_full_prefill(seq);
-                }
-                return;
-            }
-        };
-
-        if batch_caches.len() != b {
-            // Re-queue all sequences for sequential processing.
-            for seq in seqs {
-                self.execute_full_prefill(seq);
-            }
-            return;
-        }
 
         // Prefill, and deliberately NOT covered by `announce_prefill_span`: this
         // pass starts at offset 0 and spans `padded_len`, the longest row, so a
@@ -626,17 +610,21 @@ impl BatchScheduler {
         // its chunk exceeds the threshold, since any longer prompt takes the
         // chunked path instead. See `mlxcel_core::prefill_span`.
         // Single batched forward pass: [B, padded_len] → [B, padded_len, vocab]
-        let raw_logits = self.model.forward_batched_with_context_and_ids(
-            &input,
-            Some(&batch_ids),
-            &mut batch_caches,
-            stacked_mask.as_deref(),
-            None,
-        );
-
-        // Release the cache_pool borrow before the guarded eval touches
-        // `&mut self`; the per-sequence loop below re-borrows caches anyway.
-        drop(batch_caches);
+        let raw_logits =
+            match self
+                .engine
+                .prefill_cohort(&batch_ids, &input, stacked_mask.as_deref())
+            {
+                Ok(logits) => logits,
+                Err(err) => {
+                    tracing::warn!("batched prefill: {err}, falling back");
+                    // Re-queue all sequences for sequential processing.
+                    for seq in seqs {
+                        self.execute_full_prefill(seq);
+                    }
+                    return;
+                }
+            };
 
         // #822: force-evaluate the cohort's prefill graph through the fallible
         // boundary. This single eval covers the whole batch, so an MLX C++ throw
@@ -675,10 +663,10 @@ impl BatchScheduler {
             // decode phase starts with the correct cache offset.
             let excess = (padded - actual_len) as i32;
             if excess > 0
-                && let Some(caches) = self.cache_pool.get_caches_mut(seq.seq_id)
-                && let Err(err) = trim_padded_prefill(&self.model, seq.seq_id, caches, excess)
+                && self.engine.is_open(seq.seq_id)
+                && let Err(err) = self.engine.trim_padding(seq.seq_id, excess)
             {
-                self.abort_sequence(seq, &err);
+                self.abort_sequence(seq, &err.to_string());
                 continue;
             }
 
@@ -687,8 +675,10 @@ impl BatchScheduler {
             seq.prefill_offset = actual_len;
             self.batch_observability.record_prefill_start(actual_len);
 
-            let eos_tokens =
-                merged_eos_token_ids(self.model.eos_token_ids(), &seq.sampling.stop_token_ids);
+            let eos_tokens = merged_eos_token_ids(
+                self.engine.model().eos_token_ids(),
+                &seq.sampling.stop_token_ids,
+            );
             let needs_history = seq.sampling.needs_token_history();
             let token_history = initial_token_history(&seq.prompt_tokens, needs_history);
 
@@ -733,12 +723,14 @@ impl BatchScheduler {
         // across all sequences.  Reset them now (at prefill time) rather
         // than at enqueue time so that queued requests don't corrupt an
         // in-flight generation.
-        if !self.model.supports_batching() {
-            let _ = self.model.make_caches();
+        if !self.engine.model().supports_batching() {
+            let _ = self.engine.model().make_caches();
         }
 
-        let eos_tokens =
-            merged_eos_token_ids(self.model.eos_token_ids(), &seq.sampling.stop_token_ids);
+        let eos_tokens = merged_eos_token_ids(
+            self.engine.model().eos_token_ids(),
+            &seq.sampling.stop_token_ids,
+        );
         let needs_history = seq.sampling.needs_token_history();
         let token_history = initial_token_history(&seq.prompt_tokens, needs_history);
         seq.prefill_offset = plan.adopted();
@@ -791,35 +783,30 @@ impl BatchScheduler {
             .map_err(|err| PieceFailure::Abort(err.to_string()))?;
         let tokens = &seq.prompt_tokens[piece.range.clone()];
         let input = mlxcel_core::from_slice_i32(tokens, &[1, piece.len() as i32]);
-        // #822: the forward is force-evaluated while `caches` still borrows
-        // the cache pool, so capture the fallible outcome and act on it below
-        // once the borrow has ended.
-        let (logits, eval) = {
-            let caches = self.cache_pool.get_caches_mut(seq.seq_id).ok_or_else(|| {
+        // #822: the engine force-evaluates the logits and reports the
+        // fallible outcome; it is recorded against the health counter here.
+        let outcome = self
+            .engine
+            .prefill(&PrefillStep {
+                seq_id: seq.seq_id,
+                input: &input,
+                embeddings: Some(input_embeds),
+                mask: caller_mask,
+                last_pos: piece.last_real_pos(),
+                trim_excess: 0,
+                eval: true,
+            })
+            .map_err(|_| {
                 PieceFailure::Abort("Cache not found for sequence during prefill".into())
             })?;
-            let logits = self
-                .model
-                .forward_last_logits_with_embeddings_and_sequence_id(
-                    &input,
-                    Some(input_embeds),
-                    Some(seq.seq_id),
-                    caches,
-                    caller_mask,
-                    piece.last_real_pos(),
-                );
-            let eval = mlxcel_core::try_eval(&logits).map_err(|e| e.to_string());
-            self.model.after_prefill();
-            (logits, eval)
-        };
-        self.record_eval_outcome(eval)
+        self.record_eval_outcome(outcome.eval)
             .map_err(PieceFailure::EvalFailed)?;
         self.sync_sequence_storage(seq.seq_id);
         // H2: enforce the `--max-kv-size` cap at the end of the prefill before
         // the sequence transitions to decode.
         self.enforce_max_kv_size_for(seq.seq_id, seq.retention);
         seq.prefill_offset = piece.range.end;
-        Ok(logits)
+        Ok(outcome.logits)
     }
 
     /// Complete a prefill (full or chunked): sample the first token,
@@ -848,57 +835,38 @@ impl BatchScheduler {
         // batched fused DECODE path shares one global-RNG draw across the whole
         // `[B, vocab]` batch and is out of scope here (see issue #347).
         seed_rng_if_needed(&seq.sampling);
-        // The one per-row sampling step (#2169), under the same state rule as
-        // every decode step: the sequence's `RowSampler` already holds the
-        // state a penalty, mirostat or adaptive-p config needs, so the first
-        // token updates it too. The structured-output mask runs on the prefill
-        // logits before the chain, so the very first emitted token already
-        // conforms to the schema. b10621 post_sampling_probs (#1485): one chain
-        // pass, one XTC gate, for both the draw and the report.
-        let want_distribution = seq.logprobs_config.enabled
-            && seq.logprobs_config.source == LogprobSource::PostSampling;
-        let constraint = seq.structured.clone();
-        let mut mask = constraint.as_ref().map(StructuredMask);
-        let draw = seq.sampler.draw(
-            &logits,
-            &seq.sampling,
-            &token_history,
-            mask.as_mut().map(|m| m as &mut dyn LogitMask),
-            want_distribution,
-        );
-        let TokenDraw {
-            token: first_token_arr,
-            adjusted_logits,
-            distribution: post_probs,
-        } = match draw {
-            Ok(draw) => draw,
-            Err(msg) => {
-                let _ = seq
-                    .response_tx
-                    .send(GenerateEvent::Error(format!("structured output: {msg}")));
-                if let Err(err) = seq
-                    .state
-                    .transition_to(SequenceState::Finished(FinishReason::Error(msg)))
-                {
-                    tracing::error!("State transition error: {err}");
-                }
-                self.prompt_cache_seq_ctx.remove(&seq.seq_id);
-                self.release_sequence_caches(seq.seq_id);
-                return;
-            }
-        };
-        // #822: force-evaluate the first sampled token through the fallible
-        // boundary. On an MLX throw, fail just this request; the infallible
-        // `item_i32` readback below would otherwise re-trigger the same throw
-        // and abort the process.
-        if let Err(msg) = self
-            .record_eval_outcome(mlxcel_core::try_eval(&first_token_arr).map_err(|e| e.to_string()))
-        {
-            self.abort_sequence(seq, &msg);
-            self.eval_failures_exhausted();
-            return;
-        }
-        let sampled_first_token = mlxcel_core::item_i32(&first_token_arr);
+        // Store merged EOS and token history on the sequence: the engine's row
+        // reads them for the first draw and the finish step, and
+        // `decode_single_step` reuses them without per-step reconstruction.
+        seq.merged_eos = eos_tokens;
+        seq.token_history = token_history;
+        // The finish step records the first token in the history exactly when
+        // the sampler reads one, the same rule the caller built it under.
+        debug_assert_eq!(needs_history, seq.sampling.needs_token_history());
+        // The first token takes the engine's per-row chain (#2169, #2168),
+        // under the same state rule as every decode step: the sequence's
+        // `RowSampler` already holds the state a penalty, mirostat or
+        // adaptive-p config needs, so the first token updates it too. The
+        // structured-output mask runs on the prefill logits before the chain,
+        // so the very first emitted token already conforms to the schema; the
+        // matcher then advances with the pre-override token. The
+        // thinking-budget override applies to the first token too: Qwen3 chat
+        // templates prime `<think>\n`, so it is already inside the reasoning
+        // block when `enter_block_on_start == true`. The row stamps the
+        // first-token time once the emitted token is known, and the finish
+        // step then runs on it: EOS (not pushed), push and history, the stop
+        // matcher (a short stop string can complete on this very token, and
+        // then its text is never emitted), a generation bound
+        // (`t_max_predict_ms: 0` with a newline in the first token, #1477),
+        // the structured stop, `max_tokens`, the context bound (a prompt
+        // admitted just under the KV bound can leave no room for a second
+        // token, #1472) and loop detection.
+        //
+        // The shared logical KV budget is checked first: the sequence is not
+        // yet in the active batch, so the prompt plus its first token count as
+        // this tick's additional tokens, and a request that cannot fit them
+        // finishes with `Length` before any token is drawn (the draw it used
+        // to make here was discarded unseen).
         if !self.shared_budget_has_prefill_first_token_room(seq.prompt_tokens.len()) {
             seq.retention.context_exhausted = true;
             if let Err(err) = seq
@@ -915,94 +883,42 @@ impl BatchScheduler {
             self.batch_observability.record_sequence_completed();
             return;
         }
-
-        // advance the matcher state with the just-sampled token.
-        // If consume_token errors, transition the sequence to Finished(Error)
-        // and surface a clean SSE error event rather than leaking
-        // non-conforming output.
-        let structured_stopped = if let Some(constraint) = seq.structured.clone() {
-            match Self::consume_structured_token(&constraint, sampled_first_token) {
-                Ok(stopped) => stopped,
-                Err(msg) => {
-                    let _ = seq
-                        .response_tx
-                        .send(GenerateEvent::Error(format!("structured output: {msg}")));
-                    if let Err(err) = seq
-                        .state
-                        .transition_to(SequenceState::Finished(FinishReason::Error(msg)))
-                    {
-                        tracing::error!("State transition error: {err}");
-                    }
-                    self.prompt_cache_seq_ctx.remove(&seq.seq_id);
-                    self.release_sequence_caches(seq.seq_id);
-                    return;
-                }
-            }
-        } else {
-            false
-        };
-
-        // thinking-budget override. Qwen3 chat templates prime
-        // `<think>\n`, so the first prefill-completion token is already
-        // inside the reasoning block when `enter_block_on_start == true`.
-        // #1485: `resolve` then confirms the emitted first token with the
-        // sampler feedback state (see the parallel comment in
-        // `execute_batched_decode`).
-        let (sampled_first_token, first_token) = seq.sampler.resolve(sampled_first_token, |t| {
-            Self::apply_thinking_budget(&mut seq.thinking, t)
-        });
-
-        seq.mark_first_token();
-
-        // if the budget fired and substituted the first token,
-        // drop the logprob below (computed against the sampled token) so the
-        // streamed metadata stays consistent with the emitted token text.
-        let override_fired = first_token != sampled_first_token;
-
-        // Optionally compute logprobs for the first token. When the override
-        // fired, the sampled token differs from the emitted `first_token`;
-        // suppress logprob emission in that case to keep token text and
-        // logprob metadata consistent.
-        let token_lp = if override_fired {
-            None
-        } else {
-            match seq.logprobs_config.source {
-                LogprobSource::PostSampling => post_probs.as_ref().map(|p| {
-                    compute_post_sampling_probs(p, first_token, seq.logprobs_config.top_k)
-                }),
-                LogprobSource::RawModel if seq.logprobs_config.enabled => {
-                    let raw_row = mlxcel_core::slice_last_logits(&logits);
-                    compute_logprobs(&raw_row, first_token, &seq.logprobs_config)
-                }
-                _ => compute_logprobs(&adjusted_logits, first_token, &seq.logprobs_config),
-            }
-        };
-
-        // Store merged EOS and token history on the sequence: the shared finish
-        // step below reads them, and decode_single_step reuses them without
-        // per-step reconstruction.
-        seq.merged_eos = eos_tokens;
-        seq.token_history = token_history;
-        // The finish step records the first token in the history exactly when
-        // the sampler reads one, the same rule the caller built it under.
-        debug_assert_eq!(needs_history, seq.sampling.needs_token_history());
-
-        // The shared post-sample finish step (#2168) on the first token: EOS
-        // (not pushed), push and history, the stop matcher (a short stop string
-        // can complete on this very token, and then its text is never emitted),
-        // a generation bound (`t_max_predict_ms: 0` with a newline in the first
-        // token, #1477), the structured stop, `max_tokens`, the context bound (a
-        // prompt admitted just under the KV bound can leave no room for a second
-        // token, #1472) and loop detection.
         let context = self.context_bound();
-        let prefill_finish = finish_decode_token(
-            &mut seq,
-            &self.tokenizer,
-            first_token,
-            token_lp,
-            structured_stopped,
-            context,
-        );
+        let outcome = {
+            let mut row = step_rows::step_row(&mut seq, &self.tokenizer, context, true);
+            self.engine.complete_prefill(&logits, &mut row)
+        };
+        match outcome.error {
+            Some(RowError::Structured(msg)) => {
+                let _ = seq
+                    .response_tx
+                    .send(GenerateEvent::Error(format!("structured output: {msg}")));
+                if let Err(err) = seq
+                    .state
+                    .transition_to(SequenceState::Finished(FinishReason::Error(msg)))
+                {
+                    tracing::error!("State transition error: {err}");
+                }
+                self.prompt_cache_seq_ctx.remove(&seq.seq_id);
+                self.release_sequence_caches(seq.seq_id);
+                return;
+            }
+            // A B=1 prefill never takes the fused draw, so `BatchEval` cannot
+            // occur here; it is one eval failure either way.
+            Some(RowError::Eval(mlx_msg) | RowError::BatchEval(mlx_msg)) => {
+                // #822: the first sampled token threw at the MLX boundary.
+                // Fail just this request and bump the backend health counter.
+                let msg = self.record_eval_failure(&mlx_msg);
+                self.abort_sequence(seq, &msg);
+                self.eval_failures_exhausted();
+                return;
+            }
+            None => self.note_eval_success(),
+        }
+        let prefill_finish = outcome.finish;
+        if let Some(cause) = prefill_finish {
+            apply_finish_cause(&mut seq, cause);
+        }
         // Immediate EOS: the finish step already recorded `Stop`; nothing was
         // generated, so the result is built without decoding any text.
         if prefill_finish == Some(FinishCause::Eos) {
@@ -1080,7 +996,7 @@ impl BatchScheduler {
         }
 
         let prompt_len = seq.prompt_tokens.len() as i32;
-        if let Some(cache_set) = self.cache_pool.get_mut(seq.seq_id) {
+        if let Some(cache_set) = self.engine.pool_mut().get_mut(seq.seq_id) {
             cache_set.prompt_len = seq.prompt_tokens.len();
             cache_set.current_offset = prompt_len + 1;
         }

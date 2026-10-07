@@ -28,15 +28,13 @@ use crate::distributed::pipeline::LayerFilter;
 use crate::distributed::pipeline::StageExecutionOutput;
 use crate::distributed::pipeline::partial_loading::filter_weight_map;
 use crate::models::kv_snapshot::{self, KvSnapshotNames};
-use crate::models::model_owned::{
-    KvCacheLayerModes, ModelOwnedSequenceState, dispatch_paged_decode_from_visible_caches,
-};
+use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
 use crate::models::rope_utils::{RopeScalingSpec, printable_label};
 use mlxcel_core::cache::{
-    CachePool, DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS, KVCacheMode, RotatingPagedDecodeMetadata,
-    SequenceId, SequenceStateLayout, flush_decode_undo_rows,
+    CachePool, DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS, KVCacheMode, KvAttention, SequenceId,
+    SequenceStateLayout, attend_batched_rows, flush_decode_undo_rows,
 };
-use mlxcel_core::generate::{DecodeBatchContext, ModelStateSnapshot};
+use mlxcel_core::generate::ModelStateSnapshot;
 use mlxcel_core::layers::{
     FusedQKVLinear, GemmaRMSNorm, KVCache, RotatingKVCache, UnifiedEmbedding, UnifiedLinear,
 };
@@ -244,7 +242,6 @@ pub struct Attention {
     pub head_dim: i32,
     pub scale: f32,
     pub is_sliding: bool,
-    pub window_size: i32,
     pub rope_base: f32,
     /// Position scale handed to every RoPE call in this block: `1.0` on a
     /// sliding layer, `ModelArgs::global_rope_scale()` on a global one. See
@@ -313,32 +310,15 @@ impl Attention {
             (q, k, v)
         };
 
-        // Update KV cache and get sliced views
-        let (cache_k, cache_v) = cache.update_and_fetch(k, v);
-
-        // Use fused scaled dot-product attention (handles GQA internally).
-        // A multi-token forward with no mask is a prefill whose mask would be
-        // plain causal: every live key is inside this layer's window (or the
-        // layer is global). `attention_from_ptr` with no mask is not causal,
-        // so take MLX's maskless causal SDPA mode explicitly.
-        let k_len = mlxcel_core::array_shape(&cache_k)[2];
-        let attn_out =
-            if mask.is_none() && l > 1 && (self.window_size == 0 || k_len <= self.window_size) {
-                mlxcel_core::causal_attention(&q, &cache_k, &cache_v, self.scale, 0.0, 0)
-            } else {
-                let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
-                unsafe {
-                    mlxcel_core::layers::attention_from_ptr(
-                        &q,
-                        &cache_k,
-                        &cache_v,
-                        self.scale,
-                        mask_ptr,
-                        0.0,
-                        self.window_size,
-                    )
-                }
-            };
+        // The cache appends K/V and runs the attention for its storage
+        // (ADR 0008, #2172): a global `KVCache` takes the dense route of
+        // `KVCache::attend`, a sliding `RotatingKVCache` takes
+        // `RotatingKVCache::attend`, whose write path is `update_and_fetch`
+        // so the decode undo log (#2182) sees every single-token write. A
+        // multi-token unmasked forward whose window fits is a prefill whose
+        // mask would be plain causal, and the entries take the causal helper
+        // for it, as this block used to.
+        let attn_out = cache.attend(&q, k, v, self.scale, mask);
 
         // Transpose back and reshape
         let attn_out = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);
@@ -352,7 +332,6 @@ impl Attention {
         &self,
         x: &MlxArray,
         caches: &mut [&mut Cache],
-        decode_context: Option<&DecodeBatchContext>,
     ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(x);
         let batch = shape[0] as usize;
@@ -389,129 +368,12 @@ impl Attention {
             &offsets,
         );
 
-        if let Some(context) = decode_context {
-            let paged_attn = if self.is_sliding && context.is_paged_decode() {
-                let mut cache_keys = Vec::with_capacity(caches.len());
-                let mut cache_values = Vec::with_capacity(caches.len());
-                let mut kv_lens = Vec::with_capacity(caches.len());
-                let mut logical_starts = Vec::with_capacity(caches.len());
-
-                for (batch_idx, cache) in caches.iter_mut().enumerate() {
-                    let k_i = mlxcel_core::slice(
-                        &k,
-                        &[batch_idx as i32, 0, 0, 0],
-                        &[batch_idx as i32 + 1, i32::MAX, i32::MAX, i32::MAX],
-                    );
-                    let v_i = mlxcel_core::slice(
-                        &v,
-                        &[batch_idx as i32, 0, 0, 0],
-                        &[batch_idx as i32 + 1, i32::MAX, i32::MAX, i32::MAX],
-                    );
-                    let _ = cache.update_and_fetch(k_i, v_i);
-                    kv_lens.push(cache.visible_len() as i32);
-                    logical_starts.push(cache.rotating_logical_start().unwrap_or_default());
-                    cache_keys.push(
-                        cache
-                            .keys_ptr()
-                            .expect("gemma3 rotating cache should expose key buffer"),
-                    );
-                    cache_values.push(
-                        cache
-                            .values_ptr()
-                            .expect("gemma3 rotating cache should expose value buffer"),
-                    );
-                }
-
-                let metadata = RotatingPagedDecodeMetadata::from_parts(
-                    &kv_lens,
-                    &logical_starts,
-                    context.paged_block_size,
-                )
-                .expect("valid gemma3 rotating paged decode metadata");
-                let attn = if context.use_native_paged_kernel {
-                    mlxcel_core::layers::paged_decode_attention_rotating_compat(
-                        &q,
-                        &cache_keys,
-                        &cache_values,
-                        &metadata,
-                        self.scale,
-                    )
-                } else {
-                    mlxcel_core::layers::paged_decode_attention_rotating_fallback(
-                        &q,
-                        &cache_keys,
-                        &cache_values,
-                        &metadata,
-                        self.scale,
-                    )
-                }
-                .expect("valid gemma3 rotating paged decode inputs");
-                Some(attn)
-            } else {
-                dispatch_paged_decode_from_visible_caches(
-                    &q,
-                    &k,
-                    &v,
-                    caches,
-                    self.scale,
-                    context,
-                    |cache, k_i, v_i| Ok(cache.update_and_fetch(k_i, v_i)),
-                )
-                .expect("valid gemma3 paged decode inputs")
-            };
-
-            if let Some(attn_out) = paged_attn {
-                tracing::debug!(
-                    batch_size = batch,
-                    block_size = context.paged_block_size,
-                    native_kernel = context.use_native_paged_kernel,
-                    sliding = self.is_sliding,
-                    "Gemma3 paged decode attention dispatch"
-                );
-                let attn_out = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);
-                let attn_out = mlxcel_core::reshape(
-                    &attn_out,
-                    &[batch as i32, seq_len, self.num_heads * self.head_dim],
-                );
-                return self.o_proj.forward(&attn_out);
-            }
-        }
-
-        let mut outputs = Vec::with_capacity(batch);
-        for (batch_idx, cache) in caches.iter_mut().enumerate() {
-            let q_i = mlxcel_core::slice(
-                &q,
-                &[batch_idx as i32, 0, 0, 0],
-                &[batch_idx as i32 + 1, i32::MAX, i32::MAX, i32::MAX],
-            );
-            let k_i = mlxcel_core::slice(
-                &k,
-                &[batch_idx as i32, 0, 0, 0],
-                &[batch_idx as i32 + 1, i32::MAX, i32::MAX, i32::MAX],
-            );
-            let v_i = mlxcel_core::slice(
-                &v,
-                &[batch_idx as i32, 0, 0, 0],
-                &[batch_idx as i32 + 1, i32::MAX, i32::MAX, i32::MAX],
-            );
-            let (cache_k, cache_v) = cache.update_and_fetch(k_i, v_i);
-            outputs.push(unsafe {
-                mlxcel_core::layers::attention_from_ptr(
-                    &q_i,
-                    &cache_k,
-                    &cache_v,
-                    self.scale,
-                    std::ptr::null(),
-                    0.0,
-                    self.window_size,
-                )
-            });
-        }
-
-        let mut attn_out = outputs.remove(0);
-        for output in outputs {
-            attn_out = mlxcel_core::concatenate(&attn_out, &output, 0);
-        }
+        // One attention per row through the row's own cache
+        // (`Cache::attend`; ADR 0008, #2172). Gemma 3's state is never
+        // pool-backed, so there is no whole-batch launch to take, and the
+        // dense-pointer paged kernels this path used to select from the
+        // scheduler's `DecodeBatchContext` were per-row loops themselves.
+        let attn_out = attend_batched_rows(&q, &k, &v, caches, self.scale, None);
         let attn_out = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);
         let attn_out = mlxcel_core::reshape(
             &attn_out,
@@ -568,11 +430,6 @@ impl Attention {
             head_dim,
             scale,
             is_sliding,
-            window_size: if is_sliding {
-                args.sliding_window as i32
-            } else {
-                0
-            },
             rope_base,
             rope_scale,
             q_norm,
@@ -688,12 +545,9 @@ impl TransformerBlock {
         &self,
         x: &MlxArray,
         caches: &mut [&mut Cache],
-        decode_context: Option<&DecodeBatchContext>,
     ) -> UniquePtr<MlxArray> {
         let normed = self.input_layernorm.forward(x);
-        let attn_out = self
-            .self_attn
-            .forward_batched_decode(&normed, caches, decode_context);
+        let attn_out = self.self_attn.forward_batched_decode(&normed, caches);
         let post_attn_normed = self.post_attention_layernorm.forward(&attn_out);
         let h = mlxcel_core::compiled_clip_residual(x, &post_attn_normed);
 
@@ -777,6 +631,17 @@ pub(crate) trait CacheInterface {
         k: UniquePtr<MlxArray>,
         v: UniquePtr<MlxArray>,
     ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>);
+    /// Append `k`/`v` and run attention through the entry of the storage
+    /// behind this cache (`KVCache::attend`, `RotatingKVCache::attend`;
+    /// ADR 0008, #2172). The single-row forward's only attention call.
+    fn attend(
+        &mut self,
+        q: &MlxArray,
+        k: UniquePtr<MlxArray>,
+        v: UniquePtr<MlxArray>,
+        scale: f32,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray>;
 }
 
 impl CacheInterface for KVCache {
@@ -794,6 +659,17 @@ impl CacheInterface for KVCache {
         v: UniquePtr<MlxArray>,
     ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
         self.update_and_fetch(k, v)
+    }
+
+    fn attend(
+        &mut self,
+        q: &MlxArray,
+        k: UniquePtr<MlxArray>,
+        v: UniquePtr<MlxArray>,
+        scale: f32,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        KVCache::attend(self, q, k, v, scale, mask)
     }
 }
 
@@ -824,6 +700,17 @@ impl CacheInterface for RotatingKVCache {
         v: UniquePtr<MlxArray>,
     ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
         self.update_and_fetch(k, v)
+    }
+
+    fn attend(
+        &mut self,
+        q: &MlxArray,
+        k: UniquePtr<MlxArray>,
+        v: UniquePtr<MlxArray>,
+        scale: f32,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        RotatingKVCache::attend(self, q, k, v, scale, mask)
     }
 }
 
@@ -981,54 +868,35 @@ impl Cache {
         }
     }
 
-    fn update_and_fetch(
-        &mut self,
-        k: UniquePtr<MlxArray>,
-        v: UniquePtr<MlxArray>,
-    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
-        match self {
-            Cache::Standard(c) => c.update_and_fetch(k, v),
-            Cache::Rotating(c) => c.update_and_fetch(k, v),
-        }
-    }
-
-    fn visible_len(&self) -> usize {
+    /// Keys the next decode step attends: the live length of a global layer,
+    /// the visible window of a sliding one. Used by: `sync_sequence_storage`
+    /// (the pool's per-sequence length mirror).
+    pub(crate) fn visible_len(&self) -> usize {
         match self {
             Cache::Standard(c) => c.seq_len().max(0) as usize,
             Cache::Rotating(c) => c.visible_len().max(0) as usize,
         }
     }
+}
 
-    fn rotating_logical_start(&self) -> Option<i32> {
+/// The batched decode entry for one Gemma 3 layer row (ADR 0008, #2172): a
+/// global layer attends through `KVCache::attend`, a sliding layer through
+/// `RotatingKVCache::attend`. Both are model-owned dense storage, never
+/// pool-backed, so the kernel is the dense one for the layer's mode, and the
+/// sliding write still goes through `RotatingKVCache::update_and_fetch`, the
+/// path the decode undo log (#2182) hooks.
+impl KvAttention for Cache {
+    fn attend(
+        &mut self,
+        q: &MlxArray,
+        k: UniquePtr<MlxArray>,
+        v: UniquePtr<MlxArray>,
+        scale: f32,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
         match self {
-            Cache::Standard(_) => None,
-            Cache::Rotating(c) => Some(c.logical_start()),
-        }
-    }
-
-    fn keys_ptr(&self) -> Option<*const MlxArray> {
-        match self {
-            Cache::Standard(c) => c
-                .keys
-                .as_ref()
-                .map(|keys| keys.as_ref().unwrap() as *const _),
-            Cache::Rotating(c) => c
-                .keys
-                .as_ref()
-                .map(|keys| keys.as_ref().unwrap() as *const _),
-        }
-    }
-
-    fn values_ptr(&self) -> Option<*const MlxArray> {
-        match self {
-            Cache::Standard(c) => c
-                .values
-                .as_ref()
-                .map(|values| values.as_ref().unwrap() as *const _),
-            Cache::Rotating(c) => c
-                .values
-                .as_ref()
-                .map(|values| values.as_ref().unwrap() as *const _),
+            Cache::Standard(c) => KVCache::attend(c, q, k, v, scale, mask),
+            Cache::Rotating(c) => RotatingKVCache::attend(c, q, k, v, scale, mask),
         }
     }
 }
@@ -1231,7 +1099,6 @@ impl Gemma3Model {
         &self,
         input_ids: &MlxArray,
         batch_caches: &mut [Vec<Cache>],
-        decode_context: Option<&DecodeBatchContext>,
     ) -> UniquePtr<MlxArray> {
         let mut h = self.embed_tokens.forward(input_ids);
         let scale = (self.hidden_size as f32).sqrt();
@@ -1243,7 +1110,7 @@ impl Gemma3Model {
                 .iter_mut()
                 .map(|caches| &mut caches[layer_idx])
                 .collect();
-            h = layer.forward_batched_decode(&h, &mut layer_caches, decode_context);
+            h = layer.forward_batched_decode(&h, &mut layer_caches);
             pipeline_hint(&h, layer_idx, n);
         }
 
@@ -1984,13 +1851,12 @@ impl mlxcel_core::generate::LanguageModel for Gemma3Wrapper {
             })
     }
 
-    fn forward_batched_with_context_and_ids(
+    fn forward_batched_with_ids(
         &self,
         input_ids: &MlxArray,
         seq_ids: Option<&[SequenceId]>,
         batch_caches: &mut [&mut [mlxcel_core::layers::KVCache]],
         mask: Option<&MlxArray>,
-        context: Option<&DecodeBatchContext>,
     ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(input_ids);
         if shape[1] != 1 || mask.is_some() {
@@ -2022,11 +1888,9 @@ impl mlxcel_core::generate::LanguageModel for Gemma3Wrapper {
             .with_batched_sequence_states(
                 seq_ids.expect("gemma3 batched decode requires sequence ids"),
                 |sequence_caches| {
-                    let logits = self.model.forward_batched_decode_with_caches(
-                        input_ids,
-                        sequence_caches,
-                        context,
-                    );
+                    let logits = self
+                        .model
+                        .forward_batched_decode_with_caches(input_ids, sequence_caches);
                     Cache::flush_decode_undo(sequence_caches.iter_mut().flatten());
                     logits
                 },

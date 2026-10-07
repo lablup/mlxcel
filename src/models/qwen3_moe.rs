@@ -27,7 +27,7 @@
 use crate::models::rope_utils::{RopeScalingKind, RopeScalingSpec};
 use crate::models::switch_layers::SwitchGLU;
 use mlxcel_core::cache::BatchedAttentionMetadata;
-use mlxcel_core::generate::{DecodeBatchContext, LanguageModel};
+use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{FusedQKVLinear, KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -1368,20 +1368,6 @@ impl LanguageModel for Qwen3MoeModel {
             1 => Qwen3MoeModel::forward(self, input_ids, batch_caches[0], None),
             _ => self.forward_batched_impl(input_ids, batch_caches, mask),
         }
-    }
-
-    /// The context only carries paged-decode state, which this family does
-    /// not opt into (`supports_paged_decode_backend` stays false), so it is
-    /// ignored and the dense batched forward runs.
-    fn forward_batched_with_context(
-        &self,
-        input_ids: &MlxArray,
-        batch_caches: &mut [&mut [KVCache]],
-        mask: Option<&MlxArray>,
-        context: Option<&DecodeBatchContext>,
-    ) -> UniquePtr<MlxArray> {
-        let _ = context;
-        LanguageModel::forward_batched(self, input_ids, batch_caches, mask)
     }
 }
 
