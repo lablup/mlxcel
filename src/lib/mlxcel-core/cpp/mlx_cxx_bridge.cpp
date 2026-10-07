@@ -5187,6 +5187,23 @@ int32_t rocm_device_warp_size() {
 #endif
 }
 
+rust::Vec<uint64_t> rocm_dequant_cache_stats() {
+    rust::Vec<uint64_t> out;
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+    const auto s = mlx::core::rocm::dequant_cache_stats();
+    for (uint64_t v : {s.hits, s.misses, s.inserts, s.evictions, s.bypasses,
+                       static_cast<uint64_t>(s.entries),
+                       static_cast<uint64_t>(s.bytes)}) {
+        out.push_back(v);
+    }
+#else
+    for (int i = 0; i < 7; ++i) {
+        out.push_back(0);
+    }
+#endif
+    return out;
+}
+
 void set_rocm_port_warp_size_for_tests(int32_t warp_size) {
     mlxcel::set_rocm_port_warp_size_for_tests(static_cast<int>(warp_size));
 }

@@ -67,6 +67,10 @@ bool quantized_matmul_runs_dequant_gemm(
   return false;
 }
 
+DequantCacheStats dequant_cache_stats() {
+  return DequantCacheStats{};
+}
+
 } // namespace rocm
 
 namespace fast {
