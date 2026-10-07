@@ -113,3 +113,33 @@ fn reading_several_images_names_the_missing_one() {
     let err = image_data_uris(&[present, missing.clone()]).expect_err("missing");
     assert!(err.to_string().contains("missing.png"), "{err}");
 }
+
+#[test]
+fn the_image_count_sums_every_turn_of_the_transcript() {
+    let transcript = vec![
+        turn("user", "a", vec!["u1".into(), "u2".into()]),
+        turn("assistant", "b", Vec::new()),
+        turn("user", "c", vec!["u3".into()]),
+    ];
+    assert_eq!(transcript_image_count(&transcript), 3);
+    assert_eq!(transcript_image_count(&[]), 0);
+}
+
+#[test]
+fn the_image_budget_allows_up_to_the_cap_and_refuses_past_it() {
+    assert!(check_image_budget(0, 16, 16).is_ok());
+    assert!(check_image_budget(15, 1, 16).is_ok());
+    let err = check_image_budget(16, 1, 16).expect_err("one past the cap");
+    assert!(err.contains("at most 16 images"), "{err}");
+    assert!(err.contains("/clear"), "{err}");
+    assert!(check_image_budget(0, 17, 16).is_err());
+}
+
+#[test]
+fn the_image_cap_is_read_from_the_server_not_duplicated() {
+    assert_eq!(
+        server_image_cap(),
+        mlxcel::current_image_input_limits().max_images_per_request
+    );
+    assert!(server_image_cap() > 0);
+}

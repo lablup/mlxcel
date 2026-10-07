@@ -66,6 +66,36 @@ pub(crate) fn messages_json(transcript: &[Turn], image_soft_tokens: Option<usize
     Value::Array(messages)
 }
 
+/// How many images the transcript carries. Every turn re-sends the whole
+/// transcript, so this is the image count of the next request before the
+/// message being composed.
+pub(crate) fn transcript_image_count(transcript: &[Turn]) -> usize {
+    transcript.iter().map(|turn| turn.images.len()).sum()
+}
+
+/// The server's per-request image cap, read from the server itself
+/// ([`mlxcel::current_image_input_limits`]) so a configured override and the
+/// default both apply and no number is duplicated here.
+pub(crate) fn server_image_cap() -> usize {
+    mlxcel::current_image_input_limits().max_images_per_request
+}
+
+/// Refuse an attachment that would push a request over the server's image
+/// cap. `already` is the images the request carries without this attachment
+/// (the transcript plus the images waiting for the next message) and `adding`
+/// the images being attached. The REPL re-sends the whole transcript, so once
+/// the conversation is over the cap every later turn would fail until
+/// `/clear`; refusing at attach time keeps the conversation usable.
+pub(crate) fn check_image_budget(already: usize, adding: usize, cap: usize) -> Result<(), String> {
+    if already + adding <= cap {
+        return Ok(());
+    }
+    Err(format!(
+        "the server accepts at most {cap} images per request and each turn re-sends the whole conversation, \
+         which already holds {already}; /clear starts a new conversation"
+    ))
+}
+
 /// Read each image file once into a `data:` URI, naming the file that fails.
 pub(crate) fn image_data_uris<P: AsRef<Path>>(paths: &[P]) -> Result<Vec<String>> {
     paths

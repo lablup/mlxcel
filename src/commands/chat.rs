@@ -42,8 +42,17 @@
 //!
 //! Ctrl-C while a reply streams cancels that request through the worker's
 //! cancellation path (the one a disconnected HTTP client uses) and returns to
-//! the prompt; the interrupted exchange is dropped from the transcript.
+//! the prompt; the interrupted exchange is dropped from the transcript. A
+//! second Ctrl-C while that reply is still stopping ends the process.
 //! Ctrl-C at the prompt cancels the line, as before.
+//!
+//! ## Images
+//!
+//! The transcript, images included, is re-sent every turn, so the images in
+//! the conversation count against the server's per-request image cap
+//! ([`mlxcel::current_image_input_limits`]). `/image` and `--image` refuse an
+//! image that would go over it, instead of letting every later turn fail until
+//! `/clear`.
 
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
@@ -60,9 +69,12 @@ use mlxcel::server::in_process::InProcessServer;
 use mlxcel::server::in_process::chat::{chat_request_from_json, completion_request_from_json};
 
 use super::chat_transcript::{
-    Turn, image_data_uri, image_data_uris, messages_json, transcript_messages,
+    Turn, check_image_budget, image_data_uri, image_data_uris, messages_json, server_image_cap,
+    transcript_image_count, transcript_messages,
 };
-use super::cli_turn::{TurnDisplay, TurnPrinter, run_cancellable, warn_if_base_model};
+use super::cli_turn::{
+    TurnDisplay, TurnPrinter, run_cancellable, shutdown_then_fail, warn_if_base_model,
+};
 use mlxcel::cli::in_process_client::CliServerSettings;
 
 /// Triple-quote fence that opens / closes an ollama-style multiline input
@@ -180,7 +192,12 @@ pub fn run_chat(mut opts: ChatOptions) -> Result<()> {
         }
         Vec::new()
     } else {
-        image_data_uris(&opts.images)?
+        let images = image_data_uris(&opts.images)?;
+        // The first message carries them all, and the transcript re-sends
+        // them every turn, so more than the server's cap would fail turn one.
+        check_image_budget(0, images.len(), server_image_cap())
+            .map_err(|reason| anyhow!("--image: {reason}"))?;
+        images
     };
     // issue #1350: the KV cache mode this family can really run, announced
     // once before the load banner.
@@ -203,10 +220,17 @@ pub fn run_chat(mut opts: ChatOptions) -> Result<()> {
     if opts.server.max_tokens.is_none() {
         println!("Per-turn output: unlimited (-1) -> until EOS or the model context window.");
     }
-    warn_if_base_model(&model_path, opts.no_chat_template);
+    warn_if_base_model(&server, opts.no_chat_template);
 
-    let mut editor = DefaultEditor::new()
-        .map_err(|e| anyhow!("Failed to initialize the interactive line editor: {e}"))?;
+    let mut editor = match DefaultEditor::new() {
+        Ok(editor) => editor,
+        Err(e) => {
+            return shutdown_then_fail(
+                server,
+                anyhow!("Failed to initialize the interactive line editor: {e}"),
+            );
+        }
+    };
     let interactive = io::stdin().is_terminal();
     print_banner(interactive);
 
@@ -236,6 +260,17 @@ pub fn run_chat(mut opts: ChatOptions) -> Result<()> {
                 continue;
             }
             SlashOutcome::Image(path) => {
+                // The whole transcript is re-sent every turn, so an image past
+                // the server's per-request cap would fail every later turn
+                // until `/clear`; refuse it here instead.
+                if let Err(reason) = check_image_budget(
+                    transcript_image_count(&transcript) + pending_images.len(),
+                    1,
+                    server_image_cap(),
+                ) {
+                    eprintln!("error: cannot attach {}: {reason}", path.display());
+                    continue;
+                }
                 // Read now, once: the transcript keeps the encoded image, so
                 // later turns never depend on the file still being there.
                 match image_data_uri(&path) {
@@ -316,7 +351,7 @@ fn print_banner(interactive: bool) {
     println!("mlxcel interactive chat. Type a message and press Enter.");
     println!("Commands: /bye (exit), /clear (reset conversation), /image <path>, /? or /help.");
     println!("Multiline: open and close a block with {MULTILINE_FENCE} on their own lines.");
-    println!("Ctrl-C while a reply streams stops that reply.");
+    println!("Ctrl-C while a reply streams stops that reply; a second Ctrl-C quits.");
     if !interactive {
         // Piped / redirected stdin: say so instead of looking hung.
         eprintln!("(non-interactive stdin detected: reading messages until EOF)");

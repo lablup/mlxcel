@@ -24,13 +24,11 @@
 //! the worker stops that request and the process keeps running.
 
 use std::io::{self, IsTerminal, Write as IoWrite};
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::Result;
-use mlxcel::server::chat_template::ChatTemplateProcessor;
-use mlxcel::server::in_process::{ChatDelta, ChatTurn};
+use mlxcel::server::in_process::{ChatDelta, ChatTurn, InProcessServer};
 
 const DIM: &str = "\x1b[2m";
 const RESET: &str = "\x1b[0m";
@@ -63,23 +61,23 @@ impl TurnPrinter {
     }
 
     pub(crate) fn on_delta(&mut self, delta: ChatDelta<'_>) {
-        let text = match delta {
+        let (text, dimmed) = match delta {
             ChatDelta::Content(text) => {
                 self.saw_visible_text |= !text.trim().is_empty();
-                text.to_string()
+                (text, false)
             }
             ChatDelta::Reasoning(text) if self.show_reasoning => {
                 self.saw_visible_text |= !text.trim().is_empty();
-                if self.dim {
-                    format!("{DIM}{text}{RESET}")
-                } else {
-                    text.to_string()
-                }
+                (text, self.dim)
             }
             ChatDelta::Reasoning(_) => return,
         };
-        print!("{text}");
-        let _ = self.stdout.flush();
+        // The slice goes straight to the locked stdout, then a flush so the
+        // text shows as it streams; stdout is line-buffered, so without the
+        // flush a delta with no newline would wait for the next one.
+        let mut out = self.stdout.lock();
+        let _ = write_delta(&mut out, text, dimmed);
+        let _ = out.flush();
     }
 
     /// The tail notices for a finished turn.
@@ -108,21 +106,24 @@ impl TurnPrinter {
     }
 }
 
+/// Write one delta's text, wrapped in the dim escape when `dimmed`.
+fn write_delta<W: IoWrite>(out: &mut W, text: &str, dimmed: bool) -> io::Result<()> {
+    if dimmed {
+        out.write_all(DIM.as_bytes())?;
+        out.write_all(text.as_bytes())?;
+        out.write_all(RESET.as_bytes())
+    } else {
+        out.write_all(text.as_bytes())
+    }
+}
+
 /// Say so when the checkpoint ships no chat template: it is likely a base
 /// model, and the server renders turns with its generic default format.
-/// Shared by the REPL and `mlxcel run -p`.
-pub(crate) fn warn_if_base_model(model_path: &Path, no_chat_template: bool) {
-    if no_chat_template {
-        return;
-    }
-    let has_template = ChatTemplateProcessor::from_model_path(model_path)
-        .ok()
-        .flatten()
-        .is_some();
-    let native = mlxcel::tokenizer::load_tokenizer(model_path)
-        .ok()
-        .is_some_and(|tokenizer| tokenizer.kimi_k3_control_ids().is_some());
-    if has_template || native {
+/// Shared by the REPL and `mlxcel run -p`. The answer comes from the template
+/// and tokenizer the in-process server already loaded; nothing is re-read
+/// from the model directory.
+pub(crate) fn warn_if_base_model(server: &InProcessServer, no_chat_template: bool) {
+    if !base_model_notice_due(no_chat_template, || server.uses_generic_chat_template()) {
         return;
     }
     eprintln!(
@@ -139,6 +140,27 @@ pub(crate) fn warn_if_base_model(model_path: &Path, no_chat_template: bool) {
     );
     eprintln!("      role markers, pass --no-chat-template.");
     eprintln!();
+}
+
+/// Whether the base-model notice is due. The generic-template question is a
+/// closure so it is asked only when `--no-chat-template` is not set, and a
+/// checkpoint with a template (the common case) costs one boolean.
+fn base_model_notice_due(
+    no_chat_template: bool,
+    uses_generic_template: impl FnOnce() -> bool,
+) -> bool {
+    !no_chat_template && uses_generic_template()
+}
+
+/// Join the worker, then hand back the error that ended the command. A turn
+/// error would otherwise leave through `?` with the worker still holding the
+/// model, and the process could exit mid-teardown. A shutdown failure is
+/// reported on stderr and does not replace the original error.
+pub(crate) fn shutdown_then_fail<T>(server: InProcessServer, err: anyhow::Error) -> Result<T> {
+    if let Err(shutdown_err) = server.shutdown() {
+        eprintln!("warning: {shutdown_err:#}");
+    }
+    Err(err)
 }
 
 /// The cancellation flag of the request in flight, if any.
@@ -175,9 +197,32 @@ fn terminate_on_interrupt() -> ! {
     std::process::exit(130)
 }
 
+/// What one Ctrl-C does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InterruptAction {
+    /// The first Ctrl-C of a turn: the flag is now set and the worker stops
+    /// that request.
+    Cancel,
+    /// No turn is running, or the turn is already cancelling and the user
+    /// pressed Ctrl-C again: end the process.
+    Terminate,
+}
+
+/// Apply a Ctrl-C to the in-flight turn's flag. A second Ctrl-C while the
+/// flag is already set means the cancel is not taking effect (a long prefill
+/// that does not poll it, a stuck worker), so it ends the process instead of
+/// being swallowed.
+fn interrupt_action(in_flight: Option<&AtomicBool>) -> InterruptAction {
+    match in_flight {
+        Some(cancel) if !cancel.swap(true, Ordering::AcqRel) => InterruptAction::Cancel,
+        _ => InterruptAction::Terminate,
+    }
+}
+
 /// Install the process's Ctrl-C handling once: during a turn it cancels that
-/// turn through the worker; outside a turn it terminates the process as the
-/// default handler did ([`terminate_on_interrupt`]). The line editor reads in
+/// turn through the worker (a second Ctrl-C of the same turn terminates the
+/// process); outside a turn it terminates the process as the default handler
+/// did ([`terminate_on_interrupt`]). The line editor reads in
 /// raw mode, where Ctrl-C reaches it as a key rather than a signal, so the
 /// REPL prompt keeps its own `^C` handling.
 fn install_interrupt_handler() {
@@ -195,9 +240,8 @@ fn install_interrupt_handler() {
                 runtime.block_on(async {
                     while tokio::signal::ctrl_c().await.is_ok() {
                         let flag = in_flight().lock().ok().and_then(|guard| guard.clone());
-                        match flag {
-                            Some(cancel) => cancel.store(true, Ordering::Release),
-                            None => terminate_on_interrupt(),
+                        if interrupt_action(flag.as_deref()) == InterruptAction::Terminate {
+                            terminate_on_interrupt();
                         }
                     }
                 });
@@ -221,3 +265,7 @@ pub(crate) fn run_cancellable<T>(turn: impl FnOnce(Arc<AtomicBool>) -> Result<T>
     }
     outcome
 }
+
+#[cfg(test)]
+#[path = "cli_turn_tests.rs"]
+mod tests;

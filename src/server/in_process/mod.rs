@@ -168,6 +168,16 @@ impl InProcessServer {
         self.state.prompt_cache.is_some()
     }
 
+    /// Whether chat requests render with the generic fallback template: the
+    /// checkpoint ships no chat template of its own (a likely base model) and
+    /// no native renderer stands in for one. Answered from the processor
+    /// loaded at start, so the model directory is not read again.
+    #[must_use]
+    pub fn uses_generic_chat_template(&self) -> bool {
+        self.state.chat_template.kimi_k3().is_none()
+            && self.state.chat_template.is_generic_default()
+    }
+
     /// Why the loaded checkpoint cannot answer chat requests (an embedding,
     /// speech or image-task model on the chat worker), or `None` when it can.
     #[must_use]

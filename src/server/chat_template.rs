@@ -444,6 +444,17 @@ impl ChatTemplateProcessor {
         }
     }
 
+    /// Whether this processor renders with the generic fallback template
+    /// rather than one the checkpoint or an override supplied. That is what
+    /// [`Self::default`] and `resolve_chat_template` yield for a checkpoint
+    /// that ships no template, so a front end can tell a likely base model
+    /// from the already-loaded processor without re-reading the model
+    /// directory.
+    #[must_use]
+    pub fn is_generic_default(&self) -> bool {
+        self.template == preprocess_template(default_chat_template().to_string())
+    }
+
     /// Install a generation-prompt completion rule.
     ///
     /// [`Self::from_model_path`] installs the rule its checkpoint needs; this
@@ -2122,6 +2133,34 @@ impl std::fmt::Debug for ChatTemplateProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generic_default_is_true_only_for_the_fallback_template() {
+        assert!(ChatTemplateProcessor::default().is_generic_default());
+        let custom = ChatTemplateProcessor::with_template(
+            "{% for m in messages %}{{ m.content }}{% endfor %}".to_string(),
+        );
+        assert!(!custom.is_generic_default());
+
+        let shipped = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            shipped.path().join("tokenizer_config.json"),
+            r#"{"chat_template": "{% for m in messages %}<{{ m.role }}>{{ m.content }}{% endfor %}"}"#,
+        )
+        .expect("write config");
+        let loaded = ChatTemplateProcessor::from_model_path(shipped.path())
+            .expect("load")
+            .expect("template present");
+        assert!(!loaded.is_generic_default());
+
+        // A checkpoint with no template resolves to the default processor,
+        // which is what the in-process server holds for a base model.
+        let bare = tempfile::tempdir().expect("tempdir");
+        let resolved = ChatTemplateProcessor::from_model_path(bare.path())
+            .expect("load")
+            .unwrap_or_default();
+        assert!(resolved.is_generic_default());
+    }
 
     fn fresh_render_context(
         processor: &ChatTemplateProcessor,

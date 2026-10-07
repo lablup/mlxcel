@@ -60,13 +60,15 @@ use mlxcel::cli::speculative_args::SpeculativeArgs;
 use mlxcel::server::chat_template::ChatMessage;
 use mlxcel::server::in_process::InProcessServer;
 
-use super::chat_transcript::{Turn, image_data_uris, messages_json};
+use super::chat_transcript::{
+    Turn, check_image_budget, image_data_uris, messages_json, server_image_cap,
+};
 use mlxcel::cli::in_process_client::{
     CliServerSettings, ServerSamplingOptions, chat_request_body, completion_request_body,
 };
 
 use super::cli_server::{cli_flag_was_set, resolve_cli_kv_cache_mode, settings_from_flags};
-use super::cli_turn::{TurnDisplay, TurnPrinter, run_cancellable};
+use super::cli_turn::{TurnDisplay, TurnPrinter, run_cancellable, shutdown_then_fail};
 use crate::{GenerateArgs, GenerationOptions, ModelOptions, SamplingOptions};
 
 /// Default model used when `mlxcel run` is invoked without a model argument.
@@ -289,6 +291,8 @@ fn run_once(args: RunArgs) -> Result<()> {
 
     // Read `--image` files before the model loads, so a bad path fails fast.
     let images = image_data_uris(&args.generation.image)?;
+    check_image_budget(0, images.len(), server_image_cap())
+        .map_err(|reason| anyhow::anyhow!("--image: {reason}"))?;
     let mut settings = args.server_settings()?;
     // One request has nothing to reuse, so the prompt cache stays off (ADR
     // 0007: on for chat clients, which `run -p` is not); the warmup is the
@@ -310,14 +314,14 @@ fn run_once(args: RunArgs) -> Result<()> {
     // The REPL's notice: without a chat template the server renders the
     // prompt with its generic default format, which a base model rarely
     // answers well.
-    super::cli_turn::warn_if_base_model(&model_path, args.generation.no_chat_template);
+    super::cli_turn::warn_if_base_model(&server, args.generation.no_chat_template);
 
     let display = TurnDisplay {
         show_reasoning: args.generation.show_reasoning,
     };
     let mut printer = TurnPrinter::new(display);
     println!("Generating...");
-    let turn = run_cancellable(|cancel| {
+    let outcome = run_cancellable(|cancel| {
         if args.generation.no_chat_template {
             let request = mlxcel::server::in_process::chat::completion_request_from_json(
                 completion_request_body(&prompt, &settings),
@@ -339,7 +343,12 @@ fn run_once(args: RunArgs) -> Result<()> {
             )?;
             server.chat(request, cancel, |delta| printer.on_delta(delta))
         }
-    })?;
+    });
+    // Join the worker before a turn error leaves the command.
+    let turn = match outcome {
+        Ok(turn) => turn,
+        Err(err) => return shutdown_then_fail(server, err),
+    };
     printer.finish(&turn, "Re-run");
     println!();
     let seconds = turn.result.generation_only_ms as f64 / 1000.0;
