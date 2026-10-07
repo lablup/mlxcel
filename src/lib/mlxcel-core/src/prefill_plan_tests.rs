@@ -231,10 +231,20 @@ fn embedding_input_is_never_chunked_and_padded_only_where_the_executor_pads() {
             padded_len: 300
         }]
     );
-    // An embedding row never splits at the history boundary either: the
-    // scheduler passes no boundary for it, and a boundary given anyway still
-    // yields one segment plus the suffix, never chunks.
-    let plan = PrefillPlan::with_prefix(300, 0, Some(100), 64, server);
+    // An embedding row never splits at the history boundary either: a
+    // boundary handed in anyway is ignored, so the cursor an executor advances
+    // piece by piece cannot be left mid-embedding.
+    for caps in [server, cli] {
+        let plan = PrefillPlan::with_prefix(300, 0, Some(100), 64, caps);
+        assert_eq!(plan.boundary(), None);
+        assert_eq!(plan.ranges(), vec![0..300]);
+        assert!(plan.is_single_pass());
+        assert_eq!(plan.forwarded_len(), 300);
+        assert!(!plan.ends_at_boundary(&plan.pieces()[0]));
+    }
+    // The same boundary still splits token input.
+    let plan = PrefillPlan::with_prefix(300, 0, Some(100), 0, tokens(false));
+    assert_eq!(plan.boundary(), Some(100));
     assert_eq!(ranges(&plan), vec![0..100, 100..300]);
 }
 
@@ -301,4 +311,66 @@ fn chunk_policy_default_is_the_adr_0007_value() {
         prefill_chunk_len() == DEFAULT_PREFILL_CHUNK
             || std::env::var_os("MLXCEL_PREFILL_CHUNK").is_some()
     );
+}
+
+/// A `tracing` subscriber that records every WARN-or-worse event message.
+struct WarnCollector(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+impl tracing::Subscriber for WarnCollector {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        struct Message(String);
+        impl tracing::field::Visit for Message {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.0 = format!("{value:?}");
+                }
+            }
+        }
+        if *event.metadata().level() <= tracing::Level::WARN {
+            let mut message = Message(String::new());
+            event.record(&mut message);
+            self.0.lock().unwrap().push(message.0);
+        }
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// `MLXCEL_PREFILL_CHUNK` parses as a token count (`0` disables chunking),
+/// and an unparseable value falls back to the default with exactly one
+/// warning that names the variable and the value, instead of silently.
+#[test]
+fn unparseable_chunk_env_warns_once_and_falls_back_to_the_default() {
+    let warnings = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (unset, zero, padded, bad_text, negative) =
+        tracing::subscriber::with_default(WarnCollector(warnings.clone()), || {
+            (
+                parse_prefill_chunk(None),
+                parse_prefill_chunk(Some("0")),
+                parse_prefill_chunk(Some(" 512 ")),
+                parse_prefill_chunk(Some("2k")),
+                parse_prefill_chunk(Some("-1")),
+            )
+        });
+    assert_eq!(unset, DEFAULT_PREFILL_CHUNK);
+    assert_eq!(zero, 0);
+    assert_eq!(padded, 512);
+    assert_eq!(bad_text, DEFAULT_PREFILL_CHUNK);
+    assert_eq!(negative, DEFAULT_PREFILL_CHUNK);
+    let warnings = warnings.lock().unwrap();
+    assert_eq!(
+        warnings.len(),
+        2,
+        "one warning per bad value, none for good ones: {warnings:?}"
+    );
+    assert!(warnings[0].contains("MLXCEL_PREFILL_CHUNK") && warnings[0].contains("2k"));
+    assert!(warnings[1].contains("MLXCEL_PREFILL_CHUNK") && warnings[1].contains("-1"));
 }

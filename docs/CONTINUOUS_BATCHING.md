@@ -164,6 +164,11 @@ So a prompt-cache hit reproduces the cold (miss) run of the same prompt exactly 
 
 The dense-KV rows diverge because their cold plan has no split point at 45 or 71: the hit's 7-row and 4-row suffix forwards run through `qmv`, the cold run's 52-row and 75-row forwards through `qmm`. Giving every family the history-boundary split would make those two rows identical, but it would cost every cold chat prefill a second forward launch and make the prompt cache change the output of a single-turn request (off vs miss, today identical for dense-KV families), which the Phase 5 `mlxcel run` versus `mlxcel generate` comparison relies on; it was rejected for #2170. The invariant to rely on is therefore: cache off and a cold prefill with the cache on are identical for every family without a history-boundary split, a hit from a split point is identical to the miss, and a hit from inside a piece is a partition change of the #203 / #325 / #326 near-tie class, pinned by the `mlxcel_core::prefill_plan` tests and `scheduler_prompt_cache_plan_tests::cache_hit_reproduces_miss_exactly_from_a_plan_split_point` (the divergence of an inside-a-piece hit is measured in the table above, not asserted numerically by a test).
 
+Known limitations of the plan, recorded for the epic's end-of-run measurement:
+
+- The history segment of a snapshot family's prefill (the span before the history boundary, #1143) is always one unchunked forward, whatever `--prefill-chunk-size` says. This predates the plan (it has been the case since #1143), and the plan keeps it because the segment is where the prompt cache snapshots the model state. A long chat history on a snapshot family therefore prefills as one forward that does not interleave with concurrent decode ticks; only the pieces after the boundary do.
+- What the 2048 default (up from 512 on the server) does to the inter-token latency of concurrent decode streams is not measured yet. A larger chunk lengthens each prefill tick that a live decode batch waits behind. The epic's end-of-run benchmark measures it; `--prefill-chunk-size` and `MLXCEL_PREFILL_CHUNK` lower it per deployment in the meantime.
+
 ### Decode headroom under a tight budget (`--kv-admission-watermark`)
 
 When the budget is small relative to the concurrent work, admitting a request

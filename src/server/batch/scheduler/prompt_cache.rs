@@ -746,7 +746,7 @@ impl BatchScheduler {
     /// rule so the two producers do not delete each other's entries.
     ///
     /// Used by: `donate_finished_sequence_cache`,
-    /// `capture_history_boundary_snapshot`
+    /// `insert_history_boundary_snapshot`
     /// `encoded_span` is the total sequence length the model was told about when
     /// this state was produced, which is what selects a position-dependent RoPE
     /// table. It is the whole prompt for a history-boundary snapshot even though

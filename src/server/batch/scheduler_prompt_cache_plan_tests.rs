@@ -90,6 +90,30 @@ fn run_turn(
     mlxcel_core::prefill_plan::PrefillPlan,
     u64,
 ) {
+    let run = run_turn_observed(sched, tokens, history, max_tokens);
+    (run.result, run.plan, run.forwarded)
+}
+
+/// What [`run_turn_observed`] saw of one request.
+struct ObservedTurn {
+    result: GenerationResult,
+    plan: mlxcel_core::prefill_plan::PrefillPlan,
+    forwarded: u64,
+    /// `processed` of every mid-prefill `prompt_progress` frame, in order, the
+    /// opening frame included.
+    progress_frames: Vec<usize>,
+    /// How many chunks the chunk counter gained.
+    chunks_counted: u64,
+}
+
+/// [`run_turn`] that also reports the `prompt_progress` frames the request
+/// emitted and the chunk counter's movement.
+fn run_turn_observed(
+    sched: &mut BatchScheduler,
+    tokens: &[i32],
+    history: Option<&[i32]>,
+    max_tokens: usize,
+) -> ObservedTurn {
     let mut opts = options();
     opts.max_tokens = max_tokens;
     opts.ignore_eos = true;
@@ -116,7 +140,7 @@ fn run_turn(
         .prefill_queue
         .enqueue_front(queued)
         .unwrap_or_else(|_| panic!("re-queue"));
-    let forwarded_before = sched.batch_observability.snapshot().total_prefill_tokens;
+    let before = sched.batch_observability.snapshot();
     for _ in 0..32 {
         match sched.decide_action() {
             BatchSchedulerAction::Prefill(id) => sched.execute_prefill(id),
@@ -132,16 +156,26 @@ fn run_turn(
             break;
         }
     }
+    let mut progress_frames = Vec::new();
     let result = loop {
         match rx.recv_timeout(Duration::from_secs(5)) {
             Ok(GenerateEvent::Done(result)) => break result,
             Ok(GenerateEvent::Error(err)) => panic!("unexpected generation error: {err}"),
+            Ok(GenerateEvent::Prefill(stats)) if !stats.first_token => {
+                progress_frames.push(stats.processed);
+            }
             Ok(_) => {}
             Err(err) => panic!("generation did not finish: {err}"),
         }
     };
-    let forwarded = sched.batch_observability.snapshot().total_prefill_tokens - forwarded_before;
-    (result, plan, forwarded)
+    let after = sched.batch_observability.snapshot();
+    ObservedTurn {
+        result,
+        plan,
+        forwarded: after.total_prefill_tokens - before.total_prefill_tokens,
+        progress_frames,
+        chunks_counted: after.prefill_chunks_processed - before.prefill_chunks_processed,
+    }
 }
 
 /// Turn 1 (`history ++ tail_a`) splits at the history boundary and snapshots
@@ -274,4 +308,53 @@ fn cache_hit_from_inside_a_piece_is_reported_by_the_plan() {
         4,
         "the hit still decodes to completion"
     );
+}
+
+/// Only a real chunked prefill counts toward `mlxcel_batch_prefill_chunks_total`
+/// (ADR 0005's mixed-step dispatch proof) and emits a `prompt_progress` frame
+/// per chunk (b10621's cadence, #1477), after the one opening frame that
+/// `begin_prefill` sends for every prefill. A prompt that fits one chunk, an
+/// unchunked server and a history-boundary segment plus its suffix are one
+/// unchunked prefill and neither count nor emit more, as before the plan
+/// existed.
+#[test]
+fn only_real_chunks_count_and_emit_prompt_progress() {
+    let history = prompt(24);
+    let mut turn = history.clone();
+    turn.extend((0..16).map(|i| (i + 1) % 6));
+    let no_split: &[i32] = &turn[..40];
+
+    // Fits one chunk: a single-pass prefill.
+    let mut sched = plan_scheduler(test_store(), 64);
+    let run = run_turn_observed(&mut sched, no_split, None, 2);
+    assert_eq!(run.plan.ranges(), vec![0..40]);
+    assert_eq!(run.chunks_counted, 0, "a single-piece prefill is no chunk");
+    assert_eq!(run.progress_frames, vec![0]);
+
+    // Chunking disabled.
+    let mut sched = plan_scheduler(test_store(), 0);
+    let run = run_turn_observed(&mut sched, no_split, None, 2);
+    assert_eq!(run.chunks_counted, 0);
+    assert_eq!(run.progress_frames, vec![0]);
+
+    // History boundary without chunking: segment plus suffix, no chunk.
+    let mut sched = plan_scheduler(test_store(), 0);
+    let run = run_turn_observed(&mut sched, &turn, Some(&history), 2);
+    assert_eq!(run.plan.ranges(), vec![0..24, 24..40]);
+    assert_eq!(run.chunks_counted, 0, "the boundary segment is no chunk");
+    assert_eq!(run.progress_frames, vec![0]);
+
+    // Chunked: one count and one frame per chunk.
+    let mut sched = plan_scheduler(test_store(), 8);
+    let run = run_turn_observed(&mut sched, no_split, None, 2);
+    assert_eq!(run.plan.ranges(), vec![0..8, 8..16, 16..24, 24..32, 32..40]);
+    assert_eq!(run.chunks_counted, 5);
+    assert_eq!(run.progress_frames, vec![0, 8, 16, 24, 32, 40]);
+
+    // Chunked with a boundary: the segment is skipped, each chunk counts.
+    let mut sched = plan_scheduler(test_store(), 8);
+    let run = run_turn_observed(&mut sched, &turn, Some(&history), 2);
+    assert_eq!(run.plan.ranges(), vec![0..24, 24..32, 32..40]);
+    assert_eq!(run.chunks_counted, 2);
+    assert_eq!(run.progress_frames, vec![0, 32, 40]);
 }

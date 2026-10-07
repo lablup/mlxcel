@@ -232,12 +232,19 @@ impl BatchScheduler {
                 mlxcel_core::clear_memory_cache();
                 continue;
             }
-            // One `prompt_progress` frame per evaluated chunk, b10621's
-            // per-batch-iteration cadence (#1477), and the chunk counter that
-            // is the dispatch proof for the #908 / #1011 mixed-step work (the
-            // boundary segment is not a chunk the tick policy scheduled).
-            self.batch_observability.record_prefill_chunk();
-            seq.report_prefill_progress(piece.range.end);
+            // A chunked prefill reports one `prompt_progress` frame per
+            // evaluated chunk, b10621's per-batch-iteration cadence (#1477),
+            // and counts each chunk: the counter is the dispatch proof for the
+            // #908 / #1011 mixed-step work (ADR 0005). A plan that is not cut
+            // into chunks (a prompt that fits one chunk, `--prefill-chunk-size
+            // 0`, a model that cannot chunk, the segment-plus-suffix shape of a
+            // history boundary) is one unchunked prefill, which neither counts
+            // nor emits a progress frame, as before the plan existed. The
+            // boundary segment is not a chunk the tick policy scheduled either.
+            if plan.chunk().is_some() {
+                self.batch_observability.record_prefill_chunk();
+                seq.report_prefill_progress(piece.range.end);
+            }
             if !all {
                 break;
             }

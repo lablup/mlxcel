@@ -74,12 +74,26 @@ pub const DEFAULT_PREFILL_CHUNK: usize = 2048;
 /// benchmark.
 pub fn prefill_chunk_len() -> usize {
     static CHUNK: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *CHUNK.get_or_init(|| {
-        std::env::var("MLXCEL_PREFILL_CHUNK")
-            .ok()
-            .and_then(|v| v.trim().parse::<usize>().ok())
-            .unwrap_or(DEFAULT_PREFILL_CHUNK)
-    })
+    *CHUNK
+        .get_or_init(|| parse_prefill_chunk(std::env::var("MLXCEL_PREFILL_CHUNK").ok().as_deref()))
+}
+
+/// The chunk for an `MLXCEL_PREFILL_CHUNK` value: unset gives the default, and
+/// a value that is not a non-negative integer logs one warning naming the
+/// variable and the value before falling back to the default.
+fn parse_prefill_chunk(value: Option<&str>) -> usize {
+    let Some(raw) = value else {
+        return DEFAULT_PREFILL_CHUNK;
+    };
+    match raw.trim().parse::<usize>() {
+        Ok(chunk) => chunk,
+        Err(_) => {
+            tracing::warn!(
+                "MLXCEL_PREFILL_CHUNK={raw:?} is not a non-negative integer; using the default of {DEFAULT_PREFILL_CHUNK} tokens"
+            );
+            DEFAULT_PREFILL_CHUNK
+        }
+    }
 }
 
 /// `MLXCEL_FORCE_PADDED_PREFILL_MASK` makes a padded piece carry an explicit
@@ -244,7 +258,12 @@ impl PrefillPlan {
         caps: PrefillCaps,
     ) -> Self {
         let start = adopted.min(prompt_len);
-        let boundary = boundary.filter(|b| *b > start && *b < prompt_len);
+        // Embedding input is consumed whole and never split, so a history
+        // boundary does not apply to it: honoring one would cut the embedding
+        // rows into two forwards and advance a cursor the executor does not
+        // keep.
+        let boundary =
+            boundary.filter(|b| !caps.is_embedding_input() && *b > start && *b < prompt_len);
         let remaining = prompt_len - start;
         let chunk = (chunk > 0
             && caps.supports_chunked_prefill
