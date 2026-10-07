@@ -266,13 +266,18 @@ impl<M: LanguageModel> DirectEngine<M> {
         self.generation_stream.as_ref()
     }
 
-    /// Open a sequence under this client's KV mode.
+    /// Open a sequence under this client's KV mode. The model's own modes go
+    /// in before [`Engine::open`]: a model-owned family (Gemma 3/4, Llama 4,
+    /// Qwen 3.5, their VLM wrappers) builds the sequence's caches in
+    /// `prepare_sequence_state` from the modes it holds at that moment, and
+    /// a later `set_kv_cache_layer_modes` rebuilds only its fallback slot.
     pub(super) fn open_sequence(&mut self) -> Result<SequenceId, DirectEngineError> {
+        self.inject_model_kv_cache_modes();
         let id = self
             .engine
             .open(SequenceSpec::default())
             .map_err(DirectEngineError::Open)?;
-        self.apply_kv_cache_mode(id);
+        self.apply_pool_kv_cache_mode(id);
         Ok(id)
     }
 
@@ -348,12 +353,17 @@ impl<M: LanguageModel> DirectEngine<M> {
         }
     }
 
-    /// Resolve the per-layer modes for `id`'s pool caches and the model's own
-    /// caches (a no-op table for `Fp16`).
-    fn apply_kv_cache_mode(&mut self, id: SequenceId) {
+    /// Hand the model its resolved per-layer modes (a no-op table for
+    /// `Fp16`), as the scheduler does at configuration time.
+    fn inject_model_kv_cache_modes(&self) {
         let model_modes =
             resolve_kv_cache_layer_modes(self.kv_cache_mode, self.model().num_layers());
         self.model().set_kv_cache_layer_modes(model_modes);
+    }
+
+    /// Resolve the per-layer modes for `id`'s pool caches, which the pool
+    /// allocates in `Fp16`.
+    fn apply_pool_kv_cache_mode(&mut self, id: SequenceId) {
         if self.kv_cache_mode == KVCacheMode::Fp16 {
             return;
         }
@@ -572,11 +582,7 @@ impl<M: LanguageModel> DirectEngine<M> {
             return Ok(Vec::new());
         }
         install_thread_local_default_stream(self.generation_stream.as_ref());
-        let id = self
-            .engine
-            .open(SequenceSpec::default())
-            .map_err(DirectEngineError::Open)?;
-        self.apply_kv_cache_mode(id);
+        let id = self.open_sequence()?;
         let result = self.score_window(id, prompt_tokens);
         self.engine.close(id);
         crate::clear_memory_cache();

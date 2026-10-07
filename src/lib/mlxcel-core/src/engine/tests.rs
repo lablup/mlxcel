@@ -1018,12 +1018,18 @@ fn prefill_pieces_match_a_single_pass_for_every_partition() {
 }
 
 /// The client applies its KV mode to a model-owned family's own caches the
-/// way the scheduler does, before the first forward.
+/// way the scheduler does, before the first forward: the modes are in place
+/// when `prepare_sequence_state` builds the sequence's caches, on the very
+/// first sequence of both the generate and the scoring entry.
 #[test]
 fn direct_engine_injects_the_resolved_kv_modes_into_the_model() {
     use crate::cache::KVCacheMode;
+    use std::cell::RefCell;
+    #[derive(Default)]
     struct TrackingKvModeModel {
-        modes: std::cell::RefCell<Option<Vec<KVCacheMode>>>,
+        modes: RefCell<Option<Vec<KVCacheMode>>>,
+        /// The modes the model held at each `prepare_sequence_state`.
+        prepared_with: RefCell<Vec<Option<Vec<KVCacheMode>>>>,
     }
     impl LanguageModel for TrackingKvModeModel {
         fn forward(
@@ -1044,6 +1050,10 @@ fn direct_engine_injects_the_resolved_kv_modes_into_the_model() {
         fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
             self.modes.borrow().clone()
         }
+        fn prepare_sequence_state(&self, _seq_id: SequenceId) {
+            let held = self.modes.borrow().clone();
+            self.prepared_with.borrow_mut().push(held);
+        }
         fn num_layers(&self) -> usize {
             3
         }
@@ -1051,20 +1061,29 @@ fn direct_engine_injects_the_resolved_kv_modes_into_the_model() {
             vec![7]
         }
     }
-    let model = TrackingKvModeModel {
-        modes: std::cell::RefCell::new(None),
-    };
+    let int8 = Some(vec![KVCacheMode::Int8; 3]);
+
+    let model = TrackingKvModeModel::default();
     DirectEngine::new(&model, 0)
         .with_kv_cache_mode(KVCacheMode::Int8)
         .run(&[1, 2], 1, &SamplingConfig::greedy())
         .unwrap();
+    assert_eq!(model.kv_cache_layer_modes(), int8);
     assert_eq!(
-        model.kv_cache_layer_modes(),
-        Some(vec![
-            KVCacheMode::Int8,
-            KVCacheMode::Int8,
-            KVCacheMode::Int8
-        ])
+        model.prepared_with.borrow().as_slice(),
+        std::slice::from_ref(&int8),
+        "the first generate sequence was built before the modes were injected"
+    );
+
+    let model = TrackingKvModeModel::default();
+    DirectEngine::new(&model, 0)
+        .with_kv_cache_mode(KVCacheMode::Int8)
+        .loglikelihoods(&[1, 2, 3])
+        .unwrap();
+    assert_eq!(
+        model.prepared_with.borrow().as_slice(),
+        std::slice::from_ref(&int8),
+        "the first scoring sequence was built before the modes were injected"
     );
 }
 
