@@ -2092,10 +2092,19 @@ impl SamplerState {
     /// structures a penalty needs are maintained, so a repetition-only config
     /// never touches the count map and a frequency-only config never touches
     /// the sorted set.
+    ///
+    /// The aggregates serve only the full-history window
+    /// (`penalty_last_n < 0`): a positive window rebuilds over its slice and a
+    /// zero window disables the stage (see [`preprocess_penalty_stages`]), so
+    /// neither maintains them. `RowSampler` creates the state for every
+    /// history-reading config (#2169), and this keeps a windowed config from
+    /// absorbing a prompt and a history it never reads.
     pub fn for_config(config: &SamplingConfig) -> Self {
+        let full_history = config.penalty_last_n < 0;
         Self {
-            track_seen: config.repetition_penalty != 1.0,
-            track_counts: config.frequency_penalty != 0.0 || config.presence_penalty != 0.0,
+            track_seen: full_history && config.repetition_penalty != 1.0,
+            track_counts: full_history
+                && (config.frequency_penalty != 0.0 || config.presence_penalty != 0.0),
             ..Self::default()
         }
     }
@@ -3820,6 +3829,28 @@ mod tests {
         assert_eq!(s.seen_sorted, vec![7, 8]);
         assert_eq!(s.counts.get(&1), None);
         assert_eq!(s.counts.get(&7), Some(&1));
+    }
+
+    #[test]
+    fn sampler_state_skips_aggregates_outside_the_full_history_window() {
+        // A positive or zero penalty window never reads the incremental
+        // aggregates (#1436), so a state created for such a config (the
+        // per-row step creates one for every history-reading config, #2169)
+        // must not absorb the history into them.
+        for penalty_last_n in [8, 0] {
+            let cfg = SamplingConfig {
+                repetition_penalty: 1.2,
+                frequency_penalty: 0.5,
+                presence_penalty: 0.1,
+                penalty_last_n,
+                ..Default::default()
+            };
+            let mut s = SamplerState::for_config(&cfg);
+            s.sync(&[1, 2, 2, 3]);
+            assert_eq!(s.absorbed_len, 4, "window {penalty_last_n}");
+            assert!(s.seen_sorted.is_empty(), "window {penalty_last_n}");
+            assert!(s.counts.is_empty(), "window {penalty_last_n}");
+        }
     }
 
     #[test]
