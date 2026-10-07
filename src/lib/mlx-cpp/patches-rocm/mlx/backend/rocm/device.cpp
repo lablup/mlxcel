@@ -18,9 +18,11 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <shared_mutex>
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace mlx::core::rocm {
@@ -346,7 +348,16 @@ CommandEncoder& Device::get_command_encoder(Stream s) {
 }
 
 void Device::clear_encoders() {
-  encoders_.clear();
+  // Take the encoders out under the lock and destroy them after it is
+  // released: ~CommandEncoder waits on in-flight work and releases HIP
+  // resources, and must not run while encoders_mtx_ is held, which
+  // get_command_encoder and find_encoder take from other threads
+  // (lablup/mlxcel#2197).
+  std::unordered_map<int, std::unique_ptr<CommandEncoder>> encoders;
+  {
+    std::lock_guard<std::mutex> lk(encoders_mtx_);
+    encoders.swap(encoders_);
+  }
 }
 
 CommandEncoder* Device::find_encoder(Stream s) {
@@ -486,13 +497,49 @@ void CommandEncoder::check_launch(const char* primitive) {
   throw std::runtime_error(oss.str());
 }
 
-std::unordered_map<int, Device>& get_devices();
+namespace {
+
+// [mlxcel #2197] One Device per HIP device index, built on first use. The
+// table is read on every launch, from whichever thread evaluates (the server's
+// scheduler, embedding, rerank and audio workers each run on their own
+// stream), and written when a stream is first created on a device, so it is
+// locked like the JIT module cache (LOCAL_FIXES item 35): a shared lock for
+// the lookup, the unique lock only around a first construction. Upstream CUDA
+// at the pin (mlx/backend/cuda/device.cpp) instead constructs every device in
+// one magic-static initializer and reads the vector afterwards; the fork keeps
+// lazy construction because Device::Device binds the device (hipSetDevice),
+// and on a multi-GPU host a context on a GPU nobody asked for wedges the
+// discrete GPU's queue over a TB5 link (see ensure_device_flags). Leaked, as
+// upstream's devices are: user code may still evaluate after the main thread
+// has torn down, and no Device or CommandEncoder destructor then runs during
+// static teardown, where on a faulted device every HIP call fails (item 7).
+// Nothing is ever erased, so a Device& handed out stays valid for the process.
+struct DeviceTable {
+  std::shared_mutex mtx;
+  std::unordered_map<int, Device> devices;
+};
+
+DeviceTable& device_table() {
+  static auto* table = new DeviceTable;
+  return *table;
+}
+
+// The Device for `index` if one has been built, else nullptr. The shared lock
+// is held for the lookup only, so callers use the result without the table's
+// lock and the lock order (table, then Device::encoders_mtx_) cannot invert.
+Device* find_device(int index) {
+  auto& table = device_table();
+  std::shared_lock lock(table.mtx);
+  auto it = table.devices.find(index);
+  return it == table.devices.end() ? nullptr : &it->second;
+}
+
+} // namespace
 
 Error& record_stream_error(Stream s, hipError_t status, const char* where) {
   if (s.device.type == mlx::core::Device::gpu) {
-    auto& devices = get_devices();
-    if (auto it = devices.find(s.device.index); it != devices.end()) {
-      if (auto* encoder = it->second.find_encoder(s)) {
+    if (Device* d = find_device(s.device.index)) {
+      if (auto* encoder = d->find_encoder(s)) {
         encoder->set_device_error(status, where);
         return encoder->error();
       }
@@ -1378,11 +1425,6 @@ void set_graph_decode_mode(bool v) {
   g_graph_decode_mode.store(v, std::memory_order_relaxed);
 }
 
-std::unordered_map<int, Device>& get_devices() {
-  static std::unordered_map<int, Device> devices;
-  return devices;
-}
-
 void ensure_device_flags(int device_index) {
   if (device_index < 0) {
     return;
@@ -1453,9 +1495,20 @@ void ensure_current_device_flags() {
 }
 
 Device& device(mlx::core::Device device) {
-  auto& devices = get_devices();
-  auto it = devices.find(device.index);
-  if (it == devices.end()) {
+  // Hit path: one shared lock, no HIP call. This runs for every primitive.
+  if (Device* d = find_device(device.index)) {
+    return *d;
+  }
+  // Miss: build the Device under the unique lock, after a re-check, so several
+  // threads first using one index build it once and a reader never walks the
+  // table while it is being inserted into. The only HIP work under the table's
+  // lock is this construction, and it touches only the requested index. If the
+  // constructor or HIP throws, nothing is inserted, the unwind releases the
+  // lock and the next call retries.
+  auto& table = device_table();
+  std::unique_lock lock(table.mtx);
+  auto it = table.devices.find(device.index);
+  if (it == table.devices.end()) {
     // Bind this device (callers rely on it being current afterwards) and make
     // sure it is in blocking-sync mode before the Device and its streams are
     // constructed. The first unified allocation usually got there first, since
@@ -1463,7 +1516,7 @@ Device& device(mlx::core::Device device) {
     // ensure_device_flags() for why the order matters.
     (void)hipSetDevice(device.index);
     ensure_device_flags(device.index);
-    it = devices.try_emplace(device.index, device.index).first;
+    it = table.devices.try_emplace(device.index, device.index).first;
   }
   return it->second;
 }
@@ -1482,9 +1535,21 @@ CommandEncoder& get_command_encoder(Stream s) {
 }
 
 void clear_all_encoders() {
-  auto& devices = get_devices();
-  for (auto& [idx, dev] : devices) {
-    dev.clear_encoders();
+  // Collect the devices under the shared lock, then clear each one with the
+  // table unlocked: ~CommandEncoder must never run while the table is locked,
+  // or anything it reaches that looks a device up would deadlock on the
+  // non-recursive lock. Devices are never erased, so the pointers stay valid.
+  std::vector<Device*> devices;
+  {
+    auto& table = device_table();
+    std::shared_lock lock(table.mtx);
+    devices.reserve(table.devices.size());
+    for (auto& [idx, dev] : table.devices) {
+      devices.push_back(&dev);
+    }
+  }
+  for (Device* dev : devices) {
+    dev->clear_encoders();
   }
 }
 

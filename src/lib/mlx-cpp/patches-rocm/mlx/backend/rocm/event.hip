@@ -39,6 +39,11 @@ namespace {
 // caches only on the thread that first used it; a lock keeps the cache for the
 // server's worker threads, where decode runs, and is uncontended otherwise.
 // hipEventCreateWithFlags runs outside the lock.
+// [mlxcel #2197] The map and its mutex are leaked, like the JIT module cache
+// and the device table (LOCAL_FIXES items 35 and 39): a HipEvent released
+// during static teardown would otherwise push into a destroyed map, and the
+// map's destructor ran hipEventDestroy on every pooled handle at exit, which
+// fails on a faulted device (item 7). The handles go away with the process.
 struct HipEventPool {
   static HipEventHandle create(int flags) {
     int dev = 0;
@@ -63,13 +68,14 @@ struct HipEventPool {
  private:
   // Callers hold mutex().
   static std::vector<HipEventHandle>& cache_for(int device, int flags) {
-    static std::map<std::pair<int, int>, std::vector<HipEventHandle>> cache;
-    return cache[{device, flags}];
+    static auto* cache =
+        new std::map<std::pair<int, int>, std::vector<HipEventHandle>>;
+    return (*cache)[{device, flags}];
   }
 
   static std::mutex& mutex() {
-    static std::mutex mu;
-    return mu;
+    static auto* mu = new std::mutex;
+    return *mu;
   }
 };
 

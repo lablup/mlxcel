@@ -577,8 +577,14 @@ void ensure_device_flags(int device_index);
 // ensure_device_flags() for the calling thread's current HIP device.
 void ensure_current_device_flags();
 
+// The process's Device for `device.index`, built on the first call for that
+// index and never destroyed. Safe from any thread: the lookup takes a shared
+// lock on the device table and a first construction the unique lock
+// (lablup/mlxcel#2197). The reference stays valid for the rest of the process.
 Device& device(mlx::core::Device device);
 CommandEncoder& get_command_encoder(Stream s);
+// Destroys every device's encoders. Takes the device table's shared lock only
+// to collect the devices, then clears each with the table unlocked.
 void clear_all_encoders();
 
 // True while a HIP graph capture is in progress on any stream. Lazy library
