@@ -66,6 +66,7 @@ def lock_is_free(path):
     return subprocess.run(["flock", "-n", str(path), "true"]).returncode == 0
 
 
+@unittest.skipUnless(pathlib.Path("/proc/self/stat").exists(), "rocm_gpu_guard.sh needs Linux /proc")
 class GuardTests(unittest.TestCase):
     def setUp(self):
         global _TEST_LOCK
