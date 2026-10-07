@@ -912,6 +912,55 @@ mod cache_attend_entry {
         );
     }
 
+    /// Int8 storage has no dequant-first or compressed decode variant, so a
+    /// global Int8 layer still runs `update_and_fetch` plus SDPA, op for op.
+    #[test]
+    fn global_int8_layer_takes_the_route_the_block_ran() {
+        assert_entry_matches_block(
+            Cache::Standard(KVCache::new_with_mode(KVCacheMode::Int8)),
+            Cache::Standard(KVCache::new_with_mode(KVCacheMode::Int8)),
+            0,
+            5,
+            4,
+            "global int8",
+        );
+    }
+
+    /// A Turbo4Delegated global layer is one of the routes #2172 changed
+    /// (ADR 0009 Consequences (2)): before, the block ran `update_and_fetch`
+    /// plus SDPA; the entry now decodes through
+    /// `update_and_turbo4_delegated_attention` whenever its gate is on (the
+    /// default), the dequant-first compressed route ADR 0002 picked. Prefill
+    /// is unchanged. This pins the decode route against a twin cache that
+    /// calls that variant directly; with the gate off the entry falls back to
+    /// the block's ops.
+    #[test]
+    fn global_turbo4_delegated_layer_decodes_through_the_delegated_route() {
+        let delegated =
+            mlxcel_core::cache::turbo::sparse_v::turbo4_delegated_compressed_attention_enabled();
+        let mut got = Cache::Standard(KVCache::new_with_mode(KVCacheMode::Turbo4Delegated));
+        let mut want = Cache::Standard(KVCache::new_with_mode(KVCacheMode::Turbo4Delegated));
+        let mut rng = Rng(0x0002_1728 | 1);
+        let (q, k, v) = rng.step(6);
+        let (k2, v2) = (mlxcel_core::copy(&k), mlxcel_core::copy(&v));
+        let a = got.attend(&q, k, v, SCALE, None);
+        let b = block_reference(&mut want, 0, &q, k2, v2, None);
+        assert_eq!(to_vec_f32(&a), to_vec_f32(&b), "prefill differs");
+        for i in 0..4 {
+            let (q, k, v) = rng.step(1);
+            let (k2, v2) = (mlxcel_core::copy(&k), mlxcel_core::copy(&v));
+            let a = got.attend(&q, k, v, SCALE, None);
+            let b = match (&mut want, delegated) {
+                (Cache::Standard(c), true) => {
+                    c.update_and_turbo4_delegated_attention(&q, k2, v2, SCALE, None)
+                }
+                (want, _) => block_reference(want, 0, &q, k2, v2, None),
+            };
+            assert_eq!(to_vec_f32(&a), to_vec_f32(&b), "decode {i} differs");
+            assert_eq!(got.offset(), want.offset(), "offset at {i}");
+        }
+    }
+
     #[test]
     fn sliding_fp16_layer_takes_the_route_the_block_ran_through_the_wrap() {
         let window = 6;

@@ -1013,6 +1013,10 @@ mod scheduler_model_owned_pad_trim_tests;
 #[path = "../scheduler_model_owned_lookahead_tests.rs"]
 mod scheduler_model_owned_lookahead_tests;
 
+#[cfg(test)]
+#[path = "../scheduler_real_batch_parity_tests.rs"]
+mod scheduler_real_batch_parity_tests;
+
 /// Resolve a request's context-retention values against the server policy
 /// (#1472), pure so the arithmetic is unit-testable without a scheduler.
 ///

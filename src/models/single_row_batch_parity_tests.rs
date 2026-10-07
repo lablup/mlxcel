@@ -23,30 +23,42 @@
 //! These tests pin that on a real checkpoint: the same prompt is prefilled
 //! into two cache sets, then four decode tokens run through the single-row
 //! forward on one and the one-row batched forward on the other, and every
-//! step's logits must be byte-identical.
+//! step's logits must be byte-identical. Each family runs twice: without
+//! sequence ids, and with a distinct `SequenceId` per cache set, the form
+//! `Engine::step` passes.
 //!
 //! Real-checkpoint tests: `#[ignore]`, run under
 //! `MLXCEL_SDPA_DETERMINISTIC=1` on the GPU host with
 //! `cargo test --profile test-fast --features cuda --lib single_row_batch_parity -- --ignored --test-threads=1`.
 //! The checkpoint comes from `MLXCEL_QWEN3_MODEL` / `MLXCEL_LLAMA3_MODEL`,
 //! else `models/mlx/qwen3-1.7b-4bit` / `models/mlx/llama-3.2-1b-instruct-4bit`.
+//! A missing checkpoint or a run without the deterministic flag prints
+//! `SKIPPED` with the reason, and fails instead under `MLXCEL_REQUIRE_MODELS=1`.
 
 use std::path::PathBuf;
 
+use mlxcel_core::cache::SequenceId;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::KVCache;
 
 const DECODE_STEPS: usize = 4;
+
+fn skip_or_fail(reason: &str) {
+    if std::env::var("MLXCEL_REQUIRE_MODELS").is_ok_and(|v| v != "0") {
+        panic!("MLXCEL_REQUIRE_MODELS is set: {reason}");
+    }
+    eprintln!("SKIPPED single_row_batch_parity: {reason}");
+}
 
 fn checkpoint(env: &str, default: &str) -> Option<PathBuf> {
     let path = std::env::var(env).map_or_else(|_| PathBuf::from(default), PathBuf::from);
     if path.join("config.json").exists() {
         Some(path)
     } else {
-        eprintln!(
-            "skipping: no checkpoint at {} (set {env} to point at one)",
+        skip_or_fail(&format!(
+            "no checkpoint at {} (set {env} to point at one)",
             path.display()
-        );
+        ));
         None
     }
 }
@@ -68,9 +80,7 @@ fn evaluated_bytes(logits: &mlxcel_core::MlxArray) -> (Vec<i32>, Vec<u8>) {
 
 fn run(env: &str, default: &str) {
     if std::env::var("MLXCEL_SDPA_DETERMINISTIC").ok().as_deref() != Some("1") {
-        eprintln!(
-            "skipping: run with MLXCEL_SDPA_DETERMINISTIC=1 so both routes reduce in one order"
-        );
+        skip_or_fail("run with MLXCEL_SDPA_DETERMINISTIC=1 so both routes reduce in one order");
         return;
     }
     let Some(path) = checkpoint(env, default) else {
@@ -94,27 +104,58 @@ fn run(env: &str, default: &str) {
         prompt.len()
     );
 
+    for ids in [
+        None,
+        Some((
+            SequenceId::from_raw(2_172_801),
+            SequenceId::from_raw(2_172_802),
+        )),
+    ] {
+        compare(&model, &prompt, ids);
+    }
+}
+
+/// Prefill `prompt` into two cache sets, then decode on one through the
+/// single-row forward and on the other through the one-row batched forward.
+/// `ids` gives each set its own sequence id, as the engine does.
+fn compare(model: &dyn LanguageModel, prompt: &[i32], ids: Option<(SequenceId, SequenceId)>) {
+    let label = if ids.is_some() {
+        "with sequence ids"
+    } else {
+        "without sequence ids"
+    };
+    let (single_id, batched_id) = ids.unzip();
+    let batched_ids = batched_id.map(|id| [id]);
     let mut single: Vec<KVCache> = model.make_caches();
     let mut batched: Vec<KVCache> = model.make_caches();
-    let input = mlxcel_core::from_slice_i32(&prompt, &[1, prompt.len() as i32]);
-    let logits_single = model.forward_with_sequence_id(&input, None, &mut single, None);
-    let logits_batched = model.forward_with_sequence_id(&input, None, &mut batched, None);
+    let input = mlxcel_core::from_slice_i32(prompt, &[1, prompt.len() as i32]);
+    let logits_single = model.forward_with_sequence_id(&input, single_id, &mut single, None);
+    let logits_batched = model.forward_with_sequence_id(&input, batched_id, &mut batched, None);
     let mut token = argmax_last(&logits_single);
-    assert_eq!(token, argmax_last(&logits_batched), "prefill diverged");
+    assert_eq!(
+        token,
+        argmax_last(&logits_batched),
+        "{label}: prefill diverged"
+    );
 
     for step in 0..DECODE_STEPS {
         let next = mlxcel_core::from_slice_i32(&[token], &[1, 1]);
-        let one = model.forward_with_sequence_id(&next, None, &mut single, None);
-        let row = model.forward_batched_with_ids(&next, None, &mut [batched.as_mut_slice()], None);
+        let one = model.forward_with_sequence_id(&next, single_id, &mut single, None);
+        let row = model.forward_batched_with_ids(
+            &next,
+            batched_ids.as_ref().map(|ids| &ids[..]),
+            &mut [batched.as_mut_slice()],
+            None,
+        );
         let (shape_one, bytes_one) = evaluated_bytes(&one);
         let (shape_row, bytes_row) = evaluated_bytes(&row);
         assert_eq!(
             shape_one, shape_row,
-            "logits shape differs at decode step {step}"
+            "{label}: logits shape differs at decode step {step}"
         );
         assert!(
             bytes_one == bytes_row,
-            "single-row and one-row batched logits differ at decode step {step} ({} of {} bytes differ)",
+            "{label}: single-row and one-row batched logits differ at decode step {step} ({} of {} bytes differ)",
             bytes_one
                 .iter()
                 .zip(&bytes_row)

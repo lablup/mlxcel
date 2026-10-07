@@ -480,7 +480,7 @@ mod snapshot_prompt_cache {
 // batched decode of the synthetic model against single-row decode.
 mod cache_attend_entry {
     use super::super::Llama4Cache;
-    use mlxcel_core::cache::KvAttention;
+    use mlxcel_core::cache::{KVCacheMode, KvAttention};
     use mlxcel_core::layers::{ChunkedKVCache, KVCache};
     use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -622,6 +622,19 @@ mod cache_attend_entry {
             6,
             4,
             "dense fp16",
+        );
+    }
+
+    /// Int8 storage has no dequant-first decode variant, so a dense Int8
+    /// layer still runs `update_and_fetch` plus SDPA, op for op.
+    #[test]
+    fn dense_int8_layer_takes_the_route_the_block_ran() {
+        assert_entry_matches_block(
+            Llama4Cache::Regular(KVCache::new_with_mode(KVCacheMode::Int8)),
+            Llama4Cache::Regular(KVCache::new_with_mode(KVCacheMode::Int8)),
+            6,
+            4,
+            "dense int8",
         );
     }
 }

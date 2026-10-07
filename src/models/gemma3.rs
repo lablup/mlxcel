@@ -242,7 +242,6 @@ pub struct Attention {
     pub head_dim: i32,
     pub scale: f32,
     pub is_sliding: bool,
-    pub window_size: i32,
     pub rope_base: f32,
     /// Position scale handed to every RoPE call in this block: `1.0` on a
     /// sliding layer, `ModelArgs::global_rope_scale()` on a global one. See
@@ -431,11 +430,6 @@ impl Attention {
             head_dim,
             scale,
             is_sliding,
-            window_size: if is_sliding {
-                args.sliding_window as i32
-            } else {
-                0
-            },
             rope_base,
             rope_scale,
             q_norm,
