@@ -162,6 +162,14 @@ mlxcel generate -m models/<checkpoint> \
 `0` disables the policy. Values larger than half the layer count are clamped by
 the runtime. The flag is inert for `fp16` and `int8` cache modes.
 
+Under continuous batching the attention route follows the storage behind each
+layer's cache ([ADR 0008](adr/0008-kv-attention-dispatch-in-the-cache.md)).
+Turbo rows of a batched decode step take the same dequant-first variants as
+single-sequence decode, and the layers Boundary-V (or `--kv-skip-last-layer`)
+keeps at FP16 under a non-FP16 paged layout hold dense caches that run a
+per-row dense update plus SDPA. Both are the same exact attention in a different
+op order, so they are not bit-identical to the pre-#2171 batched routes.
+
 ## Symmetric Turbo4 allowlist
 
 K-side quantization can strongly affect softmax quality. The code therefore has
