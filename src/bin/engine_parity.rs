@@ -147,15 +147,71 @@ fn request<'a>(
     }
 }
 
+/// Smallest prompt (in tokens) the harness can run. Every path needs at least
+/// one token to prefill.
+const MIN_PROMPT_TOKENS: usize = 1;
+
+/// Smallest prompt the prompt-cache miss/hit comparison can run. The priming
+/// request stores a strict prefix of the prompt and the measured request still
+/// needs one token to prefill, so a prompt shorter than this would hand the
+/// scheduler a zero-length priming request.
+const MIN_PROMPT_TOKENS_FOR_CACHE_CASE: usize = 2;
+
+/// Reject a prompt that cannot drive every requested path, before any model is
+/// loaded or any worker is started.
+fn validate_prompt_text(prompt: &str) -> Result<()> {
+    anyhow::ensure!(
+        !prompt.trim().is_empty(),
+        "--prompt is empty; give the harness a non-empty prompt"
+    );
+    Ok(())
+}
+
+/// Reject a rendered prompt too short for the requested cases, with the reason
+/// and the remedy, instead of failing later on a zero-length prime request.
+fn validate_prompt_tokens(token_count: usize, prompt_cache_case: bool) -> Result<()> {
+    let needed = if prompt_cache_case {
+        MIN_PROMPT_TOKENS_FOR_CACHE_CASE
+    } else {
+        MIN_PROMPT_TOKENS
+    };
+    anyhow::ensure!(
+        token_count >= needed,
+        "the rendered prompt is {token_count} token(s) long but at least {needed} {} needed{}; \
+         give --prompt more text",
+        if needed == 1 { "is" } else { "are" },
+        if prompt_cache_case {
+            " (the prompt-cache comparison primes a strict prefix and still prefills one token; \
+             --no-prompt-cache-case lifts the second requirement)"
+        } else {
+            ""
+        },
+    );
+    Ok(())
+}
+
+/// `--expect-identical` compares token streams byte for byte, which only means
+/// something when the CUDA decode SDPA reduction order is pinned.
+fn validate_expect_identical(expect_identical: bool, sdpa_deterministic: bool) -> Result<()> {
+    anyhow::ensure!(
+        !expect_identical || sdpa_deterministic,
+        "--expect-identical needs MLXCEL_SDPA_DETERMINISTIC=1 (CUDA decode SDPA is \
+         otherwise free to change its reduction order between runs)"
+    );
+    Ok(())
+}
+
+/// Whether the run should exit non-zero: only `--expect-identical` turns a
+/// divergence into a failure, the baseline run itself always exits 0.
+fn gate_failed(expect_identical: bool, diverged: usize) -> bool {
+    expect_identical && diverged > 0
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     let sdpa_deterministic = std::env::var("MLXCEL_SDPA_DETERMINISTIC").is_ok_and(|v| v == "1");
-    if args.expect_identical && !sdpa_deterministic {
-        anyhow::bail!(
-            "--expect-identical needs MLXCEL_SDPA_DETERMINISTIC=1 (CUDA decode SDPA is \
-             otherwise free to change its reduction order between runs)"
-        );
-    }
+    validate_expect_identical(args.expect_identical, sdpa_deterministic)?;
+    validate_prompt_text(&args.prompt)?;
     mlxcel_core::hardware::apply_metal_ops_per_buffer_default();
     mlxcel_core::hardware::apply_cuda_graph_cache_default();
     mlxcel_core::hardware::apply_cuda_sdpa_cache_default();
@@ -165,6 +221,7 @@ fn main() -> Result<()> {
     let tokenizer = mlxcel::tokenizer::load_tokenizer(&args.model)
         .with_context(|| format!("failed to load tokenizer from {}", args.model.display()))?;
     let prompt = render_chat_prompt(&args.model, &tokenizer, &args.prompt, args.no_chat_template)?;
+    validate_prompt_tokens(prompt.tokens.len(), !args.no_prompt_cache_case)?;
     let stop_ids = mlxcel::read_eos_token_ids(&args.model);
     let breakers = default_dry_breaker_ids(&tokenizer);
     let cases = build_cases(&args, &stop_ids, &breakers);
@@ -296,9 +353,125 @@ fn main() -> Result<()> {
         println!("wrote {}", path.display());
     }
     let diverged = rows.iter().filter(|row| row.diverged()).count();
-    if args.expect_identical && diverged > 0 {
+    if gate_failed(args.expect_identical, diverged) {
         eprintln!("--expect-identical: {diverged} pair(s) diverged");
         std::process::exit(1);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(extra: &[&str]) -> Args {
+        let mut argv = vec!["mlxcel-engine-parity", "--model", "models/m"];
+        argv.extend_from_slice(extra);
+        Args::try_parse_from(argv).expect("arguments parse")
+    }
+
+    #[test]
+    fn defaults_run_both_cases_with_the_prompt_cache_comparison() {
+        let args = parse(&[]);
+        assert_eq!(args.cases, vec![CaseName::Greedy, CaseName::Seeded]);
+        assert_eq!(args.max_tokens, 64);
+        assert_eq!(args.seed, 1234);
+        assert!(!args.expect_identical);
+        assert!(!args.no_prompt_cache_case);
+        assert_eq!(args.server_prefill_chunk, None);
+    }
+
+    #[test]
+    fn model_is_required_and_cases_parse_as_a_list() {
+        assert!(Args::try_parse_from(["mlxcel-engine-parity"]).is_err());
+        let args = parse(&["--cases", "seeded"]);
+        assert_eq!(args.cases, vec![CaseName::Seeded]);
+        let args = parse(&["--cases", "greedy,seeded"]);
+        assert_eq!(args.cases, vec![CaseName::Greedy, CaseName::Seeded]);
+        assert!(
+            Args::try_parse_from(["mlxcel-engine-parity", "-m", "m", "--cases", "bogus"]).is_err()
+        );
+    }
+
+    #[test]
+    fn build_cases_follow_the_requested_order_and_seed() {
+        let args = parse(&["--cases", "seeded,greedy", "--seed", "9"]);
+        let cases = build_cases(&args, &[2], &[198]);
+        let names: Vec<_> = cases.iter().map(|c| c.name).collect();
+        assert_eq!(names, vec!["seeded-penalties-dry", "greedy"]);
+        assert_eq!(cases[0].sampling.seed, Some(9));
+        assert_eq!(cases[0].sampling.dry_sequence_breakers, vec![198]);
+        assert_eq!(cases[1].sampling.temperature, 0.0);
+    }
+
+    #[test]
+    fn server_options_carry_storage_chunk_and_cache_flag() {
+        let args = parse(&["--server-prefill-chunk", "2048"]);
+        let options = server_options(&args, DecodeStorageBackend::Paged, true);
+        assert_eq!(options.decode_storage, DecodeStorageBackend::Paged);
+        assert_eq!(options.prefill_chunk_size, Some(2048));
+        assert!(options.prompt_cache);
+        let options = server_options(&parse(&[]), DecodeStorageBackend::Dense, false);
+        assert_eq!(options.prefill_chunk_size, None);
+        assert!(!options.prompt_cache);
+    }
+
+    #[test]
+    fn request_borrows_the_prompt_and_clones_the_sampling() {
+        let case = greedy_case(vec![2]);
+        let tokens = [1, 2, 3];
+        let req = request(&tokens, &case, 16, None);
+        assert_eq!(req.prompt_tokens, &tokens);
+        assert_eq!(req.max_tokens, 16);
+        assert!(!req.ignore_eos);
+        assert!(req.prompt_cache.is_none());
+    }
+
+    #[test]
+    fn empty_prompt_text_is_rejected_up_front() {
+        assert!(validate_prompt_text("hello").is_ok());
+        let err = validate_prompt_text("").unwrap_err().to_string();
+        assert!(err.contains("--prompt is empty"), "{err}");
+        assert!(validate_prompt_text("  \n\t ").is_err());
+    }
+
+    #[test]
+    fn too_short_prompt_is_rejected_before_the_prime_request() {
+        // The cache comparison needs a strict prefix to prime plus one token to
+        // prefill, so a one-token prompt would have produced a zero-length
+        // prime request.
+        assert_eq!(cache_prime_len(&[7], None), 0);
+        let err = validate_prompt_tokens(1, true).unwrap_err().to_string();
+        assert!(err.contains("at least 2 are needed"), "{err}");
+        assert!(err.contains("--no-prompt-cache-case"), "{err}");
+        assert!(validate_prompt_tokens(0, true).is_err());
+        assert!(validate_prompt_tokens(2, true).is_ok());
+        assert!(cache_prime_len(&[7, 8], None) >= 1);
+    }
+
+    #[test]
+    fn single_token_prompt_runs_when_the_cache_case_is_off() {
+        assert!(validate_prompt_tokens(1, false).is_ok());
+        let err = validate_prompt_tokens(0, false).unwrap_err().to_string();
+        assert!(err.contains("at least 1 is needed"), "{err}");
+        assert!(!err.contains("--no-prompt-cache-case"), "{err}");
+    }
+
+    #[test]
+    fn expect_identical_requires_deterministic_sdpa() {
+        assert!(validate_expect_identical(false, false).is_ok());
+        assert!(validate_expect_identical(false, true).is_ok());
+        assert!(validate_expect_identical(true, true).is_ok());
+        let err = validate_expect_identical(true, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("MLXCEL_SDPA_DETERMINISTIC=1"), "{err}");
+    }
+
+    #[test]
+    fn only_expect_identical_turns_divergence_into_failure() {
+        assert!(!gate_failed(false, 5));
+        assert!(!gate_failed(true, 0));
+        assert!(gate_failed(true, 1));
+    }
 }

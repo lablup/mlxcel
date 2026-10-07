@@ -178,9 +178,10 @@ impl Measurement {
     }
 }
 
-/// Print the two paths next to each other per prompt length.
-pub fn print_side_by_side(measurements: &[Measurement]) {
-    println!("[engine-bench] summary (server vs cli at the same prompt length):");
+/// The two paths next to each other per prompt length, one line per element.
+fn side_by_side_lines(measurements: &[Measurement]) -> Vec<String> {
+    let mut lines =
+        vec!["[engine-bench] summary (server vs cli at the same prompt length):".to_string()];
     let mut targets: Vec<usize> = measurements.iter().map(|m| m.prompt_target).collect();
     targets.sort_unstable();
     targets.dedup();
@@ -203,11 +204,19 @@ pub fn print_side_by_side(measurements: &[Measurement]) {
             }
             _ => String::new(),
         };
-        println!(
+        lines.push(format!(
             "  prompt {target:>5}: cli {}  |  server {}{ratio}",
             cell(cli),
             cell(server)
-        );
+        ));
+    }
+    lines
+}
+
+/// Print the two paths next to each other per prompt length.
+pub fn print_side_by_side(measurements: &[Measurement]) {
+    for line in side_by_side_lines(measurements) {
+        println!("{line}");
     }
 }
 
@@ -250,4 +259,142 @@ pub fn append_csv(
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cli(target: usize, ttft_ms: f64, decode_tok_s: f64) -> Measurement {
+        let stats = GenerationStats {
+            prompt_tokens: target,
+            generated_tokens: 8,
+            prefill_time_ms: ttft_ms,
+            decode_time_ms: 100.0,
+            prefill_tok_per_sec: 0.0,
+            decode_tok_per_sec: decode_tok_s,
+        };
+        Measurement::from_cli(Path::new("models/mlx/tiny"), target, &stats, 8, 2048)
+    }
+
+    fn server(target: usize, ttft_ms: f64, tokens: usize, decode_ms: f64) -> Measurement {
+        let run = ServerEngineRun {
+            tokens: vec![0; tokens],
+            prompt_tokens: target,
+            cached_tokens: 0,
+            forwarded_prefill_tokens: target as u64,
+            ttft_ms,
+            decode_ms,
+            server_prompt_eval_ms: 3,
+            server_generation_ms: 90,
+            finish_reason: "length".to_string(),
+            prompt_cache_inserts: 0,
+            prompt_cache_reject: None,
+            paged_decode_launches: 0,
+        };
+        Measurement::from_server(
+            Path::new("models/mlx/tiny"),
+            target,
+            target,
+            &run,
+            512,
+            DecodeStorageBackend::Paged,
+        )
+    }
+
+    #[test]
+    fn prefill_rate_is_prompt_tokens_over_ttft() {
+        assert!((cli(1000, 500.0, 1.0).prefill_tok_s() - 2000.0).abs() < 1e-9);
+        assert_eq!(cli(1000, 0.0, 1.0).prefill_tok_s(), 0.0);
+    }
+
+    #[test]
+    fn server_measurement_derives_decode_rate_from_its_own_timing() {
+        let m = server(256, 12.0, 100, 1000.0);
+        assert!((m.decode_tok_s - 100.0).abs() < 1e-9);
+        assert_eq!(m.decode_storage, "paged");
+        assert_eq!(m.prefill_chunk, 512);
+        assert_eq!(m.server_ms, Some((3, 90)));
+        assert_eq!(m.paged_decode_launches, Some(0));
+        // No decode time recorded: the rate is 0, not infinity.
+        assert_eq!(server(256, 12.0, 100, 0.0).decode_tok_s, 0.0);
+    }
+
+    #[test]
+    fn cli_measurement_is_dense_without_server_figures() {
+        let m = cli(256, 10.0, 50.0);
+        assert_eq!(m.path, "cli");
+        assert_eq!(m.model, "tiny");
+        assert_eq!(m.decode_storage, "dense");
+        assert_eq!(m.prefill_chunk, 2048);
+        assert!(m.server_ms.is_none() && m.paged_decode_launches.is_none());
+    }
+
+    #[test]
+    fn side_by_side_pairs_paths_per_prompt_length_with_a_ratio() {
+        let lines = side_by_side_lines(&[
+            cli(8192, 900.0, 100.0),
+            cli(256, 20.0, 120.0),
+            server(256, 25.0, 100, 1000.0),
+        ]);
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains("server vs cli"));
+        // Sorted by prompt length: 256 has both paths, 8192 only the CLI.
+        assert!(lines[1].contains("prompt   256"), "{}", lines[1]);
+        assert!(
+            lines[1].contains("20.00 ms TTFT, 120.00 tok/s"),
+            "{}",
+            lines[1]
+        );
+        assert!(
+            lines[1].contains("25.00 ms TTFT, 100.00 tok/s"),
+            "{}",
+            lines[1]
+        );
+        assert!(
+            lines[1].ends_with("server/cli decode 0.833"),
+            "{}",
+            lines[1]
+        );
+        assert!(lines[2].contains("prompt  8192"), "{}", lines[2]);
+        assert!(lines[2].contains("server -"), "{}", lines[2]);
+        assert!(!lines[2].contains("server/cli"), "{}", lines[2]);
+    }
+
+    #[test]
+    fn side_by_side_skips_the_ratio_when_the_cli_rate_is_zero() {
+        let lines = side_by_side_lines(&[cli(256, 20.0, 0.0), server(256, 25.0, 100, 1000.0)]);
+        assert!(!lines[1].contains("server/cli"), "{}", lines[1]);
+    }
+
+    #[test]
+    fn csv_gets_a_header_once_and_one_row_per_measurement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bench.csv");
+        let ms = [cli(256, 20.0, 120.0), server(256, 25.0, 100, 1000.0)];
+        append_csv(&path, &ms, "arm,one", 128).unwrap();
+        append_csv(&path, &ms[..1], "arm-two", 128).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 4, "{text}");
+        assert_eq!(lines[0], CSV_HEADER);
+        assert_eq!(text.matches("model,model_path").count(), 1);
+        let columns = CSV_HEADER.split(',').count();
+        assert_eq!(columns, 14);
+        for row in &lines[1..] {
+            assert_eq!(row.split(',').count(), columns, "{row}");
+        }
+        // A comma in the label cannot split a column.
+        assert!(lines[1].ends_with(",arm;one"), "{}", lines[1]);
+        assert!(
+            lines[1].starts_with("tiny,models/mlx/tiny,256,8,20.000,"),
+            "{}",
+            lines[1]
+        );
+        assert!(
+            lines[2].contains(",server,256,512,paged,128,"),
+            "{}",
+            lines[2]
+        );
+    }
 }

@@ -389,3 +389,40 @@ impl ServerEngine {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run_with(tokens: usize, decode_ms: f64) -> ServerEngineRun {
+        ServerEngineRun {
+            tokens: vec![0; tokens],
+            prompt_tokens: 10,
+            cached_tokens: 0,
+            forwarded_prefill_tokens: 10,
+            ttft_ms: 5.0,
+            decode_ms,
+            server_prompt_eval_ms: 4,
+            server_generation_ms: 40,
+            finish_reason: "length".to_string(),
+            prompt_cache_inserts: 0,
+            prompt_cache_reject: None,
+            paged_decode_launches: 0,
+        }
+    }
+
+    #[test]
+    fn decode_rate_is_tokens_over_post_first_token_time() {
+        assert!((run_with(50, 500.0).decode_tok_per_sec() - 100.0).abs() < 1e-9);
+        assert_eq!(run_with(50, 0.0).decode_tok_per_sec(), 0.0);
+        assert_eq!(run_with(0, 500.0).decode_tok_per_sec(), 0.0);
+    }
+
+    #[test]
+    fn default_options_are_the_server_defaults() {
+        let options = ServerEngineOptions::default();
+        assert_eq!(options.decode_storage, DecodeStorageBackend::Auto);
+        assert_eq!(options.prefill_chunk_size, None);
+        assert!(options.prompt_cache);
+    }
+}

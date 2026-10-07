@@ -111,21 +111,33 @@ struct Args {
     label: String,
 }
 
-/// Apply `--prefill-chunk` to the CLI path before anything reads it.
-fn apply_cli_prefill_chunk(chunk: Option<usize>) -> Result<()> {
+/// What to do about `MLXCEL_PREFILL_CHUNK` for `--prefill-chunk`: `Ok(Some)`
+/// is the value to set, `Ok(None)` means nothing to do, and a different value
+/// already in the environment is an error (two sources for one setting would
+/// leave the run's chunk ambiguous).
+fn cli_chunk_env_action(chunk: Option<usize>, existing: Option<&str>) -> Result<Option<String>> {
     let Some(chunk) = chunk else {
-        return Ok(());
+        return Ok(None);
     };
-    match std::env::var("MLXCEL_PREFILL_CHUNK") {
-        Ok(existing) if existing.trim() != chunk.to_string() => anyhow::bail!(
+    anyhow::ensure!(chunk > 0, "--prefill-chunk must be at least 1");
+    match existing {
+        Some(existing) if existing.trim() != chunk.to_string() => anyhow::bail!(
             "--prefill-chunk {chunk} conflicts with MLXCEL_PREFILL_CHUNK={existing} in the \
              environment; drop one of them"
         ),
-        Ok(_) => {}
+        Some(_) => Ok(None),
+        None => Ok(Some(chunk.to_string())),
+    }
+}
+
+/// Apply `--prefill-chunk` to the CLI path before anything reads it.
+fn apply_cli_prefill_chunk(chunk: Option<usize>) -> Result<()> {
+    let existing = std::env::var("MLXCEL_PREFILL_CHUNK").ok();
+    if let Some(value) = cli_chunk_env_action(chunk, existing.as_deref())? {
         // SAFETY: called first thing in `main`, before the runtime, the model
         // loader or any worker thread exists, so no other thread can be
         // reading the environment concurrently.
-        Err(_) => unsafe { std::env::set_var("MLXCEL_PREFILL_CHUNK", chunk.to_string()) },
+        unsafe { std::env::set_var("MLXCEL_PREFILL_CHUNK", value) }
     }
     Ok(())
 }
@@ -215,4 +227,87 @@ fn main() -> Result<()> {
         output::append_csv(path, &measurements, &args.label, args.max_tokens)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(extra: &[&str]) -> Args {
+        let mut argv = vec!["mlxcel-bench-engine", "--model", "models/m"];
+        argv.extend_from_slice(extra);
+        Args::try_parse_from(argv).expect("arguments parse")
+    }
+
+    #[test]
+    fn defaults_measure_short_and_long_context_on_both_paths() {
+        let args = parse(&[]);
+        assert_eq!(args.path, PathArg::Both);
+        assert_eq!(args.prompt_tokens, vec![256, 8192]);
+        assert_eq!(args.max_tokens, 128);
+        assert_eq!(args.warmup_tokens, 16);
+        assert_eq!(args.prefill_chunk, None);
+        assert_eq!(args.decode_storage, DecodeStorageBackend::Auto);
+        assert!(!args.ignore_eos);
+    }
+
+    #[test]
+    fn storage_chunk_and_prompt_lengths_parse() {
+        let args = parse(&[
+            "--path",
+            "server",
+            "--decode-storage",
+            "paged",
+            "--prefill-chunk",
+            "2048",
+            "--prompt-tokens",
+            "512,4096",
+        ]);
+        assert_eq!(args.path, PathArg::Server);
+        assert_eq!(args.decode_storage, DecodeStorageBackend::Paged);
+        assert_eq!(args.prefill_chunk, Some(2048));
+        assert_eq!(args.prompt_tokens, vec![512, 4096]);
+        assert!(
+            Args::try_parse_from([
+                "mlxcel-bench-engine",
+                "-m",
+                "m",
+                "--decode-storage",
+                "bogus"
+            ])
+            .is_err()
+        );
+        assert!(Args::try_parse_from(["mlxcel-bench-engine", "--path", "cli"]).is_err());
+    }
+
+    #[test]
+    fn chunk_env_is_set_only_when_requested_and_unset() {
+        assert_eq!(cli_chunk_env_action(None, None).unwrap(), None);
+        assert_eq!(cli_chunk_env_action(None, Some("512")).unwrap(), None);
+        assert_eq!(
+            cli_chunk_env_action(Some(2048), None).unwrap(),
+            Some("2048".to_string())
+        );
+    }
+
+    #[test]
+    fn chunk_env_agreeing_value_is_accepted_and_conflict_is_an_error() {
+        assert_eq!(
+            cli_chunk_env_action(Some(512), Some(" 512 ")).unwrap(),
+            None
+        );
+        let err = cli_chunk_env_action(Some(2048), Some("512"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("conflicts with MLXCEL_PREFILL_CHUNK=512"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn zero_chunk_is_rejected() {
+        let err = cli_chunk_env_action(Some(0), None).unwrap_err().to_string();
+        assert!(err.contains("at least 1"), "{err}");
+    }
 }
