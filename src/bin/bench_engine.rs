@@ -84,7 +84,8 @@ struct Args {
     warmup_tokens: usize,
 
     /// Prefill chunk for both paths. Unset keeps each path's default (CLI
-    /// 2048 or `MLXCEL_PREFILL_CHUNK`, server 512). The CLI side is applied
+    /// 2048 or `MLXCEL_PREFILL_CHUNK`, server the same default or
+    /// `--prefill-chunk-size`). The CLI side is applied
     /// through `MLXCEL_PREFILL_CHUNK` and conflicts with a different value
     /// already in the environment.
     #[arg(long, value_name = "N")]
