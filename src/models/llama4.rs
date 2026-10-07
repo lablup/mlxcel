@@ -919,14 +919,14 @@ impl CxxAttention {
             let sum = mlxcel_core::sum_all(arr);
             mlxcel_core::eval(&sum);
             let val = mlxcel_core::item_f32(&sum);
-            println!("    {} sum: {}", name, val);
+            eprintln!("    {} sum: {}", name, val);
             val.is_nan()
         }
 
         let shape = mlxcel_core::array_shape(x);
         let b = shape[0];
         let l = shape[1];
-        println!("    Input shape: {:?}", shape);
+        eprintln!("    Input shape: {:?}", shape);
 
         // Project Q, K, V
         let q = self.q_proj.forward(x);
@@ -955,7 +955,7 @@ impl CxxAttention {
         let v = mlxcel_core::transpose_axes(&v, &[0, 2, 1, 3]);
 
         let offset = cache.offset;
-        println!(
+        eprintln!(
             "    use_rope: {}, use_qk_norm: {}, offset: {}",
             self.use_rope, self.use_qk_norm, offset
         );
@@ -1154,7 +1154,7 @@ impl TransformerBlock {
             let sum = mlxcel_core::sum_all(arr);
             mlxcel_core::eval(&sum);
             let val = mlxcel_core::item_f32(&sum);
-            println!("  {} sum: {}", name, val);
+            eprintln!("  {} sum: {}", name, val);
             val.is_nan()
         }
 
@@ -1165,7 +1165,7 @@ impl TransformerBlock {
         }
 
         // Attention (debug version)
-        println!("  Attention debug:");
+        eprintln!("  Attention debug:");
         let attn_out = self.self_attn.forward_debug(&normed, cache, mask);
         if check_nan("attention", &attn_out) {
             return attn_out;
@@ -1385,7 +1385,7 @@ impl Llama4CxxModel {
         // Check embedding output
         let h_shape = mlxcel_core::array_shape(&h);
         let h_dtype = mlxcel_core::array_dtype(&h);
-        println!("Embedding output shape: {:?}, dtype: {}", h_shape, h_dtype);
+        eprintln!("Embedding output shape: {:?}, dtype: {}", h_shape, h_dtype);
 
         // The f32 cast is no longer what keeps these statistics finite: the
         // bridge promotes a half-precision reduction to f32 internally and
@@ -1400,19 +1400,19 @@ impl Llama4CxxModel {
         let h_min = mlxcel_core::min_all(&h_f32);
         mlxcel_core::eval(&h_max);
         mlxcel_core::eval(&h_min);
-        println!(
+        eprintln!(
             "After embedding - sum: {}, max: {}, min: {}",
             sum_val,
             mlxcel_core::item_f32(&h_max),
             mlxcel_core::item_f32(&h_min)
         );
         if sum_val.is_nan() {
-            println!("NaN detected after embedding!");
+            eprintln!("NaN detected after embedding!");
             return h;
         }
 
         // Pass through first 1 transformer layer with detailed debug
-        println!("Layer 0 detailed debug:");
+        eprintln!("Layer 0 detailed debug:");
         h = self.layers[0].forward_debug(&h, &mut caches[0], None);
         mlxcel_core::eval(&h);
 

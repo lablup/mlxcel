@@ -2197,7 +2197,7 @@ impl NemotronHModel {
     pub fn load(model_path: &str) -> Result<(Self, NemotronHConfig), Box<dyn std::error::Error>> {
         let path = Path::new(model_path);
 
-        println!("[NemotronH] Loading config...");
+        tracing::info!("[NemotronH] Loading config...");
         let config_path = path.join("config.json");
         let config_str = std::fs::read_to_string(&config_path)?;
         let config_str = super::sanitize_config_json(&config_str);
@@ -2212,7 +2212,7 @@ impl NemotronHModel {
             .ok_or("hybrid_override_pattern must be set (directly or via layers_block_type)")?;
         let block_types: Vec<BlockType> = pattern.iter().map(|s| BlockType::from_str(s)).collect();
 
-        println!(
+        tracing::info!(
             "[NemotronH] Config loaded: {} layers ({} mamba, {} attention, {} mlp, {} moe)",
             config.num_hidden_layers,
             block_types
@@ -2227,14 +2227,14 @@ impl NemotronHModel {
             block_types.iter().filter(|t| **t == BlockType::MoE).count()
         );
 
-        println!("[NemotronH] Loading weights from safetensors...");
+        tracing::info!("[NemotronH] Loading weights from safetensors...");
         let weights = crate::models::load_text_weights(path, None)?;
         let weights = Self::sanitize_weights(weights, &config);
 
-        println!("[NemotronH] Building model...");
+        tracing::info!("[NemotronH] Building model...");
         let model = Self::from_weights(config.clone(), weights, block_types)?;
 
-        println!("[NemotronH] Model loaded successfully");
+        tracing::info!("[NemotronH] Model loaded successfully");
         Ok((model, config))
     }
 

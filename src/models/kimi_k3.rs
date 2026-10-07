@@ -1895,7 +1895,7 @@ impl KimiK3Model {
     pub fn load<P: AsRef<Path>>(model_dir: P) -> Result<(Self, KimiK3Config), String> {
         let model_dir = model_dir.as_ref();
 
-        println!("[KimiK3] Loading config...");
+        tracing::info!("[KimiK3] Loading config...");
         let config_path = model_dir.join("config.json");
         let config_str = std::fs::read_to_string(&config_path)
             .map_err(|e| format!("Failed to read config.json: {e}"))?;
@@ -1908,7 +1908,7 @@ impl KimiK3Model {
         let n_moe = (0..text.num_hidden_layers)
             .filter(|&i| text.is_moe_layer(i))
             .count();
-        println!(
+        tracing::info!(
             "[KimiK3] Config loaded: {} layers ({} MLA, {} KDA, {} MoE), attn_res_block_size {:?}",
             text.num_hidden_layers,
             text.num_hidden_layers - n_linear,
@@ -1917,16 +1917,16 @@ impl KimiK3Model {
             text.attn_res_block_size
         );
 
-        println!("[KimiK3] Loading weights...");
+        tracing::info!("[KimiK3] Loading weights...");
         let weights = crate::models::load_text_weights(model_dir, None)?;
         let weights = Self::sanitize_weights(weights, text)?;
 
-        println!("[KimiK3] Building model...");
+        tracing::info!("[KimiK3] Building model...");
         let mut model = Self::from_weights(&weights, text)?;
         model.set_eos_token_ids(config.eos_token_ids());
         model.set_eos_token_ids(crate::loading::read_eos_token_ids(model_dir));
 
-        println!("[KimiK3] Model loaded successfully");
+        tracing::info!("[KimiK3] Model loaded successfully");
         Ok((model, config))
     }
 

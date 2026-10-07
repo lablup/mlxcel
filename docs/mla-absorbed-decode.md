@@ -101,7 +101,7 @@ It measures one MLA attention block per decode step over three arms and prints t
 
 Every row ends in a `paths=` field from `mlxcel_core::mla::stats`, taken and reset around the measured region, and the harness prints a `WARNING` on any row whose counters disagree with the arm's label. **Do not report a row whose `paths=` field does not name its own arm.** Issue #899 shipped a fused decode path that never activated and whose before/after benchmark compared the fallback against itself; that null looked clean and was nearly accepted.
 
-For a real checkpoint, `MLXCEL_MLA_ABSORBED=1 mlxcel generate -m models/<deepseek> ...` prints one line at load stating how many layers folded and the bytes/token before and after. A run whose line reads `0/27 layers` is running the fallback. The line goes to stdout rather than through `tracing` because the `mlxcel` CLI installs no tracing subscriber, so a `tracing::info!` on this path emits nothing at any `RUST_LOG`.
+For a real checkpoint, `MLXCEL_MLA_ABSORBED=1 mlxcel generate -m models/<deepseek> ...` prints one stderr line at load stating how many layers folded and the bytes/token before and after. A run whose line reads `0/27 layers` is running the fallback. The line goes to stderr, not stdout, so it never mixes with the generated text, and it does not depend on `RUST_LOG`.
 
 ## Related
 

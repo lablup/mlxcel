@@ -695,13 +695,13 @@ impl Mamba2Model {
         let path = Path::new(model_path);
 
         // Load config
-        println!("[Mamba2] Loading config...");
+        tracing::info!("[Mamba2] Loading config...");
         let config_path = path.join("config.json");
         let config_str = std::fs::read_to_string(&config_path)?;
         let config_str = super::sanitize_config_json(&config_str);
         let mut config: Mamba2Config = serde_json::from_str(&config_str)?;
         config.compute_time_step_rank();
-        println!(
+        tracing::info!(
             "[Mamba2] Config loaded: {} layers",
             config.num_hidden_layers
         );
@@ -711,17 +711,17 @@ impl Mamba2Model {
         let _bits = config.bits();
 
         // Load weights
-        println!("[Mamba2] Loading weights from safetensors...");
+        tracing::info!("[Mamba2] Loading weights from safetensors...");
         let weights = crate::models::load_text_weights(path, None)?;
 
         // Process weights (handle conv1d weight transpose)
         let weights = Self::sanitize_weights(weights, &config);
 
         // Build model
-        println!("[Mamba2] Building model...");
+        tracing::info!("[Mamba2] Building model...");
         let model = Self::from_weights(config.clone(), weights)?;
 
-        println!("[Mamba2] Model loaded successfully");
+        tracing::info!("[Mamba2] Model loaded successfully");
         Ok((model, config))
     }
 
