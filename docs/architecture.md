@@ -52,7 +52,7 @@ src/
 - `src/lib/mlxcel-core/src/sampling_row_step.rs`: `RowSampler`, the one per-row sampling step
   (ADR 0007): the `SamplerState` lifecycle, the token-history ordering rule, the structured-output
   mask and post-draw override hooks, and fused-batch eligibility derived from the step's stage list.
-  The four `CxxGenerator` loops and the engine step draw through it.
+  The engine step draws through it, for the server and for the raw-completion client alike.
 - `src/lib/mlxcel-core/src/engine/`: `Engine`, the batch-native decode engine
   ([ADR 0007](adr/0007-unified-batch-native-engine.md), [ADR 0009](adr/0009-engine-step-api.md)).
   It owns the model and the `CachePool`; `open`, `prefill` (one plan piece), `step` (forward,
@@ -64,7 +64,7 @@ src/
 - `src/lib/mlxcel-core/src/sampling_token_bias.rs`: `compose_token_bias`, the one precedence rule
   for request bias, language bias and output suppression, called once per request by the CLI and
   the server.
-- `src/lib/mlxcel-core/src/generate.rs` — `LanguageModel` trait and generation loops.
+- `src/lib/mlxcel-core/src/generate.rs` — the `LanguageModel` trait, `SamplingConfig` and `GenerationStats`. Decode loops live in `engine/`: `engine/direct.rs` is `DirectEngine`, the raw-completion client `mlxcel generate`, the benchmarks and the inference session run (ADR 0007, #2176), and `engine/speculative.rs` is its token-only speculative loop for drafters such as prompt lookup.
 - `src/lib/mlxcel-core/src/drafter/` and `src/lib/mlxcel-core/src/speculative/` — speculative decoding support.
   `speculative/stochastic_accept.rs` holds the acceptance rules and the distribution-preservation
   guarantee; see [`speculative-acceptance.md`](speculative-acceptance.md) for which rule each path runs.

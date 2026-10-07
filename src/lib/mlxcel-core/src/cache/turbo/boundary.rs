@@ -78,7 +78,7 @@ pub const BOUNDARY_V_ENV_ALT: &str = "MLXCEL_TURBO_BOUNDARY_V";
 /// application also clamps against `n_layers / 2` (see
 /// [`resolve_boundary_count`]).
 ///
-/// Used by: `CxxGenerator::new_with_kv_mode` (cache construction) and
+/// Used by: `DirectEngine::with_kv_cache_mode` (cache construction) and
 /// the boundary-policy unit tests.
 pub fn boundary_v_layers_from_env() -> i32 {
     // Primary env var wins; fall back to the alt name; finally the
@@ -183,11 +183,11 @@ pub fn boundary_mode_for(nominal: KVCacheMode) -> KVCacheMode {
 /// resolved via [`resolve_boundary_count`] so callers can pass the raw
 /// env-var value directly.
 ///
-/// This is the single entry point used by `CxxGenerator::new_with_kv_mode`
+/// This is the single entry point used by `DirectEngine::with_kv_cache_mode`
 /// — it keeps the `update_and_fetch` hot path branchless because each
 /// `KVCache` already holds its resolved mode.
 ///
-/// Used by: [`crate::generate::CxxGenerator::new_with_kv_mode`].
+/// Used by: `crate::engine::DirectEngine::with_kv_cache_mode`, the scheduler.
 pub fn resolve_layer_modes(
     nominal: KVCacheMode,
     n_layers: usize,

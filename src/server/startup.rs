@@ -1735,10 +1735,9 @@ pub(super) fn build_server_config(
         num_draft_tokens: startup.draft_max,
         // forward the speculative-decoding selector flags
         // verbatim. Reconciliation against the drafter `config.json`
-        // and dispatch into `MtpGenerator` / `DFlashGenerator` / the
-        // classic `SpeculativeGenerator` happens later inside the
-        // continuous-batching worker, when both the drafter path and
-        // the resolved kind are known.
+        // and dispatch into `MtpGenerator` / `DFlashGenerator` / plain
+        // decode happens later inside the continuous-batching worker,
+        // when both the drafter path and the resolved kind are known.
         draft_kind: startup.draft_kind.clone(),
         draft_block_size: startup.draft_block_size,
         max_batch_size,

@@ -2408,7 +2408,7 @@ fn run_offline_mtp(
     // Inject the resolved token bias (CLI `--lang-bias` plus the model's
     // reserved multimodal placeholder suppression from issue #350) into the
     // sampling config so the adapter applies the SAME bias the non-speculative
-    // `CxxGenerator` path applies via `with_token_bias`. This is what keeps the
+    // engine client applies via `with_token_bias`. This is what keeps the
     // temp-0 output byte-identical to the non-speculative path: the adapter's
     // `prefill_and_seed` / `verify_forward` read `sampler.token_bias`.
     let mut sampling = sampling_config.clone();
@@ -2526,7 +2526,7 @@ fn run_offline_mtp(
     // is byte-identical to the non-speculative `mlxcel generate` path. The
     // `MtpGenerator` pushes a token onto its `emitted` vec and THEN checks EOS,
     // so its returned vector includes the terminal stop token. Both reference
-    // paths exclude it: `CxxGenerator::generate` breaks on EOS BEFORE pushing,
+    // paths exclude it: the engine's finish step never stores an EOS,
     // and the server burst `finalize_burst_success` does the same. Without this,
     // `decode_generated_text` (which decodes with skip_special_tokens = false)
     // would render the leaked stop token (e.g. `<end_of_turn>`) and inflate the
@@ -2549,7 +2549,7 @@ fn run_offline_mtp(
 }
 
 /// Truncate `tokens` at the first EOS / stop token so the returned vector
-/// excludes the terminal stop token, matching `CxxGenerator::generate` and the
+/// excludes the terminal stop token, matching the engine client's `generate` and the
 /// server burst `finalize_burst_success` (issue #166). The `MtpGenerator` never
 /// emits tokens after an EOS, so truncating at the first occurrence is
 /// equivalent to (and more robust than) dropping only a trailing one. An empty

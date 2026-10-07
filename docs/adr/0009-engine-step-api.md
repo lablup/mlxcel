@@ -1,6 +1,6 @@
 # ADR 0009: The engine step API and the batch-of-one rule
 
-**Status:** Accepted (2026-10-07). Epic #2166 Phase 4b (issue #2172). Amends [ADR 0007](0007-unified-batch-native-engine.md): it settles the signatures the "Engine" row of the component table left to this phase and records how "a single sequence is a `StepBatch` of one" is implemented. ADR 0007's decision table stands unchanged.
+**Status:** Accepted (2026-10-07). Epic #2166 Phase 4b (issue #2172). Amends [ADR 0007](0007-unified-batch-native-engine.md): it settles the signatures the "Engine" row of the component table left to this phase and records how "a single sequence is a `StepBatch` of one" is implemented. ADR 0007's decision table stands unchanged. Amended by #2176 (Phase 6): the raw-completion client and the token-only speculative entries, recorded in the "Raw completion" section below.
 
 ## Context
 
@@ -28,6 +28,12 @@ Errors are per row. `EngineError` (`MissingSequence`, `Batch`, `Open`, `Trim`, `
 
 The trait shape is unchanged: `LanguageModel::forward` stays the required method and the batched entries stay provided methods with per-family overrides. Inverting the required method (a provided `forward` delegating to a required batched entry) is a mechanical change across more than 200 `LanguageModel` implementations, about 40 of which override a batched entry, and buys nothing the engine-level single entry does not already give: no caller other than the engine chooses between the two forwards. Instead, the equivalence the issue's criterion wants is pinned where it can be violated: `src/models/single_row_batch_parity_tests.rs` runs, on a real checkpoint under `MLXCEL_SDPA_DETERMINISTIC=1`, the single-row forward and the one-row batched forward of every locally available family that overrides the batched entry (Qwen3, Llama 3) and requires byte-identical logits at each of four decode steps, both without sequence ids and with a distinct `SequenceId` per cache set, the form `Engine::step` passes. A family whose one-row batched path ever differs makes its `b == 1` delegate to the single-row forward.
 
+## Raw completion (Phase 6, #2176)
+
+ADR 0007's "Raw completion" row is implemented by `mlxcel_core::engine::DirectEngine<M>`, promoted from the parity harness's `d:engine` probe: one sequence through `open`, the prefill plan's pieces through `prefill`, `complete_prefill`, `step` until the finish step, `close`. It carries the request's KV mode (the Boundary-V layer table, injected into a model-owned family's caches as the scheduler does) and its token bias, and it borrows the model: `LanguageModel` is implemented for `&M`, so `Engine<&M>` runs over a model the caller keeps. `mlxcel generate` (text and VLM embeddings, `--profile`), `MlxInferenceSession`, `mlxcel-bench-decode`, `mlxcel-bench-engine`'s CLI arm, `speculative_bench`'s baseline and the harness's `a:cli` and `d:engine` arms all call it; `CxxGenerator` and its four loops are gone, and `evaluate_loglikelihoods` is `Engine::score`, a prefill-only pass that returns the whole window's logits.
+
+Two further engine entries serve a token-only drafter: `Engine::verify` forwards the current token and a proposed block as speculative appends (inside `DecodeLookaheadAppendScope`) and returns every position's logits, and `Engine::commit_appends` keeps the accepted prefix after `unwind_appends` drops the rest. `DirectEngine::generate_with_drafter` is the round loop over them; prompt lookup is such a drafter (`speculative::prompt_lookup_drafter::PromptLookupDrafter`, `Drafter::drafts_from_tokens_only`), so `--prompt-lookup` decodes on the engine and the scheduler can offer the same drafter through the same entries. The classic draft-model `SpeculativeGenerator` is deprecated for removal in the next minor release. The B=1 client does not pipeline the next forward behind the current host read the way the retired loop did; the epic's end-of-run measurement against the Phase 0 threshold decides whether the `submit` / `finish_rows` pair is added to it.
+
 ## Consequences
 
 - The scheduler keeps admission, tick policy (ADR 0005), preemption, prompt-cache lookup, donate and adopt, disaggregated handoff and the speculative burst generators. The MTP and DFlash burst adapters (`server::batch::speculative_burst`, `dflash_target`) still run their target and draft forwards themselves, outside the engine, as the issue scoped them; moving them behind an engine entry is later work; `rg '\.forward[a-z_]*\(|sample_token_[a-z_]*\(' src/server/batch/scheduler --glob '!*_tests.rs'` returns only `PrefillPlan::forwarded_len()` accessors, and no `RowSampler::draw` or `fused_sample` call. The `prefill_span_coverage_tests` source guard classifies the engine entries instead of raw forwards.
@@ -40,6 +46,6 @@ The trait shape is unchanged: `LanguageModel::forward` stays the required method
 
 ## References
 
-- Epic #2166, issue #2172, PR #2217.
+- Epic #2166, issue #2172, PR #2217; issue #2176 (Phase 6).
 - [ADR 0007](0007-unified-batch-native-engine.md), [ADR 0008](0008-kv-attention-dispatch-in-the-cache.md).
-- `src/lib/mlxcel-core/src/engine/mod.rs`, `src/lib/mlxcel-core/src/engine/rows.rs`, `src/server/batch/scheduler/step_rows.rs`, `src/server/engine_probe/engine_direct.rs`.
+- `src/lib/mlxcel-core/src/engine/mod.rs`, `src/lib/mlxcel-core/src/engine/rows.rs`, `src/lib/mlxcel-core/src/engine/direct.rs`, `src/lib/mlxcel-core/src/engine/speculative.rs`, `src/server/batch/scheduler/step_rows.rs`, `src/server/engine_probe/engine_direct.rs`.

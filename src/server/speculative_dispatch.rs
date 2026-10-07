@@ -41,14 +41,15 @@
 //! At worker-startup, [`SpeculativeDispatch::resolve`] turns those raw
 //! fields into one of:
 //!
-//! - [`SpeculativeDispatch::Disabled`] — no `--draft-model`; classic decode
-//!   path runs ('s [`crate::SpeculativeGenerator`] is itself NOT used by the server today, only by the offline `mlxcel generate` path).
+//! - [`SpeculativeDispatch::Disabled`] — no `--draft-model`; plain decode
+//!   runs (the offline draft-model loop of `mlxcel generate` is never used by
+//!   the server, and is deprecated since #2176).
 //! - [`SpeculativeDispatch::Classic { .. }`] — `--draft-model` set,
 //!   `--draft-kind` unset, drafter's `config.json::model_type` resolves to
 //!   a kind that the server has not yet wired to its kind-specific round
-//!   loop. The server logs the auto-detected kind and falls back to the
-//!   classic [`crate::SpeculativeGenerator`] dispatch path for backward
-//!   compatibility with the historical `--draft-model <path>` workflow.
+//!   loop. The server logs the auto-detected kind and falls back to plain
+//!   decode, the `Classic` dispatch, for backward compatibility with the
+//!   historical `--draft-model <path>` workflow.
 //! - [`SpeculativeDispatch::Mtp { .. }`] — `--draft-kind mtp` (or auto-
 //!   detect resolved to MTP). The scheduler constructs the kind-specific
 //!   [`mlxcel_core::speculative::mtp::MtpGenerator`] (B=1) or
@@ -105,10 +106,10 @@ pub enum SpeculativeDispatch {
 
     /// Drafter is configured but its resolved kind is one the server has
     /// not yet wired to a kind-specific round loop. Scheduler falls back
-    /// to the classic [`crate::SpeculativeGenerator`] dispatch (the same
-    /// path the offline `mlxcel generate` command takes when
-    /// `--draft-kind` is unset and the auto-detect resolves to a known
-    /// kind). The auto-detected kind is logged for operator visibility.
+    /// to plain decode (where the offline `mlxcel generate` command takes
+    /// its deprecated draft-model loop when `--draft-kind` is unset and the
+    /// auto-detect resolves to a known kind). The auto-detected kind is
+    /// logged for operator visibility.
     Classic {
         /// Drafter checkpoint directory.
         draft_model_path: PathBuf,

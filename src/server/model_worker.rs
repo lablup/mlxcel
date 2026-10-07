@@ -1110,7 +1110,8 @@ pub(crate) fn resolve_worker_token_bias(
 /// - No prefill chunking interleaving occurs.
 /// - Log output clearly indicates the sequential execution mode.
 ///
-/// The CLI `generate` command is unaffected and uses `CxxGenerator` directly.
+/// The CLI `generate` command runs the engine's raw-completion client
+/// (`mlxcel_core::engine::DirectEngine`) on the same engine, with no scheduler.
 pub(crate) fn spawn_legacy_model_worker(
     model_path: PathBuf,
     adapter_path: Option<PathBuf>,

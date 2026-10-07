@@ -15,7 +15,7 @@
 //! The one post-sample finish step shared by every decode site (#2168).
 //!
 //! After a token is sampled, a decode site decides whether the sequence is
-//! finished. The CLI's `CxxGenerator` loops and every `BatchScheduler` site
+//! finished. The engine's per-row chain, which every `BatchScheduler` site
 //! (per-row batched decode, fused batched decode, single-step decode, prefill
 //! completion and the speculative burst stream) call [`finish_step`], so the
 //! order of the checks and the set of checks cannot drift between them again.
@@ -65,7 +65,8 @@ pub trait FinishHooks {
 }
 
 /// Hooks for a decode loop with no stop strings, generation bounds or context
-/// bound: every hook returns `false`. Used by the CLI's `CxxGenerator` loops.
+/// bound: every hook returns `false`. Used by the engine's raw-completion
+/// client (`engine::BareHooks` builds on the same rule) and its tests.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NoStopHooks;
 

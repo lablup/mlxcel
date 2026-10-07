@@ -107,9 +107,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use mlxcel::vlm_runtime::{prepare_vlm_embeddings, prepared_embedding_refs};
-use mlxcel::{
-    CxxGenerator, LanguageModel, LoadedModel, MlxInferenceSession, SamplingConfig, load_model,
-};
+use mlxcel::{LanguageModel, LoadedModel, MlxInferenceSession, SamplingConfig, load_model};
 use mlxcel_core::cache::KVCacheMode;
 use mlxcel_core::cache::turbo::{TurboQuantParams, turbo4_v_rotate};
 use mlxcel_core::{
@@ -340,7 +338,7 @@ fn run_niah(
             .map(|&id| id as i32)
             .collect();
 
-        let mut generator = CxxGenerator::new_with_kv_mode(num_layers, kv_mode);
+        let mut generator = MlxInferenceSession::new_with_kv_mode(num_layers, kv_mode);
         let gen_tokens = generator.generate(model, &prompt_ids, NIAH_MAX_GEN, &sampling);
 
         let gen_u32: Vec<u32> = gen_tokens.iter().map(|&t| t as u32).collect();
@@ -1191,22 +1189,19 @@ fn measure_vlm_image_token_kurtosis(model_dir_name: &str) -> Option<(f64, f64, u
     let (inputs_embeds, mask) =
         prepared_embedding_refs(&prepared.embeddings).expect("prepared embeddings missing");
 
-    let num_layers = model.num_layers();
-    let mut generator = CxxGenerator::new_with_kv_mode(num_layers, KVCacheMode::Fp16);
+    // A bare forward over the model's own fresh FP16 caches, outside any
+    // engine sequence, so the cache handle can be inspected afterwards.
+    let mut caches = model.make_caches();
 
     let input_ids_arr =
         mlxcel_core::from_slice_i32(&prompt_tokens, &[1, prompt_tokens.len() as i32]);
 
     // Single prefill pass populates `caches[layer]` with FP16 K (and V).
-    let logits = model.forward_with_embeddings(
-        &input_ids_arr,
-        Some(inputs_embeds),
-        generator.caches_mut(),
-        mask,
-    );
+    let logits =
+        model.forward_with_embeddings(&input_ids_arr, Some(inputs_embeds), &mut caches, mask);
     eval(&logits);
 
-    let detached = generator.caches_mut()[0].clone_handle();
+    let detached = caches[0].clone_handle();
     let k_full = detached.keys()?;
     let k_shape = array_shape(k_full);
     if k_shape.len() != 4 {

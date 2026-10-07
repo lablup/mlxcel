@@ -879,3 +879,227 @@ fn direct_engine_honors_the_callback_and_withholds_eos() {
     assert!(seen.is_empty());
     assert_eq!(client.model().single_calls.get(), 3, "the prefill only");
 }
+
+/// Records every token it is fed, in order; logits echo the input.
+struct AccumModel {
+    seen: std::cell::RefCell<Vec<i32>>,
+    spans: std::cell::RefCell<Vec<Option<i32>>>,
+}
+
+impl AccumModel {
+    fn new() -> Self {
+        Self {
+            seen: std::cell::RefCell::new(Vec::new()),
+            spans: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+}
+
+impl LanguageModel for AccumModel {
+    fn forward(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.spans.borrow_mut().push(crate::prefill_span::current());
+        ffi::eval(input_ids);
+        let toks: Vec<i32> = array_to_vec_f32(&ffi::astype(input_ids, crate::dtype::FLOAT32))
+            .into_iter()
+            .map(|t| t as i32)
+            .collect();
+        self.seen.borrow_mut().extend_from_slice(&toks);
+        EchoModel::append(caches, ffi::array_shape(input_ids)[1]);
+        EchoModel::echo_logits(input_ids)
+    }
+
+    fn make_caches(&self) -> Vec<KVCache> {
+        vec![KVCache::new()]
+    }
+
+    fn num_layers(&self) -> usize {
+        1
+    }
+
+    fn eos_token_ids(&self) -> Vec<i32> {
+        vec![7]
+    }
+}
+
+/// Every piece of a chunked prefill sees the whole prompt's length (a model
+/// that picks its RoPE table from the prompt length reads exactly this,
+/// #1358), and the announcement is gone once the run returns.
+#[test]
+fn direct_engine_announces_the_whole_prompt_to_every_prefill_piece() {
+    let prompt: Vec<i32> = (0..10).map(|t| t % 7).collect();
+    let model = AccumModel::new();
+    DirectEngine::new(&model, 3)
+        .run(&prompt, 1, &SamplingConfig::greedy())
+        .unwrap();
+    assert_eq!(
+        model.spans.borrow().as_slice(),
+        &[Some(10), Some(10), Some(10), Some(10)],
+        "four pieces of 3, 3, 3, 1 must each see the prompt length, not their own"
+    );
+    assert_eq!(model.seen.borrow().as_slice(), prompt.as_slice());
+    assert_eq!(crate::prefill_span::current(), None);
+}
+
+/// A prefill plan fed piece by piece through `Engine::prefill` sees every
+/// prompt token exactly once, in order, and ends on the same last-position
+/// logits as a single pass, for every partition the plan can produce
+/// (chunks, a history boundary, both).
+#[test]
+fn prefill_pieces_match_a_single_pass_for_every_partition() {
+    use crate::prefill_plan::{PrefillCaps, PrefillPlan};
+    let prompt: Vec<i32> = (0..10).map(|t| t % 7).collect();
+    let single = {
+        let model = AccumModel::new();
+        let mut engine = Engine::with_capacity(&model, 1);
+        let id = engine.open(SequenceSpec::default()).unwrap();
+        let input = from_slice_i32(&prompt, &[1, prompt.len() as i32]);
+        let out = engine
+            .prefill(&PrefillStep {
+                seq_id: id,
+                input: &input,
+                embeddings: None,
+                mask: None,
+                last_pos: prompt.len() - 1,
+                trim_excess: 0,
+                eval: true,
+            })
+            .unwrap();
+        argmax_rows(&out.logits)
+    };
+    for (chunk, boundary) in [
+        (1usize, None),
+        (3, None),
+        (4, None),
+        (10, None),
+        (16, None),
+        (0, Some(6)),
+        (3, Some(7)),
+    ] {
+        let model = AccumModel::new();
+        let caps = PrefillCaps::for_model(&model, false);
+        let plan = PrefillPlan::with_prefix(prompt.len(), 0, boundary, chunk, caps);
+        let mut engine = Engine::with_capacity(&model, 1);
+        let id = engine.open(SequenceSpec::default()).unwrap();
+        let mut last = None;
+        for piece in plan.pieces() {
+            let tokens = &prompt[piece.range.clone()];
+            let (input, mask) = piece_input(&plan, piece, tokens, piece.range.start as i32);
+            let out = engine
+                .prefill(&PrefillStep {
+                    seq_id: id,
+                    input: &input,
+                    embeddings: None,
+                    mask: mask.as_deref(),
+                    last_pos: piece.last_real_pos(),
+                    trim_excess: piece.trim_after().unwrap_or(0) as i32,
+                    eval: true,
+                })
+                .unwrap();
+            last = Some(out.logits);
+        }
+        assert_eq!(
+            model.seen.borrow().as_slice(),
+            prompt.as_slice(),
+            "chunk={chunk} boundary={boundary:?} fed tokens out of order or twice"
+        );
+        assert_eq!(
+            argmax_rows(&last.unwrap()),
+            single,
+            "chunk={chunk} boundary={boundary:?} final logits diverged from single-pass"
+        );
+    }
+}
+
+/// The client applies its KV mode to a model-owned family's own caches the
+/// way the scheduler does, before the first forward.
+#[test]
+fn direct_engine_injects_the_resolved_kv_modes_into_the_model() {
+    use crate::cache::KVCacheMode;
+    struct TrackingKvModeModel {
+        modes: std::cell::RefCell<Option<Vec<KVCacheMode>>>,
+    }
+    impl LanguageModel for TrackingKvModeModel {
+        fn forward(
+            &self,
+            input_ids: &MlxArray,
+            caches: &mut [KVCache],
+            _mask: Option<&MlxArray>,
+        ) -> UniquePtr<MlxArray> {
+            EchoModel::append(caches, ffi::array_shape(input_ids)[1]);
+            EchoModel::echo_logits(input_ids)
+        }
+        fn make_caches(&self) -> Vec<KVCache> {
+            vec![KVCache::new(), KVCache::new(), KVCache::new()]
+        }
+        fn set_kv_cache_layer_modes(&self, modes: Vec<KVCacheMode>) {
+            *self.modes.borrow_mut() = Some(modes);
+        }
+        fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
+            self.modes.borrow().clone()
+        }
+        fn num_layers(&self) -> usize {
+            3
+        }
+        fn eos_token_ids(&self) -> Vec<i32> {
+            vec![7]
+        }
+    }
+    let model = TrackingKvModeModel {
+        modes: std::cell::RefCell::new(None),
+    };
+    DirectEngine::new(&model, 0)
+        .with_kv_cache_mode(KVCacheMode::Int8)
+        .run(&[1, 2], 1, &SamplingConfig::greedy())
+        .unwrap();
+    assert_eq!(
+        model.kv_cache_layer_modes(),
+        Some(vec![
+            KVCacheMode::Int8,
+            KVCacheMode::Int8,
+            KVCacheMode::Int8
+        ])
+    );
+}
+
+fn make_bias(entries: &[(i32, f32)]) -> crate::sampling::TokenBiasMap {
+    let mut m = crate::sampling::TokenBiasMap::new();
+    for &(id, b) in entries {
+        m.insert(id, b);
+    }
+    m
+}
+
+/// The client's token-bias composition: an empty cached map borrows the
+/// caller's config unchanged (the bit-exact baseline), a cached map is
+/// injected into a config without one, and a caller's own bias wins.
+#[test]
+fn direct_engine_token_bias_composition() {
+    use std::borrow::Cow;
+    let plain = DirectEngine::new(EchoModel::new(), 0);
+    assert!(plain.token_bias().is_empty());
+    let caller = SamplingConfig::default();
+    let composed = plain.compose_sampling(&caller);
+    assert!(matches!(composed, Cow::Borrowed(_)));
+    assert!(composed.token_bias.is_empty());
+
+    let cached = DirectEngine::new(EchoModel::new(), 0)
+        .with_token_bias(make_bias(&[(3, f32::NEG_INFINITY), (5, 1.5)]));
+    assert_eq!(cached.token_bias().len(), 2);
+    let composed = cached.compose_sampling(&caller);
+    assert!(matches!(composed, Cow::Owned(_)));
+    assert!(composed.token_bias.contains(3) && composed.token_bias.contains(5));
+
+    let caller = SamplingConfig {
+        token_bias: make_bias(&[(99, -3.0)]),
+        ..SamplingConfig::default()
+    };
+    let composed = cached.compose_sampling(&caller);
+    assert_eq!(composed.token_bias.len(), 1);
+    assert!(composed.token_bias.contains(99));
+    assert!(!composed.token_bias.contains(1));
+}

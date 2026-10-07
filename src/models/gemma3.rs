@@ -1627,7 +1627,8 @@ impl mlxcel_core::generate::LanguageModel for Gemma3Wrapper {
     }
 
     fn reset_runtime_state(&self) {
-        // Used by: CxxGenerator single-row generation paths. Gemma 3 owns
+        // Used by: bare single-row runs outside an engine sequence (the engine
+        // resets through prepare_sequence_state / release_sequence_state_by_id). Gemma 3 owns
         // its fallback sliding/global KV cache state inside
         // `ModelOwnedSequenceState`; the caller-provided `KVCache` slice is
         // intentionally empty/ignored. Reset the fallback slot before each

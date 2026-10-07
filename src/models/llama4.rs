@@ -1809,7 +1809,8 @@ impl LanguageModel for Llama4Wrapper {
     }
 
     fn reset_runtime_state(&self) {
-        // Used by: CxxGenerator single-row generation paths. Llama 4 owns
+        // Used by: bare single-row runs outside an engine sequence (the engine
+        // resets through prepare_sequence_state / release_sequence_state_by_id). Llama 4 owns
         // iGQA cache state inside `ModelOwnedSequenceState`; reset only the
         // legacy fallback slot, leaving scheduler-owned per-sequence entries
         // untouched.

@@ -69,7 +69,7 @@ pub const DEFAULT_PREFILL_CHUNK: usize = 2048;
 /// chunk-sized (issue #672). Models that cannot run a multi-call prefill opt
 /// out through `LanguageModel::supports_chunked_prefill`.
 ///
-/// Used by: `CxxGenerator`, `PromptLookupGenerator`, the server startup
+/// Used by: the engine's raw-completion client, the server startup
 /// default for `--prefill-chunk-size`, the Gemma 4 MTP prefill and the engine
 /// benchmark.
 pub fn prefill_chunk_len() -> usize {

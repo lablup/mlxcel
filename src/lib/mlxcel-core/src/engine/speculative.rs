@@ -27,7 +27,9 @@
 
 use std::time::Instant;
 
-use super::direct::{BareHooks, DirectEngine, DirectEngineError, DirectRequest, DirectRun};
+use super::direct::{
+    BareHooks, DirectEngine, DirectEngineError, DirectRequest, DirectRun, delivers_to_callback,
+};
 use super::rows::{finish_row, sample_and_finish_row};
 use super::{Engine, EngineError, StepBatch, StepRow};
 use crate::cache::{DecodeLookaheadAppendScope, SequenceId, can_trim_prompt_cache};
@@ -263,7 +265,7 @@ impl<M: LanguageModel> DirectEngine<M> {
 
         let decode_start = Instant::now();
         let mut done = first.finish.is_some();
-        if !generated.is_empty() && !on_token(first.token) {
+        if delivers_to_callback(&generated, 0, &first) && !on_token(first.token) {
             done = true;
         }
         while !done {
@@ -319,7 +321,7 @@ impl<M: LanguageModel> DirectEngine<M> {
                 }
                 let emitted = &generated[before..];
                 drafter.accept_verified_tokens(&input, &[], 0, emitted, sampling)?;
-                if !emitted.is_empty() && !on_token(outcome.token) {
+                if delivers_to_callback(&generated, before, &outcome) && !on_token(outcome.token) {
                     break;
                 }
                 done = outcome.finish.is_some();
@@ -387,7 +389,9 @@ impl<M: LanguageModel> DirectEngine<M> {
                 if let Some(error) = outcome.error {
                     return Err(DirectEngineError::Row(error.message().to_string()).into());
                 }
-                if generated.len() > emitted_before && !on_token(outcome.token) {
+                if delivers_to_callback(&generated, emitted_before, &outcome)
+                    && !on_token(outcome.token)
+                {
                     stop = true;
                     break;
                 }

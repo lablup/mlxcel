@@ -20,19 +20,21 @@
 use super::{LogitMask, RowSampler};
 use crate::ffi;
 use crate::ffi::MlxArray;
-use crate::generate::{CxxGenerator, LanguageModel, SamplingConfig};
+use crate::generate::{LanguageModel, SamplingConfig};
 use crate::generation_policy::{initial_token_history, seed_rng_if_needed};
 use crate::sampling::{
     AdaptivePState, SamplerState, TokenBiasMap, sample_token_optimized,
     sample_token_optimized_with_state,
 };
+use crate::session::MlxInferenceSession;
 use crate::test_support::induction::{INDUCTION_MODELS, INDUCTION_VOCAB, lcg_tokens};
 use cxx::UniquePtr;
 
 const MAX_TOKENS: usize = 64;
 
-/// The four public `CxxGenerator` decode loops (the CLI path), each on a fresh
-/// generator; the embeddings variants run without embeddings.
+/// The four public `MlxInferenceSession` entry points (the CLI surface over the
+/// engine client), each on a fresh session; the embeddings variants run without
+/// embeddings.
 fn cli_streams<M: LanguageModel>(
     model: &M,
     prompt: &[i32],
@@ -41,11 +43,11 @@ fn cli_streams<M: LanguageModel>(
     [
         (
             "generate",
-            CxxGenerator::new(1).generate(model, prompt, MAX_TOKENS, sampling),
+            MlxInferenceSession::new(1).generate(model, prompt, MAX_TOKENS, sampling),
         ),
         (
             "generate_streaming_with_embeddings",
-            CxxGenerator::new(1).generate_streaming_with_embeddings(
+            MlxInferenceSession::new(1).generate_streaming_with_embeddings(
                 model,
                 prompt,
                 None,
@@ -57,13 +59,13 @@ fn cli_streams<M: LanguageModel>(
         ),
         (
             "generate_with_stats_and_embeddings",
-            CxxGenerator::new(1)
+            MlxInferenceSession::new(1)
                 .generate_with_stats_and_embeddings(model, prompt, None, None, MAX_TOKENS, sampling)
                 .0,
         ),
         (
             "generate_with_stats",
-            CxxGenerator::new(1)
+            MlxInferenceSession::new(1)
                 .generate_with_stats(model, prompt, MAX_TOKENS, sampling)
                 .0,
         ),

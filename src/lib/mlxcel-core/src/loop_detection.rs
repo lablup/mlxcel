@@ -143,7 +143,7 @@ impl LoopDetectionConfig {
 /// caller passes the raw generated token stream so loops inside reasoning /
 /// tool-call spans are caught, not just the final answer.
 ///
-/// Used by: `CxxGenerator` decode loops (`generate.rs`), `BatchScheduler`
+/// Used by: the engine's finish step (`decode_finish`), `BatchScheduler`
 /// decode sites (`server/batch/scheduler.rs`).
 pub fn detect_repetition_loop(generated: &[i32], cfg: &LoopDetectionConfig) -> bool {
     if !cfg.is_enabled() {

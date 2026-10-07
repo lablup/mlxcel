@@ -118,7 +118,7 @@ impl LanguageModel for InductionModel {
 /// history-reading sampler is defined against (mlx-lm's `generate_step` hands
 /// its logits processors the token it just consumed).
 ///
-/// Every decode loop has to match it, `CxxGenerator`'s pipelined ones included:
+/// Every decode loop has to match it, the engine's token-only speculative loop included:
 /// until #2090 they sampled each step against a history missing the token
 /// they had just read.
 pub(crate) fn sequential_reference<M: LanguageModel>(

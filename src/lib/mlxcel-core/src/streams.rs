@@ -14,7 +14,7 @@
 
 //! Stream-selection wrappers for generation-time pipelining.
 //!
-//! Generation owners ([`crate::generate::CxxGenerator`],
+//! Generation owners ([`crate::engine::DirectEngine`],
 //! [`crate::speculative::SpeculativeGenerator`], and the server-side
 //! `BatchScheduler`) create a dedicated MLX stream up front and install
 //! it as the default for the worker thread that drives the generation
@@ -80,7 +80,7 @@ pub fn new_thread_local_generation_stream() -> Option<UniquePtr<MlxThreadLocalSt
 /// stream it pays neither. Different threads still resolve different
 /// streams, so dispatch and synchronization stay paired per thread.
 ///
-/// Used by: CxxGenerator, SpeculativeGenerator
+/// Used by: DirectEngine, SpeculativeGenerator
 pub fn shared_thread_local_generation_stream() -> Option<UniquePtr<MlxThreadLocalStream>> {
     if ffi::default_device_is_gpu() {
         Some(ffi::shared_thread_local_stream_gpu())
@@ -102,7 +102,7 @@ pub fn shared_thread_local_generation_stream() -> Option<UniquePtr<MlxThreadLoca
 ///
 /// `None` is a safe no-op for CPU-only builds.
 ///
-/// Used by: CxxGenerator, SpeculativeGenerator, BatchScheduler, AudioWorker
+/// Used by: DirectEngine, SpeculativeGenerator, BatchScheduler, AudioWorker
 pub fn install_thread_local_default_stream(tls: Option<&UniquePtr<MlxThreadLocalStream>>) {
     if let Some(tls) = tls {
         let stream = ffi::stream_from_thread_local_stream(tls);

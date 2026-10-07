@@ -771,22 +771,22 @@ fn b8_speculative_generator_with_token_bias_caches_map() {
 }
 
 // ============================================================================
-// B8 — CxxGenerator::with_token_bias
+// B8 — MlxInferenceSession::with_token_bias
 // ============================================================================
 
-use crate::CxxGenerator;
+use crate::MlxInferenceSession;
 
 #[test]
-fn b8_cxx_generator_default_bias_is_empty() {
-    let g = CxxGenerator::new(4);
+fn b8_session_default_bias_is_empty() {
+    let g = MlxInferenceSession::new(4);
     assert!(g.token_bias().is_empty());
 }
 
 #[test]
-fn b8_cxx_generator_with_token_bias_caches_map() {
+fn b8_session_with_token_bias_caches_map() {
     let mut bias = TokenBiasMap::new();
     bias.insert(3, -1.5);
-    let g = CxxGenerator::new(4).with_token_bias(bias);
+    let g = MlxInferenceSession::new(4).with_token_bias(bias);
     assert_eq!(g.token_bias().len(), 1);
     assert!(g.token_bias().contains(3));
 }

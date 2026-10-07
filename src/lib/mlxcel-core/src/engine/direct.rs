@@ -29,7 +29,7 @@ use std::time::Instant;
 
 use super::{Engine, EngineError, PrefillStep, SequenceSpec, StepBatch, StepRow, StepRowHooks};
 use crate::cache::{KVCacheMode, SequenceId};
-use crate::decode_finish::FinishHooks;
+use crate::decode_finish::{FinishCause, FinishHooks};
 use crate::ffi::MlxThreadLocalStream;
 use crate::generate::{
     GenerationStats, LanguageModel, SamplingConfig, TtftPhases, pad_embeddings,
@@ -41,6 +41,19 @@ use crate::sampling::{LogprobsConfig, TokenBiasMap};
 use crate::sampling_row_step::{LogitMask, RowSampler};
 use crate::streams::{install_thread_local_default_stream, shared_thread_local_generation_stream};
 use crate::{MlxArray, UniquePtr};
+
+/// Whether a row outcome's token reaches a streaming callback: the finish
+/// step appended it (so not an EOS) and it is not the looping token a
+/// repetition loop withholds, which stays in the stream but is not streamed.
+///
+/// Used by: `DirectEngine::generate`, `DirectEngine::generate_with_drafter`.
+pub(super) fn delivers_to_callback(
+    generated: &[i32],
+    len_before: usize,
+    outcome: &super::RowOutcome,
+) -> bool {
+    generated.len() > len_before && outcome.finish != Some(FinishCause::RepetitionLoop)
+}
 
 /// Hooks for a bare sequence: no stop strings, no generation or context
 /// bound, no structured-output constraint and no thinking budget, which is
@@ -246,10 +259,11 @@ impl<M: LanguageModel> DirectEngine<M> {
     /// plan, sample the first token, step until the finish step says so or
     /// `on_token` returns `false`, and close the sequence.
     ///
-    /// `on_token` receives every token the finish step appends to the stream
-    /// (so never an EOS and never a repetition loop's withheld token, but the
-    /// token that spends the budget), in order. The sequence is closed on
-    /// every return path, so a failed run leaves no state behind.
+    /// `on_token` receives every emitted token in order: never an EOS, and
+    /// not a repetition loop's looping token (which stays in the returned
+    /// stream but is withheld from the callback, as the CLI loop always
+    /// did), but the token that spends the budget. The sequence is closed
+    /// on every return path, so a failed run leaves no state behind.
     pub fn generate<F: FnMut(i32) -> bool>(
         &mut self,
         request: &DirectRequest<'_>,
@@ -396,7 +410,7 @@ impl<M: LanguageModel> DirectEngine<M> {
         if let Some(error) = first.error {
             return Err(DirectEngineError::FirstToken(error.message().to_string()));
         }
-        if !generated.is_empty() {
+        if delivers_to_callback(&generated, 0, &first) {
             continue_decode = on_token(first.token);
         }
         if first.finish.is_none() && continue_decode {
@@ -436,10 +450,7 @@ impl<M: LanguageModel> DirectEngine<M> {
                 if let Some(error) = outcome.error {
                     return Err(DirectEngineError::Row(error.message().to_string()));
                 }
-                // The finish step appended the token unless it was an EOS or
-                // a repetition loop's withheld token; only appended tokens
-                // reach the callback.
-                if generated.len() > before && !on_token(outcome.token) {
+                if delivers_to_callback(&generated, before, &outcome) && !on_token(outcome.token) {
                     break;
                 }
                 if outcome.finish.is_some() {

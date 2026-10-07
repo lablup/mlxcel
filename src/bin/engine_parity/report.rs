@@ -22,7 +22,7 @@ use mlxcel::server::engine_probe::{Divergence, first_divergence};
 /// One decode path the harness runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
-    /// (a) `CxxGenerator` through the `mlxcel generate` text path.
+    /// (a) the raw-completion client through the `mlxcel generate` text path.
     Cli,
     /// (b) server scheduler, B=1, dense decode storage, prompt cache off.
     Dense,
