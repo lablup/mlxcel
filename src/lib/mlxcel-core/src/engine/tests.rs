@@ -33,6 +33,9 @@ use crate::{ffi, from_slice_i32};
 struct EchoModel {
     single_calls: Cell<usize>,
     batched_calls: Cell<usize>,
+    /// The batched forward returns one logits row fewer than it was given, the
+    /// shape of a broken backend, so the fused draw reads back a short `[B]`.
+    drop_last_batched_row: bool,
 }
 
 impl EchoModel {
@@ -40,6 +43,14 @@ impl EchoModel {
         Self {
             single_calls: Cell::new(0),
             batched_calls: Cell::new(0),
+            drop_last_batched_row: false,
+        }
+    }
+
+    fn with_short_batched_logits() -> Self {
+        Self {
+            drop_last_batched_row: true,
+            ..Self::new()
         }
     }
 
@@ -92,7 +103,12 @@ impl LanguageModel for EchoModel {
         for caches in batch_caches.iter_mut() {
             Self::append(caches, l);
         }
-        Self::echo_logits(input_ids)
+        let logits = Self::echo_logits(input_ids);
+        if self.drop_last_batched_row {
+            let rows = ffi::array_shape(&logits)[0];
+            return ffi::slice(&logits, &[0, 0, 0], &[rows - 1, i32::MAX, i32::MAX]);
+        }
+        logits
     }
 
     fn make_caches(&self) -> Vec<KVCache> {
@@ -584,6 +600,50 @@ fn step_refuses_a_row_count_that_differs_from_the_batch() {
         assert_eq!(offset(&engine, id), 0);
         assert_eq!(seq_len(&engine, id), 0);
     }
+}
+
+/// A fused draw whose readback holds fewer tokens than rows would let the
+/// per-row zip drop a row whose KV was appended. It fails every row with one
+/// shared `BatchEval` instead, finishes none and advances none.
+#[test]
+fn fused_readback_token_count_mismatch_fails_every_row() {
+    let mut engine = Engine::with_capacity(EchoModel::with_short_batched_logits(), 4);
+    let a = engine.open(SequenceSpec::default()).unwrap();
+    let b = engine.open(SequenceSpec::default()).unwrap();
+    let input = from_slice_i32(&[2, 6], &[2, 1]);
+    let batch = StepBatch {
+        seq_ids: &[a, b],
+        input: &input,
+    };
+    let mut rows = [Row::greedy(a), Row::greedy(b)];
+    let out = {
+        let mut views: Vec<_> = rows.iter_mut().map(Row::row).collect();
+        // Both rows are fused-eligible, so the step takes the fused draw.
+        assert!(fused_params(&views).is_some());
+        engine.step(&batch, &mut views).unwrap()
+    };
+    assert_eq!(engine.model().batched_calls.get(), 1);
+    assert_eq!(out.rows.len(), 2);
+    let messages: Vec<&str> = out
+        .rows
+        .iter()
+        .map(|outcome| match &outcome.error {
+            Some(RowError::BatchEval(msg)) => msg.as_str(),
+            other => panic!("expected BatchEval, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(messages[0], messages[1]);
+    assert!(
+        messages[0].contains("1 tokens for 2 rows"),
+        "{}",
+        messages[0]
+    );
+    for (outcome, id) in out.rows.iter().zip([a, b]) {
+        assert_eq!(outcome.seq_id, id);
+        assert!(!outcome.eval_ok());
+        assert_eq!(offset(&engine, id), 0);
+    }
+    assert!(rows.iter().all(|row| row.generated.is_empty()));
 }
 
 /// A pipelined collect whose token count differs from the rows fails every
