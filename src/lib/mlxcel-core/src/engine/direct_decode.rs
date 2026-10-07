@@ -37,6 +37,16 @@
 //! turns it off. Unlike the scheduler, the client keeps loop detection on the
 //! pipeline: the finish step runs on every committed token here, so the
 //! post-commit scan the scheduler's steady path skips is not skipped.
+//!
+//! The client also pipelines a model-owned family that cannot rewind its own
+//! state ([`Teardown::Discard`]), as the retired CLI loop pipelined every
+//! family: every caller of [`DirectEngine::decode`] closes the sequence right
+//! after it, so the one append past the finishing token is released with the
+//! sequence instead of unwound, and the stream is the synchronous loop's.
+//! What such a family cannot do is fall back to the synchronous loop after a
+//! failed submit that left an append in place, so that run ends with the
+//! submit's error. The scheduler keeps these families synchronous: its
+//! sequences outlive a tick (prompt-cache donation, preemption).
 
 use super::direct::{BareHooks, DirectEngine, DirectEngineError, delivers_to_callback};
 use super::lookahead::lookahead_feedback_input;
@@ -108,11 +118,36 @@ impl<'s> DecodeState<'s> {
     }
 }
 
+/// The client's input to the fused-eligibility rule: it streams no
+/// per-token logprobs and carries no mask or override.
+fn client_fused_params(sampling: &SamplingConfig) -> Option<FusedSampleParams> {
+    shared_fused_params([Some(FusedRowGate {
+        sampling,
+        needs_mask: false,
+        needs_override: false,
+        logprobs_enabled: false,
+    })])
+}
+
 pub(super) fn single(outcomes: Vec<RowOutcome>) -> Result<RowOutcome, DirectEngineError> {
     outcomes
         .into_iter()
         .next()
         .ok_or_else(|| DirectEngineError::Row("step returned no row".into()))
+}
+
+/// How [`DirectEngine::decode`]'s pipeline tears down the speculative
+/// appends left past a finishing token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Teardown {
+    /// [`super::Engine::unwind_appends`] undoes them exactly
+    /// ([`super::Engine::can_unwind_lookahead`]), so the closed sequence holds
+    /// what the synchronous loop leaves.
+    Unwind,
+    /// A model-owned family that cannot rewind its own state: the appends
+    /// stay and are released when the caller closes the sequence, which every
+    /// caller of `decode` does right after it (see the module docs).
+    Discard,
 }
 
 impl<M: LanguageModel> DirectEngine<M> {
@@ -128,12 +163,34 @@ impl<M: LanguageModel> DirectEngine<M> {
         if self.force_sync() || !self.engine().can_unwind_lookahead(id) {
             return None;
         }
-        shared_fused_params([Some(FusedRowGate {
-            sampling,
-            needs_mask: false,
-            needs_override: false,
-            logprobs_enabled: false,
-        })])
+        client_fused_params(sampling)
+    }
+
+    /// The pipeline of [`DirectEngine::decode`]: [`DirectEngine::lookahead_params`]
+    /// with an exact unwind, else, for a model-owned family that cannot rewind
+    /// its own state and holds the sequence on its natural backend, the same
+    /// fused draw with a [`Teardown::Discard`] teardown. `None` for the
+    /// synchronous chain.
+    pub(super) fn decode_lookahead(
+        &self,
+        id: SequenceId,
+        sampling: &SamplingConfig,
+    ) -> Option<(FusedSampleParams, Teardown)> {
+        if let Some(params) = self.lookahead_params(id, sampling) {
+            return Some((params, Teardown::Unwind));
+        }
+        let model_owned = |backend| backend == SequenceStateBackend::ModelOwned;
+        let discards = !self.force_sync()
+            && model_owned(self.model().sequence_state_layout().backend)
+            && self
+                .engine()
+                .pool()
+                .get(id)
+                .is_some_and(|set| model_owned(set.backend));
+        if !discards {
+            return None;
+        }
+        client_fused_params(sampling).map(|params| (params, Teardown::Discard))
     }
 
     /// Decode `state` after its first token until the finish step ends it or
@@ -143,15 +200,15 @@ impl<M: LanguageModel> DirectEngine<M> {
         state: &mut DecodeState<'_>,
         on_token: &mut F,
     ) -> Result<(), DirectEngineError> {
-        match self.lookahead_params(state.id, state.sampling) {
-            Some(params) => {
+        match self.decode_lookahead(state.id, state.sampling) {
+            Some((params, teardown)) => {
                 // The raised command-buffer input budget pays off only where
                 // step n+1 is encoded while the device still runs step n; a
                 // synchronous step encodes and then waits, and loses the
                 // encode / execute overlap inside the step under it (the
                 // scheduler measured this on M1 Ultra, `run_decode_tick`).
                 let _decode_budget = crate::DecodeCommandBufferBudget::enter();
-                self.decode_pipelined(state, &params, on_token)
+                self.decode_pipelined(state, &params, teardown, on_token)
             }
             None => self.decode_sync(state, on_token),
         }
@@ -196,6 +253,7 @@ impl<M: LanguageModel> DirectEngine<M> {
         &mut self,
         state: &mut DecodeState<'_>,
         params: &FusedSampleParams,
+        teardown: Teardown,
         on_token: &mut F,
     ) -> Result<(), DirectEngineError> {
         let id = state.id;
@@ -203,7 +261,7 @@ impl<M: LanguageModel> DirectEngine<M> {
         let mut pending = match self.submit_lookahead(id, state.sampling, &input, params) {
             Ok(tokens) => tokens,
             Err(err) => {
-                self.unwind_failed_submit(id, &err, 0)?;
+                self.unwind_failed_submit(id, &err, 0, teardown)?;
                 return self.decode_sync(state, on_token);
             }
         };
@@ -220,7 +278,7 @@ impl<M: LanguageModel> DirectEngine<M> {
                     Err(err) => {
                         // The pending forward's append is still uncommitted.
                         drop(pending);
-                        self.unwind_failed_submit(id, &err, 1)?;
+                        self.unwind_failed_submit(id, &err, 1, teardown)?;
                         return self.decode_sync(state, on_token);
                     }
                 }
@@ -234,14 +292,14 @@ impl<M: LanguageModel> DirectEngine<M> {
                 // Nothing was committed: undo the read step's append and the
                 // next one, so the closed sequence holds no speculative state.
                 let n = 1 + i32::from(next.is_some());
-                self.retire(id, next.as_deref(), n)?;
+                self.retire(id, next.as_deref(), n, teardown)?;
                 return Err(DirectEngineError::Row(error.message().to_string()));
             }
             let stopped = delivers_to_callback(&state.generated, before, &outcome)
                 && !on_token(outcome.token);
             if stopped || outcome.finish.is_some() {
                 if next.is_some() {
-                    self.retire(id, next.as_deref(), 1)?;
+                    self.retire(id, next.as_deref(), 1, teardown)?;
                 }
                 return Ok(());
             }
@@ -276,15 +334,20 @@ impl<M: LanguageModel> DirectEngine<M> {
     /// at the schedule ([`EngineError::Eval`]; any other error appended
     /// nothing). The caller then decodes synchronously, which re-runs the
     /// step through the guarded per-row chain and reports a persistent
-    /// failure there.
+    /// failure there. Under [`Teardown::Discard`] a failure that left an
+    /// append in place cannot be undone, so it ends the run with `err`.
     pub(super) fn unwind_failed_submit(
         &mut self,
         id: SequenceId,
         err: &EngineError,
         uncommitted: i32,
+        teardown: Teardown,
     ) -> Result<(), DirectEngineError> {
         tracing::debug!(seq_id = %id, error = %err, "decode lookahead: submit failed, decoding synchronously");
         let n = uncommitted + i32::from(matches!(err, EngineError::Eval(_)));
+        if teardown == Teardown::Discard && n > 0 {
+            return Err(DirectEngineError::Step(err.clone()));
+        }
         self.engine_mut()
             .unwind_appends(id, n)
             .map_err(DirectEngineError::Step)
@@ -294,18 +357,23 @@ impl<M: LanguageModel> DirectEngine<M> {
     /// A model-owned family's rewind edits the model's own state, so its
     /// in-flight forward is synced first, as the scheduler's finishing
     /// teardown does; a pool trim only moves a host offset, and the lazy
-    /// slices it implies are ordered after the append on the stream.
+    /// slices it implies are ordered after the append on the stream. Under
+    /// [`Teardown::Discard`] the appends stay for the caller's close.
     pub(super) fn retire(
         &mut self,
         id: SequenceId,
         next: Option<&MlxArray>,
         n: i32,
+        teardown: Teardown,
     ) -> Result<(), DirectEngineError> {
         if let Some(next) = next
             && self.model().sequence_state_layout().backend == SequenceStateBackend::ModelOwned
             && let Err(err) = crate::try_eval(next)
         {
             tracing::debug!(seq_id = %id, error = %err, "decode lookahead: discarded step failed to evaluate");
+        }
+        if teardown == Teardown::Discard {
+            return Ok(());
         }
         self.engine_mut()
             .unwind_appends(id, n)

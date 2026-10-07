@@ -30,7 +30,7 @@ use std::time::Instant;
 use super::direct::{
     DirectEngine, DirectEngineError, DirectRequest, DirectRun, delivers_to_callback,
 };
-use super::direct_decode::{DecodeState, single};
+use super::direct_decode::{DecodeState, Teardown, single};
 use super::rows::{finish_row, sample_and_finish_row};
 use super::{Engine, EngineError, StepBatch};
 use crate::cache::{DecodeLookaheadAppendScope, SequenceId, can_trim_prompt_cache};
@@ -312,7 +312,7 @@ impl<M: LanguageModel> DirectEngine<M> {
                         continue;
                     }
                     // Decode the round synchronously instead.
-                    Err(err) => self.unwind_failed_submit(id, &err, 0)?,
+                    Err(err) => self.unwind_failed_submit(id, &err, 0, Teardown::Unwind)?,
                 }
             }
             rounds.rounds += 1;

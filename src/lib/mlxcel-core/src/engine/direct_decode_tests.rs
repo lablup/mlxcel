@@ -20,6 +20,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
+use super::direct_decode::Teardown;
 use super::*;
 use crate::cache::{SequenceId, SequenceStateLayout};
 use crate::generate::{LanguageModel, SamplingConfig};
@@ -346,31 +347,61 @@ fn ineligible_sampling_falls_back_to_the_synchronous_loop() {
     assert!(forced.force_sync());
 }
 
-/// A model-owned family pipelines only when it rewinds its own state, and
-/// then leaves that state exactly where the synchronous loop does.
+/// Whether `decode` would take the pipeline for `sampling` on a fresh
+/// sequence, and with which teardown.
+fn decode_teardown<M: LanguageModel>(
+    client: &mut DirectEngine<M>,
+    sampling: &SamplingConfig,
+) -> Option<Teardown> {
+    let id = client.open_sequence().unwrap();
+    let teardown = client.decode_lookahead(id, sampling).map(|(_, t)| t);
+    client.close_sequence(id);
+    teardown
+}
+
+/// A model-owned family that rewinds its own state pipelines with an exact
+/// unwind and leaves that state where the synchronous loop does; one that
+/// cannot rewind still pipelines `decode` (the retired CLI loop pipelined
+/// every family), emitting the same stream and leaving the one append past
+/// the finishing token for the close to release. The exact rule, which the
+/// drafter loop and the scheduler use, still declines it.
 #[test]
-fn model_owned_families_pipeline_only_with_a_rewind() {
+fn model_owned_families_pipeline_with_an_exact_or_a_discarding_teardown() {
     let greedy = SamplingConfig::greedy();
     let run = |rewinds: bool, force_sync: bool| {
         let model = OwnedModel::new(rewinds);
         let mut client = DirectEngine::new(&model, 0).with_force_sync(force_sync);
-        let eligible = pipelines(&mut client, &greedy);
+        let exact = pipelines(&mut client, &greedy);
+        let teardown = decode_teardown(&mut client, &greedy);
         let tokens = client.run(&[2, 3], 16, &greedy).unwrap();
         let released = model.released.borrow().last().copied();
-        (eligible, tokens, released, model.forwards.get())
+        (exact, teardown, tokens, released, model.forwards.get())
     };
-    let (eligible, sync_tokens, sync_len, sync_fwd) = run(true, true);
-    assert!(!eligible);
+    let (exact, teardown, sync_tokens, sync_len, sync_fwd) = run(true, true);
+    assert!(!exact);
+    assert_eq!(teardown, None);
     assert_eq!(sync_tokens, vec![4, 5, 6]);
     assert_eq!(sync_len, Some(5));
 
-    let (eligible, tokens, len, fwd) = run(true, false);
-    assert!(eligible);
+    let (exact, teardown, tokens, len, fwd) = run(true, false);
+    assert!(exact);
+    assert_eq!(teardown, Some(Teardown::Unwind));
     assert_eq!((tokens, len), (sync_tokens.clone(), sync_len));
     assert_eq!(fwd, sync_fwd + 1, "one unwound speculative forward");
 
-    let (eligible, tokens, len, fwd) = run(false, false);
-    assert!(!eligible, "no rewind, no pipeline");
+    let (exact, teardown, tokens, len, fwd) = run(false, false);
+    assert!(!exact, "no rewind, no exact unwind");
+    assert_eq!(teardown, Some(Teardown::Discard));
+    assert_eq!(tokens, sync_tokens);
+    assert_eq!(fwd, sync_fwd + 1, "one discarded speculative forward");
+    assert_eq!(
+        len,
+        sync_len.map(|l| l + 1),
+        "the append past the EOS is released with the sequence"
+    );
+
+    let (_, teardown, tokens, len, fwd) = run(false, true);
+    assert_eq!(teardown, None, "MLXCEL_FORCE_SYNC keeps it synchronous");
     assert_eq!((tokens, len, fwd), (sync_tokens, sync_len, sync_fwd));
 }
 

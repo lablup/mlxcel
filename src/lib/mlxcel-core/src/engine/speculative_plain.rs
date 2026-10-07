@@ -22,7 +22,7 @@
 //! from it synchronously on the next round; the switch costs no forward.
 
 use super::direct::{DirectEngine, DirectEngineError, delivers_to_callback};
-use super::direct_decode::{DecodeState, single};
+use super::direct_decode::{DecodeState, Teardown, single};
 use super::lookahead::lookahead_feedback_input;
 use super::rows::tokens_to_host;
 use super::speculative::{SpeculativeRounds, SpeculativeRunError};
@@ -76,7 +76,7 @@ impl<M: LanguageModel> DirectEngine<M> {
                     if asked {
                         drafter.retract_draft(draft);
                     }
-                    self.unwind_failed_submit(id, &err, 1)?;
+                    self.unwind_failed_submit(id, &err, 1, Teardown::Unwind)?;
                     return Ok(false);
                 }
             }
@@ -89,7 +89,7 @@ impl<M: LanguageModel> DirectEngine<M> {
         let outcome = single(self.engine_mut().finish_rows(&host, &mut [state.row()]))?;
         if let Some(error) = outcome.error {
             let n = 1 + i32::from(next.is_some());
-            self.retire(id, next.as_deref(), n)?;
+            self.retire(id, next.as_deref(), n, Teardown::Unwind)?;
             return Err(DirectEngineError::Row(error.message().to_string()).into());
         }
         let emitted = &state.generated[before..];
@@ -98,7 +98,7 @@ impl<M: LanguageModel> DirectEngine<M> {
             delivers_to_callback(&state.generated, before, &outcome) && !on_token(outcome.token);
         if stopped || outcome.finish.is_some() {
             if next.is_some() {
-                self.retire(id, next.as_deref(), 1)?;
+                self.retire(id, next.as_deref(), 1, Teardown::Unwind)?;
             }
             return Ok(true);
         }

@@ -27,8 +27,9 @@
 //! After the first token it decodes on the lookahead pipeline, the split
 //! step ([`Engine::submit`], [`Engine::finish_rows`], [`Engine::unwind_appends`])
 //! with step n+1's forward overlapping step n's host read, whenever the
-//! scheduler's eligibility rules admit the sequence, and on the synchronous
-//! [`Engine::step`] otherwise or under `MLXCEL_FORCE_SYNC` (`direct_decode`).
+//! scheduler's eligibility rules admit the sequence or the sequence is a
+//! model-owned family's that the close releases (`direct_decode`), and on the
+//! synchronous [`Engine::step`] otherwise or under `MLXCEL_FORCE_SYNC`.
 
 use std::borrow::Cow;
 use std::time::Instant;
