@@ -1,0 +1,1 @@
+{"id":"cmpl-b4f0d3d9-5533-476b-b1ef-65142876c630","object":"text_completion","created":1791335788,"model":"qwen3.5-4b-4bit","system_fingerprint":null,"choices":[{"index":0,"text":"\n    if n <= 1:\n        return n","finish_reason":"length","logprobs":null}],"usage":{"prompt_tokens":4,"completion_tokens":12,"total_tokens":16,"prompt_tokens_details":{"cached_tokens":0}}}

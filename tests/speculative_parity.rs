@@ -305,11 +305,16 @@ async fn server_round(
 ///
 /// The single-width [`assert_server_byte_equality`] stays for the MTP
 /// pairings, which have one measured width each.
+///
+/// `must_run` names the widths that must complete a burst rather than
+/// decline (#2191: on CUDA, widths 2 and 4 of the Qwen 3.5 4B pairing). Any
+/// decline must carry the probe's measured divergence, not a `NotRun`.
 async fn assert_server_byte_equality_at_widths(
     pairing: &Pairing,
     target_path: &std::path::Path,
     draft_path: &std::path::Path,
     widths: &[usize],
+    must_run: &[usize],
 ) {
     let draft_str = draft_path.to_string_lossy().to_string();
 
@@ -367,6 +372,20 @@ async fn assert_server_byte_equality_at_widths(
                 pairing.name,
                 spec.logs,
             );
+            assert!(
+                spec.logs.contains("differs from the single-token chain"),
+                "[{}] b={width}: the exactness gate declined without a measured divergence \
+                 (a probe that did not run is not a verdict). Captured logs:\n{}",
+                pairing.name,
+                spec.logs,
+            );
+            assert!(
+                !must_run.contains(&width),
+                "[{}] b={width}: this width must run the burst on this host, but the gate \
+                 declined it. Captured logs:\n{}",
+                pairing.name,
+                spec.logs,
+            );
             declined.push(width);
             assert!(
                 identical,
@@ -395,16 +414,10 @@ async fn assert_server_byte_equality_at_widths(
         mismatched.iter().map(|(w, _)| *w).collect::<Vec<_>>(),
         baseline.content,
     );
-    // An all-declined run used to fail here, on the reasoning that it says
-    // nothing about verify-path parity. It does say something, and on this
-    // pairing on CUDA it is the correct outcome rather than a hole in the test
-    // (issue #1935): the verify block is not bit-equal to classic decode at any
-    // width on this host, the exactness probe now measures that rather than
-    // reporting a false pass from an 8-token prefix, and the gate declines
-    // every width. What the test must not allow is a decline for any other
-    // reason standing in for a measured verdict, which the per-width assertion
-    // above rules out. `MLXCEL_MTP_ALLOW_INEXACT=1` remains the way to engage
-    // the burst anyway and forfeit the contract.
+    // An all-declined run is acceptable only where `must_run` is empty: every
+    // decline above carried a measured divergence, so the contract held
+    // through the gate. `MLXCEL_MTP_ALLOW_INEXACT=1` remains the way to
+    // engage the burst anyway and forfeit the contract.
     if ran.is_empty() {
         eprintln!(
             "[{}] every width declined by a measured exactness verdict, and every response \
@@ -838,7 +851,25 @@ async fn greedy_parity_dflash_qwen35_4b() {
     // single-width arm could not tell a width-specific kernel boundary from a
     // path difference shared by all of them, and the single width this test
     // used to run was 16, which the gate now declines.
-    assert_server_byte_equality_at_widths(pairing, &target_path, &draft_path, &[2, 4, 8, 16]).await;
+    //
+    // Since #2191 the CUDA verify block rotates Q and K row by row like
+    // decode, so widths 2 and 4 must run the burst there and match byte for
+    // byte; 8 and 16 still decline through the probe's measured verdict
+    // (`M * B >= 8` moves MLX from `qmv` to `qmm_sm80`). Elsewhere the
+    // verdict decides and either outcome is accepted.
+    let must_run: &[usize] = if mlxcel_core::cuda_is_available() {
+        &[2, 4]
+    } else {
+        &[]
+    };
+    assert_server_byte_equality_at_widths(
+        pairing,
+        &target_path,
+        &draft_path,
+        &[2, 4, 8, 16],
+        must_run,
+    )
+    .await;
 }
 
 /// Greedy parity for the Gemma 4 31B + MTP assistant pairing.

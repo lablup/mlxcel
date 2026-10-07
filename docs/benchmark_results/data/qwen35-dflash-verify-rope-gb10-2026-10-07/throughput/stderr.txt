@@ -1,0 +1,15 @@
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=0.58
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=1.57
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=1.57
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=1.95
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=1.52
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=2.62
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=3.25
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=4.30
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=2.49
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=3.36
+[gate] busy: ['cargo-clippy', 'clippy-driver'] foreign_models: [] ci_job=False load1=0.90
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=1.71
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=1.64
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=2.68
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=3.53

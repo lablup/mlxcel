@@ -66,6 +66,8 @@ use std::path::Path;
 /// dozen tokens past the prompt (position 194 at a 158-token prompt, 326 at a
 /// 256-token one, in both cases whatever the accept pattern). The knob is kept
 /// because that sweep is worth being able to repeat; the default is unchanged.
+/// Since #2191 the CUDA probe prefills [`CUDA_PROBE_PROMPT_LEN`] tokens and adds
+/// a long draw ([`PROBE_LONG_WALK`] tokens past the prompt) that does catch it.
 ///
 /// See `docs/benchmark_results/dflash-width-2-4-residual-qwen35-gb10-2026-09-21.md`.
 const DEFAULT_PROBE_PROMPT_LEN: usize = 8;
@@ -97,6 +99,33 @@ fn probe_prompt_len() -> usize {
 /// guard against is a false *pass*, and each one costs about a second on
 /// a 27B target at worker startup.
 const PROBE_DRAWS: usize = 3;
+
+/// Tokens past the prompt the CUDA-only long draw walks blocks and the chain
+/// over. On `qwen3.5-4b-4bit` with the #2191 fix reverted the first differing
+/// row of a served transcript sits 133 tokens past its prompt, and a
+/// synthetic walk has to be long enough that a rare per-element rounding
+/// difference reaches a byte with near certainty.
+const PROBE_LONG_WALK: usize = 128;
+
+/// Prompt length every CUDA probe draw prefills, short draws and the long
+/// one, unless `MLXCEL_MTP_PROBE_PROMPT_LEN` asks for more. Close to the
+/// 158-token prompt the hazard was measured at, and the cheapest
+/// configuration measured in MLX CUDA graph-cache misses: each KV length the
+/// probe visits can capture new graph topologies, and those misses count
+/// toward the fatal lifetime limit #818 guards against, so the short draws
+/// and the walk share one length range instead of adding a second one at
+/// 8 tokens (#2191).
+const CUDA_PROBE_PROMPT_LEN: usize = 160;
+
+/// [`probe_prompt_len`] raised to [`CUDA_PROBE_PROMPT_LEN`] on CUDA.
+/// Metal keeps its prompt length, and so its probe cost.
+fn probe_prompt_len_for_host() -> usize {
+    if mlxcel_core::cuda_is_available() {
+        probe_prompt_len().max(CUDA_PROBE_PROMPT_LEN)
+    } else {
+        probe_prompt_len()
+    }
+}
 
 // Configuration.
 #[derive(Debug, Clone, Deserialize)]
@@ -1266,6 +1295,10 @@ impl Qwen35DecoderLayer {
             Qwen35MLPVariant::Dense(mlp) => mlp.forward(&self.post_attention_layernorm.forward(&h)),
             Qwen35MLPVariant::MoE(moe) => moe.forward(&self.post_attention_layernorm.forward(&h)),
         };
+        #[cfg(test)]
+        if !self.is_linear {
+            super::qwen3_next::verify_rope::capture::record("mlp", &mlp_out);
+        }
         mlxcel_core::add(&h, &mlp_out)
     }
 
@@ -1624,43 +1657,6 @@ impl Qwen35Model {
     ///
     /// Used by: [`Self::mtp_exactness_allows`], and the
     /// `metal_block_vs_chain_op_parity` diagnostic's model-level sibling.
-    /// Whether this checkpoint on this host is the configuration issue #1935
-    /// measured a verify block failing in, and which the probe cannot observe.
-    ///
-    /// `None` when the probe's verdict can be trusted. `Some(reason)` when it
-    /// cannot, which the caller turns into a decline.
-    fn cuda_sdpa_vector_verify_hazard(&self) -> Option<&'static str> {
-        if !mlxcel_core::cuda_is_available() {
-            return None;
-        }
-        // The same gate CUDA's `supports_sdpa_vector` applies, read from this
-        // checkpoint's geometry and from the kill switch that governs it.
-        let head_dim = self.config.head_dim_resolved();
-        if head_dim != 256 && head_dim != 288 {
-            return None;
-        }
-        // MLX reads this switch as `env::get_var("MLXCEL_SDPA_VECTOR_LARGE_D", 1)`,
-        // an integer defaulting to 1, and this deliberately reads it more
-        // narrowly than mlxcel's own documented spelling: only a value that
-        // parses to zero counts as off. Erring narrow declines a burst that
-        // might have been safe; erring wide would report "safe" for a process
-        // in which MLX still takes the fused kernels, which is the one
-        // direction a safety gate must not be wrong in.
-        let fused_enabled = std::env::var("MLXCEL_SDPA_VECTOR_LARGE_D")
-            .ok()
-            .and_then(|v| v.trim().parse::<i64>().ok())
-            .map(|v| v != 0)
-            .unwrap_or(true);
-        if !fused_enabled {
-            return None;
-        }
-        Some(
-            "on CUDA this head_dim reaches the fused sdpa_vector kernels, where a verify \
-             block's per-position attention is not bit-equal to the single-token decode it \
-             stands for (issue #1935); MLXCEL_SDPA_VECTOR_LARGE_D=0 restores it",
-        )
-    }
-
     pub fn probe_block_chain_exactness(&self, block_size: usize) -> BlockChainExactness {
         if block_size < 2 {
             return BlockChainExactness::NotRun("block width below 2 drafts nothing");
@@ -1670,32 +1666,22 @@ impl Qwen35Model {
             return BlockChainExactness::NotRun("degenerate vocabulary");
         }
 
-        // A configuration the probe cannot observe, which is worse than one it
-        // fails, because a probe that cannot see a hazard reports a pass
-        // (issue #1935). On CUDA, `head_dim` 256 and 288 reach the fused
-        // `sdpa_vector` kernels (issue #675), and there a verify block's
-        // per-position attention stops being bit-equal to the single-token
-        // decode it stands for. Measured on GB10: the served greedy
-        // completion parts from classic decode at every verify width, and
-        // `MLXCEL_SDPA_VECTOR_LARGE_D=0` makes the two byte-identical over
-        // all 200 tokens. The probe's own arms never see it, because the
-        // difference does not begin until several dozen tokens past the
-        // prompt while the probe compares one block immediately after a clean
-        // prefill, and no prompt length from 8 to 512 changes that.
-        //
-        // So this declines rather than measuring. `MLXCEL_MTP_ALLOW_INEXACT=1`
-        // engages the burst anyway and forfeits the contract, and
-        // `MLXCEL_SDPA_VECTOR_LARGE_D=0` buys the contract back at the cost of
-        // classic decode's fused attention kernel.
-        if let Some(why) = self.cuda_sdpa_vector_verify_hazard() {
-            return BlockChainExactness::NotRun(why);
-        }
-
         for draw in 0..PROBE_DRAWS {
             let verdict = self.probe_one_draw(block_size, vocab, draw);
             if !verdict.is_equal() {
                 return verdict;
             }
+        }
+        // On CUDA a verify block can match the chain right after prefill and
+        // still part from it dozens of tokens later: a block-only kernel
+        // difference that rounds one bf16 element differently at some
+        // positions and not others lands in the KV cache and stays there
+        // (#1935, #2191). One block right after a clean prefill read `Equal`
+        // at widths 2 and 4 at every prompt length from 8 to 512 while the
+        // served path diverged, so CUDA also walks blocks and the chain
+        // together well past the prompt. Metal keeps the short draws only.
+        if mlxcel_core::cuda_is_available() {
+            return self.probe_long_walk(block_size, vocab);
         }
         BlockChainExactness::Equal
     }
@@ -1711,7 +1697,9 @@ impl Qwen35Model {
         let salt = draw * 977 + 1;
         let wrap =
             |i: usize, stride: usize, offset: usize| ((i * stride + offset + salt) % vocab) as i32;
-        let prompt: Vec<i32> = (0..probe_prompt_len()).map(|i| wrap(i, 7, 1)).collect();
+        let prompt: Vec<i32> = (0..probe_prompt_len_for_host())
+            .map(|i| wrap(i, 7, 1))
+            .collect();
         let block: Vec<i32> = (0..block_size).map(|i| wrap(i, 13, 3)).collect();
 
         let as_input =
@@ -1741,6 +1729,74 @@ impl Qwen35Model {
             .collect();
 
         compare_block_against_chain(&block_positions, &chain_positions)
+    }
+
+    /// The probe's long draw: a prefill, then [`PROBE_LONG_WALK`] synthetic
+    /// tokens fed both as full-accept verify blocks of `block_size` and one
+    /// token at a time, every block row compared in logit bytes against the
+    /// chain step for the same token. Mirrors Gemma 4's long buffered draw
+    /// (`Gemma4TextConfig::mtp_probe_prompt_lengths`). Rows are compared as
+    /// each block lands, so memory stays at one block of logits.
+    fn probe_long_walk(&self, block_size: usize, vocab: usize) -> BlockChainExactness {
+        let wrap = |i: usize, stride: usize, offset: usize| ((i * stride + offset) % vocab) as i32;
+        let prompt: Vec<i32> = (0..probe_prompt_len_for_host())
+            .map(|i| wrap(i, 7, 5))
+            .collect();
+        let walk: Vec<i32> = (0..PROBE_LONG_WALK).map(|i| wrap(i, 31, 11)).collect();
+        let as_input =
+            |tokens: &[i32]| mlxcel_core::from_slice_i32(tokens, &[1, tokens.len() as i32]);
+        let position_bytes = |logits: &MlxArray, index: i32| -> Vec<u8> {
+            let shape = mlxcel_core::array_shape(logits);
+            let row = mlxcel_core::slice(logits, &[0, index, 0], &[shape[0], index + 1, shape[2]]);
+            mlxcel_core::array_to_raw_bytes(&row)
+        };
+
+        let mut chain_caches = self.make_internal_caches();
+        let _ = self.forward_speculative(&as_input(&prompt), &mut chain_caches, &[]);
+        let mut block_caches = self.make_internal_caches();
+        let _ = self.forward_speculative(&as_input(&prompt), &mut block_caches, &[]);
+
+        for (start, block) in walk.chunks(block_size).enumerate() {
+            let out = self.forward_speculative(&as_input(block), &mut block_caches, &[]);
+            let block_positions: Vec<Vec<u8>> = (0..block.len())
+                .map(|i| position_bytes(&out.logits, i as i32))
+                .collect();
+            let chain_positions: Vec<Vec<u8>> = block
+                .iter()
+                .map(|token| {
+                    let step =
+                        self.forward_speculative(&as_input(&[*token]), &mut chain_caches, &[]);
+                    position_bytes(&step.logits, 0)
+                })
+                .collect();
+            match compare_block_against_chain(&block_positions, &chain_positions) {
+                BlockChainExactness::Diverges {
+                    position,
+                    differing_bytes,
+                    total_bytes,
+                } => {
+                    return BlockChainExactness::Diverges {
+                        position: start * block_size + position,
+                        differing_bytes,
+                        total_bytes,
+                    };
+                }
+                BlockChainExactness::Equal => {}
+                other => return other,
+            }
+        }
+        BlockChainExactness::Equal
+    }
+
+    /// Turn the CUDA per-row verify RoPE on or off on every full-attention
+    /// layer, so a test can show what the probe sees with the fix reverted.
+    #[cfg(test)]
+    pub(crate) fn set_verify_rope_rows_for_test(&mut self, on: bool) {
+        for layer in &mut self.layers {
+            if let Qwen35AttentionVariant::FullAttention(ref mut attn) = layer.attention {
+                attn.verify_rope_rows = on;
+            }
+        }
     }
 
     fn visible_len(cache: &Qwen3NextCache) -> usize {
@@ -4152,3 +4208,7 @@ mod chain_parity_gate_tests {
 #[cfg(test)]
 #[path = "qwen3_5_dflash_probe_tests.rs"]
 mod qwen3_5_dflash_probe_tests;
+
+#[cfg(test)]
+#[path = "qwen3_5_rope_attribution_tests.rs"]
+mod qwen3_5_rope_attribution_tests;

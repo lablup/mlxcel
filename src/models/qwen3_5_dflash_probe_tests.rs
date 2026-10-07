@@ -24,6 +24,7 @@
 //! `#[ignore]`-gated: they need the checkpoint on disk and a GPU.
 //!
 //! ```text
+//! MLX_CUDA_GRAPH_CACHE_SIZE=2000 \
 //! cargo test --release --features cuda -p mlxcel --lib -- --ignored \
 //!   --test-threads=1 --nocapture models::qwen3_5::qwen3_5_dflash_probe_tests
 //! ```
@@ -58,7 +59,7 @@ fn widths() -> Vec<usize> {
 ///
 /// Returns `None` (and says so) when the checkpoint is not on disk, so a
 /// host without it reports a skip instead of a failure.
-fn load_text_model() -> Option<(crate::LoadedModel, String)> {
+pub(super) fn load_text_model() -> Option<(crate::LoadedModel, String)> {
     let dir = target_dir();
     if !std::path::Path::new(&dir).exists() {
         eprintln!("[1935] skipping: {dir} not on disk");
@@ -70,7 +71,28 @@ fn load_text_model() -> Option<(crate::LoadedModel, String)> {
     Some((model, dir))
 }
 
-fn text_model(model: &crate::LoadedModel) -> &Qwen35Model {
+pub(super) fn text_model_mut(model: &mut crate::LoadedModel) -> &mut Qwen35Model {
+    match model {
+        crate::LoadedModel::Qwen35(m) => m,
+        crate::LoadedModel::Qwen35VLM(vlm) => &mut vlm.text_model,
+        _ => panic!("target is not a Qwen 3.5 text backbone"),
+    }
+}
+
+/// `MLXCEL_Q35_ROW_ROPE=0|1` overrides the CUDA per-row verify RoPE (#2191)
+/// for the attribution matrix; unset keeps what construction chose.
+pub(super) fn apply_row_rope_override(model: &mut crate::LoadedModel) {
+    if let Ok(v) = std::env::var("MLXCEL_Q35_ROW_ROPE") {
+        let on = v.trim() != "0";
+        eprintln!(
+            "[2191] per-row verify RoPE forced {}",
+            if on { "on" } else { "off" }
+        );
+        text_model_mut(model).set_verify_rope_rows_for_test(on);
+    }
+}
+
+pub(super) fn text_model(model: &crate::LoadedModel) -> &Qwen35Model {
     match model {
         crate::LoadedModel::Qwen35(m) => m,
         crate::LoadedModel::Qwen35VLM(vlm) => &vlm.text_model,
@@ -78,7 +100,7 @@ fn text_model(model: &crate::LoadedModel) -> &Qwen35Model {
     }
 }
 
-fn ids_of(tokens: &[i32]) -> UniquePtr<MlxArray> {
+pub(super) fn ids_of(tokens: &[i32]) -> UniquePtr<MlxArray> {
     mlxcel_core::from_slice_i32(tokens, &[1, tokens.len() as i32])
 }
 
@@ -90,13 +112,13 @@ fn synthetic(len: usize, vocab: usize, stride: usize, offset: usize) -> Vec<i32>
 }
 
 /// Raw bytes of one `[1, T, W]` row.
-fn row_bytes(t: &MlxArray, index: i32) -> Vec<u8> {
+pub(super) fn row_bytes(t: &MlxArray, index: i32) -> Vec<u8> {
     let shape = mlxcel_core::array_shape(t);
     let row = mlxcel_core::slice(t, &[0, index, 0], &[shape[0], index + 1, shape[2]]);
     mlxcel_core::array_to_raw_bytes(&row)
 }
 
-fn differing(a: &[u8], b: &[u8]) -> usize {
+pub(super) fn differing(a: &[u8], b: &[u8]) -> usize {
     a.iter().zip(b).filter(|(x, y)| x != y).count()
 }
 
@@ -414,7 +436,7 @@ fn rollback_after_partial_accept_matches_the_decode_chain() {
     );
 }
 
-fn env_ids(name: &str) -> Option<Vec<i32>> {
+pub(super) fn env_ids(name: &str) -> Option<Vec<i32>> {
     let raw = std::env::var(name).ok()?;
     Some(
         raw.trim()
@@ -972,9 +994,10 @@ fn speculative_t1_forward_versus_classic_on_the_real_transcript() {
 #[test]
 #[ignore = "needs the real Qwen 3.5 4B checkpoint, a GPU and a recorded transcript"]
 fn block_versus_chain_byte_bisect_on_the_real_transcript() {
-    let Some((model, dir)) = load_text_model() else {
+    let Some((mut model, dir)) = load_text_model() else {
         return;
     };
+    apply_row_rope_override(&mut model);
     let text = text_model(&model);
     let Some(prompt) = env_ids("MLXCEL_Q35_PROBE_PROMPT") else {
         eprintln!("[1935] skipping: set MLXCEL_Q35_PROBE_PROMPT and MLXCEL_Q35_PROBE_REFERENCE");

@@ -1,0 +1,184 @@
+{
+ "classic": [
+  {
+   "sha": "0eef87cdf198",
+   "chars": 430,
+   "completion_tokens": 146,
+   "text": "    if len(arr) <= 1:\n        return arr\n    \n    pivot = arr[len(arr) // 2]\n    left = [x for x in arr if x < pivot]\n    middle = [x for x in arr if x == pivot]\n    right = [x for x in arr if x > pivot]\n    \n    return quicksort(left) + middle + quicksort(right)\n\n# Example usage:\nif __name__ == \"__main__\":\n    unsorted_list = [10, 7, 8, 9, 1, 5]\n    sorted_list = quicksort(unsorted_list)\n    print(\"Sorted list:\", sorted_list)"
+  },
+  {
+   "sha": "7f530421e508",
+   "chars": 993,
+   "completion_tokens": 200,
+   "text": " the first, second, and third laws. Each law addresses a different aspect of how energy behaves in physical systems.\n\n**First Law of Thermodynamics**  \nThe first law states that energy cannot be created or destroyed; it can only change form. In other words, the total amount of energy in an isolated system remains constant. This principle is essentially the law of conservation of energy.\n\n**Second Law of Thermodynamics**  \nThe second law introduces the concept of entropy, a measure of disorder or randomness in a system. It asserts that the total entropy of an isolated system can never decrease over time. Consequently, natural processes tend to move toward a state of greater disorder, and energy transformations are never 100\u202f% efficient.\n\n**Third Law of Thermodynamics**  \nThe third law deals with absolute zero temperature. It states that as the temperature of a system approaches absolute zero (0\u202fK), the entropy of the system approaches a constant minimum value. In practical terms,"
+  },
+  {
+   "sha": "fffb026a234e",
+   "chars": 770,
+   "completion_tokens": 200,
+   "text": "<think>\nHere's a thinking process that leads to the story above:\n\n1.  **Analyze the Request:**\n    *   **Topic:** A lighthouse keeper finds a message in a bottle.\n    *   **Format:** Short story.\n    *   **Tone:** Open, but generally lighthouse stories lean towards atmospheric, mysterious, or reflective.\n\n2.  **Character Development:**\n    *   *Name:* Elias Thorne. Sounds old, sturdy, slightly melancholic.\n    *   *Setting:* A remote, isolated lighthouse. Let's make it on a jagged coast, maybe near a stormy sea. The \"Black Rock\" Lighthouse.\n    *   *Personality:* Solitary, routine-oriented, perhaps a bit weary but dedicated. He's been there a long time.\n    *   *Motivation:* Why does he care about the bottle? It needs to be more than just a curiosity. It needs"
+  }
+ ],
+ "classic_log": {
+  "bursts": 0,
+  "declined": false,
+  "probe_lines": [],
+  "block_size_lines": []
+ },
+ "2": [
+  {
+   "sha": "0eef87cdf198",
+   "chars": 430,
+   "completion_tokens": 146,
+   "text": "    if len(arr) <= 1:\n        return arr\n    \n    pivot = arr[len(arr) // 2]\n    left = [x for x in arr if x < pivot]\n    middle = [x for x in arr if x == pivot]\n    right = [x for x in arr if x > pivot]\n    \n    return quicksort(left) + middle + quicksort(right)\n\n# Example usage:\nif __name__ == \"__main__\":\n    unsorted_list = [10, 7, 8, 9, 1, 5]\n    sorted_list = quicksort(unsorted_list)\n    print(\"Sorted list:\", sorted_list)"
+  },
+  {
+   "sha": "7f530421e508",
+   "chars": 993,
+   "completion_tokens": 200,
+   "text": " the first, second, and third laws. Each law addresses a different aspect of how energy behaves in physical systems.\n\n**First Law of Thermodynamics**  \nThe first law states that energy cannot be created or destroyed; it can only change form. In other words, the total amount of energy in an isolated system remains constant. This principle is essentially the law of conservation of energy.\n\n**Second Law of Thermodynamics**  \nThe second law introduces the concept of entropy, a measure of disorder or randomness in a system. It asserts that the total entropy of an isolated system can never decrease over time. Consequently, natural processes tend to move toward a state of greater disorder, and energy transformations are never 100\u202f% efficient.\n\n**Third Law of Thermodynamics**  \nThe third law deals with absolute zero temperature. It states that as the temperature of a system approaches absolute zero (0\u202fK), the entropy of the system approaches a constant minimum value. In practical terms,"
+  },
+  {
+   "sha": "fffb026a234e",
+   "chars": 770,
+   "completion_tokens": 200,
+   "text": "<think>\nHere's a thinking process that leads to the story above:\n\n1.  **Analyze the Request:**\n    *   **Topic:** A lighthouse keeper finds a message in a bottle.\n    *   **Format:** Short story.\n    *   **Tone:** Open, but generally lighthouse stories lean towards atmospheric, mysterious, or reflective.\n\n2.  **Character Development:**\n    *   *Name:* Elias Thorne. Sounds old, sturdy, slightly melancholic.\n    *   *Setting:* A remote, isolated lighthouse. Let's make it on a jagged coast, maybe near a stormy sea. The \"Black Rock\" Lighthouse.\n    *   *Personality:* Solitary, routine-oriented, perhaps a bit weary but dedicated. He's been there a long time.\n    *   *Motivation:* Why does he care about the bottle? It needs to be more than just a curiosity. It needs"
+  }
+ ],
+ "2_log": {
+  "bursts": 4,
+  "declined": false,
+  "probe_lines": [
+   "2026-10-07T02:51:30.873445Z  INFO mlxcel::models::speculative_exactness: MTP exactness probe passed: verify block is byte-identical to the single-token chain block_size=2"
+  ],
+  "block_size_lines": [
+   "speculative=dflash (drafter=models/mlx/qwen3.5-4b-dflash, block_size=2, block_size_from=operator override, explicit_kind=true))"
+  ]
+ },
+ "4": [
+  {
+   "sha": "0eef87cdf198",
+   "chars": 430,
+   "completion_tokens": 146,
+   "text": "    if len(arr) <= 1:\n        return arr\n    \n    pivot = arr[len(arr) // 2]\n    left = [x for x in arr if x < pivot]\n    middle = [x for x in arr if x == pivot]\n    right = [x for x in arr if x > pivot]\n    \n    return quicksort(left) + middle + quicksort(right)\n\n# Example usage:\nif __name__ == \"__main__\":\n    unsorted_list = [10, 7, 8, 9, 1, 5]\n    sorted_list = quicksort(unsorted_list)\n    print(\"Sorted list:\", sorted_list)"
+  },
+  {
+   "sha": "7f530421e508",
+   "chars": 993,
+   "completion_tokens": 200,
+   "text": " the first, second, and third laws. Each law addresses a different aspect of how energy behaves in physical systems.\n\n**First Law of Thermodynamics**  \nThe first law states that energy cannot be created or destroyed; it can only change form. In other words, the total amount of energy in an isolated system remains constant. This principle is essentially the law of conservation of energy.\n\n**Second Law of Thermodynamics**  \nThe second law introduces the concept of entropy, a measure of disorder or randomness in a system. It asserts that the total entropy of an isolated system can never decrease over time. Consequently, natural processes tend to move toward a state of greater disorder, and energy transformations are never 100\u202f% efficient.\n\n**Third Law of Thermodynamics**  \nThe third law deals with absolute zero temperature. It states that as the temperature of a system approaches absolute zero (0\u202fK), the entropy of the system approaches a constant minimum value. In practical terms,"
+  },
+  {
+   "sha": "fffb026a234e",
+   "chars": 770,
+   "completion_tokens": 200,
+   "text": "<think>\nHere's a thinking process that leads to the story above:\n\n1.  **Analyze the Request:**\n    *   **Topic:** A lighthouse keeper finds a message in a bottle.\n    *   **Format:** Short story.\n    *   **Tone:** Open, but generally lighthouse stories lean towards atmospheric, mysterious, or reflective.\n\n2.  **Character Development:**\n    *   *Name:* Elias Thorne. Sounds old, sturdy, slightly melancholic.\n    *   *Setting:* A remote, isolated lighthouse. Let's make it on a jagged coast, maybe near a stormy sea. The \"Black Rock\" Lighthouse.\n    *   *Personality:* Solitary, routine-oriented, perhaps a bit weary but dedicated. He's been there a long time.\n    *   *Motivation:* Why does he care about the bottle? It needs to be more than just a curiosity. It needs"
+  }
+ ],
+ "4_log": {
+  "bursts": 4,
+  "declined": false,
+  "probe_lines": [
+   "2026-10-07T02:51:51.819966Z  INFO mlxcel::models::speculative_exactness: MTP exactness probe passed: verify block is byte-identical to the single-token chain block_size=4"
+  ],
+  "block_size_lines": [
+   "speculative=dflash (drafter=models/mlx/qwen3.5-4b-dflash, block_size=4, block_size_from=operator override, explicit_kind=true))"
+  ]
+ },
+ "8": [
+  {
+   "sha": "0eef87cdf198",
+   "chars": 430,
+   "completion_tokens": 146,
+   "text": "    if len(arr) <= 1:\n        return arr\n    \n    pivot = arr[len(arr) // 2]\n    left = [x for x in arr if x < pivot]\n    middle = [x for x in arr if x == pivot]\n    right = [x for x in arr if x > pivot]\n    \n    return quicksort(left) + middle + quicksort(right)\n\n# Example usage:\nif __name__ == \"__main__\":\n    unsorted_list = [10, 7, 8, 9, 1, 5]\n    sorted_list = quicksort(unsorted_list)\n    print(\"Sorted list:\", sorted_list)"
+  },
+  {
+   "sha": "7f530421e508",
+   "chars": 993,
+   "completion_tokens": 200,
+   "text": " the first, second, and third laws. Each law addresses a different aspect of how energy behaves in physical systems.\n\n**First Law of Thermodynamics**  \nThe first law states that energy cannot be created or destroyed; it can only change form. In other words, the total amount of energy in an isolated system remains constant. This principle is essentially the law of conservation of energy.\n\n**Second Law of Thermodynamics**  \nThe second law introduces the concept of entropy, a measure of disorder or randomness in a system. It asserts that the total entropy of an isolated system can never decrease over time. Consequently, natural processes tend to move toward a state of greater disorder, and energy transformations are never 100\u202f% efficient.\n\n**Third Law of Thermodynamics**  \nThe third law deals with absolute zero temperature. It states that as the temperature of a system approaches absolute zero (0\u202fK), the entropy of the system approaches a constant minimum value. In practical terms,"
+  },
+  {
+   "sha": "fffb026a234e",
+   "chars": 770,
+   "completion_tokens": 200,
+   "text": "<think>\nHere's a thinking process that leads to the story above:\n\n1.  **Analyze the Request:**\n    *   **Topic:** A lighthouse keeper finds a message in a bottle.\n    *   **Format:** Short story.\n    *   **Tone:** Open, but generally lighthouse stories lean towards atmospheric, mysterious, or reflective.\n\n2.  **Character Development:**\n    *   *Name:* Elias Thorne. Sounds old, sturdy, slightly melancholic.\n    *   *Setting:* A remote, isolated lighthouse. Let's make it on a jagged coast, maybe near a stormy sea. The \"Black Rock\" Lighthouse.\n    *   *Personality:* Solitary, routine-oriented, perhaps a bit weary but dedicated. He's been there a long time.\n    *   *Motivation:* Why does he care about the bottle? It needs to be more than just a curiosity. It needs"
+  }
+ ],
+ "8_log": {
+  "bursts": 0,
+  "declined": true,
+  "probe_lines": [
+   "2026-10-07T02:52:07.203897Z  WARN mlxcel::models::speculative_exactness: MTP declined: verify block position 0 differs from the single-token chain in 192685 of 496640 logit bytes. Falling back to classic decode. Set MLXCEL_MTP_ALLOW_INEXACT=1 to engage anyway and forfeit the temperature-0 byte-identity contract. block_size=8",
+   "2026-10-07T02:52:07.203930Z  WARN mlxcel::server::batch::speculative_burst: DFlash speculative dispatch declined for seq seq-0: the block-versus-chain exactness probe did not pass at block_size=8 on this host, so a 8-row verify block would not reproduce classic decode's tokens; falling back to classic decode (see the probe verdict logged above; MLXCEL_MTP_ALLOW_INEXACT=1 engages anyway and forfeits the contract)",
+   "2026-10-07T02:52:08.182149Z  WARN mlxcel::server::batch::speculative_burst: DFlash speculative dispatch declined for seq seq-1: the block-versus-chain exactness probe did not pass at block_size=8 on this host, so a 8-row verify block would not reproduce classic decode's tokens; falling back to classic decode (see the probe verdict logged above; MLXCEL_MTP_ALLOW_INEXACT=1 engages anyway and forfeits the contract)",
+   "2026-10-07T02:52:10.957691Z  WARN mlxcel::server::batch::speculative_burst: DFlash speculative dispatch declined for seq seq-2: the block-versus-chain exactness probe did not pass at block_size=8 on this host, so a 8-row verify block would not reproduce classic decode's tokens; falling back to classic decode (see the probe verdict logged above; MLXCEL_MTP_ALLOW_INEXACT=1 engages anyway and forfeits the contract)"
+  ],
+  "block_size_lines": [
+   "speculative=dflash (drafter=models/mlx/qwen3.5-4b-dflash, block_size=8, block_size_from=operator override, explicit_kind=true))"
+  ]
+ },
+ "16": [
+  {
+   "sha": "0eef87cdf198",
+   "chars": 430,
+   "completion_tokens": 146,
+   "text": "    if len(arr) <= 1:\n        return arr\n    \n    pivot = arr[len(arr) // 2]\n    left = [x for x in arr if x < pivot]\n    middle = [x for x in arr if x == pivot]\n    right = [x for x in arr if x > pivot]\n    \n    return quicksort(left) + middle + quicksort(right)\n\n# Example usage:\nif __name__ == \"__main__\":\n    unsorted_list = [10, 7, 8, 9, 1, 5]\n    sorted_list = quicksort(unsorted_list)\n    print(\"Sorted list:\", sorted_list)"
+  },
+  {
+   "sha": "7f530421e508",
+   "chars": 993,
+   "completion_tokens": 200,
+   "text": " the first, second, and third laws. Each law addresses a different aspect of how energy behaves in physical systems.\n\n**First Law of Thermodynamics**  \nThe first law states that energy cannot be created or destroyed; it can only change form. In other words, the total amount of energy in an isolated system remains constant. This principle is essentially the law of conservation of energy.\n\n**Second Law of Thermodynamics**  \nThe second law introduces the concept of entropy, a measure of disorder or randomness in a system. It asserts that the total entropy of an isolated system can never decrease over time. Consequently, natural processes tend to move toward a state of greater disorder, and energy transformations are never 100\u202f% efficient.\n\n**Third Law of Thermodynamics**  \nThe third law deals with absolute zero temperature. It states that as the temperature of a system approaches absolute zero (0\u202fK), the entropy of the system approaches a constant minimum value. In practical terms,"
+  },
+  {
+   "sha": "fffb026a234e",
+   "chars": 770,
+   "completion_tokens": 200,
+   "text": "<think>\nHere's a thinking process that leads to the story above:\n\n1.  **Analyze the Request:**\n    *   **Topic:** A lighthouse keeper finds a message in a bottle.\n    *   **Format:** Short story.\n    *   **Tone:** Open, but generally lighthouse stories lean towards atmospheric, mysterious, or reflective.\n\n2.  **Character Development:**\n    *   *Name:* Elias Thorne. Sounds old, sturdy, slightly melancholic.\n    *   *Setting:* A remote, isolated lighthouse. Let's make it on a jagged coast, maybe near a stormy sea. The \"Black Rock\" Lighthouse.\n    *   *Personality:* Solitary, routine-oriented, perhaps a bit weary but dedicated. He's been there a long time.\n    *   *Motivation:* Why does he care about the bottle? It needs to be more than just a curiosity. It needs"
+  }
+ ],
+ "16_log": {
+  "bursts": 0,
+  "declined": true,
+  "probe_lines": [
+   "2026-10-07T02:52:21.821896Z  WARN mlxcel::models::speculative_exactness: MTP declined: verify block position 0 differs from the single-token chain in 192685 of 496640 logit bytes. Falling back to classic decode. Set MLXCEL_MTP_ALLOW_INEXACT=1 to engage anyway and forfeit the temperature-0 byte-identity contract. block_size=16",
+   "2026-10-07T02:52:21.821932Z  WARN mlxcel::server::batch::speculative_burst: DFlash speculative dispatch declined for seq seq-0: the block-versus-chain exactness probe did not pass at block_size=16 on this host, so a 16-row verify block would not reproduce classic decode's tokens; falling back to classic decode (see the probe verdict logged above; MLXCEL_MTP_ALLOW_INEXACT=1 engages anyway and forfeits the contract)",
+   "2026-10-07T02:52:22.374697Z  WARN mlxcel::server::batch::speculative_burst: DFlash speculative dispatch declined for seq seq-1: the block-versus-chain exactness probe did not pass at block_size=16 on this host, so a 16-row verify block would not reproduce classic decode's tokens; falling back to classic decode (see the probe verdict logged above; MLXCEL_MTP_ALLOW_INEXACT=1 engages anyway and forfeits the contract)",
+   "2026-10-07T02:52:25.151257Z  WARN mlxcel::server::batch::speculative_burst: DFlash speculative dispatch declined for seq seq-2: the block-versus-chain exactness probe did not pass at block_size=16 on this host, so a 16-row verify block would not reproduce classic decode's tokens; falling back to classic decode (see the probe verdict logged above; MLXCEL_MTP_ALLOW_INEXACT=1 engages anyway and forfeits the contract)"
+  ],
+  "block_size_lines": [
+   "speculative=dflash (drafter=models/mlx/qwen3.5-4b-dflash, block_size=16, block_size_from=operator override, explicit_kind=true))"
+  ]
+ },
+ "auto": [
+  {
+   "sha": "0eef87cdf198",
+   "chars": 430,
+   "completion_tokens": 146,
+   "text": "    if len(arr) <= 1:\n        return arr\n    \n    pivot = arr[len(arr) // 2]\n    left = [x for x in arr if x < pivot]\n    middle = [x for x in arr if x == pivot]\n    right = [x for x in arr if x > pivot]\n    \n    return quicksort(left) + middle + quicksort(right)\n\n# Example usage:\nif __name__ == \"__main__\":\n    unsorted_list = [10, 7, 8, 9, 1, 5]\n    sorted_list = quicksort(unsorted_list)\n    print(\"Sorted list:\", sorted_list)"
+  },
+  {
+   "sha": "7f530421e508",
+   "chars": 993,
+   "completion_tokens": 200,
+   "text": " the first, second, and third laws. Each law addresses a different aspect of how energy behaves in physical systems.\n\n**First Law of Thermodynamics**  \nThe first law states that energy cannot be created or destroyed; it can only change form. In other words, the total amount of energy in an isolated system remains constant. This principle is essentially the law of conservation of energy.\n\n**Second Law of Thermodynamics**  \nThe second law introduces the concept of entropy, a measure of disorder or randomness in a system. It asserts that the total entropy of an isolated system can never decrease over time. Consequently, natural processes tend to move toward a state of greater disorder, and energy transformations are never 100\u202f% efficient.\n\n**Third Law of Thermodynamics**  \nThe third law deals with absolute zero temperature. It states that as the temperature of a system approaches absolute zero (0\u202fK), the entropy of the system approaches a constant minimum value. In practical terms,"
+  },
+  {
+   "sha": "fffb026a234e",
+   "chars": 770,
+   "completion_tokens": 200,
+   "text": "<think>\nHere's a thinking process that leads to the story above:\n\n1.  **Analyze the Request:**\n    *   **Topic:** A lighthouse keeper finds a message in a bottle.\n    *   **Format:** Short story.\n    *   **Tone:** Open, but generally lighthouse stories lean towards atmospheric, mysterious, or reflective.\n\n2.  **Character Development:**\n    *   *Name:* Elias Thorne. Sounds old, sturdy, slightly melancholic.\n    *   *Setting:* A remote, isolated lighthouse. Let's make it on a jagged coast, maybe near a stormy sea. The \"Black Rock\" Lighthouse.\n    *   *Personality:* Solitary, routine-oriented, perhaps a bit weary but dedicated. He's been there a long time.\n    *   *Motivation:* Why does he care about the bottle? It needs to be more than just a curiosity. It needs"
+  }
+ ],
+ "auto_log": {
+  "bursts": 4,
+  "declined": false,
+  "probe_lines": [
+   "2026-10-07T02:52:41.017819Z  INFO mlxcel::models::speculative_exactness: MTP exactness probe passed: verify block is byte-identical to the single-token chain block_size=4"
+  ],
+  "block_size_lines": [
+   "speculative=dflash (drafter=models/mlx/qwen3.5-4b-dflash, block_size=4, block_size_from=measured default for sm_121 with an affine-quantized target, explicit_ki"
+  ]
+ }
+}
