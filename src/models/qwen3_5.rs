@@ -1995,7 +1995,7 @@ impl Qwen35Model {
     pub fn load<P: AsRef<Path>>(model_dir: P) -> Result<(Self, Qwen35Config), String> {
         let model_dir = model_dir.as_ref();
 
-        println!("[Qwen3.5] Loading config...");
+        tracing::info!("[Qwen3.5] Loading config...");
         let config_path = model_dir.join("config.json");
         let config_str = std::fs::read_to_string(&config_path)
             .map_err(|e| format!("Failed to read config.json: {}", e))?;
@@ -2031,7 +2031,7 @@ impl Qwen35Model {
             .map_err(|e| format!("Failed to parse config: {}", e))?;
         config.validate_supported().map_err(|e| e.to_string())?;
 
-        println!(
+        tracing::info!(
             "[Qwen3.5] Config loaded: {} layers ({} full attention, {} linear attention)",
             config.num_hidden_layers,
             (0..config.num_hidden_layers)
@@ -2042,7 +2042,7 @@ impl Qwen35Model {
                 .count(),
         );
 
-        println!("[Qwen3.5] Loading weights...");
+        tracing::info!("[Qwen3.5] Loading weights...");
         let weights = crate::models::load_text_weights(model_dir, None)?;
 
         // Reconstruct block-scaled FP8 tensors before any other sanitization:
@@ -2050,7 +2050,6 @@ impl Qwen35Model {
         // replaces `<name>.weight` with a packed plane plus `<name>.scales`.
         let weights = match fp8_block {
             Some(detected) => {
-                println!("[Qwen3.5] Requantizing fine-grained FP8 weights to mxfp8...");
                 crate::models::requantize_block_fp8_weights(weights, detected.block_rows)?
             }
             None => weights,
@@ -2059,10 +2058,10 @@ impl Qwen35Model {
         // Strip language_model. prefix and sanitize
         let weights = sanitize_moe_weights(weights, &config);
 
-        println!("[Qwen3.5] Building model...");
+        tracing::info!("[Qwen3.5] Building model...");
         let model = Self::from_weights(&weights, &config)?;
 
-        println!("[Qwen3.5] Model loaded successfully");
+        tracing::info!("[Qwen3.5] Model loaded successfully");
         Ok((model, config))
     }
 

@@ -1012,13 +1012,13 @@ impl JambaModel {
         let path = Path::new(model_path);
 
         // Load config
-        println!("[Jamba] Loading config...");
+        tracing::info!("[Jamba] Loading config...");
         let config_path = path.join("config.json");
         let config_str = std::fs::read_to_string(&config_path)?;
         let config_str = super::sanitize_config_json(&config_str);
         let mut config: JambaConfig = serde_json::from_str(&config_str)?;
         config.post_init();
-        println!(
+        tracing::info!(
             "[Jamba] Config loaded: {} layers ({} attention, {} mamba)",
             config.num_hidden_layers,
             config
@@ -1034,17 +1034,17 @@ impl JambaModel {
         );
 
         // Load weights
-        println!("[Jamba] Loading weights from safetensors...");
+        tracing::info!("[Jamba] Loading weights from safetensors...");
         let weights = crate::models::load_text_weights(path, None)?;
 
         // Process weights
         let weights = Self::sanitize_weights(weights, &config);
 
         // Build model
-        println!("[Jamba] Building model...");
+        tracing::info!("[Jamba] Building model...");
         let model = Self::from_weights(config.clone(), weights)?;
 
-        println!("[Jamba] Model loaded successfully");
+        tracing::info!("[Jamba] Model loaded successfully");
         Ok((model, config))
     }
 

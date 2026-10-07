@@ -727,7 +727,7 @@ impl GriffinModel {
         let path = Path::new(model_path);
 
         // Load config
-        println!("[Griffin] Loading config...");
+        tracing::info!("[Griffin] Loading config...");
         let config_path = path.join("config.json");
         let config_str = std::fs::read_to_string(&config_path)?;
         let config_str = super::sanitize_config_json(&config_str);
@@ -740,7 +740,7 @@ impl GriffinModel {
         let recurrent = (0..config.num_hidden_layers)
             .filter(|i| pattern[i % pattern.len()] == "recurrent")
             .count();
-        println!(
+        tracing::info!(
             "[Griffin] Config loaded: {} layers ({} recurrent, {} attention)",
             config.num_hidden_layers,
             recurrent,
@@ -748,18 +748,18 @@ impl GriffinModel {
         );
 
         // Load weights
-        println!("[Griffin] Loading weights from safetensors...");
+        tracing::info!("[Griffin] Loading weights from safetensors...");
         let weights = crate::models::load_text_weights(path, None)?;
 
         // Process weights
         let weights = Self::sanitize_weights(weights, &config);
 
         // Build model
-        println!("[Griffin] Building model...");
+        tracing::info!("[Griffin] Building model...");
         let mut model = Self::from_weights(config.clone(), weights)?;
         model.set_eos_token_ids(crate::loading::read_eos_token_ids(path));
 
-        println!("[Griffin] Model loaded successfully");
+        tracing::info!("[Griffin] Model loaded successfully");
         Ok((model, config))
     }
 

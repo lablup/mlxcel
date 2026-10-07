@@ -473,7 +473,7 @@ impl NemotronNASModel {
     pub fn load(model_path: &str) -> Result<(Self, NemotronNASConfig), Box<dyn std::error::Error>> {
         let path = Path::new(model_path);
 
-        println!("[NemotronNAS] Loading config...");
+        tracing::info!("[NemotronNAS] Loading config...");
         let config_path = path.join("config.json");
         let config_str = std::fs::read_to_string(&config_path)?;
         let config_str = super::sanitize_config_json(&config_str);
@@ -486,20 +486,20 @@ impl NemotronNASModel {
             .filter(|bc| !bc.attention.no_op)
             .count();
 
-        println!(
+        tracing::info!(
             "[NemotronNAS] Config loaded: {} layers ({} with attention, {} no-op)",
             config.num_hidden_layers,
             num_attention_layers,
             config.num_hidden_layers - num_attention_layers
         );
 
-        println!("[NemotronNAS] Loading weights from safetensors...");
+        tracing::info!("[NemotronNAS] Loading weights from safetensors...");
         let weights = crate::models::load_text_weights(path, None)?;
 
-        println!("[NemotronNAS] Building model...");
+        tracing::info!("[NemotronNAS] Building model...");
         let model = Self::from_weights(config.clone(), weights)?;
 
-        println!("[NemotronNAS] Model loaded successfully");
+        tracing::info!("[NemotronNAS] Model loaded successfully");
         Ok((model, config))
     }
 

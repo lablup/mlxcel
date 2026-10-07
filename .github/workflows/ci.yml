@@ -530,11 +530,6 @@ jobs:
     # src/lib/mlx-cpp/patches/ keep Apple's copyright) are skipped by that same
     # predicate and must stay that way: this gate must never stamp a Lablup
     # header onto upstream-derived code.
-    #
-    # The second step is the script's own unit suite, which nothing else runs:
-    # tests/test_insert_apache_header.py sits outside python/, and
-    # python.yml's pytest step is scoped to `python/tests` behind a
-    # `python/**` path filter.
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -544,8 +539,26 @@ jobs:
           persist-credentials: false
       - name: Every owned source file carries the license header
         run: python3 scripts/insert_apache_header.py --check
-      - name: Header script unit tests
-        run: python3 -m unittest discover -s tests -p 'test_insert_apache_header.py' -v
+
+  python-tooling:
+    name: python tooling tests
+    # Not behind the `changes` filter: no toolchain, about a minute to run, and
+    # the scripts under test (bench_decode.sh, rocm_gpu_guard.sh, the quality
+    # gate, the header inserter) are touched by changes that no path filter on
+    # the Rust or Python trees would match. Before #2150 only the header suite
+    # ran in CI (inside license-headers); the other suites under tests/ ran
+    # nowhere, so a script change could break its tests and merge green.
+    # python.yml's pytest step covers `python/tests` only. The suites are
+    # stdlib unittest and need no GPU, model or network.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Run the tests/ Python suites
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
 
   llama-compat-manifest:
     name: llama-compat manifest

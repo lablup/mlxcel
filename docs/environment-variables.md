@@ -119,7 +119,7 @@ Both server entry points implement llama-server b10621's Vertex AI custom-contai
 | `MLXCEL_DECODE_MB_PER_BUFFER` | `0`/`off`/`false`/`no` (disable), positive integer | `1000` on pre-M5 Apple Silicon (the same gate as `MLX_MAX_OPS_PER_BUFFER`), off elsewhere | Metal command-buffer input budget applied during decode steps only. MLX commits a command buffer once the element count of its distinct inputs, shifted right by 20, passes `MLX_MAX_MB_PER_BUFFER` (40-50 by default). With `MLX_MAX_OPS_PER_BUFFER` raised to 1000 that budget is the only cap that binds, and in decode, where every token reads the whole weight set, the default commits a buffer every one to two layers (about 23 per token on command-r7b 4-bit) and idles the GPU at each boundary. mlxcel raises the budget around pipelined decode only (the generate loops and the server's lookahead decode) and leaves prefill and synchronous decode steps on the device default, through a runtime override in the `mlx/backend/metal/device.cpp` overlay. A synchronous step encodes and then waits, so one large buffer there only removes the overlap between CPU encoding and GPU execution. Measured on M1 Ultra (500-token prompt, 128 generated tokens, three interleaved runs per cell), decode at 1000 versus the default: command-r7b 4-bit +7%, Llama 3.1 8B 4-bit +5.6%, Qwen2.5 7B 4-bit +8%, Gemma 3n E4B +3%, Granite 4.0 H Tiny +10%, Qwen3-30B-A3B +20%, Mixtral 8x7B +21%, Llama 3.1 8B bf16 +17%, Gemma 3 4B flat. Applying the same value to prefill as well would roughly double peak memory on long prompts (2048 tokens: Qwen2.5 7B 4-bit 6.0 to 12.6 GB, Qwen3-30B-A3B 19.8 to 36.2 GB) and cost up to 2.7% prefill throughput, which is why it is scoped to decode. Speculative draft/verify loops are not covered yet. Ignored when `MLX_MAX_MB_PER_BUFFER` is set. Measurement: `docs/benchmark_results/metal-mb-per-buffer-m1ultra-2026-09-21.md`. |
 | `MLXCEL_MAMBA1_SCAN_KERNEL` | `0` disables; anything else or unset keeps the default | on (Metal, ROCm; CUDA for Jamba) | Fused kernel for the Mamba1 selective scan in Jamba (#2005) and Mamba / Falcon-Mamba (#2007). One kernel walks every timestep of a layer with the state in float32 registers (one simdgroup per channel, one lane per state element), for prefill and decode alike, replacing a Rust loop of small ops per timestep. Measured on M1 Ultra, Jamba reasoning 3B 4-bit: prefill +45% at 512 tokens and +54% at 1024 and 2048 (about 830 to 1330 tok/s), decode about +10%, prefill peak memory 4.11 to 3.15 GB at 2048 tokens. The float32 state makes results differ from the graph scan, which rounds the bf16 state every step: teacher-forced perplexity improves slightly (15.357 to 15.271 on the WikiText-2 excerpt) and top-1 choices differ only where the graph path's top two were within one logit. Set to `0` to force the graph scan (A/B, rollback). Checked on every call. On CUDA (#1981) Jamba uses a port that rounds every step in the activation dtype exactly as the graph scan does, so its output is bit-identical to the graph scan when all scan inputs share one dtype (otherwise the graph scan runs); on GB10 it cut a 3.3k-token Jamba chat request from 4.3 s to 1.5 s. Mamba / Falcon-Mamba still use the graph scan on CUDA. ROCm (lablup/mlxcel#2069) runs a HIP port of the float32-state kernel for all three families, not the graph-exact one: there the graph scan's `state @ C` (K = state width, below 32) goes to rocBLAS, whose reduction order a custom kernel cannot reproduce. It passes the same f32 and bf16 parity tests as Metal on gfx1151; no Mamba1 or Jamba checkpoint was available there to measure decode. Measurements: `docs/benchmark_results/jamba-mamba1-scan-kernel-m1ultra-2026-09-28.md`, `docs/benchmark_results/jamba-mamba1-scan-kernel-gb10-2026-09-30.md`. |
 | `MLXCEL_PREFILL_DEQUANT_MIN_M` | `0`/`off`/`false`/`no` (disable), positive integer row count | `1024` on M1-generation Apple Silicon, off on every other Apple generation, CUDA and ROCm | Input row count (every axis but the last, so a server batch counts all its rows) at which an affine 4-bit projection whose scales share the input's dtype (f16 or bf16) runs as `dequantize` + dense matmul instead of `quantized_matmul`. Only projections whose output has more than 512 tiles of 32 x 32 qualify (at 1024 rows, an output wider than 512): there the two return identical bytes, while narrower outputs tile differently and stay on `quantized_matmul` (#2001). On ROCm a projection also qualifies only where `quantized_matmul` itself runs dequantize + hipBLASLt, the one route that returns the same bytes (#2081); there the dense path repeats that GEMM without the backend's dequantized-weight cache, so setting this variable on ROCm gains nothing. Measured on M1 Ultra, prefill at 1024 rows: Llama 3.1 8B +9.7 to +10.0%, command-r7b +7.7%, Phi-3 mini +10.2%, Qwen2.5 7B +0.6 to +1.5%, Gemma 2 2B +0.6%, Mixtral 8x7B +0.6%; bf16-scale Qwen3 1.7B +15.1%, Qwen3-30B-A3B +5.5%, Gemma 4 12B +3.0%, Gemma 4 E4B +0.9%, Gemma 3 4B +0.5%. At 2048 rows every one of them gains, +0.8 to +18.0%. Below 1024 several lose (at 512 rows Qwen2.5 7B -4.2%, Gemma 4 E4B -2.7%, Gemma 2 2B -1.3%), which sets the default. Costs 0.1 to 0.6 GB of prefill peak memory. The default 2048-token prefill chunks of both the CLI and the server (ADR 0007) cross it; a server run at `--prefill-chunk-size 512` stays below it. Other generations are unmeasured, so the default is off there; set a row count to opt in. Measurement: `docs/benchmark_results/prefill-dense-gemm-m1ultra-2026-09-27.md`. |
-| `MLXCEL_HEADROOM_FACTOR` | positive `f64` | `1.20` | Runtime/activation headroom multiplier used by the unified memory estimator (`mlxcel inspect`, `--estimate-memory`, `--recommend-quant`). Positive values `<= 1.0` disable the headroom term; invalid or non-positive values warn and fall back to the default. Override only for calibration runs — see the in-code recipe in `src/execution/memory_estimate.rs`. The factor is calibrated on Apple Silicon; ROCm builds add the `MLX_ROCM_MAX_INFLIGHT_MB` budget as a separate term instead of a larger factor (see the ROCm section below, lablup/mlxcel#2155). |
+| `MLXCEL_HEADROOM_FACTOR` | positive `f64` | `1.20` | Allocator-overhead multiplier on `weights + KV` in the unified memory estimator (`mlxcel inspect`, `--estimate-memory`, the paged KV `auto` budget and the prompt-cache capacity defaults). The activation reserve (`MLXCEL_ACTIVATION_MULT`) and, on ROCm builds, the backend in-flight reserve are separate terms that the factor does not scale. `--recommend-quant` calls the same estimator but reads only its weight and KV figures, so this variable does not change its advice. Positive values `<= 1.0` disable the headroom term; invalid or non-positive values warn and fall back to the default. Override only for calibration runs, see the in-code recipe in `src/execution/memory_estimate.rs`. The factor is calibrated on Apple Silicon; ROCm builds add the `MLX_ROCM_MAX_INFLIGHT_MB` budget as a separate term instead of a larger factor (see [ROCm backend variables](#rocm-backend-variables), lablup/mlxcel#2155). |
 | `MLXCEL_CACHE_DIR` | directory path | `$HOME/.cache/mlxcel` | Root for mlxcel's on-disk caches. The tokenizer language-analysis disk cache (language-bias features) lives under `tokenizer-scripts/`, and the location-independent global model store lives under `models/<owner>/<name>` when `MLXCEL_MODELS_DIR` and the store-root flag (`--model-store-root` on the servers, `--models-dir` on the subcommands) are both unset. |
 | `MLXCEL_MODELS_DIR` | directory path | unset (falls back to `${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/models`) | Dedicated model-store root. Snapshots live directly at `$MLXCEL_MODELS_DIR/<owner>/<name>` with no `models/` subdir, so the whole store can sit on a separate volume without dragging the tokenizer-script cache along. Read by `mlxcel download`, the `-m/--model` resolver (`generate` / `serve` / `inspect` / `run`), the `mlxcel-server -m/--model` resolver, and `list` / `rm`. Resolution precedence for the models root: the CLI flag (`--model-store-root <PATH>` on `mlxcel-server` / `mlxcel serve` since #1438 reserved `--models-dir` for b10621 router mode; still `--models-dir <PATH>` on the `download` / `list` / `rm` / `generate` subcommands), then `MLXCEL_MODELS_DIR`, then `${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/models`. (`download --local-dir <PATH>` is separate: it writes the snapshot verbatim at that exact path.) |
 | `MLXCEL_DEFAULT_ORG` | HuggingFace org/user name | `mlx-community` | Org prepended to a bare, prefix-less model name (no `/`) by the `-m/--model` resolver (`generate` / `serve` / `inspect` / `run`), the `mlxcel-server -m` resolver, and the `download` verb (`mlxcel download` / `mlx-server download`), so `mlxcel run Qwen3-4B-4bit` resolves to `mlx-community/Qwen3-4B-4bit` and `mlxcel download Qwen3-4B-4bit` downloads that same repo. An explicit `owner/name` repo-id and an existing local path are unaffected. An empty/whitespace value falls back to `mlx-community`. |
@@ -190,8 +190,16 @@ CUDA builds also use non-`MLXCEL_*` variables such as `CUDA_HOME` and
 `MLX_CUDA_ARCHITECTURES`; see [Installation](installation.md#linux-with-cuda).
 ROCm builds (`--features rocm`) read `ROCM_PATH` (default `/opt/rocm`) and
 `MLX_ROCM_ARCHITECTURES` (the `gfx` targets, default detected with `rocminfo`); see
-[Installation](installation.md#linux-with-amd-rocm-experimental). At runtime they
-also read `MLX_ROCM_FFT_CACHE_SIZE` (default 128, as on CUDA), the number of
+[Installation](installation.md#linux-with-amd-rocm-experimental). The variables the ROCm
+backend reads at run time are in [ROCm backend variables](#rocm-backend-variables).
+
+## ROCm backend variables
+
+These variables are read by the ROCm backend of a `--features rocm` build. The code that reads them is under `src/lib/mlx-cpp/patches-rocm/mlx/backend/rocm/` (the file is named where a row is not obvious). Unless a row says "every call", a variable is read once per process, the first time the code path that uses it runs, so it cannot be changed afterwards. "Presence" variables take effect for any value, including `0` and the empty string. Parsers that look at the first character accept exactly the characters listed. The variables are tuning, A/B and bisecting switches, not a stable public API, and none is recommended for deployment. How to build for ROCm and what the backend supports is in [Installation](installation.md#linux-with-amd-rocm-experimental).
+
+The paragraphs just below give the background for the first of these variables: `MLX_ROCM_FFT_CACHE_SIZE`, `MLX_ROCM_MAX_INFLIGHT_MB`, `MLX_ROCM_GPU_WATCHDOG_SECS`, `MLX_ROCM_WMMA_QMM`, `MLX_ROCM_WMMA_QMM_MAX_M`, `MLX_ROCM_QMM_DEQUANT_GEMM` and the integer knobs. After them, every variable has a row in the tables, grouped by the code it controls.
+
+The backend reads `MLX_ROCM_FFT_CACHE_SIZE` (default 128, as on CUDA), the number of
 hipFFT plans the plan cache keeps; a smaller value only trades memory for plan
 rebuilds. It must be a positive integer up to 2147483647; any other value
 (for example `0`, `-1`, `8abc` or an empty string) is ignored with a stderr
@@ -223,15 +231,17 @@ leaves the watchdog off. A GPU fault is reported without it, in
 about a second; the watchdog is for a kernel that never finishes, which cannot
 be told from a slow one, so it is opt-in and must exceed the longest prefill
 the server accepts. The stream stays wedged behind the kernel either way, so a
-watchdog failure still means restarting the process. It does not apply under
-`MLX_EVENT_BLOCKING`, whose blocking waits return promptly on a fault but have
-no poll loop to time.
+watchdog failure still means restarting the process. It does not time the
+`hipEventSynchronize` waits that `MLX_EVENT_BLOCKING` selects, which return
+promptly on a fault but have no poll loop; the atomic-event wait keeps its
+deadline under that variable.
 `MLX_ROCM_WMMA_QMM` picks how `quantized_matmul` runs a bf16 affine GEMM with
 more than one row (4-, 6- or 8-bit, group 64): unset uses the fused WMMA kernel
 where the device has native WMMA and is not a low-CU iGPU, `0` never uses it,
 and `1` uses it wherever the shape fits. `MLX_ROCM_WMMA_QMM_MAX_M` is the row
 count from which such a GEMM instead goes to dequantize + hipBLASLt, where
-that route is enabled (`MLX_ROCM_QMM_DEQUANT_GEMM` not `0`) and is not the fp8
+that route is enabled (`MLX_ROCM_QMM_DEQUANT_GEMM` unset or exactly `1`; any other
+value, including `true` or an empty string, disables it) and is not the fp8
 path; it defaults to `128` on RDNA 3.5 (`gfx1150` to `gfx1152`) and to no
 ceiling elsewhere, a value that is not an integer from 1 to 2147483647 is
 ignored with a stderr warning and keeps that default, and
@@ -257,6 +267,140 @@ default per architecture) sets the columns per block of the tiled qmv kernel,
 halved until it divides the output width. `MLX_ROCM_GROUPED_PREFILL_MIN_B`
 (default 64), `MLX_ROCM_MOE_SEG_MIN` (default 1) and `MLX_GRIDX_MULT` (default
 4) take 1 to 2147483647.
+
+### MoE gather qmv
+
+The kernels behind `gather_qmm` (quantized MoE experts), all in `quantized/qmm.hip`.
+
+| Variable | Values | Default | Purpose |
+|----------|--------|---------|---------|
+| `MLX_ROCM_GATHER_QMV_EXPERT_BATCHED` | `0` off, `1` on, anything else or empty keeps the default; every call | on | Expert-batched `gather_qmm` kernel (`gather_qmv_expert_batched_kernel`) for a transposed `gather_qmm` with sorted expert indices, `M == 1`, `B >= 64` rows, at most 64 experts and `B / E >= 4`. Schemes: bf16 or f16 affine, 4 or 8 bits, group 64 (on by default since #2112), and bf16 mxfp4, group 32 (since #2164). `0` sends every scheme to the other gather kernels, which is the way to A/B or bisect a MoE regression. |
+| `MLX_ROCM_GATHER_QMV_USE_WARP` | `0` or `1`, anything else or empty keeps the default; every call | on for transposed 2-, 4- and 8-bit weights and for affine 5- and 6-bit weights, else off | Gates the fast gather qmv kernels (wide-load, int8-dot and warp-shared). `0` sends `gather_qmm` to the per-row `gather_qmv_kernel`, except where the expert-batched kernel or a tiled gather kernel applies. |
+| `MLX_ROCM_GATHER_QMV_THREADS_PER_COL` | `16` or the wavefront size, whole string; anything else is ignored; every call | `16`; the wavefront size when `K >= 16384` with batch 1 on a wave32 device | Lanes per output column in the fast gather kernels. Unset or invalid falls back to `MLX_ROCM_QMV_THREADS_PER_COL`, then to the default. |
+| `MLX_ROCM_GATHER_QMV_USE_TILED` | presence | off | Opt-in tiled gather qmv for bf16 affine 4- and 8-bit weights, group 64, with a unit-stride 1-D batch. |
+| `MLX_ROCM_GROUPED_PREFILL` | integer parsed with `atoi`; nonzero enables, anything non-numeric is `0` | off | Work-in-progress grouped WMMA prefill for bf16 affine 4-bit group 64 `gather_qmm` with `M == 1` and a 1-D batch. Experimental: the code comment says it regresses until its kernel and GPU grouping are finished. It also needs a device with native WMMA and `N % 16 == 0`, or `MLX_ROCM_GATHER_QMV_USE_WMMA=1`. |
+| `MLX_ROCM_GROUPED_PREFILL_MIN_B` | integer from 1 to 2147483647; an invalid value warns on stderr and keeps the default | `64` | Smallest `B` (tokens times top-k) for the grouped prefill. |
+| `MLX_ROCM_GATHER_QMV_USE_WMMA` | `0` or `1`, anything else or empty keeps the default; read each time the grouped prefill is reached | on when the device has native WMMA and `N % 16 == 0` | Only inside the grouped prefill. `0` falls back to the standard dispatch. |
+
+### Dense qmv
+
+The `quantized_matmul` kernels for few rows (decode), in `quantized/qmm.hip`.
+
+| Variable | Values | Default | Purpose |
+|----------|--------|---------|---------|
+| `MLX_ROCM_QMV_USE_WARP` | `0` or `1`, anything else or empty keeps the default; every call | on for transposed weights | `0` disables the warp-shared qmv. A shape that qualifies for the batched qmv forces it on regardless. |
+| `MLX_ROCM_QMV_THREADS_PER_COL` | `16` or the wavefront size, whole string; anything else is ignored; every call | as for the gather row (`16`, or the wavefront size at `K >= 16384` with batch 1 on wave32) | Lanes per output column in the dense qmv. Also the fallback for the gather kernels. |
+| `MLX_ROCM_QMV_COLS_PER_BLOCK` | `4`, `8`, `16`, `32` or `64`, whole string; anything else is ignored; every call | chosen by `N`, `K` and the bit width | Output columns per block for the dense qmv, the gather warp-shared kernels and the expert-batched kernel. |
+| `MLX_ROCM_QMV_TILE_N` | integer from 1 to 32; an invalid value warns on stderr and keeps the default | per architecture (4 to 24 on RDNA, by CU count and L2 size) | Columns per block of the L2-tiled qmv, halved until it divides `N`. |
+| `MLX_ROCM_QMV_NO_TILED` | presence | tiled on | Disables the L2-tiled qmv. |
+| `MLX_ROCM_QMV_6BIT_SLOW` | presence | off | Sends 6-bit dense and gather qmv back to the warp-shared kernel instead of the full-wave tiled one. |
+| `MLX_ROCM_FORCE_LOW_CU` | value whose first character is `1`; read once per device | devices with 8 CUs or fewer | Treats the device as a low-CU iGPU for qmv and WMMA tuning (smaller tiles, and the fused WMMA qmm kernel off unless `MLX_ROCM_WMMA_QMM=1`). |
+
+### Dequantize + GEMM
+
+How `quantized_matmul` handles many rows: the fused WMMA kernel, or dequantize followed by a hipBLASLt GEMM. The first three variables are described in the prose above.
+
+| Variable | Values | Default | Purpose |
+|----------|--------|---------|---------|
+| `MLX_ROCM_QMM_DEQUANT_GEMM` | unset or exactly `1` enables; any other value, including `true` and the empty string, disables | on | The dequantize + hipBLASLt route for affine layouts. |
+| `MLX_ROCM_WMMA_QMM` | first character `0` off, `1` forced on; anything else or unset keeps the default | on where the device has native WMMA and is not a low-CU iGPU | The fused WMMA qmm kernel for bf16 affine GEMMs with more than one row (4-, 6- or 8-bit, group 64). |
+| `MLX_ROCM_WMMA_QMM_MAX_M` | integer from 1 to 2147483647; an invalid value warns on stderr and keeps the default | `128` on RDNA 3.5 (`gfx1150` to `gfx1152`), no ceiling elsewhere | Row count from which such a GEMM goes to dequantize + hipBLASLt instead; ignored when `MLX_ROCM_WMMA_QMM=1`. |
+| `MLX_ROCM_QMM_DEQUANT_M_THRESHOLD` | integer from 1 to 2147483647; an invalid value warns on stderr and keeps the default | built-in crossover by architecture and shape | `quantized_matmul` prefers dequantize + GEMM exactly when `M >=` the value. The route still needs `MLX_ROCM_QMM_DEQUANT_GEMM` enabled. |
+| `MLX_ROCM_QMM_DEQUANT_CACHE_SIZE` | integer from 0 to 2147483647; an invalid value warns on stderr and keeps the default | `8` | Entries in the cache of dequantized weights; `0` turns the cache off. |
+| `MLX_ROCM_QMM_DEQUANT_CACHE_MAX_BYTES` | non-negative decimal integer, bytes; a value with trailing characters is ignored without a warning, and a negative number wraps to a huge cap | `268435456` (256 MiB) | Byte cap of that cache; `0` turns the cache off. |
+
+### GEMM libraries
+
+The rocBLAS and hipBLASLt GEMM paths, in `matmul.cpp`, `gemms/rocblas_gemm.cpp`, `gemms/hipblaslt_gemm.cpp` and `quantized/qmm.hip`. The four `MLX_ROCM_GEMM_*_SOLUTION_INDEX` variables are shared by all three files. Three more hipBLASLt switches without the `MLX_ROCM_` prefix are in [Variables without the `MLX_ROCM_` prefix](#variables-without-the-mlx_rocm_-prefix).
+
+| Variable | Values | Default | Purpose |
+|----------|--------|---------|---------|
+| `MLX_ROCM_GEMM_F32_SOLUTION_INDEX` | integer from 0 to 2147483647; an invalid value warns on stderr and keeps the default | `0` (rocBLAS default algorithm) | rocBLAS solution index for single f32 GEMMs. An index rocBLAS rejects falls back to the default algorithm for the rest of the process. |
+| `MLX_ROCM_GEMM_F32_BATCHED_SOLUTION_INDEX` | same range | the value of the single f32 index | Same, for batched f32 GEMMs. |
+| `MLX_ROCM_GEMM_BF16_SOLUTION_INDEX` | same range | `0` | rocBLAS solution index for single bf16 GEMMs. |
+| `MLX_ROCM_GEMM_BF16_BATCHED_SOLUTION_INDEX` | same range | the value of the single bf16 index | Same, for batched bf16 GEMMs. |
+| `MLX_ROCM_GEMM_BF16` | first character `1`, `o` or `O` enables; `true` does not | off | Forces bf16 instead of fp8 e4m3 for half-precision hipBLASLt GEMMs on devices whose hipBLASLt has fp8 kernels (RDNA4). It has no effect elsewhere. |
+| `MLX_ROCM_NO_HIPBLASLT_EPILOGUE` | presence | epilogue on | Forces the hipBLASLt epilogue to the default and attaches no bias. Its only bias caller is the `AddMM` branch for a 1-D `c`, which MLX's `addmm` does not reach because it broadcasts `c` to the output shape first, so it changes nothing observable today. |
+| `MLX_ROCM_HIPBLASLT_TUNE` | presence | off | Times every algorithm hipBLASLt returns for a shape and keeps the fastest; costs warm-up time. |
+| `MLX_ROCM_GEMM_DEBUG` | presence | off | Prints each hipBLASLt GEMM (`M`, `N`, `K`, transposes, epilogue, bias) and each newly chosen algorithm to stderr. |
+
+### Unquantized MoE
+
+`gather_mm` and the fused MoE SwiGLU, in `matmul.cpp`, `moe_swiglu.cpp` and `gemms/naive_gemm.hip`.
+
+| Variable | Values | Default | Purpose |
+|----------|--------|---------|---------|
+| `MLX_ROCM_SORTED_GATHER` | exactly `0` disables | on | Segment and pack route for an `M == 1` `gather_mm`: consecutive rows of one expert run as one tiled GEMM. `0` sends the op to the generic gather path. |
+| `MLX_ROCM_MOE_SEG_MIN` | integer from 1 to 2147483647; an invalid value warns on stderr and keeps the default | `1` | Minimum average rows per expert run for segment GEMMs instead of the gemv gather. |
+| `MLX_ROCM_MOE_PACK` | first character `0`, `f`, `F`, `n` or `N` disables; anything else or empty enables | on | Pack plus strided-batched hipBLASLt for bf16 1-D MoE `gather_mm` with padded rows and no device-to-host copy. |
+| `MLX_ROCM_MOE_DEVICE_SEG` | first character `1`, `o`, `O`, `t` or `T` enables | off | VALU device-segment path instead of the pack. |
+| `MLX_ROCM_MOE_PACK_EXACT` | first character `1`, `o`, `O`, `t` or `T` enables | off | Legacy exact max-run length through a device-to-host copy; synchronizes. |
+| `MLX_ROCM_MOE_ASYNC` | first character `1`, `o`, `O`, `t` or `T` enables | off | Experimental: host path inside `hipLaunchHostFunc`. The code comment warns it can deadlock on some ROCm builds. |
+| `MLX_ROCM_MOE_NO_PIN_CACHE` | first character `1`, `o`, `O`, `t` or `T` enables | off | Stops reusing the pinned host copy of the sorted indices across the gate, up and down calls. |
+| `MLX_ROCM_MOE_PIN_STATS` | presence | off | Prints `[moe-pin] hits=... misses=...` to stderr when a pin-cache miss lands on a multiple of 200 lookups (counted per thread). |
+| `MLX_ROCM_MOE_PAD_SYNC` | first character `0`, `n`, `N`, `f` or `F`: heuristic only; `a`, `A` or `2`: measure every call; anything else or unset: cache | cache | Padded row count for the MoE pack GEMMs in `gather_mm` and the fused SwiGLU. The cache syncs once per `(T, E)` and re-measures every 512 hits. Heuristic-only is debug-only: it can read out of bounds under extreme expert imbalance. |
+| `MLX_ROCM_MOE_ZERO_SYNC` | first character `0`, `f`, `F`, `n` or `N` disables; anything else or empty enables | on | Fused sorted-MoE SwiGLU forward and VJP use pack plus batched hipBLASLt with no device-to-host copy; off uses host run-length segments. |
+| `MLX_ROCM_MOE_VJP_DEVICE_SEG` | first character `1`, `o`, `O`, `t` or `T` enables | off | The SwiGLU VJP uses VALU token tiles and segmented weight gradients. |
+
+### Allocator and device
+
+Mostly `allocator.cpp` and `device.cpp`. The first three are described in the prose above.
+
+| Variable | Values | Default | Purpose |
+|----------|--------|---------|---------|
+| `MLX_ROCM_FFT_CACHE_SIZE` | positive integer up to 2147483647; any other value warns and keeps the default | `128` | hipFFT plans the plan cache keeps. |
+| `MLX_ROCM_MAX_INFLIGHT_MB` | non-negative integer, MiB; any other value warns and keeps the default | `1024` | Memory that committed but unfinished command batches may have allocated; `0` turns the bound off. |
+| `MLX_ROCM_GPU_WATCHDOG_SECS` | non-negative integer, seconds; any other value warns and leaves the watchdog off | `0` (off) | Longest single host wait for GPU work before it fails with an error. |
+| `MLX_ROCM_FINEGRAINED` | integer parsed with `atoi`; nonzero on, anything non-numeric is `0`; read at every allocation | on for an integrated GPU, off for a discrete one | Fine-grained host-coherent device memory (`hipExtMallocWithFlags`). |
+| `MLX_ROCM_USE_ASYNC_POOL` | presence | off | Stream-ordered `hipMallocAsync` pool. |
+| `MLX_ROCM_FORCE_ASYNC_POOL` | presence | off | As `MLX_ROCM_USE_ASYNC_POOL`, and also creates the pool on gfx1201, which is skipped by default. |
+| `MLX_ROCM_NO_ASYNC_POOL` | presence | unset | Forces the pool off; wins over the two above. |
+| `MLX_ROCM_ALLOW_MANAGED_FALLBACK` | presence; read when `hipMalloc` fails | off (integrated GPUs always allow it) | On a discrete GPU, retries a failed `hipMalloc` with `hipMallocManaged` instead of throwing. |
+| `MLX_ROCM_NO_MANAGED_FALLBACK` | presence; read when `hipMalloc` fails | unset | Forbids that fallback on every device, integrated GPUs included; a failed `hipMalloc` throws. It wins over `MLX_ROCM_ALLOW_MANAGED_FALLBACK`. |
+| `MLX_ROCM_FORCE_WARP_SIZE` | `32` or `64`; anything else is ignored with a stderr line; read when the device is created | the device's wavefront size | Overrides the host-side launch width. Debug only: a wrong value produces garbage output. |
+
+### Variables without the `MLX_ROCM_` prefix
+
+These are read by the same backend, or by the Rust side of a ROCm build, under other names. Variables of MLX itself that the ROCm backend also honors are included.
+
+Hardware libraries and kernels:
+
+| Variable | Values | Default | Purpose |
+|----------|--------|---------|---------|
+| `MLX_NO_HIPBLASLT` | presence | hipBLASLt on | Takes the rocBLAS path for every GEMM instead of hipBLASLt (a diagnostic for suspected hipBLASLt numerics). |
+| `MLX_HIPBLASLT_NO_PIPE_CACHE` | presence | pipeline cache on | Turns off the per-thread pipeline cache that serves repeat GEMMs without bias. |
+| `MLX_HIPBLASLT_EXACT_CACHE` | presence | NN GEMM shapes rounded up to fixed buckets | Keys the hipBLASLt algorithm cache on the exact `M`, `N`, `K` for NN GEMMs too. Transposed GEMMs always use exact keys. |
+| `MLX_QMV_NO_WIDE` | presence | wide-load kernels on | Turns off the 128-bit wide-load qmv kernels (dense 4- and 8-bit affine decode, and gather 4-bit affine). |
+| `MLX_QMV_IDOT` | presence | off | Opt-in int8 integer-dot dense qmv for 4-bit affine, `M` up to 8. |
+| `MLX_QMV_IDOT_GATHER` | presence | off | Opt-in int8 integer-dot gather qmv for 4-bit affine. The code comment says it measured net-negative on MoE decode. |
+| `MLX_GRIDX_MULT` | integer from 1 to 2147483647; an invalid value warns on stderr and keeps the default | `4` | Grid-size multiplier of the grouped prefill; only reached with `MLX_ROCM_GROUPED_PREFILL`. |
+| `MLX_SDPA_DECODE_FLASH` | presence | off (vector kernel) | Uses the flash (prefill) kernel for single-query decode; the code comment says it is slow there. |
+| `MLX_SDPA_NO_WMMA` | presence | WMMA flash kernel on | Turns off the WMMA flash SDPA kernel (a WMMA build only). |
+| `MLX_SDPA_FLASH_VJP` | presence | off | Opt-in fused flash SDPA backward pass. |
+| `MLX_SDPA_NO_FLASH_VJP` | presence | unset | Forces the fused flash backward pass off; wins over `MLX_SDPA_FLASH_VJP`. |
+
+Runtime, JIT and diagnostics:
+
+| Variable | Values | Default | Purpose |
+|----------|--------|---------|---------|
+| `MLX_MAX_OPS_PER_BUFFER` | integer parsed with `atoi` (MLX's own variable) | `2000` on ROCm | Operations after which a command batch is committed; a batch is also committed once it has allocated a quarter of `MLX_ROCM_MAX_INFLIGHT_MB`. |
+| `MLX_EVENT_BLOCKING` | presence | off | Blocks in `hipEventSynchronize` instead of spin-polling, and sleeps 50 microseconds instead of yielding in the atomic-event wait. The GPU watchdog does not time the `hipEventSynchronize` waits. |
+| `MLX_DISABLE_COMPILE` | presence | unset | Turns off graph compilation (`compile`); MLX's own variable, read when the compile mode is first needed. |
+| `MLX_COUNT_COPIES` | presence | off | Counts general copies by shape and prints a histogram to stderr at exit. |
+| `MLX_HSACO_CACHE_DIR` | directory path | the system temp dir, under `mlx/<version>/hsaco` | Root of the on-disk cache of JIT-compiled kernels; the GPU architecture is appended, one directory per architecture. |
+| `ROCM_HOME`, `ROCM_PATH` | directory path; `ROCM_HOME` is tried first | `/opt/rocm` when it exists | ROCm installation the runtime JIT (hiprtc) takes its headers from. With neither set and no `/opt/rocm`, the first JIT compile throws. |
+
+Switches read by the Rust side or the C++ bridge that behave differently in a ROCm build. Each one has its full row under [Common runtime variables](#common-runtime-variables) or [Hardware and kernel diagnostic variables](#hardware-and-kernel-diagnostic-variables):
+
+| Variable | Default in a ROCm build | Where it differs |
+|----------|-------------------------|------------------|
+| `MLXCEL_CACHE_LIMIT` | `2GB` (unset elsewhere) | When unset, a ROCm build bounds the buffer cache at 2 GiB (`src/execution/runtime.rs`); `0` or `none` removes the bound. |
+| `MLXCEL_HEADROOM_FACTOR` | `1.20` | Applies to weights plus KV only. A ROCm build adds `MLX_ROCM_MAX_INFLIGHT_MB` to the memory estimate as its own term, `Backend in-flight`. |
+| `MLXCEL_FUSED_ADD_RMSNORM` | on | Off on Metal and CUDA; `0` disables it on ROCm. |
+| `MLXCEL_FUSED_ROPE_APPEND` | on | Off on Metal and CUDA; `0` disables it on ROCm. |
+| `MLXCEL_FUSED_MOE_SGY` | `2` | `8` on Metal and CUDA. |
+
+Inert graph-mode variables. The HIP-graph batching path is compiled off (`use_hip_graphs()` in `device.cpp` returns `false`), and nothing in mlxcel calls the decode-capture entry points or `set_graph_decode_mode`, so these eleven variables are read on code that never runs and change nothing: `MLX_GRAPH_DECODE`, `MLX_GRAPH_PREFILL_REPLAY`, `MLX_GRAPH_REPLAY_SLOTS`, `MLX_GRAPH_FREE_LAG`, `MLX_GRAPH_DEFER_MAX_MB`, `MLX_GRAPH_NODEFER`, `MLX_GRAPH_POISON_FREE`, `MLX_GRAPH_SPLIT_LOG`, `MLX_PURE_DEBUG`, `MLX_NO_CONCAT_SPLIT` and `MLX_MAX_MB_PER_BUFFER`.
 
 ## OpenXLA / StableHLO backend variables
 
@@ -496,7 +640,7 @@ mode remains visible through startup logs and `kv_cache_mode_effective`.
 | `MLXCEL_ENABLE_DIRECT_PREFILL_CACHE_STORE` | presence enables | off | **Advanced.** Installs the incoming prefill tensor directly as the initial KV cache buffer when applicable. |
 | `MLXCEL_KV_INPLACE_WRITE` | `0`/`false`/`off`/`no` disables | on | A single-token FP16 decode step writes its K/V row into the dense cache buffer in place instead of through `slice_update` (#1959). While the previous pipelined step is in flight its command buffer holds the cache buffer, so `slice_update` could never donate it and copied the whole cache every step. The in-place write is taken only when the cache's own last write produced the current buffers and nothing rolled it back since, so a buffer shared with a prompt-cache snapshot, a restored or detached cache never has a row it holds rewritten; any other case takes one copying write and returns to in-place. Measured on M1 Ultra (`bench_decode.sh`, tg128): command-r7b 4-bit +2.5% decode at context 16, +4.1% at 512, +8.2% at 2048; Llama 3.1 8B +4.6% and Qwen2.5 7B +2.7% at 512; peak memory footprint about 0.6 GB lower at 2048 + 512. The rotating sliding-window cache takes the same path while it is still filling its window (every slot is new), which is +3% decode on Gemma 3 4B and Gemma 4 12B at pp512; once the window is full each step overwrites a slot a snapshot may still hold, so those writes keep copying. The server's paged KV pool takes the same in-place write for rows of a block held by one sequence that already owns its pool row (#1964): under the default lookahead decode the slab copy halved single-request decode, and the fix takes Llama 3.1 8B from 47 to 105 tok/s and Qwen2.5 7B from 68 to 108 at concurrency 1, with aggregate throughput +16 to +38% at concurrency 4. Disable only to compare against the copying path. |
 | `MLXCEL_DIAG_SKIP_DECODE_KV_WRITE` | presence enables | off | **Diagnostic, output is invalid while set.** A single-token FP16 decode step skips writing its K/V row and attends over the cache as it stood, so a decode benchmark reads the upper bound of removing the per-step cache write. That write costs more than one row: while the previous step is still in flight its command buffer holds the cache buffer, so `slice_update` cannot donate it and copies the whole cache every step. On command-r7b 4-bit, M1 Ultra, `bench_decode.sh` pp512/tg128 goes from about 116 to 124-126 tok/s; the bound is +4.4% at context 16 and +11% at 2048. The cache never grows and positions do not advance, so the generated text is meaningless. Prints one warning when first used. |
-| `MLXCEL_MLA_ABSORBED` | `1`/`true`/`on`/`yes` enables | off | DeepSeek-family matrix-absorbed MLA decode. Caches the compressed latent `(ckv, kpe)` instead of the decompressed per-head K/V, cutting the KV cache from `num_heads * (qk_head_dim + v_head_dim)` to `kv_lora_rank + qk_rope_head_dim` bytes per token per layer. Costs fixed weight memory: `kv_b_proj` is dequantized at load and kept dense. Currently wired for `deepseek_v2`; `deepseek_v3` / `deepseek_v32` already absorb unconditionally and ignore this. Declines (and keeps the decompressed path) for any non-FP16 KV cache mode and for paged-backed caches. Prints one stdout line at load stating how many layers folded. See [MLA absorbed decode](mla-absorbed-decode.md). |
+| `MLXCEL_MLA_ABSORBED` | `1`/`true`/`on`/`yes` enables | off | DeepSeek-family matrix-absorbed MLA decode. Caches the compressed latent `(ckv, kpe)` instead of the decompressed per-head K/V, cutting the KV cache from `num_heads * (qk_head_dim + v_head_dim)` to `kv_lora_rank + qk_rope_head_dim` bytes per token per layer. Costs fixed weight memory: `kv_b_proj` is dequantized at load and kept dense. Currently wired for `deepseek_v2`; `deepseek_v3` / `deepseek_v32` already absorb unconditionally and ignore this. Declines (and keeps the decompressed path) for any non-FP16 KV cache mode and for paged-backed caches. Prints one stderr line at load stating how many layers folded. See [MLA absorbed decode](mla-absorbed-decode.md). |
 | `MLXCEL_MLA_SPLIT_KV` | `1`/`true`/`on`/`yes` enables | off | **Advanced.** Cuts the latent range into chunks whose partial softmax states are merged by the issue #898 merge kernel. Requires `MLXCEL_MLA_ABSORBED`; ignored without it. The partial producer is currently composed from MLX ops, so this is a correctness path rather than a speed path. |
 | `MLXCEL_CASCADE_ATTENTION` | `1`/`true`/`on`/`yes` enable; `0`/`false`/`off`/`no` kill switch | off | Two-level cascade decode (issue #903): a whole-page prompt prefix shared by several concurrent sequences is attended **once** for the subgroup instead of once per sequence, and merged into each member's per-request suffix state with the issue #898 merge kernel. Detected from the paged page table, where two requests naming the same physical row at the same position hold one refcounted block, which is what an APC prefix adoption produces. No kernel is added: both levels are ordinary paged-decode v2 launches. Off by default because the throughput benefit has not been measured on a serving workload yet; when unset the decode path does no page-table scanning and the flat launch is byte-identical to pre-#903. Sequences outside the subgroup, sliding windows trimmed into the middle of a page, soft-cap families and multi-token steps all keep the flat path. See [Cascade attention](cascade-attention.md). |
 | `MLXCEL_CASCADE_MIN_SHARED_PAGES` | non-negative integer | `16` | Whole pages a subgroup must share before cascade is used; 16 pages is 512 tokens at the default block size of 32. Below this the two extra launches and the merge cost more than the duplicated reads they remove. `0` disables cascade outright. A value that is not a non-negative integer is ignored in favour of the default. |
