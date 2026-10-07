@@ -131,14 +131,29 @@ fn method_name(line: &str) -> Option<String> {
 }
 
 /// The body with all whitespace removed, so a call rustfmt broke across lines
-/// (`self\n.model\n.forward_with_sequence_id(`) reads the same as a one-line one.
+/// (`self\n.engine\n.prefill(`) reads the same as a one-line one.
 fn collapsed(body: &str) -> String {
     body.split_whitespace().collect()
 }
 
 /// Whether a method body forwards the model.
+///
+/// Since #2172 the scheduler never calls a model forward itself: every forward
+/// runs through one of the engine's entries, so those are what this guard
+/// looks for. A forward added through any other path (a raw
+/// `self.engine.model().forward*` call) fails the acceptance grep for #2172
+/// and is listed here so this guard still classifies it.
 fn forwards_the_model(collapsed_body: &str) -> bool {
-    collapsed_body.contains("self.engine.model().forward")
+    [
+        "self.engine.step(",
+        "self.engine.step_speculative(",
+        "self.engine.submit(",
+        "self.engine.prefill(",
+        "self.engine.prefill_cohort(",
+        "self.engine.model().forward",
+    ]
+    .iter()
+    .any(|entry| collapsed_body.contains(entry))
 }
 
 /// Whether a method body announces a prefill span.
