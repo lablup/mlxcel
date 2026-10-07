@@ -1321,7 +1321,7 @@ impl BatchScheduler {
         mut seq: SequenceInfo,
         logits: UniquePtr<mlxcel_core::MlxArray>,
         eos_tokens: Vec<i32>,
-        mut token_history: Vec<i32>,
+        token_history: Vec<i32>,
         needs_history: bool,
     ) {
         // apply structured-output mask to the prefill logits
@@ -1469,44 +1469,6 @@ impl BatchScheduler {
         // streamed metadata stays consistent with the emitted token text.
         let override_fired = first_token != sampled_first_token;
 
-        // Check for immediate EOS
-        if eos_tokens.contains(&first_token) {
-            if let Err(err) = seq
-                .state
-                .transition_to(SequenceState::Finished(FinishReason::Stop))
-            {
-                tracing::error!("State transition error: {err}");
-            }
-            let result = build_generation_result_with_cache(
-                String::new(),
-                seq.prompt_tokens.len(),
-                0,
-                seq.created_at.elapsed().as_millis() as u64,
-                seq.prefill_start
-                    .map(|t| (Instant::now() - t).as_millis() as u64)
-                    .unwrap_or(0),
-                seq.max_tokens,
-                seq.already_cached_tokens,
-            );
-            tracing::info!(
-                prompt_tokens = seq.prompt_tokens.len(),
-                cached_tokens = seq.already_cached_tokens,
-                saved_ms = 0,
-                "prompt-cache: request completed (eos-at-prefill): \
-                 cached={}/{} prompt tokens, saved ~0ms",
-                seq.already_cached_tokens,
-                seq.prompt_tokens.len(),
-            );
-            let _ = seq.response_tx.send(GenerateEvent::Done(result));
-            // Prefill produced a valid KV cache (EOS on turn 1 is a healthy
-            // stop). Donate it back so the next turn can reuse the prompt
-            // prefix. `generated_tokens` is empty here by construction.
-            self.donate_finished_sequence_cache(seq.seq_id, &seq.prompt_tokens, &[], true);
-            self.prompt_cache_seq_ctx.remove(&seq.seq_id);
-            self.release_sequence_caches(seq.seq_id);
-            return;
-        }
-
         // Optionally compute logprobs for the first token. When the override
         // fired, the sampled token differs from the emitted `first_token`;
         // suppress logprob emission in that case to keep token text and
@@ -1526,56 +1488,64 @@ impl BatchScheduler {
             }
         };
 
-        seq.generated_tokens.push(first_token);
-        if needs_history {
-            token_history.push(first_token);
-        }
-
-        // Store merged EOS and token history on the sequence so decode_single_step
-        // can reuse them without per-step reconstruction.
+        // Store merged EOS and token history on the sequence: the shared finish
+        // step below reads them, and decode_single_step reuses them without
+        // per-step reconstruction.
         seq.merged_eos = eos_tokens;
         seq.token_history = token_history;
+        // The finish step records the first token in the history exactly when
+        // the sampler reads one, the same rule the caller built it under.
+        debug_assert_eq!(needs_history, seq.sampling.needs_token_history());
 
-        // Stream the first token's text through the request's stop matcher
-        // (issue #1466). A short stop string can complete on this very token, in
-        // which case generation ends here and the matched text is never emitted.
-        let prefill_stop_word = match seq.decode_state.on_token(first_token, &self.tokenizer) {
-            Some(new_text) => seq.stream_decoded_text(new_text, Some(first_token), token_lp),
-            None => None,
-        };
-
-        let mut prefill_finish_reason = if prefill_stop_word.is_some() {
-            Some(FinishReason::StopSequence)
-        } else if structured_stopped {
-            Some(FinishReason::Stop)
-        // A generation bound can already have fired on the very first token
-        // (#1477); `t_max_predict_ms: 0` with a newline in that token is the
-        // reachable case.
-        } else if seq.bound_stopped() || seq.generated_tokens.len() >= seq.max_tokens {
-            Some(FinishReason::Length)
-        } else {
-            None
-        };
-        // b10621 context guard (#1472): a prompt admitted just under the KV
-        // bound can leave no room for a second token; stop here with
-        // `truncated: true` rather than overflowing on the first decode step.
-        if prefill_finish_reason.is_none()
-            && Self::context_bound_stop_due(
-                &seq,
-                self.max_kv_size,
-                self.context_retention.context_shift,
-            )
-        {
-            seq.retention.context_exhausted = true;
-            prefill_finish_reason = Some(FinishReason::Length);
+        // The shared post-sample finish step (#2168) on the first token: EOS
+        // (not pushed), push and history, the stop matcher (a short stop string
+        // can complete on this very token, and then its text is never emitted),
+        // a generation bound (`t_max_predict_ms: 0` with a newline in the first
+        // token, #1477), the structured stop, `max_tokens`, the context bound (a
+        // prompt admitted just under the KV bound can leave no room for a second
+        // token, #1472) and loop detection.
+        let context = self.context_bound();
+        let prefill_finish = finish_decode_token(
+            &mut seq,
+            &self.tokenizer,
+            first_token,
+            token_lp,
+            structured_stopped,
+            context,
+        );
+        // Immediate EOS: the finish step already recorded `Stop`; nothing was
+        // generated, so the result is built without decoding any text.
+        if prefill_finish == Some(FinishCause::Eos) {
+            let result = build_generation_result_with_cache(
+                String::new(),
+                seq.prompt_tokens.len(),
+                0,
+                seq.created_at.elapsed().as_millis() as u64,
+                seq.prefill_start
+                    .map(|t| (Instant::now() - t).as_millis() as u64)
+                    .unwrap_or(0),
+                seq.max_tokens,
+                seq.already_cached_tokens,
+            );
+            tracing::info!(
+                prompt_tokens = seq.prompt_tokens.len(),
+                cached_tokens = seq.already_cached_tokens,
+                saved_ms = 0,
+                "prompt-cache: request completed (eos-at-prefill): \
+                     cached={}/{} prompt tokens, saved ~0ms",
+                seq.already_cached_tokens,
+                seq.prompt_tokens.len(),
+            );
+            let _ = seq.response_tx.send(GenerateEvent::Done(result));
+            // Prefill produced a valid KV cache (EOS on turn 1 is a healthy
+            // stop). Donate it back so the next turn can reuse the prompt
+            // prefix. `generated_tokens` is empty here by construction.
+            self.donate_finished_sequence_cache(seq.seq_id, &seq.prompt_tokens, &[], true);
+            self.prompt_cache_seq_ctx.remove(&seq.seq_id);
+            self.release_sequence_caches(seq.seq_id);
+            return;
         }
-        if let Some(finish_reason) = prefill_finish_reason {
-            if let Err(err) = seq
-                .state
-                .transition_to(SequenceState::Finished(finish_reason))
-            {
-                tracing::error!("State transition error: {err}");
-            }
+        if prefill_finish.is_some() {
             // Forward any tail the incremental detokenizer held back (a final
             // token carrying complete text plus a trailing incomplete UTF-8
             // byte) as one last token event before Done, so streaming clients
