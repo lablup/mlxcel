@@ -30,10 +30,10 @@
 //! - **Session layer (core, single sequence).** A backend produces an
 //!   inference [`Session`] that owns its own KV state and runs generation
 //!   token-in / token-out with on-device sampling. This is the contract the CLI
-//!   `generate` / `chat` paths consume and the one a future non-MLX backend
-//!   (issue #449, a separate default-off crate) implements. The MLX session
-//!   wraps the existing `CxxGenerator`, so the same decode loop and sampling
-//!   run and CLI output stays byte-identical.
+//!   paths consume and the one a future non-MLX backend (issue #449, a
+//!   separate default-off crate) implements. The MLX session is a one-sequence
+//!   client of the batch-native engine (`mlxcel_core::engine::DirectEngine`,
+//!   ADR 0007), the same loop `mlxcel generate` and the server run.
 //! - **Extended layer (MLX-only, load boundary).** The server batch scheduler
 //!   does cross-sequence batched forward and owns [`LoadedModel`] directly, so
 //!   the load-boundary entry ([`ComputeBackend::load_model`], returning
@@ -62,8 +62,8 @@
 //! single-arm `match` marked `#[inline]`. After inlining the dispatch folds
 //! away entirely: `select_backend().load_model(p)` lowers to a direct call to
 //! the existing MLX loader, and `backend.create_session(...).generate(...)`
-//! lowers to a direct call into the wrapped `CxxGenerator`, identical to the
-//! pre-seam build. The returned [`Session`] is itself a single-variant enum
+//! lowers to a direct call into the engine's raw-completion client, identical
+//! to calling it without the seam. The returned [`Session`] is itself a single-variant enum
 //! whose per-method `match` collapses the same way, so no runtime indirection
 //! is added on the generation hot path. Shipping binaries (Apple Silicon, CUDA)
 //! compile no extra backend code because the optional `experimental-backend`

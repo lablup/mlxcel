@@ -528,6 +528,80 @@ impl<M: LanguageModel> DirectEngine<M> {
         })
     }
 
+    /// Per-target-token log-likelihoods over `prompt_tokens`: entry `i` is
+    /// `log P(prompt_tokens[i + 1] | prompt_tokens[..=i])`, so the result has
+    /// one entry fewer than the window (and is empty for a window shorter
+    /// than two tokens). One prefill-only scoring pass on a fresh sequence
+    /// under this client's KV mode, so a Turbo mode measures perplexity with
+    /// its V-compression in effect; the sequence is closed afterwards.
+    ///
+    /// The window is not padded: tile alignment is a decode optimization and
+    /// the position-to-target mapping below wants the unpadded shape.
+    ///
+    /// Used by: `MlxInferenceSession::evaluate_loglikelihoods`, the
+    /// wikitext-2 perplexity gates.
+    pub fn loglikelihoods(&mut self, prompt_tokens: &[i32]) -> Result<Vec<f32>, DirectEngineError> {
+        if prompt_tokens.len() < 2 {
+            return Ok(Vec::new());
+        }
+        install_thread_local_default_stream(self.generation_stream.as_ref());
+        let id = self
+            .engine
+            .open(SequenceSpec::default())
+            .map_err(DirectEngineError::Open)?;
+        self.apply_kv_cache_mode(id);
+        let result = self.score_window(id, prompt_tokens);
+        self.engine.close(id);
+        crate::clear_memory_cache();
+        result
+    }
+
+    fn score_window(
+        &mut self,
+        id: SequenceId,
+        prompt_tokens: &[i32],
+    ) -> Result<Vec<f32>, DirectEngineError> {
+        let actual_len = prompt_tokens.len();
+        let input = crate::from_slice_i32(prompt_tokens, &[1, actual_len as i32]);
+        let _span = crate::prefill_span::announce(actual_len as i32);
+        let outcome = self
+            .engine
+            .score(&PrefillStep {
+                seq_id: id,
+                input: &input,
+                embeddings: None,
+                mask: None,
+                last_pos: actual_len - 1,
+                trim_excess: 0,
+                eval: true,
+            })
+            .map_err(DirectEngineError::Prefill)?;
+        outcome.eval.map_err(DirectEngineError::PrefillEval)?;
+        outcome.trim.map_err(DirectEngineError::PrefillTrim)?;
+        let logits = outcome.logits;
+
+        // `[1, T, vocab]`: slice the context positions `[0, T-1)`, log-softmax
+        // in fp32 (fp16 underflows on extreme negative logits) and gather each
+        // position's next token.
+        let logits_shape = crate::ffi::array_shape(&logits);
+        debug_assert_eq!(logits_shape.len(), 3, "forward must return [B, T, V]");
+        let vocab = logits_shape[2];
+        let context_logits =
+            crate::ffi::slice(&logits, &[0, 0, 0], &[1, (actual_len - 1) as i32, vocab]);
+        let context_f32 = crate::ffi::astype(&context_logits, crate::dtype::FLOAT32);
+        let logprobs = crate::ffi::log_softmax(&context_f32, -1);
+        let targets: Vec<i32> = prompt_tokens[1..].to_vec();
+        let target_arr = crate::from_slice_i32(&targets, &[1, (actual_len - 1) as i32, 1]);
+        let gathered = crate::ffi::take_along_axis(&logprobs, &target_arr, -1);
+        crate::try_eval(&gathered).map_err(|e| DirectEngineError::PrefillEval(e.to_string()))?;
+        let bytes = crate::ffi::array_to_raw_bytes(&gathered);
+        debug_assert_eq!(bytes.len(), (actual_len - 1) * 4);
+        Ok(bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect())
+    }
+
     fn prefill_piece(
         &mut self,
         step: &PrefillStep<'_>,

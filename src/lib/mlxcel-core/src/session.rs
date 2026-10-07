@@ -34,23 +34,24 @@
 //!   and [`InferenceSession::decode_step`]) plus capability advertisement
 //!   ([`InferenceSession::capabilities`]). It is the shape a compiler-family
 //!   backend fills in.
-//! - [`MlxInferenceSession`] is the MLX implementation. It is a thin wrapper
-//!   around the existing [`CxxGenerator`]: every generation method delegates
-//!   verbatim to the matching `CxxGenerator` method, so the exact same decode
-//!   loop, KV optimizations, and sampling run whether a caller reaches them
-//!   directly or through the session. The per-token forward stays inside the
-//!   session (no per-op virtual dispatch), and the concrete hot types
-//!   ([`KVCache`](crate::layers::KVCache), the cache pool) are never type-erased.
+//! - [`MlxInferenceSession`] is the MLX implementation: a one-sequence client
+//!   of the batch-native engine (ADR 0007, #2176). Every generation method
+//!   runs the raw-completion client, [`crate::engine::DirectEngine`], over the
+//!   borrowed model, so the exact decode loop, prefill plan, sampler and
+//!   finish step the server's B=1 row runs are what a caller gets whether it
+//!   reaches them through the session, through `mlxcel generate` or through
+//!   the server. The per-token forward stays inside the engine (no per-op
+//!   virtual dispatch), and the concrete hot types ([`KVCache`](crate::layers::KVCache),
+//!   the cache pool) are never type-erased.
 //!
 //! # Why the MLX session keeps fused entry points, not hand-rolled steps
 //!
-//! The CLI drives generation through [`CxxGenerator`]'s fused `generate_*`
-//! entry points. Those carry the pipelining, the prompt-cache reset, the
-//! Boundary-V KV policy, and the language-bias merge that make CLI output what
-//! it is. Re-expressing them as a hand-written `prefill` + `decode_step` loop
-//! would fork that logic and risk a behavior drift, so [`MlxInferenceSession`]
-//! delegates the fused methods verbatim and treats [`InferenceSession::prefill`]
-//! / [`InferenceSession::decode_step`] as the engine-neutral contract reserved
+//! The engine client drives a whole completion (open, prefill, step until the
+//! finish step, close) and carries the KV mode, the token bias and the
+//! prefill plan with it. Re-expressing that as a hand-written `prefill` +
+//! `decode_step` loop would fork it, so [`MlxInferenceSession`] exposes the
+//! fused `generate_*` methods and treats [`InferenceSession::prefill`] /
+//! [`InferenceSession::decode_step`] as the engine-neutral contract reserved
 //! for the compiler-family backend rather than the MLX fast path.
 //!
 //! # Single sequence only
@@ -63,8 +64,9 @@
 //! single-sequence and multimodal-prefill capabilities it actually provides.
 
 use crate::cache::KVCacheMode;
+use crate::engine::{DirectEngine, DirectRequest, DirectRun};
 use crate::ffi::MlxArray;
-use crate::generate::{CxxGenerator, GenerationStats, LanguageModel, SamplingConfig};
+use crate::generate::{GenerationStats, LanguageModel, SamplingConfig};
 use crate::sampling::TokenBiasMap;
 
 // Keep the prepared-prefill DTO discoverable from the session boundary while
@@ -178,42 +180,48 @@ pub trait InferenceSession {
 
 /// The MLX single-sequence inference session.
 ///
-/// A behavior-preserving wrapper around [`CxxGenerator`]. Construction mirrors
-/// the generator (`new`, `new_with_kv_mode`, `with_token_bias`) and every
-/// generation method delegates verbatim, so output is byte-identical to calling
-/// the generator directly. The session owns the KV caches (inside the wrapped
-/// generator); the model is borrowed per call exactly as before, which keeps
-/// the existing call structure (speculative decode, VLM embeddings, suppressed
-/// tokens) untouched.
+/// A one-sequence client of the engine: each generation method opens a
+/// [`DirectEngine`] over the borrowed model with this session's KV mode and
+/// token bias, runs one completion on a fresh sequence and closes it, so
+/// nothing carries over between calls and model-owned state (Gemma 3/4,
+/// Llama 4, Qwen 3.5) is reset through the engine's open and close. The
+/// methods keep their infallible shape: an engine failure (an MLX throw at the
+/// fallible boundary, #822) is reported on stderr and yields the tokens the
+/// run had produced, which is none.
 pub struct MlxInferenceSession {
-    generator: CxxGenerator,
+    kv_cache_mode: KVCacheMode,
+    token_bias: TokenBiasMap,
 }
 
 impl MlxInferenceSession {
-    /// Create a session with an FP16 KV cache (default), mirroring
-    /// [`CxxGenerator::new`].
+    /// Create a session with an FP16 KV cache (default). The engine sizes a
+    /// sequence's caches from the model, so `_num_layers` is not read; it
+    /// stays for the `ComputeBackend::create_session` shape the OpenXLA
+    /// session needs.
     #[must_use]
-    pub fn new(num_layers: usize) -> Self {
+    pub fn new(_num_layers: usize) -> Self {
         Self {
-            generator: CxxGenerator::new(num_layers),
+            kv_cache_mode: KVCacheMode::Fp16,
+            token_bias: TokenBiasMap::default(),
         }
     }
 
-    /// Create a session with the given KV cache quantization mode, mirroring
-    /// [`CxxGenerator::new_with_kv_mode`].
+    /// Create a session with the given KV cache quantization mode (with the
+    /// Boundary-V upgrade for the Turbo4 modes, applied per sequence).
     #[must_use]
-    pub fn new_with_kv_mode(num_layers: usize, kv_cache_mode: KVCacheMode) -> Self {
+    pub fn new_with_kv_mode(_num_layers: usize, kv_cache_mode: KVCacheMode) -> Self {
         Self {
-            generator: CxxGenerator::new_with_kv_mode(num_layers, kv_cache_mode),
+            kv_cache_mode,
+            token_bias: TokenBiasMap::default(),
         }
     }
 
-    /// Attach a pre-resolved token-bias map, mirroring
-    /// [`CxxGenerator::with_token_bias`]. An empty map is a zero-overhead no-op
-    /// that preserves bit-exact baseline behavior.
+    /// Attach a pre-resolved token-bias map, applied to every sampling config
+    /// handed to the generation methods unless that config carries its own.
+    /// An empty map is a no-op.
     #[must_use]
     pub fn with_token_bias(mut self, bias: TokenBiasMap) -> Self {
-        self.generator = self.generator.with_token_bias(bias);
+        self.token_bias = bias;
         self
     }
 
@@ -228,20 +236,44 @@ impl MlxInferenceSession {
         }
     }
 
-    /// Reset generator-owned and model-owned caches for a fresh prefill.
-    /// Delegates to [`CxxGenerator::reset_with_model`].
-    pub fn reset_with_model<M: LanguageModel + ?Sized>(&mut self, model: &M) {
-        self.generator.reset_with_model(model);
-    }
+    /// Kept for callers that reset between runs: every generation method
+    /// opens and closes its own engine sequence, so there is nothing to
+    /// reset here.
+    pub fn reset_with_model<M: LanguageModel + ?Sized>(&mut self, _model: &M) {}
 
     /// The cached token-bias map (used by tests to assert wiring).
     #[must_use]
     pub fn token_bias(&self) -> &TokenBiasMap {
-        self.generator.token_bias()
+        &self.token_bias
     }
 
-    /// Greedy / sampled generation. Delegates verbatim to
-    /// [`CxxGenerator::generate`].
+    /// The KV cache mode every sequence this session opens is built with.
+    #[must_use]
+    pub fn kv_cache_mode(&self) -> KVCacheMode {
+        self.kv_cache_mode
+    }
+
+    fn client<'m, M: LanguageModel>(&self, model: &'m M) -> DirectEngine<&'m M> {
+        DirectEngine::with_default_chunk(model)
+            .with_kv_cache_mode(self.kv_cache_mode)
+            .with_token_bias(self.token_bias.clone())
+    }
+
+    fn run<M: LanguageModel, F: FnMut(i32) -> bool>(
+        &self,
+        model: &M,
+        request: &DirectRequest<'_>,
+        on_token: F,
+    ) -> DirectRun {
+        self.client(model)
+            .generate(request, on_token)
+            .unwrap_or_else(|err| {
+                eprintln!("generation failed: {err}");
+                DirectRun::default()
+            })
+    }
+
+    /// Greedy / sampled generation.
     pub fn generate<M: LanguageModel>(
         &mut self,
         model: &M,
@@ -249,13 +281,11 @@ impl MlxInferenceSession {
         max_tokens: usize,
         sampling: &SamplingConfig,
     ) -> Vec<i32> {
-        self.generator
-            .generate(model, prompt_tokens, max_tokens, sampling)
+        self.generate_streaming(model, prompt_tokens, max_tokens, sampling, |_| true)
     }
 
-    /// Streaming generation with a per-token callback. Delegates verbatim to
-    /// [`CxxGenerator::generate_streaming`]; the closure stays generic, so the
-    /// lookahead pipelining is preserved.
+    /// Streaming generation with a per-token callback: every token the finish
+    /// step appends reaches it, and `false` ends the run.
     pub fn generate_streaming<M: LanguageModel, F: FnMut(i32) -> bool>(
         &mut self,
         model: &M,
@@ -264,13 +294,16 @@ impl MlxInferenceSession {
         sampling: &SamplingConfig,
         on_token: F,
     ) -> Vec<i32> {
-        self.generator
-            .generate_streaming(model, prompt_tokens, max_tokens, sampling, on_token)
+        self.run(
+            model,
+            &DirectRequest::text(prompt_tokens, max_tokens, sampling),
+            on_token,
+        )
+        .tokens
     }
 
     /// Streaming generation seeded with pre-computed input embeddings (VLM /
-    /// audio prefill). Delegates verbatim to
-    /// [`CxxGenerator::generate_streaming_with_embeddings`].
+    /// audio prefill).
     #[allow(clippy::too_many_arguments)]
     pub fn generate_streaming_with_embeddings<M: LanguageModel, F: FnMut(i32) -> bool>(
         &mut self,
@@ -282,19 +315,22 @@ impl MlxInferenceSession {
         sampling: &SamplingConfig,
         on_token: F,
     ) -> Vec<i32> {
-        self.generator.generate_streaming_with_embeddings(
+        self.run(
             model,
-            prompt_tokens,
-            input_embeddings,
-            mask,
-            max_tokens,
-            sampling,
+            &DirectRequest {
+                prompt_tokens,
+                embeddings: input_embeddings,
+                mask,
+                max_tokens,
+                sampling,
+            },
             on_token,
         )
+        .tokens
     }
 
-    /// Generation with profiling stats. Delegates verbatim to
-    /// [`CxxGenerator::generate_with_stats`].
+    /// Generation with profiling stats (prefill and decode phases as the
+    /// engine client times them).
     pub fn generate_with_stats<M: LanguageModel>(
         &mut self,
         model: &M,
@@ -302,12 +338,15 @@ impl MlxInferenceSession {
         max_tokens: usize,
         sampling: &SamplingConfig,
     ) -> (Vec<i32>, GenerationStats) {
-        self.generator
-            .generate_with_stats(model, prompt_tokens, max_tokens, sampling)
+        let run = self.run(
+            model,
+            &DirectRequest::text(prompt_tokens, max_tokens, sampling),
+            |_| true,
+        );
+        (run.tokens, run.stats)
     }
 
-    /// Embedding-prefill generation with profiling stats. Delegates verbatim to
-    /// [`CxxGenerator::generate_with_stats_and_embeddings`].
+    /// Embedding-prefill generation with profiling stats.
     pub fn generate_with_stats_and_embeddings<M: LanguageModel>(
         &mut self,
         model: &M,
@@ -317,25 +356,34 @@ impl MlxInferenceSession {
         max_tokens: usize,
         sampling: &SamplingConfig,
     ) -> (Vec<i32>, GenerationStats) {
-        self.generator.generate_with_stats_and_embeddings(
+        let run = self.run(
             model,
-            prompt_tokens,
-            input_embeddings,
-            mask,
-            max_tokens,
-            sampling,
-        )
+            &DirectRequest {
+                prompt_tokens,
+                embeddings: input_embeddings,
+                mask,
+                max_tokens,
+                sampling,
+            },
+            |_| true,
+        );
+        (run.tokens, run.stats)
     }
 
     /// Per-target-token log-likelihoods over the prompt window (perplexity
-    /// evaluation). Delegates verbatim to
-    /// [`CxxGenerator::evaluate_loglikelihoods`].
+    /// evaluation): one prefill-only scoring pass on the engine under this
+    /// session's KV mode ([`DirectEngine::loglikelihoods`]).
     pub fn evaluate_loglikelihoods<M: LanguageModel>(
         &mut self,
         model: &M,
         prompt_tokens: &[i32],
     ) -> Vec<f32> {
-        self.generator.evaluate_loglikelihoods(model, prompt_tokens)
+        self.client(model)
+            .loglikelihoods(prompt_tokens)
+            .unwrap_or_else(|err| {
+                eprintln!("log-likelihood evaluation failed: {err}");
+                Vec::new()
+            })
     }
 }
 

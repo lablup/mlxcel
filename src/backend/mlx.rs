@@ -91,9 +91,8 @@ impl ComputeBackend for MlxBackend {
     ) -> Result<Session> {
         // The MLX engine already loaded the model at `load_model`, so it does not
         // need the model directory here.
-        // Wrap the existing `CxxGenerator` (inside `MlxInferenceSession`) with
-        // the same KV mode and token bias the CLI used before the seam, so the
-        // generation methods delegate verbatim and CLI output is byte-identical.
+        // The MLX session runs the engine's raw-completion client with the
+        // KV mode and token bias the caller resolved, one sequence per call.
         Ok(Session::mlx(
             MlxInferenceSession::new_with_kv_mode(num_layers, kv_cache_mode)
                 .with_token_bias(token_bias),

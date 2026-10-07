@@ -107,7 +107,9 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use mlxcel::vlm_runtime::{prepare_vlm_embeddings, prepared_embedding_refs};
-use mlxcel::{CxxGenerator, LanguageModel, LoadedModel, SamplingConfig, load_model};
+use mlxcel::{
+    CxxGenerator, LanguageModel, LoadedModel, MlxInferenceSession, SamplingConfig, load_model,
+};
 use mlxcel_core::cache::KVCacheMode;
 use mlxcel_core::cache::turbo::{TurboQuantParams, turbo4_v_rotate};
 use mlxcel_core::{
@@ -147,7 +149,7 @@ const NIAH_MAX_GEN: usize = 32;
 ///
 /// Reads `tests/fixtures/wikitext2_excerpt.txt`, tokenizes it, slices into
 /// non-overlapping chunks of `PPL_CHUNK_LEN`, and calls
-/// `CxxGenerator::evaluate_loglikelihoods` on each chunk.
+/// `MlxInferenceSession::evaluate_loglikelihoods` on each chunk.
 ///
 /// # PPL aggregation math
 ///
@@ -175,7 +177,7 @@ fn compute_ppl(
     let all_ids_i32: Vec<i32> = all_ids.iter().map(|&id| id as i32).collect();
 
     let num_layers = model.num_layers();
-    let mut generator = CxxGenerator::new_with_kv_mode(num_layers, kv_mode);
+    let mut generator = MlxInferenceSession::new_with_kv_mode(num_layers, kv_mode);
 
     let mut total_nll = 0.0_f64;
     let mut total_target_tokens = 0_usize;
@@ -952,7 +954,7 @@ fn compute_vlm_ppl(
     let all_ids_i32: Vec<i32> = all_ids.iter().map(|&id| id as i32).collect();
 
     let num_layers = model.num_layers();
-    let mut generator = CxxGenerator::new_with_kv_mode(num_layers, kv_mode);
+    let mut generator = MlxInferenceSession::new_with_kv_mode(num_layers, kv_mode);
 
     let mut total_nll = 0.0_f64;
     let mut total_target_tokens = 0_usize;

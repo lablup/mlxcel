@@ -127,6 +127,43 @@ impl<M: LanguageModel> Engine<M> {
         Ok(PrefillOutcome { logits, eval, trim })
     }
 
+    /// A prefill-only scoring pass: the forward over every position of
+    /// `step.input` for `step.seq_id`, returning the `[1, T, vocab]` logits of
+    /// the whole window rather than the last position's (`step.last_pos` is
+    /// not read). The per-token log-likelihoods a perplexity gate needs are
+    /// computed from these by the caller; the sequence is closed afterwards,
+    /// so the state the pass wrote is never decoded from.
+    ///
+    /// Used by: `DirectEngine::loglikelihoods`.
+    pub fn score(&mut self, step: &PrefillStep<'_>) -> Result<PrefillOutcome, EngineError> {
+        let caches = self
+            .pool
+            .get_caches_mut(step.seq_id)
+            .ok_or(EngineError::MissingSequence(step.seq_id))?;
+        let logits = match step.embeddings {
+            Some(embeddings) => self.model.forward_with_embeddings_and_sequence_id(
+                step.input,
+                Some(embeddings),
+                Some(step.seq_id),
+                caches,
+                step.mask,
+            ),
+            None => self.model.forward_with_sequence_id(
+                step.input,
+                Some(step.seq_id),
+                caches,
+                step.mask,
+            ),
+        };
+        let eval = if step.eval {
+            crate::try_eval(&logits).map_err(|e| e.to_string())
+        } else {
+            Ok(())
+        };
+        let trim = trim_padded_prefill(&self.model, step.seq_id, caches, step.trim_excess);
+        Ok(PrefillOutcome { logits, eval, trim })
+    }
+
     /// One padded batched prefill pass over a cohort: `input` is
     /// `[B, padded_len]`, `mask` the stacked per-row padded masks (or `None`
     /// for a maskless family). Returns `[B, padded_len, vocab]` logits; the
