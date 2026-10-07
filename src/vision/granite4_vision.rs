@@ -354,7 +354,11 @@ impl LanguageModel for Granite4VisionVLModel {
         self.text_model.restore_sequence_state(seq_id, snapshot)
     }
 
-    fn trim_internal_caches(&self, excess: i32) {
-        self.text_model.trim_internal_caches(excess);
+    fn trim_state(
+        &self,
+        seq: Option<mlxcel_core::cache::SequenceId>,
+        excess: i32,
+    ) -> Result<(), String> {
+        self.text_model.trim_state(seq, excess)
     }
 }

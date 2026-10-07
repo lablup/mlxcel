@@ -1689,10 +1689,10 @@ impl mlxcel_core::generate::LanguageModel for Gemma3Wrapper {
     /// Its K/V lives in `ModelOwnedSequenceState`, so the scheduler's trim of
     /// the `CachePool` entry reaches nothing (that entry holds no `KVCache`);
     /// PR #1752 opted out for that reason. The pad positions are now dropped
-    /// from the model's own caches by [`Self::trim_sequence_state`] (server,
-    /// per `SequenceId`) and [`Self::trim_internal_caches`] (CLI fallback
-    /// slot), both through [`Cache::rewind_padded_prefill`], which leaves every
-    /// layer as an unpadded prefill would, `offset` included.
+    /// from the model's own caches by [`Self::trim_state`] (server with the
+    /// `SequenceId`, CLI fallback slot with `None`), through
+    /// [`Cache::rewind_padded_prefill`], which leaves every layer as an
+    /// unpadded prefill would, `offset` included.
     ///
     /// The text forwards ignore the caller's padding mask and build their own
     /// causal and sliding-window masks over the padded chunk. Pad positions
@@ -1708,20 +1708,21 @@ impl mlxcel_core::generate::LanguageModel for Gemma3Wrapper {
         })
     }
 
-    fn trim_internal_caches(&self, excess: i32) {
-        if let Err(err) = self
-            .sequence_state
-            .with_sequence_state(None, |caches| Self::rewind_padded_prefill(caches, excess))
-        {
-            tracing::error!("{err}");
+    /// `None` rewinds the CLI fallback slot (`make_fallback_caches`, no undo
+    /// log), `Some` the scheduler sequence's own caches
+    /// (`make_configured_caches`); both through `Cache::rewind_padded_prefill`,
+    /// which needs no log.
+    fn trim_state(&self, seq: Option<SequenceId>, excess: i32) -> Result<(), String> {
+        match seq {
+            None => self
+                .sequence_state
+                .with_sequence_state(None, |caches| Self::rewind_padded_prefill(caches, excess)),
+            Some(seq_id) => self
+                .sequence_state
+                .with_existing_sequence_state(seq_id, |caches| {
+                    Self::rewind_padded_prefill(caches, excess)
+                })?,
         }
-    }
-
-    fn trim_sequence_state(&self, seq_id: SequenceId, excess: i32) -> Result<(), String> {
-        self.sequence_state
-            .with_existing_sequence_state(seq_id, |caches| {
-                Self::rewind_padded_prefill(caches, excess)
-            })?
     }
 
     /// Gemma 3 decodes on the scheduler's lookahead pipeline (issue #2159).

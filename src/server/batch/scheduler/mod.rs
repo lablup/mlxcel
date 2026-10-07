@@ -51,7 +51,7 @@ use mlxcel_core::sampling::{
 use mlxcel_core::streams::{
     install_thread_local_default_stream, new_thread_local_generation_stream,
 };
-use mlxcel_core::utils::{align_to_na_tile, create_padded_prefill_mask};
+use mlxcel_core::utils::create_padded_prefill_mask;
 use mlxcel_core::{FinishCause, MlxThreadLocalStream, UniquePtr};
 
 use crate::LoadedModel;
@@ -224,13 +224,6 @@ fn effective_decode_storage_backend(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ChunkedPrefillRange {
-    start: usize,
-    end: usize,
-    is_terminal: bool,
-}
-
 /// Length of the longest common prefix of two token vectors.
 ///
 /// Used by: `BatchScheduler::resolve_history_boundary` (issue #1143)
@@ -269,15 +262,16 @@ pub(crate) fn history_boundary_len(
     Some(boundary)
 }
 
-/// Whether a resolved boundary is still worth capturing for this sequence at
+/// Whether a resolved boundary still splits this sequence's prefill at
 /// prefill time (issue #1143).
 ///
 /// Separate from [`history_boundary_len`] because it depends on state that only
 /// exists once the sequence has been admitted: an adopted prompt-cache prefix
 /// may already reach past the boundary, in which case the segment forward would
-/// be empty and the snapshot already exists.
+/// be empty and the snapshot already exists. The same rule is applied by
+/// `mlxcel_core::prefill_plan::PrefillPlan::with_prefix`.
 ///
-/// Used by: `BatchScheduler::capture_history_boundary_snapshot`
+/// Used by: `BatchScheduler::history_boundary_split`
 #[inline]
 fn boundary_capture_applies(
     boundary: usize,
@@ -287,23 +281,6 @@ fn boundary_capture_applies(
     boundary > prefill_start_offset && boundary < prompt_len
 }
 
-#[inline]
-fn next_chunked_prefill_range(
-    prompt_len: usize,
-    offset: usize,
-    chunk_size: usize,
-) -> Option<ChunkedPrefillRange> {
-    if chunk_size == 0 || offset >= prompt_len {
-        return None;
-    }
-    let end = offset.saturating_add(chunk_size).min(prompt_len);
-    Some(ChunkedPrefillRange {
-        start: offset,
-        end,
-        is_terminal: end >= prompt_len,
-    })
-}
-
 /// Core batch scheduler that drives the model worker loop.
 ///
 /// Replaces the old sequential `recv()` loop with an iteration-level scheduler
@@ -311,7 +288,9 @@ fn next_chunked_prefill_range(
 /// (the default), behavior is identical to the pre-scheduler worker loop.
 ///
 /// When `prefill_chunk_size > 0`, long prompts are processed in chunks with
-/// decode interleaving to prevent latency spikes for active sequences.
+/// decode interleaving to prevent latency spikes for active sequences; the
+/// partition is the `mlxcel_core::prefill_plan::PrefillPlan` of each sequence
+/// (see `planned_prefill`).
 pub struct BatchScheduler {
     // -- Pool & scheduling structures --
     cache_pool: CachePool,
@@ -982,6 +961,7 @@ mod handoff;
 mod mtp_dispatch;
 mod pad_trim;
 mod paged_layout;
+mod planned_prefill;
 mod prefill;
 mod prompt_cache;
 mod queued_adoption;
@@ -1026,6 +1006,10 @@ mod scheduler_muse_glimmer_parallel_tests;
 #[cfg(test)]
 #[path = "../scheduler_model_owned_cache_tests.rs"]
 mod scheduler_model_owned_cache_tests;
+
+#[cfg(test)]
+#[path = "../scheduler_prompt_cache_plan_tests.rs"]
+mod scheduler_prompt_cache_plan_tests;
 
 #[cfg(test)]
 #[path = "../scheduler_whole_prompt_hit_tests.rs"]

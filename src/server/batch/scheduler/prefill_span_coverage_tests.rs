@@ -24,7 +24,8 @@
 //! threshold that silently mixes two frequency tables into one KV cache. The
 //! first fix for #1358 announced in the two chunked-prefill functions and missed
 //! the prompt-cache ones, which is exactly how the server regressed while the
-//! CLI passed every gate: `capture_history_boundary_snapshot` forwards
+//! CLI passed every gate: the history boundary segment (a piece of the prefill
+//! plan since #2170, formerly `capture_history_boundary_snapshot`) forwards
 //! `prompt_tokens[start..boundary]`, a strict prefix that can sit below the
 //! threshold while the prompt does not.
 //!
@@ -58,14 +59,12 @@ use SpanDuty::{Announces, DecodeMustNotAnnounce, PrefillOptedOut};
 const DUTIES: &[(&str, &str, SpanDuty)] = &[
     // Prefill: the sequence's own prefill work, all of which can reach the
     // model with a strict prefix or suffix of the prompt.
-    ("prefill.rs", "execute_full_prefill", Announces),
-    ("prefill.rs", "start_chunked_prefill", Announces),
-    ("prefill.rs", "continue_chunked_prefill", Announces),
-    (
-        "prompt_cache.rs",
-        "capture_history_boundary_snapshot",
-        Announces,
-    ),
+    //
+    // Since #2170 every plan piece (a full prefill, each chunk, the history
+    // boundary segment) runs through `run_prefill_piece`; the embedding input's
+    // one piece has its own executor.
+    ("planned_prefill.rs", "run_prefill_piece", Announces),
+    ("prefill.rs", "run_embedding_prefill", Announces),
     ("prompt_cache.rs", "run_next_prompt_cache_warmup", Announces),
     // Prefill, opted out: one batched pass from offset 0 over the padded cohort,
     // where the pass span already equals the longest row's prompt.
@@ -87,6 +86,7 @@ const DUTIES: &[(&str, &str, SpanDuty)] = &[
 /// The scheduler sources this guard reads.
 fn sources() -> Vec<(&'static str, &'static str)> {
     vec![
+        ("planned_prefill.rs", include_str!("planned_prefill.rs")),
         ("prefill.rs", include_str!("prefill.rs")),
         ("prompt_cache.rs", include_str!("prompt_cache.rs")),
         ("decode_tick.rs", include_str!("decode_tick.rs")),
@@ -230,15 +230,15 @@ fn the_prompt_cache_prefill_forwards_are_covered() {
     // repetition through POST /v1/completions while the CLI was correct) is not
     // visible from any unit test that does not read this file.
     let observed = observed();
-    for name in [
-        "capture_history_boundary_snapshot",
-        "run_next_prompt_cache_warmup",
+    for (file, name) in [
+        ("planned_prefill.rs", "run_prefill_piece"),
+        ("prompt_cache.rs", "run_next_prompt_cache_warmup"),
     ] {
-        let key = ("prompt_cache.rs".to_string(), name.to_string());
+        let key = (file.to_string(), name.to_string());
         assert_eq!(
             observed.get(&key),
             Some(&true),
-            "prompt_cache.rs::{name} must forward the model and announce the prefill span"
+            "{file}::{name} must forward the model and announce the prefill span"
         );
     }
 }

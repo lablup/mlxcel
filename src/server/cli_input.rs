@@ -2278,7 +2278,8 @@ pub fn resolve_prefill_chunk_size(
     batch_size: Option<usize>,
     ubatch_size: Option<usize>,
 ) -> PrefillChunkResolution {
-    const DEFAULT_PREFILL_CHUNK_SIZE: usize = 512;
+    // One chunk policy for the CLI and the server (ADR 0007, #2170).
+    let default_prefill_chunk_size = mlxcel_core::prefill_plan::prefill_chunk_len();
 
     let ubatch_size_provided = ubatch_size.is_some();
 
@@ -2289,7 +2290,7 @@ pub fn resolve_prefill_chunk_size(
             batch_size_conflict: false,
         },
         Some(bs) => {
-            let explicit_prefill = prefill_chunk_size != DEFAULT_PREFILL_CHUNK_SIZE;
+            let explicit_prefill = prefill_chunk_size != default_prefill_chunk_size;
             let conflict = explicit_prefill && bs != prefill_chunk_size;
             PrefillChunkResolution {
                 prefill_chunk_size: if explicit_prefill {

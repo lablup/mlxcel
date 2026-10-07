@@ -531,18 +531,32 @@ fn chunked_prefill_interleaving_pattern() {
 // instead feeds an empty `[end..end]` chunk on the next tick, producing a
 // zero-length `[1, 0, vocab]` forward that crashes in `slice_last_logits`.
 
-/// Thin wrapper around the production chunk range helper used by
-/// `start_chunked_prefill`.
-/// Returns `(chunk_len, is_terminal)` where `is_terminal` is true when chunk 0
-/// already covers the rest of the prompt and there is nothing to continue.
+/// The first piece of the plan `start_chunked_prefill` executes: its length,
+/// and whether it already covers the rest of the prompt and there is nothing
+/// to continue.
 fn first_chunk_is_terminal(
     prompt_len: usize,
     prefill_start_offset: usize,
     chunk_size: usize,
 ) -> (usize, bool) {
-    let range = super::next_chunked_prefill_range(prompt_len, prefill_start_offset, chunk_size)
+    let caps = mlxcel_core::prefill_plan::PrefillCaps {
+        supports_chunked_prefill: true,
+        supports_padded_prefill: false,
+        supports_maskless_padded_prefill: false,
+        align_prefill: false,
+        input: mlxcel_core::prefill_plan::PrefillInput::Tokens,
+    };
+    let plan = mlxcel_core::prefill_plan::PrefillPlan::with_prefix(
+        prompt_len,
+        prefill_start_offset,
+        None,
+        chunk_size,
+        caps,
+    );
+    let piece = plan
+        .piece_starting_at(prefill_start_offset)
         .expect("test scenarios must leave a non-empty suffix for chunk 0");
-    (range.end - range.start, range.is_terminal)
+    (piece.len(), plan.is_terminal(piece))
 }
 
 #[test]
@@ -577,23 +591,19 @@ fn chunked_prefill_first_chunk_not_terminal_on_cold_long_prompt() {
 }
 
 #[test]
-fn chunked_prefill_range_rejects_empty_continuation() {
-    let range = super::next_chunked_prefill_range(593, 593, 512);
-    assert!(
-        range.is_none(),
-        "offset == prompt length has no suffix; the scheduler must not feed a \
-         zero-token chunk to MLX"
-    );
-}
-
-#[test]
-fn chunked_prefill_range_rejects_zero_chunk_size() {
-    let range = super::next_chunked_prefill_range(593, 560, 0);
-    assert!(
-        range.is_none(),
-        "a zero chunk size cannot make progress and must not create an empty \
-         MLX input"
-    );
+fn chunked_prefill_plan_has_no_piece_for_an_empty_continuation() {
+    let caps = mlxcel_core::prefill_plan::PrefillCaps {
+        supports_chunked_prefill: true,
+        ..Default::default()
+    };
+    // offset == prompt length has no suffix; the scheduler must not feed a
+    // zero-token chunk to MLX.
+    let plan = mlxcel_core::prefill_plan::PrefillPlan::with_prefix(593, 593, None, 512, caps);
+    assert!(plan.pieces().is_empty());
+    assert!(plan.piece_starting_at(593).is_none());
+    // A zero chunk size is a single pass, never an empty MLX input.
+    let plan = mlxcel_core::prefill_plan::PrefillPlan::with_prefix(593, 560, None, 0, caps);
+    assert_eq!(plan.ranges(), vec![560..593]);
 }
 
 // -------------------------------------------------------------------

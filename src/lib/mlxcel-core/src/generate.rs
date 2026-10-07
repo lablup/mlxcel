@@ -36,11 +36,12 @@ use crate::generation_policy::{
 use crate::hardware;
 use crate::layers::KVCache;
 use crate::loop_detection::LoopDetectionConfig;
+use crate::prefill_plan::{PrefillCaps, PrefillInput, PrefillPlan};
 use crate::sampling::{
     SamplerState, TokenBiasMap, sample_token_optimized, sample_token_optimized_with_state,
 };
 use crate::streams::{install_thread_local_default_stream, shared_thread_local_generation_stream};
-use crate::utils::{align_to_na_tile, create_padded_prefill_mask};
+use crate::utils::create_padded_prefill_mask;
 use cxx::UniquePtr;
 
 /// One named tensor captured from a model-owned recurrent sequence state.
@@ -176,32 +177,30 @@ fn should_align_prefill() -> bool {
     prefill_tile_alignment_enabled()
 }
 
-#[inline]
-fn force_padded_prefill_array_mask() -> bool {
-    std::env::var("MLXCEL_FORCE_PADDED_PREFILL_MASK").is_ok()
-}
-
 /// Pad a prompt token slice to `padded_len` with the pad token (0) and return
 /// both the padded slice and an appropriate attention mask.
 ///
 /// If `actual_len == padded_len` no padding is needed: returns the original
 /// tokens and `None` (the forward pass will use its built-in causal mask).
 ///
-/// If `actual_len < padded_len` the sequence is extended with zeros and a
-/// padded causal mask is returned so that padding positions do not leak into
-/// the KV cache values.
+/// If `actual_len < padded_len` the sequence is extended with zeros and, when
+/// `pad_mask` is set, a padded causal mask anchored at `kv_offset` (the
+/// positions already in the KV cache before this piece) is returned so that
+/// padding positions do not leak into the KV cache values. Without `pad_mask`
+/// the model builds its own causal mask over the padded input
+/// ([`LanguageModel::supports_maskless_padded_prefill`]); the plan decides
+/// which ([`PrefillPlan::pad_mask_required`]).
 ///
-/// # Arguments
-/// * `prompt_tokens` - Original token IDs.
-/// * `padded_len`    - Target aligned length (≥ `prompt_tokens.len()`).
+/// Executor of a padded [`crate::prefill_plan::PrefillPiece`]; see [`crate::prefill_plan`].
 ///
 /// # Returns
 /// `(padded_tokens_vec, mask_or_none)` where `mask_or_none` is `None` when no
-/// padding was added.
+/// padding was added or no mask is required.
 fn pad_tokens_for_prefill(
     prompt_tokens: &[i32],
     padded_len: usize,
-    use_maskless_causal: bool,
+    pad_mask: bool,
+    kv_offset: usize,
 ) -> (Vec<i32>, Option<UniquePtr<MlxArray>>) {
     let actual_len = prompt_tokens.len();
     if padded_len == actual_len {
@@ -212,20 +211,24 @@ fn pad_tokens_for_prefill(
     padded.extend_from_slice(prompt_tokens);
     padded.resize(padded_len, 0); // pad with token id 0
 
-    if use_maskless_causal && !force_padded_prefill_array_mask() {
+    if !pad_mask {
         return (padded, None);
     }
 
-    let mask = create_padded_prefill_mask(actual_len as i32, padded_len as i32, 0);
+    let mask = create_padded_prefill_mask(actual_len as i32, padded_len as i32, kv_offset as i32);
     (padded, Some(mask))
 }
 
-/// After a padded prefill, trim all KV caches back to `actual_len` so that
-/// the decode phase starts with the correct sequence position.
+/// After a padded prefill piece, trim all KV caches back to `actual_len` so
+/// that the next piece or the decode phase starts with the correct sequence
+/// position.
 ///
 /// The padded token positions `[actual_len, padded_len)` were written to the
 /// cache during the forward pass; trimming removes them so the KV cache offset
-/// reflects only the real prompt tokens.
+/// reflects only the real prompt tokens. The model's own fallback state is
+/// trimmed next to it through [`LanguageModel::trim_state`] with `None`.
+///
+/// Executor of [`crate::prefill_plan::PrefillPiece::trim_after`]; see [`crate::prefill_plan`].
 fn trim_caches_to_actual_len(caches: &mut [KVCache], actual_len: usize, padded_len: usize) {
     let excess = (padded_len - actual_len) as i32;
     if excess <= 0 {
@@ -277,145 +280,170 @@ pub fn logits_at_position(logits: &MlxArray, pos: usize) -> UniquePtr<MlxArray> 
     ffi::slice(logits, &[0, pos as i32, 0], &[batch, pos as i32 + 1, vocab])
 }
 
-/// Default cache-level prefill chunk for the single-sequence CLI/bench path,
-/// matching upstream mlx-lm/mlx-vlm's `DEFAULT_PREFILL_STEP_SIZE` (issue
-/// #674). The server uses its own `prefill_chunk_size` (default 512).
-pub const DEFAULT_PREFILL_CHUNK: usize = 2048;
+pub use crate::prefill_plan::{DEFAULT_PREFILL_CHUNK, prefill_chunk_len};
 
-/// Cache-level prefill chunk length for the single-sequence CLI/bench path,
-/// from `MLXCEL_PREFILL_CHUNK` (tokens). Unset defaults to
-/// [`DEFAULT_PREFILL_CHUNK`]; `0` forces single-pass prefill.
+/// The plan for a single-sequence token prefill of `prompt_len` tokens under
+/// the chunk policy and this model's capabilities (see [`crate::prefill_plan`]).
 ///
-/// When enabled, the prompt is fed through `forward_last_logits` in chunks of
-/// this many tokens, evaluating each chunk before the next so the lazy graph
-/// (and its transients) never spans the whole prompt. This bounds prefill
-/// memory the way the server's `prefill_chunk_size` path does: sliding-window
-/// KV caches rotate down to their window between chunks instead of holding
-/// every prompt token for one giant pass, and per-chunk attention scores,
-/// masks, and logits stay chunk-sized (issue #672). Models that cannot run a
-/// multi-call prefill opt out via
-/// [`LanguageModel::supports_chunked_prefill`], mirroring mlx-vlm's
-/// `chunked_prefill_policy`.
-/// Used by: CxxGenerator, Generator and Gemma 4 31B MTP prefill.
-pub fn prefill_chunk_len() -> usize {
-    static CHUNK: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *CHUNK.get_or_init(|| {
-        std::env::var("MLXCEL_PREFILL_CHUNK")
-            .ok()
-            .and_then(|v| v.trim().parse::<usize>().ok())
-            .unwrap_or(DEFAULT_PREFILL_CHUNK)
-    })
-}
-
-/// Effective prefill chunk for one generation call: the configured chunk when
-/// chunking applies, or `None` for a single-pass prefill.
-///
-/// Pure decision logic so the gate is unit-testable without touching process
-/// environment: chunking applies when the configured chunk is non-zero, the
-/// model supports multi-call prefill, and the prompt is actually longer than
-/// one chunk.
-fn effective_prefill_chunk(
-    configured: usize,
-    model_supports: bool,
+/// Used by: `prefill_prompt_last_logits`, the Gemma 4 MTP prefill mirror.
+pub fn plan_single_sequence_prefill<M: LanguageModel + ?Sized>(
+    model: &M,
     prompt_len: usize,
-) -> Option<usize> {
-    (configured > 0 && model_supports && prompt_len > configured).then_some(configured)
+) -> PrefillPlan {
+    PrefillPlan::new(
+        prompt_len,
+        prefill_chunk_len(),
+        PrefillCaps::for_model(model, should_align_prefill()),
+    )
 }
 
-/// Run a chunked single-sequence prefill: feed `prompt_tokens` through the
-/// model `chunk` tokens at a time, forcing evaluation between chunks, and
-/// return the `[1, 1, vocab]` logits of the final prompt position.
+/// Run every piece of `plan` over `prompt_tokens` through `forward_last_logits`,
+/// continuing from `caches`, and return the `[1, 1, vocab]` logits of the final
+/// prompt position.
 ///
-/// Behavior-equivalent to one `forward_last_logits` over the whole prompt:
-/// each `forward` continues from the KV caches exactly like the multi-token
-/// verify / server chunked-prefill paths, and only the last chunk's final
-/// position is sampled. Intermediate chunks still project a single hidden row
-/// through the LM head (their `[1, 1, vocab]` result is dropped).
+/// Each piece is the plan's: its tokens are padded to `padded_len` when the
+/// plan padded it (with the padding mask the plan requires), the forward slices
+/// the piece's last real position, and the pad positions are trimmed from the
+/// caches and from the model's fallback state right after. Between two pieces
+/// the graph is evaluated and the allocator cache cleared, so one piece's
+/// transients are released before the next piece's graph is built: every
+/// chunk sees a different key length, so its scores, masks and logits land in
+/// differently-sized allocations, and without the clear the CUDA async-malloc
+/// pool accumulates each shape's high-water mark across the whole prompt
+/// (measured ~84 GB system peak for a 32k gemma-4-31b chunked prefill whose
+/// live set is ~30 GB, issue #672). A single-piece plan runs one forward and
+/// evaluates nothing here, exactly as the unchunked prefill always did; the
+/// caller's first sample evaluates it.
+///
+/// Intermediate pieces still project a single hidden row through the LM head
+/// (their `[1, 1, vocab]` result is dropped).
 fn chunked_prefill_last_logits<M: LanguageModel + ?Sized>(
     model: &M,
     caches: &mut [KVCache],
     prompt_tokens: &[i32],
-    chunk: usize,
+    plan: &PrefillPlan,
 ) -> UniquePtr<MlxArray> {
-    debug_assert!(chunk > 0 && !prompt_tokens.is_empty());
+    debug_assert_eq!(plan.prompt_len(), prompt_tokens.len());
+    debug_assert!(!plan.pieces().is_empty());
     // A model that picks its RoPE frequency table from how long the whole
-    // prompt is must make that choice once for the prompt, not once per chunk.
-    // Without this the chunks below write keys rotated with two different
+    // prompt is must make that choice once for the prompt, not once per piece.
+    // Without this the pieces below write keys rotated with two different
     // tables into one cache whenever the prompt straddles the threshold. See
     // `crate::prefill_span`.
     let _span = crate::prefill_span::announce(prompt_tokens.len() as i32);
     let mut logits: Option<UniquePtr<MlxArray>> = None;
-    for piece in prompt_tokens.chunks(chunk) {
-        let input = ffi::from_slice_i32(piece, &[1, piece.len() as i32]);
-        let piece_logits =
-            model.forward_last_logits(&input, caches, None, piece.len().saturating_sub(1));
-        // Evaluate now so this chunk's transients are released before the
-        // next chunk's graph is built; the result is only [1, 1, vocab].
-        ffi::eval(&piece_logits);
-        // Return freed buffers to the OS between chunks. Every chunk sees a
-        // different key length, so its transients (scores, masks, logits)
-        // land in differently-sized allocations; without this the CUDA
-        // async-malloc pool accumulates each shape's high-water mark across
-        // the whole prompt (measured ~84 GB system peak for a 32k gemma-4-31b
-        // chunked prefill whose live set is ~30 GB, issue #672).
-        ffi::clear_memory_cache();
+    for piece in plan.pieces() {
+        let tokens = &prompt_tokens[piece.range.clone()];
+        let (input_tokens, mask_opt) = pad_tokens_for_prefill(
+            tokens,
+            piece.padded_len,
+            plan.pad_mask_required(),
+            piece.range.start,
+        );
+        let input = ffi::from_slice_i32(&input_tokens, &[1, piece.padded_len as i32]);
+        // Last *real* token position; `forward_last_logits` slices there.
+        let piece_logits = model.forward_last_logits(
+            &input,
+            caches,
+            mask_opt.as_ref().map(|m| m.as_ref().unwrap()),
+            piece.last_real_pos(),
+        );
+        if let Some(excess) = piece.trim_after() {
+            // Trim padding positions from all KV caches so the next piece and
+            // decode use the correct cache offset (real tokens, not padded).
+            trim_caches_to_actual_len(caches, piece.len(), piece.padded_len);
+            if let Err(err) = model.trim_state(None, excess as i32) {
+                tracing::error!("padded prefill trim: {err}");
+            }
+        }
+        if !plan.is_terminal(piece) {
+            ffi::eval(&piece_logits);
+            ffi::clear_memory_cache();
+        }
         logits = Some(piece_logits);
     }
-    logits.expect("chunked_prefill_last_logits requires a non-empty prompt")
+    logits.expect("a prefill plan over a non-empty prompt has at least one piece")
 }
 
 /// Prefill the whole prompt and return the `[1, 1, vocab]` logits of its last
 /// position, the way [`CxxGenerator::generate_streaming`] does.
 ///
-/// Picks cache-level chunked prefill when `MLXCEL_PREFILL_CHUNK` applies,
-/// tile-aligned padded prefill on M5+ hardware, and one `forward_last_logits`
-/// over the prompt otherwise. Speculative generators that must stay
-/// byte-identical to plain decoding at greedy sampling call this instead of
-/// their own prefill: splitting the prompt differently changes the fp16
-/// rounding of the cached keys and values, and with it the first token.
+/// Executes [`plan_single_sequence_prefill`]: cache-level chunked prefill when
+/// the chunk policy applies, tile-aligned padded prefill on M5+ hardware, and
+/// one `forward_last_logits` over the prompt otherwise. Speculative generators
+/// that must stay byte-identical to plain decoding at greedy sampling call
+/// this instead of their own prefill: splitting the prompt differently changes
+/// the fp16 rounding of the cached keys and values, and with it the first
+/// token.
 ///
-/// Used by: `CxxGenerator::generate_streaming`, `PromptLookupGenerator`
+/// Used by: `CxxGenerator::generate_streaming`, `CxxGenerator::generate_with_stats`,
+/// `PromptLookupGenerator`
 pub(crate) fn prefill_prompt_last_logits<M: LanguageModel>(
     model: &M,
     caches: &mut [KVCache],
     prompt_tokens: &[i32],
 ) -> UniquePtr<MlxArray> {
+    let plan = plan_single_sequence_prefill(model, prompt_tokens.len());
+    chunked_prefill_last_logits(model, caches, prompt_tokens, &plan)
+}
+
+/// Prefill a prompt handed over as pre-merged embeddings (a VLM prefill) and
+/// return the `[1, 1, vocab]` logits of its last real position.
+///
+/// Executes a plan for embedding input: never chunked, and padded to the
+/// Neural Accelerator tile only when no caller mask constrains the shape and
+/// the model opts in, in which case the embedding rows are extended with
+/// [`pad_embeddings`] next to the token ids and the pad positions are trimmed
+/// afterwards. A caller-supplied `mask` is passed through unchanged.
+///
+/// Used by: `CxxGenerator::generate_streaming_with_embeddings`,
+/// `CxxGenerator::generate_with_stats_and_embeddings`
+fn prefill_embeddings_last_logits<M: LanguageModel + ?Sized>(
+    model: &M,
+    caches: &mut [KVCache],
+    prompt_tokens: &[i32],
+    input_embeddings: Option<&MlxArray>,
+    mask: Option<&MlxArray>,
+) -> UniquePtr<MlxArray> {
     let actual_len = prompt_tokens.len();
-    let prefill_chunk = effective_prefill_chunk(
-        prefill_chunk_len(),
-        model.supports_chunked_prefill(),
-        actual_len,
+    let caps = PrefillCaps::for_model(model, should_align_prefill()).with_input(
+        PrefillInput::Embeddings {
+            // A caller that supplies a mask already controls the shape.
+            executor_pads: mask.is_none(),
+        },
     );
-    if let Some(chunk) = prefill_chunk {
-        // Cache-level chunked prefill (MLXCEL_PREFILL_CHUNK, default 2048).
-        chunked_prefill_last_logits(model, caches, prompt_tokens, chunk)
-    } else if should_align_prefill() && model.supports_padded_prefill() {
-        let padded_len = align_to_na_tile(actual_len);
-        let (padded_tokens, mask_opt) = pad_tokens_for_prefill(
-            prompt_tokens,
-            padded_len,
-            model.supports_maskless_padded_prefill(),
-        );
-        let input = ffi::from_slice_i32(&padded_tokens, &[1, padded_len as i32]);
-        // Last *real* token position; `forward_last_logits` slices there,
-        // replacing the previous forward + `logits_at_position` pair.
-        let raw_logits = model.forward_last_logits(
-            &input,
-            caches,
-            mask_opt.as_ref().map(|m| m.as_ref().unwrap()),
-            actual_len.saturating_sub(1),
-        );
-        // Trim padding positions from all KV caches so decode uses the
-        // correct cache offset (actual_len, not padded_len).
-        if padded_len > actual_len {
-            trim_caches_to_actual_len(caches, actual_len, padded_len);
-            model.trim_internal_caches((padded_len - actual_len) as i32);
-        }
-        raw_logits
-    } else {
+    let plan = PrefillPlan::new(actual_len, prefill_chunk_len(), caps);
+    let Some(piece) = plan.pieces().first() else {
         let input = ffi::from_slice_i32(prompt_tokens, &[1, actual_len as i32]);
-        model.forward_last_logits(&input, caches, None, actual_len.saturating_sub(1))
+        return model.forward_with_embeddings(&input, input_embeddings, caches, mask);
+    };
+    debug_assert!(plan.is_single_pass());
+    if !piece.is_padded() {
+        let input = ffi::from_slice_i32(prompt_tokens, &[1, actual_len as i32]);
+        return model.forward_with_embeddings(&input, input_embeddings, caches, mask);
     }
+    let padded_len = piece.padded_len;
+    let (padded_tokens, mask_opt) =
+        pad_tokens_for_prefill(prompt_tokens, padded_len, plan.pad_mask_required(), 0);
+    let input = ffi::from_slice_i32(&padded_tokens, &[1, padded_len as i32]);
+    let padded_embeds_storage;
+    let effective_embeds: Option<&MlxArray> = if let Some(emb) = input_embeddings {
+        padded_embeds_storage = pad_embeddings(emb, padded_len);
+        Some(padded_embeds_storage.as_ref().unwrap())
+    } else {
+        None
+    };
+    let raw_logits = model.forward_with_embeddings(
+        &input,
+        effective_embeds,
+        caches,
+        mask_opt.as_ref().map(|m| m.as_ref().unwrap()),
+    );
+    trim_caches_to_actual_len(caches, actual_len, padded_len);
+    if let Err(err) = model.trim_state(None, piece.pad_excess() as i32) {
+        tracing::error!("padded embedding prefill trim: {err}");
+    }
+    logits_at_position(&raw_logits, piece.last_real_pos())
 }
 
 /// Per-layer KV cache modes for `n_layers` caches under the nominal `mode`,
@@ -686,45 +714,46 @@ pub trait LanguageModel {
     /// Used by models that need to adjust internal state between phases.
     fn after_prefill(&self) {}
 
-    /// Trim internal caches after padded prefill. Models with internal
-    /// cache state (e.g. NemotronH) override this to trim their own caches
-    /// so that padding positions do not corrupt subsequent decode steps.
+    /// Drop the trailing `excess` pad positions a padded prefill piece wrote
+    /// into this model's own state (issues #1755, #2170).
     ///
-    /// This reaches only the model's fallback (no `SequenceId`) state, which is
-    /// what the CLI generate paths use. The server scheduler addresses one
-    /// sequence at a time through [`Self::trim_sequence_state`].
-    fn trim_internal_caches(&self, _excess: i32) {}
-
-    /// Drop the trailing `excess` pad positions a padded prefill wrote into the
-    /// model-owned state of scheduler sequence `seq_id` (issue #1755).
-    ///
-    /// The batch scheduler calls this after every padded prefill pass whenever
-    /// the model's own [`Self::sequence_state_layout`] is
+    /// `seq` selects the state: `None` is the fallback single-sequence slot
+    /// the CLI generate paths and the speculative verify use, `Some(seq_id)`
+    /// is the per-sequence state of a scheduler sequence. The batch scheduler
+    /// calls this after every padded prefill piece whenever the model's own
+    /// [`Self::sequence_state_layout`] is
     /// [`crate::cache::SequenceStateBackend::ModelOwned`], because the
     /// `CachePool` entry of such a sequence holds no per-layer `KVCache` for
-    /// its own trim to reach. On return the sequence's state must be what an
+    /// its own trim to reach. On return the addressed state must be what an
     /// unpadded prefill of the same tokens would have left: every layer's
     /// `offset` equal to the real token count, and no pad K/V left anywhere a
-    /// later step can read.
+    /// later step can read. Recurrent state that absorbed the pad positions
+    /// cannot be rewound; the families that keep such state decline padding
+    /// through [`Self::supports_padded_prefill`] and reset it here.
     ///
-    /// The default covers a non-batching model, whose internal state is the
-    /// one sequence the scheduler is running, by delegating to
-    /// [`Self::trim_internal_caches`]. A batching model keeps one state per
-    /// `SequenceId`, which the default cannot address, so it returns `Err`; a
-    /// model-owned family that keeps [`Self::supports_padded_prefill`] `true`
-    /// must override this. The scheduler aborts the request on `Err` rather
-    /// than decode from a desynchronized offset.
+    /// The default keeps no model-owned state: the fallback slot has nothing
+    /// to trim, a non-batching model's internal state is the one sequence the
+    /// scheduler runs (nothing to trim either), and a batching model keeps one
+    /// state per `SequenceId` the default cannot address, so `Some` returns
+    /// `Err` there; a model-owned family that keeps
+    /// [`Self::supports_padded_prefill`] `true` must override this. The
+    /// scheduler aborts the request on `Err` rather than decode from a
+    /// desynchronized offset; the CLI logs it.
     ///
-    /// Used by: server batch scheduler prefill sites.
-    fn trim_sequence_state(&self, seq_id: SequenceId, excess: i32) -> Result<(), String> {
-        if self.supports_batching() {
-            return Err(format!(
+    /// Not a decode rewind: [`Self::rewind_decode_appends`] unwinds the
+    /// scheduler's speculative single-token appends exactly and stays separate.
+    ///
+    /// Used by: `chunked_prefill_last_logits`, `prefill_embeddings_last_logits`,
+    /// the speculative verify padding, and the server scheduler's
+    /// `trim_padded_prefill`.
+    fn trim_state(&self, seq: Option<SequenceId>, excess: i32) -> Result<(), String> {
+        match seq {
+            Some(seq_id) if self.supports_batching() => Err(format!(
                 "model-owned sequence {seq_id} cannot drop {excess} pad positions: the model \
-                 does not implement trim_sequence_state"
-            ));
+                 does not implement trim_state"
+            )),
+            _ => Ok(()),
         }
-        self.trim_internal_caches(excess);
-        Ok(())
     }
 
     /// Whether [`Self::rewind_decode_appends`] can unwind the speculative
@@ -907,7 +936,7 @@ pub trait LanguageModel {
     /// `CachePool` entry for such a sequence holds no `KVCache`, so its trim
     /// reaches nothing and the pad positions stay in the model's own caches.
     /// A model-owned family may answer `true` only if it also implements
-    /// [`Self::trim_sequence_state`] (server) and [`Self::trim_internal_caches`]
+    /// [`Self::trim_state`] (server with `Some`, CLI fallback with `None`)
     /// (CLI) so that both rewind its own state; otherwise it must answer
     /// `false` (issue #1755).
     ///
@@ -2301,44 +2330,16 @@ impl CxxGenerator {
         let eos_tokens = merged_eos_token_ids(model.eos_token_ids(), &sampling.stop_token_ids);
 
         // Prefill: use forward_with_embeddings for merged vision+text embeddings.
-        // On M5+ hardware pad the sequence to a 32-token tile boundary when no
-        // explicit mask is provided by the caller (callers that supply a custom
-        // mask already control the shape and may not need tile alignment).
-        let actual_len = prompt_tokens.len();
-        let logits = if mask.is_none() && should_align_prefill() && model.supports_padded_prefill()
-        {
-            let padded_len = align_to_na_tile(actual_len);
-            let (padded_tokens, mask_opt) = pad_tokens_for_prefill(
-                prompt_tokens,
-                padded_len,
-                model.supports_maskless_padded_prefill(),
-            );
-            let input = ffi::from_slice_i32(&padded_tokens, &[1, padded_len as i32]);
-            // Pad embeddings if provided.
-            let padded_embeds_storage;
-            let effective_embeds: Option<&MlxArray> = if let Some(emb) = input_embeddings {
-                padded_embeds_storage = pad_embeddings(emb, padded_len);
-                Some(padded_embeds_storage.as_ref().unwrap())
-            } else {
-                None
-            };
-            let raw_logits = model.forward_with_embeddings(
-                &input,
-                effective_embeds,
-                &mut self.caches,
-                mask_opt.as_ref().map(|m| m.as_ref().unwrap()),
-            );
-            if padded_len > actual_len {
-                trim_caches_to_actual_len(&mut self.caches, actual_len, padded_len);
-                model.trim_internal_caches((padded_len - actual_len) as i32);
-                logits_at_position(&raw_logits, actual_len - 1)
-            } else {
-                raw_logits
-            }
-        } else {
-            let input = ffi::from_slice_i32(prompt_tokens, &[1, actual_len as i32]);
-            model.forward_with_embeddings(&input, input_embeddings, &mut self.caches, mask)
-        };
+        // The plan pads to a 32-token tile on M5+ hardware only when no explicit
+        // mask is provided by the caller (callers that supply a custom mask
+        // already control the shape) and never chunks embedding input.
+        let logits = prefill_embeddings_last_logits(
+            model,
+            &mut self.caches,
+            prompt_tokens,
+            input_embeddings,
+            mask,
+        );
 
         // Force evaluation of the prefill graph before any weight modifications
         // in after_prefill. MLX lazy evaluation means the graph references the
@@ -2491,46 +2492,18 @@ impl CxxGenerator {
         // path, so that path keeps calling the original sampler unchanged.
         let mut sampler_state: Option<SamplerState> = None;
 
-        // Prefill with embeddings.
-        // On M5+ hardware pad to a 32-token tile boundary (same logic as
-        // generate_streaming_with_embeddings).
-        let actual_len = prompt_tokens.len();
+        // Prefill with embeddings, under the same plan as
+        // generate_streaming_with_embeddings.
         let ttft_setup_ns = ttft_setup_start.map_or(0, |t| t.elapsed().as_nanos());
         let prefill_start = Instant::now();
         let ttft_build_start = profile_ttft.then(Instant::now);
-        let logits = if mask.is_none() && should_align_prefill() && model.supports_padded_prefill()
-        {
-            let padded_len = align_to_na_tile(actual_len);
-            let (padded_tokens, mask_opt) = pad_tokens_for_prefill(
-                prompt_tokens,
-                padded_len,
-                model.supports_maskless_padded_prefill(),
-            );
-            let input = ffi::from_slice_i32(&padded_tokens, &[1, padded_len as i32]);
-            let padded_embeds_storage;
-            let effective_embeds: Option<&MlxArray> = if let Some(emb) = input_embeddings {
-                padded_embeds_storage = pad_embeddings(emb, padded_len);
-                Some(padded_embeds_storage.as_ref().unwrap())
-            } else {
-                None
-            };
-            let raw_logits = model.forward_with_embeddings(
-                &input,
-                effective_embeds,
-                &mut self.caches,
-                mask_opt.as_ref().map(|m| m.as_ref().unwrap()),
-            );
-            if padded_len > actual_len {
-                trim_caches_to_actual_len(&mut self.caches, actual_len, padded_len);
-                model.trim_internal_caches((padded_len - actual_len) as i32);
-                logits_at_position(&raw_logits, actual_len - 1)
-            } else {
-                raw_logits
-            }
-        } else {
-            let input = ffi::from_slice_i32(prompt_tokens, &[1, actual_len as i32]);
-            model.forward_with_embeddings(&input, input_embeddings, &mut self.caches, mask)
-        };
+        let logits = prefill_embeddings_last_logits(
+            model,
+            &mut self.caches,
+            prompt_tokens,
+            input_embeddings,
+            mask,
+        );
         model.after_prefill();
         let ttft_build_ns = ttft_build_start.map_or(0, |t| t.elapsed().as_nanos());
         let ttft_sample_start = profile_ttft.then(Instant::now);
@@ -2758,46 +2731,12 @@ impl CxxGenerator {
         // path, so that path keeps calling the original sampler unchanged.
         let mut sampler_state: Option<SamplerState> = None;
 
-        // PREFILL PHASE.
-        // On M5+ hardware pad the sequence to a 32-token tile boundary for
-        // optimal Neural Accelerator throughput.
-        let actual_len = prompt_tokens.len();
+        // PREFILL PHASE: the same plan as `generate_streaming` (chunked, tile
+        // padded on M5+ hardware, or one forward).
         let ttft_setup_ns = ttft_setup_start.map_or(0, |t| t.elapsed().as_nanos());
         let prefill_start = Instant::now();
         let ttft_build_start = profile_ttft.then(Instant::now);
-        let prefill_chunk = effective_prefill_chunk(
-            prefill_chunk_len(),
-            model.supports_chunked_prefill(),
-            actual_len,
-        );
-        let logits = if let Some(chunk) = prefill_chunk {
-            // Cache-level chunked prefill (MLXCEL_PREFILL_CHUNK, default 2048).
-            chunked_prefill_last_logits(model, &mut self.caches, prompt_tokens, chunk)
-        } else if should_align_prefill() && model.supports_padded_prefill() {
-            let padded_len = align_to_na_tile(actual_len);
-            let (padded_tokens, mask_opt) = pad_tokens_for_prefill(
-                prompt_tokens,
-                padded_len,
-                model.supports_maskless_padded_prefill(),
-            );
-            let input = ffi::from_slice_i32(&padded_tokens, &[1, padded_len as i32]);
-            // Last *real* token position; `forward_last_logits` slices there,
-            // replacing the previous forward + `logits_at_position` pair.
-            let raw_logits = model.forward_last_logits(
-                &input,
-                &mut self.caches,
-                mask_opt.as_ref().map(|m| m.as_ref().unwrap()),
-                actual_len.saturating_sub(1),
-            );
-            if padded_len > actual_len {
-                trim_caches_to_actual_len(&mut self.caches, actual_len, padded_len);
-                model.trim_internal_caches((padded_len - actual_len) as i32);
-            }
-            raw_logits
-        } else {
-            let input = ffi::from_slice_i32(prompt_tokens, &[1, actual_len as i32]);
-            model.forward_last_logits(&input, &mut self.caches, None, actual_len.saturating_sub(1))
-        };
+        let logits = prefill_prompt_last_logits(model, &mut self.caches, prompt_tokens);
 
         let ttft_build_ns = ttft_build_start.map_or(0, |t| t.elapsed().as_nanos());
 
@@ -3314,7 +3253,8 @@ mod tests {
         };
         let mut caches = model.make_caches();
 
-        let logits = chunked_prefill_last_logits(&model, &mut caches, &prompt, 3);
+        let plan = PrefillPlan::new(prompt.len(), 3, PrefillCaps::for_model(&model, false));
+        let logits = chunked_prefill_last_logits(&model, &mut caches, &prompt, &plan);
         ffi::eval(&logits);
 
         assert_eq!(
@@ -3327,20 +3267,6 @@ mod tests {
             None,
             "the announcement must not outlive the prefill; a decode step or another sequence would read it"
         );
-    }
-
-    /// The chunk gate applies only when configured, supported, and useful.
-    #[test]
-    fn effective_prefill_chunk_gates_correctly() {
-        // Normal case: configured, supported, prompt longer than one chunk.
-        assert_eq!(effective_prefill_chunk(2048, true, 8192), Some(2048));
-        // Prompt fits in one chunk: single-pass (byte-identical fast path).
-        assert_eq!(effective_prefill_chunk(2048, true, 2048), None);
-        assert_eq!(effective_prefill_chunk(2048, true, 1), None);
-        // MLXCEL_PREFILL_CHUNK=0 forces single-pass.
-        assert_eq!(effective_prefill_chunk(0, true, 8192), None);
-        // Model opt-out wins regardless of configuration.
-        assert_eq!(effective_prefill_chunk(2048, false, 8192), None);
     }
 
     /// The trait default opts in; an overriding model opts out.
@@ -3375,7 +3301,8 @@ mod tests {
     }
 
     /// Chunked prefill must feed every prompt token exactly once, in order,
-    /// and return the same final-position logits as a single pass.
+    /// and return the same final-position logits as a single pass, for every
+    /// partition the plan can produce (chunks, a history boundary, both).
     #[test]
     fn chunked_prefill_matches_single_pass() {
         let prompt: Vec<i32> = (1..=10).collect();
@@ -3387,12 +3314,27 @@ mod tests {
         let input = ffi::from_slice_i32(&prompt, &[1, prompt.len() as i32]);
         let single_logits = single.forward_last_logits(&input, &mut caches, None, prompt.len() - 1);
 
-        for chunk in [1usize, 3, 4, 10, 16] {
+        for (chunk, boundary) in [
+            (1usize, None),
+            (3, None),
+            (4, None),
+            (10, None),
+            (16, None),
+            (0, Some(6)),
+            (3, Some(7)),
+        ] {
             let chunked = AccumStubModel {
                 seen: std::cell::RefCell::new(Vec::new()),
             };
             let mut caches = chunked.make_caches();
-            let chunked_logits = chunked_prefill_last_logits(&chunked, &mut caches, &prompt, chunk);
+            let plan = PrefillPlan::with_prefix(
+                prompt.len(),
+                0,
+                boundary,
+                chunk,
+                PrefillCaps::for_model(&chunked, false),
+            );
+            let chunked_logits = chunked_prefill_last_logits(&chunked, &mut caches, &prompt, &plan);
             assert_eq!(
                 ffi::array_shape(&chunked_logits).as_slice(),
                 &[1, 1, 4],
@@ -3631,14 +3573,14 @@ mod tests {
     #[test]
     fn padded_prefill_can_skip_array_mask_for_opted_in_models() {
         let tokens = [1, 2, 3];
-        let (_padded, mask_opt) = pad_tokens_for_prefill(&tokens, 32, true);
+        let (_padded, mask_opt) = pad_tokens_for_prefill(&tokens, 32, false, 0);
         assert!(mask_opt.is_none());
     }
 
     #[test]
     fn padded_prefill_keeps_array_mask_by_default() {
         let tokens = [1, 2, 3];
-        let (_padded, mask_opt) = pad_tokens_for_prefill(&tokens, 32, false);
+        let (_padded, mask_opt) = pad_tokens_for_prefill(&tokens, 32, true, 0);
         assert!(mask_opt.is_some());
     }
 
@@ -3783,17 +3725,30 @@ mod tests {
         assert!(!cfg.needs_token_history());
     }
 
-    // -- trim_internal_caches default implementation --
+    // -- trim_state default implementation --
 
-    /// Default LanguageModel::trim_internal_caches is a no-op: calling it
-    /// with any excess value must not panic or alter observable state.
+    /// The default `LanguageModel::trim_state` keeps no state: the fallback
+    /// slot accepts any excess as a no-op, and a scheduler sequence of a
+    /// batching model is refused because the default cannot address it.
     #[test]
-    fn trim_internal_caches_default_is_noop() {
+    fn trim_state_default_is_noop_for_fallback_and_refuses_batched_sequences() {
         let model = StubModel;
-        // Should not panic for positive, zero, or negative excess.
-        model.trim_internal_caches(8);
-        model.trim_internal_caches(0);
-        model.trim_internal_caches(-1);
+        // Should not fail for positive, zero, or negative excess.
+        assert_eq!(model.trim_state(None, 8), Ok(()));
+        assert_eq!(model.trim_state(None, 0), Ok(()));
+        assert_eq!(model.trim_state(None, -1), Ok(()));
+        assert!(model.supports_batching());
+        let err = model
+            .trim_state(Some(SequenceId::from_raw(7)), 8)
+            .expect_err("a batching model's per-sequence state is unaddressed by default");
+        assert!(err.contains("seq-7"), "{err}");
+
+        // A non-batching model's internal state is the one scheduler
+        // sequence, so `Some` is accepted there.
+        assert_eq!(
+            NonBatchModel.trim_state(Some(SequenceId::from_raw(7)), 8),
+            Ok(())
+        );
     }
 
     struct TrackingResetModel {
@@ -3912,11 +3867,12 @@ mod tests {
         );
     }
 
-    /// A model that overrides trim_internal_caches records each call so we can
-    /// verify the generation machinery actually invokes the method.
+    /// A model that overrides trim_state records each call so we can verify
+    /// the generation machinery actually invokes the method.
     struct TrackingTrimModel {
         trim_call_count: std::cell::Cell<usize>,
         last_excess: std::cell::Cell<i32>,
+        last_seq: std::cell::Cell<Option<SequenceId>>,
     }
 
     impl TrackingTrimModel {
@@ -3924,6 +3880,7 @@ mod tests {
             Self {
                 trim_call_count: std::cell::Cell::new(0),
                 last_excess: std::cell::Cell::new(0),
+                last_seq: std::cell::Cell::new(None),
             }
         }
     }
@@ -3951,35 +3908,59 @@ mod tests {
             vec![99]
         }
 
-        fn trim_internal_caches(&self, excess: i32) {
+        fn trim_state(&self, seq: Option<SequenceId>, excess: i32) -> Result<(), String> {
             self.trim_call_count.set(self.trim_call_count.get() + 1);
             self.last_excess.set(excess);
+            self.last_seq.set(seq);
+            Ok(())
         }
     }
 
     #[test]
-    fn trim_internal_caches_override_receives_correct_excess() {
+    fn trim_state_override_receives_the_target_and_excess() {
         let model = TrackingTrimModel::new();
         assert_eq!(model.trim_call_count.get(), 0);
 
-        // Simulate the call pattern from the generation loop: excess = padded - actual.
-        model.trim_internal_caches(16);
+        // The CLI's call pattern: fallback slot, excess = padded - actual.
+        assert_eq!(model.trim_state(None, 16), Ok(()));
         assert_eq!(model.trim_call_count.get(), 1);
         assert_eq!(model.last_excess.get(), 16);
+        assert_eq!(model.last_seq.get(), None);
 
-        model.trim_internal_caches(32);
+        // The scheduler's: one sequence.
+        let seq = SequenceId::from_raw(3);
+        assert_eq!(model.trim_state(Some(seq), 32), Ok(()));
         assert_eq!(model.trim_call_count.get(), 2);
         assert_eq!(model.last_excess.get(), 32);
+        assert_eq!(model.last_seq.get(), Some(seq));
     }
 
+    /// A padded single-piece plan trims the caches and the model's fallback
+    /// state once, by the piece's pad excess, through the plan executor.
     #[test]
-    fn trim_internal_caches_override_called_with_zero_is_safe() {
+    fn padded_prefill_executor_trims_caches_and_fallback_state_once() {
         let model = TrackingTrimModel::new();
-        model.trim_internal_caches(0);
-        // The implementation still receives the call; it is the model's
-        // responsibility to handle excess == 0 gracefully.
+        let prompt: Vec<i32> = (1..=5).collect();
+        let mut caches = model.make_caches();
+        let caps = PrefillCaps {
+            align_prefill: true,
+            ..PrefillCaps::for_model(&model, true)
+        };
+        let plan = PrefillPlan::new(prompt.len(), 0, caps);
+        assert_eq!(plan.trim_after(), Some(27));
+        let logits = chunked_prefill_last_logits(&model, &mut caches, &prompt, &plan);
+        ffi::eval(&logits);
         assert_eq!(model.trim_call_count.get(), 1);
-        assert_eq!(model.last_excess.get(), 0);
+        assert_eq!(model.last_excess.get(), 27);
+        assert_eq!(model.last_seq.get(), None);
+
+        // Without alignment nothing is padded and nothing is trimmed.
+        let model = TrackingTrimModel::new();
+        let mut caches = model.make_caches();
+        let plan = PrefillPlan::new(prompt.len(), 0, PrefillCaps::for_model(&model, false));
+        let logits = chunked_prefill_last_logits(&model, &mut caches, &prompt, &plan);
+        ffi::eval(&logits);
+        assert_eq!(model.trim_call_count.get(), 0);
     }
 
     // ------------------------------------------------------------------

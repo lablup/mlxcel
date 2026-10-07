@@ -372,16 +372,12 @@ impl LanguageModel for VisionLanguageModel {
         self.text_model.reset_runtime_state()
     }
 
-    fn trim_internal_caches(&self, excess: i32) {
-        self.text_model.trim_internal_caches(excess)
-    }
-
-    fn trim_sequence_state(
+    fn trim_state(
         &self,
-        seq_id: mlxcel_core::cache::SequenceId,
+        seq: Option<mlxcel_core::cache::SequenceId>,
         excess: i32,
     ) -> Result<(), String> {
-        self.text_model.trim_sequence_state(seq_id, excess)
+        self.text_model.trim_state(seq, excess)
     }
 
     fn supports_decode_lookahead_rewind(&self) -> bool {

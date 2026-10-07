@@ -120,26 +120,26 @@ fn layer_cache_mamba_offset_is_zero() {
 }
 
 // ---------------------------------------------------------------------------
-// trim_internal_caches logic (via direct cache manipulation)
+// trim_state logic (via direct cache manipulation)
 // ---------------------------------------------------------------------------
 
-/// After simulating what trim_internal_caches does: Mamba conv/ssm state is cleared.
-/// This mirrors the body of NemotronHModel::trim_internal_caches for Mamba layers.
+/// After simulating what trim_state does: Mamba conv/ssm state is cleared.
+/// This mirrors the body of NemotronHModel::trim_state for Mamba layers.
 #[test]
 fn mamba_cache_reset_clears_state() {
     let mut mc = NemotronMambaCache::new();
 
     // Simulate state that would have been written during a padded prefill.
     // We set the fields to None to begin with (as they would be before prefill),
-    // then verify that resetting them (as trim_internal_caches does) leaves them None.
+    // then verify that resetting them (as trim_state does) leaves them None.
     //
     // In the real codepath, conv_state and ssm_state would hold MlxArrays written
-    // during the padded forward pass. trim_internal_caches resets them so that
+    // during the padded forward pass. trim_state resets them so that
     // subsequent decode steps do not carry corrupted padding state forward.
     mc.conv_state = None;
     mc.ssm_state = None;
 
-    // Apply the same reset logic as trim_internal_caches.
+    // Apply the same reset logic as trim_state.
     mc.conv_state = None;
     mc.ssm_state = None;
 
@@ -150,7 +150,7 @@ fn mamba_cache_reset_clears_state() {
     assert!(mc.ssm_state.is_none(), "ssm_state must be None after reset");
 }
 
-/// trim_internal_caches with excess <= 0 returns early without modifying any cache.
+/// trim_state with excess <= 0 returns early without modifying any cache.
 /// This is a guard against callers passing non-positive excess values.
 ///
 /// We verify the guard condition matches the one used in the implementation
@@ -188,7 +188,7 @@ fn trim_guard_positive_excess_proceeds() {
 // ---------------------------------------------------------------------------
 
 /// Trimming an Attention layer cache that has no data is safe and leaves the
-/// offset at 0. This verifies that trim_internal_caches for Attention layers
+/// offset at 0. This verifies that trim_state for Attention layers
 /// does not panic when called on a cache that was never populated (e.g. if
 /// padded prefill was called on a fresh session).
 #[test]

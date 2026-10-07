@@ -667,7 +667,9 @@ impl SpeculativeGenerator {
                     for cache in self.main_caches.iter_mut() {
                         cache.trim(excess);
                     }
-                    main_model.trim_internal_caches(excess);
+                    if let Err(err) = main_model.trim_state(None, excess) {
+                        tracing::error!("padded verify trim: {err}");
+                    }
                     // Return only the logits for the actual (non-padded) positions,
                     // sliced to shape [1, actual_verify_len, vocab].
                     let vocab = ffi::array_shape(&raw_logits)[2];

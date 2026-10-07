@@ -250,13 +250,9 @@ impl BatchScheduler {
         // server default, which is what the requesting node's own admission
         // would have snapshotted (#1439).
         self.ensure_lora_applied(None);
-        if self.prefill_chunk_size > 0 && prompt_tokens.len() > self.prefill_chunk_size {
-            self.start_chunked_prefill(seq);
-            while self.chunked_prefill_seq.is_some() {
-                self.continue_chunked_prefill();
-            }
-        } else {
-            self.execute_full_prefill(seq);
+        self.run_planned_prefill(seq);
+        while self.chunked_prefill_seq.is_some() {
+            self.continue_chunked_prefill();
         }
         // Lift the just-prefilled sequence back out before any local decode runs.
         // If it finished at prefill (immediate EOS) it is already finalized and
