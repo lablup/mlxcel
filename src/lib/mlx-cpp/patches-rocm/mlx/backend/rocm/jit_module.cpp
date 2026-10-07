@@ -12,6 +12,7 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <shared_mutex>
 #include <sstream>
 #include <unordered_set>
 
@@ -482,6 +483,14 @@ hipFunction_t JitModule::get_kernel(
         std::string("There is no kernel named ") + kernel_name + ".");
   }
 
+  // [mlxcel #2183] Serialize the configured-flag check and set, as the CUDA
+  // overlay does (#1566). kernels_.find above needs no lock: the map is filled
+  // once in the constructor, under the write lock in get_jit_module, and is
+  // never restructured afterwards. The lock is held across configure_kernel;
+  // no ROCm caller passes one today, and one that does must not re-enter
+  // get_kernel.
+  std::lock_guard<std::mutex> lock(kernels_mtx_);
+
   // If it is the first time we run this kernel then configure it. Do it only
   // once!
   if (!it->second.second) {
@@ -494,24 +503,42 @@ hipFunction_t JitModule::get_kernel(
   return it->second.first;
 }
 
-std::unordered_map<std::string, JitModule>& get_jit_module_cache() {
-  static std::unordered_map<std::string, JitModule> map;
-  return map;
-}
-
 JitModule& get_jit_module(
     const mlx::core::Device& mlx_device,
     const std::string& name,
     const KernelBuilder& builder,
     bool cache) {
-  auto& map = get_jit_module_cache();
+  // [mlxcel #2183] Lock the process-global cache as upstream CUDA does at the
+  // pin. Server workers (scheduler, embedding, rerank, audio) launch on their
+  // own threads, and the JitModule constructor below compiles through hiprtc
+  // for tens to hundreds of milliseconds, so an unlocked find/try_emplace let
+  // two threads compile and insert the same key, or rehash the table under a
+  // concurrent find. The storage is leaked on purpose, as upstream's is: user
+  // code may still run JIT code after the main thread tears down. It also
+  // means no hipModuleUnload runs during static teardown, where on a faulted
+  // device every HIP call fails (LOCAL_FIXES item 7).
+  static auto* modules = new std::unordered_map<std::string, JitModule>;
+  static auto* mtx = new std::shared_mutex;
+
   // Key by device too: a module compiled/loaded into one device's context is
   // not valid on another. Sharing by name across devices would hand a device-1
   // launch a hipFunction_t from device 0's context and wedge the queue.
   auto key = std::to_string(mlx_device.index) + ":" + name;
-  auto it = map.find(key);
-  if (it == map.end()) {
-    it = map.try_emplace(key, device(mlx_device), name, builder, cache).first;
+
+  {
+    std::shared_lock rlock(*mtx);
+    if (auto it = modules->find(key); it != modules->end()) {
+      return it->second;
+    }
+  }
+
+  // A compile or load failure throws out of the constructor before anything
+  // is inserted, and unwinding releases the lock, so the next caller retries.
+  std::unique_lock wlock(*mtx);
+  auto it = modules->find(key);
+  if (it == modules->end()) {
+    it = modules->try_emplace(key, device(mlx_device), name, builder, cache)
+             .first;
   }
   return it->second;
 }
