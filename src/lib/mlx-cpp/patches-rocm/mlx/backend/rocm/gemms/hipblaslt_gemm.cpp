@@ -7,8 +7,10 @@
 #include <hip/hip_runtime.h>
 #include <hipblaslt/hipblaslt.h>
 
+#include <atomic>
 #include <cstdlib>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
 
@@ -16,113 +18,172 @@
 // HIPBLASLT_EPILOGUE_SIGMOID_BIAS_EXT). Comparisons below are #ifdef-guarded so
 // consumer builds (gfx1152 / 860M) compile against stock ROCm headers.
 
+// Thread safety (lablup/mlxcel#2200). Several threads enqueue hipBLASLt GEMMs
+// on one device at once, each on its own stream: the server's batch scheduler
+// and its embedding, rerank and audio workers, plus the HIP host-callback
+// thread that serves the async MoE path for every stream. The shared state in
+// this file is therefore owned as follows:
+//   - one hipblasLtHandle_t per device, created once under HipblasltState::
+//     mutex and published through an atomic flag (ensure_handle); the handle
+//     is never mutated after that, which is what hipblaslt.h asks callers to
+//     synchronize;
+//   - one workspace buffer per (device, stream), handed out under g_ws_mutex
+//     (stream_workspace) and released with the stream's CommandEncoder, so two
+//     GEMMs that overlap on the GPU never share scratch memory;
+//   - the pipe cache (layouts, matmul descriptor, chosen algorithm per
+//     geometry) is thread-local, because hipblasLtMatmul writes into the
+//     descriptor objects it is given: on gfx1151 with hipBLASLt 1.4, eight
+//     threads enqueuing the same geometry through one shared pipe abort in
+//     malloc (corrupted tcache chunks, double frees) and fault the queue
+//     (HSA_STATUS_ERROR_MEMORY_FAULT), whether the pipe is owned by value, by
+//     shared_ptr, or with the algorithm copied out, while the same threads
+//     with per-call descriptors on the same handle pass; so a pipe serves one
+//     thread, and no lock sits on the fast path;
+//   - the algorithm caches hand out hipblasLtMatmulHeuristicResult_t by value
+//     under their own mutexes, which is what makes a thread's first use of a
+//     geometry cost descriptor creation only, not AlgoGetHeuristic.
+
 namespace mlx::core::rocm {
 
 namespace {
 
 // Maximum workspace size for hipBLASLt algorithms (32 MB).
-// hipBLASLt may request scratch memory for certain algorithm choices.
+// hipBLASLt may request scratch memory for certain algorithm choices. Every
+// heuristic preference in this file caps requests at this size, so a stream's
+// workspace buffer is allocated at this size once and never grows or moves.
 constexpr size_t kMaxWorkspaceBytes = 32u * 1024u * 1024u;
-
-// Per-device hipBLASLt handle cache. Lazily initialised, thread-safe.
-struct HipblasltState {
-  hipblasLtHandle_t handle{nullptr};
-  bool initialized{false};
-  bool available{false};
-  std::mutex mutex;
-
-  // Persistent workspace allocation (grown as needed, never shrunk).
-  void* workspace{nullptr};
-  size_t workspace_size{0};
-};
 
 // One state per device (indexed by HIP device ordinal).
 // 16 devices should be more than enough for any system.
 static constexpr int kMaxDevices = 16;
-static HipblasltState g_state[kMaxDevices];
 
-HipblasltState& get_state(int device_id) {
+void check_device_id(int device_id) {
   if (device_id < 0 || device_id >= kMaxDevices) {
     throw std::runtime_error(
         "hipBLASLt: device id out of range: " + std::to_string(device_id));
   }
+}
+
+// Per-device hipBLASLt handle. Created once, under `mutex`; `init_state` is
+// the only field read without the lock, and `handle` is read only after an
+// acquire load of it returned kHandleReady.
+constexpr int kHandleUntried = 0;
+constexpr int kHandleReady = 1;
+constexpr int kHandleUnavailable = 2;
+
+struct HipblasltState {
+  hipblasLtHandle_t handle{nullptr};
+  std::atomic<int> init_state{kHandleUntried};
+  std::mutex mutex;
+};
+
+static HipblasltState g_state[kMaxDevices];
+
+HipblasltState& get_state(int device_id) {
+  check_device_id(device_id);
   return g_state[device_id];
 }
 
-// Initialise the hipBLASLt handle for the given device.
-// Must be called with state.mutex held.
-void init_handle(HipblasltState& state, int device_id) {
-  if (state.initialized) {
+// Create the device's handle on first use. Every caller may race here; one
+// create runs, and the flag is published with release only after it
+// succeeded, so no thread can observe a null or half-built handle. A failed
+// create is permanent for the process (as before), because
+// is_hipblaslt_available() runs on every GEMM route decision and must not
+// retry a create each time.
+void ensure_handle(HipblasltState& state, int device_id) {
+  if (state.init_state.load(std::memory_order_acquire) != kHandleUntried) {
     return;
   }
-  state.initialized = true;
-
-  hipblasStatus_t status = hipblasLtCreate(&state.handle);
-  if (status != HIPBLAS_STATUS_SUCCESS) {
-    state.available = false;
-    state.handle = nullptr;
-    std::cerr << "Warning: hipBLASLt initialization failed (status "
-              << static_cast<int>(status) << ")." << std::endl;
+  std::lock_guard<std::mutex> lock(state.mutex);
+  if (state.init_state.load(std::memory_order_relaxed) != kHandleUntried) {
     return;
   }
-  state.available = true;
-
-  // Pre-allocate the matmul workspace to the maximum size NOW so that
-  // ensure_workspace() never calls hipMalloc during a HIP-graph capture (a
-  // device alloc on the capturing stream invalidates the graph). Any algorithm
-  // the heuristic returns fits within kMaxWorkspaceBytes, so a single up-front
-  // allocation makes hipblasLtMatmul capture-safe.
+  // hipblasLtCreate binds the handle to the current device.
   int prev_dev = 0;
   (void)hipGetDevice(&prev_dev);
   (void)hipSetDevice(device_id);
-  if (hipMalloc(&state.workspace, kMaxWorkspaceBytes) == hipSuccess) {
-    state.workspace_size = kMaxWorkspaceBytes;
-  } else {
-    state.workspace = nullptr;
-    state.workspace_size = 0;
-  }
+  hipblasLtHandle_t handle = nullptr;
+  hipblasStatus_t status = hipblasLtCreate(&handle);
   (void)hipSetDevice(prev_dev);
+  if (status != HIPBLAS_STATUS_SUCCESS || handle == nullptr) {
+    std::cerr << "Warning: hipBLASLt initialization failed (status "
+              << static_cast<int>(status) << ")." << std::endl;
+    state.init_state.store(kHandleUnavailable, std::memory_order_release);
+    return;
+  }
+  state.handle = handle;
+  state.init_state.store(kHandleReady, std::memory_order_release);
 }
 
 hipblasLtHandle_t get_handle(int device_id) {
   auto& state = get_state(device_id);
-  if (!state.initialized) {
-    std::lock_guard<std::mutex> lock(state.mutex);
-    init_handle(state, device_id);
-  }
-  if (!state.available) {
+  ensure_handle(state, device_id);
+  if (state.init_state.load(std::memory_order_acquire) != kHandleReady) {
     throw std::runtime_error("hipBLASLt is not available on this device.");
   }
   return state.handle;
 }
 
-// Ensure the per-device workspace is at least `required` bytes.
-// Returns the workspace pointer and the actual allocated size.
-// Must be called from within a launch_kernel callback (i.e., on the
-// stream-submission thread for this device), so no extra locking is needed
-// beyond the device serialisation that CommandEncoder already provides.
-std::pair<void*, size_t> ensure_workspace(int device_id, size_t required) {
-  auto& state = get_state(device_id);
-  if (required <= state.workspace_size && state.workspace != nullptr) {
-    return {state.workspace, state.workspace_size};
-  }
-  // Free old allocation (hipFree is a no-op on nullptr).
-  if (state.workspace) {
-    (void)hipFree(state.workspace);
-    state.workspace = nullptr;
-    state.workspace_size = 0;
-  }
+// Workspace buffers, one per (device, stream). hipblasLtMatmul only enqueues,
+// so two GEMMs on two streams whose algorithms want scratch memory can run on
+// the GPU at the same time; a buffer per device would be shared by both and
+// corrupt both outputs. A buffer per stream is reused in stream order, which
+// is the only ordering a kernel's scratch needs. The table is leaked on
+// purpose, like the JIT module cache (LOCAL_FIXES item 35), so static
+// teardown never races a CommandEncoder destructor that is still releasing
+// its stream's buffer.
+static std::mutex g_ws_mutex;
+static auto* g_ws = new std::unordered_map<hipStream_t, void*>[kMaxDevices];
+
+// Returns the stream's workspace buffer and its size (always
+// kMaxWorkspaceBytes), allocating it on first use with `device_id` current.
+// `required == 0` returns {nullptr, 0} without locking. On allocation failure
+// returns {nullptr, 0}: the tune loops skip that algorithm, every other caller
+// throws rather than hand hipblasLtMatmul a null buffer. A stream under
+// capture that has no buffer yet cannot allocate one (hipMalloc on a capturing
+// stream invalidates the capture), so that case throws; the caller's
+// hipblasLtMatmul never runs.
+std::pair<void*, size_t>
+stream_workspace(int device_id, hipStream_t stream, size_t required) {
   if (required == 0) {
     return {nullptr, 0};
   }
-  hipError_t err = hipMalloc(&state.workspace, required);
-  if (err != hipSuccess) {
-    state.workspace = nullptr;
-    state.workspace_size = 0;
+  check_device_id(device_id);
+  if (required > kMaxWorkspaceBytes) {
+    throw std::runtime_error(
+        "hipBLASLt: algorithm needs " + std::to_string(required) +
+        " bytes of workspace, above the " +
+        std::to_string(kMaxWorkspaceBytes) + " byte cap");
+  }
+  std::lock_guard<std::mutex> lock(g_ws_mutex);
+  auto& table = g_ws[device_id];
+  auto it = table.find(stream);
+  if (it != table.end()) {
+    return {it->second, kMaxWorkspaceBytes};
+  }
+  hipStreamCaptureStatus cap_st = hipStreamCaptureStatusNone;
+  (void)hipStreamGetCaptureInfo(stream, &cap_st, nullptr);
+  if (cap_st != hipStreamCaptureStatusNone) {
+    throw std::runtime_error(
+        "hipBLASLt: algorithm needs " + std::to_string(required) +
+        " bytes of workspace on a capturing stream with none allocated");
+  }
+  int prev_dev = 0;
+  (void)hipGetDevice(&prev_dev);
+  (void)hipSetDevice(device_id);
+  void* buffer = nullptr;
+  hipError_t err = hipMalloc(&buffer, kMaxWorkspaceBytes);
+  (void)hipSetDevice(prev_dev);
+  if (err != hipSuccess || buffer == nullptr) {
     return {nullptr, 0};
   }
-  state.workspace_size = required;
-  return {state.workspace, state.workspace_size};
+  table.emplace(stream, buffer);
+  return {buffer, kMaxWorkspaceBytes};
+}
+
+std::string workspace_alloc_failure(size_t required) {
+  return "hipBLASLt: failed to allocate workspace of " +
+      std::to_string(required) + " bytes";
 }
 
 hipDataType to_hipblaslt_dtype(Dtype dtype) {
@@ -205,17 +266,21 @@ bool probe_gemm_combo(
   return st == HIPBLAS_STATUS_SUCCESS && count > 0;
 }
 
+// Lock order: g_caps_mutex, then HipblasltState::mutex (inside get_handle).
 const GemmCaps& gemm_caps(int device_id) {
+  check_device_id(device_id);
   std::lock_guard<std::mutex> lock(g_caps_mutex);
   GemmCaps& caps = g_caps[device_id];
   if (caps.probed) {
     return caps;
   }
-  caps.probed = true;
   hipblasLtHandle_t handle = nullptr;
   try {
     handle = get_handle(device_id);
   } catch (...) {
+    // get_handle throws only once the create has failed, which is permanent
+    // for the process, so an all-false table is the right answer from now on.
+    caps.probed = true;
     return caps;
   }
   caps.bf16 =
@@ -240,6 +305,7 @@ const GemmCaps& gemm_caps(int device_id) {
       caps.fp8_e4m3,
       caps.fp8_e5m2,
       caps.int8);
+  caps.probed = true;
   return caps;
 }
 
@@ -292,7 +358,14 @@ struct PreferenceGuard {
 // Persistent GEMM pipeline (layouts + matmul desc + heuristic). Avoids
 // create/destroy + AlgoGetHeuristic on every call — the multi-ms host gaps
 // between dense GEMMs in train profiles. Exact geometry keys (not bucketed):
-// layouts encode real M/N/K. Process-lifetime; never destroyed.
+// layouts encode real M/N/K. One cache per thread (see the note at the top
+// of this file): hipBLASLt mutates the descriptor objects during
+// hipblasLtMatmul, so a pipe must not be used by two threads at once. An
+// entry is inserted only after its matmul succeeded, so a stale algorithm is
+// never cached, and a failed cached matmul erases the entry, which destroys
+// its descriptors (nothing else holds them). Each thread's map is leaked so a
+// thread exiting during process teardown never calls into hipBLASLt after it
+// unloaded; entries are freed when erased.
 struct GemmPipeKey {
   int M, N, K, lda, ldb, ldc, batch, dt, ta, tb, dev, epi;
   int64_t sa, sb, sc;
@@ -334,9 +407,30 @@ struct GemmPipe {
   hipblasLtMatrixLayout_t layout_d{nullptr};
   hipblasLtMatmulDesc_t desc{nullptr};
   hipblasLtMatmulHeuristicResult_t heuristic{};
+
+  GemmPipe() = default;
+  GemmPipe(const GemmPipe&) = delete;
+  GemmPipe& operator=(const GemmPipe&) = delete;
+  ~GemmPipe() {
+    if (layout_a)
+      (void)hipblasLtMatrixLayoutDestroy(layout_a);
+    if (layout_b)
+      (void)hipblasLtMatrixLayoutDestroy(layout_b);
+    if (layout_c)
+      (void)hipblasLtMatrixLayoutDestroy(layout_c);
+    if (layout_d)
+      (void)hipblasLtMatrixLayoutDestroy(layout_d);
+    if (desc)
+      (void)hipblasLtMatmulDescDestroy(desc);
+  }
 };
-static std::mutex g_pipe_mutex;
-static std::unordered_map<GemmPipeKey, GemmPipe, GemmPipeKeyHash> g_pipe_cache;
+using GemmPipeCache = std::
+    unordered_map<GemmPipeKey, std::unique_ptr<GemmPipe>, GemmPipeKeyHash>;
+
+GemmPipeCache& thread_pipe_cache() {
+  thread_local auto* cache = new GemmPipeCache();
+  return *cache;
+}
 
 // Core implementation: set up descriptors, find the best algorithm, and
 // execute the matmul on the given stream.
@@ -401,22 +495,20 @@ void hipblaslt_gemm_impl(
         stride_a,
         stride_b,
         stride_c};
-    GemmPipe* pipe = nullptr;
-    {
-      std::lock_guard<std::mutex> lock(g_pipe_mutex);
-      auto it = g_pipe_cache.find(pkey);
-      if (it != g_pipe_cache.end()) {
-        pipe = &it->second;
-      }
-    }
-    if (pipe) {
+    GemmPipeCache& cache = thread_pipe_cache();
+    auto it = cache.find(pkey);
+    if (it != cache.end()) {
+      GemmPipe* pipe = it->second.get();
       size_t ws_needed = pipe->heuristic.workspaceSize;
       void* ws_ptr = nullptr;
       size_t ws_actual = 0;
       if (ws_needed > 0) {
-        auto [p, s] = ensure_workspace(device_id, ws_needed);
+        auto [p, s] = stream_workspace(device_id, stream, ws_needed);
         ws_ptr = p;
         ws_actual = s;
+        if (ws_ptr == nullptr) {
+          throw std::runtime_error(workspace_alloc_failure(ws_needed));
+        }
       }
       status = hipblasLtMatmul(
           handle,
@@ -439,19 +531,9 @@ void hipblaslt_gemm_impl(
         return;
       }
       // Stale/incompatible algo (common when bucketed NN algos were reused for
-      // TN, or dims changed). Drop the pipe entry and rebuild below.
-      {
-        std::lock_guard<std::mutex> lock(g_pipe_mutex);
-        auto it = g_pipe_cache.find(pkey);
-        if (it != g_pipe_cache.end()) {
-          (void)hipblasLtMatrixLayoutDestroy(it->second.layout_a);
-          (void)hipblasLtMatrixLayoutDestroy(it->second.layout_b);
-          (void)hipblasLtMatrixLayoutDestroy(it->second.layout_c);
-          (void)hipblasLtMatrixLayoutDestroy(it->second.layout_d);
-          (void)hipblasLtMatmulDescDestroy(it->second.desc);
-          g_pipe_cache.erase(it);
-        }
-      }
+      // TN, or dims changed). Drop the pipe entry, which destroys its
+      // descriptors (this thread was their only user), and rebuild below.
+      cache.erase(it);
     }
   }
 
@@ -640,8 +722,9 @@ void hipblaslt_gemm_impl(
   // tok/s (peaks ~11–12k when the cache is warm, mean ~5–6k when thrashing).
   // Bucket dims upward for the cache key only; the real matmul still uses the
   // exact layouts below. Algos selected for a nearby larger-or-equal size are
-  // valid at launch (M/N/K live in the layout descriptors). Workspace is the
-  // preallocated 32 MB pool, so a slightly larger bucket never under-allocates.
+  // valid at launch (M/N/K live in the layout descriptors). Every stream's
+  // workspace buffer is the full 32 MB cap, so a slightly larger bucket never
+  // under-allocates.
   // Kill-switch: MLX_HIPBLASLT_EXACT_CACHE=1 restores exact-size keys.
   auto gemm_dim_bucket = [](int x) -> int {
     if (x <= 0)
@@ -774,7 +857,7 @@ void hipblaslt_gemm_impl(
         void* ws_p = nullptr;
         size_t ws_s = 0;
         if (ws_need > 0) {
-          auto [p, s] = ensure_workspace(device_id, ws_need);
+          auto [p, s] = stream_workspace(device_id, stream, ws_need);
           ws_p = p;
           ws_s = s;
           if (!ws_p)
@@ -848,6 +931,24 @@ void hipblaslt_gemm_impl(
       std::lock_guard<std::mutex> lock(algo_mutex);
       algo_cache[key] = heuristic;
     }
+    // MLX_ROCM_GEMM_DEBUG=1: report what the heuristic asked for, so a host
+    // can tell whether the per-stream workspace path runs for its shapes.
+    static const bool ws_debug = std::getenv("MLX_ROCM_GEMM_DEBUG") != nullptr;
+    if (ws_debug) {
+      fprintf(
+          stderr,
+          "[hipBLASLt algo] MNK=%d,%d,%d batch=%d op=%d,%d dt=%d algos=%d "
+          "workspace=%zu\n",
+          M,
+          N,
+          K,
+          batch_count,
+          static_cast<int>(op_a),
+          static_cast<int>(op_b),
+          static_cast<int>(data_type),
+          returned_algo_count,
+          static_cast<size_t>(heuristic.workspaceSize));
+    }
   }
 
   // --- Workspace allocation ---
@@ -855,23 +956,26 @@ void hipblaslt_gemm_impl(
   void* ws_ptr = nullptr;
   size_t ws_actual = 0;
   if (ws_needed > 0) {
-    auto [p, s] = ensure_workspace(device_id, ws_needed);
+    auto [p, s] = stream_workspace(device_id, stream, ws_needed);
     ws_ptr = p;
     ws_actual = s;
-    if (ws_ptr == nullptr && ws_needed > 0) {
-      throw std::runtime_error(
-          "hipBLASLt: failed to allocate workspace of " +
-          std::to_string(ws_needed) + " bytes");
+    if (ws_ptr == nullptr) {
+      throw std::runtime_error(workspace_alloc_failure(ws_needed));
     }
   }
 
-  // Promote this miss into the persistent pipe cache (no-bias default epi
-  // only). Steal ownership from RAII guards so layouts/desc outlive this call.
+  // Promote this miss into this thread's pipe cache (no-bias default epi
+  // only). Steal ownership from the RAII guards into a GemmPipe that this call
+  // owns through the matmul and the retry below; it is inserted only once the
+  // matmul succeeded, with whatever algorithm succeeded, and is destroyed on
+  // any throw.
   hipblasLtMatrixLayout_t use_la = layout_a.layout;
   hipblasLtMatrixLayout_t use_lb = layout_b.layout;
   hipblasLtMatrixLayout_t use_lc = layout_c.layout;
   hipblasLtMatrixLayout_t use_ld = layout_d.layout;
   hipblasLtMatmulDesc_t use_desc = matmul_guard.desc;
+  std::unique_ptr<GemmPipe> pipe;
+  GemmPipeKey pipe_key{};
   if (!no_pipe_cache && bias_ptr == nullptr &&
       epilogue == HIPBLASLT_EPILOGUE_DEFAULT) {
     GemmPipeKey pkey{
@@ -890,39 +994,18 @@ void hipblaslt_gemm_impl(
         stride_a,
         stride_b,
         stride_c};
-    GemmPipe entry;
-    entry.layout_a = layout_a.layout;
-    entry.layout_b = layout_b.layout;
-    entry.layout_c = layout_c.layout;
-    entry.layout_d = layout_d.layout;
-    entry.desc = matmul_guard.desc;
-    entry.heuristic = heuristic;
+    pipe_key = pkey;
+    pipe = std::make_unique<GemmPipe>();
+    pipe->layout_a = layout_a.layout;
+    pipe->layout_b = layout_b.layout;
+    pipe->layout_c = layout_c.layout;
+    pipe->layout_d = layout_d.layout;
+    pipe->desc = matmul_guard.desc;
     layout_a.layout = nullptr;
     layout_b.layout = nullptr;
     layout_c.layout = nullptr;
     layout_d.layout = nullptr;
     matmul_guard.desc = nullptr;
-    use_la = entry.layout_a;
-    use_lb = entry.layout_b;
-    use_lc = entry.layout_c;
-    use_ld = entry.layout_d;
-    use_desc = entry.desc;
-    std::lock_guard<std::mutex> lock(g_pipe_mutex);
-    // Another thread may have filled the same key; prefer existing, free ours.
-    auto [it, inserted] = g_pipe_cache.emplace(pkey, entry);
-    if (!inserted) {
-      (void)hipblasLtMatrixLayoutDestroy(entry.layout_a);
-      (void)hipblasLtMatrixLayoutDestroy(entry.layout_b);
-      (void)hipblasLtMatrixLayoutDestroy(entry.layout_c);
-      (void)hipblasLtMatrixLayoutDestroy(entry.layout_d);
-      (void)hipblasLtMatmulDescDestroy(entry.desc);
-      use_la = it->second.layout_a;
-      use_lb = it->second.layout_b;
-      use_lc = it->second.layout_c;
-      use_ld = it->second.layout_d;
-      use_desc = it->second.desc;
-      heuristic = it->second.heuristic;
-    }
   }
 
   // --- Execute the matmul ---
@@ -983,9 +1066,12 @@ void hipblaslt_gemm_impl(
       void* wp2 = nullptr;
       size_t ws2a = 0;
       if (ws2 > 0) {
-        auto [p, s] = ensure_workspace(device_id, ws2);
+        auto [p, s] = stream_workspace(device_id, stream, ws2);
         wp2 = p;
         ws2a = s;
+        if (wp2 == nullptr) {
+          throw std::runtime_error(workspace_alloc_failure(ws2));
+        }
       }
       status = hipblasLtMatmul(
           handle,
@@ -1017,6 +1103,10 @@ void hipblaslt_gemm_impl(
         std::to_string(static_cast<int>(op_b)) +
         " batch=" + std::to_string(batch_count));
   }
+  if (pipe) {
+    pipe->heuristic = heuristic;
+    thread_pipe_cache()[pipe_key] = std::move(pipe);
+  }
 }
 
 } // namespace
@@ -1029,10 +1119,11 @@ bool is_hipblaslt_available() {
   if (g_force_rocblas)
     return false;
   // When automatic HIP-graph batching is on, the GEMM is graph-split and run
-  // immediately, but hipBLASLt's lazy hipblasLtCreate / AlgoGetHeuristic /
-  // workspace hipMalloc are non-capturable and abort the process if the stream
-  // is mid-graph. rocBLAS is graph-safe here, so force it whenever graphs are
-  // enabled. (rocBLAS == hipBLASLt speed at decode, so this costs nothing.)
+  // immediately, but hipBLASLt's lazy hipblasLtCreate / AlgoGetHeuristic and
+  // a stream's first workspace hipMalloc are non-capturable and abort the
+  // process if the stream is mid-graph. rocBLAS is graph-safe here, so force
+  // it whenever graphs are enabled. (rocBLAS == hipBLASLt speed at decode, so
+  // this costs nothing.)
   if (use_hip_graphs())
     return false;
   // hipBLASLt's lazy init is non-capturable; force rocBLAS during any capture.
@@ -1041,11 +1132,31 @@ bool is_hipblaslt_available() {
   int device_id = 0;
   (void)hipGetDevice(&device_id);
   auto& state = get_state(device_id);
-  if (!state.initialized) {
-    std::lock_guard<std::mutex> lock(state.mutex);
-    init_handle(state, device_id);
+  ensure_handle(state, device_id);
+  return state.init_state.load(std::memory_order_acquire) == kHandleReady;
+}
+
+void hipblaslt_release_stream_workspace(hipStream_t stream) {
+  void* buffer = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(g_ws_mutex);
+    for (int d = 0; d < kMaxDevices; ++d) {
+      auto it = g_ws[d].find(stream);
+      if (it != g_ws[d].end()) {
+        buffer = it->second;
+        g_ws[d].erase(it);
+        break;
+      }
+    }
   }
-  return state.available;
+  if (buffer == nullptr) {
+    return;
+  }
+  // Destructor path: a GEMM queued on the stream may still be reading the
+  // buffer, so drain the stream first; a failure here (a faulted device) has
+  // nowhere to go, and hipFree would fail the same way.
+  (void)hipStreamSynchronize(stream);
+  (void)hipFree(buffer);
 }
 
 void hipblaslt_gemm_ptrs(
@@ -1559,7 +1670,7 @@ void hipblaslt_gemm_fp8_raw(
         void* wp = nullptr;
         size_t ws = 0;
         if (need > 0) {
-          auto [p, s] = ensure_workspace(device_id, need);
+          auto [p, s] = stream_workspace(device_id, stream, need);
           wp = p;
           ws = s;
           if (!wp)
@@ -1630,9 +1741,12 @@ void hipblaslt_gemm_fp8_raw(
   void* wp = nullptr;
   size_t ws = 0;
   if (need > 0) {
-    auto [p, s] = ensure_workspace(device_id, need);
+    auto [p, s] = stream_workspace(device_id, stream, need);
     wp = p;
     ws = s;
+    if (wp == nullptr) {
+      throw std::runtime_error(workspace_alloc_failure(need));
+    }
   }
   hipblasStatus_t fst = hipblasLtMatmul(
       handle,

@@ -33,9 +33,10 @@
 //! in the process, then run `ROUNDS` f32 `[M, K] x [K, N]` matmuls with
 //! integer inputs. Integers in `-4..=4` over `K = 128` keep every partial sum
 //! far below 2^24, so the GPU result must equal the host `i32` reference
-//! exactly, whichever rocBLAS solution runs. `MLX_NO_HIPBLASLT=1` keeps the
-//! f32 GEMMs on rocBLAS (hipBLASLt is the default route; its own races are
-//! issue #2200).
+//! exactly, whichever rocBLAS solution runs. f32 GEMMs route to rocBLAS
+//! (hipBLASLt takes only bf16 and f16), so nothing steers the route; the
+//! hipBLASLt side has its own test, `rocm_hipblaslt_concurrency.rs` (issue
+//! #2200).
 //!
 //! Skips on any other backend. Run on a ROCm host with:
 //!
@@ -195,7 +196,6 @@ fn run_child() -> ChildRun {
         "--test-threads=1",
     ])
     .env(CHILD_ENV, "1")
-    .env("MLX_NO_HIPBLASLT", "1")
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
     let mut child = cmd.spawn().expect("spawn the child test process");
