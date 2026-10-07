@@ -479,6 +479,13 @@ A GPU run prints `Runtime device: GPU` at startup, and the process appears in
 ./target/release/mlxcel generate -m models/mlx/Qwen3-0.6B-4bit -p "Hello" -n 50 --temp 0
 ```
 
+To take the per-row MoE kernels instead of the expert-batched `gather_qmm` kernel
+(on by default for bf16 and f16 affine and for bf16 mxfp4), for example to A/B
+a throughput change or to bisect a MoE regression, set
+`MLX_ROCM_GATHER_QMV_EXPERT_BATCHED=0`. The variable is read on every call. It
+and the other ROCm variables the backend reads at run time are listed in
+[ROCm backend variables](environment-variables.md#rocm-backend-variables).
+
 On a UMA host the GPU shares memory with the operating system and with any
 other GPU process, so check `rocm-smi --showpids` for other tenants before
 loading a large model.
@@ -592,6 +599,7 @@ made that unnecessary; not re-measured since), gpt-oss-20b-MXFP4-Q4 about 8 tok/
 | `MLXCEL_QUIET_JIT` | Suppress the one-time "compiling CUDA kernels" notice on a cold first run | unset (notice shown) |
 | `MLXCEL_DEVICE` | Runtime device hint (`gpu`, `metal`, or `cpu`) | `gpu` |
 | `MLXCEL_WIRED_LIMIT` | Apple Silicon wired-memory ceiling, e.g. `64GB`; `0`/`none` disables it | `max` |
+| `MLX_ROCM_*` and other ROCm backend variables | ROCm backend tuning, A/B and diagnostics, for example `MLX_ROCM_GATHER_QMV_EXPERT_BATCHED`, `MLX_ROCM_MAX_INFLIGHT_MB`, `MLX_NO_HIPBLASLT`; see [ROCm backend variables](environment-variables.md#rocm-backend-variables) | see that section |
 | `LLAMA_ARG_*` | Environment-backed server options accepted by clap | unset |
 
 For the complete `MLXCEL_*` reference, see
