@@ -17,10 +17,10 @@
 //! [`StreamFilter`](crate::server::tool_calls::stream_filter::StreamFilter).
 //!
 //! Until epic #2166 Phase 5 (issue #2173) the CLI split the reasoning channel
-//! with a splitter of its own (`src/reasoning_stream.rs`). The chat REPL and `mlxcel run` now receive
-//! the split from the server, and the one-shot `mlxcel generate` display runs
-//! its decoded reply through the same `StreamFilter` ([`render_full`]), so
-//! one splitter decides what is reasoning everywhere.
+//! with a splitter of its own, since removed. The chat REPL and `mlxcel run`
+//! now receive the split from the server, and the one-shot `mlxcel generate`
+//! display runs its decoded reply through the same `StreamFilter`
+//! ([`render_full`]), so one splitter decides what is reasoning everywhere.
 
 use crate::server::tool_calls::stream_filter::{FilterOutput, StreamFilter};
 use crate::tokenizer::ThinkingMarkers;

@@ -25,7 +25,7 @@ use mlxcel_core::cache::KVCacheMode;
 use crate::SamplingOptions;
 
 /// Whether a flag appeared on this process's command line, in its long
-/// (`--name`, `--name=value`) or short (`-x`, `-xVALUE`) spelling.
+/// spelling (with or without `=value`) or its short one (`-x`, `-xVALUE`).
 pub(crate) fn cli_flag_was_set(long: &str, short: Option<char>) -> bool {
     if mlxcel::server::long_cli_flag_was_set(long) {
         return true;

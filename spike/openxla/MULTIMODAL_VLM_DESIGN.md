@@ -70,8 +70,8 @@ of token ids.
     `src/vision/encoders/`), plus the shared `siglip` / `pixtral` towers.
   - The server-side wiring: `SequenceInfo.vlm_embeddings: Option<InputEmbeddings>`
     (`src/server/batch/sequence.rs:225`), `is_vlm_request` (`sequence.rs:322`),
-    and the host-side computation `prepare_and_compute_vlm_embeddings`
-    (`src/multimodal/vlm_runtime.rs:195`). The MLX scheduler already computes the
+    and the host-side computation `prepare_vlm_embeddings`
+    (`src/multimodal/vlm_runtime.rs:1044`). The MLX scheduler already computes the
     merged embeddings host-side and feeds them to the text model as input
     embeddings, which is exactly the shape the OpenXLA path needs.
 
@@ -109,7 +109,7 @@ emitter + engine + shim change, not a per-family config tweak.
 Two options, sequenced:
 
 - Host-encode first (unblock). Reuse the MLX vision stack (`VisionModule` /
-  `prepare_and_compute_vlm_embeddings`) as a host-side preprocessor that produces
+  `prepare_vlm_embeddings`) as a host-side preprocessor that produces
   the merged `InputEmbeddings`, and feed those to the prefill-from-embeddings path.
   This gets a working VLM on the OpenXLA text path quickly and keeps the encoder
   out of the graph. It couples the OpenXLA VLM to the MLX vision code and does not
