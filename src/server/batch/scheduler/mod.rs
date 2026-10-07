@@ -36,6 +36,7 @@ use mlxcel_core::cache::{
     BatchKvQuantConfig, CachePool, DetachedPagedCacheSet, KVCacheMode, PagedKvLayout, SequenceId,
     SequenceStateBackend, SequenceStateLayout,
 };
+use mlxcel_core::engine::{Engine, PrefillStep, StepBatch};
 use mlxcel_core::generate::{
     DecodeBatchContext, DecodeStorageBackend as CoreDecodeStorageBackend, LanguageModel,
 };
@@ -100,7 +101,7 @@ use super::tick_policy::{
     TickChoice, TickState, decide_tick, mixed_step_enabled, resolve_prefill_grant_interval,
 };
 
-use pad_trim::{should_align_prefill, trim_padded_prefill};
+use pad_trim::should_align_prefill;
 use run_loop::StructuredMask;
 
 pub(crate) const DEFAULT_PAGED_BLOCK_SIZE: usize = 32;
@@ -294,13 +295,20 @@ fn boundary_capture_applies(
 /// partition is the `mlxcel_core::prefill_plan::PrefillPlan` of each sequence
 /// (see `planned_prefill`).
 pub struct BatchScheduler {
-    // -- Pool & scheduling structures --
-    cache_pool: CachePool,
+    // -- Execution --
+    /// The batch-native engine (ADR 0007, #2172): it owns the model and the
+    /// KV pool, and every model forward and sampler draw the scheduler needs
+    /// runs through it. The scheduler keeps admission, tick policy,
+    /// preemption, prompt-cache lookup/donate/adopt, handoff and the
+    /// speculative burst generators, and reaches the model and the pool only
+    /// through the engine's accessors for those jobs.
+    engine: Engine<LoadedModel>,
+
+    // -- Scheduling structures --
     prefill_queue: PrefillQueue,
     active_batch: ActiveBatch,
 
-    // -- Model & tokenizer --
-    model: LoadedModel,
+    // -- Tokenizer --
     tokenizer: MlxcelTokenizer,
     /// Memo for the tokenized `--reasoning-budget-message` (#1470), keyed by
     /// the message text so a changed live setting re-encodes. One entry is

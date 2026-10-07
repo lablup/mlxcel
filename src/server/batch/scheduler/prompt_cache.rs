@@ -45,7 +45,7 @@ impl BatchScheduler {
     /// 5136-token prompt was rotated with that prompt's table, not with the
     /// table 3000 tokens would have selected on their own (#1358).
     pub(super) fn rope_regime_for(&self, encoded_span: usize) -> Option<u8> {
-        self.model.rope_table_regime(encoded_span)
+        self.engine.model().rope_table_regime(encoded_span)
     }
 
     pub(super) fn compose_prompt_cache_key<'a>(
@@ -136,14 +136,16 @@ impl BatchScheduler {
         // The request's own prompt length picks its table, so it may only match
         // entries stored by a request on the same side of the boundary (#1358).
         let key = Self::compose_prompt_cache_key(ctx, tokens, self.rope_regime_for(tokens.len()));
-        let snapshot_outcome = if self.model.supports_snapshot_reuse() {
+        let snapshot_outcome = if self.engine.model().supports_snapshot_reuse() {
             // The truncation capability is the model's own answer (#1145):
             // rotating-attention families can restore to the longest common
             // prefix while their sliding layers are unwrapped, and every
             // family whose recurrent state cannot be rewound returns false
             // here and keeps exact-prefix semantics.
             store.lookup_snapshot_outcome(&key, tokens, |snapshot, target_len| {
-                self.model.snapshot_truncatable_to(snapshot, target_len)
+                self.engine
+                    .model()
+                    .snapshot_truncatable_to(snapshot, target_len)
             })
         } else {
             SnapshotLookupOutcome::NoCandidate
@@ -186,7 +188,9 @@ impl BatchScheduler {
             if matched_len < store_matched_len {
                 let truncatable = matched_len >= store.min_prefix_tokens().max(1)
                     && snapshot_entry.with_snapshot(|snapshot| {
-                        self.model.snapshot_truncatable_to(snapshot, matched_len)
+                        self.engine
+                            .model()
+                            .snapshot_truncatable_to(snapshot, matched_len)
                     });
                 if !truncatable {
                     // Recurrent families, and rotating families whose ring
@@ -258,10 +262,13 @@ impl BatchScheduler {
             };
             let restore = snapshot_entry.with_snapshot(|snapshot| {
                 if partial {
-                    self.model
-                        .restore_sequence_state_truncated(seq_id, snapshot, matched_len)
+                    self.engine.model().restore_sequence_state_truncated(
+                        seq_id,
+                        snapshot,
+                        matched_len,
+                    )
                 } else {
-                    self.model.restore_sequence_state(seq_id, snapshot)
+                    self.engine.model().restore_sequence_state(seq_id, snapshot)
                 }
             });
             match restore {
@@ -320,7 +327,7 @@ impl BatchScheduler {
         // shadow entry a store carried in from before this fix. The snapshot
         // block above has already run, so `supports_snapshot_reuse()` families
         // keep their snapshot hits and their `snapshot_lookups`.
-        if self.model.sequence_state_layout().backend == SequenceStateBackend::ModelOwned {
+        if self.engine.model().sequence_state_layout().backend == SequenceStateBackend::ModelOwned {
             return None;
         }
         let (entry, store_matched_len) = store.lookup_longest_prefix(&key, tokens)?;
@@ -384,7 +391,7 @@ impl BatchScheduler {
         }
         let backend_is_paged = matches!(self.decode_storage_backend, DecodeStorageBackend::Paged);
         let min_prefix = store.min_prefix_tokens().max(1);
-        let cache_pool = &mut self.cache_pool;
+        let cache_pool = self.engine.pool_mut();
         // `with_detached` itself returns `None` for a drained shell; the take
         // below then also yields `None` (cold prefill).
         let clone_attempt: Option<PagedCloneOutcome> = entry.with_detached(|set| match set {
@@ -426,8 +433,9 @@ impl BatchScheduler {
             Some(PagedCloneOutcome::Cloned(clone, adoptable)) => {
                 adopted_len = adoptable;
                 let adopt_result = self
-                    .cache_pool
-                    .adopt_paged(&self.model as &dyn LanguageModel, *clone);
+                    .engine
+                    .adopt_paged(*clone)
+                    .map_err(|err| err.to_string());
                 return self.finish_prompt_cache_adopt(adopt_result, adopted_len, tokens.len());
             }
             Some(PagedCloneOutcome::Decline(reject_reason, reason)) => {
@@ -521,8 +529,7 @@ impl BatchScheduler {
                     );
                     return None;
                 }
-                self.cache_pool
-                    .adopt(&self.model as &dyn LanguageModel, dense)
+                self.engine.adopt(dense).map_err(|err| err.to_string())
             }
             DetachedKvSet::Paged(mut paged) => {
                 // Paged partial prefix adoption (#225). An APC block-clamped
@@ -547,7 +554,7 @@ impl BatchScheduler {
                         to = adoptable,
                         "prompt-cache adopt: block-floored paged match below the minimum prefix; releasing and falling back to cold prefill"
                     );
-                    self.cache_pool.release_detached_paged(paged);
+                    self.engine.pool_mut().release_detached_paged(paged);
                     self.batch_observability.record_prompt_cache_reject(
                         PromptCacheRejectReason::BlockBoundaryFloor,
                         None,
@@ -557,13 +564,14 @@ impl BatchScheduler {
                 }
                 if adoptable < paged_seq_len {
                     if let Err(err) = self
-                        .cache_pool
+                        .engine
+                        .pool_mut()
                         .trim_detached_paged_to(&mut paged, adoptable)
                     {
                         tracing::warn!(
                             "prompt-cache adopt: paged partial trim to {adoptable} failed ({err}); falling back to cold prefill"
                         );
-                        self.cache_pool.release_detached_paged(paged);
+                        self.engine.pool_mut().release_detached_paged(paged);
                         self.batch_observability.record_prompt_cache_reject(
                             PromptCacheRejectReason::LayoutConstraints,
                             None,
@@ -578,8 +586,9 @@ impl BatchScheduler {
                     );
                     adopted_len = adoptable;
                 }
-                self.cache_pool
-                    .adopt_paged(&self.model as &dyn LanguageModel, paged)
+                self.engine
+                    .adopt_paged(paged)
+                    .map_err(|err| err.to_string())
             }
         };
 
@@ -647,7 +656,7 @@ impl BatchScheduler {
         match detached {
             DetachedKvSet::Dense(_) => {}
             DetachedKvSet::Paged(paged) => {
-                self.cache_pool.release_detached_paged(paged);
+                self.engine.pool_mut().release_detached_paged(paged);
             }
         }
     }
@@ -666,7 +675,7 @@ impl BatchScheduler {
             _ => return,
         };
         for paged in store.drain_pending_paged_releases() {
-            self.cache_pool.release_detached_paged(paged);
+            self.engine.pool_mut().release_detached_paged(paged);
         }
     }
 
@@ -695,7 +704,7 @@ impl BatchScheduler {
         is_multimodal: bool,
     ) {
         let history_prompt = ctx.history_prompt.take();
-        if !self.model.supports_snapshot_reuse()
+        if !self.engine.model().supports_snapshot_reuse()
             || is_multimodal
             || crate::server::prompt_cache::boundary_snapshot_disabled()
         {
@@ -772,7 +781,11 @@ impl BatchScheduler {
             );
             return;
         }
-        let snapshot = match self.model.snapshot_sequence_state(seq_id, tokens.len()) {
+        let snapshot = match self
+            .engine
+            .model()
+            .snapshot_sequence_state(seq_id, tokens.len())
+        {
             Some(s) if !s.is_empty() => s,
             Some(_) => {
                 tracing::debug!(
@@ -880,7 +893,7 @@ impl BatchScheduler {
         ctx: PromptCacheRequestContext,
     ) {
         if !self.prompt_cache_active()
-            || !self.model.supports_snapshot_reuse()
+            || !self.engine.model().supports_snapshot_reuse()
             || crate::server::prompt_cache::cache_warmup_disabled()
         {
             return;
@@ -957,7 +970,7 @@ impl BatchScheduler {
             }
         };
         if entry
-            .with_snapshot(|snapshot| self.model.restore_sequence_state(seq_id, snapshot))
+            .with_snapshot(|snapshot| self.engine.model().restore_sequence_state(seq_id, snapshot))
             .is_err()
         {
             self.release_sequence_caches(seq_id);
@@ -973,20 +986,21 @@ impl BatchScheduler {
         let delta: Vec<i32> = tokens[matched_len..].to_vec();
         let delta_len = delta.len() as i32;
         let input = mlxcel_core::from_slice_i32(&delta, &[1, delta_len]);
-        let eval = {
-            let Some(caches) = self.cache_pool.get_caches_mut(seq_id) else {
+        let eval = match self.engine.prefill(&PrefillStep {
+            seq_id,
+            input: &input,
+            embeddings: None,
+            mask: None,
+            last_pos: delta.len().saturating_sub(1),
+            trim_excess: 0,
+            eval: true,
+        }) {
+            Ok(outcome) => outcome.eval,
+            Err(_) => {
                 self.release_sequence_caches(seq_id);
                 self.batch_observability.record_prompt_cache_warmup_skip();
                 return;
-            };
-            let last = self.model.forward_last_logits_with_sequence_id(
-                &input,
-                Some(seq_id),
-                caches,
-                None,
-                delta.len().saturating_sub(1),
-            );
-            mlxcel_core::try_eval(&last).map_err(|e| e.to_string())
+            }
         };
         // A throw here is recorded against the backend health counter exactly
         // like a foreground eval, but it fails nothing: there is no client.
@@ -1118,7 +1132,7 @@ impl BatchScheduler {
     ///
     /// Used by: `prefill_plan_for`, `start_mtp_slice_b1`, the B=1 MTP burst.
     pub(super) fn history_boundary_split(&self, seq: &SequenceInfo) -> Option<usize> {
-        if !self.model.supports_snapshot_reuse()
+        if !self.engine.model().supports_snapshot_reuse()
             || !self.prompt_cache_active()
             || seq.vlm_embeddings.is_some()
         {
@@ -1203,8 +1217,10 @@ impl BatchScheduler {
         // it can never be donated (#1358). Only Phi-3 / Phi-4 LongRoPE answers
         // this hook at all; every other family reports `None` on both sides and
         // takes the same path it always did.
-        let prompt_regime = self.model.rope_table_regime(prompt_tokens.len());
-        if prompt_regime.is_some() && self.model.rope_table_regime(tokens.len()) != prompt_regime {
+        let prompt_regime = self.engine.model().rope_table_regime(prompt_tokens.len());
+        if prompt_regime.is_some()
+            && self.engine.model().rope_table_regime(tokens.len()) != prompt_regime
+        {
             self.batch_observability.record_prompt_cache_reject(
                 PromptCacheRejectReason::RopeRegimeMismatch,
                 Some(seq_id.as_u64()),
@@ -1219,7 +1235,7 @@ impl BatchScheduler {
         // override these families may still carry a shadow `PagedKvCache`
         // placeholder even though the real state lives in
         // `ModelOwnedSequenceState` and cannot be detached as KV blocks.
-        if self.model.supports_snapshot_reuse() {
+        if self.engine.model().supports_snapshot_reuse() {
             let encoded_span = tokens.len();
             self.insert_model_state_snapshot(
                 seq_id,
@@ -1244,13 +1260,13 @@ impl BatchScheduler {
         // turn skips prefill for tokens whose K/V does not exist, and the model
         // answers turn 2 from the appended suffix alone.
         //
-        // `self.model.sequence_state_layout()` is the model's own answer and is
+        // `self.engine.model().sequence_state_layout()` is the model's own answer and is
         // never rewritten by the override (the override is built from server
         // config alone, and `CachePool::allocate_with_layout` consults the
         // model's layout separately as `natural_backend` for the same reason).
         // `handoff_supported` already gates the disaggregated KV handoff on the
         // same predicate for the same underlying fact (#708).
-        if self.model.sequence_state_layout().backend == SequenceStateBackend::ModelOwned {
+        if self.engine.model().sequence_state_layout().backend == SequenceStateBackend::ModelOwned {
             self.batch_observability.record_prompt_cache_reject(
                 PromptCacheRejectReason::ModelOwnedState,
                 Some(seq_id.as_u64()),
@@ -1260,8 +1276,9 @@ impl BatchScheduler {
         }
 
         let backend = self
-            .cache_pool
-            .get_mut(seq_id)
+            .engine
+            .pool()
+            .get(seq_id)
             .map(|s| s.backend)
             .unwrap_or(SequenceStateBackend::ModelOwned);
 
@@ -1277,7 +1294,7 @@ impl BatchScheduler {
 
         // Detach into the backend-appropriate variant.
         let kv_set: DetachedKvSet = match backend {
-            SequenceStateBackend::DenseKvCache => match self.cache_pool.detach(seq_id) {
+            SequenceStateBackend::DenseKvCache => match self.engine.pool_mut().detach(seq_id) {
                 Some(d) => DetachedKvSet::Dense(d),
                 None => return,
             },
@@ -1297,7 +1314,7 @@ impl BatchScheduler {
                     );
                     return;
                 }
-                match self.cache_pool.detach_paged(seq_id) {
+                match self.engine.pool_mut().detach_paged(seq_id) {
                     Some(p) => DetachedKvSet::Paged(p),
                     None => return,
                 }

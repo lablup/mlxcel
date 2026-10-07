@@ -413,20 +413,20 @@ impl BatchScheduler {
     pub(super) fn publish_metrics(&self) {
         let active = self.active_batch.len();
         let queued = self.prefill_queue.len();
-        let paged_stats = self.cache_pool.paged_stats();
-        let paged_block_size = self.cache_pool.paged_block_size().unwrap_or(0);
+        let paged_stats = self.engine.pool().paged_stats();
+        let paged_block_size = self.engine.pool().paged_block_size().unwrap_or(0);
         self.batch_metrics.set_active_count(active);
         self.batch_metrics.set_queue_depth(queued);
         self.batch_observability.update_gauges(
             active,
             queued,
-            self.cache_pool.active_count(),
-            self.cache_pool.memory_usage_bytes() as u64,
+            self.engine.pool().active_count(),
+            self.engine.pool().memory_usage_bytes() as u64,
             paged_block_size,
             paged_stats,
             // #122 c: surface the configured block-budget cap (0 = unbounded)
             // so `/v1/cache/stats` and `/metrics` can report admission headroom.
-            self.cache_pool.paged_block_budget().unwrap_or(0) as u64,
+            self.engine.pool().paged_block_budget().unwrap_or(0) as u64,
         );
         // Which attention kernel the decode loop actually ran, and how much
         // prefix the cascade decomposition hoisted (issues #899, #903). Cheap

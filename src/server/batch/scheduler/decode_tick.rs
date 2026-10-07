@@ -68,7 +68,7 @@ impl BatchScheduler {
             //
             // For non-Qwen-VL models / text-only requests this returns
             // an empty snapshot and the rebind is a no-op.
-            let mrope_snapshot = self.model.take_qwen_vl_mrope_entry(victim.seq_id);
+            let mrope_snapshot = self.engine.model().take_qwen_vl_mrope_entry(victim.seq_id);
 
             // same lifecycle invariant for Gemma 4 E2B/E4B
             // `per_layer_inputs`. The tensor is projected exactly once
@@ -77,14 +77,18 @@ impl BatchScheduler {
             // would otherwise drop it and the re-prefill would observe
             // `per_layer_inputs == None` for an E2B/E4B request. Take
             // it out before `release_sequence_caches` drains the map.
-            let pli_snapshot = self.model.take_gemma4_per_layer_inputs_entry(victim.seq_id);
+            let pli_snapshot = self
+                .engine
+                .model()
+                .take_gemma4_per_layer_inputs_entry(victim.seq_id);
 
             // Issue #85: same for Gemma 3n VLM `per_layer_inputs`.
             // Without this round trip the re-prefill would panic in
             // `Gemma3nVLModel::forward_with_embeddings_and_sequence_id`
             // (per_layer_inputs missing for this sequence).
             let pli3n_snapshot = self
-                .model
+                .engine
+                .model()
                 .take_gemma3n_per_layer_inputs_entry(victim.seq_id);
 
             // Drop the victim's prompt-cache context. Preemption reallocates
@@ -132,16 +136,19 @@ impl BatchScheduler {
                     // the new seq id so re-prefill resolves the same
                     // per-row delta the original prefill computed
                     // (follow-up).
-                    self.model
+                    self.engine
+                        .model()
                         .install_qwen_vl_mrope_entry(new_id, mrope_snapshot);
                     // same for Gemma 4 `per_layer_inputs`.
                     // The tensor is reused unchanged across re-prefill
                     // because both depend only on the request's
                     // input_ids (no decode-time updates).
-                    self.model
+                    self.engine
+                        .model()
                         .install_gemma4_per_layer_inputs_entry(new_id, pli_snapshot);
                     // Issue #85: same for Gemma 3n `per_layer_inputs`.
-                    self.model
+                    self.engine
+                        .model()
                         .install_gemma3n_per_layer_inputs_entry(new_id, pli3n_snapshot);
                     if let Err(err) = victim.state.transition_to(SequenceState::Queued) {
                         tracing::error!("Eviction state transition error: {err}");
@@ -256,7 +263,7 @@ impl BatchScheduler {
     /// forward. This is the exact pre-#632 behavior and the pipeline's
     /// guaranteed fallback.
     pub(super) fn dispatch_sync_decode(&mut self, seq_ids: &[SequenceId]) {
-        if seq_ids.len() <= 1 || !self.model.supports_batching() {
+        if seq_ids.len() <= 1 || !self.engine.model().supports_batching() {
             for &seq_id in seq_ids {
                 self.decode_single_step(seq_id);
             }
@@ -361,8 +368,8 @@ impl BatchScheduler {
         // an allocated-backend gate let it pipeline while the teardown reached
         // none of its real state.
         let model_owned =
-            self.model.sequence_state_layout().backend == SequenceStateBackend::ModelOwned;
-        if model_owned && !self.model.supports_decode_lookahead_rewind() {
+            self.engine.model().sequence_state_layout().backend == SequenceStateBackend::ModelOwned;
+        if model_owned && !self.engine.model().supports_decode_lookahead_rewind() {
             return None;
         }
         // Speculative decoding drives its own decode loop.
@@ -391,7 +398,7 @@ impl BatchScheduler {
             // rewind gate above is allocated `ModelOwned` (no paged override,
             // e.g. `--parallel 1`) or `PagedKvCache` (shadow accounting), and
             // its own hook unwinds the state either way.
-            match self.cache_pool.get(seq_id) {
+            match self.engine.pool().get(seq_id) {
                 Some(set)
                     if matches!(
                         set.backend,
@@ -448,41 +455,20 @@ impl BatchScheduler {
             return failed;
         }
         let want = positions as i32;
-        let model_owned =
-            self.model.sequence_state_layout().backend == SequenceStateBackend::ModelOwned;
         for &seq_id in ids {
-            if let Some(caches) = self.cache_pool.get_caches_mut(seq_id) {
-                for (layer, cache) in caches.iter_mut().enumerate() {
-                    // KVCache::trim clamps to the live window and returns the
-                    // count actually removed; a short trim means a speculative
-                    // position was not unwound (e.g. an unexpectedly short cache),
-                    // which would desync the KV against generated_tokens.
-                    let trimmed = cache.trim(want);
-                    if trimmed != want {
-                        tracing::warn!(
-                            seq_id = %seq_id,
-                            layer,
-                            requested = want,
-                            trimmed,
-                            "lookahead teardown: trim removed fewer positions \
-                             than requested, KV may be out of sync"
-                        );
-                    }
-                }
-                if model_owned && let Err(err) = self.model.rewind_decode_appends(seq_id, want) {
-                    tracing::error!(
-                        seq_id = %seq_id,
-                        positions = want,
-                        error = %err,
-                        "lookahead teardown: model-owned rewind failed, failing the request"
-                    );
-                    self.fail_desynchronized_sequence(seq_id, &err);
-                    failed.push(seq_id);
-                    continue;
-                }
-                // Re-mirror the shorter dense length into any paged bookkeeping
-                // (no-op for a pure dense pool and for pool-backed sequences).
-                self.sync_sequence_storage(seq_id);
+            // The engine trims the pool caches (a short trim is logged there:
+            // a speculative position not unwound desyncs the KV against
+            // generated_tokens), rewinds a model-owned family's own state and
+            // re-mirrors the shorter length into any paged bookkeeping.
+            if let Err(err) = self.engine.unwind_appends(seq_id, want) {
+                tracing::error!(
+                    seq_id = %seq_id,
+                    positions = want,
+                    error = %err,
+                    "lookahead teardown: model-owned rewind failed, failing the request"
+                );
+                self.fail_desynchronized_sequence(seq_id, &err.to_string());
+                failed.push(seq_id);
             }
         }
         failed
@@ -651,29 +637,23 @@ impl BatchScheduler {
         // Every append this forward makes is speculative: a model-owned family
         // that rewinds its own state (#2159) keeps the rows these writes
         // overwrite, and only these (sync steps copy nothing).
-        let _speculative = mlxcel_core::cache::DecodeLookaheadAppendScope::enter();
-        let logits = if seq_ids.len() == 1 {
-            let seq_id = seq_ids[0];
-            let caches = self.cache_pool.get_caches_mut(seq_id)?;
-            self.model
-                .forward_with_sequence_id(input, Some(seq_id), caches, None)
-        } else {
-            let decode_context = self.decode_batch_context();
-            let mut batch_caches = self.cache_pool.get_batch_caches_mut(seq_ids).ok()?;
-            let logits = self.model.forward_batched_with_context_and_ids(
-                input,
-                Some(seq_ids),
-                &mut batch_caches,
-                None,
-                Some(&decode_context),
-            );
-            drop(batch_caches);
-            logits
+        // Every append this forward makes is speculative: the engine runs it
+        // inside a `DecodeLookaheadAppendScope`, so a model-owned family that
+        // rewinds its own state (#2159) keeps the rows these writes overwrite,
+        // and only these (sync steps copy nothing).
+        let decode_context = self.decode_batch_context();
+        let batch = StepBatch {
+            seq_ids,
+            input,
+            context: Some(&decode_context),
         };
-        for &seq_id in seq_ids {
-            self.sync_sequence_storage(seq_id);
+        match self.engine.step_speculative(&batch) {
+            Ok(out) => Some(out.logits),
+            Err(err) => {
+                tracing::debug!("lookahead prime skipped: {err}");
+                None
+            }
         }
-        Some(logits)
     }
 
     /// Steady pipelined decode, ordered exactly like the CLI generation loop
@@ -840,26 +820,18 @@ impl BatchScheduler {
         );
 
         let decode_context = self.decode_batch_context();
-        let mut batch_caches = match self.cache_pool.get_batch_caches_mut(seq_ids) {
-            Ok(caches) => caches,
+        let batch = StepBatch {
+            seq_ids,
+            input: &input,
+            context: Some(&decode_context),
+        };
+        let logits = match self.engine.step(&batch) {
+            Ok(out) => out.logits,
             Err(err) => {
                 tracing::error!("{err} during batched decode");
                 return;
             }
         };
-
-        let logits = self.model.forward_batched_with_context_and_ids(
-            &input,
-            Some(seq_ids),
-            &mut batch_caches,
-            None,
-            Some(&decode_context),
-        );
-        drop(batch_caches);
-
-        for &seq_id in seq_ids {
-            self.sync_sequence_storage(seq_id);
-        }
 
         // Fast path: when every active row shares a fused-compatible sampling
         // config and none needs a structured-output mask, a thinking-budget
@@ -1057,7 +1029,7 @@ impl BatchScheduler {
                 continue;
             }
 
-            if let Some(cache_set) = self.cache_pool.get_mut(seq_id) {
+            if let Some(cache_set) = self.engine.pool_mut().get_mut(seq_id) {
                 cache_set.current_offset += 1;
             }
         }
@@ -1164,7 +1136,7 @@ impl BatchScheduler {
                 continue;
             }
 
-            if let Some(cache_set) = self.cache_pool.get_mut(seq_id) {
+            if let Some(cache_set) = self.engine.pool_mut().get_mut(seq_id) {
                 cache_set.current_offset += 1;
             }
         }
@@ -1207,18 +1179,19 @@ impl BatchScheduler {
         self.enforce_max_kv_size_for(seq_id, retention);
 
         let input = mlxcel_core::from_slice_i32(&[last_token], &[1, 1]);
-        let logits = {
-            let caches = match self.cache_pool.get_caches_mut(seq_id) {
-                Some(c) => c,
-                None => {
-                    tracing::error!("Cache not found for {seq_id} during decode");
-                    return;
-                }
-            };
-            self.model
-                .forward_with_sequence_id(&input, Some(seq_id), caches, None)
+        let decode_context = self.decode_batch_context();
+        let batch = StepBatch {
+            seq_ids: std::slice::from_ref(&seq_id),
+            input: &input,
+            context: Some(&decode_context),
         };
-        self.sync_sequence_storage(seq_id);
+        let logits = match self.engine.step(&batch) {
+            Ok(out) => out.logits,
+            Err(err) => {
+                tracing::error!("Cache not found for {seq_id} during decode: {err}");
+                return;
+            }
+        };
 
         let constraint_clone = self
             .active_batch
@@ -1371,7 +1344,7 @@ impl BatchScheduler {
             return;
         }
 
-        if let Some(cache_set) = self.cache_pool.get_mut(seq_id) {
+        if let Some(cache_set) = self.engine.pool_mut().get_mut(seq_id) {
             cache_set.current_offset += 1;
         }
     }

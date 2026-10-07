@@ -18,8 +18,9 @@ impl BatchScheduler {
     pub(super) fn allocate_sequence_state(&mut self) -> Result<SequenceId, String> {
         let layout_override = self.sequence_state_layout_override();
         let seq_id = self
-            .cache_pool
-            .allocate_with_layout(&self.model, layout_override)?;
+            .engine
+            .open(mlxcel_core::engine::SequenceSpec { layout_override })
+            .map_err(|err| err.to_string())?;
         // apply the configured KV cache mode (with
         // Boundary-V policy for Turbo4 modes) to the freshly allocated
         // per-layer caches. `model.make_caches()` always returns Fp16
@@ -27,7 +28,6 @@ impl BatchScheduler {
         // keeping boundary layers at FP16 quality. No-op when the
         // configured mode is `Fp16`.
         self.apply_kv_cache_mode_to(seq_id);
-        self.model.prepare_sequence_state(seq_id);
         Ok(seq_id)
     }
 
@@ -51,7 +51,7 @@ impl BatchScheduler {
         let batch_kv_quant = self.batch_kv_quant;
         let kv_cache_mode = self.kv_cache_mode;
         let requested_boundary_layers = mlxcel_core::cache::turbo::boundary_v_layers_from_env();
-        let Some(caches) = self.cache_pool.get_caches_mut(seq_id) else {
+        let Some(caches) = self.engine.pool_mut().get_caches_mut(seq_id) else {
             return;
         };
         if caches.is_empty() {
@@ -83,11 +83,12 @@ impl BatchScheduler {
     }
 
     pub(super) fn configured_model_kv_cache_layer_modes(&self) -> Vec<KVCacheMode> {
-        self.resolved_kv_cache_layer_modes(self.model.num_layers())
+        self.resolved_kv_cache_layer_modes(self.engine.model().num_layers())
     }
 
     pub(super) fn inject_model_owned_kv_cache_modes(&self) {
-        self.model
+        self.engine
+            .model()
             .set_kv_cache_layer_modes(self.configured_model_kv_cache_layer_modes());
     }
 
@@ -121,7 +122,7 @@ impl BatchScheduler {
     /// also satisfies `max_tokens` or EOS, the sequence never decodes and this
     /// helper is intentionally not called.
     pub(super) fn prepare_turbo4_delegated_for_sequence_decode(&mut self, seq_id: SequenceId) {
-        let Some(caches) = self.cache_pool.get_caches_mut(seq_id) else {
+        let Some(caches) = self.engine.pool_mut().get_caches_mut(seq_id) else {
             return;
         };
         for cache in caches {
@@ -189,7 +190,7 @@ impl BatchScheduler {
             );
             return;
         };
-        let Some(caches) = self.cache_pool.get_caches_mut(seq_id) else {
+        let Some(caches) = self.engine.pool_mut().get_caches_mut(seq_id) else {
             return;
         };
         // The retained prefix, clamped so a shift always has room to free:
@@ -220,7 +221,7 @@ impl BatchScheduler {
             return None;
         }
 
-        let num_layers = self.model.num_layers();
+        let num_layers = self.engine.model().num_layers();
         // prefer the batched KV quant config when active so
         // its `base_mode()` drives paged-layout selection (Turbo-aware
         // when scheme is TurboQuant, otherwise the legacy uniform path).
@@ -302,11 +303,6 @@ impl BatchScheduler {
     }
 
     pub(super) fn sync_sequence_storage(&mut self, seq_id: SequenceId) {
-        if let Err(err) = self
-            .model
-            .sync_sequence_storage(seq_id, &mut self.cache_pool)
-        {
-            tracing::warn!("Failed to sync paged state for {seq_id}: {err}");
-        }
+        self.engine.sync_sequence_storage(seq_id);
     }
 }

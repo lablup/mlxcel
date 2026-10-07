@@ -260,7 +260,7 @@ impl BatchScheduler {
         match &self.mtp_policy {
             Some(policy) => policy.should_attempt_b1(),
             None => crate::server::batch::speculative_burst::mtp_b1_burst_enabled(
-                self.model.supports_batching(),
+                self.engine.model().supports_batching(),
             ),
         }
     }
@@ -288,7 +288,10 @@ impl BatchScheduler {
         };
         block_size >= 2
             && crate::server::batch::speculative_slice::mtp_tick_slice_enabled()
-            && crate::server::batch::speculative_burst::mtp_capable_target(&self.model, block_size)
+            && crate::server::batch::speculative_burst::mtp_capable_target(
+                self.engine.model(),
+                block_size,
+            )
             && !seq.prompt_tokens.is_empty()
             && crate::server::batch::speculative_burst::mtp_prefill_suffix_start(
                 seq.prefill_start_offset,
@@ -418,8 +421,8 @@ impl BatchScheduler {
         // BatchedCold cohort holds only cold rows is what keeps cache offsets
         // correct: an adopted prefix can never be folded into a batch and have
         // its KV resumed at the wrong position.
-        let can_batch = self.model.supports_batched_prefill();
-        let can_pad = self.model.supports_padded_prefill();
+        let can_batch = self.engine.model().supports_batched_prefill();
+        let can_pad = self.engine.model().supports_padded_prefill();
         let rows: Vec<PrefillRow> = seqs
             .iter()
             .map(|s| PrefillRow {
@@ -551,7 +554,7 @@ impl BatchScheduler {
 
         let b = seqs.len();
         let max_len = seqs.iter().map(|s| s.prompt_tokens.len()).max().unwrap();
-        let can_pad_prefill = self.model.supports_padded_prefill();
+        let can_pad_prefill = self.engine.model().supports_padded_prefill();
         if !can_pad_prefill && seqs.iter().any(|s| s.prompt_tokens.len() != max_len) {
             // Should not happen for a planner-approved cohort (it only batches
             // equal-length rows on equal-length-only models), but stay safe.
@@ -596,25 +599,6 @@ impl BatchScheduler {
         };
 
         let batch_ids: Vec<SequenceId> = seqs.iter().map(|seq| seq.seq_id).collect();
-        let mut batch_caches = match self.cache_pool.get_batch_caches_mut(&batch_ids) {
-            Ok(caches) => caches,
-            Err(err) => {
-                tracing::warn!("batched prefill: {err}, falling back");
-                // Re-queue all sequences for sequential processing.
-                for seq in seqs {
-                    self.execute_full_prefill(seq);
-                }
-                return;
-            }
-        };
-
-        if batch_caches.len() != b {
-            // Re-queue all sequences for sequential processing.
-            for seq in seqs {
-                self.execute_full_prefill(seq);
-            }
-            return;
-        }
 
         // Prefill, and deliberately NOT covered by `announce_prefill_span`: this
         // pass starts at offset 0 and spans `padded_len`, the longest row, so a
@@ -626,17 +610,21 @@ impl BatchScheduler {
         // its chunk exceeds the threshold, since any longer prompt takes the
         // chunked path instead. See `mlxcel_core::prefill_span`.
         // Single batched forward pass: [B, padded_len] → [B, padded_len, vocab]
-        let raw_logits = self.model.forward_batched_with_context_and_ids(
-            &input,
-            Some(&batch_ids),
-            &mut batch_caches,
-            stacked_mask.as_deref(),
-            None,
-        );
-
-        // Release the cache_pool borrow before the guarded eval touches
-        // `&mut self`; the per-sequence loop below re-borrows caches anyway.
-        drop(batch_caches);
+        let raw_logits =
+            match self
+                .engine
+                .prefill_cohort(&batch_ids, &input, stacked_mask.as_deref())
+            {
+                Ok(logits) => logits,
+                Err(err) => {
+                    tracing::warn!("batched prefill: {err}, falling back");
+                    // Re-queue all sequences for sequential processing.
+                    for seq in seqs {
+                        self.execute_full_prefill(seq);
+                    }
+                    return;
+                }
+            };
 
         // #822: force-evaluate the cohort's prefill graph through the fallible
         // boundary. This single eval covers the whole batch, so an MLX C++ throw
@@ -675,10 +663,10 @@ impl BatchScheduler {
             // decode phase starts with the correct cache offset.
             let excess = (padded - actual_len) as i32;
             if excess > 0
-                && let Some(caches) = self.cache_pool.get_caches_mut(seq.seq_id)
-                && let Err(err) = trim_padded_prefill(&self.model, seq.seq_id, caches, excess)
+                && self.engine.is_open(seq.seq_id)
+                && let Err(err) = self.engine.trim_padding(seq.seq_id, excess)
             {
-                self.abort_sequence(seq, &err);
+                self.abort_sequence(seq, &err.to_string());
                 continue;
             }
 
@@ -687,8 +675,10 @@ impl BatchScheduler {
             seq.prefill_offset = actual_len;
             self.batch_observability.record_prefill_start(actual_len);
 
-            let eos_tokens =
-                merged_eos_token_ids(self.model.eos_token_ids(), &seq.sampling.stop_token_ids);
+            let eos_tokens = merged_eos_token_ids(
+                self.engine.model().eos_token_ids(),
+                &seq.sampling.stop_token_ids,
+            );
             let needs_history = seq.sampling.needs_token_history();
             let token_history = initial_token_history(&seq.prompt_tokens, needs_history);
 
@@ -733,12 +723,14 @@ impl BatchScheduler {
         // across all sequences.  Reset them now (at prefill time) rather
         // than at enqueue time so that queued requests don't corrupt an
         // in-flight generation.
-        if !self.model.supports_batching() {
-            let _ = self.model.make_caches();
+        if !self.engine.model().supports_batching() {
+            let _ = self.engine.model().make_caches();
         }
 
-        let eos_tokens =
-            merged_eos_token_ids(self.model.eos_token_ids(), &seq.sampling.stop_token_ids);
+        let eos_tokens = merged_eos_token_ids(
+            self.engine.model().eos_token_ids(),
+            &seq.sampling.stop_token_ids,
+        );
         let needs_history = seq.sampling.needs_token_history();
         let token_history = initial_token_history(&seq.prompt_tokens, needs_history);
         seq.prefill_offset = plan.adopted();
@@ -794,24 +786,21 @@ impl BatchScheduler {
         // #822: the forward is force-evaluated while `caches` still borrows
         // the cache pool, so capture the fallible outcome and act on it below
         // once the borrow has ended.
-        let (logits, eval) = {
-            let caches = self.cache_pool.get_caches_mut(seq.seq_id).ok_or_else(|| {
+        let outcome = self
+            .engine
+            .prefill(&PrefillStep {
+                seq_id: seq.seq_id,
+                input: &input,
+                embeddings: Some(input_embeds),
+                mask: caller_mask,
+                last_pos: piece.last_real_pos(),
+                trim_excess: 0,
+                eval: true,
+            })
+            .map_err(|_| {
                 PieceFailure::Abort("Cache not found for sequence during prefill".into())
             })?;
-            let logits = self
-                .model
-                .forward_last_logits_with_embeddings_and_sequence_id(
-                    &input,
-                    Some(input_embeds),
-                    Some(seq.seq_id),
-                    caches,
-                    caller_mask,
-                    piece.last_real_pos(),
-                );
-            let eval = mlxcel_core::try_eval(&logits).map_err(|e| e.to_string());
-            self.model.after_prefill();
-            (logits, eval)
-        };
+        let (logits, eval) = { (outcome.logits, outcome.eval) };
         self.record_eval_outcome(eval)
             .map_err(PieceFailure::EvalFailed)?;
         self.sync_sequence_storage(seq.seq_id);
@@ -1080,7 +1069,7 @@ impl BatchScheduler {
         }
 
         let prompt_len = seq.prompt_tokens.len() as i32;
-        if let Some(cache_set) = self.cache_pool.get_mut(seq.seq_id) {
+        if let Some(cache_set) = self.engine.pool_mut().get_mut(seq.seq_id) {
             cache_set.prompt_len = seq.prompt_tokens.len();
             cache_set.current_offset = prompt_len + 1;
         }

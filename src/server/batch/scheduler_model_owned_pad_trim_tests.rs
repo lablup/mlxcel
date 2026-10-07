@@ -216,7 +216,7 @@ fn run(prompt_len: usize, chunk: usize, align: bool, backend: DecodeStorageBacke
     set_alignment_override_for_test(Some(align));
     let mut sched = scheduler(chunk, backend);
     assert!(
-        sched.model.supports_padded_prefill(),
+        sched.engine.model().supports_padded_prefill(),
         "Gemma 3 takes padded prefill (#1755)"
     );
     let prompt: Vec<i32> = (0..prompt_len)
@@ -246,7 +246,10 @@ fn run(prompt_len: usize, chunk: usize, align: bool, backend: DecodeStorageBacke
         if snapshot.is_none()
             && let Some(seq_id) = sched.active_batch.sequence_ids().first().copied()
         {
-            snapshot = sched.model.snapshot_sequence_state(seq_id, prompt_len);
+            snapshot = sched
+                .engine
+                .model()
+                .snapshot_sequence_state(seq_id, prompt_len);
         }
         sched.finalize_completed();
         if sched.active_batch.is_empty()

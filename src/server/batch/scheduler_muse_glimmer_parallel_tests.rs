@@ -215,7 +215,7 @@ fn run_two_concurrent(parallelism: usize) -> (RequestSummary, RequestSummary) {
     let (small, wide) = cases();
     let mut sched = muse::scheduler(parallelism);
     assert_eq!(
-        sched.model.sequence_state_layout().backend,
+        sched.engine.model().sequence_state_layout().backend,
         SequenceStateBackend::ModelOwned
     );
 

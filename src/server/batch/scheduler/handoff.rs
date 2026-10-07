@@ -17,11 +17,7 @@ use crate::server::batch::generation_bounds::GenerationBounds;
 
 impl BatchScheduler {
     pub(super) fn release_sequence_caches(&mut self, seq_id: SequenceId) {
-        self.model.release_sequence_state_by_id(seq_id);
-        if let Some(caches) = self.cache_pool.get_caches_mut(seq_id) {
-            self.model.release_sequence_state(caches);
-        }
-        self.cache_pool.release(seq_id);
+        self.engine.close(seq_id);
     }
 
     /// #822: note a successful MLX eval at the decode/prefill boundary, clearing
@@ -144,7 +140,7 @@ impl BatchScheduler {
         generated_tokens: Vec<i32>,
     ) -> anyhow::Result<Vec<u8>> {
         crate::distributed::disaggregated::handoff_impl::extract_sequence_handoff(
-            &self.cache_pool,
+            self.engine.pool(),
             seq_id,
             None,
             token_history,
@@ -167,7 +163,7 @@ impl BatchScheduler {
             return Ok(geometry);
         }
         let probed = crate::distributed::disaggregated::handoff_impl::probe_block_geometry(
-            &self.model,
+            self.engine.model(),
             DEFAULT_PAGED_BLOCK_SIZE,
         )?;
         self.paged_handoff_geometry = Some(probed);
@@ -177,9 +173,10 @@ impl BatchScheduler {
     #[allow(dead_code)]
     pub(crate) fn ingest_sequence_handoff(&mut self, bytes: &[u8]) -> anyhow::Result<SequenceId> {
         let geometry = self.ensure_handoff_geometry()?;
+        let (model, pool) = self.engine.parts_mut();
         crate::distributed::disaggregated::handoff_impl::ingest_sequence_handoff(
-            &mut self.cache_pool,
-            &self.model,
+            pool,
+            model,
             bytes,
             &crate::distributed::kv_cache_serde::CacheIngestLimits::default(),
             &geometry,
@@ -198,7 +195,7 @@ impl BatchScheduler {
     /// loop (#708). The whole node serves one model, so this is a node-level fact
     /// the serving-role loop checks once and applies to every request.
     pub(crate) fn handoff_supported(&self) -> bool {
-        self.model.sequence_state_layout().backend == SequenceStateBackend::DenseKvCache
+        self.engine.model().sequence_state_layout().backend == SequenceStateBackend::DenseKvCache
     }
 
     /// Prefill role (#126 B2b): run a full prefill for `seq`, then extract its
@@ -313,7 +310,7 @@ impl BatchScheduler {
                  {:?} sequence-state backend; only pool-backed dense Fp16 families (qwen3 / \
                  llama3) can be handed off. Model-owned paged families (gemma3 / gemma4 / llama4 \
                  / qwen3_5 / qwen3_next) keep their KV model-internal (issue #708).",
-                self.model.sequence_state_layout().backend
+                self.engine.model().sequence_state_layout().backend
             );
         }
         if prompt_tokens.is_empty() {
@@ -439,10 +436,11 @@ impl BatchScheduler {
             thinking_enter_block_on_start,
             &generated_tokens,
         )?;
+        let (model, pool) = self.engine.parts_mut();
         let seq_id =
             crate::distributed::disaggregated::handoff_impl::ingest_sequence_handoff_state(
-                &mut self.cache_pool,
-                &self.model,
+                pool,
+                model,
                 &state,
                 &limits,
                 &geometry,
@@ -457,7 +455,10 @@ impl BatchScheduler {
         if needs_history {
             token_history.extend_from_slice(&generated_tokens);
         }
-        let merged_eos = merged_eos_token_ids(self.model.eos_token_ids(), &sampling.stop_token_ids);
+        let merged_eos = merged_eos_token_ids(
+            self.engine.model().eos_token_ids(),
+            &sampling.stop_token_ids,
+        );
         // Seed the incremental detokenizer with everything already produced (the
         // prompt plus the handed-off tokens) so the decode node's text continues
         // from the correct boundary.

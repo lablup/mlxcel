@@ -378,7 +378,7 @@ fn receive_error(rx: &mpsc::Receiver<GenerateEvent>) -> String {
 }
 
 fn muse_state_offsets(sched: &BatchScheduler, seq_id: SequenceId) -> Option<Vec<(bool, i32, i32)>> {
-    match &sched.model {
+    match sched.engine.model() {
         LoadedModel::MuseGlimmerVLM(model) => model.text.sequence_cache_summaries(seq_id),
         _ => panic!("scheduler test must use Muse Glimmer VLM"),
     }
@@ -388,7 +388,7 @@ fn muse_state_offsets(sched: &BatchScheduler, seq_id: SequenceId) -> Option<Vec<
 fn muse_scheduler_admits_text_only_with_model_owned_sequence_state() {
     let mut sched = scheduler();
     assert_eq!(
-        sched.model.sequence_state_layout().backend,
+        sched.engine.model().sequence_state_layout().backend,
         SequenceStateBackend::ModelOwned
     );
 

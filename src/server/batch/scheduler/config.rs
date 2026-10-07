@@ -92,10 +92,9 @@ impl BatchScheduler {
         // non-multimodal models (zero cost on the enqueue path).
         let model_output_suppressed = model.output_suppressed_token_ids();
         Self {
-            cache_pool: CachePool::new(pool_capacity),
+            engine: Engine::new(model, CachePool::new(pool_capacity)),
             prefill_queue: PrefillQueue::with_capacity(max_queue_depth),
             active_batch: ActiveBatch::new(max_batch_size),
-            model,
             tokenizer,
             forced_reasoning_message: std::cell::RefCell::new(None),
             sleep_idle: None,
@@ -393,7 +392,7 @@ impl BatchScheduler {
     /// model-owned / quantized families that keep dense caches and never mint
     /// pool blocks.
     pub fn with_paged_block_budget(mut self, budget: Option<usize>) -> Self {
-        self.cache_pool.set_paged_block_budget(budget);
+        self.engine.pool_mut().set_paged_block_budget(budget);
         self
     }
 
@@ -411,7 +410,7 @@ impl BatchScheduler {
     /// (a pool that already has storage) is logged and ignored, because an
     /// unsized slab costs performance, not correctness.
     pub fn with_paged_slab_blocks(mut self, slab_blocks: Option<usize>) -> Self {
-        if let Err(reason) = self.cache_pool.set_paged_slab_blocks(slab_blocks) {
+        if let Err(reason) = self.engine.pool_mut().set_paged_slab_blocks(slab_blocks) {
             tracing::warn!("could not install the paged KV slab size: {reason}");
         }
         self
@@ -481,7 +480,7 @@ impl BatchScheduler {
             let block_size = *block_size as usize;
             if block_size >= 2 {
                 let _ = crate::server::batch::speculative_burst::mtp_capable_target(
-                    &self.model,
+                    self.engine.model(),
                     block_size,
                 );
             }
@@ -532,7 +531,10 @@ impl BatchScheduler {
             let target_id = target_model_id.unwrap_or_else(|| "unknown-target".to_string());
             let block = *block_size as usize;
             if block >= 2
-                && !crate::server::batch::speculative_burst::mtp_capable_target(&self.model, block)
+                && !crate::server::batch::speculative_burst::mtp_capable_target(
+                    self.engine.model(),
+                    block,
+                )
             {
                 exactness_veto = Some(MtpPolicySnapshot::exactness_declined(
                     target_id.clone(),
@@ -545,7 +547,7 @@ impl BatchScheduler {
                 target_id,
                 drafter_id,
                 *block_size,
-                self.model.supports_batching(),
+                self.engine.model().supports_batching(),
             );
             true
         } else {
@@ -571,7 +573,7 @@ impl BatchScheduler {
                     MtpPolicyUnavailableReason::AdaptiveDisabled,
                     Some(
                         crate::server::batch::speculative_burst::mtp_b1_burst_enabled(
-                            self.model.supports_batching(),
+                            self.engine.model().supports_batching(),
                         ),
                     ),
                 ),

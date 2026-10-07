@@ -298,7 +298,7 @@ fn paged_override_does_not_change_the_model_owned_natural_backend() {
     let mut sched = scheduler(test_store());
 
     assert_eq!(
-        sched.model.sequence_state_layout().backend,
+        sched.engine.model().sequence_state_layout().backend,
         SequenceStateBackend::ModelOwned,
         "Gemma 3 keeps its K/V in ModelOwnedSequenceState"
     );
@@ -313,7 +313,7 @@ fn paged_override_does_not_change_the_model_owned_natural_backend() {
     let seq_id = sched
         .allocate_sequence_state()
         .expect("paged allocation succeeds");
-    let set = sched.cache_pool.get(seq_id).expect("sequence is active");
+    let set = sched.engine.pool().get(seq_id).expect("sequence is active");
     assert_eq!(
         set.backend,
         SequenceStateBackend::PagedKvCache,

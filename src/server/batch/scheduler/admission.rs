@@ -259,7 +259,10 @@ impl BatchScheduler {
         // `xtc_probability == 0.0` and skip this entirely.
         if sampling.xtc_probability > 0.0 {
             let mut allowlist = self.xtc_newline_token_ids.clone();
-            for id in merged_eos_token_ids(self.model.eos_token_ids(), &sampling.stop_token_ids) {
+            for id in merged_eos_token_ids(
+                self.engine.model().eos_token_ids(),
+                &sampling.stop_token_ids,
+            ) {
                 if !allowlist.contains(&id) {
                     allowlist.push(id);
                 }
@@ -277,7 +280,10 @@ impl BatchScheduler {
         // the request's merged stop tokens; suppression is idempotent, so
         // applying it after composition still wins over any bias.
         if options.ignore_eos {
-            let eos = merged_eos_token_ids(self.model.eos_token_ids(), &sampling.stop_token_ids);
+            let eos = merged_eos_token_ids(
+                self.engine.model().eos_token_ids(),
+                &sampling.stop_token_ids,
+            );
             sampling.token_bias.suppress_tokens(&eos);
         }
 
@@ -305,7 +311,7 @@ impl BatchScheduler {
             self.enable_vlm_prefix_cache,
             is_multimodal,
             !videos.is_empty(),
-            matches!(self.model, LoadedModel::Phi4MMVLM(_)),
+            matches!(self.engine.model(), LoadedModel::Phi4MMVLM(_)),
         );
 
         // For VLM sharing the image/audio placeholder tokens must be expanded
@@ -318,7 +324,7 @@ impl BatchScheduler {
         // the inner value is the optional merged embeddings.
         let prepared_early = if vlm_sharing_ok {
             match prepare_request_vlm_embeddings(
-                &self.model,
+                self.engine.model(),
                 &self.tokenizer,
                 &prompt,
                 &mut prompt_tokens,
@@ -403,7 +409,7 @@ impl BatchScheduler {
                 }
             }
             None => match prepare_request_vlm_embeddings(
-                &self.model,
+                self.engine.model(),
                 &self.tokenizer,
                 &prompt,
                 &mut prompt_tokens,
@@ -437,7 +443,9 @@ impl BatchScheduler {
         // pick up the previous VL row's delta and produce wrong
         // attention positions. Bind unconditionally for Qwen VL models;
         // the call is a no-op for everything else.
-        self.model.bind_qwen_vl_mrope_state_to_sequence(seq_id);
+        self.engine
+            .model()
+            .bind_qwen_vl_mrope_state_to_sequence(seq_id);
 
         // per-sequence `per_layer_inputs` for Gemma 4
         // E2B/E4B. `prepare_request_vlm_embeddings` writes the
@@ -446,14 +454,18 @@ impl BatchScheduler {
         // burst of Gemma 4 VLM requests in a single drain tick cannot
         // have one row consume another row's tensor. No-op for
         // everything that is not a Gemma 4 VLM.
-        self.model.bind_gemma4_per_layer_inputs_to_sequence(seq_id);
+        self.engine
+            .model()
+            .bind_gemma4_per_layer_inputs_to_sequence(seq_id);
 
         // Same lifecycle invariant for Falcon-OCR: the prefill state
         // (temporal positions, spatial coordinates, rope delta) is
         // written to a fallback slot during embedding preparation and
         // must be bound to this sequence before another request in the
         // same drain tick overwrites it. No-op for everything else.
-        self.model.bind_falcon_ocr_state_to_sequence(seq_id);
+        self.engine
+            .model()
+            .bind_falcon_ocr_state_to_sequence(seq_id);
 
         // Issue #85: same lifecycle invariant for Gemma 3n VLM. The
         // legacy `Gemma3nVLModel.cached_per_layer_inputs` cell was a
@@ -463,7 +475,9 @@ impl BatchScheduler {
         // panic on `Option::unwrap` when the timing flipped). The
         // call below is a no-op for everything that is not a
         // Gemma 3n VLM.
-        self.model.bind_gemma3n_per_layer_inputs_to_sequence(seq_id);
+        self.engine
+            .model()
+            .bind_gemma3n_per_layer_inputs_to_sequence(seq_id);
 
         let decode_state = StreamingDecodeState::new(&self.tokenizer, &prompt_tokens);
 
@@ -692,10 +706,10 @@ impl BatchScheduler {
     /// `block_size` prompt tokens, per layer. Returns 0 when there is no paged
     /// pool (the budget gate is then a no-op for this model).
     pub(super) fn estimate_prefill_blocks(&self, prompt_len: usize) -> usize {
-        match self.cache_pool.paged_block_size() {
+        match self.engine.pool().paged_block_size() {
             Some(block_size) if block_size > 0 => prompt_len
                 .div_ceil(block_size)
-                .saturating_mul(self.model.num_layers()),
+                .saturating_mul(self.engine.model().num_layers()),
             _ => 0,
         }
     }
@@ -717,13 +731,14 @@ impl BatchScheduler {
             return 0;
         }
         let Some(suffix) = self
-            .cache_pool
+            .engine
+            .pool()
             .paged_blocks_to_reach(seq.seq_id, seq.prompt_tokens.len())
         else {
             return estimate;
         };
         if seq.already_cached_tokens > 0 {
-            suffix.max(self.model.num_layers())
+            suffix.max(self.engine.model().num_layers())
         } else {
             suffix
         }
@@ -735,7 +750,7 @@ impl BatchScheduler {
     /// watermark (issue #2088) is already taken off, so the single-sequence
     /// gate and the batched-prefill window charge against the same figure.
     pub(super) fn paged_prefill_room(&self) -> Option<usize> {
-        let total = self.cache_pool.paged_block_budget()?;
+        let total = self.engine.pool().paged_block_budget()?;
         let free = self.available_paged_blocks().unwrap_or(total);
         Some(free.saturating_sub(self.paged_admission_headroom()))
     }
@@ -746,7 +761,7 @@ impl BatchScheduler {
     /// budget). A no-op (`Some(seq)`) when no budget is configured.
     pub(super) fn admit_paged_prefill(&mut self, seq: SequenceInfo) -> Option<SequenceInfo> {
         // Opt-in: no budget configured ⇒ admit (default unbounded behaviour).
-        let total = match self.cache_pool.paged_block_budget() {
+        let total = match self.engine.pool().paged_block_budget() {
             Some(t) => t,
             None => return Some(seq),
         };

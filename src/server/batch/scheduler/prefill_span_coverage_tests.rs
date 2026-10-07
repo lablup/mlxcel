@@ -138,7 +138,7 @@ fn collapsed(body: &str) -> String {
 
 /// Whether a method body forwards the model.
 fn forwards_the_model(collapsed_body: &str) -> bool {
-    collapsed_body.contains("self.model.forward")
+    collapsed_body.contains("self.engine.model().forward")
 }
 
 /// Whether a method body announces a prefill span.

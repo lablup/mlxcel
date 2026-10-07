@@ -175,7 +175,8 @@ struct SeqState {
 
 fn seq_state(sched: &BatchScheduler, seq_id: SequenceId) -> SeqState {
     let snapshot = sched
-        .model
+        .engine
+        .model()
         .snapshot_sequence_state(seq_id, 1)
         .expect("Gemma 3 snapshots a live sequence");
     let global_offset = scalar(&snapshot, "layer1.standard.offset");
@@ -214,7 +215,7 @@ struct Scenario {
 fn assert_lookahead_matches_force_sync(backend: DecodeStorageBackend, scenario: &Scenario) {
     let mut piped = scheduler(tiny_gemma3(), backend, false);
     let mut synced = scheduler(tiny_gemma3(), backend, true);
-    assert!(piped.model.supports_decode_lookahead_rewind());
+    assert!(piped.engine.model().supports_decode_lookahead_rewind());
 
     let mut rxs: Vec<(mpsc::Receiver<GenerateEvent>, mpsc::Receiver<GenerateEvent>)> = Vec::new();
     for (seed, &(prompt_len, max_tokens)) in scenario.initial.iter().enumerate() {

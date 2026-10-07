@@ -3978,6 +3978,11 @@ pub mod prefill_span;
 // CLI generator and the server scheduler (ADR 0007, #2170).
 pub mod prefill_plan;
 
+// The batch-native decode engine: owns the model and the KV pool and runs
+// every forward through `open` / `prefill` / `step` / `close`; a single
+// sequence is a batch of one (ADR 0007, #2172).
+pub mod engine;
+
 pub mod runtime_lora;
 
 // Unicode-script classifier and language-steering index for Axis B.

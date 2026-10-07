@@ -38,7 +38,8 @@ impl BatchScheduler {
                 && !seq.is_vlm_request()
                 && seq.audio.is_empty()
                 && self
-                    .cache_pool
+                    .engine
+                    .pool()
                     .paged_blocks_to_reach(seq.seq_id, 0)
                     .is_some()
         }) else {

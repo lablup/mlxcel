@@ -40,7 +40,8 @@ use crate::server::prompt_cache::PromptCacheRejectReason;
 /// snapshot the model itself would donate. The tiny fixture has one layer.
 fn restored_offset(sched: &BatchScheduler, seq_id: SequenceId, kind: &str) -> i32 {
     let snapshot = sched
-        .model
+        .engine
+        .model()
         .snapshot_sequence_state(seq_id, 0)
         .expect("restored sequence has model-owned state");
     let name = format!("layer0.{kind}.offset");

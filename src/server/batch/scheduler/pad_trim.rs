@@ -12,19 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Tile-alignment decision and the post-pad trim shared by every prefill site
-//! (issue #1755).
+//! Tile-alignment decision shared by every prefill site (issue #1755).
 //!
-//! A padded prefill writes `excess` pad positions after the real tokens. For a
-//! dense or paged sequence they sit in the `CachePool` entry's `KVCache`s; for
-//! a family whose own layout is model-owned they sit in the model's
-//! per-sequence state, which only [`LanguageModel::trim_state`] can
-//! reach. [`trim_padded_prefill`] covers both, so no site can trim one and
-//! forget the other.
-
-use mlxcel_core::cache::{SequenceId, SequenceStateBackend};
-use mlxcel_core::generate::LanguageModel;
-use mlxcel_core::layers::KVCache;
+//! The post-pad trim that pairs with it lives in the engine
+//! ([`mlxcel_core::engine::Engine::trim_padding`], run inside
+//! [`mlxcel_core::engine::Engine::prefill`] for a planned piece), so no site
+//! can trim the pool caches and forget a model-owned family's own state.
 
 #[cfg(test)]
 thread_local! {
@@ -52,33 +45,4 @@ pub(super) fn should_align_prefill() -> bool {
 #[cfg(test)]
 pub(crate) fn set_alignment_override_for_test(value: Option<bool>) {
     ALIGNMENT_OVERRIDE.with(|cell| cell.set(value));
-}
-
-/// Drop the `excess` pad positions a padded prefill pass wrote for `seq_id`.
-///
-/// `caches` is the sequence's `CachePool` entry. It is trimmed for every
-/// layout, and is empty (or shadow paged accounting) for a model-owned family,
-/// whose own state is rewound through the model hook. The model's natural
-/// layout decides, not the allocated backend: a model-owned family allocated on
-/// the paged backend for block accounting still keeps its K/V to itself
-/// (#1346).
-///
-/// `Err` means the sequence's state may disagree with its token count; the
-/// caller must abort the request.
-pub(super) fn trim_padded_prefill<M: LanguageModel + ?Sized>(
-    model: &M,
-    seq_id: SequenceId,
-    caches: &mut [KVCache],
-    excess: i32,
-) -> Result<(), String> {
-    if excess <= 0 {
-        return Ok(());
-    }
-    for cache in caches.iter_mut() {
-        cache.trim(excess);
-    }
-    if model.sequence_state_layout().backend == SequenceStateBackend::ModelOwned {
-        model.trim_state(Some(seq_id), excess)?;
-    }
-    Ok(())
 }

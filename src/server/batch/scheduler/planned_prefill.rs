@@ -78,7 +78,8 @@ impl BatchScheduler {
         } else {
             PrefillInput::Tokens
         };
-        let caps = PrefillCaps::for_model(&self.model, should_align_prefill()).with_input(input);
+        let caps =
+            PrefillCaps::for_model(self.engine.model(), should_align_prefill()).with_input(input);
         PrefillPlan::with_prefix(
             seq.prompt_tokens.len(),
             seq.prefill_start_offset,
@@ -91,7 +92,7 @@ impl BatchScheduler {
     /// The padded length of a cold batched cohort whose longest row has
     /// `max_len` tokens: the plan's single piece for that row.
     pub(super) fn batched_prefill_padded_len(&self, max_len: usize) -> usize {
-        let caps = PrefillCaps::for_model(&self.model, should_align_prefill());
+        let caps = PrefillCaps::for_model(self.engine.model(), should_align_prefill());
         PrefillPlan::new(max_len, 0, caps)
             .pieces()
             .first()
@@ -134,8 +135,9 @@ impl BatchScheduler {
         // rewound (#1755). For pooled caches the cache's own offset is read,
         // because a `--max-kv-size` trim between pieces can leave it below
         // the cursor.
-        let kv_offset = if self.model.supports_batching() {
-            self.cache_pool
+        let kv_offset = if self.engine.model().supports_batching() {
+            self.engine
+                .pool_mut()
                 .get_caches_mut(seq.seq_id)
                 .ok_or_else(|| {
                     PieceFailure::Abort("Cache not found for sequence during prefill".into())
@@ -156,7 +158,7 @@ impl BatchScheduler {
             (tokens.to_vec(), None)
         };
         if continuation && !self.reserve_prefill_chunk_blocks(seq.seq_id, piece.padded_len) {
-            let total = self.cache_pool.paged_block_budget().unwrap_or_default();
+            let total = self.engine.pool().paged_block_budget().unwrap_or_default();
             return Err(PieceFailure::Abort(format!(
                 "KV cache budget exhausted: no free blocks in the {total}-block KV cache budget to continue the chunked prefill"
             )));
@@ -165,35 +167,28 @@ impl BatchScheduler {
         // #822: the forward is force-evaluated while `caches` still borrows
         // the cache pool, so the fallible outcome is captured here and acted
         // on once the borrow has ended.
-        let (logits, eval, trim) = {
-            let caches = self.cache_pool.get_caches_mut(seq.seq_id).ok_or_else(|| {
+        // The engine runs the piece: forward, then (for a non-terminal piece)
+        // the forced eval that releases its transients before the next piece's
+        // graph is built and fails just this request on an MLX throw (#822),
+        // then the pad trim so the next piece and decode begin at the correct
+        // cache offset. The terminal piece's logits are evaluated by the first
+        // sample in `finish_prefill`, exactly as the single-forward prefill
+        // always was.
+        let outcome = self
+            .engine
+            .prefill(&PrefillStep {
+                seq_id: seq.seq_id,
+                input: &input,
+                embeddings: None,
+                mask: pad_mask.as_ref().map(|m| m.as_ref().unwrap()),
+                last_pos: piece.last_real_pos(),
+                trim_excess: piece.trim_after().unwrap_or(0) as i32,
+                eval: !plan.is_terminal(piece),
+            })
+            .map_err(|_| {
                 PieceFailure::Abort("Cache not found for sequence during prefill".into())
             })?;
-            let logits = self.model.forward_last_logits_with_sequence_id(
-                &input,
-                Some(seq.seq_id),
-                caches,
-                pad_mask.as_ref().map(|m| m.as_ref().unwrap()),
-                piece.last_real_pos(),
-            );
-            // A non-terminal piece is evaluated here so its transients are
-            // released before the next piece's graph is built and so an MLX
-            // throw fails just this request (#822). The terminal piece's
-            // logits are evaluated by the first sample in `finish_prefill`,
-            // exactly as the single-forward prefill always was.
-            let eval = if plan.is_terminal(piece) {
-                Ok(())
-            } else {
-                mlxcel_core::try_eval(&logits).map_err(|e| e.to_string())
-            };
-            // Trim padding positions from KV caches (and from a model-owned
-            // family's own state) so the next piece and decode begin at the
-            // correct cache offset.
-            let trim = piece.trim_after().map_or(Ok(()), |excess| {
-                trim_padded_prefill(&self.model, seq.seq_id, caches, excess as i32)
-            });
-            (logits, eval, trim)
-        };
+        let (logits, eval, trim) = { (outcome.logits, outcome.eval, outcome.trim) };
         self.record_eval_outcome(eval)
             .map_err(PieceFailure::EvalFailed)?;
         // A pad trim that could not rewind the model's own state leaves its
@@ -286,8 +281,8 @@ impl BatchScheduler {
         .entered();
 
         // Reset internal caches for non-batching models (same as execute_full_prefill).
-        if !self.model.supports_batching() {
-            let _ = self.model.make_caches();
+        if !self.engine.model().supports_batching() {
+            let _ = self.engine.model().make_caches();
         }
         // Counter reflects only the work the model actually runs.
         self.batch_observability
@@ -316,8 +311,10 @@ impl BatchScheduler {
         // boundary segment plus one piece can already cover the prompt. Finish
         // now rather than park a sequence with nothing to continue (#179).
         if seq.prefill_offset >= seq.prompt_tokens.len() {
-            let eos_tokens =
-                merged_eos_token_ids(self.model.eos_token_ids(), &seq.sampling.stop_token_ids);
+            let eos_tokens = merged_eos_token_ids(
+                self.engine.model().eos_token_ids(),
+                &seq.sampling.stop_token_ids,
+            );
             let needs_history = seq.sampling.needs_token_history();
             let token_history = initial_token_history(&seq.prompt_tokens, needs_history);
             self.finish_prefill(seq, logits, eos_tokens, token_history, needs_history);
@@ -405,8 +402,10 @@ impl BatchScheduler {
         }
 
         // Final chunk -- complete the prefill and sample the first token
-        let eos_tokens =
-            merged_eos_token_ids(self.model.eos_token_ids(), &seq.sampling.stop_token_ids);
+        let eos_tokens = merged_eos_token_ids(
+            self.engine.model().eos_token_ids(),
+            &seq.sampling.stop_token_ids,
+        );
         let needs_history = seq.sampling.needs_token_history();
         let token_history = initial_token_history(&seq.prompt_tokens, needs_history);
 
