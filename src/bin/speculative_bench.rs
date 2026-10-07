@@ -406,7 +406,7 @@ fn run_baseline(target_dir: &Path, prompt: &str, max_tokens: usize) -> Result<(f
     let (tokens, stats): (Vec<i32>, GenerationStats) = (run.tokens, run.stats);
     mlxcel_core::synchronize_default();
     let elapsed = started.elapsed();
-    // `generate_with_stats` returns only the generated tokens (not the
+    // `DirectEngine::generate` returns only the generated tokens (not the
     // prompt prepended) in `tokens`, and `GenerationStats::generated_tokens`
     // carries the count internally. The wall-clock used for tok/s is the
     // `decode_time_ms` field of GenerationStats, which excludes the

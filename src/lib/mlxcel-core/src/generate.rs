@@ -299,9 +299,10 @@ pub trait LanguageModel {
     /// f16 plus a same-size `final_logit_softcapping` copy, none of which is
     /// needed to sample the first generated token (issue #672).
     ///
-    /// Used by: the single-sequence prefill in `generate_streaming` and
-    /// `generate_with_stats`. Verify/speculative/logprobs paths keep calling
-    /// [`Self::forward`] for full per-position logits.
+    /// Used by: the engine's prefill (`Engine::prefill`, through the
+    /// sequence-id variants), which every single-sequence decode runs.
+    /// Verify/speculative/logprobs paths keep calling [`Self::forward`] for
+    /// full per-position logits.
     fn forward_last_logits(
         &self,
         input_ids: &MlxArray,
