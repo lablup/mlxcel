@@ -1863,8 +1863,8 @@ impl LanguageModel for Llama4Wrapper {
     /// `ChunkedKVCache` / `KVCache` set and push `offset` past the real token
     /// count (issue #1335).
     ///
-    /// Lifting this means implementing `LanguageModel::trim_sequence_state` and
-    /// `trim_internal_caches` (issue #1755) with a rewind for `ChunkedKVCache`
+    /// Lifting this means implementing `LanguageModel::trim_state` for both
+    /// targets (issue #1755) with a rewind for `ChunkedKVCache`
     /// that also handles a pad tail crossing a chunk boundary.
     fn supports_padded_prefill(&self) -> bool {
         false

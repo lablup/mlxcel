@@ -385,8 +385,12 @@ impl LanguageModel for InklingVlModel {
         LanguageModel::restore_sequence_state(&self.text, seq_id, snapshot)
     }
 
-    fn trim_internal_caches(&self, excess: i32) {
-        LanguageModel::trim_internal_caches(&self.text, excess);
+    fn trim_state(
+        &self,
+        seq: Option<mlxcel_core::cache::SequenceId>,
+        excess: i32,
+    ) -> Result<(), String> {
+        LanguageModel::trim_state(&self.text, seq, excess)
     }
 }
 

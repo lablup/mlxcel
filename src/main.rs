@@ -1652,12 +1652,13 @@ pub(crate) struct ServeArgs {
     )]
     rerank_batch_size: usize,
 
-    /// Prefill chunk size in tokens (0 = disabled, default: 512)
+    /// Prefill chunk size in tokens (0 = disabled). Defaults to the shared
+    /// chunk policy: `MLXCEL_PREFILL_CHUNK`, else 2048 (ADR 0007).
     ///
-    /// When set, long prompts are broken into chunks of this size and
-    /// decode steps are interleaved between chunks to prevent latency
-    /// spikes for active sequences.
-    #[arg(long, default_value_t = 512)]
+    /// Long prompts are broken into chunks of this size and decode steps are
+    /// interleaved between chunks to prevent latency spikes for active
+    /// sequences.
+    #[arg(long, default_value_t = mlxcel_core::prefill_plan::prefill_chunk_len())]
     prefill_chunk_size: usize,
 
     /// Decode ticks a parked chunked prefill yields before it is granted one
@@ -1678,7 +1679,7 @@ pub(crate) struct ServeArgs {
     #[arg(long, value_name = "N")]
     prefill_grant_interval: Option<usize>,
 
-    /// Prefill batch size [llama-server alias for --prefill-chunk-size] [default: 512]
+    /// Prefill batch size [llama-server alias for --prefill-chunk-size] [default: 2048]
     #[arg(
         short = 'b',
         long = "batch-size",
@@ -1752,7 +1753,7 @@ pub(crate) struct ServeArgs {
     /// mask, an O(B*L^2) transient. This caps the drained window by total
     /// padded tokens (rows * L); rows past the budget prefill via the chunked
     /// single-sequence path. Unset derives `max_batch_prefill *
-    /// prefill_chunk_size * 2` (2 * 4 * 512 = 4096). `0` disables the cap. Env
+    /// prefill_chunk_size * 2` (2 * 4 * 2048 = 16384). `0` disables the cap. Env
     /// `MLXCEL_MAX_BATCH_PREFILL_TOKENS` overrides both.
     #[arg(long)]
     max_batch_prefill_tokens: Option<usize>,

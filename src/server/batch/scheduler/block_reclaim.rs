@@ -336,26 +336,13 @@ impl BatchScheduler {
         self.chunked_prefill_seq.as_ref().map_or(0, |seq| {
             let total = seq.prompt_tokens.len();
             let remaining = total.saturating_sub(seq.prefill_offset);
-            let pad =
-                next_chunked_prefill_range(total, seq.prefill_offset, self.prefill_chunk_size)
-                    .map_or(0, |range| {
-                        let len = range.end - range.start;
-                        self.prefill_write_len(len) - len
-                    });
+            let pad = self
+                .prefill_plan_for(seq)
+                .piece_starting_at(seq.prefill_offset)
+                .map_or(0, |piece| piece.pad_excess());
             self.cache_pool
                 .paged_blocks_to_append(seq.seq_id, remaining + pad)
         })
-    }
-
-    /// Positions a prefill chunk of `len` prompt tokens writes into the KV
-    /// cache: `len` rounded up to the neural-accelerator tile when the chunk
-    /// is padded (M5+ Metal), `len` otherwise.
-    pub(super) fn prefill_write_len(&self, len: usize) -> usize {
-        if self.model.supports_padded_prefill() && should_align_prefill() {
-            align_to_na_tile(len)
-        } else {
-            len
-        }
     }
 
     /// Paged blocks acquirable without reclaim once the parked chunked
@@ -371,7 +358,7 @@ impl BatchScheduler {
     /// chunk of `write_len` positions, right before its forward (issue
     /// #2088). Returns whether the chunk may run.
     ///
-    /// Called from `continue_chunked_prefill`, so it covers both ways a chunk
+    /// Called from `run_prefill_piece` for a continuation, so it covers both ways a chunk
     /// runs beside a live decode batch: the `MLXCEL_MIXED_STEP` tick, where
     /// the decode step has just run and may have left the pool below the
     /// chunk's reservation, and the #1011 prefill grant. A no-op returning

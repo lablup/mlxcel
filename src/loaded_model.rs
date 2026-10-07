@@ -543,16 +543,12 @@ impl LanguageModel for LoadedModel {
         delegate_language_model!(self, reset_runtime_state())
     }
 
-    fn trim_internal_caches(&self, excess: i32) {
-        delegate_language_model!(self, trim_internal_caches(excess))
-    }
-
-    fn trim_sequence_state(
+    fn trim_state(
         &self,
-        seq_id: mlxcel_core::cache::SequenceId,
+        seq: Option<mlxcel_core::cache::SequenceId>,
         excess: i32,
     ) -> Result<(), String> {
-        delegate_language_model!(self, trim_sequence_state(seq_id, excess))
+        delegate_language_model!(self, trim_state(seq, excess))
     }
 
     // #2159: the scheduler pipelines a model-owned family only through these

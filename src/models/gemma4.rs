@@ -6373,8 +6373,8 @@ impl LanguageModel for Gemma4Wrapper {
         // `model_owned` family has none there, so the pad positions would
         // stay in this model's own caches and push `offset` past the real
         // token count (issue #1335). Lifting it means implementing
-        // `LanguageModel::trim_sequence_state` and `trim_internal_caches` the
-        // way `Gemma3Wrapper` does (issue #1755).
+        // `LanguageModel::trim_state` for both targets the way `Gemma3Wrapper`
+        // does (issue #1755).
         false
     }
 }

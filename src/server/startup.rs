@@ -695,7 +695,7 @@ impl Default for ServerStartupConfig {
                 crate::server::config::DEFAULT_EMBEDDING_REQUEST_TIMEOUT_SECS,
             reranker_model_path: None,
             rerank_batch_size: crate::server::config::DEFAULT_RERANK_BATCH_SIZE,
-            prefill_chunk_size: 512,
+            prefill_chunk_size: mlxcel_core::prefill_plan::prefill_chunk_len(),
             batch_size_conflict: false,
             ubatch_size_provided: false,
             enable_preemption: false,

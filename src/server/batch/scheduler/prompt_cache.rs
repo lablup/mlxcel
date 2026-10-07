@@ -1022,8 +1022,8 @@ impl BatchScheduler {
         );
     }
 
-    /// Split this sequence's prefill at the history boundary and donate a
-    /// snapshot of the state at that point (issue #1143).
+    /// Donate a snapshot of `seq`'s model state at its history boundary, right
+    /// after the plan's boundary piece has run (issue #1143).
     ///
     /// ## Why a second snapshot exists at all
     ///
@@ -1041,37 +1041,32 @@ impl BatchScheduler {
     ///
     /// ## What this does
     ///
-    /// Runs one extra forward over `prompt_tokens[prefill_start_offset..
-    /// boundary]`, snapshots the model state there, inserts it, and advances
-    /// `prefill_start_offset` so the caller's normal prefill continues with the
-    /// remaining suffix. Total tokens forwarded are unchanged; the cost is one
-    /// additional graph launch plus the state copy.
-    ///
-    /// Returns `Err(msg)` only when the extra forward's eval threw, in which
-    /// case the caller must abort the sequence exactly as it does for its own
-    /// prefill eval failures. Every other decline (feature off, dense-KV
-    /// family, no boundary, boundary already covered by an adopted prefix)
-    /// returns `Ok(())` and leaves the sequence untouched, so the request
-    /// simply prefills the way it did before this issue.
+    /// The sequence's `PrefillPlan` (see [`Self::history_boundary_split`] and
+    /// `planned_prefill`) forwarded `prompt_tokens[prefill_start_offset..
+    /// boundary]` as one unpadded piece and synced the paged shadow; this
+    /// copies the model state at that point and inserts it. Total tokens
+    /// forwarded are unchanged; the cost is one additional graph launch plus
+    /// the state copy. Everything that could decline the split (feature off,
+    /// dense-KV family, no boundary, boundary already covered by an adopted
+    /// prefix, an embedding-bearing row) already left the plan without a
+    /// boundary, so the request simply prefills the way it did before #1143.
     ///
     /// ## Where this does not run
     ///
-    /// Only [`Self::execute_full_prefill`] and [`Self::start_chunked_prefill`]
-    /// call this. A `BatchedCold` cohort of two or more rows goes through
-    /// [`Self::run_padded_batched_prefill`], which forwards every row in one
-    /// pass and has no per-row split point, so those rows take no boundary
-    /// snapshot and their next turn misses. The same is true of the MTP
-    /// speculative burst.
+    /// A `BatchedCold` cohort of two or more rows goes through
+    /// `run_padded_batched_prefill`, which forwards every row in one pass and
+    /// has no per-row split point, so those rows take no boundary snapshot and
+    /// their next turn misses. The same is true of the MTP speculative burst.
     ///
     /// Left as a gap rather than fixed by marking boundary-eligible rows
-    /// non-cold in [`plan_prefill_cohorts`]: that would route essentially every
+    /// non-cold in `plan_prefill_cohorts`: that would route essentially every
     /// snapshot-family chat row to sequential prefill and give up batched
     /// prefill for the whole family, which costs more than the missed reuse.
     /// In practice the overlap is narrow, since a cohort only forms from rows
     /// whose prompts are exactly equal in length on the families that report
     /// `supports_padded_prefill() == false`. Every single-row and error
-    /// fallback in that function routes back through `execute_full_prefill`, so
-    /// the capture still happens there.
+    /// fallback in that function routes back through `execute_full_prefill`,
+    /// whose plan still carries the boundary.
     ///
     /// ## Not bit-exact, deliberately
     ///
@@ -1082,97 +1077,26 @@ impl BatchScheduler {
     /// deterministic across repeats. This is the documented #203 / #325 / #326
     /// jitter class, and it is already the status quo on this path for two
     /// other reasons: `--prefill-chunk-size` splits prefills the same way, and
-    /// any prompt-cache hit forwards only the suffix. An operator who needs the
-    /// unsplit shape sets `MLXCEL_DISABLE_BOUNDARY_SNAPSHOT=1` (see
+    /// any prompt-cache hit forwards only the suffix. The plan turns the
+    /// converse into a guarantee: a hit that adopts exactly this boundary
+    /// forwards the same suffix piece as the cold run and reproduces it bit for
+    /// bit (`PrefillPlan::reproduces`). An operator who needs the unsplit shape
+    /// sets `MLXCEL_DISABLE_BOUNDARY_SNAPSHOT=1` (see
     /// [`boundary_snapshot_disabled`]).
-    pub(super) fn capture_history_boundary_snapshot(
-        &mut self,
-        seq: &mut SequenceInfo,
-    ) -> Result<(), String> {
-        // The segment forward below covers `prompt_tokens[start..boundary]`, a
-        // strict prefix of the prompt, so it must resolve a whole-prompt RoPE
-        // table from the prompt and not from its own span. Both callers already
-        // announce; announcing here as well keeps the function correct on its
-        // own if a third caller ever appears.
-        let _span = self.announce_prefill_span(seq);
-        if !self.model.supports_snapshot_reuse() || !self.prompt_cache_active() {
-            return Ok(());
-        }
-        // Embedding-bearing rows feed `forward_with_embeddings` over the whole
-        // prompt at once and cannot be split at a token index.
-        if seq.vlm_embeddings.is_some() {
-            return Ok(());
-        }
-        // `take` rather than clone: this is the only consumer of the vector, so
-        // moving it out both avoids copying it and releases the map's copy for
-        // the rest of the request. The context itself is cloned afterwards for
-        // the key, which is cheap once the vector is gone.
-        let Some(boundary_tokens) = self
-            .prompt_cache_seq_ctx
-            .get_mut(&seq.seq_id)
-            .and_then(|c| c.history_prefix_tokens.take())
-        else {
-            return Ok(());
-        };
-        let boundary = boundary_tokens.len();
-        // Nothing to capture when an adopted prefix already reaches the
-        // boundary, and nothing to split when the boundary is the whole prompt
-        // (the suffix forward must stay non-empty so the sampler still sees
-        // fresh logits).
-        if !boundary_capture_applies(boundary, seq.prefill_start_offset, seq.prompt_tokens.len()) {
-            return Ok(());
-        }
-        // The vector was clipped to a common prefix at enqueue time; re-checking
-        // here keeps the snapshot/state correspondence a local invariant of this
-        // function rather than a cross-function assumption.
-        if seq.prompt_tokens[..boundary] != boundary_tokens[..] {
-            return Ok(());
-        }
-
-        let start = seq.prefill_start_offset;
+    pub(super) fn insert_history_boundary_snapshot(&mut self, seq: &SequenceInfo, boundary: usize) {
         let _span = tracing::info_span!(
-            "history_boundary_prefill",
+            "history_boundary_snapshot",
             seq_id = %seq.seq_id,
-            start,
+            start = seq.prefill_start_offset,
             boundary,
             prompt_len = seq.prompt_tokens.len(),
         )
         .entered();
-
-        // No NA-tile padding here: several snapshot-only families report
-        // `supports_padded_prefill() == false` because padding tokens corrupt
-        // their conv / SSM recurrent state, and a padded segment would make the
-        // captured state describe more tokens than the key claims.
-        let segment: Vec<i32> = seq.prompt_tokens[start..boundary].to_vec();
-        let segment_len = segment.len() as i32;
-        let input = mlxcel_core::from_slice_i32(&segment, &[1, segment_len]);
-        let eval = {
-            let caches = match self.cache_pool.get_caches_mut(seq.seq_id) {
-                Some(c) => c,
-                // Treated as a decline rather than an error: the caller's own
-                // prefill hits the same missing-cache condition immediately
-                // after and reports it with its own message.
-                None => return Ok(()),
-            };
-            // Evaluate only the final position, not the whole vocabulary
-            // projection for every history token. Large-vocabulary models can
-            // slice hidden states before their LM head through this hook.
-            let last = self.model.forward_last_logits_with_sequence_id(
-                &input,
-                Some(seq.seq_id),
-                caches,
-                None,
-                segment.len().saturating_sub(1),
-            );
-            mlxcel_core::try_eval(&last).map_err(|e| e.to_string())
-        };
-        self.record_eval_outcome(eval)?;
-        self.sync_sequence_storage(seq.seq_id);
-
         let ctx = match self.prompt_cache_seq_ctx.get(&seq.seq_id) {
             Some(c) => c.clone(),
-            None => return Ok(()),
+            None => return,
         };
+        let boundary_tokens = seq.prompt_tokens[..boundary].to_vec();
         let encoded_span = seq.prompt_tokens.len();
         self.insert_model_state_snapshot(
             seq.seq_id,
@@ -1181,34 +1105,18 @@ impl BatchScheduler {
             SnapshotOrigin::Boundary,
             encoded_span,
         );
-
-        // Return the segment's intermediates to the allocator before the
-        // caller's suffix forward runs, the same way `execute_full_prefill`
-        // clears after its own forward. Without this the segment's buffers stay
-        // resident through the rest of the prefill.
-        mlxcel_core::clear_memory_cache();
-
-        // Count the segment as prefill work so `total_prefill_tokens` still
-        // sums to the prompt: the caller records only the suffix it runs.
-        // Deliberately NOT `record_prefill_chunk()`: that counter is the
-        // dispatch proof for the issue #908 / #1011 mixed-step work, and a
-        // boundary segment is not a chunk the chunked-prefill loop scheduled.
-        self.batch_observability
-            .record_prefill_tokens(boundary - start);
-        seq.prefill_start_offset = boundary;
-        Ok(())
     }
 
-    /// The history boundary [`Self::capture_history_boundary_snapshot`] would
-    /// split `seq`'s prefill at, read without consuming it.
+    /// The history boundary `seq`'s `PrefillPlan` splits its prefill at
+    /// (issue #1143), read without consuming the context's history tokens so
+    /// the plan can be rebuilt on every tick of a chunked prefill.
     ///
-    /// A speculative burst bypasses the classic prefill, so it never runs that
-    /// capture. Gemma 4's row-wise MTP prefill splits its own forwards at the
-    /// returned boundary instead, which keeps its prompt KV built from the same
-    /// partition as the classic decode it must match byte for byte (#2160).
-    /// Same gates as the capture, in the same order; keep the two in step.
+    /// The classic scheduler plan and the Gemma 4 row-wise MTP prefill both
+    /// take their boundary from here, which keeps the MTP burst's prompt KV
+    /// built from the same partition as the classic decode it must match byte
+    /// for byte (#2160).
     ///
-    /// Used by: `start_mtp_slice_b1`, the B=1 MTP burst.
+    /// Used by: `prefill_plan_for`, `start_mtp_slice_b1`, the B=1 MTP burst.
     pub(super) fn history_boundary_split(&self, seq: &SequenceInfo) -> Option<usize> {
         if !self.model.supports_snapshot_reuse()
             || !self.prompt_cache_active()

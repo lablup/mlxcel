@@ -85,7 +85,7 @@ fn sample_input() -> ServerStartupInput {
         embedding_request_timeout_secs: 120,
         reranker_model_path: None,
         rerank_batch_size: 0,
-        prefill_chunk_size: 512,
+        prefill_chunk_size: mlxcel_core::prefill_plan::prefill_chunk_len(),
         prefill_grant_interval: None,
         batch_size: None,
         ubatch_size: None,
@@ -445,7 +445,8 @@ fn into_startup_config_propagates_image_limits() {
 
 #[test]
 fn resolve_prefill_chunk_size_batch_size_alias_takes_effect() {
-    let r = resolve_prefill_chunk_size(512, Some(1024), None);
+    let default = mlxcel_core::prefill_plan::prefill_chunk_len();
+    let r = resolve_prefill_chunk_size(default, Some(1024), None);
     assert_eq!(r.prefill_chunk_size, 1024);
     assert!(!r.batch_size_conflict);
     assert!(!r.ubatch_size_provided);
@@ -467,9 +468,10 @@ fn resolve_prefill_chunk_size_no_batch_size_returns_prefill() {
 
 #[test]
 fn resolve_prefill_chunk_size_ubatch_sets_provided_flag() {
-    let r = resolve_prefill_chunk_size(512, None, Some(256));
+    let default = mlxcel_core::prefill_plan::prefill_chunk_len();
+    let r = resolve_prefill_chunk_size(default, None, Some(256));
     assert!(r.ubatch_size_provided);
-    assert_eq!(r.prefill_chunk_size, 512);
+    assert_eq!(r.prefill_chunk_size, default);
 }
 
 #[test]

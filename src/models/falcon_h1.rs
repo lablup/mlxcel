@@ -1207,11 +1207,15 @@ impl LanguageModel for FalconH1Model {
         Ok(())
     }
 
-    fn trim_internal_caches(&self, excess: i32) {
+    fn trim_state(
+        &self,
+        seq: Option<mlxcel_core::cache::SequenceId>,
+        excess: i32,
+    ) -> Result<(), String> {
         if excess <= 0 {
-            return;
+            return Ok(());
         }
-        self.sequence_state.with_sequence_state(None, |internal| {
+        let trim = |internal: &mut [FalconH1LayerCache]| {
             for cache in internal.iter_mut() {
                 // KV cache trims positionally; the Mamba2 conv/ssm state is
                 // recurrent (computed from padding tokens), so reset it.
@@ -1219,6 +1223,15 @@ impl LanguageModel for FalconH1Model {
                 cache.mamba.conv_state = None;
                 cache.mamba.ssm_state = None;
             }
-        });
+        };
+        match seq {
+            None => {
+                self.sequence_state.with_sequence_state(None, trim);
+                Ok(())
+            }
+            Some(seq_id) => self
+                .sequence_state
+                .with_existing_sequence_state(seq_id, trim),
+        }
     }
 }

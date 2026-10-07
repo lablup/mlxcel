@@ -1662,11 +1662,15 @@ impl LanguageModel for GraniteMoeHybridModel {
         Ok(())
     }
 
-    fn trim_internal_caches(&self, excess: i32) {
+    fn trim_state(
+        &self,
+        seq: Option<mlxcel_core::cache::SequenceId>,
+        excess: i32,
+    ) -> Result<(), String> {
         if excess <= 0 {
-            return;
+            return Ok(());
         }
-        self.sequence_state.with_sequence_state(None, |internal| {
+        let trim = |internal: &mut [_]| {
             for cache in internal.iter_mut() {
                 match cache {
                     GraniteMoeHybridLayerCache::Attention(kv) => {
@@ -1680,6 +1684,15 @@ impl LanguageModel for GraniteMoeHybridModel {
                     }
                 }
             }
-        });
+        };
+        match seq {
+            None => {
+                self.sequence_state.with_sequence_state(None, trim);
+                Ok(())
+            }
+            Some(seq_id) => self
+                .sequence_state
+                .with_existing_sequence_state(seq_id, trim),
+        }
     }
 }

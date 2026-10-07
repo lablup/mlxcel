@@ -39,7 +39,7 @@ impl RotatingKVCache {
     /// an `Err` and leaves the cache untouched.
     ///
     /// Used by: model-owned families' sequence-aware pad trim
-    /// (`LanguageModel::trim_sequence_state`), Gemma 3.
+    /// (`LanguageModel::trim_state`), Gemma 3.
     pub fn rewind_padded_prefill(&mut self, n: i32) -> Result<(), String> {
         if n < 0 {
             return Err(format!("rotating prefill rewind: negative count {n}"));
