@@ -68,6 +68,15 @@ fn to_vec_f32(arr: &MlxArray) -> Vec<f32> {
         .collect()
 }
 
+/// Bit patterns of `arr` widened to f32, for comparisons where NaN must count.
+///
+/// `f32` equality treats every NaN as unequal to itself, so two outputs that
+/// hold NaN in the same slot fail `assert_eq!` on their values even when they
+/// are the same bits. Comparing `to_bits` makes "identical" mean identical.
+fn to_bits_f32(arr: &MlxArray) -> Vec<u32> {
+    to_vec_f32(arr).into_iter().map(f32::to_bits).collect()
+}
+
 fn relative_rms(a: &[f32], b: &[f32]) -> f32 {
     assert_eq!(a.len(), b.len(), "outputs must have the same length");
     let mut num = 0.0f64;
@@ -219,6 +228,16 @@ fn batched_masked_rows_get_their_own_mask_row() {
 
     // Padded batched prefill: 3 tokens, mask `[B, 3, 3]`, row 1 masks its
     // first key so the two rows must not share a mask.
+    //
+    // Query 0 of row 1 is left with no unmasked key (key 0 by the row mask,
+    // keys 1 and 2 causally). That is deliberate: it is the row whose output
+    // depends most on which mask row it got. What a fully masked query yields
+    // is backend-defined. Metal's vector SDPA skips the masked keys and writes
+    // 0; on ROCm an array-masked SDPA at this head dim has no fused kernel and
+    // MLX's graph fallback softmaxes an all -inf row (-1e9 rounds to -inf in
+    // f16) into NaN. The batched and per-row paths run the same SDPA either
+    // way, so the comparison below is bitwise: the same NaN in the same slot is
+    // a match, a NaN on one side only is not.
     let (q, k, v) = step(&mut rng, 2, 3);
     let mut mask_data = vec![0.0f32; 2 * 3 * 3];
     for t in 0..3 {
@@ -249,7 +268,7 @@ fn batched_masked_rows_get_their_own_mask_row() {
 
     let mut caches: Vec<&mut KVCache> = vec![&mut c0, &mut c1];
     let got = attend_batched(&q, &k, &v, &mut caches, SCALE, Some(&mask));
-    assert_eq!(to_vec_f32(&got), to_vec_f32(&want));
+    assert_eq!(to_bits_f32(&got), to_bits_f32(&want));
 }
 
 #[test]
