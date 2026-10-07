@@ -45,7 +45,7 @@ thread_local! {
 /// process-wide `MLXCEL_LANG_BIAS_COUNTERS` setting, read once, decides.
 ///
 /// Used by: `sampling::apply_token_bias_stage`,
-/// `sampling::row_supports_fused_batch_except_bias`
+/// `sampling_row_step::RowSampler::fused_eligible`
 pub(crate) fn enabled() -> bool {
     if let Some(forced) = OVERRIDE.with(Cell::get) {
         return forced;

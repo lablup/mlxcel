@@ -3872,6 +3872,14 @@ pub mod loop_detection;
 // Public so that the server batch scheduler can perform step-level sampling.
 pub mod sampling;
 
+// The one per-row sampling step and its sampler-state lifecycle, shared by the
+// CLI decode loops and the server scheduler (#2169, ADR 0007).
+pub mod sampling_row_step;
+
+// The one token-bias composition (request bias, language bias, output
+// suppression) the CLI and the server both call once per request (#2169).
+pub mod sampling_token_bias;
+
 // The opt-in gate for the B9 pre-bias suppression counters, read once from
 // `MLXCEL_LANG_BIAS_COUNTERS`, plus the per-thread scoped override tests use
 // instead of mutating the environment (#2187).

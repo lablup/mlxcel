@@ -1029,17 +1029,16 @@ pub fn config_supports_fused_batch(config: &SamplingConfig) -> bool {
 /// [`apply_token_bias_rows`] call in the same chain position the per-row
 /// sampler uses: after the last-position slice, before [`apply_row_filters`].
 ///
-/// Used by: `BatchScheduler::batched_decode_fused_params` (the synchronous
-/// fused branch and the lookahead pipeline, both of which apply the bias)
+/// A thin delegate to [`crate::sampling_row_step::RowSampler::fused_eligible`]
+/// (#2169), which derives the answer from the per-row step's own stage list.
+/// That includes the B9 counters rule: while the pre-bias suppression
+/// counters are on, a biased config is not eligible, because only the per-row
+/// sampler reads the pre-bias argmax.
+///
+/// Used by: [`config_supports_fused_batch`],
+/// [`row_supports_fused_batch_except_bias`]
 pub fn config_supports_fused_batch_except_bias(config: &SamplingConfig) -> bool {
-    !config.needs_token_history()
-        && config.xtc_probability <= 0.0
-        // #1485: mirostat carries per-sequence feedback state and replaces
-        // the chain; the extended chain (dynatemp / min_keep / adaptive-p)
-        // needs per-row Rust filter arithmetic the fused dispatch has no
-        // parameters for. Both must take the per-row sampler.
-        && config.effective_mirostat() == 0
-        && !config.needs_extended_chain()
+    crate::sampling_row_step::RowSampler::fused_eligible(config)
 }
 
 /// Per-row eligibility for the batched fused fast path.
@@ -1073,10 +1072,10 @@ pub fn row_supports_fused_batch(
 /// [`row_supports_fused_batch`] for callers that apply the row's token bias
 /// themselves (see [`config_supports_fused_batch_except_bias`]).
 ///
-/// The opt-in `MLXCEL_LANG_BIAS_COUNTERS` suppression counters read the
-/// pre-bias argmax back to the host on every step, which the pipelined decode
-/// path cannot afford, so a biased row goes back to the per-row sampler while
-/// they are enabled. Unbiased rows are unaffected either way.
+/// The sampler-stage half, including the opt-in `MLXCEL_LANG_BIAS_COUNTERS`
+/// rule (a biased row goes back to the per-row sampler while they are on), is
+/// [`crate::sampling_row_step::RowSampler::fused_eligible`]; this adds the
+/// per-row obligations that are not sampler stages.
 ///
 /// Used by: `BatchScheduler::batched_decode_fused_params`
 pub fn row_supports_fused_batch_except_bias(
@@ -1085,10 +1084,7 @@ pub fn row_supports_fused_batch_except_bias(
     needs_token_override: bool,
     needs_per_token_payload: bool,
 ) -> bool {
-    if !config.token_bias.is_empty() && crate::lang_bias_counters::enabled() {
-        return false;
-    }
-    config_supports_fused_batch_except_bias(config)
+    crate::sampling_row_step::RowSampler::fused_eligible(config)
         && !needs_logit_mask
         && !needs_token_override
         && !needs_per_token_payload

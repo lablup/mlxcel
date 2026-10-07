@@ -1324,34 +1324,6 @@ impl BatchScheduler {
         mut token_history: Vec<i32>,
         needs_history: bool,
     ) {
-        // apply structured-output mask to the prefill logits
-        // before sampling the first token so the very first emitted token
-        // already conforms to the schema.
-        let logits_for_sampling = if let Some(constraint) = seq.structured.clone() {
-            // Read the vocab dimension from the prefill logits so the mask
-            // matches the sampler's vocabulary exactly.
-            let shape = mlxcel_core::array_shape(&logits);
-            let vocab = *shape.last().unwrap_or(&0) as usize;
-            match Self::apply_structured_mask(&constraint, mlxcel_core::copy(&logits), vocab) {
-                Ok(masked) => masked,
-                Err(msg) => {
-                    let _ = seq
-                        .response_tx
-                        .send(GenerateEvent::Error(format!("structured output: {msg}")));
-                    if let Err(err) = seq
-                        .state
-                        .transition_to(SequenceState::Finished(FinishReason::Error(msg)))
-                    {
-                        tracing::error!("State transition error: {err}");
-                    }
-                    self.prompt_cache_seq_ctx.remove(&seq.seq_id);
-                    self.release_sequence_caches(seq.seq_id);
-                    return;
-                }
-            }
-        } else {
-            mlxcel_core::copy(&logits)
-        };
         // #347: reseed the global MLX RNG to THIS row's own seed at the exact
         // point it samples its first token. `begin_prefill` already seeded once,
         // but a batched cohort runs every row's `begin_prefill` up front before
@@ -1367,34 +1339,44 @@ impl BatchScheduler {
         // batched fused DECODE path shares one global-RNG draw across the whole
         // `[B, vocab]` batch and is out of scope here (see issue #347).
         seed_rng_if_needed(&seq.sampling);
-        let (first_token_arr, adjusted_logits, post_probs) = if seq.logprobs_config.enabled
-            && seq.logprobs_config.source == LogprobSource::PostSampling
-        {
-            // b10621 post_sampling_probs (#1485): one chain pass, one XTC
-            // gate, for both the draw and the report.
-            let (token, adjusted, probs) = sample_token_with_state_and_distribution(
-                &logits_for_sampling,
-                &seq.sampling,
-                &token_history,
-                &mut seq.sampler_state,
-            );
-            (token, adjusted, Some(probs))
-        } else if seq.sampling.needs_sampler_feedback_state() {
-            // #1485: mirostat / adaptive-p carry per-sequence state that the
-            // first sampled token must already update, so the stateful entry
-            // point runs here too (penalty-only rows keep the stateless
-            // rebuild path this call site always used).
-            let (token, adjusted) = sample_token_optimized_with_state(
-                &logits_for_sampling,
-                &seq.sampling,
-                &token_history,
-                &mut seq.sampler_state,
-            );
-            (token, adjusted, None)
-        } else {
-            let (token, adjusted) =
-                sample_token_optimized(&logits_for_sampling, &seq.sampling, &token_history);
-            (token, adjusted, None)
+        // The one per-row sampling step (#2169), under the same state rule as
+        // every decode step: the sequence's `RowSampler` already holds the
+        // state a penalty, mirostat or adaptive-p config needs, so the first
+        // token updates it too. The structured-output mask runs on the prefill
+        // logits before the chain, so the very first emitted token already
+        // conforms to the schema. b10621 post_sampling_probs (#1485): one chain
+        // pass, one XTC gate, for both the draw and the report.
+        let want_distribution = seq.logprobs_config.enabled
+            && seq.logprobs_config.source == LogprobSource::PostSampling;
+        let constraint = seq.structured.clone();
+        let mut mask = constraint.as_ref().map(StructuredMask);
+        let draw = seq.sampler.draw(
+            &logits,
+            &seq.sampling,
+            &token_history,
+            mask.as_mut().map(|m| m as &mut dyn LogitMask),
+            want_distribution,
+        );
+        let TokenDraw {
+            token: first_token_arr,
+            adjusted_logits,
+            distribution: post_probs,
+        } = match draw {
+            Ok(draw) => draw,
+            Err(msg) => {
+                let _ = seq
+                    .response_tx
+                    .send(GenerateEvent::Error(format!("structured output: {msg}")));
+                if let Err(err) = seq
+                    .state
+                    .transition_to(SequenceState::Finished(FinishReason::Error(msg)))
+                {
+                    tracing::error!("State transition error: {err}");
+                }
+                self.prompt_cache_seq_ctx.remove(&seq.seq_id);
+                self.release_sequence_caches(seq.seq_id);
+                return;
+            }
         };
         // #822: force-evaluate the first sampled token through the fallible
         // boundary. On an MLX throw, fail just this request; the infallible
@@ -1454,13 +1436,12 @@ impl BatchScheduler {
         // thinking-budget override. Qwen3 chat templates prime
         // `<think>\n`, so the first prefill-completion token is already
         // inside the reasoning block when `enter_block_on_start == true`.
-        let first_token = Self::apply_thinking_budget(&mut seq.thinking, sampled_first_token);
-
-        // #1485: confirm the emitted first token with the sampler feedback
-        // state (see the parallel comment in `execute_batched_decode`).
-        if let Some(state) = seq.sampler_state.as_mut() {
-            state.accept_token(first_token);
-        }
+        // #1485: `resolve` then confirms the emitted first token with the
+        // sampler feedback state (see the parallel comment in
+        // `execute_batched_decode`).
+        let (sampled_first_token, first_token) = seq.sampler.resolve(sampled_first_token, |t| {
+            Self::apply_thinking_budget(&mut seq.thinking, t)
+        });
 
         seq.mark_first_token();
 

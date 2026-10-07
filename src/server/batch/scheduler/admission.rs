@@ -203,49 +203,52 @@ impl BatchScheduler {
 
         let mut sampling = merge_config_stop_tokens(options.sampling.clone(), &self.config_eos);
 
-        // b10621 logit_bias (#1485): the resolved request-or-server biases
-        // merge into the sequence's token-bias map first, additively
-        // (upstream's logit-bias sampler applies entries additively), with
-        // string keys tokenized against this model's vocabulary exactly as
-        // upstream's `common_tokenize(vocab, text, false)` does. Applied
-        // BEFORE the lang-bias merge below, whose empty-map condition then
-        // treats a biased request as carrying its own policy.
+        // The request's effective token bias, composed once by the rule the
+        // CLI uses too (#2169, `compose_token_bias`; its module doc records
+        // the precedence).
+        //
+        // 1. Request bias. b10621 logit_bias (#1485): the resolved
+        //    request-or-server biases merge into the map the request
+        //    resolution placed on the sampling config, additively (upstream's
+        //    logit-bias sampler applies entries additively), with string keys
+        //    tokenized against this model's vocabulary exactly as upstream's
+        //    `common_tokenize(vocab, text, false)` does.
+        let mut request_bias = std::mem::take(&mut sampling.token_bias);
         if !options.logit_bias.is_empty() || !options.logit_bias_texts.is_empty() {
             for &(id, bias) in &options.logit_bias {
-                sampling.token_bias.accumulate(id, bias);
+                request_bias.accumulate(id, bias);
             }
             for (text, bias) in &options.logit_bias_texts {
                 if let Ok(ids) = self.tokenizer.encode_with_special(text, false, false) {
                     for id in ids {
-                        sampling.token_bias.accumulate(id as i32, *bias);
+                        request_bias.accumulate(id as i32, *bias);
                     }
                 }
             }
         }
 
-        // Axis B (B8): attach the scheduler-wide token bias to each sequence's
-        // sampling config when no per-request override is present. Empty
-        // cached bias = bit-exact baseline (the `is_empty()` short-circuit in
-        // `sample_token_optimized` keeps hot-path cost at zero).
+        // 2. Language bias. Axis B (B8): the scheduler-wide token bias applies
+        //    when the request carries no bias of its own and no per-request
+        //    runtime override is present. Phase 1 limitation: one policy per
+        //    batch; per-request overrides via the `/v1/chat/completions`
+        //    request body are deferred to B12.
+        // 3. Output suppression. issue #350: the model's reserved multimodal
+        //    placeholder tokens (audio / image / video span markers) are
+        //    forced to -inf last and unconditionally, so suppression always
+        //    wins over any bias and a placeholder id can never become the
+        //    sampled argmax.
         //
-        // Phase 1 limitation: one policy per batch. Per-request overrides
-        // via `/v1/chat/completions` request body are deferred to B12.
-        if use_worker_token_bias && !self.token_bias.is_empty() && sampling.token_bias.is_empty() {
-            sampling.token_bias = self.token_bias.clone();
-        }
-
-        // issue #350: force-suppress the model's reserved multimodal
-        // placeholder tokens (audio / image / video span markers) on every
-        // sequence's output logits. Applied after the lang-bias merge and
-        // unconditionally, so suppression always wins over any per-request
-        // bias and a placeholder id can never become the sampled argmax. A
-        // no-op (and zero alloc) for non-multimodal models whose suppressed
-        // set is empty.
-        if !self.model_output_suppressed.is_empty() {
-            sampling
-                .token_bias
-                .suppress_tokens(&self.model_output_suppressed);
-        }
+        // Every source empty = an empty map, the bit-exact baseline (the
+        // `is_empty()` short-circuit in the sampler keeps hot-path cost at
+        // zero).
+        let no_language_bias = TokenBiasMap::new();
+        let language_bias = if use_worker_token_bias {
+            &self.token_bias
+        } else {
+            &no_language_bias
+        };
+        sampling.token_bias =
+            compose_token_bias(request_bias, language_bias, &self.model_output_suppressed);
 
         // XTC (Exclude Top Choices) special-token allowlist: the tokenizer's
         // newline id(s) plus every id in this request's merged end-of-sequence
@@ -269,9 +272,10 @@ impl BatchScheduler {
         // model keeps generating until the token budget or a string stop.
         // Suppressing through the shared token-bias map reproduces that
         // exactly; the EOS stop check then never fires because the id can
-        // never be sampled. Opt-in only, so the common path stays bit-exact
-        // (and fused-batch eligible: a non-empty bias map already routes to
-        // the per-row sampler).
+        // never be sampled. Opt-in only, so the common path stays bit-exact.
+        // It stays outside `compose_token_bias` because the EOS set depends on
+        // the request's merged stop tokens; suppression is idempotent, so
+        // applying it after composition still wins over any bias.
         if options.ignore_eos {
             let eos = merged_eos_token_ids(self.model.eos_token_ids(), &sampling.stop_token_ids);
             sampling.token_bias.suppress_tokens(&eos);
@@ -518,6 +522,7 @@ impl BatchScheduler {
 
         let retention = self.resolve_sequence_retention(&options, &prompt_tokens);
 
+        let sampler = RowSampler::new(&sampling);
         let seq = SequenceInfo {
             retention,
             seq_id,
@@ -552,7 +557,7 @@ impl BatchScheduler {
             prefill_start: None,
             first_token_time: None,
             token_history: Vec::new(),
-            sampler_state: None,
+            sampler,
             merged_eos: Vec::new(),
             thinking,
             // forward the structured-output constraint built by
