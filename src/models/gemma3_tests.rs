@@ -880,7 +880,7 @@ mod cache_attend_entry {
         decode_steps: usize,
         label: &str,
     ) {
-        let mut rng = Rng(0x2172_7 | 1);
+        let mut rng = Rng(0x0002_1727 | 1);
         let (q, k, v) = rng.step(prefill);
         let (k2, v2) = (mlxcel_core::copy(&k), mlxcel_core::copy(&v));
         let a = got.attend(&q, k, v, SCALE, None);

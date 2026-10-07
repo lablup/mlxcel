@@ -41,9 +41,7 @@ use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::generation_policy::{
     initial_token_history, merged_eos_token_ids, seed_rng_if_needed,
 };
-use mlxcel_core::sampling::{
-    FusedSampleParams, TokenBiasMap, row_supports_fused_batch_except_bias,
-};
+use mlxcel_core::sampling::{FusedSampleParams, TokenBiasMap};
 use mlxcel_core::sampling_row_step::{LogitMask, RowSampler};
 use mlxcel_core::sampling_token_bias::compose_token_bias;
 use mlxcel_core::streams::{
@@ -746,24 +744,6 @@ struct DecodeLookahead {
     /// `[B]` device token-id array (uint32), one per `ids` entry, already
     /// scheduled with `async_eval`.
     tokens: UniquePtr<mlxcel_core::MlxArray>,
-}
-
-/// Copy a `[B]` device token-id array to host as `Vec<i32>`. `fused_sample`
-/// returns a row-contiguous `uint32` array; the raw bytes are reinterpreted as
-/// `i32`, exact for any token id in `0..vocab_size`.
-///
-/// Uses [`mlxcel_core::array_evaluated_bytes`] (surgical per-array `eval`, no
-/// `contiguous()` op) rather than `array_to_raw_bytes`: the steady pipeline has
-/// already scheduled the next forward on the same stream before this read, and
-/// `array_to_raw_bytes`' `contiguous()` would enqueue a fresh op behind that
-/// forward, making the read block on it and collapsing the overlap. This reader
-/// waits only on the token array's own completion event.
-fn lookahead_tokens_to_host(tokens: &mlxcel_core::MlxArray) -> Vec<i32> {
-    let bytes = mlxcel_core::array_evaluated_bytes(tokens);
-    bytes
-        .chunks_exact(4)
-        .map(|c| i32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
-        .collect()
 }
 
 /// Pure decision: may the lookahead pipeline stay engaged for the next tick?

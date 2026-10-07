@@ -30,7 +30,7 @@ use crate::ffi;
 use crate::generate::SamplingConfig;
 use crate::sampling::{
     FusedSampleParams, LogprobSource, LogprobsConfig, TokenBiasMap, TokenLogprobData,
-    batched_fused_sample_with_bias, compute_logprobs, compute_post_sampling_probs,
+    batched_fused_sample_tokens, compute_logprobs, compute_post_sampling_probs,
     row_supports_fused_batch_except_bias,
 };
 use crate::sampling_row_step::{LogitMask, RowSampler, TokenDraw};
@@ -55,8 +55,10 @@ pub trait StepRowHooks: FinishHooks {
     /// matcher failure that finishes the row with an error.
     fn consume_sampled(&mut self, sampled: i32) -> Result<bool, String>;
 
-    /// The emitted token is known (after the override, before the finish
-    /// step). A prefill completion stamps its first-token time here.
+    /// The emitted token is known and the matcher accepted the sampled one
+    /// (after the override and [`StepRowHooks::consume_sampled`], before the
+    /// finish step). A prefill completion stamps its first-token time here,
+    /// so a matcher failure reports its error without a first-token event.
     fn resolved(&mut self, _sampled: i32, _token: i32) {}
 
     /// The per-token logprob payload that rides the token's stream event,
@@ -137,22 +139,41 @@ impl RowOutcome {
     }
 }
 
-/// The shared fused parameters when every row can be sampled in one
-/// `[B, vocab] -> [B]` dispatch: all rows share the scalar parameters and
-/// none needs a history penalty, a mask, an override or a per-token payload.
-/// Token bias is folded into the logits, so a biased row stays eligible.
-pub fn fused_params<H: StepRowHooks>(rows: &[StepRow<'_, H>]) -> Option<FusedSampleParams> {
+/// What the fused-eligibility rule reads from one row: its sampling config
+/// and the per-row obligations that keep it on the per-row chain.
+#[derive(Debug, Clone, Copy)]
+pub struct FusedRowGate<'c> {
+    pub sampling: &'c SamplingConfig,
+    /// A structured-output mask runs on the row's logits.
+    pub needs_mask: bool,
+    /// A thinking-budget override may change the draw.
+    pub needs_override: bool,
+    /// The row streams a per-token logprobs payload.
+    pub logprobs_enabled: bool,
+}
+
+/// The one fused-eligibility rule, shared by [`Engine::step`](super::Engine::step)
+/// (through [`fused_params`]) and the scheduler's lookahead gate: the shared
+/// fused parameters when every row can be sampled in one `[B, vocab] -> [B]`
+/// dispatch, i.e. all rows share the scalar parameters and none needs a
+/// history penalty, a mask, an override or a per-token payload. Token bias is
+/// folded into the logits, so a biased row stays eligible. A `None` item (a
+/// row the caller could not resolve) or an empty iterator returns `None`.
+pub fn shared_fused_params<'c>(
+    rows: impl IntoIterator<Item = Option<FusedRowGate<'c>>>,
+) -> Option<FusedSampleParams> {
     let mut shared: Option<FusedSampleParams> = None;
-    for row in rows {
+    for gate in rows {
+        let gate = gate?;
         if !row_supports_fused_batch_except_bias(
-            row.sampling,
-            row.needs_mask,
-            row.needs_override,
-            row.logprobs.enabled,
+            gate.sampling,
+            gate.needs_mask,
+            gate.needs_override,
+            gate.logprobs_enabled,
         ) {
             return None;
         }
-        let params = FusedSampleParams::from_config(row.sampling);
+        let params = FusedSampleParams::from_config(gate.sampling);
         match shared {
             None => shared = Some(params),
             Some(first) if !first.matches(&params) => return None,
@@ -162,31 +183,59 @@ pub fn fused_params<H: StepRowHooks>(rows: &[StepRow<'_, H>]) -> Option<FusedSam
     shared
 }
 
+impl<H: StepRowHooks> StepRow<'_, H> {
+    /// This row's input to the fused-eligibility rule.
+    pub fn fused_gate(&self) -> FusedRowGate<'_> {
+        FusedRowGate {
+            sampling: self.sampling,
+            needs_mask: self.needs_mask,
+            needs_override: self.needs_override,
+            logprobs_enabled: self.logprobs.enabled,
+        }
+    }
+}
+
+/// [`shared_fused_params`] over a step's rows.
+pub fn fused_params<H: StepRowHooks>(rows: &[StepRow<'_, H>]) -> Option<FusedSampleParams> {
+    shared_fused_params(rows.iter().map(|row| Some(row.fused_gate())))
+}
+
 /// Sample and finish every row of `logits` (`[B, 1, vocab]`, one row per
 /// `rows` entry, in order).
 ///
-/// Takes the fused path when [`fused_params`] admits the batch, else the
-/// per-row chain: mask, draw, eval, override, logprobs, matcher, finish. The
-/// per-row chain is also what a batch of one runs.
+/// A batch of more than one row takes the fused path when [`fused_params`]
+/// admits it, else the per-row chain: mask, draw, eval, override, logprobs,
+/// matcher, finish. A batch of one always runs the per-row chain, the path
+/// the single-sequence decode has always taken.
+///
+/// Both paths evaluate the sampled tokens through the fallible boundary
+/// before reading them back (#822). The fused draw is one evaluation for the
+/// whole batch, so a throw there fails every row of it with
+/// [`RowError::Eval`]; the per-row chain fails only the row that threw.
 pub fn sample_and_finish<H: StepRowHooks>(
     logits: &MlxArray,
     rows: &mut [StepRow<'_, H>],
 ) -> Vec<RowOutcome> {
-    if let Some(params) = fused_params(rows) {
-        let biases: Vec<&TokenBiasMap> = rows.iter().map(|r| &r.sampling.token_bias).collect();
-        let tokens = batched_fused_sample_with_bias(logits, &params, &biases);
+    if rows.len() > 1
+        && let Some(params) = fused_params(rows)
+    {
+        let tokens = batched_fused_sample_tokens(logits, &params, &row_biases(rows));
+        if let Err(err) = crate::try_eval(&tokens) {
+            let msg = err.to_string();
+            return rows
+                .iter()
+                .map(|row| RowOutcome::failed(row.seq_id, RowError::Eval(msg.clone())))
+                .collect();
+        }
         return rows
             .iter_mut()
-            .zip(tokens)
+            .zip(tokens_to_host(&tokens))
             .map(|(row, token)| finish_row(row, token, token, None, false))
             .collect();
     }
     rows.iter_mut()
         .enumerate()
-        .map(|(i, row)| {
-            let row_logits = ffi::slice(logits, &[i as i32, 0, 0], &[i as i32 + 1, 1, i32::MAX]);
-            sample_and_finish_row(&row_logits, row)
-        })
+        .map(|(i, row)| sample_and_finish_row(&row_logits(logits, i), row))
         .collect()
 }
 
@@ -233,7 +282,6 @@ pub fn sample_and_finish_row<H: StepRowHooks>(
     let (sampled, token) = row
         .sampler
         .resolve(sampled, |t| row.hooks.override_token(t));
-    row.hooks.resolved(sampled, token);
     let logprobs = if token == sampled {
         match row.logprobs.source {
             LogprobSource::PostSampling => distribution
@@ -254,6 +302,7 @@ pub fn sample_and_finish_row<H: StepRowHooks>(
         Ok(stopped) => stopped,
         Err(msg) => return RowOutcome::failed(row.seq_id, RowError::Structured(msg)),
     };
+    row.hooks.resolved(sampled, token);
     finish_row(row, sampled, token, logprobs, structured_stopped)
 }
 
@@ -299,7 +348,15 @@ pub fn row_biases<'r, H: StepRowHooks>(rows: &'r [StepRow<'_, H>]) -> Vec<&'r To
     rows.iter().map(|r| &r.sampling.token_bias).collect()
 }
 
-/// The `[B]` host tokens of a device-side draw.
+/// The `[B]` host tokens of a device-side fused draw: `fused_sample`
+/// returns a row-contiguous `uint32` array whose raw bytes are read as `i32`,
+/// exact for any token id in `0..vocab_size`.
+///
+/// Uses [`ffi::array_evaluated_bytes`] (a per-array `eval`, no `contiguous()`
+/// op) rather than `array_to_raw_bytes`: in the steady lookahead pipeline the
+/// next forward is already scheduled on the same stream before this read,
+/// and a fresh `contiguous()` op would queue behind it and collapse the
+/// overlap. This reader waits only on the token array's own completion.
 pub fn tokens_to_host(tokens: &MlxArray) -> Vec<i32> {
     ffi::array_evaluated_bytes(tokens)
         .chunks_exact(4)

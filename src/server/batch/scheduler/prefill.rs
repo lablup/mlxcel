@@ -905,10 +905,10 @@ impl BatchScheduler {
                 self.release_sequence_caches(seq.seq_id);
                 return;
             }
-            Some(RowError::Eval(msg)) => {
+            Some(RowError::Eval(mlx_msg)) => {
                 // #822: the first sampled token threw at the MLX boundary.
                 // Fail just this request and bump the backend health counter.
-                let _ = self.record_eval_outcome(Err(msg.clone()));
+                let msg = self.record_eval_failure(&mlx_msg);
                 self.abort_sequence(seq, &msg);
                 self.eval_failures_exhausted();
                 return;

@@ -554,10 +554,15 @@ impl BatchScheduler {
         let biases = biases?;
         let batch = StepBatch { seq_ids, input };
         match self.engine.submit(&batch, params, &biases) {
-            Ok(tokens) => Some(DecodeLookahead {
-                ids: seq_ids.to_vec(),
-                tokens,
-            }),
+            Ok(tokens) => {
+                // The schedule itself succeeded; the collect half evaluates
+                // the tokens through its own guard.
+                self.note_eval_success();
+                Some(DecodeLookahead {
+                    ids: seq_ids.to_vec(),
+                    tokens,
+                })
+            }
             Err(mlxcel_core::engine::EngineError::Eval(msg)) => {
                 // #822: the forward already appended one speculative KV
                 // position per sequence before the async schedule threw.
@@ -611,7 +616,7 @@ impl BatchScheduler {
         let next = self.prime_lookahead_with_input(seq_ids, &next_input, params);
 
         // Step 2: read step n's tokens to host (the sync point) and finish-check.
-        let toks = lookahead_tokens_to_host(&la.tokens);
+        let toks = mlxcel_core::engine::tokens_to_host(&la.tokens);
         let mut finishing = toks.len() != seq_ids.len();
         if !finishing {
             for (i, &seq_id) in seq_ids.iter().enumerate() {
@@ -806,41 +811,25 @@ impl BatchScheduler {
     /// row that needs per-row treatment returns `None`, which routes the caller
     /// to the unchanged per-row fallback loop.
     ///
-    /// The per-row obligations map onto the generic predicate
-    /// [`mlxcel_core::sampling::row_supports_fused_batch`] as: structured-output
-    /// mask -> `needs_logit_mask` (`seq.structured`); thinking-budget override
-    /// -> `needs_token_override` (`seq.thinking`); per-token logprobs ->
-    /// `needs_per_token_payload` (`seq.logprobs_config`).
+    /// This is the engine's own rule
+    /// ([`mlxcel_core::engine::shared_fused_params`]) over each row's
+    /// [`step_rows::fused_gate`], the same gate the engine's fused branch
+    /// reads through the step row, so the lookahead pipeline and the
+    /// synchronous step cannot disagree on which batches are fused. Token
+    /// bias is folded into the logits at both dispatch points, so a biased
+    /// row stays eligible (keeping it off the pipeline cost `ignore_eos` and
+    /// `logit_bias` requests 13% decode). A row that vanished from the batch
+    /// forces the per-row fallback, which carries its own missing-sequence
+    /// guards.
     pub(super) fn batched_decode_fused_params(
         &self,
         seq_ids: &[SequenceId],
     ) -> Option<FusedSampleParams> {
-        let mut shared: Option<FusedSampleParams> = None;
-        for &seq_id in seq_ids {
-            // A row that vanished from the batch forces the per-row fallback,
-            // which carries its own missing-sequence guards.
-            let seq = self.active_batch.get(seq_id)?;
-            // `_except_bias`: this scheduler folds every row's token bias into
-            // the logits itself (`row_token_biases` + `apply_token_bias_rows`)
-            // at both dispatch points, so a biased row no longer has to leave
-            // the fused path and, with it, the lookahead pipeline. That cost
-            // `ignore_eos` and `logit_bias` requests 13% decode.
-            if !row_supports_fused_batch_except_bias(
-                &seq.sampling,
-                seq.structured.is_some(),
-                !seq.thinking.is_disabled(),
-                seq.logprobs_config.enabled,
-            ) {
-                return None;
-            }
-            let params = FusedSampleParams::from_config(&seq.sampling);
-            match shared {
-                None => shared = Some(params),
-                Some(first) if !first.matches(&params) => return None,
-                Some(_) => {}
-            }
-        }
-        shared
+        mlxcel_core::engine::shared_fused_params(
+            seq_ids
+                .iter()
+                .map(|&seq_id| self.active_batch.get(seq_id).map(step_rows::fused_gate)),
+        )
     }
 
     /// Collect half of a pipelined step: `tokens[i]` is the id the engine's

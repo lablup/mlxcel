@@ -42,19 +42,30 @@ impl BatchScheduler {
     /// still live, so the raw `try_*` call is made inline there and its `Result`
     /// is handed to this method once the borrow has ended.
     pub(super) fn record_eval_outcome(&mut self, result: Result<(), String>) -> Result<(), String> {
-        self.consecutive_decode_eval_failures =
-            advance_eval_failure_count(self.consecutive_decode_eval_failures, result.is_ok());
         match result {
-            Ok(()) => Ok(()),
-            Err(mlx_msg) => {
-                tracing::error!(
-                    consecutive = self.consecutive_decode_eval_failures,
-                    threshold = MAX_CONSECUTIVE_EVAL_FAILURES,
-                    "MLX threw at the decode/prefill eval FFI boundary; failing the affected request(s) instead of aborting the process: {mlx_msg}"
-                );
-                Err(format!("inference backend error: {mlx_msg}"))
+            Ok(()) => {
+                self.consecutive_decode_eval_failures =
+                    advance_eval_failure_count(self.consecutive_decode_eval_failures, true);
+                Ok(())
             }
+            Err(mlx_msg) => Err(self.record_eval_failure(&mlx_msg)),
         }
+    }
+
+    /// #822: [`Self::record_eval_outcome`] for a known failure: bump the
+    /// counter, log the MLX message and return the request-facing error
+    /// (`inference backend error: {mlx_msg}`). The engine reports a row's
+    /// eval throw as `RowError::Eval` carrying the raw MLX message; this is
+    /// where it gets the same wording every other eval site sends.
+    pub(super) fn record_eval_failure(&mut self, mlx_msg: &str) -> String {
+        self.consecutive_decode_eval_failures =
+            advance_eval_failure_count(self.consecutive_decode_eval_failures, false);
+        tracing::error!(
+            consecutive = self.consecutive_decode_eval_failures,
+            threshold = MAX_CONSECUTIVE_EVAL_FAILURES,
+            "MLX threw at the decode/prefill eval FFI boundary; failing the affected request(s) instead of aborting the process: {mlx_msg}"
+        );
+        format!("inference backend error: {mlx_msg}")
     }
 
     /// #822: after an eval failure has been recorded and the affected

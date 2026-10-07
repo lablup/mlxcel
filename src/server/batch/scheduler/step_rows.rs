@@ -26,7 +26,7 @@
 use std::time::Instant;
 
 use mlxcel_core::FinishHooks;
-use mlxcel_core::engine::{RowError, RowOutcome, StepRow, StepRowHooks};
+use mlxcel_core::engine::{FusedRowGate, RowError, RowOutcome, StepRow, StepRowHooks};
 use mlxcel_core::sampling::TokenLogprobData;
 use mlxcel_core::sampling_row_step::LogitMask;
 
@@ -94,6 +94,21 @@ impl StepRowHooks for SequenceStepHooks<'_> {
     }
 }
 
+/// `seq`'s input to the engine's fused-eligibility rule
+/// ([`mlxcel_core::engine::shared_fused_params`]): a structured-output
+/// constraint needs the mask, an active thinking budget may override the draw
+/// and logprobs need a per-token payload. [`step_row`] reads its
+/// `needs_mask` / `needs_override` from here, so the lookahead gate and the
+/// engine's fused branch apply one rule.
+pub(crate) fn fused_gate(seq: &SequenceInfo) -> FusedRowGate<'_> {
+    FusedRowGate {
+        sampling: &seq.sampling,
+        needs_mask: seq.structured.is_some(),
+        needs_override: !seq.thinking.is_disabled(),
+        logprobs_enabled: seq.logprobs_config.enabled,
+    }
+}
+
 /// `seq` as the engine's step row. `first_token` marks a prefill completion.
 pub(crate) fn step_row<'s>(
     seq: &'s mut SequenceInfo,
@@ -101,6 +116,10 @@ pub(crate) fn step_row<'s>(
     context: ContextBound,
     first_token: bool,
 ) -> StepRow<'s, SequenceStepHooks<'s>> {
+    let (needs_mask, needs_override) = {
+        let gate = fused_gate(seq);
+        (gate.needs_mask, gate.needs_override)
+    };
     let SequenceInfo {
         seq_id,
         sampler,
@@ -150,8 +169,8 @@ pub(crate) fn step_row<'s>(
     };
     StepRow {
         seq_id: *seq_id,
-        needs_mask: constraint.is_some(),
-        needs_override: !hooks.thinking.is_disabled(),
+        needs_mask,
+        needs_override,
         sampler,
         sampling,
         token_history,
@@ -176,24 +195,31 @@ impl BatchScheduler {
     /// health counter, a failed one bumps it (#822), and a failed row is
     /// finished with its error. Returns `false` when the health counter is
     /// exhausted and the caller must stop.
+    ///
+    /// An eval failure carries the request-facing wording
+    /// [`Self::record_eval_failure`] gives every eval site: the stream sees
+    /// `inference backend: inference backend error: {mlx}` and the finish
+    /// reason `Error("inference backend error: {mlx}")`.
     pub(super) fn apply_row_outcomes(&mut self, outcomes: &[RowOutcome]) -> bool {
         for outcome in outcomes {
             match &outcome.error {
                 None => self.note_eval_success(),
-                Some(error) => {
-                    let eval = matches!(error, RowError::Eval(_));
-                    if eval {
-                        let _ = self.record_eval_outcome(Err(error.message().to_string()));
-                    }
+                Some(error @ RowError::Eval(mlx_msg)) => {
+                    let msg = self.record_eval_failure(mlx_msg);
                     Self::abort_sequence_with_error(
                         self.active_batch.get_mut(outcome.seq_id),
                         row_error_prefix(error),
-                        error.message(),
+                        &msg,
                     );
-                    if eval && self.eval_failures_exhausted() {
+                    if self.eval_failures_exhausted() {
                         return false;
                     }
                 }
+                Some(error) => Self::abort_sequence_with_error(
+                    self.active_batch.get_mut(outcome.seq_id),
+                    row_error_prefix(error),
+                    error.message(),
+                ),
             }
         }
         true

@@ -321,6 +321,68 @@ fn step_of_one_runs_the_single_row_forward() {
     assert_eq!(offset(&engine, id), 1);
 }
 
+/// A batch of one samples through the per-row chain even when its row is
+/// fused-eligible, so B=1 keeps the per-row `try_eval` guard (#822) and the
+/// sampler path the single-sequence decode always took. The chain is visible
+/// through `resolved`, which the fused path never calls.
+#[test]
+fn a_batch_of_one_runs_the_per_row_chain() {
+    let mut engine = engine();
+    let id = engine.open(SequenceSpec::default()).unwrap();
+    let mut row = Row::greedy(id);
+    let input = from_slice_i32(&[3], &[1, 1]);
+    let out = {
+        let mut views = [row.row()];
+        assert!(
+            fused_params(&views).is_some(),
+            "the row alone is fused-eligible"
+        );
+        engine
+            .step(
+                &StepBatch {
+                    seq_ids: &[id],
+                    input: &input,
+                },
+                &mut views,
+            )
+            .unwrap()
+    };
+    assert_eq!((out.rows[0].sampled, out.rows[0].token), (3, 3));
+    assert_eq!(row.hooks.resolved, vec![(3, 3)]);
+    assert_eq!(row.generated, vec![3]);
+}
+
+/// The shared eligibility rule: one ineligible or unresolved row, or rows
+/// with different scalar parameters, keep the whole batch off the fused
+/// draw; an empty batch has no shared parameters.
+#[test]
+fn shared_fused_params_needs_every_row() {
+    let greedy = SamplingConfig::greedy();
+    let gate = |sampling| FusedRowGate {
+        sampling,
+        needs_mask: false,
+        needs_override: false,
+        logprobs_enabled: false,
+    };
+    assert!(shared_fused_params([Some(gate(&greedy)), Some(gate(&greedy))]).is_some());
+    assert!(shared_fused_params([Some(gate(&greedy)), None]).is_none());
+    assert!(shared_fused_params(std::iter::empty::<Option<FusedRowGate<'_>>>()).is_none());
+    for obligation in 0..3 {
+        let mut g = gate(&greedy);
+        match obligation {
+            0 => g.needs_mask = true,
+            1 => g.needs_override = true,
+            _ => g.logprobs_enabled = true,
+        }
+        assert!(shared_fused_params([Some(gate(&greedy)), Some(g)]).is_none());
+    }
+    let warm = SamplingConfig {
+        temperature: 0.7,
+        ..SamplingConfig::greedy()
+    };
+    assert!(shared_fused_params([Some(gate(&greedy)), Some(gate(&warm))]).is_none());
+}
+
 #[test]
 fn step_of_many_runs_the_batched_forward_in_row_order() {
     let mut engine = engine();

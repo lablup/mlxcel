@@ -436,3 +436,44 @@ fn failed_rewind_fails_the_request() {
     }
     assert!(saw_error, "the client sees the error");
 }
+
+/// An engine row's eval failure (#822) reaches the client with the wording
+/// every other eval site uses: the stream sees `inference backend: inference
+/// backend error: {mlx}` and the sequence finishes with
+/// `Error("inference backend error: {mlx}")`, and the backend health counter
+/// advances.
+#[test]
+fn a_row_eval_failure_carries_the_backend_error_wording() {
+    let mut sched = scheduler(tiny_gemma3(), DecodeStorageBackend::Dense, true);
+    let rx = enqueue(&mut sched, 4, 0, 16);
+    while sched.active_batch.is_empty() {
+        assert!(tick(&mut sched), "the request is still running");
+    }
+    let seq_id = sched.active_batch.sequence_ids()[0];
+    let failures = sched.consecutive_decode_eval_failures;
+    let outcome = mlxcel_core::engine::RowOutcome {
+        seq_id,
+        sampled: 0,
+        token: 0,
+        finish: None,
+        error: Some(mlxcel_core::engine::RowError::Eval("boom".to_string())),
+    };
+    assert!(sched.apply_row_outcomes(&[outcome]));
+    assert_eq!(sched.consecutive_decode_eval_failures, failures + 1);
+    assert!(matches!(
+        sched.active_batch.get(seq_id).map(|s| &s.state),
+        Some(SequenceState::Finished(FinishReason::Error(msg)))
+            if msg == "inference backend error: boom"
+    ));
+    let errors: Vec<String> = rx
+        .try_iter()
+        .filter_map(|event| match event {
+            GenerateEvent::Error(msg) => Some(msg),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        errors,
+        vec!["inference backend: inference backend error: boom".to_string()]
+    );
+}

@@ -40,14 +40,15 @@ use crate::cache::{
 };
 use crate::decode_finish::FinishCause;
 use crate::generate::LanguageModel;
-use crate::sampling::{FusedSampleParams, TokenBiasMap, apply_row_filters, apply_token_bias_rows};
+use crate::sampling::{FusedSampleParams, TokenBiasMap, batched_fused_sample_tokens};
 use crate::{MlxArray, UniquePtr};
 
 pub mod rows;
 
 pub use rows::{
-    RowError, RowOutcome, StepRow, StepRowHooks, finish_row, fused_params, row_biases, row_logits,
-    sample_and_finish, sample_and_finish_row, tokens_to_host,
+    FusedRowGate, RowError, RowOutcome, StepRow, StepRowHooks, finish_row, fused_params,
+    row_biases, row_logits, sample_and_finish, sample_and_finish_row, shared_fused_params,
+    tokens_to_host,
 };
 
 /// A per-sequence engine failure.
@@ -180,10 +181,6 @@ impl<M: LanguageModel> Engine<M> {
         &self.model
     }
 
-    pub fn model_mut(&mut self) -> &mut M {
-        &mut self.model
-    }
-
     /// The pool, for admission accounting, detach and adopt, and handoff.
     pub fn pool(&self) -> &CachePool {
         &self.pool
@@ -194,7 +191,10 @@ impl<M: LanguageModel> Engine<M> {
     }
 
     /// Model and pool together, for callers that hand a sequence's caches to
-    /// a model hook (snapshot, restore, release).
+    /// a model hook (snapshot, restore, release) or restore a disaggregated
+    /// handoff into the pool. The model is shared, as from [`Engine::model`]:
+    /// forwards still belong to the engine entries, which the scheduler's
+    /// source guard (`prefill_span_coverage_tests`) enforces.
     pub fn parts_mut(&mut self) -> (&M, &mut CachePool) {
         (&self.model, &mut self.pool)
     }
@@ -260,7 +260,8 @@ impl<M: LanguageModel> Engine<M> {
     ///
     /// A batch of one runs the model's single-row forward, which is what the
     /// provided batched entry does at `b == 1` and what the measured B=1
-    /// throughput rests on; a larger batch runs the batched entry. After the
+    /// throughput rests on, and samples through the per-row chain; a larger
+    /// batch runs the batched entry and may take the fused draw. After the
     /// forward each row's model-owned storage is mirrored into the pool
     /// (`sync_sequence_storage`), and every row that continues advances its
     /// pool offset by one. `rows` must be the batch's rows in
@@ -300,21 +301,10 @@ impl<M: LanguageModel> Engine<M> {
             let _speculative = DecodeLookaheadAppendScope::enter();
             self.forward(batch)?
         };
-        let last_logits = crate::slice_last_logits(&logits);
-        // Token bias in the per-row sampler's chain position (after the
-        // slice, before the filters), then the same pre-fused row filters as
-        // the synchronous fused path, so the pipelined draw samples from the
-        // identical distribution.
-        let last_logits = apply_token_bias_rows(last_logits, biases);
-        let last_logits = apply_row_filters(last_logits, params);
-        let tokens = crate::fused_sample(
-            &last_logits,
-            params.temperature,
-            params.top_k,
-            params.top_p,
-            params.min_p,
-        );
-        crate::report_sampling_dispatch();
+        // The synchronous fused path's draw (token bias in the per-row
+        // sampler's chain position, then the pre-fused row filters), so the
+        // pipelined draw samples from the identical distribution.
+        let tokens = batched_fused_sample_tokens(&logits, params, biases);
         crate::try_async_eval(&tokens).map_err(|e| EngineError::Eval(e.to_string()))?;
         Ok(tokens)
     }

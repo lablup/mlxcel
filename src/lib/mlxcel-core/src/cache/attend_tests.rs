@@ -576,7 +576,7 @@ fn rotating_state(cache: &RotatingKVCache) -> (i32, i32, Vec<f32>, Vec<f32>) {
 
 #[test]
 fn rotating_attend_matches_update_and_fetch_plus_windowed_sdpa() {
-    let mut rng = Rng::new(0x2172_01);
+    let mut rng = Rng::new(0x0021_7201);
     let window = 6;
     let mut got = RotatingKVCache::new(window);
     let mut want = RotatingKVCache::new(window);
@@ -607,7 +607,7 @@ fn rotating_attend_matches_update_and_fetch_plus_windowed_sdpa() {
 
 #[test]
 fn rotating_attend_masked_step_matches_masked_sdpa() {
-    let mut rng = Rng::new(0x2172_02);
+    let mut rng = Rng::new(0x0021_7202);
     let mut got = RotatingKVCache::new(8);
     let mut want = RotatingKVCache::new(8);
     let (q, k, v) = step(&mut rng, 1, 3);
@@ -630,7 +630,7 @@ fn rotating_attend_masked_step_matches_masked_sdpa() {
 /// rows it overwrote and a teardown can unwind it exactly (#2182).
 #[test]
 fn rotating_attend_logs_the_speculative_writes_for_rewind() {
-    let mut rng = Rng::new(0x2172_03);
+    let mut rng = Rng::new(0x0021_7203);
     let mut cache = RotatingKVCache::new(4);
     cache.set_decode_undo_depth(DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS);
     let (q, k, v) = step(&mut rng, 1, 3);
@@ -665,7 +665,7 @@ fn rotating_attend_logs_the_speculative_writes_for_rewind() {
 /// log is cleared, and the earlier speculative write is no longer rewindable.
 #[test]
 fn rotating_multi_token_attend_clears_the_undo_log() {
-    let mut rng = Rng::new(0x2172_04);
+    let mut rng = Rng::new(0x0021_7204);
     let mut cache = RotatingKVCache::new(4);
     cache.set_decode_undo_depth(DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS);
     let (q, k, v) = step(&mut rng, 1, 3);
@@ -701,7 +701,7 @@ fn rotating_multi_token_attend_clears_the_undo_log() {
 
 #[test]
 fn chunked_attend_matches_update_and_fetch_plus_sdpa() {
-    let mut rng = Rng::new(0x2172_05);
+    let mut rng = Rng::new(0x0021_7205);
     let chunk = 8;
     let mut got = ChunkedKVCache::new(chunk);
     let mut want = ChunkedKVCache::new(chunk);
@@ -744,7 +744,7 @@ fn chunked_attend_matches_update_and_fetch_plus_sdpa() {
 
 #[test]
 fn batched_rows_over_rotating_caches_match_per_row_attend() {
-    let mut rng = Rng::new(0x2172_06);
+    let mut rng = Rng::new(0x0021_7206);
     let window = 6;
     let mut c0 = RotatingKVCache::new(window);
     let mut c1 = RotatingKVCache::new(window);
