@@ -514,29 +514,31 @@ impl MambaModel {
         let path = Path::new(model_path);
 
         // Load config
-        println!("[Mamba] Loading config...");
+        tracing::info!("[Mamba] Loading config...");
         let config_path = path.join("config.json");
         let config_str = std::fs::read_to_string(&config_path)?;
         let config_str = super::sanitize_config_json(&config_str);
         let mut config: MambaConfig = serde_json::from_str(&config_str)?;
         config.compute_time_step_rank();
-        println!(
+        tracing::info!(
             "[Mamba] Config loaded: {} layers, hidden_size={}, state_size={}",
-            config.num_hidden_layers, config.hidden_size, config.state_size
+            config.num_hidden_layers,
+            config.hidden_size,
+            config.state_size
         );
 
         // Load weights
-        println!("[Mamba] Loading weights from safetensors...");
+        tracing::info!("[Mamba] Loading weights from safetensors...");
         let weights = crate::models::load_text_weights(path, None)?;
 
         // Process weights (handle conv1d weight transpose)
         let weights = Self::sanitize_weights(weights, &config);
 
         // Build model
-        println!("[Mamba] Building model...");
+        tracing::info!("[Mamba] Building model...");
         let model = Self::from_weights(config.clone(), weights)?;
 
-        println!("[Mamba] Model loaded successfully");
+        tracing::info!("[Mamba] Model loaded successfully");
         Ok((model, config))
     }
 

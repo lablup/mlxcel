@@ -1544,14 +1544,14 @@ impl Qwen3NextModel {
         let model_dir = model_dir.as_ref();
 
         // Load config
-        println!("[Qwen3Next] Loading config...");
+        tracing::info!("[Qwen3Next] Loading config...");
         let config_path = model_dir.join("config.json");
         let config_str = std::fs::read_to_string(&config_path)
             .map_err(|e| format!("Failed to read config.json: {}", e))?;
         let config: Qwen3NextConfig = serde_json::from_str(&config_str)
             .map_err(|e| format!("Failed to parse config.json: {}", e))?;
 
-        println!(
+        tracing::info!(
             "[Qwen3Next] Config loaded: {} layers ({} full attention, {} linear attention, {} MoE)",
             config.num_hidden_layers,
             (0..config.num_hidden_layers)
@@ -1566,17 +1566,17 @@ impl Qwen3NextModel {
         );
 
         // Load weights
-        println!("[Qwen3Next] Loading weights...");
+        tracing::info!("[Qwen3Next] Loading weights...");
         let weights = crate::models::load_text_weights(model_dir, None)?;
 
         // Sanitize weights
         let weights = Self::sanitize_weights(weights, &config);
 
         // Build model
-        println!("[Qwen3Next] Building model...");
+        tracing::info!("[Qwen3Next] Building model...");
         let model = Self::from_weights(&weights, &config)?;
 
-        println!("[Qwen3Next] Model loaded successfully");
+        tracing::info!("[Qwen3Next] Model loaded successfully");
         Ok((model, config))
     }
 
