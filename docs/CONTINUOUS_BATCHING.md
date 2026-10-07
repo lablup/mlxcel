@@ -505,7 +505,14 @@ still run to completion inside one tick regardless of the flag. Concurrent
 speculative requests that share a prompt length, `max_tokens`, and sampling
 config can instead run as one B>1 batched burst, but that path is experimental
 and stays behind `MLXCEL_ENABLE_MTP_BATCH` (plus
-`MLXCEL_ENABLE_MTP_BATCH_RAGGED` for mixed prompt lengths).
+`MLXCEL_ENABLE_MTP_BATCH_RAGGED` for mixed prompt lengths). On the Gemma 4
+geometries whose MTP verify runs row by row (the 31B everywhere, the 12B on
+CUDA) the batched burst is decode-exact since issue #2190: each row is
+prefilled and verified through the B=1 calls and only the cache write is
+batched. It runs on CUDA for windows of up to 4 rows short enough that the
+sliding cache never compacts under a lagging row, and declines to classic
+decode otherwise; see
+[the GB10 record](benchmark_results/gemma4-mtp-batched-gb10-2026-10-07.md).
 
 A tick-cooperative slice spans the request's whole generation, so the single
 speculative slot would otherwise be held for that entire time. Since issue

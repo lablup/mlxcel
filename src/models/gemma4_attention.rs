@@ -184,7 +184,7 @@ impl super::Attention {
     /// The uniform `reshape -> norm -> transpose -> RoPE` chain, `[B, L, H*D]`
     /// in and `[B, H, L, D]` out: the compiled proportional chain on
     /// full-attention layers, the op-at-a-time chain otherwise.
-    fn head_branch(
+    pub(super) fn head_branch(
         &self,
         raw: &MlxArray,
         norm: &RMSNorm,

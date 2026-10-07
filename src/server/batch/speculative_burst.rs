@@ -1107,6 +1107,9 @@ pub(crate) struct BurstContext<'a> {
     /// The scheduler's context bound (#1472), applied by the burst stream's
     /// finish step exactly as classic decode applies it (#2168).
     pub(crate) context_bound: ContextBound,
+    /// The same split for each row of a batched window, in window order
+    /// (issue #2190); empty for B=1 bursts.
+    pub(crate) prefill_boundaries: Vec<Option<usize>>,
 }
 
 impl<'a> BurstContext<'a> {
@@ -1125,6 +1128,7 @@ impl<'a> BurstContext<'a> {
             prefill_chunk_size: self.prefill_chunk_size,
             prefill_boundary: self.prefill_boundary,
             context_bound: self.context_bound,
+            prefill_boundaries: self.prefill_boundaries.clone(),
         }
     }
 }
@@ -2488,6 +2492,67 @@ pub(crate) fn try_run_burst_batched(
     }
 }
 
+/// Largest batched MTP window the row-wise Gemma 4 geometries serve. A B>1
+/// verify there runs each row through the B = 1 calls, so a round costs about
+/// B single-row verifies; measured on GB10 (31B, issue #2190) that still beats
+/// classic batched decode at the widths up to this one.
+pub(crate) const ROW_WISE_MTP_MAX_BATCH: usize = 4;
+
+/// The window facts the row-wise batched MTP gate needs (issue #2190).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RowWiseBatchedWindow {
+    pub(crate) batch_size: usize,
+    pub(crate) max_prompt_len: usize,
+    pub(crate) max_tokens: usize,
+    pub(crate) block_size: usize,
+    /// The target's sliding window; zero when it has none.
+    pub(crate) sliding_window: usize,
+    /// Whether every per-layer cache is dense FP16, which the per-row prefill
+    /// stacking requires.
+    pub(crate) dense_fp16_caches: bool,
+    /// Whether this backend is one the batched win was measured on (CUDA, not
+    /// ROCm). The row-wise predicate also covers the 31B on Metal, where the
+    /// per-row batched verify has not been measured (#2158).
+    pub(crate) measured_backend: bool,
+}
+
+impl RowWiseBatchedWindow {
+    /// Why this window must decline to classic decode, or `None` when the
+    /// batched burst is decode-exact for it.
+    ///
+    /// The sliding cache compacts against the SHARED offset, so once it does,
+    /// a row lagging that offset has lost keys its own window needs and the
+    /// verify refuses the round mid-burst. The shared offset never passes
+    /// `max_prompt_len + block_size * (max_tokens + 1)`: every round emits at
+    /// least one token for every live row, so there are at most `max_tokens`
+    /// rounds, and a row that already finished still advances up to
+    /// `block_size` positions a round. Staying under the window plus the
+    /// rollback buffer keeps every round free of compaction.
+    pub(crate) fn decline_reason(&self) -> Option<&'static str> {
+        if !self.measured_backend {
+            return Some("row-wise batched MTP is measured on CUDA only");
+        }
+        if self.batch_size > ROW_WISE_MTP_MAX_BATCH {
+            return Some("window wider than the measured row-wise batched MTP win");
+        }
+        if !self.dense_fp16_caches {
+            return Some("per-row prefill stacking needs dense FP16 caches");
+        }
+        if self.sliding_window == 0 {
+            return None;
+        }
+        if self.max_prompt_len > self.sliding_window {
+            return Some("a prompt longer than the sliding window cannot be stacked");
+        }
+        let ceiling = self.sliding_window
+            + crate::models::gemma4_mtp_target::mtp_rotating_buffer_size(self.block_size) as usize;
+        let reach = self.max_prompt_len + self.block_size * (self.max_tokens + 1);
+        (reach > ceiling).then_some(
+            "the burst could pass the sliding rollback buffer, where lagging rows lose keys",
+        )
+    }
+}
+
 /// MTP batched burst — Gemma 4 / Gemma 4 VLM target (B > 1).
 ///
 /// Mirrors [`run_mtp_burst`] but drives [`MtpBatchedGenerator`] over the
@@ -2508,22 +2573,42 @@ fn run_mtp_burst_batched(
     }
     let batch_size = seqs.len();
 
-    // Used by: Gemma 4 text, VLM, and Unified targets. The startup probe
-    // validates a linear singleton, not a padded/batched reduction layout.
-    // A passing 31B probe must not enable the uncorrected batched path,
-    // even when MLXCEL_ENABLE_MTP_BATCH is explicitly enabled.
-    let requires_singleton = match ctx.model {
-        LoadedModel::Gemma4(wrapper) => wrapper.mtp_requires_linear_singleton(),
-        LoadedModel::Gemma4VLM(vlm) => vlm.text_model.mtp_requires_linear_singleton(),
-        LoadedModel::Gemma4Unified(unified) => unified.text_model.mtp_requires_linear_singleton(),
-        _ => false,
-    };
-    if requires_singleton {
-        tracing::debug!(
+    // Used by: Gemma 4 text, VLM, and Unified targets. On the row-wise
+    // geometries (31B everywhere, 12B on CUDA) the batched adapter verifies
+    // each row through the B = 1 calls and is decode-exact (issue #2190),
+    // but only inside the limits `RowWiseBatchedWindow` checks; any other
+    // window declines here, before drafter IO, so it never reaches a
+    // client-facing error mid-burst.
+    let row_wise = match ctx.model {
+        LoadedModel::Gemma4(wrapper) => Some(wrapper),
+        LoadedModel::Gemma4VLM(vlm) => Some(&vlm.text_model),
+        LoadedModel::Gemma4Unified(unified) => Some(&unified.text_model),
+        _ => None,
+    }
+    .filter(|wrapper| wrapper.mtp_requires_linear_singleton());
+    if let Some(wrapper) = row_wise {
+        let window = RowWiseBatchedWindow {
             batch_size,
-            "MTP batched dispatch declined: target exactness requires linear B=1 verification; falling back to classic decode"
-        );
-        return Err(BurstOutcome::DeclineToClassic);
+            max_prompt_len: seqs
+                .iter()
+                .map(|s| s.prompt_tokens.len())
+                .max()
+                .unwrap_or(0),
+            max_tokens: seqs.iter().map(|s| s.max_tokens).max().unwrap_or(0),
+            block_size,
+            sliding_window: wrapper.sliding_window_value(),
+            dense_fp16_caches: wrapper.speculative_caches_are_dense_fp16(),
+            // ROCm builds run MLX's GPU backend too but were not measured.
+            measured_backend: mlxcel_core::cuda_is_available() && !cfg!(feature = "rocm"),
+        };
+        if let Some(reason) = window.decline_reason() {
+            tracing::debug!(
+                batch_size,
+                reason,
+                "MTP batched dispatch declined for a row-wise Gemma 4 target; falling back to classic decode"
+            );
+            return Err(BurstOutcome::DeclineToClassic);
+        }
     }
 
     // HOIST: variant gate before any drafter IO.
@@ -2589,7 +2674,9 @@ fn run_mtp_burst_batched(
     let (tokens_per_row, decode_ms, recovered_drafter) = match ctx.model {
         LoadedModel::Gemma4(wrapper) => {
             let adapter =
-                Gemma4MtpBatchedTargetAdapter::new_with_block_size(wrapper, batch_size, block_size);
+                Gemma4MtpBatchedTargetAdapter::new_with_block_size(wrapper, batch_size, block_size)
+                    .with_prefill_chunk_size(ctx.prefill_chunk_size)
+                    .with_prefill_boundaries(ctx.prefill_boundaries.clone());
             drive_mtp_batched_generator(
                 adapter,
                 owned_drafter,
@@ -2601,7 +2688,9 @@ fn run_mtp_burst_batched(
         }
         LoadedModel::Gemma4VLM(vlm) => {
             let adapter =
-                Gemma4VLMtpBatchedTargetAdapter::new_with_block_size(vlm, batch_size, block_size);
+                Gemma4VLMtpBatchedTargetAdapter::new_with_block_size(vlm, batch_size, block_size)
+                    .with_prefill_chunk_size(ctx.prefill_chunk_size)
+                    .with_prefill_boundaries(ctx.prefill_boundaries.clone());
             drive_mtp_batched_generator(
                 adapter,
                 owned_drafter,
@@ -2614,7 +2703,9 @@ fn run_mtp_burst_batched(
         LoadedModel::Gemma4Unified(unified) => {
             let adapter = Gemma4UnifiedMtpBatchedTargetAdapter::new_with_block_size(
                 unified, batch_size, block_size,
-            );
+            )
+            .with_prefill_chunk_size(ctx.prefill_chunk_size)
+            .with_prefill_boundaries(ctx.prefill_boundaries.clone());
             drive_mtp_batched_generator(
                 adapter,
                 owned_drafter,
