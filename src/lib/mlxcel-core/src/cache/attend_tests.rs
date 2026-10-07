@@ -78,7 +78,15 @@ fn relative_rms(a: &[f32], b: &[f32]) -> f32 {
 }
 
 /// `(q, k, v)` for one step of `len` tokens over `batch` rows.
-fn step(rng: &mut Rng, batch: i32, len: i32) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+fn step(
+    rng: &mut Rng,
+    batch: i32,
+    len: i32,
+) -> (
+    UniquePtr<MlxArray>,
+    UniquePtr<MlxArray>,
+    UniquePtr<MlxArray>,
+) {
     (
         random_array(rng, &[batch, HEADS, len, DIM]),
         random_array(rng, &[batch, KV_HEADS, len, DIM]),
@@ -278,7 +286,10 @@ fn paged_cache_single_token_goes_through_the_pooled_entry() {
     );
     let b = reference(&mut baseline, &q, k2, v2, None);
     let rms = relative_rms(&to_vec_f32(&a), &to_vec_f32(&b));
-    assert!(rms < 2e-2, "paged decode diverged from the gather baseline: rms {rms}");
+    assert!(
+        rms < 2e-2,
+        "paged decode diverged from the gather baseline: rms {rms}"
+    );
     assert_eq!(paged.offset, 41);
     assert_eq!(baseline.offset, 41);
 

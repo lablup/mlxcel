@@ -59,9 +59,9 @@ use cxx::UniquePtr;
 
 use crate::cache::{KVCache, KVCacheMode};
 use crate::ffi::MlxArray;
+use crate::mla::MlaGeometry;
 use crate::mla::absorb::MlaAbsorbedProjections;
 use crate::mla::decode::absorbed_decode;
-use crate::mla::MlaGeometry;
 
 /// Bytes one token of the compressed-latent cache costs, per layer.
 ///

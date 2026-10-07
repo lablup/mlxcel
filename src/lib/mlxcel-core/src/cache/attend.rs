@@ -125,9 +125,12 @@ impl KVCache {
             if self.sparse_v_available() {
                 return self
                     .update_and_sparse_v_attention(q, new_keys, new_values, scale, mask)
-                    .expect("update_and_sparse_v_attention returned None despite sparse_v_available");
+                    .expect(
+                        "update_and_sparse_v_attention returned None despite sparse_v_available",
+                    );
             }
-            if turbo::sparse_v::turbo4_dequant_sdpa_enabled() && self.turbo4_dequant_sdpa_available()
+            if turbo::sparse_v::turbo4_dequant_sdpa_enabled()
+                && self.turbo4_dequant_sdpa_available()
             {
                 return self.update_and_turbo4_dequant_sdpa_attention(
                     q, new_keys, new_values, scale, mask,
@@ -136,9 +139,8 @@ impl KVCache {
             if turbo::sparse_v::turbo4_delegated_compressed_attention_enabled()
                 && self.turbo4_delegated_available()
             {
-                return self.update_and_turbo4_delegated_attention(
-                    q, new_keys, new_values, scale, mask,
-                );
+                return self
+                    .update_and_turbo4_delegated_attention(q, new_keys, new_values, scale, mask);
             }
         }
         let (cache_k, cache_v) = self.update_and_fetch(new_keys, new_values);

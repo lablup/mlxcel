@@ -19,9 +19,7 @@
 
 use mlxcel_core::cache::{BatchedAttentionMetadata, SequenceId};
 use mlxcel_core::generate::LanguageModel;
-use mlxcel_core::layers::{
-    FusedQKVLinear, KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear,
-};
+use mlxcel_core::layers::{FusedQKVLinear, KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::pipeline_hint;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -1027,14 +1025,9 @@ impl TransformerBlock {
 
         // Per-sequence attention still owns cache mutation, but positional
         // metadata and RoPE now stay on a batched path.
-        let attn_concat = self.self_attn.forward_split_attention(
-            &q,
-            &k,
-            &v,
-            caches,
-            &metadata,
-            mask,
-        );
+        let attn_concat = self
+            .self_attn
+            .forward_split_attention(&q, &k, &v, caches, &metadata, mask);
 
         // Batched output projection
         let attn_out = self.self_attn.o_proj.forward(&attn_concat);

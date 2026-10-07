@@ -950,7 +950,8 @@ impl LanguageModel for HeliumModel {
         batch_caches: &mut [&mut [KVCache]],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        self.inner.forward_batched_impl(input_ids, batch_caches, mask)
+        self.inner
+            .forward_batched_impl(input_ids, batch_caches, mask)
     }
 
     fn supports_batched_prefill(&self) -> bool {
