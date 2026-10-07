@@ -44,6 +44,9 @@ fn host_tokens(input_ids: &MlxArray) -> Vec<i32> {
 #[derive(Default)]
 struct CycleModel {
     forwards: RefCell<usize>,
+    /// Return a single position's logits for a multi-token input, as a model
+    /// that breaks the `[B, T, V]` contract would.
+    short_logits: bool,
 }
 
 impl LanguageModel for CycleModel {
@@ -64,6 +67,9 @@ impl LanguageModel for CycleModel {
         let mut logits = vec![0.0f32; tokens.len() * VOCAB];
         for (i, tok) in tokens.into_iter().enumerate() {
             logits[i * VOCAB + (tok + 1).rem_euclid(7) as usize] = 10.0;
+        }
+        if self.short_logits && shape[1] > 1 {
+            return ffi::from_slice_f32(&logits[..VOCAB], &[shape[0], 1, VOCAB as i32]);
         }
         ffi::from_slice_f32(&logits, &[shape[0], shape[1], VOCAB as i32])
     }
@@ -295,4 +301,88 @@ fn a_drafter_that_does_not_pipeline_stays_synchronous() {
     let (sync, _, sync_fwd) = drafted(true, &mut sync_drafter, &[2], 20, &greedy, Some(6));
     assert_eq!(piped, sync);
     assert_eq!(piped_fwd, sync_fwd);
+}
+
+/// A model whose verify forward returns fewer positions than it was given is
+/// an error from the round loop, not an out-of-range index.
+#[test]
+fn a_short_verify_forward_is_an_error_not_a_panic() {
+    let greedy = SamplingConfig::greedy();
+    let stochastic = SamplingConfig {
+        temperature: 0.8,
+        seed: Some(7),
+        ..SamplingConfig::greedy()
+    };
+    // Argmax-batched and per-position verification read the shape differently.
+    for sampling in [&greedy, &stochastic] {
+        let model = CycleModel {
+            short_logits: true,
+            ..CycleModel::default()
+        };
+        let mut client = DirectEngine::new(&model, 0).with_force_sync(true);
+        let id = client.open_sequence().unwrap();
+        let mut drafter = ScriptedDrafter::new(&[2], false);
+        let err = client
+            .speculate(
+                id,
+                &DirectRequest::text(&[0], 20, sampling),
+                sampling,
+                &mut drafter,
+                4,
+                |_| true,
+            )
+            .expect_err("the verify logits are one position short");
+        assert!(err.to_string().contains("unexpected logits shape"), "{err}");
+        client.close_sequence(id);
+    }
+}
+
+/// The same for a scoring window: the logits cover fewer positions than the
+/// window, so the gather would read past them.
+#[test]
+fn a_short_scoring_forward_is_an_error_not_a_panic() {
+    let model = CycleModel {
+        short_logits: true,
+        ..CycleModel::default()
+    };
+    let mut client = DirectEngine::new(&model, 0);
+    let err = client
+        .loglikelihoods(&[0, 1, 2, 3])
+        .expect_err("the scoring logits are short");
+    assert!(err.to_string().contains("unexpected logits shape"), "{err}");
+}
+
+#[test]
+fn logits_vocab_accepts_only_a_single_row_of_enough_positions() {
+    use super::direct::logits_vocab;
+    assert_eq!(logits_vocab(&[1, 4, 32], 4), Ok(32));
+    assert_eq!(logits_vocab(&[1, 5, 32], 4), Ok(32));
+    for bad in [
+        &[1, 3, 32][..],
+        &[2, 4, 32],
+        &[1, 4],
+        &[1, 4, 32, 1],
+        &[1, 4, 0],
+        &[],
+    ] {
+        assert!(logits_vocab(bad, 4).is_err(), "{bad:?}");
+    }
+}
+
+/// An EOS inside a verify block leaves the pool offset where the synchronous
+/// step does: the token that finishes the sequence is not committed.
+#[test]
+fn an_eos_inside_a_verify_block_leaves_the_offset_where_the_step_does() {
+    let stop = SamplingConfig {
+        stop_token_ids: vec![3],
+        ..SamplingConfig::greedy()
+    };
+    // The model continues 1, 2, 3; the drafter proposes [2, 3] after the
+    // first token, so the block ends on the stop id mid-verify.
+    let mut proposing = ScriptedDrafter::new(&[2], false);
+    let (verified, rounds, _) = drafted(true, &mut proposing, &[0], 20, &stop, None);
+    assert!(rounds.drafted_rounds > 0, "a block was verified");
+    let mut plain = ScriptedDrafter::new(&[], false);
+    let (stepped, _, _) = drafted(true, &mut plain, &[0], 20, &stop, None);
+    assert_eq!(verified, stepped);
 }

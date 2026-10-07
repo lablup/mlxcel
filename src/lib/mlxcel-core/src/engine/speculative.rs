@@ -28,12 +28,13 @@
 use std::time::Instant;
 
 use super::direct::{
-    DirectEngine, DirectEngineError, DirectRequest, DirectRun, delivers_to_callback,
+    DirectEngine, DirectEngineError, DirectRequest, DirectRun, delivers_to_callback, logits_vocab,
 };
 use super::direct_decode::{DecodeState, Teardown, single};
 use super::rows::{finish_row, sample_and_finish_row};
 use super::{Engine, EngineError, StepBatch};
 use crate::cache::{DecodeLookaheadAppendScope, SequenceId, can_trim_prompt_cache};
+use crate::decode_finish::FinishCause;
 use crate::drafter::{Drafter, DrafterError};
 use crate::ffi;
 use crate::generate::{GenerationStats, LanguageModel, SamplingConfig};
@@ -259,7 +260,6 @@ impl<M: LanguageModel> DirectEngine<M> {
         }
         drafter.prefill_from_target_hidden(prompt_tokens, &logits, first.token, sampling)?;
         self.prepare_decode(id, max_tokens);
-        let _decode_budget = crate::DecodeCommandBufferBudget::enter();
         let prefill_time = prefill_start.elapsed();
         crate::clear_memory_cache();
 
@@ -272,6 +272,12 @@ impl<M: LanguageModel> DirectEngine<M> {
         // in flight: that token is in the state as an uncommitted append and
         // `tokens` is the lazy draw of the one after it.
         let mut in_flight: Option<UniquePtr<MlxArray>> = None;
+        // The raised command-buffer input budget, held only while a pipelined
+        // plain round is in flight: it pays off where step n+1 is encoded
+        // while the device runs step n, and a synchronous plain step or a
+        // verify block loses the encode / execute overlap under it (the rule
+        // `decode` and the scheduler's `run_decode_tick` apply).
+        let mut decode_budget: Option<crate::DecodeCommandBufferBudget> = None;
         while !done {
             let current = state.last_token()?;
             // Never propose past `max_tokens`: every accepted proposal is
@@ -297,6 +303,9 @@ impl<M: LanguageModel> DirectEngine<M> {
                     &mut rounds,
                     &mut on_token,
                 )?;
+                if in_flight.is_none() {
+                    drop(decode_budget.take());
+                }
                 continue;
             }
             if draft.is_empty()
@@ -305,14 +314,19 @@ impl<M: LanguageModel> DirectEngine<M> {
                 && drafter.pipelines_plain_rounds()
             {
                 let input = ffi::from_slice_i32(&[current], &[1, 1]);
+                let guard = crate::DecodeCommandBufferBudget::enter();
                 match self.submit_lookahead(id, sampling, &input, params) {
                     Ok(tokens) => {
                         rounds.rounds += 1;
                         in_flight = Some(tokens);
+                        decode_budget = Some(guard);
                         continue;
                     }
                     // Decode the round synchronously instead.
-                    Err(err) => self.unwind_failed_submit(id, &err, 0, Teardown::Unwind)?,
+                    Err(err) => {
+                        drop(guard);
+                        self.unwind_failed_submit(id, &err, 0, Teardown::Unwind)?
+                    }
                 }
             }
             rounds.rounds += 1;
@@ -358,13 +372,21 @@ impl<M: LanguageModel> DirectEngine<M> {
                 .engine_mut()
                 .verify(id, &input)
                 .map_err(DirectEngineError::Step)?;
-            let vocab = ffi::array_shape(&logits)[2];
+            let vocab = logits_vocab(&ffi::array_shape(&logits), verify_len)
+                .map_err(DirectEngineError::Row)?;
             let greedy_targets = if batched_argmax {
                 let argmax = ffi::argmax_last_axis(&logits);
                 crate::try_eval(&argmax).map_err(|e| DirectEngineError::Row(e.to_string()))?;
-                Some(crate::drafter::dflash::materialize_argmax_i32_vec(
-                    &argmax, verify_len,
-                ))
+                let targets =
+                    crate::drafter::dflash::materialize_argmax_i32_vec(&argmax, verify_len);
+                if targets.len() != verify_len {
+                    return Err(DirectEngineError::Row(format!(
+                        "verify argmax returned {} tokens for {verify_len} positions",
+                        targets.len()
+                    ))
+                    .into());
+                }
+                Some(targets)
             } else {
                 None
             };
@@ -372,6 +394,7 @@ impl<M: LanguageModel> DirectEngine<M> {
             let before = state.generated.len();
             let mut accepted = 0usize;
             let mut stop = false;
+            let mut ended_on_eos = false;
             for pos in 0..verify_len {
                 let emitted_before = state.generated.len();
                 let outcome = match &greedy_targets {
@@ -395,6 +418,7 @@ impl<M: LanguageModel> DirectEngine<M> {
                 }
                 if outcome.finish.is_some() {
                     stop = true;
+                    ended_on_eos = outcome.finish == Some(FinishCause::Eos);
                     break;
                 }
                 // The target's token is emitted either way; it only extends
@@ -415,7 +439,11 @@ impl<M: LanguageModel> DirectEngine<M> {
             self.engine_mut()
                 .unwind_appends(id, rejected)
                 .map_err(DirectEngineError::Step)?;
-            self.engine_mut().commit_appends(id, accepted as i32 + 1);
+            // A step does not advance the pool offset for the token that
+            // finishes the sequence on an EOS, so the EOS slot is not
+            // committed here either.
+            let committed = accepted as i32 + i32::from(!ended_on_eos);
+            self.engine_mut().commit_appends(id, committed);
             let emitted = &state.generated[before..];
             drafter.accept_verified_tokens(&logits, &draft, accepted, emitted, sampling)?;
             if crate::memory::should_clear_cache_at(

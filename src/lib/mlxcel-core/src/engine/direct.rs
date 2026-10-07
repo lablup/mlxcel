@@ -51,6 +51,21 @@ use crate::sampling_row_step::LogitMask;
 use crate::streams::{install_thread_local_default_stream, shared_thread_local_generation_stream};
 use crate::{MlxArray, UniquePtr};
 
+/// The vocabulary width of `[1, T, vocab]` logits, checked rather than
+/// indexed: a model that returns another rank, a wider batch, or fewer than
+/// `positions` positions is reported instead of panicking in a release
+/// build. `positions` is how many leading positions the caller reads.
+pub(super) fn logits_vocab(shape: &[i32], positions: usize) -> Result<i32, String> {
+    match shape {
+        &[1, t, vocab] if vocab > 0 && usize::try_from(t).is_ok_and(|t| t >= positions) => {
+            Ok(vocab)
+        }
+        _ => Err(format!(
+            "unexpected logits shape {shape:?}, wanted [1, >= {positions}, vocab]"
+        )),
+    }
+}
+
 /// Whether a row outcome's token reaches a streaming callback: the finish
 /// step appended it (so not an EOS) and it is not the looping token a
 /// repetition loop withholds, which stays in the stream but is not streamed.
@@ -647,8 +662,8 @@ impl<M: LanguageModel> DirectEngine<M> {
         // in fp32 (fp16 underflows on extreme negative logits) and gather each
         // position's next token.
         let logits_shape = crate::ffi::array_shape(&logits);
-        debug_assert_eq!(logits_shape.len(), 3, "forward must return [B, T, V]");
-        let vocab = logits_shape[2];
+        let vocab =
+            logits_vocab(&logits_shape, actual_len - 1).map_err(DirectEngineError::PrefillEval)?;
         let context_logits =
             crate::ffi::slice(&logits, &[0, 0, 0], &[1, (actual_len - 1) as i32, vocab]);
         let context_f32 = crate::ffi::astype(&context_logits, crate::dtype::FLOAT32);
