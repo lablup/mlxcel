@@ -3,6 +3,7 @@
 #include "mlx/backend/rocm/device.h"
 #include <algorithm>
 #include <atomic>
+#include "mlx/backend/rocm/gemms/hipblaslt_gemm.h"
 #include "mlx/backend/rocm/utils.h"
 #include "mlx/backend/rocm/worker.h"
 #include "mlx/utils.h"
@@ -371,6 +372,10 @@ CommandEncoder::~CommandEncoder() {
   // Destructor path: a failed destroy has nowhere to go, and on a device that
   // has faulted every one of these returns the fault.
   release_inflight();
+  // The hipBLASLt workspace is keyed by stream handle; give it back before
+  // stream_ is destroyed so a later stream with the same handle value starts
+  // without a buffer a queued GEMM may still be reading (lablup/mlxcel#2200).
+  hipblaslt_release_stream_workspace(stream_);
   for (hipEvent_t ev : spare_events_) {
     (void)hipEventDestroy(ev);
   }

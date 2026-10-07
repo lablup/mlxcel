@@ -15,6 +15,12 @@ namespace mlx::core::rocm {
 // Returns true if hipBLASLt is available and usable on the current device.
 bool is_hipblaslt_available();
 
+// Frees the workspace buffer this file allocated for `stream`, if any, after
+// draining the stream. CommandEncoder's destructor calls it so a later stream
+// that reuses the handle value cannot inherit a buffer its predecessor is
+// still reading. Safe to call for a stream that never ran a hipBLASLt GEMM.
+void hipblaslt_release_stream_workspace(hipStream_t stream);
+
 void hipblaslt_gemm(
     CommandEncoder& encoder,
     bool transpose_a,
