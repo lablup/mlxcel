@@ -337,6 +337,12 @@ fn run_once(args: RunArgs) -> Result<()> {
         "[Generated {} tokens in {seconds:.2}s = {rate:.2} tok/s]",
         turn.result.completion_tokens
     );
+    if let Some(spec) = turn.result.speculative.as_ref() {
+        println!(
+            "[Speculative {:?}: {} rounds, {}/{} drafted tokens accepted]",
+            spec.draft_kind, spec.draft_rounds, spec.draft_n_accepted, spec.draft_n
+        );
+    }
     server.shutdown()
 }
 

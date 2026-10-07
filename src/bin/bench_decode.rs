@@ -237,7 +237,7 @@ fn prepare_prompt(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let prepared = mlxcel::vlm_runtime::prepare_and_compute_vlm_embeddings(
+    let prepared = mlxcel::vlm_runtime::prepare_vlm_embeddings(
         model,
         &mut tokens,
         &prompt,

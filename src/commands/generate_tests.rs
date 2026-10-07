@@ -1067,7 +1067,7 @@ fn gemma3_vlm_config() -> serde_json::Value {
 
 #[test]
 fn cli_video_fallback_declines_native_and_text_only_checkpoints() {
-    // A native video family keeps its clip so `compute_vlm_embeddings` routes
+    // A native video family keeps its clip so `prepare_local_vlm_embeddings` routes
     // it to the family's own temporal path, and a checkpoint with no vision
     // tower has nowhere to send frames. Neither reaches ffmpeg, which is why
     // this test needs none.
@@ -1172,7 +1172,7 @@ fn cli_video_fallback_appends_frame_images_and_clears_video() {
     let first = clip_frames.frame_paths[0].clone();
 
     // What `run_generate_once` then does with it: the frames join `--image` and
-    // the video list empties, so `compute_vlm_embeddings` never sees a video.
+    // the video list empties, so `prepare_local_vlm_embeddings` never sees a video.
     let mut images: Vec<PathBuf> = vec![PathBuf::from("user-own.png")];
     let mut videos: Vec<PathBuf> = vec![clip.clone()];
     let (groups, frame_dir) = expansion.splice_into(&mut images, &mut videos);

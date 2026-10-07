@@ -41,9 +41,7 @@ use crate::tokenizer::MlxcelTokenizer;
 use crate::vision::feature_cache::ModelVisionCaches;
 use crate::vision::merge::InputEmbeddings;
 use crate::vision::processors::ImageProcessor;
-use crate::vlm_runtime::{
-    prepare_and_compute_vlm_embeddings_with_budget, prepare_and_compute_vlm_embeddings_with_cache,
-};
+use crate::vlm_runtime::{prepare_vlm_embeddings_with_budget, prepare_vlm_embeddings_with_cache};
 use crate::worker_failfast::run_core_thread_or_abort;
 
 use super::{GenerationResult, ModelRequest, StopKind};
@@ -1608,7 +1606,7 @@ pub(crate) fn prepare_request_vlm_embeddings(
     }
 
     // video inputs route to the Gemma 4 video embedding path,
-    // mirroring the CLI dispatch in `commands/generate_vlm.rs::compute_vlm_embeddings`.
+    // the dispatch `mlxcel generate` also reaches through `local_media` (#2173).
     // A request that carries both video and audio is merged only by Gemma 4
     // Unified (issue #1349); for every other family this branch is the backstop
     // behind `media_capability_rejection`. It is a backstop and not the only
@@ -1764,7 +1762,7 @@ pub(crate) fn prepare_request_vlm_embeddings(
                     ))
                 })
                 .collect();
-            prepare_and_compute_vlm_embeddings_with_cache(
+            prepare_vlm_embeddings_with_cache(
                 model,
                 prompt_tokens,
                 prompt,
@@ -1782,7 +1780,7 @@ pub(crate) fn prepare_request_vlm_embeddings(
                 },
             )?
         } else {
-            prepare_and_compute_vlm_embeddings_with_budget(
+            prepare_vlm_embeddings_with_budget(
                 model,
                 prompt_tokens,
                 prompt,

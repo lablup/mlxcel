@@ -88,7 +88,7 @@ fn greedy(model_dir: &std::path::Path) -> (Vec<i32>, Vec<i32>) {
     let images = vec![fixture_image()];
     let mut prompt_tokens: Vec<i32> = Vec::new();
 
-    let prepared = mlxcel::vlm_runtime::prepare_and_compute_vlm_embeddings(
+    let prepared = mlxcel::vlm_runtime::prepare_vlm_embeddings(
         &model,
         &mut prompt_tokens,
         "OCR: ",

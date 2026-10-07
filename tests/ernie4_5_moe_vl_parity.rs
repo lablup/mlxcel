@@ -143,7 +143,7 @@ fn debug_image_greedy_ids() {
         .collect();
     eprintln!("prompt ids (pre-splice): {prompt_tokens:?}");
 
-    let prepared = mlxcel::vlm_runtime::prepare_and_compute_vlm_embeddings(
+    let prepared = mlxcel::vlm_runtime::prepare_vlm_embeddings(
         &model,
         &mut prompt_tokens,
         "What color dominates this image?",
@@ -231,7 +231,7 @@ fn image_forward_produces_finite_logits() {
         .map(|&t| t as i32)
         .collect();
 
-    let prepared = mlxcel::vlm_runtime::prepare_and_compute_vlm_embeddings(
+    let prepared = mlxcel::vlm_runtime::prepare_vlm_embeddings(
         &model,
         &mut prompt_tokens,
         "User: What is in this image?\nAssistant:",

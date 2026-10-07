@@ -154,7 +154,7 @@ fn greedy_image_tokens(model_dir: &std::path::Path, max_tokens: usize) -> Vec<i3
         .map(|&id| id as i32)
         .collect();
 
-    let prepared = crate::vlm_runtime::prepare_and_compute_vlm_embeddings(
+    let prepared = crate::vlm_runtime::prepare_vlm_embeddings(
         &model,
         &mut prompt_tokens,
         IMAGE_PROMPT,

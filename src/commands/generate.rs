@@ -1017,7 +1017,7 @@ impl CliVideoFrames {
 
     /// Hand the frames to the run. They join `images` after the caller's own
     /// `--image` inputs, clip by clip, and `videos` empties so
-    /// `compute_vlm_embeddings` never sees a clip. Returns the per-clip layout
+    /// `prepare_local_vlm_embeddings` never sees a clip. Returns the per-clip layout
     /// the prompt renderer needs, in the same order, and the directory guard,
     /// which the caller holds until the vision tower has read the files.
     pub(crate) fn splice_into(
@@ -1044,7 +1044,7 @@ impl CliVideoFrames {
 ///
 /// `Ok(None)` for a family that consumes the clip itself, and for a request
 /// with no `--video` at all, so the native paths in
-/// `generate_vlm::compute_vlm_embeddings` keep seeing their video list. A
+/// `server::local_media::prepare_local_vlm_embeddings` keep seeing their video list. A
 /// checkpoint with no vision tower also returns `Ok(None)`: there is nowhere to
 /// send frames, and the refusal it already produces names that.
 ///
@@ -2835,7 +2835,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
     // `--layout-detections`, the Muse Glimmer guard) so none of them changes
     // meaning, and before the prompt is rendered so the template emits one
     // image placeholder per frame. On the fallback path
-    // `compute_vlm_embeddings` never sees a video: the clip is already an
+    // `prepare_local_vlm_embeddings` never sees a video: the clip is already an
     // ordered run of `--image` inputs by then. Each clip's lead sentence is
     // rendered immediately ahead of that clip's own frames, as the server does
     // (issue #1766). The frame directory lives until this function returns,
@@ -3152,17 +3152,20 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
             .map(mlxcel::vision::processors::gemma4::validate_image_soft_tokens)
             .transpose()
             .map_err(|err| anyhow::anyhow!("--image-soft-tokens: {err}"))?;
-        let vlm_embeddings = generate_vlm::compute_vlm_embeddings(
+        // The server's media preparation (issue #2173): the same per-family
+        // dispatch the model worker runs for a chat request with these bytes.
+        let vlm_embeddings = mlxcel::server::local_media::prepare_local_vlm_embeddings(
             &model,
-            &mut prompt_tokens,
-            &prompt,
-            &args.generation.image,
-            args.generation.audio.as_deref(),
-            &args.generation.video,
-            args.generation.fps,
             &tokenizer,
-            image_soft_tokens,
-            args.generation.no_chat_template,
+            &prompt,
+            &mut prompt_tokens,
+            mlxcel::server::local_media::LocalMedia {
+                images: &args.generation.image,
+                audio: args.generation.audio.as_deref(),
+                videos: &args.generation.video,
+                fps: args.generation.fps,
+                image_soft_tokens,
+            },
         )?;
         print_generation_preamble(&user_prompt)?;
         let generation = run_generation_mode(

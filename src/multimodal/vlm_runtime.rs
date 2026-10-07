@@ -1041,7 +1041,7 @@ where
         .collect()
 }
 
-pub fn prepare_and_compute_vlm_embeddings<E>(
+pub fn prepare_vlm_embeddings<E>(
     model: &LoadedModel,
     prompt_tokens: &mut Vec<i32>,
     prompt: &str,
@@ -1051,7 +1051,7 @@ pub fn prepare_and_compute_vlm_embeddings<E>(
 where
     E: FnMut(&str, bool) -> Vec<i32>,
 {
-    prepare_and_compute_vlm_embeddings_with_cache(
+    prepare_vlm_embeddings_with_cache(
         model,
         prompt_tokens,
         prompt,
@@ -1063,14 +1063,14 @@ where
     )
 }
 
-/// [`prepare_and_compute_vlm_embeddings`] with a per-request Gemma 4 image
+/// [`prepare_vlm_embeddings`] with a per-request Gemma 4 image
 /// soft-token budget.
 ///
 /// `image_soft_tokens = None` is identical to
-/// [`prepare_and_compute_vlm_embeddings`]. The budget must already have passed
+/// [`prepare_vlm_embeddings`]. The budget must already have passed
 /// [`crate::vision::processors::gemma4::validate_image_soft_tokens`]; every
 /// non-Gemma-4 family ignores it.
-pub fn prepare_and_compute_vlm_embeddings_with_budget<E>(
+pub fn prepare_vlm_embeddings_with_budget<E>(
     model: &LoadedModel,
     prompt_tokens: &mut Vec<i32>,
     prompt: &str,
@@ -1081,7 +1081,7 @@ pub fn prepare_and_compute_vlm_embeddings_with_budget<E>(
 where
     E: FnMut(&str, bool) -> Vec<i32>,
 {
-    prepare_and_compute_vlm_embeddings_with_cache(
+    prepare_vlm_embeddings_with_cache(
         model,
         prompt_tokens,
         prompt,
@@ -1123,7 +1123,7 @@ where
     Ok(())
 }
 
-/// Cache-aware wrapper for [`prepare_and_compute_vlm_embeddings`].
+/// Cache-aware wrapper for [`prepare_vlm_embeddings`].
 ///
 /// When `caches` is `Some`, the VLM runtime is invoked through its
 /// cache-aware variant. Cache keys (one per image for per-image VLM families
@@ -1140,7 +1140,7 @@ where
 /// [`crate::vision::feature_cache::image_hash_from_bytes_with_soft_tokens`]),
 /// because the cached vision features differ per budget.
 #[allow(clippy::too_many_arguments)]
-pub fn prepare_and_compute_vlm_embeddings_with_cache<E>(
+pub fn prepare_vlm_embeddings_with_cache<E>(
     model: &LoadedModel,
     prompt_tokens: &mut Vec<i32>,
     prompt: &str,
@@ -3475,7 +3475,7 @@ pub fn expand_nemotron_h_nano_omni_audio_tokens_for_server(
 /// Expand Nemotron H Nano Omni image placeholders for the server path.
 ///
 /// Mirrors the image-only runtime expansion in
-/// [`prepare_and_compute_vlm_embeddings`] (the `VlmRuntimeRef::NemotronHNanoOmni`
+/// [`prepare_vlm_embeddings`] (the `VlmRuntimeRef::NemotronHNanoOmni`
 /// arm) so a combined image + audio chat request produces the same image-token
 /// stream as an image-only request. When the text-only server prompt carries no
 /// `img_context_token_id` marker, one block per image is prepended; otherwise

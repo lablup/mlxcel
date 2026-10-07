@@ -45,6 +45,7 @@ pub mod infill;
 pub mod kimi_k3_chat;
 pub mod kokoro_tts;
 mod listen;
+pub mod local_media;
 pub mod logging;
 mod media;
 mod media_net;
