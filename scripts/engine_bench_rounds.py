@@ -37,6 +37,11 @@ at long context:
 
 --hostgate waits for a quiet host before every arm with the #1820 gate from
 docs/benchmark_results/data/sdpa-plan-bucket-gb10-2026-09-12/harness/.
+
+Every benchmark process runs under --run-timeout seconds (default 3600, 0
+disables it) so a hung model load or decode cannot stall a round forever. An
+arm name ending in -null is reserved for the generated null arms and is
+rejected.
 """
 import argparse
 import json
@@ -52,6 +57,8 @@ HOSTGATE_DIR = os.path.join(REPO, "docs", "benchmark_results", "data",
                             "sdpa-plan-bucket-gb10-2026-09-12", "harness")
 MARK = "[engine-bench] {"
 METRICS = ("ttft_ms", "decode_tok_s")
+NULL_SUFFIX = "-null"
+DEFAULT_RUN_TIMEOUT_S = 3600.0
 
 
 def parse_arm(spec):
@@ -59,6 +66,19 @@ def parse_arm(spec):
     if not sep or not name:
         raise argparse.ArgumentTypeError(f"--arm expects NAME=\"FLAGS\", got {spec!r}")
     return name, shlex.split(flags)
+
+
+def check_arm_names(names):
+    """Reject duplicate arm names and names that collide with a generated null
+    arm. A null arm is named `<source>-null`, so a user arm that ends in -null
+    would share its records and its summary row with it."""
+    if len(set(names)) != len(names):
+        raise SystemExit("arm names must be unique")
+    reserved = [n for n in names if n.endswith(NULL_SUFFIX)]
+    if reserved:
+        raise SystemExit(
+            f"arm name(s) {', '.join(reserved)} end in {NULL_SUFFIX!r}, which is reserved for "
+            "the generated null arms; rename them")
 
 
 def run_arm(a, name, flags, round_no, gate):
@@ -70,7 +90,15 @@ def run_arm(a, name, flags, round_no, gate):
            "--prompt-tokens", ",".join(str(p) for p in a.prompt_tokens),
            "--label", name] + flags + a.extra
     started = time.time()
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=a.run_timeout or None)
+    except subprocess.TimeoutExpired as exc:
+        for stream in (exc.stdout, exc.stderr):
+            if stream:
+                sys.stderr.write(stream if isinstance(stream, str) else stream.decode(errors="replace"))
+        raise SystemExit(f"arm {name} round {round_no} timed out after {a.run_timeout:g} s "
+                         "(raise --run-timeout if the run is expected to take longer)")
     if proc.returncode != 0:
         sys.stderr.write(proc.stdout + proc.stderr)
         raise SystemExit(f"arm {name} round {round_no} failed with exit {proc.returncode}")
@@ -137,19 +165,23 @@ def main():
     ap.add_argument("--hostgate", action="store_true", help="wait for a quiet host before each arm")
     ap.add_argument("--null-every-arm", action="store_true",
                     help="repeat every arm as its own null arm, not only the first")
+    ap.add_argument("--run-timeout", type=float, default=DEFAULT_RUN_TIMEOUT_S, metavar="SECONDS",
+                    help="kill and fail an arm whose benchmark process runs longer than this "
+                         f"(default {DEFAULT_RUN_TIMEOUT_S:g}, 0 disables)")
     ap.add_argument("--extra", default="", help='flags passed to every arm, e.g. --extra="--ignore-eos"')
     a = ap.parse_args()
     a.extra = shlex.split(a.extra)
+    if a.run_timeout < 0:
+        raise SystemExit("--run-timeout must be 0 or positive")
     names = [n for n, _ in a.arm]
-    if len(set(names)) != len(names):
-        raise SystemExit("arm names must be unique")
+    check_arm_names(names)
     gate = None
     if a.hostgate:
         sys.path.insert(0, HOSTGATE_DIR)
         import hostgate as gate  # noqa: E402
     flags_of = dict(a.arm)
     null_sources = names if a.null_every_arm else names[:1]
-    nulls = {f"{n}-null": n for n in null_sources}
+    nulls = {f"{n}{NULL_SUFFIX}": n for n in null_sources}
     records = []
     with open(a.out, "a") as out:
         header = {"kind": "header", "model": a.model, "bin": a.bin, "arms": dict(a.arm),

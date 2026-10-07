@@ -179,9 +179,14 @@ make bench-engine MODEL=models/mlx/qwen3-1.7b-4bit
 scripts/engine_bench_rounds.py --model models/mlx/qwen3-1.7b-4bit --rounds 5 \
     --null-every-arm --arm cli="--path cli" --arm server="--path server" \
     --out baseline-qwen.jsonl
+# Each benchmark process is killed after --run-timeout seconds (default 3600,
+# 0 disables). Arm names ending in -null are reserved for the generated null
+# arms and are rejected.
 
 # CLI vs server token parity (first divergent token per pair), same prompt and
-# SamplingConfig, B=1 dense and paged, MLXCEL_SDPA_DETERMINISTIC=1.
+# SamplingConfig, B=1 dense and paged, MLXCEL_SDPA_DETERMINISTIC=1. The prompt
+# must render to at least two tokens (one with --no-prompt-cache-case); an
+# empty or one-token prompt is rejected before any model loads.
 make engine-parity MODEL=models/mlx/qwen3-1.7b-4bit
 
 # Sampling step, no model attached. Gumbel-max (#900) covers the no-filter
