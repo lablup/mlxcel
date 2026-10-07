@@ -143,11 +143,15 @@ fn greedy_parity_mtp_gemma4_batched_matches_classic() {
         mlxcel_core::clear_memory_cache();
         let (loaded, tokenizer) = load_model(&target_path).expect("target model must load");
         let wrapper = gemma4_text_wrapper(&loaded);
-        assert!(
-            wrapper.mtp_requires_linear_singleton(),
-            "{} must be a row-wise geometry on this host",
-            pairing.name
-        );
+        if !wrapper.mtp_requires_linear_singleton() {
+            // The 12B is row-wise on CUDA only; elsewhere its batched verify is
+            // #1986's subject, not this test's.
+            eprintln!(
+                "Skipping {}: not a row-wise MTP geometry on this backend",
+                pairing.name
+            );
+            continue;
+        }
         let encode = |text: &str| -> Vec<i32> {
             tokenizer
                 .encode(text, true)
