@@ -49,6 +49,7 @@ mod lookahead;
 mod prefill;
 pub mod rows;
 mod speculative;
+mod speculative_plain;
 
 pub use direct::{BareHooks, DirectEngine, DirectEngineError, DirectRequest, DirectRun};
 pub use lookahead::{FORCE_SYNC_ENV, force_sync_requested, lookahead_feedback_input};
@@ -425,5 +426,7 @@ impl<M: LanguageModel> Engine<M> {
 
 #[cfg(test)]
 mod direct_decode_tests;
+#[cfg(test)]
+mod speculative_plain_tests;
 #[cfg(test)]
 mod tests;

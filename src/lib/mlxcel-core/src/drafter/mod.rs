@@ -991,6 +991,24 @@ pub trait Drafter {
         false
     }
 
+    /// Whether the token-only round loop may pipeline its next round without
+    /// a proposal: submit that one-token forward from the still-unread
+    /// target token, before the host knows it. The round after a pipelined
+    /// one cannot carry a proposal (its lookup ran on a context that lacked
+    /// the in-flight token), so a drafter says yes only when a proposal is
+    /// unlikely to be lost. Asked after a [`Self::draft_block`] that returned
+    /// nothing. The default never pipelines.
+    fn pipelines_plain_rounds(&self) -> bool {
+        false
+    }
+
+    /// The round loop asked [`Self::draft_block`] for a proposal but runs no
+    /// forward for that call (it reads the in-flight step instead and asks
+    /// again next round): undo whatever per-round accounting the call did.
+    /// The default keeps none.
+    #[allow(unused_variables)]
+    fn retract_draft(&mut self, draft: &[i32]) {}
+
     /// Extend a **stateful** MTP drafter's cache after a verify round.
     ///
     /// **Qwen 3.5 MTP only.** Called by the MTP round loop after the

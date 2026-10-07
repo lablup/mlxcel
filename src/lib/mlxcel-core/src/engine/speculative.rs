@@ -28,17 +28,16 @@
 use std::time::Instant;
 
 use super::direct::{
-    BareHooks, DirectEngine, DirectEngineError, DirectRequest, DirectRun, delivers_to_callback,
+    DirectEngine, DirectEngineError, DirectRequest, DirectRun, delivers_to_callback,
 };
+use super::direct_decode::{DecodeState, single};
 use super::rows::{finish_row, sample_and_finish_row};
-use super::{Engine, EngineError, StepBatch, StepRow};
+use super::{Engine, EngineError, StepBatch};
 use crate::cache::{DecodeLookaheadAppendScope, SequenceId, can_trim_prompt_cache};
 use crate::drafter::{Drafter, DrafterError};
 use crate::ffi;
 use crate::generate::{GenerationStats, LanguageModel, SamplingConfig};
-use crate::generation_policy::{initial_token_history, merged_eos_token_ids, seed_rng_if_needed};
-use crate::sampling::LogprobsConfig;
-use crate::sampling_row_step::RowSampler;
+use crate::generation_policy::{merged_eos_token_ids, seed_rng_if_needed};
 use crate::streams::install_thread_local_default_stream;
 use crate::{MlxArray, UniquePtr};
 
@@ -206,7 +205,7 @@ impl<M: LanguageModel> DirectEngine<M> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn speculate<F: FnMut(i32) -> bool>(
+    pub(super) fn speculate<F: FnMut(i32) -> bool>(
         &mut self,
         id: SequenceId,
         request: &DirectRequest<'_>,
@@ -228,38 +227,28 @@ impl<M: LanguageModel> DirectEngine<M> {
             return Err(SpeculativeRunError::NotTrimmable);
         }
         let eos = merged_eos_token_ids(self.model().eos_token_ids(), &sampling.stop_token_ids);
-        let needs_history = sampling.needs_token_history();
-        let mut history = initial_token_history(prompt_tokens, needs_history);
-        let mut generated: Vec<i32> = Vec::new();
-        let mut sampler = RowSampler::new(sampling);
-        let logprobs = LogprobsConfig::default();
+        let mut state = DecodeState::new(id, prompt_tokens, sampling, eos, max_tokens);
         let mut rounds = SpeculativeRounds::default();
         // Pure argmax with nothing that depends on the emitted prefix: every
         // verify position is decided from one batched argmax and a single
         // host read. Anything else goes position by position through the
         // per-row chain.
-        let batched_argmax =
-            sampling.is_greedy_path() && !needs_history && sampling.token_bias.is_empty();
+        let batched_argmax = sampling.is_greedy_path()
+            && !sampling.needs_token_history()
+            && sampling.token_bias.is_empty();
+        // Rounds without a proposal pipeline the way `generate` does, once
+        // the drafter says a run of them is due: the next one-token forward
+        // is submitted from the still-unread token, so the device does not
+        // idle while the host reads it and builds the next graph. Same
+        // eligibility as `generate`'s pipeline.
+        let pipeline = self.lookahead_params(id, sampling);
 
         let prefill_start = Instant::now();
         let logits = self.prefill_text(id, prompt_tokens)?;
         seed_rng_if_needed(sampling);
-        let first = {
-            let mut row = StepRow {
-                seq_id: id,
-                sampler: &mut sampler,
-                sampling,
-                token_history: &mut history,
-                generated: &mut generated,
-                eos: &eos,
-                max_tokens,
-                logprobs: &logprobs,
-                needs_mask: false,
-                needs_override: false,
-                hooks: BareHooks,
-            };
-            self.engine_mut().complete_prefill(&logits, &mut row)
-        };
+        let first = self
+            .engine_mut()
+            .complete_prefill(&logits, &mut state.row());
         if let Some(error) = first.error {
             return Err(DirectEngineError::FirstToken(error.message().to_string()).into());
         }
@@ -271,16 +260,18 @@ impl<M: LanguageModel> DirectEngine<M> {
 
         let decode_start = Instant::now();
         let mut done = first.finish.is_some();
-        if delivers_to_callback(&generated, 0, &first) && !on_token(first.token) {
+        if delivers_to_callback(&state.generated, 0, &first) && !on_token(first.token) {
             done = true;
         }
+        // `Some(tokens)` while the forward fed by the last emitted token is
+        // in flight: that token is in the state as an uncommitted append and
+        // `tokens` is the lazy draw of the one after it.
+        let mut in_flight: Option<UniquePtr<MlxArray>> = None;
         while !done {
-            let current = *generated
-                .last()
-                .ok_or_else(|| DirectEngineError::Row("decode without a token".into()))?;
+            let current = state.last_token()?;
             // Never propose past `max_tokens`: every accepted proposal is
             // emitted, and the round also emits one target token.
-            let remaining = max_tokens.saturating_sub(generated.len());
+            let remaining = max_tokens.saturating_sub(state.generated.len());
             let budget = block_size.min(remaining.saturating_sub(1));
             let draft = if budget == 0 {
                 Vec::new()
@@ -289,6 +280,36 @@ impl<M: LanguageModel> DirectEngine<M> {
                 draft.truncate(budget);
                 draft
             };
+
+            if in_flight.is_some() {
+                done = self.pipelined_plain_round(
+                    &mut state,
+                    &mut in_flight,
+                    &draft,
+                    budget > 0,
+                    pipeline.as_ref(),
+                    drafter,
+                    &mut rounds,
+                    &mut on_token,
+                )?;
+                continue;
+            }
+            if draft.is_empty()
+                && remaining > 1
+                && let Some(params) = pipeline.as_ref()
+                && drafter.pipelines_plain_rounds()
+            {
+                let input = ffi::from_slice_i32(&[current], &[1, 1]);
+                match self.submit_lookahead(id, sampling, &input, params) {
+                    Ok(tokens) => {
+                        rounds.rounds += 1;
+                        in_flight = Some(tokens);
+                        continue;
+                    }
+                    // Decode the round synchronously instead.
+                    Err(err) => self.unwind_failed_submit(id, &err, 0)?,
+                }
+            }
             rounds.rounds += 1;
 
             if draft.is_empty() {
@@ -298,36 +319,20 @@ impl<M: LanguageModel> DirectEngine<M> {
                     seq_ids: std::slice::from_ref(&id),
                     input: &input,
                 };
-                let before = generated.len();
-                let out = {
-                    let row = StepRow {
-                        seq_id: id,
-                        sampler: &mut sampler,
-                        sampling,
-                        token_history: &mut history,
-                        generated: &mut generated,
-                        eos: &eos,
-                        max_tokens,
-                        logprobs: &logprobs,
-                        needs_mask: false,
-                        needs_override: false,
-                        hooks: BareHooks,
-                    };
-                    self.engine_mut()
-                        .step(&batch, &mut [row])
-                        .map_err(DirectEngineError::Step)?
-                };
-                let outcome = out
-                    .rows
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| DirectEngineError::Row("step returned no row".into()))?;
+                let before = state.generated.len();
+                let out = self
+                    .engine_mut()
+                    .step(&batch, &mut [state.row()])
+                    .map_err(DirectEngineError::Step)?;
+                let outcome = single(out.rows)?;
                 if let Some(error) = outcome.error {
                     return Err(DirectEngineError::Row(error.message().to_string()).into());
                 }
-                let emitted = &generated[before..];
+                let emitted = &state.generated[before..];
                 drafter.accept_verified_tokens(&input, &[], 0, emitted, sampling)?;
-                if delivers_to_callback(&generated, before, &outcome) && !on_token(outcome.token) {
+                if delivers_to_callback(&state.generated, before, &outcome)
+                    && !on_token(outcome.token)
+                {
                     break;
                 }
                 done = outcome.finish.is_some();
@@ -359,43 +364,25 @@ impl<M: LanguageModel> DirectEngine<M> {
                 None
             };
 
-            let before = generated.len();
+            let before = state.generated.len();
             let mut accepted = 0usize;
             let mut stop = false;
             for pos in 0..verify_len {
-                let emitted_before = generated.len();
-                let outcome = {
-                    let mut row = StepRow {
-                        seq_id: id,
-                        sampler: &mut sampler,
-                        sampling,
-                        token_history: &mut history,
-                        generated: &mut generated,
-                        eos: &eos,
-                        max_tokens,
-                        logprobs: &logprobs,
-                        needs_mask: false,
-                        needs_override: false,
-                        hooks: BareHooks,
-                    };
-                    match &greedy_targets {
-                        Some(targets) => {
-                            finish_row(&mut row, targets[pos], targets[pos], None, false)
-                        }
-                        None => {
-                            let pos_logits = ffi::slice(
-                                &logits,
-                                &[0, pos as i32, 0],
-                                &[1, pos as i32 + 1, vocab],
-                            );
-                            sample_and_finish_row(&pos_logits, &mut row)
-                        }
+                let emitted_before = state.generated.len();
+                let outcome = match &greedy_targets {
+                    Some(targets) => {
+                        finish_row(&mut state.row(), targets[pos], targets[pos], None, false)
+                    }
+                    None => {
+                        let pos_logits =
+                            ffi::slice(&logits, &[0, pos as i32, 0], &[1, pos as i32 + 1, vocab]);
+                        sample_and_finish_row(&pos_logits, &mut state.row())
                     }
                 };
                 if let Some(error) = outcome.error {
                     return Err(DirectEngineError::Row(error.message().to_string()).into());
                 }
-                if delivers_to_callback(&generated, emitted_before, &outcome)
+                if delivers_to_callback(&state.generated, emitted_before, &outcome)
                     && !on_token(outcome.token)
                 {
                     stop = true;
@@ -424,10 +411,10 @@ impl<M: LanguageModel> DirectEngine<M> {
                 .unwind_appends(id, rejected)
                 .map_err(DirectEngineError::Step)?;
             self.engine_mut().commit_appends(id, accepted as i32 + 1);
-            let emitted = &generated[before..];
+            let emitted = &state.generated[before..];
             drafter.accept_verified_tokens(&logits, &draft, accepted, emitted, sampling)?;
             if crate::memory::should_clear_cache_at(
-                generated.len(),
+                state.generated.len(),
                 crate::memory::cache_clear_interval(),
             ) {
                 crate::clear_memory_cache();
@@ -436,6 +423,7 @@ impl<M: LanguageModel> DirectEngine<M> {
         }
         let decode_time = decode_start.elapsed();
 
+        let generated = state.generated;
         let prompt_count = prompt_tokens.len();
         let gen_count = generated.len();
         let prefill_ms = prefill_time.as_secs_f64() * 1000.0;

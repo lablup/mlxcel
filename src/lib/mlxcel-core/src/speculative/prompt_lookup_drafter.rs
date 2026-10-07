@@ -32,6 +32,20 @@ use crate::drafter::{Drafter, DrafterError, DrafterKind};
 use crate::generate::{LanguageModel, SamplingConfig};
 use crate::weights::WeightMap;
 
+/// Consecutive rounds without a proposal before the round loop pipelines.
+///
+/// A pipelined step is submitted before the host knows the token it follows,
+/// so it cannot carry a proposal: the first proposal after a pipelined run
+/// waits one step. Edits that miss for a token or two at each changed field
+/// (a JSON id, a renamed identifier) would pay that step at every field, so
+/// only a run of plain rounds switches to pipelining. A paused
+/// `DraftPolicy::Gated` governor pipelines at once: it cannot propose until
+/// a shadow probe settles, which takes at least [`SHADOW_CONFIRM`] emitted
+/// tokens, so there is no proposal for a pipelined step to delay. Waiting on
+/// each token before encoding the next step cost 12% of decode time on an
+/// M4 Pro.
+const PLAIN_ROUNDS_BEFORE_PIPELINE: usize = 2;
+
 /// The prompt-lookup drafter. One instance serves one completion; a second
 /// run through the same instance starts from the prompt the loop reports to
 /// [`Drafter::prefill_from_target_hidden`].
@@ -50,6 +64,9 @@ pub struct PromptLookupDrafter {
     /// paused proposals (or the budget left room for none), rather than
     /// because the lookup found no match.
     last_paused: bool,
+    /// Rounds in a row, the last one included, whose `draft_block` proposed
+    /// nothing.
+    plain_streak: usize,
     stats: PromptLookupStats,
 }
 
@@ -69,6 +86,7 @@ impl PromptLookupDrafter {
             governor: DraftGovernor::new(&config),
             shadow: None,
             last_paused: false,
+            plain_streak: 0,
             stats: PromptLookupStats::default(),
         }
     }
@@ -94,6 +112,7 @@ impl PromptLookupDrafter {
         self.governor = DraftGovernor::new(&self.config);
         self.shadow = None;
         self.last_paused = false;
+        self.plain_streak = 0;
         self.stats = PromptLookupStats::default();
     }
 }
@@ -148,6 +167,7 @@ impl Drafter for PromptLookupDrafter {
             // say whether proposing would have paid, at the cost of a
             // host-side hash probe instead of a verify forward.
             self.last_paused = true;
+            self.plain_streak += 1;
             self.stats.paused_rounds += 1;
             if self.shadow.is_none() && self.governor.probes_while_paused() {
                 self.index.extend(&self.context);
@@ -165,11 +185,30 @@ impl Drafter for PromptLookupDrafter {
         self.index.extend(&self.context);
         let mut draft = self.index.find(&self.context, &self.config);
         draft.truncate(budget);
-        if !draft.is_empty() {
+        if draft.is_empty() {
+            self.plain_streak += 1;
+        } else {
+            self.plain_streak = 0;
             self.stats.drafted_rounds += 1;
             self.stats.proposed_draft_tokens += draft.len();
         }
         Ok(draft)
+    }
+
+    fn pipelines_plain_rounds(&self) -> bool {
+        self.plain_streak > PLAIN_ROUNDS_BEFORE_PIPELINE || self.governor.probes_while_paused()
+    }
+
+    fn retract_draft(&mut self, draft: &[i32]) {
+        self.stats.rounds = self.stats.rounds.saturating_sub(1);
+        if self.last_paused {
+            self.stats.paused_rounds = self.stats.paused_rounds.saturating_sub(1);
+        }
+        if !draft.is_empty() {
+            self.stats.drafted_rounds = self.stats.drafted_rounds.saturating_sub(1);
+            self.stats.proposed_draft_tokens =
+                self.stats.proposed_draft_tokens.saturating_sub(draft.len());
+        }
     }
 
     fn accept_verified_tokens(
@@ -192,6 +231,7 @@ impl Drafter for PromptLookupDrafter {
         self.context.clear();
         self.shadow = None;
         self.last_paused = false;
+        self.plain_streak = 0;
         Ok(())
     }
 

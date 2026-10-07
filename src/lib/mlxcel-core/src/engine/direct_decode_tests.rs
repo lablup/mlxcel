@@ -20,7 +20,6 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
-use super::direct_decode::DecodeState;
 use super::*;
 use crate::cache::{SequenceId, SequenceStateLayout};
 use crate::generate::{LanguageModel, SamplingConfig};
@@ -222,8 +221,7 @@ fn trace<M: LanguageModel>(
 /// sequence.
 fn pipelines<M: LanguageModel>(client: &mut DirectEngine<M>, sampling: &SamplingConfig) -> bool {
     let id = client.open_sequence().unwrap();
-    let state = DecodeState::new(id, &[1], sampling, vec![EOS], 4);
-    let eligible = client.lookahead_params(&state).is_some();
+    let eligible = client.lookahead_params(id, sampling).is_some();
     client.close_sequence(id);
     eligible
 }

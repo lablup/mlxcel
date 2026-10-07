@@ -100,7 +100,7 @@ impl<'s> DecodeState<'s> {
         }
     }
 
-    fn last_token(&self) -> Result<i32, DirectEngineError> {
+    pub(super) fn last_token(&self) -> Result<i32, DirectEngineError> {
         self.generated
             .last()
             .copied()
@@ -108,7 +108,7 @@ impl<'s> DecodeState<'s> {
     }
 }
 
-fn single(outcomes: Vec<RowOutcome>) -> Result<RowOutcome, DirectEngineError> {
+pub(super) fn single(outcomes: Vec<RowOutcome>) -> Result<RowOutcome, DirectEngineError> {
     outcomes
         .into_iter()
         .next()
@@ -116,18 +116,23 @@ fn single(outcomes: Vec<RowOutcome>) -> Result<RowOutcome, DirectEngineError> {
 }
 
 impl<M: LanguageModel> DirectEngine<M> {
-    /// The fused sampling parameters of the lookahead pipeline when `state`
-    /// may decode on it, `None` for the synchronous chain (see the module
-    /// docs for the rules).
-    pub(super) fn lookahead_params(&self, state: &DecodeState<'_>) -> Option<FusedSampleParams> {
-        if self.force_sync() || !self.engine().can_unwind_lookahead(state.id) {
+    /// The fused sampling parameters of the lookahead pipeline when sequence
+    /// `id` may decode on it under `sampling`, `None` for the synchronous
+    /// chain (see the module docs for the rules). The client streams no
+    /// per-token logprobs and carries no mask or override.
+    pub(super) fn lookahead_params(
+        &self,
+        id: SequenceId,
+        sampling: &SamplingConfig,
+    ) -> Option<FusedSampleParams> {
+        if self.force_sync() || !self.engine().can_unwind_lookahead(id) {
             return None;
         }
         shared_fused_params([Some(FusedRowGate {
-            sampling: state.sampling,
+            sampling,
             needs_mask: false,
             needs_override: false,
-            logprobs_enabled: state.logprobs.enabled,
+            logprobs_enabled: false,
         })])
     }
 
@@ -138,7 +143,7 @@ impl<M: LanguageModel> DirectEngine<M> {
         state: &mut DecodeState<'_>,
         on_token: &mut F,
     ) -> Result<(), DirectEngineError> {
-        match self.lookahead_params(state) {
+        match self.lookahead_params(state.id, state.sampling) {
             Some(params) => {
                 // The raised command-buffer input budget pays off only where
                 // step n+1 is encoded while the device still runs step n; a
@@ -195,7 +200,7 @@ impl<M: LanguageModel> DirectEngine<M> {
     ) -> Result<(), DirectEngineError> {
         let id = state.id;
         let input = crate::from_slice_i32(&[state.last_token()?], &[1, 1]);
-        let mut pending = match self.submit_lookahead(state, &input, params) {
+        let mut pending = match self.submit_lookahead(id, state.sampling, &input, params) {
             Ok(tokens) => tokens,
             Err(err) => {
                 self.unwind_failed_submit(id, &err, 0)?;
@@ -210,7 +215,7 @@ impl<M: LanguageModel> DirectEngine<M> {
                 None
             } else {
                 let input = lookahead_feedback_input(&pending);
-                match self.submit_lookahead(state, &input, params) {
+                match self.submit_lookahead(id, state.sampling, &input, params) {
                     Ok(tokens) => Some(tokens),
                     Err(err) => {
                         // The pending forward's append is still uncommitted.
@@ -250,18 +255,20 @@ impl<M: LanguageModel> DirectEngine<M> {
         }
     }
 
-    fn submit_lookahead(
+    /// Submit one pipelined step for `id` on `input` (`[1, 1]`).
+    pub(super) fn submit_lookahead(
         &mut self,
-        state: &DecodeState<'_>,
+        id: SequenceId,
+        sampling: &SamplingConfig,
         input: &MlxArray,
         params: &FusedSampleParams,
     ) -> Result<UniquePtr<MlxArray>, EngineError> {
         let batch = StepBatch {
-            seq_ids: std::slice::from_ref(&state.id),
+            seq_ids: std::slice::from_ref(&id),
             input,
         };
         self.engine_mut()
-            .submit(&batch, params, &[&state.sampling.token_bias])
+            .submit(&batch, params, &[&sampling.token_bias])
     }
 
     /// Unwind after a failed [`super::Engine::submit`]: the `uncommitted`
@@ -270,7 +277,7 @@ impl<M: LanguageModel> DirectEngine<M> {
     /// nothing). The caller then decodes synchronously, which re-runs the
     /// step through the guarded per-row chain and reports a persistent
     /// failure there.
-    fn unwind_failed_submit(
+    pub(super) fn unwind_failed_submit(
         &mut self,
         id: SequenceId,
         err: &EngineError,
@@ -288,7 +295,7 @@ impl<M: LanguageModel> DirectEngine<M> {
     /// in-flight forward is synced first, as the scheduler's finishing
     /// teardown does; a pool trim only moves a host offset, and the lazy
     /// slices it implies are ordered after the append on the stream.
-    fn retire(
+    pub(super) fn retire(
         &mut self,
         id: SequenceId,
         next: Option<&MlxArray>,
