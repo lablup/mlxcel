@@ -397,3 +397,126 @@ fn batched_turbo4_asym_rows_match_single_sequence_dequant_first() {
     assert_eq!(c0.offset, 7);
     assert_eq!(c1.offset, 7);
 }
+
+#[test]
+#[should_panic(expected = "empty batch")]
+fn batched_attend_rejects_an_empty_batch() {
+    let mut rng = Rng::new(0x2177);
+    let (q, k, v) = step(&mut rng, 1, 1);
+    let mut caches: Vec<&mut KVCache> = Vec::new();
+    attend_batched(&q, &k, &v, &mut caches, SCALE, None);
+}
+
+/// A one-row batch is what the lookahead prime and `forward_batched` hand over
+/// when no `DecodeBatchContext` exists. Dense storage matches the per-row
+/// `attend` bit for bit.
+#[test]
+fn batched_dense_one_row_matches_attend() {
+    let mut rng = Rng::new(0x2178);
+    let mut batched = KVCache::new();
+    let mut single = KVCache::new();
+    let (q, k, v) = step(&mut rng, 1, 5);
+    batched.attend(&q, ffi::copy(&k), ffi::copy(&v), SCALE, None);
+    single.attend(&q, k, v, SCALE, None);
+
+    let (q, k, v) = step(&mut rng, 1, 1);
+    let want = single.attend(&q, ffi::copy(&k), ffi::copy(&v), SCALE, None);
+    let mut caches: Vec<&mut KVCache> = vec![&mut batched];
+    let got = attend_batched(&q, &k, &v, &mut caches, SCALE, None);
+    assert_eq!(ffi::array_shape(&got), vec![1, HEADS, 1, DIM]);
+    assert_eq!(to_vec_f32(&got), to_vec_f32(&want));
+    assert_eq!(batched.offset, 6);
+}
+
+/// The pooled launch keys on `caches[0]`, so a one-row pool-backed batch
+/// reaches it at a single-token step with no scheduler context.
+#[test]
+fn batched_paged_one_row_is_one_pooled_launch() {
+    let (pool, states) = fresh_pool(1);
+    let mut rng = Rng::new(0x2179);
+    let mut paged = KVCache::new_paged(pool, states[0].clone(), 0);
+    let (q, k, v) = step(&mut rng, 1, 12);
+    paged.attend(&q, k, v, SCALE, None);
+
+    let (q, k, v) = step(&mut rng, 1, 1);
+    let before = paged_batch_decode_stats();
+    let mut caches: Vec<&mut KVCache> = vec![&mut paged];
+    let out = attend_batched(&q, &k, &v, &mut caches, SCALE, None);
+    let after = paged_batch_decode_stats();
+    assert_eq!(ffi::array_shape(&out), vec![1, HEADS, 1, DIM]);
+    assert_eq!(
+        after.v2_launches + after.gather_fallbacks,
+        before.v2_launches + before.gather_fallbacks + 1,
+        "a one-row pool-backed batch is served by the pooled entry"
+    );
+    assert_eq!(paged.offset, 13);
+}
+
+/// A batch that mixes a pool-backed row with a dense row cannot share one
+/// launch. The pooled entry declines before it writes to the pool, and every
+/// row then runs `attend` on its own storage, in either row order.
+#[test]
+fn batched_mixed_storage_runs_each_row_on_its_own_route() {
+    for paged_first in [true, false] {
+        let (pool, states) = fresh_pool(1);
+        let mut rng = Rng::new(0x217a);
+        let mut paged = KVCache::new_paged(pool.clone(), states[0].clone(), 0);
+        let mut paged_ref = KVCache::new_paged(pool, states[1].clone(), 0);
+        let mut dense = KVCache::new();
+        let mut dense_ref = KVCache::new();
+
+        let (q, k, v) = step(&mut rng, 1, 12);
+        paged.attend(&q, ffi::copy(&k), ffi::copy(&v), SCALE, None);
+        paged_ref.attend(&q, ffi::copy(&k), ffi::copy(&v), SCALE, None);
+        let (q, k, v) = step(&mut rng, 1, 12);
+        dense.attend(&q, ffi::copy(&k), ffi::copy(&v), SCALE, None);
+        dense_ref.attend(&q, k, v, SCALE, None);
+
+        let (q, k, v) = step(&mut rng, 2, 1);
+        let (paged_row, dense_row) = if paged_first { (0, 1) } else { (1, 0) };
+        let want_paged = paged_ref.attend(
+            &slice_row(&q, paged_row),
+            slice_row(&k, paged_row),
+            slice_row(&v, paged_row),
+            SCALE,
+            None,
+        );
+        let want_dense = dense_ref.attend(
+            &slice_row(&q, dense_row),
+            slice_row(&k, dense_row),
+            slice_row(&v, dense_row),
+            SCALE,
+            None,
+        );
+
+        let before = paged_batch_decode_stats();
+        let mut caches: Vec<&mut KVCache> = if paged_first {
+            vec![&mut paged, &mut dense]
+        } else {
+            vec![&mut dense, &mut paged]
+        };
+        let got = attend_batched(&q, &k, &v, &mut caches, SCALE, None);
+        let after = paged_batch_decode_stats();
+        assert_eq!(ffi::array_shape(&got), vec![2, HEADS, 1, DIM]);
+        assert_eq!(
+            after.v2_launches + after.gather_fallbacks,
+            before.v2_launches + before.gather_fallbacks + 1,
+            "only the pool-backed row reaches the pooled entry (paged_first={paged_first})"
+        );
+
+        let got_paged = to_vec_f32(&slice_row(&got, paged_row));
+        let got_dense = to_vec_f32(&slice_row(&got, dense_row));
+        assert_eq!(
+            got_dense,
+            to_vec_f32(&want_dense),
+            "dense row differs (paged_first={paged_first})"
+        );
+        assert_eq!(
+            got_paged,
+            to_vec_f32(&want_paged),
+            "pool-backed row differs (paged_first={paged_first})"
+        );
+        assert_eq!(paged.offset, 13);
+        assert_eq!(dense.offset, 13);
+    }
+}
