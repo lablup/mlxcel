@@ -2510,8 +2510,8 @@ pub(crate) struct RowWiseBatchedWindow {
     /// Whether every per-layer cache is dense FP16, which the per-row prefill
     /// stacking requires.
     pub(crate) dense_fp16_caches: bool,
-    /// Whether this backend is one the batched win was measured on (CUDA).
-    /// The row-wise predicate also covers the 31B on Metal, where the
+    /// Whether this backend is one the batched win was measured on (CUDA, not
+    /// ROCm). The row-wise predicate also covers the 31B on Metal, where the
     /// per-row batched verify has not been measured (#2158).
     pub(crate) measured_backend: bool,
 }
@@ -2598,7 +2598,8 @@ fn run_mtp_burst_batched(
             block_size,
             sliding_window: wrapper.sliding_window_value(),
             dense_fp16_caches: wrapper.speculative_caches_are_dense_fp16(),
-            measured_backend: mlxcel_core::cuda_is_available(),
+            // ROCm builds run MLX's GPU backend too but were not measured.
+            measured_backend: mlxcel_core::cuda_is_available() && !cfg!(feature = "rocm"),
         };
         if let Some(reason) = window.decline_reason() {
             tracing::debug!(

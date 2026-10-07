@@ -17,7 +17,7 @@ PR #2185 made the B=1 linear Gemma 4 MTP adapter byte-identical to classic decod
 
 - Rejected: widening the `b == 1` gates to a `[B, K]` call. `B * K >= 8` moves the quantized matmuls from qmv to qmm and the compiled GeGLU gate counts the same rows.
 - Ceiling: the buffered sliding cache compacts against the shared offset (`buffered_planned_drop`), so after a compaction a row lagging that offset has lost the oldest keys of its own window. The forward reports that (`row_verify_inexact`) and the adapter returns `DraftFailed` rather than emit tokens classic decode would not. The serving gate keeps windows below it: `max_prompt_len + K * (max_tokens + 1) <= sliding_window + 32`, where `K * max_tokens` covers rows that finished early and keep advancing up to K positions a round.
-- Gate: CUDA only (Metal 31B is row-wise but unmeasured), B <= 4 (measured widths), dense FP16 caches (the stacker's requirement), prompts within the sliding window. Every other window declines before drafter IO, so no row reaches a client-facing error.
+- Gate: CUDA only (Metal 31B is row-wise but unmeasured, and ROCm builds are excluded for the same reason), B <= 4 (measured widths), dense FP16 caches (the stacker's requirement), prompts within the sliding window. Every other window declines before drafter IO, so no row reaches a client-facing error.
 - The decision came from measurement: classic batched decode on the 31B barely scales with B on GB10 (8.3, 8.8, 8.9 tok/s at B=1, 2, 4), so a per-row verify that costs about B single-row verifies a round still wins.
 
 ## Verification on GB10 (CUDA, release, `--features cuda`)
