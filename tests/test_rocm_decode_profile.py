@@ -313,6 +313,150 @@ class GuardTests(unittest.TestCase):
             finally:
                 os.kill(daemon, 9)
 
+    # --hold and --status (issue #2244)
+
+    def start_hold(self, kfd, *cmd, max_wait=None):
+        args = ["--hold"] + (["--max-wait", str(max_wait)] if max_wait else []) + ["--", *cmd]
+        p = subprocess.Popen(["bash", str(GUARD), *args], env=guard_env(kfd),
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(p.communicate)
+        self.addCleanup(p.kill)
+        for _ in range(100):
+            if not lock_is_free(_TEST_LOCK):
+                return p
+            time.sleep(0.05)
+        self.fail("the --hold guard never took the lock")
+
+    def test_hold_runs_nested_guards_without_taking_the_lock(self):
+        with tempfile.TemporaryDirectory() as kfd, tempfile.TemporaryDirectory() as out:
+            log = pathlib.Path(out) / "inner.log"
+            inner = (f"bash {GUARD} --idle-secs 1 --max-wait 10 --log {log} -- true; "
+                     f"bash {GUARD} --idle-secs 1 --max-wait 10 --log {log} -- bash -c 'exit 4'; "
+                     'test "$ROCM_GPU_GUARD_LOCK_HELD" = "$PPID" || exit 9; '
+                     f"flock -n {_TEST_LOCK} true && exit 8; exit 3")
+            r = run_guard(kfd, "--hold", "--", "bash", "-c", inner)
+            # The inner guards ran their own idle wait and monitor (a CLEAN
+            # attempt each), took no lock, and the lock stayed held throughout
+            # (exit 8 would mean it was free); the command's status comes back.
+            self.assertEqual(r.returncode, 3, r.stderr)
+            self.assertEqual(r.stderr.count("lock held by outer guard"), 2, r.stderr)
+            self.assertNotIn("waiting for guard lock", r.stderr)
+            self.assertEqual(log.read_text().count("CLEAN, exit"), 2, log.read_text())
+            self.assertIn("exit 4", log.read_text())
+            self.assertTrue(lock_is_free(_TEST_LOCK))
+
+    def test_hold_does_no_idle_wait_even_with_a_busy_gpu(self):
+        with tempfile.TemporaryDirectory() as kfd:
+            os.mkdir(f"{kfd}/1")
+            r = run_guard(kfd, "--hold", "--", "true")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertNotIn("waiting for", r.stderr.replace("waiting for guard lock", ""))
+            self.assertNotIn("attempt", r.stderr)
+
+    def test_a_second_hold_waits_for_the_first_and_exits_75_on_max_wait(self):
+        with tempfile.TemporaryDirectory() as kfd, tempfile.TemporaryDirectory() as out:
+            first = self.start_hold(kfd, "sleep", "8")
+            marker = pathlib.Path(out) / "ran"
+            start = time.monotonic()
+            r = run_guard(kfd, "--hold", "--max-wait", "2", "--", "touch", str(marker))
+            self.assertEqual(r.returncode, 75, r.stderr)
+            self.assertLess(time.monotonic() - start, 7)
+            self.assertIn("waiting for guard lock", r.stderr)
+            self.assertIn("gave up waiting for guard lock", r.stderr)
+            self.assertFalse(marker.exists())
+            self.assertIsNone(first.poll(), "the first hold was disturbed")
+
+    def test_status_reports_held_with_the_holder_then_free(self):
+        with tempfile.TemporaryDirectory() as kfd:
+            r = run_guard(kfd, "--status")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("free", r.stdout)
+            holder = self.start_hold(kfd, "sleep", "8")
+            for _ in range(100):
+                if pathlib.Path(f"{_TEST_LOCK}.holder").read_text():
+                    break
+                time.sleep(0.05)
+            r = run_guard(kfd, "--status")
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("held", r.stdout)
+            self.assertIn(f"pid={holder.pid}", r.stdout)
+            self.assertIn("mode=hold", r.stdout)
+            self.assertIn("sleep", r.stdout)
+            self.assertNotIn("stale", r.stdout)
+            holder.terminate()
+            holder.communicate(timeout=30)
+            self.assertEqual(holder.returncode, 143)
+            r = run_guard(kfd, "--status")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("free", r.stdout)
+            self.assertFalse(pathlib.Path(f"{_TEST_LOCK}.holder").exists())
+
+    def test_a_plain_guard_records_and_clears_its_holder_file(self):
+        with tempfile.TemporaryDirectory() as kfd:
+            cmd = f"cat {_TEST_LOCK}.holder; exit 2"
+            r = run_guard(kfd, "--idle-secs", "1", "--", "bash", "-c", cmd)
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertIn("mode=guard", r.stdout)
+            self.assertFalse(pathlib.Path(f"{_TEST_LOCK}.holder").exists())
+
+    def test_status_calls_a_holder_file_whose_pid_is_gone_stale(self):
+        gone = subprocess.Popen(["true"])
+        gone.wait()
+        self.hold_lock()
+        with tempfile.TemporaryDirectory() as kfd:
+            pathlib.Path(f"{_TEST_LOCK}.holder").write_text(
+                f"pid={gone.pid}\nstart=then\nmode=hold\ncmd=old\n")
+            r = run_guard(kfd, "--status")
+            self.assertEqual(r.returncode, 1, r.stdout)
+            self.assertIn("stale", r.stdout)
+
+    def test_status_with_a_lock_nobody_recorded_still_says_held(self):
+        self.hold_lock()
+        with tempfile.TemporaryDirectory() as kfd:
+            r = run_guard(kfd, "--status")
+            self.assertEqual(r.returncode, 1, r.stdout)
+            self.assertIn("held", r.stdout)
+            self.assertIn("no holder file", r.stdout)
+
+    def test_hold_refuses_the_idle_options_and_status_refuses_everything(self):
+        with tempfile.TemporaryDirectory() as kfd:
+            for extra in (("--idle-secs", "5"), ("--max-attempts", "2"), ("--log", "/dev/null")):
+                r = run_guard(kfd, "--hold", *extra, "--", "true")
+                self.assertEqual(r.returncode, 2, (extra, r.stderr))
+                self.assertIn("--hold takes only --max-wait", r.stderr)
+            self.assertEqual(run_guard(kfd, "--status", "--hold").returncode, 2)
+            self.assertEqual(run_guard(kfd, "--status", "--max-wait", "1").returncode, 2)
+            self.assertEqual(run_guard(kfd, "--status", "--", "true").returncode, 2)
+            self.assertEqual(run_guard(kfd, "--hold").returncode, 2)
+
+    def test_hold_under_an_outer_guard_just_runs_the_command(self):
+        self.hold_lock()
+        with tempfile.TemporaryDirectory() as kfd:
+            inner = f"ROCM_GPU_GUARD_LOCK_HELD=$$ bash {GUARD} --hold -- bash -c 'exit 6'; exit $?"
+            r = subprocess.run(["bash", "-c", inner], env=guard_env(kfd),
+                               capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 6, r.stderr)
+            self.assertIn("lock held by outer guard", r.stderr)
+            self.assertNotIn("waiting for guard lock", r.stderr)
+
+    def test_sigterm_stops_the_held_command_and_releases_the_lock(self):
+        with tempfile.TemporaryDirectory() as kfd, tempfile.TemporaryDirectory() as out:
+            marker = pathlib.Path(out) / "survived"
+            p = self.start_hold(kfd, "bash", "-c", f"sleep 20; touch {marker}")
+            p.terminate()
+            p.communicate(timeout=30)
+            self.assertEqual(p.returncode, 143)
+            self.assertTrue(lock_is_free(_TEST_LOCK))
+            self.assertFalse(marker.exists())
+
+    def test_hold_passes_stdin_to_the_command(self):
+        with tempfile.TemporaryDirectory() as kfd:
+            r = subprocess.run(["bash", str(GUARD), "--hold", "--", "cat"],
+                               env=guard_env(kfd), input="piped\n",
+                               capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(r.stdout, "piped\n")
+
 
 def k(op: str) -> str:
     """A kernel name spelled the way rocprofv3 writes the overlay's kernels."""

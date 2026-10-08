@@ -4,6 +4,8 @@
 # Usage:
 #   scripts/rocm_gpu_guard.sh [--idle-secs N] [--max-attempts N] [--max-wait SECS]
 #                             [--log FILE] -- COMMAND [ARGS...]
+#   scripts/rocm_gpu_guard.sh --hold [--max-wait SECS] -- COMMAND [ARGS...]
+#   scripts/rocm_gpu_guard.sh --status
 #
 # A benchmark that shares the GPU with another process, or the UMA memory bus
 # with a compiler, is not a measurement. This is the guard the gfx1151 baseline
@@ -39,6 +41,21 @@
 # and the monitor and exit 130 / 143. The three numeric options take plain
 # non-negative integers.
 #
+# --hold takes the lock and nothing else, for a whole session (#2244): it waits
+# for the lock through the same --max-wait budget (exit 75 when that runs out),
+# does no idle wait and no monitoring, exports ROCM_GPU_GUARD_LOCK_HELD=<its pid>
+# and runs COMMAND in the foreground with COMMAND's status as its own. Guards
+# started inside COMMAND skip the lock but keep their idle wait and monitor, so
+# a gate or a multi-run measurement queues for the lock once instead of once
+# per run, and other units cannot slip between the runs. Under an outer guard
+# --hold just runs COMMAND. --idle-secs, --max-attempts and --log are refused
+# with --hold (exit 2). INT and TERM stop COMMAND and exit 130 / 143.
+#
+# Whoever holds the lock writes ROCM_GPU_GUARD_LOCK.holder (pid, start time,
+# mode, command line) and removes it on exit. --status prints whether the lock
+# is held and, from that file, by whom (a file naming a pid that is gone is
+# reported as stale); exit 0 when the lock is free, 1 when it is held.
+#
 # The sampling interval is one second: a GPU job shorter than that can in
 # principle be missed. The compiler list matches /proc/<pid>/comm exactly.
 
@@ -50,6 +67,10 @@ MAX_WAIT=0
 LOG=""
 KFD_PROC_DIR="${ROCM_GPU_GUARD_KFD_DIR:-/sys/class/kfd/kfd/proc}"
 LOCK="${ROCM_GPU_GUARD_LOCK:-/tmp/mlxcel-rocm-gpu-guard.lock}"
+HOLDER="$LOCK.holder"
+HOLD=0
+STATUS=0
+GIVEN=""
 # Build tools whose memory traffic or CPU load would distort a UMA measurement.
 # Driver processes (make, cmake, ninja, build scripts) are left out: they are
 # idle while their compiler children, which are listed, do the work.
@@ -57,13 +78,60 @@ LOCK="${ROCM_GPU_GUARD_LOCK:-/tmp/mlxcel-rocm-gpu-guard.lock}"
 COMPILER_RE="${ROCM_GPU_GUARD_COMPILER_RE:-^(cargo|rustc|clang|clang\+\+|clang-[0-9]+|hipcc|nvcc|cc1|cc1plus|ld|ld\.lld|ld\.gold|ld\.bfd|lld|collect2)$}"
 
 usage() {
-  sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,60p' "$0" | sed 's/^# \{0,1\}//'
 }
+
+# --status: say whether the lock is held and by whom. The holder file is
+# written by whoever took the lock, after it took it, so it can lag a fresh
+# acquire by a moment and can outlive a holder that was killed with SIGKILL.
+guard_status() {
+  command -v flock >/dev/null 2>&1 || { echo "rocm_gpu_guard: flock not found (util-linux)" >&2; exit 2; }
+  if [[ ! -e "$LOCK" ]] || flock -n "$LOCK" true 2>/dev/null; then
+    echo "guard lock $LOCK: free"
+    exit 0
+  fi
+  echo "guard lock $LOCK: held"
+  if [[ -r "$HOLDER" ]]; then
+    local pid="" line state="running"
+    while IFS= read -r line; do
+      [[ "$line" == pid=* ]] && pid="${line#pid=}"
+    done <"$HOLDER"
+    if ! [[ "$pid" =~ ^[1-9][0-9]*$ && -e "/proc/$pid" ]]; then
+      state="stale (pid ${pid:-unknown} is gone; the lock is held by something else)"
+    fi
+    echo "holder file $HOLDER: $state"
+    sed 's/^/  /' "$HOLDER"
+  else
+    echo "no holder file $HOLDER (the lock was taken by something other than this script)"
+  fi
+  exit 1
+}
+
+# Record who holds the lock, best effort: a file left by another user in a
+# sticky directory cannot be replaced, and the lock does not depend on it.
+write_holder() {
+  local mode="$1"; shift
+  [[ -e "$HOLDER" ]] || { (umask 000; : >>"$HOLDER") 2>/dev/null || true; }
+  {
+    printf 'pid=%s\nstart=%s\nmode=%s\ncmd=' "$$" "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$mode"
+    printf '%q ' "$@"; printf '\n'
+  } >"$HOLDER" 2>/dev/null || true
+  HOLDER_WRITTEN=1
+}
+HOLDER_WRITTEN=0
+# Remove the holder file only if it still names this process.
+clear_holder() {
+  (( HOLDER_WRITTEN )) || return 0
+  if grep -qx "pid=$$" "$HOLDER" 2>/dev/null; then rm -f "$HOLDER" 2>/dev/null || : >"$HOLDER" 2>/dev/null || true; fi
+  return 0
+}
+trap clear_holder EXIT
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --idle-secs|--max-attempts|--max-wait|--log)
       [[ $# -ge 2 ]] || { echo "rocm_gpu_guard: $1 needs a value" >&2; exit 2; }
+      GIVEN="$GIVEN $1"
       case "$1" in
         --idle-secs)    IDLE_SECS="$2" ;;
         --max-attempts) MAX_ATTEMPTS="$2" ;;
@@ -71,6 +139,8 @@ while [[ $# -gt 0 ]]; do
         --log)          LOG="$2" ;;
       esac
       shift 2 ;;
+    --hold)         HOLD=1; shift ;;
+    --status)       STATUS=1; shift ;;
     -h|--help)      usage; exit 0 ;;
     --)             shift; break ;;
     *)              echo "rocm_gpu_guard: unknown option $1" >&2; usage >&2; exit 2 ;;
@@ -85,8 +155,19 @@ for opt in IDLE_SECS MAX_ATTEMPTS MAX_WAIT; do
 done
 # Force base 10 so a value such as 08 is not read as octal.
 IDLE_SECS=$((10#$IDLE_SECS)); MAX_ATTEMPTS=$((10#$MAX_ATTEMPTS)); MAX_WAIT=$((10#$MAX_WAIT))
+if (( STATUS )); then
+  if (( HOLD )) || [[ -n "$GIVEN" || $# -gt 0 ]]; then
+    echo "rocm_gpu_guard: --status takes no other option and no command" >&2
+    exit 2
+  fi
+  guard_status
+fi
+if (( HOLD )) && [[ -n "$GIVEN" && "$GIVEN" =~ (--idle-secs|--max-attempts|--log) ]]; then
+  echo "rocm_gpu_guard: --hold takes only --max-wait (no idle wait, attempts or log)" >&2
+  exit 2
+fi
 [[ $# -gt 0 ]] || { echo "rocm_gpu_guard: no command given" >&2; usage >&2; exit 2; }
-[[ -d "$KFD_PROC_DIR" ]] || { echo "rocm_gpu_guard: $KFD_PROC_DIR not found (no ROCm KFD driver?)" >&2; exit 2; }
+(( HOLD )) || [[ -d "$KFD_PROC_DIR" ]] || { echo "rocm_gpu_guard: $KFD_PROC_DIR not found (no ROCm KFD driver?)" >&2; exit 2; }
 # --max-wait counts from here. run_secs is the time COMMAND has run, which is
 # not waiting.
 SECONDS=0
@@ -255,6 +336,27 @@ acquire_lock() {
   note "acquired guard lock $LOCK after $((SECONDS - start))s"
 }
 
+if (( HOLD )); then
+  if [[ -n "$OUTER_GUARD" ]]; then
+    note "lock held by outer guard ${OUTER_GUARD}: --hold runs the command without taking $LOCK"
+    exec "$@"
+  fi
+  acquire_lock || exit 75
+  write_holder hold "$@"
+  export ROCM_GPU_GUARD_LOCK_HELD=$$
+  note "holding the lock for: $*"
+  # The lock descriptor stays out of COMMAND, so a daemon it leaves behind
+  # cannot keep the lock. The explicit stdin redirect keeps COMMAND's stdin
+  # (a background job would otherwise read /dev/null); it runs in the
+  # background only so INT and TERM can stop it while this shell waits.
+  "$@" {LOCK_FD}<&- <&0 &
+  cmd_pid=$!
+  rc=0
+  wait "$cmd_pid" || rc=$?
+  note "held command exited ${rc}: releasing $LOCK"
+  exit "$rc"
+fi
+
 if [[ -n "$OUTER_GUARD" ]]; then
   note "lock held by outer guard ${OUTER_GUARD}: not taking $LOCK"
   # No lock to hold here; a placeholder descriptor keeps the closing
@@ -267,6 +369,7 @@ else
     note "gave up: $((MAX_WAIT - (SECONDS - run_secs)))s of --max-wait left after the lock wait, shorter than ${IDLE_SECS}s of idle"
     exit 75
   fi
+  write_holder guard "$@"
   export ROCM_GPU_GUARD_LOCK_HELD=$$
 fi
 

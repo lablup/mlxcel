@@ -807,6 +807,22 @@ verify-rocm-smoke: ## ROCm smoke: build, link and generate on the GPU, asserting
 verify-rocm: verify-versions verify-kernel-dtype-keys verify-kernel-port-dispatch verify-llama-compat verify-rocm-overlay verify-python-tooling verify-fmt verify-clippy-rocm verify-rocm-smoke verify-test-rocm ## Run the ROCm gate locally on an AMD host (issue #1811)
 	@echo "$(GREEN)[verify-rocm] OK$(RESET)"
 
+# The gate for a shared gfx1151 host (issue #2244). Build everything the gate
+# runs without the guard lock, then run `verify-rocm` under one `--hold` of
+# the host-wide lock: the cargo rebuilds inside are cache hits, no
+# other unit's guard can find an idle window in the middle of the gate, and an
+# unguarded `verify-rocm` no longer invalidates everyone else's windows. The
+# test, smoke and clippy builds must stay outside the hold, or the lock would be held through
+# the compile. `verify-rocm` itself is unchanged for hosts with one tenant.
+.PHONY: verify-rocm-held
+verify-rocm-held: ## ROCm gate for a shared host: build unlocked, then run verify-rocm under one rocm_gpu_guard.sh --hold (issue #2244)
+	@echo "$(CYAN)[verify-rocm-held] building the gate's artifacts without the lock...$(RESET)"
+	$(CARGO) test --workspace --profile test-fast $(ROCM_JOBS) --features rocm --no-run
+	$(CARGO) build --release $(ROCM_JOBS) --features rocm
+	$(CARGO) clippy --workspace --all-targets $(ROCM_JOBS) --features rocm -- -D warnings
+	@echo "$(CYAN)[verify-rocm-held] running verify-rocm under one guard lock hold...$(RESET)"
+	@bash scripts/rocm_gpu_guard.sh --hold -- $(MAKE) verify-rocm
+
 .PHONY: verify-versions
 verify-versions: ## Assert every version-tracking workspace crate carries the root `mlxcel` version
 	@echo "$(CYAN)[verify] workspace crate versions...$(RESET)"
