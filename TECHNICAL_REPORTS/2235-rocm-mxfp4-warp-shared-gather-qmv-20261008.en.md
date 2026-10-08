@@ -99,11 +99,11 @@ That extra guard exists because `MLX_ROCM_GATHER_QMV_THREADS_PER_COL` can set an
 |---|---|---|---|---|
 | unsorted, 1 token | 1.6358e-3 / 1.6358e-3 | 0 of 11520 | 1.6588e-3 / 1.6588e-3 | 0 of 2064 |
 | unsorted, 8 tokens | 1.6609e-3 / 1.6609e-3 | 5 of 92160 | 1.6827e-3 / 1.6827e-3 | 1 of 16512 |
-| sorted, 16 tokens | 1.6569e-3 / 1.6569e-3 | 0 of 184320 | 1.6606e-3 / 1.6606e-3 | 0 of 33024 |
+| sorted, 16 tokens | 1.6569e-3 / 1.6569e-3 | 7 of 184320 | 1.6606e-3 / 1.6606e-3 | 0 of 33024 |
 
 The two paths agree to five digits, and two default runs are bit-identical.
 
-**Deviation from the issue.** The issue asked that, at `N = K = 2880`, the default and per-row outputs differ in at least one byte. That holds over the three `N = 2880` cases together (288,000 outputs) but not for the 1-token case alone, whose sums round to identical bf16 outputs: over 2880 f32 terms the two summation orders rarely straddle a bf16 rounding boundary. The test therefore accumulates the differing-output count over the `N = 2880` cases and asserts it is above zero, which still proves the dispatch left the per-row kernel. The count is 5 in the table above (all from the 8-token case). The PR body and LOCAL_FIXES item 41 say 12 for this total; that figure comes from the author's run and was not reproduced for this report, and the table is the benchmark page's. Either way the total is a handful out of 288,000.
+**Deviation from the issue.** The issue asked that, at `N = K = 2880`, the default and per-row outputs differ in at least one byte. That holds over the three `N = 2880` cases together (288,000 outputs) but not for the 1-token case alone, whose sums round to identical bf16 outputs: over 2880 f32 terms the two summation orders rarely straddle a bf16 rounding boundary. The test therefore accumulates the differing-output count over the `N = 2880` cases and asserts it is above zero, which still proves the dispatch left the per-row kernel. The count is 12 of 288,000 (0 in the 1-token case, 5 in the 8-token case, 7 in the sorted 16-token case), as the test printed it on the measured run; the benchmark page's table, the PR body and LOCAL_FIXES item 41 carry the same figures.
 
 **Mutation check.** With the sign bit dropped from the new decode the first case fails at a relative L2 error of 1.211, against 1.636e-3 for the per-row path.
 
@@ -153,7 +153,7 @@ Decode improved 7.65x and prefill moved 0.2%, so the arm is on by default, with 
 - `make verify-versions verify-kernel-dtype-keys verify-kernel-port-dispatch verify-llama-compat verify-fmt verify-rocm-overlay`, `cargo test --test dead_doc_pointers`, and clippy `-D warnings` on both test targets: pass.
 - `rocm_mxfp4_quant` (5 tests) and `rocm_gather_qmm_expert_batched` (2 tests): pass.
 - Unit's `make verify-rocm` (with `MLXCEL_ROCM_SMOKE_MODEL=models/mlx/Qwen3-0.6B-4bit`): OK, 161 suites, 12,188 passed, 0 failed, 398 ignored.
-- Orchestrator gate: pending.
+- Orchestrator gate (`make verify-rocm` on `16be6bf9`): passed, 12,188 passed, 0 failed, 398 ignored.
 
 Not verified: Metal and CUDA (not available on this host; the change touches only the ROCm overlay and ROCm-gated tests). Wave64 (CDNA) is untested: the 16-lane instantiation reduces inside a wave on both widths, and the `WARP_SIZE` instantiation is selected only for `K >= 16384` with one routing entry or through `MLX_ROCM_GATHER_QMV_THREADS_PER_COL`.
 
