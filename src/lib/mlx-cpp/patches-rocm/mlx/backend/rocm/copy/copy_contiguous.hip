@@ -66,15 +66,19 @@ void copy_contiguous(
   
   dispatch_all_types(in.dtype(), [&](auto in_type_tag) {
     dispatch_all_types(out.dtype(), [&](auto out_type_tag) {
-      dispatch_bool(out.data_size() > UINT32_MAX, [&](auto large) {
+      // 64-bit indices from INT32_MAX, not UINT32_MAX: the loop's uint32_t
+      // counter adds stride * N_READS (up to 2^26) to an index below `size`,
+      // which wrapped past 2^32 for sizes just under UINT32_MAX
+      // (LOCAL_FIXES.md 42).
+      dispatch_bool(out.data_size() > INT32_MAX, [&](auto large) {
         using InType = hip_type_t<MLX_GET_TYPE(in_type_tag)>;
         using OutType = hip_type_t<MLX_GET_TYPE(out_type_tag)>;
         using IdxT = std::conditional_t<large(), int64_t, uint32_t>;
         constexpr int N_READS = 4;
         
         int block_size = 256;
-        int num_blocks = (size + block_size * N_READS - 1) / (block_size * N_READS);
-        num_blocks = std::max(1, std::min(num_blocks, 65535));
+        uint32_t num_blocks =
+            rocm::copy_grid_blocks(size, size_t(block_size) * N_READS);
         
         const InType* in_ptr = gpu_ptr<const InType>(in) + in_offset;
         OutType* out_ptr = gpu_ptr<OutType>(out) + out_offset;
