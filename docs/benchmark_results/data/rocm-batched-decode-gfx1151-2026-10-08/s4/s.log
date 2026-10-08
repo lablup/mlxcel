@@ -1,0 +1,12 @@
+test 0 2026-10-09T03:04:01+09:00
+probe_bf16_b2 0 2026-10-09T03:04:13+09:00
+probe_bf16_b4 0 2026-10-09T03:04:24+09:00
+probe_bf16_b8 0 2026-10-09T03:04:35+09:00
+pbd_before_Qwen3-0.6B-4bit_r1 0 2026-10-09T03:05:10+09:00
+pbd_after_Qwen3-0.6B-4bit_r1 0 2026-10-09T03:05:47+09:00
+pbd_before_Qwen3-0.6B-4bit_r2 0 2026-10-09T03:06:22+09:00
+pbd_after_Qwen3-0.6B-4bit_r2 0 2026-10-09T03:06:59+09:00
+pbd_before_gemma-3-4b-it-4bit_r1 0 2026-10-09T03:12:30+09:00
+pbd_after_gemma-3-4b-it-4bit_r1 0 2026-10-09T03:18:00+09:00
+pbd_before_gemma-3-4b-it-4bit_r2 0 2026-10-09T03:23:28+09:00
+pbd_after_gemma-3-4b-it-4bit_r2 0 2026-10-09T03:29:00+09:00

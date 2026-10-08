@@ -1,0 +1,15 @@
+=== Batched Decode Profiling ===
+Model: models/mlx/Meta-Llama-3.1-8B-Instruct-4bit
+Config: decode_steps=50, warmup=5, runs=3, prompt_len=16384
+
+[mlx-rocm] bound HIP device 0: gfx1151 (AMD Radeon 8060S Graphics) cus=20 warp=32 lds=64KB
+Model loaded in 0.2s
+  supports_batching: true
+  num_layers: 32
+
+Batch Size        Seq TPS    Batch TPS      Speedup  Seq ms/step  Bat ms/step
+------------------------------------------------------------------------------
+[mlx-rocm] gfx1151 native_wmma=1 cus=20 warp=32 low_cu=0 host_WARP_SIZE=32
+[hipBLASLt caps] device 0 (gfx1151): bf16=1 fp8_e4m3=0 fp8_e5m2=0 int8=1
+terminate called after throwing an instance of 'std::runtime_error'
+  what():  hipLaunchKernel( func, grid_dim, block_dim, params, smem_bytes, stream_) failed: invalid configuration argument

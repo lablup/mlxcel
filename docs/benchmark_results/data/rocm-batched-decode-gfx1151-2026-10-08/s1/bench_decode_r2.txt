@@ -1,0 +1,17 @@
+[mlx-rocm] bound HIP device 0: gfx1151 (AMD Radeon 8060S Graphics) cus=20 warp=32 lds=64KB
+[Memory] cache limit: 2.15 GB
+[Load] wall: 0.141 s  MLX peak: 0.00 GB
+[Memory] after load: active 0.00 GB, cache 0.00 GB, active+cache 0.00 GB, phase peak 0.00 GB
+[long-prompt] target=512 tokens -> using 512 tokens (max_context=Some(131072), reserved 128 for generation)
+[mlx-rocm] gfx1151 native_wmma=1 cus=20 warp=32 low_cu=0 host_WARP_SIZE=32
+[hipBLASLt caps] device 0 (gfx1151): bf16=1 fp8_e4m3=0 fp8_e5m2=0 int8=1
+[Memory] after warmup (prefill + warmup tokens): active 4.75 GB, cache 0.42 GB, active+cache 5.18 GB, phase peak 5.11 GB
+[long-prompt] target=512 tokens -> using 512 tokens (max_context=Some(131072), reserved 128 for generation)
+[Memory] after measured pass: active 4.75 GB, cache 0.38 GB, active+cache 5.13 GB, phase peak 6.15 GB
+[Profile Results]
+  Prompt tokens:    512
+  Generated tokens: 128
+  Prefill:          501.17 ms (1021.61 tok/s)
+  Decode:           3415.50 ms (37.48 tok/s)
+  Decode path:      engine
+  MLX peak memory:  6.15 GB
