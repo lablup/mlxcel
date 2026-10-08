@@ -259,7 +259,12 @@ default applies (lablup/mlxcel#2152). An unset or empty variable takes the
 default silently. `MLX_ROCM_QMM_DEQUANT_M_THRESHOLD` (1 to 2147483647, default
 the built-in crossover) is the row count from which a quantized GEMM prefers
 dequantize + GEMM. `MLX_ROCM_QMM_DEQUANT_CACHE_SIZE` (0 to 2147483647, default
-8, `0` turns it off) is the number of dequantized weights kept for reuse.
+8, `0` turns it off) is the number of dequantized weights kept for reuse; the
+bf16 GEMMs sent above `MLX_ROCM_WMMA_QMM_MAX_M` never use that cache, since a
+forward pass at those row counts cycles it without a hit (lablup/mlxcel#2151).
+`MLX_ROCM_QMM_DEQUANT_CACHE_STATS=1` prints the cache's hit, miss, insert,
+eviction and bypass counts, its entry count and its bytes on stderr when the
+process exits.
 `MLX_ROCM_GEMM_F32_SOLUTION_INDEX` and `MLX_ROCM_GEMM_BF16_SOLUTION_INDEX` (0
 to 2147483647, default 0) pick a rocBLAS solution, and their `_BATCHED_`
 variants (same range) fall back to them. `MLX_ROCM_QMV_TILE_N` (1 to 32,

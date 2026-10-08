@@ -2377,6 +2377,12 @@ mod ffi {
         /// `MLX_ROCM_FORCE_WARP_SIZE` launch-width override (issue #2147).
         fn rocm_device_warp_size() -> i32;
 
+        /// Raw counters of the ROCm QuantizedMatmul dequantized-weight
+        /// cache (issue #2151): hits, misses, inserts, evictions, bypasses,
+        /// entries, bytes. Seven zeros off ROCm. Prefer
+        /// [`crate::rocm_qmm_cache::dequant_cache_stats`].
+        fn rocm_dequant_cache_stats() -> Vec<u64>;
+
         /// Test-only seam (issue #2147): replaces the wavefront width the
         /// ROCm port tables are checked against for the rest of the process
         /// (0 restores the hardware value), so the wave64 refusal can be
@@ -3945,6 +3951,10 @@ pub mod dtype;
 // machine, whichever backend they are on.
 pub mod cuda_arch;
 pub mod rocm_arch;
+
+// Counters of the ROCm QuantizedMatmul dequantized-weight cache (#2151), for
+// tests and memory diagnostics.
+pub mod rocm_qmm_cache;
 
 // Deliberate ROCm GPU failures for tests (#1804): a typed wrapper over the
 // bridge's fault-probe fixture, so `tests/rocm_gpu_faults.rs` can provoke a

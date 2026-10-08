@@ -1419,6 +1419,12 @@ int32_t gpu_backend_kind();
 // width `port_for` sees (0 restores the hardware value).
 bool rocm_port_allowed(bool any_wave_size, int32_t warp_size);
 int32_t rocm_device_warp_size();
+
+// Counters of the ROCm QuantizedMatmul dequantized-weight cache
+// (lablup/mlxcel#2151), as `mlx::core::rocm::dequant_cache_stats()` returns
+// them: hits, misses, inserts, evictions, bypasses, entries, bytes, in that
+// order. Seven zeros off ROCm.
+rust::Vec<uint64_t> rocm_dequant_cache_stats();
 void set_rocm_port_warp_size_for_tests(int32_t warp_size);
 
 // Test-only (lablup/mlxcel#1804): a lazy array whose evaluation fails on the

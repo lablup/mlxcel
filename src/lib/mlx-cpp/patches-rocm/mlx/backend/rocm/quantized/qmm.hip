@@ -9,6 +9,7 @@
 #include "mlx/backend/rocm/kernel_utils.hpp"
 #include "mlx/backend/rocm/quantized/quantized.h"
 #include "mlx/backend/rocm/quantized/qmv_tiled_kernel.hip"
+#include "mlx/backend/rocm/rocm.h"
 #include "mlx/primitives.h"
 
 #include <hip/hip_bfloat16.h>
@@ -35,6 +36,8 @@
 #endif
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <list>
@@ -808,6 +811,13 @@ enum class QmmRoute {
   WmmaDense, // qmm_wmma_dense_kernel, fused dequant + rocWMMA
   DequantFp8Gemm, // dequant_fp8_gemm (weight and activation in e4m3)
   DequantGemm, // dequantize (cached) + dequant_rocblas_gemm in the x dtype
+  // The same GEMM for a bf16 shape the fused kernel would take below the row
+  // ceiling (wmma_qmm_max_m). The weight is dequantized into a temporary on
+  // every call and never enters the dequantized-weight cache: a forward pass
+  // runs more distinct projections at these row counts than the cache holds,
+  // so it never hit, and its last entries stayed alive through decode
+  // (lablup/mlxcel#2151).
+  DequantGemmAboveWmmaCeiling,
   Other, // qmv, batched qmv and the tiled kernels below
 };
 
@@ -905,7 +915,7 @@ inline QmmRoute select_qmm_route(const QmmRouteInputs& in, rocm::Device& d) {
     if (!hipblaslt_is_faster) {
       return QmmRoute::WmmaDense;
     }
-    return QmmRoute::DequantGemm;
+    return QmmRoute::DequantGemmAboveWmmaCeiling;
   }
   if (fp8()) {
     return QmmRoute::DequantFp8Gemm;
@@ -976,6 +986,97 @@ inline size_t dequant_cache_max_bytes() {
   static size_t max_bytes = parse_non_negative_size_t_env(
       "MLX_ROCM_QMM_DEQUANT_CACHE_MAX_BYTES", 256ULL * 1024ULL * 1024ULL);
   return max_bytes;
+}
+
+// The dequantized-weight LRU of the DequantGemm route and its counters
+// (lablup/mlxcel#2151). The counters are relaxed atomics, bumped once per
+// GEMM on the route and never read on the hot path; rocm::dequant_cache_stats
+// reads them with the entry count and bytes. MLX_ROCM_QMM_DEQUANT_CACHE_STATS=1
+// prints them on stderr when the process exits.
+struct DequantCacheCounters {
+  std::atomic<uint64_t> hits{0};
+  std::atomic<uint64_t> misses{0};
+  std::atomic<uint64_t> inserts{0};
+  std::atomic<uint64_t> evictions{0};
+  std::atomic<uint64_t> bypasses{0};
+};
+
+DequantCacheCounters g_dequant_cache_counters;
+
+inline void count_dequant_cache(std::atomic<uint64_t>& counter) {
+  counter.fetch_add(1, std::memory_order_relaxed);
+}
+
+struct DequantCache {
+  std::mutex mutex;
+  std::list<DequantCacheKey> lru;
+  size_t cached_bytes = 0;
+  std::unordered_map<DequantCacheKey, DequantCacheEntry, DequantCacheKeyHasher>
+      entries;
+
+  // Drops least recently used entries until both limits hold. Call with
+  // `mutex` held.
+  void evict_to(int capacity, size_t max_bytes) {
+    while (!lru.empty() &&
+           (static_cast<int>(entries.size()) > capacity ||
+            cached_bytes > max_bytes)) {
+      auto evict_it = entries.find(lru.back());
+      if (evict_it != entries.end()) {
+        cached_bytes -= evict_it->second.bytes;
+        entries.erase(evict_it);
+        count_dequant_cache(g_dequant_cache_counters.evictions);
+      }
+      lru.pop_back();
+    }
+  }
+};
+
+void print_dequant_cache_stats();
+
+// The process-wide cache. The exit report is registered after the cache is
+// constructed, so it runs before the cache is destroyed.
+DequantCache& dequant_cache() {
+  static DequantCache cache;
+  static const bool report_registered = [] {
+    const char* e = std::getenv("MLX_ROCM_QMM_DEQUANT_CACHE_STATS");
+    if (e && e[0] == '1' && e[1] == '\0') {
+      std::atexit(print_dequant_cache_stats);
+      return true;
+    }
+    return false;
+  }();
+  (void)report_registered;
+  return cache;
+}
+
+rocm::DequantCacheStats read_dequant_cache_stats() {
+  rocm::DequantCacheStats stats{};
+  const auto& c = g_dequant_cache_counters;
+  stats.hits = c.hits.load(std::memory_order_relaxed);
+  stats.misses = c.misses.load(std::memory_order_relaxed);
+  stats.inserts = c.inserts.load(std::memory_order_relaxed);
+  stats.evictions = c.evictions.load(std::memory_order_relaxed);
+  stats.bypasses = c.bypasses.load(std::memory_order_relaxed);
+  auto& cache = dequant_cache();
+  std::lock_guard<std::mutex> lock(cache.mutex);
+  stats.entries = cache.entries.size();
+  stats.bytes = cache.cached_bytes;
+  return stats;
+}
+
+void print_dequant_cache_stats() {
+  const auto s = read_dequant_cache_stats();
+  std::fprintf(
+      stderr,
+      "[ROCm] qmm dequant cache: hits=%llu misses=%llu inserts=%llu "
+      "evictions=%llu bypassed=%llu entries=%zu bytes=%zu\n",
+      static_cast<unsigned long long>(s.hits),
+      static_cast<unsigned long long>(s.misses),
+      static_cast<unsigned long long>(s.inserts),
+      static_cast<unsigned long long>(s.evictions),
+      static_cast<unsigned long long>(s.bypasses),
+      s.entries,
+      s.bytes);
 }
 
 inline rocblas_operation to_rocblas_op(bool transpose) {
@@ -3411,7 +3512,13 @@ bool quantized_matmul_runs_dequant_gemm(
   // and fall back to different rocBLAS calls, so only the hipBLASLt case is
   // claimed. The claim assumes the hipBLASLt launch itself does not throw,
   // which would send each side to its own rocBLAS fallback.
-  return route == QmmRoute::DequantGemm && is_hipblaslt_available();
+  return (route == QmmRoute::DequantGemm ||
+          route == QmmRoute::DequantGemmAboveWmmaCeiling) &&
+      is_hipblaslt_available();
+}
+
+DequantCacheStats dequant_cache_stats() {
+  return read_dequant_cache_stats();
 }
 
 } // namespace rocm
@@ -3524,7 +3631,9 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
 
   // Dequant + rocBLAS GEMM path
   // Disable with MLX_ROCM_QMM_DEQUANT_GEMM=0 if needed
-  if (route == QmmRoute::DequantGemm || route == QmmRoute::DequantFp8Gemm) {
+  if (route == QmmRoute::DequantGemm ||
+      route == QmmRoute::DequantGemmAboveWmmaCeiling ||
+      route == QmmRoute::DequantFp8Gemm) {
     if (!((x_batch_count == 1) || (x_batch_count == batch_count))) {
       throw std::runtime_error(
           "Unsupported x batch shape for dequant GEMM fallback");
@@ -3567,15 +3676,16 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
     bool cache_hit = false;
     int cache_cap = dequant_cache_capacity();
     size_t cache_max_bytes = dequant_cache_max_bytes();
-    if (cache_cap > 0 && cache_max_bytes > 0) {
-      static std::mutex cache_mutex;
-      static std::list<DequantCacheKey> lru;
-      static size_t cached_bytes = 0;
-      static std::unordered_map<
-          DequantCacheKey,
-          DequantCacheEntry,
-          DequantCacheKeyHasher>
-          cache;
+    // Above the WMMA ceiling the cache is skipped: the weight is dequantized
+    // into a temporary below, as with the cache turned off.
+    const bool use_cache = route == QmmRoute::DequantGemm && cache_cap > 0 &&
+        cache_max_bytes > 0;
+    if (route == QmmRoute::DequantGemmAboveWmmaCeiling) {
+      dequant_cache(); // registers the exit report, if requested
+      count_dequant_cache(g_dequant_cache_counters.bypasses);
+    }
+    if (use_cache) {
+      auto& c = dequant_cache();
 
       DequantCacheKey key{
           reinterpret_cast<std::uintptr_t>(gpu_ptr<void>(w)),
@@ -3589,14 +3699,18 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
           x.dtype()};
 
       {
-        std::lock_guard<std::mutex> lock(cache_mutex);
-        auto it = cache.find(key);
-        if (it != cache.end() && it->second.weight.shape() == w_dequant_shape) {
-          lru.splice(lru.begin(), lru, it->second.lru_it);
+        std::lock_guard<std::mutex> lock(c.mutex);
+        auto it = c.entries.find(key);
+        if (it != c.entries.end() &&
+            it->second.weight.shape() == w_dequant_shape) {
+          c.lru.splice(c.lru.begin(), c.lru, it->second.lru_it);
           w_dequant = it->second.weight;
           cache_hit = true;
         }
       }
+      count_dequant_cache(
+          cache_hit ? g_dequant_cache_counters.hits
+                    : g_dequant_cache_counters.misses);
 
       if (!cache_hit) {
         w_dequant.set_data(mlx::core::rocm::malloc_async(w_dequant.nbytes(), enc));
@@ -3608,13 +3722,13 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
           fp_dequantize(w, scales, w_dequant, group_size_, bits_, enc, s);
         }
 
-        std::lock_guard<std::mutex> lock(cache_mutex);
-        auto it = cache.find(key);
-        if (it == cache.end()) {
+        std::lock_guard<std::mutex> lock(c.mutex);
+        auto it = c.entries.find(key);
+        if (it == c.entries.end()) {
           size_t entry_bytes = w_dequant.nbytes();
           if (entry_bytes <= cache_max_bytes) {
-            lru.push_front(key);
-            cache.emplace(
+            c.lru.push_front(key);
+            c.entries.emplace(
                 key,
                 DequantCacheEntry{
                     w_dequant,
@@ -3622,47 +3736,30 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
                     scales,
                     has_bias ? std::optional<array>(*biases) : std::nullopt,
                     entry_bytes,
-                    lru.begin()});
-            cached_bytes += entry_bytes;
-
-            while (static_cast<int>(cache.size()) > cache_cap ||
-                   cached_bytes > cache_max_bytes) {
-              auto evict = lru.back();
-              auto evict_it = cache.find(evict);
-              if (evict_it != cache.end()) {
-                cached_bytes -= evict_it->second.bytes;
-                cache.erase(evict_it);
-              }
-              lru.pop_back();
-            }
+                    c.lru.begin()});
+            c.cached_bytes += entry_bytes;
+            count_dequant_cache(g_dequant_cache_counters.inserts);
+            c.evict_to(cache_cap, cache_max_bytes);
           }
         } else {
           size_t entry_bytes = w_dequant.nbytes();
           if (entry_bytes > cache_max_bytes) {
-            cached_bytes -= it->second.bytes;
-            lru.erase(it->second.lru_it);
-            cache.erase(it);
+            c.cached_bytes -= it->second.bytes;
+            c.lru.erase(it->second.lru_it);
+            c.entries.erase(it);
+            count_dequant_cache(g_dequant_cache_counters.evictions);
           } else {
-            cached_bytes -= it->second.bytes;
+            c.cached_bytes -= it->second.bytes;
             it->second.w_source = w;
             it->second.scales_source = scales;
             it->second.biases_source =
                 has_bias ? std::optional<array>(*biases) : std::nullopt;
             it->second.weight = w_dequant;
             it->second.bytes = entry_bytes;
-            cached_bytes += it->second.bytes;
-            lru.splice(lru.begin(), lru, it->second.lru_it);
-
-            while (static_cast<int>(cache.size()) > cache_cap ||
-                   cached_bytes > cache_max_bytes) {
-              auto evict = lru.back();
-              auto evict_it = cache.find(evict);
-              if (evict_it != cache.end()) {
-                cached_bytes -= evict_it->second.bytes;
-                cache.erase(evict_it);
-              }
-              lru.pop_back();
-            }
+            c.cached_bytes += it->second.bytes;
+            c.lru.splice(c.lru.begin(), c.lru, it->second.lru_it);
+            count_dequant_cache(g_dequant_cache_counters.inserts);
+            c.evict_to(cache_cap, cache_max_bytes);
           }
         }
       }

@@ -8,6 +8,7 @@
 #include "mlx/utils.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <vector>
 
@@ -78,5 +79,27 @@ MLX_API bool quantized_matmul_runs_dequant_gemm(
     std::optional<Dtype> biases_dtype,
     int group_size,
     int bits);
+
+// Counters of QuantizedMatmul's dequantized-weight cache, process-wide since
+// start (lablup/mlxcel#2151). `hits` and `misses` count lookups on the cached
+// dequantize + GEMM route, `inserts` the entries stored (a refresh of an entry
+// under the same key counts), `evictions` the entries dropped for the
+// MLX_ROCM_QMM_DEQUANT_CACHE_SIZE or MLX_ROCM_QMM_DEQUANT_CACHE_MAX_BYTES
+// limit, and `bypasses` the bf16 GEMMs above the fused kernel's row ceiling,
+// which dequantize into a temporary without touching the cache. `entries` and
+// `bytes` are what the cache holds now. All zero without ROCm.
+// MLX_ROCM_QMM_DEQUANT_CACHE_STATS=1 prints the same numbers on stderr at
+// process exit.
+struct DequantCacheStats {
+  uint64_t hits;
+  uint64_t misses;
+  uint64_t inserts;
+  uint64_t evictions;
+  uint64_t bypasses;
+  size_t entries;
+  size_t bytes;
+};
+
+MLX_API DequantCacheStats dequant_cache_stats();
 
 } // namespace mlx::core::rocm
