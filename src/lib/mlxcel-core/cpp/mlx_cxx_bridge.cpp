@@ -6097,7 +6097,15 @@ static mlx::core::array fused_sample_filter_logits(
             mask, in, sampler_scalar(std::numeric_limits<float>::lowest()));
     };
 
-    const bool use_top_k = top_k > 0;
+    // Top-k at or above the vocabulary keeps every token, so it is inactive
+    // (issue #2247), the same rule `sampling_rejection_routes` and the
+    // rejection kernel apply and the one llama.cpp uses for `top_k >= n_vocab`.
+    // It is also a hard requirement here: `argpartition` throws when
+    // `kth >= shape(axis)`, and this chain runs under non-`Result` bridge
+    // functions, so the throw would reach cxx's noexcept boundary and abort the
+    // process on one request with a large `top_k`. `top_k == vocab` would be a
+    // valid partition, but it filters nothing, so it skips the work too.
+    const bool use_top_k = top_k > 0 && top_k < x.shape(-1);
     const bool use_top_p = top_p > 0.0f && top_p < 1.0f;
 
     if (rejection_semantics && use_top_k && use_top_p) {
