@@ -1,0 +1,40 @@
+{%- if tools %}
+    {{- '<|start_of_role|>available_tools<|end_of_role|>
+' }}
+    {%- for tool in tools %}
+    {{- tool | tojson(indent=4) }}
+    {%- if not loop.last %}
+        {{- '
+
+' }}
+    {%- endif %}
+    {%- endfor %}
+    {{- '<|end_of_text|>
+' }}
+{%- endif %}
+{%- for message in messages if message['role'] == 'system'%}{% else %}<|system|>
+A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the user's questions.
+{% endfor %}{%- for message in messages %}
+    {%- if message['role'] == 'system' %}
+    {{- '<|system|>
+' + message['content'][0]['text'] + '
+' }}
+    {%- elif message['role'] == 'user' %}<|user|>
+ {# Render all images first #}{% for content in message['content'] | selectattr('type', 'equalto', 'image') %}{{ '<image>
+' }}{% endfor %}{# Render all text next #}{% for content in message['content'] | selectattr('type', 'equalto', 'text') %}{{ content['text'] + '
+' }}{% endfor %}
+{%- elif message['role'] == 'assistant' %}
+    {{- '<|assistant|>
+'  + message['content'][0]['text']  + '<|end_of_text|>' }}
+    {%- elif message['role'] == 'assistant_tool_call' %}
+    {{- '<|start_of_role|>assistant<|end_of_role|><|tool_call|>' + message['content'][0]['text']  + '<|end_of_text|>
+' }}
+    {%- elif message['role'] == 'tool_response' %}
+    {{- '<|start_of_role|>tool_response<|end_of_role|>' + message['content'][0]['text'] + '<|end_of_text|>
+' }}
+    {%- endif %}
+    {%- if loop.last and add_generation_prompt %}
+    {{- '<|assistant|>
+' }}
+    {%- endif %}
+{%- endfor %}

@@ -52,6 +52,9 @@ use super::chat_template_kwargs::ChatTemplateKwargs;
 use super::tool_calls::{self, ToolCallFormat};
 use super::types::request::Tool;
 
+#[path = "chat_template_content.rs"]
+mod content;
+
 /// A message in the conversation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -178,6 +181,10 @@ pub struct ChatTemplateProcessor {
     bos_token: String,
     eos_token: String,
     add_generation_prompt: bool,
+    /// Checkpoint templates may need typed text parts. Decisions use the
+    /// effective render context and string-content roles, with a bounded cache.
+    /// Custom template strings keep their caller-controlled content contract.
+    content_normalizer: Option<content::ContentNormalizer>,
     /// Cached result of `supports_tools()` introspection.
     /// `None` means not yet computed.
     supports_tools_cached: Option<bool>,
@@ -318,7 +325,10 @@ impl std::fmt::Display for ChatTemplateCompileError {
 impl std::error::Error for ChatTemplateCompileError {}
 
 impl ChatTemplateProcessor {
-    /// Create a new processor by loading template from tokenizer_config.json or chat_template.jinja
+    /// Create a new processor by loading template from tokenizer_config.json or chat_template.jinja.
+    ///
+    /// Used by: CLI and server model loading across families, including
+    /// Granite Vision, Llama and Qwen.
     pub fn from_model_path(model_path: &Path) -> Result<Option<Self>> {
         let config_path = model_path.join("tokenizer_config.json");
         let config: Option<serde_json::Value> = if config_path.exists() {
@@ -412,6 +422,7 @@ impl ChatTemplateProcessor {
             bos_token,
             eos_token,
             add_generation_prompt: true,
+            content_normalizer: Some(content::ContentNormalizer::default()),
             supports_tools_cached: None,
             forced_tool_call_format,
             default_enable_thinking: false,
@@ -433,6 +444,7 @@ impl ChatTemplateProcessor {
             bos_token: String::new(),
             eos_token: String::new(),
             add_generation_prompt: true,
+            content_normalizer: None,
             supports_tools_cached: None,
             forced_tool_call_format,
             default_enable_thinking: false,
@@ -915,6 +927,11 @@ impl ChatTemplateProcessor {
     /// `[{"type": "image"}, {"type": "text", "text": "..."}]`) that Jinja2
     /// templates like Gemma3 VLM can iterate over.
     ///
+    /// Checkpoint-loaded processors conservatively adapt eligible string
+    /// content to typed text parts in the effective render context. Existing
+    /// arrays, null content and message metadata are untouched. Processors
+    /// created with with_template retain the caller's original raw contract.
+    ///
     /// When `tools` is `Some`, the tool definitions are passed to the Jinja2
     /// template context, enabling tool-calling prompt formatting.
     ///
@@ -939,11 +956,12 @@ impl ChatTemplateProcessor {
     /// plumbing path used's `preserve_thinking` feature and
     /// generalizes to any future kwarg a HuggingFace chat template expects.
     ///
-    /// When a kwarg key duplicates an already-provided context entry
-    /// (`messages`, `bos_token`, `eos_token`, `add_generation_prompt`,
-    /// `tools`), the kwarg value wins — this lets operators override defaults
-    /// if a template ships with unusual expectations.
-    // Used by: chat_request, routes/chat
+    /// Canonical server keys (messages, bos_token, eos_token,
+    /// add_generation_prompt and tools) are reserved; attempts to override
+    /// them through kwargs are ignored. enable_thinking remains overridable.
+    /// Other kwargs enter the effective context used for both adaptation and
+    /// rendering.
+    // Used by: chat_request, routes/chat, checkpoint-backed prompt inspection
     pub fn apply_raw_with_kwargs(
         &self,
         messages: &serde_json::Value,
@@ -981,9 +999,6 @@ impl ChatTemplateProcessor {
         kwargs: &ChatTemplateKwargs,
         add_generation_prompt: bool,
     ) -> Result<String> {
-        // Convert serde_json::Value to minijinja::Value
-        let messages_val = minijinja::Value::from_serialize(messages);
-
         // Leave `tools` UNDEFINED when the request carries no tools, and count
         // an explicit empty list as no tools (issue #1597). Three guard shapes
         // ship in the local template corpus and only an absent key satisfies
@@ -1014,7 +1029,7 @@ impl ChatTemplateProcessor {
             .map(minijinja::Value::from_serialize);
 
         let context = build_template_context(
-            messages_val,
+            Value::UNDEFINED,
             &self.bos_token,
             &self.eos_token,
             add_generation_prompt,
@@ -1025,11 +1040,16 @@ impl ChatTemplateProcessor {
             self.thinking_mode_sentinel().as_deref(),
         );
 
-        // Render directly: minijinja reproduces the template's own
-        // enable_thinking branches faithfully (issue #686), so no post-render
-        // Gemma-4 patching is applied. The `enable_thinking` value reaches the
-        // template through `build_template_context` above.
-        let rendered = self.render_template(context)?;
+        // Both ordinary and raw messages use this one adaptation boundary.
+        // Probes call the unchecked renderer, so they cannot normalize again.
+        // Existing arrays, null content and message metadata remain untouched.
+        let messages = match &self.content_normalizer {
+            Some(normalizer) => {
+                normalizer.normalize(messages, &context, |probe| self.render_template(probe))
+            }
+            None => std::borrow::Cow::Borrowed(messages),
+        };
+        let rendered = self.render_template(content::with_messages(&context, messages.as_ref()))?;
         Ok(self.complete_generation_prompt(rendered, add_generation_prompt))
     }
 
@@ -1075,6 +1095,8 @@ impl ChatTemplateProcessor {
         self.apply_inner(messages, tools, kwargs, false)
     }
 
+    // Used by: text-only CLI and server generation/history renders across
+    // model families. Share adaptation, kwargs and rendering with the raw path.
     fn apply_inner(
         &self,
         messages: &[ChatMessage],
@@ -1082,34 +1104,9 @@ impl ChatTemplateProcessor {
         kwargs: &ChatTemplateKwargs,
         add_generation_prompt: bool,
     ) -> Result<String> {
-        // Same `tools` rule as `apply_raw_inner`: the key is absent when the
-        // request carries no tools, and an explicit empty list counts as no
-        // tools (issue #1597). See that function for why undefined rather than
-        // `none` or an empty list is the value that every shipped guard shape
-        // agrees on.
-        let tools_val = tools
-            .filter(|t| !t.is_empty())
-            .map(minijinja::Value::from_serialize);
-
-        let messages_val = minijinja::Value::from_serialize(messages);
-        let context = build_template_context(
-            messages_val,
-            &self.bos_token,
-            &self.eos_token,
-            add_generation_prompt,
-            tools_val,
-            kwargs,
-            self.default_enable_thinking,
-            self.wants_bare_thinking_alias(),
-            self.thinking_mode_sentinel().as_deref(),
-        );
-
-        // Render directly: minijinja reproduces the template's own
-        // enable_thinking branches faithfully (issue #686), so no post-render
-        // Gemma-4 patching is applied. The `enable_thinking` value reaches the
-        // template through `build_template_context` above.
-        let rendered = self.render_template(context)?;
-        Ok(self.complete_generation_prompt(rendered, add_generation_prompt))
+        let messages =
+            serde_json::to_value(messages).context("Failed to serialize chat messages")?;
+        self.apply_raw_inner(&messages, tools, kwargs, add_generation_prompt)
     }
 }
 
@@ -5036,3 +5033,15 @@ TOOL
         assert!(out.starts_with("<think>"));
     }
 }
+
+#[cfg(test)]
+#[path = "chat_template_content_tests.rs"]
+mod content_tests;
+
+#[cfg(test)]
+#[path = "chat_template_raw_content_tests.rs"]
+mod raw_content_tests;
+
+#[cfg(test)]
+#[path = "chat_template_policy_tests.rs"]
+mod policy_tests;

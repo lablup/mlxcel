@@ -2175,3 +2175,7 @@ mod tests;
 #[cfg(test)]
 #[path = "chat_request_reasoning_content_tests.rs"]
 mod reasoning_content_tests;
+
+#[cfg(test)]
+#[path = "chat_request_content_tests.rs"]
+mod content_tests;
