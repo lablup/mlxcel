@@ -1,0 +1,286 @@
+# HELP llamacpp:prompt_tokens_total Number of prompt tokens processed, excluding cached tokens
+# TYPE llamacpp:prompt_tokens_total counter
+llamacpp:prompt_tokens_total 19
+# HELP llamacpp:prompt_tokens_cached_total Number of prompt tokens reused from the cache
+# TYPE llamacpp:prompt_tokens_cached_total counter
+llamacpp:prompt_tokens_cached_total 0
+# HELP llamacpp:prompt_seconds_total Total time spent processing prompts
+# TYPE llamacpp:prompt_seconds_total counter
+llamacpp:prompt_seconds_total 0.078
+# HELP llamacpp:tokens_predicted_total Number of generation tokens processed
+# TYPE llamacpp:tokens_predicted_total counter
+llamacpp:tokens_predicted_total 62
+# HELP llamacpp:tokens_predicted_seconds_total Total time spent generating tokens
+# TYPE llamacpp:tokens_predicted_seconds_total counter
+llamacpp:tokens_predicted_seconds_total 0.925
+# HELP llamacpp:n_decode_total Total number of llama_decode() calls, excluding speculative decoding and multimodal decoding
+# TYPE llamacpp:n_decode_total counter
+llamacpp:n_decode_total 62
+# HELP llamacpp:n_tokens_max Largest observed sequence length (prompt + generation)
+# TYPE llamacpp:n_tokens_max counter
+llamacpp:n_tokens_max 81
+# HELP llamacpp:spec_decode_num_draft_tokens_total Speculative: Total draft tokens generated
+# TYPE llamacpp:spec_decode_num_draft_tokens_total counter
+llamacpp:spec_decode_num_draft_tokens_total 0
+# HELP llamacpp:spec_decode_num_accepted_tokens_total Speculative: Total draft tokens accepted by the target model
+# TYPE llamacpp:spec_decode_num_accepted_tokens_total counter
+llamacpp:spec_decode_num_accepted_tokens_total 0
+# HELP llamacpp:spec_decode_num_drafts_total Speculative: Total speculative decoding verification steps
+# TYPE llamacpp:spec_decode_num_drafts_total counter
+llamacpp:spec_decode_num_drafts_total 0
+# HELP llamacpp:prompt_tokens_seconds Average prompt throughput in tokens/s
+# TYPE llamacpp:prompt_tokens_seconds gauge
+llamacpp:prompt_tokens_seconds 243.5897435897436
+# HELP llamacpp:predicted_tokens_seconds Average generation throughput in tokens/s
+# TYPE llamacpp:predicted_tokens_seconds gauge
+llamacpp:predicted_tokens_seconds 67.02702702702703
+# HELP llamacpp:requests_processing Number of requests processing
+# TYPE llamacpp:requests_processing gauge
+llamacpp:requests_processing 0
+# HELP llamacpp:requests_deferred Number of requests deferred
+# TYPE llamacpp:requests_deferred gauge
+llamacpp:requests_deferred 0
+# HELP llamacpp:n_busy_slots_per_decode Average number of busy slots per llama_decode() call
+# TYPE llamacpp:n_busy_slots_per_decode gauge
+llamacpp:n_busy_slots_per_decode 1
+# HELP mlxcel_requests_total Total number of completed generation requests; chat completion streams cancelled by the client are excluded
+# TYPE mlxcel_requests_total counter
+mlxcel_requests_total 1
+# HELP mlxcel_prompt_tokens_total Total prompt tokens processed
+# TYPE mlxcel_prompt_tokens_total counter
+mlxcel_prompt_tokens_total 19
+# HELP mlxcel_completion_tokens_total Total completion tokens of the requests counted in mlxcel_requests_total
+# TYPE mlxcel_completion_tokens_total counter
+mlxcel_completion_tokens_total 62
+# HELP mlxcel_generation_time_seconds_total Total generation time in seconds
+# TYPE mlxcel_generation_time_seconds_total counter
+mlxcel_generation_time_seconds_total 1.003
+# HELP mlxcel_slots_total Total number of parallel slots
+# TYPE mlxcel_slots_total gauge
+mlxcel_slots_total 1
+# HELP mlxcel_slots_available Available parallel slots
+# TYPE mlxcel_slots_available gauge
+mlxcel_slots_available 1
+# HELP mlxcel_queue_depth Current prefill queue depth
+# TYPE mlxcel_queue_depth gauge
+mlxcel_queue_depth 0
+# HELP mlxcel_batch_sequences_started Total sequences that entered prefill
+# TYPE mlxcel_batch_sequences_started counter
+mlxcel_batch_sequences_started 2
+# HELP mlxcel_batch_sequences_completed Total sequences that completed generation
+# TYPE mlxcel_batch_sequences_completed counter
+mlxcel_batch_sequences_completed 1
+# HELP mlxcel_batch_prefill_tokens_total Cumulative prefill tokens processed
+# TYPE mlxcel_batch_prefill_tokens_total counter
+mlxcel_batch_prefill_tokens_total 21
+# HELP mlxcel_batch_decode_tokens_total Cumulative decode tokens generated
+# TYPE mlxcel_batch_decode_tokens_total counter
+mlxcel_batch_decode_tokens_total 62
+# HELP mlxcel_batch_decode_steps_total Total decode steps executed
+# TYPE mlxcel_batch_decode_steps_total counter
+mlxcel_batch_decode_steps_total 62
+# HELP mlxcel_batch_decode_lookahead_steps_total Decode steps served by the lookahead async_eval pipeline
+# TYPE mlxcel_batch_decode_lookahead_steps_total counter
+mlxcel_batch_decode_lookahead_steps_total 60
+# HELP mlxcel_batch_prefill_chunks_total Total prefill chunks processed
+# TYPE mlxcel_batch_prefill_chunks_total counter
+mlxcel_batch_prefill_chunks_total 0
+# HELP mlxcel_batch_mixed_steps_total Mixed prefill/decode ticks (issue #908 prototype; zero unless MLXCEL_MIXED_STEP is set)
+# TYPE mlxcel_batch_mixed_steps_total counter
+mlxcel_batch_mixed_steps_total 0
+# HELP mlxcel_batch_prefill_grants_total Fairness grants handed to a parked chunked prefill (issue #1011; zero when --prefill-grant-interval is 0)
+# TYPE mlxcel_batch_prefill_grants_total counter
+mlxcel_batch_prefill_grants_total 0
+# HELP mlxcel_batch_current_size Current active batch size
+# TYPE mlxcel_batch_current_size gauge
+mlxcel_batch_current_size 0
+# HELP mlxcel_cache_pool_active Active cache entries
+# TYPE mlxcel_cache_pool_active gauge
+mlxcel_cache_pool_active 0
+# HELP mlxcel_cache_pool_paged_block_size Paged decode block size in tokens
+# TYPE mlxcel_cache_pool_paged_block_size gauge
+mlxcel_cache_pool_paged_block_size 0
+# HELP mlxcel_cache_pool_paged_blocks_allocated Total paged KV blocks tracked by the allocator
+# TYPE mlxcel_cache_pool_paged_blocks_allocated gauge
+mlxcel_cache_pool_paged_blocks_allocated 0
+# HELP mlxcel_cache_pool_paged_blocks_live Paged KV blocks currently in live use
+# TYPE mlxcel_cache_pool_paged_blocks_live gauge
+mlxcel_cache_pool_paged_blocks_live 0
+# HELP mlxcel_cache_pool_paged_blocks_free Paged KV blocks currently free for reuse
+# TYPE mlxcel_cache_pool_paged_blocks_free gauge
+mlxcel_cache_pool_paged_blocks_free 0
+# HELP mlxcel_cache_pool_paged_bytes_reserved Real bytes of allocated paged pool slabs (capacity, including grow slack)
+# TYPE mlxcel_cache_pool_paged_bytes_reserved gauge
+mlxcel_cache_pool_paged_bytes_reserved 0
+# HELP mlxcel_cache_pool_paged_bytes_in_use Real bytes of pool rows mapped to live blocks (active sequences plus parked prompt-cache pins)
+# TYPE mlxcel_cache_pool_paged_bytes_in_use gauge
+mlxcel_cache_pool_paged_bytes_in_use 0
+# HELP mlxcel_cache_pool_paged_block_budget Configured paged KV block-budget cap (0 = unbounded)
+# TYPE mlxcel_cache_pool_paged_block_budget gauge
+mlxcel_cache_pool_paged_block_budget 3322306
+# HELP mlxcel_decode_storage_fallbacks_total Number of paged decode fallback events
+# TYPE mlxcel_decode_storage_fallbacks_total counter
+mlxcel_decode_storage_fallbacks_total 0
+# HELP mlxcel_paged_decode_launches_total Layer decode steps by attention path
+# TYPE mlxcel_paged_decode_launches_total counter
+mlxcel_paged_decode_launches_total{path="fused_v2"} 0
+mlxcel_paged_decode_launches_total{path="gather"} 0
+mlxcel_paged_decode_launches_total{path="cascade"} 0
+# HELP mlxcel_cascade_shared_tokens_total Cumulative KV tokens hoisted into a shared-span cascade launch
+# TYPE mlxcel_cascade_shared_tokens_total counter
+mlxcel_cascade_shared_tokens_total 0
+# HELP mlxcel_cascade_member_sequences_total Cumulative sequences sharing a cascade span
+# TYPE mlxcel_cascade_member_sequences_total counter
+mlxcel_cascade_member_sequences_total 0
+# HELP mlxcel_cascade_failures_total Planned cascade launches that fell back to the flat v2 launch
+# TYPE mlxcel_cascade_failures_total counter
+mlxcel_cascade_failures_total 0
+# HELP mlxcel_lang_bias_applied_total Sampling steps where language token bias was applied
+# TYPE mlxcel_lang_bias_applied_total counter
+mlxcel_lang_bias_applied_total 0
+# HELP mlxcel_lang_bias_tokens_suppressed_total Sampling steps where the pre-bias top-1 token was neg-inf suppressed
+# TYPE mlxcel_lang_bias_tokens_suppressed_total counter
+mlxcel_lang_bias_tokens_suppressed_total 0
+# HELP mlxcel_lang_bias_byte_fragment_suppressions_total Suppressions where the neg-inf top-1 token was classified via UTF-8 start-byte
+# TYPE mlxcel_lang_bias_byte_fragment_suppressions_total counter
+mlxcel_lang_bias_byte_fragment_suppressions_total 0
+# HELP mlxcel_prompt_cache_hits_total Successful prompt-prefix cache adoptions
+# TYPE mlxcel_prompt_cache_hits_total counter
+mlxcel_prompt_cache_hits_total 0
+# HELP mlxcel_prompt_cache_misses_total Prompt-prefix cache lookups that produced no match
+# TYPE mlxcel_prompt_cache_misses_total counter
+mlxcel_prompt_cache_misses_total 1
+# HELP mlxcel_prompt_cache_prefix_tokens_reused_total Total prompt tokens reused from prefix cache
+# TYPE mlxcel_prompt_cache_prefix_tokens_reused_total counter
+mlxcel_prompt_cache_prefix_tokens_reused_total 0
+# HELP mlxcel_prompt_cache_evictions_total Prompt-prefix cache evictions labeled by reason
+# TYPE mlxcel_prompt_cache_evictions_total counter
+mlxcel_prompt_cache_evictions_total{reason="lru"} 0
+mlxcel_prompt_cache_evictions_total{reason="ttl"} 0
+mlxcel_prompt_cache_evictions_total{reason="capacity"} 0
+# HELP mlxcel_prompt_cache_bytes Current byte footprint of all live prompt-cache entries
+# TYPE mlxcel_prompt_cache_bytes gauge
+mlxcel_prompt_cache_bytes 37909448
+# HELP mlxcel_prompt_cache_entries Current number of live prompt-cache entries
+# TYPE mlxcel_prompt_cache_entries gauge
+mlxcel_prompt_cache_entries 1
+# HELP mlxcel_prompt_cache_snapshot_hits_total Successful exact-prefix recurrent-state snapshot restores
+# TYPE mlxcel_prompt_cache_snapshot_hits_total counter
+mlxcel_prompt_cache_snapshot_hits_total 1
+# HELP mlxcel_prompt_cache_snapshot_misses_total Exact-prefix recurrent-state snapshot lookups that missed
+# TYPE mlxcel_prompt_cache_snapshot_misses_total counter
+mlxcel_prompt_cache_snapshot_misses_total 1
+# HELP mlxcel_prompt_cache_snapshot_tokens_reused_total Total prompt tokens reused from recurrent-state snapshots
+# TYPE mlxcel_prompt_cache_snapshot_tokens_reused_total counter
+mlxcel_prompt_cache_snapshot_tokens_reused_total 81
+# HELP mlxcel_prompt_cache_snapshot_evictions_total Snapshot evictions labeled by reason
+# TYPE mlxcel_prompt_cache_snapshot_evictions_total counter
+mlxcel_prompt_cache_snapshot_evictions_total{reason="lru"} 0
+mlxcel_prompt_cache_snapshot_evictions_total{reason="ttl"} 0
+# HELP mlxcel_prompt_cache_reject_total Prompt-prefix cache reject/decline events labeled by reason (covers both the donate-back and adopt paths)
+# TYPE mlxcel_prompt_cache_reject_total counter
+mlxcel_prompt_cache_reject_total{reason="oversized"} 0
+mlxcel_prompt_cache_reject_total{reason="disabled"} 0
+mlxcel_prompt_cache_reject_total{reason="prefix_too_short"} 0
+mlxcel_prompt_cache_reject_total{reason="mode_mismatch"} 0
+mlxcel_prompt_cache_reject_total{reason="empty_set"} 0
+mlxcel_prompt_cache_reject_total{reason="layout_constraints"} 0
+mlxcel_prompt_cache_reject_total{reason="block_boundary_floor"} 0
+mlxcel_prompt_cache_reject_total{reason="snapshot_diverged"} 0
+mlxcel_prompt_cache_reject_total{reason="model_owned_state"} 0
+# HELP mlxcel_audio_source_seconds_total Source audio duration accepted by preprocessing
+# TYPE mlxcel_audio_source_seconds_total counter
+mlxcel_audio_source_seconds_total 0.000000
+# HELP mlxcel_audio_source_samples_total Source mono frames decoded before resampling
+# TYPE mlxcel_audio_source_samples_total counter
+mlxcel_audio_source_samples_total 0
+# HELP mlxcel_audio_normalized_samples_total Normalized mono frames after family resampling
+# TYPE mlxcel_audio_normalized_samples_total counter
+mlxcel_audio_normalized_samples_total 0
+# HELP mlxcel_audio_feature_frames_total Family feature frames estimated
+# TYPE mlxcel_audio_feature_frames_total counter
+mlxcel_audio_feature_frames_total 0
+# HELP mlxcel_audio_effective_tokens_total Internal audio soft-token positions
+# TYPE mlxcel_audio_effective_tokens_total counter
+mlxcel_audio_effective_tokens_total 0
+# HELP mlxcel_audio_effective_prefill_tokens_total Final prepared-prefill sequence positions for audio requests
+# TYPE mlxcel_audio_effective_prefill_tokens_total counter
+mlxcel_audio_effective_prefill_tokens_total 0
+# HELP mlxcel_audio_preprocess_latency_seconds_total Host audio preprocessing latency
+# TYPE mlxcel_audio_preprocess_latency_seconds_total counter
+mlxcel_audio_preprocess_latency_seconds_total 0.000000
+# HELP mlxcel_audio_preprocess_rejections_total Audio preprocessing rejections
+# TYPE mlxcel_audio_preprocess_rejections_total counter
+mlxcel_audio_preprocess_rejections_total{reason="queue_full"} 0
+mlxcel_audio_preprocess_rejections_total{reason="memory_limit"} 0
+mlxcel_audio_preprocess_rejections_total{reason="worker_unavailable"} 0
+mlxcel_audio_preprocess_rejections_total{reason="overflow"} 0
+mlxcel_audio_preprocess_rejections_total{reason="waveform"} 0
+mlxcel_audio_preprocess_rejections_total{reason="feature"} 0
+mlxcel_audio_preprocess_rejections_total{reason="feature_panic"} 0
+mlxcel_audio_preprocess_rejections_total{reason="context_limit"} 0
+# HELP mlxcel_audio_preprocess_cancelled_total Cancelled audio preprocessing jobs
+# TYPE mlxcel_audio_preprocess_cancelled_total counter
+mlxcel_audio_preprocess_cancelled_total 0
+# HELP mlxcel_audio_preprocess_queued_bytes Encoded audio bytes retained across queued, processing, and result-handoff states
+# TYPE mlxcel_audio_preprocess_queued_bytes gauge
+mlxcel_audio_preprocess_queued_bytes 0
+# HELP mlxcel_audio_preprocess_inflight_host_bytes Host bytes reserved across queued, processing, and result handoff
+# TYPE mlxcel_audio_preprocess_inflight_host_bytes gauge
+mlxcel_audio_preprocess_inflight_host_bytes 0
+# HELP mlxcel_request_ttft_ms Per-request time to first token (prefill latency) in milliseconds
+# TYPE mlxcel_request_ttft_ms histogram
+mlxcel_request_ttft_ms_bucket{le="5"} 0
+mlxcel_request_ttft_ms_bucket{le="10"} 0
+mlxcel_request_ttft_ms_bucket{le="25"} 0
+mlxcel_request_ttft_ms_bucket{le="50"} 0
+mlxcel_request_ttft_ms_bucket{le="100"} 1
+mlxcel_request_ttft_ms_bucket{le="250"} 1
+mlxcel_request_ttft_ms_bucket{le="500"} 1
+mlxcel_request_ttft_ms_bucket{le="1000"} 1
+mlxcel_request_ttft_ms_bucket{le="2500"} 1
+mlxcel_request_ttft_ms_bucket{le="5000"} 1
+mlxcel_request_ttft_ms_bucket{le="10000"} 1
+mlxcel_request_ttft_ms_bucket{le="30000"} 1
+mlxcel_request_ttft_ms_bucket{le="+Inf"} 1
+mlxcel_request_ttft_ms_sum 78.000
+mlxcel_request_ttft_ms_count 1
+# HELP mlxcel_request_decode_tok_s Per-request decode throughput in tokens per second
+# TYPE mlxcel_request_decode_tok_s histogram
+mlxcel_request_decode_tok_s_bucket{le="1"} 0
+mlxcel_request_decode_tok_s_bucket{le="5"} 0
+mlxcel_request_decode_tok_s_bucket{le="10"} 0
+mlxcel_request_decode_tok_s_bucket{le="25"} 0
+mlxcel_request_decode_tok_s_bucket{le="50"} 0
+mlxcel_request_decode_tok_s_bucket{le="75"} 1
+mlxcel_request_decode_tok_s_bucket{le="100"} 1
+mlxcel_request_decode_tok_s_bucket{le="150"} 1
+mlxcel_request_decode_tok_s_bucket{le="200"} 1
+mlxcel_request_decode_tok_s_bucket{le="300"} 1
+mlxcel_request_decode_tok_s_bucket{le="500"} 1
+mlxcel_request_decode_tok_s_bucket{le="1000"} 1
+mlxcel_request_decode_tok_s_bucket{le="+Inf"} 1
+mlxcel_request_decode_tok_s_sum 67.027
+mlxcel_request_decode_tok_s_count 1
+# HELP mlxcel_pp_stage_busy_fraction Fraction of stage time spent on compute/transfer
+# TYPE mlxcel_pp_stage_busy_fraction gauge
+# HELP mlxcel_pp_stage_bubble_fraction Fraction of stage time spent idle (bubble)
+# TYPE mlxcel_pp_stage_bubble_fraction gauge
+# HELP mlxcel_pp_mean_bubble_ratio Rolling mean bubble ratio across recorded steps
+# TYPE mlxcel_pp_mean_bubble_ratio gauge
+mlxcel_pp_mean_bubble_ratio 0.000000
+# HELP mlxcel_pp_activation_latency_microseconds Activation transfer latency between adjacent stages
+# TYPE mlxcel_pp_activation_latency_microseconds summary
+# HELP mlxcel_pp_admission_rejections_total Total KV cache admission rejections
+# TYPE mlxcel_pp_admission_rejections_total counter
+# HELP mlxcel_pp_repartition_events_total Total elastic pipeline repartition events
+# TYPE mlxcel_pp_repartition_events_total counter
+# HELP mlxcel_pp_repartition_drain_microseconds Drain duration histogram for completed repartitions
+# TYPE mlxcel_pp_repartition_drain_microseconds summary
+mlxcel_pp_repartition_drain_microseconds_sum 0
+mlxcel_pp_repartition_drain_microseconds_count 0
+mlxcel_pp_repartition_drain_microseconds_max 0
+# HELP mlxcel_pp_repartition_total_microseconds Total repartition wall time across outcomes
+# TYPE mlxcel_pp_repartition_total_microseconds summary
+mlxcel_pp_repartition_total_microseconds_sum 0
+mlxcel_pp_repartition_total_microseconds_count 0

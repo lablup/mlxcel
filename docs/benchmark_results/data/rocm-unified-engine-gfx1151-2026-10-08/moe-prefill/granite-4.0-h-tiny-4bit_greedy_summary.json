@@ -1,0 +1,187 @@
+{
+  "name": "granite-4.0-h-tiny-4bit_greedy",
+  "model_type": "granitemoehybrid",
+  "temperature": 0.0,
+  "clock": "boottime",
+  "prompt_tokens": 512,
+  "generated_tokens": 128,
+  "profiled_decode_tok_s": 75.25,
+  "profiled_prefill_tok_s": 608.69,
+  "plain_decode_tok_s": null,
+  "plain_prefill_tok_s": null,
+  "profiler_decode_slowdown_pct": null,
+  "decode_dispatches": 212348,
+  "dispatches_per_token": 1659.0,
+  "decode_wall_ms": 1701.056,
+  "decode_gpu_sum_ms": 1106.483,
+  "decode_gpu_busy_ms": 1106.483,
+  "gpu_ms_per_token": 8.6444,
+  "host_gap_ms_per_token": 4.6451,
+  "host_gap_pct_of_wall": 34.95,
+  "plain_wall_ms_per_token": null,
+  "plain_host_gap_ms_per_token_est": null,
+  "checks": {
+    "kernels_straddling_decode_start": 0,
+    "idle_gap_before_first_decode_dispatch_us": 14012.0,
+    "last_dispatch_before_decode": "void mlx::core::rocm::arg_reduce_final<hip_bfloat16, mlx::core::rocm::ArgMax<hip_bfloat16>, 256>(hip_bfloat16 const*, un"
+  },
+  "top_kernels": [
+    {
+      "kernel": "void mlx::core::rocm::qmv_wide_kernel<hip_bfloat16, hip_bfloat16, 64, 4>(hip_bfloat16 const*, unsigned char const*, hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16*, int, int, int, bool)",
+      "class": "qmv",
+      "calls_per_token": 167.68,
+      "share_pct": 31.6
+    },
+    {
+      "kernel": "void mlx::core::rocm::gather_qmv_wide_kernel<hip_bfloat16, hip_bfloat16, 64>(hip_bfloat16 const*, unsigned char const*, hip_bfloat16 const*, hip_bfloat16 const*, unsigned int const*, unsigned int const*, mlx::core::rocm::hip_array<int, 10>, mlx::core::rocm::hip_array<long, 10>, mlx::core::rocm::hip_array<long, 10>, int, hip_bfloat16*, int, int, int, int, int, bool, bool, long)",
+      "class": "gather_qmv",
+      "calls_per_token": 119.06,
+      "share_pct": 26.23
+    },
+    {
+      "kernel": "mlx::core::rocm::custom_kernel_ssm_kernel_hip_bfloat16_t_float_64_128_48_48_bfloat16_t_bfloat16_t_bfloat16_t(hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16 const*, float const*, float const*, hip_bfloat16*, float*)",
+      "class": "other",
+      "calls_per_token": 35.72,
+      "share_pct": 6.92
+    },
+    {
+      "kernel": "void mlx::core::rocm::block_sort_kernel<hip_bfloat16, unsigned int, true, 32, 8>(hip_bfloat16 const*, unsigned int*, int, long, long, long, long)",
+      "class": "sort",
+      "calls_per_token": 39.69,
+      "share_pct": 4.69
+    },
+    {
+      "kernel": "void mlx::core::rocm::rms_norm_kernel<hip_bfloat16, 256, 4>(hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16*, float, unsigned int, long)",
+      "class": "rms_norm",
+      "calls_per_token": 116.09,
+      "share_pct": 4.61
+    },
+    {
+      "kernel": "void mlx::core::rocm::CV2ISigmoidADV2IBroadcastACEV2IBroadcastCAFV2IMultiplyDEGV2IBroadcastFBHV2IBroadcastBFIV2OMultiplyGH_VV_V2V2_6142509188972423790_contiguous<unsigned int, 16>(hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16*, unsigned int)",
+      "class": "compiled",
+      "calls_per_token": 79.38,
+      "share_pct": 3.54
+    },
+    {
+      "kernel": "void mlx::core::rocm::binary_vv<mlx::core::rocm::Add, hip_bfloat16, hip_bfloat16, unsigned int, 4>(hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16*, unsigned int)",
+      "class": "binary",
+      "calls_per_token": 154.78,
+      "share_pct": 3.29
+    },
+    {
+      "kernel": "void mlx::core::rocm::BV2ISigmoidACV2IBroadcastABDV2IBroadcastBAEV2OMultiplyCD_V_V2_6142509188972423790_contiguous<unsigned int, 16>(hip_bfloat16 const*, hip_bfloat16*, unsigned int)",
+      "class": "compiled",
+      "calls_per_token": 71.44,
+      "share_pct": 2.4
+    },
+    {
+      "kernel": "void mlx::core::rocm::binary_vs<mlx::core::rocm::Multiply, hip_bfloat16, hip_bfloat16, unsigned int, 4>(hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16*, unsigned int)",
+      "class": "binary",
+      "calls_per_token": 80.37,
+      "share_pct": 1.81
+    },
+    {
+      "kernel": "void mlx::core::rocm::binary_vv<mlx::core::rocm::Multiply, hip_bfloat16, hip_bfloat16, unsigned int, 4>(hip_bfloat16 const*, hip_bfloat16 const*, hip_bfloat16*, unsigned int)",
+      "class": "binary",
+      "calls_per_token": 71.44,
+      "share_pct": 1.59
+    }
+  ],
+  "class_share_pct": {
+    "qmv": 32.96,
+    "gather_qmv": 26.23,
+    "binary": 7.67,
+    "other": 6.92,
+    "compiled": 6.76,
+    "copy": 5.68,
+    "sort": 4.69,
+    "rms_norm": 4.61,
+    "softmax": 1.03,
+    "reduce": 0.87,
+    "gather_scatter": 0.79,
+    "conv": 0.76,
+    "sdpa": 0.54,
+    "gemm": 0.38,
+    "arg_reduce": 0.09,
+    "dequantize": 0.02
+  },
+  "role_share_pct": {
+    "unattributed": 47.1,
+    "moe_expert_gemv": 26.23,
+    "ssm_step": 10.44,
+    "add_rms_join": 4.59,
+    "ssm_gated_norm": 2.82,
+    "moe_activation": 2.45,
+    "ssm_silu": 2.4,
+    "ssm_conv": 1.82,
+    "moe_weighted_sum": 1.12,
+    "moe_gather_indices": 0.76,
+    "sampler_tail": 0.28,
+    "add_rms_join_post_attn": 0.0,
+    "rope_append": 0.0,
+    "paged_attention": 0.0
+  },
+  "role_dispatches_per_token": {
+    "unattributed": 669.9,
+    "ssm_step": 179.4,
+    "ssm_conv": 107.2,
+    "ssm_silu": 71.4,
+    "ssm_gated_norm": 107.2,
+    "add_rms_join": 156.8,
+    "moe_gather_indices": 79.4,
+    "moe_expert_gemv": 119.1,
+    "moe_activation": 79.4,
+    "moe_weighted_sum": 79.4,
+    "sampler_tail": 9.9,
+    "add_rms_join_post_attn": 0.0,
+    "rope_append": 0.0,
+    "paged_attention": 0.0
+  },
+  "port_units": {
+    "2063": {
+      "port": "fused_add_rms_norm + fused_rope_qk_append",
+      "fallback_share_pct": 0.0,
+      "fallback_dispatches_per_token": 0.0,
+      "reached_default_share_pct": 0.0,
+      "reached_default_dispatches_per_token": 0.0,
+      "reached_optin_share_pct": 0.0,
+      "note": "granitemoehybrid never calls fused_add_rms_norm or forward_fused_rope_append"
+    },
+    "2064": {
+      "port": "samplers (gumbel_max_sample, rejection_sample)",
+      "fallback_share_pct": 0.28,
+      "fallback_dispatches_per_token": 9.9,
+      "reached_default_share_pct": 0.0,
+      "reached_default_dispatches_per_token": 0.0,
+      "reached_optin_share_pct": 0.0,
+      "note": "greedy argmax dispatches neither sampler kernel"
+    },
+    "2065": {
+      "port": "fused MoE decode (moe_gateup, moe_down)",
+      "fallback_share_pct": 30.55,
+      "fallback_dispatches_per_token": 357.2,
+      "reached_default_share_pct": 0.0,
+      "reached_default_dispatches_per_token": 0.0,
+      "reached_optin_share_pct": 0.0,
+      "note": "granitemoehybrid does not call forward_fused_kernel"
+    },
+    "2067": {
+      "port": "SSM update (ssm_update_kernel)",
+      "fallback_share_pct": 10.44,
+      "fallback_dispatches_per_token": 179.4,
+      "reached_default_share_pct": 10.44,
+      "reached_default_dispatches_per_token": 179.4,
+      "reached_optin_share_pct": 10.44,
+      "note": "ssm_kernel_available() gates the decode step"
+    },
+    "2068": {
+      "port": "paged attention (v1, v2, merge)",
+      "fallback_share_pct": 0.0,
+      "fallback_dispatches_per_token": 0.0,
+      "reached_default_share_pct": 0.0,
+      "reached_default_dispatches_per_token": 0.0,
+      "reached_optin_share_pct": 0.0,
+      "note": "the bench decodes into a dense KVCache; the paged path is not taken"
+    }
+  }
+}

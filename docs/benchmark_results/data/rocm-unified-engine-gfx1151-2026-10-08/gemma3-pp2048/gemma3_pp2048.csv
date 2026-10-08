@@ -1,0 +1,10 @@
+round,arm,prefill_tok_s,decode_tok_s,status
+1,base,2928.21,62.66,ok
+1,new,2957.12,61.93,ok
+1,new-sync,2903.93,63.62,ok
+2,new,2931.20,61.83,ok
+2,new-sync,2785.33,63.69,ok
+2,base,2923.49,62.82,ok
+3,new-sync,2911.18,63.50,ok
+3,base,2911.06,62.61,ok
+3,new,2927.53,61.67,ok

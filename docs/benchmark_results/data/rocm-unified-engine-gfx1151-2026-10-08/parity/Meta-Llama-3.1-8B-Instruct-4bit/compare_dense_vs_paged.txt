@@ -1,0 +1,22 @@
+reference  models/mlx/Meta-Llama-3.1-8B-Instruct-4bit
+candidate  models/mlx/Meta-Llama-3.1-8B-Instruct-4bit
+positions  128
+
+top-1 disagreement                      0 / 128       0.000%
+  on decided positions (gap>=2.0)       0 / 44        0.000%   <- gate on this
+  largest gap at a disagreement   none, every position agrees
+
+disagreement by how decided the reference was
+reference top-two gap    positions  disagreed     rate
+  0 to 0.5                      39          0    0.00%
+  0.5 to 1                      21          0    0.00%
+  1 to 2                        24          0    0.00%
+  2 to 5                        19          0    0.00%
+  5 to 10                       20          0    0.00%
+  10 to inf                      5          0    0.00%
+
+logit delta on the reference's own choice: p50=0.0000  p90=0.0000  p99=0.0000  max=0.0000
+
+perplexity  reference 2.2329   candidate 2.2329   +0.000%  (higher is worse)
+
+verdict: byte-identical in effect, every position agrees

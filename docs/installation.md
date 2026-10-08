@@ -528,6 +528,10 @@ in
 Where that decode time goes, per kernel, and the order the #1814 kernel ports
 should land in, is in
 [`docs/benchmark_results/rocm-decode-profile-gfx1151-2026-09-30.md`](benchmark_results/rocm-decode-profile-gfx1151-2026-09-30.md).
+The unified decode engine (epic #2166) was verified on `gfx1151` after it
+merged: the ROCm gate, every ROCm-only test, CLI-vs-server parity (dense and
+paged) and decode throughput against the pre-epic loop, in
+[`docs/benchmark_results/rocm-unified-engine-gfx1151-2026-10-08.md`](benchmark_results/rocm-unified-engine-gfx1151-2026-10-08.md).
 
 #### Memory footprint
 
