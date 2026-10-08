@@ -23,7 +23,7 @@ Paired per-round decode tok/s delta against `base-cli` (median, range over 5 rou
 | Llama-3.2-1B 4-bit | 8192 | +0.19 % (+0.03..+0.82) | -2.05 % (-2.25..-1.50) | +0.06 % (-0.36..+0.42) |
 
 - **`mlxcel generate` passes in every cell.** The engine client decodes at least as fast as `CxxGenerator`; three of the four cells clear the null range upward.
-- **The server engine at B=1 with dense storage misses the threshold in three of four cells.** That is the path `mlxcel run` and the chat REPL take since #2173 (one slot, dense). Phase 0 measured the same gap before the epic (server dense within 1.0 to 1.5 percent of the CLI), so it is the scheduler's per-tick overhead rather than something the epic added. But `run` used `CxxGenerator` before #2173, so for `run` users this is a 1 to 2 percent decode regression. Follow-up needed.
+- **The server engine at B=1 with dense storage misses the threshold in all four cells.** That is the path `mlxcel run` and the chat REPL take since #2173 (one slot, dense). Phase 0 measured the same gap before the epic (server dense within 1.0 to 1.5 percent of the CLI), so it is the scheduler's per-tick overhead rather than something the epic added. But `run` used `CxxGenerator` before #2173, so for `run` users this is a 1 to 2 percent decode regression. Follow-up needed.
 - **TTFT at 256 tokens on `generate`**: +4.4 % on Qwen3 (null range -3.9..+10.9, unresolved) and +9.0 % on Llama (+4.2..+12.7 against a null of -4.4..+8.3), about 1 ms. At 8192 tokens TTFT is unchanged (-0.4 %).
 
 Medians (tok/s, TTFT ms):
