@@ -111,6 +111,8 @@ reproduce the single-request path on the server, use `--max-batch-size 1`
 (dense storage) or `--decode-storage-backend dense` while keeping the default
 admission width, and `--no-prompt-cache`.
 
+On ROCm the invariant holds without `MLXCEL_SDPA_DETERMINISTIC` (the variable is read only by the CUDA overlay), and the dense-vs-paged pair is a recorded divergence index rather than a gate ([ADR 0007](adr/0007-unified-batch-native-engine.md), "What parity means on ROCm and Metal"). Measured on gfx1151 after the epic (#2192, [results](benchmark_results/rocm-unified-engine-gfx1151-2026-10-08.md)): on Qwen3-0.6B 4-bit and Llama-3.1-8B 4-bit every pair the harness compares is identical for the greedy and the seeded case, the paged arm included (it ran the HIP paged v2 kernel, 1764 to 2080 launches per run), except the documented seeded prompt-cache miss-vs-hit row; a 128-token teacher-forced decode-step trace of a dense server against a paged server disagrees at TODO_PAGED positions and at TODO_PAGED_DECIDED decided positions. On the Mamba hybrid granite-4.0-h-tiny 4-bit the CLI, `run` and the dense server are identical; paged storage is `n/a` (the worker falls back to dense), and the prompt cache's history-boundary split (`prefill[0..45)+prefill[45..48)` against the cache-off `prefill[0..48)`) is a different partition, so the cache-off and cache-miss arms diverge there, at token 47 greedy and token 0 seeded.
+
 > Backend note (CUDA / Blackwell, e.g. GB10): batched decode used to be a
 > throughput wash on CUDA because the `M*B < 8` quantized matmul fell back to
 > per-row qmv, re-reading the weights once per sequence (aggregate flat at

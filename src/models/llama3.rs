@@ -671,11 +671,13 @@ impl Attention {
         // Fused q/k RoPE + KV-append-layout kernel (#905). Unlike
         // `forward_split_rope` above, this one takes `traditional` as a real
         // parameter, so traditional-RoPE checkpoints reach it too. It emits
-        // K/V in the dense `KVCache` slab layout, which is what
-        // `update_and_fetch` splices below; the paged-pool layout the kernel
-        // also supports belongs to the batched paged decode path (#899) and is
-        // deliberately not wired here. `MLXCEL_FUSED_ROPE_APPEND=0` falls back
-        // to the reshape / transpose / `fast_rope` graph below.
+        // K/V in the dense `KVCache` slab layout `[B, Hkv, L, D]`, which is
+        // what `cache.attend` below appends on both storages (dense
+        // `update_and_fetch`, and the pool-backed `write_paged`, which takes
+        // the same order); the paged-pool layout the kernel also supports
+        // belongs to the batched paged decode path (#899) and is deliberately
+        // not wired here. `MLXCEL_FUSED_ROPE_APPEND=0` falls back to the
+        // reshape / transpose / `fast_rope` graph below.
         let fused_rope_append = if fused_split_rope.is_some() || self.rope_freqs.is_some() {
             // A `rope_scaling` table has no route into this kernel either: it
             // takes `rope_base` and builds its own frequencies in Metal.

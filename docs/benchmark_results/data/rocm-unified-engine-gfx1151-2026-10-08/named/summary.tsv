@@ -1,0 +1,31 @@
+selector	result	skipping_lines	status
+test_sampling_gumbel_kill_switch	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out	0	ok
+test_sampling_rejection_kill_switch	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out	0	ok
+test_rocm_slice_update_source	test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out	0	ok
+test_rocm_slice_update_reduce	test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out	0	ok
+test_rocm_wave64_port_refusal	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out	0	ok
+test_rocm_wave_size	test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out	0	ok
+test_rocm_gather_qmm_expert_batched	test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out	0	ok
+test_rocm_inflight_bound	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out	0	ok
+core_sampling_fixed_key_tests	test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 2021 filtered out	0	ok
+core_sampling_rejection_tests	test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 1998 filtered out	0	ok
+core_sampling_gumbel_tests	test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 2012 filtered out	0	ok
+core_lang_bias_counters_tests_override_is_scoped_nested_and_thread_local	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2025 filtered out	0	ok
+core_config_supports_fused_batch_false_for_token_bias	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2025 filtered out	0	ok
+core_rotating_inplace_warmup_and_wrap_keep_shared_snapshots_intact	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2025 filtered out	0	ok
+core_rotating_steady_state_snapshot_survives_the_next_wrap_write	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2025 filtered out	0	ok
+core_paged_pool_offset_tests	test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 2023 filtered out	0	ok
+core_validate_rejects_a_merge_input_past_the_u32_index_range	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2025 filtered out	0	ok
+core_kernel_port_tests	test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2024 filtered out	0	ok
+core_fused_905_defaults_are_on_for_rocm_builds_only	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2025 filtered out	0	ok
+core_fused_norm_parity_tests	test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 2016 filtered out	0	ok
+core_ssm_update_parity_tests	test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 2021 filtered out	0	ok
+core_fused_moe_parity_tests	test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 2021 filtered out	0	ok
+core_fused_moe_relu2_parity_tests	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2025 filtered out	0	ok
+lib_pooling_cache_remainder_survives_an_overlapping_tail_write	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9070 filtered out	0	ok
+lib_the_rope_append_bypass_notice_needs_an_explicit_truthy_value	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9070 filtered out	0	ok
+lib_switch_layers_mxfp_tests	test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 9066 filtered out	0	ok (rerun with the selector switch_layers::mxfp_tests)
+lib_runtime_tests_cache_limit_	test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 9067 filtered out	0	ok (rerun with the selector runtime::tests::cache_limit_)
+lib_scheduler_model_owned_lookahead_tests	test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 9064 filtered out	0	ok
+lib_model_owned_sequence_primes_the_decode_lookahead_only_with_a_rewind	test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9070 filtered out	0	ok
+lib_sampling_observability_tests	test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 9065 filtered out	0	ok
