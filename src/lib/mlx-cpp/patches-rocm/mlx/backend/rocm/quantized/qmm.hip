@@ -906,7 +906,16 @@ inline QmmRoute select_qmm_route(const QmmRouteInputs& in, rocm::Device& d) {
       single && in.M > 1 && (in.N % 16 == 0) && in.group_size == 64 &&
       (in.K % 64 == 0) &&
       (in.bits == 4 || in.bits == 6 || in.bits == 8) && d.has_native_wmma();
-  if (want_wmma && wmma_shape) {
+  // Up to 8 rows of a 4- or 8-bit shape with biases, qmv_wide_kernel reads the
+  // weight once for all rows. On gfx1151 the fused kernel cost 7 to 8 times
+  // the one-row GEMV there (Meta-Llama-3.1-8B shapes, bf16, 2 to 8 rows:
+  // about 4.2 ms against 0.56 ms summed over one layer's projections), so a
+  // decode batch, whose [B, 1, K] rows reach this point since the batch fold
+  // (lablup/mlxcel#2156), takes the same qmv / dequantize crossover as f16.
+  // MLX_ROCM_WMMA_QMM=1 still forces the fused kernel.
+  const bool wide_qmv_rows = in.M <= 8 && (in.bits == 4 || in.bits == 8) &&
+      in.biases_dtype.has_value();
+  if (want_wmma && wmma_shape && !(env != 1 && wide_qmv_rows)) {
     // The ceiling only hands the GEMM to the bf16 dequant + hipBLASLt path it
     // was measured against; where the fallback would be the fp8 path the
     // fused kernel stays.
@@ -3561,6 +3570,22 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
 
   bool x_singleton_batch = has_only_singleton_batch_dims(x);
   bool w_singleton_batch = has_only_singleton_batch_dims(w);
+
+  // An unbatched weight against a row-contiguous batched activation is one
+  // GEMM of batch * M rows, which is how the Metal backend reads it
+  // (`M = x.size() / K` when `w.ndim() == 2` and x is row contiguous). Kept as
+  // a batch, a decode batch's [B, 1, K] activation took the batched qmv
+  // kernel, which streams the whole weight once per batch element: on gfx1151
+  // a batch-4 Meta-Llama-3.1-8B 4-bit decode step cost 158 ms against 31 ms
+  // at batch 1 (lablup/mlxcel#2156). The output is allocated row contiguous,
+  // so [batch, M, N] and [batch * M, N] are the same bytes.
+  if (batch_count > 1 && w_singleton_batch && x_batch_count == batch_count &&
+      x.flags().row_contiguous) {
+    M *= batch_count;
+    batch_count = 1;
+    x_batch_count = 1;
+    x_singleton_batch = true;
+  }
   bool non_batched =
       (batch_count == 1) && x_singleton_batch && w_singleton_batch;
 
