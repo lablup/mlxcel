@@ -158,12 +158,14 @@ NO_CHAT_TEMPLATE=0
 NO_DEDUP=0
 OUTPUT=""
 SUFFIX=""
-# Sampling for both passes (issue #2064). Empty means the runner's default,
-# greedy argmax, which never dispatches a sampler kernel; a sampled run is how
-# the Gumbel-max and rejection kernels are measured. The CSV schema does not
-# record either, so a non-greedy run also tags the auto-generated filename.
+# Sampling for both passes (issue #2064; --top-k from #2157). Empty means the
+# runner's default, greedy argmax, which never dispatches a sampler kernel; a
+# sampled run is how the Gumbel-max and rejection kernels are measured. The CSV
+# schema records none of them, so a non-greedy run also tags the
+# auto-generated filename.
 TEMPERATURE=""
 TOP_P=""
+TOP_K=""
 DATE=$(date '+%Y-%m-%d')
 # Version recorded in the CSV `mlxcel_version` column. This is the mlxcel
 # version from Cargo.toml (the /update-benchmarks staleness check compares
@@ -866,6 +868,9 @@ Options:
   --top-p P           Nucleus threshold, effective with a positive
                       --temperature (default: the runner's 1.0, off). Tags
                       the filename with `_p<P>`.
+  --top-k K           Top-k cutoff, effective with a positive --temperature
+                      (default: the runner's 0, off). Tags the filename with
+                      `_k<K>`.
   --cooldown N        Sleep N seconds after every model to let the GPU cool
                       down (default: 0). Use on thermally constrained
                       hardware such as the MacBook Pro M5 Max where back-to-
@@ -959,6 +964,7 @@ default_output_path() {
   name="${name}_${DATE}"
   [[ -n "$TEMPERATURE" ]] && name="${name}_t${TEMPERATURE}"
   [[ -n "$TOP_P" ]] && name="${name}_p${TOP_P}"
+  [[ -n "$TOP_K" ]] && name="${name}_k${TOP_K}"
   if [[ -n "$SUFFIX" ]]; then
     name="${name}_${SUFFIX}"
   fi
@@ -1084,6 +1090,7 @@ bench_one() {
   fi
   [[ -n "$TEMPERATURE" ]] && extra_args+=(--temperature "$TEMPERATURE")
   [[ -n "$TOP_P" ]] && extra_args+=(--top-p "$TOP_P")
+  [[ -n "$TOP_K" ]] && extra_args+=(--top-k "$TOP_K")
 
   >&2 printf '>>> [bench]  %s (same-process warmup=%s) ...\n' "$model_name" "$WARMUP_TOKENS"
   local raw rc=0
@@ -1175,6 +1182,7 @@ while [[ $# -gt 0 ]]; do
     --suffix)         SUFFIX="$2"; shift 2 ;;
     --temperature)    TEMPERATURE="$2"; shift 2 ;;
     --top-p)          TOP_P="$2"; shift 2 ;;
+    --top-k)          TOP_K="$2"; shift 2 ;;
     --cooldown)       COOLDOWN_SECS="$2"; shift 2 ;;
     --big-cooldown)   BIG_MODEL_COOLDOWN_SECS="$2"; shift 2 ;;
     --big-threshold-gb)
@@ -1199,6 +1207,12 @@ for _sampling_opt in "--temperature:$TEMPERATURE" "--top-p:$TOP_P"; do
     exit 1
   fi
 done
+# No leading zeros (the filename tag would not match the value) and at most
+# nine digits (the runner takes an i32).
+if [[ -n "$TOP_K" && ! "$TOP_K" =~ ^(0|[1-9][0-9]{0,8})$ ]]; then
+  echo "Error: --top-k takes a non-negative integer, got '$TOP_K'" >&2
+  exit 1
+fi
 
 if [[ -z "$MODEL_ARG" ]]; then
   echo "Error: model path or 'all' required" >&2

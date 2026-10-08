@@ -2666,6 +2666,14 @@ mod ffi {
         /// Pure host arithmetic, so it answers on a CPU-only build too.
         fn sampling_rejection_routes(vocab: i32, top_k: i32, top_p: f32, min_p: f32) -> bool;
 
+        /// The vocabulary ceiling [`sampling_rejection_routes`] applies to
+        /// top-k and top-p together on this build: the compile-time
+        /// `REJECTION_JOINT_VOCAB_MAX` in `mlx_cxx_bridge.cpp`, 152064 on a
+        /// ROCm build (gfx1151, #2157) and 32768 on every other build (M1
+        /// Ultra, #901). It is chosen by build flag, never by a runtime
+        /// backend check.
+        fn sampling_rejection_joint_vocab_max() -> i32;
+
         /// Threads per threadgroup the rejection kernel launches with. The
         /// determinism argument rests on this being fixed, so it is exposed.
         fn sampling_rejection_threadgroup_size() -> i32;

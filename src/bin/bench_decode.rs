@@ -93,6 +93,12 @@ struct Args {
     #[arg(long, default_value_t = 1.0)]
     top_p: f32,
 
+    /// Top-k cutoff for both passes. 0 disables it. Only has an effect with a
+    /// positive `--temperature`; with `--top-p` it measures the joint filter,
+    /// whose rejection-kernel routing is capped by vocabulary (#2157).
+    #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(i32).range(0..))]
+    top_k: i32,
+
     /// Generated tokens in the warmup pass.
     #[arg(long, default_value_t = 20)]
     warmup_tokens: usize,
@@ -284,11 +290,12 @@ fn sampling_config(
     model: &LoadedModel,
     ignore_eos: bool,
     temperature: f32,
+    top_k: i32,
     top_p: f32,
 ) -> SamplingConfig {
     let mut config = build_sampling_config(ResolvedSamplingParams {
         temperature,
-        top_k: 0,
+        top_k,
         top_p,
         min_p: 0.0,
         seed: None,
@@ -517,6 +524,7 @@ fn main() -> Result<()> {
         &model,
         args.ignore_eos,
         args.temperature,
+        args.top_k,
         args.top_p,
     );
 

@@ -5790,11 +5790,50 @@ static bool gumbel_sample_applies(
 
 // Vocabulary ceiling for routing top-k and top-p together.
 //
-// 32768 is measured (1.27x - 1.64x across three repetitions); 152064 is measured
-// as a loss (0.71x - 0.83x); 65536 has not been measured for this combination and
-// is therefore excluded rather than interpolated. Raise it only against a
-// measurement, never to widen coverage.
+// M1 Ultra (#901): 32768 is measured (1.27x - 1.64x across three repetitions);
+// 152064 is measured as a loss (0.71x - 0.83x); 65536 has not been measured for
+// this combination and is therefore excluded rather than interpolated.
+//
+// gfx1151 (#2157, docs/benchmark_results/rocm-rejection-joint-cap-gfx1151-2026-10-07.md):
+// re-measured with the cap lifted on a measurement build, so `fused_sample`
+// routed every cell. Medians of three runs, top-k 40 + top-p 0.9, pipe_x by
+// batch {1, 4, 8} (iso_x for batch 1 in brackets):
+//
+//   vocab  32768   1.00  1.17  1.44   [2.23]
+//   vocab  65536   0.98  1.18  1.64   [1.59]
+//   vocab 128256   0.98  1.28  1.80   [0.96]
+//   vocab 151936   0.90  1.36  1.90   [0.92]
+//   vocab 152064   0.93  1.29  2.02   [0.92]
+//
+// Batches 4 and 8 win at every vocabulary. Batch 1, the single-stream decode
+// shape, does not clear 1.0 above 32768 on these synthetic logits (bf16 logits
+// read the same: 0.98 at 128256, 0.86 at 152064), so by the microbenchmark
+// alone the cap would stay 32768. End-to-end decode says otherwise, and it is
+// the measurement the issue's rule defers to at 128256 and above: with
+// `--temperature 0.8 --top-k 40 --top-p 0.95`, a measurement build that routes
+// the joint case against `MLXCEL_SAMPLING_REJECTION=0` (medians of three
+// interleaved pairs, every pair clean under `scripts/rocm_gpu_guard.sh`):
+//
+//   Meta-Llama-3.1-8B-Instruct-4bit (128256)  37.57 vs 32.67 tok/s, 1.15x
+//   Qwen2.5-7B-Instruct-4bit        (152064)  46.92 vs 41.91 tok/s, 1.12x
+//
+// with every kernel run faster than every chain run. Why the synthetic batch-1
+// cell does not predict real decode on this GPU was not isolated. On ROCm the
+// cap is therefore 152064, the largest vocabulary measured both ways; larger
+// vocabularies (gpt-oss 201088, Gemma 262144) are unmeasured and stay on the
+// chain. A ROCm build has no Metal or CUDA backend, so the build flag is the
+// backend here, as for the SGY default in `mlx_cxx_kernels.cpp`; there is no
+// runtime backend comparison. Raise either value only against a measurement,
+// never to widen coverage.
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+constexpr int32_t REJECTION_JOINT_VOCAB_MAX = 152064;
+#else
 constexpr int32_t REJECTION_JOINT_VOCAB_MAX = 32768;
+#endif
+
+int32_t sampling_rejection_joint_vocab_max() {
+    return REJECTION_JOINT_VOCAB_MAX;
+}
 
 // Pure routing policy: would `fused_sample` send this configuration to the
 // rejection kernel, ignoring backend support and the env switch? Exposed so a
@@ -5829,8 +5868,12 @@ static std::string rejection_not_routed_reason(
               "measured slower: top-k alone 0.31x-0.97x, min-p alone "
               "0.47x-0.88x";
     } else {
-        os << "top-k and top-p together measured 0.71x-0.83x above vocab "
-           << REJECTION_JOINT_VOCAB_MAX << ", and this row has vocab " << vocab;
+        os << "top-k and top-p together route only up to vocab "
+           << REJECTION_JOINT_VOCAB_MAX
+           << " on this build, the largest vocabulary where the combination "
+              "measured a win (above it, M1 Ultra measured 0.71x-0.83x at "
+              "152064 and gfx1151 is unmeasured), and this row has vocab "
+           << vocab;
     }
     os << "; top_k " << top_k << ", top_p " << top_p << ", min_p " << min_p
        << ")";
