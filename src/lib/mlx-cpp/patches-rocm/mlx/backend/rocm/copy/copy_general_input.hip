@@ -16,7 +16,7 @@ static constexpr int TILE_SIZE = 16;
 namespace rocm {
 
 // General copy kernel - strided input to contiguous output (by-value args)
-template <typename In, typename Out, typename IdxT>
+template <typename In, typename Out, typename IdxT, bool kLoop>
 __global__ void copy_g_byval(
     const In* in,
     Out* out,
@@ -24,16 +24,17 @@ __global__ void copy_g_byval(
     hip_array<int32_t, MAX_NDIM> shape,
     hip_array<int64_t, MAX_NDIM> strides,
     int ndim) {
-  IdxT index = blockIdx.x * blockDim.x + threadIdx.x;
-  if (index >= size) return;
-
-  IdxT loc = 0;
-  IdxT elem = index;
-  for (int i = ndim - 1; i >= 0 && elem > 0; --i) {
-    loc += (elem % shape[i]) * IdxT(strides[i]);
-    elem /= shape[i];
-  }
-  out[index] = cast_to<Out>(in[loc]);
+  // Grid capped by copy_grid_blocks (LOCAL_FIXES.md 42).
+  for_each_copy_index<kLoop>(int64_t(size), [&](int64_t i) {
+    IdxT index = IdxT(i);
+    IdxT loc = 0;
+    IdxT elem = index;
+    for (int d = ndim - 1; d >= 0 && elem > 0; --d) {
+      loc += (elem % shape[d]) * IdxT(strides[d]);
+      elem /= shape[d];
+    }
+    out[index] = cast_to<Out>(in[loc]);
+  });
 }
 
 // Column to row transpose kernel
@@ -120,7 +121,8 @@ void copy_general_input(
   void* out_ptr = gpu_ptr<void>(out);
 
   int block_size = 256;
-  int num_blocks = (data_size + block_size - 1) / block_size;
+  uint32_t num_blocks = rocm::copy_grid_blocks(data_size, block_size);
+  bool loop = rocm::copy_grid_loops(data_size, block_size);
   int64_t size_arg = static_cast<int64_t>(data_size);
 
   dispatch_all_types(in.dtype(), [&](auto in_type_tag) {
@@ -131,8 +133,10 @@ void copy_general_input(
       const InType* in_typed = static_cast<const InType*>(in_ptr) + offset_in;
       OutType* out_typed = static_cast<OutType*>(out_ptr) + offset_out;
 
+      auto kernel = loop ? &rocm::copy_g_byval<InType, OutType, int64_t, true>
+                         : &rocm::copy_g_byval<InType, OutType, int64_t, false>;
       encoder.add_kernel_node(
-          &rocm::copy_g_byval<InType, OutType, int64_t>,
+          kernel,
           dim3(num_blocks), dim3(block_size), 0,
           in_typed,
           out_typed,

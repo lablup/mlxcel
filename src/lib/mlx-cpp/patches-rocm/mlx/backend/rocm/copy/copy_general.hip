@@ -14,7 +14,7 @@ namespace mlx::core {
 namespace rocm {
 
 // General copy kernel with by-value shape/strides (no hipMemcpyAsync needed)
-template <typename In, typename Out, typename IdxT>
+template <typename In, typename Out, typename IdxT, bool kLoop>
 __global__ void copy_gg_byval(
     const In* in,
     Out* out,
@@ -23,18 +23,18 @@ __global__ void copy_gg_byval(
     hip_array<int64_t, MAX_NDIM> strides_in,
     hip_array<int64_t, MAX_NDIM> strides_out,
     int ndim) {
-  IdxT index = blockIdx.x * blockDim.x + threadIdx.x;
-  if (index >= size) return;
-
-  IdxT loc_in = 0, loc_out = 0;
-  IdxT elem = index;
-  for (int i = ndim - 1; i >= 0 && elem > 0; --i) {
-    IdxT dim_idx = elem % shape[i];
-    loc_in += dim_idx * IdxT(strides_in[i]);
-    loc_out += dim_idx * IdxT(strides_out[i]);
-    elem /= shape[i];
-  }
-  out[loc_out] = cast_to<Out>(in[loc_in]);
+  // Grid capped by copy_grid_blocks (LOCAL_FIXES.md 42).
+  for_each_copy_index<kLoop>(int64_t(size), [&](int64_t i) {
+    IdxT loc_in = 0, loc_out = 0;
+    IdxT elem = IdxT(i);
+    for (int d = ndim - 1; d >= 0 && elem > 0; --d) {
+      IdxT dim_idx = elem % shape[d];
+      loc_in += dim_idx * IdxT(strides_in[d]);
+      loc_out += dim_idx * IdxT(strides_out[d]);
+      elem /= shape[d];
+    }
+    out[loc_out] = cast_to<Out>(in[loc_in]);
+  });
 }
 
 } // namespace rocm
@@ -74,7 +74,8 @@ void copy_general(
   void* out_ptr = gpu_ptr<void>(out);
 
   int block_size = 256;
-  int num_blocks = (data_size + block_size - 1) / block_size;
+  uint32_t num_blocks = rocm::copy_grid_blocks(data_size, block_size);
+  bool loop = rocm::copy_grid_loops(data_size, block_size);
   int64_t size_arg = static_cast<int64_t>(data_size);
 
   dispatch_all_types(in.dtype(), [&](auto in_type_tag) {
@@ -85,8 +86,10 @@ void copy_general(
       const InType* in_typed = static_cast<const InType*>(in_ptr) + offset_in;
       OutType* out_typed = static_cast<OutType*>(out_ptr) + offset_out;
 
+      auto kernel = loop ? &rocm::copy_gg_byval<InType, OutType, int64_t, true>
+                         : &rocm::copy_gg_byval<InType, OutType, int64_t, false>;
       encoder.add_kernel_node(
-          &rocm::copy_gg_byval<InType, OutType, int64_t>,
+          kernel,
           dim3(num_blocks), dim3(block_size), 0,
           in_typed,
           out_typed,

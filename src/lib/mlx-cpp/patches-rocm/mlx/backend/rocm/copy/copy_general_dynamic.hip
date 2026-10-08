@@ -16,7 +16,7 @@ namespace mlx::core {
 namespace rocm {
 
 // Kernel with fixed-size arrays passed by value (no device memory needed)
-template <typename In, typename Out, typename IdxT, int NDIM>
+template <typename In, typename Out, typename IdxT, int NDIM, bool kLoop>
 __global__ void copy_gg_dynamic_nd(
     const In* in,
     Out* out,
@@ -26,38 +26,39 @@ __global__ void copy_gg_dynamic_nd(
     const int64_t strides_out0, const int64_t strides_out1, const int64_t strides_out2,
     const int64_t* offset_in,
     const int64_t* offset_out) {
-  IdxT index = blockIdx.x * blockDim.x + threadIdx.x;
-  if (index >= size) return;
-  
-  // Compute input and output locations
-  IdxT idx_in = 0;
-  IdxT idx_out = 0;
-  IdxT elem = index;
-  
-  // Unroll based on NDIM
-  if constexpr (NDIM >= 3) {
-    IdxT dim_idx = elem % shape2;
-    elem /= shape2;
-    idx_in += dim_idx * strides_in2;
-    idx_out += dim_idx * strides_out2;
-  }
-  if constexpr (NDIM >= 2) {
-    IdxT dim_idx = elem % shape1;
-    elem /= shape1;
-    idx_in += dim_idx * strides_in1;
-    idx_out += dim_idx * strides_out1;
-  }
-  if constexpr (NDIM >= 1) {
-    IdxT dim_idx = elem % shape0;
-    idx_in += dim_idx * strides_in0;
-    idx_out += dim_idx * strides_out0;
-  }
-  
-  out[idx_out + *offset_out] = static_cast<Out>(in[idx_in + *offset_in]);
+  // Grid capped by copy_grid_blocks (LOCAL_FIXES.md 42); the index math stays
+  // in IdxT.
+  for_each_copy_index<kLoop>(int64_t(size), [&](int64_t i) {
+    // Compute input and output locations
+    IdxT idx_in = 0;
+    IdxT idx_out = 0;
+    IdxT elem = IdxT(i);
+
+    // Unroll based on NDIM
+    if constexpr (NDIM >= 3) {
+      IdxT dim_idx = elem % shape2;
+      elem /= shape2;
+      idx_in += dim_idx * strides_in2;
+      idx_out += dim_idx * strides_out2;
+    }
+    if constexpr (NDIM >= 2) {
+      IdxT dim_idx = elem % shape1;
+      elem /= shape1;
+      idx_in += dim_idx * strides_in1;
+      idx_out += dim_idx * strides_out1;
+    }
+    if constexpr (NDIM >= 1) {
+      IdxT dim_idx = elem % shape0;
+      idx_in += dim_idx * strides_in0;
+      idx_out += dim_idx * strides_out0;
+    }
+
+    out[idx_out + *offset_out] = static_cast<Out>(in[idx_in + *offset_in]);
+  });
 }
 
 // General kernel for ndim > 3 (shape/strides passed by value)
-template <typename In, typename Out, typename IdxT>
+template <typename In, typename Out, typename IdxT, bool kLoop>
 __global__ void copy_gg_dynamic(
     const In* in,
     Out* out,
@@ -68,22 +69,22 @@ __global__ void copy_gg_dynamic(
     int ndim,
     const int64_t* offset_in,
     const int64_t* offset_out) {
-  IdxT index = blockIdx.x * blockDim.x + threadIdx.x;
-  if (index >= size) return;
-  
-  // Compute input and output locations
-  IdxT idx_in = 0;
-  IdxT idx_out = 0;
-  IdxT elem = index;
-  
-  for (int i = ndim - 1; i >= 0; --i) {
-    IdxT dim_idx = elem % shape[i];
-    elem /= shape[i];
-    idx_in += dim_idx * strides_in[i];
-    idx_out += dim_idx * strides_out[i];
-  }
-  
-  out[idx_out + *offset_out] = static_cast<Out>(in[idx_in + *offset_in]);
+  // Grid capped by copy_grid_blocks, as in copy_gg_dynamic_nd.
+  for_each_copy_index<kLoop>(int64_t(size), [&](int64_t i) {
+    // Compute input and output locations
+    IdxT idx_in = 0;
+    IdxT idx_out = 0;
+    IdxT elem = IdxT(i);
+
+    for (int d = ndim - 1; d >= 0; --d) {
+      IdxT dim_idx = elem % shape[d];
+      elem /= shape[d];
+      idx_in += dim_idx * strides_in[d];
+      idx_out += dim_idx * strides_out[d];
+    }
+
+    out[idx_out + *offset_out] = static_cast<Out>(in[idx_in + *offset_in]);
+  });
 }
 
 } // namespace rocm
@@ -107,10 +108,22 @@ void copy_general_dynamic(
   encoder.set_output_array(out);
   
   int ndim = shape.size();
-  size_t size = out.size();
-  
+  // Size the launch by the copied region, not by `out`: DynamicSliceUpdate
+  // passes the whole destination as `out` and the update's shape as `shape`,
+  // and a launch over out.size() made every thread past the update rewrite a
+  // wrapped copy of it, and failed outright once the destination reached 2^32
+  // elements (LOCAL_FIXES.md 42).
+  size_t size = 1;
+  for (auto s : shape) {
+    size *= s;
+  }
+  if (size == 0) {
+    return;
+  }
+
   int block_size = 256;
-  int num_blocks = (size + block_size - 1) / block_size;
+  uint32_t num_blocks = rocm::copy_grid_blocks(size, block_size);
+  bool loop = rocm::copy_grid_loops(size, block_size);
   
   bool large = in.data_size() > INT32_MAX || out.data_size() > INT32_MAX;
   
@@ -139,8 +152,11 @@ void copy_general_dynamic(
             static_cast<const InT*>(in_ptr_base) + offset_in; \
         OutT* out_typed = static_cast<OutT*>(out_ptr_base) + offset_out; \
         IdxT size_arg = static_cast<IdxT>(size); \
+        auto kernel = loop \
+            ? &rocm::copy_gg_dynamic_nd<InT, OutT, IdxT, NDIM, true> \
+            : &rocm::copy_gg_dynamic_nd<InT, OutT, IdxT, NDIM, false>; \
         encoder.add_kernel_node( \
-            &rocm::copy_gg_dynamic_nd<InT, OutT, IdxT, NDIM>, \
+            kernel, \
             dim3(num_blocks), dim3(block_size), 0, \
             in_typed, \
             out_typed, \
@@ -211,8 +227,11 @@ void copy_general_dynamic(
       const InT* in_typed = static_cast<const InT*>(in_ptr_base) + offset_in; \
       OutT* out_typed = static_cast<OutT*>(out_ptr_base) + offset_out; \
       IdxT size_arg = static_cast<IdxT>(size); \
+      auto kernel = loop \
+          ? &rocm::copy_gg_dynamic<InT, OutT, IdxT, true> \
+          : &rocm::copy_gg_dynamic<InT, OutT, IdxT, false>; \
       encoder.add_kernel_node( \
-          &rocm::copy_gg_dynamic<InT, OutT, IdxT>, \
+          kernel, \
           dim3(num_blocks), dim3(block_size), 0, \
           in_typed, \
           out_typed, \
