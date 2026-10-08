@@ -96,7 +96,7 @@ struct Args {
     /// Top-k cutoff for both passes. 0 disables it. Only has an effect with a
     /// positive `--temperature`; with `--top-p` it measures the joint filter,
     /// whose rejection-kernel routing is capped by vocabulary (#2157).
-    #[arg(long, default_value_t = 0)]
+    #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(i32).range(0..))]
     top_k: i32,
 
     /// Generated tokens in the warmup pass.

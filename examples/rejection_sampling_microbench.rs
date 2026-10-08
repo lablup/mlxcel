@@ -99,6 +99,11 @@
 //!   --iters N     timed repetitions per point (default 200)
 //!   --warmup N    discarded repetitions per point (default 30)
 //!   --csv PATH    also write the table as CSV
+//!   --dtype T     logits dtype: f32 (default), bf16 or f16. A bf16 checkpoint
+//!                 hands the sampler bf16 logits, and the stock chain's sort
+//!                 cost depends on the dtype (#2157)
+//!   --config L    run only the filter configuration labelled L (for example
+//!                 `top-k+top-p`)
 //!
 //! On Apple Silicon run under `caffeinate -i` and let the machine cool between
 //! sweeps; it down-clocks under sustained load.
@@ -107,10 +112,10 @@ use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
 use mlxcel_core::{
-    MlxArray, UniquePtr, array_to_raw_bytes, async_eval_pair, eval, from_slice_f32, fused_sample,
-    fused_sample_categorical, fused_sample_rejection, gpu_backend_available, matmul, random_seed,
-    rejection_cap_overflow_launches, rejection_cap_overflow_rows, reset_sampling_dispatch,
-    sampling_dispatch_drain_pending, sampling_dispatch_recorded_report,
+    MlxArray, UniquePtr, array_to_raw_bytes, astype, async_eval_pair, dtype, eval, from_slice_f32,
+    fused_sample, fused_sample_categorical, fused_sample_rejection, gpu_backend_available, matmul,
+    random_seed, rejection_cap_overflow_launches, rejection_cap_overflow_rows,
+    reset_sampling_dispatch, sampling_dispatch_drain_pending, sampling_dispatch_recorded_report,
     sampling_rejection_available, sampling_rejection_backend_supported,
     sampling_rejection_joint_vocab_max, sampling_rejection_max_rounds, sampling_rejection_probe,
     sampling_rejection_routes, synchronize_default,
@@ -142,6 +147,9 @@ struct Options {
     iters: usize,
     warmup: usize,
     csv: Option<String>,
+    dtype: i32,
+    dtype_label: &'static str,
+    config: Option<String>,
 }
 
 fn parse_options() -> Options {
@@ -149,6 +157,9 @@ fn parse_options() -> Options {
         iters: 200,
         warmup: 30,
         csv: None,
+        dtype: dtype::FLOAT32,
+        dtype_label: "f32",
+        config: None,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -167,6 +178,23 @@ fn parse_options() -> Options {
             }
             "--csv" => {
                 opts.csv = Some(args.next().expect("--csv needs a path"));
+            }
+            "--dtype" => {
+                let value = args.next().expect("--dtype needs f32, bf16 or f16");
+                (opts.dtype, opts.dtype_label) = match value.as_str() {
+                    "f32" => (dtype::FLOAT32, "f32"),
+                    "bf16" => (dtype::BFLOAT16, "bf16"),
+                    "f16" => (dtype::FLOAT16, "f16"),
+                    other => panic!("--dtype takes f32, bf16 or f16, got {other}"),
+                };
+            }
+            "--config" => {
+                let label = args.next().expect("--config needs a label");
+                assert!(
+                    CONFIGS.iter().any(|(l, ..)| *l == label),
+                    "--config {label} is not one of the configurations"
+                );
+                opts.config = Some(label);
             }
             other => panic!("unknown argument {other}"),
         }
@@ -371,15 +399,16 @@ fn main() {
     let cap = sampling_rejection_max_rounds();
     println!(
         "Dual-pivot rejection sampling microbenchmark (#901)  iters={} warmup={}  \
-         routing_enabled={}  round_cap={cap}",
+         routing_enabled={}  round_cap={cap}  logits={}",
         opts.iters,
         opts.warmup,
-        sampling_rejection_available()
+        sampling_rejection_available(),
+        opts.dtype_label
     );
 
     // Prove the two arms take different paths before timing anything.
     reset_sampling_dispatch();
-    let probe_logits = synthetic_logits(4, 32_768);
+    let probe_logits = astype(&synthetic_logits(4, 32_768), opts.dtype);
     let _ = fused_sample_categorical(&probe_logits, TEMPERATURE, 40, 0.9, 0.0);
     print_dispatch("  baseline arm  -> ");
     reset_sampling_dispatch();
@@ -418,9 +447,13 @@ fn main() {
          pipe_baseline_us,pipe_rejection_us,pipe_speedup\n",
     );
     for (label, top_k, top_p, min_p) in CONFIGS {
+        if opts.config.as_deref().is_some_and(|wanted| wanted != label) {
+            continue;
+        }
         for vocab in VOCABS {
             for batch in BATCHES {
-                let logits = synthetic_logits(batch, vocab);
+                let logits = astype(&synthetic_logits(batch, vocab), opts.dtype);
+                eval(&logits);
                 let rounds = worst_rounds(&logits, batch, top_k, top_p, min_p, cap);
 
                 // Reseed before each arm so both consume the same RNG stream

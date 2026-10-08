@@ -2667,10 +2667,11 @@ mod ffi {
         fn sampling_rejection_routes(vocab: i32, top_k: i32, top_p: f32, min_p: f32) -> bool;
 
         /// The vocabulary ceiling [`sampling_rejection_routes`] applies to
-        /// top-k and top-p together on this build. A compile-time value
-        /// (`REJECTION_JOINT_VOCAB_MAX` in `mlx_cxx_bridge.cpp`): ROCm builds
-        /// carry the gfx1151 measurement, every other build the M1 Ultra one
-        /// (#2157).
+        /// top-k and top-p together on this build: the compile-time
+        /// `REJECTION_JOINT_VOCAB_MAX` in `mlx_cxx_bridge.cpp`. One value on
+        /// every build today (32768; M1 Ultra in #901 and gfx1151 in #2157
+        /// both measured it). A backend that measures a different crossover
+        /// gets a build-flag branch there.
         fn sampling_rejection_joint_vocab_max() -> i32;
 
         /// Threads per threadgroup the rejection kernel launches with. The

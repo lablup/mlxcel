@@ -158,10 +158,11 @@ NO_CHAT_TEMPLATE=0
 NO_DEDUP=0
 OUTPUT=""
 SUFFIX=""
-# Sampling for both passes (issue #2064). Empty means the runner's default,
-# greedy argmax, which never dispatches a sampler kernel; a sampled run is how
-# the Gumbel-max and rejection kernels are measured. The CSV schema does not
-# record either, so a non-greedy run also tags the auto-generated filename.
+# Sampling for both passes (issue #2064; --top-k from #2157). Empty means the
+# runner's default, greedy argmax, which never dispatches a sampler kernel; a
+# sampled run is how the Gumbel-max and rejection kernels are measured. The CSV
+# schema records none of them, so a non-greedy run also tags the
+# auto-generated filename.
 TEMPERATURE=""
 TOP_P=""
 TOP_K=""
@@ -1206,7 +1207,9 @@ for _sampling_opt in "--temperature:$TEMPERATURE" "--top-p:$TOP_P"; do
     exit 1
   fi
 done
-if [[ -n "$TOP_K" && ! "$TOP_K" =~ ^[0-9]+$ ]]; then
+# No leading zeros (the filename tag would not match the value) and at most
+# nine digits (the runner takes an i32).
+if [[ -n "$TOP_K" && ! "$TOP_K" =~ ^(0|[1-9][0-9]{0,8})$ ]]; then
   echo "Error: --top-k takes a non-negative integer, got '$TOP_K'" >&2
   exit 1
 fi
