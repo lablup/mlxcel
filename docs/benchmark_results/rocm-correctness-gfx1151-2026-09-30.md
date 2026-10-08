@@ -101,7 +101,66 @@ Across the sixteen pairs there are 155 top-1 disagreements, by the rank the Meta
 
 91.6% are a straight swap of two adjacent candidates. The rank-8 case is in `nemotron-3-nano-30b-a3b` `w1`, an undecided position (all of that pair's disagreements are at gaps under 1.0).
 
-Perplexity deltas stay inside +/- 0.9% except `granite-4.0-h-tiny` `w1` at +4.345%. That is a 128-position no-context run, the kind the first run set aside as too small to mean anything, but it is the largest shift in this run, so it was checked per position. Per position, ROCm's NLL there is higher by 0.042 nats on average with a standard error of 0.017, and higher at 73 of 128 positions, so it is about 2.5 standard errors from zero: weak evidence of a small bias, not noise that can be dismissed outright. It does not reach the token: all 128 positions agree on top-1, 112 of them decided. Its Mamba2 layers run the same SSD graph code on both backends at this width (see below), so this is not a kernel-against-graph effect. At `w8` and `w256` the mean NLL shift is 0.003 and 0.004 nats. The sign of the perplexity delta is otherwise mixed across pairs, as in the first run.
+Perplexity deltas stay inside +/- 0.9% except `granite-4.0-h-tiny` `w1` at +4.345%. That is a 128-position no-context run, the kind the first run set aside as too small to mean anything, but it is the largest shift in this run, so it was checked per position. Per position, ROCm's NLL there is higher by 0.042 nats on average with a standard error of 0.017, and higher at 73 of 128 positions, so it is about 2.5 standard errors from zero. It does not reach the token: all 128 positions agree on top-1, 112 of them decided. Its Mamba2 layers run the same SSD graph code on both backends at this width (see below), so this is not a kernel-against-graph effect. At `w8` and `w256` the mean NLL shift is 0.003 and 0.004 nats. The sign of the perplexity delta is otherwise mixed across pairs, as in the first run.
+
+The follow-up measurement (#2154) found no ROCm defect behind it: [The granite `w1` perplexity gap](#the-granite-w1-perplexity-gap).
+
+## The granite `w1` perplexity gap
+
+Measured for #2154 on gfx1151 at `a18d3d76`, after the SSM update port (#2099), the fused defaults (#2189) and the engine refactor (#2166). Traces, the per-op table and the probe are in `benchmarks/logit_traces/rocm_gfx1151_a18d3d76/`. Conclusion: no ROCm op is out of line, and the gap is not a ROCm defect. Both backends' bf16 forwards sharpen granite's single-token logits by a similar amount against an f32 reference, almost all of it from rounding the residual stream to bf16, and the 128-position window the Metal trace covers is one where that rounding costs NLL. Over 1024 positions ROCm's NLL is within noise of f32.
+
+**It still exists, unchanged.** The `w1` trace at `a18d3d76` has the same data rows, byte for byte, as `c5fe9a16` and `96cbce84`, with the HIP SSM update kernel on or off (`MLXCEL_SSM_KERNEL=0`): a `w1` chunk never has SSM state, so neither setting reaches the kernel. Against Metal it is still +4.345%, the mean NLL shift 0.042 nats (SE 0.017) and the top-1 minus top-8 logit spread 0.071 wider on ROCm (SE 0.019). The naive SEs treat the 128 rows as independent, but they come from only 90 distinct input tokens and a row is a function of its input token alone; clustered by input token the SEs are 0.020 and 0.026, about 2.1 and 2.8 SE.
+
+**The reference.** There is no Metal host here, so a 1024-position Metal trace could not be made. The CPU stream cannot stand in either: `MLXCEL_DEVICE=cpu` with this bf16 checkpoint gives a top-1 logit of 14.50 at chunk 0 where the GPU gives 18.875, at about 400 s per chunk. The reference is instead the same forward with f32 activations (the embedding output cast to f32, so every op runs in f32 against the stored weights, and the logits are not rounded to bf16). On the GPU and on the CPU stream it agrees to 0.0007 nats per position over the 3 chunks the CPU finished, so it does not depend on the device.
+
+**Against f32, at the positions the Metal trace has** (chunks 0 to 127; NLL and spread are means of candidate minus f32, SEs clustered by input token):
+
+| Candidate | Perplexity vs f32 | NLL shift | Spread shift |
+|---|---|---|---|
+| Metal bf16 (`d1128266`) | +7.325% | +0.071 (SE 0.035) | +0.305 (SE 0.047) |
+| ROCm bf16 (`a18d3d76`) | +11.987% | +0.113 (SE 0.032) | +0.377 (SE 0.035) |
+
+Both backends sit on the same side of f32, by similar amounts; the ROCm-Metal gap is about a fifth of the spread shift they share.
+
+**Over 1024 positions** ROCm against f32 is +1.123% perplexity, NLL +0.011 (SE 0.019 clustered, 382 distinct inputs, 0.6 SE), spread +0.360 (SE 0.026). Per 128-chunk window the NLL shift is +0.113, +0.039, -0.036, -0.030, -0.014, +0.043, -0.022 and -0.003: chunks 0 to 127 are the largest of the eight, and the windows vary from each other by an SD of 0.051, twice the within-window SE of about 0.025. A 128-position NLL mean on this shape is not a reliable test at 2 SE. The spread shift is the same in every window (+0.32 to +0.39).
+
+**Per op, ROCm bf16 against f32 on the same inputs** (`ops_bf16_vs_f32.tsv`, first 128 chunks, every layer; relative L2 error of the stage output, mean and max over token and layer). For scale, rounding an f32 Gaussian vector to bf16 once costs 0.0017 relative L2:
+
+| Stage | Mean | Max |
+|---|---|---|
+| Mamba2 `in_proj` (qmv) | 0.0017 | 0.0023 |
+| conv1d + bias + SiLU | 0.0021 | 0.0037 |
+| `ssm_step` (SSD graph, no state) | 0.0016 | 0.0033 |
+| gated RMSNorm | 0.0035 | 0.0106 |
+| Mamba2 `out_proj` | 0.0016 | 0.0035 |
+| attention (one key) | 0.0017 | 0.0032 |
+| `input_layernorm` / `post_attention_layernorm` | 0.0022 / 0.0022 | 0.0050 / 0.0052 |
+| MoE router (8-bit qmv) | 0.0016 | 0.0021 |
+| MoE experts (`gather_qmm`, SwiGLU) | 0.0038 | 0.0077 |
+| MoE weighted sum | 0.0027 | 0.0054 |
+| shared MLP | 0.0032 | 0.0089 |
+| final norm / lm head | 0.0024 / 0.0032 | 0.0045 / 0.0065 |
+
+Every stage is between about one rounding (0.0014 to 0.0017, the stages that end in one rounded output) and two and a half (0.0038, the expert MLP, which rounds its intermediate activations too), and none stands out. bf16 router logits pick a different top-6 expert set from f32 router logits on 401 of 5120 router calls (7.8%), which is how small rounding differences reach the output, but the router itself is at rounding.
+
+**Which rounding makes the spread.** The f32 forward with one family switched to bf16, over 1024 positions, against f32:
+
+| bf16 family | Spread shift (SE) | NLL shift (SE) |
+|---|---|---|
+| residual stream only | +0.436 (0.025) | +0.040 (0.021) |
+| RMSNorms only (input, post-attention, final) | +0.011 (0.007) | +0.007 (0.004) |
+| Mamba2 mixers only | -0.014 (0.009) | -0.010 (0.005) |
+| attention only | -0.0003 (0.0003) | -0.0001 (0.0003) |
+| MoE only | -0.016 (0.006) | -0.003 (0.004) |
+| shared MLP only | +0.002 (0.006) | +0.0003 (0.004) |
+| lm head only | +0.001 (0.006) | -0.0004 (0.003) |
+| all of them | +0.371 (0.028) | +0.012 (0.021) |
+
+Rounding the residual stream to bf16 after each add reproduces the whole spread shift, and no op family comes close. Its NLL cost is window-dependent the same way: +0.133 in chunks 0 to 127, -0.018 to +0.081 elsewhere. The residual add is an elementwise bf16 add, which both backends round the same way, so this is the dtype policy that granite runs under on every backend, not a ROCm kernel. "All of them" matches the real ROCm bf16 trace to an NLL shift of 0.0003 (SE 0.005) over 1024 positions, so the arms describe what the model actually does.
+
+**What is and is not established.** Established: each op on ROCm's single-token path is within bf16 rounding of f32; the logit sharpening both backends show is a property of bf16 residual rounding; ROCm's NLL over 1024 positions is within noise of f32; and the Metal reference is itself +0.071 nats from f32 in the 128-position window. Not established: Metal's own per-op error, or a 1024-position Metal-against-ROCm pair, which needs an Apple host. The remaining 0.042-nat, 0.071-spread difference between the two backends, inside a shared +0.07 to +0.11 nat and +0.31 to +0.38 spread departure from f32, is not attributed to any one op; no measurement here points to one. Two bf16 implementations with different kernels (different `qmv` accumulation orders, for example) round differently at every op, and the per-window numbers above show how far a 128-position mean moves on this shape.
+
+At `a18d3d76` the `w8` and `w256` traces are no longer byte-identical to `c5fe9a16`'s (the multi-token paths changed, for example #2085 and #2189). Against the same Metal traces they still pass at `--decided 2.0` (0 decided mismatches, worst rank 3), with perplexity deltas of +0.864% and +0.996%; this is a cross-commit pair, since the Metal side is at `d1128266`.
 
 ## What is not like-for-like
 
@@ -279,4 +338,5 @@ The Metal traces were produced with the loop in `benchmarks/logit_traces/rocm_gf
 - Two MoE implementations in the Nemotron-H pairs: since the HIP fused MoE ports (#2065) ROCm's gate reads `moe_down_kernel_available()` and takes `fused_moe_forward`, as Metal does. New Nemotron-H traces on that path pass against these Metal traces at `w8` and `w1ctx512` with zero decided-position mismatches, in [rocm-fused-moe-gfx1151-2026-10-05.md](rocm-fused-moe-gfx1151-2026-10-05.md#model-logits).
 - The fused add-RMSNorm and RoPE + append kernels: these traces ran with both off, the default at the time. They are on by default on ROCm since lablup/mlxcel#2145. Their HIP ports (#2063) are byte-identical to the graph they replace: Llama 3.1 and Qwen2.5 traces with them on match the traces with them off byte for byte at `w1`, `w8` and `w1ctx512`, so for the models that call them, turning them on does not change ROCm's side of these comparisons ([rocm-fused-norm-rope-gfx1151-2026-10-05.md](rocm-fused-norm-rope-gfx1151-2026-10-05.md)).
 - `src/models/nemotron_h.rs` prints its loading messages to stdout, which puts five non-trace lines into every Nemotron-H trace and stops `compare_logit_traces.py`. Either the loader should log to stderr or the comparison script should skip them.
-- No noise floor was measured; the first run's reasoning for not needing one still applies.
+- No noise floor was measured; the first run's reasoning for not needing one still applies. For granite `w1` the f32 reference and window statistics in [The granite `w1` perplexity gap](#the-granite-w1-perplexity-gap) stand in for one.
+- `MLXCEL_DEVICE=cpu` is not a usable reference for this bf16 checkpoint on this host: it is far from both GPU and f32 at chunk 0 and takes about 400 s per chunk (#2154).
