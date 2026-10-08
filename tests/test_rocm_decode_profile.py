@@ -15,7 +15,8 @@
 """Tests for the ROCm per-kernel decode profile tooling (issue #2061).
 
 Covers scripts/rocm_decode_profile.py (the decode cut, the busy-time union,
-the port-unit attribution) on synthetic traces, and scripts/rocm_gpu_guard.sh
+the port-unit attribution) and scripts/rocm_decode_gaps.py (host gaps per
+role and the wall-time ceilings, issue #2148) on synthetic traces, and scripts/rocm_gpu_guard.sh
 against a fake KFD process directory. No GPU is needed.
 
 Run with:
@@ -35,6 +36,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 GUARD = ROOT / "scripts" / "rocm_gpu_guard.sh"
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import rocm_decode_gaps as gaps  # noqa: E402
 import rocm_decode_profile as rdp  # noqa: E402
 
 # A compiler pattern nothing on the host matches, so the guard's compiler check
@@ -437,13 +439,105 @@ class WindowTests(unittest.TestCase):
                 "[phase] measured_end monotonic_ns=4 boottime_ns=800000\n"
                 "  Prompt tokens:    512\n  Generated tokens: 2\n"
                 "  Prefill:          1.00 ms (512.00 tok/s)\n  Decode:           0.20 ms (10000.00 tok/s)\n")
-            s = rdp.summarize(trace, log, None, None, "t", tmp)
+            plain = tmp / "plain.log"
+            plain.write_text("  Generated tokens: 2\n"
+                             "  Decode:           0.20 ms (8000.00 tok/s)\n")
+            s = rdp.summarize(trace, log, plain, None, "t", tmp)
             self.assertEqual(s["clock"], "boottime")
             self.assertEqual(s["decode_dispatches"], 2)
             self.assertEqual(s["decode_gpu_busy_ms"], 0.05)
             self.assertEqual(s["checks"]["kernels_straddling_decode_start"], 0)
             self.assertEqual(s["checks"]["idle_gap_before_first_decode_dispatch_us"], 110.0)
             self.assertTrue((tmp / "t_decode_kernels.csv").exists())
+            # #2148: the window's 150 us of idle time, per role, adds up.
+            self.assertEqual(s["checks"]["host_gap_attribution_residual_ns"], 0)
+            self.assertEqual(s["role_host_gap_ms_per_token"],
+                             {"unattributed": 0.055, "tail": 0.02})
+            self.assertEqual(s["plain_wall_ms_per_token"], 0.125)
+            self.assertEqual(s["plain_host_gap_ms_per_token_est"], 0.1)
+            for unit in rdp.UNIT_ROLES:
+                p = s["port_units"][unit]
+                # No dispatch of any unit's roles: no gap, nothing to gain.
+                for prefix in ("fallback", "reached_default"):
+                    self.assertEqual(p[f"{prefix}_host_gap_ms_per_token"], 0.0)
+                    self.assertEqual(p[f"{prefix}_host_gap_us_per_dispatch"], 0.0)
+                    self.assertEqual(p[f"{prefix}_wall_share_pct"], 0.0)
+                for key in ("ceiling_gpu_share", "ceiling_wall", "plain_ceiling_wall_est",
+                            "reached_default_ceiling_gpu_share", "reached_default_ceiling_wall",
+                            "reached_default_plain_ceiling_wall_est"):
+                    self.assertEqual(p[key], 1.0, (unit, key))
+            text = rdp.report(tmp)
+            self.assertIn("| Run: ceiling wall (GPU share) |", text)
+            self.assertIn("| `t` (plain) | 1.00 (1.00) |", text)
+
+
+def disp(start, end, name="k"):
+    return rdp.Dispatch(name, start, end)
+
+
+class GapTests(unittest.TestCase):
+    def test_gaps_go_to_the_dispatch_that_ends_them_and_sum_to_the_idle_time(self):
+        # A leading gap, an overlap, a dispatch inside another, an idle tail.
+        d = [disp(10, 20), disp(15, 30), disp(40, 50), disp(45, 48), disp(60, 70)]
+        roles = ["ssm_step", "rope_append", None, "ssm_step", "rope_append"]
+        gaps = rdp.attribute_gaps(d, roles, 0, 100)
+        self.assertEqual(gaps, {"ssm_step": 10, "rope_append": 10, "unattributed": 10,
+                                "tail": 30})
+        self.assertEqual(sum(gaps.values()), 100 - rdp.busy_ns(d, 0, 100))
+
+    def test_a_dispatch_running_past_the_window_leaves_no_tail(self):
+        d = [disp(5, 10), disp(95, 130)]
+        gaps = rdp.attribute_gaps(d, ["sampler_tail", "ssm_step"], 0, 100)
+        self.assertEqual(gaps, {"sampler_tail": 5, "ssm_step": 85, "tail": 0})
+        self.assertEqual(sum(gaps.values()), 100 - rdp.busy_ns(d, 0, 100))
+
+    def test_role_count_must_match(self):
+        with self.assertRaises(ValueError):
+            rdp.attribute_gaps([disp(1, 2)], [], 0, 10)
+
+    def test_wall_ceiling_counts_the_launch_gaps(self):
+        # 3 ms of a unit's kernels and 2 ms of gaps in front of them, in a 20 ms
+        # window with 10 ms of kernels; the plain run keeps half of each gap and
+        # takes 12 ms.
+        f = gaps.wall_fields("fallback", ("ssm_step",), {"ssm_step": 3_000_000},
+                             {"ssm_step": 2_000_000}, {"ssm_step": 4},
+                             gpu_sum=10_000_000, wall=20_000_000, tokens=1, scale=0.5,
+                             plain_wall_ms_per_token=12.0)
+        self.assertEqual(f, {
+            "fallback_host_gap_ms_per_token": 2.0,
+            "fallback_host_gap_us_per_dispatch": 500.0,
+            "fallback_wall_share_pct": 25.0,
+            "ceiling_gpu_share": 1.43,   # 1 / (1 - 0.30)
+            "ceiling_wall": 1.33,        # 1 / (1 - 0.25)
+            "plain_ceiling_wall_est": 1.5,  # 1 / (1 - (3 + 1) / 12)
+        })
+        r = gaps.wall_fields("reached_default", (), {}, {}, {}, gpu_sum=1, wall=1,
+                             tokens=1, scale=None, plain_wall_ms_per_token=None)
+        self.assertEqual(r["reached_default_ceiling_wall"], 1.0)
+        self.assertIsNone(r["reached_default_plain_ceiling_wall_est"])
+
+    def test_a_full_share_and_zero_tokens_have_no_ceiling_or_per_token_figure(self):
+        f = gaps.wall_fields("fallback", ("ssm_step",), {"ssm_step": 10}, {"ssm_step": 0},
+                             {"ssm_step": 1}, gpu_sum=10, wall=10, tokens=0, scale=1.0,
+                             plain_wall_ms_per_token=1.0)
+        self.assertIsNone(f["ceiling_gpu_share"])
+        self.assertIsNone(f["ceiling_wall"])
+        self.assertIsNone(f["fallback_host_gap_ms_per_token"])
+        self.assertIsNone(f["plain_ceiling_wall_est"])
+        self.assertIsNone(gaps.ceiling(None))
+
+    def test_gap_scale(self):
+        self.assertIsNone(gaps.gap_scale(None, 4.0))
+        self.assertEqual(gaps.gap_scale(2.0, 4.0), 0.5)
+        self.assertEqual(gaps.gap_scale(-1.0, 4.0), 0.0)
+        self.assertEqual(gaps.gap_scale(1.0, 0.0), 0.0)
+
+    def test_report_cell_prefers_the_plain_estimate(self):
+        self.assertEqual(gaps.ceiling_cell({"ceiling_wall": 1.6, "plain_ceiling_wall_est": 1.5,
+                                            "ceiling_gpu_share": 1.42}), "1.50 (1.42)")
+        self.assertEqual(gaps.ceiling_cell({"ceiling_wall": 1.6, "plain_ceiling_wall_est": None,
+                                            "ceiling_gpu_share": None}), "1.60 (-)")
+        self.assertEqual(gaps.ceiling_cell({"fallback_share_pct": 3.0}), "-")
 
 
 if __name__ == "__main__":

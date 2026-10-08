@@ -268,7 +268,22 @@ to a temporary directory (`--trace-dir` to keep them) because they run to
 hundreds of MB. Read shares rather than absolute times from the profiled run:
 the tracer slows decode, and the summary records by how much against the plain
 run. `--temperature` and `--top-p` exist so a profile can see the sampler; the
-greedy default never dispatches it. The published profile and how each kernel
+greedy default never dispatches it.
+
+A port unit's share of decode GPU time implies a speedup ceiling of
+`1 / (1 - share)` (`ceiling_gpu_share` in the summary), but that share ignores
+the host launch gaps between dispatches, so it underrates a port that replaces
+many small dispatches with one kernel (issue #2148). The summary therefore also
+charges each idle stretch of the decode window to the dispatch that ends it
+(`scripts/rocm_decode_gaps.py`): per role `role_host_gap_ms_per_token`, and per
+port unit its host gap per token and per dispatch, its share of decode wall
+time (kernels plus the gaps in front of them) and `ceiling_wall`, the speedup
+bound that share implies. With a plain run the gaps are scaled to the plain
+run's host gap (the tracer inflates host gaps, not kernel time) and divided by
+its wall time per token: `plain_ceiling_wall_est`. That is the bound to compare
+a port's measured speedup against; `report` prints it beside the GPU-share
+ceiling. The same fields exist for the roles reached with shipped defaults
+(`reached_default_*`). The published profile and how each kernel
 name was attributed to a port unit are in
 [rocm-decode-profile-gfx1151-2026-09-30.md](benchmark_results/rocm-decode-profile-gfx1151-2026-09-30.md).
 

@@ -25,6 +25,12 @@ the trace and the bench's log and writes, per run:
 * ``<name>_summary.json``: decode GPU time and host gap per token, tok/s with
   and without the profiler, share per port unit, and the checks below.
 
+Per port unit the summary also charges each idle stretch of the decode window
+to the dispatch that ends it (``rocm_decode_gaps.py``, issue #2148), so a unit
+owns its launch gaps as well as its kernel time; ``ceiling_wall`` (and
+``plain_ceiling_wall_est`` against the run without the profiler) is the speedup
+bound that counts both, where ``ceiling_gpu_share`` counts kernel time only.
+
 The measured decode is the dispatches that start between the bench's
 ``decode_start`` and ``measured_end`` marks (see
 ``src/bin/bench_decode/phase_marks.rs``). The prefill before it ends in a
@@ -48,6 +54,8 @@ import re
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
+
+from rocm_decode_gaps import attribute_gaps, ceiling_cell, gap_scale, wall_fields
 
 # --------------------------------------------------------------------------
 # Kernel classes. First match wins. Patterns run on the demangled kernel name
@@ -434,6 +442,21 @@ def summarize(trace: pathlib.Path, log_path: pathlib.Path, plain_log: pathlib.Pa
         role_ns[r or "unattributed"] += d.dur
         role_calls[r or "unattributed"] += 1
         class_ns[classify(d.name)] += d.dur
+    role_gap_ns = attribute_gaps(decode, roles, lo, hi)
+    plain = parse_log(plain_log.read_text(errors="replace")) if plain_log else None
+    host_gap_ms_per_token = round((wall - gpu_busy) / 1e6 / tokens, 4) if tokens else None
+    plain_wall_ms_per_token = round(1000.0 / plain.decode_tok_s, 4) \
+        if plain and plain.decode_tok_s else None
+    # The tracer adds host time per dispatch but barely changes kernel
+    # durations, so the unprofiled run's wall time per token minus the traced
+    # GPU time is the better host-gap estimate for dispatch-heavy models. Same
+    # denominator as tok/s (generated tokens).
+    plain_host_gap_ms_per_token_est = \
+        round(1000.0 / plain.decode_tok_s - gpu_busy / 1e6 / tokens, 4) \
+        if plain_wall_ms_per_token is not None and tokens else None
+    gap_kw = {"gpu_sum": gpu_sum, "wall": wall, "tokens": tokens,
+              "scale": gap_scale(plain_host_gap_ms_per_token_est, host_gap_ms_per_token),
+              "plain_wall_ms_per_token": plain_wall_ms_per_token}
 
     def share(ns: int) -> float:
         return round(100.0 * ns / gpu_sum, 2)
@@ -463,10 +486,12 @@ def summarize(trace: pathlib.Path, log_path: pathlib.Path, plain_log: pathlib.Pa
             "reached_default_dispatches_per_token":
                 round(sum(role_calls[r] for r in default_roles) / tokens, 1) if tokens else None,
             "reached_optin_share_pct": share(sum(role_ns[r] for r in optin_roles)),
+            **wall_fields("fallback", rs, role_ns, role_gap_ns, role_calls, **gap_kw),
+            **wall_fields("reached_default", default_roles, role_ns, role_gap_ns, role_calls,
+                          **gap_kw),
             "note": note,
         }
 
-    plain = parse_log(plain_log.read_text(errors="replace")) if plain_log else None
     top = sorted(per_kernel.items(), key=lambda kv: -kv[1][1])[:10]
     summary = {
         "name": name,
@@ -487,19 +512,15 @@ def summarize(trace: pathlib.Path, log_path: pathlib.Path, plain_log: pathlib.Pa
         "decode_gpu_sum_ms": round(gpu_sum / 1e6, 3),
         "decode_gpu_busy_ms": round(gpu_busy / 1e6, 3),
         "gpu_ms_per_token": round(gpu_busy / 1e6 / tokens, 4) if tokens else None,
-        "host_gap_ms_per_token": round((wall - gpu_busy) / 1e6 / tokens, 4) if tokens else None,
+        "host_gap_ms_per_token": host_gap_ms_per_token,
         "host_gap_pct_of_wall": round(100.0 * (wall - gpu_busy) / wall, 2),
-        # The tracer adds host time per dispatch but barely changes kernel
-        # durations, so the unprofiled run's wall time per token minus the
-        # traced GPU time is the better host-gap estimate for dispatch-heavy
-        # models. Same denominator as tok/s (generated tokens).
-        "plain_wall_ms_per_token": round(1000.0 / plain.decode_tok_s, 4)
-        if plain and plain.decode_tok_s else None,
-        "plain_host_gap_ms_per_token_est":
-            round(1000.0 / plain.decode_tok_s - gpu_busy / 1e6 / tokens, 4)
-        if plain and plain.decode_tok_s and tokens else None,
+        "plain_wall_ms_per_token": plain_wall_ms_per_token,
+        "plain_host_gap_ms_per_token_est": plain_host_gap_ms_per_token_est,
         "checks": {
             "kernels_straddling_decode_start": straddling,
+            # The per-role host gaps must add up to the window's idle time.
+            "host_gap_attribution_residual_ns":
+                sum(role_gap_ns.values()) - (wall - gpu_busy),
             "idle_gap_before_first_decode_dispatch_us":
                 round((decode[0].start - before[-1].end) / 1e3, 1) if before else None,
             "last_dispatch_before_decode": before[-1].name[:120] if before else None,
@@ -513,6 +534,11 @@ def summarize(trace: pathlib.Path, log_path: pathlib.Path, plain_log: pathlib.Pa
         "role_share_pct": {r: share(ns) for r, ns in sorted(role_ns.items(), key=lambda kv: -kv[1])},
         "role_dispatches_per_token": {r: round(c / tokens, 1) for r, c in role_calls.items()}
         if tokens else {},
+        # Idle time before each role's dispatches ("tail": after the last one).
+        "role_host_gap_ms_per_token": {
+            r: round(ns / 1e6 / tokens, 4)
+            for r, ns in sorted(role_gap_ns.items(), key=lambda kv: -kv[1])
+        } if tokens else {},
         "port_units": units,
     }
     (out_dir / f"{name}_summary.json").write_text(json.dumps(summary, indent=2) + "\n")
@@ -561,6 +587,22 @@ def report(out_dir: pathlib.Path) -> str:
             p = s["port_units"][u]
             cells.append(f"{p['reached_default_share_pct']} ({p['fallback_share_pct']})")
         lines.append(f"| `{s['name']}` | " + " | ".join(cells) + " |")
+    # Speedup ceilings of each unit's fallback roles: wall time (kernels plus the
+    # launch gaps in front of them, against the plain run when there is one),
+    # then in brackets the GPU-time-share ceiling, which ignores the gaps.
+    lines += ["", "| Run: ceiling wall (GPU share) | "
+              + " | ".join(f"#{u}" for u in UNIT_ROLES) + " |",
+              "|---|" + "---:|" * len(UNIT_ROLES)]
+    for s in rows:
+        units = s["port_units"]
+        if any(units[u].get("plain_ceiling_wall_est") is not None for u in UNIT_ROLES):
+            basis = "plain"
+        elif any(units[u].get("ceiling_wall") is not None for u in UNIT_ROLES):
+            basis = "profiled"
+        else:
+            basis = "summary predates #2148"
+        cells = [ceiling_cell(units[u]) for u in UNIT_ROLES]
+        lines.append(f"| `{s['name']}` ({basis}) | " + " | ".join(cells) + " |")
     for s in rows:
         lines += ["", f"Top kernels, `{s['name']}` (share of decode GPU time, calls per token):", ""]
         for k in s["top_kernels"]:
