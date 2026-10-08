@@ -1,0 +1,10 @@
+rocm_gfx1151_a18d3d76_granite-4.0-h-tiny_default_w1                 exit=0 rows=135 elapsed=5s
+rocm_gfx1151_a18d3d76_granite-4.0-h-tiny_ssmkernel0_w1              exit=0 rows=135 elapsed=4s
+rocm_gfx1151_a18d3d76_granite-4.0-h-tiny_default_w1x1024            exit=0 rows=1031 elapsed=20s
+rocm_gfx1151_a18d3d76_granite-4.0-h-tiny_default_w8                 exit=0 rows=647 elapsed=50s
+rocm_gfx1151_a18d3d76_granite-4.0-h-tiny_default_w256               exit=0 rows=519 elapsed=2s
+rocm_gfx1151_a18d3d76_granite-4.0-h-tiny_f32ref_w1x1024             probe PROBE_ARMS=f32gpu,bf16gpu PROBE_N=1024 exit=0 elapsed=265s (both arms)
+rocm_gfx1151_a18d3d76_granite-4.0-h-tiny_f32refcpu_w1x3             probe PROBE_ARMS=f32cpu, stopped by hand after 3 chunks in about 20 minutes
+rocm_gfx1151_a18d3d76_granite-4.0-h-tiny_cpubf16_w1x1               MLXCEL_DEVICE=cpu logit_trace 1 2 8 0, exit=124 (timeout 600s) after chunk 0
+rocm_gfx1151_a18d3d76_granite-4.0-h-tiny_ops_bf16_vs_f32            probe PROBE_ARMS=ops PROBE_OPS_N=128 exit=0 elapsed=261s
+rocm_gfx1151_a18d3d76_granite-4.0-h-tiny_f32mix-*_w1x1024           probe PROBE_MIX='all;resid;norm;mamba;attn;moe;shared;head' PROBE_N=1024 exit=0 elapsed=817s (all eight arms)
