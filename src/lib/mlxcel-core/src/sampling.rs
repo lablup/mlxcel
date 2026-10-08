@@ -2515,6 +2515,9 @@ pub(crate) fn min_p_filter(logits: &MlxArray, min_p: f32) -> UniquePtr<MlxArray>
 /// mask that pins b10621's `top_k -> typ_p` chain position), unit tests
 /// (`fused_sample_probs_equals_softmax_of_filtered_over_t` in
 /// `sampling::tests`)
+///
+/// `k` must be in `1..vocab`: `argpartition` aborts the process on
+/// `k > vocab`, so every caller guards with `top_k < vocab` first (#2247).
 pub(crate) fn top_k_filter(logits: &MlxArray, k: i32) -> UniquePtr<MlxArray> {
     let neg_logits = ffi::negative(logits);
     let indices = ffi::argpartition(&neg_logits, k - 1, -1);

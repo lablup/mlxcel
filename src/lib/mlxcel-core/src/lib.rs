@@ -4139,6 +4139,12 @@ mod sampling_rejection_tests;
 #[path = "sampling_fixed_key_tests.rs"]
 mod sampling_fixed_key_tests;
 
+// A `top_k` at or above the vocabulary is "no top-k" on every fused sampler
+// entry point instead of aborting the process in `argpartition` (#2247).
+#[cfg(test)]
+#[path = "sampling_top_k_vocab_tests.rs"]
+mod sampling_top_k_vocab_tests;
+
 // Numeric-parity, Gemma `(1 + w)` convention, kill-switch and greedy-argmax
 // tests for the fused residual-add RMSNorm kernel (#905). GPU-only; they skip
 // on CPU-only builds.
