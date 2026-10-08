@@ -24,8 +24,8 @@
 //! size 32, E8M0 scales, bf16 activations). Every case below satisfies that
 //! gate. The sorted call runs that kernel, and the same inputs with
 //! `sorted_indices = false` run the kernel the unsorted path uses (the wide
-//! or warp-shared gather qmv for affine, the per-row `gather_qmv_kernel` for
-//! mxfp4).
+//! or warp-shared gather qmv for affine, and since issue #2178 the
+//! warp-shared gather qmv's mxfp4 word path for mxfp4).
 //!
 //! The kernel used to read `lhs_indices[b]` and `rhs_indices[b]` as flat
 //! arrays. That holds for the `[B]` indices `SwitchGLU`'s sorted path builds,
@@ -45,7 +45,8 @@
 //!   rounding to the activation dtype alone meets;
 //! * two sorted runs agree bit for bit;
 //! * for mxfp4 at gpt-oss-20b's `K = 2880`, the sorted call with the kernel
-//!   switched off (the per-row kernel) differs from it somewhere, so the
+//!   switched off and the per-row kernel selected
+//!   (`MLX_ROCM_GATHER_QMV_USE_WARP=0`) differs from it somewhere, so the
 //!   gate is known to reach the kernel.
 //!
 //! Shapes: a Mixtral-like layer (8 experts, top 2, `K = 4096`, with an output
@@ -109,6 +110,19 @@ fn force_expert_batched(on: bool) {
     // while MLX reads it during evaluation, and nothing else in the process
     // touches the environment concurrently.
     unsafe { std::env::set_var(ENV, if on { "1" } else { "0" }) };
+}
+
+/// Sets `MLX_ROCM_GATHER_QMV_USE_WARP=0` (per-row gather kernel) or removes
+/// the variable (the default dispatch).
+fn force_gather_warp_off(off: bool) {
+    // SAFETY: as in `force_expert_batched`.
+    unsafe {
+        if off {
+            std::env::set_var("MLX_ROCM_GATHER_QMV_USE_WARP", "0");
+        } else {
+            std::env::remove_var("MLX_ROCM_GATHER_QMV_USE_WARP");
+        }
+    }
 }
 
 fn eval_ok(label: &str, a: &MlxArray) {
@@ -481,7 +495,13 @@ fn check_shape(shape: Shape, scheme: Scheme, dt: i32) {
             // bytes mean it did not. At K = 512 the f32 sums can round to the
             // same bf16 values everywhere (measured), so the narrow shape
             // skips this check.
+            //
+            // Since issue #2178 a bf16 mxfp4 call that misses the gate takes
+            // the warp-shared gather kernel, whose word walk sums in the same
+            // order as the expert-batched kernel, so the per-row kernel is
+            // also selected explicitly (`MLX_ROCM_GATHER_QMV_USE_WARP=0`).
             force_expert_batched(false);
+            force_gather_warp_off(true);
             let per_row = gather_qmm(
                 &format!("{label} sorted, kernel off"),
                 &inp,
@@ -489,6 +509,7 @@ fn check_shape(shape: Shape, scheme: Scheme, dt: i32) {
                 scheme,
                 true,
             );
+            force_gather_warp_off(false);
             force_expert_batched(true);
             assert!(
                 mlxcel_core::array_to_raw_bytes(&batched)

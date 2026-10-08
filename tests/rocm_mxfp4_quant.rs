@@ -32,6 +32,11 @@
 //! - `gather_qmm` in mxfp4 reached an affine-only kernel instantiation (item
 //!   10). It must match a per-expert dequantized reference, sorted and
 //!   unsorted, as `SwitchLinear` calls it for MoE experts.
+//! - bf16 mxfp4 `gather_qmm` at gpt-oss-20b's decode shape ran the per-row
+//!   `gather_qmv_kernel` (item 10) at about 1.39 ms per call. It now takes
+//!   the warp-shared gather kernel's mxfp4 word path (issue #2178) and must
+//!   stay as accurate as the per-row kernel, which
+//!   `MLX_ROCM_GATHER_QMV_USE_WARP=0` still selects.
 //!
 //! Every result is evaluated through `try_eval`, which surfaces a ROCm GPU
 //! failure as an error (issue #1804), so a regression fails the test with the
@@ -418,4 +423,241 @@ fn gather_qmm_matches_per_expert_reference() {
             }
         }
     }
+}
+
+const GATHER_WARP_ENV: &str = "MLX_ROCM_GATHER_QMV_USE_WARP";
+
+/// Sets `MLX_ROCM_GATHER_QMV_USE_WARP` (`None` removes it) and restores the
+/// value it found when dropped. `GatherQMM::eval_gpu` reads the variable on
+/// every call.
+struct GatherWarpEnv(Option<std::ffi::OsString>);
+
+impl GatherWarpEnv {
+    fn new() -> Self {
+        Self(std::env::var_os(GATHER_WARP_ENV))
+    }
+
+    fn set(&self, value: Option<&str>) {
+        // SAFETY: `set_var` and `remove_var` mutate the process-global
+        // environment. The caller holds `lock_default_device` while it sets
+        // the variable and while MLX reads it during evaluation, and nothing
+        // else in this binary touches the environment.
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var(GATHER_WARP_ENV, v),
+                None => std::env::remove_var(GATHER_WARP_ENV),
+            }
+        }
+    }
+}
+
+impl Drop for GatherWarpEnv {
+    fn drop(&mut self) {
+        let prev = self.0.take();
+        self.set(prev.as_deref().and_then(|v| v.to_str()));
+    }
+}
+
+/// `||got - want|| / ||want||`, computed on the CPU in f32.
+fn relative_l2(got: &MlxArray, want: &MlxArray) -> f32 {
+    let _guard = DefaultDeviceGuard::cpu();
+    let got = mlxcel_core::astype(got, dtype::FLOAT32);
+    let want = mlxcel_core::astype(want, dtype::FLOAT32);
+    let diff = mlxcel_core::sum_all(&mlxcel_core::square(&mlxcel_core::subtract(&got, &want)));
+    let norm = mlxcel_core::sum_all(&mlxcel_core::square(&want));
+    eval_ok("error metric", &diff);
+    eval_ok("error metric", &norm);
+    let (diff, norm) = (mlxcel_core::item_f32(&diff), mlxcel_core::item_f32(&norm));
+    assert!(norm > 0.0, "reference is all zeros");
+    (diff / norm).sqrt()
+}
+
+/// mxfp4 `gather_qmm` on the GPU, returned as `[rows, 1, n]` in output order.
+fn gather_qmm_gpu(
+    label: &str,
+    x: &MlxArray,
+    packed: &MlxArray,
+    scales: &MlxArray,
+    rhs: &MlxArray,
+    sorted: bool,
+    n: i32,
+) -> UniquePtr<MlxArray> {
+    let y = {
+        let _guard = DefaultDeviceGuard::gpu();
+        // SAFETY: `rhs` outlives the call, and null is the bridge's documented
+        // value for absent biases and lhs indices.
+        let y = unsafe {
+            mlxcel_core::gather_qmm(
+                x,
+                packed,
+                scales,
+                std::ptr::null(),
+                std::ptr::null(),
+                rhs as *const MlxArray,
+                true,
+                GROUP_SIZE,
+                BITS,
+                sorted,
+                MODE,
+            )
+        };
+        eval_ok(label, &y);
+        y
+    };
+    let _guard = DefaultDeviceGuard::cpu();
+    let flat = mlxcel_core::reshape(&y, &[-1, 1, n]);
+    eval_ok("reshape", &flat);
+    flat
+}
+
+/// bf16 mxfp4 decode-shaped `gather_qmm` takes the warp-shared gather kernel's
+/// mxfp4 word path (issue #2178) and stays as accurate as the per-row
+/// `gather_qmv_kernel` it replaces (`MLX_ROCM_GATHER_QMV_USE_WARP=0`).
+///
+/// gpt-oss-20b's expert layer: 32 experts, top 4, `K = 2880` (two
+/// `shared_x` chunks, 2048 and 832), at `N = 2880` and at `N = 516`, whose
+/// last column block is partial. Unsorted with 1 token (a decode step) and 8
+/// tokens, and sorted with 16 tokens (`B = 64`, `B / E = 2`, so the sorted
+/// call misses the expert-batched gate and reaches this arm). Each case
+/// checks that the default path's relative L2 error against the dequantized
+/// f32 reference is within 1.05 times the per-row path's and under 2e-2, that
+/// two default runs agree bit for bit, and that over the `N = 2880` cases
+/// the default and per-row outputs differ somewhere, which proves the
+/// dispatch reached another kernel.
+#[test]
+fn mxfp4_warp_shared_gather_qmv_matches_per_row_and_reference() {
+    if !on_rocm() {
+        eprintln!("skipping: not running on a ROCm device");
+        return;
+    }
+    let _lock = lock_default_device();
+    let env = GatherWarpEnv::new();
+    mlxcel_core::random_seed(2178);
+    let (experts, k, top_k) = (32, 2880, 4);
+    let dt = dtype::BFLOAT16;
+    let mut differing_at_full_width = 0usize;
+
+    for n in [2880, 516] {
+        let (packed, scales) = {
+            let w = normal(&[experts, n, k], dtype::FLOAT32);
+            quantize_on(true, &w)
+        };
+        let dense = dequantize_cpu(&packed, &scales);
+
+        for (tokens, sorted) in [(1, false), (8, false), (16, true)] {
+            let label = format!("mxfp4 gather_qmm N={n} T={tokens} sorted={sorted}");
+            let rows = tokens * top_k;
+            let indices: Vec<i32> = (0..rows).map(|i| (i * 7 + 3) % experts).collect();
+            let x = normal(&[tokens, 1, 1, k], dt);
+            let mut order: Vec<i32> = (0..rows).collect();
+            if sorted {
+                order.sort_by_key(|&r| indices[r as usize]);
+            }
+            let expert_of: Vec<i32> = order.iter().map(|&r| indices[r as usize]).collect();
+            // One input row per output row, in output order: the sorted call's
+            // input, and the reference's input for both layouts.
+            let x_rows = {
+                let _guard = DefaultDeviceGuard::cpu();
+                let token_of: Vec<i32> = order.iter().map(|r| r / top_k).collect();
+                let tok = mlxcel_core::from_slice_i32(&token_of, &[rows]);
+                let flat = mlxcel_core::reshape(&x, &[tokens, 1, k]);
+                let picked = mlxcel_core::take(&flat, &tok, 0);
+                eval_ok("input rows", &picked);
+                picked
+            };
+            let (x_in, rhs) = {
+                let _guard = DefaultDeviceGuard::cpu();
+                let (x_in, flat, shape) = if sorted {
+                    (mlxcel_core::copy(&x_rows), &expert_of, vec![rows])
+                } else {
+                    (mlxcel_core::copy(&x), &indices, vec![tokens, top_k])
+                };
+                let rhs =
+                    mlxcel_core::astype(&mlxcel_core::from_slice_i32(flat, &shape), dtype::UINT32);
+                eval_ok("inputs", &x_in);
+                eval_ok("indices", &rhs);
+                (x_in, rhs)
+            };
+
+            let run = |what: &str| {
+                gather_qmm_gpu(
+                    &format!("{label} {what}"),
+                    &x_in,
+                    &packed,
+                    &scales,
+                    &rhs,
+                    sorted,
+                    n,
+                )
+            };
+            env.set(None);
+            let fast = run("default");
+            let again = run("default rerun");
+            env.set(Some("0"));
+            let per_row = run("per-row");
+            env.set(None);
+
+            // The reference in row chunks keeps the gathered f32 experts small.
+            let want = {
+                let parts: Vec<UniquePtr<MlxArray>> = (0..rows)
+                    .step_by(8)
+                    .map(|s| {
+                        let e = (s + 8).min(rows);
+                        let xr = {
+                            let _guard = DefaultDeviceGuard::cpu();
+                            let part = mlxcel_core::copy(&mlxcel_core::slice(
+                                &x_rows,
+                                &[s, 0, 0],
+                                &[e, 1, k],
+                            ));
+                            eval_ok("reference rows", &part);
+                            part
+                        };
+                        gather_reference(&xr, &dense, &expert_of[s as usize..e as usize])
+                    })
+                    .collect();
+                let _guard = DefaultDeviceGuard::cpu();
+                let refs: Vec<&MlxArray> = parts.iter().map(|p| &**p).collect();
+                let all = mlxcel_core::concatenate_many(&refs, 0);
+                eval_ok("reference", &all);
+                all
+            };
+
+            assert!(
+                raw(&fast) == raw(&again),
+                "{label}: two default runs differ"
+            );
+            let err_fast = relative_l2(&fast, &want);
+            let err_per_row = relative_l2(&per_row, &want);
+            eprintln!("{label}: default {err_fast:.4e}, per-row {err_per_row:.4e}");
+            assert!(
+                err_fast < 2e-2,
+                "{label}: default relative error {err_fast} exceeds 2e-2"
+            );
+            assert!(
+                err_fast <= err_per_row * 1.05,
+                "{label}: default relative error {err_fast} is above 1.05 times the per-row \
+                 path's {err_per_row}"
+            );
+            let (fast_bytes, per_row_bytes) = (raw(&fast), raw(&per_row));
+            let differing = fast_bytes
+                .chunks_exact(2)
+                .zip(per_row_bytes.chunks_exact(2))
+                .filter(|(a, b)| a != b)
+                .count();
+            eprintln!("{label}: {differing} bf16 outputs differ from the per-row path");
+            if n == k {
+                differing_at_full_width += differing;
+            }
+        }
+    }
+    // The two kernels sum each output in another order, but over 2880 terms
+    // in f32 the results rarely straddle a bf16 rounding boundary: measured,
+    // the 1-token case alone can round to identical outputs. Over the three
+    // full-width cases (288 rows of 2880 outputs) some must differ; none
+    // differing means the default call never left the per-row kernel.
+    assert!(
+        differing_at_full_width > 0,
+        "the default calls at N = K = {k} did not leave the per-row kernel"
+    );
 }
