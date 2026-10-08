@@ -114,14 +114,13 @@ size_t max_inflight_bytes() {
   return bytes;
 }
 
-// Per-arch op/MB caps for the build graph. Tunable via env.
-// The earlier "corrupts at >3 nodes" was actually one bad op (Concatenate,
+// Op/MB caps for the build graph (fixed; the former MLX_MAX_MB_PER_BUFFER and
+// graph-side MLX_MAX_OPS_PER_BUFFER overrides were dead because the graph build
+// path is permanently off, see use_hip_graphs()). The earlier "corrupts at >3 nodes" was actually one bad op (Concatenate,
 // whose multi-copy kernels corrupt when co-grouped); it is now graph-split in
 // gpu::eval (is_graph_split_op), so large graphs are correct again.
 static std::pair<int, int> get_graph_limits() {
-  int ops = env::max_ops_per_buffer(50);
-  int mb = env::max_mb_per_buffer(200);
-  return {ops, mb};
+  return {50, 200};
 }
 
 namespace {
@@ -735,39 +734,6 @@ void CommandEncoder::add_kernel_node_kp(const hipKernelNodeParams& kp) {
     // records any launched kernel that the manual node API won't accept), so
     // the chunk stays ~1 fragment. Else fall back to the eager graph-split.
     (void)hipGetLastError();
-    static const bool cap_reject = [] {
-      const char* e = std::getenv("MLX_GRAPH_PREFILL_REPLAY");
-      return e && e[0] == '1';
-    }();
-    if (cap_reject && !graph_decode_mode()) {
-      device_.make_current();
-      hipError_t be =
-          hipStreamBeginCapture(stream_, hipStreamCaptureModeThreadLocal);
-      if (be == hipSuccess) {
-        (void)hipLaunchKernel(
-            kp.func,
-            kp.gridDim,
-            kp.blockDim,
-            kp.kernelParams,
-            kp.sharedMemBytes,
-            stream_);
-        hipGraph_t child = nullptr;
-        hipError_t ee = hipStreamEndCapture(stream_, &child);
-        if (ee == hipSuccess && child) {
-          size_t nn = 0;
-          hipGraphGetNodes(child, nullptr, &nn);
-          if (nn > 0) {
-            add_child_graph_node(child, key);
-            hipGraphDestroy(child);
-            return;
-          }
-          hipGraphDestroy(child);
-        } else if (child) {
-          hipGraphDestroy(child);
-        }
-        (void)hipGetLastError();
-      }
-    }
     commit();
     device_.make_current();
     (void)hipLaunchKernel(
@@ -946,9 +912,6 @@ bool CommandEncoder::decode_capture_begin() {
   if (e != hipSuccess) {
     g_decode_capturing.store(false, std::memory_order_relaxed);
     (void)hipGetLastError();
-    static const bool dbg = std::getenv("MLX_PURE_DEBUG") != nullptr;
-    if (dbg)
-      fprintf(stderr, "[cap] BeginCapture failed: %s\n", hipGetErrorString(e));
     return false;
   }
   return true;
@@ -957,7 +920,6 @@ bool CommandEncoder::decode_capture_begin() {
 bool CommandEncoder::decode_capture_end_record(int slot) {
   device_.make_current();
   slot &= 1;
-  static const bool dbg = std::getenv("MLX_PURE_DEBUG") != nullptr;
   hipGraph_t g = nullptr;
   hipError_t ee = hipStreamEndCapture(stream_, &g);
   g_decode_capturing.store(false, std::memory_order_relaxed);
@@ -965,52 +927,10 @@ bool CommandEncoder::decode_capture_end_record(int slot) {
     if (g)
       hipGraphDestroy(g);
     (void)hipGetLastError();
-    if (dbg)
-      fprintf(stderr, "[cap] EndCapture failed: %s\n", hipGetErrorString(ee));
     return false;
   }
   size_t nn = 0;
   hipGraphGetNodes(g, nullptr, &nn);
-  if (dbg) {
-    fprintf(stderr, "[cap] captured %zu nodes\n", nn);
-    std::vector<hipGraphNode_t> nodes(nn);
-    if (hipGraphGetNodes(g, nodes.data(), &nn) == hipSuccess) {
-      int n_kernel = 0, n_memcpy = 0, n_memset = 0, n_event = 0, n_other = 0;
-      for (auto& nd : nodes) {
-        hipGraphNodeType ty;
-        if (hipGraphNodeGetType(nd, &ty) != hipSuccess) {
-          n_other++;
-          continue;
-        }
-        switch (ty) {
-          case hipGraphNodeTypeKernel:
-            n_kernel++;
-            break;
-          case hipGraphNodeTypeMemcpy:
-            n_memcpy++;
-            break;
-          case hipGraphNodeTypeMemset:
-            n_memset++;
-            break;
-          case hipGraphNodeTypeEventRecord:
-          case hipGraphNodeTypeWaitEvent:
-            n_event++;
-            break;
-          default:
-            n_other++;
-            break;
-        }
-      }
-      fprintf(
-          stderr,
-          "[cap] node types: kernel=%d memcpy=%d memset=%d event=%d other=%d\n",
-          n_kernel,
-          n_memcpy,
-          n_memset,
-          n_event,
-          n_other);
-    }
-  }
   if (nn == 0) {
     hipGraphDestroy(g);
     return false;
@@ -1018,8 +938,6 @@ bool CommandEncoder::decode_capture_end_record(int slot) {
   hipGraphExec_t exec = nullptr;
   hipError_t ie = hipGraphInstantiate(&exec, g, nullptr, nullptr, 0);
   if (ie != hipSuccess) {
-    if (dbg)
-      fprintf(stderr, "[cap] Instantiate failed: %s\n", hipGetErrorString(ie));
     hipGraphDestroy(g);
     (void)hipGetLastError();
     return false;
@@ -1092,19 +1010,12 @@ void CommandEncoder::commit() {
     // ExecUpdate fails) reinstantiate into the slot. The slot owns the source
     // graph + arg Packs for the exec's life (CLR stores kernelParams by
     // pointer).
-    static const bool prefill_replay_cu = [] {
-      const char* e = std::getenv("MLX_GRAPH_PREFILL_REPLAY");
-      return e && e[0] == '1';
-    }();
-    const bool use_execupdate = graph_decode_mode() || prefill_replay_cu;
+    const bool use_execupdate = graph_decode_mode();
     auto& pool = exec_pool_[graph_nodes_key_ + ":" + graph_deps_key_];
     // For the stable decode topology, grow the pool to N execs (skip reuse
     // until then) so replay always finds a drained slot despite completion-flag
     // lag.
-    static const size_t replay_slots = [] {
-      const char* e = std::getenv("MLX_GRAPH_REPLAY_SLOTS");
-      return e ? std::max<size_t>(2, std::atoi(e)) : 4;
-    }();
+    constexpr size_t replay_slots = 4;
     const std::string& grow_key =
         graph_decode_mode() ? decode_key_ : prefill_key_;
     const bool force_grow = use_execupdate && !grow_key.empty() &&
@@ -1161,27 +1072,9 @@ void CommandEncoder::commit() {
     }
     inflight->store(1, std::memory_order_release);
 
-    // Reclaim this chunk's deferred-free buffers once it has drained, bounding
-    // graph-mode memory to a sliding window of chunks instead of a whole
-    // forward (which OOMs a 32GB card). Free with a generation LAG so a buffer
-    // is only released after the next few chunks have also launched — covers
-    // cross-chunk / in-place references that a lag-0 free races
-    // (use-after-free). Tunable via MLX_GRAPH_FREE_LAG. Opt-in
-    // (MLX_GRAPH_FREE_LAG): per-chunk reclaim is currently racy (frees a buffer
-    // the next chunk still references → UAF), so OFF by default — frees flush
-    // safely at the per-token synchronize. The real fix is 100% buffer reuse
-    // (deterministic per-forward addresses), not freeing.
-    static const long free_lag = [] {
-      const char* e = std::getenv("MLX_GRAPH_FREE_LAG");
-      return e ? std::atol(e) : -1;
-    }();
     uint64_t my_gen = graph_current_gen();
     graph_advance_gen();
     CHECK_HIP_ERROR(hipGraphLaunch(graph_exec, stream_));
-    if (free_lag >= 0 && static_cast<long>(my_gen) > free_lag) {
-      uint64_t fg = my_gen - free_lag;
-      add_completed_handler([fg]() { free_graph_generation(fg); });
-    }
     // Reclaim this chunk's stream-ordered POOL buffers now, via hipFreeAsync
     // queued right after the launch on stream_ (retires after the graph; no
     // blocking drain). This is the common case on the discrete pool and keeps
@@ -1189,12 +1082,9 @@ void CommandEncoder::commit() {
     free_graph_generation_async(my_gen);
     // Backstop ONLY for the non-stream-ordered remainder (unified/slab buffers,
     // rare on the discrete path): if that residual backlog still exceeds a cap,
-    // drain + flush. MLX_GRAPH_DEFER_MAX_MB (default 2048; 0 disables).
-    static const size_t defer_cap = [] {
-      const char* e = std::getenv("MLX_GRAPH_DEFER_MAX_MB");
-      return static_cast<size_t>(e ? std::atoll(e) : 2048) << 20;
-    }();
-    if (defer_cap && graph_deferred_bytes() > defer_cap) {
+    // drain + flush (fixed 2048 MB cap).
+    constexpr size_t defer_cap = static_cast<size_t>(2048) << 20;
+    if (graph_deferred_bytes() > defer_cap) {
       (void)hipStreamSynchronize(stream_);
       flush_graph_deferred_frees();
     }
@@ -1417,14 +1307,9 @@ void set_graph_active(bool v) {
 // Decode-mode: a single-token forward accrues into ONE graph (no mid-forward
 // commit) that is refreshed via hipGraphExecUpdate and launched once per token.
 // Set by the generation loop for Lstep==1 steps; prefill leaves it off so its
-// large intermediates stay bounded by the per-graph caps. Disable entirely with
-// MLX_GRAPH_DECODE=0.
+// large intermediates stay bounded by the per-graph caps.
 bool graph_decode_mode() {
-  static const bool enabled = [] {
-    const char* e = std::getenv("MLX_GRAPH_DECODE");
-    return !(e && std::string(e) == "0");
-  }();
-  return enabled && g_graph_decode_mode.load(std::memory_order_relaxed);
+  return g_graph_decode_mode.load(std::memory_order_relaxed);
 }
 void set_graph_decode_mode(bool v) {
   g_graph_decode_mode.store(v, std::memory_order_relaxed);

@@ -47,10 +47,9 @@ void new_thread_unsafe_stream(Stream s) {
 // neighbors (a ROCm CLR kernarg-pool interaction; found by per-op force-execute
 // bisection). Isolate them: flush the graph before AND after so they run alone.
 static bool is_graph_split_op(const char* name) {
-  static const bool no_split = std::getenv("MLX_NO_CONCAT_SPLIT") != nullptr;
   // Decode-mode keeps the whole forward in one graph, so Concatenate must be a
   // graph node (validated bit-identical via ExecUpdate), never a split point.
-  if (no_split || rocm::graph_decode_mode())
+  if (rocm::graph_decode_mode())
     return false;
   return std::strcmp(name, "Concatenate") == 0;
 }
