@@ -5117,7 +5117,39 @@ __global__ void __launch_bounds__(1024) gather_qmv_warp_shared_kernel(
     }
     __syncthreads();
 
-    if (valid) {
+    // mlxcelverse: mxfp4 (4-bit e2m1, group size 32, one E8M0 scale byte per
+    // group, no biases) walks packed words across the whole chunk instead of
+    // looping per group. With the per-group loop below, lanes start at
+    // lane * 8 inside each 32-value group, so only lanes 0 to 3 of 16 did work
+    // and the decode went through the branchy fp4_e2m1_to_float switch. Here
+    // every lane takes one 8-value word per step: the word's eight nibbles
+    // sit in one group (8 divides 32), so each word reads one scale, decodes
+    // without a branch (fp4_e2m1_to_float_scaled, the value times 2^-14) and
+    // scales its dot product back by 2^14, as the expert-batched kernel does
+    // (LOCAL_FIXES.md item 31). The dispatch sends only K % 32 == 0 here, and
+    // CHUNK_SIZE is a multiple of 32, so no word straddles a chunk end.
+    constexpr bool kMxfp4WordPath = !AFFINE && BITS == 4 && GROUP_SIZE == 32;
+    if constexpr (kMxfp4WordPath) {
+      if (valid) {
+        for (int k = chunk_start + lane * 8; k < chunk_end;
+             k += THREADS_PER_COL * 8) {
+          const uint32_t packed =
+              *reinterpret_cast<const uint32_t*>(&w_row[k / 2]);
+          const float scale = load_scale_value<ScaleT, GROUP_SIZE, false>(
+              scales_row[k / GROUP_SIZE]);
+          const float* xs = &shared_x[k - chunk_start];
+          float qx = 0.0f;
+#pragma unroll
+          for (int j = 0; j < 8; ++j) {
+            qx = fmaf(
+                xs[j], fp4_e2m1_to_float_scaled((packed >> (4 * j)) & 0xFu), qx);
+          }
+          acc = fmaf(scale, qx * kFp4HalfBitsScale, acc);
+        }
+      }
+    }
+
+    if (!kMxfp4WordPath && valid) {
       int g_start = chunk_start / GROUP_SIZE;
       int g_end = (chunk_end + GROUP_SIZE - 1) / GROUP_SIZE;
 
@@ -6526,13 +6558,76 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
       return;
     }
 
+    // mlxcelverse: bf16 mxfp4 at group size 32 takes the warp-shared kernel's
+    // AFFINE=false word path (lablup/mlxcel#2178). Before, it fell to the
+    // per-row gather_qmv_kernel below, one thread per output column walking
+    // all of K, which took about 1.39 ms per call and most of a gpt-oss-20b
+    // decode step on gfx1151. Only bf16 is instantiated (gpt-oss runs bf16
+    // activations), to hold the file's compile time; f16 mxfp4 and mxfp8 keep
+    // the per-row kernel. MLX_ROCM_GATHER_QMV_USE_WARP=0 sends this case back
+    // to the per-row kernel too. A thread count set through
+    // MLX_ROCM_GATHER_QMV_THREADS_PER_COL that matches neither instantiation
+    // also stays on the per-row kernel, since the kernel's lane reduction
+    // assumes the block's x dimension equals THREADS_PER_COL.
+    if (use_fast_gather_qmv && mode_ == QuantizationMode::Mxfp4 &&
+        x.dtype() == bfloat16 && group_size_ == 32 && bits_ == 4 &&
+        K % 32 == 0 &&
+        (fast_threads_per_col == 16 || fast_threads_per_col == WARP_SIZE)) {
+      auto launch_mxfp4 = [&](auto kernel) {
+        enc.add_kernel_node(
+            kernel,
+            fast_grid,
+            fast_block,
+            0u,
+            (const hip_bfloat16*)x_ptr,
+            (const uint8_t*)w_ptr,
+            (const uint8_t*)scales_ptr,
+            static_cast<const uint8_t*>(nullptr),
+            li_ptr,
+            ri_ptr,
+            batch_shape_param,
+            lhs_idx_strides_param,
+            rhs_idx_strides_param,
+            batch_ndim,
+            (hip_bfloat16*)out_ptr,
+            B,
+            M,
+            N,
+            K,
+            E,
+            false,
+            use_sorted_rhs_schedule,
+            implicit_x_batch_stride);
+      };
+      if (fast_threads_per_col == 16) {
+        launch_mxfp4(&rocm::gather_qmv_warp_shared_kernel<
+                     hip_bfloat16,
+                     uint8_t,
+                     4,
+                     32,
+                     false,
+                     16>);
+      } else {
+        launch_mxfp4(&rocm::gather_qmv_warp_shared_kernel<
+                     hip_bfloat16,
+                     uint8_t,
+                     4,
+                     32,
+                     false,
+                     WARP_SIZE>);
+      }
+      return;
+    }
+
 #define has_bias has_bias, use_sorted_rhs_schedule, implicit_x_batch_stride
 
     // mlxcelverse: mxfp4/mxfp8 store one E8M0 byte per group and no biases,
     // but every launch below instantiates the kernel with AFFINE=true and a
     // T-typed scale pointer, which dequantizes fp weights with the affine
     // formula. Route non-affine modes to the AFFINE=false instantiation with
-    // uint8_t scales instead.
+    // uint8_t scales instead. bf16 mxfp4 at group size 32 with K % 32 == 0
+    // takes the warp-shared arm above unless MLX_ROCM_GATHER_QMV_USE_WARP=0;
+    // f16 and f32 mxfp4, mxfp8 and that switch reach this per-row kernel.
     if (mode_ != QuantizationMode::Affine) {
       if (group_size_ != 32 || (bits_ != 4 && bits_ != 8)) {
         throw std::runtime_error(
