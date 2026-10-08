@@ -1,0 +1,4 @@
+model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlxcel_version,build_type,max_tokens,prompt,prompt_target_len,mlxcel_commit,mlx_commit,mlx_rocm_overlay_commit,hip_version
+Qwen2.5-7B-Instruct-4bit,models/mlx/Qwen2.5-7B-Instruct-4bit,512,128,337.03,1519.14,2999.31,42.68,2026-10-08,AMD_Radeon_8060S_Graphics_gfx1151_ROCm10.0.0_96GB,0.7.0,release,128,"Hello, how are you today?",512,unknown,81ba1c6a,75915908,7.15.26333
+Qwen2.5-7B-Instruct-4bit,models/mlx/Qwen2.5-7B-Instruct-4bit,512,128,341.74,1498.22,3053.81,41.91,2026-10-08,AMD_Radeon_8060S_Graphics_gfx1151_ROCm10.0.0_96GB,0.7.0,release,128,"Hello, how are you today?",512,unknown,81ba1c6a,75915908,7.15.26333
+Qwen2.5-7B-Instruct-4bit,models/mlx/Qwen2.5-7B-Instruct-4bit,512,128,312.67,1637.52,3137.77,40.79,2026-10-08,AMD_Radeon_8060S_Graphics_gfx1151_ROCm10.0.0_96GB,0.7.0,release,128,"Hello, how are you today?",512,unknown,81ba1c6a,75915908,7.15.26333

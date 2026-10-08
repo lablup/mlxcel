@@ -984,10 +984,10 @@ fn a_starved_round_cap_falls_back_and_the_event_is_counted() {
 /// | top-k + top-p | 1.27x - 1.64x at 32K, 0.71x - 0.83x at 152K | only at vocab <= 32768 |
 ///
 /// gfx1151 re-measured the joint row (#2157, vocab {32K, 64K, 128256, 151936,
-/// 152064}): batches 4 and 8 win everywhere, but batch 1 does not clear 1.0
-/// above 32768 (pipelined 0.90x - 0.98x), so ROCm keeps the same cap. The cap is
-/// one constant on every build; [`the_joint_vocab_cap_is_the_measured_crossover`]
-/// pins it.
+/// 152064}): batches 4 and 8 win everywhere, and end-to-end decode with the
+/// joint case routed measured 1.15x on Llama 3.1 8B (128256) and 1.12x on
+/// Qwen2.5-7B (152064), so a ROCm build caps it at 152064 instead.
+/// [`the_joint_vocab_cap_is_the_measured_crossover`] pins the per-build value.
 ///
 /// The kernel replaces a sort, so it wins exactly where the stock chain sorts,
 /// which is when top-p is active. The `rounds` column of the microbenchmark
@@ -1026,18 +1026,31 @@ fn the_routing_policy_matches_the_measured_matrix() {
         );
     }
 
-    // The joint case is capped at the vocabulary where it was measured to win.
-    // On M1 Ultra 65536 is excluded because it has not been measured for this
-    // combination; on gfx1151 it was measured and batch 1 did not win (#2157).
-    // 128256 is the Llama 3 vocabulary that prompted the ROCm re-measurement.
+    // The joint case is capped at the vocabulary where it was measured to win,
+    // which is per build (#2157). On M1 Ultra 65536 is excluded because it has
+    // not been measured for this combination. On gfx1151 every vocabulary up
+    // to 152064 routes; 128256 is the Llama 3 vocabulary that prompted the
+    // re-measurement, 151936 Qwen3's, 152064 Qwen 2.5's.
+    let rocm = cfg!(feature = "rocm");
     assert!(sampling_rejection_routes(4096, 40, 0.9, 0.0));
     assert!(sampling_rejection_routes(32_768, 40, 0.9, 0.0));
-    assert!(!sampling_rejection_routes(65_536, 40, 0.9, 0.0));
-    assert!(!sampling_rejection_routes(128_256, 40, 0.9, 0.0));
-    assert!(!sampling_rejection_routes(152_064, 40, 0.9, 0.0));
     assert!(sampling_rejection_routes(32_768, 40, 0.9, 0.05));
-    assert!(!sampling_rejection_routes(128_256, 40, 0.95, 0.0));
-    assert!(!sampling_rejection_routes(152_064, 40, 0.9, 0.05));
+    for vocab in [65_536, 128_256, 151_936, 152_064] {
+        assert_eq!(
+            sampling_rejection_routes(vocab, 40, 0.9, 0.0),
+            rocm,
+            "top-k + top-p at vocab {vocab}"
+        );
+        assert_eq!(
+            sampling_rejection_routes(vocab, 40, 0.95, 0.05),
+            rocm,
+            "top-k + top-p + min-p at vocab {vocab}"
+        );
+    }
+    // Above every measured vocabulary the joint case stays on the chain on
+    // every build (gpt-oss 201088, Gemma 262144).
+    assert!(!sampling_rejection_routes(201_088, 40, 0.9, 0.0));
+    assert!(!sampling_rejection_routes(262_144, 40, 0.95, 0.0));
 
     // A top-k that cannot bind is not a top-k: it leaves the chain's cost
     // profile at top-p alone, so it does not drag the joint ceiling in.
@@ -1050,14 +1063,19 @@ fn the_routing_policy_matches_the_measured_matrix() {
 /// The joint top-k + top-p cap is the measured crossover on this build, and the
 /// routing policy turns exactly at it (#2157).
 ///
-/// Both measurements put the crossover at 32768: M1 Ultra (#901) and gfx1151,
-/// where batch 1 read 0.98x pipelined at 65536 and 0.96x isolated at 128256.
-/// The value is a compile-time constant, so a backend that measures a different
-/// crossover changes it by build flag; this test is where that build's value
-/// gets pinned. Pure host arithmetic, so it runs on a CPU-only build too.
+/// M1 Ultra (#901) measured the crossover at 32768, which every non-ROCm build
+/// keeps. gfx1151 measured end-to-end wins at 128256 and 152064 and nothing
+/// above, so a ROCm build (`#ifdef MLXCEL_BRIDGE_ROCM_BACKEND`, which build.rs
+/// defines exactly when the `rocm` feature is on) caps at 152064. The value is
+/// a compile-time constant; this test is where each build's value is pinned.
+/// Pure host arithmetic, so it runs on a CPU-only build too.
 #[test]
 fn the_joint_vocab_cap_is_the_measured_crossover() {
-    const MEASURED_CAP: i32 = 32_768;
+    const MEASURED_CAP: i32 = if cfg!(feature = "rocm") {
+        152_064
+    } else {
+        32_768
+    };
     let cap = sampling_rejection_joint_vocab_max();
     assert_eq!(
         cap,
@@ -1151,24 +1169,33 @@ fn a_large_vocabulary_sends_the_joint_config_back_to_the_stock_chain() {
         return;
     }
     // The llama-server default (top-k 40 + top-p 0.9) above the measured
-    // ceiling. This is the cell that measured 0.71x-0.83x, so it must decline,
-    // and it must say the vocabulary is the reason.
-    let logits = spread_logits(65_536, 0x90F);
+    // ceiling, which is per build (#2157): 65536 on a build capped at 32768
+    // (M1 Ultra measured the joint case losing above it), and gpt-oss's
+    // 201088 on a ROCm build capped at 152064 (unmeasured above the cap). It
+    // must decline, and it must say the vocabulary is the reason.
+    let vocab: usize = if sampling_rejection_joint_vocab_max() < 65_536 {
+        65_536
+    } else {
+        201_088
+    };
+    assert!(vocab as i32 > sampling_rejection_joint_vocab_max());
+    let logits = spread_logits(vocab, 0x90F);
     let batched = tiled(&logits, 4);
 
     assert!(
         !took_the_kernel(&batched, 40, 0.9, 0.0),
-        "a 65536-vocabulary top-k + top-p launch reached the kernel"
+        "a {vocab}-vocabulary top-k + top-p launch reached the kernel"
     );
 
     reset_sampling_dispatch();
     let tokens = u32_values(&fused_sample(&batched, 1.0, 40, 0.9, 0.0));
     assert_eq!(tokens.len(), 4);
     let lines = recorded_dispatch();
+    let vocab_text = vocab.to_string();
     assert!(
         lines
             .iter()
-            .any(|l| l.contains("not routed") && l.contains("65536")),
+            .any(|l| l.contains("not routed") && l.contains(&vocab_text)),
         "the decline did not name the vocabulary that caused it: {lines:?}"
     );
 
@@ -1176,7 +1203,7 @@ fn a_large_vocabulary_sends_the_joint_config_back_to_the_stock_chain() {
     // of splitting the policy by filter rather than by vocabulary alone.
     assert!(
         took_the_kernel(&batched, 0, 0.9, 0.0),
-        "top-p alone at vocab 65536 measured a win at every batch and must still route"
+        "top-p alone at vocab {vocab} must still route"
     );
 }
 
