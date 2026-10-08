@@ -2,7 +2,7 @@
 
 lablup/mlxcel#2157, part of #1801. The rejection sampler (#901) routes top-k together with top-p only up to a vocabulary cap, `REJECTION_JOINT_VOCAB_MAX` in `src/lib/mlxcel-core/cpp/mlx_cxx_bridge.cpp`. Its value, 32768, was measured on M1 Ultra ([rejection-sampling-m1ultra-2026-08-02.md](rejection-sampling-m1ultra-2026-08-02.md)). The HIP port (#2064) inherited it unmeasured, so `--top-k 40 --top-p 0.95` on a Llama 3 checkpoint (vocab 128256) never reached the kernel ([rocm-samplers-gfx1151-2026-10-05.md](rocm-samplers-gfx1151-2026-10-05.md)). This page re-measures the crossover on gfx1151.
 
-**Outcome: a ROCm build routes top-k with top-p up to vocab 152064; Metal and CUDA keep 32768.** The microbenchmark alone would have kept 32768: its batch 4 and 8 cells win at every vocabulary, but its synthetic batch-1 cell does not clear 1.0 above 32768. End-to-end decode, which the issue's rule names as the confirmation at 128256 and above, disagrees with that cell by a wide margin: with the joint case routed, decode is 1.15x faster on Meta-Llama-3.1-8B-Instruct-4bit (vocab 128256) and 1.12x on Qwen2.5-7B-Instruct-4bit (152064), and every kernel run was faster than every chain run. The cap is set to 152064, the largest vocabulary measured both ways. Why the synthetic batch-1 cell does not predict real decode on this GPU was not isolated; a bf16 rerun ruled out the logits dtype.
+**Outcome: a ROCm build routes top-k with top-p up to vocab 152064; Metal and CUDA keep 32768.** The microbenchmark alone would have kept 32768: its batch 4 and 8 cells win at every vocabulary, but its synthetic batch-1 cell does not clear 1.0 above 32768. End-to-end decode, which the issue's rule names as the confirmation at 128256 and above, disagrees with that cell by a wide margin: with the joint case routed, decode is 1.15x faster on Meta-Llama-3.1-8B-Instruct-4bit (vocab 128256) and 1.12x on Qwen2.5-7B-Instruct-4bit (152064), and every kernel run was faster than every chain run; on the final build rebased onto current `main` the Llama 3.1 pairs read 1.14x. The cap is set to 152064, the largest vocabulary measured both ways. Why the synthetic batch-1 cell does not predict real decode on this GPU was not isolated; a bf16 rerun ruled out the logits dtype.
 
 ## Environment
 
@@ -73,7 +73,15 @@ How much the batch-1 pipelined cells can say is limited. Rows that production do
 
 Every kernel run is faster than every chain run on both models, by 10% to 18% within each pair. The chain arm also spreads more (4.5 to 7.0% of its median, against 0.9 to 1.7% for the kernel), as the top-p chain did on Llama 3.1 in #2064.
 
-FINAL_SECTION
+### Final build, rebased on current main
+
+The same pairs on this branch's own build after rebasing onto `main` at `ad844354`, where `mlxcel-bench-decode` now decodes through the engine (#2224, #2225; the CSV's last column reads `engine`). The arms are the shipped default, which now routes the joint case at 128256, and `MLXCEL_SAMPLING_REJECTION=0`, which is the path `main` takes for this configuration (it never routed the joint case above 32768). An `mlxcel generate` run in the first pair logged `sampling dispatch: rejection kernel (batch 1, vocab 128256, temperature 0.8, top_k 40, top_p 0.95, ...)` by default and `sampling dispatch: argpartition chain: pinned by MLXCEL_SAMPLING_REJECTION` with the switch. All three pairs were clean on their first guard attempt. Raw rows: `benchmarks/rocm_strixhalo-gfx1151_2026-10-08_joint-cap-{after,before}_Meta-Llama-3.1-8B-Instruct-4bit.csv` (`mlxcel_commit` `79ea5814`).
+
+| Model (vocab) | Before (stock chain) tok/s | After (rejection kernel) tok/s | Medians |
+|---|---|---|---|
+| Meta-Llama-3.1-8B-Instruct-4bit (128256) | 33.15 / 35.76 / 33.09, median 33.15 | 37.61 / 38.45 / 37.73, median 37.73 | 1.14x |
+
+Every after run is faster than every before run, by 1.08x to 1.14x within each pair. Qwen2.5-7B was not re-run on the rebased build: the shared GPU was contended for hours at a time, and the measurement-build pairs above already separate cleanly.
 
 ## Decision
 
