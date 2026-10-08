@@ -61,6 +61,7 @@ reference runtime) live alongside the snapshot:
 - [Gemma3n decode profile on M5 Max](benchmark_results/gemma3n-decode-profile-m5max.md)
 - [Gemma 4 31B QAT/non-QAT MTP exactness on M5 Max](benchmark_results/gemma4-31b-mtp-exactness-2026-09-26.md)
 - [Unified engine baseline: CLI vs server B=1 decode, prefill chunk and KV storage (GB10)](benchmark_results/unified-engine-baseline-gb10-2026-10-07.md)
+- [Unified engine final measurement: pre-epic CxxGenerator vs the engine, batched serving, prefill chunk under live decode (GB10)](benchmark_results/unified-engine-final-gb10-2026-10-08.md)
 
 Embedding and rerank throughput (`/v1/embeddings`, `/v1/rerank`) has its own
 ladder, driven by `scripts/bench_embeddings.py`:

@@ -1,0 +1,20 @@
+# mixed prefill/decode admission bench (issue #908)
+model=llama-3.2-1b-instruct-4bit  streams=4  settle=5.0s
+stream_prompt~128 tok  admit_prompt~8192 tok  stream_max_tokens=4096
+expect=any
+
+## scheduler tick attribution
+    mixed_steps_total: +0
+    prefill_grants_total: +13
+    prefill_chunks_total: +14
+    decode_steps_total: +4095
+
+## per-stream inter-token latency
+    quiet window (before admission): p50 13.3 ms  p95 19.4 ms  mean 13.9 ms  n=1338
+    admission window (closed by the admitted request's first token): p50 10.3 ms  p95 56.1 ms  mean 13.9 ms  n=807
+    p95 inflation during admission: 2.89x
+
+## admitted request
+    TTFT: 4067 ms
+    admitted_first_token_after_last_stream: False
+
