@@ -163,8 +163,11 @@ cargo run --release --features cuda --example verify_width_cost -- models/mlx/qw
 # Batched serving ladder, against a server started with
 # --parallel 4 --max-batch-prefill 4. Writes no CSV; transcribe into
 # benchmarks/{backend}_{hw}_batch_{date}.csv.
+# --metrics also prints, per level, the batch scheduler's decode steps, mean
+# batch occupancy, interleaved prefill chunks and mixed steps, and the mean
+# decode step ms from /metrics (issue #2156).
 python3 scripts/bench_serving_concurrency.py --port <port> \
-    --concurrency 1,2,4 --prompt-tokens 512 --max-tokens 128
+    --concurrency 1,2,4 --prompt-tokens 512 --max-tokens 128 --metrics
 
 # Embedding and rerank ladder. One server per checkpoint; writes its own CSV.
 python3 scripts/bench_embeddings.py --bin target/release/mlxcel-server \
