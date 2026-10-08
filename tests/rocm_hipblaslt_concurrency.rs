@@ -39,15 +39,20 @@
 //! `[64, 64] x transpose([64, 64])` (the hipBLASLt TN pipe), a bf16 batched
 //! `[4, 64, 64] x [4, 64, 64]` (`hipblaslt_gemm_batched`) and an f32
 //! `[64, 128] x [128, 64]` (rocBLAS, so both libraries interleave). Inputs
-//! are integers: `-1..=1` for bf16 over `K = 64` keeps every output an
-//! integer of magnitude at most 64, exact in bf16, and `-4..=4` for f32
-//! over `K = 128` stays far below 2^24, so each output cast to f32 must
-//! equal the host `i32` reference exactly. The bf16 range is `-1..=1` and
-//! not `-2..=2` because on gfx1151 both hipBLASLt and rocBLAS return
-//! residues of about 2^-22 at exact-zero outputs when the bf16 inputs mix
-//! zeros with values of magnitude 2 (single-threaded, NN and TN, K from 16
-//! to 128; `{-1, 0, 1}` and `{-2, -1, 1, 2}` are exact), which bf16 output
-//! rounding hides everywhere except at zeros. The parent also requires the
+//! are integers: `-2..=2` for bf16 over `K = 64` keeps every output an
+//! integer of magnitude at most 256, exact in bf16, and `-4..=4` for f32
+//! over `K = 128` stays far below 2^24. The f32 outputs must equal the host
+//! `i32` reference exactly. The bf16 outputs must lie within
+//! `bf16_gemm_tolerance` of it, which is at most about 0.002 here, so any
+//! wrong operand, element or tile (an error of at least 1) still fails. The
+//! bf16 check cannot be exact on gfx11: hipBLASLt and rocBLAS run these
+//! GEMMs on `v_wmma_f32_16x16x16_bf16`, whose f32 accumulation is not IEEE
+//! (a cancelling term of opposite sign leaves a residue of about one unit in
+//! the 24th bit, for example `1 + -1` gives `-2^-24`), so exact-zero outputs
+//! come back as `+-2^-23` or `-2^-22` (#2206; measured in
+//! `docs/benchmark_results/rocm-bf16-gemm-residue-gfx1151-2026-10-08.md`).
+//! `bf16_gemm_error_is_within_the_accumulation_bound` pins that bound on
+//! inputs that provoke the residue in every output. The parent also requires the
 //! `[hipBLASLt caps] device` line exactly once in each child's stderr, which
 //! `gemm_caps` prints on the first hipBLASLt GEMM, proving the bf16 GEMMs
 //! reached hipBLASLt.
@@ -96,7 +101,7 @@ const THREADS: usize = 8;
 const ROUNDS: usize = 33;
 /// bf16 shapes: `[BF_M, BF_K] x transpose([BF_N, BF_K])` and the batched
 /// `[BATCH, BF_M, BF_K] x [BATCH, BF_K, BF_N]`, inputs in `-BF_HALF..=BF_HALF`.
-const BF_HALF: i32 = 1;
+const BF_HALF: i32 = 2;
 const BF_M: usize = 64;
 const BF_K: usize = 64;
 const BF_N: usize = 64;
@@ -141,12 +146,42 @@ fn reference(
     out
 }
 
-/// Evaluates `out`, casts it to f32 and compares every element with `want`.
+/// Per-element tolerance of a bf16 GEMM with f32 accumulation whose exact
+/// result is representable in bf16: twice the standard dot-product bound
+/// `K * u * sum_k |a_k * b_k|` with `u = 2^-24` (Higham, "Accuracy and
+/// Stability of Numerical Algorithms", section 3.1), the factor 2 covering the
+/// rounding of the f32 accumulator to the bf16 output. `f32::EPSILON` is
+/// `2^-23 = 2u`. On gfx1151 the WMMA residue measured at most 0.8% of the
+/// undoubled bound (#2206).
+fn bf16_gemm_tolerance(k: usize, abs_sum: i32) -> f32 {
+    k as f32 * f32::EPSILON * abs_sum as f32
+}
+
+/// Host `sum_k |a[m, k] * b[k, n]|` with `b` addressed through `b_at(k, n)`.
+fn abs_reference(
+    a: &[f32],
+    m: usize,
+    k: usize,
+    n: usize,
+    b_at: impl Fn(usize, usize) -> f32,
+) -> Vec<i32> {
+    reference(
+        &a.iter().map(|x| x.abs()).collect::<Vec<_>>(),
+        m,
+        k,
+        n,
+        |kk, col| b_at(kk, col).abs(),
+    )
+}
+
+/// Evaluates `out`, casts it to f32 and compares every element with `want`:
+/// exactly when `tolerance` is `None`, else within `tolerance[i]`.
 fn check(
     what: &str,
     seed: usize,
     out: &mlxcel_core::MlxArray,
     want: &[i32],
+    tolerance: Option<&[f32]>,
     cols: usize,
 ) -> Result<(), String> {
     let out = mlxcel_core::astype(out, dtype::FLOAT32);
@@ -161,9 +196,11 @@ fn check(
     }
     for (i, chunk) in bytes.chunks_exact(4).enumerate() {
         let got = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-        if got != want[i] as f32 {
+        let allowed = tolerance.map_or(0.0, |t| t[i]);
+        let diff = (got - want[i] as f32).abs();
+        if diff.is_nan() || diff > allowed {
             return Err(format!(
-                "{what} seed {seed}: element {i} (row {}, col {}) is {got}, expected {}",
+                "{what} seed {seed}: element {i} (row {}, col {}) is {got}, expected {} (tolerance {allowed})",
                 i / cols,
                 i % cols,
                 want[i]
@@ -184,7 +221,11 @@ fn bf16_tn_and_check(seed: usize) -> Result<(), String> {
     let bt = mlxcel_core::transpose(&b);
     let out = mlxcel_core::matmul(&a, &bt);
     let want = reference(&a_host, BF_M, BF_K, BF_N, |k, n| b_host[n * BF_K + k]);
-    check("bf16 TN", seed, &out, &want, BF_N)
+    let tol: Vec<f32> = abs_reference(&a_host, BF_M, BF_K, BF_N, |k, n| b_host[n * BF_K + k])
+        .into_iter()
+        .map(|abs| bf16_gemm_tolerance(BF_K, abs))
+        .collect();
+    check("bf16 TN", seed, &out, &want, Some(&tol), BF_N)
 }
 
 /// bf16 batched `a[BATCH, BF_M, BF_K] x b[BATCH, BF_K, BF_N]`.
@@ -197,14 +238,20 @@ fn bf16_batched_and_check(seed: usize) -> Result<(), String> {
     let b = mlxcel_core::astype(&b, dtype::BFLOAT16);
     let out = mlxcel_core::matmul(&a, &b);
     let mut want = Vec::with_capacity(BATCH * BF_M * BF_N);
+    let mut tol = Vec::with_capacity(BATCH * BF_M * BF_N);
     for batch in 0..BATCH {
         let a_mat = &a_host[batch * BF_M * BF_K..(batch + 1) * BF_M * BF_K];
         let b_mat = &b_host[batch * BF_K * BF_N..(batch + 1) * BF_K * BF_N];
         want.extend(reference(a_mat, BF_M, BF_K, BF_N, |k, n| {
             b_mat[k * BF_N + n]
         }));
+        tol.extend(
+            abs_reference(a_mat, BF_M, BF_K, BF_N, |k, n| b_mat[k * BF_N + n])
+                .into_iter()
+                .map(|abs| bf16_gemm_tolerance(BF_K, abs)),
+        );
     }
-    check("bf16 batched", seed, &out, &want, BF_N)
+    check("bf16 batched", seed, &out, &want, Some(&tol), BF_N)
 }
 
 /// f32 `a[F_M, F_K] x b[F_K, F_N]`: rocBLAS, interleaved with the hipBLASLt
@@ -216,7 +263,51 @@ fn f32_and_check(seed: usize) -> Result<(), String> {
     let b = mlxcel_core::from_slice_f32(&b_host, &[F_K as i32, F_N as i32]);
     let out = mlxcel_core::matmul(&a, &b);
     let want = reference(&a_host, F_M, F_K, F_N, |k, n| b_host[k * F_N + n]);
-    check("f32", seed, &out, &want, F_N)
+    check("f32", seed, &out, &want, None, F_N)
+}
+
+/// Single-threaded pin of the bound the bf16 checks above rely on (#2206).
+/// Every row of `a` cancels to zero through a pair of opposite-sign terms
+/// (`[h, -h, 0, ...]` with `h` in 1, 2, 4, 8), which on gfx11 WMMA leaves a
+/// residue in every output, and `b` is all ones, so the exact result is zero
+/// everywhere. The test passes whether or not the device is exact; it fails
+/// if an element lands outside `bf16_gemm_tolerance`, and it prints how many
+/// elements were inexact so a change in the hardware or library is visible.
+#[test]
+fn bf16_gemm_error_is_within_the_accumulation_bound() {
+    if !on_rocm() {
+        eprintln!("skipping: not running on a ROCm device");
+        return;
+    }
+    let mut a_host = vec![0.0f32; BF_M * BF_K];
+    for row in 0..BF_M {
+        let h = (1 << (row % 4)) as f32;
+        a_host[row * BF_K] = h;
+        a_host[row * BF_K + 1] = -h;
+    }
+    let b_host = vec![1.0f32; BF_N * BF_K];
+    let a = mlxcel_core::from_slice_f32(&a_host, &[BF_M as i32, BF_K as i32]);
+    let b = mlxcel_core::from_slice_f32(&b_host, &[BF_N as i32, BF_K as i32]);
+    let a = mlxcel_core::astype(&a, dtype::BFLOAT16);
+    let b = mlxcel_core::astype(&b, dtype::BFLOAT16);
+    let out = mlxcel_core::matmul(&a, &mlxcel_core::transpose(&b));
+    let want = reference(&a_host, BF_M, BF_K, BF_N, |k, n| b_host[n * BF_K + k]);
+    let tol: Vec<f32> = abs_reference(&a_host, BF_M, BF_K, BF_N, |k, n| b_host[n * BF_K + k])
+        .into_iter()
+        .map(|abs| bf16_gemm_tolerance(BF_K, abs))
+        .collect();
+    if let Err(e) = check("bf16 cancelling pairs", 0, &out, &want, Some(&tol), BF_N) {
+        panic!("{e}");
+    }
+    let out = mlxcel_core::astype(&out, dtype::FLOAT32);
+    let inexact = mlxcel_core::array_to_raw_bytes(&out)
+        .chunks_exact(4)
+        .filter(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]) != 0.0)
+        .count();
+    eprintln!(
+        "bf16 cancelling pairs: {inexact} of {} outputs inexact, all within the bound",
+        BF_M * BF_N
+    );
 }
 
 /// Child body: `THREADS` threads, each on its own stream, released together

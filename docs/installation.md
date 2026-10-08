@@ -508,6 +508,18 @@ streaming and non-streaming. It counts the reasoning channel as output, so a
 thinking model that spends its whole budget inside the thinking block reports
 `channel=reasoning only` rather than looking like an empty response.
 
+bf16 and f16 GEMMs on gfx11 (hipBLASLt, and rocBLAS with a bf16 output) run
+on `v_wmma_f32_16x16x16_bf16` and its f16 twin, which do not add
+opposite-sign terms the IEEE way: `1 + -1` in one instruction gives `-2^-24`.
+An output whose exact value is zero can therefore come back as a value like
+`-2^-22`, even for integer inputs. The error measured within 2.1% of the
+standard f32 dot-product bound `K u sum_k |a_k b_k|` and no hipBLASLt solution
+avoids the instruction, so the backend leaves it alone; tests that compare
+bf16 GEMMs on ROCm do so within that bound rather than exactly. The
+measurements, kernels and probes are in
+[`docs/benchmark_results/rocm-bf16-gemm-residue-gfx1151-2026-10-08.md`](benchmark_results/rocm-bf16-gemm-residue-gfx1151-2026-10-08.md)
+(lablup/mlxcel#2206).
+
 Decode and prefill throughput on `gfx1151`, against mlx-lm on the same host, is
 in
 [`docs/benchmark_results/rocm-baseline-gfx1151-2026-09-30.md`](benchmark_results/rocm-baseline-gfx1151-2026-09-30.md);
