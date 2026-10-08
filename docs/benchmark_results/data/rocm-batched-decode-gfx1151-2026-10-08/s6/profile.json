@@ -1,0 +1,148 @@
+[
+ {
+  "conc": 1,
+  "prompt_tokens": 1024,
+  "t0_ns": 900727889247363,
+  "requests": [
+   {
+    "start_ns": 900727890915527,
+    "first_ns": 900728631388574,
+    "end_ns": 900732956146389,
+    "tokens": 128,
+    "decode_tok_s": 29.36580623308511
+   }
+  ],
+  "delta": {
+   "decode_steps": 127.0,
+   "decode_tokens": 127.0,
+   "mixed_steps": 0.0,
+   "prefill_chunks": 0.0,
+   "predicted_s": 4.3260000000000005,
+   "predicted_tokens": 128.0
+  },
+  "lines": [
+   "    batch counters: decode_steps=+127  decode_tokens=+127  mixed_steps=+0  prefill_chunks=+0  tokens_predicted_seconds=+4.326",
+   "    batch steps: occupancy=1.00  decode_step_ms=34.06  (predicted_seconds/steps=34.06 ms)"
+  ]
+ },
+ {
+  "conc": 4,
+  "prompt_tokens": 1024,
+  "t0_ns": 900734960243420,
+  "requests": [
+   {
+    "start_ns": 900734960760108,
+    "first_ns": 900735701601114,
+    "end_ns": 900745368160914,
+    "tokens": 128,
+    "decode_tok_s": 13.138076278126865
+   },
+   {
+    "start_ns": 900734961083253,
+    "first_ns": 900738126538214,
+    "end_ns": 900745366837537,
+    "tokens": 128,
+    "decode_tok_s": 17.540711279257533
+   },
+   {
+    "start_ns": 900734961504822,
+    "first_ns": 900738126098832,
+    "end_ns": 900745367484327,
+    "tokens": 128,
+    "decode_tok_s": 17.53808025918313
+   },
+   {
+    "start_ns": 900734962416348,
+    "first_ns": 900738126872390,
+    "end_ns": 900745366206445,
+    "tokens": 128,
+    "decode_tok_s": 17.543050097607352
+   }
+  ],
+  "delta": {
+   "decode_steps": 127.0,
+   "decode_tokens": 508.0,
+   "mixed_steps": 0.0,
+   "prefill_chunks": 0.0,
+   "predicted_s": 31.38799999999999,
+   "predicted_tokens": 512.0
+  },
+  "lines": [
+   "    batch counters: decode_steps=+127  decode_tokens=+508  mixed_steps=+0  prefill_chunks=+0  tokens_predicted_seconds=+31.388",
+   "    batch steps: occupancy=4.00  decode_step_ms=61.79  (predicted_seconds/steps=247.15 ms)"
+  ]
+ },
+ {
+  "conc": 1,
+  "prompt_tokens": 16384,
+  "t0_ns": 900747373064435,
+  "requests": [
+   {
+    "start_ns": 900747374013442,
+    "first_ns": 900797085851925,
+    "end_ns": 900801980602983,
+    "tokens": 128,
+    "decode_tok_s": 25.946161202712364
+   }
+  ],
+  "delta": {
+   "decode_steps": 127.0,
+   "decode_tokens": 127.0,
+   "mixed_steps": 0.0,
+   "prefill_chunks": 7.0,
+   "predicted_s": 4.905000000000001,
+   "predicted_tokens": 128.0
+  },
+  "lines": [
+   "    batch counters: decode_steps=+127  decode_tokens=+127  mixed_steps=+0  prefill_chunks=+7  tokens_predicted_seconds=+4.905",
+   "    batch steps: occupancy=1.00  decode_step_ms=38.62  (predicted_seconds/steps=38.62 ms)"
+  ]
+ },
+ {
+  "conc": 4,
+  "prompt_tokens": 16384,
+  "t0_ns": 900803984342185,
+  "requests": [
+   {
+    "start_ns": 900803985068846,
+    "first_ns": 901022792636573,
+    "end_ns": 901028306669151,
+    "tokens": 128,
+    "decode_tok_s": 23.03214538615208
+   },
+   {
+    "start_ns": 900803985688446,
+    "first_ns": 900855910742496,
+    "end_ns": 900918733207654,
+    "tokens": 128,
+    "decode_tok_s": 2.021569826664563
+   },
+   {
+    "start_ns": 900803986982068,
+    "first_ns": 900967335398195,
+    "end_ns": 901024569896403,
+    "tokens": 128,
+    "decode_tok_s": 2.2189414422464693
+   },
+   {
+    "start_ns": 900803987646091,
+    "first_ns": 900911452156012,
+    "end_ns": 900974395349334,
+    "tokens": 128,
+    "decode_tok_s": 2.017692355553158
+   }
+  ],
+  "delta": {
+   "decode_steps": 415.0,
+   "decode_tokens": 508.0,
+   "mixed_steps": 0.0,
+   "prefill_chunks": 28.0,
+   "predicted_s": 188.54899999999998,
+   "predicted_tokens": 512.0
+  },
+  "lines": [
+   "    batch counters: decode_steps=+415  decode_tokens=+508  mixed_steps=+0  prefill_chunks=+28  tokens_predicted_seconds=+188.549",
+   "    batch steps: occupancy=1.22  decode_step_ms=371.16  (predicted_seconds/steps=454.33 ms)"
+  ]
+ }
+]

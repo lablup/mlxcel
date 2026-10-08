@@ -1,0 +1,61 @@
+2026-10-08T12:51:54.367794Z  WARN mlxcel::server::startup: CORS is set to allow all origins ('*') and no API key is set; this can be a security risk (cross-origin attacks). Set --api-key, or narrow --cors-origins / --allowed-origins
+2026-10-08T12:51:54.367845Z  INFO mlxcel::server::startup: effective KV cache mode kv_cache_mode=fp16 kv_bits=0
+2026-10-08T12:51:54.367975Z  INFO mlxcel::server::startup: resolved context and batch geometry (0 = the checkpoint's own trained context) ctx_size=131072 ctx_size_per_slot=32768 context_slots=4 kv_unified=false n_parallel=4 prefill_chunk_size=2048 max_kv_size=None
+2026-10-08T12:51:54.368125Z  INFO mlxcel::server::startup: Runtime device: GPU
+2026-10-08T12:51:54.368128Z  INFO mlxcel::server::startup: Wired memory limit: 96.0 GB
+2026-10-08T12:51:54.530769Z  INFO mlxcel::server::startup: DRY sequence breakers active (b10621 semantics: breaker token data derived from the vocabulary per request) breakers=["\n", ":", "\"", "*"]
+2026-10-08T12:51:54.688042Z  INFO mlxcel::server::startup: Warming up model...
+2026-10-08T12:51:54.688046Z  INFO mlxcel::server::model_provider::model_worker: Model worker thread starting, loading model...
+[mlx-rocm] bound HIP device 0: gfx1151 (AMD Radeon 8060S Graphics) cus=20 warp=32 lds=64KB
+2026-10-08T12:51:54.865983Z  INFO mlxcel::server::model_provider::model_worker: Model Meta-Llama-3.1-8B-Instruct-4bit loaded in 0.178s (resident after load: 0.00 GB) worker_model_id=Meta-Llama-3.1-8B-Instruct-4bit load_seconds=0.177891302 active_bytes=256 peak_bytes=256 cache_bytes=0 limit_bytes=82463372083
+2026-10-08T12:51:54.866195Z  INFO mlxcel::server::model_provider::model_worker: EOS tokens from config: [128009]
+2026-10-08T12:51:54.866212Z  INFO mlxcel::server::model_provider::model_worker: Starting BatchScheduler (max_batch_size=4, max_queue_depth=32, prefill_chunk_size=2048, max_batch_prefill=4, decode_storage=auto)
+2026-10-08T12:51:54.866424Z  INFO mlxcel::server::model_provider::model_worker: Paged KV block budget: 479016 blocks (32 layers, 32-token blocks)
+2026-10-08T12:51:54.866432Z  INFO mlxcel::server::model_provider::model_worker: Paged KV slab size: 4096 blocks per layer (fused decode serves a layer only while its rows fit one slab)
+2026-10-08T12:51:54.866456Z  INFO mlxcel::server::batch::scheduler::paged_layout: resolved KV cache mode applied to model caches kv_cache_mode_effective=fp16 kv_cache_mode_applied_layers=32 kv_cache_mode_total_layers=32
+2026-10-08T12:51:54.870904Z  INFO prefill{seq_id=seq-0 prompt_len=1 cached=0 start=0}: mlxcel_core::cache::paged_batch_decode: paged decode v2: gather: 1 visible KV tokens across 1 request(s) is below the 4096-token dispatch floor
+2026-10-08T12:51:54.871650Z  INFO prefill{seq_id=seq-0 prompt_len=1 cached=0 start=0}: mlxcel_core::sampling_dispatch: sampling dispatch: argmax: greedy path (temperature 0, top_k 1); no sampling kernel involved
+[mlx-rocm] gfx1151 native_wmma=1 cus=20 warp=32 low_cu=0 host_WARP_SIZE=32
+2026-10-08T12:51:55.845637Z  INFO prefill{seq_id=seq-0 prompt_len=1 cached=0 start=0}: mlxcel::server::batch::scheduler::prefill: prompt-cache: request completed during prefill: cached=0/1 prompt tokens, total 974ms prompt_tokens=1 cached_tokens=0 generation_time_ms=974
+2026-10-08T12:51:55.845674Z  INFO mlxcel::server::startup: Warmup complete
+2026-10-08T12:51:55.846625Z  INFO mlxcel::server::startup: Starting mlxcel server on http://127.0.0.1:18996
+2026-10-08T12:51:55.846629Z  INFO mlxcel::server::startup: Detected 1 GPU(s)
+2026-10-08T12:51:55.846631Z  INFO mlxcel::server::startup: Endpoints:
+2026-10-08T12:51:55.846633Z  INFO mlxcel::server::startup:   POST /v1/chat/completions  - OpenAI chat completions
+2026-10-08T12:51:55.846634Z  INFO mlxcel::server::startup:   POST /v1/completions       - OpenAI text completions
+2026-10-08T12:51:55.846636Z  INFO mlxcel::server::startup:   GET  /v1/models            - List models
+2026-10-08T12:51:55.846637Z  INFO mlxcel::server::startup:   POST /completion           - llama-server native completion
+2026-10-08T12:51:55.846639Z  INFO mlxcel::server::startup:   POST /tokenize             - Tokenize text
+2026-10-08T12:51:55.846648Z  INFO mlxcel::server::startup:   POST /detokenize           - Detokenize tokens
+2026-10-08T12:51:55.846649Z  INFO mlxcel::server::startup:   GET  /props                - Server properties
+2026-10-08T12:51:55.846651Z  INFO mlxcel::server::startup:   GET  /slots                - Slot status
+2026-10-08T12:51:55.846652Z  INFO mlxcel::server::startup:   GET  /health               - Health check
+2026-10-08T12:51:56.015970Z ERROR tower_http::trace::on_failure: response failed classification=Status code: 501 Not Implemented latency=0 ms
+[hipBLASLt caps] device 0 (gfx1151): bf16=1 fp8_e4m3=0 fp8_e5m2=0 int8=1
+2026-10-08T12:52:00.262313Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/107 prompt tokens, total 4242ms prompt_tokens=107 cached_tokens=0 generation_time_ms=4242
+2026-10-08T12:52:00.263427Z ERROR tower_http::trace::on_failure: response failed classification=Status code: 501 Not Implemented latency=0 ms
+2026-10-08T12:52:00.320894Z ERROR tower_http::trace::on_failure: response failed classification=Status code: 501 Not Implemented latency=0 ms
+2026-10-08T12:52:23.982553Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/251 prompt tokens, total 23317ms prompt_tokens=251 cached_tokens=0 generation_time_ms=23317
+2026-10-08T12:52:23.982658Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/251 prompt tokens, total 23317ms prompt_tokens=251 cached_tokens=0 generation_time_ms=23317
+2026-10-08T12:52:23.982710Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/251 prompt tokens, total 23659ms prompt_tokens=251 cached_tokens=0 generation_time_ms=23659
+2026-10-08T12:52:23.982760Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/251 prompt tokens, total 23317ms prompt_tokens=251 cached_tokens=0 generation_time_ms=23317
+2026-10-08T12:52:23.987518Z ERROR tower_http::trace::on_failure: response failed classification=Status code: 501 Not Implemented latency=0 ms
+2026-10-08T12:52:24.040230Z ERROR tower_http::trace::on_failure: response failed classification=Status code: 501 Not Implemented latency=0 ms
+2026-10-08T12:52:28.093777Z  INFO decode_step{batch_size=4}: mlxcel_core::cache::paged_batch_decode: paged decode v2: fused v2 launch (batch 4, 3600 visible KV tokens, 116 chunks, merge on)
+2026-10-08T12:52:48.113714Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/899 prompt tokens, total 24067ms prompt_tokens=899 cached_tokens=0 generation_time_ms=24067
+2026-10-08T12:52:48.113965Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/899 prompt tokens, total 24067ms prompt_tokens=899 cached_tokens=0 generation_time_ms=24067
+2026-10-08T12:52:48.114137Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/899 prompt tokens, total 24067ms prompt_tokens=899 cached_tokens=0 generation_time_ms=24067
+2026-10-08T12:52:48.114252Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/899 prompt tokens, total 20774ms prompt_tokens=899 cached_tokens=0 generation_time_ms=20774
+2026-10-08T12:52:48.118455Z ERROR tower_http::trace::on_failure: response failed classification=Status code: 501 Not Implemented latency=0 ms
+2026-10-08T12:52:48.171284Z ERROR tower_http::trace::on_failure: response failed classification=Status code: 501 Not Implemented latency=0 ms
+2026-10-08T12:53:12.177592Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/899 prompt tokens, total 24002ms prompt_tokens=899 cached_tokens=0 generation_time_ms=24002
+2026-10-08T12:53:12.177806Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/899 prompt tokens, total 23233ms prompt_tokens=899 cached_tokens=0 generation_time_ms=23233
+2026-10-08T12:53:12.177922Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/899 prompt tokens, total 23233ms prompt_tokens=899 cached_tokens=0 generation_time_ms=23233
+2026-10-08T12:53:12.178025Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/899 prompt tokens, total 23233ms prompt_tokens=899 cached_tokens=0 generation_time_ms=23233
+2026-10-08T12:53:12.182006Z ERROR tower_http::trace::on_failure: response failed classification=Status code: 501 Not Implemented latency=0 ms
+2026-10-08T12:53:12.229822Z ERROR tower_http::trace::on_failure: response failed classification=Status code: 501 Not Implemented latency=0 ms
+2026-10-08T12:53:36.265609Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/899 prompt tokens, total 24032ms prompt_tokens=899 cached_tokens=0 generation_time_ms=24032
+2026-10-08T12:53:36.265800Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/899 prompt tokens, total 24032ms prompt_tokens=899 cached_tokens=0 generation_time_ms=24032
+2026-10-08T12:53:36.265913Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/899 prompt tokens, total 24032ms prompt_tokens=899 cached_tokens=0 generation_time_ms=24032
+2026-10-08T12:53:36.265997Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/899 prompt tokens, total 20744ms prompt_tokens=899 cached_tokens=0 generation_time_ms=20744
+2026-10-08T12:53:36.268825Z ERROR tower_http::trace::on_failure: response failed classification=Status code: 501 Not Implemented latency=0 ms

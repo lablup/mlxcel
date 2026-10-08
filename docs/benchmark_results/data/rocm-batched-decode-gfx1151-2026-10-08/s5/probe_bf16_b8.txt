@@ -1,0 +1,10 @@
+=== qmm decode-batch layout probe === B=8 T=64 ROUNDS=5 4-bit g64 bf16
+shape             out     in   [1,1,K] us   [B,1,K] us     [B,K] us   [1,B,K] us  max|diff|
+[mlx-rocm] bound HIP device 0: gfx1151 (AMD Radeon 8060S Graphics) cus=20 warp=32 lds=64KB
+[mlx-rocm] gfx1151 native_wmma=1 cus=20 warp=32 low_cu=0 host_WARP_SIZE=32
+q_proj           4096   4096         90.8        202.2        206.7        208.3     0.00e0
+k/v_proj         1024   4096         14.2         44.2         45.2         45.5     0.00e0
+o_proj           4096   4096         88.5        198.0        199.5        203.2     0.00e0
+gate/up_proj    14336   4096        186.7        580.4        584.0        582.6     0.00e0
+down_proj        4096  14336        186.7        546.5        549.1        553.6     0.00e0
+sum                                 566.9       1571.2       1584.4       1593.2

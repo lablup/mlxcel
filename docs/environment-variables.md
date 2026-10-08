@@ -250,7 +250,13 @@ hipBLASLt was faster than the WMMA kernel on every bf16 shape measured from 128
 rows up, which raised bf16 prefill there by 5% (Qwen3-30B-A3B, whose experts do
 not take this path) to 2.9x (Gemma 3 4B at 2048 tokens); see
 `docs/benchmark_results/rocm-bf16-qmm-route-gfx1151-2026-09-30.md`
-(lablup/mlxcel#2081).
+(lablup/mlxcel#2081). Unset, a 4- or 8-bit GEMM of at most 8 rows with biases
+skips the WMMA kernel too and takes the qmv / dequantize crossover f16 takes,
+since `qmv_wide_kernel` reads the weight once for all of those rows and the
+WMMA kernel cost 7 to 8 times the one-row GEMV there on gfx1151; a batched
+decode step's `[B, 1, K]` activation is such a GEMM
+(`docs/benchmark_results/rocm-batched-decode-gfx1151-2026-10-08.md`,
+lablup/mlxcel#2156). `MLX_ROCM_WMMA_QMM=1` still forces the kernel.
 The other integer knobs of the ROCm GEMM paths follow the same rule: a value
 that is not a whole decimal integer in the range below (for example `12abc`,
 `-1`, or `4294967297`, which used to wrap) prints one stderr line,
@@ -308,7 +314,7 @@ How `quantized_matmul` handles many rows: the fused WMMA kernel, or dequantize f
 | Variable | Values | Default | Purpose |
 |----------|--------|---------|---------|
 | `MLX_ROCM_QMM_DEQUANT_GEMM` | unset or exactly `1` enables; any other value, including `true` and the empty string, disables | on | The dequantize + hipBLASLt route for affine layouts. |
-| `MLX_ROCM_WMMA_QMM` | first character `0` off, `1` forced on; anything else or unset keeps the default | on where the device has native WMMA and is not a low-CU iGPU | The fused WMMA qmm kernel for bf16 affine GEMMs with more than one row (4-, 6- or 8-bit, group 64). |
+| `MLX_ROCM_WMMA_QMM` | first character `0` off, `1` forced on; anything else or unset keeps the default | on where the device has native WMMA and is not a low-CU iGPU | The fused WMMA qmm kernel for bf16 affine GEMMs with more than one row (4-, 6- or 8-bit, group 64); unset, 4- and 8-bit GEMMs of at most 8 rows with biases take qmv instead. |
 | `MLX_ROCM_WMMA_QMM_MAX_M` | integer from 1 to 2147483647; an invalid value warns on stderr and keeps the default | `128` on RDNA 3.5 (`gfx1150` to `gfx1152`), no ceiling elsewhere | Row count from which such a GEMM goes to dequantize + hipBLASLt instead; ignored when `MLX_ROCM_WMMA_QMM=1`. |
 | `MLX_ROCM_QMM_DEQUANT_M_THRESHOLD` | integer from 1 to 2147483647; an invalid value warns on stderr and keeps the default | built-in crossover by architecture and shape | `quantized_matmul` prefers dequantize + GEMM exactly when `M >=` the value. The route still needs `MLX_ROCM_QMM_DEQUANT_GEMM` enabled. |
 | `MLX_ROCM_QMM_DEQUANT_CACHE_SIZE` | integer from 0 to 2147483647; an invalid value warns on stderr and keeps the default | `8` | Entries in the cache of dequantized weights; `0` turns the cache off. |

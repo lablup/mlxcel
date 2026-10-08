@@ -41,6 +41,13 @@ import statistics
 import time
 from dataclasses import dataclass, field
 
+from bench_serving_metrics import (
+    BATCH_METRICS,
+    batch_delta,
+    format_batch_delta,
+    parse_metrics,
+)
+
 # Base sentence repeated to synthesize a prompt of an approximate token length.
 # The server tokenizes it; the client only needs a roughly-sized input, so a
 # words-per-token heuristic is sufficient here.
@@ -312,8 +319,8 @@ _PATH_METRICS = (
 )
 
 
-def scrape_paths(host: str, port: int) -> dict[str, float]:
-    """Read the decode-path counters from ``/metrics``.
+def scrape_metrics(host: str, port: int, names: tuple[str, ...]) -> dict[str, float]:
+    """Read the counters in ``names`` from ``/metrics``.
 
     Returns an empty dict when the endpoint is unavailable, so the load
     generator still works against a build without it.
@@ -328,18 +335,12 @@ def scrape_paths(host: str, port: int) -> dict[str, float]:
             return {}
     except (OSError, ValueError):
         return {}
-    out: dict[str, float] = {}
-    for line in body.splitlines():
-        if line.startswith("#"):
-            continue
-        name, _, value = line.rpartition(" ")
-        name = name.strip()
-        if name in _PATH_METRICS:
-            try:
-                out[name] = float(value)
-            except ValueError:
-                continue
-    return out
+    return parse_metrics(body, names)
+
+
+def scrape_paths(host: str, port: int) -> dict[str, float]:
+    """Read the decode-path and batch-step counters from ``/metrics``."""
+    return scrape_metrics(host, port, _PATH_METRICS + BATCH_METRICS)
 
 
 def print_path_delta(before: dict[str, float], after: dict[str, float]) -> None:
@@ -433,7 +434,10 @@ async def _amain(args: argparse.Namespace) -> int:
             system_prompt,
         )
         if args.metrics:
-            print_path_delta(before, scrape_paths(args.host, args.port))
+            after = scrape_paths(args.host, args.port)
+            print_path_delta(before, after)
+            for line in format_batch_delta(batch_delta(before, after)):
+                print(line)
         summaries.append(summary)
 
     print_table(summaries)
@@ -492,9 +496,10 @@ def main() -> int:
         action="store_true",
         help=(
             "Scrape /metrics around each level and print which attention path "
-            "the decode loop ran. Use it whenever the run is meant to compare "
-            "cascade against flat: a level whose cascade counter did not move "
-            "did not measure cascade."
+            "the decode loop ran, plus the batch counters (decode steps, "
+            "occupancy, prefill chunks, mean decode step ms). Use it whenever "
+            "the run is meant to compare cascade against flat: a level whose "
+            "cascade counter did not move did not measure cascade."
         ),
     )
     args = parser.parse_args()
