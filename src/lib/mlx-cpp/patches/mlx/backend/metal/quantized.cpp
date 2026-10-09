@@ -1,10 +1,14 @@
 // Copyright © 2023-2026 Apple Inc.
 // Patched by mlxcel: `use_qmv_wide` gains an off-switch, `MLXCEL_QMV_WIDE=0`.
-// Synced to upstream 81ba1c6a. The delta is three hunks: the includes below,
-// `mlxcel_qmv_wide_flag()` with the one call it adds to `use_qmv_wide`, and the
-// two bridge entry points `mlxcel_set_qmv_wide()` / `mlxcel_qmv_wide()` at the
-// end of the file. Everything else is upstream verbatim, so a bump refreshes
-// this file and re-applies those three hunks.
+// Synced to upstream 81ba1c6a. The delta is four hunks: the includes below,
+// `mlxcel_qmv_wide_flag()` with the one call it adds to `use_qmv_wide`, the
+// row count `GatherQMM::eval_gpu` passes to `gather_qmm_rhs` (marked
+// `mlxcel:` at the call, lablup/mlxcel#1599), and the two bridge entry points
+// `mlxcel_set_qmv_wide()` / `mlxcel_qmv_wide()` at the end of the file.
+// Everything else is upstream verbatim, so a bump refreshes this file and
+// re-applies those four hunks. The #1599 hunk can be dropped once upstream
+// stops passing `x.size() / K` there (still present on ml-explore/mlx main as
+// of 2026-10-06).
 //
 // Why it exists (lablup/mlxcel#1186, #1187). `use_qmv_wide` sends `M >= 2`
 // affine quantized matmuls down `qmv_wide` on GPU generation 15 and later
@@ -2012,7 +2016,16 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
         transpose_,
         group_size_,
         bits_,
-        x.size() / K,
+        // mlxcel: the rows of the broadcast x, not of the input x
+        // (lablup/mlxcel#1599). `gather_qmm_rhs` broadcasts x against the
+        // indices when x carries fewer batch entries than there are slots,
+        // but upstream passes `x.size() / K`, the pre-broadcast row count,
+        // which sizes the grid and the kernel's row bound. A shared
+        // activation row gathered against B sorted slots then writes row 0
+        // and leaves rows 1..B-1 of the fresh output buffer unwritten.
+        // `B * M` is the same value whenever x is already expanded (every
+        // `gather_sort` caller) and the right one when it is not.
+        B * M,
         N,
         K,
         d,

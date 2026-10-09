@@ -29,10 +29,12 @@ function(mlx_apply_source_overlays mlx_source_dir)
   # The steel/gemm/mma.h overlay (issue #217: upstream safe-load fix
   # cherry-pick, PRs #3560/#3565) was retired when the pin moved to
   # 2026-06-11 upstream main, which carries the fix natively (issue #222).
-  # quantized.cpp carries one delta, the MLXCEL_QMV_WIDE off-switch on
-  # `use_qmv_wide` (issue #1187). Upstream has no equivalent knob and the
-  # predicate is unchanged as of pin 81ba1c6a, so it has to be overlaid here.
-  # Refresh the file wholesale on a bump and re-apply that one hunk.
+  # quantized.cpp carries two deltas: the MLXCEL_QMV_WIDE off-switch on
+  # `use_qmv_wide` (issue #1187; upstream has no equivalent knob), and the
+  # row count `GatherQMM::eval_gpu` hands `gather_qmm_rhs`, which upstream
+  # takes from the pre-broadcast x so a shared activation row gathered
+  # against sorted slots leaves most output rows unwritten (issue #1599).
+  # Refresh the file wholesale on a bump and re-apply both marked hunks.
   # device.cpp carries a runtime override of the per-command-buffer input
   # budget (`mlxcel_set_mb_per_buffer_override`), which mlxcel raises around
   # decode steps and leaves at the device default for prefill. Upstream latches
