@@ -462,6 +462,12 @@ impl SwitchLinear {
     /// synthesized, so the kernel sees identical inputs. `lhs = None` keeps
     /// MLX's default.
     ///
+    /// `lhs` must be `None` when `sorted` is true. Upstream builds the
+    /// primitive with `right_sorted = sorted_indices && !lhs_indices`, so an
+    /// explicit lhs, identity or not, takes every backend off its sorted MoE
+    /// prefill kernel (issue #2241). [`SwitchGLU::forward`]'s sorted path
+    /// therefore shares only the `uint32` ids.
+    ///
     /// Used by: `SwitchLinear::forward`, `SwitchGLU::forward`,
     ///          `SwitchGLU::forward_with_expert_scales`
     pub(crate) fn forward_indexed(
@@ -471,6 +477,11 @@ impl SwitchLinear {
         indices: &MlxArray,
         sorted: bool,
     ) -> UniquePtr<MlxArray> {
+        debug_assert!(
+            !(sorted && lhs.is_some()),
+            "an explicit lhs_indices clears right_sorted and loses the sorted MoE prefill \
+             kernel on every backend (issue #2241); pass None with sorted = true"
+        );
         // Null selects MLX's default. Otherwise it borrows `lhs`, which lives
         // for the whole call, so the FFI calls below never see a dangling
         // pointer.
@@ -1081,13 +1092,22 @@ impl SwitchGLU {
 
     /// Run the selected experts: `down(act(gate(x), up(x)))` per expert id.
     ///
-    /// The gather indices are prepared once per call and shared by the three
-    /// projections (issue #1713): the expert ids are cast to `uint32` once,
-    /// and gate/up share one `lhs_indices` array (the default MLX would build
-    /// for `x`'s batch shape). Down keeps MLX's default `lhs_indices` in the
-    /// unsorted path because its input has a different batch shape (`[n, k]`
-    /// rather than `[n, 1]`), and shares gate/up's in the sorted path, where
-    /// all three inputs have batch shape `[n * k]`.
+    /// The expert ids are cast to `uint32` once per call and shared by the
+    /// three projections (issue #1713). In the unsorted path (decode, small
+    /// prefill) gate/up also share one `lhs_indices` array (the default MLX
+    /// would build for `x`'s batch shape); down keeps MLX's default because
+    /// its input has a different batch shape (`[n, k]` rather than `[n, 1]`).
+    ///
+    /// The sorted path (`n * k >= 64`, large prefill) never passes
+    /// `lhs_indices`. Upstream `gather_qmm` and `gather_mm` build their
+    /// primitive with `right_sorted = sorted_indices && !lhs_indices`, and
+    /// every backend keys its sorted MoE prefill kernel on that flag (the ROCm
+    /// expert-batched kernel and sorted-rhs schedule, Metal's `gather_qmm_rhs`
+    /// and `M == 1` sorted `gather_mm`, CUDA's grouped GEMM). Passing the
+    /// identity arange here, as the first version of the sharing did, cleared
+    /// the flag and cost 1.7x to 4.8x of MoE prefill on gfx1151 (issue #2241).
+    /// MLX's default lhs is that same arange, so leaving it to MLX costs three
+    /// small index nodes per projection on the prefill graph and nothing else.
     ///
     /// Used by: AfMoE, BailingMoe, BailingMoeLinear, Cohere2Moe, Dbrx,
     ///          DeepSeekV2, DeepSeekV3, DeepSeekV32, Dots1, Ernie4_5MoeVL,
@@ -1108,18 +1128,14 @@ impl SwitchGLU {
 
         if do_sort {
             let (sorted_x, sorted_idx, inv_order) = gather_sort(&x_exp, indices);
-            // sorted_x, the activation and the down output all have batch
-            // shape `[n * k]`, so one lhs serves the three projections.
-            let gi = prepare_gather_indices(&sorted_x, &sorted_idx);
-            let lhs = gi.lhs.as_deref();
-            let x_gate = self
-                .gate_proj
-                .forward_indexed(&sorted_x, lhs, &gi.rhs, true);
-            let x_up = self.up_proj.forward_indexed(&sorted_x, lhs, &gi.rhs, true);
+            // Only the `uint32` ids are shared. An explicit `lhs_indices`
+            // would clear `right_sorted` on every backend (issue #2241; see
+            // the doc comment above).
+            let rhs = mlxcel_core::astype(&sorted_idx, dtype::UINT32);
+            let x_gate = self.gate_proj.forward(&sorted_x, &rhs, true);
+            let x_up = self.up_proj.forward(&sorted_x, &rhs, true);
             let activated = self.activate(&x_gate, &x_up);
-            let output = self
-                .down_proj
-                .forward_indexed(&activated, lhs, &gi.rhs, true);
+            let output = self.down_proj.forward(&activated, &rhs, true);
             scatter_unsort(&output, &inv_order, &indices_shape)
         } else {
             let gi = prepare_gather_indices(&x_exp, indices);

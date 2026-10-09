@@ -5128,6 +5128,46 @@ rust::String astype_breakdown_pair(const MlxArray& a, const MlxArray& b) {
     return rust::String(os.str());
 }
 
+// Sorted flags of every GatherMM / GatherQMM node in the unevaluated graph
+// below `out` (issue #2241). Upstream `gather_qmm` / `gather_mm` build the
+// primitive with `right_sorted = sorted_indices && !lhs_indices`, and every
+// backend's sorted MoE prefill kernel keys on that flag, so a caller that
+// means to take the sorted path can check here that it did. Depth-first,
+// deduplicated by array id(), like `collect_astype_stats`; three bytes per
+// node: quantized (1 for GatherQMM, 0 for GatherMM), left_sorted,
+// right_sorted. Traversal only; an evaluated graph has no inputs left to
+// walk and reports nothing.
+rust::Vec<uint8_t> gather_sorted_flags_raw(const MlxArray& out) {
+    rust::Vec<uint8_t> flags;
+    std::unordered_set<std::uintptr_t> visited;
+    std::vector<array> stack = {out.inner};
+    while (!stack.empty()) {
+        array a = stack.back();
+        stack.pop_back();
+        if (!visited.insert(a.id()).second || !a.has_primitive()) {
+            continue;
+        }
+        if (auto* qmm = dynamic_cast<const GatherQMM*>(&a.primitive())) {
+            // state() is (group_size, bits, mode, transpose, left_sorted,
+            // right_sorted).
+            const auto st = qmm->state();
+            flags.push_back(1);
+            flags.push_back(std::get<4>(st) ? 1 : 0);
+            flags.push_back(std::get<5>(st) ? 1 : 0);
+        } else if (auto* mm = dynamic_cast<const GatherMM*>(&a.primitive())) {
+            // state() is (left_sorted, right_sorted).
+            const auto st = mm->state();
+            flags.push_back(0);
+            flags.push_back(st.first ? 1 : 0);
+            flags.push_back(st.second ? 1 : 0);
+        }
+        for (const auto& in : a.inputs()) {
+            stack.push_back(in);
+        }
+    }
+    return flags;
+}
+
 // Set default stream for subsequent operations
 void set_default_stream(const MlxStream& stream) {
     mlx::core::set_default_stream(stream.inner);

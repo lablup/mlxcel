@@ -1381,6 +1381,10 @@ uint64_t count_astype_nodes_pair(const MlxArray& a, const MlxArray& b);
 // Human-readable AsType breakdown (counts + per src->dst dtype pair) for a pair.
 rust::String astype_breakdown_pair(const MlxArray& a, const MlxArray& b);
 
+// Sorted flags of every GatherMM / GatherQMM node below `out`, three bytes per
+// node in depth-first discovery order: quantized, left_sorted, right_sorted.
+rust::Vec<uint8_t> gather_sorted_flags_raw(const MlxArray& out);
+
 // Set default stream for subsequent operations
 void set_default_stream(const MlxStream& stream);
 
