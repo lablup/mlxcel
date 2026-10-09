@@ -53,6 +53,11 @@ bool use_hip_graphs() {
   // Train graphs: also hard-off until a TrainArena (see RocmAllocator
   // train_arena_*) wraps the step tape with stable addresses. Flipping this
   // without an arena reintroduces aperture violations / wrong loss.
+  //
+  // The GEMM pointer wrappers (hipblaslt_gemm_ptrs, rocblas_gemm_ptrs) pass
+  // the host alpha/beta captured by value in the launch_kernel functor, which
+  // is only valid because the functor runs synchronously. If this is ever
+  // re-enabled with manual graph nodes that defer the functor, revisit them.
   return false;
 }
 

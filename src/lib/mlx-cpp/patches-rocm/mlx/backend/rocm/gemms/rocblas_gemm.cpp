@@ -275,22 +275,8 @@ void rocblas_gemm_ptrs(
   if (!encoder.device().is_rocblas_available()) {
     throw std::runtime_error("rocblas_gemm_ptrs: rocBLAS unavailable");
   }
-  // Process-lifetime alpha/beta (same rationale as hipblaslt_gemm_ptrs).
-  const float* alpha_p;
-  const float* beta_p;
-  if (alpha == 1.0f && beta == 0.0f) {
-    static const float kOne = 1.0f, kZero = 0.0f;
-    alpha_p = &kOne;
-    beta_p = &kZero;
-  } else if (alpha == 1.0f && beta == 1.0f) {
-    static const float kOne = 1.0f;
-    alpha_p = &kOne;
-    beta_p = &kOne;
-  } else {
-    float* p = new float[2]{alpha, beta};
-    alpha_p = &p[0];
-    beta_p = &p[1];
-  }
+  // Host-mode scalars are read at enqueue, and launch_kernel runs its functor
+  // synchronously, so the lambda's by-value captures are valid for the call.
 
   // Row-major MLX → col-major rocBLAS: swap A/B and M/N (matches hipblaslt).
   rocblas_operation op_a = to_rocblas_op(transpose_b);
@@ -308,14 +294,14 @@ void rocblas_gemm_ptrs(
           N,
           M,
           K,
-          alpha_p,
+          &alpha,
           b_ptr,
           rocblas_datatype_bf16_r,
           ldb,
           a_ptr,
           rocblas_datatype_bf16_r,
           lda,
-          beta_p,
+          &beta,
           c_ptr,
           rocblas_datatype_bf16_r,
           ldc,
@@ -368,12 +354,12 @@ void rocblas_gemm_ptrs(
           N,
           M,
           K,
-          alpha_p,
+          &alpha,
           static_cast<const float*>(b_ptr),
           ldb,
           static_cast<const float*>(a_ptr),
           lda,
-          beta_p,
+          &beta,
           static_cast<float*>(c_ptr),
           ldc);
       if (status != rocblas_status_success) {
