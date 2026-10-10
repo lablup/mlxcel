@@ -1,0 +1,33 @@
+== gpt-oss-20b-MXFP4-Q4_greedy plain
+2026-10-10T23:47:31+0900 acquired guard lock /tmp/mlxcel-rocm-gpu-guard.lock after 0s
+2026-10-10T23:47:31+0900 waiting for 90s of idle GPU and no compiler
+2026-10-10T23:49:38+0900 idle for 90s: kfd proc empty and no compiler in every 1 Hz sample
+2026-10-10T23:49:38+0900 attempt 1/5: start: target/release/mlxcel-bench-decode -m models/mlx/gpt-oss-20b-MXFP4-Q4 -p profile -n 128 --warmup-tokens 20 --ignore-eos --prompt-tokens 512 --temperature 0 --top-p 1.0
+2026-10-10T23:49:38+0900 sample 1: clean gpu=[]
+2026-10-10T23:49:40+0900 sample 2: clean gpu=[2924729:mlxcel-bench-de]
+2026-10-10T23:49:41+0900 sample 3: clean gpu=[2924729:mlxcel-bench-de]
+2026-10-10T23:49:43+0900 sample 4: clean gpu=[2924729:mlxcel-bench-de]
+2026-10-10T23:49:44+0900 sample 5: clean gpu=[2924729:mlxcel-bench-de]
+2026-10-10T23:49:45+0900 sample 6: clean gpu=[2924729:mlxcel-bench-de]
+2026-10-10T23:49:47+0900 sample 7: clean gpu=[2924729:mlxcel-bench-de]
+2026-10-10T23:49:48+0900 sample 8: clean gpu=[2924729:mlxcel-bench-de]
+2026-10-10T23:49:50+0900 sample 9: clean gpu=[2924729:mlxcel-bench-de]
+2026-10-10T23:49:51+0900 sample 10: clean gpu=[2924729:mlxcel-bench-de]
+2026-10-10T23:49:53+0900 sample 11: clean gpu=[2924729:mlxcel-bench-de]
+2026-10-10T23:49:54+0900 sample 12: clean gpu=[2924729:mlxcel-bench-de]
+2026-10-10T23:49:56+0900 sample 13: clean gpu=[2924729:mlxcel-bench-de]
+2026-10-10T23:49:57+0900 monitor: 13 samples
+2026-10-10T23:49:57+0900 attempt 1: CLEAN, exit 0
+== gpt-oss-20b-MXFP4-Q4_greedy profiled
+2026-10-10T23:49:57+0900 acquired guard lock /tmp/mlxcel-rocm-gpu-guard.lock after 0s
+2026-10-10T23:49:57+0900 waiting for 90s of idle GPU and no compiler
+2026-10-10T23:52:06+0900 idle for 90s: kfd proc empty and no compiler in every 1 Hz sample
+2026-10-10T23:52:06+0900 attempt 1/5: start: /usr/bin/rocprofv3 --kernel-trace --hip-graph-trace --stats -f csv -d <trace-dir>/gpt-oss-20b-MXFP4-Q4_greedy -o gpt-oss-20b-MXFP4-Q4_greedy -- target/release/mlxcel-bench-decode -m models/mlx/gpt-oss-20b-MXFP4-Q4 -p profile -n 128 --warmup-tokens 20 --ignore-eos --prompt-tokens 512 --temperature 0 --top-p 1.0
+2026-10-10T23:52:06+0900 sample 1: clean gpu=[]
+2026-10-10T23:52:08+0900 sample 2: clean gpu=[3013766:mlxcel-bench-de]
+2026-10-10T23:52:09+0900 sample 3: clean gpu=[3013766:mlxcel-bench-de]
+2026-10-10T23:52:11+0900 sample 4: clean gpu=[3013766:mlxcel-bench-de]
+2026-10-10T23:52:12+0900 sample 5: clean gpu=[3013766:mlxcel-bench-de]
+2026-10-10T23:52:14+0900 sample 6: clean gpu=[3013766:mlxcel-bench-de]
+2026-10-10T23:52:15+0900 monitor: 6 samples
+2026-10-10T23:52:15+0900 attempt 1: CLEAN, exit 0
