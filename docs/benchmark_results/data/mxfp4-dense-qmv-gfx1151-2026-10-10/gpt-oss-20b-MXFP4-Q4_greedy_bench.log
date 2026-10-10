@@ -1,0 +1,22 @@
+[mlx-rocm] bound HIP device 0: gfx1151 (AMD Radeon 8060S Graphics) cus=20 warp=32 lds=64KB
+[Memory] cache limit: 2.15 GB
+Quantization mode mxfp4: running on native ROCm kernels, no load-time conversion (backend quantization capability table)
+[Load] wall: 0.428 s  MLX peak: 0.00 GB
+[Memory] after load: active 0.00 GB, cache 0.00 GB, active+cache 0.00 GB, phase peak 0.00 GB
+[long-prompt] target=512 tokens -> using 512 tokens (max_context=Some(131072), reserved 128 for generation)
+[phase] warmup_start monotonic_ns=1048971124617882 boottime_ns=1048971124617902
+[mlx-rocm] gfx1151 native_wmma=1 cus=20 warp=32 low_cu=0 host_WARP_SIZE=32
+[hipBLASLt caps] device 0 (gfx1151): bf16=1 fp8_e4m3=0 fp8_e5m2=0 int8=1
+[Memory] after warmup (prefill + warmup tokens): active 11.20 GB, cache 0.27 GB, active+cache 11.47 GB, phase peak 13.46 GB
+[long-prompt] target=512 tokens -> using 512 tokens (max_context=Some(131072), reserved 128 for generation)
+[phase] measured_start monotonic_ns=1048973776610206 boottime_ns=1048973776610236
+[phase] decode_start monotonic_ns=1048975240730545 boottime_ns=1048975240730565
+[phase] measured_end monotonic_ns=1048977367060796 boottime_ns=1048977367060816
+[Memory] after measured pass: active 11.22 GB, cache 0.28 GB, active+cache 11.49 GB, phase peak 13.58 GB
+[Profile Results]
+  Prompt tokens:    512
+  Generated tokens: 128
+  Prefill:          1453.69 ms (352.21 tok/s)
+  Decode:           2126.33 ms (60.20 tok/s)
+  Decode path:      engine
+  MLX peak memory:  13.58 GB

@@ -4,7 +4,7 @@ mlxcelverse is the name for everything mlxcel builds on top of upstream MLX: per
 
 ## What is in here
 
-The tree mirrors the MLX source tree. Every file is a whole-file overlay, copied over the fetched MLX checkout by `mlx_apply_source_overlays` in `../CMakeLists.txt`, and only when `MLX_BUILD_ROCM` is on. Metal and CUDA builds never see these files.
+The tree mirrors the MLX source tree. Every file is a whole-file overlay, copied over the fetched MLX checkout by `mlx_apply_source_overlays` in `../CMakeLists.txt`, and only when `MLX_BUILD_ROCM` is on. Metal and CUDA builds never see these files. A ROCm build also compiles the one overlay in `../patches/` that every build gets, the CPU backend's `mlx/backend/cpu/quantized.cpp` (float accumulation in the scalar quantized matmul, lablup/mlxcel#2248). That file is not part of this overlay, the fork does not change it, and it is not counted below; its delta and refresh rule are in its header and in `../CMakeLists.txt`.
 
 - `mlx/backend/rocm/**`: the ROCm backend (109 files). Upstream MLX has no such directory, so these files never conflict with a pin bump; they only need to keep compiling against the API of the pinned commit.
 - 15 MLX core files (`CMakeLists.txt`, `mlx/CMakeLists.txt`, `mlx/backend/common/{buffer_cache.h,compiled.cpp,compiled.h}`, `mlx/backend/gpu/primitives.cpp`, `mlx/{compile,device,fast,ops,primitives,stream}.cpp`, `mlx/{fast,fast_primitives}.h`, `mlx/io/safetensors.cpp`): the upstream file at the pinned commit merged with the fork's ROCm hooks, which are mostly `#ifdef MLX_USE_ROCM` blocks.

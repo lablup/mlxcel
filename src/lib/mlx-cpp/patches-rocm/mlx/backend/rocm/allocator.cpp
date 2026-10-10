@@ -671,17 +671,10 @@ void free_graph_generation(uint64_t gen) {
     }
     g_deferred_frees.swap(keep);
   }
-  static const bool poison = std::getenv("MLX_GRAPH_POISON_FREE") != nullptr;
   for (auto b : to_free) {
     auto* buf = static_cast<RocmBuffer*>(b.ptr());
     if (buf) {
       g_deferred_bytes.fetch_sub(buf->size, std::memory_order_relaxed);
-    }
-    if (poison) {
-      if (buf && buf->data) {
-        (void)hipMemset(buf->data, 0x7F, buf->size);
-      }
-      continue;
     }
     allocator().free(b, /*force=*/true);
   }
@@ -736,8 +729,7 @@ void RocmAllocator::free(Buffer buffer, bool force) {
     delete buf;
     return;
   }
-  static const bool nodefer = std::getenv("MLX_GRAPH_NODEFER") != nullptr;
-  if (!force && !nodefer && graph_active()) {
+  if (!force && graph_active()) {
     g_deferred_bytes.fetch_add(buf->size, std::memory_order_relaxed);
     std::lock_guard<std::mutex> lk(g_deferred_mutex);
     g_deferred_frees.push_back(

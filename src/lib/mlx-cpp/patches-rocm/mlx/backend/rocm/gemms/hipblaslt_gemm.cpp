@@ -468,10 +468,7 @@ void hipblaslt_gemm_impl(
   int32_t trans_a_val = static_cast<int32_t>(op_a);
   int32_t trans_b_val = static_cast<int32_t>(op_b);
 
-  static const bool no_epi =
-      std::getenv("MLX_ROCM_NO_HIPBLASLT_EPILOGUE") != nullptr;
-  hipblasLtEpilogue_t epilogue =
-      static_cast<hipblasLtEpilogue_t>(no_epi ? 1 : epilogue_i);
+  hipblasLtEpilogue_t epilogue = static_cast<hipblasLtEpilogue_t>(epilogue_i);
 
   // Fast path: full pipeline cache (no bias). ~all train dense + MoE segment
   // GEMMs hit this after warm-up.
@@ -657,8 +654,8 @@ void hipblaslt_gemm_impl(
 
   // Fused epilogue (bias / GELU / Swish). Bias vector length = D rows after the
   // col-major M/N swap → matches original row-major N (feature dim).
-  // no_epi / epilogue already computed above for the pipe-cache fast path.
-  if (!no_epi && bias_ptr != nullptr &&
+  // epilogue already computed above for the pipe-cache fast path.
+  if (bias_ptr != nullptr &&
       epilogue != HIPBLASLT_EPILOGUE_DEFAULT) {
     status = hipblasLtMatmulDescSetAttribute(
         matmul_guard.desc,
@@ -686,7 +683,7 @@ void hipblaslt_gemm_impl(
       throw std::runtime_error("hipblasLt set BIAS_DATA_TYPE failed");
     }
   } else if (
-      !no_epi && bias_ptr == nullptr &&
+      bias_ptr == nullptr &&
       epilogue != HIPBLASLT_EPILOGUE_DEFAULT &&
       epilogue != HIPBLASLT_EPILOGUE_BIAS &&
       epilogue != HIPBLASLT_EPILOGUE_RELU_BIAS &&

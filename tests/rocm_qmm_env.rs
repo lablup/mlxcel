@@ -47,6 +47,14 @@
 //! width) prints a warning. With only the threshold read made per call again,
 //! the threshold case fails with one warning per GEMM.
 //!
+//! `MLX_ROCM_QMM_DEQUANT_CACHE_MAX_BYTES` (a byte count, issue #2242) is
+//! checked the same way, through `env_u64_or_default`. The bare `strtoull` it
+//! replaces wrapped `-1` to `SIZE_MAX`, which made the cap unlimited. The
+//! cases run one GEMM whose dequantized weight (288 MiB) is over the 256 MiB
+//! default and read how many entries the cache stored: an invalid value must
+//! warn once and leave the default cap, so nothing is stored, while a valid
+//! 1 GiB cap stores it and `0` turns the cache off.
+//!
 //! Skips on any other backend. Run on a ROCm host with:
 //!
 //! ```sh
@@ -68,9 +76,21 @@ const MAX_M: &str = "MLX_ROCM_WMMA_QMM_MAX_M";
 const THRESHOLD: &str = "MLX_ROCM_QMM_DEQUANT_M_THRESHOLD";
 const CACHE_SIZE: &str = "MLX_ROCM_QMM_DEQUANT_CACHE_SIZE";
 const TILE_N: &str = "MLX_ROCM_QMV_TILE_N";
+const CACHE_BYTES: &str = "MLX_ROCM_QMM_DEQUANT_CACHE_MAX_BYTES";
+/// Set by the byte-cap cases: the child runs one GEMM whose dequantized weight
+/// is bigger than the 256 MiB default and reports how many entries the cache
+/// stored, instead of the numeric GEMM checks.
+const CACHE_PROBE: &str = "MLXCEL_ROCM_QMM_ENV_CACHE_PROBE";
 /// Every variable a case sets; the parent clears them all before applying a
 /// case, so the host environment cannot leak in.
-const ALL_VARS: &[&str] = &[MAX_M, THRESHOLD, CACHE_SIZE, TILE_N];
+const ALL_VARS: &[&str] = &[
+    MAX_M,
+    THRESHOLD,
+    CACHE_SIZE,
+    TILE_N,
+    CACHE_BYTES,
+    CACHE_PROBE,
+];
 
 /// Set by the parent on the children it spawns; the child body runs only
 /// when it is present, so `--include-ignored` sweeps skip it.
@@ -79,6 +99,11 @@ const CHILD_TEST: &str = "child_qmm_with_env";
 const CHILD_BUDGET: Duration = Duration::from_secs(120);
 const DONE_MARKER: &str = "QMM_ENV done";
 const ROUTE_PREFIX: &str = "QMM_ENV route_dense=";
+const INSERTS_PREFIX: &str = "QMM_ENV cache_inserts=";
+/// Rows, inner width and output width of the byte-cap probe: the dequantized
+/// bf16 weight is 12288 * 12288 * 2 bytes = 288 MiB, over the 256 MiB default.
+const PROBE_ROWS: i32 = 128;
+const PROBE_DIM: i32 = 12288;
 
 const GROUP_SIZE: i32 = 64;
 const BITS: i32 = 4;
@@ -97,6 +122,8 @@ struct Case {
     watched: &'static str,
     warning: Option<String>,
     route_dense: Option<bool>,
+    /// Entries the cache must have stored after the byte-cap probe GEMM.
+    cache_inserts: Option<u64>,
 }
 
 fn warning(var: &str, value: &str, expected: &str, fallback: &str) -> Option<String> {
@@ -129,6 +156,7 @@ fn cases() -> Vec<Case> {
                 None
             },
             route_dense: Some(dense),
+            cache_inserts: None,
         }
     };
     cases.push(max_m(None, false, false));
@@ -153,6 +181,7 @@ fn cases() -> Vec<Case> {
             "the built-in crossover",
         ),
         route_dense: Some(false),
+        cache_inserts: None,
     });
 
     // The dequantized-weight cache: 0 is the documented off switch.
@@ -166,12 +195,14 @@ fn cases() -> Vec<Case> {
             "the default 8",
         ),
         route_dense: None,
+        cache_inserts: None,
     });
     cases.push(Case {
         env: vec![(THRESHOLD, "1"), (CACHE_SIZE, "0")],
         watched: CACHE_SIZE,
         warning: None,
         route_dense: None,
+        cache_inserts: None,
     });
 
     // The tiled qmv width, read on the one-row GEMV. No threshold here, so
@@ -191,6 +222,41 @@ fn cases() -> Vec<Case> {
                 None
             },
             route_dense: None,
+            cache_inserts: None,
+        });
+    }
+
+    // The dequantized-weight byte cap (#2242). The probe weight is 288 MiB, so
+    // under the 256 MiB default it is never cached. A cap that wrapped to
+    // SIZE_MAX (`-1`, or an overflow) would store it, so the insert count tells
+    // the default from a wrapped cap; 1 GiB is a valid cap that does store it.
+    for (value, warns, inserts) in [
+        (None, false, 0),
+        (Some("0"), false, 0),
+        (Some("1073741824"), false, 1),
+        (Some("-1"), true, 0),
+        (Some("12abc"), true, 0),
+        (Some("18446744073709551616"), true, 0),
+    ] {
+        let mut env = vec![(THRESHOLD, "1"), (CACHE_PROBE, "1")];
+        if let Some(v) = value {
+            env.push((CACHE_BYTES, v));
+        }
+        cases.push(Case {
+            env,
+            watched: CACHE_BYTES,
+            warning: if warns {
+                warning(
+                    CACHE_BYTES,
+                    value.expect("an invalid case has a value"),
+                    "a non-negative integer",
+                    "the default 268435456",
+                )
+            } else {
+                None
+            },
+            route_dense: None,
+            cache_inserts: Some(inserts),
         });
     }
     cases
@@ -321,6 +387,17 @@ fn check_child(case: &Case) -> Option<String> {
         if reported != Some(want) {
             problems.push(format!(
                 "expected the 64-row probe to report route_dense={want}, got {reported:?}"
+            ));
+        }
+    }
+    if let Some(want) = case.cache_inserts {
+        let reported = run
+            .stdout
+            .lines()
+            .find_map(|l| l.split_once(INSERTS_PREFIX).map(|(_, rest)| rest.trim()));
+        if reported != Some(want.to_string().as_str()) {
+            problems.push(format!(
+                "expected the probe GEMM to store {want} cache entries, got {reported:?}"
             ));
         }
     }
@@ -463,6 +540,48 @@ fn check_gemm(label: &str, rows: i32, k: i32, n: i32, repeats: usize) {
     }
 }
 
+/// Runs one dequantize-route GEMM whose dequantized weight (288 MiB) is over
+/// the 256 MiB default byte cap and prints how many entries the cache stored.
+/// The weight is all zeros: only the cache decision is probed, not the values.
+/// f16 keeps the GEMM off the fused bf16 WMMA kernel and its ceiling, so the
+/// dequantize route runs through the cache at every row count.
+fn probe_cache_inserts() {
+    let _gpu = DefaultDeviceGuard::gpu();
+    let (n, k) = (PROBE_DIM, PROBE_DIM);
+    let x = mlxcel_core::zeros(&[PROBE_ROWS, k], dtype::FLOAT16);
+    let w = mlxcel_core::zeros(&[n, k * BITS / 32], dtype::UINT32);
+    let scales = mlxcel_core::zeros(&[n, k / GROUP_SIZE], dtype::FLOAT16);
+    let biases = mlxcel_core::zeros(&[n, k / GROUP_SIZE], dtype::FLOAT16);
+    let before = mlxcel_core::rocm_qmm_cache::dequant_cache_stats();
+    // SAFETY: every reference is a live array owned by this frame.
+    let out = unsafe {
+        mlxcel_core::quantized_matmul(
+            &x,
+            &w,
+            &scales,
+            &*biases as *const MlxArray,
+            true,
+            GROUP_SIZE,
+            BITS,
+            "affine",
+        )
+    };
+    if let Err(err) = mlxcel_core::try_eval(&out) {
+        panic!("the byte-cap probe GEMM failed: {err}");
+    }
+    let after = mlxcel_core::rocm_qmm_cache::dequant_cache_stats();
+    assert_eq!(
+        after.misses - before.misses,
+        if std::env::var(CACHE_BYTES).as_deref() == Ok("0") {
+            0
+        } else {
+            1
+        },
+        "the probe GEMM did not take the cached dequantize route: {after:?}"
+    );
+    println!("{INSERTS_PREFIX}{}", after.inserts - before.inserts);
+}
+
 /// The body the parent test runs in a fresh process per case.
 #[test]
 #[ignore = "spawned by qmm_env_integers_are_range_checked with the ROCm qmm variables set per case"]
@@ -473,6 +592,11 @@ fn child_qmm_with_env() {
     }
     if !on_rocm() {
         eprintln!("skipping: not running on a ROCm device");
+        return;
+    }
+    if std::env::var_os(CACHE_PROBE).is_some() {
+        probe_cache_inserts();
+        println!("{DONE_MARKER}");
         return;
     }
     println!("{ROUTE_PREFIX}{}", probe_route_dense());

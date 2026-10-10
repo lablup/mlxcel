@@ -313,9 +313,8 @@ void execute_fft(
   // plan lives only as long as the enqueue, not the asynchronous execution.
   // An eviction later is still safe for that execution: hipfftDestroy frees
   // the plan's device memory through hipFree, which synchronizes the device
-  // first. That argument covers the eager launch; the opt-in
-  // MLX_GRAPH_PREFILL_REPLAY=1 path, which records the call into a graph that
-  // launches later, was not examined.
+  // first. That argument covers the eager launch, which is the only launch path
+  // now that use_hip_graphs() is permanently off.
   encoder.launch_kernel([handle,
                          plan,
                          in_ptr,

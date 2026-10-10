@@ -10,6 +10,7 @@
 
 #pragma once
 
+#include <cctype>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -66,6 +67,41 @@ inline int env_int_or_default(
     return default_value;
   }
   return static_cast<int>(value);
+}
+
+// Reads `name` as an unsigned 64-bit decimal integer (a byte count). Same rule
+// and message as env_int_or_default: unset or empty returns `default_value`
+// silently; trailing junk ("12abc"), a leading '-' (strtoull would wrap it to
+// a huge value), or a value past ULLONG_MAX (ERANGE) prints one stderr line and
+// returns `default_value`. Zero is a valid value. Keep the result in a
+// function-local static so the warning prints once per process.
+inline unsigned long long env_u64_or_default(
+    const char* name,
+    unsigned long long default_value,
+    const char* expected = "a non-negative integer") {
+  const char* raw = std::getenv(name);
+  if (raw == nullptr || *raw == '\0') {
+    return default_value;
+  }
+  const char* first = raw;
+  while (std::isspace(static_cast<unsigned char>(*first))) {
+    ++first;
+  }
+  char* end = nullptr;
+  errno = 0;
+  unsigned long long value = std::strtoull(raw, &end, 10);
+  if (*first == '-' || end == raw || *end != '\0' || errno == ERANGE) {
+    std::fprintf(
+        stderr,
+        "[ROCm] ignoring invalid %s=\"%s\" (expected %s); "
+        "using the default %llu\n",
+        name,
+        raw,
+        expected,
+        default_value);
+    return default_value;
+  }
+  return value;
 }
 
 } // namespace mlx::core::rocm
