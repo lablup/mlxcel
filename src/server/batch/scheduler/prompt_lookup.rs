@@ -115,9 +115,10 @@
 //!
 //! A multi-token verify forward cannot take the paged single-token kernel
 //! and goes through the pool intercept and gather, which ADR 0001 measured at
-//! two to three times contiguous SDPA past 4096 tokens at batch 4. Whether
-//! that erases the gain is measured once (#2255 measurement (d)); until then
-//! [`PROMPT_LOOKUP_PAGED_CONTEXT_LIMIT`] is `None` and no limit applies.
+//! two to three times contiguous SDPA past 4096 tokens at batch 4. Measured
+//! for prompt lookup, it still gains at 4096 tokens and loses at 8192, so a
+//! paged sequence stops verifying past [`PROMPT_LOOKUP_PAGED_CONTEXT_LIMIT`]
+//! (4096) and decodes plainly; dense sequences have no limit.
 
 use mlxcel_core::drafter::Drafter;
 use mlxcel_core::engine::EngineError;
@@ -130,11 +131,14 @@ use crate::server::model_provider::SpeculativeStats;
 /// Context length past which a sequence on paged storage stops running
 /// verify rounds and decodes plainly.
 ///
-/// PROVISIONAL (#2255): `None`, no limit, pending the end-of-run measurement
-/// (d), the verify cost at 8192 tokens on `--decode-storage-backend paged`.
-/// The measurement fills in either a length (with its numbers cited here) or
-/// a note that no limit applies and why.
-pub(crate) const PROMPT_LOOKUP_PAGED_CONTEXT_LIMIT: Option<usize> = None;
+/// Measured on GB10 (Qwen3-1.7B 4-bit, B=1, 256 tokens;
+/// `docs/benchmark_results/server-prompt-lookup-gb10-2026-10-11.md`): on paged
+/// storage the flag-on / flag-off decode ratio for a copy prompt and an open
+/// question was 2.69x / 1.27x at 1024 tokens, 2.79x / 1.64x at 2048 and
+/// 1.42x / 1.12x at 4096, then 1.15x / 0.62x at 8192, where the gathered
+/// multi-token verify forward costs more than the accepted tokens save.
+/// Dense storage needs no limit (2.10x / 0.99x at 8192).
+pub(crate) const PROMPT_LOOKUP_PAGED_CONTEXT_LIMIT: Option<usize> = Some(4096);
 
 /// A sequence's prompt-lookup state, carried on [`SequenceInfo`] across
 /// ticks (see the module docs).

@@ -193,13 +193,13 @@ pub enum SpeculativeDispatch {
 /// Default `--prompt-lookup-max-batch`: the largest active decode batch at
 /// which a prompt-lookup row may run its own verify forward.
 ///
-/// PROVISIONAL (#2255): pending the end-of-run measurement. Each proposing row costs one verify forward on top
-/// of the batched step, so the gain shrinks as the batch grows. Until the
-/// concurrency measurement (`scripts/bench_serving_concurrency.py
-/// --prompt-style plain|copy` at concurrency 4 and 8, flag on vs off) sets
-/// it, the default admits the batch sizes where one extra forward per tick
-/// is at most a doubling of the step (B <= 2) and leaves larger batches on
-/// the plain pipelined step.
+/// Each proposing row costs one verify forward on top of the batched step,
+/// so the gain shrinks as the batch grows. Measured on GB10 (Qwen3-1.7B
+/// 4-bit, `--parallel 8`;
+/// `docs/benchmark_results/server-prompt-lookup-gb10-2026-10-11.md`): with
+/// this default, concurrency 4 and 8 match the flag-off server in every
+/// workload, while a gate of 8 gains 15 to 63 % on raw-completion workloads
+/// but loses 13 % on the chat-template copy workload at concurrency 4.
 pub const DEFAULT_PROMPT_LOOKUP_MAX_BATCH: usize = 2;
 
 /// Draft-policy name for [`SpeculativeDispatch::summary`].

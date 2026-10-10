@@ -1,0 +1,5 @@
+spark-102
+NVIDIA GB10, 580.178.04
+base 4c44e317 feat: add ADR 0007, CLI/server parity harness and B=1 decode bench (#2194)
+prev c2523e5f fix(moe): keep right_sorted on the SwitchGLU sorted prefill path (#2257)
+new 28078507 update: offer prompt lookup on the server without slowing plain decode (#2262)

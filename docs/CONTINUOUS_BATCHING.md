@@ -665,9 +665,20 @@ proposals.
 
 Each proposing row costs one extra forward per tick, so verify rounds run only
 while the active decode batch has at most `--prompt-lookup-max-batch` rows
-(default 2, provisional until the concurrency measurement of #2255 sets it).
-Above that every row decodes plainly, its drafter records no miss, and it
-resumes when the batch shrinks. Verify rounds also stay off under a unified KV
+(default 2; at a gate of 8 one chat-template workload lost 13 % at concurrency
+4 on GB10). Above that every row decodes plainly, its drafter records no miss,
+and it resumes when the batch shrinks. On paged storage a sequence stops
+verifying once its context passes 4096 tokens, where the gathered verify
+forward starts to cost more than it saves (0.62x at 8192 tokens on a 59 %
+acceptance prompt); dense storage has no such limit.
+
+The flag gains on output that copies its prompt (+53 to +67 % at B=1 on GB10
+for a repeat-the-paragraph prompt, up to 2.8x with a long document in front)
+but costs 3.5 % on chat whose reply copies little (25 to 45 % of proposed
+tokens accepted), because each proposal also ends the lookahead for a tick.
+Turn it on for workloads that quote or edit their input. Measurements:
+[`docs/benchmark_results/server-prompt-lookup-gb10-2026-10-11.md`](benchmark_results/server-prompt-lookup-gb10-2026-10-11.md);
+server-side gating for low-acceptance replies is #2264. Verify rounds also stay off under a unified KV
 budget (`--kv-unified`). Requests with images, audio or video, structured
 output, per-token logprobs, mirostat, adaptive-p or the extended sampler chain
 (dynamic temperature, `min_keep`), and models whose state a cache trim cannot

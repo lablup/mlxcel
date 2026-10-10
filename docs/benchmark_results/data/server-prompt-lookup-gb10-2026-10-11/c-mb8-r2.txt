@@ -1,0 +1,48 @@
+Server:       http://127.0.0.1:18080
+Model:        qwen3-1.7b-4bit
+Prompt:       ~512 tokens (2591 chars), style plain
+Max tokens:   256
+Concurrency:  [2, 4, 8]
+
+>>> concurrency=2 ...
+
+>>> concurrency=4 ...
+
+>>> concurrency=8 ...
+
+conc   ok  fail  ttft_ms(mean)  ttft_ms(p95)  decode_tok_s(mean)  aggregate_tok_s
+---------------------------------------------------------------------------------
+   2    2     0          214.8         214.8                69.5            131.9
+   4    4     0          106.2         106.8                65.7            256.8
+   8    8     0          245.3         246.6                16.0            126.2
+
+Server:       http://127.0.0.1:18080
+Model:        qwen3-1.7b-4bit
+Prompt:       ~512 tokens (2631 chars), style copy
+Max tokens:   256
+Concurrency:  [2, 4, 8]
+
+>>> concurrency=2 ...
+
+>>> concurrency=4 ...
+
+>>> concurrency=8 ...
+
+conc   ok  fail  ttft_ms(mean)  ttft_ms(p95)  decode_tok_s(mean)  aggregate_tok_s
+---------------------------------------------------------------------------------
+   2    2     0          254.9         254.9               107.7            195.3
+   4    4     0          112.3         112.5                58.7            229.8
+   8    8     0          258.4         260.3                16.4            129.9
+
+{"style": "chat", "conc": 2, "rep": 0, "wall_s": 2.765, "tokens": 512, "agg_tok_s": 185.18, "decode_tok_s": [281.46, 143.18], "prompt_n": [27, 19], "draft_kind": "prompt-lookup", "draft_n": 210, "draft_n_accepted": 175, "draft_rounds": 33}
+{"style": "chat", "conc": 2, "rep": 1, "wall_s": 2.445, "tokens": 512, "agg_tok_s": 209.39, "decode_tok_s": [137.47, 109.25], "prompt_n": [21, 20], "draft_kind": "prompt-lookup", "draft_n": 288, "draft_n_accepted": 234, "draft_rounds": 49}
+{"style": "copy", "conc": 2, "rep": 0, "wall_s": 2.126, "tokens": 512, "agg_tok_s": 240.82, "decode_tok_s": [127.88, 127.95], "prompt_n": [155, 155], "draft_kind": "prompt-lookup", "draft_n": 498, "draft_n_accepted": 344, "draft_rounds": 82}
+{"style": "copy", "conc": 2, "rep": 1, "wall_s": 2.184, "tokens": 512, "agg_tok_s": 234.45, "decode_tok_s": [242.17, 235.02], "prompt_n": [155, 155], "draft_kind": "prompt-lookup", "draft_n": 498, "draft_n_accepted": 344, "draft_rounds": 82}
+{"style": "chat", "conc": 4, "rep": 0, "wall_s": 4.499, "tokens": 1024, "agg_tok_s": 227.62, "decode_tok_s": [194.06, 83.77, 113.03, 104.12], "prompt_n": [27, 19, 21, 20], "draft_kind": "prompt-lookup", "draft_n": 503, "draft_n_accepted": 410, "draft_rounds": 82}
+{"style": "chat", "conc": 4, "rep": 1, "wall_s": 4.41, "tokens": 1024, "agg_tok_s": 232.21, "decode_tok_s": [83.03, 317.16, 71.75, 161.8], "prompt_n": [19, 21, 15, 18], "draft_kind": "prompt-lookup", "draft_n": 650, "draft_n_accepted": 491, "draft_rounds": 128}
+{"style": "copy", "conc": 4, "rep": 0, "wall_s": 4.073, "tokens": 1024, "agg_tok_s": 251.39, "decode_tok_s": [64.43, 66.27, 64.41, 66.27], "prompt_n": [155, 155, 155, 155], "draft_kind": "prompt-lookup", "draft_n": 996, "draft_n_accepted": 688, "draft_rounds": 164}
+{"style": "copy", "conc": 4, "rep": 1, "wall_s": 4.134, "tokens": 1024, "agg_tok_s": 247.71, "decode_tok_s": [65.17, 65.15, 65.49, 65.17], "prompt_n": [155, 155, 155, 155], "draft_kind": "prompt-lookup", "draft_n": 996, "draft_n_accepted": 688, "draft_rounds": 164}
+{"style": "chat", "conc": 8, "rep": 0, "wall_s": 11.572, "tokens": 2048, "agg_tok_s": 176.97, "decode_tok_s": [31.69, 22.53, 29.4, 25.72, 51.89, 33.65, 23.8, 23.24], "prompt_n": [27, 19, 21, 20, 19, 21, 15, 18], "draft_kind": "prompt-lookup", "draft_n": 1092, "draft_n_accepted": 816, "draft_rounds": 195}
+{"style": "chat", "conc": 8, "rep": 1, "wall_s": 11.8, "tokens": 2048, "agg_tok_s": 173.56, "decode_tok_s": [32.51, 21.92, 28.57, 25.21, 49.33, 33.56, 23.33, 22.84], "prompt_n": [27, 19, 21, 20, 19, 21, 15, 18], "draft_kind": "prompt-lookup", "draft_n": 1092, "draft_n_accepted": 816, "draft_rounds": 195}
+{"style": "copy", "conc": 8, "rep": 0, "wall_s": 10.377, "tokens": 2048, "agg_tok_s": 197.35, "decode_tok_s": [25.07, 25.08, 25.82, 25.08, 25.82, 25.87, 25.82, 25.82], "prompt_n": [155, 155, 155, 155, 155, 155, 155, 155], "draft_kind": "prompt-lookup", "draft_n": 1992, "draft_n_accepted": 1376, "draft_rounds": 328}
+{"style": "copy", "conc": 8, "rep": 1, "wall_s": 10.165, "tokens": 2048, "agg_tok_s": 201.48, "decode_tok_s": [25.89, 25.18, 25.89, 26.43, 25.92, 25.93, 26.46, 26.46], "prompt_n": [155, 155, 155, 155, 155, 155, 155, 155], "draft_kind": "prompt-lookup", "draft_n": 1992, "draft_n_accepted": 1376, "draft_rounds": 328}
