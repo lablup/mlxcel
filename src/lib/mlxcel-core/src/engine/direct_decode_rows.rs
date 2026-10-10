@@ -32,7 +32,8 @@
 //! The teardown rules are the fused pipeline's (`direct_decode`): one
 //! uncommitted append past a finishing token or a callback stop, none after
 //! the token that spends the budget, and a synchronous fallback from the last
-//! committed token after a failed submit or draw.
+//! committed token after a failed submit or draw. A draw that fails at the
+//! host read ends the run with that error, as the synchronous step's does.
 
 use super::direct::{DirectEngine, DirectEngineError, delivers_to_callback};
 use super::direct_decode::{DecodeState, Teardown, single};
@@ -87,8 +88,20 @@ impl<M: LanguageModel> DirectEngine<M> {
                 }
             };
             // The sync point: waits for `pending` only, while `next` runs.
-            // `item_i32` reads the per-row draw in whatever integer dtype the
-            // chain returned, as the synchronous step does.
+            // `try_eval` is the per-array wait (it enqueues nothing behind
+            // `next`) behind the fallible boundary, as in the synchronous
+            // step: a backend throw surfacing at the wait fails the run
+            // instead of aborting the process in the infallible readback
+            // (#822). `item_i32` then reads the per-row draw in whatever
+            // integer dtype the chain returned.
+            if let Err(err) = crate::try_eval(&pending) {
+                drop(pending);
+                // Nothing was committed: undo the read step's append and the
+                // next one, as after a row error.
+                let n = 1 + i32::from(next.is_some());
+                self.retire(id, next.as_deref(), n, teardown)?;
+                return Err(DirectEngineError::Row(err.to_string()));
+            }
             let token = ffi::item_i32(&pending);
             drop(pending);
             let before = state.generated.len();
