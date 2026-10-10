@@ -915,6 +915,10 @@ impl BatchScheduler {
             }
             None => self.note_eval_success(),
         }
+        // Under `--draft-kind prompt-lookup`, the first eligible prefill
+        // warms every verify width up, before a finish at prefill can return,
+        // so the server's one-token startup warmup covers it (#2255).
+        self.warm_up_prompt_lookup_widths(&seq);
         let prefill_finish = outcome.finish;
         if let Some(cause) = prefill_finish {
             apply_finish_cause(&mut seq, cause);

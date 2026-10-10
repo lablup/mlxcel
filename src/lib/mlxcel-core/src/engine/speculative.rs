@@ -189,19 +189,10 @@ impl<M: LanguageModel> DirectEngine<M> {
         let result = (|| -> Result<(), SpeculativeRunError> {
             let logits = self.prefill_text(id, prompt_tokens)?;
             crate::try_eval(&logits).map_err(|e| DirectEngineError::PrefillEval(e.to_string()))?;
-            for width in 2..=max_draft + 1 {
-                let tokens = vec![last; width];
-                let input = ffi::from_slice_i32(&tokens, &[1, width as i32]);
-                let logits = self
-                    .engine_mut()
-                    .verify(id, &input)
-                    .map_err(DirectEngineError::Step)?;
-                let argmax = ffi::argmax_last_axis(&logits);
-                crate::try_eval(&argmax).map_err(|e| DirectEngineError::Row(e.to_string()))?;
-                self.engine_mut()
-                    .unwind_appends(id, width as i32)
-                    .map_err(DirectEngineError::Step)?;
-            }
+            // The warm-up the server scheduler runs too (#2255).
+            self.engine_mut()
+                .warm_up_verify_widths(id, last, max_draft)
+                .map_err(DirectEngineError::Step)?;
             Ok(())
         })();
         self.close_sequence(id);

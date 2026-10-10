@@ -172,6 +172,7 @@ impl BatchScheduler {
                 crate::server::batch::speculative_burst::WorkerDrafterSlot::from_dispatch(
                     &crate::server::SpeculativeDispatch::Disabled,
                 ),
+            prompt_lookup_widths_warmed: false,
             // No adaptive MTP policy until `with_mtp_policy` builds one for an
             // MTP dispatch. The non-speculative hot path never touches it.
             mtp_policy: None,

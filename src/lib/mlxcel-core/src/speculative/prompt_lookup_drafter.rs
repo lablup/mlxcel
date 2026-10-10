@@ -116,8 +116,10 @@ impl PromptLookupDrafter {
         self.context.clear();
         self.context.extend_from_slice(prompt_tokens);
         self.context.push(first_token);
+        // The index is built from the context on the first lookup, not
+        // here: a server row the verify gate keeps out never pays for it
+        // (#2255), and the first `draft_block` extends it anyway.
         self.index = NgramIndex::new(&self.config);
-        self.index.extend(&self.context);
         self.governor = DraftGovernor::new(&self.config);
         self.shadow = None;
         self.last_paused = false;
@@ -309,6 +311,34 @@ mod tests {
             last = emitted;
         }
         (seen, drafter.stats())
+    }
+
+    /// Prefill builds no n-gram index (#2255): the first lookup builds it
+    /// and proposes exactly what a scan of the context finds.
+    #[test]
+    fn the_index_is_built_on_the_first_lookup() {
+        let config = PromptLookupConfig {
+            adaptive: false,
+            ..PromptLookupConfig::default()
+        };
+        let sampling = SamplingConfig::greedy();
+        let hidden = crate::from_slice_i32(&[0], &[1]);
+        let mut drafter = PromptLookupDrafter::new(config);
+        let prompt = [5, 6, 7, 8, 9, 5, 6];
+        drafter
+            .prefill_from_target_hidden(&prompt, &hidden, 7, &sampling)
+            .unwrap();
+        assert_eq!(drafter.index.indexed_len(), 0, "prefill builds no index");
+        let draft = drafter
+            .draft_block(7, None, config.max_draft, &sampling)
+            .unwrap();
+        let context = [5, 6, 7, 8, 9, 5, 6, 7];
+        assert_eq!(drafter.index.indexed_len(), context.len());
+        assert_eq!(
+            draft,
+            super::super::prompt_lookup::find_draft(&context, &config)
+        );
+        assert_eq!(draft, vec![8, 9, 5, 6, 7]);
     }
 
     /// Under `Graded`, three drafted misses in a row pause proposals for

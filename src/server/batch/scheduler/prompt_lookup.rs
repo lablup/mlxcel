@@ -97,6 +97,14 @@
 //!   round leaves its state consistent (I1) and `finalize_completed` finishes
 //!   it after the tick.
 //!
+//! ## Verify-width warmup
+//!
+//! The first eligible prefill on a scheduler (normally the server's startup
+//! warmup request, before its finish at prefill returns) runs one verify
+//! forward at every width a round can use and unwinds each
+//! ([`BatchScheduler::warm_up_prompt_lookup_widths`]), as `mlxcel generate
+//! --prompt-lookup` does, so first-use kernel costs do not land mid-decode.
+//!
 //! ## Paged storage
 //!
 //! A multi-token verify forward cannot take the paged single-token kernel
@@ -459,6 +467,62 @@ impl BatchScheduler {
                 return;
             }
             row.observed = generated_tokens.len();
+        }
+    }
+
+    /// Run one verify forward at every width a prompt-lookup round can use
+    /// (2 through `max_draft + 1`) on `seq`'s freshly prefilled state and
+    /// unwind each, once per scheduler, as `mlxcel generate --prompt-lookup`
+    /// does before it decodes: the first forward at a width builds or traces
+    /// its kernels, which on GB10 costs more than the rest of a short reply,
+    /// and would otherwise land in the middle of the first requests that use
+    /// each width. Runs on the first text-only prefill that could run verify
+    /// rounds at all; the server's startup warmup request is one. The state
+    /// is left as the prefill left it (the prompt, not the first token). A
+    /// failure is logged and not retried: the request decodes as it would
+    /// have, and its own rounds fail it cleanly if the backend is broken.
+    pub(super) fn warm_up_prompt_lookup_widths(&mut self, seq: &SequenceInfo) {
+        if self.prompt_lookup_widths_warmed {
+            return;
+        }
+        let Some((config, _)) = self.speculative_dispatch.prompt_lookup_config() else {
+            return;
+        };
+        let max_draft = config.max_draft;
+        let drafter = PromptLookupDrafter::new(*config);
+        if seq.vlm_embeddings.is_some()
+            || !seq.images.is_empty()
+            || !seq.audio.is_empty()
+            || self.shared_kv_budget().is_some()
+            || self
+                .engine
+                .verify_rounds_unsupported(seq.seq_id, &seq.sampling, &drafter)
+                .is_some()
+        {
+            return;
+        }
+        let Some(&first) = seq.generated_tokens.last() else {
+            return;
+        };
+        let widest = max_draft + 1;
+        let fits = self.available_paged_blocks().is_none_or(|free| {
+            free >= self
+                .engine
+                .pool()
+                .paged_blocks_to_append(seq.seq_id, widest)
+        });
+        if !fits {
+            return;
+        }
+        self.prompt_lookup_widths_warmed = true;
+        match self
+            .engine
+            .warm_up_verify_widths(seq.seq_id, first, max_draft)
+        {
+            Ok(()) => tracing::debug!(max_draft, "prompt lookup: verify widths warmed up"),
+            Err(err) => {
+                tracing::warn!(seq_id = %seq.seq_id, error = %err, "prompt lookup: verify-width warmup failed")
+            }
         }
     }
 

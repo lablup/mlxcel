@@ -678,6 +678,12 @@ the `timings` block with `draft_kind: "prompt-lookup"` (see
 context limit applies yet; the verify cost at long contexts is measured
 separately. `--spec-type none` turns prompt lookup off like any other drafter.
 
+The first eligible prefill, normally the server's startup warmup request, runs
+one verify forward at every block width (2 through `--draft-block-size` + 1)
+and unwinds each, as `mlxcel generate --prompt-lookup` does before it decodes,
+so the first requests do not pay each width's first-use kernel cost
+mid-decode.
+
 ## Disaggregated serving
 
 Prefill is compute-bound and decode is memory-bound, so a deployment can run them

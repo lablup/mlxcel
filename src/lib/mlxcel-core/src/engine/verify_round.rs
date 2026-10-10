@@ -126,6 +126,31 @@ impl<M: LanguageModel> Engine<M> {
         prompt_lookup_unsupported_reason(&self.model).map(SpeculativeRunError::ModelUnsupported)
     }
 
+    /// Run one verify forward at every block width a verify round can use
+    /// (2 through `max_draft + 1`) on the open sequence `id`, feeding `token`
+    /// at every position, and unwind each, so a later round does not pay a
+    /// width's first-use kernel cost in the middle of a decode (on GB10 that
+    /// cost more than the rest of a short reply). The sequence's state is
+    /// left as it was, also when a width fails: its appends are unwound
+    /// before the error is returned.
+    pub fn warm_up_verify_widths(
+        &mut self,
+        id: SequenceId,
+        token: i32,
+        max_draft: usize,
+    ) -> Result<(), EngineError> {
+        for width in 2..=max_draft + 1 {
+            let tokens = vec![token; width];
+            let input = ffi::from_slice_i32(&tokens, &[1, width as i32]);
+            let logits = self.verify(id, &input)?;
+            let argmax = ffi::argmax_last_axis(&logits);
+            let evaluated = crate::try_eval(&argmax);
+            self.unwind_appends(id, width as i32)?;
+            evaluated.map_err(|err| EngineError::Eval(err.to_string()))?;
+        }
+        Ok(())
+    }
+
     /// One verify round for `row` (see the module docs): `current` is the
     /// row's last emitted token, which its state does not hold yet, and
     /// `draft` the proposed block (non-empty, already capped so the round

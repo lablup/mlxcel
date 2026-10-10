@@ -526,3 +526,39 @@ fn admission_during_an_in_flight_lookahead_tears_it_down_first() {
     assert_eq!(tokens_of(&done, &prompt), cycle_from(4, 30));
     assert!(acceptance(&lookup_rx).is_some_and(|(_, accepted)| accepted > 0));
 }
+
+/// The first eligible prefill warms every verify width up once, also for a
+/// one-token request that finishes at prefill (the server's startup warmup),
+/// and leaves the state as the prefill left it (I1 after the prefill tick),
+/// so the next request decodes exactly its plain stream. Without prompt
+/// lookup nothing is warmed.
+#[test]
+fn the_first_prefill_warms_the_verify_widths_once() {
+    let mut done = Done::new();
+    let mut plain = scheduler(None);
+    let _plain_rx = enqueue(&mut plain, PLAIN_PROMPT, 1);
+    drain(&mut plain, &mut done);
+    assert!(!plain.prompt_lookup_widths_warmed);
+
+    let mut sched = scheduler(Some(4));
+    let warm_rx = enqueue(&mut sched, PLAIN_PROMPT, 1);
+    assert_eq!(tick(&mut sched, &mut done), Tick::Prefill);
+    assert!(
+        sched.prompt_lookup_widths_warmed,
+        "a request that finishes at prefill warms the widths"
+    );
+    assert!(acceptance(&warm_rx).is_none());
+    let prompt = copy_prompt();
+    let rx = enqueue(&mut sched, &prompt, 20);
+    drain(&mut sched, &mut done);
+    assert_eq!(tokens_of(&done, &prompt), cycle_from(4, 20));
+    assert!(acceptance(&rx).is_some_and(|(_, accepted)| accepted > 0));
+
+    let mut fresh = scheduler(Some(4));
+    let _rx = enqueue(&mut fresh, &prompt, 20);
+    // `tick` checks I1 right after the prefill that warmed the widths.
+    assert_eq!(tick(&mut fresh, &mut done), Tick::Prefill);
+    assert!(fresh.prompt_lookup_widths_warmed);
+    drain(&mut fresh, &mut done);
+    assert_eq!(tokens_of(&done, &prompt), cycle_from(4, 20));
+}
