@@ -53,6 +53,9 @@
 //!   the accepted `a` proposals plus the current token (`a` on an EOS) and
 //!   unwinds the other `k - a`; a round that fails at a position unwinds all
 //!   `k + 1` and the row finishes with `FinishReason::Error` (#822).
+//!   A stop token inside the accepted block ends the row there: it is not
+//!   stored, nothing after it is committed, and the KV holds the prompt and
+//!   every stored token.
 //! - **I2, one append in flight.** While `decode_lookahead` holds step n,
 //!   each of its rows has exactly one uncommitted append (the forward fed by
 //!   its last emitted token). Only the steady commit
@@ -127,10 +130,10 @@ use crate::server::model_provider::SpeculativeStats;
 /// Context length past which a sequence on paged storage stops running
 /// verify rounds and decodes plainly.
 ///
-/// PROVISIONAL (#2255): `None`, no limit, pending measurement (d), the verify
-/// cost at 8192 tokens on `--decode-storage-backend paged`. The measurement
-/// fills in either a length (with its numbers cited here) or a note that no
-/// limit applies and why.
+/// PROVISIONAL (#2255): `None`, no limit, pending the end-of-run measurement
+/// (d), the verify cost at 8192 tokens on `--decode-storage-backend paged`.
+/// The measurement fills in either a length (with its numbers cited here) or
+/// a note that no limit applies and why.
 pub(crate) const PROMPT_LOOKUP_PAGED_CONTEXT_LIMIT: Option<usize> = None;
 
 /// A sequence's prompt-lookup state, carried on [`SequenceInfo`] across

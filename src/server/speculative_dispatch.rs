@@ -193,7 +193,7 @@ pub enum SpeculativeDispatch {
 /// Default `--prompt-lookup-max-batch`: the largest active decode batch at
 /// which a prompt-lookup row may run its own verify forward.
 ///
-/// Provisional (#2255). Each proposing row costs one verify forward on top
+/// PROVISIONAL (#2255): pending the end-of-run measurement. Each proposing row costs one verify forward on top
 /// of the batched step, so the gain shrinks as the batch grows. Until the
 /// concurrency measurement (`scripts/bench_serving_concurrency.py
 /// --prompt-style plain|copy` at concurrency 4 and 8, flag on vs off) sets

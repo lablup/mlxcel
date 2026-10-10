@@ -140,6 +140,17 @@ fn enqueue(
     prompt: &[i32],
     max_tokens: usize,
 ) -> mpsc::Receiver<GenerateEvent> {
+    enqueue_with(sched, prompt, max_tokens, &[]).0
+}
+
+/// [`enqueue`] with extra stop token ids (the cycle model has no EOS of its
+/// own, so a stop id stands in for one) and the request's cancel flag.
+fn enqueue_with(
+    sched: &mut BatchScheduler,
+    prompt: &[i32],
+    max_tokens: usize,
+    stop_token_ids: &[i32],
+) -> (mpsc::Receiver<GenerateEvent>, Arc<AtomicBool>) {
     let options = ServerGenerateOptions {
         n_indent: 0,
         t_max_predict_ms: None,
@@ -150,7 +161,10 @@ fn enqueue(
         logit_bias_texts: Vec::new(),
         post_sampling_probs: false,
         max_tokens,
-        sampling: SamplingConfig::greedy(),
+        sampling: SamplingConfig {
+            stop_token_ids: stop_token_ids.to_vec(),
+            ..SamplingConfig::greedy()
+        },
         stop_sequences: None,
         ignore_eos: false,
         priority: RequestPriority::Normal,
@@ -166,6 +180,7 @@ fn enqueue(
         pre_rendered_prompt_tokens: None,
     };
     let (tx, rx) = mpsc::channel();
+    let cancelled = Arc::new(AtomicBool::new(false));
     sched.enqueue_request(
         "prompt".to_string(),
         Some(prompt.to_vec()),
@@ -174,10 +189,10 @@ fn enqueue(
         Vec::new(),
         Vec::new(),
         tx,
-        Arc::new(AtomicBool::new(false)),
+        Arc::clone(&cancelled),
         true,
     );
-    rx
+    (rx, cancelled)
 }
 
 /// What one run-loop iteration did.
@@ -635,4 +650,113 @@ fn a_drafter_ahead_of_its_row_decodes_plainly() {
     drain(&mut sched, &mut done);
     assert_eq!(tokens_of(&done, &prompt), cycle_from(4, 12));
     assert!(acceptance(&rx).is_none(), "no verify round ran");
+}
+
+/// I1 and I7, EOS inside an accepted block: the stop id sits in the middle
+/// of the proposals a verify round accepts, so the round ends the row at the
+/// stop token, commits nothing after it (the unwound tail leaves the KV at
+/// the row's committed tokens, I1, checked before the row is released), and
+/// the reply equals the plain decode with the same stop id.
+#[test]
+fn an_eos_inside_an_accepted_block_ends_the_row_there() {
+    let prompt = copy_prompt();
+    // The reply is `4, 5, 6, ..`; the stop id 11 ends it and is not stored.
+    let eos = [11];
+    let mut done = Done::new();
+    let mut plain = scheduler(None);
+    let _plain_rx = enqueue_with(&mut plain, &prompt, 40, &eos);
+    drain(&mut plain, &mut done);
+    let plain_tokens = tokens_of(&done, &prompt);
+    assert_eq!(plain_tokens, cycle_from(4, 7));
+
+    let mut sched = scheduler(Some(4));
+    let (rx, _cancelled) = enqueue_with(&mut sched, &prompt, 40, &eos);
+    let mut ended = None;
+    let mut guard = 0;
+    while ended.is_none() {
+        guard += 1;
+        assert!(guard < 100, "the row never finished");
+        match sched.decide_action() {
+            BatchSchedulerAction::Prefill(id) => {
+                sched.discard_lookahead();
+                sched.execute_prefill(id);
+            }
+            BatchSchedulerAction::Decode(ids) => sched.execute_decode_step(&ids),
+            other => panic!("unexpected scheduler action {other:?}"),
+        }
+        if sched.decode_lookahead.is_some() {
+            // Finishing tokens force the lookahead teardown in
+            // `finalize_completed`; a finished row is inspected after it.
+            sched.discard_lookahead();
+        }
+        let finished: Vec<(SequenceId, usize, Vec<i32>)> = sched
+            .active_batch
+            .iter_sequences()
+            .filter(|seq| seq.state.is_finished())
+            .map(|seq| {
+                (
+                    seq.seq_id,
+                    // The stop token is not stored, and every stored token
+                    // was fed before the one that stopped the row.
+                    seq.prompt_tokens.len() + seq.generated_tokens.len(),
+                    seq.generated_tokens.clone(),
+                )
+            })
+            .collect();
+        if let Some((id, committed, tokens)) = finished.into_iter().next() {
+            let offset = sched
+                .engine
+                .pool_mut()
+                .get_caches_mut(id)
+                .expect("the finished row still holds its sequence")[0]
+                .offset as usize;
+            assert_eq!(
+                offset, committed,
+                "the KV holds the committed tokens, not the unwound tail of the block"
+            );
+            ended = Some(tokens);
+        }
+        sched.finalize_completed();
+    }
+    let tokens = ended.expect("finished");
+    assert_eq!(tokens, plain_tokens);
+    assert_eq!(
+        tokens.last(),
+        Some(&10),
+        "the stop token itself is not kept"
+    );
+    let (proposed, accepted) = acceptance(&rx).expect("prompt lookup verified");
+    assert!(
+        accepted > 0 && accepted <= proposed,
+        "{accepted}/{proposed}: the stop token fell inside a verified block"
+    );
+}
+
+/// I8: a request cancelled while a verify round is due is not interrupted
+/// mid-round. The round runs to its end and leaves the row's KV at its
+/// committed tokens (I1, checked by `tick` before the row is released), and
+/// `finalize_completed` then releases it after the tick.
+#[test]
+fn a_cancel_during_a_round_finalizes_after_the_round() {
+    let prompt = copy_prompt();
+    let mut done = Done::new();
+    let mut sched = scheduler(Some(4));
+    let (rx, cancelled) = enqueue_with(&mut sched, &prompt, 40, &[]);
+    assert_eq!(tick(&mut sched, &mut done), Tick::Prefill);
+    let id = only_row(&sched);
+    // Tick until a synchronous tick is next, where the row verifies.
+    while sched.decode_lookahead.is_some() {
+        assert_eq!(tick(&mut sched, &mut done), Tick::Decode);
+    }
+    assert!(len_of(&sched, id).is_some(), "the row is still decoding");
+    cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(tick(&mut sched, &mut done), Tick::Decode);
+    assert!(
+        sched.active_batch.get(id).is_none(),
+        "the cancelled row is released after the tick"
+    );
+    assert!(sched.decode_lookahead.is_none());
+    assert_eq!(tick(&mut sched, &mut done), Tick::Idle);
+    let (proposed, _) = acceptance(&rx).expect("the round ran before the cancel took effect");
+    assert!(proposed > 0, "a verify round ran in the cancelled tick");
 }
