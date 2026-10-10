@@ -101,6 +101,12 @@ struct Args {
     #[arg(long)]
     ignore_eos: bool,
 
+    /// Repetition penalty for both paths (1.0 = off). A value other than 1.0
+    /// keeps the request off the fused draw: the CLI decodes it on the
+    /// per-row lookahead pipeline, the server on the per-row sampler.
+    #[arg(long, default_value_t = 1.0)]
+    repetition_penalty: f32,
+
     /// Append one CSV row per measurement to this file.
     #[arg(long, value_name = "PATH")]
     csv: Option<PathBuf>,
@@ -163,9 +169,9 @@ fn main() -> Result<()> {
         let len = cap_prompt_len(target, max_context, args.max_tokens);
         prompts.push((target, synthesize_prompt_tokens(&tokenizer, len)?));
     }
-    let sampling = mlxcel::sampling::build_sampling_config(neutral_params(
-        mlxcel::read_eos_token_ids(&args.model),
-    ));
+    let mut params = neutral_params(mlxcel::read_eos_token_ids(&args.model));
+    params.repetition_penalty = args.repetition_penalty;
+    let sampling = mlxcel::sampling::build_sampling_config(params);
     let mut measurements: Vec<Measurement> = Vec::new();
 
     if run_cli {
@@ -250,6 +256,18 @@ mod tests {
         assert_eq!(args.prefill_chunk, None);
         assert_eq!(args.decode_storage, DecodeStorageBackend::Auto);
         assert!(!args.ignore_eos);
+        assert_eq!(args.repetition_penalty, 1.0);
+    }
+
+    #[test]
+    fn repetition_penalty_reaches_the_sampling_config() {
+        let args = parse(&["--repetition-penalty", "1.1"]);
+        assert_eq!(args.repetition_penalty, 1.1);
+        let mut params = neutral_params(vec![2]);
+        params.repetition_penalty = args.repetition_penalty;
+        let sampling = mlxcel::sampling::build_sampling_config(params);
+        assert_eq!(sampling.repetition_penalty, 1.1);
+        assert!(sampling.needs_token_history());
     }
 
     #[test]
