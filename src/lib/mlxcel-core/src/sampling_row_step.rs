@@ -112,7 +112,8 @@ impl TokenDraw {
 /// One sequence's sampling step and its [`SamplerState`].
 ///
 /// Used by: `engine::sample_and_finish_row`
-/// (the scheduler's decode steps and prefill completions)
+/// (the scheduler's decode steps and prefill completions), `Engine::draw_row`
+/// (the raw-completion client's per-row lookahead pipeline, #2229)
 #[derive(Debug, Clone, Default)]
 pub struct RowSampler {
     state: Option<SamplerState>,

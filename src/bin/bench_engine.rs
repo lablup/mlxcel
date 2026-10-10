@@ -101,6 +101,12 @@ struct Args {
     #[arg(long)]
     ignore_eos: bool,
 
+    /// Repetition penalty for both paths (1.0 = off). A value other than 1.0
+    /// keeps the request off the fused draw: the CLI decodes it on the
+    /// per-row lookahead pipeline, the server on the per-row sampler.
+    #[arg(long, default_value_t = 1.0)]
+    repetition_penalty: f32,
+
     /// Append one CSV row per measurement to this file.
     #[arg(long, value_name = "PATH")]
     csv: Option<PathBuf>,
@@ -142,6 +148,17 @@ fn apply_cli_prefill_chunk(chunk: Option<usize>) -> Result<()> {
     Ok(())
 }
 
+/// The sampling config every measured run uses: neutral params plus the
+/// flags that shape the sampler (currently `--repetition-penalty`).
+fn bench_sampling_config(
+    args: &Args,
+    eos_token_ids: Vec<i32>,
+) -> mlxcel_core::generate::SamplingConfig {
+    let mut params = neutral_params(eos_token_ids);
+    params.repetition_penalty = args.repetition_penalty;
+    mlxcel::sampling::build_sampling_config(params)
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     let run_cli = matches!(args.path, PathArg::Cli | PathArg::Both);
@@ -163,9 +180,7 @@ fn main() -> Result<()> {
         let len = cap_prompt_len(target, max_context, args.max_tokens);
         prompts.push((target, synthesize_prompt_tokens(&tokenizer, len)?));
     }
-    let sampling = mlxcel::sampling::build_sampling_config(neutral_params(
-        mlxcel::read_eos_token_ids(&args.model),
-    ));
+    let sampling = bench_sampling_config(&args, mlxcel::read_eos_token_ids(&args.model));
     let mut measurements: Vec<Measurement> = Vec::new();
 
     if run_cli {
@@ -250,6 +265,19 @@ mod tests {
         assert_eq!(args.prefill_chunk, None);
         assert_eq!(args.decode_storage, DecodeStorageBackend::Auto);
         assert!(!args.ignore_eos);
+        assert_eq!(args.repetition_penalty, 1.0);
+    }
+
+    #[test]
+    fn repetition_penalty_reaches_the_sampling_config() {
+        let args = parse(&["--repetition-penalty", "1.1"]);
+        assert_eq!(args.repetition_penalty, 1.1);
+        let sampling = bench_sampling_config(&args, vec![2]);
+        assert_eq!(sampling.repetition_penalty, 1.1);
+        assert!(sampling.needs_token_history());
+        let neutral = bench_sampling_config(&parse(&[]), vec![2]);
+        assert_eq!(neutral.repetition_penalty, 1.0);
+        assert!(!neutral.needs_token_history());
     }
 
     #[test]

@@ -13,8 +13,9 @@
 // limitations under the License.
 
 //! The decode loop of the raw-completion client (#2176), after its first
-//! token: the lookahead pipeline when the sequence is eligible, the
-//! synchronous per-row chain otherwise.
+//! token: the fused lookahead pipeline when the sequence is eligible, the
+//! per-row lookahead pipeline (`direct_decode_rows`, #2229) for the samplers
+//! the fused draw cannot run, the synchronous per-row chain otherwise.
 //!
 //! The pipeline overlaps step n+1's forward with step n's host read, as the
 //! retired CLI generator did and the server scheduler does (#632): every
@@ -34,7 +35,12 @@
 //! sampler feedback state, and the host token is never needed before the
 //! next forward) and [`super::Engine::can_unwind_lookahead`] (a trimmable state, or
 //! a model-owned family that rewinds its own). [`super::lookahead::FORCE_SYNC_ENV`]
-//! turns it off. Unlike the scheduler, the client keeps loop detection on the
+//! turns it off. A sequence the second rule admits but whose sampler fails
+//! the first (history penalties, DRY, the feedback samplers) decodes on the
+//! per-row pipeline, which keeps the forward ahead and builds each draw on
+//! the host after the previous token is committed (mirostat and adaptive-p read
+//! the draw on the host, so for them only the finish step overlaps the next
+//! forward). Unlike the scheduler, the client keeps loop detection on the
 //! pipeline: the finish step runs on every committed token here, so the
 //! post-commit scan the scheduler's steady path skips is not skipped.
 //!
@@ -166,31 +172,58 @@ impl<M: LanguageModel> DirectEngine<M> {
         client_fused_params(sampling)
     }
 
-    /// The pipeline of [`DirectEngine::decode`]: [`DirectEngine::lookahead_params`]
-    /// with an exact unwind, else, for a model-owned family that cannot rewind
-    /// its own state and holds the sequence on its natural backend, the same
-    /// fused draw with a [`Teardown::Discard`] teardown. `None` for the
-    /// synchronous chain.
-    pub(super) fn decode_lookahead(
-        &self,
-        id: SequenceId,
-        sampling: &SamplingConfig,
-    ) -> Option<(FusedSampleParams, Teardown)> {
-        if let Some(params) = self.lookahead_params(id, sampling) {
-            return Some((params, Teardown::Unwind));
+    /// How a pipeline on sequence `id` would tear down its speculative
+    /// appends, whatever the sampler: [`Teardown::Unwind`] under the exact
+    /// rule ([`super::Engine::can_unwind_lookahead`]), [`Teardown::Discard`]
+    /// for a model-owned family that cannot rewind its own state and holds
+    /// the sequence on its natural backend, `None` (the synchronous chain)
+    /// otherwise or under [`super::lookahead::FORCE_SYNC_ENV`].
+    pub(super) fn lookahead_teardown(&self, id: SequenceId) -> Option<Teardown> {
+        if self.force_sync() {
+            return None;
+        }
+        if self.engine().can_unwind_lookahead(id) {
+            return Some(Teardown::Unwind);
         }
         let model_owned = |backend| backend == SequenceStateBackend::ModelOwned;
-        let discards = !self.force_sync()
-            && model_owned(self.model().sequence_state_layout().backend)
+        let discards = model_owned(self.model().sequence_state_layout().backend)
             && self
                 .engine()
                 .pool()
                 .get(id)
                 .is_some_and(|set| model_owned(set.backend));
-        if !discards {
+        discards.then_some(Teardown::Discard)
+    }
+
+    /// The fused pipeline of [`DirectEngine::decode`]: the fused sampling
+    /// parameters and the teardown when the sampler is fused-eligible and
+    /// [`DirectEngine::lookahead_teardown`] admits the sequence, `None`
+    /// otherwise.
+    pub(super) fn decode_lookahead(
+        &self,
+        id: SequenceId,
+        sampling: &SamplingConfig,
+    ) -> Option<(FusedSampleParams, Teardown)> {
+        let teardown = self.lookahead_teardown(id)?;
+        client_fused_params(sampling).map(|params| (params, teardown))
+    }
+
+    /// The per-row pipeline of [`DirectEngine::decode`] (#2229): its teardown
+    /// when the sampler is not fused-eligible but the sequence may still
+    /// pipeline, `None` for the synchronous chain. The B9 pre-bias counters
+    /// ([`crate::lang_bias_counters`]) read the pre-bias argmax on the host
+    /// at every draw, so they keep a request synchronous. The client's rows
+    /// carry no mask, override or logprobs payload, so every such row meets
+    /// [`super::Engine::draw_row`]'s contract.
+    pub(super) fn decode_row_lookahead(
+        &self,
+        id: SequenceId,
+        sampling: &SamplingConfig,
+    ) -> Option<Teardown> {
+        if client_fused_params(sampling).is_some() || crate::lang_bias_counters::enabled() {
             return None;
         }
-        client_fused_params(sampling).map(|params| (params, Teardown::Discard))
+        self.lookahead_teardown(id)
     }
 
     /// Decode `state` after its first token until the finish step ends it or
@@ -200,18 +233,20 @@ impl<M: LanguageModel> DirectEngine<M> {
         state: &mut DecodeState<'_>,
         on_token: &mut F,
     ) -> Result<(), DirectEngineError> {
-        match self.decode_lookahead(state.id, state.sampling) {
-            Some((params, teardown)) => {
-                // The raised command-buffer input budget pays off only where
-                // step n+1 is encoded while the device still runs step n; a
-                // synchronous step encodes and then waits, and loses the
-                // encode / execute overlap inside the step under it (the
-                // scheduler measured this on M1 Ultra, `run_decode_tick`).
-                let _decode_budget = crate::DecodeCommandBufferBudget::enter();
-                self.decode_pipelined(state, &params, teardown, on_token)
-            }
-            None => self.decode_sync(state, on_token),
+        if let Some((params, teardown)) = self.decode_lookahead(state.id, state.sampling) {
+            // The raised command-buffer input budget pays off only where
+            // step n+1 is encoded while the device still runs step n; a
+            // synchronous step encodes and then waits, and loses the
+            // encode / execute overlap inside the step under it (the
+            // scheduler measured this on M1 Ultra, `run_decode_tick`).
+            let _decode_budget = crate::DecodeCommandBufferBudget::enter();
+            return self.decode_pipelined(state, &params, teardown, on_token);
         }
+        if let Some(teardown) = self.decode_row_lookahead(state.id, state.sampling) {
+            let _decode_budget = crate::DecodeCommandBufferBudget::enter();
+            return self.decode_pipelined_rows(state, teardown, on_token);
+        }
+        self.decode_sync(state, on_token)
     }
 
     /// The synchronous loop: forward, per-row sample, host read, finish.

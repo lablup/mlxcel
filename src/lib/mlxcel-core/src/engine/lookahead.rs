@@ -18,7 +18,9 @@
 //!
 //! Two drivers use them: the server scheduler's cross-tick state machine
 //! (`BatchScheduler::run_decode_tick`) and the raw-completion client's B=1
-//! loop ([`super::DirectEngine::generate`]). Their state machines stay
+//! loop ([`super::DirectEngine::generate`]), whose per-row pipeline feeds the
+//! forward from a per-row draw ([`Engine::submit_forward`],
+//! [`Engine::draw_row`]) the same way. Their state machines stay
 //! separate: the scheduler's has to tear the pipeline down on admission,
 //! preemption and membership changes and re-run a finishing tick through its
 //! synchronous path so completion and prompt-cache donation see clean caches,
