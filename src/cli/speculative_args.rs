@@ -101,7 +101,13 @@ pub const DEFAULT_DFLASH_BLOCK_SIZE: u32 = 16;
 pub struct SpeculativeArgs {
     /// Speculative drafter kind. Optional.
     ///
-    /// Accepted values: `dflash`, `mtp`. When unset AND a drafter path is
+    /// Accepted values: `dflash`, `mtp`, and on `mlxcel serve` and
+    /// `mlxcel-server` also `prompt-lookup`, which takes no drafter
+    /// checkpoint: each eligible request runs n-gram prompt-lookup verify
+    /// rounds inside the batch scheduler, `--draft-block-size` sets the
+    /// largest proposal, and `--prompt-lookup-max-batch` caps the active
+    /// batch at which verify rounds run (`mlxcel generate` uses
+    /// `--prompt-lookup` instead). When unset AND a drafter path is
     /// supplied (`--draft-model` on `mlxcel`, `--model-draft` on
     /// `mlxcel-server`), the kind is auto-detected from the drafter's
     /// `config.json::model_type` via

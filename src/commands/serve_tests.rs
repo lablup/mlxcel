@@ -51,6 +51,8 @@ fn sample_args() -> crate::ServeArgs {
         n_predict: 128,
         draft_model: Some(PathBuf::from("models/draft")),
         draft_max: 4,
+        prompt_lookup_max_batch:
+            mlxcel::server::speculative_dispatch::DEFAULT_PROMPT_LOOKUP_MAX_BATCH,
         max_batch_size: Some(4),
         no_batch: false,
         max_queue_depth: 32,

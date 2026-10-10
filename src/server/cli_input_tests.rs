@@ -74,6 +74,8 @@ fn sample_input() -> ServerStartupInput {
         // (None = auto-detect at dispatch time when a drafter is set).
         draft_kind: None,
         draft_block_size: None,
+        prompt_lookup_max_batch:
+            crate::server::speculative_dispatch::DEFAULT_PROMPT_LOOKUP_MAX_BATCH,
         max_batch_size: Some(4),
         max_queue_depth: 32,
         audio_queue_depth: 8,

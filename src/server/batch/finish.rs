@@ -63,6 +63,31 @@ impl ContextBound {
                 .max_kv_size
                 .is_some_and(|max| prompt_len + generated_len + 1 >= max)
     }
+
+    /// The most proposals a verify round may forward for a still-decoding
+    /// sequence before [`Self::stop_due`] would end it, or `None` when no
+    /// stop bound applies (#2255).
+    ///
+    /// The round's state holds `prompt + generated - 1` positions and the
+    /// forward appends `k + 1`, emitting tokens `generated + 1` through
+    /// `generated + k + 1`. The bound stops the row at the first emitted
+    /// token with `prompt + generated' + 1 >= bound`, so with
+    /// `k <= bound - (prompt + generated + 2)` the last position is at most
+    /// that finishing token: no position is forwarded only to be discarded,
+    /// and the forward never holds more positions than the plain step that
+    /// emits the finishing token (`bound - 2`).
+    pub(crate) fn verify_room(
+        self,
+        prompt_len: usize,
+        generated_len: usize,
+        is_vlm: bool,
+    ) -> Option<usize> {
+        if self.context_shift || is_vlm {
+            return None;
+        }
+        let max = self.max_kv_size?;
+        Some(max.saturating_sub(prompt_len + generated_len + 2))
+    }
 }
 
 /// Where a finish step reads its EOS set, budget and history from.

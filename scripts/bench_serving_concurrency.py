@@ -23,6 +23,11 @@ Examples:
     # Longer prompts and more decode tokens:
     python3 scripts/bench_serving_concurrency.py --prompt-tokens 2048 --max-tokens 256
 
+    # Prompt lookup (issue #2255): a reply that copies the prompt, against a
+    # server started with --draft-kind prompt-lookup and one without it.
+    python3 scripts/bench_serving_concurrency.py --concurrency 4,8 \
+        --max-tokens 256 --prompt-style copy
+
     # Shared-prefix (cascade) scenario: every client sends the same 2K system
     # prompt and a distinct short question, with the decode path printed per
     # level so the arm can be attributed (issue #903).
@@ -107,6 +112,15 @@ def build_prompt(prompt_tokens: int) -> str:
     target_words = max(words_per_copy, int(prompt_tokens / _TOKENS_PER_WORD))
     copies = max(1, target_words // words_per_copy + 1)
     return (_BASE_SENTENCE * copies).strip()
+
+
+def style_prompt(paragraph: str, style: str) -> str:
+    """Apply ``--prompt-style``: ``plain`` sends the paragraph as is; ``copy``
+    asks the model to repeat it, so the reply copies the prompt (the shape
+    prompt-lookup speculative decoding accelerates, issue #2255)."""
+    if style == "copy":
+        return f"Repeat the following paragraph exactly: {paragraph}"
+    return paragraph
 
 
 def resolve_model(host: str, port: int, override: str | None) -> str:
@@ -402,7 +416,7 @@ def parse_concurrency(spec: str) -> list[int]:
 
 async def _amain(args: argparse.Namespace) -> int:
     model = resolve_model(args.host, args.port, args.model)
-    prompt = build_prompt(args.prompt_tokens)
+    prompt = style_prompt(build_prompt(args.prompt_tokens), args.prompt_style)
     system_prompt = (
         build_prompt(args.shared_prefix_tokens) if args.shared_prefix_tokens else ""
     )
@@ -410,7 +424,10 @@ async def _amain(args: argparse.Namespace) -> int:
 
     print(f"Server:       http://{args.host}:{args.port}")
     print(f"Model:        {model}")
-    print(f"Prompt:       ~{args.prompt_tokens} tokens ({len(prompt)} chars)")
+    print(
+        f"Prompt:       ~{args.prompt_tokens} tokens ({len(prompt)} chars), "
+        f"style {args.prompt_style}"
+    )
     if system_prompt:
         print(
             f"Shared prefix: ~{args.shared_prefix_tokens} tokens "
@@ -467,6 +484,17 @@ def main() -> int:
         type=int,
         default=512,
         help="Approximate synthetic prompt length in tokens (default: 512)",
+    )
+    parser.add_argument(
+        "--prompt-style",
+        choices=("plain", "copy"),
+        default="plain",
+        help=(
+            "plain: send the synthetic paragraph as is (default). copy: wrap it "
+            "as 'Repeat the following paragraph exactly: ...', so the reply "
+            "copies the prompt; compare a --draft-kind prompt-lookup server "
+            "against one without it."
+        ),
     )
     parser.add_argument(
         "--max-tokens",

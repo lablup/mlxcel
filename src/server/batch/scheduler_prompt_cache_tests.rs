@@ -584,6 +584,7 @@ fn sequence_info_fields_transport_cache_hit_metadata() {
         created_at: Instant::now(),
         prefill_start: None,
         first_token_time: None,
+        prompt_lookup: None,
         token_history: Vec::new(),
         sampler: Default::default(),
         merged_eos: Vec::new(),

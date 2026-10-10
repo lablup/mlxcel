@@ -51,6 +51,7 @@ mod prefill;
 pub mod rows;
 mod speculative;
 mod speculative_plain;
+mod verify_round;
 
 pub use direct::{BareHooks, DirectEngine, DirectEngineError, DirectRequest, DirectRun};
 pub use lookahead::{FORCE_SYNC_ENV, force_sync_requested, lookahead_feedback_input};
@@ -62,6 +63,7 @@ pub use rows::{
     tokens_to_host,
 };
 pub use speculative::{SpeculativeRounds, SpeculativeRun, SpeculativeRunError};
+pub use verify_round::{VerifyRound, token_only_rounds_unsupported};
 
 /// A per-sequence engine failure.
 ///
@@ -495,3 +497,5 @@ mod direct_decode_tests;
 mod speculative_plain_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod verify_round_tests;

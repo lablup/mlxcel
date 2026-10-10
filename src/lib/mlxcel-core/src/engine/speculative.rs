@@ -28,13 +28,12 @@
 use std::time::Instant;
 
 use super::direct::{
-    DirectEngine, DirectEngineError, DirectRequest, DirectRun, delivers_to_callback, logits_vocab,
+    DirectEngine, DirectEngineError, DirectRequest, DirectRun, delivers_to_callback,
 };
 use super::direct_decode::{DecodeState, Teardown, single};
-use super::rows::{finish_row, sample_and_finish_row};
+use super::verify_round::token_only_rounds_unsupported;
 use super::{Engine, EngineError, StepBatch};
-use crate::cache::{DecodeLookaheadAppendScope, SequenceId, can_trim_prompt_cache};
-use crate::decode_finish::FinishCause;
+use crate::cache::{DecodeLookaheadAppendScope, SequenceId};
 use crate::drafter::{Drafter, DrafterError};
 use crate::ffi;
 use crate::generate::{GenerationStats, LanguageModel, SamplingConfig};
@@ -96,6 +95,10 @@ pub enum SpeculativeRunError {
     NotTrimmable,
     #[error("the sampler carries feedback state across tokens, which a verify block cannot replay")]
     SamplerFeedbackState,
+    /// The model keeps sequence state outside the external KV caches
+    /// ([`crate::speculative::prompt_lookup::prompt_lookup_unsupported_reason`]).
+    #[error("{0}")]
+    ModelUnsupported(&'static str),
 }
 
 impl From<DrafterError> for SpeculativeRunError {
@@ -149,12 +152,9 @@ impl<M: LanguageModel> DirectEngine<M> {
         block_size: usize,
         on_token: F,
     ) -> Result<SpeculativeRun, SpeculativeRunError> {
-        if !drafter.drafts_from_tokens_only() {
-            return Err(SpeculativeRunError::NeedsHiddenStates);
-        }
         let sampling = self.compose_sampling(request.sampling);
-        if sampling.needs_sampler_feedback_state() {
-            return Err(SpeculativeRunError::SamplerFeedbackState);
+        if let Some(err) = token_only_rounds_unsupported(&sampling, drafter) {
+            return Err(err);
         }
         if request.max_tokens == 0 {
             return Ok(SpeculativeRun {
@@ -189,19 +189,10 @@ impl<M: LanguageModel> DirectEngine<M> {
         let result = (|| -> Result<(), SpeculativeRunError> {
             let logits = self.prefill_text(id, prompt_tokens)?;
             crate::try_eval(&logits).map_err(|e| DirectEngineError::PrefillEval(e.to_string()))?;
-            for width in 2..=max_draft + 1 {
-                let tokens = vec![last; width];
-                let input = ffi::from_slice_i32(&tokens, &[1, width as i32]);
-                let logits = self
-                    .engine_mut()
-                    .verify(id, &input)
-                    .map_err(DirectEngineError::Step)?;
-                let argmax = ffi::argmax_last_axis(&logits);
-                crate::try_eval(&argmax).map_err(|e| DirectEngineError::Row(e.to_string()))?;
-                self.engine_mut()
-                    .unwind_appends(id, width as i32)
-                    .map_err(DirectEngineError::Step)?;
-            }
+            // The warm-up the server scheduler runs too (#2255).
+            self.engine_mut()
+                .warm_up_verify_widths(id, last, max_draft)
+                .map_err(DirectEngineError::Step)?;
             Ok(())
         })();
         self.close_sequence(id);
@@ -221,26 +212,17 @@ impl<M: LanguageModel> DirectEngine<M> {
     ) -> Result<SpeculativeRun, SpeculativeRunError> {
         let prompt_tokens = request.prompt_tokens;
         let max_tokens = request.max_tokens;
-        // A rejected block is dropped through the pool caches, so they must
-        // be trimmable; a family with no external caches has nothing to trim.
-        let trimmable = self
+        // The one eligibility rule the scheduler's prompt-lookup rows apply
+        // too (#2255).
+        if let Some(err) = self
             .engine_mut()
-            .pool_mut()
-            .get_caches_mut(id)
-            .is_some_and(|caches| !caches.is_empty() && can_trim_prompt_cache(caches));
-        if !trimmable {
-            return Err(SpeculativeRunError::NotTrimmable);
+            .verify_rounds_unsupported(id, sampling, drafter)
+        {
+            return Err(err);
         }
         let eos = merged_eos_token_ids(self.model().eos_token_ids(), &sampling.stop_token_ids);
         let mut state = DecodeState::new(id, prompt_tokens, sampling, eos, max_tokens);
         let mut rounds = SpeculativeRounds::default();
-        // Pure argmax with nothing that depends on the emitted prefix: every
-        // verify position is decided from one batched argmax and a single
-        // host read. Anything else goes position by position through the
-        // per-row chain.
-        let batched_argmax = sampling.is_greedy_path()
-            && !sampling.needs_token_history()
-            && sampling.token_bias.is_empty();
         // Rounds without a proposal pipeline the way `generate` does, once
         // the drafter says a run of them is due: the next one-token forward
         // is submitted from the still-unread token, so the device does not
@@ -358,101 +340,34 @@ impl<M: LanguageModel> DirectEngine<M> {
                 continue;
             }
 
-            // Verify `[current, d_0, .., d_{k-1}]` in one forward. Position
-            // `i` is the target's choice for the slot `draft[i]` claims;
-            // position `k` is the bonus token after a fully accepted block.
+            // Verify `[current, d_0, .., d_{k-1}]` in one forward: the round
+            // the scheduler's prompt-lookup rows run too (#2255).
             rounds.drafted_rounds += 1;
             rounds.proposed_draft_tokens += draft.len();
-            let mut verify_tokens = Vec::with_capacity(draft.len() + 1);
-            verify_tokens.push(current);
-            verify_tokens.extend_from_slice(&draft);
-            let verify_len = verify_tokens.len();
-            let input = ffi::from_slice_i32(&verify_tokens, &[1, verify_len as i32]);
-            let logits = self
-                .engine_mut()
-                .verify(id, &input)
-                .map_err(DirectEngineError::Step)?;
-            let vocab = logits_vocab(&ffi::array_shape(&logits), verify_len)
-                .map_err(DirectEngineError::Row)?;
-            let greedy_targets = if batched_argmax {
-                let argmax = ffi::argmax_last_axis(&logits);
-                crate::try_eval(&argmax).map_err(|e| DirectEngineError::Row(e.to_string()))?;
-                let targets =
-                    crate::drafter::dflash::materialize_argmax_i32_vec(&argmax, verify_len);
-                if targets.len() != verify_len {
-                    return Err(DirectEngineError::Row(format!(
-                        "verify argmax returned {} tokens for {verify_len} positions",
-                        targets.len()
-                    ))
-                    .into());
-                }
-                Some(targets)
-            } else {
-                None
-            };
-
             let before = state.generated.len();
-            let mut accepted = 0usize;
-            let mut stop = false;
-            let mut ended_on_eos = false;
-            for pos in 0..verify_len {
-                let emitted_before = state.generated.len();
-                let outcome = match &greedy_targets {
-                    Some(targets) => {
-                        finish_row(&mut state.row(), targets[pos], targets[pos], None, false)
-                    }
-                    None => {
-                        let pos_logits =
-                            ffi::slice(&logits, &[0, pos as i32, 0], &[1, pos as i32 + 1, vocab]);
-                        sample_and_finish_row(&pos_logits, &mut state.row())
-                    }
-                };
-                if let Some(error) = outcome.error {
-                    return Err(DirectEngineError::Row(error.message().to_string()).into());
-                }
-                if delivers_to_callback(&state.generated, emitted_before, &outcome)
-                    && !on_token(outcome.token)
-                {
-                    stop = true;
-                    break;
-                }
-                if outcome.finish.is_some() {
-                    stop = true;
-                    ended_on_eos = outcome.finish == Some(FinishCause::Eos);
-                    break;
-                }
-                // The target's token is emitted either way; it only extends
-                // the round when it confirms the proposal in the same slot.
-                if pos < draft.len() && outcome.token == draft[pos] {
-                    accepted += 1;
-                } else {
-                    break;
-                }
-            }
-            rounds.accepted_draft_tokens += accepted;
-
-            // The forward appended `current, d_0..d_{k-1}`. The state must
-            // end holding every emitted token except the next round's
-            // current token, i.e. through `d_{a-1}`: keep `a + 1`, drop
-            // `k - a`.
-            let rejected = (draft.len() - accepted) as i32;
-            self.engine_mut()
-                .unwind_appends(id, rejected)
+            let round = self
+                .engine_mut()
+                .verify_round(&mut state.row(), current, &draft, &mut on_token)
                 .map_err(DirectEngineError::Step)?;
-            // A step does not advance the pool offset for the token that
-            // finishes the sequence on an EOS, so the EOS slot is not
-            // committed here either.
-            let committed = accepted as i32 + i32::from(!ended_on_eos);
-            self.engine_mut().commit_appends(id, committed);
+            if let Some(error) = round.error() {
+                return Err(DirectEngineError::Row(error.message().to_string()).into());
+            }
+            rounds.accepted_draft_tokens += round.accepted;
             let emitted = &state.generated[before..];
-            drafter.accept_verified_tokens(&logits, &draft, accepted, emitted, sampling)?;
+            drafter.accept_verified_tokens(
+                &round.logits,
+                &draft,
+                round.accepted,
+                emitted,
+                sampling,
+            )?;
             if crate::memory::should_clear_cache_at(
                 state.generated.len(),
                 crate::memory::cache_clear_interval(),
             ) {
                 crate::clear_memory_cache();
             }
-            done = stop;
+            done = round.ended();
         }
         let decode_time = decode_start.elapsed();
 

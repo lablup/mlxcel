@@ -1553,6 +1553,16 @@ pub(crate) struct ServeArgs {
     )]
     draft_max: usize,
 
+    /// Largest active decode batch at which a prompt-lookup sequence runs
+    /// its own verify round (`--draft-kind prompt-lookup`). Each proposing
+    /// row costs one verify forward on top of the batched step, so on ticks
+    /// with more concurrent rows every row takes the plain batched step and
+    /// the drafter keeps observing the emitted tokens until the batch
+    /// shrinks. Must be at least 1. Defaults to 2, a provisional value until the
+    /// concurrency measurement sets it.
+    #[arg(long, value_name = "N", default_value_t = mlxcel::server::speculative_dispatch::DEFAULT_PROMPT_LOOKUP_MAX_BATCH)]
+    prompt_lookup_max_batch: usize,
+
     /// Maximum concurrent decode sequences; explicit value keeps split --ctx-size windows
     #[arg(long, value_name = "N")]
     max_batch_size: Option<usize>,

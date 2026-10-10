@@ -546,6 +546,12 @@ impl NgramIndex {
         self.indexed_len = context.len();
     }
 
+    /// Context length already indexed.
+    #[cfg(test)]
+    pub(crate) fn indexed_len(&self) -> usize {
+        self.indexed_len
+    }
+
     /// Same proposal as [`find_draft`] on the indexed `context`.
     pub(crate) fn find(&self, context: &[i32], config: &PromptLookupConfig) -> Vec<i32> {
         debug_assert_eq!(self.indexed_len, context.len(), "index is stale");

@@ -788,6 +788,10 @@ pub struct ServerConfig {
     /// "use the per-kind default" — `4` for MTP, `16` for DFlash. See
     /// [`crate::cli::speculative_args::default_block_size_for_kind`].
     pub draft_block_size: Option<u32>,
+    /// `--prompt-lookup-max-batch`: under `--draft-kind prompt-lookup`, a
+    /// sequence runs its own verify round only on ticks whose active decode
+    /// batch has at most this many rows (#2255).
+    pub prompt_lookup_max_batch: usize,
     /// Maximum number of sequences in the active decode batch.
     /// Defaults to `n_parallel` (4 as of #628); the worker clamps it to 1 for
     /// model families that cannot batch (`supports_batching() == false`).
@@ -1155,6 +1159,8 @@ impl Default for ServerConfig {
             // drafter is set.
             draft_kind: None,
             draft_block_size: None,
+            prompt_lookup_max_batch:
+                crate::server::speculative_dispatch::DEFAULT_PROMPT_LOOKUP_MAX_BATCH,
             // Serving-throughput default: batched decode up to 4 sequences
             // (#628). Clamped to 1 by the worker for non-batching families.
             max_batch_size: 4,
