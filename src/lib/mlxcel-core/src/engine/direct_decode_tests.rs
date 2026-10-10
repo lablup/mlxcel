@@ -28,10 +28,10 @@ use crate::layers::KVCache;
 use crate::utils::array_to_vec_f32;
 use crate::{ffi, from_slice_i32};
 
-const VOCAB: usize = 8;
-const EOS: i32 = 7;
+pub(super) const VOCAB: usize = 8;
+pub(super) const EOS: i32 = 7;
 
-fn host_tokens(input_ids: &MlxArray) -> Vec<i32> {
+pub(super) fn host_tokens(input_ids: &MlxArray) -> Vec<i32> {
     ffi::eval(input_ids);
     array_to_vec_f32(&ffi::astype(input_ids, crate::dtype::FLOAT32))
         .into_iter()
@@ -53,12 +53,12 @@ fn count_logits(input_ids: &MlxArray) -> UniquePtr<MlxArray> {
 
 /// A dense-cache counting model that records every forward's input.
 #[derive(Default)]
-struct CountModel {
+pub(super) struct CountModel {
     inputs: RefCell<Vec<Vec<i32>>>,
 }
 
 impl CountModel {
-    fn forwards(&self) -> usize {
+    pub(super) fn forwards(&self) -> usize {
         self.inputs.borrow().len()
     }
 }
@@ -99,15 +99,15 @@ impl LanguageModel for CountModel {
 
 /// A model-owned counting model: it keeps each sequence's length itself and
 /// can be told whether it rewinds speculative appends (#2159).
-struct OwnedModel {
+pub(super) struct OwnedModel {
     rewinds: bool,
     lengths: RefCell<HashMap<SequenceId, i32>>,
-    released: RefCell<Vec<i32>>,
-    forwards: Cell<usize>,
+    pub(super) released: RefCell<Vec<i32>>,
+    pub(super) forwards: Cell<usize>,
 }
 
 impl OwnedModel {
-    fn new(rewinds: bool) -> Self {
+    pub(super) fn new(rewinds: bool) -> Self {
         Self {
             rewinds,
             lengths: RefCell::new(HashMap::new()),
@@ -177,16 +177,16 @@ impl LanguageModel for OwnedModel {
 /// What one run leaves behind: the stream, the callback deliveries, and the
 /// sequence's pool offset and KV length right before it is closed.
 #[derive(Debug, PartialEq, Eq)]
-struct Trace {
-    tokens: Vec<i32>,
-    delivered: Vec<i32>,
-    offset: i32,
-    kv_len: Option<i32>,
+pub(super) struct Trace {
+    pub(super) tokens: Vec<i32>,
+    pub(super) delivered: Vec<i32>,
+    pub(super) offset: i32,
+    pub(super) kv_len: Option<i32>,
 }
 
 /// Run one completion through the client's own open / run / close
 /// sequence, stopping the callback after `deliveries` tokens when given.
-fn trace<M: LanguageModel>(
+pub(super) fn trace<M: LanguageModel>(
     client: &mut DirectEngine<M>,
     prompt: &[i32],
     max_tokens: usize,
@@ -327,21 +327,18 @@ fn a_pipelined_client_is_reusable() {
     assert_eq!(client.engine().pool().active_count(), 0);
 }
 
+/// A history penalty keeps a request off the fused pipeline; it decodes on
+/// the per-row pipeline instead (`direct_decode_rows_tests`).
 #[test]
-fn ineligible_sampling_falls_back_to_the_synchronous_loop() {
+fn history_penalties_are_not_fused_eligible() {
     let model = CountModel::default();
     let mut client = DirectEngine::new(&model, 0).with_force_sync(false);
-    // A history penalty needs each host token before the next draw.
     let penalty = SamplingConfig {
         repetition_penalty: 1.3,
         ..SamplingConfig::greedy()
     };
     assert!(!pipelines(&mut client, &penalty));
     assert!(pipelines(&mut client, &SamplingConfig::greedy()));
-    let before = model.forwards();
-    let trace = trace(&mut client, &[3], 16, &penalty, None);
-    assert_eq!(trace.tokens, vec![4, 5, 6]);
-    assert_eq!(model.forwards() - before, 4, "no speculative forward");
 
     let forced = DirectEngine::new(&model, 0).with_force_sync(true);
     assert!(forced.force_sync());

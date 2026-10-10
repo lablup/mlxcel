@@ -45,6 +45,7 @@ use crate::{MlxArray, UniquePtr};
 
 mod direct;
 mod direct_decode;
+mod direct_decode_rows;
 mod lookahead;
 mod prefill;
 pub mod rows;
@@ -282,16 +283,62 @@ impl<M: LanguageModel> Engine<M> {
         params: &FusedSampleParams,
         biases: &[&TokenBiasMap],
     ) -> Result<UniquePtr<MlxArray>, EngineError> {
-        let logits = {
-            let _speculative = DecodeLookaheadAppendScope::enter();
-            self.forward(batch)?
-        };
+        let logits = self.speculative_forward(batch)?;
         // The synchronous fused path's draw (token bias in the per-row
         // sampler's chain position, then the pre-fused row filters), so the
         // pipelined draw samples from the identical distribution.
         let tokens = batched_fused_sample_tokens(&logits, params, biases);
-        crate::try_async_eval(&tokens).map_err(|e| EngineError::Eval(e.to_string()))?;
+        schedule(&tokens)?;
         Ok(tokens)
+    }
+
+    /// The forward half of a pipelined step without a draw, for rows whose
+    /// sampler needs the previous token on the host before it can build the
+    /// next draw (history penalties, DRY, the feedback samplers; #2229): the
+    /// speculative forward of [`Engine::submit`], scheduled with
+    /// `async_eval`, returned as the lazy `[B, 1, vocab]` logits. The caller
+    /// draws from them with [`Engine::draw_row`] once the previous token is
+    /// committed, and tears the step down as after [`Engine::submit`],
+    /// including after an [`EngineError::Eval`], which leaves the appends in
+    /// place.
+    pub fn submit_forward(
+        &mut self,
+        batch: &StepBatch<'_>,
+    ) -> Result<UniquePtr<MlxArray>, EngineError> {
+        let logits = self.speculative_forward(batch)?;
+        schedule(&logits)?;
+        Ok(logits)
+    }
+
+    /// The per-row chain's draw for one row of [`Engine::submit_forward`]'s
+    /// `[1, 1, vocab]` logits, scheduled with `async_eval` and returned as
+    /// the lazy `[1]` token: [`RowSampler::draw_and_accept`] over the row's
+    /// config and history, token bias in its chain position, so the draw is
+    /// the synchronous [`Engine::step`]'s. The row's history must already end
+    /// with the previous token; the caller reads the token back and commits
+    /// it with [`Engine::finish_rows`].
+    ///
+    /// The draw is confirmed to the feedback state at once, so the row may
+    /// carry no logit mask, token override or logprobs payload (those need
+    /// the host token first): such a row is [`EngineError::Batch`].
+    ///
+    /// [`RowSampler::draw_and_accept`]: crate::sampling_row_step::RowSampler::draw_and_accept
+    pub fn draw_row<H: StepRowHooks>(
+        &mut self,
+        logits: &MlxArray,
+        row: &mut StepRow<'_, H>,
+    ) -> Result<UniquePtr<MlxArray>, EngineError> {
+        if row.needs_mask || row.needs_override || row.logprobs.enabled {
+            return Err(EngineError::Batch(format!(
+                "sequence {} needs its host token before the draw is confirmed",
+                row.seq_id
+            )));
+        }
+        let draw = row
+            .sampler
+            .draw_and_accept(logits, row.sampling, row.token_history);
+        schedule(&draw.token)?;
+        Ok(draw.token)
     }
 
     /// The collect half of a pipelined step: `tokens[i]` is the host token
@@ -343,6 +390,16 @@ impl<M: LanguageModel> Engine<M> {
                 set.current_offset += 1;
             }
         }
+    }
+
+    /// [`Engine::forward`] inside a [`DecodeLookaheadAppendScope`], the
+    /// speculative forward of both pipelined submits.
+    fn speculative_forward(
+        &mut self,
+        batch: &StepBatch<'_>,
+    ) -> Result<UniquePtr<MlxArray>, EngineError> {
+        let _speculative = DecodeLookaheadAppendScope::enter();
+        self.forward(batch)
     }
 
     /// The forward for `batch`: `[B, 1, vocab]` lazy logits, with each row's
@@ -424,6 +481,14 @@ impl<M: LanguageModel> Engine<M> {
     }
 }
 
+/// Schedule a pipelined step's lazy output through the fallible boundary
+/// (#822).
+fn schedule(array: &MlxArray) -> Result<(), EngineError> {
+    crate::try_async_eval(array).map_err(|e| EngineError::Eval(e.to_string()))
+}
+
+#[cfg(test)]
+mod direct_decode_rows_tests;
 #[cfg(test)]
 mod direct_decode_tests;
 #[cfg(test)]

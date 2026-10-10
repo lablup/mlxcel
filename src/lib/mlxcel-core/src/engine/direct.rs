@@ -28,8 +28,11 @@
 //! step ([`Engine::submit`], [`Engine::finish_rows`], [`Engine::unwind_appends`])
 //! with step n+1's forward overlapping step n's host read, whenever the
 //! scheduler's eligibility rules admit the sequence or the sequence is a
-//! model-owned family's that the close releases (`direct_decode`), and on the
-//! synchronous [`Engine::step`] otherwise or under `MLXCEL_FORCE_SYNC`.
+//! model-owned family's that the close releases (`direct_decode`). A sampler
+//! the fused draw cannot run (history penalties, DRY, mirostat, adaptive-p)
+//! keeps the forward ahead on the per-row pipeline ([`Engine::submit_forward`],
+//! [`Engine::draw_row`], `direct_decode_rows`). Everything else, and every
+//! request under `MLXCEL_FORCE_SYNC`, takes the synchronous [`Engine::step`].
 
 use std::borrow::Cow;
 use std::time::Instant;
