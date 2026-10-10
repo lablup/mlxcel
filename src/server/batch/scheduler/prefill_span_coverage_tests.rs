@@ -77,6 +77,12 @@ const DUTIES: &[(&str, &str, SpanDuty)] = &[
         "prime_lookahead_with_input",
         DecodeMustNotAnnounce,
     ),
+    // Decode: a prompt-lookup row's verify round (#2255).
+    (
+        "prompt_lookup.rs",
+        "run_prompt_lookup_round",
+        DecodeMustNotAnnounce,
+    ),
 ];
 
 /// The scheduler sources this guard reads.
@@ -86,6 +92,7 @@ fn sources() -> Vec<(&'static str, &'static str)> {
         ("prefill.rs", include_str!("prefill.rs")),
         ("prompt_cache.rs", include_str!("prompt_cache.rs")),
         ("decode_tick.rs", include_str!("decode_tick.rs")),
+        ("prompt_lookup.rs", include_str!("prompt_lookup.rs")),
     ]
 }
 
@@ -143,6 +150,7 @@ fn forwards_the_model(collapsed_body: &str) -> bool {
     [
         "self.engine.step(",
         "self.engine.submit(",
+        "self.engine.verify_round(",
         "self.engine.prefill(",
         "self.engine.prefill_cohort(",
         "self.engine.model().forward",

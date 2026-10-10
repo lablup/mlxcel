@@ -497,3 +497,5 @@ mod direct_decode_tests;
 mod speculative_plain_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod verify_round_tests;

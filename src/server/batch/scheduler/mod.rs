@@ -949,6 +949,7 @@ mod paged_layout;
 mod planned_prefill;
 mod prefill;
 mod prompt_cache;
+pub(crate) mod prompt_lookup;
 mod queued_adoption;
 mod run_loop;
 mod shared_budget;
@@ -1000,6 +1001,10 @@ mod scheduler_prompt_cache_plan_tests;
 #[cfg(test)]
 #[path = "../scheduler_whole_prompt_hit_tests.rs"]
 mod scheduler_whole_prompt_hit_tests;
+
+#[cfg(test)]
+#[path = "../scheduler_prompt_lookup_tests.rs"]
+mod scheduler_prompt_lookup_tests;
 
 #[cfg(test)]
 #[path = "../scheduler_completion_snapshot_tests.rs"]

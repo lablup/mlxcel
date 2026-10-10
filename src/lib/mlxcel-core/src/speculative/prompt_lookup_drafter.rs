@@ -103,6 +103,15 @@ impl PromptLookupDrafter {
         self.stats
     }
 
+    /// Extend the context with `tokens` emitted by plain steps, as
+    /// [`Drafter::accept_verified_tokens`] does for a round with no draft,
+    /// without the hidden-state argument a token-only drafter ignores. The
+    /// server scheduler reports plain-step tokens through this, lazily,
+    /// before its next [`Drafter::draft_block`] (#2255).
+    pub fn observe_emitted(&mut self, tokens: &[i32]) {
+        self.context.extend_from_slice(tokens);
+    }
+
     fn start(&mut self, prompt_tokens: &[i32], first_token: i32) {
         self.context.clear();
         self.context.extend_from_slice(prompt_tokens);

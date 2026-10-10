@@ -1000,6 +1000,9 @@ impl BatchScheduler {
             cache_set.prompt_len = seq.prompt_tokens.len();
             cache_set.current_offset = prompt_len + 1;
         }
+        // Under `--draft-kind prompt-lookup`, an eligible sequence gets its
+        // drafter here, bound to the prompt and the first token (#2255).
+        self.prime_prompt_lookup(&mut seq, &logits);
 
         // The slot this sequence was admitted into is reserved for it: admission
         // required `!active_batch.is_full()`, and while a chunked prefill is

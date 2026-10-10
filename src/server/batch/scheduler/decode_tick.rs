@@ -127,6 +127,9 @@ impl BatchScheduler {
             victim.stop_matcher.reset();
             victim.token_history.clear();
             victim.merged_eos.clear();
+            // The drafter's context is the discarded decode's; the re-prefill
+            // primes a fresh one (#2255).
+            victim.prompt_lookup = None;
 
             // Allocate a fresh cache slot
             match self.allocate_sequence_state() {
@@ -282,6 +285,12 @@ impl BatchScheduler {
     /// - No prebuilt lookahead -> run synchronously, then prime if eligible
     ///   (bootstrap).
     pub(super) fn run_decode_tick(&mut self, seq_ids: &[SequenceId]) {
+        // Prompt-lookup rows gated in this tick (#2255): proposals are asked
+        // for before any prime, see `prompt_lookup`'s switch rule.
+        if self.prompt_lookup_tick_applies(seq_ids) {
+            self.run_prompt_lookup_tick(seq_ids);
+            return;
+        }
         let params = self.lookahead_params(seq_ids);
 
         // The raised command-buffer input budget (`DecodeCommandBufferBudget`)
@@ -326,12 +335,16 @@ impl BatchScheduler {
     /// masks, thinking-budget overrides, and per-token logprobs) and further
     /// requires a trimmable KV tail (dense or pool-backed paged; model-owned
     /// SSM / hybrid / mixed-cache backends stay synchronous), no
-    /// `--max-kv-size`, no speculative dispatch, and `MLXCEL_FORCE_SYNC` unset.
+    /// `--max-kv-size`, no kind-specific speculative dispatch (MTP / DFlash
+    /// drive their own loop; prompt lookup keeps the pipeline for ticks where
+    /// no row proposes, #2255), and `MLXCEL_FORCE_SYNC` unset.
     pub(super) fn lookahead_params(&self, seq_ids: &[SequenceId]) -> Option<FusedSampleParams> {
         if self.lookahead_force_sync {
             return None;
         }
-        // Speculative decoding drives its own decode loop.
+        // MTP and DFlash drive their own decode loop. Prompt lookup is not
+        // kind-specific: its rows are asked for proposals before any prime
+        // (`prompt_lookup`), so proposal-free ticks stay pipelined.
         if self.should_dispatch_speculative() {
             return None;
         }
@@ -430,7 +443,7 @@ impl BatchScheduler {
     /// tokens (#2159). Unlike [`Self::abort_sequence_with_error`] this also
     /// overrides a finish already recorded this tick (`length`, `stop`), which
     /// would otherwise donate the desynchronized state to the prompt cache.
-    fn fail_desynchronized_sequence(&mut self, seq_id: SequenceId, err: &str) {
+    pub(super) fn fail_desynchronized_sequence(&mut self, seq_id: SequenceId, err: &str) {
         let Some(seq) = self.active_batch.get_mut(seq_id) else {
             return;
         };
@@ -480,6 +493,11 @@ impl BatchScheduler {
             return;
         };
         if !self.lookahead_safe() {
+            return;
+        }
+        // A prompt-lookup row that expects a proposal soon keeps the next
+        // tick synchronous (#2255, rule 4).
+        if self.prompt_lookup_blocks_prime(seq_ids) {
             return;
         }
         // The prime appends a KV position; skip it when that would need a
@@ -974,9 +992,13 @@ impl BatchScheduler {
                 let tail = seq.decode_state.flush(&self.tokenizer);
                 seq.close_text_stream(tail);
                 let cached = seq.already_cached_tokens;
-                // Classic decode: no drafter ran, so no acceptance block
-                // reaches the client (#1314).
-                let result = seq.take_generation_result(&self.tokenizer, cached, None);
+                // Classic decode reports no acceptance block (#1314); a
+                // prompt-lookup row reports its verify rounds (#2255).
+                let speculative = seq
+                    .prompt_lookup
+                    .as_ref()
+                    .and_then(|row| row.speculative_stats());
+                let result = seq.take_generation_result(&self.tokenizer, cached, speculative);
                 // Per-request TTFT / decode-rate telemetry (epic #623 #624).
                 // Recorded once here, where the finished sequence's timings are
                 // available, never on the per-token hot path.
