@@ -75,7 +75,10 @@
 //!   decode batch is at most `--prompt-lookup-max-batch`, no unified KV
 //!   budget is set (verify rounds commit several tokens per tick, as the
 //!   speculative bursts that also decline it), the row has room for a
-//!   proposal under `max_tokens`, and the paged context limit
+//!   proposal under `max_tokens` and under the context-bound stop (a
+//!   proposal is capped so the verify forward never appends past the
+//!   positions the plain step that ends the row would hold), and the paged
+//!   context limit
 //!   ([`PROMPT_LOOKUP_PAGED_CONTEXT_LIMIT`]) does not engage. A row that is
 //!   not asked calls no `draft_block`, so its governor records no miss, and
 //!   it keeps observing committed tokens, so it resumes when the batch
@@ -155,10 +158,25 @@ impl PromptLookupRow {
 
 /// Proposals a row may verify this tick: never past `max_tokens`, since
 /// every accepted proposal is emitted and the round emits one target token
-/// too.
-fn proposal_budget(seq: &SequenceInfo, config: &PromptLookupConfig) -> usize {
+/// too, and never past the context-bound stop
+/// ([`ContextBound::verify_room`]), so a prompt that ends just under
+/// `--max-kv-size` cannot make the verify forward append positions beyond
+/// what the plain step that ends the row would hold.
+pub(super) fn proposal_budget(
+    seq: &SequenceInfo,
+    config: &PromptLookupConfig,
+    context: ContextBound,
+) -> usize {
     let remaining = seq.max_tokens.saturating_sub(seq.generated_tokens.len());
-    config.max_draft.min(remaining.saturating_sub(1))
+    let budget = config.max_draft.min(remaining.saturating_sub(1));
+    match context.verify_room(
+        seq.prompt_tokens.len(),
+        seq.generated_tokens.len(),
+        seq.vlm_embeddings.is_some(),
+    ) {
+        Some(room) => budget.min(room),
+        None => budget,
+    }
 }
 
 impl BatchScheduler {
@@ -175,7 +193,7 @@ impl BatchScheduler {
     fn prompt_lookup_askable(&self, seq: &SequenceInfo, config: &PromptLookupConfig) -> bool {
         if seq.prompt_lookup.is_none()
             || seq.state.is_finished()
-            || proposal_budget(seq, config) == 0
+            || proposal_budget(seq, config, self.context_bound()) == 0
         {
             return false;
         }
@@ -232,6 +250,7 @@ impl BatchScheduler {
         let Some(config) = self.prompt_lookup_gate(seq_ids) else {
             return Vec::new();
         };
+        let context = self.context_bound();
         let mut asked = Vec::new();
         for &id in seq_ids {
             let askable = self
@@ -244,7 +263,7 @@ impl BatchScheduler {
             let Some(seq) = self.active_batch.get_mut(id) else {
                 continue;
             };
-            let budget = proposal_budget(seq, &config);
+            let budget = proposal_budget(seq, &config, context);
             let SequenceInfo {
                 generated_tokens,
                 prompt_lookup,
@@ -255,8 +274,15 @@ impl BatchScheduler {
             else {
                 continue;
             };
-            row.drafter
-                .observe_emitted(&generated_tokens[row.observed..]);
+            // I4 keeps `observed <= generated_tokens.len()`; a row that ever
+            // breaks it decodes plainly instead of panicking the scheduler
+            // thread on the slice.
+            let Some(unseen) = generated_tokens.get(row.observed..) else {
+                tracing::debug!(seq_id = %id, observed = row.observed, generated = generated_tokens.len(), "prompt lookup: drafter is ahead of the row, decoding plainly");
+                *prompt_lookup = None;
+                continue;
+            };
+            row.drafter.observe_emitted(unseen);
             row.observed = generated_tokens.len();
             match row.drafter.draft_block(current, None, budget, sampling) {
                 Ok(mut draft) => {
@@ -504,6 +530,16 @@ impl BatchScheduler {
         let Some(&first) = seq.generated_tokens.last() else {
             return;
         };
+        // A prompt that ends near the context-bound stop cannot take the
+        // widest block (`proposal_budget` would never forward it); leave the
+        // warmup to a later, shorter prefill.
+        if self
+            .context_bound()
+            .verify_room(seq.prompt_tokens.len(), seq.generated_tokens.len(), false)
+            .is_some_and(|room| room < max_draft)
+        {
+            return;
+        }
         let widest = max_draft + 1;
         let fits = self.available_paged_blocks().is_none_or(|free| {
             free >= self

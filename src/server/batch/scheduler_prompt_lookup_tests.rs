@@ -562,3 +562,77 @@ fn the_first_prefill_warms_the_verify_widths_once() {
     drain(&mut fresh, &mut done);
     assert_eq!(tokens_of(&done, &prompt), cycle_from(4, 20));
 }
+
+/// I5, context bound: under `--max-kv-size` with context shifting off, a
+/// proposal is capped so the verify forward appends no position past the
+/// token that ends the row (`ContextBound::verify_room`), the verify-width
+/// warmup is left to a prefill with room for the widest block, and the row
+/// emits exactly the plain decode's tokens up to the bound.
+#[test]
+fn proposals_stop_at_the_context_bound() {
+    let prompt = copy_prompt();
+    let bound = prompt.len() + 6;
+    let mut done = Done::new();
+    let mut plain = scheduler(None).with_max_kv_size(Some(bound));
+    let _plain_rx = enqueue(&mut plain, &prompt, 40);
+    drain(&mut plain, &mut done);
+    // The bound stops the row once `prompt + generated + 1 >= bound`.
+    let plain_tokens = tokens_of(&done, &prompt);
+    assert_eq!(plain_tokens, cycle_from(4, 5));
+
+    let mut done = Done::new();
+    let mut sched = scheduler(Some(4)).with_max_kv_size(Some(bound));
+    let rx = enqueue(&mut sched, &prompt, 40);
+    assert_eq!(tick(&mut sched, &mut done), Tick::Prefill);
+    assert!(
+        !sched.prompt_lookup_widths_warmed,
+        "a prompt this close to the bound does not take the widest block"
+    );
+    let id = only_row(&sched);
+    let seq = sched.active_batch.get(id).expect("decoding row");
+    // 20 prompt positions and one emitted token leave room for 26 - 23 = 3
+    // proposals, under both max_draft (7) and max_tokens (40).
+    assert_eq!(
+        prompt_lookup::proposal_budget(seq, &PromptLookupConfig::default(), sched.context_bound()),
+        3
+    );
+    drain(&mut sched, &mut done);
+    assert_eq!(tokens_of(&done, &prompt), plain_tokens);
+    // The governor may start narrower than the room (Gated probation); the
+    // room caps every round either way.
+    let (proposed, accepted) = acceptance(&rx).expect("prompt lookup verified");
+    assert!(
+        accepted > 0 && proposed <= 3,
+        "{accepted}/{proposed} within a room of 3"
+    );
+}
+
+/// I4 hardening: a drafter whose observed count runs ahead of its row's
+/// tokens is dropped and the row decodes plainly, instead of the slice
+/// panicking the scheduler thread.
+#[test]
+fn a_drafter_ahead_of_its_row_decodes_plainly() {
+    let prompt = copy_prompt();
+    let mut done = Done::new();
+    let mut sched = scheduler(Some(4));
+    let rx = enqueue(&mut sched, &prompt, 12);
+    assert_eq!(tick(&mut sched, &mut done), Tick::Prefill);
+    let id = only_row(&sched);
+    sched
+        .active_batch
+        .get_mut(id)
+        .and_then(|seq| seq.prompt_lookup.as_mut())
+        .expect("eligible row is primed")
+        .observed = usize::MAX;
+    assert_eq!(tick(&mut sched, &mut done), Tick::Decode);
+    assert!(
+        sched
+            .active_batch
+            .get(id)
+            .is_some_and(|seq| seq.prompt_lookup.is_none()),
+        "the inconsistent drafter was dropped"
+    );
+    drain(&mut sched, &mut done);
+    assert_eq!(tokens_of(&done, &prompt), cycle_from(4, 12));
+    assert!(acceptance(&rx).is_none(), "no verify round ran");
+}
