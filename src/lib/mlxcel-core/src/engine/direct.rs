@@ -31,7 +31,8 @@
 //! model-owned family's that the close releases (`direct_decode`). A sampler
 //! the fused draw cannot run (history penalties, DRY, mirostat, adaptive-p)
 //! keeps the forward ahead on the per-row pipeline ([`Engine::submit_forward`],
-//! [`Engine::draw_row`], `direct_decode_rows`). Everything else, and every
+//! [`Engine::draw_row`], `direct_decode_rows`); mirostat and adaptive-p read
+//! their draw on the host, so only their finish step overlaps the next forward. Everything else, and every
 //! request under `MLXCEL_FORCE_SYNC`, takes the synchronous [`Engine::step`].
 
 use std::borrow::Cow;

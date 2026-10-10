@@ -38,7 +38,9 @@
 //! turns it off. A sequence the second rule admits but whose sampler fails
 //! the first (history penalties, DRY, the feedback samplers) decodes on the
 //! per-row pipeline, which keeps the forward ahead and builds each draw on
-//! the host after the previous token is committed. Unlike the scheduler, the client keeps loop detection on the
+//! the host after the previous token is committed (mirostat and adaptive-p read
+//! the draw on the host, so for them only the finish step overlaps the next
+//! forward). Unlike the scheduler, the client keeps loop detection on the
 //! pipeline: the finish step runs on every committed token here, so the
 //! post-commit scan the scheduler's steady path skips is not skipped.
 //!

@@ -29,6 +29,12 @@
 //! synchronous step's, and forwards consume no randomness, so greedy and
 //! seeded streams equal [`super::DirectEngine::decode_sync`]'s token for token.
 //!
+//! The overlap differs by sampler. Penalties, DRY and the extended chain
+//! without adaptive-p keep the draw lazy on the device, so the draw and the
+//! finish step both overlap the next forward. Mirostat and adaptive-p read the
+//! uniform draw on the host inside the sampler, so for them only the finish
+//! step overlaps the next forward.
+//!
 //! The teardown rules are the fused pipeline's (`direct_decode`): one
 //! uncommitted append past a finishing token or a callback stop, none after
 //! the token that spends the budget, and a synchronous fallback from the last
