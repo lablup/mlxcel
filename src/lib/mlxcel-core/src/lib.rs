@@ -4092,6 +4092,13 @@ mod ffi_tests;
 #[path = "one_bit_tests.rs"]
 mod one_bit_tests;
 
+// CPU quantized matmul accumulates in f32 for bf16 and f16 activations (issue
+// #2248): affine transposed and plain, 3/4/6/8-bit, and MXFP4, each against a
+// host f64 reference on the CPU stream. Runs on every backend.
+#[cfg(test)]
+#[path = "cpu_qmm_accum_tests.rs"]
+mod cpu_qmm_accum_tests;
+
 // CUDA architecture-list parsing and the coverage/mismatch predicate. Pure
 // functions over strings and tuples, so these run on every host including
 // ones with no GPU at all.

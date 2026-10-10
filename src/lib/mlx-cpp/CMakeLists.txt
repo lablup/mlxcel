@@ -53,6 +53,31 @@ function(mlx_apply_source_overlays mlx_source_dir)
   endforeach()
   message(STATUS "Applied Metal kernel patches")
 
+  # CPU backend patches, applied on every build (Metal, CUDA, ROCm, CPU-only),
+  # because every build compiles MLX's CPU backend and every one of them can
+  # run a quantized matmul on the CPU stream (MLXCEL_DEVICE=cpu, or the CPU
+  # stream a GPU build still has). quantized.cpp carries one delta, issue
+  # #2248: the scalar `_qmm`, `_qmm_t`, `fp_qmm` and `fp_qmm_t` loops, which
+  # every build without Accelerate's SIMD header runs (all of Linux, x86
+  # macOS), accumulate in float instead of the activation type, and read the
+  # activation row and the output accumulator from local buffers. Upstream
+  # accumulates bf16 in bf16 as of pin 81ba1c6a. Same refresh rule as the
+  # Metal files: take the new upstream file and re-apply the four bodies
+  # marked `mlxcel:`. The NripeshN/mlx fork does not change this file, so the
+  # ROCm overlay below never replaces it.
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/patches/mlx/backend/cpu")
+    file(GLOB_RECURSE _cpu_patch_files
+         RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}/patches"
+         "${CMAKE_CURRENT_SOURCE_DIR}/patches/mlx/backend/cpu/*")
+    foreach(_patch_file ${_cpu_patch_files})
+      configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/patches/${_patch_file}"
+        "${mlx_source_dir}/${_patch_file}"
+        COPYONLY)
+    endforeach()
+    message(STATUS "Applied CPU backend patches (${_cpu_patch_files})")
+  endif()
+
   # CUDA patches: custom grouped GEMM, quantized kernels, reduce ops, binary ops.
   # These are in patches/mlx/backend/cuda/ and only compiled for CUDA targets,
   # so they are safe to apply unconditionally (harmless on Metal-only builds).
