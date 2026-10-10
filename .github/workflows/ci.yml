@@ -175,9 +175,11 @@ jobs:
               # Note what is NOT excluded: `patches/` as a whole. Despite the
               # name it is not the Metal overlay. `patches/mlx/backend/cuda/`
               # holds 24 CUDA sources, applied and compiled for CUDA targets by
-              # `src/lib/mlx-cpp/CMakeLists.txt:59-69`, against 4 Metal files in
-              # `patches/mlx/backend/metal/`. Excluding `patches/**` would drop
-              # real CUDA coverage, so only the Metal subtree is named.
+              # `src/lib/mlx-cpp/CMakeLists.txt`, against 4 Metal files in
+              # `patches/mlx/backend/metal/`, plus the CPU backend overlay in
+              # `patches/mlx/backend/cpu/` that every build compiles (#2248).
+              # Excluding `patches/**` would drop real CUDA coverage, so only
+              # the Metal subtree is named.
               - '!src/lib/mlx-cpp/patches-rocm/**'
               - '!src/lib/mlx-cpp/patches/mlx/backend/metal/**'
               - 'src/lib/mlxcel-core/build.rs'
@@ -193,7 +195,8 @@ jobs:
               # The mirror of the exclusion above: neither the Metal files nor
               # the CUDA overlays reach a HIP compile. `patches/` is split by
               # subtree here for the same reason it is there, that the directory
-              # holds both backends' files.
+              # holds several backends' files. `patches/mlx/backend/cpu/` is not
+              # excluded: the ROCm build compiles it too (#2248).
               - '!src/lib/mlx-cpp/patches/mlx/backend/metal/**'
               - '!src/lib/mlx-cpp/patches/mlx/backend/cuda/**'
               - '!src/lib/mlx-cpp/patches-cuda/**'
@@ -209,6 +212,9 @@ jobs:
             # `src/lib/mlx-cpp/turbo/` (#2108). No overlay excludes: that job
             # costs seconds warm, unlike the CUDA jobs those excludes protect.
             cpu_link:
+              # The CPU backend overlay compiles into every build, this one
+              # included (#2248).
+              - 'src/lib/mlx-cpp/patches/mlx/backend/cpu/**'
               - '**/*.rs'
               - '**/Cargo.toml'
               - 'Cargo.lock'
