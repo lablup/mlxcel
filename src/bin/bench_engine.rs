@@ -148,6 +148,17 @@ fn apply_cli_prefill_chunk(chunk: Option<usize>) -> Result<()> {
     Ok(())
 }
 
+/// The sampling config every measured run uses: neutral params plus the
+/// flags that shape the sampler (currently `--repetition-penalty`).
+fn bench_sampling_config(
+    args: &Args,
+    eos_token_ids: Vec<i32>,
+) -> mlxcel_core::generate::SamplingConfig {
+    let mut params = neutral_params(eos_token_ids);
+    params.repetition_penalty = args.repetition_penalty;
+    mlxcel::sampling::build_sampling_config(params)
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     let run_cli = matches!(args.path, PathArg::Cli | PathArg::Both);
@@ -169,9 +180,7 @@ fn main() -> Result<()> {
         let len = cap_prompt_len(target, max_context, args.max_tokens);
         prompts.push((target, synthesize_prompt_tokens(&tokenizer, len)?));
     }
-    let mut params = neutral_params(mlxcel::read_eos_token_ids(&args.model));
-    params.repetition_penalty = args.repetition_penalty;
-    let sampling = mlxcel::sampling::build_sampling_config(params);
+    let sampling = bench_sampling_config(&args, mlxcel::read_eos_token_ids(&args.model));
     let mut measurements: Vec<Measurement> = Vec::new();
 
     if run_cli {
@@ -263,11 +272,12 @@ mod tests {
     fn repetition_penalty_reaches_the_sampling_config() {
         let args = parse(&["--repetition-penalty", "1.1"]);
         assert_eq!(args.repetition_penalty, 1.1);
-        let mut params = neutral_params(vec![2]);
-        params.repetition_penalty = args.repetition_penalty;
-        let sampling = mlxcel::sampling::build_sampling_config(params);
+        let sampling = bench_sampling_config(&args, vec![2]);
         assert_eq!(sampling.repetition_penalty, 1.1);
         assert!(sampling.needs_token_history());
+        let neutral = bench_sampling_config(&parse(&[]), vec![2]);
+        assert_eq!(neutral.repetition_penalty, 1.0);
+        assert!(!neutral.needs_token_history());
     }
 
     #[test]
