@@ -41,7 +41,10 @@ void hipblaslt_gemm(
 // Optional fused epilogue (bias / GELU / Swish / combos). Bias length must
 // match the GEMM N dim (output features) for the usual Linear row-major layout.
 // epilogue: hipblasLtEpilogue_t cast to int (HIPBLASLT_EPILOGUE_*).
-// Kill-switch: MLX_ROCM_NO_HIPBLASLT_EPILOGUE=1 forces DEFAULT (no epi).
+// Currently no caller passes a bias or a non-default epilogue: the only user
+// is hipblaslt_gemm(), which passes DEFAULT and no bias. (The AddMM bias-vector
+// branch that used to is unreachable; addmm() broadcasts C to the output
+// shape before it builds the primitive.)
 void hipblaslt_gemm_epilogue(
     CommandEncoder& encoder,
     bool transpose_a,

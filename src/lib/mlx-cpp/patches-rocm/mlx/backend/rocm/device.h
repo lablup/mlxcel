@@ -599,8 +599,8 @@ void set_graph_active(bool v);
 bool graph_active();
 
 // Decode-mode: single-token forward = one graph, refreshed via ExecUpdate and
-// launched once/token. Set per-step by the generation loop; MLX_GRAPH_DECODE=0
-// disables. See device.cpp.
+// launched once/token. Set per-step by the generation loop.
+// See device.cpp.
 bool graph_decode_mode();
 void set_graph_decode_mode(bool v);
 void flush_graph_deferred_frees();
@@ -633,52 +633,7 @@ void CommandEncoder::launch_kernel(F&& func) {
   // flush+launch the accumulated graph, run this op immediately on the same
   // stream (ordered after the graph), and start the next graph fresh.
   if (use_hip_graphs()) {
-    static const bool capture_lib = [] {
-      const char* e = std::getenv("MLX_GRAPH_PREFILL_REPLAY");
-      return e && e[0] == '1';
-    }();
     auto hstream = static_cast<hipStream_t>(stream_);
-    if (capture_lib && !graph_decode_mode()) {
-      hipError_t be =
-          hipStreamBeginCapture(hstream, hipStreamCaptureModeThreadLocal);
-      if (be == hipSuccess) {
-        // A launch that throws (a rejected hipModuleLaunchKernel) must not
-        // leave the stream capturing, or every later operation on it fails
-        // too. End the capture and retry eagerly below, which rethrows a
-        // genuine launch failure outside the capture.
-        bool launched = true;
-        try {
-          func(hstream);
-        } catch (...) {
-          launched = false;
-        }
-        hipGraph_t child = nullptr;
-        hipError_t ee = hipStreamEndCapture(hstream, &child);
-        if (!launched) {
-          ee = hipErrorStreamCaptureInvalidated;
-        }
-        // Failures here fall back to the eager launch below; the graph
-        // handles are released without checking (an already-failed capture
-        // has nothing better to report) and the pending error is cleared.
-        if (ee == hipSuccess && child) {
-          size_t nn = 0;
-          (void)hipGraphGetNodes(child, nullptr, &nn);
-          if (nn > 0) {
-            add_child_graph_node(child, "lib");
-            (void)hipGraphDestroy(child);
-            return;
-          }
-          (void)hipGraphDestroy(child);
-        } else if (child) {
-          (void)hipGraphDestroy(child);
-        }
-        (void)hipGetLastError();
-      } else {
-        if (std::getenv("MLX_GRAPH_SPLIT_LOG"))
-          fprintf(stderr, "[cap-fail] begin err=%s\n", hipGetErrorString(be));
-        (void)hipGetLastError();
-      }
-    }
     commit();
     func(hstream);
     record_inline_launch();

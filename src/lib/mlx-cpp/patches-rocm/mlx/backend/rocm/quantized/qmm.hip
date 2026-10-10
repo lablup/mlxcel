@@ -435,22 +435,6 @@ inline bool parse_warp_kernel_env(const char* env_name, bool default_value) {
   return default_value;
 }
 
-inline size_t parse_non_negative_size_t_env(
-    const char* env_name,
-    size_t default_value) {
-  const char* raw = std::getenv(env_name);
-  if (raw == nullptr || *raw == '\0') {
-    return default_value;
-  }
-
-  char* end = nullptr;
-  unsigned long long value = std::strtoull(raw, &end, 10);
-  if (end == raw || *end != '\0') {
-    return default_value;
-  }
-  return static_cast<size_t>(value);
-}
-
 // Check if rocBLAS dequant fast path should be used
 // Default ON
 inline bool use_rocblas_dequant_path() {
@@ -992,8 +976,8 @@ inline int dequant_cache_capacity() {
 }
 
 inline size_t dequant_cache_max_bytes() {
-  static size_t max_bytes = parse_non_negative_size_t_env(
-      "MLX_ROCM_QMM_DEQUANT_CACHE_MAX_BYTES", 256ULL * 1024ULL * 1024ULL);
+  static const size_t max_bytes = static_cast<size_t>(rocm::env_u64_or_default(
+      "MLX_ROCM_QMM_DEQUANT_CACHE_MAX_BYTES", 256ULL * 1024ULL * 1024ULL));
   return max_bytes;
 }
 
