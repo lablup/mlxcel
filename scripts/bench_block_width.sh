@@ -8,6 +8,7 @@
 #   ./scripts/bench_block_width.sh qwen35dflash  # DFlash, affine target
 #   ./scripts/bench_block_width.sh laguna        # DFlash, NVFP4 target
 #   ./scripts/bench_block_width.sh gemma 4 5 6 # explicit widths
+#   ./scripts/bench_block_width.sh --help      # show this help (also -h)
 #
 # The two DFlash pairings were added by issue #1797. They are the arm that
 # decides the per-device block-width default in `src/cli/draft_block_policy.rs`,
@@ -55,6 +56,11 @@ set -uo pipefail
 . "$(dirname "$0")/lib/bench_quiet.sh"
 QUIET_IGNORE="$QUIET_IGNORE|bench_block_width"
 
+# Help must not require a built benchmark binary.
+case "${1:-}" in
+  -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
+esac
+
 BIN=${MLXCEL_BIN:-target/release/mlxcel}
 # Overridden by the DFlash pairings below; every pre-#1797 pairing is MTP.
 KIND=mtp
@@ -96,8 +102,9 @@ case "${1:-}" in
     TARGET=models/mlx/laguna-xs-2.1-nvfp4; DRAFTER=models/mlx/laguna-xs-2.1-dflash
     DEFAULT_WIDTHS=(2 3 4 5 6 7 8 16) ;;
   *)
-    sed -n '2,10p' "$0"; exit 1 ;;
+    sed -n '2,11p' "$0"; exit 1 ;;
 esac
+
 shift
 WIDTHS=("$@"); [ ${#WIDTHS[@]} -eq 0 ] && WIDTHS=("${DEFAULT_WIDTHS[@]}")
 

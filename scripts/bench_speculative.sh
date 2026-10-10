@@ -8,6 +8,8 @@
 #   ./scripts/bench_speculative.sh gemma31b        # the batch-capable pairing
 #   ./scripts/bench_speculative.sh --reps 4        # more samples per arm
 #   ./scripts/bench_speculative.sh --no-wait       # do not wait for a quiet host
+#   ./scripts/bench_speculative.sh --spread-limit 4 # max spread as % of median (default: 4)
+#   ./scripts/bench_speculative.sh --help          # show this help (also -h)
 #
 # Output: a markdown table row per pairing, ready to paste beside the existing
 # rows, plus the acceptance diagnostics behind each one.
@@ -54,7 +56,7 @@ while [ $# -gt 0 ]; do
     --reps) REPS="$2"; shift 2 ;;
     --no-wait) WAIT_FOR_QUIET=0; shift ;;
     --spread-limit) SPREAD_LIMIT="$2"; shift 2 ;;
-    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
     *) ONLY="$1"; shift ;;
   esac
 done
