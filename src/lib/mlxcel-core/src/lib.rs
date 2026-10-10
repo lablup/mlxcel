@@ -2332,6 +2332,13 @@ mod ffi {
         /// for the graph that produces the given pair of arrays.
         fn astype_breakdown_pair(a: &MlxArray, b: &MlxArray) -> String;
 
+        /// Sorted flags of every `GatherMM` / `GatherQMM` node in the
+        /// unevaluated graph that produces `out`, three bytes per node in
+        /// depth-first discovery order: `[quantized, left_sorted,
+        /// right_sorted]` as 0 or 1. Traversal only, no eval; the typed form
+        /// is [`gather_sorted_flags`].
+        fn gather_sorted_flags_raw(out: &MlxArray) -> Vec<u8>;
+
         /// Set default stream for subsequent operations
         fn set_default_stream(stream: &MlxStream);
 
@@ -3427,6 +3434,37 @@ mod ffi {
 
 // Re-export the FFI types and functions
 pub use ffi::*;
+
+/// The sorted flags of one `GatherMM` or `GatherQMM` node, as the primitive
+/// carries them (issue #2241).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GatherSortedFlags {
+    /// `GatherQMM` (true) or `GatherMM` (false).
+    pub quantized: bool,
+    /// Upstream sets this to `sorted_indices && !rhs_indices`.
+    pub left_sorted: bool,
+    /// Upstream sets this to `sorted_indices && !lhs_indices`; every
+    /// backend's sorted MoE prefill kernel keys on it.
+    pub right_sorted: bool,
+}
+
+/// Sorted flags of every `GatherMM` / `GatherQMM` node in the unevaluated
+/// graph that produces `out`, in depth-first discovery order. Traversal only,
+/// no eval; an evaluated array has no graph left to walk and gives an empty
+/// list.
+///
+/// Used by: the `SwitchGLU` sorted-path regression tests (issue #2241)
+#[must_use]
+pub fn gather_sorted_flags(out: &MlxArray) -> Vec<GatherSortedFlags> {
+    ffi::gather_sorted_flags_raw(out)
+        .chunks_exact(3)
+        .map(|node| GatherSortedFlags {
+            quantized: node[0] != 0,
+            left_sorted: node[1] != 0,
+            right_sorted: node[2] != 0,
+        })
+        .collect()
+}
 
 /// Deprecated name for [`default_device_is_gpu`] (issue #1421).
 ///

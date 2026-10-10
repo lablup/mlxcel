@@ -21,10 +21,17 @@
 //! indices against MLX's `indices_or_default` + `broadcast_arrays` values,
 //! and the whole block, bit for bit, against the previous per-call form in the
 //! unsorted (decode, small prefill) and sorted (large prefill) shapes.
+//!
+//! The sharing must stop short of the sorted path's `lhs_indices` (issue
+//! #2241): upstream builds `GatherQMM` / `GatherMM` with `right_sorted =
+//! sorted_indices && !lhs_indices`, and every backend's sorted MoE prefill
+//! kernel keys on that flag, so `sorted_prefill_keeps_right_sorted_on_every_projection`
+//! reads the flags off the unevaluated graph and fails whenever the sorted
+//! path hands MLX an explicit lhs.
 
 use mlxcel_core::streams::lock_default_device;
 use mlxcel_core::weights::WeightMap;
-use mlxcel_core::{MlxArray, UniquePtr, dtype};
+use mlxcel_core::{MlxArray, UniquePtr, dtype, gather_sorted_flags};
 
 use super::{
     SwitchGLU, broadcast_shape, gather_sort, insert_honest_affine_swiglu_experts,
@@ -39,6 +46,27 @@ fn honest_moe() -> SwitchGLU {
     let mut weights = WeightMap::new();
     insert_honest_affine_swiglu_experts(&mut weights, "moe.switch_mlp", EXPERTS, HIDDEN, DFF);
     SwitchGLU::from_weights(&weights, "moe.switch_mlp", 64, 4).expect("honest experts load")
+}
+
+/// The same block with unquantized (`SwitchLinear::Regular`) experts, so the
+/// `gather_mm` path is covered too.
+fn regular_moe() -> SwitchGLU {
+    let mut weights = WeightMap::new();
+    for (leaf, out, input) in [
+        ("gate_proj", DFF, HIDDEN),
+        ("up_proj", DFF, HIDDEN),
+        ("down_proj", HIDDEN, DFF),
+    ] {
+        let data: Vec<f32> = (0..EXPERTS * out * input)
+            .map(|i| ((i * 53 % 97) as f32 - 48.0) / 128.0)
+            .collect();
+        let w = mlxcel_core::from_slice_f32(&data, &[EXPERTS, out, input]);
+        weights.insert(
+            format!("moe.switch_mlp.{leaf}.weight"),
+            mlxcel_core::astype(&w, dtype::BFLOAT16),
+        );
+    }
+    SwitchGLU::from_weights(&weights, "moe.switch_mlp", 64, 4).expect("regular experts load")
 }
 
 fn activations(tokens: i32) -> UniquePtr<MlxArray> {
@@ -182,4 +210,64 @@ fn expert_scales_path_is_bit_identical_to_the_per_call_gather_form() {
     let out = mlxcel_core::multiply(&out, &scale_for(&out_scale, &out));
     let expected = mlxcel_core::squeeze_axis(&out, -2);
     assert_bit_identical(&actual, &expected, "forward_with_expert_scales");
+}
+
+/// The sorted prefill path must leave `right_sorted` set on gate, up and
+/// down (issue #2241). Upstream `gather_qmm` / `gather_mm` compute it as
+/// `sorted_indices && !lhs_indices`, and the ROCm expert-batched kernel and
+/// sorted-rhs schedule, Metal's `gather_qmm_rhs` and sorted `gather_mm`, and
+/// CUDA's grouped GEMM all key on it. The flags are read off the unevaluated
+/// graph, so this holds on every backend and needs no kernel to run; it
+/// failed on the `main` that shared the identity arange across the sorted
+/// path (1.7x to 4.8x slower MoE prefill on gfx1151).
+#[test]
+fn sorted_prefill_keeps_right_sorted_on_every_projection() {
+    let _device = lock_default_device();
+    for (label, moe, quantized) in [
+        ("quantized", honest_moe(), true),
+        ("regular", regular_moe(), false),
+    ] {
+        // 40 x 2 = 80 >= 64: the sorted path.
+        let (tokens, top_k) = (40, 2);
+        let x = activations(tokens);
+        let indices = mlxcel_core::from_slice_i32(&routing(tokens, top_k), &[tokens, top_k]);
+        let out = moe.forward(&x, &indices);
+        let flags = gather_sorted_flags(&out);
+        assert_eq!(
+            flags.len(),
+            3,
+            "{label}: one gather per projection, got {flags:?}"
+        );
+        for (i, f) in flags.iter().enumerate() {
+            assert_eq!(
+                f.quantized, quantized,
+                "{label}: projection {i} primitive kind"
+            );
+            assert!(
+                f.right_sorted,
+                "{label}: projection {i} lost right_sorted: the sorted path passed an explicit \
+                 lhs_indices, which takes every backend off its sorted MoE prefill kernel"
+            );
+            assert!(
+                !f.left_sorted,
+                "{label}: projection {i}: left_sorted is only set when rhs_indices is omitted"
+            );
+        }
+
+        // The unsorted path (decode) asserts nothing about order.
+        let (tokens, top_k) = (1, 2);
+        let x = activations(tokens);
+        let indices = mlxcel_core::from_slice_i32(&routing(tokens, top_k), &[tokens, top_k]);
+        let out = moe.forward(&x, &indices);
+        let flags = gather_sorted_flags(&out);
+        assert_eq!(
+            flags.len(),
+            3,
+            "{label}: one gather per projection, got {flags:?}"
+        );
+        assert!(
+            flags.iter().all(|f| !f.left_sorted && !f.right_sorted),
+            "{label}: the unsorted path must not claim sorted indices: {flags:?}"
+        );
+    }
 }
