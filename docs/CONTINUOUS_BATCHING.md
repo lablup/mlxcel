@@ -641,6 +641,43 @@ default so a long-lived server does not hit MLX's fatal `Cache thrashing`
 abort at its own 400 default (issue #818, `MLX_CUDA_GRAPH_CACHE_SIZE` in
 [environment-variables.md](environment-variables.md)).
 
+### Prompt lookup under continuous batching
+
+`--draft-kind prompt-lookup` (on `mlxcel serve` and `mlxcel-server`, with no
+drafter checkpoint; a `--draft-model` with it fails startup) offers n-gram
+prompt-lookup speculation per request inside the batch scheduler (#2255). It
+pays off on replies that copy the prompt (edits, reformatting, quoting). At
+prefill completion an eligible request gets a `PromptLookupDrafter`;
+`--draft-block-size` sets the largest proposal (default 7) and every other
+setting is the drafter's default, including the backend's draft policy (`gated`
+on CUDA, `graded` elsewhere). The startup log prints
+`speculative=prompt-lookup (max_draft=N, policy=P, max_batch=M)`.
+
+Each decode tick asks the eligible rows for a proposal. A row that proposes
+runs one verify round on its own (the round `mlxcel generate --prompt-lookup`
+runs), and every other row takes the regular batched step, so concurrent
+requests keep getting a token every tick; there is no run-to-completion burst.
+Ticks where nobody proposes stay on the lookahead pipeline. A proposal found
+while a step is in flight commits that step without submitting the next one,
+and the following tick verifies synchronously, so the switch costs no forward;
+the pipeline resumes once the drafters report a run of rounds without
+proposals.
+
+Each proposing row costs one extra forward per tick, so verify rounds run only
+while the active decode batch has at most `--prompt-lookup-max-batch` rows
+(default 2, provisional until the concurrency measurement of #2255 sets it).
+Above that every row decodes plainly, its drafter records no miss, and it
+resumes when the batch shrinks. Verify rounds also stay off under a unified KV
+budget (`--kv-unified`). Requests with images, audio or video, structured
+output, per-token logprobs, mirostat, adaptive-p or the extended sampler chain
+(dynamic temperature, `min_keep`), and models whose state a cache trim cannot
+roll back (recurrent, hybrid and model-owned families), decode plainly; a
+`debug` log names the reason. A finished request reports its verify rounds in
+the `timings` block with `draft_kind: "prompt-lookup"` (see
+[speculative-acceptance.md](speculative-acceptance.md)). On paged storage no
+context limit applies yet; the verify cost at long contexts is measured
+separately. `--spec-type none` turns prompt lookup off like any other drafter.
+
 ## Disaggregated serving
 
 Prefill is compute-bound and decode is memory-bound, so a deployment can run them

@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `mlxcel serve` and `mlxcel-server` accept `--draft-kind prompt-lookup` with no drafter checkpoint: each eligible request runs prompt-lookup verify rounds inside the batch scheduler, at most one per tick, while proposal-free ticks stay on the lookahead pipeline (#2255). `--draft-block-size` sets the largest proposal and the new `--prompt-lookup-max-batch` (default 2) is the largest active decode batch at which verify rounds run. Finished requests report the rounds in `timings` with `draft_kind: "prompt-lookup"`. `scripts/bench_serving_concurrency.py` gains `--prompt-style plain|copy`. `mlxcel generate --prompt-lookup` runs the same `Engine::verify_round`.
+
 ### Deprecated
 
 - The classic draft-model speculative path (`mlxcel generate --draft-model <dir>` without `--draft-kind mtp` or `--draft-kind dflash`, the `SpeculativeGenerator` loop) prints a deprecation notice and will be removed in the next minor release (v0.8.0). It is the last decode loop outside the batch-native engine (epic #2166, #2176); use `--draft-kind mtp` or `--draft-kind dflash` with a matching drafter, or `--prompt-lookup` for drafter-free speculation, which now runs on the engine.
