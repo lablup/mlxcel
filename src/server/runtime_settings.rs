@@ -108,6 +108,7 @@ pub const CLASSIFIED_SERVER_CONFIG_FIELDS: &[&str] = &[
     "num_draft_tokens",
     "draft_kind",
     "draft_block_size",
+    "prompt_lookup_max_batch",
     "max_batch_size",
     "max_queue_depth",
     "audio_queue_depth",
@@ -518,7 +519,11 @@ fn read_only_reason(field: &str) -> &'static str {
         // b10621 `--sleep-idle-seconds` (#1440): the serving worker reads the
         // window when it builds its scheduler, so changing it live would only
         // take effect on the next wake, which is worse than refusing it.
-        "draft_model_path" | "num_draft_tokens" | "draft_kind" | "draft_block_size"
+        "draft_model_path"
+        | "num_draft_tokens"
+        | "draft_kind"
+        | "draft_block_size"
+        | "prompt_lookup_max_batch"
         | "sleep_idle_seconds" => WORKER_REASON,
         _ => MODEL_REASON,
     }
@@ -610,6 +615,7 @@ fn read_only_value(config: &ServerConfig, field: &str) -> Value {
         "num_draft_tokens" => json!(config.num_draft_tokens),
         "draft_kind" => json!(config.draft_kind),
         "draft_block_size" => json!(config.draft_block_size),
+        "prompt_lookup_max_batch" => json!(config.prompt_lookup_max_batch),
         "max_batch_size" => json!(config.max_batch_size),
         "max_queue_depth" => json!(config.max_queue_depth),
         "audio_queue_depth" => json!(config.audio_queue_depth),
@@ -700,6 +706,7 @@ fn read_only_kind(field: &str) -> KnobKind {
         | "n_keep"
         | "default_mirostat"
         | "num_draft_tokens"
+        | "prompt_lookup_max_batch"
         | "max_batch_size"
         | "max_queue_depth"
         | "audio_queue_depth"
