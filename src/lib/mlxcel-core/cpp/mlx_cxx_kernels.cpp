@@ -852,13 +852,15 @@ const mlxcel::KernelPorts& ssm_ports() {
     return ports;
 }
 
-    // Compiled compute_dt: float32 promotion + softplus + clip → single fused kernel
-    // Matches Python's @mx.compile compute_dt (casts dt to float32 before softplus for precision)
+    // Compiled compute_dt: float32 promotion + softplus + clip → single fused kernel.
+    // Used by: GraniteMoeHybrid, NemotronH, FalconH1, Plamo2.
+    // Cast both operands: CUDA's bf16-preserving promotion would otherwise
+    // narrow the timestep even when dt is float32 (#2142).
     static std::function<std::vector<array>(const std::vector<array>&)>
     get_compiled_compute_dt() {
         auto fn = [](const std::vector<array>& inputs) -> std::vector<array> {
             auto dt = mlx::core::astype(inputs[0], mlx::core::float32);
-            const auto& dt_bias = inputs[1];
+            auto dt_bias = mlx::core::astype(inputs[1], mlx::core::float32);
             const auto& lo = inputs[2];
             const auto& hi = inputs[3];
             auto result = mlx::core::add(dt, dt_bias);
