@@ -308,3 +308,117 @@ fn is_kind_specific_is_true_only_for_mtp_and_dflash() {
     assert!(dflash.is_kind_specific());
     assert!(!SpeculativeDispatch::Disabled.is_kind_specific());
 }
+
+/// `--draft-kind prompt-lookup` with no drafter resolves before the
+/// draft-model early return (#2255): `PromptLookup` with the default config
+/// and max batch, not a kind-specific burst, so the scheduler's
+/// `should_dispatch_speculative()` (which is `is_kind_specific()`) stays
+/// false and the burst path is never entered.
+#[test]
+fn resolve_prompt_lookup_without_a_drafter() {
+    let mut cfg = base_config();
+    cfg.draft_kind = Some("prompt-lookup".to_string());
+    assert!(cfg.draft_model_path.is_none());
+
+    let dispatch = SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect("resolve");
+    let SpeculativeDispatch::PromptLookup { config, max_batch } = &dispatch else {
+        panic!("expected PromptLookup, got {dispatch:?}");
+    };
+    assert_eq!(*config, PromptLookupConfig::default());
+    assert_eq!(*max_batch, DEFAULT_PROMPT_LOOKUP_MAX_BATCH);
+    assert!(!dispatch.is_kind_specific());
+    assert_eq!(
+        dispatch.prompt_lookup_config(),
+        Some((
+            &PromptLookupConfig::default(),
+            DEFAULT_PROMPT_LOOKUP_MAX_BATCH
+        ))
+    );
+    assert_eq!(dispatch.drafter_kind(), Some(DrafterKind::PromptLookup));
+    assert!(dispatch.draft_model_path().is_none());
+    assert!(dispatch.block_size().is_none());
+    let summary = dispatch.summary();
+    assert!(
+        summary.starts_with(&format!(
+            "speculative=prompt-lookup (max_draft={}, policy=",
+            PromptLookupConfig::default().max_draft
+        )),
+        "{summary}"
+    );
+}
+
+/// A drafter checkpoint with `--draft-kind prompt-lookup` is refused.
+#[test]
+fn resolve_prompt_lookup_with_a_drafter_is_invalid() {
+    let (_dir, path) = write_drafter_config(Some("qwen3"));
+    let mut cfg = base_config();
+    cfg.draft_model_path = Some(path);
+    cfg.draft_kind = Some("prompt-lookup".to_string());
+
+    let err = SpeculativeDispatch::resolve(&cfg, unmeasured_target())
+        .expect_err("prompt-lookup with a draft model must be refused");
+    match err {
+        SpeculativeDispatchError::InvalidKind { message } => {
+            assert!(
+                message.contains("prompt-lookup takes no draft model"),
+                "{message}"
+            );
+        }
+        other => panic!("expected InvalidKind, got {other:?}"),
+    }
+}
+
+/// `--draft-block-size` sets `max_draft`; the other fields stay default;
+/// `--prompt-lookup-max-batch` lands in the dispatch.
+#[test]
+fn resolve_prompt_lookup_block_size_and_max_batch() {
+    let mut cfg = base_config();
+    cfg.draft_kind = Some("prompt-lookup".to_string());
+    cfg.draft_block_size = Some(4);
+    cfg.prompt_lookup_max_batch = 3;
+
+    let dispatch = SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect("resolve");
+    let (config, max_batch) = dispatch.prompt_lookup_config().expect("prompt lookup");
+    assert_eq!(config.max_draft, 4);
+    assert_eq!(
+        *config,
+        PromptLookupConfig {
+            max_draft: 4,
+            ..PromptLookupConfig::default()
+        }
+    );
+    assert_eq!(max_batch, 3);
+    assert!(dispatch.summary().contains("max_draft=4"));
+    assert!(dispatch.summary().contains("max_batch=3"));
+}
+
+/// A block size the drafter cannot use and a zero max batch are refused at
+/// startup rather than per request.
+#[test]
+fn resolve_prompt_lookup_rejects_out_of_range_settings() {
+    let mut cfg = base_config();
+    cfg.draft_kind = Some("prompt-lookup".to_string());
+    cfg.draft_block_size = Some(0);
+    assert!(matches!(
+        SpeculativeDispatch::resolve(&cfg, unmeasured_target()),
+        Err(SpeculativeDispatchError::InvalidKind { .. })
+    ));
+    cfg.draft_block_size = None;
+    cfg.prompt_lookup_max_batch = 0;
+    assert!(matches!(
+        SpeculativeDispatch::resolve(&cfg, unmeasured_target()),
+        Err(SpeculativeDispatchError::InvalidKind { .. })
+    ));
+}
+
+/// The unrecognised-kind message lists prompt-lookup among the accepted
+/// values.
+#[test]
+fn unknown_kind_message_lists_prompt_lookup() {
+    let (_dir, path) = write_drafter_config(Some("qwen3"));
+    let mut cfg = base_config();
+    cfg.draft_model_path = Some(path);
+    cfg.draft_kind = Some("ngram".to_string());
+    let err = SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect_err("unknown kind");
+    assert!(err.to_string().contains("prompt-lookup"), "{err}");
+}

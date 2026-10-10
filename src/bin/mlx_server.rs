@@ -694,6 +694,15 @@ struct ServerArgs {
     )]
     draft: usize,
 
+    /// Largest active decode batch at which a prompt-lookup sequence runs
+    /// its own verify round (`--draft-kind prompt-lookup`). Each proposing
+    /// row costs one verify forward on top of the batched step, so on ticks
+    /// with more concurrent rows every row takes the plain batched step and
+    /// the drafter keeps observing the emitted tokens until the batch
+    /// shrinks. Must be at least 1.
+    #[arg(long, value_name = "N", default_value_t = mlxcel::server::speculative_dispatch::DEFAULT_PROMPT_LOOKUP_MAX_BATCH)]
+    prompt_lookup_max_batch: usize,
+
     /// Maximum concurrent decode sequences; explicit value keeps split --ctx-size windows
     #[arg(long = "max-batch-size", value_name = "N")]
     max_batch_size: Option<usize>,
@@ -2321,6 +2330,16 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         );
         args.model_draft = None;
     }
+    // `none` disables prompt lookup as well (#2255): it needs no draft model,
+    // so the draft-model drop above does not reach it.
+    if spec_type.disable_speculation
+        && args.speculative.draft_kind.as_deref() == Some("prompt-lookup")
+    {
+        tracing::warn!(
+            "--spec-type none disables speculative decoding (b10621 semantics); ignoring --draft-kind prompt-lookup"
+        );
+        args.speculative.draft_kind = None;
+    }
     if let Some(kind) = spec_type.draft_kind {
         match args.speculative.draft_kind.as_deref() {
             None => args.speculative.draft_kind = Some(kind.to_string()),
@@ -2568,6 +2587,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         // typed `DrafterKind` happens later, at the dispatch site.
         draft_kind: args.speculative.draft_kind,
         draft_block_size: args.speculative.draft_block_size,
+        prompt_lookup_max_batch: args.prompt_lookup_max_batch,
         max_batch_size: args.max_batch_size,
         no_batch: args.no_batch,
         max_queue_depth: args.max_queue_depth,

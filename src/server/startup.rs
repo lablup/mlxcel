@@ -197,6 +197,8 @@ pub struct ServerStartupConfig {
     /// "use the per-kind default" — `4` for MTP, `16` for DFlash. See
     /// [`crate::cli::speculative_args::default_block_size_for_kind`].
     pub draft_block_size: Option<u32>,
+    /// `--prompt-lookup-max-batch` (#2255).
+    pub prompt_lookup_max_batch: usize,
 
     // Chat template
     pub chat_template: Option<String>,
@@ -683,6 +685,8 @@ impl Default for ServerStartupConfig {
             // has been resolved".
             draft_kind: None,
             draft_block_size: None,
+            prompt_lookup_max_batch:
+                crate::server::speculative_dispatch::DEFAULT_PROMPT_LOOKUP_MAX_BATCH,
             max_batch_size: None,
             max_queue_depth: 32,
             audio_queue_depth: crate::server::config::DEFAULT_AUDIO_QUEUE_DEPTH,
@@ -1740,6 +1744,7 @@ pub(super) fn build_server_config(
         // when both the drafter path and the resolved kind are known.
         draft_kind: startup.draft_kind.clone(),
         draft_block_size: startup.draft_block_size,
+        prompt_lookup_max_batch: startup.prompt_lookup_max_batch,
         max_batch_size,
         max_queue_depth: startup.max_queue_depth,
         audio_queue_depth: startup.audio_queue_depth,

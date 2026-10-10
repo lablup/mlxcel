@@ -129,6 +129,8 @@ pub struct ServerStartupInput {
     /// ([`crate::cli::speculative_args::default_block_size_for_kind`])
     /// once the kind has been resolved.
     pub draft_block_size: Option<u32>,
+    /// `--prompt-lookup-max-batch` (#2255).
+    pub prompt_lookup_max_batch: usize,
     pub max_batch_size: Option<usize>,
     pub max_queue_depth: usize,
     /// Bound on the audio worker command queue (admission control), forwarded to
@@ -1050,6 +1052,7 @@ impl ServerStartupInput {
             // owns both the drafter path AND the resolved kind.
             draft_kind: self.draft_kind,
             draft_block_size: self.draft_block_size,
+            prompt_lookup_max_batch: self.prompt_lookup_max_batch,
             max_batch_size,
             max_queue_depth: self.max_queue_depth,
             audio_queue_depth: self.audio_queue_depth,

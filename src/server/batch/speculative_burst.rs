@@ -922,8 +922,13 @@ pub(crate) fn try_run_burst_b1(
         // The gate (`should_burst_for_sequence`) already excluded
         // `Disabled` / `Classic`. Re-asserting here makes the intent
         // explicit for future maintainers.
+        // Prompt lookup never bursts (it is not kind-specific); its verify
+        // rounds run inside the regular decode tick (#2255).
         crate::server::SpeculativeDispatch::Disabled
-        | crate::server::SpeculativeDispatch::Classic { .. } => Err(BurstOutcome::DeclineToClassic),
+        | crate::server::SpeculativeDispatch::Classic { .. }
+        | crate::server::SpeculativeDispatch::PromptLookup { .. } => {
+            Err(BurstOutcome::DeclineToClassic)
+        }
     };
 
     match result {
@@ -2391,8 +2396,13 @@ pub(crate) fn try_run_burst_batched(
             let bs = *block_size;
             run_dflash_burst_batched(ctx.reborrow(), &mut seqs, bs)
         }
+        // Prompt lookup never bursts (it is not kind-specific); its verify
+        // rounds run inside the regular decode tick (#2255).
         crate::server::SpeculativeDispatch::Disabled
-        | crate::server::SpeculativeDispatch::Classic { .. } => Err(BurstOutcome::DeclineToClassic),
+        | crate::server::SpeculativeDispatch::Classic { .. }
+        | crate::server::SpeculativeDispatch::PromptLookup { .. } => {
+            Err(BurstOutcome::DeclineToClassic)
+        }
     };
 
     match result {
