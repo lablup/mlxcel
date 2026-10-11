@@ -105,6 +105,53 @@ fn failed_submit_commits_pending_eos_and_callback_stop() {
 }
 
 #[test]
+fn failed_submit_commits_seeded_pending_eos() {
+    for mut sampling in [configs()[0].clone(), configs()[3].clone()] {
+        sampling.token_bias.insert(15, f32::NEG_INFINITY);
+        let model = NoisyModel::default();
+        let mut sync = DirectEngine::new(&model, 0).with_force_sync(true);
+        let baseline = trace(&mut sync, &[1, 4], 16, &sampling, None);
+        // Choose an EOS reached in-loop without assuming backend-specific
+        // categorical samples. A greedy redraw could conceal a lost pending draw.
+        let eos_index = (2..baseline.tokens.len() - 1)
+            .find(|&i| !baseline.tokens[..i].contains(&baseline.tokens[i]))
+            .expect("the seeded stream must introduce an in-loop stop token");
+        sampling.stop_token_ids = vec![baseline.tokens[eos_index]];
+        let expected = trace(&mut sync, &[1, 4], 16, &sampling, None);
+        assert_eq!(expected.tokens, baseline.tokens[..eos_index]);
+        let mut piped = DirectEngine::new(&model, 0).with_force_sync(false);
+        // Submit zero primes the pipeline; submit eos_index fails while the
+        // already drawn EOS is pending, before its readback and commitment.
+        let fault = FaultGuard::arm(FaultPoint::Submit, eos_index);
+        let actual = trace(&mut piped, &[1, 4], 16, &sampling, None);
+        assert!(
+            fault.fired(),
+            "the pending EOS must reach the failed submit"
+        );
+        assert_eq!(actual, expected, "config {sampling:?}");
+    }
+}
+
+#[test]
+fn failed_submit_commits_seeded_pending_callback_stop() {
+    for mut sampling in [configs()[0].clone(), configs()[3].clone()] {
+        sampling.token_bias.insert(15, f32::NEG_INFINITY);
+        let model = NoisyModel::default();
+        let mut sync = DirectEngine::new(&model, 0).with_force_sync(true);
+        let expected = trace(&mut sync, &[1, 4], 16, &sampling, Some(2));
+        assert_eq!(expected.delivered.len(), 2);
+        let mut piped = DirectEngine::new(&model, 0).with_force_sync(false);
+        let fault = FaultGuard::arm(FaultPoint::Submit, 1);
+        let actual = trace(&mut piped, &[1, 4], 16, &sampling, Some(2));
+        assert!(
+            fault.fired(),
+            "the callback stop must reach the failed submit"
+        );
+        assert_eq!(actual, expected, "config {sampling:?}");
+    }
+}
+
+#[test]
 fn readback_helpers_return_errors() {
     let tokens = from_slice_i32(&[2], &[1]);
     {
