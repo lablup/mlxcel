@@ -1,0 +1,2 @@
+rc=0 model=qwen3-1.7b-4bit completed=2026-10-11T19:31:46+09:00
+rc=0 model=llama-3.2-1b-instruct-4bit completed=2026-10-11T19:46:40+09:00

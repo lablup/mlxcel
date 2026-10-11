@@ -1,0 +1,13 @@
+run=2 ticks=127 tick_avg_us=5318.203
+stage	calls	total_ns	tick_pct	avg_ns_per_call
+metrics	128	312052	0.0462	2437.906
+row_lookup	127	17824	0.0026	140.346
+row_build	127	18096	0.0027	142.488
+engine_step	2	13668204	2.0237	6834102.000
+finish_state	127	6208	0.0009	48.882
+apply_outcomes	2	128	0.0	64.000
+lookahead_submit	127	656315740	97.1727	5167840.472
+lookahead_collect	126	564546	0.0836	4480.524
+fused_finish_rows	125	976026	0.1445	7808.208
+finalize_completed	127	63696	0.0094	501.543
+event_send	127	471319	0.0698	3711.173

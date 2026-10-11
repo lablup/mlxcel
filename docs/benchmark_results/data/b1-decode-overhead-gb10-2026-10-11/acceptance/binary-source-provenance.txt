@@ -1,0 +1,13 @@
+binary_source_head=7c8830cd5aa01198e6ff93b661f90c048ccaeb1d
+binary_source_tree=aa976c7eaa17b1e39c6b984e7124e184e96d1800
+checkout_head=93e2f9abb3127eb64d414b9dddc4224cce3c703b
+checkout_tree=7a3f9d3ea71fb23e749704c1348fc627ff6b4b9c
+merge_base=73700aafa6a792f07830578c0c26137cea3a038b
+name_status_begin
+M	src/server/batch/scheduler_muse_glimmer_parallel_tests.rs
+M	src/server/batch/scheduler_prompt_lookup_tests.rs
+name_status_end
+production_diff_begin
+production_diff_end
+0ea8b10cdf0459e0f4cf4ed55e3dc1bf94ea6e2782e126f797297e9183987725  /tmp/mlxcel-auto-plan/2227-acceptance/binary-source-7c8830cd.patch
+67ef72805c698bc2c81eac2d9dfefe286232f7367e1993c715624dac8ab80836  /tmp/mlxcel-auto-plan/2227-acceptance/post-build-test-only.diff

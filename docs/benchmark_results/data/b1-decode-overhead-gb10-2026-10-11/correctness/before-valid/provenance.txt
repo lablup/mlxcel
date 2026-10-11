@@ -1,0 +1,36 @@
+2026-10-11T18:07:53+09:00
+spark-102
+Linux spark-102 7.0.0-1019-nvidia #19~24.04.2-Ubuntu SMP PREEMPT_DYNAMIC Sun Sep  6 18:35:11 UTC 2 aarch64 aarch64 aarch64 GNU/Linux
+source_head=73700aafa6a792f07830578c0c26137cea3a038b
+source_status_begin
+ M src/server/batch/scheduler/config.rs
+ M src/server/batch/scheduler/decode_tick.rs
+ M src/server/batch/scheduler/mod.rs
+ M src/server/batch/scheduler/run_loop.rs
+ M src/server/batch/sequence.rs
+?? src/server/batch/scheduler/b1_profile.rs
+source_status_end
+306b2664d8b69186cc896ec83c1f6323e534372fc1148fd75fc4df9e5e2fe0b6  /tmp/mlxcel-auto-plan/2227-run-parity/before-valid/profile-instrumentation.patch
+4937aea464d3d9ed24793dff2d3ff8be019e21fbe2b67a581fd6f3d3029eb25f  /home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2227/target/release/mlxcel
+binary_size=108106312 binary_mtime=2026-10-11 18:02:59.450889010 +0900
+mlx_pin=81ba1c6a0e50a9268b931579c2d4f1158b9aab5a
+Sun Oct 11 18:07:53 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.178.04             Driver Version: 580.178.04     CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GB10                    On  |   0000000F:01:00.0 Off |                  N/A |
+| N/A   47C    P8              5W /  N/A  | Not Supported          |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+

@@ -1,0 +1,4 @@
+[cli   ] prompt   256 tok  TTFT     20.37 ms  decode   128 tok in    660.11 ms =   193.91 tok/s  chunk 2048 storage dense
+[engine-bench] {"path":"cli","model":"qwen3-1.7b-4bit","prompt_target_len":256,"prompt_tokens":256,"generated_tokens":128,"ttft_ms":20.372872,"prefill_tok_s":12565.729564295109,"decode_ms":660.1149750000001,"decode_tok_s":193.90561469992403,"prefill_chunk":2048,"decode_storage":"dense","max_tokens":128,"label":"profile-cli","server_prompt_eval_ms":null,"server_generation_ms":null,"paged_decode_launches":null}
+[engine-bench] summary (server vs cli at the same prompt length):
+  prompt   256: cli 20.37 ms TTFT, 193.91 tok/s  |  server -

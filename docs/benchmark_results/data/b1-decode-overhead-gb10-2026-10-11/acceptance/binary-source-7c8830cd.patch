@@ -1,0 +1,305 @@
+From 7c8830cd5aa01198e6ff93b661f90c048ccaeb1d Mon Sep 17 00:00:00 2001
+From: Jeongkyu Shin <inureyes@gmail.com>
+Date: Sun, 11 Oct 2026 18:15:29 +0900
+Subject: [PATCH] fix(perf): avoid replaying terminal B1 decode
+
+---
+ src/server/batch/scheduler/config.rs          |   2 +
+ src/server/batch/scheduler/decode_tick.rs     |  65 ++++++++--
+ src/server/batch/scheduler/mod.rs             |   5 +
+ .../scheduler_muse_glimmer_parallel_tests.rs  | 122 ++++++++++++++++++
+ 4 files changed, 182 insertions(+), 12 deletions(-)
+
+diff --git a/src/server/batch/scheduler/config.rs b/src/server/batch/scheduler/config.rs
+index 4a9e4fa5..e772cccf 100644
+--- a/src/server/batch/scheduler/config.rs
++++ b/src/server/batch/scheduler/config.rs
+@@ -193,6 +193,8 @@ impl BatchScheduler {
+             // here (the server worker is long-lived, so a per-tick getenv would
+             // be pure overhead).
+             lookahead_force_sync: mlxcel_core::engine::force_sync_requested(),
++            #[cfg(test)]
++            decode_forward_calls: 0,
+         }
+     }
+ 
+diff --git a/src/server/batch/scheduler/decode_tick.rs b/src/server/batch/scheduler/decode_tick.rs
+index 01e4222b..82e45452 100644
+--- a/src/server/batch/scheduler/decode_tick.rs
++++ b/src/server/batch/scheduler/decode_tick.rs
+@@ -549,6 +549,10 @@ impl BatchScheduler {
+         // appended yet, so the caller just decodes synchronously.
+         let biases = biases?;
+         let batch = StepBatch { seq_ids, input };
++        #[cfg(test)]
++        {
++            self.decode_forward_calls += 1;
++        }
+         match self.engine.submit(&batch, params, &biases) {
+             Ok(tokens) => {
+                 // The schedule itself succeeded; the collect half evaluates
+@@ -587,14 +591,15 @@ impl BatchScheduler {
+     ///
+     /// 1. FIRST build and `async_eval` step n+1 from `la.tokens` fed back
+     ///    device-side (no host knowledge needed). The GPU starts the next
+-    ///    forward immediately.
++    ///    forward immediately, except when a B=1 row's pending token is known
++    ///    to exhaust its length budget.
+     /// 2. THEN read step n's tokens to host (this blocks on the PREVIOUS tick's
+     ///    prime forward, which by now has finished, while step n+1 runs on the
+     ///    GPU) and run the finish pre-check.
+-    /// 3. If a row finishes (EOS / length / cancel) or the shape is off, unwind
+-    ///    BOTH speculative appends (step n and the just-issued step n+1) and
+-    ///    re-run the tick synchronously, so completion / donation flows through
+-    ///    the untouched sync path from a clean cache state.
++    /// 3. Commit a known B=1 length token directly. For any other finish (EOS,
++    ///    cancel) or a bad shape, unwind the speculative appends and re-run the
++    ///    tick synchronously, so completion / donation flows through the
++    ///    untouched sync path from a clean cache state.
+     /// 4. Otherwise commit step n and keep the step n+1 prebuilt step.
+     pub(super) fn pipelined_steady_decode(
+         &mut self,
+@@ -602,13 +607,23 @@ impl BatchScheduler {
+         seq_ids: &[SequenceId],
+         params: &FusedSampleParams,
+     ) {
+-        // Step 1: speculatively build + schedule step n+1 FIRST. Feed la.tokens
+-        // ([B]) back as the next [B, 1] input device-side (reshape + int32 cast
+-        // to match the synchronous from_slice_i32 dtype), keeping the GPU busy
+-        // through the host read below. This appends a second speculative KV
+-        // position per sequence (the overshoot the issue accepts).
+-        let next_input = mlxcel_core::engine::lookahead_feedback_input(&la.tokens);
+-        let next = self.prime_lookahead_with_input(seq_ids, &next_input, params);
++        // Step 1: speculatively build + schedule step n+1 FIRST, except when a
++        // B=1 row's already-pending token is certain to spend its length
++        // budget. DirectEngine applies the same check before its submit. The
++        // old scheduler submitted n+1, discarded both n and n+1, then replayed
++        // n synchronously on that terminal tick: two whole forwards whose
++        // result could not affect the response.
++        let pending_spends_budget = self.b1_pending_spends_budget(seq_ids);
++        let next = if pending_spends_budget {
++            None
++        } else {
++            // Feed la.tokens ([B]) back as the next [B, 1] input device-side
++            // (reshape + int32 cast to match the synchronous from_slice_i32
++            // dtype), keeping the GPU busy through the host read below. This
++            // appends a second speculative KV position per sequence.
++            let next_input = mlxcel_core::engine::lookahead_feedback_input(&la.tokens);
++            self.prime_lookahead_with_input(seq_ids, &next_input, params)
++        };
+ 
+         // Step 2: read step n's tokens to host (the sync point) and finish-check.
+         let toks = match mlxcel_core::engine::try_tokens_to_host(&la.tokens) {
+@@ -618,6 +633,17 @@ impl BatchScheduler {
+                 Vec::new()
+             }
+         };
++
++        // The pending B=1 draw is the terminal length token. Commit it through
++        // the shared finish path exactly as DirectEngine does. A short/failed
++        // read still takes the guarded teardown and synchronous retry below.
++        if pending_spends_budget && toks.len() == 1 {
++            drop(la);
++            self.apply_fused_decode_tokens(seq_ids, &toks);
++            self.batch_observability.record_lookahead_step();
++            return;
++        }
++
+         let mut finishing = toks.len() != seq_ids.len();
+         if !finishing {
+             for (i, &seq_id) in seq_ids.iter().enumerate() {
+@@ -685,6 +711,17 @@ impl BatchScheduler {
+         self.batch_observability.record_lookahead_step();
+     }
+ 
++    /// Whether the one pending lookahead token must exhaust a B=1 row's
++    /// length budget. B>1 keeps its existing all-row teardown/replay path.
++    fn b1_pending_spends_budget(&self, seq_ids: &[SequenceId]) -> bool {
++        let [seq_id] = seq_ids else {
++            return false;
++        };
++        self.active_batch
++            .get(*seq_id)
++            .is_some_and(|seq| seq.generated_tokens.len().saturating_add(1) >= seq.max_tokens)
++    }
++
+     /// Batched decode: one engine step for all active sequences.
+     ///
+     /// # Null/empty-cache safety
+@@ -778,6 +815,10 @@ impl BatchScheduler {
+                 .into_iter()
+                 .map(|seq| step_rows::step_row(seq, tokenizer, context, false))
+                 .collect();
++            #[cfg(test)]
++            {
++                self.decode_forward_calls += 1;
++            }
+             self.engine.step(&batch, &mut rows)
+         };
+         match stepped {
+diff --git a/src/server/batch/scheduler/mod.rs b/src/server/batch/scheduler/mod.rs
+index a1b6aa9c..d345558c 100644
+--- a/src/server/batch/scheduler/mod.rs
++++ b/src/server/batch/scheduler/mod.rs
+@@ -737,6 +737,11 @@ pub struct BatchScheduler {
+     /// never engages the lookahead pipeline and every decode tick runs
+     /// synchronously, so the sync path stays available for A/B equivalence.
+     lookahead_force_sync: bool,
++
++    /// Decode forwards submitted by this scheduler, for tests that pin the
++    /// B=1 terminal lookahead cost to one forward per post-prefill token.
++    #[cfg(test)]
++    pub(super) decode_forward_calls: usize,
+ }
+ 
+ /// One prebuilt decode step held across ticks by the lookahead pipeline.
+diff --git a/src/server/batch/scheduler_muse_glimmer_parallel_tests.rs b/src/server/batch/scheduler_muse_glimmer_parallel_tests.rs
+index 44e9d6d6..ce6169a4 100644
+--- a/src/server/batch/scheduler_muse_glimmer_parallel_tests.rs
++++ b/src/server/batch/scheduler_muse_glimmer_parallel_tests.rs
+@@ -38,6 +38,14 @@ struct RequestSummary {
+     finish_reason: String,
+ }
+ 
++#[derive(Debug, PartialEq, Eq)]
++struct TerminalDecodeSummary {
++    generated_tokens: Vec<i32>,
++    finish_reason: FinishReason,
++    final_offsets: Vec<(bool, i32, i32)>,
++    stream: RequestSummary,
++}
++
+ fn cases() -> (ImageCase, ImageCase) {
+     (
+         ImageCase {
+@@ -197,6 +205,79 @@ fn run_isolated(case: &ImageCase, collect_tokens: bool) -> RequestSummary {
+     }
+ }
+ 
++fn run_b1_length_budget(max_tokens: usize) -> (RequestSummary, usize) {
++    let mut sched = muse::scheduler(1);
++    let rx = muse::enqueue(
++        &mut sched,
++        request_prompt(),
++        muse::image_bytes(2, 2, 31),
++        max_tokens,
++    );
++    let seq_id = SequenceId::from_raw(0);
++    execute_prefill_tick(&mut sched);
++    while sched.active_batch.get(seq_id).is_some() {
++        execute_decode_tick(&mut sched, &[seq_id]);
++        sched.finalize_completed();
++    }
++    let forwards = sched.decode_forward_calls;
++    (summarize(muse::collect_stream(&rx)), forwards)
++}
++
++fn run_terminal_length_path(parallelism: usize) -> (TerminalDecodeSummary, usize) {
++    let max_tokens = 3;
++    let mut sched = muse::scheduler(parallelism);
++    let target_rx = muse::enqueue(
++        &mut sched,
++        request_prompt(),
++        muse::image_bytes(2, 2, 41),
++        max_tokens,
++    );
++    let sibling_rx = (parallelism > 1).then(|| {
++        muse::enqueue(
++            &mut sched,
++            request_prompt(),
++            muse::image_bytes(2, 2, 73),
++            max_tokens,
++        )
++    });
++    let target_id = SequenceId::from_raw(0);
++    execute_prefill_tick(&mut sched);
++
++    let mut terminal = None;
++    while sched.active_batch.get(target_id).is_some() {
++        let ids = sched.active_batch.sequence_ids();
++        execute_decode_tick(&mut sched, &ids);
++        if let Some(seq) = sched.active_batch.get(target_id)
++            && let SequenceState::Finished(reason) = &seq.state
++        {
++            terminal = Some((
++                seq.generated_tokens.clone(),
++                reason.clone(),
++                muse::muse_state_offsets(&sched, target_id)
++                    .expect("finished target retains its state until finalization"),
++            ));
++        }
++        sched.finalize_completed();
++    }
++
++    let (generated_tokens, finish_reason, final_offsets) =
++        terminal.expect("target reached a terminal decode tick");
++    let stream = summarize(muse::collect_stream(&target_rx));
++    if let Some(rx) = sibling_rx {
++        let sibling = summarize(muse::collect_stream(&rx));
++        assert_eq!(sibling, stream);
++    }
++    (
++        TerminalDecodeSummary {
++            generated_tokens,
++            finish_reason,
++            final_offsets,
++            stream,
++        },
++        sched.decode_forward_calls,
++    )
++}
++
+ fn assert_reuse_after_release(sched: &mut BatchScheduler) {
+     let image = muse::image_bytes(2, 2, 17);
+     let rx = muse::enqueue(sched, request_prompt(), image, 1);
+@@ -315,6 +396,47 @@ fn muse_scheduler_two_image_requests_parallelism_two_match_isolated_runs() {
+     assert_eq!(wide_result.streamed, vec!["a", "a", "a"]);
+ }
+ 
++#[test]
++fn b1_length_boundary_submits_one_decode_forward_per_post_prefill_token() {
++    // max_tokens 0 and 1 both finish on the first token sampled by prefill;
++    // 2 finishes on the synchronous bootstrap step; 3 and 4 reach the
++    // terminal lookahead branch. None may submit or replay a future token.
++    for (max_tokens, completion_tokens, decode_forwards) in
++        [(0, 1, 0), (1, 1, 0), (2, 2, 1), (3, 3, 2), (4, 4, 3)]
++    {
++        let (summary, forwards) = run_b1_length_budget(max_tokens);
++        assert_eq!(
++            summary.completion_tokens, completion_tokens,
++            "max_tokens={max_tokens}"
++        );
++        assert_eq!(summary.finish_reason, "length", "max_tokens={max_tokens}");
++        assert_eq!(
++            forwards, decode_forwards,
++            "max_tokens={max_tokens} submitted an avoidable decode forward"
++        );
++    }
++}
++
++#[test]
++fn b1_terminal_length_matches_the_unchanged_b2_path() {
++    let (b1, b1_forwards) = run_terminal_length_path(1);
++    let (b2, b2_forwards) = run_terminal_length_path(2);
++
++    assert_eq!(b1, b2);
++    assert_eq!(b1.generated_tokens, vec![muse::GENERATED_TOKEN_ID; 3]);
++    assert_eq!(b1.finish_reason, FinishReason::Length);
++    assert_eq!(b1.final_offsets, vec![(true, 6, 6), (false, 6, 6)]);
++    assert_eq!(b1.stream.streamed, vec!["a", "a", "a"]);
++    assert_eq!(
++        b1_forwards, 2,
++        "B=1 should not submit or replay past length"
++    );
++    assert_eq!(
++        b2_forwards, 4,
++        "B=2 keeps the existing terminal teardown and replay path"
++    );
++}
++
+ #[test]
+ fn muse_scheduler_streaming_and_result_only_collection_are_equivalent() {
+     let (small, _) = cases();
+-- 
+2.43.0
+

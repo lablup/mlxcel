@@ -1,0 +1,15 @@
+profile/*.log binary
+profile/*.txt binary
+profile/*.patch binary
+profile/*.nsys-rep binary
+acceptance/*.jsonl binary
+acceptance/*.log binary
+acceptance/*.txt binary
+acceptance/*.patch binary
+acceptance/*.diff binary
+correctness/*.log binary
+correctness/*.patch binary
+correctness/*/*.txt binary
+correctness/*/*.patch binary
+validation/*.log binary
+validation/*.txt binary

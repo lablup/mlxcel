@@ -1,0 +1,9 @@
+Runtime device: NVIDIA GPU (CUDA)
+Wired memory limit: 121.7 GB
+Loading model from "models/mlx/qwen3-1.7b-4bit"...
+Model loaded in 1.03s.
+Generating...
+
+Okay, the user wants the capital of France in one sentence. Let me think. France's capital is Paris, right? Yeah, Paris is the capital. I should just state that clearly. Wait, the user specified exactly one sentence. So I need to make sure it's just the capital name. No
+
+[Generated 64 tokens in 0.33s = 192.19 tok/s]

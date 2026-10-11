@@ -1,0 +1,104 @@
+warning: mlxcel-core@0.7.0: In file included from cpp/mlx_cxx_bridge.cpp:7:
+warning: mlxcel-core@0.7.0: /home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2227/target/release/build/mlxcel-core-4c8821fbbcc3d8f4/out/build/include/mlx/primitives.h: In member function 'std::pair<float, float> mlx::core::AddMM::state() const':
+warning: mlxcel-core@0.7.0: /home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2227/target/release/build/mlxcel-core-4c8821fbbcc3d8f4/out/build/include/mlx/primitives.h:204:41: note: parameter passing for argument of type 'std::pair<float, float>' when C++17 is enabled changed to match C++14 in GCC 10.1
+warning: mlxcel-core@0.7.0:   204 |   std::pair<float, float> state() const {
+warning: mlxcel-core@0.7.0:       |                                         ^
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_bridge.cpp: In function 'mlx_cxx::{anonymous}::get_compiled_q_path_proportional(int, int, int, float)::<lambda(const std::vector<mlx::core::array>&)>':
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_bridge.cpp:3851:31: warning: '*(int*)((char*)&in_shape + offsetof(mlx::core::SmallVector<int, 10, std::allocator<int> >,mlx::core::SmallVector<int, 10, std::allocator<int> >::inline_storage_[0]))' may be used uninitialized [-Wmaybe-uninitialized]
+warning: mlxcel-core@0.7.0:  3851 |             int B = in_shape[0];
+warning: mlxcel-core@0.7.0:       |                               ^
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_bridge.cpp:3850:18: note: 'in_shape' declared here
+warning: mlxcel-core@0.7.0:  3850 |             auto in_shape = q_in.shape();
+warning: mlxcel-core@0.7.0:       |                  ^~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_bridge.cpp:3851:31: warning: '*(int*)((char*)&in_shape + offsetof(mlx::core::SmallVector<int, 10, std::allocator<int> >,mlx::core::SmallVector<int, 10, std::allocator<int> >::inline_storage_[0]))' may be used uninitialized [-Wmaybe-uninitialized]
+warning: mlxcel-core@0.7.0:  3851 |             int B = in_shape[0];
+warning: mlxcel-core@0.7.0:       |                               ^
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_bridge.cpp:3850:18: note: 'in_shape' declared here
+warning: mlxcel-core@0.7.0:  3850 |             auto in_shape = q_in.shape();
+warning: mlxcel-core@0.7.0:       |                  ^~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_bridge.cpp: In lambda function:
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_bridge.cpp:2190:24: warning: '*(int*)((char*)&shape + offsetof(mlx::core::SmallVector<int, 10, std::allocator<int> >,mlx::core::SmallVector<int, 10, std::allocator<int> >::inline_storage_[0]))' may be used uninitialized [-Wmaybe-uninitialized]
+warning: mlxcel-core@0.7.0:  2190 |         int B = shape[0], H = shape[1], S = shape[2], D = shape[3];
+warning: mlxcel-core@0.7.0:       |                        ^
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_bridge.cpp:2189:14: note: 'shape' declared here
+warning: mlxcel-core@0.7.0:  2189 |         auto shape = x.shape();
+warning: mlxcel-core@0.7.0:       |              ^~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_bridge.cpp:2190:24: warning: '*(int*)((char*)&shape + offsetof(mlx::core::SmallVector<int, 10, std::allocator<int> >,mlx::core::SmallVector<int, 10, std::allocator<int> >::inline_storage_[0]))' may be used uninitialized [-Wmaybe-uninitialized]
+warning: mlxcel-core@0.7.0:  2190 |         int B = shape[0], H = shape[1], S = shape[2], D = shape[3];
+warning: mlxcel-core@0.7.0:       |                        ^
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_bridge.cpp:2189:14: note: 'shape' declared here
+warning: mlxcel-core@0.7.0:  2189 |         auto shape = x.shape();
+warning: mlxcel-core@0.7.0:       |              ^~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_kernels.cpp: In lambda function:
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_kernels.cpp:3362:24: note: parameter passing for argument of type 'std::pair<double, double>' when C++17 is enabled changed to match C++14 in GCC 10.1
+warning: mlxcel-core@0.7.0:  3362 |                 ref_rms);
+warning: mlxcel-core@0.7.0:       |                        ^
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_kernels.cpp: At global scope:
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_kernels.cpp:3792:24: warning: 'mlx_cxx::{anonymous}::ADD3_LN_HIP_SOURCE' defined but not used [-Wunused-variable]
+warning: mlxcel-core@0.7.0:  3792 |     static const char* ADD3_LN_HIP_SOURCE = R"(
+warning: mlxcel-core@0.7.0:       |                        ^~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_kernels.cpp:3027:24: warning: 'mlx_cxx::{anonymous}::MOE_FC1_RELU2_HIP_SOURCE' defined but not used [-Wunused-variable]
+warning: mlxcel-core@0.7.0:  3027 |     static const char* MOE_FC1_RELU2_HIP_SOURCE = R"(
+warning: mlxcel-core@0.7.0:       |                        ^~~~~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_kernels.cpp:2847:24: warning: 'mlx_cxx::{anonymous}::MOE_DOWN_HIP_SOURCE' defined but not used [-Wunused-variable]
+warning: mlxcel-core@0.7.0:  2847 |     static const char* MOE_DOWN_HIP_SOURCE = R"(
+warning: mlxcel-core@0.7.0:       |                        ^~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_kernels.cpp:2708:24: warning: 'mlx_cxx::{anonymous}::MOE_GATEUP_HIP_SOURCE' defined but not used [-Wunused-variable]
+warning: mlxcel-core@0.7.0:  2708 |     static const char* MOE_GATEUP_HIP_SOURCE = R"(
+warning: mlxcel-core@0.7.0:       |                        ^~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_kernels.cpp:2129:24: warning: 'mlx_cxx::{anonymous}::MAMBA1_SCAN_HIP_SOURCE' defined but not used [-Wunused-variable]
+warning: mlxcel-core@0.7.0:  2129 |     static const char* MAMBA1_SCAN_HIP_SOURCE = R"(
+warning: mlxcel-core@0.7.0:       |                        ^~~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_kernels.cpp:752:24: warning: 'mlx_cxx::{anonymous}::SSM_HIP_SOURCE' defined but not used [-Wunused-variable]
+warning: mlxcel-core@0.7.0:   752 |     static const char* SSM_HIP_SOURCE = R"(
+warning: mlxcel-core@0.7.0:       |                        ^~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_kernels.cpp:452:24: warning: 'mlx_cxx::{anonymous}::XIELU_HIP_SOURCE' defined but not used [-Wunused-variable]
+warning: mlxcel-core@0.7.0:   452 |     static const char* XIELU_HIP_SOURCE = R"(
+warning: mlxcel-core@0.7.0:       |                        ^~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_kernels.cpp:159:24: warning: 'mlx_cxx::{anonymous}::BITLINEAR_HIP_SOURCE' defined but not used [-Wunused-variable]
+warning: mlxcel-core@0.7.0:   159 |     static const char* BITLINEAR_HIP_SOURCE = R"(
+warning: mlxcel-core@0.7.0:       |                        ^~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp: In function 'void mlx_cxx::nemotron_decode_step(uint64_t, const MlxArray&, rust::cxxbridge1::Slice<const MlxArray* const>, rust::cxxbridge1::Slice<const MlxArray* const>, rust::cxxbridge1::Slice<const MlxArray* const>, rust::cxxbridge1::Slice<const MlxArray* const>, rust::cxxbridge1::Slice<const int>, std::unique_ptr<MlxArray>&, rust::cxxbridge1::Slice<std::unique_ptr<MlxArray> >, rust::cxxbridge1::Slice<std::unique_ptr<MlxArray> >)':
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp:156:16: warning: '*(int*)((char*)&id_shape + offsetof(mlx::core::SmallVector<int, 10, std::allocator<int> >,mlx::core::SmallVector<int, 10, std::allocator<int> >::inline_storage_[0]))' may be used uninitialized [-Wmaybe-uninitialized]
+warning: mlxcel-core@0.7.0:   156 |     h = reshape(h, {id_shape[0], id_shape[1], (int)h.shape().back()});
+warning: mlxcel-core@0.7.0:       |         ~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp:155:10: note: 'id_shape' declared here
+warning: mlxcel-core@0.7.0:   155 |     auto id_shape = input_ids.inner.shape();
+warning: mlxcel-core@0.7.0:       |          ^~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp:156:16: warning: '*(int*)((char*)&id_shape + offsetof(mlx::core::SmallVector<int, 10, std::allocator<int> >,mlx::core::SmallVector<int, 10, std::allocator<int> >::inline_storage_[0]))' may be used uninitialized [-Wmaybe-uninitialized]
+warning: mlxcel-core@0.7.0:   156 |     h = reshape(h, {id_shape[0], id_shape[1], (int)h.shape().back()});
+warning: mlxcel-core@0.7.0:       |         ~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp:155:10: note: 'id_shape' declared here
+warning: mlxcel-core@0.7.0:   155 |     auto id_shape = input_ids.inner.shape();
+warning: mlxcel-core@0.7.0:       |          ^~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp:244:28: warning: '*(int*)((char*)&ks + offsetof(mlx::core::SmallVector<int, 10, std::allocator<int> >,mlx::core::SmallVector<int, 10, std::allocator<int> >::inline_storage_[0]))' may be used uninitialized [-Wmaybe-uninitialized]
+warning: mlxcel-core@0.7.0:   244 |                 k = reshape(k, {ks[0], ks[1], 1, ks[2], ks[3]});
+warning: mlxcel-core@0.7.0:       |                     ~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp:243:22: note: 'ks' declared here
+warning: mlxcel-core@0.7.0:   243 |                 auto ks = k.shape();
+warning: mlxcel-core@0.7.0:       |                      ^~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp:244:28: warning: '*(int*)((char*)&ks + offsetof(mlx::core::SmallVector<int, 10, std::allocator<int> >,mlx::core::SmallVector<int, 10, std::allocator<int> >::inline_storage_[0]))' may be used uninitialized [-Wmaybe-uninitialized]
+warning: mlxcel-core@0.7.0:   244 |                 k = reshape(k, {ks[0], ks[1], 1, ks[2], ks[3]});
+warning: mlxcel-core@0.7.0:       |                     ~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp:243:22: note: 'ks' declared here
+warning: mlxcel-core@0.7.0:   243 |                 auto ks = k.shape();
+warning: mlxcel-core@0.7.0:       |                      ^~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp:248:28: warning: '*(int*)((char*)&vs + offsetof(mlx::core::SmallVector<int, 10, std::allocator<int> >,mlx::core::SmallVector<int, 10, std::allocator<int> >::inline_storage_[0]))' may be used uninitialized [-Wmaybe-uninitialized]
+warning: mlxcel-core@0.7.0:   248 |                 v = reshape(v, {vs[0], vs[1], 1, vs[2], vs[3]});
+warning: mlxcel-core@0.7.0:       |                     ~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp:247:22: note: 'vs' declared here
+warning: mlxcel-core@0.7.0:   247 |                 auto vs = v.shape();
+warning: mlxcel-core@0.7.0:       |                      ^~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp:248:28: warning: '*(int*)((char*)&vs + offsetof(mlx::core::SmallVector<int, 10, std::allocator<int> >,mlx::core::SmallVector<int, 10, std::allocator<int> >::inline_storage_[0]))' may be used uninitialized [-Wmaybe-uninitialized]
+warning: mlxcel-core@0.7.0:   248 |                 v = reshape(v, {vs[0], vs[1], 1, vs[2], vs[3]});
+warning: mlxcel-core@0.7.0:       |                     ~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp:247:22: note: 'vs' declared here
+warning: mlxcel-core@0.7.0:   247 |                 auto vs = v.shape();
+warning: mlxcel-core@0.7.0:       |                      ^~
+warning: mlxcel-core@0.7.0: In file included from ../mlx-cpp/turbo/kv_inplace_write.cpp:23:
+warning: mlxcel-core@0.7.0: /home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2227/target/release/build/mlxcel-core-4c8821fbbcc3d8f4/out/build/include/mlx/primitives.h: In member function 'std::pair<float, float> mlx::core::AddMM::state() const':
+warning: mlxcel-core@0.7.0: /home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2227/target/release/build/mlxcel-core-4c8821fbbcc3d8f4/out/build/include/mlx/primitives.h:204:41: note: parameter passing for argument of type 'std::pair<float, float>' when C++17 is enabled changed to match C++14 in GCC 10.1
+warning: mlxcel-core@0.7.0:   204 |   std::pair<float, float> state() const {
+warning: mlxcel-core@0.7.0:       |                                         ^
+   Compiling mlxcel v0.7.0 (/home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2227)
+    Finished `release` profile [optimized] target(s) in 6m 50s

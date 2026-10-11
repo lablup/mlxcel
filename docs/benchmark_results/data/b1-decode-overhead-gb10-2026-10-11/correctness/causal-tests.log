@@ -1,0 +1,10 @@
+
+running 4 tests
+test server::batch::scheduler::scheduler_prompt_lookup_tests::b1_length_boundary_submits_one_decode_forward_per_post_prefill_token ... ok
+test server::batch::scheduler::scheduler_prompt_lookup_tests::b1_stochastic_terminal_length_commits_the_pending_draw ... Compiling CUDA kernels (first run on this host; cached for later runs)...
+ok
+test server::batch::scheduler::scheduler_prompt_lookup_tests::b1_terminal_length_skips_two_forwards_and_leaves_b2_unchanged ... ok
+test server::batch::scheduler::scheduler_prompt_lookup_tests::b1_terminal_token_eos_precedes_the_length_boundary ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 9091 filtered out; finished in 1.46s
+

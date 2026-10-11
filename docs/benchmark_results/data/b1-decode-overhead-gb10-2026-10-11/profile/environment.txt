@@ -1,0 +1,51 @@
+2026-10-11T18:04:06+09:00
+spark-102
+Linux spark-102 7.0.0-1019-nvidia #19~24.04.2-Ubuntu SMP PREEMPT_DYNAMIC Sun Sep  6 18:35:11 UTC 2 aarch64 aarch64 aarch64 GNU/Linux
+73700aafa6a792f07830578c0c26137cea3a038b
+ M src/server/batch/scheduler/config.rs
+ M src/server/batch/scheduler/decode_tick.rs
+ M src/server/batch/scheduler/mod.rs
+ M src/server/batch/scheduler/run_loop.rs
+ M src/server/batch/sequence.rs
+?? src/server/batch/scheduler/b1_profile.rs
+eb208514dc7dfbb8dbf9314d9c6d6cee5fd0ef50139abbb546e48d5b42a57572  /home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2227/target/release/mlxcel-bench-engine
+binary_size=90508048 binary_mtime=2026-10-11 18:01:32.590106717 +0900
+src/lib/mlx-cpp/patches-rocm/CORE_RESIDUAL.diff:18:# pin: 81ba1c6a0e50a9268b931579c2d4f1158b9aab5a
+src/lib/mlx-cpp/patches-rocm/UPSTREAM:5:retargeted_to_mlx_pin: 81ba1c6a0e50a9268b931579c2d4f1158b9aab5a
+src/lib/mlx-cpp/CMakeLists.txt:203:    GIT_TAG 81ba1c6a0e50a9268b931579c2d4f1158b9aab5a)
+NVIDIA Nsight Systems version 2025.3.2.474-253236389321v0
+Timestamp counter supported: Yes
+
+CPU Profiling Environment Check
+Root privilege: disabled
+Linux Kernel Paranoid Level = 4
+Linux Distribution = Ubuntu
+Linux Kernel Version = 7.0.0-1019-nvidia: OK
+Linux perf_event_open syscall available: Fail
+Sampling trigger event available: Fail
+Intel(c) Last Branch Record support: Not Available
+CPU Profiling Environment (process-tree): Fail
+CPU Profiling Environment (system-wide): Fail
+
+See the product documentation at https://docs.nvidia.com/nsight-systems for more information,
+including information on how to set the Linux Kernel Paranoid Level.
+Sun Oct 11 18:04:06 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.178.04             Driver Version: 580.178.04     CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GB10                    On  |   0000000F:01:00.0 Off |                  N/A |
+| N/A   47C    P8              5W /  N/A  | Not Supported          |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
