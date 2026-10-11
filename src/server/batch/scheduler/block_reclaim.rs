@@ -27,6 +27,7 @@
 //! forward runs.
 
 use super::*;
+use mlxcel_core::prefill_plan::{PrefillCaps, PrefillInput, PrefillPlan};
 
 /// The scheduler operations the block reclaim loop drives.
 pub(super) trait PagedBlockReclaimer {
@@ -336,10 +337,24 @@ impl BatchScheduler {
         self.chunked_prefill_seq.as_ref().map_or(0, |seq| {
             let total = seq.prompt_tokens.len();
             let remaining = total.saturating_sub(seq.prefill_offset);
-            let pad = self
-                .prefill_plan_for(seq)
-                .piece_starting_at(seq.prefill_offset)
-                .map_or(0, |piece| piece.pad_excess());
+            let input = if seq.vlm_embeddings.is_some() {
+                PrefillInput::Embeddings {
+                    executor_pads: false,
+                }
+            } else {
+                PrefillInput::Tokens
+            };
+            let caps = PrefillCaps::for_model(self.engine.model(), should_align_prefill())
+                .with_input(input);
+            let pad = PrefillPlan::next_piece_at(
+                total,
+                seq.prefill_start_offset,
+                self.history_boundary_split(seq),
+                seq.prefill_offset,
+                self.prefill_chunk_for_tick(),
+                caps,
+            )
+            .map_or(0, |piece| piece.pad_excess());
             self.engine
                 .pool()
                 .paged_blocks_to_append(seq.seq_id, remaining + pad)

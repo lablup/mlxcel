@@ -352,6 +352,66 @@ fn resumed_last_piece_still_reports_the_active_chunk() {
 }
 
 #[test]
+fn next_piece_matches_resumed_plan_across_boundaries_cursors_chunks_and_padding() {
+    let caps = [
+        tokens(false),
+        tokens(true),
+        PrefillCaps {
+            supports_padded_prefill: false,
+            ..tokens(true)
+        },
+        PrefillCaps {
+            supports_chunked_prefill: false,
+            ..tokens(true)
+        },
+        tokens(true).with_input(PrefillInput::Embeddings {
+            executor_pads: false,
+        }),
+        tokens(true).with_input(PrefillInput::Embeddings {
+            executor_pads: true,
+        }),
+    ];
+    for (prompt_len, adopted, boundary) in [
+        (0, 0, None),
+        (70, 0, None),
+        (1300, 0, Some(700)),
+        (5000, 123, Some(777)),
+    ] {
+        let mut cursors = vec![
+            adopted,
+            boundary.unwrap_or(adopted),
+            1024,
+            prompt_len.saturating_sub(1),
+            prompt_len,
+        ];
+        cursors.sort_unstable();
+        cursors.dedup();
+        for caps in caps {
+            for chunk in [0, 64, 512, 2048] {
+                for &cursor in &cursors {
+                    if cursor < adopted
+                        || cursor > prompt_len
+                        || (cursor > adopted && boundary.is_some_and(|boundary| cursor < boundary))
+                    {
+                        continue;
+                    }
+                    let plan =
+                        PrefillPlan::resume_at(prompt_len, adopted, boundary, cursor, chunk, caps);
+                    let expected = plan.piece_starting_at(cursor).cloned();
+                    assert_eq!(
+                        PrefillPlan::next_piece_at(
+                            prompt_len, adopted, boundary, cursor, chunk, caps,
+                        ),
+                        expected,
+                        "prompt_len={prompt_len}, adopted={adopted}, boundary={boundary:?}, cursor={cursor}, chunk={chunk}, caps={caps:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn chunk_policy_resolves_adaptive_defaults_and_explicit_overrides() {
     assert_eq!(
         PrefillChunkPolicy::resolve(None),

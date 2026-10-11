@@ -309,18 +309,11 @@ impl PrefillPlan {
         let (start, boundary, can_pad, pad_mask) =
             plan_metadata(prompt_len, adopted, boundary, caps);
         let remaining = prompt_len - start;
-        let chunk = (chunk > 0
-            && caps.supports_chunked_prefill
-            && !caps.is_embedding_input()
-            && remaining > chunk)
-            .then_some(chunk);
+        let chunk = eligible_chunk(chunk, caps).filter(|chunk| remaining > *chunk);
         let mut pieces = Vec::new();
         let mut cursor = start;
         if let Some(boundary) = boundary {
-            pieces.push(PrefillPiece {
-                range: cursor..boundary,
-                padded_len: boundary - cursor,
-            });
+            pieces.push(piece_to_boundary(cursor, boundary));
             cursor = boundary;
         }
         let step = chunk.unwrap_or(remaining.max(1));
@@ -362,8 +355,7 @@ impl PrefillPlan {
         debug_assert!(cursor <= prompt_len);
         debug_assert!(boundary.is_none_or(|boundary| cursor >= boundary));
         let cursor = cursor.min(prompt_len);
-        let chunk = (chunk > 0 && caps.supports_chunked_prefill && !caps.is_embedding_input())
-            .then_some(chunk);
+        let chunk = eligible_chunk(chunk, caps);
         let mut pieces = Vec::new();
         let step = chunk.unwrap_or((prompt_len - cursor).max(1));
         append_pieces(&mut pieces, cursor, prompt_len, step, can_pad);
@@ -432,6 +424,43 @@ impl PrefillPlan {
         self.pieces.iter().find(|p| p.range.start == cursor)
     }
 
+    /// Compute only the piece that would start at the cursor in
+    /// Self::resume_at.
+    ///
+    /// This is the allocation-free form for capacity and reservation checks
+    /// that need the next piece's padding but do not execute the full suffix.
+    /// It follows the same initial-plan, continuation, boundary and padding
+    /// rules as Self::resume_at.
+    #[must_use]
+    pub fn next_piece_at(
+        prompt_len: usize,
+        adopted: usize,
+        boundary: Option<usize>,
+        cursor: usize,
+        chunk: usize,
+        caps: PrefillCaps,
+    ) -> Option<PrefillPiece> {
+        let (adopted, boundary, can_pad) = plan_geometry(prompt_len, adopted, boundary, caps);
+        if cursor < adopted || cursor >= prompt_len {
+            return None;
+        }
+        if cursor == adopted {
+            if let Some(boundary) = boundary {
+                return Some(piece_to_boundary(cursor, boundary));
+            }
+            let remaining = prompt_len - cursor;
+            let step = eligible_chunk(chunk, caps)
+                .filter(|chunk| remaining > *chunk)
+                .unwrap_or(remaining.max(1));
+            return piece_from_cursor(cursor, prompt_len, step, can_pad);
+        }
+
+        debug_assert!(boundary.is_none_or(|boundary| cursor >= boundary));
+        let remaining = prompt_len - cursor;
+        let step = eligible_chunk(chunk, caps).unwrap_or(remaining.max(1));
+        piece_from_cursor(cursor, prompt_len, step, can_pad)
+    }
+
     /// Whether `piece` is the last one.
     #[must_use]
     pub fn is_terminal(&self, piece: &PrefillPiece) -> bool {
@@ -493,6 +522,17 @@ fn plan_metadata(
     boundary: Option<usize>,
     caps: PrefillCaps,
 ) -> (usize, Option<usize>, bool, bool) {
+    let (adopted, boundary, can_pad) = plan_geometry(prompt_len, adopted, boundary, caps);
+    let pad_mask = !caps.supports_maskless_padded_prefill || force_padded_prefill_array_mask();
+    (adopted, boundary, can_pad, pad_mask)
+}
+
+fn plan_geometry(
+    prompt_len: usize,
+    adopted: usize,
+    boundary: Option<usize>,
+    caps: PrefillCaps,
+) -> (usize, Option<usize>, bool) {
     let adopted = adopted.min(prompt_len);
     // Embedding input is consumed whole and never split, so a history
     // boundary does not apply to it: honoring one would cut the embedding
@@ -501,8 +541,35 @@ fn plan_metadata(
         !caps.is_embedding_input() && *boundary > adopted && *boundary < prompt_len
     });
     let can_pad = caps.can_pad();
-    let pad_mask = !caps.supports_maskless_padded_prefill || force_padded_prefill_array_mask();
-    (adopted, boundary, can_pad, pad_mask)
+    (adopted, boundary, can_pad)
+}
+
+fn eligible_chunk(chunk: usize, caps: PrefillCaps) -> Option<usize> {
+    (chunk > 0 && caps.supports_chunked_prefill && !caps.is_embedding_input()).then_some(chunk)
+}
+
+fn piece_to_boundary(cursor: usize, boundary: usize) -> PrefillPiece {
+    PrefillPiece {
+        range: cursor..boundary,
+        padded_len: boundary - cursor,
+    }
+}
+
+fn piece_from_cursor(
+    cursor: usize,
+    prompt_len: usize,
+    step: usize,
+    can_pad: bool,
+) -> Option<PrefillPiece> {
+    if cursor >= prompt_len {
+        return None;
+    }
+    let end = cursor.saturating_add(step).min(prompt_len);
+    let len = end - cursor;
+    Some(PrefillPiece {
+        range: cursor..end,
+        padded_len: if can_pad { align_to_na_tile(len) } else { len },
+    })
 }
 
 fn append_pieces(
@@ -512,14 +579,9 @@ fn append_pieces(
     step: usize,
     can_pad: bool,
 ) {
-    while cursor < prompt_len {
-        let end = cursor.saturating_add(step).min(prompt_len);
-        let len = end - cursor;
-        pieces.push(PrefillPiece {
-            range: cursor..end,
-            padded_len: if can_pad { align_to_na_tile(len) } else { len },
-        });
-        cursor = end;
+    while let Some(piece) = piece_from_cursor(cursor, prompt_len, step, can_pad) {
+        cursor = piece.range.end;
+        pieces.push(piece);
     }
 }
 
