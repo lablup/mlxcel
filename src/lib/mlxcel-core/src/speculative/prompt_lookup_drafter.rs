@@ -273,6 +273,7 @@ mod tests {
             max_draft: 4,
             adaptive: true,
             policy,
+            ..PromptLookupConfig::default()
         };
         let sampling = SamplingConfig::greedy();
         let hidden = crate::from_slice_i32(&[0], &[1]);
