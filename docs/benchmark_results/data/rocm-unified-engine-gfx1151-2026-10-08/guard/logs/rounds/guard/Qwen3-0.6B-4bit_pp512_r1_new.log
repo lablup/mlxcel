@@ -1,9 +1,0 @@
-2026-10-08T20:39:25+0900 waiting for guard lock /tmp/mlxcel-rocm-gpu-guard.lock
-2026-10-08T21:20:56+0900 acquired guard lock /tmp/mlxcel-rocm-gpu-guard.lock after 2491s
-2026-10-08T21:20:56+0900 waiting for 60s of idle GPU and no compiler
-2026-10-08T21:22:23+0900 idle for 60s: kfd proc empty and no compiler in every 1 Hz sample
-2026-10-08T21:22:23+0900 attempt 1/10: start: /home/devops/Development/wt-20261006T1212-issue-2192/target/release/mlxcel-bench-decode -m models/mlx/Qwen3-0.6B-4bit -p x -n 128 --warmup-tokens 20 --ignore-eos --prompt-tokens 512
-2026-10-08T21:22:23+0900 sample 1: clean gpu=[]
-2026-10-08T21:22:25+0900 sample 2: clean gpu=[3213872:mlxcel-bench-de]
-2026-10-08T21:22:26+0900 monitor: 2 samples
-2026-10-08T21:22:26+0900 attempt 1: CLEAN, exit 0

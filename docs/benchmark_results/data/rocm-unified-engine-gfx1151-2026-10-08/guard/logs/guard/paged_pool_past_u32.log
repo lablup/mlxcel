@@ -1,8 +1,0 @@
-2026-10-09T02:51:21+0900 lock held by outer guard 2263193: not taking /tmp/mlxcel-rocm-gpu-guard.lock
-2026-10-09T02:51:21+0900 waiting for 10s of idle GPU and no compiler
-2026-10-09T02:51:36+0900 idle for 10s: kfd proc empty and no compiler in every 1 Hz sample
-2026-10-09T02:51:36+0900 attempt 1/10: start: /home/devops/Development/wt-20261006T1212-issue-2192/target/test-fast/deps/mlxcel_core-480914a0f733fc77 paged_pool_past_u32_elements_matches_gather --ignored --test-threads=1 --nocapture
-2026-10-09T02:51:36+0900 sample 1: clean gpu=[]
-2026-10-09T02:51:38+0900 sample 2: clean gpu=[1358129:mlxcel_core-480]
-2026-10-09T02:51:39+0900 monitor: 2 samples
-2026-10-09T02:51:39+0900 attempt 1: CLEAN, exit 0

@@ -98,6 +98,17 @@ DECLARED = (
             "and the MP3 and FLAC framing cannot be synthesized in the test."
         ),
     ),
+    Rule(
+        pattern="docs/benchmark_results/data/*.tar.gz",
+        max_bytes=32 * 1024,
+        why=(
+            "Raw per-run logs behind a committed benchmark report, archived "
+            "because nobody reads them in normal review; the report's tables "
+            "and CSVs carry the numbers, and the archive is there to audit a "
+            "run. Keep each under 32 KB compressed; larger log sets belong "
+            "outside the repository."
+        ),
+    ),
 )
 
 

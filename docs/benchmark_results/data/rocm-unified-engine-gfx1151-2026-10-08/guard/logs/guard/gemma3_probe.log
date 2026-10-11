@@ -1,9 +1,0 @@
-2026-10-09T02:51:39+0900 lock held by outer guard 2263193: not taking /tmp/mlxcel-rocm-gpu-guard.lock
-2026-10-09T02:51:39+0900 waiting for 20s of idle GPU and no compiler
-2026-10-09T02:52:08+0900 idle for 20s: kfd proc empty and no compiler in every 1 Hz sample
-2026-10-09T02:52:08+0900 attempt 1/3: start: bash /tmp/claude-1001/-home-devops-Development-mlxcel/66a03ced-36c6-4e0a-9e39-155a3eb57353/scratchpad/issue-2192/measure/gemma3_probe.sh
-2026-10-09T02:52:08+0900 sample 1: clean gpu=[]
-2026-10-09T02:52:10+0900 sample 2: clean gpu=[1378646:mlxcel]
-2026-10-09T02:52:11+0900 sample 3: clean gpu=[1378646:mlxcel]
-2026-10-09T02:52:12+0900 monitor: 3 samples
-2026-10-09T02:52:12+0900 attempt 1: CLEAN, exit 0
