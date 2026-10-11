@@ -8,7 +8,7 @@
   "binary_sha256": "0cc49217021dab12b5add25dc2bb8de7e90c405c0b406607b244a8060d3ed800",
   "binary_size_bytes": 108106312,
   "binary_mtime_utc": "2026-10-11T03:25:49Z",
-  "release_build_log": "/tmp/mlxcel-auto-plan/2230-release-build.log",
+  "release_build_log": "docs/benchmark_results/data/model-owned-storage-gb10-2026-10-11/release-build.log",
   "release_build_log_sha256": "037e0fb240ec19853a63eecd66a6d4d7045c510e4bd0f3e13ab558b48b13e31c",
   "release_build_result": "Finished release profile in 19m 43s",
   "ancestor_command": "git merge-base --is-ancestor 2cb92404b153897440c4906a5548dcfb4889a9ad 35da2dbe32c731ff6645b2b32a2117af2965f332",
@@ -21,6 +21,6 @@
     "docs/benchmark_results/data/model-owned-storage-gb10-2026-10-11/test_protocol.py"
   ],
   "production_source_equivalent": true,
-  "derivation": "The preserved release-build session identifies 2cb92404 as the binary build source. That commit is an ancestor of the clean measurement checkout, and the complete intervening diff contains only the four listed benchmark-protocol files. No Rust, C++, model, or build-definition path changed between the binary source and measurement checkout.",
-  "limitation": "The release binary does not embed a source commit. The binary-source association is reconstructed after the run from the preserved build session, artifact hash and mtime, commit ancestry, and exact intervening path set; it is not a contemporaneous field in environment.txt. The original environment and measured scripts remain byte-for-byte unchanged."
+  "derivation": "The preserved release-build session context identifies 2cb92404 as the binary build source. That commit is an ancestor of the clean measurement checkout, and the complete intervening diff contains only the four listed benchmark-protocol files. No Rust, C++, model, or build-definition path changed between the binary source and measurement checkout.",
+  "limitation": "The release binary does not embed a source commit, and release-build.log proves the successful 19m43s build but does not print HEAD. The binary-source association is reconstructed after the run from the preserved session context, artifact hash and mtime, commit ancestry, and exact intervening path set; it is not a contemporaneous field in environment.txt. The original environment and measured scripts remain byte-for-byte unchanged."
 }
