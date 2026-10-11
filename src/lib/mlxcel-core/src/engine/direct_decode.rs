@@ -56,7 +56,7 @@
 
 use super::direct::{BareHooks, DirectEngine, DirectEngineError, delivers_to_callback};
 use super::lookahead::lookahead_feedback_input;
-use super::rows::{FusedRowGate, shared_fused_params, tokens_to_host};
+use super::rows::{FusedRowGate, shared_fused_params, try_tokens_to_host};
 use super::{EngineError, RowOutcome, StepBatch, StepRow};
 use crate::cache::{SequenceId, SequenceStateBackend};
 use crate::generate::{LanguageModel, SamplingConfig};
@@ -311,31 +311,15 @@ impl<M: LanguageModel> DirectEngine<M> {
                 match self.submit_lookahead(id, state.sampling, &input, params) {
                     Ok(tokens) => Some(tokens),
                     Err(err) => {
-                        // The pending forward's append is still uncommitted.
-                        drop(pending);
-                        self.unwind_failed_submit(id, &err, 1, teardown)?;
+                        self.unwind_failed_submit(id, &err, 0, teardown)?;
+                        if self.commit_fused_pending(state, pending, None, teardown, on_token)? {
+                            return Ok(());
+                        }
                         return self.decode_sync(state, on_token);
                     }
                 }
             };
-            // The sync point: waits for `pending` only, while `next` runs.
-            let host = tokens_to_host(&pending);
-            drop(pending);
-            let before = state.generated.len();
-            let outcome = single(self.engine_mut().finish_rows(&host, &mut [state.row()]))?;
-            if let Some(error) = outcome.error {
-                // Nothing was committed: undo the read step's append and the
-                // next one, so the closed sequence holds no speculative state.
-                let n = 1 + i32::from(next.is_some());
-                self.retire(id, next.as_deref(), n, teardown)?;
-                return Err(DirectEngineError::Row(error.message().to_string()));
-            }
-            let stopped = delivers_to_callback(&state.generated, before, &outcome)
-                && !on_token(outcome.token);
-            if stopped || outcome.finish.is_some() {
-                if next.is_some() {
-                    self.retire(id, next.as_deref(), 1, teardown)?;
-                }
+            if self.commit_fused_pending(state, pending, next.as_deref(), teardown, on_token)? {
                 return Ok(());
             }
             match next {
@@ -346,6 +330,44 @@ impl<M: LanguageModel> DirectEngine<M> {
                 None => return self.decode_sync(state, on_token),
             }
         }
+    }
+
+    /// Read and commit the pending draw, shared by normal and failed submits.
+    /// Returns whether the run finished; `next` owns only an uncommitted append.
+    fn commit_fused_pending<F: FnMut(i32) -> bool>(
+        &mut self,
+        state: &mut DecodeState<'_>,
+        pending: UniquePtr<MlxArray>,
+        next: Option<&MlxArray>,
+        teardown: Teardown,
+        on_token: &mut F,
+    ) -> Result<bool, DirectEngineError> {
+        let id = state.id;
+        // Wait only for pending, preserving overlap with the next forward.
+        let host = match try_tokens_to_host(&pending) {
+            Ok(host) => host,
+            Err(msg) => {
+                drop(pending);
+                self.retire(id, next, 1 + i32::from(next.is_some()), teardown)?;
+                return Err(DirectEngineError::Row(msg));
+            }
+        };
+        drop(pending);
+        let before = state.generated.len();
+        let outcome = single(self.engine_mut().finish_rows(&host, &mut [state.row()]))?;
+        if let Some(error) = outcome.error {
+            self.retire(id, next, 1 + i32::from(next.is_some()), teardown)?;
+            return Err(DirectEngineError::Row(error.message().to_string()));
+        }
+        let stopped =
+            delivers_to_callback(&state.generated, before, &outcome) && !on_token(outcome.token);
+        if stopped || outcome.finish.is_some() {
+            if next.is_some() {
+                self.retire(id, next, 1, teardown)?;
+            }
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     /// Submit one pipelined step for `id` on `input` (`[1, 1]`).

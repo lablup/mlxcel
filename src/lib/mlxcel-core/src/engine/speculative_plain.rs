@@ -24,7 +24,7 @@
 use super::direct::{DirectEngine, DirectEngineError, delivers_to_callback};
 use super::direct_decode::{DecodeState, Teardown, single};
 use super::lookahead::lookahead_feedback_input;
-use super::rows::tokens_to_host;
+use super::rows::try_tokens_to_host;
 use super::speculative::{SpeculativeRounds, SpeculativeRunError};
 use crate::drafter::Drafter;
 use crate::generate::LanguageModel;
@@ -84,7 +84,19 @@ impl<M: LanguageModel> DirectEngine<M> {
         if next.is_none() && asked {
             drafter.retract_draft(draft);
         }
-        let host = tokens_to_host(&pending);
+        let host = match try_tokens_to_host(&pending) {
+            Ok(host) => host,
+            Err(msg) => {
+                drop(pending);
+                self.retire(
+                    id,
+                    next.as_deref(),
+                    1 + i32::from(next.is_some()),
+                    Teardown::Unwind,
+                )?;
+                return Err(DirectEngineError::Row(msg).into());
+            }
+        };
         let before = state.generated.len();
         let outcome = single(self.engine_mut().finish_rows(&host, &mut [state.row()]))?;
         if let Some(error) = outcome.error {

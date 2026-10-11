@@ -33,7 +33,7 @@ use crate::sampling::{
     batched_fused_sample_tokens, compute_logprobs, compute_post_sampling_probs,
     row_supports_fused_batch_except_bias,
 };
-use crate::sampling_row_step::{LogitMask, RowSampler, TokenDraw};
+use crate::sampling_row_step::{DrawError, LogitMask, RowSampler, TokenDraw};
 use crate::{MlxArray, UniquePtr};
 
 /// The caller-side hooks one row's sampling and finishing need.
@@ -289,7 +289,10 @@ pub fn sample_and_finish_row<H: StepRowHooks>(
         distribution,
     } = match draw {
         Ok(draw) => draw,
-        Err(msg) => return RowOutcome::failed(row.seq_id, RowError::Structured(msg)),
+        Err(DrawError::Mask(msg)) => {
+            return RowOutcome::failed(row.seq_id, RowError::Structured(msg));
+        }
+        Err(DrawError::Eval(msg)) => return RowOutcome::failed(row.seq_id, RowError::Eval(msg)),
     };
     // #822: force-evaluate the sampled token through the fallible boundary.
     // On an MLX throw only this row fails; the infallible readback below
@@ -391,4 +394,18 @@ pub fn tokens_to_host(tokens: &MlxArray) -> Vec<i32> {
 /// expects (a prefill's last-position logits already have it).
 pub fn row_logits(logits: &MlxArray, i: usize) -> UniquePtr<MlxArray> {
     ffi::slice(logits, &[i as i32, 0, 0], &[i as i32 + 1, 1, i32::MAX])
+}
+
+/// Wait through the fallible boundary before the overlap-preserving byte read.
+pub fn try_tokens_to_host(tokens: &MlxArray) -> Result<Vec<i32>, String> {
+    crate::eval_faults::check(crate::eval_faults::FaultPoint::Readback)?;
+    crate::try_eval(tokens).map_err(|e| e.to_string())?;
+    Ok(tokens_to_host(tokens))
+}
+
+/// Read a per-row token without letting an asynchronous backend error escape.
+pub(crate) fn try_read_token(token: &MlxArray) -> Result<i32, String> {
+    crate::eval_faults::check(crate::eval_faults::FaultPoint::Readback)?;
+    crate::try_eval(token).map_err(|e| e.to_string())?;
+    Ok(ffi::item_i32(token))
 }

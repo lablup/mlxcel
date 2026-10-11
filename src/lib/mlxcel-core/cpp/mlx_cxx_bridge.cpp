@@ -51,6 +51,15 @@ namespace mlx_cxx {
 
 using namespace mlx::core;
 
+std::unique_ptr<MlxRngSnapshot> rng_snapshot() {
+    return std::make_unique<MlxRngSnapshot>();
+}
+
+void restore_rng_snapshot(const MlxRngSnapshot& snapshot) {
+    random::KeySequence::default_() = snapshot.inner;
+}
+
+
 namespace {
 
 using CompiledArrayFn =

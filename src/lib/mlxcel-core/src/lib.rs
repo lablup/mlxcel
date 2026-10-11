@@ -31,6 +31,9 @@ mod ffi {
 
         /// Opaque wrapper for mlx::core::array
         type MlxArray;
+        type MlxRngSnapshot;
+        fn rng_snapshot() -> Result<UniquePtr<MlxRngSnapshot>>;
+        fn restore_rng_snapshot(snapshot: &MlxRngSnapshot);
 
         /// Opaque wrapper for one MLX quantize() result triple.
         type MlxQuantizedWeights;
@@ -4011,6 +4014,7 @@ pub mod prefill_plan;
 // every forward through `open` / `prefill` / `step` / `close`; a single
 // sequence is a batch of one (ADR 0007, #2172).
 pub mod engine;
+mod eval_faults;
 
 pub mod runtime_lora;
 

@@ -401,5 +401,5 @@ fn the_mask_runs_before_the_chain_and_its_error_aborts_the_draw() {
         .draw(&logits, &greedy, &[], Some(&mut refuse), false)
         .err()
         .expect("a refusing mask aborts the draw");
-    assert_eq!(err, "no token is allowed");
+    assert_eq!(err, super::DrawError::Mask("no token is allowed".into()));
 }

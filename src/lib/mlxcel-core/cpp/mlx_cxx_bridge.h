@@ -12,6 +12,16 @@
 
 namespace mlx_cxx {
 
+// A copy of the pinned MLX KeySequence retains only its lazy key array.
+// Its public copy/assignment operations let failed fused submits restore the
+// calling thread's RNG without evaluating a graph or adding a GPU schedule.
+struct MlxRngSnapshot {
+    mlx::core::random::KeySequence inner;
+    MlxRngSnapshot() : inner(mlx::core::random::KeySequence::default_()) {}
+};
+std::unique_ptr<MlxRngSnapshot> rng_snapshot();
+void restore_rng_snapshot(const MlxRngSnapshot& snapshot);
+
 // Opaque wrapper struct to hold mlx::core::array
 // This allows cxx to manage the lifetime without exposing the complex internals
 struct MlxArray {

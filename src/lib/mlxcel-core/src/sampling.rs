@@ -424,7 +424,8 @@ fn sample_token_optimized_core(
     state: Option<&mut SamplerState>,
 ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
     let (token, adjusted, _probs) =
-        sample_token_optimized_core_full(logits, config, token_history, state, false);
+        sample_token_optimized_core_full(logits, config, token_history, state, false)
+            .unwrap_or_else(|e| panic!("sampler host read failed: {e}"));
     (token, adjusted)
 }
 
@@ -449,11 +450,14 @@ fn sample_token_optimized_core_full(
     token_history: &[i32],
     mut state: Option<&mut SamplerState>,
     want_distribution: bool,
-) -> (
-    UniquePtr<MlxArray>,
-    UniquePtr<MlxArray>,
-    Option<UniquePtr<MlxArray>>,
-) {
+) -> Result<
+    (
+        UniquePtr<MlxArray>,
+        UniquePtr<MlxArray>,
+        Option<UniquePtr<MlxArray>>,
+    ),
+    String,
+> {
     if config.effective_mirostat() != 0 {
         return mirostat_sample_core(logits, config, state, want_distribution);
     }
@@ -464,14 +468,14 @@ fn sample_token_optimized_core_full(
         let gate = xtc_gate_draw(config);
         let filtered = apply_extended_chain(&adjusted, config, gate.as_deref());
         let (token, probs) = if config.effective_adaptive_target() >= 0.0 {
-            adaptive_p_sample(&filtered, config, state, want_distribution)
+            adaptive_p_sample(&filtered, config, state, want_distribution)?
         } else {
             let token = ffi::fused_sample(&filtered, 1.0, 0, 1.0, 0.0);
             let probs = want_distribution.then(|| ffi::softmax(&filtered, -1));
             (token, probs)
         };
         crate::sampling_dispatch::report_sampling_dispatch();
-        return (token, adjusted, probs);
+        return Ok((token, adjusted, probs));
     }
 
     let last_logits = preprocess_logits_for_sampling(logits, config, token_history, state);
@@ -483,7 +487,7 @@ fn sample_token_optimized_core_full(
     crate::sampling_dispatch::report_sampling_dispatch();
     let probs = want_distribution
         .then(|| fused_sample_probs_dispatch(&last_logits, config, gate.as_deref()));
-    (token, last_logits, probs)
+    Ok((token, last_logits, probs))
 }
 
 /// Stateful sampling with the post-chain distribution (#1485): the
@@ -505,11 +509,42 @@ pub fn sample_token_with_state_and_distribution(
     UniquePtr<MlxArray>,
     UniquePtr<MlxArray>,
 ) {
+    try_sample_token_with_state_and_distribution(logits, config, token_history, state)
+        .unwrap_or_else(|e| panic!("sampler host read failed: {e}"))
+}
+
+/// Fallible stateful sampling with the post-chain distribution.
+pub fn try_sample_token_with_state_and_distribution(
+    logits: &MlxArray,
+    config: &SamplingConfig,
+    token_history: &[i32],
+    state: &mut Option<SamplerState>,
+) -> Result<
+    (
+        UniquePtr<MlxArray>,
+        UniquePtr<MlxArray>,
+        UniquePtr<MlxArray>,
+    ),
+    String,
+> {
     ensure_sampler_state(config, state);
     let (token, adjusted, probs) =
-        sample_token_optimized_core_full(logits, config, token_history, state.as_mut(), true);
+        sample_token_optimized_core_full(logits, config, token_history, state.as_mut(), true)?;
     let probs = probs.expect("want_distribution returns a distribution on every path");
-    (token, adjusted, probs)
+    Ok((token, adjusted, probs))
+}
+
+/// Fallible stateful sampling for the engine's per-row chain.
+pub fn try_sample_token_optimized_with_state(
+    logits: &MlxArray,
+    config: &SamplingConfig,
+    token_history: &[i32],
+    state: &mut Option<SamplerState>,
+) -> Result<(UniquePtr<MlxArray>, UniquePtr<MlxArray>), String> {
+    ensure_sampler_state(config, state);
+    let (token, adjusted, _) =
+        sample_token_optimized_core_full(logits, config, token_history, state.as_mut(), false)?;
+    Ok((token, adjusted))
 }
 
 /// Create the per-sequence [`SamplerState`] on first use when `config` needs
@@ -1180,6 +1215,15 @@ fn token_ids_to_host(tokens: &MlxArray) -> Vec<i32> {
         .collect()
 }
 
+fn try_token_ids_to_host(tokens: &MlxArray) -> Result<Vec<i32>, String> {
+    crate::eval_faults::check(crate::eval_faults::FaultPoint::SamplerRead)?;
+    let bytes = ffi::try_array_to_raw_bytes(tokens).map_err(|e| e.to_string())?;
+    Ok(bytes
+        .chunks_exact(4)
+        .map(|c| i32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+        .collect())
+}
+
 /// Batch-safe row-filter hook: apply the enabled RNG-free, history-free
 /// logit filters to a `[B, V]` (or `[V]`-broadcastable) logit tensor in the
 /// fixed order pinned by #1375:
@@ -1392,7 +1436,7 @@ fn adaptive_p_sample(
     config: &SamplingConfig,
     state: Option<&mut SamplerState>,
     want_distribution: bool,
-) -> (UniquePtr<MlxArray>, Option<UniquePtr<MlxArray>>) {
+) -> Result<(UniquePtr<MlxArray>, Option<UniquePtr<MlxArray>>), String> {
     let target = config.effective_adaptive_target();
     let decay = config.adaptive_decay.clamp(0.0, 0.99);
 
@@ -1434,15 +1478,16 @@ fn adaptive_p_sample(
     // Read back the selected token's ORIGINAL probability for the EMA.
     let idx = ffi::reshape(&ffi::astype(&token, dtype::INT32), &[1, 1]);
     let sel_p = ffi::take_along_axis(&p, &idx, -1);
-    ffi::eval(&sel_p);
+    crate::eval_faults::check(crate::eval_faults::FaultPoint::SamplerRead)?;
+    crate::try_eval(&sel_p).map_err(|e| e.to_string())?;
     let orig_p = ffi::item_f32(&sel_p);
-    let token_id = token_ids_to_host(&token)[0];
+    let token_id = try_token_ids_to_host(&token)?[0];
     if let Some(a) = adaptive {
         a.pending = Some((token_id, orig_p));
     }
 
     let probs = want_distribution.then(|| ffi::softmax(&transformed, -1));
-    (token, probs)
+    Ok((token, probs))
 }
 
 /// b10621's mirostat bypass path (#1485, upstream `common_sampler_init` with
@@ -1471,11 +1516,14 @@ fn mirostat_sample_core(
     config: &SamplingConfig,
     state: Option<&mut SamplerState>,
     want_distribution: bool,
-) -> (
-    UniquePtr<MlxArray>,
-    UniquePtr<MlxArray>,
-    Option<UniquePtr<MlxArray>>,
-) {
+) -> Result<
+    (
+        UniquePtr<MlxArray>,
+        UniquePtr<MlxArray>,
+        Option<UniquePtr<MlxArray>>,
+    ),
+    String,
+> {
     let version = config.effective_mirostat();
     let tau = config.mirostat_tau;
     let eta = config.mirostat_eta;
@@ -1492,7 +1540,8 @@ fn mirostat_sample_core(
         // The plain temperature stage collapses to the argmax; mirostat then
         // draws the single candidate with observed surprise 0.
         let token = ffi::fused_sample(&biased, 0.0, 0, 1.0, 0.0);
-        ffi::eval(&token);
+        crate::eval_faults::check(crate::eval_faults::FaultPoint::SamplerRead)?;
+        crate::try_eval(&token).map_err(|e| e.to_string())?;
         mu -= eta * (0.0 - tau);
         let probs = want_distribution.then(|| ffi::fused_sample_probs(&biased, 0.0, 0, 1.0, 0.0));
         (token, probs)
@@ -1519,8 +1568,11 @@ fn mirostat_sample_core(
             let m = 100.min(vocab);
             let p = ffi::exp(&logp);
             let top = ffi::topk(&p, m, -1);
-            ffi::eval(&top);
-            let bytes = ffi::array_to_raw_bytes(&ffi::astype(&top, dtype::FLOAT32));
+            crate::eval_faults::check(crate::eval_faults::FaultPoint::SamplerRead)?;
+            crate::try_eval(&top).map_err(|e| e.to_string())?;
+            crate::eval_faults::check(crate::eval_faults::FaultPoint::SamplerRead)?;
+            let bytes = ffi::try_array_to_raw_bytes(&ffi::astype(&top, dtype::FLOAT32))
+                .map_err(|e| e.to_string())?;
             let mut top_probs: Vec<f32> = bytes
                 .chunks_exact(4)
                 .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
@@ -1567,7 +1619,8 @@ fn mirostat_sample_core(
         // renormalized distribution.
         let idx = ffi::reshape(&ffi::astype(&token, dtype::INT32), &[1, 1]);
         let sel_lp = ffi::take_along_axis(&ffi::log_softmax(&masked, -1), &idx, -1);
-        ffi::eval(&sel_lp);
+        crate::eval_faults::check(crate::eval_faults::FaultPoint::SamplerRead)?;
+        crate::try_eval(&sel_lp).map_err(|e| e.to_string())?;
         let observed_surprise = -ffi::item_f32(&sel_lp) / LN_2;
         mu -= eta * (observed_surprise - tau);
 
@@ -1579,7 +1632,7 @@ fn mirostat_sample_core(
         m.mu = mu;
     }
     crate::sampling_dispatch::report_sampling_dispatch();
-    (token, biased, probs)
+    Ok((token, biased, probs))
 }
 
 /// Top-n-sigma logit filter: keep only the tokens whose logit lies within

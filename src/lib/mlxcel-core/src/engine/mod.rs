@@ -60,7 +60,7 @@ use rows::fail_batch;
 pub use rows::{
     FusedRowGate, RowError, RowOutcome, StepRow, StepRowHooks, finish_row, fused_params,
     row_biases, row_logits, sample_and_finish, sample_and_finish_row, shared_fused_params,
-    tokens_to_host,
+    tokens_to_host, try_tokens_to_host,
 };
 pub use speculative::{SpeculativeRounds, SpeculativeRun, SpeculativeRunError};
 pub use verify_round::{VerifyRound, token_only_rounds_unsupported};
@@ -286,11 +286,24 @@ impl<M: LanguageModel> Engine<M> {
         biases: &[&TokenBiasMap],
     ) -> Result<UniquePtr<MlxArray>, EngineError> {
         let logits = self.speculative_forward(batch)?;
-        // The synchronous fused path's draw (token bias in the per-row
-        // sampler's chain position, then the pre-fused row filters), so the
-        // pipelined draw samples from the identical distribution.
+        // Graph construction spends a thread-local RNG key before scheduling.
+        // Retain it for a failed fused submit without adding another async_eval.
+        // The snapshot never leaves this synchronous call or its owning thread.
+        let rng = if params.temperature > 0.0 {
+            Some(crate::ffi::rng_snapshot().map_err(|e| EngineError::Eval(e.to_string()))?)
+        } else {
+            None
+        };
         let tokens = batched_fused_sample_tokens(&logits, params, biases);
-        schedule(&tokens)?;
+        let submitted = crate::eval_faults::check(crate::eval_faults::FaultPoint::Submit)
+            .map_err(EngineError::Eval)
+            .and_then(|()| schedule(&tokens));
+        if let Err(err) = submitted {
+            if let Some(rng) = rng {
+                crate::ffi::restore_rng_snapshot(&rng);
+            }
+            return Err(err);
+        }
         Ok(tokens)
     }
 
@@ -308,6 +321,8 @@ impl<M: LanguageModel> Engine<M> {
         batch: &StepBatch<'_>,
     ) -> Result<UniquePtr<MlxArray>, EngineError> {
         let logits = self.speculative_forward(batch)?;
+        crate::eval_faults::check(crate::eval_faults::FaultPoint::Submit)
+            .map_err(EngineError::Eval)?;
         schedule(&logits)?;
         Ok(logits)
     }
@@ -336,11 +351,21 @@ impl<M: LanguageModel> Engine<M> {
                 row.seq_id
             )));
         }
-        let draw = row
-            .sampler
-            .draw_and_accept(logits, row.sampling, row.token_history);
-        schedule(&draw.token)?;
-        Ok(draw.token)
+        let snapshot = row.sampler.feedback_snapshot();
+        let result = (|| {
+            let draw = row
+                .sampler
+                .draw_and_accept(logits, row.sampling, row.token_history)
+                .map_err(EngineError::Eval)?;
+            crate::eval_faults::check(crate::eval_faults::FaultPoint::Draw)
+                .map_err(EngineError::Eval)?;
+            schedule(&draw.token)?;
+            Ok(draw.token)
+        })();
+        if result.is_err() {
+            row.sampler.restore_feedback(snapshot);
+        }
+        result
     }
 
     /// The collect half of a pipelined step: `tokens[i]` is the host token
@@ -499,3 +524,6 @@ mod speculative_plain_tests;
 mod tests;
 #[cfg(test)]
 mod verify_round_tests;
+
+#[cfg(test)]
+mod eval_fault_tests;

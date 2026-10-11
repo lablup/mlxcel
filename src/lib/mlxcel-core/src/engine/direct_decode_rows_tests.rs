@@ -35,7 +35,7 @@ const NOISY_VOCAB: i32 = 16;
 /// token, spread over `[0, 3)` with small gaps, so a history penalty, DRY or
 /// a stale history changes the draw.
 #[derive(Default)]
-struct NoisyModel {
+pub(super) struct NoisyModel {
     forwards: RefCell<usize>,
 }
 

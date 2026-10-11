@@ -67,7 +67,8 @@ use crate::ffi;
 use crate::ffi::MlxArray;
 use crate::generate::SamplingConfig;
 use crate::sampling::{
-    SamplerState, sample_token_optimized_with_state, sample_token_with_state_and_distribution,
+    AdaptivePState, MirostatState, SamplerState, try_sample_token_optimized_with_state,
+    try_sample_token_with_state_and_distribution,
 };
 use cxx::UniquePtr;
 
@@ -107,6 +108,22 @@ impl TokenDraw {
     pub fn into_token_and_logits(self) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
         (self.token, self.adjusted_logits)
     }
+}
+
+/// Failure while preparing a row's draw.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DrawError {
+    /// The structured-output mask rejected the row.
+    Mask(String),
+    /// A sampler host read failed at the backend boundary.
+    Eval(String),
+}
+
+/// Feedback only: history caches stay in place and synchronize idempotently.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct FeedbackSnapshot {
+    mirostat: Option<MirostatState>,
+    adaptive: Option<AdaptivePState>,
 }
 
 /// One sequence's sampling step and its [`SamplerState`].
@@ -151,11 +168,26 @@ impl RowSampler {
         self.state.as_ref()
     }
 
+    pub(crate) fn feedback_snapshot(&self) -> FeedbackSnapshot {
+        FeedbackSnapshot {
+            mirostat: self.state.as_ref().and_then(|s| s.mirostat),
+            adaptive: self.state.as_ref().and_then(|s| s.adaptive.clone()),
+        }
+    }
+
+    pub(crate) fn restore_feedback(&mut self, snapshot: FeedbackSnapshot) {
+        if let Some(state) = self.state.as_mut() {
+            state.mirostat = snapshot.mirostat;
+            state.adaptive = snapshot.adaptive;
+        }
+    }
+
     /// Draw one token from `logits` (one row) under `config`.
     ///
     /// `history` must already end with the previous token (see
     /// [`Self::needs_host_token_before_sample`]). `mask` runs before the
-    /// chain; its error is returned unchanged and nothing is sampled.
+    /// chain; its error is returned as [`DrawError::Mask`] and nothing is
+    /// sampled. A backend read failure is [`DrawError::Eval`].
     /// `want_distribution` attaches the post-chain distribution, drawn in the
     /// same chain pass so both share one XTC gate.
     ///
@@ -169,13 +201,18 @@ impl RowSampler {
         history: &[i32],
         mask: Option<&mut dyn LogitMask>,
         want_distribution: bool,
-    ) -> Result<TokenDraw, String> {
+    ) -> Result<TokenDraw, DrawError> {
         let Some(mask) = mask else {
-            return Ok(self.sample(logits, config, history, want_distribution));
+            return self
+                .sample(logits, config, history, want_distribution)
+                .map_err(DrawError::Eval);
         };
         let vocab_size = ffi::array_shape(logits).last().copied().unwrap_or(0) as usize;
-        let masked = mask.apply(ffi::copy(logits), vocab_size)?;
-        Ok(self.sample(&masked, config, history, want_distribution))
+        let masked = mask
+            .apply(ffi::copy(logits), vocab_size)
+            .map_err(DrawError::Mask)?;
+        self.sample(&masked, config, history, want_distribution)
+            .map_err(DrawError::Eval)
     }
 
     /// [`Self::draw`] without a mask or a distribution, confirmed at once as
@@ -189,10 +226,10 @@ impl RowSampler {
         logits: &MlxArray,
         config: &SamplingConfig,
         history: &[i32],
-    ) -> TokenDraw {
-        let draw = self.sample(logits, config, history, false);
+    ) -> Result<TokenDraw, String> {
+        let draw = self.sample(logits, config, history, false)?;
         self.accept_drawn();
-        draw
+        Ok(draw)
     }
 
     /// Apply `token_override` to the host value of the last draw and confirm
@@ -224,26 +261,31 @@ impl RowSampler {
         config: &SamplingConfig,
         history: &[i32],
         want_distribution: bool,
-    ) -> TokenDraw {
+    ) -> Result<TokenDraw, String> {
         if want_distribution {
             let (token, adjusted_logits, distribution) =
-                sample_token_with_state_and_distribution(logits, config, history, &mut self.state);
-            TokenDraw {
+                try_sample_token_with_state_and_distribution(
+                    logits,
+                    config,
+                    history,
+                    &mut self.state,
+                )?;
+            Ok(TokenDraw {
                 token,
                 adjusted_logits,
                 distribution: Some(distribution),
-            }
+            })
         } else {
             // With no state this is `sample_token_optimized` exactly: the
             // chain's lazy creator allocates nothing for a config that needs
             // no state.
             let (token, adjusted_logits) =
-                sample_token_optimized_with_state(logits, config, history, &mut self.state);
-            TokenDraw {
+                try_sample_token_optimized_with_state(logits, config, history, &mut self.state)?;
+            Ok(TokenDraw {
                 token,
                 adjusted_logits,
                 distribution: None,
-            }
+            })
         }
     }
 

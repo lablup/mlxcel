@@ -29,6 +29,12 @@
 //! synchronous step's, and forwards consume no randomness, so greedy and
 //! seeded streams equal [`super::DirectEngine::decode_sync`]'s token for token.
 //!
+//! A failed draw restores sampler feedback before synchronous fallback. A
+//! stochastic draw already consumed a thread-local RNG key while building its
+//! graph. This per-row path does not retain an RNG snapshot, so a discarded
+//! draw's key is not restored and the failure may shift a seeded stream by one
+//! draw. A failed forward submit commits the pending draw first.
+//!
 //! The overlap differs by sampler. Penalties, DRY and the extended chain
 //! without adaptive-p keep the draw lazy on the device, so the draw and the
 //! finish step both overlap the next forward. Mirostat and adaptive-p read the
@@ -47,7 +53,7 @@ use super::lookahead::lookahead_feedback_input;
 use super::{EngineError, StepBatch};
 use crate::cache::SequenceId;
 use crate::generate::LanguageModel;
-use crate::{MlxArray, UniquePtr, ffi};
+use crate::{MlxArray, UniquePtr};
 
 impl<M: LanguageModel> DirectEngine<M> {
     /// The per-row lookahead pipeline (see the module docs). Holds at most
@@ -86,45 +92,15 @@ impl<M: LanguageModel> DirectEngine<M> {
                 match self.submit_row_forward(id, &input) {
                     Ok(logits) => Some(logits),
                     Err(err) => {
-                        // The pending draw's forward is still uncommitted.
-                        drop(pending);
-                        self.unwind_failed_submit(id, &err, 1, teardown)?;
+                        self.unwind_failed_submit(id, &err, 0, teardown)?;
+                        if self.commit_row_pending(state, pending, None, teardown, on_token)? {
+                            return Ok(());
+                        }
                         return self.decode_sync(state, on_token);
                     }
                 }
             };
-            // The sync point: waits for `pending` only, while `next` runs.
-            // `try_eval` is the per-array wait (it enqueues nothing behind
-            // `next`) behind the fallible boundary, as in the synchronous
-            // step: a backend throw surfacing at the wait fails the run
-            // instead of aborting the process in the infallible readback
-            // (#822). `item_i32` then reads the per-row draw in whatever
-            // integer dtype the chain returned.
-            if let Err(err) = crate::try_eval(&pending) {
-                drop(pending);
-                // Nothing was committed: undo the read step's append and the
-                // next one, as after a row error.
-                let n = 1 + i32::from(next.is_some());
-                self.retire(id, next.as_deref(), n, teardown)?;
-                return Err(DirectEngineError::Row(err.to_string()));
-            }
-            let token = ffi::item_i32(&pending);
-            drop(pending);
-            let before = state.generated.len();
-            let outcome = single(self.engine_mut().finish_rows(&[token], &mut [state.row()]))?;
-            if let Some(error) = outcome.error {
-                // Nothing was committed: undo the read step's append and the
-                // next one, as the fused pipeline does.
-                let n = 1 + i32::from(next.is_some());
-                self.retire(id, next.as_deref(), n, teardown)?;
-                return Err(DirectEngineError::Row(error.message().to_string()));
-            }
-            let stopped = delivers_to_callback(&state.generated, before, &outcome)
-                && !on_token(outcome.token);
-            if stopped || outcome.finish.is_some() {
-                if next.is_some() {
-                    self.retire(id, next.as_deref(), 1, teardown)?;
-                }
+            if self.commit_row_pending(state, pending, next.as_deref(), teardown, on_token)? {
                 return Ok(());
             }
             // The budget check above and the finish step's length rule agree,
@@ -142,6 +118,44 @@ impl<M: LanguageModel> DirectEngine<M> {
                 }
             };
         }
+    }
+
+    /// Read and commit the pending draw, shared by normal and failed submits.
+    /// Returns whether the run finished; `next` owns only an uncommitted append.
+    fn commit_row_pending<F: FnMut(i32) -> bool>(
+        &mut self,
+        state: &mut DecodeState<'_>,
+        pending: UniquePtr<MlxArray>,
+        next: Option<&MlxArray>,
+        teardown: Teardown,
+        on_token: &mut F,
+    ) -> Result<bool, DirectEngineError> {
+        let id = state.id;
+        // Wait only for pending, preserving overlap with the next forward.
+        let host = match super::rows::try_read_token(&pending) {
+            Ok(host) => host,
+            Err(msg) => {
+                drop(pending);
+                self.retire(id, next, 1 + i32::from(next.is_some()), teardown)?;
+                return Err(DirectEngineError::Row(msg));
+            }
+        };
+        drop(pending);
+        let before = state.generated.len();
+        let outcome = single(self.engine_mut().finish_rows(&[host], &mut [state.row()]))?;
+        if let Some(error) = outcome.error {
+            self.retire(id, next, 1 + i32::from(next.is_some()), teardown)?;
+            return Err(DirectEngineError::Row(error.message().to_string()));
+        }
+        let stopped =
+            delivers_to_callback(&state.generated, before, &outcome) && !on_token(outcome.token);
+        if stopped || outcome.finish.is_some() {
+            if next.is_some() {
+                self.retire(id, next, 1, teardown)?;
+            }
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     /// Submit the forward of one per-row pipelined step for `id` on `input`

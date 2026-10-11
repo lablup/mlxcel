@@ -386,3 +386,46 @@ fn an_eos_inside_a_verify_block_leaves_the_offset_where_the_step_does() {
     let (stepped, _, _) = drafted(true, &mut plain, &[0], 20, &stop, None);
     assert_eq!(verified, stepped);
 }
+
+#[test]
+fn failed_plain_readback_unwinds_to_the_committed_prefix() {
+    use crate::eval_faults::{FaultGuard, FaultPoint};
+    let sampling = SamplingConfig::greedy();
+    for nth in [0, 2] {
+        let model = CycleModel::default();
+        let mut client = DirectEngine::new(&model, 0).with_force_sync(false);
+        let id = client.open_sequence().unwrap();
+        let mut delivered = Vec::new();
+        {
+            let _fault = FaultGuard::arm(FaultPoint::Readback, nth);
+            let mut drafter = ScriptedDrafter::new(&[], true);
+            let result = client.speculate(
+                id,
+                &DirectRequest::text(&[0], 16, &sampling),
+                &sampling,
+                &mut drafter,
+                4,
+                |token| {
+                    delivered.push(token);
+                    true
+                },
+            );
+            assert!(result.is_err());
+            assert!(
+                result
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("injected eval failure")
+            );
+        }
+        let set = client.engine().pool().get(id).unwrap();
+        let actual = (set.current_offset, set.caches[0].seq_len());
+        let mut drafter = ScriptedDrafter::new(&[], false);
+        let (expected, _, _) = drafted(true, &mut drafter, &[0], delivered.len(), &sampling, None);
+        assert_eq!(delivered, expected.tokens);
+        assert_eq!(actual, (expected.offset, expected.kv_len));
+        client.close_sequence(id);
+        assert!(client.engine().pool().get(id).is_none());
+    }
+}

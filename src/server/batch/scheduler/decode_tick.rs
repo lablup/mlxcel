@@ -611,7 +611,13 @@ impl BatchScheduler {
         let next = self.prime_lookahead_with_input(seq_ids, &next_input, params);
 
         // Step 2: read step n's tokens to host (the sync point) and finish-check.
-        let toks = mlxcel_core::engine::tokens_to_host(&la.tokens);
+        let toks = match mlxcel_core::engine::try_tokens_to_host(&la.tokens) {
+            Ok(tokens) => tokens,
+            Err(msg) => {
+                let _ = self.record_eval_outcome(Err(msg));
+                Vec::new()
+            }
+        };
         let mut finishing = toks.len() != seq_ids.len();
         if !finishing {
             for (i, &seq_id) in seq_ids.iter().enumerate() {
