@@ -106,10 +106,14 @@ impl BatchScheduler {
             batch_metrics,
             batch_observability,
             config_eos,
-            prefill_chunk_size,
+            prefill_chunk_policy: mlxcel_core::prefill_plan::PrefillChunkPolicy::resolve(Some(
+                prefill_chunk_size,
+            )),
             enable_preemption,
             preemption_policy,
             chunked_prefill_seq: None,
+            #[cfg(test)]
+            prefill_forward_lengths: Vec::new(),
             // A one-wide decode batch has nothing to mix a prefill into, and
             // that is also exactly b10621's `--no-cont-batching` gate:
             // upstream adds pending prompts to the batch only when
@@ -192,6 +196,16 @@ impl BatchScheduler {
         }
     }
 
+    /// Install the adaptive server chunk policy after the compatibility
+    /// constructor has derived budgets from its alone value.
+    pub fn with_prefill_chunk_policy(
+        mut self,
+        policy: mlxcel_core::prefill_plan::PrefillChunkPolicy,
+    ) -> Self {
+        self.prefill_chunk_policy = policy;
+        self
+    }
+
     /// Override the #715 batched-prefill padded-token budget with the explicit
     /// CLI/config value (`--max-batch-prefill-tokens`).
     ///
@@ -203,7 +217,7 @@ impl BatchScheduler {
     pub fn with_max_batch_prefill_tokens(mut self, configured: Option<usize>) -> Self {
         self.max_batch_prefill_tokens = resolve_max_batch_prefill_tokens(
             configured,
-            self.prefill_chunk_size,
+            self.prefill_chunk_policy.alone,
             self.max_batch_prefill,
         );
         self

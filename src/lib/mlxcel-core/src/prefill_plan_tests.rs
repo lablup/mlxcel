@@ -303,13 +303,117 @@ fn a_hit_reproduces_the_miss_only_from_a_split_point() {
 }
 
 #[test]
+fn resume_at_matches_the_fixed_chunk_suffix_at_every_split_point() {
+    for chunk in [512, 2048] {
+        for boundary in [None, Some(777)] {
+            for align in [false, true] {
+                let caps = tokens(align);
+                let base = PrefillPlan::with_prefix(5000, 123, boundary, chunk, caps);
+                let mut cursors = base.split_points();
+                cursors.push(base.prompt_len());
+                for cursor in cursors {
+                    let resumed = PrefillPlan::resume_at(5000, 123, boundary, cursor, chunk, caps);
+                    let expected: Vec<_> = base
+                        .pieces()
+                        .iter()
+                        .filter(|piece| piece.range.start >= cursor)
+                        .cloned()
+                        .collect();
+                    assert_eq!(
+                        resumed.pieces(),
+                        expected,
+                        "chunk={chunk}, boundary={boundary:?}, align={align}, cursor={cursor}"
+                    );
+                    assert_eq!(resumed.adopted(), base.adopted());
+                    assert_eq!(resumed.boundary(), base.boundary());
+                    assert_eq!(resumed.forwarded_len(), base.forwarded_len());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn resume_at_repartitions_from_the_cursor_when_the_chunk_changes() {
+    let plan = PrefillPlan::resume_at(8192, 0, None, 1024, 2048, tokens(false));
+    assert_eq!(
+        ranges(&plan),
+        vec![1024..3072, 3072..5120, 5120..7168, 7168..8192]
+    );
+    assert_eq!(plan.adopted(), 0);
+    assert_eq!(plan.forwarded_len(), 8192);
+}
+
+#[test]
+fn resumed_last_piece_still_reports_the_active_chunk() {
+    let plan = PrefillPlan::resume_at(1537, 0, None, 1536, 512, tokens(false));
+    assert_eq!(ranges(&plan), vec![1536..1537]);
+    assert_eq!(plan.chunk(), Some(512));
+}
+
+#[test]
+fn chunk_policy_resolves_adaptive_defaults_and_explicit_overrides() {
+    assert_eq!(
+        PrefillChunkPolicy::resolve(None),
+        PrefillChunkPolicy {
+            alone: DEFAULT_PREFILL_CHUNK,
+            contended: CONTENDED_PREFILL_CHUNK,
+        }
+    );
+    for chunk in [1024, 0] {
+        let policy = PrefillChunkPolicy::resolve(Some(chunk));
+        assert_eq!(policy.alone, chunk);
+        assert_eq!(policy.contended, chunk);
+        assert_eq!(policy.chunk(false), chunk);
+        assert_eq!(policy.chunk(true), chunk);
+    }
+}
+
+#[test]
 fn chunk_policy_default_is_the_adr_0007_value() {
     assert_eq!(DEFAULT_PREFILL_CHUNK, 2048);
+    assert_eq!(CONTENDED_PREFILL_CHUNK, 512);
     // The env override is read once per process, so only the default can be
     // asserted here without disturbing sibling tests.
     assert!(
         prefill_chunk_len() == DEFAULT_PREFILL_CHUNK
             || std::env::var_os("MLXCEL_PREFILL_CHUNK").is_some()
+    );
+}
+
+#[test]
+fn prefill_chunk_override_is_read_once_in_a_fresh_process() {
+    const CHILD: &str = "MLXCEL_PREFILL_CHUNK_TEST_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        assert_eq!(prefill_chunk_override(), Some(1024));
+        // SAFETY: this child process runs only this exact test, with one test
+        // thread, and no other thread reads or writes this environment key.
+        unsafe { std::env::set_var("MLXCEL_PREFILL_CHUNK", "512") };
+        assert_eq!(prefill_chunk_override(), Some(1024));
+        assert_eq!(prefill_chunk_len(), 1024);
+        return;
+    }
+
+    let output = std::process::Command::new(std::env::current_exe().expect("current test binary"))
+        .args([
+            "--exact",
+            "prefill_plan::tests::prefill_chunk_override_is_read_once_in_a_fresh_process",
+            "--test-threads=1",
+        ])
+        .env(CHILD, "1")
+        .env("MLXCEL_PREFILL_CHUNK", "1024")
+        .output()
+        .expect("spawn isolated prefill override test");
+    assert!(
+        output.status.success(),
+        "isolated test failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+        "isolated test did not run the exact case:\n{}",
+        String::from_utf8_lossy(&output.stdout)
     );
 }
 
@@ -345,8 +449,8 @@ impl tracing::Subscriber for WarnCollector {
 }
 
 /// `MLXCEL_PREFILL_CHUNK` parses as a token count (`0` disables chunking),
-/// and an unparseable value falls back to the default with exactly one
-/// warning that names the variable and the value, instead of silently.
+/// and an unparseable value is treated as unset with exactly one warning that
+/// names the variable and the value, instead of silently.
 #[test]
 fn unparseable_chunk_env_warns_once_and_falls_back_to_the_default() {
     let warnings = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -360,11 +464,11 @@ fn unparseable_chunk_env_warns_once_and_falls_back_to_the_default() {
                 parse_prefill_chunk(Some("-1")),
             )
         });
-    assert_eq!(unset, DEFAULT_PREFILL_CHUNK);
-    assert_eq!(zero, 0);
-    assert_eq!(padded, 512);
-    assert_eq!(bad_text, DEFAULT_PREFILL_CHUNK);
-    assert_eq!(negative, DEFAULT_PREFILL_CHUNK);
+    assert_eq!(unset, None);
+    assert_eq!(zero, Some(0));
+    assert_eq!(padded, Some(512));
+    assert_eq!(bad_text, None);
+    assert_eq!(negative, None);
     let warnings = warnings.lock().unwrap();
     assert_eq!(
         warnings.len(),

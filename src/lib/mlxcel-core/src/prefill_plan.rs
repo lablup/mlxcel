@@ -45,9 +45,10 @@
 //!    always; embedding input only where the executor extends the embedding
 //!    rows). A piece ending at the history boundary is never padded.
 //!
-//! The chunk value is one policy: [`prefill_chunk_len`], `MLXCEL_PREFILL_CHUNK`
-//! or [`DEFAULT_PREFILL_CHUNK`], on both front ends. The server's
-//! `--prefill-chunk-size` overrides it per process.
+//! The direct engine uses [`prefill_chunk_len`]. The server uses
+//! [`PrefillChunkPolicy`]: the larger default while no other sequence is
+//! decoding and a smaller chunk while a decode batch is live. An explicit
+//! `--prefill-chunk-size` or `MLXCEL_PREFILL_CHUNK` pins both states.
 
 use std::ops::Range;
 
@@ -58,6 +59,49 @@ use crate::utils::align_to_na_tile;
 /// row: TTFT at an 8192-token prompt was 8 to 29 percent higher at 512 on
 /// both paths and both measured models.
 pub const DEFAULT_PREFILL_CHUNK: usize = 2048;
+
+/// Prefill chunk used while at least one other sequence is decoding.
+///
+/// PR #2226 measured this value at less than half the live-stream ITL p95 of
+/// 2048 while admitting an 8192-token prompt. The larger default remains the
+/// faster time-to-first-token choice when no decode stream needs protection.
+pub const CONTENDED_PREFILL_CHUNK: usize = 512;
+
+/// Server prefill chunk sizes for idle and decode-contended scheduler ticks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrefillChunkPolicy {
+    /// Chunk used when no other sequence is decoding.
+    pub alone: usize,
+    /// Chunk used while at least one other sequence is decoding.
+    pub contended: usize,
+}
+
+impl PrefillChunkPolicy {
+    /// Resolve an explicit override or the adaptive server defaults.
+    #[must_use]
+    pub fn resolve(explicit: Option<usize>) -> Self {
+        match explicit {
+            Some(chunk) => Self {
+                alone: chunk,
+                contended: chunk,
+            },
+            None => Self {
+                alone: DEFAULT_PREFILL_CHUNK,
+                contended: CONTENDED_PREFILL_CHUNK,
+            },
+        }
+    }
+
+    /// Select the chunk for the scheduler's current decode state.
+    #[must_use]
+    pub fn chunk(&self, others_decoding: bool) -> usize {
+        if others_decoding {
+            self.contended
+        } else {
+            self.alone
+        }
+    }
+}
 
 /// The chunk policy: `MLXCEL_PREFILL_CHUNK` (tokens, `0` forces a single-pass
 /// prefill), else [`DEFAULT_PREFILL_CHUNK`]. Read once per process.
@@ -73,25 +117,32 @@ pub const DEFAULT_PREFILL_CHUNK: usize = 2048;
 /// default for `--prefill-chunk-size`, the Gemma 4 MTP prefill and the engine
 /// benchmark.
 pub fn prefill_chunk_len() -> usize {
-    static CHUNK: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    prefill_chunk_override().unwrap_or(DEFAULT_PREFILL_CHUNK)
+}
+
+/// Explicit `MLXCEL_PREFILL_CHUNK` override, read once per process.
+///
+/// `0` is a valid override that disables chunking. An unset or invalid value
+/// returns `None`; invalid text emits the same warning as before.
+pub fn prefill_chunk_override() -> Option<usize> {
+    static CHUNK: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
     *CHUNK
         .get_or_init(|| parse_prefill_chunk(std::env::var("MLXCEL_PREFILL_CHUNK").ok().as_deref()))
 }
 
-/// The chunk for an `MLXCEL_PREFILL_CHUNK` value: unset gives the default, and
-/// a value that is not a non-negative integer logs one warning naming the
-/// variable and the value before falling back to the default.
-fn parse_prefill_chunk(value: Option<&str>) -> usize {
+/// Parse an `MLXCEL_PREFILL_CHUNK` value. Unset and invalid values are not
+/// overrides; invalid text logs one warning naming the variable and value.
+fn parse_prefill_chunk(value: Option<&str>) -> Option<usize> {
     let Some(raw) = value else {
-        return DEFAULT_PREFILL_CHUNK;
+        return None;
     };
     match raw.trim().parse::<usize>() {
-        Ok(chunk) => chunk,
+        Ok(chunk) => Some(chunk),
         Err(_) => {
             tracing::warn!(
                 "MLXCEL_PREFILL_CHUNK={raw:?} is not a non-negative integer; using the default of {DEFAULT_PREFILL_CHUNK} tokens"
             );
-            DEFAULT_PREFILL_CHUNK
+            None
         }
     }
 }
@@ -257,22 +308,14 @@ impl PrefillPlan {
         chunk: usize,
         caps: PrefillCaps,
     ) -> Self {
-        let start = adopted.min(prompt_len);
-        // Embedding input is consumed whole and never split, so a history
-        // boundary does not apply to it: honoring one would cut the embedding
-        // rows into two forwards and advance a cursor the executor does not
-        // keep.
-        let boundary =
-            boundary.filter(|b| !caps.is_embedding_input() && *b > start && *b < prompt_len);
+        let (start, boundary, can_pad, pad_mask) =
+            plan_metadata(prompt_len, adopted, boundary, caps);
         let remaining = prompt_len - start;
         let chunk = (chunk > 0
             && caps.supports_chunked_prefill
             && !caps.is_embedding_input()
             && remaining > chunk)
             .then_some(chunk);
-        let can_pad = caps.can_pad(); // the model's own supports_padded_prefill() gate, see PrefillCaps::can_pad
-        let pad_mask = !caps.supports_maskless_padded_prefill || force_padded_prefill_array_mask();
-
         let mut pieces = Vec::new();
         let mut cursor = start;
         if let Some(boundary) = boundary {
@@ -283,19 +326,52 @@ impl PrefillPlan {
             cursor = boundary;
         }
         let step = chunk.unwrap_or(remaining.max(1));
-        while cursor < prompt_len {
-            let end = (cursor + step).min(prompt_len);
-            let len = end - cursor;
-            pieces.push(PrefillPiece {
-                range: cursor..end,
-                padded_len: if can_pad { align_to_na_tile(len) } else { len },
-            });
-            cursor = end;
-        }
+        append_pieces(&mut pieces, cursor, prompt_len, step, can_pad);
 
         Self {
             prompt_len,
             adopted: start,
+            boundary,
+            chunk,
+            pad_mask,
+            pieces,
+        }
+    }
+
+    /// Rebuild a prefill plan at `cursor`, allowing the chunk to change
+    /// between scheduler ticks without requiring the cursor to be a split
+    /// point of the new partition.
+    ///
+    /// The initial call (`cursor <= adopted`) is exactly [`Self::with_prefix`].
+    /// A continuation retains that plan's adopted-prefix and history-boundary
+    /// metadata, then partitions only `[cursor, prompt_len)`. The boundary
+    /// segment has already run before a continuation is parked.
+    #[must_use]
+    pub fn resume_at(
+        prompt_len: usize,
+        adopted: usize,
+        boundary: Option<usize>,
+        cursor: usize,
+        chunk: usize,
+        caps: PrefillCaps,
+    ) -> Self {
+        let (adopted, boundary, can_pad, pad_mask) =
+            plan_metadata(prompt_len, adopted, boundary, caps);
+        if cursor <= adopted {
+            return Self::with_prefix(prompt_len, adopted, boundary, chunk, caps);
+        }
+
+        debug_assert!(cursor <= prompt_len);
+        debug_assert!(boundary.is_none_or(|boundary| cursor >= boundary));
+        let cursor = cursor.min(prompt_len);
+        let chunk = (chunk > 0 && caps.supports_chunked_prefill && !caps.is_embedding_input())
+            .then_some(chunk);
+        let mut pieces = Vec::new();
+        let step = chunk.unwrap_or((prompt_len - cursor).max(1));
+        append_pieces(&mut pieces, cursor, prompt_len, step, can_pad);
+        Self {
+            prompt_len,
+            adopted,
             boundary,
             chunk,
             pad_mask,
@@ -410,6 +486,42 @@ impl PrefillPlan {
             .filter(|p| p.range.start >= self.adopted)
             .collect();
         tail.len() == self.pieces.len() && tail.iter().zip(&self.pieces).all(|(a, b)| *a == b)
+    }
+}
+
+fn plan_metadata(
+    prompt_len: usize,
+    adopted: usize,
+    boundary: Option<usize>,
+    caps: PrefillCaps,
+) -> (usize, Option<usize>, bool, bool) {
+    let adopted = adopted.min(prompt_len);
+    // Embedding input is consumed whole and never split, so a history
+    // boundary does not apply to it: honoring one would cut the embedding
+    // rows into two forwards and advance a cursor the executor does not keep.
+    let boundary = boundary.filter(|boundary| {
+        !caps.is_embedding_input() && *boundary > adopted && *boundary < prompt_len
+    });
+    let can_pad = caps.can_pad();
+    let pad_mask = !caps.supports_maskless_padded_prefill || force_padded_prefill_array_mask();
+    (adopted, boundary, can_pad, pad_mask)
+}
+
+fn append_pieces(
+    pieces: &mut Vec<PrefillPiece>,
+    mut cursor: usize,
+    prompt_len: usize,
+    step: usize,
+    can_pad: bool,
+) {
+    while cursor < prompt_len {
+        let end = cursor.saturating_add(step).min(prompt_len);
+        let len = end - cursor;
+        pieces.push(PrefillPiece {
+            range: cursor..end,
+            padded_len: if can_pad { align_to_na_tile(len) } else { len },
+        });
+        cursor = end;
     }
 }
 

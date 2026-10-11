@@ -59,7 +59,7 @@ pub(crate) struct WorkerSchedulerConfig {
     pub lora_runtime: Option<Arc<crate::lora::RuntimeLoraSet>>,
     pub max_batch_size: usize,
     pub max_queue_depth: usize,
-    pub prefill_chunk_size: usize,
+    pub prefill_chunk_policy: mlxcel_core::prefill_plan::PrefillChunkPolicy,
     /// #1011: explicit `--prefill-grant-interval` value bounding how long a
     /// parked chunked prefill yields to a live decode batch. `None` keeps the
     /// `MLXCEL_PREFILL_GRANT_INTERVAL` override or the shipped default;
@@ -518,8 +518,12 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                     }
                 }
 
-                let chunk_info = if sched_config.prefill_chunk_size > 0 {
-                    format!(", prefill_chunk_size={}", sched_config.prefill_chunk_size)
+                let chunk_info = if sched_config.prefill_chunk_policy.alone > 0 {
+                    format!(
+                        ", prefill_chunk_size={}, prefill_chunk_size_contended={}",
+                        sched_config.prefill_chunk_policy.alone,
+                        sched_config.prefill_chunk_policy.contended
+                    )
                 } else {
                     String::new()
                 };
@@ -727,12 +731,13 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                     sched_config.max_queue_depth,
                     batch_metrics.clone(),
                     batch_observability.clone(),
-                    sched_config.prefill_chunk_size,
+                    sched_config.prefill_chunk_policy.alone,
                     sched_config.enable_preemption,
                     sched_config.preemption_policy,
                     sched_config.max_batch_prefill,
                     sched_config.decode_storage_backend,
                 )
+                .with_prefill_chunk_policy(sched_config.prefill_chunk_policy)
                 .with_vision_cache_size(sched_config.vision_cache_size)
                 // per-batch runtime-LoRA scale application (#1439).
                 .with_lora_runtime(sched_config.lora_runtime.clone())
@@ -1328,6 +1333,9 @@ pub(crate) fn spawn_legacy_model_worker(
                 1, // max_batch_prefill = 1 → sequential prefill
                 crate::server::DecodeStorageBackend::Dense,
             )
+            .with_prefill_chunk_policy(mlxcel_core::prefill_plan::PrefillChunkPolicy::resolve(
+                Some(0),
+            ))
             .with_xtc_newline_token_ids(xtc_newline_token_ids)
             .with_reasoning_budget(reasoning_budget, thinking_ids);
             scheduler.serve();

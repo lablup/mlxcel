@@ -340,8 +340,8 @@ pub struct BatchScheduler {
 
     // -- Configuration --
     config_eos: Vec<i32>,
-    /// Number of prompt tokens per prefill chunk. 0 = chunking disabled.
-    prefill_chunk_size: usize,
+    /// Prompt tokens per prefill chunk with and without live decode streams.
+    prefill_chunk_policy: mlxcel_core::prefill_plan::PrefillChunkPolicy,
     /// Whether preemptive eviction is enabled.
     enable_preemption: bool,
     /// Policy for selecting the eviction victim.
@@ -351,6 +351,12 @@ pub struct BatchScheduler {
     /// Sequence currently undergoing chunked prefill. `None` when no chunked
     /// prefill is in progress.
     chunked_prefill_seq: Option<SequenceInfo>,
+
+    /// Logical token lengths handed to the engine by `run_prefill_piece`.
+    /// Test-only proof that adaptive plans are executed rather than merely
+    /// constructed.
+    #[cfg(test)]
+    pub(super) prefill_forward_lengths: Vec<usize>,
 
     /// Issue #908 prototype gate, read once from `MLXCEL_MIXED_STEP` at
     /// construction so the tick loop never touches the environment. False (the

@@ -121,6 +121,7 @@ pub const CLASSIFIED_SERVER_CONFIG_FIELDS: &[&str] = &[
     "reranker_model_path",
     "rerank_batch_size",
     "prefill_chunk_size",
+    "prefill_chunk_size_contended",
     "prefill_grant_interval",
     "enable_preemption",
     "preemption_policy",
@@ -494,6 +495,7 @@ fn read_only_reason(field: &str) -> &'static str {
         | "embedding_request_timeout_secs"
         | "rerank_batch_size"
         | "prefill_chunk_size"
+        | "prefill_chunk_size_contended"
         | "prefill_grant_interval"
         | "enable_preemption"
         | "preemption_policy"
@@ -636,6 +638,7 @@ fn read_only_value(config: &ServerConfig, field: &str) -> Value {
             .unwrap_or(Value::Null),
         "rerank_batch_size" => json!(config.rerank_batch_size),
         "prefill_chunk_size" => json!(config.prefill_chunk_size),
+        "prefill_chunk_size_contended" => json!(config.prefill_chunk_size_contended),
         "prefill_grant_interval" => json!(config.prefill_grant_interval),
         "enable_preemption" => json!(config.enable_preemption),
         "preemption_policy" => debug(&config.preemption_policy),
@@ -716,6 +719,7 @@ fn read_only_kind(field: &str) -> KnobKind {
         | "embedding_request_timeout_secs"
         | "rerank_batch_size"
         | "prefill_chunk_size"
+        | "prefill_chunk_size_contended"
         | "max_batch_prefill"
         | "vision_cache_size"
         | "video_max_frames" => KnobKind::Int,

@@ -276,8 +276,10 @@ pub struct ServerStartupConfig {
     /// `--rerank-batch-size`. Forwarded to
     /// [`super::config::ServerConfig::rerank_batch_size`].
     pub rerank_batch_size: usize,
-    /// Prefill chunk size in tokens (0 = disabled).
+    /// Prefill chunk size when no other sequence is decoding (0 = disabled).
     pub prefill_chunk_size: usize,
+    /// Prefill chunk size while at least one other sequence is decoding.
+    pub prefill_chunk_size_contended: usize,
     /// Set when `--batch-size` and `--prefill-chunk-size` conflict; triggers a startup warning.
     pub batch_size_conflict: bool,
     /// Set when `--ubatch-size` was provided; triggers a startup info notice.
@@ -637,6 +639,9 @@ pub struct ServerStartupConfig {
 
 impl Default for ServerStartupConfig {
     fn default() -> Self {
+        let prefill_chunk_policy = mlxcel_core::prefill_plan::PrefillChunkPolicy::resolve(
+            mlxcel_core::prefill_plan::prefill_chunk_override(),
+        );
         Self {
             reasoning_format: crate::server::ReasoningFormat::default(),
             reasoning_alias_field: crate::server::ReasoningAliasField::default(),
@@ -699,7 +704,8 @@ impl Default for ServerStartupConfig {
                 crate::server::config::DEFAULT_EMBEDDING_REQUEST_TIMEOUT_SECS,
             reranker_model_path: None,
             rerank_batch_size: crate::server::config::DEFAULT_RERANK_BATCH_SIZE,
-            prefill_chunk_size: mlxcel_core::prefill_plan::prefill_chunk_len(),
+            prefill_chunk_size: prefill_chunk_policy.alone,
+            prefill_chunk_size_contended: prefill_chunk_policy.contended,
             batch_size_conflict: false,
             ubatch_size_provided: false,
             enable_preemption: false,
@@ -1757,6 +1763,7 @@ pub(super) fn build_server_config(
         reranker_model_path: startup.reranker_model_path.clone(),
         rerank_batch_size: startup.rerank_batch_size,
         prefill_chunk_size: startup.prefill_chunk_size,
+        prefill_chunk_size_contended: startup.prefill_chunk_size_contended,
         // #1011: pass the explicit --prefill-grant-interval through untouched
         // (the scheduler resolves env / shipped default when this is None).
         prefill_grant_interval: startup.prefill_grant_interval,
@@ -3081,6 +3088,7 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
             kv_unified = startup.kv_unified,
             n_parallel = startup.n_parallel,
             prefill_chunk_size = startup.prefill_chunk_size,
+            prefill_chunk_size_contended = startup.prefill_chunk_size_contended,
             max_kv_size = ?startup.max_kv_size,
             "resolved context and batch geometry (0 = the checkpoint's own trained context)"
         );

@@ -742,7 +742,10 @@ impl ModelProvider {
                 config.lora_runtime.clone(),
                 config.max_batch_size,
                 config.max_queue_depth,
-                config.prefill_chunk_size,
+                mlxcel_core::prefill_plan::PrefillChunkPolicy {
+                    alone: config.prefill_chunk_size,
+                    contended: config.prefill_chunk_size_contended,
+                },
                 config.enable_preemption,
                 config.preemption_policy,
                 config.max_batch_prefill,
@@ -1137,7 +1140,7 @@ impl ModelProvider {
             None,
             max_batch_size,
             max_queue_depth,
-            prefill_chunk_size,
+            mlxcel_core::prefill_plan::PrefillChunkPolicy::resolve(Some(prefill_chunk_size)),
             enable_preemption,
             preemption_policy,
             max_batch_prefill,
@@ -1199,7 +1202,7 @@ impl ModelProvider {
         lora_runtime: Option<Arc<crate::lora::RuntimeLoraSet>>,
         max_batch_size: usize,
         max_queue_depth: usize,
-        prefill_chunk_size: usize,
+        prefill_chunk_policy: mlxcel_core::prefill_plan::PrefillChunkPolicy,
         enable_preemption: bool,
         preemption_policy: crate::server::config::PreemptionPolicy,
         max_batch_prefill: usize,
@@ -1262,7 +1265,7 @@ impl ModelProvider {
             lora_runtime,
             max_batch_size,
             max_queue_depth,
-            prefill_chunk_size,
+            prefill_chunk_policy,
             enable_preemption,
             preemption_policy,
             max_batch_prefill: max_batch_prefill.max(1),
@@ -1391,7 +1394,7 @@ impl ModelProvider {
         let sched_config = model_worker::WorkerSchedulerConfig {
             max_batch_size,
             max_queue_depth,
-            prefill_chunk_size: 0,
+            prefill_chunk_policy: mlxcel_core::prefill_plan::PrefillChunkPolicy::resolve(Some(0)),
             // #1011: chunking is off on this path, so no prefill can ever park
             // and the fairness grant is unreachable; keep the default.
             lora_adapters: Vec::new(),

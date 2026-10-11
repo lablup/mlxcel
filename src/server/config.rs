@@ -834,9 +834,11 @@ pub struct ServerConfig {
     /// takes the loaded reranker kind's own default. See
     /// [`DEFAULT_RERANK_BATCH_SIZE`].
     pub rerank_batch_size: usize,
-    /// Number of tokens per prefill chunk. When 0, chunking is disabled and
-    /// the full prompt is prefilled in a single pass.
+    /// Number of tokens per prefill chunk when no other sequence is decoding.
+    /// When 0, chunking is disabled and the full prompt is one pass.
     pub prefill_chunk_size: usize,
+    /// Number of tokens per prefill chunk while another sequence is decoding.
+    pub prefill_chunk_size_contended: usize,
     /// #1011 prefill fairness interval (`--prefill-grant-interval`): decode
     /// ticks a parked chunked prefill yields before the scheduler grants it
     /// one, bounding the admitted request's time to first token. `None` lets
@@ -1086,6 +1088,9 @@ pub struct ServerConfig {
 
 impl Default for ServerConfig {
     fn default() -> Self {
+        let prefill_chunk_policy = mlxcel_core::prefill_plan::PrefillChunkPolicy::resolve(
+            mlxcel_core::prefill_plan::prefill_chunk_override(),
+        );
         Self {
             gcp: None,
             reasoning_format: crate::server::ReasoningFormat::default(),
@@ -1174,7 +1179,8 @@ impl Default for ServerConfig {
             embedding_request_timeout_secs: DEFAULT_EMBEDDING_REQUEST_TIMEOUT_SECS,
             reranker_model_path: None,
             rerank_batch_size: DEFAULT_RERANK_BATCH_SIZE,
-            prefill_chunk_size: mlxcel_core::prefill_plan::prefill_chunk_len(),
+            prefill_chunk_size: prefill_chunk_policy.alone,
+            prefill_chunk_size_contended: prefill_chunk_policy.contended,
             // #1011: unset -> scheduler resolves the env override / default.
             prefill_grant_interval: None,
             enable_preemption: false,

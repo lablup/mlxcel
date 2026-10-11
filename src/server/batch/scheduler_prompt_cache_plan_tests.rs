@@ -24,9 +24,12 @@
 //! of that follow-up, and a hit from inside a piece is reported as such by the
 //! plan. `docs/CONTINUOUS_BATCHING.md` records the real-checkpoint numbers.
 
-use super::scheduler_model_owned_cache_tests::{options, prompt, test_store, tiny_gemma3};
+use super::scheduler_model_owned_cache_tests::{
+    options, prompt, test_store, tiny_gemma3, tiny_gemma3_args, tiny_gemma3_weights,
+};
 use super::*;
 use crate::LoadedModel;
+use crate::models::{Gemma3Model, Gemma3Wrapper};
 use crate::server::config::{DecodeStorageBackend, PreemptionPolicy, PromptCacheRequestContext};
 use crate::server::model_provider::{GenerateEvent, GenerationResult};
 use crate::server::prompt_cache::{PromptCacheStore, key::MultimodalDigest};
@@ -41,9 +44,17 @@ use std::time::Duration;
 /// with an explicit prefill chunk, so the plan's chunk pieces run across
 /// ticks.
 fn plan_scheduler(store: Arc<PromptCacheStore>, chunk: usize) -> BatchScheduler {
+    plan_scheduler_with_model(tiny_gemma3(), store, chunk)
+}
+
+fn plan_scheduler_with_model(
+    model: Gemma3Wrapper,
+    store: Arc<PromptCacheStore>,
+    chunk: usize,
+) -> BatchScheduler {
     let (_tx, rx) = mpsc::channel();
     let sched = BatchScheduler::with_config(
-        LoadedModel::Gemma3(tiny_gemma3()),
+        LoadedModel::Gemma3(model),
         MlxcelTokenizer::stub(),
         vec![7],
         rx,
@@ -60,6 +71,123 @@ fn plan_scheduler(store: Arc<PromptCacheStore>, chunk: usize) -> BatchScheduler 
     .with_prompt_cache(Some(store));
     install_thread_local_default_stream(sched.generation_stream.as_ref());
     sched
+}
+
+/// Scheduler with the production adaptive chunk policy.
+fn adaptive_plan_scheduler() -> BatchScheduler {
+    let mut args = tiny_gemma3_args();
+    args.max_position_embeddings = 8192;
+    let model = Gemma3Wrapper::new(
+        Gemma3Model::from_weights(&tiny_gemma3_weights(), &args).expect("tiny gemma3 loads"),
+    );
+    plan_scheduler_with_model(
+        model,
+        test_store(),
+        mlxcel_core::prefill_plan::DEFAULT_PREFILL_CHUNK,
+    )
+    .with_prefill_chunk_policy(mlxcel_core::prefill_plan::PrefillChunkPolicy::resolve(None))
+}
+
+/// Admit a synthetic request and return its queued sequence and response
+/// stream for execution tests.
+fn queued_prompt(
+    sched: &mut BatchScheduler,
+    prompt_len: usize,
+) -> (SequenceInfo, mpsc::Receiver<GenerateEvent>) {
+    let mut opts = options();
+    opts.max_tokens = 1;
+    opts.ignore_eos = true;
+    let tokens: Vec<i32> = (0..prompt_len).map(|index| (index % 6) as i32).collect();
+    let (tx, rx) = mpsc::channel();
+    sched.enqueue_request(
+        "prompt".to_string(),
+        Some(tokens),
+        opts,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        tx,
+        Arc::new(AtomicBool::new(false)),
+        true,
+    );
+    (
+        sched.prefill_queue.dequeue().expect("request is queued"),
+        rx,
+    )
+}
+
+/// Put a dequeued request back at the head and execute its first real prefill
+/// forward through the scheduler and tiny Gemma test model.
+fn start_recorded_prefill(sched: &mut BatchScheduler, seq: SequenceInfo) {
+    let seq_id = seq.seq_id;
+    sched
+        .prefill_queue
+        .enqueue_front(seq)
+        .unwrap_or_else(|_| panic!("re-queue adaptive prefill request"));
+    sched.execute_prefill(seq_id);
+}
+
+/// Execute every parked continuation, then require a successful Done frame.
+fn finish_recorded_prefill(sched: &mut BatchScheduler, rx: &mpsc::Receiver<GenerateEvent>) {
+    while sched.chunked_prefill_seq.is_some() {
+        assert!(
+            sched.continue_chunked_prefill(),
+            "every parked continuation runs a model forward"
+        );
+    }
+    loop {
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(GenerateEvent::Done(_)) => break,
+            Ok(GenerateEvent::Error(err)) => panic!("adaptive prefill aborted: {err}"),
+            Ok(_) => {}
+            Err(err) => panic!("adaptive prefill did not complete: {err}"),
+        }
+    }
+}
+
+#[test]
+fn adaptive_chunk_policy_executes_and_resumes_real_prefill_forwards() {
+    // A live decode row selects 512 for every executed piece, including the
+    // one-token terminal continuation.
+    {
+        let mut sched = adaptive_plan_scheduler();
+        let (live, _live_rx) = queued_prompt(&mut sched, 8);
+        sched.active_batch.add(live).expect("decode row fits");
+        let (contended, rx) = queued_prompt(&mut sched, 1537);
+        start_recorded_prefill(&mut sched, contended);
+        finish_recorded_prefill(&mut sched, &rx);
+        assert_eq!(sched.prefill_forward_lengths, vec![512, 512, 512, 1]);
+    }
+
+    // With no other row decoding, the same execution path selects 2048.
+    {
+        let mut sched = adaptive_plan_scheduler();
+        let (alone, rx) = queued_prompt(&mut sched, 3000);
+        start_recorded_prefill(&mut sched, alone);
+        finish_recorded_prefill(&mut sched, &rx);
+        assert_eq!(sched.prefill_forward_lengths, vec![2048, 952]);
+    }
+
+    // The decode row drains after the first forward. The parked request is
+    // repartitioned at its live 512-token cursor and completes without the old
+    // "no remaining tokens" abort.
+    {
+        let mut sched = adaptive_plan_scheduler();
+        let (live, _live_rx) = queued_prompt(&mut sched, 8);
+        let live_id = live.seq_id;
+        sched.active_batch.add(live).expect("decode row fits");
+        let (changing, rx) = queued_prompt(&mut sched, 5000);
+        start_recorded_prefill(&mut sched, changing);
+        assert_eq!(sched.prefill_forward_lengths, vec![512]);
+        assert!(sched.chunked_prefill_seq.is_some());
+
+        sched
+            .active_batch
+            .remove(live_id)
+            .expect("decode row exists");
+        finish_recorded_prefill(&mut sched, &rx);
+        assert_eq!(sched.prefill_forward_lengths, vec![512, 2048, 2048, 392]);
+    }
 }
 
 /// A chat turn's cache context: `history` is the rendering without the

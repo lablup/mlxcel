@@ -9,10 +9,11 @@ serving roles that split prefill and decode across processes.
 ## Continuous batching
 
 The scheduler keeps up to `--parallel` sequences active at once. Each step it
-either admits and prefills queued prompts (chunked at `--prefill-chunk-size` so a
-long prompt does not stall decode) or advances the active batch by one decode
-token, then streams the new tokens out. The scheduler decides what runs; the
-engine runs it. `mlxcel_core::engine::Engine` owns the model and the KV pool,
+either admits and prefills queued prompts (chunked at 2048 tokens while no other
+sequence is decoding and 512 while a decode batch is live, unless overridden)
+or advances the active batch by one decode token, then streams the new tokens
+out. The scheduler decides what runs; the engine runs it.
+`mlxcel_core::engine::Engine` owns the model and the KV pool,
 and every model forward, sampler draw and finish step the scheduler needs goes
 through `Engine::prefill`, `Engine::step` (one entry for every row count: a
 lone request is a batch of one) and the pipelined `submit` / `finish_rows` pair
@@ -31,7 +32,7 @@ the speculative burst generators stay in the scheduler. Relevant flags:
 | `--max-batch-prefill N` | 4 | Requests batched into one prefill forward pass (families that support it). |
 | `--max-batch-prefill-tokens N` | (derived) | Padded-token budget bounding one batched prefill's transient memory. Unset derives `2 * max_batch_prefill * min(prefill_chunk_size, 512)`; `0` disables the cap. |
 | `--max-queue-depth N` | 32 | Maximum queued (not yet admitted) requests. |
-| `--prefill-chunk-size N` | 2048 | Token chunk size for prefill; bounds prefill's effect on decode latency. One policy with the CLI's `MLXCEL_PREFILL_CHUNK` (ADR 0007). |
+| `--prefill-chunk-size N` | 2048 alone; 512 with live decode | Token chunk size for both scheduler states when explicitly set. `--batch-size` / `LLAMA_ARG_BATCH` and `MLXCEL_PREFILL_CHUNK` are equivalent overrides. Without one, the scheduler chooses per tick to preserve single-stream TTFT while bounding admission's effect on active decode latency (#2228). |
 | `--prefill-grant-interval N` | 16 | Decode ticks a parked chunked prefill yields before it is granted one; bounds an admitted long prompt's time to first token. `0` disables the grant (unbounded wait). |
 | `--kv-admission-watermark F` | 0.01 | Fraction of the paged KV block budget (`0.0` to `0.5`) a prefill admission keeps free while rows are decoding, so they can grow without being preempted. `0` disables it. See below. |
 | `--enable-preemption` | off | Allow evicting a lower-priority sequence to admit a waiting one. |
@@ -177,11 +178,11 @@ context-sizing note in [environment-variables.md](environment-variables.md)).
 
 ### One prefill plan, and when a prompt-cache hit reproduces a miss
 
-Since #2170 the CLI generator and the scheduler prefill through one `PrefillPlan` (`mlxcel_core::prefill_plan`): the adopted prompt-cache prefix is skipped, a snapshot family's chat prompt is split once at its history boundary (#1143, one unpadded forward, the point the prompt cache snapshots), the rest is cut into `--prefill-chunk-size` pieces (default 2048, the same policy value as the CLI's `MLXCEL_PREFILL_CHUNK`, decided in [ADR 0007](adr/0007-unified-batch-native-engine.md)), and a piece is tile-padded on M5+ hardware only where the model opts in. The scheduler runs one piece per tick and rebuilds the plan from the sequence each tick, so chunked prefill keeps interleaving with decode; the Gemma 4 MTP burst takes its row-wise prefill ranges from the same plan.
+Since #2170 the CLI generator and the scheduler prefill through one `PrefillPlan` (`mlxcel_core::prefill_plan`): the adopted prompt-cache prefix is skipped, a snapshot family's chat prompt is split once at its history boundary (#1143, one unpadded forward, the point the prompt cache snapshots), the rest is cut into chunk pieces, and a piece is tile-padded on M5+ hardware only where the model opts in. The direct engine and an otherwise idle server use 2048. While another sequence is decoding, the server uses 512; an explicit `--prefill-chunk-size` (or `--batch-size` / `LLAMA_ARG_BATCH`) or `MLXCEL_PREFILL_CHUNK` pins both states. The scheduler runs one piece per tick and rebuilds the continuation from the live cursor, so the chunk may change safely when the decode batch empties or becomes active. The Gemma 4 MTP burst remains on the alone value and takes its row-wise prefill ranges from the same plan.
 
 Two prefills of the same prompt that forward the same pieces from the same KV state are bitwise identical under `MLXCEL_SDPA_DETERMINISTIC=1`. Two that partition the prompt differently are not: the CUDA quantized matmul routes a forward of fewer than 8 rows to the per-row `qmv` kernel and larger ones to the tiled `qmm` kernel, attention over a short query block tiles differently from the full causal pass, and the two reduce in different orders, so KV and logits differ in the last bit and a greedy stream can flip at a near-tie token. The split at the history boundary, `--prefill-chunk-size`, and a prompt-cache hit (which forwards only the suffix after the adopted prefix) are all partitions.
 
-So a prompt-cache hit reproduces the cold (miss) run of the same prompt exactly when its adopted prefix ends on one of the cold plan's split points (`PrefillPlan::reproduces`): the history boundary of a snapshot family, or a chunk edge. That is the plan half of the condition; the other half is that the adopted rows were themselves written by the same pieces, as a boundary snapshot of an earlier turn or a primed prefix forwarded as one piece are. Rows a donor wrote by decode steps, or inside a longer forward, are a different partition even when the adopted length is a split point. `make engine-parity` measures both shapes on GB10 (2026-10-07, 64 greedy and seeded tokens, the hit primed with the prompt's history prefix):
+So a prompt-cache hit reproduces the cold (miss) run of the same prompt exactly when its adopted prefix ends on one of the cold plan's split points (`PrefillPlan::reproduces`): the history boundary of a snapshot family, or a chunk edge. That is the plan half of the condition; the other half is that the adopted rows were themselves written by the same pieces, as a boundary snapshot of an earlier turn or a primed prefix forwarded as one piece are. Rows a donor wrote by decode steps, or inside a longer forward, are a different partition even when the adopted length is a split point. A prefill whose chunk changes with scheduler state is likewise a different partition; prefills that run in the same scheduler states keep the existing reproduction invariant. `make engine-parity` measures both shapes on GB10 (2026-10-07, 64 greedy and seeded tokens, the hit primed with the prompt's history prefix):
 
 | model | miss partition | hit partition | miss vs hit |
 |---|---|---|---|
@@ -196,7 +197,7 @@ The dense-KV rows diverge because their cold plan has no split point at 45 or 71
 Known limitations of the plan, recorded for the epic's end-of-run measurement:
 
 - The history segment of a snapshot family's prefill (the span before the history boundary, #1143) is always one unchunked forward, whatever `--prefill-chunk-size` says. This predates the plan (it has been the case since #1143), and the plan keeps it because the segment is where the prompt cache snapshots the model state. A long chat history on a snapshot family therefore prefills as one forward that does not interleave with concurrent decode ticks; only the pieces after the boundary do.
-- What the 2048 default (up from 512 on the server) does to the inter-token latency of concurrent decode streams is not measured yet. A larger chunk lengthens each prefill tick that a live decode batch waits behind. The epic's end-of-run benchmark measures it; `--prefill-chunk-size` and `MLXCEL_PREFILL_CHUNK` lower it per deployment in the meantime.
+- PR #2226 measured the tradeoff that the adaptive default resolves: with four Llama-3.2-1B 4-bit streams decoding and an 8192-token request admitted, 2048 produced 127.9–128.9 ms stream ITL p95 during admission and 1903–2060 ms admitted-request TTFT; 512 produced 55.8–56.4 ms ITL p95 and 3768–4067 ms TTFT (three rounds). The scheduler therefore uses 512 only while `active_batch` is non-empty and returns to 2048 when the decode streams finish (#2228).
 
 ### Decode headroom under a tight budget (`--kv-admission-watermark`)
 

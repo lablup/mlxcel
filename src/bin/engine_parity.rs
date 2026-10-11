@@ -341,6 +341,7 @@ fn main() -> Result<()> {
             // `--server-prefill-chunk` pins the chunk on every server arm.
             if let Some(chunk) = args.server_prefill_chunk {
                 startup.prefill_chunk_size = chunk;
+                startup.prefill_chunk_size_contended = chunk;
             }
             let server = InProcessServer::start(&startup)?;
             for case in &cases {

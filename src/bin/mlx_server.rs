@@ -827,13 +827,12 @@ struct ServerArgs {
     )]
     rerank_batch_size: usize,
 
-    /// Prefill chunk size in tokens (0 = disabled). Defaults to the shared
-    /// chunk policy: `MLXCEL_PREFILL_CHUNK`, else 2048 (ADR 0007).
-    #[arg(
-        long = "prefill-chunk-size",
-        default_value_t = mlxcel_core::prefill_plan::prefill_chunk_len()
-    )]
-    prefill_chunk_size: usize,
+    /// Prefill chunk size in tokens (0 = disabled).
+    ///
+    /// [default: 2048 when no other sequence is decoding, 512 when one is;
+    /// MLXCEL_PREFILL_CHUNK overrides]
+    #[arg(long = "prefill-chunk-size")]
+    prefill_chunk_size: Option<usize>,
 
     /// Decode ticks a parked chunked prefill yields before it is granted one
     /// (#1011).
@@ -853,7 +852,7 @@ struct ServerArgs {
     #[arg(long = "prefill-grant-interval", value_name = "N")]
     prefill_grant_interval: Option<usize>,
 
-    /// Prefill batch size [llama-server alias for --prefill-chunk-size] [default: 2048]
+    /// Prefill batch size [llama-server alias for --prefill-chunk-size]
     #[arg(
         short = 'b',
         long = "batch-size",

@@ -14,11 +14,12 @@
 
 //! The scheduler's execution of a [`PrefillPlan`] (ADR 0007, issue #2170).
 //!
-//! The plan is a pure function of the sequence (prompt length, adopted
-//! prompt-cache prefix, history boundary), the server's chunk and the model's
-//! capabilities, so it is rebuilt from the sequence on every tick instead of
-//! being parked next to it; `SequenceInfo::prefill_offset` is the cursor into
-//! it. One tick runs one piece, so a long prompt keeps interleaving with
+//! The plan is rebuilt from the sequence on every tick instead of being parked
+//! next to it. Its inputs are the prompt length, adopted prompt-cache prefix,
+//! history boundary, model capabilities, and the chunk selected from the live
+//! scheduler state. `SequenceInfo::prefill_offset` is the resumable cursor, so
+//! the chunk may change between ticks. One tick runs one piece, so a long
+//! prompt keeps interleaving with
 //! decode (ADR 0005), with one exception that keeps the pre-plan tick shape:
 //! the history-boundary segment (issue #1143) is followed by the next piece in
 //! the same tick, because the segment is the prompt cache's snapshot point and
@@ -59,7 +60,29 @@ impl BatchScheduler {
     /// `continue_chunked_prefill`, `chunked_prefill_reserved_blocks`, the
     /// prefill-role handoff.
     pub(super) fn prefill_plan_for(&self, seq: &SequenceInfo) -> PrefillPlan {
-        self.prefill_plan_for_with_chunk(seq, self.prefill_chunk_size)
+        let input = if seq.vlm_embeddings.is_some() {
+            PrefillInput::Embeddings {
+                executor_pads: false,
+            }
+        } else {
+            PrefillInput::Tokens
+        };
+        let caps =
+            PrefillCaps::for_model(self.engine.model(), should_align_prefill()).with_input(input);
+        PrefillPlan::resume_at(
+            seq.prompt_tokens.len(),
+            seq.prefill_start_offset,
+            self.history_boundary_split(seq),
+            seq.prefill_offset,
+            self.prefill_chunk_for_tick(),
+            caps,
+        )
+    }
+
+    /// Chunk selected for this scheduler tick.
+    pub(super) fn prefill_chunk_for_tick(&self) -> usize {
+        self.prefill_chunk_policy
+            .chunk(!self.active_batch.is_empty())
     }
 
     /// [`Self::prefill_plan_for`] with an explicit chunk; `0` keeps every
@@ -154,6 +177,8 @@ impl BatchScheduler {
                 "KV cache budget exhausted: no free blocks in the {total}-block KV cache budget to continue the chunked prefill"
             )));
         }
+        #[cfg(test)]
+        self.prefill_forward_lengths.push(piece.len());
         // The engine runs the piece: forward, then (for a non-terminal piece)
         // the forced eval that releases its transients before the next piece's
         // graph is built and fails just this request on an MLX throw (#822),
@@ -255,11 +280,12 @@ impl BatchScheduler {
     /// first piece starts after it.
     pub(super) fn start_chunked_prefill(&mut self, mut seq: SequenceInfo) {
         let plan = self.prefill_plan_for(&seq);
+        let selected_chunk = self.prefill_chunk_for_tick();
         let _span = tracing::info_span!(
             "chunked_prefill_start",
             seq_id = %seq.seq_id,
             prompt_len = seq.prompt_tokens.len(),
-            chunk_size = self.prefill_chunk_size,
+            chunk_size = selected_chunk,
             cached = seq.already_cached_tokens,
             start = seq.prefill_start_offset,
             boundary = plan.boundary(),

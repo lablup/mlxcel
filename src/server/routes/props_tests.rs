@@ -227,18 +227,16 @@ fn geometry_block_reports_batch_and_kv_bounds() {
 /// startup notice's trigger) and never changes the number (#1472).
 #[test]
 fn geometry_block_reports_the_resolved_batch_size_alias() {
-    // The default is the shared chunk policy (ADR 0007), not a literal: 512
-    // is an explicit chunk now and would win over the alias.
-    let default_chunk = mlxcel_core::prefill_plan::prefill_chunk_len();
-    let alias = if default_chunk == 1024 { 2048 } else { 1024 };
+    let alias = 1024;
     let resolved =
-        crate::server::cli_input::resolve_prefill_chunk_size(default_chunk, Some(alias), Some(256));
-    assert_eq!(resolved.prefill_chunk_size, alias);
+        crate::server::cli_input::resolve_prefill_chunk_size(None, Some(alias), Some(256));
+    assert_eq!(resolved.explicit, Some(alias));
     assert!(resolved.ubatch_size_provided);
     assert!(!resolved.batch_size_conflict);
 
     let block = geometry_block(&ServerConfig {
-        prefill_chunk_size: resolved.prefill_chunk_size,
+        prefill_chunk_size: alias,
+        prefill_chunk_size_contended: alias,
         max_batch_size: 4,
         max_kv_size: Some(4096),
         ..Default::default()

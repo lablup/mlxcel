@@ -225,7 +225,7 @@ impl BatchScheduler {
                 tokenizer: &self.tokenizer,
                 drafter_slot: &mut self.speculative_drafter_slot,
                 dispatch: &self.speculative_dispatch,
-                prefill_chunk_size: self.prefill_chunk_size,
+                prefill_chunk_size: self.prefill_chunk_policy.alone,
                 // Classic-step probes are a B=1 profiling concern (#736).
                 profile_probe_rounds: 0,
                 prefill_boundary: None,
@@ -340,7 +340,7 @@ impl BatchScheduler {
                 tokenizer: &self.tokenizer,
                 drafter_slot: &mut self.speculative_drafter_slot,
                 dispatch: &self.speculative_dispatch,
-                prefill_chunk_size: self.prefill_chunk_size,
+                prefill_chunk_size: self.prefill_chunk_policy.alone,
                 // While the adaptive policy is profiling this pairing, ask
                 // the burst for a few classic-step probe rounds so the
                 // measured-cost estimator has a classic step time (#736);

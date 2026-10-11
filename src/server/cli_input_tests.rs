@@ -87,7 +87,7 @@ fn sample_input() -> ServerStartupInput {
         embedding_request_timeout_secs: 120,
         reranker_model_path: None,
         rerank_batch_size: 0,
-        prefill_chunk_size: mlxcel_core::prefill_plan::prefill_chunk_len(),
+        prefill_chunk_size: None,
         prefill_grant_interval: None,
         batch_size: None,
         ubatch_size: None,
@@ -447,39 +447,40 @@ fn into_startup_config_propagates_image_limits() {
 
 #[test]
 fn resolve_prefill_chunk_size_batch_size_alias_takes_effect() {
-    let default = mlxcel_core::prefill_plan::prefill_chunk_len();
-    let r = resolve_prefill_chunk_size(default, Some(1024), None);
-    assert_eq!(r.prefill_chunk_size, 1024);
+    let r = resolve_prefill_chunk_size(None, Some(1024), None);
+    assert_eq!(r.explicit, Some(1024));
     assert!(!r.batch_size_conflict);
     assert!(!r.ubatch_size_provided);
 }
 
 #[test]
 fn resolve_prefill_chunk_size_explicit_prefill_wins_with_conflict() {
-    let r = resolve_prefill_chunk_size(256, Some(1024), None);
-    assert_eq!(r.prefill_chunk_size, 256);
+    let r = resolve_prefill_chunk_size(Some(2048), Some(1024), None);
+    assert_eq!(r.explicit, Some(2048));
     assert!(r.batch_size_conflict);
 }
 
 #[test]
 fn resolve_prefill_chunk_size_no_batch_size_returns_prefill() {
-    let r = resolve_prefill_chunk_size(768, None, None);
-    assert_eq!(r.prefill_chunk_size, 768);
+    let r = resolve_prefill_chunk_size(Some(768), None, None);
+    assert_eq!(r.explicit, Some(768));
     assert!(!r.batch_size_conflict);
 }
 
 #[test]
 fn resolve_prefill_chunk_size_ubatch_sets_provided_flag() {
-    let default = mlxcel_core::prefill_plan::prefill_chunk_len();
-    let r = resolve_prefill_chunk_size(default, None, Some(256));
+    let r = resolve_prefill_chunk_size(None, None, Some(256));
     assert!(r.ubatch_size_provided);
-    assert_eq!(r.prefill_chunk_size, default);
+    assert_eq!(
+        r.explicit,
+        mlxcel_core::prefill_plan::prefill_chunk_override()
+    );
 }
 
 #[test]
 fn resolve_prefill_chunk_size_both_same_value_no_conflict() {
-    let r = resolve_prefill_chunk_size(1024, Some(1024), None);
-    assert_eq!(r.prefill_chunk_size, 1024);
+    let r = resolve_prefill_chunk_size(Some(1024), Some(1024), None);
+    assert_eq!(r.explicit, Some(1024));
     assert!(!r.batch_size_conflict);
 }
 
@@ -503,6 +504,7 @@ fn into_startup_config_resolves_batch_size_alias() {
     input.batch_size = Some(1024);
     let startup = input.into_startup_config().expect("valid startup input");
     assert_eq!(startup.prefill_chunk_size, 1024);
+    assert_eq!(startup.prefill_chunk_size_contended, 1024);
     assert!(!startup.batch_size_conflict);
     assert!(!startup.ubatch_size_provided);
 }
@@ -510,13 +512,85 @@ fn into_startup_config_resolves_batch_size_alias() {
 #[test]
 fn into_startup_config_detects_batch_size_conflict() {
     let mut input = sample_input();
-    input.prefill_chunk_size = 256;
+    input.prefill_chunk_size = Some(2048);
     input.batch_size = Some(1024);
     input.ubatch_size = Some(64);
     let startup = input.into_startup_config().expect("valid startup input");
-    assert_eq!(startup.prefill_chunk_size, 256);
+    assert_eq!(startup.prefill_chunk_size, 2048);
+    assert_eq!(startup.prefill_chunk_size_contended, 2048);
     assert!(startup.batch_size_conflict);
     assert!(startup.ubatch_size_provided);
+}
+
+#[test]
+fn into_startup_config_uses_adaptive_defaults_without_an_override() {
+    const CHILD: &str = "MLXCEL_CLI_ADAPTIVE_PREFILL_TEST_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let startup = sample_input()
+            .into_startup_config()
+            .expect("valid startup input");
+        assert_eq!(startup.prefill_chunk_size, 2048);
+        assert_eq!(startup.prefill_chunk_size_contended, 512);
+        return;
+    }
+
+    let output = std::process::Command::new(std::env::current_exe().expect("current test binary"))
+        .args([
+            "--exact",
+            "server::cli_input::tests::into_startup_config_uses_adaptive_defaults_without_an_override",
+            "--test-threads=1",
+        ])
+        .env(CHILD, "1")
+        .env_remove("MLXCEL_PREFILL_CHUNK")
+        .env_remove("LLAMA_ARG_BATCH")
+        .output()
+        .expect("spawn isolated adaptive prefill test");
+    assert!(
+        output.status.success(),
+        "isolated test failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+        "isolated test did not run the exact case:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn into_startup_config_uses_env_prefill_override_in_a_fresh_process() {
+    const CHILD: &str = "MLXCEL_CLI_PREFILL_CHUNK_TEST_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let startup = sample_input()
+            .into_startup_config()
+            .expect("valid startup input");
+        assert_eq!(startup.prefill_chunk_size, 768);
+        assert_eq!(startup.prefill_chunk_size_contended, 768);
+        return;
+    }
+
+    let output = std::process::Command::new(std::env::current_exe().expect("current test binary"))
+        .args([
+            "--exact",
+            "server::cli_input::tests::into_startup_config_uses_env_prefill_override_in_a_fresh_process",
+            "--test-threads=1",
+        ])
+        .env(CHILD, "1")
+        .env("MLXCEL_PREFILL_CHUNK", "768")
+        .output()
+        .expect("spawn isolated CLI prefill override test");
+    assert!(
+        output.status.success(),
+        "isolated test failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+        "isolated test did not run the exact case:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
 }
 
 #[test]
