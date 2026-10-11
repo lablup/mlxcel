@@ -1,0 +1,2 @@
+# Preserve the concurrency client's trailing blank line byte-for-byte.
+c-*-r*.txt -whitespace

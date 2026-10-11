@@ -1,0 +1,32 @@
+(a) chat: aggregate decode tokens / aggregate decode seconds per round
+round 1: on=157.485 off=157.747 delta=-0.166%
+round 2: on=158.416 off=159.882 delta=-0.917%
+round 3: on=155.207 off=152.814 delta=+1.567%
+round 4: on=152.479 off=159.752 delta=-4.553%
+round 5: on=153.867 off=155.342 delta=-0.950%
+median=-0.917%, range=-4.553%..+1.567%
+(b) copy: median paired gain per request; retain 90% of original gain
+q0: gain=+41.968% original=+61.736% floor=+55.563%
+q1: gain=+41.364% original=+53.320% floor=+47.988%
+q2: gain=+41.644% original=+65.449% floor=+58.904%
+q3: gain=+42.567% original=+66.599% floor=+59.939%
+(c) chat-template C=2: medians and round ranges; no disjoint regression
+plain: on=137.500 (137.300..140.200) off=136.000 (135.600..138.800)
+copy: on=216.500 (212.300..218.800) off=217.600 (201.700..218.400)
+(d) long copy: ratios of median decode rates; retain 90% of speedup above 1x
+paged 1024: on=282.080 off=114.810 ratio=2.4569 floor=2.521
+paged 2048: on=230.980 off=90.360 ratio=2.5562 floor=2.6109999999999998
+paged 4096: on=178.950 off=125.370 ratio=1.4274 floor=1.378
+dense 8192: on=214.830 off=105.420 ratio=2.0378 floor=1.9900000000000002
+paged 8192: on=100.390 off=101.590 ratio=0.9882 floor=None
+{
+  "passed": false,
+  "failures": [
+    "(b) q0 gain below 90% historical gain",
+    "(b) q1 gain below 90% historical gain",
+    "(b) q2 gain below 90% historical gain",
+    "(b) q3 gain below 90% historical gain",
+    "(d) paged 1024 gain below 90% historical gain",
+    "(d) paged 2048 gain below 90% historical gain"
+  ]
+}
