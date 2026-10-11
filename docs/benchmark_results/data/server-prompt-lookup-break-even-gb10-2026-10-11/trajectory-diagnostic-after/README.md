@@ -1,0 +1,5 @@
+# Consecutive-low-yield correction: trajectory validation
+
+Production source `719ea08b` was temporarily instrumented with the archived patch and built in the test-fast profile. The same copy-32/chat-32 warmups followed by copy-256 now produce 239 proposed tokens, 214 accepted tokens, and 35 drafted rounds, versus 137/112/21 before this correction. These are state-transition diagnostics, not performance acceptance timings.
+
+The exact previously fatal boundary (2/2, 7/7, 0/7) now records one low round and stays active. Each later profitable verification resets the streak. Three isolated misses in the main request no longer cause a pause; the row stays active through context 411 and its final 6/6 verification. No shadow resume is needed. Two consecutive incomplete below-floor rounds still pause in the regression tests. The traced build passed 49 governor/drafter tests and 20 scheduler tests. Temporary logging was removed and the tracked production diff was verified empty before the final production rebuild.

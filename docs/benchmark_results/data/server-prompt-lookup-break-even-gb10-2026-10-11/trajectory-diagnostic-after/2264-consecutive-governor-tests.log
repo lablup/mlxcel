@@ -1,0 +1,54 @@
+
+running 49 tests
+test speculative::prompt_lookup::tests::cli_defaults_keep_original_resume_and_pipeline_policy ... ok
+test speculative::prompt_lookup::tests::config_validation ... ok
+test speculative::prompt_lookup::tests::config_validation_bounds_the_index_and_the_verify_block ... ok
+test speculative::prompt_lookup::tests::default_ngram_min_skips_single_token_matches ... ok
+test speculative::prompt_lookup::tests::default_policy_follows_the_build ... ok
+test speculative::prompt_lookup::tests::draft_is_capped_by_max_draft_and_context_end ... ok
+test speculative::prompt_lookup::tests::falls_back_to_shorter_ngrams ... ok
+test speculative::prompt_lookup::tests::gated_block_never_uses_the_widths_between_narrow_and_full ... ok
+test speculative::prompt_lookup::tests::gated_block_widens_after_a_whole_narrow_block_and_narrows_after_misses ... ok
+test speculative::prompt_lookup::tests::gated_governor_starts_narrow_on_probation ... ok
+test speculative::prompt_lookup::tests::gated_pause_has_no_length_and_ends_on_a_confirmed_proposal ... ok
+test speculative::prompt_lookup::tests::gated_probation_ends_only_on_a_whole_narrow_block ... ok
+test speculative::prompt_lookup::tests::gated_respects_a_max_draft_below_the_narrow_block ... ok
+test speculative::prompt_lookup::tests::gated_shadow_probe_confirms_exactly_the_resumed_copy ... ok
+test speculative::prompt_lookup::tests::generate_refuses_a_model_without_external_caches ... ok
+test speculative::prompt_lookup::tests::generate_refuses_a_sampler_with_feedback_state ... ok
+test speculative::prompt_lookup::tests::governor_backoff_is_capped ... ok
+test speculative::prompt_lookup::tests::governor_backoff_resets_once_a_round_lands ... ok
+test speculative::prompt_lookup::tests::governor_keeps_the_full_block_while_blocks_land ... ok
+test speculative::prompt_lookup::tests::governor_pauses_after_repeated_misses_and_backs_off ... ok
+test speculative::prompt_lookup::tests::governor_shortens_the_block_when_few_tokens_land ... ok
+test speculative::prompt_lookup::tests::governor_starts_with_the_full_block ... ok
+test speculative::prompt_lookup::tests::index_matches_the_scan_at_every_length ... ok
+test speculative::prompt_lookup::tests::index_matches_the_scan_when_extended_in_blocks ... ok
+test speculative::prompt_lookup::tests::longer_shadow_probe_requires_all_tokens_and_rejects_short_proposals ... ok
+test speculative::prompt_lookup::tests::loop_guard_stops_mid_block_where_plain_decoding_stops ... ok
+test speculative::prompt_lookup::tests::model_owned_sequence_state_is_refused_even_when_other_flags_allow_it ... ok
+test speculative::prompt_lookup::tests::never_matches_the_suffix_against_itself ... ok
+test speculative::prompt_lookup::tests::non_adaptive_governor_always_proposes_max_draft ... ok
+test speculative::prompt_lookup::tests::prefers_the_longest_matching_suffix ... ok
+test speculative::prompt_lookup::tests::prefers_the_most_recent_occurrence_of_a_given_length ... ok
+test speculative::prompt_lookup::tests::proposes_the_tokens_after_an_earlier_occurrence ... ok
+test speculative::prompt_lookup::tests::repeated_run_proposes_the_run ... ok
+test speculative::prompt_lookup::tests::rollback_keeps_a_cache_dependent_target_identical_to_plain_decoding ... ok
+test speculative::prompt_lookup::tests::rollback_matches_plain_decoding_under_a_repetition_penalty ... ok
+test speculative::prompt_lookup::tests::server_break_even_allows_a_recovering_round_and_pauses_two_low_rounds ... ok
+test speculative::prompt_lookup::tests::server_break_even_does_not_pause_on_one_miss_after_profitable_copy ... ok
+test speculative::prompt_lookup::tests::server_break_even_ignores_fixed_and_graded_policies ... ok
+test speculative::prompt_lookup::tests::server_break_even_keeps_a_fully_accepted_short_ramp ... ok
+test speculative::prompt_lookup::tests::server_break_even_keeps_fully_accepted_blocks_at_every_width ... ok
+test speculative::prompt_lookup::tests::server_break_even_pauses_partial_matches_without_changing_cli ... ok
+test speculative::prompt_lookup::tests::shadow_confirmation_is_ignored_unless_paused_and_gated ... ok
+test speculative::prompt_lookup::tests::shadow_probe_settles_on_the_first_two_emitted_tokens ... ok
+test speculative::prompt_lookup::tests::short_and_empty_contexts_propose_nothing ... ok
+test speculative::prompt_lookup::tests::tokens_per_forward_excludes_the_prefill_token ... ok
+test speculative::prompt_lookup::tests::warmup_runs_every_verify_width_and_rolls_each_back ... ok
+test speculative::prompt_lookup::tests::without_the_loop_guard_lookup_runs_to_max_tokens ... ok
+test speculative::prompt_lookup_drafter::tests::graded_cooldown_counts_down_and_records_paused_rounds ... ok
+test speculative::prompt_lookup_drafter::tests::the_index_is_built_on_the_first_lookup ... ok
+
+test result: ok. 49 passed; 0 failed; 0 ignored; 0 measured; 2042 filtered out; finished in 3.59s
+

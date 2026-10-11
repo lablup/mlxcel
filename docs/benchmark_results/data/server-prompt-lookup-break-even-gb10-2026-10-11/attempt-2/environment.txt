@@ -1,0 +1,7 @@
+2026-10-11T12:51:22Z
+spark-102
+a4bd791aedfb8a6d039f6acd6a60f3070cb260e7
+?? docs/benchmark_results/data/server-prompt-lookup-break-even-gb10-2026-10-11/attempt-2/environment.txt
+?? docs/benchmark_results/data/server-prompt-lookup-break-even-gb10-2026-10-11/attempt-2/hostgate.log
+95471996726209627f13bdef8c93afa16a329155a626ae7d2451fa1223ae595d  /home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2264/target/release/mlxcel-server
+NVIDIA GB10, 580.178.04

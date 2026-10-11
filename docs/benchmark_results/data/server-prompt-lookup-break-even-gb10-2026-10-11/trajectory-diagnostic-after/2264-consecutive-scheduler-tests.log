@@ -1,0 +1,26 @@
+
+running 20 tests
+test server::batch::scheduler::scheduler_prompt_lookup_tests::a_cancel_during_a_round_finalizes_after_the_round ... ok
+test server::batch::scheduler::scheduler_prompt_lookup_tests::a_concurrent_plain_row_gets_a_token_every_tick ... ok
+test server::batch::scheduler::scheduler_prompt_lookup_tests::a_drafter_ahead_of_its_row_decodes_plainly ... ok
+test server::batch::scheduler::scheduler_prompt_lookup_tests::a_prompt_lookup_row_emits_the_plain_tokens_and_counts_acceptance ... ok
+test server::batch::scheduler::scheduler_prompt_lookup_tests::a_proposal_makes_the_next_tick_synchronous_without_a_prime ... ok
+test server::batch::scheduler::scheduler_prompt_lookup_tests::admission_during_an_in_flight_lookahead_tears_it_down_first ... ok
+test server::batch::scheduler::scheduler_prompt_lookup_tests::an_eos_inside_an_accepted_block_ends_the_row_there ... ok
+test server::batch::scheduler::scheduler_prompt_lookup_tests::b1_length_boundary_submits_one_decode_forward_per_post_prefill_token ... ok
+test server::batch::scheduler::scheduler_prompt_lookup_tests::b1_stochastic_terminal_length_commits_the_pending_draw ... Compiling CUDA kernels (first run on this host; cached for later runs)...
+ok
+test server::batch::scheduler::scheduler_prompt_lookup_tests::b1_terminal_length_skips_two_forwards_and_leaves_b2_unchanged ... ok
+test server::batch::scheduler::scheduler_prompt_lookup_tests::b1_terminal_token_eos_precedes_the_length_boundary ... ok
+test server::batch::scheduler::scheduler_prompt_lookup_tests::break_even_evidence_is_per_row_while_a_copy_peer_keeps_the_tick_synchronous ... ok
+test server::batch::scheduler::scheduler_prompt_lookup_tests::low_yield_verify_rounds_pause_pipeline_and_resume_on_copy ... ok
+test server::batch::scheduler::scheduler_prompt_lookup_tests::paged_prompt_lookup_cap_covers_measured_continuation_and_stops_at_boundary ... ok
+test server::batch::scheduler::scheduler_prompt_lookup_tests::proposal_free_ticks_stay_pipelined ... ok
+test server::batch::scheduler::scheduler_prompt_lookup_tests::proposals_stop_at_the_context_bound ... ok
+test server::batch::scheduler::scheduler_prompt_lookup_tests::rows_above_the_max_batch_run_no_verify_round ... ok
+test server::batch::scheduler::scheduler_prompt_lookup_tests::server_break_even_keeps_copy_heavy_rows_verifying ... ok
+test server::batch::scheduler::scheduler_prompt_lookup_tests::server_reprimes_after_the_first_proposal_free_ask ... ok
+test server::batch::scheduler::scheduler_prompt_lookup_tests::the_first_prefill_warms_the_verify_widths_once ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 9081 filtered out; finished in 1.44s
+

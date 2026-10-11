@@ -1,0 +1,14 @@
+start 2026-10-11T12:54:57Z
+rc=0 :: ab-off-r1 12:55:14
+rc=0 :: ab-on-r1 12:55:32
+rc=0 :: ab-on-r2 12:55:50
+rc=0 :: ab-off-r2 12:56:12
+rc=0 :: ab-off-r3 12:56:34
+rc=0 :: ab-on-r3 12:56:52
+rc=0 :: ab-on-r4 12:57:11
+rc=0 :: ab-off-r4 12:57:33
+rc=0 :: ab-off-r5 12:57:54
+rc=0 :: ab-on-r5 12:58:13
+rc=0 :: c-off-r1 12:58:27
+rc=0 :: c-on-r1 12:58:42
+Terminated

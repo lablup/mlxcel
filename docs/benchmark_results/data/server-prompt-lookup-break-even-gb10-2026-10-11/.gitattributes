@@ -1,2 +1,7 @@
 # Preserve the concurrency client's trailing blank line byte-for-byte.
 c-*-r*.txt -whitespace
+
+# Preserve diagnostic patches and captured test output byte-for-byte.
+trajectory-diagnostic/*.patch -whitespace
+trajectory-diagnostic-after/*.patch -whitespace
+trajectory-diagnostic-after/*-tests.log -whitespace
