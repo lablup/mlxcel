@@ -1980,6 +1980,7 @@ fn apply_frequency_presence_incremental_reference(
 ///   only form). A head with a non-empty tail breaks only when the window
 ///   tokens after `pos` spell the tail out in full, which is how a
 ///   multi-character breaker split across token boundaries is recognized.
+#[cfg(test)]
 fn dry_breaks_at(config: &SamplingConfig, window: &[i32], pos: usize) -> bool {
     if config.dry_sequence_breakers.contains(&window[pos]) {
         return true;
@@ -2002,9 +2003,184 @@ fn dry_breaks_at(config: &SamplingConfig, window: &[i32], pos: usize) -> bool {
         })
 }
 
+#[derive(Default)]
+struct DryBreakerNode {
+    transitions: HashMap<i32, usize>,
+    failure: usize,
+    terminal: bool,
+}
+
+struct DryBreakerMatches {
+    positions: Vec<bool>,
+    #[cfg(test)]
+    build_steps: usize,
+    #[cfg(test)]
+    scan_steps: usize,
+}
+
+/// Find every DRY breaker start in `reversed_window` in additive
+/// `O(window + breaker-pattern tokens)` expected time.
+///
+/// Exact IDs are singleton patterns. A forward breaker `[head] + tail` is
+/// inserted as `reverse(tail) + [head]`, so an Aho-Corasick terminal reached
+/// at reversed index `r` always maps to original start `n - 1 - r`, regardless
+/// of pattern length. Failure-terminal propagation therefore marks a start
+/// once without enumerating every matching suffix pattern.
+fn dry_breaker_matches(reversed_window: &[i32], config: &SamplingConfig) -> DryBreakerMatches {
+    #[cfg(test)]
+    let mut build_steps = 0usize;
+    #[cfg(test)]
+    let mut scan_steps = 0usize;
+
+    if config.dry_sequence_breakers.is_empty() && config.dry_breaker_heads.is_empty() {
+        return DryBreakerMatches {
+            positions: vec![false; reversed_window.len()],
+            #[cfg(test)]
+            build_steps,
+            #[cfg(test)]
+            scan_steps,
+        };
+    }
+
+    let mut nodes = vec![DryBreakerNode::default()];
+
+    for &token in &config.dry_sequence_breakers {
+        #[cfg(test)]
+        {
+            build_steps += 1;
+        }
+        let next = nodes[0].transitions.get(&token).copied();
+        let state = match next {
+            Some(state) => state,
+            None => {
+                let state = nodes.len();
+                nodes.push(DryBreakerNode::default());
+                nodes[0].transitions.insert(token, state);
+                #[cfg(test)]
+                {
+                    build_steps += 1;
+                }
+                state
+            }
+        };
+        nodes[state].terminal = true;
+    }
+
+    for (&head, tails) in config.dry_breaker_heads.iter() {
+        for tail in tails {
+            let mut state = 0usize;
+            for token in tail.iter().rev().copied().chain(std::iter::once(head)) {
+                #[cfg(test)]
+                {
+                    build_steps += 1;
+                }
+                let next = nodes[state].transitions.get(&token).copied();
+                state = match next {
+                    Some(next) => next,
+                    None => {
+                        let next = nodes.len();
+                        nodes.push(DryBreakerNode::default());
+                        nodes[state].transitions.insert(token, next);
+                        #[cfg(test)]
+                        {
+                            build_steps += 1;
+                        }
+                        next
+                    }
+                };
+            }
+            nodes[state].terminal = true;
+        }
+    }
+
+    // Breadth-first failure-link construction. Root children fail to root;
+    // every deeper node inherits the terminal bit of its failure target. Across
+    // trie edges, failure hops telescope over failure depth, so construction is
+    // linear in the number of supplied pattern tokens in expected HashMap time.
+    let mut queue: Vec<usize> = nodes[0].transitions.values().copied().collect();
+    #[cfg(test)]
+    {
+        build_steps += queue.len();
+    }
+    let mut cursor = 0usize;
+    while cursor < queue.len() {
+        let state = queue[cursor];
+        cursor += 1;
+        let transitions: Vec<(i32, usize)> = nodes[state]
+            .transitions
+            .iter()
+            .map(|(&token, &next)| (token, next))
+            .collect();
+        #[cfg(test)]
+        {
+            build_steps += transitions.len();
+        }
+        for (token, next) in transitions {
+            let mut fallback = nodes[state].failure;
+            let failure = loop {
+                #[cfg(test)]
+                {
+                    build_steps += 1;
+                }
+                if let Some(&target) = nodes[fallback].transitions.get(&token) {
+                    break target;
+                }
+                if fallback == 0 {
+                    break 0;
+                }
+                fallback = nodes[fallback].failure;
+                #[cfg(test)]
+                {
+                    build_steps += 1;
+                }
+            };
+            nodes[next].failure = failure;
+            let failure_terminal = nodes[failure].terminal;
+            nodes[next].terminal |= failure_terminal;
+            queue.push(next);
+        }
+    }
+
+    let mut positions = vec![false; reversed_window.len()];
+    let mut state = 0usize;
+    for (reversed_pos, &token) in reversed_window.iter().enumerate() {
+        loop {
+            #[cfg(test)]
+            {
+                scan_steps += 1;
+            }
+            if let Some(&next) = nodes[state].transitions.get(&token) {
+                state = next;
+                break;
+            }
+            if state == 0 {
+                break;
+            }
+            state = nodes[state].failure;
+            #[cfg(test)]
+            {
+                scan_steps += 1;
+            }
+        }
+        if nodes[state].terminal {
+            positions[reversed_window.len() - 1 - reversed_pos] = true;
+        }
+    }
+
+    DryBreakerMatches {
+        positions,
+        #[cfg(test)]
+        build_steps,
+        #[cfg(test)]
+        scan_steps,
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     static DRY_STEP_COST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static DRY_BREAKER_BUILD_COST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static DRY_BREAKER_SCAN_COST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -2017,17 +2193,34 @@ fn last_dry_step_cost() -> usize {
     DRY_STEP_COST.with(std::cell::Cell::get)
 }
 
+#[cfg(test)]
+fn record_dry_breaker_cost(build: usize, scan: usize) {
+    DRY_BREAKER_BUILD_COST.with(|counter| counter.set(build));
+    DRY_BREAKER_SCAN_COST.with(|counter| counter.set(scan));
+}
+
+#[cfg(test)]
+fn last_dry_breaker_cost() -> (usize, usize) {
+    let build = DRY_BREAKER_BUILD_COST.with(std::cell::Cell::get);
+    let scan = DRY_BREAKER_SCAN_COST.with(std::cell::Cell::get);
+    (build, scan)
+}
+
 /// Compute DRY penalties from a selected history window without MLX calls.
 ///
 /// Reversing the window turns every suffix match against the current suffix
 /// into a prefix match, so one Z-function pass provides all match lengths.
-/// A second forward pass records the nearest breaker strictly before each
-/// candidate position. Both passes are linear in the window length.
+/// A reversed-token automaton marks breaker starts before one forward pass
+/// records the nearest breaker strictly before each candidate position. The
+/// per-step work is additive in the window and configured breaker-pattern
+/// tokens; it never multiplies the two request-controlled sizes.
 fn dry_penalty_map(window: &[i32], config: &SamplingConfig) -> Vec<(i32, f32)> {
     #[cfg(test)]
     let mut step_cost = 0usize;
     #[cfg(test)]
     record_dry_step_cost(0);
+    #[cfg(test)]
+    record_dry_breaker_cost(0, 0);
 
     let window_len = window.len();
     if window_len < 2 || config.dry_base < 1.0 {
@@ -2062,6 +2255,13 @@ fn dry_penalty_map(window: &[i32], config: &SamplingConfig) -> Vec<(i32, f32)> {
         }
     }
 
+    let breaker_matches = dry_breaker_matches(&reversed, config);
+    #[cfg(test)]
+    {
+        step_cost += breaker_matches.scan_steps;
+        record_dry_breaker_cost(breaker_matches.build_steps, breaker_matches.scan_steps);
+    }
+
     let no_breaker = usize::MAX;
     let mut breaker_before = vec![no_breaker; window_len];
     let mut most_recent_breaker = no_breaker;
@@ -2071,7 +2271,7 @@ fn dry_penalty_map(window: &[i32], config: &SamplingConfig) -> Vec<(i32, f32)> {
         {
             step_cost += 1;
         }
-        if dry_breaks_at(config, window, pos) {
+        if breaker_matches.positions[pos] {
             most_recent_breaker = pos;
         }
     }
@@ -3296,6 +3496,23 @@ mod tests {
                 _ => {}
             }
 
+            let window = if config.dry_penalty_last_n == crate::generate::DRY_FULL_HISTORY {
+                history.as_slice()
+            } else if config.dry_penalty_last_n == 0 {
+                &history[history.len()..]
+            } else {
+                let start = history.len().saturating_sub(config.dry_penalty_last_n);
+                &history[start..]
+            };
+            let breaker_matches = breaker_positions(window, &config);
+            for (pos, matched) in breaker_matches.iter().copied().enumerate() {
+                assert_eq!(
+                    matched,
+                    dry_breaks_at(&config, window, pos),
+                    "breaker mismatch at case={case} pos={pos} window={window:?}"
+                );
+            }
+
             let reference = apply_dry_penalty_reference(&logits, &history, &config);
             let linear = apply_dry_penalty(&logits, &history, &config);
             assert_penalty_logits_equal(
@@ -3342,6 +3559,169 @@ mod tests {
             &linear,
             &reference,
             "a breaker tail running past the window end must not break",
+        );
+    }
+
+    fn breaker_positions(window: &[i32], config: &SamplingConfig) -> Vec<bool> {
+        let reversed: Vec<i32> = window.iter().rev().copied().collect();
+        dry_breaker_matches(&reversed, config).positions
+    }
+
+    #[test]
+    fn dry_breaker_automaton_preserves_overlap_and_boundary_semantics() {
+        let config = SamplingConfig {
+            dry_multiplier: 0.75,
+            dry_base: 1.75,
+            dry_allowed_length: 2,
+            dry_penalty_last_n: crate::generate::DRY_FULL_HISTORY,
+            dry_sequence_breakers: vec![-7, 2, 2],
+            dry_breaker_heads: std::sync::Arc::new(HashMap::from([
+                (2, vec![Vec::new(), Vec::new(), vec![3, 4]]),
+                (4, vec![vec![5, 6, 8]]),
+                (5, vec![vec![6], vec![6, 7], vec![7]]),
+                (9, vec![vec![10, 11]]),
+            ])),
+            ..Default::default()
+        };
+
+        let window = [-7, 2, 3, 4, 5, 6, 7, 5, 7, 9, 10, 11];
+        let positions = breaker_positions(&window, &config);
+        for (pos, matched) in positions.iter().copied().enumerate() {
+            assert_eq!(
+                matched,
+                dry_breaks_at(&config, &window, pos),
+                "overlap breaker mismatch at position {pos}"
+            );
+        }
+        for expected in [0usize, 1, 4, 7, 9] {
+            assert!(positions[expected], "missing breaker at {expected}");
+        }
+        assert_eq!(
+            positions.iter().filter(|&&is_breaker| is_breaker).count(),
+            5,
+            "duplicates and overlapping tails must mark each start once"
+        );
+
+        assert_eq!(
+            breaker_positions(&[9, 10, 11], &config),
+            vec![true, false, false],
+            "a tail ending exactly at the window end must match"
+        );
+        assert_eq!(
+            breaker_positions(&[9, 10], &config),
+            vec![false, false],
+            "a tail running past the window end must not match"
+        );
+        assert_eq!(
+            breaker_positions(&[5, 6, 8], &config),
+            vec![true, false, false],
+            "a terminal failure suffix must mark the same original start"
+        );
+
+        let logits = ffi::from_slice_f32(&[0.0; 16], &[1, 16]);
+        for history in [
+            vec![9, 10, 11, 4, 9, 10, 11],
+            vec![9, 10, 4, 9, 10],
+            vec![1, -7, 2, 4, 1, -7, 2],
+            vec![5, 6, 8, 4, 5, 6, 8],
+        ] {
+            let reference = apply_dry_penalty_reference(&logits, &history, &config);
+            let automaton = apply_dry_penalty(&logits, &history, &config);
+            assert_penalty_logits_equal(
+                &automaton,
+                &reference,
+                &format!("breaker automaton history {history:?}"),
+            );
+        }
+    }
+
+    #[test]
+    fn dry_breaker_automaton_large_exact_list_is_additive() {
+        const WINDOW: usize = 4096;
+        const EXACT: usize = 2048;
+        let mut exact: Vec<i32> = (10_000..10_000 + EXACT as i32).collect();
+        exact.extend([-7, 0, 1, 2]);
+        let config = SamplingConfig {
+            dry_multiplier: 0.75,
+            dry_base: 1.75,
+            dry_allowed_length: 2,
+            dry_penalty_last_n: crate::generate::DRY_FULL_HISTORY,
+            dry_sequence_breakers: exact,
+            ..Default::default()
+        };
+        let mut history: Vec<i32> = (0..WINDOW - 1).map(|index| (index % 3) as i32).collect();
+        history.push(63);
+
+        let _ = dry_penalty_map(&history, &config);
+        let (build_steps, scan_steps) = last_dry_breaker_cost();
+        assert!(
+            build_steps <= 4 * config.dry_sequence_breakers.len() + 16,
+            "exact-list build took {build_steps} steps for {} tokens",
+            config.dry_sequence_breakers.len()
+        );
+        assert!(
+            scan_steps <= 3 * WINDOW + 16,
+            "exact-list scan took {scan_steps} steps for window {WINDOW}"
+        );
+        assert!(
+            last_dry_step_cost() <= 8 * WINDOW,
+            "window work must stay linear independently of the exact-list size"
+        );
+
+        let logits = ffi::from_slice_f32(&[0.0; 64], &[1, 64]);
+        let reference = apply_dry_penalty_reference(&logits, &history, &config);
+        let automaton = apply_dry_penalty(&logits, &history, &config);
+        assert_penalty_logits_equal(
+            &automaton,
+            &reference,
+            "large exact list with a rare last token",
+        );
+    }
+
+    #[test]
+    fn dry_breaker_automaton_long_shared_tails_are_additive() {
+        const WINDOW: usize = 4096;
+        const MAX_TAIL: usize = 128;
+        let mut breaker_heads = HashMap::new();
+        let mut inserted_tokens = 0usize;
+        for len in 1..=MAX_TAIL {
+            let tail = vec![1; len];
+            inserted_tokens += tail.len() + 1;
+            breaker_heads.insert(10_000 + len as i32, vec![tail]);
+        }
+        let config = SamplingConfig {
+            dry_multiplier: 0.75,
+            dry_base: 1.75,
+            dry_allowed_length: 2,
+            dry_penalty_last_n: crate::generate::DRY_FULL_HISTORY,
+            dry_breaker_heads: std::sync::Arc::new(breaker_heads),
+            ..Default::default()
+        };
+        let mut history = vec![1; WINDOW - 1];
+        history.push(63);
+
+        let _ = dry_penalty_map(&history, &config);
+        let (build_steps, scan_steps) = last_dry_breaker_cost();
+        assert!(
+            build_steps <= 8 * inserted_tokens + 32,
+            "shared-tail build took {build_steps} steps for {inserted_tokens} inserted tokens"
+        );
+        assert!(
+            scan_steps <= 3 * WINDOW + 16,
+            "shared-tail scan took {scan_steps} steps for window {WINDOW}"
+        );
+        assert!(
+            last_dry_step_cost() <= 8 * WINDOW,
+            "window work must not multiply by the shared-tail family"
+        );
+
+        let logits = ffi::from_slice_f32(&[0.0; 64], &[1, 64]);
+        let reference = apply_dry_penalty_reference(&logits, &history, &config);
+        let automaton = apply_dry_penalty(&logits, &history, &config);
+        assert_penalty_logits_equal(
+            &automaton,
+            &reference,
+            "long shared tails with a rare last token",
         );
     }
 
