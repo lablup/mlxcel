@@ -334,12 +334,17 @@ fn padded_len(caps: PrefillCaps, len: usize) -> usize {
     if can_pad { align_to_na_tile(len) } else { len }
 }
 "#;
+    assert_eq!(
+        padded_prefill_guard_aliases(guarded),
+        vec!["can_pad".to_string()]
+    );
     assert!(unguarded_tile_aligned_prefills(guarded).is_empty());
 
     let mutated = guarded.replace(
         "self.align_prefill && self.supports_padded_prefill",
         "self.align_prefill",
     );
+    assert!(padded_prefill_guard_aliases(&mutated).is_empty());
     assert_eq!(unguarded_tile_aligned_prefills(&mutated).len(), 1);
 
     let direct = r#"
