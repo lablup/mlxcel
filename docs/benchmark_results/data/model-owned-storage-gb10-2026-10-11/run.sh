@@ -6,10 +6,13 @@ BIN=/home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2230/targe
 CLIENT=/home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2230/scripts/bench_serving_concurrency.py
 MODEL_ROOT=/home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2230/models/mlx
 DATA=/home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2230/docs/benchmark_results/data/model-owned-storage-gb10-2026-10-11
+GATE_DRIVER=${DATA}/gate.py
+HOSTGATE_DIR=${WORKTREE}/docs/benchmark_results/data/sdpa-plan-bucket-gb10-2026-09-12/harness
 PORT=18080
 
 export MLXCEL_CCCL_DIR=/home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2230/target/release/build/mlxcel-core-4c8821fbbcc3d8f4/out/build/include/cccl
 export MLXCEL_CUTLASS_DIR=/home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2230/target/release/build/mlxcel-core-4c8821fbbcc3d8f4/out/build/include
+MLX_SOURCE_DIR=/home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2230/target/release/build/mlxcel-core-4c8821fbbcc3d8f4/out/build/_deps/mlx-src
 
 SERVER_PID=
 cleanup_server() {
@@ -24,7 +27,7 @@ trap cleanup_server EXIT INT TERM
 mkdir -p "${DATA}"
 exec > >(tee -a "${DATA}/run.log") 2>&1
 
-for required in "${BIN}" "${CLIENT}" "${MODEL_ROOT}/gemma-3-1b-it-4bit" "${MODEL_ROOT}/llama-4-scout-17b-16e-instruct-4bit" "${MLXCEL_CCCL_DIR}" "${MLXCEL_CUTLASS_DIR}"; do
+for required in "${BIN}" "${CLIENT}" "${GATE_DRIVER}" "${HOSTGATE_DIR}/hostgate.py" "${MODEL_ROOT}/gemma-3-1b-it-4bit" "${MODEL_ROOT}/llama-4-scout-17b-16e-instruct-4bit" "${MLXCEL_CCCL_DIR}" "${MLXCEL_CUTLASS_DIR}" "${MLX_SOURCE_DIR}/.git"; do
     if [[ ! -e "${required}" ]]; then
         echo "missing required benchmark path: ${required}" >&2
         exit 2
@@ -36,13 +39,27 @@ if [[ -e "${DATA}/complete" ]]; then
     exit 2
 fi
 
+: > "${DATA}/hostgate.jsonl"
+python3 "${GATE_DRIVER}" --hostgate-dir "${HOSTGATE_DIR}" --evidence "${DATA}/hostgate.jsonl" --label run-preflight --port "${PORT}" --port-only
+
+mlx_cmake_tag=$(awk '$1 == "GIT_TAG" { gsub(/[")]/, "", $2); print $2; exit }' "${WORKTREE}/src/lib/mlx-cpp/CMakeLists.txt")
+mlx_checkout_commit=$(git -C "${MLX_SOURCE_DIR}" rev-parse HEAD)
+if [[ -z "${mlx_cmake_tag}" || "${mlx_cmake_tag}" != "${mlx_checkout_commit}" ]]; then
+    echo "MLX pin mismatch: CMake GIT_TAG=${mlx_cmake_tag:-missing}, release checkout=${mlx_checkout_commit}" >&2
+    exit 2
+fi
+
 {
     echo "started_utc=$(date -u +%FT%TZ)"
     echo "worktree=${WORKTREE}"
     echo "binary=${BIN}"
     echo "binary_sha256=$(sha256sum "${BIN}" | awk '{print $1}')"
     echo "commit=$(git -C "${WORKTREE}" rev-parse HEAD)"
-    echo "mlx_pin=$(git -C "${WORKTREE}/src/lib/mlx-cpp" rev-parse HEAD)"
+    echo "mlx_cmake_git_tag=${mlx_cmake_tag}"
+    echo "mlx_checkout=${MLX_SOURCE_DIR}"
+    echo "mlx_checkout_commit=${mlx_checkout_commit}"
+    echo "hostgate_source=${HOSTGATE_DIR}/hostgate.py"
+    echo "hostgate_sha256=$(sha256sum "${HOSTGATE_DIR}/hostgate.py" | awk '{print $1}')"
     echo "host=$(hostname)"
     uname -a
     nvidia-smi --query-gpu=name,driver_version,pci.bus_id --format=csv,noheader
@@ -81,6 +98,8 @@ run_arm() {
     local server_log="${DATA}/server-${stem}.log"
     local client_log="${DATA}/client-${stem}.txt"
 
+    echo "GATE ${stem} $(date -u +%FT%TZ)"
+    python3 "${GATE_DRIVER}" --hostgate-dir "${HOSTGATE_DIR}" --evidence "${DATA}/hostgate.jsonl" --label "${stem}" --port "${PORT}"
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${model_name}" "${prompt_tokens}" "${round}" "${position}" "${arm}" "${backend}" "$(date -u +%FT%TZ)" >> "${DATA}/schedule.tsv"
     echo "START ${stem} $(date -u +%FT%TZ)"
     "${BIN}" serve -m "${model_path}" --port "${PORT}" --metrics --parallel 8 --decode-storage-backend "${backend}" > "${server_log}" 2>&1 &
