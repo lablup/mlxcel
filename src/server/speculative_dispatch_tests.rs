@@ -310,7 +310,7 @@ fn is_kind_specific_is_true_only_for_mtp_and_dflash() {
 }
 
 /// `--draft-kind prompt-lookup` with no drafter resolves before the
-/// draft-model early return (#2255): `PromptLookup` with the default config
+/// draft-model early return (#2255): `PromptLookup` with server defaults
 /// and max batch, not a kind-specific burst, so the scheduler's
 /// `should_dispatch_speculative()` (which is `is_kind_specific()`) stays
 /// false and the burst path is never entered.
@@ -324,15 +324,22 @@ fn resolve_prompt_lookup_without_a_drafter() {
     let SpeculativeDispatch::PromptLookup { config, max_batch } = &dispatch else {
         panic!("expected PromptLookup, got {dispatch:?}");
     };
-    assert_eq!(*config, PromptLookupConfig::default());
+    let cli_defaults = PromptLookupConfig::default();
+    assert_eq!(cli_defaults.min_tokens_per_round, None);
+    assert_eq!(cli_defaults.shadow_confirm_tokens, 2);
+    assert_eq!(cli_defaults.plain_rounds_before_pipeline, 2);
+    let server_defaults = PromptLookupConfig {
+        min_tokens_per_round: cfg!(feature = "cuda").then_some(4),
+        shadow_confirm_tokens: if cfg!(feature = "cuda") { 7 } else { 2 },
+        plain_rounds_before_pipeline: if cfg!(feature = "cuda") { 0 } else { 2 },
+        ..cli_defaults
+    };
+    assert_eq!(*config, server_defaults);
     assert_eq!(*max_batch, DEFAULT_PROMPT_LOOKUP_MAX_BATCH);
     assert!(!dispatch.is_kind_specific());
     assert_eq!(
         dispatch.prompt_lookup_config(),
-        Some((
-            &PromptLookupConfig::default(),
-            DEFAULT_PROMPT_LOOKUP_MAX_BATCH
-        ))
+        Some((&server_defaults, DEFAULT_PROMPT_LOOKUP_MAX_BATCH))
     );
     assert_eq!(dispatch.drafter_kind(), Some(DrafterKind::PromptLookup));
     assert!(dispatch.draft_model_path().is_none());
