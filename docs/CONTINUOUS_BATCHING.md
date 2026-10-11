@@ -457,6 +457,14 @@ sequence was opened.
   (`scheduler_real_batch_parity_tests`, gemma-3-1b-it-4bit under
   `MLXCEL_SDPA_DETERMINISTIC=1`) gives two concurrent greedy requests the
   same token streams as each request alone, on both backends.
+- The [2026-10-11 GB10 paired/null storage sweep](benchmark_results/model-owned-storage-gb10-2026-10-11.md)
+  kept `supports_paged_decode_backend()` true for both model-owned families.
+  None of the six prompt/concurrency cells per family cleared its rotating
+  paged-repeat null spread in either direction. Therefore `auto` on a
+  multi-slot server and an explicit `paged` request still select paged
+  storage for Gemma 3 and Llama 4, including the pool allocation and
+  per-step mirror, while their attention continues through the dense rows
+  described above.
 - Batched decode over Turbo caches takes the dequant-first variants that
   single-sequence decode already used, instead of a full dequant per step. The
   attention is the same exact math in a different op order, so it is not

@@ -1,0 +1,12 @@
+Runtime device: NVIDIA GPU (CUDA)
+Wired memory limit: 121.7 GB
+KV cache mode: fp16 (applied to 40 of 40 layers)
+Loading model from "/home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2230/models/mlx/granite-4.0-h-tiny-4bit"...
+Detected 1 GPU(s).
+CUDA compute capability 12.1 (sm_121); compiled for [121] (cubin)
+GPU: NVIDIA GB10 (Nvidia), 121.69 GiB device memory.
+Model loaded in 0.178s (resident: 0.00 GB, peak: 0.00 GB).
+Generating...
+Explain the Mamba state update.The Mamba state update is a technique used in the Mamba neural network architecture, which is a type of recurrent neural network (RNN) designed for efficient and effective sequence modeling. The Mamba architecture aims to address some of the limitations of traditional RNNs, such as the difficulty in capturing long-range dependencies and
+
+[Generated 64 tokens in 6.03s = 10.61 tok/s]

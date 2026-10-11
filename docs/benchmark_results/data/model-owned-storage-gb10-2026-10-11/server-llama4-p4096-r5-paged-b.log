@@ -1,0 +1,50 @@
+requested_decode_storage_backend=paged
+2026-10-11T07:06:28.991472Z  WARN mlxcel::server::startup: CORS is set to allow all origins ('*') and no API key is set; this can be a security risk (cross-origin attacks). Set --api-key, or narrow --cors-origins / --allowed-origins
+2026-10-11T07:06:28.991503Z  INFO mlxcel::server::startup: effective KV cache mode kv_cache_mode=fp16 kv_bits=0
+2026-10-11T07:06:28.991808Z  INFO mlxcel::server::startup: resolved context and batch geometry (0 = the checkpoint's own trained context) ctx_size=0 ctx_size_per_slot=0 context_slots=8 kv_unified=false n_parallel=8 prefill_chunk_size=2048 max_kv_size=None
+2026-10-11T07:06:28.991893Z  INFO mlxcel::server::startup: Runtime device: NVIDIA GPU (CUDA)
+2026-10-11T07:06:28.991896Z  INFO mlxcel::server::startup: CUDA graph-cache LRU capacity: MLX_CUDA_GRAPH_CACHE_SIZE=2000 (mlxcel raises MLX's default of 400 to 2000 so long-lived, shape-diverse decode does not hit the cache-thrashing abort from issue #818, unless an operator override is set)
+2026-10-11T07:06:28.991898Z  INFO mlxcel::server::startup: Wired memory limit: 121.7 GB
+2026-10-11T07:06:29.488199Z  INFO mlxcel::server::startup: DRY sequence breakers active (b10621 semantics: breaker token data derived from the vocabulary per request) breakers=["\n", ":", "\"", "*"]
+2026-10-11T07:06:29.500826Z  INFO mlxcel::server::startup: Applied model-aware prompt-cache snapshot capacity default previous_snapshot_capacity_bytes=536870912 recommended_snapshot_capacity_bytes=9663676416 representative_snapshot_bytes=1610612736 representative_tokens=8192 target_entries=6 kv_bytes_at_representative_tokens=1610612736 fixed_state_bytes=0 available_ceiling_bytes=12186870490 architecture=standard attention (48 layers, full context)
+2026-10-11T07:06:29.501580Z  INFO mlxcel::server::startup: Prompt-prefix cache store enabled (+ APC, snapshots) capacity_bytes=2147483648 max_entries=1024 ttl_seconds=3600 snapshot_capacity_bytes=9663676416 snapshot_max_entries=4096 snapshot_ttl_seconds=7200 min_prefix_tokens=32 apc_enabled=true apc_block_size=16 apc_hash=sha256
+2026-10-11T07:06:29.988356Z  INFO mlxcel::server::startup: Warming up model...
+2026-10-11T07:06:29.988996Z  INFO mlxcel::server::model_provider::model_worker: Model worker thread starting, loading model...
+2026-10-11T07:06:30.475468Z  INFO mlxcel::server::model_provider::model_worker: Model llama-4-scout-17b-16e-instruct-4bit loaded in 0.486s (resident after load: 0.00 GB) worker_model_id=llama-4-scout-17b-16e-instruct-4bit load_seconds=0.486423612 active_bytes=229376 peak_bytes=229376 cache_bytes=0 limit_bytes=124128081510
+2026-10-11T07:06:30.475525Z  INFO mlxcel::server::model_provider::model_worker: EOS tokens from config: [200001, 200007, 200008]
+2026-10-11T07:06:30.475543Z  INFO mlxcel::server::model_provider::model_worker: Starting BatchScheduler (max_batch_size=8, max_queue_depth=32, prefill_chunk_size=2048, max_batch_prefill=4, decode_storage=paged)
+2026-10-11T07:06:30.476330Z  INFO mlxcel::server::model_provider::model_worker: Paged KV block budget: 317207 blocks (48 layers, 32-token blocks)
+2026-10-11T07:06:30.476367Z  INFO mlxcel::server::model_provider::model_worker: Paged KV slab size: 2048 blocks per layer (fused decode serves a layer only while its rows fit one slab)
+2026-10-11T07:06:30.476392Z  INFO mlxcel::server::batch::scheduler::paged_layout: resolved KV cache mode applied to model caches kv_cache_mode_effective=fp16 kv_cache_mode_applied_layers=48 kv_cache_mode_total_layers=48
+2026-10-11T07:06:30.477733Z  INFO prefill{seq_id=seq-0 prompt_len=2 cached=0 start=0}: mlxcel_core::sampling_dispatch: sampling dispatch: argmax: greedy path (temperature 0, top_k 1); no sampling kernel involved
+2026-10-11T07:07:05.043615Z  INFO prefill{seq_id=seq-0 prompt_len=2 cached=0 start=0}: mlxcel::server::batch::scheduler::prefill: prompt-cache: request completed during prefill: cached=0/2 prompt tokens, total 34566ms prompt_tokens=2 cached_tokens=0 generation_time_ms=34566
+2026-10-11T07:07:05.044287Z  INFO mlxcel::server::startup: Warmup complete
+2026-10-11T07:07:05.044414Z  INFO mlxcel::server::startup: model_type=Llama4VLM: no native video path; video_url content blocks will be served as ordered sampled frames
+2026-10-11T07:07:05.044932Z  WARN mlxcel::server::startup: The loaded model accepts video input, but `ffmpeg` and `ffprobe` are not both on PATH, so every video request will be refused. The check is cached for the life of the process: restart the server after installing ffmpeg.
+2026-10-11T07:07:05.045784Z  INFO mlxcel::server::startup: Starting mlxcel server on http://127.0.0.1:18080
+2026-10-11T07:07:05.045791Z  INFO mlxcel::server::startup: Detected 1 GPU(s)
+2026-10-11T07:07:05.045795Z  INFO mlxcel::server::startup: CUDA compute capability 12.1 (sm_121); compiled for [121] (cubin)
+2026-10-11T07:07:05.045797Z  INFO mlxcel::server::startup: Endpoints:
+2026-10-11T07:07:05.045798Z  INFO mlxcel::server::startup:   POST /v1/chat/completions  - OpenAI chat completions
+2026-10-11T07:07:05.045799Z  INFO mlxcel::server::startup:   POST /v1/completions       - OpenAI text completions
+2026-10-11T07:07:05.045801Z  INFO mlxcel::server::startup:   GET  /v1/models            - List models
+2026-10-11T07:07:05.045802Z  INFO mlxcel::server::startup:   POST /completion           - llama-server native completion
+2026-10-11T07:07:05.045803Z  INFO mlxcel::server::startup:   POST /tokenize             - Tokenize text
+2026-10-11T07:07:05.045804Z  INFO mlxcel::server::startup:   POST /detokenize           - Detokenize tokens
+2026-10-11T07:07:05.045805Z  INFO mlxcel::server::startup:   GET  /props                - Server properties
+2026-10-11T07:07:05.045807Z  INFO mlxcel::server::startup:   GET  /slots                - Slot status
+2026-10-11T07:07:05.045808Z  INFO mlxcel::server::startup:   GET  /health               - Health check
+2026-10-11T07:07:06.126632Z  INFO mlxcel::server::chat_request: prompt cache on + preserve_thinking unset: defaulting preserve_thinking=true for prefix stability (override via chat_template_kwargs.preserve_thinking=false) session=__mlxcel_anon__
+2026-10-11T07:07:22.076589Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/3466 prompt tokens, total 15944ms prompt_tokens=3466 cached_tokens=0 generation_time_ms=15944
+2026-10-11T07:07:44.332149Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=3465/3466 prompt tokens, total 22048ms prompt_tokens=3466 cached_tokens=3465 generation_time_ms=22048
+2026-10-11T07:07:44.333509Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=3465/3466 prompt tokens, total 22050ms prompt_tokens=3466 cached_tokens=3465 generation_time_ms=22050
+2026-10-11T07:07:44.334338Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=3465/3466 prompt tokens, total 22050ms prompt_tokens=3466 cached_tokens=3465 generation_time_ms=22050
+2026-10-11T07:07:44.334956Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=3465/3466 prompt tokens, total 22051ms prompt_tokens=3466 cached_tokens=3465 generation_time_ms=22051
+2026-10-11T07:08:54.306989Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=3465/3466 prompt tokens, total 69764ms prompt_tokens=3466 cached_tokens=3465 generation_time_ms=69764
+2026-10-11T07:08:54.308619Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=3465/3466 prompt tokens, total 69766ms prompt_tokens=3466 cached_tokens=3465 generation_time_ms=69766
+2026-10-11T07:08:54.309594Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=3465/3466 prompt tokens, total 69767ms prompt_tokens=3466 cached_tokens=3465 generation_time_ms=69767
+2026-10-11T07:08:54.310489Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=3465/3466 prompt tokens, total 69767ms prompt_tokens=3466 cached_tokens=3465 generation_time_ms=69767
+2026-10-11T07:08:54.311340Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=3465/3466 prompt tokens, total 69769ms prompt_tokens=3466 cached_tokens=3465 generation_time_ms=69769
+2026-10-11T07:08:54.312468Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=3465/3466 prompt tokens, total 69770ms prompt_tokens=3466 cached_tokens=3465 generation_time_ms=69770
+2026-10-11T07:08:54.313435Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=3465/3466 prompt tokens, total 69771ms prompt_tokens=3466 cached_tokens=3465 generation_time_ms=69771
+2026-10-11T07:08:54.314215Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=3465/3466 prompt tokens, total 69771ms prompt_tokens=3466 cached_tokens=3465 generation_time_ms=69771

@@ -1,0 +1,30 @@
+Server:       http://127.0.0.1:18080
+Model:        llama-4-scout-17b-16e-instruct-4bit
+Prompt:       ~4096 tokens (20735 chars), style plain
+Max tokens:   128
+Concurrency:  [1, 4, 8]
+
+>>> concurrency=1 ...
+    decode paths: paged_decode_launches_total{path="fused_v2"}=+0  paged_decode_launches_total{path="gather"}=+0  paged_decode_launches_total{path="cascade"}=+0  cascade_shared_tokens_total=+0  cascade_member_sequences_total=+0  cascade_failures_total=+0  prompt_cache_hits_total=+0
+    NOTE: no cascade launch in this level. Whatever this level measured, it was not cascade attention.
+    batch counters: decode_steps=+127  decode_tokens=+127  mixed_steps=+0  prefill_chunks=+1  tokens_predicted_seconds=+7.792
+    batch steps: occupancy=1.00  decode_step_ms=61.35  (predicted_seconds/steps=61.35 ms)
+
+>>> concurrency=4 ...
+    decode paths: paged_decode_launches_total{path="fused_v2"}=+0  paged_decode_launches_total{path="gather"}=+0  paged_decode_launches_total{path="cascade"}=+0  cascade_shared_tokens_total=+0  cascade_member_sequences_total=+0  cascade_failures_total=+0  prompt_cache_hits_total=+0
+    NOTE: no cascade launch in this level. Whatever this level measured, it was not cascade attention.
+    batch counters: decode_steps=+127  decode_tokens=+508  mixed_steps=+0  prefill_chunks=+0  tokens_predicted_seconds=+86.392
+    batch steps: occupancy=4.00  decode_step_ms=170.06  (predicted_seconds/steps=680.25 ms)
+
+>>> concurrency=8 ...
+    decode paths: paged_decode_launches_total{path="fused_v2"}=+0  paged_decode_launches_total{path="gather"}=+0  paged_decode_launches_total{path="cascade"}=+0  cascade_shared_tokens_total=+0  cascade_member_sequences_total=+0  cascade_failures_total=+0  prompt_cache_hits_total=+0
+    NOTE: no cascade launch in this level. Whatever this level measured, it was not cascade attention.
+    batch counters: decode_steps=+127  decode_tokens=+1016  mixed_steps=+0  prefill_chunks=+0  tokens_predicted_seconds=+550.118
+    batch steps: occupancy=8.00  decode_step_ms=541.45  (predicted_seconds/steps=4331.64 ms)
+
+conc   ok  fail  ttft_ms(mean)  ttft_ms(p95)  decode_tok_s(mean)  aggregate_tok_s
+---------------------------------------------------------------------------------
+   1    1     0         8239.7        8239.7                16.3              8.0
+   4    4     0          380.6         487.5                 5.9             23.3
+   8    8     0          555.3         919.7                 1.8             14.8
+
