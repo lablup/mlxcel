@@ -372,7 +372,7 @@ fn next_piece_matches_resumed_plan_across_boundaries_cursors_chunks_and_padding(
         }),
     ];
     for (prompt_len, adopted, boundary) in [
-        (0, 0, None),
+        (0_usize, 0_usize, None),
         (70, 0, None),
         (1300, 0, Some(700)),
         (5000, 123, Some(777)),
