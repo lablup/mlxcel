@@ -22,9 +22,23 @@ The raw final logs correspond to source commit `ecb89a308aecc468dd1886d9c9f4982f
 
 The native build logs contain existing compiler diagnostics from the pinned dependency build; the Rust clippy command still exited successfully with `-D warnings`.
 
+## Rebase equivalence
+
+The benchmark was captured before PR #2272 rebased onto main. The measured source is `ecb89a308aecc468dd1886d9c9f4982f556f3c93`; the rebased publication checkout is `327b6bf13a31d0f98e4cce717443d03b4be2cb73` on `3ae626c2a4d67e7628a4050f01cc62b7419296fb`. Both checkouts have `sampling.rs` blob `59fb6b02c6b54913aa549085fafc090e0b516d55`, and their diff across `src/lib/mlxcel-core`, `src/lib/mlx-cpp`, and `Cargo.lock` is empty. `rebase-equivalence.txt` records the exact identities and empty-output hash. The byte-preserved original `environment.txt` is unchanged.
+
+`implementation-73700aaf-to-ecb89a3.patch` contains the original two implementation commits as a format patch. To reconstruct the measured implementation tree from the public base:
+
+```bash
+cp implementation-73700aaf-to-ecb89a3.patch /tmp/issue-2259-implementation.patch
+git switch --detach 73700aafa6a792f07830578c0c26137cea3a038b
+git am /tmp/issue-2259-implementation.patch
+git rev-parse HEAD^{tree}
+# 58b9a04161eaf88048699d0930a69dd59ccdd7b3
+```
+
 ## Replay
 
-After squash merge, rebuild and run the ignored test from the merge commit on a quiet CUDA host with `gpu-lock run --tag issue-2259-quiet-timing -- cargo test --profile test-fast --features cuda -p mlxcel-core --lib sampling::tests::dry_step_cost_report -- --ignored --nocapture --test-threads=1`. That direct cargo form may compile while holding the lock if the cache is cold. For a controlled measurement, first build the test artifact outside the timing window, then adapt the preserved inner driver to invoke that exact artifact while retaining the same provenance capture and gate. Compare production and test code against the measured source and keep any post-measurement difference explicit.
+Rebuild the reconstructed measured tree or a source-equivalent merge checkout, then run the ignored test on a quiet CUDA host with `gpu-lock run --tag issue-2259-quiet-timing -- cargo test --profile test-fast --features cuda -p mlxcel-core --lib sampling::tests::dry_step_cost_report -- --ignored --nocapture --test-threads=1`. That direct cargo form may compile while holding the lock if the cache is cold. For a controlled measurement, first build the test artifact outside the timing window, then adapt the preserved inner driver to invoke that exact artifact while retaining the same provenance capture and gate. Keep the replay checkout and any source difference explicit; the published timing always refers to the original measured artifact.
 
 Validate the preserved files from this directory with:
 
