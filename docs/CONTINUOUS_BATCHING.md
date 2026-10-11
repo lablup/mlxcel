@@ -199,6 +199,13 @@ Known limitations of the plan, recorded for the epic's end-of-run measurement:
 - The history segment of a snapshot family's prefill (the span before the history boundary, #1143) is always one unchunked forward, whatever `--prefill-chunk-size` says. This predates the plan (it has been the case since #1143), and the plan keeps it because the segment is where the prompt cache snapshots the model state. A long chat history on a snapshot family therefore prefills as one forward that does not interleave with concurrent decode ticks; only the pieces after the boundary do.
 - PR #2226 measured the tradeoff that the adaptive default resolves: with four Llama-3.2-1B 4-bit streams decoding and an 8192-token request admitted, 2048 produced 127.9–128.9 ms stream ITL p95 during admission and 1903–2060 ms admitted-request TTFT; 512 produced 55.8–56.4 ms ITL p95 and 3768–4067 ms TTFT (three rounds). The scheduler therefore uses 512 only while `active_batch` is non-empty and returns to 2048 when the decode streams finish (#2228).
 
+The shipped policy passed its fresh-release GB10 acceptance run: three
+quiet-host admission rounds measured 54.1, 54.8, and 55.2 ms live-stream ITL
+p95, below the 62.0 ms limit. Five-round idle-server TTFT comparisons placed
+the policy median inside the explicit-2048 null range on both Qwen3-1.7B and
+Llama-3.2-1B. See the
+[raw results and protocol](benchmark_results/adaptive-prefill-chunk-gb10-2026-10-11.md).
+
 ### Decode headroom under a tight budget (`--kv-admission-watermark`)
 
 When the budget is small relative to the concurrent work, admitting a request

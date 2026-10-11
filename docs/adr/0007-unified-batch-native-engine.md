@@ -93,6 +93,12 @@ Phase 5 makes the CLI a client of the server engine, so the server's llama-serve
 
 Amendment (#2228): PR #2226 measured the server's 2048 choice under live decode. Across three Llama-3.2-1B 4-bit admission rounds, stream ITL p95 was 127.9–128.9 ms at 2048 and 55.8–56.4 ms at 512, while the admitted request's TTFT was 1903–2060 ms and 3768–4067 ms respectively. No fixed value wins both measures, so the server now chooses per scheduler tick: 2048 with no other sequence decoding and 512 while `active_batch` is non-empty. `--prefill-chunk-size`, `--batch-size` / `LLAMA_ARG_BATCH`, and `MLXCEL_PREFILL_CHUNK` pin both states. The direct engine remains at the 2048 alone value.
 
+The fresh-release acceptance run on GB10 confirmed the decision: live-stream
+admission ITL p95 was 54.1, 54.8, and 55.2 ms in three quiet-host rounds, and
+the adaptive policy's five-round idle-server TTFT median lay inside the
+explicit-2048 null range for both Qwen3-1.7B and Llama-3.2-1B
+([results](../benchmark_results/adaptive-prefill-chunk-gb10-2026-10-11.md)).
+
 ### Regression threshold
 
 | Row | Value | How it is set |
