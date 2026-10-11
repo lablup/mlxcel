@@ -182,7 +182,9 @@ pub enum SpeculativeDispatch {
     /// tick; everything else decodes in the regular batched step.
     PromptLookup {
         /// The drafter's tunables: `--draft-block-size` sets `max_draft`,
-        /// every other field is [`PromptLookupConfig::default`].
+        /// CUDA gated dispatch additionally sets the server emission floor,
+        /// shadow-confirmation length, and proposal-free pipeline cadence.
+        /// Other settings retain [`PromptLookupConfig::default`].
         config: PromptLookupConfig,
         /// `--prompt-lookup-max-batch`: verify rounds run only on ticks whose
         /// active decode batch has at most this many rows.

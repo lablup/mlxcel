@@ -186,9 +186,9 @@ pub enum DraftPolicy {
     /// Narrow (`GATED_NARROW_DRAFT`, 2 proposals) until a narrow block lands
     /// whole, then full (`max_draft`). While paused it keeps looking up and
     /// checks each proposal against the tokens decoding emits next; proposing
-    /// resumes only once `SHADOW_CONFIRM` (2) proposed tokens in a row came
-    /// true, and until a round lands a whole narrow block, a round that lands
-    /// nothing pauses again at once.
+    /// resumes once `shadow_confirm_tokens` proposed tokens in a row came
+    /// true (default 2, CUDA server 7). Until a round lands a whole narrow
+    /// block, a round that lands nothing pauses again at once.
     Gated,
 }
 
@@ -472,8 +472,8 @@ impl DraftGovernor {
     }
 
     /// A paused [`DraftPolicy::Gated`] governor saw a lookup proposal come
-    /// true for [`SHADOW_CONFIRM`] tokens: resume with a narrow block, on
-    /// probation.
+    /// true for the configured `shadow_confirm_tokens`: resume with a narrow
+    /// block, on probation.
     pub(crate) fn shadow_confirmed(&mut self) {
         if self.probes_while_paused() {
             self.drafting = true;
