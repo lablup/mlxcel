@@ -70,7 +70,6 @@ Before report additions, the branch changes 16 files with 868 insertions and 116
 ## 8. Follow-up Actions
 
 - Confirm PR CI results before central merge.
-- Finalize the PR number, validation status and bilingual reports before central merge.
 - Keep the separate plain-drafter failed-submit/retraction problem outside this change, as specified by #2258.
 
 ## Appendix: Validation Recorded So Far
