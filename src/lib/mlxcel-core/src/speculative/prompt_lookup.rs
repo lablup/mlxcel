@@ -127,9 +127,9 @@ pub struct PromptLookupConfig {
     /// Ignored when `adaptive` is `false`.
     pub policy: DraftPolicy,
     /// Optional minimum EMA of emitted tokens (accepted proposals plus the
-    /// bonus) per drafted round. Gated adaptation pauses after at least two
-    /// samples below this floor, when the latest round also falls below it
-    /// and left at least one proposed token unaccepted. The floor is capped at
+    /// bonus) per drafted round. Gated adaptation pauses when the EMA is below
+    /// this floor and two consecutive rounds also fall below it with at least
+    /// one proposed token left unaccepted. The floor is capped at
     /// `max_draft + 1`; a fully accepted short block keeps drafting because it
     /// is evidence that the available copy was exhausted, not rejected.
     /// `None` preserves the CLI policy.
@@ -313,6 +313,10 @@ const GATED_FULL_AT: f64 = 1.5;
 /// Accepted-proposal average a [`DraftPolicy::Gated`] governor starts from and
 /// resumes with: below [`GATED_FULL_AT`], so the first block is narrow.
 const GATED_START_EMA: f64 = 1.0;
+/// Consecutive incomplete rounds below the server emission floor required to
+/// pause. One miss is tolerated because copy workloads cross field boundaries
+/// before finding the next long repeated span.
+const BREAK_EVEN_LOW_ROUNDS: usize = 2;
 /// Proposed tokens in a row a paused [`DraftPolicy::Gated`] governor must see
 /// come true before it proposes again. One is not enough on prose: the token
 /// after a two-token match is often a common one that happens to recur.
@@ -340,6 +344,7 @@ pub(crate) struct DraftGovernor {
     min_tokens_per_round: Option<usize>,
     emitted_ema: f64,
     drafted_samples: usize,
+    low_yield_rounds: usize,
     misses: usize,
     /// [`DraftPolicy::Graded`]: paused rounds left, and the next pause length.
     cooldown: usize,
@@ -371,6 +376,7 @@ impl DraftGovernor {
                 .map(|floor| floor.min(config.max_draft.saturating_add(1))),
             emitted_ema: 0.0,
             drafted_samples: 0,
+            low_yield_rounds: 0,
             misses: 0,
             cooldown: 0,
             next_cooldown: MIN_COOLDOWN,
@@ -444,10 +450,14 @@ impl DraftGovernor {
                         0.5 * self.emitted_ema + 0.5 * emitted
                     };
                     self.drafted_samples = self.drafted_samples.saturating_add(1);
+                    if emitted < floor as f64 && accepted < proposed {
+                        self.low_yield_rounds = self.low_yield_rounds.saturating_add(1);
+                    } else {
+                        self.low_yield_rounds = 0;
+                    }
                     if self.drafted_samples >= 2
                         && self.emitted_ema < floor as f64
-                        && emitted < floor as f64
-                        && accepted < proposed
+                        && self.low_yield_rounds >= BREAK_EVEN_LOW_ROUNDS
                     {
                         self.drafting = false;
                         self.misses = 0;
@@ -492,6 +502,7 @@ impl DraftGovernor {
             self.accepted_ema = GATED_START_EMA;
             self.emitted_ema = 0.0;
             self.drafted_samples = 0;
+            self.low_yield_rounds = 0;
         }
     }
 }

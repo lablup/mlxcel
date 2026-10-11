@@ -982,15 +982,20 @@ fn server_break_even_keeps_a_fully_accepted_short_ramp() {
         "a fully accepted narrow proposal widens instead of pausing"
     );
     governor.record_round(2, 7);
+    assert!(
+        governor.budget() > 0,
+        "one incomplete round does not erase the fully accepted ramp"
+    );
+    governor.record_round(2, 7);
     assert_eq!(
         governor.budget(),
         0,
-        "the same emission count still pauses an incomplete wide proposal"
+        "two incomplete wide proposals still pause"
     );
 }
 
 #[test]
-fn server_break_even_allows_a_recovering_round_but_pauses_the_next_low_round() {
+fn server_break_even_allows_a_recovering_round_and_pauses_two_low_rounds() {
     let mut governor = DraftGovernor::new(&PromptLookupConfig {
         min_tokens_per_round: Some(4),
         ..gated(7)
@@ -999,6 +1004,8 @@ fn server_break_even_allows_a_recovering_round_but_pauses_the_next_low_round() {
     governor.record(3); // Four emissions: current round repays EMA debt.
     assert!(governor.budget() > 0);
     governor.record(2); // Three emissions, EMA still below four.
+    assert!(governor.budget() > 0, "one low round is tolerated");
+    governor.record(2); // A consecutive low round confirms the regression.
     assert_eq!(governor.budget(), 0);
     assert!(governor.probes_while_paused());
 
@@ -1007,7 +1014,33 @@ fn server_break_even_allows_a_recovering_round_but_pauses_the_next_low_round() {
     governor.record(4); // Five emissions: EMA exactly four, not below.
     assert!(governor.budget() > 0, "the threshold is strictly below");
     governor.record(2); // Three emissions: EMA is now below four.
+    assert!(governor.budget() > 0, "one low round is tolerated");
+    governor.record(2); // A consecutive low round confirms the regression.
     assert_eq!(governor.budget(), 0);
+}
+
+#[test]
+fn server_break_even_does_not_pause_on_one_miss_after_profitable_copy() {
+    let mut governor = DraftGovernor::new(&PromptLookupConfig {
+        min_tokens_per_round: Some(4),
+        ..gated(7)
+    });
+    governor.record_round(2, 2);
+    governor.record_round(7, 7);
+    governor.record_round(0, 7);
+    assert_eq!(
+        governor.budget(),
+        7,
+        "the traced 2/2, 7/7, 0/7 boundary keeps looking for the next copy span"
+    );
+    governor.record_round(7, 7);
+    governor.record_round(0, 7);
+    assert!(
+        governor.budget() > 0,
+        "a later isolated miss is also tolerated"
+    );
+    governor.record_round(0, 7);
+    assert_eq!(governor.budget(), 0, "two consecutive misses still pause");
 }
 
 #[test]
