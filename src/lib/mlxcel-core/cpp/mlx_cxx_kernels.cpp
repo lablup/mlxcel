@@ -858,7 +858,11 @@ const mlxcel::KernelPorts& ssm_ports() {
     get_compiled_compute_dt() {
         auto fn = [](const std::vector<array>& inputs) -> std::vector<array> {
             auto dt = mlx::core::astype(inputs[0], mlx::core::float32);
-            const auto& dt_bias = inputs[1];
+            // MLX's binary type promotion preserves the bf16 bias dtype here,
+            // which would round the softplus result before the float32 state
+            // update. Promote both operands explicitly so the compiled path
+            // matches the model graph and the kernel's float32 recurrence.
+            auto dt_bias = mlx::core::astype(inputs[1], mlx::core::float32);
             const auto& lo = inputs[2];
             const auto& hi = inputs[3];
             auto result = mlx::core::add(dt, dt_bias);

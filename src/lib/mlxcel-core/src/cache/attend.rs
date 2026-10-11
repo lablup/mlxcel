@@ -50,12 +50,11 @@
 //! dense entries for those storages, [`KvAttention`] is the trait the model
 //! enums implement by matching to the inner cache, and [`attend_batched_rows`]
 //! is the per-row batched loop every non-pooled batch takes. The
-//! `DecodeBatchContext` those families used to read is gone: the
-//! dense-pointer "paged compat" kernels it selected
-//! (`paged_decode_attention_dense_compat`, `_rotating_compat`) were per-row
-//! loops of block slices, a concat and one SDPA call per row, so a batch now
-//! runs the same attention per row through its own cache without the concat
-//! copy, the change ADR 0008 already made for Qwen3 and Llama 3.
+//! `DecodeBatchContext` those families used to read is gone: its old
+//! dense-pointer route ran per-row loops of block slices, a concat and one SDPA
+//! call per row, so a batch now runs the same attention per row through its own
+//! cache without the concat copy, the change ADR 0008 already made for Qwen3
+//! and Llama 3.
 
 use cxx::UniquePtr;
 

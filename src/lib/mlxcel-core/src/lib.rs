@@ -1388,36 +1388,6 @@ mod ffi {
             scale: f32,
         ) -> UniquePtr<MlxArray>;
 
-        /// Decode-only paged attention over dense compatibility KV caches.
-        ///
-        /// `q` is `[B, Hq, 1, D]`. `cache_keys[i]` / `cache_values[i]` are
-        /// per-sequence dense KV buffers, while `kv_lens`, `block_tables`, and
-        /// `block_table_offsets` describe the logical paged layout.
-        unsafe fn paged_decode_attention_dense_compat(
-            q: &MlxArray,
-            cache_keys: &[*const MlxArray],
-            cache_values: &[*const MlxArray],
-            kv_lens: &[i32],
-            block_tables: &[i32],
-            block_table_offsets: &[i32],
-            block_size: i32,
-            scale: f32,
-        ) -> UniquePtr<MlxArray>;
-
-        /// Decode-only paged attention over rotating ring-buffer KV caches.
-        ///
-        /// `logical_starts[i]` identifies the physical start of the logical
-        /// visible window within `cache_keys[i]` / `cache_values[i]`.
-        unsafe fn paged_decode_attention_rotating_compat(
-            q: &MlxArray,
-            cache_keys: &[*const MlxArray],
-            cache_values: &[*const MlxArray],
-            kv_lens: &[i32],
-            logical_starts: &[i32],
-            block_size: i32,
-            scale: f32,
-        ) -> UniquePtr<MlxArray>;
-
         /// Fused paged-attention decode Metal kernel (epic #116 Phase 6, #123).
         ///
         /// Reads scattered KV blocks directly out of the global pool via the
