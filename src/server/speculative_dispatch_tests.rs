@@ -384,6 +384,14 @@ fn resolve_prompt_lookup_block_size_and_max_batch() {
         *config,
         PromptLookupConfig {
             max_draft: 4,
+            min_tokens_per_round: cfg!(feature = "cuda")
+                .then_some(PROMPT_LOOKUP_MIN_TOKENS_PER_ROUND),
+            shadow_confirm_tokens: if cfg!(feature = "cuda") {
+                PROMPT_LOOKUP_SHADOW_CONFIRM_TOKENS
+            } else {
+                2
+            },
+            plain_rounds_before_pipeline: if cfg!(feature = "cuda") { 0 } else { 2 },
             ..PromptLookupConfig::default()
         }
     );
@@ -421,4 +429,21 @@ fn unknown_kind_message_lists_prompt_lookup() {
     cfg.draft_kind = Some("ngram".to_string());
     let err = SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect_err("unknown kind");
     assert!(err.to_string().contains("prompt-lookup"), "{err}");
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn resolve_prompt_lookup_caps_break_even_floor_for_explicit_narrow_blocks() {
+    for width in [1, 2] {
+        let mut cfg = base_config();
+        cfg.draft_kind = Some("prompt-lookup".to_string());
+        cfg.draft_block_size = Some(width);
+        let dispatch = SpeculativeDispatch::resolve(&cfg, unmeasured_target()).expect("resolve");
+        let (config, _) = dispatch.prompt_lookup_config().expect("prompt lookup");
+        assert_eq!(config.min_tokens_per_round, Some(width as usize + 1));
+        assert_eq!(
+            config.shadow_confirm_tokens, 7,
+            "narrow widths still need strong resume evidence"
+        );
+    }
 }

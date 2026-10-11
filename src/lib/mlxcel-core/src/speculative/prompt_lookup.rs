@@ -126,6 +126,16 @@ pub struct PromptLookupConfig {
     /// How the adaptive governor sizes blocks and decides when to resume.
     /// Ignored when `adaptive` is `false`.
     pub policy: DraftPolicy,
+    /// Optional minimum EMA of emitted tokens (accepted proposals plus the
+    /// bonus) per drafted round. Gated adaptation pauses after at least two
+    /// samples below this floor, when the latest round also falls below it
+    /// (capped at `max_draft + 1`, so a fully accepted narrow block can keep
+    /// drafting). `None` preserves the CLI policy.
+    pub min_tokens_per_round: Option<usize>,
+    /// Consecutive shadow tokens required to resume a paused gated row.
+    pub shadow_confirm_tokens: usize,
+    /// Proposal-free asks tolerated before enabling the plain-step pipeline.
+    pub plain_rounds_before_pipeline: usize,
 }
 
 impl Default for PromptLookupConfig {
@@ -136,6 +146,9 @@ impl Default for PromptLookupConfig {
             max_draft: DEFAULT_MAX_DRAFT,
             adaptive: true,
             policy: DraftPolicy::default_for_backend(),
+            min_tokens_per_round: None,
+            shadow_confirm_tokens: SHADOW_CONFIRM,
+            plain_rounds_before_pipeline: 2,
         }
     }
 }
@@ -217,6 +230,14 @@ impl PromptLookupConfig {
                 "prompt-lookup max-draft ({}) must be at most {MAX_DRAFT_LIMIT}",
                 self.max_draft
             ));
+        }
+        if self.shadow_confirm_tokens == 0 || self.shadow_confirm_tokens > MAX_DRAFT_LIMIT {
+            return Err(format!(
+                "prompt-lookup shadow-confirm-tokens must be in 1..={MAX_DRAFT_LIMIT}"
+            ));
+        }
+        if self.min_tokens_per_round == Some(0) {
+            return Err("prompt-lookup min-tokens-per-round must be positive".to_string());
         }
         Ok(())
     }
@@ -314,6 +335,9 @@ pub(crate) struct DraftGovernor {
     adaptive: bool,
     policy: DraftPolicy,
     accepted_ema: f64,
+    min_tokens_per_round: Option<usize>,
+    emitted_ema: f64,
+    drafted_samples: usize,
     misses: usize,
     /// [`DraftPolicy::Graded`]: paused rounds left, and the next pause length.
     cooldown: usize,
@@ -340,6 +364,11 @@ impl DraftGovernor {
             adaptive: config.adaptive,
             policy: config.policy,
             accepted_ema,
+            min_tokens_per_round: config
+                .min_tokens_per_round
+                .map(|floor| floor.min(config.max_draft.saturating_add(1))),
+            emitted_ema: 0.0,
+            drafted_samples: 0,
             misses: 0,
             cooldown: 0,
             next_cooldown: MIN_COOLDOWN,
@@ -396,6 +425,25 @@ impl DraftGovernor {
                 }
             }
             DraftPolicy::Gated => {
+                if let Some(floor) = self.min_tokens_per_round {
+                    // Only real verify rounds contribute; proposal-free asks
+                    // and retracted lookahead proposals carry no evidence.
+                    let emitted = accepted as f64 + 1.0;
+                    self.emitted_ema = if self.drafted_samples == 0 {
+                        emitted
+                    } else {
+                        0.5 * self.emitted_ema + 0.5 * emitted
+                    };
+                    self.drafted_samples = self.drafted_samples.saturating_add(1);
+                    if self.drafted_samples >= 2
+                        && self.emitted_ema < floor as f64
+                        && emitted < floor as f64
+                    {
+                        self.drafting = false;
+                        self.misses = 0;
+                        return;
+                    }
+                }
                 // Probation ends on a round that lands a whole narrow block:
                 // one stray token is what prose lands too, and on GB10 a run
                 // of such rounds (8B email: 6 drafted, 3 tokens landed) cost
@@ -432,6 +480,8 @@ impl DraftGovernor {
             self.probation = true;
             self.misses = 0;
             self.accepted_ema = GATED_START_EMA;
+            self.emitted_ema = 0.0;
+            self.drafted_samples = 0;
         }
     }
 }
@@ -447,11 +497,14 @@ pub(crate) struct ShadowProbe {
 }
 
 impl ShadowProbe {
-    /// `Some(true)` once the first [`SHADOW_CONFIRM`] proposed tokens all came
+    /// `Some(true)` once the first `confirm_tokens` proposed tokens all came
     /// true, `Some(false)` at the first one that did not, and `None` while
     /// decoding has not emitted that far yet.
-    pub(crate) fn settle(&self, context: &[i32]) -> Option<bool> {
-        for (i, &claimed) in self.proposal.iter().take(SHADOW_CONFIRM).enumerate() {
+    pub(crate) fn settle(&self, context: &[i32], confirm_tokens: usize) -> Option<bool> {
+        if self.proposal.len() < confirm_tokens {
+            return Some(false);
+        }
+        for (i, &claimed) in self.proposal.iter().take(confirm_tokens).enumerate() {
             match context.get(self.start + i) {
                 None => return None,
                 Some(&emitted) if emitted != claimed => return Some(false),

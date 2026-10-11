@@ -143,6 +143,7 @@ fn prompt_lookup_flags_parse_into_the_generator_config() {
             max_draft: 5,
             adaptive: false,
             policy: mlxcel::DraftPolicy::Graded,
+            ..mlxcel::PromptLookupConfig::default()
         }
     );
 }

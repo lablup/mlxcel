@@ -664,10 +664,24 @@ drafter checkpoint; a `--draft-model` with it fails startup) offers n-gram
 prompt-lookup speculation per request inside the batch scheduler (#2255). It
 pays off on replies that copy the prompt (edits, reformatting, quoting). At
 prefill completion an eligible request gets a `PromptLookupDrafter`;
-`--draft-block-size` sets the largest proposal (default 7) and every other
-setting is the drafter's default, including the backend's draft policy (`gated`
-on CUDA, `graded` elsewhere). The startup log prints
-`speculative=prompt-lookup (max_draft=N, policy=P, max_batch=M)`.
+`--draft-block-size` sets the largest proposal (default 7) and the backend draft policy is `gated` on CUDA, `graded` elsewhere. The
+startup summary includes `max_draft`, `policy`, `max_batch`,
+`min_tokens_per_round`, `shadow_confirm_tokens`, and
+`plain_rounds_before_pipeline`.
+
+The CUDA server opts into a break-even governor (#2264): after two drafted
+rounds, an EMA (weight 0.5) below four emitted tokens per verify round
+(accepted proposals plus the bonus), with the latest round also below that
+floor, pauses the row. A round that already meets the floor can repay startup
+EMA debt without pausing. The floor is capped at
+`max_draft + 1` for explicitly narrower blocks, so full acceptance keeps
+drafting. Paused rows immediately
+permit pipelining and continue shadow lookups; seven consecutive proposed
+tokens must come true before verification resumes with fresh evidence.
+Ordinary proposal-free asks re-prime after the first ask instead of the CLI's
+three. Each row keeps its own evidence even at concurrency two; a proposing
+peer still makes the shared tick synchronous. The CLI defaults and the graded
+policy remain unchanged.
 
 Each decode tick asks the eligible rows for a proposal. A row that proposes
 runs one verify round on its own (the round `mlxcel generate --prompt-lookup`
@@ -688,22 +702,21 @@ verifying once its context passes 4096 tokens, where the gathered verify
 forward starts to cost more than it saves (0.62x at 8192 tokens on a 59 %
 acceptance prompt); dense storage has no such limit.
 
-The flag gains on output that copies its prompt (+53 to +67 % at B=1 on GB10
+Before the break-even governor, the flag gained on output that copied its
+prompt (+53 to +67 % at B=1 on GB10
 for a repeat-the-paragraph prompt, up to 2.8x with a long document in front)
-but costs 3.5 % on chat whose reply copies little (25 to 45 % of proposed
+but cost 3.5 % on chat whose reply copied little (25 to 45 % of proposed
 tokens accepted), because each proposal also ends the lookahead for a tick.
 Turn it on for workloads that quote or edit their input. Measurements:
 [`docs/benchmark_results/server-prompt-lookup-gb10-2026-10-11.md`](benchmark_results/server-prompt-lookup-gb10-2026-10-11.md);
-server-side gating for low-acceptance replies is #2264. Verify rounds also stay off under a unified KV
+the server break-even governor addresses these low-yield rounds (#2264). Verify rounds also stay off under a unified KV
 budget (`--kv-unified`). Requests with images, audio or video, structured
 output, per-token logprobs, mirostat, adaptive-p or the extended sampler chain
 (dynamic temperature, `min_keep`), and models whose state a cache trim cannot
 roll back (recurrent, hybrid and model-owned families), decode plainly; a
 `debug` log names the reason. A finished request reports its verify rounds in
 the `timings` block with `draft_kind: "prompt-lookup"` (see
-[speculative-acceptance.md](speculative-acceptance.md)). On paged storage no
-context limit applies yet; the verify cost at long contexts is measured
-separately. `--spec-type none` turns prompt lookup off like any other drafter.
+[speculative-acceptance.md](speculative-acceptance.md)). `--spec-type none` turns prompt lookup off like any other drafter.
 
 The first eligible prefill, normally the server's startup warmup request, runs
 one verify forward at every block width (2 through `--draft-block-size` + 1)

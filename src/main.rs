@@ -475,6 +475,7 @@ impl PromptLookupOptions {
             max_draft: self.prompt_lookup_max_draft,
             adaptive: !self.prompt_lookup_no_adaptive,
             policy: self.prompt_lookup_policy.resolve(),
+            ..mlxcel::PromptLookupConfig::default()
         }
     }
 }

@@ -134,6 +134,17 @@ rules emit a draw from `p` conditioned on not being `d`. Sampler-match is
 therefore already the acceptance-optimal rule for that path, and there is
 nothing to opt into.
 
+The CUDA server's prompt-lookup governor additionally pauses low-yield rows
+when the EMA of accepted proposals plus one falls below four tokens after at
+least two drafted rounds and the latest round is also below the floor. A
+latest round meeting the floor can repay startup EMA debt without pausing.
+This is a proposal-cost decision, not a change to
+the sampler-match acceptance rule. Paused rows still observe emitted tokens
+and run shadow lookups; seven matching shadow tokens restore verification.
+Plain asks, retracted proposals, and gated-out rows add no verify evidence.
+The CLI has no break-even floor and retains its two-token shadow confirmation.
+`adaptive = false` ignores the floor, and the graded policy is unchanged.
+
 ## RNG dependency
 
 Modified rejection sampling draws randomness the previous rules did not:

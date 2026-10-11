@@ -25,26 +25,12 @@
 //! drafter rather than with the loop.
 
 use super::prompt_lookup::{
-    DraftGovernor, NgramIndex, PromptLookupConfig, PromptLookupStats, SHADOW_CONFIRM, ShadowProbe,
+    DraftGovernor, NgramIndex, PromptLookupConfig, PromptLookupStats, ShadowProbe,
 };
 use crate::MlxArray;
 use crate::drafter::{Drafter, DrafterError, DrafterKind};
 use crate::generate::{LanguageModel, SamplingConfig};
 use crate::weights::WeightMap;
-
-/// Consecutive rounds without a proposal before the round loop pipelines.
-///
-/// A pipelined step is submitted before the host knows the token it follows,
-/// so it cannot carry a proposal: the first proposal after a pipelined run
-/// waits one step. Edits that miss for a token or two at each changed field
-/// (a JSON id, a renamed identifier) would pay that step at every field, so
-/// only a run of plain rounds switches to pipelining. A paused
-/// `DraftPolicy::Gated` governor pipelines at once: it cannot propose until
-/// a shadow probe settles, which takes at least [`SHADOW_CONFIRM`] emitted
-/// tokens, so there is no proposal for a pipelined step to delay. Waiting on
-/// each token before encoding the next step cost 12% of decode time on an
-/// M4 Pro.
-const PLAIN_ROUNDS_BEFORE_PIPELINE: usize = 2;
 
 /// The prompt-lookup drafter. One instance serves one completion; a second
 /// run through the same instance starts from the prompt the loop reports to
@@ -78,7 +64,7 @@ impl PromptLookupDrafter {
         Self {
             config,
             shadow_config: PromptLookupConfig {
-                max_draft: SHADOW_CONFIRM,
+                max_draft: config.shadow_confirm_tokens,
                 ..config
             },
             context: Vec::new(),
@@ -163,7 +149,7 @@ impl Drafter for PromptLookupDrafter {
         if let Some(confirmed) = self
             .shadow
             .as_ref()
-            .and_then(|probe| probe.settle(&self.context))
+            .and_then(|probe| probe.settle(&self.context, self.config.shadow_confirm_tokens))
         {
             self.shadow = None;
             if confirmed {
@@ -183,7 +169,7 @@ impl Drafter for PromptLookupDrafter {
             if self.shadow.is_none() && self.governor.probes_while_paused() {
                 self.index.extend(&self.context);
                 let proposal = self.index.find(&self.context, &self.shadow_config);
-                if proposal.len() >= SHADOW_CONFIRM {
+                if proposal.len() >= self.config.shadow_confirm_tokens {
                     self.shadow = Some(ShadowProbe {
                         start: self.context.len(),
                         proposal,
@@ -206,8 +192,14 @@ impl Drafter for PromptLookupDrafter {
         Ok(draft)
     }
 
+    // A pipelined step cannot carry a proposal because its predecessor is
+    // still in flight. The CLI tolerates two proposal-free asks to avoid
+    // switching at each edited field; the server can request immediate
+    // re-priming. A paused gated row always permits the pipeline while
+    // shadow evidence accumulates.
     fn pipelines_plain_rounds(&self) -> bool {
-        self.plain_streak > PLAIN_ROUNDS_BEFORE_PIPELINE || self.governor.probes_while_paused()
+        self.plain_streak > self.config.plain_rounds_before_pipeline
+            || self.governor.probes_while_paused()
     }
 
     fn retract_draft(&mut self, draft: &[i32]) {

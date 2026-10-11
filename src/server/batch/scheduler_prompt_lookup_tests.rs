@@ -932,3 +932,210 @@ fn a_cancel_during_a_round_finalizes_after_the_round() {
     let (proposed, _) = acceptance(&rx).expect("the round ran before the cancel took effect");
     assert!(proposed > 0, "a verify round ran in the cancelled tick");
 }
+
+/// Exercise the production resolver so this regression covers the server's
+/// opt-in settings as well as the governor and scheduler integration.
+#[cfg(feature = "cuda")]
+fn break_even_scheduler() -> BatchScheduler {
+    let config = crate::server::config::ServerConfig {
+        draft_kind: Some("prompt-lookup".to_string()),
+        ..Default::default()
+    };
+    let mut dispatch =
+        crate::server::SpeculativeDispatch::resolve(&config, std::path::Path::new("unused"))
+            .expect("token-only dispatch needs no checkpoint");
+    if let crate::server::SpeculativeDispatch::PromptLookup { config, .. } = &mut dispatch {
+        config.ngram_max = 2;
+    }
+    scheduler(None).with_speculative_dispatch(dispatch)
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn low_yield_verify_rounds_pause_pipeline_and_resume_on_copy() {
+    let mut sched = break_even_scheduler();
+    let mut done = Done::new();
+    // Every true bigram continues with one correct token and then an error.
+    // Use bigram lookup to land exactly one proposal. Once decoding
+    // has written its own cycle, a long shadow match can recover copying.
+    let prompt = low_yield_prompt();
+    let rx = enqueue(&mut sched, &prompt, 80);
+    assert_eq!(tick(&mut sched, &mut done), Tick::Prefill);
+    let id = only_row(&sched);
+    let mut paused_after = None;
+    let mut pipelined_while_paused = 0;
+    let mut resumed = false;
+    for _ in 0..100 {
+        if tick(&mut sched, &mut done) == Tick::Idle {
+            break;
+        }
+        let Some(seq) = sched.active_batch.get(id) else {
+            continue;
+        };
+        let stats = seq
+            .prompt_lookup
+            .as_ref()
+            .expect("eligible row")
+            .drafter
+            .stats();
+        if stats.paused_rounds > 0 && paused_after.is_none() {
+            assert_eq!(stats.drafted_rounds, 2, "two low-yield verifies pause");
+            assert_eq!(
+                stats.accepted_draft_tokens, 2,
+                "one token landed each round"
+            );
+            paused_after = Some(stats.drafted_rounds);
+        }
+        if let Some(rounds) = paused_after {
+            if stats.drafted_rounds == rounds && sched.decode_lookahead.is_some() {
+                pipelined_while_paused += 1;
+            }
+            if stats.shadow_confirmations > 0 && stats.drafted_rounds > rounds {
+                resumed = true;
+            }
+        }
+    }
+    assert!(
+        paused_after.is_some(),
+        "low-yield rounds must pause (fails without server rule)"
+    );
+    assert!(
+        pipelined_while_paused >= 2,
+        "paused row promptly returns to actual lookahead ticks"
+    );
+    assert!(
+        resumed,
+        "shadow evidence restores actual verification on a copy stretch"
+    );
+    assert_eq!(tokens_of(&done, &prompt), cycle_from(0, 80));
+    let (proposed, accepted) = acceptance(&rx).expect("verify counters");
+    assert!(accepted > 2 && accepted <= proposed);
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn server_break_even_keeps_copy_heavy_rows_verifying() {
+    let mut sched = break_even_scheduler();
+    let mut done = Done::new();
+    let prompt = copy_prompt();
+    let rx = enqueue(&mut sched, &prompt, 64);
+    assert_eq!(tick(&mut sched, &mut done), Tick::Prefill);
+    let id = only_row(&sched);
+    let mut verified = 0;
+    for _ in 0..100 {
+        if tick(&mut sched, &mut done) == Tick::Idle {
+            break;
+        }
+        if let Some(seq) = sched.active_batch.get(id) {
+            let stats = seq
+                .prompt_lookup
+                .as_ref()
+                .expect("eligible row")
+                .drafter
+                .stats();
+            assert_eq!(
+                stats.paused_rounds, 0,
+                "copy evidence stays above break-even"
+            );
+            if stats.drafted_rounds > verified {
+                assert!(
+                    sched.decode_lookahead.is_none(),
+                    "copy round really verified synchronously"
+                );
+                verified = stats.drafted_rounds;
+            }
+        }
+    }
+    assert!(verified >= 4);
+    assert_eq!(tokens_of(&done, &prompt), cycle_from(4, 64));
+    let (proposed, accepted) = acceptance(&rx).expect("copy counters");
+    assert!(accepted > 32 && accepted <= proposed);
+}
+
+#[cfg(feature = "cuda")]
+fn low_yield_prompt() -> Vec<i32> {
+    let mut prompt = Vec::new();
+    for t in 0..VOCAB {
+        prompt.extend([
+            t as i32,
+            ((t + 1) % VOCAB) as i32,
+            ((t + 2) % VOCAB) as i32,
+            ((t + 7) % VOCAB) as i32,
+        ]);
+    }
+    prompt.extend([14, 15]);
+    prompt
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn break_even_evidence_is_per_row_while_a_copy_peer_keeps_the_tick_synchronous() {
+    let mut sched = break_even_scheduler();
+    let mut done = Done::new();
+    let copy = copy_prompt();
+    let low = low_yield_prompt();
+    let _copy_rx = enqueue(&mut sched, &copy, 128);
+    assert_eq!(tick(&mut sched, &mut done), Tick::Prefill);
+    let copy_id = only_row(&sched);
+    let _low_rx = enqueue(&mut sched, &low, 80);
+    assert_eq!(tick(&mut sched, &mut done), Tick::Prefill);
+    let low_id = sched
+        .active_batch
+        .iter_sequences()
+        .find(|seq| seq.prompt_tokens == low)
+        .expect("low-yield row admitted")
+        .seq_id;
+    let mut observed_pause = false;
+    for _ in 0..10 {
+        assert_eq!(tick(&mut sched, &mut done), Tick::Decode);
+        let low_stats = sched
+            .active_batch
+            .get(low_id)
+            .expect("low row active")
+            .prompt_lookup
+            .as_ref()
+            .expect("low drafter")
+            .drafter
+            .stats();
+        let copy_stats = sched
+            .active_batch
+            .get(copy_id)
+            .expect("copy row active")
+            .prompt_lookup
+            .as_ref()
+            .expect("copy drafter")
+            .drafter
+            .stats();
+        assert_eq!(
+            copy_stats.paused_rounds, 0,
+            "peer low yield cannot pause copying"
+        );
+        if low_stats.paused_rounds > 0 {
+            assert_eq!(low_stats.drafted_rounds, 2);
+            assert!(copy_stats.drafted_rounds >= 3);
+            assert!(
+                sched.decode_lookahead.is_none(),
+                "copy peer still verifies on the shared tick"
+            );
+            observed_pause = true;
+            break;
+        }
+    }
+    assert!(observed_pause);
+    drain(&mut sched, &mut done);
+    assert_eq!(tokens_of(&done, &copy), cycle_from(4, 128));
+    assert_eq!(tokens_of(&done, &low), cycle_from(0, 80));
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn server_reprimes_after_the_first_proposal_free_ask() {
+    let mut sched = break_even_scheduler();
+    let mut done = Done::new();
+    let _rx = enqueue(&mut sched, PLAIN_PROMPT, 12);
+    assert_eq!(tick(&mut sched, &mut done), Tick::Prefill);
+    assert_eq!(tick(&mut sched, &mut done), Tick::Decode);
+    assert!(sched.decode_lookahead.is_some());
+    drain(&mut sched, &mut done);
+    assert_eq!(tokens_of(&done, PLAIN_PROMPT), cycle_from(9, 12));
+}
