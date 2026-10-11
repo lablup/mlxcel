@@ -3,6 +3,7 @@ from pathlib import Path
 import copy
 import json
 import subprocess
+import shutil
 import tempfile
 
 ANALYZER = Path(__file__).resolve().with_name('analyze_break_even.py')
@@ -42,6 +43,11 @@ def check(label,passed):
     assert (result.returncode==0)==passed,(label,result.stdout,result.stderr)
     print(label+': PASS')
 check('complete passing matrix',True)
+original_directory = d
+d = root / 'nested' / 'attempt-3'
+shutil.copytree(original_directory, d)
+check('nested attempt passing matrix', True)
+d = original_directory
 p=d/'a2-on-r5.txt';saved=p.read_text();p.unlink();check('missing round',False);p.write_text(saved)
 p=d/'environment.json';saved=p.read_text();bad=copy.deepcopy(prov);del bad['model_config'];p.write_text(json.dumps(bad));check('missing model',False);bad=copy.deepcopy(prov);bad['model_config']['hidden_size']=4096;p.write_text(json.dumps(bad));check('wrong model',False);p.write_text(saved)
 p=d/'d2-on-r1.txt';saved=p.read_text();p.write_text('\n'.join(saved.splitlines()[:-1]));check('missing long-copy cell',False);p.write_text(saved)

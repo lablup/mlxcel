@@ -112,12 +112,20 @@ def below(value: float, floor: float) -> bool:
 
 def main() -> None:
     directory = Path(sys.argv[1]).resolve()
-    historical = directory.parent / "server-prompt-lookup-gb10-2026-10-11"
+    historical = next(
+        ancestor / "server-prompt-lookup-gb10-2026-10-11"
+        for ancestor in directory.parents
+        if (ancestor / "server-prompt-lookup-gb10-2026-10-11").is_dir()
+    )
+    repository = next(
+        ancestor for ancestor in Path(__file__).resolve().parents
+        if (ancestor / "scripts/ci/mlx_pinned_commit.sh").is_file()
+    )
     provenance = json.loads((directory / "environment.json").read_text())
     model = provenance["model_config"]
     if (model["model_type"], model["hidden_size"], model["num_hidden_layers"], model["quantization"]["bits"]) != ("qwen3", 2048, 28, 4):
         raise ValueError("acceptance requires Qwen3-1.7B affine 4-bit")
-    if provenance["native_mlx_pin"] != canonical_mlx_pin(Path(__file__).resolve().parents[4]):
+    if provenance["native_mlx_pin"] != canonical_mlx_pin(repository):
         raise ValueError("recorded native MLX pin differs from the canonical checkout pin")
     if provenance["purpose"] != "final-acceptance":
         raise ValueError("diagnostic runs are not final acceptance")
