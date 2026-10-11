@@ -133,9 +133,7 @@ pub fn prefill_chunk_override() -> Option<usize> {
 /// Parse an `MLXCEL_PREFILL_CHUNK` value. Unset and invalid values are not
 /// overrides; invalid text logs one warning naming the variable and value.
 fn parse_prefill_chunk(value: Option<&str>) -> Option<usize> {
-    let Some(raw) = value else {
-        return None;
-    };
+    let raw = value?;
     match raw.trim().parse::<usize>() {
         Ok(chunk) => Some(chunk),
         Err(_) => {
