@@ -22,15 +22,19 @@ mkdir -p "$OUT"
 [[ -x "$BENCH_BIN" ]] || { echo "missing fresh release benchmark: $BENCH_BIN" >&2; exit 2; }
 [[ -d "$MODELS/llama-3.2-1b-instruct-4bit" ]] || { echo "missing llama model link" >&2; exit 2; }
 [[ -d "$MODELS/qwen3-1.7b-4bit" ]] || { echo "missing qwen model link" >&2; exit 2; }
-# Subsequent commits only repair/add tests; validate this explicitly rather
-# than rebuilding unchanged production sources to refresh a timestamp.
+# The archived default identifies the measured production commit on the
+# unsquashed PR lineage. A fresh build, including one from a squash-merged
+# checkout, must set MLXCEL_BUILD_COMMIT to the exact revision that produced it.
+if ! git -C "$WT" merge-base --is-ancestor "$BUILD_COMMIT" HEAD; then
+    echo "build commit $BUILD_COMMIT is not an ancestor of HEAD; use the unsquashed measured lineage or rebuild HEAD and set MLXCEL_BUILD_COMMIT=$(git -C "$WT" rev-parse HEAD)" >&2
+    exit 2
+fi
 while IFS= read -r changed; do
     case "$changed" in
         src/lib/mlxcel-core/src/prefill_plan_tests.rs|tests/vlm_wrapper_capability_delegation.rs|docs/*|TECHNICAL_REPORTS/*) ;;
         *) echo "production changed since release build: $changed" >&2; exit 2 ;;
     esac
 done < <(git -C "$WT" diff --name-only "$BUILD_COMMIT" HEAD)
-git -C "$WT" merge-base --is-ancestor "$BUILD_COMMIT" HEAD
 [[ -z $(git -C "$WT" status --porcelain --untracked-files=all) ]] || { echo "measurement requires a clean worktree" >&2; exit 2; }
 head_time=$(git -C "$WT" show -s --format=%ct "$BUILD_COMMIT")
 (( $(stat -c %Y "$BIN") >= head_time )) || { echo "mlxcel predates release production commit" >&2; exit 2; }

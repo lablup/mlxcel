@@ -100,6 +100,8 @@ Completed on the implementation worktree:
 
 The acceptance artifact used production commit `88c2e6a0964d4a3a144c2ff1cc3c80dfd2893752` and measured clean worktree HEAD `b2394566a71fc1f6db83ad40b44380b9c129b57c`. The driver verified that only two test files differed. Raw records, server logs, the exact environment, a machine-readable summary, and the reproducible driver and analyzer are archived under `docs/benchmark_results/data/adaptive-prefill-chunk-gb10-2026-10-11/`.
 
+The driver's default build commit is valid only on the unsquashed measured lineage. A replay from a squash-merged or newer clean checkout must rebuild both release binaries from that checkout and set `MLXCEL_BUILD_COMMIT="$(git rev-parse HEAD)"`; the benchmark report gives the complete command.
+
 The issue-owned validation and acceptance gates are complete. The parent full CUDA run otherwise reported only the two known SSM failures assigned to sibling issue #2230; the branch remains in progress until that integration is green.
 
 ## 6. Change Summary
@@ -107,7 +109,7 @@ The issue-owned validation and acceptance gates are complete. The parent full CU
 | Item | Value |
 |---|---|
 | Files changed | 47 |
-| Lines added | 1837 |
+| Lines added | 1863 |
 | Lines deleted | 210 |
 | Measured branch head | b2394566a71fc1f6db83ad40b44380b9c129b57c |
 

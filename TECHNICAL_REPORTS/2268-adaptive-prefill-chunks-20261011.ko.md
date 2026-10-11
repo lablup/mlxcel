@@ -100,6 +100,8 @@ CLI 필드는 기본값이 들어간 usize에서 Option<usize>로 바뀌었다. 
 
 Acceptance artifact는 production commit `88c2e6a0964d4a3a144c2ff1cc3c80dfd2893752`를 사용했고 clean worktree HEAD `b2394566a71fc1f6db83ad40b44380b9c129b57c`에서 측정했다. Driver는 두 test file만 다르다는 점을 검증했다. Raw record, server log, 정확한 환경, machine-readable summary, 재현 driver 및 analyzer는 `docs/benchmark_results/data/adaptive-prefill-chunk-gb10-2026-10-11/`에 보관한다.
 
+Driver의 기본 build commit은 squash 전 측정 lineage에서만 유효하다. Squash merge 이후 또는 더 새로운 clean checkout에서 재실행하려면 해당 checkout에서 release binary 2개를 다시 빌드하고 `MLXCEL_BUILD_COMMIT="$(git rev-parse HEAD)"`를 지정해야 한다. 전체 명령은 benchmark report에 기록했다.
+
 Issue 소유 검증 및 acceptance gate는 완료했다. 상위 full CUDA run에서 그 밖에 보고된 실패는 sibling issue #2230이 담당하는 기존 SSM 실패 2건뿐이다. 해당 통합이 green이 될 때까지 branch는 진행 중 상태를 유지한다.
 
 ## 6. 변경 요약
@@ -107,7 +109,7 @@ Issue 소유 검증 및 acceptance gate는 완료했다. 상위 full CUDA run에
 | 항목 | 값 |
 |---|---|
 | 변경 파일 | 47 |
-| 추가 라인 | 1837 |
+| 추가 라인 | 1863 |
 | 삭제 라인 | 210 |
 | 측정 대상 branch head | b2394566a71fc1f6db83ad40b44380b9c129b57c |
 

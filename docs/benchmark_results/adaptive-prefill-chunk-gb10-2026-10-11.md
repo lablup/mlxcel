@@ -74,9 +74,27 @@ summary are in
 Run its `analyze.py` against that directory to recheck the archived acceptance
 without rounding. `run.sh` reruns the full protocol from a clean worktree,
 acquires `gpu-lock`, checks port 18080, validates the release artifact against
-`MLXCEL_BUILD_COMMIT` (defaulting to the measured production commit), and writes
-a new result directory under `/tmp`. `MLXCEL_BIN`, `MLXCEL_BENCH_BIN`, and
-`MLXCEL_MODELS` can point it at relocated artifacts and checkpoints.
+`MLXCEL_BUILD_COMMIT`, and writes a new result directory under `/tmp`.
+`MLXCEL_BIN`, `MLXCEL_BENCH_BIN`, and `MLXCEL_MODELS` can point it at relocated
+artifacts and checkpoints.
+
+The default `MLXCEL_BUILD_COMMIT` is the archived production commit and is only
+valid on an unsquashed PR lineage where that commit is an ancestor and every
+later production source is unchanged. It is not expected to work unchanged from
+a squash-merged checkout. For a safe replay of the current clean revision,
+build both release binaries from that revision and identify it explicitly:
+
+```bash
+cargo build --release --features cuda --bin mlxcel --bin mlxcel-bench-engine
+MLXCEL_BUILD_COMMIT="$(git rev-parse HEAD)" \
+  docs/benchmark_results/data/adaptive-prefill-chunk-gb10-2026-10-11/run.sh
+```
+
+To replay with the archived release binaries instead, check out an unsquashed
+PR revision that contains this driver and descends from
+`88c2e6a0964d4a3a144c2ff1cc3c80dfd2893752`; keep the worktree clean and leave
+`MLXCEL_BUILD_COMMIT` at its default. The script rejects unrelated production
+changes in that mode rather than attributing them to the archived binary.
 
 The archived data came from the original driver invocation:
 
