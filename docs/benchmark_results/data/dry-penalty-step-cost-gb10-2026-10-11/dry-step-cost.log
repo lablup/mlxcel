@@ -1,0 +1,9 @@
+
+running 1 test
+test sampling::tests::dry_step_cost_report ... dry_step_cost window=1024 reference_us_per_step=619.751 linear_us_per_step=23.607
+dry_step_cost window=4096 reference_us_per_step=4889.370 linear_us_per_step=29.997
+dry_step_cost window=16384 reference_us_per_step=77199.293 linear_us_per_step=111.433
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2082 filtered out; finished in 0.38s
+

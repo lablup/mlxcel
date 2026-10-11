@@ -1,0 +1,34 @@
+2026-10-11T10:14:59+00:00
+spark-102
+Linux spark-102 7.0.0-1019-nvidia #19~24.04.2-Ubuntu SMP PREEMPT_DYNAMIC Sun Sep  6 18:35:11 UTC 2 aarch64 aarch64 aarch64 GNU/Linux
+ecb89a308aecc468dd1886d9c9f4982f556f3c93
+configured_mlx_pin=81ba1c6a0e50a9268b931579c2d4f1158b9aab5a
+fetched_mlx_source=target/test-fast/build/mlxcel-core-0cdeace19df9bd92/out/build/_deps/mlx-src commit=81ba1c6a0e50a9268b931579c2d4f1158b9aab5a
+fetched_mlx_source=target/test-fast/build/mlxcel-core-3f6a9569cabe31aa/out/build/_deps/mlx-src commit=81ba1c6a0e50a9268b931579c2d4f1158b9aab5a
+fetched_mlx_source=target/test-fast/build/mlxcel-core-7abde4bba84d02cd/out/build/_deps/mlx-src commit=81ba1c6a0e50a9268b931579c2d4f1158b9aab5a
+fetched_mlx_source=target/test-fast/build/mlxcel-core-951f0822c2faa7cb/out/build/_deps/mlx-src commit=81ba1c6a0e50a9268b931579c2d4f1158b9aab5a
+fetched_mlx_source=target/test-fast/build/mlxcel-core-d7f780f67d2a58c2/out/build/_deps/mlx-src commit=81ba1c6a0e50a9268b931579c2d4f1158b9aab5a
+128d6b6c4e06c8a0a2c473d268c318110c643a583f8e233e1b3e35adf7aad9c8  target/test-fast/deps/mlxcel_core-5feb86ac05c84f53
+06b48baeb28c191f550564075a65e7e1f6ee6c9dc594437a63a467319c1ab988  /tmp/mlxcel-auto-plan/2259-quiet-timing.sh
+Sun Oct 11 19:14:59 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.178.04             Driver Version: 580.178.04     CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GB10                    On  |   0000000F:01:00.0 Off |                  N/A |
+| N/A   53C    P8              5W /  N/A  | Not Supported          |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+[]
+2026-10-11T10:15:55+00:00

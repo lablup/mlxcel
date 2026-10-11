@@ -1,0 +1,4 @@
+dry-step-cost.log whitespace=-blank-at-eof
+engine-tests.log whitespace=-blank-at-eof
+environment.txt whitespace=-trailing-space
+sampling-tests.log whitespace=-blank-at-eof
