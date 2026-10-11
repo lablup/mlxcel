@@ -7,6 +7,7 @@ CLIENT=/home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2230/sc
 MODEL_ROOT=/home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2230/models/mlx
 DATA=/home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2230/docs/benchmark_results/data/model-owned-storage-gb10-2026-10-11
 GATE_DRIVER=${DATA}/gate.py
+ANALYZER=${DATA}/analyze.py
 HOSTGATE_DIR=${WORKTREE}/docs/benchmark_results/data/sdpa-plan-bucket-gb10-2026-09-12/harness
 PORT=18080
 
@@ -24,10 +25,7 @@ cleanup_server() {
 }
 trap cleanup_server EXIT INT TERM
 
-mkdir -p "${DATA}"
-exec > >(tee -a "${DATA}/run.log") 2>&1
-
-for required in "${BIN}" "${CLIENT}" "${GATE_DRIVER}" "${HOSTGATE_DIR}/hostgate.py" "${MODEL_ROOT}/gemma-3-1b-it-4bit" "${MODEL_ROOT}/llama-4-scout-17b-16e-instruct-4bit" "${MLXCEL_CCCL_DIR}" "${MLXCEL_CUTLASS_DIR}" "${MLX_SOURCE_DIR}/.git"; do
+for required in "${BIN}" "${CLIENT}" "${GATE_DRIVER}" "${ANALYZER}" "${HOSTGATE_DIR}/hostgate.py" "${MODEL_ROOT}/gemma-3-1b-it-4bit" "${MODEL_ROOT}/llama-4-scout-17b-16e-instruct-4bit" "${MLXCEL_CCCL_DIR}" "${MLXCEL_CUTLASS_DIR}" "${MLX_SOURCE_DIR}/.git"; do
     if [[ ! -e "${required}" ]]; then
         echo "missing required benchmark path: ${required}" >&2
         exit 2
@@ -39,8 +37,15 @@ if [[ -e "${DATA}/complete" ]]; then
     exit 2
 fi
 
-: > "${DATA}/hostgate.jsonl"
-python3 "${GATE_DRIVER}" --hostgate-dir "${HOSTGATE_DIR}" --evidence "${DATA}/hostgate.jsonl" --label run-preflight --port "${PORT}" --port-only
+run_commit=$(git -C "${WORKTREE}" rev-parse HEAD)
+if [[ -n "$(git -C "${WORKTREE}" status --porcelain --untracked-files=all)" ]]; then
+    echo "benchmark worktree must be clean before provenance is recorded" >&2
+    git -C "${WORKTREE}" status --short >&2
+    exit 2
+fi
+
+mkdir -p "${DATA}"
+exec > >(tee -a "${DATA}/run.log") 2>&1
 
 mlx_cmake_tag=$(awk '$1 == "GIT_TAG" { gsub(/[")]/, "", $2); print $2; exit }' "${WORKTREE}/src/lib/mlx-cpp/CMakeLists.txt")
 mlx_checkout_commit=$(git -C "${MLX_SOURCE_DIR}" rev-parse HEAD)
@@ -52,18 +57,27 @@ fi
 {
     echo "started_utc=$(date -u +%FT%TZ)"
     echo "worktree=${WORKTREE}"
+    echo "worktree_clean=true"
     echo "binary=${BIN}"
     echo "binary_sha256=$(sha256sum "${BIN}" | awk '{print $1}')"
-    echo "commit=$(git -C "${WORKTREE}" rev-parse HEAD)"
+    echo "binary_size_bytes=$(stat -c %s "${BIN}")"
+    echo "binary_mtime_utc=$(date -u -d "@$(stat -c %Y "${BIN}")" +%FT%TZ)"
+    echo "commit=${run_commit}"
     echo "mlx_cmake_git_tag=${mlx_cmake_tag}"
     echo "mlx_checkout=${MLX_SOURCE_DIR}"
     echo "mlx_checkout_commit=${mlx_checkout_commit}"
     echo "hostgate_source=${HOSTGATE_DIR}/hostgate.py"
     echo "hostgate_sha256=$(sha256sum "${HOSTGATE_DIR}/hostgate.py" | awk '{print $1}')"
+    echo "gate_sha256=$(sha256sum "${GATE_DRIVER}" | awk '{print $1}')"
+    echo "analyzer_sha256=$(sha256sum "${ANALYZER}" | awk '{print $1}')"
+    echo "run_sha256=$(sha256sum "${DATA}/run.sh" | awk '{print $1}')"
     echo "host=$(hostname)"
-    uname -a
-    nvidia-smi --query-gpu=name,driver_version,pci.bus_id --format=csv,noheader
+    echo "uname=$(uname -a)"
+    echo "gpu=$(nvidia-smi --query-gpu=name,driver_version,pci.bus_id --format=csv,noheader | paste -sd ';' -)"
 } > "${DATA}/environment.txt"
+
+: > "${DATA}/hostgate.jsonl"
+python3 "${GATE_DRIVER}" --hostgate-dir "${HOSTGATE_DIR}" --evidence "${DATA}/hostgate.jsonl" --label run-preflight --port "${PORT}" --port-only
 
 : > "${DATA}/schedule.tsv"
 printf 'model\tprompt_tokens\tround\tposition\tarm\tbackend\tstarted_utc\n' >> "${DATA}/schedule.tsv"
@@ -102,7 +116,8 @@ run_arm() {
     python3 "${GATE_DRIVER}" --hostgate-dir "${HOSTGATE_DIR}" --evidence "${DATA}/hostgate.jsonl" --label "${stem}" --port "${PORT}"
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${model_name}" "${prompt_tokens}" "${round}" "${position}" "${arm}" "${backend}" "$(date -u +%FT%TZ)" >> "${DATA}/schedule.tsv"
     echo "START ${stem} $(date -u +%FT%TZ)"
-    "${BIN}" serve -m "${model_path}" --port "${PORT}" --metrics --parallel 8 --decode-storage-backend "${backend}" > "${server_log}" 2>&1 &
+    printf 'requested_decode_storage_backend=%s\n' "${backend}" > "${server_log}"
+    "${BIN}" serve -m "${model_path}" --port "${PORT}" --metrics --parallel 8 --decode-storage-backend "${backend}" >> "${server_log}" 2>&1 &
     SERVER_PID=$!
 
     if ! wait_for_server; then
