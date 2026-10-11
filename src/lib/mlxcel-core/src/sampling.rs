@@ -1850,7 +1850,75 @@ pub(crate) fn apply_repetition_penalty_sorted(
 /// Apply OpenAI-style frequency and presence penalties to logits.
 ///
 /// Used by: standard generation, speculative decoding
+fn apply_frequency_presence_sparse(
+    logits: &MlxArray,
+    idx: &[i32],
+    val: &[f32],
+) -> UniquePtr<MlxArray> {
+    debug_assert_eq!(idx.len(), val.len());
+
+    let shape = ffi::array_shape(logits);
+    let vocab_size = *shape.last().unwrap();
+    let rows: i32 = shape[..shape.len() - 1].iter().product();
+    if idx.is_empty() {
+        return ffi::copy(logits);
+    }
+
+    let k = idx.len() as i32;
+    let mut row_idx = Vec::with_capacity(rows as usize * idx.len());
+    let mut row_val = Vec::with_capacity(rows as usize * val.len());
+    for _ in 0..rows {
+        row_idx.extend_from_slice(idx);
+        row_val.extend_from_slice(val);
+    }
+
+    let indices = ffi::from_slice_i32(&row_idx, &[rows, k]);
+    let values = ffi::from_slice_f32(&row_val, &[rows, k]);
+    let flat = ffi::reshape(logits, &[rows, vocab_size]);
+    let selected = ffi::take_along_axis(&flat, &indices, -1);
+    let penalized = ffi::subtract(&selected, &values);
+    let scattered = ffi::put_along_axis(&flat, &indices, &penalized, -1);
+    ffi::reshape(&scattered, &shape)
+}
+
 pub(crate) fn apply_frequency_presence_penalty(
+    logits: &MlxArray,
+    token_history: &[i32],
+    frequency_penalty: f32,
+    presence_penalty: f32,
+) -> UniquePtr<MlxArray> {
+    let mut token_counts: HashMap<i32, usize> = HashMap::new();
+    for &tok in token_history {
+        *token_counts.entry(tok).or_insert(0) += 1;
+    }
+
+    if token_counts.is_empty() {
+        return ffi::copy(logits);
+    }
+
+    let shape = ffi::array_shape(logits);
+    let vocab_size = *shape.last().unwrap() as usize;
+    let mut idx = Vec::with_capacity(token_counts.len());
+    let mut val = Vec::with_capacity(token_counts.len());
+    for (&token_id, &count) in &token_counts {
+        if token_id >= 0 && (token_id as usize) < vocab_size {
+            idx.push(token_id);
+            val.push(frequency_penalty * count as f32 + presence_penalty);
+        }
+    }
+
+    // Reproduce the dense reference's mixed-dtype result before scattering.
+    // The CUDA MLX patch preserves bf16 for bf16/f32 binary arithmetic, while
+    // unpatched backends and f16 promote to f32. Subtracting a scalar +0.0
+    // follows that platform rule without allocating a vocabulary-sized host
+    // buffer and leaves every untouched value unchanged.
+    let zero = ffi::full_f32(&[1], 0.0, dtype::FLOAT32);
+    let promoted = ffi::subtract(logits, &zero);
+    apply_frequency_presence_sparse(&promoted, &idx, &val)
+}
+
+#[cfg(test)]
+fn apply_frequency_presence_penalty_reference(
     logits: &MlxArray,
     token_history: &[i32],
     frequency_penalty: f32,
@@ -1878,6 +1946,25 @@ pub(crate) fn apply_frequency_presence_penalty(
     let penalty_array = ffi::from_slice_f32(&penalties, &[1, vocab_size as i32]);
     let penalty_broadcast = ffi::broadcast_to(&penalty_array, &shape);
     ffi::subtract(logits, &penalty_broadcast)
+}
+
+#[cfg(test)]
+fn apply_frequency_presence_incremental_reference(
+    logits: &MlxArray,
+    idx: &[i32],
+    val: &[f32],
+) -> UniquePtr<MlxArray> {
+    if idx.is_empty() {
+        ffi::copy(logits)
+    } else {
+        let promoted = ffi::astype(logits, dtype::FLOAT32);
+        let k = idx.len() as i32;
+        let indices = ffi::from_slice_i32(idx, &[1, k]);
+        let selected = ffi::take_along_axis(&promoted, &indices, -1);
+        let values = ffi::from_slice_f32(val, &[1, k]);
+        let penalized = ffi::subtract(&selected, &values);
+        ffi::put_along_axis(&promoted, &indices, &penalized, -1)
+    }
 }
 
 /// Whether DRY matching breaks at `window[pos]` (#1485).
@@ -1915,13 +2002,201 @@ fn dry_breaks_at(config: &SamplingConfig, window: &[i32], pos: usize) -> bool {
         })
 }
 
+#[cfg(test)]
+thread_local! {
+    static DRY_STEP_COST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_dry_step_cost(cost: usize) {
+    DRY_STEP_COST.with(|counter| counter.set(cost));
+}
+
+#[cfg(test)]
+fn last_dry_step_cost() -> usize {
+    DRY_STEP_COST.with(std::cell::Cell::get)
+}
+
+/// Compute DRY penalties from a selected history window without MLX calls.
+///
+/// Reversing the window turns every suffix match against the current suffix
+/// into a prefix match, so one Z-function pass provides all match lengths.
+/// A second forward pass records the nearest breaker strictly before each
+/// candidate position. Both passes are linear in the window length.
+fn dry_penalty_map(window: &[i32], config: &SamplingConfig) -> Vec<(i32, f32)> {
+    #[cfg(test)]
+    let mut step_cost = 0usize;
+    #[cfg(test)]
+    record_dry_step_cost(0);
+
+    let window_len = window.len();
+    if window_len < 2 || config.dry_base < 1.0 {
+        return Vec::new();
+    }
+
+    let reversed: Vec<i32> = window.iter().rev().copied().collect();
+    let mut z = vec![0usize; window_len];
+    z[0] = window_len;
+    let mut left = 0usize;
+    let mut right = 0usize;
+    for i in 1..window_len {
+        if i <= right {
+            z[i] = (right - i + 1).min(z[i - left]);
+        }
+        while i + z[i] < window_len {
+            #[cfg(test)]
+            {
+                step_cost += 1;
+            }
+            if reversed[z[i]] != reversed[i + z[i]] {
+                break;
+            }
+            z[i] += 1;
+        }
+        if z[i] > 0 {
+            let candidate_right = i + z[i] - 1;
+            if candidate_right > right {
+                left = i;
+                right = candidate_right;
+            }
+        }
+    }
+
+    let no_breaker = usize::MAX;
+    let mut breaker_before = vec![no_breaker; window_len];
+    let mut most_recent_breaker = no_breaker;
+    for (pos, slot) in breaker_before.iter_mut().enumerate() {
+        *slot = most_recent_breaker;
+        #[cfg(test)]
+        {
+            step_cost += 1;
+        }
+        if dry_breaks_at(config, window, pos) {
+            most_recent_breaker = pos;
+        }
+    }
+
+    let last_pos = window_len - 1;
+    let last_token = window[last_pos];
+    let mut penalties: HashMap<i32, f32> = HashMap::new();
+    for (pos, &token) in window[..last_pos].iter().enumerate() {
+        #[cfg(test)]
+        {
+            step_cost += 1;
+        }
+        if token != last_token {
+            continue;
+        }
+
+        let suffix_match_len = z[last_pos - pos];
+        let breaker_limited_len = if breaker_before[pos] == no_breaker {
+            pos + 1
+        } else {
+            pos - breaker_before[pos]
+        };
+        let match_len = suffix_match_len.min(breaker_limited_len);
+
+        if match_len >= config.dry_allowed_length {
+            let next_token = window[pos + 1];
+            let mut exponent = (match_len - config.dry_allowed_length) as f32;
+            if config.dry_base > 1.0 {
+                let max_exponent = 88.722_84_f32 / config.dry_base.ln();
+                if exponent > max_exponent {
+                    exponent = max_exponent;
+                }
+            }
+            let penalty = config.dry_multiplier * config.dry_base.powf(exponent);
+            let entry = penalties.entry(next_token).or_insert(0.0);
+            if penalty > *entry {
+                *entry = penalty;
+            }
+        }
+    }
+
+    #[cfg(test)]
+    record_dry_step_cost(step_cost);
+    penalties.into_iter().collect()
+}
+
+fn apply_dry_penalties_sparse(logits: &MlxArray, penalties: &[(i32, f32)]) -> UniquePtr<MlxArray> {
+    let shape = ffi::array_shape(logits);
+    let vocab_size = *shape.last().unwrap();
+    let rows: i32 = shape[..shape.len() - 1].iter().product();
+    let mut idx = Vec::with_capacity(penalties.len());
+    let mut val = Vec::with_capacity(penalties.len());
+    for &(token_id, penalty) in penalties {
+        if token_id >= 0 && token_id < vocab_size {
+            idx.push(token_id);
+            val.push(-penalty);
+        }
+    }
+
+    // Match the old dense `add(logits, f32_penalty_buffer)` result dtype on
+    // every backend. In particular, the CUDA MLX patch keeps bf16 here rather
+    // than promoting it to f32. A scalar +0.0 obtains the same binary-op dtype
+    // and untouched values without a vocabulary-sized host allocation.
+    let zero = ffi::full_f32(&[1], 0.0, dtype::FLOAT32);
+    let promoted = ffi::add(logits, &zero);
+    if idx.is_empty() {
+        return promoted;
+    }
+
+    let k = idx.len() as i32;
+    let mut row_idx = Vec::with_capacity(rows as usize * idx.len());
+    let mut row_val = Vec::with_capacity(rows as usize * val.len());
+    for _ in 0..rows {
+        row_idx.extend_from_slice(&idx);
+        row_val.extend_from_slice(&val);
+    }
+
+    let indices = ffi::from_slice_i32(&row_idx, &[rows, k]);
+    let values = ffi::from_slice_f32(&row_val, &[rows, k]);
+    let flat = ffi::reshape(&promoted, &[rows, vocab_size]);
+    let selected = ffi::take_along_axis(&flat, &indices, -1);
+    let penalized = ffi::add(&selected, &values);
+    let scattered = ffi::put_along_axis(&flat, &indices, &penalized, -1);
+    ffi::reshape(&scattered, &shape)
+}
+
 /// Apply DRY (Don't Repeat Yourself) penalty to logits.
 ///
-/// This runs on CPU as sequential pattern matching, which keeps the matching
-/// invariant explicit and mirrors the upstream llama.cpp style algorithm.
+/// The host matching pass is linear in the selected history window and the
+/// device update touches only token ids that receive a penalty.
 ///
 /// Used by: standard generation, speculative decoding
 pub(crate) fn apply_dry_penalty(
+    logits: &MlxArray,
+    token_history: &[i32],
+    config: &SamplingConfig,
+) -> UniquePtr<MlxArray> {
+    let history_len = token_history.len();
+    if history_len < 2 || config.dry_base < 1.0 {
+        return ffi::copy(logits);
+    }
+
+    let window = if config.dry_penalty_last_n == crate::generate::DRY_FULL_HISTORY {
+        token_history
+    } else if config.dry_penalty_last_n == 0 {
+        &token_history[history_len..]
+    } else {
+        let start = history_len.saturating_sub(config.dry_penalty_last_n);
+        &token_history[start..]
+    };
+
+    if window.len() < 2 {
+        return ffi::copy(logits);
+    }
+
+    let penalties = dry_penalty_map(window, config);
+    if penalties.is_empty() {
+        return ffi::copy(logits);
+    }
+    apply_dry_penalties_sparse(logits, &penalties)
+}
+
+/// Test-only copy of the pre-#2259 DRY implementation.
+#[cfg(test)]
+fn apply_dry_penalty_reference(
     logits: &MlxArray,
     token_history: &[i32],
     config: &SamplingConfig,
@@ -2232,12 +2507,12 @@ impl SamplerState {
     /// Frequency/presence penalty using the reusable sparse scratch buffers
     /// (touched tokens only); never allocates a full-vocabulary vector.
     ///
-    /// Byte-identical to [`apply_frequency_presence_penalty`]: the rebuild path
-    /// computes `subtract(logits, penalty_f32)`, which promotes the whole array
-    /// to f32 (f16/bf16 -> f32 is lossless). This path promotes first, then
-    /// applies `logits[id] - penalty[id]` to exactly the touched ids via
-    /// take/put. Untouched ids keep their promoted value, which equals the
-    /// rebuild path's `logits[id] - 0.0` for every finite logit.
+    /// Preserves the pre-#2259 incremental semantics: promote the logits to
+    /// f32 first, then apply `logits[id] - penalty[id]` to exactly the touched
+    /// ids. This intentionally differs from the dense rebuild path on CUDA
+    /// bf16, where patched MLX keeps mixed bf16/f32 subtraction in bf16; the
+    /// two paths already had that dtype/rounding distinction before this
+    /// refactor. An all-out-of-range count map still returns an unchanged copy.
     fn apply_frequency_presence(
         &mut self,
         logits: &MlxArray,
@@ -2266,16 +2541,15 @@ impl SamplerState {
         }
 
         let result = if idx.is_empty() {
-            // No in-range tokens: matches the rebuild path's empty early return.
+            // Preserve the pre-#2259 incremental path: an all-out-of-range
+            // count map returns an unchanged copy without dtype promotion.
             ffi::copy(logits)
         } else {
+            // The incremental path explicitly promoted before its sparse
+            // scatter, including on CUDA bf16 where the dense rebuild path
+            // follows MLX's patched bf16/f32 binary-op rule instead.
             let promoted = ffi::astype(logits, dtype::FLOAT32);
-            let k = idx.len() as i32;
-            let indices = ffi::from_slice_i32(&idx, &[1, k]);
-            let selected = ffi::take_along_axis(&promoted, &indices, -1);
-            let values = ffi::from_slice_f32(&val, &[1, k]);
-            let penalized = ffi::subtract(&selected, &values);
-            ffi::put_along_axis(&promoted, &indices, &penalized, -1)
+            apply_frequency_presence_sparse(&promoted, &idx, &val)
         };
 
         self.sparse_idx = idx;
@@ -2936,6 +3210,274 @@ mod tests {
         assert_eq!(logit_at(&result, 0), 1.0);
         assert_eq!(logit_at(&result, 1), 1.0);
         assert_eq!(logit_at(&result, 2), -1.0);
+    }
+
+    fn assert_penalty_logits_equal(a: &MlxArray, b: &MlxArray, context: &str) {
+        assert_eq!(ffi::array_shape(a), ffi::array_shape(b), "{context}: shape");
+        assert_eq!(ffi::array_dtype(a), ffi::array_dtype(b), "{context}: dtype");
+        let a = ffi::astype(a, dtype::FLOAT32);
+        let b = ffi::astype(b, dtype::FLOAT32);
+        let a = array_to_vec_f32(&a);
+        let b = array_to_vec_f32(&b);
+        assert_eq!(a.len(), b.len(), "{context}: length");
+        for (index, (&actual, &expected)) in a.iter().zip(&b).enumerate() {
+            assert_eq!(
+                actual, expected,
+                "{context}: element {index}: {actual} != {expected}"
+            );
+        }
+    }
+
+    fn lcg_token_history(seed: u64, len: usize, vocab_size: usize) -> Vec<i32> {
+        let mut state = seed;
+        let mut history = Vec::with_capacity(len);
+        for _ in 0..len {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            history.push(((state >> 32) as usize % vocab_size) as i32);
+        }
+        history
+    }
+
+    #[test]
+    fn dry_reverse_z_matches_reference_lcg_cases() {
+        const CASES: usize = 512;
+        const LENGTHS: [usize; 10] = [0, 1, 2, 3, 7, 17, 64, 257, 1024, 2048];
+        const WINDOWS: [usize; 6] = [crate::generate::DRY_FULL_HISTORY, 0, 1, 2, 17, 64];
+
+        for case in 0..CASES {
+            let vocab_size = [8usize, 64][(case / 19) % 2];
+            let history_len = LENGTHS[(case / 23) % LENGTHS.len()];
+            let periodic = (case / 7) % 2 == 0;
+            let history = if periodic {
+                (0..history_len)
+                    .map(|index| ((index + case) % 3) as i32)
+                    .collect()
+            } else {
+                lcg_token_history(
+                    0x2259_0000_u64.wrapping_add(case as u64),
+                    history_len,
+                    vocab_size,
+                )
+            };
+            let batch = [1usize, 2][(case / 3) % 2];
+            let raw_logits = lcg_logits(
+                0xD4A0_0000_u64.wrapping_add(case as u64),
+                batch * vocab_size,
+            );
+            let f32_logits = ffi::from_slice_f32(&raw_logits, &[batch as i32, vocab_size as i32]);
+            let input_dtype = [dtype::FLOAT32, dtype::BFLOAT16][(case / 5) % 2];
+            let logits = if input_dtype == dtype::FLOAT32 {
+                f32_logits
+            } else {
+                ffi::astype(&f32_logits, input_dtype)
+            };
+
+            let mut config = SamplingConfig {
+                dry_multiplier: 0.75,
+                dry_base: [1.0, 1.75][(case / 13) % 2],
+                dry_allowed_length: 1 + (case / 11) % 4,
+                dry_penalty_last_n: WINDOWS[(case / 29) % WINDOWS.len()],
+                ..Default::default()
+            };
+            let breaker = ((case * 5 + 1) % vocab_size) as i32;
+            match (case / 17) % 4 {
+                1 => config.dry_sequence_breakers = vec![breaker],
+                2 => {
+                    config.dry_breaker_heads =
+                        std::sync::Arc::new(HashMap::from([(breaker, vec![Vec::new()])]));
+                }
+                3 => {
+                    let tail = (breaker + 1) % vocab_size as i32;
+                    config.dry_breaker_heads =
+                        std::sync::Arc::new(HashMap::from([(breaker, vec![vec![tail]])]));
+                }
+                _ => {}
+            }
+
+            let reference = apply_dry_penalty_reference(&logits, &history, &config);
+            let linear = apply_dry_penalty(&logits, &history, &config);
+            assert_penalty_logits_equal(
+                &linear,
+                &reference,
+                &format!(
+                    "case={case} vocab={vocab_size} history={history_len} periodic={periodic} batch={batch} dtype={input_dtype} window={} allowed={} base={}",
+                    config.dry_penalty_last_n, config.dry_allowed_length, config.dry_base
+                ),
+            );
+        }
+    }
+
+    #[test]
+    fn dry_reverse_z_preserves_breaker_boundaries() {
+        let mut config = SamplingConfig {
+            dry_multiplier: 0.75,
+            dry_base: 1.75,
+            dry_allowed_length: 2,
+            dry_penalty_last_n: crate::generate::DRY_FULL_HISTORY,
+            dry_sequence_breakers: vec![2],
+            ..Default::default()
+        };
+        let history = [1, 2, 9, 1, 2];
+        let map = dry_penalty_map(&history, &config);
+        assert!(
+            map.iter().any(|&(token, _)| token == 9),
+            "a breaker at the occurrence itself must not cut the preceding match"
+        );
+
+        config.dry_sequence_breakers.clear();
+        config.dry_breaker_heads = std::sync::Arc::new(HashMap::from([(2, vec![vec![7, 8]])]));
+        let reference = apply_dry_penalty_reference(
+            &ffi::from_slice_f32(&[0.0; 12], &[1, 12]),
+            &history,
+            &config,
+        );
+        let linear = apply_dry_penalty(
+            &ffi::from_slice_f32(&[0.0; 12], &[1, 12]),
+            &history,
+            &config,
+        );
+        assert_penalty_logits_equal(
+            &linear,
+            &reference,
+            "a breaker tail running past the window end must not break",
+        );
+    }
+
+    #[test]
+    fn dry_reverse_z_step_cost_is_linear() {
+        let config = SamplingConfig {
+            dry_multiplier: 0.75,
+            dry_base: 1.75,
+            dry_allowed_length: 2,
+            dry_penalty_last_n: crate::generate::DRY_FULL_HISTORY,
+            ..Default::default()
+        };
+        let history_4096: Vec<i32> = (0..4096).map(|index| index % 3).collect();
+        let _ = dry_penalty_map(&history_4096, &config);
+        let cost_4096 = last_dry_step_cost();
+        assert!(
+            cost_4096 <= 8 * 4096,
+            "period-3 window 4096 cost {cost_4096}, expected <= {}",
+            8 * 4096
+        );
+
+        let history_8192: Vec<i32> = (0..8192).map(|index| index % 3).collect();
+        let _ = dry_penalty_map(&history_8192, &config);
+        let cost_8192 = last_dry_step_cost();
+        assert!(
+            cost_8192 <= 2 * cost_4096 + 16,
+            "doubling the window changed cost from {cost_4096} to {cost_8192}"
+        );
+    }
+
+    #[test]
+    fn frequency_presence_sparse_matches_vocab_reference() {
+        let vocab_size = 64usize;
+        let history = lcg_token_history(0xF2E9_2259, 96, vocab_size);
+        for penalty_last_n in [1, 64] {
+            let window = penalty_window(&history, penalty_last_n);
+            for batch in [1usize, 2] {
+                let raw = lcg_logits(0xF2E9_0000 + batch as u64, batch * vocab_size);
+                let f32_logits = ffi::from_slice_f32(&raw, &[batch as i32, vocab_size as i32]);
+                for input_dtype in [dtype::FLOAT32, dtype::FLOAT16, dtype::BFLOAT16] {
+                    let logits = if input_dtype == dtype::FLOAT32 {
+                        ffi::copy(&f32_logits)
+                    } else {
+                        ffi::astype(&f32_logits, input_dtype)
+                    };
+                    let reference =
+                        apply_frequency_presence_penalty_reference(&logits, window, 0.625, 0.375);
+                    let sparse = apply_frequency_presence_penalty(&logits, window, 0.625, 0.375);
+                    assert_penalty_logits_equal(
+                        &sparse,
+                        &reference,
+                        &format!(
+                            "penalty_last_n={penalty_last_n} batch={batch} dtype={input_dtype}"
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sampler_state_frequency_presence_preserves_bf16_reference() {
+        let (frequency_penalty, presence_penalty) = (0.625, 0.375);
+        let config = SamplingConfig {
+            frequency_penalty,
+            presence_penalty,
+            ..Default::default()
+        };
+        let raw = lcg_logits(0x1AC0_2259, 64);
+        let bf16_logits = ffi::astype(&ffi::from_slice_f32(&raw, &[1, 64]), dtype::BFLOAT16);
+
+        let mut state = SamplerState::for_config(&config);
+        state.sync(&[1, 1, 2, 5, 8, 13, 13]);
+        let mut idx = Vec::new();
+        let mut val = Vec::new();
+        for (&token_id, &count) in &state.counts {
+            idx.push(token_id);
+            val.push(frequency_penalty * count as f32 + presence_penalty);
+        }
+        let reference = apply_frequency_presence_incremental_reference(&bf16_logits, &idx, &val);
+        let sparse =
+            state.apply_frequency_presence(&bf16_logits, frequency_penalty, presence_penalty);
+        assert_penalty_logits_equal(
+            &sparse,
+            &reference,
+            "incremental bf16 path must retain its explicit f32 promotion",
+        );
+        assert_eq!(ffi::array_dtype(&sparse), dtype::FLOAT32);
+
+        let mut out_of_range = SamplerState::for_config(&config);
+        out_of_range.sync(&[-3, 64, 100]);
+        let untouched = out_of_range.apply_frequency_presence(
+            &bf16_logits,
+            frequency_penalty,
+            presence_penalty,
+        );
+        assert_eq!(ffi::array_dtype(&untouched), dtype::BFLOAT16);
+        assert_penalty_logits_equal(
+            &untouched,
+            &bf16_logits,
+            "all-out-of-range incremental counts must keep the copy early return",
+        );
+    }
+
+    #[test]
+    #[ignore = "manual timing evidence for issue #2259"]
+    fn dry_step_cost_report() {
+        let config = SamplingConfig {
+            dry_multiplier: 0.75,
+            dry_base: 1.75,
+            dry_allowed_length: 2,
+            dry_penalty_last_n: crate::generate::DRY_FULL_HISTORY,
+            ..Default::default()
+        };
+        let logits = ffi::from_slice_f32(&[0.0; 4], &[1, 4]);
+        for window_len in [1024usize, 4096, 16384] {
+            let history: Vec<i32> = (0..window_len).map(|index| (index % 3) as i32).collect();
+            let reference_steps = if window_len == 16384 { 1 } else { 3 };
+            let reference_start = std::time::Instant::now();
+            for _ in 0..reference_steps {
+                std::hint::black_box(apply_dry_penalty_reference(&logits, &history, &config));
+            }
+            let reference_us =
+                reference_start.elapsed().as_secs_f64() * 1_000_000.0 / reference_steps as f64;
+
+            let linear_steps = 20;
+            let linear_start = std::time::Instant::now();
+            for _ in 0..linear_steps {
+                std::hint::black_box(apply_dry_penalty(&logits, &history, &config));
+            }
+            let linear_us =
+                linear_start.elapsed().as_secs_f64() * 1_000_000.0 / linear_steps as f64;
+            println!(
+                "dry_step_cost window={window_len} reference_us_per_step={reference_us:.3} linear_us_per_step={linear_us:.3}"
+            );
+        }
     }
 
     #[test]
