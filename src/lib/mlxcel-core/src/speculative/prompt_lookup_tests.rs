@@ -961,10 +961,32 @@ fn server_break_even_keeps_fully_accepted_blocks_at_every_width() {
                 proposed > 0,
                 "width {max_draft}: fully accepted blocks never pause"
             );
-            governor.record(proposed);
+            governor.record_round(proposed, proposed);
         }
         assert!(!governor.probes_while_paused());
     }
+}
+
+#[test]
+fn server_break_even_keeps_a_fully_accepted_short_ramp() {
+    let mut governor = DraftGovernor::new(&PromptLookupConfig {
+        min_tokens_per_round: Some(4),
+        ..gated(7)
+    });
+    governor.record_round(1, 2);
+    assert_eq!(governor.budget(), GATED_NARROW_DRAFT);
+    governor.record_round(2, 2);
+    assert_eq!(
+        governor.budget(),
+        7,
+        "a fully accepted narrow proposal widens instead of pausing"
+    );
+    governor.record_round(2, 7);
+    assert_eq!(
+        governor.budget(),
+        0,
+        "the same emission count still pauses an incomplete wide proposal"
+    );
 }
 
 #[test]

@@ -129,8 +129,10 @@ pub struct PromptLookupConfig {
     /// Optional minimum EMA of emitted tokens (accepted proposals plus the
     /// bonus) per drafted round. Gated adaptation pauses after at least two
     /// samples below this floor, when the latest round also falls below it
-    /// (capped at `max_draft + 1`, so a fully accepted narrow block can keep
-    /// drafting). `None` preserves the CLI policy.
+    /// and left at least one proposed token unaccepted. The floor is capped at
+    /// `max_draft + 1`; a fully accepted short block keeps drafting because it
+    /// is evidence that the available copy was exhausted, not rejected.
+    /// `None` preserves the CLI policy.
     pub min_tokens_per_round: Option<usize>,
     /// Consecutive shadow tokens required to resume a paused gated row.
     pub shadow_confirm_tokens: usize,
@@ -404,8 +406,15 @@ impl DraftGovernor {
         }
     }
 
-    /// Record a drafted round that landed `accepted` proposals.
+    /// Record a configured-width drafted round in governor unit tests.
+    #[cfg(test)]
     pub(crate) fn record(&mut self, accepted: usize) {
+        self.record_round(accepted, self.max_draft);
+    }
+
+    /// Record a drafted round that landed `accepted` of `proposed` tokens.
+    pub(crate) fn record_round(&mut self, accepted: usize, proposed: usize) {
+        debug_assert!(accepted <= proposed);
         if !self.adaptive {
             return;
         }
@@ -438,6 +447,7 @@ impl DraftGovernor {
                     if self.drafted_samples >= 2
                         && self.emitted_ema < floor as f64
                         && emitted < floor as f64
+                        && accepted < proposed
                     {
                         self.drafting = false;
                         self.misses = 0;

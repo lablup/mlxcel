@@ -224,7 +224,7 @@ impl Drafter for PromptLookupDrafter {
     ) -> Result<(), DrafterError> {
         self.context.extend_from_slice(new_tokens);
         if !draft_tokens.is_empty() {
-            self.governor.record(accepted);
+            self.governor.record_round(accepted, draft_tokens.len());
             self.stats.accepted_draft_tokens += accepted;
         }
         Ok(())
