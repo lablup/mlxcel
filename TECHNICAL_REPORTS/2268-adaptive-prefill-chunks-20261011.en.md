@@ -1,7 +1,7 @@
 # PR #2268: Adaptive Server Prefill Chunks
 
 **Date**: 2026-10-11
-**Status**: Implementation and performance acceptance complete; sibling integration pending
+**Status**: Complete; performance acceptance and full integration validation passed
 **Languages**: Rust, Markdown
 **Risk**: Medium (changes live batch scheduling, prefill partitioning, and CLI precedence)
 
@@ -9,7 +9,7 @@
 
 PR #2268 changes server prefill chunking from one fixed value to a scheduler-state policy. A request uses 2048-token chunks while no other sequence is decoding and 512-token chunks while the active batch contains decode work. Explicit native, llama-compatible, or environment configuration pins both states to the requested value.
 
-The implementation also makes prefill plans resumable from their live cursor. This is required because a parked request can start under contention at a 512-token boundary and resume after the active batch drains, when a newly built 2048-token partition would otherwise have no piece at that cursor. Focused CUDA tests cover the actual forward lengths and completion behavior. Fresh-release quiet-host admission and TTFT acceptance passed on GB10. Integration still waits for sibling issue #2230 to supply the two known SSM fixes seen by the parent-managed full gate.
+The implementation also makes prefill plans resumable from their live cursor. This is required because a parked request can start under contention at a 512-token boundary and resume after the active batch drains, when a newly built 2048-token partition would otherwise have no piece at that cursor. Focused CUDA tests cover the actual forward lengths and completion behavior. Fresh-release quiet-host admission and TTFT acceptance passed on GB10, and the full integrated workspace and CUDA gates passed after the two preceding PRs merged.
 
 ## 1. Problem Statement
 
@@ -96,20 +96,20 @@ Completed on the implementation worktree:
 - CUDA props compatibility regression: passed.
 - Independent security/performance review found that repeated paged-block capacity checks eagerly built every remaining plan piece. Commit 88c2e6a0964d4a3a144c2ff1cc3c80dfd2893752 replaces that hot-path allocation with the O(1) accessor and adds equivalence coverage across boundaries, cursors, chunks, padding modes, model opt-outs, and embedding inputs.
 - Workspace all-targets Clippy passed after the fix. Focused CUDA runtime checks passed: 17 prefill-plan tests, 20 block-reclaim tests, and the adaptive scheduler transition regression.
-- The full CUDA gate found the source audit no longer recognized the shared capability helper plus two known SSM failures handled by sibling issue #2230. The audit now uses brace-counted interprocedural recognition, retains direct-guard detection, and includes a mutation fixture; its three tests pass.
+- The first full CUDA gate exposed a source-audit gap after capability-helper extraction. The audit now uses brace-counted interprocedural recognition, retains direct-guard detection, and includes a mutation fixture; its three tests pass.
 
 The acceptance artifact used production commit `88c2e6a0964d4a3a144c2ff1cc3c80dfd2893752` and measured clean worktree HEAD `b2394566a71fc1f6db83ad40b44380b9c129b57c`. The driver verified that only two test files differed. Raw records, server logs, the exact environment, a machine-readable summary, and the reproducible driver and analyzer are archived under `docs/benchmark_results/data/adaptive-prefill-chunk-gb10-2026-10-11/`.
 
 The driver's default build commit is valid only on the unsquashed measured lineage. A replay from a squash-merged or newer clean checkout must rebuild both release binaries from that checkout and set `MLXCEL_BUILD_COMMIT="$(git rev-parse HEAD)"`; the benchmark report gives the complete command.
 
-The issue-owned validation and acceptance gates are complete. The parent full CUDA run otherwise reported only the two known SSM failures assigned to sibling issue #2230; the branch remains in progress until that integration is green.
+After PR #2270 and PR #2269 merged, the complete series passed workspace test compilation with `--no-run`, workspace all-targets Clippy, formatting, the kernel dtype-key, kernel port-dispatch, and llama-server compatibility contract suites, and the full single-threaded CUDA workspace run through `make verify-test-cuda`. Every CUDA test summary reported zero failures, including the BF16 and F32 SSM update parity tests. The validated pre-rebase tree `ab8ff77ade8d6b1b4fb494707320cebc95150c8e` remained identical after rebasing onto current `origin/main`; the final changes after that comparison are documentation and PR status only.
 
 ## 6. Change Summary
 
 | Item | Value |
 |---|---|
 | Files changed | 47 |
-| Lines added | 1863 |
+| Lines added | 1879 |
 | Lines deleted | 210 |
 | Measured branch head | b2394566a71fc1f6db83ad40b44380b9c129b57c |
 
@@ -123,9 +123,9 @@ The issue-owned validation and acceptance gates are complete. The parent full CU
 
 The initial implementation commit is 7c43726a0fb792594a69de0fda1e31e78eef4fa1. Commit 7b2d17241ea9c16612766ccf37524cbe8be9f913 satisfies the CI Clippy expression policy. Commit 88c2e6a0964d4a3a144c2ff1cc3c80dfd2893752 removes the review-discovered reservation allocation, and commit 808bcccf387957a6da31b961666aadd5bf7cbe65 adds the test-only type annotation required by all-targets Clippy. Commits 6f07f7563e74c5466b5aace6f3e8ee98ec8347e2 and b2394566a71fc1f6db83ad40b44380b9c129b57c conservatively update and strengthen the source audit for the shared capability guard.
 
-## 7. Follow-up Actions
+## 7. Completion
 
-- [ ] Integrate sibling issue #2230 and rerun the parent full CUDA gate before changing the issue and PR to done/review-ready.
+No implementation, acceptance, or integration-validation work remains for issue #2228.
 
 ## References
 

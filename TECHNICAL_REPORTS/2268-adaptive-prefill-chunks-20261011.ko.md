@@ -1,7 +1,7 @@
 # PR #2268: 서버 프리필 청크 적응형 선택
 
 **작성일**: 2026-10-11
-**상태**: 구현 및 성능 승인 완료, sibling 통합 대기
+**상태**: 완료, 성능 승인 및 전체 통합 검증 통과
 **언어**: Rust, Markdown
 **위험도**: 중간 (실시간 배치 스케줄링, 프리필 분할, CLI 우선순위 변경)
 
@@ -9,7 +9,7 @@
 
 PR #2268은 서버 프리필 청크를 하나의 고정값에서 스케줄러 상태에 따른 정책으로 바꾼다. 다른 시퀀스가 디코딩 중이 아니면 2048토큰 청크를 사용하고, 활성 배치에 디코딩 작업이 있으면 512토큰 청크를 사용한다. native 옵션, llama 호환 옵션 또는 환경 변수로 값을 명시하면 두 상태 모두 해당 값으로 고정한다.
 
-프리필 계획은 현재 커서에서 다시 시작할 수 있게 되었다. 경합 중인 요청이 512토큰 경계에서 시작한 뒤 활성 배치가 비워졌을 때, 기존 방식으로 새 2048토큰 계획을 만들면 현재 커서에서 시작하는 조각이 없을 수 있기 때문이다. 집중 CUDA 테스트는 실제 forward 길이와 요청 완료를 검증한다. GB10에서 새 release를 사용한 quiet-host admission 및 TTFT 승인이 통과했다. 상위 full gate에서 발견한 기존 SSM 실패 2건은 sibling issue #2230의 수정 통합을 기다린다.
+프리필 계획은 현재 커서에서 다시 시작할 수 있게 되었다. 경합 중인 요청이 512토큰 경계에서 시작한 뒤 활성 배치가 비워졌을 때, 기존 방식으로 새 2048토큰 계획을 만들면 현재 커서에서 시작하는 조각이 없을 수 있기 때문이다. 집중 CUDA 테스트는 실제 forward 길이와 요청 완료를 검증한다. GB10에서 새 release를 사용한 quiet-host admission 및 TTFT 승인이 통과했고, 선행 PR 2건을 merge한 뒤 전체 workspace 및 CUDA 통합 gate도 통과했다.
 
 ## 1. 문제 정의
 
@@ -96,20 +96,20 @@ CLI 필드는 기본값이 들어간 usize에서 Option<usize>로 바뀌었다. 
 - CUDA props 호환성 regression: 통과.
 - 독립 security/performance review에서 반복되는 paged-block capacity check가 남은 모든 계획 조각을 즉시 생성하는 문제를 발견했다. Commit 88c2e6a0964d4a3a144c2ff1cc3c80dfd2893752는 이를 O(1) accessor로 교체하고 boundary, cursor, chunk, padding mode, model opt-out, embedding input 전반의 동등성 테스트를 추가한다.
 - 수정 후 workspace all-targets Clippy가 통과했다. Focused CUDA runtime 검증은 prefill-plan 17개, block-reclaim 20개, adaptive scheduler transition regression이 모두 통과했다.
-- Full CUDA gate에서는 source audit가 공통 capability helper를 인식하지 못한 문제와 sibling issue #2230이 처리하는 기존 SSM 실패 2건만 발생했다. Audit는 brace-counted interprocedural 인식으로 보완했고 direct-guard 검사를 유지했으며 mutation fixture를 추가했다. 해당 테스트 3개는 모두 통과했다.
+- 최초 full CUDA gate에서 capability helper 분리 후 source audit가 공통 guard를 인식하지 못한 문제를 발견했다. Audit는 brace-counted interprocedural 인식으로 보완했고 direct-guard 검사를 유지했으며 mutation fixture를 추가했다. 해당 테스트 3개는 모두 통과했다.
 
 Acceptance artifact는 production commit `88c2e6a0964d4a3a144c2ff1cc3c80dfd2893752`를 사용했고 clean worktree HEAD `b2394566a71fc1f6db83ad40b44380b9c129b57c`에서 측정했다. Driver는 두 test file만 다르다는 점을 검증했다. Raw record, server log, 정확한 환경, machine-readable summary, 재현 driver 및 analyzer는 `docs/benchmark_results/data/adaptive-prefill-chunk-gb10-2026-10-11/`에 보관한다.
 
 Driver의 기본 build commit은 squash 전 측정 lineage에서만 유효하다. Squash merge 이후 또는 더 새로운 clean checkout에서 재실행하려면 해당 checkout에서 release binary 2개를 다시 빌드하고 `MLXCEL_BUILD_COMMIT="$(git rev-parse HEAD)"`를 지정해야 한다. 전체 명령은 benchmark report에 기록했다.
 
-Issue 소유 검증 및 acceptance gate는 완료했다. 상위 full CUDA run에서 그 밖에 보고된 실패는 sibling issue #2230이 담당하는 기존 SSM 실패 2건뿐이다. 해당 통합이 green이 될 때까지 branch는 진행 중 상태를 유지한다.
+PR #2270과 PR #2269를 merge한 뒤 전체 series는 workspace test `--no-run` compile, workspace all-targets Clippy, formatting, kernel dtype-key, kernel port-dispatch, llama-server compatibility contract suite, 그리고 `make verify-test-cuda`의 전체 single-threaded CUDA workspace run을 모두 통과했다. CUDA test summary는 전부 실패 0건이었고 BF16 및 F32 SSM update parity test도 통과했다. Rebase 전 검증 tree `ab8ff77ade8d6b1b4fb494707320cebc95150c8e`는 현재 `origin/main`으로 rebase한 뒤에도 정확히 같았다. 해당 비교 이후 변경은 문서와 PR 상태뿐이다.
 
 ## 6. 변경 요약
 
 | 항목 | 값 |
 |---|---|
 | 변경 파일 | 47 |
-| 추가 라인 | 1863 |
+| 추가 라인 | 1879 |
 | 삭제 라인 | 210 |
 | 측정 대상 branch head | b2394566a71fc1f6db83ad40b44380b9c129b57c |
 
@@ -123,9 +123,9 @@ Issue 소유 검증 및 acceptance gate는 완료했다. 상위 full CUDA run에
 
 최초 구현 commit은 7c43726a0fb792594a69de0fda1e31e78eef4fa1이다. 7b2d17241ea9c16612766ccf37524cbe8be9f913은 CI Clippy 표현식 정책을 만족한다. 88c2e6a0964d4a3a144c2ff1cc3c80dfd2893752는 review에서 발견된 reservation 할당을 제거하며, 808bcccf387957a6da31b961666aadd5bf7cbe65는 all-targets Clippy에 필요한 테스트 전용 type annotation을 추가한다. 6f07f7563e74c5466b5aace6f3e8ee98ec8347e2와 b2394566a71fc1f6db83ad40b44380b9c129b57c는 공통 capability guard를 위한 source audit를 보수적으로 갱신하고 fixture를 강화한다.
 
-## 7. 후속 조치
+## 7. 완료 상태
 
-- [ ] Sibling issue #2230을 통합하고 상위 full CUDA gate를 다시 통과한 뒤 issue와 PR을 done/review-ready로 변경한다.
+Issue #2228의 구현, 성능 승인, 통합 검증에 남은 작업은 없다.
 
 ## 참고 자료
 

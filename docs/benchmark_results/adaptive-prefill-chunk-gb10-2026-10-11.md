@@ -66,6 +66,22 @@ motivated the policy. With no live decode, its TTFT stays within the explicit
 2048 alone and 512 contended; an explicit CLI, compatibility, or environment
 override continues to pin both states.
 
+## Integrated validation
+
+After PR #2270 and PR #2269 merged, the complete issue #2228 series was
+validated with both preceding changes present. Workspace test compilation
+(`--no-run`), workspace all-targets Clippy, formatting, the kernel dtype-key,
+kernel port-dispatch, and llama-server compatibility contract suites, and the
+full single-threaded CUDA workspace run (`make verify-test-cuda`) all passed.
+The CUDA run reported zero failed test summaries, including
+`ssm_update_kernel_matches_graph_step_bf16` and
+`ssm_update_kernel_matches_graph_step_f32`.
+
+The validated pre-rebase tree was
+`ab8ff77ade8d6b1b4fb494707320cebc95150c8e`; rebasing the series onto the
+current `origin/main` preserved that tree exactly. The final edits after that
+comparison update documentation and PR status only.
+
 ## Reproduce
 
 The exact raw records, server logs, environment provenance, and machine-readable
