@@ -193,6 +193,8 @@ impl BatchScheduler {
             // here (the server worker is long-lived, so a per-tick getenv would
             // be pure overhead).
             lookahead_force_sync: mlxcel_core::engine::force_sync_requested(),
+            #[cfg(test)]
+            decode_forward_calls: 0,
         }
     }
 

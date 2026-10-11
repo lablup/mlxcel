@@ -549,6 +549,10 @@ impl BatchScheduler {
         // appended yet, so the caller just decodes synchronously.
         let biases = biases?;
         let batch = StepBatch { seq_ids, input };
+        #[cfg(test)]
+        {
+            self.decode_forward_calls += 1;
+        }
         match self.engine.submit(&batch, params, &biases) {
             Ok(tokens) => {
                 // The schedule itself succeeded; the collect half evaluates
@@ -587,14 +591,15 @@ impl BatchScheduler {
     ///
     /// 1. FIRST build and `async_eval` step n+1 from `la.tokens` fed back
     ///    device-side (no host knowledge needed). The GPU starts the next
-    ///    forward immediately.
+    ///    forward immediately, except when a B=1 row's pending token is known
+    ///    to exhaust its length budget.
     /// 2. THEN read step n's tokens to host (this blocks on the PREVIOUS tick's
     ///    prime forward, which by now has finished, while step n+1 runs on the
     ///    GPU) and run the finish pre-check.
-    /// 3. If a row finishes (EOS / length / cancel) or the shape is off, unwind
-    ///    BOTH speculative appends (step n and the just-issued step n+1) and
-    ///    re-run the tick synchronously, so completion / donation flows through
-    ///    the untouched sync path from a clean cache state.
+    /// 3. Commit a known B=1 length token directly. For any other finish (EOS,
+    ///    cancel) or a bad shape, unwind the speculative appends and re-run the
+    ///    tick synchronously, so completion / donation flows through the
+    ///    untouched sync path from a clean cache state.
     /// 4. Otherwise commit step n and keep the step n+1 prebuilt step.
     pub(super) fn pipelined_steady_decode(
         &mut self,
@@ -602,13 +607,23 @@ impl BatchScheduler {
         seq_ids: &[SequenceId],
         params: &FusedSampleParams,
     ) {
-        // Step 1: speculatively build + schedule step n+1 FIRST. Feed la.tokens
-        // ([B]) back as the next [B, 1] input device-side (reshape + int32 cast
-        // to match the synchronous from_slice_i32 dtype), keeping the GPU busy
-        // through the host read below. This appends a second speculative KV
-        // position per sequence (the overshoot the issue accepts).
-        let next_input = mlxcel_core::engine::lookahead_feedback_input(&la.tokens);
-        let next = self.prime_lookahead_with_input(seq_ids, &next_input, params);
+        // Step 1: speculatively build + schedule step n+1 FIRST, except when a
+        // B=1 row's already-pending token is certain to spend its length
+        // budget. DirectEngine applies the same check before its submit. The
+        // old scheduler submitted n+1, discarded both n and n+1, then replayed
+        // n synchronously on that terminal tick: two whole forwards whose
+        // result could not affect the response.
+        let pending_spends_budget = self.b1_pending_spends_budget(seq_ids);
+        let next = if pending_spends_budget {
+            None
+        } else {
+            // Feed la.tokens ([B]) back as the next [B, 1] input device-side
+            // (reshape + int32 cast to match the synchronous from_slice_i32
+            // dtype), keeping the GPU busy through the host read below. This
+            // appends a second speculative KV position per sequence.
+            let next_input = mlxcel_core::engine::lookahead_feedback_input(&la.tokens);
+            self.prime_lookahead_with_input(seq_ids, &next_input, params)
+        };
 
         // Step 2: read step n's tokens to host (the sync point) and finish-check.
         let toks = match mlxcel_core::engine::try_tokens_to_host(&la.tokens) {
@@ -618,6 +633,17 @@ impl BatchScheduler {
                 Vec::new()
             }
         };
+
+        // The pending B=1 draw is the terminal length token. Commit it through
+        // the shared finish path exactly as DirectEngine does. A short/failed
+        // read still takes the guarded teardown and synchronous retry below.
+        if pending_spends_budget && toks.len() == 1 {
+            drop(la);
+            self.apply_fused_decode_tokens(seq_ids, &toks);
+            self.batch_observability.record_lookahead_step();
+            return;
+        }
+
         let mut finishing = toks.len() != seq_ids.len();
         if !finishing {
             for (i, &seq_id) in seq_ids.iter().enumerate() {
@@ -683,6 +709,17 @@ impl BatchScheduler {
         self.apply_fused_decode_tokens(seq_ids, &toks);
         self.decode_lookahead = next;
         self.batch_observability.record_lookahead_step();
+    }
+
+    /// Whether the one pending lookahead token must exhaust a B=1 row's
+    /// length budget. B>1 keeps its existing all-row teardown/replay path.
+    fn b1_pending_spends_budget(&self, seq_ids: &[SequenceId]) -> bool {
+        let [seq_id] = seq_ids else {
+            return false;
+        };
+        self.active_batch
+            .get(*seq_id)
+            .is_some_and(|seq| seq.generated_tokens.len().saturating_add(1) >= seq.max_tokens)
     }
 
     /// Batched decode: one engine step for all active sequences.
@@ -778,6 +815,10 @@ impl BatchScheduler {
                 .into_iter()
                 .map(|seq| step_rows::step_row(seq, tokenizer, context, false))
                 .collect();
+            #[cfg(test)]
+            {
+                self.decode_forward_calls += 1;
+            }
             self.engine.step(&batch, &mut rows)
         };
         match stepped {

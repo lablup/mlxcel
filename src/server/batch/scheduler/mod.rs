@@ -737,6 +737,11 @@ pub struct BatchScheduler {
     /// never engages the lookahead pipeline and every decode tick runs
     /// synchronously, so the sync path stays available for A/B equivalence.
     lookahead_force_sync: bool,
+
+    /// Decode forwards submitted by this scheduler, for tests that pin the
+    /// B=1 terminal lookahead cost to one forward per post-prefill token.
+    #[cfg(test)]
+    pub(super) decode_forward_calls: usize,
 }
 
 /// One prebuilt decode step held across ticks by the lookahead pipeline.
