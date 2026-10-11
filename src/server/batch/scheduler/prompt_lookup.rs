@@ -118,7 +118,8 @@
 //! two to three times contiguous SDPA past 4096 tokens at batch 4. Measured
 //! for prompt lookup, it still gains at 4096 tokens and loses at 8192, so a
 //! paged sequence stops verifying past [`PROMPT_LOOKUP_PAGED_CONTEXT_LIMIT`]
-//! (4096) and decodes plainly; dense sequences have no limit.
+//! (4608, including tokenization and continuation headroom for the 4096-target
+//! workload) and decodes plainly; dense sequences have no limit.
 
 use mlxcel_core::drafter::Drafter;
 use mlxcel_core::engine::EngineError;
@@ -138,7 +139,17 @@ use crate::server::model_provider::SpeculativeStats;
 /// 1.42x / 1.12x at 4096, then 1.15x / 0.62x at 8192, where the gathered
 /// multi-token verify forward costs more than the accepted tokens save.
 /// Dense storage needs no limit (2.10x / 0.99x at 8192).
-pub(crate) const PROMPT_LOOKUP_PAGED_CONTEXT_LIMIT: Option<usize> = Some(4096);
+///
+/// The original 4096-target copy measurement preceded the 4096-total-token
+/// cutoff. The #2264 pre-acceptance diagnostic at source `89581b8d` found
+/// actual prompts of 4099, 4101 and 4102 tokens and zero proposals in every
+/// flag-on request under that cutoff. Reserving the measured 256-token
+/// continuation requires 4102 + 256 = 4358 positions; 4352 is insufficient.
+/// 4608 is the smallest 512-token boundary covering that measured envelope,
+/// while the 8192-token control remains excluded. This is admission evidence,
+/// not a claim that every context up to this limit is profitable. See
+/// `docs/benchmark_results/data/server-prompt-lookup-break-even-gb10-2026-10-11/context-diagnostic.md`.
+pub(crate) const PROMPT_LOOKUP_PAGED_CONTEXT_LIMIT: Option<usize> = Some(4608);
 
 /// A sequence's prompt-lookup state, carried on [`SequenceInfo`] across
 /// ticks (see the module docs).

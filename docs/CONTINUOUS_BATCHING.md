@@ -698,9 +698,16 @@ while the active decode batch has at most `--prompt-lookup-max-batch` rows
 (default 2; at a gate of 8 one chat-template workload lost 13 % at concurrency
 4 on GB10). Above that every row decodes plainly, its drafter records no miss,
 and it resumes when the batch shrinks. On paged storage a sequence stops
-verifying once its context passes 4096 tokens, where the gathered verify
-forward starts to cost more than it saves (0.62x at 8192 tokens on a 59 %
-acceptance prompt); dense storage has no such limit.
+verifying once total context passes 4608 tokens. The original 4096-target
+benchmark actually tokenizes to 4099–4102 prompt tokens; with its 256-token
+continuation it needs up to 4358 positions. A separate admission diagnostic
+found that the old 4096 cutoff suppressed every proposal in that workload.
+The 4608 cap is the smallest 512-token boundary covering that envelope; it
+keeps 8192-token contexts excluded, where gathered verification previously
+lost performance (0.62x on a 59% acceptance prompt). This boundary rationale
+does not establish the new configuration's performance; the full same-build
+acceptance run is required. See the [context diagnostic](benchmark_results/data/server-prompt-lookup-break-even-gb10-2026-10-11/context-diagnostic.md).
+Dense storage has no such limit.
 
 Before the break-even governor, the flag gained on output that copied its
 prompt (+53 to +67 % at B=1 on GB10

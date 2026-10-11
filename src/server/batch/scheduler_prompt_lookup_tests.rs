@@ -109,6 +109,13 @@ fn cycle_llama() -> crate::models::Llama3Model {
 /// A scheduler over the cycle model; `max_batch` is
 /// `--prompt-lookup-max-batch`, `None` runs without prompt lookup.
 fn scheduler(max_batch: Option<usize>) -> BatchScheduler {
+    scheduler_with_storage(max_batch, DecodeStorageBackend::Dense)
+}
+
+fn scheduler_with_storage(
+    max_batch: Option<usize>,
+    storage: DecodeStorageBackend,
+) -> BatchScheduler {
     let (_tx, rx) = mpsc::channel();
     let mut sched = BatchScheduler::with_config(
         crate::LoadedModel::Llama(cycle_llama()),
@@ -123,7 +130,7 @@ fn scheduler(max_batch: Option<usize>) -> BatchScheduler {
         false,
         PreemptionPolicy::default(),
         1,
-        DecodeStorageBackend::Dense,
+        storage,
     );
     if let Some(max_batch) = max_batch {
         sched = sched.with_speculative_dispatch(crate::server::SpeculativeDispatch::PromptLookup {
@@ -1138,4 +1145,62 @@ fn server_reprimes_after_the_first_proposal_free_ask() {
     assert!(sched.decode_lookahead.is_some());
     drain(&mut sched, &mut done);
     assert_eq!(tokens_of(&done, PLAIN_PROMPT), cycle_from(9, 12));
+}
+
+/// The cap is on total context, including generated tokens. Exercise the
+/// real scheduler admission query with an allocated paged/dense sequence;
+/// query-only lengths avoid allocating long attention fixtures. Restore
+/// the actual token state before running another model step.
+#[test]
+fn paged_prompt_lookup_cap_covers_measured_continuation_and_stops_at_boundary() {
+    use mlxcel_core::cache::SequenceStateBackend;
+
+    for storage in [DecodeStorageBackend::Paged, DecodeStorageBackend::Dense] {
+        let mut sched = scheduler_with_storage(Some(2), storage);
+        let mut done = Done::new();
+        let prompt = copy_prompt();
+        let _rx = enqueue(&mut sched, &prompt, 1024);
+        assert_eq!(tick(&mut sched, &mut done), Tick::Prefill);
+        let id = only_row(&sched);
+        let expected_backend = if storage == DecodeStorageBackend::Paged {
+            SequenceStateBackend::PagedKvCache
+        } else {
+            SequenceStateBackend::DenseKvCache
+        };
+        assert_eq!(
+            sched.engine.pool().get(id).expect("allocated row").backend,
+            expected_backend
+        );
+        let generated = sched
+            .active_batch
+            .get(id)
+            .expect("row")
+            .generated_tokens
+            .clone();
+        for (prompt_len, generated_len, paged_admitted) in [
+            (4099, 1, true),
+            (4101, 1, true),
+            (4102, 256, true), // 4358 total: the measured request envelope.
+            (4607, 1, true),   // Exact 4608 boundary is inclusive.
+            (4608, 1, false),
+            (4102, 507, false), // The continuation also crosses the cap.
+            (8192, 1, false),
+        ] {
+            let seq = sched.active_batch.get_mut(id).expect("row");
+            seq.prompt_tokens.resize(prompt_len, 0);
+            seq.generated_tokens.resize(generated_len, 0);
+            let admitted = sched.prompt_lookup_tick_applies(&[id]);
+            assert_eq!(
+                admitted,
+                storage == DecodeStorageBackend::Dense || paged_admitted,
+                "storage {storage:?}, prompt {prompt_len}, generated {generated_len}"
+            );
+        }
+        let seq = sched.active_batch.get_mut(id).expect("row");
+        seq.prompt_tokens = prompt.clone();
+        seq.generated_tokens = generated;
+        seq.max_tokens = 24;
+        drain(&mut sched, &mut done);
+        assert_eq!(tokens_of(&done, &prompt), cycle_from(4, 24));
+    }
 }
