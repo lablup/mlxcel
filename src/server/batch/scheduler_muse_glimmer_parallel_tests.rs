@@ -206,25 +206,7 @@ fn run_isolated(case: &ImageCase, collect_tokens: bool) -> RequestSummary {
     }
 }
 
-fn run_b1_length_budget(max_tokens: usize) -> (RequestSummary, usize) {
-    let mut sched = muse::scheduler(1);
-    let rx = muse::enqueue(
-        &mut sched,
-        request_prompt(),
-        muse::image_bytes(2, 2, 31),
-        max_tokens,
-    );
-    let seq_id = SequenceId::from_raw(0);
-    execute_prefill_tick(&mut sched);
-    while sched.active_batch.get(seq_id).is_some() {
-        execute_decode_tick(&mut sched, &[seq_id]);
-        sched.finalize_completed();
-    }
-    let forwards = sched.decode_forward_calls;
-    (summarize(muse::collect_stream(&rx)), forwards)
-}
-
-fn run_terminal_length_path(parallelism: usize) -> (TerminalDecodeSummary, usize) {
+fn run_terminal_length_path(parallelism: usize) -> TerminalDecodeSummary {
     let max_tokens = 3;
     let mut sched = muse::scheduler(parallelism);
     let target_rx = muse::enqueue(
@@ -243,6 +225,11 @@ fn run_terminal_length_path(parallelism: usize) -> (TerminalDecodeSummary, usize
     });
     let target_id = SequenceId::from_raw(0);
     execute_prefill_tick(&mut sched);
+    let active_ids = sched.active_batch.sequence_ids();
+    assert!(
+        sched.lookahead_params(&active_ids).is_none(),
+        "Muse model-owned state deliberately stays on the synchronous path"
+    );
 
     let mut terminal = None;
     while sched.active_batch.get(target_id).is_some() {
@@ -274,16 +261,13 @@ fn run_terminal_length_path(parallelism: usize) -> (TerminalDecodeSummary, usize
         let sibling = summarize(muse::collect_stream(&rx));
         assert_eq!(sibling, stream);
     }
-    (
-        TerminalDecodeSummary {
-            generated_tokens,
-            finish_reason,
-            final_pool_offset,
-            final_offsets,
-            stream,
-        },
-        sched.decode_forward_calls,
-    )
+    TerminalDecodeSummary {
+        generated_tokens,
+        finish_reason,
+        final_pool_offset,
+        final_offsets,
+        stream,
+    }
 }
 
 fn assert_reuse_after_release(sched: &mut BatchScheduler) {
@@ -405,30 +389,9 @@ fn muse_scheduler_two_image_requests_parallelism_two_match_isolated_runs() {
 }
 
 #[test]
-fn b1_length_boundary_submits_one_decode_forward_per_post_prefill_token() {
-    // max_tokens 0 and 1 both finish on the first token sampled by prefill;
-    // 2 finishes on the synchronous bootstrap step; 3 and 4 reach the
-    // terminal lookahead branch. None may submit or replay a future token.
-    for (max_tokens, completion_tokens, decode_forwards) in
-        [(0, 1, 0), (1, 1, 0), (2, 2, 1), (3, 3, 2), (4, 4, 3)]
-    {
-        let (summary, forwards) = run_b1_length_budget(max_tokens);
-        assert_eq!(
-            summary.completion_tokens, completion_tokens,
-            "max_tokens={max_tokens}"
-        );
-        assert_eq!(summary.finish_reason, "length", "max_tokens={max_tokens}");
-        assert_eq!(
-            forwards, decode_forwards,
-            "max_tokens={max_tokens} submitted an avoidable decode forward"
-        );
-    }
-}
-
-#[test]
 fn b1_terminal_length_matches_the_unchanged_b2_path() {
-    let (b1, b1_forwards) = run_terminal_length_path(1);
-    let (b2, b2_forwards) = run_terminal_length_path(2);
+    let b1 = run_terminal_length_path(1);
+    let b2 = run_terminal_length_path(2);
 
     assert_eq!(b1, b2);
     assert_eq!(b1.generated_tokens, vec![muse::GENERATED_TOKEN_ID; 3]);
@@ -436,14 +399,6 @@ fn b1_terminal_length_matches_the_unchanged_b2_path() {
     assert_eq!(b1.final_pool_offset, 7);
     assert_eq!(b1.final_offsets, vec![(true, 6, 6), (false, 6, 6)]);
     assert_eq!(b1.stream.streamed, vec!["a", "a", "a"]);
-    assert_eq!(
-        b1_forwards, 2,
-        "B=1 should not submit or replay past length"
-    );
-    assert_eq!(
-        b2_forwards, 4,
-        "B=2 keeps the existing terminal teardown and replay path"
-    );
 }
 
 #[test]

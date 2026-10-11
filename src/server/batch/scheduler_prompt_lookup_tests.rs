@@ -151,6 +151,23 @@ fn enqueue_with(
     max_tokens: usize,
     stop_token_ids: &[i32],
 ) -> (mpsc::Receiver<GenerateEvent>, Arc<AtomicBool>) {
+    enqueue_with_sampling(
+        sched,
+        prompt,
+        max_tokens,
+        SamplingConfig {
+            stop_token_ids: stop_token_ids.to_vec(),
+            ..SamplingConfig::greedy()
+        },
+    )
+}
+
+fn enqueue_with_sampling(
+    sched: &mut BatchScheduler,
+    prompt: &[i32],
+    max_tokens: usize,
+    sampling: SamplingConfig,
+) -> (mpsc::Receiver<GenerateEvent>, Arc<AtomicBool>) {
     let options = ServerGenerateOptions {
         n_indent: 0,
         t_max_predict_ms: None,
@@ -161,10 +178,7 @@ fn enqueue_with(
         logit_bias_texts: Vec::new(),
         post_sampling_probs: false,
         max_tokens,
-        sampling: SamplingConfig {
-            stop_token_ids: stop_token_ids.to_vec(),
-            ..SamplingConfig::greedy()
-        },
+        sampling,
         stop_sequences: None,
         ignore_eos: false,
         priority: RequestPriority::Normal,
@@ -269,6 +283,22 @@ fn assert_synchronous_state(sched: &mut BatchScheduler) {
             "sequence {id}: KV offset disagrees with its tokens"
         );
     }
+}
+
+/// Drain one request's stream and return its terminal result.
+fn completion(rx: &mpsc::Receiver<GenerateEvent>) -> crate::server::GenerationResult {
+    let mut completed = None;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            GenerateEvent::Done(result) => {
+                assert!(completed.is_none(), "request completed more than once");
+                completed = Some(result);
+            }
+            GenerateEvent::Error(err) => panic!("request failed: {err}"),
+            _ => {}
+        }
+    }
+    completed.expect("request completed")
 }
 
 /// The Done result's prompt-lookup acceptance counters `(proposed,
@@ -398,6 +428,148 @@ fn a_concurrent_plain_row_gets_a_token_every_tick() {
     drain(&mut sched, &mut done);
     assert_eq!(tokens_of(&done, &prompt), cycle_from(4, 48));
     assert_eq!(tokens_of(&done, PLAIN_PROMPT), cycle_from(9, 10));
+}
+
+/// Issue #2227: every post-prefill B=1 token costs one decode forward,
+/// including the terminal token. The `max_tokens >= 3` cases reach the
+/// lookahead pipeline; without the terminal-budget guard they submit and
+/// replay two forwards on the final tick.
+#[test]
+fn b1_length_boundary_submits_one_decode_forward_per_post_prefill_token() {
+    for (max_tokens, completion_tokens, decode_forwards) in
+        [(0, 1, 0), (1, 1, 0), (2, 2, 1), (3, 3, 2), (4, 4, 3)]
+    {
+        let mut sched = scheduler(None);
+        let mut done = Done::new();
+        let rx = enqueue(&mut sched, PLAIN_PROMPT, max_tokens);
+        drain(&mut sched, &mut done);
+        let result = completion(&rx);
+        assert_eq!(
+            result.generated_token_ids,
+            cycle_from(9, completion_tokens),
+            "max_tokens={max_tokens}"
+        );
+        assert_eq!(result.finish_reason, "length", "max_tokens={max_tokens}");
+        assert_eq!(
+            sched.decode_forward_calls, decode_forwards,
+            "max_tokens={max_tokens} submitted an avoidable decode forward"
+        );
+    }
+}
+
+/// The terminal B=1 tick commits its pending draw without another submit or
+/// replay. B=2 remains on the pre-existing two-append teardown and sync replay.
+#[test]
+fn b1_terminal_length_skips_two_forwards_and_leaves_b2_unchanged() {
+    let mut b1 = scheduler(None);
+    let mut b1_done = Done::new();
+    let b1_rx = enqueue(&mut b1, PLAIN_PROMPT, 3);
+    assert_eq!(tick(&mut b1, &mut b1_done), Tick::Prefill);
+    let ids = vec![only_row(&b1)];
+    assert!(b1.lookahead_params(&ids).is_some(), "dense B=1 is eligible");
+    assert_eq!(tick(&mut b1, &mut b1_done), Tick::Decode);
+    assert!(
+        b1.decode_lookahead.is_some(),
+        "bootstrap decode primed the terminal token"
+    );
+    assert_eq!(b1.decode_forward_calls, 2, "sync bootstrap plus prime");
+    assert_eq!(tick(&mut b1, &mut b1_done), Tick::Decode);
+    assert_eq!(
+        b1.decode_forward_calls, 2,
+        "terminal B=1 commits the pending token without submit or replay"
+    );
+    let b1_result = completion(&b1_rx);
+    assert_eq!(b1_result.generated_token_ids, cycle_from(9, 3));
+    assert_eq!(b1_result.finish_reason, "length");
+
+    let sibling_prompt = [1, 3, 5, 7, 9];
+    let mut b2 = scheduler(None);
+    let mut b2_done = Done::new();
+    let target_rx = enqueue(&mut b2, PLAIN_PROMPT, 3);
+    let sibling_rx = enqueue(&mut b2, &sibling_prompt, 3);
+    assert_eq!(tick(&mut b2, &mut b2_done), Tick::Prefill);
+    assert_eq!(tick(&mut b2, &mut b2_done), Tick::Prefill);
+    let ids = b2.active_batch.sequence_ids();
+    assert_eq!(ids.len(), 2, "both rows are active for B=2 decode");
+    assert!(b2.lookahead_params(&ids).is_some(), "dense B=2 is eligible");
+    assert_eq!(tick(&mut b2, &mut b2_done), Tick::Decode);
+    assert!(
+        b2.decode_lookahead.is_some(),
+        "B=2 bootstrap decode primed the terminal tokens"
+    );
+    assert_eq!(b2.decode_forward_calls, 2, "batched bootstrap plus prime");
+    assert_eq!(tick(&mut b2, &mut b2_done), Tick::Decode);
+    assert_eq!(
+        b2.decode_forward_calls, 4,
+        "B=2 keeps next submit, teardown, and synchronous replay"
+    );
+    let target = completion(&target_rx);
+    let sibling = completion(&sibling_rx);
+    assert_eq!(target.generated_token_ids, b1_result.generated_token_ids);
+    assert_eq!(target.finish_reason, b1_result.finish_reason);
+    assert_eq!(sibling.generated_token_ids, cycle_from(10, 3));
+    assert_eq!(sibling.finish_reason, "length");
+}
+
+/// An eligible stochastic row commits the device draw that was already
+/// pending. It neither advances the RNG with a future submit nor re-draws the
+/// terminal token synchronously.
+#[test]
+fn b1_stochastic_terminal_length_commits_the_pending_draw() {
+    let mut sched = scheduler(None);
+    let mut done = Done::new();
+    let (rx, _cancelled) = enqueue_with_sampling(
+        &mut sched,
+        PLAIN_PROMPT,
+        3,
+        SamplingConfig {
+            temperature: 1.0,
+            top_k: 0,
+            top_p: 1.0,
+            min_p: 0.0,
+            seed: Some(2227),
+            ..SamplingConfig::default()
+        },
+    );
+    assert_eq!(tick(&mut sched, &mut done), Tick::Prefill);
+    let ids = vec![only_row(&sched)];
+    assert!(
+        sched.lookahead_params(&ids).is_some(),
+        "the seeded stochastic row stays fused-lookahead eligible"
+    );
+    assert_eq!(tick(&mut sched, &mut done), Tick::Decode);
+    let pending = mlxcel_core::engine::try_tokens_to_host(
+        &sched
+            .decode_lookahead
+            .as_ref()
+            .expect("bootstrap decode primed the terminal stochastic draw")
+            .tokens,
+    )
+    .expect("read pending stochastic draw")[0];
+    assert_eq!(tick(&mut sched, &mut done), Tick::Decode);
+    assert_eq!(sched.decode_forward_calls, 2);
+    let result = completion(&rx);
+    assert_eq!(result.generated_token_ids.last(), Some(&pending));
+    assert_eq!(result.finish_reason, "length");
+}
+
+/// EOS keeps precedence when the pending token also reaches `max_tokens`.
+/// The optimized terminal branch still finishes through `Engine::finish_rows`.
+#[test]
+fn b1_terminal_token_eos_precedes_the_length_boundary() {
+    let mut sched = scheduler(None);
+    let mut done = Done::new();
+    let (rx, _cancelled) = enqueue_with(&mut sched, PLAIN_PROMPT, 3, &[11]);
+    assert_eq!(tick(&mut sched, &mut done), Tick::Prefill);
+    let ids = vec![only_row(&sched)];
+    assert!(sched.lookahead_params(&ids).is_some());
+    assert_eq!(tick(&mut sched, &mut done), Tick::Decode);
+    assert!(sched.decode_lookahead.is_some());
+    assert_eq!(tick(&mut sched, &mut done), Tick::Decode);
+    assert_eq!(sched.decode_forward_calls, 2);
+    let result = completion(&rx);
+    assert_eq!(result.generated_token_ids, cycle_from(9, 2));
+    assert_eq!(result.finish_reason, "stop");
 }
 
 /// Rules 2 and 4 (I3): with the flag on and no row proposing, the lookahead
