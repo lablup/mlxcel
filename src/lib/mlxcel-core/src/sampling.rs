@@ -429,6 +429,19 @@ fn sample_token_optimized_core(
     (token, adjusted)
 }
 
+/// Sampled token, adjusted logits, and the post-chain probability distribution.
+pub type SampleWithDistribution = (
+    UniquePtr<MlxArray>,
+    UniquePtr<MlxArray>,
+    UniquePtr<MlxArray>,
+);
+
+type SampleWithOptionalDistribution = (
+    UniquePtr<MlxArray>,
+    UniquePtr<MlxArray>,
+    Option<UniquePtr<MlxArray>>,
+);
+
 /// Full-form core sampler shared by every entry point: samples one token and,
 /// when `want_distribution` is set, also returns the float32 `[1, vocab]`
 /// post-chain distribution the draw came from (b10621's `post_sampling_probs`
@@ -450,14 +463,7 @@ fn sample_token_optimized_core_full(
     token_history: &[i32],
     mut state: Option<&mut SamplerState>,
     want_distribution: bool,
-) -> Result<
-    (
-        UniquePtr<MlxArray>,
-        UniquePtr<MlxArray>,
-        Option<UniquePtr<MlxArray>>,
-    ),
-    String,
-> {
+) -> Result<SampleWithOptionalDistribution, String> {
     if config.effective_mirostat() != 0 {
         return mirostat_sample_core(logits, config, state, want_distribution);
     }
@@ -519,14 +525,7 @@ pub fn try_sample_token_with_state_and_distribution(
     config: &SamplingConfig,
     token_history: &[i32],
     state: &mut Option<SamplerState>,
-) -> Result<
-    (
-        UniquePtr<MlxArray>,
-        UniquePtr<MlxArray>,
-        UniquePtr<MlxArray>,
-    ),
-    String,
-> {
+) -> Result<SampleWithDistribution, String> {
     ensure_sampler_state(config, state);
     let (token, adjusted, probs) =
         sample_token_optimized_core_full(logits, config, token_history, state.as_mut(), true)?;
@@ -1516,14 +1515,7 @@ fn mirostat_sample_core(
     config: &SamplingConfig,
     state: Option<&mut SamplerState>,
     want_distribution: bool,
-) -> Result<
-    (
-        UniquePtr<MlxArray>,
-        UniquePtr<MlxArray>,
-        Option<UniquePtr<MlxArray>>,
-    ),
-    String,
-> {
+) -> Result<SampleWithOptionalDistribution, String> {
     let version = config.effective_mirostat();
     let tau = config.mirostat_tau;
     let eta = config.mirostat_eta;
