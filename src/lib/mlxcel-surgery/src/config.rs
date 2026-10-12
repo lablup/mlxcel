@@ -108,6 +108,7 @@ pub enum OpSpec {
         /// Glob pattern matched against tensor keys.
         pattern: String,
         /// Scalar multiplier (any finite f32).
+        #[serde(deserialize_with = "yaml_number::deserialize")]
         factor: f32,
     },
 
@@ -119,7 +120,10 @@ pub enum OpSpec {
         /// Path to a safetensors file containing the task vector.
         source: PathBuf,
         /// Coefficient on the source term. Defaults to `1.0`.
-        #[serde(default = "default_alpha_one")]
+        #[serde(
+            default = "default_alpha_one",
+            deserialize_with = "yaml_number::deserialize"
+        )]
         alpha: f32,
     },
 
@@ -162,6 +166,7 @@ pub enum OpSpec {
         /// Donor checkpoint B.
         source_b: PathBuf,
         /// Mixing ratio in `[0.0, 1.0]`.
+        #[serde(deserialize_with = "yaml_number::deserialize")]
         ratio: f32,
         /// Interpolation method.
         method: InterpolateMethod,
@@ -212,7 +217,12 @@ pub fn parse_config_str(
     yaml: &str,
     base_dir: Option<&Path>,
 ) -> Result<SurgeryPipeline, SurgeryError> {
-    let config: SurgeryConfig = serde_yaml::from_str(yaml)
+    let options = serde_saphyr::options! {
+        merge_keys: serde_saphyr::MergeKeyPolicy::AsOrdinary,
+        strict_booleans: true,
+        reject_non_finite_typeless_float: false,
+    };
+    let config: SurgeryConfig = serde_saphyr::from_str_with_options(yaml, options)
         .map_err(|e| SurgeryError::Other(anyhow::anyhow!("failed to parse surgery YAML: {e}")))?;
 
     if config.version != SUPPORTED_SCHEMA_VERSION {
@@ -886,3 +896,10 @@ operations:
         parse_tempfile(yaml)
     }
 }
+
+#[cfg(test)]
+#[path = "config_yaml_compat_tests.rs"]
+mod yaml_compat_tests;
+
+#[path = "config_yaml_number.rs"]
+mod yaml_number;
