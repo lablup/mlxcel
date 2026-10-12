@@ -52,6 +52,9 @@
 use super::*;
 use crate::hardware::{GpuBackendKind, gpu_backend_kind};
 
+#[path = "ssm_update_timestep_precision_tests.rs"]
+mod timestep_precision_tests;
+
 const KILL_SWITCHES: [&str; 2] = ["MLXCEL_SSM_KERNEL", "MLXCEL_SSM_CUDA_KERNEL"];
 
 /// Normalized (RMS, max) deviation budget for values stored in `dtype`.

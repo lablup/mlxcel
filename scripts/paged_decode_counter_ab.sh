@@ -61,7 +61,7 @@
 # Exit status: 0 both sides launched the fused path the same number of times
 # with no fallbacks and produced the same text; 1 the counters disagree, a side
 # never launched the fused path, or the text differs; 2 the run could not be
-# made meaningful (server never came up, metrics unavailable).
+# made meaningful (server never came up, metrics unavailable, output directory unavailable).
 set -uo pipefail
 
 BASELINE_BIN=""
@@ -107,8 +107,16 @@ if cmp -s "$BASELINE_BIN" "$ARM_BIN"; then
   exit 1
 fi
 
-[[ -n "$OUT_DIR" ]] || OUT_DIR="$(mktemp -d -t paged_decode_counter_ab)"
-mkdir -p "$OUT_DIR"
+if [[ -z "$OUT_DIR" ]]; then
+  OUT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/paged_decode_counter_ab.XXXXXX")" || {
+    echo "error: could not create output directory" >&2
+    exit 2
+  }
+fi
+if [[ -z "$OUT_DIR" ]] || ! mkdir -p "$OUT_DIR"; then
+  echo "error: could not create output directory" >&2
+  exit 2
+fi
 
 echo "baseline: $BASELINE_BIN"
 echo "arm:      $ARM_BIN"
