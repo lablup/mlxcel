@@ -1,0 +1,25 @@
+(a) chat: aggregate decode tokens / aggregate decode seconds per round
+round 1: on=152.867 off=156.110 delta=-2.077%
+round 2: on=155.904 off=154.055 delta=+1.200%
+round 3: on=152.473 off=152.894 delta=-0.275%
+round 4: on=157.006 off=154.012 delta=+1.944%
+round 5: on=152.221 off=155.604 delta=-2.174%
+median=-0.275%, range=-2.174%..+1.944%
+(b) copy: median paired gain per request; retain 90% of original gain
+q0: gain=+159.283% original=+61.736% floor=+55.563%
+q1: gain=+157.037% original=+53.320% floor=+47.988%
+q2: gain=+151.289% original=+65.449% floor=+58.904%
+q3: gain=+148.602% original=+66.599% floor=+59.939%
+(c) chat-template C=2: medians and round ranges; no disjoint regression
+plain: on=137.900 (135.900..141.700) off=136.900 (135.300..137.300)
+copy: on=220.000 (216.600..225.100) off=217.400 (216.900..226.800)
+(d) long copy: ratios of median decode rates; retain 90% of speedup above 1x
+paged 1024: on=314.430 off=114.970 ratio=2.7349 floor=2.521
+paged 2048: on=255.000 off=90.460 ratio=2.8189 floor=2.6109999999999998
+paged 4096: on=188.050 off=123.550 ratio=1.5221 floor=1.378
+dense 8192: on=246.140 off=104.850 ratio=2.3475 floor=1.9900000000000002
+paged 8192: on=99.420 off=101.030 ratio=0.9841 floor=None
+{
+  "passed": true,
+  "failures": []
+}

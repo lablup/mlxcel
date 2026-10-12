@@ -1,0 +1,57 @@
+[36m[verify] kernel dtype cache keys...[0m
+kernel-dtype-keys: OK, 9 in scope (launching cuda_kernel or hip_kernel) of 199 source files scanned.
+ok   control -> exit 0
+ok   dtype-key-dropped -> exit 1
+ok   launch-in-header -> exit 1
+ok   launch-in-new-directory -> exit 1
+ok   launch-moved-to-helper -> exit 1
+ok   launch-commented-out -> exit 1
+ok   launcher-deleted -> exit 1
+ok   hip-only-new-file -> exit 1
+ok   hip-only-bridge-int-keys -> exit 1
+ok   hip-only-bridge-dtype-keys -> exit 0
+ok   unpinned-launcher -> exit 1
+ok   token-in-comment -> exit 0
+ok   hip-file-in-nested-build-dir -> exit 1
+ok   git-work-tree-ignored -> exit 0
+ok   git-work-tree-untracked -> exit 1
+ok   empty-tree -> exit 1
+all kernel dtype-key checker cases passed
+[36m[verify] kernel port dispatch...[0m
+Kernel port dispatch check passed: 12 launcher file(s) route through select_kernel_port, 0 exempt; 1976 Rust file(s) free of backend-enumerating gates, 0 awaiting a predicate; 5 any-wave ROCm table(s) free of lane operations, wave-size test seam used only by tests.
+ok   control -> exit 0
+ok   mark-shuffle-port -> exit 1
+ok   shuffle-in-marked-body -> exit 1
+ok   ballot-in-marked-body -> exit 1
+ok   builtin-ballot-in-marked-body -> exit 1
+ok   marked-entry-swapped -> exit 1
+ok   marked-with-header -> exit 1
+ok   shuffle-in-comment -> exit 0
+ok   unmark-pinned-table -> exit 1
+ok   seam-in-production -> exit 1
+ok   seam-in-cpp -> exit 1
+ok   seam-in-bridge -> exit 1
+ok   seam-in-test-module -> exit 0
+all kernel port dispatch checker cases passed
+[36m[verify] llama-server b10621 compatibility manifest...[0m
+llama-compat manifest OK: 249 help entries, 323 spellings, 136 env vars, 53 routes, 74 native fields; states {'supported': 171, 'aliased': 22, 'not_applicable': 147, 'by_design': 36}; 0 distinct deferred issues
+ok   control -> exit 0
+ok   supported-with-divergence -> exit 1
+ok   divergence-on-deferred -> exit 0
+ok   misspelled-divergence-key -> exit 1
+ok   divergence-inside-mlxcel-claim -> exit 1
+ok   divergence-not-a-list -> exit 1
+ok   divergence-empty-string -> exit 1
+ok   missing-divergence -> exit 1
+ok   drifted-test-pointer -> exit 1
+ok   valid-test-pointer -> exit 0
+ok   by-design-with-empty-divergence -> exit 1
+ok   policy-without-revisit -> exit 1
+ok   architectural-with-revisit -> exit 1
+ok   unknown-rationale-key -> exit 1
+ok   rationale-on-supported -> exit 1
+ok   rationale-on-deferred -> exit 1
+ok   by-design-without-test -> exit 1
+ok   by-design-foreign-issue -> exit 1
+ok   well-formed-by-design -> exit 0
+all llama-compat manifest validator cases passed

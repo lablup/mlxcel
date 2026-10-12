@@ -1,0 +1,24 @@
+Server:       http://127.0.0.1:18080
+Model:        qwen3-1.7b-4bit
+Prompt:       ~512 tokens (2591 chars), style plain
+Max tokens:   256
+Concurrency:  [2]
+
+>>> concurrency=2 ...
+
+conc   ok  fail  ttft_ms(mean)  ttft_ms(p95)  decode_tok_s(mean)  aggregate_tok_s
+---------------------------------------------------------------------------------
+   2    2     0          222.7         223.1                73.1            137.9
+
+Server:       http://127.0.0.1:18080
+Model:        qwen3-1.7b-4bit
+Prompt:       ~512 tokens (2631 chars), style copy
+Max tokens:   256
+Concurrency:  [2]
+
+>>> concurrency=2 ...
+
+conc   ok  fail  ttft_ms(mean)  ttft_ms(p95)  decode_tok_s(mean)  aggregate_tok_s
+---------------------------------------------------------------------------------
+   2    2     0          106.3         106.3               114.8            220.0
+

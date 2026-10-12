@@ -686,7 +686,7 @@ tokens must come true before verification resumes with fresh evidence.
 Ordinary proposal-free asks re-prime after the first ask instead of the CLI's
 three. Each row keeps its own evidence even at concurrency two; a proposing
 peer still makes the shared tick synchronous. The CLI defaults and the graded
-policy remain unchanged.
+policy remain unchanged. The [GB10 break-even report](benchmark_results/server-prompt-lookup-break-even-gb10-2026-10-11.md) records the final passing matrix: chat −0.275%, short-copy +149–159%, and long-copy 1.52–2.82×. These measurements cover Qwen3-1.7B 4-bit on GB10; the boundary-miss heuristic is not a guarantee for other workloads.
 
 Each decode tick asks the eligible rows for a proposal. A row that proposes
 runs one verify round on its own (the round `mlxcel generate --prompt-lookup`

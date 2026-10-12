@@ -1,0 +1,18 @@
+complete passing matrix: PASS
+nested attempt passing matrix: PASS
+missing round: PASS
+missing model: PASS
+wrong model: PASS
+missing long-copy cell: PASS
+zero tokens: PASS
+missing baseline field: PASS
+failed concurrency request: PASS
+wrong on arm argv: PASS
+off arm reports verification: PASS
+paged 8192 control verified: PASS
+wrong draft kind: PASS
+wrong native MLX pin: PASS
+missing native MLX pin: PASS
+chat threshold rate 99.0: PASS
+chat threshold rate 98.9999: PASS
+Synthetic data: /tmp/issue2264-analyzer-82wpmzoy
