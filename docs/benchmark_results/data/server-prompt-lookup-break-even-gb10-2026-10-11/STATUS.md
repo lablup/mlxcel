@@ -1,6 +1,6 @@
 # Issue 2264 checkpoint
 
-Attempt 4 passes every unchanged acceptance criterion. Release source `b274abf0` passed release build, clippy, formatting, three contract checks, and the full CUDA workspace suite (8,936 root and 2,093 core tests, no integration failures). Publication and CI are pending.
+Attempt 4 passes every unchanged acceptance criterion. Release source `b274abf0` passed release build, clippy, formatting, three contract checks, and the full CUDA workspace suite (8,936 root and 2,093 core tests, no integration failures). Results and bilingual technical reports are published in PR #2274. This file records the passing acceptance checkpoint; GitHub is authoritative for subsequent CI and merge state.
 
 - Attempt 1: complete failed matrix; chat passed, copy retention failed.
 - Attempt 2: short-copy failure persisted after the full-short-acceptance correction; intentionally stopped with partial evidence preserved.
