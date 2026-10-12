@@ -764,9 +764,9 @@ impl GraniteMoeHybridMLP {
 
 // Sparse MoE block (`block_sparse_moe`): softmax-over-top-k router + SwitchGLU.
 
-struct GraniteMoeHybridMoE {
+pub(crate) struct GraniteMoeHybridMoE {
     router: UnifiedLinear,
-    switch_mlp: SwitchGLU,
+    pub(crate) switch_mlp: SwitchGLU,
     top_k: i32,
     num_experts: i32,
 }
@@ -797,8 +797,34 @@ impl GraniteMoeHybridMoE {
         let topk_logits = mlxcel_core::astype(&topk_logits, mlxcel_core::dtype::FLOAT32);
         let scores = mlxcel_core::softmax(&topk_logits, -1);
 
-        let expert_out = self.switch_mlp.forward(&x_flat, &topk_indices);
-        let result = moe_weighted_sum(&expert_out, &scores, mlxcel_core::array_dtype(&x_flat));
+        // Apply routed experts. Fused single-token decode kernel (#268) on by
+        // default; MLXCEL_FUSED_MOE=0 forces the proven SwitchGLU +
+        // moe_weighted_sum path (also the automatic fallback when the kernel
+        // does not support the config). Granite routes through softmax over
+        // ONLY the top-k logits, which equals softmax-over-all then
+        // renormalize over the top-k (norm_topk_prob), so `scores` already
+        // carries the full combine weights the kernel needs; the launcher
+        // casts scores to f32 itself. The shared expert joins outside this
+        // block (the decoder layer sums it with the MoE output) and is
+        // unchanged (issue #2245).
+        let result = {
+            let fused = if mlxcel_core::array_shape(&x_flat)[0] == 1
+                && crate::models::switch_layers::fused_moe_enabled()
+            {
+                self.switch_mlp
+                    .forward_fused_kernel(&x_flat, &topk_indices, &scores)
+                    .map(|out| mlxcel_core::reshape(&out, &[1, hidden_dim]))
+            } else {
+                None
+            };
+            match fused {
+                Some(out) => out,
+                None => {
+                    let expert_out = self.switch_mlp.forward(&x_flat, &topk_indices);
+                    moe_weighted_sum(&expert_out, &scores, mlxcel_core::array_dtype(&x_flat))
+                }
+            }
+        };
 
         if orig_shape.len() > 2 {
             mlxcel_core::reshape(&result, &orig_shape)
@@ -810,7 +836,7 @@ impl GraniteMoeHybridMoE {
 
 // Shared dense expert (`shared_mlp`): fused gate/up SwiGLU, always summed with MoE.
 
-struct GraniteMoeHybridSharedMLP {
+pub(crate) struct GraniteMoeHybridSharedMLP {
     input_linear: UnifiedLinear,
     output_linear: UnifiedLinear,
     shared_intermediate: i32,
@@ -833,7 +859,7 @@ impl GraniteMoeHybridSharedMLP {
 
 // Per-layer feed-forward: dense MLP, or MoE + shared MLP.
 
-enum FeedForward {
+pub(crate) enum FeedForward {
     Dense(GraniteMoeHybridMLP),
     /// Dense feed-forward kept in the fused `shared_mlp` form (a single
     /// `input_linear` producing gate+up). Used for quantized dense checkpoints,
@@ -1334,7 +1360,7 @@ impl GraniteMoeHybridModel {
 
 /// Build the per-layer feed-forward: dense `mlp`, or `block_sparse_moe` +
 /// `shared_mlp` when `use_moe`.
-fn build_feed_forward(
+pub(crate) fn build_feed_forward(
     weights: &WeightMap,
     args: &ModelArgs,
     prefix: &str,

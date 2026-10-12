@@ -1215,6 +1215,10 @@ impl SwitchGLU {
     /// non-SwiGLU activation (the kernel fuses `silu(gate) * up` and nothing
     /// else, so Kimi K3's SiTU experts stay on the gather path). Gated by the
     /// caller (`MLXCEL_FUSED_MOE`).
+    ///
+    /// Used by: AfMoE, BailingMoe, Cohere2Moe, Dbrx, Dots1, GraniteMoeHybrid,
+    ///          Klear, Laguna, Lfm2, Mellum, MiniMax, Mixtral, OLMoE, PhiMoE,
+    ///          Qwen2Moe, Qwen3Moe, and Qwen3VLMoE
     pub fn forward_fused_kernel(
         &self,
         x: &MlxArray,

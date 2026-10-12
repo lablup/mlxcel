@@ -26,7 +26,22 @@
 //! `mlx-community/granite-4.0-h-350m-4bit` checkpoint and is not exercised here
 //! (no Metal device is assumed in unit tests).
 
-use super::granitemoehybrid::ModelArgs;
+use super::granitemoehybrid::{FeedForward, GraniteMoeHybridMoE, ModelArgs, build_feed_forward};
+use crate::models::switch_layers::{
+    HONEST_EXPERT_GROUP_SIZE, insert_honest_affine_swiglu_experts, moe_weighted_sum,
+};
+use mlxcel_core::weights::WeightMap;
+
+fn values(len: usize, start: f32, step: f32) -> Vec<f32> {
+    (0..len).map(|idx| start + idx as f32 * step).collect()
+}
+
+fn insert_tensor(weights: &mut WeightMap, name: &str, values: Vec<f32>, shape: &[i32]) {
+    weights.insert(
+        name.to_string(),
+        mlxcel_core::from_slice_f32(&values, shape),
+    );
+}
 
 /// A trimmed `granite-4.0-h-350m` config (the dense-MLP hybrid). Values mirror
 /// the real checkpoint, including the full 32-entry `layer_types` interleave.
@@ -196,6 +211,133 @@ fn granite_hybrid_quantization_read_from_config() {
     assert!(bf16.quantization.is_none());
     assert_eq!(bf16.group_size(), 64);
     assert_eq!(bf16.bits(), 4);
+}
+
+/// Hidden width of the fused-kernel geometry below: one quantization group per
+/// input row, so one token carries 64 elements. Reuses the honest affine 4-bit
+/// expert triple the Qwen3MoE fused-geometry tests use (issue #1884).
+const FUSED_HIDDEN: i32 = HONEST_EXPERT_GROUP_SIZE;
+const FUSED_EXPERTS: i32 = 2;
+
+/// A granite `GraniteMoeHybridMoE` over two honest affine 4-bit bf16 experts of
+/// intermediate width `dff`, loaded through the family's own `build_feed_forward`,
+/// so the fused-kernel decision under test runs on the exact type and stored
+/// triple a converted granite-4.0-h checkpoint produces.
+fn fused_moe_block() -> GraniteMoeHybridMoE {
+    let mut weights = WeightMap::new();
+    insert_honest_affine_swiglu_experts(
+        &mut weights,
+        "model.layers.0.block_sparse_moe.switch_mlp",
+        FUSED_EXPERTS,
+        FUSED_HIDDEN,
+        FUSED_HIDDEN,
+    );
+    // A non-quantized router and shared expert, so the declared pair can only
+    // reach the routed experts.
+    insert_tensor(
+        &mut weights,
+        "model.layers.0.block_sparse_moe.router.layer.weight",
+        values((FUSED_EXPERTS * FUSED_HIDDEN) as usize, -0.2, 0.004),
+        &[FUSED_EXPERTS, FUSED_HIDDEN],
+    );
+    insert_tensor(
+        &mut weights,
+        "model.layers.0.shared_mlp.input_linear.weight",
+        values((2 * FUSED_HIDDEN * FUSED_HIDDEN) as usize, 0.01, 0.002),
+        &[2 * FUSED_HIDDEN, FUSED_HIDDEN],
+    );
+    insert_tensor(
+        &mut weights,
+        "model.layers.0.shared_mlp.output_linear.weight",
+        values((FUSED_HIDDEN * FUSED_HIDDEN) as usize, 0.02, 0.002),
+        &[FUSED_HIDDEN, FUSED_HIDDEN],
+    );
+    let args: ModelArgs = serde_json::from_value(serde_json::json!({
+        "model_type": "granitemoehybrid",
+        "vocab_size": 8,
+        "hidden_size": FUSED_HIDDEN,
+        "intermediate_size": FUSED_HIDDEN,
+        "num_hidden_layers": 1,
+        "num_attention_heads": 1,
+        "num_key_value_heads": 1,
+        "rms_norm_eps": 1e-5,
+        "embedding_multiplier": 1.0,
+        "attention_multiplier": 1.0,
+        "logits_scaling": 1.0,
+        "residual_multiplier": 1.0,
+        "layer_types": ["attention"],
+        "num_local_experts": FUSED_EXPERTS,
+        "num_experts_per_tok": FUSED_EXPERTS,
+        "shared_intermediate_size": FUSED_HIDDEN,
+        "quantization": { "group_size": 64, "bits": 4 },
+    }))
+    .expect("fused-geometry granite config must parse");
+    let ff = build_feed_forward(&weights, &args, "model.layers.0")
+        .expect("honest affine 4-bit granite experts must load");
+    match ff {
+        FeedForward::Moe { moe, .. } => moe,
+        _ => panic!("num_local_experts 2 must build the MoE feed-forward"),
+    }
+}
+
+/// Before issue #2245 granite's `block_sparse_moe` never called
+/// `forward_fused_kernel`, so the fused single-token MoE kernel (#268) never
+/// ran for the family and every decode step paid the `gather_qmm` fallback
+/// (25.4% of decode GPU time on gfx1151, per the #2061 profile). The kernel
+/// must decline nothing on an honest affine 4-bit expert triple of dff 64 and
+/// compute the `forward` + `moe_weighted_sum` function within the tolerance
+/// that test pins. It launches the kernel, which on a backend without a port
+/// refuses across the bridge, so it runs only when
+/// `fused_moe_kernels_available()` says both ports exist.
+#[test]
+fn granite_hybrid_fused_kernel_matches_the_gather_path_at_one_token() {
+    if !mlxcel_core::fused_moe_kernels_available() {
+        eprintln!("skipping: this backend has no fused MoE kernel port (#1803)");
+        return;
+    }
+    let moe = fused_moe_block();
+    let x = mlxcel_core::astype(
+        &mlxcel_core::from_slice_f32(
+            &values(FUSED_HIDDEN as usize, -0.4, 0.0125),
+            &[1, FUSED_HIDDEN],
+        ),
+        mlxcel_core::dtype::BFLOAT16,
+    );
+    let indices = mlxcel_core::from_slice_i32(&[0, 1], &[1, FUSED_EXPERTS]);
+    let scores = mlxcel_core::from_slice_f32(&[0.25, 0.75], &[1, FUSED_EXPERTS]);
+
+    let fused = moe
+        .switch_mlp
+        .forward_fused_kernel(&x, &indices, &scores)
+        .expect("honest affine 4-bit experts of dff 64 must dispatch the fused kernel");
+    let fused = mlxcel_core::reshape(&fused, &[1, FUSED_HIDDEN]);
+    let gathered = moe_weighted_sum(
+        &moe.switch_mlp.forward(&x, &indices),
+        &scores,
+        mlxcel_core::dtype::BFLOAT16,
+    );
+    // A structural check, not a numeric parity bound (that lives in
+    // `fused_moe_parity_tests`): swapped planes or a dropped expert land near
+    // 1, the bf16 quantized jitter between the two paths two orders lower.
+    let fused = mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(
+        &fused,
+        mlxcel_core::dtype::FLOAT32,
+    ));
+    let gathered = mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(
+        &gathered,
+        mlxcel_core::dtype::FLOAT32,
+    ));
+    let diff_sq: f64 = fused
+        .iter()
+        .zip(&gathered)
+        .map(|(a, b)| f64::from(a - b).powi(2))
+        .sum();
+    let ref_sq: f64 = gathered.iter().map(|b| f64::from(*b).powi(2)).sum();
+    let nrms = (diff_sq / ref_sq.max(1e-20)).sqrt();
+    assert!(
+        fused.iter().all(|v| v.is_finite()) && nrms < 0.1,
+        "the fused kernel must compute the gather path's function: nrms {nrms:e}"
+    );
 }
 
 /// Regression for the `slice_update`-is-functional footgun: `inject_at_positions`
