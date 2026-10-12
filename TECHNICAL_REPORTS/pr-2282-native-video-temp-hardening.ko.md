@@ -49,4 +49,4 @@ Native 경로와 frame fallback의 모든 요청은 모델 startup 중 canonical
 - Contract gate는 Python 123개와 WebUI 49개 검증을 통과했습니다. Formatting 및 diff 검사도 통과했습니다.
 - 독립 구현, 보안, finalization 리뷰는 in-process constructor 수정을 반영한 뒤 남은 문제를 보고하지 않았습니다.
 
-End-to-end 모델 실행은 Linux CUDA에서 수행했습니다. 이 호스트에서는 macOS Metal을 실행할 수 없었으며 해당 검증은 CI에서 수행합니다.
+End-to-end 모델 실행은 Linux CUDA에서 수행했습니다. macOS Metal inference는 로컬에서 실행하지 않았습니다.

@@ -49,4 +49,4 @@ All native and frame-fallback requests use the canonical directory list captured
 - Contract gates passed with 123 Python checks and 49 WebUI checks. Formatting and diff checks passed.
 - Independent implementation, security, and finalization reviews reported no remaining findings after the in-process constructor fix.
 
-The end-to-end model run used Linux CUDA. macOS Metal execution was not available on this host and remains a CI validation surface.
+The end-to-end model run used Linux CUDA. macOS Metal inference was not run locally.
