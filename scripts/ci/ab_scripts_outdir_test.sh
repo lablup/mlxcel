@@ -4,7 +4,7 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd "$script_dir/../.." && pwd)"
+repo_root="${MLXCEL_AB_SCRIPTS_TEST_ROOT:-$(cd "$script_dir/../.." && pwd)}"
 output_equality="$repo_root/scripts/ab_output_equality.sh"
 paged_counter="$repo_root/scripts/paged_decode_counter_ab.sh"
 
@@ -23,6 +23,9 @@ write_fake_mlxcel() {
   printf '%s\n' \
     '#!/usr/bin/env bash' \
     "# $marker" \
+    'if [[ -n "${AB_SCRIPTS_OUTDIR_TEST_MODEL_MARKER:-}" ]]; then' \
+    '  : > "$AB_SCRIPTS_OUTDIR_TEST_MODEL_MARKER"' \
+    'fi' \
     'case "${1:-}" in' \
     '  generate)' \
     '    printf "Generating...\\n"' \
@@ -111,6 +114,22 @@ assert_create_failure() {
   grep -Fq 'error: could not create output directory' "$output" || fail "$name create failure" "missing output-directory error"
 }
 
+assert_mktemp_failure() {
+  local name="$1" script="$2"
+  shift 2
+  local marker="$work/$name.model-invoked"
+  local output="$work/$name.mktemp-failure.out"
+  local status
+  rm -f "$marker"
+  set +e
+  AB_SCRIPTS_OUTDIR_TEST_MODEL_MARKER="$marker" TMPDIR="$work/not-a-directory/missing" "$script" "$@" > "$output" 2>&1
+  status=$?
+  set -e
+  [[ "$status" -eq 2 ]] || fail "$name mktemp failure" "expected exit 2, got $status"
+  grep -Fq 'error: could not create output directory' "$output" || fail "$name mktemp failure" "missing output-directory error"
+  [[ ! -e "$marker" ]] || fail "$name mktemp failure" "model binary was invoked after output-directory creation failed"
+}
+
 mkdir -p "$work/tmp" "$work/bin"
 write_fake_mlxcel "$work/baseline" baseline
 write_fake_mlxcel "$work/arm" arm
@@ -118,13 +137,29 @@ write_fake_curl "$work/bin/curl"
 write_fake_jq "$work/bin/jq"
 printf 'not a directory\n' > "$work/not-a-directory"
 
+set +e
 output="$(TMPDIR="$work/tmp" "$output_equality" --baseline "$work/baseline" --arm "$work/arm" --model models/fake --prompt test -n 1 2>&1)"
-assert_default_dir "output equality default" ab_output_equality "$output"
+status=$?
+set -e
+if [[ "$status" -eq 0 ]]; then
+  assert_default_dir "output equality default" ab_output_equality "$output"
+else
+  fail "output equality default" "expected exit 0, got $status"
+fi
 assert_create_failure "output equality" "$output_equality" --baseline "$work/baseline" --arm "$work/arm" --model models/fake --prompt test -n 1
+assert_mktemp_failure "output equality" "$output_equality" --baseline "$work/baseline" --arm "$work/arm" --model models/fake --prompt test -n 1
 
+set +e
 output="$(PATH="$work/bin:$PATH" TMPDIR="$work/tmp" "$paged_counter" --baseline "$work/baseline" --arm "$work/arm" --model models/fake --requests 1 -n 1 2>&1)"
-assert_default_dir "paged counter default" paged_decode_counter_ab "$output"
+status=$?
+set -e
+if [[ "$status" -eq 0 ]]; then
+  assert_default_dir "paged counter default" paged_decode_counter_ab "$output"
+else
+  fail "paged counter default" "expected exit 0, got $status"
+fi
 assert_create_failure "paged counter" "$paged_counter" --baseline "$work/baseline" --arm "$work/arm" --model models/fake --requests 1 -n 1
+assert_mktemp_failure "paged counter" "$paged_counter" --baseline "$work/baseline" --arm "$work/arm" --model models/fake --requests 1 -n 1
 
 if [[ "$failures" -ne 0 ]]; then
   echo "A/B output-directory regression test: $failures case(s) failed" >&2
