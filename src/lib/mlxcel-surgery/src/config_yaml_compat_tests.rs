@@ -49,7 +49,9 @@ fn shipped_examples_keep_their_enum_and_numeric_syntax() {
 
 #[test]
 fn non_finite_factors_reach_operation_validation() {
-    for value in [".nan", ".NaN", ".inf", "-.inf", "+.Inf"] {
+    for value in [
+        ".nan", ".NaN", ".inf", "-.inf", "+.Inf", "'.nan'", "'.inf'", "'-.inf'",
+    ] {
         let yaml =
             format!("version: 1\noperations: [{{op: scale, pattern: '*', factor: {value}}}]");
         let error = parse_config_str(&yaml, None)
@@ -58,6 +60,40 @@ fn non_finite_factors_reach_operation_validation() {
             .to_string();
         assert!(
             error.contains("scale") && error.contains("finite"),
+            "{value}: {error}"
+        );
+    }
+}
+
+#[test]
+fn non_finite_coefficients_reach_add_validation() {
+    for value in [".nan", ".inf", "-.inf", "'.nan'", "'.inf'", "'-.inf'"] {
+        let yaml = format!(
+            "version: 1\noperations: [{{op: add, pattern: '*', source: donor.safetensors, alpha: {value}}}]"
+        );
+        let error = parse_config_str(&yaml, None)
+            .err()
+            .expect("non-finite rejected")
+            .to_string();
+        assert!(
+            error.contains("(add)") && error.contains("alpha must be finite"),
+            "{value}: {error}"
+        );
+    }
+}
+
+#[test]
+fn non_finite_ratios_reach_interpolate_validation() {
+    for value in [".nan", ".inf", "-.inf", "'.nan'", "'.inf'", "'-.inf'"] {
+        let yaml = format!(
+            "version: 1\noperations: [{{op: interpolate, pattern: '*', source_a: a.safetensors, source_b: b.safetensors, method: lerp, ratio: {value}}}]"
+        );
+        let error = parse_config_str(&yaml, None)
+            .err()
+            .expect("non-finite rejected")
+            .to_string();
+        assert!(
+            error.contains("(interpolate)") && error.contains("ratio must be a finite number"),
             "{value}: {error}"
         );
     }
