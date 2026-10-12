@@ -49,8 +49,8 @@
 #   /bin/cp target/release/mlxcel target/release/mlxcel.before
 #   git stash pop && cargo build --release --features metal,accelerate --bin mlxcel
 #
-# Exit status: 0 all pairs equal, 1 at least one pair differs, 2 at least one
-# pair inconclusive (unstable baseline) and none differ.
+# Exit status: 0 all pairs equal, 1 at least one pair differs, 2 at least one pair
+# inconclusive (unstable baseline) and none differ, or the output directory cannot be created.
 
 set -uo pipefail
 
@@ -126,9 +126,15 @@ if [[ ${#PROMPTS[@]} -eq 0 ]]; then
 fi
 
 if [[ -z "$OUT_DIR" ]]; then
-  OUT_DIR="$(mktemp -d -t ab_output_equality)"
+  OUT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ab_output_equality.XXXXXX")" || {
+    echo "error: could not create output directory" >&2
+    exit 2
+  }
 fi
-mkdir -p "$OUT_DIR"
+if [[ -z "$OUT_DIR" ]] || ! mkdir -p "$OUT_DIR"; then
+  echo "error: could not create output directory" >&2
+  exit 2
+fi
 
 echo "baseline: $BASELINE_BIN"
 echo "arm:      $ARM_BIN"
