@@ -683,7 +683,7 @@ fn submit_then_finish_rows_is_one_pipelined_step() {
     let biases: Vec<&crate::sampling::TokenBiasMap> =
         rows.iter().map(|r| &r.sampling.token_bias).collect();
     let tokens = engine.submit(&batch, &params, &biases).unwrap();
-    let host = tokens_to_host(&tokens);
+    let host = tokens_to_host(&tokens).expect("test token readback must succeed");
     assert_eq!(host, vec![2, 7]);
     // The speculative appends are in place until the caller decides.
     assert_eq!(seq_len(&engine, a), 1);

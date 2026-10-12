@@ -400,18 +400,19 @@ impl BatchScheduler {
 
     /// Rule 3's read: commit the in-flight step n without submitting step
     /// n+1. The tokens are evaluated through the fallible boundary first
-    /// (#822); a throw, or a readback of the wrong length, unwinds the
-    /// in-flight append and decodes the tick synchronously (I7).
+    /// (#822). A throw unwinds the in-flight append and fails only these rows;
+    /// a successful readback of the wrong length unwinds and decodes the tick
+    /// synchronously (I7).
     pub(super) fn commit_lookahead_without_prime(
         &mut self,
         la: DecodeLookahead,
         seq_ids: &[SequenceId],
     ) {
-        let toks = match mlxcel_core::try_eval(&la.tokens) {
-            Ok(()) => mlxcel_core::engine::tokens_to_host(&la.tokens),
-            Err(err) => {
-                let _ = self.record_eval_outcome(Err(err.to_string()));
-                Vec::new()
+        let toks = match super::decode_tick::read_lookahead_tokens(&la.tokens) {
+            Ok(tokens) => tokens,
+            Err(msg) => {
+                self.fail_lookahead_readback(la, None, &msg);
+                return;
             }
         };
         if toks.len() != seq_ids.len() {

@@ -237,7 +237,10 @@ pub fn sample_and_finish<H: StepRowHooks>(
         if let Err(err) = crate::try_eval(&tokens) {
             return fail_batch(rows, &err.to_string());
         }
-        let host = tokens_to_host(&tokens);
+        let host = match tokens_to_host(&tokens) {
+            Ok(host) => host,
+            Err(err) => return fail_batch(rows, &err),
+        };
         if host.len() != rows.len() {
             // A short readback would let `zip` drop rows whose KV was
             // appended but which are never finished or advanced.
@@ -383,11 +386,12 @@ pub fn row_biases<'r, H: StepRowHooks>(rows: &'r [StepRow<'_, H>]) -> Vec<&'r To
 /// next forward is already scheduled on the same stream before this read,
 /// and a fresh `contiguous()` op would queue behind it and collapse the
 /// overlap. This reader waits only on the token array's own completion.
-pub fn tokens_to_host(tokens: &MlxArray) -> Vec<i32> {
-    ffi::array_evaluated_bytes(tokens)
+pub fn tokens_to_host(tokens: &MlxArray) -> Result<Vec<i32>, String> {
+    Ok(ffi::array_evaluated_bytes(tokens)
+        .map_err(|err| err.to_string())?
         .chunks_exact(4)
         .map(|c| i32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
-        .collect()
+        .collect())
 }
 
 /// `logits` sliced to a `[1, 1, vocab]` row, the shape the per-row chain
@@ -399,8 +403,7 @@ pub fn row_logits(logits: &MlxArray, i: usize) -> UniquePtr<MlxArray> {
 /// Wait through the fallible boundary before the overlap-preserving byte read.
 pub fn try_tokens_to_host(tokens: &MlxArray) -> Result<Vec<i32>, String> {
     crate::eval_faults::check(crate::eval_faults::FaultPoint::Readback)?;
-    crate::try_eval(tokens).map_err(|e| e.to_string())?;
-    Ok(tokens_to_host(tokens))
+    tokens_to_host(tokens)
 }
 
 /// Read a per-row token without letting an asynchronous backend error escape.

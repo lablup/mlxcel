@@ -135,7 +135,8 @@ fn the_hybrid_mask_is_bidirectional_inside_the_image_and_causal_outside() {
         vec![1, 1, tokens.len() as i32, tokens.len() as i32]
     );
 
-    let bytes = mlxcel_core::array_evaluated_bytes(&mask);
+    let bytes =
+        mlxcel_core::array_evaluated_bytes(&mask).expect("test tensor readback must succeed");
     let values: Vec<f32> = bytes
         .chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
@@ -165,7 +166,8 @@ fn the_hybrid_mask_is_bidirectional_inside_the_image_and_causal_outside() {
 fn the_hybrid_mask_is_plain_causal_without_images() {
     let tokens = vec![7, 8, 9];
     let mask = build_hybrid_mask(&tokens, &ids());
-    let bytes = mlxcel_core::array_evaluated_bytes(&mask);
+    let bytes =
+        mlxcel_core::array_evaluated_bytes(&mask).expect("test tensor readback must succeed");
     let values: Vec<f32> = bytes
         .chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
@@ -212,7 +214,8 @@ fn the_rotary_rotates_interleaved_pairs() {
     let (cos, sin) = (mlxcel_core::cos(&theta), mlxcel_core::sin(&theta));
 
     let out = rotate_interleaved(&x, &cos, &sin);
-    let bytes = mlxcel_core::array_evaluated_bytes(&out);
+    let bytes =
+        mlxcel_core::array_evaluated_bytes(&out).expect("test tensor readback must succeed");
     let values: Vec<f32> = bytes
         .chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
@@ -254,7 +257,8 @@ fn a_zero_spatial_position_makes_the_golden_rotary_the_identity() {
         Some((cos_2d.as_ref().unwrap(), sin_2d.as_ref().unwrap())),
     );
 
-    let bytes = mlxcel_core::array_evaluated_bytes(&out);
+    let bytes =
+        mlxcel_core::array_evaluated_bytes(&out).expect("test tensor readback must succeed");
     let values: Vec<f32> = bytes
         .chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))

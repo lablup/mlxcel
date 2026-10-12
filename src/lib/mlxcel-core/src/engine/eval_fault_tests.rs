@@ -169,6 +169,17 @@ fn readback_helpers_return_errors() {
 }
 
 #[test]
+fn engine_token_readback_propagates_a_failed_event() {
+    // Use a fresh fixture: Event::check_error consumes its attached error.
+    let tokens = crate::array_with_failed_event_for_test();
+    let err = try_tokens_to_host(&tokens).expect_err("failed event must reach the engine");
+    assert!(
+        err.contains("synthetic array read failure"),
+        "unexpected engine readback error: {err}"
+    );
+}
+
+#[test]
 fn failed_readbacks_unwind_to_the_committed_prefix() {
     for sampling in [
         SamplingConfig::greedy(),

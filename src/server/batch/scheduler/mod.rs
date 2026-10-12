@@ -1034,6 +1034,10 @@ mod scheduler_model_owned_pad_trim_tests;
 mod scheduler_model_owned_lookahead_tests;
 
 #[cfg(test)]
+#[path = "../scheduler_lookahead_read_failure_tests.rs"]
+mod scheduler_lookahead_read_failure_tests;
+
+#[cfg(test)]
 #[path = "../scheduler_real_batch_parity_tests.rs"]
 mod scheduler_real_batch_parity_tests;
 

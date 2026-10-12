@@ -249,6 +249,10 @@ rust::Vec<uint8_t> try_array_to_raw_bytes(const MlxArray& arr);
 // `array_to_raw_bytes` contiguous copy rather than reading past the allocation.
 rust::Vec<uint8_t> array_evaluated_bytes(const MlxArray& arr);
 
+// Test-only. Return an evaluated uint32 array whose signalled event carries a
+// synthetic backend error. The error outlives the returned event.
+std::unique_ptr<MlxArray> array_with_failed_event_for_test();
+
 // Evaluation.
 void eval(const MlxArray& arr);
 // Fallible counterpart of `eval`; declared `-> Result<()>` in the bridge so cxx

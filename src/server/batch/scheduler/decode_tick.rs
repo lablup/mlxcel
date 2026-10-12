@@ -14,6 +14,37 @@
 
 use super::*;
 
+#[cfg(test)]
+thread_local! {
+    static LOOKAHEAD_READ_FAILURE: std::cell::RefCell<Option<String>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+#[cfg(test)]
+pub(super) struct LookaheadReadFailureGuard;
+
+#[cfg(test)]
+impl Drop for LookaheadReadFailureGuard {
+    fn drop(&mut self) {
+        LOOKAHEAD_READ_FAILURE.with(|failure| *failure.borrow_mut() = None);
+    }
+}
+
+#[cfg(test)]
+pub(super) fn inject_lookahead_read_failure(message: &str) -> LookaheadReadFailureGuard {
+    LOOKAHEAD_READ_FAILURE.with(|failure| *failure.borrow_mut() = Some(message.to_string()));
+    LookaheadReadFailureGuard
+}
+
+pub(super) fn read_lookahead_tokens(tokens: &mlxcel_core::MlxArray) -> Result<Vec<i32>, String> {
+    #[cfg(test)]
+    if let Some(message) = LOOKAHEAD_READ_FAILURE.with(|failure| failure.borrow_mut().take()) {
+        return Err(message);
+    }
+    mlxcel_core::engine::try_tokens_to_host(tokens)
+}
+
 impl BatchScheduler {
     /// The scheduler's KV bound and context-shift setting, as the shared
     /// finish step's context-bound stop (#1472) reads them.
@@ -626,11 +657,11 @@ impl BatchScheduler {
         };
 
         // Step 2: read step n's tokens to host (the sync point) and finish-check.
-        let toks = match mlxcel_core::engine::try_tokens_to_host(&la.tokens) {
+        let toks = match read_lookahead_tokens(&la.tokens) {
             Ok(tokens) => tokens,
             Err(msg) => {
-                let _ = self.record_eval_outcome(Err(msg));
-                Vec::new()
+                self.fail_lookahead_readback(la, next, &msg);
+                return;
             }
         };
 
@@ -709,6 +740,53 @@ impl BatchScheduler {
         self.apply_fused_decode_tokens(seq_ids, &toks);
         self.decode_lookahead = next;
         self.batch_observability.record_lookahead_step();
+    }
+
+    /// Fail only the rows whose pending lookahead token could not be read.
+    ///
+    /// A submitted `next` step may still be writing the same rows' caches, so
+    /// first wait for it through the raw fallible boundary. Its outcome is not
+    /// health bookkeeping: a successful drain must not erase the primary read
+    /// failure, and a propagated stream error must not count the same backend
+    /// fault twice. Once both speculative appends are quiescent, rewind them,
+    /// preserve any row the rewind itself already failed, and finish each
+    /// remaining affected row exactly once. Unrelated active rows stay live.
+    pub(super) fn fail_lookahead_readback(
+        &mut self,
+        la: DecodeLookahead,
+        next: Option<DecodeLookahead>,
+        mlx_msg: &str,
+    ) {
+        if let Some(next) = &next
+            && let Err(err) = mlxcel_core::try_eval(&next.tokens)
+        {
+            tracing::debug!(
+                error = %err,
+                "lookahead read failure propagated into the in-flight next step"
+            );
+        }
+
+        let affected = la.ids.clone();
+        let message = self.record_eval_failure(mlx_msg);
+        let failed =
+            self.apply_lookahead_trim(&affected, lookahead_teardown_positions(next.is_some()));
+        drop(next);
+        drop(la);
+
+        for seq_id in affected {
+            let unfinished = self
+                .active_batch
+                .get(seq_id)
+                .is_some_and(|seq| !seq.state.is_finished());
+            if unfinished && !failed.contains(&seq_id) {
+                Self::abort_sequence_with_error(
+                    self.active_batch.get_mut(seq_id),
+                    "inference backend",
+                    &message,
+                );
+            }
+        }
+        self.eval_failures_exhausted();
     }
 
     /// Whether the one pending lookahead token must exhaust a B=1 row's

@@ -218,7 +218,12 @@ mod ffi {
         /// `fused_sample` output); a non-contiguous array falls back to the safe
         /// `array_to_raw_bytes` copy rather than reading past the allocation.
         /// Used by: the #632 lookahead decode pipeline.
-        fn array_evaluated_bytes(arr: &MlxArray) -> Vec<u8>;
+        fn array_evaluated_bytes(arr: &MlxArray) -> Result<Vec<u8>>;
+
+        /// Test-only. Build an evaluated uint32 array whose real, signalled
+        /// event carries a synthetic backend error. Each call owns an
+        /// independent error so tests can exercise consuming read boundaries.
+        fn array_with_failed_event_for_test() -> UniquePtr<MlxArray>;
 
         /// Fallible counterpart of [`array_to_raw_bytes`].
         ///
@@ -4058,6 +4063,10 @@ pub(crate) mod test_support;
 #[cfg(test)]
 #[path = "ffi_tests.rs"]
 mod ffi_tests;
+
+#[cfg(test)]
+#[path = "array_evaluated_bytes_tests.rs"]
+mod array_evaluated_bytes_tests;
 
 // Affine 1-bit quantization (issue #1370): fused Metal qmv / qmm parity against
 // a host f64 oracle, the dequantize reference, load validation and layer

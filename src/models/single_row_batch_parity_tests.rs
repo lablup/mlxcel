@@ -74,7 +74,7 @@ fn evaluated_bytes(logits: &mlxcel_core::MlxArray) -> (Vec<i32>, Vec<u8>) {
     mlxcel_core::eval(logits);
     (
         mlxcel_core::array_shape(logits),
-        mlxcel_core::array_evaluated_bytes(logits),
+        mlxcel_core::array_evaluated_bytes(logits).expect("test tensor readback must succeed"),
     )
 }
 
