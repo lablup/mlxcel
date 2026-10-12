@@ -48,7 +48,7 @@ use anyhow::{Context, Result};
 use crate::server::batch::BatchObservability;
 use crate::server::startup::{
     build_server_config, detect_model_media_support, load_chat_front, resolve_prompt_cache_store,
-    run_startup_warmup,
+    resolve_video_request_inputs, run_startup_warmup,
 };
 use crate::server::{
     ApiKeys, AppState, BatchMetrics, ModelMediaSupport, ModelProvider, ServerConfig,
@@ -107,16 +107,19 @@ impl InProcessServer {
             // warmup is logged, not fatal.
             run_startup_warmup(&model_path, &provider);
         }
-        let state = AppState::with_observability(
-            Arc::new(provider),
-            config,
-            chat_template,
-            tokenizer,
-            model_path.clone(),
-            batch_metrics,
-            observability.clone(),
+        let media_support = detect_model_media_support(&model_path);
+        let state = install_media_startup_inputs(
+            AppState::with_observability(
+                Arc::new(provider),
+                config,
+                chat_template,
+                tokenizer,
+                model_path.clone(),
+                batch_metrics,
+                observability.clone(),
+            ),
+            media_support,
         )
-        .with_media_support(detect_model_media_support(&model_path))
         .with_prompt_cache(store);
         Ok(Self {
             state,
@@ -211,9 +214,25 @@ impl InProcessServer {
     }
 }
 
+/// Install the same immutable media inputs as the HTTP startup paths.
+///
+/// Keeping this in one helper makes it harder for the in-process front end to
+/// install detected video support without also installing the startup-resolved
+/// local-video allowlist used by request preparation.
+fn install_media_startup_inputs(state: AppState, media_support: ModelMediaSupport) -> AppState {
+    let video_dir_allowlist = resolve_video_request_inputs(media_support);
+    state
+        .with_media_support(media_support)
+        .with_video_dir_allowlist(video_dir_allowlist)
+}
+
 impl Drop for InProcessServer {
     fn drop(&mut self) {
         // Idempotent: a worker that `shutdown` already stopped ignores it.
         self.state.model_provider.shutdown_worker();
     }
 }
+
+#[cfg(test)]
+#[path = "startup_state_tests.rs"]
+mod tests;

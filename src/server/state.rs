@@ -508,11 +508,12 @@ pub struct AppState {
     /// `MLXCEL_VIDEO_DIR_ALLOWLIST`, canonicalized once at startup (issue
     /// #1766).
     ///
-    /// The video-frames fallback resolves local clips against this rather than
-    /// re-reading the environment and calling `std::fs::canonicalize` on each
-    /// entry per request, which ran on a Tokio worker. Empty by default, which
-    /// is the same fail-closed answer an unset variable gives: no local path
-    /// resolves until the startup pipeline installs the operator's list.
+    /// Native-video resolution and the video-frames fallback both resolve
+    /// local clips against this rather than re-reading the environment and
+    /// calling `std::fs::canonicalize` on each entry per request. Empty by
+    /// default, which is the same fail-closed answer an unset variable gives:
+    /// no local path resolves until the startup pipeline installs the
+    /// operator's list.
     pub(crate) video_dir_allowlist: Arc<Vec<PathBuf>>,
     /// Batch-level metrics (active sequences, queue depth) for admission
     /// control and status reporting.

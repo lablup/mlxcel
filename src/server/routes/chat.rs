@@ -30,7 +30,9 @@ use axum::{
 use mlxcel_core::sampling::TokenLogprobData;
 
 use crate::server::batch::RequestPriority;
-use crate::server::chat_request::{prepare_chat_request_with_cache, resolve_effective_kwargs};
+use crate::server::chat_request::{
+    prepare_chat_request_with_cache_and_video_allowlist, resolve_effective_kwargs,
+};
 use crate::server::chat_template::ChatTemplateProcessor;
 use crate::server::config::{PromptCacheRequestContext, ReasoningBudgetOverride};
 use crate::server::prompt_cache::key::{
@@ -1092,7 +1094,7 @@ pub(crate) async fn stream_asr_completion(
     }
 
     let prompt_cache_enabled = state.prompt_cache.is_some();
-    let mut prepared = match prepare_chat_request_with_cache(
+    let mut prepared = match prepare_chat_request_with_cache_and_video_allowlist(
         &state.chat_template,
         &request,
         live.chat_template_kwargs.as_ref(),
@@ -1100,6 +1102,7 @@ pub(crate) async fn stream_asr_completion(
         state.should_render_history_boundary_snapshot(),
         state.prefill_assistant(),
         &state.thinking_markers,
+        &state.video_dir_allowlist,
     )
     .await
     {

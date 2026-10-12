@@ -42,7 +42,9 @@ use crate::server::anthropic_translator::{
     AnthropicTranslated, anthropic_request_to_chat, anthropic_stop_reason, apply_stop_sequences,
     build_content_blocks, parsed_call_to_tool_use, short_uuid, thinking_enabled,
 };
-use crate::server::chat_request::{prepare_chat_request_with_cache, request_has_effective_input};
+use crate::server::chat_request::{
+    prepare_chat_request_with_cache_and_video_allowlist, request_has_effective_input,
+};
 use crate::server::config::ReasoningBudgetOverride;
 use crate::server::model_provider::{ChatWorkerGoneError, QueueFullError};
 use crate::server::streaming::sse_response;
@@ -276,7 +278,7 @@ async fn non_stream_messages(
         echo_scope.as_ref(),
         &translated.chat_request,
     );
-    let mut prepared = match prepare_chat_request_with_cache(
+    let mut prepared = match prepare_chat_request_with_cache_and_video_allowlist(
         &state.chat_template,
         &render_request,
         live.chat_template_kwargs.as_ref(),
@@ -284,6 +286,7 @@ async fn non_stream_messages(
         state.should_render_history_boundary_snapshot(),
         state.prefill_assistant(),
         &state.thinking_markers,
+        &state.video_dir_allowlist,
     )
     .await
     {
@@ -480,7 +483,7 @@ async fn stream_messages(
         echo_scope.as_ref(),
         &translated.chat_request,
     );
-    let mut prepared = match prepare_chat_request_with_cache(
+    let mut prepared = match prepare_chat_request_with_cache_and_video_allowlist(
         &state.chat_template,
         &render_request,
         live.chat_template_kwargs.as_ref(),
@@ -488,6 +491,7 @@ async fn stream_messages(
         state.should_render_history_boundary_snapshot(),
         state.prefill_assistant(),
         &state.thinking_markers,
+        &state.video_dir_allowlist,
     )
     .await
     {
@@ -855,7 +859,7 @@ pub async fn anthropic_count_tokens(
     }
 
     let prompt_cache_enabled = state.prompt_cache.is_some();
-    let prepared = match prepare_chat_request_with_cache(
+    let prepared = match prepare_chat_request_with_cache_and_video_allowlist(
         &state.chat_template,
         &translated.chat_request,
         live.chat_template_kwargs.as_ref(),
@@ -863,6 +867,7 @@ pub async fn anthropic_count_tokens(
         state.should_render_history_boundary_snapshot(),
         state.prefill_assistant(),
         &state.thinking_markers,
+        &state.video_dir_allowlist,
     )
     .await
     {

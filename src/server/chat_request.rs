@@ -89,8 +89,8 @@ use super::chat_template_kwargs::{
     strip_think_block,
 };
 use super::media::{
-    MediaRequestMetadata, ResolvedVideo, extract_chat_video_paths, try_extract_chat_audio_data,
-    try_extract_chat_image_data,
+    MediaRequestMetadata, ResolvedVideo, extract_chat_video_paths_with_allowlist,
+    try_extract_chat_audio_data, try_extract_chat_image_data,
 };
 use super::prompt_cache::key::resolve_session_key;
 use super::types::request::{
@@ -768,7 +768,7 @@ pub(crate) async fn prepare_chat_request(
     request: &ChatCompletionRequest,
     server_default_kwargs: Option<&ChatTemplateKwargs>,
 ) -> Result<PreparedChatRequest> {
-    prepare_chat_request_with_cache(
+    prepare_chat_request_with_cache_and_video_allowlist(
         processor,
         request,
         server_default_kwargs,
@@ -776,6 +776,34 @@ pub(crate) async fn prepare_chat_request(
         false,
         false,
         &crate::tokenizer::ThinkingMarkers::default(),
+        &[],
+    )
+    .await
+}
+
+/// Test-only compatibility entry point for focused renderer tests that do not
+/// construct [`super::state::AppState`]. Production routes must call
+/// [`prepare_chat_request_with_cache_and_video_allowlist`] with the immutable
+/// startup snapshot.
+#[cfg(test)]
+pub(crate) async fn prepare_chat_request_with_cache(
+    processor: &ChatTemplateProcessor,
+    request: &ChatCompletionRequest,
+    server_default_kwargs: Option<&ChatTemplateKwargs>,
+    prompt_cache_enabled: bool,
+    snapshot_reuse_capable: bool,
+    prefill_assistant: bool,
+    thinking_markers: &crate::tokenizer::ThinkingMarkers,
+) -> Result<PreparedChatRequest> {
+    prepare_chat_request_with_cache_and_video_allowlist(
+        processor,
+        request,
+        server_default_kwargs,
+        prompt_cache_enabled,
+        snapshot_reuse_capable,
+        prefill_assistant,
+        thinking_markers,
+        &[],
     )
     .await
 }
@@ -792,7 +820,7 @@ pub(crate) async fn prepare_chat_request(
 ///
 /// When `prompt_cache_enabled` is `false` this is identical to the legacy
 /// [`prepare_chat_request`].
-pub(crate) async fn prepare_chat_request_with_cache(
+pub(crate) async fn prepare_chat_request_with_cache_and_video_allowlist(
     processor: &ChatTemplateProcessor,
     request: &ChatCompletionRequest,
     server_default_kwargs: Option<&ChatTemplateKwargs>,
@@ -800,6 +828,7 @@ pub(crate) async fn prepare_chat_request_with_cache(
     snapshot_reuse_capable: bool,
     prefill_assistant: bool,
     thinking_markers: &crate::tokenizer::ThinkingMarkers,
+    video_dir_allowlist: &[PathBuf],
 ) -> Result<PreparedChatRequest> {
     // Refuse rather than fall back to the generic template when the loaded
     // tokenizer's vocabulary family is Kimi K3 but no native renderer could be
@@ -1070,7 +1099,7 @@ pub(crate) async fn prepare_chat_request_with_cache(
     let (image_data, audio_data, videos) = tokio::join!(
         try_extract_chat_image_data(request),
         try_extract_chat_audio_data(request),
-        extract_chat_video_paths(request),
+        extract_chat_video_paths_with_allowlist(request, video_dir_allowlist),
     );
     let image_data = image_data?;
     let audio_data = audio_data?;
@@ -2175,3 +2204,7 @@ mod tests;
 #[cfg(test)]
 #[path = "chat_request_reasoning_content_tests.rs"]
 mod reasoning_content_tests;
+
+#[cfg(test)]
+#[path = "chat_request_video_allowlist_tests.rs"]
+mod video_allowlist_tests;

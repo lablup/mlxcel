@@ -37,7 +37,8 @@ use super::chat::{
 };
 use crate::server::batch::RequestPriority;
 use crate::server::chat_request::{
-    PreparedChatRequest, prepare_chat_request_with_cache, request_has_effective_input,
+    PreparedChatRequest, prepare_chat_request_with_cache_and_video_allowlist,
+    request_has_effective_input,
 };
 use crate::server::config::{PromptCacheRequestContext, ReasoningBudgetOverride};
 use crate::server::reasoning_echo::ReasoningEchoScope;
@@ -190,7 +191,7 @@ pub(crate) async fn prepare_chat_generation<'r>(
     let echo_scope = crate::server::reasoning_echo::chat_scope(state, &live, request);
     let render_request =
         crate::server::reasoning_echo::render_request(state, echo_scope.as_ref(), request);
-    let mut prepared = prepare_chat_request_with_cache(
+    let mut prepared = prepare_chat_request_with_cache_and_video_allowlist(
         &state.chat_template,
         &render_request,
         live.chat_template_kwargs.as_ref(),
@@ -198,6 +199,7 @@ pub(crate) async fn prepare_chat_generation<'r>(
         state.should_render_history_boundary_snapshot(),
         state.prefill_assistant(),
         &state.thinking_markers,
+        &state.video_dir_allowlist,
     )
     .await
     .map_err(|err| ErrorResponse::new(err.to_string(), "invalid_request_error"))?;

@@ -35,7 +35,9 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use crate::server::chat_request::{prepare_chat_request_with_cache, request_has_effective_input};
+use crate::server::chat_request::{
+    prepare_chat_request_with_cache_and_video_allowlist, request_has_effective_input,
+};
 use crate::server::config::ReasoningBudgetOverride;
 use crate::server::conversation_store::ConversationItem;
 use crate::server::model_provider::QueueFullError;
@@ -255,7 +257,7 @@ async fn non_stream_create_response(
         echo_scope.as_ref(),
         &translated.chat_request,
     );
-    let prepared = prepare_chat_request_with_cache(
+    let prepared = prepare_chat_request_with_cache_and_video_allowlist(
         &state.chat_template,
         &render_request,
         live.chat_template_kwargs.as_ref(),
@@ -263,6 +265,7 @@ async fn non_stream_create_response(
         state.should_render_history_boundary_snapshot(),
         state.prefill_assistant(),
         &state.thinking_markers,
+        &state.video_dir_allowlist,
     )
     .await;
     let mut prepared = match prepared {
@@ -436,7 +439,7 @@ async fn stream_create_response(
         echo_scope.as_ref(),
         &translated.chat_request,
     );
-    let prepared = prepare_chat_request_with_cache(
+    let prepared = prepare_chat_request_with_cache_and_video_allowlist(
         &state.chat_template,
         &render_request,
         live.chat_template_kwargs.as_ref(),
@@ -444,6 +447,7 @@ async fn stream_create_response(
         state.should_render_history_boundary_snapshot(),
         state.prefill_assistant(),
         &state.thinking_markers,
+        &state.video_dir_allowlist,
     )
     .await;
     let mut prepared = match prepared {

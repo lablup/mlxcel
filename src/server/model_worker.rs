@@ -3071,7 +3071,8 @@ fn prepare_nemotron_h_nano_omni_audio_embeddings(
 /// whose startup media support advertises video):
 /// * The model is one of the video-capable VLM families below.
 /// * The video paths have already been canonicalised and validated against
-///   `MLXCEL_VIDEO_DIR_ALLOWLIST` by [`crate::server::media::extract_chat_video_paths`].
+///   `MLXCEL_VIDEO_DIR_ALLOWLIST` by
+///   [`crate::server::media::extract_chat_video_paths_with_allowlist`].
 ///
 /// Defence-in-depth: this function still rejects non-video models with a clean
 /// error so a future caller that bypasses the route guard cannot silently

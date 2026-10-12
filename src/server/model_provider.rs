@@ -1610,9 +1610,10 @@ impl ModelProvider {
     /// full result.
     ///
     /// Server video routes pass `videos` through here once the path-traversal
-    /// guard in [`crate::server::media::extract_chat_video_paths`] has cleared
-    /// each entry against `MLXCEL_VIDEO_DIR_ALLOWLIST`. Empty `videos` matches
-    /// earlier behavior bit-for-bit.
+    /// guard in
+    /// [`crate::server::media::extract_chat_video_paths_with_allowlist`] has
+    /// cleared each entry against `MLXCEL_VIDEO_DIR_ALLOWLIST`. Empty `videos`
+    /// matches earlier behavior bit-for-bit.
     ///
     /// Restricted to `pub(crate)` because the input type [`ResolvedVideo`] is
     /// crate-internal — it carries an [`crate::multimodal::video::VideoSource`]

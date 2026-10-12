@@ -532,7 +532,8 @@ impl Drop for TempFile {
 /// Built on `std` rather than the `tempfile` crate, which is a dev-dependency
 /// only.
 ///
-/// Used by: `commands::generate::CliVideoFrames` (CLI video-frames fallback).
+/// Used by: `commands::generate::CliVideoFrames` (CLI video-frames fallback)
+/// and `server::media` (native-video data URI and HTTP materialization).
 #[derive(Debug)]
 pub struct PrivateTempDir {
     path: PathBuf,
