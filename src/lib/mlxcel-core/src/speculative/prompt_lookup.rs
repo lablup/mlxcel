@@ -128,10 +128,12 @@ pub struct PromptLookupConfig {
     pub policy: DraftPolicy,
     /// Optional minimum EMA of emitted tokens (accepted proposals plus the
     /// bonus) per drafted round. Gated adaptation pauses when the EMA is below
-    /// this floor and two consecutive rounds also fall below it with at least
-    /// one proposed token left unaccepted. The floor is capped at
-    /// `max_draft + 1`; a fully accepted short block keeps drafting because it
-    /// is evidence that the available copy was exhausted, not rejected.
+    /// this floor and the current round also falls below it with at least one
+    /// proposed token left unaccepted. One complete miss is tolerated when the
+    /// accepted-token EMA was at least the floor before that miss. The floor
+    /// is capped at `max_draft + 1`; a fully accepted short block keeps
+    /// drafting because it is evidence that the available copy was exhausted,
+    /// not rejected.
     /// `None` preserves the CLI policy.
     pub min_tokens_per_round: Option<usize>,
     /// Consecutive shadow tokens required to resume a paused gated row.
@@ -313,10 +315,10 @@ const GATED_FULL_AT: f64 = 1.5;
 /// Accepted-proposal average a [`DraftPolicy::Gated`] governor starts from and
 /// resumes with: below [`GATED_FULL_AT`], so the first block is narrow.
 const GATED_START_EMA: f64 = 1.0;
-/// Consecutive incomplete rounds below the server emission floor required to
-/// pause. One miss is tolerated because copy workloads cross field boundaries
-/// before finding the next long repeated span.
-const BREAK_EVEN_LOW_ROUNDS: usize = 2;
+/// Low-yield rounds required to pause after an abrupt miss following profitable
+/// accepted-token history. The grace is limited to the first low-yield round;
+/// sustained partial yield and consecutive misses pause without another probe.
+const BREAK_EVEN_BOUNDARY_MISS_ROUNDS: usize = 2;
 /// Proposed tokens in a row a paused [`DraftPolicy::Gated`] governor must see
 /// come true before it proposes again. One is not enough on prose: the token
 /// after a two-token match is often a common one that happens to recur.
@@ -424,6 +426,7 @@ impl DraftGovernor {
         if !self.adaptive {
             return;
         }
+        let accepted_ema_before = self.accepted_ema;
         self.accepted_ema = 0.5 * self.accepted_ema + 0.5 * accepted as f64;
         match self.policy {
             DraftPolicy::Graded => {
@@ -450,14 +453,31 @@ impl DraftGovernor {
                         0.5 * self.emitted_ema + 0.5 * emitted
                     };
                     self.drafted_samples = self.drafted_samples.saturating_add(1);
-                    if emitted < floor as f64 && accepted < proposed {
+                    let low_yield_rounds_before = self.low_yield_rounds;
+                    let incomplete_low = emitted < floor as f64 && accepted < proposed;
+                    if incomplete_low {
                         self.low_yield_rounds = self.low_yield_rounds.saturating_add(1);
                     } else {
                         self.low_yield_rounds = 0;
                     }
+                    // A zero-acceptance round after accepted drafts alone were
+                    // paying for the verify width is an abrupt copy-boundary
+                    // miss. Probe once more for the next repeated span. A
+                    // partial low-yield round is evidence of sustained weak
+                    // matches, and a second complete miss must not earn another
+                    // grace even when a large max_draft keeps the EMA high.
+                    let profitable_boundary_miss = incomplete_low
+                        && low_yield_rounds_before == 0
+                        && accepted == 0
+                        && accepted_ema_before >= floor as f64;
+                    let low_rounds_to_pause = if profitable_boundary_miss {
+                        BREAK_EVEN_BOUNDARY_MISS_ROUNDS
+                    } else {
+                        1
+                    };
                     if self.drafted_samples >= 2
                         && self.emitted_ema < floor as f64
-                        && self.low_yield_rounds >= BREAK_EVEN_LOW_ROUNDS
+                        && self.low_yield_rounds >= low_rounds_to_pause
                     {
                         self.drafting = false;
                         self.misses = 0;

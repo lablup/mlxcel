@@ -1,0 +1,299 @@
+diff --git a/src/lib/mlxcel-core/src/speculative/prompt_lookup.rs b/src/lib/mlxcel-core/src/speculative/prompt_lookup.rs
+index c2ff0fd2..fce38dc1 100644
+--- a/src/lib/mlxcel-core/src/speculative/prompt_lookup.rs
++++ b/src/lib/mlxcel-core/src/speculative/prompt_lookup.rs
+@@ -128,10 +128,12 @@ pub struct PromptLookupConfig {
+     pub policy: DraftPolicy,
+     /// Optional minimum EMA of emitted tokens (accepted proposals plus the
+     /// bonus) per drafted round. Gated adaptation pauses when the EMA is below
+-    /// this floor and two consecutive rounds also fall below it with at least
+-    /// one proposed token left unaccepted. The floor is capped at
+-    /// `max_draft + 1`; a fully accepted short block keeps drafting because it
+-    /// is evidence that the available copy was exhausted, not rejected.
++    /// this floor and the current round also falls below it with at least one
++    /// proposed token left unaccepted. One complete miss is tolerated when the
++    /// accepted-token EMA was at least the floor before that miss. The floor
++    /// is capped at `max_draft + 1`; a fully accepted short block keeps
++    /// drafting because it is evidence that the available copy was exhausted,
++    /// not rejected.
+     /// `None` preserves the CLI policy.
+     pub min_tokens_per_round: Option<usize>,
+     /// Consecutive shadow tokens required to resume a paused gated row.
+@@ -313,10 +315,10 @@ const GATED_FULL_AT: f64 = 1.5;
+ /// Accepted-proposal average a [`DraftPolicy::Gated`] governor starts from and
+ /// resumes with: below [`GATED_FULL_AT`], so the first block is narrow.
+ const GATED_START_EMA: f64 = 1.0;
+-/// Consecutive incomplete rounds below the server emission floor required to
+-/// pause. One miss is tolerated because copy workloads cross field boundaries
+-/// before finding the next long repeated span.
+-const BREAK_EVEN_LOW_ROUNDS: usize = 2;
++/// Low-yield rounds required to pause after an abrupt miss following profitable
++/// accepted-token history. The grace is limited to the first low-yield round;
++/// sustained partial yield and consecutive misses pause without another probe.
++const BREAK_EVEN_BOUNDARY_MISS_ROUNDS: usize = 2;
+ /// Proposed tokens in a row a paused [`DraftPolicy::Gated`] governor must see
+ /// come true before it proposes again. One is not enough on prose: the token
+ /// after a two-token match is often a common one that happens to recur.
+@@ -424,6 +426,7 @@ impl DraftGovernor {
+         if !self.adaptive {
+             return;
+         }
++        let accepted_ema_before = self.accepted_ema;
+         self.accepted_ema = 0.5 * self.accepted_ema + 0.5 * accepted as f64;
+         match self.policy {
+             DraftPolicy::Graded => {
+@@ -450,14 +453,31 @@ impl DraftGovernor {
+                         0.5 * self.emitted_ema + 0.5 * emitted
+                     };
+                     self.drafted_samples = self.drafted_samples.saturating_add(1);
+-                    if emitted < floor as f64 && accepted < proposed {
++                    let low_yield_rounds_before = self.low_yield_rounds;
++                    let incomplete_low = emitted < floor as f64 && accepted < proposed;
++                    if incomplete_low {
+                         self.low_yield_rounds = self.low_yield_rounds.saturating_add(1);
+                     } else {
+                         self.low_yield_rounds = 0;
+                     }
++                    // A zero-acceptance round after accepted drafts alone were
++                    // paying for the verify width is an abrupt copy-boundary
++                    // miss. Probe once more for the next repeated span. A
++                    // partial low-yield round is evidence of sustained weak
++                    // matches, and a second complete miss must not earn another
++                    // grace even when a large max_draft keeps the EMA high.
++                    let profitable_boundary_miss = incomplete_low
++                        && low_yield_rounds_before == 0
++                        && accepted == 0
++                        && accepted_ema_before >= floor as f64;
++                    let low_rounds_to_pause = if profitable_boundary_miss {
++                        BREAK_EVEN_BOUNDARY_MISS_ROUNDS
++                    } else {
++                        1
++                    };
+                     if self.drafted_samples >= 2
+                         && self.emitted_ema < floor as f64
+-                        && self.low_yield_rounds >= BREAK_EVEN_LOW_ROUNDS
++                        && self.low_yield_rounds >= low_rounds_to_pause
+                     {
+                         self.drafting = false;
+                         self.misses = 0;
+diff --git a/src/lib/mlxcel-core/src/speculative/prompt_lookup_tests.rs b/src/lib/mlxcel-core/src/speculative/prompt_lookup_tests.rs
+index 3f43066c..5ba1a100 100644
+--- a/src/lib/mlxcel-core/src/speculative/prompt_lookup_tests.rs
++++ b/src/lib/mlxcel-core/src/speculative/prompt_lookup_tests.rs
+@@ -982,45 +982,103 @@ fn server_break_even_keeps_a_fully_accepted_short_ramp() {
+         "a fully accepted narrow proposal widens instead of pausing"
+     );
+     governor.record_round(2, 7);
+-    assert!(
+-        governor.budget() > 0,
+-        "one incomplete round does not erase the fully accepted ramp"
+-    );
+-    governor.record_round(2, 7);
+     assert_eq!(
+         governor.budget(),
+         0,
+-        "two incomplete wide proposals still pause"
++        "partial low yield after the short ramp pauses immediately"
+     );
+ }
+ 
+ #[test]
+-fn server_break_even_allows_a_recovering_round_and_pauses_two_low_rounds() {
++fn server_break_even_floor_meeting_round_repays_ema_debt() {
+     let mut governor = DraftGovernor::new(&PromptLookupConfig {
+         min_tokens_per_round: Some(4),
+         ..gated(7)
+     });
+     governor.record(2); // Three emissions: optimistic narrow startup.
+-    governor.record(3); // Four emissions: current round repays EMA debt.
+-    assert!(governor.budget() > 0);
+-    governor.record(2); // Three emissions, EMA still below four.
+-    assert!(governor.budget() > 0, "one low round is tolerated");
+-    governor.record(2); // A consecutive low round confirms the regression.
+-    assert_eq!(governor.budget(), 0);
+-    assert!(governor.probes_while_paused());
++    governor.record(3); // Four emissions: the current round meets the floor.
++    assert!(
++        governor.emitted_ema < 4.0,
++        "the current floor-meeting round need not erase all earlier EMA debt"
++    );
++    assert!(
++        governor.budget() > 0,
++        "meeting the floor keeps drafting active"
++    );
++    governor.record(2); // Three emissions while the EMA remains below four.
++    assert_eq!(governor.budget(), 0, "a later partial low round pauses");
+ 
+     governor.shadow_confirmed();
+     governor.record(2); // Three emissions from a full narrow block.
+-    governor.record(4); // Five emissions: EMA exactly four, not below.
+-    assert!(governor.budget() > 0, "the threshold is strictly below");
+-    governor.record(2); // Three emissions: EMA is now below four.
+-    assert!(governor.budget() > 0, "one low round is tolerated");
+-    governor.record(2); // A consecutive low round confirms the regression.
+-    assert_eq!(governor.budget(), 0);
++    governor.record(4); // Five emissions lift the EMA to exactly four.
++    assert_eq!(governor.emitted_ema, 4.0);
++    assert!(
++        governor.budget() > 0,
++        "the break-even threshold is strictly below the floor"
++    );
++    governor.record(2);
++    assert_eq!(governor.budget(), 0, "falling below the floor pauses again");
++}
++
++#[test]
++fn server_break_even_graces_only_a_complete_miss_after_profitable_history() {
++    fn established_governor() -> DraftGovernor {
++        let mut governor = DraftGovernor::new(&PromptLookupConfig {
++            min_tokens_per_round: Some(4),
++            ..gated(7)
++        });
++        governor.accepted_ema = 4.0;
++        governor.emitted_ema = 4.5;
++        governor.drafted_samples = 2;
++        governor.probation = false;
++        governor
++    }
++
++    let mut boundary_miss = established_governor();
++    boundary_miss.record_round(0, 7);
++    assert_eq!(boundary_miss.budget(), 7, "an abrupt miss gets one probe");
++    assert_eq!(boundary_miss.low_yield_rounds, 1);
++    assert_eq!(
++        boundary_miss.misses, 1,
++        "legacy miss accounting is retained"
++    );
++    boundary_miss.record_round(0, 7);
++    assert_eq!(boundary_miss.budget(), 0, "a consecutive miss pauses");
++    assert_eq!(boundary_miss.misses, 0);
++
++    for accepted in [1, 2] {
++        let mut partial = established_governor();
++        partial.record_round(accepted, 7);
++        assert_eq!(
++            partial.budget(),
++            0,
++            "partial low yield ({accepted}/7) is sustained weak-match evidence"
++        );
++    }
++}
++
++#[test]
++fn server_break_even_boundary_grace_starts_at_the_accepted_floor() {
++    for (accepted_ema, expected_budget) in [(3.999, 0), (4.0, 7)] {
++        let mut governor = DraftGovernor::new(&PromptLookupConfig {
++            min_tokens_per_round: Some(4),
++            ..gated(7)
++        });
++        governor.accepted_ema = accepted_ema;
++        governor.emitted_ema = 5.0;
++        governor.drafted_samples = 2;
++        governor.probation = false;
++        governor.record_round(0, 7);
++        assert_eq!(
++            governor.budget(),
++            expected_budget,
++            "accepted EMA {accepted_ema}"
++        );
++    }
+ }
+ 
+ #[test]
+-fn server_break_even_does_not_pause_on_one_miss_after_profitable_copy() {
++fn server_break_even_preserves_traced_copy_boundary_grace() {
+     let mut governor = DraftGovernor::new(&PromptLookupConfig {
+         min_tokens_per_round: Some(4),
+         ..gated(7)
+@@ -1043,6 +1101,63 @@ fn server_break_even_does_not_pause_on_one_miss_after_profitable_copy() {
+     assert_eq!(governor.budget(), 0, "two consecutive misses still pause");
+ }
+ 
++#[test]
++fn server_break_even_does_not_extend_boundary_grace_at_large_width() {
++    let mut governor = DraftGovernor::new(&PromptLookupConfig {
++        max_draft: 16,
++        min_tokens_per_round: Some(4),
++        ..gated(16)
++    });
++    governor.record_round(2, 2);
++    governor.record_round(16, 16);
++    governor.record_round(0, 16);
++    assert!(governor.accepted_ema >= 4.0);
++    assert!(
++        governor.budget() > 0,
++        "the first abrupt miss gets one probe"
++    );
++    governor.record_round(0, 16);
++    assert_eq!(governor.budget(), 0, "the streak bounds grace to one probe");
++}
++
++#[test]
++fn server_break_even_shadow_resume_clears_boundary_history() {
++    let mut governor = DraftGovernor::new(&PromptLookupConfig {
++        min_tokens_per_round: Some(4),
++        ..gated(7)
++    });
++    governor.record_round(2, 2);
++    governor.record_round(7, 7);
++    governor.record_round(1, 7);
++    assert!(governor.probes_while_paused());
++
++    governor.shadow_confirmed();
++    assert_eq!(governor.accepted_ema, GATED_START_EMA);
++    assert_eq!(governor.emitted_ema, 0.0);
++    assert_eq!(governor.drafted_samples, 0);
++    assert_eq!(governor.low_yield_rounds, 0);
++    governor.record_round(2, 2);
++    governor.record_round(0, 7);
++    assert_eq!(governor.budget(), 0, "pre-resume profit cannot grant grace");
++}
++
++#[test]
++fn server_break_even_caps_floor_for_small_max_draft() {
++    let mut governor = DraftGovernor::new(&PromptLookupConfig {
++        min_tokens_per_round: Some(4),
++        ..gated(1)
++    });
++    assert_eq!(governor.min_tokens_per_round, Some(2));
++    governor.record_round(1, 1);
++    assert_eq!(
++        governor.budget(),
++        1,
++        "a fully accepted short block stays active"
++    );
++    governor.record_round(0, 1);
++    assert_eq!(governor.budget(), 0, "a weak short-width miss still pauses");
++}
++
+ #[test]
+ fn cli_defaults_keep_original_resume_and_pipeline_policy() {
+     let config = PromptLookupConfig::default();
+diff --git a/src/server/speculative_dispatch.rs b/src/server/speculative_dispatch.rs
+index ac1f62cb..27227c98 100644
+--- a/src/server/speculative_dispatch.rs
++++ b/src/server/speculative_dispatch.rs
+@@ -210,9 +210,11 @@ pub const DEFAULT_PROMPT_LOOKUP_MAX_BATCH: usize = 2;
+ /// steady wide forward; narrow rounds emitting only two or three cannot
+ /// amortize the switch tick and synchronous re-prime gap. Full copy blocks
+ /// emit eight and amortize those transition costs across consecutive rounds.
+-/// Two consecutive incomplete low-emission rounds are required, so an
+-/// isolated field-boundary miss does not discard a profitable copy run. A
+-/// round meeting the floor repays startup EMA debt.
++/// Once the emitted-token EMA is below the floor, a partial low-emission round
++/// pauses immediately. A complete miss gets one more probe only when the
++/// accepted-token EMA was already at least four, so an abrupt field boundary
++/// does not discard an established profitable copy run. Consecutive misses
++/// still pause. A round meeting the floor repays startup EMA debt.
+ /// See `docs/benchmark_results/server-prompt-lookup-break-even-gb10-2026-10-11.md`.
+ pub(crate) const PROMPT_LOOKUP_MIN_TOKENS_PER_ROUND: usize = 4;
+ /// Require a whole default proposal's worth of shadow evidence to avoid
+@@ -456,7 +458,7 @@ impl SpeculativeDispatch {
+                 block_size_source.reason()
+             ),
+             Self::PromptLookup { config, max_batch } => format!(
+-                "speculative=prompt-lookup (max_draft={}, policy={}, max_batch={max_batch}, min_tokens_per_round={:?} (ema_and_two_consecutive_low_rounds), shadow_confirm_tokens={}, plain_rounds_before_pipeline={})",
++                "speculative=prompt-lookup (max_draft={}, policy={}, max_batch={max_batch}, min_tokens_per_round={:?} (ema_with_profitable_boundary_miss_grace), shadow_confirm_tokens={}, plain_rounds_before_pipeline={})",
+                 config.max_draft,
+                 draft_policy_name(config.policy),
+                 config.min_tokens_per_round,

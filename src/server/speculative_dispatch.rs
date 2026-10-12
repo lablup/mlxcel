@@ -210,9 +210,11 @@ pub const DEFAULT_PROMPT_LOOKUP_MAX_BATCH: usize = 2;
 /// steady wide forward; narrow rounds emitting only two or three cannot
 /// amortize the switch tick and synchronous re-prime gap. Full copy blocks
 /// emit eight and amortize those transition costs across consecutive rounds.
-/// Two consecutive incomplete low-emission rounds are required, so an
-/// isolated field-boundary miss does not discard a profitable copy run. A
-/// round meeting the floor repays startup EMA debt.
+/// Once the emitted-token EMA is below the floor, a partial low-emission round
+/// pauses immediately. A complete miss gets one more probe only when the
+/// accepted-token EMA was already at least four, so an abrupt field boundary
+/// does not discard an established profitable copy run. Consecutive misses
+/// still pause. A round meeting the floor repays startup EMA debt.
 /// See `docs/benchmark_results/server-prompt-lookup-break-even-gb10-2026-10-11.md`.
 pub(crate) const PROMPT_LOOKUP_MIN_TOKENS_PER_ROUND: usize = 4;
 /// Require a whole default proposal's worth of shadow evidence to avoid
@@ -456,7 +458,7 @@ impl SpeculativeDispatch {
                 block_size_source.reason()
             ),
             Self::PromptLookup { config, max_batch } => format!(
-                "speculative=prompt-lookup (max_draft={}, policy={}, max_batch={max_batch}, min_tokens_per_round={:?} (ema_and_two_consecutive_low_rounds), shadow_confirm_tokens={}, plain_rounds_before_pipeline={})",
+                "speculative=prompt-lookup (max_draft={}, policy={}, max_batch={max_batch}, min_tokens_per_round={:?} (ema_with_profitable_boundary_miss_grace), shadow_confirm_tokens={}, plain_rounds_before_pipeline={})",
                 config.max_draft,
                 draft_policy_name(config.policy),
                 config.min_tokens_per_round,

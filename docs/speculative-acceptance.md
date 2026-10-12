@@ -138,6 +138,10 @@ The CUDA server's prompt-lookup governor additionally pauses low-yield rows
 when the EMA of accepted proposals plus one falls below four tokens after at
 least two drafted rounds and the latest round is also below the floor. A
 latest round meeting the floor can repay startup EMA debt without pausing.
+An isolated zero-accept round after an accepted-token EMA at least equal to
+the floor receives one round of grace; partial low-yield acceptance does not.
+Two consecutive incomplete low-yield rounds still pause. This measured
+field-boundary heuristic leaves the acceptance rule itself unchanged.
 This is a proposal-cost decision, not a change to
 the sampler-match acceptance rule. Paused rows still observe emitted tokens
 and run shadow lookups; seven matching shadow tokens restore verification.

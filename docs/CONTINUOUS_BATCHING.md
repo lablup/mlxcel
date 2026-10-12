@@ -672,7 +672,12 @@ startup summary includes `max_draft`, `policy`, `max_batch`,
 The CUDA server opts into a break-even governor (#2264): after two drafted
 rounds, an EMA (weight 0.5) below four emitted tokens per verify round
 (accepted proposals plus the bonus), with the latest round also below that
-floor, pauses the row. A round that already meets the floor can repay startup
+floor, pauses the row. One zero-accept round is exempt if its preceding
+accepted-token EMA meets the floor; two consecutive incomplete low-yield rounds
+still pause. This preserves isolated misses after strong copy evidence while
+partially accepted, unprofitable rounds pause without that grace. It is a
+heuristic measured on the workloads in the benchmark report, not a guarantee
+for arbitrary prose. A round that already meets the floor can repay startup
 EMA debt without pausing. The floor is capped at
 `max_draft + 1` for explicitly narrower blocks, so full acceptance keeps
 drafting. Paused rows immediately
