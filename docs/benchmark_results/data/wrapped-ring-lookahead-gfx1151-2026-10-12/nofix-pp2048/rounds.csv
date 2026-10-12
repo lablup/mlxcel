@@ -1,0 +1,7 @@
+round,arm,prefill_tok_s,decode_tok_s,status
+1,nofix,2909.09,62.79,ok
+1,nofix-sync,2878.72,59.23,ok
+2,nofix-sync,2933.27,62.52,ok
+2,nofix,2944.68,62.58,ok
+3,nofix,2908.11,62.83,ok
+3,nofix-sync,2905.02,62.08,ok

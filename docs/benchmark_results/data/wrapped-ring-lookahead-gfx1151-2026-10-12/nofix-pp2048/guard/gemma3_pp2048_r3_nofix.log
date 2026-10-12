@@ -1,0 +1,11 @@
+2026-10-12T10:41:08+0900 lock held by outer guard 138159: not taking /tmp/mlxcel-rocm-gpu-guard.lock
+2026-10-12T10:41:08+0900 waiting for 10s of idle GPU and no compiler
+2026-10-12T10:41:22+0900 idle for 10s: kfd proc empty and no compiler in every 1 Hz sample
+2026-10-12T10:41:22+0900 attempt 1/10: start: env /home/devops/Development/pre-fix-e24fb7b2/target/release/mlxcel-bench-decode -m /home/devops/Development/wt-20261006T1212-issue-2239/models/mlx/gemma-3-4b-it-4bit -p x -n 128 --warmup-tokens 20 --ignore-eos --prompt-tokens 2048
+2026-10-12T10:41:23+0900 sample 1: clean gpu=[]
+2026-10-12T10:41:24+0900 sample 2: clean gpu=[198087:mlxcel-bench-de]
+2026-10-12T10:41:26+0900 sample 3: clean gpu=[198087:mlxcel-bench-de]
+2026-10-12T10:41:27+0900 sample 4: clean gpu=[198087:mlxcel-bench-de]
+2026-10-12T10:41:29+0900 sample 5: clean gpu=[198087:mlxcel-bench-de]
+2026-10-12T10:41:30+0900 monitor: 5 samples
+2026-10-12T10:41:30+0900 attempt 1: CLEAN, exit 0
