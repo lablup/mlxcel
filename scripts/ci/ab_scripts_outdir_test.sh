@@ -4,7 +4,7 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="${MLXCEL_AB_SCRIPTS_TEST_ROOT:-$(cd "$script_dir/../.." && pwd)}"
+repo_root="$(cd "$script_dir/../.." && pwd)"
 output_equality="$repo_root/scripts/ab_output_equality.sh"
 paged_counter="$repo_root/scripts/paged_decode_counter_ab.sh"
 
@@ -48,11 +48,13 @@ write_fake_curl() {
     '#!/usr/bin/env bash' \
     'set -euo pipefail' \
     'output=""' \
+    'read_stdin=0' \
     'url=""' \
     'while [[ $# -gt 0 ]]; do' \
     '  case "$1" in' \
     '    -o) output="$2"; shift 2 ;;' \
-    '    -H|--data-binary) shift 2 ;;' \
+    '    -H) shift 2 ;;' \
+    '    --data-binary) [[ "$2" == "@-" ]] && read_stdin=1; shift 2 ;;' \
     '    -*) shift ;;' \
     '    *) url="$1"; shift ;;' \
     '  esac' \
@@ -61,8 +63,9 @@ write_fake_curl() {
     '  */health) body="{}" ;;' \
     '  */metrics) body=$(printf "mlxcel_paged_decode_launches_total{path=\\\"fused_v2\\\"} 1\\nmlxcel_paged_decode_launches_total{path=\\\"gather\\\"} 0\\nmlxcel_paged_decode_launches_total{path=\\\"cascade\\\"} 0") ;;' \
     '  */v1/completions) body="{\\\"choices\\\":[{\\\"text\\\":\\\"same\\\"}]}" ;;' \
-    '  *) exit 1 ;;' \
+    '  *) printf "unexpected curl URL: %s\\n" "$url" >&2; exit 1 ;;' \
     'esac' \
+    'if [[ "$read_stdin" -eq 1 ]]; then cat >/dev/null; fi' \
     'if [[ -n "$output" ]]; then' \
     '  printf "%s\\n" "$body" > "$output"' \
     'else' \
@@ -145,6 +148,7 @@ if [[ "$status" -eq 0 ]]; then
   assert_default_dir "output equality default" ab_output_equality "$output"
 else
   fail "output equality default" "expected exit 0, got $status"
+  sed 's/^/    /' <<< "$output" >&2
 fi
 assert_create_failure "output equality" "$output_equality" --baseline "$work/baseline" --arm "$work/arm" --model models/fake --prompt test -n 1
 assert_mktemp_failure "output equality" "$output_equality" --baseline "$work/baseline" --arm "$work/arm" --model models/fake --prompt test -n 1
@@ -157,6 +161,7 @@ if [[ "$status" -eq 0 ]]; then
   assert_default_dir "paged counter default" paged_decode_counter_ab "$output"
 else
   fail "paged counter default" "expected exit 0, got $status"
+  sed 's/^/    /' <<< "$output" >&2
 fi
 assert_create_failure "paged counter" "$paged_counter" --baseline "$work/baseline" --arm "$work/arm" --model models/fake --requests 1 -n 1
 assert_mktemp_failure "paged counter" "$paged_counter" --baseline "$work/baseline" --arm "$work/arm" --model models/fake --requests 1 -n 1
