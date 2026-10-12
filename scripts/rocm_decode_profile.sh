@@ -27,6 +27,8 @@
 #   --no-plain         skip the unprofiled run (no overhead figure)
 #   --idle-secs N      guard idle window (default 90)
 #   --bench PATH       bench binary (default target/release/mlxcel-bench-decode)
+#   --prompt-tokens N  prompt length (default 512)
+#   --max-tokens N     measured decode tokens (default 128)
 #
 # Build first: cargo build --release --features rocm --bin mlxcel-bench-decode
 # Render the tables: python3 scripts/rocm_decode_profile.py report <out dir>
@@ -47,7 +49,7 @@ PROMPT_TOKENS=512
 MAX_TOKENS=128
 WARMUP_TOKENS=20
 
-usage() { sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//'; }
 
 MODELS=()
 while [[ $# -gt 0 ]]; do
@@ -60,6 +62,8 @@ while [[ $# -gt 0 ]]; do
     --no-plain)    PLAIN=0; shift ;;
     --idle-secs)   IDLE_SECS="$2"; shift 2 ;;
     --bench)       BENCH="$2"; shift 2 ;;
+    --prompt-tokens) PROMPT_TOKENS="$2"; shift 2 ;;
+    --max-tokens)  MAX_TOKENS="$2"; shift 2 ;;
     -h|--help)     usage; exit 0 ;;
     -*)            echo "unknown option $1" >&2; usage >&2; exit 2 ;;
     *)             MODELS+=("$1"); shift ;;
