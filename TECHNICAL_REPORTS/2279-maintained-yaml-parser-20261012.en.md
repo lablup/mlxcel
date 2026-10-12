@@ -1,7 +1,7 @@
 # Technical report: PR #2279 — maintained YAML parser
 
 **Date**: 2026-10-12
-**Status**: Pending final verification
+**Status**: Verified
 **Risk level**: Medium
 
 ## Executive summary
@@ -24,7 +24,7 @@ The lockfile removes both unsupported packages and adds only the replacement par
 
 ## Validation
 
-All 34 focused language-bias tests and 26 surgery configuration tests pass. cargo deny check passes advisories, bans, licenses, and sources. Formatting and diff checks pass. Repository contract checks pass, including 123 Python tooling tests and 49 WebUI fixtures. The validated source commit is 2fd0ac73b13af0b8e638f2ac401eed505bf7c4cd. Review added explicit alpha/ratio non-finite regressions and quoted canonical special cases after this test run. Execution of those added cases and Clippy verification were pending when this report was prepared; the final PR body records their outcomes.
+All 34 focused language-bias tests and 28 surgery configuration tests pass, including the added factor/alpha/ratio non-finite and quoted canonical regressions. cargo deny check passes advisories, bans, licenses, and sources. Formatting and diff checks pass. Repository contract checks pass, including 123 Python tooling tests and 49 WebUI fixtures. Final tests and CI Clippy, CPU-only link, and cargo-deny were verified on dd36abb9b321fa6eb6c9abaca07f5690ead72a17. The duplicate local CUDA Clippy rebuild was stopped after CI Clippy succeeded.
 
 ## References
 

@@ -1,7 +1,7 @@
 # 기술 보고서: PR #2279 — 유지보수되는 YAML 파서
 
 **작성일**: 2026-10-12
-**상태**: 최종 검증 대기
+**상태**: 검증 완료
 **위험도**: 중간
 
 ## 요약
@@ -24,7 +24,7 @@ Serde의 untagged 및 internally tagged 버퍼링은 숫자를 타입이 정해�
 
 ## 검증
 
-언어 바이어스 집중 테스트 34개와 surgery 설정 테스트 26개를 모두 통과했습니다. cargo deny check의 advisories, bans, licenses, sources 검사 및 포맷과 패치 검사를 통과했습니다. Python 도구 테스트 123개와 WebUI 픽스처 49개를 포함한 저장소 계약 검사를 통과했습니다. 검증한 소스 커밋은 2fd0ac73b13af0b8e638f2ac401eed505bf7c4cd입니다. 이 테스트 실행 후 리뷰에서 alpha/ratio 비유한 숫자와 따옴표 특수 값 회귀 테스트를 추가했습니다. 보고서 작성 시 추가 테스트 실행과 Clippy 검증은 대기 중이며 최종 결과는 PR 본문에 기록합니다.
+언어 바이어스 집중 테스트 34개와 surgery 설정 테스트 28개를 통과했습니다. 추가한 factor/alpha/ratio 비유한 숫자 및 따옴표 특수 값 회귀 테스트도 통과했습니다. cargo deny check의 advisories, bans, licenses, sources 검사와 포맷 및 패치 검사를 통과했습니다. Python 도구 테스트 123개와 WebUI 픽스처 49개를 포함한 저장소 계약 검사도 통과했습니다. 최종 테스트와 CI Clippy, CPU 전용 링크, cargo-deny는 dd36abb9b321fa6eb6c9abaca07f5690ead72a17에서 확인했습니다. 중복된 로컬 CUDA Clippy 재빌드는 CI Clippy 성공 후 중단했습니다.
 
 ## 참고 자료
 
