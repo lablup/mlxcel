@@ -61,7 +61,9 @@ pub(crate) struct SplitMtpArgs {
     #[arg(long, default_value_t = 64, value_name = "N")]
     pub(crate) q_group_size: i32,
 
-    /// Overwrite an output directory that already holds a checkpoint.
+    /// A non-empty output directory is refused unless this flag is set.
+    /// Foreign safetensors weights and symlinked drafter files are always
+    /// refused.
     #[arg(long)]
     pub(crate) force: bool,
 }
@@ -85,6 +87,7 @@ pub(crate) fn run_split_mtp(args: SplitMtpArgs) -> Result<()> {
         block_size: args.block_size,
         q_bits: args.q_bits,
         q_group_size: args.q_group_size,
+        force: args.force,
     };
     println!(
         "Splitting the MTP block out of {} into {}{}",
@@ -189,18 +192,13 @@ fn preflight_checks(
 
 /// Guard `args.output` before [`split_mtp_dir`] writes into it.
 ///
-/// No existing marker: `Ok(())`, nothing to guard. A marker with `force`
-/// unset: today's `already holds a checkpoint (...); pass --force to
-/// overwrite` refusal, unchanged. A marker with `force` set and at least one
-/// foreign safetensors file present ([`is_foreign_safetensors_file`]): a new
-/// refusal naming one such file, because `--force` overwrites the drafter's
-/// own `model.safetensors` and `config.json` but does not promise to delete
-/// weight files, and the file it would otherwise leave orphaned may be the
-/// only surviving copy (issue #1763). A marker with `force` set and no
-/// foreign files: remove a stale `model.safetensors.index.json` as before
-/// and return `Ok(())`, since `collect_shard_paths` prefers an index over a
-/// bare `model.safetensors` and a stale one left beside the drafter's
-/// single-file output would send the loader to the victim's shards.
+/// An absent or empty directory is accepted. Any non-empty directory without
+/// `force` is refused, including one that holds only unrelated files. With
+/// `force`, foreign safetensors files remain protected (issue #1763) and all
+/// seven drafter destinations are checked with `symlink_metadata`, so a
+/// dangling link is refused as well. This function is intentionally
+/// non-mutating; [`split_mtp_dir`] stages the complete drafter and owns the
+/// commit-time checks that close races after this early guard.
 ///
 /// Used by: [`run_split_mtp`] (after [`preflight_checks`] has already
 /// refused anything that does not require touching the filesystem).
@@ -210,7 +208,7 @@ fn prepare_output_dir(dir: &std::path::Path, force: bool) -> Result<()> {
     };
     if !force {
         return Err(anyhow!(
-            "split-mtp: {} already holds a checkpoint ({existing}); pass --force to overwrite",
+            "split-mtp: {} is not empty ({existing}); pass --force to overwrite drafter files",
             dir.display()
         ));
     }
@@ -228,22 +226,31 @@ fn prepare_output_dir(dir: &std::path::Path, force: bool) -> Result<()> {
             dir.display()
         ));
     }
-    let index = dir.join("model.safetensors.index.json");
-    if index.exists() {
-        std::fs::remove_file(&index)
-            .with_context(|| format!("split-mtp: failed to remove stale {}", index.display()))?;
+    for name in [
+        "model.safetensors",
+        "config.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "chat_template.jinja",
+        "generation_config.json",
+        "special_tokens_map.json",
+    ] {
+        let path = dir.join(name);
+        if std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            return Err(anyhow!(
+                "split-mtp: refusing symlinked output file {}",
+                path.display()
+            ));
+        }
     }
     Ok(())
 }
 
-/// Name of the first artifact that makes `dir` look like an existing
-/// checkpoint, or `None` when writing there would clobber nothing.
-///
-/// `split_mtp_dir` writes `model.safetensors` and `config.json` and copies
-/// five tokenizer files over whatever is present, so the guard has to screen
-/// on more than the single-file weight name: a sharded checkpoint has an
-/// index and shards instead, and would lose its config and tokenizer while
-/// keeping shards nothing can load.
+/// Name of one entry that makes `dir` non-empty, or `None` when writing there
+/// would clobber nothing. Known drafter and checkpoint names are checked first
+/// with `symlink_metadata` so dangling links are visible; remaining entries
+/// are returned in filename order.
 ///
 /// Used by: [`run_split_mtp`] (through [`prepare_output_dir`]).
 fn existing_checkpoint_marker(dir: &std::path::Path) -> Option<String> {
@@ -251,18 +258,23 @@ fn existing_checkpoint_marker(dir: &std::path::Path) -> Option<String> {
         "model.safetensors",
         "model.safetensors.index.json",
         "config.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "chat_template.jinja",
+        "generation_config.json",
+        "special_tokens_map.json",
     ] {
-        if dir.join(name).exists() {
+        if std::fs::symlink_metadata(dir.join(name)).is_ok() {
             return Some(name.to_string());
         }
     }
-    let shard = std::fs::read_dir(dir).ok()?.flatten().find(|entry| {
-        entry
-            .file_name()
-            .to_str()
-            .is_some_and(is_foreign_safetensors_file)
-    })?;
-    Some(shard.file_name().to_string_lossy().into_owned())
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names.into_iter().next()
 }
 
 #[cfg(test)]
@@ -297,11 +309,14 @@ mod tests {
     }
 
     #[test]
-    fn marker_is_none_for_an_empty_or_unrelated_directory() {
+    fn marker_is_none_only_for_an_empty_or_missing_directory() {
         let dir = tempfile::tempdir().expect("tempdir");
         assert_eq!(existing_checkpoint_marker(dir.path()), None);
         std::fs::write(dir.path().join("README.md"), b"x").expect("write");
-        assert_eq!(existing_checkpoint_marker(dir.path()), None);
+        assert_eq!(
+            existing_checkpoint_marker(dir.path()).as_deref(),
+            Some("README.md")
+        );
         assert_eq!(
             existing_checkpoint_marker(&dir.path().join("missing")),
             None,
@@ -334,11 +349,10 @@ mod tests {
         assert!(index.exists(), "the index must not be deleted");
     }
 
-    /// A stale index with no surviving shards is still cleared under
-    /// `--force`, as before: there is nothing left for it to misdirect the
-    /// loader toward.
+    /// The early guard is non-mutating. The staged writer removes the stale
+    /// index only when the replacement drafter is ready to commit.
     #[test]
-    fn force_clears_a_stale_index_when_no_shards_remain() {
+    fn force_accepts_a_stale_index_without_mutating_the_output() {
         let dir = tempfile::tempdir().expect("tempdir");
         let weights = dir.path().join("model.safetensors");
         let index = dir.path().join("model.safetensors.index.json");
@@ -347,8 +361,58 @@ mod tests {
 
         prepare_output_dir(dir.path(), true).expect("must be accepted");
 
-        assert!(!index.exists(), "the stale index must be removed");
+        assert!(index.exists(), "preflight must leave the stale index alone");
         assert!(weights.exists(), "model.safetensors must be left alone");
+    }
+
+    #[test]
+    fn non_empty_output_is_refused_without_force_and_names_an_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let note = dir.path().join("README.md");
+        std::fs::write(&note, b"keep").expect("write");
+
+        let err = prepare_output_dir(dir.path(), false).expect_err("must refuse");
+        assert!(err.to_string().contains("README.md"), "{err}");
+        assert_eq!(std::fs::read(&note).expect("read"), b"keep");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn force_refuses_present_and_dangling_drafter_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        for name in ["tokenizer.json", "config.json"] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let target = dir.path().join(format!("{name}.target"));
+            if name == "tokenizer.json" {
+                std::fs::write(&target, b"untouched").expect("write target");
+            }
+            symlink(&target, dir.path().join(name)).expect("symlink");
+
+            let err = prepare_output_dir(dir.path(), true).expect_err("must refuse");
+            assert!(err.to_string().contains(name), "{err}");
+            if name == "tokenizer.json" {
+                assert_eq!(std::fs::read(&target).expect("read target"), b"untouched");
+            } else {
+                assert!(!target.exists(), "dangling target must not be created");
+            }
+        }
+    }
+
+    #[test]
+    fn force_help_describes_the_non_empty_and_symlink_rules() {
+        use clap::CommandFactory;
+
+        let mut command = crate::Cli::command();
+        let split_mtp = command
+            .find_subcommand_mut("split-mtp")
+            .expect("split-mtp command");
+        let help = split_mtp.render_long_help().to_string();
+        assert!(
+            help.contains("A non-empty output directory is refused unless this flag is set"),
+            "{help}"
+        );
+        assert!(help.contains("symlinked drafter files"), "{help}");
     }
 
     /// `--force` must also refuse a directory holding a foreign safetensors

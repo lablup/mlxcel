@@ -58,8 +58,7 @@
 //! for its own layers, so `TransformerBlock::from_weights` loads the block
 //! unchanged.
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::anyhow;
 use mlxcel_core::mla::{KvBProjGeometry, decompose_kv_b_proj};
@@ -98,6 +97,9 @@ pub struct SplitMtpOptions {
     pub q_bits: Option<i32>,
     /// Affine quantization group size. Only read when `q_bits` is set.
     pub q_group_size: i32,
+    /// Replace drafter files in a non-empty output directory. Foreign
+    /// safetensors files and symlinked drafter paths are always refused.
+    pub force: bool,
 }
 
 impl Default for SplitMtpOptions {
@@ -106,6 +108,7 @@ impl Default for SplitMtpOptions {
             block_size: None,
             q_bits: None,
             q_group_size: 64,
+            force: false,
         }
     }
 }
@@ -446,198 +449,12 @@ pub fn split_mtp(
     })
 }
 
-/// An evaluated tensor held as host bytes for the safetensors writer.
-struct OwnedTensor {
-    dtype: safetensors::Dtype,
-    shape: Vec<usize>,
-    data: Vec<u8>,
-}
-
-impl safetensors::View for &OwnedTensor {
-    fn dtype(&self) -> safetensors::Dtype {
-        self.dtype
-    }
-    fn shape(&self) -> &[usize] {
-        &self.shape
-    }
-    fn data(&self) -> std::borrow::Cow<'_, [u8]> {
-        std::borrow::Cow::Borrowed(&self.data)
-    }
-    fn data_len(&self) -> usize {
-        self.data.len()
-    }
-}
-
-fn safetensors_dtype(mlx_dtype: i32) -> Result<safetensors::Dtype, SurgeryError> {
-    use mlxcel_core::dtype as d;
-    use safetensors::Dtype;
-    Ok(match mlx_dtype {
-        d::BOOL => Dtype::BOOL,
-        d::UINT8 => Dtype::U8,
-        d::UINT16 => Dtype::U16,
-        d::UINT32 => Dtype::U32,
-        d::UINT64 => Dtype::U64,
-        d::INT8 => Dtype::I8,
-        d::INT16 => Dtype::I16,
-        d::INT32 => Dtype::I32,
-        d::INT64 => Dtype::I64,
-        d::FLOAT16 => Dtype::F16,
-        d::FLOAT32 => Dtype::F32,
-        d::FLOAT64 => Dtype::F64,
-        d::BFLOAT16 => Dtype::BF16,
-        other => {
-            return Err(
-                anyhow!("split-mtp: MLX dtype {other} has no safetensors equivalent").into(),
-            );
-        }
-    })
-}
-
-/// Materialize `weights` and write them as one `model.safetensors` with the
-/// `{"format": "mlx"}` metadata every mlx-community checkpoint carries.
-///
-/// Consumes the map so each array is released as soon as its bytes are on
-/// the host; the drafter's bf16 payload is a few GB and holding both copies
-/// would double the peak.
-pub fn write_safetensors(weights: WeightMap, path: &Path) -> Result<u64, SurgeryError> {
-    let mut owned: Vec<(String, OwnedTensor)> = Vec::with_capacity(weights.len());
-    let mut bytes_written = 0u64;
-    let mut entries: Vec<(String, UniquePtr<MlxArray>)> = weights.into_iter().collect();
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-    for (key, array) in entries {
-        let dtype = safetensors_dtype(mlxcel_core::array_dtype(&array))?;
-        let shape: Vec<usize> = mlxcel_core::array_shape(&array)
-            .iter()
-            .map(|&d| d as usize)
-            .collect();
-        mlxcel_core::eval(&array);
-        let data = mlxcel_core::array_to_raw_bytes(&array);
-        drop(array);
-        bytes_written += data.len() as u64;
-        owned.push((key, OwnedTensor { dtype, shape, data }));
-    }
-    let views: Vec<(&str, &OwnedTensor)> = owned.iter().map(|(k, t)| (k.as_str(), t)).collect();
-    let mut metadata = HashMap::new();
-    metadata.insert("format".to_string(), "mlx".to_string());
-    safetensors::serialize_to_file(views, Some(metadata), path)
-        .map_err(|e| anyhow!("split-mtp: writing {}: {e}", path.display()))?;
-    Ok(bytes_written)
-}
-
-/// Whether the safetensors index names any `model.layers.{layer}.*` tensor.
-///
-/// One JSON parse, no shard opened. `Ok(true)` for a directory without an
-/// index: the filtered load below then answers the question from the shard
-/// headers and [`split_mtp`] reports the same refusal on an empty result.
-fn index_names_nextn_layer(model_dir: &Path, layer: usize) -> Result<bool, SurgeryError> {
-    let index_path = model_dir.join("model.safetensors.index.json");
-    if !index_path.exists() {
-        return Ok(true);
-    }
-    let prefix = format!("model.layers.{layer}.");
-    let raw = std::fs::read_to_string(&index_path)?;
-    let value: Value = serde_json::from_str(&raw)
-        .map_err(|e| anyhow!("split-mtp: parsing {}: {e}", index_path.display()))?;
-    let map = value
-        .get("weight_map")
-        .and_then(Value::as_object)
-        .ok_or_else(|| anyhow!("{}: missing weight_map object", index_path.display()))?;
-    Ok(map.keys().any(|k| k.starts_with(&prefix)))
-}
-
-/// Refuse when `output_dir` resolves to the same directory as `model_dir`.
-///
-/// A sharded raw checkpoint carries no `model.safetensors`, so the CLI's
-/// overwrite guard (`prepare_output_dir` in the `mlxcel` binary crate) does
-/// not fire on it, and the writes [`split_mtp_dir`] performs would replace
-/// the source `config.json` with the drafter's and truncate every companion
-/// file: `std::fs::copy` on a path to itself reports `Ok(0)` after opening
-/// the destination with `O_TRUNC`. This has to run before any mutation,
-/// including the CLI's own overwrite guard, which cannot tell "the shard I'm
-/// looking at belongs to the source" from "it belongs to a stray previous
-/// output" (PR #1778 review).
-///
-/// Used by: [`split_mtp_dir`], and
-///          `crate::commands::split_mtp::run_split_mtp` (through its
-///          `preflight_checks`) in the consuming crate
-pub fn refuse_output_is_source(model_dir: &Path, output_dir: &Path) -> Result<(), SurgeryError> {
-    if output_dir.exists()
-        && std::fs::canonicalize(model_dir)? == std::fs::canonicalize(output_dir)?
-    {
-        return Err(anyhow!(
-            "split-mtp: --output {} is the source checkpoint; write the drafter to a separate \
-             directory, otherwise the source config.json is overwritten and its tokenizer \
-             files are truncated",
-            output_dir.display()
-        )
-        .into());
-    }
-    Ok(())
-}
-
-/// Split the nextn block out of `model_dir` into `output_dir`.
-///
-/// Reads `config.json`, refuses a checkpoint whose index names no nextn
-/// tensor (the community conversions), loads only the shards that hold the
-/// block, runs [`split_mtp`], writes `model.safetensors` and `config.json`,
-/// and copies the tokenizer files alongside.
-pub fn split_mtp_dir(
-    model_dir: &Path,
-    output_dir: &Path,
-    opts: &SplitMtpOptions,
-) -> Result<SplitMtpReport, SurgeryError> {
-    refuse_output_is_source(model_dir, output_dir)?;
-    let config_path = model_dir.join("config.json");
-    let config: Value = serde_json::from_str(&std::fs::read_to_string(&config_path)?)
-        .map_err(|e| anyhow!("split-mtp: parsing {}: {e}", config_path.display()))?;
-    let source_layer = nextn_layer_index(&config)?;
-
-    if !index_names_nextn_layer(model_dir, source_layer)? {
-        return Err(anyhow!(
-            "split-mtp: {} names no `model.layers.{source_layer}.*` tensor; this checkpoint was \
-             converted without its MTP layer; use the raw zai-org checkpoint",
-            model_dir.display()
-        )
-        .into());
-    }
-
-    let layer_prefix = format!("model.layers.{source_layer}.");
-    let weights = mlxcel_core::weights::load_weights_from_dir_index_filtered(model_dir, |name| {
-        name.starts_with(&layer_prefix)
-    })
-    .map_err(|e| anyhow!("split-mtp: {e}"))?;
-
-    let result = split_mtp(weights, &config, opts)?;
-
-    std::fs::create_dir_all(output_dir)?;
-    let tensors = result.weights.len();
-    let bytes_written = write_safetensors(result.weights, &output_dir.join("model.safetensors"))?;
-    let config_text = serde_json::to_string_pretty(&result.config)
-        .map_err(|e| anyhow!("split-mtp: serializing config.json: {e}"))?;
-    std::fs::write(output_dir.join("config.json"), config_text)?;
-
-    let mut copied_files = Vec::new();
-    let mut missing_files = Vec::new();
-    for name in COMPANION_FILES {
-        let src = model_dir.join(name);
-        if src.is_file() {
-            std::fs::copy(&src, output_dir.join(name))?;
-            copied_files.push((*name).to_string());
-        } else if *name == "tokenizer.json" || *name == "tokenizer_config.json" {
-            missing_files.push((*name).to_string());
-        }
-    }
-
-    Ok(SplitMtpReport {
-        output_dir: output_dir.to_path_buf(),
-        source_layer,
-        tensors,
-        quantized_tensors: result.quantized_tensors,
-        bytes_written,
-        copied_files,
-        missing_files,
-    })
-}
+#[path = "split_mtp_dir.rs"]
+mod directory;
+pub use directory::{refuse_output_is_source, split_mtp_dir};
+#[path = "split_mtp_output.rs"]
+mod output;
+pub use output::write_safetensors;
 
 #[cfg(test)]
 #[path = "split_mtp_tests.rs"]
