@@ -210,10 +210,10 @@ pub struct LangBiasYamlConfig {
 /// which made the resolve loop's duplicate check unreachable and let the YAML
 /// path silently accept input the `--lang-bias` parser rejects. See issue #1267.
 ///
-/// Collecting the entries through `MapAccess` into a `Vec` keeps both: the
-/// author's order survives, and a repeated key arrives as a second entry that
-/// the resolve loop can reject. The accepted YAML syntax is unchanged, `bias:`
-/// is still a plain mapping.
+/// Collecting entries through `MapAccess` into a `Vec` preserves their priority
+/// order. The YAML parser rejects duplicate mapping keys before this visitor
+/// receives them; `load_yaml_config` retains the specific language-code error.
+/// The accepted YAML syntax is unchanged: `bias:` is still a plain mapping.
 #[derive(Debug, Default)]
 pub struct BiasEntries(Vec<(String, BiasValueStr)>);
 
@@ -223,7 +223,7 @@ impl BiasEntries {
         &self.0
     }
 
-    /// Number of entries, counting a repeated language code once per occurrence.
+    /// Number of entries in document order.
     pub fn len(&self) -> usize {
         self.0.len()
     }
@@ -262,8 +262,8 @@ impl<'de> Deserialize<'de> for BiasEntries {
                 M: serde::de::MapAccess<'de>,
             {
                 let mut entries = Vec::with_capacity(access.size_hint().unwrap_or(0));
-                // Deliberately a Vec push per entry rather than a map insert:
-                // repeated keys must reach the caller so it can reject them.
+                // Preserve parser-provided document order with a Vec push.
+                // The loader handles parser-level duplicate-key errors.
                 while let Some(entry) = access.next_entry::<String, BiasValueStr>()? {
                     entries.push(entry);
                 }
@@ -313,7 +313,12 @@ impl<'de> Deserialize<'de> for BiasValueStr {
         let raw = RawBias::deserialize(deserializer)?;
         let value = match raw {
             RawBias::Float(f) => f as f32,
-            RawBias::Str(s) => parse_bias_f32(&s).map_err(serde::de::Error::custom)?,
+            RawBias::Str(s) => match s.as_str() {
+                ".nan" => f32::NAN,
+                ".inf" => f32::INFINITY,
+                "-.inf" => f32::NEG_INFINITY,
+                _ => parse_bias_f32(&s).map_err(serde::de::Error::custom)?,
+            },
         };
         Ok(BiasValueStr(value))
     }
@@ -355,9 +360,25 @@ pub fn load_yaml_config(path: &PathBuf) -> Result<LangBiasYamlConfig, CliError> 
         source: e,
     })?;
 
-    serde_yaml::from_str(&content).map_err(|e| CliError::ConfigParseError {
-        path: path.display().to_string(),
-        message: e.to_string(),
+    let options = serde_saphyr::options! {
+        merge_keys: serde_saphyr::MergeKeyPolicy::AsOrdinary,
+        strict_booleans: true,
+        reject_non_finite_typeless_float: false,
+    };
+    serde_saphyr::from_str_with_options(&content, options).map_err(|e| {
+        // Only bias mapping keys can be valid language codes in this schema.
+        // Keep the CLI diagnostic while retaining strict parser duplicate checks.
+        if let serde_saphyr::Error::DuplicateMappingKey {
+            key: Some(code), ..
+        } = e.without_snippet()
+            && LanguageCode::from_str(code).is_ok()
+        {
+            return CliError::DuplicateLanguageCode { code: code.clone() };
+        }
+        CliError::ConfigParseError {
+            path: path.display().to_string(),
+            message: e.to_string(),
+        }
     })
 }
 
@@ -495,10 +516,8 @@ impl LangBiasCliArgs {
             }
 
             if let Some(yaml_bias) = yaml.bias {
-                // `BiasEntries` yields the `bias:` block in document order and
-                // keeps repeated keys, so `ordered` ends up in the priority
-                // order the author wrote and the duplicate check below actually
-                // fires. This mirrors `parse_lang_bias_entries` entry for entry.
+                // Preserve the author's priority order. The YAML loader rejects
+                // duplicates; retain this defensive check for other deserializers.
                 let mut ordered = Vec::new();
                 let mut seen: HashMap<String, ()> = HashMap::new();
                 for (code_str, BiasValueStr(bias)) in yaml_bias {
@@ -692,7 +711,7 @@ exceptions:
   include_numeric: false
   include_punctuation: true
 "#;
-        let config: LangBiasYamlConfig = serde_yaml::from_str(yaml_str).unwrap();
+        let config: LangBiasYamlConfig = serde_saphyr::from_str(yaml_str).unwrap();
         assert!(matches!(config.policy, Some(PolicyStr::Conservative)));
         let bias = config.bias.unwrap();
         // Assert the order, not just membership. Asserting membership alone is
@@ -714,7 +733,7 @@ exceptions:
         let yaml_str = r#"
 policy: strict
 "#;
-        let config: LangBiasYamlConfig = serde_yaml::from_str(yaml_str).unwrap();
+        let config: LangBiasYamlConfig = serde_saphyr::from_str(yaml_str).unwrap();
         assert!(config.bias.is_none());
     }
 
@@ -724,7 +743,7 @@ policy: strict
 policy: conservative
 unknown_field: value
 "#;
-        let result: Result<LangBiasYamlConfig, _> = serde_yaml::from_str(yaml_str);
+        let result: Result<LangBiasYamlConfig, _> = serde_saphyr::from_str(yaml_str);
         assert!(
             result.is_err(),
             "unknown top-level key should produce a parse error"
@@ -904,11 +923,8 @@ unknown_field: value
 
     #[test]
     fn yaml_duplicate_language_code_is_rejected() {
-        // serde_yaml deserializes a repeated key into a typed `HashMap` without
-        // any diagnostic (last occurrence wins), which is why the duplicate
-        // check in `resolve` used to be unreachable. The ordered representation
-        // delivers both occurrences, so the YAML path now rejects what the
-        // `--lang-bias` path already rejected.
+        // The parser rejects duplicates before collecting bias entries. The
+        // loader maps that failure to the same specific error as the CLI path.
         let (_tmpfile, path) = write_temp_yaml("bias:\n  ja: -1.0\n  zh: -2.0\n  ja: -3.0\n");
 
         let args = LangBiasCliArgs {
@@ -945,7 +961,7 @@ unknown_field: value
         // The accepted syntax is unchanged: `bias:` is a mapping, and a list
         // form is still a parse error rather than a silently different config.
         let result: Result<LangBiasYamlConfig, _> =
-            serde_yaml::from_str("bias:\n  - ja: -inf\n  - zh: -10.0\n");
+            serde_saphyr::from_str("bias:\n  - ja: -inf\n  - zh: -10.0\n");
         assert!(
             result.is_err(),
             "a sequence-shaped bias: block should still be a parse error"
@@ -1164,3 +1180,7 @@ unknown_field: value
         assert_eq!(parse_bias_f32("-5.0").unwrap(), -5.0_f32);
     }
 }
+
+#[cfg(test)]
+#[path = "lang_bias_yaml_compat_tests.rs"]
+mod yaml_compat_tests;
