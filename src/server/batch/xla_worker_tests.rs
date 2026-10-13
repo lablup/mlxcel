@@ -344,8 +344,37 @@ fn receive_done(rx: &mpsc::Receiver<GenerateEvent>) -> GenerationResult {
             | GenerateEvent::TokenWithLogprobs(_, _, _)
             | GenerateEvent::Prefill(_) => {}
             GenerateEvent::Error(error) => panic!("unexpected generation failure: {error}"),
+            GenerateEvent::Admitted => {
+                panic!("unexpected Metal memory admission on the XLA worker")
+            }
+            GenerateEvent::RequestMemoryRejected(error) => {
+                panic!("unexpected Metal memory rejection on the XLA worker: {error}")
+            }
         }
     }
+}
+
+#[test]
+#[should_panic(expected = "unexpected Metal memory admission on the XLA worker")]
+fn receive_done_rejects_metal_memory_admission_events() {
+    let (sender, receiver) = mpsc::channel();
+    sender.send(GenerateEvent::Admitted).unwrap();
+    receive_done(&receiver);
+}
+
+#[test]
+#[should_panic(expected = "unexpected Metal memory rejection on the XLA worker")]
+fn receive_done_rejects_metal_memory_rejection_events() {
+    let (sender, receiver) = mpsc::channel();
+    sender
+        .send(GenerateEvent::RequestMemoryRejected(
+            crate::execution::request_memory::RequestMemoryRejection {
+                estimated_bytes: 2048,
+                budget_bytes: 1024,
+            },
+        ))
+        .unwrap();
+    receive_done(&receiver);
 }
 
 #[test]
@@ -711,6 +740,10 @@ fn stop_finish_without_a_token_event_returns_empty_content_and_no_completion_tok
             panic!("unexpected prefill snapshot before the result: {stats:?}")
         }
         GenerateEvent::Error(error) => panic!("unexpected generation failure: {error}"),
+        GenerateEvent::Admitted => panic!("unexpected Metal memory admission on the XLA worker"),
+        GenerateEvent::RequestMemoryRejected(error) => {
+            panic!("unexpected Metal memory rejection on the XLA worker: {error}")
+        }
     };
     assert_eq!(result.text, "");
     assert_eq!(result.completion_tokens, 0);
