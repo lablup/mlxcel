@@ -1,7 +1,11 @@
 // WMMA-accelerated flash attention for RDNA 3+ (gfx1100+)
 //
 // Uses rocwmma 16x16x16 bf16→f32 tiles for Q@K^T and P@V matmuls.
-// Implements FlashAttention-2 online softmax.
+// Implements FlashAttention-2 online softmax with a deferred accumulator
+// rescale: the O tiles and l of a row live in the softmax frame the row was
+// last rescaled to, so the store/scale/reload of every accumulator tile
+// through LDS runs only when a row's block max outgrows that frame by more
+// than kFaWmmaRescaleMargin, never in the steady state of a chunked prefill.
 //
 // BLOCK_M=64, BLOCK_N=64, 128 threads (4 waves), each wave owns 16 query rows.
 // Shared memory ~50 KB for D=128.
@@ -34,6 +38,15 @@ struct FAWmmaParams {
   // LSE ptr is null. Contiguous layout: LSE_strides[0]=H*qL, [1]=qL, [2]=1.
   int64_t LSE_strides[3];
 };
+
+// Margin between a row's running block max and its softmax frame before the O
+// accumulator rescale runs. Entries of O and l stay in the frame f the row
+// was last rescaled to, so P = exp(S - f) is bounded by exp(margin) instead
+// of 1; the margin keeps that well inside the score dtype (bf16 P caps at
+// 65504, exp(10) = 22,026) while making the per-K-block rescale a steady-state
+// no-op for a chunked prefill, where the block max moves a few points per
+// block.
+constexpr float kFaWmmaRescaleMargin = 10.0f;
 
 // Helper: collaborative load from global to shared memory
 template <typename T, int STRIDE>
@@ -163,6 +176,23 @@ __global__ void __launch_bounds__(256)
                       + q_start * params.Q_strides[2];
   const int q_valid = min(BLOCK_M, params.qL - q_start);
 
+  // ---- Stage Q once when the head dim fits one DW-wide slice (D <= 128) ----
+  // Q_sh is resident through the K/V loop, so the per-K-block re-stage inside
+  // the loop below (a global re-read plus an LDS write of BLOCK_M x DW halfs
+  // per block, up to 256 iterations per call at kL=16K) runs only for D > DW.
+  if constexpr (N_DCHUNKS == 1) {
+    load_tile<T, Q_PAD>(
+        Q_sh, Q_base, params.Q_strides[2], BLOCK_M, min(DW, D), q_valid, tid,
+        NTHREADS);
+    __syncthreads();
+  }
+
+  // Dynamic smem scratch: per-row scale_old for the (deferred) accumulator
+  // rescale, plus the per-block rescale flag.
+  float* wave_scale = reinterpret_cast<float*>(
+      reinterpret_cast<char*>(S_sh) + BLOCK_M * S_PAD * sizeof(float));
+  bool* rescale_flag = reinterpret_cast<bool*>(wave_scale + BLOCK_M);
+
   // ---- K/V block loop ----
   for (int k_start = 0; k_start < params.kL; k_start += BLOCK_N) {
 
@@ -172,6 +202,10 @@ __global__ void __launch_bounds__(256)
       int max_k_allowed = (params.kL - params.qL) + last_q;
       if (k_start > max_k_allowed) break;
     }
+
+    // Reset the per-block accumulator-rescale flag; the __syncthreads inside
+    // the S stage below orders this reset before the online softmax sets it.
+    if (tid == 0) *rescale_flag = false;
 
     int k_valid = min(BLOCK_N, params.kL - k_start);
 
@@ -191,9 +225,11 @@ __global__ void __launch_bounds__(256)
       for (int dc = 0; dc < N_DCHUNKS; dc++) {
         const int d0 = dc * DW;
         const int dwid = min(DW, D - d0);
-        load_tile<T, Q_PAD>(
-            Q_sh, Q_base + d0, params.Q_strides[2], BLOCK_M, dwid, q_valid, tid,
-            NTHREADS);
+        if constexpr (N_DCHUNKS > 1) {
+          load_tile<T, Q_PAD>(
+              Q_sh, Q_base + d0, params.Q_strides[2], BLOCK_M, dwid, q_valid,
+              tid, NTHREADS);
+        }
         load_tile<T, KV_PAD>(
             KV_sh, K_base + d0, params.K_strides[2], BLOCK_N, dwid, k_valid, tid,
             NTHREADS);
@@ -235,9 +271,13 @@ __global__ void __launch_bounds__(256)
     rocwmma::synchronize_workgroup();
 
     // ---- Online softmax: each wave processes its own 16 query rows ----
-    // Dynamic smem slot for per-row scale_old (avoids static/dynamic LDS aliasing).
-    float* wave_scale = reinterpret_cast<float*>(
-        reinterpret_cast<char*>(S_sh) + BLOCK_M * S_PAD * sizeof(float));
+    // Deferred accumulator rescale: the O entries and l of a row live in the
+    // softmax frame f = m_arr[row] the row was last rescaled to, so the
+    // store/scale/reload of all D_TILES f32 tiles through LDS (3 barriers per
+    // tile, 24 per K block at D=128) only runs when a row's block max
+    // outgrows its frame by more than kFaWmmaRescaleMargin, never in the
+    // steady state of a chunked prefill.
+    float scale_old = 1.0f;
     if (lane < WT) {
       int row = wave * WT + lane; // 0..BLOCK_M-1, one row per lane of this wave
       int q_idx = q_start + row;
@@ -256,7 +296,26 @@ __global__ void __launch_bounds__(256)
         }
       }
 
-      float scale_old = (old_m > -1e29f) ? expf(old_m - new_m) : 0.0f;
+      if (valid && old_l > 0.0f) {
+        // O already carries entries in the frame old_m: rescale them only
+        // when the frame would go stale by more than the margin.
+        if ((new_m - old_m) > kFaWmmaRescaleMargin) {
+          scale_old = expf(old_m - new_m);
+          m_arr[row] = new_m;
+          *rescale_flag = true;
+        } else {
+          scale_old = 1.0f;
+          m_arr[row] = old_m;
+        }
+      } else if (valid) {
+        // Nothing accumulated yet (O is zero): move the frame for free.
+        scale_old = 0.0f;
+        m_arr[row] = new_m;
+      } else {
+        // A padding row: no state change, P writes 0 below.
+        scale_old = 0.0f;
+      }
+
       float row_sum = 0.0f;
 
       for (int j = 0; j < BLOCK_N; j++) {
@@ -265,7 +324,7 @@ __global__ void __launch_bounds__(256)
           use = use && ((k_start + j) <= (params.kL - params.qL + q_idx));
 
         if (use) {
-          float p = expf(S_sh[row * S_PAD + j] - new_m);
+          float p = expf(S_sh[row * S_PAD + j] - m_arr[row]);
           S_sh[row * S_PAD + j] = p;
           row_sum += p;
         } else {
@@ -273,16 +332,16 @@ __global__ void __launch_bounds__(256)
         }
       }
 
-      m_arr[row] = new_m;
       l_arr[row] = old_l * scale_old + row_sum;
       wave_scale[row] = scale_old;
     }
     __syncthreads();
 
-    // ---- Rescale O accumulators by scale_old ----
+    // ---- Rescale O accumulators by scale_old (only when a row outgrew its
+    // frame this block) ----
     // Each wave rescales its 16-row O tiles.
     // Since fragment layout is opaque, store→scale→reload via shared memory.
-    {
+    if (*rescale_flag) {
       // Use KV_sh area as f32 temp (it held K which we no longer need)
       float* o_tmp = reinterpret_cast<float*>(KV_sh);
       constexpr int OT_PAD = WT + 4;
@@ -445,13 +504,15 @@ bool supports_sdpa_flash_wmma(
 int sdpa_flash_wmma_smem(int D) {
   constexpr int BM = 64, BN = 64;
   const int DW = (D < 128) ? D : 128;
-  // Layout: m[BM] l[BM] | Q[BM,DW+4] | KV[BN,DW+4] | S[BM,BN+4] | wave_scale[BM]
-  // wave_scale is dynamic (not static __shared__) so it is accounted here.
+  // Layout: m[BM] l[BM] | Q[BM,DW+4] | KV[BN,DW+4] | S[BM,BN+4] |
+  //         wave_scale[BM] | rescale_flag
+  // wave_scale and the per-block rescale flag are dynamic (not static
+  // __shared__) so they are accounted here.
   return 2 * BM * (int)sizeof(float)
        + BM * (DW + 4) * (int)sizeof(uint16_t)
        + BN * (DW + 4) * (int)sizeof(uint16_t)
        + BM * (BN + 4) * (int)sizeof(float)
-       + BM * (int)sizeof(float);
+       + (BM + 1) * (int)sizeof(float);
 }
 
 void sdpa_flash_wmma(
