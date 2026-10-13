@@ -1,7 +1,7 @@
 # PR #2290: Bound Nemotron-H SSD prefill memory
 
 **Date**: 2026-10-13
-**Status**: Partial; implementation reviewed and focused validation passed
+**Status**: Complete for the bounded SSD-prefill scope; implementation reviewed and focused validation passed
 **Risk**: High at issue scope because request-level transient-memory admission remains unimplemented
 
 ## Summary
@@ -33,4 +33,4 @@ Three fresh-process repetitions were recorded for each 1,519-, 3,019-, 4,519-, a
 
 ## Remaining work
 
-Request-level activation/transient-memory admission remains required before issue #2281 can be considered complete. Arbitrary within-context Metal command-buffer OOM can still terminate the process. GitHub also reports #2281 in this PR's `closingIssuesReferences` despite the PR body stating that it intentionally does not close the issue; the PR must not merge until the issue is split or that closing relationship is removed.
+Request-level activation/transient-memory admission remains required to address arbitrary within-context Metal command-buffer OOM that can still terminate the process. The user approved tracking and implementing that work as a separate follow-up after this bounded SSD-prefill fix merges; no follow-up issue number exists yet. The PR body's non-closing wording was rewritten after GitHub interpreted the earlier negated phrase as a closing keyword, and `closingIssuesReferences` is now empty.

@@ -1,7 +1,7 @@
 # PR #2290: Nemotron-H SSD prefill 메모리 제한
 
 **날짜**: 2026-10-13
-**상태**: 부분 완료; 구현 리뷰와 집중 검증 통과
+**상태**: 제한된 SSD-prefill 범위 완료; 구현 리뷰와 집중 검증 통과
 **위험도**: 이슈 범위에서는 높음. 요청별 transient-memory admission이 아직 구현되지 않음
 
 ## 요약
@@ -33,4 +33,4 @@ PR #2290은 Nemotron-H Mamba prefill을 prompt 전체 길이의 quadratic surrog
 
 ## 남은 작업
 
-Issue #2281을 완료하려면 요청별 activation/transient-memory admission이 필요합니다. 임의의 within-context Metal command-buffer OOM은 여전히 process를 종료할 수 있습니다. 또한 PR 본문은 이 issue를 의도적으로 닫지 않는다고 명시하지만 GitHub는 #2281을 이 PR의 `closingIssuesReferences`로 보고합니다. Issue를 분리하거나 closing relationship을 제거하기 전에는 이 PR을 merge하면 안 됩니다.
+요청별 activation/transient-memory admission은 임의의 within-context Metal command-buffer OOM이 여전히 process를 종료할 수 있는 문제를 해결하기 위해 필요합니다. 사용자는 이 제한된 SSD-prefill 수정이 merge된 뒤 해당 작업을 별도 후속으로 추적하고 구현하는 것에 동의했으며, 아직 후속 issue 번호는 없습니다. 이전 PR 본문의 부정형 표현을 GitHub가 closing keyword로 해석하여 해당 문구를 다시 작성했고, 이제 `closingIssuesReferences`는 비어 있습니다.
