@@ -320,6 +320,10 @@ fn drain_events(rx: &mpsc::Receiver<GenerateEvent>) -> Vec<(String, String)> {
         out.push(match ev {
             GenerateEvent::Token(t, _) => ("token".to_string(), t),
             GenerateEvent::TokenWithLogprobs(t, _, _) => ("token_lp".to_string(), t),
+            GenerateEvent::Admitted => continue,
+            GenerateEvent::RequestMemoryRejected(error) => {
+                panic!("unexpected memory rejection: {error}")
+            }
             GenerateEvent::Prefill(_) => ("prefill".to_string(), String::new()),
             GenerateEvent::Done(_) => ("done".to_string(), String::new()),
             GenerateEvent::Error(e) => panic!("unexpected error event: {e}"),

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -21,11 +21,11 @@ use mlxcel_core::generate::SamplingConfig;
 use mlxcel_core::sampling::{LogprobsConfig, TokenLogprobData};
 
 use super::{
-    ChatWorkerGoneError, DECODE_HANG_TIMEOUT, GenerateEvent, GenerationResult, ModelProvider,
-    ModelRequest, PrefillStats, QueueReservationMode, RequestRuntimeDefaults,
-    SingleStreamQueueReservation, StopKind, TokenMeta, drain_generation_events,
-    drain_generation_events_with_logprobs_observing_prefill, observe_worker_exit,
-    send_shutdown_signal, tokenize_prompt_for_generation,
+    AdmissionWaiter, ChatWorkerGoneError, DECODE_HANG_TIMEOUT, GenerateEvent, GenerationResult,
+    ModelProvider, ModelRequest, PrefillStats, QueueReservationMode, RequestRuntimeDefaults,
+    SingleStreamQueueReservation, StopKind, TokenMeta, await_request_admission,
+    drain_generation_events, drain_generation_events_with_logprobs_observing_prefill,
+    observe_worker_exit, send_shutdown_signal, tokenize_prompt_for_generation,
     tokenize_prompt_for_generation_with_ordered_media, validated_decode_hang_timeout,
 };
 use crate::server::batch::BatchObservability;
@@ -79,6 +79,7 @@ fn sample_options() -> crate::server::ServerGenerateOptions {
         grammar: None,
         image_soft_tokens: None,
         pre_rendered_prompt_tokens: None,
+        admission_notification: None,
     }
 }
 
@@ -237,6 +238,7 @@ fn generate_with_live_enqueues_the_captured_runtime_defaults() {
         batch_metrics: Arc::new(BatchMetrics::new()),
         batch_observability: Arc::new(BatchObservability::new()),
         max_queue_depth: usize::MAX,
+        request_memory_admission: false,
         single_stream_queue_admission: Arc::new(AtomicBool::new(false)),
         sleeping: Arc::new(AtomicBool::new(false)),
         prompt_cache: None,
@@ -384,6 +386,7 @@ fn pre_reserved_single_stream_enqueue_does_not_double_reserve() {
         batch_metrics: metrics.clone(),
         batch_observability: Arc::new(BatchObservability::new()),
         max_queue_depth: 1,
+        request_memory_admission: false,
         single_stream_queue_admission: Arc::new(AtomicBool::new(true)),
         sleeping: Arc::new(AtomicBool::new(false)),
         prompt_cache: None,
@@ -435,6 +438,7 @@ fn scheduler_paths_do_not_create_single_stream_reservations() {
         batch_metrics: Arc::new(BatchMetrics::new()),
         batch_observability: Arc::new(BatchObservability::new()),
         max_queue_depth: 0,
+        request_memory_admission: false,
         single_stream_queue_admission: Arc::new(AtomicBool::new(false)),
         sleeping: Arc::new(AtomicBool::new(false)),
         prompt_cache: None,
@@ -609,6 +613,8 @@ fn drain_generation_events_impl_survives_long_prefill_before_first_token() {
             Ok(Some(r))
         }
         GenerateEvent::Error(e) => Err(anyhow::anyhow!(e)),
+        GenerateEvent::Admitted => Ok(None),
+        GenerateEvent::RequestMemoryRejected(e) => Err(anyhow::Error::new(e)),
     })
     .expect("drain_generation_events_impl must not error during long prefill");
 
@@ -675,6 +681,8 @@ fn drain_generation_events_impl_detects_phase2_decode_hang() {
         GenerateEvent::Prefill(_) => Ok(None),
         GenerateEvent::Done(r) => Ok(Some(r)),
         GenerateEvent::Error(e) => Err(anyhow::anyhow!(e)),
+        GenerateEvent::Admitted => Ok(None),
+        GenerateEvent::RequestMemoryRejected(e) => Err(anyhow::Error::new(e)),
     });
 
     worker.join().expect("worker thread must not panic");
@@ -693,4 +701,88 @@ fn drain_generation_events_impl_detects_phase2_decode_hang() {
         msg.contains("hang") || msg.contains("decode") || msg.contains("150"),
         "error message must describe the decode hang; got: {msg}"
     );
+}
+
+#[test]
+fn request_memory_admission_preserves_typed_rejection_and_context_errors() {
+    use crate::execution::request_memory::RequestMemoryRejection;
+    let (sender, receiver) = mpsc::channel();
+    sender
+        .send(GenerateEvent::RequestMemoryRejected(
+            RequestMemoryRejection {
+                estimated_bytes: 11,
+                budget_bytes: 10,
+            },
+        ))
+        .unwrap();
+    let cancelled = AtomicBool::new(false);
+    let error = await_request_admission(&receiver, &cancelled).unwrap_err();
+    assert_eq!(
+        error
+            .downcast_ref::<RequestMemoryRejection>()
+            .unwrap()
+            .estimated_bytes,
+        11
+    );
+    sender
+        .send(GenerateEvent::Error(
+            "prompt exceeds the available context size".into(),
+        ))
+        .unwrap();
+    let error = await_request_admission(&receiver, &cancelled).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("exceeds the available context size")
+    );
+    sender.send(GenerateEvent::Admitted).unwrap();
+    assert!(await_request_admission(&receiver, &cancelled).is_ok());
+}
+
+#[tokio::test]
+async fn request_memory_admission_http_abandonment_cancels_pending_worker() {
+    let mut options = sample_options();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let waiter = AdmissionWaiter::arm(&mut options, cancelled.clone());
+    let (sender, receiver) = mpsc::channel();
+    let worker_cancelled = cancelled.clone();
+    let worker =
+        tokio::task::spawn_blocking(move || await_request_admission(&receiver, &worker_cancelled));
+    drop(waiter);
+    assert!(cancelled.load(Ordering::Acquire));
+    let error = tokio::time::timeout(Duration::from_secs(2), worker)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(error.to_string().contains("cancelled"));
+    drop(sender);
+}
+
+#[tokio::test]
+async fn request_memory_admission_sender_exit_releases_http_waiter() {
+    let mut options = sample_options();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let waiter = AdmissionWaiter::arm(&mut options, cancelled.clone());
+    drop(options);
+    let error = tokio::time::timeout(Duration::from_secs(2), waiter.wait())
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(error.downcast_ref::<ChatWorkerGoneError>().is_some());
+    assert!(cancelled.load(Ordering::Acquire));
+}
+
+#[tokio::test]
+async fn request_memory_admission_ack_does_not_cancel_generation() {
+    let mut options = sample_options();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let waiter = AdmissionWaiter::arm(&mut options, cancelled.clone());
+    options
+        .admission_notification
+        .take()
+        .unwrap()
+        .complete(&Ok(()));
+    waiter.wait().await.unwrap();
+    assert!(!cancelled.load(Ordering::Acquire));
 }

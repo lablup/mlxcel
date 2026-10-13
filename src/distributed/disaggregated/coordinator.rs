@@ -903,7 +903,8 @@ fn drain_generation_events(rx: &mpsc::Receiver<GenerateEvent>) -> DrainedGenerat
             // The prefill snapshot is a streaming-only detail of the native
             // completion route; a disaggregated drain has no frame to put it
             // on (#1441).
-            GenerateEvent::Prefill(_) => {}
+            GenerateEvent::Prefill(_) | GenerateEvent::Admitted => {}
+            GenerateEvent::RequestMemoryRejected(e) => error = Some(e.to_string()),
             GenerateEvent::Error(e) => error = Some(e),
         }
     }

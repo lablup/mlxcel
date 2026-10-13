@@ -6,6 +6,8 @@ Ship the model-internal SSD chunking for Nemotron-H. The production server path 
 
 This record resolves the quadratic-prefill-memory part of issue #2281. It does **not** establish request-level rejection from a projected transient-memory budget. The current server has context-size and KV-budget admission plus an optional startup `--estimate-memory` check, but no per-request activation/transient-memory admission; a separate host/model combination can therefore still reach a fatal Metal driver OOM. The existing 8,319-token context rejection reported below is evidence only for context admission and is not treated as memory admission.
 
+Follow-up: request-level admission is implemented separately in #2291; see [the admission policy](../request-memory-admission.md). The measurements and limitations below describe the original SSD-only change, not the subsequent guard.
+
 ## Environment and provenance
 
 - Host: Mac Studio `Mac13,2`, Apple M1 Ultra, 128 GB unified memory, 20 logical CPUs.

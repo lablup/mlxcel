@@ -1149,6 +1149,9 @@ pub(crate) async fn stream_asr_completion(
     let skip_chat_parsing = state.config.skip_chat_parsing;
     let token_events = events.clone();
 
+    let admission =
+        crate::server::model_provider::AdmissionWaiter::arm(&mut options, cancelled.clone());
+
     tokio::task::spawn_blocking(move || {
         let slot = state.slots.begin(
             &prepared.prompt,
@@ -1258,6 +1261,10 @@ pub(crate) async fn stream_asr_completion(
         }
         events.done();
     });
+
+    if let Err(error) = admission.wait().await {
+        return generation_error_to_response(error).into_response();
+    }
 
     sse_response(stream, keepalive)
 }
@@ -1400,6 +1407,9 @@ async fn stream_chat_completion(
     let echo_enabled = echo_record.is_some();
 
     // Spawn a blocking task to handle generation
+    let admission =
+        crate::server::model_provider::AdmissionWaiter::arm(&mut options, cancelled.clone());
+
     tokio::task::spawn_blocking(move || {
         // Keep the completion controllable for exactly the lifetime of this
         // task; the guard unregisters the id on drop, whatever exit path
@@ -1965,6 +1975,10 @@ async fn stream_chat_completion(
 
         finish_events.done();
     });
+
+    if let Err(error) = admission.wait().await {
+        return generation_error_to_response(error).into_response();
+    }
 
     sse_response(stream, keepalive)
 }

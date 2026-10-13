@@ -2008,6 +2008,7 @@ pub(crate) fn warmup_model(model_provider: &ModelProvider) -> Result<()> {
     model_provider.generate(
         "Hello".to_string(),
         ServerGenerateOptions {
+            admission_notification: None,
             // Inert: the generation bounds are native-route fields (#1477).
             n_indent: 0,
             t_max_predict_ms: None,
@@ -3152,6 +3153,8 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         }
     }
 
+    // Invalid explicit request caps fail startup, rather than silently disabling admission.
+    crate::execution::request_memory::budget_override()?;
     let runtime = crate::initialize_runtime_checked()?;
     if let Some(invalid) = runtime.invalid_device_override.as_deref() {
         tracing::warn!(

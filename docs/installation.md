@@ -615,6 +615,7 @@ made that unnecessary; not re-measured since), gpt-oss-20b-MXFP4-Q4 about 8 tok/
 | `MLXCEL_QUIET_JIT` | Suppress the one-time "compiling CUDA kernels" notice on a cold first run | unset (notice shown) |
 | `MLXCEL_DEVICE` | Runtime device hint (`gpu`, `metal`, or `cpu`) | `gpu` |
 | `MLXCEL_WIRED_LIMIT` | Apple Silicon wired-memory ceiling, e.g. `64GB`; `0`/`none` disables it | `max` |
+| `MLXCEL_REQUEST_MEMORY_BUDGET` | Lower-only positive byte/size ceiling for [Nemotron-H request admission](request-memory-admission.md), e.g. `24GB`; invalid explicit values stop startup | runtime device/wired/allocator minimum |
 | `MLX_ROCM_*` and other ROCm backend variables | ROCm backend tuning, A/B and diagnostics, for example `MLX_ROCM_GATHER_QMV_EXPERT_BATCHED`, `MLX_ROCM_MAX_INFLIGHT_MB`, `MLX_NO_HIPBLASLT`; see [ROCm backend variables](environment-variables.md#rocm-backend-variables) | see that section |
 | `LLAMA_ARG_*` | Environment-backed server options accepted by clap | unset |
 

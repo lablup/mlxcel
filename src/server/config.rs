@@ -331,6 +331,8 @@ pub struct ServerGenerateOptions {
     /// `None` on every request that rendered through a chat template, which is
     /// every request that predates #1338.
     pub pre_rendered_prompt_tokens: Option<Vec<i32>>,
+    /// HTTP-only admission handshake, removed before dispatch to the scheduler.
+    pub admission_notification: Option<crate::server::model_provider::AdmissionNotification>,
 }
 
 /// Per-request context-retention overrides (b10621 `n_keep` / `n_discard`,

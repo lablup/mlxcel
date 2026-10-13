@@ -201,6 +201,7 @@ fn options(max_tokens: usize) -> ServerGenerateOptions {
         grammar: None,
         image_soft_tokens: None,
         pre_rendered_prompt_tokens: None,
+        admission_notification: None,
     }
 }
 
@@ -267,6 +268,10 @@ fn run(prompt_len: usize, chunk: usize, align: bool, backend: DecodeStorageBacke
             | Ok(GenerateEvent::TokenWithLogprobs(..))
             | Ok(GenerateEvent::Prefill(_)) => {}
             Ok(GenerateEvent::Done(result)) => break result.generated_token_ids,
+            Ok(GenerateEvent::Admitted) => {}
+            Ok(GenerateEvent::RequestMemoryRejected(error)) => {
+                panic!("unexpected memory rejection: {error}")
+            }
             Ok(GenerateEvent::Error(err)) => panic!("unexpected generation error: {err}"),
             Err(err) => panic!("generation did not finish: {err}"),
         }
@@ -424,6 +429,10 @@ fn padded_prefill_keeps_snapshot_reuse() {
     loop {
         match rx.recv_timeout(Duration::from_secs(5)) {
             Ok(GenerateEvent::Done(_)) => break,
+            Ok(GenerateEvent::Admitted) => {}
+            Ok(GenerateEvent::RequestMemoryRejected(error)) => {
+                panic!("unexpected memory rejection: {error}")
+            }
             Ok(GenerateEvent::Error(err)) => panic!("unexpected generation error: {err}"),
             Ok(_) => {}
             Err(err) => panic!("generation did not finish: {err}"),

@@ -236,6 +236,7 @@ pub(super) fn options() -> ServerGenerateOptions {
         grammar: None,
         image_soft_tokens: None,
         pre_rendered_prompt_tokens: None,
+        admission_notification: None,
     }
 }
 
@@ -278,6 +279,10 @@ pub(super) fn run_to_completion(
             Ok(GenerateEvent::Token(_, _))
             | Ok(GenerateEvent::TokenWithLogprobs(_, _, _))
             | Ok(GenerateEvent::Prefill(_)) => {}
+            Ok(GenerateEvent::Admitted) => {}
+            Ok(GenerateEvent::RequestMemoryRejected(error)) => {
+                panic!("unexpected memory rejection: {error}")
+            }
             Ok(GenerateEvent::Done(result)) => return result,
             Ok(GenerateEvent::Error(err)) => panic!("unexpected generation error: {err}"),
             Err(err) => panic!("generation did not finish: {err}"),

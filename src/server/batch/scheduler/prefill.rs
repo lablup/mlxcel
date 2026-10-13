@@ -98,6 +98,15 @@ impl BatchScheduler {
             return;
         }
 
+        // Request memory admission needs the preceding single-slot work to
+        // finish, even if preemption was configured. Never sample a transient
+        // active-request baseline or admit alongside a parked decode graph.
+        if self.request_memory_policy_enabled() && !self.active_batch.is_empty() {
+            let ids = self.active_batch.sequence_ids();
+            self.execute_decode_step(&ids);
+            return;
+        }
+
         // Preemption: if batch is full and preemption is enabled, evict
         // a lower-priority sequence to make room.
         if self.active_batch.is_full() && self.enable_preemption && !self.try_evict_for_preemption()
@@ -137,6 +146,29 @@ impl BatchScheduler {
                 seq.prompt_tokens.len(),
                 self.shared_kv_budget(),
             );
+            self.prompt_cache_seq_ctx.remove(&seq.seq_id);
+            self.release_sequence_caches(seq.seq_id);
+            return;
+        }
+
+        if seq.cancelled.load(Ordering::Acquire) {
+            self.prompt_cache_seq_ctx.remove(&seq.seq_id);
+            self.release_sequence_caches(seq.seq_id);
+            return;
+        }
+        if let Err(rejection) = self.check_request_memory(&seq) {
+            let _ = seq
+                .response_tx
+                .send(GenerateEvent::RequestMemoryRejected(rejection));
+            self.prompt_cache_seq_ctx.remove(&seq.seq_id);
+            self.release_sequence_caches(seq.seq_id);
+            return;
+        }
+        // Provider-held HTTP admission waiters may now commit SSE headers.
+        // Non-target requests ignore this event and retain their previous path.
+        if matches!(self.engine.model(), LoadedModel::NemotronH(_))
+            && seq.response_tx.send(GenerateEvent::Admitted).is_err()
+        {
             self.prompt_cache_seq_ctx.remove(&seq.seq_id);
             self.release_sequence_caches(seq.seq_id);
             return;

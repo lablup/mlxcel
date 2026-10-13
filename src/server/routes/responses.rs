@@ -545,6 +545,9 @@ async fn stream_create_response(
         None
     };
 
+    let admission =
+        crate::server::model_provider::AdmissionWaiter::arm(&mut options, cancelled.clone());
+
     tokio::task::spawn_blocking(move || {
         let mut emitter = ResponseStreamEmitter::new();
         let initial_response = build_response_object(OutboundContext {
@@ -1036,6 +1039,10 @@ async fn stream_create_response(
             store.unregister_in_flight(&response_id_for_task);
         }
     });
+
+    if let Err(error) = admission.wait().await {
+        return generation_error_to_response(error).into_response();
+    }
 
     sse_response(stream, keepalive)
 }

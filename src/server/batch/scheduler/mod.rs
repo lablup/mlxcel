@@ -357,6 +357,8 @@ pub struct BatchScheduler {
     /// constructed.
     #[cfg(test)]
     pub(super) prefill_forward_lengths: Vec<usize>,
+    #[cfg(test)]
+    request_memory_test_inputs: Option<(mlxcel_core::memory::MemorySnapshot, Option<u64>)>,
 
     /// Issue #908 prototype gate, read once from `MLXCEL_MIXED_STEP` at
     /// construction so the tick loop never touches the environment. False (the
@@ -966,6 +968,7 @@ mod prefill;
 mod prompt_cache;
 pub(crate) mod prompt_lookup;
 mod queued_adoption;
+mod request_memory;
 mod run_loop;
 mod shared_budget;
 mod speculative_finalize;
@@ -1089,3 +1092,6 @@ fn context_shift_trim_depth(live_len: i32, excess: i32, keep: i32, requested_dis
     };
     discard.max(excess).min((n_left - 1).max(excess))
 }
+
+#[cfg(test)]
+mod request_memory_tests;

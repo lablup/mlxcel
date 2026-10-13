@@ -103,6 +103,18 @@ fn media_rejection_response(
 }
 
 fn generation_error_to_response(err: anyhow::Error) -> Response {
+    if err
+        .downcast_ref::<crate::execution::request_memory::RequestMemoryRejection>()
+        .is_some()
+    {
+        let response = super::generation_error_to_response(err);
+        return (
+            response.status,
+            axum::Json(serde_json::json!({"type": "error", "error": response.error})),
+        )
+            .into_response();
+    }
+
     if err.downcast_ref::<QueueFullError>().is_some() {
         AnthropicErrorResponse::overloaded("All slots are busy. Please try again later.")
             .into_response()
@@ -576,6 +588,9 @@ async fn stream_messages(
         .map(|ids| ids.len())
         .unwrap_or(0);
 
+    let admission =
+        crate::server::model_provider::AdmissionWaiter::arm(&mut options, cancelled.clone());
+
     tokio::task::spawn_blocking(move || {
         let message_id = format!("msg_{}", short_uuid());
 
@@ -828,6 +843,10 @@ async fn stream_messages(
         });
         let _ = sender.send_event(&AnthropicStreamEvent::MessageStop);
     });
+
+    if let Err(error) = admission.wait().await {
+        return generation_error_to_response(error);
+    }
 
     sse_response(stream, keepalive)
 }

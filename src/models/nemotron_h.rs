@@ -1594,6 +1594,23 @@ impl Drop for NemotronHModel {
 }
 
 impl NemotronHModel {
+    /// Loaded normalized dimensions for single-slot request admission.
+    pub(crate) fn request_memory_config(&self) -> (&NemotronHConfig, u64) {
+        let dtype = match &self.embeddings {
+            UnifiedEmbedding::Quantized(e) => mlxcel_core::array_dtype(&e.scales),
+            UnifiedEmbedding::Regular(e) => mlxcel_core::array_dtype(&e.weight),
+        };
+        let bytes = if dtype == mlxcel_core::dtype::FLOAT16 || dtype == mlxcel_core::dtype::BFLOAT16
+        {
+            2
+        } else if dtype == mlxcel_core::dtype::FLOAT32 {
+            4
+        } else {
+            0
+        };
+        (&self.config, bytes)
+    }
+
     pub fn num_layers(&self) -> usize {
         self.config.num_hidden_layers
     }
@@ -2279,6 +2296,22 @@ impl NemotronHModel {
         tracing::info!("[NemotronH] Loading weights from safetensors...");
         let weights = crate::models::load_text_weights(path, None)?;
         let weights = Self::sanitize_weights(weights, &config);
+
+        // Request admission samples MLX active allocations, not on-disk weight
+        // sizes. Materialize the sanitized weight graph at the load boundary so
+        // --no-warmup (or a failed warmup) cannot make the first request see a
+        // zero/partial resident baseline. Evaluate in place: no second weight
+        // copy survives loading, and failure remains a startup load error.
+        if cfg!(all(target_os = "macos", feature = "metal")) && mlxcel_core::default_device_is_gpu()
+        {
+            for weight in weights.values() {
+                mlxcel_core::try_eval(weight)?;
+            }
+            tracing::info!(
+                resident_bytes = mlxcel_core::memory::active_memory(),
+                "[NemotronH] materialized weights for request memory admission"
+            );
+        }
 
         tracing::info!("[NemotronH] Building model...");
         let model = Self::from_weights(config.clone(), weights, block_types)?;

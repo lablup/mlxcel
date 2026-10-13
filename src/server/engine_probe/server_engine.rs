@@ -296,6 +296,7 @@ impl ServerEngine {
             grammar: None,
             image_soft_tokens: None,
             pre_rendered_prompt_tokens: Some(request.prompt_tokens.to_vec()),
+            admission_notification: None,
         };
         let live = self.server.config().live_settings();
         let before = self.server.observability().snapshot();

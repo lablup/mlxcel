@@ -157,6 +157,10 @@ fn drive(text: &str, stops: &[&str], max_tokens: usize, chunk_bytes: usize) -> R
             GenerateEvent::Token(t, _) | GenerateEvent::TokenWithLogprobs(t, _, _) => {
                 streamed.push_str(&t);
             }
+            GenerateEvent::Admitted => {}
+            GenerateEvent::RequestMemoryRejected(error) => {
+                panic!("unexpected memory rejection: {error}")
+            }
             GenerateEvent::Done(_) | GenerateEvent::Error(_) | GenerateEvent::Prefill(_) => {}
         }
     }

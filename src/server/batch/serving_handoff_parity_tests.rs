@@ -417,7 +417,10 @@ fn collect_text(rx: &mpsc::Receiver<GenerateEvent>) -> String {
             GenerateEvent::Token(t, _) | GenerateEvent::TokenWithLogprobs(t, _, _) => {
                 text.push_str(&t)
             }
-            GenerateEvent::Done(_) | GenerateEvent::Prefill(_) => {}
+            GenerateEvent::Done(_) | GenerateEvent::Prefill(_) | GenerateEvent::Admitted => {}
+            GenerateEvent::RequestMemoryRejected(error) => {
+                panic!("unexpected memory rejection: {error}")
+            }
             GenerateEvent::Error(e) => panic!("unexpected generation error event: {e}"),
         }
     }
