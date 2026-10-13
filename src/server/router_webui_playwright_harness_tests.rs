@@ -518,23 +518,72 @@ async fn start_harness_server(
     })
 }
 
-#[cfg(unix)]
 fn write_private_json(path: &Path, value: serde_json::Value) -> anyhow::Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)?;
-    file.write_all(serde_json::to_string_pretty(&value)?.as_bytes())?;
+
+    let body = serde_json::to_vec_pretty(&value)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("private JSON path has no parent: {}", path.display()))?;
+    // The browser treats the final name as the publication signal. Creating it
+    // before write_all leaves a window where it can observe and parse an empty
+    // or partial document. Stage a private file beside the destination, then
+    // publish it without replacing an earlier response.
+    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+    staged.write_all(&body)?;
+    staged.as_file_mut().sync_all()?;
+    staged
+        .persist_noclobber(path)
+        .map_err(|error| error.error)?;
     Ok(())
 }
 
-#[cfg(not(unix))]
-fn write_private_json(path: &Path, value: serde_json::Value) -> anyhow::Result<()> {
-    std::fs::write(path, serde_json::to_vec_pretty(&value)?)?;
-    Ok(())
+#[test]
+fn private_json_is_complete_when_published_and_never_clobbered() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("control.done.json");
+    // Keep serialization long enough that publishing the final name before
+    // serialization/write (the original bug) gives the reader a real race.
+    let blob = "x".repeat(4 * 1024 * 1024);
+    let expected_len = blob.len();
+    let writer_path = path.clone();
+    let writer = std::thread::spawn(move || {
+        write_private_json(&writer_path, serde_json::json!({ "blob": blob }))
+    });
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !path.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "private JSON was not published"
+        );
+        std::thread::yield_now();
+    }
+    let published: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("read published JSON"))
+            .expect("the published path must always contain complete JSON");
+    writer.join().expect("writer thread").expect("publish JSON");
+    assert_eq!(published["blob"].as_str().map(str::len), Some(expected_len));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("published metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+
+    let original = std::fs::read(&path).expect("original JSON");
+    assert!(
+        write_private_json(&path, serde_json::json!({ "blob": "replacement" })).is_err(),
+        "publishing must retain create-new/no-clobber semantics"
+    );
+    assert_eq!(std::fs::read(&path).expect("unchanged JSON"), original);
 }
 
 fn take_marker(path: &Path) -> bool {
