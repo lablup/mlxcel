@@ -747,7 +747,7 @@ impl GraniteMoeHybridAttention {
 
 // Dense SwiGLU MLP (`GraniteMoeHybridMLP`).
 
-struct GraniteMoeHybridMLP {
+pub(crate) struct GraniteMoeHybridMLP {
     gate_proj: UnifiedLinear,
     up_proj: UnifiedLinear,
     down_proj: UnifiedLinear,
@@ -765,14 +765,14 @@ impl GraniteMoeHybridMLP {
 // Sparse MoE block (`block_sparse_moe`): softmax-over-top-k router + SwitchGLU.
 
 pub(crate) struct GraniteMoeHybridMoE {
-    router: UnifiedLinear,
+    pub(crate) router: UnifiedLinear,
     pub(crate) switch_mlp: SwitchGLU,
     top_k: i32,
     num_experts: i32,
 }
 
 impl GraniteMoeHybridMoE {
-    fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+    pub(crate) fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let orig_shape = mlxcel_core::array_shape(x);
         let hidden_dim = orig_shape[orig_shape.len() - 1];
 

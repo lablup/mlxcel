@@ -340,6 +340,86 @@ fn granite_hybrid_fused_kernel_matches_the_gather_path_at_one_token() {
     );
 }
 
+/// Reproduction for issue #2245: before it, `GraniteMoeHybridMoE::forward`
+/// always took the `SwitchGLU::forward` + `moe_weighted_sum` gather path, so
+/// the fused single-token decode kernel never ran for the family. The
+/// production `forward` must return, at one token, exactly the fused-kernel
+/// computation (bit for bit, since it IS that computation) and not the gather
+/// computation, which the two candidate values below pin. The candidates come
+/// from the block's own router outputs, so the comparison is against the exact
+/// indices and scores `forward` would hand the kernel. Runs only when both
+/// fused MoE ports exist and the `MLXCEL_FUSED_MOE` gate is on, since the
+/// gate is part of the routing under test.
+#[test]
+fn granite_hybrid_forward_routes_one_token_through_the_fused_kernel() {
+    use crate::models::switch_layers::fused_moe_enabled;
+
+    if !mlxcel_core::fused_moe_kernels_available() {
+        eprintln!("skipping: this backend has no fused MoE kernel port (#1803)");
+        return;
+    }
+    if !fused_moe_enabled() {
+        eprintln!("skipping: MLXCEL_FUSED_MOE disables the routing this test pins");
+        return;
+    }
+
+    let moe = fused_moe_block();
+    let x = mlxcel_core::astype(
+        &mlxcel_core::from_slice_f32(
+            &values(FUSED_HIDDEN as usize, -0.4, 0.0125),
+            &[1, FUSED_HIDDEN],
+        ),
+        mlxcel_core::dtype::BFLOAT16,
+    );
+
+    // The router outputs `forward` computes, replicated with the block's own
+    // router so the candidates use the exact indices and scores the
+    // production step would.
+    let logits = moe.router.forward(&x);
+    let kth = 0; // two experts, top_k 2: every expert is routed
+    let indices = mlxcel_core::argpartition(&logits, kth, -1);
+    let indices_shape = mlxcel_core::array_shape(&indices);
+    let topk_indices =
+        mlxcel_core::slice(&indices, &[0, kth], &[indices_shape[0], indices_shape[1]]);
+    let topk_logits = mlxcel_core::take_along_axis(&logits, &topk_indices, -1);
+    let topk_logits = mlxcel_core::astype(&topk_logits, mlxcel_core::dtype::FLOAT32);
+    let scores = mlxcel_core::softmax(&topk_logits, -1);
+
+    let fused = moe
+        .switch_mlp
+        .forward_fused_kernel(&x, &topk_indices, &scores)
+        .expect("honest affine 4-bit experts of dff 64 must dispatch the fused kernel");
+    let fused_candidate = mlxcel_core::reshape(&fused, &[1, FUSED_HIDDEN]);
+    let gather_candidate = moe_weighted_sum(
+        &moe.switch_mlp.forward(&x, &topk_indices),
+        &scores,
+        mlxcel_core::dtype::BFLOAT16,
+    );
+
+    let routed = mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(
+        &moe.forward(&x),
+        mlxcel_core::dtype::FLOAT32,
+    ));
+    let fused = mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(
+        &fused_candidate,
+        mlxcel_core::dtype::FLOAT32,
+    ));
+    let gathered = mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(
+        &gather_candidate,
+        mlxcel_core::dtype::FLOAT32,
+    ));
+
+    assert!(
+        routed.iter().zip(&fused).all(|(a, b)| a == b),
+        "one-token forward must take the fused kernel path, not the gather path"
+    );
+    assert!(
+        routed.iter().zip(&gathered).any(|(a, b)| a != b),
+        "the gather candidate must differ from the fused path for this geometry, \
+         so the bit-exact match above is a routing check"
+    );
+}
+
 /// Regression for the `slice_update`-is-functional footgun: `inject_at_positions`
 /// MUST write the visual features into `h` at the image-token positions. A
 /// dropped `slice_update` return leaves the image slots zero and silently makes
