@@ -1,0 +1,22 @@
+{
+  "status": 400,
+  "response": {
+    "error": {
+      "message": "request (8319 tokens) exceeds the available context size (8192 tokens), try increasing it",
+      "type": "exceed_context_size_error",
+      "code": null
+    }
+  },
+  "health": [
+    200,
+    {
+      "status": "ok"
+    }
+  ],
+  "process_alive": true,
+  "load": [
+    5.47119140625,
+    4.74072265625,
+    4.93408203125
+  ]
+}
