@@ -1871,6 +1871,17 @@ impl LanguageModel for Qwen3NextModel {
         false
     }
 
+    /// A multi-token forward without a sequence id starts an independent
+    /// prompt and resets the model-owned GatedDelta/KV state. Splitting one
+    /// no-ID prompt across multiple forwards would therefore discard the
+    /// earlier chunks. DirectEngine carries a stable sequence id across its
+    /// prefill pieces, but the trait capability also covers legacy callers of
+    /// the cache-less entry point, so those callers must prefill this family in
+    /// one pass. This trades chunk-bounded transient memory for correctness.
+    fn supports_chunked_prefill(&self) -> bool {
+        false
+    }
+
     fn eos_token_ids(&self) -> Vec<i32> {
         vec![151645] // Qwen3 EOS token
     }
