@@ -374,6 +374,36 @@ fn mixed_kimi_caches() -> Vec<KimiLinearCache> {
     ]
 }
 
+/// KimiLinear resets its model-owned Delta and MLA state whenever a
+/// multi-token forward arrives without a sequence id, which keeps two
+/// unrelated cache-less forwards isolated. A no-ID caller must therefore not
+/// split one prompt across multiple forwards because each piece after the
+/// first would discard the recurrent state built by its predecessors.
+#[test]
+fn kimi_linear_loaded_model_opts_out_of_chunked_prefill() {
+    use mlxcel_core::generate::LanguageModel;
+
+    let mut config = mla_config(16);
+    config.num_hidden_layers = 0;
+
+    let mut weights = WeightMap::new();
+    weights.insert(
+        "model.embed_tokens.weight".to_string(),
+        mlxcel_core::zeros(&[32, 32], mlxcel_core::dtype::FLOAT32),
+    );
+    weights.insert(
+        "model.norm.weight".to_string(),
+        mlxcel_core::zeros(&[32], mlxcel_core::dtype::FLOAT32),
+    );
+
+    let model = KimiLinearModel::from_weights(&weights, &config).expect("tiny model loads");
+    let language_model: &dyn LanguageModel = &model;
+    assert!(
+        !language_model.supports_chunked_prefill(),
+        "a no-ID chunked prefill would discard the recurrent state built by every chunk but the last"
+    );
+}
+
 #[test]
 fn kimi_linear_eos_token_ids_come_from_config_metadata() {
     let config = mla_config(16);

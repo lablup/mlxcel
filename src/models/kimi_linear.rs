@@ -1585,6 +1585,29 @@ impl LanguageModel for KimiLinearModel {
         false // Padding tokens corrupt DeltaCache recurrent state
     }
 
+    /// Prefill through the cache-less [`LanguageModel::forward`] entry point
+    /// runs in one pass for this family.
+    ///
+    /// [`Self::forward_for_sequence`] treats a multi-token forward carrying no
+    /// sequence id as the start of a prompt and resets the model-owned Delta
+    /// and MLA state, which is what makes that entry point safe to call twice
+    /// for two unrelated prompts. A no-ID caller that split one prompt across
+    /// forwards would send exactly that shape once per chunk, so every chunk
+    /// after the first would discard the recurrent state its predecessors
+    /// built. DirectEngine currently avoids that reset by carrying a stable
+    /// sequence id across prefill pieces, but the trait capability also covers
+    /// callers of the cache-less entry point.
+    ///
+    /// Opting out is the conservative half of the fix. It costs the prefill
+    /// memory bound of issue #672 (per-chunk transients instead of one graph
+    /// over the whole prompt). Carrying no-ID state across chunks needs
+    /// `forward_for_sequence` to distinguish "new prompt" from "continuation"
+    /// by something other than the token count, which changes the shared
+    /// `ModelOwnedSequenceState` contract.
+    fn supports_chunked_prefill(&self) -> bool {
+        false
+    }
+
     fn supports_batching(&self) -> bool {
         false // KimiLinear uses internal mixed caches (MLA + DeltaCache), not compatible with per-sequence KV isolation
     }
