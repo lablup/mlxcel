@@ -1,0 +1,22 @@
+[
+  {
+    "value": "0",
+    "exit_code": 1,
+    "stderr": "Error: MLXCEL_REQUEST_MEMORY_BUDGET must be a positive finite byte size, for example 12G\n"
+  },
+  {
+    "value": "-1G",
+    "exit_code": 1,
+    "stderr": "Error: MLXCEL_REQUEST_MEMORY_BUDGET must be a positive finite byte size, for example 12G\n"
+  },
+  {
+    "value": "NaN",
+    "exit_code": 1,
+    "stderr": "Error: MLXCEL_REQUEST_MEMORY_BUDGET must be a positive finite byte size, for example 12G\n"
+  },
+  {
+    "value": "18446744073709551616",
+    "exit_code": 1,
+    "stderr": "Error: MLXCEL_REQUEST_MEMORY_BUDGET must be a positive finite byte size, for example 12G\n"
+  }
+]

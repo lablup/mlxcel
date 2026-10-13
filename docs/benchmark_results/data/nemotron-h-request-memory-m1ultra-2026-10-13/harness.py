@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Real checkpoint admission lifecycle, not a speed benchmark."""
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -66,7 +67,9 @@ def run(args: argparse.Namespace, repetition: int) -> dict:
     cmd = [args.binary, "--model", args.model, "--ctx-size", "8192", "--jinja", "--parallel", "1", "--host", "127.0.0.1", "--port", str(port), "--alias", "repro", "--offline"]
     if args.no_warmup:
         cmd.append("--no-warmup")
-    result = {"rep": repetition, "command": cmd, "budget": args.budget, "load_before": os.getloadavg(), "requests": [], "log": str(log_path)}
+    if args.no_batch:
+        cmd.append("--no-batch")
+    result = {"rep": repetition, "binary_sha256": hashlib.sha256(Path(args.binary).read_bytes()).hexdigest(), "command": cmd, "budget": args.budget, "load_before": os.getloadavg(), "requests": [], "log": str(log_path)}
     started = time.monotonic()
     with log_path.open("w") as log:
         proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env)
@@ -121,9 +124,10 @@ def run(args: argparse.Namespace, repetition: int) -> dict:
             require(medium["status"] == 200, f"medium request failed: {medium}")
             medium.update({"case": "accepted_1500", "admission": admissions(log_path)[-1], "footprint": footprint(proc.pid)})
             result["requests"].append(medium)
-            context = request(base, "/v1/completions", {"model": "repro", "prompt": "benchmark " * 8400, "max_tokens": 8, "stream": True})
-            require(context["status"] == 400, f"context precedence: {context}")
-            result["context_rejection"] = context
+            if not args.no_batch:
+                context = request(base, "/v1/completions", {"model": "repro", "prompt": "benchmark " * 8400, "max_tokens": 8, "stream": True})
+                require(context["status"] == 400, f"context precedence: {context}")
+                result["context_rejection"] = context
             result["final_health"] = request(base, "/health")
             require(result["final_health"]["status"] == 200, "final health not200")
             result["load_after"] = os.getloadavg()
@@ -145,6 +149,7 @@ def main() -> None:
     parser.add_argument("--budget", default="24G")
     parser.add_argument("--reps", type=int, default=3)
     parser.add_argument("--no-warmup", action="store_true")
+    parser.add_argument("--no-batch", action="store_true")
     args = parser.parse_args()
     results = []
     for repetition in range(1, args.reps + 1):
