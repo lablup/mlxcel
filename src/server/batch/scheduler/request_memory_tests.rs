@@ -138,7 +138,8 @@ fn request_memory_other_family_is_unchanged() {
 
 #[test]
 fn request_memory_distributed_worker_path_is_excluded() {
-    let scheduler = scheduler().with_request_memory_worker_path(false);
+    let mut scheduler = scheduler();
+    scheduler.set_request_memory_worker_path(false);
     assert!(!scheduler.request_memory_policy_enabled());
 }
 

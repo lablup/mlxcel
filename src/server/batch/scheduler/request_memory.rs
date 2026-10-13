@@ -34,9 +34,12 @@ impl BatchScheduler {
     }
 
     /// Keep the HTTP handshake and scheduler guard on the same local-worker scope.
-    pub(crate) fn with_request_memory_worker_path(mut self, supported: bool) -> Self {
+    ///
+    /// Configure this in place rather than adding another by-value builder step:
+    /// `BatchScheduler` contains `LoadedModel`, and another `Self -> Self` frame
+    /// overflows the default worker-thread stack in unoptimized Linux builds.
+    pub(crate) fn set_request_memory_worker_path(&mut self, supported: bool) {
         self.request_memory_worker_path = supported;
-        self
     }
 
     /// Narrow policy scope; unsupported backends, speculative and other model
