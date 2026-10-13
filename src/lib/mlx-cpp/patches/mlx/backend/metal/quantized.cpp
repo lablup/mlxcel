@@ -1,6 +1,7 @@
 // Copyright © 2023-2026 Apple Inc.
 // Patched by mlxcel: `use_qmv_wide` gains an off-switch, `MLXCEL_QMV_WIDE=0`.
-// Synced to upstream 81ba1c6a. The delta is three hunks: the includes below,
+// Modified from upstream MLX 59d600b5e mlx/backend/metal/quantized.cpp
+// Synced to upstream 59d600b5e. The delta is three hunks: the includes below,
 // `mlxcel_qmv_wide_flag()` with the one call it adds to `use_qmv_wide`, and the
 // two bridge entry points `mlxcel_set_qmv_wide()` / `mlxcel_qmv_wide()` at the
 // end of the file. Everything else is upstream verbatim, so a bump refreshes
@@ -864,6 +865,7 @@ void qmm_nax(
     const array& w,
     const array& scales,
     const std::optional<array>& biases,
+    const std::optional<array>& global_scale,
     array& out,
     bool transpose,
     int group_size,
@@ -910,7 +912,8 @@ void qmm_nax(
       "_wn",
       wn,
       transpose ? (aligned ? "_alN_true" : "_alN_false") : "",
-      batched ? "_batch_1" : "_batch_0");
+      batched ? "_batch_1" : "_batch_0",
+      global_scale ? "_hgs" : "");
   std::string template_def;
   MTL::ComputePipelineState* kernel;
   if (transpose) {
@@ -928,7 +931,8 @@ void qmm_nax(
         bk,
         bn,
         wm,
-        wn);
+        wn,
+        global_scale.has_value());
   } else {
     kernel = get_qmm_nax_kernel_wrapped(
         d,
@@ -953,6 +957,11 @@ void qmm_nax(
   compute_encoder.set_input_array(scales, c++);
   if (biases) {
     compute_encoder.set_input_array(*biases, c++);
+  } else if (transpose) {
+    if (global_scale) {
+      compute_encoder.set_input_array(*global_scale, c);
+    }
+    c++;
   }
   compute_encoder.set_input_array(x, c++);
   compute_encoder.set_output_array(out, c++);
@@ -1080,6 +1089,7 @@ void qmm(
     const array& w,
     const array& scales,
     const std::optional<array>& biases,
+    const std::optional<array>& global_scale,
     array& out,
     bool transpose,
     int group_size,
@@ -1090,6 +1100,10 @@ void qmm(
     metal::Device& d,
     const Stream& s,
     const std::string& mode) {
+  assert(
+      (!global_scale || (transpose && !biases)) &&
+      "qmm global scale requires transposed weights without biases");
+
   bool has_nax_kernel =
       metal::is_nax_available() && (transpose || mode == "affine");
   bool nax_aligned = (K % 64 == 0) && (transpose || N % 64 == 0);
@@ -1100,6 +1114,7 @@ void qmm(
         /* const array& w = */ w,
         /* const array& scales = */ scales,
         /* const std::optional<array>& biases = */ biases,
+        /* const std::optional<array>& global_scale = */ global_scale,
         /* array& out = */ out,
         /* bool transpose = */ transpose,
         /* int group_size = */ group_size,
@@ -1135,7 +1150,8 @@ void qmm(
       "_b_",
       bits,
       transpose ? (aligned ? "_alN_true" : "_alN_false") : "",
-      batched ? "_batch_1" : "_batch_0");
+      batched ? "_batch_1" : "_batch_0",
+      global_scale ? "_hgs" : "");
   std::string template_def;
   MTL::ComputePipelineState* kernel;
   if (transpose) {
@@ -1148,7 +1164,8 @@ void qmm(
         group_size,
         bits,
         aligned,
-        batched);
+        batched,
+        global_scale.has_value());
   } else {
     kernel = get_quantized_kernel_wrapped(
         d, kname, "qmm_n", mode, type_string, group_size, bits, batched);
@@ -1161,6 +1178,11 @@ void qmm(
   compute_encoder.set_input_array(scales, c++);
   if (biases) {
     compute_encoder.set_input_array(*biases, c++);
+  } else if (transpose) {
+    if (global_scale) {
+      compute_encoder.set_input_array(*global_scale, c);
+    }
+    c++;
   }
   compute_encoder.set_input_array(x, c++);
   compute_encoder.set_output_array(out, c++);
@@ -1206,7 +1228,21 @@ void qmm_splitk(
   }
   if (split_k <= 1) {
     return qmm(
-        x, w, scales, biases, out, true, group_size, bits, M, N, K, d, s, mode);
+        x,
+        w,
+        scales,
+        biases,
+        std::nullopt,
+        out,
+        true,
+        group_size,
+        bits,
+        M,
+        N,
+        K,
+        d,
+        s,
+        mode);
   }
 
   int k_partition_size = K / split_k;
@@ -1910,6 +1946,7 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
         w,
         scales,
         biases,
+        std::nullopt,
         out,
         transpose_,
         group_size_,
@@ -2126,6 +2163,26 @@ void QQMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
   int K = x.shape(-1);
   int M = non_batched ? x.size() / K : x.shape(-2);
   int N = out.shape(-1);
+  if (has_global_scales && w_quantized && non_batched &&
+      x.dtype() == bfloat16 && K % 32 == 0 &&
+      M >= get_qmv_batch_limit(K, N, d)) {
+    qmm(x,
+        w_q,
+        scales_w,
+        std::nullopt,
+        global_scale_w,
+        out,
+        true,
+        group_size_,
+        bits_,
+        M,
+        N,
+        K,
+        d,
+        s,
+        mode);
+    return;
+  }
   dispatch_qmv(
       x,
       w_q,
@@ -2194,6 +2251,57 @@ void GatherQQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
     array gs_e(Shape{E}, float32, nullptr, {});
     broadcast(*global_scale_w, gs_e);
     global_scale_w = ensure_row_contiguous(gs_e, d, s);
+  }
+
+  int B = out.size() / M / N;
+  bool use_matrix_kernels = has_global_scales && w_quantized &&
+      x.dtype() == bfloat16 && w_q.ndim() == 3 &&
+      K % (metal::is_nax_available() ? 64 : 32) == 0;
+
+  if (use_matrix_kernels && M == 1 && B >= 16 && right_sorted_) {
+    int E = w_q.size() / w_q.shape(-1) / w_q.shape(-2);
+    if (B / E >= 4) {
+      gather_qmm_rhs(
+          x,
+          w_q,
+          scales_w,
+          std::nullopt,
+          global_scale_w,
+          rhs_indices,
+          out,
+          true,
+          group_size_,
+          bits_,
+          x.size() / K,
+          N,
+          K,
+          d,
+          s,
+          mode);
+      return;
+    }
+  }
+
+  if (use_matrix_kernels && M >= get_qmv_batch_limit(K, N, d)) {
+    gather_qmm(
+        x,
+        w_q,
+        scales_w,
+        std::nullopt,
+        global_scale_w,
+        lhs_indices,
+        rhs_indices,
+        out,
+        true,
+        group_size_,
+        bits_,
+        M,
+        N,
+        K,
+        d,
+        s,
+        mode);
+    return;
   }
 
   gather_qmv(

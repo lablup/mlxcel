@@ -8,6 +8,8 @@
 // fixed floor of that round), and the LRU's lifetime miss counter then aborted
 // the process after 2 * MLX_CUDA_SDPA_CACHE_SIZE misses (lablup/mlxcel#1799).
 //
+// Modified from upstream MLX 81ba1c6a mlx/backend/cuda/scaled_dot_product_attention.cpp
+//
 // Three mlxcel changes sit on top of upstream 81ba1c6a:
 //
 // 1. #1820, the general fix: a small multi-row call carrying an array mask over

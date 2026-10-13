@@ -2,6 +2,7 @@
 // Modified by mlxcel: Added cutlass_gather_mm for general GatherMM with both
 // lhs_indices and rhs_indices support. Synced to upstream c9aa5605, which
 // folds in #3469's Accumulator C-type fix for cutlass half-type matmul.
+// Modified from upstream MLX c9aa5605 mlx/backend/cuda/gemms/grouped_gemm_unaligned.cu
 
 #include "mlx/backend/cuda/cublas_utils.h"
 #include "mlx/backend/cuda/cutlass_utils.cuh"

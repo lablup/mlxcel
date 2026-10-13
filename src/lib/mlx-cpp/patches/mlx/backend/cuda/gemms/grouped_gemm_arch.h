@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Modified from upstream MLX 9a795735 mlx/backend/cuda/gemms/grouped_gemm_arch.h (factored out of grouped_gemm_unaligned.cu in lablup/mlxcel#1544; not a separate upstream file)
 // Added by mlxcel (lablup/mlxcel#1544). Not an upstream MLX file.
 //
 // The CUTLASS architecture tag selection for the grouped GEMM in

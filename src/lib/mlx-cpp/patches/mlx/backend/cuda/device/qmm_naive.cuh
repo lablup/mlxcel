@@ -1,4 +1,10 @@
 // Copyright © 2026 Apple Inc.
+//
+// Patched by mlxcel (lablup/mlxcel#1543): parameterize qmm_naive_mainloop and
+// qmm_naive_kernel on MmaPath instead of bool SM80 so Volta sm_70 can dispatch
+// the Sm70 tensor-core MMA arm from gemm_sm70.cuh.
+//
+// Modified from upstream MLX 59d600b5e mlx/backend/cuda/device/qmm_naive.cuh
 
 #include "mlx/backend/cuda/device/cute_dequant.cuh"
 #include "mlx/backend/cuda/device/gemm_sm70.cuh"
@@ -269,6 +275,10 @@ void qmm_naive_kernel(
   // For gather, use index lookup for input batch slicing.
   uint32_t a_batch = lhs_indices ? lhs_indices[l_coord] : l_coord;
   uint32_t b_batch = rhs_indices ? rhs_indices[l_coord] : l_coord;
+  // The global scale is per gathered expert; a non-gathered call has one.
+  if (global_scale && rhs_indices) {
+    global_scale += b_batch;
+  }
 
   // Get batch slice.
   Tensor mA = mA_mkl(_,_,a_batch); // (M,K)

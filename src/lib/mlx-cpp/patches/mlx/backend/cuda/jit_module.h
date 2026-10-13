@@ -3,6 +3,8 @@
 // Modified by mlxcel (lablup/mlxcel#1566): serialize the per-kernel lazy
 // configuration in JitModule::get_kernel_and_dims.
 //
+// Modified from upstream MLX 9a795735 mlx/backend/cuda/jit_module.h
+//
 // Upstream stores each kernel as (CUfunction, configured_flag, max_block_dim)
 // and fills the last two on first use with no lock, while publishing the flag
 // *before* the dimension. A second thread that observes the flag already set

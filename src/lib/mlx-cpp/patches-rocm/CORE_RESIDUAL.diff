@@ -15,7 +15,7 @@
 # replace: an overlay that silently drops part of an upstream change shows up
 # here as a new hunk, even if it was wrong before the bump.
 #
-# pin: 81ba1c6a0e50a9268b931579c2d4f1158b9aab5a
+# pin: 59d600b5e64c238427d0f8d897ab7c682ef4d3d2
 # fork: 75915908dfe5028335d318b10340313744fd3a8d
 # fork_upstream_merge_base: 39886de461d4f014cd60a3a68ad42fd8d776754a
 # overlay-sha256: ad95c895c1bf4d10b3fdece59d617b35c8f6135a135edb5a08f91a8a0a9afb30 CMakeLists.txt
@@ -26,11 +26,11 @@
 # overlay-sha256: ccf2ae61f566cde4b740b43d62a37fd6c904838b68f8330666073842f290b0f6 mlx/backend/gpu/primitives.cpp
 # overlay-sha256: 744670de21dbd5c74e2cee3afe1d542c2b73c45deee7611765fc9b0dcc99c334 mlx/compile.cpp
 # overlay-sha256: 67e68d6e70df6271ed2f54d75957c4762653b6a32fa6c666ea3b014c5d425acd mlx/device.cpp
-# overlay-sha256: fb3a1dfce38319f1113732bdd40e070be0886ec48f1a53b26b7377065604deed mlx/fast.cpp
-# overlay-sha256: 03638686c779e32639b6887b2ce625e9bda4966f86e6ec757a47045f984361d9 mlx/fast.h
-# overlay-sha256: dad142ea136ff6b4c1fd14c5578526f196d0a1724f41495bbed5798ef6c2ff50 mlx/fast_primitives.h
+# overlay-sha256: b45c24910329b5b40085b6c0607bc2c8e514a4fc3bafcce4e7422701a7d0d78c mlx/fast.cpp
+# overlay-sha256: b1a5366b31412246256ea56f9114bfe7df2fcb93329301ce7ec924f7200c7695 mlx/fast.h
+# overlay-sha256: 46684f0d184dc8e1d19c04839ad315e2a3ad38f58e8bd899d6a0b23031391953 mlx/fast_primitives.h
 # overlay-sha256: f5fccd165887c2860c04fecf3fcf6073397789081183c2bcaaacad8f8f4d8e9e mlx/io/safetensors.cpp
-# overlay-sha256: 029ded214e753db3ead896df34d528200abcf21bd7a6e65d96b1e0f0f5e1c041 mlx/ops.cpp
+# overlay-sha256: 92c85296ae688ef1db962a3c1b2132f0b94493d71ee2de350c259c4ce2493581 mlx/ops.cpp
 # overlay-sha256: 221cf283f6e15a1ddc4d11451eb79e930f2567828cf5fff45cb9ff020c6431e5 mlx/primitives.cpp
 # overlay-sha256: adb49482ec61de1b26887b851ec499b351387d0d030fb240664ded3d3d04e5cd mlx/stream.cpp
 # note mlx/backend/common/compiled.cpp: LOCAL_FIXES.md item 1: resolves the pin/fork conflict, keeping upstream's negative_strides tracking and the fork's constant-input skipping.
@@ -131,7 +131,7 @@
        compute_dynamic_offset(start_indices, out.strides(), axes_, s);
 --- a/mlx/fast_primitives.h
 +++ b/mlx/fast_primitives.h
-@@ -447,11 +447,8 @@
+@@ -479,11 +479,8 @@
        std::vector<ScalarArg> scalar_arguments,
        bool is_precompiled,
        int shared_memory,
@@ -144,7 +144,7 @@
        : Primitive(stream),
          name_(std::move(name)),
          source_(std::move(source)),
-@@ -463,11 +460,8 @@
+@@ -495,11 +492,8 @@
          scalar_arguments_(std::move(scalar_arguments)),
          is_precompiled_(is_precompiled),
          shared_memory_(shared_memory),
@@ -157,7 +157,7 @@
  
    void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
        override {
-@@ -504,12 +498,9 @@
+@@ -536,12 +530,9 @@
    std::vector<ScalarArg> scalar_arguments_;
    bool is_precompiled_;
    int shared_memory_;

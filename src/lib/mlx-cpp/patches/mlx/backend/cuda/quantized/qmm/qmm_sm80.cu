@@ -1,6 +1,7 @@
 // Copyright © 2026 Apple Inc.
-// Patched by mlxcel. Modified from upstream MLX b7c3dd6d
-// mlx/backend/cuda/quantized/qmm/qmm_sm80.cu. Changes:
+// Patched by mlxcel.
+// Modified from upstream MLX b7c3dd6d mlx/backend/cuda/quantized/qmm/qmm_sm80.cu
+// Changes:
 // (1) #637: raise the CTA tile_m cap to 128 on consumer Blackwell
 //     (sm_120/121) for large-M prefill shapes, with MLXCEL_QMM_TILE_{M,N,K}
 //     env overrides (see make_cta_tiler below);

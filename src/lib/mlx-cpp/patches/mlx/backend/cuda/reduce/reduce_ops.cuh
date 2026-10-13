@@ -2,8 +2,7 @@
 //
 // CUDA patch: bf16 reduce accumulation optimization
 //
-// Modified from upstream MLX v0.31.1
-// mlx/backend/cuda/reduce/reduce_ops.cuh
+// Modified from upstream MLX ce45c525 mlx/backend/cuda/reduce/reduce_ops.cuh
 //
 // Changes:
 //   - Added ReduceResult<Sum, __nv_bfloat16> specialization: accumulate in fp32

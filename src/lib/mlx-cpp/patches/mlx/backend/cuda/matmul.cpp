@@ -1,5 +1,7 @@
 // Copyright © 2025 Apple Inc.
-// Modified by mlxcel: Added general GatherMM case using CUTLASS grouped GEMM.
+// Modified by mlxcel: Added general GatherMM case using CUTLASS grouped GEMM
+// (copied at b98831ad and merged with upstream 4652b0086 at 9a795735 in #1198).
+// Modified from upstream MLX 9a795735 mlx/backend/cuda/matmul.cpp
 
 #include "mlx/backend/common/matmul.h"
 #include "mlx/backend/cuda/device.h"

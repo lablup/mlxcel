@@ -2,8 +2,7 @@
 //
 // CUDA patch: bf16 reduce accumulation optimization
 //
-// Modified from upstream MLX v0.31.1
-// mlx/backend/cuda/reduce/col_reduce.cu
+// Modified from upstream MLX 59d600b5e mlx/backend/cuda/reduce/col_reduce.cu
 //
 // Changes:
 //   - Added output type template parameter V (separate from accumulation type U)
@@ -305,8 +304,6 @@ void col_reduce_looped(
         using OP = MLX_GET_TYPE(reduce_type_tag);
         using T = cuda_type_t<MLX_GET_TYPE(type_tag)>;
         using U = typename cu::ReduceResult<OP, T>::type;
-        // Cub doesn't like const pointers for vectorized loads. (sigh)
-        T* indata = const_cast<T*>(gpu_ptr<T>(in));
 
         constexpr int N_READS = 4;
         constexpr int BM = 32;
@@ -320,7 +317,7 @@ void col_reduce_looped(
             kernel,
             grid,
             blocks,
-            indata,
+            gpu_ptr<T>(in),
             gpu_ptr<T>(out),
             static_cast<cu::ColReduceArgs>(args),
             out.size() / args.reduction_stride);
@@ -431,9 +428,6 @@ void col_reduce_two_pass(
 
         // --- First pass: T input -> U intermediate ---
         {
-          // Cub doesn't like const pointers for vectorized loads. (sigh)
-          T* indata = const_cast<T*>(gpu_ptr<T>(in));
-
           constexpr int N_READS = 4;
           constexpr int BM = 32;
           constexpr int BN = 32;
@@ -456,7 +450,7 @@ void col_reduce_two_pass(
               kernel,
               grid,
               blocks,
-              indata,
+              gpu_ptr<T>(in),
               gpu_ptr<U>(intermediate),
               static_cast<cu::ColReduceArgs>(args),
               out.size() / args.reduction_stride);

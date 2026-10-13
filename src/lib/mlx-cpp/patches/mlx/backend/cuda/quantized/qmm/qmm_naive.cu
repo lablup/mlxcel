@@ -1,4 +1,5 @@
 // Copyright © 2026 Apple Inc.
+// Modified from upstream MLX 81ba1c6a mlx/backend/cuda/quantized/qmm/qmm_naive.cu
 // Patched by mlxcel (lablup/mlxcel#1541): size the CTA tile against the
 // device's real per-block shared-memory budget instead of a shape rule
 // standing in for one, opt into a larger dynamic shared-memory maximum when

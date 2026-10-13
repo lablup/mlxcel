@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Modified from upstream MLX 9a795735 mlx/backend/cuda/quantized/qmm/qmm_naive_tile.h (factored out of qmm_naive.cu in lablup/mlxcel#1541; not a separate upstream file)
 // Added by mlxcel (lablup/mlxcel#1541). Not an upstream MLX file.
 //
 // The CTA tile selection for `qmm_naive`, factored out of `qmm_naive.cu` as a

@@ -1,4 +1,9 @@
 // Copyright © 2026 Apple Inc.
+//
+// Patched by mlxcel (lablup/mlxcel#1543): add MmaPath::Sm70 Volta 8x8x4
+// quad-pair tensor-core arm to make_tiled_mma for qmm_naive.
+//
+// Modified from upstream MLX 9a795735 mlx/backend/cuda/device/gemm_sm70.cuh
 
 #include <cute/tensor.hpp>
 

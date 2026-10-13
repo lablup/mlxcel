@@ -2,8 +2,7 @@
 //
 // CUDA patch: bf16 reduce accumulation optimization
 //
-// Modified from upstream MLX v0.31.1
-// mlx/backend/cuda/reduce/all_reduce.cu
+// Modified from upstream MLX 59d600b5e mlx/backend/cuda/reduce/all_reduce.cu
 //
 // Changes:
 //   - Added output type template parameter V (separate from accumulation type U)
@@ -80,12 +79,12 @@ void all_reduce(
 
   out.set_data(cu::malloc_async(out.nbytes(), encoder));
 
-  auto get_args = [](int size, int N) {
-    int threads = std::min(512, (size + N - 1) / N);
+  auto get_args = [](size_t size, size_t N) {
+    int threads =
+        static_cast<int>(std::min(size_t{512}, cuda::ceil_div(size, N)));
     threads = ((threads + WARP_SIZE - 1) / WARP_SIZE) * WARP_SIZE;
-    int reductions_per_step = threads * N;
-    size_t steps_needed =
-        (size + reductions_per_step - 1) / reductions_per_step;
+    size_t reductions_per_step = threads * N;
+    size_t steps_needed = cuda::ceil_div(size, reductions_per_step);
 
     int blocks;
     if (steps_needed < 32) {
@@ -100,7 +99,7 @@ void all_reduce(
       blocks = 1024;
     }
 
-    size_t steps_per_block = (steps_needed + blocks - 1) / blocks;
+    size_t steps_per_block = cuda::ceil_div(steps_needed, blocks);
     size_t block_step = steps_per_block * reductions_per_step;
 
     return std::make_tuple(blocks, threads, block_step);
@@ -109,9 +108,7 @@ void all_reduce(
   int blocks, threads;
   size_t block_step;
   size_t insize = in.size();
-
-  // Cub doesn't like const pointers for load (sigh).
-  void* indata = const_cast<void*>(gpu_ptr<void>(in));
+  void* indata = gpu_ptr<void>(in);
 
   // Large array so allocate an intermediate and accumulate there
   std::tie(blocks, threads, block_step) = get_args(insize, N_READS);
@@ -144,7 +141,7 @@ void all_reduce(
             kernel_pass1,
             blocks,
             threads,
-            static_cast<T*>(indata),
+            indata,
             gpu_ptr<U>(intermediate),
             block_step,
             insize);
@@ -178,7 +175,7 @@ void all_reduce(
             kernel,
             blocks,
             threads,
-            static_cast<T*>(indata),
+            indata,
             gpu_ptr<T>(out),
             block_step,
             insize);

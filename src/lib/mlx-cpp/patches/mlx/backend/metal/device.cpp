@@ -1,6 +1,7 @@
 // Copyright © 2023-2024 Apple Inc.
 // Patched by mlxcel: a runtime override for the per-command-buffer input
-// budget. Synced to upstream 81ba1c6a. The delta is three hunks: the <atomic>
+// budget. Synced to upstream 81ba1c6a.
+// Modified from upstream MLX 81ba1c6a mlx/backend/metal/device.cpp The delta is three hunks: the <atomic>
 // include below, the override read in `CommandEncoder::needs_commit`, and the
 // two bridge entry points `mlxcel_set_mb_per_buffer_override()` /
 // `mlxcel_mb_per_buffer_override()` at the end of the file. Everything else is

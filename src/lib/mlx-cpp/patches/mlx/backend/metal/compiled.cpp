@@ -1,5 +1,6 @@
 // Copyright © 2023-2024 Apple Inc.
 // mlxcel patch: adds static_cast for mixed-dtype compiled ops.
+// Modified from upstream MLX 81ba1c6a mlx/backend/metal/compiled.cpp
 // Synced to upstream 81ba1c6a. The only delta is that cast, in build_kernel's
 // emission of an op's inputs; everything else is upstream verbatim. Until this
 // sync the file also emitted `elem_to_loc_1<uint>` for 1-D inputs, a leftover

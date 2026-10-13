@@ -1,4 +1,5 @@
-// Copyright © 2025 Apple Inc.
+// Copyright © 2025-2026 Apple Inc.
+//
 // Patched by mlxcel: (1) ensure input contiguity in QuantizedMatmul for
 // non-contiguous 3D batched weights (e.g. GLM-4 MLA embed_q with
 // transpose=false); (2) split long-prompt quantized matmuls so no CUDA launch
@@ -10,17 +11,14 @@
 // qmm_sm80, the naive kernel and qmv is the most architecture-dependent
 // dispatch in decode and MLX exposes no hook for it, so the one-shot trace has
 // to be emitted from the dispatch site itself.
-// Synced to upstream 81ba1c6a. Between 9a795735 and 81ba1c6a upstream touched
-// this file once, ml-explore/mlx#4458, which gives GatherQMM::eval_gpu a
-// guard that refuses a global scale outside Metal and keys `biases` on
-// `mode_ == Affine` instead of `inputs.size() == 6`. Both land ahead of delta
-// (3) and merged without conflict, and the grouped-GEMM gate below already
-// reads `biases` only on the affine path. qmm/qmm.h is byte-identical across
-// that range, which means every dispatch entry point consumed here
-// (qmm_naive, qmm_sm90, qmm_sm80, qmv, gather_qmv, fp_qmv) kept its
-// signature, including the `const std::optional<array>& global_scale`
-// parameter ml-explore/mlx#3757 added to qmm_naive at position 5 that both
-// call sites below pass std::nullopt for.
+//
+// Modified from upstream MLX 59d600b5e mlx/backend/cuda/quantized/quantized.cpp
+//
+// Between 81ba1c6a and 59d600b5e upstream touched this file in
+// ml-explore/mlx#4507, plumbing `global_scale` into GatherQMM::eval_gpu for
+// nvfp4 and gating qmm_sm80 off when `global_scale` is present. The grouped-GEMM
+// fast path already declines nvfp4 above, and `call_qmm_naive` / `call_qmv`
+// forward `global_scale` into each batch chunk.
 //
 // Re-verify these call sites against qmm.h on the next pin bump; an overlay
 // that silently reverts an upstream change is how #830 / #831 happened.
@@ -328,17 +326,16 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
   auto& s = stream();
   auto& encoder = cu::get_command_encoder(s);
 
-  if (mode_ != QuantizationMode::Affine && inputs.size() == 6) {
-    throw std::runtime_error(
-        "[GatherQMM] Global scale is only supported on the Metal backend.");
-  }
-
   array x = ensure_row_contiguous(inputs[0], encoder, s);
   const array& w = inputs[1];
   const array& scales = inputs[2];
+  // Affine gets biases at index 3, nvfp4 an optional global scale.
   std::optional<array> biases;
+  std::optional<array> global_scale;
   if (mode_ == QuantizationMode::Affine) {
     biases = inputs[3];
+  } else if (inputs.size() == 6) {
+    global_scale = ensure_row_contiguous(inputs[3], encoder, s);
   }
   array lhs_indices =
       ensure_row_contiguous(inputs[inputs.size() - 2], encoder, s);
@@ -458,7 +455,10 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
         mode_,
         encoder.device());
   };
-  bool can_use_qmm_sm80 = supports(supports_qmm_sm80);
+  // qmm_sm80 does not apply global scales yet; route such calls to the
+  // naive kernel until it does.
+  bool can_use_qmm_sm80 =
+      !global_scale.has_value() && supports(supports_qmm_sm80);
   bool can_use_qmm_naive = supports(supports_qmm_naive);
   bool can_use_qmv = supports(supports_qmv);
 
@@ -491,7 +491,7 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
               w,
               scales,
               biases,
-              std::nullopt,
+              global_scale,
               lc,
               rc,
               oc,
@@ -512,6 +512,7 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
               w,
               scales,
               biases,
+              global_scale,
               lc,
               rc,
               oc,

@@ -2,8 +2,7 @@
 //
 // CUDA patch: bf16 reduce accumulation optimization
 //
-// Modified from upstream MLX v0.31.1
-// mlx/backend/cuda/reduce/row_reduce.cu
+// Modified from upstream MLX 59d600b5e mlx/backend/cuda/reduce/row_reduce.cu
 //
 // Changes:
 //   - Added output type template parameter V (separate from accumulation type U)
@@ -296,10 +295,15 @@ void row_reduce_simple(
         kernel = cu::row_reduce_simple<T, U, T, OP, N_READS, 2>;
       }
 
-      T* indata = const_cast<T*>(gpu_ptr<T>(in));
       int size = plan.shape.back();
       encoder.add_kernel_node(
-          kernel, grid, block, indata, gpu_ptr<T>(out), out.size(), size);
+          kernel,
+          grid,
+          block,
+          gpu_ptr<T>(in),
+          gpu_ptr<T>(out),
+          out.size(),
+          size);
     });
   });
 }

@@ -1,5 +1,6 @@
 // Copyright © 2025 Apple Inc.
 // Modified by mlxcel: Added cutlass_gather_mm for general GatherMM support.
+// Modified from upstream MLX b98831ad mlx/backend/cuda/gemms/grouped_gemm.h
 
 #pragma once
 

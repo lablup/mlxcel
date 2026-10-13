@@ -1,5 +1,6 @@
 // Copyright © 2025 Apple Inc.
-// Modified by mlxcel (synced to upstream e9463bb):
+// Modified from upstream MLX 9a795735 mlx/backend/cuda/jit_module.cpp
+// Modified by mlxcel (rebased onto 9a795735 in #1198):
 // - CCCL include resolution honors the MLXCEL_CCCL_DIR override and resolves
 //   the executable directory from /proc/self/exe, so the bundled headers are
 //   found regardless of how the process is launched (a relative ./mlxcel from

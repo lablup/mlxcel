@@ -2,8 +2,7 @@
 //
 // CUDA patch: bf16 reduce accumulation optimization
 //
-// Modified from upstream MLX v0.31.1
-// mlx/backend/cuda/reduce/init_reduce.cu
+// Modified from upstream MLX 9a795735 mlx/backend/cuda/reduce/init_reduce.cu
 //
 // Changes:
 //   - Uses T (input type) for output pointer instead of U (accumulation type)

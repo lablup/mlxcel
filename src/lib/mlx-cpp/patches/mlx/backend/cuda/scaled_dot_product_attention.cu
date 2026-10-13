@@ -14,6 +14,8 @@
 // launches (a no-op for D <= 128 which already fit). The .cpp is unchanged:
 // cudnn rejects head_dim > 128, so widening this gate alone routes 256/288
 // decode to the vector kernels. Synced to upstream e9463bb.
+//
+// Modified from upstream MLX e9463bb mlx/backend/cuda/scaled_dot_product_attention.cu
 
 // Required for using M_LOG2E in MSVC.
 #define _USE_MATH_DEFINES

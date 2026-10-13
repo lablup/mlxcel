@@ -47,6 +47,16 @@ NO_GPU(GatherQQMM)
 namespace fast {
 NO_GPU_USE_FALLBACK(CrossEntropy)
 NO_GPU_MULTI(CrossEntropyVJP)
+bool GatedDeltaUpdate::use_fallback(
+    const int Hk,
+    const int Dk,
+    const int Hv,
+    const int Dv,
+    const bool has_mask,
+    Stream s) {
+  return true;
+}
+NO_GPU_MULTI(GatedDeltaUpdate)
 } // namespace fast
 
 // Note: The following are now implemented in their respective files:

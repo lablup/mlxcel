@@ -5,6 +5,8 @@
 // Without this patch, Gemma 4 and Qwen 3.5 models crash on CUDA because
 // their computation graphs produce mixed bf16/float intermediates in the
 // compiled DAG.
+//
+// Modified from upstream MLX 81ba1c6a mlx/backend/cuda/device/binary_ops.cuh
 
 #include "mlx/backend/cuda/device/unary_ops.cuh"
 

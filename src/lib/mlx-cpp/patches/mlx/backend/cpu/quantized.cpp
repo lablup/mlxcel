@@ -1,5 +1,6 @@
 // Copyright © 2023-2026 Apple Inc.
 // Patched by mlxcel: the scalar quantized matmul loops accumulate in float.
+// Modified from upstream MLX 81ba1c6a mlx/backend/cpu/quantized.cpp
 // Synced to upstream 81ba1c6a. The delta is the bodies of four functions,
 // `_qmm`, `_qmm_t`, `fp_qmm` and `fp_qmm_t`, each marked `mlxcel:` below; the
 // SIMD variants and everything else are upstream verbatim.

@@ -2,7 +2,7 @@
 //
 // CUDA patch: Mixed-precision binary operation dispatch for bf16
 //
-// Modified from upstream MLX 81ba1c6a mlx/ops.cpp
+// Modified from upstream MLX 59d600b5e mlx/ops.cpp
 //
 // Changes:
 //   - Added bf16_mixed_astype() helper that skips astype conversion when the
@@ -5610,9 +5610,9 @@ array gather_qmm(
           << ".";
       throw std::invalid_argument(msg.str());
     }
-    if (to_stream(s).device != Device::gpu || !metal::is_available()) {
+    if (to_stream(s).device != Device::gpu) {
       throw std::invalid_argument(
-          "[gather_qmm] Global scale is only supported on the Metal backend.");
+          "[gather_qmm] Global scale is only supported on the GPU.");
     }
   }
   if (qmode == QuantizationMode::Affine) {
@@ -5715,7 +5715,13 @@ array gather_qqmm(
   return array(
       std::move(out_shape),
       x.dtype(),
-      std::make_shared<GatherQQMM>(stream, group_size, bits, qmode),
+      std::make_shared<GatherQQMM>(
+          stream,
+          group_size,
+          bits,
+          qmode,
+          sorted_indices && !rhs_indices_,
+          sorted_indices && !lhs_indices_),
       std::move(inputs));
 }
 

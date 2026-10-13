@@ -2,7 +2,7 @@
 //
 // CUDA patch: bf16 type promotion preservation
 //
-// Modified from upstream MLX v0.31.1 mlx/dtype.cpp
+// Modified from upstream MLX ce45c525 mlx/dtype.cpp
 //
 // Changes to the type_rules promotion table:
 //   - bf16 + float32 → bf16  (was float32)

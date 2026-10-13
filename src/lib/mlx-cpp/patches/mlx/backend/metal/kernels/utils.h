@@ -1,4 +1,9 @@
 // Copyright © 2023-2024 Apple Inc.
+//
+// Patched by mlxcel: include <metal_simdgroup_matrix> and qualify metal::vec<IdxT, N>
+// in elem_to_loc_{2,3}_nd for macOS 26.4 Metal compiler compatibility.
+//
+// Modified from upstream MLX 81ba1c6a mlx/backend/metal/kernels/utils.h
 
 #pragma once
 

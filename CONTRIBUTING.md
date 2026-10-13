@@ -147,6 +147,45 @@ After bumping the pin, re-validate the in-tree fused Metal kernel launchers in `
 
 All three should produce output within RMS < 5e-3 of the graph reference on Apple Silicon.
 
+#### Reconciling CUDA, Metal, and CPU source overlays
+
+The overlays in `src/lib/mlx-cpp/patches/` and `src/lib/mlx-cpp/patches-cuda/` are applied whole-file with `configure_file(... COPYONLY)`, so any upstream commit to an overlaid file is silently reverted when the pin moves unless the overlay is rebased first. Every file under those two directories therefore carries a single machine-readable base line in its header comment:
+
+```cpp
+// Modified from upstream MLX <sha> <upstream/relative/path>
+```
+
+`<sha>` is the upstream MLX commit (7–40 lowercase hex characters, resolvable with `git rev-parse` in an `ml-explore/mlx` clone) that the overlay was copied from or last rebased onto, established by diffing against upstream rather than stamping the current pin onto untouched files.
+
+Before and after bumping `GIT_TAG`, run the drift check against an `ml-explore/mlx` checkout (such as `$OUT_DIR/build/_deps/mlx-src` or `~/.cache/mlxcel/mlxcelverse/mlx.git`):
+
+```bash
+MLX_SRC=<ml-explore/mlx clone, or $OUT_DIR/build/_deps/mlx-src>
+PIN=$(bash scripts/ci/mlx_pinned_commit.sh)
+for f in $(find src/lib/mlx-cpp/patches src/lib/mlx-cpp/patches-cuda -type f); do
+  case "$f" in
+    */patches-cuda/*) up="mlx/$(basename "$f")" ;;
+    *) up="${f#src/lib/mlx-cpp/patches/}" ;;
+  esac
+  base=$(sed -n 's|^// *Modified from upstream MLX \([0-9a-f]\{7,40\}\).*|\1|p' "$f" | head -1)
+  [ -n "$base" ] || { echo "NO BASE $f"; continue; }
+  n=$(git -C "$MLX_SRC" log --oneline "$base..$PIN" -- "$up" | wc -l)
+  [ "$n" -eq 0 ] || echo "DRIFT $n $f (base $base)"
+done
+```
+
+For each file reported as `DRIFT`, 3-way merge the overlay from its declared `<base>` onto the new pin:
+
+```bash
+git -C "$MLX_SRC" show "<base>:<up>" > /tmp/mlx-base
+git -C "$MLX_SRC" show "$PIN:<up>" > /tmp/mlx-theirs
+git merge-file <overlay> /tmp/mlx-base /tmp/mlx-theirs
+```
+
+Resolve any conflicts, diff `<overlay>` line by line against `/tmp/mlx-theirs` to verify that every mlxcel delta documented in the file's header survived and no upstream change was dropped, and update that overlay's `// Modified from upstream MLX <sha> <path>` line to the new pin. When done, the drift check must produce no `NO BASE` and no `DRIFT` lines against `$PIN`. If upstream now carries the fix natively, retire the overlay instead of rebasing it.
+
+#### Reconciling the ROCm overlay
+
 The ROCm overlay in [`src/lib/mlx-cpp/patches-rocm/`](src/lib/mlx-cpp/patches-rocm/README.md) follows the pin too, and `make verify-rocm-overlay` (part of `make verify`) fails until it does: `patches-rocm/UPSTREAM` must name the new pin. The procedure is [`docs/mlxcelverse/rocm-overlay.md`](docs/mlxcelverse/rocm-overlay.md): `scripts/mlxcelverse/rocm_overlay.py retarget` 3-way merges the overlay's MLX core files onto the new pin; on an AMD host `scripts/mlxcelverse/check_api_drift.sh` lists the backend's compile errors and the primitives left without a ROCm `eval_gpu` (undefined symbols, since `libmlx` is static), which get a fix or a `NO_GPU` stub; `rocm_overlay.py drift` compares each core file line by line with the new pin plus the fork's own change and must match the reviewed `patches-rocm/CORE_RESIDUAL.diff`, which is what catches an overlay that was already wrong before the bump. Record each fix in `patches-rocm/LOCAL_FIXES.md`, run `make verify-rocm` on the AMD host (it includes the generation smoke from #1811), and add the "ROCm overlay" section described in that document to the PR body and to the technical report if there is one.
 
 ## Development environment
