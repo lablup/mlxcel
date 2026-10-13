@@ -1,0 +1,69 @@
+{
+  "command": [
+    "target/release/mlxcel-server",
+    "--model",
+    "models/mlx/qwen2.5-7b-instruct-4bit",
+    "--offline",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "50235",
+    "--parallel",
+    "1",
+    "--ctx-size",
+    "4096",
+    "--alias",
+    "repro"
+  ],
+  "budget": "1",
+  "binary_sha256": "e7a5cc9997a8c0eeceba6a69769353eed35395e906b270d2c62a5f437e2a7062",
+  "load_before": [
+    5.1533203125,
+    5.9248046875,
+    7.2822265625
+  ],
+  "requests": [
+    {
+      "status": 200,
+      "content_type": "application/json",
+      "body": {
+        "id": "cmpl-64415a6c-ff62-43ef-b84e-298fb2e3c14f",
+        "object": "text_completion",
+        "created": 1791905835,
+        "model": "repro",
+        "system_fingerprint": null,
+        "choices": [
+          {
+            "index": 0,
+            "text": " Paris. It is located in the northern",
+            "finish_reason": "length",
+            "logprobs": null
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 5,
+          "completion_tokens": 8,
+          "total_tokens": 13,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        }
+      },
+      "elapsed_s": 0.11453845800133422
+    },
+    {
+      "status": 200,
+      "content_type": "text/event-stream",
+      "body": "data: {\"id\":\"cmpl-962e0204-7d42-4cd6-93bf-76da8166a6dd\",\"object\":\"text_completion\",\"created\":1791905836,\"model\":\"repro\",\"system_fingerprint\":null,\"choices\":[{\"index\":0,\"text\":\" Paris\",\"finish_reason\":null,\"logprobs\":null}]}\n\ndata: {\"id\":\"cmpl-962e0204-7d42-4cd6-93bf-76da8166a6dd\",\"object\":\"text_completion\",\"created\":1791905836,\"model\":\"repro\",\"system_fingerprint\":null,\"choices\":[{\"index\":0,\"text\":\".\",\"finish_reason\":null,\"logprobs\":null}]}\n\ndata: {\"id\":\"cmpl-962e0204-7d42-4cd6-93bf-76da8166a6dd\",\"object\":\"text_completion\",\"created\":1791905836,\"model\":\"repro\",\"system_fingerprint\":null,\"choices\":[{\"index\":0,\"text\":\" It\",\"finish_reason\":null,\"logprobs\":null}]}\n\ndata: {\"id\":\"cmpl-962e0204-7d42-4cd6-93bf-76da8166a6dd\",\"object\":\"text_completion\",\"created\":1791905836,\"model\":\"repro\",\"system_fingerprint\":null,\"choices\":[{\"index\":0,\"text\":\" is\",\"finish_reason\":null,\"logprobs\":null}]}\n\ndata: {\"id\":\"cmpl-962e0204-7d42-4cd6-93bf-76da8166a6dd\",\"object\":\"text_completion\",\"created\":1791905836,\"model\":\"repro\",\"system_fingerprint\":null,\"choices\":[{\"index\":0,\"text\":\" located\",\"finish_reason\":null,\"logprobs\":null}]}\n\ndata: {\"id\":\"cmpl-962e0204-7d42-4cd6-93bf-76da8166a6dd\",\"object\":\"text_completion\",\"created\":1791905836,\"model\":\"repro\",\"system_fingerprint\":null,\"choices\":[{\"index\":0,\"text\":\" in\",\"finish_reason\":null,\"logprobs\":null}]}\n\ndata: {\"id\":\"cmpl-962e0204-7d42-4cd6-93bf-76da8166a6dd\",\"object\":\"text_completion\",\"created\":1791905836,\"model\":\"repro\",\"system_fingerprint\":null,\"choices\":[{\"index\":0,\"text\":\" the\",\"finish_reason\":null,\"logprobs\":null}]}\n\ndata: {\"id\":\"cmpl-962e0204-7d42-4cd6-93bf-76da8166a6dd\",\"object\":\"text_completion\",\"created\":1791905836,\"model\":\"repro\",\"system_fingerprint\":null,\"choices\":[{\"index\":0,\"text\":\" northern\",\"finish_reason\":null,\"logprobs\":null}]}\n\ndata: {\"id\":\"cmpl-962e0204-7d42-4cd6-93bf-76da8166a6dd\",\"object\":\"text_completion\",\"created\":1791905836,\"model\":\"repro\",\"system_fingerprint\":null,\"choices\":[{\"index\":0,\"text\":\"\",\"finish_reason\":\"length\",\"logprobs\":null}]}\n\ndata: [DONE]\n\n",
+      "elapsed_s": 0.10268333298154175
+    }
+  ],
+  "health": {
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "status": "ok"
+    },
+    "elapsed_s": 0.0006745830178260803
+  }
+}

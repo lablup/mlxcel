@@ -1,0 +1,376 @@
+[
+  {
+    "rep": 1,
+    "binary_sha256": "e7a5cc9997a8c0eeceba6a69769353eed35395e906b270d2c62a5f437e2a7062",
+    "command": [
+      "target/release/mlxcel-server",
+      "--model",
+      "models/mlx/nvidia-nemotron-3-nano-30b-a3b-4bit",
+      "--ctx-size",
+      "8192",
+      "--jinja",
+      "--parallel",
+      "1",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "50100",
+      "--alias",
+      "repro",
+      "--offline"
+    ],
+    "budget": "24G",
+    "load_before": [
+      5.89990234375,
+      6.17626953125,
+      7.46484375
+    ],
+    "requests": [
+      {
+        "status": 503,
+        "content_type": "application/json",
+        "body": {
+          "error": {
+            "message": "request_memory_budget_exceeded: estimated_bytes=29352994060, budget_bytes=25769803776; shorten the prompt/output or lower retained cache usage",
+            "type": "request_memory_budget_exceeded",
+            "code": "request_memory_budget_exceeded",
+            "estimated_bytes": 29352994060,
+            "budget_bytes": 25769803776
+          }
+        },
+        "elapsed_s": 0.00812412501545623,
+        "case": "reject",
+        "route": "/v1/completions",
+        "stream": false,
+        "footprint": {
+          "peak_bytes": 18146236825,
+          "current_bytes": 18146236825
+        },
+        "admission": {
+          "prompt_tokens": 6001,
+          "output_tokens": 8,
+          "largest_forward_tokens": 2048,
+          "estimated_bytes": 29352994060,
+          "budget_bytes": 25769803776,
+          "resident_bytes": 17777861900,
+          "allocator_cache_bytes": 51426664,
+          "admitted": false
+        },
+        "health_status": 200
+      },
+      {
+        "status": 200,
+        "content_type": "application/json",
+        "body": {
+          "id": "cmpl-35dc2747-a488-4c94-9f5b-d03c71db0007",
+          "object": "text_completion",
+          "created": 1791905784,
+          "model": "repro",
+          "system_fingerprint": null,
+          "choices": [
+            {
+              "index": 0,
+              "text": "10000000",
+              "finish_reason": "length",
+              "logprobs": null
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 17,
+            "completion_tokens": 8,
+            "total_tokens": 25,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          }
+        },
+        "elapsed_s": 0.5463505419902503,
+        "case": "accept_after_reject",
+        "route": "/v1/completions",
+        "stream": false,
+        "footprint": {
+          "peak_bytes": 18146236825,
+          "current_bytes": 18146236825
+        },
+        "admission": {
+          "prompt_tokens": 17,
+          "output_tokens": 8,
+          "largest_forward_tokens": 17,
+          "estimated_bytes": 19126584460,
+          "budget_bytes": 25769803776,
+          "resident_bytes": 17777861900,
+          "allocator_cache_bytes": 51426664,
+          "admitted": true
+        },
+        "health_status": 200
+      },
+      {
+        "status": 503,
+        "content_type": "application/json",
+        "body": {
+          "error": {
+            "message": "request_memory_budget_exceeded: estimated_bytes=29352994060, budget_bytes=25769803776; shorten the prompt/output or lower retained cache usage",
+            "type": "request_memory_budget_exceeded",
+            "code": "request_memory_budget_exceeded",
+            "estimated_bytes": 29352994060,
+            "budget_bytes": 25769803776
+          }
+        },
+        "elapsed_s": 0.007055417052470148,
+        "case": "reject",
+        "route": "/v1/completions",
+        "stream": true,
+        "footprint": {
+          "peak_bytes": 18146236825,
+          "current_bytes": 18146236825
+        },
+        "admission": {
+          "prompt_tokens": 6001,
+          "output_tokens": 8,
+          "largest_forward_tokens": 2048,
+          "estimated_bytes": 29352994060,
+          "budget_bytes": 25769803776,
+          "resident_bytes": 17777861900,
+          "allocator_cache_bytes": 68705834,
+          "admitted": false
+        },
+        "health_status": 200
+      },
+      {
+        "status": 200,
+        "content_type": "text/event-stream",
+        "body": "data: {\"id\":\"cmpl-fd4f20e3-65ed-42d7-964d-1201931c79ae\",\"object\":\"text_completion\",\"created\":1791905788,\"model\":\"repro\",\"system_fingerprint\":null,\"choices\":[{\"index\":0,\"text\":\"1\",\"finish_reason\":null,\"logprobs\":null}]}\n\ndata: {\"id\":\"cmpl-fd4f20e3-65ed-42d7-964d-1201931c79ae\",\"object\":\"text_completion\",\"created\":1791905788,\"model\":\"repro\",\"system_fingerprint\":null,\"choices\":[{\"index\":0,\"text\":\"0\",\"finish_reason\":null,\"logprobs\":null}]}\n\ndata: {\"id\":\"cmpl-fd4f20e3-65ed-42d7-964d-1201931c79ae\",\"object\":\"text_completion\",\"created\":1791905788,\"model\":\"repro\",\"system_fingerprint\":null,\"choices\":[{\"index\":0,\"text\":\"0\",\"finish_reason\":null,\"logprobs\":null}]}\n\ndata: {\"id\":\"cmpl-fd4f20e3-65ed-42d7-964d-1201931c79ae\",\"object\":\"text_completion\",\"created\":1791905788,\"model\":\"repro\",\"system_fingerprint\":null,\"choices\":[{\"index\":0,\"text\":\"0\",\"finish_reason\":null,\"logprobs\":null}]}\n\ndata: {\"id\":\"cmpl-fd4f20e3-65ed-42d7-964d-1201931c79ae\",\"object\":\"text_completion\",\"created\":1791905788,\"model\":\"repro\",\"system_fingerprint\":null,\"choices\":[{\"index\":0,\"text\":\"0\",\"finish_reason\":null,\"logprobs\":null}]}\n\ndata: {\"id\":\"cmpl-fd4f20e3-65ed-42d7-964d-1201931c79ae\",\"object\":\"text_completion\",\"created\":1791905788,\"model\":\"repro\",\"system_fingerprint\":null,\"choices\":[{\"index\":0,\"text\":\"0\",\"finish_reason\":null,\"logprobs\":null}]}\n\ndata: {\"id\":\"cmpl-fd4f20e3-65ed-42d7-964d-1201931c79ae\",\"object\":\"text_completion\",\"created\":1791905788,\"model\":\"repro\",\"system_fingerprint\":null,\"choices\":[{\"index\":0,\"text\":\"0\",\"finish_reason\":null,\"logprobs\":null}]}\n\ndata: {\"id\":\"cmpl-fd4f20e3-65ed-42d7-964d-1201931c79ae\",\"object\":\"text_completion\",\"created\":1791905788,\"model\":\"repro\",\"system_fingerprint\":null,\"choices\":[{\"index\":0,\"text\":\"0\",\"finish_reason\":null,\"logprobs\":null}]}\n\ndata: {\"id\":\"cmpl-fd4f20e3-65ed-42d7-964d-1201931c79ae\",\"object\":\"text_completion\",\"created\":1791905788,\"model\":\"repro\",\"system_fingerprint\":null,\"choices\":[{\"index\":0,\"text\":\"\",\"finish_reason\":\"length\",\"logprobs\":null}]}\n\ndata: [DONE]\n\n",
+        "elapsed_s": 0.627219290996436,
+        "case": "accept_after_reject",
+        "route": "/v1/completions",
+        "stream": true,
+        "footprint": {
+          "peak_bytes": 18146236825,
+          "current_bytes": 18146236825
+        },
+        "admission": {
+          "prompt_tokens": 17,
+          "output_tokens": 8,
+          "largest_forward_tokens": 17,
+          "estimated_bytes": 19126584460,
+          "budget_bytes": 25769803776,
+          "resident_bytes": 17777861900,
+          "allocator_cache_bytes": 68705834,
+          "admitted": true
+        },
+        "health_status": 200
+      },
+      {
+        "status": 503,
+        "content_type": "application/json",
+        "body": {
+          "error": {
+            "message": "request_memory_budget_exceeded: estimated_bytes=29367936268, budget_bytes=25769803776; shorten the prompt/output or lower retained cache usage",
+            "type": "request_memory_budget_exceeded",
+            "code": "request_memory_budget_exceeded",
+            "estimated_bytes": 29367936268,
+            "budget_bytes": 25769803776
+          }
+        },
+        "elapsed_s": 0.013188332959543914,
+        "case": "reject",
+        "route": "/v1/chat/completions",
+        "stream": false,
+        "footprint": {
+          "peak_bytes": 18146236825,
+          "current_bytes": 18146236825
+        },
+        "admission": {
+          "prompt_tokens": 6020,
+          "output_tokens": 8,
+          "largest_forward_tokens": 2048,
+          "estimated_bytes": 29367936268,
+          "budget_bytes": 25769803776,
+          "resident_bytes": 17777861900,
+          "allocator_cache_bytes": 68869674,
+          "admitted": false
+        },
+        "health_status": 200
+      },
+      {
+        "status": 200,
+        "content_type": "application/json",
+        "body": {
+          "id": "chatcmpl-6050d0c2-41bd-41f9-a997-4e38d2b551e7",
+          "object": "chat.completion",
+          "created": 1791905793,
+          "model": "repro",
+          "system_fingerprint": null,
+          "choices": [
+            {
+              "index": 0,
+              "message": {
+                "role": "assistant",
+                "content": "OK"
+              },
+              "finish_reason": "stop",
+              "logprobs": null
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 36,
+            "completion_tokens": 1,
+            "total_tokens": 37,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          }
+        },
+        "elapsed_s": 0.5821980829932727,
+        "case": "accept_after_reject",
+        "route": "/v1/chat/completions",
+        "stream": false,
+        "footprint": {
+          "peak_bytes": 18146236825,
+          "current_bytes": 18146236825
+        },
+        "admission": {
+          "prompt_tokens": 36,
+          "output_tokens": 8,
+          "largest_forward_tokens": 36,
+          "estimated_bytes": 19182021900,
+          "budget_bytes": 25769803776,
+          "resident_bytes": 17777861900,
+          "allocator_cache_bytes": 68869674,
+          "admitted": true
+        },
+        "health_status": 200
+      },
+      {
+        "status": 503,
+        "content_type": "application/json",
+        "body": {
+          "error": {
+            "message": "request_memory_budget_exceeded: estimated_bytes=29367936268, budget_bytes=25769803776; shorten the prompt/output or lower retained cache usage",
+            "type": "request_memory_budget_exceeded",
+            "code": "request_memory_budget_exceeded",
+            "estimated_bytes": 29367936268,
+            "budget_bytes": 25769803776
+          }
+        },
+        "elapsed_s": 0.012780916993506253,
+        "case": "reject",
+        "route": "/v1/chat/completions",
+        "stream": true,
+        "footprint": {
+          "peak_bytes": 18146236825,
+          "current_bytes": 18146236825
+        },
+        "admission": {
+          "prompt_tokens": 6020,
+          "output_tokens": 8,
+          "largest_forward_tokens": 2048,
+          "estimated_bytes": 29367936268,
+          "budget_bytes": 25769803776,
+          "resident_bytes": 17777861900,
+          "allocator_cache_bytes": 73796926,
+          "admitted": false
+        },
+        "health_status": 200
+      },
+      {
+        "status": 200,
+        "content_type": "text/event-stream",
+        "body": "data: {\"id\":\"chatcmpl-72d8caad-7788-450c-aa08-17ecec0a0630\",\"object\":\"chat.completion.chunk\",\"created\":1791905796,\"model\":\"repro\",\"system_fingerprint\":null,\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null,\"logprobs\":null}]}\n\ndata: {\"id\":\"chatcmpl-72d8caad-7788-450c-aa08-17ecec0a0630\",\"object\":\"chat.completion.chunk\",\"created\":1791905797,\"model\":\"repro\",\"system_fingerprint\":null,\"choices\":[{\"index\":0,\"delta\":{\"content\":\"OK\"},\"finish_reason\":null,\"logprobs\":null}]}\n\ndata: {\"id\":\"chatcmpl-72d8caad-7788-450c-aa08-17ecec0a0630\",\"object\":\"chat.completion.chunk\",\"created\":1791905797,\"model\":\"repro\",\"system_fingerprint\":null,\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\",\"logprobs\":null}]}\n\ndata: [DONE]\n\n",
+        "elapsed_s": 0.5606945420149714,
+        "case": "accept_after_reject",
+        "route": "/v1/chat/completions",
+        "stream": true,
+        "footprint": {
+          "peak_bytes": 18146236825,
+          "current_bytes": 18146236825
+        },
+        "admission": {
+          "prompt_tokens": 36,
+          "output_tokens": 8,
+          "largest_forward_tokens": 36,
+          "estimated_bytes": 19182021900,
+          "budget_bytes": 25769803776,
+          "resident_bytes": 17777861900,
+          "allocator_cache_bytes": 73796926,
+          "admitted": true
+        },
+        "health_status": 200
+      },
+      {
+        "status": 200,
+        "content_type": "application/json",
+        "body": {
+          "id": "cmpl-557ec735-ee01-4223-8a38-1b1d8e4d4924",
+          "object": "text_completion",
+          "created": 1791905803,
+          "model": "repro",
+          "system_fingerprint": null,
+          "choices": [
+            {
+              "index": 0,
+              "text": "\n\n\n**Step\u2011by\u2011step",
+              "finish_reason": "length",
+              "logprobs": null
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 1501,
+            "completion_tokens": 8,
+            "total_tokens": 1509,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          }
+        },
+        "elapsed_s": 4.345065540983342,
+        "case": "accepted_1500",
+        "admission": {
+          "prompt_tokens": 1501,
+          "output_tokens": 8,
+          "largest_forward_tokens": 1501,
+          "estimated_bytes": 23974864524,
+          "budget_bytes": 25769803776,
+          "resident_bytes": 17777861900,
+          "allocator_cache_bytes": 73797698,
+          "admitted": true
+        },
+        "footprint": {
+          "peak_bytes": 18897856102,
+          "current_bytes": 18468359372
+        }
+      }
+    ],
+    "log": "/tmp/mlxcel-2291-post-setter-normal.json.rep1.log",
+    "ready_s": 5.623054875002708,
+    "startup_footprint": {
+      "peak_bytes": 18146236825,
+      "current_bytes": 18146236825
+    },
+    "context_rejection": {
+      "status": 400,
+      "content_type": "application/json",
+      "body": {
+        "error": {
+          "message": "request (8401 tokens) exceeds the available context size (8192 tokens), try increasing it",
+          "type": "exceed_context_size_error",
+          "code": null
+        }
+      },
+      "elapsed_s": 0.00963070901343599
+    },
+    "final_health": {
+      "status": 200,
+      "content_type": "application/json",
+      "body": {
+        "status": "ok"
+      },
+      "elapsed_s": 0.0004997919895686209
+    },
+    "load_after": [
+      5.51171875,
+      6.05810546875,
+      7.369140625
+    ]
+  }
+]
