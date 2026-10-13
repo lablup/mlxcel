@@ -1875,9 +1875,11 @@ impl LanguageModel for Qwen3NextModel {
     /// prompt and resets the model-owned GatedDelta/KV state. Splitting one
     /// no-ID prompt across multiple forwards would therefore discard the
     /// earlier chunks. DirectEngine carries a stable sequence id across its
-    /// prefill pieces, but the trait capability also covers legacy callers of
-    /// the cache-less entry point, so those callers must prefill this family in
-    /// one pass. This trades chunk-bounded transient memory for correctness.
+    /// prefill pieces, so its state handling is safe, but `PrefillCaps` applies
+    /// this model-wide capability to every token-ID prefill plan. The opt-out
+    /// therefore makes DirectEngine and cache-less callers prefill this family
+    /// in one whole-prompt graph, trading chunk-bounded transient memory for
+    /// correctness across the trait contract.
     fn supports_chunked_prefill(&self) -> bool {
         false
     }

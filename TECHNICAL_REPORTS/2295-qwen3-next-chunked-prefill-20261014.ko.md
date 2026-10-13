@@ -14,11 +14,11 @@ Qwen3-Next가 이제 `supports_chunked_prefill() == false`를 명시한다. 이�
 
 `Qwen3NextModel::forward_for_sequence`는 sequence ID가 없는 multi-token forward를 매번 새 prompt로 해석한다. 이 초기화는 독립적인 cache-less prompt를 격리하지만, no-ID chunking 호출자는 앞 chunk가 만든 state를 다음 chunk에서 버리게 된다. 기존 trait 기본값은 이 계약과 달리 chunking 지원을 선언했다.
 
-현재 DirectEngine prefill은 모든 piece에 동일한 sequence ID를 전달하므로 per-sequence state를 유지한다. 이번 변경은 현재 server state lifecycle을 바꾸지 않고 legacy 및 다른 cache-less 호출자를 위한 보수적인 trait capability를 정의한다.
+현재 DirectEngine prefill은 모든 piece에 동일한 sequence ID를 전달하므로 state 처리 관점에서 per-sequence state를 안전하게 유지한다. 그러나 `PrefillCaps`는 이 model-wide capability를 모든 token-ID prefill plan에 적용하므로 false를 반환하면 server state lifecycle은 바꾸지 않으면서 DirectEngine과 cache-less caller 모두의 chunking을 비활성화한다.
 
 ## 3. 기술적 선택과 그 이유
 
-`ModelOwnedSequenceState` 계약을 바꾸지 않고 모델이 opt-out하도록 선택했다. 명시적인 no-ID continuation mechanism은 독립 prompt 사이에서 계속 초기화하면서도 continuation을 구분하는 여러 family 공통 lifecycle signal이 필요하다. 국소적인 opt-out은 이 격리를 보존하지만, 긴 prompt에서 chunk별 transient memory bound 대신 전체 prompt를 하나의 graph로 처리할 수 있다.
+`ModelOwnedSequenceState` 계약을 바꾸지 않고 모델이 opt-out하도록 선택했다. 명시적인 no-ID continuation mechanism은 독립 prompt 사이에서 계속 초기화하면서도 continuation을 구분하는 여러 family 공통 lifecycle signal이 필요하다. 이 opt-out은 격리를 보존하지만 model-wide capability이므로 DirectEngine과 cache-less caller 모두 긴 prompt에서 chunk별 transient memory bound 대신 전체 prompt를 하나의 graph로 처리한다.
 
 ## 7. 변경 요약
 
