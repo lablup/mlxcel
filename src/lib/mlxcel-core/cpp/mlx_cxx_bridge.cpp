@@ -753,6 +753,31 @@ rust::Vec<uint8_t> array_evaluated_bytes(const MlxArray& arr) {
     return result;
 }
 
+std::unique_ptr<MlxArray> array_with_failed_event_for_test() {
+    auto stream = mlx::core::default_stream(mlx::core::default_device());
+    mlx::core::Event event(stream);
+    event.set_value(1);
+    event.signal(stream);
+    // Land the real signal before attaching an error: synchronize checks an
+    // event's error, so doing this afterwards would consume the fixture.
+    mlx::core::synchronize(stream);
+
+    // Event stores a raw Error pointer. This fixture deliberately gives each
+    // returned array an independent process-lifetime error so one consuming
+    // read cannot invalidate another test's event.
+    auto* error = new mlx::core::Error();
+    error->set_message(std::make_shared<std::string>(
+        "mlxcel test: synthetic array read failure"));
+    event.set_error(*error);
+
+    const uint32_t zero = 0;
+    auto result = std::make_unique<MlxArray>(
+        mlx::core::array(&zero, mlx::core::Shape{1}, mlx::core::uint32));
+    result->inner.set_status(mlx::core::array::Status::evaluated);
+    result->inner.attach_event(event);
+    return result;
+}
+
 // Same body as `array_to_raw_bytes`, but declared `-> Result<Vec<u8>>` on the
 // Rust side so cxx wraps the call in a try/catch and converts any thrown MLX
 // exception (an allocation failure making the contiguous copy, or any deferred

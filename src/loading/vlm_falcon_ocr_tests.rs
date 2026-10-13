@@ -18,6 +18,7 @@ use super::*;
 
 fn read(array: &mlxcel_core::MlxArray) -> Vec<f32> {
     mlxcel_core::array_evaluated_bytes(array)
+        .expect("test tensor readback must succeed")
         .chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()

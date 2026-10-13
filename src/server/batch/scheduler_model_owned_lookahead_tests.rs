@@ -41,7 +41,7 @@ use crate::server::model_provider::GenerateEvent;
 use crate::server::state::BatchMetrics;
 use crate::tokenizer::MlxcelTokenizer;
 
-fn scheduler(
+pub(super) fn scheduler(
     model: Gemma3Wrapper,
     backend: DecodeStorageBackend,
     force_sync: bool,
@@ -95,7 +95,7 @@ fn options(max_tokens: usize) -> ServerGenerateOptions {
     }
 }
 
-fn enqueue(
+pub(super) fn enqueue(
     sched: &mut BatchScheduler,
     prompt_len: usize,
     seed: usize,
@@ -121,7 +121,7 @@ fn enqueue(
 
 /// One run-loop iteration without `finalize_completed` (so a sequence that
 /// finished this tick can still be inspected). Returns false when idle.
-fn tick(sched: &mut BatchScheduler) -> bool {
+pub(super) fn tick(sched: &mut BatchScheduler) -> bool {
     match sched.decide_action() {
         BatchSchedulerAction::Prefill(id) => {
             // The run loop tears the lookahead down before any admission.
@@ -191,7 +191,7 @@ fn seq_state(sched: &BatchScheduler, seq_id: SequenceId) -> SeqState {
     }
 }
 
-fn finish(rx: &mpsc::Receiver<GenerateEvent>) -> Vec<i32> {
+pub(super) fn finish(rx: &mpsc::Receiver<GenerateEvent>) -> Vec<i32> {
     loop {
         match rx.recv_timeout(Duration::from_secs(5)) {
             Ok(GenerateEvent::Done(result)) => return result.generated_token_ids,

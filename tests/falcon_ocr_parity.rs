@@ -142,6 +142,7 @@ fn logits_row(logits: &MlxArray, pos: usize) -> Vec<f32> {
 
 fn read(a: &MlxArray) -> Vec<f32> {
     mlxcel_core::array_evaluated_bytes(a)
+        .expect("test tensor readback must succeed")
         .chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()

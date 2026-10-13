@@ -59,6 +59,37 @@ pub struct ChatMessage {
     pub content: String,
 }
 
+/// Borrowed serialization shape for templates that require typed text parts.
+///
+/// The explicit, exhaustive destructuring in [`From`] makes adding a field to
+/// [`ChatMessage`] a compile error here until that field is preserved in this
+/// rendering shape as well.
+#[derive(Serialize)]
+struct TypedTextChatMessage<'a> {
+    role: &'a str,
+    content: [TypedTextContentPart<'a>; 1],
+}
+
+#[derive(Serialize)]
+struct TypedTextContentPart<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    text: &'a str,
+}
+
+impl<'a> From<&'a ChatMessage> for TypedTextChatMessage<'a> {
+    fn from(message: &'a ChatMessage) -> Self {
+        let ChatMessage { role, content } = message;
+        Self {
+            role,
+            content: [TypedTextContentPart {
+                kind: "text",
+                text: content,
+            }],
+        }
+    }
+}
+
 /// Sentinel attached as the [`std::error::Error::source`] of every error a
 /// chat template raises through the `raise_exception(...)` callable.
 ///
@@ -178,6 +209,12 @@ pub struct ChatTemplateProcessor {
     bos_token: String,
     eos_token: String,
     add_generation_prompt: bool,
+    /// Whether typed [`ChatMessage`] renders must express text as content parts.
+    ///
+    /// Some multimodal checkpoint templates silently drop a plain string even
+    /// though they render an equivalent typed text part.  This is detected once
+    /// while loading the checkpoint and never changes the raw JSON contract.
+    wrap_string_content: bool,
     /// Cached result of `supports_tools()` introspection.
     /// `None` means not yet computed.
     supports_tools_cached: Option<bool>,
@@ -406,12 +443,13 @@ impl ChatTemplateProcessor {
 
         let template = preprocess_template(template);
         let forced_tool_call_format = detect_forced_tool_call_format(&template);
-        Ok(Some(Self {
+        let mut processor = Self {
             template,
             compiled_template: Arc::new(OnceLock::new()),
             bos_token,
             eos_token,
             add_generation_prompt: true,
+            wrap_string_content: false,
             supports_tools_cached: None,
             forced_tool_call_format,
             default_enable_thinking: false,
@@ -420,7 +458,9 @@ impl ChatTemplateProcessor {
             kimi_k3_family_unrenderable: false,
             #[cfg(test)]
             template_compile_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        }))
+        };
+        processor.wrap_string_content = template_requires_typed_text_content(&processor);
+        Ok(Some(processor))
     }
 
     /// Create a processor with a custom template string
@@ -433,6 +473,7 @@ impl ChatTemplateProcessor {
             bos_token: String::new(),
             eos_token: String::new(),
             add_generation_prompt: true,
+            wrap_string_content: false,
             supports_tools_cached: None,
             forced_tool_call_format,
             default_enable_thinking: false,
@@ -1091,7 +1132,16 @@ impl ChatTemplateProcessor {
             .filter(|t| !t.is_empty())
             .map(minijinja::Value::from_serialize);
 
-        let messages_val = minijinja::Value::from_serialize(messages);
+        let wrapped_messages = self.wrap_string_content.then(|| {
+            messages
+                .iter()
+                .map(TypedTextChatMessage::from)
+                .collect::<Vec<_>>()
+        });
+        let messages_val = match wrapped_messages.as_ref() {
+            Some(messages) => minijinja::Value::from_serialize(messages),
+            None => minijinja::Value::from_serialize(messages),
+        };
         let context = build_template_context(
             messages_val,
             &self.bos_token,
@@ -1471,6 +1521,34 @@ fn template_renders_typed_image_content(template: &str) -> bool {
             with_image.contains("__mlxcel_text_probe__")
                 && text_only.contains("__mlxcel_text_probe__")
                 && with_image != text_only
+        }
+        _ => false,
+    }
+}
+
+const TEXT_CONTENT_PROBE_MARKER: &str = "__mlxcel_text_probe__";
+
+/// Detect a checkpoint template that accepts typed text parts but drops strings.
+///
+/// Both probes go through the raw renderer so this decision cannot observe or
+/// recursively trigger the typed-message adaptation it controls.  Any render
+/// error is treated conservatively as no adaptation.
+fn template_requires_typed_text_content(processor: &ChatTemplateProcessor) -> bool {
+    let string_content = serde_json::json!([{
+        "role": "user",
+        "content": TEXT_CONTENT_PROBE_MARKER,
+    }]);
+    let typed_content = serde_json::json!([{
+        "role": "user",
+        "content": [{"type": "text", "text": TEXT_CONTENT_PROBE_MARKER}],
+    }]);
+    match (
+        processor.apply_raw(&string_content, None),
+        processor.apply_raw(&typed_content, None),
+    ) {
+        (Ok(string_render), Ok(typed_render)) => {
+            !string_render.contains(TEXT_CONTENT_PROBE_MARKER)
+                && typed_render.contains(TEXT_CONTENT_PROBE_MARKER)
         }
         _ => false,
     }
@@ -5036,3 +5114,7 @@ TOOL
         assert!(out.starts_with("<think>"));
     }
 }
+
+#[cfg(test)]
+#[path = "chat_template_text_wrap_tests.rs"]
+mod text_wrap_tests;
