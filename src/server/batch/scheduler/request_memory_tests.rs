@@ -135,3 +135,58 @@ fn request_memory_other_family_is_unchanged() {
     let scheduler = super::scheduler_model_owned_cache_tests::scheduler(store);
     assert!(!scheduler.request_memory_policy_enabled());
 }
+
+#[test]
+fn request_memory_distributed_worker_path_is_excluded() {
+    let scheduler = scheduler().with_request_memory_worker_path(false);
+    assert!(!scheduler.request_memory_policy_enabled());
+}
+
+#[test]
+fn request_memory_two_queued_rows_cannot_bypass_admission_via_batched_prefill() {
+    let mut scheduler = scheduler();
+    scheduler.max_batch_prefill = 4;
+    let LoadedModel::NemotronH(model) = scheduler.engine.model() else {
+        panic!("test model");
+    };
+    let (config, bytes) = model.request_memory_config();
+    let short_estimate =
+        crate::execution::request_memory::estimate(config, 4, 5, bytes, MemorySnapshot::default())
+            .unwrap();
+    scheduler.request_memory_test_inputs =
+        Some((MemorySnapshot::default(), Some(short_estimate.total_bytes)));
+    let long = enqueue(&mut scheduler, 64);
+    let short = enqueue(&mut scheduler, 4);
+    assert_eq!(scheduler.prefill_queue.len(), 2);
+    scheduler.execute_prefill_action(SequenceId::from_raw(0));
+    assert!(matches!(
+        long.recv().unwrap(),
+        GenerateEvent::RequestMemoryRejected(_)
+    ));
+    assert!(scheduler.prefill_forward_lengths.is_empty());
+    assert!(matches!(short.try_recv(), Err(mpsc::TryRecvError::Empty)));
+    scheduler.execute_prefill_action(SequenceId::from_raw(0));
+    assert!(matches!(short.recv().unwrap(), GenerateEvent::Admitted));
+    assert_eq!(scheduler.prefill_forward_lengths, vec![4]);
+    assert!(scheduler.prefill_queue.is_empty());
+}
+
+#[test]
+fn request_memory_disables_snapshot_donation_and_background_warmup() {
+    let store = super::scheduler_model_owned_cache_tests::test_store();
+    let mut scheduler = scheduler().with_prompt_cache(Some(store));
+    let _events = enqueue(&mut scheduler, 4);
+    assert!(scheduler.prompt_cache_seq_ctx.is_empty());
+    let ctx = super::scheduler_model_owned_cache_tests::cache_ctx();
+    scheduler.handle_incoming(ModelRequest::PromptCacheWarmup {
+        tokens: vec![1; 64],
+        ctx: ctx.clone(),
+    });
+    assert!(scheduler.prompt_cache_warmups.is_empty());
+    // Even a previously queued job cannot reach restore/forward after the
+    // policy is enabled. Retained store entries are not evicted.
+    scheduler.prompt_cache_warmups.push_back((vec![1; 64], ctx));
+    scheduler.run_next_prompt_cache_warmup();
+    assert!(scheduler.prompt_cache_warmups.is_empty());
+    assert!(scheduler.prefill_forward_lengths.is_empty());
+}

@@ -509,7 +509,8 @@ impl BatchScheduler {
         // empty and the donate-back short-circuits. Multimodal requests are
         // stored only when VLM sharing is enabled (#124 step c); otherwise
         // they keep opting out of the cache entirely.
-        if self.prompt_cache_active()
+        if !self.request_memory_policy_enabled()
+            && self.prompt_cache_active()
             && (!is_multimodal || vlm_sharing_ok)
             && let Some(mut ctx) = options.prompt_cache_ctx.clone()
         {

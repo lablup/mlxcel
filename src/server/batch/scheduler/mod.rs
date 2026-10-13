@@ -339,6 +339,8 @@ pub struct BatchScheduler {
     batch_observability: Arc<BatchObservability>,
 
     // -- Configuration --
+    /// False for distributed worker paths outside local request admission.
+    request_memory_worker_path: bool,
     config_eos: Vec<i32>,
     /// Prompt tokens per prefill chunk with and without live decode streams.
     prefill_chunk_policy: mlxcel_core::prefill_plan::PrefillChunkPolicy,

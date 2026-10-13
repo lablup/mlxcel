@@ -737,6 +737,17 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                     sched_config.max_batch_prefill,
                     sched_config.decode_storage_backend,
                 )
+                .with_request_memory_worker_path(
+                    crate::server::model_provider::request_memory_worker_path_supported(
+                        sched_config.pipeline_parallel_runtime.is_some(),
+                        sched_config.tensor_parallel.tp_size,
+                        sched_config.serving_mode,
+                        !matches!(
+                            sched_config.speculative_dispatch,
+                            crate::server::SpeculativeDispatch::Disabled
+                        ),
+                    ),
+                )
                 .with_prefill_chunk_policy(sched_config.prefill_chunk_policy)
                 .with_vision_cache_size(sched_config.vision_cache_size)
                 // per-batch runtime-LoRA scale application (#1439).
@@ -1332,6 +1343,14 @@ pub(crate) fn spawn_legacy_model_worker(
                 crate::server::config::PreemptionPolicy::default(),
                 1, // max_batch_prefill = 1 → sequential prefill
                 crate::server::DecodeStorageBackend::Dense,
+            )
+            .with_request_memory_worker_path(
+                crate::server::model_provider::request_memory_worker_path_supported(
+                    false,
+                    tensor_parallel.tp_size,
+                    crate::distributed::disaggregated::ServingMode::Hybrid,
+                    false,
+                ),
             )
             .with_prefill_chunk_policy(mlxcel_core::prefill_plan::PrefillChunkPolicy::resolve(
                 Some(0),

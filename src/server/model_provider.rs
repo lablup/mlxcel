@@ -176,6 +176,75 @@ fn uses_single_stream_queue_admission(model_path: &std::path::Path) -> bool {
     })
 }
 
+/// Whether the configured worker uses the local non-speculative scheduler
+/// path covered by request-memory admission. Check runtime/model eligibility
+/// separately: a checkpoint architecture does not identify its serving engine.
+// Used by: NemotronH provider admission and model-worker scheduler policy setup.
+pub(crate) fn request_memory_worker_path_supported(
+    has_pipeline: bool,
+    tp_size: usize,
+    serving_mode: crate::distributed::disaggregated::ServingMode,
+    has_speculation: bool,
+) -> bool {
+    use crate::distributed::disaggregated::ServingMode;
+    !has_pipeline
+        && tp_size == 1
+        && matches!(serving_mode, ServingMode::Hybrid | ServingMode::Router)
+        && !has_speculation
+}
+
+// Used by: NemotronH scheduler-backed provider constructors; pure device input
+// keeps CPU/non-Metal bypass tests independent of the process-global MLX device.
+fn request_memory_provider_wait_enabled(
+    worker_path_supported: bool,
+    metal_gpu: bool,
+    model_type: Option<crate::models::ModelType>,
+) -> bool {
+    worker_path_supported
+        && metal_gpu
+        && matches!(model_type, Some(crate::models::ModelType::NemotronH))
+}
+
+// Used by: NemotronH legacy sequential provider. The legacy worker still uses
+// BatchScheduler at width one; it forwards TP but not PP, serving roles, or
+// speculation. Match its actual execution, not those ignored request settings.
+fn legacy_request_memory_admission_enabled(
+    tp_size: usize,
+    metal_gpu: bool,
+    model_type: Option<crate::models::ModelType>,
+) -> bool {
+    request_memory_provider_wait_enabled(
+        request_memory_worker_path_supported(
+            false,
+            tp_size,
+            crate::distributed::disaggregated::ServingMode::Hybrid,
+            false,
+        ),
+        metal_gpu,
+        model_type,
+    )
+}
+
+// Used by: NemotronH scheduler-backed provider constructors.
+fn uses_request_memory_admission(
+    model_path: &std::path::Path,
+    config: &model_worker::WorkerSchedulerConfig,
+) -> bool {
+    request_memory_provider_wait_enabled(
+        request_memory_worker_path_supported(
+            config.pipeline_parallel_runtime.is_some(),
+            config.tensor_parallel.tp_size,
+            config.serving_mode,
+            !matches!(
+                config.speculative_dispatch,
+                crate::server::SpeculativeDispatch::Disabled
+            ),
+        ),
+        cfg!(all(target_os = "macos", feature = "metal")) && mlxcel_core::default_device_is_gpu(),
+        crate::models::get_model_type(model_path).ok(),
+    )
+}
+
 /// One-shot HTTP admission signal. Clones share a single sender, not multiple
 /// acknowledgements. Providers remove this from generation options before enqueue.
 #[derive(Debug, Clone)]
@@ -688,8 +757,8 @@ impl ModelProvider {
 
     /// Same as [`Self::new_with_server_config`] but also wires the
     /// cross-request prompt-prefix KV cache store.
-    /// The legacy (`config.no_batch`) worker ignores the store because that
-    /// path never calls the batch scheduler that manages the cache.
+    /// The legacy (`config.no_batch`) worker ignores the store because its
+    /// size-one scheduler does not attach cross-request prompt caching.
     pub fn new_with_server_config_and_prompt_cache(
         model_path: PathBuf,
         adapter_path: Option<PathBuf>,
@@ -824,8 +893,8 @@ impl ModelProvider {
             provider.decode_hang_timeout = decode_hang_timeout;
             // log a warning if the operator asked for
             // speculative decoding but selected `--no-batch`. The legacy
-            // sequential worker bypasses the BatchScheduler entirely so
-            // the dispatch is inactive on this path.
+            // sequential worker does not attach speculative dispatch to its
+            // size-one scheduler, so dispatch is inactive on this path.
             if !matches!(
                 speculative_dispatch,
                 crate::server::SpeculativeDispatch::Disabled
@@ -1001,6 +1070,12 @@ impl ModelProvider {
         let metrics_clone = batch_metrics.clone();
         let obs_clone = batch_observability.clone();
 
+        let request_memory_admission = legacy_request_memory_admission_enabled(
+            tensor_parallel.tp_size,
+            cfg!(all(target_os = "macos", feature = "metal"))
+                && mlxcel_core::default_device_is_gpu(),
+            crate::models::get_model_type(&model_path).ok(),
+        );
         let worker_handle = model_worker::spawn_legacy_model_worker(
             model_path,
             adapter_path,
@@ -1028,7 +1103,7 @@ impl ModelProvider {
             chat_unavailable,
             max_queue_depth,
             single_stream_queue_admission,
-            request_memory_admission: false,
+            request_memory_admission,
             sleeping,
             prompt_cache: None,
             prompt_tokenizer: None,
@@ -1425,10 +1500,7 @@ impl ModelProvider {
             diffusion_threshold,
         };
 
-        let request_memory_admission = matches!(
-            crate::models::get_model_type(&model_path),
-            Ok(crate::models::ModelType::NemotronH)
-        );
+        let request_memory_admission = uses_request_memory_admission(&model_path, &sched_config);
         let worker_handle = model_worker::spawn_model_worker_with_batch_config(
             model_path,
             adapter_path,
@@ -1551,10 +1623,7 @@ impl ModelProvider {
             diffusion_threshold: 0.9,
         };
 
-        let request_memory_admission = matches!(
-            crate::models::get_model_type(&model_path),
-            Ok(crate::models::ModelType::NemotronH)
-        );
+        let request_memory_admission = uses_request_memory_admission(&model_path, &sched_config);
         let worker_handle = model_worker::spawn_model_worker_with_batch_config(
             model_path,
             adapter_path,

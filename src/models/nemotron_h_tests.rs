@@ -866,3 +866,27 @@ fn nemotron_h_rejects_expert_quantization_params_that_would_abort_gather_qmm() {
     NemotronHModel::from_weights(config_with(0, 0), regular, vec![BlockType::MoE])
         .expect("a non-quantized expert plane must not be gated on quantization params");
 }
+
+#[test]
+#[cfg(all(target_os = "macos", feature = "metal"))]
+fn request_memory_runtime_lora_rejects_before_construction_and_cleans_staging() {
+    if !mlxcel_core::default_device_is_gpu() {
+        return;
+    }
+    // Empty terms suffice to represent a staged adapter without GPU work.
+    mlxcel_core::runtime_lora::stage(std::collections::HashMap::from([(
+        "backbone.layers.0.mixer.q_proj".to_string(),
+        Vec::new(),
+    )]));
+    let config: NemotronHConfig = serde_json::from_str(&minimal_config_json("")).unwrap();
+    let result = super::NemotronHModel::from_weights(
+        config,
+        mlxcel_core::weights::WeightMap::new(),
+        Vec::new(),
+    );
+    let error = result
+        .err()
+        .expect("runtime adapter must fail before weights are read");
+    assert!(error.to_string().contains("does not support runtime LoRA"));
+    assert!(!mlxcel_core::runtime_lora::has_pending());
+}

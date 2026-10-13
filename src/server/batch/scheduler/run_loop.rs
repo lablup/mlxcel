@@ -288,15 +288,7 @@ impl BatchScheduler {
                     // attention mask chunked to `[chunk, L]` instead of the
                     // unchunked `[L, L]` a single-row batched forward would
                     // build).
-                    if self.max_batch_prefill > 1
-                        && self.prefill_queue.len() >= 2
-                        && self.chunked_prefill_seq.is_none()
-                        && self.batched_prefill_admits_head()
-                    {
-                        self.execute_batched_prefill();
-                    } else {
-                        self.execute_prefill(seq_id);
-                    }
+                    self.execute_prefill_action(seq_id);
                     // A classic action ran: the next tick goes back to the
                     // in-flight speculative slice, if any (issue #734).
                     self.speculative_slice_yielded = false;

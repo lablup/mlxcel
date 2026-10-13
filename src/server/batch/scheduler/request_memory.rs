@@ -16,6 +16,29 @@ use super::*;
 use crate::execution::request_memory::{self, RequestMemoryRejection};
 
 impl BatchScheduler {
+    /// Used by: the scheduler run loop and admission regression tests.
+    /// A sequential fallback inside batched prefill does not pass the final
+    /// single-slot admission gate. Guarded workers must never enter that route,
+    /// even when --max-batch-prefill allows collecting multiple queued rows.
+    pub(super) fn execute_prefill_action(&mut self, seq_id: SequenceId) {
+        if !self.request_memory_policy_enabled()
+            && self.max_batch_prefill > 1
+            && self.prefill_queue.len() >= 2
+            && self.chunked_prefill_seq.is_none()
+            && self.batched_prefill_admits_head()
+        {
+            self.execute_batched_prefill();
+        } else {
+            self.execute_prefill(seq_id);
+        }
+    }
+
+    /// Keep the HTTP handshake and scheduler guard on the same local-worker scope.
+    pub(crate) fn with_request_memory_worker_path(mut self, supported: bool) -> Self {
+        self.request_memory_worker_path = supported;
+        self
+    }
+
     /// Narrow policy scope; unsupported backends, speculative and other model
     /// families keep their current admission behavior.
     pub(super) fn request_memory_policy_enabled(&self) -> bool {
@@ -24,6 +47,7 @@ impl BatchScheduler {
         #[cfg(test)]
         let metal = metal || self.request_memory_test_inputs.is_some();
         metal
+            && self.request_memory_worker_path
             && self.active_batch.max_size() == 1
             && matches!(self.engine.model(), LoadedModel::NemotronH(_))
             && matches!(

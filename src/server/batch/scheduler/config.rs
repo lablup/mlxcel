@@ -106,6 +106,7 @@ impl BatchScheduler {
             batch_metrics,
             batch_observability,
             config_eos,
+            request_memory_worker_path: true,
             prefill_chunk_policy: mlxcel_core::prefill_plan::PrefillChunkPolicy::resolve(Some(
                 prefill_chunk_size,
             )),

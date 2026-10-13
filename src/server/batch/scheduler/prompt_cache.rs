@@ -892,7 +892,8 @@ impl BatchScheduler {
         tokens: Vec<i32>,
         ctx: PromptCacheRequestContext,
     ) {
-        if !self.prompt_cache_active()
+        if self.request_memory_policy_enabled()
+            || !self.prompt_cache_active()
             || !self.engine.model().supports_snapshot_reuse()
             || crate::server::prompt_cache::cache_warmup_disabled()
         {
@@ -933,6 +934,12 @@ impl BatchScheduler {
     /// snapshot it already had, and its next turn still hits the #1143 boundary
     /// entry. A warm-up must never turn into a client-visible error.
     pub(super) fn run_next_prompt_cache_warmup(&mut self) {
+        // Guarded requests use cold plans. Neither restore nor speculative
+        // background forward is permitted outside their final admission gate.
+        if self.request_memory_policy_enabled() {
+            self.prompt_cache_warmups.clear();
+            return;
+        }
         let Some((tokens, ctx)) = self.prompt_cache_warmups.pop_front() else {
             return;
         };

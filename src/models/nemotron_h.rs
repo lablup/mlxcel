@@ -2297,22 +2297,6 @@ impl NemotronHModel {
         let weights = crate::models::load_text_weights(path, None)?;
         let weights = Self::sanitize_weights(weights, &config);
 
-        // Request admission samples MLX active allocations, not on-disk weight
-        // sizes. Materialize the sanitized weight graph at the load boundary so
-        // --no-warmup (or a failed warmup) cannot make the first request see a
-        // zero/partial resident baseline. Evaluate in place: no second weight
-        // copy survives loading, and failure remains a startup load error.
-        if cfg!(all(target_os = "macos", feature = "metal")) && mlxcel_core::default_device_is_gpu()
-        {
-            for weight in weights.values() {
-                mlxcel_core::try_eval(weight)?;
-            }
-            tracing::info!(
-                resident_bytes = mlxcel_core::memory::active_memory(),
-                "[NemotronH] materialized weights for request memory admission"
-            );
-        }
-
         tracing::info!("[NemotronH] Building model...");
         let model = Self::from_weights(config.clone(), weights, block_types)?;
 
@@ -2372,6 +2356,30 @@ impl NemotronHModel {
         mut weights: WeightMap,
         block_types: Vec<BlockType>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        // Request admission samples MLX active allocations, not on-disk weight
+        // sizes. Materialize the sanitized weight graph at the shared construction boundary so
+        // --no-warmup (or a failed warmup) cannot make the first request see a
+        // zero/partial resident baseline. Evaluate in place: no second weight
+        // copy survives loading, and failure remains a startup load error.
+        // This includes fused-adapter loading and the VLM/VoiceChat users of
+        // this constructor; they only inherit eager startup, not admission.
+        if cfg!(all(target_os = "macos", feature = "metal")) && mlxcel_core::default_device_is_gpu()
+        {
+            // Runtime adapters add arbitrary-rank f32 activation work not yet
+            // modeled by admission. Fused adapters are ordinary weights below.
+            if mlxcel_core::runtime_lora::has_pending() {
+                mlxcel_core::runtime_lora::drain_unclaimed();
+                return Err("Metal Nemotron-H request memory admission does not support runtime LoRA; use a fused adapter checkpoint instead".into());
+            }
+            for weight in weights.values() {
+                mlxcel_core::try_eval(weight)?;
+            }
+            tracing::info!(
+                resident_bytes = mlxcel_core::memory::active_memory(),
+                "[NemotronH] materialized weights for request memory admission"
+            );
+        }
+
         // Get quantization parameters
         let group_size = config.group_size();
         let bits = config.bits();
