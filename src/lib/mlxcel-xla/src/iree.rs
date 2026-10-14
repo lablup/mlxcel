@@ -750,10 +750,12 @@ pub(crate) fn iree_compile_bin() -> Result<PathBuf, String> {
     }
     #[cfg(xla_iree_rocm)]
     {
-        Err("[compile] the ROCm build needs a ROCm-capable iree-compile: set \
+        Err(
+            "[compile] the ROCm build needs a ROCm-capable iree-compile: set \
              MLXCEL_XLA_IREE_COMPILE to one matching the source runtime version \
              (for example `eval \"$(scripts/iree/setup-rocm.sh --env)\"`)"
-            .to_string())
+                .to_string(),
+        )
     }
     #[cfg(not(any(xla_iree_cuda, xla_iree_rocm)))]
     {
@@ -1959,8 +1961,8 @@ fn create_ctx_with_diagnostics(
     drop(bufs);
     if ctx.is_null() {
         if device == "hip" {
-            let target = std::env::var("MLXCEL_XLA_ROCM_TARGET")
-                .unwrap_or_else(|_| "<unset>".to_string());
+            let target =
+                std::env::var("MLXCEL_XLA_ROCM_TARGET").unwrap_or_else(|_| "<unset>".to_string());
             return Err(format!(
                 "[runtime-init / module-load] xla_llama_create failed on device=\"hip\" \
                  (MLXCEL_XLA_ROCM_TARGET={target}): see the IREE status on stderr above. \

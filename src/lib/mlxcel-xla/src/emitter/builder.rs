@@ -101,7 +101,10 @@ impl Precision {
 /// unset / unrecognized (so the per-device default applies).
 #[must_use]
 pub fn precision_env_override() -> Option<Precision> {
-    match std::env::var("MLXCEL_XLA_PRECISION").as_deref() {
+    match std::env::var("MLXCEL_XLA_PRECISION")
+        .as_deref()
+        .map(str::trim)
+    {
         Ok("f16") => Some(Precision::F16),
         Ok("bf16") => Some(Precision::Bf16),
         // `f32` is an explicit override too, so it forces f32 even on a GPU device
@@ -166,14 +169,13 @@ fn precision_lowers_on(device: &str, precision: Precision) -> bool {
     !(device == "metal" && precision == Precision::Bf16)
 }
 
-/// [`resolve_precision`], but reject a precision the target cannot lower before it
-/// reaches `iree-compile` (issue #612, found in #575). Without this, bf16 on Metal
-/// fails deep inside `iree-compile` with an opaque `vector.bitcast` legalization
-/// dump, after model load. Catch it at the emit/compile boundary and return an
-/// actionable message pointing at f16 (the Metal default). bf16 is only ever the
-/// explicit env override here (never a per-device default), so the message names it.
-pub fn resolve_precision_checked(device: &str) -> Result<Precision, String> {
-    if let Ok(raw) = std::env::var("MLXCEL_XLA_PRECISION") {
+/// Pure precision resolver with an optional explicit raw env override,
+/// allowing unit tests to exercise all branches without process env mutation.
+pub fn resolve_precision_checked_with_override(
+    device: &str,
+    raw_override: Option<&str>,
+) -> Result<Precision, String> {
+    if let Some(raw) = raw_override {
         let trimmed = raw.trim();
         if !trimmed.is_empty() && !matches!(trimmed, "f16" | "bf16" | "f32") {
             return Err(format!(
@@ -182,7 +184,13 @@ pub fn resolve_precision_checked(device: &str) -> Result<Precision, String> {
             ));
         }
     }
-    let precision = resolve_precision(device);
+    let opt_precision = raw_override.and_then(|raw| match raw.trim() {
+        "f16" => Some(Precision::F16),
+        "bf16" => Some(Precision::Bf16),
+        "f32" => Some(Precision::F32),
+        _ => None,
+    });
+    let precision = opt_precision.unwrap_or_else(|| default_precision(device));
     if precision_lowers_on(device, precision) {
         Ok(precision)
     } else {
@@ -193,6 +201,17 @@ pub fn resolve_precision_checked(device: &str) -> Result<Precision, String> {
                 .to_string(),
         )
     }
+}
+
+/// [`resolve_precision`], but reject a precision the target cannot lower before it
+/// reaches `iree-compile` (issue #612, found in #575). Without this, bf16 on Metal
+/// fails deep inside `iree-compile` with an opaque `vector.bitcast` legalization
+/// dump, after model load. Catch it at the emit/compile boundary and return an
+/// actionable message pointing at f16 (the Metal default). bf16 is only ever the
+/// explicit env override here (never a per-device default), so the message names it.
+pub fn resolve_precision_checked(device: &str) -> Result<Precision, String> {
+    let raw = std::env::var("MLXCEL_XLA_PRECISION").ok();
+    resolve_precision_checked_with_override(device, raw.as_deref())
 }
 
 /// Whether a packed int8 in-graph-dequant build can execute on `device`.
@@ -1766,12 +1785,40 @@ mod tests {
         let empty_err = target_flags_with_rocm_target("hip", Some("   ")).unwrap_err();
         assert!(empty_err.contains("requires MLXCEL_XLA_ROCM_TARGET"));
 
-        let ambig_err =
-            target_flags_with_rocm_target("hip", Some("gfx1100,gfx1151")).unwrap_err();
+        let ambig_err = target_flags_with_rocm_target("hip", Some("gfx1100,gfx1151")).unwrap_err();
         assert!(ambig_err.contains("ambiguous MLXCEL_XLA_ROCM_TARGET"));
 
         let bad_err = target_flags_with_rocm_target("hip", Some("sm_80")).unwrap_err();
         assert!(bad_err.contains("invalid MLXCEL_XLA_ROCM_TARGET"));
+    }
+
+    #[test]
+    fn resolve_precision_validates_and_defaults() {
+        assert_eq!(
+            resolve_precision_checked_with_override("hip", None).unwrap(),
+            Precision::F16
+        );
+        assert_eq!(
+            resolve_precision_checked_with_override("hip", Some("f16")).unwrap(),
+            Precision::F16
+        );
+        assert_eq!(
+            resolve_precision_checked_with_override("hip", Some("  f32 \n")).unwrap(),
+            Precision::F32
+        );
+        assert_eq!(
+            resolve_precision_checked_with_override("hip", Some("bf16")).unwrap(),
+            Precision::Bf16
+        );
+        assert_eq!(
+            resolve_precision_checked_with_override("local-task", None).unwrap(),
+            Precision::F32
+        );
+        let err_bad = resolve_precision_checked_with_override("hip", Some("fp8")).unwrap_err();
+        assert!(err_bad.contains("[compile] unsupported MLXCEL_XLA_PRECISION"));
+        let err_metal_bf16 =
+            resolve_precision_checked_with_override("metal", Some("bf16")).unwrap_err();
+        assert!(err_metal_bf16.contains("metal-spirv"));
     }
 
     #[test]

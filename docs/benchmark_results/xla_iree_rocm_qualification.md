@@ -207,3 +207,18 @@ int8 kernel arithmetic (upcast vs tensor/matrix cores):
 1. **Default precision on `hip`**: `f16` (`default_precision("hip") == Precision::F16`) is `2.0x` faster than `f32` (`11.30 tok/s` vs `5.71 tok/s` on 64-token runs, `14.16 tok/s` on 32-token runs) and `64/64` token-exact with `f32`.
 2. **`bf16` on `hip`**: Lowers and executes cleanly on `gfx1151` (`10.02 tok/s`, `64/64` token-exact on `Llama-3.2-1B-Instruct-4bit`), unlike `metal-spirv` where `bf16` cannot legalize (`#612`).
 3. **`MLXCEL_XLA_QUANT=packed` on `hip`**: Compiles and executes `64/64` token-exact on `Llama-3.2-1B-Instruct-4bit` (unlike Metal where the command buffer faults, `#613`), but regresses decode throughput to `0.07 tok/s` because IREE 3.12.0rc20260721 emits `1,209` flow dispatches and materializes the unpacked `f16` weights to global memory every decode step (`dequant -> matmul` = 2 dispatches). Enabling `--iree-global-opt-data-tiling` fails during `flow` lowering with `'tensor.expand_shape' op expected collapsed rank (2) to equal the number of reassociation maps (3)` (identical to CUDA in `#574`), while `--iree-rocm-encoding-layout-resolver=pad` compiles with `1,209` unfused dispatches. Consequently, `MLXCEL_XLA_QUANT=packed` remains opt-in (off by default) on `hip`.
+
+---
+
+## 6. Support Decision & Support Boundaries
+
+- **Qualification Verdict**: **Conditionally Supported**
+  - **Supported (Production-Ready)**:
+    - Target devices: AMD ROCm/HIP (`MLXCEL_XLA_DEVICE=hip`) with a single unambiguous ASIC specified via `MLXCEL_XLA_ROCM_TARGET` (qualified on `gfx1151` / AMD Radeon 8060S Graphics; architecture validation permits `gfx1100`, `gfx942`, `gfx90a`).
+    - Precision modes: `f16` (default on `hip`, recommended for performance, 2.0x faster than f32), `f32` (load-time dequantization, reference oracle), and `bf16` (load-time dequantization).
+    - Execution paths: Single-sequence generation (`mlxcel generate`), continuous batching (`XlaBatchEngine` / `xla_batch_bench` for `B_max=4` and `B_max=8`), and HTTP serving (`mlxcel-server` non-streaming and streaming SSE).
+  - **Conditionally Supported (Opt-In / Experimental)**:
+    - Packed int4/int8 in-graph dequantization (`MLXCEL_XLA_QUANT=packed`): Correctness verified (64/64 token-exact), but throughput is compute-bound / memory-bandwidth regressed (`0.07 tok/s`) because IREE 3.12.0rc20260721 lacks native quantized-matmul fusion for ROCm (emits 1,209 unfused dispatches and materializes f16 weights to DRAM each step). Kept opt-in behind `MLXCEL_XLA_QUANT=packed`.
+  - **Blocked / Not Supported**:
+    - Data tiling optimization (`--iree-global-opt-data-tiling`) on ROCm in IREE 3.12.0rc20260721: Fails during `flow` compilation with `'tensor.expand_shape' op expected collapsed rank (2) to equal the number of reassociation maps (3)` (reproducible with `scripts/xla/fusion_spike.sh`, tracked as an upstream IREE issue in #574).
+
