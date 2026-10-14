@@ -914,7 +914,7 @@ async fn route_chat(
 
     // Render the chat template.
     let thinking_markers = state.tokenizer.infer_thinking_markers();
-    let prepared = match super::chat_request::prepare_chat_request_with_cache(
+    let prepared = match super::chat_request::prepare_chat_request_with_cache_and_video_allowlist(
         &state.chat_template,
         &request,
         live.chat_template_kwargs.as_ref(),
@@ -922,6 +922,9 @@ async fn route_chat(
         false,
         !state.config.no_prefill_assistant,
         &thinking_markers,
+        // The disaggregated router rejects every declared media input before
+        // preparation, so it has no video allowlist to consult.
+        &[],
     )
     .await
     {

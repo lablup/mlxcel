@@ -1136,9 +1136,9 @@ fn execute_probe(device: &str, definition: ProbeDefinition) -> Result<NumericOra
     let cache = std::env::temp_dir().join("mlxcel-xla-numeric-probes");
     std::fs::create_dir_all(&cache)
         .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
-    let vmfb = cached_vmfb_path(&compiler, &mlir, flags, &cache, cache_key, 0);
+    let vmfb = cached_vmfb_path(&compiler, &mlir, &flags, &cache, cache_key, 0);
     ensure_qualified_auxiliary_artifact(&vmfb, &artifact_contract, &weights, |output| {
-        compile_one_to(&compiler, &mlir, flags, &cache, cache_key, 0, output)
+        compile_one_to(&compiler, &mlir, &flags, &cache, cache_key, 0, output)
     })?;
     let mut module = IreeAuxiliaryModule::load(device, &vmfb, &artifact_contract, weights)?;
     let artifact_fingerprint = format!("{:016x}", module.fingerprint());

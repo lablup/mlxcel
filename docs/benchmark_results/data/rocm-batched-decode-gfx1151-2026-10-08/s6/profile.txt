@@ -1,0 +1,16 @@
+1
+1024
+    batch counters: decode_steps=+127  decode_tokens=+127  mixed_steps=+0  prefill_chunks=+0  tokens_predicted_seconds=+4.326
+    batch steps: occupancy=1.00  decode_step_ms=34.06  (predicted_seconds/steps=34.06 ms)
+4
+1024
+    batch counters: decode_steps=+127  decode_tokens=+508  mixed_steps=+0  prefill_chunks=+0  tokens_predicted_seconds=+31.388
+    batch steps: occupancy=4.00  decode_step_ms=61.79  (predicted_seconds/steps=247.15 ms)
+1
+16384
+    batch counters: decode_steps=+127  decode_tokens=+127  mixed_steps=+0  prefill_chunks=+7  tokens_predicted_seconds=+4.905
+    batch steps: occupancy=1.00  decode_step_ms=38.62  (predicted_seconds/steps=38.62 ms)
+4
+16384
+    batch counters: decode_steps=+415  decode_tokens=+508  mixed_steps=+0  prefill_chunks=+28  tokens_predicted_seconds=+188.549
+    batch steps: occupancy=1.22  decode_step_ms=371.16  (predicted_seconds/steps=454.33 ms)

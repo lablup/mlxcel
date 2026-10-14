@@ -34,7 +34,7 @@ use crate::vision::encoders::jina_vlm::JinaVlmVisionModel;
 use crate::vision::merge::InputEmbeddings;
 use crate::vision::processors::jina_vlm::JinaVlmProcessor;
 use mlxcel_core::cache::SequenceStateLayout;
-use mlxcel_core::generate::{DecodeBatchContext, LanguageModel};
+use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -172,22 +172,6 @@ impl LanguageModel for JinaVlmModel {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         LanguageModel::forward_batched(&self.text_model, input_ids, batch_caches, mask)
-    }
-
-    fn forward_batched_with_context(
-        &self,
-        input_ids: &MlxArray,
-        batch_caches: &mut [&mut [KVCache]],
-        mask: Option<&MlxArray>,
-        context: Option<&DecodeBatchContext>,
-    ) -> UniquePtr<MlxArray> {
-        LanguageModel::forward_batched_with_context(
-            &self.text_model,
-            input_ids,
-            batch_caches,
-            mask,
-            context,
-        )
     }
 
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {

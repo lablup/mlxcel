@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use super::block_reclaim::take_paged_room;
+use super::planned_prefill::PieceFailure;
 use super::*;
+use mlxcel_core::prefill_plan::PrefillPlan;
 use mlxcel_core::prefill_span::PrefillSpan;
 
 impl BatchScheduler {
@@ -68,9 +70,9 @@ impl BatchScheduler {
     /// prompt (Phi-3 / Phi-4 LongRoPE) cannot get that from one forward's own
     /// `(cache_offset, seq_len)`, because the scheduler reaches the model with
     /// only a piece of the prompt in three separate ways: a `--prefill-chunk-size`
-    /// chunk, the history-boundary segment split off by
-    /// `capture_history_boundary_snapshot`, and the suffix left after a
-    /// prompt-cache hit. Each of those pieces would resolve the table on its own
+    /// chunk, the history-boundary segment the plan splits off (issue #1143),
+    /// and the suffix left after a prompt-cache hit. Each of those pieces
+    /// would resolve the table on its own
     /// and a prompt that straddles the threshold would end up with keys built
     /// from two tables in one cache.
     ///
@@ -81,8 +83,7 @@ impl BatchScheduler {
     /// announce: there the pass's own offset is the position. See
     /// [`mlxcel_core::prefill_span`].
     ///
-    /// Used by: `execute_full_prefill`, `start_chunked_prefill`,
-    /// `continue_chunked_prefill`, `capture_history_boundary_snapshot`
+    /// Used by: `run_prefill_piece`, `run_embedding_prefill`
     pub(super) fn announce_prefill_span(&self, seq: &SequenceInfo) -> PrefillSpan {
         mlxcel_core::prefill_span::announce(seq.prompt_tokens.len() as i32)
     }
@@ -94,6 +95,15 @@ impl BatchScheduler {
         // Resume a chunked prefill already in progress?
         if self.chunked_prefill_seq.is_some() {
             self.continue_chunked_prefill();
+            return;
+        }
+
+        // Request memory admission needs the preceding single-slot work to
+        // finish, even if preemption was configured. Never sample a transient
+        // active-request baseline or admit alongside a parked decode graph.
+        if self.request_memory_policy_enabled() && !self.active_batch.is_empty() {
+            let ids = self.active_batch.sequence_ids();
+            self.execute_decode_step(&ids);
             return;
         }
 
@@ -136,6 +146,29 @@ impl BatchScheduler {
                 seq.prompt_tokens.len(),
                 self.shared_kv_budget(),
             );
+            self.prompt_cache_seq_ctx.remove(&seq.seq_id);
+            self.release_sequence_caches(seq.seq_id);
+            return;
+        }
+
+        if seq.cancelled.load(Ordering::Acquire) {
+            self.prompt_cache_seq_ctx.remove(&seq.seq_id);
+            self.release_sequence_caches(seq.seq_id);
+            return;
+        }
+        if let Err(rejection) = self.check_request_memory(&seq) {
+            let _ = seq
+                .response_tx
+                .send(GenerateEvent::RequestMemoryRejected(rejection));
+            self.prompt_cache_seq_ctx.remove(&seq.seq_id);
+            self.release_sequence_caches(seq.seq_id);
+            return;
+        }
+        // Provider-held HTTP admission waiters may now commit SSE headers.
+        // Non-target requests ignore this event and retain their previous path.
+        if matches!(self.engine.model(), LoadedModel::NemotronH(_))
+            && seq.response_tx.send(GenerateEvent::Admitted).is_err()
+        {
             self.prompt_cache_seq_ctx.remove(&seq.seq_id);
             self.release_sequence_caches(seq.seq_id);
             return;
@@ -210,30 +243,13 @@ impl BatchScheduler {
             return;
         }
 
-        let prompt_len = seq.prompt_tokens.len();
-
-        // Decide: chunked vs full prefill.
-        //
-        // VLM image requests carry pre-merged input embeddings spanning the
-        // full (unpadded) prompt length and are consumed whole by
-        // `forward_with_embeddings` (which ignores `input_ids` length when
-        // embeddings are present). Chunked prefill would (a) feed the entire
-        // embedding sequence on chunk 0 while advancing `prefill_offset` by
-        // only one chunk — corrupting the cache/offset bookkeeping — and
-        // (b) re-introduce the NA-tile padding/embedding shape mismatch that
-        // `execute_full_prefill` guards against. So embeddings-bearing
-        // sequences always take the full-prefill path, mirroring the batched
+        // The plan decides between one forward and a piece per tick. VLM image
+        // requests carry pre-merged input embeddings spanning the full
+        // (unpadded) prompt length and are consumed whole by
+        // `forward_with_embeddings`, so their plan is always a single piece
+        // and they always take the full-prefill path, mirroring the batched
         // dispatch which already forces VLM requests to `execute_full_prefill`.
-        if self.prefill_chunk_size > 0
-            && prompt_len > self.prefill_chunk_size
-            && seq.vlm_embeddings.is_none()
-        {
-            // Start chunked prefill: process first chunk
-            self.start_chunked_prefill(seq);
-        } else {
-            // Full-prompt prefill (original path)
-            self.execute_full_prefill(seq);
-        }
+        self.run_planned_prefill(seq);
     }
 
     /// Attempt to handle the dequeued head sequence through the
@@ -276,7 +292,7 @@ impl BatchScheduler {
         match &self.mtp_policy {
             Some(policy) => policy.should_attempt_b1(),
             None => crate::server::batch::speculative_burst::mtp_b1_burst_enabled(
-                self.model.supports_batching(),
+                self.engine.model().supports_batching(),
             ),
         }
     }
@@ -304,7 +320,10 @@ impl BatchScheduler {
         };
         block_size >= 2
             && crate::server::batch::speculative_slice::mtp_tick_slice_enabled()
-            && crate::server::batch::speculative_burst::mtp_capable_target(&self.model, block_size)
+            && crate::server::batch::speculative_burst::mtp_capable_target(
+                self.engine.model(),
+                block_size,
+            )
             && !seq.prompt_tokens.is_empty()
             && crate::server::batch::speculative_burst::mtp_prefill_suffix_start(
                 seq.prefill_start_offset,
@@ -434,8 +453,8 @@ impl BatchScheduler {
         // BatchedCold cohort holds only cold rows is what keeps cache offsets
         // correct: an adopted prefix can never be folded into a batch and have
         // its KV resumed at the wrong position.
-        let can_batch = self.model.supports_batched_prefill();
-        let can_pad = self.model.supports_padded_prefill();
+        let can_batch = self.engine.model().supports_batched_prefill();
+        let can_pad = self.engine.model().supports_padded_prefill();
         let rows: Vec<PrefillRow> = seqs
             .iter()
             .map(|s| PrefillRow {
@@ -567,7 +586,7 @@ impl BatchScheduler {
 
         let b = seqs.len();
         let max_len = seqs.iter().map(|s| s.prompt_tokens.len()).max().unwrap();
-        let can_pad_prefill = self.model.supports_padded_prefill();
+        let can_pad_prefill = self.engine.model().supports_padded_prefill();
         if !can_pad_prefill && seqs.iter().any(|s| s.prompt_tokens.len() != max_len) {
             // Should not happen for a planner-approved cohort (it only batches
             // equal-length rows on equal-length-only models), but stay safe.
@@ -580,11 +599,7 @@ impl BatchScheduler {
             return;
         }
 
-        let padded_len = if can_pad_prefill && should_align_prefill() {
-            align_to_na_tile(max_len)
-        } else {
-            max_len
-        };
+        let padded_len = self.batched_prefill_padded_len(max_len);
 
         tracing::debug!("batched prefill: {} requests, padded to {}", b, padded_len);
 
@@ -616,25 +631,6 @@ impl BatchScheduler {
         };
 
         let batch_ids: Vec<SequenceId> = seqs.iter().map(|seq| seq.seq_id).collect();
-        let mut batch_caches = match self.cache_pool.get_batch_caches_mut(&batch_ids) {
-            Ok(caches) => caches,
-            Err(err) => {
-                tracing::warn!("batched prefill: {err}, falling back");
-                // Re-queue all sequences for sequential processing.
-                for seq in seqs {
-                    self.execute_full_prefill(seq);
-                }
-                return;
-            }
-        };
-
-        if batch_caches.len() != b {
-            // Re-queue all sequences for sequential processing.
-            for seq in seqs {
-                self.execute_full_prefill(seq);
-            }
-            return;
-        }
 
         // Prefill, and deliberately NOT covered by `announce_prefill_span`: this
         // pass starts at offset 0 and spans `padded_len`, the longest row, so a
@@ -646,17 +642,21 @@ impl BatchScheduler {
         // its chunk exceeds the threshold, since any longer prompt takes the
         // chunked path instead. See `mlxcel_core::prefill_span`.
         // Single batched forward pass: [B, padded_len] → [B, padded_len, vocab]
-        let raw_logits = self.model.forward_batched_with_context_and_ids(
-            &input,
-            Some(&batch_ids),
-            &mut batch_caches,
-            stacked_mask.as_deref(),
-            None,
-        );
-
-        // Release the cache_pool borrow before the guarded eval touches
-        // `&mut self`; the per-sequence loop below re-borrows caches anyway.
-        drop(batch_caches);
+        let raw_logits =
+            match self
+                .engine
+                .prefill_cohort(&batch_ids, &input, stacked_mask.as_deref())
+            {
+                Ok(logits) => logits,
+                Err(err) => {
+                    tracing::warn!("batched prefill: {err}, falling back");
+                    // Re-queue all sequences for sequential processing.
+                    for seq in seqs {
+                        self.execute_full_prefill(seq);
+                    }
+                    return;
+                }
+            };
 
         // #822: force-evaluate the cohort's prefill graph through the fallible
         // boundary. This single eval covers the whole batch, so an MLX C++ throw
@@ -690,15 +690,16 @@ impl BatchScheduler {
                 &[i as i32 + 1, last_pos + 1, vocab],
             );
 
-            // Trim padding positions from this sequence's KV cache so that the
+            // Trim padding positions from this sequence's KV cache (and, for a
+            // model-owned family, from the model's own state) so that the
             // decode phase starts with the correct cache offset.
             let excess = (padded - actual_len) as i32;
             if excess > 0
-                && let Some(caches) = self.cache_pool.get_caches_mut(seq.seq_id)
+                && self.engine.is_open(seq.seq_id)
+                && let Err(err) = self.engine.trim_padding(seq.seq_id, excess)
             {
-                for c in caches.iter_mut() {
-                    c.trim(excess);
-                }
+                self.abort_sequence(seq, &err.to_string());
+                continue;
             }
 
             self.sync_sequence_storage(seq.seq_id);
@@ -706,8 +707,10 @@ impl BatchScheduler {
             seq.prefill_offset = actual_len;
             self.batch_observability.record_prefill_start(actual_len);
 
-            let eos_tokens =
-                merged_eos_token_ids(self.model.eos_token_ids(), &seq.sampling.stop_token_ids);
+            let eos_tokens = merged_eos_token_ids(
+                self.engine.model().eos_token_ids(),
+                &seq.sampling.stop_token_ids,
+            );
             let needs_history = seq.sampling.needs_token_history();
             let token_history = initial_token_history(&seq.prompt_tokens, needs_history);
 
@@ -715,589 +718,127 @@ impl BatchScheduler {
         }
     }
 
-    /// Full-prompt prefill: process the entire prompt in one pass.
+    /// Full-prompt prefill: every piece of the plan in this call, with each
+    /// segment one forward (no chunking).
     ///
-    /// when `seq.prefill_start_offset > 0`, a
-    /// prompt-cache hit has installed the first `prefill_start_offset` tokens
-    /// of KV state on this sequence. Only the suffix tokens are fed to the
-    /// model. The VLM-prefix path deliberately opts out of cache adoption at
-    /// the enqueue site, so this branch never has to mix the two.
+    /// When `seq.prefill_start_offset > 0`, a prompt-cache hit has installed
+    /// the first `prefill_start_offset` tokens of KV state on this sequence
+    /// and only the suffix is fed to the model. A snapshot family's chat
+    /// prompt is split at its history boundary (issue #1143) and the model
+    /// state snapshotted there before the suffix runs. The VLM-prefix path
+    /// deliberately opts out of cache adoption at the enqueue site, so the
+    /// embedding branch never has to mix the two.
+    ///
+    /// Also the fallback of every batched-window row that cannot run in a
+    /// cohort, which is why it never parks a sequence: a window may hold
+    /// several such rows and there is one continuation slot.
     pub(super) fn execute_full_prefill(&mut self, mut seq: SequenceInfo) {
-        let _span = self.announce_prefill_span(&seq);
-        // Split off the history-boundary segment first (issue #1143). On the
-        // vast majority of requests this is an early-return; when it does run
-        // it advances `prefill_start_offset`, so everything below sees the
-        // remaining suffix exactly as it would see an adopted-prefix suffix.
-        if let Err(msg) = self.capture_history_boundary_snapshot(&mut seq) {
-            self.abort_sequence(seq, &msg);
-            self.eval_failures_exhausted();
-            return;
-        }
-        // `cached` reports the ADOPTED prefix only. `prefill_start_offset` may
-        // also have been advanced past a freshly-forwarded history-boundary
-        // segment (issue #1143), and reporting those as cached would misread as
-        // reuse in a trace. `start` carries the real cursor.
+        let plan = self.prefill_plan_for_with_chunk(&seq, 0);
+        // `cached` reports the ADOPTED prefix only; `start` carries the real
+        // cursor and `boundary` the split, if any.
         let _span = tracing::info_span!(
             "prefill",
             seq_id = %seq.seq_id,
             prompt_len = seq.prompt_tokens.len(),
             cached = seq.already_cached_tokens,
             start = seq.prefill_start_offset,
+            boundary = plan.boundary(),
         )
         .entered();
-        // Only the suffix enters the prefill counters — the first
+        // Only the suffix enters the prefill counters: the first
         // `prefill_start_offset` tokens were resolved from the adopted
         // detached cache with zero model work.
-        let suffix_len = seq.prompt_tokens.len() - seq.prefill_start_offset;
-        self.batch_observability.record_prefill_start(suffix_len);
+        self.batch_observability
+            .record_prefill_start(plan.forwarded_len());
 
         // Non-batching models use internal RefCell caches that are shared
         // across all sequences.  Reset them now (at prefill time) rather
         // than at enqueue time so that queued requests don't corrupt an
         // in-flight generation.
-        if !self.model.supports_batching() {
-            let _ = self.model.make_caches();
+        if !self.engine.model().supports_batching() {
+            let _ = self.engine.model().make_caches();
         }
 
-        let eos_tokens =
-            merged_eos_token_ids(self.model.eos_token_ids(), &seq.sampling.stop_token_ids);
+        let eos_tokens = merged_eos_token_ids(
+            self.engine.model().eos_token_ids(),
+            &seq.sampling.stop_token_ids,
+        );
         let needs_history = seq.sampling.needs_token_history();
         let token_history = initial_token_history(&seq.prompt_tokens, needs_history);
+        seq.prefill_offset = plan.adopted();
 
-        // Feed only the suffix tokens to the model when a cached prefix was
-        // adopted. For cold prefills `start == 0` and this is identical to
-        // the legacy behavior.
-        let suffix_tokens: Vec<i32> = seq.prompt_tokens[seq.prefill_start_offset..].to_vec();
-
-        // Run prefill (with or without VLM embeddings).
-        // On M5+ hardware pad the prompt to a 32-token tile boundary for
-        // optimal Neural Accelerator throughput.
-        let actual_len = suffix_tokens.len();
-        // VLM image requests inject pre-merged input embeddings at the real
-        // (unpadded) sequence length and run through `forward_with_embeddings`
-        // below. NA-tile alignment pads only the token-id vector and builds a
-        // matching padded mask — it does NOT pad the injected embeddings. So
-        // aligning here would hand the model a padded mask (e.g. 320x320) that
-        // cannot broadcast against the unpadded embeddings (e.g. [1,H,293,293]),
-        // aborting the process. Skip alignment when embeddings are present; the
-        // text backbone then builds a causal mask sized to the embeddings,
-        // matching the CLI generate path. Token-id (text-only) prefill — for
-        // VLMs and plain text models alike — is unaffected.
-        let (effective_tokens, pad_mask_opt) = if self.model.supports_padded_prefill()
-            && should_align_prefill()
-            && seq.vlm_embeddings.is_none()
-        {
-            let padded_len = align_to_na_tile(actual_len);
-            if padded_len > actual_len {
-                let mut padded = suffix_tokens.clone();
-                padded.resize(padded_len, 0);
-                // The padding mask anchors to the adopted cache offset so
-                // the newly-prefilled positions see the correct KV-history
-                // positions on M5+ hardware.
-                let mask = create_padded_prefill_mask(
-                    actual_len as i32,
-                    padded_len as i32,
-                    seq.prefill_start_offset as i32,
-                );
-                (padded, Some(mask))
-            } else {
-                (suffix_tokens.clone(), None)
+        let logits = if seq.vlm_embeddings.is_some() {
+            match self.run_embedding_prefill(&mut seq, &plan) {
+                Ok(logits) => logits,
+                Err(failure) => {
+                    self.fail_prefill_piece(seq, failure);
+                    return;
+                }
             }
         } else {
-            (suffix_tokens.clone(), None)
-        };
-
-        let eff_len = effective_tokens.len() as i32;
-        let input = mlxcel_core::from_slice_i32(&effective_tokens, &[1, eff_len]);
-        // #822: the VLM branch force-evaluates the prefill graph while `caches`
-        // still borrows the cache pool, so capture the fallible eval outcome
-        // here and act on it below once the borrow has ended.
-        let mut prefill_eval: Option<Result<(), String>> = None;
-        let logits = {
-            let caches = match self.cache_pool.get_caches_mut(seq.seq_id) {
-                Some(c) => c,
-                None => {
-                    self.abort_sequence(seq, "Cache not found for sequence during prefill");
+            match self.run_prefill_pieces(&mut seq, &plan, true, false) {
+                Ok(logits) => logits,
+                Err(failure) => {
+                    self.fail_prefill_piece(seq, failure);
                     return;
                 }
-            };
-
-            let raw_logits = if let Some(ref embeddings) = seq.vlm_embeddings {
-                // VLM path: apply provided mask or the tile-alignment mask.
-                match prepared_embedding_refs(embeddings) {
-                    Ok((input_embeds, caller_mask)) => {
-                        // Caller-supplied mask takes precedence; tile-alignment mask
-                        // is used only when the caller does not provide one.
-                        let effective_mask =
-                            caller_mask.or(pad_mask_opt.as_ref().map(|m| m.as_ref().unwrap()));
-                        let logits = self
-                            .model
-                            .forward_last_logits_with_embeddings_and_sequence_id(
-                                &input,
-                                Some(input_embeds),
-                                Some(seq.seq_id),
-                                caches,
-                                effective_mask,
-                                actual_len.saturating_sub(1),
-                            );
-                        prefill_eval =
-                            Some(mlxcel_core::try_eval(&logits).map_err(|e| e.to_string()));
-                        self.model.after_prefill();
-                        logits
-                    }
-                    Err(err) => {
-                        self.abort_sequence(seq, &err.to_string());
-                        return;
-                    }
-                }
-            } else {
-                self.model.forward_last_logits_with_sequence_id(
-                    &input,
-                    Some(seq.seq_id),
-                    caches,
-                    pad_mask_opt.as_ref().map(|m| m.as_ref().unwrap()),
-                    actual_len.saturating_sub(1),
-                )
-            };
-
-            // The sequence-aware last-logits hook already extracts the last
-            // real row. Trim padding from KV caches so decode begins at the
-            // correct cache offset.
-            if pad_mask_opt.is_some() && effective_tokens.len() > actual_len {
-                let padded_len = effective_tokens.len();
-                // Trim padding positions from all KV caches.
-                let excess = (padded_len - actual_len) as i32;
-                for c in caches.iter_mut() {
-                    c.trim(excess);
-                }
             }
-            raw_logits
         };
 
-        // #822: if the VLM prefill eval threw, fail just this request and, if the
-        // backend has failed too many times in a row, shut the scheduler down.
-        if let Some(outcome) = prefill_eval
-            && let Err(msg) = self.record_eval_outcome(outcome)
-        {
-            self.abort_sequence(seq, &msg);
-            self.eval_failures_exhausted();
-            return;
-        }
-
-        self.sync_sequence_storage(seq.seq_id);
-
-        // H2: enforce the `--max-kv-size` cap at the end of a
-        // full prefill before the sequence transitions to decode. A long
-        // prompt can overshoot the cap during a single forward pass; without
-        // this trim the first decode step would start with a too-wide live
-        // window. With no cap configured this is a cheap early-return.
-        self.enforce_max_kv_size_for(seq.seq_id, seq.retention);
-
         mlxcel_core::clear_memory_cache();
-        // `prefill_offset` is a cursor into `prompt_tokens`, so it must
-        // include the adopted prefix even though those tokens bypassed the
-        // forward pass.
-        seq.prefill_offset = seq.prefill_start_offset + actual_len;
-
         self.finish_prefill(seq, logits, eos_tokens, token_history, needs_history);
     }
 
-    /// Begin a chunked prefill: process the first chunk and store the
-    /// sequence for continuation on subsequent ticks.
-    ///
-    /// `seq.prefill_start_offset` skips over the
-    /// leading tokens that the adopted prompt-cache entry already covers,
-    /// so the first chunk starts *after* the cached prefix.
-    pub(super) fn start_chunked_prefill(&mut self, mut seq: SequenceInfo) {
-        let _span = self.announce_prefill_span(&seq);
-        // Same history-boundary split as `execute_full_prefill` (issue #1143).
-        // It advances `prefill_start_offset`, which is exactly the cursor the
-        // first chunk starts from, so the chunk loop below needs no changes.
-        if let Err(msg) = self.capture_history_boundary_snapshot(&mut seq) {
-            self.abort_sequence(seq, &msg);
-            self.eval_failures_exhausted();
-            return;
-        }
-        let _span = tracing::info_span!(
-            "chunked_prefill_start",
-            seq_id = %seq.seq_id,
-            prompt_len = seq.prompt_tokens.len(),
-            chunk_size = self.prefill_chunk_size,
-            cached = seq.already_cached_tokens,
-            start = seq.prefill_start_offset,
-        )
-        .entered();
-
-        // Reset internal caches for non-batching models (same as execute_full_prefill).
-        if !self.model.supports_batching() {
-            let _ = self.model.make_caches();
-        }
-
-        let chunk_size = self.prefill_chunk_size;
-        let chunk_range = match next_chunked_prefill_range(
-            seq.prompt_tokens.len(),
-            seq.prefill_start_offset,
-            chunk_size,
-        ) {
-            Some(range) => range,
-            None => {
-                self.abort_sequence(seq, "Chunked prefill start had no suffix tokens to process");
-                return;
-            }
-        };
-        // Counter reflects only the work the model actually runs.
-        let suffix_len = seq.prompt_tokens.len() - seq.prefill_start_offset;
-        self.batch_observability.record_prefill_start(suffix_len);
-
-        let start = chunk_range.start;
-        let end = chunk_range.end;
-        let chunk = &seq.prompt_tokens[start..end];
-
-        // Align the first chunk to a 32-token tile boundary on M5+ hardware.
-        let actual_chunk_len = chunk.len();
-        let (eff_chunk, pad_mask_opt) =
-            if self.model.supports_padded_prefill() && should_align_prefill() {
-                let padded_len = align_to_na_tile(actual_chunk_len);
-                if padded_len > actual_chunk_len {
-                    let mut padded = chunk.to_vec();
-                    padded.resize(padded_len, 0);
-                    // Mask anchored to the KV offset the adopted prefix already
-                    // installed (starts at zero for cold prefills).
-                    let mask = create_padded_prefill_mask(
-                        actual_chunk_len as i32,
-                        padded_len as i32,
-                        start as i32,
-                    );
-                    (padded, Some(mask))
-                } else {
-                    (chunk.to_vec(), None)
-                }
-            } else {
-                (chunk.to_vec(), None)
-            };
-
-        let eff_len = eff_chunk.len() as i32;
-        let input = mlxcel_core::from_slice_i32(&eff_chunk, &[1, eff_len]);
-        // #822: this chunk's forward is force-evaluated while `caches` still
-        // borrows the cache pool, so capture the fallible eval outcome and act
-        // on it below once the borrow has ended. Deferred-init: every path that
-        // reaches the check below assigns it exactly once; the others return.
-        let prefill_eval: Option<Result<(), String>>;
-        let logits = {
-            let caches = match self.cache_pool.get_caches_mut(seq.seq_id) {
-                Some(c) => c,
-                None => {
-                    self.abort_sequence(seq, "Cache not found for sequence during chunked prefill");
-                    return;
-                }
-            };
-
-            // VLM embeddings are applied only on the first chunk.
-            let logits = if let Some(ref embeddings) = seq.vlm_embeddings {
-                match prepared_embedding_refs(embeddings) {
-                    Ok((input_embeds, caller_mask)) => {
-                        let effective_mask =
-                            caller_mask.or(pad_mask_opt.as_ref().map(|m| m.as_ref().unwrap()));
-                        let logits = self
-                            .model
-                            .forward_last_logits_with_embeddings_and_sequence_id(
-                                &input,
-                                Some(input_embeds),
-                                Some(seq.seq_id),
-                                caches,
-                                effective_mask,
-                                actual_chunk_len.saturating_sub(1),
-                            );
-                        prefill_eval =
-                            Some(mlxcel_core::try_eval(&logits).map_err(|e| e.to_string()));
-                        self.model.after_prefill();
-                        logits
-                    }
-                    Err(err) => {
-                        self.abort_sequence(seq, &err.to_string());
-                        return;
-                    }
-                }
-            } else {
-                let logits = self.model.forward_last_logits_with_sequence_id(
-                    &input,
-                    Some(seq.seq_id),
-                    caches,
-                    pad_mask_opt.as_ref().map(|m| m.as_ref().unwrap()),
-                    actual_chunk_len.saturating_sub(1),
-                );
-                prefill_eval = Some(mlxcel_core::try_eval(&logits).map_err(|e| e.to_string()));
-                logits
-            };
-
-            // Trim padding positions from KV caches when the chunk was padded.
-            if pad_mask_opt.is_some() && eff_chunk.len() > actual_chunk_len {
-                let excess = (eff_chunk.len() - actual_chunk_len) as i32;
-                for c in caches.iter_mut() {
-                    c.trim(excess);
-                }
-            }
-            logits
-        };
-
-        // #822: if this chunk's eval threw, fail just this request and, if the
-        // backend has failed too many times in a row, shut the scheduler down.
-        if let Some(outcome) = prefill_eval
-            && let Err(msg) = self.record_eval_outcome(outcome)
-        {
-            self.abort_sequence(seq, &msg);
-            self.eval_failures_exhausted();
-            return;
-        }
-
-        self.sync_sequence_storage(seq.seq_id);
-
-        // H2: enforce the `--max-kv-size` cap after each
-        // prefill chunk so the live window cannot grow unbounded across
-        // chunks of a long prompt. A 100k-token prompt with `--max-kv-size
-        // 4096` would otherwise see the cap engage only after the entire
-        // prefill completes — defeating the memory-bound the operator
-        // configured. With no cap configured this is a cheap early-return.
-        self.enforce_max_kv_size_for(seq.seq_id, seq.retention);
-
-        mlxcel_core::clear_memory_cache();
-        seq.prefill_offset = end;
-        // One `prompt_progress` frame per evaluated chunk, b10621's per-batch
-        // -iteration cadence (#1477).
-        seq.report_prefill_progress(end);
-        // Count the first chunk too. Before issue #908 only
-        // `continue_chunked_prefill` recorded, so the counter reported
-        // continuations and read as zero for a prompt that ran chunk 0 and was
-        // then starved, which is precisely the state a reader needs to see.
-        self.batch_observability.record_prefill_chunk();
-
-        tracing::debug!(
-            "Chunked prefill: seq {} chunk 0..{end}/{} tokens",
-            seq.seq_id,
-            seq.prompt_tokens.len()
-        );
-
-        // The chunked-vs-full decision in `prefill_sequence` keys off the
-        // *full* prompt length, but the work we just ran covers only the
-        // suffix `[prefill_start_offset..]`. When a prompt-cache hit adopts a
-        // long prefix, that suffix can fit entirely in chunk 0 even though the
-        // full prompt cleared the chunking threshold — so this first chunk has
-        // already reached the end of the prompt and there is nothing to
-        // continue. Finish the prefill now (mirroring the final-chunk handling
-        // in `continue_chunked_prefill`). Storing the sequence for
-        // continuation instead would feed an empty `[end..end]` chunk on the
-        // next tick, producing a zero-length forward whose `[1, 0, vocab]`
-        // logits crash in `slice_last_logits` (issue #179).
-        if chunk_range.is_terminal {
-            let eos_tokens =
-                merged_eos_token_ids(self.model.eos_token_ids(), &seq.sampling.stop_token_ids);
-            let needs_history = seq.sampling.needs_token_history();
-            let token_history = initial_token_history(&seq.prompt_tokens, needs_history);
-            self.finish_prefill(seq, logits, eos_tokens, token_history, needs_history);
-            return;
-        }
-
-        // Store the sequence for continuation
-        self.chunked_prefill_seq = Some(seq);
-    }
-
-    /// Continue a chunked prefill that is already in progress.
-    ///
-    /// Returns `true` when a chunk forward actually ran. Every early return
-    /// here (no parked sequence, an empty range, a missing cache, an exhausted
-    /// eval) reports `false`, which is what lets the issue #908 mixed-step
-    /// counter stay an honest dispatch proof instead of counting ticks on which
-    /// no prefill work happened.
-    ///
-    /// The per-chunk `clear_memory_cache()` below is suppressed whenever a
-    /// decode batch is live alongside this chunk. The decode path deliberately
-    /// clears on a cadence instead (`cache_clear_interval()`, 256 tokens on
-    /// Metal and off by default on CUDA, because a per-step clear churns the
-    /// pool and defeats CUDA-graph reuse, ml-explore/mlx#2358). Before #908
-    /// this function was only ever reachable with an empty active batch, so its
-    /// per-chunk clear never touched a decode hot path.
-    ///
-    /// #908 introduced the first interleaved caller (`MixedStep`) and passed an
-    /// explicit `mixed_tick` flag to suppress the clear. #1011 makes the
-    /// DEFAULT policy interleaved too, via the fairness grant, so the condition
-    /// is now read from the active batch rather than passed in: a caller that
-    /// forgot the flag would silently put an allocator-pool clear on the decode
-    /// hot path for the whole duration of a long prefill, inflating exactly the
-    /// inter-token latency this issue has to measure. There is one source of
-    /// truth for "is decode live" and it is the active batch.
-    pub(super) fn continue_chunked_prefill(&mut self) -> bool {
-        // Re-apply the parked sequence's runtime-LoRA snapshot (#1439): the
-        // interleaved decode batch may have applied its own between chunks.
-        let chunked_lora = self
-            .chunked_prefill_seq
+    /// The one piece of an embedding-input plan: VLM image requests inject
+    /// pre-merged input embeddings at the real (unpadded) sequence length and
+    /// run through `forward_with_embeddings`. The plan never pads them
+    /// (NA-tile alignment pads only the token-id vector and would hand the
+    /// model a padded mask that cannot broadcast against the unpadded
+    /// embeddings) and never chunks them, so the text backbone builds a causal
+    /// mask sized to the embeddings, matching the CLI generate path.
+    fn run_embedding_prefill(
+        &mut self,
+        seq: &mut SequenceInfo,
+        plan: &PrefillPlan,
+    ) -> Result<UniquePtr<mlxcel_core::MlxArray>, PieceFailure> {
+        let _span = self.announce_prefill_span(seq);
+        let piece = plan
+            .pieces()
+            .first()
+            .ok_or_else(|| PieceFailure::Abort("Prefill had no suffix tokens to process".into()))?;
+        debug_assert!(plan.is_single_pass() && !piece.is_padded());
+        let embeddings = seq
+            .vlm_embeddings
             .as_ref()
-            .and_then(|seq| seq.lora_scales.clone());
-        if self.chunked_prefill_seq.is_some() {
-            self.ensure_lora_applied(chunked_lora.as_ref());
-        }
-        let mut seq = match self.chunked_prefill_seq.take() {
-            Some(s) => s,
-            None => return false,
-        };
-        let _span = self.announce_prefill_span(&seq);
-        // Interleaved with decode (a #1011 grant or a #908 mixed step) rather
-        // than running against a drained batch.
-        let decode_batch_live = !self.active_batch.is_empty();
-
-        let _span = tracing::info_span!(
-            "chunked_prefill_continue",
-            seq_id = %seq.seq_id,
-            offset = seq.prefill_offset,
-            total = seq.prompt_tokens.len(),
-        )
-        .entered();
-
-        let chunk_size = self.prefill_chunk_size;
-        let offset = seq.prefill_offset;
-        let total = seq.prompt_tokens.len();
-        let chunk_range = match next_chunked_prefill_range(total, offset, chunk_size) {
-            Some(range) => range,
-            None => {
-                self.abort_sequence(
-                    seq,
-                    "Chunked prefill continuation had no remaining tokens to process",
-                );
-                return false;
-            }
-        };
-        self.batch_observability.record_prefill_chunk();
-
-        let end = chunk_range.end;
-        let chunk = &seq.prompt_tokens[offset..end];
-
-        // Align each continuation chunk to a 32-token tile boundary on M5+.
-        let actual_chunk_len = chunk.len();
-        // For non-batching models the scheduler's dummy caches always have
-        // offset=0.  Use the prefill_offset (number of tokens already
-        // processed) as the KV offset instead, which is accurate regardless
-        // of whether the model uses internal or scheduler-managed caches.
-        let kv_offset = {
-            let caches = match self.cache_pool.get_caches_mut(seq.seq_id) {
-                Some(c) => c,
-                None => {
-                    self.abort_sequence(seq, "Cache not found during chunked prefill continuation");
-                    return false;
-                }
-            };
-            if self.model.supports_batching() {
-                caches.first().map_or(0, |c| c.offset)
-            } else {
-                offset as i32
-            }
-        };
-        let (eff_chunk, pad_mask_opt) =
-            if self.model.supports_padded_prefill() && should_align_prefill() {
-                let padded_len = align_to_na_tile(actual_chunk_len);
-                if padded_len > actual_chunk_len {
-                    let mut padded = chunk.to_vec();
-                    padded.resize(padded_len, 0);
-                    let mask = create_padded_prefill_mask(
-                        actual_chunk_len as i32,
-                        padded_len as i32,
-                        kv_offset,
-                    );
-                    (padded, Some(mask))
-                } else {
-                    (chunk.to_vec(), None)
-                }
-            } else {
-                (chunk.to_vec(), None)
-            };
-
-        // Reserve this chunk's blocks before its forward (issue #2088). A
-        // MixedStep tick has just run a decode step, and nothing else restores
-        // the set-aside once the pool falls below it; a failed acquire inside
-        // the forward is fatal for the worker.
-        if !self.reserve_prefill_chunk_blocks(seq.seq_id, eff_chunk.len()) {
-            let total = self.cache_pool.paged_block_budget().unwrap_or_default();
-            self.abort_sequence(
-                seq,
-                &format!(
-                    "KV cache budget exhausted: no free blocks in the {total}-block KV cache budget to continue the chunked prefill"
-                ),
-            );
-            return false;
-        }
-        let eff_len = eff_chunk.len() as i32;
-        let input = mlxcel_core::from_slice_i32(&eff_chunk, &[1, eff_len]);
-        let logits = {
-            let caches = match self.cache_pool.get_caches_mut(seq.seq_id) {
-                Some(c) => c,
-                None => {
-                    self.abort_sequence(seq, "Cache not found during chunked prefill continuation");
-                    return false;
-                }
-            };
-
-            let logits = self.model.forward_last_logits_with_sequence_id(
-                &input,
-                Some(seq.seq_id),
-                caches,
-                pad_mask_opt.as_ref().map(|m| m.as_ref().unwrap()),
-                actual_chunk_len.saturating_sub(1),
-            );
-
-            // Trim padding positions from KV caches when the chunk was padded.
-            if pad_mask_opt.is_some() && eff_chunk.len() > actual_chunk_len {
-                let excess = (eff_chunk.len() - actual_chunk_len) as i32;
-                for c in caches.iter_mut() {
-                    c.trim(excess);
-                }
-            }
-            logits
-        };
+            .ok_or_else(|| PieceFailure::Abort("embedding prefill without embeddings".into()))?;
+        let (input_embeds, caller_mask) = prepared_embedding_refs(embeddings)
+            .map_err(|err| PieceFailure::Abort(err.to_string()))?;
+        let tokens = &seq.prompt_tokens[piece.range.clone()];
+        let input = mlxcel_core::from_slice_i32(tokens, &[1, piece.len() as i32]);
+        // #822: the engine force-evaluates the logits and reports the
+        // fallible outcome; it is recorded against the health counter here.
+        let outcome = self
+            .engine
+            .prefill(&PrefillStep {
+                seq_id: seq.seq_id,
+                input: &input,
+                embeddings: Some(input_embeds),
+                mask: caller_mask,
+                last_pos: piece.last_real_pos(),
+                trim_excess: 0,
+                eval: true,
+            })
+            .map_err(|_| {
+                PieceFailure::Abort("Cache not found for sequence during prefill".into())
+            })?;
+        self.record_eval_outcome(outcome.eval)
+            .map_err(PieceFailure::EvalFailed)?;
         self.sync_sequence_storage(seq.seq_id);
-
-        // H2: enforce the `--max-kv-size` cap after each
-        // continuation chunk so a multi-chunk prefill stays bounded across
-        // all chunks, not just at the very end. Cheap early-return when no
-        // cap is configured.
+        // H2: enforce the `--max-kv-size` cap at the end of the prefill before
+        // the sequence transitions to decode.
         self.enforce_max_kv_size_for(seq.seq_id, seq.retention);
-
-        seq.prefill_offset = end;
-        // Per-chunk `prompt_progress`, as on the first chunk (#1477).
-        seq.report_prefill_progress(end);
-
-        tracing::debug!(
-            "Chunked prefill: seq {} chunk {offset}..{end}/{total} tokens",
-            seq.seq_id,
-        );
-
-        if !chunk_range.is_terminal {
-            // More chunks remain -- store and yield back to the scheduler.
-            // #822: evaluate this chunk through the fallible boundary so an MLX
-            // throw fails just this request rather than aborting the process.
-            if let Err(msg) =
-                self.record_eval_outcome(mlxcel_core::try_eval(&logits).map_err(|e| e.to_string()))
-            {
-                self.abort_sequence(seq, &msg);
-                self.eval_failures_exhausted();
-                return false;
-            }
-            if !decode_batch_live {
-                mlxcel_core::clear_memory_cache();
-            }
-            self.chunked_prefill_seq = Some(seq);
-            return true;
-        }
-
-        // Final chunk -- complete the prefill and sample the first token
-        if !decode_batch_live {
-            mlxcel_core::clear_memory_cache();
-        }
-
-        let eos_tokens =
-            merged_eos_token_ids(self.model.eos_token_ids(), &seq.sampling.stop_token_ids);
-        let needs_history = seq.sampling.needs_token_history();
-        let token_history = initial_token_history(&seq.prompt_tokens, needs_history);
-
-        self.finish_prefill(seq, logits, eos_tokens, token_history, needs_history);
-        true
+        seq.prefill_offset = piece.range.end;
+        Ok(outcome.logits)
     }
 
     /// Complete a prefill (full or chunked): sample the first token,
@@ -1308,37 +849,9 @@ impl BatchScheduler {
         mut seq: SequenceInfo,
         logits: UniquePtr<mlxcel_core::MlxArray>,
         eos_tokens: Vec<i32>,
-        mut token_history: Vec<i32>,
+        token_history: Vec<i32>,
         needs_history: bool,
     ) {
-        // apply structured-output mask to the prefill logits
-        // before sampling the first token so the very first emitted token
-        // already conforms to the schema.
-        let logits_for_sampling = if let Some(constraint) = seq.structured.clone() {
-            // Read the vocab dimension from the prefill logits so the mask
-            // matches the sampler's vocabulary exactly.
-            let shape = mlxcel_core::array_shape(&logits);
-            let vocab = *shape.last().unwrap_or(&0) as usize;
-            match Self::apply_structured_mask(&constraint, mlxcel_core::copy(&logits), vocab) {
-                Ok(masked) => masked,
-                Err(msg) => {
-                    let _ = seq
-                        .response_tx
-                        .send(GenerateEvent::Error(format!("structured output: {msg}")));
-                    if let Err(err) = seq
-                        .state
-                        .transition_to(SequenceState::Finished(FinishReason::Error(msg)))
-                    {
-                        tracing::error!("State transition error: {err}");
-                    }
-                    self.prompt_cache_seq_ctx.remove(&seq.seq_id);
-                    self.release_sequence_caches(seq.seq_id);
-                    return;
-                }
-            }
-        } else {
-            mlxcel_core::copy(&logits)
-        };
         // #347: reseed the global MLX RNG to THIS row's own seed at the exact
         // point it samples its first token. `begin_prefill` already seeded once,
         // but a batched cohort runs every row's `begin_prefill` up front before
@@ -1354,47 +867,38 @@ impl BatchScheduler {
         // batched fused DECODE path shares one global-RNG draw across the whole
         // `[B, vocab]` batch and is out of scope here (see issue #347).
         seed_rng_if_needed(&seq.sampling);
-        let (first_token_arr, adjusted_logits, post_probs) = if seq.logprobs_config.enabled
-            && seq.logprobs_config.source == LogprobSource::PostSampling
-        {
-            // b10621 post_sampling_probs (#1485): one chain pass, one XTC
-            // gate, for both the draw and the report.
-            let (token, adjusted, probs) = sample_token_with_state_and_distribution(
-                &logits_for_sampling,
-                &seq.sampling,
-                &token_history,
-                &mut seq.sampler_state,
-            );
-            (token, adjusted, Some(probs))
-        } else if seq.sampling.needs_sampler_feedback_state() {
-            // #1485: mirostat / adaptive-p carry per-sequence state that the
-            // first sampled token must already update, so the stateful entry
-            // point runs here too (penalty-only rows keep the stateless
-            // rebuild path this call site always used).
-            let (token, adjusted) = sample_token_optimized_with_state(
-                &logits_for_sampling,
-                &seq.sampling,
-                &token_history,
-                &mut seq.sampler_state,
-            );
-            (token, adjusted, None)
-        } else {
-            let (token, adjusted) =
-                sample_token_optimized(&logits_for_sampling, &seq.sampling, &token_history);
-            (token, adjusted, None)
-        };
-        // #822: force-evaluate the first sampled token through the fallible
-        // boundary. On an MLX throw, fail just this request; the infallible
-        // `item_i32` readback below would otherwise re-trigger the same throw
-        // and abort the process.
-        if let Err(msg) = self
-            .record_eval_outcome(mlxcel_core::try_eval(&first_token_arr).map_err(|e| e.to_string()))
-        {
-            self.abort_sequence(seq, &msg);
-            self.eval_failures_exhausted();
-            return;
-        }
-        let sampled_first_token = mlxcel_core::item_i32(&first_token_arr);
+        // Store merged EOS and token history on the sequence: the engine's row
+        // reads them for the first draw and the finish step, and
+        // `decode_single_step` reuses them without per-step reconstruction.
+        seq.merged_eos = eos_tokens;
+        seq.token_history = token_history;
+        // The finish step records the first token in the history exactly when
+        // the sampler reads one, the same rule the caller built it under.
+        debug_assert_eq!(needs_history, seq.sampling.needs_token_history());
+        // The first token takes the engine's per-row chain (#2169, #2168),
+        // under the same state rule as every decode step: the sequence's
+        // `RowSampler` already holds the state a penalty, mirostat or
+        // adaptive-p config needs, so the first token updates it too. The
+        // structured-output mask runs on the prefill logits before the chain,
+        // so the very first emitted token already conforms to the schema; the
+        // matcher then advances with the pre-override token. The
+        // thinking-budget override applies to the first token too: Qwen3 chat
+        // templates prime `<think>\n`, so it is already inside the reasoning
+        // block when `enter_block_on_start == true`. The row stamps the
+        // first-token time once the emitted token is known, and the finish
+        // step then runs on it: EOS (not pushed), push and history, the stop
+        // matcher (a short stop string can complete on this very token, and
+        // then its text is never emitted), a generation bound
+        // (`t_max_predict_ms: 0` with a newline in the first token, #1477),
+        // the structured stop, `max_tokens`, the context bound (a prompt
+        // admitted just under the KV bound can leave no room for a second
+        // token, #1472) and loop detection.
+        //
+        // The shared logical KV budget is checked first: the sequence is not
+        // yet in the active batch, so the prompt plus its first token count as
+        // this tick's additional tokens, and a request that cannot fit them
+        // finishes with `Length` before any token is drawn (the draw it used
+        // to make here was discarded unseen).
         if !self.shared_budget_has_prefill_first_token_room(seq.prompt_tokens.len()) {
             seq.retention.context_exhausted = true;
             if let Err(err) = seq
@@ -1411,59 +915,49 @@ impl BatchScheduler {
             self.batch_observability.record_sequence_completed();
             return;
         }
-
-        // advance the matcher state with the just-sampled token.
-        // If consume_token errors, transition the sequence to Finished(Error)
-        // and surface a clean SSE error event rather than leaking
-        // non-conforming output.
-        let structured_stopped = if let Some(constraint) = seq.structured.clone() {
-            match Self::consume_structured_token(&constraint, sampled_first_token) {
-                Ok(stopped) => stopped,
-                Err(msg) => {
-                    let _ = seq
-                        .response_tx
-                        .send(GenerateEvent::Error(format!("structured output: {msg}")));
-                    if let Err(err) = seq
-                        .state
-                        .transition_to(SequenceState::Finished(FinishReason::Error(msg)))
-                    {
-                        tracing::error!("State transition error: {err}");
-                    }
-                    self.prompt_cache_seq_ctx.remove(&seq.seq_id);
-                    self.release_sequence_caches(seq.seq_id);
-                    return;
-                }
-            }
-        } else {
-            false
+        let context = self.context_bound();
+        let outcome = {
+            let mut row = step_rows::step_row(&mut seq, &self.tokenizer, context, true);
+            self.engine.complete_prefill(&logits, &mut row)
         };
-
-        // thinking-budget override. Qwen3 chat templates prime
-        // `<think>\n`, so the first prefill-completion token is already
-        // inside the reasoning block when `enter_block_on_start == true`.
-        let first_token = Self::apply_thinking_budget(&mut seq.thinking, sampled_first_token);
-
-        // #1485: confirm the emitted first token with the sampler feedback
-        // state (see the parallel comment in `execute_batched_decode`).
-        if let Some(state) = seq.sampler_state.as_mut() {
-            state.accept_token(first_token);
-        }
-
-        seq.mark_first_token();
-
-        // if the budget fired and substituted the first token,
-        // drop the logprob below (computed against the sampled token) so the
-        // streamed metadata stays consistent with the emitted token text.
-        let override_fired = first_token != sampled_first_token;
-
-        // Check for immediate EOS
-        if eos_tokens.contains(&first_token) {
-            if let Err(err) = seq
-                .state
-                .transition_to(SequenceState::Finished(FinishReason::Stop))
-            {
-                tracing::error!("State transition error: {err}");
+        match outcome.error {
+            Some(RowError::Structured(msg)) => {
+                let _ = seq
+                    .response_tx
+                    .send(GenerateEvent::Error(format!("structured output: {msg}")));
+                if let Err(err) = seq
+                    .state
+                    .transition_to(SequenceState::Finished(FinishReason::Error(msg)))
+                {
+                    tracing::error!("State transition error: {err}");
+                }
+                self.prompt_cache_seq_ctx.remove(&seq.seq_id);
+                self.release_sequence_caches(seq.seq_id);
+                return;
             }
+            // A B=1 prefill never takes the fused draw, so `BatchEval` cannot
+            // occur here; it is one eval failure either way.
+            Some(RowError::Eval(mlx_msg) | RowError::BatchEval(mlx_msg)) => {
+                // #822: the first sampled token threw at the MLX boundary.
+                // Fail just this request and bump the backend health counter.
+                let msg = self.record_eval_failure(&mlx_msg);
+                self.abort_sequence(seq, &msg);
+                self.eval_failures_exhausted();
+                return;
+            }
+            None => self.note_eval_success(),
+        }
+        // Under `--draft-kind prompt-lookup`, the first eligible prefill
+        // warms every verify width up, before a finish at prefill can return,
+        // so the server's one-token startup warmup covers it (#2255).
+        self.warm_up_prompt_lookup_widths(&seq);
+        let prefill_finish = outcome.finish;
+        if let Some(cause) = prefill_finish {
+            apply_finish_cause(&mut seq, cause);
+        }
+        // Immediate EOS: the finish step already recorded `Stop`; nothing was
+        // generated, so the result is built without decoding any text.
+        if prefill_finish == Some(FinishCause::Eos) {
             let result = build_generation_result_with_cache(
                 String::new(),
                 seq.prompt_tokens.len(),
@@ -1480,7 +974,7 @@ impl BatchScheduler {
                 cached_tokens = seq.already_cached_tokens,
                 saved_ms = 0,
                 "prompt-cache: request completed (eos-at-prefill): \
-                 cached={}/{} prompt tokens, saved ~0ms",
+                     cached={}/{} prompt tokens, saved ~0ms",
                 seq.already_cached_tokens,
                 seq.prompt_tokens.len(),
             );
@@ -1493,76 +987,7 @@ impl BatchScheduler {
             self.release_sequence_caches(seq.seq_id);
             return;
         }
-
-        // Optionally compute logprobs for the first token. When the override
-        // fired, the sampled token differs from the emitted `first_token`;
-        // suppress logprob emission in that case to keep token text and
-        // logprob metadata consistent.
-        let token_lp = if override_fired {
-            None
-        } else {
-            match seq.logprobs_config.source {
-                LogprobSource::PostSampling => post_probs.as_ref().map(|p| {
-                    compute_post_sampling_probs(p, first_token, seq.logprobs_config.top_k)
-                }),
-                LogprobSource::RawModel if seq.logprobs_config.enabled => {
-                    let raw_row = mlxcel_core::slice_last_logits(&logits);
-                    compute_logprobs(&raw_row, first_token, &seq.logprobs_config)
-                }
-                _ => compute_logprobs(&adjusted_logits, first_token, &seq.logprobs_config),
-            }
-        };
-
-        seq.generated_tokens.push(first_token);
-        if needs_history {
-            token_history.push(first_token);
-        }
-
-        // Store merged EOS and token history on the sequence so decode_single_step
-        // can reuse them without per-step reconstruction.
-        seq.merged_eos = eos_tokens;
-        seq.token_history = token_history;
-
-        // Stream the first token's text through the request's stop matcher
-        // (issue #1466). A short stop string can complete on this very token, in
-        // which case generation ends here and the matched text is never emitted.
-        let prefill_stop_word = match seq.decode_state.on_token(first_token, &self.tokenizer) {
-            Some(new_text) => seq.stream_decoded_text(new_text, Some(first_token), token_lp),
-            None => None,
-        };
-
-        let mut prefill_finish_reason = if prefill_stop_word.is_some() {
-            Some(FinishReason::StopSequence)
-        } else if structured_stopped {
-            Some(FinishReason::Stop)
-        // A generation bound can already have fired on the very first token
-        // (#1477); `t_max_predict_ms: 0` with a newline in that token is the
-        // reachable case.
-        } else if seq.bound_stopped() || seq.generated_tokens.len() >= seq.max_tokens {
-            Some(FinishReason::Length)
-        } else {
-            None
-        };
-        // b10621 context guard (#1472): a prompt admitted just under the KV
-        // bound can leave no room for a second token; stop here with
-        // `truncated: true` rather than overflowing on the first decode step.
-        if prefill_finish_reason.is_none()
-            && Self::context_bound_stop_due(
-                &seq,
-                self.max_kv_size,
-                self.context_retention.context_shift,
-            )
-        {
-            seq.retention.context_exhausted = true;
-            prefill_finish_reason = Some(FinishReason::Length);
-        }
-        if let Some(finish_reason) = prefill_finish_reason {
-            if let Err(err) = seq
-                .state
-                .transition_to(SequenceState::Finished(finish_reason))
-            {
-                tracing::error!("State transition error: {err}");
-            }
+        if prefill_finish.is_some() {
             // Forward any tail the incremental detokenizer held back (a final
             // token carrying complete text plus a trailing incomplete UTF-8
             // byte) as one last token event before Done, so streaming clients
@@ -1585,10 +1010,12 @@ impl BatchScheduler {
                 result.generation_time_ms,
             );
             let _ = seq.response_tx.send(GenerateEvent::Done(result));
+            // The first token was sampled here and never forwarded, so the
+            // state holds the prompt only (#1754).
             self.donate_finished_sequence_cache(
                 seq.seq_id,
                 &seq.prompt_tokens,
-                &seq.generated_tokens,
+                seq.generated_in_state(),
                 true,
             );
             self.prompt_cache_seq_ctx.remove(&seq.seq_id);
@@ -1605,10 +1032,13 @@ impl BatchScheduler {
         }
 
         let prompt_len = seq.prompt_tokens.len() as i32;
-        if let Some(cache_set) = self.cache_pool.get_mut(seq.seq_id) {
+        if let Some(cache_set) = self.engine.pool_mut().get_mut(seq.seq_id) {
             cache_set.prompt_len = seq.prompt_tokens.len();
             cache_set.current_offset = prompt_len + 1;
         }
+        // Under `--draft-kind prompt-lookup`, an eligible sequence gets its
+        // drafter here, bound to the prompt and the first token (#2255).
+        self.prime_prompt_lookup(&mut seq, &logits);
 
         // The slot this sequence was admitted into is reserved for it: admission
         // required `!active_batch.is_full()`, and while a chunked prefill is

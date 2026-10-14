@@ -35,7 +35,7 @@
 //!
 //! # Which ROCm branches this reaches
 //!
-//! `GatherQMM::eval_gpu` in `patches-rocm/mlx/backend/rocm/quantized/qmm.hip`
+//! `GatherQMM::eval_gpu` in `overlays/rocm/mlx/backend/rocm/quantized/qmm.hip`
 //! gates every specialised path (grouped WMMA prefill, expert-batched, tiled,
 //! wide, idot and the warp-shared fast kernel) on `mode_ == Affine`, so a
 //! non-affine mode reaches exactly one launch: the
@@ -52,9 +52,10 @@
 //!   shared-activation case (`B = 32`, `E = 8`);
 //! * `N = 320`, so the second column block runs its `col >= N` bound check.
 //!
-//! This is the default path. The opt-in expert-batched kernel from item 9
-//! (`MLX_ROCM_GATHER_QMV_EXPERT_BATCHED=1`) is affine-only and cannot be
-//! reached from a block-float mode, so no case targets it.
+//! This is the default path. The expert-batched kernel from item 9 (on by
+//! default for sorted affine bf16 and f16 prefill since lablup/mlxcel#2066)
+//! is affine-only and cannot be reached from a block-float mode, so no case
+//! targets it; `tests/rocm_gather_qmm_expert_batched.rs` covers it.
 //!
 //! The tests are not backend-gated: the tolerances are what a correct
 //! backend meets from output rounding alone, and
@@ -502,6 +503,22 @@ fn mxfp8_gather_qmm_matches_host_reference() {
 fn mxfp4_gather_qmm_matches_host_reference() {
     let _device = lock_default_device();
     check_gather(Mode::Mxfp4, OUT_FEATURES, &GATHER_CASES, &ACTIVATIONS);
+}
+
+/// Unlike the 320-wide tail cases, this width admits CUDA's sorted RHS GEMM.
+/// gather_sort expands 32 tokens x 4 experts into 128 physical rows, also
+/// exercising the consumer Blackwell 128-row CTA policy.
+#[test]
+fn mxfp_sorted_prefill_aligned_width_matches_host_reference() {
+    let _device = lock_default_device();
+    for mode in [Mode::Mxfp4, Mode::Mxfp8] {
+        check_gather(
+            mode,
+            384,
+            &[GatherCase::PrefillSorted],
+            &[ACTIVATIONS[0], ACTIVATIONS[1]],
+        );
+    }
 }
 
 #[test]

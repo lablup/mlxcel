@@ -95,7 +95,7 @@ Which of those roles each port would actually take over depends on whether mlxce
 
 - **#2063** (`fused_add_rms_norm`, `fused_rope_qk_append`): both paths ship off on every backend (`FUSED_ADD_RMSNORM_DEFAULT` and `FUSED_ROPE_APPEND_DEFAULT` are `false`, `layers.rs:808` and `:820`, after #905 measured no decode win on Metal), and only `llama3.rs` (with `gemma.rs` and `iquestloopcoder.rs`, not profiled) calls them. With the opt-in on, Llama 3.1 would reach only the post-attention join (`llama3.rs:1201`): its `rope_scaling` builds a frequency table, which routes around the RoPE kernel (`llama3.rs:669`).
 - **#2064** (`gumbel_max_sample`, `rejection_sample`): greedy argmax calls neither. A sampled run would reach the whole sampler tail (both kernels are on by default where ported) except the few logit-bias dispatches `--ignore-eos` adds; the table counts the whole tail, so its #2064 figures are slightly high.
-- **#2065** (`moe_gateup`, `moe_down`): reached by `qwen3_moe` (`qwen3_moe.rs:223`, single-token decode). Not by granite, whose `block_sparse_moe` calls `SwitchGLU::forward` and never `forward_fused_kernel`, and not by Nemotron-H, whose `fused_moe_forward` default branch is `gather_qmm`; its kernel branch needs `MLXCEL_FUSED_MOE_RELU2` and `moe_fc1_relu2` (#2069).
+- **#2065** (`moe_gateup`, `moe_down`): reached by `qwen3_moe` (`qwen3_moe.rs:223`, single-token decode). At this profile's source (`929c80ab`) not by granite, whose `block_sparse_moe` called `SwitchGLU::forward` and never `forward_fused_kernel`; since issue #2245 (2026-10-11) granite's `block_sparse_moe` routes single-token decode through `forward_fused_kernel`, so the granite rows in the table above predate the wiring. Not by Nemotron-H, whose `fused_moe_forward` default branch is `gather_qmm`; its kernel branch needs `MLXCEL_FUSED_MOE_RELU2` and `moe_fc1_relu2` (#2069).
 - **#2067** (`ssm_update_kernel`): reached by both hybrids, since `ssm_kernel_available()` gates every single-token SSD step (`granitemoehybrid.rs:440`, `nemotron_h.rs:537` and `:635`).
 - **#2068** (paged attention): not on this path at all. The bench decodes one sequence into a dense `KVCache`; no paged kernel or paged graph fallback appears in any trace.
 
@@ -125,6 +125,19 @@ A share is an upper bound on what a port saves, since the ported kernel costs so
 - **#2064** is zero in greedy decode, 0.4 to 0.7% with temperature alone, and 1.2 to 3.8% with top-p, where a full-vocabulary sort (`rocprim` radix sort, `block_sort_kernel`) and scans run every token; the top-p runs also add 0.7 to 1.4 ms per token of host gap over the temperature-only runs (profiled).
 - **#2063** is zero with shipped settings on every backend. Turned on, the most it could reach here is Llama's post-attention join, 0.83% of decode (0.89% in the top-p run).
 - **#2068** has nothing to act on in single-stream decode. Its value is the batched paged serving path, which this profile does not measure, and the 36 paged-attention test skips on ROCm.
+
+## Note, 2026-10-09: the #2067 shares understated the gain (issue #2148)
+
+The shares above are of decode GPU time, so the ceiling they imply, `1 / (1 - share)`, leaves out the host launch gaps between dispatches. For #2067 that bound was 1.42x on granite and 1.25x on Nemotron-H, yet the port measured 1.46x and 1.45x (PR #2099, [rocm-ssm-update-kernel-gfx1151-2026-10-04.md](rocm-ssm-update-kernel-gfx1151-2026-10-04.md)): it removes more than half of each model's dispatches, and the gaps in front of them go with them. `scripts/rocm_decode_profile.py` now charges each idle stretch of the decode window to the dispatch that ends it and reports, per port unit, its share of decode wall time and the ceiling that implies (`ceiling_wall`; `plain_ceiling_wall_est` scales the traced gaps to the run without the profiler, see `docs/benchmarks.md`).
+
+Re-profiled at `6dbfe7d7` with `MLXCEL_SSM_KERNEL=0` (the graph path this page measured), same shape and guard, results in `benchmarks/rocm_profiles/gfx1151_6dbfe7d7_ssm-graph/`. The measured speedup is the median of three alternating runs per arm of the same binary, kernel off and on, in one guard session per model (`ab_decode.txt`, `ab_guard.log`):
+
+| Model | #2067 GPU share | Ceiling, GPU share | #2067 host gap ms/token (us/dispatch, profiled) | Ceiling, wall (profiled) | Ceiling, wall (plain estimate) | Decode tok/s off / on (medians) | Measured |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `granite-4.0-h-tiny-4bit` | 31.18% | 1.45x | 4.24 (2.5) | 1.65x | 1.60x | 59.88 / 89.40 | 1.49x |
+| `NVIDIA-Nemotron-3-Nano-30B-A3B-4bit` | 20.70% | 1.26x | 6.73 (5.9) | 1.72x | 1.56x | 52.29 / 75.26 | 1.44x |
+
+Spread: kernel on, 89.33 to 89.43 and 75.04 to 75.37 tok/s; kernel off, 59.88 to 60.85 on granite after a first run at 52.18, and 52.06 to 52.66 on Nemotron. The plain-run ceilings sit above the measured gains, as an upper bound must (the ported kernel and its one dispatch per layer still cost time); the GPU-share ceilings sit below them. Rank dispatch-heavy ports by `plain_ceiling_wall_est`, not by GPU share.
 
 ## Ranked port order
 

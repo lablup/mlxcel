@@ -39,15 +39,18 @@ use std::path::Path;
 /// non-Metal backend and its throw crossed the cxx bridge into a `noexcept`
 /// extern, ending the process. That was never ROCm-only: a CPU-only build took
 /// the same path. Metal, CUDA and ROCm all have ports now (issue #1862), so
-/// this refuses only where no kernel exists at all, and it refuses at load
-/// rather than mid-request.
+/// this refuses only where no kernel exists at all, or where the ROCm port is
+/// held back on a wave64 device (issue #2147), and it refuses at load rather
+/// than mid-request.
 fn reject_without_bitlinear_kernel() -> Result<(), String> {
     if mlxcel_core::bitlinear_kernel_available() {
         return Ok(());
     }
     Err(
-        "BitNet checkpoints need the bitlinear_matmul kernel, which has Metal, CUDA and ROCm ports. \
-         This build has no GPU backend, and the op has no graph fallback, so the model cannot run here."
+        "BitNet checkpoints need the bitlinear_matmul kernel, which has Metal, CUDA and ROCm ports \
+         (the ROCm port is validated on 32-lane wavefronts only). This build has no GPU backend, or \
+         the ROCm device's wavefront is not 32 lanes, and the op has no graph fallback, so the model \
+         cannot run here."
             .to_string(),
     )
 }

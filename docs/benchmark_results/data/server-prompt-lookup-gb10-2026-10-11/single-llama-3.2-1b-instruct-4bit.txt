@@ -1,0 +1,144 @@
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=0.23
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=0.82
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=0.35
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=1.05
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=1.25
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=0.35
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=1.09
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=1.97
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=2.25
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=2.25
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=1.46
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=1.38
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=1.38
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=1.36
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=1.13
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=0.87
+[gate] busy: ['ld', 'rustc'] foreign_models: [] ci_job=False load1=1.22
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=1.42
+[gate] busy: ['ld', 'rustc'] foreign_models: [] ci_job=False load1=3.64
+[gate] busy: ['ld', 'rustc'] foreign_models: [] ci_job=False load1=4.24
+[gate] busy: ['ld', 'rustc'] foreign_models: [] ci_job=False load1=3.91
+[gate] busy: ['ld', 'rustc'] foreign_models: [] ci_job=False load1=4.53
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=3.44
+[gate] busy: ['ld', 'rustc'] foreign_models: [] ci_job=False load1=6.81
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=5.31
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=3.70
+[gate] busy: ['ld', 'rustc'] foreign_models: [] ci_job=False load1=2.73
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=1.86
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=1.38
+[gate] busy: ['ld', 'rustc'] foreign_models: [] ci_job=False load1=1.41
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=1.40
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=1.15
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=1.12
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=1.08
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=1.04
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=1.06
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=1.17
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=1.48
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=2.02
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=2.09
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=1.65
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=1.24
+[gate] busy: ['ld', 'rustc'] foreign_models: [] ci_job=False load1=2.68
+[gate] busy: ['ld', 'rustc'] foreign_models: [] ci_job=False load1=3.56
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=3.48
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=2.32
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=1.48
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=1.71
+[gate] busy: ['cargo-clippy', 'clippy-driver'] foreign_models: [] ci_job=False load1=1.78
+[gate] busy: ['cargo-clippy', 'clippy-driver'] foreign_models: [] ci_job=False load1=1.68
+[gate] busy: ['cargo-clippy', 'clippy-driver'] foreign_models: [] ci_job=False load1=2.10
+[gate] busy: ['cargo-clippy', 'clippy-driver'] foreign_models: [] ci_job=False load1=1.71
+[gate] busy: ['ld', 'rustc'] foreign_models: [] ci_job=False load1=1.79
+[gate] busy: ['ld', 'rustc'] foreign_models: [] ci_job=False load1=3.01
+[gate] busy: ['ld', 'rustc'] foreign_models: [] ci_job=False load1=4.10
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=1.77
+[gate] busy: ['rustc'] foreign_models: [] ci_job=False load1=1.35
+[gate] busy: ['ld', 'rustc'] foreign_models: [] ci_job=False load1=1.97
+[gate] busy: ['ld', 'rustc'] foreign_models: [] ci_job=False load1=3.16
+[gate] busy: ['ld', 'rustc'] foreign_models: [] ci_job=False load1=3.76
+[gate] busy: ['cargo-clippy', 'clippy-driver'] foreign_models: [] ci_job=False load1=1.41
+[gate] busy: ['cargo-clippy', 'clippy-driver'] foreign_models: [] ci_job=False load1=2.10
+round 0 new-pen            cli    prompt   256 TTFT 13.80 ms  decode 288.21 tok/s
+round 0 new-pen            cli    prompt  8192 TTFT 400.53 ms  decode 219.90 tok/s
+round 0 prev-pen           cli    prompt   256 TTFT 14.58 ms  decode 216.59 tok/s
+round 0 prev-pen           cli    prompt  8192 TTFT 400.89 ms  decode 183.61 tok/s
+round 0 base-pen           cli    prompt   256 TTFT 14.57 ms  decode 276.03 tok/s
+round 0 base-pen           cli    prompt  8192 TTFT 399.76 ms  decode 216.25 tok/s
+round 0 new-plain          cli    prompt   256 TTFT 14.37 ms  decode 293.11 tok/s
+round 0 new-plain          cli    prompt  8192 TTFT 400.38 ms  decode 225.35 tok/s
+round 0 new-pen-null       cli    prompt   256 TTFT 14.81 ms  decode 284.30 tok/s
+round 0 new-pen-null       cli    prompt  8192 TTFT 403.78 ms  decode 218.68 tok/s
+round 1 prev-pen           cli    prompt   256 TTFT 14.86 ms  decode 214.96 tok/s
+round 1 prev-pen           cli    prompt  8192 TTFT 397.79 ms  decode 178.20 tok/s
+round 1 base-pen           cli    prompt   256 TTFT 13.26 ms  decode 274.87 tok/s
+round 1 base-pen           cli    prompt  8192 TTFT 400.61 ms  decode 215.62 tok/s
+round 1 new-plain          cli    prompt   256 TTFT 13.99 ms  decode 294.45 tok/s
+round 1 new-plain          cli    prompt  8192 TTFT 399.05 ms  decode 225.45 tok/s
+round 1 new-pen-null       cli    prompt   256 TTFT 14.33 ms  decode 285.56 tok/s
+round 1 new-pen-null       cli    prompt  8192 TTFT 397.84 ms  decode 219.76 tok/s
+round 1 new-pen            cli    prompt   256 TTFT 15.35 ms  decode 283.36 tok/s
+round 1 new-pen            cli    prompt  8192 TTFT 399.83 ms  decode 218.87 tok/s
+round 2 base-pen           cli    prompt   256 TTFT 14.28 ms  decode 276.93 tok/s
+round 2 base-pen           cli    prompt  8192 TTFT 401.47 ms  decode 216.07 tok/s
+round 2 new-plain          cli    prompt   256 TTFT 14.22 ms  decode 292.14 tok/s
+round 2 new-plain          cli    prompt  8192 TTFT 400.39 ms  decode 225.28 tok/s
+round 2 new-pen-null       cli    prompt   256 TTFT 14.75 ms  decode 284.34 tok/s
+round 2 new-pen-null       cli    prompt  8192 TTFT 401.92 ms  decode 217.52 tok/s
+round 2 new-pen            cli    prompt   256 TTFT 14.56 ms  decode 284.10 tok/s
+round 2 new-pen            cli    prompt  8192 TTFT 405.48 ms  decode 218.73 tok/s
+round 2 prev-pen           cli    prompt   256 TTFT 14.49 ms  decode 214.72 tok/s
+round 2 prev-pen           cli    prompt  8192 TTFT 401.69 ms  decode 181.94 tok/s
+round 3 new-plain          cli    prompt   256 TTFT 15.09 ms  decode 293.55 tok/s
+round 3 new-plain          cli    prompt  8192 TTFT 405.37 ms  decode 226.00 tok/s
+round 3 new-pen-null       cli    prompt   256 TTFT 14.40 ms  decode 274.12 tok/s
+round 3 new-pen-null       cli    prompt  8192 TTFT 404.56 ms  decode 204.97 tok/s
+round 3 new-pen            cli    prompt   256 TTFT 15.31 ms  decode 284.46 tok/s
+round 3 new-pen            cli    prompt  8192 TTFT 402.66 ms  decode 217.94 tok/s
+round 3 prev-pen           cli    prompt   256 TTFT 14.46 ms  decode 222.76 tok/s
+round 3 prev-pen           cli    prompt  8192 TTFT 404.36 ms  decode 178.43 tok/s
+round 3 base-pen           cli    prompt   256 TTFT 31.05 ms  decode 276.78 tok/s
+round 3 base-pen           cli    prompt  8192 TTFT 399.23 ms  decode 181.10 tok/s
+round 4 new-pen-null       cli    prompt   256 TTFT 14.69 ms  decode 285.66 tok/s
+round 4 new-pen-null       cli    prompt  8192 TTFT 404.16 ms  decode 174.43 tok/s
+round 4 new-pen            cli    prompt   256 TTFT 14.67 ms  decode 282.89 tok/s
+round 4 new-pen            cli    prompt  8192 TTFT 400.49 ms  decode 218.41 tok/s
+round 4 prev-pen           cli    prompt   256 TTFT 14.40 ms  decode 221.22 tok/s
+round 4 prev-pen           cli    prompt  8192 TTFT 400.74 ms  decode 173.28 tok/s
+round 4 base-pen           cli    prompt   256 TTFT 13.08 ms  decode 275.60 tok/s
+round 4 base-pen           cli    prompt  8192 TTFT 396.09 ms  decode 216.03 tok/s
+round 4 new-plain          cli    prompt   256 TTFT 14.06 ms  decode 294.50 tok/s
+round 4 new-plain          cli    prompt  8192 TTFT 399.61 ms  decode 223.86 tok/s
+
+arm medians (min..max) per path and prompt length
+  cli    prompt   256  new-pen            n=5  ttft_ms 14.67 (13.80..15.35)  decode_tok_s 284.10 (282.89..288.21)
+  cli    prompt   256  prev-pen           n=5  ttft_ms 14.49 (14.40..14.86)  decode_tok_s 216.59 (214.72..222.76)
+  cli    prompt   256  base-pen           n=5  ttft_ms 14.28 (13.08..31.05)  decode_tok_s 276.03 (274.87..276.93)
+  cli    prompt   256  new-plain          n=5  ttft_ms 14.22 (13.99..15.09)  decode_tok_s 293.55 (292.14..294.50)
+  cli    prompt   256  new-pen-null       n=5  ttft_ms 14.69 (14.33..14.81)  decode_tok_s 284.34 (274.12..285.66)
+  cli    prompt  8192  new-pen            n=5  ttft_ms 400.53 (399.83..405.48)  decode_tok_s 218.73 (217.94..219.90)
+  cli    prompt  8192  prev-pen           n=5  ttft_ms 400.89 (397.79..404.36)  decode_tok_s 178.43 (173.28..183.61)
+  cli    prompt  8192  base-pen           n=5  ttft_ms 399.76 (396.09..401.47)  decode_tok_s 216.03 (181.10..216.25)
+  cli    prompt  8192  new-plain          n=5  ttft_ms 400.38 (399.05..405.37)  decode_tok_s 225.35 (223.86..226.00)
+  cli    prompt  8192  new-pen-null       n=5  ttft_ms 403.78 (397.84..404.56)  decode_tok_s 217.52 (174.43..219.76)
+
+paired per-round deltas, arm vs reference (positive = higher than the reference)
+  cli    prompt   256  prev-pen           vs new-pen        ttft_ms      median -1.78%  range -5.54%..+5.61%
+  cli    prompt   256  prev-pen           vs new-pen        decode_tok_s median -24.14%  range -24.85%..-21.69%
+  cli    prompt   256  base-pen           vs new-pen        ttft_ms      median -1.93%  range -13.56%..+102.76%
+  cli    prompt   256  base-pen           vs new-pen        decode_tok_s median -2.70%  range -4.23%..-2.53%
+  cli    prompt   256  new-plain          vs new-pen        ttft_ms      median -2.34%  range -8.86%..+4.12%
+  cli    prompt   256  new-plain          vs new-pen        decode_tok_s median +3.20%  range +1.70%..+4.10%
+  cli    prompt   256  new-pen-null       vs new-pen        ttft_ms      median +0.13%  range -6.63%..+7.33%
+  cli    prompt   256  new-pen-null       vs new-pen        decode_tok_s median +0.08%  range -3.63%..+0.98%
+  cli    prompt  8192  prev-pen           vs new-pen        ttft_ms      median +0.06%  range -0.93%..+0.42%
+  cli    prompt  8192  prev-pen           vs new-pen        decode_tok_s median -18.13%  range -20.66%..-16.50%
+  cli    prompt  8192  base-pen           vs new-pen        ttft_ms      median -0.85%  range -1.10%..+0.19%
+  cli    prompt  8192  base-pen           vs new-pen        decode_tok_s median -1.49%  range -16.90%..-1.09%
+  cli    prompt  8192  new-plain          vs new-pen        ttft_ms      median -0.19%  range -1.26%..+0.67%
+  cli    prompt  8192  new-plain          vs new-pen        decode_tok_s median +3.00%  range +2.48%..+3.70%
+  cli    prompt  8192  new-pen-null       vs new-pen        ttft_ms      median +0.47%  range -0.88%..+0.92%
+  cli    prompt  8192  new-pen-null       vs new-pen        decode_tok_s median -0.56%  range -20.14%..+0.41%
+
+the *-null rows are the noise floor: an A/B delta whose range overlaps the null range is unresolved

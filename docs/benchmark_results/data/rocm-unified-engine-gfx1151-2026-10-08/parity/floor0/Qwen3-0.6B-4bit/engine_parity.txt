@@ -1,0 +1,37 @@
+[engine-parity] model: models/mlx/Qwen3-0.6B-4bit
+[engine-parity] prompt tokens: 48  MLXCEL_SDPA_DETERMINISTIC=1
+[engine-parity] paths:
+  greedy                 a:cli            64 tokens   cli
+  seeded-penalties-dry   a:cli            64 tokens   cli
+  greedy                 d:engine         64 tokens   engine B=1 dense chunk=2048
+  seeded-penalties-dry   d:engine         64 tokens   engine B=1 dense chunk=2048
+  greedy                 b:dense          64 tokens   Dense pc=off prefill[0..48)
+  seeded-penalties-dry   b:dense          64 tokens   Dense pc=off prefill[0..48)
+  greedy                 c:paged          64 tokens   Paged pc=off prefill[0..48) paged-kernel-launches=1820
+  seeded-penalties-dry   c:paged          64 tokens   Paged pc=off prefill[0..48) paged-kernel-launches=1764
+  greedy                 e:run            64 tokens   run -p parallel=1 pc=off prompt-tokens=48 chunk=2048
+  seeded-penalties-dry   e:run            n/a         the chat-request arms cover the greedy case
+  greedy                 f:server         64 tokens   mlxcel-server parallel=4 pc=off prompt-tokens=48 chunk=2048
+  seeded-penalties-dry   f:server         n/a         the chat-request arms cover the greedy case
+  greedy                 b:dense+pc:miss  64 tokens   Dense pc=on cached=0 forwarded=48 prefill[0..48)
+  greedy                 b:dense+pc:hit   64 tokens   Dense pc=on cached=45 forwarded=3 adopted[0..45)+prefill[45..48) primed[0..45)
+  seeded-penalties-dry   b:dense+pc:miss  64 tokens   Dense pc=on cached=0 forwarded=48 prefill[0..48)
+  seeded-penalties-dry   b:dense+pc:hit   64 tokens   Dense pc=on cached=45 forwarded=3 adopted[0..45)+prefill[45..48) primed[0..45)
+[engine-parity] pairs:
+  greedy                 a:cli            vs b:dense          identical
+  greedy                 a:cli            vs c:paged          identical
+  greedy                 b:dense          vs c:paged          identical
+  greedy                 b:dense          vs d:engine         identical
+  greedy                 f:server         vs e:run            identical
+  greedy                 b:dense          vs b:dense+pc:miss  identical
+  greedy                 b:dense+pc:miss  vs b:dense+pc:hit   identical
+  seeded-penalties-dry   a:cli            vs b:dense          identical
+  seeded-penalties-dry   a:cli            vs c:paged          diverge@6 left=1191 right=1430
+  seeded-penalties-dry   b:dense          vs c:paged          diverge@6 left=1191 right=1430
+  seeded-penalties-dry   b:dense          vs d:engine         identical
+  seeded-penalties-dry   f:server         vs e:run            n/a
+  seeded-penalties-dry   b:dense          vs b:dense+pc:miss  identical
+  seeded-penalties-dry   b:dense+pc:miss  vs b:dense+pc:hit   diverge@6 left=1191 right=1430
+[engine-parity] summary: 14 pair(s), 10 identical, 3 diverged, 1 n/a
+wrote /tmp/claude-1001/-home-devops-Development-mlxcel/66a03ced-36c6-4e0a-9e39-155a3eb57353/scratchpad/issue-2192/parity-floor0/Qwen3-0.6B-4bit/engine_parity.json
+engine-parity rc=0

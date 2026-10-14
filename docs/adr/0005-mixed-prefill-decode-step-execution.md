@@ -28,7 +28,7 @@ Two further facts bound the problem before any execution model is considered.
 
 **The issue's scenario is unreachable under the shipped defaults.** The admission branch fires only when `!active_batch.is_full() && !prefill_queue.is_empty()`. `--parallel` defaults to 4 and sets the batch ceiling, so with 4 decode streams the batch is full, the admitted request stays in the queue, and no prefill runs during decode at all. Reproducing the scenario at all requires `--parallel` strictly greater than the stream count.
 
-**Chunked prefill bounds the admission spike to one forward.** When a slot is free, admission runs exactly one prefill forward before decode reclaims every subsequent tick: one chunk of `--prefill-chunk-size` (512 by default), or one unchunked forward for a prompt below that threshold. The sustained window of alternating spikes the issue describes does not occur, because there is no sustained window.
+**Chunked prefill bounds the admission spike to one forward.** When a slot is free, admission runs exactly one prefill forward before decode reclaims every subsequent tick: one chunk of `--prefill-chunk-size` (512 by default when this was written; 2048 since ADR 0007), or one unchunked forward for a prompt below that threshold. The sustained window of alternating spikes the issue describes does not occur, because there is no sustained window.
 
 One corollary belongs to the follow-up issue rather than to this decision, but it comes from the same structure and is worth recording: the chunked branch short-circuits above the admission branch, so while a prefill is parked, no further request can be admitted either, whatever the batch's occupancy. A parked long prompt therefore holds up the whole queue behind it, not just itself.
 

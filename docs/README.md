@@ -18,7 +18,7 @@ Current GitHub-facing docs:
 2. `environment-variables.md` - `MLXCEL_*` runtime, build, downloader, cache, and diagnostic knobs.
 3. `benchmarks.md` - benchmark methodology and the requirements for future raw result tables.
 4. `supported-models.md` - maintained architecture/checkpoint support matrix.
-5. `architecture.md` - runtime architecture and major components, including mlxcelverse (the per-backend MLX overlays and mlxcel kernels under `src/lib/mlx-cpp/`).
+5. `architecture.md` - runtime architecture and major components, including mlxcelverse (the per-backend MLX overlays and mlxcel kernels under `src/lib/mlxcelverse/`).
 6. `distributed.md` - tensor/pipeline parallel setup and limitations.
 7. `turbo-kv-cache.md` - TurboQuant modes, the unified paged KV cache, quality/performance trade-offs, and flags.
 8. `CONTINUOUS_BATCHING.md` - continuous-batching scheduler, paged decode, and disaggregated prefill/decode/router serving.
@@ -40,7 +40,7 @@ Current GitHub-facing docs:
 
 ## mlxcelverse maintenance
 
-`mlxcelverse/rocm-overlay.md` is the procedure for keeping the ROCm overlay in step with the MLX pin and with the NripeshN/mlx fork it is vendored from, including the `scripts/mlxcelverse/` tools and the `make verify-rocm-overlay` gate. `mlxcelverse/upstream/` holds the overlay's fork-side fixes prepared as pull requests for NripeshN/mlx, submitted by hand; its README is the index.
+`mlxcelverse/rocm-overlay.md` is the procedure for keeping the ROCm overlay in step with the MLX pin and with the NripeshN/mlx fork it is vendored from, including the `scripts/mlxcelverse/` tools and the `make verify-rocm-overlay` gate. `mlxcelverse/upstream/` holds fork-side fix packages kept as historical reference, not submitted: fixes to the fork stay in the overlay and no PRs go to NripeshN/mlx; its README is the index.
 
 ## Architecture Decision Records
 

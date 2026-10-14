@@ -19,7 +19,11 @@
 //! `final_norm(sigmoid(s) * (g * audio_proj(audio / Q) + (1 - g) * text_proj(text)))`
 //! with `g = sigmoid(gate)`. The gate and residual scale are sigmoid-ed in
 //! their stored dtype and then cast to the audio branch's dtype, which is
-//! `f32` at runtime because the code embeddings are summed in `f32`.
+//! `f32` at runtime because the code embeddings are summed in `f32`. The
+//! bf16 text branch is cast to that dtype as well before it is mixed in: the
+//! reference promotes it there, and CUDA builds would otherwise resolve the
+//! mix to bf16 (issue #2109). The cast is exact, so upstream promotion sees
+//! the same values.
 
 use mlxcel_core::layers::UnifiedLinear;
 use mlxcel_core::weights::WeightMap;
@@ -71,8 +75,8 @@ impl GatedFusion {
         let act = mlxcel_core::array_dtype(audio);
         let audio = mlxcel_core::divide(audio, &scalar(self.num_codebooks as f64, act));
         let audio = linear_forward(&self.audio_proj, &audio);
-        let text = linear_forward(&self.text_proj, text);
         let act = mlxcel_core::array_dtype(&audio);
+        let text = mlxcel_core::astype(&linear_forward(&self.text_proj, text), act);
         let gate = mlxcel_core::astype(&mlxcel_core::sigmoid(&self.gate), act);
         let scale = mlxcel_core::astype(&mlxcel_core::sigmoid(&self.residual_scale), act);
         let one_minus = mlxcel_core::subtract(&scalar(1.0, act), &gate);

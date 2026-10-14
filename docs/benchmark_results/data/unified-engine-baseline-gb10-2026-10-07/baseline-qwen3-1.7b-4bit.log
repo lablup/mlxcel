@@ -1,0 +1,62 @@
+round 0 cli                cli    prompt   256 TTFT 19.90 ms  decode 191.04 tok/s
+round 0 cli                cli    prompt  8192 TTFT 741.95 ms  decode 115.41 tok/s
+round 0 server             server prompt   256 TTFT 20.70 ms  decode 149.26 tok/s
+round 0 server             server prompt  8192 TTFT 805.51 ms  decode 106.06 tok/s
+round 0 cli-null           cli    prompt   256 TTFT 19.48 ms  decode 190.21 tok/s
+round 0 cli-null           cli    prompt  8192 TTFT 746.24 ms  decode 115.12 tok/s
+round 0 server-null        server prompt   256 TTFT 21.28 ms  decode 144.46 tok/s
+round 0 server-null        server prompt  8192 TTFT 798.63 ms  decode 105.59 tok/s
+round 1 server             server prompt   256 TTFT 20.08 ms  decode 147.78 tok/s
+round 1 server             server prompt  8192 TTFT 798.17 ms  decode 106.24 tok/s
+round 1 cli-null           cli    prompt   256 TTFT 19.13 ms  decode 190.67 tok/s
+round 1 cli-null           cli    prompt  8192 TTFT 738.56 ms  decode 115.00 tok/s
+round 1 server-null        server prompt   256 TTFT 19.93 ms  decode 157.57 tok/s
+round 1 server-null        server prompt  8192 TTFT 797.02 ms  decode 106.81 tok/s
+round 1 cli                cli    prompt   256 TTFT 19.08 ms  decode 189.12 tok/s
+round 1 cli                cli    prompt  8192 TTFT 730.54 ms  decode 115.11 tok/s
+round 2 cli-null           cli    prompt   256 TTFT 18.74 ms  decode 191.07 tok/s
+round 2 cli-null           cli    prompt  8192 TTFT 745.69 ms  decode 115.22 tok/s
+round 2 server-null        server prompt   256 TTFT 19.68 ms  decode 151.81 tok/s
+round 2 server-null        server prompt  8192 TTFT 803.86 ms  decode 105.87 tok/s
+round 2 cli                cli    prompt   256 TTFT 19.37 ms  decode 191.16 tok/s
+round 2 cli                cli    prompt  8192 TTFT 746.67 ms  decode 114.90 tok/s
+round 2 server             server prompt   256 TTFT 19.59 ms  decode 158.26 tok/s
+round 2 server             server prompt  8192 TTFT 807.45 ms  decode 105.34 tok/s
+round 3 server-null        server prompt   256 TTFT 20.12 ms  decode 151.17 tok/s
+round 3 server-null        server prompt  8192 TTFT 805.42 ms  decode 105.92 tok/s
+round 3 cli                cli    prompt   256 TTFT 18.87 ms  decode 191.33 tok/s
+round 3 cli                cli    prompt  8192 TTFT 750.28 ms  decode 115.26 tok/s
+round 3 server             server prompt   256 TTFT 21.57 ms  decode 139.30 tok/s
+round 3 server             server prompt  8192 TTFT 794.85 ms  decode 106.78 tok/s
+round 3 cli-null           cli    prompt   256 TTFT 19.16 ms  decode 189.88 tok/s
+round 3 cli-null           cli    prompt  8192 TTFT 739.09 ms  decode 115.43 tok/s
+round 4 cli                cli    prompt   256 TTFT 18.40 ms  decode 191.46 tok/s
+round 4 cli                cli    prompt  8192 TTFT 737.94 ms  decode 115.21 tok/s
+round 4 server             server prompt   256 TTFT 20.17 ms  decode 139.90 tok/s
+round 4 server             server prompt  8192 TTFT 800.26 ms  decode 105.72 tok/s
+round 4 cli-null           cli    prompt   256 TTFT 17.94 ms  decode 189.71 tok/s
+round 4 cli-null           cli    prompt  8192 TTFT 753.67 ms  decode 115.18 tok/s
+round 4 server-null        server prompt   256 TTFT 20.66 ms  decode 144.92 tok/s
+round 4 server-null        server prompt  8192 TTFT 799.75 ms  decode 105.64 tok/s
+
+arm medians (min..max) per path and prompt length
+  cli    prompt   256  cli                n=5  ttft_ms 19.08 (18.40..19.90)  decode_tok_s 191.16 (189.12..191.46)
+  cli    prompt   256  cli-null           n=5  ttft_ms 19.13 (17.94..19.48)  decode_tok_s 190.21 (189.71..191.07)
+  cli    prompt  8192  cli                n=5  ttft_ms 741.95 (730.54..750.28)  decode_tok_s 115.21 (114.90..115.41)
+  cli    prompt  8192  cli-null           n=5  ttft_ms 745.69 (738.56..753.67)  decode_tok_s 115.18 (115.00..115.43)
+  server prompt   256  server             n=5  ttft_ms 20.17 (19.59..21.57)  decode_tok_s 147.78 (139.30..158.26)
+  server prompt   256  server-null        n=5  ttft_ms 20.12 (19.68..21.28)  decode_tok_s 151.17 (144.46..157.57)
+  server prompt  8192  server             n=5  ttft_ms 800.26 (794.85..807.45)  decode_tok_s 106.06 (105.34..106.78)
+  server prompt  8192  server-null        n=5  ttft_ms 799.75 (797.02..805.42)  decode_tok_s 105.87 (105.59..106.81)
+
+paired per-round deltas, arm vs reference (positive = higher than the reference)
+  cli    prompt   256  cli-null           vs cli            ttft_ms      median -2.07%  range -3.26%..+1.55%
+  cli    prompt   256  cli-null           vs cli            decode_tok_s median -0.43%  range -0.92%..+0.82%
+  cli    prompt  8192  cli-null           vs cli            ttft_ms      median +0.58%  range -1.49%..+2.13%
+  cli    prompt  8192  cli-null           vs cli            decode_tok_s median -0.02%  range -0.25%..+0.28%
+  server prompt   256  server-null        vs server         ttft_ms      median +0.43%  range -6.72%..+2.80%
+  server prompt   256  server-null        vs server         decode_tok_s median +3.59%  range -4.07%..+8.52%
+  server prompt  8192  server-null        vs server         ttft_ms      median -0.14%  range -0.86%..+1.33%
+  server prompt  8192  server-null        vs server         decode_tok_s median -0.07%  range -0.80%..+0.53%
+
+the *-null rows are the noise floor: an A/B delta whose range overlaps the null range is unresolved

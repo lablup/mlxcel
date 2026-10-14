@@ -26,12 +26,9 @@ fn solid_image(h: u32, w: u32, rgb: [u8; 3]) -> DynamicImage {
 }
 
 fn synthetic_processor() -> YoutuVLProcessor {
-    // patch_size=16, spatial_merge_size=2 → factor = 32.
-    // Use very tight pixel bounds so a small synthetic image survives
-    // smart_resize untouched.
-    YoutuVLProcessor::new(16, 2)
-        .with_pixel_bounds(32 * 32, 256 * 256)
-        .with_norm([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
+    // patch_size=16, spatial_merge_size=2 → factor = 32. Edges that are
+    // already multiples of 32 pass through smart_resize untouched.
+    YoutuVLProcessor::new(16, 2).with_norm([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
 }
 
 #[test]
@@ -41,9 +38,10 @@ fn smart_resize_aligns_to_patch_merge_factor() {
     let cases = vec![
         // Inputs that are already multiples of 32 should pass through as-is.
         (64, 64, 64, 64),
-        // Inputs slightly off should round to the nearest multiple.
-        (60, 100, 64, 96),
-        // Tiny inputs must be lifted to satisfy the min_pixels lower bound.
+        // Inputs slightly off round UP to the next multiple (`math.ceil`).
+        (60, 100, 64, 128),
+        // An edge below one block rounds up to exactly one block; there is
+        // no Qwen2-VL min_pixels floor lifting it further.
         (16, 16, 32, 32),
     ];
     for (h, w, exp_h, exp_w) in cases {
@@ -91,25 +89,60 @@ fn preprocess_concatenates_multi_image_batches() {
     assert_eq!(shape, vec![total_patches, 16 * 16 * 3]);
 }
 
+/// Reference grids from transformers 4.56.0 `AutoProcessor` with the
+/// checkpoint's remote code (`YoutuVLProcessor`, `max_image_patches=36864`),
+/// as `spatial_shapes` `(h_patches, w_patches)` for an `h x w` image (#1611).
 #[test]
-fn smart_resize_honors_num_patches_cap() {
-    let p = YoutuVLProcessor::new(16, 2)
-        .with_max_patches_per_image(4096)
-        .with_pixel_bounds(32 * 32, usize::MAX);
-    let shapes = p.compute_spatial_shapes(&[solid_image(4096, 4096, [1, 2, 3])]);
-    let (h_patches, w_patches) = shapes[0];
-    assert!(
-        (h_patches as usize) * (w_patches as usize) <= 4096,
-        "patch grid {:?} exceeds num_patches cap",
-        shapes[0]
-    );
+fn smart_resize_matches_autoprocessor_patch_grid() {
+    let p = YoutuVLProcessor::new(16, 2);
+    assert_eq!(p.max_patches_per_image, 36864);
+    let cases: [(u32, u32, i32, i32); 11] = [
+        (224, 224, 14, 14),
+        (330, 330, 22, 22),
+        (336, 336, 22, 22),
+        (448, 448, 28, 28),
+        (512, 512, 32, 32),
+        (2048, 2048, 128, 128),
+        (1080, 1920, 68, 120),
+        (3000, 4000, 166, 220),
+        (330, 500, 22, 32),
+        (100, 3000, 8, 188),
+        (32, 32, 2, 2),
+    ];
+    for (h, w, exp_h, exp_w) in cases {
+        let (rh, rw) = p.smart_resize(h, w);
+        let got = ((rh / 16) as i32, (rw / 16) as i32);
+        assert_eq!(got, (exp_h, exp_w), "patch grid mismatch for {h}x{w}");
+        assert!(
+            (got.0 as usize) * (got.1 as usize) <= p.max_patches_per_image,
+            "{h}x{w} grid {got:?} exceeds the cap"
+        );
+    }
+}
+
+/// A smaller cap still shrinks by the reference's 0.02 scale walk, and an
+/// extreme aspect ratio terminates with every edge clamped to one block.
+#[test]
+fn smart_resize_shrinks_under_cap_and_terminates_on_extreme_aspect() {
+    let p = YoutuVLProcessor::new(16, 2).with_max_patches_per_image(4096);
+    // Values from the reference `get_image_size_for_patches`: the 0.02 walk
+    // lands on scale 0.24 (62x62), not the 64x64 a sqrt shrink would pick.
+    let (h, w) = p.smart_resize(4096, 4096);
+    assert_eq!((h, w), (992, 992));
+
+    let tiny_cap = YoutuVLProcessor::new(16, 2).with_max_patches_per_image(8);
+    let (h, w) = tiny_cap.smart_resize(1, 100_000);
+    assert_eq!((h, w), (32, 32), "wide image under an 8-patch cap");
+
+    // A cap below one block's 2x2 patches cannot be met; the walk still
+    // terminates at one block per edge and preprocessing rejects it.
+    let below_floor = YoutuVLProcessor::new(16, 2).with_max_patches_per_image(3);
+    assert_eq!(below_floor.smart_resize(5000, 7), (32, 32));
 }
 
 #[test]
 fn try_preprocess_rejects_cap_below_alignment_floor() {
-    let p = YoutuVLProcessor::new(16, 2)
-        .with_max_patches_per_image(3)
-        .with_pixel_bounds(1, usize::MAX);
+    let p = YoutuVLProcessor::new(16, 2).with_max_patches_per_image(3);
     let err = match p.try_preprocess_with_spatial(&[solid_image(64, 64, [1, 2, 3])]) {
         Ok(_) => panic!("expected preprocessing to reject a cap below the aligned patch floor"),
         Err(err) => err,

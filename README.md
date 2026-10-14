@@ -16,7 +16,7 @@ Apple Silicon is the primary target. Linux/CUDA is supported as a secondary targ
 
 The current `main` branch is v0.7.0 plus unreleased work. Install from source to use features that have not reached the latest tagged release; see the [changelog](CHANGELOG.md) for the release-by-release record.
 
-- **Experimental AMD GPU (ROCm) support.** `--features rocm` builds mlxcel on Linux against an MLX ROCm backend vendored into the source tree as the ROCm part of mlxcelverse, applied on the same pinned MLX commit as the Metal and CUDA builds. Affine, mxfp8, and mxfp4 checkpoints, including gpt-oss MoE experts, run on RDNA 3.5 (`gfx1151`); the fused kernels with a HIP port (BitLinear, the samplers, the SSM update step, the Mamba1 scan, the decode-MoE kernels, xIELU, the add3 LayerNorm) run natively and the rest fall back to MLX graphs. See [Linux with AMD ROCm](docs/installation.md#linux-with-amd-rocm-experimental) for the build and the open gaps.
+- **Experimental AMD GPU (ROCm) support.** `--features rocm` builds mlxcel on Linux against an MLX ROCm backend vendored into the source tree as the ROCm part of mlxcelverse, applied on the same pinned MLX commit as the Metal and CUDA builds. Affine, mxfp8, and mxfp4 checkpoints, including gpt-oss MoE experts, run on RDNA 3.5 (`gfx1151`); the fused kernels with a HIP port (BitLinear, the samplers, the SSM update step, the Mamba1 scan, the decode-MoE kernels, xIELU, the add3 LayerNorm, and the fused add-RMSNorm and RoPE + append, which are on by default on ROCm) run natively and the rest fall back to MLX graphs. See [Linux with AMD ROCm](docs/installation.md#linux-with-amd-rocm-experimental) for the build and the open gaps.
 - **Verified `llama-server` compatibility.** A frozen b10621 manifest classifies all 376 pinned options, routes, and native request fields, with no deferred entries. Native completion, embedding, tokenization, template, infill, props, slots, metrics, resumable-stream, router, and LoRA surfaces are implemented or explicitly classified instead of being silently ignored.
 - **OpenAI, Anthropic, and Vertex-compatible serving.** Chat Completions, Completions, Responses, Embeddings, Reranking, Audio, and Anthropic Messages are available alongside the native `llama-server` routes. Optional Vertex AI custom-container routing is supported through the standard `AIP_*` variables.
 - **Multi-model routing and live adapters.** Router mode discovers checkpoints from the model store, a model directory, or INI presets; loads them on demand; and bounds the resident set with LRU eviction. Multiple LoRA adapters can remain unfused for per-request or live scale changes, or be fused for zero decode overhead.
@@ -70,6 +70,8 @@ mlxcel run
 
 Thinking-capable checkpoints may generate reasoning before the final answer. `run` and `generate` hide reasoning from terminal output by default; pass `--show-reasoning` to display it without the raw marker tokens.
 
+`run` and its chat REPL are clients of the server engine: they start the `mlxcel-server` model worker in-process (one slot, no HTTP listener) and send each turn through the same `/v1/chat/completions` request path, so `mlxcel run -p` and the server give the same output for the same request. Sampling flags map onto the server options of the same name (`--temp`, `--top-k`, `--repeat-last-n`, `--frequency-penalty`, `--dry-sequence-breaker`, `--stop`, ...); with none given, the base sampler stays greedy unless `generation_config.json` sets one. `--draft-model` (with `--draft-kind dflash|mtp` when the drafter does not say) runs speculative decoding through the server's DFlash and MTP paths. In the REPL, `/clear` starts a new conversation, `/image <path>` attaches an image to the next message, and Ctrl-C stops the reply being generated without leaving the chat (a second Ctrl-C quits). The whole conversation is re-sent every turn, so `/image` and `--image` refuse an image once the conversation would hold more than the server's per-request image cap (16 by default); `/clear` starts over.
+
 With no `-n/--max-tokens`, generation continues until EOS or the effective context limit. Pass `-n N` to set a cap.
 
 ```bash
@@ -85,7 +87,9 @@ mlxcel inspect --json -m Qwen3.5-0.8B-4bit --max-tokens 32768 | python3 -m json.
 mlxcel generate -m Qwen3.5-0.8B-4bit -p "Hello" -n 32768 --estimate-memory
 ```
 
-`mlxcel inspect --json` prints a single JSON object with byte-exact `weights_bytes`, `kv_bytes_total`, `activation_bytes`, `headroom_bytes`, `budget_bytes`, `total_bytes`, `fits`, input flags, and per-token FP16/INT8 KV rates when the model config exposes KV geometry. TurboQuant per-token sizing is reported as `null` until the estimator models those widths directly.
+`generate` is the raw-completion client of the same batch-native engine (`mlxcel_core::engine::DirectEngine`): no server worker or HTTP request path in between, the rendered prompt goes straight through the engine's prefill and decode, so it decodes with the same sampler, finish step and lookahead pipeline as the server's single-sequence row (`MLXCEL_FORCE_SYNC` turns the pipeline off). `--prompt-lookup` runs drafter-free speculative decoding on that engine for any model. The classic draft-model path (`--draft-model` without `--draft-kind mtp` or `dflash`) is deprecated and will be removed in v0.8.0.
+
+`mlxcel inspect --json` prints a single JSON object with byte-exact `weights_bytes`, `kv_bytes_total`, `activation_bytes`, `backend_inflight_bytes` (ROCm builds only, else 0), `headroom_bytes`, `budget_bytes`, `total_bytes`, `fits`, input flags, and per-token FP16/INT8 KV rates when the model config exposes KV geometry. TurboQuant per-token sizing is reported as `null` until the estimator models those widths directly.
 
 ### Start a server
 
@@ -337,7 +341,7 @@ Apache License 2.0 unless otherwise noted. See [LICENSE](LICENSE). Third-party a
 
 ## Acknowledgments
 
-- [MLX](https://github.com/ml-explore/mlx), Apple's machine learning framework.
+- [MLX](https://github.com/ml-explore/mlx), Copyright © 2023 Apple Inc., licensed under the MIT License, provides the runtime and source adapted for mlxcel's fused xIELU `expm1f` routine. See [NOTICE](NOTICE).
 - [NripeshN/mlx](https://github.com/NripeshN/mlx), whose `rocm-support` branch is the AMD GPU (ROCm/HIP) MLX backend vendored as the ROCm part of mlxcelverse, under the MIT License. See [NOTICE](NOTICE).
 - [mlx-lm](https://github.com/ml-explore/mlx-lm), [mlx-vlm](https://github.com/Blaizzy/mlx-vlm), and [mlx-audio](https://github.com/Blaizzy/mlx-audio), whose model coverage and behavior mlxcel ports and mirrors. See [NOTICE](NOTICE).
 - [MLX Community](https://huggingface.co/mlx-community), pre-converted MLX checkpoints.

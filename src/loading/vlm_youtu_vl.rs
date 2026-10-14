@@ -222,14 +222,24 @@ fn transform_youtu_vl_key(key: &str) -> String {
 }
 
 fn build_processor(model_path: &Path, vision_config: &YoutuVisionConfig) -> YoutuVLProcessor {
+    // The per-image patch cap is `DEFAULT_MAX_PATCHES_PER_IMAGE` (36864), the
+    // `max_image_patches` default of `YoutuVLProcessor.__call__` in the
+    // checkpoint's `processing_youtu_vl.py`. Two values that look like caps
+    // are deliberately ignored:
+    // - `vision_config.num_patches` sizes the learned position table of
+    //   `Siglip2VisionEmbeddings`, which this checkpoint does not instantiate
+    //   (it builds `Siglip2VisionEmbeddingsWoPos` and uses 2D RoPE), so it
+    //   bounds nothing.
+    // - `preprocessor_config.json`'s `max_num_patches: 256` is the bare
+    //   `Siglip2ImageProcessorFast` default, which `YoutuVLProcessor.__call__`
+    //   overrides with 36864 on every call.
+    // The reference has no pixel-area bounds either, so none are read.
     let mut processor =
-        YoutuVLProcessor::new(vision_config.patch_size, vision_config.spatial_merge_size)
-            .with_max_patches_per_image(vision_config.num_patches);
+        YoutuVLProcessor::new(vision_config.patch_size, vision_config.spatial_merge_size);
 
-    // Try to read `preprocessor_config.json` for `image_mean`, `image_std`,
-    // and any min/max pixel hints. Fail silently (use defaults) if anything
-    // is missing or malformed — the SigLIP2 defaults still produce valid
-    // numerical output.
+    // Read `preprocessor_config.json` for `image_mean` and `image_std`. Fail
+    // silently (use defaults) if anything is missing or malformed: the SigLIP2
+    // defaults still produce valid numerical output.
     let preproc_path = model_path.join("preprocessor_config.json");
     let Ok(text) = std::fs::read_to_string(&preproc_path) else {
         return processor;
@@ -262,15 +272,6 @@ fn build_processor(model_path: &Path, vision_config: &YoutuVisionConfig) -> Yout
             })
             .unwrap_or([0.5, 0.5, 0.5]);
         processor = processor.with_norm(mean, std);
-    }
-
-    let min_pixels = json.get("min_pixels").and_then(|v| v.as_u64());
-    let max_pixels = json.get("max_pixels").and_then(|v| v.as_u64());
-    if let (Some(min_p), Some(max_p)) = (min_pixels, max_pixels) {
-        processor = processor.with_pixel_bounds(min_p as usize, max_p as usize);
-    }
-    if let Some(num_patches) = json.get("num_patches").and_then(|v| v.as_u64()) {
-        processor = processor.with_max_patches_per_image(num_patches as usize);
     }
 
     processor
@@ -317,5 +318,89 @@ mod tests {
         assert!(out.contains_key("lm_head.weight"));
         // Position ids should be stripped.
         assert!(!out.keys().any(|k| k.contains("position_ids")));
+    }
+
+    /// #1611: neither `vision_config.num_patches` (4096) nor
+    /// `preprocessor_config.json`'s `max_num_patches` (256) may cap the grid;
+    /// the cap is `YoutuVLProcessor.__call__`'s 36864. The dead `num_patches`
+    /// and Qwen2-VL `min_pixels`/`max_pixels` keys must not leak in either.
+    #[test]
+    fn build_processor_uses_autoprocessor_patch_cap() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = serde_json::json!({
+            "vision_config": {
+                "num_patches": 4096,
+                "patch_size": 16,
+                "spatial_merge_size": 2
+            }
+        });
+        let preprocessor = serde_json::json!({
+            "image_mean": [0.5, 0.5, 0.5],
+            "image_std": [0.5, 0.5, 0.5],
+            "max_num_patches": 256,
+            "num_patches": 1024,
+            "min_pixels": 64 * 64 * 4,
+            "max_pixels": 64 * 64 * 16,
+            "patch_size": 16
+        });
+        std::fs::write(dir.path().join("config.json"), config.to_string()).expect("config");
+        std::fs::write(
+            dir.path().join("preprocessor_config.json"),
+            preprocessor.to_string(),
+        )
+        .expect("preprocessor");
+
+        let full_config: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("config.json")).expect("read config"),
+        )
+        .expect("parse config");
+        let vision_config: YoutuVisionConfig =
+            parse_required_vlm_subconfig(&full_config, "vision_config", "test vision config")
+                .expect("vision config");
+        assert_eq!(vision_config.num_patches, 4096);
+
+        let processor = build_processor(dir.path(), &vision_config);
+        assert_eq!(processor.max_patches_per_image, 36864);
+        assert_eq!(
+            processor.max_patches_per_image,
+            crate::vision::processors::youtu_vl::DEFAULT_MAX_PATCHES_PER_IMAGE
+        );
+
+        // 2048x2048 is 128x128 = 16384 patches under AutoProcessor; any of the
+        // ignored caps would shrink it.
+        let image = image::DynamicImage::new_rgb8(2048, 2048);
+        assert_eq!(processor.compute_spatial_shapes(&[image]), vec![(128, 128)]);
+    }
+
+    /// #1611 real-checkpoint grid parity: `build_processor` on the shipped
+    /// checkpoint gives the `spatial_shapes` transformers 4.56.0 `AutoProcessor`
+    /// (with the checkpoint's remote code) reports for the same image sizes.
+    /// CPU-only (no MLX allocation); skipped when the checkpoint is absent.
+    #[test]
+    #[ignore = "needs models/mlx/youtu-vl-4b-instruct"]
+    fn real_checkpoint_grid_matches_autoprocessor() {
+        let candidates = [
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("models/mlx/youtu-vl-4b-instruct"),
+            std::path::PathBuf::from("/home/inureyes/models/mlx/youtu-vl-4b-instruct"),
+        ];
+        let Some(dir) = candidates.iter().find(|d| d.join("config.json").is_file()) else {
+            eprintln!("youtu-vl-4b-instruct checkpoint not found; skipping");
+            return;
+        };
+        let full_config: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join("config.json")).expect("read config"),
+        )
+        .expect("parse config");
+        let vision_config: YoutuVisionConfig =
+            parse_required_vlm_subconfig(&full_config, "vision_config", "vision config")
+                .expect("vision config");
+        let processor = build_processor(dir, &vision_config);
+        let images = [(330, 330), (2048, 2048), (3000, 4000)]
+            .map(|(h, w)| image::DynamicImage::new_rgb8(w, h));
+        assert_eq!(
+            processor.compute_spatial_shapes(&images),
+            vec![(22, 22), (128, 128), (166, 220)]
+        );
     }
 }

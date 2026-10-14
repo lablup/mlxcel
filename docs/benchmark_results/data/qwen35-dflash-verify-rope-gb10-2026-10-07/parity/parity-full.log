@@ -1,0 +1,44 @@
+
+running 8 tests
+test b1_batched_baseline_probe ... FAILED
+test divergent_hidden_probe_31b ... ok
+test greedy_parity_dflash_qwen35_4b ... ok
+test greedy_parity_mtp_gemma4_31b ... ok
+test greedy_parity_mtp_gemma4_batched_b4_matches_b1 ... ok
+test greedy_parity_mtp_gemma4_batched_b4_ragged_matches_b1 ... ok
+test greedy_parity_mtp_gemma4_unified_12b ... ok
+test mtp_gemma4_ragged_throughput_probe ... ok
+
+failures:
+
+---- b1_batched_baseline_probe stdout ----
+[b1-batched probe] row 0: accept_lens [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 3, 1]
+  b1-batched (24): [100, 236749, 715, 496, 3161, 1638, 1638, 236751, 236751, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 1852]
+  b1 ref     (24): [100, 236749, 715, 496, 3161, 1638, 1638, 236751, 236751, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 1852]
+  first_mismatch: None
+[b1-batched probe] row 1: accept_lens [0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 1, 0, 0, 3]
+  b1-batched (24): [912, 236743, 236749, 236744, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 236761, 1852, 1852, 1852, 1852, 1852]
+  b1 ref     (24): [912, 12156, 1048, 1852, 236744, 1852, 236744, 1852, 236744, 1852, 236744, 1852, 236744, 1852, 236744, 1852, 236744, 1852, 107, 100, 45518, 107, 101, 1509]
+  first_mismatch: Some(1)
+[b1-batched probe] row 2: accept_lens [0, 0, 3, 2, 1, 3, 3, 0, 2]
+  b1-batched (24): [100, 236745, 45518, 107, 101, 1509, 5724, 1133, 611, 1149, 735, 43443, 5524, 623, 5738, 236775, 1680, 24226, 822, 3305, 236888, 236743, 108, 79629]
+  b1 ref     (24): [100, 236745, 45518, 107, 101, 1509, 5724, 1133, 611, 46271, 506, 3658, 5213, 236775, 102164, 1781, 1018, 236743, 108, 79629, 580, 506, 4403, 236764]
+  first_mismatch: Some(9)
+[b1-batched probe] row 3: accept_lens [1, 0, 0, 0, 0, 1, 3, 3, 0, 0, 0, 3]
+  b1-batched (24): [912, 529, 529, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 2155, 2155, 2155, 2155, 2155, 2155, 2155]
+  b1 ref     (24): [912, 529, 529, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 1852, 3030, 1021, 1852, 1852, 1852, 1852, 1852]
+  first_mismatch: Some(17)
+
+thread 'b1_batched_baseline_probe' (3777983) panicked at tests/speculative_parity.rs:1664:5:
+B=1 batched baseline drift:
+row 1 mismatch at 1
+row 2 mismatch at 9
+row 3 mismatch at 17
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    b1_batched_baseline_probe
+
+test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 257.47s
+

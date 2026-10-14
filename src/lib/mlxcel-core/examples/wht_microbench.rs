@@ -17,7 +17,7 @@
 //! This is the empirical evidence for the spike question:
 //!
 //!     "Does an MLX-graph WHT (composed of Hadamard step ops) hit acceptable
-//!      throughput, or do we need a custom Metal kernel via mlx-cpp/ ?"
+//!      throughput, or do we need a custom Metal kernel via mlxcelverse/ ?"
 //!
 //! "Acceptable" per the issue body: the WHT step adds < 5% to the per-token
 //! decode latency on Qwen2.5-7B at 4K context on M5 Max, vs the FP16 baseline.

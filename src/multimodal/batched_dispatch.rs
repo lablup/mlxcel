@@ -16,7 +16,7 @@
 //!
 //! Several VLM wrappers (Qwen2-VL, Qwen2.5-VL, Qwen3-VL, Qwen3-VL-MoE, and
 //! Gemma 4) need an identical override on
-//! [`LanguageModel::forward_batched_with_context_and_ids`] so each row of a
+//! [`LanguageModel::forward_batched_with_ids`] so each row of a
 //! batched call reaches the text model's seq-aware forward path with its
 //! own `seq_id`. Without the override, the trait default discards `seq_ids`
 //! before they reach the model — the bug fixed for Qwen VL and
@@ -27,7 +27,7 @@
 //! reuse the same loop without coupling the families to each other.
 
 use mlxcel_core::cache::SequenceId;
-use mlxcel_core::generate::{DecodeBatchContext, LanguageModel};
+use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -37,7 +37,7 @@ use mlxcel_core::{MlxArray, UniquePtr};
 /// a `[B, T, V]` tensor.
 ///
 /// When `seq_ids` is `None`, this falls back to the model's default
-/// `forward_batched_with_context` so non-server callers (CLI, single-
+/// `forward_batched` so non-server callers (CLI, single-
 /// process VLM batches) keep their existing behavior — they never had a
 /// scheduler-allocated `SequenceId` to plumb through.
 ///
@@ -63,10 +63,9 @@ pub fn forward_batched_with_seq_ids_dispatch<M: LanguageModel + ?Sized>(
     seq_ids: Option<&[SequenceId]>,
     batch_caches: &mut [&mut [KVCache]],
     mask: Option<&MlxArray>,
-    context: Option<&DecodeBatchContext>,
 ) -> UniquePtr<MlxArray> {
     let Some(seq_ids) = seq_ids else {
-        return text_model.forward_batched_with_context(input_ids, batch_caches, mask, context);
+        return text_model.forward_batched(input_ids, batch_caches, mask);
     };
 
     let b = batch_caches.len();

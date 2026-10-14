@@ -24,13 +24,13 @@ trap 'rm -rf "$work"' EXIT
 failures=0
 
 # A fresh copy of every directory that holds a pinned launcher. The vendored
-# MLX trees under src/lib/mlx-cpp come along, so the entry-point definitions
+# MLX trees under src/lib/mlxcelverse come along, so the entry-point definitions
 # (`CustomKernelFunction hip_kernel(`) are present and must not count.
 make_tree() {
   local dir="$work/$1"
   # A failed copy must stop the test, not yield a tree that passes vacuously.
   mkdir -p "$dir/src/lib/mlxcel-core" || return 1
-  cp -R "$repo_root/src/lib/mlx-cpp" "$dir/src/lib/mlx-cpp" || return 1
+  cp -R "$repo_root/src/lib/mlxcelverse" "$dir/src/lib/mlxcelverse" || return 1
   cp -R "$repo_root/src/lib/mlxcel-core/cpp" "$dir/src/lib/mlxcel-core/cpp" || return 1
   echo "$dir"
 }
@@ -103,7 +103,7 @@ inline void moved_launch(const mlx::core::array& x, int n) {
 CPP
 }
 
-sampling="src/lib/mlx-cpp/turbo/sampling.cpp"
+sampling="src/lib/mlxcelverse/kernels/sampling.cpp"
 bridge="src/lib/mlxcel-core/cpp/mlx_cxx_bridge.cpp"
 
 # Control: an untouched copy passes and reports both counts, so every failure
@@ -125,9 +125,9 @@ fi
 # A launch that moves into a header stays in scope and is checked. Before
 # #1875 only `*.cpp` was globbed, and this passed.
 dir="$(make_tree launch-in-header)"
-write_launcher "$dir/src/lib/mlx-cpp/turbo/moved_launch.h" cuda_kernel
+write_launcher "$dir/src/lib/mlxcelverse/kernels/moved_launch.h" cuda_kernel
 if run_case launch-in-header "$dir" 1; then
-  assert_contains launch-in-header "src/lib/mlx-cpp/turbo/moved_launch.h:5: \`template_args\` names no input dtype"
+  assert_contains launch-in-header "src/lib/mlxcelverse/kernels/moved_launch.h:5: \`template_args\` names no input dtype"
 fi
 
 # Same for a header in a directory the old checker never searched.
@@ -173,10 +173,10 @@ fi
 # A HIP-only launcher is held to the same rule: ROCm keys its JIT cache as CUDA
 # does. Before #1875 only `cuda_kernel(` scoped a file, and this passed.
 dir="$(make_tree hip-only-new-file)"
-write_launcher "$dir/src/lib/mlx-cpp/turbo/hip_only.cpp" hip_kernel
+write_launcher "$dir/src/lib/mlxcelverse/kernels/hip_only.cpp" hip_kernel
 if run_case hip-only-new-file "$dir" 1; then
-  assert_contains hip-only-new-file "src/lib/mlx-cpp/turbo/hip_only.cpp:5: \`template_args\` names no input dtype"
-  assert_contains hip-only-new-file "src/lib/mlx-cpp/turbo/hip_only.cpp: launches a CUDA or HIP JIT kernel but is not pinned"
+  assert_contains hip-only-new-file "src/lib/mlxcelverse/kernels/hip_only.cpp:5: \`template_args\` names no input dtype"
+  assert_contains hip-only-new-file "src/lib/mlxcelverse/kernels/hip_only.cpp: launches a CUDA or HIP JIT kernel but is not pinned"
 fi
 
 # The real HIP-only launcher in the tree (the #1804 fault probe in the bridge,
@@ -210,10 +210,10 @@ run_case hip-only-bridge-dtype-keys "$dir" 0
 # A new launcher that keys correctly still has to be pinned, so the pin cannot
 # go stale; the message is about the pin, not the rule.
 dir="$(make_tree unpinned-launcher)"
-write_launcher "$dir/src/lib/mlx-cpp/turbo/new_launcher.hpp" cuda_kernel '
+write_launcher "$dir/src/lib/mlxcelverse/kernels/new_launcher.hpp" cuda_kernel '
         {"T", x.dtype()},'
 if run_case unpinned-launcher "$dir" 1; then
-  assert_contains unpinned-launcher "src/lib/mlx-cpp/turbo/new_launcher.hpp: launches a CUDA or HIP JIT kernel but is not pinned"
+  assert_contains unpinned-launcher "src/lib/mlxcelverse/kernels/new_launcher.hpp: launches a CUDA or HIP JIT kernel but is not pinned"
   assert_not_contains unpinned-launcher "names no input dtype"
 fi
 
@@ -222,8 +222,8 @@ fi
 # scope and the tree still passes. The raw string holds a quote and a `/*`, so
 # a lexer that did not recognise raw strings would misread what follows it.
 dir="$(make_tree token-in-comment)"
-mkdir -p "$dir/src/lib/mlx-cpp/turbo"
-cat >"$dir/src/lib/mlx-cpp/turbo/metal_only.h" <<'CPP'
+mkdir -p "$dir/src/lib/mlxcelverse/kernels"
+cat >"$dir/src/lib/mlxcelverse/kernels/metal_only.h" <<'CPP'
 // The CUDA port would call fast::cuda_kernel(...); this file is Metal-only.
 /* Likewise fast::hip_kernel( is not called here. */
 inline void metal_only(int n) {
@@ -239,9 +239,9 @@ run_case token-in-comment "$dir" 0
 # A `.hip` translation unit is scanned, and a nested directory named like a
 # build directory is not skipped: only top-level ones are.
 dir="$(make_tree hip-file-in-nested-build-dir)"
-write_launcher "$dir/src/lib/mlx-cpp/turbo/build/launch.hip" hip_kernel
+write_launcher "$dir/src/lib/mlxcelverse/kernels/build/launch.hip" hip_kernel
 if run_case hip-file-in-nested-build-dir "$dir" 1; then
-  assert_contains hip-file-in-nested-build-dir "src/lib/mlx-cpp/turbo/build/launch.hip:5:"
+  assert_contains hip-file-in-nested-build-dir "src/lib/mlxcelverse/kernels/build/launch.hip:5:"
 fi
 
 # In a git work tree the file list comes from git: an ignored local checkout
@@ -254,9 +254,9 @@ write_launcher "$dir/references/mlx/python/src/fast.cpp" cuda_kernel
 if run_case git-work-tree-ignored "$dir" 0; then
   assert_contains git-work-tree-ignored "9 in scope"
 fi
-write_launcher "$dir/src/lib/mlx-cpp/turbo/untracked_launch.h" cuda_kernel
+write_launcher "$dir/src/lib/mlxcelverse/kernels/untracked_launch.h" cuda_kernel
 if run_case git-work-tree-untracked "$dir" 1; then
-  assert_contains git-work-tree-untracked "src/lib/mlx-cpp/turbo/untracked_launch.h:5:"
+  assert_contains git-work-tree-untracked "src/lib/mlxcelverse/kernels/untracked_launch.h:5:"
   assert_not_contains git-work-tree-untracked "references/"
 fi
 

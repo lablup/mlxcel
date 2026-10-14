@@ -26,6 +26,7 @@
 //! real DeepSeek model.
 
 use super::*;
+use crate::cache::KVCache;
 use crate::dtype;
 use crate::mla::absorb::MlaAbsorbedProjections;
 use crate::mla::testkit::{MlaFixture, TINY, max_rel_error, serial, to_vec_f32};
@@ -99,6 +100,32 @@ fn absorbed_attention_respects_an_additive_causal_mask() {
         max_rel_error(&unmasked, &want) > 1e-2,
         "the causal mask made no difference, so the masked test proves nothing"
     );
+}
+
+#[test]
+fn latent_cache_attend_matches_the_decompressed_reference() {
+    let _guard = serial();
+    // The cache-owned entry (#2171): hand the latent cache this step's rows and
+    // the query halves, and it appends then runs absorbed attention over the
+    // live window. Same identity as `absorbed_decode`, pinned against the same
+    // host f64 reference so a wrong window or a dropped append cannot hide.
+    let fx = MlaFixture::new(TINY, 2, 1, 37, 0xA77E);
+    let dt = dtype::FLOAT32;
+    let proj = MlaAbsorbedProjections::from_dense(&fx.kv_b_array(dt), fx.geometry).unwrap();
+    let mut inner = KVCache::new();
+    let mut cache = MlaLatentCache::wrap(&mut inner, fx.geometry).unwrap();
+    let out = cache.attend(
+        &fx.q_nope_array(dt),
+        &fx.q_pe_array(dt),
+        fx.ckv_array(dt),
+        fx.kpe_array(dt),
+        &proj,
+        fx.scale,
+        None,
+    );
+    assert_eq!(cache.offset(), 37, "attend appends the step's rows");
+    let err = max_rel_error(&to_vec_f32(&out), &fx.decompressed_reference(false));
+    assert!(err < F32_TOL, "latent cache attend drifted by {err}");
 }
 
 #[test]

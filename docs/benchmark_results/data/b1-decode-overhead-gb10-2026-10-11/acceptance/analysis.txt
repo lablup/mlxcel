@@ -1,0 +1,16 @@
+| Model | Prompt | new-srv-dense vs base-cli | Null arm | Threshold | Noise label |
+|---|---:|---:|---:|---|---|
+| qwen3-1.7b-4bit | 256 | +0.57% (-0.25%..+1.54%) | +0.04% (-0.41%..+0.76%) | PASS | unresolved (ranges overlap) |
+<!-- qwen3-1.7b-4bit 256 candidate rounds: -0.25%, +1.54%, +0.75%, +0.57%, +0.44% -->
+<!-- qwen3-1.7b-4bit 256 null rounds: -0.41%, +0.76%, -0.22%, +0.04%, +0.05% -->
+| qwen3-1.7b-4bit | 8192 | +0.32% (+0.04%..+0.63%) | +0.22% (-0.13%..+0.66%) | PASS | unresolved (ranges overlap) |
+<!-- qwen3-1.7b-4bit 8192 candidate rounds: +0.04%, +0.63%, +0.32%, +0.09%, +0.42% -->
+<!-- qwen3-1.7b-4bit 8192 null rounds: +0.66%, +0.04%, +0.22%, +0.24%, -0.13% -->
+| llama-3.2-1b-instruct-4bit | 256 | +0.48% (+0.19%..+1.41%) | +0.07% (-12.38%..+0.54%) | PASS | unresolved (ranges overlap) |
+<!-- llama-3.2-1b-instruct-4bit 256 candidate rounds: +1.03%, +1.41%, +0.47%, +0.19%, +0.48% -->
+<!-- llama-3.2-1b-instruct-4bit 256 null rounds: +0.25%, +0.54%, -1.01%, -12.38%, +0.07% -->
+| llama-3.2-1b-instruct-4bit | 8192 | -0.16% (-1.15%..+0.05%) | -0.17% (-0.29%..+0.14%) | PASS | unresolved (ranges overlap) |
+<!-- llama-3.2-1b-instruct-4bit 8192 candidate rounds: +0.05%, -0.16%, -0.36%, -0.12%, -1.15% -->
+<!-- llama-3.2-1b-instruct-4bit 8192 null rounds: -0.02%, +0.14%, -0.17%, -0.29%, -0.24% -->
+
+Acceptance: PASS (4/4 cells >= -1.00%)

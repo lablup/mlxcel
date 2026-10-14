@@ -6,9 +6,9 @@
 // GPU feature enabled.
 //
 // The header this includes is the same file the CUDA overlay
-// `patches/mlx/backend/cuda/gemms/grouped_gemm_unaligned.cu` includes; CMake
+// `overlays/cuda/mlx/backend/cuda/gemms/grouped_gemm_unaligned.cu` includes; CMake
 // copies it into the fetched MLX tree verbatim (`configure_file ... COPYONLY`
-// over a recursive glob of `patches/mlx/backend/cuda`). There is one
+// over a recursive glob of `overlays/cuda/mlx/backend/cuda`). There is one
 // definition, and the test exercises it rather than a restatement of it.
 //
 // It is a pure integer function with no CUDA in it, which is why this file is
@@ -17,7 +17,7 @@
 // and epic #1536 has no Ampere-or-later part; enumeration here settles it
 // everywhere, including the macOS hosts this project also targets.
 
-#include "../../mlx-cpp/patches/mlx/backend/cuda/gemms/grouped_gemm_arch.h"
+#include "../../mlxcelverse/overlays/cuda/mlx/backend/cuda/gemms/grouped_gemm_arch.h"
 
 extern "C" {
 

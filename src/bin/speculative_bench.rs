@@ -74,7 +74,8 @@ use clap::{Parser, ValueEnum};
 
 use mlxcel::tokenizer::MlxcelTokenizer;
 use mlxcel::{LanguageModel, LoadedModel, SamplingConfig, initialize_runtime, load_model};
-use mlxcel_core::generate::{CxxGenerator, GenerationStats};
+use mlxcel_core::engine::{DirectEngine, DirectRequest};
+use mlxcel_core::generate::GenerationStats;
 use mlxcel_core::speculative::mtp::MtpAcceptanceSummary;
 
 /// Default 17-token prompt that matches the upstream MTP perf-table conditions
@@ -378,32 +379,34 @@ fn run_baseline(target_dir: &Path, prompt: &str, max_tokens: usize) -> Result<(f
         max_tokens
     );
 
-    let num_layers = model.num_layers();
-
-    // Warm-up: a single forward to pull lazy MLX kernels onto the GPU before
-    // the timed run. Upstream MLX defers Metal kernel compilation until the
-    // first call; without the warm-up the first generation reports an
-    // inflated decode time. Bound the warm-up to 4 new tokens so it adds
-    // negligible total wall-clock.
+    // Warm-up: a single run to pull lazy MLX kernels onto the GPU before the
+    // timed run. Upstream MLX defers Metal kernel compilation until the first
+    // call; without the warm-up the first generation reports an inflated
+    // decode time. Bound the warm-up to 4 new tokens so it adds negligible
+    // total wall-clock.
+    // The raw-completion client `mlxcel generate` runs (ADR 0007, #2176);
+    // each run opens and closes its own engine sequence.
+    let mut client = DirectEngine::with_default_chunk(&model);
     {
         eprintln!("[bench/baseline] Warm-up (4 tokens)...");
-        let mut warmup_gen = CxxGenerator::new(num_layers);
-        let _ = warmup_gen.generate(&model, &prompt_tokens, 4, &SamplingConfig::greedy());
+        client
+            .run(&prompt_tokens, 4, &SamplingConfig::greedy())
+            .context("baseline warm-up failed")?;
         mlxcel_core::synchronize_default();
     }
 
     eprintln!("[bench/baseline] Timed run starts");
-    let mut generator = CxxGenerator::new(num_layers);
     let started = Instant::now();
-    let (tokens, stats): (Vec<i32>, GenerationStats) = generator.generate_with_stats(
-        &model,
-        &prompt_tokens,
-        max_tokens,
-        &SamplingConfig::greedy(),
-    );
+    let run = client
+        .generate(
+            &DirectRequest::text(&prompt_tokens, max_tokens, &SamplingConfig::greedy()),
+            |_| true,
+        )
+        .context("baseline generation failed")?;
+    let (tokens, stats): (Vec<i32>, GenerationStats) = (run.tokens, run.stats);
     mlxcel_core::synchronize_default();
     let elapsed = started.elapsed();
-    // `generate_with_stats` returns only the generated tokens (not the
+    // `DirectEngine::generate` returns only the generated tokens (not the
     // prompt prepended) in `tokens`, and `GenerationStats::generated_tokens`
     // carries the count internally. The wall-clock used for tok/s is the
     // `decode_time_ms` field of GenerationStats, which excludes the
@@ -466,7 +469,7 @@ fn mtp_target_supported(model: &LoadedModel) -> bool {
 ///
 /// Mirrors [`run_baseline`]: same runtime init, warm-up, and streaming
 /// progress, but drives the MTP round loop through the target family's
-/// `MtpTarget` adapter + `MtpGenerator` instead of the plain `CxxGenerator`.
+/// `MtpTarget` adapter + `MtpGenerator` instead of the plain engine client.
 ///
 /// Variant dispatch mirrors the server burst path
 /// (`src/server/batch/speculative_burst.rs`): the Gemma 4 text, VLM and

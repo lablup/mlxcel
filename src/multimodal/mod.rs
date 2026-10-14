@@ -20,7 +20,7 @@
 //!
 //! Modules:
 //! - `batched_dispatch`: shared per-row batched dispatch helper used by every
-//!   vision wrapper that needs `forward_batched_with_context_and_ids` to route
+//!   vision wrapper that needs `forward_batched_with_ids` to route
 //!   each row through `forward_with_sequence_id`.
 //! - `gemma4_vl`: Gemma 4 mixed-length batching helpers
 //! - `host_preprocessor`: owned host-first prefill production for compiler backends
@@ -78,3 +78,7 @@ mod llmjp_vl_prompt_parity_tests;
 #[cfg(test)]
 #[path = "moondream3_prompt_tests.rs"]
 mod moondream3_prompt_tests;
+
+#[cfg(test)]
+#[path = "granite_vision_prompt_parity_tests.rs"]
+mod granite_vision_prompt_parity_tests;

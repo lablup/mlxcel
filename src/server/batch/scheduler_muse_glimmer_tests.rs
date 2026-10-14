@@ -312,6 +312,7 @@ fn options(max_tokens: usize) -> ServerGenerateOptions {
         grammar: None,
         image_soft_tokens: None,
         pre_rendered_prompt_tokens: None,
+        admission_notification: None,
     }
 }
 
@@ -357,6 +358,10 @@ fn receive_done(rx: &mpsc::Receiver<GenerateEvent>) -> crate::server::Generation
             Ok(GenerateEvent::Token(_, _))
             | Ok(GenerateEvent::TokenWithLogprobs(_, _, _))
             | Ok(GenerateEvent::Prefill(_)) => {}
+            Ok(GenerateEvent::Admitted) => {}
+            Ok(GenerateEvent::RequestMemoryRejected(error)) => {
+                panic!("unexpected memory rejection: {error}")
+            }
             Ok(GenerateEvent::Done(result)) => return result,
             Ok(GenerateEvent::Error(error)) => panic!("unexpected generation error: {error}"),
             Err(err) => panic!("generation did not finish: {err}"),
@@ -373,12 +378,14 @@ fn receive_error(rx: &mpsc::Receiver<GenerateEvent>) -> String {
         }
         Ok(GenerateEvent::Done(_)) => panic!("unexpected done event"),
         Ok(GenerateEvent::Prefill(_)) => panic!("unexpected prefill event"),
+        Ok(GenerateEvent::Admitted) => panic!("unexpected admission event"),
+        Ok(GenerateEvent::RequestMemoryRejected(error)) => error.to_string(),
         Err(err) => panic!("generation did not reject: {err}"),
     }
 }
 
 fn muse_state_offsets(sched: &BatchScheduler, seq_id: SequenceId) -> Option<Vec<(bool, i32, i32)>> {
-    match &sched.model {
+    match sched.engine.model() {
         LoadedModel::MuseGlimmerVLM(model) => model.text.sequence_cache_summaries(seq_id),
         _ => panic!("scheduler test must use Muse Glimmer VLM"),
     }
@@ -388,7 +395,7 @@ fn muse_state_offsets(sched: &BatchScheduler, seq_id: SequenceId) -> Option<Vec<
 fn muse_scheduler_admits_text_only_with_model_owned_sequence_state() {
     let mut sched = scheduler();
     assert_eq!(
-        sched.model.sequence_state_layout().backend,
+        sched.engine.model().sequence_state_layout().backend,
         SequenceStateBackend::ModelOwned
     );
 

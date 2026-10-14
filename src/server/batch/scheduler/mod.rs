@@ -36,24 +36,19 @@ use mlxcel_core::cache::{
     BatchKvQuantConfig, CachePool, DetachedPagedCacheSet, KVCacheMode, PagedKvLayout, SequenceId,
     SequenceStateBackend, SequenceStateLayout,
 };
-use mlxcel_core::generate::{
-    DecodeBatchContext, DecodeStorageBackend as CoreDecodeStorageBackend, LanguageModel,
-};
+use mlxcel_core::engine::{Engine, PrefillStep, RowError, RowOutcome, StepBatch};
+use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::generation_policy::{
     initial_token_history, merged_eos_token_ids, seed_rng_if_needed,
 };
-use mlxcel_core::hardware;
-use mlxcel_core::sampling::{
-    FusedSampleParams, LogprobSource, TokenBiasMap, apply_row_filters, apply_token_bias_rows,
-    batched_fused_sample_with_bias, compute_logprobs, compute_post_sampling_probs,
-    row_supports_fused_batch_except_bias, sample_token_optimized,
-    sample_token_optimized_with_state, sample_token_with_state_and_distribution,
-};
+use mlxcel_core::sampling::{FusedSampleParams, TokenBiasMap};
+use mlxcel_core::sampling_row_step::{LogitMask, RowSampler};
+use mlxcel_core::sampling_token_bias::compose_token_bias;
 use mlxcel_core::streams::{
     install_thread_local_default_stream, new_thread_local_generation_stream,
 };
-use mlxcel_core::utils::{align_to_na_tile, create_padded_prefill_mask};
-use mlxcel_core::{MlxThreadLocalStream, UniquePtr};
+use mlxcel_core::utils::create_padded_prefill_mask;
+use mlxcel_core::{FinishCause, MlxThreadLocalStream, UniquePtr};
 
 use crate::LoadedModel;
 use crate::models::gemma4_mtp_target::{
@@ -85,6 +80,7 @@ use crate::vision::feature_cache::ModelVisionCaches;
 use crate::vlm_runtime::prepared_embedding_refs;
 
 use super::active::ActiveBatch;
+use super::finish::{ContextBound, apply_finish_cause};
 use super::prefill_cohort::{
     PrefillCohortKind, PrefillRow, batched_window_admits, batched_window_admits_lora,
     default_batched_prefill_token_budget, plan_prefill_cohorts,
@@ -99,13 +95,7 @@ use super::tick_policy::{
     TickChoice, TickState, decide_tick, mixed_step_enabled, resolve_prefill_grant_interval,
 };
 
-/// Returns true when the current hardware is M5+ with Neural Accelerator
-/// support and tile-aligned prefill should be applied.
-#[inline]
-fn should_align_prefill() -> bool {
-    let hw = hardware::get_hardware();
-    hw.has_neural_accelerator && hw.macos_supports_na
-}
+use pad_trim::should_align_prefill;
 
 pub(crate) const DEFAULT_PAGED_BLOCK_SIZE: usize = 32;
 
@@ -230,13 +220,6 @@ fn effective_decode_storage_backend(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ChunkedPrefillRange {
-    start: usize,
-    end: usize,
-    is_terminal: bool,
-}
-
 /// Length of the longest common prefix of two token vectors.
 ///
 /// Used by: `BatchScheduler::resolve_history_boundary` (issue #1143)
@@ -261,8 +244,9 @@ fn common_prefix_len(a: &[i32], b: &[i32]) -> usize {
 /// * at or beyond the prompt length there is no suffix left to prefill, and
 ///   the sampler needs a non-empty final forward to produce fresh logits.
 ///
-/// Used by: `BatchScheduler::resolve_history_boundary`
-fn history_boundary_len(
+/// Used by: `BatchScheduler::resolve_history_boundary`,
+/// `engine_probe::ServerEngine::history_boundary`
+pub(crate) fn history_boundary_len(
     history: &[i32],
     prompt_tokens: &[i32],
     min_prefix_tokens: usize,
@@ -274,15 +258,16 @@ fn history_boundary_len(
     Some(boundary)
 }
 
-/// Whether a resolved boundary is still worth capturing for this sequence at
+/// Whether a resolved boundary still splits this sequence's prefill at
 /// prefill time (issue #1143).
 ///
 /// Separate from [`history_boundary_len`] because it depends on state that only
 /// exists once the sequence has been admitted: an adopted prompt-cache prefix
 /// may already reach past the boundary, in which case the segment forward would
-/// be empty and the snapshot already exists.
+/// be empty and the snapshot already exists. The same rule is applied by
+/// `mlxcel_core::prefill_plan::PrefillPlan::with_prefix`.
 ///
-/// Used by: `BatchScheduler::capture_history_boundary_snapshot`
+/// Used by: `BatchScheduler::history_boundary_split`
 #[inline]
 fn boundary_capture_applies(
     boundary: usize,
@@ -292,23 +277,6 @@ fn boundary_capture_applies(
     boundary > prefill_start_offset && boundary < prompt_len
 }
 
-#[inline]
-fn next_chunked_prefill_range(
-    prompt_len: usize,
-    offset: usize,
-    chunk_size: usize,
-) -> Option<ChunkedPrefillRange> {
-    if chunk_size == 0 || offset >= prompt_len {
-        return None;
-    }
-    let end = offset.saturating_add(chunk_size).min(prompt_len);
-    Some(ChunkedPrefillRange {
-        start: offset,
-        end,
-        is_terminal: end >= prompt_len,
-    })
-}
-
 /// Core batch scheduler that drives the model worker loop.
 ///
 /// Replaces the old sequential `recv()` loop with an iteration-level scheduler
@@ -316,15 +284,24 @@ fn next_chunked_prefill_range(
 /// (the default), behavior is identical to the pre-scheduler worker loop.
 ///
 /// When `prefill_chunk_size > 0`, long prompts are processed in chunks with
-/// decode interleaving to prevent latency spikes for active sequences.
+/// decode interleaving to prevent latency spikes for active sequences; the
+/// partition is the `mlxcel_core::prefill_plan::PrefillPlan` of each sequence
+/// (see `planned_prefill`).
 pub struct BatchScheduler {
-    // -- Pool & scheduling structures --
-    cache_pool: CachePool,
+    // -- Execution --
+    /// The batch-native engine (ADR 0007, #2172): it owns the model and the
+    /// KV pool, and every model forward and sampler draw the scheduler needs
+    /// runs through it. The scheduler keeps admission, tick policy,
+    /// preemption, prompt-cache lookup/donate/adopt, handoff and the
+    /// speculative burst generators, and reaches the model and the pool only
+    /// through the engine's accessors for those jobs.
+    engine: Engine<LoadedModel>,
+
+    // -- Scheduling structures --
     prefill_queue: PrefillQueue,
     active_batch: ActiveBatch,
 
-    // -- Model & tokenizer --
-    model: LoadedModel,
+    // -- Tokenizer --
     tokenizer: MlxcelTokenizer,
     /// Memo for the tokenized `--reasoning-budget-message` (#1470), keyed by
     /// the message text so a changed live setting re-encodes. One entry is
@@ -362,9 +339,11 @@ pub struct BatchScheduler {
     batch_observability: Arc<BatchObservability>,
 
     // -- Configuration --
+    /// False for distributed worker paths outside local request admission.
+    request_memory_worker_path: bool,
     config_eos: Vec<i32>,
-    /// Number of prompt tokens per prefill chunk. 0 = chunking disabled.
-    prefill_chunk_size: usize,
+    /// Prompt tokens per prefill chunk with and without live decode streams.
+    prefill_chunk_policy: mlxcel_core::prefill_plan::PrefillChunkPolicy,
     /// Whether preemptive eviction is enabled.
     enable_preemption: bool,
     /// Policy for selecting the eviction victim.
@@ -374,6 +353,14 @@ pub struct BatchScheduler {
     /// Sequence currently undergoing chunked prefill. `None` when no chunked
     /// prefill is in progress.
     chunked_prefill_seq: Option<SequenceInfo>,
+
+    /// Logical token lengths handed to the engine by `run_prefill_piece`.
+    /// Test-only proof that adaptive plans are executed rather than merely
+    /// constructed.
+    #[cfg(test)]
+    pub(super) prefill_forward_lengths: Vec<usize>,
+    #[cfg(test)]
+    request_memory_test_inputs: Option<(mlxcel_core::memory::MemorySnapshot, Option<u64>)>,
 
     /// Issue #908 prototype gate, read once from `MLXCEL_MIXED_STEP` at
     /// construction so the tick loop never touches the environment. False (the
@@ -652,6 +639,10 @@ pub struct BatchScheduler {
     /// entered.
     speculative_drafter_slot: super::speculative_burst::WorkerDrafterSlot,
 
+    /// Whether the prompt-lookup verify widths have been warmed up on this
+    /// scheduler (#2255, [`Self::warm_up_prompt_lookup_widths`]).
+    prompt_lookup_widths_warmed: bool,
+
     /// Adaptive MTP enable/decline policy (issue #333). `Some` only when the
     /// dispatch is [`crate::server::SpeculativeDispatch::Mtp`] and the adaptive
     /// path is enabled (`MLXCEL_MTP_ADAPTIVE` not set to an off value); built
@@ -750,6 +741,11 @@ pub struct BatchScheduler {
     /// never engages the lookahead pipeline and every decode tick runs
     /// synchronously, so the sync path stays available for A/B equivalence.
     lookahead_force_sync: bool,
+
+    /// Decode forwards submitted by this scheduler, for tests that pin the
+    /// B=1 terminal lookahead cost to one forward per post-prefill token.
+    #[cfg(test)]
+    pub(super) decode_forward_calls: usize,
 }
 
 /// One prebuilt decode step held across ticks by the lookahead pipeline.
@@ -767,24 +763,6 @@ struct DecodeLookahead {
     /// `[B]` device token-id array (uint32), one per `ids` entry, already
     /// scheduled with `async_eval`.
     tokens: UniquePtr<mlxcel_core::MlxArray>,
-}
-
-/// Copy a `[B]` device token-id array to host as `Vec<i32>`. `fused_sample`
-/// returns a row-contiguous `uint32` array; the raw bytes are reinterpreted as
-/// `i32`, exact for any token id in `0..vocab_size`.
-///
-/// Uses [`mlxcel_core::array_evaluated_bytes`] (surgical per-array `eval`, no
-/// `contiguous()` op) rather than `array_to_raw_bytes`: the steady pipeline has
-/// already scheduled the next forward on the same stream before this read, and
-/// `array_to_raw_bytes`' `contiguous()` would enqueue a fresh op behind that
-/// forward, making the read block on it and collapsing the overlap. This reader
-/// waits only on the token array's own completion event.
-fn lookahead_tokens_to_host(tokens: &mlxcel_core::MlxArray) -> Vec<i32> {
-    let bytes = mlxcel_core::array_evaluated_bytes(tokens);
-    bytes
-        .chunks_exact(4)
-        .map(|c| i32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
-        .collect()
 }
 
 /// Pure decision: may the lookahead pipeline stay engaged for the next tick?
@@ -823,8 +801,15 @@ fn lookahead_token_finishes(
 /// (admission, preemption, stale id set, cancellation in `finalize_completed`)
 /// unwinds one (step n only). Mirrors the count selection in
 /// [`BatchScheduler::pipelined_steady_decode`] and the `1`-position teardowns.
+///
+/// The two-append maximum is shared with model-owned families, which size the
+/// undo log of their sliding layers from it (#2159).
 fn lookahead_teardown_positions(next_prime_issued: bool) -> usize {
-    if next_prime_issued { 2 } else { 1 }
+    if next_prime_issued {
+        mlxcel_core::cache::DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS
+    } else {
+        1
+    }
 }
 
 /// Pick the preemption victim for `policy` out of a candidate iterator.
@@ -978,13 +963,18 @@ mod decode_tick;
 mod handoff;
 #[path = "../scheduler.rs"]
 mod mtp_dispatch;
+mod pad_trim;
 mod paged_layout;
+mod planned_prefill;
 mod prefill;
 mod prompt_cache;
+pub(crate) mod prompt_lookup;
 mod queued_adoption;
+mod request_memory;
 mod run_loop;
 mod shared_budget;
 mod speculative_finalize;
+pub(crate) mod step_rows;
 
 #[cfg(test)]
 mod structure_tests;
@@ -1023,6 +1013,38 @@ mod scheduler_muse_glimmer_parallel_tests;
 #[cfg(test)]
 #[path = "../scheduler_model_owned_cache_tests.rs"]
 mod scheduler_model_owned_cache_tests;
+
+#[cfg(test)]
+#[path = "../scheduler_prompt_cache_plan_tests.rs"]
+mod scheduler_prompt_cache_plan_tests;
+
+#[cfg(test)]
+#[path = "../scheduler_whole_prompt_hit_tests.rs"]
+mod scheduler_whole_prompt_hit_tests;
+
+#[cfg(test)]
+#[path = "../scheduler_prompt_lookup_tests.rs"]
+mod scheduler_prompt_lookup_tests;
+
+#[cfg(test)]
+#[path = "../scheduler_completion_snapshot_tests.rs"]
+mod scheduler_completion_snapshot_tests;
+
+#[cfg(test)]
+#[path = "../scheduler_model_owned_pad_trim_tests.rs"]
+mod scheduler_model_owned_pad_trim_tests;
+
+#[cfg(test)]
+#[path = "../scheduler_model_owned_lookahead_tests.rs"]
+mod scheduler_model_owned_lookahead_tests;
+
+#[cfg(test)]
+#[path = "../scheduler_lookahead_read_failure_tests.rs"]
+mod scheduler_lookahead_read_failure_tests;
+
+#[cfg(test)]
+#[path = "../scheduler_real_batch_parity_tests.rs"]
+mod scheduler_real_batch_parity_tests;
 
 /// Resolve a request's context-retention values against the server policy
 /// (#1472), pure so the arithmetic is unit-testable without a scheduler.
@@ -1072,3 +1094,6 @@ fn context_shift_trim_depth(live_len: i32, excess: i32, keep: i32, requested_dis
     };
     discard.max(excess).min((n_left - 1).max(excess))
 }
+
+#[cfg(test)]
+mod request_memory_tests;

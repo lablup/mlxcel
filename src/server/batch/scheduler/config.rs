@@ -92,10 +92,9 @@ impl BatchScheduler {
         // non-multimodal models (zero cost on the enqueue path).
         let model_output_suppressed = model.output_suppressed_token_ids();
         Self {
-            cache_pool: CachePool::new(pool_capacity),
+            engine: Engine::new(model, CachePool::new(pool_capacity)),
             prefill_queue: PrefillQueue::with_capacity(max_queue_depth),
             active_batch: ActiveBatch::new(max_batch_size),
-            model,
             tokenizer,
             forced_reasoning_message: std::cell::RefCell::new(None),
             sleep_idle: None,
@@ -107,10 +106,17 @@ impl BatchScheduler {
             batch_metrics,
             batch_observability,
             config_eos,
-            prefill_chunk_size,
+            request_memory_worker_path: true,
+            prefill_chunk_policy: mlxcel_core::prefill_plan::PrefillChunkPolicy::resolve(Some(
+                prefill_chunk_size,
+            )),
             enable_preemption,
             preemption_policy,
             chunked_prefill_seq: None,
+            #[cfg(test)]
+            prefill_forward_lengths: Vec::new(),
+            #[cfg(test)]
+            request_memory_test_inputs: None,
             // A one-wide decode batch has nothing to mix a prefill into, and
             // that is also exactly b10621's `--no-cont-batching` gate:
             // upstream adds pending prompts to the batch only when
@@ -173,6 +179,7 @@ impl BatchScheduler {
                 crate::server::batch::speculative_burst::WorkerDrafterSlot::from_dispatch(
                     &crate::server::SpeculativeDispatch::Disabled,
                 ),
+            prompt_lookup_widths_warmed: false,
             // No adaptive MTP policy until `with_mtp_policy` builds one for an
             // MTP dispatch. The non-speculative hot path never touches it.
             mtp_policy: None,
@@ -188,8 +195,20 @@ impl BatchScheduler {
             // Honor MLXCEL_FORCE_SYNC=1 as the pipeline kill switch, probed once
             // here (the server worker is long-lived, so a per-tick getenv would
             // be pure overhead).
-            lookahead_force_sync: std::env::var("MLXCEL_FORCE_SYNC").is_ok(),
+            lookahead_force_sync: mlxcel_core::engine::force_sync_requested(),
+            #[cfg(test)]
+            decode_forward_calls: 0,
         }
+    }
+
+    /// Install the adaptive server chunk policy after the compatibility
+    /// constructor has derived budgets from its alone value.
+    pub fn with_prefill_chunk_policy(
+        mut self,
+        policy: mlxcel_core::prefill_plan::PrefillChunkPolicy,
+    ) -> Self {
+        self.prefill_chunk_policy = policy;
+        self
     }
 
     /// Override the #715 batched-prefill padded-token budget with the explicit
@@ -203,7 +222,7 @@ impl BatchScheduler {
     pub fn with_max_batch_prefill_tokens(mut self, configured: Option<usize>) -> Self {
         self.max_batch_prefill_tokens = resolve_max_batch_prefill_tokens(
             configured,
-            self.prefill_chunk_size,
+            self.prefill_chunk_policy.alone,
             self.max_batch_prefill,
         );
         self
@@ -393,7 +412,7 @@ impl BatchScheduler {
     /// model-owned / quantized families that keep dense caches and never mint
     /// pool blocks.
     pub fn with_paged_block_budget(mut self, budget: Option<usize>) -> Self {
-        self.cache_pool.set_paged_block_budget(budget);
+        self.engine.pool_mut().set_paged_block_budget(budget);
         self
     }
 
@@ -411,7 +430,7 @@ impl BatchScheduler {
     /// (a pool that already has storage) is logged and ignored, because an
     /// unsized slab costs performance, not correctness.
     pub fn with_paged_slab_blocks(mut self, slab_blocks: Option<usize>) -> Self {
-        if let Err(reason) = self.cache_pool.set_paged_slab_blocks(slab_blocks) {
+        if let Err(reason) = self.engine.pool_mut().set_paged_slab_blocks(slab_blocks) {
             tracing::warn!("could not install the paged KV slab size: {reason}");
         }
         self
@@ -481,7 +500,7 @@ impl BatchScheduler {
             let block_size = *block_size as usize;
             if block_size >= 2 {
                 let _ = crate::server::batch::speculative_burst::mtp_capable_target(
-                    &self.model,
+                    self.engine.model(),
                     block_size,
                 );
             }
@@ -532,7 +551,10 @@ impl BatchScheduler {
             let target_id = target_model_id.unwrap_or_else(|| "unknown-target".to_string());
             let block = *block_size as usize;
             if block >= 2
-                && !crate::server::batch::speculative_burst::mtp_capable_target(&self.model, block)
+                && !crate::server::batch::speculative_burst::mtp_capable_target(
+                    self.engine.model(),
+                    block,
+                )
             {
                 exactness_veto = Some(MtpPolicySnapshot::exactness_declined(
                     target_id.clone(),
@@ -545,7 +567,7 @@ impl BatchScheduler {
                 target_id,
                 drafter_id,
                 *block_size,
-                self.model.supports_batching(),
+                self.engine.model().supports_batching(),
             );
             true
         } else {
@@ -571,7 +593,7 @@ impl BatchScheduler {
                     MtpPolicyUnavailableReason::AdaptiveDisabled,
                     Some(
                         crate::server::batch::speculative_burst::mtp_b1_burst_enabled(
-                            self.model.supports_batching(),
+                            self.engine.model().supports_batching(),
                         ),
                     ),
                 ),

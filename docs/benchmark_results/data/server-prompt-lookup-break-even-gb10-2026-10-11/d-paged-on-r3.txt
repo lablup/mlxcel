@@ -1,0 +1,6 @@
+{"style": "long-copy", "conc": 1, "rep": 0, "wall_s": 4.69, "tokens": 256, "agg_tok_s": 54.58, "decode_tok_s": [65.87], "prompt_n": [8205], "draft_kind": null, "draft_n": 0, "draft_n_accepted": 0, "draft_rounds": 0}
+{"style": "long-copy", "conc": 1, "rep": 1, "wall_s": 3.295, "tokens": 256, "agg_tok_s": 77.69, "decode_tok_s": [100.39], "prompt_n": [8208], "draft_kind": null, "draft_n": 0, "draft_n_accepted": 0, "draft_rounds": 0}
+{"style": "long-copy", "conc": 1, "rep": 2, "wall_s": 3.276, "tokens": 256, "agg_tok_s": 78.15, "decode_tok_s": [100.51], "prompt_n": [8210], "draft_kind": null, "draft_n": 0, "draft_n_accepted": 0, "draft_rounds": 0}
+{"style": "long-chat", "conc": 1, "rep": 0, "wall_s": 3.215, "tokens": 256, "agg_tok_s": 79.62, "decode_tok_s": [100.91], "prompt_n": [8076], "draft_kind": null, "draft_n": 0, "draft_n_accepted": 0, "draft_rounds": 0}
+{"style": "long-chat", "conc": 1, "rep": 1, "wall_s": 3.205, "tokens": 256, "agg_tok_s": 79.87, "decode_tok_s": [101.03], "prompt_n": [8071], "draft_kind": null, "draft_n": 0, "draft_n_accepted": 0, "draft_rounds": 0}
+{"style": "long-chat", "conc": 1, "rep": 2, "wall_s": 3.21, "tokens": 256, "agg_tok_s": 79.74, "decode_tok_s": [100.79], "prompt_n": [8075], "draft_kind": null, "draft_n": 0, "draft_n_accepted": 0, "draft_rounds": 0}

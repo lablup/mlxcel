@@ -62,13 +62,20 @@ const WARMUP: usize = 20;
 const ITERS: usize = 50;
 
 /// Backend the fused kernel actually dispatches on: Metal on Apple, the #634
-/// CUDA port on NVIDIA, else CPU (no native kernel). Drives the selector label
-/// so the printed `select=` column matches production dispatch on this host.
+/// CUDA port on NVIDIA, the #2068 HIP port on ROCm, else CPU (no native
+/// kernel). Drives the selector label so the printed `select=` column matches
+/// production dispatch on this host.
 fn bench_backend() -> PagedDecodeBackend {
-    if mlxcel_core::metal_is_available() {
+    if !mlxcel_core::paged_attention_decode_available() {
+        PagedDecodeBackend::Other
+    } else if mlxcel_core::metal_is_available() {
         PagedDecodeBackend::Metal
     } else if mlxcel_core::cuda_is_available() {
         PagedDecodeBackend::Cuda
+    } else if mlxcel_core::hardware::gpu_backend_kind()
+        == mlxcel_core::hardware::GpuBackendKind::Rocm
+    {
+        PagedDecodeBackend::Rocm
     } else {
         PagedDecodeBackend::Other
     }

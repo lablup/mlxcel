@@ -16,8 +16,8 @@
 //!
 //! | Op | Backend | Knob | Status |
 //! |----|---------|------|--------|
-//! | [`paged_decode_splits`] | Metal + CUDA | v1 paged-decode `NumSplits` launch shape | Wired end to end; the Apple-Silicon-tunable op. |
-//! | [`paged_decode_v2_chunk`] | Metal + CUDA | v2 paged-decode `pages_per_chunk` | Wired end to end (issue #898); reachable only when `MLXCEL_PAGED_ATTENTION_V2=1` selects the v2 path. |
+//! | [`paged_decode_splits`] | Metal + CUDA + ROCm | v1 paged-decode `NumSplits` launch shape | Wired end to end; the Apple-Silicon-tunable op. |
+//! | [`paged_decode_v2_chunk`] | Metal + CUDA + ROCm | v2 paged-decode `pages_per_chunk` | Wired end to end (issue #898); reachable only when `MLXCEL_PAGED_ATTENTION_V2=1` selects the v2 path. |
 //! | [`cuda_kernel_knobs::QmmTileOp`] | CUDA | Blackwell qmm CTA `tile_m` | Wired, **unvalidated** (no CUDA host was available). |
 //! | [`cuda_kernel_knobs::QmvMultirowOp`] | CUDA | multirow-qmv row-window ceiling | Wired, **unvalidated** (no CUDA host was available). |
 //!

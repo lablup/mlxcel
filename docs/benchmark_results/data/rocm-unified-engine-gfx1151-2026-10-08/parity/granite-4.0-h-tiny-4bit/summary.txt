@@ -1,0 +1,10 @@
+model: granite-4.0-h-tiny-4bit
+generate vs run text: identical
+run vs server dense text: identical
+server dense vs server paged text: identical
+# first_divergence	identical
+# restarts	
+top-1 disagreement                      0 / 128       0.000%
+  on decided positions (gap>=2.0)       0 / 69        0.000%   <- gate on this
+      1 2026-10-08T10:16:33.547882Z  INFO mlxcel::server::batch::scheduler::config: Paged decode storage requested but unavailable for this worker; falling back to dense
+      1 2026-10-08T10:16:33.547358Z  INFO mlxcel::server::model_provider::model_worker: Starting BatchScheduler (max_batch_size=1, max_queue_depth=32, prefill_chunk_size=2048, max_batch_prefill=4, decode_storage=paged)

@@ -1,0 +1,406 @@
+// Copyright 2025-2026 Lablup Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Speculative decoding on the engine for a token-only drafter (#2176).
+//!
+//! A [`Drafter`] whose proposals come from the token context alone
+//! ([`Drafter::drafts_from_tokens_only`], prompt lookup today) needs no
+//! hidden states from the target, so one round loop can drive it over any
+//! model through the engine: [`Engine::verify`] forwards the current token
+//! and the proposed block as speculative appends, the per-row chain samples
+//! or argmaxes every position in order, and [`Engine::unwind_appends`] drops
+//! the rejected tail so the sequence's state holds exactly the emitted
+//! tokens. [`DirectEngine::generate_with_drafter`] is that loop for one
+//! sequence; the server's scheduler can offer the same drafter through the
+//! same two engine entries.
+
+use std::time::Instant;
+
+use super::direct::{
+    DirectEngine, DirectEngineError, DirectRequest, DirectRun, delivers_to_callback,
+};
+use super::direct_decode::{DecodeState, Teardown, single};
+use super::verify_round::token_only_rounds_unsupported;
+use super::{Engine, EngineError, StepBatch};
+use crate::cache::{DecodeLookaheadAppendScope, SequenceId};
+use crate::drafter::{Drafter, DrafterError};
+use crate::ffi;
+use crate::generate::{GenerationStats, LanguageModel, SamplingConfig};
+use crate::generation_policy::{merged_eos_token_ids, seed_rng_if_needed};
+use crate::streams::install_thread_local_default_stream;
+use crate::{MlxArray, UniquePtr};
+
+impl<M: LanguageModel> Engine<M> {
+    /// A verify forward for `id`: `input` is `[1, n]`, the current token
+    /// followed by a proposed block, appended to the sequence's state as
+    /// speculative positions (inside a [`DecodeLookaheadAppendScope`], so a
+    /// model-owned family logs what the appends overwrote). Returns the
+    /// `[1, n, vocab]` logits; the caller samples every position, keeps the
+    /// accepted prefix with [`Engine::commit_appends`] and drops the rest
+    /// with [`Engine::unwind_appends`].
+    pub fn verify(
+        &mut self,
+        id: SequenceId,
+        input: &MlxArray,
+    ) -> Result<UniquePtr<MlxArray>, EngineError> {
+        let caches = self
+            .pool
+            .get_caches_mut(id)
+            .ok_or(EngineError::MissingSequence(id))?;
+        let logits = {
+            let _speculative = DecodeLookaheadAppendScope::enter();
+            self.model
+                .forward_with_sequence_id(input, Some(id), caches, None)
+        };
+        self.sync_sequence_storage(id);
+        Ok(logits)
+    }
+
+    /// Keep `n` of the positions a verify forward appended for `id`: the
+    /// pool offset advances by that many, as a step advances it by one.
+    pub fn commit_appends(&mut self, id: SequenceId, n: i32) {
+        if n <= 0 {
+            return;
+        }
+        if let Some(set) = self.pool.get_mut(id) {
+            set.current_offset += n;
+        }
+    }
+}
+
+/// Why a speculative run on the engine stopped early.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum SpeculativeRunError {
+    #[error(transparent)]
+    Engine(#[from] DirectEngineError),
+    #[error("drafter: {0}")]
+    Drafter(String),
+    #[error(
+        "the drafter needs the target's hidden states, which the token-only round loop does not produce"
+    )]
+    NeedsHiddenStates,
+    #[error("the sequence's KV caches cannot drop a rejected block (not trimmable)")]
+    NotTrimmable,
+    #[error("the sampler carries feedback state across tokens, which a verify block cannot replay")]
+    SamplerFeedbackState,
+    /// The model keeps sequence state outside the external KV caches
+    /// ([`crate::speculative::prompt_lookup::prompt_lookup_unsupported_reason`]).
+    #[error("{0}")]
+    ModelUnsupported(&'static str),
+}
+
+impl From<DrafterError> for SpeculativeRunError {
+    fn from(err: DrafterError) -> Self {
+        SpeculativeRunError::Drafter(err.to_string())
+    }
+}
+
+/// Acceptance accounting for one [`DirectEngine::generate_with_drafter`] run,
+/// as the round loop sees it: one round per forward.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SpeculativeRounds {
+    /// Forwards after the prefill: plain steps and verify blocks.
+    pub rounds: usize,
+    /// Rounds that verified a proposed block.
+    pub drafted_rounds: usize,
+    pub proposed_draft_tokens: usize,
+    pub accepted_draft_tokens: usize,
+}
+
+/// The result of a speculative run.
+#[derive(Debug, Clone, Default)]
+pub struct SpeculativeRun {
+    pub run: DirectRun,
+    pub rounds: SpeculativeRounds,
+}
+
+impl<M: LanguageModel> DirectEngine<M> {
+    /// One completion with a token-only `drafter` proposing up to
+    /// `block_size` tokens per round. Every round forwards the current token
+    /// and the proposal in one [`Engine::verify`], emits the longest agreeing
+    /// prefix plus the target's own token at the first disagreement (or the
+    /// bonus token after a full block), and unwinds the rest; a round with
+    /// no proposal is a plain [`Engine::step`]. Greedy output equals
+    /// [`DirectEngine::generate`]'s wherever the multi-token verify forward
+    /// rounds as the one-token step does; where the target's top two logits
+    /// are close enough for the two kernels to disagree, the stream can take
+    /// the other token from there on (see the prompt-lookup module's
+    /// "Greedy exactness" section). On a stub model they are identical.
+    ///
+    /// `on_token` sees every emitted token in order, as in `generate`. The
+    /// drafter is bound to the model, told the prompt and the first token,
+    /// and told every round's outcome through
+    /// [`Drafter::accept_verified_tokens`] (with the verify logits, or the
+    /// step's `[1, 1, vocab]` logits, in the hidden-state slot a token-only
+    /// drafter ignores).
+    pub fn generate_with_drafter<F: FnMut(i32) -> bool>(
+        &mut self,
+        request: &DirectRequest<'_>,
+        drafter: &mut dyn Drafter,
+        block_size: usize,
+        on_token: F,
+    ) -> Result<SpeculativeRun, SpeculativeRunError> {
+        let sampling = self.compose_sampling(request.sampling);
+        if let Some(err) = token_only_rounds_unsupported(&sampling, drafter) {
+            return Err(err);
+        }
+        if request.max_tokens == 0 {
+            return Ok(SpeculativeRun {
+                run: DirectRun::empty(request.prompt_tokens.len()),
+                rounds: SpeculativeRounds::default(),
+            });
+        }
+        install_thread_local_default_stream(self.generation_stream());
+        drafter.bind(self.model())?;
+        let id = self.open_sequence()?;
+        let result = self.speculate(id, request, &sampling, drafter, block_size, on_token);
+        self.close_sequence(id);
+        result
+    }
+
+    /// Prefill `prompt_tokens` and run one verify forward at every block
+    /// width `generate_with_drafter` can use (2 through `max_draft + 1`), so
+    /// a later run does not pay first-use kernel costs in the middle of its
+    /// decode. The first forward at a width this process has not run yet
+    /// builds or traces kernels for it, which on GB10 cost more than the
+    /// rest of a short reply.
+    pub fn warm_up_verify_widths(
+        &mut self,
+        prompt_tokens: &[i32],
+        max_draft: usize,
+    ) -> Result<(), SpeculativeRunError> {
+        let Some(&last) = prompt_tokens.last() else {
+            return Err(DirectEngineError::EmptyPrompt.into());
+        };
+        install_thread_local_default_stream(self.generation_stream());
+        let id = self.open_sequence()?;
+        let result = (|| -> Result<(), SpeculativeRunError> {
+            let logits = self.prefill_text(id, prompt_tokens)?;
+            crate::try_eval(&logits).map_err(|e| DirectEngineError::PrefillEval(e.to_string()))?;
+            // The warm-up the server scheduler runs too (#2255).
+            self.engine_mut()
+                .warm_up_verify_widths(id, last, max_draft)
+                .map_err(DirectEngineError::Step)?;
+            Ok(())
+        })();
+        self.close_sequence(id);
+        crate::clear_memory_cache();
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn speculate<F: FnMut(i32) -> bool>(
+        &mut self,
+        id: SequenceId,
+        request: &DirectRequest<'_>,
+        sampling: &SamplingConfig,
+        drafter: &mut dyn Drafter,
+        block_size: usize,
+        mut on_token: F,
+    ) -> Result<SpeculativeRun, SpeculativeRunError> {
+        let prompt_tokens = request.prompt_tokens;
+        let max_tokens = request.max_tokens;
+        // The one eligibility rule the scheduler's prompt-lookup rows apply
+        // too (#2255).
+        if let Some(err) = self
+            .engine_mut()
+            .verify_rounds_unsupported(id, sampling, drafter)
+        {
+            return Err(err);
+        }
+        let eos = merged_eos_token_ids(self.model().eos_token_ids(), &sampling.stop_token_ids);
+        let mut state = DecodeState::new(id, prompt_tokens, sampling, eos, max_tokens);
+        let mut rounds = SpeculativeRounds::default();
+        // Rounds without a proposal pipeline the way `generate` does, once
+        // the drafter says a run of them is due: the next one-token forward
+        // is submitted from the still-unread token, so the device does not
+        // idle while the host reads it and builds the next graph. Same
+        // eligibility as `generate`'s pipeline.
+        let pipeline = self.lookahead_params(id, sampling);
+
+        let prefill_start = Instant::now();
+        let logits = self.prefill_text(id, prompt_tokens)?;
+        seed_rng_if_needed(sampling);
+        let first = self
+            .engine_mut()
+            .complete_prefill(&logits, &mut state.row());
+        self.mark_prefilled(id, prompt_tokens.len());
+        if let Some(error) = first.error {
+            return Err(DirectEngineError::FirstToken(error.message().to_string()).into());
+        }
+        drafter.prefill_from_target_hidden(prompt_tokens, &logits, first.token, sampling)?;
+        self.prepare_decode(id, max_tokens);
+        let prefill_time = prefill_start.elapsed();
+        crate::clear_memory_cache();
+
+        let decode_start = Instant::now();
+        let mut done = first.finish.is_some();
+        if delivers_to_callback(&state.generated, 0, &first) && !on_token(first.token) {
+            done = true;
+        }
+        // `Some(tokens)` while the forward fed by the last emitted token is
+        // in flight: that token is in the state as an uncommitted append and
+        // `tokens` is the lazy draw of the one after it.
+        let mut in_flight: Option<UniquePtr<MlxArray>> = None;
+        // The raised command-buffer input budget, held only while a pipelined
+        // plain round is in flight: it pays off where step n+1 is encoded
+        // while the device runs step n, and a synchronous plain step or a
+        // verify block loses the encode / execute overlap under it (the rule
+        // `decode` and the scheduler's `run_decode_tick` apply).
+        let mut decode_budget: Option<crate::DecodeCommandBufferBudget> = None;
+        while !done {
+            let current = state.last_token()?;
+            // Never propose past `max_tokens`: every accepted proposal is
+            // emitted, and the round also emits one target token.
+            let remaining = max_tokens.saturating_sub(state.generated.len());
+            let budget = block_size.min(remaining.saturating_sub(1));
+            let draft = if budget == 0 {
+                Vec::new()
+            } else {
+                let mut draft = drafter.draft_block(current, None, budget, sampling)?;
+                draft.truncate(budget);
+                draft
+            };
+
+            if in_flight.is_some() {
+                done = self.pipelined_plain_round(
+                    &mut state,
+                    &mut in_flight,
+                    &draft,
+                    budget > 0,
+                    pipeline.as_ref(),
+                    drafter,
+                    &mut rounds,
+                    &mut on_token,
+                )?;
+                if in_flight.is_none() {
+                    drop(decode_budget.take());
+                }
+                continue;
+            }
+            if draft.is_empty()
+                && remaining > 1
+                && let Some(params) = pipeline.as_ref()
+                && drafter.pipelines_plain_rounds()
+            {
+                let input = ffi::from_slice_i32(&[current], &[1, 1]);
+                let guard = crate::DecodeCommandBufferBudget::enter();
+                match self.submit_lookahead(id, sampling, &input, params) {
+                    Ok(tokens) => {
+                        rounds.rounds += 1;
+                        in_flight = Some(tokens);
+                        decode_budget = Some(guard);
+                        continue;
+                    }
+                    // Decode the round synchronously instead.
+                    Err(err) => {
+                        drop(guard);
+                        self.unwind_failed_submit(id, &err, 0, Teardown::Unwind)?
+                    }
+                }
+            }
+            rounds.rounds += 1;
+
+            if draft.is_empty() {
+                // A plain step, as `generate` runs it.
+                let input = ffi::from_slice_i32(&[current], &[1, 1]);
+                let batch = StepBatch {
+                    seq_ids: std::slice::from_ref(&id),
+                    input: &input,
+                };
+                let before = state.generated.len();
+                let out = self
+                    .engine_mut()
+                    .step(&batch, &mut [state.row()])
+                    .map_err(DirectEngineError::Step)?;
+                let outcome = single(out.rows)?;
+                if let Some(error) = outcome.error {
+                    return Err(DirectEngineError::Row(error.message().to_string()).into());
+                }
+                let emitted = &state.generated[before..];
+                drafter.accept_verified_tokens(&input, &[], 0, emitted, sampling)?;
+                if delivers_to_callback(&state.generated, before, &outcome)
+                    && !on_token(outcome.token)
+                {
+                    break;
+                }
+                done = outcome.finish.is_some();
+                continue;
+            }
+
+            // Verify `[current, d_0, .., d_{k-1}]` in one forward: the round
+            // the scheduler's prompt-lookup rows run too (#2255).
+            rounds.drafted_rounds += 1;
+            rounds.proposed_draft_tokens += draft.len();
+            let before = state.generated.len();
+            let round = self
+                .engine_mut()
+                .verify_round(&mut state.row(), current, &draft, &mut on_token)
+                .map_err(DirectEngineError::Step)?;
+            if let Some(error) = round.error() {
+                return Err(DirectEngineError::Row(error.message().to_string()).into());
+            }
+            rounds.accepted_draft_tokens += round.accepted;
+            let emitted = &state.generated[before..];
+            drafter.accept_verified_tokens(
+                &round.logits,
+                &draft,
+                round.accepted,
+                emitted,
+                sampling,
+            )?;
+            if crate::memory::should_clear_cache_at(
+                state.generated.len(),
+                crate::memory::cache_clear_interval(),
+            ) {
+                crate::clear_memory_cache();
+            }
+            done = round.ended();
+        }
+        let decode_time = decode_start.elapsed();
+
+        let generated = state.generated;
+        let prompt_count = prompt_tokens.len();
+        let gen_count = generated.len();
+        let prefill_ms = prefill_time.as_secs_f64() * 1000.0;
+        let decode_ms = decode_time.as_secs_f64() * 1000.0;
+        // The first token comes out of the prefill forward; the decode rate
+        // counts only what the rounds produced in `decode_time`.
+        let decode_count = gen_count.saturating_sub(1);
+        let stats = GenerationStats {
+            prompt_tokens: prompt_count,
+            generated_tokens: gen_count,
+            prefill_time_ms: prefill_ms,
+            decode_time_ms: decode_ms,
+            prefill_tok_per_sec: if prefill_ms > 0.0 {
+                prompt_count as f64 / (prefill_ms / 1000.0)
+            } else {
+                0.0
+            },
+            decode_tok_per_sec: if decode_ms > 0.0 {
+                decode_count as f64 / (decode_ms / 1000.0)
+            } else {
+                0.0
+            },
+        };
+        Ok(SpeculativeRun {
+            run: DirectRun {
+                tokens: generated,
+                stats,
+            },
+            rounds,
+        })
+    }
+}

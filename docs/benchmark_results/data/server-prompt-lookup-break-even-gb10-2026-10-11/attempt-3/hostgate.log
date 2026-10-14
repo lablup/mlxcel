@@ -1,0 +1,2 @@
+gate_wait_s= 0
+ci_job_running= False

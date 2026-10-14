@@ -2,9 +2,11 @@
 // Direct C++ bridge implementation for MLX via cxx
 
 #include "mlx_cxx_internal.h"
-#include "../../mlx-cpp/turbo/gpu_backend.h"
+#include "../../mlxcelverse/kernels/gpu_backend.h"
 
 #include "mlx/primitives.h"
+// Backend-agnostic CUDA availability probe; non-CUDA builds link the stub.
+#include "mlx/backend/cuda/cuda.h"
 #ifdef MLXCEL_BRIDGE_ROCM_BACKEND
 // `quantized_matmul_runs_dequant_gemm` (lablup/mlxcel#2081).
 #include "mlx/backend/rocm/rocm.h"
@@ -48,6 +50,15 @@ int mlxcel_mb_per_buffer_override();
 namespace mlx_cxx {
 
 using namespace mlx::core;
+
+std::unique_ptr<MlxRngSnapshot> rng_snapshot() {
+    return std::make_unique<MlxRngSnapshot>();
+}
+
+void restore_rng_snapshot(const MlxRngSnapshot& snapshot) {
+    random::KeySequence::default_() = snapshot.inner;
+}
+
 
 namespace {
 
@@ -739,6 +750,31 @@ rust::Vec<uint8_t> array_evaluated_bytes(const MlxArray& arr) {
     for (size_t i = 0; i < nbytes; ++i) {
         result.push_back(data[i]);
     }
+    return result;
+}
+
+std::unique_ptr<MlxArray> array_with_failed_event_for_test() {
+    auto stream = mlx::core::default_stream(mlx::core::default_device());
+    mlx::core::Event event(stream);
+    event.set_value(1);
+    event.signal(stream);
+    // Land the real signal before attaching an error: synchronize checks an
+    // event's error, so doing this afterwards would consume the fixture.
+    mlx::core::synchronize(stream);
+
+    // Event stores a raw Error pointer. This fixture deliberately gives each
+    // returned array an independent process-lifetime error so one consuming
+    // read cannot invalidate another test's event.
+    auto* error = new mlx::core::Error();
+    error->set_message(std::make_shared<std::string>(
+        "mlxcel test: synthetic array read failure"));
+    event.set_error(*error);
+
+    const uint32_t zero = 0;
+    auto result = std::make_unique<MlxArray>(
+        mlx::core::array(&zero, mlx::core::Shape{1}, mlx::core::uint32));
+    result->inner.set_status(mlx::core::array::Status::evaluated);
+    result->inner.attach_event(event);
     return result;
 }
 
@@ -2462,10 +2498,26 @@ std::unique_ptr<MlxArray> compiled_gelu_approx_mlp_forward(
         x_shape.size() >= 2 && x_shape[x_shape.size() - 2] == 1;
     // The pre-#680 always-compiled case, preserved bit-for-bit.
     const bool legacy_compiled_shape = (group_size == 64 && bits == 4);
+    // [#2160] A speculative verify block (M = draft width, at most 8 rows)
+    // must produce each row byte-identical to the single-token decode forward
+    // it stands for. On CUDA the fused compiled activation and the
+    // op-at-a-time `gelu_tanh_approx` below round differently, so a 4-row
+    // Gemma 4 12B verify block (8-bit MLP) diverged from decode at the first
+    // MLP. Rows inside CUDA's qmv window (`M * B < 8`, where each row of the
+    // matmul is bit-identical to its single-row launch) take the decode graph;
+    // the shapeless compile keeps each row's element-wise ops identical to an
+    // `l == 1` call. At 8 rows and up the matmul itself moves to qmm, so
+    // there is nothing to match. Metal keeps the #680 gate unchanged.
+    int64_t rows = 1;
+    for (size_t i = 0; i + 1 < x_shape.size(); ++i) {
+        rows *= x_shape[i];
+    }
+    const bool cuda_decode_sized_block =
+        rows < 8 && mlx::core::cu::is_available();
 
     if (compiled_qgelu_enabled && mode_str == "affine"
         && gate_biases && up_biases && down_biases
-        && (legacy_compiled_shape || is_single_token)) {
+        && (legacy_compiled_shape || is_single_token || cuda_decode_sized_block)) {
         auto& compiled_fn = get_compiled_qgelu_approx_mlp(group_size, bits, mode_str);
 
         auto result = compiled_fn({
@@ -3167,6 +3219,13 @@ std::unique_ptr<MlxArray> arange_f32(float start, float stop, float step) {
 
 std::unique_ptr<MlxArray> arange_i32(int32_t start, int32_t stop, int32_t step) {
     return std::make_unique<MlxArray>(mlx::core::arange(start, stop, step));
+}
+
+// `[0, stop)` as uint32, built exactly as MLX's `indices_or_default` builds the
+// default `lhs_indices` of `gather_qmm` / `gather_mm` (issue #1713).
+std::unique_ptr<MlxArray> arange_u32(int32_t stop) {
+    return std::make_unique<MlxArray>(
+        mlx::core::arange(static_cast<double>(stop), mlx::core::uint32));
 }
 
 // Logical operations.
@@ -4084,258 +4143,6 @@ std::unique_ptr<MlxArray> fast_scaled_dot_product_attention_causal(
     ));
 }
 
-std::unique_ptr<MlxArray> paged_decode_attention_dense_compat(
-    const MlxArray& q,
-    rust::Slice<const MlxArray* const> cache_keys,
-    rust::Slice<const MlxArray* const> cache_values,
-    rust::Slice<const int32_t> kv_lens,
-    rust::Slice<const int32_t> block_tables,
-    rust::Slice<const int32_t> block_table_offsets,
-    int32_t block_size,
-    float scale
-) {
-    if (block_size <= 0) {
-        throw std::invalid_argument("paged_decode_attention_dense_compat: block_size must be > 0");
-    }
-
-    const auto q_shape = q.inner.shape();
-    if (q_shape.size() != 4 || q_shape[2] != 1) {
-        throw std::invalid_argument("paged_decode_attention_dense_compat: expected q shape [B, H, 1, D]");
-    }
-
-    const size_t batch = static_cast<size_t>(q_shape[0]);
-    if (cache_keys.size() != batch || cache_values.size() != batch || kv_lens.size() != batch) {
-        throw std::invalid_argument("paged_decode_attention_dense_compat: batch metadata length mismatch");
-    }
-    if (block_table_offsets.size() != batch + 1) {
-        throw std::invalid_argument("paged_decode_attention_dense_compat: block_table_offsets must have length B + 1");
-    }
-
-    std::vector<array> outputs;
-    outputs.reserve(batch);
-
-    for (size_t batch_idx = 0; batch_idx < batch; ++batch_idx) {
-        const MlxArray* key_cache = cache_keys[batch_idx];
-        const MlxArray* value_cache = cache_values[batch_idx];
-        if (key_cache == nullptr || value_cache == nullptr) {
-            throw std::invalid_argument("paged_decode_attention_dense_compat: null cache pointer");
-        }
-
-        const int32_t kv_len = kv_lens[batch_idx];
-        if (kv_len <= 0) {
-            throw std::invalid_argument("paged_decode_attention_dense_compat: kv_len must be > 0");
-        }
-
-        const int32_t table_begin = block_table_offsets[batch_idx];
-        const int32_t table_end = block_table_offsets[batch_idx + 1];
-        if (table_begin < 0 || table_end < table_begin ||
-            static_cast<size_t>(table_end) > block_tables.size()) {
-            throw std::invalid_argument("paged_decode_attention_dense_compat: invalid block table offsets");
-        }
-
-        std::vector<array> key_blocks;
-        std::vector<array> value_blocks;
-        key_blocks.reserve(table_end - table_begin);
-        value_blocks.reserve(table_end - table_begin);
-
-        for (int32_t table_idx = table_begin; table_idx < table_end; ++table_idx) {
-            const int32_t logical_block = block_tables[table_idx];
-            if (logical_block < 0) {
-                throw std::invalid_argument("paged_decode_attention_dense_compat: block indices must be non-negative");
-            }
-
-            const int32_t block_start = logical_block * block_size;
-            if (block_start >= kv_len) {
-                continue;
-            }
-            const int32_t block_end = std::min(block_start + block_size, kv_len);
-
-            key_blocks.push_back(mlx::core::slice(
-                key_cache->inner,
-                {0, 0, block_start, 0},
-                {1, static_cast<int>(key_cache->inner.shape(1)), block_end,
-                 static_cast<int>(key_cache->inner.shape(3))}
-            ));
-            value_blocks.push_back(mlx::core::slice(
-                value_cache->inner,
-                {0, 0, block_start, 0},
-                {1, static_cast<int>(value_cache->inner.shape(1)), block_end,
-                 static_cast<int>(value_cache->inner.shape(3))}
-            ));
-        }
-
-        if (key_blocks.empty() || value_blocks.empty()) {
-            throw std::invalid_argument("paged_decode_attention_dense_compat: empty visible block list");
-        }
-
-        array key_visible =
-            key_blocks.size() == 1 ? key_blocks.front() : mlx::core::concatenate(key_blocks, 2);
-        array value_visible = value_blocks.size() == 1
-            ? value_blocks.front()
-            : mlx::core::concatenate(value_blocks, 2);
-
-        auto q_i = mlx::core::slice(
-            q.inner,
-            {static_cast<int>(batch_idx), 0, 0, 0},
-            {static_cast<int>(batch_idx + 1), static_cast<int>(q_shape[1]), 1,
-             static_cast<int>(q_shape[3])}
-        );
-        auto attn_i = mlx::core::fast::scaled_dot_product_attention(
-            q_i, key_visible, value_visible, scale, "", std::nullopt
-        );
-        outputs.push_back(std::move(attn_i));
-    }
-
-    if (outputs.empty()) {
-        throw std::invalid_argument("paged_decode_attention_dense_compat: empty batch");
-    }
-    if (outputs.size() == 1) {
-        return std::make_unique<MlxArray>(std::move(outputs.front()));
-    }
-    return std::make_unique<MlxArray>(mlx::core::concatenate(outputs, 0));
-}
-
-std::unique_ptr<MlxArray> paged_decode_attention_rotating_compat(
-    const MlxArray& q,
-    rust::Slice<const MlxArray* const> cache_keys,
-    rust::Slice<const MlxArray* const> cache_values,
-    rust::Slice<const int32_t> kv_lens,
-    rust::Slice<const int32_t> logical_starts,
-    int32_t block_size,
-    float scale
-) {
-    if (block_size <= 0) {
-        throw std::invalid_argument("paged_decode_attention_rotating_compat: block_size must be > 0");
-    }
-
-    const auto q_shape = q.inner.shape();
-    if (q_shape.size() != 4 || q_shape[2] != 1) {
-        throw std::invalid_argument("paged_decode_attention_rotating_compat: expected q shape [B, H, 1, D]");
-    }
-
-    const size_t batch = static_cast<size_t>(q_shape[0]);
-    if (cache_keys.size() != batch || cache_values.size() != batch ||
-        kv_lens.size() != batch || logical_starts.size() != batch) {
-        throw std::invalid_argument("paged_decode_attention_rotating_compat: batch metadata length mismatch");
-    }
-
-    std::vector<array> outputs;
-    outputs.reserve(batch);
-
-    for (size_t batch_idx = 0; batch_idx < batch; ++batch_idx) {
-        const MlxArray* key_cache = cache_keys[batch_idx];
-        const MlxArray* value_cache = cache_values[batch_idx];
-        if (key_cache == nullptr || value_cache == nullptr) {
-            throw std::invalid_argument("paged_decode_attention_rotating_compat: null cache pointer");
-        }
-
-        const auto key_shape = key_cache->inner.shape();
-        const auto value_shape = value_cache->inner.shape();
-        if (key_shape.size() != 4 || value_shape.size() != 4) {
-            throw std::invalid_argument("paged_decode_attention_rotating_compat: cache tensors must have rank 4");
-        }
-
-        const int32_t kv_len = kv_lens[batch_idx];
-        const int32_t logical_start = logical_starts[batch_idx];
-        const int32_t buffer_len = static_cast<int32_t>(key_shape[2]);
-        if (kv_len <= 0) {
-            throw std::invalid_argument("paged_decode_attention_rotating_compat: kv_len must be > 0");
-        }
-        if (buffer_len <= 0) {
-            throw std::invalid_argument("paged_decode_attention_rotating_compat: buffer_len must be > 0");
-        }
-        if (logical_start < 0 || logical_start >= buffer_len) {
-            throw std::invalid_argument("paged_decode_attention_rotating_compat: logical_start out of range");
-        }
-
-        std::vector<array> key_blocks;
-        std::vector<array> value_blocks;
-        const int32_t block_count = (kv_len + block_size - 1) / block_size;
-        key_blocks.reserve(block_count);
-        value_blocks.reserve(block_count);
-
-        for (int32_t logical_block = 0; logical_block < block_count; ++logical_block) {
-            const int32_t logical_pos = logical_block * block_size;
-            const int32_t logical_end = std::min(logical_pos + block_size, kv_len);
-            const int32_t token_count = logical_end - logical_pos;
-            if (token_count <= 0) {
-                continue;
-            }
-
-            const int32_t physical_start = (logical_start + logical_pos) % buffer_len;
-            const int32_t physical_end = physical_start + token_count;
-            if (physical_end <= buffer_len) {
-                key_blocks.push_back(mlx::core::slice(
-                    key_cache->inner,
-                    {0, 0, physical_start, 0},
-                    {1, static_cast<int>(key_shape[1]), physical_end, static_cast<int>(key_shape[3])}
-                ));
-                value_blocks.push_back(mlx::core::slice(
-                    value_cache->inner,
-                    {0, 0, physical_start, 0},
-                    {1, static_cast<int>(value_shape[1]), physical_end, static_cast<int>(value_shape[3])}
-                ));
-            } else {
-                const int32_t tail_count = buffer_len - physical_start;
-                const int32_t head_count = token_count - tail_count;
-
-                auto key_tail = mlx::core::slice(
-                    key_cache->inner,
-                    {0, 0, physical_start, 0},
-                    {1, static_cast<int>(key_shape[1]), buffer_len, static_cast<int>(key_shape[3])}
-                );
-                auto key_head = mlx::core::slice(
-                    key_cache->inner,
-                    {0, 0, 0, 0},
-                    {1, static_cast<int>(key_shape[1]), head_count, static_cast<int>(key_shape[3])}
-                );
-                key_blocks.push_back(mlx::core::concatenate(std::vector<array>{key_tail, key_head}, 2));
-
-                auto value_tail = mlx::core::slice(
-                    value_cache->inner,
-                    {0, 0, physical_start, 0},
-                    {1, static_cast<int>(value_shape[1]), buffer_len, static_cast<int>(value_shape[3])}
-                );
-                auto value_head = mlx::core::slice(
-                    value_cache->inner,
-                    {0, 0, 0, 0},
-                    {1, static_cast<int>(value_shape[1]), head_count, static_cast<int>(value_shape[3])}
-                );
-                value_blocks.push_back(mlx::core::concatenate(std::vector<array>{value_tail, value_head}, 2));
-            }
-        }
-
-        if (key_blocks.empty() || value_blocks.empty()) {
-            throw std::invalid_argument("paged_decode_attention_rotating_compat: empty visible block list");
-        }
-
-        array key_visible =
-            key_blocks.size() == 1 ? key_blocks.front() : mlx::core::concatenate(key_blocks, 2);
-        array value_visible = value_blocks.size() == 1
-            ? value_blocks.front()
-            : mlx::core::concatenate(value_blocks, 2);
-
-        auto q_i = mlx::core::slice(
-            q.inner,
-            {static_cast<int>(batch_idx), 0, 0, 0},
-            {static_cast<int>(batch_idx + 1), static_cast<int>(q_shape[1]), 1,
-             static_cast<int>(q_shape[3])}
-        );
-        auto attn_i = mlx::core::fast::scaled_dot_product_attention(
-            q_i, key_visible, value_visible, scale, "", std::nullopt
-        );
-        outputs.push_back(std::move(attn_i));
-    }
-
-    if (outputs.empty()) {
-        throw std::invalid_argument("paged_decode_attention_rotating_compat: empty batch");
-    }
-    if (outputs.size() == 1) {
-        return std::make_unique<MlxArray>(std::move(outputs.front()));
-    }
-    return std::make_unique<MlxArray>(mlx::core::concatenate(outputs, 0));
-}
-
 namespace {
 bool sdpa_supports_fast_path_impl(
     const array& q,
@@ -5103,6 +4910,46 @@ rust::String astype_breakdown_pair(const MlxArray& a, const MlxArray& b) {
     return rust::String(os.str());
 }
 
+// Sorted flags of every GatherMM / GatherQMM node in the unevaluated graph
+// below `out` (issue #2241). Upstream `gather_qmm` / `gather_mm` build the
+// primitive with `right_sorted = sorted_indices && !lhs_indices`, and every
+// backend's sorted MoE prefill kernel keys on that flag, so a caller that
+// means to take the sorted path can check here that it did. Depth-first,
+// deduplicated by array id(), like `collect_astype_stats`; three bytes per
+// node: quantized (1 for GatherQMM, 0 for GatherMM), left_sorted,
+// right_sorted. Traversal only; an evaluated graph has no inputs left to
+// walk and reports nothing.
+rust::Vec<uint8_t> gather_sorted_flags_raw(const MlxArray& out) {
+    rust::Vec<uint8_t> flags;
+    std::unordered_set<std::uintptr_t> visited;
+    std::vector<array> stack = {out.inner};
+    while (!stack.empty()) {
+        array a = stack.back();
+        stack.pop_back();
+        if (!visited.insert(a.id()).second || !a.has_primitive()) {
+            continue;
+        }
+        if (auto* qmm = dynamic_cast<const GatherQMM*>(&a.primitive())) {
+            // state() is (group_size, bits, mode, transpose, left_sorted,
+            // right_sorted).
+            const auto st = qmm->state();
+            flags.push_back(1);
+            flags.push_back(std::get<4>(st) ? 1 : 0);
+            flags.push_back(std::get<5>(st) ? 1 : 0);
+        } else if (auto* mm = dynamic_cast<const GatherMM*>(&a.primitive())) {
+            // state() is (left_sorted, right_sorted).
+            const auto st = mm->state();
+            flags.push_back(0);
+            flags.push_back(st.first ? 1 : 0);
+            flags.push_back(st.second ? 1 : 0);
+        }
+        for (const auto& in : a.inputs()) {
+            stack.push_back(in);
+        }
+    }
+    return flags;
+}
+
 // Set default stream for subsequent operations
 void set_default_stream(const MlxStream& stream) {
     mlx::core::set_default_stream(stream.inner);
@@ -5148,6 +4995,39 @@ bool custom_kernels_available() {
 // target, so key presence alone says "AMD is CUDA" (issue #1805).
 int32_t gpu_backend_kind() {
     return static_cast<int32_t>(mlxcel::gpu_kernel_backend());
+}
+
+bool rocm_port_allowed(bool any_wave_size, int32_t warp_size) {
+    return mlxcel::rocm_port_allowed(any_wave_size, static_cast<int>(warp_size));
+}
+
+int32_t rocm_device_warp_size() {
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+    return static_cast<int32_t>(mlx::core::rocm::device_warp_size());
+#else
+    return 0;
+#endif
+}
+
+rust::Vec<uint64_t> rocm_dequant_cache_stats() {
+    rust::Vec<uint64_t> out;
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+    const auto s = mlx::core::rocm::dequant_cache_stats();
+    for (uint64_t v : {s.hits, s.misses, s.inserts, s.evictions, s.bypasses,
+                       static_cast<uint64_t>(s.entries),
+                       static_cast<uint64_t>(s.bytes)}) {
+        out.push_back(v);
+    }
+#else
+    for (int i = 0; i < 7; ++i) {
+        out.push_back(0);
+    }
+#endif
+    return out;
+}
+
+void set_rocm_port_warp_size_for_tests(int32_t warp_size) {
+    mlxcel::set_rocm_port_warp_size_for_tests(static_cast<int>(warp_size));
 }
 
 // Test-only fixture for lablup/mlxcel#1804; see the header. The kernels go
@@ -5200,11 +5080,109 @@ std::unique_ptr<MlxArray> rocm_fault_probe_array(int32_t kind) {
 #endif
 }
 
-// True when this backend has a BitLinear kernel port. Metal, CUDA and, since
-// issue #1862, ROCm. Kept apart from `custom_kernels_available` because kernels
-// are ported one at a time: ROCm has this one and not the rest.
-bool bitlinear_kernel_available() {
-    return mlxcel::gpu_kernel_backend() != mlxcel::GpuKernelBackend::None;
+// Test-only fixture for lablup/mlxcel#2149; see the header. One kernel name
+// and no template args for every call, so only the generated source (the
+// input's dtype, the output's dtype, and whether the input is 0-d) can tell
+// two calls apart.
+std::unique_ptr<MlxArray> rocm_jit_key_probe(
+    const MlxArray& input,
+    bool f16_output) {
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+    using namespace mlx::core;
+    const array& inp = input.inner;
+    const Dtype dtype = inp.dtype();
+    if (dtype != float32 && dtype != float16 && dtype != bfloat16) {
+        throw std::invalid_argument(
+            "rocm_jit_key_probe: input must be float32, float16 or bfloat16");
+    }
+    if (inp.ndim() > 1 || inp.size() < 1 || inp.size() > 1024) {
+        throw std::invalid_argument(
+            "rocm_jit_key_probe: input must be 0-d or 1-d with 1 to 1024 "
+            "elements");
+    }
+    // `build_kernel` declares `inp_shape` only for an input with ndim > 0.
+    // For a 0-d input, unqualified lookup of `inp_shape` falls through to
+    // this namespace-scope sentinel, so one source compiles either way.
+    const std::string header =
+        "namespace mlx::core::rocm {\n"
+        "__constant__ KernelShape inp_shape = {{-1, 0, 0, 0, 0, 0, 0, 0}};\n"
+        "} // namespace mlx::core::rocm\n";
+    const std::string source =
+        "  const int i = global_thread_index();\n"
+        "  out[1 + i] = static_cast<float>(inp[i]);\n"
+        "  if (i == 0) {\n"
+        "    out[0] = static_cast<float>(inp_shape[0]);\n"
+        "  }\n";
+    auto kernel = fast::hip_kernel(
+        "mlxcel_jit_key_probe", {"inp"}, {"out"}, source, header);
+    const int n = static_cast<int>(inp.size());
+    auto outputs = kernel(
+        {inp},
+        {{n + 1}},
+        {f16_output ? float16 : float32},
+        std::make_tuple(n, 1, 1),
+        std::make_tuple(n, 1, 1),
+        {},
+        std::nullopt,
+        false,
+        Device::gpu);
+    return std::make_unique<MlxArray>(std::move(outputs.at(0)));
+#else
+    (void)input;
+    (void)f16_output;
+    throw std::runtime_error(
+        "rocm_jit_key_probe is only available on the ROCm backend");
+#endif
+}
+
+// Test-only fixture for lablup/mlxcel#2183; see the header. Each `variant` is
+// its own kernel name, so its first launch in a process is a JIT cache miss
+// that compiles through hiprtc and inserts a new module, and every later
+// launch of it is a hit.
+std::unique_ptr<MlxArray> rocm_jit_race_probe_array(
+    const MlxArray& input,
+    int32_t variant) {
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+    using namespace mlx::core;
+    const array& inp = input.inner;
+    if (inp.dtype() != float32) {
+        throw std::invalid_argument(
+            "rocm_jit_race_probe_array: input must be float32");
+    }
+    if (inp.ndim() != 1 || inp.size() < 1 || inp.size() > 1024) {
+        throw std::invalid_argument(
+            "rocm_jit_race_probe_array: input must be 1-d with 1 to 1024 "
+            "elements");
+    }
+    if (variant < 0) {
+        throw std::invalid_argument(
+            "rocm_jit_race_probe_array: variant must be non-negative");
+    }
+    const std::string source =
+        "  out[thread_index()] = inp[thread_index()] * 2.0f + 1.0f;\n";
+    auto kernel = fast::hip_kernel(
+        "mlxcel_jit_race_probe_v" + std::to_string(variant),
+        {"inp"},
+        {"out"},
+        source);
+    const int n = static_cast<int>(inp.size());
+    auto outputs = kernel(
+        {inp},
+        {{n}},
+        {float32},
+        std::make_tuple(n, 1, 1),
+        std::make_tuple(n, 1, 1),
+        {},
+        std::nullopt,
+        false,
+        Device::gpu);
+    return std::make_unique<MlxArray>(std::move(outputs.at(0)));
+#else
+    (void)input;
+    (void)variant;
+    throw std::runtime_error(
+        "rocm_jit_race_probe_array is only available on the ROCm backend");
+#endif
 }
 
 // See the header. Only ROCm routes `quantized_matmul` to kernels whose bytes
@@ -5651,11 +5629,50 @@ static bool gumbel_sample_applies(
 
 // Vocabulary ceiling for routing top-k and top-p together.
 //
-// 32768 is measured (1.27x - 1.64x across three repetitions); 152064 is measured
-// as a loss (0.71x - 0.83x); 65536 has not been measured for this combination and
-// is therefore excluded rather than interpolated. Raise it only against a
-// measurement, never to widen coverage.
+// M1 Ultra (#901): 32768 is measured (1.27x - 1.64x across three repetitions);
+// 152064 is measured as a loss (0.71x - 0.83x); 65536 has not been measured for
+// this combination and is therefore excluded rather than interpolated.
+//
+// gfx1151 (#2157, docs/benchmark_results/rocm-rejection-joint-cap-gfx1151-2026-10-07.md):
+// re-measured with the cap lifted on a measurement build, so `fused_sample`
+// routed every cell. Medians of three runs, top-k 40 + top-p 0.9, pipe_x by
+// batch {1, 4, 8} (iso_x for batch 1 in brackets):
+//
+//   vocab  32768   1.00  1.17  1.44   [2.23]
+//   vocab  65536   0.98  1.18  1.64   [1.59]
+//   vocab 128256   0.98  1.28  1.80   [0.96]
+//   vocab 151936   0.90  1.36  1.90   [0.92]
+//   vocab 152064   0.93  1.29  2.02   [0.92]
+//
+// Batches 4 and 8 win at every vocabulary. Batch 1, the single-stream decode
+// shape, does not clear 1.0 above 32768 on these synthetic logits (bf16 logits
+// read the same: 0.98 at 128256, 0.86 at 152064), so by the microbenchmark
+// alone the cap would stay 32768. End-to-end decode says otherwise, and it is
+// the measurement the issue's rule defers to at 128256 and above: with
+// `--temperature 0.8 --top-k 40 --top-p 0.95`, a measurement build that routes
+// the joint case against `MLXCEL_SAMPLING_REJECTION=0` (medians of three
+// interleaved pairs, every pair clean under `scripts/rocm_gpu_guard.sh`):
+//
+//   Meta-Llama-3.1-8B-Instruct-4bit (128256)  37.57 vs 32.67 tok/s, 1.15x
+//   Qwen2.5-7B-Instruct-4bit        (152064)  46.92 vs 41.91 tok/s, 1.12x
+//
+// with every kernel run faster than every chain run. Why the synthetic batch-1
+// cell does not predict real decode on this GPU was not isolated. On ROCm the
+// cap is therefore 152064, the largest vocabulary measured both ways; larger
+// vocabularies (gpt-oss 201088, Gemma 262144) are unmeasured and stay on the
+// chain. A ROCm build has no Metal or CUDA backend, so the build flag is the
+// backend here, as for the SGY default in `mlx_cxx_kernels.cpp`; there is no
+// runtime backend comparison. Raise either value only against a measurement,
+// never to widen coverage.
+#ifdef MLXCEL_BRIDGE_ROCM_BACKEND
+constexpr int32_t REJECTION_JOINT_VOCAB_MAX = 152064;
+#else
 constexpr int32_t REJECTION_JOINT_VOCAB_MAX = 32768;
+#endif
+
+int32_t sampling_rejection_joint_vocab_max() {
+    return REJECTION_JOINT_VOCAB_MAX;
+}
 
 // Pure routing policy: would `fused_sample` send this configuration to the
 // rejection kernel, ignoring backend support and the env switch? Exposed so a
@@ -5690,8 +5707,12 @@ static std::string rejection_not_routed_reason(
               "measured slower: top-k alone 0.31x-0.97x, min-p alone "
               "0.47x-0.88x";
     } else {
-        os << "top-k and top-p together measured 0.71x-0.83x above vocab "
-           << REJECTION_JOINT_VOCAB_MAX << ", and this row has vocab " << vocab;
+        os << "top-k and top-p together route only up to vocab "
+           << REJECTION_JOINT_VOCAB_MAX
+           << " on this build, the largest vocabulary where the combination "
+              "measured a win (above it, M1 Ultra measured 0.71x-0.83x at "
+              "152064 and gfx1151 is unmeasured), and this row has vocab "
+           << vocab;
     }
     os << "; top_k " << top_k << ", top_p " << top_p << ", min_p " << min_p
        << ")";
@@ -5898,7 +5919,15 @@ static mlx::core::array fused_sample_filter_logits(
             mask, in, sampler_scalar(std::numeric_limits<float>::lowest()));
     };
 
-    const bool use_top_k = top_k > 0;
+    // Top-k at or above the vocabulary keeps every token, so it is inactive
+    // (issue #2247), the same rule `sampling_rejection_routes` and the
+    // rejection kernel apply and the one llama.cpp uses for `top_k >= n_vocab`.
+    // It is also a hard requirement here: `argpartition` throws when
+    // `kth >= shape(axis)`, and this chain runs under non-`Result` bridge
+    // functions, so the throw would reach cxx's noexcept boundary and abort the
+    // process on one request with a large `top_k`. `top_k == vocab` would be a
+    // valid partition, but it filters nothing, so it skips the work too.
+    const bool use_top_k = top_k > 0 && top_k < x.shape(-1);
     const bool use_top_p = top_p > 0.0f && top_p < 1.0f;
 
     if (rejection_semantics && use_top_k && use_top_p) {

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod added_tokens;
 pub mod fim;
 pub mod pieces;
 mod spm_proto;
@@ -409,6 +410,22 @@ impl MlxcelTokenizer {
         }
     }
 
+    /// Whether `id` names an entry of this vocabulary (#2127).
+    ///
+    /// This is a membership test, not a `< vocab_size()` comparison: the
+    /// HuggingFace `vocab_size()` counts entries rather than the largest id
+    /// plus one, and the other backends' id ranges can have holes, so an id
+    /// below the bound can still be unassigned and one above it can be an
+    /// added token. HuggingFace uses the same added-vocabulary-then-model
+    /// lookup `decode` performs, so added and special tokens count as valid.
+    pub fn contains_id(&self, id: u32) -> bool {
+        match self {
+            Self::HuggingFace(t) => t.id_to_token(id).is_some(),
+            Self::SentencePiece(t) => t.contains_id(id),
+            Self::Tiktoken(t) => t.contains_id(id),
+        }
+    }
+
     /// The number of ids this vocabulary can decode, i.e. the exclusive
     /// upper bound for iterating [`Self::token_piece_bytes`] (#1485).
     ///
@@ -665,6 +682,14 @@ impl MlxcelTokenizer {
 }
 
 impl SentencePieceTokenizer {
+    /// Whether `id` is a special token, an added token, or inside the
+    /// SentencePiece model's own id range (see `MlxcelTokenizer::contains_id`).
+    pub fn contains_id(&self, id: u32) -> bool {
+        self.id_to_special_token.contains_key(&id)
+            || self.added_token_contents.contains_key(&id)
+            || (id as usize) < self.processor.len()
+    }
+
     /// The exclusive id bound this wrapper can decode: the SentencePiece
     /// vocabulary size, extended past any added-token id living outside it
     /// (#1485; see `MlxcelTokenizer::vocab_size`).
@@ -1611,24 +1636,7 @@ fn read_added_tokens_sorted(model_path: &Path) -> Result<Vec<(u32, tokenizers::A
         .and_then(|v| v.as_object());
 
     if let Some(decoder) = decoder {
-        for (id, entry) in decoder {
-            let id: u32 = id
-                .parse()
-                .map_err(|e| anyhow::anyhow!("added_tokens_decoder key {:?}: {}", id, e))?;
-            let content = entry
-                .get("content")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("added_tokens_decoder[{id}] has no content"))?;
-            let flag = |name: &str, default: bool| {
-                entry.get(name).and_then(|v| v.as_bool()).unwrap_or(default)
-            };
-            let token = AddedToken::from(content.to_string(), flag("special", false))
-                .single_word(flag("single_word", false))
-                .lstrip(flag("lstrip", false))
-                .rstrip(flag("rstrip", false))
-                .normalized(flag("normalized", false));
-            out.push((id, token));
-        }
+        out = added_tokens::parse_added_tokens_decoder(decoder)?;
     } else if let Ok(raw) = std::fs::read_to_string(model_path.join("added_tokens.json")) {
         let map: HashMap<String, u32> = serde_json::from_str(&raw)
             .map_err(|e| anyhow::anyhow!("Failed to parse added_tokens.json: {}", e))?;
@@ -1891,6 +1899,9 @@ pub fn load_tokenizer(model_path: &Path) -> Result<MlxcelTokenizer> {
                 .map_err(|e| anyhow::anyhow!(e))?
         };
         clear_serialized_padding_and_truncation(&mut tokenizer);
+        // Added tokens declared only in tokenizer_config.json (Granite Vision's
+        // `<image>`, issue #1683) are registered the way transformers does.
+        added_tokens::reconcile_config_added_tokens(&mut tokenizer, model_path);
         ensure_bos_post_processor(&mut tokenizer, model_path);
         return Ok(MlxcelTokenizer::HuggingFace(tokenizer));
     }
@@ -1954,6 +1965,9 @@ pub fn load_tokenizer(model_path: &Path) -> Result<MlxcelTokenizer> {
         model_path
     ))
 }
+
+#[cfg(test)]
+mod contains_id_tests;
 
 #[cfg(test)]
 mod tests {

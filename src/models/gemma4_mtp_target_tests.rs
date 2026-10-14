@@ -72,7 +72,7 @@ fn gemma31b_adapter_rejects_branched_tree_before_forward() {
     };
     assert_eq!(
         error.reason,
-        "Gemma 4 31B exact verification requires a linear draft layout"
+        "Gemma 4 row-wise exact verification requires a linear draft layout"
     );
 }
 
@@ -1492,4 +1492,34 @@ fn mtp_prefill_chunks_match_classic_last_logits_and_capture_final_seed() {
         );
         assert!(!sinks.shared_kv_sink.unwrap().is_empty());
     }
+}
+
+/// #2160: the row-wise MTP prefill reproduces the classic scheduler's
+/// partition: the history-boundary segment as one forward, then chunks from
+/// the boundary, with no split when the boundary is outside the suffix.
+#[test]
+fn mtp_prefill_ranges_mirror_classic_history_boundary_split() {
+    assert_eq!(mtp_prefill_ranges(0, 40, 512, None), vec![0..40]);
+    assert_eq!(
+        mtp_prefill_ranges(0, 40, 512, Some(34)),
+        vec![0..34, 34..40]
+    );
+    // The segment is one forward even past the chunk size; the suffix chunks
+    // start at the boundary.
+    assert_eq!(
+        mtp_prefill_ranges(0, 1300, 512, Some(700)),
+        vec![0..700, 700..1212, 1212..1300]
+    );
+    // An adopted prefix already past the boundary, or a boundary covering the
+    // whole prompt, splits nothing.
+    assert_eq!(mtp_prefill_ranges(36, 40, 512, Some(34)), vec![36..40]);
+    assert_eq!(mtp_prefill_ranges(0, 40, 512, Some(40)), vec![0..40]);
+    assert_eq!(
+        mtp_prefill_ranges(10, 40, 0, Some(20)),
+        vec![10..20, 20..40]
+    );
+    assert_eq!(
+        mtp_prefill_ranges(0, 1100, 512, None),
+        vec![0..512, 512..1024, 1024..1100]
+    );
 }

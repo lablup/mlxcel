@@ -60,6 +60,9 @@ use cxx::UniquePtr;
 use crate::cache::{KVCache, KVCacheMode};
 use crate::ffi::MlxArray;
 use crate::mla::MlaGeometry;
+use crate::mla::absorb::MlaAbsorbedProjections;
+use crate::mla::decode::absorbed_decode;
+use crate::mla::{MlaSplitPlan, absorbed_decode_split_kv};
 
 /// Bytes one token of the compressed-latent cache costs, per layer.
 ///
@@ -252,6 +255,64 @@ impl<'a> MlaLatentCache<'a> {
         kpe: UniquePtr<MlxArray>,
     ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
         self.inner.update_and_fetch(ckv, kpe)
+    }
+
+    /// Append one step's latent and rope rows and run absorbed attention over
+    /// the live window: the MLA analogue of [`KVCache::attend`] (#2171).
+    ///
+    /// A latent cache keeps its own attention (`absorbed_decode`: the score is
+    /// split into the absorbed latent term and the rope term, and the kernel
+    /// sees the latent as both K and V), so it cannot share the dense
+    /// dispatch. It shares the entry: the caller hands over this step's rows
+    /// and the query halves, and never reads the cache back to choose a
+    /// kernel.
+    ///
+    /// `q_nope` is `[B, H, L, qk_nope_head_dim]` (not yet absorbed), `q_pe` is
+    /// `[B, H, L, qk_rope_head_dim]` (already rotated), `ckv` and `kpe` are
+    /// this step's `[B, 1, L, kv_lora_rank]` and `[B, 1, L, qk_rope_head_dim]`
+    /// rows, `mask` is the optional additive causal or padding mask. Returns
+    /// `[B, H, L, v_head_dim]`.
+    ///
+    /// A single-token unmasked step takes the Stage 2 split-KV decode when
+    /// [`crate::mla::split_kv_enabled`] is on and its plan accepts the shape,
+    /// and Stage 1 [`absorbed_decode`] otherwise, the same order the model
+    /// forward ran before this entry existed.
+    ///
+    /// Used by: `models::deepseek_v2::Attention::forward_absorbed` (decode
+    /// steps; prefill up-projects the window through the model's `kv_b_proj`
+    /// and stays in the model); `mla::decode_tests` pins it against the
+    /// decompressed reference.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn attend(
+        &mut self,
+        q_nope: &MlxArray,
+        q_pe: &MlxArray,
+        ckv: UniquePtr<MlxArray>,
+        kpe: UniquePtr<MlxArray>,
+        proj: &MlaAbsorbedProjections,
+        scale: f32,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let (ckv_all, kpe_all) = self.update_and_fetch(ckv, kpe);
+        let q_shape = crate::ffi::array_shape(q_nope);
+        if mask.is_none() && q_shape.len() == 4 && q_shape[2] == 1 && crate::mla::split_kv_enabled()
+        {
+            let plan = MlaSplitPlan::heuristic(
+                q_shape[0].max(0) as usize,
+                q_shape[1].max(0) as usize,
+                self.seq_len(),
+                crate::paged_v2::device_target_ctas(),
+            );
+            // A plan that declines falls through to Stage 1 rather than
+            // failing the step.
+            if let Ok(out) =
+                absorbed_decode_split_kv(q_nope, q_pe, &ckv_all, &kpe_all, proj, scale, &plan)
+            {
+                return out;
+            }
+        }
+        absorbed_decode(q_nope, q_pe, &ckv_all, &kpe_all, proj, scale, mask)
     }
 
     /// Bytes per token this cache costs, at the element size it stores.

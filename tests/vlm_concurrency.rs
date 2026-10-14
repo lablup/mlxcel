@@ -170,7 +170,7 @@ fn gemma3n_vlm_single_row_bench_prefill_accepts_m5_tile_padding() {
 /// KV-cache rebuild missing for some VLM paths — the warmup pass left stale KV
 /// state that caused a 4-D attention mask broadcast to abort on the subsequent
 /// measured pass. PR #34 fixed this by rebuilding generator-owned KV caches
-/// before each single-row run in `CxxGenerator::reset_with_model()`.
+/// before each bare single-row run through `reset_runtime_state()`.
 /// `qwen2_5_vl` has no model-owned fallback state, so the fix applied
 /// transitively.
 ///

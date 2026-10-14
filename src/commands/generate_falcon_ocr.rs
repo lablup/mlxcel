@@ -508,7 +508,7 @@ fn ocr_region(
         .map(|&token| token as i32)
         .collect();
 
-    let prepared = mlxcel::vlm_runtime::prepare_and_compute_vlm_embeddings_with_budget(
+    let prepared = mlxcel::vlm_runtime::prepare_vlm_embeddings_with_budget(
         model,
         &mut prompt_tokens,
         &prompt,

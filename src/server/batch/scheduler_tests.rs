@@ -72,13 +72,15 @@ fn make_test_sequence(id_val: u64) -> (SequenceInfo, mpsc::Receiver<GenerateEven
         prefill_offset: 0,
         prefill_start_offset: 0,
         already_cached_tokens: 0,
+        eos_terminated: false,
         response_tx: tx,
         cancelled: Arc::new(AtomicBool::new(false)),
         created_at: Instant::now(),
         prefill_start: None,
         first_token_time: None,
+        prompt_lookup: None,
         token_history: Vec::new(),
-        sampler_state: None,
+        sampler: Default::default(),
         merged_eos: Vec::new(),
         thinking: crate::server::thinking_budget::ThinkingState::disabled(),
         structured: None,
@@ -264,13 +266,15 @@ fn make_test_sequence_with_priority(
         prefill_offset: 0,
         prefill_start_offset: 0,
         already_cached_tokens: 0,
+        eos_terminated: false,
         response_tx: tx,
         cancelled: Arc::new(AtomicBool::new(false)),
         created_at: Instant::now(),
         prefill_start: None,
+        prompt_lookup: None,
         first_token_time: None,
         token_history: Vec::new(),
-        sampler_state: None,
+        sampler: Default::default(),
         merged_eos: Vec::new(),
         thinking: crate::server::thinking_budget::ThinkingState::disabled(),
         structured: None,
@@ -529,18 +533,32 @@ fn chunked_prefill_interleaving_pattern() {
 // instead feeds an empty `[end..end]` chunk on the next tick, producing a
 // zero-length `[1, 0, vocab]` forward that crashes in `slice_last_logits`.
 
-/// Thin wrapper around the production chunk range helper used by
-/// `start_chunked_prefill`.
-/// Returns `(chunk_len, is_terminal)` where `is_terminal` is true when chunk 0
-/// already covers the rest of the prompt and there is nothing to continue.
+/// The first piece of the plan `start_chunked_prefill` executes: its length,
+/// and whether it already covers the rest of the prompt and there is nothing
+/// to continue.
 fn first_chunk_is_terminal(
     prompt_len: usize,
     prefill_start_offset: usize,
     chunk_size: usize,
 ) -> (usize, bool) {
-    let range = super::next_chunked_prefill_range(prompt_len, prefill_start_offset, chunk_size)
+    let caps = mlxcel_core::prefill_plan::PrefillCaps {
+        supports_chunked_prefill: true,
+        supports_padded_prefill: false,
+        supports_maskless_padded_prefill: false,
+        align_prefill: false,
+        input: mlxcel_core::prefill_plan::PrefillInput::Tokens,
+    };
+    let plan = mlxcel_core::prefill_plan::PrefillPlan::with_prefix(
+        prompt_len,
+        prefill_start_offset,
+        None,
+        chunk_size,
+        caps,
+    );
+    let piece = plan
+        .piece_starting_at(prefill_start_offset)
         .expect("test scenarios must leave a non-empty suffix for chunk 0");
-    (range.end - range.start, range.is_terminal)
+    (piece.len(), plan.is_terminal(piece))
 }
 
 #[test]
@@ -575,23 +593,19 @@ fn chunked_prefill_first_chunk_not_terminal_on_cold_long_prompt() {
 }
 
 #[test]
-fn chunked_prefill_range_rejects_empty_continuation() {
-    let range = super::next_chunked_prefill_range(593, 593, 512);
-    assert!(
-        range.is_none(),
-        "offset == prompt length has no suffix; the scheduler must not feed a \
-         zero-token chunk to MLX"
-    );
-}
-
-#[test]
-fn chunked_prefill_range_rejects_zero_chunk_size() {
-    let range = super::next_chunked_prefill_range(593, 560, 0);
-    assert!(
-        range.is_none(),
-        "a zero chunk size cannot make progress and must not create an empty \
-         MLX input"
-    );
+fn chunked_prefill_plan_has_no_piece_for_an_empty_continuation() {
+    let caps = mlxcel_core::prefill_plan::PrefillCaps {
+        supports_chunked_prefill: true,
+        ..Default::default()
+    };
+    // offset == prompt length has no suffix; the scheduler must not feed a
+    // zero-token chunk to MLX.
+    let plan = mlxcel_core::prefill_plan::PrefillPlan::with_prefix(593, 593, None, 512, caps);
+    assert!(plan.pieces().is_empty());
+    assert!(plan.piece_starting_at(593).is_none());
+    // A zero chunk size is a single pass, never an empty MLX input.
+    let plan = mlxcel_core::prefill_plan::PrefillPlan::with_prefix(593, 560, None, 0, caps);
+    assert_eq!(plan.ranges(), vec![560..593]);
 }
 
 // -------------------------------------------------------------------
@@ -2183,32 +2197,22 @@ fn context_shift_trim_depth_matches_the_b10621_shift_arithmetic() {
 
 #[test]
 fn context_bound_stop_fires_only_with_shifting_disabled_and_a_bound() {
-    use super::BatchScheduler;
+    use crate::server::batch::finish::ContextBound;
 
-    let (mut seq, _rx) = make_test_sequence(90);
-    seq.prompt_tokens = vec![0; 60];
-    seq.generated_tokens = vec![1; 3];
-
+    let bound = |max_kv_size, context_shift| ContextBound {
+        max_kv_size,
+        context_shift,
+    };
     // 60 + 3 + 1 >= 64: the next token would not fit a 64-token bound.
-    assert!(BatchScheduler::context_bound_stop_due(
-        &seq,
-        Some(64),
-        false
-    ));
+    assert!(bound(Some(64), false).stop_due(60, 3, false));
     // One more token of headroom: not yet.
-    assert!(!BatchScheduler::context_bound_stop_due(
-        &seq,
-        Some(65),
-        false
-    ));
+    assert!(!bound(Some(65), false).stop_due(60, 3, false));
     // Shifting enabled: the trim handles it instead.
-    assert!(!BatchScheduler::context_bound_stop_due(
-        &seq,
-        Some(64),
-        true
-    ));
+    assert!(!bound(Some(64), true).stop_due(60, 3, false));
     // No bound configured: unbounded legacy behavior.
-    assert!(!BatchScheduler::context_bound_stop_due(&seq, None, false));
+    assert!(!bound(None, false).stop_due(60, 3, false));
+    // VLM sequences are exempt, as upstream exempts multimodal.
+    assert!(!bound(Some(64), false).stop_due(60, 3, true));
 }
 
 #[test]
@@ -2223,22 +2227,43 @@ fn a_context_bound_stop_is_reported_as_truncated_with_stop_type_limit() {
     assert_eq!(result.finish_reason, "length");
 }
 
-#[test]
-fn generation_deadline_finalizer_stops_single_sequence_decode_as_length() {
-    use super::BatchScheduler;
-
-    let (mut seq, _rx) = make_test_sequence(92);
+/// A decoding sequence on the byte-fallback stub tokenizer, so each byte id
+/// decodes to its own piece in the shared finish step (#2168).
+fn byte_decoding_sequence(
+    id_val: u64,
+) -> (
+    SequenceInfo,
+    mpsc::Receiver<GenerateEvent>,
+    crate::tokenizer::MlxcelTokenizer,
+) {
+    let tokenizer = crate::tokenizer::MlxcelTokenizer::stub_all_byte_fallback();
+    let (mut seq, rx) = make_test_sequence(id_val);
+    seq.decode_state = StreamingDecodeState::new(&tokenizer, &seq.prompt_tokens);
     seq.state = SequenceState::Decoding;
+    (seq, rx, tokenizer)
+}
+
+#[test]
+fn generation_deadline_stops_single_sequence_decode_as_length() {
+    use crate::server::batch::finish::{ContextBound, finish_decode_token};
+    use mlxcel_core::FinishCause;
+
+    let (mut seq, _rx, tokenizer) = byte_decoding_sequence(92);
     seq.bounds = GenerationBounds::new(0, Some(0));
+    let context = ContextBound::default();
 
     // The deadline starts with the first decoded piece and, like b10621, is
     // evaluated only when a later newline-bearing piece arrives.
-    seq.stream_decoded_text("prefix".to_owned(), Some(10), None);
+    assert_eq!(
+        finish_decode_token(&mut seq, &tokenizer, i32::from(b'p'), None, false, context),
+        None
+    );
     std::thread::sleep(Duration::from_millis(2));
-    seq.stream_decoded_text("\n".to_owned(), Some(11), None);
+    assert_eq!(
+        finish_decode_token(&mut seq, &tokenizer, i32::from(b'\n'), None, false, context),
+        Some(FinishCause::Length)
+    );
     assert!(seq.bound_stopped());
-
-    BatchScheduler::finish_on_generation_bound(&mut seq);
     assert!(matches!(
         seq.state,
         SequenceState::Finished(FinishReason::Length)
@@ -2246,20 +2271,31 @@ fn generation_deadline_finalizer_stops_single_sequence_decode_as_length() {
 }
 
 #[test]
-fn generation_bound_finalizer_preserves_a_prior_string_stop() {
-    use super::BatchScheduler;
+fn a_string_stop_outranks_a_fired_generation_bound() {
+    use crate::server::batch::finish::{ContextBound, finish_decode_token};
+    use mlxcel_core::FinishCause;
 
-    let (mut seq, _rx) = make_test_sequence(93);
-    seq.state = SequenceState::Decoding;
+    let (mut seq, _rx, tokenizer) = byte_decoding_sequence(93);
     seq.bounds = GenerationBounds::new(0, Some(0));
+    seq.stop_matcher = StopMatcher::new(["z".to_owned()]);
     seq.stream_decoded_text("prefix".to_owned(), Some(10), None);
     std::thread::sleep(Duration::from_millis(2));
     seq.stream_decoded_text("\n".to_owned(), Some(11), None);
-    seq.state
-        .transition_to(SequenceState::Finished(FinishReason::StopSequence))
-        .expect("string stop transition succeeds");
+    assert!(seq.bound_stopped());
 
-    BatchScheduler::finish_on_generation_bound(&mut seq);
+    // The finish step reads the stop string before the bound, as upstream
+    // evaluates stop strings first.
+    assert_eq!(
+        finish_decode_token(
+            &mut seq,
+            &tokenizer,
+            i32::from(b'z'),
+            None,
+            false,
+            ContextBound::default()
+        ),
+        Some(FinishCause::StopSequence)
+    );
     assert!(matches!(
         seq.state,
         SequenceState::Finished(FinishReason::StopSequence)

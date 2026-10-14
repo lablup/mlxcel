@@ -331,6 +331,8 @@ pub struct ServerGenerateOptions {
     /// `None` on every request that rendered through a chat template, which is
     /// every request that predates #1338.
     pub pre_rendered_prompt_tokens: Option<Vec<i32>>,
+    /// HTTP-only admission handshake, removed before dispatch to the scheduler.
+    pub admission_notification: Option<crate::server::model_provider::AdmissionNotification>,
 }
 
 /// Per-request context-retention overrides (b10621 `n_keep` / `n_discard`,
@@ -777,9 +779,8 @@ pub struct ServerConfig {
     ///
     /// `None` means the server should auto-detect the drafter kind from
     /// `draft_model_path` via
-    /// [`mlxcel_core::drafter::resolve_drafter_kind`], OR run the
-    /// classic [`crate::SpeculativeGenerator`] path when no drafter is
-    /// configured. Stored as a raw `Option<String>` because parsing
+    /// [`mlxcel_core::drafter::resolve_drafter_kind`], OR run plain decode
+    /// when no drafter is configured. Stored as a raw `Option<String>` because parsing
     /// only succeeds for `dflash` / `mtp` (the `internal-mtp` variant of
     /// [`mlxcel_core::drafter::DrafterKind`] is auto-detected, not
     /// user-selectable) and the parse error must surface at the
@@ -789,6 +790,10 @@ pub struct ServerConfig {
     /// "use the per-kind default" — `4` for MTP, `16` for DFlash. See
     /// [`crate::cli::speculative_args::default_block_size_for_kind`].
     pub draft_block_size: Option<u32>,
+    /// `--prompt-lookup-max-batch`: under `--draft-kind prompt-lookup`, a
+    /// sequence runs its own verify round only on ticks whose active decode
+    /// batch has at most this many rows (#2255).
+    pub prompt_lookup_max_batch: usize,
     /// Maximum number of sequences in the active decode batch.
     /// Defaults to `n_parallel` (4 as of #628); the worker clamps it to 1 for
     /// model families that cannot batch (`supports_batching() == false`).
@@ -831,9 +836,11 @@ pub struct ServerConfig {
     /// takes the loaded reranker kind's own default. See
     /// [`DEFAULT_RERANK_BATCH_SIZE`].
     pub rerank_batch_size: usize,
-    /// Number of tokens per prefill chunk. When 0, chunking is disabled and
-    /// the full prompt is prefilled in a single pass.
+    /// Number of tokens per prefill chunk when no other sequence is decoding.
+    /// When 0, chunking is disabled and the full prompt is one pass.
     pub prefill_chunk_size: usize,
+    /// Number of tokens per prefill chunk while another sequence is decoding.
+    pub prefill_chunk_size_contended: usize,
     /// #1011 prefill fairness interval (`--prefill-grant-interval`): decode
     /// ticks a parked chunked prefill yields before the scheduler grants it
     /// one, bounding the admitted request's time to first token. `None` lets
@@ -938,7 +945,7 @@ pub struct ServerConfig {
     /// Resolved from `--cache-type-k`/`--cache-type-v` (llama-server split
     /// flags) or the legacy `--kv-cache-mode` shorthand.  Defaults to
     /// `KVCacheMode::Fp16` (bit-exact baseline). The model worker uses this
-    /// when constructing per-sequence `CxxGenerator` instances so that every
+    /// when opening engine sequences so that every
     /// sequence in the batch sees the same KV quantization policy.
     pub kv_cache_mode: mlxcel_core::cache::KVCacheMode,
 
@@ -1083,6 +1090,9 @@ pub struct ServerConfig {
 
 impl Default for ServerConfig {
     fn default() -> Self {
+        let prefill_chunk_policy = mlxcel_core::prefill_plan::PrefillChunkPolicy::resolve(
+            mlxcel_core::prefill_plan::prefill_chunk_override(),
+        );
         Self {
             gcp: None,
             reasoning_format: crate::server::ReasoningFormat::default(),
@@ -1152,10 +1162,12 @@ impl Default for ServerConfig {
             draft_model_path: None,
             num_draft_tokens: 3,
             // default to "auto-detect from drafter config"
-            // when a drafter is supplied; the classic
-            // `SpeculativeGenerator` path runs when no drafter is set.
+            // when a drafter is supplied; plain decode runs when no
+            // drafter is set.
             draft_kind: None,
             draft_block_size: None,
+            prompt_lookup_max_batch:
+                crate::server::speculative_dispatch::DEFAULT_PROMPT_LOOKUP_MAX_BATCH,
             // Serving-throughput default: batched decode up to 4 sequences
             // (#628). Clamped to 1 by the worker for non-batching families.
             max_batch_size: 4,
@@ -1169,7 +1181,8 @@ impl Default for ServerConfig {
             embedding_request_timeout_secs: DEFAULT_EMBEDDING_REQUEST_TIMEOUT_SECS,
             reranker_model_path: None,
             rerank_batch_size: DEFAULT_RERANK_BATCH_SIZE,
-            prefill_chunk_size: 512,
+            prefill_chunk_size: prefill_chunk_policy.alone,
+            prefill_chunk_size_contended: prefill_chunk_policy.contended,
             // #1011: unset -> scheduler resolves the env override / default.
             prefill_grant_interval: None,
             enable_preemption: false,
@@ -1178,7 +1191,7 @@ impl Default for ServerConfig {
             // Serving-throughput default: batched prefill of up to 4 pending
             // requests (#628). No-ops for families without batched prefill.
             max_batch_prefill: 4,
-            // #715: unset -> scheduler derives `max_batch_prefill * prefill_chunk_size`.
+            // #715: unset -> scheduler derives `2 * max_batch_prefill * min(prefill_chunk_size, 512)`.
             max_batch_prefill_tokens: None,
             decode_storage_backend: DecodeStorageBackend::Auto,
             pipeline_parallel_runtime: None,

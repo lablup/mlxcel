@@ -1,0 +1,5 @@
+# Selective boundary-miss grace validation
+
+Source is checkpoint `22dba1dc` plus the archived selective-policy patch and temporary trace patch. Formatting changed the trace helper layout during the build; `2264-selective-trace.patch` records the exact instrumentation that was reversed afterward. The environment files also hash the original applied instrumentation. The tracked drafter diff was verified empty before the production rebuild.
+
+All 54 governor/drafter and 20 scheduler tests pass. The unchanged warmed copy workload retains 239 proposed / 214 accepted / 35 verify rounds. The eight chat questions produce exactly the predicted counters: 23/12/4, 16/8/3, 16/5/3, 55/27/10, 9/3/2, 22/9/4, 16/5/3, 16/6/3 (173/75/32 total). Compared with attempt 3, this removes 53 proposals, 8 accepted tokens, and 11 verify rounds. Question 3 retains one additional 7/0 round because its observed prefix is identical to profitable copy startup. These are state-transition diagnostics, not performance acceptance timings.

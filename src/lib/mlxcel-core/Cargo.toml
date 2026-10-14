@@ -15,7 +15,7 @@ metal = []
 accelerate = []
 cuda = []
 # AMD GPU (ROCm/HIP) backend through the ROCm overlay in
-# ../mlx-cpp/patches-rocm, Linux only (issue #1802).
+# ../mlxcelverse/overlays/rocm, Linux only (issue #1802).
 rocm = []
 
 [dependencies]
@@ -47,3 +47,11 @@ path = "examples/benchmark.rs"
 [[example]]
 name = "wht_microbench"
 path = "examples/wht_microbench.rs"
+
+# Per-call time and TFLOP/s of the fused ROCm SDPA prefill path at the
+# chunked-prefill shapes (issue #2251). Needs a ROCm host; builds only under
+# the rocm feature, which carries the overlay link recipe.
+[[example]]
+name = "sdpa_prefill_probe"
+path = "examples/sdpa_prefill_probe.rs"
+required-features = ["rocm"]

@@ -1,0 +1,27 @@
+
+running 1 test
+test greedy_parity_dflash_qwen35_4b ... [Qwen 3.5 4B + DFlash (b=16)] Loading target from "models/mlx/qwen3.5-4b-4bit"
+[Qwen 3.5 4B + DFlash (b=16)] Target loaded as Qwen 3.5 family (Qwen35Model / Qwen35VLModel)
+[Qwen 3.5 4B + DFlash (b=16)] Loading drafter from "models/mlx/qwen3.5-4b-dflash"
+[Qwen 3.5 4B + DFlash (b=16)] Drafter loaded successfully; block_size=16
+[Qwen 3.5 4B + DFlash (b=16)] Drafter bound to target; embed_tokens resolved via lazy-bind
+[Qwen 3.5 4B + DFlash (b=16)] baseline: spawning mlxcel-server with args ["--model", "models/mlx/qwen3.5-4b-4bit", "--host", "127.0.0.1", "--port", "39013", "--no-warmup", "--log-file", "/tmp/mlxcel-speculative-parity-scWg1x.log"]
+[Qwen 3.5 4B + DFlash (b=16)] baseline: server healthy, submitting fixed prompt
+[Qwen 3.5 4B + DFlash (b=16)] baseline: completion_tokens=96, content.len()=0
+[Qwen 3.5 4B + DFlash (b=16)] speculative b=2: spawning mlxcel-server with args ["--model", "models/mlx/qwen3.5-4b-4bit", "--host", "127.0.0.1", "--port", "43183", "--no-warmup", "--log-file", "/tmp/mlxcel-speculative-parity-PqFRam.log", "--model-draft", "models/mlx/qwen3.5-4b-dflash", "--draft-kind", "dflash", "--draft-block-size", "2"]
+[Qwen 3.5 4B + DFlash (b=16)] speculative b=2: server healthy, submitting fixed prompt
+[Qwen 3.5 4B + DFlash (b=16)] speculative b=2: completion_tokens=96, content.len()=0
+[Qwen 3.5 4B + DFlash (b=16)] speculative b=4: spawning mlxcel-server with args ["--model", "models/mlx/qwen3.5-4b-4bit", "--host", "127.0.0.1", "--port", "44903", "--no-warmup", "--log-file", "/tmp/mlxcel-speculative-parity-kn1zea.log", "--model-draft", "models/mlx/qwen3.5-4b-dflash", "--draft-kind", "dflash", "--draft-block-size", "4"]
+[Qwen 3.5 4B + DFlash (b=16)] speculative b=4: server healthy, submitting fixed prompt
+[Qwen 3.5 4B + DFlash (b=16)] speculative b=4: completion_tokens=96, content.len()=0
+[Qwen 3.5 4B + DFlash (b=16)] speculative b=8: spawning mlxcel-server with args ["--model", "models/mlx/qwen3.5-4b-4bit", "--host", "127.0.0.1", "--port", "36009", "--no-warmup", "--log-file", "/tmp/mlxcel-speculative-parity-sdqPMV.log", "--model-draft", "models/mlx/qwen3.5-4b-dflash", "--draft-kind", "dflash", "--draft-block-size", "8"]
+[Qwen 3.5 4B + DFlash (b=16)] speculative b=8: server healthy, submitting fixed prompt
+[Qwen 3.5 4B + DFlash (b=16)] speculative b=8: completion_tokens=96, content.len()=0
+[Qwen 3.5 4B + DFlash (b=16)] speculative b=16: spawning mlxcel-server with args ["--model", "models/mlx/qwen3.5-4b-4bit", "--host", "127.0.0.1", "--port", "34871", "--no-warmup", "--log-file", "/tmp/mlxcel-speculative-parity-VBhhfN.log", "--model-draft", "models/mlx/qwen3.5-4b-dflash", "--draft-kind", "dflash", "--draft-block-size", "16"]
+[Qwen 3.5 4B + DFlash (b=16)] speculative b=16: server healthy, submitting fixed prompt
+[Qwen 3.5 4B + DFlash (b=16)] speculative b=16: completion_tokens=96, content.len()=0
+[Qwen 3.5 4B + DFlash (b=16)] widths that ran the burst: [2, 4]; widths the gate declined: [8, 16]
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 39.41s
+

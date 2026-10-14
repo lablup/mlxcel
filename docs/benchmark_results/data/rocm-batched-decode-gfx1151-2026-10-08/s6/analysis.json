@@ -1,0 +1,752 @@
+[
+ {
+  "conc": 1,
+  "prompt_tokens": 1024,
+  "window_ms": 4324.757815,
+  "busy_ms": 3936.704361,
+  "gap_ms": 388.053454,
+  "busy_share": 0.910271633557358,
+  "dispatches": 66040,
+  "class_ms": {
+   "qmv": 3442.908323,
+   "gather_scatter": 343.936599,
+   "sdpa": 55.739619,
+   "rms_norm": 43.337458,
+   "rope": 15.317163,
+   "copy": 14.373076,
+   "compiled": 10.021512,
+   "binary": 9.467599,
+   "arg_reduce": 1.352936,
+   "dequantize": 0.250076
+  },
+  "class_n": {
+   "qmv": 20447,
+   "gather_scatter": 8509,
+   "rms_norm": 8255,
+   "rope": 8128,
+   "copy": 8128,
+   "sdpa": 4064,
+   "compiled": 4064,
+   "binary": 4064,
+   "arg_reduce": 254,
+   "dequantize": 127
+  },
+  "gap_ms_by_size": {
+   "1-5ms": 138.928524,
+   "<10us": 197.49546,
+   "10-50us": 37.063441,
+   "50-200us": 0.549117,
+   "0.2-1ms": 14.016912
+  },
+  "largest_gaps_ms": [
+   [
+    1659.7,
+    2.499
+   ],
+   [
+    0.0,
+    2.37
+   ],
+   [
+    718.41,
+    2.298
+   ],
+   [
+    749.19,
+    1.817
+   ],
+   [
+    530.32,
+    1.706
+   ],
+   [
+    779.02,
+    1.679
+   ],
+   [
+    30.78,
+    1.669
+   ],
+   [
+    60.41,
+    1.587
+   ],
+   [
+    1779.6,
+    1.409
+   ],
+   [
+    808.56,
+    1.404
+   ],
+   [
+    1839.63,
+    1.401
+   ],
+   [
+    1720.18,
+    1.4
+   ],
+   [
+    1809.57,
+    1.399
+   ],
+   [
+    867.28,
+    1.399
+   ],
+   [
+    1749.68,
+    1.399
+   ]
+  ],
+  "top_kernels": [
+   [
+    "qmv_wide_kernel<f16>",
+    20447
+   ],
+   [
+    "gather_rows_kernel<f16>",
+    8382
+   ],
+   [
+    "rope_single_freqs_1d<f16>",
+    8128
+   ],
+   [
+    "copy_gg_byval<f16>",
+    8128
+   ],
+   [
+    "rms_norm_kernel<f16>",
+    4191
+   ],
+   [
+    "kernel_sdpav_1pass<f16>",
+    4064
+   ],
+   [
+    "custom_kernel_mlxcel_fused_add_rms_norm_float16_t_float16_t_4096_256",
+    4064
+   ],
+   [
+    "compiled Cf2ISigmoidADf2IBroadcastACEf2IBroadcast...",
+    4064
+   ],
+   [
+    "binary_vv<Add, f16>",
+    4064
+   ],
+   [
+    "gather_rows_kernel<u32>",
+    127
+   ],
+   [
+    "affine_dequantize_packed_kernel<f16>",
+    127
+   ],
+   [
+    "arg_reduce_partial<ArgMax>",
+    127
+   ],
+   [
+    "arg_reduce_final<ArgMax>",
+    127
+   ]
+  ],
+  "delta": {
+   "decode_steps": 127.0,
+   "decode_tokens": 127.0,
+   "mixed_steps": 0.0,
+   "prefill_chunks": 0.0,
+   "predicted_s": 4.3260000000000005,
+   "predicted_tokens": 128.0
+  },
+  "decode_tok_s": [
+   29.36580623308511
+  ],
+  "min_tokens": 128,
+  "all_decoding_window": true
+ },
+ {
+  "conc": 4,
+  "prompt_tokens": 1024,
+  "window_ms": 7239.334055,
+  "busy_ms": 6392.89912,
+  "gap_ms": 846.434935,
+  "busy_share": 0.8830783427633938,
+  "dispatches": 171704,
+  "class_ms": {
+   "qmv": 5606.577109,
+   "sdpa": 515.624459,
+   "copy": 133.115168,
+   "rope": 59.848011,
+   "rms_norm": 46.381662,
+   "compiled": 14.914472,
+   "binary": 11.60362,
+   "arg_reduce": 2.614594,
+   "gather_scatter": 1.725298,
+   "dequantize": 0.494727
+  },
+  "class_n": {
+   "copy": 93472,
+   "rope": 32512,
+   "qmv": 20447,
+   "rms_norm": 8255,
+   "sdpa": 8128,
+   "compiled": 4064,
+   "binary": 4064,
+   "gather_scatter": 381,
+   "arg_reduce": 254,
+   "dequantize": 127
+  },
+  "gap_ms_by_size": {
+   "1-5ms": 313.480749,
+   "<10us": 416.729153,
+   "10-50us": 72.769338,
+   ">=5ms": 41.31698,
+   "50-200us": 1.689884,
+   "0.2-1ms": 0.448831
+  },
+  "largest_gaps_ms": [
+   [
+    4.05,
+    27.137
+   ],
+   [
+    31.41,
+    14.18
+   ],
+   [
+    0.0,
+    3.61
+   ],
+   [
+    100.04,
+    3.506
+   ],
+   [
+    5645.12,
+    3.332
+   ],
+   [
+    948.42,
+    3.188
+   ],
+   [
+    3659.88,
+    3.126
+   ],
+   [
+    6445.65,
+    3.076
+   ],
+   [
+    157.3,
+    2.943
+   ],
+   [
+    3490.46,
+    2.89
+   ],
+   [
+    3729.83,
+    2.886
+   ],
+   [
+    7125.39,
+    2.885
+   ],
+   [
+    5307.27,
+    2.847
+   ],
+   [
+    6899.65,
+    2.785
+   ],
+   [
+    5250.84,
+    2.706
+   ]
+  ],
+  "top_kernels": [
+   [
+    "copy_gg_byval<f16>",
+    81280
+   ],
+   [
+    "rope_single_freqs_1d<f16>",
+    32512
+   ],
+   [
+    "qmv_wide_kernel<f16>",
+    20447
+   ],
+   [
+    "rms_norm_kernel<f16>",
+    4191
+   ],
+   [
+    "copy_s<f32>",
+    4064
+   ],
+   [
+    "copy_v<f16>",
+    4064
+   ],
+   [
+    "custom_kernel_mlxcel_paged_attention_v2_partial_128_32_4_4_1_4_8_float_float16_t_float16_t",
+    4064
+   ],
+   [
+    "custom_kernel_mlxcel_paged_attention_merge_states_128_float_float",
+    4064
+   ],
+   [
+    "copy_v<f32>",
+    4064
+   ],
+   [
+    "custom_kernel_mlxcel_fused_add_rms_norm_float16_t_float16_t_4096_256",
+    4064
+   ],
+   [
+    "compiled Cf2ISigmoidADf2IBroadcastACEf2IBroadcast...",
+    4064
+   ],
+   [
+    "binary_vv<Add, f16>",
+    4064
+   ],
+   [
+    "gather_rows_kernel<f16>",
+    254
+   ],
+   [
+    "gather_rows_kernel<u32>",
+    127
+   ],
+   [
+    "affine_dequantize_packed_kernel<f16>",
+    127
+   ],
+   [
+    "arg_reduce_partial<ArgMax>",
+    127
+   ],
+   [
+    "arg_reduce_final<ArgMax>",
+    127
+   ]
+  ],
+  "delta": {
+   "decode_steps": 127.0,
+   "decode_tokens": 508.0,
+   "mixed_steps": 0.0,
+   "prefill_chunks": 0.0,
+   "predicted_s": 31.38799999999999,
+   "predicted_tokens": 512.0
+  },
+  "decode_tok_s": [
+   13.138076278126865,
+   17.540711279257533,
+   17.53808025918313,
+   17.543050097607352
+  ],
+  "min_tokens": 128,
+  "all_decoding_window": true
+ },
+ {
+  "conc": 1,
+  "prompt_tokens": 16384,
+  "window_ms": 4894.751058,
+  "busy_ms": 4418.931799,
+  "gap_ms": 475.819259,
+  "busy_share": 0.9027898960821881,
+  "dispatches": 74168,
+  "class_ms": {
+   "qmv": 2809.382881,
+   "sdpa": 1489.000115,
+   "rms_norm": 47.42595,
+   "copy": 31.99533,
+   "rope": 16.699671,
+   "compiled": 11.900237,
+   "binary": 9.984688,
+   "arg_reduce": 1.334415,
+   "gather_scatter": 0.955915,
+   "dequantize": 0.252597
+  },
+  "class_n": {
+   "qmv": 20447,
+   "copy": 20320,
+   "rms_norm": 8255,
+   "rope": 8128,
+   "sdpa": 8128,
+   "compiled": 4064,
+   "binary": 4064,
+   "gather_scatter": 381,
+   "arg_reduce": 254,
+   "dequantize": 127
+  },
+  "gap_ms_by_size": {
+   "1-5ms": 207.810895,
+   "<10us": 230.712964,
+   "10-50us": 36.272546,
+   "50-200us": 0.653222,
+   "0.2-1ms": 0.369632
+  },
+  "largest_gaps_ms": [
+   [
+    1434.65,
+    3.114
+   ],
+   [
+    194.78,
+    2.331
+   ],
+   [
+    0.0,
+    2.308
+   ],
+   [
+    1475.06,
+    2.169
+   ],
+   [
+    929.95,
+    2.138
+   ],
+   [
+    3895.93,
+    2.107
+   ],
+   [
+    3664.13,
+    2.055
+   ],
+   [
+    234.1,
+    2.032
+   ],
+   [
+    2667.46,
+    1.976
+   ],
+   [
+    39.28,
+    1.966
+   ],
+   [
+    1513.79,
+    1.952
+   ],
+   [
+    78.19,
+    1.952
+   ],
+   [
+    1553.15,
+    1.949
+   ],
+   [
+    116.67,
+    1.929
+   ],
+   [
+    1085.64,
+    1.911
+   ]
+  ],
+  "top_kernels": [
+   [
+    "qmv_wide_kernel<f16>",
+    20447
+   ],
+   [
+    "rope_single_freqs_1d<f16>",
+    8128
+   ],
+   [
+    "copy_gg_byval<f16>",
+    8128
+   ],
+   [
+    "rms_norm_kernel<f16>",
+    4191
+   ],
+   [
+    "copy_s<f32>",
+    4064
+   ],
+   [
+    "copy_v<f16>",
+    4064
+   ],
+   [
+    "custom_kernel_mlxcel_paged_attention_v2_partial_128_32_4_4_1_4_8_float_float16_t_float16_t",
+    4064
+   ],
+   [
+    "custom_kernel_mlxcel_paged_attention_merge_states_128_float_float",
+    4064
+   ],
+   [
+    "copy_v<f32>",
+    4064
+   ],
+   [
+    "custom_kernel_mlxcel_fused_add_rms_norm_float16_t_float16_t_4096_256",
+    4064
+   ],
+   [
+    "compiled Cf2ISigmoidADf2IBroadcastACEf2IBroadcast...",
+    4064
+   ],
+   [
+    "binary_vv<Add, f16>",
+    4064
+   ],
+   [
+    "gather_rows_kernel<f16>",
+    254
+   ],
+   [
+    "gather_rows_kernel<u32>",
+    127
+   ],
+   [
+    "affine_dequantize_packed_kernel<f16>",
+    127
+   ],
+   [
+    "arg_reduce_partial<ArgMax>",
+    127
+   ],
+   [
+    "arg_reduce_final<ArgMax>",
+    127
+   ]
+  ],
+  "delta": {
+   "decode_steps": 127.0,
+   "decode_tokens": 127.0,
+   "mixed_steps": 0.0,
+   "prefill_chunks": 7.0,
+   "predicted_s": 4.905000000000001,
+   "predicted_tokens": 128.0
+  },
+  "decode_tok_s": [
+   25.946161202712364
+  ],
+  "min_tokens": 128,
+  "all_decoding_window": true
+ },
+ {
+  "conc": 4,
+  "prompt_tokens": 16384,
+  "window_ms": 172395.926655,
+  "busy_ms": 169916.456582,
+  "gap_ms": 2479.470073,
+  "busy_share": 0.9856175831928911,
+  "dispatches": 362492,
+  "class_ms": {
+   "sdpa": 134941.551951,
+   "gemm": 19748.182211,
+   "qmv": 10164.181494,
+   "dequantize": 2503.620132,
+   "copy": 678.405658,
+   "rope": 521.272045,
+   "compiled": 521.081834,
+   "rms_norm": 438.221007,
+   "gather_scatter": 234.999849,
+   "binary": 160.376651,
+   "arg_reduce": 4.56375
+  },
+  "class_n": {
+   "copy": 167680,
+   "qmv": 66836,
+   "rope": 33856,
+   "rms_norm": 28340,
+   "sdpa": 27232,
+   "compiled": 13952,
+   "binary": 13952,
+   "dequantize": 3796,
+   "gemm": 3360,
+   "gather_scatter": 2652,
+   "arg_reduce": 836
+  },
+  "gap_ms_by_size": {
+   ">=5ms": 376.735768,
+   "<10us": 972.386185,
+   "10-50us": 286.167468,
+   "1-5ms": 834.35158,
+   "50-200us": 8.19946,
+   "0.2-1ms": 1.629612
+  },
+  "largest_gaps_ms": [
+   [
+    55530.66,
+    27.746
+   ],
+   [
+    111415.27,
+    27.42
+   ],
+   [
+    113326.36,
+    14.565
+   ],
+   [
+    124112.66,
+    14.468
+   ],
+   [
+    166872.16,
+    14.403
+   ],
+   [
+    0.0,
+    14.119
+   ],
+   [
+    30397.33,
+    12.491
+   ],
+   [
+    141997.98,
+    12.252
+   ],
+   [
+    6643.27,
+    12.062
+   ],
+   [
+    58539.43,
+    12.053
+   ],
+   [
+    19520.56,
+    12.014
+   ],
+   [
+    62864.85,
+    11.885
+   ],
+   [
+    75729.28,
+    11.846
+   ],
+   [
+    131408.89,
+    11.797
+   ],
+   [
+    99982.24,
+    11.681
+   ]
+  ],
+  "top_kernels": [
+   [
+    "copy_gg_byval<f16>",
+    127168
+   ],
+   [
+    "qmv_wide_kernel<f16>",
+    66836
+   ],
+   [
+    "rope_single_freqs_1d<f16>",
+    32512
+   ],
+   [
+    "rms_norm_kernel<f16>",
+    14388
+   ],
+   [
+    "custom_kernel_mlxcel_fused_add_rms_norm_float16_t_float16_t_4096_256",
+    13952
+   ],
+   [
+    "compiled Cf2ISigmoidADf2IBroadcastACEf2IBroadcast...",
+    13952
+   ],
+   [
+    "binary_vv<Add, f16>",
+    13952
+   ],
+   [
+    "copy_s<f32>",
+    13280
+   ],
+   [
+    "copy_v<f16>",
+    13280
+   ],
+   [
+    "custom_kernel_mlxcel_paged_attention_v2_partial_128_32_4_4_1_4_8_float_float16_t_float16_t",
+    13280
+   ],
+   [
+    "custom_kernel_mlxcel_paged_attention_merge_states_128_float_float",
+    13280
+   ],
+   [
+    "copy_v<f32>",
+    13280
+   ],
+   [
+    "affine_dequantize_packed_kernel<f16>",
+    3796
+   ],
+   [
+    "Cijk_* (Tensile GEMM)",
+    3360
+   ],
+   [
+    "gather_rows_kernel<f16>",
+    2216
+   ],
+   [
+    "rope_freqs<f16>",
+    1344
+   ],
+   [
+    "kernel_sdpa_flash_wmma<f16>",
+    672
+   ],
+   [
+    "copy_g_byval<f16>",
+    672
+   ],
+   [
+    "gather_rows_kernel<u32>",
+    436
+   ],
+   [
+    "arg_reduce_partial<ArgMax>",
+    418
+   ],
+   [
+    "arg_reduce_final<ArgMax>",
+    418
+   ]
+  ],
+  "delta": {
+   "decode_steps": 415.0,
+   "decode_tokens": 508.0,
+   "mixed_steps": 0.0,
+   "prefill_chunks": 28.0,
+   "predicted_s": 188.54899999999998,
+   "predicted_tokens": 512.0
+  },
+  "decode_tok_s": [
+   23.03214538615208,
+   2.021569826664563,
+   2.2189414422464693,
+   2.017692355553158
+  ],
+  "min_tokens": 128,
+  "all_decoding_window": false
+ }
+]

@@ -19,12 +19,14 @@
 //! `kv_b_proj` plane that carries `.scales` with no `.biases` (issue #1026).
 
 use super::{
-    KimiDeltaCache, KimiLinearCache, KimiLinearConfig, KimiLinearModel, LinearAttnConfig,
-    MultiLinear,
+    KimiDeltaCache, KimiLinearCache, KimiLinearConfig, KimiLinearModel, KimiMLAAttention,
+    LinearAttnConfig, MultiLinear, apply_mla_causal_mask,
 };
 use crate::models::model_owned::ModelOwnedSequenceState;
 use crate::models::switch_layers::{HOSTILE_QUANT_PARAMS, insert_stacked_quantized_expert_plane};
 use mlxcel_core::cache::SequenceId;
+use mlxcel_core::layers::KVCache;
+use mlxcel_core::utils::{array_to_vec_f32, create_causal_mask};
 use mlxcel_core::weights::WeightMap;
 
 /// Honest 4-bit geometry: `packed_in * 32 == bits * num_groups * group_size`
@@ -40,6 +42,91 @@ const GROUP_SIZE: i32 = 64;
 const BITS: i32 = 4;
 
 const PREFIX: &str = "model.layers.0.self_attn.embed_q";
+
+fn insert_zero_weight(weights: &mut WeightMap, prefix: &str, shape: &[i32]) {
+    weights.insert(
+        format!("{prefix}.weight"),
+        mlxcel_core::zeros(shape, mlxcel_core::dtype::FLOAT32),
+    );
+}
+
+fn zero_mla_attention() -> KimiMLAAttention {
+    let config = mla_config(2);
+    let heads = config.num_attention_heads as i32;
+    let hidden = config.hidden_size as i32;
+    let q_head = config.q_head_dim() as i32;
+    let nope = config.qk_nope() as i32;
+    let rope = config.qk_rope() as i32;
+    let value = config.v_head() as i32;
+    let rank = config.kv_lora_rank as i32;
+    let prefix = "model.layers.0.self_attn";
+    let mut weights = WeightMap::new();
+
+    insert_zero_weight(
+        &mut weights,
+        &format!("{prefix}.q_proj"),
+        &[heads * q_head, hidden],
+    );
+    insert_zero_weight(
+        &mut weights,
+        &format!("{prefix}.kv_a_proj_with_mqa"),
+        &[rank + rope, hidden],
+    );
+    weights.insert(
+        format!("{prefix}.kv_a_layernorm.weight"),
+        mlxcel_core::ones(&[rank], mlxcel_core::dtype::FLOAT32),
+    );
+    insert_zero_weight(
+        &mut weights,
+        &format!("{prefix}.embed_q"),
+        &[heads, rank, nope],
+    );
+    insert_zero_weight(
+        &mut weights,
+        &format!("{prefix}.unembed_out"),
+        &[heads, value, rank],
+    );
+    insert_zero_weight(
+        &mut weights,
+        &format!("{prefix}.o_proj"),
+        &[hidden, heads * value],
+    );
+
+    KimiMLAAttention::from_weights(&weights, &config, prefix)
+        .unwrap_or_else(|e| panic!("tiny MLA fixture must load: {e}"))
+}
+
+#[test]
+fn kimi_mla_applies_the_repository_causal_mask_as_additive_values() {
+    let scores = mlxcel_core::from_slice_f32(
+        &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+        &[1, 1, 3, 3],
+    );
+    let masked = apply_mla_causal_mask(&scores, &create_causal_mask(3, 0));
+    let values = array_to_vec_f32(&masked);
+
+    assert_eq!(values[0], 0.0);
+    assert!(values[1].is_infinite() && values[1].is_sign_negative());
+    assert!(values[2].is_infinite() && values[2].is_sign_negative());
+    assert_eq!(&values[3..5], &[3.0, 4.0]);
+    assert!(values[5].is_infinite() && values[5].is_sign_negative());
+    assert_eq!(&values[6..9], &[6.0, 7.0, 8.0]);
+}
+
+#[test]
+fn kimi_mla_multi_token_prefill_keeps_the_last_query_row_finite() {
+    let attention = zero_mla_attention();
+    let hidden = mlxcel_core::zeros(&[1, 3, 32], mlxcel_core::dtype::FLOAT32);
+    let mask = create_causal_mask(3, 0);
+    let output = attention.forward(&hidden, Some(&mask), &mut KVCache::new());
+    let values = array_to_vec_f32(&output);
+
+    assert_eq!(mlxcel_core::array_shape(&output), vec![1, 3, 32]);
+    assert!(
+        values.iter().all(|value| value.is_finite()),
+        "a visible-only final query row must not softmax an all-negative-infinity score row"
+    );
+}
 
 /// The pair this loader stores is handed straight to `quantized_matmul`, which
 /// crosses the cxx bridge as `UniquePtr<MlxArray>` rather than `Result`. A C++
@@ -372,6 +459,36 @@ fn mixed_kimi_caches() -> Vec<KimiLinearCache> {
         KimiLinearCache::Delta(KimiDeltaCache::new()),
         KimiLinearCache::MLA(mlxcel_core::layers::KVCache::new()),
     ]
+}
+
+/// KimiLinear resets its model-owned Delta and MLA state whenever a
+/// multi-token forward arrives without a sequence id, which keeps two
+/// unrelated cache-less forwards isolated. A no-ID caller must therefore not
+/// split one prompt across multiple forwards because each piece after the
+/// first would discard the recurrent state built by its predecessors.
+#[test]
+fn kimi_linear_loaded_model_opts_out_of_chunked_prefill() {
+    use mlxcel_core::generate::LanguageModel;
+
+    let mut config = mla_config(16);
+    config.num_hidden_layers = 0;
+
+    let mut weights = WeightMap::new();
+    weights.insert(
+        "model.embed_tokens.weight".to_string(),
+        mlxcel_core::zeros(&[32, 32], mlxcel_core::dtype::FLOAT32),
+    );
+    weights.insert(
+        "model.norm.weight".to_string(),
+        mlxcel_core::zeros(&[32], mlxcel_core::dtype::FLOAT32),
+    );
+
+    let model = KimiLinearModel::from_weights(&weights, &config).expect("tiny model loads");
+    let language_model: &dyn LanguageModel = &model;
+    assert!(
+        !language_model.supports_chunked_prefill(),
+        "a no-ID chunked prefill would discard the recurrent state built by every chunk but the last"
+    );
 }
 
 #[test]

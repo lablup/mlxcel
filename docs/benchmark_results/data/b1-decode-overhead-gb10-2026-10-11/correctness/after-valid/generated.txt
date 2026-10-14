@@ -1,0 +1,2 @@
+
+Okay, the user wants the capital of France in one sentence. Let me think. France's capital is Paris, right? Yeah, Paris is the capital. I should just state that clearly. Wait, the user specified exactly one sentence. So I need to make sure it's just the capital name. No

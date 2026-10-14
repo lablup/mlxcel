@@ -1,0 +1,8 @@
+# model	models/mlx/granite-4.0-h-tiny-4bit
+# device	CPU
+# corpus	tests/fixtures/wikitext2_excerpt.txt	tokens	289403
+# chunks	2	chunk_tokens	1	topk	8	prefill	0
+# columns	chunk	pos	target	nll	top_ids	top_logits
+# start_token	0
+# contiguous	false
+0	0	43205	16.213432	198,720,2355,279,220,271,256,12	14.500000,12.937500,12.687500,12.437500,11.687500,11.687500,11.500000,11.250000

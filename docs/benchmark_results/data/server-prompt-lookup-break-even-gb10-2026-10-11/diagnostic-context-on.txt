@@ -1,0 +1,3 @@
+{"style": "long-copy", "conc": 1, "rep": 0, "wall_s": 3.742, "tokens": 256, "agg_tok_s": 68.41, "decode_tok_s": [75.65], "prompt_n": [4099], "draft_kind": null, "draft_n": 0, "draft_n_accepted": 0, "draft_rounds": 0}
+{"style": "long-copy", "conc": 1, "rep": 1, "wall_s": 2.378, "tokens": 256, "agg_tok_s": 107.64, "decode_tok_s": [125.62], "prompt_n": [4101], "draft_kind": null, "draft_n": 0, "draft_n_accepted": 0, "draft_rounds": 0}
+{"style": "long-copy", "conc": 1, "rep": 2, "wall_s": 2.38, "tokens": 256, "agg_tok_s": 107.54, "decode_tok_s": [125.49], "prompt_n": [4102], "draft_kind": null, "draft_n": 0, "draft_n_accepted": 0, "draft_rounds": 0}

@@ -27,7 +27,7 @@
 //! input and resolve to the identical commit. The reverse does not hold and
 //! is not asserted here. The shell parser is intentionally the stricter of
 //! the two (see the `mlx-pin` job in `.github/workflows/ci.yml` and the
-//! comment above `GIT_TAG` in `src/lib/mlx-cpp/CMakeLists.txt`): it requires
+//! comment above `GIT_TAG` in `src/lib/mlxcelverse/CMakeLists.txt`): it requires
 //! `GIT_TAG` to be the first token on its own line, after the line naming the
 //! MLX repository, with no closing parenthesis in between, while the Rust
 //! parser scans the whole declaration body regardless of line order. An input

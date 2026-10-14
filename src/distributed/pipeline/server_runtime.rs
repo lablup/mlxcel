@@ -17,7 +17,7 @@
 //! Used by: server model worker, batch scheduler
 
 use mlxcel_core::cache::{SequenceId, SequenceStateLayout};
-use mlxcel_core::generate::{DecodeBatchContext, LanguageModel};
+use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -124,6 +124,17 @@ impl LanguageModel for PipelineServerModel {
         true
     }
 
+    /// Opt out of NA tile-aligned padded prefill (issue #1755).
+    ///
+    /// Each sequence's K/V lives in the pipeline stages, behind the runtime,
+    /// and the runtime has no operation to rewind a sequence by a pad width.
+    /// The scheduler's own trim cannot reach it (this layout is model-owned),
+    /// so a padded prefill would leave every stage's offset ahead of the real
+    /// token count.
+    fn supports_padded_prefill(&self) -> bool {
+        false
+    }
+
     fn forward_with_sequence_id(
         &self,
         input_ids: &MlxArray,
@@ -152,13 +163,12 @@ impl LanguageModel for PipelineServerModel {
         self.forward_with_sequence_id(input_ids, seq_id, caches, mask)
     }
 
-    fn forward_batched_with_context_and_ids(
+    fn forward_batched_with_ids(
         &self,
         input_ids: &MlxArray,
         seq_ids: Option<&[SequenceId]>,
         _batch_caches: &mut [&mut [KVCache]],
         _mask: Option<&MlxArray>,
-        _context: Option<&DecodeBatchContext>,
     ) -> UniquePtr<MlxArray> {
         let seq_ids = seq_ids.expect("pipeline batched decode requires sequence ids");
         self.runtime
@@ -259,11 +269,10 @@ mod tests {
             None,
         );
         let mut cache_slices: Vec<&mut [KVCache]> = vec![&mut [], &mut []];
-        let _ = model.forward_batched_with_context_and_ids(
+        let _ = model.forward_batched_with_ids(
             input_ids.as_ref().unwrap(),
             Some(&[seq0, seq1]),
             &mut cache_slices,
-            None,
             None,
         );
 

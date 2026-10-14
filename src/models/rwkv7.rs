@@ -203,6 +203,7 @@ fn wkv7_step_ops(
     // y = state @ r[..., None]
     let r_expanded = mlxcel_core::expand_dims(r, -1);
     let y = mlxcel_core::matmul(&new_state, &r_expanded);
+    let y = mlxcel_core::squeeze_axis(&y, -1);
 
     (y, new_state)
 }
@@ -1065,6 +1066,17 @@ impl LanguageModel for Rwkv7 {
         false // Padding tokens corrupt RWKV recurrent state
     }
 
+    fn supports_chunked_prefill(&self) -> bool {
+        // A multi-token forward without a sequence ID deliberately starts an
+        // independent prompt by replacing the model-owned recurrent state.
+        // DirectEngine supplies a stable ID and does not hit that reset, but
+        // the capability must also be safe for legacy no-ID callers. Returning
+        // false makes every caller that honors the capability, DirectEngine
+        // included, keep the full prompt in one prefill call, trading
+        // chunk-bounded transient memory for correct no-ID semantics.
+        false
+    }
+
     fn supports_batching(&self) -> bool {
         false // RWKV7 uses internal RNN-like state, not compatible with per-sequence KV isolation
     }
@@ -1108,10 +1120,191 @@ fn make_rwkv7_cache(num_hidden_layers: usize) -> Vec<Rwkv7Cache> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Rwkv7Cache, make_rwkv7_cache};
+    use super::{Rwkv7, Rwkv7Cache, Rwkv7Config, make_rwkv7_cache};
     use crate::models::model_owned::ModelOwnedSequenceState;
     use mlxcel_core::cache::SequenceId;
-    use mlxcel_core::{dtype, generate::ModelStateSnapshot};
+    use mlxcel_core::generate::{LanguageModel, ModelStateSnapshot};
+    use mlxcel_core::weights::WeightMap;
+    use mlxcel_core::{MlxArray, UniquePtr, dtype};
+
+    fn rwkv7_test_config() -> Rwkv7Config {
+        serde_json::from_value(serde_json::json!({
+            "model_type": "rwkv7",
+            "vocab_size": 32,
+            "hidden_size": 8,
+            "intermediate_size": 16,
+            "head_dim": 4,
+            "num_hidden_layers": 1,
+            "a_low_rank_dim": 2,
+            "v_low_rank_dim": 2,
+            "gate_low_rank_dim": 2,
+            "decay_low_rank_dim": 2,
+            "tie_word_embeddings": true
+        }))
+        .expect("RWKV7 test config must parse")
+    }
+
+    fn varied(shape: &[i32], seed: usize) -> UniquePtr<MlxArray> {
+        let len: usize = shape.iter().map(|dim| *dim as usize).product();
+        let values: Vec<f32> = (0..len)
+            .map(|index| {
+                let magnitude = ((index + seed) % 17 + 1) as f32 * 0.005;
+                if (index + seed).is_multiple_of(2) {
+                    magnitude
+                } else {
+                    -magnitude
+                }
+            })
+            .collect();
+        mlxcel_core::from_slice_f32(&values, shape)
+    }
+
+    fn ones(shape: &[i32]) -> UniquePtr<MlxArray> {
+        mlxcel_core::full_f32(shape, 1.0, dtype::FLOAT32)
+    }
+
+    fn rwkv7_test_weights() -> WeightMap {
+        let mut weights = WeightMap::new();
+        let mut seed = 1usize;
+        let mut put_varied = |weights: &mut WeightMap, name: String, shape: &[i32]| {
+            weights.insert(name, varied(shape, seed));
+            seed += 1;
+        };
+
+        put_varied(&mut weights, "model.embeddings.weight".into(), &[32, 8]);
+        weights.insert("model.layers.0.pre_norm.weight".into(), ones(&[8]));
+
+        let attn = "model.layers.0.attn";
+        for name in ["x_r", "x_w", "x_k", "x_v", "x_a", "x_g"] {
+            put_varied(&mut weights, format!("{attn}.{name}"), &[8]);
+        }
+        for name in ["k_k", "k_a", "r_k"] {
+            put_varied(&mut weights, format!("{attn}.{name}"), &[8]);
+        }
+        for name in ["r_proj", "k_proj", "v_proj", "o_proj"] {
+            put_varied(&mut weights, format!("{attn}.{name}.weight"), &[8, 8]);
+        }
+        put_varied(&mut weights, format!("{attn}.g_norm.weight"), &[8]);
+        put_varied(&mut weights, format!("{attn}.g_norm.bias"), &[8]);
+        for name in ["w_lora", "a_lora", "g_lora"] {
+            put_varied(
+                &mut weights,
+                format!("{attn}.{name}.lora.0.weight"),
+                &[2, 8],
+            );
+            put_varied(
+                &mut weights,
+                format!("{attn}.{name}.lora.2.weight"),
+                &[8, 2],
+            );
+        }
+
+        let ffn = "model.layers.0.ffn";
+        put_varied(&mut weights, format!("{ffn}.key.weight"), &[16, 8]);
+        put_varied(&mut weights, format!("{ffn}.value.weight"), &[8, 16]);
+        put_varied(&mut weights, format!("{ffn}.x_k"), &[8]);
+        weights.insert("model.layers.0.attn_norm.weight".into(), ones(&[8]));
+        weights.insert("model.layers.0.ffn_norm.weight".into(), ones(&[8]));
+        weights.insert("model.norm.weight".into(), ones(&[8]));
+        weights
+    }
+
+    fn build_rwkv7_test_model(weights: &WeightMap, config: &Rwkv7Config) -> Rwkv7 {
+        Rwkv7::from_weights(weights, config.clone()).expect("RWKV7 test model must load")
+    }
+
+    fn to_vec_f32(array: &MlxArray) -> Vec<f32> {
+        let array = mlxcel_core::astype(array, dtype::FLOAT32);
+        mlxcel_core::array_evaluated_bytes(&array)
+            .expect("RWKV7 test logits must evaluate")
+            .chunks_exact(4)
+            .map(|chunk| f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect()
+    }
+
+    fn assert_logits_close(got: &[f32], want: &[f32], context: &str) {
+        assert_eq!(got.len(), want.len(), "{context}: logit count differs");
+        for (index, (&got, &want)) in got.iter().zip(want).enumerate() {
+            assert!(
+                got.is_finite() && want.is_finite(),
+                "{context}: logit[{index}] is not finite: got={got}, want={want}"
+            );
+            let abs = (got - want).abs();
+            let rel = abs / want.abs().max(1.0);
+            assert!(
+                abs < 1e-3 || rel < 1e-3,
+                "{context}: logit[{index}] differs: got={got}, want={want}, abs={abs}, rel={rel}"
+            );
+        }
+    }
+
+    #[test]
+    fn rwkv7_loaded_model_chunking_contract_is_safe() {
+        let config = rwkv7_test_config();
+        let weights = rwkv7_test_weights();
+
+        let contaminated = build_rwkv7_test_model(&weights, &config);
+        let policy: &dyn LanguageModel = &contaminated;
+        assert!(!policy.supports_chunked_prefill());
+
+        let mut contaminated_caches = contaminated.make_caches();
+        let contaminant = mlxcel_core::from_slice_i32(&[1], &[1, 1]);
+        let contaminant_logits = contaminated.forward(&contaminant, &mut contaminated_caches, None);
+        mlxcel_core::eval(&contaminant_logits);
+
+        let target = mlxcel_core::from_slice_i32(&[7, 11, 13], &[1, 3]);
+        let reset_logits = contaminated.forward(&target, &mut contaminated_caches, None);
+
+        let fresh = build_rwkv7_test_model(&weights, &config);
+        let mut fresh_caches = fresh.make_caches();
+        let fresh_logits = fresh.forward(&target, &mut fresh_caches, None);
+        assert_logits_close(
+            &to_vec_f32(&reset_logits),
+            &to_vec_f32(&fresh_logits),
+            "a new no-ID prompt after stale state",
+        );
+
+        let continued = build_rwkv7_test_model(&weights, &config);
+        let mut continued_caches = continued.make_caches();
+        let continued_id = SequenceId::from_raw(2_286_001);
+        continued.prepare_sequence_state(continued_id);
+        let prefix = mlxcel_core::from_slice_i32(&[2, 3], &[1, 2]);
+        let prefix_logits = continued.forward_with_sequence_id(
+            &prefix,
+            Some(continued_id),
+            &mut continued_caches,
+            None,
+        );
+        mlxcel_core::eval(&prefix_logits);
+        let suffix = mlxcel_core::from_slice_i32(&[5, 8, 12], &[1, 3]);
+        let continued_logits = continued.forward_with_sequence_id(
+            &suffix,
+            Some(continued_id),
+            &mut continued_caches,
+            None,
+        );
+
+        let one_pass = build_rwkv7_test_model(&weights, &config);
+        let mut one_pass_caches = one_pass.make_caches();
+        let one_pass_id = SequenceId::from_raw(2_286_002);
+        one_pass.prepare_sequence_state(one_pass_id);
+        let full_prompt = mlxcel_core::from_slice_i32(&[2, 3, 5, 8, 12], &[1, 5]);
+        let one_pass_logits = one_pass.forward_with_sequence_id(
+            &full_prompt,
+            Some(one_pass_id),
+            &mut one_pass_caches,
+            None,
+        );
+        let continued_values = to_vec_f32(&continued_logits);
+        let one_pass_values = to_vec_f32(&one_pass_logits);
+        let suffix_len = continued_values.len();
+        assert!(one_pass_values.len() > suffix_len);
+        assert_logits_close(
+            &continued_values,
+            &one_pass_values[one_pass_values.len() - suffix_len..],
+            "stable sequence-ID continuation",
+        );
+    }
 
     #[test]
     fn rwkv7_cache_snapshot_restore_round_trips_state_shapes() {

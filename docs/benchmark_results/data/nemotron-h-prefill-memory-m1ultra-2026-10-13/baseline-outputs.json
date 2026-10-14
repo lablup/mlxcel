@@ -1,0 +1,67 @@
+{
+  "arm": "baseline",
+  "binary": "/tmp/mlxcel-chain-2281-artifacts/mlxcel-server.baseline",
+  "load_before": [
+    8.7099609375,
+    5.65087890625,
+    5.400390625
+  ],
+  "responses": [
+    {
+      "index": 0,
+      "status": 200,
+      "prompt_tokens": 37,
+      "completion_tokens": 81,
+      "choice": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "A solar eclipse happens when the Moon passes directly between the Earth and the Sun, casting its shadow onto the Earth’s surface. Because the Moon’s shadow is relatively small, only a narrow path experiences the total eclipse, while most locations see only a partial or no eclipse. The geometry of the Sun, Moon, and Earth must align just right, so the eclipse is visible only from specific regions on Earth."
+        },
+        "finish_reason": "stop",
+        "logprobs": null
+      }
+    },
+    {
+      "index": 1,
+      "status": 200,
+      "prompt_tokens": 65,
+      "completion_tokens": 128,
+      "choice": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "**Step‑by‑step arithmetic**\n\n1. **Start:** 240 crates  \n\n2. **Monday – ship one quarter**  \n   \\[\n   \\text{Shipped} = \\frac{1}{4}\\times 240 = 60\n   \\]\n   \\[\n   \\text{Remaining after Monday} = 240 - 60 = 180\n   \\]\n\n3. **Tuesday – receive 36 crates**  \n   \\[\n   \\text{After receiving} = 180 + 36 = 216"
+        },
+        "finish_reason": "length",
+        "logprobs": null
+      }
+    },
+    {
+      "index": 2,
+      "status": 200,
+      "prompt_tokens": 2810,
+      "completion_tokens": 17,
+      "choice": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "The blue archive contains cedar records, and the red archive contains maple records."
+        },
+        "finish_reason": "stop",
+        "logprobs": null
+      }
+    }
+  ],
+  "health": [
+    200,
+    {
+      "status": "ok"
+    }
+  ],
+  "load_after": [
+    7.4384765625,
+    5.51953125,
+    5.35791015625
+  ]
+}

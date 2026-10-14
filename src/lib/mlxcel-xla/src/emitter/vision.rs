@@ -350,7 +350,7 @@ mod tests {
         let vmfb = crate::iree::compile_one(
             &compiler,
             &mlir,
-            crate::iree::target_flags("local-task").unwrap(),
+            &crate::iree::target_flags("local-task").unwrap(),
             &cache,
             "pinned-llava-vision",
             0,

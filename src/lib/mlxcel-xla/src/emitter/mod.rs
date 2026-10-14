@@ -141,7 +141,8 @@ pub(crate) use config::{MoeConfig, SharedExpertConfig};
 // superseded uniform-B Stage-1 graph) is re-exported for the validation harness.
 #[allow(unused_imports)]
 pub(crate) use builder::{
-    Precision, check_packed_supported, quant_in_graph, resolve_precision, resolve_precision_checked,
+    Precision, check_packed_supported, quant_in_graph, resolve_precision,
+    resolve_precision_checked, target_flags_with_rocm_target,
 };
 #[allow(unused_imports)]
 pub(crate) use model::{

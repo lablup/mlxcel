@@ -19,6 +19,9 @@
 //! isolated modules.
 
 pub(crate) mod chat;
+mod chat_transcript;
+mod cli_server;
+mod cli_turn;
 pub(crate) mod detect;
 pub(crate) mod download;
 pub(crate) mod embed;

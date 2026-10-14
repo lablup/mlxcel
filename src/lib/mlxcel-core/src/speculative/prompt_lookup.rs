@@ -31,21 +31,13 @@
 //! Each round forwards `[current_token, d_0, ..., d_{k-1}]` through the target,
 //! keeps the longest prefix of the proposals the target agrees with, emits one
 //! more token from the target (the replacement at the first disagreement, or
-//! the bonus token after a fully accepted block), and trims the rejected tail
-//! off the KV caches. With no match the round is `k = 0`: a plain one-token
-//! decode step.
-//!
-//! ## Pipelining
-//!
-//! A round without a proposal is pipelined the way plain decoding is: its
-//! one-token forward is submitted from the previous round's still-lazy sample,
-//! before the host reads that sample, so the GPU goes straight from one step to
-//! the next. Waiting on each token before encoding the next step cost 12% of
-//! decode time on an M4 Pro. Pipelining starts only after a few rounds in a
-//! row found no proposal, because a pipelined step cannot carry one. When
-//! lookup finds a proposal while a step is in flight, the host reads the
-//! in-flight token and verifies from there synchronously; that switch costs no
-//! extra forward.
+//! the bonus token after a fully accepted block), and unwinds the rejected
+//! tail from the sequence's KV state. With no match the round is `k = 0`: a
+//! plain one-token decode step. Since #2176 the lookup is a [`crate::drafter::Drafter`]
+//! ([`super::prompt_lookup_drafter::PromptLookupDrafter`]) and the round loop
+//! is the engine's token-only speculative loop
+//! ([`crate::engine::DirectEngine::generate_with_drafter`]), so `mlxcel
+//! generate --prompt-lookup` decodes on the same engine as everything else.
 //!
 //! ## Adaptive drafting
 //!
@@ -72,8 +64,8 @@
 //!
 //! ## Greedy exactness
 //!
-//! The prompt is prefilled by the same routine plain decoding uses
-//! ([`crate::generate::prefill_prompt_last_logits`]), so the caches and the
+//! The prompt is prefilled by the same prefill plan plain decoding uses
+//! ([`crate::engine::DirectEngine`]), so the caches and the
 //! first token match plain decoding exactly, and a round without a proposal
 //! is the same one-token forward. A round with proposals runs a multi-token
 //! forward, whose kernels may round differently from the one-token path; where
@@ -91,27 +83,10 @@
 //! state that cannot be trimmed; callers must refuse them, see
 //! [`prompt_lookup_unsupported_reason`].
 
-use crate::cache::{KVCacheMode, SequenceStateBackend, can_trim_prompt_cache};
-use crate::drafter::dflash::materialize_argmax_i32_vec;
-use crate::ffi;
-use crate::ffi::MlxThreadLocalStream;
-use crate::generate::{
-    GenerationStats, LanguageModel, SamplingConfig, prefill_prompt_last_logits,
-    resolve_kv_cache_layer_modes,
-};
-use crate::generation_policy::{initial_token_history, merged_eos_token_ids, seed_rng_if_needed};
-use crate::layers::KVCache;
-use crate::loop_detection::detect_repetition_loop;
-use crate::sampling::{
-    SamplerState, TokenBiasMap, sample_token_optimized, sample_token_optimized_with_state,
-};
-use crate::streams::{install_thread_local_default_stream, shared_thread_local_generation_stream};
-use cxx::UniquePtr;
-use std::borrow::Cow;
 use std::collections::HashMap;
-use std::time::Instant;
 
-use super::trim_caches;
+use crate::cache::SequenceStateBackend;
+use crate::generate::LanguageModel;
 
 /// Default longest n-gram matched against the context.
 pub const DEFAULT_NGRAM_MAX: usize = 3;
@@ -136,7 +111,7 @@ pub const NGRAM_MAX_LIMIT: usize = 16;
 /// proposal is a forward position the target computes.
 pub const MAX_DRAFT_LIMIT: usize = 64;
 
-/// Tunables for [`PromptLookupGenerator`].
+/// Tunables for [`PromptLookupDrafter`](super::prompt_lookup_drafter::PromptLookupDrafter).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PromptLookupConfig {
     /// Longest suffix n-gram tried first.
@@ -151,6 +126,20 @@ pub struct PromptLookupConfig {
     /// How the adaptive governor sizes blocks and decides when to resume.
     /// Ignored when `adaptive` is `false`.
     pub policy: DraftPolicy,
+    /// Optional minimum EMA of emitted tokens (accepted proposals plus the
+    /// bonus) per drafted round. Gated adaptation pauses when the EMA is below
+    /// this floor and the current round also falls below it with at least one
+    /// proposed token left unaccepted. One complete miss is tolerated when the
+    /// accepted-token EMA was at least the floor before that miss. The floor
+    /// is capped at `max_draft + 1`; a fully accepted short block keeps
+    /// drafting because it is evidence that the available copy was exhausted,
+    /// not rejected.
+    /// `None` preserves the CLI policy.
+    pub min_tokens_per_round: Option<usize>,
+    /// Consecutive shadow tokens required to resume a paused gated row.
+    pub shadow_confirm_tokens: usize,
+    /// Proposal-free asks tolerated before enabling the plain-step pipeline.
+    pub plain_rounds_before_pipeline: usize,
 }
 
 impl Default for PromptLookupConfig {
@@ -161,6 +150,9 @@ impl Default for PromptLookupConfig {
             max_draft: DEFAULT_MAX_DRAFT,
             adaptive: true,
             policy: DraftPolicy::default_for_backend(),
+            min_tokens_per_round: None,
+            shadow_confirm_tokens: SHADOW_CONFIRM,
+            plain_rounds_before_pipeline: 2,
         }
     }
 }
@@ -198,9 +190,9 @@ pub enum DraftPolicy {
     /// Narrow (`GATED_NARROW_DRAFT`, 2 proposals) until a narrow block lands
     /// whole, then full (`max_draft`). While paused it keeps looking up and
     /// checks each proposal against the tokens decoding emits next; proposing
-    /// resumes only once `SHADOW_CONFIRM` (2) proposed tokens in a row came
-    /// true, and until a round lands a whole narrow block, a round that lands
-    /// nothing pauses again at once.
+    /// resumes once `shadow_confirm_tokens` proposed tokens in a row came
+    /// true (default 2, CUDA server 7). Until a round lands a whole narrow
+    /// block, a round that lands nothing pauses again at once.
     Gated,
 }
 
@@ -243,11 +235,19 @@ impl PromptLookupConfig {
                 self.max_draft
             ));
         }
+        if self.shadow_confirm_tokens == 0 || self.shadow_confirm_tokens > MAX_DRAFT_LIMIT {
+            return Err(format!(
+                "prompt-lookup shadow-confirm-tokens must be in 1..={MAX_DRAFT_LIMIT}"
+            ));
+        }
+        if self.min_tokens_per_round == Some(0) {
+            return Err("prompt-lookup min-tokens-per-round must be positive".to_string());
+        }
         Ok(())
     }
 }
 
-/// Why `model` cannot run under [`PromptLookupGenerator`], or `None` when it
+/// Why `model` cannot run under [`PromptLookupDrafter`](super::prompt_lookup_drafter::PromptLookupDrafter), or `None` when it
 /// can.
 ///
 /// Verification rolls rejected tokens back with `KVCache::trim`, which is only
@@ -289,7 +289,7 @@ pub fn prompt_lookup_unsupported_reason<M: LanguageModel>(model: &M) -> Option<&
     None
 }
 
-/// Whether `model` can run under [`PromptLookupGenerator`]. See
+/// Whether `model` can run under [`PromptLookupDrafter`](super::prompt_lookup_drafter::PromptLookupDrafter). See
 /// [`prompt_lookup_unsupported_reason`] for why not.
 pub fn supports_prompt_lookup<M: LanguageModel>(model: &M) -> bool {
     prompt_lookup_unsupported_reason(model).is_none()
@@ -315,21 +315,14 @@ const GATED_FULL_AT: f64 = 1.5;
 /// Accepted-proposal average a [`DraftPolicy::Gated`] governor starts from and
 /// resumes with: below [`GATED_FULL_AT`], so the first block is narrow.
 const GATED_START_EMA: f64 = 1.0;
+/// Low-yield rounds required to pause after an abrupt miss following profitable
+/// accepted-token history. The grace is limited to the first low-yield round;
+/// sustained partial yield and consecutive misses pause without another probe.
+const BREAK_EVEN_BOUNDARY_MISS_ROUNDS: usize = 2;
 /// Proposed tokens in a row a paused [`DraftPolicy::Gated`] governor must see
 /// come true before it proposes again. One is not enough on prose: the token
 /// after a two-token match is often a common one that happens to recur.
 pub(crate) const SHADOW_CONFIRM: usize = 2;
-/// Consecutive rounds without a proposal before the decode loop pipelines.
-///
-/// A pipelined step is submitted before the host knows the token it follows,
-/// so it cannot carry a proposal: the first proposal after a pipelined run
-/// waits one step. Edits that miss for a token or two at each changed field
-/// (a JSON id, a renamed identifier) would pay that step at every field, so
-/// only a run of plain rounds switches to pipelining. A paused
-/// [`DraftPolicy::Gated`] governor pipelines at once: it cannot propose until
-/// a shadow probe settles, which takes at least [`SHADOW_CONFIRM`] emitted
-/// tokens, so there is no proposal for a pipelined step to delay.
-const PLAIN_ROUNDS_BEFORE_PIPELINE: usize = 2;
 
 /// Decides, round by round, how many lookup tokens to propose.
 ///
@@ -350,6 +343,10 @@ pub(crate) struct DraftGovernor {
     adaptive: bool,
     policy: DraftPolicy,
     accepted_ema: f64,
+    min_tokens_per_round: Option<usize>,
+    emitted_ema: f64,
+    drafted_samples: usize,
+    low_yield_rounds: usize,
     misses: usize,
     /// [`DraftPolicy::Graded`]: paused rounds left, and the next pause length.
     cooldown: usize,
@@ -376,6 +373,12 @@ impl DraftGovernor {
             adaptive: config.adaptive,
             policy: config.policy,
             accepted_ema,
+            min_tokens_per_round: config
+                .min_tokens_per_round
+                .map(|floor| floor.min(config.max_draft.saturating_add(1))),
+            emitted_ema: 0.0,
+            drafted_samples: 0,
+            low_yield_rounds: 0,
             misses: 0,
             cooldown: 0,
             next_cooldown: MIN_COOLDOWN,
@@ -411,11 +414,19 @@ impl DraftGovernor {
         }
     }
 
-    /// Record a drafted round that landed `accepted` proposals.
+    /// Record a configured-width drafted round in governor unit tests.
+    #[cfg(test)]
     pub(crate) fn record(&mut self, accepted: usize) {
+        self.record_round(accepted, self.max_draft);
+    }
+
+    /// Record a drafted round that landed `accepted` of `proposed` tokens.
+    pub(crate) fn record_round(&mut self, accepted: usize, proposed: usize) {
+        debug_assert!(accepted <= proposed);
         if !self.adaptive {
             return;
         }
+        let accepted_ema_before = self.accepted_ema;
         self.accepted_ema = 0.5 * self.accepted_ema + 0.5 * accepted as f64;
         match self.policy {
             DraftPolicy::Graded => {
@@ -432,6 +443,47 @@ impl DraftGovernor {
                 }
             }
             DraftPolicy::Gated => {
+                if let Some(floor) = self.min_tokens_per_round {
+                    // Only real verify rounds contribute; proposal-free asks
+                    // and retracted lookahead proposals carry no evidence.
+                    let emitted = accepted as f64 + 1.0;
+                    self.emitted_ema = if self.drafted_samples == 0 {
+                        emitted
+                    } else {
+                        0.5 * self.emitted_ema + 0.5 * emitted
+                    };
+                    self.drafted_samples = self.drafted_samples.saturating_add(1);
+                    let low_yield_rounds_before = self.low_yield_rounds;
+                    let incomplete_low = emitted < floor as f64 && accepted < proposed;
+                    if incomplete_low {
+                        self.low_yield_rounds = self.low_yield_rounds.saturating_add(1);
+                    } else {
+                        self.low_yield_rounds = 0;
+                    }
+                    // A zero-acceptance round after accepted drafts alone were
+                    // paying for the verify width is an abrupt copy-boundary
+                    // miss. Probe once more for the next repeated span. A
+                    // partial low-yield round is evidence of sustained weak
+                    // matches, and a second complete miss must not earn another
+                    // grace even when a large max_draft keeps the EMA high.
+                    let profitable_boundary_miss = incomplete_low
+                        && low_yield_rounds_before == 0
+                        && accepted == 0
+                        && accepted_ema_before >= floor as f64;
+                    let low_rounds_to_pause = if profitable_boundary_miss {
+                        BREAK_EVEN_BOUNDARY_MISS_ROUNDS
+                    } else {
+                        1
+                    };
+                    if self.drafted_samples >= 2
+                        && self.emitted_ema < floor as f64
+                        && self.low_yield_rounds >= low_rounds_to_pause
+                    {
+                        self.drafting = false;
+                        self.misses = 0;
+                        return;
+                    }
+                }
                 // Probation ends on a round that lands a whole narrow block:
                 // one stray token is what prose lands too, and on GB10 a run
                 // of such rounds (8B email: 6 drafted, 3 tokens landed) cost
@@ -460,14 +512,17 @@ impl DraftGovernor {
     }
 
     /// A paused [`DraftPolicy::Gated`] governor saw a lookup proposal come
-    /// true for [`SHADOW_CONFIRM`] tokens: resume with a narrow block, on
-    /// probation.
+    /// true for the configured `shadow_confirm_tokens`: resume with a narrow
+    /// block, on probation.
     pub(crate) fn shadow_confirmed(&mut self) {
         if self.probes_while_paused() {
             self.drafting = true;
             self.probation = true;
             self.misses = 0;
             self.accepted_ema = GATED_START_EMA;
+            self.emitted_ema = 0.0;
+            self.drafted_samples = 0;
+            self.low_yield_rounds = 0;
         }
     }
 }
@@ -483,11 +538,14 @@ pub(crate) struct ShadowProbe {
 }
 
 impl ShadowProbe {
-    /// `Some(true)` once the first [`SHADOW_CONFIRM`] proposed tokens all came
+    /// `Some(true)` once the first `confirm_tokens` proposed tokens all came
     /// true, `Some(false)` at the first one that did not, and `None` while
     /// decoding has not emitted that far yet.
-    pub(crate) fn settle(&self, context: &[i32]) -> Option<bool> {
-        for (i, &claimed) in self.proposal.iter().take(SHADOW_CONFIRM).enumerate() {
+    pub(crate) fn settle(&self, context: &[i32], confirm_tokens: usize) -> Option<bool> {
+        if self.proposal.len() < confirm_tokens {
+            return Some(false);
+        }
+        for (i, &claimed) in self.proposal.iter().take(confirm_tokens).enumerate() {
             match context.get(self.start + i) {
                 None => return None,
                 Some(&emitted) if emitted != claimed => return Some(false),
@@ -544,7 +602,7 @@ pub fn find_draft(context: &[i32], config: &PromptLookupConfig) -> Vec<i32> {
 /// from the prompt and extended by the tokens emitted since the last call, so
 /// a lookup costs one hash probe per n-gram length however long the context
 /// grows, where a scan costs a pass over the whole context every round.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct NgramIndex {
     ngram_min: usize,
     /// `latest[n - ngram_min]`: n-gram to the start of its latest occurrence
@@ -582,6 +640,12 @@ impl NgramIndex {
         self.indexed_len = context.len();
     }
 
+    /// Context length already indexed.
+    #[cfg(test)]
+    pub(crate) fn indexed_len(&self) -> usize {
+        self.indexed_len
+    }
+
     /// Same proposal as [`find_draft`] on the indexed `context`.
     pub(crate) fn find(&self, context: &[i32], config: &PromptLookupConfig) -> Vec<i32> {
         debug_assert_eq!(self.indexed_len, context.len(), "index is stale");
@@ -604,7 +668,9 @@ impl NgramIndex {
     }
 }
 
-/// Acceptance accounting for one [`PromptLookupGenerator::generate`] call.
+/// Acceptance accounting for one
+/// [`DirectEngine::generate_with_drafter`](crate::engine::DirectEngine::generate_with_drafter)
+/// call under a prompt-lookup drafter.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct PromptLookupStats {
     /// Target forwards in the decode loop (one per round).
@@ -661,475 +727,6 @@ fn ratio(num: usize, den: usize) -> f64 {
         0.0
     } else {
         num as f64 / den as f64
-    }
-}
-
-/// Speculative generator whose drafter is [`find_draft`], answered from an
-/// [`NgramIndex`].
-pub struct PromptLookupGenerator {
-    caches: Vec<KVCache>,
-    config: PromptLookupConfig,
-    kv_cache_mode: KVCacheMode,
-    /// Prompt followed by every emitted token. The lookup searches this.
-    context: Vec<i32>,
-    generated_tokens: Vec<i32>,
-    generation_stream: Option<UniquePtr<MlxThreadLocalStream>>,
-    token_bias: TokenBiasMap,
-    stats: PromptLookupStats,
-}
-
-impl PromptLookupGenerator {
-    /// Create a generator. Caches are built from the model on every
-    /// [`Self::generate`] call.
-    pub fn new(config: PromptLookupConfig) -> Self {
-        Self {
-            caches: Vec::new(),
-            config,
-            kv_cache_mode: KVCacheMode::Fp16,
-            context: Vec::new(),
-            generated_tokens: Vec::new(),
-            generation_stream: shared_thread_local_generation_stream(),
-            token_bias: TokenBiasMap::default(),
-            stats: PromptLookupStats::default(),
-        }
-    }
-
-    /// Store the KV caches in `mode`, with the same Boundary-V policy plain
-    /// decoding applies.
-    pub fn with_kv_cache_mode(mut self, mode: KVCacheMode) -> Self {
-        self.kv_cache_mode = mode;
-        self
-    }
-
-    /// Attach a pre-resolved token bias, applied to every target sample.
-    pub fn with_token_bias(mut self, bias: TokenBiasMap) -> Self {
-        self.token_bias = bias;
-        self
-    }
-
-    /// Acceptance accounting for the most recent [`Self::generate`] call.
-    pub fn stats(&self) -> PromptLookupStats {
-        self.stats
-    }
-
-    /// Prefill `prompt_tokens` and run one verify forward at every block
-    /// width [`Self::generate`] can use (2 through `max_draft + 1`), so a
-    /// later call does not pay first-use costs in the middle of its decode.
-    ///
-    /// The first forward at a width this process has not run yet builds or
-    /// traces kernels for it, which on GB10 cost more than the rest of a
-    /// short reply: a 72-token Qwen3-1.7B answer with two drafted rounds ran
-    /// at 0.65x plain decoding without this warmup and at 1.07x with it. A
-    /// warmup generation only reaches the widths its own proposals happen to
-    /// use, which on a reply with nothing to copy is none of them.
-    ///
-    /// # Panics
-    ///
-    /// Same contract as [`Self::generate`] for the model and the prompt.
-    pub fn warm_up_verify_widths<M: LanguageModel>(&mut self, model: &M, prompt_tokens: &[i32]) {
-        self.reset(model);
-        assert!(
-            !self.caches.is_empty() && can_trim_prompt_cache(&self.caches),
-            "prompt-lookup decoding requires trimmable external KV caches"
-        );
-        let last = *prompt_tokens
-            .last()
-            .expect("prompt-lookup warmup requires at least one prompt token");
-        install_thread_local_default_stream(self.generation_stream.as_ref());
-        let logits = prefill_prompt_last_logits(model, &mut self.caches, prompt_tokens);
-        ffi::eval(&logits);
-        for width in 2..=self.config.max_draft + 1 {
-            let tokens = vec![last; width];
-            let input = ffi::from_slice_i32(&tokens, &[1, width as i32]);
-            let logits = model.forward(&input, &mut self.caches, None);
-            let argmax = ffi::argmax_last_axis(&logits);
-            ffi::eval(&argmax);
-            trim_caches(&mut self.caches, width as i32);
-        }
-        ffi::clear_memory_cache();
-    }
-
-    /// Fresh caches from the model, in the configured mode, as
-    /// `CxxGenerator::reset_with_model` builds them.
-    fn reset<M: LanguageModel>(&mut self, model: &M) {
-        model.reset_runtime_state();
-        self.caches = model.make_caches();
-        let modes = resolve_kv_cache_layer_modes(self.kv_cache_mode, self.caches.len());
-        for (cache, mode) in self.caches.iter_mut().zip(modes) {
-            cache.mode = mode;
-        }
-        model.set_kv_cache_layer_modes(resolve_kv_cache_layer_modes(
-            self.kv_cache_mode,
-            model.num_layers(),
-        ));
-        self.context.clear();
-        self.generated_tokens.clear();
-        self.stats = PromptLookupStats::default();
-    }
-
-    /// Same composition rule as `SpeculativeGenerator::compose_target_sampling`:
-    /// the caller's own bias wins, otherwise the cached one is injected.
-    fn compose_sampling<'a>(&self, sampling: &'a SamplingConfig) -> Cow<'a, SamplingConfig> {
-        if self.token_bias.is_empty() || !sampling.token_bias.is_empty() {
-            Cow::Borrowed(sampling)
-        } else {
-            let mut cloned = sampling.clone();
-            cloned.token_bias = self.token_bias.clone();
-            Cow::Owned(cloned)
-        }
-    }
-
-    /// Generate up to `max_tokens` tokens after `prompt_tokens`.
-    ///
-    /// # Panics
-    ///
-    /// Panics on an empty prompt, on a model with no external KV caches or a
-    /// non-trimmable one (callers must check [`supports_prompt_lookup`]
-    /// first), and on a sampler that carries feedback state across tokens
-    /// (mirostat, adaptive-p), which this loop does not thread through its
-    /// rounds; the server's speculative burst declines the same samplers.
-    /// `mlxcel generate` cannot configure either one.
-    pub fn generate<M: LanguageModel>(
-        &mut self,
-        model: &M,
-        prompt_tokens: &[i32],
-        max_tokens: usize,
-        sampling: &SamplingConfig,
-    ) -> (Vec<i32>, GenerationStats) {
-        self.reset(model);
-
-        // `can_trim_prompt_cache` is vacuously true on an empty slice, which
-        // is exactly what a family that keeps its caches internally returns.
-        assert!(
-            !self.caches.is_empty() && can_trim_prompt_cache(&self.caches),
-            "prompt-lookup decoding requires trimmable external KV caches"
-        );
-        assert!(
-            !prompt_tokens.is_empty(),
-            "prompt-lookup generate requires at least one prompt token"
-        );
-
-        let sampling_cow = self.compose_sampling(sampling);
-        let sampling: &SamplingConfig = sampling_cow.as_ref();
-        assert!(
-            !sampling.needs_sampler_feedback_state(),
-            "prompt-lookup decoding does not carry mirostat or adaptive-p sampler state"
-        );
-        seed_rng_if_needed(sampling);
-        install_thread_local_default_stream(self.generation_stream.as_ref());
-
-        let eos_tokens = merged_eos_token_ids(model.eos_token_ids(), &sampling.stop_token_ids);
-        let needs_history = sampling.needs_token_history();
-        let mut token_history = initial_token_history(prompt_tokens, needs_history);
-        // Incremental penalty state, as `CxxGenerator` keeps it: byte-identical
-        // logits to rebuilding the penalties from `token_history` on every
-        // sample, without the per-sample pass over the whole history. History
-        // only grows here (rejected proposals are never sampled into it), so
-        // the state's append-only fast path always applies.
-        let mut sampler_state: Option<SamplerState> = None;
-        // Pure argmax with nothing that depends on the emitted prefix: every
-        // verify position can be decided from one batched argmax and a single
-        // host read. Anything else goes position by position through the
-        // sampler, as the draft-model path does.
-        let batched_argmax =
-            sampling.is_greedy_path() && !needs_history && sampling.token_bias.is_empty();
-
-        self.context.extend_from_slice(prompt_tokens);
-
-        // PREFILL through the plain-decode routine, so the caches and the
-        // first token are exactly what plain decoding produces.
-        let prefill_start = Instant::now();
-        let logits = prefill_prompt_last_logits(model, &mut self.caches, prompt_tokens);
-        ffi::clear_memory_cache();
-        let (first_arr, _) = if needs_history {
-            sample_token_optimized_with_state(&logits, sampling, &token_history, &mut sampler_state)
-        } else {
-            sample_token_optimized(&logits, sampling, &token_history)
-        };
-        ffi::async_eval(&first_arr);
-        // Index the prompt while the GPU finishes the prefill.
-        let mut index = NgramIndex::new(&self.config);
-        index.extend(&self.context);
-        let first_token = ffi::item_i32(&first_arr);
-        let prefill_time = prefill_start.elapsed();
-
-        if eos_tokens.contains(&first_token) || max_tokens == 0 {
-            return self.finish(prompt_tokens.len(), prefill_time, Default::default());
-        }
-        let mut done = self.emit(
-            first_token,
-            needs_history.then_some(&mut token_history),
-            max_tokens,
-            sampling,
-        );
-        if max_tokens > 1 {
-            for cache in &mut self.caches {
-                cache.prepare_turbo4_delegated_for_decode();
-            }
-        }
-
-        // DECODE.
-        let decode_start = Instant::now();
-        let mut current_token = first_token;
-        let mut governor = DraftGovernor::new(&self.config);
-        // Rounds without a proposal are pipelined the way plain decoding is:
-        // the next step is encoded and submitted from the still-lazy sample
-        // before the host reads it, so the GPU does not idle while the host
-        // reads a token and builds the next graph (measured 12% of decode time
-        // on an M4 Pro). A sampler that reads the emitted history needs each
-        // token on the host first, so those runs stay synchronous.
-        let pipeline = !needs_history && std::env::var("MLXCEL_FORCE_SYNC").is_err();
-        // `Some(next)` while a one-token forward of `current_token` is in
-        // flight: the cache already holds `current_token` and `next` is the
-        // lazy sample of the token after it. `None` means the cache holds
-        // every emitted token except `current_token`.
-        let mut in_flight: Option<UniquePtr<ffi::MlxArray>> = None;
-        // Rounds in a row, this one included, whose lookup proposed nothing.
-        let mut plain_streak = 0usize;
-        // A proposal looked up while a `DraftPolicy::Gated` governor is
-        // paused, waiting for decoding to show whether it comes true. Exactly
-        // as long as settling reads, whatever `max_draft` is.
-        let mut shadow: Option<ShadowProbe> = None;
-        let shadow_config = PromptLookupConfig {
-            max_draft: SHADOW_CONFIRM,
-            ..self.config
-        };
-
-        while !done {
-            if let Some(confirmed) = shadow
-                .as_ref()
-                .and_then(|probe| probe.settle(&self.context))
-            {
-                shadow = None;
-                if confirmed {
-                    governor.shadow_confirmed();
-                    self.stats.shadow_confirmations += 1;
-                }
-            }
-            // Never propose past `max_tokens`: every accepted proposal is
-            // emitted, and the round also emits one target token.
-            let remaining = max_tokens - self.generated_tokens.len();
-            let budget = governor.budget().min(remaining.saturating_sub(1));
-            let draft = if budget == 0 {
-                // Paused: look up anyway and let the next tokens decoding
-                // emits say whether proposing would have paid, at the cost of
-                // a host-side hash probe instead of a verify forward.
-                if shadow.is_none() && governor.probes_while_paused() {
-                    index.extend(&self.context);
-                    let proposal = index.find(&self.context, &shadow_config);
-                    if proposal.len() >= SHADOW_CONFIRM {
-                        shadow = Some(ShadowProbe {
-                            start: self.context.len(),
-                            proposal,
-                        });
-                    }
-                }
-                Vec::new()
-            } else {
-                index.extend(&self.context);
-                let mut draft = index.find(&self.context, &self.config);
-                draft.truncate(budget);
-                draft
-            };
-
-            if draft.is_empty() {
-                plain_streak += 1;
-            } else {
-                plain_streak = 0;
-            }
-            if let Some(next) = in_flight.take() {
-                // Keep the pipeline full unless lookup has something to verify
-                // or `next` is the last token allowed.
-                if draft.is_empty() && remaining > 1 {
-                    let next_input = ffi::reshape_token_for_forward(&next);
-                    let logits = model.forward(&next_input, &mut self.caches, None);
-                    let (after_next, _) = sample_token_optimized(&logits, sampling, &token_history);
-                    ffi::async_eval(&after_next);
-                    in_flight = Some(after_next);
-                    self.count_plain_round(budget);
-                }
-                let token = ffi::item_i32(&next);
-                if eos_tokens.contains(&token) {
-                    break;
-                }
-                done = self.emit(token, None, max_tokens, sampling);
-                current_token = token;
-                // With nothing in flight now, the next round verifies from
-                // `current_token` synchronously; the proposal found this round
-                // was for the token before it and is looked up again there.
-                continue;
-            }
-
-            if draft.is_empty()
-                && pipeline
-                && remaining > 1
-                && (plain_streak > PLAIN_ROUNDS_BEFORE_PIPELINE || governor.probes_while_paused())
-            {
-                let input = ffi::from_slice_i32(&[current_token], &[1, 1]);
-                let logits = model.forward(&input, &mut self.caches, None);
-                let (next, _) = sample_token_optimized(&logits, sampling, &token_history);
-                ffi::async_eval(&next);
-                in_flight = Some(next);
-                self.count_plain_round(budget);
-                continue;
-            }
-
-            let mut verify_tokens = Vec::with_capacity(draft.len() + 1);
-            verify_tokens.push(current_token);
-            verify_tokens.extend_from_slice(&draft);
-            let verify_len = verify_tokens.len();
-            let verify_input = ffi::from_slice_i32(&verify_tokens, &[1, verify_len as i32]);
-            let logits = model.forward(&verify_input, &mut self.caches, None);
-
-            // Target token at every verify position, in order. Position `i`
-            // is the target's choice for the slot draft[i] claims; position
-            // `draft.len()` is the bonus token after a fully accepted block.
-            let vocab = ffi::array_shape(&logits)[2];
-            let greedy_targets = batched_argmax.then(|| {
-                let argmax = ffi::argmax_last_axis(&logits);
-                ffi::eval(&argmax);
-                materialize_argmax_i32_vec(&argmax, verify_len)
-            });
-
-            let mut accepted = 0usize;
-            for pos in 0..verify_len {
-                let target = match &greedy_targets {
-                    Some(targets) => targets[pos],
-                    None => {
-                        let pos_logits =
-                            ffi::slice(&logits, &[0, pos as i32, 0], &[1, pos as i32 + 1, vocab]);
-                        let (arr, _) = if needs_history {
-                            sample_token_optimized_with_state(
-                                &pos_logits,
-                                sampling,
-                                &token_history,
-                                &mut sampler_state,
-                            )
-                        } else {
-                            sample_token_optimized(&pos_logits, sampling, &token_history)
-                        };
-                        ffi::eval(&arr);
-                        ffi::item_i32(&arr)
-                    }
-                };
-
-                if eos_tokens.contains(&target) {
-                    done = true;
-                    break;
-                }
-                done = self.emit(
-                    target,
-                    needs_history.then_some(&mut token_history),
-                    max_tokens,
-                    sampling,
-                );
-                current_token = target;
-                if done {
-                    break;
-                }
-                // `target` is emitted either way; it only extends the round
-                // when it confirms the proposal in the same slot.
-                if pos < draft.len() && target == draft[pos] {
-                    accepted += 1;
-                } else {
-                    break;
-                }
-            }
-
-            if draft.is_empty() {
-                self.count_plain_round(budget);
-            } else {
-                self.stats.rounds += 1;
-                self.stats.drafted_rounds += 1;
-                governor.record(accepted);
-            }
-            self.stats.proposed_draft_tokens += draft.len();
-            self.stats.accepted_draft_tokens += accepted;
-
-            // The verify forward appended `current, d_0..d_{k-1}`. The cache
-            // must end holding every emitted token except the next round's
-            // `current_token`, i.e. through `d_{a-1}`: trim `k - a`.
-            trim_caches(&mut self.caches, (draft.len() - accepted) as i32);
-
-            if crate::memory::should_clear_cache_at(
-                self.generated_tokens.len(),
-                crate::memory::cache_clear_interval(),
-            ) {
-                ffi::clear_memory_cache();
-            }
-        }
-
-        let decode_time = decode_start.elapsed();
-        tracing::info!(
-            rounds = self.stats.rounds,
-            drafted_rounds = self.stats.drafted_rounds,
-            proposed_draft_tokens = self.stats.proposed_draft_tokens,
-            accepted_draft_tokens = self.stats.accepted_draft_tokens,
-            shadow_confirmations = self.stats.shadow_confirmations,
-            generated_tokens = self.generated_tokens.len(),
-            "prompt-lookup decode finished"
-        );
-        self.finish(prompt_tokens.len(), prefill_time, decode_time)
-    }
-
-    /// Count a one-token forward. `budget == 0` means the governor paused
-    /// proposals (or `max_tokens` left room for none) rather than lookup
-    /// finding no match.
-    fn count_plain_round(&mut self, budget: usize) {
-        self.stats.rounds += 1;
-        if budget == 0 {
-            self.stats.paused_rounds += 1;
-        }
-    }
-
-    /// Emit `token` and report whether generation stops after it: at
-    /// `max_tokens`, or when the repetition-loop guard fires, which plain
-    /// decoding checks after every token too.
-    fn emit(
-        &mut self,
-        token: i32,
-        history: Option<&mut Vec<i32>>,
-        max_tokens: usize,
-        sampling: &SamplingConfig,
-    ) -> bool {
-        self.generated_tokens.push(token);
-        self.context.push(token);
-        if let Some(history) = history {
-            history.push(token);
-        }
-        self.generated_tokens.len() >= max_tokens
-            || detect_repetition_loop(&self.generated_tokens, &sampling.loop_detection)
-    }
-
-    fn finish(
-        &self,
-        prompt_count: usize,
-        prefill_time: std::time::Duration,
-        decode_time: std::time::Duration,
-    ) -> (Vec<i32>, GenerationStats) {
-        let prefill_ms = prefill_time.as_secs_f64() * 1000.0;
-        let decode_ms = decode_time.as_secs_f64() * 1000.0;
-        let gen_count = self.generated_tokens.len();
-        // The first token comes out of the prefill forward; the decode rate
-        // counts only what the decode loop produced in `decode_time`.
-        let decode_count = gen_count.saturating_sub(1);
-        let stats = GenerationStats {
-            prompt_tokens: prompt_count,
-            generated_tokens: gen_count,
-            prefill_time_ms: prefill_ms,
-            decode_time_ms: decode_ms,
-            prefill_tok_per_sec: if prefill_ms > 0.0 {
-                prompt_count as f64 / (prefill_ms / 1000.0)
-            } else {
-                0.0
-            },
-            decode_tok_per_sec: if decode_ms > 0.0 {
-                decode_count as f64 / (decode_ms / 1000.0)
-            } else {
-                0.0
-            },
-        };
-        (self.generated_tokens.clone(), stats)
     }
 }
 

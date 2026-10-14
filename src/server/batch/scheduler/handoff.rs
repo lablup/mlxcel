@@ -17,11 +17,7 @@ use crate::server::batch::generation_bounds::GenerationBounds;
 
 impl BatchScheduler {
     pub(super) fn release_sequence_caches(&mut self, seq_id: SequenceId) {
-        self.model.release_sequence_state_by_id(seq_id);
-        if let Some(caches) = self.cache_pool.get_caches_mut(seq_id) {
-            self.model.release_sequence_state(caches);
-        }
-        self.cache_pool.release(seq_id);
+        self.engine.close(seq_id);
     }
 
     /// #822: note a successful MLX eval at the decode/prefill boundary, clearing
@@ -46,19 +42,30 @@ impl BatchScheduler {
     /// still live, so the raw `try_*` call is made inline there and its `Result`
     /// is handed to this method once the borrow has ended.
     pub(super) fn record_eval_outcome(&mut self, result: Result<(), String>) -> Result<(), String> {
-        self.consecutive_decode_eval_failures =
-            advance_eval_failure_count(self.consecutive_decode_eval_failures, result.is_ok());
         match result {
-            Ok(()) => Ok(()),
-            Err(mlx_msg) => {
-                tracing::error!(
-                    consecutive = self.consecutive_decode_eval_failures,
-                    threshold = MAX_CONSECUTIVE_EVAL_FAILURES,
-                    "MLX threw at the decode/prefill eval FFI boundary; failing the affected request(s) instead of aborting the process: {mlx_msg}"
-                );
-                Err(format!("inference backend error: {mlx_msg}"))
+            Ok(()) => {
+                self.consecutive_decode_eval_failures =
+                    advance_eval_failure_count(self.consecutive_decode_eval_failures, true);
+                Ok(())
             }
+            Err(mlx_msg) => Err(self.record_eval_failure(&mlx_msg)),
         }
+    }
+
+    /// #822: [`Self::record_eval_outcome`] for a known failure: bump the
+    /// counter, log the MLX message and return the request-facing error
+    /// (`inference backend error: {mlx_msg}`). The engine reports a row's
+    /// eval throw as `RowError::Eval` carrying the raw MLX message; this is
+    /// where it gets the same wording every other eval site sends.
+    pub(super) fn record_eval_failure(&mut self, mlx_msg: &str) -> String {
+        self.consecutive_decode_eval_failures =
+            advance_eval_failure_count(self.consecutive_decode_eval_failures, false);
+        tracing::error!(
+            consecutive = self.consecutive_decode_eval_failures,
+            threshold = MAX_CONSECUTIVE_EVAL_FAILURES,
+            "MLX threw at the decode/prefill eval FFI boundary; failing the affected request(s) instead of aborting the process: {mlx_msg}"
+        );
+        format!("inference backend error: {mlx_msg}")
     }
 
     /// #822: after an eval failure has been recorded and the affected
@@ -144,7 +151,7 @@ impl BatchScheduler {
         generated_tokens: Vec<i32>,
     ) -> anyhow::Result<Vec<u8>> {
         crate::distributed::disaggregated::handoff_impl::extract_sequence_handoff(
-            &self.cache_pool,
+            self.engine.pool(),
             seq_id,
             None,
             token_history,
@@ -167,7 +174,7 @@ impl BatchScheduler {
             return Ok(geometry);
         }
         let probed = crate::distributed::disaggregated::handoff_impl::probe_block_geometry(
-            &self.model,
+            self.engine.model(),
             DEFAULT_PAGED_BLOCK_SIZE,
         )?;
         self.paged_handoff_geometry = Some(probed);
@@ -177,9 +184,10 @@ impl BatchScheduler {
     #[allow(dead_code)]
     pub(crate) fn ingest_sequence_handoff(&mut self, bytes: &[u8]) -> anyhow::Result<SequenceId> {
         let geometry = self.ensure_handoff_geometry()?;
+        let (model, pool) = self.engine.parts_mut();
         crate::distributed::disaggregated::handoff_impl::ingest_sequence_handoff(
-            &mut self.cache_pool,
-            &self.model,
+            pool,
+            model,
             bytes,
             &crate::distributed::kv_cache_serde::CacheIngestLimits::default(),
             &geometry,
@@ -198,7 +206,7 @@ impl BatchScheduler {
     /// loop (#708). The whole node serves one model, so this is a node-level fact
     /// the serving-role loop checks once and applies to every request.
     pub(crate) fn handoff_supported(&self) -> bool {
-        self.model.sequence_state_layout().backend == SequenceStateBackend::DenseKvCache
+        self.engine.model().sequence_state_layout().backend == SequenceStateBackend::DenseKvCache
     }
 
     /// Prefill role (#126 B2b): run a full prefill for `seq`, then extract its
@@ -250,13 +258,9 @@ impl BatchScheduler {
         // server default, which is what the requesting node's own admission
         // would have snapshotted (#1439).
         self.ensure_lora_applied(None);
-        if self.prefill_chunk_size > 0 && prompt_tokens.len() > self.prefill_chunk_size {
-            self.start_chunked_prefill(seq);
-            while self.chunked_prefill_seq.is_some() {
-                self.continue_chunked_prefill();
-            }
-        } else {
-            self.execute_full_prefill(seq);
+        self.run_planned_prefill(seq);
+        while self.chunked_prefill_seq.is_some() {
+            self.continue_chunked_prefill();
         }
         // Lift the just-prefilled sequence back out before any local decode runs.
         // If it finished at prefill (immediate EOS) it is already finalized and
@@ -317,7 +321,7 @@ impl BatchScheduler {
                  {:?} sequence-state backend; only pool-backed dense Fp16 families (qwen3 / \
                  llama3) can be handed off. Model-owned paged families (gemma3 / gemma4 / llama4 \
                  / qwen3_5 / qwen3_next) keep their KV model-internal (issue #708).",
-                self.model.sequence_state_layout().backend
+                self.engine.model().sequence_state_layout().backend
             );
         }
         if prompt_tokens.is_empty() {
@@ -352,6 +356,7 @@ impl BatchScheduler {
             .allocate_sequence_state()
             .map_err(|e| anyhow::anyhow!("prefill-role handoff: allocate sequence: {e}"))?;
         let decode_state = StreamingDecodeState::new(&self.tokenizer, &prompt_tokens);
+        let sampler = RowSampler::new(&sampling);
         let seq = SequenceInfo {
             retention: Default::default(),
             seq_id,
@@ -381,13 +386,15 @@ impl BatchScheduler {
             prefill_offset: 0,
             prefill_start_offset: 0,
             already_cached_tokens: 0,
+            eos_terminated: false,
             response_tx,
             cancelled,
             created_at: Instant::now(),
             prefill_start: None,
             first_token_time: None,
+            prompt_lookup: None,
             token_history: Vec::new(),
-            sampler_state: None,
+            sampler,
             merged_eos: Vec::new(),
             thinking,
             structured: None,
@@ -441,10 +448,11 @@ impl BatchScheduler {
             thinking_enter_block_on_start,
             &generated_tokens,
         )?;
+        let (model, pool) = self.engine.parts_mut();
         let seq_id =
             crate::distributed::disaggregated::handoff_impl::ingest_sequence_handoff_state(
-                &mut self.cache_pool,
-                &self.model,
+                pool,
+                model,
                 &state,
                 &limits,
                 &geometry,
@@ -459,7 +467,10 @@ impl BatchScheduler {
         if needs_history {
             token_history.extend_from_slice(&generated_tokens);
         }
-        let merged_eos = merged_eos_token_ids(self.model.eos_token_ids(), &sampling.stop_token_ids);
+        let merged_eos = merged_eos_token_ids(
+            self.engine.model().eos_token_ids(),
+            &sampling.stop_token_ids,
+        );
         // Seed the incremental detokenizer with everything already produced (the
         // prompt plus the handed-off tokens) so the decode node's text continues
         // from the correct boundary.
@@ -471,6 +482,7 @@ impl BatchScheduler {
         let decode_state = StreamingDecodeState::new(&self.tokenizer, &detok_seed);
         let prefill_offset = prompt_tokens.len();
 
+        let sampler = RowSampler::new(&sampling);
         let seq = SequenceInfo {
             retention: Default::default(),
             seq_id,
@@ -500,13 +512,15 @@ impl BatchScheduler {
             prefill_offset,
             prefill_start_offset: 0,
             already_cached_tokens: 0,
+            eos_terminated: false,
             response_tx,
             cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             created_at: Instant::now(),
             prefill_start: None,
+            prompt_lookup: None,
             first_token_time: Some(Instant::now()),
             token_history,
-            sampler_state: None,
+            sampler,
             merged_eos,
             thinking,
             structured: None,

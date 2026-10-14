@@ -12,24 +12,37 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! `mlxcel run` verb (epic #92, issue #95): the ollama-style entry
-//! point.
+//! `mlxcel run` verb (epic #92, issue #95): the ollama-style entry point.
 //!
-//! `run` is the capstone of the unified download + run epic. It is a thin
-//! dispatcher that forks **no** model-loading or generation code, it builds a
-//! [`GenerateArgs`] from its own (deliberately small) flag surface and hands it
-//! straight to [`crate::commands::run_generate`], which already routes:
+//! Since epic #2166 Phase 5 (issue #2173, ADR 0007 "CLI front end") `run` is
+//! an in-process client of the model server, the way llama-cli is a client of
+//! llama-server but without the loopback socket: it starts the server's model
+//! worker in this process at one slot
+//! ([`mlxcel::server::in_process::InProcessServer`]) and submits chat requests
+//! through the `/v1/chat/completions` request path. That path renders the
+//! chat template, builds the worker options, splits reasoning from content
+//! with the server's `StreamFilter`, parses tool calls and applies stop
+//! strings, so `run` keeps only terminal I/O and REPL commands:
 //!
-//! * **no `-p/--prompt`** → the interactive multi-turn chat REPL
-//!   ([`crate::commands::run_chat`], issue #96), and
-//! * **with `-p`** → the historical one-shot `generate` flow
-//!   (`run_generate_once`), including the repo-id-aware `-m` resolver
-//!   ([`mlxcel::downloader::resolve_model_source`], issue #94).
+//! * **no `-p/--prompt`**: the interactive multi-turn chat REPL
+//!   ([`crate::commands::run_chat`], issue #96);
+//! * **with `-p`**: one chat turn, printed as it streams.
 //!
-//! Routing through `run_generate` (rather than re-implementing the
-//! prompt/no-prompt branch) is what guarantees `mlxcel run <repo-id> -p "..."`
-//! produces byte-identical output to the equivalent `mlxcel generate -m
-//! <repo-id> -p "..."` invocation, they execute the same code.
+//! The equivalence invariant replaces the old "same code as `generate`"
+//! promise: for the same request, `mlxcel run -p` and `mlxcel-server` produce
+//! the same tokens, because they run the same request path and the same
+//! engine. `mlxcel-engine-parity` checks it (arm `e:run`, greedy, under
+//! `MLXCEL_SDPA_DETERMINISTIC=1`). Every sampling flag maps onto the
+//! `mlxcel-server` option of the same meaning
+//! ([`crate::commands::cli_server`]); defaults follow ADR 0007's decision
+//! table, with greedy kept as the CLI base sampler.
+//!
+//! One-shot modes the chat server does not serve stay on the `generate`
+//! one-shot flow until Phase 6 (#2176): block-diffusion, Florence-2,
+//! Nemotron-Parse and VoiceChat checkpoints, `--output-audio`,
+//! `--layout-detections`, `--audio`, `--video`, `--profile`,
+//! `--estimate-memory` and `--recommend-quant`. `--image` goes through the
+//! server like a chat client's `image_url` part.
 //!
 //! ## Default-model fallback
 //!
@@ -38,11 +51,24 @@
 //! the shared resolver, so `mlxcel run` with no arguments works from any
 //! directory.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use anyhow::Result;
 use clap::Args;
+use mlxcel::cli::speculative_args::SpeculativeArgs;
+use mlxcel::server::chat_template::ChatMessage;
+use mlxcel::server::in_process::InProcessServer;
 
+use super::chat_transcript::{
+    Turn, check_image_budget, image_data_uris, messages_json, server_image_cap,
+};
+use mlxcel::cli::in_process_client::{
+    CliServerSettings, ServerSamplingOptions, chat_request_body, completion_request_body,
+};
+
+use super::cli_server::{cli_flag_was_set, resolve_cli_kv_cache_mode, settings_from_flags};
+use super::cli_turn::{TurnDisplay, TurnPrinter, run_cancellable, shutdown_then_fail};
 use crate::{GenerateArgs, GenerationOptions, ModelOptions, SamplingOptions};
 
 /// Default model used when `mlxcel run` is invoked without a model argument.
@@ -58,10 +84,11 @@ pub(crate) const DEFAULT_MODEL: &str = "mlx-community/gemma-4-e2b-it-4bit";
 /// `run` takes a model (repo-id or local path) and either streams an
 /// interactive chat (no `-p`) or prints a one-shot completion (`-p "..."`).
 /// The model argument is **optional**: omitting it loads
-/// [`DEFAULT_MODEL`]. Sampling and generation flags are the *same* clap groups
+/// [`DEFAULT_MODEL`]. The generation and sampling groups are the clap groups
 /// [`GenerateArgs`] flattens ([`GenerationOptions`] / [`SamplingOptions`]), so
-/// `--help` and behavior stay in lock-step with `mlxcel generate` and no flag
-/// is duplicated.
+/// the shared flags read the same on both verbs; on `run` every sampling flag
+/// becomes an option of the in-process server (issue #2173), and
+/// [`ServerSamplingOptions`] adds the server sampling flags `generate` lacks.
 #[derive(Args, Debug)]
 #[command(next_help_heading = "Run Options")]
 pub(crate) struct RunArgs {
@@ -110,19 +137,36 @@ pub(crate) struct RunArgs {
     #[command(flatten)]
     pub(crate) generation: GenerationOptions,
 
-    /// Sampling options shared verbatim with `mlxcel generate` (temperature,
-    /// top-k/p, min-p, repetition + DRY penalties).
+    /// Sampling options shared with `mlxcel generate` (temperature, top-k/p,
+    /// min-p, repetition + DRY penalties), applied as the in-process server's
+    /// sampling options.
     #[command(flatten)]
     pub(crate) sampling: SamplingOptions,
+
+    /// The `mlxcel-server` sampling options the generate group lacks
+    /// (frequency/presence penalties, XTC, Mirostat, dynamic temperature, DRY
+    /// sequence breakers, stop strings).
+    #[command(flatten)]
+    pub(crate) server_sampling: ServerSamplingOptions,
+
+    /// Speculative drafter checkpoint (a DFlash drafter or an MTP head),
+    /// served through the server's speculative burst exactly as
+    /// `mlxcel-server --draft-model` serves it. `--draft-kind` picks the kind
+    /// when the checkpoint does not say.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) draft_model: Option<PathBuf>,
+
+    /// `--draft-kind` (`dflash` or `mtp`) and `--draft-block-size`, shared
+    /// with `mlxcel serve`.
+    #[command(flatten)]
+    pub(crate) speculative: SpeculativeArgs,
 }
 
 impl RunArgs {
-    /// Lower the `run` flag surface onto a full [`GenerateArgs`], filling the
-    /// model (default-model fallback) and leaving every advanced flag group
-    /// (`tensor_parallel` / `pipeline_parallel` / `speculative` / `lang_bias`
-    /// / `surgery`) at its clap default; `run` intentionally does not expose
-    /// them, matching the minimal `ollama run` surface. The resulting
-    /// `GenerateArgs` is then driven by the unchanged `run_generate` dispatch.
+    /// Lower the `run` flag surface onto a full [`GenerateArgs`] for the
+    /// one-shot modes that stay on `generate` until Phase 6, filling the model
+    /// (default-model fallback) and leaving the parallelism, language-bias and
+    /// surgery groups at their clap defaults.
     fn into_generate_args(self) -> GenerateArgs {
         let model = self.model.unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
 
@@ -132,9 +176,7 @@ impl RunArgs {
                 models_dir: self.models_dir,
                 revision: self.revision,
                 adapter: self.adapter,
-                // `run` does not surface offline speculative decoding; keep the
-                // same defaults `mlxcel generate` uses when the flags are absent.
-                draft_model: None,
+                draft_model: self.draft_model,
                 num_draft_tokens: 3,
             },
             generation: self.generation,
@@ -142,24 +184,190 @@ impl RunArgs {
             pipeline_parallel: crate::PipelineParallelOptions::default(),
             tensor_parallel: crate::TensorParallelOptions::default(),
             lang_bias: mlxcel::lang_bias::LangBiasCliArgs::default(),
-            speculative: mlxcel::cli::speculative_args::SpeculativeArgs::default(),
+            speculative: self.speculative,
             prompt_lookup: crate::PromptLookupOptions::default(),
             #[cfg(feature = "surgery")]
             surgery: None,
         }
     }
+
+    /// The in-process server settings this command line asks for.
+    pub(crate) fn server_settings(&self) -> Result<CliServerSettings> {
+        let kv_cache_mode = resolve_cli_kv_cache_mode(&self.generation.turbo)?;
+        let mut settings = settings_from_flags(
+            &self.sampling,
+            self.server_sampling.clone(),
+            self.generation.max_tokens,
+            kv_cache_mode,
+            &cli_flag_was_set,
+        );
+        settings.adapter = self.adapter.clone();
+        settings.draft_model = self.draft_model.clone();
+        settings.draft_kind = self.speculative.draft_kind.clone();
+        settings.draft_block_size = self.speculative.draft_block_size;
+        Ok(settings)
+    }
+}
+
+/// Whether a `-p` run asks for a one-shot mode the chat server does not
+/// serve, so it stays on the `generate` flow (Phase 6, #2176).
+fn one_shot_stays_on_generate(generation: &GenerationOptions, model_path: &Path) -> bool {
+    if generation.output_audio.is_some()
+        || generation.layout_detections.is_some()
+        || generation.profile
+        || generation.estimate_memory
+        || generation.recommend_quant
+        || !generation.video.is_empty()
+        || generation.audio.is_some()
+        // The raw completion path carries no media, so a raw prompt with
+        // images keeps `generate`'s raw-prompt image handling.
+        || (generation.no_chat_template && !generation.image.is_empty())
+    {
+        return true;
+    }
+    use mlxcel::models::ModelType;
+    mlxcel::models::get_model_type(model_path).is_ok_and(|model_type| {
+        matches!(
+            model_type,
+            ModelType::DiffusionGemma
+                | ModelType::Llada2Moe
+                | ModelType::Florence2VLM
+                | ModelType::NemotronParseVLM
+                | ModelType::NemotronVoiceChat
+        )
+    })
 }
 
 /// Handle `mlxcel run`.
 ///
-/// Resolves the default model when none is given, then dispatches through the
-/// shared [`crate::commands::run_generate`] path: no prompt → interactive chat
-/// REPL (issue #96); `-p` → one-shot generation (the historical `generate`
-/// flow). Model resolution / auto-download is performed by the same
-/// [`mlxcel::downloader::resolve_model_source`] resolver (issue #94) those paths
-/// already use.
+/// No prompt: the chat REPL (issue #96). With `-p`: one chat turn through the
+/// in-process server, or the `generate` one-shot flow for the modes
+/// [`one_shot_stays_on_generate`] lists.
 pub(crate) fn run_run(args: RunArgs) -> Result<()> {
-    crate::commands::run_generate(args.into_generate_args())
+    if args.generation.prompt.is_none() {
+        // `generate`'s no-prompt checks (VoiceChat, `--layout-detections`,
+        // `--output-audio`) and the REPL dispatch.
+        if args.generation.output_audio.is_some()
+            || args.generation.layout_detections.is_some()
+            || args.generation.audio.is_some()
+        {
+            return crate::commands::run_generate(args.into_generate_args());
+        }
+        let opts = crate::commands::chat::ChatOptions {
+            model: args
+                .model
+                .clone()
+                .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL)),
+            models_dir: args.models_dir.clone(),
+            revision: args.revision.clone(),
+            server: args.server_settings()?,
+            no_chat_template: args.generation.no_chat_template,
+            show_reasoning: args.generation.show_reasoning,
+            images: args.generation.image.clone(),
+            image_soft_tokens: args.generation.image_soft_tokens,
+        };
+        return crate::commands::run_chat(opts);
+    }
+    run_once(args)
+}
+
+/// One `-p` turn through the in-process server.
+fn run_once(args: RunArgs) -> Result<()> {
+    let prompt = args.generation.prompt.clone().unwrap_or_default();
+    let runtime = mlxcel::initialize_runtime_checked()?;
+    super::generate::print_runtime_setup(&runtime);
+    let requested = args
+        .model
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+    let model_path = mlxcel::downloader::resolve_model_source_with_override(
+        &requested,
+        args.models_dir.as_deref(),
+        args.revision.as_deref(),
+    )?;
+    if one_shot_stays_on_generate(&args.generation, &model_path) {
+        return crate::commands::run_generate(args.into_generate_args());
+    }
+
+    // Read `--image` files before the model loads, so a bad path fails fast.
+    let images = image_data_uris(&args.generation.image)?;
+    check_image_budget(0, images.len(), server_image_cap())
+        .map_err(|reason| anyhow::anyhow!("--image: {reason}"))?;
+    let mut settings = args.server_settings()?;
+    // One request has nothing to reuse, so the prompt cache stays off (ADR
+    // 0007: on for chat clients, which `run -p` is not); the warmup is the
+    // one-token pass the `generate` flow always ran before its generation.
+    settings.prompt_cache = false;
+    settings.warmup = true;
+    settings.kv_cache_mode = mlxcel::cli::turbo_args::resolve_and_announce_kv_cache_mode(
+        settings.kv_cache_mode,
+        &model_path,
+    );
+
+    println!("Loading model from {model_path:?}...");
+    let load_start = Instant::now();
+    let server = InProcessServer::start(&settings.startup(&model_path))?;
+    println!(
+        "Model loaded in {:.2}s.",
+        load_start.elapsed().as_secs_f64()
+    );
+    // The REPL's notice: without a chat template the server renders the
+    // prompt with its generic default format, which a base model rarely
+    // answers well.
+    super::cli_turn::warn_if_base_model(&server, args.generation.no_chat_template);
+
+    let display = TurnDisplay {
+        show_reasoning: args.generation.show_reasoning,
+    };
+    let mut printer = TurnPrinter::new(display);
+    println!("Generating...");
+    let outcome = run_cancellable(|cancel| {
+        if args.generation.no_chat_template {
+            let request = mlxcel::server::in_process::chat::completion_request_from_json(
+                completion_request_body(&prompt, &settings),
+            )?;
+            server.complete(request, cancel, |delta| printer.on_delta(delta))
+        } else {
+            let messages = messages_json(
+                &[Turn {
+                    message: ChatMessage {
+                        role: "user".to_string(),
+                        content: prompt.clone(),
+                    },
+                    images: images.clone(),
+                }],
+                args.generation.image_soft_tokens,
+            );
+            let request = mlxcel::server::in_process::chat::chat_request_from_json(
+                chat_request_body(messages, &settings),
+            )?;
+            server.chat(request, cancel, |delta| printer.on_delta(delta))
+        }
+    });
+    // Join the worker before a turn error leaves the command.
+    let turn = match outcome {
+        Ok(turn) => turn,
+        Err(err) => return shutdown_then_fail(server, err),
+    };
+    printer.finish(&turn, "Re-run");
+    println!();
+    let seconds = turn.result.generation_only_ms as f64 / 1000.0;
+    let rate = if seconds > 0.0 {
+        turn.result.completion_tokens as f64 / seconds
+    } else {
+        0.0
+    };
+    println!(
+        "[Generated {} tokens in {seconds:.2}s = {rate:.2} tok/s]",
+        turn.result.completion_tokens
+    );
+    if let Some(spec) = turn.result.speculative.as_ref() {
+        println!(
+            "[Speculative {:?}: {} rounds, {}/{} drafted tokens accepted]",
+            spec.draft_kind, spec.draft_rounds, spec.draft_n_accepted, spec.draft_n
+        );
+    }
+    server.shutdown()
 }
 
 #[cfg(test)]

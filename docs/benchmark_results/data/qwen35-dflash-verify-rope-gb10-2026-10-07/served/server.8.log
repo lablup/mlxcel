@@ -1,0 +1,43 @@
+2026-10-07T02:52:04.481436Z  WARN mlxcel::server::startup: CORS is set to allow all origins ('*') and no API key is set; this can be a security risk (cross-origin attacks). Set --api-key, or narrow --cors-origins / --allowed-origins
+2026-10-07T02:52:04.481476Z  INFO mlxcel::server::startup: effective KV cache mode kv_cache_mode=fp16 kv_bits=0
+2026-10-07T02:52:04.482656Z  INFO mlxcel::server::startup: resolved context and batch geometry (0 = the checkpoint's own trained context) ctx_size=0 ctx_size_per_slot=0 context_slots=1 kv_unified=false n_parallel=4 prefill_chunk_size=512 max_kv_size=None
+2026-10-07T02:52:04.482743Z  INFO mlxcel::server::startup: Runtime device: NVIDIA GPU (CUDA)
+2026-10-07T02:52:04.482746Z  INFO mlxcel::server::startup: CUDA graph-cache LRU capacity: MLX_CUDA_GRAPH_CACHE_SIZE=2000 (mlxcel raises MLX's default of 400 to 2000 so long-lived, shape-diverse decode does not hit the cache-thrashing abort from issue #818, unless an operator override is set)
+2026-10-07T02:52:04.482748Z  INFO mlxcel::server::startup: Wired memory limit: 121.7 GB
+2026-10-07T02:52:04.810067Z  INFO mlxcel::server::startup: DRY sequence breakers active (b10621 semantics: breaker token data derived from the vocabulary per request) breakers=["\n", ":", "\"", "*"]
+2026-10-07T02:52:04.810097Z  INFO mlxcel::server::startup: Tokenizer recognizes a think marker pair; defaulting chat_template kwarg `enable_thinking=true` (upstream PR #1114) think_start=Some("<think>") think_end=Some("</think>") think_start_tokens_len=1 think_end_tokens_len=1
+2026-10-07T02:52:04.810684Z  INFO mlxcel::server::startup: Applied model-aware prompt-cache snapshot capacity default previous_snapshot_capacity_bytes=536870912 recommended_snapshot_capacity_bytes=1768685568 representative_snapshot_bytes=294780928 representative_tokens=8192 target_entries=6 kv_bytes_at_representative_tokens=268435456 fixed_state_bytes=26345472 available_ceiling_bytes=30035092070 architecture=hybrid: 8 attention layer(s) hold KV (rest recurrent/SSM)
+2026-10-07T02:52:04.810979Z  INFO mlxcel::server::startup: Prompt-prefix cache store enabled (+ APC, snapshots) capacity_bytes=2147483648 max_entries=1024 ttl_seconds=3600 snapshot_capacity_bytes=1768685568 snapshot_max_entries=4096 snapshot_ttl_seconds=7200 min_prefix_tokens=32 apc_enabled=true apc_block_size=16 apc_hash=sha256
+2026-10-07T02:52:05.143132Z  INFO mlxcel::server::startup: Warming up model...
+2026-10-07T02:52:05.143242Z  INFO mlxcel::server::model_provider::model_worker: Model worker thread starting, loading model...
+2026-10-07T02:52:05.481890Z  INFO mlxcel::server::model_provider::model_worker: Model qwen3.5-4b-4bit loaded in 0.339s (resident after load: 0.00 GB) worker_model_id=qwen3.5-4b-4bit load_seconds=0.338637838 active_bytes=0 peak_bytes=0 cache_bytes=0 limit_bytes=124128081510
+2026-10-07T02:52:05.481962Z  INFO mlxcel::server::model_provider::model_worker: Starting BatchScheduler (max_batch_size=1, max_queue_depth=32, prefill_chunk_size=512, max_batch_prefill=4, decode_storage=auto, speculative=dflash (drafter=models/mlx/qwen3.5-4b-dflash, block_size=8, block_size_from=operator override, explicit_kind=true))
+2026-10-07T02:52:05.482387Z  INFO mlxcel::server::model_provider::model_worker: Paged KV block budget: 3062487 blocks (32 layers, 32-token blocks)
+2026-10-07T02:52:05.482403Z  INFO mlxcel::server::model_provider::model_worker: Paged KV slab size: 256 blocks per layer (fused decode serves a layer only while its rows fit one slab)
+2026-10-07T02:52:05.482437Z  INFO mlxcel::server::batch::scheduler::paged_layout: resolved KV cache mode applied to model caches kv_cache_mode_effective=fp16 kv_cache_mode_applied_layers=32 kv_cache_mode_total_layers=32
+2026-10-07T02:52:07.203897Z  WARN mlxcel::models::speculative_exactness: MTP declined: verify block position 0 differs from the single-token chain in 192685 of 496640 logit bytes. Falling back to classic decode. Set MLXCEL_MTP_ALLOW_INEXACT=1 to engage anyway and forfeit the temperature-0 byte-identity contract. block_size=8
+2026-10-07T02:52:07.203930Z  WARN mlxcel::server::batch::speculative_burst: DFlash speculative dispatch declined for seq seq-0: the block-versus-chain exactness probe did not pass at block_size=8 on this host, so a 8-row verify block would not reproduce classic decode's tokens; falling back to classic decode (see the probe verdict logged above; MLXCEL_MTP_ALLOW_INEXACT=1 engages anyway and forfeits the contract)
+2026-10-07T02:52:07.206932Z  INFO prefill{seq_id=seq-0 prompt_len=1 cached=0 start=0}: mlxcel_core::sampling_dispatch: sampling dispatch: argmax: greedy path (temperature 0, top_k 1); no sampling kernel involved
+2026-10-07T02:52:07.228427Z  INFO prefill{seq_id=seq-0 prompt_len=1 cached=0 start=0}: mlxcel::server::batch::scheduler::prefill: prompt-cache: request completed during prefill: cached=0/1 prompt tokens, total 1745ms prompt_tokens=1 cached_tokens=0 generation_time_ms=1745
+2026-10-07T02:52:07.228637Z  INFO mlxcel::server::startup: Warmup complete
+2026-10-07T02:52:07.229110Z  INFO mlxcel::server::startup: model_type=Qwen35VLM: enabling native video_url content block support
+2026-10-07T02:52:07.230253Z  WARN mlxcel::server::startup: The loaded model accepts video input, but `ffmpeg` and `ffprobe` are not both on PATH, so every video request will be refused. The check is cached for the life of the process: restart the server after installing ffmpeg.
+2026-10-07T02:52:07.231850Z  INFO mlxcel::server::startup: Starting mlxcel server on http://127.0.0.1:18977
+2026-10-07T02:52:07.231860Z  INFO mlxcel::server::startup: Detected 1 GPU(s)
+2026-10-07T02:52:07.231863Z  INFO mlxcel::server::startup: CUDA compute capability 12.1 (sm_121); compiled for [121] (cubin)
+2026-10-07T02:52:07.231865Z  INFO mlxcel::server::startup: Endpoints:
+2026-10-07T02:52:07.231866Z  INFO mlxcel::server::startup:   POST /v1/chat/completions  - OpenAI chat completions
+2026-10-07T02:52:07.231868Z  INFO mlxcel::server::startup:   POST /v1/completions       - OpenAI text completions
+2026-10-07T02:52:07.231869Z  INFO mlxcel::server::startup:   GET  /v1/models            - List models
+2026-10-07T02:52:07.231870Z  INFO mlxcel::server::startup:   POST /completion           - llama-server native completion
+2026-10-07T02:52:07.231871Z  INFO mlxcel::server::startup:   POST /tokenize             - Tokenize text
+2026-10-07T02:52:07.231873Z  INFO mlxcel::server::startup:   POST /detokenize           - Detokenize tokens
+2026-10-07T02:52:07.231874Z  INFO mlxcel::server::startup:   GET  /props                - Server properties
+2026-10-07T02:52:07.231875Z  INFO mlxcel::server::startup:   GET  /slots                - Slot status
+2026-10-07T02:52:07.231877Z  INFO mlxcel::server::startup:   GET  /health               - Health check
+2026-10-07T02:52:08.182149Z  WARN mlxcel::server::batch::speculative_burst: DFlash speculative dispatch declined for seq seq-1: the block-versus-chain exactness probe did not pass at block_size=8 on this host, so a 8-row verify block would not reproduce classic decode's tokens; falling back to classic decode (see the probe verdict logged above; MLXCEL_MTP_ALLOW_INEXACT=1 engages anyway and forfeits the contract)
+2026-10-07T02:52:10.956054Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/15 prompt tokens, total 2773ms prompt_tokens=15 cached_tokens=0 generation_time_ms=2773
+2026-10-07T02:52:10.957691Z  WARN mlxcel::server::batch::speculative_burst: DFlash speculative dispatch declined for seq seq-2: the block-versus-chain exactness probe did not pass at block_size=8 on this host, so a 8-row verify block would not reproduce classic decode's tokens; falling back to classic decode (see the probe verdict logged above; MLXCEL_MTP_ALLOW_INEXACT=1 engages anyway and forfeits the contract)
+2026-10-07T02:52:14.395865Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/9 prompt tokens, total 3438ms prompt_tokens=9 cached_tokens=0 generation_time_ms=3438
+2026-10-07T02:52:14.397449Z  WARN mlxcel::server::batch::speculative_burst: DFlash speculative dispatch declined for seq seq-3: the block-versus-chain exactness probe did not pass at block_size=8 on this host, so a 8-row verify block would not reproduce classic decode's tokens; falling back to classic decode (see the probe verdict logged above; MLXCEL_MTP_ALLOW_INEXACT=1 engages anyway and forfeits the contract)
+2026-10-07T02:52:17.941150Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/18 prompt tokens, total 3543ms prompt_tokens=18 cached_tokens=0 generation_time_ms=3543

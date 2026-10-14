@@ -1,0 +1,192 @@
+diff --git a/src/lib/mlxcel-core/src/speculative/prompt_lookup.rs b/src/lib/mlxcel-core/src/speculative/prompt_lookup.rs
+index 35ce2b66..8d3d80f1 100644
+--- a/src/lib/mlxcel-core/src/speculative/prompt_lookup.rs
++++ b/src/lib/mlxcel-core/src/speculative/prompt_lookup.rs
+@@ -489,6 +489,18 @@ impl DraftGovernor {
+             self.drafted_samples = 0;
+         }
+     }
++
++    /// Temporary issue #2264 diagnostic state. Remove after the trajectory capture.
++    pub(crate) fn diagnostic_state(&self) -> (f64, f64, usize, usize, bool, bool) {
++        (
++            self.accepted_ema,
++            self.emitted_ema,
++            self.drafted_samples,
++            self.misses,
++            self.drafting,
++            self.probation,
++        )
++    }
+ }
+ 
+ /// A lookup proposal made while proposals are paused, tested against the
+diff --git a/src/lib/mlxcel-core/src/speculative/prompt_lookup_drafter.rs b/src/lib/mlxcel-core/src/speculative/prompt_lookup_drafter.rs
+index 847a31e2..f7b3593f 100644
+--- a/src/lib/mlxcel-core/src/speculative/prompt_lookup_drafter.rs
++++ b/src/lib/mlxcel-core/src/speculative/prompt_lookup_drafter.rs
+@@ -32,6 +32,15 @@ use crate::drafter::{Drafter, DrafterError, DrafterKind};
+ use crate::generate::{LanguageModel, SamplingConfig};
+ use crate::weights::WeightMap;
+ 
++fn diagnostic_trace_enabled() -> bool {
++    use std::sync::OnceLock;
++
++    static ENABLED: OnceLock<bool> = OnceLock::new();
++    *ENABLED.get_or_init(|| {
++        matches!(std::env::var("MLXCEL_PROMPT_LOOKUP_TRACE").as_deref(), Ok("1"))
++    })
++}
++
+ /// The prompt-lookup drafter. One instance serves one completion; a second
+ /// run through the same instance starts from the prompt the loop reports to
+ /// [`Drafter::prefill_from_target_hidden`].
+@@ -96,7 +105,20 @@ impl PromptLookupDrafter {
+     /// server scheduler reports plain-step tokens through this, lazily,
+     /// before its next [`Drafter::draft_block`] (#2255).
+     pub fn observe_emitted(&mut self, tokens: &[i32]) {
++        let context_before = self.context.len();
+         self.context.extend_from_slice(tokens);
++        if diagnostic_trace_enabled() && !tokens.is_empty() {
++            eprintln!(
++                "prompt_lookup_trace event=plain gov={:p} round={} emitted={} context_before={} context_after={} paused={} shadow_pending={}",
++                &self.governor,
++                self.stats.rounds,
++                tokens.len(),
++                context_before,
++                self.context.len(),
++                self.governor.probes_while_paused(),
++                self.shadow.is_some(),
++            );
++        }
+     }
+ 
+     fn start(&mut self, prompt_tokens: &[i32], first_token: i32) {
+@@ -112,6 +134,17 @@ impl PromptLookupDrafter {
+         self.last_paused = false;
+         self.plain_streak = 0;
+         self.stats = PromptLookupStats::default();
++        if diagnostic_trace_enabled() {
++            eprintln!(
++                "prompt_lookup_trace event=start gov={:p} prompt={} context={} max_draft={} floor={:?} shadow_confirm={}",
++                &self.governor,
++                prompt_tokens.len(),
++                self.context.len(),
++                self.config.max_draft,
++                self.config.min_tokens_per_round,
++                self.config.shadow_confirm_tokens,
++            );
++        }
+     }
+ }
+ 
+@@ -151,12 +184,21 @@ impl Drafter for PromptLookupDrafter {
+             .as_ref()
+             .and_then(|probe| probe.settle(&self.context, self.config.shadow_confirm_tokens))
+         {
++            if diagnostic_trace_enabled() {
++                eprintln!(
++                    "prompt_lookup_trace event=shadow_settle gov={:p} round={} confirmed={} context={}",
++                    &self.governor,
++                    self.stats.rounds + 1,
++                    confirmed,
++                    self.context.len(),
++                );
++            }
+             self.shadow = None;
+             if confirmed {
+                 self.governor.shadow_confirmed();
+                 self.stats.shadow_confirmations += 1;
+             }
+         }
+         let budget = self.governor.budget().min(block_size);
+         self.stats.rounds += 1;
+         if budget == 0 {
+@@ -179,5 +221,17 @@ impl Drafter for PromptLookupDrafter {
+                     });
+                 }
+             }
++            if diagnostic_trace_enabled() {
++                let (accepted_ema, emitted_ema, samples, misses, drafting, probation) =
++                    self.governor.diagnostic_state();
++                eprintln!(
++                    "prompt_lookup_trace event=ask gov={:p} round={} context={} block_limit={} budget=0 proposed=0 paused=true shadow_pending={} accepted_ema={accepted_ema:.6} emitted_ema={emitted_ema:.6} samples={samples} misses={misses} drafting={drafting} probation={probation}",
++                    &self.governor,
++                    self.stats.rounds,
++                    self.context.len(),
++                    block_size,
++                    self.shadow.is_some(),
++                );
++            }
+             return Ok(Vec::new());
+         }
+@@ -195,5 +249,19 @@ impl Drafter for PromptLookupDrafter {
+             self.stats.drafted_rounds += 1;
+             self.stats.proposed_draft_tokens += draft.len();
+         }
++        if diagnostic_trace_enabled() {
++            let (accepted_ema, emitted_ema, samples, misses, drafting, probation) =
++                self.governor.diagnostic_state();
++            eprintln!(
++                "prompt_lookup_trace event=ask gov={:p} round={} context={} block_limit={} budget={} proposed={} paused=false shadow_pending={} accepted_ema={accepted_ema:.6} emitted_ema={emitted_ema:.6} samples={samples} misses={misses} drafting={drafting} probation={probation}",
++                &self.governor,
++                self.stats.rounds,
++                self.context.len(),
++                block_size,
++                budget,
++                draft.len(),
++                self.shadow.is_some(),
++            );
++        }
+         Ok(draft)
+     }
+@@ -213,5 +281,14 @@ impl Drafter for PromptLookupDrafter {
+     }
+ 
+     fn retract_draft(&mut self, draft: &[i32]) {
++        if diagnostic_trace_enabled() {
++            eprintln!(
++                "prompt_lookup_trace event=retract gov={:p} round={} proposed={} paused_ask={}",
++                &self.governor,
++                self.stats.rounds,
++                draft.len(),
++                self.last_paused,
++            );
++        }
+         self.stats.rounds = self.stats.rounds.saturating_sub(1);
+         if self.last_paused {
+@@ -224,9 +301,34 @@ impl Drafter for PromptLookupDrafter {
+         _sampler: &SamplingConfig,
+     ) -> Result<(), DrafterError> {
+         self.context.extend_from_slice(new_tokens);
+         if !draft_tokens.is_empty() {
++            let before = self.governor.diagnostic_state();
+             self.governor.record_round(accepted, draft_tokens.len());
++            let after = self.governor.diagnostic_state();
+             self.stats.accepted_draft_tokens += accepted;
++            if diagnostic_trace_enabled() {
++                eprintln!(
++                    "prompt_lookup_trace event=verify gov={:p} round={} proposed={} accepted={} emitted={} context={} accepted_ema_before={:.6} accepted_ema_after={:.6} emitted_ema_before={:.6} emitted_ema_after={:.6} samples_before={} samples_after={} misses_before={} misses_after={} drafting_before={} drafting_after={} probation_before={} probation_after={}",
++                    &self.governor,
++                    self.stats.rounds,
++                    draft_tokens.len(),
++                    accepted,
++                    new_tokens.len(),
++                    self.context.len(),
++                    before.0,
++                    after.0,
++                    before.1,
++                    after.1,
++                    before.2,
++                    after.2,
++                    before.3,
++                    after.3,
++                    before.4,
++                    after.4,
++                    before.5,
++                    after.5,
++                );
++            }
+         }
+         Ok(())
+     }

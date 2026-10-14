@@ -85,7 +85,7 @@ const PROMPT: &str = "The capital of France is";
 /// Prefill `PROMPT`, decode greedily, and assert every step's sampled row is
 /// finite.
 ///
-/// The decode loop is written out rather than run through `CxxGenerator`
+/// The decode loop is written out rather than run through the engine client
 /// because the assertion has to happen after *every* step. A generator returns
 /// the finished token list, by which point a NaN at step 3 is indistinguishable
 /// from a model that simply produced odd text.

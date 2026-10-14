@@ -336,7 +336,7 @@ const SPECULATIVE_EXPECTED_FLAGS: &[&str] = &["--draft-kind", "--draft-block-siz
 /// `mlxcel_core::drafter::KNOWN_DRAFTER_KINDS` (the third
 /// `internal-mtp` variant is intentionally excluded from CLI parsing,
 /// see `SpeculativeArgs::parse_kind`).
-const SPECULATIVE_EXPECTED_KINDS: &[&str] = &["dflash", "mtp"];
+const SPECULATIVE_EXPECTED_KINDS: &[&str] = &["dflash", "mtp", "prompt-lookup"];
 
 /// Env vars consulted by the speculative-decoding flag group via
 /// `#[arg(env = "...")]`. Cleared before spawn so help output is

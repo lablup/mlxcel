@@ -15,7 +15,7 @@
 //! [#1820] Numbers out of the bucketed cuDNN SDPA path.
 //!
 //! The patched `sdpa_cudnn` in
-//! `src/lib/mlx-cpp/patches/mlx/backend/cuda/scaled_dot_product_attention.cpp`
+//! `src/lib/mlxcelverse/overlays/cuda/mlx/backend/cuda/scaled_dot_product_attention.cpp`
 //! answers a small array-masked multi-row call over a KV cache by handing cuDNN
 //! the whole cache buffer instead of the live prefix, with the mask widened to
 //! the same width and the true lengths carried by `set_seq_len_kv`. That points

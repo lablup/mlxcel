@@ -1,0 +1,25 @@
+w2-rr0-ld1-r1 exit=0 [1935] FIRST byte difference at round 80 row 0 (emitted index 134, absolute position 291): 236123 of 496640 logit bytes [1935] 114 rounds, 67 of 200 kept rows differ in logit bytes 
+w2-rr0-ld0-r1 exit=0 [1935] FIRST byte difference at round 43 row 1 (emitted index 72, absolute position 229): 226562 of 496640 logit bytes [1935] 114 rounds, 129 of 200 kept rows differ in logit bytes 
+w2-rr1-ld1-r1 exit=0 [1935] 114 rounds, 0 of 200 kept rows differ in logit bytes 
+w2-rr1-ld0-r1 exit=0 [1935] 114 rounds, 0 of 200 kept rows differ in logit bytes 
+w4-rr0-ld1-r1 exit=0 [1935] FIRST byte difference at round 60 row 1 (emitted index 134, absolute position 291): 236123 of 496640 logit bytes [1935] 79 rounds, 67 of 200 kept rows differ in logit bytes 
+w4-rr0-ld0-r1 exit=0 [1935] FIRST byte difference at round 31 row 3 (emitted index 72, absolute position 229): 226562 of 496640 logit bytes [1935] 79 rounds, 129 of 200 kept rows differ in logit bytes 
+w4-rr1-ld1-r1 exit=0 [1935] 79 rounds, 0 of 200 kept rows differ in logit bytes 
+w4-rr1-ld0-r1 exit=0 [1935] 79 rounds, 0 of 200 kept rows differ in logit bytes 
+w2-rr0-ld1-r2 exit=0 [1935] FIRST byte difference at round 80 row 0 (emitted index 134, absolute position 291): 236123 of 496640 logit bytes [1935] 114 rounds, 67 of 200 kept rows differ in logit bytes 
+w2-rr0-ld0-r2 exit=0 [1935] FIRST byte difference at round 43 row 1 (emitted index 72, absolute position 229): 226562 of 496640 logit bytes [1935] 114 rounds, 129 of 200 kept rows differ in logit bytes 
+w2-rr1-ld1-r2 exit=0 [1935] 114 rounds, 0 of 200 kept rows differ in logit bytes 
+w2-rr1-ld0-r2 exit=0 [1935] 114 rounds, 0 of 200 kept rows differ in logit bytes 
+w4-rr0-ld1-r2 exit=0 [1935] FIRST byte difference at round 60 row 1 (emitted index 134, absolute position 291): 236123 of 496640 logit bytes [1935] 79 rounds, 67 of 200 kept rows differ in logit bytes 
+w4-rr0-ld0-r2 exit=0 [1935] FIRST byte difference at round 31 row 3 (emitted index 72, absolute position 229): 226562 of 496640 logit bytes [1935] 79 rounds, 129 of 200 kept rows differ in logit bytes 
+w4-rr1-ld1-r2 exit=0 [1935] 79 rounds, 0 of 200 kept rows differ in logit bytes 
+w4-rr1-ld0-r2 exit=0 [1935] 79 rounds, 0 of 200 kept rows differ in logit bytes 
+w2-rr0-ld1-r3 exit=0 [1935] FIRST byte difference at round 80 row 0 (emitted index 134, absolute position 291): 236123 of 496640 logit bytes [1935] 114 rounds, 67 of 200 kept rows differ in logit bytes 
+w2-rr0-ld0-r3 exit=0 [1935] FIRST byte difference at round 43 row 1 (emitted index 72, absolute position 229): 226562 of 496640 logit bytes [1935] 114 rounds, 129 of 200 kept rows differ in logit bytes 
+w2-rr1-ld1-r3 exit=0 [1935] 114 rounds, 0 of 200 kept rows differ in logit bytes 
+w2-rr1-ld0-r3 exit=0 [1935] 114 rounds, 0 of 200 kept rows differ in logit bytes 
+w4-rr0-ld1-r3 exit=0 [1935] FIRST byte difference at round 60 row 1 (emitted index 134, absolute position 291): 236123 of 496640 logit bytes [1935] 79 rounds, 67 of 200 kept rows differ in logit bytes 
+w4-rr0-ld0-r3 exit=0 [1935] FIRST byte difference at round 31 row 3 (emitted index 72, absolute position 229): 226562 of 496640 logit bytes [1935] 79 rounds, 129 of 200 kept rows differ in logit bytes 
+w4-rr1-ld1-r3 exit=0 [1935] 79 rounds, 0 of 200 kept rows differ in logit bytes 
+w4-rr1-ld0-r3 exit=0 [1935] 79 rounds, 0 of 200 kept rows differ in logit bytes 
+MATRIX DONE

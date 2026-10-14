@@ -28,14 +28,13 @@ use crate::distributed::pipeline::LayerFilter;
 use crate::distributed::pipeline::StageExecutionOutput;
 use crate::distributed::pipeline::partial_loading::filter_weight_map;
 use crate::models::kv_snapshot::{self, KvSnapshotNames};
-use crate::models::model_owned::{
-    KvCacheLayerModes, ModelOwnedSequenceState, dispatch_paged_decode_from_visible_caches,
-};
+use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
 use crate::models::rope_utils::{RopeScalingSpec, printable_label};
 use mlxcel_core::cache::{
-    CachePool, KVCacheMode, RotatingPagedDecodeMetadata, SequenceId, SequenceStateLayout,
+    CachePool, DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS, KVCacheMode, KvAttention, SequenceId,
+    SequenceStateLayout, attend_batched_rows, flush_decode_undo_rows,
 };
-use mlxcel_core::generate::{DecodeBatchContext, ModelStateSnapshot};
+use mlxcel_core::generate::ModelStateSnapshot;
 use mlxcel_core::layers::{
     FusedQKVLinear, GemmaRMSNorm, KVCache, RotatingKVCache, UnifiedEmbedding, UnifiedLinear,
 };
@@ -243,7 +242,6 @@ pub struct Attention {
     pub head_dim: i32,
     pub scale: f32,
     pub is_sliding: bool,
-    pub window_size: i32,
     pub rope_base: f32,
     /// Position scale handed to every RoPE call in this block: `1.0` on a
     /// sliding layer, `ModelArgs::global_rope_scale()` on a global one. See
@@ -312,32 +310,15 @@ impl Attention {
             (q, k, v)
         };
 
-        // Update KV cache and get sliced views
-        let (cache_k, cache_v) = cache.update_and_fetch(k, v);
-
-        // Use fused scaled dot-product attention (handles GQA internally).
-        // A multi-token forward with no mask is a prefill whose mask would be
-        // plain causal: every live key is inside this layer's window (or the
-        // layer is global). `attention_from_ptr` with no mask is not causal,
-        // so take MLX's maskless causal SDPA mode explicitly.
-        let k_len = mlxcel_core::array_shape(&cache_k)[2];
-        let attn_out =
-            if mask.is_none() && l > 1 && (self.window_size == 0 || k_len <= self.window_size) {
-                mlxcel_core::causal_attention(&q, &cache_k, &cache_v, self.scale, 0.0, 0)
-            } else {
-                let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
-                unsafe {
-                    mlxcel_core::layers::attention_from_ptr(
-                        &q,
-                        &cache_k,
-                        &cache_v,
-                        self.scale,
-                        mask_ptr,
-                        0.0,
-                        self.window_size,
-                    )
-                }
-            };
+        // The cache appends K/V and runs the attention for its storage
+        // (ADR 0008, #2172): a global `KVCache` takes the dense route of
+        // `KVCache::attend`, a sliding `RotatingKVCache` takes
+        // `RotatingKVCache::attend`, whose write path is `update_and_fetch`
+        // so the decode undo log (#2182) sees every single-token write. A
+        // multi-token unmasked forward whose window fits is a prefill whose
+        // mask would be plain causal, and the entries take the causal helper
+        // for it, as this block used to.
+        let attn_out = cache.attend(&q, k, v, self.scale, mask);
 
         // Transpose back and reshape
         let attn_out = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);
@@ -351,7 +332,6 @@ impl Attention {
         &self,
         x: &MlxArray,
         caches: &mut [&mut Cache],
-        decode_context: Option<&DecodeBatchContext>,
     ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(x);
         let batch = shape[0] as usize;
@@ -388,129 +368,12 @@ impl Attention {
             &offsets,
         );
 
-        if let Some(context) = decode_context {
-            let paged_attn = if self.is_sliding && context.is_paged_decode() {
-                let mut cache_keys = Vec::with_capacity(caches.len());
-                let mut cache_values = Vec::with_capacity(caches.len());
-                let mut kv_lens = Vec::with_capacity(caches.len());
-                let mut logical_starts = Vec::with_capacity(caches.len());
-
-                for (batch_idx, cache) in caches.iter_mut().enumerate() {
-                    let k_i = mlxcel_core::slice(
-                        &k,
-                        &[batch_idx as i32, 0, 0, 0],
-                        &[batch_idx as i32 + 1, i32::MAX, i32::MAX, i32::MAX],
-                    );
-                    let v_i = mlxcel_core::slice(
-                        &v,
-                        &[batch_idx as i32, 0, 0, 0],
-                        &[batch_idx as i32 + 1, i32::MAX, i32::MAX, i32::MAX],
-                    );
-                    let _ = cache.update_and_fetch(k_i, v_i);
-                    kv_lens.push(cache.visible_len() as i32);
-                    logical_starts.push(cache.rotating_logical_start().unwrap_or_default());
-                    cache_keys.push(
-                        cache
-                            .keys_ptr()
-                            .expect("gemma3 rotating cache should expose key buffer"),
-                    );
-                    cache_values.push(
-                        cache
-                            .values_ptr()
-                            .expect("gemma3 rotating cache should expose value buffer"),
-                    );
-                }
-
-                let metadata = RotatingPagedDecodeMetadata::from_parts(
-                    &kv_lens,
-                    &logical_starts,
-                    context.paged_block_size,
-                )
-                .expect("valid gemma3 rotating paged decode metadata");
-                let attn = if context.use_native_paged_kernel {
-                    mlxcel_core::layers::paged_decode_attention_rotating_compat(
-                        &q,
-                        &cache_keys,
-                        &cache_values,
-                        &metadata,
-                        self.scale,
-                    )
-                } else {
-                    mlxcel_core::layers::paged_decode_attention_rotating_fallback(
-                        &q,
-                        &cache_keys,
-                        &cache_values,
-                        &metadata,
-                        self.scale,
-                    )
-                }
-                .expect("valid gemma3 rotating paged decode inputs");
-                Some(attn)
-            } else {
-                dispatch_paged_decode_from_visible_caches(
-                    &q,
-                    &k,
-                    &v,
-                    caches,
-                    self.scale,
-                    context,
-                    |cache, k_i, v_i| Ok(cache.update_and_fetch(k_i, v_i)),
-                )
-                .expect("valid gemma3 paged decode inputs")
-            };
-
-            if let Some(attn_out) = paged_attn {
-                tracing::debug!(
-                    batch_size = batch,
-                    block_size = context.paged_block_size,
-                    native_kernel = context.use_native_paged_kernel,
-                    sliding = self.is_sliding,
-                    "Gemma3 paged decode attention dispatch"
-                );
-                let attn_out = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);
-                let attn_out = mlxcel_core::reshape(
-                    &attn_out,
-                    &[batch as i32, seq_len, self.num_heads * self.head_dim],
-                );
-                return self.o_proj.forward(&attn_out);
-            }
-        }
-
-        let mut outputs = Vec::with_capacity(batch);
-        for (batch_idx, cache) in caches.iter_mut().enumerate() {
-            let q_i = mlxcel_core::slice(
-                &q,
-                &[batch_idx as i32, 0, 0, 0],
-                &[batch_idx as i32 + 1, i32::MAX, i32::MAX, i32::MAX],
-            );
-            let k_i = mlxcel_core::slice(
-                &k,
-                &[batch_idx as i32, 0, 0, 0],
-                &[batch_idx as i32 + 1, i32::MAX, i32::MAX, i32::MAX],
-            );
-            let v_i = mlxcel_core::slice(
-                &v,
-                &[batch_idx as i32, 0, 0, 0],
-                &[batch_idx as i32 + 1, i32::MAX, i32::MAX, i32::MAX],
-            );
-            let (cache_k, cache_v) = cache.update_and_fetch(k_i, v_i);
-            outputs.push(unsafe {
-                mlxcel_core::layers::attention_from_ptr(
-                    &q_i,
-                    &cache_k,
-                    &cache_v,
-                    self.scale,
-                    std::ptr::null(),
-                    0.0,
-                    self.window_size,
-                )
-            });
-        }
-
-        let mut attn_out = outputs.remove(0);
-        for output in outputs {
-            attn_out = mlxcel_core::concatenate(&attn_out, &output, 0);
-        }
+        // One attention per row through the row's own cache
+        // (`Cache::attend`; ADR 0008, #2172). Gemma 3's state is never
+        // pool-backed, so there is no whole-batch launch to take, and the
+        // dense-pointer paged kernels this path used to select from the
+        // scheduler's `DecodeBatchContext` were per-row loops themselves.
+        let attn_out = attend_batched_rows(&q, &k, &v, caches, self.scale, None);
         let attn_out = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);
         let attn_out = mlxcel_core::reshape(
             &attn_out,
@@ -567,11 +430,6 @@ impl Attention {
             head_dim,
             scale,
             is_sliding,
-            window_size: if is_sliding {
-                args.sliding_window as i32
-            } else {
-                0
-            },
             rope_base,
             rope_scale,
             q_norm,
@@ -687,12 +545,9 @@ impl TransformerBlock {
         &self,
         x: &MlxArray,
         caches: &mut [&mut Cache],
-        decode_context: Option<&DecodeBatchContext>,
     ) -> UniquePtr<MlxArray> {
         let normed = self.input_layernorm.forward(x);
-        let attn_out = self
-            .self_attn
-            .forward_batched_decode(&normed, caches, decode_context);
+        let attn_out = self.self_attn.forward_batched_decode(&normed, caches);
         let post_attn_normed = self.post_attention_layernorm.forward(&attn_out);
         let h = mlxcel_core::compiled_clip_residual(x, &post_attn_normed);
 
@@ -776,6 +631,17 @@ pub(crate) trait CacheInterface {
         k: UniquePtr<MlxArray>,
         v: UniquePtr<MlxArray>,
     ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>);
+    /// Append `k`/`v` and run attention through the entry of the storage
+    /// behind this cache (`KVCache::attend`, `RotatingKVCache::attend`;
+    /// ADR 0008, #2172). The single-row forward's only attention call.
+    fn attend(
+        &mut self,
+        q: &MlxArray,
+        k: UniquePtr<MlxArray>,
+        v: UniquePtr<MlxArray>,
+        scale: f32,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray>;
 }
 
 impl CacheInterface for KVCache {
@@ -793,6 +659,17 @@ impl CacheInterface for KVCache {
         v: UniquePtr<MlxArray>,
     ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
         self.update_and_fetch(k, v)
+    }
+
+    fn attend(
+        &mut self,
+        q: &MlxArray,
+        k: UniquePtr<MlxArray>,
+        v: UniquePtr<MlxArray>,
+        scale: f32,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        KVCache::attend(self, q, k, v, scale, mask)
     }
 }
 
@@ -823,6 +700,17 @@ impl CacheInterface for RotatingKVCache {
         v: UniquePtr<MlxArray>,
     ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
         self.update_and_fetch(k, v)
+    }
+
+    fn attend(
+        &mut self,
+        q: &MlxArray,
+        k: UniquePtr<MlxArray>,
+        v: UniquePtr<MlxArray>,
+        scale: f32,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        RotatingKVCache::attend(self, q, k, v, scale, mask)
     }
 }
 
@@ -913,6 +801,59 @@ impl Cache {
         }
     }
 
+    /// Drop the trailing `excess` positions a tile-aligned padded prefill
+    /// wrote, leaving the state an unpadded prefill of the same tokens would
+    /// have left (issue #1755). A sliding layer also cuts its physical buffer
+    /// back, because a plain `trim` would leave the pad keys in the slots the
+    /// next decode step keeps.
+    ///
+    /// Used by: Gemma 3.
+    pub(crate) fn rewind_padded_prefill(&mut self, excess: i32) -> Result<(), String> {
+        match self {
+            Cache::Standard(cache) => {
+                let trimmed = cache.trim(excess);
+                if trimmed == excess {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "standard cache dropped {trimmed} of {excess} pad positions"
+                    ))
+                }
+            }
+            Cache::Rotating(cache) => cache.rewind_padded_prefill(excess),
+        }
+    }
+
+    /// Unwind the last `n` single-token decode appends (issue #2159). A
+    /// global layer's cursor trim is exact (its slots are never reused); a
+    /// sliding layer restores the rows its undo log kept.
+    pub(crate) fn rewind_decode_appends(&mut self, n: i32) -> Result<(), String> {
+        match self {
+            Cache::Standard(cache) => {
+                let offset = cache.offset;
+                let trimmed = cache.trim(n);
+                if trimmed == n {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "global decode rewind of {n}: trimmed {trimmed} (offset was {offset})"
+                    ))
+                }
+            }
+            Cache::Rotating(cache) => cache.rewind_decode_writes(n),
+        }
+    }
+
+    /// Schedule the pending undo-row copies of every sliding layer in
+    /// `caches` (see [`flush_decode_undo_rows`]). No MLX call when nothing is
+    /// pending, which is always the case for a cache without an undo log.
+    pub(crate) fn flush_decode_undo<'a>(caches: impl IntoIterator<Item = &'a mut Cache>) {
+        flush_decode_undo_rows(caches.into_iter().filter_map(|cache| match cache {
+            Cache::Rotating(rotating) => Some(rotating),
+            Cache::Standard(_) => None,
+        }));
+    }
+
     pub(crate) fn as_interface(&mut self) -> &mut dyn CacheInterface {
         match self {
             Cache::Standard(c) => c,
@@ -927,54 +868,35 @@ impl Cache {
         }
     }
 
-    fn update_and_fetch(
-        &mut self,
-        k: UniquePtr<MlxArray>,
-        v: UniquePtr<MlxArray>,
-    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
-        match self {
-            Cache::Standard(c) => c.update_and_fetch(k, v),
-            Cache::Rotating(c) => c.update_and_fetch(k, v),
-        }
-    }
-
-    fn visible_len(&self) -> usize {
+    /// Keys the next decode step attends: the live length of a global layer,
+    /// the visible window of a sliding one. Used by: `sync_sequence_storage`
+    /// (the pool's per-sequence length mirror).
+    pub(crate) fn visible_len(&self) -> usize {
         match self {
             Cache::Standard(c) => c.seq_len().max(0) as usize,
             Cache::Rotating(c) => c.visible_len().max(0) as usize,
         }
     }
+}
 
-    fn rotating_logical_start(&self) -> Option<i32> {
+/// The batched decode entry for one Gemma 3 layer row (ADR 0008, #2172): a
+/// global layer attends through `KVCache::attend`, a sliding layer through
+/// `RotatingKVCache::attend`. Both are model-owned dense storage, never
+/// pool-backed, so the kernel is the dense one for the layer's mode, and the
+/// sliding write still goes through `RotatingKVCache::update_and_fetch`, the
+/// path the decode undo log (#2182) hooks.
+impl KvAttention for Cache {
+    fn attend(
+        &mut self,
+        q: &MlxArray,
+        k: UniquePtr<MlxArray>,
+        v: UniquePtr<MlxArray>,
+        scale: f32,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
         match self {
-            Cache::Standard(_) => None,
-            Cache::Rotating(c) => Some(c.logical_start()),
-        }
-    }
-
-    fn keys_ptr(&self) -> Option<*const MlxArray> {
-        match self {
-            Cache::Standard(c) => c
-                .keys
-                .as_ref()
-                .map(|keys| keys.as_ref().unwrap() as *const _),
-            Cache::Rotating(c) => c
-                .keys
-                .as_ref()
-                .map(|keys| keys.as_ref().unwrap() as *const _),
-        }
-    }
-
-    fn values_ptr(&self) -> Option<*const MlxArray> {
-        match self {
-            Cache::Standard(c) => c
-                .values
-                .as_ref()
-                .map(|values| values.as_ref().unwrap() as *const _),
-            Cache::Rotating(c) => c
-                .values
-                .as_ref()
-                .map(|values| values.as_ref().unwrap() as *const _),
+            Cache::Standard(c) => KVCache::attend(c, q, k, v, scale, mask),
+            Cache::Rotating(c) => RotatingKVCache::attend(c, q, k, v, scale, mask),
         }
     }
 }
@@ -1177,7 +1099,6 @@ impl Gemma3Model {
         &self,
         input_ids: &MlxArray,
         batch_caches: &mut [Vec<Cache>],
-        decode_context: Option<&DecodeBatchContext>,
     ) -> UniquePtr<MlxArray> {
         let mut h = self.embed_tokens.forward(input_ids);
         let scale = (self.hidden_size as f32).sqrt();
@@ -1189,7 +1110,7 @@ impl Gemma3Model {
                 .iter_mut()
                 .map(|caches| &mut caches[layer_idx])
                 .collect();
-            h = layer.forward_batched_decode(&h, &mut layer_caches, decode_context);
+            h = layer.forward_batched_decode(&h, &mut layer_caches);
             pipeline_hint(&h, layer_idx, n);
         }
 
@@ -1495,14 +1416,78 @@ impl Gemma3Wrapper {
         }
     }
 
+    /// Caches for one scheduler sequence. When the decode lookahead can be
+    /// rewound, every sliding layer logs its newest single-token writes deep
+    /// enough for any lookahead teardown (issue #2159).
     fn make_configured_caches(&self) -> Vec<Cache> {
+        let mut caches = self.make_fallback_caches();
+        if self.supports_lookahead_rewind() {
+            for cache in &mut caches {
+                if let Cache::Rotating(rotating) = cache {
+                    rotating.set_decode_undo_depth(DECODE_LOOKAHEAD_MAX_SPECULATIVE_APPENDS);
+                }
+            }
+        }
+        caches
+    }
+
+    /// Caches for the CLI fallback slot, which has no decode lookahead and so
+    /// keeps no undo log.
+    fn make_fallback_caches(&self) -> Vec<Cache> {
         self.model
             .make_caches_with_modes(Some(&self.kv_cache_layer_modes))
     }
 
     pub fn reset_caches(&self) {
         self.sequence_state
-            .replace_internal(self.make_configured_caches());
+            .replace_internal(self.make_fallback_caches());
+    }
+
+    /// Every sliding layer stores plain FP16 K/V, the only storage the
+    /// rotating undo log covers (INT8 and Turbo4Asym keep sidecars).
+    fn supports_lookahead_rewind(&self) -> bool {
+        (0..self.model.layers.len()).all(|layer_idx| {
+            !self.is_sliding_layer(layer_idx)
+                || self.kv_cache_layer_modes.mode_for_layer(layer_idx) == KVCacheMode::Fp16
+        })
+    }
+
+    /// Run `f` on sequence `seq_id`'s caches (or the fallback slot), then
+    /// schedule the undo-row copies the forward it built recorded.
+    fn with_sequence_caches<R>(
+        &self,
+        seq_id: Option<SequenceId>,
+        f: impl FnOnce(&mut [Cache]) -> R,
+    ) -> R {
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.make_configured_caches(),
+            |caches| {
+                let out = f(caches);
+                Cache::flush_decode_undo(caches.iter_mut());
+                out
+            },
+        )
+    }
+
+    /// Whether layer `layer_idx` is a sliding-window (`Cache::Rotating`) layer.
+    fn is_sliding_layer(&self, layer_idx: usize) -> bool {
+        let pattern = self.model.sliding_window_pattern;
+        (layer_idx % pattern) != (pattern - 1)
+    }
+
+    /// Rewind every layer of one sequence's caches by the pad width of a
+    /// padded prefill (issue #1755).
+    fn rewind_padded_prefill(caches: &mut [Cache], excess: i32) -> Result<(), String> {
+        if excess <= 0 {
+            return Ok(());
+        }
+        for (layer_idx, cache) in caches.iter_mut().enumerate() {
+            cache
+                .rewind_padded_prefill(excess)
+                .map_err(|err| format!("Gemma 3 pad trim, layer {layer_idx}: {err}"))?;
+        }
+        Ok(())
     }
 }
 
@@ -1566,30 +1551,76 @@ impl mlxcel_core::generate::LanguageModel for Gemma3Wrapper {
         true
     }
 
-    /// Opt out of NA tile-aligned padded prefill, as Gemma 4 already does
-    /// (`src/models/gemma4.rs`).
+    /// Gemma 3 takes NA tile-aligned padded prefill (issue #1755).
     ///
-    /// The contract on this method (see [`LanguageModel::supports_padded_prefill`])
-    /// requires that the caches be trimmed back to the real prompt length
-    /// after a padded chunk. The batch scheduler honours that by trimming the
-    /// `CachePool`'s `Vec<KVCache>`, and a `model_owned` family's pool entry is
-    /// `SequenceCacheSet::model_owned`, whose `caches` vector is empty, so the
-    /// trim reaches nothing and the pad positions stay in this model's own
-    /// caches. `offset` then runs ahead of the real token count by the pad
-    /// width (an M5-only, `should_align_prefill()`-gated defect), which puts
-    /// every later token at the wrong RoPE position and makes the cached state
-    /// disagree with the token vector a prompt-cache snapshot is keyed on
-    /// (issue #1335).
+    /// Its K/V lives in `ModelOwnedSequenceState`, so the scheduler's trim of
+    /// the `CachePool` entry reaches nothing (that entry holds no `KVCache`);
+    /// PR #1752 opted out for that reason. The pad positions are now dropped
+    /// from the model's own caches by [`Self::trim_state`] (server with the
+    /// `SequenceId`, CLI fallback slot with `None`), through
+    /// [`Cache::rewind_padded_prefill`], which leaves every layer as an
+    /// unpadded prefill would, `offset` included.
     ///
-    /// The general repair is a sequence-aware trim hook the scheduler can call
-    /// for model-owned families; `trim_internal_caches` takes no `SequenceId`
-    /// and is only wired into the CLI generate paths. Until that exists, the
-    /// three families joining snapshot reuse decline padding the same way
-    /// Gemma 4 does.
+    /// The text forwards ignore the caller's padding mask and build their own
+    /// causal and sliding-window masks over the padded chunk. Pad positions
+    /// trail the real ones, so causal attention already keeps them out of every
+    /// real row, and the sliding layers keep their window.
+    ///
+    /// A sliding layer stored as Turbo4Asym cannot be rewound (its V side is
+    /// packed into sidecars), so that configuration declines padding instead.
     fn supports_padded_prefill(&self) -> bool {
-        false
+        !(0..self.model.layers.len()).any(|layer_idx| {
+            self.is_sliding_layer(layer_idx)
+                && self.kv_cache_layer_modes.mode_for_layer(layer_idx) == KVCacheMode::Turbo4Asym
+        })
     }
 
+    /// `None` rewinds the CLI fallback slot (`make_fallback_caches`, no undo
+    /// log), `Some` the scheduler sequence's own caches
+    /// (`make_configured_caches`); both through `Cache::rewind_padded_prefill`,
+    /// which needs no log.
+    fn trim_state(&self, seq: Option<SequenceId>, excess: i32) -> Result<(), String> {
+        match seq {
+            None => self
+                .sequence_state
+                .with_sequence_state(None, |caches| Self::rewind_padded_prefill(caches, excess)),
+            Some(seq_id) => self
+                .sequence_state
+                .with_existing_sequence_state(seq_id, |caches| {
+                    Self::rewind_padded_prefill(caches, excess)
+                })?,
+        }
+    }
+
+    /// Gemma 3 decodes on the scheduler's lookahead pipeline (issue #2159).
+    /// Its global layers are plain `KVCache`s whose trim is exact, and its
+    /// sliding layers log the rows each decode write overwrites, so a
+    /// teardown restores a wrapped window exactly. Declined unless every
+    /// sliding layer is FP16, the only storage the log covers.
+    fn supports_decode_lookahead_rewind(&self) -> bool {
+        self.supports_lookahead_rewind()
+    }
+
+    fn rewind_decode_appends(&self, seq_id: SequenceId, n: i32) -> Result<(), String> {
+        self.sequence_state
+            .with_existing_sequence_state(seq_id, |caches| {
+                caches
+                    .iter_mut()
+                    .enumerate()
+                    .try_for_each(|(layer_idx, cache)| {
+                        cache.rewind_decode_appends(n).map_err(|err| {
+                            format!(
+                                "Gemma 3 decode rewind, sequence {seq_id}, layer {layer_idx}: {err}"
+                            )
+                        })
+                    })
+            })?
+    }
+
+    /// Retained after the 2026-10-11 GB10 paired/null storage sweep in
+    /// `docs/benchmark_results/model-owned-storage-gb10-2026-10-11.md`.
+    /// Across 512/4096-token prompts at concurrency 1/4/8, neither backend
+    /// cleared the paged-repeat null spread in any Gemma 3 cell.
     fn supports_paged_decode_backend(&self) -> bool {
         true
     }
@@ -1600,7 +1631,8 @@ impl mlxcel_core::generate::LanguageModel for Gemma3Wrapper {
     }
 
     fn reset_runtime_state(&self) {
-        // Used by: CxxGenerator single-row generation paths. Gemma 3 owns
+        // Used by: bare single-row runs outside an engine sequence (the engine
+        // resets through prepare_sequence_state / release_sequence_state_by_id). Gemma 3 owns
         // its fallback sliding/global KV cache state inside
         // `ModelOwnedSequenceState`; the caller-provided `KVCache` slice is
         // intentionally empty/ignored. Reset the fallback slot before each
@@ -1736,11 +1768,9 @@ impl mlxcel_core::generate::LanguageModel for Gemma3Wrapper {
         _caches: &mut [mlxcel_core::layers::KVCache],
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        self.sequence_state.with_or_create_sequence_state(
-            seq_id,
-            || self.make_configured_caches(),
-            |sequence_caches| self.model.forward_with_caches(input_ids, sequence_caches),
-        )
+        self.with_sequence_caches(seq_id, |sequence_caches| {
+            self.model.forward_with_caches(input_ids, sequence_caches)
+        })
     }
 
     // The three last-logits entry points mirror `forward`,
@@ -1764,19 +1794,15 @@ impl mlxcel_core::generate::LanguageModel for Gemma3Wrapper {
         _mask: Option<&MlxArray>,
         last_pos: usize,
     ) -> UniquePtr<MlxArray> {
-        self.sequence_state.with_or_create_sequence_state(
-            seq_id,
-            || self.make_configured_caches(),
-            |sequence_caches| {
-                self.model.last_logits_with_caches_and_embeddings(
-                    input_ids,
-                    None,
-                    sequence_caches,
-                    None,
-                    last_pos,
-                )
-            },
-        )
+        self.with_sequence_caches(seq_id, |sequence_caches| {
+            self.model.last_logits_with_caches_and_embeddings(
+                input_ids,
+                None,
+                sequence_caches,
+                None,
+                last_pos,
+            )
+        })
     }
 
     fn forward_last_logits_with_embeddings_and_sequence_id(
@@ -1788,19 +1814,15 @@ impl mlxcel_core::generate::LanguageModel for Gemma3Wrapper {
         mask: Option<&MlxArray>,
         last_pos: usize,
     ) -> UniquePtr<MlxArray> {
-        self.sequence_state.with_or_create_sequence_state(
-            seq_id,
-            || self.make_configured_caches(),
-            |sequence_caches| {
-                self.model.last_logits_with_caches_and_embeddings(
-                    input_ids,
-                    input_embeddings,
-                    sequence_caches,
-                    mask,
-                    last_pos,
-                )
-            },
-        )
+        self.with_sequence_caches(seq_id, |sequence_caches| {
+            self.model.last_logits_with_caches_and_embeddings(
+                input_ids,
+                input_embeddings,
+                sequence_caches,
+                mask,
+                last_pos,
+            )
+        })
     }
 
     fn forward_with_embeddings_and_sequence_id(
@@ -1811,18 +1833,14 @@ impl mlxcel_core::generate::LanguageModel for Gemma3Wrapper {
         _caches: &mut [mlxcel_core::layers::KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
-        self.sequence_state.with_or_create_sequence_state(
-            seq_id,
-            || self.make_configured_caches(),
-            |sequence_caches| {
-                self.model.forward_with_caches_and_embeddings(
-                    input_ids,
-                    input_embeddings,
-                    sequence_caches,
-                    mask,
-                )
-            },
-        )
+        self.with_sequence_caches(seq_id, |sequence_caches| {
+            self.model.forward_with_caches_and_embeddings(
+                input_ids,
+                input_embeddings,
+                sequence_caches,
+                mask,
+            )
+        })
     }
 
     fn sync_sequence_storage(
@@ -1838,13 +1856,12 @@ impl mlxcel_core::generate::LanguageModel for Gemma3Wrapper {
             })
     }
 
-    fn forward_batched_with_context_and_ids(
+    fn forward_batched_with_ids(
         &self,
         input_ids: &MlxArray,
         seq_ids: Option<&[SequenceId]>,
         batch_caches: &mut [&mut [mlxcel_core::layers::KVCache]],
         mask: Option<&MlxArray>,
-        context: Option<&DecodeBatchContext>,
     ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(input_ids);
         if shape[1] != 1 || mask.is_some() {
@@ -1876,11 +1893,11 @@ impl mlxcel_core::generate::LanguageModel for Gemma3Wrapper {
             .with_batched_sequence_states(
                 seq_ids.expect("gemma3 batched decode requires sequence ids"),
                 |sequence_caches| {
-                    self.model.forward_batched_decode_with_caches(
-                        input_ids,
-                        sequence_caches,
-                        context,
-                    )
+                    let logits = self
+                        .model
+                        .forward_batched_decode_with_caches(input_ids, sequence_caches);
+                    Cache::flush_decode_undo(sequence_caches.iter_mut().flatten());
+                    logits
                 },
             )
             .expect("gemma3 batched decode requires sequence-local cache state")

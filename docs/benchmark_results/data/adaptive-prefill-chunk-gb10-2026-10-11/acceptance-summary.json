@@ -1,0 +1,50 @@
+{
+  "admission": [
+    {
+      "round": 1,
+      "p95_ms": 54.1,
+      "pass": true
+    },
+    {
+      "round": 2,
+      "p95_ms": 54.8,
+      "pass": true
+    },
+    {
+      "round": 3,
+      "p95_ms": 55.2,
+      "pass": true
+    }
+  ],
+  "ttft": [
+    {
+      "model": "qwen3-1.7b-4bit",
+      "policy_median_delta_pct": 0.014711996169936015,
+      "policy_range_pct": [
+        -3.7947101163357533,
+        0.9759518988692761
+      ],
+      "null_range_pct": [
+        -4.729402218560718,
+        3.2610291206550457
+      ],
+      "null_median_delta_pct": -1.1428652324241395,
+      "pass": true
+    },
+    {
+      "model": "llama-3.2-1b-instruct-4bit",
+      "policy_median_delta_pct": -0.20285407850114678,
+      "policy_range_pct": [
+        -1.6062401209527066,
+        1.5959968179777517
+      ],
+      "null_range_pct": [
+        -1.115018402057133,
+        -0.02967215291590497
+      ],
+      "null_median_delta_pct": -0.21802043638052826,
+      "pass": true
+    }
+  ],
+  "pass": true
+}

@@ -475,6 +475,7 @@ impl PromptLookupOptions {
             max_draft: self.prompt_lookup_max_draft,
             adaptive: !self.prompt_lookup_no_adaptive,
             policy: self.prompt_lookup_policy.resolve(),
+            ..mlxcel::PromptLookupConfig::default()
         }
     }
 }
@@ -1553,6 +1554,16 @@ pub(crate) struct ServeArgs {
     )]
     draft_max: usize,
 
+    /// Largest active decode batch at which a prompt-lookup sequence runs
+    /// its own verify round (`--draft-kind prompt-lookup`). Each proposing
+    /// row costs one verify forward on top of the batched step, so on ticks
+    /// with more concurrent rows every row takes the plain batched step and
+    /// the drafter keeps observing the emitted tokens until the batch
+    /// shrinks. Must be at least 1. Defaults to 2, the largest batch at which
+    /// the GB10 concurrency measurement showed no aggregate loss.
+    #[arg(long, value_name = "N", default_value_t = mlxcel::server::speculative_dispatch::DEFAULT_PROMPT_LOOKUP_MAX_BATCH)]
+    prompt_lookup_max_batch: usize,
+
     /// Maximum concurrent decode sequences; explicit value keeps split --ctx-size windows
     #[arg(long, value_name = "N")]
     max_batch_size: Option<usize>,
@@ -1652,13 +1663,14 @@ pub(crate) struct ServeArgs {
     )]
     rerank_batch_size: usize,
 
-    /// Prefill chunk size in tokens (0 = disabled, default: 512)
+    /// Prefill chunk size in tokens (0 = disabled).
     ///
-    /// When set, long prompts are broken into chunks of this size and
-    /// decode steps are interleaved between chunks to prevent latency
-    /// spikes for active sequences.
-    #[arg(long, default_value_t = 512)]
-    prefill_chunk_size: usize,
+    /// Long prompts are broken into chunks of this size and decode steps are
+    /// interleaved between chunks to prevent latency spikes for active
+    /// sequences. [default: 2048 when no other sequence is decoding, 512 when
+    /// one is; MLXCEL_PREFILL_CHUNK overrides]
+    #[arg(long)]
+    prefill_chunk_size: Option<usize>,
 
     /// Decode ticks a parked chunked prefill yields before it is granted one
     /// (#1011).
@@ -1678,7 +1690,7 @@ pub(crate) struct ServeArgs {
     #[arg(long, value_name = "N")]
     prefill_grant_interval: Option<usize>,
 
-    /// Prefill batch size [llama-server alias for --prefill-chunk-size] [default: 512]
+    /// Prefill batch size [llama-server alias for --prefill-chunk-size]
     #[arg(
         short = 'b',
         long = "batch-size",
@@ -1752,7 +1764,7 @@ pub(crate) struct ServeArgs {
     /// mask, an O(B*L^2) transient. This caps the drained window by total
     /// padded tokens (rows * L); rows past the budget prefill via the chunked
     /// single-sequence path. Unset derives `max_batch_prefill *
-    /// prefill_chunk_size * 2` (2 * 4 * 512 = 4096). `0` disables the cap. Env
+    /// min(prefill_chunk_size, 512) * 2` (2 * 4 * 512 = 4096). `0` disables the cap. Env
     /// `MLXCEL_MAX_BATCH_PREFILL_TOKENS` overrides both.
     #[arg(long)]
     max_batch_prefill_tokens: Option<usize>,

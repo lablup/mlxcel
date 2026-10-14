@@ -1,0 +1,16 @@
+Server:       http://127.0.0.1:18996
+Model:        Meta-Llama-3.1-8B-Instruct-4bit
+Prompt:       ~16384 tokens (82511 chars)
+Max tokens:   128
+Concurrency:  [4]
+
+>>> concurrency=4 ...
+    decode paths: paged_decode_launches_total{path="fused_v2"}=+13248  paged_decode_launches_total{path="gather"}=+0  paged_decode_launches_total{path="cascade"}=+0  cascade_shared_tokens_total=+0  cascade_member_sequences_total=+0  cascade_failures_total=+0  prompt_cache_hits_total=+0
+    NOTE: no cascade launch in this level. Whatever this level measured, it was not cascade attention.
+    batch counters: decode_steps=+415  decode_tokens=+508  mixed_steps=+0  prefill_chunks=+28  tokens_predicted_seconds=+184.908
+    batch steps: occupancy=1.22  decode_step_ms=363.99  (predicted_seconds/steps=445.56 ms)
+
+conc   ok  fail  ttft_ms(mean)  ttft_ms(p95)  decode_tok_s(mean)  aggregate_tok_s
+---------------------------------------------------------------------------------
+   4    4     0       131908.1      213572.9                 7.1              2.3
+

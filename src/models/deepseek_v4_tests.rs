@@ -1981,3 +1981,61 @@ fn use_hierarchy_gates_on_size_and_honours_the_flat_override() {
         "an i32-overflowing block span must not open the gate"
     );
 }
+
+/// Issue #1859: `LimitedSwitchGlu::forward` now shares the `uint32` expert ids
+/// across all three projections and the broadcast `lhs_indices` across
+/// `gate_proj` and `up_proj`, matching `SwitchGLU::forward` (#1713). It must
+/// remain bit-identical to the per-call gather form across decode and prefill
+/// shapes while eliminating two redundant `AsType(uint32)` nodes per layer when
+/// handed `int32` router indices.
+#[test]
+fn limited_switch_glu_shares_gather_indices_and_is_bit_identical_to_per_call_form() {
+    let args = tiny_args();
+    let weights = tiny_weight_map(&args);
+    let moe = DeepseekV4MoE::from_weights(&weights, &args, "model.layers.1.ffn", 1).expect("moe");
+    let hidden = args.hidden_size as i32;
+    let experts = args.n_routed_experts as i32;
+    let top_k = args.num_experts_per_tok as i32;
+
+    let per_call_reference = |x: &MlxArray, indices: &MlxArray| {
+        let x_exp = mlxcel_core::expand_dims(x, -2);
+        let x_exp = mlxcel_core::expand_dims(&x_exp, -3);
+        let gate = moe.switch_mlp.gate_proj.forward(&x_exp, indices, false);
+        let up = moe.switch_mlp.up_proj.forward(&x_exp, indices, false);
+        let h = limited_swiglu(&gate, &up, moe.switch_mlp.limit);
+        let out = moe.switch_mlp.down_proj.forward(&h, indices, false);
+        mlxcel_core::squeeze_axis(&out, -2)
+    };
+
+    for (b, l) in [(1, 1), (1, 3), (2, 2)] {
+        let x = mlxcel_core::from_slice_f32(&noise((b * l * hidden) as usize, 91), &[b, l, hidden]);
+        let ids: Vec<i32> = (0..b * l * top_k).map(|i| (i * 3 + 1) % experts).collect();
+        let ids_i32 = mlxcel_core::from_slice_i32(&ids, &[b, l, top_k]);
+        let ids_u32: Vec<u32> = ids.iter().map(|&e| e as u32).collect();
+        let ids_u32 = mlxcel_core::from_slice_u32(&ids_u32, &[b, l, top_k]);
+
+        // Unevaluated AsType count on int32 router indices: sharing the uint32
+        // rhs cast across gate/up/down drops two AsType nodes per layer.
+        let actual_i32 = moe.switch_mlp.forward(&x, &ids_i32);
+        let expected_i32 = per_call_reference(&x, &ids_i32);
+        let actual_astype = mlxcel_core::count_astype_nodes_pair(&actual_i32, &actual_i32);
+        let expected_astype = mlxcel_core::count_astype_nodes_pair(&expected_i32, &expected_i32);
+        assert_eq!(
+            actual_astype + 2,
+            expected_astype,
+            "sharing gather indices must eliminate 2 AsType(uint32) nodes per MoE layer \
+             (b={b}, l={l})"
+        );
+        assert!(
+            mlxcel_core::item_bool(&mlxcel_core::array_equal(&actual_i32, &expected_i32, false)),
+            "LimitedSwitchGlu::forward diverged from per-call reference on int32 ids (b={b}, l={l})"
+        );
+
+        let actual_u32 = moe.switch_mlp.forward(&x, &ids_u32);
+        let expected_u32 = per_call_reference(&x, &ids_u32);
+        assert!(
+            mlxcel_core::item_bool(&mlxcel_core::array_equal(&actual_u32, &expected_u32, false)),
+            "LimitedSwitchGlu::forward diverged from per-call reference on uint32 ids (b={b}, l={l})"
+        );
+    }
+}

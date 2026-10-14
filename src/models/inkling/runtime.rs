@@ -201,11 +201,15 @@ impl LanguageModel for InklingModel {
         self.sequence_state.replace_sequence_state(seq_id, state);
         Ok(())
     }
-    fn trim_internal_caches(&self, excess: i32) {
+    fn trim_state(
+        &self,
+        seq: Option<mlxcel_core::cache::SequenceId>,
+        excess: i32,
+    ) -> Result<(), String> {
         if excess <= 0 {
-            return;
+            return Ok(());
         }
-        self.sequence_state.with_sequence_state(None, |state| {
+        let trim = |state: &mut [InklingLayerCache]| {
             for cache in state {
                 // This hook removes speculative or padded TAIL tokens. The
                 // recurrent conv state cannot be positionally rewound, so
@@ -215,7 +219,16 @@ impl LanguageModel for InklingModel {
                     *state = None;
                 }
             }
-        });
+        };
+        match seq {
+            None => {
+                self.sequence_state.with_sequence_state(None, trim);
+                Ok(())
+            }
+            Some(seq_id) => self
+                .sequence_state
+                .with_existing_sequence_state(seq_id, trim),
+        }
     }
 }
 

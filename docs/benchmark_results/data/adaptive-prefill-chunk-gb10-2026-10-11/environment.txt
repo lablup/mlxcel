@@ -1,0 +1,46 @@
+2026-10-11T04:18:12Z
+spark-102
+NVIDIA GB10, 580.178.04
+b2394566a71fc1f6db83ad40b44380b9c129b57c
+release_production_commit=88c2e6a0964d4a3a144c2ff1cc3c80dfd2893752
+ src/lib/mlxcel-core/src/prefill_plan_tests.rs |   2 +-
+ tests/vlm_wrapper_capability_delegation.rs    | 161 +++++++++++++++++++-------
+ 2 files changed, 121 insertions(+), 42 deletions(-)
+mlx_git_tag=81ba1c6a0e50a9268b931579c2d4f1158b9aab5a
+mlx_build_dir=/home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2228/target/release/build/mlxcel-core-4c8821fbbcc3d8f4
+mlx_fetched_head=81ba1c6a0e50a9268b931579c2d4f1158b9aab5a
+ M mlx/backend/cpu/quantized.cpp
+ M mlx/backend/cuda/binary/binary.cuh
+ M mlx/backend/cuda/cuda_utils.h
+ M mlx/backend/cuda/device/binary_ops.cuh
+ M mlx/backend/cuda/device/gemm_sm70.cuh
+ M mlx/backend/cuda/device/qmm_naive.cuh
+ M mlx/backend/cuda/device/qmm_sm80.cuh
+ M mlx/backend/cuda/gemms/grouped_gemm.h
+ M mlx/backend/cuda/gemms/grouped_gemm_unaligned.cu
+ M mlx/backend/cuda/jit_module.cpp
+ M mlx/backend/cuda/jit_module.h
+ M mlx/backend/cuda/matmul.cpp
+ M mlx/backend/cuda/quantized/qmm/qmm_naive.cu
+ M mlx/backend/cuda/quantized/qmm/qmm_sm80.cu
+ M mlx/backend/cuda/quantized/qmm/qmv.cu
+ M mlx/backend/cuda/quantized/quantized.cpp
+ M mlx/backend/cuda/reduce/all_reduce.cu
+ M mlx/backend/cuda/reduce/col_reduce.cu
+ M mlx/backend/cuda/reduce/init_reduce.cu
+ M mlx/backend/cuda/reduce/reduce_ops.cuh
+ M mlx/backend/cuda/reduce/row_reduce.cu
+ M mlx/backend/cuda/scaled_dot_product_attention.cpp
+ M mlx/backend/cuda/scaled_dot_product_attention.cu
+ M mlx/backend/metal/compiled.cpp
+ M mlx/backend/metal/device.cpp
+ M mlx/backend/metal/kernels/utils.h
+ M mlx/backend/metal/quantized.cpp
+ M mlx/dtype.cpp
+ M mlx/fast.cpp
+ M mlx/ops.cpp
+?? mlx/backend/cuda/gemms/grouped_gemm_arch.h
+?? mlx/backend/cuda/quantized/qmm/qmm_naive_tile.h
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  -
+2026-10-11 13:00:13.602698582 +0900 /home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2228/target/release/mlxcel
+2026-10-11 12:58:36.481966866 +0900 /home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2228/target/release/mlxcel-bench-engine

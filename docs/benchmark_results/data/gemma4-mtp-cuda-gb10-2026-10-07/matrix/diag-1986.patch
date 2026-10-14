@@ -1,0 +1,45 @@
+diff --git a/src/models/gemma4.rs b/src/models/gemma4.rs
+index 71943895..f4cbe59e 100644
+--- a/src/models/gemma4.rs
++++ b/src/models/gemma4.rs
+@@ -199,6 +199,10 @@ fn default_partial_rotary_factor() -> f32 {
+     1.0
+ }
+ 
++fn diag_long_probe() -> bool {
++    std::env::var("MLXCEL_DIAG_GEMMA4_LONG_PROBE").is_ok_and(|v| v == "1")
++}
++
+ fn default_rope_type() -> String {
+     "default".to_string()
+ }
+@@ -275,8 +279,11 @@ impl TextConfig {
+     pub(crate) fn mtp_probe_prompt_lengths(&self) -> Vec<usize> {
+         // Preserve the original three short draws for other Gemma variants.
+         // The long buffered draw validates the measured 31B correction.
++        if let Ok(list) = std::env::var("MLXCEL_DIAG_GEMMA4_PROBE_LENGTHS") {
++            return list.split(',').filter_map(|v| v.trim().parse().ok()).collect();
++        }
+         let mut lengths = vec![8; 3];
+-        if self.mtp_requires_linear_singleton() {
++        if self.mtp_requires_linear_singleton() || diag_long_probe() {
+             lengths.push(self.sliding_window.saturating_add(32).min(1536));
+         }
+         lengths
+@@ -5259,7 +5266,7 @@ impl Gemma4Wrapper {
+             );
+             for cache in block_caches
+                 .iter_mut()
+-                .filter(|_| self.mtp_requires_linear_singleton())
++                .filter(|_| self.mtp_requires_linear_singleton() || diag_long_probe())
+             {
+                 if cache
+                     .enable_mtp_rotating_buffer(super::gemma4_mtp_target::mtp_rotating_buffer_size(
+@@ -5305,6 +5312,7 @@ impl Gemma4Wrapper {
+                 .collect();
+ 
+             let verdict = compare_block_against_chain(&block_positions, &chain_positions);
++            eprintln!("[DIAG1986] draw={draw} prompt_len={prompt_len} trace={trace} verdict={}", verdict.reason());
+             if !verdict.is_equal() {
+                 if trace
+                     && let Some(location) =

@@ -1,0 +1,37 @@
+[engine-parity] model: models/mlx/Meta-Llama-3.1-8B-Instruct-4bit
+[engine-parity] prompt tokens: 75  MLXCEL_SDPA_DETERMINISTIC=1
+[engine-parity] paths:
+  greedy                 a:cli            64 tokens   cli
+  seeded-penalties-dry   a:cli            64 tokens   cli
+  greedy                 d:engine         64 tokens   engine B=1 dense chunk=2048
+  seeded-penalties-dry   d:engine         64 tokens   engine B=1 dense chunk=2048
+  greedy                 b:dense          64 tokens   Dense pc=off prefill[0..75)
+  seeded-penalties-dry   b:dense          64 tokens   Dense pc=off prefill[0..75)
+  greedy                 c:paged          64 tokens   Paged pc=off prefill[0..75) paged-kernel-launches=2080
+  seeded-penalties-dry   c:paged          64 tokens   Paged pc=off prefill[0..75) paged-kernel-launches=2016
+  greedy                 e:run            64 tokens   run -p parallel=1 pc=off prompt-tokens=75 chunk=2048
+  seeded-penalties-dry   e:run            n/a         the chat-request arms cover the greedy case
+  greedy                 f:server         64 tokens   mlxcel-server parallel=4 pc=off prompt-tokens=75 chunk=2048
+  seeded-penalties-dry   f:server         n/a         the chat-request arms cover the greedy case
+  greedy                 b:dense+pc:miss  64 tokens   Dense pc=on cached=0 forwarded=75 prefill[0..75)
+  greedy                 b:dense+pc:hit   64 tokens   Dense pc=on cached=71 forwarded=4 adopted[0..71)+prefill[71..75) primed[0..71)
+  seeded-penalties-dry   b:dense+pc:miss  64 tokens   Dense pc=on cached=0 forwarded=75 prefill[0..75)
+  seeded-penalties-dry   b:dense+pc:hit   64 tokens   Dense pc=on cached=71 forwarded=4 adopted[0..71)+prefill[71..75) primed[0..71)
+[engine-parity] pairs:
+  greedy                 a:cli            vs b:dense          identical
+  greedy                 a:cli            vs c:paged          identical
+  greedy                 b:dense          vs c:paged          identical
+  greedy                 b:dense          vs d:engine         identical
+  greedy                 f:server         vs e:run            identical
+  greedy                 b:dense          vs b:dense+pc:miss  identical
+  greedy                 b:dense+pc:miss  vs b:dense+pc:hit   identical
+  seeded-penalties-dry   a:cli            vs b:dense          identical
+  seeded-penalties-dry   a:cli            vs c:paged          diverge@18 left=18921 right=18435
+  seeded-penalties-dry   b:dense          vs c:paged          diverge@18 left=18921 right=18435
+  seeded-penalties-dry   b:dense          vs d:engine         identical
+  seeded-penalties-dry   f:server         vs e:run            n/a
+  seeded-penalties-dry   b:dense          vs b:dense+pc:miss  identical
+  seeded-penalties-dry   b:dense+pc:miss  vs b:dense+pc:hit   diverge@18 left=18921 right=18435
+[engine-parity] summary: 14 pair(s), 10 identical, 3 diverged, 1 n/a
+wrote /tmp/claude-1001/-home-devops-Development-mlxcel/66a03ced-36c6-4e0a-9e39-155a3eb57353/scratchpad/issue-2192/parity-floor0/Meta-Llama-3.1-8B-Instruct-4bit/engine_parity.json
+engine-parity rc=0

@@ -1,0 +1,321 @@
+warning: mlxcel-core@0.7.0: In file included from cpp/mlx_cxx_bridge.cpp:7:
+warning: mlxcel-core@0.7.0: /home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2259/target/test-fast/build/mlxcel-core-7abde4bba84d02cd/out/build/include/mlx/primitives.h: In member function 'std::pair<float, float> mlx::core::AddMM::state() const':
+warning: mlxcel-core@0.7.0: /home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2259/target/test-fast/build/mlxcel-core-7abde4bba84d02cd/out/build/include/mlx/primitives.h:204:41: note: parameter passing for argument of type 'std::pair<float, float>' when C++17 is enabled changed to match C++14 in GCC 10.1
+warning: mlxcel-core@0.7.0:   204 |   std::pair<float, float> state() const {
+warning: mlxcel-core@0.7.0:       |                                         ^
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_bridge.cpp: In function 'mlx_cxx::{anonymous}::get_compiled_q_path_proportional(int, int, int, float)::<lambda(const std::vector<mlx::core::array>&)>':
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_bridge.cpp:3851:31: warning: '*(int*)((char*)&in_shape + offsetof(mlx::core::SmallVector<int, 10, std::allocator<int> >,mlx::core::SmallVector<int, 10, std::allocator<int> >::inline_storage_[0]))' may be used uninitialized [-Wmaybe-uninitialized]
+warning: mlxcel-core@0.7.0:  3851 |             int B = in_shape[0];
+warning: mlxcel-core@0.7.0:       |                               ^
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_bridge.cpp:3850:18: note: 'in_shape' declared here
+warning: mlxcel-core@0.7.0:  3850 |             auto in_shape = q_in.shape();
+warning: mlxcel-core@0.7.0:       |                  ^~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_bridge.cpp:3851:31: warning: '*(int*)((char*)&in_shape + offsetof(mlx::core::SmallVector<int, 10, std::allocator<int> >,mlx::core::SmallVector<int, 10, std::allocator<int> >::inline_storage_[0]))' may be used uninitialized [-Wmaybe-uninitialized]
+warning: mlxcel-core@0.7.0:  3851 |             int B = in_shape[0];
+warning: mlxcel-core@0.7.0:       |                               ^
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_bridge.cpp:3850:18: note: 'in_shape' declared here
+warning: mlxcel-core@0.7.0:  3850 |             auto in_shape = q_in.shape();
+warning: mlxcel-core@0.7.0:       |                  ^~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_bridge.cpp: In lambda function:
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_bridge.cpp:2190:24: warning: '*(int*)((char*)&shape + offsetof(mlx::core::SmallVector<int, 10, std::allocator<int> >,mlx::core::SmallVector<int, 10, std::allocator<int> >::inline_storage_[0]))' may be used uninitialized [-Wmaybe-uninitialized]
+warning: mlxcel-core@0.7.0:  2190 |         int B = shape[0], H = shape[1], S = shape[2], D = shape[3];
+warning: mlxcel-core@0.7.0:       |                        ^
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_bridge.cpp:2189:14: note: 'shape' declared here
+warning: mlxcel-core@0.7.0:  2189 |         auto shape = x.shape();
+warning: mlxcel-core@0.7.0:       |              ^~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_bridge.cpp:2190:24: warning: '*(int*)((char*)&shape + offsetof(mlx::core::SmallVector<int, 10, std::allocator<int> >,mlx::core::SmallVector<int, 10, std::allocator<int> >::inline_storage_[0]))' may be used uninitialized [-Wmaybe-uninitialized]
+warning: mlxcel-core@0.7.0:  2190 |         int B = shape[0], H = shape[1], S = shape[2], D = shape[3];
+warning: mlxcel-core@0.7.0:       |                        ^
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_bridge.cpp:2189:14: note: 'shape' declared here
+warning: mlxcel-core@0.7.0:  2189 |         auto shape = x.shape();
+warning: mlxcel-core@0.7.0:       |              ^~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_kernels.cpp: In lambda function:
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_kernels.cpp:3362:24: note: parameter passing for argument of type 'std::pair<double, double>' when C++17 is enabled changed to match C++14 in GCC 10.1
+warning: mlxcel-core@0.7.0:  3362 |                 ref_rms);
+warning: mlxcel-core@0.7.0:       |                        ^
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_kernels.cpp: At global scope:
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_kernels.cpp:3792:24: warning: 'mlx_cxx::{anonymous}::ADD3_LN_HIP_SOURCE' defined but not used [-Wunused-variable]
+warning: mlxcel-core@0.7.0:  3792 |     static const char* ADD3_LN_HIP_SOURCE = R"(
+warning: mlxcel-core@0.7.0:       |                        ^~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_kernels.cpp:3027:24: warning: 'mlx_cxx::{anonymous}::MOE_FC1_RELU2_HIP_SOURCE' defined but not used [-Wunused-variable]
+warning: mlxcel-core@0.7.0:  3027 |     static const char* MOE_FC1_RELU2_HIP_SOURCE = R"(
+warning: mlxcel-core@0.7.0:       |                        ^~~~~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_kernels.cpp:2847:24: warning: 'mlx_cxx::{anonymous}::MOE_DOWN_HIP_SOURCE' defined but not used [-Wunused-variable]
+warning: mlxcel-core@0.7.0:  2847 |     static const char* MOE_DOWN_HIP_SOURCE = R"(
+warning: mlxcel-core@0.7.0:       |                        ^~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_kernels.cpp:2708:24: warning: 'mlx_cxx::{anonymous}::MOE_GATEUP_HIP_SOURCE' defined but not used [-Wunused-variable]
+warning: mlxcel-core@0.7.0:  2708 |     static const char* MOE_GATEUP_HIP_SOURCE = R"(
+warning: mlxcel-core@0.7.0:       |                        ^~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_kernels.cpp:2129:24: warning: 'mlx_cxx::{anonymous}::MAMBA1_SCAN_HIP_SOURCE' defined but not used [-Wunused-variable]
+warning: mlxcel-core@0.7.0:  2129 |     static const char* MAMBA1_SCAN_HIP_SOURCE = R"(
+warning: mlxcel-core@0.7.0:       |                        ^~~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_kernels.cpp:752:24: warning: 'mlx_cxx::{anonymous}::SSM_HIP_SOURCE' defined but not used [-Wunused-variable]
+warning: mlxcel-core@0.7.0:   752 |     static const char* SSM_HIP_SOURCE = R"(
+warning: mlxcel-core@0.7.0:       |                        ^~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_kernels.cpp:452:24: warning: 'mlx_cxx::{anonymous}::XIELU_HIP_SOURCE' defined but not used [-Wunused-variable]
+warning: mlxcel-core@0.7.0:   452 |     static const char* XIELU_HIP_SOURCE = R"(
+warning: mlxcel-core@0.7.0:       |                        ^~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_kernels.cpp:159:24: warning: 'mlx_cxx::{anonymous}::BITLINEAR_HIP_SOURCE' defined but not used [-Wunused-variable]
+warning: mlxcel-core@0.7.0:   159 |     static const char* BITLINEAR_HIP_SOURCE = R"(
+warning: mlxcel-core@0.7.0:       |                        ^~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp: In function 'void mlx_cxx::nemotron_decode_step(uint64_t, const MlxArray&, rust::cxxbridge1::Slice<const MlxArray* const>, rust::cxxbridge1::Slice<const MlxArray* const>, rust::cxxbridge1::Slice<const MlxArray* const>, rust::cxxbridge1::Slice<const MlxArray* const>, rust::cxxbridge1::Slice<const int>, std::unique_ptr<MlxArray>&, rust::cxxbridge1::Slice<std::unique_ptr<MlxArray> >, rust::cxxbridge1::Slice<std::unique_ptr<MlxArray> >)':
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp:156:16: warning: '*(int*)((char*)&id_shape + offsetof(mlx::core::SmallVector<int, 10, std::allocator<int> >,mlx::core::SmallVector<int, 10, std::allocator<int> >::inline_storage_[0]))' may be used uninitialized [-Wmaybe-uninitialized]
+warning: mlxcel-core@0.7.0:   156 |     h = reshape(h, {id_shape[0], id_shape[1], (int)h.shape().back()});
+warning: mlxcel-core@0.7.0:       |         ~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp:155:10: note: 'id_shape' declared here
+warning: mlxcel-core@0.7.0:   155 |     auto id_shape = input_ids.inner.shape();
+warning: mlxcel-core@0.7.0:       |          ^~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp:156:16: warning: '*(int*)((char*)&id_shape + offsetof(mlx::core::SmallVector<int, 10, std::allocator<int> >,mlx::core::SmallVector<int, 10, std::allocator<int> >::inline_storage_[0]))' may be used uninitialized [-Wmaybe-uninitialized]
+warning: mlxcel-core@0.7.0:   156 |     h = reshape(h, {id_shape[0], id_shape[1], (int)h.shape().back()});
+warning: mlxcel-core@0.7.0:       |         ~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp:155:10: note: 'id_shape' declared here
+warning: mlxcel-core@0.7.0:   155 |     auto id_shape = input_ids.inner.shape();
+warning: mlxcel-core@0.7.0:       |          ^~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp:244:28: warning: '*(int*)((char*)&ks + offsetof(mlx::core::SmallVector<int, 10, std::allocator<int> >,mlx::core::SmallVector<int, 10, std::allocator<int> >::inline_storage_[0]))' may be used uninitialized [-Wmaybe-uninitialized]
+warning: mlxcel-core@0.7.0:   244 |                 k = reshape(k, {ks[0], ks[1], 1, ks[2], ks[3]});
+warning: mlxcel-core@0.7.0:       |                     ~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp:243:22: note: 'ks' declared here
+warning: mlxcel-core@0.7.0:   243 |                 auto ks = k.shape();
+warning: mlxcel-core@0.7.0:       |                      ^~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp:244:28: warning: '*(int*)((char*)&ks + offsetof(mlx::core::SmallVector<int, 10, std::allocator<int> >,mlx::core::SmallVector<int, 10, std::allocator<int> >::inline_storage_[0]))' may be used uninitialized [-Wmaybe-uninitialized]
+warning: mlxcel-core@0.7.0:   244 |                 k = reshape(k, {ks[0], ks[1], 1, ks[2], ks[3]});
+warning: mlxcel-core@0.7.0:       |                     ~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp:243:22: note: 'ks' declared here
+warning: mlxcel-core@0.7.0:   243 |                 auto ks = k.shape();
+warning: mlxcel-core@0.7.0:       |                      ^~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp:248:28: warning: '*(int*)((char*)&vs + offsetof(mlx::core::SmallVector<int, 10, std::allocator<int> >,mlx::core::SmallVector<int, 10, std::allocator<int> >::inline_storage_[0]))' may be used uninitialized [-Wmaybe-uninitialized]
+warning: mlxcel-core@0.7.0:   248 |                 v = reshape(v, {vs[0], vs[1], 1, vs[2], vs[3]});
+warning: mlxcel-core@0.7.0:       |                     ~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp:247:22: note: 'vs' declared here
+warning: mlxcel-core@0.7.0:   247 |                 auto vs = v.shape();
+warning: mlxcel-core@0.7.0:       |                      ^~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp:248:28: warning: '*(int*)((char*)&vs + offsetof(mlx::core::SmallVector<int, 10, std::allocator<int> >,mlx::core::SmallVector<int, 10, std::allocator<int> >::inline_storage_[0]))' may be used uninitialized [-Wmaybe-uninitialized]
+warning: mlxcel-core@0.7.0:   248 |                 v = reshape(v, {vs[0], vs[1], 1, vs[2], vs[3]});
+warning: mlxcel-core@0.7.0:       |                     ~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp:247:22: note: 'vs' declared here
+warning: mlxcel-core@0.7.0:   247 |                 auto vs = v.shape();
+warning: mlxcel-core@0.7.0:       |                      ^~
+warning: mlxcel-core@0.7.0: In file included from ../mlx-cpp/turbo/kv_inplace_write.cpp:23:
+warning: mlxcel-core@0.7.0: /home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2259/target/test-fast/build/mlxcel-core-7abde4bba84d02cd/out/build/include/mlx/primitives.h: In member function 'std::pair<float, float> mlx::core::AddMM::state() const':
+warning: mlxcel-core@0.7.0: /home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2259/target/test-fast/build/mlxcel-core-7abde4bba84d02cd/out/build/include/mlx/primitives.h:204:41: note: parameter passing for argument of type 'std::pair<float, float>' when C++17 is enabled changed to match C++14 in GCC 10.1
+warning: mlxcel-core@0.7.0:   204 |   std::pair<float, float> state() const {
+warning: mlxcel-core@0.7.0:       |                                         ^
+    Finished `test-fast` profile [optimized] target(s) in 0.15s
+     Running unittests src/lib.rs (target/test-fast/deps/mlxcel_core-5feb86ac05c84f53)
+
+running 211 tests
+test drafter::masked_embedder::tests::argmax_never_picks_masked_token_with_argmax_sampling ... ok
+test generate::tests::sampling_config_with_temperature_only_changes_temperature ... ok
+test sampling::tests::adaptive_p_disabled_target_stays_on_the_fused_path ... ok
+test sampling::tests::adaptive_p_state_accept_updates_ema_only_on_matching_token ... ok
+test sampling::tests::adaptive_p_transform_prefers_tokens_near_the_target ... Compiling CUDA kernels (first run on this host; cached for later runs)...
+ok
+test sampling::tests::apply_dry_penalty_penalizes_followup_token_after_suffix_match ... ok
+test sampling::tests::apply_frequency_presence_penalty_accumulates_by_token_count ... ok
+test sampling::tests::apply_repetition_penalty_modifies_selected_logits ... ok
+test sampling::tests::apply_row_filters_disabled_returns_input_pointer_unchanged ... ok
+test sampling::tests::apply_row_filters_greedy_skips_active_filter ... ok
+test sampling::tests::apply_row_filters_treats_negative_sentinel_as_disabled ... ok
+test sampling::tests::apply_token_bias_empty_noop ... ok
+test sampling::tests::apply_token_bias_multiple_entries ... ok
+test sampling::tests::apply_token_bias_neg_inf_forces_zero_prob ... ok
+test sampling::tests::apply_token_bias_negative_index_ignored ... ok
+test sampling::tests::apply_token_bias_out_of_range_ignored ... ok
+test sampling::tests::apply_token_bias_positive_adds ... ok
+test sampling::tests::apply_token_bias_rows_biases_each_row_independently ... ok
+test sampling::tests::apply_token_bias_rows_ignores_out_of_range_ids ... ok
+test sampling::tests::apply_token_bias_rows_is_a_noop_without_bias ... ok
+test sampling::tests::apply_token_bias_rows_matches_single_row_helper ... ok
+test sampling::tests::apply_token_bias_rows_rejects_a_row_count_mismatch - should panic ... ok
+test sampling::tests::apply_xtc_filter_allowlist_tokens_survive_removal ... ok
+test sampling::tests::apply_xtc_filter_is_noop_with_fewer_than_two_candidates ... ok
+test sampling::tests::apply_xtc_filter_is_noop_with_zero_candidates ... ok
+test sampling::tests::apply_xtc_filter_keeps_least_probable_above_threshold_token ... ok
+test sampling::tests::apply_xtc_step_gate_at_one_always_fires ... ok
+test sampling::tests::apply_xtc_step_gate_at_zero_never_fires ... ok
+test sampling::tests::apply_xtc_step_mid_probability_is_reproducible_for_the_same_seed ... ok
+test sampling::tests::batched_fused_sample_accepts_2d_logits ... ok
+test sampling::tests::batched_fused_sample_greedy_matches_per_row ... ok
+test sampling::tests::batched_fused_sample_honors_p_less ... ok
+test sampling::tests::batched_fused_sample_honors_top_n_sigma ... ok
+test sampling::tests::batched_fused_sample_honors_typical_p ... ok
+test sampling::tests::batched_fused_sample_single_row_no_regression ... ok
+test sampling::tests::batched_sample_greedy_selects_argmax_per_sequence ... ok
+test sampling::tests::batched_sample_single_sequence_matches_unbatched ... ok
+test sampling::tests::compute_logprobs_returns_none_when_disabled ... ok
+test sampling::tests::compute_logprobs_returns_selected_token_logprob ... ok
+test sampling::tests::compute_logprobs_returns_top_k_alternatives_sorted_descending ... ok
+test sampling::tests::compute_logprobs_selected_token_bf16_matches_f32 ... ok
+test sampling::tests::compute_logprobs_selected_token_f16_matches_f32 ... ok
+test sampling::tests::compute_logprobs_top_k_bf16_no_panic_matches_f32 ... ok
+test sampling::tests::compute_logprobs_top_k_capped_at_vocab_size ... ok
+test sampling::tests::compute_logprobs_top_k_f16_matches_f32 ... ok
+test sampling::tests::compute_logprobs_top_k_f32_values_correct ... ok
+test sampling::tests::compute_logprobs_top_k_zero_fast_path_f16_matches_full_softmax ... ok
+test sampling::tests::compute_logprobs_top_k_zero_fast_path_matches_full_softmax ... ok
+test sampling::tests::config_supports_fused_batch_false_for_penalties ... ok
+test sampling::tests::config_supports_fused_batch_false_for_token_bias ... ok
+test sampling::tests::config_supports_fused_batch_false_for_xtc ... ok
+test sampling::tests::config_supports_fused_batch_true_for_plain_configs ... ok
+test sampling::tests::config_supports_fused_batch_true_for_top_n_sigma ... ok
+test sampling::tests::cpp_xtc_gate_decides_the_removal ... ok
+test sampling::tests::cpp_xtc_greedy_draw_is_the_argmax_of_the_filtered_row ... ok
+test sampling::tests::cpp_xtc_matches_the_rust_reference_filter ... ok
+test sampling::tests::dry_breaker_automaton_large_exact_list_is_additive ... ok
+test sampling::tests::dry_breaker_automaton_long_shared_tails_are_additive ... ok
+test sampling::tests::dry_breaker_automaton_preserves_overlap_and_boundary_semantics ... ok
+test sampling::tests::dry_breaker_head_with_empty_tail_breaks_matching ... ok
+test sampling::tests::dry_breaker_head_with_tail_requires_the_full_sequence ... ok
+test sampling::tests::dry_full_history_sentinel_scans_everything ... ok
+test sampling::tests::dry_penalizes_at_exactly_the_allowed_length ... ok
+test sampling::tests::dry_penalty_last_n_zero_disables_dry ... ok
+test sampling::tests::dry_reverse_z_matches_reference_lcg_cases ... ok
+test sampling::tests::dry_reverse_z_preserves_breaker_boundaries ... ok
+test sampling::tests::dry_reverse_z_step_cost_is_linear ... ok
+test sampling::tests::dry_step_cost_report ... ignored, manual timing evidence for issue #2259
+test sampling::tests::dynatemp_keeps_temperature_zero_config_off_the_greedy_path ... ok
+test sampling::tests::dynatemp_matches_host_reference_on_peaked_row ... ok
+test sampling::tests::dynatemp_single_candidate_passes_through ... ok
+test sampling::tests::dynatemp_uniform_row_scales_by_max_temp ... ok
+test sampling::tests::effective_token_distribution_zeroes_top_n_sigma_masked_tokens ... ok
+test sampling::tests::effective_token_distribution_zeroes_typical_p_masked_tokens ... ok
+test sampling::tests::frequency_presence_sparse_matches_vocab_reference ... ok
+test sampling::tests::fused_sample_params_match_detects_each_difference ... ok
+test sampling::tests::fused_sample_params_matches_compares_p_less ... ok
+test sampling::tests::fused_sample_params_matches_compares_top_n_sigma ... ok
+test sampling::tests::fused_sample_params_matches_compares_typical_p ... ok
+test sampling::tests::fused_sample_params_normalizes_inert_top_n_sigma ... ok
+test sampling::tests::fused_sample_params_normalizes_inert_typical_p ... ok
+test sampling::tests::fused_sample_probs_equals_softmax_of_filtered_over_t ... ok
+test sampling::tests::greedy_path_unchanged ... ok
+test sampling::tests::inert_new_fields_keep_the_fused_path_and_identical_bytes ... ok
+test sampling::tests::min_p_min_keep_forces_floor_in_probability_order ... ok
+test sampling::tests::min_p_support_is_temperature_invariant ... ok
+test sampling::tests::mirostat_ignores_penalties_and_truncation_filters ... ok
+test sampling::tests::mirostat_temperature_zero_draws_the_argmax ... ok
+test sampling::tests::mirostat_v1_peaked_row_truncates_to_the_argmax ... ok
+test sampling::tests::mirostat_v2_tiny_mu_selects_the_argmax_and_updates_mu ... ok
+test sampling::tests::p_less_filter_argmax_always_survives ... ok
+test sampling::tests::p_less_filter_higher_temp_keeps_more ... ok
+test sampling::tests::p_less_filter_ignores_neg_inf_entries ... ok
+test sampling::tests::p_less_filter_matches_host_reference ... ok
+test sampling::tests::p_less_filter_peaked_keeps_top_only ... ok
+test sampling::tests::p_less_filter_rows_independent ... ok
+test sampling::tests::p_less_skipped_on_greedy_and_disabled_returns_input_pointer ... ok
+test sampling::tests::penalty_last_n_zero_disables_the_stage_and_stays_fused_eligible ... ok
+test sampling::tests::penalty_window_sentinels ... ok
+test sampling::tests::post_sampling_probs_reports_linear_probabilities_and_drops_zeros ... ok
+test sampling::tests::repetition_penalty_windowed_ignores_tokens_outside_the_window ... ok
+test sampling::tests::row_supports_fused_batch_gate_off_for_incompatible_config ... ok
+test sampling::tests::row_supports_fused_batch_gate_off_for_per_row_obligations ... ok
+test sampling::tests::row_supports_fused_batch_gate_on_for_plain_row ... ok
+test sampling::tests::sample_token_optimized_respects_greedy_argmax_path ... ok
+test sampling::tests::sample_token_optimized_with_state_dry_only_allocates_no_state ... ok
+test sampling::tests::sample_token_optimized_with_state_greedy_parity_over_sequence ... ok
+test sampling::tests::sample_token_optimized_with_state_no_penalty_allocates_no_state ... ok
+test sampling::tests::sampler_state_frequency_presence_matches_rebuild_f16 ... ok
+test sampling::tests::sampler_state_frequency_presence_matches_rebuild_over_sequence ... ok
+test sampling::tests::sampler_state_frequency_presence_preserves_bf16_reference ... ok
+test sampling::tests::sampler_state_repetition_matches_rebuild_f16 ... ok
+test sampling::tests::sampler_state_repetition_matches_rebuild_over_sequence ... ok
+test sampling::tests::sampler_state_skips_aggregates_outside_the_full_history_window ... ok
+test sampling::tests::sampler_state_sync_handles_append_shrink_and_divergence ... ok
+test sampling::tests::suppress_tokens_empty_slice_is_noop ... ok
+test sampling::tests::suppress_tokens_forces_neg_inf_and_drives_probability_to_zero ... ok
+test sampling::tests::temperature_one_support_unchanged ... ok
+test sampling::tests::top_n_sigma_filter_f16_large_vocab_does_not_overflow ... ok
+test sampling::tests::top_n_sigma_filter_ignores_neg_inf_entries ... ok
+test sampling::tests::top_n_sigma_filter_keeps_within_n_std ... ok
+test sampling::tests::top_n_sigma_filter_nan_entry_does_not_mask_the_row ... ok
+test sampling::tests::top_n_sigma_filter_rows_independent ... ok
+test sampling::tests::top_n_sigma_skipped_on_greedy ... ok
+test sampling::tests::top_p_filter_batched_equals_per_row ... ok
+test sampling::tests::top_p_filter_single_row_all_pass_at_one ... ok
+test sampling::tests::top_p_filter_single_row_nucleus_boundary ... ok
+test sampling::tests::top_p_min_keep_floor_never_resurrects_masked_entries ... ok
+test sampling::tests::top_p_min_keep_forces_floor_in_probability_order ... ok
+test sampling::tests::top_p_support_is_temperature_invariant ... ok
+test sampling::tests::typical_p_filter_can_drop_argmax ... ok
+test sampling::tests::typical_p_filter_ignores_neg_inf_entries ... ok
+test sampling::tests::typical_p_filter_matches_host_reference ... ok
+test sampling::tests::typical_p_filter_nan_entry_does_not_mask_the_row ... ok
+test sampling::tests::typical_p_filter_preserves_dtype ... ok
+test sampling::tests::typical_p_filter_smaller_keeps_fewer ... ok
+test sampling::tests::typical_p_min_keep_forces_floor_in_typicality_order ... ok
+test sampling::tests::typical_p_one_disables_via_hook ... ok
+test sampling::tests::typical_p_runs_on_the_renormalized_top_k_survivors ... ok
+test sampling::tests::typical_p_skipped_on_greedy ... ok
+test sampling::tests::typical_p_top_k_premask_skips_oversized_k ... ok
+test sampling::tests::uniform_fused_batch_params_still_rejects_token_bias ... ok
+test sampling::tests::windowed_penalties_match_full_history_when_the_window_covers_it ... ok
+test sampling::tests::xtc_min_keep_skips_removal_when_too_few_would_survive ... ok
+test sampling::tests::xtc_runs_on_renormalised_filtered_row ... ok
+test sampling_dispatch::tests::draining_an_empty_queue_is_a_no_op ... ok
+test sampling_dispatch::tests::the_production_round_cap_is_the_documented_value ... ok
+test sampling_dispatch::tests::the_reset_clears_both_cap_overflow_counters ... ok
+test sampling_dispatch::tests::the_threadgroup_size_is_a_power_of_two ... ok
+test sampling_fixed_key_tests::gumbel_kernel_and_graph_categorical_draw_one_distribution ... ok
+test sampling_fixed_key_tests::gumbel_kernel_matches_the_keyed_graph_argmax ... ok
+test sampling_fixed_key_tests::rejection_kernel_and_graph_chain_draw_one_distribution ... ok
+test sampling_fixed_key_tests::rejection_kernel_draws_stay_inside_the_filtered_support ... ok
+test sampling_fixed_key_tests::rejection_kernel_draws_the_keyed_token_under_min_p ... ok
+test sampling_gumbel_tests::filtered_configs_never_reach_the_gumbel_kernel ... ok
+test sampling_gumbel_tests::fused_sample_routes_the_no_filter_path_to_the_gumbel_kernel ... ok
+test sampling_gumbel_tests::greedy_sampling_is_byte_identical_to_argmax ... ok
+test sampling_gumbel_tests::gumbel_noise_stays_inside_its_finite_range ... ok
+test sampling_gumbel_tests::gumbel_sample_index_does_not_depend_on_the_launch_split ... ok
+test sampling_gumbel_tests::gumbel_sample_is_reproducible_for_a_fixed_seed ... ok
+test sampling_gumbel_tests::gumbel_sample_matches_softmax_on_bimodal_logits ... ok
+test sampling_gumbel_tests::gumbel_sample_matches_softmax_on_flat_logits ... ok
+test sampling_gumbel_tests::gumbel_sample_matches_softmax_on_peaked_logits ... ok
+test sampling_gumbel_tests::gumbel_sample_matches_softmax_over_a_large_vocabulary ... ok
+test sampling_gumbel_tests::gumbel_sample_matches_softmax_with_masked_entries ... ok
+test sampling_gumbel_tests::gumbel_sample_never_selects_masked_tokens ... ok
+test sampling_gumbel_tests::gumbel_sample_temperature_scaling_matches_reference ... ok
+test sampling_gumbel_tests::split_heuristic_stays_within_its_documented_range ... ok
+test sampling_rejection_tests::a_failed_stashed_launch_is_dropped_without_throwing_or_consuming_its_error ... ok
+test sampling_rejection_tests::a_fixed_seed_reproduces_the_stream ... ok
+test sampling_rejection_tests::a_large_vocabulary_sends_the_joint_config_back_to_the_stock_chain ... ok
+test sampling_rejection_tests::a_near_uniform_152k_row_converges_inside_the_round_cap ... ok
+test sampling_rejection_tests::a_starved_round_cap_falls_back_and_the_event_is_counted ... ok
+test sampling_rejection_tests::all_three_filters_compose_into_one_threshold ... ok
+test sampling_rejection_tests::cap_overflow_is_detected_without_waiting_on_the_production_path ... ok
+test sampling_rejection_tests::fused_sample_routes_only_the_configurations_that_measured_faster ... ok
+test sampling_rejection_tests::greedy_and_no_filter_paths_report_that_they_bypass_the_rejection_kernel ... ok
+test sampling_rejection_tests::joint_top_k_top_p_support_is_a_superset_of_the_stock_chain ... ok
+test sampling_rejection_tests::masked_entries_are_never_sampled_and_do_not_shift_the_support ... ok
+test sampling_rejection_tests::min_p_filters_the_stock_chain ... ok
+test sampling_rejection_tests::min_p_needs_no_rejection_round ... ok
+test sampling_rejection_tests::min_p_support_and_frequencies_match_the_stock_filter ... ok
+test sampling_rejection_tests::per_row_parameters_reach_the_kernel_from_one_launch ... ok
+test sampling_rejection_tests::rejection_kernel_filter_on_untempered_draw_on_tempered ... ok
+test sampling_rejection_tests::subnormal_scale_probabilities_do_not_break_the_shrinking_interval ... ok
+test sampling_rejection_tests::the_forced_entry_point_is_the_one_that_synchronizes ... ok
+test sampling_rejection_tests::the_joint_vocab_cap_is_the_measured_crossover ... ok
+test sampling_rejection_tests::the_production_sampling_call_never_synchronizes ... ok
+test sampling_rejection_tests::the_reference_arm_stays_on_the_argpartition_chain ... ok
+test sampling_rejection_tests::the_reported_distribution_matches_what_the_sampler_draws ... ok
+test sampling_rejection_tests::the_routing_policy_matches_the_measured_matrix ... ok
+test sampling_rejection_tests::the_two_filter_orderings_really_do_differ_for_top_k_plus_top_p ... ok
+test sampling_rejection_tests::top_k_frequencies_match_the_renormalised_truncated_distribution ... ok
+test sampling_rejection_tests::top_k_holds_under_temperature_scaling ... ok
+test sampling_rejection_tests::top_k_support_matches_the_argpartition_mask_including_ties ... ok
+test sampling_rejection_tests::top_p_frequencies_match_the_renormalised_truncated_distribution ... ok
+test sampling_rejection_tests::top_p_support_matches_the_stock_nucleus_filter ... ok
+test sampling_row_step::fused_tests::fused_eligible_is_false_for_every_stage_the_dispatch_cannot_run ... ok
+test sampling_row_step::fused_tests::fused_eligible_matches_the_pre_2169_gate ... ok
+test sampling_row_step::tests::cli_loops_and_server_row_step_emit_identical_streams ... ok
+test sampling_row_step::tests::cli_loops_carry_feedback_state_across_steps ... ok
+test sampling_row_step::tests::resolve_returns_sampled_and_final_and_confirms_only_the_final_token ... ok
+test sampling_row_step::tests::state_is_created_for_history_and_feedback_samplers_only ... ok
+test sampling_row_step::tests::the_mask_runs_before_the_chain_and_its_error_aborts_the_draw ... ok
+test sampling_token_bias::tests::byte_fragment_tags_survive_the_language_fallback ... ok
+test sampling_token_bias::tests::empty_sources_compose_to_an_empty_map ... ok
+test sampling_token_bias::tests::language_bias_applies_only_without_a_request_bias ... ok
+test sampling_token_bias::tests::output_suppression_always_wins ... ok
+test sampling_token_bias::tests::output_suppression_beats_non_finite_request_bias ... ok
+test sampling_top_k_vocab_tests::top_k_at_or_above_vocab_is_no_top_k ... ok
+test sampling_top_k_vocab_tests::top_k_at_or_above_vocab_is_no_top_k_with_xtc_active ... ok
+
+test result: ok. 210 passed; 0 failed; 1 ignored; 0 measured; 1872 filtered out; finished in 18.07s
+

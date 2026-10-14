@@ -122,13 +122,15 @@ pub struct ServerStartupInput {
     /// explicit drafter-kind override from `--draft-kind`.
     /// `None` means "auto-detect from the drafter's `config.json`" when
     /// `draft_model_path` is supplied; otherwise the field is inert and
-    /// the classic [`crate::SpeculativeGenerator`] path is used.
+    /// plain decode runs.
     pub draft_kind: Option<String>,
     /// explicit draft-block-size override from
     /// `--draft-block-size`. `None` means "use the per-kind default"
     /// ([`crate::cli::speculative_args::default_block_size_for_kind`])
     /// once the kind has been resolved.
     pub draft_block_size: Option<u32>,
+    /// `--prompt-lookup-max-batch` (#2255).
+    pub prompt_lookup_max_batch: usize,
     pub max_batch_size: Option<usize>,
     pub max_queue_depth: usize,
     /// Bound on the audio worker command queue (admission control), forwarded to
@@ -153,15 +155,16 @@ pub struct ServerStartupInput {
     pub reranker_model_path: Option<PathBuf>,
     /// `--rerank-batch-size`: query/document pairs per rerank forward pass.
     pub rerank_batch_size: usize,
-    pub prefill_chunk_size: usize,
+    /// Explicit `--prefill-chunk-size`, or `None` to use the adaptive policy.
+    pub prefill_chunk_size: Option<usize>,
     /// #1011: `--prefill-grant-interval`, the decode ticks a parked chunked
     /// prefill yields before the scheduler grants it one. `None` = env override
     /// / shipped default; `Some(0)` = grant disabled (pre-#1011 starvation).
     pub prefill_grant_interval: Option<usize>,
     /// llama-server alias for `--prefill-chunk-size` (`--batch-size` / `-b`).
     ///
-    /// When set, maps to `prefill_chunk_size`. If both this and `prefill_chunk_size`
-    /// differ from the default, `prefill_chunk_size` takes precedence with a warning.
+    /// When set, maps to `prefill_chunk_size`. If both are present and differ,
+    /// `prefill_chunk_size` takes precedence with a warning.
     pub batch_size: Option<usize>,
     /// llama-server `--ubatch-size`. Accepted but ignored on Apple Silicon.
     pub ubatch_size: Option<usize>,
@@ -810,6 +813,8 @@ impl ServerStartupInput {
             .resolve_kv_unified(self.parallel_auto, self.max_batch_size.is_some());
         let resolution =
             resolve_prefill_chunk_size(self.prefill_chunk_size, self.batch_size, self.ubatch_size);
+        let prefill_chunk_policy =
+            mlxcel_core::prefill_plan::PrefillChunkPolicy::resolve(resolution.explicit);
         // resolve the server-wide thinking budget once, up-front.
         // Invalid values are logged and treated as unbounded so the server
         // still starts (per-request errors are surfaced as 400s at the route).
@@ -1050,6 +1055,7 @@ impl ServerStartupInput {
             // owns both the drafter path AND the resolved kind.
             draft_kind: self.draft_kind,
             draft_block_size: self.draft_block_size,
+            prompt_lookup_max_batch: self.prompt_lookup_max_batch,
             max_batch_size,
             max_queue_depth: self.max_queue_depth,
             audio_queue_depth: self.audio_queue_depth,
@@ -1061,7 +1067,8 @@ impl ServerStartupInput {
             embedding_request_timeout_secs: self.embedding_request_timeout_secs,
             reranker_model_path: self.reranker_model_path,
             rerank_batch_size: self.rerank_batch_size,
-            prefill_chunk_size: resolution.prefill_chunk_size,
+            prefill_chunk_size: prefill_chunk_policy.alone,
+            prefill_chunk_size_contended: prefill_chunk_policy.contended,
             prefill_grant_interval: self.prefill_grant_interval,
             batch_size_conflict: resolution.batch_size_conflict,
             ubatch_size_provided: resolution.ubatch_size_provided,
@@ -2258,8 +2265,9 @@ fn apply_optional_usize_env_fallback(value: &mut Option<usize>, key: &str, flag_
 
 /// Result of resolving the prefill chunk size from the explicit flag and llama-server aliases.
 pub struct PrefillChunkResolution {
-    /// The effective prefill chunk size to use.
-    pub prefill_chunk_size: usize,
+    /// Explicit chunk override from the native flag, llama alias, or env.
+    /// `None` selects the adaptive server defaults.
+    pub explicit: Option<usize>,
     /// True when `--ubatch-size` was provided (always ignored; caller should log a notice).
     pub ubatch_size_provided: bool,
     /// True when both `--batch-size` and an explicit `--prefill-chunk-size` were supplied
@@ -2272,35 +2280,24 @@ pub struct PrefillChunkResolution {
 /// Resolution rules:
 /// - `--ubatch-size` is always ignored on Apple Silicon unified memory (logged at info level).
 /// - `--batch-size` is an alias for `--prefill-chunk-size`. If both are provided with
-///   different non-default values, `--prefill-chunk-size` takes precedence with a warning.
+///   different values, `--prefill-chunk-size` takes precedence with a warning.
+/// - `MLXCEL_PREFILL_CHUNK` is the final fallback and pins both scheduler states.
 pub fn resolve_prefill_chunk_size(
-    prefill_chunk_size: usize,
+    prefill_chunk_size: Option<usize>,
     batch_size: Option<usize>,
     ubatch_size: Option<usize>,
 ) -> PrefillChunkResolution {
-    const DEFAULT_PREFILL_CHUNK_SIZE: usize = 512;
-
     let ubatch_size_provided = ubatch_size.is_some();
-
-    match batch_size {
-        None => PrefillChunkResolution {
-            prefill_chunk_size,
-            ubatch_size_provided,
-            batch_size_conflict: false,
-        },
-        Some(bs) => {
-            let explicit_prefill = prefill_chunk_size != DEFAULT_PREFILL_CHUNK_SIZE;
-            let conflict = explicit_prefill && bs != prefill_chunk_size;
-            PrefillChunkResolution {
-                prefill_chunk_size: if explicit_prefill {
-                    prefill_chunk_size
-                } else {
-                    bs
-                },
-                ubatch_size_provided,
-                batch_size_conflict: conflict,
-            }
-        }
+    let batch_size_conflict = prefill_chunk_size
+        .zip(batch_size)
+        .is_some_and(|(prefill, batch)| prefill != batch);
+    let explicit = prefill_chunk_size
+        .or(batch_size)
+        .or_else(mlxcel_core::prefill_plan::prefill_chunk_override);
+    PrefillChunkResolution {
+        explicit,
+        ubatch_size_provided,
+        batch_size_conflict,
     }
 }
 

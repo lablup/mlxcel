@@ -109,7 +109,11 @@ fn audio_precision() -> Result<Precision, String> {
     }
 }
 
-fn generation_identity(compiler: &Path, flags: &[&str], graph: &str) -> Result<String, String> {
+fn generation_identity<S: AsRef<str> + std::fmt::Debug>(
+    compiler: &Path,
+    flags: &[S],
+    graph: &str,
+) -> Result<String, String> {
     let version = Command::new(compiler)
         .arg("--version")
         .output()
@@ -129,9 +133,9 @@ fn generation_identity(compiler: &Path, flags: &[&str], graph: &str) -> Result<S
     )
 }
 
-fn generation_identity_from_version(
+fn generation_identity_from_version<S: AsRef<str> + std::fmt::Debug>(
     compiler: &Path,
-    flags: &[&str],
+    flags: &[S],
     graph: &str,
     version: &str,
 ) -> Result<String, String> {
@@ -343,18 +347,25 @@ fn load_audio_module(
     let cache = std::env::temp_dir().join("mlxcel-xla-vmfb");
     std::fs::create_dir_all(&cache)
         .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
-    let vmfb = cached_vmfb_path(&compiler, graph, flags, &cache, artifact_name, frame_bucket);
+    let vmfb = cached_vmfb_path(
+        &compiler,
+        graph,
+        &flags,
+        &cache,
+        artifact_name,
+        frame_bucket,
+    );
     let weights = load_audio_weights(model_dir, config)?;
     let contract = AuxiliaryArtifactContract::new_legacy_unqualified(
         entry_name,
         config_identity(config, frame_bucket, precision),
-        generation_identity(&compiler, flags, graph)?,
+        generation_identity(&compiler, &flags, graph)?,
     )?;
     ensure_qualified_auxiliary_artifact(&vmfb, &contract, &weights, |temporary| {
         compile_one_to(
             &compiler,
             graph,
-            flags,
+            &flags,
             &cache,
             artifact_name,
             frame_bucket,

@@ -52,9 +52,16 @@
 //!      earlier user turn only when the following assistant message carries
 //!      `reasoning_content`, issue #2089). An echoed trace is forwarded under
 //!      both `reasoning` and `reasoning_content`, so such a turn re-renders
-//!      exactly as it was generated. A client that echoes only `content`
-//!      still gets the rewritten (shorter) turn; that is the template's own
-//!      rule and the follow-up misses the cache by design.
+//!      exactly as it was generated. A client that echoes only `content` gets
+//!      the trace re-injected by the chat routes before this module renders
+//!      (issue #2110, [`super::reasoning_echo`]): the server remembers the
+//!      reasoning each reply returned, keyed by model, `template_sig`,
+//!      session, the preceding messages and the reply content, and fills it
+//!      back into a matching content-only assistant turn exactly as if the
+//!      client had echoed it. The turn still renders shorter, and the
+//!      follow-up misses the cache, when that entry is gone (evicted, server
+//!      restarted, `cache_prompt: false`, prompt cache off) or the client
+//!      edited the reply, an earlier message, the kwargs or the session key.
 //!    * Tool-schema hashing: [`super::prompt_cache::key::tools_digest`] is
 //!      order-preserving, so reordering tools invalidates the cache. This
 //!      is intentional: HuggingFace templates iterate tools in order and
@@ -82,8 +89,8 @@ use super::chat_template_kwargs::{
     strip_think_block,
 };
 use super::media::{
-    MediaRequestMetadata, ResolvedVideo, extract_chat_video_paths, try_extract_chat_audio_data,
-    try_extract_chat_image_data,
+    MediaRequestMetadata, ResolvedVideo, extract_chat_video_paths_with_allowlist,
+    try_extract_chat_audio_data, try_extract_chat_image_data,
 };
 use super::prompt_cache::key::resolve_session_key;
 use super::types::request::{
@@ -761,7 +768,7 @@ pub(crate) async fn prepare_chat_request(
     request: &ChatCompletionRequest,
     server_default_kwargs: Option<&ChatTemplateKwargs>,
 ) -> Result<PreparedChatRequest> {
-    prepare_chat_request_with_cache(
+    prepare_chat_request_with_cache_and_video_allowlist(
         processor,
         request,
         server_default_kwargs,
@@ -769,6 +776,34 @@ pub(crate) async fn prepare_chat_request(
         false,
         false,
         &crate::tokenizer::ThinkingMarkers::default(),
+        &[],
+    )
+    .await
+}
+
+/// Test-only compatibility entry point for focused renderer tests that do not
+/// construct [`super::state::AppState`]. Production routes must call
+/// [`prepare_chat_request_with_cache_and_video_allowlist`] with the immutable
+/// startup snapshot.
+#[cfg(test)]
+pub(crate) async fn prepare_chat_request_with_cache(
+    processor: &ChatTemplateProcessor,
+    request: &ChatCompletionRequest,
+    server_default_kwargs: Option<&ChatTemplateKwargs>,
+    prompt_cache_enabled: bool,
+    snapshot_reuse_capable: bool,
+    prefill_assistant: bool,
+    thinking_markers: &crate::tokenizer::ThinkingMarkers,
+) -> Result<PreparedChatRequest> {
+    prepare_chat_request_with_cache_and_video_allowlist(
+        processor,
+        request,
+        server_default_kwargs,
+        prompt_cache_enabled,
+        snapshot_reuse_capable,
+        prefill_assistant,
+        thinking_markers,
+        &[],
     )
     .await
 }
@@ -785,7 +820,7 @@ pub(crate) async fn prepare_chat_request(
 ///
 /// When `prompt_cache_enabled` is `false` this is identical to the legacy
 /// [`prepare_chat_request`].
-pub(crate) async fn prepare_chat_request_with_cache(
+pub(crate) async fn prepare_chat_request_with_cache_and_video_allowlist(
     processor: &ChatTemplateProcessor,
     request: &ChatCompletionRequest,
     server_default_kwargs: Option<&ChatTemplateKwargs>,
@@ -793,6 +828,7 @@ pub(crate) async fn prepare_chat_request_with_cache(
     snapshot_reuse_capable: bool,
     prefill_assistant: bool,
     thinking_markers: &crate::tokenizer::ThinkingMarkers,
+    video_dir_allowlist: &[PathBuf],
 ) -> Result<PreparedChatRequest> {
     // Refuse rather than fall back to the generic template when the loaded
     // tokenizer's vocabulary family is Kimi K3 but no native renderer could be
@@ -1063,7 +1099,7 @@ pub(crate) async fn prepare_chat_request_with_cache(
     let (image_data, audio_data, videos) = tokio::join!(
         try_extract_chat_image_data(request),
         try_extract_chat_audio_data(request),
-        extract_chat_video_paths(request),
+        extract_chat_video_paths_with_allowlist(request, video_dir_allowlist),
     );
     let image_data = image_data?;
     let audio_data = audio_data?;
@@ -1317,6 +1353,15 @@ fn kwarg_effort(kwargs: &ChatTemplateKwargs, key: &str) -> Result<Option<Option<
 /// misses the warm-up entry and falls back to the #1143 boundary snapshot, so a
 /// wrong guess costs one background prefill and never correctness.
 ///
+/// `reply_reasoning` is the reply's reasoning when the next turn will render it
+/// with that reasoning: the route passes it exactly when the reasoning re-echo
+/// store kept the trace (#2110), so a content-only follow-up gets it filled
+/// back and renders the reply the same way (#2118). `request` must likewise be
+/// the request as this turn rendered it, filled turns included. Both renders
+/// below pick the raw-JSON or typed message path with the same predicate
+/// [`prepare_chat_request_with_cache`] uses, since only the raw path carries a
+/// message's reasoning to the template.
+///
 /// Returns `None` whenever the render is not usable: no reply text, a template
 /// that failed, or a result that is not an extension of this turn's own history
 /// prefix. That last check is what keeps a warm-up from storing a snapshot
@@ -1348,6 +1393,7 @@ pub(crate) fn render_next_turn_history(
     request: &ChatCompletionRequest,
     server_default_kwargs: Option<&ChatTemplateKwargs>,
     reply: &str,
+    reply_reasoning: Option<&str>,
 ) -> Option<NextTurnHistory> {
     if reply.trim().is_empty() {
         tracing::debug!("warmup: empty reply");
@@ -1389,16 +1435,35 @@ pub(crate) fn render_next_turn_history(
     }
     let preserve_thinking = merged_kwargs.preserve_thinking();
     let effective_tools = effective_tools(request);
+    // The raw-JSON / typed split of `prepare_chat_request_with_cache`, so each
+    // render here takes the path the real request with these messages takes.
+    // Only the raw path forwards `reasoning` / `reasoning_content`, and a
+    // template such as Jamba-Reasoning renders an earlier user turn
+    // differently when the following assistant turn carries it.
+    let render = |req: &ChatCompletionRequest, history: bool| -> Result<String> {
+        if has_tool_fields(req) || has_reasoning_fields(req) {
+            let raw = build_raw_json_messages_with_thinking(req, preserve_thinking);
+            if history {
+                processor.apply_raw_history_with_kwargs(&raw, effective_tools, &merged_kwargs)
+            } else {
+                processor.apply_raw_with_kwargs(&raw, effective_tools, &merged_kwargs)
+            }
+        } else {
+            let msgs = build_chat_messages_with_thinking(req, preserve_thinking);
+            if history {
+                processor.apply_history_with_kwargs(&msgs, effective_tools, &merged_kwargs)
+            } else {
+                processor.apply_with_kwargs(&msgs, effective_tools, &merged_kwargs)
+            }
+        }
+    };
 
     // This turn's own history prefix, for the extension check below.
-    let this_turn = {
-        let messages = build_chat_messages_with_thinking(request, preserve_thinking);
-        match processor.apply_history_with_kwargs(&messages, effective_tools, &merged_kwargs) {
-            Ok(v) => v,
-            Err(err) => {
-                tracing::debug!("warmup: this-turn history render failed: {err:#}");
-                return None;
-            }
+    let this_turn = match render(request, true) {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::debug!("warmup: this-turn history render failed: {err:#}");
+            return None;
         }
     };
 
@@ -1408,7 +1473,9 @@ pub(crate) fn render_next_turn_history(
         content: MessageContent::Text(reply.to_string()),
         name: None,
         tool_call_id: None,
-        reasoning: None,
+        reasoning: reply_reasoning
+            .filter(|r| !r.is_empty())
+            .map(str::to_string),
         tool_calls: None,
     });
     // Render two probe turns. Both put the reply where the next turn will put
@@ -1432,8 +1499,7 @@ pub(crate) fn render_next_turn_history(
             reasoning: None,
             tool_calls: None,
         });
-        let msgs = build_chat_messages_with_thinking(&probed, preserve_thinking);
-        processor.apply_with_kwargs(&msgs, effective_tools, &merged_kwargs)
+        render(&probed, false)
     };
     let (Ok(probe_a), Ok(probe_b)) = (
         render_probe(NEXT_TURN_PROBE_A),
@@ -2138,3 +2204,7 @@ mod tests;
 #[cfg(test)]
 #[path = "chat_request_reasoning_content_tests.rs"]
 mod reasoning_content_tests;
+
+#[cfg(test)]
+#[path = "chat_request_video_allowlist_tests.rs"]
+mod video_allowlist_tests;

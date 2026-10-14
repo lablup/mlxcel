@@ -1,0 +1,262 @@
+warning: mlxcel-core@0.7.0: In file included from cpp/mlx_cxx_bridge.cpp:7:
+warning: mlxcel-core@0.7.0: /home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2227/target/test-fast/build/mlxcel-core-951f0822c2faa7cb/out/build/include/mlx/primitives.h: In member function 'std::pair<float, float> mlx::core::AddMM::state() const':
+warning: mlxcel-core@0.7.0: /home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2227/target/test-fast/build/mlxcel-core-951f0822c2faa7cb/out/build/include/mlx/primitives.h:204:41: note: parameter passing for argument of type 'std::pair<float, float>' when C++17 is enabled changed to match C++14 in GCC 10.1
+warning: mlxcel-core@0.7.0:   204 |   std::pair<float, float> state() const {
+warning: mlxcel-core@0.7.0:       |                                         ^
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_bridge.cpp: In function 'mlx_cxx::{anonymous}::get_compiled_q_path_proportional(int, int, int, float)::<lambda(const std::vector<mlx::core::array>&)>':
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_bridge.cpp:3851:31: warning: '*(int*)((char*)&in_shape + offsetof(mlx::core::SmallVector<int, 10, std::allocator<int> >,mlx::core::SmallVector<int, 10, std::allocator<int> >::inline_storage_[0]))' may be used uninitialized [-Wmaybe-uninitialized]
+warning: mlxcel-core@0.7.0:  3851 |             int B = in_shape[0];
+warning: mlxcel-core@0.7.0:       |                               ^
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_bridge.cpp:3850:18: note: 'in_shape' declared here
+warning: mlxcel-core@0.7.0:  3850 |             auto in_shape = q_in.shape();
+warning: mlxcel-core@0.7.0:       |                  ^~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_bridge.cpp:3851:31: warning: '*(int*)((char*)&in_shape + offsetof(mlx::core::SmallVector<int, 10, std::allocator<int> >,mlx::core::SmallVector<int, 10, std::allocator<int> >::inline_storage_[0]))' may be used uninitialized [-Wmaybe-uninitialized]
+warning: mlxcel-core@0.7.0:  3851 |             int B = in_shape[0];
+warning: mlxcel-core@0.7.0:       |                               ^
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_bridge.cpp:3850:18: note: 'in_shape' declared here
+warning: mlxcel-core@0.7.0:  3850 |             auto in_shape = q_in.shape();
+warning: mlxcel-core@0.7.0:       |                  ^~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_bridge.cpp: In lambda function:
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_bridge.cpp:2190:24: warning: '*(int*)((char*)&shape + offsetof(mlx::core::SmallVector<int, 10, std::allocator<int> >,mlx::core::SmallVector<int, 10, std::allocator<int> >::inline_storage_[0]))' may be used uninitialized [-Wmaybe-uninitialized]
+warning: mlxcel-core@0.7.0:  2190 |         int B = shape[0], H = shape[1], S = shape[2], D = shape[3];
+warning: mlxcel-core@0.7.0:       |                        ^
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_bridge.cpp:2189:14: note: 'shape' declared here
+warning: mlxcel-core@0.7.0:  2189 |         auto shape = x.shape();
+warning: mlxcel-core@0.7.0:       |              ^~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_bridge.cpp:2190:24: warning: '*(int*)((char*)&shape + offsetof(mlx::core::SmallVector<int, 10, std::allocator<int> >,mlx::core::SmallVector<int, 10, std::allocator<int> >::inline_storage_[0]))' may be used uninitialized [-Wmaybe-uninitialized]
+warning: mlxcel-core@0.7.0:  2190 |         int B = shape[0], H = shape[1], S = shape[2], D = shape[3];
+warning: mlxcel-core@0.7.0:       |                        ^
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_bridge.cpp:2189:14: note: 'shape' declared here
+warning: mlxcel-core@0.7.0:  2189 |         auto shape = x.shape();
+warning: mlxcel-core@0.7.0:       |              ^~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_kernels.cpp: In lambda function:
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_kernels.cpp:3362:24: note: parameter passing for argument of type 'std::pair<double, double>' when C++17 is enabled changed to match C++14 in GCC 10.1
+warning: mlxcel-core@0.7.0:  3362 |                 ref_rms);
+warning: mlxcel-core@0.7.0:       |                        ^
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_kernels.cpp: At global scope:
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_kernels.cpp:3792:24: warning: 'mlx_cxx::{anonymous}::ADD3_LN_HIP_SOURCE' defined but not used [-Wunused-variable]
+warning: mlxcel-core@0.7.0:  3792 |     static const char* ADD3_LN_HIP_SOURCE = R"(
+warning: mlxcel-core@0.7.0:       |                        ^~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_kernels.cpp:3027:24: warning: 'mlx_cxx::{anonymous}::MOE_FC1_RELU2_HIP_SOURCE' defined but not used [-Wunused-variable]
+warning: mlxcel-core@0.7.0:  3027 |     static const char* MOE_FC1_RELU2_HIP_SOURCE = R"(
+warning: mlxcel-core@0.7.0:       |                        ^~~~~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_kernels.cpp:2847:24: warning: 'mlx_cxx::{anonymous}::MOE_DOWN_HIP_SOURCE' defined but not used [-Wunused-variable]
+warning: mlxcel-core@0.7.0:  2847 |     static const char* MOE_DOWN_HIP_SOURCE = R"(
+warning: mlxcel-core@0.7.0:       |                        ^~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_kernels.cpp:2708:24: warning: 'mlx_cxx::{anonymous}::MOE_GATEUP_HIP_SOURCE' defined but not used [-Wunused-variable]
+warning: mlxcel-core@0.7.0:  2708 |     static const char* MOE_GATEUP_HIP_SOURCE = R"(
+warning: mlxcel-core@0.7.0:       |                        ^~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_kernels.cpp:2129:24: warning: 'mlx_cxx::{anonymous}::MAMBA1_SCAN_HIP_SOURCE' defined but not used [-Wunused-variable]
+warning: mlxcel-core@0.7.0:  2129 |     static const char* MAMBA1_SCAN_HIP_SOURCE = R"(
+warning: mlxcel-core@0.7.0:       |                        ^~~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_kernels.cpp:752:24: warning: 'mlx_cxx::{anonymous}::SSM_HIP_SOURCE' defined but not used [-Wunused-variable]
+warning: mlxcel-core@0.7.0:   752 |     static const char* SSM_HIP_SOURCE = R"(
+warning: mlxcel-core@0.7.0:       |                        ^~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_kernels.cpp:452:24: warning: 'mlx_cxx::{anonymous}::XIELU_HIP_SOURCE' defined but not used [-Wunused-variable]
+warning: mlxcel-core@0.7.0:   452 |     static const char* XIELU_HIP_SOURCE = R"(
+warning: mlxcel-core@0.7.0:       |                        ^~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_kernels.cpp:159:24: warning: 'mlx_cxx::{anonymous}::BITLINEAR_HIP_SOURCE' defined but not used [-Wunused-variable]
+warning: mlxcel-core@0.7.0:   159 |     static const char* BITLINEAR_HIP_SOURCE = R"(
+warning: mlxcel-core@0.7.0:       |                        ^~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp: In function 'void mlx_cxx::nemotron_decode_step(uint64_t, const MlxArray&, rust::cxxbridge1::Slice<const MlxArray* const>, rust::cxxbridge1::Slice<const MlxArray* const>, rust::cxxbridge1::Slice<const MlxArray* const>, rust::cxxbridge1::Slice<const MlxArray* const>, rust::cxxbridge1::Slice<const int>, std::unique_ptr<MlxArray>&, rust::cxxbridge1::Slice<std::unique_ptr<MlxArray> >, rust::cxxbridge1::Slice<std::unique_ptr<MlxArray> >)':
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp:156:16: warning: '*(int*)((char*)&id_shape + offsetof(mlx::core::SmallVector<int, 10, std::allocator<int> >,mlx::core::SmallVector<int, 10, std::allocator<int> >::inline_storage_[0]))' may be used uninitialized [-Wmaybe-uninitialized]
+warning: mlxcel-core@0.7.0:   156 |     h = reshape(h, {id_shape[0], id_shape[1], (int)h.shape().back()});
+warning: mlxcel-core@0.7.0:       |         ~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp:155:10: note: 'id_shape' declared here
+warning: mlxcel-core@0.7.0:   155 |     auto id_shape = input_ids.inner.shape();
+warning: mlxcel-core@0.7.0:       |          ^~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp:156:16: warning: '*(int*)((char*)&id_shape + offsetof(mlx::core::SmallVector<int, 10, std::allocator<int> >,mlx::core::SmallVector<int, 10, std::allocator<int> >::inline_storage_[0]))' may be used uninitialized [-Wmaybe-uninitialized]
+warning: mlxcel-core@0.7.0:   156 |     h = reshape(h, {id_shape[0], id_shape[1], (int)h.shape().back()});
+warning: mlxcel-core@0.7.0:       |         ~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp:155:10: note: 'id_shape' declared here
+warning: mlxcel-core@0.7.0:   155 |     auto id_shape = input_ids.inner.shape();
+warning: mlxcel-core@0.7.0:       |          ^~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp:244:28: warning: '*(int*)((char*)&ks + offsetof(mlx::core::SmallVector<int, 10, std::allocator<int> >,mlx::core::SmallVector<int, 10, std::allocator<int> >::inline_storage_[0]))' may be used uninitialized [-Wmaybe-uninitialized]
+warning: mlxcel-core@0.7.0:   244 |                 k = reshape(k, {ks[0], ks[1], 1, ks[2], ks[3]});
+warning: mlxcel-core@0.7.0:       |                     ~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp:243:22: note: 'ks' declared here
+warning: mlxcel-core@0.7.0:   243 |                 auto ks = k.shape();
+warning: mlxcel-core@0.7.0:       |                      ^~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp:244:28: warning: '*(int*)((char*)&ks + offsetof(mlx::core::SmallVector<int, 10, std::allocator<int> >,mlx::core::SmallVector<int, 10, std::allocator<int> >::inline_storage_[0]))' may be used uninitialized [-Wmaybe-uninitialized]
+warning: mlxcel-core@0.7.0:   244 |                 k = reshape(k, {ks[0], ks[1], 1, ks[2], ks[3]});
+warning: mlxcel-core@0.7.0:       |                     ~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp:243:22: note: 'ks' declared here
+warning: mlxcel-core@0.7.0:   243 |                 auto ks = k.shape();
+warning: mlxcel-core@0.7.0:       |                      ^~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp:248:28: warning: '*(int*)((char*)&vs + offsetof(mlx::core::SmallVector<int, 10, std::allocator<int> >,mlx::core::SmallVector<int, 10, std::allocator<int> >::inline_storage_[0]))' may be used uninitialized [-Wmaybe-uninitialized]
+warning: mlxcel-core@0.7.0:   248 |                 v = reshape(v, {vs[0], vs[1], 1, vs[2], vs[3]});
+warning: mlxcel-core@0.7.0:       |                     ~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp:247:22: note: 'vs' declared here
+warning: mlxcel-core@0.7.0:   247 |                 auto vs = v.shape();
+warning: mlxcel-core@0.7.0:       |                      ^~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp:248:28: warning: '*(int*)((char*)&vs + offsetof(mlx::core::SmallVector<int, 10, std::allocator<int> >,mlx::core::SmallVector<int, 10, std::allocator<int> >::inline_storage_[0]))' may be used uninitialized [-Wmaybe-uninitialized]
+warning: mlxcel-core@0.7.0:   248 |                 v = reshape(v, {vs[0], vs[1], 1, vs[2], vs[3]});
+warning: mlxcel-core@0.7.0:       |                     ~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+warning: mlxcel-core@0.7.0: cpp/mlx_cxx_nemotron.cpp:247:22: note: 'vs' declared here
+warning: mlxcel-core@0.7.0:   247 |                 auto vs = v.shape();
+warning: mlxcel-core@0.7.0:       |                      ^~
+warning: mlxcel-core@0.7.0: In file included from ../mlx-cpp/turbo/kv_inplace_write.cpp:23:
+warning: mlxcel-core@0.7.0: /home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2227/target/test-fast/build/mlxcel-core-951f0822c2faa7cb/out/build/include/mlx/primitives.h: In member function 'std::pair<float, float> mlx::core::AddMM::state() const':
+warning: mlxcel-core@0.7.0: /home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2227/target/test-fast/build/mlxcel-core-951f0822c2faa7cb/out/build/include/mlx/primitives.h:204:41: note: parameter passing for argument of type 'std::pair<float, float>' when C++17 is enabled changed to match C++14 in GCC 10.1
+warning: mlxcel-core@0.7.0:   204 |   std::pair<float, float> state() const {
+warning: mlxcel-core@0.7.0:       |                                         ^
+   Compiling mlxcel v0.7.0 (/home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2227)
+    Finished `test-fast` profile [optimized] target(s) in 2m 12s
+  Executable unittests src/lib.rs (target/test-fast/deps/mlxcel-e4114342978c2f44)
+  Executable unittests src/main.rs (target/test-fast/deps/mlxcel-e029287206517e01)
+  Executable unittests src/bin/bench_decode.rs (target/test-fast/deps/mlxcel_bench_decode-d8d701711f5fa4db)
+  Executable unittests src/bin/bench_engine.rs (target/test-fast/deps/mlxcel_bench_engine-2ec930d264c4367a)
+  Executable unittests src/bin/engine_parity.rs (target/test-fast/deps/mlxcel_engine_parity-9ed786ceb5161668)
+  Executable unittests src/bin/mlx_server.rs (target/test-fast/deps/mlxcel_server-f103ed86e524be74)
+  Executable unittests src/bin/speculative_bench.rs (target/test-fast/deps/speculative_bench-873145a883391206)
+  Executable tests/apertus_parity.rs (target/test-fast/deps/apertus_parity-c44bfaf23ceb5f2a)
+  Executable tests/apply_template_tools_parity.rs (target/test-fast/deps/apply_template_tools_parity-b2007d5a95013a11)
+  Executable tests/attention_f16_range.rs (target/test-fast/deps/attention_f16_range-138269846d1237aa)
+  Executable tests/autotuner_outcome.rs (target/test-fast/deps/autotuner_outcome-4c20917d1b09d047)
+  Executable tests/cascade_decode_dispatch.rs (target/test-fast/deps/cascade_decode_dispatch-62f66eadbdb18eda)
+  Executable tests/causal_prefill_greedy_parity.rs (target/test-fast/deps/causal_prefill_greedy_parity-b24e4113b58bf5d0)
+  Executable tests/chat_template_kwargs.rs (target/test-fast/deps/chat_template_kwargs-e6294d8887f3dfd8)
+  Executable tests/cli_help_consistency.rs (target/test-fast/deps/cli_help_consistency-2e4bdd7019e4ac9f)
+  Executable tests/cpu_device_custom_kernel_gates.rs (target/test-fast/deps/cpu_device_custom_kernel_gates-219ccab8fff654e1)
+  Executable tests/cpu_device_sdpa.rs (target/test-fast/deps/cpu_device_sdpa-e846797475f02825)
+  Executable tests/cuda_qmm_determinism.rs (target/test-fast/deps/cuda_qmm_determinism-0580441a9e835343)
+  Executable tests/cuda_sdpa_determinism.rs (target/test-fast/deps/cuda_sdpa_determinism-11feef284e612c65)
+  Executable tests/dead_doc_pointers.rs (target/test-fast/deps/dead_doc_pointers-ca67affaaac25f60)
+  Executable tests/deepseek_v2_greedy_parity.rs (target/test-fast/deps/deepseek_v2_greedy_parity-d173298dd0dfe794)
+  Executable tests/deepseek_v4_real_model.rs (target/test-fast/deps/deepseek_v4_real_model-c15e8bbf4b076998)
+  Executable tests/deepseek_vl_v2_parity.rs (target/test-fast/deps/deepseek_vl_v2_parity-c0ccf4da9d490ca0)
+  Executable tests/deepseekocr_2_resampler.rs (target/test-fast/deps/deepseekocr_2_resampler-ad3501f1d9ed4877)
+  Executable tests/deepseekocr_encoder_parity.rs (target/test-fast/deps/deepseekocr_encoder_parity-9e87576af190a9b5)
+  Executable tests/disaggregated_e2e.rs (target/test-fast/deps/disaggregated_e2e-4848b86f61cec466)
+  Executable tests/disaggregated_router_e2e.rs (target/test-fast/deps/disaggregated_router_e2e-7e3e5b706b1b110e)
+  Executable tests/disaggregated_serving_e2e.rs (target/test-fast/deps/disaggregated_serving_e2e-1e4b34efeb44049f)
+  Executable tests/dots_ocr_parity.rs (target/test-fast/deps/dots_ocr_parity-67cba3b161e4505a)
+  Executable tests/embedding_pooling_normalize_real.rs (target/test-fast/deps/embedding_pooling_normalize_real-d10955dd8b9aaa7e)
+  Executable tests/ernie4_5_moe_vl_parity.rs (target/test-fast/deps/ernie4_5_moe_vl_parity-c5a44a881cbb174d)
+  Executable tests/falcon_ocr_parity.rs (target/test-fast/deps/falcon_ocr_parity-7fc0e6d322316955)
+  Executable tests/fastvlm_parity.rs (target/test-fast/deps/fastvlm_parity-2042aa80ba2a521c)
+  Executable tests/florence2_fusion_parity.rs (target/test-fast/deps/florence2_fusion_parity-2583c03819278165)
+  Executable tests/florence2_postprocess_parity.rs (target/test-fast/deps/florence2_postprocess_parity-19db236ea85faf3c)
+  Executable tests/florence2_processor_parity.rs (target/test-fast/deps/florence2_processor_parity-4b74746a8bc1f78d)
+  Executable tests/florence2_quantized_parity.rs (target/test-fast/deps/florence2_quantized_parity-918e1afbf870f2d1)
+  Executable tests/florence2_text_parity.rs (target/test-fast/deps/florence2_text_parity-9dce19252589f2a1)
+  Executable tests/florence2_vision_parity.rs (target/test-fast/deps/florence2_vision_parity-9ab1c5fcb66e84b1)
+  Executable tests/gcp_predict_real_model.rs (target/test-fast/deps/gcp_predict_real_model-ad2470a51cd171da)
+  Executable tests/glm4v_moe_parity.rs (target/test-fast/deps/glm4v_moe_parity-58a3c5aaa3117dc7)
+  Executable tests/glm4v_parity.rs (target/test-fast/deps/glm4v_parity-6de5375d410ba9a4)
+  Executable tests/glm_ocr_parity.rs (target/test-fast/deps/glm_ocr_parity-420214652985ebca)
+  Executable tests/got_ocr_prompt_parity.rs (target/test-fast/deps/got_ocr_prompt_parity-767e02b0997a5a04)
+  Executable tests/got_ocr_real_model.rs (target/test-fast/deps/got_ocr_real_model-4359125e618e9ca2)
+  Executable tests/granite4_vision_parity.rs (target/test-fast/deps/granite4_vision_parity-c95852f9d741c413)
+  Executable tests/granite_vision_parity.rs (target/test-fast/deps/granite_vision_parity-f1608c43da7d0138)
+  Executable tests/hunyuan_vl_parity.rs (target/test-fast/deps/hunyuan_vl_parity-b2021063bb475f35)
+  Executable tests/internvl_parity.rs (target/test-fast/deps/internvl_parity-06fe5da83044d70e)
+  Executable tests/iquestloopcoder_parity.rs (target/test-fast/deps/iquestloopcoder_parity-660c85f48d3b81fa)
+  Executable tests/kimi_vl_parity.rs (target/test-fast/deps/kimi_vl_parity-26ed5217c0889d9c)
+  Executable tests/lang_bias.rs (target/test-fast/deps/lang_bias-b5d7e56713d0931b)
+  Executable tests/llama_chat_template_cli.rs (target/test-fast/deps/llama_chat_template_cli-ba7b27b2422e142c)
+  Executable tests/llama_compat_manifest.rs (target/test-fast/deps/llama_compat_manifest-fcd85f2b5b6009a5)
+  Executable tests/llama_compat_rope_freq_base.rs (target/test-fast/deps/llama_compat_rope_freq_base-52ae5c644ce3d347)
+  Executable tests/llama_compat_rope_scaling_override.rs (target/test-fast/deps/llama_compat_rope_scaling_override-634e4027e5826a68)
+  Executable tests/llama_compat_utility_routes.rs (target/test-fast/deps/llama_compat_utility_routes-47e5d7c8f7329113)
+  Executable tests/llama_compat_yarn_override.rs (target/test-fast/deps/llama_compat_yarn_override-d0f6c02aebc9d4ba)
+  Executable tests/llama_ggml_runtime_cli.rs (target/test-fast/deps/llama_ggml_runtime_cli-3053a09c56967f3f)
+  Executable tests/llama_logging_presets.rs (target/test-fast/deps/llama_logging_presets-8a4f2177a9edd8e6)
+  Executable tests/llama_model_source_cli.rs (target/test-fast/deps/llama_model_source_cli-ccb97ca32c61fd40)
+  Executable tests/mamba2_hybrid_decode_finite.rs (target/test-fast/deps/mamba2_hybrid_decode_finite-add021fce9fc603e)
+  Executable tests/mamba2_hybrid_finite.rs (target/test-fast/deps/mamba2_hybrid_finite-967483ae9fbb74dc)
+  Executable tests/max_kv_size_dense_e2e.rs (target/test-fast/deps/max_kv_size_dense_e2e-51bbe6daacbce4e6)
+  Executable tests/metal_block_vs_chain_op_parity.rs (target/test-fast/deps/metal_block_vs_chain_op_parity-bf79e9600bd70b8e)
+  Executable tests/mllama_parity.rs (target/test-fast/deps/mllama_parity-801c7c3c25a7c428)
+  Executable tests/model_loader_stdout_guard.rs (target/test-fast/deps/model_loader_stdout_guard-0872d345b83daea5)
+  Executable tests/model_loading.rs (target/test-fast/deps/model_loading-51125a9d94a8a1e6)
+  Executable tests/molmo_parity.rs (target/test-fast/deps/molmo_parity-78a82be660460062)
+  Executable tests/moondream2_parity.rs (target/test-fast/deps/moondream2_parity-64de1e4a812c5df6)
+  Executable tests/nemotron_parse_real_model.rs (target/test-fast/deps/nemotron_parse_real_model-70ad37b9f5b06003)
+  Executable tests/nemotron_voicechat_codec_real.rs (target/test-fast/deps/nemotron_voicechat_codec_real-a611132170248ea5)
+  Executable tests/nemotron_voicechat_front_real.rs (target/test-fast/deps/nemotron_voicechat_front_real-973fbeb950daea0e)
+  Executable tests/nemotron_voicechat_llm_real.rs (target/test-fast/deps/nemotron_voicechat_llm_real-a8c1e68664c3d216)
+  Executable tests/nemotron_voicechat_offline_real.rs (target/test-fast/deps/nemotron_voicechat_offline_real-d41233eca36885fd)
+  Executable tests/nemotron_voicechat_stream_real.rs (target/test-fast/deps/nemotron_voicechat_stream_real-88bd5a8555f1dc8c)
+  Executable tests/nemotron_voicechat_streaming_real.rs (target/test-fast/deps/nemotron_voicechat_streaming_real-e64bfda065b15f86)
+  Executable tests/nemotron_voicechat_tts_real.rs (target/test-fast/deps/nemotron_voicechat_tts_real-cf2d97a8b12f84a2)
+  Executable tests/paddleocr_vl_parity.rs (target/test-fast/deps/paddleocr_vl_parity-699fcb2a45b1b72c)
+  Executable tests/paged_decode_v2_greedy_parity.rs (target/test-fast/deps/paged_decode_v2_greedy_parity-35b27959d4a264c3)
+  Executable tests/paged_kv_serialize_parity.rs (target/test-fast/deps/paged_kv_serialize_parity-f358287d400f4c09)
+  Executable tests/paged_prefix_share_parity.rs (target/test-fast/deps/paged_prefix_share_parity-931ca02c63f47cbd)
+  Executable tests/paged_real_model_parity.rs (target/test-fast/deps/paged_real_model_parity-79904217e6718907)
+  Executable tests/paged_scheduler_parity.rs (target/test-fast/deps/paged_scheduler_parity-7d111b8f3d81ed82)
+  Executable tests/phi4mm_audio_parity.rs (target/test-fast/deps/phi4mm_audio_parity-5eb0a15b0d76628e)
+  Executable tests/pipeline_auto_partition_real_models.rs (target/test-fast/deps/pipeline_auto_partition_real_models-8db47da5a21d9350)
+  Executable tests/pipeline_ci_multi_stage_real_models.rs (target/test-fast/deps/pipeline_ci_multi_stage_real_models-a43a41029bda035a)
+  Executable tests/pipeline_cli_real_models.rs (target/test-fast/deps/pipeline_cli_real_models-207e16982539c7fe)
+  Executable tests/pipeline_elastic_repartition_real_models.rs (target/test-fast/deps/pipeline_elastic_repartition_real_models-d66be1191ccd53d2)
+  Executable tests/pipeline_lora_composition_real_models.rs (target/test-fast/deps/pipeline_lora_composition_real_models-ead36b0820d00cfa)
+  Executable tests/pipeline_observability_real_models.rs (target/test-fast/deps/pipeline_observability_real_models-d0030065f08d8806)
+  Executable tests/pipeline_remote_real_models.rs (target/test-fast/deps/pipeline_remote_real_models-33a14d3d4e098b14)
+  Executable tests/pipeline_server_real_models.rs (target/test-fast/deps/pipeline_server_real_models-2e5a52c9f63f50ba)
+  Executable tests/pipeline_server_remote_real_models.rs (target/test-fast/deps/pipeline_server_remote_real_models-1868bd067b6d0b68)
+  Executable tests/pipeline_stage_executor_real_models.rs (target/test-fast/deps/pipeline_stage_executor_real_models-14babd2449fe0997)
+  Executable tests/plamo2_parity.rs (target/test-fast/deps/plamo2_parity-30d11583853e1554)
+  Executable tests/pp_tp_2d_real_models.rs (target/test-fast/deps/pp_tp_2d_real_models-281cb6ff4d54681c)
+  Executable tests/pre_ampere_f16_quality.rs (target/test-fast/deps/pre_ampere_f16_quality-1fe282cf39704a90)
+  Executable tests/prompt_cache_compat_e2e.rs (target/test-fast/deps/prompt_cache_compat_e2e-00ac992017fb509a)
+  Executable tests/prompt_cache_e2e.rs (target/test-fast/deps/prompt_cache_e2e-34178c8f531b2f8b)
+  Executable tests/prompt_cache_prefill_bench.rs (target/test-fast/deps/prompt_cache_prefill_bench-5eb81d5890c52e5d)
+  Executable tests/qwen2_5_vl_parity.rs (target/test-fast/deps/qwen2_5_vl_parity-e606f3d0324be489)
+  Executable tests/qwen35_mtp_verify_parity.rs (target/test-fast/deps/qwen35_mtp_verify_parity-85d8b5eeb0993e08)
+  Executable tests/qwen38_mtp_chain_parity.rs (target/test-fast/deps/qwen38_mtp_chain_parity-2b7368b6d660a1b9)
+  Executable tests/qwen3_omni_moe_parity.rs (target/test-fast/deps/qwen3_omni_moe_parity-5c97750f1b386f79)
+  Executable tests/rdma_transport_bench.rs (target/test-fast/deps/rdma_transport_bench-c463b6f5edd9aa14)
+  Executable tests/realtime_ws.rs (target/test-fast/deps/realtime_ws-8d448b6b3978e98e)
+  Executable tests/rocm_cpu_blas_finegrained.rs (target/test-fast/deps/rocm_cpu_blas_finegrained-9e01e7eebb932ea8)
+  Executable tests/rocm_custom_kernel_jit_key.rs (target/test-fast/deps/rocm_custom_kernel_jit_key-429b78588e3ab20b)
+  Executable tests/rocm_device_map_concurrency.rs (target/test-fast/deps/rocm_device_map_concurrency-b0d502a30461e028)
+  Executable tests/rocm_fft_cache_env.rs (target/test-fast/deps/rocm_fft_cache_env-faaf2c4c2ea56be6)
+  Executable tests/rocm_fft_plan_cache.rs (target/test-fast/deps/rocm_fft_plan_cache-2933c1432fc8f46b)
+  Executable tests/rocm_gather_qmm_expert_batched.rs (target/test-fast/deps/rocm_gather_qmm_expert_batched-5e7629804b2127c0)
+  Executable tests/rocm_gpu_faults.rs (target/test-fast/deps/rocm_gpu_faults-8ac74879aac2f38e)
+  Executable tests/rocm_hipblaslt_concurrency.rs (target/test-fast/deps/rocm_hipblaslt_concurrency-a06938cd1f47570e)
+  Executable tests/rocm_inflight_bound.rs (target/test-fast/deps/rocm_inflight_bound-ea64ea44d6ab13f8)
+  Executable tests/rocm_jit_module_concurrency.rs (target/test-fast/deps/rocm_jit_module_concurrency-afd0e4ddc966b3ab)
+  Executable tests/rocm_mxfp4_quant.rs (target/test-fast/deps/rocm_mxfp4_quant-d8f2ed54547ef957)
+  Executable tests/rocm_qmm_batched_rows.rs (target/test-fast/deps/rocm_qmm_batched_rows-7c063f30782f80bb)
+  Executable tests/rocm_qmm_dequant_cache.rs (target/test-fast/deps/rocm_qmm_dequant_cache-f197b575a8ab5792)
+  Executable tests/rocm_qmm_env.rs (target/test-fast/deps/rocm_qmm_env-45bdba43a2258fda)
+  Executable tests/rocm_rocblas_handle_concurrency.rs (target/test-fast/deps/rocm_rocblas_handle_concurrency-46a5fa727df46606)
+  Executable tests/rocm_scalar_pool_concurrency.rs (target/test-fast/deps/rocm_scalar_pool_concurrency-3d0b3a76087317b6)
+  Executable tests/rocm_slice_update_reduce.rs (target/test-fast/deps/rocm_slice_update_reduce-317c5ec53f6e80a5)
+  Executable tests/rocm_slice_update_source.rs (target/test-fast/deps/rocm_slice_update_source-35e750a3d8e272d9)
+  Executable tests/rocm_strided_copy_grid.rs (target/test-fast/deps/rocm_strided_copy_grid-907df35d74ec26a1)
+  Executable tests/rocm_strided_scan.rs (target/test-fast/deps/rocm_strided_scan-f9cd902ec831070b)
+  Executable tests/rocm_wave64_port_refusal.rs (target/test-fast/deps/rocm_wave64_port_refusal-c314586229ba53d2)
+  Executable tests/rocm_wave_size.rs (target/test-fast/deps/rocm_wave_size-f5a9c5a45bf7fdab)
+  Executable tests/sampling_gumbel_kill_switch.rs (target/test-fast/deps/sampling_gumbel_kill_switch-9e6224e7dbb2fa87)
+  Executable tests/sampling_rejection_kill_switch.rs (target/test-fast/deps/sampling_rejection_kill_switch-12d3b1f579f8baf7)
+  Executable tests/sampling_top_k_above_vocab_e2e.rs (target/test-fast/deps/sampling_top_k_above_vocab_e2e-75e0f7228af789de)
+  Executable tests/smolvlm_parity.rs (target/test-fast/deps/smolvlm_parity-608d4f1820d455e5)
+  Executable tests/speculative_dispatch.rs (target/test-fast/deps/speculative_dispatch-d6380ee4637988e7)
+  Executable tests/speculative_parity.rs (target/test-fast/deps/speculative_parity-4de814b818ad16b5)
+  Executable tests/step3p7_parity.rs (target/test-fast/deps/step3p7_parity-129d3f4377a92c12)
+  Executable tests/structured_outputs.rs (target/test-fast/deps/structured_outputs-a032780570696018)
+  Executable tests/surgery_cli.rs (target/test-fast/deps/surgery_cli-273e8e62ee5e122c)
+  Executable tests/tensor_parallel_real_models.rs (target/test-fast/deps/tensor_parallel_real_models-a2e9a51b730af924)
+  Executable tests/thinking_budget.rs (target/test-fast/deps/thinking_budget-c2847a4d7ba0bc6e)
+  Executable tests/tp_e2e.rs (target/test-fast/deps/tp_e2e-dfb4b082e3ffd928)
+  Executable tests/turbo_kv_e2e.rs (target/test-fast/deps/turbo_kv_e2e-5724d8a936e28028)
+  Executable tests/vlm_concurrency.rs (target/test-fast/deps/vlm_concurrency-620f8b1cfff030af)
+  Executable tests/vlm_wrapper_capability_delegation.rs (target/test-fast/deps/vlm_wrapper_capability_delegation-d1ec0017ac51192e)
+  Executable tests/wht_op.rs (target/test-fast/deps/wht_op-8a3cfea2f7d8fb0c)
+  Executable tests/xla_gemma3n_prefill.rs (target/test-fast/deps/xla_gemma3n_prefill-b926285baa265003)
+  Executable tests/youtu_vl_parity.rs (target/test-fast/deps/youtu_vl_parity-a6076273912211e5)
+  Executable tests/zero_config_cluster_init.rs (target/test-fast/deps/zero_config_cluster_init-42f8f650c529fe07)
+  Executable unittests src/lib.rs (target/test-fast/deps/mlxcel_core-a9c9e3c743946c6b)
+  Executable unittests src/lib.rs (target/test-fast/deps/mlxcel_mlx_pin-7bbde732c345a80b)
+  Executable tests/cross_parser.rs (target/test-fast/deps/cross_parser-6f5e8642504955cf)
+  Executable unittests src/lib.rs (target/test-fast/deps/mlxcel_surgery-9d678b028e2c884a)
+  Executable tests/add_integration.rs (target/test-fast/deps/add_integration-546b1ff68c8c3742)
+  Executable tests/interpolate_integration.rs (target/test-fast/deps/interpolate_integration-51776ac318944ce5)
+  Executable tests/prune_integration.rs (target/test-fast/deps/prune_integration-150bd6435c018dab)
+  Executable tests/replace_integration.rs (target/test-fast/deps/replace_integration-ab6e6ee969a83bd6)
+  Executable tests/scale_integration.rs (target/test-fast/deps/scale_integration-e62651ee478e81ff)
+  Executable unittests src/lib.rs (target/test-fast/deps/mlxcel_xla-202b6bbdaef2e90c)

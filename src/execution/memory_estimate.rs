@@ -34,6 +34,10 @@
 //!   last-token logit buffer `batch × vocab × 2`, capturing the
 //!   batch / context / vocab growth the flat factor missed.
 //!   `MLXCEL_ACTIVATION_MULT` overrides the multiplier.
+//! - **Backend in-flight** (ROCm builds only, issue #2155) — the
+//!   `MLX_ROCM_MAX_INFLIGHT_MB` budget the ROCm backend lets committed but
+//!   unfinished command batches hold, parsed by
+//!   [`rocm_inflight_reserve_bytes`]. Every other build adds 0.
 //!
 //! The result feeds three callers that all use this exact function:
 //!
@@ -123,11 +127,27 @@ pub const ACTIVATION_BUFFER_MULT: f64 = 2.0;
 /// invalid / non-positive values fall back to the default with a warning.
 pub const ACTIVATION_MULT_ENV: &str = "MLXCEL_ACTIVATION_MULT";
 
-/// Tokens of prompt processed per prefill step. Chunked prefill (the server's
-/// default `prefill_chunk_size = 512`) bounds the activation peak to this many
-/// tokens regardless of the full context length, so the activation term scales
-/// with `min(ctx, ACTIVATION_PREFILL_TOKENS)` — not the full context.
-pub const ACTIVATION_PREFILL_TOKENS: u64 = 512;
+/// Tokens of prompt processed per prefill step. Chunked prefill bounds the
+/// activation peak to this many tokens regardless of the full context length,
+/// so the activation term scales with `min(ctx, activation_prefill_tokens())`,
+/// not the full context. It is the one prefill chunk policy the CLI and the
+/// server share (`prefill_chunk_len()`: `MLXCEL_PREFILL_CHUNK`, else 2048,
+/// ADR 0007 and #2170); an explicit `--prefill-chunk-size` is not seen here.
+pub fn activation_prefill_tokens() -> u64 {
+    mlxcel_core::prefill_plan::prefill_chunk_len() as u64
+}
+
+/// Prompt tokens one prefill forward spans at `ctx_len` under `chunk`
+/// ([`activation_prefill_tokens`]): `min(ctx_len, chunk)`, at least 1. A
+/// `chunk` of `0` (`MLXCEL_PREFILL_CHUNK=0`, a single-pass prefill) bounds
+/// nothing, so the whole context is one forward.
+fn activation_prefill_span(ctx_len: u64, chunk: u64) -> u64 {
+    if chunk == 0 {
+        ctx_len.max(1)
+    } else {
+        ctx_len.clamp(1, chunk)
+    }
+}
 
 /// Env var applied by `execution::runtime` as an MLX allocator soft cap.
 ///
@@ -135,6 +155,19 @@ pub const ACTIVATION_PREFILL_TOKENS: u64 = 512;
 /// that runtime initializer, so the estimator must read this env var directly
 /// as well as checking `mlxcel_core::memory::memory_limit()`.
 const MEMORY_LIMIT_ENV: &str = "MLXCEL_MEMORY_LIMIT";
+
+/// Env var the ROCm backend reads for its in-flight budget, in MiB (issue
+/// #2062, `LOCAL_FIXES.md` item 28): committed but unfinished command batches
+/// may hold up to this much newly allocated memory, mostly the f16 weight
+/// copies of the dequantize-and-GEMM qmm path during prefill. Parsed for the
+/// estimate by [`rocm_inflight_reserve_bytes`].
+pub const ROCM_MAX_INFLIGHT_ENV: &str = "MLX_ROCM_MAX_INFLIGHT_MB";
+
+/// The backend's in-flight budget when [`ROCM_MAX_INFLIGHT_ENV`] is unset or
+/// invalid. Must equal `default_max_inflight_mb` in
+/// `src/lib/mlxcelverse/overlays/rocm/mlx/backend/rocm/device.cpp`; a unit test
+/// reads that file and fails when the two drift.
+pub const ROCM_DEFAULT_MAX_INFLIGHT_MB: u64 = 1024;
 
 /// Default context length when the caller does not pass one (e.g. the
 /// quant advisor's legacy 8K sizing). Matches the previous
@@ -302,8 +335,8 @@ pub struct MemoryEstimate {
     pub kv_cache_bytes: u64,
     /// Total reserve beyond `weights + kv_cache`: the allocator overhead
     /// (flat [`DEFAULT_HEADROOM_FACTOR`] on weights+kv) **plus**
-    /// [`Self::activation_bytes`]. This is the figure that lands in
-    /// `total_bytes`.
+    /// [`Self::activation_bytes`] **plus** [`Self::backend_inflight_bytes`].
+    /// This is the figure that lands in `total_bytes`.
     pub runtime_headroom_bytes: u64,
     /// Workload-scaled activation reserve — `mult × batch ×
     /// min(ctx, prefill_chunk) × (hidden + intermediate) × 2` plus the
@@ -312,6 +345,15 @@ pub struct MemoryEstimate {
     /// inspect` can show the batch/context-sensitive component apart from the
     /// flat allocator overhead. See [`ACTIVATION_BUFFER_MULT`].
     pub activation_bytes: u64,
+    /// Backend in-flight working set: transient allocations that committed
+    /// but unfinished command batches may hold on top of the steady state.
+    /// The ROCm backend bounds it with `MLX_ROCM_MAX_INFLIGHT_MB` (default
+    /// 1024 MiB), so ROCm builds reserve exactly that budget (see
+    /// [`rocm_inflight_reserve_bytes`]); every other build reserves 0, which
+    /// leaves Metal and CUDA totals unchanged. Part of
+    /// [`Self::runtime_headroom_bytes`]; surfaced separately for `mlxcel
+    /// inspect`.
+    pub backend_inflight_bytes: u64,
     /// `weights + kv_cache + runtime_headroom`.
     pub total_bytes: u64,
     /// Best-known available unified memory in bytes. On Apple Silicon
@@ -369,6 +411,7 @@ pub struct InspectReport {
     pub kv_detail: String,
     pub per_slot_overhead_bytes: Option<u64>,
     pub activation_bytes: u64,
+    pub backend_inflight_bytes: u64,
     pub headroom_bytes: u64,
     pub headroom_factor: f64,
     pub budget_bytes: u64,
@@ -435,6 +478,7 @@ impl InspectReport {
             kv_detail: est.kv_detail.clone(),
             per_slot_overhead_bytes,
             activation_bytes: est.activation_bytes,
+            backend_inflight_bytes: est.backend_inflight_bytes,
             headroom_bytes: est.runtime_headroom_bytes,
             headroom_factor: est.headroom_factor,
             budget_bytes: est.available_bytes,
@@ -476,6 +520,7 @@ impl MemoryEstimate {
 /// - filesystem reads of `model_dir/config.json` and the safetensors
 ///   header (no tensor data is touched),
 /// - one read of `MLXCEL_HEADROOM_FACTOR` (when set),
+/// - one read of `MLX_ROCM_MAX_INFLIGHT_MB` on ROCm builds,
 /// - one read of `/proc/meminfo` on Linux to derive available memory.
 ///
 /// Side-effect-free with respect to MLX state: no allocations on the
@@ -525,7 +570,14 @@ pub fn estimate_total_memory(
     let activation_bytes = activation_dims_from_path(model_dir)
         .map(|dims| compute_activation_bytes(&dims, ctx_len, batch, resolve_activation_mult()))
         .unwrap_or(0);
-    let runtime_headroom_bytes = allocator_overhead_bytes.saturating_add(activation_bytes);
+    // ROCm only: the in-flight working set the backend allows on top of the
+    // steady state (issue #2155). It tracks the `MLX_ROCM_MAX_INFLIGHT_MB`
+    // budget rather than model size, so it is an additive term, not a larger
+    // factor; Metal and CUDA builds add 0.
+    let backend_inflight_bytes = backend_inflight_reserve_bytes();
+    let runtime_headroom_bytes = allocator_overhead_bytes
+        .saturating_add(activation_bytes)
+        .saturating_add(backend_inflight_bytes);
 
     let total_bytes = weights_bytes
         .saturating_add(kv_cache_bytes)
@@ -540,6 +592,7 @@ pub fn estimate_total_memory(
         kv_cache_bytes,
         runtime_headroom_bytes,
         activation_bytes,
+        backend_inflight_bytes,
         total_bytes,
         available_bytes,
         fits,
@@ -552,6 +605,72 @@ pub fn estimate_total_memory(
         quant,
         kv_dtype_int8,
     }
+}
+
+/// Bytes the ROCm backend's in-flight bound lets committed but unfinished
+/// command batches hold, for a raw `MLX_ROCM_MAX_INFLIGHT_MB` value.
+///
+/// Mirrors `max_inflight_bytes()` in the ROCm overlay's `device.cpp` exactly,
+/// so the estimate reserves what the backend will enforce: unset or empty
+/// means [`ROCM_DEFAULT_MAX_INFLIGHT_MB`]; otherwise the value is parsed the
+/// way `strtoull(e, &end, 10)` does (leading C whitespace and one optional
+/// `+` or `-` sign skipped, then decimal digits) and kept only when the whole
+/// string was consumed, the first byte is not `-`, the digits did not overflow
+/// 64 bits, and the MiB count still fits in 64 bits once shifted by 20.
+/// Anything else (a suffix such as `1G`, `-1`, an overflow) falls back to the
+/// default, as the backend does. `0` turns the bound off in the backend and
+/// reserves 0 here: an unbounded in-flight set is not modeled (peaks of 20.60
+/// GB were measured for an 8B model that way).
+#[must_use]
+pub fn rocm_inflight_reserve_bytes(raw: Option<&str>) -> u64 {
+    let mb = raw
+        .filter(|s| !s.is_empty())
+        .and_then(parse_inflight_mb_like_strtoull)
+        .unwrap_or(ROCM_DEFAULT_MAX_INFLIGHT_MB);
+    mb << 20
+}
+
+/// `strtoull(s, &end, 10)` plus the overlay's acceptance checks; `None` when
+/// the backend would ignore the value. See [`rocm_inflight_reserve_bytes`].
+fn parse_inflight_mb_like_strtoull(s: &str) -> Option<u64> {
+    if s.starts_with('-') {
+        return None;
+    }
+    // C `isspace` in the "C" locale: space, \t, \n, \v, \f, \r.
+    let rest = s.trim_start_matches([' ', '\t', '\n', '\x0b', '\x0c', '\r']);
+    let (negative, digits) = match rest.as_bytes().first() {
+        Some(b'-') => (true, &rest[1..]),
+        Some(b'+') => (false, &rest[1..]),
+        _ => (false, rest),
+    };
+    // No digits means no conversion (`end == e`); anything after the digits
+    // means `*end != '\0'`. Both keep the default.
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    // Digits beyond u64 set ERANGE.
+    let magnitude: u64 = digits.parse().ok()?;
+    // strtoull negates a `-` that follows whitespace in unsigned arithmetic.
+    let value = if negative {
+        magnitude.wrapping_neg()
+    } else {
+        magnitude
+    };
+    (value <= (u64::MAX >> 20)).then_some(value)
+}
+
+/// The in-flight reserve this build adds to every estimate: the
+/// `MLX_ROCM_MAX_INFLIGHT_MB` budget on ROCm builds, 0 elsewhere. Gated at
+/// compile time like the ROCm cache-limit default in `execution::runtime`,
+/// so the estimator never brings up a runtime to ask which backend it has.
+#[cfg(feature = "rocm")]
+fn backend_inflight_reserve_bytes() -> u64 {
+    rocm_inflight_reserve_bytes(std::env::var(ROCM_MAX_INFLIGHT_ENV).ok().as_deref())
+}
+
+#[cfg(not(feature = "rocm"))]
+fn backend_inflight_reserve_bytes() -> u64 {
+    0
 }
 
 /// Resolve the per-process headroom factor.
@@ -660,7 +779,7 @@ fn resolve_activation_mult() -> f64 {
 /// (batch, context, vocab) rather than the model weights.
 ///
 /// `streaming` is the per-prefill-chunk working set: `mult × batch ×
-/// min(ctx, ACTIVATION_PREFILL_TOKENS) × (hidden + intermediate) × 2 bytes`.
+/// min(ctx, activation_prefill_tokens()) × (hidden + intermediate) × 2 bytes`.
 /// Activations are FP16 (2 bytes) regardless of weight/KV quantisation. Chunked
 /// prefill bounds the token count, so this does not grow with full context.
 /// `logits` is the last-token logit buffer `batch × vocab × 2` (prefill slices
@@ -668,7 +787,7 @@ fn resolve_activation_mult() -> f64 {
 /// weights-proportional headroom missed in the batch>1 / large-vocab regime.
 fn compute_activation_bytes(dims: &ActivationDims, ctx_len: u64, batch: u64, mult: f64) -> u64 {
     const ACT_DTYPE_BYTES: u64 = 2; // activations are FP16 even with int8 KV/weights
-    let prefill_tokens = ctx_len.clamp(1, ACTIVATION_PREFILL_TOKENS);
+    let prefill_tokens = activation_prefill_span(ctx_len, activation_prefill_tokens());
     let per_token = dims.hidden.saturating_add(dims.intermediate);
     let streaming_base = per_token
         .saturating_mul(batch)
@@ -1183,10 +1302,11 @@ pub fn paged_block_bytes(
 /// `--kv-cache-budget auto` policy.
 ///
 /// Inverts the [`estimate_total_memory`] fit inequality. Recall that
-/// `total = headroom_factor × (weights + kv) + activation` (the allocator
-/// overhead is `(factor − 1) × (weights + kv)`); requiring `total ≤ available`
+/// `total = headroom_factor × (weights + kv) + activation + inflight` (the
+/// allocator overhead is `(factor − 1) × (weights + kv)`, and `inflight` is
+/// [`MemoryEstimate::backend_inflight_bytes`]); requiring `total ≤ available`
 /// and solving for the KV term gives
-/// `kv ≤ (available − activation) / factor − weights`. Returns the clamped
+/// `kv ≤ (available − activation − inflight) / factor − weights`. Returns the clamped
 /// non-negative headroom; `0` when the model leaves no room for KV.
 fn auto_kv_budget_bytes(est: &MemoryEstimate) -> u64 {
     let factor = if est.headroom_factor.is_finite() && est.headroom_factor > 1.0 {
@@ -1194,7 +1314,10 @@ fn auto_kv_budget_bytes(est: &MemoryEstimate) -> u64 {
     } else {
         1.0
     };
-    let after_activation = est.available_bytes.saturating_sub(est.activation_bytes);
+    let after_activation = est
+        .available_bytes
+        .saturating_sub(est.activation_bytes)
+        .saturating_sub(est.backend_inflight_bytes);
     // `after_activation / factor` in f64; byte magnitudes (≤ ~10^12) sit far
     // inside f64's exact-integer range, and factor ≥ 1.0 only shrinks the value.
     let scaled = (after_activation as f64 / factor).floor();
@@ -1496,13 +1619,17 @@ pub fn format_estimate(model_dir: &Path, est: &MemoryEstimate) -> String {
     }
     let allocator_overhead = est
         .runtime_headroom_bytes
-        .saturating_sub(est.activation_bytes);
+        .saturating_sub(est.activation_bytes)
+        .saturating_sub(est.backend_inflight_bytes);
     let _ = writeln!(
         out,
-        "  Activation:      {}  (batch {} × ≤{} prefill tokens × (hidden+intermediate) + logits)",
+        "  Activation:      {}  (batch {} × {} prefill tokens × (hidden+intermediate) + logits)",
         format_bytes(est.activation_bytes),
         est.batch,
-        ACTIVATION_PREFILL_TOKENS,
+        match activation_prefill_tokens() {
+            0 => "all".to_string(),
+            chunk => format!("≤{chunk}"),
+        },
     );
     let _ = writeln!(
         out,
@@ -1510,6 +1637,13 @@ pub fn format_estimate(model_dir: &Path, est: &MemoryEstimate) -> String {
         format_bytes(allocator_overhead),
         est.headroom_factor,
     );
+    if est.backend_inflight_bytes > 0 {
+        let _ = writeln!(
+            out,
+            "  Backend in-flight: {}  ({ROCM_MAX_INFLIGHT_ENV})",
+            format_bytes(est.backend_inflight_bytes),
+        );
+    }
     let _ = writeln!(out, "  -----");
     let _ = writeln!(out, "  Total estimate:  {}", format_bytes(est.total_bytes));
     let _ = writeln!(
@@ -1537,6 +1671,10 @@ pub fn format_estimate(model_dir: &Path, est: &MemoryEstimate) -> String {
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+#[path = "memory_estimate_inflight_tests.rs"]
+mod inflight_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1730,6 +1868,7 @@ mod tests {
             kv_cache_bytes: 0,
             runtime_headroom_bytes: 20,
             activation_bytes: 4,
+            backend_inflight_bytes: 0,
             total_bytes: 120,
             available_bytes: 128,
             fits: true,
@@ -2109,11 +2248,23 @@ mod tests {
             intermediate: 11008,
             vocab: 32000,
         };
-        // ctx 8192 → prefill capped at ACTIVATION_PREFILL_TOKENS (512); mult 2.0.
+        // ctx 8192 → prefill capped at the prefill chunk; mult 2.0.
         let a = compute_activation_bytes(&dims, 8192, 1, 2.0);
-        let streaming = 2 * 512 * (4096 + 11008) * 2; // mult × prefill × (h+i) × 2 bytes
+        let prefill = activation_prefill_tokens().min(8192);
+        let streaming = 2 * prefill * (4096 + 11008) * 2; // mult × prefill × (h+i) × 2 bytes
         let logits = 32000 * 2; // vocab × batch(1) × 2 bytes
         assert_eq!(a, streaming + logits);
+    }
+
+    /// `MLXCEL_PREFILL_CHUNK=0` (single-pass prefill) must not panic the
+    /// estimate: `ctx.clamp(1, 0)` would, so a zero chunk spans the context.
+    #[test]
+    fn activation_prefill_span_handles_a_disabled_chunk() {
+        assert_eq!(activation_prefill_span(8192, 2048), 2048);
+        assert_eq!(activation_prefill_span(256, 2048), 256);
+        assert_eq!(activation_prefill_span(0, 2048), 1);
+        assert_eq!(activation_prefill_span(8192, 0), 8192);
+        assert_eq!(activation_prefill_span(0, 0), 1);
     }
 
     #[test]
@@ -2143,7 +2294,7 @@ mod tests {
         // Below the chunk, it is smaller (prefill = ctx).
         let at_256 = compute_activation_bytes(&dims, 256, 1, 2.0);
         assert!(at_256 < at_8k);
-        assert_eq!(at_256 * (ACTIVATION_PREFILL_TOKENS / 256), at_8k);
+        assert_eq!(at_256 * (activation_prefill_tokens() / 256), at_8k);
     }
 
     #[test]
@@ -2469,6 +2620,7 @@ mod tests {
             kv_cache_bytes: 0,
             runtime_headroom_bytes: 0,
             activation_bytes: 1_000_000_000,
+            backend_inflight_bytes: 0,
             total_bytes: 0,
             available_bytes: 25_000_000_000,
             fits: true,
@@ -2497,6 +2649,7 @@ mod tests {
             kv_cache_bytes: 0,
             runtime_headroom_bytes: 0,
             activation_bytes: 1_000_000_000,
+            backend_inflight_bytes: 0,
             total_bytes: 0,
             available_bytes: 16_000_000_000,
             fits: false,

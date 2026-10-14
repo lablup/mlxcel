@@ -31,16 +31,28 @@ use std::path::PathBuf;
 /// `rocm` feature is on. A no-op otherwise, so Apple Silicon, CUDA and CI
 /// builds are unaffected.
 pub fn emit() {
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux") {
+        return;
+    }
     println!("cargo:rerun-if-env-changed=ROCM_PATH");
-    if env::var_os("CARGO_FEATURE_ROCM").is_none() {
+    println!("cargo:rerun-if-env-changed=IREE_ROCM_HOME");
+    let has_rocm_feature = env::var_os("CARGO_FEATURE_ROCM").is_some();
+    let has_iree_rocm = env::var_os("IREE_ROCM_HOME")
+        .filter(|p| !p.is_empty())
+        .is_some();
+    if !has_rocm_feature && !has_iree_rocm {
         return;
     }
     let rocm = env::var_os("ROCM_PATH")
         .filter(|p| !p.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/opt/rocm"));
+    // Emit DT_RPATH (`--disable-new-dtags`) so both direct DT_NEEDED loads (`rocm`
+    // feature) and `dlopen("libamdhip64.so", ...)` inside IREE's statically linked
+    // HIP HAL driver (`IREE_ROCM_HOME`) resolve `/opt/rocm/lib/libamdhip64.so`
+    // without requiring `LD_LIBRARY_PATH` at runtime.
     println!(
-        "cargo:rustc-link-arg=-Wl,-rpath,{}",
+        "cargo:rustc-link-arg=-Wl,--disable-new-dtags,-rpath,{}",
         rocm.join("lib").display()
     );
 }

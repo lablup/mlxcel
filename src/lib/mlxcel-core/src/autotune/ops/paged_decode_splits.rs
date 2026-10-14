@@ -16,7 +16,7 @@
 //!
 //! ## Why this knob
 //!
-//! `src/lib/mlx-cpp/turbo/paged_attention.cpp` launches the fused decode kernel
+//! `src/lib/mlxcelverse/kernels/paged_attention.cpp` launches the fused decode kernel
 //! over `(32, NumSplits, B*Hq)`: 32 lanes partition the head dimension and
 //! `NumSplits` SIMD groups sweep strided token stripes, then SIMD group 0
 //! merges the partials with a flash rescale. Before #906 `NumSplits` came from
@@ -202,10 +202,13 @@ impl TunableOp for PagedDecodeSplitsOp<'_> {
     }
 
     fn runner_id(&self) -> String {
-        // The launcher picks the Metal or CUDA JIT body from the live backend,
-        // and the two are different kernels; keep their tactics apart.
+        // The launcher picks the Metal, CUDA or HIP (#2068) JIT body from the
+        // live backend, and they are different kernels; keep their tactics
+        // apart.
         if crate::metal_is_available() {
             "metal".to_string()
+        } else if crate::hardware::gpu_backend_kind() == crate::hardware::GpuBackendKind::Rocm {
+            "rocm".to_string()
         } else {
             "cuda".to_string()
         }

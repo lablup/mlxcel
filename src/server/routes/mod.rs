@@ -26,6 +26,7 @@ pub mod anthropic;
 pub mod audio;
 pub mod cache;
 pub mod chat;
+pub(crate) mod chat_generation;
 pub mod completions;
 pub mod control;
 pub mod detokenize;
@@ -170,7 +171,23 @@ pub(crate) fn chat_not_available(state: &AppState) -> Option<ErrorResponse> {
 
 /// Map generation dispatch failures consistently across OpenAI-compatible
 /// routes.
+// Used by: all serving models, all OpenAI-compatible generation routes.
 pub(crate) fn generation_error_to_response(err: anyhow::Error) -> ErrorResponse {
+    if let Some(rejection) =
+        err.downcast_ref::<crate::execution::request_memory::RequestMemoryRejection>()
+    {
+        let mut response = ErrorResponse::new(
+            rejection.to_string(),
+            crate::execution::request_memory::RequestMemoryRejection::CODE,
+        );
+        response.error.code =
+            Some(crate::execution::request_memory::RequestMemoryRejection::CODE.to_string());
+        response.error.estimated_bytes = Some(rejection.estimated_bytes);
+        response.error.budget_bytes = Some(rejection.budget_bytes);
+        response.status = axum::http::StatusCode::SERVICE_UNAVAILABLE;
+        return response;
+    }
+
     if err.downcast_ref::<QueueFullError>().is_some() {
         return ErrorResponse::service_unavailable("All slots are busy. Please try again later.");
     }

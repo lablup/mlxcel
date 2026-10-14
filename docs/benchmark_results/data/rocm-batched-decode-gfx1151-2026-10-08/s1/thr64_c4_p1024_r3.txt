@@ -1,0 +1,14 @@
+Server:       http://127.0.0.1:18996
+Model:        Meta-Llama-3.1-8B-Instruct-4bit
+Prompt:       ~1024 tokens (5183 chars)
+Max tokens:   128
+Concurrency:  [4]
+
+>>> concurrency=4 ...
+    decode paths: /metrics unavailable, path attribution unknown
+    batch steps: /metrics unavailable, step cost unknown
+
+conc   ok  fail  ttft_ms(mean)  ttft_ms(p95)  decode_tok_s(mean)  aggregate_tok_s
+---------------------------------------------------------------------------------
+   4    4     0         3479.8        4049.9                 6.2             21.3
+

@@ -320,6 +320,7 @@ pub(super) fn options(max_tokens: usize) -> ServerGenerateOptions {
         grammar: None,
         image_soft_tokens: None,
         pre_rendered_prompt_tokens: None,
+        admission_notification: None,
     }
 }
 
@@ -371,6 +372,10 @@ pub(super) fn collect_stream(rx: &mpsc::Receiver<GenerateEvent>) -> StreamSummar
             }
             Ok(GenerateEvent::Prefill(_)) => {}
             Ok(GenerateEvent::Done(result)) => return StreamSummary { tokens, result },
+            Ok(GenerateEvent::Admitted) => {}
+            Ok(GenerateEvent::RequestMemoryRejected(error)) => {
+                panic!("unexpected memory rejection: {error}")
+            }
             Ok(GenerateEvent::Error(error)) => panic!("unexpected generation error: {error}"),
             Err(err) => panic!("generation did not finish: {err}"),
         }
@@ -387,7 +392,7 @@ pub(super) fn muse_state_offsets(
     sched: &BatchScheduler,
     seq_id: SequenceId,
 ) -> Option<Vec<(bool, i32, i32)>> {
-    match &sched.model {
+    match sched.engine.model() {
         LoadedModel::MuseGlimmerVLM(model) => model.text.sequence_cache_summaries(seq_id),
         _ => panic!("scheduler test must use Muse Glimmer VLM"),
     }

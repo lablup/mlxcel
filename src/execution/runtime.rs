@@ -20,6 +20,13 @@
 
 use std::fmt;
 
+static APPLIED_WIRED_LIMIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The cap actually configured at runtime, unlike get_wired_limit (device recommendation).
+pub(crate) fn applied_wired_limit() -> u64 {
+    APPLIED_WIRED_LIMIT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 const RUNTIME_DEVICE_ENV: &str = "MLXCEL_DEVICE";
 const WIRED_LIMIT_ENV: &str = "MLXCEL_WIRED_LIMIT";
 /// Issue #55: optional soft cap on the MLX allocator. When set, the
@@ -255,6 +262,11 @@ pub fn initialize_runtime() -> RuntimeSetup {
     } else {
         None
     };
+
+    APPLIED_WIRED_LIMIT.store(
+        wired_limit_bytes.unwrap_or(0) as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
 
     // Issue #55: apply optional soft allocator cap regardless of device.
     // The MLX no-gpu CPU allocator also honours `set_memory_limit()`, so

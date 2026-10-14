@@ -36,7 +36,7 @@
 //!
 //! Unlike the paged-decode split count, these knobs are read by patched MLX
 //! CUDA kernels through the environment
-//! (`src/lib/mlx-cpp/patches/mlx/backend/cuda/quantized/qmm/`). mlxcel's C++
+//! (`src/lib/mlxcelverse/overlays/cuda/mlx/backend/cuda/quantized/qmm/`). mlxcel's C++
 //! and MLX's C++ are separate link units in the "mlxcel calls MLX" direction
 //! only, so there is no in-process channel from the tuner to those kernels
 //! other than the environment they already read. That has two consequences
@@ -93,7 +93,7 @@ fn env_tile_m() -> Option<i64> {
 
 /// Round `m` up to the next power of two, floored at [`TILE_M_MIN`] and capped
 /// at `cap`. Mirrors `make_cta_tiler` in
-/// `patches/mlx/backend/cuda/quantized/qmm/qmm_sm80.cu` exactly, so the
+/// `overlays/cuda/mlx/backend/cuda/quantized/qmm/qmm_sm80.cu` exactly, so the
 /// autotuner's "default" is the value the kernel would have picked.
 #[must_use]
 pub fn default_tile_m(m: usize, cap: i64) -> i64 {
@@ -317,7 +317,7 @@ pub const OP_QMV_MULTIROW: &str = "qmv_multirow_max_rows";
 pub const QMV_MULTIROW_ENV: &str = "MLXCEL_QMV_MULTIROW";
 
 /// Explicit row-window ceiling override (issue #906). Read once by
-/// `patches/mlx/backend/cuda/quantized/qmm/qmv.cu`.
+/// `overlays/cuda/mlx/backend/cuda/quantized/qmm/qmv.cu`.
 pub const QMV_MULTIROW_MAX_ROWS_ENV: &str = "MLXCEL_QMV_MULTIROW_MAX_ROWS";
 
 /// Compile-time ceiling in `qmv.cu` (`max_x_rows`). The tuned value can only

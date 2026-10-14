@@ -26,7 +26,6 @@ use crate::models::gated_delta::{gated_delta_update, scaled_fast_rms_norm_no_wei
 use crate::models::switch_layers::SwitchGLU;
 use crate::models::switch_layers::validate_expert_quantization_params;
 use mlxcel_core::cache::{SequenceId, SequenceStateLayout};
-use mlxcel_core::dtype;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, silu, stack_arrays};
@@ -493,6 +492,22 @@ struct KimiMLAAttention {
     scale: f32,
 }
 
+/// Apply the repository's additive attention mask to MLA positional scores.
+///
+/// [`create_causal_mask`] produces zero for visible keys and negative infinity
+/// for blocked keys. Keep that representation additive here instead of using
+/// it as a boolean condition: zero would become `false`, reversing the mask
+/// and leaving the final prefill row entirely blocked.
+fn apply_mla_causal_mask(scores: &MlxArray, mask: &MlxArray) -> UniquePtr<MlxArray> {
+    let scores_dtype = mlxcel_core::array_dtype(scores);
+    let mask = if mlxcel_core::array_dtype(mask) == scores_dtype {
+        mlxcel_core::copy(mask)
+    } else {
+        mlxcel_core::astype(mask, scores_dtype)
+    };
+    mlxcel_core::add(scores, &mask)
+}
+
 impl KimiMLAAttention {
     fn forward(
         &self,
@@ -547,10 +562,9 @@ impl KimiMLAAttention {
         let k_pe_t = mlxcel_core::swap_axes(&cached_k_pe, -1, -2);
         let mut pe_scores = mlxcel_core::matmul(&q_pe_scaled, &k_pe_t);
 
-        // Apply causal mask to pe_scores
+        // Apply the additive causal mask to positional scores.
         if let Some(m) = mask {
-            let neg_inf = mlxcel_core::full_f32(&[1], f32::NEG_INFINITY, dtype::FLOAT16);
-            pe_scores = mlxcel_core::where_cond(m, &pe_scores, &neg_inf);
+            pe_scores = apply_mla_causal_mask(&pe_scores, m);
         }
 
         // Attention computation (different paths for generation vs prefill)
@@ -1299,7 +1313,7 @@ impl KimiLinearModel {
     pub fn load<P: AsRef<Path>>(model_dir: P) -> Result<(Self, KimiLinearConfig), String> {
         let model_dir = model_dir.as_ref();
 
-        println!("[KimiLinear] Loading config...");
+        tracing::info!("[KimiLinear] Loading config...");
         let config_path = model_dir.join("config.json");
         let config_str = std::fs::read_to_string(&config_path)
             .map_err(|e| format!("Failed to read config.json: {}", e))?;
@@ -1312,7 +1326,7 @@ impl KimiLinearModel {
         let n_moe = (0..config.num_hidden_layers)
             .filter(|&i| config.is_moe_layer(i))
             .count();
-        println!(
+        tracing::info!(
             "[KimiLinear] Config loaded: {} layers ({} MLA, {} delta, {} MoE)",
             config.num_hidden_layers,
             config.num_hidden_layers - n_linear,
@@ -1320,15 +1334,15 @@ impl KimiLinearModel {
             n_moe
         );
 
-        println!("[KimiLinear] Loading weights...");
+        tracing::info!("[KimiLinear] Loading weights...");
         let weights = crate::models::load_text_weights(model_dir, None)?;
         let weights = Self::sanitize_weights(weights, &config)?;
 
-        println!("[KimiLinear] Building model...");
+        tracing::info!("[KimiLinear] Building model...");
         let mut model = Self::from_weights(&weights, &config)?;
         model.set_eos_token_ids(crate::loading::read_eos_token_ids(model_dir));
 
-        println!("[KimiLinear] Model loaded successfully");
+        tracing::info!("[KimiLinear] Model loaded successfully");
         Ok((model, config))
     }
 
@@ -1583,6 +1597,29 @@ impl LanguageModel for KimiLinearModel {
 
     fn supports_padded_prefill(&self) -> bool {
         false // Padding tokens corrupt DeltaCache recurrent state
+    }
+
+    /// Prefill through the cache-less [`LanguageModel::forward`] entry point
+    /// runs in one pass for this family.
+    ///
+    /// [`Self::forward_for_sequence`] treats a multi-token forward carrying no
+    /// sequence id as the start of a prompt and resets the model-owned Delta
+    /// and MLA state, which is what makes that entry point safe to call twice
+    /// for two unrelated prompts. A no-ID caller that split one prompt across
+    /// forwards would send exactly that shape once per chunk, so every chunk
+    /// after the first would discard the recurrent state its predecessors
+    /// built. DirectEngine currently avoids that reset by carrying a stable
+    /// sequence id across prefill pieces, but the trait capability also covers
+    /// callers of the cache-less entry point.
+    ///
+    /// Opting out is the conservative half of the fix. It costs the prefill
+    /// memory bound of issue #672 (per-chunk transients instead of one graph
+    /// over the whole prompt). Carrying no-ID state across chunks needs
+    /// `forward_for_sequence` to distinguish "new prompt" from "continuation"
+    /// by something other than the token count, which changes the shared
+    /// `ModelOwnedSequenceState` contract.
+    fn supports_chunked_prefill(&self) -> bool {
+        false
     }
 
     fn supports_batching(&self) -> bool {

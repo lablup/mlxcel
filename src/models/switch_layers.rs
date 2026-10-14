@@ -158,10 +158,11 @@ const FUSED_MOE_MAX_DFF_CUDA: i32 = 8192;
 ///
 /// The cap is family-agnostic, but it only governs families whose fused decode
 /// goes through the shared [`SwitchGLU::forward_fused_kernel`]: AFMoE,
-/// BailingMoe, Cohere2Moe, DBRX, dots.llm1, Klear, Laguna, LFM2, Mellum,
-/// MiniMax, Mixtral, OLMoE, PhiMoE (phi-3.5-moe), Qwen2Moe, Qwen3-MoE and
-/// Qwen3-VL-MoE (and the Qwen3-Omni-MoE thinker, which is built as a
-/// `Qwen3VLMoeModel`). Two families still drive a fused kernel from their own
+/// BailingMoe, Cohere2Moe, DBRX, dots.llm1, GraniteMoeHybrid, Inkling, Klear,
+/// Laguna, LFM2, Mellum, MiniMax, Mixtral, OLMoE, PhiMoE (phi-3.5-moe),
+/// Qwen2Moe, Qwen3-MoE and Qwen3-VL-MoE (and the Qwen3-Omni-MoE thinker, which
+/// is built as a `Qwen3VLMoeModel`). Two families still drive a fused kernel
+/// from their own
 /// expert type and do not read it: `qwen3_next.rs` (Qwen3Next, Qwen3.5 and the
 /// Qwen3-Omni-MoE talker, SwiGLU kernel) and `gemma4.rs` (GeGLU kernel), and
 /// NemotronH's opt-in `MLXCEL_FUSED_MOE_RELU2` path launches the down kernel
@@ -438,7 +439,58 @@ pub enum SwitchLinear {
 }
 
 impl SwitchLinear {
+    /// Gathered expert matmul for `indices` (the per-token expert ids), with
+    /// MLX's default `lhs_indices`.
+    ///
+    /// Used by: DeepSeek, Ernie4_5Moe, ExaOneMoe, Gemma4, GLM4Moe, GLM4MoeLite,
+    ///          GptOss, HunyuanMoe, Llama4, MiniMaxM3Moe, Moondream3,
+    ///          NemotronH, Phixtral, Qwen3Next (each drives its own
+    ///          projections)
     pub fn forward(&self, x: &MlxArray, indices: &MlxArray, sorted: bool) -> UniquePtr<MlxArray> {
+        self.forward_indexed(x, None, indices, sorted)
+    }
+
+    /// Like [`Self::forward`], with the gather indices supplied by the caller.
+    ///
+    /// `gather_qmm` / `gather_mm` turn missing or non-`uint32` indices into
+    /// graph nodes on every call: an `AsType` for the expert ids, and an
+    /// `Arange` + `Reshape` + `Broadcast` for the default `lhs_indices`. A
+    /// block that runs several projections over the same routing (gate, up
+    /// and down in [`SwitchGLU`]) builds them once with
+    /// [`prepare_gather_indices`] and passes them here, so MLX receives
+    /// arrays that are already `uint32` and already broadcast and adds no node
+    /// of its own (issue #1713). The values are the ones MLX would have
+    /// synthesized, so the kernel sees identical inputs. `lhs = None` keeps
+    /// MLX's default.
+    ///
+    /// `lhs` must be `None` when `sorted` is true. Upstream builds the
+    /// primitive with `right_sorted = sorted_indices && !lhs_indices`, so an
+    /// explicit lhs, identity or not, takes every backend off its sorted MoE
+    /// prefill kernel (issue #2241). [`SwitchGLU::forward`]'s sorted path
+    /// therefore shares only the `uint32` ids.
+    ///
+    /// Used by: `SwitchLinear::forward`, `SwitchGLU::forward`,
+    ///          `SwitchGLU::forward_with_expert_scales`,
+    ///          `DeepSeekV4Moe` (`LimitedSwitchGlu::forward`)
+    pub(crate) fn forward_indexed(
+        &self,
+        x: &MlxArray,
+        lhs: Option<&MlxArray>,
+        indices: &MlxArray,
+        sorted: bool,
+    ) -> UniquePtr<MlxArray> {
+        debug_assert!(
+            !(sorted && lhs.is_some()),
+            "an explicit lhs_indices clears right_sorted and loses the sorted MoE prefill \
+             kernel on every backend (issue #2241); pass None with sorted = true"
+        );
+        // Null selects MLX's default. Otherwise it borrows `lhs`, which lives
+        // for the whole call, so the FFI calls below never see a dangling
+        // pointer.
+        let lhs_ptr: *const MlxArray = match lhs {
+            Some(l) => l as *const MlxArray,
+            None => std::ptr::null(),
+        };
         match self {
             Self::Quantized {
                 weight,
@@ -459,7 +511,7 @@ impl SwitchLinear {
                         weight,
                         scales,
                         biases_ptr,
-                        std::ptr::null(),
+                        lhs_ptr,
                         indices as *const _,
                         true,
                         *group_size,
@@ -476,9 +528,7 @@ impl SwitchLinear {
             Self::Regular { weight } => {
                 // Python: gather_mm(x, weight.swapaxes(-1, -2), rhs_indices=indices)
                 let wt = mlxcel_core::swap_axes(weight, -1, -2);
-                unsafe {
-                    mlxcel_core::gather_mm(x, &wt, std::ptr::null(), indices as *const _, sorted)
-                }
+                unsafe { mlxcel_core::gather_mm(x, &wt, lhs_ptr, indices as *const _, sorted) }
             }
         }
     }
@@ -770,7 +820,7 @@ impl SwitchLinear {
 /// keeps its bf16/f16 dtype (the same shape as
 /// `QuantizedWeight::apply_global_scale` on a dense linear).
 ///
-/// Used by: `SwitchLinear::forward` (compressed-tensors NVFP4 experts)
+/// Used by: `SwitchLinear::forward_indexed` (compressed-tensors NVFP4 experts)
 fn apply_expert_global_scale(
     out: UniquePtr<MlxArray>,
     global_scale: &MlxArray,
@@ -779,10 +829,14 @@ fn apply_expert_global_scale(
     let out_dtype = mlxcel_core::array_dtype(&out);
     let out_rank = mlxcel_core::array_shape(&out).len();
     let idx_rank = mlxcel_core::array_shape(indices).len();
-    let mut selected = mlxcel_core::take(global_scale, indices, 0);
-    for _ in idx_rank..out_rank {
-        selected = mlxcel_core::expand_dims(&selected, -1);
-    }
+    let selected = mlxcel_core::take(global_scale, indices, 0);
+    // One ExpandDims node for all trailing axes.
+    let trailing: Vec<i32> = (idx_rank..out_rank).map(|r| r as i32).collect();
+    let selected = if trailing.is_empty() {
+        selected
+    } else {
+        mlxcel_core::expand_dims_multi(&selected, &trailing)
+    };
     let scaled = mlxcel_core::multiply(&out, &selected);
     if mlxcel_core::array_dtype(&scaled) == out_dtype {
         scaled
@@ -1038,6 +1092,32 @@ impl SwitchGLU {
         }
     }
 
+    /// Run the selected experts: `down(act(gate(x), up(x)))` per expert id.
+    ///
+    /// The expert ids are cast to `uint32` once per call and shared by the
+    /// three projections (issue #1713). In the unsorted path (decode, small
+    /// prefill) gate/up also share one `lhs_indices` array (the default MLX
+    /// would build for `x`'s batch shape); down keeps MLX's default because
+    /// its input has a different batch shape (`[n, k]` rather than `[n, 1]`).
+    ///
+    /// The sorted path (`n * k >= 64`, large prefill) never passes
+    /// `lhs_indices`. Upstream `gather_qmm` and `gather_mm` build their
+    /// primitive with `right_sorted = sorted_indices && !lhs_indices`, and
+    /// every backend keys its sorted MoE prefill kernel on that flag (the ROCm
+    /// expert-batched kernel and sorted-rhs schedule, Metal's `gather_qmm_rhs`
+    /// and `M == 1` sorted `gather_mm`, CUDA's grouped GEMM). Passing the
+    /// identity arange here, as the first version of the sharing did, cleared
+    /// the flag and cost 1.7x to 4.8x of MoE prefill on gfx1151 (issue #2241).
+    /// MLX's default lhs is that same arange, so leaving it to MLX costs three
+    /// small index nodes per projection on the prefill graph and nothing else.
+    ///
+    /// Used by: AfMoE, BailingMoe, BailingMoeLinear, Cohere2Moe, Dbrx,
+    ///          DeepSeekV2, DeepSeekV3, DeepSeekV32, Dots1, Ernie4_5MoeVL,
+    ///          GLM4Moe, GraniteMoeHybrid, Jamba, KimiK3, KimiLinear, Klear,
+    ///          Laguna, Lfm2, LongcatFlashNgram, Mellum, MiniMax, Mistral4,
+    ///          Mixtral, OLMoE, PhiMoE, Qwen2Moe, Qwen3_5, Qwen3Moe,
+    ///          Qwen3VLMoe, SolarOpen, Step3p5, and Inkling through
+    ///          [`Self::forward_with_expert_scales`]
     pub fn forward(&self, x: &MlxArray, indices: &MlxArray) -> UniquePtr<MlxArray> {
         let indices_shape = mlxcel_core::array_shape(indices);
         let n_tokens = indices_shape[0];
@@ -1045,21 +1125,29 @@ impl SwitchGLU {
         let total = n_tokens * top_k;
         let do_sort = total >= 64;
 
-        let x_exp = mlxcel_core::expand_dims(x, -2);
-        let x_exp = mlxcel_core::expand_dims(&x_exp, -3);
+        // `[..., d]` -> `[..., 1, 1, d]` as one ExpandDims node.
+        let x_exp = mlxcel_core::expand_dims_multi(x, &[-3, -2]);
 
         if do_sort {
             let (sorted_x, sorted_idx, inv_order) = gather_sort(&x_exp, indices);
-            let x_gate = self.gate_proj.forward(&sorted_x, &sorted_idx, true);
-            let x_up = self.up_proj.forward(&sorted_x, &sorted_idx, true);
+            // Only the `uint32` ids are shared. An explicit `lhs_indices`
+            // would clear `right_sorted` on every backend (issue #2241; see
+            // the doc comment above).
+            let rhs = mlxcel_core::astype(&sorted_idx, dtype::UINT32);
+            let x_gate = self.gate_proj.forward(&sorted_x, &rhs, true);
+            let x_up = self.up_proj.forward(&sorted_x, &rhs, true);
             let activated = self.activate(&x_gate, &x_up);
-            let output = self.down_proj.forward(&activated, &sorted_idx, true);
+            let output = self.down_proj.forward(&activated, &rhs, true);
             scatter_unsort(&output, &inv_order, &indices_shape)
         } else {
-            let x_gate = self.gate_proj.forward(&x_exp, indices, false);
-            let x_up = self.up_proj.forward(&x_exp, indices, false);
+            let gi = prepare_gather_indices(&x_exp, indices);
+            let lhs = gi.lhs.as_deref();
+            let x_gate = self.gate_proj.forward_indexed(&x_exp, lhs, &gi.rhs, false);
+            let x_up = self.up_proj.forward_indexed(&x_exp, lhs, &gi.rhs, false);
             let activated = self.activate(&x_gate, &x_up);
-            let output = self.down_proj.forward(&activated, indices, false);
+            let output = self
+                .down_proj
+                .forward_indexed(&activated, None, &gi.rhs, false);
             mlxcel_core::squeeze_axis(&output, -2)
         }
     }
@@ -1074,6 +1162,8 @@ impl SwitchGLU {
     /// lets the sidecars broadcast without building a second permutation.
     /// Callers with no sidecars stay on [`Self::forward`] and retain its sorted
     /// large-prefill optimization.
+    ///
+    /// Used by: Inkling
     pub fn forward_with_expert_scales(
         &self,
         x: &MlxArray,
@@ -1085,23 +1175,24 @@ impl SwitchGLU {
             return self.forward(x, indices);
         }
 
-        let x_exp = mlxcel_core::expand_dims(x, -2);
-        let x_exp = mlxcel_core::expand_dims(&x_exp, -3);
-        let mut x_gate = self.gate_proj.forward(&x_exp, indices, false);
-        let x_up = self.up_proj.forward(&x_exp, indices, false);
+        let x_exp = mlxcel_core::expand_dims_multi(x, &[-3, -2]);
+        let gi = prepare_gather_indices(&x_exp, indices);
+        let lhs = gi.lhs.as_deref();
+        let mut x_gate = self.gate_proj.forward_indexed(&x_exp, lhs, &gi.rhs, false);
+        let x_up = self.up_proj.forward_indexed(&x_exp, lhs, &gi.rhs, false);
         if let Some(scale) = gate_scale {
             let selected = mlxcel_core::take(scale, indices, 0);
-            let selected = mlxcel_core::expand_dims(&selected, -1);
-            let selected = mlxcel_core::expand_dims(&selected, -1);
+            let selected = mlxcel_core::expand_dims_multi(&selected, &[-2, -1]);
             let selected = mlxcel_core::astype(&selected, mlxcel_core::array_dtype(&x_gate));
             x_gate = mlxcel_core::multiply(&x_gate, &selected);
         }
         let activated = self.activate(&x_gate, &x_up);
-        let mut output = self.down_proj.forward(&activated, indices, false);
+        let mut output = self
+            .down_proj
+            .forward_indexed(&activated, None, &gi.rhs, false);
         if let Some(scale) = out_scale {
             let selected = mlxcel_core::take(scale, indices, 0);
-            let selected = mlxcel_core::expand_dims(&selected, -1);
-            let selected = mlxcel_core::expand_dims(&selected, -1);
+            let selected = mlxcel_core::expand_dims_multi(&selected, &[-2, -1]);
             let selected = mlxcel_core::astype(&selected, mlxcel_core::array_dtype(&output));
             output = mlxcel_core::multiply(&output, &selected);
         }
@@ -1126,6 +1217,10 @@ impl SwitchGLU {
     /// non-SwiGLU activation (the kernel fuses `silu(gate) * up` and nothing
     /// else, so Kimi K3's SiTU experts stay on the gather path). Gated by the
     /// caller (`MLXCEL_FUSED_MOE`).
+    ///
+    /// Used by: AfMoE, BailingMoe, Cohere2Moe, Dbrx, Dots1, GraniteMoeHybrid,
+    ///          Inkling, Klear, Laguna, Lfm2, Mellum, MiniMax, Mixtral, OLMoE,
+    ///          PhiMoE, Qwen2Moe, Qwen3Moe, and Qwen3VLMoE
     pub fn forward_fused_kernel(
         &self,
         x: &MlxArray,
@@ -1315,6 +1410,77 @@ impl SwitchGLU {
             activation: SwitchGluActivation::SwiGlu,
         })
     }
+}
+
+/// Gather indices built once and shared by several expert projections.
+///
+/// `rhs` is the expert-id tensor cast to `uint32`, the dtype `gather_qmm` /
+/// `gather_mm` cast to internally. `lhs` is the `lhs_indices` array MLX would
+/// synthesize for the `x` it was built from (`arange` over `x`'s batch
+/// dimensions, reshaped and broadcast against `rhs`), or `None` when the two
+/// shapes do not broadcast, in which case MLX builds (and validates) it as
+/// before.
+pub(crate) struct GatherIndices {
+    pub(crate) lhs: Option<UniquePtr<MlxArray>>,
+    pub(crate) rhs: UniquePtr<MlxArray>,
+}
+
+/// Build [`GatherIndices`] for gathering `x` (`[..batch, rows, cols]`) with
+/// the expert ids `indices` (issue #1713).
+///
+/// Every value matches what MLX's `indices_or_default` + `broadcast_arrays`
+/// produce inside each `gather_qmm` / `gather_mm` call, so passing these
+/// changes the graph's node count and nothing else.
+///
+/// Used by: `SwitchGLU::forward`, `SwitchGLU::forward_with_expert_scales`,
+///          `DeepSeekV4Moe` (`LimitedSwitchGlu::forward`)
+pub(crate) fn prepare_gather_indices(x: &MlxArray, indices: &MlxArray) -> GatherIndices {
+    let rhs = mlxcel_core::astype(indices, dtype::UINT32);
+    let x_shape = mlxcel_core::array_shape(x);
+    let batch = &x_shape[..x_shape.len().saturating_sub(2)];
+    let idx_shape = mlxcel_core::array_shape(indices);
+    let lhs = broadcast_shape(batch, &idx_shape).map(|target| {
+        let total: i32 = batch.iter().product();
+        let lhs = mlxcel_core::arange_u32(total);
+        let lhs = if batch == [total] {
+            lhs
+        } else {
+            mlxcel_core::reshape(&lhs, batch)
+        };
+        if target.as_slice() == batch {
+            lhs
+        } else {
+            mlxcel_core::broadcast_to(&lhs, &target)
+        }
+    });
+    GatherIndices { lhs, rhs }
+}
+
+/// NumPy broadcast of two shapes, or `None` when they are incompatible.
+///
+/// Used by: `prepare_gather_indices`
+fn broadcast_shape(a: &[i32], b: &[i32]) -> Option<Vec<i32>> {
+    let n = a.len().max(b.len());
+    let mut out = vec![0; n];
+    for i in 0..n {
+        let da = if i < n - a.len() {
+            1
+        } else {
+            a[i - (n - a.len())]
+        };
+        let db = if i < n - b.len() {
+            1
+        } else {
+            b[i - (n - b.len())]
+        };
+        out[i] = match (da, db) {
+            (x, y) if x == y => x,
+            (1, y) => y,
+            (x, 1) => x,
+            _ => return None,
+        };
+    }
+    Some(out)
 }
 
 /// Sort tokens by expert index for efficient gather_qmm/gather_mm
@@ -1584,6 +1750,10 @@ pub(crate) fn nvfp4_expert_plane(prefix: &str) -> WeightMap {
 #[cfg(test)]
 #[path = "switch_layers_mxfp_tests.rs"]
 mod mxfp_tests;
+
+#[cfg(test)]
+#[path = "switch_layers_gather_index_tests.rs"]
+mod gather_index_tests;
 
 #[cfg(test)]
 mod tests {

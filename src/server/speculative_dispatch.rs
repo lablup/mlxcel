@@ -41,19 +41,28 @@
 //! At worker-startup, [`SpeculativeDispatch::resolve`] turns those raw
 //! fields into one of:
 //!
-//! - [`SpeculativeDispatch::Disabled`] — no `--draft-model`; classic decode
-//!   path runs ('s [`crate::SpeculativeGenerator`] is itself NOT used by the server today, only by the offline `mlxcel generate` path).
+//! - [`SpeculativeDispatch::Disabled`] — no `--draft-model`; plain decode
+//!   runs (the offline draft-model loop of `mlxcel generate` is never used by
+//!   the server, and is deprecated since #2176).
 //! - [`SpeculativeDispatch::Classic { .. }`] — `--draft-model` set,
 //!   `--draft-kind` unset, drafter's `config.json::model_type` resolves to
 //!   a kind that the server has not yet wired to its kind-specific round
-//!   loop. The server logs the auto-detected kind and falls back to the
-//!   classic [`crate::SpeculativeGenerator`] dispatch path for backward
-//!   compatibility with the historical `--draft-model <path>` workflow.
+//!   loop. The server logs the auto-detected kind and falls back to plain
+//!   decode, the `Classic` dispatch, for backward compatibility with the
+//!   historical `--draft-model <path>` workflow.
 //! - [`SpeculativeDispatch::Mtp { .. }`] — `--draft-kind mtp` (or auto-
 //!   detect resolved to MTP). The scheduler constructs the kind-specific
 //!   [`mlxcel_core::speculative::mtp::MtpGenerator`] (B=1) or
 //!   [`mlxcel_core::speculative::mtp::MtpBatchedGenerator`] (B>1) per
 //!   request.
+//! - [`SpeculativeDispatch::PromptLookup { .. }`]: set by `--draft-kind
+//!   prompt-lookup` with no `--draft-model` (#2255). Prompt lookup needs no
+//!   checkpoint, so it is resolved before the draft-model early return. It
+//!   is not a kind-specific burst ([`SpeculativeDispatch::is_kind_specific`]
+//!   is `false`): the scheduler runs at most one verify round per tick per
+//!   eligible sequence inside the regular decode tick and keeps the
+//!   lookahead pipeline for ticks where no row proposes (see
+//!   `server::batch::scheduler::prompt_lookup`).
 //! - [`SpeculativeDispatch::DFlash { .. }`] — `--draft-kind dflash` (or
 //!   auto-detect resolved to DFlash and operator explicitly opted in via
 //!   `--draft-kind`). The scheduler constructs the kind-specific
@@ -87,6 +96,7 @@
 use std::path::PathBuf;
 
 use mlxcel_core::drafter::{DrafterKind, resolve_drafter_kind};
+use mlxcel_core::speculative::prompt_lookup::{DraftPolicy, PromptLookupConfig};
 
 use crate::cli::draft_block_policy::BlockSizeSource;
 use crate::cli::speculative_args::resolve_draft_block_size_for_target;
@@ -105,10 +115,10 @@ pub enum SpeculativeDispatch {
 
     /// Drafter is configured but its resolved kind is one the server has
     /// not yet wired to a kind-specific round loop. Scheduler falls back
-    /// to the classic [`crate::SpeculativeGenerator`] dispatch (the same
-    /// path the offline `mlxcel generate` command takes when
-    /// `--draft-kind` is unset and the auto-detect resolves to a known
-    /// kind). The auto-detected kind is logged for operator visibility.
+    /// to plain decode (where the offline `mlxcel generate` command takes
+    /// its deprecated draft-model loop when `--draft-kind` is unset and the
+    /// auto-detect resolves to a known kind). The auto-detected kind is
+    /// logged for operator visibility.
     Classic {
         /// Drafter checkpoint directory.
         draft_model_path: PathBuf,
@@ -164,6 +174,60 @@ pub enum SpeculativeDispatch {
         /// [`Self::Mtp::user_requested_explicit_kind`].
         user_requested_explicit_kind: bool,
     },
+
+    /// Prompt-lookup (n-gram) speculative decoding (#2255): `--draft-kind
+    /// prompt-lookup` with no drafter checkpoint. Each eligible sequence gets
+    /// a [`mlxcel_core::speculative::prompt_lookup_drafter::PromptLookupDrafter`]
+    /// at prefill completion and runs at most one verify round per decode
+    /// tick; everything else decodes in the regular batched step.
+    PromptLookup {
+        /// The drafter's tunables: `--draft-block-size` sets `max_draft`,
+        /// CUDA gated dispatch additionally sets the server emission floor,
+        /// shadow-confirmation length, and proposal-free pipeline cadence.
+        /// Other settings retain [`PromptLookupConfig::default`].
+        config: PromptLookupConfig,
+        /// `--prompt-lookup-max-batch`: verify rounds run only on ticks whose
+        /// active decode batch has at most this many rows.
+        max_batch: usize,
+    },
+}
+
+/// Default `--prompt-lookup-max-batch`: the largest active decode batch at
+/// which a prompt-lookup row may run its own verify forward.
+///
+/// Each proposing row costs one verify forward on top of the batched step,
+/// so the gain shrinks as the batch grows. Measured on GB10 (Qwen3-1.7B
+/// 4-bit, `--parallel 8`;
+/// `docs/benchmark_results/server-prompt-lookup-gb10-2026-10-11.md`): with
+/// this default, concurrency 4 and 8 match the flag-off server in every
+/// workload, while a gate of 8 gains 15 to 63 % on raw-completion workloads
+/// but loses 13 % on the chat-template copy workload at concurrency 4.
+pub const DEFAULT_PROMPT_LOOKUP_MAX_BATCH: usize = 2;
+
+/// Minimum recent tokens emitted per verify round on the CUDA server.
+/// GB10 Qwen3-1.7B width 3 costs 1.76 pipelined steps and width 8 costs
+/// 3.91 (the cost table in `DraftPolicy`). Four emitted tokens cover the
+/// steady wide forward; narrow rounds emitting only two or three cannot
+/// amortize the switch tick and synchronous re-prime gap. Full copy blocks
+/// emit eight and amortize those transition costs across consecutive rounds.
+/// Once the emitted-token EMA is below the floor, a partial low-emission round
+/// pauses immediately. A complete miss gets one more probe only when the
+/// accepted-token EMA was already at least four, so an abrupt field boundary
+/// does not discard an established profitable copy run. Consecutive misses
+/// still pause. A round meeting the floor repays startup EMA debt.
+/// See `docs/benchmark_results/server-prompt-lookup-break-even-gb10-2026-10-11.md`.
+pub(crate) const PROMPT_LOOKUP_MIN_TOKENS_PER_ROUND: usize = 4;
+/// Require a whole default proposal's worth of shadow evidence to avoid
+/// resuming on the incidental two-token matches common in chat prose.
+pub(crate) const PROMPT_LOOKUP_SHADOW_CONFIRM_TOKENS: usize = 7;
+
+/// Draft-policy name for [`SpeculativeDispatch::summary`].
+fn draft_policy_name(policy: DraftPolicy) -> &'static str {
+    match policy {
+        DraftPolicy::Graded => "graded",
+        DraftPolicy::Gated => "gated",
+        _ => "other",
+    }
 }
 
 /// Error variants for [`SpeculativeDispatch::resolve`].
@@ -223,6 +287,11 @@ impl SpeculativeDispatch {
         config: &ServerConfig,
         target_model_path: &std::path::Path,
     ) -> Result<Self, SpeculativeDispatchError> {
+        // Prompt lookup takes no checkpoint, so it resolves before the
+        // draft-model early return below (#2255).
+        if config.draft_kind.as_deref() == Some("prompt-lookup") {
+            return Self::resolve_prompt_lookup(config);
+        }
         let Some(draft_model_path) = config.draft_model_path.clone() else {
             return Ok(Self::Disabled);
         };
@@ -246,7 +315,8 @@ impl SpeculativeDispatch {
             Some(other) => {
                 return Err(SpeculativeDispatchError::InvalidKind {
                     message: format!(
-                        "--draft-kind={other:?} is not recognised; accepted values: dflash, mtp"
+                        "--draft-kind={other:?} is not recognised; accepted values: dflash, mtp, \
+                         prompt-lookup"
                     ),
                 });
             }
@@ -311,6 +381,45 @@ impl SpeculativeDispatch {
         }
     }
 
+    /// [`Self::PromptLookup`] from `--draft-kind prompt-lookup`: a drafter
+    /// checkpoint is refused, `--draft-block-size` sets `max_draft` (checked
+    /// by [`PromptLookupConfig::validate`]), and `--prompt-lookup-max-batch`
+    /// must admit at least one row.
+    fn resolve_prompt_lookup(config: &ServerConfig) -> Result<Self, SpeculativeDispatchError> {
+        if config.draft_model_path.is_some() {
+            return Err(SpeculativeDispatchError::InvalidKind {
+                message: "prompt-lookup takes no draft model; remove --draft-model/--model-draft"
+                    .to_string(),
+            });
+        }
+        let mut lookup = PromptLookupConfig::default();
+        if lookup.policy == DraftPolicy::Gated {
+            lookup.min_tokens_per_round = Some(PROMPT_LOOKUP_MIN_TOKENS_PER_ROUND);
+            lookup.shadow_confirm_tokens = PROMPT_LOOKUP_SHADOW_CONFIRM_TOKENS;
+            lookup.plain_rounds_before_pipeline = 0;
+        }
+        if let Some(width) = config.draft_block_size {
+            lookup.max_draft = width as usize;
+        }
+        lookup.min_tokens_per_round = lookup
+            .min_tokens_per_round
+            .map(|floor| floor.min(lookup.max_draft.saturating_add(1)));
+        lookup
+            .validate()
+            .map_err(|message| SpeculativeDispatchError::InvalidKind {
+                message: format!("--draft-kind prompt-lookup: {message} (--draft-block-size)"),
+            })?;
+        if config.prompt_lookup_max_batch == 0 {
+            return Err(SpeculativeDispatchError::InvalidKind {
+                message: "--prompt-lookup-max-batch must be at least 1".to_string(),
+            });
+        }
+        Ok(Self::PromptLookup {
+            config: lookup,
+            max_batch: config.prompt_lookup_max_batch,
+        })
+    }
+
     /// Human-readable summary of the resolved dispatch, used by the
     /// worker's startup log so an operator can confirm at a glance which
     /// path is active.
@@ -348,6 +457,14 @@ impl SpeculativeDispatch {
                 draft_model_path.display(),
                 block_size_source.reason()
             ),
+            Self::PromptLookup { config, max_batch } => format!(
+                "speculative=prompt-lookup (max_draft={}, policy={}, max_batch={max_batch}, min_tokens_per_round={:?} (ema_with_profitable_boundary_miss_grace), shadow_confirm_tokens={}, plain_rounds_before_pipeline={})",
+                config.max_draft,
+                draft_policy_name(config.policy),
+                config.min_tokens_per_round,
+                config.shadow_confirm_tokens,
+                config.plain_rounds_before_pipeline
+            ),
         }
     }
 
@@ -355,7 +472,7 @@ impl SpeculativeDispatch {
     /// [`Self::Disabled`].
     pub fn draft_model_path(&self) -> Option<&std::path::Path> {
         match self {
-            Self::Disabled => None,
+            Self::Disabled | Self::PromptLookup { .. } => None,
             Self::Classic {
                 draft_model_path, ..
             }
@@ -379,6 +496,7 @@ impl SpeculativeDispatch {
             } => Some(*auto_detected_kind),
             Self::Mtp { .. } => Some(DrafterKind::Mtp),
             Self::DFlash { .. } => Some(DrafterKind::Dflash),
+            Self::PromptLookup { .. } => Some(DrafterKind::PromptLookup),
         }
     }
 
@@ -394,9 +512,21 @@ impl SpeculativeDispatch {
     }
 
     /// Whether the dispatch is one of the kind-specific server-side
-    /// round-loop variants (MTP or DFlash).
+    /// round-loop variants (MTP or DFlash). `false` for
+    /// [`Self::PromptLookup`], whose verify rounds run inside the regular
+    /// decode tick rather than a burst; see [`Self::prompt_lookup_config`].
     pub fn is_kind_specific(&self) -> bool {
         matches!(self, Self::Mtp { .. } | Self::DFlash { .. })
+    }
+
+    /// The drafter config and `--prompt-lookup-max-batch` of a
+    /// [`Self::PromptLookup`] dispatch, `None` otherwise. The scheduler
+    /// checks this, not [`Self::is_kind_specific`], to offer prompt lookup.
+    pub fn prompt_lookup_config(&self) -> Option<(&PromptLookupConfig, usize)> {
+        match self {
+            Self::PromptLookup { config, max_batch } => Some((config, *max_batch)),
+            _ => None,
+        }
     }
 }
 

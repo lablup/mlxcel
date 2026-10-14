@@ -37,7 +37,7 @@
 //! and only one of them is on every path.
 //!
 //! 1. **Accumulator width.** `dispatch_multirow_width`
-//!    (`src/lib/mlx-cpp/patches/mlx/backend/cuda/quantized/qmm/qmv.cu`)
+//!    (`src/lib/mlxcelverse/overlays/cuda/mlx/backend/cuda/quantized/qmm/qmv.cu`)
 //!    instantiates exactly three compile-time widths, 2, 4 and `Cap = 8`, so
 //!    a 5, 6 or 7 row verify takes the 8-wide instantiation and pays its
 //!    register cost without using the extra rows. This boundary exists only
@@ -57,7 +57,7 @@
 //! ## Re-measurement condition
 //!
 //! Every entry in [`measured_default_block_size`] was measured against MLX
-//! pin `81ba1c6a` (`src/lib/mlx-cpp/CMakeLists.txt`). If a later pin adds a
+//! pin `81ba1c6a` (`src/lib/mlxcelverse/CMakeLists.txt`). If a later pin adds a
 //! multirow instantiation between 4 and 8, widens `supports_fp_qmv`, or moves
 //! the `M * B < 8` family switch, boundary 1 or 2 moves and the seeded widths
 //! have to be re-measured against the new pin. This mirrors the way

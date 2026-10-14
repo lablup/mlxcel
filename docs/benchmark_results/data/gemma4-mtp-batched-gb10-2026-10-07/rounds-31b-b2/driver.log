@@ -1,0 +1,10 @@
+[b2 r0-classic-open] [8.793, 8.765] sha=[('19d095f3eb', '0d446d6a09')] batched_rows=0/0 b1_bursts=0 thrash=False gate_timed_out=False nvrm+0
+[b2 r0-mtp] [15.359, 15.325] sha=[('19d095f3eb', '0d446d6a09')] batched_rows=6/6 b1_bursts=4 thrash=False gate_timed_out=False nvrm+0
+[b2 r0-classic-close] [8.786, 8.794] sha=[('19d095f3eb', '0d446d6a09')] batched_rows=0/0 b1_bursts=0 thrash=False gate_timed_out=False nvrm+0
+[b2 r1-classic-open] [8.673, 8.372] sha=[('19d095f3eb', '0d446d6a09')] batched_rows=0/0 b1_bursts=0 thrash=False gate_timed_out=False nvrm+0
+[b2 r1-mtp] [15.339, 15.354] sha=[('19d095f3eb', '0d446d6a09')] batched_rows=6/6 b1_bursts=4 thrash=False gate_timed_out=False nvrm+0
+[b2 r1-classic-close] [8.79, 8.785] sha=[('19d095f3eb', '0d446d6a09')] batched_rows=0/0 b1_bursts=0 thrash=False gate_timed_out=False nvrm+0
+[b2 r2-classic-open] [8.817, 8.781] sha=[('19d095f3eb', '0d446d6a09')] batched_rows=0/0 b1_bursts=0 thrash=False gate_timed_out=False nvrm+0
+[b2 r2-mtp] [15.429, 15.438] sha=[('19d095f3eb', '0d446d6a09')] batched_rows=6/6 b1_bursts=4 thrash=False gate_timed_out=False nvrm+0
+[b2 r2-classic-close] [8.842, 8.817] sha=[('19d095f3eb', '0d446d6a09')] batched_rows=0/0 b1_bursts=0 thrash=False gate_timed_out=False nvrm+0
+ROUNDS DONE

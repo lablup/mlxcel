@@ -727,7 +727,7 @@ impl GriffinModel {
         let path = Path::new(model_path);
 
         // Load config
-        println!("[Griffin] Loading config...");
+        tracing::info!("[Griffin] Loading config...");
         let config_path = path.join("config.json");
         let config_str = std::fs::read_to_string(&config_path)?;
         let config_str = super::sanitize_config_json(&config_str);
@@ -740,7 +740,7 @@ impl GriffinModel {
         let recurrent = (0..config.num_hidden_layers)
             .filter(|i| pattern[i % pattern.len()] == "recurrent")
             .count();
-        println!(
+        tracing::info!(
             "[Griffin] Config loaded: {} layers ({} recurrent, {} attention)",
             config.num_hidden_layers,
             recurrent,
@@ -748,18 +748,18 @@ impl GriffinModel {
         );
 
         // Load weights
-        println!("[Griffin] Loading weights from safetensors...");
+        tracing::info!("[Griffin] Loading weights from safetensors...");
         let weights = crate::models::load_text_weights(path, None)?;
 
         // Process weights
         let weights = Self::sanitize_weights(weights, &config);
 
         // Build model
-        println!("[Griffin] Building model...");
+        tracing::info!("[Griffin] Building model...");
         let mut model = Self::from_weights(config.clone(), weights)?;
         model.set_eos_token_ids(crate::loading::read_eos_token_ids(path));
 
-        println!("[Griffin] Model loaded successfully");
+        tracing::info!("[Griffin] Model loaded successfully");
         Ok((model, config))
     }
 
@@ -1080,6 +1080,24 @@ impl LanguageModel for GriffinModel {
         self.config.num_hidden_layers
     }
 
+    /// Prefill through the cache-less [`LanguageModel::forward`] entry point
+    /// runs in one pass for this family.
+    ///
+    /// [`Self::forward_for_sequence`] treats a multi-token forward carrying no
+    /// sequence id as a new prompt and resets the model-owned recurrent and KV
+    /// state. That keeps unrelated no-ID prompts isolated, but it also means a
+    /// no-ID caller splitting one prompt across forwards would discard every
+    /// earlier chunk. DirectEngine carries a stable sequence id and therefore
+    /// avoids this reset, but the trait capability also covers cache-less
+    /// callers and cannot express support conditional on an id being present.
+    ///
+    /// Opting out makes every prefill-plan caller, including DirectEngine,
+    /// process the full prompt in one graph. This preserves the no-ID contract
+    /// at the cost of the transient-memory bound that chunked prefill provides.
+    fn supports_chunked_prefill(&self) -> bool {
+        false
+    }
+
     fn supports_padded_prefill(&self) -> bool {
         false // Padding tokens corrupt RGLRU recurrent state
     }
@@ -1123,10 +1141,190 @@ impl LanguageModel for GriffinModel {
 
 #[cfg(test)]
 mod tests {
-    use super::{GriffinConfig, GriffinLayerCache, make_griffin_caches};
+    use super::{GriffinConfig, GriffinLayerCache, GriffinModel, make_griffin_caches};
     use crate::models::model_owned::ModelOwnedSequenceState;
+    use mlxcel_core::MlxArray;
     use mlxcel_core::cache::SequenceId;
     use mlxcel_core::dtype;
+    use mlxcel_core::generate::LanguageModel;
+    use mlxcel_core::weights::WeightMap;
+
+    fn recurrent_gemma_test_config() -> GriffinConfig {
+        serde_json::from_value(serde_json::json!({
+            "model_type": "recurrent_gemma",
+            "hidden_size": 8,
+            "intermediate_size": 16,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 1,
+            "vocab_size": 32,
+            "block_types": ["recurrent"],
+            "conv1d_width": 4
+        }))
+        .expect("the one-layer RecurrentGemma config must parse")
+    }
+
+    fn recurrent_gemma_test_weights() -> WeightMap {
+        let mut weights = WeightMap::new();
+        let mut seed = 0x2288_u32;
+        let mut insert = |name: &str, shape: &[i32]| {
+            let n = shape.iter().product::<i32>() as usize;
+            let values: Vec<f32> = (0..n)
+                .map(|_| {
+                    seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    ((seed % 97) + 1) as f32 / 970.0
+                })
+                .collect();
+            weights.insert(
+                name.to_string(),
+                mlxcel_core::from_slice_f32(&values, shape),
+            );
+        };
+
+        insert("model.embed_tokens.weight", &[32, 8]);
+        insert("model.layers.0.temporal_block.linear_y.weight", &[8, 8]);
+        insert("model.layers.0.temporal_block.linear_x.weight", &[8, 8]);
+        insert("model.layers.0.temporal_block.linear_out.weight", &[8, 8]);
+        insert("model.layers.0.temporal_block.conv_1d.weight", &[8, 4, 1]);
+        insert("model.layers.0.temporal_block.conv_1d.bias", &[8]);
+        insert("model.layers.0.temporal_block.rg_lru.recurrent_param", &[8]);
+        insert(
+            "model.layers.0.temporal_block.rg_lru.input_gate_weight",
+            &[2, 4, 4],
+        );
+        insert(
+            "model.layers.0.temporal_block.rg_lru.input_gate_bias",
+            &[2, 4],
+        );
+        insert(
+            "model.layers.0.temporal_block.rg_lru.recurrent_gate_weight",
+            &[2, 4, 4],
+        );
+        insert(
+            "model.layers.0.temporal_block.rg_lru.recurrent_gate_bias",
+            &[2, 4],
+        );
+        insert("model.layers.0.mlp_block.gate_proj.weight", &[16, 8]);
+        insert("model.layers.0.mlp_block.up_proj.weight", &[16, 8]);
+        insert("model.layers.0.mlp_block.down_proj.weight", &[8, 16]);
+        insert("model.layers.0.temporal_pre_norm.weight", &[8]);
+        insert("model.layers.0.channel_pre_norm.weight", &[8]);
+        insert("model.final_norm.weight", &[8]);
+        weights
+    }
+
+    fn read_all_f32(array: &MlxArray) -> Vec<f32> {
+        mlxcel_core::eval(array);
+        let flat = mlxcel_core::reshape(array, &[-1]);
+        let len = mlxcel_core::array_shape(&flat)[0];
+        (0..len)
+            .map(|i| mlxcel_core::item_f32(&mlxcel_core::slice(&flat, &[i], &[i + 1])))
+            .collect()
+    }
+
+    fn assert_close(actual: &MlxArray, expected: &MlxArray, context: &str) {
+        let actual = read_all_f32(actual);
+        let expected = read_all_f32(expected);
+        assert_eq!(actual.len(), expected.len(), "{context}: element count");
+        for (index, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
+            let abs = (actual - expected).abs();
+            let rel = abs / actual.abs().max(expected.abs()).max(1e-6);
+            assert!(
+                abs < 1e-3 || rel < 1e-3,
+                "{context}: element {index} differs: actual={actual}, expected={expected}, abs={abs}, rel={rel}"
+            );
+        }
+    }
+
+    fn loaded_recurrent_gemma() -> GriffinModel {
+        GriffinModel::from_weights(
+            recurrent_gemma_test_config(),
+            recurrent_gemma_test_weights(),
+        )
+        .expect("the one-layer RecurrentGemma model must load")
+    }
+
+    #[test]
+    fn recurrent_gemma_loaded_model_chunking_contract_is_safe() {
+        let reset_model = loaded_recurrent_gemma();
+        let language_model: &dyn LanguageModel = &reset_model;
+        assert!(
+            !language_model.supports_chunked_prefill(),
+            "a no-ID chunked prefill would discard the state built by every chunk but the last"
+        );
+
+        let mut unused_caches = language_model.make_caches();
+        let contaminant = mlxcel_core::from_slice_i32(&[7], &[1, 1]);
+        let contaminated = language_model.forward(&contaminant, &mut unused_caches, None);
+        mlxcel_core::eval(&contaminated);
+        reset_model
+            .sequence_state
+            .with_sequence_state(None, |caches| match &caches[0] {
+                GriffinLayerCache::Recurrent(cache) => {
+                    assert!(
+                        cache.conv_cache.is_some(),
+                        "the contaminant must populate conv state"
+                    );
+                    assert!(
+                        cache.state_cache.is_some(),
+                        "the contaminant must populate RGLRU state"
+                    );
+                }
+                GriffinLayerCache::Attention(_) => panic!("layer 0 must be recurrent"),
+            });
+
+        let target = mlxcel_core::from_slice_i32(&[1, 2, 3], &[1, 3]);
+        let reset_logits = language_model.forward(&target, &mut unused_caches, None);
+        let fresh_model = loaded_recurrent_gemma();
+        let mut fresh_caches = LanguageModel::make_caches(&fresh_model);
+        let fresh_logits = LanguageModel::forward(&fresh_model, &target, &mut fresh_caches, None);
+        assert_close(
+            &reset_logits,
+            &fresh_logits,
+            "a multi-token no-ID prompt must start from fresh state",
+        );
+
+        let split_model = loaded_recurrent_gemma();
+        let split_id = SequenceId::from_raw(2288);
+        LanguageModel::prepare_sequence_state(&split_model, split_id);
+        let mut split_caches = LanguageModel::make_caches(&split_model);
+        let first = mlxcel_core::from_slice_i32(&[1, 2], &[1, 2]);
+        let second = mlxcel_core::from_slice_i32(&[3, 4, 5], &[1, 3]);
+        let first_logits = LanguageModel::forward_with_sequence_id(
+            &split_model,
+            &first,
+            Some(split_id),
+            &mut split_caches,
+            None,
+        );
+        mlxcel_core::eval(&first_logits);
+        let split_logits = LanguageModel::forward_with_sequence_id(
+            &split_model,
+            &second,
+            Some(split_id),
+            &mut split_caches,
+            None,
+        );
+
+        let whole_model = loaded_recurrent_gemma();
+        let whole_id = SequenceId::from_raw(2289);
+        LanguageModel::prepare_sequence_state(&whole_model, whole_id);
+        let mut whole_caches = LanguageModel::make_caches(&whole_model);
+        let whole = mlxcel_core::from_slice_i32(&[1, 2, 3, 4, 5], &[1, 5]);
+        let whole_logits = LanguageModel::forward_with_sequence_id(
+            &whole_model,
+            &whole,
+            Some(whole_id),
+            &mut whole_caches,
+            None,
+        );
+        let expected_tail = mlxcel_core::slice(&whole_logits, &[0, 2, 0], &[1, 5, 32]);
+        assert_close(
+            &split_logits,
+            &expected_tail,
+            "stable-ID continuation must match one-pass recurrent state",
+        );
+    }
 
     /// The conv used to be called with the PyTorch `[B, C, L]` layout, which
     /// MLX rejects because it reads the channel count off the last axis. That

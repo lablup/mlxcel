@@ -372,8 +372,24 @@ impl LanguageModel for VisionLanguageModel {
         self.text_model.reset_runtime_state()
     }
 
-    fn trim_internal_caches(&self, excess: i32) {
-        self.text_model.trim_internal_caches(excess)
+    fn trim_state(
+        &self,
+        seq: Option<mlxcel_core::cache::SequenceId>,
+        excess: i32,
+    ) -> Result<(), String> {
+        self.text_model.trim_state(seq, excess)
+    }
+
+    fn supports_decode_lookahead_rewind(&self) -> bool {
+        self.text_model.supports_decode_lookahead_rewind()
+    }
+
+    fn rewind_decode_appends(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+        n: i32,
+    ) -> Result<(), String> {
+        self.text_model.rewind_decode_appends(seq_id, n)
     }
 
     fn release_sequence_state(&self, caches: &mut [KVCache]) {
@@ -559,32 +575,15 @@ impl LanguageModel for VisionLanguageModel {
             .forward_batched(input_ids, batch_caches, mask)
     }
 
-    fn forward_batched_with_context(
-        &self,
-        input_ids: &MlxArray,
-        batch_caches: &mut [&mut [KVCache]],
-        mask: Option<&MlxArray>,
-        context: Option<&mlxcel_core::generate::DecodeBatchContext>,
-    ) -> UniquePtr<MlxArray> {
-        self.text_model
-            .forward_batched_with_context(input_ids, batch_caches, mask, context)
-    }
-
-    fn forward_batched_with_context_and_ids(
+    fn forward_batched_with_ids(
         &self,
         input_ids: &MlxArray,
         seq_ids: Option<&[mlxcel_core::cache::SequenceId]>,
         batch_caches: &mut [&mut [KVCache]],
         mask: Option<&MlxArray>,
-        context: Option<&mlxcel_core::generate::DecodeBatchContext>,
     ) -> UniquePtr<MlxArray> {
-        self.text_model.forward_batched_with_context_and_ids(
-            input_ids,
-            seq_ids,
-            batch_caches,
-            mask,
-            context,
-        )
+        self.text_model
+            .forward_batched_with_ids(input_ids, seq_ids, batch_caches, mask)
     }
 }
 

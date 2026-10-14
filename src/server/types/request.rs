@@ -1809,8 +1809,10 @@ pub struct TokenizeRequest {
 /// rather than an error.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct DetokenizeRequest {
-    /// Token IDs to decode
-    pub tokens: Option<Vec<i32>>,
+    /// Token IDs to decode. Read as `i64` (the width `/tokenize` splicing
+    /// uses) so any integer id reaches the vocabulary check instead of
+    /// failing extraction with a 422 (#2127).
+    pub tokens: Option<Vec<i64>>,
 }
 
 // ---------------------------------------------------------------------------

@@ -26,16 +26,19 @@
 #   date, hardware, mlxcel_version, build_type, max_tokens, prompt,
 #   prompt_target_len
 #
-#   ...then mlxcel_commit, mlx_commit (the upstream MLX pin), and on ROCm
-#   only mlx_rocm_overlay_commit and hip_version (issue #1810). Metal and CUDA
-#   rows carry neither, so their schema is unchanged.
+#   ...then mlxcel_commit, mlx_commit (the upstream MLX pin), on ROCm only
+#   mlx_rocm_overlay_commit and hip_version (issue #1810; Metal and CUDA rows
+#   carry neither), and last decode_path, the decode loop the runner timed
+#   (`engine` since epic #2166 Phase 6, #2176; empty on rows written before
+#   that column existed, which all timed the retired `CxxGenerator`).
 #
 # The first 14 columns are unchanged from the historical schema so older CSVs
 # stay comparable. Column 15 (prompt_target_len) records the --prompt-tokens
 # target for long-prompt prefill runs (epic #623 #624) and is empty for the
 # default short-prompt path. The actual prompt length used (after capping at the
 # model context) is still reported in the prompt_tokens column. Any trailing
-# result-classification token (SKIP:*/FAIL:*) follows prompt_target_len.
+# result-classification token (SKIP:*/FAIL:*) follows the last named column
+# (decode_path, which such a row leaves empty).
 #
 # Result classifications (trailing CSV token):
 #   (none)               successful decode with profiling numbers
@@ -155,12 +158,14 @@ NO_CHAT_TEMPLATE=0
 NO_DEDUP=0
 OUTPUT=""
 SUFFIX=""
-# Sampling for both passes (issue #2064). Empty means the runner's default,
-# greedy argmax, which never dispatches a sampler kernel; a sampled run is how
-# the Gumbel-max and rejection kernels are measured. The CSV schema does not
-# record either, so a non-greedy run also tags the auto-generated filename.
+# Sampling for both passes (issue #2064; --top-k from #2157). Empty means the
+# runner's default, greedy argmax, which never dispatches a sampler kernel; a
+# sampled run is how the Gumbel-max and rejection kernels are measured. The CSV
+# schema records none of them, so a non-greedy run also tags the
+# auto-generated filename.
 TEMPERATURE=""
 TOP_P=""
+TOP_K=""
 DATE=$(date '+%Y-%m-%d')
 # Version recorded in the CSV `mlxcel_version` column. This is the mlxcel
 # version from Cargo.toml (the /update-benchmarks staleness check compares
@@ -529,7 +534,7 @@ BACKEND=""
 SYSTEM_MEMORY_BYTES=0
 MEMORY_LIMIT_BYTES=0
 # The trailing commit columns of every row. ROCm rows carry two more: the
-# source commit of the MLX ROCm overlay (src/lib/mlx-cpp/patches-rocm/UPSTREAM),
+# source commit of the MLX ROCm overlay (src/lib/mlxcelverse/overlays/rocm/UPSTREAM),
 # since `mlx_commit` names only the upstream pin and cannot tell upstream MLX
 # from a build carrying the overlay, and the HIP runtime version.
 COMMIT_FIELDS=""
@@ -546,7 +551,7 @@ resolve_platform() {
   COMMIT_FIELDS="${SOURCE_COMMIT},${MLX_COMMIT}"
   if [[ "$BACKEND" == "rocm" ]]; then
     local overlay
-    overlay=$(sed -n 's/^commit:[[:space:]]*//p' src/lib/mlx-cpp/patches-rocm/UPSTREAM 2>/dev/null | cut -c1-8)
+    overlay=$(sed -n 's/^commit:[[:space:]]*//p' src/lib/mlxcelverse/overlays/rocm/UPSTREAM 2>/dev/null | cut -c1-8)
     COMMIT_FIELDS="${COMMIT_FIELDS},${overlay:-unknown},${HIP_VERSION:-unknown}"
     CSV_HEADER_EXTRA=",mlx_rocm_overlay_commit,hip_version"
   fi
@@ -830,7 +835,7 @@ emit_duplicate_row() {
   local ptl="$PROMPT_TOKENS"
   [[ "$VLM_MODE" -eq 1 ]] && ptl=""
   >&2 printf '>>> [skip]   %s duplicate of %s (SKIP:duplicate_of)\n' "$model_name" "$owner"
-  echo "${model_name},${dir},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${COMMIT_FIELDS},SKIP:duplicate_of=${owner}"
+  echo "${model_name},${dir},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${COMMIT_FIELDS},,SKIP:duplicate_of=${owner}"
 }
 
 # ---------------------------------------------------------------------------
@@ -863,6 +868,9 @@ Options:
   --top-p P           Nucleus threshold, effective with a positive
                       --temperature (default: the runner's 1.0, off). Tags
                       the filename with `_p<P>`.
+  --top-k K           Top-k cutoff, effective with a positive --temperature
+                      (default: the runner's 0, off). Tags the filename with
+                      `_k<K>`.
   --cooldown N        Sleep N seconds after every model to let the GPU cool
                       down (default: 0). Use on thermally constrained
                       hardware such as the MacBook Pro M5 Max where back-to-
@@ -956,6 +964,7 @@ default_output_path() {
   name="${name}_${DATE}"
   [[ -n "$TEMPERATURE" ]] && name="${name}_t${TEMPERATURE}"
   [[ -n "$TOP_P" ]] && name="${name}_p${TOP_P}"
+  [[ -n "$TOP_K" ]] && name="${name}_k${TOP_K}"
   if [[ -n "$SUFFIX" ]]; then
     name="${name}_${SUFFIX}"
   fi
@@ -984,6 +993,15 @@ parse_profile() {
   echo "${prompt_tok:-},${gen_tok:-},${prefill_ms:-},${prefill_tps:-},${decode_ms:-},${decode_tps:-}"
 }
 
+# The decode path the runner reports (`Decode path:` in `[Profile Results]`):
+# `engine` since epic #2166 Phase 6 (#2176), when `mlxcel-bench-decode` moved
+# from the retired `CxxGenerator` loop onto the engine's raw-completion client.
+# Rows written before that line existed carry no value here, which is how a
+# reader tells a pre-engine row from an engine row.
+parse_decode_path() {
+  echo "$1" | sed -n 's/.*Decode path:[[:space:]]*\([a-z_-]*\).*/\1/p' | head -1
+}
+
 # ---------------------------------------------------------------------------
 # Benchmark a single model
 # ---------------------------------------------------------------------------
@@ -1009,7 +1027,7 @@ bench_one() {
   # dangling symlink into a pruned HuggingFace cache.
   if [[ ! -f "$model_path/config.json" ]]; then
     >&2 printf '>>> [skip]   %s (no config.json; not a checkpoint)\n' "$model_name"
-    echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$TEXT_PROMPT\",${ptl},${COMMIT_FIELDS},SKIP:not_a_checkpoint"
+    echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$TEXT_PROMPT\",${ptl},${COMMIT_FIELDS},,SKIP:not_a_checkpoint"
     return
   fi
   local _w _have_weights=0
@@ -1020,7 +1038,7 @@ bench_one() {
   done
   if [[ "$_have_weights" -eq 0 ]]; then
     >&2 printf '>>> [skip]   %s (config.json present but no readable *.safetensors)\n' "$model_name"
-    echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$TEXT_PROMPT\",${ptl},${COMMIT_FIELDS},SKIP:missing_weights"
+    echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$TEXT_PROMPT\",${ptl},${COMMIT_FIELDS},,SKIP:missing_weights"
     return
   fi
 
@@ -1033,7 +1051,7 @@ bench_one() {
     effective_mb=$(awk -v b="$est_bytes" -v f="$BENCH_MEM_OVERHEAD_FACTOR" 'BEGIN{printf "%.0f", b * f / 1048576}')
     limit_mb=$(( MEMORY_LIMIT_BYTES / 1048576 ))
     >&2 printf '>>> [skip]   %s (%d MB > %d MB limit)\n' "$model_name" "$effective_mb" "$limit_mb"
-    echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$TEXT_PROMPT\",${ptl},${COMMIT_FIELDS},SKIP:oom_estimate"
+    echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$TEXT_PROMPT\",${ptl},${COMMIT_FIELDS},,SKIP:oom_estimate"
     return
   fi
 
@@ -1042,7 +1060,7 @@ bench_one() {
   if [[ "$VLM_MODE" -eq 1 ]]; then
     prompt="$VLM_PROMPT"
     if [[ ! -f "$VLM_IMAGE" ]]; then
-      echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${COMMIT_FIELDS},SKIP:vlm_image_not_found"
+      echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${COMMIT_FIELDS},,SKIP:vlm_image_not_found"
       return
     fi
     extra_args+=(--image "$VLM_IMAGE")
@@ -1072,6 +1090,7 @@ bench_one() {
   fi
   [[ -n "$TEMPERATURE" ]] && extra_args+=(--temperature "$TEMPERATURE")
   [[ -n "$TOP_P" ]] && extra_args+=(--top-p "$TOP_P")
+  [[ -n "$TOP_K" ]] && extra_args+=(--top-k "$TOP_K")
 
   >&2 printf '>>> [bench]  %s (same-process warmup=%s) ...\n' "$model_name" "$WARMUP_TOKENS"
   local raw rc=0
@@ -1096,10 +1115,10 @@ bench_one() {
   if [[ "$rc" -ne 0 ]]; then
     if is_oom_failure "$rc" "$raw"; then
       >&2 printf '    OOM at load/run (exit %d) — SKIP:oom\n' "$rc"
-      echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${COMMIT_FIELDS},SKIP:oom"
+      echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${COMMIT_FIELDS},,SKIP:oom"
     else
       >&2 printf '    benchmark failed (exit %d)\n' "$rc"
-      echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${COMMIT_FIELDS},FAIL:bench"
+      echo "${model_name},${model_path},,,,,,,$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${COMMIT_FIELDS},,FAIL:bench"
     fi
     return
   fi
@@ -1111,10 +1130,12 @@ bench_one() {
 
   if [[ -z "$decode_tps" ]]; then
     >&2 echo "    no decode output"
-    echo "${model_name},${model_path},${fields},$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${COMMIT_FIELDS},FAIL:no_output"
+    echo "${model_name},${model_path},${fields},$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${COMMIT_FIELDS},,FAIL:no_output"
   else
     >&2 printf '    decode: %s tok/s\n' "$decode_tps"
-    echo "${model_name},${model_path},${fields},$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${COMMIT_FIELDS}"
+    local decode_path
+    decode_path=$(parse_decode_path "$raw")
+    echo "${model_name},${model_path},${fields},$DATE,$HARDWARE_FULL,$MLXCEL_VERSION,$BUILD_TYPE,$MAX_TOKENS,\"$prompt\",${ptl},${COMMIT_FIELDS},${decode_path}"
   fi
 }
 
@@ -1161,6 +1182,7 @@ while [[ $# -gt 0 ]]; do
     --suffix)         SUFFIX="$2"; shift 2 ;;
     --temperature)    TEMPERATURE="$2"; shift 2 ;;
     --top-p)          TOP_P="$2"; shift 2 ;;
+    --top-k)          TOP_K="$2"; shift 2 ;;
     --cooldown)       COOLDOWN_SECS="$2"; shift 2 ;;
     --big-cooldown)   BIG_MODEL_COOLDOWN_SECS="$2"; shift 2 ;;
     --big-threshold-gb)
@@ -1185,6 +1207,12 @@ for _sampling_opt in "--temperature:$TEMPERATURE" "--top-p:$TOP_P"; do
     exit 1
   fi
 done
+# No leading zeros (the filename tag would not match the value) and at most
+# nine digits (the runner takes an i32).
+if [[ -n "$TOP_K" && ! "$TOP_K" =~ ^(0|[1-9][0-9]{0,8})$ ]]; then
+  echo "Error: --top-k takes a non-negative integer, got '$TOP_K'" >&2
+  exit 1
+fi
 
 if [[ -z "$MODEL_ARG" ]]; then
   echo "Error: model path or 'all' required" >&2
@@ -1282,7 +1310,7 @@ fi
 # ---------------------------------------------------------------------------
 # CSV header
 # ---------------------------------------------------------------------------
-CSV_HEADER="model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlxcel_version,build_type,max_tokens,prompt,prompt_target_len,mlxcel_commit,mlx_commit${CSV_HEADER_EXTRA}"
+CSV_HEADER="model,model_path,prompt_tokens,generated_tokens,prefill_ms,prefill_tok_s,decode_ms,decode_tok_s,date,hardware,mlxcel_version,build_type,max_tokens,prompt,prompt_target_len,mlxcel_commit,mlx_commit${CSV_HEADER_EXTRA},decode_path"
 
 mkdir -p "$(dirname "$OUTPUT")"
 echo "$CSV_HEADER" > "$OUTPUT"

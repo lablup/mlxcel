@@ -23,6 +23,11 @@ Examples:
     # Longer prompts and more decode tokens:
     python3 scripts/bench_serving_concurrency.py --prompt-tokens 2048 --max-tokens 256
 
+    # Prompt lookup (issue #2255): a reply that copies the prompt, against a
+    # server started with --draft-kind prompt-lookup and one without it.
+    python3 scripts/bench_serving_concurrency.py --concurrency 4,8 \
+        --max-tokens 256 --prompt-style copy
+
     # Shared-prefix (cascade) scenario: every client sends the same 2K system
     # prompt and a distinct short question, with the decode path printed per
     # level so the arm can be attributed (issue #903).
@@ -40,6 +45,13 @@ import json
 import statistics
 import time
 from dataclasses import dataclass, field
+
+from bench_serving_metrics import (
+    BATCH_METRICS,
+    batch_delta,
+    format_batch_delta,
+    parse_metrics,
+)
 
 # Base sentence repeated to synthesize a prompt of an approximate token length.
 # The server tokenizes it; the client only needs a roughly-sized input, so a
@@ -100,6 +112,15 @@ def build_prompt(prompt_tokens: int) -> str:
     target_words = max(words_per_copy, int(prompt_tokens / _TOKENS_PER_WORD))
     copies = max(1, target_words // words_per_copy + 1)
     return (_BASE_SENTENCE * copies).strip()
+
+
+def style_prompt(paragraph: str, style: str) -> str:
+    """Apply ``--prompt-style``: ``plain`` sends the paragraph as is; ``copy``
+    asks the model to repeat it, so the reply copies the prompt (the shape
+    prompt-lookup speculative decoding accelerates, issue #2255)."""
+    if style == "copy":
+        return f"Repeat the following paragraph exactly: {paragraph}"
+    return paragraph
 
 
 def resolve_model(host: str, port: int, override: str | None) -> str:
@@ -312,8 +333,8 @@ _PATH_METRICS = (
 )
 
 
-def scrape_paths(host: str, port: int) -> dict[str, float]:
-    """Read the decode-path counters from ``/metrics``.
+def scrape_metrics(host: str, port: int, names: tuple[str, ...]) -> dict[str, float]:
+    """Read the counters in ``names`` from ``/metrics``.
 
     Returns an empty dict when the endpoint is unavailable, so the load
     generator still works against a build without it.
@@ -328,18 +349,12 @@ def scrape_paths(host: str, port: int) -> dict[str, float]:
             return {}
     except (OSError, ValueError):
         return {}
-    out: dict[str, float] = {}
-    for line in body.splitlines():
-        if line.startswith("#"):
-            continue
-        name, _, value = line.rpartition(" ")
-        name = name.strip()
-        if name in _PATH_METRICS:
-            try:
-                out[name] = float(value)
-            except ValueError:
-                continue
-    return out
+    return parse_metrics(body, names)
+
+
+def scrape_paths(host: str, port: int) -> dict[str, float]:
+    """Read the decode-path and batch-step counters from ``/metrics``."""
+    return scrape_metrics(host, port, _PATH_METRICS + BATCH_METRICS)
 
 
 def print_path_delta(before: dict[str, float], after: dict[str, float]) -> None:
@@ -401,7 +416,7 @@ def parse_concurrency(spec: str) -> list[int]:
 
 async def _amain(args: argparse.Namespace) -> int:
     model = resolve_model(args.host, args.port, args.model)
-    prompt = build_prompt(args.prompt_tokens)
+    prompt = style_prompt(build_prompt(args.prompt_tokens), args.prompt_style)
     system_prompt = (
         build_prompt(args.shared_prefix_tokens) if args.shared_prefix_tokens else ""
     )
@@ -409,7 +424,10 @@ async def _amain(args: argparse.Namespace) -> int:
 
     print(f"Server:       http://{args.host}:{args.port}")
     print(f"Model:        {model}")
-    print(f"Prompt:       ~{args.prompt_tokens} tokens ({len(prompt)} chars)")
+    print(
+        f"Prompt:       ~{args.prompt_tokens} tokens ({len(prompt)} chars), "
+        f"style {args.prompt_style}"
+    )
     if system_prompt:
         print(
             f"Shared prefix: ~{args.shared_prefix_tokens} tokens "
@@ -433,7 +451,10 @@ async def _amain(args: argparse.Namespace) -> int:
             system_prompt,
         )
         if args.metrics:
-            print_path_delta(before, scrape_paths(args.host, args.port))
+            after = scrape_paths(args.host, args.port)
+            print_path_delta(before, after)
+            for line in format_batch_delta(batch_delta(before, after)):
+                print(line)
         summaries.append(summary)
 
     print_table(summaries)
@@ -465,6 +486,17 @@ def main() -> int:
         help="Approximate synthetic prompt length in tokens (default: 512)",
     )
     parser.add_argument(
+        "--prompt-style",
+        choices=("plain", "copy"),
+        default="plain",
+        help=(
+            "plain: send the synthetic paragraph as is (default). copy: wrap it "
+            "as 'Repeat the following paragraph exactly: ...', so the reply "
+            "copies the prompt; compare a --draft-kind prompt-lookup server "
+            "against one without it."
+        ),
+    )
+    parser.add_argument(
         "--max-tokens",
         type=int,
         default=128,
@@ -492,9 +524,10 @@ def main() -> int:
         action="store_true",
         help=(
             "Scrape /metrics around each level and print which attention path "
-            "the decode loop ran. Use it whenever the run is meant to compare "
-            "cascade against flat: a level whose cascade counter did not move "
-            "did not measure cascade."
+            "the decode loop ran, plus the batch counters (decode steps, "
+            "occupancy, prefill chunks, mean decode step ms). Use it whenever "
+            "the run is meant to compare cascade against flat: a level whose "
+            "cascade counter did not move did not measure cascade."
         ),
     )
     args = parser.parse_args()

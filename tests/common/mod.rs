@@ -32,6 +32,20 @@ use std::path::{Path, PathBuf};
 /// of returning a path that does not exist, so a local gate run cannot pass by
 /// skipping everything. CI has no checkpoints and leaves the variable unset,
 /// keeping the skip behaviour there.
+/// Apply the MLX CUDA cache capacities every shipped binary sets at the top of
+/// `main()` (`src/main.rs`): the CUDA graph cache (#818) and the cuDNN SDPA
+/// plan cache (#1799). MLX reads them once, on its first CUDA use, so an
+/// in-process model test must call this before `initialize_runtime()`; without
+/// it the process runs MLX's bare defaults, whose lifetime-miss abort a long
+/// speculative test can reach where the server never runs. Each call is a
+/// no-op when the variable is already set, so calling it from every test is
+/// safe and an operator override still wins.
+#[allow(dead_code)]
+pub fn apply_server_mlx_cache_defaults() {
+    mlxcel_core::hardware::apply_cuda_graph_cache_default();
+    mlxcel_core::hardware::apply_cuda_sdpa_cache_default();
+}
+
 #[allow(dead_code)]
 pub fn repo_model_dir(name: &str) -> PathBuf {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

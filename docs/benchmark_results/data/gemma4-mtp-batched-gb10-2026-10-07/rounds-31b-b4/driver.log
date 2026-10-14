@@ -1,0 +1,10 @@
+[b4 r0-classic-open] [8.871, 8.856] sha=[('19d095f3eb', '0d446d6a09', '5664e4a2e5', '5d08d6acc5')] batched_rows=0/0 b1_bursts=0 thrash=False gate_timed_out=False nvrm+0
+[b4 r0-mtp] [13.466, 13.465] sha=[('19d095f3eb', '0d446d6a09', '5664e4a2e5', '5d08d6acc5')] batched_rows=12/12 b1_bursts=4 thrash=False gate_timed_out=False nvrm+0
+[b4 r0-classic-close] [8.753, 8.821] sha=[('19d095f3eb', '0d446d6a09', '5664e4a2e5', '5d08d6acc5')] batched_rows=0/0 b1_bursts=0 thrash=False gate_timed_out=False nvrm+0
+[b4 r1-classic-open] [8.859, 8.848] sha=[('19d095f3eb', '0d446d6a09', '5664e4a2e5', '5d08d6acc5')] batched_rows=0/0 b1_bursts=0 thrash=False gate_timed_out=False nvrm+0
+[b4 r1-mtp] [13.57, 13.535] sha=[('19d095f3eb', '0d446d6a09', '5664e4a2e5', '5d08d6acc5')] batched_rows=12/12 b1_bursts=4 thrash=False gate_timed_out=False nvrm+0
+[b4 r1-classic-close] [8.649, 8.657] sha=[('19d095f3eb', '0d446d6a09', '5664e4a2e5', '5d08d6acc5')] batched_rows=0/0 b1_bursts=0 thrash=False gate_timed_out=False nvrm+0
+[b4 r2-classic-open] [8.852, 8.863] sha=[('19d095f3eb', '0d446d6a09', '5664e4a2e5', '5d08d6acc5')] batched_rows=0/0 b1_bursts=0 thrash=False gate_timed_out=False nvrm+0
+[b4 r2-mtp] [13.612, 13.492] sha=[('19d095f3eb', '0d446d6a09', '5664e4a2e5', '5d08d6acc5')] batched_rows=12/12 b1_bursts=4 thrash=False gate_timed_out=False nvrm+0
+[b4 r2-classic-close] [8.927, 8.889] sha=[('19d095f3eb', '0d446d6a09', '5664e4a2e5', '5d08d6acc5')] batched_rows=0/0 b1_bursts=0 thrash=False gate_timed_out=False nvrm+0
+ROUNDS DONE

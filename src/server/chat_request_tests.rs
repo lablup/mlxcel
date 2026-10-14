@@ -2766,7 +2766,7 @@ fn next_turn_history_extends_this_turns_history_with_the_reply() {
         text_message(Role::User, "q2"),
     ]);
 
-    let rendered = render_next_turn_history(&processor, &request, None, "a2 is the answer")
+    let rendered = render_next_turn_history(&processor, &request, None, "a2 is the answer", None)
         .expect("a plain text turn with a reply must produce a next-turn history");
 
     // The two probes differ only in their trailing placeholder user text, so
@@ -2814,8 +2814,8 @@ fn next_turn_history_declines_without_a_usable_reply() {
     let request = cached_request(vec![text_message(Role::User, "q1")]);
 
     // An empty or whitespace-only reply adds nothing to warm.
-    assert!(render_next_turn_history(&processor, &request, None, "").is_none());
-    assert!(render_next_turn_history(&processor, &request, None, "   \n ").is_none());
+    assert!(render_next_turn_history(&processor, &request, None, "", None).is_none());
+    assert!(render_next_turn_history(&processor, &request, None, "   \n ", None).is_none());
 }
 
 #[test]
@@ -2839,7 +2839,7 @@ fn next_turn_history_declines_for_multimodal_requests() {
         tool_calls: None,
     }]);
 
-    assert!(render_next_turn_history(&processor, &request, None, "a picture").is_none());
+    assert!(render_next_turn_history(&processor, &request, None, "a picture", None).is_none());
 }
 
 #[test]

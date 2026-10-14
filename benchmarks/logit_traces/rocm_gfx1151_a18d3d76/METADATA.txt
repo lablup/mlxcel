@@ -1,0 +1,15 @@
+host: AMD Ryzen AI MAX+ 395 with Radeon 8060S (gfx1151, RDNA 3.5), 96 GiB VRAM carve-out, 31 GiB host RAM
+os: Debian GNU/Linux 13 (trixie), kernel 6.18.12+deb13-amd64
+rocm: 10.0.0 packages (HIP 7.15.26333), ROCM_PATH=/opt/rocm
+mlxcel_commit: a18d3d76 (origin/main, merge of PR #2237)
+mlx_pin: 81ba1c6a0e50a9268b931579c2d4f1158b9aab5a
+rocm_overlay_fork: NripeshN/mlx rocm-support @ 75915908dfe5028335d318b10340313744fd3a8d (src/lib/mlx-cpp/patches-rocm/UPSTREAM), plus the local fixes in LOCAL_FIXES.md (42 items)
+logit_trace_sha256: 687cf66d6867ff43f244a5c6be43034efb029d62a7cbfe075d8bca6d5d78cef5
+build: cargo build --release --features rocm --example logit_trace (default, ssmkernel0, cpubf16 traces); cargo test --profile test-fast --features rocm --lib --no-run with granitemoehybrid_probe_2154.rs attached (f32ref, f32refcpu, f32mix, ops)
+corpus: tests/fixtures/wikitext2_excerpt.txt sha256 16721fc1057d69efc8493718fcad562de9e4554ce05369876cd06dcba431394e
+checkpoint: granite-4.0-h-tiny-4bit@02c8783da0cb171942e30a7dde8acce11fe82e0d (the same local directory as ../rocm_gfx1151_c5fe9a16/)
+args: w1='1 128 8 0'; w1x1024='1 1024 8 0'; w8='8 80 8 512'; w256='256 2 8 0' (CHUNK_TOKENS MAX_CHUNKS TOPK PREFILL)
+tags: 'default' = no override. 'ssmkernel0' = MLXCEL_SSM_KERNEL=0. 'cpubf16' = MLXCEL_DEVICE=cpu, stopped by a 600 s timeout after its first chunk. 'f32ref' = the probe's f32-activation forward on the GPU (embedding output cast to f32, so every op runs in f32 against the bf16-stored weights; logits not rounded to bf16). 'f32refcpu' = the same forward on the CPU stream, first 3 chunks only. 'f32mix-<family>' = the f32 forward with only that family run in bf16 (input cast to bf16, output cast back); 'resid' rounds the residual stream to bf16 after the embedding and after every residual add; 'all' runs every family in bf16. 'ops' = per-stage bf16 output against the f32 stage on the same inputs, first 128 chunks, on the GPU.
+env: LD_LIBRARY_PATH unset; MLXCEL_KEEP_BF16 unset; MLXCEL_FUSED_MOE unset; MLXCEL_DEVICE unset except the cpubf16 trace
+gpu: correctness traces, not timings; every run held the host GPU lock (/tmp/mlxcel-rocm-gpu-guard.lock)
+metal_reference: ../metal_m5_d1128266/ (w1, w8, w256, 128 / 80 / 2 chunks); no Metal host was available to trace 1024 chunks

@@ -1,0 +1,1 @@
+MLXCEL_B1_DECODE_PROFILE=<unset> MLXCEL_DEVICE=gpu MLXCEL_SDPA_DETERMINISTIC=1 /home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2227/target/release/mlxcel run models/mlx/qwen3-1.7b-4bit -p Reply\ with\ exactly\ one\ short\ sentence\ naming\ the\ capital\ of\ France. -n 64 --temp 0 --top-k 0 --top-p 1 --min-p 0 --seed 2227 --show-reasoning 

@@ -57,7 +57,7 @@ pub fn sanitize_weights(mut weights: WeightMap, config: &ModelArgs) -> WeightMap
     weights.retain(|k, _| !k.starts_with(&mtp_prefix));
 
     // Step 4: Materialize all converted weights to collapse the lazy graph
-    println!("[SolarOpen] Materializing converted weights...");
+    tracing::info!("[SolarOpen] Materializing converted weights...");
     let ptrs: Vec<*const MlxArray> = weights
         .values()
         .map(|v| v.as_ref().unwrap() as *const MlxArray)
@@ -92,7 +92,7 @@ fn convert_gptq_to_mlx(weights: &mut WeightMap, config: &ModelArgs) {
         return;
     }
 
-    println!(
+    tracing::info!(
         "[SolarOpen] Converting {} GPTQ layers to MLX format (bits={}, group_size={})",
         qweight_keys.len(),
         bits,
@@ -847,7 +847,7 @@ impl SolarOpenModel {
         let args: ModelArgs = serde_json::from_str(&config_str)
             .map_err(|e| format!("Failed to parse config.json: {}", e))?;
 
-        println!(
+        tracing::info!(
             "[SolarOpen] Loading model: {} layers, {} experts, top-{}, group_size={}, bits={}",
             args.num_hidden_layers,
             args.n_routed_experts,

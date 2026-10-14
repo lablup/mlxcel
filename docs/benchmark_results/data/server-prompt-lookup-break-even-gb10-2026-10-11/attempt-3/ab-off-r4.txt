@@ -1,0 +1,8 @@
+{"style": "chat", "conc": 1, "rep": 0, "wall_s": 1.675, "tokens": 256, "agg_tok_s": 152.87, "decode_tok_s": [153.89], "prompt_n": [27], "draft_kind": null, "draft_n": 0, "draft_n_accepted": 0, "draft_rounds": 0}
+{"style": "chat", "conc": 1, "rep": 1, "wall_s": 1.692, "tokens": 256, "agg_tok_s": 151.32, "decode_tok_s": [154.08], "prompt_n": [19], "draft_kind": null, "draft_n": 0, "draft_n_accepted": 0, "draft_rounds": 0}
+{"style": "chat", "conc": 1, "rep": 2, "wall_s": 1.657, "tokens": 256, "agg_tok_s": 154.5, "decode_tok_s": [157.21], "prompt_n": [21], "draft_kind": null, "draft_n": 0, "draft_n_accepted": 0, "draft_rounds": 0}
+{"style": "chat", "conc": 1, "rep": 3, "wall_s": 1.721, "tokens": 256, "agg_tok_s": 148.71, "decode_tok_s": [151.43], "prompt_n": [20], "draft_kind": null, "draft_n": 0, "draft_n_accepted": 0, "draft_rounds": 0}
+{"style": "copy", "conc": 1, "rep": 0, "wall_s": 1.766, "tokens": 256, "agg_tok_s": 144.96, "decode_tok_s": [146.38], "prompt_n": [155], "draft_kind": null, "draft_n": 0, "draft_n_accepted": 0, "draft_rounds": 0}
+{"style": "copy", "conc": 1, "rep": 1, "wall_s": 1.787, "tokens": 256, "agg_tok_s": 143.24, "decode_tok_s": [144.39], "prompt_n": [155], "draft_kind": null, "draft_n": 0, "draft_n_accepted": 0, "draft_rounds": 0}
+{"style": "copy", "conc": 1, "rep": 2, "wall_s": 1.813, "tokens": 256, "agg_tok_s": 141.18, "decode_tok_s": [142.22], "prompt_n": [155], "draft_kind": null, "draft_n": 0, "draft_n_accepted": 0, "draft_rounds": 0}
+{"style": "copy", "conc": 1, "rep": 3, "wall_s": 1.805, "tokens": 256, "agg_tok_s": 141.87, "decode_tok_s": [142.94], "prompt_n": [155], "draft_kind": null, "draft_n": 0, "draft_n_accepted": 0, "draft_rounds": 0}

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -21,10 +21,12 @@ use mlxcel_core::generate::SamplingConfig;
 use mlxcel_core::sampling::{LogprobsConfig, TokenLogprobData};
 
 use super::{
-    ChatWorkerGoneError, DECODE_HANG_TIMEOUT, GenerateEvent, GenerationResult, ModelProvider,
-    ModelRequest, PrefillStats, QueueReservationMode, RequestRuntimeDefaults,
-    SingleStreamQueueReservation, StopKind, TokenMeta, drain_generation_events,
-    drain_generation_events_with_logprobs_observing_prefill, observe_worker_exit,
+    AdmissionWaiter, ChatWorkerGoneError, DECODE_HANG_TIMEOUT, GenerateEvent, GenerationResult,
+    ModelProvider, ModelRequest, PrefillStats, QueueReservationMode, RequestRuntimeDefaults,
+    SingleStreamQueueReservation, StopKind, TokenMeta, await_request_admission,
+    drain_generation_events, drain_generation_events_with_logprobs_observing_prefill,
+    legacy_request_memory_admission_enabled, observe_worker_exit,
+    request_memory_provider_wait_enabled, request_memory_worker_path_supported,
     send_shutdown_signal, tokenize_prompt_for_generation,
     tokenize_prompt_for_generation_with_ordered_media, validated_decode_hang_timeout,
 };
@@ -79,6 +81,7 @@ fn sample_options() -> crate::server::ServerGenerateOptions {
         grammar: None,
         image_soft_tokens: None,
         pre_rendered_prompt_tokens: None,
+        admission_notification: None,
     }
 }
 
@@ -237,6 +240,7 @@ fn generate_with_live_enqueues_the_captured_runtime_defaults() {
         batch_metrics: Arc::new(BatchMetrics::new()),
         batch_observability: Arc::new(BatchObservability::new()),
         max_queue_depth: usize::MAX,
+        request_memory_admission: false,
         single_stream_queue_admission: Arc::new(AtomicBool::new(false)),
         sleeping: Arc::new(AtomicBool::new(false)),
         prompt_cache: None,
@@ -384,6 +388,7 @@ fn pre_reserved_single_stream_enqueue_does_not_double_reserve() {
         batch_metrics: metrics.clone(),
         batch_observability: Arc::new(BatchObservability::new()),
         max_queue_depth: 1,
+        request_memory_admission: false,
         single_stream_queue_admission: Arc::new(AtomicBool::new(true)),
         sleeping: Arc::new(AtomicBool::new(false)),
         prompt_cache: None,
@@ -435,6 +440,7 @@ fn scheduler_paths_do_not_create_single_stream_reservations() {
         batch_metrics: Arc::new(BatchMetrics::new()),
         batch_observability: Arc::new(BatchObservability::new()),
         max_queue_depth: 0,
+        request_memory_admission: false,
         single_stream_queue_admission: Arc::new(AtomicBool::new(false)),
         sleeping: Arc::new(AtomicBool::new(false)),
         prompt_cache: None,
@@ -609,6 +615,8 @@ fn drain_generation_events_impl_survives_long_prefill_before_first_token() {
             Ok(Some(r))
         }
         GenerateEvent::Error(e) => Err(anyhow::anyhow!(e)),
+        GenerateEvent::Admitted => Ok(None),
+        GenerateEvent::RequestMemoryRejected(e) => Err(anyhow::Error::new(e)),
     })
     .expect("drain_generation_events_impl must not error during long prefill");
 
@@ -675,6 +683,8 @@ fn drain_generation_events_impl_detects_phase2_decode_hang() {
         GenerateEvent::Prefill(_) => Ok(None),
         GenerateEvent::Done(r) => Ok(Some(r)),
         GenerateEvent::Error(e) => Err(anyhow::anyhow!(e)),
+        GenerateEvent::Admitted => Ok(None),
+        GenerateEvent::RequestMemoryRejected(e) => Err(anyhow::Error::new(e)),
     });
 
     worker.join().expect("worker thread must not panic");
@@ -693,4 +703,236 @@ fn drain_generation_events_impl_detects_phase2_decode_hang() {
         msg.contains("hang") || msg.contains("decode") || msg.contains("150"),
         "error message must describe the decode hang; got: {msg}"
     );
+}
+
+#[test]
+fn request_memory_admission_preserves_typed_rejection_and_context_errors() {
+    use crate::execution::request_memory::RequestMemoryRejection;
+    let (sender, receiver) = mpsc::channel();
+    sender
+        .send(GenerateEvent::RequestMemoryRejected(
+            RequestMemoryRejection {
+                estimated_bytes: 11,
+                budget_bytes: 10,
+            },
+        ))
+        .unwrap();
+    let cancelled = AtomicBool::new(false);
+    let error = await_request_admission(&receiver, &cancelled).unwrap_err();
+    assert_eq!(
+        error
+            .downcast_ref::<RequestMemoryRejection>()
+            .unwrap()
+            .estimated_bytes,
+        11
+    );
+    sender
+        .send(GenerateEvent::Error(
+            "prompt exceeds the available context size".into(),
+        ))
+        .unwrap();
+    let error = await_request_admission(&receiver, &cancelled).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("exceeds the available context size")
+    );
+    sender.send(GenerateEvent::Admitted).unwrap();
+    assert!(await_request_admission(&receiver, &cancelled).is_ok());
+}
+
+#[tokio::test]
+async fn request_memory_admission_http_abandonment_cancels_pending_worker() {
+    let mut options = sample_options();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let waiter = AdmissionWaiter::arm(&mut options, cancelled.clone());
+    let (sender, receiver) = mpsc::channel();
+    let worker_cancelled = cancelled.clone();
+    let worker =
+        tokio::task::spawn_blocking(move || await_request_admission(&receiver, &worker_cancelled));
+    drop(waiter);
+    assert!(cancelled.load(Ordering::Acquire));
+    let error = tokio::time::timeout(Duration::from_secs(2), worker)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(error.to_string().contains("cancelled"));
+    drop(sender);
+}
+
+#[tokio::test]
+async fn request_memory_admission_sender_exit_releases_http_waiter() {
+    let mut options = sample_options();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let waiter = AdmissionWaiter::arm(&mut options, cancelled.clone());
+    drop(options);
+    let error = tokio::time::timeout(Duration::from_secs(2), waiter.wait())
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(error.downcast_ref::<ChatWorkerGoneError>().is_some());
+    assert!(cancelled.load(Ordering::Acquire));
+}
+
+#[tokio::test]
+async fn request_memory_admission_ack_does_not_cancel_generation() {
+    let mut options = sample_options();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let waiter = AdmissionWaiter::arm(&mut options, cancelled.clone());
+    options
+        .admission_notification
+        .take()
+        .unwrap()
+        .complete(&Ok(()));
+    waiter.wait().await.unwrap();
+    assert!(!cancelled.load(Ordering::Acquire));
+}
+
+#[test]
+fn request_memory_admission_excludes_nonlocal_and_speculative_workers() {
+    use crate::distributed::disaggregated::ServingMode;
+    assert!(request_memory_worker_path_supported(
+        false,
+        1,
+        ServingMode::Hybrid,
+        false
+    ));
+    // Router currently uses the same local worker loop as Hybrid.
+    assert!(request_memory_worker_path_supported(
+        false,
+        1,
+        ServingMode::Router,
+        false
+    ));
+    for (pipeline, tp_size, mode, speculation) in [
+        (true, 1, ServingMode::Hybrid, false),
+        (false, 2, ServingMode::Hybrid, false),
+        (false, 0, ServingMode::Hybrid, false),
+        (false, 1, ServingMode::PrefillOnly, false),
+        (false, 1, ServingMode::DecodeOnly, false),
+        (false, 1, ServingMode::Hybrid, true),
+    ] {
+        assert!(!request_memory_worker_path_supported(
+            pipeline,
+            tp_size,
+            mode,
+            speculation
+        ));
+    }
+}
+
+#[tokio::test]
+async fn request_memory_admission_bypassed_worker_needs_no_admitted_event() {
+    use crate::distributed::disaggregated::ServingMode;
+    for (pipeline, tp_size, mode, speculation, metal_gpu) in [
+        (true, 1, ServingMode::Hybrid, false, true),
+        (false, 2, ServingMode::Hybrid, false, true),
+        (false, 1, ServingMode::PrefillOnly, false, true),
+        (false, 1, ServingMode::DecodeOnly, false, true),
+        (false, 1, ServingMode::Hybrid, true, true),
+        (false, 1, ServingMode::Hybrid, false, false),
+    ] {
+        let (options_tx, _options_rx) = mpsc::channel();
+        // This worker emits Done only. Accidentally waiting for Admitted would
+        // turn its ordinary result into a protocol error instead of success.
+        let mut provider =
+            ModelProvider::recording_for_route_tests_with_admission(options_tx, true, 1);
+        provider.request_memory_admission = request_memory_provider_wait_enabled(
+            request_memory_worker_path_supported(pipeline, tp_size, mode, speculation),
+            metal_gpu,
+            Some(crate::models::ModelType::NemotronH),
+        );
+        let mut options = sample_options();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let waiter = AdmissionWaiter::arm(&mut options, cancelled.clone());
+        provider
+            .generate("hello".into(), options)
+            .expect("unsupported worker must preserve ordinary generation");
+        tokio::time::timeout(Duration::from_secs(1), waiter.wait())
+            .await
+            .expect("bypass must acknowledge immediately")
+            .unwrap();
+        assert!(!cancelled.load(Ordering::Acquire));
+        assert_eq!(provider.batch_metrics.queue_depth(), 0);
+    }
+}
+
+#[test]
+fn request_memory_admission_requires_metal_gpu_and_actual_target_family() {
+    use crate::models::ModelType;
+    assert!(request_memory_provider_wait_enabled(
+        true,
+        true,
+        Some(ModelType::NemotronH)
+    ));
+    assert!(!request_memory_provider_wait_enabled(
+        true,
+        false,
+        Some(ModelType::NemotronH)
+    ));
+    assert!(!request_memory_provider_wait_enabled(
+        false,
+        true,
+        Some(ModelType::NemotronH)
+    ));
+    assert!(!request_memory_provider_wait_enabled(
+        true,
+        true,
+        Some(ModelType::Llama)
+    ));
+    assert!(!request_memory_provider_wait_enabled(true, true, None));
+}
+
+#[test]
+fn request_memory_admission_legacy_sequential_scheduler_has_matching_scope() {
+    use crate::models::ModelType;
+    assert!(legacy_request_memory_admission_enabled(
+        1,
+        true,
+        Some(ModelType::NemotronH)
+    ));
+    for (tp_size, metal_gpu, model_type) in [
+        (2, true, Some(ModelType::NemotronH)),
+        (0, true, Some(ModelType::NemotronH)),
+        (1, false, Some(ModelType::NemotronH)),
+        (1, true, Some(ModelType::Llama)),
+        (1, true, None),
+    ] {
+        assert!(!legacy_request_memory_admission_enabled(
+            tp_size, metal_gpu, model_type
+        ));
+    }
+}
+
+#[tokio::test]
+async fn request_memory_admission_legacy_provider_preserves_preheader_rejection() {
+    let (options_tx, _options_rx) = mpsc::channel();
+    let mut provider = ModelProvider::memory_admission_for_route_tests(options_tx);
+    provider.request_memory_admission =
+        legacy_request_memory_admission_enabled(1, true, Some(crate::models::ModelType::NemotronH));
+    let mut options = sample_options();
+    options.max_tokens = 64;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let waiter = AdmissionWaiter::arm(&mut options, cancelled.clone());
+    let error = provider.generate("oversized".into(), options).unwrap_err();
+    assert!(
+        error
+            .downcast_ref::<crate::execution::request_memory::RequestMemoryRejection>()
+            .is_some()
+    );
+    let error = tokio::time::timeout(Duration::from_secs(1), waiter.wait())
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(
+        error
+            .downcast_ref::<crate::execution::request_memory::RequestMemoryRejection>()
+            .is_some()
+    );
+    assert!(cancelled.load(Ordering::Acquire));
+    assert_eq!(provider.batch_metrics.queue_depth(), 0);
+    let mut options = sample_options();
+    options.max_tokens = 1;
+    assert!(provider.generate("short".into(), options).is_ok());
 }

@@ -527,3 +527,115 @@ async fn multi_turn_chat_with_cache_disabled_never_reports_cached_tokens() {
 
     stop_server(&mut child);
 }
+
+/// One greedy, seeded chat completion of a single user turn. Returns the whole
+/// assistant message (reasoning plus content, so a thinking model's output is
+/// compared too), `usage.prompt_tokens` and `usage.prompt_tokens_details.cached_tokens`.
+async fn replay_turn(
+    client: &reqwest::Client,
+    base_url: &str,
+    model_alias: &str,
+    prompt: &str,
+) -> (String, u64, Option<u64>) {
+    let body = serde_json::json!({
+        "model": model_alias,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 48,
+        "temperature": 0.0,
+        "seed": 0,
+        "user": "prompt-cache-e2e-replay",
+    });
+    let resp = client
+        .post(format!("{base_url}/v1/chat/completions"))
+        .json(&body)
+        .send()
+        .await
+        .expect("send chat request");
+    let status = resp.status();
+    let value: serde_json::Value = resp.json().await.expect("parse chat response JSON");
+    assert!(status.is_success(), "status={status} body={value}");
+    let message = &value["choices"][0]["message"];
+    let text = format!(
+        "{}\u{0}{}",
+        message["reasoning_content"].as_str().unwrap_or_default(),
+        message["content"].as_str().unwrap_or_default()
+    );
+    let prompt_tokens = value["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
+    let cached = value["usage"]["prompt_tokens_details"]["cached_tokens"].as_u64();
+    (text, prompt_tokens, cached)
+}
+
+/// Issue #1760: replaying an identical prompt hits the cache over the whole
+/// prompt. The adopt must restore `prompt_tokens - 1` tokens and let prefill
+/// re-run the last one, so the warm reply is byte-identical to the cold one.
+/// Before the fix the restore installed all `prompt_tokens` and the last token
+/// landed in the cache twice, and the replies diverged.
+///
+/// `--apc-block-size 1` (dense backend via `--batch-size 1`) lets the KV
+/// lookup match the full prompt at any length instead of flooring it to a
+/// 16-token block, so the whole-prompt hit is reached on every run.
+/// `cached_tokens` is the restored length the scheduler installed, which is
+/// the cache offset prefill starts from.
+#[tokio::test]
+#[ignore = "requires local model weights (qwen3-0.6b-4bit) and the mlxcel-server binary"]
+async fn identical_prompt_replay_restores_all_but_the_last_token() {
+    let model_dir = repo_model_dir(QWEN3_MODEL);
+    let binary = repo_binary_path("mlxcel-server");
+    if !model_dir.exists() || !binary.exists() {
+        eprintln!("Skipping: model or mlxcel-server binary not present");
+        return;
+    }
+    let port = reserve_port();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let port_str = port.to_string();
+    let model_str = model_dir.to_string_lossy().to_string();
+    let model_alias = "qwen3-replay";
+    let mut child = spawn_server(&[
+        "--model",
+        &model_str,
+        "--alias",
+        model_alias,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        &port_str,
+        "--parallel",
+        "1",
+        "--batch-size",
+        "1",
+        "--no-warmup",
+        "--prompt-cache-enabled=true",
+        "--prompt-cache-min-prefix",
+        "4",
+        "--apc-block-size",
+        "1",
+    ]);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .expect("build reqwest client");
+    if !wait_for_health_soft(&client, &base_url, Duration::from_secs(90)).await {
+        eprintln!("Skipping: mlxcel-server did not become healthy at {base_url}");
+        stop_server(&mut child);
+        return;
+    }
+
+    let prompt = "List three facts about the Moon, one short sentence each.";
+    let (cold, cold_prompt_tokens, cold_cached) =
+        replay_turn(&client, &base_url, model_alias, prompt).await;
+    let (warm, warm_prompt_tokens, warm_cached) =
+        replay_turn(&client, &base_url, model_alias, prompt).await;
+    stop_server(&mut child);
+
+    assert_eq!(cold_cached, Some(0), "the first request is a cold prefill");
+    assert_eq!(cold_prompt_tokens, warm_prompt_tokens);
+    assert_eq!(
+        warm_cached,
+        Some(warm_prompt_tokens - 1),
+        "a whole-prompt hit restores every prompt token but the last"
+    );
+    assert_eq!(
+        warm, cold,
+        "the warm replay must match the cold request byte for byte"
+    );
+}

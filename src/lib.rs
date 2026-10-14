@@ -28,7 +28,7 @@ pub mod lang_bias;
 pub mod lora;
 pub mod models;
 pub mod multimodal;
-pub mod reasoning_stream;
+pub mod reasoning_display;
 pub mod rerank;
 pub mod server;
 #[cfg(feature = "surgery")]
@@ -58,6 +58,7 @@ pub(crate) mod test_support;
 mod model_metadata_tests;
 
 #[cfg(test)]
+#[allow(deprecated)]
 #[path = "lang_analyzer_tests.rs"]
 mod lang_analyzer_tests;
 
@@ -74,15 +75,14 @@ pub use execution::runtime::{
 };
 pub use execution::sampling;
 pub use mlxcel_core::generate;
-pub use mlxcel_core::generate::{
-    CxxGenerator, DecodeBatchContext, DecodeStorageBackend, GenerationStats, LanguageModel,
-    SamplingConfig,
-};
+pub use mlxcel_core::generate::{GenerationStats, LanguageModel, SamplingConfig};
+// Deprecated with the classic draft-model loop (#2176), removed in v0.8.0.
+#[allow(deprecated)]
 pub use mlxcel_core::speculative::SpeculativeGenerator;
 pub use mlxcel_core::speculative::prompt_lookup::{
-    DraftPolicy, PromptLookupConfig, PromptLookupGenerator, prompt_lookup_unsupported_reason,
-    supports_prompt_lookup,
+    DraftPolicy, PromptLookupConfig, prompt_lookup_unsupported_reason, supports_prompt_lookup,
 };
+pub use mlxcel_core::speculative::prompt_lookup_drafter::PromptLookupDrafter;
 #[cfg(feature = "xla-diagnostics")]
 pub use multimodal::host_preprocessor::LlavaHostReferenceCapture;
 #[cfg(feature = "xla-iree")]
@@ -147,15 +147,17 @@ pub use loading::{
     read_generation_config_defaults, read_model_context_window,
 };
 
-/// Pin f32 GEMMs to full precision for this test process (issue #1259).
+/// Pin f32 GEMMs to full precision for this test process (issues #1065,
+/// #1088, #1259).
 ///
-/// MLX selects its reduced-precision NAX matmul kernel as
-/// `is_nax_available() && (enable_tf32() || dtype != float32)`, and
-/// `MLX_ENABLE_TF32` defaults to 1 in `mlx/utils.h`, so on Apple GPU
-/// generation 17 an f32 GEMM runs at TF32-class precision. The suite's
-/// algorithm-equivalence tests (chunked vs sequential, prefill vs the
-/// single-token chain, absorbed vs decompressed) assert full-f32 agreement
-/// and break under that default, on this hardware only. Shipped numerics
+/// `MLX_ENABLE_TF32` defaults to 1 in `mlx/utils.h`, and MLX then runs an
+/// f32 GEMM at TF32-class precision on CUDA Ampere and later (cuBLAS
+/// `CUBLAS_COMPUTE_32F_FAST_TF32`) and on Apple GPU generation 17 (NAX).
+/// The suite's algorithm-equivalence tests (chunked vs sequential, prefill
+/// vs the single-token chain, absorbed vs decompressed) assert full-f32
+/// agreement and break under that default on both backends; see the
+/// mirror of this pin in `mlxcel-core`'s `lib.rs` and its sentinel test
+/// `tf32_pin_tests`. Shipped numerics
 /// stay on MLX defaults and are covered by the runtime exactness probes
 /// instead. This runs before `main`, before MLX latches the value into its
 /// process-wide static; an explicit operator setting wins.

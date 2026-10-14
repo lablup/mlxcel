@@ -1,0 +1,12 @@
+diff --git a/src/server/batch/scheduler/decode_tick.rs b/src/server/batch/scheduler/decode_tick.rs
+--- a/src/server/batch/scheduler/decode_tick.rs
++++ b/src/server/batch/scheduler/decode_tick.rs
+@@ -613,7 +613,7 @@ impl Scheduler {
+         // old scheduler submitted n+1, discarded both n and n+1, then replayed
+         // n synchronously on that terminal tick: two whole forwards whose
+         // result could not affect the response.
+-        let pending_spends_budget = self.b1_pending_spends_budget(seq_ids);
++        let pending_spends_budget = false;
+         let next = if pending_spends_budget {
+             None
+         } else {

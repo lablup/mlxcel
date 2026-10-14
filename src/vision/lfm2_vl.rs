@@ -33,7 +33,7 @@
 //! Used by: `loading::load_lfm2_vl`, `multimodal::vlm_runtime`.
 
 use mlxcel_core::cache::{KVCacheMode, SequenceId};
-use mlxcel_core::generate::{DecodeBatchContext, LanguageModel, ModelStateSnapshot};
+use mlxcel_core::generate::{LanguageModel, ModelStateSnapshot};
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -162,15 +162,14 @@ impl LanguageModel for Lfm2VlModel {
         )
     }
 
-    fn forward_batched_with_context(
+    fn forward_batched(
         &self,
         input_ids: &MlxArray,
         batch_caches: &mut [&mut [KVCache]],
         mask: Option<&MlxArray>,
-        context: Option<&DecodeBatchContext>,
     ) -> UniquePtr<MlxArray> {
         self.text_model
-            .forward_batched_with_context(input_ids, batch_caches, mask, context)
+            .forward_batched(input_ids, batch_caches, mask)
     }
 
     fn embed_tokens(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {
@@ -237,8 +236,12 @@ impl LanguageModel for Lfm2VlModel {
         self.text_model.restore_sequence_state(seq_id, snapshot)
     }
 
-    fn trim_internal_caches(&self, excess: i32) {
-        self.text_model.trim_internal_caches(excess);
+    fn trim_state(
+        &self,
+        seq: Option<mlxcel_core::cache::SequenceId>,
+        excess: i32,
+    ) -> Result<(), String> {
+        self.text_model.trim_state(seq, excess)
     }
 }
 

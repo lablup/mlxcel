@@ -27,7 +27,7 @@ src/
 ├── tokenizer/                   # tokenizer loading helpers
 ├── lora/                        # LoRA adapter loading
 ├── lib/mlxcel-core/             # MLX C++ FFI crate and low-level generation primitives
-└── lib/mlx-cpp/                 # mlxcelverse: MLX build, per-backend overlays, fused kernels
+└── lib/mlxcelverse/             # mlxcelverse: MLX build, per-backend overlays, fused kernels
 ```
 
 ## `mlxcel-core`
@@ -36,14 +36,35 @@ src/
 
 - `src/lib/mlxcel-core/src/lib.rs` — `cxx::bridge` definitions and crate exports.
 - `src/lib/mlxcel-core/src/cache.rs` and `src/lib/mlxcel-core/src/cache/` — FP16/INT8/TurboQuant KV cache variants,
-  paged cache layout, detach/adopt helpers, and cache tests.
+  paged cache layout, detach/adopt helpers, and cache tests. `cache/attend.rs`
+  holds `KVCache::attend` and `cache::attend_batched`, the one attention entry
+  that picks the dense or paged kernel from the storage behind the cache
+  ([ADR 0008](adr/0008-kv-attention-dispatch-in-the-cache.md)), plus the
+  `KvAttention` trait, `RotatingKVCache::attend`, `ChunkedKVCache::attend` and
+  `cache::attend_batched_rows` that the model-owned families (Gemma 3, Llama 4)
+  attend through ([ADR 0009](adr/0009-engine-step-api.md)).
 - `src/lib/mlxcel-core/src/ops.rs`, `src/lib/mlxcel-core/src/dtype.rs`, `src/lib/mlxcel-core/src/streams.rs` — wrappers around common MLX
   operations and runtime concepts.
 - `src/lib/mlxcel-core/src/sampling.rs` — penalties and token sampling shared by CLI/server paths.
   Sampler chain order: token bias and penalties, then top-k / top-p / min-p evaluated on the
   untempered distribution, then XTC on the renormalised filtered row, then one temperature
   scaling applied only to the final draw (matching the llama-server chain).
-- `src/lib/mlxcel-core/src/generate.rs` — `LanguageModel` trait and generation loops.
+- `src/lib/mlxcel-core/src/sampling_row_step.rs`: `RowSampler`, the one per-row sampling step
+  (ADR 0007): the `SamplerState` lifecycle, the token-history ordering rule, the structured-output
+  mask and post-draw override hooks, and fused-batch eligibility derived from the step's stage list.
+  The engine step draws through it, for the server and for the raw-completion client alike.
+- `src/lib/mlxcel-core/src/engine/`: `Engine`, the batch-native decode engine
+  ([ADR 0007](adr/0007-unified-batch-native-engine.md), [ADR 0009](adr/0009-engine-step-api.md)).
+  It owns the model and the `CachePool`; `open`, `prefill` (one plan piece), `step` (forward,
+  then every row's sampling and finish step, one entry for every row count), `submit` /
+  `finish_rows` (the lookahead's split form) and `close`. `engine/rows.rs` holds `StepRow`,
+  `StepRowHooks` and `RowOutcome`, through which the server supplies the structured-output
+  matcher, thinking budget, stop matcher and streaming per row and gets each row's token, finish
+  cause or row-only error back.
+- `src/lib/mlxcel-core/src/sampling_token_bias.rs`: `compose_token_bias`, the one precedence rule
+  for request bias, language bias and output suppression, called once per request by the CLI and
+  the server.
+- `src/lib/mlxcel-core/src/generate.rs` — the `LanguageModel` trait, `SamplingConfig` and `GenerationStats`. Decode loops live in `engine/`: `engine/direct.rs` is `DirectEngine`, the raw-completion client `mlxcel generate`, the benchmarks and the inference session run (ADR 0007, #2176), and `engine/speculative.rs` is its token-only speculative loop for drafters such as prompt lookup.
 - `src/lib/mlxcel-core/src/drafter/` and `src/lib/mlxcel-core/src/speculative/` — speculative decoding support.
   `speculative/stochastic_accept.rs` holds the acceptance rules and the distribution-preservation
   guarantee; see [`speculative-acceptance.md`](speculative-acceptance.md) for which rule each path runs.
@@ -59,14 +80,15 @@ src/
   the microbench harnesses under `examples/` (see [benchmarks](benchmarks.md)).
 
 `src/lib/mlxcel-core/build.rs` builds the pinned MLX commit through
-`src/lib/mlx-cpp/` and compiles the bridge code; see
+`src/lib/mlxcelverse/` and compiles the bridge code; see
 [mlxcelverse](#mlxcelverse-the-mlx-side-layer) for what is layered on top of
 upstream MLX.
 
 ## mlxcelverse: the MLX-side layer
 
-mlxcelverse is the name for everything mlxcel builds on top of upstream MLX.
-mlxcel does not use a fork of MLX: `src/lib/mlx-cpp/CMakeLists.txt` fetches
+mlxcelverse is the name for everything mlxcel builds on top of upstream MLX
+(`src/lib/mlxcelverse/`, described in its [README](../src/lib/mlxcelverse/README.md)).
+mlxcel does not use a fork of MLX: `src/lib/mlxcelverse/CMakeLists.txt` fetches
 `ml-explore/mlx` at one pinned commit (its `GIT_TAG`, the single source of truth
 for the pin), copies mlxcelverse's source overlays over the checkout, and builds
 a static `libmlx.a` that the `cxx` bridge links. Every backend (Metal, CUDA,
@@ -76,8 +98,8 @@ mlxcelverse holds two kinds of code, maintained by different rules:
 
 | Kind | Where | What changes on an MLX pin bump |
 |------|-------|---------------------------------|
-| Per-backend source overlays: whole files that replace or add MLX sources before MLX is compiled | `src/lib/mlx-cpp/patches/mlx/backend/metal/` (always copied), `patches/mlx/backend/cuda/` (always copied, compiled only by CUDA builds), `patches-cuda/` (MLX core files copied only for CUDA builds), `patches-rocm/` (the ROCm backend plus the MLX core files it hooks, copied only for ROCm builds) | Each overlay is 3-way merged against the new upstream file and compared with it line by line; see "Bumping the MLX upstream pin" in `CONTRIBUTING.md` and `patches-rocm/README.md` |
-| mlxcel's own kernels: fusions and extension functions built on MLX's public custom-kernel APIs (`fast::metal_kernel`, `fast::cuda_kernel`, and `fast::hip_kernel` on ROCm) | `src/lib/mlx-cpp/turbo/` and the kernel bodies in `src/lib/mlxcel-core/cpp/mlx_cxx_kernels.cpp` | Only public-API compatibility; the fused launchers are revalidated against their graph references |
+| Per-backend source overlays: whole files that replace or add MLX sources before MLX is compiled | `src/lib/mlxcelverse/overlays/metal/` (always copied), `overlays/cpu/` (always copied and compiled by every build: the CPU quantized matmul accumulating in f32, #2248), `overlays/cuda/` (CUDA backend files and MLX core files, copied only for CUDA builds), `overlays/rocm/` (the ROCm backend plus the MLX core files it hooks, copied only for ROCm builds) | Each overlay is 3-way merged against the new upstream file and compared with it line by line; see "Bumping the MLX upstream pin" in `CONTRIBUTING.md` and `overlays/rocm/README.md` |
+| mlxcel's own kernels: fusions and extension functions built on MLX's public custom-kernel APIs (`fast::metal_kernel`, `fast::cuda_kernel`, and `fast::hip_kernel` on ROCm) | `src/lib/mlxcelverse/kernels/` and the kernel bodies in `src/lib/mlxcel-core/cpp/mlx_cxx_kernels.cpp` | Only public-API compatibility; the fused launchers are revalidated against their graph references |
 
 The overlay copy is whole-file `configure_file(... COPYONLY)`, so rerunning
 CMake configure (which `build.rs` does on every rebuild) is idempotent.
@@ -87,14 +109,12 @@ features cannot be enabled together.
 
 The ROCm overlay is vendored from the `rocm-support` branch of NripeshN/mlx
 (MIT), the head of the upstream draft ml-explore/mlx#2300.
-`patches-rocm/UPSTREAM` records the source commit and the MLX pin it was
-retargeted to, and `patches-rocm/LOCAL_FIXES.md` lists every change mlxcel
+`overlays/rocm/UPSTREAM` records the source commit and the MLX pin it was
+retargeted to, and `overlays/rocm/LOCAL_FIXES.md` lists every change mlxcel
 carries on top of it. `docs/mlxcelverse/rocm-overlay.md` is the procedure for
 following both upstreams (pin bumps, fork syncs, and the `scripts/mlxcelverse/`
-tools), and `docs/mlxcelverse/upstream/` holds the fixes prepared as pull
-requests for the fork. Reorganizing the whole tree under an `mlxcelverse`
-directory name, with no change to build output, is tracked in
-lablup/mlxcel#1816.
+tools), and `docs/mlxcelverse/upstream/` holds fork-side fix packages kept as
+historical reference (not submitted; fixes stay in the overlay).
 
 ## Loading pipeline
 
@@ -154,7 +174,10 @@ Important control surfaces:
    Jinja template and have a code-rendered format instead: Kimi K3's XTML renderer
    (`src/server/kimi_k3_chat.rs`) produces token ids directly and they reach the
    scheduler through the pre-tokenized request path.
-5. `src/server/batch/` schedules batched decode when enabled.
+5. `src/server/batch/` schedules batched decode when enabled: `BatchScheduler` decides what
+   runs each tick and drives the model only through `mlxcel_core::engine::Engine`
+   (`src/server/batch/scheduler/step_rows.rs` is the scheduler's side of an engine step row).
+   `--no-batch` is the same scheduler at `max_batch_size = 1`.
 6. Streaming responses are emitted as SSE frames.
 
 #### Panic and threading posture
@@ -164,11 +187,11 @@ Release builds use `panic = "unwind"` (issue #375), so the deliberate audio work
 ## Platform-specific behavior
 
 - macOS/Metal, Linux/CUDA and Linux/ROCm behavior is primarily determined by
-  the pinned MLX build under `src/lib/mlx-cpp/`, the backend's mlxcelverse
+  the pinned MLX build under `src/lib/mlxcelverse/`, the backend's mlxcelverse
   overlays, and the feature flags passed to Cargo.
 - Apple Silicon runtime/device helpers live in `src/lib/mlxcel-core/src/hardware.rs`
   and `src/execution/runtime.rs`.
-- Custom fused kernel launchers live under `src/lib/mlx-cpp/turbo/` and are
+- Custom fused kernel launchers live under `src/lib/mlxcelverse/kernels/` and are
   called through the C++ bridge. Each one carries a Metal JIT source and, where
   ported, a CUDA counterpart selected at runtime by
   `mlx::core::metal::is_available()`: TurboQuant Sparse-V and delegated SDPA,
@@ -178,7 +201,7 @@ Release builds use `panic = "unwind"` (issue #375), so the deliberate audio work
 - CUDA kernel behavior is mostly inherited from MLX; `mlxcel` passes the CUDA
   architecture list through `MLX_CUDA_ARCHITECTURES` at build time.
 - ROCm (experimental, `--features rocm`) runs the vendored ROCm backend from
-  `src/lib/mlx-cpp/patches-rocm/`. The build passes the HIP `gfx` targets
+  `src/lib/mlxcelverse/overlays/rocm/`. The build passes the HIP `gfx` targets
   through `MLX_ROCM_ARCHITECTURES` (default: the targets `rocminfo` reports),
   links the backend's kernel archive and the ROCm libraries, and embeds
   `$ROCM_PATH/lib` as an rpath. The fused launchers above choose CUDA whenever

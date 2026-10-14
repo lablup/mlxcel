@@ -1,0 +1,114 @@
+diff --git a/original/src/lib/mlxcel-core/src/speculative/prompt_lookup_drafter.rs b/modified/src/lib/mlxcel-core/src/speculative/prompt_lookup_drafter.rs
+index 847a31e..890b9e5 100644
+--- a/original/src/lib/mlxcel-core/src/speculative/prompt_lookup_drafter.rs
++++ b/modified/src/lib/mlxcel-core/src/speculative/prompt_lookup_drafter.rs
+@@ -32,6 +32,15 @@ use crate::drafter::{Drafter, DrafterError, DrafterKind};
+ use crate::generate::{LanguageModel, SamplingConfig};
+ use crate::weights::WeightMap;
+ 
++fn diagnostic_trace_enabled() -> bool {
++    use std::sync::OnceLock;
++
++    static ENABLED: OnceLock<bool> = OnceLock::new();
++    *ENABLED.get_or_init(|| {
++        matches!(std::env::var("MLXCEL_PROMPT_LOOKUP_TRACE").as_deref(), Ok("1"))
++    })
++}
++
+ /// The prompt-lookup drafter. One instance serves one completion; a second
+ /// run through the same instance starts from the prompt the loop reports to
+ /// [`Drafter::prefill_from_target_hidden`].
+@@ -151,6 +160,16 @@ impl Drafter for PromptLookupDrafter {
+             .as_ref()
+             .and_then(|probe| probe.settle(&self.context, self.config.shadow_confirm_tokens))
+         {
++            if diagnostic_trace_enabled() {
++                eprintln!(
++                    "prompt_lookup_trace event=shadow_settle gov={:p} round={} confirmed={} context={} governor={:?}",
++                    &self.governor,
++                    self.stats.rounds + 1,
++                    confirmed,
++                    self.context.len(),
++                    self.governor,
++                );
++            }
+             self.shadow = None;
+             if confirmed {
+                 self.governor.shadow_confirmed();
+@@ -176,6 +195,17 @@ impl Drafter for PromptLookupDrafter {
+                     });
+                 }
+             }
++            if diagnostic_trace_enabled() {
++                eprintln!(
++                    "prompt_lookup_trace event=ask gov={:p} round={} context={} block_limit={} budget=0 proposed=0 paused=true shadow_pending={} governor={:?}",
++                    &self.governor,
++                    self.stats.rounds,
++                    self.context.len(),
++                    block_size,
++                    self.shadow.is_some(),
++                    self.governor,
++                );
++            }
+             return Ok(Vec::new());
+         }
+         self.last_paused = false;
+@@ -189,6 +219,18 @@ impl Drafter for PromptLookupDrafter {
+             self.stats.drafted_rounds += 1;
+             self.stats.proposed_draft_tokens += draft.len();
+         }
++        if diagnostic_trace_enabled() {
++            eprintln!(
++                "prompt_lookup_trace event=ask gov={:p} round={} context={} block_limit={} budget={} proposed={} paused=false governor={:?}",
++                &self.governor,
++                self.stats.rounds,
++                self.context.len(),
++                block_size,
++                budget,
++                draft.len(),
++                self.governor,
++            );
++        }
+         Ok(draft)
+     }
+ 
+@@ -203,6 +245,16 @@ impl Drafter for PromptLookupDrafter {
+     }
+ 
+     fn retract_draft(&mut self, draft: &[i32]) {
++        if diagnostic_trace_enabled() {
++            eprintln!(
++                "prompt_lookup_trace event=retract gov={:p} round={} proposed={} paused_ask={} governor={:?}",
++                &self.governor,
++                self.stats.rounds,
++                draft.len(),
++                self.last_paused,
++                self.governor,
++            );
++        }
+         self.stats.rounds = self.stats.rounds.saturating_sub(1);
+         if self.last_paused {
+             self.stats.paused_rounds = self.stats.paused_rounds.saturating_sub(1);
+@@ -224,8 +276,22 @@ impl Drafter for PromptLookupDrafter {
+     ) -> Result<(), DrafterError> {
+         self.context.extend_from_slice(new_tokens);
+         if !draft_tokens.is_empty() {
++            let governor_before = self.governor.clone();
+             self.governor.record_round(accepted, draft_tokens.len());
+             self.stats.accepted_draft_tokens += accepted;
++            if diagnostic_trace_enabled() {
++                eprintln!(
++                    "prompt_lookup_trace event=verify gov={:p} round={} proposed={} accepted={} emitted={} context={} governor_before={:?} governor_after={:?}",
++                    &self.governor,
++                    self.stats.rounds,
++                    draft_tokens.len(),
++                    accepted,
++                    new_tokens.len(),
++                    self.context.len(),
++                    governor_before,
++                    self.governor,
++                );
++            }
+         }
+         Ok(())
+     }

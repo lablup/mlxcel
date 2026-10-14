@@ -1,0 +1,24 @@
+=== Batched Decode Profiling ===
+Model: models/mlx/gemma-3-4b-it-4bit
+Config: decode_steps=50, warmup=5, runs=3, prompt_len=1024
+
+Warning: model.safetensors.index.json in models/mlx/gemma-3-4b-it-4bit references shards that don't match the on-disk files (likely a repackaged mlx-community quant). Falling back to all *.safetensors files in the directory.
+[mlx-rocm] bound HIP device 0: gfx1151 (AMD Radeon 8060S Graphics) cus=20 warp=32 lds=64KB
+Model loaded in 0.6s
+  supports_batching: true
+  num_layers: 34
+
+Batch Size        Seq TPS    Batch TPS      Speedup  Seq ms/step  Bat ms/step
+------------------------------------------------------------------------------
+[mlx-rocm] gfx1151 native_wmma=1 cus=20 warp=32 low_cu=0 host_WARP_SIZE=32
+[hipBLASLt caps] device 0 (gfx1151): bf16=1 fp8_e4m3=0 fp8_e5m2=0 int8=1
+1                    63.8         63.8         1.00x        15.68        15.68
+2                    62.0         69.9         1.13x        32.24        28.60
+4                    55.8         62.9         1.13x        71.64        63.57
+8                    46.6         46.5         1.00x       171.81       172.12
+
+Legend:
+  Seq TPS    = total tok/s using B × forward() per step
+  Batch TPS  = total tok/s using 1 × forward_batched() per step
+  Speedup    = Batch TPS / Seq TPS (>1.0 means batching wins)
+  ms/step    = wall time per decode step (all B sequences)

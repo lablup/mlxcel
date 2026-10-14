@@ -1,0 +1,17 @@
+target/release/mlxcel-server: OK
+bash: /home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2264/docs/scripts/ci/mlx_pinned_commit.sh: No such file or directory
+Traceback (most recent call last):
+  File "/home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2264/docs/benchmark_results/data/server-prompt-lookup-break-even-gb10-2026-10-11/attempt-3/analyze_break_even.py", line 207, in <module>
+    main()
+  File "/home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2264/docs/benchmark_results/data/server-prompt-lookup-break-even-gb10-2026-10-11/attempt-3/analyze_break_even.py", line 120, in main
+    if provenance["native_mlx_pin"] != canonical_mlx_pin(Path(__file__).resolve().parents[4]):
+                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2264/docs/benchmark_results/data/server-prompt-lookup-break-even-gb10-2026-10-11/attempt-3/provenance.py", line 26, in canonical_mlx_pin
+    return subprocess.check_output(["bash", str(helper)], env=env, text=True).strip()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 466, in check_output
+    return run(*popenargs, stdout=PIPE, timeout=timeout, check=True,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['bash', '/home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2264/docs/scripts/ci/mlx_pinned_commit.sh']' returned non-zero exit status 127.

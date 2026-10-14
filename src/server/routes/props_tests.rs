@@ -227,19 +227,22 @@ fn geometry_block_reports_batch_and_kv_bounds() {
 /// startup notice's trigger) and never changes the number (#1472).
 #[test]
 fn geometry_block_reports_the_resolved_batch_size_alias() {
-    let resolved = crate::server::cli_input::resolve_prefill_chunk_size(512, Some(1024), Some(256));
-    assert_eq!(resolved.prefill_chunk_size, 1024);
+    let alias = 1024;
+    let resolved =
+        crate::server::cli_input::resolve_prefill_chunk_size(None, Some(alias), Some(256));
+    assert_eq!(resolved.explicit, Some(alias));
     assert!(resolved.ubatch_size_provided);
     assert!(!resolved.batch_size_conflict);
 
     let block = geometry_block(&ServerConfig {
-        prefill_chunk_size: resolved.prefill_chunk_size,
+        prefill_chunk_size: alias,
+        prefill_chunk_size_contended: alias,
         max_batch_size: 4,
         max_kv_size: Some(4096),
         ..Default::default()
     });
-    assert_eq!(block["n_batch"], 1024);
-    assert_eq!(block["n_ubatch"], 1024);
+    assert_eq!(block["n_batch"], alias);
+    assert_eq!(block["n_ubatch"], alias);
 }
 
 /// GET /props answers the b10621 key set. This is the golden-schema gate for

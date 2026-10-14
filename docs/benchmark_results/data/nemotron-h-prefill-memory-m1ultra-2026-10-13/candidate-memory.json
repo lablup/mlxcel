@@ -1,0 +1,442 @@
+{
+  "arm": "fixed-final",
+  "binary": "/tmp/mlxcel-chain-2281-artifacts/mlxcel-server.final",
+  "model": "models/mlx/nvidia-nemotron-3-nano-30b-a3b-4bit",
+  "marker_expectation": "present",
+  "started_at": "2026-10-13T22:19:20+0900",
+  "runs": [
+    {
+      "rep": 1,
+      "target_tokens": 1500,
+      "status": 200,
+      "prompt_tokens": 1519,
+      "completion_tokens": 1,
+      "choice": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "OK"
+        },
+        "finish_reason": "stop",
+        "logprobs": null
+      },
+      "peak_bytes": 18897856102,
+      "peak_gib": 17.59999999962747,
+      "ready_s": 2.561246156692505,
+      "request_s": 4.554424047470093,
+      "load_before": [
+        3.0283203125,
+        4.4365234375,
+        4.92724609375
+      ],
+      "load_after": [
+        3.0908203125,
+        4.40478515625,
+        4.90966796875
+      ],
+      "health_status": 200,
+      "health": {
+        "status": "ok"
+      },
+      "forward_marker": true,
+      "load_marker": true
+    },
+    {
+      "rep": 1,
+      "target_tokens": 3000,
+      "status": 200,
+      "prompt_tokens": 3019,
+      "completion_tokens": 1,
+      "choice": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "OK"
+        },
+        "finish_reason": "stop",
+        "logprobs": null
+      },
+      "peak_bytes": 19327352832,
+      "peak_gib": 18.0,
+      "ready_s": 2.053757905960083,
+      "request_s": 8.864027261734009,
+      "load_before": [
+        3.0908203125,
+        4.40478515625,
+        4.90966796875
+      ],
+      "load_after": [
+        3.95703125,
+        4.53125,
+        4.9453125
+      ],
+      "health_status": 200,
+      "health": {
+        "status": "ok"
+      },
+      "forward_marker": true,
+      "load_marker": true
+    },
+    {
+      "rep": 1,
+      "target_tokens": 4500,
+      "status": 200,
+      "prompt_tokens": 4519,
+      "completion_tokens": 1,
+      "choice": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "OK"
+        },
+        "finish_reason": "stop",
+        "logprobs": null
+      },
+      "peak_bytes": 19756849561,
+      "peak_gib": 18.399999999441206,
+      "ready_s": 2.0424530506134033,
+      "request_s": 12.59739089012146,
+      "load_before": [
+        3.95703125,
+        4.53125,
+        4.9453125
+      ],
+      "load_after": [
+        3.775390625,
+        4.45654296875,
+        4.91064453125
+      ],
+      "health_status": 200,
+      "health": {
+        "status": "ok"
+      },
+      "forward_marker": true,
+      "load_marker": true
+    },
+    {
+      "rep": 1,
+      "target_tokens": 6000,
+      "status": 200,
+      "prompt_tokens": 6019,
+      "completion_tokens": 1,
+      "choice": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "OK"
+        },
+        "finish_reason": "stop",
+        "logprobs": null
+      },
+      "peak_bytes": 20078972108,
+      "peak_gib": 18.699999999254942,
+      "ready_s": 2.0454490184783936,
+      "request_s": 16.56507921218872,
+      "load_before": [
+        3.775390625,
+        4.45654296875,
+        4.91064453125
+      ],
+      "load_after": [
+        4.068359375,
+        4.48828125,
+        4.9111328125
+      ],
+      "health_status": 200,
+      "health": {
+        "status": "ok"
+      },
+      "forward_marker": true,
+      "load_marker": true
+    },
+    {
+      "rep": 2,
+      "target_tokens": 1500,
+      "status": 200,
+      "prompt_tokens": 1519,
+      "completion_tokens": 1,
+      "choice": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "OK"
+        },
+        "finish_reason": "stop",
+        "logprobs": null
+      },
+      "peak_bytes": 18897856102,
+      "peak_gib": 17.59999999962747,
+      "ready_s": 2.04069185256958,
+      "request_s": 4.253753185272217,
+      "load_before": [
+        4.068359375,
+        4.48828125,
+        4.9111328125
+      ],
+      "load_after": [
+        4.05078125,
+        4.4716796875,
+        4.900390625
+      ],
+      "health_status": 200,
+      "health": {
+        "status": "ok"
+      },
+      "forward_marker": true,
+      "load_marker": true
+    },
+    {
+      "rep": 2,
+      "target_tokens": 3000,
+      "status": 200,
+      "prompt_tokens": 3019,
+      "completion_tokens": 1,
+      "choice": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "OK"
+        },
+        "finish_reason": "stop",
+        "logprobs": null
+      },
+      "peak_bytes": 19327352832,
+      "peak_gib": 18.0,
+      "ready_s": 2.042436122894287,
+      "request_s": 8.334737777709961,
+      "load_before": [
+        4.05078125,
+        4.4716796875,
+        4.900390625
+      ],
+      "load_after": [
+        3.7412109375,
+        4.3896484375,
+        4.8662109375
+      ],
+      "health_status": 200,
+      "health": {
+        "status": "ok"
+      },
+      "forward_marker": true,
+      "load_marker": true
+    },
+    {
+      "rep": 2,
+      "target_tokens": 4500,
+      "status": 200,
+      "prompt_tokens": 4519,
+      "completion_tokens": 1,
+      "choice": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "OK"
+        },
+        "finish_reason": "stop",
+        "logprobs": null
+      },
+      "peak_bytes": 19756849561,
+      "peak_gib": 18.399999999441206,
+      "ready_s": 2.033221960067749,
+      "request_s": 12.392516851425171,
+      "load_before": [
+        3.7412109375,
+        4.3896484375,
+        4.8662109375
+      ],
+      "load_after": [
+        4.337890625,
+        4.49072265625,
+        4.8916015625
+      ],
+      "health_status": 200,
+      "health": {
+        "status": "ok"
+      },
+      "forward_marker": true,
+      "load_marker": true
+    },
+    {
+      "rep": 2,
+      "target_tokens": 6000,
+      "status": 200,
+      "prompt_tokens": 6019,
+      "completion_tokens": 1,
+      "choice": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "OK"
+        },
+        "finish_reason": "stop",
+        "logprobs": null
+      },
+      "peak_bytes": 20078972108,
+      "peak_gib": 18.699999999254942,
+      "ready_s": 2.0374650955200195,
+      "request_s": 16.56824803352356,
+      "load_before": [
+        4.337890625,
+        4.49072265625,
+        4.8916015625
+      ],
+      "load_after": [
+        4.48095703125,
+        4.5078125,
+        4.8876953125
+      ],
+      "health_status": 200,
+      "health": {
+        "status": "ok"
+      },
+      "forward_marker": true,
+      "load_marker": true
+    },
+    {
+      "rep": 3,
+      "target_tokens": 1500,
+      "status": 200,
+      "prompt_tokens": 1519,
+      "completion_tokens": 1,
+      "choice": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "OK"
+        },
+        "finish_reason": "stop",
+        "logprobs": null
+      },
+      "peak_bytes": 18897856102,
+      "peak_gib": 17.59999999962747,
+      "ready_s": 2.041900157928467,
+      "request_s": 4.239515066146851,
+      "load_before": [
+        4.48095703125,
+        4.5078125,
+        4.8876953125
+      ],
+      "load_after": [
+        4.2822265625,
+        4.4658203125,
+        4.87060546875
+      ],
+      "health_status": 200,
+      "health": {
+        "status": "ok"
+      },
+      "forward_marker": true,
+      "load_marker": true
+    },
+    {
+      "rep": 3,
+      "target_tokens": 3000,
+      "status": 200,
+      "prompt_tokens": 3019,
+      "completion_tokens": 1,
+      "choice": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "OK"
+        },
+        "finish_reason": "stop",
+        "logprobs": null
+      },
+      "peak_bytes": 19327352832,
+      "peak_gib": 18.0,
+      "ready_s": 2.039336919784546,
+      "request_s": 8.308146953582764,
+      "load_before": [
+        4.2822265625,
+        4.4658203125,
+        4.87060546875
+      ],
+      "load_after": [
+        5.0263671875,
+        4.63525390625,
+        4.923828125
+      ],
+      "health_status": 200,
+      "health": {
+        "status": "ok"
+      },
+      "forward_marker": true,
+      "load_marker": true
+    },
+    {
+      "rep": 3,
+      "target_tokens": 4500,
+      "status": 200,
+      "prompt_tokens": 4519,
+      "completion_tokens": 1,
+      "choice": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "OK"
+        },
+        "finish_reason": "stop",
+        "logprobs": null
+      },
+      "peak_bytes": 19756849561,
+      "peak_gib": 18.399999999441206,
+      "ready_s": 2.047098159790039,
+      "request_s": 12.469884872436523,
+      "load_before": [
+        5.0263671875,
+        4.63525390625,
+        4.923828125
+      ],
+      "load_after": [
+        4.93310546875,
+        4.63525390625,
+        4.91796875
+      ],
+      "health_status": 200,
+      "health": {
+        "status": "ok"
+      },
+      "forward_marker": true,
+      "load_marker": true
+    },
+    {
+      "rep": 3,
+      "target_tokens": 6000,
+      "status": 200,
+      "prompt_tokens": 6019,
+      "completion_tokens": 1,
+      "choice": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "OK"
+        },
+        "finish_reason": "stop",
+        "logprobs": null
+      },
+      "peak_bytes": 20078972108,
+      "peak_gib": 18.699999999254942,
+      "ready_s": 2.0449910163879395,
+      "request_s": 16.522796154022217,
+      "load_before": [
+        4.93310546875,
+        4.63525390625,
+        4.91796875
+      ],
+      "load_after": [
+        4.3154296875,
+        4.51220703125,
+        4.86669921875
+      ],
+      "health_status": 200,
+      "health": {
+        "status": "ok"
+      },
+      "forward_marker": true,
+      "load_marker": true
+    }
+  ],
+  "finished_at": "2026-10-13T22:22:13+0900"
+}

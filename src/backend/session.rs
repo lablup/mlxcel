@@ -19,10 +19,10 @@
 //! [`Session::Mlx`] variant under default features, so every `match` over it
 //! collapses to its one arm. Each generation method is a single-arm `match`
 //! marked `#[inline]`, so the session dispatch folds away entirely at compile
-//! time and the CLI `generate` / `chat` paths call the wrapped
-//! [`MlxInferenceSession`] (and through it the existing `CxxGenerator`) with no
-//! runtime indirection added on the hot path. The per-token forward stays inside
-//! the session method; the concrete KV types are never type-erased.
+//! time and a caller reaches the wrapped [`MlxInferenceSession`] (and through
+//! it the engine's raw-completion client, `mlxcel_core::engine::DirectEngine`)
+//! with no runtime indirection added on the hot path. The per-token forward
+//! stays inside the engine; the concrete KV types are never type-erased.
 //!
 //! # Extension point for the non-MLX backend (issue #449)
 //!
@@ -156,10 +156,9 @@ impl std::ops::DerefMut for XlaBackendSession {
 /// Under default features this enum has a single variant, [`Session::Mlx`].
 /// Because the dispatch is a single-arm `match`, the seam adds no runtime
 /// indirection: `session.generate(...)` inlines to the wrapped
-/// [`MlxInferenceSession::generate`], which delegates verbatim to the existing
-/// `CxxGenerator`.
+/// [`MlxInferenceSession::generate`], a one-sequence run on the engine.
 pub enum Session {
-    /// The MLX single-sequence session, wrapping `CxxGenerator`.
+    /// The MLX single-sequence session, a client of the batch-native engine.
     Mlx(MlxInferenceSession),
     /// The OpenXLA / StableHLO compiler-family session (issue #449), compiled
     /// only under the `xla-backend` feature. It owns its KV and samples
@@ -209,7 +208,8 @@ impl Session {
         }
     }
 
-    /// Reset generator-owned and model-owned caches for a fresh prefill.
+    /// Kept for callers that reset between runs; the MLX session opens a fresh
+    /// engine sequence per run, so it has nothing to reset.
     #[inline]
     pub fn reset_with_model<M: LanguageModel + ?Sized>(&mut self, model: &M) {
         match self {

@@ -44,7 +44,7 @@
 // which is correct and slower; see `one_bit_matmul_impl`.
 
 #include "mlx_cxx_internal.h"
-#include "../../mlx-cpp/turbo/kernel_port.h"
+#include "../../mlxcelverse/kernels/kernel_port.h"
 
 #include <optional>
 #include <sstream>

@@ -52,6 +52,9 @@
 use super::*;
 use crate::hardware::{GpuBackendKind, gpu_backend_kind};
 
+#[path = "ssm_update_timestep_precision_tests.rs"]
+mod timestep_precision_tests;
+
 const KILL_SWITCHES: [&str; 2] = ["MLXCEL_SSM_KERNEL", "MLXCEL_SSM_CUDA_KERNEL"];
 
 /// Normalized (RMS, max) deviation budget for values stored in `dtype`.
@@ -85,6 +88,9 @@ fn skip() -> bool {
     }
     if kill_switch_set() {
         eprintln!("skipping ssm_update_parity_tests: SSM kernel kill switch is set");
+        return true;
+    }
+    if crate::test_support::kernel_ports::skip_for_wave32_only_rocm_port("SSM update") {
         return true;
     }
     panic!(

@@ -111,6 +111,27 @@ impl ActiveBatch {
         self.sequences.keys().copied().collect()
     }
 
+    /// Mutable access to every sequence of `ids`, in `ids` order, or `None`
+    /// when any of them is not in the batch (or `ids` repeats one). The
+    /// engine samples and finishes a decode step over these rows at once
+    /// (#2172).
+    ///
+    /// One pass over the batch drops each sequence into its slot; the slot
+    /// lookup is a scan of `ids`, which is at most `max_batch_size` long, so
+    /// this is one allocation and no sort per decode tick. Collecting the
+    /// slots into `Option<Vec<_>>` reuses that allocation (`Option<&mut T>`
+    /// has the layout of `&mut T`).
+    pub fn get_rows_mut(&mut self, ids: &[SequenceId]) -> Option<Vec<&mut SequenceInfo>> {
+        let mut slots: Vec<Option<&mut SequenceInfo>> = Vec::with_capacity(ids.len());
+        slots.resize_with(ids.len(), || None);
+        for (id, seq) in self.sequences.iter_mut() {
+            if let Some(i) = ids.iter().position(|want| want == id) {
+                slots[i] = Some(seq);
+            }
+        }
+        slots.into_iter().collect()
+    }
+
     /// Iterate over all active sequences mutably.
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut SequenceInfo> {
         self.sequences.values_mut()
@@ -178,13 +199,15 @@ mod tests {
             prefill_offset: 0,
             prefill_start_offset: 0,
             already_cached_tokens: 0,
+            eos_terminated: false,
             response_tx: tx,
             cancelled: Arc::new(AtomicBool::new(false)),
             created_at: Instant::now(),
             prefill_start: None,
             first_token_time: None,
+            prompt_lookup: None,
             token_history: Vec::new(),
-            sampler_state: None,
+            sampler: Default::default(),
             merged_eos: Vec::new(),
             thinking: crate::server::thinking_budget::ThinkingState::disabled(),
             structured: None,
@@ -333,5 +356,37 @@ mod tests {
     fn get_mut_nonexistent_returns_none() {
         let mut batch = ActiveBatch::new(4);
         assert!(batch.get_mut(SequenceId::from_raw(999)).is_none());
+    }
+
+    #[test]
+    fn get_rows_mut_returns_rows_in_id_order() {
+        let mut batch = ActiveBatch::new(4);
+        let mut _rxs = Vec::new();
+        for raw in [1, 2, 3] {
+            let (seq, rx) = make_test_sequence(raw);
+            batch.add(seq).unwrap();
+            _rxs.push(rx);
+        }
+        let ids: Vec<SequenceId> = [3, 1, 2].map(SequenceId::from_raw).to_vec();
+        let rows = batch.get_rows_mut(&ids).expect("every id is in the batch");
+        let got: Vec<SequenceId> = rows.iter().map(|seq| seq.seq_id).collect();
+        assert_eq!(got, ids);
+        // A subset is fine; a missing or repeated id is not.
+        assert_eq!(
+            batch
+                .get_rows_mut(&[SequenceId::from_raw(2)])
+                .map(|r| r.len()),
+            Some(1)
+        );
+        assert!(
+            batch
+                .get_rows_mut(&[SequenceId::from_raw(1), SequenceId::from_raw(9)])
+                .is_none()
+        );
+        assert!(
+            batch
+                .get_rows_mut(&[SequenceId::from_raw(1), SequenceId::from_raw(1)])
+                .is_none()
+        );
     }
 }

@@ -54,7 +54,7 @@ use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
 use crate::models::switch_layers::{
-    SwitchLinear, moe_weighted_sum, validate_expert_quantization_params,
+    SwitchLinear, moe_weighted_sum, prepare_gather_indices, validate_expert_quantization_params,
     validate_expert_quantization_shapes,
 };
 
@@ -231,21 +231,24 @@ impl MoEGate {
 }
 
 /// Routed experts: three `SwitchLinear`s with the limited SwiGLU between.
-struct LimitedSwitchGlu {
-    gate_proj: SwitchLinear,
-    up_proj: SwitchLinear,
-    down_proj: SwitchLinear,
-    limit: f32,
+pub(crate) struct LimitedSwitchGlu {
+    pub(crate) gate_proj: SwitchLinear,
+    pub(crate) up_proj: SwitchLinear,
+    pub(crate) down_proj: SwitchLinear,
+    pub(crate) limit: f32,
 }
 
 impl LimitedSwitchGlu {
-    fn forward(&self, x: &MlxArray, indices: &MlxArray) -> UniquePtr<MlxArray> {
-        let x_exp = mlxcel_core::expand_dims(x, -2);
-        let x_exp = mlxcel_core::expand_dims(&x_exp, -3);
-        let gate = self.gate_proj.forward(&x_exp, indices, false);
-        let up = self.up_proj.forward(&x_exp, indices, false);
+    pub(crate) fn forward(&self, x: &MlxArray, indices: &MlxArray) -> UniquePtr<MlxArray> {
+        // Share the `uint32` expert ids across all three projections and the
+        // broadcast `lhs_indices` across gate/up (issues #1713, #1859).
+        let x_exp = mlxcel_core::expand_dims_multi(x, &[-3, -2]);
+        let gi = prepare_gather_indices(&x_exp, indices);
+        let lhs = gi.lhs.as_deref();
+        let gate = self.gate_proj.forward_indexed(&x_exp, lhs, &gi.rhs, false);
+        let up = self.up_proj.forward_indexed(&x_exp, lhs, &gi.rhs, false);
         let h = limited_swiglu(&gate, &up, self.limit);
-        let out = self.down_proj.forward(&h, indices, false);
+        let out = self.down_proj.forward_indexed(&h, None, &gi.rhs, false);
         // `[..., top_k, 1, hidden] -> [..., top_k, hidden]` so
         // `moe_weighted_sum` broadcasts against `[..., top_k, 1]` scores.
         mlxcel_core::squeeze_axis(&out, -2)
@@ -303,7 +306,7 @@ impl LimitedMlp {
 /// the always-on shared expert.
 pub(crate) struct DeepseekV4MoE {
     gate: MoEGate,
-    switch_mlp: LimitedSwitchGlu,
+    pub(crate) switch_mlp: LimitedSwitchGlu,
     shared_experts: LimitedMlp,
 }
 

@@ -174,13 +174,15 @@ fn make_request(
         prefill_offset: 0,
         prefill_start_offset: 0,
         already_cached_tokens: 0,
+        eos_terminated: false,
         response_tx: tx,
         cancelled: Arc::new(AtomicBool::new(false)),
         created_at: Instant::now(),
         prefill_start: None,
         first_token_time: None,
+        prompt_lookup: None,
         token_history: Vec::new(),
-        sampler_state: None,
+        sampler: Default::default(),
         merged_eos: Vec::new(),
         thinking: crate::server::thinking_budget::ThinkingState::disabled(),
         structured: None,
@@ -415,7 +417,10 @@ fn collect_text(rx: &mpsc::Receiver<GenerateEvent>) -> String {
             GenerateEvent::Token(t, _) | GenerateEvent::TokenWithLogprobs(t, _, _) => {
                 text.push_str(&t)
             }
-            GenerateEvent::Done(_) | GenerateEvent::Prefill(_) => {}
+            GenerateEvent::Done(_) | GenerateEvent::Prefill(_) | GenerateEvent::Admitted => {}
+            GenerateEvent::RequestMemoryRejected(error) => {
+                panic!("unexpected memory rejection: {error}")
+            }
             GenerateEvent::Error(e) => panic!("unexpected generation error event: {e}"),
         }
     }

@@ -162,6 +162,14 @@ mlxcel generate -m models/<checkpoint> \
 `0` disables the policy. Values larger than half the layer count are clamped by
 the runtime. The flag is inert for `fp16` and `int8` cache modes.
 
+Under continuous batching the attention route follows the storage behind each
+layer's cache ([ADR 0008](adr/0008-kv-attention-dispatch-in-the-cache.md)).
+Turbo rows of a batched decode step take the same dequant-first variants as
+single-sequence decode, and the layers Boundary-V (or `--kv-skip-last-layer`)
+keeps at FP16 under a non-FP16 paged layout hold dense caches that run a
+per-row dense update plus SDPA. Both are the same exact attention in a different
+op order, so they are not bit-identical to the pre-#2171 batched routes.
+
 ## Symmetric Turbo4 allowlist
 
 K-side quantization can strongly affect softmax quality. The code therefore has
@@ -369,13 +377,17 @@ reproduces the cache as captured, wrapped ring and trimmed front included. Only
 the shorter-prefix variant declines.
 
 A snapshot is keyed on a token vector, so the cached state has to hold exactly
-those tokens and no others. That rules out the M5 neural-accelerator prefill
-alignment for a model-owned family: the scheduler pads the first chunk to a
-32-token tile and then trims the padding back out of the `CachePool`'s caches,
-and a model-owned sequence has none there, so the pad positions would stay in
-the model's own caches and run `offset` past the real token count. Gemma 3,
-Gemma 4, AFMoE and Llama 4 therefore answer `supports_padded_prefill()` with
-`false`. Pool-backed families are unaffected and keep the aligned path.
+those tokens and no others. The M5 neural-accelerator prefill alignment pads a
+chunk to a 32-token tile and then trims the padding back out of the
+`CachePool`'s caches, and a model-owned sequence has none there, so the pad
+positions would stay in the model's own caches and run `offset` past the real
+token count. The scheduler therefore also calls
+`LanguageModel::trim_state` (with the sequence's id) for a model-owned family, which rewinds
+the model's own per-sequence state; the request is aborted if that rewind
+fails. Gemma 3 implements it (a sliding-window layer also cuts its physical
+ring buffer back, so no pad key survives the next decode step) and keeps the
+aligned path. Gemma 4, AFMoE and Llama 4 do not implement it yet and answer
+`supports_padded_prefill()` with `false`. Pool-backed families are unaffected.
 
 Snapshot reuse is deliberately conservative with quantized attention caches.
 Every family listed above serializes FP16 model-owned attention KV state only;
@@ -450,8 +462,8 @@ llama3 Fp16 dense-natural-cache allocations at B=1/B=2, plus a CUDA qwen3 arm
 that requires greedy-token equality and bounded logit RMS with TF32 disabled.
 That evidence does not claim byte identity for VLM front ends, model-owned
 caches, Turbo/quantized-KV modes, or every CUDA reduction geometry. The live
-batched path uses the native block-table decode kernel
-(`DecodeBatchContext::use_native_paged_kernel`, set by the scheduler); a
+batched path is the pooled paged decode of #899, dispatched from the cache
+itself (`KVCache::attend`, ADR 0008) rather than by the model forward; a
 gather-then-SDPA path is kept as a correctness reference. At batch 4 the native
 kernel runs at 276 tok/s for a 512-token prompt and 84 tok/s for a 4096-token
 prompt, versus 146 and 7.7 tok/s for the gather reference (1.9x and 10.9x). The

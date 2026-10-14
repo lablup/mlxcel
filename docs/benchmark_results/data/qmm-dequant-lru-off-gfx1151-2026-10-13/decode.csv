@@ -1,0 +1,7 @@
+round,arm,prefill_tok_s,decode_tok_s,peak_gb,active_after_prefill_gb,active_end_gb,stats,status
+1,before,1171.31,39.12,6.92,4.75,4.75,"qmm dequant cache: hits=0 misses=320 inserts=320 evictions=318 bypassed=0 entries=2 bytes=234881024",0
+1,after,1160.18,39.18,6.92,4.52,4.52,"none",0
+2,after,1168.13,39.16,6.92,4.52,4.52,"none",0
+2,before,1164.68,39.27,6.92,4.75,4.75,"qmm dequant cache: hits=0 misses=320 inserts=320 evictions=318 bypassed=0 entries=2 bytes=234881024",0
+3,before,1038.19,39.14,6.92,4.75,4.75,"qmm dequant cache: hits=0 misses=320 inserts=320 evictions=318 bypassed=0 entries=2 bytes=234881024",0
+3,after,1171.22,38.52,6.92,4.52,4.52,"none",0

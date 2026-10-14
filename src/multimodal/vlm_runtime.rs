@@ -346,11 +346,17 @@ pub enum VlmPreparationSummary {
     GraniteVision {
         image_blocks: usize,
         total_image_tokens: i32,
+        /// No `<image>` placeholder was found; the runs were spliced after the
+        /// first token.
+        spliced: bool,
     },
     /// Granite 4 Vision expanded each `<image>` into `num_image_tokens` copies.
     Granite4Vision {
         image_blocks: usize,
         total_image_tokens: i32,
+        /// No `<image>` placeholder was found; the runs were spliced after the
+        /// first token.
+        spliced: bool,
     },
     /// DeepSeek-OCR expanded each `<image>` into its per-image placeholder run.
     DeepSeekOcr {
@@ -1035,7 +1041,7 @@ where
         .collect()
 }
 
-pub fn prepare_and_compute_vlm_embeddings<E>(
+pub fn prepare_vlm_embeddings<E>(
     model: &LoadedModel,
     prompt_tokens: &mut Vec<i32>,
     prompt: &str,
@@ -1045,7 +1051,7 @@ pub fn prepare_and_compute_vlm_embeddings<E>(
 where
     E: FnMut(&str, bool) -> Vec<i32>,
 {
-    prepare_and_compute_vlm_embeddings_with_cache(
+    prepare_vlm_embeddings_with_cache(
         model,
         prompt_tokens,
         prompt,
@@ -1057,14 +1063,14 @@ where
     )
 }
 
-/// [`prepare_and_compute_vlm_embeddings`] with a per-request Gemma 4 image
+/// [`prepare_vlm_embeddings`] with a per-request Gemma 4 image
 /// soft-token budget.
 ///
 /// `image_soft_tokens = None` is identical to
-/// [`prepare_and_compute_vlm_embeddings`]. The budget must already have passed
+/// [`prepare_vlm_embeddings`]. The budget must already have passed
 /// [`crate::vision::processors::gemma4::validate_image_soft_tokens`]; every
 /// non-Gemma-4 family ignores it.
-pub fn prepare_and_compute_vlm_embeddings_with_budget<E>(
+pub fn prepare_vlm_embeddings_with_budget<E>(
     model: &LoadedModel,
     prompt_tokens: &mut Vec<i32>,
     prompt: &str,
@@ -1075,7 +1081,7 @@ pub fn prepare_and_compute_vlm_embeddings_with_budget<E>(
 where
     E: FnMut(&str, bool) -> Vec<i32>,
 {
-    prepare_and_compute_vlm_embeddings_with_cache(
+    prepare_vlm_embeddings_with_cache(
         model,
         prompt_tokens,
         prompt,
@@ -1117,7 +1123,7 @@ where
     Ok(())
 }
 
-/// Cache-aware wrapper for [`prepare_and_compute_vlm_embeddings`].
+/// Cache-aware wrapper for [`prepare_vlm_embeddings`].
 ///
 /// When `caches` is `Some`, the VLM runtime is invoked through its
 /// cache-aware variant. Cache keys (one per image for per-image VLM families
@@ -1134,7 +1140,7 @@ where
 /// [`crate::vision::feature_cache::image_hash_from_bytes_with_soft_tokens`]),
 /// because the cached vision features differ per budget.
 #[allow(clippy::too_many_arguments)]
-pub fn prepare_and_compute_vlm_embeddings_with_cache<E>(
+pub fn prepare_vlm_embeddings_with_cache<E>(
     model: &LoadedModel,
     prompt_tokens: &mut Vec<i32>,
     prompt: &str,
@@ -1850,9 +1856,9 @@ where
                 .try_preprocess_with_spatial(images)
                 .map_err(|err| anyhow::anyhow!("Youtu-VL image preprocessing failed: {err}"))?;
 
-            // Splice image-token runs into the prompt when they aren't already
-            // present. We mirror the upstream `<vision_start> + image*N +
-            // <vision_end>` framing.
+            // Expand the template's `<|image_pad|>` placeholders (or splice
+            // framed runs when there are none) so the prompt carries one image
+            // token per merged feature, as the checkpoint's processor does.
             let preparation = insert_youtu_vl_image_tokens(
                 prompt_tokens,
                 &spatial_shapes,
@@ -1861,6 +1867,7 @@ where
                 youtu.vision_end_token_id,
                 youtu.image_token_id,
             )
+            .map_err(|err| anyhow::anyhow!("Youtu-VL prompt preparation failed: {err}"))?
             .map(|stats| VlmPreparationSummary::YoutuVL {
                 image_blocks: stats.image_blocks,
                 total_image_tokens: stats.total_image_tokens,
@@ -1875,8 +1882,9 @@ where
             let _ = image_cache_keys;
 
             let input_ids_arr = prompt_ids_array(prompt_tokens);
-            let embeddings =
-                youtu.get_input_embeddings(&input_ids_arr, &pixel_values, &spatial_shapes);
+            let embeddings = youtu
+                .get_input_embeddings(&input_ids_arr, &pixel_values, &spatial_shapes)
+                .map_err(|err| anyhow::anyhow!(err))?;
 
             Ok(Some(PreparedVlmEmbeddings {
                 embeddings,
@@ -2211,6 +2219,7 @@ where
                 .map(|stats| VlmPreparationSummary::GraniteVision {
                     image_blocks: stats.image_blocks,
                     total_image_tokens: stats.total_image_tokens,
+                    spliced: stats.spliced,
                 });
 
             // Granite Vision runs every tile in one tower call; skip the
@@ -2242,6 +2251,7 @@ where
                 .map(|stats| VlmPreparationSummary::Granite4Vision {
                     image_blocks: stats.image_blocks,
                     total_image_tokens: stats.total_image_tokens,
+                    spliced: stats.spliced,
                 });
 
             let _ = active_caches;
@@ -3465,7 +3475,7 @@ pub fn expand_nemotron_h_nano_omni_audio_tokens_for_server(
 /// Expand Nemotron H Nano Omni image placeholders for the server path.
 ///
 /// Mirrors the image-only runtime expansion in
-/// [`prepare_and_compute_vlm_embeddings`] (the `VlmRuntimeRef::NemotronHNanoOmni`
+/// [`prepare_vlm_embeddings`] (the `VlmRuntimeRef::NemotronHNanoOmni`
 /// arm) so a combined image + audio chat request produces the same image-token
 /// stream as an image-only request. When the text-only server prompt carries no
 /// `img_context_token_id` marker, one block per image is prepended; otherwise

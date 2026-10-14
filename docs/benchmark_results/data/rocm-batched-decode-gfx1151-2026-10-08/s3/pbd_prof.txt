@@ -1,0 +1,30 @@
+W1009 00:32:43.943432 1295938 simple_timer.cpp:55] [rocprofv3] tool initialization ::     0.001935 sec
+W1009 00:32:43.962405 1295938 simple_timer.cpp:55] [rocprofv3] 'target/release/examples/profile_batched_decode -m models/mlx/Meta-Llama-3.1-8B-Instruct-4bit --batch-sizes 4 --decode-steps 20 --warmup 3 --runs 1 --prompt-len 1024' ::     0.000000 sec
+W1009 00:32:43.992092 1295938 tool.cpp:3348] HSA version 1.21.0 initialized (instance=0)
+=== Batched Decode Profiling ===
+Model: models/mlx/Meta-Llama-3.1-8B-Instruct-4bit
+Config: decode_steps=20, warmup=3, runs=1, prompt_len=1024
+
+[mlx-rocm] bound HIP device 0: gfx1151 (AMD Radeon 8060S Graphics) cus=20 warp=32 lds=64KB
+Model loaded in 0.2s
+  supports_batching: true
+  num_layers: 32
+
+Batch Size        Seq TPS    Batch TPS      Speedup  Seq ms/step  Bat ms/step
+------------------------------------------------------------------------------
+[mlx-rocm] gfx1151 native_wmma=1 cus=20 warp=32 low_cu=0 host_WARP_SIZE=32
+[hipBLASLt caps] device 0 (gfx1151): bf16=1 fp8_e4m3=0 fp8_e5m2=0 int8=1
+4                    38.7         69.5         1.79x       103.24        57.52
+
+Legend:
+  Seq TPS    = total tok/s using B × forward() per step
+  Batch TPS  = total tok/s using 1 × forward_batched() per step
+  Speedup    = Batch TPS / Seq TPS (>1.0 means batching wins)
+  ms/step    = wall time per decode step (all B sequences)
+W1009 00:32:55.197626 1295938 simple_timer.cpp:55] [rocprofv3] 'target/release/examples/profile_batched_decode -m models/mlx/Meta-Llama-3.1-8B-Instruct-4bit --batch-sizes 4 --decode-steps 20 --warmup 3 --runs 1 --prompt-len 1024' ::    11.235221 sec
+E1009 00:32:55.239687 1295938 output_stream.cpp:110] Opened result file: <meas>/s3/trace/pbd_kernel_stats.csv
+E1009 00:32:55.243269 1295938 output_stream.cpp:110] Opened result file: <meas>/s3/trace/pbd_kernel_trace.csv
+E1009 00:32:55.330245 1295938 output_stream.cpp:110] Opened result file: <meas>/s3/trace/pbd_agent_info.csv
+E1009 00:32:55.330401 1295938 output_stream.cpp:110] Opened result file: <meas>/s3/trace/pbd_domain_stats.csv
+W1009 00:32:55.331589 1295938 simple_timer.cpp:55] [rocprofv3] output generation ::     0.102144 sec
+W1009 00:32:55.338784 1295938 simple_timer.cpp:55] [rocprofv3] tool finalization ::     0.109379 sec

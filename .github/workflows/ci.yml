@@ -62,9 +62,10 @@ on:
     branches: [main]
 
 concurrency:
-  # One CI run per branch, because four jobs below land on GB10, the single
+  # One CI run per branch, because seven jobs below land on GB10, the single
   # self-hosted Linux runner that also serves the release build: `clippy`,
-  # `xla-compile`, `xla-link`, and `cuda-sm70-compile`. Without a group, a run
+  # `cpu-link`, `webui-installed-artifact`, `xla-compile`, `xla-link`,
+  # `cuda-sm70-compile`, and `cuda-blockfloat`. Without a group, a run
   # for a commit nobody is waiting on any more does not merely sit idle, it
   # holds a place in line ahead of the runs that matter. Measured over
   # 2026-09-10 KST: 113 runs created, 14 open at once, 11 of those stacked on
@@ -110,6 +111,7 @@ jobs:
       xla_link: ${{ steps.filter.outputs.xla_link }}
       cuda_arch: ${{ steps.filter.outputs.cuda_arch }}
       rocm: ${{ steps.filter.outputs.rocm }}
+      cpu_link: ${{ steps.filter.outputs.cpu_link }}
       workflows: ${{ steps.filter.outputs.workflows }}
       webui_bundle: ${{ steps.filter.outputs.webui_bundle }}
     steps:
@@ -121,12 +123,13 @@ jobs:
         with:
           # Required for the `!` patterns below to mean anything. Under the
           # default `some`, a negated pattern is just another pattern to match,
-          # so `'src/lib/mlx-cpp/**'` plus `'!src/lib/mlx-cpp/patches-rocm/**'`
-          # still matches a ROCm-only change: the action's own README says the
-          # exclusion syntax is ignored "UNLESS you specify 'every' or
-          # 'some-with-excludes'". Safe to set globally because no filter here
-          # used negation before this change, and for a filter with no negated
-          # rule `some-with-excludes` reduces to `some` (lablup/mlxcel#1992).
+          # so `'src/lib/mlxcelverse/**'` plus
+          # `'!src/lib/mlxcelverse/overlays/rocm/**'` still matches a ROCm-only
+          # change: the action's own README says the exclusion syntax is
+          # ignored "UNLESS you specify 'every' or 'some-with-excludes'". Safe
+          # to set globally because no filter here used negation before this
+          # change, and for a filter with no negated rule `some-with-excludes`
+          # reduces to `some` (lablup/mlxcel#1992).
           predicate-quantifier: 'some-with-excludes'
           filters: |
             rust:
@@ -137,7 +140,7 @@ jobs:
               - 'build.rs'
               - 'scripts/iree/**'
             mlx_pin:
-              - 'src/lib/mlx-cpp/CMakeLists.txt'
+              - 'src/lib/mlxcelverse/CMakeLists.txt'
               - 'src/lib/mlxcel-core/build_support/mlx_pin.rs'
               - 'src/lib/mlxcel-mlx-pin/**'
               - 'scripts/ci/mlx_pinned_commit.sh'
@@ -155,29 +158,23 @@ jobs:
               # script names the CUDA libraries, and the MLX pin decides which
               # of them libmlx.a needs. See the `xla-link` job comment.
               - 'src/lib/mlxcel-core/build.rs'
-              - 'src/lib/mlx-cpp/CMakeLists.txt'
+              - 'src/lib/mlxcelverse/CMakeLists.txt'
             # Everything that can compile differently per CUDA architecture: the
-            # MLX overlays and turbo kernels, the pinned MLX commit, and the
+            # MLX overlays and mlxcel kernels, the pinned MLX commit, and the
             # build scripts that hand CMake the architecture list. Rust sources
             # outside these paths cannot break an arch-conditional compile, so
             # the sm_70 gate below does not run on every Rust PR. See the
             # `cuda-sm70-compile` job comment for why sm_70 specifically.
             cuda_arch:
-              - 'src/lib/mlx-cpp/**'
+              - 'src/lib/mlxcelverse/**'
               # Two subtrees under that glob cannot change what nvcc compiles,
               # and these are the heaviest jobs on the shared GB10 runner. Most
-              # of epic #1801's pull requests touch only `patches-rocm/`, so
+              # of epic #1801's pull requests touch only `overlays/rocm/`, so
               # before this exclusion every one of them woke both CUDA jobs
-              # (lablup/mlxcel#1992).
-              #
-              # Note what is NOT excluded: `patches/` as a whole. Despite the
-              # name it is not the Metal overlay. `patches/mlx/backend/cuda/`
-              # holds 24 CUDA sources, applied and compiled for CUDA targets by
-              # `src/lib/mlx-cpp/CMakeLists.txt:59-69`, against 4 Metal files in
-              # `patches/mlx/backend/metal/`. Excluding `patches/**` would drop
-              # real CUDA coverage, so only the Metal subtree is named.
-              - '!src/lib/mlx-cpp/patches-rocm/**'
-              - '!src/lib/mlx-cpp/patches/mlx/backend/metal/**'
+              # (lablup/mlxcel#1992). `overlays/cpu/` is not excluded because
+              # every build compiles it (#2248).
+              - '!src/lib/mlxcelverse/overlays/rocm/**'
+              - '!src/lib/mlxcelverse/overlays/metal/**'
               - 'src/lib/mlxcel-core/build.rs'
               - 'src/lib/mlxcel-core/build_support/**'
               - 'build.rs'
@@ -185,22 +182,38 @@ jobs:
             # runs: the HIP overlay, the shared MLX build inputs, the bridge
             # sources the overlay is called through, and the pinned MLX commit.
             # A pin bump must trigger this, because the ROCm half of every bump
-            # now lives in `patches-rocm/` and nothing else in CI links it.
+            # now lives in `overlays/rocm/` and nothing else in CI links it.
             rocm:
-              - 'src/lib/mlx-cpp/**'
-              # The mirror of the exclusion above: neither the Metal files nor
-              # the CUDA overlays reach a HIP compile. `patches/` is split by
-              # subtree here for the same reason it is there, that the directory
-              # holds both backends' files.
-              - '!src/lib/mlx-cpp/patches/mlx/backend/metal/**'
-              - '!src/lib/mlx-cpp/patches/mlx/backend/cuda/**'
-              - '!src/lib/mlx-cpp/patches-cuda/**'
+              - 'src/lib/mlxcelverse/**'
+              # The mirror of the exclusion above: neither the Metal overlay nor
+              # the CUDA overlay reaches a HIP compile. `overlays/cpu/` is not
+              # excluded: the ROCm build compiles it too (#2248).
+              - '!src/lib/mlxcelverse/overlays/metal/**'
+              - '!src/lib/mlxcelverse/overlays/cuda/**'
               - 'src/lib/mlxcel-core/build.rs'
               - 'src/lib/mlxcel-core/build_support/**'
               - 'src/lib/mlxcel-core/cpp/**'
               - 'build.rs'
               - '**/Cargo.toml'
               - 'Cargo.lock'
+            # What can break the CPU-only link of `mlxcel-core`: the Rust
+            # sources and manifests, plus the bridge C++ that `rust` above does
+            # not match. The bug that motivated the `cpu-link` job lived in
+            # `src/lib/mlxcelverse/kernels/` (#2108). No overlay excludes: that
+            # job costs seconds warm, unlike the CUDA jobs those excludes
+            # protect.
+            cpu_link:
+              # The CPU backend overlay compiles into every build, this one
+              # included (#2248).
+              - 'src/lib/mlxcelverse/overlays/cpu/**'
+              - '**/*.rs'
+              - '**/Cargo.toml'
+              - 'Cargo.lock'
+              - 'build.rs'
+              - 'rust-toolchain.toml'
+              - 'src/lib/mlxcelverse/**'
+              - 'src/lib/mlxcel-core/cpp/**'
+              - 'src/lib/mlxcel-core/build_support/**'
             # The workflow files themselves. Deliberately NOT folded into the
             # filters above: those gate what gets compiled, and a workflow edit
             # compiles nothing. What a workflow edit needs is the lint job and
@@ -320,6 +333,40 @@ jobs:
             --tests \
             -- -D warnings
 
+  cpu-link:
+    name: CPU-only link
+    needs: changes
+    # Links the `mlxcel-core` test binary with no GPU feature. A Linux build
+    # without one compiles MLX with no GPU backend, so bridge C++ that calls a
+    # GPU-only MLX helper without the `MLXCEL_BRIDGE_GPU_BACKEND` guard fails
+    # only here, at link time: `cargo check` does not link, and every other
+    # GB10 job passes `--features cuda` (#2108). `--no-run` links without
+    # running the tests. The repository guard reads as on `clippy` above.
+    if: >-
+      github.repository == 'lablup/mlxcel'
+      && (needs.changes.outputs.cpu_link == 'true' || contains(github.event.pull_request.labels.*.name, 'ci:full'))
+    runs-on: GB10
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Use a persistent target directory
+        run: |
+          # Its own directory: a CPU-only MLX tree would otherwise evict the
+          # CUDA build in any directory it shared. Measured on GB10 for #2108,
+          # about 2.5 minutes cold (including the CPU-only MLX tree) and about
+          # 6 seconds to relink after a one-file change.
+          CARGO_TARGET="$HOME/.cargo-target/mlxcel-cpu-link-ci"
+          mkdir -p "$CARGO_TARGET"
+          echo "CARGO_TARGET_DIR=$CARGO_TARGET" >> "$GITHUB_ENV"
+
+      - name: Link the CPU-only mlxcel-core test binary
+        run: cargo test -p mlxcel-core --profile test-fast --lib --no-run
+
   crate-versions:
     name: crate versions
     # Deliberately not behind the `changes` filter. It needs no toolchain and
@@ -395,6 +442,8 @@ jobs:
           persist-credentials: false
       - name: Check every fused-kernel launcher routes through select_kernel_port
         run: python3 scripts/ci/check_kernel_port_dispatch.py
+      - name: Check the port-dispatch checker rejects an unvalidated wave64 port
+        run: bash scripts/ci/check_kernel_port_dispatch_test.sh
 
   binary-assets:
     name: binary assets
@@ -430,7 +479,7 @@ jobs:
     # mlx/backend/cuda/quantized/nvfp4_quantize.cuh) only under an
     # architecture-specific target, and the lists here are plain, so what
     # supplies them is the per-source injection in
-    # `src/lib/mlx-cpp/CMakeLists.txt`. Remove that and the plain lists quietly
+    # `src/lib/mlxcelverse/CMakeLists.txt`. Remove that and the plain lists quietly
     # go back to compiling the converters out of every artifact and every test,
     # which is where issue #1934 started, so this asserts it is still there.
     #
@@ -474,15 +523,10 @@ jobs:
     # would touch, reusing the same `has_existing_header` predicate the writer
     # branches on, so the gate can never demand an edit that running
     # `python3 scripts/insert_apache_header.py` does not produce. Files that
-    # already carry someone else's provenance (the vendored MLX patches under
-    # src/lib/mlx-cpp/patches/ keep Apple's copyright) are skipped by that same
+    # already carry someone else's provenance (the vendored MLX overlays under
+    # src/lib/mlxcelverse/overlays/ keep Apple's copyright) are skipped by that same
     # predicate and must stay that way: this gate must never stamp a Lablup
     # header onto upstream-derived code.
-    #
-    # The second step is the script's own unit suite, which nothing else runs:
-    # tests/test_insert_apache_header.py sits outside python/, and
-    # python.yml's pytest step is scoped to `python/tests` behind a
-    # `python/**` path filter.
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -492,8 +536,26 @@ jobs:
           persist-credentials: false
       - name: Every owned source file carries the license header
         run: python3 scripts/insert_apache_header.py --check
-      - name: Header script unit tests
-        run: python3 -m unittest discover -s tests -p 'test_insert_apache_header.py' -v
+
+  python-tooling:
+    name: python tooling tests
+    # Not behind the `changes` filter: no toolchain, about a minute to run, and
+    # the scripts under test (bench_decode.sh, rocm_gpu_guard.sh, the quality
+    # gate, the header inserter) are touched by changes that no path filter on
+    # the Rust or Python trees would match. Before #2150 only the header suite
+    # ran in CI (inside license-headers); the other suites under tests/ ran
+    # nowhere, so a script change could break its tests and merge green.
+    # python.yml's pytest step covers `python/tests` only. The suites are
+    # stdlib unittest and need no GPU, model or network.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Run the tests/ Python suites
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
 
   llama-compat-manifest:
     name: llama-compat manifest
@@ -640,7 +702,8 @@ jobs:
     runs-on: GB10
     permissions:
       contents: read
-    timeout-minutes: 90
+    # Two cold builds plus the Activity gate step's 75 minutes (#1949).
+    timeout-minutes: 120
     env:
       # What releases build for this runner's architecture, pinned rather than
       # inferred so the artifact this job verifies carries the same device code
@@ -650,6 +713,13 @@ jobs:
       # inferring it, which is what makes the job reviewable and what keeps it
       # right if this ever runs on something other than a GB10.
       MLX_CUDA_ARCHITECTURES: "121"
+      # `test-fast` sets `incremental = true`, and this job's persistent target directory once kept
+      # incremental state that linked with undefined `serde_json` generics from one codegen unit
+      # on five consecutive attempts until that state was cleared by hand (run 36988516810,
+      # #2111). This job builds each artifact once per run and gains little from incremental
+      # reuse, so it opts out. Cleaning and retrying on a link failure was rejected: it hides the
+      # cause and pays a full rebuild. Other GB10 target directories keep the profile default.
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v7
         with:
@@ -720,6 +790,7 @@ jobs:
           python3 scripts/webui/verify_single_model_tests.py
           python3 scripts/webui/verify_activity_performance_tests.py
           python3 scripts/webui/summarize_activity_evidence_tests.py
+          python3 scripts/webui/activity_gate_host_tests.py
       - name: Verify the installed Rust artifact serves the bundled WebUI
         env:
           WEBUI_INSTALLED_EVIDENCE: ${{ runner.temp }}/webui-installed-evidence.json
@@ -820,41 +891,94 @@ jobs:
       # overhead keeps running headed here while the hidden acceptance is recorded as not run.
       # The visibility backoff itself stays covered by webui/src/state/sync.test.ts and the
       # visibilitychange case in webui/tests/browser.spec.ts. See docs/webui-integration-matrix.md.
+      # Lock order: the cooperative CI flock, then the host `gpu-lock` that development sessions on
+      # this runner take (`/usr/local/bin/gpu-lock`, a flock on `/tmp/gpu-lock-$(id -u)/lock`; the
+      # runner is the same uid with PrivateTmp=no), then the fail-closed precheck below. Without
+      # the middle lock a development session's GPU job made the nvidia-smi check fail the gate
+      # (run 36982300183, #2111). On a host without gpu-lock the gate behaves as before. When the
+      # lock is not free within 600 seconds the step fails closed and prints its holder.
+      #
+      # The gate body is written to one script so it can run either under `gpu-lock run` or
+      # directly. Its first command, `activity_gate_host.py precheck` (#1949), stops a server an
+      # earlier run of this job leaked, or anything left working in a verifier run directory
+      # (orphaned, or its RUNNER_TEMP directory deleted), waits up to 600 seconds for the host to be quiet enough to measure (the
+      # instantaneous runnable-task count, not a load average: a concurrent compile on this host
+      # moved the score by more than the 2 percent budget), and then fails closed, naming each
+      # process, if any GPU compute process remains. The step timeout covers both 600-second lock
+      # waits and the 600-second quiet wait on top of the 45 minutes the gate itself was given.
       - name: Run Activity performance gate with the hidden acceptance deferred
-        timeout-minutes: 45
+        timeout-minutes: 75
         env:
           MLXCEL_REQUIRE_MODELS: '1'
         run: |
           set -euo pipefail
           mkdir -p "$HOME/.cache/mlxcel/ci-locks"
+          gate_script="$RUNNER_TEMP/webui-activity-gate.sh"
+          export WEBUI_ACTIVITY_GATE_STARTED="$RUNNER_TEMP/webui-activity-gate.started"
+          rm -f "$WEBUI_ACTIVITY_GATE_STARTED"
+          cat > "$gate_script" <<'GATE'
+          set -euo pipefail
+          : > "$WEBUI_ACTIVITY_GATE_STARTED"
+          echo "Activity gate body started at $(date -u +%FT%TZ), $(( $(date +%s) - WEBUI_ACTIVITY_WAIT_START ))s after the host GPU lock wait began"
+          python3 scripts/webui/activity_gate_host.py precheck \
+            --installed-dir "$RUNNER_TEMP/mlxcel-webui-installed" \
+            --run-root "$RUNNER_TEMP" \
+            --host-state "$RUNNER_TEMP/webui-activity-host-state.json" \
+            --quiet-timeout 600
+          full_evidence="$RUNNER_TEMP/webui-activity-performance-full.json"
+          summary_evidence="$RUNNER_TEMP/webui-activity-performance-summary.json"
+          python3 scripts/webui/verify_activity_performance.py \
+            --server-bin "$RUNNER_TEMP/mlxcel-webui-installed/mlxcel-server-webui" \
+            --model "$RUNNER_TEMP/mlxcel-webui-activity-fixtures/qwen3-0.6b-4bit" \
+            --checkpoint-revision "ci-fixtures/qwen3-0.6b-4bit-v1" \
+            --source-sha "${{ github.sha }}" \
+            --features cuda,webui \
+            --evidence "$full_evidence" \
+            --work-dir "$RUNNER_TEMP" \
+            --repo-root "$GITHUB_WORKSPACE" \
+            --node-bin "$(command -v node)" \
+            --nvidia-smi "$(command -v nvidia-smi)" \
+            --virtual-display \
+            --activity-timeout 1800 \
+            --pid-file "$RUNNER_TEMP/webui-activity-gate.pid" \
+            --host-state "$RUNNER_TEMP/webui-activity-host-state.json" \
+            --perf-mode visible-only-headed
+          python3 scripts/webui/summarize_activity_evidence.py \
+            --input "$full_evidence" \
+            --output "$summary_evidence" \
+            --expect-hidden-native not-run
+          GATE
           (
-            # This flock serializes cooperating CI steps only; the nvidia-smi check below fails closed if non-cooperating GPU compute work is already present.
+            # This flock serializes cooperating CI steps only; gpu-lock below covers development sessions on the host, and the precheck at the top of the gate body fails closed on any other GPU compute work.
             flock -w 600 -x 9 || { echo "::error::timed out waiting for cooperative WebUI Activity GPU lock"; exit 1; }
-            gpu_process_count="$(nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits | awk '$1 ~ /^[0-9]+$/ {count++} END {print count + 0}')"
-            if [ "$gpu_process_count" -ne 0 ]; then
-              echo "::error::GPU compute processes are already present before Activity gate"
-              exit 1
+            WEBUI_ACTIVITY_WAIT_START="$(date +%s)"
+            export WEBUI_ACTIVITY_WAIT_START
+            if command -v gpu-lock >/dev/null 2>&1; then
+              echo "Host gpu-lock holder at $(date -u +%FT%TZ): $(gpu-lock status); waiting up to 600s for it"
+              rc=0
+              gpu-lock run --tag webui-activity --wait 600 -- bash "$gate_script" || rc=$?
+              if [ "$rc" -ne 0 ] && [ ! -e "$WEBUI_ACTIVITY_GATE_STARTED" ]; then
+                echo "::error::could not obtain the host gpu-lock within 600s (gpu-lock exit $rc); holder: $(gpu-lock status)"
+                exit 1
+              fi
+              exit "$rc"
             fi
-            full_evidence="$RUNNER_TEMP/webui-activity-performance-full.json"
-            summary_evidence="$RUNNER_TEMP/webui-activity-performance-summary.json"
-            python3 scripts/webui/verify_activity_performance.py \
-              --server-bin "$RUNNER_TEMP/mlxcel-webui-installed/mlxcel-server-webui" \
-              --model "$RUNNER_TEMP/mlxcel-webui-activity-fixtures/qwen3-0.6b-4bit" \
-              --checkpoint-revision "ci-fixtures/qwen3-0.6b-4bit-v1" \
-              --source-sha "${{ github.sha }}" \
-              --features cuda,webui \
-              --evidence "$full_evidence" \
-              --work-dir "$RUNNER_TEMP" \
-              --repo-root "$GITHUB_WORKSPACE" \
-              --node-bin "$(command -v node)" \
-              --virtual-display \
-              --activity-timeout 1800 \
-              --perf-mode visible-only-headed
-            python3 scripts/webui/summarize_activity_evidence.py \
-              --input "$full_evidence" \
-              --output "$summary_evidence" \
-              --expect-hidden-native not-run
+            echo "gpu-lock is not installed on this runner; running the Activity gate without the host GPU lock"
+            bash "$gate_script"
           ) 9>"$HOME/.cache/mlxcel/ci-locks/webui-activity-gpu.lock"
+      # The verifier's server, display, node and browser start their own sessions, so neither a
+      # step timeout, a cancellation nor a killed verifier reaches them, and a survivor holds GPU
+      # memory into the next job (#1949). Reap by the pid file the verifier writes and by this
+      # job's identity. Anything reaped is a warning, a survivor fails this job instead of the
+      # next one, and nothing to do is the normal outcome.
+      - name: Reap Activity gate processes
+        if: always() && hashFiles('scripts/webui/activity_gate_host.py') != ''
+        timeout-minutes: 5
+        run: |
+          python3 scripts/webui/activity_gate_host.py reap \
+            --installed-dir "$RUNNER_TEMP/mlxcel-webui-installed" \
+            --run-root "$RUNNER_TEMP" \
+            --pid-file "$RUNNER_TEMP/webui-activity-gate.pid"
       - name: Upload installed-artifact WebUI evidence
         if: always()
         uses: actions/upload-artifact@v7
@@ -886,6 +1010,7 @@ jobs:
           name: webui-activity-performance-diagnostics-${{ runner.os }}
           path: |
             ${{ runner.temp }}/webui-activity-performance-full.json
+            ${{ runner.temp }}/webui-activity-host-state.json
             ${{ runner.temp }}/mlxcel-activity-performance-*/activity-performance.log
             ${{ runner.temp }}/mlxcel-activity-performance-*/*.log
           if-no-files-found: warn
@@ -902,7 +1027,7 @@ jobs:
         with:
           persist-credentials: false
       # The pinned MLX commit has one home, GIT_TAG in
-      # src/lib/mlx-cpp/CMakeLists.txt, and two independent parsers read it:
+      # src/lib/mlxcelverse/CMakeLists.txt, and two independent parsers read it:
       # mlxcel-core's build.rs in Rust (build_support/mlx_pin.rs, unit-tested by
       # mlxcel-mlx-pin) and this script in awk, for release.yml's "Validate MLX
       # build cache" steps. The shell half accepts strictly less than the Rust
@@ -1024,7 +1149,7 @@ jobs:
       # #1943 auto-detection produces this same `121` on a GB10; the pin remains
       # because a gate should name the list it compiles instead of inferring it.
       # The hardware NVFP4/MXFP4 converters come from the per-source injection in
-      # `src/lib/mlx-cpp/CMakeLists.txt`, not from this list.
+      # `src/lib/mlxcelverse/CMakeLists.txt`, not from this list.
       MLX_CUDA_ARCHITECTURES: "121"
       # Every rustc lint, not just the `unused_imports` this job started with.
       # The narrower value existed because the XLA feature combination carried a
@@ -1119,7 +1244,7 @@ jobs:
   # rejected because the release link is minutes of shared-runner time and the
   # overwhelming majority of Rust PRs cannot affect the link line.
   #
-  # `src/lib/mlxcel-core/build.rs` and `src/lib/mlx-cpp/CMakeLists.txt` are on
+  # `src/lib/mlxcel-core/build.rs` and `src/lib/mlxcelverse/CMakeLists.txt` are on
   # the causal path as well. The former lists the CUDA libraries every
   # `--features cuda` link resolves `libmlx.a` against; the latter holds the MLX
   # pin, and a pin bump can add one without touching any build script. That is
@@ -1211,7 +1336,7 @@ jobs:
       # auto-detection produces this same `121` on a GB10; the pin remains
       # because a gate should name the list it compiles instead of inferring it.
       # The hardware NVFP4/MXFP4 converters come from the per-source injection in
-      # `src/lib/mlx-cpp/CMakeLists.txt`, not from this list.
+      # `src/lib/mlxcelverse/CMakeLists.txt`, not from this list.
       MLX_CUDA_ARCHITECTURES: "121"
     steps:
       - uses: actions/checkout@v7
@@ -1409,7 +1534,7 @@ jobs:
   # block-float quantization exercised only the scalar CUTLASS fallback.
   #
   # It also proves the converter reached *only* there. The architecture lists
-  # stay plain and `src/lib/mlx-cpp/CMakeLists.txt` gives the extra image to
+  # stay plain and `src/lib/mlxcelverse/CMakeLists.txt` gives the extra image to
   # `fp_quantize.cu` alone, so an architecture-specific image anywhere else
   # means the injection was replaced by a target-level list and every kernel on
   # every Blackwell host now runs different machine code. `cuda-arch-lists`
@@ -1586,7 +1711,7 @@ jobs:
           GATED=$(grep -rl '__CUDA_ARCH_SPECIFIC__\|__CUDA_ARCH_FAMILY_SPECIFIC__' "$MLX_SRC" | sed "s|$MLX_SRC/||" | sort | tr '\n' ' ' | sed 's/ $//')
           echo "MLX files gated on an architecture-specific target: $GATED"
           if [ "$GATED" != "backend/cuda/quantized/nvfp4_quantize.cuh" ]; then
-            echo "the arch-specific surface of the pinned MLX has changed; the per-source injection in src/lib/mlx-cpp/CMakeLists.txt covers only fp_quantize.cu, so decide whether to extend it or move to a target-level architecture list (issue #1934)" >&2
+            echo "the arch-specific surface of the pinned MLX has changed; the per-source injection in src/lib/mlxcelverse/CMakeLists.txt covers only fp_quantize.cu, so decide whether to extend it or move to a target-level architecture list (issue #1934)" >&2
             exit 1
           fi
           rm -rf "$WORK"
@@ -1611,7 +1736,7 @@ jobs:
   # ============================================================================
   # Nothing else in CI compiles the ROCm feature at all. `cargo check` jobs do
   # not carry it, the CUDA jobs point at NVIDIA runners, and the ROCm half of
-  # every MLX pin bump now lives in `src/lib/mlx-cpp/patches-rocm/`. Without
+  # every MLX pin bump now lives in `src/lib/mlxcelverse/overlays/rocm/`. Without
   # this job a bump that breaks the HIP overlay reaches `main` unnoticed, which
   # is exactly how the CUDA link regression in #1274 got in: `cargo check` was
   # green on a tree that could not link a single test.

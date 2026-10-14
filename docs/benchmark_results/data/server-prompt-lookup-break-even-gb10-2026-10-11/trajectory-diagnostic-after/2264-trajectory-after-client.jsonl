@@ -1,0 +1,1 @@
+{"style": "copy", "conc": 1, "rep": 0, "wall_s": 0.723, "tokens": 256, "agg_tok_s": 354.09, "decode_tok_s": [364.29], "prompt_n": [155], "draft_kind": "prompt-lookup", "draft_n": 239, "draft_n_accepted": 214, "draft_rounds": 35}

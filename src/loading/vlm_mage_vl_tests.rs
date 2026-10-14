@@ -171,7 +171,7 @@ fn assert_text_only(dir: &Path) {
 
     let image = image::DynamicImage::new_rgb8(64, 64);
     let mut tokens = vec![1, 2, 3];
-    let err = crate::vlm_runtime::prepare_and_compute_vlm_embeddings(
+    let err = crate::vlm_runtime::prepare_vlm_embeddings(
         &loaded,
         &mut tokens,
         "describe",

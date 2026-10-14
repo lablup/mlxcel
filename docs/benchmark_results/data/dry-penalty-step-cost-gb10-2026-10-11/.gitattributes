@@ -1,0 +1,5 @@
+dry-step-cost.log whitespace=-blank-at-eof
+engine-tests.log whitespace=-blank-at-eof
+environment.txt whitespace=-trailing-space
+implementation-73700aaf-to-ecb89a3.patch whitespace=-trailing-space
+sampling-tests.log whitespace=-blank-at-eof

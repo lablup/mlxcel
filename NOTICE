@@ -66,17 +66,41 @@ they are reproduced below:
 
 
 mlx (expm1f device routine)
----------------------------
+----------------------------
 
 The fused xIELU Metal kernel in
 src/lib/mlxcel-core/cpp/mlx_cxx_kernels.cpp reproduces the device-side
-expm1f routine from mlx/backend/metal/kernels/expm1f.h in MLX
-(https://github.com/ml-explore/mlx), Copyright (c) Apple Inc., licensed
-under the MIT License. The JIT metal_kernel preamble does not pull that
-header in and Metal's <metal_math> provides no expm1, so the routine is
-inlined verbatim (renamed) to keep the fused activation byte-identical to
-the elementwise path that calls mlx::core::expm1. The MIT License text in
-the section above (Copyright © 2023 Apple Inc.) covers this reuse.
+expm1f routine from MLX
+(https://github.com/ml-explore/mlx/blob/main/mlx/backend/metal/kernels/expm1f.h),
+Copyright (c) Apple Inc., licensed under the MIT License. The JIT metal_kernel
+preamble does not pull that header in and Metal's <metal_math> provides no
+expm1, so the routine is inlined verbatim (renamed) to keep the fused
+activation byte-identical to the elementwise path that calls mlx::core::expm1.
+
+MLX is Copyright © 2023 Apple Inc. and licensed under the MIT License. The
+copyright, permission, and warranty notice is reproduced below:
+
+    MIT License
+
+    Copyright © 2023 Apple Inc.
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
 
 That routine is itself derived work carried in MLX under the following
 BSD 2-Clause license, reproduced verbatim as required:
@@ -155,12 +179,12 @@ this repository's LICENSE.
 mlx ROCm backend (NripeshN/mlx, rocm-support branch)
 ----------------------------------------------------
 
-The AMD GPU (ROCm/HIP) backend under src/lib/mlx-cpp/patches-rocm/, the
+The AMD GPU (ROCm/HIP) backend under src/lib/mlxcelverse/overlays/rocm/, the
 ROCm part of mlxcelverse, is vendored from the rocm-support branch of
 NripeshN/mlx (https://github.com/NripeshN/mlx), a fork of MLX
 (https://github.com/ml-explore/mlx), at the commit recorded in
-src/lib/mlx-cpp/patches-rocm/UPSTREAM, with the local changes listed in
-src/lib/mlx-cpp/patches-rocm/LOCAL_FIXES.md. It is licensed under the MIT
+src/lib/mlxcelverse/overlays/rocm/UPSTREAM, with the local changes listed in
+src/lib/mlxcelverse/overlays/rocm/LOCAL_FIXES.md. It is licensed under the MIT
 License, Copyright © 2023 Apple Inc. and the MLX and NripeshN/mlx
 contributors; the MIT License text in the mlx-lm section above covers it.
 Vendored files keep their original headers.

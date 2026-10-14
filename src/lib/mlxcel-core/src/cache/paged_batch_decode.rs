@@ -448,3 +448,7 @@ fn slice_row(arr: &MlxArray, b: usize) -> UniquePtr<MlxArray> {
 #[cfg(test)]
 #[path = "paged_batch_decode_tests.rs"]
 mod paged_batch_decode_tests;
+
+#[cfg(test)]
+#[path = "paged_pool_offset_tests.rs"]
+mod paged_pool_offset_tests;

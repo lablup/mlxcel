@@ -44,7 +44,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use crate::server::chat_request::prepare_chat_request_with_cache;
+use crate::server::chat_request::prepare_chat_request_with_cache_and_video_allowlist;
 use crate::server::responses_translator::responses_request_to_chat;
 use crate::server::types::{ChatCompletionRequest, CreateResponseRequest, ErrorResponse};
 use crate::server::{AppState, LiveSettings};
@@ -120,7 +120,7 @@ async fn render_chat_prompt(
         .await
         .map_err(crate::server::chat_request::VideoFramesError::into_error_response)?;
     let prompt_cache_enabled = state.prompt_cache.is_some();
-    prepare_chat_request_with_cache(
+    prepare_chat_request_with_cache_and_video_allowlist(
         &state.chat_template,
         &request,
         live.chat_template_kwargs.as_ref(),
@@ -128,6 +128,7 @@ async fn render_chat_prompt(
         state.should_render_history_boundary_snapshot(),
         state.prefill_assistant(),
         &state.thinking_markers,
+        &state.video_dir_allowlist,
     )
     .await
     .map(|prepared| RenderedPrompt {

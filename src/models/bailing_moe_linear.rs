@@ -2726,6 +2726,34 @@ impl LanguageModel for BailingMoeLinearModel {
         false
     }
 
+    /// Prefill through the cache-less [`LanguageModel::forward`] entry point
+    /// runs in one pass for this family.
+    ///
+    /// [`Self::forward_for_sequence`] treats a multi-token forward carrying no
+    /// sequence id as a new prompt and resets the model-owned recurrent and KV
+    /// state. That keeps unrelated no-ID prompts isolated, but it also means a
+    /// no-ID caller splitting one prompt across forwards would discard every
+    /// earlier chunk. DirectEngine carries a stable sequence id and therefore
+    /// avoids this reset, but the trait capability also covers cache-less
+    /// callers and cannot express support conditional on an id being present.
+    ///
+    /// Opting out makes every prefill-plan caller, including DirectEngine,
+    /// process the full prompt in one graph. This preserves the no-ID contract
+    /// at the cost of the transient-memory bound that chunked prefill provides.
+    fn supports_chunked_prefill(&self) -> bool {
+        false
+    }
+
+    /// Opt out of NA tile-aligned padded prefill (issue #1755).
+    ///
+    /// The `BailingLinearCache::Linear` layers carry a `LinearAttentionCache`,
+    /// a recurrent GLA state that has already absorbed every pad token by the
+    /// time the forward returns; unlike a K/V cache it has no trailing slots to
+    /// drop, so no trim (sequence-aware or not) can restore it.
+    fn supports_padded_prefill(&self) -> bool {
+        false
+    }
+
     fn eos_token_ids(&self) -> Vec<i32> {
         self.eos_token_ids.clone()
     }

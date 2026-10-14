@@ -1,0 +1,39 @@
+timestamp=2026-10-11T02:59:19.975Z
+command=/bin/zsh -lc gpu-lock run --tag issue2230-ssm-fixed-decay -- target/test-fast/deps/mlxcel_core-5feb86ac05c84f53 ssm_update_parity_tests::ssm_update_kernel_matches_graph_step_bf16 --exact --test-threads=1 --nocapture
+status=completed
+exit_code=0
+--- output ---
+
+running 1 test
+test ssm_update_parity_tests::ssm_update_kernel_matches_graph_step_bf16 ... Compiling CUDA kernels (first run on this host; cached for later runs)...
+SSM stage probe seed 2069: compiled dt dtype 10; dt compiled/stable (2.890811209876877e-8, 2.0028127562385632e-7); dt compiled/bf16-rounded (0.0015696586690978889, 0.005879791600633243); dt naive/stable (2.890811209876877e-8, 2.0028127562385632e-7); decay compiled/stable (6.809246821557169e-10, 4.717584582485562e-9); decay naive/stable (6.809246821557169e-10, 4.717584582485562e-9); decay rounded-A/stable (0.0008696147800822081, 0.0023052609154684007); state kernel/naive (2.34598996877995e-8, 8.505048240025111e-7); state kernel/rounded-A (0.0007675677693150441, 0.00796170226000352); state kernel/stable (2.838613609145525e-8, 1.7010096528383182e-6)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2052 filtered out; finished in 1.91s
+
+--- end output ---
+
+timestamp=2026-10-11T02:59:52.462Z
+command=/bin/zsh -lc gpu-lock run --tag issue2230-ssm-baseline-decay -- target/test-fast/deps/mlxcel_core-5feb86ac05c84f53 ssm_update_parity_tests::ssm_update_kernel_matches_graph_step_bf16 --exact --test-threads=1 --nocapture
+status=failed
+exit_code=101
+--- output ---
+
+running 1 test
+test ssm_update_parity_tests::ssm_update_kernel_matches_graph_step_bf16 ... Compiling CUDA kernels (first run on this host; cached for later runs)...
+SSM stage probe seed 2069: compiled dt dtype 12; dt compiled/stable (0.0019571408311071774, 0.005875451501701449); dt compiled/bf16-rounded (0.0017737195567379125, 0.0065676646839906636); dt naive/stable (2.890811209876877e-8, 2.0028127562385632e-7); decay compiled/stable (0.003008783834355594, 0.010758810176786593); decay naive/stable (6.809246821557169e-10, 4.717584582485562e-9); decay rounded-A/stable (0.0008696147800822081, 0.0023052609154684007); state kernel/naive (0.0025324044936919097, 0.04127457385642986); state kernel/rounded-A (0.002590295934443625, 0.040084687630816164); state kernel/stable (0.0025324028008192334, 0.04127457397370858)
+
+thread 'ssm_update_parity_tests::ssm_update_kernel_matches_graph_step_bf16' (4073340) panicked at src/lib/mlxcel-core/src/ssm_update_parity_tests.rs:131:5:
+granite-4.0-h-tiny act dtype 12 A_log dtype 12 on Cuda: new state: normalized rms 2.532e-3 (tol 1.0e-5), normalized max 4.127e-2 (tol 1.0e-4)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    ssm_update_parity_tests::ssm_update_kernel_matches_graph_step_bf16
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2052 filtered out; finished in 1.13s
+
+--- end output ---
+

@@ -4,12 +4,14 @@
 # docs/benchmark_results/fused-moe-decode-kernel-design.md.
 #
 # Two modes:
-#   gputrace  (default) one warm decode token via the in-process
-#             MLXCEL_CAPTURE_DECODE hook, then the process exits so the bundle
-#             finalizes. Open in Xcode: `open <out>.gputrace`. The Summary
+#   gputrace  (default) the bench's measured pass after a warmup, captured
+#             through MLXCEL_METAL_CAPTURE_PATH: the short prompt's prefill
+#             plus one decode token (`-n 2`; the first token comes from the
+#             prefill). Open in Xcode: `open <out>.gputrace`. The Summary
 #             (Command Buffers / Compute Encoders / Dispatch Calls) is readable
-#             without the slow Profile pass; compare expert-path idle/dispatch
-#             counts before vs after the kernel lands.
+#             without the slow Profile pass; the decode token is the last
+#             command buffers, so compare expert-path idle/dispatch counts
+#             there before vs after the kernel lands.
 #   xctrace   Metal System Trace over N decode tokens (timeline view).
 #
 # Usage:
@@ -32,9 +34,9 @@ case "$MODE" in
   gputrace)
     OUT="${3:-/tmp/mlxcel_moe_$(basename "$MODEL").gputrace}"
     rm -rf "$OUT"
-    echo "Capturing one warm decode token -> $OUT"
-    MTL_CAPTURE_ENABLED=1 MLXCEL_CAPTURE_DECODE="$OUT" \
-      "$BIN" -m "$MODEL" -p "$PROMPT" -n 1 --warmup-tokens 6 --no-chat-template
+    echo "Capturing the measured prefill and one warm decode token -> $OUT"
+    MTL_CAPTURE_ENABLED=1 MLXCEL_METAL_CAPTURE_PATH="$OUT" \
+      "$BIN" -m "$MODEL" -p "$PROMPT" -n 2 --warmup-tokens 6 --no-chat-template
     echo "Done. A finalized bundle has hex-named archive files at top level."
     echo "Open: open '$OUT'"
     ;;

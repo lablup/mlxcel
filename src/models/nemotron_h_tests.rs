@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{NemotronHConfig, NemotronLayerCache, NemotronMambaCache};
+use super::{NemotronHConfig, NemotronLayerCache, NemotronMambaCache, nemotron_h_ssm_attn};
 use mlxcel_core::{dtype, generate::ModelStateSnapshot, layers::KVCache};
 
 // ---------------------------------------------------------------------------
@@ -120,26 +120,26 @@ fn layer_cache_mamba_offset_is_zero() {
 }
 
 // ---------------------------------------------------------------------------
-// trim_internal_caches logic (via direct cache manipulation)
+// trim_state logic (via direct cache manipulation)
 // ---------------------------------------------------------------------------
 
-/// After simulating what trim_internal_caches does: Mamba conv/ssm state is cleared.
-/// This mirrors the body of NemotronHModel::trim_internal_caches for Mamba layers.
+/// After simulating what trim_state does: Mamba conv/ssm state is cleared.
+/// This mirrors the body of NemotronHModel::trim_state for Mamba layers.
 #[test]
 fn mamba_cache_reset_clears_state() {
     let mut mc = NemotronMambaCache::new();
 
     // Simulate state that would have been written during a padded prefill.
     // We set the fields to None to begin with (as they would be before prefill),
-    // then verify that resetting them (as trim_internal_caches does) leaves them None.
+    // then verify that resetting them (as trim_state does) leaves them None.
     //
     // In the real codepath, conv_state and ssm_state would hold MlxArrays written
-    // during the padded forward pass. trim_internal_caches resets them so that
+    // during the padded forward pass. trim_state resets them so that
     // subsequent decode steps do not carry corrupted padding state forward.
     mc.conv_state = None;
     mc.ssm_state = None;
 
-    // Apply the same reset logic as trim_internal_caches.
+    // Apply the same reset logic as trim_state.
     mc.conv_state = None;
     mc.ssm_state = None;
 
@@ -150,7 +150,7 @@ fn mamba_cache_reset_clears_state() {
     assert!(mc.ssm_state.is_none(), "ssm_state must be None after reset");
 }
 
-/// trim_internal_caches with excess <= 0 returns early without modifying any cache.
+/// trim_state with excess <= 0 returns early without modifying any cache.
 /// This is a guard against callers passing non-positive excess values.
 ///
 /// We verify the guard condition matches the one used in the implementation
@@ -188,7 +188,7 @@ fn trim_guard_positive_excess_proceeds() {
 // ---------------------------------------------------------------------------
 
 /// Trimming an Attention layer cache that has no data is safe and leaves the
-/// offset at 0. This verifies that trim_internal_caches for Attention layers
+/// offset at 0. This verifies that trim_state for Attention layers
 /// does not panic when called on a cache that was never populated (e.g. if
 /// padded prefill was called on a fresh session).
 #[test]
@@ -319,6 +319,281 @@ fn post_init_no_time_step_fields_defaults_to_zero_inf() {
         hi.is_infinite() && hi.is_sign_positive(),
         "upper bound must be +inf"
     );
+}
+
+#[test]
+fn missing_chunk_size_defaults_to_128() {
+    let json = minimal_config_json("");
+    let mut cfg: NemotronHConfig = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(cfg.chunk_size, 128);
+    cfg.post_init().expect("default chunk_size must be valid");
+}
+
+#[test]
+fn mamba_chunk_size_alias_is_accepted() {
+    let json = minimal_config_json(r#", "mamba_chunk_size": 64"#);
+    let mut cfg: NemotronHConfig = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(cfg.chunk_size, 64);
+    cfg.post_init().expect("aliased chunk_size must be valid");
+}
+
+#[test]
+fn zero_chunk_size_is_rejected() {
+    let json = minimal_config_json(r#", "chunk_size": 0"#);
+    let mut cfg: NemotronHConfig = serde_json::from_str(&json).expect("deserialize");
+    let error = cfg.post_init().expect_err("zero chunk_size must fail");
+    assert!(error.contains("chunk_size must be greater than zero"));
+}
+
+#[test]
+#[ignore = "requires serial MLX execution"]
+fn chunked_ssd_matches_full_step_with_prior_state_and_partial_tail() {
+    let _runtime = crate::initialize_runtime();
+
+    const SEQ_LEN: i32 = 5;
+    const HEADS: i32 = 2;
+    const HEAD_DIM: i32 = 2;
+    const STATE_DIM: i32 = 3;
+
+    let ramp = |len: usize, offset: f32, scale: f32| -> Vec<f32> {
+        (0..len)
+            .map(|index| offset + index as f32 * scale)
+            .collect()
+    };
+    let x = mlxcel_core::from_slice_f32(
+        &ramp((SEQ_LEN * HEADS * HEAD_DIM) as usize, -0.2, 0.025),
+        &[1, SEQ_LEN, HEADS, HEAD_DIM],
+    );
+    let b = mlxcel_core::from_slice_f32(
+        &ramp((SEQ_LEN * STATE_DIM) as usize, -0.1, 0.02),
+        &[1, SEQ_LEN, 1, STATE_DIM],
+    );
+    let c = mlxcel_core::from_slice_f32(
+        &ramp((SEQ_LEN * STATE_DIM) as usize, 0.15, -0.01),
+        &[1, SEQ_LEN, 1, STATE_DIM],
+    );
+    let dt = mlxcel_core::from_slice_f32(
+        &ramp((SEQ_LEN * HEADS) as usize, -0.4, 0.03),
+        &[1, SEQ_LEN, HEADS],
+    );
+    let a_log = mlxcel_core::from_slice_f32(&[-0.4, -0.2], &[HEADS]);
+    let d = mlxcel_core::from_slice_f32(&[0.3, -0.2], &[HEADS]);
+    let dt_bias = mlxcel_core::from_slice_f32(&[-0.1, 0.2], &[HEADS]);
+    let prior_state = mlxcel_core::from_slice_f32(
+        &ramp((HEADS * HEAD_DIM * STATE_DIM) as usize, -0.05, 0.01),
+        &[1, HEADS, HEAD_DIM, STATE_DIM],
+    );
+
+    let (full_y, full_state) = nemotron_h_ssm_attn(
+        &x,
+        &a_log,
+        &b,
+        &c,
+        &d,
+        &dt,
+        &dt_bias,
+        Some(&prior_state),
+        (0.0, f32::INFINITY),
+        SEQ_LEN as usize,
+    );
+    let (chunked_y, chunked_state) = nemotron_h_ssm_attn(
+        &x,
+        &a_log,
+        &b,
+        &c,
+        &d,
+        &dt,
+        &dt_bias,
+        Some(&prior_state),
+        (0.0, f32::INFINITY),
+        2,
+    );
+
+    assert_eq!(
+        mlxcel_core::array_shape(&chunked_y),
+        vec![1, SEQ_LEN, HEADS, HEAD_DIM]
+    );
+    let output_close = mlxcel_core::allclose(&full_y, &chunked_y, 1e-4, 1e-5);
+    mlxcel_core::eval(&output_close);
+    assert!(
+        mlxcel_core::item_bool(&output_close),
+        "chunk size 2 (2+2+1) changed SSD output"
+    );
+
+    let state_close = mlxcel_core::allclose(&full_state, &chunked_state, 1e-4, 1e-5);
+    mlxcel_core::eval(&state_close);
+    assert!(
+        mlxcel_core::item_bool(&state_close),
+        "chunk size 2 (2+2+1) changed final recurrent state"
+    );
+}
+
+fn recurrence_oracle(
+    x: &[f32],
+    a_log: &[f32],
+    b: &[f32],
+    c: &[f32],
+    d: &[f32],
+    dt: &[f32],
+    dt_bias: &[f32],
+    batch_size: usize,
+    seq_len: usize,
+    num_heads: usize,
+    head_dim: usize,
+    num_groups: usize,
+    state_dim: usize,
+) -> (Vec<f32>, Vec<f32>) {
+    let heads_per_group = num_heads / num_groups;
+    let mut output = vec![0.0; batch_size * seq_len * num_heads * head_dim];
+    let mut state = vec![0.0; batch_size * num_heads * head_dim * state_dim];
+
+    for batch in 0..batch_size {
+        for token in 0..seq_len {
+            for head in 0..num_heads {
+                let group = head / heads_per_group;
+                let dt_index = (batch * seq_len + token) * num_heads + head;
+                let delta = (dt[dt_index] + dt_bias[head]).exp().ln_1p();
+                let decay = (-a_log[head].exp() * delta).exp();
+                for channel in 0..head_dim {
+                    let x_index =
+                        ((batch * seq_len + token) * num_heads + head) * head_dim + channel;
+                    let mut value = 0.0;
+                    for state_channel in 0..state_dim {
+                        let state_index = ((batch * num_heads + head) * head_dim + channel)
+                            * state_dim
+                            + state_channel;
+                        let bc_index = ((batch * seq_len + token) * num_groups + group) * state_dim
+                            + state_channel;
+                        state[state_index] =
+                            decay * state[state_index] + delta * x[x_index] * b[bc_index];
+                        value += state[state_index] * c[bc_index];
+                    }
+                    output[x_index] = value + d[head] * x[x_index];
+                }
+            }
+        }
+    }
+
+    (output, state)
+}
+
+#[test]
+#[ignore = "requires serial MLX execution"]
+fn chunked_ssd_matches_direct_recurrence_for_multigroup_f16_and_bf16() {
+    use mlxcel_core::utils::array_to_vec_f32;
+
+    let _runtime = crate::initialize_runtime();
+
+    const BATCH: usize = 2;
+    const SEQ_LEN: usize = 5;
+    const HEADS: usize = 4;
+    const HEAD_DIM: usize = 2;
+    const GROUPS: usize = 2;
+    const STATE_DIM: usize = 3;
+
+    let ramp = |len: usize, offset: f32, scale: f32| -> Vec<f32> {
+        (0..len)
+            .map(|index| offset + index as f32 * scale)
+            .collect()
+    };
+    let raw_x = ramp(BATCH * SEQ_LEN * HEADS * HEAD_DIM, -0.3, 0.007);
+    let raw_b = ramp(BATCH * SEQ_LEN * GROUPS * STATE_DIM, -0.15, 0.004);
+    let raw_c = ramp(BATCH * SEQ_LEN * GROUPS * STATE_DIM, 0.2, -0.003);
+    let raw_dt = ramp(BATCH * SEQ_LEN * HEADS, -0.5, 0.006);
+    let raw_a_log = [-0.4, -0.3, -0.2, -0.1];
+    let raw_d = [0.3, -0.2, 0.1, -0.05];
+    let raw_dt_bias = [-0.15, -0.05, 0.05, 0.15];
+
+    for (dtype, tolerance) in [
+        (mlxcel_core::dtype::FLOAT16, 2e-3_f32),
+        (mlxcel_core::dtype::BFLOAT16, 2e-2_f32),
+    ] {
+        let cast = |values: &[f32], shape: &[i32]| {
+            mlxcel_core::astype(&mlxcel_core::from_slice_f32(values, shape), dtype)
+        };
+        let x = cast(
+            &raw_x,
+            &[BATCH as i32, SEQ_LEN as i32, HEADS as i32, HEAD_DIM as i32],
+        );
+        let b = cast(
+            &raw_b,
+            &[
+                BATCH as i32,
+                SEQ_LEN as i32,
+                GROUPS as i32,
+                STATE_DIM as i32,
+            ],
+        );
+        let c = cast(
+            &raw_c,
+            &[
+                BATCH as i32,
+                SEQ_LEN as i32,
+                GROUPS as i32,
+                STATE_DIM as i32,
+            ],
+        );
+        let dt = cast(&raw_dt, &[BATCH as i32, SEQ_LEN as i32, HEADS as i32]);
+        let a_log = cast(&raw_a_log, &[HEADS as i32]);
+        let d = cast(&raw_d, &[HEADS as i32]);
+        let dt_bias = cast(&raw_dt_bias, &[HEADS as i32]);
+
+        let (actual_output, actual_state) = nemotron_h_ssm_attn(
+            &x,
+            &a_log,
+            &b,
+            &c,
+            &d,
+            &dt,
+            &dt_bias,
+            None,
+            (0.0, f32::INFINITY),
+            2,
+        );
+        let (expected_output, expected_state) = recurrence_oracle(
+            &array_to_vec_f32(&x),
+            &array_to_vec_f32(&a_log),
+            &array_to_vec_f32(&b),
+            &array_to_vec_f32(&c),
+            &array_to_vec_f32(&d),
+            &array_to_vec_f32(&dt),
+            &array_to_vec_f32(&dt_bias),
+            BATCH,
+            SEQ_LEN,
+            HEADS,
+            HEAD_DIM,
+            GROUPS,
+            STATE_DIM,
+        );
+        let expected_output = cast(
+            &expected_output,
+            &[BATCH as i32, SEQ_LEN as i32, HEADS as i32, HEAD_DIM as i32],
+        );
+        let expected_state = mlxcel_core::from_slice_f32(
+            &expected_state,
+            &[
+                BATCH as i32,
+                HEADS as i32,
+                HEAD_DIM as i32,
+                STATE_DIM as i32,
+            ],
+        );
+
+        let output_close =
+            mlxcel_core::allclose(&actual_output, &expected_output, 0.0, tolerance as f64);
+        mlxcel_core::eval(&output_close);
+        assert!(
+            mlxcel_core::item_bool(&output_close),
+            "chunked SSD output diverged from direct recurrence for dtype {dtype}"
+        );
+        let state_close =
+            mlxcel_core::allclose(&actual_state, &expected_state, 1e-4, tolerance as f64);
+        mlxcel_core::eval(&state_close);
+        assert!(
+            mlxcel_core::item_bool(&state_close),
+            "chunked SSD state diverged from direct recurrence for dtype {dtype}"
+        );
+    }
 }
 
 /// Config with only time_step_min: 0.001 (no time_step_limit, no time_step_max).
@@ -590,4 +865,28 @@ fn nemotron_h_rejects_expert_quantization_params_that_would_abort_gather_qmm() {
     }
     NemotronHModel::from_weights(config_with(0, 0), regular, vec![BlockType::MoE])
         .expect("a non-quantized expert plane must not be gated on quantization params");
+}
+
+#[test]
+#[cfg(all(target_os = "macos", feature = "metal"))]
+fn request_memory_runtime_lora_rejects_before_construction_and_cleans_staging() {
+    if !mlxcel_core::default_device_is_gpu() {
+        return;
+    }
+    // Empty terms suffice to represent a staged adapter without GPU work.
+    mlxcel_core::runtime_lora::stage(std::collections::HashMap::from([(
+        "backbone.layers.0.mixer.q_proj".to_string(),
+        Vec::new(),
+    )]));
+    let config: NemotronHConfig = serde_json::from_str(&minimal_config_json("")).unwrap();
+    let result = super::NemotronHModel::from_weights(
+        config,
+        mlxcel_core::weights::WeightMap::new(),
+        Vec::new(),
+    );
+    let error = result
+        .err()
+        .expect("runtime adapter must fail before weights are read");
+    assert!(error.to_string().contains("does not support runtime LoRA"));
+    assert!(!mlxcel_core::runtime_lora::has_pending());
 }

@@ -21,7 +21,7 @@
 use image::DynamicImage;
 use mlxcel_core::cache::{CachePool, SequenceId, SequenceStateLayout};
 use mlxcel_core::drafter::dflash::SpeculativeTarget;
-use mlxcel_core::generate::{DecodeBatchContext, LanguageModel, ModelStateSnapshot};
+use mlxcel_core::generate::{LanguageModel, ModelStateSnapshot};
 use mlxcel_core::layers::{KVCache, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -274,38 +274,23 @@ impl LanguageModel for MuseGlimmerVlmModel {
         LanguageModel::sync_sequence_storage(&self.text, seq_id, cache_pool)
     }
 
-    fn forward_batched_with_context(
+    fn forward_batched(
         &self,
         input_ids: &MlxArray,
         batch_caches: &mut [&mut [KVCache]],
         mask: Option<&MlxArray>,
-        context: Option<&DecodeBatchContext>,
     ) -> UniquePtr<MlxArray> {
-        LanguageModel::forward_batched_with_context(
-            &self.text,
-            input_ids,
-            batch_caches,
-            mask,
-            context,
-        )
+        LanguageModel::forward_batched(&self.text, input_ids, batch_caches, mask)
     }
 
-    fn forward_batched_with_context_and_ids(
+    fn forward_batched_with_ids(
         &self,
         input_ids: &MlxArray,
         seq_ids: Option<&[SequenceId]>,
         batch_caches: &mut [&mut [KVCache]],
         mask: Option<&MlxArray>,
-        context: Option<&DecodeBatchContext>,
     ) -> UniquePtr<MlxArray> {
-        LanguageModel::forward_batched_with_context_and_ids(
-            &self.text,
-            input_ids,
-            seq_ids,
-            batch_caches,
-            mask,
-            context,
-        )
+        LanguageModel::forward_batched_with_ids(&self.text, input_ids, seq_ids, batch_caches, mask)
     }
 }
 

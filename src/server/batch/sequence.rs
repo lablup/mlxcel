@@ -43,7 +43,8 @@ use std::time::Instant;
 
 use mlxcel_core::cache::SequenceId;
 use mlxcel_core::generate::SamplingConfig;
-use mlxcel_core::sampling::{LogprobsConfig, SamplerState, TokenLogprobData};
+use mlxcel_core::sampling::{LogprobsConfig, TokenLogprobData};
+use mlxcel_core::sampling_row_step::RowSampler;
 
 use super::generation_bounds::{BoundStop, GenerationBounds};
 use super::stop_matcher::StopMatcher;
@@ -315,13 +316,12 @@ pub struct SequenceInfo {
     /// step. Avoids O(prompt_len + generated_len) Vec reconstruction on every
     /// decode step. Empty when `sampling.needs_token_history()` is false.
     pub(crate) token_history: Vec<i32>,
-    /// Incremental per-sequence sampler state for history-based penalties
-    /// (repetition, frequency/presence). Created lazily on the first decode
-    /// step that applies one of those penalties and dropped with the sequence
-    /// (so the default no-penalty path never allocates it). DRY is not
-    /// state-backed and keeps reading `token_history` directly. Kept in sync
-    /// with `token_history` by `sample_token_optimized_with_state`.
-    pub(crate) sampler_state: Option<SamplerState>,
+    /// The sequence's per-row sampling step and its sampler state (#2169):
+    /// built from `sampling` at admission, it creates the state when the
+    /// config reads history or carries feedback state (mirostat, adaptive-p),
+    /// so the no-penalty path never allocates one. Every server sampling site
+    /// draws through it.
+    pub(crate) sampler: RowSampler,
     /// Merged EOS token IDs (model + per-request stop tokens), computed once
     /// during prefill and reused for every decode step. Avoids redundant
     /// allocation on every step.
@@ -347,6 +347,13 @@ pub struct SequenceInfo {
     /// the prefill path can rewrite `prefill_start_offset` for bookkeeping
     /// (e.g. chunked prefill continuation math) without affecting the stat.
     pub already_cached_tokens: usize,
+
+    /// Generation ended on a merged EOS token (#1754). The EOS is sampled but
+    /// never pushed to `generated_tokens`, and the step that sampled it had
+    /// already forwarded every pushed token, so the model state holds all of
+    /// them. Every other finish leaves the last pushed token unforwarded; see
+    /// [`SequenceInfo::generated_in_state`].
+    pub eos_terminated: bool,
 
     // -- thinking-token budget --
     /// Per-sequence thinking-budget state. Drives forced `</think>` injection
@@ -384,9 +391,37 @@ pub struct SequenceInfo {
     pub prefill_start: Option<Instant>,
     /// Wall-clock time when the first decode token was produced.
     pub first_token_time: Option<Instant>,
+
+    // -- Prompt lookup (#2255) --
+    /// The sequence's prompt-lookup drafter and what it has observed, set at
+    /// prefill completion under `--draft-kind prompt-lookup` for an eligible
+    /// request and `None` otherwise (see `scheduler::prompt_lookup`).
+    pub(crate) prompt_lookup:
+        Option<Box<crate::server::batch::scheduler::prompt_lookup::PromptLookupRow>>,
 }
 
 impl SequenceInfo {
+    /// The generated tokens whose K/V (or recurrent state) the model actually
+    /// holds once the sequence has finished (#1754).
+    ///
+    /// Decode forwards `generated_tokens.last()` on the step after it was
+    /// sampled, so the most recently pushed token is never in the state when
+    /// generation stops on the length budget, a stop string, a structured
+    /// stop, the repetition guard, a cancellation, or inside prefill. The one
+    /// exception is a merged-EOS stop ([`Self::eos_terminated`]): the EOS is
+    /// not pushed, so the last pushed token was forwarded by the step that
+    /// sampled the EOS. A prompt-cache donation must store exactly this
+    /// prefix, or an exact-entry restore resumes prefill one position past the
+    /// state it installed.
+    pub(crate) fn generated_in_state(&self) -> &[i32] {
+        if self.eos_terminated {
+            &self.generated_tokens
+        } else {
+            let held = self.generated_tokens.len().saturating_sub(1);
+            &self.generated_tokens[..held]
+        }
+    }
+
     /// Convenience: returns the number of generated tokens so far.
     pub fn completion_count(&self) -> usize {
         self.generated_tokens.len()
@@ -420,18 +455,17 @@ impl SequenceInfo {
     /// streamed `prompt_ms` and the final `prompt_eval_ms` derive from one
     /// origin. Clamped at zero if `at` precedes `created_at`.
     pub(crate) fn mark_first_token_at(&mut self, at: Instant) {
-        if self.first_token_time.is_some() {
-            return;
-        }
-        self.first_token_time = Some(at);
-        self.decode_state.stamp_first_token(at);
-        let _ = self.response_tx.send(GenerateEvent::Prefill(PrefillStats {
-            prompt_tokens: self.prompt_tokens.len(),
-            cached_tokens: self.already_cached_tokens,
-            prompt_ms: at.saturating_duration_since(self.created_at).as_millis() as u64,
-            processed: self.prompt_tokens.len(),
-            first_token: true,
-        }));
+        stamp_first_token(
+            &mut self.first_token_time,
+            &mut self.decode_state,
+            &self.response_tx,
+            FirstTokenOrigin {
+                prompt_tokens: self.prompt_tokens.len(),
+                cached_tokens: self.already_cached_tokens,
+                created_at: self.created_at,
+            },
+            at,
+        );
     }
 
     /// Publish a mid-prefill progress observation (#1477).
@@ -481,49 +515,25 @@ impl SequenceInfo {
         token_id: Option<i32>,
         logprobs: Option<TokenLogprobData>,
     ) -> Option<String> {
-        let meta = TokenMeta {
+        emit_decoded_piece(
+            &mut self.stop_matcher,
+            &mut self.bounds,
+            &self.response_tx,
+            self.generated_tokens.len(),
+            text,
             token_id,
-            decoded: Some(self.generated_tokens.len()),
-        };
-        // No stop strings: send the piece verbatim, exactly as every call site
-        // did before #1466, without building a `StopChunk` per decoded token.
-        // This is the overwhelmingly common case on the decode hot path.
-        if !self.stop_matcher.is_active() {
-            self.bounds.observe(&text, &text);
-            let event = match logprobs {
-                Some(lp) => GenerateEvent::TokenWithLogprobs(text, meta, lp),
-                None => GenerateEvent::Token(text, meta),
-            };
-            let _ = self.response_tx.send(event);
-            return None;
-        }
-
-        // b10621 sends one partial frame per decoded token even while a stop
-        // string is being matched: that frame carries empty content and the
-        // token's own id, and its `tokens_predicted` still counts the token
-        // (measured against the pinned binary, #1477). Emitting nothing here
-        // would drop the id and make the frame count disagree with the token
-        // count. Consumers that accumulate text ignore an empty piece.
-        let chunk = self.stop_matcher.push(&text);
-        // The generation bounds see the raw decoded text (what upstream appends
-        // to `generated_text`) and the emitted part separately (what arms its
-        // `has_new_line`); the two differ only mid stop-string match (#1477).
-        self.bounds.observe(&text, &chunk.emit);
-        let event = match logprobs {
-            Some(lp) => GenerateEvent::TokenWithLogprobs(chunk.emit, meta, lp),
-            None => GenerateEvent::Token(chunk.emit, meta),
-        };
-        let _ = self.response_tx.send(event);
-        chunk.matched
+            logprobs,
+        )
     }
 
     /// Whether a b10621 generation bound ended this request on the step just
     /// streamed (#1477).
     ///
-    /// Read right after [`stream_decoded_text`](Self::stream_decoded_text) by
-    /// every decode path, alongside the stop-string result: a string stop wins
+    /// The decode paths read the same flag through the shared finish step's
+    /// hooks (#2168), right after the stop-string check: a string stop wins
     /// when both land on the same piece, because upstream evaluates the stop
     /// strings first and stops feeding tokens there.
+    #[cfg(test)]
     pub(crate) fn bound_stopped(&self) -> bool {
         self.bounds.fired().is_some()
     }
@@ -692,6 +702,55 @@ fn truncate_result_text(
     result.text.truncate(cut);
 }
 
+/// [`SequenceInfo::stream_decoded_text`] over the disjoint fields it touches,
+/// so the shared finish step (#2168) can stream a piece while it holds
+/// `generated_tokens` mutably. `decoded` is the generated-token count the
+/// event reports ([`TokenMeta::decoded`]), which already includes the token.
+pub(crate) fn emit_decoded_piece(
+    stop_matcher: &mut StopMatcher,
+    bounds: &mut GenerationBounds,
+    response_tx: &mpsc::Sender<GenerateEvent>,
+    decoded: usize,
+    text: String,
+    token_id: Option<i32>,
+    logprobs: Option<TokenLogprobData>,
+) -> Option<String> {
+    let meta = TokenMeta {
+        token_id,
+        decoded: Some(decoded),
+    };
+    // No stop strings: send the piece verbatim, exactly as every call site
+    // did before #1466, without building a `StopChunk` per decoded token.
+    // This is the overwhelmingly common case on the decode hot path.
+    if !stop_matcher.is_active() {
+        bounds.observe(&text, &text);
+        let event = match logprobs {
+            Some(lp) => GenerateEvent::TokenWithLogprobs(text, meta, lp),
+            None => GenerateEvent::Token(text, meta),
+        };
+        let _ = response_tx.send(event);
+        return None;
+    }
+
+    // b10621 sends one partial frame per decoded token even while a stop
+    // string is being matched: that frame carries empty content and the
+    // token's own id, and its `tokens_predicted` still counts the token
+    // (measured against the pinned binary, #1477). Emitting nothing here
+    // would drop the id and make the frame count disagree with the token
+    // count. Consumers that accumulate text ignore an empty piece.
+    let chunk = stop_matcher.push(&text);
+    // The generation bounds see the raw decoded text (what upstream appends
+    // to `generated_text`) and the emitted part separately (what arms its
+    // `has_new_line`); the two differ only mid stop-string match (#1477).
+    bounds.observe(&text, &chunk.emit);
+    let event = match logprobs {
+        Some(lp) => GenerateEvent::TokenWithLogprobs(chunk.emit, meta, lp),
+        None => GenerateEvent::Token(chunk.emit, meta),
+    };
+    let _ = response_tx.send(event);
+    chunk.matched
+}
+
 // We cannot derive `Debug` automatically because `InputEmbeddings` contains
 // `UniquePtr<MlxArray>` which is not `Debug`. A manual implementation keeps
 // the struct debuggable in logs.
@@ -824,9 +883,11 @@ mod tests {
 
     // -- decode-site loop-detection wiring --
     //
-    // These replicate the exact guard the scheduler decode sites apply after
-    // pushing each token, driving the real `SequenceState` machine so the
-    // wiring (detector + transition), not just the pure helper, is exercised.
+    // The scheduler decode sites run their finish decision through
+    // `mlxcel_core::finish_step` (#2168). This helper mirrors only the
+    // repetition-loop step of it, driving the real `SequenceState` machine so
+    // the detector-plus-transition wiring, not just the pure helper, is
+    // exercised.
 
     fn apply_loop_guard(
         state: &mut SequenceState,
@@ -1123,4 +1184,37 @@ mod tests {
         let action = BatchSchedulerAction::Idle;
         let _ = format!("{action:?}");
     }
+}
+
+/// The request facts a first-token stamp reports, copied out of the sequence
+/// so the stamp can run while its other fields are borrowed (#2172).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FirstTokenOrigin {
+    pub(crate) prompt_tokens: usize,
+    pub(crate) cached_tokens: usize,
+    pub(crate) created_at: Instant,
+}
+
+/// [`SequenceInfo::mark_first_token_at`] over the disjoint fields it touches:
+/// records the instant once, stamps the decode state and streams the prefill
+/// stats event. A second stamp is a no-op.
+pub(crate) fn stamp_first_token(
+    first_token_time: &mut Option<Instant>,
+    decode_state: &mut StreamingDecodeState,
+    response_tx: &mpsc::Sender<GenerateEvent>,
+    origin: FirstTokenOrigin,
+    at: Instant,
+) {
+    if first_token_time.is_some() {
+        return;
+    }
+    *first_token_time = Some(at);
+    decode_state.stamp_first_token(at);
+    let _ = response_tx.send(GenerateEvent::Prefill(PrefillStats {
+        prompt_tokens: origin.prompt_tokens,
+        cached_tokens: origin.cached_tokens,
+        prompt_ms: at.saturating_duration_since(origin.created_at).as_millis() as u64,
+        processed: origin.prompt_tokens,
+        first_token: true,
+    }));
 }

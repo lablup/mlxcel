@@ -203,6 +203,7 @@ use std::time::{Duration, Instant};
 // `mlxcel-core` cannot name, so core refuses that `model_type` and this
 // wrapper builds it and delegates every other kind back to core.
 use crate::models::drafter_loader::load_drafter;
+use mlxcel_core::FinishCause;
 use mlxcel_core::drafter::dflash::drafter::sampler_is_greedy;
 use mlxcel_core::drafter::{Drafter, DrafterKind};
 use mlxcel_core::generate::{LanguageModel, SamplingConfig};
@@ -222,6 +223,7 @@ use crate::models::gemma4_mtp_target::{
 };
 use crate::server::model_provider::{GenerateEvent, SpeculativeStats};
 
+use super::finish::{ContextBound, StepLimits, finish_reason_for, run_finish_step};
 use super::sequence::{FinishReason, SequenceInfo, SequenceState};
 
 /// Lazy-loaded drafter slot held on the scheduler.
@@ -920,8 +922,13 @@ pub(crate) fn try_run_burst_b1(
         // The gate (`should_burst_for_sequence`) already excluded
         // `Disabled` / `Classic`. Re-asserting here makes the intent
         // explicit for future maintainers.
+        // Prompt lookup never bursts (it is not kind-specific); its verify
+        // rounds run inside the regular decode tick (#2255).
         crate::server::SpeculativeDispatch::Disabled
-        | crate::server::SpeculativeDispatch::Classic { .. } => Err(BurstOutcome::DeclineToClassic),
+        | crate::server::SpeculativeDispatch::Classic { .. }
+        | crate::server::SpeculativeDispatch::PromptLookup { .. } => {
+            Err(BurstOutcome::DeclineToClassic)
+        }
     };
 
     match result {
@@ -1099,6 +1106,15 @@ pub(crate) struct BurstContext<'a> {
     /// the DFlash and batched burst arms.
     pub(crate) profile_probe_rounds: usize,
     pub(crate) prefill_chunk_size: usize,
+    /// Classic history-boundary prefill split for the B=1 sequence (issue
+    /// #2160); `None` for batched bursts and requests without one.
+    pub(crate) prefill_boundary: Option<usize>,
+    /// The scheduler's context bound (#1472), applied by the burst stream's
+    /// finish step exactly as classic decode applies it (#2168).
+    pub(crate) context_bound: ContextBound,
+    /// The same split for each row of a batched window, in window order
+    /// (issue #2190); empty for B=1 bursts.
+    pub(crate) prefill_boundaries: Vec<Option<usize>>,
 }
 
 impl<'a> BurstContext<'a> {
@@ -1115,6 +1131,9 @@ impl<'a> BurstContext<'a> {
             dispatch: self.dispatch,
             profile_probe_rounds: self.profile_probe_rounds,
             prefill_chunk_size: self.prefill_chunk_size,
+            prefill_boundary: self.prefill_boundary,
+            context_bound: self.context_bound,
+            prefill_boundaries: self.prefill_boundaries.clone(),
         }
     }
 }
@@ -1324,7 +1343,8 @@ fn run_mtp_burst(
             let adapter =
                 Gemma4MtpTargetAdapter::new_with_block_size(wrapper, Some(seq.seq_id), block_size)
                     .with_prefill_start_offset(prefill_start_offset)
-                    .with_prefill_chunk_size(ctx.prefill_chunk_size);
+                    .with_prefill_chunk_size(ctx.prefill_chunk_size)
+                    .with_prefill_boundary(ctx.prefill_boundary);
             drive_mtp_generator(
                 adapter,
                 owned_drafter,
@@ -1346,7 +1366,8 @@ fn run_mtp_burst(
                     block_size,
                 )
                 .with_prefill_start_offset(prefill_start_offset)
-                .with_prefill_chunk_size(ctx.prefill_chunk_size);
+                .with_prefill_chunk_size(ctx.prefill_chunk_size)
+                .with_prefill_boundary(ctx.prefill_boundary);
             drive_mtp_generator(
                 adapter,
                 owned_drafter,
@@ -1368,7 +1389,8 @@ fn run_mtp_burst(
                     block_size,
                 )
                 .with_prefill_start_offset(prefill_start_offset)
-                .with_prefill_chunk_size(ctx.prefill_chunk_size);
+                .with_prefill_chunk_size(ctx.prefill_chunk_size)
+                .with_prefill_boundary(ctx.prefill_boundary);
             drive_mtp_generator(
                 adapter,
                 owned_drafter,
@@ -1938,7 +1960,7 @@ fn finalize_burst_success(
     // the first-token stamp must be the prefill's end, not the replay below;
     // the replay's own `mark_first_token` is then a no-op (issue #1592).
     seq.mark_first_token_at(prefill_end);
-    let mut stream = begin_burst_stream(ctx.model.eos_token_ids(), &seq);
+    let mut stream = begin_burst_stream(ctx.model.eos_token_ids(), &seq, ctx.context_bound);
     stream_burst_tokens(ctx.tokenizer, &mut seq, &mut stream, &tokens, &logprobs);
     finalize_burst_stream(ctx.tokenizer, seq, &stream, speculative)
 }
@@ -1952,50 +1974,74 @@ fn finalize_burst_success(
 /// drive the same three helpers ([`begin_burst_stream`],
 /// [`stream_burst_tokens`] (once, or once per slice), and
 /// [`finalize_burst_stream`]), so the client-visible event stream, the
-/// thinking-budget enforcement, and the EOS-vs-Length classification are
+/// thinking-budget enforcement, and the finish classification are
 /// identical regardless of how the tokens were produced.
 pub(crate) struct BurstStreamState {
     /// Merged EOS set (target EOS + per-request stop tokens), resolved once.
-    eos_set: std::collections::HashSet<i32>,
+    eos: Vec<i32>,
     /// Emission budget (`seq.max_tokens.max(1)`).
     max_tokens: usize,
-    /// Whether an EOS token (post thinking-budget override) terminated the
-    /// stream. Drives the `FinishReason::Stop` classification.
-    hit_eos: bool,
+    /// The scheduler's context bound, so a burst stops at the KV bound
+    /// exactly as classic decode does (#1472).
+    context: ContextBound,
+    /// Why the shared finish step (#2168) ended the stream, if it did.
+    /// `None` at finalize means the drafter / round loop stopped first.
+    finish: Option<FinishCause>,
     /// Whether the request asked for per-token logprobs.
     logprobs_enabled: bool,
-    /// Whether the stream reached a terminal condition (EOS or budget).
+    /// Whether the stream reached a terminal condition (any finish cause).
     /// Once set, further [`stream_burst_tokens`] calls are no-ops; the
     /// slice driver uses this to stop stepping the generator when the
     /// stream layer finished the request first (e.g. a thinking-budget
     /// forced `</think>` that is an EOS id).
     done: bool,
+    /// The finish step ended the stream before the last token of a batch
+    /// the generator had already produced (and forwarded into the target's
+    /// model-owned state). The model state then holds tokens past the
+    /// committed stream (`prompt + generated_tokens`), so the finish must
+    /// not donate its state to the prompt cache: a snapshot-reuse entry
+    /// keyed by the committed tokens would restore the uncommitted tail
+    /// into the next turn.
+    uncommitted_tail: bool,
+}
+
+impl BurstStreamState {
+    /// The cause the shared finish step recorded, if it ended the stream.
+    #[cfg(test)]
+    pub(crate) fn finish(&self) -> Option<FinishCause> {
+        self.finish
+    }
 }
 
 /// Resolve the per-request streaming state once, before the first tokens
 /// land. `model_eos_token_ids` is the target's EOS set
 /// (`LoadedModel::eos_token_ids()`); `seq.merged_eos` is empty on the burst
 /// path (the classic path populates it in `finish_prefill`), so the merged
-/// set is recomputed here from the sampling/model state.
+/// set is recomputed here from the sampling/model state. `context` is the
+/// scheduler's [`ContextBound`].
 pub(crate) fn begin_burst_stream(
     model_eos_token_ids: Vec<i32>,
     seq: &SequenceInfo,
+    context: ContextBound,
 ) -> BurstStreamState {
-    let merged_eos = merged_eos_token_ids(model_eos_token_ids, &seq.sampling.stop_token_ids);
     BurstStreamState {
-        eos_set: merged_eos.iter().copied().collect(),
+        eos: merged_eos_token_ids(model_eos_token_ids, &seq.sampling.stop_token_ids),
         max_tokens: seq.max_tokens.max(1),
-        hit_eos: false,
+        context,
+        finish: None,
         logprobs_enabled: seq.logprobs_config.enabled,
         done: false,
+        uncommitted_tail: false,
     }
 }
 
 /// Stream one batch of burst-produced tokens to `seq.response_tx`,
-/// committing them to `seq.generated_tokens` and applying the per-token
-/// thinking-budget + EOS + budget checks. Returns `true` when the stream
-/// reached a terminal condition (EOS or budget); the caller must then
-/// stop producing tokens and call [`finalize_burst_stream`].
+/// committing them to `seq.generated_tokens` through the shared finish step
+/// (#2168): the thinking-budget override first, then EOS, stop strings,
+/// generation bounds, the budget, the context bound and loop detection, the
+/// same checks in the same order as classic decode. Returns `true` when the
+/// stream reached a terminal condition; the caller must then stop producing
+/// tokens and call [`finalize_burst_stream`].
 ///
 /// `logprobs` is index-aligned 1:1 with `tokens` (this call's slice, not
 /// the whole request). An empty `logprobs` with logprobs enabled degrades
@@ -2025,11 +2071,6 @@ pub(crate) fn stream_burst_tokens(
     // plain `Token` events.
     let logprobs_on = stream.logprobs_enabled && !logprobs.is_empty();
     for (idx, token) in tokens.iter().copied().enumerate() {
-        if seq.generated_tokens.len() >= stream.max_tokens {
-            stream.done = true;
-            break;
-        }
-
         // thinking-budget enforcement, applied
         // per-emitted-token. See [`apply_burst_thinking_budget`].
         // `override_fired` gates logprob emission below: when the
@@ -2041,54 +2082,43 @@ pub(crate) fn stream_burst_tokens(
         // (`scheduler.rs::decode_single_step`).
         let (final_token, override_fired) = apply_burst_thinking_budget(&mut seq.thinking, token);
 
-        // EOS check before recording the token so EOS is reported as
-        // FinishReason::Stop, not Length, matching the classic
-        // `decode_single_step` semantics. The check uses the
-        // post-override `final_token` so a forced `</think>` that
-        // happens to be an EOS id is classified correctly.
-        if stream.eos_set.contains(&final_token) {
-            stream.hit_eos = true;
+        // `logprobs[idx]` mirrors the classic path's per-token
+        // `compute_logprobs(...)` result: `Some(lp)` emits
+        // `TokenWithLogprobs`, `None` emits plain `Token` (the classic path
+        // does the same when `compute_logprobs` returns `None`, e.g. on a
+        // sampler override). A fired thinking-budget override also forces
+        // plain `Token`.
+        let lp = if logprobs_on && !override_fired {
+            logprobs.get(idx).and_then(|lp| lp.clone())
+        } else {
+            None
+        };
+
+        // The EOS check runs on the post-override `final_token`, so a forced
+        // `</think>` that happens to be an EOS id is reported as `Stop`. A
+        // speculative request must not outrun its own stop strings, bounds
+        // (#1466, #1477) or repetition guard (#432) just because its tokens
+        // arrive several at a time.
+        let limits = StepLimits::Burst {
+            eos: &stream.eos,
+            max_tokens: stream.max_tokens,
+        };
+        if let Some(cause) = run_finish_step(
+            seq,
+            tokenizer,
+            final_token,
+            lp,
+            false,
+            stream.context,
+            limits,
+        ) {
+            stream.finish = Some(cause);
             stream.done = true;
+            // The generator already produced every token in `tokens`; any
+            // after `idx` sit in the model state but are never committed.
+            stream.uncommitted_tail = idx + 1 < tokens.len();
             break;
         }
-        seq.generated_tokens.push(final_token);
-        if let Some(new_text) = seq.decode_state.on_token(final_token, tokenizer) {
-            // `logprobs[idx]` mirrors the classic path's per-token
-            // `compute_logprobs(...)` result: `Some(lp)` → emit
-            // `TokenWithLogprobs`, `None` → emit plain `Token` (the
-            // classic path does the same when `compute_logprobs`
-            // returns `None`, e.g. on a sampler override). A fired
-            // thinking-budget override also forces plain `Token`.
-            let lp = if logprobs_on && !override_fired {
-                logprobs.get(idx).and_then(|lp| lp.clone())
-            } else {
-                None
-            };
-            // Same stop-string enforcement as the classic decode path
-            // (issue #1466): a speculative request must not outrun its own
-            // stop strings just because its tokens arrive several at a time.
-            if seq
-                .stream_decoded_text(new_text, Some(final_token), lp)
-                .is_some()
-            {
-                stream.done = true;
-                return true;
-            }
-            // A b10621 generation bound ends the burst too (#1477); a
-            // speculative request must not outrun its own bounds any more than
-            // it may outrun its stop strings.
-            if seq.bound_stopped() {
-                stream.done = true;
-                return true;
-            }
-        }
-    }
-    // Budget saturation terminates the stream even when the last committed
-    // token was the final in-budget one (the legacy loop discovered this at
-    // the top of the NEXT iteration; the slice driver needs it now so it
-    // stops stepping the generator).
-    if seq.generated_tokens.len() >= stream.max_tokens {
-        stream.done = true;
     }
     stream.done
 }
@@ -2109,17 +2139,14 @@ pub(crate) fn finalize_burst_stream(
     stream: &BurstStreamState,
     speculative: Option<SpeculativeStats>,
 ) -> FinalizeOutcome {
-    // Final state classification. A matched string stop sequence outranks the
-    // budget: the request ended because the caller's own stop string appeared,
-    // not because it ran out of tokens (issue #1466).
+    // Final state classification. A matched string stop sequence outranks
+    // everything else: the request ended because the caller's own stop string
+    // appeared (issue #1466). Otherwise the cause the shared finish step
+    // recorded maps exactly as on the classic path.
     let finish_reason = if seq.matched_stop().is_some() {
         FinishReason::StopSequence
-    } else if stream.hit_eos {
-        FinishReason::Stop
-    // A fired b10621 generation bound is a `limit` finish, ranked below a
-    // string stop and an EOS exactly as on the classic path (#1477).
-    } else if seq.bound_stopped() || seq.generated_tokens.len() >= stream.max_tokens {
-        FinishReason::Length
+    } else if let Some(cause) = stream.finish {
+        finish_reason_for(&mut seq, cause)
     } else {
         // The drafter / round loop bailed early without hitting EOS or
         // the budget — surface as Stop so the client sees a clean end
@@ -2127,22 +2154,26 @@ pub(crate) fn finalize_burst_stream(
         // still accurate.
         FinishReason::Stop
     };
-    // classify the finish for the prompt-cache donate gate
-    // BEFORE `finish_reason` is moved into `transition_to`. Mirrors the
-    // `healthy` gate in `scheduler.rs::finalize_completed` — only
-    // `Stop` / `StopSequence` / `Length` / `Cancelled` finishes donate their
-    // cache back. `finalize_burst_success` only ever classifies `Stop`,
-    // `StopSequence` or `Length` (the `Error` / `Cancelled` outcomes never
-    // reach this function), so this is always `true` here; computing it
-    // explicitly keeps the burst path's gate bit-identical to the classic
-    // path's and robust if the classification above ever gains a new arm.
-    let healthy_finish = matches!(
-        finish_reason,
-        FinishReason::Stop
-            | FinishReason::StopSequence
-            | FinishReason::Length
-            | FinishReason::Cancelled
-    );
+    // Classify the finish for the prompt-cache donate gate BEFORE
+    // `finish_reason` is moved into `transition_to`. The reason list mirrors
+    // the `healthy` gate in `scheduler.rs::finalize_completed`. On top of it,
+    // a stream the finish step truncated mid-batch never donates, whatever
+    // the cause: the generator had already forwarded the rest of that batch
+    // into the target's model-owned state, so the state is ahead of
+    // `prompt + generated_tokens`. Snapshot-reuse families snapshot the whole
+    // state under that shorter key, and a later whole-entry prompt-cache
+    // match would restore the uncommitted tail into the next turn. A finish
+    // on the last token of a batch leaves the state in step and donates as
+    // classic decode does.
+    let healthy_finish = !stream.uncommitted_tail
+        && matches!(
+            finish_reason,
+            FinishReason::Stop
+                | FinishReason::StopSequence
+                | FinishReason::Length
+                | FinishReason::RepetitionLoop
+                | FinishReason::Cancelled
+        );
     if let Err(err) = seq
         .state
         .transition_to(SequenceState::Finished(finish_reason))
@@ -2365,8 +2396,13 @@ pub(crate) fn try_run_burst_batched(
             let bs = *block_size;
             run_dflash_burst_batched(ctx.reborrow(), &mut seqs, bs)
         }
+        // Prompt lookup never bursts (it is not kind-specific); its verify
+        // rounds run inside the regular decode tick (#2255).
         crate::server::SpeculativeDispatch::Disabled
-        | crate::server::SpeculativeDispatch::Classic { .. } => Err(BurstOutcome::DeclineToClassic),
+        | crate::server::SpeculativeDispatch::Classic { .. }
+        | crate::server::SpeculativeDispatch::PromptLookup { .. } => {
+            Err(BurstOutcome::DeclineToClassic)
+        }
     };
 
     match result {
@@ -2466,6 +2502,67 @@ pub(crate) fn try_run_burst_batched(
     }
 }
 
+/// Largest batched MTP window the row-wise Gemma 4 geometries serve. A B>1
+/// verify there runs each row through the B = 1 calls, so a round costs about
+/// B single-row verifies; measured on GB10 (31B, issue #2190) that still beats
+/// classic batched decode at the widths up to this one.
+pub(crate) const ROW_WISE_MTP_MAX_BATCH: usize = 4;
+
+/// The window facts the row-wise batched MTP gate needs (issue #2190).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RowWiseBatchedWindow {
+    pub(crate) batch_size: usize,
+    pub(crate) max_prompt_len: usize,
+    pub(crate) max_tokens: usize,
+    pub(crate) block_size: usize,
+    /// The target's sliding window; zero when it has none.
+    pub(crate) sliding_window: usize,
+    /// Whether every per-layer cache is dense FP16, which the per-row prefill
+    /// stacking requires.
+    pub(crate) dense_fp16_caches: bool,
+    /// Whether this backend is one the batched win was measured on (CUDA, not
+    /// ROCm). The row-wise predicate also covers the 31B on Metal, where the
+    /// per-row batched verify has not been measured (#2158).
+    pub(crate) measured_backend: bool,
+}
+
+impl RowWiseBatchedWindow {
+    /// Why this window must decline to classic decode, or `None` when the
+    /// batched burst is decode-exact for it.
+    ///
+    /// The sliding cache compacts against the SHARED offset, so once it does,
+    /// a row lagging that offset has lost keys its own window needs and the
+    /// verify refuses the round mid-burst. The shared offset never passes
+    /// `max_prompt_len + block_size * (max_tokens + 1)`: every round emits at
+    /// least one token for every live row, so there are at most `max_tokens`
+    /// rounds, and a row that already finished still advances up to
+    /// `block_size` positions a round. Staying under the window plus the
+    /// rollback buffer keeps every round free of compaction.
+    pub(crate) fn decline_reason(&self) -> Option<&'static str> {
+        if !self.measured_backend {
+            return Some("row-wise batched MTP is measured on CUDA only");
+        }
+        if self.batch_size > ROW_WISE_MTP_MAX_BATCH {
+            return Some("window wider than the measured row-wise batched MTP win");
+        }
+        if !self.dense_fp16_caches {
+            return Some("per-row prefill stacking needs dense FP16 caches");
+        }
+        if self.sliding_window == 0 {
+            return None;
+        }
+        if self.max_prompt_len > self.sliding_window {
+            return Some("a prompt longer than the sliding window cannot be stacked");
+        }
+        let ceiling = self.sliding_window
+            + crate::models::gemma4_mtp_target::mtp_rotating_buffer_size(self.block_size) as usize;
+        let reach = self.max_prompt_len + self.block_size * (self.max_tokens + 1);
+        (reach > ceiling).then_some(
+            "the burst could pass the sliding rollback buffer, where lagging rows lose keys",
+        )
+    }
+}
+
 /// MTP batched burst — Gemma 4 / Gemma 4 VLM target (B > 1).
 ///
 /// Mirrors [`run_mtp_burst`] but drives [`MtpBatchedGenerator`] over the
@@ -2486,22 +2583,42 @@ fn run_mtp_burst_batched(
     }
     let batch_size = seqs.len();
 
-    // Used by: Gemma 4 text, VLM, and Unified targets. The startup probe
-    // validates a linear singleton, not a padded/batched reduction layout.
-    // A passing 31B probe must not enable the uncorrected batched path,
-    // even when MLXCEL_ENABLE_MTP_BATCH is explicitly enabled.
-    let requires_singleton = match ctx.model {
-        LoadedModel::Gemma4(wrapper) => wrapper.mtp_requires_linear_singleton(),
-        LoadedModel::Gemma4VLM(vlm) => vlm.text_model.mtp_requires_linear_singleton(),
-        LoadedModel::Gemma4Unified(unified) => unified.text_model.mtp_requires_linear_singleton(),
-        _ => false,
-    };
-    if requires_singleton {
-        tracing::debug!(
+    // Used by: Gemma 4 text, VLM, and Unified targets. On the row-wise
+    // geometries (31B everywhere, 12B on CUDA) the batched adapter verifies
+    // each row through the B = 1 calls and is decode-exact (issue #2190),
+    // but only inside the limits `RowWiseBatchedWindow` checks; any other
+    // window declines here, before drafter IO, so it never reaches a
+    // client-facing error mid-burst.
+    let row_wise = match ctx.model {
+        LoadedModel::Gemma4(wrapper) => Some(wrapper),
+        LoadedModel::Gemma4VLM(vlm) => Some(&vlm.text_model),
+        LoadedModel::Gemma4Unified(unified) => Some(&unified.text_model),
+        _ => None,
+    }
+    .filter(|wrapper| wrapper.mtp_requires_linear_singleton());
+    if let Some(wrapper) = row_wise {
+        let window = RowWiseBatchedWindow {
             batch_size,
-            "MTP batched dispatch declined: target exactness requires linear B=1 verification; falling back to classic decode"
-        );
-        return Err(BurstOutcome::DeclineToClassic);
+            max_prompt_len: seqs
+                .iter()
+                .map(|s| s.prompt_tokens.len())
+                .max()
+                .unwrap_or(0),
+            max_tokens: seqs.iter().map(|s| s.max_tokens).max().unwrap_or(0),
+            block_size,
+            sliding_window: wrapper.sliding_window_value(),
+            dense_fp16_caches: wrapper.speculative_caches_are_dense_fp16(),
+            // ROCm builds run MLX's GPU backend too but were not measured.
+            measured_backend: mlxcel_core::cuda_is_available() && !cfg!(feature = "rocm"),
+        };
+        if let Some(reason) = window.decline_reason() {
+            tracing::debug!(
+                batch_size,
+                reason,
+                "MTP batched dispatch declined for a row-wise Gemma 4 target; falling back to classic decode"
+            );
+            return Err(BurstOutcome::DeclineToClassic);
+        }
     }
 
     // HOIST: variant gate before any drafter IO.
@@ -2567,7 +2684,9 @@ fn run_mtp_burst_batched(
     let (tokens_per_row, decode_ms, recovered_drafter) = match ctx.model {
         LoadedModel::Gemma4(wrapper) => {
             let adapter =
-                Gemma4MtpBatchedTargetAdapter::new_with_block_size(wrapper, batch_size, block_size);
+                Gemma4MtpBatchedTargetAdapter::new_with_block_size(wrapper, batch_size, block_size)
+                    .with_prefill_chunk_size(ctx.prefill_chunk_size)
+                    .with_prefill_boundaries(ctx.prefill_boundaries.clone());
             drive_mtp_batched_generator(
                 adapter,
                 owned_drafter,
@@ -2579,7 +2698,9 @@ fn run_mtp_burst_batched(
         }
         LoadedModel::Gemma4VLM(vlm) => {
             let adapter =
-                Gemma4VLMtpBatchedTargetAdapter::new_with_block_size(vlm, batch_size, block_size);
+                Gemma4VLMtpBatchedTargetAdapter::new_with_block_size(vlm, batch_size, block_size)
+                    .with_prefill_chunk_size(ctx.prefill_chunk_size)
+                    .with_prefill_boundaries(ctx.prefill_boundaries.clone());
             drive_mtp_batched_generator(
                 adapter,
                 owned_drafter,
@@ -2592,7 +2713,9 @@ fn run_mtp_burst_batched(
         LoadedModel::Gemma4Unified(unified) => {
             let adapter = Gemma4UnifiedMtpBatchedTargetAdapter::new_with_block_size(
                 unified, batch_size, block_size,
-            );
+            )
+            .with_prefill_chunk_size(ctx.prefill_chunk_size)
+            .with_prefill_boundaries(ctx.prefill_boundaries.clone());
             drive_mtp_batched_generator(
                 adapter,
                 owned_drafter,

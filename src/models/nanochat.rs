@@ -394,6 +394,20 @@ impl LanguageModel for NanoChatModel {
         self.logits_from_hidden(&row)
     }
 
+    /// The engine's prefill entry (CLI and server alike) passes a sequence id;
+    /// nanochat keeps dense caches, so the id changes nothing and the prefill
+    /// still projects only the last row.
+    fn forward_last_logits_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        _seq_id: Option<mlxcel_core::cache::SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        last_pos: usize,
+    ) -> UniquePtr<MlxArray> {
+        LanguageModel::forward_last_logits(self, input_ids, caches, mask, last_pos)
+    }
+
     fn make_caches(&self) -> Vec<KVCache> {
         NanoChatModel::make_caches(self)
     }

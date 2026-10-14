@@ -672,9 +672,9 @@ pub(crate) fn is_embedding_checkpoint(
 /// turns it into `ModelMediaSupport::video_native` and
 /// `commands::generate` uses it to decide whether `--video` needs the
 /// frames fallback, so the HTTP boundary and the CLI cannot drift apart.
-/// Mirror the dispatch in `commands/generate_vlm::compute_vlm_embeddings` and
-/// `server::model_worker::prepare_request_video_embeddings` when a family
-/// gains a native path.
+/// Mirror `server::model_worker::prepare_request_video_embeddings` (which
+/// `mlxcel generate` also reaches, issue #2173) when a family gains a native
+/// path.
 #[must_use]
 pub fn model_type_has_native_video(model_type: ModelType) -> bool {
     matches!(

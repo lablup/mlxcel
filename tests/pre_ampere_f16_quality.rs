@@ -48,7 +48,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use mlxcel::{CxxGenerator, LanguageModel, load_model};
+use mlxcel::{LanguageModel, MlxInferenceSession, load_model};
 use mlxcel_core::cache::KVCacheMode;
 
 /// Window sizes required by #1542. Short windows stress the per-token
@@ -120,7 +120,8 @@ fn compute_ppl_at(
     let ids: Vec<i32> = all_ids.iter().map(|&id| id as i32).collect();
     let bos = tokenizer.bos_token_id().map(|id| id as i32);
 
-    let mut generator = CxxGenerator::new_with_kv_mode(model.num_layers(), KVCacheMode::Fp16);
+    let mut generator =
+        MlxInferenceSession::new_with_kv_mode(model.num_layers(), KVCacheMode::Fp16);
     let mut total_nll = 0.0_f64;
     let mut total_targets = 0_usize;
     let mut non_finite = 0_usize;

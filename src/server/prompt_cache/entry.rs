@@ -105,8 +105,7 @@ impl DetachedKvSet {
 /// [`DetachedPagedCacheSet`]: `CachePool::detach_paged` is the only producer of
 /// that type and it now refuses the handle-less shape outright (#1346), which
 /// is exactly the case the third term guards. Same house style as
-/// `boundary_capture_applies` and `next_chunked_prefill_range` in the
-/// scheduler.
+/// `boundary_capture_applies` in the scheduler.
 ///
 /// * `seq_len`: visible tokens the block table exposes.
 /// * `retained_blocks`: physical pool blocks the set pins.

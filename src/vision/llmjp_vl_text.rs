@@ -22,7 +22,7 @@
 //! Used by: [`crate::vision::llmjp_vl`].
 
 use mlxcel_core::cache::{KVCacheMode, SequenceId, SequenceStateLayout};
-use mlxcel_core::generate::{DecodeBatchContext, LanguageModel};
+use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -134,37 +134,19 @@ impl LanguageModel for LlmJpTextModel {
         ))
     }
 
-    fn forward_batched_with_context(
-        &self,
-        input_ids: &MlxArray,
-        batch_caches: &mut [&mut [KVCache]],
-        mask: Option<&MlxArray>,
-        context: Option<&DecodeBatchContext>,
-    ) -> UniquePtr<MlxArray> {
-        on_text_model!(self, inner => LanguageModel::forward_batched_with_context(
-            inner,
-            input_ids,
-            batch_caches,
-            mask,
-            context,
-        ))
-    }
-
-    fn forward_batched_with_context_and_ids(
+    fn forward_batched_with_ids(
         &self,
         input_ids: &MlxArray,
         seq_ids: Option<&[SequenceId]>,
         batch_caches: &mut [&mut [KVCache]],
         mask: Option<&MlxArray>,
-        context: Option<&DecodeBatchContext>,
     ) -> UniquePtr<MlxArray> {
-        on_text_model!(self, inner => LanguageModel::forward_batched_with_context_and_ids(
+        on_text_model!(self, inner => LanguageModel::forward_batched_with_ids(
             inner,
             input_ids,
             seq_ids,
             batch_caches,
             mask,
-            context,
         ))
     }
 

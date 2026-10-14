@@ -1,0 +1,472 @@
+diff --git a/src/server/batch/scheduler/config.rs b/src/server/batch/scheduler/config.rs
+index 4a9e4fa5..03f9d950 100644
+--- a/src/server/batch/scheduler/config.rs
++++ b/src/server/batch/scheduler/config.rs
+@@ -105,6 +105,7 @@ impl BatchScheduler {
+             request_rx,
+             batch_metrics,
+             batch_observability,
++            b1_decode_profile: b1_profile::B1DecodeProfile::new(),
+             config_eos,
+             prefill_chunk_policy: mlxcel_core::prefill_plan::PrefillChunkPolicy::resolve(Some(
+                 prefill_chunk_size,
+diff --git a/src/server/batch/scheduler/decode_tick.rs b/src/server/batch/scheduler/decode_tick.rs
+index 01e4222b..46a1c3e3 100644
+--- a/src/server/batch/scheduler/decode_tick.rs
++++ b/src/server/batch/scheduler/decode_tick.rs
+@@ -517,7 +517,10 @@ impl BatchScheduler {
+             }
+         }
+         let input = mlxcel_core::from_slice_i32(&last_tokens, &[seq_ids.len() as i32, 1]);
++        let profile_started = self.b1_decode_profile.start();
+         self.decode_lookahead = self.prime_lookahead_with_input(seq_ids, &input, &params);
++        self.b1_decode_profile
++            .record(b1_profile::Stage::LookaheadSubmit, profile_started);
+     }
+ 
+     /// Submit one pipelined step for `seq_ids` on `input` (`[B, 1]`): the
+@@ -608,9 +611,13 @@ impl BatchScheduler {
+         // through the host read below. This appends a second speculative KV
+         // position per sequence (the overshoot the issue accepts).
+         let next_input = mlxcel_core::engine::lookahead_feedback_input(&la.tokens);
++        let submit_started = self.b1_decode_profile.start();
+         let next = self.prime_lookahead_with_input(seq_ids, &next_input, params);
++        self.b1_decode_profile
++            .record(b1_profile::Stage::LookaheadSubmit, submit_started);
+ 
+         // Step 2: read step n's tokens to host (the sync point) and finish-check.
++        let collect_started = self.b1_decode_profile.start();
+         let toks = match mlxcel_core::engine::try_tokens_to_host(&la.tokens) {
+             Ok(tokens) => tokens,
+             Err(msg) => {
+@@ -618,6 +625,8 @@ impl BatchScheduler {
+                 Vec::new()
+             }
+         };
++        self.b1_decode_profile
++            .record(b1_profile::Stage::LookaheadCollect, collect_started);
+         let mut finishing = toks.len() != seq_ids.len();
+         if !finishing {
+             for (i, &seq_id) in seq_ids.iter().enumerate() {
+@@ -769,21 +778,39 @@ impl BatchScheduler {
+         let context = self.context_bound();
+         let batch = StepBatch { seq_ids, input };
+         let stepped = {
++            let lookup_started = self.b1_decode_profile.start();
+             let Some(seqs) = self.active_batch.get_rows_mut(seq_ids) else {
++                self.b1_decode_profile
++                    .record(b1_profile::Stage::RowLookup, lookup_started);
+                 tracing::warn!("a sequence left the active batch before its decode step");
+                 return;
+             };
++            self.b1_decode_profile
++                .record(b1_profile::Stage::RowLookup, lookup_started);
+             let tokenizer = &self.tokenizer;
++            let build_started = self.b1_decode_profile.start();
+             let mut rows: Vec<_> = seqs
+                 .into_iter()
+                 .map(|seq| step_rows::step_row(seq, tokenizer, context, false))
+                 .collect();
+-            self.engine.step(&batch, &mut rows)
++            self.b1_decode_profile
++                .record(b1_profile::Stage::RowBuild, build_started);
++            let engine_started = self.b1_decode_profile.start();
++            let stepped = self.engine.step(&batch, &mut rows);
++            self.b1_decode_profile
++                .record(b1_profile::Stage::EngineStep, engine_started);
++            stepped
+         };
+         match stepped {
+             Ok(out) => {
++                let finish_started = self.b1_decode_profile.start();
+                 self.finish_rows_state(&out.rows);
++                self.b1_decode_profile
++                    .record(b1_profile::Stage::FinishState, finish_started);
++                let apply_started = self.b1_decode_profile.start();
+                 self.apply_row_outcomes(&out.rows);
++                self.b1_decode_profile
++                    .record(b1_profile::Stage::ApplyOutcomes, apply_started);
+             }
+             Err(err) => tracing::error!("{err} during decode"),
+         }
+@@ -848,23 +875,43 @@ impl BatchScheduler {
+         );
+         let context = self.context_bound();
+         let outcomes = {
++            let lookup_started = self.b1_decode_profile.start();
+             let Some(seqs) = self.active_batch.get_rows_mut(seq_ids) else {
++                self.b1_decode_profile
++                    .record(b1_profile::Stage::RowLookup, lookup_started);
+                 tracing::warn!("a sequence left the active batch before its pipelined step");
+                 return;
+             };
++            self.b1_decode_profile
++                .record(b1_profile::Stage::RowLookup, lookup_started);
+             let tokenizer = &self.tokenizer;
++            let build_started = self.b1_decode_profile.start();
+             let mut rows: Vec<_> = seqs
+                 .into_iter()
+                 .map(|seq| step_rows::step_row(seq, tokenizer, context, false))
+                 .collect();
+-            self.engine.finish_rows(tokens, &mut rows)
++            self.b1_decode_profile
++                .record(b1_profile::Stage::RowBuild, build_started);
++            let finish_started = self.b1_decode_profile.start();
++            let outcomes = self.engine.finish_rows(tokens, &mut rows);
++            self.b1_decode_profile
++                .record(b1_profile::Stage::FusedFinishRows, finish_started);
++            outcomes
+         };
++        let finish_state_started = self.b1_decode_profile.start();
+         self.finish_rows_state(&outcomes);
++        self.b1_decode_profile.record(
++            b1_profile::Stage::FinishState,
++            finish_state_started,
++        );
+         // The gate keeps per-row failures off this path; a failed row here is
+         // the engine refusing a token count that does not match the rows, and
+         // it must finish with an error rather than stall.
+         if outcomes.iter().any(|outcome| outcome.error.is_some()) {
++            let apply_started = self.b1_decode_profile.start();
+             self.apply_row_outcomes(&outcomes);
++            self.b1_decode_profile
++                .record(b1_profile::Stage::ApplyOutcomes, apply_started);
+         }
+     }
+ 
+diff --git a/src/server/batch/scheduler/mod.rs b/src/server/batch/scheduler/mod.rs
+index a1b6aa9c..073d11da 100644
+--- a/src/server/batch/scheduler/mod.rs
++++ b/src/server/batch/scheduler/mod.rs
+@@ -337,6 +337,8 @@ pub struct BatchScheduler {
+     batch_metrics: Arc<BatchMetrics>,
+     /// Detailed observability counters (prefill, decode, cache).
+     batch_observability: Arc<BatchObservability>,
++    /// Temporary issue #2227 pre-change host-time attribution.
++    b1_decode_profile: b1_profile::B1DecodeProfile,
+ 
+     // -- Configuration --
+     config_eos: Vec<i32>,
+@@ -948,6 +950,7 @@ fn validate_dense_detached_kv_modes_against_table(
+ 
+ mod admission;
+ mod admission_watermark;
++pub(crate) mod b1_profile;
+ mod block_reclaim;
+ mod config;
+ mod decode_tick;
+diff --git a/src/server/batch/scheduler/run_loop.rs b/src/server/batch/scheduler/run_loop.rs
+index 207b4cbe..cfd842ba 100644
+--- a/src/server/batch/scheduler/run_loop.rs
++++ b/src/server/batch/scheduler/run_loop.rs
+@@ -257,6 +257,14 @@ impl BatchScheduler {
+         install_thread_local_default_stream(self.generation_stream.as_ref());
+ 
+         loop {
++            // Temporary issue #2227 profile: an active B=1 row at loop entry
++            // means prefill has ended and the next measurements belong to the
++            // decode request, so discard startup/prefill samples here.
++            if self.active_batch.len() == 1 {
++                self.b1_decode_profile.begin_decode_tick();
++            }
++            let profile_tick_started = self.b1_decode_profile.start();
++            let mut profiled_decode = false;
+             // 1. Non-blocking drain of all pending requests
+             self.drain_incoming_requests();
+ 
+@@ -304,6 +312,7 @@ impl BatchScheduler {
+                 }
+                 BatchSchedulerAction::Decode(ids) => {
+                     self.execute_decode_step(&ids);
++                    profiled_decode = ids.len() == 1;
+                     // A classic action ran: the next tick goes back to the
+                     // in-flight speculative slice, if any (issue #734).
+                     self.speculative_slice_yielded = false;
+@@ -406,11 +415,23 @@ impl BatchScheduler {
+             }
+ 
+             // 4. Clean up completed sequences
++            let finalize_started = self.b1_decode_profile.start();
+             self.finalize_completed();
++            self.b1_decode_profile.record(
++                b1_profile::Stage::FinalizeCompleted,
++                finalize_started,
++            );
++            if profiled_decode {
++                self.b1_decode_profile.record_tick(profile_tick_started);
++                if self.active_batch.is_empty() {
++                    self.b1_decode_profile.emit_and_reset();
++                }
++            }
+         }
+     }
+ 
+     pub(super) fn publish_metrics(&self) {
++        let profile_started = self.b1_decode_profile.start();
+         let active = self.active_batch.len();
+         let queued = self.prefill_queue.len();
+         let paged_stats = self.engine.pool().paged_stats();
+@@ -434,5 +455,7 @@ impl BatchScheduler {
+         // makes the answer readable from `/health` without a profiler.
+         self.batch_observability
+             .update_paged_decode_gauges(mlxcel_core::cache::paged_batch_decode_stats());
++        self.b1_decode_profile
++            .record(b1_profile::Stage::Metrics, profile_started);
+     }
+ }
+diff --git a/src/server/batch/sequence.rs b/src/server/batch/sequence.rs
+index cb4166ef..7e40c858 100644
+--- a/src/server/batch/sequence.rs
++++ b/src/server/batch/sequence.rs
+@@ -728,7 +728,9 @@ pub(crate) fn emit_decoded_piece(
+             Some(lp) => GenerateEvent::TokenWithLogprobs(text, meta, lp),
+             None => GenerateEvent::Token(text, meta),
+         };
++        let send_started = super::scheduler::b1_profile::started();
+         let _ = response_tx.send(event);
++        super::scheduler::b1_profile::record_event_send(send_started);
+         return None;
+     }
+ 
+@@ -747,7 +749,9 @@ pub(crate) fn emit_decoded_piece(
+         Some(lp) => GenerateEvent::TokenWithLogprobs(chunk.emit, meta, lp),
+         None => GenerateEvent::Token(chunk.emit, meta),
+     };
++    let send_started = super::scheduler::b1_profile::started();
+     let _ = response_tx.send(event);
++    super::scheduler::b1_profile::record_event_send(send_started);
+     chunk.matched
+ }
+ 
+diff --git a/src/server/batch/scheduler/b1_profile.rs b/src/server/batch/scheduler/b1_profile.rs
+new file mode 100644
+index 00000000..2be204a0
+--- /dev/null
++++ b/src/server/batch/scheduler/b1_profile.rs
+@@ -0,0 +1,226 @@
++// Copyright 2025-2026 Lablup Inc.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++//! Temporary host-clock attribution for issue #2227's pre-change profile.
++//!
++//! This module is removed after the required baseline profile. It is gated by
++//! `MLXCEL_B1_DECODE_PROFILE=1`, so the same release binary can run the CLI arm
++//! without timer overhead and the server arm with per-stage attribution.
++
++use std::cell::Cell;
++use std::fmt::Write as _;
++use std::sync::OnceLock;
++use std::time::{Duration, Instant};
++
++const PROFILE_ENV: &str = "MLXCEL_B1_DECODE_PROFILE";
++
++#[derive(Debug, Clone, Copy)]
++pub(super) enum Stage {
++    Metrics,
++    RowLookup,
++    RowBuild,
++    EngineStep,
++    FinishState,
++    ApplyOutcomes,
++    LookaheadSubmit,
++    LookaheadCollect,
++    FusedFinishRows,
++    FinalizeCompleted,
++}
++
++impl Stage {
++    const ALL: [Self; 10] = [
++        Self::Metrics,
++        Self::RowLookup,
++        Self::RowBuild,
++        Self::EngineStep,
++        Self::FinishState,
++        Self::ApplyOutcomes,
++        Self::LookaheadSubmit,
++        Self::LookaheadCollect,
++        Self::FusedFinishRows,
++        Self::FinalizeCompleted,
++    ];
++
++    const fn index(self) -> usize {
++        self as usize
++    }
++
++    const fn name(self) -> &'static str {
++        match self {
++            Self::Metrics => "metrics",
++            Self::RowLookup => "row_lookup",
++            Self::RowBuild => "row_build",
++            Self::EngineStep => "engine_step",
++            Self::FinishState => "finish_state",
++            Self::ApplyOutcomes => "apply_outcomes",
++            Self::LookaheadSubmit => "lookahead_submit",
++            Self::LookaheadCollect => "lookahead_collect",
++            Self::FusedFinishRows => "fused_finish_rows",
++            Self::FinalizeCompleted => "finalize_completed",
++        }
++    }
++}
++
++fn enabled() -> bool {
++    static ENABLED: OnceLock<bool> = OnceLock::new();
++    *ENABLED.get_or_init(|| std::env::var(PROFILE_ENV).is_ok_and(|value| value.trim() == "1"))
++}
++
++pub(crate) fn started() -> Option<Instant> {
++    enabled().then(Instant::now)
++}
++
++fn duration_ns(duration: Duration) -> u64 {
++    duration.as_nanos().min(u128::from(u64::MAX)) as u64
++}
++
++thread_local! {
++    static EVENT_SEND_NS: Cell<u64> = const { Cell::new(0) };
++    static EVENT_SEND_CALLS: Cell<u64> = const { Cell::new(0) };
++}
++
++pub(crate) fn record_event_send(started: Option<Instant>) {
++    let Some(started) = started else {
++        return;
++    };
++    let elapsed = duration_ns(started.elapsed());
++    EVENT_SEND_NS.with(|total| total.set(total.get().saturating_add(elapsed)));
++    EVENT_SEND_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
++}
++
++fn reset_event_send() {
++    EVENT_SEND_NS.with(|total| total.set(0));
++    EVENT_SEND_CALLS.with(|calls| calls.set(0));
++}
++
++fn event_send_snapshot() -> (u64, u64) {
++    let total = EVENT_SEND_NS.with(Cell::get);
++    let calls = EVENT_SEND_CALLS.with(Cell::get);
++    (total, calls)
++}
++
++pub(super) struct B1DecodeProfile {
++    enabled: bool,
++    run: Cell<u64>,
++    ticks: Cell<u64>,
++    tick_ns: Cell<u64>,
++    stage_ns: [Cell<u64>; Stage::ALL.len()],
++    stage_calls: [Cell<u64>; Stage::ALL.len()],
++}
++
++impl B1DecodeProfile {
++    pub(super) fn new() -> Self {
++        Self {
++            enabled: enabled(),
++            run: Cell::new(0),
++            ticks: Cell::new(0),
++            tick_ns: Cell::new(0),
++            stage_ns: std::array::from_fn(|_| Cell::new(0)),
++            stage_calls: std::array::from_fn(|_| Cell::new(0)),
++        }
++    }
++
++    pub(super) fn start(&self) -> Option<Instant> {
++        self.enabled.then(Instant::now)
++    }
++
++    pub(super) fn begin_decode_tick(&self) {
++        if !self.enabled || self.ticks.get() != 0 {
++            return;
++        }
++        self.clear_measurement();
++    }
++
++    pub(super) fn record(&self, stage: Stage, started: Option<Instant>) {
++        let Some(started) = started else {
++            return;
++        };
++        let index = stage.index();
++        self.stage_ns[index].set(
++            self.stage_ns[index]
++                .get()
++                .saturating_add(duration_ns(started.elapsed())),
++        );
++        self.stage_calls[index].set(self.stage_calls[index].get().saturating_add(1));
++    }
++
++    pub(super) fn record_tick(&self, started: Option<Instant>) {
++        let Some(started) = started else {
++            return;
++        };
++        self.tick_ns
++            .set(self.tick_ns.get().saturating_add(duration_ns(started.elapsed())));
++        self.ticks.set(self.ticks.get().saturating_add(1));
++    }
++
++    pub(super) fn emit_and_reset(&self) {
++        if !self.enabled || self.ticks.get() == 0 {
++            return;
++        }
++        let run = self.run.get().saturating_add(1);
++        self.run.set(run);
++        let ticks = self.ticks.get();
++        let tick_ns = self.tick_ns.get();
++        let mut line = format!(
++            "[b1-profile] {{\"run\":{run},\"ticks\":{ticks},\"tick_total_ns\":{tick_ns},\"tick_avg_us\":{:.3},\"stages\":{{",
++            tick_ns as f64 / ticks as f64 / 1_000.0
++        );
++        for (position, stage) in Stage::ALL.into_iter().enumerate() {
++            if position > 0 {
++                line.push(',');
++            }
++            let index = stage.index();
++            let total = self.stage_ns[index].get();
++            let calls = self.stage_calls[index].get();
++            let tick_pct = if tick_ns == 0 {
++                0.0
++            } else {
++                total as f64 * 100.0 / tick_ns as f64
++            };
++            let _ = write!(
++                line,
++                "\"{}\":{{\"calls\":{},\"total_ns\":{},\"tick_pct\":{:.4}}}",
++                stage.name(),
++                calls,
++                total,
++                tick_pct
++            );
++        }
++        let (event_ns, event_calls) = event_send_snapshot();
++        let event_pct = if tick_ns == 0 {
++            0.0
++        } else {
++            event_ns as f64 * 100.0 / tick_ns as f64
++        };
++        let _ = write!(
++            line,
++            "}},\"event_send\":{{\"calls\":{event_calls},\"total_ns\":{event_ns},\"tick_pct\":{event_pct:.4}}}}}"
++        );
++        eprintln!("{line}");
++        self.clear_measurement();
++    }
++
++    fn clear_measurement(&self) {
++        self.ticks.set(0);
++        self.tick_ns.set(0);
++        for value in &self.stage_ns {
++            value.set(0);
++        }
++        for value in &self.stage_calls {
++            value.set(0);
++        }
++        reset_event_send();
++    }
++}

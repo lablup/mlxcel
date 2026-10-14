@@ -71,7 +71,7 @@ use common::repo_model_dir;
 
 use std::path::PathBuf;
 
-use mlxcel::{DecodeBatchContext, LanguageModel, initialize_runtime, load_model};
+use mlxcel::{LanguageModel, initialize_runtime, load_model};
 use mlxcel_core::cache::{CachePool, PagedKvLayout, SequenceStateLayout};
 
 /// Paged block size, matching the scheduler's `DEFAULT_PAGED_BLOCK_SIZE`.
@@ -182,9 +182,9 @@ fn run_batched(
         next[slot] = greedy_token(&logits, 0, len as i32 - 1);
     }
 
-    // Batched greedy decode, exactly the dispatch `execute_batched_decode`
-    // performs for the paged storage backend.
-    let context = DecodeBatchContext::paged_with_native(BLOCK_SIZE as i32, true);
+    // Batched greedy decode, exactly the dispatch `Engine::step` performs for
+    // a batch of pool-backed rows: the storage behind each cache picks the
+    // kernel (ADR 0008), so there is no per-step storage hint to pass.
     let mut streams: Vec<Vec<i32>> = (0..BATCH).map(|_| Vec::with_capacity(steps)).collect();
     for _ in 0..steps {
         for (slot, stream) in streams.iter_mut().enumerate() {
@@ -193,13 +193,7 @@ fn run_batched(
         let input = mlxcel_core::from_slice_i32(&next, &[BATCH as i32, 1]);
         let logits = {
             let mut batch_caches = pool.get_batch_caches_mut(&ids).expect("batch caches");
-            model.forward_batched_with_context_and_ids(
-                &input,
-                Some(&ids),
-                &mut batch_caches,
-                None,
-                Some(&context),
-            )
+            model.forward_batched_with_ids(&input, Some(&ids), &mut batch_caches, None)
         };
         mlxcel_core::eval(&logits);
         for (slot, entry) in next.iter_mut().enumerate() {

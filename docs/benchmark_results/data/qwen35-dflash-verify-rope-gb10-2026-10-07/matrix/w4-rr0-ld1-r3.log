@@ -1,0 +1,10 @@
+
+running 1 test
+test models::qwen3_5::qwen3_5_dflash_probe_tests::block_versus_chain_byte_bisect_on_the_real_transcript ... [1935] models/mlx/qwen3.5-4b-4bit, 32 layers, block 4, 79 accepts, prompt 158, reference 200
+[1935] FIRST byte difference at round 60 row 1 (emitted index 134, absolute position 291): 236123 of 496640 logit bytes
+[1935] FIRST layer divergence at layer 3 (full attention): 859 of 5120 hidden bytes
+[1935] 79 rounds, 67 of 200 kept rows differ in logit bytes
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9012 filtered out; finished in 9.04s
+

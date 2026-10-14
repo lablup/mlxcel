@@ -807,7 +807,7 @@ async fn next_turn_warmup_renders_with_the_mapped_reasoning_effort() {
         "the served prompt must carry the low instruction, got: {served}"
     );
 
-    let warmed = render_next_turn_history(&processor, &req, None, "hello")
+    let warmed = render_next_turn_history(&processor, &req, None, "hello", None)
         .expect("a text-only turn with a reply must produce a next-turn history");
     assert!(
         warmed.probe_a.contains(LOW_INSTRUCTION),
@@ -834,7 +834,7 @@ async fn next_turn_warmup_without_an_effort_keeps_the_template_default() {
         .expect("an unset effort must render");
     assert!(served.contains(XHIGH_INSTRUCTION));
 
-    let warmed = render_next_turn_history(&processor, &req, None, "hello")
+    let warmed = render_next_turn_history(&processor, &req, None, "hello", None)
         .expect("a text-only turn with a reply must produce a next-turn history");
     assert!(
         warmed.probe_a.contains(XHIGH_INSTRUCTION),

@@ -1,0 +1,10 @@
+model: Meta-Llama-3.1-8B-Instruct-4bit
+generate vs run text: identical
+run vs server dense text: identical
+server dense vs server paged text: identical
+# first_divergence	identical
+# restarts	
+top-1 disagreement                      0 / 128       0.000%
+  on decided positions (gap>=2.0)       0 / 44        0.000%   <- gate on this
+      1 2026-10-08T10:17:34.391356Z  INFO prefill{seq_id=seq-0 prompt_len=1 cached=0 start=0}: mlxcel_core::cache::paged_batch_decode: paged decode v2: gather: 1 visible KV tokens across 1 request(s) is below the 4096-token dispatch floor
+      1 2026-10-08T10:17:34.385945Z  INFO mlxcel::server::model_provider::model_worker: Starting BatchScheduler (max_batch_size=2, max_queue_depth=32, prefill_chunk_size=2048, max_batch_prefill=4, decode_storage=paged)

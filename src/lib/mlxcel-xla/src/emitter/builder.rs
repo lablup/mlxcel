@@ -101,7 +101,10 @@ impl Precision {
 /// unset / unrecognized (so the per-device default applies).
 #[must_use]
 pub fn precision_env_override() -> Option<Precision> {
-    match std::env::var("MLXCEL_XLA_PRECISION").as_deref() {
+    match std::env::var("MLXCEL_XLA_PRECISION")
+        .as_deref()
+        .map(str::trim)
+    {
         Ok("f16") => Some(Precision::F16),
         Ok("bf16") => Some(Precision::Bf16),
         // `f32` is an explicit override too, so it forces f32 even on a GPU device
@@ -134,14 +137,14 @@ pub fn quant_in_graph() -> bool {
 }
 
 /// The default contraction precision for a HAL device when `MLXCEL_XLA_PRECISION`
-/// is unset: `f16` on the GPU devices (`metal`, `cuda`), whose runtimes and the
-/// pinned iree-compile handle f16 well and where it is ~2x, and `f32` on the CPU
-/// (`local-task` / `local-sync`), where f16 gains little and can round-trip
-/// through f32 anyway. CUDA is never *auto*-selected as a device, but if it is
-/// the target this is its default precision.
+/// is unset: `f16` on the GPU devices (`metal`, `cuda`, `hip`), whose runtimes and
+/// the pinned iree-compile handle f16 well and where it is ~2x, and `f32` on the
+/// CPU (`local-task` / `local-sync`), where f16 gains little and can round-trip
+/// through f32 anyway. CUDA and HIP are never *auto*-selected as a device, but if
+/// selected explicitly this is their default precision.
 #[must_use]
 pub fn default_precision(device: &str) -> Precision {
-    if device == "metal" || device == "cuda" {
+    if device == "metal" || device == "cuda" || device == "hip" {
         Precision::F16
     } else {
         Precision::F32
@@ -166,14 +169,28 @@ fn precision_lowers_on(device: &str, precision: Precision) -> bool {
     !(device == "metal" && precision == Precision::Bf16)
 }
 
-/// [`resolve_precision`], but reject a precision the target cannot lower before it
-/// reaches `iree-compile` (issue #612, found in #575). Without this, bf16 on Metal
-/// fails deep inside `iree-compile` with an opaque `vector.bitcast` legalization
-/// dump, after model load. Catch it at the emit/compile boundary and return an
-/// actionable message pointing at f16 (the Metal default). bf16 is only ever the
-/// explicit env override here (never a per-device default), so the message names it.
-pub fn resolve_precision_checked(device: &str) -> Result<Precision, String> {
-    let precision = resolve_precision(device);
+/// Pure precision resolver with an optional explicit raw env override,
+/// allowing unit tests to exercise all branches without process env mutation.
+pub fn resolve_precision_checked_with_override(
+    device: &str,
+    raw_override: Option<&str>,
+) -> Result<Precision, String> {
+    if let Some(raw) = raw_override {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() && !matches!(trimmed, "f16" | "bf16" | "f32") {
+            return Err(format!(
+                "[compile] unsupported MLXCEL_XLA_PRECISION={raw:?} on device={device:?}: \
+                 expected `f16`, `bf16`, or `f32`."
+            ));
+        }
+    }
+    let opt_precision = raw_override.and_then(|raw| match raw.trim() {
+        "f16" => Some(Precision::F16),
+        "bf16" => Some(Precision::Bf16),
+        "f32" => Some(Precision::F32),
+        _ => None,
+    });
+    let precision = opt_precision.unwrap_or_else(|| default_precision(device));
     if precision_lowers_on(device, precision) {
         Ok(precision)
     } else {
@@ -184,6 +201,17 @@ pub fn resolve_precision_checked(device: &str) -> Result<Precision, String> {
                 .to_string(),
         )
     }
+}
+
+/// [`resolve_precision`], but reject a precision the target cannot lower before it
+/// reaches `iree-compile` (issue #612, found in #575). Without this, bf16 on Metal
+/// fails deep inside `iree-compile` with an opaque `vector.bitcast` legalization
+/// dump, after model load. Catch it at the emit/compile boundary and return an
+/// actionable message pointing at f16 (the Metal default). bf16 is only ever the
+/// explicit env override here (never a per-device default), so the message names it.
+pub fn resolve_precision_checked(device: &str) -> Result<Precision, String> {
+    let raw = std::env::var("MLXCEL_XLA_PRECISION").ok();
+    resolve_precision_checked_with_override(device, raw.as_deref())
 }
 
 /// Whether a packed int8 in-graph-dequant build can execute on `device`.
@@ -212,9 +240,76 @@ pub fn check_packed_supported(device: &str, packed_active: bool) -> Result<(), S
              int8 dequant prefill faults at runtime on the metal HAL driver (Metal \
              command buffer error), and its bandwidth win is un-demonstrable on the \
              compute-bound Metal decode. Unset MLXCEL_XLA_QUANT to dequant at load, \
-             or use the CUDA / CPU (local-task) target."
+             or use the CUDA / HIP / CPU (local-task) target."
                 .to_string(),
         )
+    }
+}
+
+/// Validate an AMD GPU target identifier (e.g. `gfx1151`, `gfx1100`, `gfx942`,
+/// `gfx90a`) for `--iree-rocm-target=<target>`.
+fn validate_rocm_target(raw: Option<&str>) -> Result<String, String> {
+    let target = raw.map(str::trim).unwrap_or("").to_ascii_lowercase();
+    if target.is_empty() {
+        return Err(
+            "[compile] MLXCEL_XLA_DEVICE=hip requires MLXCEL_XLA_ROCM_TARGET \
+             (for example `export MLXCEL_XLA_ROCM_TARGET=gfx1151`). Detect your \
+             GPU ASIC with `rocminfo | grep -E 'Name:\\s+gfx'` or \
+             `eval \"$(scripts/iree/setup-rocm.sh --env)\"`."
+                .to_string(),
+        );
+    }
+    if target.contains(',') || target.chars().any(char::is_whitespace) {
+        return Err(format!(
+            "[compile] ambiguous MLXCEL_XLA_ROCM_TARGET={target:?}: specify a \
+             single AMD GPU architecture (for example `gfx1151`, `gfx1100`, or \
+             `gfx942`). Check `rocminfo | grep -E 'Name:\\s+gfx'`."
+        ));
+    }
+    let valid_gfx = target.strip_prefix("gfx").is_some_and(|rest| {
+        rest.len() >= 3
+            && rest
+                .chars()
+                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit())
+    });
+    if !valid_gfx {
+        return Err(format!(
+            "[compile] invalid MLXCEL_XLA_ROCM_TARGET={target:?}: expected an \
+             AMD GPU architecture identifier like `gfx1151`, `gfx1100`, or \
+             `gfx942`. Check `rocminfo | grep -E 'Name:\\s+gfx'`."
+        ));
+    }
+    Ok(target)
+}
+
+/// Pure `iree-compile` target-flag resolver for `device` with an explicit
+/// `rocm_target` value (`MLXCEL_XLA_ROCM_TARGET`), allowing unit tests to
+/// exercise every branch without mutating process environment variables.
+pub fn target_flags_with_rocm_target(
+    device: &str,
+    rocm_target: Option<&str>,
+) -> Result<Vec<String>, String> {
+    if device == "cuda" {
+        Ok(vec!["--iree-hal-target-device=cuda".to_string()])
+    } else if device == "metal" {
+        Ok(vec!["--iree-hal-target-device=metal".to_string()])
+    } else if device == "hip" {
+        let target = validate_rocm_target(rocm_target)?;
+        Ok(vec![
+            "--iree-hal-target-device=hip".to_string(),
+            format!("--iree-rocm-target={target}"),
+        ])
+    } else if device.starts_with("local") {
+        Ok(vec![
+            "--iree-hal-target-device=local".to_string(),
+            "--iree-hal-local-target-device-backends=llvm-cpu".to_string(),
+        ])
+    } else {
+        Err(format!(
+            "unsupported OpenXLA device {device:?}; use \"local-task\" (CPU), \
+             \"metal\" (Apple Silicon GPU, macOS build), \"cuda\" (NVIDIA CUDA build), \
+             or \"hip\" (AMD ROCm/HIP build)"
+        ))
     }
 }
 
@@ -1634,34 +1729,103 @@ mod tests {
     fn default_precision_is_f16_on_gpu_and_f32_on_cpu() {
         assert_eq!(default_precision("metal"), Precision::F16);
         assert_eq!(default_precision("cuda"), Precision::F16);
+        assert_eq!(default_precision("hip"), Precision::F16);
         assert_eq!(default_precision("local-task"), Precision::F32);
         assert_eq!(default_precision("local-sync"), Precision::F32);
     }
 
     /// Issue #612: only bf16-on-Metal is rejected; every other pair lowers. The
     /// `metal-spirv` target has no bf16 compute, but f16 / f32 lower on Metal and
-    /// bf16 lowers on CUDA and the CPU targets.
+    /// bf16 lowers on CUDA, HIP, and the CPU targets.
     #[test]
     fn precision_lowers_on_rejects_only_bf16_on_metal() {
         assert!(!precision_lowers_on("metal", Precision::Bf16));
         assert!(precision_lowers_on("metal", Precision::F16));
         assert!(precision_lowers_on("metal", Precision::F32));
         assert!(precision_lowers_on("cuda", Precision::Bf16));
+        assert!(precision_lowers_on("hip", Precision::Bf16));
         assert!(precision_lowers_on("local-task", Precision::Bf16));
         assert!(precision_lowers_on("local-sync", Precision::Bf16));
     }
 
     /// Issue #613: only an ACTIVE packed build on Metal is rejected (the metal HAL
-    /// driver faults on the packed prefill command buffer). Packed runs on CUDA and
-    /// the CPU targets, and an inactive packed path (`packed_active = false`) never
+    /// driver faults on the packed prefill command buffer). Packed runs on CUDA, HIP,
+    /// and the CPU targets, and an inactive packed path (`packed_active = false`) never
     /// trips the guard, so a non-packed Metal build is unaffected.
     #[test]
     fn packed_runs_on_rejects_only_active_packed_on_metal() {
         assert!(!packed_runs_on("metal", true));
         assert!(packed_runs_on("metal", false));
         assert!(packed_runs_on("cuda", true));
+        assert!(packed_runs_on("hip", true));
         assert!(packed_runs_on("local-task", true));
         assert!(packed_runs_on("local-sync", true));
+    }
+
+    #[test]
+    fn target_flags_for_hip_validates_rocm_target() {
+        assert_eq!(
+            target_flags_with_rocm_target("hip", Some("gfx1151")).unwrap(),
+            vec![
+                "--iree-hal-target-device=hip".to_string(),
+                "--iree-rocm-target=gfx1151".to_string(),
+            ]
+        );
+        assert_eq!(
+            target_flags_with_rocm_target("hip", Some("  gfx90a \n")).unwrap(),
+            vec![
+                "--iree-hal-target-device=hip".to_string(),
+                "--iree-rocm-target=gfx90a".to_string(),
+            ]
+        );
+        assert_eq!(
+            target_flags_with_rocm_target("hip", Some("GFX1151")).unwrap(),
+            vec![
+                "--iree-hal-target-device=hip".to_string(),
+                "--iree-rocm-target=gfx1151".to_string(),
+            ]
+        );
+        let unset_err = target_flags_with_rocm_target("hip", None).unwrap_err();
+        assert!(unset_err.contains("[compile]"));
+        assert!(unset_err.contains("MLXCEL_XLA_ROCM_TARGET"));
+
+        let empty_err = target_flags_with_rocm_target("hip", Some("   ")).unwrap_err();
+        assert!(empty_err.contains("requires MLXCEL_XLA_ROCM_TARGET"));
+
+        let ambig_err = target_flags_with_rocm_target("hip", Some("gfx1100,gfx1151")).unwrap_err();
+        assert!(ambig_err.contains("ambiguous MLXCEL_XLA_ROCM_TARGET"));
+
+        let bad_err = target_flags_with_rocm_target("hip", Some("sm_80")).unwrap_err();
+        assert!(bad_err.contains("invalid MLXCEL_XLA_ROCM_TARGET"));
+    }
+
+    #[test]
+    fn resolve_precision_validates_and_defaults() {
+        assert_eq!(
+            resolve_precision_checked_with_override("hip", None).unwrap(),
+            Precision::F16
+        );
+        assert_eq!(
+            resolve_precision_checked_with_override("hip", Some("f16")).unwrap(),
+            Precision::F16
+        );
+        assert_eq!(
+            resolve_precision_checked_with_override("hip", Some("  f32 \n")).unwrap(),
+            Precision::F32
+        );
+        assert_eq!(
+            resolve_precision_checked_with_override("hip", Some("bf16")).unwrap(),
+            Precision::Bf16
+        );
+        assert_eq!(
+            resolve_precision_checked_with_override("local-task", None).unwrap(),
+            Precision::F32
+        );
+        let err_bad = resolve_precision_checked_with_override("hip", Some("fp8")).unwrap_err();
+        assert!(err_bad.contains("[compile] unsupported MLXCEL_XLA_PRECISION"));
+        let err_metal_bf16 =
+            resolve_precision_checked_with_override("metal", Some("bf16")).unwrap_err();
+        assert!(err_metal_bf16.contains("metal-spirv"));
     }
 
     #[test]

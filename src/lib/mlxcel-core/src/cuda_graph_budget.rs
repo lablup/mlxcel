@@ -17,7 +17,7 @@
 //! MLX's CUDA backend captures every eval into a CUDA graph and commits the
 //! graph when either of two budgets is exceeded (`needs_commit`,
 //! `mlx/backend/cuda/device.cpp:458-460` at the pin in
-//! `src/lib/mlx-cpp/CMakeLists.txt`): an op count, and a byte count. Both come
+//! `src/lib/mlxcelverse/CMakeLists.txt`): an op count, and a byte count. Both come
 //! from a per-architecture table (`get_graph_limits`, `device.cpp:181-202`),
 //! overridable through `MLX_MAX_OPS_PER_BUFFER` and `MLX_MAX_MB_PER_BUFFER`.
 //! Compute capability 12.1 (DGX Spark / GB10) is given 20 ops and 25 "MB", the

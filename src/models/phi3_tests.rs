@@ -208,7 +208,8 @@ fn a_server_prefill_pins_one_table_across_the_boundary_segment_and_every_chunk()
     // the prompt cache on, one 5136-token prompt reaches the model as a
     // history-boundary segment (`prompt_tokens[0..boundary]`, forwarded by
     // `capture_history_boundary_snapshot`) followed by chunks of
-    // `--prefill-chunk-size`, whose default is 512. Both the segment and the
+    // `--prefill-chunk-size`, which was 512 when this was written (2048 since ADR
+    // 0007; 512 is kept here as a fixed fixture). Both the segment and the
     // early chunks end below the trained context, so without the announcement
     // they take the short table while the tail takes the long one, and the
     // greedy output degenerates into repetition.

@@ -20,6 +20,7 @@ use std::path::Path;
 use mlxcel_core::weights::WeightMap;
 use serde_json::{Value, json};
 
+use super::output::{StagingDir, commit_staging_dir};
 use super::{DRAFTER_MODEL_TYPE, SplitMtpOptions, split_mtp, split_mtp_dir, write_safetensors};
 
 const VOCAB: i32 = 16;
@@ -342,6 +343,7 @@ fn split_quantizes_projections_but_not_the_router_or_norms() {
         block_size: Some(3),
         q_bits: Some(4),
         q_group_size: 64,
+        force: false,
     };
     let result = split_mtp(synthetic_weights(), &source_config(), &opts).expect("split");
     let w = &result.weights;
@@ -449,6 +451,7 @@ fn split_dir_writes_a_loadable_drafter_directory() {
         block_size: None,
         q_bits: Some(4),
         q_group_size: 64,
+        force: false,
     };
     let report = split_mtp_dir(&src, &out, &opts).expect("split dir");
     assert_eq!(report.source_layer, LAYERS);
@@ -490,6 +493,276 @@ fn split_dir_writes_a_loadable_drafter_directory() {
     assert!(out.join("chat_template.jinja").is_file());
 }
 
+fn assert_no_staging_directory(parent: &Path, output_name: &str) {
+    let prefix = format!(".{output_name}.split-mtp-");
+    let staged: Vec<String> = std::fs::read_dir(parent)
+        .expect("read parent")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(&prefix))
+        .collect();
+    assert!(staged.is_empty(), "staging directories remain: {staged:?}");
+}
+
+#[test]
+fn empty_existing_output_is_replaced_by_the_staged_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("drafter");
+    std::fs::create_dir(&out).unwrap();
+    let staging = StagingDir::create(&out).expect("staging");
+    std::fs::write(staging.path().join("config.json"), b"new").unwrap();
+
+    commit_staging_dir(staging, &out, false).expect("commit");
+
+    assert_eq!(std::fs::read(out.join("config.json")).unwrap(), b"new");
+    assert_no_staging_directory(tmp.path(), "drafter");
+}
+
+#[cfg(unix)]
+#[test]
+fn staging_directory_is_private() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("drafter");
+    let staging = StagingDir::create(&out).expect("staging");
+
+    let mode = std::fs::metadata(staging.path())
+        .expect("metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o700);
+}
+
+#[test]
+fn dot_and_dotdot_outputs_stage_beside_the_resolved_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let resolved_parent = std::fs::canonicalize(tmp.path()).unwrap();
+    let dot_target = tmp.path().join("dot-target");
+    let dotdot_child = tmp.path().join("dotdot-target").join("child");
+    std::fs::create_dir(&dot_target).unwrap();
+    std::fs::create_dir_all(&dotdot_child).unwrap();
+
+    for output in [dot_target.join("."), dotdot_child.join("..")] {
+        let staging = StagingDir::create(&output).expect("staging");
+        assert_eq!(staging.path().parent(), Some(resolved_parent.as_path()));
+        std::fs::write(staging.path().join("config.json"), b"new").unwrap();
+        commit_staging_dir(staging, &output, true).expect("commit");
+        assert_eq!(std::fs::read(output.join("config.json")).unwrap(), b"new");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_output_name_is_supported_or_rejected_cleanly() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let output = tmp.path().join(std::ffi::OsString::from_vec(vec![
+        b'd', b'r', 0xff, b'f', b't',
+    ]));
+
+    if let Err(probe_error) = std::fs::create_dir(&output) {
+        let staging_error = match StagingDir::create(&output) {
+            Ok(_) => panic!("staging must honor the filesystem rejection"),
+            Err(error) => error,
+        };
+        match staging_error {
+            crate::SurgeryError::Io(error) => {
+                assert_eq!(error.kind(), probe_error.kind());
+                assert_eq!(error.raw_os_error(), probe_error.raw_os_error());
+            }
+            error => panic!("expected filesystem error, got: {error}"),
+        }
+        assert!(
+            std::fs::read_dir(tmp.path()).unwrap().next().is_none(),
+            "filesystem rejection must not leave output or staging entries"
+        );
+        return;
+    }
+    std::fs::remove_dir(&output).unwrap();
+
+    let staging = StagingDir::create(&output).expect("staging");
+    std::fs::write(staging.path().join("config.json"), b"new").unwrap();
+
+    commit_staging_dir(staging, &output, false).expect("commit");
+
+    assert_eq!(std::fs::read(output.join("config.json")).unwrap(), b"new");
+}
+
+#[cfg(unix)]
+#[test]
+fn commit_refuses_an_ancestor_symlink_retarget() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let first = tmp.path().join("first");
+    let second = tmp.path().join("second");
+    let route = tmp.path().join("route");
+    std::fs::create_dir(&first).unwrap();
+    std::fs::create_dir(&second).unwrap();
+    symlink(&first, &route).unwrap();
+    let output = route.join("drafter");
+    let staging = StagingDir::create(&output).expect("staging");
+    std::fs::write(staging.path().join("config.json"), b"new").unwrap();
+    std::fs::remove_file(&route).unwrap();
+    symlink(&second, &route).unwrap();
+
+    let err = commit_staging_dir(staging, &output, false).expect_err("must refuse drift");
+
+    assert!(err.to_string().contains("changed while"), "{err}");
+    assert!(!first.join("drafter").exists());
+    assert!(!second.join("drafter").exists());
+    assert_no_staging_directory(&first, "drafter");
+}
+
+#[test]
+fn concurrent_non_empty_output_wins_without_interleaving() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("drafter");
+    let staging = StagingDir::create(&out).expect("staging");
+    std::fs::write(staging.path().join("config.json"), b"loser").unwrap();
+    std::fs::create_dir(&out).unwrap();
+    std::fs::write(out.join("config.json"), b"winner").unwrap();
+    std::fs::write(out.join("model.safetensors"), b"winner weights").unwrap();
+
+    let err = commit_staging_dir(staging, &out, false).expect_err("must refuse");
+
+    assert!(err.to_string().contains("config.json"), "{err}");
+    assert_eq!(std::fs::read(out.join("config.json")).unwrap(), b"winner");
+    assert_eq!(
+        std::fs::read(out.join("model.safetensors")).unwrap(),
+        b"winner weights"
+    );
+    assert_no_staging_directory(tmp.path(), "drafter");
+}
+
+#[test]
+fn split_dir_refuses_an_unrelated_non_empty_output_without_force() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("raw");
+    let out = tmp.path().join("drafter");
+    std::fs::create_dir(&src).unwrap();
+    std::fs::create_dir(&out).unwrap();
+    write_synthetic_checkpoint(&src);
+    std::fs::write(out.join("README.md"), b"keep").unwrap();
+
+    let err = split_mtp_dir(&src, &out, &SplitMtpOptions::default()).expect_err("must refuse");
+
+    assert!(err.to_string().contains("README.md"), "{err}");
+    assert_eq!(std::fs::read(out.join("README.md")).unwrap(), b"keep");
+    assert!(!out.join("model.safetensors").exists());
+    assert_no_staging_directory(tmp.path(), "drafter");
+}
+
+#[cfg(unix)]
+#[test]
+fn split_dir_refuses_present_and_dangling_output_symlinks_for_both_force_modes() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("raw");
+    std::fs::create_dir(&src).unwrap();
+    write_synthetic_checkpoint(&src);
+
+    for force in [false, true] {
+        let suffix = if force { "force" } else { "plain" };
+        let tokenizer_out = tmp.path().join(format!("tokenizer-{suffix}"));
+        let tokenizer_target = tmp.path().join(format!("tokenizer-target-{suffix}"));
+        std::fs::create_dir(&tokenizer_out).unwrap();
+        std::fs::write(&tokenizer_target, b"untouched").unwrap();
+        symlink(&tokenizer_target, tokenizer_out.join("tokenizer.json")).unwrap();
+        let opts = SplitMtpOptions {
+            force,
+            ..SplitMtpOptions::default()
+        };
+        let err = split_mtp_dir(&src, &tokenizer_out, &opts).expect_err("must refuse");
+        assert!(err.to_string().contains("tokenizer.json"), "{err}");
+        assert_eq!(std::fs::read(&tokenizer_target).unwrap(), b"untouched");
+        assert_no_staging_directory(tmp.path(), &format!("tokenizer-{suffix}"));
+
+        let config_out = tmp.path().join(format!("config-{suffix}"));
+        let config_target = tmp.path().join(format!("config-target-{suffix}"));
+        std::fs::create_dir(&config_out).unwrap();
+        symlink(&config_target, config_out.join("config.json")).unwrap();
+        let err = split_mtp_dir(&src, &config_out, &opts).expect_err("must refuse");
+        assert!(err.to_string().contains("config.json"), "{err}");
+        assert!(!config_target.exists(), "dangling target must stay absent");
+        assert_no_staging_directory(tmp.path(), &format!("config-{suffix}"));
+    }
+}
+
+#[test]
+fn force_commit_replaces_drafter_files_and_removes_the_stale_index() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("raw");
+    let out = tmp.path().join("drafter");
+    std::fs::create_dir(&src).unwrap();
+    std::fs::create_dir(&out).unwrap();
+    write_synthetic_checkpoint(&src);
+    std::fs::write(out.join("model.safetensors"), b"old").unwrap();
+    std::fs::write(out.join("config.json"), b"old").unwrap();
+    std::fs::write(out.join("model.safetensors.index.json"), b"stale").unwrap();
+    let opts = SplitMtpOptions {
+        force: true,
+        ..SplitMtpOptions::default()
+    };
+
+    split_mtp_dir(&src, &out, &opts).expect("force replacement");
+
+    assert!(!out.join("model.safetensors.index.json").exists());
+    let config: Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("config.json")).unwrap()).unwrap();
+    assert_eq!(config["model_type"], DRAFTER_MODEL_TYPE);
+    assert_no_staging_directory(tmp.path(), "drafter");
+}
+
+#[test]
+fn safetensors_writer_refuses_to_replace_an_existing_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("model.safetensors");
+    std::fs::write(&path, b"keep").unwrap();
+
+    let err = write_safetensors(synthetic_weights(), &path).expect_err("must refuse");
+
+    assert!(err.to_string().contains("creating"), "{err}");
+    assert_eq!(std::fs::read(path).unwrap(), b"keep");
+}
+
+#[test]
+fn exclusive_safetensors_writer_matches_the_crate_serializer_byte_for_byte() {
+    let tmp = tempfile::tempdir().unwrap();
+    let exclusive_path = tmp.path().join("exclusive.safetensors");
+    let reference_path = tmp.path().join("reference.safetensors");
+    let mut weights = WeightMap::new();
+    weights.insert("z-f32".to_string(), ramp(&[2, 3], 1.0));
+    weights.insert("a-f32".to_string(), ramp(&[1, 4], 2.0));
+    let bf16_source = ramp(&[2, 2], 3.0);
+    weights.insert(
+        "m-bf16".to_string(),
+        mlxcel_core::astype(&bf16_source, mlxcel_core::dtype::BFLOAT16),
+    );
+    let u32_source = mlxcel_core::from_slice_i32(&[1, 2, 3], &[3]);
+    weights.insert(
+        "b-u32".to_string(),
+        mlxcel_core::astype(&u32_source, mlxcel_core::dtype::UINT32),
+    );
+
+    write_safetensors(weights, &exclusive_path).expect("exclusive write");
+    let exclusive = std::fs::read(&exclusive_path).expect("read exclusive");
+    let parsed = safetensors::SafeTensors::deserialize(&exclusive).expect("parse exclusive");
+    let mut metadata = HashMap::new();
+    metadata.insert("format".to_string(), "mlx".to_string());
+    safetensors::serialize_to_file(parsed.tensors(), Some(metadata), &reference_path)
+        .expect("reference write");
+
+    assert_eq!(
+        exclusive,
+        std::fs::read(reference_path).expect("read reference")
+    );
+}
+
 #[test]
 fn split_dir_refuses_an_output_that_aliases_the_source() {
     // `--output <source>` passes the CLI overwrite guard on a sharded
@@ -520,6 +793,40 @@ fn split_dir_refuses_an_output_that_aliases_the_source() {
     let nested = src.join("mtp");
     split_mtp_dir(&src, &nested, &SplitMtpOptions::default()).expect("nested output");
     assert!(nested.join("model.safetensors").is_file());
+}
+
+#[test]
+fn split_dir_refuses_an_unresolved_dotdot_alias_without_touching_the_source() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("raw");
+    std::fs::create_dir(&src).unwrap();
+    write_synthetic_checkpoint(&src);
+    let config_before = std::fs::read(src.join("config.json")).unwrap();
+    let shard = src.join("model-00001-of-00003.safetensors");
+    let weights_before = std::fs::read(&shard).unwrap();
+    let mut entries_before: Vec<_> = std::fs::read_dir(&src)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    entries_before.sort();
+    let output = src.join("new").join("..");
+
+    let err = split_mtp_dir(&src, &output, &SplitMtpOptions::default()).expect_err("must refuse");
+
+    assert!(err.to_string().contains("source checkpoint"), "{err}");
+    assert_eq!(
+        std::fs::read(src.join("config.json")).unwrap(),
+        config_before
+    );
+    assert_eq!(std::fs::read(shard).unwrap(), weights_before);
+    let mut entries_after: Vec<_> = std::fs::read_dir(&src)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    entries_after.sort();
+    assert_eq!(entries_after, entries_before);
+    assert!(!src.join("new").exists());
+    assert_no_staging_directory(tmp.path(), "raw");
 }
 
 #[test]

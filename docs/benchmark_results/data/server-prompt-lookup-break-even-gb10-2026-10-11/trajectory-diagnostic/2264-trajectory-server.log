@@ -1,0 +1,429 @@
+2026-10-11T13:03:41.222024Z  WARN mlxcel::server::startup: CORS is set to allow all origins ('*') and no API key is set; this can be a security risk (cross-origin attacks). Set --api-key, or narrow --cors-origins / --allowed-origins
+2026-10-11T13:03:41.222227Z  INFO mlxcel::server::startup: effective KV cache mode kv_cache_mode=fp16 kv_bits=0
+2026-10-11T13:03:41.222566Z  INFO mlxcel::server::startup: resolved context and batch geometry (0 = the checkpoint's own trained context) ctx_size=0 ctx_size_per_slot=0 context_slots=1 kv_unified=true n_parallel=4 prefill_chunk_size=2048 prefill_chunk_size_contended=512 max_kv_size=None
+2026-10-11T13:03:41.222673Z  INFO mlxcel::server::startup: Runtime device: NVIDIA GPU (CUDA)
+2026-10-11T13:03:41.222715Z  INFO mlxcel::server::startup: CUDA graph-cache LRU capacity: MLX_CUDA_GRAPH_CACHE_SIZE=2000 (mlxcel raises MLX's default of 400 to 2000 so long-lived, shape-diverse decode does not hit the cache-thrashing abort from issue #818, unless an operator override is set)
+2026-10-11T13:03:41.222717Z  INFO mlxcel::server::startup: Wired memory limit: 121.7 GB
+2026-10-11T13:03:41.406029Z  INFO mlxcel::server::startup: Tokenizer recognizes a think marker pair; defaulting chat_template kwarg `enable_thinking=true` (upstream PR #1114) think_start=Some("<think>") think_end=Some("</think>") think_start_tokens_len=1 think_end_tokens_len=1
+2026-10-11T13:03:41.406055Z  INFO mlxcel::server::startup: DRY sequence breakers active (b10621 semantics: breaker token data derived from the vocabulary per request) breakers=["\n", ":", "\"", "*"]
+2026-10-11T13:03:41.407857Z  INFO mlxcel::server::startup: Applied model-aware prompt-cache KV store capacity default previous_capacity_bytes=2147483648 recommended_capacity_bytes=5637144576 representative_entry_bytes=939524096 representative_tokens=8192 target_entries=6 available_ceiling_bytes=30442909504 architecture=standard attention (28 layers, full context)
+2026-10-11T13:03:41.407945Z  INFO mlxcel::server::startup: Prompt-prefix cache store enabled (+ APC, snapshots) capacity_bytes=5637144576 max_entries=1024 ttl_seconds=3600 snapshot_capacity_bytes=536870912 snapshot_max_entries=4096 snapshot_ttl_seconds=7200 min_prefix_tokens=32 apc_enabled=true apc_block_size=16 apc_hash=sha256
+2026-10-11T13:03:41.594031Z  INFO mlxcel::server::startup: Warming up model...
+2026-10-11T13:03:41.594677Z  INFO mlxcel::server::model_provider::model_worker: Model worker thread starting, loading model...
+2026-10-11T13:03:41.807262Z  INFO mlxcel::server::model_provider::model_worker: Model qwen3-1.7b-4bit loaded in 0.213s (resident after load: 0.00 GB) worker_model_id=qwen3-1.7b-4bit load_seconds=0.212546376 active_bytes=0 peak_bytes=0 cache_bytes=0 limit_bytes=124128081510
+2026-10-11T13:03:41.807328Z  INFO mlxcel::server::model_provider::model_worker: EOS tokens from config: [151645]
+2026-10-11T13:03:41.807384Z  INFO mlxcel::server::model_provider::model_worker: Starting BatchScheduler (max_batch_size=4, max_queue_depth=32, prefill_chunk_size=2048, prefill_chunk_size_contended=512, max_batch_prefill=4, decode_storage=auto, speculative=prompt-lookup (max_draft=7, policy=gated, max_batch=2, min_tokens_per_round=Some(4) (ema_and_latest), shadow_confirm_tokens=7, plain_rounds_before_pipeline=0))
+2026-10-11T13:03:41.807625Z  INFO mlxcel::server::model_provider::model_worker: Paged KV block budget: 779952 blocks (28 layers, 32-token blocks)
+2026-10-11T13:03:41.807635Z  INFO mlxcel::server::model_provider::model_worker: Paged KV slab size: 1024 blocks per layer (fused decode serves a layer only while its rows fit one slab)
+2026-10-11T13:03:41.807894Z  INFO mlxcel::server::batch::scheduler::paged_layout: resolved KV cache mode applied to model caches kv_cache_mode_effective=fp16 kv_cache_mode_applied_layers=28 kv_cache_mode_total_layers=28
+2026-10-11T13:03:41.809234Z  INFO prefill{seq_id=seq-0 prompt_len=1 cached=0 start=0}: mlxcel_core::cache::paged_batch_decode: paged decode v2: gather: 1 visible KV tokens across 1 request(s) is below the 4096-token dispatch floor
+2026-10-11T13:03:41.810083Z  INFO prefill{seq_id=seq-0 prompt_len=1 cached=0 start=0}: mlxcel_core::sampling_dispatch: sampling dispatch: argmax: greedy path (temperature 0, top_k 1); no sampling kernel involved
+2026-10-11T13:03:42.839060Z  INFO prefill{seq_id=seq-0 prompt_len=1 cached=0 start=0}: mlxcel::server::batch::scheduler::prefill: prompt-cache: request completed during prefill: cached=0/1 prompt tokens, total 1030ms prompt_tokens=1 cached_tokens=0 generation_time_ms=1030
+2026-10-11T13:03:42.839392Z  INFO mlxcel::server::startup: Warmup complete
+2026-10-11T13:03:42.841051Z  INFO mlxcel::server::startup: Starting mlxcel server on http://127.0.0.1:18080
+2026-10-11T13:03:42.841066Z  INFO mlxcel::server::startup: Detected 1 GPU(s)
+2026-10-11T13:03:42.841070Z  INFO mlxcel::server::startup: CUDA compute capability 12.1 (sm_121); compiled for [121] (cubin)
+2026-10-11T13:03:42.841071Z  INFO mlxcel::server::startup: Endpoints:
+2026-10-11T13:03:42.841073Z  INFO mlxcel::server::startup:   POST /v1/chat/completions  - OpenAI chat completions
+2026-10-11T13:03:42.841074Z  INFO mlxcel::server::startup:   POST /v1/completions       - OpenAI text completions
+2026-10-11T13:03:42.841075Z  INFO mlxcel::server::startup:   GET  /v1/models            - List models
+2026-10-11T13:03:42.841077Z  INFO mlxcel::server::startup:   POST /completion           - llama-server native completion
+2026-10-11T13:03:42.841078Z  INFO mlxcel::server::startup:   POST /tokenize             - Tokenize text
+2026-10-11T13:03:42.841079Z  INFO mlxcel::server::startup:   POST /detokenize           - Detokenize tokens
+2026-10-11T13:03:42.841080Z  INFO mlxcel::server::startup:   GET  /props                - Server properties
+2026-10-11T13:03:42.841081Z  INFO mlxcel::server::startup:   GET  /slots                - Slot status
+2026-10-11T13:03:42.841083Z  INFO mlxcel::server::startup:   GET  /health               - Health check
+prompt_lookup_trace event=start gov=0xf319920aa7c0 prompt=155 context=156 max_draft=7 floor=Some(4) shadow_confirm=7
+prompt_lookup_trace event=ask gov=0xf318a76555e0 round=1 context=156 block_limit=7 budget=2 proposed=2 paused=false shadow_pending=false accepted_ema=1.000000 emitted_ema=0.000000 samples=0 misses=0 drafting=true probation=true
+prompt_lookup_trace event=verify gov=0xf318a76555e0 round=1 proposed=2 accepted=2 emitted=3 context=159 accepted_ema_before=1.000000 accepted_ema_after=1.500000 emitted_ema_before=0.000000 emitted_ema_after=3.000000 samples_before=0 samples_after=1 misses_before=0 misses_after=0 drafting_before=true drafting_after=true probation_before=true probation_after=false
+prompt_lookup_trace event=ask gov=0xf318a76555e0 round=2 context=159 block_limit=7 budget=7 proposed=7 paused=false shadow_pending=false accepted_ema=1.500000 emitted_ema=3.000000 samples=1 misses=0 drafting=true probation=false
+prompt_lookup_trace event=verify gov=0xf318a76555e0 round=2 proposed=7 accepted=7 emitted=8 context=167 accepted_ema_before=1.500000 accepted_ema_after=4.250000 emitted_ema_before=3.000000 emitted_ema_after=5.500000 samples_before=1 samples_after=2 misses_before=0 misses_after=0 drafting_before=true drafting_after=true probation_before=false probation_after=false
+prompt_lookup_trace event=ask gov=0xf318a76555e0 round=3 context=167 block_limit=7 budget=7 proposed=7 paused=false shadow_pending=false accepted_ema=4.250000 emitted_ema=5.500000 samples=2 misses=0 drafting=true probation=false
+prompt_lookup_trace event=verify gov=0xf318a76555e0 round=3 proposed=7 accepted=0 emitted=1 context=168 accepted_ema_before=4.250000 accepted_ema_after=2.125000 emitted_ema_before=5.500000 emitted_ema_after=3.250000 samples_before=2 samples_after=3 misses_before=0 misses_after=0 drafting_before=true drafting_after=false probation_before=false probation_after=false
+prompt_lookup_trace event=ask gov=0xf318a76555e0 round=4 context=168 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.125000 emitted_ema=3.250000 samples=3 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf318a76555e0 round=4 emitted=1 context_before=168 context_after=169 paused=true shadow_pending=true
+prompt_lookup_trace event=ask gov=0xf318a76555e0 round=5 context=169 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.125000 emitted_ema=3.250000 samples=3 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf318a76555e0 round=5 emitted=1 context_before=169 context_after=170 paused=true shadow_pending=true
+prompt_lookup_trace event=ask gov=0xf318a76555e0 round=6 context=170 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.125000 emitted_ema=3.250000 samples=3 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf318a76555e0 round=6 emitted=1 context_before=170 context_after=171 paused=true shadow_pending=true
+prompt_lookup_trace event=ask gov=0xf318a76555e0 round=7 context=171 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.125000 emitted_ema=3.250000 samples=3 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf318a76555e0 round=7 emitted=1 context_before=171 context_after=172 paused=true shadow_pending=true
+prompt_lookup_trace event=ask gov=0xf318a76555e0 round=8 context=172 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.125000 emitted_ema=3.250000 samples=3 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf318a76555e0 round=8 emitted=1 context_before=172 context_after=173 paused=true shadow_pending=true
+prompt_lookup_trace event=ask gov=0xf318a76555e0 round=9 context=173 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.125000 emitted_ema=3.250000 samples=3 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf318a76555e0 round=9 emitted=1 context_before=173 context_after=174 paused=true shadow_pending=true
+prompt_lookup_trace event=ask gov=0xf318a76555e0 round=10 context=174 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.125000 emitted_ema=3.250000 samples=3 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf318a76555e0 round=10 emitted=1 context_before=174 context_after=175 paused=true shadow_pending=true
+prompt_lookup_trace event=shadow_settle gov=0xf318a76555e0 round=11 confirmed=true context=175
+prompt_lookup_trace event=ask gov=0xf318a76555e0 round=11 context=175 block_limit=7 budget=2 proposed=2 paused=false shadow_pending=false accepted_ema=1.000000 emitted_ema=0.000000 samples=0 misses=0 drafting=true probation=true
+prompt_lookup_trace event=retract gov=0xf318a76555e0 round=11 proposed=2 paused_ask=false
+prompt_lookup_trace event=plain gov=0xf318a76555e0 round=10 emitted=1 context_before=175 context_after=176 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf318a76555e0 round=11 context=176 block_limit=7 budget=2 proposed=2 paused=false shadow_pending=false accepted_ema=1.000000 emitted_ema=0.000000 samples=0 misses=0 drafting=true probation=true
+prompt_lookup_trace event=verify gov=0xf318a76555e0 round=11 proposed=2 accepted=2 emitted=3 context=179 accepted_ema_before=1.000000 accepted_ema_after=1.500000 emitted_ema_before=0.000000 emitted_ema_after=3.000000 samples_before=0 samples_after=1 misses_before=0 misses_after=0 drafting_before=true drafting_after=true probation_before=true probation_after=false
+prompt_lookup_trace event=ask gov=0xf318a76555e0 round=12 context=179 block_limit=7 budget=7 proposed=7 paused=false shadow_pending=false accepted_ema=1.500000 emitted_ema=3.000000 samples=1 misses=0 drafting=true probation=false
+prompt_lookup_trace event=verify gov=0xf318a76555e0 round=12 proposed=7 accepted=7 emitted=8 context=187 accepted_ema_before=1.500000 accepted_ema_after=4.250000 emitted_ema_before=3.000000 emitted_ema_after=5.500000 samples_before=1 samples_after=2 misses_before=0 misses_after=0 drafting_before=true drafting_after=true probation_before=false probation_after=false
+2026-10-11T13:03:43.174737Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/155 prompt tokens, total 256ms prompt_tokens=155 cached_tokens=0 generation_time_ms=256
+prompt_lookup_trace event=start gov=0xf319920aa7c0 prompt=27 context=28 max_draft=7 floor=Some(4) shadow_confirm=7
+prompt_lookup_trace event=ask gov=0xf31874db0970 round=1 context=28 block_limit=7 budget=2 proposed=0 paused=false shadow_pending=false accepted_ema=1.000000 emitted_ema=0.000000 samples=0 misses=0 drafting=true probation=true
+prompt_lookup_trace event=plain gov=0xf31874db0970 round=1 emitted=1 context_before=28 context_after=29 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874db0970 round=2 context=29 block_limit=7 budget=2 proposed=0 paused=false shadow_pending=false accepted_ema=1.000000 emitted_ema=0.000000 samples=0 misses=0 drafting=true probation=true
+prompt_lookup_trace event=plain gov=0xf31874db0970 round=2 emitted=1 context_before=29 context_after=30 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874db0970 round=3 context=30 block_limit=7 budget=2 proposed=0 paused=false shadow_pending=false accepted_ema=1.000000 emitted_ema=0.000000 samples=0 misses=0 drafting=true probation=true
+prompt_lookup_trace event=plain gov=0xf31874db0970 round=3 emitted=1 context_before=30 context_after=31 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874db0970 round=4 context=31 block_limit=7 budget=2 proposed=0 paused=false shadow_pending=false accepted_ema=1.000000 emitted_ema=0.000000 samples=0 misses=0 drafting=true probation=true
+prompt_lookup_trace event=plain gov=0xf31874db0970 round=4 emitted=1 context_before=31 context_after=32 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874db0970 round=5 context=32 block_limit=7 budget=2 proposed=0 paused=false shadow_pending=false accepted_ema=1.000000 emitted_ema=0.000000 samples=0 misses=0 drafting=true probation=true
+prompt_lookup_trace event=plain gov=0xf31874db0970 round=5 emitted=1 context_before=32 context_after=33 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874db0970 round=6 context=33 block_limit=7 budget=2 proposed=0 paused=false shadow_pending=false accepted_ema=1.000000 emitted_ema=0.000000 samples=0 misses=0 drafting=true probation=true
+prompt_lookup_trace event=plain gov=0xf31874db0970 round=6 emitted=1 context_before=33 context_after=34 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874db0970 round=7 context=34 block_limit=7 budget=2 proposed=0 paused=false shadow_pending=false accepted_ema=1.000000 emitted_ema=0.000000 samples=0 misses=0 drafting=true probation=true
+prompt_lookup_trace event=plain gov=0xf31874db0970 round=7 emitted=1 context_before=34 context_after=35 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874db0970 round=8 context=35 block_limit=7 budget=2 proposed=0 paused=false shadow_pending=false accepted_ema=1.000000 emitted_ema=0.000000 samples=0 misses=0 drafting=true probation=true
+prompt_lookup_trace event=plain gov=0xf31874db0970 round=8 emitted=1 context_before=35 context_after=36 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874db0970 round=9 context=36 block_limit=7 budget=2 proposed=0 paused=false shadow_pending=false accepted_ema=1.000000 emitted_ema=0.000000 samples=0 misses=0 drafting=true probation=true
+prompt_lookup_trace event=plain gov=0xf31874db0970 round=9 emitted=1 context_before=36 context_after=37 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874db0970 round=10 context=37 block_limit=7 budget=2 proposed=0 paused=false shadow_pending=false accepted_ema=1.000000 emitted_ema=0.000000 samples=0 misses=0 drafting=true probation=true
+prompt_lookup_trace event=plain gov=0xf31874db0970 round=10 emitted=1 context_before=37 context_after=38 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874db0970 round=11 context=38 block_limit=7 budget=2 proposed=0 paused=false shadow_pending=false accepted_ema=1.000000 emitted_ema=0.000000 samples=0 misses=0 drafting=true probation=true
+prompt_lookup_trace event=plain gov=0xf31874db0970 round=11 emitted=1 context_before=38 context_after=39 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874db0970 round=12 context=39 block_limit=7 budget=2 proposed=0 paused=false shadow_pending=false accepted_ema=1.000000 emitted_ema=0.000000 samples=0 misses=0 drafting=true probation=true
+prompt_lookup_trace event=plain gov=0xf31874db0970 round=12 emitted=1 context_before=39 context_after=40 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874db0970 round=13 context=40 block_limit=7 budget=2 proposed=0 paused=false shadow_pending=false accepted_ema=1.000000 emitted_ema=0.000000 samples=0 misses=0 drafting=true probation=true
+prompt_lookup_trace event=plain gov=0xf31874db0970 round=13 emitted=1 context_before=40 context_after=41 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874db0970 round=14 context=41 block_limit=7 budget=2 proposed=0 paused=false shadow_pending=false accepted_ema=1.000000 emitted_ema=0.000000 samples=0 misses=0 drafting=true probation=true
+prompt_lookup_trace event=plain gov=0xf31874db0970 round=14 emitted=1 context_before=41 context_after=42 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874db0970 round=15 context=42 block_limit=7 budget=2 proposed=0 paused=false shadow_pending=false accepted_ema=1.000000 emitted_ema=0.000000 samples=0 misses=0 drafting=true probation=true
+prompt_lookup_trace event=plain gov=0xf31874db0970 round=15 emitted=1 context_before=42 context_after=43 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874db0970 round=16 context=43 block_limit=7 budget=2 proposed=0 paused=false shadow_pending=false accepted_ema=1.000000 emitted_ema=0.000000 samples=0 misses=0 drafting=true probation=true
+prompt_lookup_trace event=plain gov=0xf31874db0970 round=16 emitted=1 context_before=43 context_after=44 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874db0970 round=17 context=44 block_limit=7 budget=2 proposed=0 paused=false shadow_pending=false accepted_ema=1.000000 emitted_ema=0.000000 samples=0 misses=0 drafting=true probation=true
+prompt_lookup_trace event=plain gov=0xf31874db0970 round=17 emitted=1 context_before=44 context_after=45 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874db0970 round=18 context=45 block_limit=7 budget=2 proposed=0 paused=false shadow_pending=false accepted_ema=1.000000 emitted_ema=0.000000 samples=0 misses=0 drafting=true probation=true
+prompt_lookup_trace event=plain gov=0xf31874db0970 round=18 emitted=1 context_before=45 context_after=46 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874db0970 round=19 context=46 block_limit=7 budget=2 proposed=0 paused=false shadow_pending=false accepted_ema=1.000000 emitted_ema=0.000000 samples=0 misses=0 drafting=true probation=true
+prompt_lookup_trace event=plain gov=0xf31874db0970 round=19 emitted=1 context_before=46 context_after=47 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874db0970 round=20 context=47 block_limit=7 budget=2 proposed=0 paused=false shadow_pending=false accepted_ema=1.000000 emitted_ema=0.000000 samples=0 misses=0 drafting=true probation=true
+prompt_lookup_trace event=plain gov=0xf31874db0970 round=20 emitted=1 context_before=47 context_after=48 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874db0970 round=21 context=48 block_limit=7 budget=2 proposed=0 paused=false shadow_pending=false accepted_ema=1.000000 emitted_ema=0.000000 samples=0 misses=0 drafting=true probation=true
+prompt_lookup_trace event=plain gov=0xf31874db0970 round=21 emitted=1 context_before=48 context_after=49 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874db0970 round=22 context=49 block_limit=7 budget=2 proposed=0 paused=false shadow_pending=false accepted_ema=1.000000 emitted_ema=0.000000 samples=0 misses=0 drafting=true probation=true
+prompt_lookup_trace event=plain gov=0xf31874db0970 round=22 emitted=1 context_before=49 context_after=50 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874db0970 round=23 context=50 block_limit=7 budget=2 proposed=0 paused=false shadow_pending=false accepted_ema=1.000000 emitted_ema=0.000000 samples=0 misses=0 drafting=true probation=true
+prompt_lookup_trace event=plain gov=0xf31874db0970 round=23 emitted=1 context_before=50 context_after=51 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874db0970 round=24 context=51 block_limit=7 budget=2 proposed=0 paused=false shadow_pending=false accepted_ema=1.000000 emitted_ema=0.000000 samples=0 misses=0 drafting=true probation=true
+prompt_lookup_trace event=plain gov=0xf31874db0970 round=24 emitted=1 context_before=51 context_after=52 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874db0970 round=25 context=52 block_limit=6 budget=2 proposed=0 paused=false shadow_pending=false accepted_ema=1.000000 emitted_ema=0.000000 samples=0 misses=0 drafting=true probation=true
+prompt_lookup_trace event=plain gov=0xf31874db0970 round=25 emitted=1 context_before=52 context_after=53 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874db0970 round=26 context=53 block_limit=5 budget=2 proposed=0 paused=false shadow_pending=false accepted_ema=1.000000 emitted_ema=0.000000 samples=0 misses=0 drafting=true probation=true
+prompt_lookup_trace event=plain gov=0xf31874db0970 round=26 emitted=1 context_before=53 context_after=54 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874db0970 round=27 context=54 block_limit=4 budget=2 proposed=0 paused=false shadow_pending=false accepted_ema=1.000000 emitted_ema=0.000000 samples=0 misses=0 drafting=true probation=true
+prompt_lookup_trace event=plain gov=0xf31874db0970 round=27 emitted=1 context_before=54 context_after=55 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874db0970 round=28 context=55 block_limit=3 budget=2 proposed=0 paused=false shadow_pending=false accepted_ema=1.000000 emitted_ema=0.000000 samples=0 misses=0 drafting=true probation=true
+prompt_lookup_trace event=plain gov=0xf31874db0970 round=28 emitted=1 context_before=55 context_after=56 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874db0970 round=29 context=56 block_limit=2 budget=2 proposed=0 paused=false shadow_pending=false accepted_ema=1.000000 emitted_ema=0.000000 samples=0 misses=0 drafting=true probation=true
+prompt_lookup_trace event=plain gov=0xf31874db0970 round=29 emitted=1 context_before=56 context_after=57 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874db0970 round=30 context=57 block_limit=1 budget=1 proposed=0 paused=false shadow_pending=false accepted_ema=1.000000 emitted_ema=0.000000 samples=0 misses=0 drafting=true probation=true
+2026-10-11T13:03:43.505342Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/27 prompt tokens, total 285ms prompt_tokens=27 cached_tokens=0 generation_time_ms=285
+prompt_lookup_trace event=start gov=0xf319920aa7c0 prompt=155 context=156 max_draft=7 floor=Some(4) shadow_confirm=7
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=1 context=156 block_limit=7 budget=2 proposed=2 paused=false shadow_pending=false accepted_ema=1.000000 emitted_ema=0.000000 samples=0 misses=0 drafting=true probation=true
+prompt_lookup_trace event=verify gov=0xf31874d73230 round=1 proposed=2 accepted=2 emitted=3 context=159 accepted_ema_before=1.000000 accepted_ema_after=1.500000 emitted_ema_before=0.000000 emitted_ema_after=3.000000 samples_before=0 samples_after=1 misses_before=0 misses_after=0 drafting_before=true drafting_after=true probation_before=true probation_after=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=2 context=159 block_limit=7 budget=7 proposed=7 paused=false shadow_pending=false accepted_ema=1.500000 emitted_ema=3.000000 samples=1 misses=0 drafting=true probation=false
+prompt_lookup_trace event=verify gov=0xf31874d73230 round=2 proposed=7 accepted=7 emitted=8 context=167 accepted_ema_before=1.500000 accepted_ema_after=4.250000 emitted_ema_before=3.000000 emitted_ema_after=5.500000 samples_before=1 samples_after=2 misses_before=0 misses_after=0 drafting_before=true drafting_after=true probation_before=false probation_after=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=3 context=167 block_limit=7 budget=7 proposed=7 paused=false shadow_pending=false accepted_ema=4.250000 emitted_ema=5.500000 samples=2 misses=0 drafting=true probation=false
+prompt_lookup_trace event=verify gov=0xf31874d73230 round=3 proposed=7 accepted=0 emitted=1 context=168 accepted_ema_before=4.250000 accepted_ema_after=2.125000 emitted_ema_before=5.500000 emitted_ema_after=3.250000 samples_before=2 samples_after=3 misses_before=0 misses_after=0 drafting_before=true drafting_after=false probation_before=false probation_after=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=4 context=168 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.125000 emitted_ema=3.250000 samples=3 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=4 emitted=1 context_before=168 context_after=169 paused=true shadow_pending=true
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=5 context=169 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.125000 emitted_ema=3.250000 samples=3 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=5 emitted=1 context_before=169 context_after=170 paused=true shadow_pending=true
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=6 context=170 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.125000 emitted_ema=3.250000 samples=3 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=6 emitted=1 context_before=170 context_after=171 paused=true shadow_pending=true
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=7 context=171 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.125000 emitted_ema=3.250000 samples=3 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=7 emitted=1 context_before=171 context_after=172 paused=true shadow_pending=true
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=8 context=172 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.125000 emitted_ema=3.250000 samples=3 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=8 emitted=1 context_before=172 context_after=173 paused=true shadow_pending=true
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=9 context=173 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.125000 emitted_ema=3.250000 samples=3 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=9 emitted=1 context_before=173 context_after=174 paused=true shadow_pending=true
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=10 context=174 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.125000 emitted_ema=3.250000 samples=3 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=10 emitted=1 context_before=174 context_after=175 paused=true shadow_pending=true
+prompt_lookup_trace event=shadow_settle gov=0xf31874d73230 round=11 confirmed=true context=175
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=11 context=175 block_limit=7 budget=2 proposed=2 paused=false shadow_pending=false accepted_ema=1.000000 emitted_ema=0.000000 samples=0 misses=0 drafting=true probation=true
+prompt_lookup_trace event=retract gov=0xf31874d73230 round=11 proposed=2 paused_ask=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=10 emitted=1 context_before=175 context_after=176 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=11 context=176 block_limit=7 budget=2 proposed=2 paused=false shadow_pending=false accepted_ema=1.000000 emitted_ema=0.000000 samples=0 misses=0 drafting=true probation=true
+prompt_lookup_trace event=verify gov=0xf31874d73230 round=11 proposed=2 accepted=2 emitted=3 context=179 accepted_ema_before=1.000000 accepted_ema_after=1.500000 emitted_ema_before=0.000000 emitted_ema_after=3.000000 samples_before=0 samples_after=1 misses_before=0 misses_after=0 drafting_before=true drafting_after=true probation_before=true probation_after=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=12 context=179 block_limit=7 budget=7 proposed=7 paused=false shadow_pending=false accepted_ema=1.500000 emitted_ema=3.000000 samples=1 misses=0 drafting=true probation=false
+prompt_lookup_trace event=verify gov=0xf31874d73230 round=12 proposed=7 accepted=7 emitted=8 context=187 accepted_ema_before=1.500000 accepted_ema_after=4.250000 emitted_ema_before=3.000000 emitted_ema_after=5.500000 samples_before=1 samples_after=2 misses_before=0 misses_after=0 drafting_before=true drafting_after=true probation_before=false probation_after=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=13 context=187 block_limit=7 budget=7 proposed=7 paused=false shadow_pending=false accepted_ema=4.250000 emitted_ema=5.500000 samples=2 misses=0 drafting=true probation=false
+prompt_lookup_trace event=verify gov=0xf31874d73230 round=13 proposed=7 accepted=7 emitted=8 context=195 accepted_ema_before=4.250000 accepted_ema_after=5.625000 emitted_ema_before=5.500000 emitted_ema_after=6.750000 samples_before=2 samples_after=3 misses_before=0 misses_after=0 drafting_before=true drafting_after=true probation_before=false probation_after=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=14 context=195 block_limit=7 budget=7 proposed=7 paused=false shadow_pending=false accepted_ema=5.625000 emitted_ema=6.750000 samples=3 misses=0 drafting=true probation=false
+prompt_lookup_trace event=verify gov=0xf31874d73230 round=14 proposed=7 accepted=7 emitted=8 context=203 accepted_ema_before=5.625000 accepted_ema_after=6.312500 emitted_ema_before=6.750000 emitted_ema_after=7.375000 samples_before=3 samples_after=4 misses_before=0 misses_after=0 drafting_before=true drafting_after=true probation_before=false probation_after=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=15 context=203 block_limit=7 budget=7 proposed=7 paused=false shadow_pending=false accepted_ema=6.312500 emitted_ema=7.375000 samples=4 misses=0 drafting=true probation=false
+prompt_lookup_trace event=verify gov=0xf31874d73230 round=15 proposed=7 accepted=7 emitted=8 context=211 accepted_ema_before=6.312500 accepted_ema_after=6.656250 emitted_ema_before=7.375000 emitted_ema_after=7.687500 samples_before=4 samples_after=5 misses_before=0 misses_after=0 drafting_before=true drafting_after=true probation_before=false probation_after=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=16 context=211 block_limit=7 budget=7 proposed=7 paused=false shadow_pending=false accepted_ema=6.656250 emitted_ema=7.687500 samples=5 misses=0 drafting=true probation=false
+prompt_lookup_trace event=verify gov=0xf31874d73230 round=16 proposed=7 accepted=7 emitted=8 context=219 accepted_ema_before=6.656250 accepted_ema_after=6.828125 emitted_ema_before=7.687500 emitted_ema_after=7.843750 samples_before=5 samples_after=6 misses_before=0 misses_after=0 drafting_before=true drafting_after=true probation_before=false probation_after=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=17 context=219 block_limit=7 budget=7 proposed=7 paused=false shadow_pending=false accepted_ema=6.828125 emitted_ema=7.843750 samples=6 misses=0 drafting=true probation=false
+prompt_lookup_trace event=verify gov=0xf31874d73230 round=17 proposed=7 accepted=7 emitted=8 context=227 accepted_ema_before=6.828125 accepted_ema_after=6.914062 emitted_ema_before=7.843750 emitted_ema_after=7.921875 samples_before=6 samples_after=7 misses_before=0 misses_after=0 drafting_before=true drafting_after=true probation_before=false probation_after=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=18 context=227 block_limit=7 budget=7 proposed=7 paused=false shadow_pending=false accepted_ema=6.914062 emitted_ema=7.921875 samples=7 misses=0 drafting=true probation=false
+prompt_lookup_trace event=verify gov=0xf31874d73230 round=18 proposed=7 accepted=0 emitted=1 context=228 accepted_ema_before=6.914062 accepted_ema_after=3.457031 emitted_ema_before=7.921875 emitted_ema_after=4.460938 samples_before=7 samples_after=8 misses_before=0 misses_after=1 drafting_before=true drafting_after=true probation_before=false probation_after=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=19 context=228 block_limit=7 budget=7 proposed=7 paused=false shadow_pending=false accepted_ema=3.457031 emitted_ema=4.460938 samples=8 misses=1 drafting=true probation=false
+prompt_lookup_trace event=verify gov=0xf31874d73230 round=19 proposed=7 accepted=7 emitted=8 context=236 accepted_ema_before=3.457031 accepted_ema_after=5.228516 emitted_ema_before=4.460938 emitted_ema_after=6.230469 samples_before=8 samples_after=9 misses_before=1 misses_after=0 drafting_before=true drafting_after=true probation_before=false probation_after=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=20 context=236 block_limit=7 budget=7 proposed=7 paused=false shadow_pending=false accepted_ema=5.228516 emitted_ema=6.230469 samples=9 misses=0 drafting=true probation=false
+prompt_lookup_trace event=verify gov=0xf31874d73230 round=20 proposed=7 accepted=7 emitted=8 context=244 accepted_ema_before=5.228516 accepted_ema_after=6.114258 emitted_ema_before=6.230469 emitted_ema_after=7.115234 samples_before=9 samples_after=10 misses_before=0 misses_after=0 drafting_before=true drafting_after=true probation_before=false probation_after=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=21 context=244 block_limit=7 budget=7 proposed=7 paused=false shadow_pending=false accepted_ema=6.114258 emitted_ema=7.115234 samples=10 misses=0 drafting=true probation=false
+prompt_lookup_trace event=verify gov=0xf31874d73230 round=21 proposed=7 accepted=7 emitted=8 context=252 accepted_ema_before=6.114258 accepted_ema_after=6.557129 emitted_ema_before=7.115234 emitted_ema_after=7.557617 samples_before=10 samples_after=11 misses_before=0 misses_after=0 drafting_before=true drafting_after=true probation_before=false probation_after=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=22 context=252 block_limit=7 budget=7 proposed=7 paused=false shadow_pending=false accepted_ema=6.557129 emitted_ema=7.557617 samples=11 misses=0 drafting=true probation=false
+prompt_lookup_trace event=verify gov=0xf31874d73230 round=22 proposed=7 accepted=7 emitted=8 context=260 accepted_ema_before=6.557129 accepted_ema_after=6.778564 emitted_ema_before=7.557617 emitted_ema_after=7.778809 samples_before=11 samples_after=12 misses_before=0 misses_after=0 drafting_before=true drafting_after=true probation_before=false probation_after=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=23 context=260 block_limit=7 budget=7 proposed=7 paused=false shadow_pending=false accepted_ema=6.778564 emitted_ema=7.778809 samples=12 misses=0 drafting=true probation=false
+prompt_lookup_trace event=verify gov=0xf31874d73230 round=23 proposed=7 accepted=7 emitted=8 context=268 accepted_ema_before=6.778564 accepted_ema_after=6.889282 emitted_ema_before=7.778809 emitted_ema_after=7.889404 samples_before=12 samples_after=13 misses_before=0 misses_after=0 drafting_before=true drafting_after=true probation_before=false probation_after=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=24 context=268 block_limit=7 budget=7 proposed=7 paused=false shadow_pending=false accepted_ema=6.889282 emitted_ema=7.889404 samples=13 misses=0 drafting=true probation=false
+prompt_lookup_trace event=verify gov=0xf31874d73230 round=24 proposed=7 accepted=7 emitted=8 context=276 accepted_ema_before=6.889282 accepted_ema_after=6.944641 emitted_ema_before=7.889404 emitted_ema_after=7.944702 samples_before=13 samples_after=14 misses_before=0 misses_after=0 drafting_before=true drafting_after=true probation_before=false probation_after=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=25 context=276 block_limit=7 budget=7 proposed=7 paused=false shadow_pending=false accepted_ema=6.944641 emitted_ema=7.944702 samples=14 misses=0 drafting=true probation=false
+prompt_lookup_trace event=verify gov=0xf31874d73230 round=25 proposed=7 accepted=7 emitted=8 context=284 accepted_ema_before=6.944641 accepted_ema_after=6.972321 emitted_ema_before=7.944702 emitted_ema_after=7.972351 samples_before=14 samples_after=15 misses_before=0 misses_after=0 drafting_before=true drafting_after=true probation_before=false probation_after=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=26 context=284 block_limit=7 budget=7 proposed=7 paused=false shadow_pending=false accepted_ema=6.972321 emitted_ema=7.972351 samples=15 misses=0 drafting=true probation=false
+prompt_lookup_trace event=verify gov=0xf31874d73230 round=26 proposed=7 accepted=7 emitted=8 context=292 accepted_ema_before=6.972321 accepted_ema_after=6.986160 emitted_ema_before=7.972351 emitted_ema_after=7.986176 samples_before=15 samples_after=16 misses_before=0 misses_after=0 drafting_before=true drafting_after=true probation_before=false probation_after=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=27 context=292 block_limit=7 budget=7 proposed=7 paused=false shadow_pending=false accepted_ema=6.986160 emitted_ema=7.986176 samples=16 misses=0 drafting=true probation=false
+prompt_lookup_trace event=verify gov=0xf31874d73230 round=27 proposed=7 accepted=3 emitted=4 context=296 accepted_ema_before=6.986160 accepted_ema_after=4.993080 emitted_ema_before=7.986176 emitted_ema_after=5.993088 samples_before=16 samples_after=17 misses_before=0 misses_after=0 drafting_before=true drafting_after=true probation_before=false probation_after=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=28 context=296 block_limit=7 budget=7 proposed=0 paused=false shadow_pending=false accepted_ema=4.993080 emitted_ema=5.993088 samples=17 misses=0 drafting=true probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=28 emitted=1 context_before=296 context_after=297 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=29 context=297 block_limit=7 budget=7 proposed=0 paused=false shadow_pending=false accepted_ema=4.993080 emitted_ema=5.993088 samples=17 misses=0 drafting=true probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=29 emitted=1 context_before=297 context_after=298 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=30 context=298 block_limit=7 budget=7 proposed=0 paused=false shadow_pending=false accepted_ema=4.993080 emitted_ema=5.993088 samples=17 misses=0 drafting=true probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=30 emitted=1 context_before=298 context_after=299 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=31 context=299 block_limit=7 budget=7 proposed=0 paused=false shadow_pending=false accepted_ema=4.993080 emitted_ema=5.993088 samples=17 misses=0 drafting=true probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=31 emitted=1 context_before=299 context_after=300 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=32 context=300 block_limit=7 budget=7 proposed=0 paused=false shadow_pending=false accepted_ema=4.993080 emitted_ema=5.993088 samples=17 misses=0 drafting=true probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=32 emitted=1 context_before=300 context_after=301 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=33 context=301 block_limit=7 budget=7 proposed=0 paused=false shadow_pending=false accepted_ema=4.993080 emitted_ema=5.993088 samples=17 misses=0 drafting=true probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=33 emitted=1 context_before=301 context_after=302 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=34 context=302 block_limit=7 budget=7 proposed=0 paused=false shadow_pending=false accepted_ema=4.993080 emitted_ema=5.993088 samples=17 misses=0 drafting=true probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=34 emitted=1 context_before=302 context_after=303 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=35 context=303 block_limit=7 budget=7 proposed=0 paused=false shadow_pending=false accepted_ema=4.993080 emitted_ema=5.993088 samples=17 misses=0 drafting=true probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=35 emitted=1 context_before=303 context_after=304 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=36 context=304 block_limit=7 budget=7 proposed=0 paused=false shadow_pending=false accepted_ema=4.993080 emitted_ema=5.993088 samples=17 misses=0 drafting=true probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=36 emitted=1 context_before=304 context_after=305 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=37 context=305 block_limit=7 budget=7 proposed=0 paused=false shadow_pending=false accepted_ema=4.993080 emitted_ema=5.993088 samples=17 misses=0 drafting=true probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=37 emitted=1 context_before=305 context_after=306 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=38 context=306 block_limit=7 budget=7 proposed=0 paused=false shadow_pending=false accepted_ema=4.993080 emitted_ema=5.993088 samples=17 misses=0 drafting=true probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=38 emitted=1 context_before=306 context_after=307 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=39 context=307 block_limit=7 budget=7 proposed=0 paused=false shadow_pending=false accepted_ema=4.993080 emitted_ema=5.993088 samples=17 misses=0 drafting=true probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=39 emitted=1 context_before=307 context_after=308 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=40 context=308 block_limit=7 budget=7 proposed=0 paused=false shadow_pending=false accepted_ema=4.993080 emitted_ema=5.993088 samples=17 misses=0 drafting=true probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=40 emitted=1 context_before=308 context_after=309 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=41 context=309 block_limit=7 budget=7 proposed=0 paused=false shadow_pending=false accepted_ema=4.993080 emitted_ema=5.993088 samples=17 misses=0 drafting=true probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=41 emitted=1 context_before=309 context_after=310 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=42 context=310 block_limit=7 budget=7 proposed=0 paused=false shadow_pending=false accepted_ema=4.993080 emitted_ema=5.993088 samples=17 misses=0 drafting=true probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=42 emitted=1 context_before=310 context_after=311 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=43 context=311 block_limit=7 budget=7 proposed=7 paused=false shadow_pending=false accepted_ema=4.993080 emitted_ema=5.993088 samples=17 misses=0 drafting=true probation=false
+prompt_lookup_trace event=retract gov=0xf31874d73230 round=43 proposed=7 paused_ask=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=42 emitted=1 context_before=311 context_after=312 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=43 context=312 block_limit=7 budget=7 proposed=0 paused=false shadow_pending=false accepted_ema=4.993080 emitted_ema=5.993088 samples=17 misses=0 drafting=true probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=43 emitted=1 context_before=312 context_after=313 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=44 context=313 block_limit=7 budget=7 proposed=0 paused=false shadow_pending=false accepted_ema=4.993080 emitted_ema=5.993088 samples=17 misses=0 drafting=true probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=44 emitted=1 context_before=313 context_after=314 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=45 context=314 block_limit=7 budget=7 proposed=0 paused=false shadow_pending=false accepted_ema=4.993080 emitted_ema=5.993088 samples=17 misses=0 drafting=true probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=45 emitted=1 context_before=314 context_after=315 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=46 context=315 block_limit=7 budget=7 proposed=0 paused=false shadow_pending=false accepted_ema=4.993080 emitted_ema=5.993088 samples=17 misses=0 drafting=true probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=46 emitted=1 context_before=315 context_after=316 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=47 context=316 block_limit=7 budget=7 proposed=0 paused=false shadow_pending=false accepted_ema=4.993080 emitted_ema=5.993088 samples=17 misses=0 drafting=true probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=47 emitted=1 context_before=316 context_after=317 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=48 context=317 block_limit=7 budget=7 proposed=7 paused=false shadow_pending=false accepted_ema=4.993080 emitted_ema=5.993088 samples=17 misses=0 drafting=true probation=false
+prompt_lookup_trace event=retract gov=0xf31874d73230 round=48 proposed=7 paused_ask=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=47 emitted=1 context_before=317 context_after=318 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=48 context=318 block_limit=7 budget=7 proposed=0 paused=false shadow_pending=false accepted_ema=4.993080 emitted_ema=5.993088 samples=17 misses=0 drafting=true probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=48 emitted=1 context_before=318 context_after=319 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=49 context=319 block_limit=7 budget=7 proposed=0 paused=false shadow_pending=false accepted_ema=4.993080 emitted_ema=5.993088 samples=17 misses=0 drafting=true probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=49 emitted=1 context_before=319 context_after=320 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=50 context=320 block_limit=7 budget=7 proposed=0 paused=false shadow_pending=false accepted_ema=4.993080 emitted_ema=5.993088 samples=17 misses=0 drafting=true probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=50 emitted=1 context_before=320 context_after=321 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=51 context=321 block_limit=7 budget=7 proposed=0 paused=false shadow_pending=false accepted_ema=4.993080 emitted_ema=5.993088 samples=17 misses=0 drafting=true probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=51 emitted=1 context_before=321 context_after=322 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=52 context=322 block_limit=7 budget=7 proposed=0 paused=false shadow_pending=false accepted_ema=4.993080 emitted_ema=5.993088 samples=17 misses=0 drafting=true probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=52 emitted=1 context_before=322 context_after=323 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=53 context=323 block_limit=7 budget=7 proposed=0 paused=false shadow_pending=false accepted_ema=4.993080 emitted_ema=5.993088 samples=17 misses=0 drafting=true probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=53 emitted=1 context_before=323 context_after=324 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=54 context=324 block_limit=7 budget=7 proposed=7 paused=false shadow_pending=false accepted_ema=4.993080 emitted_ema=5.993088 samples=17 misses=0 drafting=true probation=false
+prompt_lookup_trace event=retract gov=0xf31874d73230 round=54 proposed=7 paused_ask=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=53 emitted=1 context_before=324 context_after=325 paused=false shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=54 context=325 block_limit=7 budget=7 proposed=7 paused=false shadow_pending=false accepted_ema=4.993080 emitted_ema=5.993088 samples=17 misses=0 drafting=true probation=false
+prompt_lookup_trace event=verify gov=0xf31874d73230 round=54 proposed=7 accepted=0 emitted=1 context=326 accepted_ema_before=4.993080 accepted_ema_after=2.496540 emitted_ema_before=5.993088 emitted_ema_after=3.496544 samples_before=17 samples_after=18 misses_before=0 misses_after=0 drafting_before=true drafting_after=false probation_before=false probation_after=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=55 context=326 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=55 emitted=1 context_before=326 context_after=327 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=56 context=327 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=56 emitted=1 context_before=327 context_after=328 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=57 context=328 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=57 emitted=1 context_before=328 context_after=329 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=58 context=329 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=58 emitted=1 context_before=329 context_after=330 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=59 context=330 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=59 emitted=1 context_before=330 context_after=331 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=60 context=331 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=60 emitted=1 context_before=331 context_after=332 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=61 context=332 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=61 emitted=1 context_before=332 context_after=333 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=62 context=333 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=62 emitted=1 context_before=333 context_after=334 paused=true shadow_pending=true
+prompt_lookup_trace event=shadow_settle gov=0xf31874d73230 round=63 confirmed=false context=334
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=63 context=334 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=63 emitted=1 context_before=334 context_after=335 paused=true shadow_pending=true
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=64 context=335 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=64 emitted=1 context_before=335 context_after=336 paused=true shadow_pending=true
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=65 context=336 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=65 emitted=1 context_before=336 context_after=337 paused=true shadow_pending=true
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=66 context=337 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=66 emitted=1 context_before=337 context_after=338 paused=true shadow_pending=true
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=67 context=338 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=67 emitted=1 context_before=338 context_after=339 paused=true shadow_pending=true
+prompt_lookup_trace event=shadow_settle gov=0xf31874d73230 round=68 confirmed=false context=339
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=68 context=339 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=68 emitted=1 context_before=339 context_after=340 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=69 context=340 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=69 emitted=1 context_before=340 context_after=341 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=70 context=341 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=70 emitted=1 context_before=341 context_after=342 paused=true shadow_pending=true
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=71 context=342 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=71 emitted=1 context_before=342 context_after=343 paused=true shadow_pending=true
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=72 context=343 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=72 emitted=1 context_before=343 context_after=344 paused=true shadow_pending=true
+prompt_lookup_trace event=shadow_settle gov=0xf31874d73230 round=73 confirmed=false context=344
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=73 context=344 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=73 emitted=1 context_before=344 context_after=345 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=74 context=345 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=74 emitted=1 context_before=345 context_after=346 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=75 context=346 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=75 emitted=1 context_before=346 context_after=347 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=76 context=347 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=76 emitted=1 context_before=347 context_after=348 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=77 context=348 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=77 emitted=1 context_before=348 context_after=349 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=78 context=349 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=78 emitted=1 context_before=349 context_after=350 paused=true shadow_pending=true
+prompt_lookup_trace event=shadow_settle gov=0xf31874d73230 round=79 confirmed=false context=350
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=79 context=350 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=79 emitted=1 context_before=350 context_after=351 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=80 context=351 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=80 emitted=1 context_before=351 context_after=352 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=81 context=352 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=81 emitted=1 context_before=352 context_after=353 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=82 context=353 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=82 emitted=1 context_before=353 context_after=354 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=83 context=354 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=83 emitted=1 context_before=354 context_after=355 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=84 context=355 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=84 emitted=1 context_before=355 context_after=356 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=85 context=356 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=85 emitted=1 context_before=356 context_after=357 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=86 context=357 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=86 emitted=1 context_before=357 context_after=358 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=87 context=358 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=87 emitted=1 context_before=358 context_after=359 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=88 context=359 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=88 emitted=1 context_before=359 context_after=360 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=89 context=360 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=89 emitted=1 context_before=360 context_after=361 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=90 context=361 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=90 emitted=1 context_before=361 context_after=362 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=91 context=362 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=91 emitted=1 context_before=362 context_after=363 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=92 context=363 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=92 emitted=1 context_before=363 context_after=364 paused=true shadow_pending=true
+prompt_lookup_trace event=shadow_settle gov=0xf31874d73230 round=93 confirmed=false context=364
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=93 context=364 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=93 emitted=1 context_before=364 context_after=365 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=94 context=365 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=94 emitted=1 context_before=365 context_after=366 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=95 context=366 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=95 emitted=1 context_before=366 context_after=367 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=96 context=367 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=96 emitted=1 context_before=367 context_after=368 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=97 context=368 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=97 emitted=1 context_before=368 context_after=369 paused=true shadow_pending=true
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=98 context=369 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=98 emitted=1 context_before=369 context_after=370 paused=true shadow_pending=true
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=99 context=370 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=99 emitted=1 context_before=370 context_after=371 paused=true shadow_pending=true
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=100 context=371 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=100 emitted=1 context_before=371 context_after=372 paused=true shadow_pending=true
+prompt_lookup_trace event=shadow_settle gov=0xf31874d73230 round=101 confirmed=false context=372
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=101 context=372 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=101 emitted=1 context_before=372 context_after=373 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=102 context=373 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=102 emitted=1 context_before=373 context_after=374 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=103 context=374 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=103 emitted=1 context_before=374 context_after=375 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=104 context=375 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=104 emitted=1 context_before=375 context_after=376 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=105 context=376 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=105 emitted=1 context_before=376 context_after=377 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=106 context=377 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=106 emitted=1 context_before=377 context_after=378 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=107 context=378 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=107 emitted=1 context_before=378 context_after=379 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=108 context=379 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=108 emitted=1 context_before=379 context_after=380 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=109 context=380 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=109 emitted=1 context_before=380 context_after=381 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=110 context=381 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=110 emitted=1 context_before=381 context_after=382 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=111 context=382 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=111 emitted=1 context_before=382 context_after=383 paused=true shadow_pending=true
+prompt_lookup_trace event=shadow_settle gov=0xf31874d73230 round=112 confirmed=false context=383
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=112 context=383 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=112 emitted=1 context_before=383 context_after=384 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=113 context=384 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=113 emitted=1 context_before=384 context_after=385 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=114 context=385 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=114 emitted=1 context_before=385 context_after=386 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=115 context=386 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=115 emitted=1 context_before=386 context_after=387 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=116 context=387 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=116 emitted=1 context_before=387 context_after=388 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=117 context=388 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=117 emitted=1 context_before=388 context_after=389 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=118 context=389 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=118 emitted=1 context_before=389 context_after=390 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=119 context=390 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=119 emitted=1 context_before=390 context_after=391 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=120 context=391 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=120 emitted=1 context_before=391 context_after=392 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=121 context=392 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=121 emitted=1 context_before=392 context_after=393 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=122 context=393 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=122 emitted=1 context_before=393 context_after=394 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=123 context=394 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=123 emitted=1 context_before=394 context_after=395 paused=true shadow_pending=true
+prompt_lookup_trace event=shadow_settle gov=0xf31874d73230 round=124 confirmed=false context=395
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=124 context=395 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=124 emitted=1 context_before=395 context_after=396 paused=true shadow_pending=true
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=125 context=396 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=125 emitted=1 context_before=396 context_after=397 paused=true shadow_pending=true
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=126 context=397 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=126 emitted=1 context_before=397 context_after=398 paused=true shadow_pending=true
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=127 context=398 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=127 emitted=1 context_before=398 context_after=399 paused=true shadow_pending=true
+prompt_lookup_trace event=shadow_settle gov=0xf31874d73230 round=128 confirmed=false context=399
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=128 context=399 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=128 emitted=1 context_before=399 context_after=400 paused=true shadow_pending=true
+prompt_lookup_trace event=shadow_settle gov=0xf31874d73230 round=129 confirmed=false context=400
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=129 context=400 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=129 emitted=1 context_before=400 context_after=401 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=130 context=401 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=130 emitted=1 context_before=401 context_after=402 paused=true shadow_pending=true
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=131 context=402 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=131 emitted=1 context_before=402 context_after=403 paused=true shadow_pending=true
+prompt_lookup_trace event=shadow_settle gov=0xf31874d73230 round=132 confirmed=false context=403
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=132 context=403 block_limit=7 budget=0 proposed=0 paused=true shadow_pending=false accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=132 emitted=1 context_before=403 context_after=404 paused=true shadow_pending=false
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=133 context=404 block_limit=6 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=133 emitted=1 context_before=404 context_after=405 paused=true shadow_pending=true
+prompt_lookup_trace event=shadow_settle gov=0xf31874d73230 round=134 confirmed=false context=405
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=134 context=405 block_limit=5 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=134 emitted=1 context_before=405 context_after=406 paused=true shadow_pending=true
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=135 context=406 block_limit=4 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=135 emitted=1 context_before=406 context_after=407 paused=true shadow_pending=true
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=136 context=407 block_limit=3 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=136 emitted=1 context_before=407 context_after=408 paused=true shadow_pending=true
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=137 context=408 block_limit=2 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+prompt_lookup_trace event=plain gov=0xf31874d73230 round=137 emitted=1 context_before=408 context_after=409 paused=true shadow_pending=true
+prompt_lookup_trace event=shadow_settle gov=0xf31874d73230 round=138 confirmed=false context=409
+prompt_lookup_trace event=ask gov=0xf31874d73230 round=138 context=409 block_limit=1 budget=0 proposed=0 paused=true shadow_pending=true accepted_ema=2.496540 emitted_ema=3.496544 samples=18 misses=0 drafting=false probation=false
+2026-10-11T13:03:44.756488Z  INFO mlxcel::server::batch::scheduler::decode_tick: prompt-cache: request completed: cached=0/155 prompt tokens, total 1224ms prompt_tokens=155 cached_tokens=0 generation_time_ms=1224

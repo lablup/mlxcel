@@ -447,6 +447,9 @@ async fn stream_completion(
     let tokenizer = state.tokenizer.clone();
 
     // Spawn a blocking task to handle generation
+    let admission =
+        crate::server::model_provider::AdmissionWaiter::arm(&mut options, cancelled.clone());
+
     tokio::task::spawn_blocking(move || {
         // Unregister the completion-control entry when this task exits, on
         // every path (#1444).
@@ -544,6 +547,10 @@ async fn stream_completion(
 
         finish_events.done();
     });
+
+    if let Err(error) = admission.wait().await {
+        return generation_error_to_response(error).into_response();
+    }
 
     sse_response(stream, keepalive)
 }

@@ -1,0 +1,27 @@
+W1008 21:55:06.476390  249655 simple_timer.cpp:55] [rocprofv3] tool initialization ::     0.000697 sec
+E1008 21:55:06.489262  249655 rocattach.cpp:233] [rocprofiler-sdk-rocattach] Could not find 'rocp-bg-attach' thread in /proc/230523/task
+E1008 21:55:06.489299  249655 rocattach.cpp:358] [rocprofiler-sdk-rocattach] Cannot attach to process 230523: 'rocp-bg-attach' thread not found. The target process does not appear to have attach support enabled. Start the target with ROCP_TOOL_ATTACH=1, or use a rocprofiler-register build configured with ROCPROFILER_REGISTER_BUILD_DEFAULT_ATTACHMENT=ON.
+E1008 21:55:06.489304  249655 rocattach.cpp:576] [rocprofiler-sdk-rocattach] rocattach_attach_tree failed for pid 230523 with error code 1, continuing with remaining processes
+E1008 21:55:06.489305  249655 rocattach.cpp:596] [rocprofiler-sdk-rocattach] rocattach_attach_tree could not record tree session for root pid 230523
+Attaching to PID 230523 using library /opt/rocm/core-10.0/lib/librocprofiler-sdk-rocattach.so
+Traceback (most recent call last):
+  File "/opt/rocm/core-10.0/bin/rocprof-attach", line 218, in <module>
+    ec = main(sys.argv[1:])
+  File "/opt/rocm/core-10.0/bin/rocprof-attach", line 207, in main
+    attach(
+    ~~~~~~^
+        pid=args.pid,
+        ^^^^^^^^^^^^^
+    ...<3 lines>...
+        attach_children=args.attach_children,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/opt/rocm/core-10.0/bin/rocprof-attach", line 161, in attach
+    raise RuntimeError(
+        f"Calling attach in {attach_library} returned non-zero status {attach_status}"
+    )
+RuntimeError: Calling attach in /opt/rocm/core-10.0/lib/librocprofiler-sdk-rocattach.so returned non-zero status 1
+W1008 21:55:06.498845  249655 simple_timer.cpp:55] [rocprofv3] output generation ::     0.000544 sec
+W1008 21:55:06.498885  249655 simple_timer.cpp:55] [rocprofv3] tool finalization ::     0.001328 sec
+rocprofv3 exit 1

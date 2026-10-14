@@ -1,0 +1,24 @@
+Server:       http://127.0.0.1:18080
+Model:        gemma-3-1b-it-4bit
+Prompt:       ~512 tokens (2591 chars)
+Max tokens:   128
+Concurrency:  [1, 4, 8]
+
+>>> concurrency=1 ...
+    decode paths: paged_decode_launches_total{path="fused_v2"}=+0  paged_decode_launches_total{path="gather"}=+0  paged_decode_launches_total{path="cascade"}=+0  cascade_shared_tokens_total=+0  cascade_member_sequences_total=+0  cascade_failures_total=+0  prompt_cache_hits_total=+0
+    NOTE: no cascade launch in this level. Whatever this level measured, it was not cascade attention.
+
+>>> concurrency=4 ...
+    decode paths: paged_decode_launches_total{path="fused_v2"}=+0  paged_decode_launches_total{path="gather"}=+0  paged_decode_launches_total{path="cascade"}=+0  cascade_shared_tokens_total=+0  cascade_member_sequences_total=+0  cascade_failures_total=+0  prompt_cache_hits_total=+0
+    NOTE: no cascade launch in this level. Whatever this level measured, it was not cascade attention.
+
+>>> concurrency=8 ...
+    decode paths: paged_decode_launches_total{path="fused_v2"}=+0  paged_decode_launches_total{path="gather"}=+0  paged_decode_launches_total{path="cascade"}=+0  cascade_shared_tokens_total=+0  cascade_member_sequences_total=+0  cascade_failures_total=+0  prompt_cache_hits_total=+0
+    NOTE: no cascade launch in this level. Whatever this level measured, it was not cascade attention.
+
+conc   ok  fail  ttft_ms(mean)  ttft_ms(p95)  decode_tok_s(mean)  aggregate_tok_s
+---------------------------------------------------------------------------------
+   1    1     0          307.9         307.9               232.5            149.8
+   4    4     0          110.9         164.6                96.6            358.5
+   8    8     0           37.8          61.0                23.9            191.2
+

@@ -1,0 +1,48 @@
+{
+  "measurement_checkout": "a4bd791aedfb8a6d039f6acd6a60f3070cb260e7",
+  "binary_source_commit": "a4bd791aedfb8a6d039f6acd6a60f3070cb260e7",
+  "binary": "/home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2264/target/release/mlxcel-server",
+  "binary_sha256": "95471996726209627f13bdef8c93afa16a329155a626ae7d2451fa1223ae595d",
+  "model": "/home/inureyes/models/mlx/qwen3-1.7b-4bit",
+  "model_config": {
+    "architectures": [
+      "Qwen3ForCausalLM"
+    ],
+    "attention_bias": false,
+    "attention_dropout": 0.0,
+    "bos_token_id": 151643,
+    "eos_token_id": 151645,
+    "head_dim": 128,
+    "hidden_act": "silu",
+    "hidden_size": 2048,
+    "initializer_range": 0.02,
+    "intermediate_size": 6144,
+    "max_position_embeddings": 40960,
+    "max_window_layers": 28,
+    "model_type": "qwen3",
+    "num_attention_heads": 16,
+    "num_hidden_layers": 28,
+    "num_key_value_heads": 8,
+    "quantization": {
+      "group_size": 64,
+      "bits": 4
+    },
+    "quantization_config": {
+      "group_size": 64,
+      "bits": 4
+    },
+    "rms_norm_eps": 1e-06,
+    "rope_scaling": null,
+    "rope_theta": 1000000,
+    "sliding_window": null,
+    "tie_word_embeddings": true,
+    "torch_dtype": "bfloat16",
+    "transformers_version": "4.51.0",
+    "use_cache": true,
+    "use_sliding_window": false,
+    "vocab_size": 151936
+  },
+  "model_config_sha256": "507a6701220524eb8b283425bf0856a9ae4f21f4052e563896ddd668994b1dc7",
+  "native_mlx_pin": "81ba1c6a0e50a9268b931579c2d4f1158b9aab5a",
+  "purpose": "final-acceptance"
+}

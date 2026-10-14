@@ -1,0 +1,8 @@
+{"q": 0, "completion_tokens": 256, "decode_s": 1.5692, "decode_tok_s": 162.5, "draft_n": 0, "draft_n_accepted": 0, "draft_rounds": 0}
+{"q": 1, "completion_tokens": 256, "decode_s": 1.6108, "decode_tok_s": 158.31, "draft_n": 0, "draft_n_accepted": 0, "draft_rounds": 0}
+{"q": 2, "completion_tokens": 256, "decode_s": 1.6059, "decode_tok_s": 158.79, "draft_n": 0, "draft_n_accepted": 0, "draft_rounds": 0}
+{"q": 3, "completion_tokens": 256, "decode_s": 1.546, "decode_tok_s": 164.94, "draft_n": 0, "draft_n_accepted": 0, "draft_rounds": 0}
+{"q": 4, "completion_tokens": 256, "decode_s": 1.5787, "decode_tok_s": 161.52, "draft_n": 0, "draft_n_accepted": 0, "draft_rounds": 0}
+{"q": 5, "completion_tokens": 256, "decode_s": 1.6129, "decode_tok_s": 158.1, "draft_n": 0, "draft_n_accepted": 0, "draft_rounds": 0}
+{"q": 6, "completion_tokens": 256, "decode_s": 1.628, "decode_tok_s": 156.63, "draft_n": 0, "draft_n_accepted": 0, "draft_rounds": 0}
+{"q": 7, "completion_tokens": 256, "decode_s": 1.5853, "decode_tok_s": 160.85, "draft_n": 0, "draft_n_accepted": 0, "draft_rounds": 0}

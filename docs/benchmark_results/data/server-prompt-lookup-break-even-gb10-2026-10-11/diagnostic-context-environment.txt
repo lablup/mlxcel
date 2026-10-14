@@ -1,0 +1,4 @@
+2026-10-11T10:15:55Z
+25fbee3fbb2e50c2fda4fae6a5e647b663699e2b
+7a7b56aabf9d49ea08037acdda9a3cc72ffe3b2ec15d4ee06f2e8f3918d0b13e  /home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2264/target/release/mlxcel-server
+pub(crate) const PROMPT_LOOKUP_PAGED_CONTEXT_LIMIT: Option<usize> = Some(4096);

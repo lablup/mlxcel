@@ -92,13 +92,15 @@ fn make_sequence(
         prefill_offset: 0,
         prefill_start_offset: 0,
         already_cached_tokens: 0,
+        eos_terminated: false,
         response_tx: tx,
         cancelled: Arc::new(AtomicBool::new(false)),
         created_at: Instant::now(),
         prefill_start: None,
         first_token_time: None,
+        prompt_lookup: None,
         token_history: Vec::new(),
-        sampler_state: None,
+        sampler: Default::default(),
         merged_eos: Vec::new(),
         thinking: crate::server::thinking_budget::ThinkingState::disabled(),
         structured: None,
@@ -154,6 +156,10 @@ fn drive(text: &str, stops: &[&str], max_tokens: usize, chunk_bytes: usize) -> R
         match event {
             GenerateEvent::Token(t, _) | GenerateEvent::TokenWithLogprobs(t, _, _) => {
                 streamed.push_str(&t);
+            }
+            GenerateEvent::Admitted => {}
+            GenerateEvent::RequestMemoryRejected(error) => {
+                panic!("unexpected memory rejection: {error}")
             }
             GenerateEvent::Done(_) | GenerateEvent::Error(_) | GenerateEvent::Prefill(_) => {}
         }

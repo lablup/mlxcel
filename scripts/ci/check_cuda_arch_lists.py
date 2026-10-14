@@ -21,7 +21,7 @@ alternative it may ignore. Measured on GB10, that is 12.7 MB of extra archive
 and a different ``qmv`` on every Blackwell user's machine, to fix a converter
 none of those kernels call.
 
-``src/lib/mlx-cpp/CMakeLists.txt`` adds the architecture-specific image to
+``src/lib/mlxcelverse/CMakeLists.txt`` adds the architecture-specific image to
 ``fp_quantize.cu`` alone instead, which is the only translation unit that can
 reach the converters. So these lists stay plain, and an ``a`` in one is now a
 regression rather than a fix.
@@ -45,7 +45,7 @@ For every ``MLX_CUDA_ARCHITECTURES`` value in ``.github/workflows/*.yml``:
 
 Then, once for the repository:
 
-4. ``src/lib/mlx-cpp/CMakeLists.txt`` must still carry the per-source injection.
+4. ``src/lib/mlxcelverse/CMakeLists.txt`` must still carry the per-source injection.
    Without it, plain lists mean the converters are compiled out again, silently,
    which is exactly the state this issue started from.
 5. Every list in ``release.yml`` must appear verbatim in
@@ -103,7 +103,7 @@ SUFFIX_RULES = (
         "a Blackwell host with MLX_CUDA_ARCHITECTURES unset then builds the whole MLX target as "
         "`121a`: every translation unit compiles under __CUDA_ARCH_SPECIFIC__, CUTLASS keys "
         "CUTLASS_ARCH_MMA_SM121A_ENABLED on the same macro, and the per-source injection in "
-        "src/lib/mlx-cpp/CMakeLists.txt never fires at all, because an entry already carrying `a` "
+        "src/lib/mlxcelverse/CMakeLists.txt never fires at all, because an entry already carrying `a` "
         "is skipped rather than given a duplicate --generate-code. That is the whole-target shape "
         "rule 3 rejects in a workflow, reached by a path no workflow names",
     ),
@@ -231,7 +231,7 @@ def check_list(arch_list: ArchList) -> list[str]:
             "CUTLASS_ARCH_MMA_SM121A_ENABLED on the same macro, so the decode kernels get a "
             "second image, and on a matching device that is the image the driver loads. Measured "
             "on GB10 it costs 12.7 MB of archive to change code no converter calls. Use plain "
-            f"{sm}; src/lib/mlx-cpp/CMakeLists.txt gives fp_quantize.cu the {sm}a image on its "
+            f"{sm}; src/lib/mlxcelverse/CMakeLists.txt gives fp_quantize.cu the {sm}a image on its "
             "own. See issue #1934."
         )
 
@@ -389,7 +389,7 @@ def main() -> int:
             relative = arch_list.path.relative_to(args.root)
             failures.append(f"{relative}:{arch_list.line}: {problem}")
 
-    failures.extend(check_injection(args.root / "src" / "lib" / "mlx-cpp" / "CMakeLists.txt"))
+    failures.extend(check_injection(args.root / "src" / "lib" / "mlxcelverse" / "CMakeLists.txt"))
     failures.extend(check_auto_detect(args.root))
     release_lists = [a for a in arch_lists if a.path.name == "release.yml"]
     failures.extend(check_docs(release_lists, args.root / "docs" / "installation.md"))

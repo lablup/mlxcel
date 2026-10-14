@@ -17,7 +17,7 @@
 //!
 //! Loads a model, prefills a fixed 300-token prompt, then times:
 //!
-//! - a pipelined one-token step, as `CxxGenerator` runs it (the next step is
+//! - a pipelined one-token step, as the retired `CxxGenerator` loop ran it (the next step is
 //!   submitted from the still-lazy argmax before the host reads it);
 //! - a synchronous forward of `w` tokens plus the argmax and its host read,
 //!   for `w` in 1..=10, trimming `w - 1` positions afterwards so the cache
@@ -62,7 +62,7 @@ fn main() {
         caches
     };
 
-    // Pipelined one-token steps, as CxxGenerator runs them.
+    // Pipelined one-token steps, as the retired CxxGenerator loop ran them.
     let pipelined = |n: usize| {
         let mut caches = fresh();
         let mut y = mlxcel_core::from_slice_i32(&[1234], &[1, 1]);

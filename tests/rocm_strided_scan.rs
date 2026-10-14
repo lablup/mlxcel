@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! A scan along a non-last axis launches the right number of blocks on ROCm
-//! (issue #1809, `patches-rocm/LOCAL_FIXES.md` item 22).
+//! (issue #1809, `overlays/rocm/LOCAL_FIXES.md` item 22).
 //!
 //! `Scan::eval_gpu` sizes the `strided_scan` grid with `get_2d_grid_dims(shape,
 //! strides, axis_size * stride)`. The ROCm overlay carried an older copy of that

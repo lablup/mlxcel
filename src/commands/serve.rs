@@ -136,6 +136,16 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
         );
         args.draft_model = None;
     }
+    // `none` disables prompt lookup as well (#2255): it needs no draft model,
+    // so the draft-model drop above does not reach it.
+    if spec_type.disable_speculation
+        && args.speculative.draft_kind.as_deref() == Some("prompt-lookup")
+    {
+        tracing::warn!(
+            "--spec-type none disables speculative decoding (b10621 semantics); ignoring --draft-kind prompt-lookup"
+        );
+        args.speculative.draft_kind = None;
+    }
     if let Some(kind) = spec_type.draft_kind {
         match args.speculative.draft_kind.as_deref() {
             None => args.speculative.draft_kind = Some(kind.to_string()),
@@ -615,6 +625,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         // typed `DrafterKind` happens later, at the dispatch site.
         draft_kind: args.speculative.draft_kind,
         draft_block_size: args.speculative.draft_block_size,
+        prompt_lookup_max_batch: args.prompt_lookup_max_batch,
         max_batch_size: args.max_batch_size,
         no_batch: args.no_batch,
         max_queue_depth: args.max_queue_depth,

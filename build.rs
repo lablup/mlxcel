@@ -42,6 +42,7 @@ fn main() {
 
     println!("cargo:rerun-if-env-changed=IREE_DIST");
     println!("cargo:rerun-if-env-changed=IREE_CUDA_HOME");
+    println!("cargo:rerun-if-env-changed=IREE_ROCM_HOME");
     println!("cargo:rerun-if-env-changed=IREE_MACOS_HOME");
 
     // The feature env is set for this crate's own enabled features; `xla-iree`
@@ -109,9 +110,9 @@ fn main() {
         // runs after this block on macOS; no explicit early return is needed.
     }
 
-    // The CUDA and Linux-dist recipes below are GNU-ld only and never apply on
-    // macOS (handled by the arm above), so they are gated out there to keep the
-    // macOS build free of dead code.
+    // The CUDA, ROCm, and Linux-dist recipes below are GNU-ld only and never
+    // apply on macOS (handled by the arm above), so they are gated out there to
+    // keep the macOS build free of dead code.
     #[cfg(not(target_os = "macos"))]
     {
         // CUDA mode (GB10): link the source-built cuda-enabled IREE runtime instead
@@ -184,6 +185,66 @@ fn main() {
                 // `-Wl,--copy-dt-needed-entries` alone does not, because rustc
                 // appends our args after its `-lc` and that flag only governs
                 // inputs that follow it. See issue #1274.
+                "-lc",
+            ]);
+
+            let mut link_args = vec![
+                "-Wl,--whole-archive",
+                "-l:libiree_runtime_unified.a",
+                "-Wl,--no-whole-archive",
+                "-Wl,--start-group",
+            ];
+            link_args.extend(group);
+            link_args.push("-Wl,--end-group");
+            for arg in link_args {
+                println!("cargo:rustc-link-arg={arg}");
+            }
+            return;
+        }
+
+        // ROCm/HIP mode: link the source-built HIP-enabled IREE runtime under
+        // IREE_ROCM_HOME (produced by `scripts/iree/setup-rocm.sh`). The unified
+        // archive bundles the HIP driver implementation and local-task/local-sync,
+        // while `libiree_hal_drivers_hip_registration_registration.a` supplies
+        // `iree_hal_hip_driver_module_register`. The HIP driver loads
+        // `libamdhip64.so` via `dlopen` at runtime (no `-lamdhip64` needed here).
+        if let Ok(home) = env::var("IREE_ROCM_HOME") {
+            let b = PathBuf::from(home).join("build");
+            let unified = b.join("runtime/src/iree/runtime/libiree_runtime_unified.a");
+            assert!(
+                unified.exists(),
+                "IREE_ROCM_HOME build is missing {} (run `make iree-rocm` first)",
+                unified.display()
+            );
+            let hip_reg = b.join(
+                "runtime/src/iree/hal/drivers/hip/registration/\
+                 libiree_hal_drivers_hip_registration_registration.a",
+            );
+            assert!(
+                hip_reg.exists(),
+                "IREE_ROCM_HOME build is missing {} (run `make iree-rocm` first)",
+                hip_reg.display()
+            );
+            for d in [
+                "runtime/src/iree/runtime",
+                "runtime/src/iree/hal/drivers/hip/registration",
+                "build_tools/third_party/flatcc",
+                "build_tools/third_party/printf",
+            ] {
+                println!("cargo:rustc-link-search=native={}", b.join(d).display());
+            }
+            let mut group = vec!["-l:libiree_hal_drivers_hip_registration_registration.a"];
+            if b.join("build_tools/third_party/printf/libprintf_printf.a")
+                .exists()
+            {
+                group.push("-l:libprintf_printf.a");
+            }
+            group.extend([
+                "-l:libflatcc_parsing.a",
+                "-lgcc",
+                "-lm",
+                "-lpthread",
+                "-ldl",
                 "-lc",
             ]);
 

@@ -162,11 +162,12 @@ impl Gemma3EmbeddingModel {
 
         let mut layers = Vec::with_capacity(args.num_hidden_layers);
         for i in 0..args.num_hidden_layers {
-            let mut layer = TransformerBlock::from_weights(weights, args, i)
+            // The embedding path builds and owns every mask and gives every
+            // layer a `Cache::Standard`, so no layer applies a sliding window
+            // of its own: the window lives in a `RotatingKVCache`, which this
+            // path never creates.
+            let layer = TransformerBlock::from_weights(weights, args, i)
                 .map_err(|e| anyhow::anyhow!("EmbeddingGemma layer {i}: {e}"))?;
-            // The embedding path builds and owns every mask, so the layer must
-            // not also apply its causal sliding window.
-            layer.self_attn.window_size = 0;
             layers.push(layer);
         }
 

@@ -1,0 +1,4 @@
+2026-10-12T00:25:44Z
+22dba1dcbae91d0b0f633ed77183fad2686030e3
+3f30d1c93ffba2c38baabab0a82c00015d2a399718332b22807dd2634ee52c39  target/test-fast/mlxcel-server
+85489e18f97868775fe41b9e28aa09ec93b7a3a1b840b0b49a878f25d8242e22  /tmp/mlxcel-auto-plan/2264-prompt-lookup-trajectory-after-fix.patch

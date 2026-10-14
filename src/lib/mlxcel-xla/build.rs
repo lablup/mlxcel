@@ -104,10 +104,13 @@ fn main() {
     println!("cargo:rerun-if-env-changed=IREE_DIST");
     println!("cargo:rerun-if-env-changed=IREE_CUDA_HOME");
     println!("cargo:rerun-if-env-changed=IREE_CUDA_COMPILE");
+    println!("cargo:rerun-if-env-changed=IREE_ROCM_HOME");
+    println!("cargo:rerun-if-env-changed=IREE_ROCM_COMPILE");
     println!("cargo:rerun-if-env-changed=IREE_MACOS_HOME");
     println!("cargo:rerun-if-env-changed=IREE_MACOS_COMPILE");
-    // cfg used by src/iree.rs to select the cuda iree-compile / device behavior.
+    // cfg used by src/iree.rs to select the cuda/rocm iree-compile / device behavior.
     println!("cargo:rustc-check-cfg=cfg(xla_iree_cuda)");
+    println!("cargo:rustc-check-cfg=cfg(xla_iree_rocm)");
 
     // Only build the native shim under the `iree` feature.
     if env::var_os("CARGO_FEATURE_IREE").is_none() {
@@ -142,6 +145,34 @@ fn main() {
         compile_gemma3n_qmv_ptx();
         println!("cargo:rustc-cfg=xla_iree_cuda");
         if let Ok(ic) = env::var("IREE_CUDA_COMPILE") {
+            println!("cargo:rustc-env=MLXCEL_XLA_IREE_COMPILE={ic}");
+        }
+        return;
+    }
+
+    // ROCm/HIP mode: build against a source-built HIP-enabled IREE runtime
+    // (IREE_ROCM_HOME, produced by `scripts/iree/setup-rocm.sh`) paired with
+    // the version-matched ROCm-capable `iree-compile` (`IREE_ROCM_COMPILE`,
+    // baked here / overridable at runtime via `MLXCEL_XLA_IREE_COMPILE`).
+    if let Ok(home) = env::var("IREE_ROCM_HOME") {
+        let home = PathBuf::from(home);
+        let src_inc = home.join("src/runtime/src");
+        let bld_inc = home.join("build/runtime/src");
+        assert!(
+            src_inc.join("iree/runtime/api.h").exists(),
+            "IREE_ROCM_HOME={} is not an iree source+build tree (missing \
+             src/runtime/src/iree/runtime/api.h); run `make iree-rocm`",
+            home.display()
+        );
+        let mut build = cc::Build::new();
+        add_iree_shim_sources(&mut build);
+        build
+            .include(&src_inc)
+            .include(&bld_inc)
+            .define("XLA_GATE_ROCM", None)
+            .compile("xla_iree");
+        println!("cargo:rustc-cfg=xla_iree_rocm");
+        if let Ok(ic) = env::var("IREE_ROCM_COMPILE") {
             println!("cargo:rustc-env=MLXCEL_XLA_IREE_COMPILE={ic}");
         }
         return;

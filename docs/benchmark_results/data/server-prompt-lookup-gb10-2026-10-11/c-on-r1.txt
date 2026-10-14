@@ -1,0 +1,48 @@
+Server:       http://127.0.0.1:18080
+Model:        qwen3-1.7b-4bit
+Prompt:       ~512 tokens (2591 chars), style plain
+Max tokens:   256
+Concurrency:  [2, 4, 8]
+
+>>> concurrency=2 ...
+
+>>> concurrency=4 ...
+
+>>> concurrency=8 ...
+
+conc   ok  fail  ttft_ms(mean)  ttft_ms(p95)  decode_tok_s(mean)  aggregate_tok_s
+---------------------------------------------------------------------------------
+   2    2     0          218.3         218.6                70.5            133.5
+   4    4     0          102.2         102.9                70.4            275.0
+   8    8     0          226.4         228.7                15.3            121.4
+
+Server:       http://127.0.0.1:18080
+Model:        qwen3-1.7b-4bit
+Prompt:       ~512 tokens (2631 chars), style copy
+Max tokens:   256
+Concurrency:  [2, 4, 8]
+
+>>> concurrency=2 ...
+
+>>> concurrency=4 ...
+
+>>> concurrency=8 ...
+
+conc   ok  fail  ttft_ms(mean)  ttft_ms(p95)  decode_tok_s(mean)  aggregate_tok_s
+---------------------------------------------------------------------------------
+   2    2     0          199.8         199.9               109.5            202.4
+   4    4     0          112.6         112.8                65.5            255.6
+   8    8     0          255.0         256.5                15.3            121.1
+
+{"style": "chat", "conc": 2, "rep": 0, "wall_s": 2.585, "tokens": 512, "agg_tok_s": 198.08, "decode_tok_s": [194.06, 104.29], "prompt_n": [27, 19], "draft_kind": "prompt-lookup", "draft_n": 210, "draft_n_accepted": 175, "draft_rounds": 33}
+{"style": "chat", "conc": 2, "rep": 1, "wall_s": 2.351, "tokens": 512, "agg_tok_s": 217.75, "decode_tok_s": [144.31, 113.74], "prompt_n": [21, 20], "draft_kind": "prompt-lookup", "draft_n": 288, "draft_n_accepted": 234, "draft_rounds": 49}
+{"style": "copy", "conc": 2, "rep": 0, "wall_s": 2.102, "tokens": 512, "agg_tok_s": 243.61, "decode_tok_s": [129.64, 129.7], "prompt_n": [155, 155], "draft_kind": "prompt-lookup", "draft_n": 498, "draft_n_accepted": 344, "draft_rounds": 82}
+{"style": "copy", "conc": 2, "rep": 1, "wall_s": 2.22, "tokens": 512, "agg_tok_s": 230.59, "decode_tok_s": [120.85, 120.91], "prompt_n": [155, 155], "draft_kind": "prompt-lookup", "draft_n": 498, "draft_n_accepted": 344, "draft_rounds": 82}
+{"style": "chat", "conc": 4, "rep": 0, "wall_s": 5.504, "tokens": 1024, "agg_tok_s": 186.03, "decode_tok_s": [48.1, 48.1, 46.66, 48.1], "prompt_n": [27, 19, 21, 20], "draft_kind": null, "draft_n": 0, "draft_n_accepted": 0, "draft_rounds": 0}
+{"style": "chat", "conc": 4, "rep": 1, "wall_s": 5.92, "tokens": 1024, "agg_tok_s": 172.98, "decode_tok_s": [44.54, 43.76, 43.75, 44.54], "prompt_n": [19, 21, 15, 18], "draft_kind": null, "draft_n": 0, "draft_n_accepted": 0, "draft_rounds": 0}
+{"style": "copy", "conc": 4, "rep": 0, "wall_s": 6.054, "tokens": 1024, "agg_tok_s": 169.15, "decode_tok_s": [42.97, 42.97, 43.78, 43.77], "prompt_n": [155, 155, 155, 155], "draft_kind": null, "draft_n": 0, "draft_n_accepted": 0, "draft_rounds": 0}
+{"style": "copy", "conc": 4, "rep": 1, "wall_s": 5.934, "tokens": 1024, "agg_tok_s": 172.55, "decode_tok_s": [43.14, 44.62, 44.62, 44.63], "prompt_n": [155, 155, 155, 155], "draft_kind": null, "draft_n": 0, "draft_n_accepted": 0, "draft_rounds": 0}
+{"style": "chat", "conc": 8, "rep": 0, "wall_s": 11.752, "tokens": 2048, "agg_tok_s": 174.27, "decode_tok_s": [42.91, 43.16, 47.21, 47.22, 47.21, 47.22, 42.92, 42.92], "prompt_n": [27, 19, 21, 20, 19, 21, 15, 18], "draft_kind": null, "draft_n": 0, "draft_n_accepted": 0, "draft_rounds": 0}
+{"style": "chat", "conc": 8, "rep": 1, "wall_s": 14.312, "tokens": 2048, "agg_tok_s": 143.09, "decode_tok_s": [58.67, 58.49, 58.49, 26.47, 26.47, 26.47, 26.47, 26.56], "prompt_n": [27, 19, 21, 20, 19, 21, 15, 18], "draft_kind": null, "draft_n": 0, "draft_n_accepted": 0, "draft_rounds": 0}
+{"style": "copy", "conc": 8, "rep": 0, "wall_s": 15.003, "tokens": 2048, "agg_tok_s": 136.5, "decode_tok_s": [18.6, 18.6, 18.6, 240.57, 19.01, 19.01, 19.01, 19.01], "prompt_n": [155, 155, 155, 155, 155, 155, 155, 155], "draft_kind": null, "draft_n": 249, "draft_n_accepted": 172, "draft_rounds": 41}
+{"style": "copy", "conc": 8, "rep": 1, "wall_s": 14.905, "tokens": 2048, "agg_tok_s": 137.4, "decode_tok_s": [55.17, 56.54, 56.54, 25.59, 25.6, 25.59, 25.59, 25.65], "prompt_n": [155, 155, 155, 155, 155, 155, 155, 155], "draft_kind": null, "draft_n": 0, "draft_n_accepted": 0, "draft_rounds": 0}

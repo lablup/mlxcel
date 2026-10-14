@@ -4,7 +4,7 @@
 # Builds a small synthetic world in a temporary directory: one git repository
 # holding an "upstream" history (merge base B1, pins P1 and P2) and a "fork"
 # history (F1 and variants), plus an overlay directory laid out like
-# src/lib/mlx-cpp/patches-rocm/. Then it checks that each subcommand accepts
+# src/lib/mlxcelverse/overlays/rocm/. Then it checks that each subcommand accepts
 # the good cases and rejects the bad ones, including the review risk #1813 is
 # about: an overlay core file that quietly drops part of an upstream change is
 # reported even though its +/- line counts look plausible. Needs git, bash and

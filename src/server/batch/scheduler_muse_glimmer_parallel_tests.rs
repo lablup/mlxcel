@@ -38,6 +38,15 @@ struct RequestSummary {
     finish_reason: String,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct TerminalDecodeSummary {
+    generated_tokens: Vec<i32>,
+    finish_reason: FinishReason,
+    final_pool_offset: i32,
+    final_offsets: Vec<(bool, i32, i32)>,
+    stream: RequestSummary,
+}
+
 fn cases() -> (ImageCase, ImageCase) {
     (
         ImageCase {
@@ -197,6 +206,70 @@ fn run_isolated(case: &ImageCase, collect_tokens: bool) -> RequestSummary {
     }
 }
 
+fn run_terminal_length_path(parallelism: usize) -> TerminalDecodeSummary {
+    let max_tokens = 3;
+    let mut sched = muse::scheduler(parallelism);
+    let target_rx = muse::enqueue(
+        &mut sched,
+        request_prompt(),
+        muse::image_bytes(2, 2, 41),
+        max_tokens,
+    );
+    let sibling_rx = (parallelism > 1).then(|| {
+        muse::enqueue(
+            &mut sched,
+            request_prompt(),
+            muse::image_bytes(2, 2, 73),
+            max_tokens,
+        )
+    });
+    let target_id = SequenceId::from_raw(0);
+    execute_prefill_tick(&mut sched);
+    let active_ids = sched.active_batch.sequence_ids();
+    assert!(
+        sched.lookahead_params(&active_ids).is_none(),
+        "Muse model-owned state deliberately stays on the synchronous path"
+    );
+
+    let mut terminal = None;
+    while sched.active_batch.get(target_id).is_some() {
+        let ids = sched.active_batch.sequence_ids();
+        execute_decode_tick(&mut sched, &ids);
+        if let Some(seq) = sched.active_batch.get(target_id)
+            && let SequenceState::Finished(reason) = &seq.state
+        {
+            terminal = Some((
+                seq.generated_tokens.clone(),
+                reason.clone(),
+                sched
+                    .engine
+                    .pool()
+                    .get(target_id)
+                    .expect("finished target retains its pool entry until finalization")
+                    .current_offset,
+                muse::muse_state_offsets(&sched, target_id)
+                    .expect("finished target retains its state until finalization"),
+            ));
+        }
+        sched.finalize_completed();
+    }
+
+    let (generated_tokens, finish_reason, final_pool_offset, final_offsets) =
+        terminal.expect("target reached a terminal decode tick");
+    let stream = summarize(muse::collect_stream(&target_rx));
+    if let Some(rx) = sibling_rx {
+        let sibling = summarize(muse::collect_stream(&rx));
+        assert_eq!(sibling, stream);
+    }
+    TerminalDecodeSummary {
+        generated_tokens,
+        finish_reason,
+        final_pool_offset,
+        final_offsets,
+        stream,
+    }
+}
+
 fn assert_reuse_after_release(sched: &mut BatchScheduler) {
     let image = muse::image_bytes(2, 2, 17);
     let rx = muse::enqueue(sched, request_prompt(), image, 1);
@@ -215,7 +288,7 @@ fn run_two_concurrent(parallelism: usize) -> (RequestSummary, RequestSummary) {
     let (small, wide) = cases();
     let mut sched = muse::scheduler(parallelism);
     assert_eq!(
-        sched.model.sequence_state_layout().backend,
+        sched.engine.model().sequence_state_layout().backend,
         SequenceStateBackend::ModelOwned
     );
 
@@ -313,6 +386,19 @@ fn muse_scheduler_two_image_requests_parallelism_two_match_isolated_runs() {
     assert_eq!(wide_result.prompt_tokens, 5);
     assert_eq!(small_result.streamed, vec!["a", "a"]);
     assert_eq!(wide_result.streamed, vec!["a", "a", "a"]);
+}
+
+#[test]
+fn b1_terminal_length_matches_the_unchanged_b2_path() {
+    let b1 = run_terminal_length_path(1);
+    let b2 = run_terminal_length_path(2);
+
+    assert_eq!(b1, b2);
+    assert_eq!(b1.generated_tokens, vec![muse::GENERATED_TOKEN_ID; 3]);
+    assert_eq!(b1.finish_reason, FinishReason::Length);
+    assert_eq!(b1.final_pool_offset, 7);
+    assert_eq!(b1.final_offsets, vec![(true, 6, 6), (false, 6, 6)]);
+    assert_eq!(b1.stream.streamed, vec!["a", "a", "a"]);
 }
 
 #[test]

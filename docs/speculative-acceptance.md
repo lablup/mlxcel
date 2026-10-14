@@ -110,8 +110,9 @@ real and provable.
 
 | Path | `temperature == 0` | `temperature > 0` default | `temperature > 0` opt-in |
 |------|--------------------|---------------------------|--------------------------|
-| `SpeculativeGenerator` (classic; `mlxcel generate --draft-model`) | greedy argmax (lossless) | **sampler-match** (lossless) | modified rejection sampling (lossless, acceptance-optimal) |
-| `PromptLookupGenerator` (`mlxcel generate --prompt-lookup`) | greedy argmax (lossless) | **sampler-match** (lossless, and acceptance-optimal here) | none needed |
+| `SpeculativeGenerator` (classic, deprecated and removed in v0.8.0, #2176; `mlxcel generate --draft-model`) | greedy argmax (lossless) | **sampler-match** (lossless) | modified rejection sampling (lossless, acceptance-optimal) |
+| `PromptLookupDrafter` on the engine's token-only loop (`mlxcel generate --prompt-lookup`) | greedy argmax (lossless) | **sampler-match** (lossless, and acceptance-optimal here) | none needed |
+| `PromptLookupDrafter` in the server scheduler (`--draft-kind prompt-lookup`, the same `Engine::verify_round`) | greedy argmax (lossless) | **sampler-match** (lossless, and acceptance-optimal here) | none needed |
 | Gemma 4 MTP round loop | argmax (lossless here) | argmax-against-argmax (**biased**) | not wired |
 | DFlash round loop (Qwen 3.5 DFlash drafter) | argmax (lossless here) | argmax-against-argmax (**biased**) | not wired |
 | DFlash round loop (LFM2 DSpark drafter) | argmax (lossless here, probe-gated) | declines to classic decode | not wired |
@@ -132,6 +133,22 @@ token `d`. The two acceptance probabilities then coincide at `p(d)`
 rules emit a draw from `p` conditioned on not being `d`. Sampler-match is
 therefore already the acceptance-optimal rule for that path, and there is
 nothing to opt into.
+
+The CUDA server's prompt-lookup governor additionally pauses low-yield rows
+when the EMA of accepted proposals plus one falls below four tokens after at
+least two drafted rounds and the latest round is also below the floor. A
+latest round meeting the floor can repay startup EMA debt without pausing.
+An isolated zero-accept round after an accepted-token EMA at least equal to
+the floor receives one round of grace; partial low-yield acceptance does not.
+Grace never extends beyond the first consecutive low-yield round; pausing
+still requires the emitted-token EMA to be below the floor. This measured
+field-boundary heuristic leaves the acceptance rule itself unchanged.
+This is a proposal-cost decision, not a change to
+the sampler-match acceptance rule. Paused rows still observe emitted tokens
+and run shadow lookups; seven matching shadow tokens restore verification.
+Plain asks, retracted proposals, and gated-out rows add no verify evidence.
+The CLI has no break-even floor and retains its two-token shadow confirmation.
+`adaptive = false` ignores the floor, and the graded policy is unchanged.
 
 ## RNG dependency
 
@@ -269,13 +286,16 @@ The mean accepted length per round is `(draft_n_accepted + draft_rounds) /
 draft_rounds`: every round emits its accepted drafts plus one bonus token. It
 is left to the client rather than reported, so a client that wants a different
 aggregate is not stuck with this one. `draft_kind` carries a `--draft-kind`
-name. In practice today it is `dflash` or `mtp`: `internal-mtp` resolves to the
+name. In practice today it is `dflash`, `mtp` or `prompt-lookup`: `internal-mtp` resolves to the
 classic dispatch, which the burst gate declines, so no request is served
 speculatively under it and none reports a block.
 
 The block covers the three paths that own a request's whole round loop: the
 DFlash B=1 burst, the MTP B=1 burst, and the tick-cooperative MTP slice (whose
-counters are the session totals across every slice, not one slice's). The
+counters are the session totals across every slice, not one slice's), plus
+prompt lookup's per-tick verify rounds, whose counters are the drafter's
+totals for the request (a proposal retracted because no forward followed it is
+not counted). The
 default-off B>1 batched burst reports nothing, because its round loops return
 per-row tokens without per-row acceptance counters.
 

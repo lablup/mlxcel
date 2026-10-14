@@ -151,7 +151,7 @@ pub(crate) fn load_kimi_k3_vlm(model_path: &Path) -> Result<LoadedModel> {
         .map_err(|e| anyhow!("{e}"))?;
 
     let num_layers = config.text_config.num_hidden_layers;
-    println!("[KimiK3-VLM] Loading weights...");
+    tracing::info!("[KimiK3-VLM] Loading weights...");
     let mut weights = mlxcel_core::weights::load_weights_from_dir_index_filtered(model_path, |k| {
         keep_kimi_k3_vlm_weight(k, num_layers)
     })
@@ -187,7 +187,7 @@ pub(crate) fn load_kimi_k3_vlm(model_path: &Path) -> Result<LoadedModel> {
         ));
     }
 
-    println!("[KimiK3-VLM] Building text backbone ({num_layers} layers)...");
+    tracing::info!("[KimiK3-VLM] Building text backbone ({num_layers} layers)...");
     let text_weights = KimiK3Model::sanitize_weights(text_weights, &config.text_config)
         .map_err(|e| anyhow!("{e}"))?;
     let mut text = KimiK3Model::from_weights(&text_weights, &config.text_config)
@@ -196,7 +196,7 @@ pub(crate) fn load_kimi_k3_vlm(model_path: &Path) -> Result<LoadedModel> {
     text.set_eos_token_ids(config.eos_token_ids());
     text.set_eos_token_ids(crate::loading::read_eos_token_ids(model_path));
 
-    println!(
+    tracing::info!(
         "[KimiK3-VLM] Building MoonViT3D tower ({} blocks) and patchmergerv2 projector...",
         vision_config.vt_num_hidden_layers
     );
@@ -207,7 +207,7 @@ pub(crate) fn load_kimi_k3_vlm(model_path: &Path) -> Result<LoadedModel> {
     let projector = KimiK3VLModel::projector_from_weights(&vision_weights, &vision_config)
         .map_err(|e| anyhow!("Failed to load Kimi K3 projector: {e}"))?;
 
-    println!("[KimiK3-VLM] Model loaded successfully");
+    tracing::info!("[KimiK3-VLM] Model loaded successfully");
     Ok(LoadedModel::KimiK3VLM(KimiK3VLModel {
         text,
         vision,

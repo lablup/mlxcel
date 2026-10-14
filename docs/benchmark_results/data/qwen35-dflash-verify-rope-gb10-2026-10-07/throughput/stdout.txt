@@ -1,0 +1,4 @@
+[r2 classic-b] e2e 56.59..58.11 tok/s | sha ['2c76b0a181'] | declined=False
+[r2 classic-a] e2e 56.47..57.19 tok/s | sha ['2c76b0a181'] | declined=False
+[r2 dflash-auto] e2e 61.04..61.75 tok/s | sha ['2c76b0a181'] | declined=False
+ROPE PRICE DONE

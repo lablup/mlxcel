@@ -508,11 +508,12 @@ pub struct AppState {
     /// `MLXCEL_VIDEO_DIR_ALLOWLIST`, canonicalized once at startup (issue
     /// #1766).
     ///
-    /// The video-frames fallback resolves local clips against this rather than
-    /// re-reading the environment and calling `std::fs::canonicalize` on each
-    /// entry per request, which ran on a Tokio worker. Empty by default, which
-    /// is the same fail-closed answer an unset variable gives: no local path
-    /// resolves until the startup pipeline installs the operator's list.
+    /// Native-video resolution and the video-frames fallback both resolve
+    /// local clips against this rather than re-reading the environment and
+    /// calling `std::fs::canonicalize` on each entry per request. Empty by
+    /// default, which is the same fail-closed answer an unset variable gives:
+    /// no local path resolves until the startup pipeline installs the
+    /// operator's list.
     pub(crate) video_dir_allowlist: Arc<Vec<PathBuf>>,
     /// Batch-level metrics (active sequences, queue depth) for admission
     /// control and status reporting.
@@ -533,6 +534,10 @@ pub struct AppState {
     /// publish and adopt detached caches. HTTP handlers may only call
     /// read-only observation methods on this store.
     pub prompt_cache: Option<Arc<PromptCacheStore>>,
+    /// Reasoning the server generated per chat turn, re-injected into a later
+    /// request whose client echoed only `content` (issue #2110). Bounded and
+    /// evicting; consulted only while `prompt_cache` is installed.
+    pub(crate) reasoning_echo: Arc<super::reasoning_echo::ReasoningEchoStore>,
     /// in-memory store backing `POST /v1/responses` with
     /// `store=true`, `GET /v1/responses/:id`, and `previous_response_id`
     /// chaining. `None` when the operator passed
@@ -777,6 +782,7 @@ impl AppState {
             pp_observability: Arc::new(PipelineObservability::new()),
             pp_tracer: None,
             prompt_cache: None,
+            reasoning_echo: Arc::new(super::reasoning_echo::ReasoningEchoStore::from_env()),
             responses_store: None,
             conversation_store: None,
             audio_model: None,
@@ -847,6 +853,7 @@ impl AppState {
             pp_observability: Arc::new(PipelineObservability::new()),
             pp_tracer: None,
             prompt_cache: None,
+            reasoning_echo: Arc::new(super::reasoning_echo::ReasoningEchoStore::from_env()),
             responses_store: None,
             conversation_store: None,
             audio_model: None,

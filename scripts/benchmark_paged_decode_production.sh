@@ -145,6 +145,7 @@ run_case() {
     --concurrency "$concurrency" \
     --prompt-tokens "$prompt_tokens" \
     --max-tokens "$MAX_TOKENS" \
+    --metrics \
     | tee "$log"
   echo "$arm,$scenario,$concurrency,$prompt_tokens,$MAX_TOKENS,$log" >> "$CSV"
 }

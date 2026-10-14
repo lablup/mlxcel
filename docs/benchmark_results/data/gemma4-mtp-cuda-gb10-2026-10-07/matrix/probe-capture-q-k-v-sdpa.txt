@@ -1,0 +1,3 @@
+d2-12b-8: position 3 differs from the single-token chain in 219979 of 524288 logit bytes; first divergence: layer 5 (diag) q at position 3.
+d2-31b-8: position 0 differs from the single-token chain in 243000 of 524288 logit bytes; first divergence: layer 6 (diag) q at position 2.
+d2-31b-8-ld0: position 3 differs from the single-token chain in 226703 of 524288 logit bytes; first divergence: layer 7 (diag) q at position 2.

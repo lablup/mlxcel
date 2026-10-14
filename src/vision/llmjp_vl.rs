@@ -46,7 +46,7 @@
 //! Used by: `loading::load_llmjp_vl`, `multimodal::vlm_runtime`.
 
 use mlxcel_core::cache::{KVCacheMode, SequenceId, SequenceStateLayout};
-use mlxcel_core::generate::{DecodeBatchContext, LanguageModel};
+use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -254,37 +254,19 @@ impl LanguageModel for LlmJpVlModel {
         LanguageModel::forward_batched(&self.text_model, input_ids, batch_caches, mask)
     }
 
-    fn forward_batched_with_context(
-        &self,
-        input_ids: &MlxArray,
-        batch_caches: &mut [&mut [KVCache]],
-        mask: Option<&MlxArray>,
-        context: Option<&DecodeBatchContext>,
-    ) -> UniquePtr<MlxArray> {
-        LanguageModel::forward_batched_with_context(
-            &self.text_model,
-            input_ids,
-            batch_caches,
-            mask,
-            context,
-        )
-    }
-
-    fn forward_batched_with_context_and_ids(
+    fn forward_batched_with_ids(
         &self,
         input_ids: &MlxArray,
         seq_ids: Option<&[SequenceId]>,
         batch_caches: &mut [&mut [KVCache]],
         mask: Option<&MlxArray>,
-        context: Option<&DecodeBatchContext>,
     ) -> UniquePtr<MlxArray> {
-        LanguageModel::forward_batched_with_context_and_ids(
+        LanguageModel::forward_batched_with_ids(
             &self.text_model,
             input_ids,
             seq_ids,
             batch_caches,
             mask,
-            context,
         )
     }
 

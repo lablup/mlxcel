@@ -1,0 +1,109 @@
+{
+ "cmd": [
+  "/tmp/claude-1000/-home-inureyes-Development-mlxcel/5568ce08-b0ae-4157-b7dd-f6aed374b0be/scratchpad/i2190/mlxcel-2190mtp",
+  "-m",
+  "/home/inureyes/models/mlx/gemma-4-31b-it-4bit",
+  "--port",
+  "18975",
+  "--max-batch-size",
+  "1",
+  "--parallel",
+  "1",
+  "--no-cache-prompt",
+  "--max-batch-prefill",
+  "1",
+  "--model-draft",
+  "/home/inureyes/models/mlx/gemma-4-31b-it-assistant-bf16",
+  "--draft-kind",
+  "mtp",
+  "--draft-block-size",
+  "4"
+ ],
+ "batch": 1,
+ "cache_size": 100,
+ "batches": [
+  {
+   "wall_s": 12.726,
+   "tokens": 200
+  },
+  {
+   "wall_s": 12.818,
+   "tokens": 200
+  },
+  {
+   "wall_s": 12.809,
+   "tokens": 200
+  },
+  {
+   "wall_s": 12.768,
+   "tokens": 200
+  },
+  {
+   "wall_s": 12.809,
+   "tokens": 200
+  },
+  {
+   "wall_s": 12.748,
+   "tokens": 200
+  },
+  {
+   "wall_s": 12.853,
+   "tokens": 200
+  },
+  {
+   "wall_s": 12.734,
+   "tokens": 200
+  },
+  {
+   "wall_s": 12.774,
+   "tokens": 200
+  },
+  {
+   "wall_s": 12.798,
+   "tokens": 200
+  },
+  {
+   "wall_s": 12.721,
+   "tokens": 200
+  },
+  {
+   "wall_s": 12.719,
+   "tokens": 200
+  },
+  {
+   "wall_s": 12.737,
+   "tokens": 200
+  },
+  {
+   "wall_s": 12.856,
+   "tokens": 200
+  },
+  {
+   "wall_s": 12.82,
+   "tokens": 200
+  },
+  {
+   "wall_s": 12.822,
+   "tokens": 200
+  },
+  {
+   "wall_s": 12.669,
+   "tokens": 200
+  },
+  {
+   "wall_s": 12.753,
+   "tokens": 200
+  },
+  {
+   "wall_s": 12.786,
+   "tokens": 200
+  },
+  {
+   "wall_s": 12.766,
+   "tokens": 200
+  }
+ ],
+ "server_alive": true,
+ "thrash_abort": false,
+ "row_tokens_served": 4000
+}

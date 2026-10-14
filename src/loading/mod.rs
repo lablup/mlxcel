@@ -517,7 +517,7 @@ pub fn context_window_from_config(config: &serde_json::Value) -> Option<usize> {
 /// DeepSeek-V2 (and DeepSeek-VL2, whose language tower is the same MLA
 /// backbone) sat on this lever from #829 to #831, attributed to the same class
 /// of hazard. That attribution was wrong: the collapse was the broken RMSNorm
-/// overlay mlxcel carried at `patches/mlx/backend/cuda/rms_norm.cu`, whose
+/// overlay mlxcel carried at `overlays/cuda/mlx/backend/cuda/rms_norm.cu`, whose
 /// two-stage reduction read past its shared scratch on the `kv_a_layernorm`
 /// axis (`kv_lora_rank == 512` at bf16), making the applied normalizer depend
 /// on residual shared memory at single-row decode. Deleting the overlay (#831)

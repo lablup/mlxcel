@@ -22,12 +22,13 @@ use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use futures::StreamExt;
 use std::{
+    io,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering},
     time::Duration,
 };
 
-use crate::multimodal::video::{TempFile, VideoSource, is_video_file};
+use crate::multimodal::video::{PrivateTempDir, VideoSource, is_video_file};
 
 use super::media_net;
 use super::media_root;
@@ -72,7 +73,7 @@ struct MediaAcquisitionCancelled {
 ///   and ffmpeg's `open`;
 /// * the optional per-video FPS override from
 ///   [`crate::server::types::request::VideoUrl::fps`];
-/// * an optional [`TempFile`] guard that owns the cleanup of any
+/// * an optional [`PrivateTempDir`] guard that owns the cleanup of any
 ///   server-allocated temporary file (data-URI decode, HTTP fetch). The
 ///   guard is held until the response handler drops `ResolvedVideo`.
 ///
@@ -98,15 +99,16 @@ pub(crate) struct ResolvedVideo {
     /// Per-video FPS override from
     /// [`crate::server::types::request::VideoUrl::fps`].
     pub(crate) fps: Option<f64>,
-    /// `Some(TempFile)` when the resolver allocated a server-owned
-    /// temp file (data URI / HTTP fetch). The guard is dropped — and the
-    /// file unlinked — when this struct drops.
+    /// `Some(PrivateTempDir)` when the resolver allocated a server-owned
+    /// private directory and temp file (data URI / HTTP fetch). The guard is
+    /// dropped — and the directory removed recursively — when this struct
+    /// drops.
     ///
     /// `dead_code` suppression is intentional: the guard is read only for
     /// its `Drop` impl. Any other access path would defeat the point of
     /// the guard.
     #[allow(dead_code)]
-    pub(crate) temp_guard: Option<TempFile>,
+    pub(crate) temp_guard: Option<PrivateTempDir>,
 }
 
 impl ResolvedVideo {
@@ -538,32 +540,11 @@ pub(crate) const VIDEO_DIR_ALLOWLIST_ENV: &str = "MLXCEL_VIDEO_DIR_ALLOWLIST";
 /// Stash the returned vector in a struct that lives for the full duration
 /// of the request handler — when that struct drops, every fd is closed
 /// and every temp file is removed automatically.
-pub(crate) async fn extract_chat_video_paths(
-    request: &ChatCompletionRequest,
-) -> Vec<ResolvedVideo> {
-    // `prepare_chat_request_with_cache` calls this for every request, so a
-    // body with no clip, which includes every body the video-frames fallback
-    // has already rewritten into images, returns before reading the
-    // environment or touching the filesystem (issue #1766). `has_video_urls`
-    // rather than `video_urls().is_empty()`, which would clone every inline
-    // `data:video/` payload just to count them.
-    if !request.has_video_urls() {
-        return Vec::new();
-    }
-    // The native-video path still reads the allowlist per request, because
-    // request preparation does not see `AppState`; the canonicalization at
-    // least runs on the blocking pool rather than on this Tokio worker. A
-    // failed task resolves to the empty, fail-closed list.
-    let allowlist = tokio::task::spawn_blocking(video_dir_allowlist_from_env)
-        .await
-        .unwrap_or_default();
-    extract_chat_video_paths_with_allowlist(request, &allowlist).await
-}
-
-/// Test/internal-friendly variant of [`extract_chat_video_paths`] that
-/// accepts the allowlist directly. Production code reads the env var via
-/// the public wrapper above; tests inject a controlled allowlist so they
-/// don't depend on process-wide state.
+/// Resolve video inputs against the allowlist captured at server startup.
+///
+/// The caller passes [`crate::server::state::AppState::video_dir_allowlist`]
+/// so native-video requests and the video-frames fallback share one immutable
+/// view. Request handling never re-reads or re-canonicalizes the environment.
 ///
 /// Returns a vector of [`ResolvedVideo`] records — one per `video_url`
 /// content block that resolved successfully. Failed resolutions are
@@ -574,6 +555,12 @@ pub(crate) async fn extract_chat_video_paths_with_allowlist(
     request: &ChatCompletionRequest,
     allowlist: &[PathBuf],
 ) -> Vec<ResolvedVideo> {
+    // This runs for every prepared request. Use `has_video_urls` rather than
+    // `video_urls().is_empty()`, which would clone every inline data URI just
+    // to discover that there is no work.
+    if !request.has_video_urls() {
+        return Vec::new();
+    }
     let mut resolved = Vec::new();
     for video in request.video_urls() {
         if let Some(item) = resolve_video_url(&video, allowlist).await {
@@ -594,9 +581,8 @@ pub(crate) async fn extract_chat_video_paths_with_allowlist(
 /// Synchronous, and it calls the blocking `std::fs::canonicalize`, so keep it
 /// off Tokio workers. Startup resolves it once per model load
 /// ([`crate::server::startup::resolve_video_request_inputs`]) into
-/// `AppState`, which is what the video-frames fallback reads (issue #1766);
-/// the native-video path in [`extract_chat_video_paths`] still calls it per
-/// request that carries a clip, through `spawn_blocking`.
+/// `AppState`, which both native-video resolution and the video-frames
+/// fallback read (issues #1766 and #1787).
 ///
 /// Deliberately not memoized: tests set the variable and read it back, and
 /// the `_with_allowlist` entry points exist so the rest of the tests can
@@ -873,7 +859,7 @@ async fn resolve_local_video_path(raw: &str, allowlist: &[PathBuf]) -> Option<Pa
 /// prevent OOM from extremely large base64 attachments.
 pub(crate) const MAX_VIDEO_PAYLOAD_SIZE: usize = 1024 * 1024 * 1024;
 
-async fn decode_video_data_uri(url: &str) -> Option<(PathBuf, TempFile)> {
+async fn decode_video_data_uri(url: &str) -> Option<(PathBuf, PrivateTempDir)> {
     let Some((metadata, encoded_data)) = url.split_once(',') else {
         tracing::warn!("Invalid video data URI format");
         return None;
@@ -897,7 +883,7 @@ async fn decode_video_data_uri(url: &str) -> Option<(PathBuf, TempFile)> {
         );
         return None;
     }
-    write_video_temp_file(&bytes, infer_video_extension(metadata)).await
+    write_video_temp_file(bytes, infer_video_extension(metadata)).await
 }
 
 /// Fetch a remote video URL with size enforcement applied **incrementally**
@@ -916,7 +902,7 @@ async fn decode_video_data_uri(url: &str) -> Option<(PathBuf, TempFile)> {
 ///
 /// Connect timeout, total request timeout, and redirect cap are configured
 /// on the shared client (see [`http_image_client`]).
-async fn fetch_remote_video(url: &str) -> Option<(PathBuf, TempFile)> {
+async fn fetch_remote_video(url: &str) -> Option<(PathBuf, PrivateTempDir)> {
     let client = match http_image_client().await {
         Ok(client) => client,
         Err(err) => {
@@ -985,7 +971,7 @@ async fn fetch_remote_video(url: &str) -> Option<(PathBuf, TempFile)> {
         .rsplit_once('.')
         .map(|(_, ext)| ext.split('?').next().unwrap_or(ext).to_string())
         .unwrap_or_else(|| "mp4".to_string());
-    write_video_temp_file(&accumulated, sanitize_video_extension(&ext)).await
+    write_video_temp_file(accumulated, sanitize_video_extension(&ext)).await
 }
 
 fn infer_video_extension(metadata: &str) -> &str {
@@ -1002,35 +988,59 @@ fn infer_video_extension(metadata: &str) -> &str {
     }
 }
 
-/// Write `bytes` to a fresh temp file and wrap the path in a [`TempFile`]
-/// drop guard. The guard's `Drop` impl removes the file when the caller
-/// drops it, so callers MUST keep the guard alive for as long as the file
-/// must remain on disk (e.g., until ffmpeg has finished probing it).
+/// Materialize `bytes` in a private 0700 directory as a create-new 0600 file.
 ///
-/// Returning the guard alongside the path is the fix for the temp-file leak
-/// reported during review: every previous version returned a bare
-/// `PathBuf` and relied on no-one to call cleanup explicitly. With the guard
-/// in place a panic, an early-return error path, or a normal completion all
-/// converge on the same cleanup behaviour.
-async fn write_video_temp_file(bytes: &[u8], ext: &str) -> Option<(PathBuf, TempFile)> {
-    let dir = std::env::temp_dir();
-    let unique = uuid::Uuid::new_v4();
-    let ext = sanitize_video_extension(ext);
-    let path = dir.join(format!("mlxcel-video-{unique}.{ext}"));
-    match tokio::fs::write(&path, bytes).await {
-        Ok(()) => {
-            let guard = TempFile::new(path.clone());
-            Some((path, guard))
+/// The blocking closure owns the guard before it writes the first byte. Tokio
+/// cannot cancel an already-running `spawn_blocking` task, so this ownership
+/// order is what makes handler cancellation safe: if the awaiting request is
+/// dropped, the closure finishes and its unclaimed return value immediately
+/// drops the guard. Write errors drop it inside the closure as well.
+async fn write_video_temp_file(bytes: Vec<u8>, ext: &str) -> Option<(PathBuf, PrivateTempDir)> {
+    write_video_temp_file_with_writer(bytes, sanitize_video_extension(ext), |dir, name, bytes| {
+        dir.write_file(name, bytes)
+    })
+    .await
+}
+
+async fn write_video_temp_file_with_writer<F>(
+    bytes: Vec<u8>,
+    ext: &'static str,
+    writer: F,
+) -> Option<(PathBuf, PrivateTempDir)>
+where
+    F: FnOnce(&PrivateTempDir, &str, &[u8]) -> io::Result<PathBuf> + Send + 'static,
+{
+    let result = tokio::task::spawn_blocking(move || {
+        let guard = PrivateTempDir::create("mlxcel-video")?;
+        let name = format!("clip.{ext}");
+        let path = writer(&guard, &name, &bytes)?;
+        Ok::<_, io::Error>((path, guard))
+    })
+    .await;
+
+    match result {
+        Ok(Ok(materialized)) => Some(materialized),
+        Ok(Err(err)) => {
+            tracing::warn!("Failed to write private video temp file: {err}");
+            None
         }
         Err(err) => {
-            tracing::warn!(
-                "Failed to write video temp file {}: {}",
-                path.display(),
-                err
-            );
+            tracing::warn!("Video temp-file task failed: {err}");
             None
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) async fn write_video_temp_file_for_test<F>(
+    bytes: Vec<u8>,
+    ext: &'static str,
+    writer: F,
+) -> Option<(PathBuf, PrivateTempDir)>
+where
+    F: FnOnce(&PrivateTempDir, &str, &[u8]) -> io::Result<PathBuf> + Send + 'static,
+{
+    write_video_temp_file_with_writer(bytes, sanitize_video_extension(ext), writer).await
 }
 
 fn sanitize_video_extension(ext: &str) -> &'static str {
@@ -1666,3 +1676,7 @@ async fn http_image_client() -> Result<&'static reqwest::Client> {
 #[cfg(test)]
 #[path = "media_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "media_temp_tests.rs"]
+mod temp_tests;

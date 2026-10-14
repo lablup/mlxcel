@@ -8,7 +8,7 @@
     "build": "vite build",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --max-warnings=0",
-    "unit": "node --test scripts/activity-stream.spec.mjs scripts/check-theme-selectors.spec.mjs && vitest run",
+    "unit": "node --test scripts/activity-performance-diagnostics.spec.mjs scripts/activity-stream.spec.mjs scripts/check-theme-selectors.spec.mjs && vitest run",
     "check:theme-selectors": "node scripts/check-theme-selectors.mjs",
     "browser": "playwright test --project=chromium",
     "browser:all": "playwright test --config playwright.engines.config.ts",

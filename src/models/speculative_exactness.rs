@@ -94,7 +94,9 @@ pub enum BlockChainExactness {
     Equal,
     /// At least one position differed. Carries the first one.
     Diverges {
-        /// Zero-based position inside the verify block.
+        /// Zero-based position inside the verify block, or, for a probe
+        /// that walks several blocks (Qwen 3.5's CUDA long draw), inside
+        /// the walk.
         position: usize,
         /// Bytes that differ at that position.
         differing_bytes: usize,

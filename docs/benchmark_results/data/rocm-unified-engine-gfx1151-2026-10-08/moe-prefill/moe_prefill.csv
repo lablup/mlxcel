@@ -1,0 +1,13 @@
+model,round,arm,prefill_tok_s,decode_tok_s,status
+granite-4.0-h-tiny-4bit,1,default,574.99,89.33,ok
+granite-4.0-h-tiny-4bit,1,no-expert-batched,585.17,88.67,ok
+granite-4.0-h-tiny-4bit,1,no-fused-moe,579.48,89.29,ok
+Mixtral-8x7B-Instruct-v0.1-4bit,1,default,26.05,9.83,ok
+Mixtral-8x7B-Instruct-v0.1-4bit,1,no-expert-batched,26.06,9.02,ok
+Mixtral-8x7B-Instruct-v0.1-4bit,1,no-fused-moe,25.65,11.81,ok
+granite-4.0-h-tiny-4bit,2,default,544.12,89.37,ok
+granite-4.0-h-tiny-4bit,2,no-expert-batched,579.55,89.27,ok
+granite-4.0-h-tiny-4bit,2,no-fused-moe,571.51,89.34,ok
+Mixtral-8x7B-Instruct-v0.1-4bit,2,default,26.04,9.34,ok
+Mixtral-8x7B-Instruct-v0.1-4bit,2,no-expert-batched,25.74,9.68,ok
+Mixtral-8x7B-Instruct-v0.1-4bit,2,no-fused-moe,25.74,8.87,ok

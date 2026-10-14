@@ -4,6 +4,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { chromium } from '@playwright/test';
 import { performanceMode, assertGeometry, performanceCompletion } from './activity-performance-config.mjs';
+import { capturePerformanceDiagnostics } from './activity-performance-diagnostics.mjs';
 
 const base = new URL(process.env.WEBUI_PERF_BASE ?? 'http://127.0.0.1:8080/');
 if (!['127.0.0.1', '[::1]', 'localhost'].includes(base.hostname) || base.username || base.password || base.search || base.hash) throw new Error('Use a credential-free loopback API base (including any API prefix).');
@@ -12,6 +13,7 @@ const key = (await readFile(required('WEBUI_PERF_KEY_FILE'), 'utf8')).trim();
 const model = required('WEBUI_PERF_INFERENCE_MODEL');
 const modelId = required('WEBUI_PERF_MODEL_ID');
 const output = required('WEBUI_PERF_OUTPUT');
+const nvidiaSmi = process.env.WEBUI_PERF_NVIDIA_SMI;
 const prompt = process.env.WEBUI_PERF_PROMPT_FILE ? await readFile(process.env.WEBUI_PERF_PROMPT_FILE, 'utf8') : 'Explain the difference between a process and a thread, in detail. '.repeat(100);
 const modeConfig = performanceMode(process.env.WEBUI_PERF_MODE);
 // Playwright's default Chromium arguments include --disable-backgrounding-occluded-windows and
@@ -108,12 +110,14 @@ async function clients(mode) {
   }
 }
 async function request(mode, pair) {
+  const diagnosticsBefore = await capturePerformanceDiagnostics(nvidiaSmi);
   const response = await fetch(api('completion?autoload=false'), { method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ model, prompt, n_predict: 256, seed: 42, temperature: 0, cache_prompt: false, stream: false }), signal: AbortSignal.timeout(600000) });
   if (!response.ok) throw new Error(`Native completion failed (${response.status}); no response body logged.`);
   const body = await response.json();
   const rate = body.timings?.predicted_per_second;
   if (!(typeof rate === 'number' && Number.isFinite(rate) && rate > 0)) throw new Error('No valid backend predicted_per_second; do not replace with wall-clock or word-count inference.');
-  const sample = { mode, pair, tokens_per_second: rate, predicted_tokens: body.timings.predicted_n, predicted_ms: body.timings.predicted_ms };
+  const diagnosticsAfter = await capturePerformanceDiagnostics(nvidiaSmi);
+  const sample = { mode, pair, tokens_per_second: rate, predicted_tokens: body.timings.predicted_n, predicted_ms: body.timings.predicted_ms, diagnostics: { before: diagnosticsBefore, after: diagnosticsAfter } };
   results.push(sample); process.stdout.write(`${JSON.stringify(sample)}\n`);
   await writeFile(output, JSON.stringify({ status: 'in-progress', scope: modeConfig.name, hidden_native: modeConfig.headless ? 'not-run' : 'pending', preflight, samples: results }, null, 2));
   return rate;

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! The ROCm backend bounds what in-flight command batches pin (issue #2062,
-//! `patches-rocm/LOCAL_FIXES.md` item 28).
+//! `overlays/rocm/LOCAL_FIXES.md` item 28).
 //!
 //! A command batch keeps every buffer its operations allocate until the batch
 //! finishes on the GPU. Before the bound, the eager path let the host encode

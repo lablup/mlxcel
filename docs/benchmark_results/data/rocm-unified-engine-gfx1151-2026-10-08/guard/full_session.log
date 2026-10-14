@@ -1,0 +1,245 @@
+waiting for /tmp/mlxcel-rocm-gpu-guard.lock (2026-10-08T15:20:43Z)
+lock held by 2263193 (2026-10-08T16:19:10Z)
+session start 2026-10-08T16:19:10Z
+bench_rounds rc=0 17:43:42
+bench_engine done 17:51:21
+mlxcel-core test binary: /home/devops/Development/wt-20261006T1212-issue-2192/target/test-fast/deps/mlxcel_core-480914a0f733fc77
+paged_pool_past_u32 rc=0 17:51:39
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2025 filtered out; finished in 1.72s
+rocm_gpu_guard: 2026-10-09T02:51:39+0900 lock held by outer guard 2263193: not taking /tmp/mlxcel-rocm-gpu-guard.lock
+rocm_gpu_guard: 2026-10-09T02:51:39+0900 waiting for 20s of idle GPU and no compiler
+rocm_gpu_guard: 2026-10-09T02:52:08+0900 idle for 20s: kfd proc empty and no compiler in every 1 Hz sample
+rocm_gpu_guard: 2026-10-09T02:52:08+0900 attempt 1/3: start: bash /tmp/claude-1001/-home-devops-Development-mlxcel/66a03ced-36c6-4e0a-9e39-155a3eb57353/scratchpad/issue-2192/measure/gemma3_probe.sh
+rocm_gpu_guard: 2026-10-09T02:52:12+0900 monitor: 3 samples
+rocm_gpu_guard: 2026-10-09T02:52:12+0900 attempt 1: CLEAN, exit 0
+gemma3 probe rc=0
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+    import json,sys; d=json.load(open(sys.argv[1])); print("gemma3 tokens:", d.get("usage")); print(d["choices"][0]["message"]["content"][:300])
+                       ~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/json/__init__.py", line 293, in load
+    return loads(fp.read(),
+        cls=cls, object_hook=object_hook,
+        parse_float=parse_float, parse_int=parse_int,
+        parse_constant=parse_constant, object_pairs_hook=object_pairs_hook, **kw)
+  File "/usr/lib/python3.13/json/__init__.py", line 346, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "/usr/lib/python3.13/json/decoder.py", line 345, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.13/json/decoder.py", line 363, in raw_decode
+    raise JSONDecodeError("Expecting value", s, err.value) from None
+json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+gemma3 done 17:52:12
+decode_profile rc=0 17:52:44
+guard.log
+Meta-Llama-3.1-8B-Instruct-4bit_greedy_bench.log
+Meta-Llama-3.1-8B-Instruct-4bit_greedy_decode_kernels.csv
+Meta-Llama-3.1-8B-Instruct-4bit_greedy_kernel_stats.csv
+Meta-Llama-3.1-8B-Instruct-4bit_greedy_plain_bench.log
+Meta-Llama-3.1-8B-Instruct-4bit_greedy_summary.json
+session end 2026-10-08T17:52:44Z
+measure_session rc=0 (2026-10-08T17:52:44Z)
+rocm_gpu_guard: 2026-10-09T02:52:44+0900 lock held by outer guard 2263193: not taking /tmp/mlxcel-rocm-gpu-guard.lock
+rocm_gpu_guard: 2026-10-09T02:52:44+0900 waiting for 10s of idle GPU and no compiler
+rocm_gpu_guard: 2026-10-09T02:52:59+0900 idle for 10s: kfd proc empty and no compiler in every 1 Hz sample
+rocm_gpu_guard: 2026-10-09T02:52:59+0900 attempt 1/5: start: bash /home/devops/Development/wt-20261006T1212-issue-2192/docs/benchmark_results/data/rocm-unified-engine-gfx1151-2026-10-08/harness/parity_session.sh /home/devops/Development/wt-20261006T1212-issue-2192 /tmp/claude-1001/-home-devops-Development-mlxcel/66a03ced-36c6-4e0a-9e39-155a3eb57353/scratchpad/issue-2192/parity-floor0 /tmp/claude-1001/-home-devops-Development-mlxcel/66a03ced-36c6-4e0a-9e39-155a3eb57353/scratchpad/issue-2192/fn/prompt.txt models/mlx Qwen3-0.6B-4bit Meta-Llama-3.1-8B-Instruct-4bit
+=== Qwen3-0.6B-4bit (17:52:59)
+engine-parity rc=0
+rocm_gpu_guard: 2026-10-09T02:53:14+0900 sample 11: CONTENDED foreign_gpu=[1418671:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T02:53:19+0900 sample 14: CONTENDED foreign_gpu=[1421633:mlxcel] compilers=[]
+model: Qwen3-0.6B-4bit
+generate vs run text: identical
+run vs server dense text: identical
+server dense vs server paged text: identical
+# first_divergence	identical
+# restarts	
+top-1 disagreement                      0 / 128       0.000%
+  on decided positions (gap>=2.0)       0 / 86        0.000%   <- gate on this
+      1 2026-10-08T17:53:17.253010Z  INFO prefill{seq_id=seq-0 prompt_len=1 cached=0 start=0}: mlxcel_core::cache::paged_batch_decode: paged decode v2: fused v2 launch (batch 1, 1 visible KV tokens, 1 chunks, merge skipped)
+      1 2026-10-08T17:53:17.246575Z  INFO mlxcel::server::model_provider::model_worker: Starting BatchScheduler (max_batch_size=2, max_queue_depth=32, prefill_chunk_size=2048, max_batch_prefill=4, decode_storage=paged)
+=== Meta-Llama-3.1-8B-Instruct-4bit (17:53:20)
+engine-parity rc=0
+rocm_gpu_guard: 2026-10-09T02:54:09+0900 sample 47: CONTENDED foreign_gpu=[1452579:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T02:54:11+0900 sample 48: CONTENDED foreign_gpu=[1452579:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T02:54:12+0900 sample 49: CONTENDED foreign_gpu=[1452579:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T02:54:14+0900 sample 50: CONTENDED foreign_gpu=[1452579:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T02:54:18+0900 sample 53: CONTENDED foreign_gpu=[1459081:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T02:54:20+0900 sample 54: CONTENDED foreign_gpu=[1459081:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T02:54:21+0900 sample 55: CONTENDED foreign_gpu=[1459081:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T02:54:23+0900 sample 56: CONTENDED foreign_gpu=[1459081:mlxcel] compilers=[]
+model: Meta-Llama-3.1-8B-Instruct-4bit
+generate vs run text: identical
+run vs server dense text: identical
+server dense vs server paged text: identical
+# first_divergence	identical
+# restarts	
+top-1 disagreement                      0 / 128       0.000%
+  on decided positions (gap>=2.0)       0 / 44        0.000%   <- gate on this
+      1 2026-10-08T17:54:15.963991Z  INFO prefill{seq_id=seq-0 prompt_len=1 cached=0 start=0}: mlxcel_core::cache::paged_batch_decode: paged decode v2: fused v2 launch (batch 1, 1 visible KV tokens, 1 chunks, merge skipped)
+      1 2026-10-08T17:54:15.958968Z  INFO mlxcel::server::model_provider::model_worker: Starting BatchScheduler (max_batch_size=2, max_queue_depth=32, prefill_chunk_size=2048, max_batch_prefill=4, decode_storage=paged)
+session done (17:54:24)
+rocm_gpu_guard: 2026-10-09T02:54:25+0900 monitor: 57 samples
+rocm_gpu_guard: 2026-10-09T02:54:25+0900 attempt 1: REJECTED (contended), exit 0; rerunning
+rocm_gpu_guard: 2026-10-09T02:54:25+0900 waiting for 10s of idle GPU and no compiler
+rocm_gpu_guard: 2026-10-09T02:54:40+0900 idle for 10s: kfd proc empty and no compiler in every 1 Hz sample
+rocm_gpu_guard: 2026-10-09T02:54:40+0900 attempt 2/5: start: bash /home/devops/Development/wt-20261006T1212-issue-2192/docs/benchmark_results/data/rocm-unified-engine-gfx1151-2026-10-08/harness/parity_session.sh /home/devops/Development/wt-20261006T1212-issue-2192 /tmp/claude-1001/-home-devops-Development-mlxcel/66a03ced-36c6-4e0a-9e39-155a3eb57353/scratchpad/issue-2192/parity-floor0 /tmp/claude-1001/-home-devops-Development-mlxcel/66a03ced-36c6-4e0a-9e39-155a3eb57353/scratchpad/issue-2192/fn/prompt.txt models/mlx Qwen3-0.6B-4bit Meta-Llama-3.1-8B-Instruct-4bit
+=== Qwen3-0.6B-4bit (17:54:40)
+engine-parity rc=0
+rocm_gpu_guard: 2026-10-09T02:54:58+0900 sample 13: CONTENDED foreign_gpu=[1485516:mlxcel] compilers=[]
+model: Qwen3-0.6B-4bit
+generate vs run text: identical
+run vs server dense text: identical
+server dense vs server paged text: identical
+# first_divergence	identical
+# restarts	
+top-1 disagreement                      0 / 128       0.000%
+  on decided positions (gap>=2.0)       0 / 86        0.000%   <- gate on this
+      1 2026-10-08T17:54:57.380991Z  INFO prefill{seq_id=seq-0 prompt_len=1 cached=0 start=0}: mlxcel_core::cache::paged_batch_decode: paged decode v2: fused v2 launch (batch 1, 1 visible KV tokens, 1 chunks, merge skipped)
+      1 2026-10-08T17:54:57.373699Z  INFO mlxcel::server::model_provider::model_worker: Starting BatchScheduler (max_batch_size=2, max_queue_depth=32, prefill_chunk_size=2048, max_batch_prefill=4, decode_storage=paged)
+=== Meta-Llama-3.1-8B-Instruct-4bit (17:55:01)
+engine-parity rc=0
+rocm_gpu_guard: 2026-10-09T02:55:48+0900 sample 46: CONTENDED foreign_gpu=[1517562:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T02:55:50+0900 sample 47: CONTENDED foreign_gpu=[1517562:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T02:55:51+0900 sample 48: CONTENDED foreign_gpu=[1517562:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T02:55:53+0900 sample 49: CONTENDED foreign_gpu=[1517562:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T02:55:57+0900 sample 52: CONTENDED foreign_gpu=[1523434:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T02:55:59+0900 sample 53: CONTENDED foreign_gpu=[1523434:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T02:56:00+0900 sample 54: CONTENDED foreign_gpu=[1523434:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T02:56:02+0900 sample 55: CONTENDED foreign_gpu=[1523434:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T02:56:03+0900 sample 56: CONTENDED foreign_gpu=[1523434:mlxcel] compilers=[]
+model: Meta-Llama-3.1-8B-Instruct-4bit
+generate vs run text: identical
+run vs server dense text: identical
+server dense vs server paged text: identical
+# first_divergence	identical
+# restarts	
+top-1 disagreement                      0 / 128       0.000%
+  on decided positions (gap>=2.0)       0 / 44        0.000%   <- gate on this
+      1 2026-10-08T17:55:56.221721Z  INFO prefill{seq_id=seq-0 prompt_len=1 cached=0 start=0}: mlxcel_core::cache::paged_batch_decode: paged decode v2: fused v2 launch (batch 1, 1 visible KV tokens, 1 chunks, merge skipped)
+      1 2026-10-08T17:55:56.217858Z  INFO mlxcel::server::model_provider::model_worker: Starting BatchScheduler (max_batch_size=2, max_queue_depth=32, prefill_chunk_size=2048, max_batch_prefill=4, decode_storage=paged)
+session done (17:56:05)
+rocm_gpu_guard: 2026-10-09T02:56:06+0900 monitor: 57 samples
+rocm_gpu_guard: 2026-10-09T02:56:06+0900 attempt 2: REJECTED (contended), exit 0; rerunning
+rocm_gpu_guard: 2026-10-09T02:56:06+0900 waiting for 10s of idle GPU and no compiler
+rocm_gpu_guard: 2026-10-09T02:56:21+0900 idle for 10s: kfd proc empty and no compiler in every 1 Hz sample
+rocm_gpu_guard: 2026-10-09T02:56:21+0900 attempt 3/5: start: bash /home/devops/Development/wt-20261006T1212-issue-2192/docs/benchmark_results/data/rocm-unified-engine-gfx1151-2026-10-08/harness/parity_session.sh /home/devops/Development/wt-20261006T1212-issue-2192 /tmp/claude-1001/-home-devops-Development-mlxcel/66a03ced-36c6-4e0a-9e39-155a3eb57353/scratchpad/issue-2192/parity-floor0 /tmp/claude-1001/-home-devops-Development-mlxcel/66a03ced-36c6-4e0a-9e39-155a3eb57353/scratchpad/issue-2192/fn/prompt.txt models/mlx Qwen3-0.6B-4bit Meta-Llama-3.1-8B-Instruct-4bit
+=== Qwen3-0.6B-4bit (17:56:21)
+engine-parity rc=0
+rocm_gpu_guard: 2026-10-09T02:56:39+0900 sample 13: CONTENDED foreign_gpu=[1550676:mlxcel] compilers=[]
+model: Qwen3-0.6B-4bit
+generate vs run text: identical
+run vs server dense text: identical
+server dense vs server paged text: identical
+# first_divergence	identical
+# restarts	
+top-1 disagreement                      0 / 128       0.000%
+  on decided positions (gap>=2.0)       0 / 86        0.000%   <- gate on this
+      1 2026-10-08T17:56:38.284052Z  INFO prefill{seq_id=seq-0 prompt_len=1 cached=0 start=0}: mlxcel_core::cache::paged_batch_decode: paged decode v2: fused v2 launch (batch 1, 1 visible KV tokens, 1 chunks, merge skipped)
+      1 2026-10-08T17:56:38.278131Z  INFO mlxcel::server::model_provider::model_worker: Starting BatchScheduler (max_batch_size=2, max_queue_depth=32, prefill_chunk_size=2048, max_batch_prefill=4, decode_storage=paged)
+=== Meta-Llama-3.1-8B-Instruct-4bit (17:56:42)
+engine-parity rc=0
+rocm_gpu_guard: 2026-10-09T02:57:30+0900 sample 46: CONTENDED foreign_gpu=[1582376:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T02:57:32+0900 sample 47: CONTENDED foreign_gpu=[1582376:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T02:57:33+0900 sample 48: CONTENDED foreign_gpu=[1582376:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T02:57:35+0900 sample 49: CONTENDED foreign_gpu=[1582376:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T02:57:39+0900 sample 52: CONTENDED foreign_gpu=[1588408:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T02:57:41+0900 sample 53: CONTENDED foreign_gpu=[1588408:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T02:57:42+0900 sample 54: CONTENDED foreign_gpu=[1588408:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T02:57:44+0900 sample 55: CONTENDED foreign_gpu=[1588408:mlxcel] compilers=[]
+model: Meta-Llama-3.1-8B-Instruct-4bit
+generate vs run text: identical
+run vs server dense text: identical
+server dense vs server paged text: identical
+# first_divergence	identical
+# restarts	
+top-1 disagreement                      0 / 128       0.000%
+  on decided positions (gap>=2.0)       0 / 44        0.000%   <- gate on this
+      1 2026-10-08T17:57:37.048354Z  INFO prefill{seq_id=seq-0 prompt_len=1 cached=0 start=0}: mlxcel_core::cache::paged_batch_decode: paged decode v2: fused v2 launch (batch 1, 1 visible KV tokens, 1 chunks, merge skipped)
+      1 2026-10-08T17:57:37.043125Z  INFO mlxcel::server::model_provider::model_worker: Starting BatchScheduler (max_batch_size=2, max_queue_depth=32, prefill_chunk_size=2048, max_batch_prefill=4, decode_storage=paged)
+session done (17:57:45)
+rocm_gpu_guard: 2026-10-09T02:57:46+0900 monitor: 56 samples
+rocm_gpu_guard: 2026-10-09T02:57:46+0900 attempt 3: REJECTED (contended), exit 0; rerunning
+rocm_gpu_guard: 2026-10-09T02:57:46+0900 waiting for 10s of idle GPU and no compiler
+rocm_gpu_guard: 2026-10-09T02:58:01+0900 idle for 10s: kfd proc empty and no compiler in every 1 Hz sample
+rocm_gpu_guard: 2026-10-09T02:58:01+0900 attempt 4/5: start: bash /home/devops/Development/wt-20261006T1212-issue-2192/docs/benchmark_results/data/rocm-unified-engine-gfx1151-2026-10-08/harness/parity_session.sh /home/devops/Development/wt-20261006T1212-issue-2192 /tmp/claude-1001/-home-devops-Development-mlxcel/66a03ced-36c6-4e0a-9e39-155a3eb57353/scratchpad/issue-2192/parity-floor0 /tmp/claude-1001/-home-devops-Development-mlxcel/66a03ced-36c6-4e0a-9e39-155a3eb57353/scratchpad/issue-2192/fn/prompt.txt models/mlx Qwen3-0.6B-4bit Meta-Llama-3.1-8B-Instruct-4bit
+=== Qwen3-0.6B-4bit (17:58:01)
+engine-parity rc=0
+model: Qwen3-0.6B-4bit
+generate vs run text: identical
+run vs server dense text: identical
+server dense vs server paged text: identical
+# first_divergence	identical
+# restarts	
+top-1 disagreement                      0 / 128       0.000%
+  on decided positions (gap>=2.0)       0 / 86        0.000%   <- gate on this
+      1 2026-10-08T17:58:18.713545Z  INFO prefill{seq_id=seq-0 prompt_len=1 cached=0 start=0}: mlxcel_core::cache::paged_batch_decode: paged decode v2: fused v2 launch (batch 1, 1 visible KV tokens, 1 chunks, merge skipped)
+      1 2026-10-08T17:58:18.705218Z  INFO mlxcel::server::model_provider::model_worker: Starting BatchScheduler (max_batch_size=2, max_queue_depth=32, prefill_chunk_size=2048, max_batch_prefill=4, decode_storage=paged)
+=== Meta-Llama-3.1-8B-Instruct-4bit (17:58:22)
+engine-parity rc=0
+rocm_gpu_guard: 2026-10-09T02:59:10+0900 sample 46: CONTENDED foreign_gpu=[1647029:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T02:59:12+0900 sample 47: CONTENDED foreign_gpu=[1647029:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T02:59:13+0900 sample 48: CONTENDED foreign_gpu=[1647029:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T02:59:15+0900 sample 49: CONTENDED foreign_gpu=[1647029:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T02:59:19+0900 sample 52: CONTENDED foreign_gpu=[1652995:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T02:59:21+0900 sample 53: CONTENDED foreign_gpu=[1652995:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T02:59:22+0900 sample 54: CONTENDED foreign_gpu=[1652995:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T02:59:24+0900 sample 55: CONTENDED foreign_gpu=[1652995:mlxcel] compilers=[]
+model: Meta-Llama-3.1-8B-Instruct-4bit
+generate vs run text: identical
+run vs server dense text: identical
+server dense vs server paged text: identical
+# first_divergence	identical
+# restarts	
+top-1 disagreement                      0 / 128       0.000%
+  on decided positions (gap>=2.0)       0 / 44        0.000%   <- gate on this
+      1 2026-10-08T17:59:17.382437Z  INFO prefill{seq_id=seq-0 prompt_len=1 cached=0 start=0}: mlxcel_core::cache::paged_batch_decode: paged decode v2: fused v2 launch (batch 1, 1 visible KV tokens, 1 chunks, merge skipped)
+      1 2026-10-08T17:59:17.375442Z  INFO mlxcel::server::model_provider::model_worker: Starting BatchScheduler (max_batch_size=2, max_queue_depth=32, prefill_chunk_size=2048, max_batch_prefill=4, decode_storage=paged)
+session done (17:59:26)
+rocm_gpu_guard: 2026-10-09T02:59:26+0900 monitor: 56 samples
+rocm_gpu_guard: 2026-10-09T02:59:26+0900 attempt 4: REJECTED (contended), exit 0; rerunning
+rocm_gpu_guard: 2026-10-09T02:59:26+0900 waiting for 10s of idle GPU and no compiler
+rocm_gpu_guard: 2026-10-09T02:59:41+0900 idle for 10s: kfd proc empty and no compiler in every 1 Hz sample
+rocm_gpu_guard: 2026-10-09T02:59:41+0900 attempt 5/5: start: bash /home/devops/Development/wt-20261006T1212-issue-2192/docs/benchmark_results/data/rocm-unified-engine-gfx1151-2026-10-08/harness/parity_session.sh /home/devops/Development/wt-20261006T1212-issue-2192 /tmp/claude-1001/-home-devops-Development-mlxcel/66a03ced-36c6-4e0a-9e39-155a3eb57353/scratchpad/issue-2192/parity-floor0 /tmp/claude-1001/-home-devops-Development-mlxcel/66a03ced-36c6-4e0a-9e39-155a3eb57353/scratchpad/issue-2192/fn/prompt.txt models/mlx Qwen3-0.6B-4bit Meta-Llama-3.1-8B-Instruct-4bit
+=== Qwen3-0.6B-4bit (17:59:41)
+engine-parity rc=0
+rocm_gpu_guard: 2026-10-09T03:00:00+0900 sample 13: CONTENDED foreign_gpu=[1679443:mlxcel] compilers=[]
+model: Qwen3-0.6B-4bit
+generate vs run text: identical
+run vs server dense text: identical
+server dense vs server paged text: identical
+# first_divergence	identical
+# restarts	
+top-1 disagreement                      0 / 128       0.000%
+  on decided positions (gap>=2.0)       0 / 86        0.000%   <- gate on this
+      1 2026-10-08T17:59:58.873284Z  INFO prefill{seq_id=seq-0 prompt_len=1 cached=0 start=0}: mlxcel_core::cache::paged_batch_decode: paged decode v2: fused v2 launch (batch 1, 1 visible KV tokens, 1 chunks, merge skipped)
+      1 2026-10-08T17:59:58.866438Z  INFO mlxcel::server::model_provider::model_worker: Starting BatchScheduler (max_batch_size=2, max_queue_depth=32, prefill_chunk_size=2048, max_batch_prefill=4, decode_storage=paged)
+=== Meta-Llama-3.1-8B-Instruct-4bit (18:00:02)
+engine-parity rc=0
+rocm_gpu_guard: 2026-10-09T03:00:49+0900 sample 45: CONTENDED foreign_gpu=[1710437:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T03:00:51+0900 sample 46: CONTENDED foreign_gpu=[1710437:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T03:00:52+0900 sample 47: CONTENDED foreign_gpu=[1710437:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T03:00:54+0900 sample 48: CONTENDED foreign_gpu=[1710437:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T03:00:55+0900 sample 49: CONTENDED foreign_gpu=[1710437:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T03:01:00+0900 sample 52: CONTENDED foreign_gpu=[1716307:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T03:01:01+0900 sample 53: CONTENDED foreign_gpu=[1716307:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T03:01:03+0900 sample 54: CONTENDED foreign_gpu=[1716307:mlxcel] compilers=[]
+rocm_gpu_guard: 2026-10-09T03:01:04+0900 sample 55: CONTENDED foreign_gpu=[1716307:mlxcel] compilers=[]
+model: Meta-Llama-3.1-8B-Instruct-4bit
+generate vs run text: identical
+run vs server dense text: identical
+server dense vs server paged text: identical
+# first_divergence	identical
+# restarts	
+top-1 disagreement                      0 / 128       0.000%
+  on decided positions (gap>=2.0)       0 / 44        0.000%   <- gate on this
+      1 2026-10-08T18:00:57.206671Z  INFO prefill{seq_id=seq-0 prompt_len=1 cached=0 start=0}: mlxcel_core::cache::paged_batch_decode: paged decode v2: fused v2 launch (batch 1, 1 visible KV tokens, 1 chunks, merge skipped)
+      1 2026-10-08T18:00:57.200375Z  INFO mlxcel::server::model_provider::model_worker: Starting BatchScheduler (max_batch_size=2, max_queue_depth=32, prefill_chunk_size=2048, max_batch_prefill=4, decode_storage=paged)
+session done (18:01:06)
+rocm_gpu_guard: 2026-10-09T03:01:07+0900 monitor: 56 samples
+rocm_gpu_guard: 2026-10-09T03:01:07+0900 attempt 5: REJECTED (contended), exit 0; rerunning
+rocm_gpu_guard: 2026-10-09T03:01:07+0900 every attempt (5) was contended
+parity floor0 rc=75 (2026-10-08T18:01:07Z)
+lock released (2026-10-08T18:01:07Z)
+exit=0

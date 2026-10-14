@@ -140,7 +140,7 @@ pub fn split_kv_enabled() -> bool {
     *ENABLED.get_or_init(|| parse_enabled(std::env::var(SPLIT_KV_ENV).ok().as_deref()))
         && absorbed_enabled()
         // The split path ends in `paged_attention_merge_states`, a custom
-        // kernel with Metal and CUDA ports only. On a backend without one the
+        // kernel with Metal, CUDA and HIP (#2068) ports. On a backend without one the
         // launch would be refused. Declining here takes the `absorbed_decode`
         // fallback the caller already has for a plan that declines (issue
         // #1803). The predicate reads the merge kernel's own port table.

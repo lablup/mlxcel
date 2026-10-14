@@ -147,7 +147,7 @@ pub struct ChatMessage {
     /// `reasoning_budget`) before closing its thinking block leaves exactly
     /// this shape, and without this field it is indistinguishable from a
     /// clean, intentionally empty response. Mirrors
-    /// `reasoning_stream::is_reasoning_only`, which already names this
+    /// `reasoning_display::is_reasoning_only`, which already names this
     /// condition for the CLI (#1721); this is the same condition surfaced on
     /// the HTTP API, which previously only logged it, and only for the
     /// narrower primed-thinking case (#467). Never `Some(false)`; omitted
@@ -514,6 +514,10 @@ pub struct ErrorDetail {
     #[serde(rename = "type")]
     pub error_type: String,
     pub code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget_bytes: Option<u64>,
 }
 
 impl ErrorResponse {
@@ -523,6 +527,8 @@ impl ErrorResponse {
                 message: message.into(),
                 error_type: error_type.into(),
                 code: None,
+                estimated_bytes: None,
+                budget_bytes: None,
             },
             status: axum::http::StatusCode::BAD_REQUEST,
         }
@@ -534,6 +540,8 @@ impl ErrorResponse {
                 message: message.into(),
                 error_type: "server_busy".into(),
                 code: None,
+                estimated_bytes: None,
+                budget_bytes: None,
             },
             status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
         }
@@ -549,6 +557,8 @@ impl ErrorResponse {
                 message: message.into(),
                 error_type: "server_timeout".into(),
                 code: None,
+                estimated_bytes: None,
+                budget_bytes: None,
             },
             status: axum::http::StatusCode::GATEWAY_TIMEOUT,
         }
@@ -564,6 +574,8 @@ impl ErrorResponse {
                 message: message.into(),
                 error_type: "server_error".into(),
                 code: None,
+                estimated_bytes: None,
+                budget_bytes: None,
             },
             status: axum::http::StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -584,6 +596,8 @@ impl ErrorResponse {
                 message: "The client closed the connection before the request finished.".into(),
                 error_type: "client_closed_request".into(),
                 code: None,
+                estimated_bytes: None,
+                budget_bytes: None,
             },
             status: axum::http::StatusCode::from_u16(499)
                 .unwrap_or(axum::http::StatusCode::BAD_REQUEST),
@@ -605,6 +619,8 @@ impl ErrorResponse {
                 message: message.into(),
                 error_type: "not_supported_error".into(),
                 code: None,
+                estimated_bytes: None,
+                budget_bytes: None,
             },
             status: axum::http::StatusCode::NOT_IMPLEMENTED,
         }
@@ -619,6 +635,8 @@ impl ErrorResponse {
                 message: message.into(),
                 error_type: "not_implemented".into(),
                 code: None,
+                estimated_bytes: None,
+                budget_bytes: None,
             },
             status: axum::http::StatusCode::NOT_IMPLEMENTED,
         }

@@ -25,9 +25,7 @@
 use crate::models::switch_layers::validate_expert_quantization_params;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::mla::{
-    self, MlaAbsorbedProjections, MlaDecodePath, MlaGeometry, MlaLatentCache, MlaSplitPlan,
-};
+use mlxcel_core::mla::{self, MlaAbsorbedProjections, MlaDecodePath, MlaGeometry, MlaLatentCache};
 use mlxcel_core::utils::{repeat_kv, silu, slice_axis};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, concatenate};
@@ -536,32 +534,17 @@ impl MLAAttention {
 
         let mut view = MlaLatentCache::wrap(cache, geometry)
             .expect("supports() was checked immediately before this wrap");
-        let (ckv_all, kpe_all) = view.update_and_fetch(ckv, k_pe);
-        let kv_len = view.seq_len();
 
         let output = if l == 1 {
-            // Stage 2 first when asked for, Stage 1 otherwise. A split plan that
-            // declines falls through to Stage 1 rather than failing the step.
-            let split = if mla::split_kv_enabled() {
-                let plan = MlaSplitPlan::heuristic(
-                    b.max(0) as usize,
-                    self.num_heads,
-                    kv_len,
-                    mlxcel_core::paged_v2::device_target_ctas(),
-                );
-                mla::absorbed_decode_split_kv(
-                    q_nope, &q_pe, &ckv_all, &kpe_all, proj, self.scale, &plan,
-                )
-                .ok()
-            } else {
-                None
-            };
-            split.unwrap_or_else(|| {
-                // Decode sees the whole cache, so no mask, matching the
-                // `causal_attention` call the decompressed path makes here.
-                mla::absorbed_decode(q_nope, &q_pe, &ckv_all, &kpe_all, proj, self.scale, None)
-            })
+            // The latent cache's own attention entry (#2171, ADR 0008): it
+            // appends this step's rows and runs Stage 2 split-KV when asked
+            // for, Stage 1 otherwise. Decode sees the whole cache, so no mask,
+            // matching the `causal_attention` call the decompressed path makes
+            // here.
+            view.attend(q_nope, &q_pe, ckv, k_pe, proj, self.scale, None)
         } else {
+            let (ckv_all, kpe_all) = view.update_and_fetch(ckv, k_pe);
+            let kv_len = view.seq_len();
             mla::stats::record(MlaDecodePath::AbsorbedPrefill);
             // Up-project the live latent window back into per-head K and V.
             // `kv_b_proj` wants `[B, S, kv_lora_rank]`, the shape before the
@@ -896,13 +879,13 @@ impl DeepSeekV2Model {
     }
 }
 
-/// State the absorbed-decode decision on stdout, once per load.
+/// State the absorbed-decode decision on stderr, once per load.
 ///
 /// Silent unless `MLXCEL_MLA_ABSORBED` is set, so the default path prints
 /// nothing. When it is set, this is the only place that says whether the fold
-/// actually took: `tracing` would not do, because the `mlxcel` CLI installs no
-/// subscriber and a `tracing::info!` from this path emits nothing at any
-/// `RUST_LOG`. A run whose flag is on but whose output says `0/27 layers` is
+/// actually took, so it uses `eprintln!` rather than `tracing`: the report must
+/// show without `RUST_LOG`, and stderr keeps it out of the generated text on
+/// stdout. A run whose flag is on but whose output says `0/27 layers` is
 /// visibly running the fallback, which is how issue #899's silent null is
 /// avoided here.
 fn report_absorption(layers: &[DecoderLayer], args: &ModelArgs) {
@@ -923,7 +906,7 @@ fn report_absorption(layers: &[DecoderLayer], args: &ModelArgs) {
     };
     let before = mla::decompressed_bytes_per_token(&geometry, 2);
     let after = mla::latent_bytes_per_token(&geometry, 2);
-    println!(
+    eprintln!(
         "mla: absorbed decode folded {folded}/{total} layers; KV cache {before} -> {after} \
          bytes/token/layer ({:.1}x), split-kv={}",
         before as f64 / after.max(1) as f64,
@@ -934,7 +917,7 @@ fn report_absorption(layers: &[DecoderLayer], args: &ModelArgs) {
             .iter()
             .find_map(|l| l.self_attn.absorb_note.as_deref())
             .unwrap_or("no reason recorded");
-        println!("mla: absorption declined, keeping the decompressed path: {reason}");
+        eprintln!("mla: absorption declined, keeping the decompressed path: {reason}");
     }
 }
 

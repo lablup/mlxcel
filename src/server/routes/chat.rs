@@ -27,11 +27,11 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use mlxcel_core::sampling::{LogprobsConfig, TokenLogprobData};
+use mlxcel_core::sampling::TokenLogprobData;
 
 use crate::server::batch::RequestPriority;
 use crate::server::chat_request::{
-    prepare_chat_request_with_cache, request_has_effective_input, resolve_effective_kwargs,
+    prepare_chat_request_with_cache_and_video_allowlist, resolve_effective_kwargs,
 };
 use crate::server::chat_template::ChatTemplateProcessor;
 use crate::server::config::{PromptCacheRequestContext, ReasoningBudgetOverride};
@@ -39,15 +39,13 @@ use crate::server::prompt_cache::key::{
     MultimodalDigest, multimodal_digest_from_vecs, resolve_session_key, template_sig,
 };
 use crate::server::request_options::{
-    RequestOptionOverrides, build_server_generate_options_with_live, chat_carries_loop_amplifier,
-    resolve_server_max_tokens_with_live,
+    RequestOptionOverrides, build_server_generate_options_with_live,
 };
 use crate::server::streaming::{sse_channel_resumable, sse_response};
 use crate::server::structured::{
     StructuredOutputConstraint, StructuredOutputError, build_constraint_from_response_format,
     build_lark_constraint,
 };
-use crate::server::thinking_budget::{pick_budget_alias, resolve_request_budget};
 use crate::server::tool_calls;
 use crate::server::tool_calls::ToolCallFormat;
 use crate::server::tool_calls::stream_filter::{FilterOutput, StreamFilter};
@@ -129,32 +127,7 @@ pub(crate) fn build_prompt_cache_request_context(
     if request.resolve_cache_prompt() == Some(false) {
         return None;
     }
-    // Share the kwargs resolution with `prepare_chat_request_with_cache` so the
-    // digest sees the same canonicalized map as the rendering pipeline. Calling
-    // the helper rather than re-deriving the merge here keeps a mapped
-    // `reasoning_effort` (issue #1164) inside `template_sig`, so two requests
-    // that differ only in reasoning effort land in different cache buckets
-    // instead of sharing one and re-prefilling past the divergence point.
-    let merged_kwargs = resolve_effective_kwargs(
-        &state.chat_template,
-        request,
-        live.chat_template_kwargs.as_ref(),
-        &request.merged_extra_body(),
-    );
-
-    let template_signature = template_sig(
-        state.chat_template.template_source(),
-        &merged_kwargs,
-        request.tool_choice.as_ref(),
-        request.tools.as_deref(),
-        // The dimension only matters when this request actually has a trailing
-        // assistant message: hashing the flag unconditionally would split every
-        // bucket in the store the first time an operator passes
-        // `--no-prefill-assistant`.
-        state.prefill_assistant()
-            && crate::server::assistant_prefill::resolve(request, true)
-                .is_ok_and(|prefill| prefill.is_some()),
-    );
+    let template_signature = chat_template_signature(state, live, request);
     let session_key =
         resolve_session_key(request.resolve_prompt_cache_key(), request.resolve_user()).to_string();
     // Digest the resolved multimodal payload. Empty slices (text-only) hash to
@@ -177,6 +150,43 @@ pub(crate) fn build_prompt_cache_request_context(
         history_prompt: history_prompt.map(str::to_string),
         history_prefix_tokens: None,
     })
+}
+
+/// The prompt-cache `template_sig` for a chat request.
+///
+/// Shared by [`build_prompt_cache_request_context`] and the reasoning re-echo
+/// scope (issue #2110), which must key on exactly the bucket the request's
+/// cache entries live in.
+pub(crate) fn chat_template_signature(
+    state: &AppState,
+    live: &LiveSettings,
+    request: &ChatCompletionRequest,
+) -> String {
+    // Share the kwargs resolution with `prepare_chat_request_with_cache` so the
+    // digest sees the same canonicalized map as the rendering pipeline. Calling
+    // the helper rather than re-deriving the merge here keeps a mapped
+    // `reasoning_effort` (issue #1164) inside `template_sig`, so two requests
+    // that differ only in reasoning effort land in different cache buckets
+    // instead of sharing one and re-prefilling past the divergence point.
+    let merged_kwargs = resolve_effective_kwargs(
+        &state.chat_template,
+        request,
+        live.chat_template_kwargs.as_ref(),
+        &request.merged_extra_body(),
+    );
+    template_sig(
+        state.chat_template.template_source(),
+        &merged_kwargs,
+        request.tool_choice.as_ref(),
+        request.tools.as_deref(),
+        // The dimension only matters when this request actually has a trailing
+        // assistant message: hashing the flag unconditionally would split every
+        // bucket in the store the first time an operator passes
+        // `--no-prefill-assistant`.
+        state.prefill_assistant()
+            && crate::server::assistant_prefill::resolve(request, true)
+                .is_ok_and(|prefill| prefill.is_some()),
+    )
 }
 
 /// Cache-key template dimension for the two raw-prompt routes (#1473).
@@ -295,121 +305,18 @@ pub async fn chat_completions(
     headers: HeaderMap,
     Json(mut request): Json<ChatCompletionRequest>,
 ) -> Response {
-    let live = state.live();
     if let Some(response) = super::chat_not_available(&state) {
         return response.into_response();
     }
 
-    // Reject requests with no effective input before any other validation or
-    // model dispatch (issue #773): an empty `messages` array, or messages
-    // whose content is empty/whitespace-only with no media/tool/reasoning
-    // payload, would otherwise reach the model worker and waste a prefill.
-    if !request_has_effective_input(&request) {
-        return ErrorResponse::new(
-            "Request must include at least one non-empty message content or media input.",
-            "invalid_request_error",
-        )
-        .into_response();
-    }
-
-    // Validate top_logprobs range per OpenAI spec (0-20)
-    if let Some(top) = request.top_logprobs
-        && top > 20
-    {
-        return ErrorResponse::new(
-            "top_logprobs must be between 0 and 20",
-            "invalid_request_error",
-        )
-        .into_response();
-    }
-    // top_logprobs requires logprobs: true
-    if request.top_logprobs.is_some() && request.logprobs != Some(true) {
-        return ErrorResponse::new(
-            "top_logprobs requires logprobs to be set to true",
-            "invalid_request_error",
-        )
-        .into_response();
-    }
-
-    // Validate XTC (Exclude Top Choices) sampling parameter ranges before any
-    // generation work begins.
-    if let Err(message) =
-        validate_xtc_params(request.params.xtc_threshold, request.params.xtc_probability)
-    {
-        return ErrorResponse::new(message, "invalid_request_error").into_response();
-    }
-    if let Err(message) = validate_top_n_sigma(request.params.top_n_sigma) {
-        return ErrorResponse::new(message, "invalid_request_error").into_response();
-    }
-    if let Err(message) = validate_typical_p(request.params.typical_p) {
-        return ErrorResponse::new(message, "invalid_request_error").into_response();
-    }
-
-    // Reject image, audio and video content blocks the loaded checkpoint
-    // cannot consume, before any referenced URL or file is read. Capability is
-    // detected once at startup from `config.json` and cached on
-    // `AppState.media_support`; the refusal carries b10621's own
-    // `<kind> input is not supported` wording (issue #1451). Silently dropping
-    // an image would still consume tokens and produce a reply the caller could
-    // not tell apart from one that saw the picture.
-    if let Some(rejection) = crate::server::media_capability_rejection(
-        &request,
-        state.media_support,
-        state.display_model_id(),
-    ) {
-        return rejection.into_response();
-    }
-
-    // A checkpoint with a vision tower but no temporal one answers a
-    // `video_url` block by reading the clip as ordered stills (issue #1322).
-    // The substitution happens here, after the capability gate and before
-    // `prepare_chat_request_with_cache` renders, so the template emits one
-    // image placeholder per frame and the request the rest of this handler
-    // sees is an ordinary multi-image one. Native video families are left
-    // alone and keep `prepared.videos`. A client that disconnects mid-decode
-    // cancels the clips not yet decoded (issue #1766).
-    if let Err(err) =
-        crate::server::chat_request::expand_request_video_parts(&state, &mut request).await
-    {
-        return err.into_error_response().into_response();
-    }
-
-    // Keep tool validation shared with the disaggregated router front so both
-    // paths reject invalid and oversized requests before template rendering.
-    if let Err(message) = validate_chat_tool_inputs(&request) {
-        return ErrorResponse::new(message, "invalid_request_error").into_response();
-    }
-
-    // validate thinking_budget_tokens early so malformed values
-    // surface as 400 before any generation work begins.
-    let effective_max_tokens =
-        resolve_server_max_tokens_with_live(&state.config, &live, request.params.max_tokens);
-    let raw_budget = pick_budget_alias(
-        request.params.thinking_budget_tokens,
-        request.params.thinking_token_budget,
-        request.params.thinking_budget,
-    );
-    let budget_override =
-        match resolve_request_budget(raw_budget, live.reasoning_budget, effective_max_tokens) {
-            Ok(effective) => ReasoningBudgetOverride::Explicit(effective),
-            Err(err) => {
-                return ErrorResponse::new(err.to_string(), "invalid_request_error")
-                    .into_response();
-            }
-        };
-
-    // + H2: build the structured-output constraint up
-    // front so any schema validation error surfaces as a 400 before
-    // generation work starts. Grammar compilation can be ~hundreds of ms
-    // and (worst case, before the size guard) hundreds of MB — running
-    // it directly on the Tokio runtime worker thread would block other
-    // in-flight requests. We move it onto a blocking task and await the
-    // join handle. Returns `None` when the request did not ask for
-    // structured output (`response_format`, or a forced `tool_choice` on a
-    // grammar-capable template, #1319), in which case the rest of the
-    // pipeline behaves identically to before this issue.
-    let structured = match build_chat_constraint(&state, &request).await {
-        Ok(structured) => structured,
+    // The validation prefix and the per-request constraints are shared with
+    // the in-process server `mlxcel run` drives (issue #2173).
+    let super::chat_generation::ChatAdmission {
+        live,
+        budget_override,
+        structured,
+    } = match super::chat_generation::admit_chat_request(&state, &mut request).await {
+        Ok(admission) => admission,
         Err(response) => return response.into_response(),
     };
 
@@ -641,85 +548,25 @@ pub(crate) async fn non_stream_chat_completion(
     let request_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
     let model_id = state.display_model_id().to_string();
 
-    // when the prompt-prefix cache is installed, enter the
-    // prefix-stable rendering path so unset preserve_thinking defaults to
-    // true. The store is built by startup.rs only when configured, so
-    // `state.prompt_cache.is_some()` is the operator-visible flag here.
+    // Rendering and option building are shared with the streaming path and
+    // the in-process server (issue #2173).
+    let admission = super::chat_generation::ChatAdmission {
+        live: live.clone(),
+        budget_override,
+        structured,
+    };
+    let super::chat_generation::ChatGeneration {
+        render_request,
+        echo_scope,
+        prepared,
+        options,
+        warmup_ctx,
+        primed_open_thinking,
+        echo_prefill,
+        ..
+    } = super::chat_generation::prepare_chat_generation(&state, &request, priority, admission)
+        .await?;
     let prompt_cache_enabled = state.prompt_cache.is_some();
-    let mut prepared = prepare_chat_request_with_cache(
-        &state.chat_template,
-        &request,
-        live.chat_template_kwargs.as_ref(),
-        prompt_cache_enabled,
-        state.should_render_history_boundary_snapshot(),
-        state.prefill_assistant(),
-        &state.thinking_markers,
-    )
-    .await
-    .map_err(|err| ErrorResponse::new(err.to_string(), "invalid_request_error"))?;
-    // Build the prompt-cache context AFTER preparation so the multimodal
-    // digest sees the resolved image/audio bytes.
-    let prompt_cache_ctx = build_prompt_cache_request_context(
-        &state,
-        &live,
-        &request,
-        &prepared.image_data,
-        &prepared.audio_data,
-        prepared.history_prompt.as_deref(),
-    );
-    // Retained for the post-completion warm-up (issue #1144); the context
-    // itself moves into `options` below. Cheap: the history string has already
-    // been handed to the context and the token vector is not filled until the
-    // dispatch thread.
-    let warmup_ctx = prompt_cache_ctx.as_ref().map(|ctx| {
-        let mut c = ctx.clone();
-        c.history_prompt = None;
-        c
-    });
-    let primed_open_thinking =
-        is_prompt_primed_open_thinking(&state.thinking_markers, &prepared.prompt);
-    // Loop-detection amplifier signal (issues #967 and #977): only tool-shaped
-    // prompts arm the family default. Grammar-only requests stay disabled.
-    let amplified = chat_carries_loop_amplifier(&request);
-    let mut options =
-        build_generate_options_with_live(&request.params, &state.config, &live, amplified);
-    options.priority = priority;
-    options.reasoning_budget = budget_override;
-    options.prompt_cache_ctx = prompt_cache_ctx;
-    // per-request Gemma 4 image soft-token budget, already validated against the
-    // supported ladder by `prepare_chat_request_with_cache`. `None` for every
-    // request that did not set `detail` / `max_soft_tokens`.
-    options.image_soft_tokens = prepared.image_soft_tokens;
-    // A native chat renderer (Kimi K3's XTML format, #1338) produced the
-    // prompt as token ids. Handing them to the provider is what keeps the
-    // rendered structure intact: re-tokenizing `prepared.prompt` would have to
-    // re-recognize control-token spellings, which is the injection surface the
-    // native renderer closes. `None` for every template-rendered request.
-    options.pre_rendered_prompt_tokens = prepared.prompt_token_ids.take();
-    // `ThinkingState` counts reasoning tokens from the first decoded token
-    // only when the prompt already left the model inside an open thinking
-    // block. The chat template decides this at render time (Qwen primes
-    // `<think>\n`; Gemma 4's enable_thinking=true path primes
-    // `<|channel>thought\n`; every other path leaves generation starting
-    // outside any block). Setting this per-request keeps
-    // `thinking_budget_tokens` functional for both families and avoids
-    // counting ordinary content tokens as reasoning when the prompt
-    // wasn't primed.
-    options.thinking_enter_block_on_start = primed_open_thinking;
-    // attach the structured-output constraint built at the
-    // request boundary so the scheduler runs constrained sampling for this
-    // sequence.
-    options.structured = structured;
-
-    // Set logprobs configuration when requested
-    let top_k = request.top_logprobs.unwrap_or(0) as usize;
-    if request.logprobs == Some(true) {
-        options.logprobs = LogprobsConfig {
-            enabled: true,
-            top_k,
-            source: Default::default(),
-        };
-    }
 
     // Generate (blocking call handled by model provider's worker thread).
     // forward resolved video paths alongside images and audio.
@@ -733,16 +580,10 @@ pub(crate) async fn non_stream_chat_completion(
         super::slots::slot_params_json(&options, false),
         Some(options.max_tokens as i64),
     );
-    // b10621 `echo` (#1470): with a prefilled assistant message and `echo`
-    // set, the prefill leads the response. Upstream reaches the same shape by
-    // NOT priming its chat parser, so the first diff carries the continuation
-    // text; prepending it to the generated text here feeds the identical
-    // string through tool-call parsing, the reasoning split and the
+    // b10621 `echo` (#1470): `echo_prefill` (resolved with the render above)
+    // leads the response; prepending it to the generated text feeds the
+    // identical string through tool-call parsing, the reasoning split and the
     // `--reasoning-format` placement.
-    let echo_prefill = request
-        .resolve_echo()
-        .then(|| prepared.assistant_prefill.clone())
-        .flatten();
     let mut result = state
         .model_provider
         .generate_with_media_and_videos_declared_live_with_prefill(
@@ -786,7 +627,11 @@ pub(crate) async fn non_stream_chat_completion(
         if lp_data.is_empty() {
             None
         } else {
-            Some(build_chat_logprobs(&state.tokenizer, lp_data, top_k))
+            Some(build_chat_logprobs(
+                &state.tokenizer,
+                lp_data,
+                request.top_logprobs.unwrap_or(0) as usize,
+            ))
         }
     });
 
@@ -910,6 +755,13 @@ pub(crate) async fn non_stream_chat_completion(
             || tool_calls::content_with_thinking_block(&result.text, &answer, reasoning.as_deref()),
             reasoning.clone(),
         );
+        crate::server::reasoning_echo::record_reply(
+            &state,
+            echo_scope.as_ref(),
+            &request.messages,
+            &shaped.content,
+            shaped.reasoning_content.as_deref(),
+        );
         let reasoning_only = log_if_reasoning_only(
             &result.text,
             &shaped.content,
@@ -956,12 +808,31 @@ pub(crate) async fn non_stream_chat_completion(
         reasoning.clone(),
     );
 
-    // Warm the next turn's history prefix in the background (issue #1144).
-    // Only the plain chat path does this: a tool-calling turn is echoed back as
-    // a tool result rather than as assistant content, so the reply text is not
-    // a reliable guess at the next prompt there.
+    // Record the reply's reasoning first (issue #2110), then warm the next
+    // turn's history prefix in the background (issue #1144). The warm-up
+    // renders what the next turn will render: this turn's filled request plus
+    // the reply, carrying its reasoning exactly when the store kept it for the
+    // follow-up's own fill (#2118). Only the plain chat path warms: a
+    // tool-calling turn is echoed back as a tool result rather than as
+    // assistant content, so the reply text is not a reliable guess at the next
+    // prompt there.
+    let stored = crate::server::reasoning_echo::record_reply(
+        &state,
+        echo_scope.as_ref(),
+        &request.messages,
+        &shaped.content,
+        shaped.reasoning_content.as_deref(),
+    );
     if let Some(ref ctx) = warmup_ctx {
-        submit_next_turn_warmup(&state, &live, &request, ctx, &cleaned_text);
+        let reply_reasoning = shaped.reasoning_content.as_deref().filter(|_| stored);
+        submit_next_turn_warmup(
+            &state,
+            &live,
+            &render_request,
+            ctx,
+            &cleaned_text,
+            reply_reasoning,
+        );
     }
 
     let reasoning_only = log_if_reasoning_only(
@@ -999,13 +870,18 @@ pub(crate) async fn non_stream_chat_completion(
 /// still a hit on the next turn.
 ///
 /// `ctx` is the same prompt-cache context the request carried, so the warm-up
-/// lands in the bucket the next turn will look in.
-fn submit_next_turn_warmup(
+/// lands in the bucket the next turn will look in. `request` is the request as
+/// it was rendered (with any re-injected reasoning, #2110), and
+/// `reply_reasoning` is the reply's reasoning when the re-echo store kept it,
+/// so the probes render the reply the way a content-only follow-up will after
+/// its own fill (#2118).
+pub(crate) fn submit_next_turn_warmup(
     state: &AppState,
     live: &LiveSettings,
     request: &ChatCompletionRequest,
     ctx: &PromptCacheRequestContext,
     reply: &str,
+    reply_reasoning: Option<&str>,
 ) {
     if state.prompt_cache.is_none()
         || crate::server::prompt_cache::boundary_snapshot_disabled()
@@ -1029,6 +905,7 @@ fn submit_next_turn_warmup(
         request,
         live.chat_template_kwargs.as_ref(),
         reply,
+        reply_reasoning,
     ) else {
         return;
     };
@@ -1081,6 +958,11 @@ struct StreamCallbackState {
     /// what it echoes back as the assistant turn. Only appended to when a
     /// warm-up is actually possible for this request.
     warmup_content: String,
+    /// Every `delta.content` fragment and every `delta.reasoning_content`
+    /// fragment, in order, for the reasoning re-echo store (issue #2110). Only
+    /// appended to when the request has an echo scope.
+    echo_content: String,
+    echo_reasoning: String,
     /// Stream filter that splits reasoning/content and strips structural tokens.
     stream_filter: StreamFilter,
     /// Per-`feed()` logprob buffer, drained in lockstep with the filter's
@@ -1212,7 +1094,7 @@ pub(crate) async fn stream_asr_completion(
     }
 
     let prompt_cache_enabled = state.prompt_cache.is_some();
-    let mut prepared = match prepare_chat_request_with_cache(
+    let mut prepared = match prepare_chat_request_with_cache_and_video_allowlist(
         &state.chat_template,
         &request,
         live.chat_template_kwargs.as_ref(),
@@ -1220,6 +1102,7 @@ pub(crate) async fn stream_asr_completion(
         state.should_render_history_boundary_snapshot(),
         state.prefill_assistant(),
         &state.thinking_markers,
+        &state.video_dir_allowlist,
     )
     .await
     {
@@ -1265,6 +1148,9 @@ pub(crate) async fn stream_asr_completion(
 
     let skip_chat_parsing = state.config.skip_chat_parsing;
     let token_events = events.clone();
+
+    let admission =
+        crate::server::model_provider::AdmissionWaiter::arm(&mut options, cancelled.clone());
 
     tokio::task::spawn_blocking(move || {
         let slot = state.slots.begin(
@@ -1376,6 +1262,10 @@ pub(crate) async fn stream_asr_completion(
         events.done();
     });
 
+    if let Err(error) = admission.wait().await {
+        return generation_error_to_response(error).into_response();
+    }
+
     sse_response(stream, keepalive)
 }
 
@@ -1398,91 +1288,38 @@ async fn stream_chat_completion(
 
     let request_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
     let model_id = state.display_model_id().to_string();
-    // same prompt-cache flag as the non-streaming path so that
-    // both endpoints default preserve_thinking=true identically when the
-    // cache is installed.
     let prompt_cache_enabled = state.prompt_cache.is_some();
-    let prepared = prepare_chat_request_with_cache(
-        &state.chat_template,
-        &request,
-        live.chat_template_kwargs.as_ref(),
-        prompt_cache_enabled,
-        state.should_render_history_boundary_snapshot(),
-        state.prefill_assistant(),
-        &state.thinking_markers,
-    )
-    .await;
-    let mut prepared = match prepared {
-        Ok(prepared) => prepared,
-        Err(err) => {
-            return ErrorResponse::new(err.to_string(), "invalid_request_error").into_response();
-        }
+    // Rendering and option building are shared with the non-streaming path
+    // and the in-process server (issue #2173).
+    let admission = super::chat_generation::ChatAdmission {
+        live: live.clone(),
+        budget_override,
+        structured,
     };
-    // b10621 `echo` (#1470), captured before `prepared` is consumed.
-    let echo_prefill = request
-        .resolve_echo()
-        .then(|| prepared.assistant_prefill.clone())
-        .flatten();
-    // Build the prompt-cache context AFTER preparation so the multimodal
-    // digest sees the resolved image/audio bytes.
-    let prompt_cache_ctx = build_prompt_cache_request_context(
-        &state,
-        &live,
-        &request,
-        &prepared.image_data,
-        &prepared.audio_data,
-        prepared.history_prompt.as_deref(),
-    );
-    // Retained for the post-completion warm-up (issue #1144), same as the
-    // non-streaming path. `warmup_enabled` gates the per-token accumulation in
-    // the callback so a request that can never warm up pays nothing for it.
-    let warmup_ctx = prompt_cache_ctx.as_ref().map(|ctx| {
-        let mut c = ctx.clone();
-        c.history_prompt = None;
-        c
-    });
+    let generation = match super::chat_generation::prepare_chat_generation(
+        &state, &request, priority, admission,
+    )
+    .await
+    {
+        Ok(generation) => generation,
+        Err(err) => return err.into_response(),
+    };
+    let super::chat_generation::ChatGeneration {
+        render_request,
+        echo_scope,
+        prepared,
+        mut options,
+        warmup_ctx,
+        primed_open_thinking,
+        primed_close_marker,
+        echo_prefill,
+    } = generation;
+    // Retained for the post-completion warm-up (issue #1144). `warmup_enabled`
+    // gates the per-token accumulation in the callback so a request that can
+    // never warm up pays nothing for it.
     let warmup_enabled = warmup_ctx.is_some()
         && !crate::server::prompt_cache::boundary_snapshot_disabled()
         && !tool_calls::should_parse_tool_calls(&request);
-    let primed_open_thinking =
-        is_prompt_primed_open_thinking(&state.thinking_markers, &prepared.prompt);
-    // The family whose block the prompt primed open, for the #1470 delimiter
-    // echo: with the open marker in the prompt rather than the generation, the
-    // streamed content has to synthesize it, exactly as the non-streaming
-    // `content_with_thinking_block` does from the close marker in the raw text.
-    let primed_close_marker =
-        primed_open_thinking_close_marker(&state.thinking_markers, &prepared.prompt);
-    // Loop-detection amplifier signal (issue #967): same derivation as the
-    // non-streaming path, so both chat surfaces resolve identically.
-    let amplified = chat_carries_loop_amplifier(&request);
-    let mut options =
-        build_generate_options_with_live(&request.params, &state.config, &live, amplified);
-    options.priority = priority;
-    options.reasoning_budget = budget_override;
-    options.prompt_cache_ctx = prompt_cache_ctx;
-    // per-request Gemma 4 image soft-token budget, already validated against the
-    // supported ladder by `prepare_chat_request_with_cache`. `None` for every
-    // request that did not set `detail` / `max_soft_tokens`.
-    options.image_soft_tokens = prepared.image_soft_tokens;
-    // A native chat renderer (Kimi K3's XTML format, #1338) produced the
-    // prompt as token ids. Handing them to the provider is what keeps the
-    // rendered structure intact: re-tokenizing `prepared.prompt` would have to
-    // re-recognize control-token spellings, which is the injection surface the
-    // native renderer closes. `None` for every template-rendered request.
-    options.pre_rendered_prompt_tokens = prepared.prompt_token_ids.take();
-    // `ThinkingState` counts reasoning tokens from the first decoded token
-    // only when the prompt already left the model inside an open thinking
-    // block. The chat template decides this at render time (Qwen primes
-    // `<think>\n`; Gemma 4's enable_thinking=true path primes
-    // `<|channel>thought\n`; every other path leaves generation starting
-    // outside any block). Setting this per-request keeps
-    // `thinking_budget_tokens` functional for both families and avoids
-    // counting ordinary content tokens as reasoning when the prompt
-    // wasn't primed.
-    options.thinking_enter_block_on_start = primed_open_thinking;
-    // forward the constraint built at the request boundary so
-    // streamed generation is also constrained.
-    options.structured = structured;
 
     // Extract include_usage before request is moved into the closure
     let include_usage = request
@@ -1491,16 +1328,9 @@ async fn stream_chat_completion(
         .map(|o| o.include_usage)
         .unwrap_or(false);
 
-    // Set logprobs configuration when requested
+    // Logprobs configuration was attached by `prepare_chat_generation`.
     let top_k = request.top_logprobs.unwrap_or(0) as usize;
     let logprobs_enabled = request.logprobs == Some(true);
-    if logprobs_enabled {
-        options.logprobs = LogprobsConfig {
-            enabled: true,
-            top_k,
-            source: Default::default(),
-        };
-    }
 
     let queue_reservation = match state.model_provider.reserve_single_stream_queue_slot() {
         Ok(reservation) => reservation,
@@ -1567,9 +1397,19 @@ async fn stream_chat_completion(
     // warm-up is actually possible so the ordinary streaming path allocates
     // nothing extra.
     let warmup_state = warmup_enabled.then(|| state.clone());
-    let warmup_request = warmup_enabled.then(|| request.clone());
+    // The warm-up renders the request as this turn rendered it, with any
+    // re-injected reasoning (#2110), because that is what the next turn's own
+    // fill reproduces (#2118).
+    let warmup_request = warmup_enabled.then(|| render_request.as_ref().clone());
+    // The streamed reply's reasoning is recorded for the next turn (#2110)
+    // under the request's messages as the client sent them.
+    let echo_record = echo_scope.map(|scope| (scope, request.messages.clone()));
+    let echo_enabled = echo_record.is_some();
 
     // Spawn a blocking task to handle generation
+    let admission =
+        crate::server::model_provider::AdmissionWaiter::arm(&mut options, cancelled.clone());
+
     tokio::task::spawn_blocking(move || {
         // Keep the completion controllable for exactly the lifetime of this
         // task; the guard unregisters the id on drop, whatever exit path
@@ -1644,6 +1484,8 @@ async fn stream_chat_completion(
         let cb_state = std::sync::Arc::new(std::sync::Mutex::new(StreamCallbackState {
             accumulated: String::new(),
             warmup_content: String::new(),
+            echo_content: String::new(),
+            echo_reasoning: String::new(),
             stream_filter: if primed_open_thinking {
                 StreamFilter::new_primed_open_thinking()
             } else {
@@ -1757,6 +1599,9 @@ async fn stream_chat_completion(
                             && !reasoning_text.is_empty()
                         {
                             if reasoning_format.emits_reasoning_content() {
+                                if echo_enabled {
+                                    cb.echo_reasoning.push_str(&reasoning_text);
+                                }
                                 pending.push(
                                     ChatCompletionChunk::reasoning_content_with_alias_field(
                                         request_id_inner.clone(),
@@ -1804,6 +1649,9 @@ async fn stream_chat_completion(
                             if warmup_enabled {
                                 cb.warmup_content.push_str(&text);
                             }
+                            if echo_enabled {
+                                cb.echo_content.push_str(&text);
+                            }
                             let logprobs = if logprobs_enabled {
                                 lp_data.as_ref().map(|lp| {
                                     build_single_token_chat_logprobs(&tokenizer, lp, top_k)
@@ -1847,7 +1695,7 @@ async fn stream_chat_completion(
                         // content-carrying chunk (the placeholder push just
                         // above pushes an explicitly empty one, so it does not
                         // trip this). Read at finish time via
-                        // `reasoning_stream::is_reasoning_only`.
+                        // `reasoning_display::is_reasoning_only`.
                         if !cb.saw_content && pending.iter().any(chunk_carries_content) {
                             cb.saw_content = true;
                         }
@@ -1877,6 +1725,14 @@ async fn stream_chat_completion(
             .ok()
             .map(|mut cb| cb.stream_filter.flush())
             .unwrap_or_default();
+        // Copies of the flushed tail for the reasoning re-echo record (#2110)
+        // and the warm-up reply (#1144), taken before the chunks below move
+        // the strings.
+        let remaining_echo = if echo_enabled || warmup_enabled {
+            (remaining.reasoning.clone(), remaining.content.clone())
+        } else {
+            (None, None)
+        };
         // Tracks whether either branch below pushes real `delta.content`, so
         // `cb.saw_content` (read at finish time, see its doc comment) reflects
         // this end-of-stream flush too, not just the main per-token loop.
@@ -1923,6 +1779,19 @@ async fn stream_chat_completion(
         {
             cb.saw_content |= remaining_had_content;
             cb.saw_reasoning_content |= remaining_had_reasoning;
+            if echo_enabled {
+                if remaining_had_reasoning && let Some(text) = remaining_echo.0.as_deref() {
+                    cb.echo_reasoning.push_str(text);
+                }
+                if let Some(text) = remaining_echo.1.as_deref() {
+                    cb.echo_content.push_str(text);
+                }
+            }
+            // The flushed tail reached the client as content too, so the
+            // warm-up's guess at the echoed reply must include it.
+            if warmup_enabled && let Some(text) = remaining_echo.1.as_deref() {
+                cb.warmup_content.push_str(text);
+            }
         }
 
         if let Ok(r) = &result {
@@ -2014,11 +1883,28 @@ async fn stream_chat_completion(
             warn_unmet_tool_choice(tool_choice.as_ref(), forced_format, &finish_reason);
         }
 
+        // Record the streamed reasoning for the next turn (issue #2110), from
+        // exactly the deltas the client received. A tool-calling turn is
+        // echoed back with its tool calls, which the store never fills.
+        let mut stored_reasoning: Option<String> = None;
+        if finish_reason != "tool_calls"
+            && result.is_ok()
+            && let Some((scope, messages)) = &echo_record
+            && let Ok(cb) = cb_state.lock()
+            && state
+                .reasoning_echo
+                .record(scope, messages, &cb.echo_content, &cb.echo_reasoning)
+        {
+            stored_reasoning = Some(cb.echo_reasoning.clone());
+        }
+
         // Warm the next turn's history prefix in the background (issue #1144).
         // Submitted after the stream's content is complete and before the
-        // terminal chunks, on the generation thread that is about to go idle.
-        // Skipped when the turn produced tool calls: that reply is echoed back
-        // as a tool result, not as assistant content.
+        // terminal chunks, on the generation thread that is about to go idle,
+        // and after the record above so the reply renders with the reasoning
+        // a content-only follow-up gets back from the store (#2118). Skipped
+        // when the turn produced tool calls: that reply is echoed back as a
+        // tool result, not as assistant content.
         if finish_reason != "tool_calls"
             && let (Some(state), Some(request), Some(ctx)) =
                 (&warmup_state, &warmup_request, &warmup_ctx)
@@ -2027,7 +1913,14 @@ async fn stream_chat_completion(
                 .lock()
                 .map(|cb| cb.warmup_content.clone())
                 .unwrap_or_default();
-            submit_next_turn_warmup(state, &live, request, ctx, &reply);
+            submit_next_turn_warmup(
+                state,
+                &live,
+                request,
+                ctx,
+                &reply,
+                stored_reasoning.as_deref(),
+            );
         }
 
         // Whether the whole stream produced tokens but `delta.content` never
@@ -2082,6 +1975,10 @@ async fn stream_chat_completion(
 
         finish_events.done();
     });
+
+    if let Err(error) = admission.wait().await {
+        return generation_error_to_response(error).into_response();
+    }
 
     sse_response(stream, keepalive)
 }
@@ -2222,7 +2119,7 @@ pub(crate) fn is_prompt_primed_open_thinking(
     prompt: &str,
 ) -> bool {
     if markers.has_thinking() {
-        return crate::reasoning_stream::prompt_primed_open_thinking(markers, prompt);
+        return crate::reasoning_display::prompt_primed_open_thinking(markers, prompt);
     }
     legacy_primed_close_marker(prompt).is_some()
 }
@@ -2274,7 +2171,7 @@ pub(crate) fn primed_open_thinking_close_marker(
     prompt: &str,
 ) -> Option<String> {
     if markers.has_thinking() {
-        return crate::reasoning_stream::prompt_primed_open_close_marker(markers, prompt);
+        return crate::reasoning_display::prompt_primed_open_close_marker(markers, prompt);
     }
     legacy_primed_close_marker(prompt).map(str::to_string)
 }
@@ -2316,7 +2213,7 @@ fn primed_thinking_unclosed(raw_output: &str, primed: bool) -> bool {
 /// `deepseek-legacy`, which deliberately keep the thinking block inside
 /// `content` rather than emptying it.
 ///
-/// Reuses [`crate::reasoning_stream::is_reasoning_only`], the same predicate
+/// Reuses [`crate::reasoning_display::is_reasoning_only`], the same predicate
 /// the CLI's `generate` and `chat` REPL name this condition with (#1721), so
 /// the two surfaces agree on what counts. `show_reasoning` is fixed to
 /// `false`: unlike the CLI, the server never suppresses reasoning into a
@@ -2349,7 +2246,7 @@ fn log_if_reasoning_only(
     // `deepseek-legacy` keep them in `content`, which is then non-empty and
     // short-circuits below anyway. See `ReasoningFormat::emits_reasoning_content`.
     let reasoning_only = reasoning_content.is_some_and(|text| !text.trim().is_empty())
-        && crate::reasoning_stream::is_reasoning_only(
+        && crate::reasoning_display::is_reasoning_only(
             raw_generated_text,
             !content.trim().is_empty(),
             false,
@@ -2378,7 +2275,7 @@ fn log_if_reasoning_only(
 ///   client as `tool_calls` deltas instead. A model that answers with nothing
 ///   but a tool call -- the ordinary shape -- therefore ends with
 ///   `saw_content` false and a non-empty `result.text`, which
-///   [`crate::reasoning_stream::is_reasoning_only`] alone would report as
+///   [`crate::reasoning_display::is_reasoning_only`] alone would report as
 ///   reasoning-only on every such request. The non-streaming path excludes its
 ///   tool-calls arm for the same reason; this keeps the two surfaces agreeing.
 /// - The stream actually emitted reasoning. The field asserts the output stayed
@@ -2386,7 +2283,7 @@ fn log_if_reasoning_only(
 ///   other reason must not borrow that explanation. See
 ///   [`log_if_reasoning_only`], which gates on the shaped `reasoning_content`
 ///   for the same reason.
-/// - [`crate::reasoning_stream::is_reasoning_only`] agrees: tokens were
+/// - [`crate::reasoning_display::is_reasoning_only`] agrees: tokens were
 ///   produced and none of them reached `delta.content`.
 ///
 /// Used by: the streaming chat completion handler, at finish time.
@@ -2398,7 +2295,7 @@ fn stream_reasoning_only(
 ) -> bool {
     finish_reason != "tool_calls"
         && saw_reasoning_content
-        && crate::reasoning_stream::is_reasoning_only(generated_text, saw_content, false)
+        && crate::reasoning_display::is_reasoning_only(generated_text, saw_content, false)
 }
 
 /// Whether a streamed chunk carries non-empty `delta.reasoning_content`.
@@ -2630,6 +2527,7 @@ pub(crate) fn build_generate_options_with_live(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::chat_request::request_has_effective_input;
     use crate::server::types::request::{FunctionDefinition, Tool};
 
     fn make_tool(name: &str) -> Tool {
@@ -3083,7 +2981,7 @@ mod tests {
     fn log_if_reasoning_only_false_when_nothing_was_generated() {
         // Zero completion tokens is a different fact from a suppressed
         // channel, and must not borrow this explanation (mirrors
-        // `reasoning_stream::is_reasoning_only`'s own `reasoning_only_is_false_
+        // `reasoning_display::is_reasoning_only`'s own `reasoning_only_is_false_
         // when_nothing_was_generated` case).
         assert!(!log_if_reasoning_only("", "", None, 0, "stop"));
     }

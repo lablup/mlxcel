@@ -134,7 +134,7 @@ impl Phi4MMRequestModes {
     }
 
     fn reset(&self) {
-        // `CxxGenerator` resets model runtime state after the caller has
+        // A bare single-row run resets model runtime state after the caller has
         // already built and registered multimodal embeddings. Keep those
         // one-shot pointer registrations until `begin_prefill` consumes
         // them; only active/fallback sequence state belongs to the previous

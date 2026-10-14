@@ -876,6 +876,9 @@ async fn stream_native_completion(
     let want_progress = request.return_progress.unwrap_or(false);
     let progress_events = events.clone();
 
+    let admission =
+        crate::server::model_provider::AdmissionWaiter::arm(&mut options, cancelled.clone());
+
     tokio::task::spawn_blocking(move || {
         // Slot accounting (#1440): ties this request to a numbered slot for
         // GET /slots and the frames' `id_slot` field.
@@ -1060,6 +1063,10 @@ async fn stream_native_completion(
             }
         }
     });
+
+    if let Err(error) = admission.wait().await {
+        return generation_error_to_response(error).into_response();
+    }
 
     sse_response(stream, keepalive)
 }

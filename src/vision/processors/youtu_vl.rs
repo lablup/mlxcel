@@ -43,9 +43,21 @@ use image::{DynamicImage, imageops::FilterType};
 use mlxcel_core::{MlxArray, UniquePtr};
 use thiserror::Error;
 
-/// Upstream `YoutuVisionConfig.num_patches` default. This is the hard
-/// per-image runtime cap used before allocating the flattened patch tensor.
-pub const DEFAULT_MAX_PATCHES_PER_IMAGE: usize = 4096;
+/// Per-image patch cap of the checkpoint's documented entry point.
+///
+/// Source: `YoutuVLProcessor.__call__(..., max_image_patches: int=36864, ...)`
+/// in the checkpoint's `processing_youtu_vl.py` (line 53), which forwards it as
+/// `max_num_patches` to the image processor on every call. It is a constant
+/// because 36864 exists only as that Python default argument: no JSON file in
+/// the checkpoint carries it. `preprocessor_config.json`'s `max_num_patches:
+/// 256` is the bare `Siglip2ImageProcessorFast` default that this call
+/// overrides, and `vision_config.num_patches` bounds nothing here (the tower
+/// uses 2D RoPE, not a learned position table).
+pub const DEFAULT_MAX_PATCHES_PER_IMAGE: usize = 36864;
+
+/// Step by which the reference walks its resize scale down until the grid
+/// fits under the cap (`get_image_size_for_patches`).
+const SCALE_STEP: f64 = 0.02;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum YoutuVLPreprocessError {
@@ -77,14 +89,10 @@ pub enum YoutuVLPreprocessError {
 pub struct YoutuVLProcessor {
     pub patch_size: usize,
     pub spatial_merge_size: usize,
-    /// Pre-pixel-area lower bound (in pixels). Falls back to upstream's
-    /// SigLIP2 default if the HF processor json does not specify one.
-    pub min_pixels: usize,
-    /// Pre-pixel-area upper bound (in pixels). Same fallback rationale.
-    pub max_pixels: usize,
-    /// Hard runtime cap on flattened patches per image. Mirrors
-    /// `VisionConfig.num_patches` and is enforced before allocating the
-    /// `[total_patches, patch_size**2 * channels]` tensor.
+    /// Cap on flattened patches per image. `smart_resize` shrinks the image
+    /// until the grid fits, and `try_preprocess_with_spatial` enforces it
+    /// again before allocating the `[total_patches, patch_size**2 * channels]`
+    /// tensor. Defaults to [`DEFAULT_MAX_PATCHES_PER_IMAGE`].
     pub max_patches_per_image: usize,
     pub mean: [f32; 3],
     pub std: [f32; 3],
@@ -96,11 +104,6 @@ impl YoutuVLProcessor {
         Self {
             patch_size,
             spatial_merge_size,
-            // Match the SigLIP2 / Qwen2.5-VL defaults so a model whose
-            // preprocessor.json was missing these keys still produces a
-            // sensible patch grid.
-            min_pixels: 4 * 28 * 28,
-            max_pixels: 16384 * 28 * 28,
             max_patches_per_image: DEFAULT_MAX_PATCHES_PER_IMAGE,
             mean: [0.5, 0.5, 0.5],
             std: [0.5, 0.5, 0.5],
@@ -110,12 +113,6 @@ impl YoutuVLProcessor {
     pub fn with_norm(mut self, mean: [f32; 3], std: [f32; 3]) -> Self {
         self.mean = mean;
         self.std = std;
-        self
-    }
-
-    pub fn with_pixel_bounds(mut self, min_pixels: usize, max_pixels: usize) -> Self {
-        self.min_pixels = min_pixels;
-        self.max_pixels = max_pixels;
         self
     }
 
@@ -172,44 +169,47 @@ impl YoutuVLProcessor {
             .max(1) as u32
     }
 
-    fn effective_max_pixels(&self) -> usize {
-        let patch_area = self.patch_size.saturating_mul(self.patch_size).max(1);
-        let patch_cap_pixels = self.max_patches_per_image.max(1).saturating_mul(patch_area);
-        self.max_pixels.max(1).min(patch_cap_pixels)
-    }
-
-    /// Compute target (h, w) padded to multiples of `patch_size *
-    /// spatial_merge_size` so the resulting patch grid is divisible by the
-    /// spatial-merge factor used inside the encoder.
+    /// Target `(h, w)` in pixels, a port of `get_image_size_for_patches` in
+    /// the checkpoint's `image_processing_siglip2_fast.py`.
+    ///
+    /// Each edge is rounded UP to a multiple of `patch_size *
+    /// spatial_merge_size` (at least one block), starting at `scale = 1.0` and
+    /// lowering `scale` by 0.02 until the patch grid fits under
+    /// `max_patches_per_image`. There is no lower pixel bound beyond one block
+    /// per edge and no upscaling. The reference hardcodes the block as
+    /// `patch_size * 2`; the config-driven form is equal for this checkpoint.
+    ///
+    /// `scale` is decremented in place exactly as Python does; `1.0 - 0.02 *
+    /// k` rounds differently and can pick a different grid. For an extreme
+    /// aspect ratio `scale` may go to or below zero, where every edge clamps to
+    /// one block, so the loop ends once a grid that small fits the cap. The
+    /// iteration bound only guards a cap below one block's patch count, which
+    /// `try_preprocess_with_spatial` then rejects as `TooManyPatches`.
     fn smart_resize(&self, orig_h: u32, orig_w: u32) -> (u32, u32) {
-        let factor = self.resize_factor();
-        let max_pixels = self.effective_max_pixels();
-        let min_pixels = self.min_pixels.min(max_pixels).max(1);
+        let block = self.resize_factor() as f64;
+        let patch = self.patch_size.max(1) as u64;
+        let max_patches = self.max_patches_per_image as u64;
+        // Compute in f64 and clamp before casting so a negative scaled edge
+        // never reaches an unsigned type.
+        let scaled = |edge: u32, scale: f64| -> u32 {
+            let size = ((edge as f64 * scale) / block).ceil() * block;
+            size.max(block).min(u32::MAX as f64) as u32
+        };
 
-        let mut h = ((orig_h as f64 / factor as f64).round() as u32).max(1) * factor;
-        let mut w = ((orig_w as f64 / factor as f64).round() as u32).max(1) * factor;
-
-        let pixels = (h as usize) * (w as usize);
-        if pixels > max_pixels {
-            let scale = (max_pixels as f64 / pixels as f64).sqrt();
-            h = ((h as f64 * scale / factor as f64).round() as u32).max(1) * factor;
-            w = ((w as f64 * scale / factor as f64).round() as u32).max(1) * factor;
-        }
-        if (h as usize) * (w as usize) > max_pixels {
-            let scale = (max_pixels as f64 / ((h as usize) * (w as usize)) as f64).sqrt();
-            h = ((h as f64 * scale / factor as f64).floor() as u32).max(1) * factor;
-            w = ((w as f64 * scale / factor as f64).floor() as u32).max(1) * factor;
-        }
-        let pixels = (h as usize) * (w as usize);
-        if pixels < min_pixels {
-            let scale = (min_pixels as f64 / pixels as f64).sqrt();
-            h = ((h as f64 * scale / factor as f64).ceil() as u32).max(1) * factor;
-            w = ((w as f64 * scale / factor as f64).ceil() as u32).max(1) * factor;
-        }
-        if (h as usize) * (w as usize) > max_pixels {
-            let scale = (max_pixels as f64 / ((h as usize) * (w as usize)) as f64).sqrt();
-            h = ((h as f64 * scale / factor as f64).floor() as u32).max(1) * factor;
-            w = ((w as f64 * scale / factor as f64).floor() as u32).max(1) * factor;
+        let mut scale = 1.0f64;
+        // One block per edge is reached by scale <= 0, i.e. within
+        // 1 / SCALE_STEP + 1 steps; a few more cover f64 accumulation.
+        let max_steps = (1.0 / SCALE_STEP).ceil() as usize + 2;
+        let mut h = scaled(orig_h, scale);
+        let mut w = scaled(orig_w, scale);
+        for _ in 0..max_steps {
+            let patches = (h as u64 / patch) * (w as u64 / patch);
+            if patches <= max_patches {
+                break;
+            }
+            scale -= SCALE_STEP;
+            h = scaled(orig_h, scale);
+            w = scaled(orig_w, scale);
         }
         (h, w)
     }

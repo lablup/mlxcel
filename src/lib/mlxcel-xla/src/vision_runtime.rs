@@ -90,9 +90,9 @@ fn hex_bytes(bytes: &[u8]) -> String {
     output
 }
 
-fn compiler_generation_identity(
+fn compiler_generation_identity<S: AsRef<str> + std::fmt::Debug>(
     compiler: &Path,
-    flags: &[&str],
+    flags: &[S],
     mlir: &str,
 ) -> Result<String, String> {
     let version = Command::new(compiler)
@@ -114,9 +114,9 @@ fn compiler_generation_identity(
     )
 }
 
-fn compiler_generation_identity_from_version(
+fn compiler_generation_identity_from_version<S: AsRef<str> + std::fmt::Debug>(
     compiler: &Path,
-    flags: &[&str],
+    flags: &[S],
     mlir: &str,
     version: &str,
 ) -> Result<String, String> {
@@ -588,11 +588,11 @@ fn compile_and_load(
             processor.identity,
             sha256_hex(checkpoint_schema.as_bytes())
         ),
-        compiler_generation_identity(&compiler, flags, mlir)?,
+        compiler_generation_identity(&compiler, &flags, mlir)?,
     )?;
-    let vmfb = cached_vmfb_path(&compiler, mlir, flags, &cache, tag, 0);
+    let vmfb = cached_vmfb_path(&compiler, mlir, &flags, &cache, tag, 0);
     ensure_qualified_auxiliary_artifact(&vmfb, &contract, &weights, |temporary| {
-        compile_one_to(&compiler, mlir, flags, &cache, tag, 0, temporary)
+        compile_one_to(&compiler, mlir, &flags, &cache, tag, 0, temporary)
     })?;
     IreeAuxiliaryModule::load(device, &vmfb, &contract, weights)
 }

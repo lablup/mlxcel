@@ -694,6 +694,16 @@ struct ServerArgs {
     )]
     draft: usize,
 
+    /// Largest active decode batch at which a prompt-lookup sequence runs
+    /// its own verify round (`--draft-kind prompt-lookup`). Each proposing
+    /// row costs one verify forward on top of the batched step, so on ticks
+    /// with more concurrent rows every row takes the plain batched step and
+    /// the drafter keeps observing the emitted tokens until the batch
+    /// shrinks. Must be at least 1. Defaults to 2, the largest batch at which
+    /// the GB10 concurrency measurement showed no aggregate loss.
+    #[arg(long, value_name = "N", default_value_t = mlxcel::server::speculative_dispatch::DEFAULT_PROMPT_LOOKUP_MAX_BATCH)]
+    prompt_lookup_max_batch: usize,
+
     /// Maximum concurrent decode sequences; explicit value keeps split --ctx-size windows
     #[arg(long = "max-batch-size", value_name = "N")]
     max_batch_size: Option<usize>,
@@ -817,9 +827,12 @@ struct ServerArgs {
     )]
     rerank_batch_size: usize,
 
-    /// Prefill chunk size in tokens (0 = disabled, default: 512)
-    #[arg(long = "prefill-chunk-size", default_value_t = 512)]
-    prefill_chunk_size: usize,
+    /// Prefill chunk size in tokens (0 = disabled).
+    ///
+    /// [default: 2048 when no other sequence is decoding, 512 when one is;
+    /// MLXCEL_PREFILL_CHUNK overrides]
+    #[arg(long = "prefill-chunk-size")]
+    prefill_chunk_size: Option<usize>,
 
     /// Decode ticks a parked chunked prefill yields before it is granted one
     /// (#1011).
@@ -839,7 +852,7 @@ struct ServerArgs {
     #[arg(long = "prefill-grant-interval", value_name = "N")]
     prefill_grant_interval: Option<usize>,
 
-    /// Prefill batch size [llama-server alias for --prefill-chunk-size] [default: 512]
+    /// Prefill batch size [llama-server alias for --prefill-chunk-size]
     #[arg(
         short = 'b',
         long = "batch-size",
@@ -928,7 +941,7 @@ struct ServerArgs {
     /// mask, an O(B*L^2) transient. This caps the drained window by total
     /// padded tokens (rows * L): rows past the budget spill to the next tick
     /// and prefill via the chunked single-sequence path. Unset derives the
-    /// default `2 * max_batch_prefill * prefill_chunk_size` (2 * 4 * 512 = 4096).
+    /// default `2 * max_batch_prefill * min(prefill_chunk_size, 512)` (2 * 4 * 512 = 4096).
     /// `0` disables the cap (uncapped). Env: `MLXCEL_MAX_BATCH_PREFILL_TOKENS`
     /// overrides both.
     #[arg(long = "max-batch-prefill-tokens")]
@@ -2317,6 +2330,16 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         );
         args.model_draft = None;
     }
+    // `none` disables prompt lookup as well (#2255): it needs no draft model,
+    // so the draft-model drop above does not reach it.
+    if spec_type.disable_speculation
+        && args.speculative.draft_kind.as_deref() == Some("prompt-lookup")
+    {
+        tracing::warn!(
+            "--spec-type none disables speculative decoding (b10621 semantics); ignoring --draft-kind prompt-lookup"
+        );
+        args.speculative.draft_kind = None;
+    }
     if let Some(kind) = spec_type.draft_kind {
         match args.speculative.draft_kind.as_deref() {
             None => args.speculative.draft_kind = Some(kind.to_string()),
@@ -2564,6 +2587,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         // typed `DrafterKind` happens later, at the dispatch site.
         draft_kind: args.speculative.draft_kind,
         draft_block_size: args.speculative.draft_block_size,
+        prompt_lookup_max_batch: args.prompt_lookup_max_batch,
         max_batch_size: args.max_batch_size,
         no_batch: args.no_batch,
         max_queue_depth: args.max_queue_depth,

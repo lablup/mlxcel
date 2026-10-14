@@ -419,3 +419,51 @@ fn stored_response_with_image_tool_output_replays_identically() {
     assert_eq!(replayed.messages[4].role, Role::User);
     assert_eq!(replayed.messages[4].content.text(), "continue");
 }
+
+#[test]
+fn untyped_item_with_role_parses_as_message() {
+    use super::types::responses_request::ResponseInputItem;
+
+    let item: ResponseInputItem =
+        serde_json::from_str(r#"{"role":"user","content":"hi"}"#).expect("untyped message parses");
+    assert!(matches!(item, ResponseInputItem::Message { .. }));
+
+    let err = serde_json::from_str::<ResponseInputItem>(r#"{"content":"x"}"#)
+        .expect_err("no type and no role stays an error");
+    assert!(err.to_string().contains("type"), "{err}");
+}
+
+#[test]
+fn typed_assistant_output_text_lowers_to_assistant_text() {
+    let chat = translated(
+        r#"{
+            "model":"m",
+            "input":[
+                {"type":"message","role":"user","content":"q"},
+                {"type":"message","role":"assistant","content":[
+                    {"type":"output_text","text":"Paris."},
+                    {"type":"refusal","refusal":" No."}
+                ]}
+            ]
+        }"#,
+    );
+    assert_eq!(chat.messages[1].role, Role::Assistant);
+    assert_eq!(chat.messages[1].content.text(), "Paris. No.");
+}
+
+#[test]
+fn output_text_on_non_assistant_roles_is_rejected() {
+    for role in ["user", "system", "developer"] {
+        let body = format!(
+            r#"{{"model":"m","input":[{{"type":"message","role":"{role}","content":[{{"type":"output_text","text":"x"}}]}}]}}"#
+        );
+        let err = match responses_request_to_chat(&request(&body), None, None) {
+            Ok(_) => panic!("{role}: output_text must be rejected"),
+            Err(err) => err.to_string(),
+        };
+        assert!(
+            err.contains("input part type 'output_text' is not supported"),
+            "{role}: {err}"
+        );
+    }
+}

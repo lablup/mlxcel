@@ -328,6 +328,16 @@ impl PagedDecodePlan {
                 self.num_chunks
             ));
         }
+        // The partial kernel's output and the merge kernel's input,
+        // `[num_chunks, Hq, D]`, are indexed in 32 bits, and the merge launcher
+        // refuses anything larger (issue #2153). Declining here instead sends
+        // such a batch to the gather path before any launch.
+        if self.workspace_partial_v_elems() > u32::MAX as usize {
+            return Err(format!(
+                "PagedDecodePlan: {} partial elements exceed the merge kernel's u32 index range",
+                self.workspace_partial_v_elems()
+            ));
+        }
         if !self.needs_merge && self.num_chunks != self.batch {
             return Err(
                 "PagedDecodePlan: a merge-free plan must have exactly one chunk per request"

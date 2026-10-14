@@ -1,0 +1,26 @@
+[engine-parity] model: models/mlx/llama-3.2-1b-instruct-4bit
+[engine-parity] prompt tokens: 75  MLXCEL_SDPA_DETERMINISTIC=1
+[engine-parity] paths:
+  greedy                 a:cli            400 tokens  cli
+  seeded-penalties-dry   a:cli            369 tokens  cli
+  greedy                 b:dense          400 tokens  Dense pc=off prefill[0..75)
+  seeded-penalties-dry   b:dense          369 tokens  Dense pc=off prefill[0..75)
+  greedy                 c:paged          400 tokens  Paged pc=off prefill[0..75) paged-kernel-launches=6416
+  seeded-penalties-dry   c:paged          369 tokens  Paged pc=off prefill[0..75) paged-kernel-launches=5904
+  greedy                 b:dense+pc:miss  400 tokens  Dense pc=on cached=0 forwarded=75 prefill[0..75)
+  greedy                 b:dense+pc:hit   400 tokens  Dense pc=on cached=71 forwarded=4 adopted[0..71)+prefill[71..75) primed[0..71)
+  seeded-penalties-dry   b:dense+pc:miss  369 tokens  Dense pc=on cached=0 forwarded=75 prefill[0..75)
+  seeded-penalties-dry   b:dense+pc:hit   317 tokens  Dense pc=on cached=71 forwarded=4 adopted[0..71)+prefill[71..75) primed[0..71)
+[engine-parity] pairs:
+  greedy                 a:cli            vs b:dense          identical
+  greedy                 a:cli            vs c:paged          identical
+  greedy                 b:dense          vs c:paged          identical
+  greedy                 b:dense          vs b:dense+pc:miss  identical
+  greedy                 b:dense+pc:miss  vs b:dense+pc:hit   identical
+  seeded-penalties-dry   a:cli            vs b:dense          identical
+  seeded-penalties-dry   a:cli            vs c:paged          identical
+  seeded-penalties-dry   b:dense          vs c:paged          identical
+  seeded-penalties-dry   b:dense          vs b:dense+pc:miss  identical
+  seeded-penalties-dry   b:dense+pc:miss  vs b:dense+pc:hit   diverge@25 left=11452 right=9332
+[engine-parity] summary: 10 pair(s), 9 identical, 1 diverged, 0 n/a
+wrote docs/benchmark_results/data/unified-engine-baseline-gb10-2026-10-07/parity-llama-3.2-1b-instruct-4bit.json

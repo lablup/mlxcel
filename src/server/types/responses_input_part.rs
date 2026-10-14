@@ -44,6 +44,14 @@ pub enum ResponseInputPart {
     Text {
         text: String,
     },
+    /// Assistant output replayed as input (`response.output` items).
+    OutputText {
+        text: String,
+    },
+    /// Assistant refusal replayed as input; lowered as plain text.
+    Refusal {
+        refusal: String,
+    },
     ImageUrl {
         image_url: ImageUrl,
     },
@@ -89,6 +97,12 @@ impl<'de> Deserialize<'de> for ResponseInputPart {
             }
             "text" => Ok(Self::Text {
                 text: required_field(&raw, &part_type, "text")?,
+            }),
+            "output_text" => Ok(Self::OutputText {
+                text: required_field(&raw, &part_type, "text")?,
+            }),
+            "refusal" => Ok(Self::Refusal {
+                refusal: required_field(&raw, &part_type, "refusal")?,
             }),
             "image_url" => Ok(Self::ImageUrl {
                 image_url: required_field(&raw, &part_type, "image_url")?,
@@ -154,6 +168,16 @@ where
 }
 
 impl ResponseInputPart {
+    /// Wire `type` of an assistant-only part, which only an assistant
+    /// message may carry.
+    pub(crate) fn assistant_only_type(&self) -> Option<&'static str> {
+        match self {
+            Self::OutputText { .. } => Some("output_text"),
+            Self::Refusal { .. } => Some("refusal"),
+            _ => None,
+        }
+    }
+
     pub(crate) fn to_json_value(&self) -> serde_json::Value {
         match self {
             Self::InputText { text } => serde_json::json!({"type": "input_text", "text": text}),
@@ -177,6 +201,12 @@ impl ResponseInputPart {
             }
             Self::InputFile { raw } => object_with_type("input_file", raw.clone()),
             Self::Text { text } => serde_json::json!({"type": "text", "text": text}),
+            Self::OutputText { text } => {
+                serde_json::json!({"type": "output_text", "text": text})
+            }
+            Self::Refusal { refusal } => {
+                serde_json::json!({"type": "refusal", "refusal": refusal})
+            }
             Self::ImageUrl { image_url } => {
                 serde_json::json!({"type": "image_url", "image_url": image_url})
             }
@@ -200,9 +230,14 @@ impl TryFrom<&ResponseInputPart> for ContentPart {
 
     fn try_from(part: &ResponseInputPart) -> Result<Self, Self::Error> {
         match part {
-            ResponseInputPart::InputText { text } | ResponseInputPart::Text { text } => {
+            ResponseInputPart::InputText { text }
+            | ResponseInputPart::Text { text }
+            | ResponseInputPart::OutputText { text } => {
                 Ok(ContentPart::Text { text: text.clone() })
             }
+            ResponseInputPart::Refusal { refusal } => Ok(ContentPart::Text {
+                text: refusal.clone(),
+            }),
             ResponseInputPart::InputImage {
                 image_url,
                 detail,

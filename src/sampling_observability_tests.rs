@@ -25,8 +25,13 @@
 //! - Tracing field assertion — `lang_bias resolved` DEBUG event emitted with
 //!   `entries`, `languages`, and `policy` fields when bias is non-empty.
 //!
-//! Each test calls `reset_lang_bias_counters()` first to decouple from other
-//! tests that may run in the same process.
+//! - `byte_fragment_suppression_counter_tracks_opt_in_entries` and
+//!   `byte_fragment_len_counts_only_tagged_entries` — the byte-fragment
+//!   suppression counter and the tagged-entry count.
+//!
+//! Each counter test takes `counter_lock()`, which serializes on the global
+//! counters and arms the opt-in ones for the test thread only, then calls
+//! `reset_counters()` to start from zero.
 
 use mlxcel_core::{
     generate::SamplingConfig,
@@ -46,35 +51,39 @@ use mlxcel_core::{
 /// test gets an isolated baseline.
 static COUNTER_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
 
-fn counter_lock() -> std::sync::MutexGuard<'static, ()> {
-    arm_counters();
-    COUNTER_LOCK
-        .get_or_init(|| std::sync::Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+/// Held for a whole test: the counter lock plus the counters armed on this
+/// thread. Field order matters: the override drops before the lock is
+/// released.
+struct CounterScope {
+    _counters: mlxcel_core::lang_bias_counters::ScopedOverride,
+    _lock: std::sync::MutexGuard<'static, ()>,
 }
 
-/// Turn on the two counters that are opt-in in production.
+/// Serialize on the global counters and turn on the two that are opt-in in
+/// production.
 ///
 /// `LANG_BIAS_TOKENS_SUPPRESSED_TOTAL` and
 /// `LANG_BIAS_BYTE_FRAGMENT_SUPPRESSIONS_TOTAL` need the pre-bias argmax, and
 /// reading it costs an `eval` plus an `item_i32` on every biased decode step,
 /// which measured 13% to 78% of decode for anyone using `logit_bias`,
-/// `--ignore-eos` or `--lang-bias`. That read now sits behind
+/// `--ignore-eos` or `--lang-bias`. That read sits behind
 /// `MLXCEL_LANG_BIAS_COUNTERS`, so a test that asserts those counters has to ask
-/// for them. `LANG_BIAS_APPLIED_TOTAL` is outside the gate and needs nothing.
+/// for them.
 ///
-/// The gate caches its answer in a `OnceLock`, so this has to run before the
-/// first sampling call in the process. Every test here takes `counter_lock()`
-/// first, and nothing else in this test binary samples with a non-empty bias.
-fn arm_counters() {
-    static ARMED: std::sync::Once = std::sync::Once::new();
-    ARMED.call_once(|| {
-        // SAFETY: single-threaded here by construction. `Once` admits one caller,
-        // and it runs before any test body, so no other thread is reading the
-        // environment at this point.
-        unsafe { std::env::set_var("MLXCEL_LANG_BIAS_COUNTERS", "1") };
-    });
+/// The arming is a thread-scoped override, never `set_var`: the environment
+/// gate is cached for the whole process, and arming it here once made every
+/// later biased decode in this test binary leave the fused path, which turned
+/// off the Gemma 3 lookahead the scheduler tests assert (#2187). The sampling
+/// calls below run on the test thread, so the override covers them.
+fn counter_lock() -> CounterScope {
+    let lock = COUNTER_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    CounterScope {
+        _counters: mlxcel_core::lang_bias_counters::scoped_override(true),
+        _lock: lock,
+    }
 }
 
 /// Call `sample_token_optimized` with greedy sampling and the given bias,

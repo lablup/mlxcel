@@ -263,6 +263,7 @@ fn zero_config_two_stage_cluster_matches_dense_baseline() {
         grammar: None,
         image_soft_tokens: None,
         pre_rendered_prompt_tokens: None,
+        admission_notification: None,
     };
 
     let dense = dense_provider

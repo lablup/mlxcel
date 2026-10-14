@@ -44,7 +44,9 @@ use std::path::Path;
 use mlxcel::generate::LanguageModel;
 use mlxcel_core::layers::KVCache;
 
-const DEFAULT_MODEL_DIR: &str = "models/llama-3.2-1b-instruct-4bit";
+// Where the repository's checkpoints live; the bare `models/<name>` this used
+// to name never existed, so the test always skipped (#2128).
+const DEFAULT_MODEL_DIR: &str = "models/mlx/llama-3.2-1b-instruct-4bit";
 
 /// Byte-level hash of an array's contents after forcing evaluation.
 fn hash_array(arr: &mlxcel_core::UniquePtr<mlxcel_core::MlxArray>) -> u64 {

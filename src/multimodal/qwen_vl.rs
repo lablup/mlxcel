@@ -153,7 +153,7 @@ pub trait QwenVlRuntime {
     }
 
     // NOTE: per-row batched dispatch lives directly on each
-    // `vision::Qwen*VLModel`'s `LanguageModel::forward_batched_with_context_and_ids`
+    // `vision::Qwen*VLModel`'s `LanguageModel::forward_batched_with_ids`
     // override, not on this trait. Most wrappers delegate to the free
     // helper [`forward_batched_with_seq_ids_dispatch`]; Qwen3.5 forwards
     // straight to its text model's batched-with-ids method.
@@ -170,7 +170,7 @@ pub trait QwenVlRuntime {
 pub use super::batched_dispatch::forward_batched_with_seq_ids_dispatch;
 
 /// Per-row dispatch shared by every Qwen VL wrapper whose text model
-/// uses the default `forward_batched_with_context_and_ids` trait impl
+/// uses the default `forward_batched_with_ids` trait impl
 /// (i.e. all of them except Qwen3.5). Calls the shared helper.
 macro_rules! impl_qwen_vl_runtime_loop_dispatch {
     ($ty:ty $(, $text_only:ident)?) => {
@@ -401,7 +401,7 @@ impl QwenVlRuntime for vision::CohereCompassModel {
 }
 
 // Qwen3.5-VL: text model already implements
-// `forward_batched_with_context_and_ids` natively (per-row dispatch and
+// `forward_batched_with_ids` natively (per-row dispatch and
 // batched-prefill fast path), so the wrapper forwards directly to it.
 impl QwenVlRuntime for vision::Qwen35VLModel {
     fn prompt_info(&self) -> QwenVlmPromptInfo<'_> {

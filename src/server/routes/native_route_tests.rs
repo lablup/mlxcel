@@ -999,3 +999,93 @@ async fn the_native_stream_carries_the_draft_keys_on_the_final_frame_only() {
         "the assertion must run against real partial frames, saw {timed_partials}"
     );
 }
+
+#[tokio::test]
+async fn request_memory_admission_rejects_before_sse_and_keeps_routes_healthy() {
+    let (options_tx, _options_rx) = mpsc::channel();
+    let provider = Arc::new(ModelProvider::memory_admission_for_route_tests(options_tx));
+    let metrics = provider.batch_metrics().clone();
+    let app = create_app(state_for(provider));
+    for stream in [false, true] {
+        for (path, mut payload) in [
+            (
+                "/v1/completions",
+                serde_json::json!({"model":"route-test-model", "prompt":"hello", "max_tokens":64}),
+            ),
+            (
+                "/completion",
+                serde_json::json!({"prompt":"hello", "n_predict":64}),
+            ),
+            (
+                "/v1/chat/completions",
+                serde_json::json!({"model":"route-test-model", "messages":[{"role":"user","content":"hello"}], "max_tokens":64}),
+            ),
+            (
+                "/v1/responses",
+                serde_json::json!({"model":"route-test-model", "input":"hello", "max_output_tokens":64}),
+            ),
+            (
+                "/v1/messages",
+                serde_json::json!({"model":"route-test-model", "messages":[{"role":"user","content":"hello"}], "max_tokens":64}),
+            ),
+        ] {
+            payload["stream"] = serde_json::json!(stream);
+            let response = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                app.clone().oneshot(json_request(path, payload)),
+            )
+            .await
+            .expect("admission must not hang")
+            .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{path}, stream={stream}"
+            );
+            assert!(
+                !response.headers()[header::CONTENT_TYPE]
+                    .to_str()
+                    .unwrap()
+                    .contains("event-stream")
+            );
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                body["error"]["type"], "request_memory_budget_exceeded",
+                "{path}: {body}"
+            );
+            assert_eq!(body["error"]["code"], "request_memory_budget_exceeded");
+            assert_eq!(body["error"]["estimated_bytes"], 2048);
+            assert_eq!(body["error"]["budget_bytes"], 1024);
+            if path == "/v1/messages" {
+                assert_eq!(body["type"], "error");
+            }
+            let health = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/health")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(health.status(), StatusCode::OK);
+            let (status, body) = post_to(
+                app.clone(),
+                "/v1/completions",
+                serde_json::json!({"model":"route-test-model", "prompt":"short", "max_tokens":1}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "short after rejection: {body}");
+        }
+    }
+    assert_eq!(
+        metrics
+            .queue_depth
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+}

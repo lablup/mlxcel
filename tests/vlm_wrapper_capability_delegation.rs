@@ -143,6 +143,84 @@ fn field_types(src: &str) -> BTreeSet<String> {
     out
 }
 
+/// The brace-counted body of the first function whose header contains
+/// `signature`.
+fn function_body<'a>(src: &'a str, signature: &str) -> Option<&'a str> {
+    let header = src.find(signature)?;
+    let open = header + src[header..].find('{')?;
+    let mut depth = 0usize;
+    for (i, c) in src[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&src[open + 1..open + i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Locals that visibly derive from the padded-prefill model predicate.
+///
+/// The prefill planner centralizes the predicate in `PrefillCaps::can_pad`.
+/// Recognize `caps.can_pad()` only after inspecting that helper's body; a
+/// same-named helper without `supports_padded_prefill` provides no evidence.
+fn padded_prefill_guard_aliases(src: &str) -> Vec<String> {
+    let shared_caps_guarded = function_body(src, "fn can_pad(&self) -> bool")
+        .is_some_and(|body| body.contains("supports_padded_prefill"));
+    let mut aliases = Vec::new();
+    for line in src.lines() {
+        let Some(rest) = line.trim().strip_prefix("let ") else {
+            continue;
+        };
+        if !line.contains("supports_padded_prefill")
+            && !(shared_caps_guarded && line.contains("caps.can_pad()"))
+        {
+            continue;
+        }
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        if !name.is_empty() {
+            aliases.push(name);
+        }
+    }
+    aliases
+}
+
+fn unguarded_tile_aligned_prefills(src: &str) -> Vec<(usize, String)> {
+    const WINDOW: usize = 12;
+    let lines: Vec<&str> = src.lines().collect();
+    let aliases = padded_prefill_guard_aliases(src);
+    let mut unguarded = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        // The definition, its doc examples and its own unit tests are not
+        // prefill sites and have nothing to guard.
+        if !line.contains("align_to_na_tile(")
+            || trimmed.starts_with("//")
+            || trimmed.starts_with("fn ")
+            || trimmed.starts_with("pub fn ")
+            || trimmed.starts_with("assert")
+        {
+            continue;
+        }
+        let start = i.saturating_sub(WINDOW);
+        if lines[start..=i].iter().any(|l| {
+            l.contains("supports_padded_prefill") || aliases.iter().any(|a| l.contains(a.as_str()))
+        }) {
+            continue;
+        }
+        unguarded.push((i + 1, line.trim().to_string()));
+    }
+    unguarded
+}
+
 #[test]
 fn a_vision_wrapper_delegates_padded_prefill_when_its_backbone_refuses_it() {
     let mut files = Vec::new();
@@ -213,7 +291,6 @@ fn a_vision_wrapper_delegates_padded_prefill_when_its_backbone_refuses_it() {
 /// that is one a reader cannot see either.
 #[test]
 fn every_tile_aligned_prefill_is_guarded_on_the_model_predicate() {
-    const WINDOW: usize = 12;
     let mut files = Vec::new();
     rust_sources(&repo_root().join("src"), &mut files);
     files.sort();
@@ -223,49 +300,12 @@ fn every_tile_aligned_prefill_is_guarded_on_the_model_predicate() {
         let Ok(src) = fs::read_to_string(file) else {
             continue;
         };
-        let lines: Vec<&str> = src.lines().collect();
-        // Locals bound to the predicate count as the guard, so a site that
-        // hoists it out of a loop is not reported as unguarded.
-        let mut aliases: Vec<String> = Vec::new();
-        for line in &lines {
-            let Some(rest) = line.trim().strip_prefix("let ") else {
-                continue;
-            };
-            if !line.contains("supports_padded_prefill") {
-                continue;
-            }
-            let name: String = rest
-                .chars()
-                .take_while(|c| c.is_alphanumeric() || *c == '_')
-                .collect();
-            if !name.is_empty() {
-                aliases.push(name);
-            }
-        }
-        for (i, line) in lines.iter().enumerate() {
-            let trimmed = line.trim_start();
-            // The definition, its doc examples and its own unit tests are not
-            // prefill sites and have nothing to guard.
-            if !line.contains("align_to_na_tile(")
-                || trimmed.starts_with("//")
-                || trimmed.starts_with("fn ")
-                || trimmed.starts_with("pub fn ")
-                || trimmed.starts_with("assert")
-            {
-                continue;
-            }
-            let start = i.saturating_sub(WINDOW);
-            if lines[start..=i].iter().any(|l| {
-                l.contains("supports_padded_prefill")
-                    || aliases.iter().any(|a| l.contains(a.as_str()))
-            }) {
-                continue;
-            }
+        for (line_number, line) in unguarded_tile_aligned_prefills(&src) {
             unguarded.push(format!(
                 "{}:{}: {}",
                 file.strip_prefix(repo_root()).unwrap_or(file).display(),
-                i + 1,
-                line.trim()
+                line_number,
+                line
             ));
         }
     }
@@ -278,4 +318,43 @@ fn every_tile_aligned_prefill_is_guarded_on_the_model_predicate() {
          trimming the KV caches afterwards does not undo. Unguarded sites:\n  {}",
         unguarded.join("\n  ")
     );
+}
+
+#[test]
+fn shared_can_pad_alias_requires_the_model_predicate() {
+    let guarded = r#"
+impl PrefillCaps {
+    fn can_pad(&self) -> bool {
+        self.align_prefill && self.supports_padded_prefill
+    }
+}
+
+fn padded_len(caps: PrefillCaps, len: usize) -> usize {
+    let can_pad = caps.can_pad();
+    if can_pad { align_to_na_tile(len) } else { len }
+}
+"#;
+    assert_eq!(
+        padded_prefill_guard_aliases(guarded),
+        vec!["can_pad".to_string()]
+    );
+    assert!(unguarded_tile_aligned_prefills(guarded).is_empty());
+
+    let mutated = guarded.replace(
+        "self.align_prefill && self.supports_padded_prefill",
+        "self.align_prefill",
+    );
+    assert!(padded_prefill_guard_aliases(&mutated).is_empty());
+    assert_eq!(unguarded_tile_aligned_prefills(&mutated).len(), 1);
+
+    let direct = r#"
+fn padded_len(model: &Model, len: usize) -> usize {
+    if model.supports_padded_prefill() {
+        align_to_na_tile(len)
+    } else {
+        len
+    }
+}
+"#;
+    assert!(unguarded_tile_aligned_prefills(direct).is_empty());
 }

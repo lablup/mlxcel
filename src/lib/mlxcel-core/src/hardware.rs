@@ -306,7 +306,7 @@ impl GpuBackendKind {
     ///   (`mlx/backend/cpu/quantized.cpp` handles the group-16 E4M3 scale that
     ///   NVFP4 needs). Also unchanged.
     /// - ROCm: affine native. mxfp8 and mxfp4 native after the scale-type and
-    ///   `gather_qmm` fixes in `patches-rocm/LOCAL_FIXES.md` (items 8, 10, 11),
+    ///   `gather_qmm` fixes in `overlays/rocm/LOCAL_FIXES.md` (items 8, 10, 11),
     ///   measured against a dequantized f32 reference and on
     ///   gpt-oss-20b-MXFP4-Q4 (lablup/mlxcel#1818). For mxfp4 the committed
     ///   evidence is `tests/rocm_mxfp4_quant.rs` (#1808): GPU `quantize`,
@@ -716,7 +716,7 @@ pub fn prefill_dense_gemm_min_rows() -> Option<i64> {
 /// only buys a proportionally larger lifetime budget, so it is a delay, not a
 /// fix. Removal condition: once an upstream fix lands that stops punishing a
 /// large lifetime working set (a windowed miss rate, or a non-fatal report) and
-/// the MLX pin in `src/lib/mlx-cpp/CMakeLists.txt` moves past it, this default
+/// the MLX pin in `src/lib/mlxcelverse/CMakeLists.txt` moves past it, this default
 /// can be lowered back toward MLX's own 400 or dropped entirely.
 #[must_use]
 pub fn cuda_graph_cache_default() -> Option<u32> {

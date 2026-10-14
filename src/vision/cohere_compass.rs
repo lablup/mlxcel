@@ -27,7 +27,6 @@ use crate::multimodal::qwen_vl::{
     compute_qwen_vl_mrope_position_ids, forward_batched_with_seq_ids_dispatch,
 };
 use mlxcel_core::cache::SequenceId;
-use mlxcel_core::generate::DecodeBatchContext;
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -213,13 +212,12 @@ impl LanguageModel for CohereCompassModel {
 
     /// Per-row batched dispatch with seq_ids so each row's MRoPE state
     /// resolves correctly in a mixed VL + text server batch.
-    fn forward_batched_with_context_and_ids(
+    fn forward_batched_with_ids(
         &self,
         input_ids: &MlxArray,
         seq_ids: Option<&[SequenceId]>,
         batch_caches: &mut [&mut [KVCache]],
         mask: Option<&MlxArray>,
-        context: Option<&DecodeBatchContext>,
     ) -> UniquePtr<MlxArray> {
         forward_batched_with_seq_ids_dispatch(
             &self.text_model,
@@ -227,7 +225,6 @@ impl LanguageModel for CohereCompassModel {
             seq_ids,
             batch_caches,
             mask,
-            context,
         )
     }
 

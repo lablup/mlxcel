@@ -1,0 +1,38 @@
+2026-10-11T18:55:50+09:00
+spark-102
+Linux spark-102 7.0.0-1019-nvidia #19~24.04.2-Ubuntu SMP PREEMPT_DYNAMIC Sun Sep  6 18:35:11 UTC 2 aarch64 aarch64 aarch64 GNU/Linux
+binary_source_head=7c8830cd5aa01198e6ff93b661f90c048ccaeb1d
+checkout_head=93e2f9abb3127eb64d414b9dddc4224cce3c703b
+checkout_status_begin
+ M src/server/batch/scheduler/decode_tick.rs
+checkout_status_end
+post_build_diff_begin
+M	src/server/batch/scheduler_muse_glimmer_parallel_tests.rs
+M	src/server/batch/scheduler_prompt_lookup_tests.rs
+post_build_diff_end
+b9b68fef6d85f8d733afbbefa00674e4332b424a56f626cde5db7c9c70e58501  /home/inureyes/Development/backend.ai/wt-auto-20261011T0224-issue-2227/target/release/mlxcel
+binary_size=108040776 binary_mtime=2026-10-11 18:23:15.769971600 +0900
+mlx_pin=81ba1c6a0e50a9268b931579c2d4f1158b9aab5a
+229e206d9df229704fffb316c9be0aef7da348696fff5b80a52f736cf1e26dd1  /tmp/mlxcel-auto-plan/2227-run-parity/capture-run-after.sh
+fcae8b4cb063c6a76cdb7468633853ddd5ef2f4f2e948fe75ecc1638eaee3cec  /tmp/mlxcel-auto-plan/2227-profile/extract-run-text.py
+ecbb6c3137fa73714f6fe6df1dd6414b14c6af75796efe19662a3aaab50eaea6  /tmp/mlxcel-auto-plan/2227-run-parity/before-valid/generated.txt
+Sun Oct 11 18:55:50 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.178.04             Driver Version: 580.178.04     CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GB10                    On  |   0000000F:01:00.0 Off |                  N/A |
+| N/A   55C    P8              6W /  N/A  | Not Supported          |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+

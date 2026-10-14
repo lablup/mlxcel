@@ -14,6 +14,27 @@
 
 use super::*;
 
+/// A sequence's structured-output constraint as the mask hook of its
+/// per-row sampling step ([`RowSampler::draw`], #2169).
+///
+/// Used by: `SequenceStepHooks::logit_mask` (`step_rows.rs`), which the engine
+/// step and the prefill completion both sample through
+pub(super) struct StructuredMask<'a>(pub(super) &'a SharedStructuredConstraint);
+
+/// The shared, lockable structured-output constraint a sequence carries.
+pub(super) type SharedStructuredConstraint =
+    std::sync::Arc<std::sync::Mutex<crate::server::structured::StructuredOutputConstraint>>;
+
+impl LogitMask for StructuredMask<'_> {
+    fn apply(
+        &mut self,
+        logits: UniquePtr<mlxcel_core::MlxArray>,
+        vocab_size: usize,
+    ) -> Result<UniquePtr<mlxcel_core::MlxArray>, String> {
+        BatchScheduler::apply_structured_mask(self.0, logits, vocab_size)
+    }
+}
+
 impl BatchScheduler {
     /// Apply thinking-budget enforcement to a freshly sampled
     /// token for a single sequence.
@@ -267,15 +288,7 @@ impl BatchScheduler {
                     // attention mask chunked to `[chunk, L]` instead of the
                     // unchunked `[L, L]` a single-row batched forward would
                     // build).
-                    if self.max_batch_prefill > 1
-                        && self.prefill_queue.len() >= 2
-                        && self.chunked_prefill_seq.is_none()
-                        && self.batched_prefill_admits_head()
-                    {
-                        self.execute_batched_prefill();
-                    } else {
-                        self.execute_prefill(seq_id);
-                    }
+                    self.execute_prefill_action(seq_id);
                     // A classic action ran: the next tick goes back to the
                     // in-flight speculative slice, if any (issue #734).
                     self.speculative_slice_yielded = false;
@@ -392,20 +405,20 @@ impl BatchScheduler {
     pub(super) fn publish_metrics(&self) {
         let active = self.active_batch.len();
         let queued = self.prefill_queue.len();
-        let paged_stats = self.cache_pool.paged_stats();
-        let paged_block_size = self.cache_pool.paged_block_size().unwrap_or(0);
+        let paged_stats = self.engine.pool().paged_stats();
+        let paged_block_size = self.engine.pool().paged_block_size().unwrap_or(0);
         self.batch_metrics.set_active_count(active);
         self.batch_metrics.set_queue_depth(queued);
         self.batch_observability.update_gauges(
             active,
             queued,
-            self.cache_pool.active_count(),
-            self.cache_pool.memory_usage_bytes() as u64,
+            self.engine.pool().active_count(),
+            self.engine.pool().memory_usage_bytes() as u64,
             paged_block_size,
             paged_stats,
             // #122 c: surface the configured block-budget cap (0 = unbounded)
             // so `/v1/cache/stats` and `/metrics` can report admission headroom.
-            self.cache_pool.paged_block_budget().unwrap_or(0) as u64,
+            self.engine.pool().paged_block_budget().unwrap_or(0) as u64,
         );
         // Which attention kernel the decode loop actually ran, and how much
         // prefix the cascade decomposition hoisted (issues #899, #903). Cheap

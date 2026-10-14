@@ -46,6 +46,7 @@ use super::{
     Quantization, TokenIdField, alibi_slopes, chunked_prefill_enabled_from, gla_chunked,
     gla_sequential, gla_step, layer_decay, validate_weights,
 };
+use mlxcel_core::cache::SequenceId;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -980,6 +981,28 @@ fn synthetic_weights(args: &ModelArgs) -> WeightMap {
     weights
 }
 
+fn filled_weights(args: &ModelArgs) -> WeightMap {
+    let mut weights = synthetic_weights(args);
+    // An all-zero stack produces finite logits without exercising the decay,
+    // router, or gate. Fill every tensor deterministically so forward-based
+    // contract tests cover the real six-layer computation.
+    let mut keys: Vec<String> = weights.keys().cloned().collect();
+    // `WeightMap` is a `HashMap`, so sorting keeps the advancing seed stable
+    // across processes (issue #1265).
+    keys.sort();
+    let mut seed = 0x5EED_1234u32;
+    for key in keys {
+        let shape = mlxcel_core::array_shape(weights.get(&key).expect("key just listed"));
+        let n: i32 = shape.iter().product();
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        weights.insert(
+            key,
+            mlxcel_core::from_slice_f32(&noise(n as usize, seed), &shape),
+        );
+    }
+    weights
+}
+
 /// A shrunk Ring-mini: 6 layers in groups of 3 (so layers 2 and 5 are global),
 /// 4 experts, small dims.
 fn small_args() -> ModelArgs {
@@ -1087,25 +1110,7 @@ fn a_dense_prefix_layer_is_validated_as_a_plain_mlp() {
 #[test]
 fn a_synthetic_model_builds_and_produces_finite_logits() {
     let args = small_args();
-    let mut weights = synthetic_weights(&args);
-    // Replace the lazy zeros with real values: an all-zero stack produces
-    // technically-finite logits from a graph that never exercises the decay,
-    // the router or the gate.
-    let mut keys: Vec<String> = weights.keys().cloned().collect();
-    // Sorted because `WeightMap` is a `HashMap`: its iteration order is
-    // randomized per process, and the seed below advances once per key, so an
-    // unsorted walk builds a different random model on every run (issue #1265).
-    keys.sort();
-    let mut seed = 0x5EED_1234u32;
-    for key in keys {
-        let shape = mlxcel_core::array_shape(weights.get(&key).expect("key just listed"));
-        let n: i32 = shape.iter().product();
-        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        weights.insert(
-            key,
-            mlxcel_core::from_slice_f32(&noise(n as usize, seed), &shape),
-        );
-    }
+    let weights = filled_weights(&args);
 
     let model = BailingMoeLinearModel::from_weights(&weights, &args).expect("the model builds");
     assert_eq!(model.num_layers(), args.num_hidden_layers);
@@ -1136,6 +1141,60 @@ fn a_synthetic_model_builds_and_produces_finite_logits() {
     {
         assert!(value.is_finite(), "decode logit[{i}] is {value}");
     }
+}
+
+#[test]
+fn bailing_moe_linear_loaded_model_chunking_contract_is_safe() {
+    let args = small_args();
+    let weights = filled_weights(&args);
+    let model = BailingMoeLinearModel::from_weights(&weights, &args).expect("the model builds");
+    let language_model: &dyn LanguageModel = &model;
+    assert!(
+        !language_model.supports_chunked_prefill(),
+        "a no-ID chunked prefill would discard the state built by every chunk but the last"
+    );
+
+    let two_tokens = mlxcel_core::from_slice_i32(&[1, 2], &[1, 2]);
+    let three_tokens = mlxcel_core::from_slice_i32(&[3, 4, 5], &[1, 3]);
+    let mut unused_caches = language_model.make_caches();
+
+    let first_prompt = language_model.forward(&two_tokens, &mut unused_caches, None);
+    mlxcel_core::eval(&first_prompt);
+    let second_prompt = language_model.forward(&three_tokens, &mut unused_caches, None);
+    mlxcel_core::eval(&second_prompt);
+
+    let fallback_offset =
+        model
+            .sequence_state
+            .with_sequence_state(None, |caches| match &caches[0] {
+                BailingLinearCache::Linear(cache) => cache.offset,
+                BailingLinearCache::Attention(_) => panic!("layer 0 must use linear recurrence"),
+            });
+    assert_eq!(
+        fallback_offset, 3,
+        "a second no-ID prompt must replace, rather than inherit, fallback state"
+    );
+
+    let seq = SequenceId::from_raw(2287);
+    language_model.prepare_sequence_state(seq);
+    let first_chunk =
+        language_model.forward_with_sequence_id(&two_tokens, Some(seq), &mut unused_caches, None);
+    mlxcel_core::eval(&first_chunk);
+    let second_chunk =
+        language_model.forward_with_sequence_id(&three_tokens, Some(seq), &mut unused_caches, None);
+    mlxcel_core::eval(&second_chunk);
+
+    let continued_offset = model
+        .sequence_state
+        .with_sequence_state_ref(seq, |caches| match &caches[0] {
+            BailingLinearCache::Linear(cache) => cache.offset,
+            BailingLinearCache::Attention(_) => panic!("layer 0 must use linear recurrence"),
+        })
+        .expect("the prepared sequence state must remain available");
+    assert_eq!(
+        continued_offset, 5,
+        "consecutive chunks carrying one sequence id must retain their state"
+    );
 }
 
 #[test]

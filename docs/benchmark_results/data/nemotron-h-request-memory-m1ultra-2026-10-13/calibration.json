@@ -1,0 +1,51 @@
+{
+  "stage": "initial calibration before load-time weight materialization fix",
+  "binary_sha256": "aaddeef2480cd829b5b41c2f6ddbcf2ebf9fa73f63f4914afa4ba4193167aebc",
+  "budget": "32G",
+  "outcome": "correctly admitted; harness aborted instead of claiming rejection",
+  "result": {
+    "status": 200,
+    "content_type": "application/json",
+    "body": {
+      "id": "cmpl-cc9d645c-4ea8-4f53-a556-d228a7fdda66",
+      "object": "text_completion",
+      "created": 1791902423,
+      "model": "repro",
+      "system_fingerprint": null,
+      "choices": [
+        {
+          "index": 0,
+          "text": "10000000",
+          "finish_reason": "length",
+          "logprobs": null
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 6001,
+        "completion_tokens": 8,
+        "total_tokens": 6009,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      }
+    },
+    "elapsed_s": 16.983042375009973,
+    "case": "reject",
+    "route": "/v1/completions",
+    "stream": false,
+    "footprint": {
+      "peak_bytes": 19112604467,
+      "current_bytes": 18575733555
+    },
+    "admission": {
+      "prompt_tokens": 6001,
+      "output_tokens": 8,
+      "largest_forward_tokens": 2048,
+      "estimated_bytes": 29353208076,
+      "budget_bytes": 34359738368,
+      "resident_bytes": 17778075916,
+      "allocator_cache_bytes": 51414376,
+      "admitted": true
+    }
+  }
+}

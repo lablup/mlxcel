@@ -1,0 +1,118 @@
+{
+  "arm": "fixed-final-8k",
+  "binary": "/tmp/mlxcel-chain-2281-artifacts/mlxcel-server.final",
+  "model": "models/mlx/nvidia-nemotron-3-nano-30b-a3b-4bit",
+  "marker_expectation": "present",
+  "started_at": "2026-10-13T22:24:57+0900",
+  "runs": [
+    {
+      "rep": 1,
+      "target_tokens": 8000,
+      "status": 200,
+      "prompt_tokens": 8019,
+      "completion_tokens": 1,
+      "choice": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "OK"
+        },
+        "finish_reason": "stop",
+        "logprobs": null
+      },
+      "peak_bytes": 20723217203,
+      "peak_gib": 19.299999999813735,
+      "ready_s": 2.0552399158477783,
+      "request_s": 22.137491941452026,
+      "load_before": [
+        6.67138671875,
+        5.81103515625,
+        5.35400390625
+      ],
+      "load_after": [
+        6.63916015625,
+        5.873046875,
+        5.388671875
+      ],
+      "health_status": 200,
+      "health": {
+        "status": "ok"
+      },
+      "forward_marker": true,
+      "load_marker": true
+    },
+    {
+      "rep": 2,
+      "target_tokens": 8000,
+      "status": 200,
+      "prompt_tokens": 8019,
+      "completion_tokens": 1,
+      "choice": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "OK"
+        },
+        "finish_reason": "stop",
+        "logprobs": null
+      },
+      "peak_bytes": 20723217203,
+      "peak_gib": 19.299999999813735,
+      "ready_s": 2.044273853302002,
+      "request_s": 22.105428218841553,
+      "load_before": [
+        6.63916015625,
+        5.873046875,
+        5.388671875
+      ],
+      "load_after": [
+        6.98681640625,
+        6.02490234375,
+        5.45703125
+      ],
+      "health_status": 200,
+      "health": {
+        "status": "ok"
+      },
+      "forward_marker": true,
+      "load_marker": true
+    },
+    {
+      "rep": 3,
+      "target_tokens": 8000,
+      "status": 200,
+      "prompt_tokens": 8019,
+      "completion_tokens": 1,
+      "choice": {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "OK"
+        },
+        "finish_reason": "stop",
+        "logprobs": null
+      },
+      "peak_bytes": 20723217203,
+      "peak_gib": 19.299999999813735,
+      "ready_s": 2.0479462146759033,
+      "request_s": 22.11466908454895,
+      "load_before": [
+        6.98681640625,
+        6.02490234375,
+        5.45703125
+      ],
+      "load_after": [
+        7.513671875,
+        6.2548828125,
+        5.5576171875
+      ],
+      "health_status": 200,
+      "health": {
+        "status": "ok"
+      },
+      "forward_marker": true,
+      "load_marker": true
+    }
+  ],
+  "finished_at": "2026-10-13T22:26:15+0900"
+}

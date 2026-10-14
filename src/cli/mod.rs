@@ -32,6 +32,7 @@ pub mod embedding_compat_args;
 pub mod flag_surface;
 pub mod ggml_compat_args;
 pub mod grammar_args;
+pub mod in_process_client;
 pub mod infill_args;
 pub mod llama_short_flags;
 pub mod logging_compat_args;

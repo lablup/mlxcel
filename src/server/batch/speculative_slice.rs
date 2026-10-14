@@ -110,6 +110,7 @@ use mlxcel_core::generate::GenerationStats;
 use mlxcel_core::speculative::mtp::target::MtpTarget;
 use mlxcel_core::speculative::mtp::{MtpAcceptanceSummary, MtpGenerator, MtpSessionState};
 
+use super::finish::ContextBound;
 use super::sequence::SequenceInfo;
 use super::speculative_burst::{BurstStreamState, begin_burst_stream, stream_burst_tokens};
 
@@ -452,9 +453,10 @@ impl MtpSliceJob {
 /// mock target.
 ///
 /// `token_history` is the history-dependent-penalty context for the first
-/// bonus (the caller computes `initial_token_history(&prompt, ..)`), and
-/// `model_eos_token_ids` seeds the stream layer's merged EOS set, both
-/// exactly as on the run-to-completion path.
+/// bonus (the caller computes `initial_token_history(&prompt, ..)`),
+/// `model_eos_token_ids` seeds the stream layer's merged EOS set, and
+/// `context` is the scheduler's context bound (#1472), all exactly as on the
+/// run-to-completion path.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn begin_slice_session<T: MtpTarget>(
     target: T,
@@ -466,6 +468,7 @@ pub(crate) fn begin_slice_session<T: MtpTarget>(
     profile_probe_rounds: usize,
     prefill_start_offset: usize,
     token_history: &[i32],
+    context: ContextBound,
 ) -> MtpSliceJob {
     let slice_start = Instant::now();
     let max_tokens = seq.max_tokens.max(1);
@@ -483,7 +486,7 @@ pub(crate) fn begin_slice_session<T: MtpTarget>(
 
     // Stream the first bonus immediately: per-slice streaming starts at
     // slice 0, unlike the legacy burst which lumps every token at finalize.
-    let mut stream = begin_burst_stream(model_eos_token_ids, &seq);
+    let mut stream = begin_burst_stream(model_eos_token_ids, &seq, context);
     let stream_done = stream_burst_tokens(
         tokenizer,
         &mut seq,

@@ -496,6 +496,7 @@ pub(crate) fn build_server_generate_options_with_live(
         // carry no image parts and always leave it `None`.
         image_soft_tokens: None,
         pre_rendered_prompt_tokens: None,
+        admission_notification: None,
         // Snapshot the server-default adapter scales at admission (#1439);
         // the native-completion route replaces this when the request carries
         // its own `lora` field.

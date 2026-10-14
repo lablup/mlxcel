@@ -394,3 +394,60 @@ fn reverse_window_indices_round_trips_a_multi_image_batch() {
     assert_eq!(misplaced_when_applied_twice(&window_index), 192);
     assert!(is_identity(&round_trip(&window_index)));
 }
+
+/// Issue #1618 named `get_window_index` as the first suspect for the
+/// multi-window misdescriptions. These values come from running the
+/// checkpoint's own `Siglip2Encoder.get_window_index` (`modeling_siglip2.py`,
+/// including `torch.unique_consecutive`) on the two shape fixtures' grids,
+/// one image each and both batched, plus a non-square grid with a partial
+/// last window column. The real defect was the unexpanded prompt placeholder
+/// (`multimodal::youtu_vl_prompt`); this pins that the window path, which the
+/// stage-by-stage diff found matching, stays matching.
+#[test]
+fn window_index_matches_the_reference_on_multi_window_grids() {
+    let cases: &[(&[(i32, i32)], &[i32], [i32; 10], i32, usize)] = &[
+        (
+            &[(22, 22)],
+            &[0, 256, 352, 448, 484],
+            [81, 82, 83, 84, 8, 9, 10, 19, 20, 21],
+            7260,
+            121,
+        ),
+        (
+            &[(28, 28)],
+            &[0, 256, 448, 640, 784],
+            [102, 103, 104, 105, 8, 9, 10, 11, 12, 13],
+            19110,
+            196,
+        ),
+        (
+            &[(22, 22), (28, 28)],
+            &[0, 256, 352, 448, 484, 740, 932, 1124, 1268],
+            [81, 82, 83, 84, 8, 9, 10, 19, 20, 21],
+            50086,
+            317,
+        ),
+        (
+            &[(16, 40)],
+            &[0, 256, 512, 640],
+            [144, 145, 146, 147, 8, 9, 10, 11, 12, 13],
+            12720,
+            160,
+        ),
+    ];
+    for &(shapes, cu, slice, sum, len) in cases {
+        let (window_index, cu_window_seqlens) = window::get_window_index(shapes, 2, 256, 16, 4);
+        assert_eq!(cu_window_seqlens, cu, "cu_window_seqlens for {shapes:?}");
+        assert_eq!(window_index.len(), len, "length for {shapes:?}");
+        assert_eq!(
+            &window_index[60..70],
+            &slice,
+            "window_index[60..70] for {shapes:?}"
+        );
+        assert_eq!(
+            window_index.iter().sum::<i32>(),
+            sum,
+            "index sum for {shapes:?}"
+        );
+    }
+}

@@ -1,0 +1,4 @@
+outer_driver=/tmp/mlxcel-auto-plan/batch2-quiet-measurements.sh
+outer_driver_sha256=af9da7d10881230ecf0aa4cc5c7127921bb238a2a1e1cab7b832f85c773baed0
+outer_invocation=gpu-lock run --tag issue-2259-quiet-timing -- bash /tmp/mlxcel-auto-plan/2259-quiet-timing.sh
+session_invocation=bash /tmp/mlxcel-auto-plan/batch2-quiet-measurements.sh > /tmp/mlxcel-auto-plan/batch2-quiet-measurements.log 2>&1

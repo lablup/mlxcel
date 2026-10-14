@@ -340,3 +340,100 @@ async fn a_spliced_id_consumes_the_add_special_position() {
     .await;
     assert_eq!(body["tokens"], serde_json::json!([0, 2]));
 }
+
+#[tokio::test]
+async fn detokenize_answers_500_for_ids_outside_the_vocabulary() {
+    // byte_level_tokenizer(): ids 0..=255 plus the special 256.
+    for token in [serde_json::json!(999999999), serde_json::json!(257)] {
+        let (status, body) = post(
+            byte_level_tokenizer(),
+            "/detokenize",
+            serde_json::json!({"tokens": [token]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+        assert_eq!(body["error"]["type"], "server_error");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains(&format!(
+                    "token id {token} is out of vocabulary range (vocab_size 257)"
+                ))
+        );
+    }
+}
+
+#[tokio::test]
+async fn detokenize_names_a_negative_id_as_sent() {
+    let (status, body) = post(
+        byte_level_tokenizer(),
+        "/detokenize",
+        serde_json::json!({"tokens": [-1]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(body["error"]["type"], "server_error");
+    let message = body["error"]["message"].as_str().unwrap();
+    assert!(message.contains("token id -1 "), "{message}");
+    assert!(!message.contains("4294967295"), "{message}");
+}
+
+#[tokio::test]
+async fn detokenize_refuses_a_mixed_list_without_partial_text() {
+    let (status, body) = post(
+        byte_level_tokenizer(),
+        "/detokenize",
+        serde_json::json!({"tokens": [72, 999999999, 105]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert!(body.get("content").is_none(), "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("token id 999999999 ")
+    );
+}
+
+#[tokio::test]
+async fn detokenize_reports_the_first_bad_id_in_request_order() {
+    let (_, body) = post(
+        byte_level_tokenizer(),
+        "/detokenize",
+        serde_json::json!({"tokens": [72, 300, -5]}),
+    )
+    .await;
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("token id 300 ")
+    );
+}
+
+#[tokio::test]
+async fn detokenize_checks_an_id_above_i32_max_instead_of_returning_422() {
+    let (status, body) = post(
+        byte_level_tokenizer(),
+        "/detokenize",
+        serde_json::json!({"tokens": [3000000000i64]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(body["error"]["type"], "server_error");
+}
+
+#[tokio::test]
+async fn detokenize_accepts_the_last_vocabulary_ids() {
+    for id in [255, 256] {
+        let (status, body) = post(
+            byte_level_tokenizer(),
+            "/detokenize",
+            serde_json::json!({"tokens": [id]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "id {id}: {body}");
+    }
+}

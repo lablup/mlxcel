@@ -31,6 +31,7 @@ impl ModelProvider {
             single_stream_admission,
             max_queue_depth,
             None,
+            None,
         )
     }
 
@@ -41,7 +42,28 @@ impl ModelProvider {
         options_tx: mpsc::Sender<ServerGenerateOptions>,
         speculative: SpeculativeStats,
     ) -> Self {
-        Self::recording_for_route_tests_inner(options_tx, false, usize::MAX, Some(speculative))
+        Self::recording_for_route_tests_inner(
+            options_tx,
+            false,
+            usize::MAX,
+            Some(speculative),
+            None,
+        )
+    }
+
+    pub(crate) fn memory_admission_for_route_tests(
+        options_tx: mpsc::Sender<ServerGenerateOptions>,
+    ) -> Self {
+        Self::recording_for_route_tests_inner(
+            options_tx,
+            true,
+            1,
+            None,
+            Some(crate::execution::request_memory::RequestMemoryRejection {
+                estimated_bytes: 2048,
+                budget_bytes: 1024,
+            }),
+        )
     }
 
     fn recording_for_route_tests_inner(
@@ -49,6 +71,7 @@ impl ModelProvider {
         single_stream_admission: bool,
         max_queue_depth: usize,
         speculative: Option<SpeculativeStats>,
+        memory_rejection: Option<crate::execution::request_memory::RequestMemoryRejection>,
     ) -> Self {
         let (request_tx, request_rx) = mpsc::channel::<ModelRequest>();
         let loaded = Arc::new(AtomicBool::new(true));
@@ -64,6 +87,15 @@ impl ModelProvider {
                         ..
                     } => {
                         drop(queue_reservation);
+                        if let Some(rejection) = memory_rejection {
+                            if options.max_tokens >= 64 {
+                                let _ = options_tx.send(options);
+                                let _ = response_tx
+                                    .send(GenerateEvent::RequestMemoryRejected(rejection));
+                                continue;
+                            }
+                            let _ = response_tx.send(GenerateEvent::Admitted);
+                        }
                         // A request carrying string stop sequences is answered
                         // as a generation that one of them ended (issue #1466),
                         // so route tests can assert the b10621
@@ -74,9 +106,7 @@ impl ModelProvider {
                             .stop_sequences
                             .as_deref()
                             .and_then(<[String]>::first)
-                            .map(|word| {
-                                crate::server::model_provider::StopKind::Word(word.clone())
-                            })
+                            .map(|word| crate::server::model_provider::StopKind::Word(word.clone()))
                             .unwrap_or(crate::server::model_provider::StopKind::Eos);
                         let _ = options_tx.send(options);
                         let _ = response_tx.send(GenerateEvent::Done(GenerationResult {
@@ -115,6 +145,7 @@ impl ModelProvider {
             batch_metrics,
             batch_observability,
             max_queue_depth,
+            request_memory_admission: memory_rejection.is_some(),
             single_stream_queue_admission: Arc::new(AtomicBool::new(single_stream_admission)),
             sleeping: Arc::new(AtomicBool::new(false)),
             prompt_cache: None,
@@ -148,6 +179,7 @@ impl ModelProvider {
             batch_metrics,
             batch_observability: Arc::new(BatchObservability::new()),
             max_queue_depth: usize::MAX,
+            request_memory_admission: false,
             single_stream_queue_admission: Arc::new(AtomicBool::new(false)),
             sleeping: Arc::new(AtomicBool::new(false)),
             prompt_cache: None,
@@ -170,7 +202,17 @@ impl ModelProvider {
     pub(crate) fn scripted_streaming_for_route_tests(
         options_tx: mpsc::Sender<ServerGenerateOptions>,
     ) -> (Self, ScriptedStreamHandle) {
-        Self::scripted_streaming_for_route_tests_inner(options_tx, None)
+        Self::scripted_streaming_for_route_tests_inner(options_tx, None, None)
+    }
+
+    /// The same scripted provider, also forwarding each dispatched rendered
+    /// prompt, so a route test can assert what the chat template produced
+    /// (issue #2110).
+    pub(crate) fn scripted_streaming_for_route_tests_with_prompts(
+        options_tx: mpsc::Sender<ServerGenerateOptions>,
+        prompt_tx: mpsc::Sender<String>,
+    ) -> (Self, ScriptedStreamHandle) {
+        Self::scripted_streaming_for_route_tests_inner(options_tx, None, Some(prompt_tx))
     }
 
     /// The same scripted provider, answering as a request a drafter served
@@ -180,12 +222,13 @@ impl ModelProvider {
         options_tx: mpsc::Sender<ServerGenerateOptions>,
         speculative: SpeculativeStats,
     ) -> (Self, ScriptedStreamHandle) {
-        Self::scripted_streaming_for_route_tests_inner(options_tx, Some(speculative))
+        Self::scripted_streaming_for_route_tests_inner(options_tx, Some(speculative), None)
     }
 
     fn scripted_streaming_for_route_tests_inner(
         options_tx: mpsc::Sender<ServerGenerateOptions>,
         speculative: Option<SpeculativeStats>,
+        prompt_tx: Option<mpsc::Sender<String>>,
     ) -> (Self, ScriptedStreamHandle) {
         let (request_tx, request_rx) = mpsc::channel::<ModelRequest>();
         let (step_tx, step_rx) = mpsc::channel::<ScriptedStreamStep>();
@@ -199,6 +242,7 @@ impl ModelProvider {
             while let Ok(request) = request_rx.recv() {
                 match request {
                     ModelRequest::Generate {
+                        prompt,
                         options,
                         queue_reservation,
                         response_tx,
@@ -206,6 +250,9 @@ impl ModelProvider {
                         ..
                     } => {
                         drop(queue_reservation);
+                        if let Some(prompt_tx) = prompt_tx.as_ref() {
+                            let _ = prompt_tx.send(prompt);
+                        }
                         let _ = options_tx.send(options);
                         if let Ok(mut flags) = flags_for_worker.lock() {
                             flags.push(cancelled.clone());
@@ -224,7 +271,8 @@ impl ModelProvider {
                                     }
                                     text.push_str(&token);
                                     tokens_emitted += 1;
-                                    let _ = response_tx.send(GenerateEvent::Token(token, TokenMeta::default()));
+                                    let _ = response_tx
+                                        .send(GenerateEvent::Token(token, TokenMeta::default()));
                                 }
                                 ScriptedStreamStep::Finish => break,
                             }
@@ -264,6 +312,7 @@ impl ModelProvider {
             batch_metrics,
             batch_observability,
             max_queue_depth: usize::MAX,
+            request_memory_admission: false,
             single_stream_queue_admission: Arc::new(AtomicBool::new(false)),
             sleeping: Arc::new(AtomicBool::new(false)),
             prompt_cache: None,
@@ -280,7 +329,6 @@ impl ModelProvider {
             },
         )
     }
-
 }
 
 /// One step of a scripted streaming generation (#1444).
@@ -302,7 +350,9 @@ pub(crate) struct ScriptedStreamHandle {
 
 impl ScriptedStreamHandle {
     pub(crate) fn token(&self, token: &str) {
-        let _ = self.step_tx.send(ScriptedStreamStep::Token(token.to_string()));
+        let _ = self
+            .step_tx
+            .send(ScriptedStreamStep::Token(token.to_string()));
     }
 
     pub(crate) fn finish(&self) {
