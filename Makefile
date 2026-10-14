@@ -256,19 +256,30 @@ debug: build ## Alias for build (debug mode)
 # the host: CUDA on Linux, Metal on macOS.
 
 IREE_CUDA_SCRIPT := scripts/iree/setup-cuda.sh
+IREE_ROCM_SCRIPT := scripts/iree/setup-rocm.sh
 IREE_MACOS_SCRIPT := scripts/iree/setup-macos.sh
 
 .PHONY: iree
-iree: ## Set up the IREE backend toolchain for this host (CUDA/Linux, Metal/macOS)
+iree: ## Set up the IREE backend toolchain for this host (CUDA or ROCm on Linux, Metal on macOS)
 ifeq ($(UNAME_S),Darwin)
 	@$(MAKE) --no-print-directory iree-metal
 else
-	@$(MAKE) --no-print-directory iree-cuda
+	@if command -v nvcc >/dev/null 2>&1 || [ -d /usr/local/cuda ]; then \
+		$(MAKE) --no-print-directory iree-cuda; \
+	elif [ -x /opt/rocm/bin/rocminfo ] || [ -e /dev/kfd ]; then \
+		$(MAKE) --no-print-directory iree-rocm; \
+	else \
+		$(MAKE) --no-print-directory iree-cuda; \
+	fi
 endif
 
 .PHONY: iree-cuda
 iree-cuda: ## Set up the IREE CUDA toolchain (Linux/NVIDIA)
 	@$(IREE_CUDA_SCRIPT)
+
+.PHONY: iree-rocm
+iree-rocm: ## Set up the IREE ROCm/HIP toolchain (Linux/AMD)
+	@$(IREE_ROCM_SCRIPT)
 
 .PHONY: iree-metal
 iree-metal: ## Set up the IREE Metal toolchain (macOS/Apple Silicon)
@@ -279,7 +290,13 @@ iree-env: ## Print the resolved IREE toolchain paths + pinned version
 ifeq ($(UNAME_S),Darwin)
 	@$(IREE_MACOS_SCRIPT) --info
 else
-	@$(IREE_CUDA_SCRIPT) --info
+	@if command -v nvcc >/dev/null 2>&1 || [ -d /usr/local/cuda ]; then \
+		$(IREE_CUDA_SCRIPT) --info; \
+	elif [ -x /opt/rocm/bin/rocminfo ] || [ -e /dev/kfd ]; then \
+		$(IREE_ROCM_SCRIPT) --info; \
+	else \
+		$(IREE_CUDA_SCRIPT) --info; \
+	fi
 endif
 
 # ============================================================================

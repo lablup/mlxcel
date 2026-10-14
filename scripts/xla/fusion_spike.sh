@@ -1,25 +1,46 @@
 #!/usr/bin/env bash
-# Reproduce the issue #573 spike: does IREE fuse the packed int4/int8 dequant into
-# the matmul on the CUDA target, so the reconstructed weight is not materialized to
-# DRAM every decode step? Measures the static decode dispatch count (the fusion
-# signal: `iree-compile --compile-to=flow` then count `flow.dispatch`) for the real
-# packed decode graph under a flag sweep, plus three isolating microtests.
+# Reproduce the issue #573 / #574 / #851 spike: does IREE fuse the packed int4/int8
+# dequant into the matmul on the GPU target (CUDA or ROCm/HIP), so the reconstructed
+# weight is not materialized to DRAM every decode step? Measures the static decode
+# dispatch count (the fusion signal: `iree-compile --compile-to=flow` then count
+# `flow.dispatch`) for the real packed decode graph under a flag sweep, plus three
+# isolating microtests and executable lowering with `--iree-global-opt-data-tiling`.
 #
-# Prereqs: a cuda `iree-compile` (issue #571: `make iree-cuda`, then
-# `eval "$(scripts/iree/setup-cuda.sh --env)"`). tok/s figures come from the mlxcel
-# binary (`MLXCEL_XLA_QUANT=packed ... generate`), not this script.
+# Prereqs:
+#   - CUDA: `make iree-cuda && eval "$(scripts/iree/setup-cuda.sh --env)"`
+#   - ROCm: `make iree-rocm && eval "$(scripts/iree/setup-rocm.sh --env)"`
 #
 # Usage:
 #   scripts/xla/fusion_spike.sh [DECODE_MLIR]
 # With no arg it uses the newest packed decode graph mlxcel left in its vmfb cache
-# ($TMPDIR/mlxcel-xla-vmfb/decode-*.mlir with ui32 weight args); run a packed decode
-# once first: MLXCEL_XLA_QUANT=packed MLXCEL_BACKEND=xla MLXCEL_XLA_DEVICE=cuda \
-#   ./target/release/mlxcel generate -m <Llama-3.2-1B 4-bit dir> -p "..." -n 8
+# ($TMPDIR/mlxcel-xla-vmfb/decode-*.mlir with ui32 weight args).
 set -uo pipefail
 
+DEVICE="${MLXCEL_XLA_DEVICE:-}"
+if [ -z "$DEVICE" ]; then
+  if [ -n "${IREE_ROCM_HOME:-}" ] || { ! command -v nvcc >/dev/null 2>&1 && [ -x /opt/rocm/bin/rocminfo ]; }; then
+    DEVICE="hip"
+  else
+    DEVICE="cuda"
+  fi
+fi
+
 IREE_COMPILE="${MLXCEL_XLA_IREE_COMPILE:-}"
-[ -n "$IREE_COMPILE" ] || IREE_COMPILE="$(eval "$(dirname "$0")/../iree/setup-cuda.sh --env" 2>/dev/null; echo "${MLXCEL_XLA_IREE_COMPILE:-}")"
-[ -x "$IREE_COMPILE" ] || { echo "no cuda iree-compile; run: eval \"\$(scripts/iree/setup-cuda.sh --env)\"" >&2; exit 1; }
+if [ "$DEVICE" = "hip" ]; then
+  if [ -z "$IREE_COMPILE" ] || [ -z "${MLXCEL_XLA_ROCM_TARGET:-}" ]; then
+    eval "$("$(dirname "$0")/../iree/setup-rocm.sh" --env 2>/dev/null)" || true
+    IREE_COMPILE="${MLXCEL_XLA_IREE_COMPILE:-$IREE_COMPILE}"
+  fi
+  [ -x "$IREE_COMPILE" ] || { echo "no rocm iree-compile; run: eval \"\$(scripts/iree/setup-rocm.sh --env)\"" >&2; exit 1; }
+  [ -n "${MLXCEL_XLA_ROCM_TARGET:-}" ] || { echo "MLXCEL_XLA_ROCM_TARGET is not set" >&2; exit 1; }
+  TARGET_FLAGS=(--iree-input-type=stablehlo --iree-hal-target-device=hip "--iree-rocm-target=${MLXCEL_XLA_ROCM_TARGET}")
+  echo "target device: hip (rocm target: ${MLXCEL_XLA_ROCM_TARGET})"
+else
+  [ -n "$IREE_COMPILE" ] || IREE_COMPILE="$(eval "$(dirname "$0")/../iree/setup-cuda.sh --env" 2>/dev/null; echo "${MLXCEL_XLA_IREE_COMPILE:-}")"
+  [ -x "$IREE_COMPILE" ] || { echo "no cuda iree-compile; run: eval \"\$(scripts/iree/setup-cuda.sh --env)\"" >&2; exit 1; }
+  TARGET_FLAGS=(--iree-input-type=stablehlo --iree-hal-target-device=cuda)
+  echo "target device: cuda"
+fi
 
 CACHE="${TMPDIR:-/tmp}/mlxcel-xla-vmfb"
 DECODE="${1:-}"
@@ -33,11 +54,10 @@ echo "packed decode graph: $DECODE"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
-CUDA=(--iree-input-type=stablehlo --iree-hal-target-device=cuda)
 
 dispatches() { # <extra flags...> < in.mlir path is $DECODE
   local out="$WORK/o.mlir"
-  if "$IREE_COMPILE" "${CUDA[@]}" "$@" --compile-to=flow "$DECODE" -o "$out" 2>"$WORK/e"; then
+  if "$IREE_COMPILE" "${TARGET_FLAGS[@]}" "$@" --compile-to=flow "$DECODE" -o "$out" 2>"$WORK/e"; then
     grep -c 'flow.dispatch' "$out"
   else
     echo "FAIL($(tail -1 "$WORK/e" | cut -c1-60))"
@@ -46,18 +66,30 @@ dispatches() { # <extra flags...> < in.mlir path is $DECODE
 
 echo ""
 echo "== packed decode: flow.dispatch under an iree-compile flag sweep =="
-printf "  %-16s %s\n" "baseline" "$(dispatches)"
-printf "  %-16s %s\n" "aggressive-fuse" "$(dispatches --iree-dispatch-creation-enable-aggressive-fusion)"
-printf "  %-16s %s\n" "generalize-mm" "$(dispatches --iree-opt-generalize-matmul)"
-printf "  %-16s %s\n" "early-trunc" "$(dispatches --iree-dispatch-creation-enable-early-trunc-fusion)"
-printf "  %-16s %s\n" "horiz-contract" "$(dispatches --iree-dispatch-creation-enable-fuse-horizontal-contractions)"
-printf "  %-16s %s\n" "fuse-multi-use" "$(dispatches --iree-dispatch-creation-fuse-multi-use)"
-printf "  %-16s %s\n" "data-tiling" "$(dispatches --iree-global-opt-data-tiling)"
-printf "  %-16s %s\n" "all-fusion" "$(dispatches --iree-dispatch-creation-enable-aggressive-fusion --iree-opt-generalize-matmul --iree-dispatch-creation-enable-early-trunc-fusion --iree-dispatch-creation-enable-fuse-horizontal-contractions --iree-dispatch-creation-fuse-multi-use)"
+printf "  %-24s %s\n" "baseline" "$(dispatches)"
+printf "  %-24s %s\n" "aggressive-fuse" "$(dispatches --iree-dispatch-creation-enable-aggressive-fusion)"
+printf "  %-24s %s\n" "generalize-mm" "$(dispatches --iree-opt-generalize-matmul)"
+printf "  %-24s %s\n" "early-trunc" "$(dispatches --iree-dispatch-creation-enable-early-trunc-fusion)"
+printf "  %-24s %s\n" "horiz-contract" "$(dispatches --iree-dispatch-creation-enable-fuse-horizontal-contractions)"
+printf "  %-24s %s\n" "fuse-multi-use" "$(dispatches --iree-dispatch-creation-fuse-multi-use)"
+printf "  %-24s %s\n" "data-tiling" "$(dispatches --iree-global-opt-data-tiling)"
+if [ "$DEVICE" = "hip" ]; then
+  printf "  %-24s %s\n" "data-tiling+rocm-pad" "$(dispatches --iree-global-opt-data-tiling --iree-rocm-encoding-layout-resolver=pad)"
+  printf "  %-24s %s\n" "data-tiling+rocm-dt" "$(dispatches --iree-global-opt-data-tiling --iree-rocm-encoding-layout-resolver=data-tiling)"
+fi
+printf "  %-24s %s\n" "all-fusion" "$(dispatches --iree-dispatch-creation-enable-aggressive-fusion --iree-opt-generalize-matmul --iree-dispatch-creation-enable-early-trunc-fusion --iree-dispatch-creation-enable-fuse-horizontal-contractions --iree-dispatch-creation-fuse-multi-use)"
+
+echo ""
+echo "== full VMFB compilation check under data-tiling (#574) =="
+if "$IREE_COMPILE" "${TARGET_FLAGS[@]}" --iree-global-opt-data-tiling "$DECODE" -o "$WORK/dt.vmfb" 2>"$WORK/dt.err"; then
+  echo "  data-tiling full compile: PASS ($(stat -c%s "$WORK/dt.vmfb" 2>/dev/null || wc -c <"$WORK/dt.vmfb") bytes)"
+else
+  echo "  data-tiling full compile: FAIL ($(grep -E 'error:' "$WORK/dt.err" | head -n 2 | tr '\n' ' '))"
+fi
 
 micro() { # <name> <mlir file>
   local out="$WORK/m.mlir"
-  if "$IREE_COMPILE" "${CUDA[@]}" --compile-to=flow "$2" -o "$out" 2>"$WORK/e"; then
+  if "$IREE_COMPILE" "${TARGET_FLAGS[@]}" --compile-to=flow "$2" -o "$out" 2>"$WORK/e"; then
     printf "  %-22s %s dispatch(es)\n" "$1" "$(grep -c 'flow.dispatch' "$out")"
   else
     printf "  %-22s FAIL (%s)\n" "$1" "$(tail -1 "$WORK/e" | cut -c1-70)"
@@ -100,9 +132,9 @@ micro "bare f16 matmul" "$WORK/f16.mlir"
 micro "bare int8 matmul" "$WORK/i8.mlir"
 
 echo ""
-echo "int8 kernel arithmetic (upcast vs int8 tensor cores):"
-"$IREE_COMPILE" "${CUDA[@]}" --iree-hal-dump-executable-intermediates-to="$WORK/i8dump" "$WORK/i8.mlir" -o "$WORK/i8.vmfb" 2>/dev/null
+echo "int8 kernel arithmetic (upcast vs tensor/matrix cores):"
+"$IREE_COMPILE" "${TARGET_FLAGS[@]}" --iree-hal-dump-executable-intermediates-to="$WORK/i8dump" "$WORK/i8.mlir" -o "$WORK/i8.vmfb" 2>/dev/null
 LL="$(ls "$WORK/i8dump"/*optimized.ll 2>/dev/null | head -1)"
 if [ -n "$LL" ]; then
-  echo "  sext i8->i32 (upcast): $(grep -c 'sext i8\|sext <' "$LL")   dp4a/mma.s8: $(grep -cE 'dp4a|mma.*s8' "$LL")"
+  echo "  sext i8->i32 (upcast): $(grep -c 'sext i8\|sext <' "$LL")   dp4a/mma/wmma/mfma/sdot: $(grep -cE 'dp4a|mma.*s8|wmma|mfma|sdot' "$LL")"
 fi

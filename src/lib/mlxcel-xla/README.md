@@ -68,6 +68,47 @@ Validated on a GB10 (Grace-Blackwell, sm_121): token-exact 48/48, ~5 tok/s
 (~2.6x the CPU path). Vulkan via the prebuilt dist does **not** work on the GB10
 (IREE's Vulkan allocator vs NVIDIA's unified memory), so CUDA is the GPU path.
 
+### ROCm (HIP) build
+
+Like the CUDA path, the ROCm/HIP path uses a **source-built HIP-enabled IREE
+runtime** (`IREE_ROCM_HOME`) paired with a **ROCm-capable `iree-compile`**
+(`MLXCEL_XLA_IREE_COMPILE`) at the same pinned version (`3.12.0rc20260721`).
+`make iree-rocm` (wrapping `scripts/iree/setup-rocm.sh`) installs the pinned
+compiler wheel into `<IREE_ROCM_HOME>/venv`, source-builds the runtime with the
+`local-task`, `local-sync`, and `hip` HAL drivers, and auto-detects the single
+host AMD GPU architecture (`MLXCEL_XLA_ROCM_TARGET`, e.g. `gfx1151`) from
+`rocminfo` / `amdgpu-arch`.
+
+```bash
+# 1. Source-build the ROCm/HIP IREE runtime + pinned iree-compile (idempotent).
+make iree-rocm                                 # or `make iree` (auto-detects the host)
+eval "$(scripts/iree/setup-rocm.sh --env)"     # export IREE_ROCM_HOME / _COMPILE / MLXCEL_XLA_ROCM_TARGET
+# (inspect the resolved paths + target + pinned version any time: `make iree-env`)
+
+# 2. Build with real execution on.
+OPENSSL_INCLUDE_DIR=/usr/include OPENSSL_LIB_DIR=/usr/lib/x86_64-linux-gnu \
+  cargo build --release --features xla-iree
+
+# 3. Run on the AMD GPU (requires MLXCEL_XLA_ROCM_TARGET=<gfx...>).
+MLXCEL_BACKEND=xla MLXCEL_XLA_DEVICE=hip ./target/release/mlxcel generate \
+  -m <Llama-3.2-1B-Instruct dir> -p "The capital of France is" -n 48
+```
+
+Qualified on an AMD Ryzen AI Max+ 395 w/ Radeon 8060S (`gfx1151`, ROCm 10.0 /
+HIP 7.15, Debian 13, kernel 6.18.12; full report in
+[`docs/benchmark_results/xla_iree_rocm_qualification.md`](../../../docs/benchmark_results/xla_iree_rocm_qualification.md)):
+
+- **Single-sequence greedy (`Llama-3.2-1B-Instruct-4bit`, `n=64`):** `64/64`
+  token-exact against the CPU `f32` oracle across `f32` (`5.71 tok/s`), `f16`
+  default (`11.30 tok/s` at `n=64`, `14.16 tok/s` at `n=32`), `bf16`
+  (`10.02 tok/s`), and `MLXCEL_XLA_QUANT=packed` (`0.07 tok/s`).
+- **Continuous batching (`XlaBatchEngine` / `xla_batch_bench`, `f16`):**
+  `100%` reference-exact (`8/8` requests at `B_max=4`, `65.80 tok/s` mean;
+  `16/16` requests at `B_max=8`, `82.06 tok/s` mean).
+- **HTTP server (`mlxcel-server`):** non-streaming and streaming
+  `/v1/completions` verified on `device=hip`; 20-iteration stability smoke loop
+  completed `20/20` identical runs with steady `147.8 MiB` post-exit VRAM.
+
 ### macOS (Apple Silicon, Metal) build
 
 On Apple Silicon, **MLX is the default and primary backend**; this OpenXLA path
@@ -118,7 +159,7 @@ driver registers via `use_all_available_drivers`).
 ### Precision (low-precision matmul)
 
 The contraction (matmul) input precision is authored in the emitted StableHLO
-graph, so it applies on every IREE target (CPU, CUDA, Metal, and future NPUs),
+graph, so it applies on every IREE target (CPU, CUDA, ROCm/HIP, Metal, and future NPUs),
 not just one backend:
 
 - `f16` / `bf16`: demote the f32 inputs of every `dot_general` to the narrow
@@ -128,7 +169,7 @@ not just one backend:
   slower).
 - `f32`: no demotion.
 
-**Default is per device:** `f16` on the GPU devices (`metal`, `cuda`), `f32` on
+**Default is per device:** `f16` on the GPU devices (`metal`, `cuda`, `hip`), `f32` on
 the CPU (`local-task` / `local-sync`). `MLXCEL_XLA_PRECISION` (`f16` | `bf16` |
 `f32`) overrides the default on any device. So on Apple Silicon the Metal path
 runs f16 by default:
@@ -556,14 +597,25 @@ Findings (GB10, IREE 3.11.0rc @ e4a3b04):
   upcasts `i8 -> i32` (17 `sext`, zero `dp4a` / `mma.*.s8`), so an int8 path would
   not beat f16 here.
 
+**ROCm (`hip` / `gfx1151`, IREE 3.12.0rc20260721, issue #851):** Re-running
+`scripts/xla/fusion_spike.sh` on `hip` (`--iree-rocm-target=gfx1151`) shows the
+same behavior: the packed decode graph emits `1,209` `flow.dispatch` ops under
+every fusion flag (`1,208` with aggressive-fusion), `dequant -> matmul` remains 2
+unfused dispatches (`0.07 tok/s` vs `11.30 tok/s` for `f16` load-time dequant,
+while remaining `64/64` token-exact), `--iree-global-opt-data-tiling` fails in
+`flow` lowering (`'tensor.expand_shape' op expected collapsed rank (2) to equal
+the number of reassociation maps (3)`), and
+`--iree-rocm-encoding-layout-resolver=pad` leaves the `1,209` dispatches
+unfused.
+
 **Split.** The graph-level dequant is necessary but the fused kernel is upstream
-IREE's job (a CUDA quantized-matmul codegen path / encoding resolver / ukernel that
-does not exist in 3.11.0). No in-tree representation or flag realizes it on CUDA. The
+IREE's job (a CUDA / ROCm quantized-matmul codegen path / encoding resolver / ukernel).
+No in-tree representation or flag realizes it on CUDA or ROCm. The
 realized low-precision bandwidth win today is **f16-resident weights (#572)**; the
-packed int8 path is a correctness-verified foundation but is dominated on CUDA until
-upstream fusion lands. #574 therefore ships the minimal in-tree packed representation
-(folding in the bf16 scales / biases limitation) and tracks the upstream fused
-quantized-matmul, rather than forcing an int8-beats-f16 win in-tree.
+packed int8 path is a correctness-verified foundation but is dominated on CUDA and
+ROCm until upstream fusion lands. #574 therefore ships the minimal in-tree packed
+representation (folding in the bf16 scales / biases limitation) and tracks the
+upstream fused quantized-matmul, rather than forcing an int8-beats-f16 win in-tree.
 
 ## File map
 

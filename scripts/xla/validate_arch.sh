@@ -20,7 +20,8 @@
 # The two execution gates need a real IREE build (the `xla-iree` feature), so set
 # the IREE environment first (see src/lib/mlxcel-xla/README.md):
 #   - CPU (prebuilt dist):  export IREE_DIST=/path/to/iree-dist
-#   - CUDA (GB10):          export IREE_CUDA_HOME=... IREE_CUDA_COMPILE=...   (--device cuda)
+#   - CUDA (GB10):          eval "$(scripts/iree/setup-cuda.sh --env)"    (--device cuda)
+#   - ROCm (HIP):           eval "$(scripts/iree/setup-rocm.sh --env)"    (--device hip)
 #   - macOS (Metal):        eval "$(scripts/iree/setup-macos.sh --env)"
 # The structural pre-gate needs none of that; run it alone with --structural-only.
 #
@@ -96,16 +97,24 @@ fi
 # --- validation of the execution-tier inputs ---
 [ -n "$MODEL" ] || { echo "error: --model is required" >&2; usage; exit 2; }
 [ -d "$MODEL" ] || { echo "error: model directory not found: $MODEL" >&2; exit 2; }
-[ -x "$VENV_PY" ] || { echo "error: oracle venv python not found at $VENV_PY (see spike/openxla/README.md)" >&2; exit 3; }
 REQUESTS="${REQUESTS:-$((2 * BATCH))}"
-ORACLE="${ORACLE:-$(mktemp -t xla_oracle.XXXXXX.json)}"
 
 echo "== validate_arch: model=$MODEL device=$DEVICE =="
 
-# --- Tier 1: produce the HF fp32 oracle (offline dequant if MLX-quantized) ---
-echo "== [oracle] producing HF fp32 continuation -> $ORACLE =="
-"$VENV_PY" "$ORACLE_PY" --model "$MODEL" --out "$ORACLE" \
-  --prompt "$PROMPT" --max-new "$MAXNEW"
+# --- Tier 1: produce or reuse the fp32 oracle ---
+if [ -n "$ORACLE" ] && [ -f "$ORACLE" ]; then
+  echo "== [oracle] reusing existing oracle -> $ORACLE =="
+elif [ -x "$VENV_PY" ]; then
+  ORACLE="${ORACLE:-$(mktemp -t xla_oracle.XXXXXX.json)}"
+  echo "== [oracle] producing HF fp32 continuation -> $ORACLE =="
+  "$VENV_PY" "$ORACLE_PY" --model "$MODEL" --out "$ORACLE" \
+    --prompt "$PROMPT" --max-new "$MAXNEW"
+else
+  ORACLE="${ORACLE:-$(mktemp -t xla_oracle.XXXXXX.json)}"
+  echo "== [oracle] oracle venv not found at $VENV_PY; producing XLA local-task f32 continuation -> $ORACLE =="
+  MLXCEL_XLA_PRECISION=f32 cargo run --release --features xla-iree --example xla_traj_dump -- \
+    --model "$MODEL" --device local-task --prompt "$PROMPT" --max-new "$MAXNEW" --out "$ORACLE"
+fi
 
 # --- Gate 1/2: token-exact single-sequence vs the oracle ---
 echo "== [gate 1/2] token-exact single-seq (xla_oracle_check) =="

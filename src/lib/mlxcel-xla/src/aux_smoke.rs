@@ -110,7 +110,10 @@ fn invocation_inputs<'a>(
     ]
 }
 
-fn generation_identity(compiler: &Path, flags: &[&str]) -> Result<String, String> {
+fn generation_identity<S: AsRef<str> + std::fmt::Debug>(
+    compiler: &Path,
+    flags: &[S],
+) -> Result<String, String> {
     let version = Command::new(compiler)
         .arg("--version")
         .output()
@@ -135,11 +138,11 @@ pub fn run_auxiliary_abi_smoke(device: &str) -> Result<AuxiliaryAbiSmokeReport, 
     let cache = std::env::temp_dir().join("mlxcel-xla-aux-smoke");
     std::fs::create_dir_all(&cache)
         .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
-    let vmfb = compile_one(&compiler, SMOKE_MLIR, flags, &cache, "aux-smoke", 0)?;
+    let vmfb = compile_one(&compiler, SMOKE_MLIR, &flags, &cache, "aux-smoke", 0)?;
     let contract = AuxiliaryArtifactContract::new_legacy_unqualified(
         "aux_smoke.main",
         "aux-smoke-config-v1",
-        generation_identity(&compiler, flags)?,
+        generation_identity(&compiler, &flags)?,
     )?;
     write_auxiliary_manifest(&vmfb, &contract, &[weight()])?;
 

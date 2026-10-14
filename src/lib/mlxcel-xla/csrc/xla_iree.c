@@ -574,8 +574,17 @@ static iree_status_t xla_llama_create_impl(
   IREE_RETURN_IF_ERROR(iree_runtime_instance_create(
       &inst_opts, iree_allocator_system(), &c->instance));
 
-  IREE_RETURN_IF_ERROR(iree_runtime_instance_try_create_default_device(
-      c->instance, iree_make_cstring_view(device_uri), &c->device));
+  iree_status_t status = iree_runtime_instance_try_create_default_device(
+      c->instance, iree_make_cstring_view(device_uri), &c->device);
+  if (!iree_status_is_ok(status)) {
+    return iree_status_annotate_f(
+        status,
+        "[runtime-init] failed to open IREE HAL device '%s' (check driver "
+        "registration, vendor runtime libraries such as libamdhip64.so / "
+        "libcuda.so.1, /dev/kfd + /dev/dri permissions, and visible-device "
+        "environment variables)",
+        device_uri);
+  }
 
   iree_runtime_session_options_t sess_opts;
   iree_runtime_session_options_initialize(&sess_opts);
@@ -583,9 +592,17 @@ static iree_status_t xla_llama_create_impl(
       c->instance, &sess_opts, c->device,
       iree_runtime_instance_host_allocator(c->instance), &c->session));
 
-  IREE_RETURN_IF_ERROR(xla_append_bundle(
+  status = xla_append_bundle(
       c, prefill_vmfb, prefill_embeddings_vmfb,
-      prefill_embeddings_deepstack_vmfb, decode_vmfb, prefill_diagnostics_vmfb));
+      prefill_embeddings_deepstack_vmfb, decode_vmfb, prefill_diagnostics_vmfb);
+  if (!iree_status_is_ok(status)) {
+    return iree_status_annotate_f(
+        status,
+        "[module-load] failed to load compiled VMFB bundle on device '%s' "
+        "(verify target architecture such as MLXCEL_XLA_ROCM_TARGET matches "
+        "the host GPU ASIC)",
+        device_uri);
+  }
 
   c->allocator = iree_runtime_session_device_allocator(c->session);
 
@@ -624,9 +641,13 @@ static iree_status_t xla_llama_create_impl(
                                 "unknown weight dtype %d for weight %d",
                                 weight_dtypes[i], i);
     }
-    IREE_RETURN_IF_ERROR(xla_alloc_bv(c, (iree_host_size_t)rank, shape, elt,
-                                      weight_data[i], nelem * esize,
-                                      &c->weights[i]));
+    status = xla_alloc_bv(c, (iree_host_size_t)rank, shape, elt,
+                          weight_data[i], nelem * esize, &c->weights[i]);
+    if (!iree_status_is_ok(status)) {
+      return iree_status_annotate_f(
+          status, "[weight-upload] failed to allocate/upload weight %d on '%s'",
+          i, device_uri);
+    }
   }
   return iree_ok_status();
 }
@@ -749,11 +770,9 @@ xla_ctx* xla_llama_create_bucket(const xla_ctx* base, const char* prefill_vmfb,
       prefill_embeddings_deepstack_vmfb, decode_vmfb, prefill_diagnostics_vmfb,
       context_capacity);
   if (!iree_status_is_ok(s)) {
-    char buf[512];
-    iree_host_size_t got = 0;
-    iree_status_format(s, sizeof(buf), buf, &got);
-    fprintf(stderr, "xla_llama_create_bucket failed: %.*s (code %d)\n", (int)got,
-            buf, (int)iree_status_code(s));
+    fprintf(stderr, "xla_llama_create_bucket failed (code %d):\n",
+            (int)iree_status_code(s));
+    iree_status_fprint(stderr, s);
     iree_status_ignore(s);
     xla_llama_free(c);
     return NULL;
@@ -798,11 +817,9 @@ xla_ctx* xla_llama_create(const char* device_uri, const char* prefill_vmfb,
                             deepstack_visual_positions,
                             deepstack_target_layers);
   if (!iree_status_is_ok(s)) {
-    char buf[512];
-    iree_host_size_t got = 0;
-    iree_status_format(s, sizeof(buf), buf, &got);
-    fprintf(stderr, "xla_llama_create failed: %.*s (code %d)\n", (int)got, buf,
+    fprintf(stderr, "xla_llama_create failed (code %d):\n",
             (int)iree_status_code(s));
+    iree_status_fprint(stderr, s);
     iree_status_ignore(s);
     xla_llama_free(c);
     return NULL;

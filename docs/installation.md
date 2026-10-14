@@ -63,6 +63,11 @@ builds, so those binaries compile none of it and the seam folds to MLX:
   - `IREE_CUDA_HOME` (+ `IREE_CUDA_COMPILE`): a source-built CUDA-enabled IREE
     runtime and a matching cuda-capable `iree-compile`, for the GB10-class GPU
     path. `scripts/iree/setup-cuda.sh` produces this tree.
+  - `IREE_ROCM_HOME` (+ `IREE_ROCM_COMPILE`): a source-built HIP/ROCm-enabled
+    IREE runtime (`IREE_HAL_DRIVER_HIP=ON`) and a matching rocm-capable
+    `iree-compile`, for the AMD ROCm GPU path (`gfx1151` / `gfx1100` /
+    `gfx942`). `scripts/iree/setup-rocm.sh` (or `make iree-rocm`) produces this
+    tree and prints the matching environment.
   - `IREE_MACOS_HOME` (+ `IREE_MACOS_COMPILE`): a source-built macOS runtime and
     a Metal-capable `iree-compile`, for the Apple Silicon dev path.
     `scripts/iree/setup-macos.sh` produces this tree and prints the matching

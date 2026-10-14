@@ -718,7 +718,7 @@ mod gemma3n_qmv_eligibility_tests {
 /// path baked at build time (the dist whose runtime is linked into this binary).
 /// Only the dist (CPU/vulkan) build uses this; the cuda build links a source-built
 /// runtime and takes its iree-compile from `MLXCEL_XLA_IREE_COMPILE` instead.
-#[cfg(not(xla_iree_cuda))]
+#[cfg(not(any(xla_iree_cuda, xla_iree_rocm)))]
 fn iree_dist() -> Result<PathBuf, String> {
     if let Ok(d) = std::env::var("IREE_DIST") {
         return Ok(PathBuf::from(d));
@@ -730,7 +730,7 @@ fn iree_dist() -> Result<PathBuf, String> {
 }
 
 /// The `iree-compile` binary used to lower the bundled graphs to vmfbs. In the
-/// cuda build the source-built runtime ships no compiler, so a cuda-capable
+/// CUDA or ROCm build the source-built runtime ships no compiler, so a GPU-capable
 /// iree-compile (version-matched to that runtime) is required via
 /// `MLXCEL_XLA_IREE_COMPILE` (runtime env, else baked at build); in the dist
 /// build it is the dist's own `bin/iree-compile`.
@@ -748,7 +748,14 @@ pub(crate) fn iree_compile_bin() -> Result<PathBuf, String> {
              (e.g. the pip iree-compile)"
             .to_string())
     }
-    #[cfg(not(xla_iree_cuda))]
+    #[cfg(xla_iree_rocm)]
+    {
+        Err("[compile] the ROCm build needs a ROCm-capable iree-compile: set \
+             MLXCEL_XLA_IREE_COMPILE to one matching the source runtime version \
+             (for example `eval \"$(scripts/iree/setup-rocm.sh --env)\"`)"
+            .to_string())
+    }
+    #[cfg(not(any(xla_iree_cuda, xla_iree_rocm)))]
     {
         let ic = iree_dist()?.join("bin/iree-compile");
         if !ic.exists() {
@@ -762,33 +769,18 @@ pub(crate) fn iree_compile_bin() -> Result<PathBuf, String> {
 }
 
 /// iree-compile target flags for a HAL device. `local-task`/`local-sync` -> the
-/// CPU (llvm-cpu) target; `cuda` -> the CUDA target (only usable in a cuda
-/// build, whose runtime registers the cuda driver and whose iree-compile has
-/// cuda codegen); `metal` -> the Metal target (metal-spirv codegen; the Apple
-/// Silicon dev path, where the macOS runtime registers the metal driver and the
-/// pinned macOS universal2 iree-compile has metal-spirv codegen).
-pub(crate) fn target_flags(device: &str) -> Result<&'static [&'static str], String> {
-    if device == "cuda" {
-        Ok(&["--iree-hal-target-device=cuda"])
-    } else if device == "metal" {
-        Ok(&["--iree-hal-target-device=metal"])
-    } else if device.starts_with("local") {
-        Ok(&[
-            "--iree-hal-target-device=local",
-            "--iree-hal-local-target-device-backends=llvm-cpu",
-        ])
-    } else {
-        Err(format!(
-            "unsupported OpenXLA device {device:?}; use \"local-task\" (CPU), \
-             \"metal\" (Apple Silicon GPU, macOS build), or \"cuda\" (cuda build)"
-        ))
-    }
+/// CPU (llvm-cpu) target; `cuda` -> the CUDA target; `hip` -> the ROCm/HIP target
+/// (`--iree-hal-target-device=hip` + `--iree-rocm-target=<MLXCEL_XLA_ROCM_TARGET>`);
+/// `metal` -> the Metal target (metal-spirv codegen on Apple Silicon).
+pub(crate) fn target_flags(device: &str) -> Result<Vec<String>, String> {
+    let rocm_target = std::env::var("MLXCEL_XLA_ROCM_TARGET").ok();
+    crate::emitter::target_flags_with_rocm_target(device, rocm_target.as_deref())
 }
 
-fn compiled_graph_paths(
+fn compiled_graph_paths<S: AsRef<str>>(
     iree_compile: &Path,
     mlir: &str,
-    flags: &[&str],
+    flags: &[S],
     cache: &Path,
     tag: &str,
     context_capacity: usize,
@@ -796,9 +788,9 @@ fn compiled_graph_paths(
     let mut h = std::collections::hash_map::DefaultHasher::new();
     mlir.hash(&mut h);
     for f in flags {
-        f.hash(&mut h);
+        f.as_ref().hash(&mut h);
     }
-    // Include the compiler path so a cuda vmfb is never reused for a cpu build
+    // Include the compiler path so a GPU vmfb is never reused for a CPU build
     // (or across iree-compile versions) just because the graph text matches.
     iree_compile.to_string_lossy().hash(&mut h);
     context_capacity.hash(&mut h);
@@ -809,10 +801,10 @@ fn compiled_graph_paths(
 }
 
 /// Return the cache path for one bundled graph without compiling it.
-pub(crate) fn cached_vmfb_path(
+pub(crate) fn cached_vmfb_path<S: AsRef<str>>(
     iree_compile: &Path,
     mlir: &str,
-    flags: &[&str],
+    flags: &[S],
     cache: &Path,
     tag: &str,
     context_capacity: usize,
@@ -824,10 +816,10 @@ pub(crate) fn cached_vmfb_path(
 ///
 /// Qualification-aware auxiliary caches use this to compile to a temporary
 /// sibling before atomically publishing the final VMFB.
-pub(crate) fn compile_one_to(
+pub(crate) fn compile_one_to<S: AsRef<str>>(
     iree_compile: &Path,
     mlir: &str,
-    flags: &[&str],
+    flags: &[S],
     cache: &Path,
     tag: &str,
     context_capacity: usize,
@@ -836,9 +828,12 @@ pub(crate) fn compile_one_to(
     let (mlir_path, _) =
         compiled_graph_paths(iree_compile, mlir, flags, cache, tag, context_capacity);
     std::fs::write(&mlir_path, mlir).map_err(|e| format!("write {}: {e}", mlir_path.display()))?;
-    let out = Command::new(iree_compile)
-        .arg("--iree-input-type=stablehlo")
-        .args(flags)
+    let mut cmd = Command::new(iree_compile);
+    cmd.arg("--iree-input-type=stablehlo");
+    for flag in flags {
+        cmd.arg(flag.as_ref());
+    }
+    let out = cmd
         .arg(&mlir_path)
         .arg("-o")
         .arg(output)
@@ -846,7 +841,7 @@ pub(crate) fn compile_one_to(
         .map_err(|e| format!("run {}: {e}", iree_compile.display()))?;
     if !out.status.success() {
         return Err(format!(
-            "iree-compile failed for {tag}: {}",
+            "[compile] iree-compile failed for {tag}: {}",
             String::from_utf8_lossy(&out.stderr)
         ));
     }
@@ -855,10 +850,10 @@ pub(crate) fn compile_one_to(
 
 /// Compile one bundled graph to a vmfb, cached by a hash of its text + flags so
 /// repeated loads skip the ~3 s compile.
-pub(crate) fn compile_one(
+pub(crate) fn compile_one<S: AsRef<str>>(
     iree_compile: &Path,
     mlir: &str,
-    flags: &[&str],
+    flags: &[S],
     cache: &Path,
     tag: &str,
     context_capacity: usize,
@@ -913,9 +908,9 @@ fn compile_bundle(
             iree_compile.display()
         ));
     }
-    let mut flags = target_flags(device)?.to_vec();
+    let mut flags = target_flags(device)?;
     if gemma3n_qmv {
-        flags.push("--iree-cuda-target=sm_80");
+        flags.push("--iree-cuda-target=sm_80".to_string());
     }
     let cache = std::env::temp_dir().join("mlxcel-xla-vmfb");
     std::fs::create_dir_all(&cache).map_err(|e| format!("mkdir {}: {e}", cache.display()))?;
@@ -1046,9 +1041,9 @@ fn compile_gemma3n_diagnostics(
     let cache = std::env::temp_dir().join("mlxcel-xla-vmfb");
     std::fs::create_dir_all(&cache)
         .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
-    let mut flags = target_flags(device)?.to_vec();
+    let mut flags = target_flags(device)?;
     if native_qmv {
-        flags.push("--iree-cuda-target=sm_80");
+        flags.push("--iree-cuda-target=sm_80".to_string());
     }
     let vmfb = compile_one(
         &compiler,
@@ -1963,9 +1958,22 @@ fn create_ctx_with_diagnostics(
     drop(ptrs);
     drop(bufs);
     if ctx.is_null() {
-        return Err(
-            "xla_llama_create failed (IREE runtime; see stderr for the status)".to_string(),
-        );
+        if device == "hip" {
+            let target = std::env::var("MLXCEL_XLA_ROCM_TARGET")
+                .unwrap_or_else(|_| "<unset>".to_string());
+            return Err(format!(
+                "[runtime-init / module-load] xla_llama_create failed on device=\"hip\" \
+                 (MLXCEL_XLA_ROCM_TARGET={target}): see the IREE status on stderr above. \
+                 Verify that (1) mlxcel was built with IREE_ROCM_HOME (`make iree-rocm`), \
+                 (2) libamdhip64.so is reachable and /dev/kfd + /dev/dri/renderD* are \
+                 accessible, (3) HIP_VISIBLE_DEVICES selects a valid GPU, and \
+                 (4) MLXCEL_XLA_ROCM_TARGET matches the host GPU ASIC (`rocminfo | grep -E 'Name:\\s+gfx'`)."
+            ));
+        }
+        return Err(format!(
+            "[runtime-init / module-load] xla_llama_create failed on device={device:?} \
+             (IREE runtime; see stderr for the annotated status)"
+        ));
     }
     Ok(ctx)
 }
