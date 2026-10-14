@@ -158,10 +158,11 @@ const FUSED_MOE_MAX_DFF_CUDA: i32 = 8192;
 ///
 /// The cap is family-agnostic, but it only governs families whose fused decode
 /// goes through the shared [`SwitchGLU::forward_fused_kernel`]: AFMoE,
-/// BailingMoe, Cohere2Moe, DBRX, dots.llm1, Klear, Laguna, LFM2, Mellum,
-/// MiniMax, Mixtral, OLMoE, PhiMoE (phi-3.5-moe), Qwen2Moe, Qwen3-MoE and
-/// Qwen3-VL-MoE (and the Qwen3-Omni-MoE thinker, which is built as a
-/// `Qwen3VLMoeModel`). Two families still drive a fused kernel from their own
+/// BailingMoe, Cohere2Moe, DBRX, dots.llm1, GraniteMoeHybrid, Inkling, Klear,
+/// Laguna, LFM2, Mellum, MiniMax, Mixtral, OLMoE, PhiMoE (phi-3.5-moe),
+/// Qwen2Moe, Qwen3-MoE and Qwen3-VL-MoE (and the Qwen3-Omni-MoE thinker, which
+/// is built as a `Qwen3VLMoeModel`). Two families still drive a fused kernel
+/// from their own
 /// expert type and do not read it: `qwen3_next.rs` (Qwen3Next, Qwen3.5 and the
 /// Qwen3-Omni-MoE talker, SwiGLU kernel) and `gemma4.rs` (GeGLU kernel), and
 /// NemotronH's opt-in `MLXCEL_FUSED_MOE_RELU2` path launches the down kernel
@@ -441,10 +442,10 @@ impl SwitchLinear {
     /// Gathered expert matmul for `indices` (the per-token expert ids), with
     /// MLX's default `lhs_indices`.
     ///
-    /// Used by: DeepSeek, DeepSeekV4Moe, Ernie4_5Moe, ExaOneMoe, Gemma4,
-    ///          GLM4Moe, GLM4MoeLite, GptOss, HunyuanMoe, Llama4, MiniMaxM3Moe,
-    ///          Moondream3, NemotronH, Phixtral, Qwen3Next (each drives its
-    ///          own projections)
+    /// Used by: DeepSeek, Ernie4_5Moe, ExaOneMoe, Gemma4, GLM4Moe, GLM4MoeLite,
+    ///          GptOss, HunyuanMoe, Llama4, MiniMaxM3Moe, Moondream3,
+    ///          NemotronH, Phixtral, Qwen3Next (each drives its own
+    ///          projections)
     pub fn forward(&self, x: &MlxArray, indices: &MlxArray, sorted: bool) -> UniquePtr<MlxArray> {
         self.forward_indexed(x, None, indices, sorted)
     }
@@ -469,7 +470,8 @@ impl SwitchLinear {
     /// therefore shares only the `uint32` ids.
     ///
     /// Used by: `SwitchLinear::forward`, `SwitchGLU::forward`,
-    ///          `SwitchGLU::forward_with_expert_scales`
+    ///          `SwitchGLU::forward_with_expert_scales`,
+    ///          `DeepSeekV4Moe` (`LimitedSwitchGlu::forward`)
     pub(crate) fn forward_indexed(
         &self,
         x: &MlxArray,
@@ -1217,8 +1219,8 @@ impl SwitchGLU {
     /// caller (`MLXCEL_FUSED_MOE`).
     ///
     /// Used by: AfMoE, BailingMoe, Cohere2Moe, Dbrx, Dots1, GraniteMoeHybrid,
-    ///          Klear, Laguna, Lfm2, Mellum, MiniMax, Mixtral, OLMoE, PhiMoE,
-    ///          Qwen2Moe, Qwen3Moe, and Qwen3VLMoE
+    ///          Inkling, Klear, Laguna, Lfm2, Mellum, MiniMax, Mixtral, OLMoE,
+    ///          PhiMoE, Qwen2Moe, Qwen3Moe, and Qwen3VLMoE
     pub fn forward_fused_kernel(
         &self,
         x: &MlxArray,
@@ -1430,7 +1432,8 @@ pub(crate) struct GatherIndices {
 /// produce inside each `gather_qmm` / `gather_mm` call, so passing these
 /// changes the graph's node count and nothing else.
 ///
-/// Used by: `SwitchGLU::forward`, `SwitchGLU::forward_with_expert_scales`
+/// Used by: `SwitchGLU::forward`, `SwitchGLU::forward_with_expert_scales`,
+///          `DeepSeekV4Moe` (`LimitedSwitchGlu::forward`)
 pub(crate) fn prepare_gather_indices(x: &MlxArray, indices: &MlxArray) -> GatherIndices {
     let rhs = mlxcel_core::astype(indices, dtype::UINT32);
     let x_shape = mlxcel_core::array_shape(x);

@@ -18,7 +18,7 @@ use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, dtype};
 
 use super::{InklingConfig, weight};
-use crate::models::switch_layers::{SwitchGLU, moe_weighted_sum};
+use crate::models::switch_layers::{SwitchGLU, fused_moe_enabled, moe_weighted_sum};
 
 pub(crate) enum InklingMlp {
     Dense(InklingDenseMlp),
@@ -214,13 +214,32 @@ impl InklingSparseMoe {
             self.top_k,
             self.route_scale,
         );
-        let experts = self.switch_mlp.forward_with_expert_scales(
-            &flat,
-            &indices,
-            self.gate_scale.as_deref(),
-            self.out_scale.as_deref(),
-        );
-        let routed = moe_weighted_sum(&experts, &routed_weights, mlxcel_core::array_dtype(x));
+        // Single-token decode tries the fused affine kernel (issue #1859);
+        // NVFP4 experts and any plane carrying ModelOpt gate/out scale
+        // sidecars stay on the gather path.
+        let fused = if mlxcel_core::array_shape(&flat)[0] == 1
+            && self.gate_scale.is_none()
+            && self.out_scale.is_none()
+            && fused_moe_enabled()
+        {
+            self.switch_mlp
+                .forward_fused_kernel(&flat, &indices, &routed_weights)
+                .map(|out| mlxcel_core::reshape(&out, &[1, hidden]))
+        } else {
+            None
+        };
+        let routed = match fused {
+            Some(out) => out,
+            None => {
+                let experts = self.switch_mlp.forward_with_expert_scales(
+                    &flat,
+                    &indices,
+                    self.gate_scale.as_deref(),
+                    self.out_scale.as_deref(),
+                );
+                moe_weighted_sum(&experts, &routed_weights, mlxcel_core::array_dtype(x))
+            }
+        };
 
         let shared_gate = self.shared_gate.forward(&flat);
         let shared_up = self.shared_up.forward(&flat);
@@ -275,6 +294,87 @@ pub(crate) fn route_weights(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::models::switch_layers::insert_honest_affine_swiglu_experts;
+    use serde_json::json;
+
+    const FUSED_HIDDEN: i32 = 64;
+    const FUSED_DFF: i32 = 64;
+    const FUSED_ROUTED: i32 = 2;
+    const FUSED_SHARED: i32 = 1;
+    const FUSED_TOPK: i32 = 2;
+
+    fn values(n: usize, start: f32, step: f32) -> Vec<f32> {
+        (0..n)
+            .map(|i| start + ((i * 7 + 3) % 19) as f32 * step)
+            .collect()
+    }
+
+    fn honest_affine_sparse_moe() -> InklingSparseMoe {
+        let config: InklingConfig = serde_json::from_value(json!({
+            "quantization": {"group_size": 64, "bits": 4},
+            "text_config": {
+                "hidden_size": FUSED_HIDDEN,
+                "num_hidden_layers": 1,
+                "dense_mlp_idx": 0,
+                "mlp_layer_types": ["sparse"],
+                "intermediate_size": FUSED_DFF,
+                "dense_intermediate_size": FUSED_DFF,
+                "n_routed_experts": FUSED_ROUTED,
+                "num_experts_per_tok": FUSED_TOPK,
+                "n_shared_experts": FUSED_SHARED,
+                "route_scale": 8.0
+            }
+        }))
+        .expect("config parses");
+
+        let mut weights = WeightMap::new();
+        let prefix = "model.layers.0.mlp";
+        insert_honest_affine_swiglu_experts(
+            &mut weights,
+            &format!("{prefix}.switch_mlp"),
+            FUSED_ROUTED,
+            FUSED_HIDDEN,
+            FUSED_DFF,
+        );
+        let total_experts = FUSED_ROUTED + FUSED_SHARED;
+        weights.insert(
+            format!("{prefix}.gate_weight"),
+            mlxcel_core::astype(
+                &mlxcel_core::from_slice_f32(
+                    &values((total_experts * FUSED_HIDDEN) as usize, -0.2, 0.025),
+                    &[total_experts, FUSED_HIDDEN],
+                ),
+                dtype::BFLOAT16,
+            ),
+        );
+        weights.insert(
+            format!("{prefix}.e_score_correction_bias"),
+            mlxcel_core::from_slice_f32(&[0.1, -0.05], &[FUSED_ROUTED]),
+        );
+        weights.insert(
+            format!("{prefix}.global_scale"),
+            mlxcel_core::from_slice_f32(&[1.25], &[1]),
+        );
+        for (leaf, rows, cols, seed) in [
+            ("gate_proj", FUSED_SHARED * FUSED_DFF, FUSED_HIDDEN, 1usize),
+            ("up_proj", FUSED_SHARED * FUSED_DFF, FUSED_HIDDEN, 2),
+            ("down_proj", FUSED_HIDDEN, FUSED_SHARED * FUSED_DFF, 3),
+        ] {
+            weights.insert(
+                format!("{prefix}.shared_experts.{leaf}.weight"),
+                mlxcel_core::astype(
+                    &mlxcel_core::from_slice_f32(
+                        &values((rows * cols) as usize, -0.15 * seed as f32, 0.01),
+                        &[rows, cols],
+                    ),
+                    dtype::BFLOAT16,
+                ),
+            );
+        }
+        InklingSparseMoe::from_weights(&weights, &config, 0).expect("sparse MoE loads")
+    }
+
     #[test]
     fn concatenated_shared_experts_equal_explicit_expert_sum() {
         const TOKENS: usize = 2;
@@ -334,5 +434,155 @@ mod tests {
         assert!(mlxcel_core::item_bool(&mlxcel_core::allclose(
             &actual, &expected, 1e-5, 1e-5
         )));
+    }
+
+    /// Issue #1859: `InklingSparseMoe::forward` never called
+    /// `SwitchGLU::forward_fused_kernel`, so affine checkpoints like
+    /// `inkling-small-mlx-4bit` (`gate_scale: None, out_scale: None`) always
+    /// took the `forward_with_expert_scales` + `moe_weighted_sum` gather path
+    /// at single-token decode. When the fused MoE ports are available and
+    /// `MLXCEL_FUSED_MOE` is enabled, a single-token forward on an unscaled
+    /// affine block must route through `forward_fused_kernel` and match its
+    /// output bit-for-bit, while agreeing with the gather fallback within
+    /// quantization tolerance.
+    #[test]
+    fn inkling_sparse_moe_routes_one_token_affine_through_fused_kernel() {
+        if !mlxcel_core::fused_moe_kernels_available() {
+            eprintln!("skipping: this backend has no fused MoE kernel port (#1803)");
+            return;
+        }
+        if !fused_moe_enabled() {
+            eprintln!("skipping: MLXCEL_FUSED_MOE disables the routing this test pins");
+            return;
+        }
+
+        let moe = honest_affine_sparse_moe();
+        let x = mlxcel_core::astype(
+            &mlxcel_core::from_slice_f32(
+                &values(FUSED_HIDDEN as usize, -0.4, 0.0125),
+                &[1, 1, FUSED_HIDDEN],
+            ),
+            dtype::BFLOAT16,
+        );
+        let flat = mlxcel_core::reshape(&x, &[1, FUSED_HIDDEN]);
+        let logits = mlxcel_core::matmul(&flat, &mlxcel_core::transpose(&moe.gate_weight));
+        let (indices, routed_weights, shared_weights) = route_weights(
+            &logits,
+            &moe.correction_bias,
+            &moe.global_scale,
+            moe.n_routed,
+            moe.n_shared,
+            moe.top_k,
+            moe.route_scale,
+        );
+
+        let fused_routed = moe
+            .switch_mlp
+            .forward_fused_kernel(&flat, &indices, &routed_weights)
+            .expect("honest affine 4-bit experts of dff 64 must dispatch the fused kernel");
+        let fused_routed = mlxcel_core::reshape(&fused_routed, &[1, FUSED_HIDDEN]);
+        let gather_routed = moe_weighted_sum(
+            &moe.switch_mlp.forward(&flat, &indices),
+            &routed_weights,
+            dtype::BFLOAT16,
+        );
+
+        let shared_gate = moe.shared_gate.forward(&flat);
+        let shared_up = moe.shared_up.forward(&flat);
+        let shared = mlxcel_core::compiled_swiglu_activation(&shared_gate, &shared_up);
+        let shared_weights =
+            mlxcel_core::astype(&shared_weights, mlxcel_core::array_dtype(&shared));
+        let gamma = mlxcel_core::repeat(&shared_weights, moe.intermediate, -1);
+        let shared = mlxcel_core::multiply(&shared, &gamma);
+        let shared = moe.shared_down.forward(&shared);
+
+        let fused_total = mlxcel_core::reshape(
+            &mlxcel_core::astype(&mlxcel_core::add(&fused_routed, &shared), dtype::BFLOAT16),
+            &[1, 1, FUSED_HIDDEN],
+        );
+        let gather_total = mlxcel_core::reshape(
+            &mlxcel_core::astype(&mlxcel_core::add(&gather_routed, &shared), dtype::BFLOAT16),
+            &[1, 1, FUSED_HIDDEN],
+        );
+
+        let actual = moe.forward(&x);
+        assert!(
+            mlxcel_core::item_bool(&mlxcel_core::array_equal(&actual, &fused_total, false)),
+            "one-token affine InklingSparseMoe::forward must take the fused kernel path"
+        );
+
+        let actual_f32 =
+            mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(&actual, dtype::FLOAT32));
+        let gather_f32 = mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(
+            &gather_total,
+            dtype::FLOAT32,
+        ));
+        let diff_sq: f64 = actual_f32
+            .iter()
+            .zip(&gather_f32)
+            .map(|(a, b)| f64::from(a - b).powi(2))
+            .sum();
+        let ref_sq: f64 = gather_f32.iter().map(|b| f64::from(*b).powi(2)).sum();
+        let nrms = (diff_sq / ref_sq.max(1e-20)).sqrt();
+        assert!(
+            actual_f32.iter().all(|v| v.is_finite()) && nrms < 0.1,
+            "fused InklingSparseMoe output must agree with gather reference: nrms {nrms:e}"
+        );
+    }
+
+    /// Issue #1859 guard: if `gate_scale` or `out_scale` is present on an
+    /// `InklingSparseMoe` block, single-token `forward` must NOT bypass those
+    /// per-expert sidecar scales via `forward_fused_kernel`.
+    #[test]
+    fn inkling_sparse_moe_with_expert_scales_stays_on_scaled_gather_path() {
+        let mut moe = honest_affine_sparse_moe();
+        let gate_scale = mlxcel_core::from_slice_f32(&[2.5, 0.25], &[FUSED_ROUTED]);
+        let out_scale = mlxcel_core::from_slice_f32(&[3.0, 0.5], &[FUSED_ROUTED]);
+        moe.gate_scale = Some(mlxcel_core::copy(&gate_scale));
+        moe.out_scale = Some(mlxcel_core::copy(&out_scale));
+
+        let x = mlxcel_core::astype(
+            &mlxcel_core::from_slice_f32(
+                &values(FUSED_HIDDEN as usize, -0.4, 0.0125),
+                &[1, 1, FUSED_HIDDEN],
+            ),
+            dtype::BFLOAT16,
+        );
+        let flat = mlxcel_core::reshape(&x, &[1, FUSED_HIDDEN]);
+        let logits = mlxcel_core::matmul(&flat, &mlxcel_core::transpose(&moe.gate_weight));
+        let (indices, routed_weights, shared_weights) = route_weights(
+            &logits,
+            &moe.correction_bias,
+            &moe.global_scale,
+            moe.n_routed,
+            moe.n_shared,
+            moe.top_k,
+            moe.route_scale,
+        );
+        let experts = moe.switch_mlp.forward_with_expert_scales(
+            &flat,
+            &indices,
+            Some(&gate_scale),
+            Some(&out_scale),
+        );
+        let routed = moe_weighted_sum(&experts, &routed_weights, dtype::BFLOAT16);
+        let shared_gate = moe.shared_gate.forward(&flat);
+        let shared_up = moe.shared_up.forward(&flat);
+        let shared = mlxcel_core::compiled_swiglu_activation(&shared_gate, &shared_up);
+        let shared_weights =
+            mlxcel_core::astype(&shared_weights, mlxcel_core::array_dtype(&shared));
+        let gamma = mlxcel_core::repeat(&shared_weights, moe.intermediate, -1);
+        let shared = mlxcel_core::multiply(&shared, &gamma);
+        let shared = moe.shared_down.forward(&shared);
+        let expected = mlxcel_core::reshape(
+            &mlxcel_core::astype(&mlxcel_core::add(&routed, &shared), dtype::BFLOAT16),
+            &[1, 1, FUSED_HIDDEN],
+        );
+
+        let actual = moe.forward(&x);
+        assert!(
+            mlxcel_core::item_bool(&mlxcel_core::array_equal(&actual, &expected, false)),
+            "scaled InklingSparseMoe must stay on forward_with_expert_scales at one token"
+        );
     }
 }
