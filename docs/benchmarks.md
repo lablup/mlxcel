@@ -1260,6 +1260,10 @@ quantizing the drafter to 4-bit (#1185 Phase 3) is what moved it to
 break-even, and it did not move it past. Nothing measured here argues for
 enabling this pairing on generation 13.
 
+### Gemma 4 12B long-context exactness
+
+The [M1 Ultra 12B investigation](benchmark_results/gemma4-12b-mtp-exactness-m1-ultra-2026-10-15.md) reproduces a long buffered verify mismatch despite passing short startup draws. Matching sliding-ring order, maskless single-query full attention and classic prefill chunking restores the measured width-4 path: zero disagreements on 256 teacher-forced positions (155 decided), and three byte-identical 256-token completions behind 1,238–1,638-token prompts. The 12B startup guard now includes the long buffered draw; unsupported layouts still decline rather than bypassing exactness. This is M1 Ultra evidence, not M5 or CUDA validation. See the record for performance and measurement limitations.
+
 ### Gemma 4 31B + bf16 assistant
 
 **Current exactness (2026-09-26, #1983/#1279):** both QAT and non-QAT 31B now pass the startup probe after the automatic narrow-kernel retry on M5 Max, without `MLXCEL_MTP_ALLOW_INEXACT`. Non-QAT widths 2, 3 and 4 all pass. The fix matches full-attention query/mask geometry, sliding-cache physical ring order, and classic prefill chunking. It is limited to singleton linear verification; batched MTP falls back to classic; nonlinear tree rounds are disabled, so dispatch uses the supported linear path. See the [matched QAT/non-QAT measurements](benchmark_results/gemma4-31b-mtp-exactness-2026-09-26.md) for long-context logit metrics, greedy parity and current test-fast throughput. The static hardware preference remains subordinate to measured exactness and adaptive profitability.

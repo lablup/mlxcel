@@ -34,7 +34,7 @@ pub(super) fn linear_verify_layout(
 
 /// Row-wise verify attention for the geometries where a batched M=K block
 /// and classic M=1 decode select different kernels or reductions (31B
-/// everywhere, 12B on CUDA; see `TextConfig::mtp_requires_linear_singleton`).
+/// and 12B; see `TextConfig::mtp_requires_linear_singleton`).
 ///
 /// `window == 0` is a full-attention layer. A sliding layer whose cache holds
 /// the MTP rotating buffer reports a `ring_cursor` and gets the physical ring

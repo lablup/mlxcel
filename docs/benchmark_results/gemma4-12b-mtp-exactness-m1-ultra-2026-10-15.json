@@ -1,0 +1,1504 @@
+{
+  "hardware": "Apple M1 Ultra, 128 GiB, Metal",
+  "date": "2026-10-15 KST",
+  "diagnostic_base": "a269883588c3a3b40ef2bcc56096ee7f6435647b",
+  "mlx_pin": "243bdf09",
+  "profile": "test-fast",
+  "artifacts_sha256": {
+    "diag-baseline-server": "b60e1cba62156c6dfa04c9875ce3f3601502370c60c8524bb6fe42af8bc9edc9",
+    "diagnostic-baseline.patch": "7ff9fb734998a6b8a8823a2c24e17024475813adda54a5505775bf1a86a10551",
+    "diag-attention-server": "fac4bed92c7cdaa2a390fac38ba21fc03f38aac9ed9787044ec1e36b335b5e9b",
+    "diagnostic-attention.patch": "d2e257f5b441a2276dbb3442c76739c612052ceaf3cf0e1cc1d7d83c4e53b018",
+    "candidate-testfast-server": "1c71d7ef1f1edb4cdd3ea63b5df01dc1a510e7f716cf77d2abfe4030134a4d9e",
+    "candidate-logit-trace": "34eedc96b94f62cfb1e7404ef3905c55d15d4c2061e8de9259f1c7ac0aba74cc"
+  },
+  "checkpoint_config_sha256": {
+    "gemma-4-12b-it-4bit": "a17d0966c7e4be270f5ce096e286935ad4386d8262c9c6d6982e61ed4d50f286",
+    "gemma-4-12b-it-assistant-4bit": "09eec70b34616c5f48abca37b396a75a6f29776d548424228e6d0593fe49a844",
+    "gemma-4-31b-it-4bit": "f24fd0f1114e77bc4b3ffb539292702aa63806eed63669d2ada9d549705f51e2",
+    "gemma-4-31b-it-assistant-bf16": "d09487c1083a334a97545f204dd41ab1a40b0438bdead19558f0e1357e26d66a",
+    "qwen3.8-27b-4bit": "14b65a0ee06517060a6bbd979bb1a8ff54e7b304b1a1f01d54344b88b8285e85",
+    "qwen3.8-27b-mtp-4bit": "16094efa6177985ab3725a9d6d61d6ab248b71e4b42a114efddcdb2aaddc0a55"
+  },
+  "runs": {
+    "policy-classic": {
+      "command": [
+        "/private/tmp/mlxcel-1986-diag-attention-server",
+        "--model",
+        "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-4bit",
+        "--parallel",
+        "1",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "19866",
+        "--batch-size",
+        "512",
+        "--ctx-size",
+        "16384"
+      ],
+      "environment": {
+        "MLXCEL_QMV_WIDE": "0",
+        "MLXCEL_ENABLE_MTP_B1": "1",
+        "MLXCEL_MTP_ADAPTIVE": "0",
+        "MLXCEL_MTP_SLICE_GRANT_ROUNDS": "0"
+      },
+      "load_before": [
+        4.86181640625,
+        5.88037109375,
+        5.8251953125
+      ],
+      "health_seconds": 4.38373587501701,
+      "exit": -15,
+      "results": [
+        {
+          "label": "0-science",
+          "wall_s": 12.653938499977812,
+          "load_before": [
+            4.79248046875,
+            5.84912109375,
+            5.814453125
+          ],
+          "load_after": [
+            4.83056640625,
+            5.8212890625,
+            5.8046875
+          ],
+          "tokens_evaluated": 1638,
+          "tokens_predicted": 256,
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 1638,
+            "prompt_ms": 5524.0,
+            "prompt_per_token_ms": 3.3724053724053724,
+            "prompt_per_second": 296.52425778421434,
+            "predicted_n": 256,
+            "predicted_ms": 7123.0,
+            "predicted_per_token_ms": 27.933333333333334,
+            "predicted_per_second": 35.79952267303103
+          },
+          "text_sha256": "0dbc5cb5ccaa4b21b5c7c7313694633a79bb0db44da20f15b529ffee9ada35e1"
+        },
+        {
+          "label": "0-software",
+          "wall_s": 11.116661250009201,
+          "load_before": [
+            4.83056640625,
+            5.8212890625,
+            5.8046875
+          ],
+          "load_after": [
+            4.4013671875,
+            5.6953125,
+            5.759765625
+          ],
+          "tokens_evaluated": 1338,
+          "tokens_predicted": 256,
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 1338,
+            "prompt_ms": 3954.0,
+            "prompt_per_token_ms": 2.9551569506726456,
+            "prompt_per_second": 338.391502276176,
+            "predicted_n": 256,
+            "predicted_ms": 7158.0,
+            "predicted_per_token_ms": 28.070588235294117,
+            "predicted_per_second": 35.62447611064543
+          },
+          "text_sha256": "1770852d1cbde47c54d6b657f7e52a09019dff67ba2c5968377b566221927536"
+        },
+        {
+          "label": "0-history",
+          "wall_s": 10.645726124988869,
+          "load_before": [
+            4.4013671875,
+            5.6953125,
+            5.759765625
+          ],
+          "load_after": [
+            4.265625,
+            5.62255859375,
+            5.73291015625
+          ],
+          "tokens_evaluated": 1238,
+          "tokens_predicted": 256,
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 1238,
+            "prompt_ms": 3542.0,
+            "prompt_per_token_ms": 2.861066235864297,
+            "prompt_per_second": 349.5200451722191,
+            "predicted_n": 256,
+            "predicted_ms": 7099.0,
+            "predicted_per_token_ms": 27.83921568627451,
+            "predicted_per_second": 35.92055219044936
+          },
+          "text_sha256": "111352576aab1e1d7a78711b8951d6400da58926fb5b15c78d1d9cc3018fe7e9"
+        }
+      ]
+    },
+    "policy-classic-repeat": {
+      "command": [
+        "/private/tmp/mlxcel-1986-diag-attention-server",
+        "--model",
+        "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-4bit",
+        "--parallel",
+        "1",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "19866",
+        "--batch-size",
+        "512",
+        "--ctx-size",
+        "16384"
+      ],
+      "environment": {
+        "MLXCEL_QMV_WIDE": "0",
+        "MLXCEL_ENABLE_MTP_B1": "1",
+        "MLXCEL_MTP_ADAPTIVE": "0",
+        "MLXCEL_MTP_SLICE_GRANT_ROUNDS": "0"
+      },
+      "load_before": [
+        4.85107421875,
+        5.4345703125,
+        5.64501953125
+      ],
+      "health_seconds": 4.355929582961835,
+      "exit": -15,
+      "results": [
+        {
+          "label": "0-science",
+          "wall_s": 11.806887166923843,
+          "load_before": [
+            4.78271484375,
+            5.41064453125,
+            5.63525390625
+          ],
+          "load_after": [
+            4.7353515625,
+            5.38037109375,
+            5.62158203125
+          ],
+          "tokens_evaluated": 1638,
+          "tokens_predicted": 256,
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 1638,
+            "prompt_ms": 4710.0,
+            "prompt_per_token_ms": 2.8754578754578755,
+            "prompt_per_second": 347.77070063694265,
+            "predicted_n": 256,
+            "predicted_ms": 7093.0,
+            "predicted_per_token_ms": 27.815686274509805,
+            "predicted_per_second": 35.950937544057524
+          },
+          "text_sha256": "0dbc5cb5ccaa4b21b5c7c7313694633a79bb0db44da20f15b529ffee9ada35e1"
+        },
+        {
+          "label": "0-software",
+          "wall_s": 10.962935124989599,
+          "load_before": [
+            4.7353515625,
+            5.38037109375,
+            5.62158203125
+          ],
+          "load_after": [
+            4.775390625,
+            5.36767578125,
+            5.61376953125
+          ],
+          "tokens_evaluated": 1338,
+          "tokens_predicted": 256,
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 1338,
+            "prompt_ms": 3802.0,
+            "prompt_per_token_ms": 2.8415545590433484,
+            "prompt_per_second": 351.92004208311414,
+            "predicted_n": 256,
+            "predicted_ms": 7156.0,
+            "predicted_per_token_ms": 28.062745098039215,
+            "predicted_per_second": 35.63443264393516
+          },
+          "text_sha256": "1770852d1cbde47c54d6b657f7e52a09019dff67ba2c5968377b566221927536"
+        },
+        {
+          "label": "0-history",
+          "wall_s": 10.72060895897448,
+          "load_before": [
+            4.775390625,
+            5.36767578125,
+            5.61376953125
+          ],
+          "load_after": [
+            4.81591796875,
+            5.35546875,
+            5.60595703125
+          ],
+          "tokens_evaluated": 1238,
+          "tokens_predicted": 256,
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 1238,
+            "prompt_ms": 3568.0,
+            "prompt_per_token_ms": 2.8820678513731823,
+            "prompt_per_second": 346.97309417040356,
+            "predicted_n": 256,
+            "predicted_ms": 7148.0,
+            "predicted_per_token_ms": 28.031372549019608,
+            "predicted_per_second": 35.67431449356464
+          },
+          "text_sha256": "111352576aab1e1d7a78711b8951d6400da58926fb5b15c78d1d9cc3018fe7e9"
+        }
+      ]
+    },
+    "policy-classic-whole": {
+      "command": [
+        "/private/tmp/mlxcel-1986-diag-attention-server",
+        "--model",
+        "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-4bit",
+        "--parallel",
+        "1",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "19866",
+        "--batch-size",
+        "16384",
+        "--ctx-size",
+        "16384"
+      ],
+      "environment": {
+        "MLXCEL_QMV_WIDE": "0",
+        "MLXCEL_ENABLE_MTP_B1": "1",
+        "MLXCEL_MTP_ADAPTIVE": "0",
+        "MLXCEL_MTP_SLICE_GRANT_ROUNDS": "0"
+      },
+      "load_before": [
+        4.5078125,
+        5.45947265625,
+        5.66455078125
+      ],
+      "health_seconds": 4.36366179108154,
+      "exit": -15,
+      "results": [
+        {
+          "label": "0-science",
+          "wall_s": 11.550643457914703,
+          "load_before": [
+            4.70703125,
+            5.48486328125,
+            5.67236328125
+          ],
+          "load_after": [
+            5.12646484375,
+            5.55029296875,
+            5.69287109375
+          ],
+          "tokens_evaluated": 1638,
+          "tokens_predicted": 256,
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 1638,
+            "prompt_ms": 4399.0,
+            "prompt_per_token_ms": 2.6855921855921854,
+            "prompt_per_second": 372.35735394407817,
+            "predicted_n": 256,
+            "predicted_ms": 7147.0,
+            "predicted_per_token_ms": 28.027450980392157,
+            "predicted_per_second": 35.67930600251854
+          },
+          "text_sha256": "5f05bb6bd851161ab22a8988f67562f97dab7ecae7f65ebcd7778ebe39fde34e"
+        },
+        {
+          "label": "0-software",
+          "wall_s": 10.694066166994162,
+          "load_before": [
+            5.12646484375,
+            5.55029296875,
+            5.69287109375
+          ],
+          "load_after": [
+            4.873046875,
+            5.482421875,
+            5.66650390625
+          ],
+          "tokens_evaluated": 1338,
+          "tokens_predicted": 256,
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 1338,
+            "prompt_ms": 3533.0,
+            "prompt_per_token_ms": 2.64050822122571,
+            "prompt_per_second": 378.7149731106708,
+            "predicted_n": 256,
+            "predicted_ms": 7157.0,
+            "predicted_per_token_ms": 28.066666666666666,
+            "predicted_per_second": 35.62945368171022
+          },
+          "text_sha256": "ac68529f2fc5682a97eda5413d6bf17e186794af1fa2a8eb938917cdeb837ce2"
+        },
+        {
+          "label": "0-history",
+          "wall_s": 10.475972207961604,
+          "load_before": [
+            4.873046875,
+            5.482421875,
+            5.66650390625
+          ],
+          "load_after": [
+            4.82470703125,
+            5.4501953125,
+            5.65283203125
+          ],
+          "tokens_evaluated": 1238,
+          "tokens_predicted": 256,
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 1238,
+            "prompt_ms": 3303.0,
+            "prompt_per_token_ms": 2.6680129240710824,
+            "prompt_per_second": 374.8107780805329,
+            "predicted_n": 256,
+            "predicted_ms": 7169.0,
+            "predicted_per_token_ms": 28.113725490196078,
+            "predicted_per_second": 35.56981447900684
+          },
+          "text_sha256": "4c4a394e9d49c23312f67d998ed9c0f0c10a5d122c02409c554221496ff351f4"
+        }
+      ]
+    },
+    "policy-attention": {
+      "command": [
+        "/private/tmp/mlxcel-1986-diag-attention-server",
+        "--model",
+        "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-4bit",
+        "--parallel",
+        "1",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "19866",
+        "--batch-size",
+        "512",
+        "--ctx-size",
+        "16384",
+        "--model-draft",
+        "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-assistant-4bit",
+        "--draft-kind",
+        "mtp",
+        "--draft-block-size",
+        "4"
+      ],
+      "environment": {
+        "MLXCEL_DIAG_GEMMA4_ATTENTION": "both",
+        "MLXCEL_DIAG_GEMMA4_LONG_PROBE": "1",
+        "MLXCEL_QMV_WIDE": "0",
+        "MLXCEL_ENABLE_MTP_B1": "1",
+        "MLXCEL_MTP_ADAPTIVE": "0",
+        "MLXCEL_MTP_SLICE_GRANT_ROUNDS": "0"
+      },
+      "load_before": [
+        4.083984375,
+        5.56201171875,
+        5.7109375
+      ],
+      "health_seconds": 11.3990068329731,
+      "exit": -15,
+      "results": [
+        {
+          "label": "0-science",
+          "wall_s": 12.75755895790644,
+          "load_before": [
+            4.43896484375,
+            5.59130859375,
+            5.7197265625
+          ],
+          "load_after": [
+            4.291015625,
+            5.521484375,
+            5.693359375
+          ],
+          "tokens_evaluated": 1638,
+          "tokens_predicted": 256,
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 1638,
+            "prompt_ms": 4796.0,
+            "prompt_per_token_ms": 2.9279609279609278,
+            "prompt_per_second": 341.534612176814,
+            "predicted_n": 256,
+            "predicted_ms": 7955.0,
+            "predicted_per_token_ms": 31.19607843137255,
+            "predicted_per_second": 32.05531112507857,
+            "draft_n": 287,
+            "draft_n_accepted": 160,
+            "draft_rounds": 96,
+            "draft_kind": "mtp"
+          },
+          "text_sha256": "5f05bb6bd851161ab22a8988f67562f97dab7ecae7f65ebcd7778ebe39fde34e"
+        },
+        {
+          "label": "0-software",
+          "wall_s": 11.808159208972938,
+          "load_before": [
+            4.291015625,
+            5.521484375,
+            5.693359375
+          ],
+          "load_after": [
+            5.14892578125,
+            5.6572265625,
+            5.73876953125
+          ],
+          "tokens_evaluated": 1338,
+          "tokens_predicted": 256,
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 1338,
+            "prompt_ms": 3845.0,
+            "prompt_per_token_ms": 2.873692077727952,
+            "prompt_per_second": 347.98439531859555,
+            "predicted_n": 256,
+            "predicted_ms": 7954.0,
+            "predicted_per_token_ms": 31.192156862745097,
+            "predicted_per_second": 32.05934121196882,
+            "draft_n": 294,
+            "draft_n_accepted": 157,
+            "draft_rounds": 98,
+            "draft_kind": "mtp"
+          },
+          "text_sha256": "ac68529f2fc5682a97eda5413d6bf17e186794af1fa2a8eb938917cdeb837ce2"
+        },
+        {
+          "label": "0-history",
+          "wall_s": 12.188962667016312,
+          "load_before": [
+            5.14892578125,
+            5.6572265625,
+            5.73876953125
+          ],
+          "load_after": [
+            4.8115234375,
+            5.56884765625,
+            5.70654296875
+          ],
+          "tokens_evaluated": 1238,
+          "tokens_predicted": 256,
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 1238,
+            "prompt_ms": 3586.0,
+            "prompt_per_token_ms": 2.8966074313408723,
+            "prompt_per_second": 345.2314556609035,
+            "predicted_n": 256,
+            "predicted_ms": 8595.0,
+            "predicted_per_token_ms": 33.705882352941174,
+            "predicted_per_second": 29.668411867364746,
+            "draft_n": 316,
+            "draft_n_accepted": 149,
+            "draft_rounds": 106,
+            "draft_kind": "mtp"
+          },
+          "text_sha256": "4c4a394e9d49c23312f67d998ed9c0f0c10a5d122c02409c554221496ff351f4"
+        }
+      ]
+    },
+    "candidate-mtp": {
+      "command": [
+        "/private/tmp/mlxcel-1986-candidate-testfast-server",
+        "--model",
+        "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-4bit",
+        "--parallel",
+        "1",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "19866",
+        "--batch-size",
+        "512",
+        "--ctx-size",
+        "16384",
+        "--model-draft",
+        "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-assistant-4bit",
+        "--draft-kind",
+        "mtp",
+        "--draft-block-size",
+        "4"
+      ],
+      "environment": {
+        "MLXCEL_QMV_WIDE": "0",
+        "MLXCEL_ENABLE_MTP_B1": "1",
+        "MLXCEL_MTP_ADAPTIVE": "0",
+        "MLXCEL_MTP_SLICE_GRANT_ROUNDS": "0"
+      },
+      "load_before": [
+        8.08642578125,
+        7.40771484375,
+        6.42236328125
+      ],
+      "health_seconds": 12.867632207926363,
+      "exit": -15,
+      "results": [
+        {
+          "label": "0-science",
+          "wall_s": 12.99647062504664,
+          "load_before": [
+            7.033203125,
+            7.2080078125,
+            6.36767578125
+          ],
+          "load_after": [
+            6.4990234375,
+            7.08544921875,
+            6.33349609375
+          ],
+          "tokens_evaluated": 1638,
+          "tokens_predicted": 256,
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 1638,
+            "prompt_ms": 4705.0,
+            "prompt_per_token_ms": 2.8724053724053724,
+            "prompt_per_second": 348.1402763018066,
+            "predicted_n": 256,
+            "predicted_ms": 8287.0,
+            "predicted_per_token_ms": 32.498039215686276,
+            "predicted_per_second": 30.771087245082658,
+            "draft_n": 317,
+            "draft_n_accepted": 150,
+            "draft_rounds": 106,
+            "draft_kind": "mtp"
+          },
+          "text_sha256": "0dbc5cb5ccaa4b21b5c7c7313694633a79bb0db44da20f15b529ffee9ada35e1"
+        },
+        {
+          "label": "0-software",
+          "wall_s": 11.843483416014351,
+          "load_before": [
+            6.4990234375,
+            7.08544921875,
+            6.33349609375
+          ],
+          "load_after": [
+            6.40283203125,
+            7.048828125,
+            6.32861328125
+          ],
+          "tokens_evaluated": 1338,
+          "tokens_predicted": 256,
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 1338,
+            "prompt_ms": 3771.0,
+            "prompt_per_token_ms": 2.818385650224215,
+            "prompt_per_second": 354.81304693715197,
+            "predicted_n": 256,
+            "predicted_ms": 8069.0,
+            "predicted_per_token_ms": 31.643137254901962,
+            "predicted_per_second": 31.602429049448503,
+            "draft_n": 295,
+            "draft_n_accepted": 157,
+            "draft_rounds": 99,
+            "draft_kind": "mtp"
+          },
+          "text_sha256": "1770852d1cbde47c54d6b657f7e52a09019dff67ba2c5968377b566221927536"
+        },
+        {
+          "label": "0-history",
+          "wall_s": 11.644585457979701,
+          "load_before": [
+            6.40283203125,
+            7.048828125,
+            6.32861328125
+          ],
+          "load_after": [
+            6.6630859375,
+            7.06494140625,
+            6.34619140625
+          ],
+          "tokens_evaluated": 1238,
+          "tokens_predicted": 256,
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 1238,
+            "prompt_ms": 3517.0,
+            "prompt_per_token_ms": 2.8408723747980615,
+            "prompt_per_second": 352.0045493318169,
+            "predicted_n": 256,
+            "predicted_ms": 8121.0,
+            "predicted_per_token_ms": 31.847058823529412,
+            "predicted_per_second": 31.40007388252678,
+            "draft_n": 322,
+            "draft_n_accepted": 148,
+            "draft_rounds": 108,
+            "draft_kind": "mtp"
+          },
+          "text_sha256": "111352576aab1e1d7a78711b8951d6400da58926fb5b15c78d1d9cc3018fe7e9"
+        }
+      ]
+    },
+    "31b-baseline": {
+      "command": [
+        "/private/tmp/mlxcel-1986-diag-baseline-server",
+        "--model",
+        "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-31b-it-4bit",
+        "--parallel",
+        "1",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "19866",
+        "--batch-size",
+        "512",
+        "--ctx-size",
+        "16384",
+        "--model-draft",
+        "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-31b-it-assistant-bf16",
+        "--draft-kind",
+        "mtp",
+        "--draft-block-size",
+        "4"
+      ],
+      "environment": {
+        "MLXCEL_QMV_WIDE": "0",
+        "MLXCEL_ENABLE_MTP_B1": "1",
+        "MLXCEL_MTP_ADAPTIVE": "0",
+        "MLXCEL_MTP_SLICE_GRANT_ROUNDS": "0"
+      },
+      "load_before": [
+        5.64697265625,
+        6.68798828125,
+        6.259765625
+      ],
+      "health_seconds": 44.74544099997729,
+      "exit": -15,
+      "results": [
+        {
+          "label": "0-science",
+          "wall_s": 27.433809750014916,
+          "load_before": [
+            6.5185546875,
+            6.76318359375,
+            6.3076171875
+          ],
+          "load_after": [
+            5.6318359375,
+            6.52587890625,
+            6.234375
+          ],
+          "tokens_evaluated": 1638,
+          "tokens_predicted": 256,
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 1638,
+            "prompt_ms": 12357.0,
+            "prompt_per_token_ms": 7.543956043956044,
+            "prompt_per_second": 132.5564457392571,
+            "predicted_n": 256,
+            "predicted_ms": 15068.0,
+            "predicted_per_token_ms": 59.090196078431376,
+            "predicted_per_second": 16.92328112556411,
+            "draft_n": 269,
+            "draft_n_accepted": 166,
+            "draft_rounds": 90,
+            "draft_kind": "mtp"
+          },
+          "text_sha256": "44d42bb1a12a63d9a029a1d5e01dd6623968592a1216c45148b79bcab98a417e"
+        },
+        {
+          "label": "0-software",
+          "wall_s": 26.631206582998857,
+          "load_before": [
+            5.6318359375,
+            6.52587890625,
+            6.234375
+          ],
+          "load_after": [
+            5.494140625,
+            6.39697265625,
+            6.1962890625
+          ],
+          "tokens_evaluated": 1338,
+          "tokens_predicted": 256,
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 1338,
+            "prompt_ms": 9909.0,
+            "prompt_per_token_ms": 7.4058295964125564,
+            "prompt_per_second": 135.028761731759,
+            "predicted_n": 256,
+            "predicted_ms": 16718.0,
+            "predicted_per_token_ms": 65.56078431372549,
+            "predicted_per_second": 15.253020696255533,
+            "draft_n": 314,
+            "draft_n_accepted": 151,
+            "draft_rounds": 105,
+            "draft_kind": "mtp"
+          },
+          "text_sha256": "29a2ddfc2e5976ef7a55fcd11143449a2dc06670aa055d2c9f09f8c76cc16773"
+        },
+        {
+          "label": "0-history",
+          "wall_s": 24.315425458014943,
+          "load_before": [
+            5.494140625,
+            6.39697265625,
+            6.1962890625
+          ],
+          "load_after": [
+            5.0576171875,
+            6.240234375,
+            6.14404296875
+          ],
+          "tokens_evaluated": 1238,
+          "tokens_predicted": 256,
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 1238,
+            "prompt_ms": 9200.0,
+            "prompt_per_token_ms": 7.431340872374798,
+            "prompt_per_second": 134.56521739130434,
+            "predicted_n": 256,
+            "predicted_ms": 15112.0,
+            "predicted_per_token_ms": 59.26274509803922,
+            "predicted_per_second": 16.874007411328744,
+            "draft_n": 287,
+            "draft_n_accepted": 160,
+            "draft_rounds": 96,
+            "draft_kind": "mtp"
+          },
+          "text_sha256": "6ddf1eef02d196a66529b2a6a3c83fc274c5c6e2ea5a4f8e18762a4caa28466f"
+        }
+      ]
+    },
+    "31b-candidate": {
+      "command": [
+        "/private/tmp/mlxcel-1986-candidate-testfast-server",
+        "--model",
+        "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-31b-it-4bit",
+        "--parallel",
+        "1",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "19866",
+        "--batch-size",
+        "512",
+        "--ctx-size",
+        "16384",
+        "--model-draft",
+        "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-31b-it-assistant-bf16",
+        "--draft-kind",
+        "mtp",
+        "--draft-block-size",
+        "4"
+      ],
+      "environment": {
+        "MLXCEL_QMV_WIDE": "0",
+        "MLXCEL_ENABLE_MTP_B1": "1",
+        "MLXCEL_MTP_ADAPTIVE": "0",
+        "MLXCEL_MTP_SLICE_GRANT_ROUNDS": "0"
+      },
+      "load_before": [
+        4.97265625,
+        6.20263671875,
+        6.13134765625
+      ],
+      "health_seconds": 22.824099583085626,
+      "exit": -15,
+      "results": [
+        {
+          "label": "0-science",
+          "wall_s": 26.986201041028835,
+          "load_before": [
+            5.7431640625,
+            6.314453125,
+            6.1728515625
+          ],
+          "load_after": [
+            5.26123046875,
+            6.1455078125,
+            6.11474609375
+          ],
+          "tokens_evaluated": 1638,
+          "tokens_predicted": 256,
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 1638,
+            "prompt_ms": 12306.0,
+            "prompt_per_token_ms": 7.512820512820513,
+            "prompt_per_second": 133.10580204778157,
+            "predicted_n": 256,
+            "predicted_ms": 14674.0,
+            "predicted_per_token_ms": 57.54509803921569,
+            "predicted_per_second": 17.377674798964154,
+            "draft_n": 269,
+            "draft_n_accepted": 166,
+            "draft_rounds": 90,
+            "draft_kind": "mtp"
+          },
+          "text_sha256": "44d42bb1a12a63d9a029a1d5e01dd6623968592a1216c45148b79bcab98a417e"
+        },
+        {
+          "label": "0-software",
+          "wall_s": 26.493130791001022,
+          "load_before": [
+            5.26123046875,
+            6.1455078125,
+            6.11474609375
+          ],
+          "load_after": [
+            5.08837890625,
+            6.0185546875,
+            6.068359375
+          ],
+          "tokens_evaluated": 1338,
+          "tokens_predicted": 256,
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 1338,
+            "prompt_ms": 9875.0,
+            "prompt_per_token_ms": 7.380418535127055,
+            "prompt_per_second": 135.49367088607596,
+            "predicted_n": 256,
+            "predicted_ms": 16615.0,
+            "predicted_per_token_ms": 65.15686274509804,
+            "predicted_per_second": 15.347577490219683,
+            "draft_n": 314,
+            "draft_n_accepted": 151,
+            "draft_rounds": 105,
+            "draft_kind": "mtp"
+          },
+          "text_sha256": "29a2ddfc2e5976ef7a55fcd11143449a2dc06670aa055d2c9f09f8c76cc16773"
+        },
+        {
+          "label": "0-history",
+          "wall_s": 24.388443666975945,
+          "load_before": [
+            5.08837890625,
+            6.0185546875,
+            6.068359375
+          ],
+          "load_after": [
+            5.4482421875,
+            6.01806640625,
+            6.06591796875
+          ],
+          "tokens_evaluated": 1238,
+          "tokens_predicted": 256,
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 1238,
+            "prompt_ms": 9192.0,
+            "prompt_per_token_ms": 7.424878836833603,
+            "prompt_per_second": 134.6823324630113,
+            "predicted_n": 256,
+            "predicted_ms": 15193.0,
+            "predicted_per_token_ms": 59.58039215686274,
+            "predicted_per_second": 16.784045284012375,
+            "draft_n": 287,
+            "draft_n_accepted": 160,
+            "draft_rounds": 96,
+            "draft_kind": "mtp"
+          },
+          "text_sha256": "6ddf1eef02d196a66529b2a6a3c83fc274c5c6e2ea5a4f8e18762a4caa28466f"
+        }
+      ]
+    },
+    "qwen-baseline": {
+      "command": [
+        "/private/tmp/mlxcel-1986-diag-baseline-server",
+        "--model",
+        "/Volumes/Monolith/Development/rust/models/mlx/qwen3.8-27b-4bit",
+        "--parallel",
+        "1",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "19866",
+        "--batch-size",
+        "512",
+        "--ctx-size",
+        "16384",
+        "--model-draft",
+        "/Volumes/Monolith/Development/rust/models/mlx/qwen3.8-27b-mtp-4bit",
+        "--draft-kind",
+        "mtp",
+        "--draft-block-size",
+        "4"
+      ],
+      "environment": {
+        "MLXCEL_QMV_WIDE": "0",
+        "MLXCEL_ENABLE_MTP_B1": "1",
+        "MLXCEL_MTP_ADAPTIVE": "0",
+        "MLXCEL_MTP_SLICE_GRANT_ROUNDS": "0"
+      },
+      "load_before": [
+        5.4482421875,
+        6.01806640625,
+        6.06591796875
+      ],
+      "health_seconds": 7.86744462500792,
+      "exit": -15,
+      "results": [
+        {
+          "label": "0-science",
+          "wall_s": 13.914978291024454,
+          "load_before": [
+            5.412109375,
+            6.0009765625,
+            6.0595703125
+          ],
+          "load_after": [
+            5.78173828125,
+            6.0498046875,
+            6.07568359375
+          ],
+          "tokens_evaluated": 468,
+          "tokens_predicted": 256,
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 468,
+            "prompt_ms": 3195.0,
+            "prompt_per_token_ms": 6.826923076923077,
+            "prompt_per_second": 146.47887323943664,
+            "predicted_n": 256,
+            "predicted_ms": 10716.0,
+            "predicted_per_token_ms": 42.023529411764706,
+            "predicted_per_second": 23.796192609182533,
+            "draft_n": 265,
+            "draft_n_accepted": 167,
+            "draft_rounds": 89,
+            "draft_kind": "mtp"
+          },
+          "text_sha256": "dc793de1b633af7dbebf0832ee0e86bbd674ca4278e3d2191549767c6a2f0c55"
+        },
+        {
+          "label": "0-software",
+          "wall_s": 12.888858041958883,
+          "load_before": [
+            5.78173828125,
+            6.0498046875,
+            6.07568359375
+          ],
+          "load_after": [
+            5.595703125,
+            5.9970703125,
+            6.056640625
+          ],
+          "tokens_evaluated": 384,
+          "tokens_predicted": 256,
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 384,
+            "prompt_ms": 2499.0,
+            "prompt_per_token_ms": 6.5078125,
+            "prompt_per_second": 153.66146458583432,
+            "predicted_n": 256,
+            "predicted_ms": 10388.0,
+            "predicted_per_token_ms": 40.73725490196078,
+            "predicted_per_second": 24.547554871005005,
+            "draft_n": 273,
+            "draft_n_accepted": 164,
+            "draft_rounds": 92,
+            "draft_kind": "mtp"
+          },
+          "text_sha256": "a2106268345877d9dbf65ffdd0a08357d5340f97c112109199d154cbf62a72a8"
+        },
+        {
+          "label": "0-history",
+          "wall_s": 13.04283812502399,
+          "load_before": [
+            5.595703125,
+            5.9970703125,
+            6.056640625
+          ],
+          "load_after": [
+            5.564453125,
+            5.9794921875,
+            6.0498046875
+          ],
+          "tokens_evaluated": 356,
+          "tokens_predicted": 256,
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 356,
+            "prompt_ms": 2477.0,
+            "prompt_per_token_ms": 6.957865168539326,
+            "prompt_per_second": 143.72224465078725,
+            "predicted_n": 256,
+            "predicted_ms": 10564.0,
+            "predicted_per_token_ms": 41.42745098039216,
+            "predicted_per_second": 24.13858386974631,
+            "draft_n": 279,
+            "draft_n_accepted": 161,
+            "draft_rounds": 94,
+            "draft_kind": "mtp"
+          },
+          "text_sha256": "864db77e54b07a451e094d2b57a8df094ef7511e9ac60daa141b3d6eee2a5c16"
+        }
+      ]
+    },
+    "qwen-candidate": {
+      "command": [
+        "/private/tmp/mlxcel-1986-candidate-testfast-server",
+        "--model",
+        "/Volumes/Monolith/Development/rust/models/mlx/qwen3.8-27b-4bit",
+        "--parallel",
+        "1",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "19866",
+        "--batch-size",
+        "512",
+        "--ctx-size",
+        "16384",
+        "--model-draft",
+        "/Volumes/Monolith/Development/rust/models/mlx/qwen3.8-27b-mtp-4bit",
+        "--draft-kind",
+        "mtp",
+        "--draft-block-size",
+        "4"
+      ],
+      "environment": {
+        "MLXCEL_QMV_WIDE": "0",
+        "MLXCEL_ENABLE_MTP_B1": "1",
+        "MLXCEL_MTP_ADAPTIVE": "0",
+        "MLXCEL_MTP_SLICE_GRANT_ROUNDS": "0"
+      },
+      "load_before": [
+        5.564453125,
+        5.9794921875,
+        6.0498046875
+      ],
+      "health_seconds": 3.315994667005725,
+      "exit": -15,
+      "results": [
+        {
+          "label": "0-science",
+          "wall_s": 13.146601584041491,
+          "load_before": [
+            5.67919921875,
+            5.99609375,
+            6.05517578125
+          ],
+          "load_after": [
+            5.3798828125,
+            5.9140625,
+            6.0244140625
+          ],
+          "tokens_evaluated": 468,
+          "tokens_predicted": 256,
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 468,
+            "prompt_ms": 3100.0,
+            "prompt_per_token_ms": 6.6239316239316235,
+            "prompt_per_second": 150.96774193548387,
+            "predicted_n": 256,
+            "predicted_ms": 10044.0,
+            "predicted_per_token_ms": 39.38823529411765,
+            "predicted_per_second": 25.388291517323776,
+            "draft_n": 265,
+            "draft_n_accepted": 167,
+            "draft_rounds": 89,
+            "draft_kind": "mtp"
+          },
+          "text_sha256": "dc793de1b633af7dbebf0832ee0e86bbd674ca4278e3d2191549767c6a2f0c55"
+        },
+        {
+          "label": "0-software",
+          "wall_s": 12.729782375041395,
+          "load_before": [
+            5.3798828125,
+            5.9140625,
+            6.0244140625
+          ],
+          "load_after": [
+            5.1669921875,
+            5.8505859375,
+            6.0
+          ],
+          "tokens_evaluated": 384,
+          "tokens_predicted": 256,
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 384,
+            "prompt_ms": 2472.0,
+            "prompt_per_token_ms": 6.4375,
+            "prompt_per_second": 155.3398058252427,
+            "predicted_n": 256,
+            "predicted_ms": 10255.0,
+            "predicted_per_token_ms": 40.21568627450981,
+            "predicted_per_second": 24.86591906387128,
+            "draft_n": 273,
+            "draft_n_accepted": 164,
+            "draft_rounds": 92,
+            "draft_kind": "mtp"
+          },
+          "text_sha256": "a2106268345877d9dbf65ffdd0a08357d5340f97c112109199d154cbf62a72a8"
+        },
+        {
+          "label": "0-history",
+          "wall_s": 12.943057540920563,
+          "load_before": [
+            5.1669921875,
+            5.8505859375,
+            6.0
+          ],
+          "load_after": [
+            5.509765625,
+            5.890625,
+            6.01123046875
+          ],
+          "tokens_evaluated": 356,
+          "tokens_predicted": 256,
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 356,
+            "prompt_ms": 2481.0,
+            "prompt_per_token_ms": 6.969101123595506,
+            "prompt_per_second": 143.49052801289804,
+            "predicted_n": 256,
+            "predicted_ms": 10460.0,
+            "predicted_per_token_ms": 41.01960784313726,
+            "predicted_per_second": 24.37858508604206,
+            "draft_n": 279,
+            "draft_n_accepted": 161,
+            "draft_rounds": 94,
+            "draft_kind": "mtp"
+          },
+          "text_sha256": "864db77e54b07a451e094d2b57a8df094ef7511e9ac60daa141b3d6eee2a5c16"
+        }
+      ]
+    },
+    "baseline-draws": {
+      "command": [
+        "/private/tmp/mlxcel-1986-diag-baseline-server",
+        "--model",
+        "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-4bit",
+        "--model-draft",
+        "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-assistant-4bit",
+        "--draft-kind",
+        "mtp",
+        "--draft-block-size",
+        "4",
+        "--parallel",
+        "1",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "19866"
+      ],
+      "environment": {
+        "MLXCEL_QMV_WIDE": "0",
+        "MLXCEL_ENABLE_MTP_B1": "1",
+        "MLXCEL_DIAG_GEMMA4_LONG_PROBE": "1",
+        "MLXCEL_DIAG_GEMMA4_PROBE_LENGTHS": "8,8,8,1056"
+      },
+      "load_before": [
+        7.57373046875,
+        7.6591796875,
+        5.87841796875
+      ],
+      "health": {
+        "status": "ok"
+      },
+      "health_seconds": 42.440938875079155,
+      "load_after": [
+        6.0146484375,
+        7.21240234375,
+        5.802734375
+      ],
+      "exit": -15
+    },
+    "baseline-long": {
+      "command": [
+        "/private/tmp/mlxcel-1986-diag-baseline-server",
+        "--model",
+        "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-4bit",
+        "--model-draft",
+        "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-assistant-4bit",
+        "--draft-kind",
+        "mtp",
+        "--draft-block-size",
+        "4",
+        "--parallel",
+        "1",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "19866"
+      ],
+      "environment": {
+        "MLXCEL_QMV_WIDE": "0",
+        "MLXCEL_ENABLE_MTP_B1": "1",
+        "MLXCEL_DIAG_GEMMA4_LONG_PROBE": "1",
+        "MLXCEL_DIAG_GEMMA4_PROBE_LENGTHS": "1056"
+      },
+      "load_before": [
+        5.85791015625,
+        7.13916015625,
+        5.79296875
+      ],
+      "health": {
+        "status": "ok"
+      },
+      "health_seconds": 16.358760333969258,
+      "load_after": [
+        6.48583984375,
+        7.21337890625,
+        5.8427734375
+      ],
+      "exit": -15
+    },
+    "baseline-long-repeat": {
+      "command": [
+        "/private/tmp/mlxcel-1986-diag-baseline-server",
+        "--model",
+        "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-4bit",
+        "--model-draft",
+        "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-assistant-4bit",
+        "--draft-kind",
+        "mtp",
+        "--draft-block-size",
+        "4",
+        "--parallel",
+        "1",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "19866"
+      ],
+      "environment": {
+        "MLXCEL_QMV_WIDE": "0",
+        "MLXCEL_ENABLE_MTP_B1": "1",
+        "MLXCEL_DIAG_GEMMA4_LONG_PROBE": "1",
+        "MLXCEL_DIAG_GEMMA4_PROBE_LENGTHS": "1056"
+      },
+      "load_before": [
+        6.35693359375,
+        7.138671875,
+        5.88037109375
+      ],
+      "health": {
+        "status": "ok"
+      },
+      "health_seconds": 16.384363875025883,
+      "load_after": [
+        6.0498046875,
+        7.03271484375,
+        5.8642578125
+      ],
+      "exit": -15
+    },
+    "sliding-draws": {
+      "command": [
+        "/private/tmp/mlxcel-1986-diag-attention-server",
+        "--model",
+        "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-4bit",
+        "--model-draft",
+        "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-assistant-4bit",
+        "--draft-kind",
+        "mtp",
+        "--draft-block-size",
+        "4",
+        "--parallel",
+        "1",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "19866"
+      ],
+      "environment": {
+        "MLXCEL_DIAG_GEMMA4_ATTENTION": "sliding",
+        "MLXCEL_QMV_WIDE": "0",
+        "MLXCEL_ENABLE_MTP_B1": "1",
+        "MLXCEL_DIAG_GEMMA4_LONG_PROBE": "1",
+        "MLXCEL_DIAG_GEMMA4_PROBE_LENGTHS": "8,8,8,1056"
+      },
+      "load_before": [
+        5.30859375,
+        6.6298828125,
+        6.02880859375
+      ],
+      "health": {
+        "status": "ok"
+      },
+      "health_seconds": 22.57531075004954,
+      "load_after": [
+        5.318359375,
+        6.515625,
+        6.00390625
+      ],
+      "exit": -15
+    },
+    "sliding-long": {
+      "command": [
+        "/private/tmp/mlxcel-1986-diag-attention-server",
+        "--model",
+        "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-4bit",
+        "--model-draft",
+        "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-assistant-4bit",
+        "--draft-kind",
+        "mtp",
+        "--draft-block-size",
+        "4",
+        "--parallel",
+        "1",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "19866"
+      ],
+      "environment": {
+        "MLXCEL_DIAG_GEMMA4_ATTENTION": "sliding",
+        "MLXCEL_QMV_WIDE": "0",
+        "MLXCEL_ENABLE_MTP_B1": "1",
+        "MLXCEL_DIAG_GEMMA4_LONG_PROBE": "1",
+        "MLXCEL_DIAG_GEMMA4_PROBE_LENGTHS": "1056"
+      },
+      "load_before": [
+        5.318359375,
+        6.515625,
+        6.00390625
+      ],
+      "health": {
+        "status": "ok"
+      },
+      "health_seconds": 15.960272916941904,
+      "load_after": [
+        5.02001953125,
+        6.3916015625,
+        5.96826171875
+      ],
+      "exit": -15
+    },
+    "both-draws": {
+      "command": [
+        "/private/tmp/mlxcel-1986-diag-attention-server",
+        "--model",
+        "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-4bit",
+        "--model-draft",
+        "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-assistant-4bit",
+        "--draft-kind",
+        "mtp",
+        "--draft-block-size",
+        "4",
+        "--parallel",
+        "1",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "19866"
+      ],
+      "environment": {
+        "MLXCEL_DIAG_GEMMA4_ATTENTION": "both",
+        "MLXCEL_QMV_WIDE": "0",
+        "MLXCEL_ENABLE_MTP_B1": "1",
+        "MLXCEL_DIAG_GEMMA4_LONG_PROBE": "1",
+        "MLXCEL_DIAG_GEMMA4_PROBE_LENGTHS": "8,8,8,1056"
+      },
+      "load_before": [
+        4.60009765625,
+        6.2041015625,
+        5.90966796875
+      ],
+      "health": {
+        "status": "ok"
+      },
+      "health_seconds": 11.131262916955166,
+      "load_after": [
+        4.353515625,
+        6.09814453125,
+        5.87548828125
+      ],
+      "exit": -15
+    },
+    "both-long": {
+      "command": [
+        "/private/tmp/mlxcel-1986-diag-attention-server",
+        "--model",
+        "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-4bit",
+        "--model-draft",
+        "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-assistant-4bit",
+        "--draft-kind",
+        "mtp",
+        "--draft-block-size",
+        "4",
+        "--parallel",
+        "1",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "19866"
+      ],
+      "environment": {
+        "MLXCEL_DIAG_GEMMA4_ATTENTION": "both",
+        "MLXCEL_QMV_WIDE": "0",
+        "MLXCEL_ENABLE_MTP_B1": "1",
+        "MLXCEL_DIAG_GEMMA4_LONG_PROBE": "1",
+        "MLXCEL_DIAG_GEMMA4_PROBE_LENGTHS": "1056"
+      },
+      "load_before": [
+        4.353515625,
+        6.09814453125,
+        5.87548828125
+      ],
+      "health": {
+        "status": "ok"
+      },
+      "health_seconds": 9.969693333958276,
+      "load_after": [
+        4.60009765625,
+        6.09423828125,
+        5.87646484375
+      ],
+      "exit": -15
+    }
+  },
+  "trace": {
+    "width": 4,
+    "prefix": 1536,
+    "positions": 256,
+    "decided_gap": 2,
+    "decided_positions": 155,
+    "ordinary_block": {
+      "top1_disagreed": 18,
+      "decided_disagreed": 2,
+      "maximum_disagreement_gap": 5.344,
+      "choice_delta_percentiles": [
+        0.125,
+        1,
+        5.6875,
+        8.4531
+      ],
+      "perplexity": 249.2134
+    },
+    "corrected_verify": {
+      "top1_disagreed": 0,
+      "decided_disagreed": 0,
+      "choice_delta_percentiles": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "perplexity": 246.8612
+    },
+    "reference_perplexity": 246.8612
+  },
+  "remaining": [
+    "release throughput repetitions",
+    "startup cost"
+  ],
+  "unmeasured": [
+    "M5 Max",
+    "CUDA",
+    "ROCm",
+    "CPU"
+  ]
+}

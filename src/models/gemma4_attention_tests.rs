@@ -162,11 +162,12 @@ fn buffered_ring_attention_matches_decode_after_wrap_and_partial_accept() {
 /// #2160: the 12B geometry (16 query heads over 8 KV heads at head_dim 256,
 /// windowed) verified row-wise must reproduce classic M=1 decode byte for byte,
 /// with and without the MTP rotating buffer, before and after the window wraps.
-/// On CUDA a batched M=4 block leaves the single-query `sdpa_vector` kernel
-/// classic decode takes at this head_dim, which is what the row-wise path fixes.
+/// On CUDA a batched M=4 block leaves the single-query `sdpa_vector` kernel.
+/// On Metal the long buffered block changes physical reduction order (#1986).
+/// Use the real 1024-token window as well as the checkpoint's head geometry.
 #[test]
 fn gemma4_12b_sliding_verify_rows_match_decode_byte_for_byte() {
-    const WINDOW: i32 = 32;
+    const WINDOW: i32 = 1024;
     const WIDTH: i32 = 4;
     const DIM: i32 = 256;
     const HEADS: i32 = 16;

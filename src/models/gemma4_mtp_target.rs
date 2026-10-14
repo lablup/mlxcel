@@ -2176,7 +2176,7 @@ impl<'a> MtpTarget for Gemma4MtpBatchedTargetAdapter<'a> {
         prompt_tokens_per_row: &[Vec<i32>],
         sampler: &SamplingConfig,
     ) -> Result<(Vec<i32>, MtpBatchedVerifyOutput), DrafterError> {
-        // The row-wise geometries (31B everywhere, 12B on CUDA) verify each
+        // The row-wise geometries (31B and 12B) verify each
         // row exactly as the B = 1 linear adapter does, which needs each row's
         // prompt KV built the way classic serving builds it (issue #2190).
         if self.wrapper.mtp_row_verify_enabled() {

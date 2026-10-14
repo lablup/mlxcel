@@ -2584,7 +2584,7 @@ fn run_mtp_burst_batched(
     let batch_size = seqs.len();
 
     // Used by: Gemma 4 text, VLM, and Unified targets. On the row-wise
-    // geometries (31B everywhere, 12B on CUDA) the batched adapter verifies
+    // geometries (31B and 12B) the batched adapter verifies
     // each row through the B = 1 calls and is decode-exact (issue #2190),
     // but only inside the limits `RowWiseBatchedWindow` checks; any other
     // window declines here, before drafter IO, so it never reaches a
