@@ -13,7 +13,8 @@
 // limitations under the License.
 
 //! bf16 GEMMs routed above the fused WMMA kernel's row ceiling skip the
-//! dequantized-weight cache (issue #2151).
+//! dequantized-weight cache (issue #2151), and the cache is off by default
+//! (issue #2232).
 //!
 //! On RDNA 3.5, `select_qmm_route` in the ROCm overlay sends a bf16 affine
 //! GEMM of `MLX_ROCM_WMMA_QMM_MAX_M` rows or more (128 by default) to
@@ -21,7 +22,11 @@
 //! in the process-wide LRU (8 matrices or 256 MB), which a forward pass cycles
 //! without a hit while its last entries stay alive through decode. The route
 //! now dequantizes into a temporary and leaves the cache alone; the f16 and
-//! non-WMMA shapes that reach the same GEMM keep the cache.
+//! non-WMMA shapes that reach the same GEMM keep the cache behind an explicit
+//! `MLX_ROCM_QMM_DEQUANT_CACHE_SIZE`. The default is 0, off, since #2232: the
+//! shapes that reach the cached route never hit either (batch-1 decode takes
+//! qmv, a prefill cycles more distinct projections than the capacity holds),
+//! while its last entries stayed resident through decode.
 //!
 //! The cache and its counters are process-wide, and the knobs are read once
 //! per process, so every case runs in a fresh child process (the parent
@@ -38,7 +43,9 @@
 //! returning `DequantGemm` again, measured on gfx1151) the two bf16
 //! above-ceiling cases fail on their first pass, which reads `misses=1
 //! inserts=1 bypasses=0 entries=1` instead of one bypass and an empty cache;
-//! the forced-WMMA and f16 cases still pass.
+//! the forced-WMMA and f16 cases still pass. With the default reverted to 8
+//! the `f16_default_off` case fails the same way, which is how the default
+//! change is guarded.
 //!
 //! Skips on any other backend. Run on a ROCm host with:
 //!
@@ -171,10 +178,11 @@ fn cases() -> Vec<Case> {
             after: [NOTHING, NOTHING],
         },
         // f16 never takes the fused kernel, so it reaches the cached route:
-        // the first pass misses and inserts, the second hits.
+        // the first pass misses and inserts, the second hits. The cache size
+        // is set explicitly: the default is off since #2232.
         Case {
             name: "f16_cached",
-            env: &[(THRESHOLD, "1")],
+            env: &[(THRESHOLD, "1"), (CACHE_SIZE, "8")],
             dtype: dtype::FLOAT16,
             rows: 128,
             k: 1024,
@@ -195,6 +203,20 @@ fn cases() -> Vec<Case> {
                     ..NOTHING
                 },
             ],
+        },
+        // With no MLX_ROCM_QMM_DEQUANT_CACHE_SIZE set, the default is off
+        // (#2232): the cached route dequantizes into a temporary and no
+        // counter moves. With the old default of 8 this case read
+        // `misses=1 inserts=1 entries=1` on the first pass and failed.
+        Case {
+            name: "f16_default_off",
+            env: &[(THRESHOLD, "1")],
+            dtype: dtype::FLOAT16,
+            rows: 128,
+            k: 1024,
+            n: 1024,
+            dense_bytes: false,
+            after: [NOTHING, NOTHING],
         },
     ]
 }

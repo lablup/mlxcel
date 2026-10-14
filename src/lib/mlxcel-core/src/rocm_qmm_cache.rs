@@ -12,17 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Counters of the ROCm QuantizedMatmul dequantized-weight cache (issue
-//! #2151).
+//! Counters of the ROCm QuantizedMatmul dequantized-weight cache (issues
+//! #2151, #2232).
 //!
 //! On ROCm, a quantized GEMM that takes the dequantize + GEMM route keeps the
-//! dequantized weight in a process-wide LRU (8 matrices or 256 MB by default,
+//! dequantized weight in a process-wide LRU (byte cap 256 MB by default,
 //! `MLX_ROCM_QMM_DEQUANT_CACHE_SIZE` and `MLX_ROCM_QMM_DEQUANT_CACHE_MAX_BYTES`).
-//! bf16 GEMMs at or above the fused WMMA kernel's row ceiling take the same
-//! GEMM without the cache, and count as bypasses. These counters say whether
-//! the cache earns the memory it holds. `MLX_ROCM_QMM_DEQUANT_CACHE_STATS=1`
-//! prints the same numbers on stderr when the process exits, which is how a
-//! benchmark run reads them.
+//! The cache is off by default since #2232: the shapes that reach the route
+//! never hit either, while its last entries stayed resident through decode; a
+//! workload that does hit can opt in with a positive cache size. bf16 GEMMs at
+//! or above the fused WMMA kernel's row ceiling take the same GEMM without the
+//! cache, and count as bypasses. These counters say whether the cache earns
+//! the memory it holds. `MLX_ROCM_QMM_DEQUANT_CACHE_STATS=1` prints the same
+//! numbers on stderr when the process exits, which is how a benchmark run
+//! reads them.
 
 /// A snapshot of the cache's process-wide counters and its current size.
 /// All zero on every backend other than ROCm.

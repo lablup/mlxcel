@@ -266,8 +266,12 @@ default applies (lablup/mlxcel#2152). An unset or empty variable takes the
 default silently. `MLX_ROCM_QMM_DEQUANT_M_THRESHOLD` (1 to 2147483647, default
 the built-in crossover) is the row count from which a quantized GEMM prefers
 dequantize + GEMM. `MLX_ROCM_QMM_DEQUANT_CACHE_SIZE` (0 to 2147483647, default
-8, `0` turns it off) is the number of dequantized weights kept for reuse; the
-bf16 GEMMs sent above `MLX_ROCM_WMMA_QMM_MAX_M` never use that cache, since a
+0, off) is the number of dequantized weights kept for reuse; the shapes that
+reach that route never hit either (batch-1 decode takes qmv, a prefill cycles
+more distinct projections than a small capacity holds, while its last entries
+stayed resident through decode), so the default is off since lablup/mlxcel#2232
+and a workload that does hit can opt in with a positive size; the bf16 GEMMs
+sent above `MLX_ROCM_WMMA_QMM_MAX_M` never use that cache regardless, since a
 forward pass at those row counts cycles it without a hit (lablup/mlxcel#2151).
 `MLX_ROCM_QMM_DEQUANT_CACHE_STATS=1` prints the cache's hit, miss, insert,
 eviction and bypass counts, its entry count and its bytes on stderr when the
@@ -318,7 +322,7 @@ How `quantized_matmul` handles many rows: the fused WMMA kernel, or dequantize f
 | `MLX_ROCM_WMMA_QMM` | first character `0` off, `1` forced on; anything else or unset keeps the default | on where the device has native WMMA and is not a low-CU iGPU | The fused WMMA qmm kernel for bf16 affine GEMMs with more than one row (4-, 6- or 8-bit, group 64); unset, 4- and 8-bit GEMMs of at most 8 rows with biases take qmv instead. |
 | `MLX_ROCM_WMMA_QMM_MAX_M` | integer from 1 to 2147483647; an invalid value warns on stderr and keeps the default | `128` on RDNA 3.5 (`gfx1150` to `gfx1152`), no ceiling elsewhere | Row count from which such a GEMM goes to dequantize + hipBLASLt instead; ignored when `MLX_ROCM_WMMA_QMM=1`. |
 | `MLX_ROCM_QMM_DEQUANT_M_THRESHOLD` | integer from 1 to 2147483647; an invalid value warns on stderr and keeps the default | built-in crossover by architecture and shape | `quantized_matmul` prefers dequantize + GEMM exactly when `M >=` the value. The route still needs `MLX_ROCM_QMM_DEQUANT_GEMM` enabled. |
-| `MLX_ROCM_QMM_DEQUANT_CACHE_SIZE` | integer from 0 to 2147483647; an invalid value warns on stderr and keeps the default | `8` | Entries in the cache of dequantized weights; `0` turns the cache off. |
+| `MLX_ROCM_QMM_DEQUANT_CACHE_SIZE` | integer from 0 to 2147483647; an invalid value warns on stderr and keeps the default | `0` (off) | Entries in the cache of dequantized weights; a positive value opts a workload that hits into the cache. |
 | `MLX_ROCM_QMM_DEQUANT_CACHE_MAX_BYTES` | non-negative decimal integer, bytes; the whole value must be one, so `-1`, `12abc` and a value past `18446744073709551615` warn once on stderr and use the default | `268435456` (256 MiB) | Byte cap of that cache; `0` turns the cache off. |
 
 ### GEMM libraries

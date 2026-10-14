@@ -965,10 +965,14 @@ struct DequantCacheEntry {
 };
 
 inline int dequant_cache_capacity() {
-  // 0 turns the cache off.
+  // 0 turns the cache off, and is the default (lablup/mlxcel#2232): the f16
+  // and non-WMMA shapes that reach the cached route never hit either (batch-1
+  // decode takes qmv, a prefill cycles more distinct projections than the
+  // capacity holds), while the last entries stay resident through decode.
+  // A workload that does hit can opt in with a positive size.
   static const int capacity = rocm::env_int_or_default(
       "MLX_ROCM_QMM_DEQUANT_CACHE_SIZE",
-      8,
+      0,
       0,
       std::numeric_limits<int>::max(),
       "a non-negative integer");

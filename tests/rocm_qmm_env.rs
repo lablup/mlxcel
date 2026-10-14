@@ -184,7 +184,8 @@ fn cases() -> Vec<Case> {
         cache_inserts: None,
     });
 
-    // The dequantized-weight cache: 0 is the documented off switch.
+    // The dequantized-weight cache: 0 is the documented off switch, and the
+    // default since #2232.
     cases.push(Case {
         env: vec![(THRESHOLD, "1"), (CACHE_SIZE, "4294967304")],
         watched: CACHE_SIZE,
@@ -192,7 +193,7 @@ fn cases() -> Vec<Case> {
             CACHE_SIZE,
             "4294967304",
             "a non-negative integer",
-            "the default 8",
+            "the default 0",
         ),
         route_dense: None,
         cache_inserts: None,
@@ -230,6 +231,8 @@ fn cases() -> Vec<Case> {
     // under the 256 MiB default it is never cached. A cap that wrapped to
     // SIZE_MAX (`-1`, or an overflow) would store it, so the insert count tells
     // the default from a wrapped cap; 1 GiB is a valid cap that does store it.
+    // The cache size is set explicitly: the default is off since #2232, and a
+    // byte-cap check needs a live cache to probe.
     for (value, warns, inserts) in [
         (None, false, 0),
         (Some("0"), false, 0),
@@ -238,7 +241,7 @@ fn cases() -> Vec<Case> {
         (Some("12abc"), true, 0),
         (Some("18446744073709551616"), true, 0),
     ] {
-        let mut env = vec![(THRESHOLD, "1"), (CACHE_PROBE, "1")];
+        let mut env = vec![(THRESHOLD, "1"), (CACHE_SIZE, "8"), (CACHE_PROBE, "1")];
         if let Some(v) = value {
             env.push((CACHE_BYTES, v));
         }
@@ -544,7 +547,9 @@ fn check_gemm(label: &str, rows: i32, k: i32, n: i32, repeats: usize) {
 /// the 256 MiB default byte cap and prints how many entries the cache stored.
 /// The weight is all zeros: only the cache decision is probed, not the values.
 /// f16 keeps the GEMM off the fused bf16 WMMA kernel and its ceiling, so the
-/// dequantize route runs through the cache at every row count.
+/// dequantize route runs through the cache at every row count; the parent sets
+/// `MLX_ROCM_QMM_DEQUANT_CACHE_SIZE` explicitly, since the default is off
+/// since #2232 and a byte-cap check needs a live cache.
 fn probe_cache_inserts() {
     let _gpu = DefaultDeviceGuard::gpu();
     let (n, k) = (PROBE_DIM, PROBE_DIM);

@@ -1,0 +1,48 @@
+rocm_gpu_guard: 2026-10-14T11:40:34+0900 lock held by outer guard 1041044: not taking /tmp/mlxcel-rocm-gpu-guard.lock
+rocm_gpu_guard: 2026-10-14T11:40:34+0900 waiting for 60s of idle GPU and no compiler
+rocm_gpu_guard: 2026-10-14T11:41:20+0900 idle streak reset after 31s: gpu=[] compilers=[1568041:cargo,1568055:rustc,1568318:collect2]
+rocm_gpu_guard: 2026-10-14T11:42:50+0900 idle for 60s: kfd proc empty and no compiler in every 1 Hz sample
+rocm_gpu_guard: 2026-10-14T11:42:50+0900 attempt 1/5: start: env MLX_ROCM_QMM_DEQUANT_CACHE_STATS=1 /home/devops/Development/wt-20261013-issue-2232/target/release/mlxcel-bench-decode -m /home/devops/Development/mlxcel/models/mlx/Meta-Llama-3.1-8B-Instruct-4bit -p x -n 128 --warmup-tokens 20 --ignore-eos --prompt-tokens 2048
+[mlx-rocm] bound HIP device 0: gfx1151 (AMD Radeon 8060S Graphics) cus=20 warp=32 lds=64KB
+[Memory] cache limit: 2.15 GB
+[Load] wall: 0.170 s  MLX peak: 0.00 GB
+[Memory] after load: active 0.00 GB, cache 0.00 GB, active+cache 0.00 GB, phase peak 0.00 GB
+[long-prompt] target=2048 tokens -> using 2048 tokens (max_context=Some(131072), reserved 128 for generation)
+[mlx-rocm] gfx1151 native_wmma=1 cus=20 warp=32 low_cu=0 host_WARP_SIZE=32
+[hipBLASLt caps] device 0 (gfx1151): bf16=1 fp8_e4m3=0 fp8_e5m2=0 int8=1
+[Memory] after warmup (prefill + warmup tokens): active 4.52 GB, cache 1.34 GB, active+cache 5.85 GB, phase peak 6.63 GB
+[long-prompt] target=2048 tokens -> using 2048 tokens (max_context=Some(131072), reserved 128 for generation)
+rocm_gpu_guard: 2026-10-14T11:42:58+0900 sample 6: CONTENDED foreign_gpu=[] compilers=[1629763:cargo,1629852:rustc,1629853:rustc,1629939:rustc,1629941:rustc]
+[Memory] after measured pass: active 4.52 GB, cache 1.34 GB, active+cache 5.85 GB, phase peak 6.92 GB
+[Profile Results]
+  Prompt tokens:    2048
+  Generated tokens: 128
+  Prefill:          1748.60 ms (1171.22 tok/s)
+  Decode:           3323.07 ms (38.52 tok/s)
+  Decode path:      engine
+  MLX peak memory:  6.92 GB
+rocm_gpu_guard: 2026-10-14T11:42:59+0900 monitor: 6 samples
+rocm_gpu_guard: 2026-10-14T11:42:59+0900 attempt 1: REJECTED (contended), exit 0; rerunning
+rocm_gpu_guard: 2026-10-14T11:42:59+0900 waiting for 60s of idle GPU and no compiler
+rocm_gpu_guard: 2026-10-14T11:44:55+0900 idle streak reset after 35s: gpu=[] compilers=[1712912:cargo,1712934:rustc]
+rocm_gpu_guard: 2026-10-14T11:46:26+0900 idle for 60s: kfd proc empty and no compiler in every 1 Hz sample
+rocm_gpu_guard: 2026-10-14T11:46:26+0900 attempt 2/5: start: env MLX_ROCM_QMM_DEQUANT_CACHE_STATS=1 /home/devops/Development/wt-20261013-issue-2232/target/release/mlxcel-bench-decode -m /home/devops/Development/mlxcel/models/mlx/Meta-Llama-3.1-8B-Instruct-4bit -p x -n 128 --warmup-tokens 20 --ignore-eos --prompt-tokens 2048
+[mlx-rocm] bound HIP device 0: gfx1151 (AMD Radeon 8060S Graphics) cus=20 warp=32 lds=64KB
+[Memory] cache limit: 2.15 GB
+[Load] wall: 0.174 s  MLX peak: 0.00 GB
+[Memory] after load: active 0.00 GB, cache 0.00 GB, active+cache 0.00 GB, phase peak 0.00 GB
+[long-prompt] target=2048 tokens -> using 2048 tokens (max_context=Some(131072), reserved 128 for generation)
+[mlx-rocm] gfx1151 native_wmma=1 cus=20 warp=32 low_cu=0 host_WARP_SIZE=32
+[hipBLASLt caps] device 0 (gfx1151): bf16=1 fp8_e4m3=0 fp8_e5m2=0 int8=1
+[Memory] after warmup (prefill + warmup tokens): active 4.52 GB, cache 1.34 GB, active+cache 5.85 GB, phase peak 6.63 GB
+[long-prompt] target=2048 tokens -> using 2048 tokens (max_context=Some(131072), reserved 128 for generation)
+[Memory] after measured pass: active 4.52 GB, cache 1.29 GB, active+cache 5.80 GB, phase peak 6.92 GB
+[Profile Results]
+  Prompt tokens:    2048
+  Generated tokens: 128
+  Prefill:          1775.80 ms (1153.28 tok/s)
+  Decode:           3281.02 ms (39.01 tok/s)
+  Decode path:      engine
+  MLX peak memory:  6.92 GB
+rocm_gpu_guard: 2026-10-14T11:46:35+0900 monitor: 6 samples
+rocm_gpu_guard: 2026-10-14T11:46:35+0900 attempt 2: CLEAN, exit 0
