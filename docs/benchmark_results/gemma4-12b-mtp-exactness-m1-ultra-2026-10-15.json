@@ -1491,10 +1491,7 @@
     },
     "reference_perplexity": 246.8612
   },
-  "remaining": [
-    "final-head release smoke after backend-scope refinement",
-    "untouched-default startup control"
-  ],
+  "remaining": [],
   "unmeasured": [
     "M5 Max",
     "CUDA",
@@ -3100,8 +3097,302 @@
     "candidate_sha256": "de772cee794bd5680fdbd0e354e25800d3c000e5af2c5ba8d195a7889bcceada",
     "candidate_product_patch_sha256": "f4192c3fc452590f2f9ee35eb3eb71d3b89524988dd7bb9bedd0030701bbd0b4",
     "review_refinement_revision": "1eda64efea3d7e738c67916931b29de07f980252",
-    "final_head_runtime_measured": false,
+    "final_head_runtime_measured": true,
     "startup_interval_definition": "Starting BatchScheduler log timestamp to MTP exactness probe passed log timestamp; includes scheduler setup, not isolated pure probe time",
-    "throughput_policy": "Pinned validation switches, forced M1 B=1 eligibility, adaptive sizing and slice grants disabled; no default broadening"
+    "throughput_policy": "Pinned validation switches, forced M1 B=1 eligibility, adaptive sizing and slice grants disabled; no default broadening",
+    "final_head_runtime_scope": "Separate final-source correctness smoke and single default-environment startup only; repeated throughput and startup-cost comparison remain on bd6 artifact."
+  },
+  "final_release_smoke": {
+    "source_revision": "1eda64efea3d7e738c67916931b29de07f980252",
+    "artifact_sha256": "98fb89c5d81daa8d47e0c575ccf68ad93f1439087cd241994de6c3426902237d",
+    "classic": {
+      "command": [
+        "/private/tmp/mlxcel-1986-final-release-server",
+        "--model",
+        "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-4bit",
+        "--parallel",
+        "1",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "19866",
+        "--batch-size",
+        "512",
+        "--ctx-size",
+        "16384"
+      ],
+      "environment": {
+        "MLXCEL_QMV_WIDE": "0",
+        "MLXCEL_ENABLE_MTP_B1": "1",
+        "MLXCEL_MTP_ADAPTIVE": "0",
+        "MLXCEL_MTP_SLICE_GRANT_ROUNDS": "0"
+      },
+      "load_before": [
+        6.26171875,
+        5.9228515625,
+        5.7822265625
+      ],
+      "health_seconds": 4.394757624948397,
+      "exit": -15,
+      "results": [
+        {
+          "label": "0-science",
+          "wall_s": 11.898478833027184,
+          "load_before": [
+            6.00048828125,
+            5.8740234375,
+            5.765625
+          ],
+          "load_after": [
+            5.68603515625,
+            5.8115234375,
+            5.744140625
+          ],
+          "tokens_evaluated": 1638,
+          "tokens_predicted": 256,
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 1638,
+            "prompt_ms": 4739.0,
+            "prompt_per_token_ms": 2.893162393162393,
+            "prompt_per_second": 345.64254062038407,
+            "predicted_n": 256,
+            "predicted_ms": 7155.0,
+            "predicted_per_token_ms": 28.058823529411764,
+            "predicted_per_second": 35.63941299790356
+          },
+          "text_sha256": "0dbc5cb5ccaa4b21b5c7c7313694633a79bb0db44da20f15b529ffee9ada35e1"
+        },
+        {
+          "label": "0-software",
+          "wall_s": 11.003335208049975,
+          "load_before": [
+            5.68603515625,
+            5.8115234375,
+            5.744140625
+          ],
+          "load_after": [
+            4.96142578125,
+            5.6416015625,
+            5.68408203125
+          ],
+          "tokens_evaluated": 1338,
+          "tokens_predicted": 256,
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 1338,
+            "prompt_ms": 3835.0,
+            "prompt_per_token_ms": 2.866218236173393,
+            "prompt_per_second": 348.8917861799218,
+            "predicted_n": 256,
+            "predicted_ms": 7164.0,
+            "predicted_per_token_ms": 28.094117647058823,
+            "predicted_per_second": 35.594639865996655
+          },
+          "text_sha256": "1770852d1cbde47c54d6b657f7e52a09019dff67ba2c5968377b566221927536"
+        },
+        {
+          "label": "0-history",
+          "wall_s": 10.732727959053591,
+          "load_before": [
+            4.96142578125,
+            5.6416015625,
+            5.68408203125
+          ],
+          "load_after": [
+            4.89306640625,
+            5.60400390625,
+            5.66943359375
+          ],
+          "tokens_evaluated": 1238,
+          "tokens_predicted": 256,
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 1238,
+            "prompt_ms": 3575.0,
+            "prompt_per_token_ms": 2.8877221324717284,
+            "prompt_per_second": 346.2937062937063,
+            "predicted_n": 256,
+            "predicted_ms": 7154.0,
+            "predicted_per_token_ms": 28.054901960784314,
+            "predicted_per_second": 35.64439474419905
+          },
+          "text_sha256": "111352576aab1e1d7a78711b8951d6400da58926fb5b15c78d1d9cc3018fe7e9"
+        }
+      ]
+    },
+    "mtp": {
+      "command": [
+        "/private/tmp/mlxcel-1986-final-release-server",
+        "--model",
+        "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-4bit",
+        "--parallel",
+        "1",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "19866",
+        "--batch-size",
+        "512",
+        "--ctx-size",
+        "16384",
+        "--model-draft",
+        "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-assistant-4bit",
+        "--draft-kind",
+        "mtp",
+        "--draft-block-size",
+        "4"
+      ],
+      "environment": {
+        "MLXCEL_QMV_WIDE": "0",
+        "MLXCEL_ENABLE_MTP_B1": "1",
+        "MLXCEL_MTP_ADAPTIVE": "0",
+        "MLXCEL_MTP_SLICE_GRANT_ROUNDS": "0"
+      },
+      "load_before": [
+        4.89306640625,
+        5.60400390625,
+        5.66943359375
+      ],
+      "health_seconds": 10.55454100004863,
+      "exit": -15,
+      "results": [
+        {
+          "label": "0-science",
+          "wall_s": 13.283061083056964,
+          "load_before": [
+            4.6689453125,
+            5.53369140625,
+            5.6435546875
+          ],
+          "load_after": [
+            5.03564453125,
+            5.572265625,
+            5.65478515625
+          ],
+          "tokens_evaluated": 1638,
+          "tokens_predicted": 256,
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 1638,
+            "prompt_ms": 4711.0,
+            "prompt_per_token_ms": 2.876068376068376,
+            "prompt_per_second": 347.6968796433878,
+            "predicted_n": 256,
+            "predicted_ms": 8568.0,
+            "predicted_per_token_ms": 33.6,
+            "predicted_per_second": 29.761904761904763,
+            "draft_n": 317,
+            "draft_n_accepted": 150,
+            "draft_rounds": 106,
+            "draft_kind": "mtp"
+          },
+          "text_sha256": "0dbc5cb5ccaa4b21b5c7c7313694633a79bb0db44da20f15b529ffee9ada35e1"
+        },
+        {
+          "label": "0-software",
+          "wall_s": 11.857663832954131,
+          "load_before": [
+            5.03564453125,
+            5.572265625,
+            5.65478515625
+          ],
+          "load_after": [
+            4.9755859375,
+            5.53759765625,
+            5.64111328125
+          ],
+          "tokens_evaluated": 1338,
+          "tokens_predicted": 256,
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 1338,
+            "prompt_ms": 3792.0,
+            "prompt_per_token_ms": 2.8340807174887894,
+            "prompt_per_second": 352.8481012658228,
+            "predicted_n": 256,
+            "predicted_ms": 8059.0,
+            "predicted_per_token_ms": 31.603921568627452,
+            "predicted_per_second": 31.641642883732477,
+            "draft_n": 295,
+            "draft_n_accepted": 157,
+            "draft_rounds": 99,
+            "draft_kind": "mtp"
+          },
+          "text_sha256": "1770852d1cbde47c54d6b657f7e52a09019dff67ba2c5968377b566221927536"
+        },
+        {
+          "label": "0-history",
+          "wall_s": 12.170932917040773,
+          "load_before": [
+            4.9755859375,
+            5.53759765625,
+            5.64111328125
+          ],
+          "load_after": [
+            5.13916015625,
+            5.552734375,
+            5.64501953125
+          ],
+          "tokens_evaluated": 1238,
+          "tokens_predicted": 256,
+          "timings": {
+            "cache_n": 0,
+            "prompt_n": 1238,
+            "prompt_ms": 3533.0,
+            "prompt_per_token_ms": 2.8537964458804526,
+            "prompt_per_second": 350.4104160769884,
+            "predicted_n": 256,
+            "predicted_ms": 8631.0,
+            "predicted_per_token_ms": 33.84705882352941,
+            "predicted_per_second": 29.54466458116093,
+            "draft_n": 322,
+            "draft_n_accepted": 148,
+            "draft_rounds": 108,
+            "draft_kind": "mtp"
+          },
+          "text_sha256": "111352576aab1e1d7a78711b8951d6400da58926fb5b15c78d1d9cc3018fe7e9"
+        }
+      ]
+    },
+    "status": "All three 256-token long-prompt classic/MTP outputs match each other and the prior release evidence; actual MTP attribution passes. Correctness smoke, not additional performance evidence."
+  },
+  "default_environment_startup": {
+    "command": [
+      "/private/tmp/mlxcel-1986-final-release-server",
+      "--model",
+      "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-4bit",
+      "--model-draft",
+      "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-assistant-4bit",
+      "--draft-kind",
+      "mtp",
+      "--draft-block-size",
+      "4",
+      "--parallel",
+      "1",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "19866"
+    ],
+    "environment": {},
+    "load_before": [
+      5.2080078125,
+      5.56005859375,
+      5.64697265625
+    ],
+    "health": {
+      "status": "ok"
+    },
+    "health_seconds": 10.374631875078194,
+    "load_after": [
+      4.861328125,
+      5.474609375,
+      5.61572265625
+    ],
+    "exit": -15,
+    "exactness_probe_passed": true,
+    "narrow_retry_observed": false,
+    "scope": "Single fresh startup with all MLXCEL_* and LLAMA_ARG_* variables removed; explicit model/drafter, MTP width 4 and parallel 1 CLI. Not a default serving throughput study."
   }
 }

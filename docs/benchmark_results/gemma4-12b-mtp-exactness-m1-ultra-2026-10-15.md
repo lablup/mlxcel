@@ -99,7 +99,13 @@ Decode throughput is tokens/s, median [minimum, maximum] over three runs. MAD an
 
 Three additional paired fresh-process startups compare the baseline short guard with the strengthened candidate guard, with no diagnostic variables or inexact override. They retain `MLXCEL_QMV_WIDE=0` and `MLXCEL_ENABLE_MTP_B1=1`. All six guards pass. The scheduler-setup-to-probe-pass log interval is 1.245 s [1.245, 1.264] before versus 7.041 s [7.009, 7.073] after: +5.795 s between medians. This interval includes scheduler setup and is **not isolated pure probe duration**. Process-to-health medians are 4.796 s [4.570, 4.804] versus 10.408 s [10.357, 10.582], a +5.612 s increase including load/warmup and health polling. These startup costs are an explicit tradeoff of covering the real window in the fail-closed guard.
 
-Final-head release rebuild and smoke are pending separately; the above artifact provenance remains fixed. M5, CUDA, ROCm and CPU runtime behavior, 31B QAT, Qwen bf16 drafter and untouched-default performance remain unmeasured.
+### Final-source release confirmation
+
+A fresh release built from product source `1eda64ef` has SHA-256 `98fb89c5d81daa8d47e0c575ccf68ad93f1439087cd241994de6c3426902237d`. All three long-prompt 256-token classic/MTP output pairs match each other and the previous release hashes. MTP proposed/accepted/rounds remain 317/150/106, 295/157/99 and 322/148/108. This is final-source correctness confirmation, not a second throughput study; the repeated performance evidence above retains its original artifact provenance.
+
+A separate fresh startup removes every `MLXCEL_*` and `LLAMA_ARG_*` environment variable while explicitly selecting the target, assistant, MTP width 4 and one parallel slot. The default-environment exactness probe passes without a retry or inexact override, and health succeeds after 10.375 s. This single control verifies default-environment startup, not default serving throughput or profitability. Its command, empty environment override map and load are retained in the JSON.
+
+M5, CUDA, ROCm and CPU runtime behavior, 31B QAT, Qwen bf16 drafter and untouched-default performance remain unmeasured.
 
 ## Reproduction
 
