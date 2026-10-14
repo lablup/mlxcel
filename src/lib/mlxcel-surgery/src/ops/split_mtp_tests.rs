@@ -538,6 +538,7 @@ fn staging_directory_is_private() {
 #[test]
 fn dot_and_dotdot_outputs_stage_beside_the_resolved_directory() {
     let tmp = tempfile::tempdir().unwrap();
+    let resolved_parent = std::fs::canonicalize(tmp.path()).unwrap();
     let dot_target = tmp.path().join("dot-target");
     let dotdot_child = tmp.path().join("dotdot-target").join("child");
     std::fs::create_dir(&dot_target).unwrap();
@@ -545,7 +546,7 @@ fn dot_and_dotdot_outputs_stage_beside_the_resolved_directory() {
 
     for output in [dot_target.join("."), dotdot_child.join("..")] {
         let staging = StagingDir::create(&output).expect("staging");
-        assert_eq!(staging.path().parent(), Some(tmp.path()));
+        assert_eq!(staging.path().parent(), Some(resolved_parent.as_path()));
         std::fs::write(staging.path().join("config.json"), b"new").unwrap();
         commit_staging_dir(staging, &output, true).expect("commit");
         assert_eq!(std::fs::read(output.join("config.json")).unwrap(), b"new");
@@ -554,13 +555,34 @@ fn dot_and_dotdot_outputs_stage_beside_the_resolved_directory() {
 
 #[cfg(unix)]
 #[test]
-fn non_utf8_output_name_is_supported() {
+fn non_utf8_output_name_is_supported_or_rejected_cleanly() {
     use std::os::unix::ffi::OsStringExt;
 
     let tmp = tempfile::tempdir().unwrap();
     let output = tmp.path().join(std::ffi::OsString::from_vec(vec![
         b'd', b'r', 0xff, b'f', b't',
     ]));
+
+    if let Err(probe_error) = std::fs::create_dir(&output) {
+        let staging_error = match StagingDir::create(&output) {
+            Ok(_) => panic!("staging must honor the filesystem rejection"),
+            Err(error) => error,
+        };
+        match staging_error {
+            crate::SurgeryError::Io(error) => {
+                assert_eq!(error.kind(), probe_error.kind());
+                assert_eq!(error.raw_os_error(), probe_error.raw_os_error());
+            }
+            error => panic!("expected filesystem error, got: {error}"),
+        }
+        assert!(
+            std::fs::read_dir(tmp.path()).unwrap().next().is_none(),
+            "filesystem rejection must not leave output or staging entries"
+        );
+        return;
+    }
+    std::fs::remove_dir(&output).unwrap();
+
     let staging = StagingDir::create(&output).expect("staging");
     std::fs::write(staging.path().join("config.json"), b"new").unwrap();
 

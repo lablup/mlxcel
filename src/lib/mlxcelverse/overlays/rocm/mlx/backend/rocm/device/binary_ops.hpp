@@ -27,14 +27,23 @@ struct FloorDivide {
   template <typename T>
   __device__ T operator()(T x, T y) {
     if constexpr (std::is_integral_v<T>) {
-      return x / y;
+      auto q = x / y;
+      if constexpr (std::is_signed_v<T>) {
+        if (x % y != 0 && (x < 0) != (y < 0)) {
+          --q;
+        }
+      }
+      return q;
+    } else if constexpr (is_complex_v<T>) {
+      // Complex floor division is rejected by the frontend.
+      return hipCdivf(x, y);
     } else if constexpr (std::is_same_v<T, hip_bfloat16>) {
       return hip_bfloat16(
-          truncf(static_cast<float>(x) / static_cast<float>(y)));
+          floorf(static_cast<float>(x) / static_cast<float>(y)));
     } else if constexpr (std::is_same_v<T, __half>) {
-      return __float2half(truncf(__half2float(x) / __half2float(y)));
+      return __float2half(floorf(__half2float(x) / __half2float(y)));
     } else {
-      return truncf(x / y);
+      return floor(x / y);
     }
   }
 };

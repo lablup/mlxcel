@@ -2234,9 +2234,11 @@ void moe_ws_alloc(CommandEncoder& encoder, array& a) {
       /*host_shadow=*/nullptr,
       /*host_dirty=*/false,
       /*alloc_stream=*/encoder.stream()};
-  a.set_data(allocator::Buffer{rb}, [](allocator::Buffer b) {
+  // The slab owns the storage. A custom Data deleter releases only this shell
+  // and marks the array borrowed, so is_donatable() rejects its storage.
+  a.set_data(allocator::Data(allocator::Buffer{rb}, [](allocator::Buffer b) {
     delete static_cast<RocmBuffer*>(b.ptr());
-  });
+  }));
 }
 
 void segmented_mm_device(

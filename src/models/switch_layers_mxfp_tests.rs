@@ -505,6 +505,22 @@ fn mxfp4_gather_qmm_matches_host_reference() {
     check_gather(Mode::Mxfp4, OUT_FEATURES, &GATHER_CASES, &ACTIVATIONS);
 }
 
+/// Unlike the 320-wide tail cases, this width admits CUDA's sorted RHS GEMM.
+/// gather_sort expands 32 tokens x 4 experts into 128 physical rows, also
+/// exercising the consumer Blackwell 128-row CTA policy.
+#[test]
+fn mxfp_sorted_prefill_aligned_width_matches_host_reference() {
+    let _device = lock_default_device();
+    for mode in [Mode::Mxfp4, Mode::Mxfp8] {
+        check_gather(
+            mode,
+            384,
+            &[GatherCase::PrefillSorted],
+            &[ACTIVATIONS[0], ACTIVATIONS[1]],
+        );
+    }
+}
+
 #[test]
 fn mxfp8_quantized_matmul_matches_host_reference() {
     let _device = lock_default_device();

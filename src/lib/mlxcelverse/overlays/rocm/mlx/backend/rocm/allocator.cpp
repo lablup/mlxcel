@@ -967,11 +967,13 @@ RocmAllocator& allocator() {
   return *allocator_;
 }
 
-Buffer malloc_async(size_t size, CommandEncoder& encoder) {
-  return allocator().malloc_async(
+allocator::Data malloc_async(size_t size, CommandEncoder& encoder) {
+  // Use Data's owned constructor, just like CUDA: ordinary allocations remain
+  // donatable and release through the ROCm allocator after encoder retention.
+  return allocator::Data(allocator().malloc_async(
       size,
       encoder.device().hip_device(),
-      static_cast<hipStream_t>(encoder.stream()));
+      static_cast<hipStream_t>(encoder.stream())));
 }
 
 } // namespace rocm

@@ -638,7 +638,19 @@ struct Remainder {
 struct FloorDivide {
   template <typename T>
   __device__ T operator()(T x, T y) {
-    return T(truncf(static_cast<float>(x) / static_cast<float>(y)));
+    // HIPRTC has no standard-library type traits here. Clang's integral
+    // predicate keeps 64-bit quotients exact instead of converting to float.
+    if constexpr (__is_integral(T)) {
+      auto q = x / y;
+      if (x % y != 0 && (x < 0) != (y < 0)) {
+        --q;
+      }
+      return T(q);
+    } else if constexpr (__is_same(T, double)) {
+      return floor(x / y);
+    } else {
+      return T(floorf(static_cast<float>(x) / static_cast<float>(y)));
+    }
   }
 };
 

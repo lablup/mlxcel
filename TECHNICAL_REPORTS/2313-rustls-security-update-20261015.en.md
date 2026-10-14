@@ -6,7 +6,9 @@
 
 ## Summary
 
-PR #2313 updates the sole locked `rustls` package from 0.23.45 to 0.23.46, the upstream patched release for RUSTSEC-2026-0346 through RUSTSEC-2026-0349. The complete product diff is the rustls version and registry checksum in `Cargo.lock`; 108 other resolved packages, manifests, and the existing provider feature selection remain unchanged.
+The original PR #2313 source commit `e9604cba` updated the sole locked `rustls` package from 0.23.45 to 0.23.46, the upstream patched release for RUSTSEC-2026-0346 through RUSTSEC-2026-0349. Its complete product diff was the rustls version and registry checksum in `Cargo.lock`; 108 other resolved packages, manifests, and the existing provider feature selection remained unchanged.
+
+**Current status:** The same rustls 0.23.46 lock update landed on `main` through PR #2304. After incorporating that merged state, PR #2313 preserves this review and test record as report-only documentation and introduces no additional product change.
 
 No user documentation changes are needed because the patch adds no configuration, command-line option, API, migration, or observable error-contract change. The security correction is supplied by the compatible upstream patch release.
 
@@ -23,13 +25,15 @@ All four advisories identify rustls 0.23.46 as patched. No advisory ignore or po
 
 ## Validation
 
+The validation below records the original `e9604cba` source and dependency graph; it remains historical evidence rather than a claim that the current report-only diff changes the rustls pin.
+
 - `cargo deny check` passed locally for advisories, bans, licenses, and sources; the hosted `cargo-deny` job also passed on PR #2313.
 - `cargo metadata --locked --no-deps --format-version 1` passed and reported the five workspace packages without modifying the lockfile.
 - `cargo tree --locked -i rustls -e features` resolved one rustls 0.23.46 package. The feature graph retains the explicit `ring`, `std`, `tls12`, and logging selection and does not enable an alternative rustls crypto provider.
 - Parsed diff inspection confirms a two-field lockfile change: version `0.23.45` → `0.23.46` and checksum replacement. `git diff --check` passed.
 - `MLXCEL_BUILD_METAL=OFF RUSTC_WRAPPER= cargo test --locked --profile test-fast --no-default-features --lib tls_tests:: -- --test-threads=1` passed 10 tests with none ignored. This covers the existing TLS configuration, certificate, key, and plaintext-fallback guards.
 - The equivalent `downloader::tests::` run passed 71 tests and ignored one optional integration test. No live external download was performed.
-- An initial default-macOS build reached MLX's unrelated `gated_delta_update_nax.metal` MPP compilation failure before running tests. The authoritative focused runs explicitly disabled the unrelated Metal backend and completed with nonzero counts.
+- An initial default-macOS build of `e9604cba` reached MLX's unrelated `gated_delta_update_nax.metal` MPP compilation failure before running tests. The authoritative focused runs explicitly disabled the unrelated Metal backend and completed with nonzero counts; this failure is not evidence about the rustls pin now on `main`.
 - Independent implementation and security review found no blocking issue in the lock-only patch or its qualified advisory wording. Hosted CI had already passed cargo-deny and the repository contract checks observed during finalization; remaining CI status is checked separately before merge.
 
 ## Risk and limits

@@ -332,6 +332,7 @@ void binary_op_gpu(
 BINARY_GPU(Add)
 BINARY_GPU(ArcTan2)
 BINARY_GPU(Divide)
+BINARY_GPU(FloorDivide)
 BINARY_GPU(Greater)
 BINARY_GPU(GreaterEqual)
 BINARY_GPU(Less)

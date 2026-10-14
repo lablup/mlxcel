@@ -1,6 +1,8 @@
 # MLX CUDA: `CudaHandle`'s destructor throws while the driver is unloading
 
-A test binary on GB10 sometimes aborts after it has already printed `test result: ok`:
+As of the MLX pin update in #2303, the local overlay is retired: upstream [#4514](https://github.com/ml-explore/mlx/pull/4514), commit `9eb3e3ab6fceb4031994f70dfe023872643ed634`, directly destroys CUDA handles without throwing and adds related lifetime fixes. The overlapping [#4531](https://github.com/ml-explore/mlx/pull/4531) was closed unmerged in its favor. The captured target includes #4514; the historical investigation below describes the earlier pin.
+
+A test binary on GB10 sometimes aborted after it had already printed `test result: ok`:
 
 ```
 test result: ok. N passed; 0 failed; ...

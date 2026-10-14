@@ -270,20 +270,17 @@ void MoeSwigluSorted::eval_gpu(
       rocm::malloc_async(
           static_cast<size_t>(T) * I * size_of(bfloat16), encoder),
       mid_shape,
-      bfloat16,
-      allocator::free);
+      bfloat16);
   array up(
       rocm::malloc_async(
           static_cast<size_t>(T) * I * size_of(bfloat16), encoder),
       mid_shape,
-      bfloat16,
-      allocator::free);
+      bfloat16);
   array h(
       rocm::malloc_async(
           static_cast<size_t>(T) * I * size_of(bfloat16), encoder),
       mid_shape,
-      bfloat16,
-      allocator::free);
+      bfloat16);
   encoder.add_temporary(gate);
   encoder.add_temporary(up);
   encoder.add_temporary(h);

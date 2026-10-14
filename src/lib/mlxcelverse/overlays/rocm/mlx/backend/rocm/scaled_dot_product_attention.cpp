@@ -149,6 +149,7 @@ bool ScaledDotProductAttention::use_fallback(
     bool has_mask,
     bool has_arr_mask,
     bool do_causal,
+    bool has_sinks,
     bool /*is_training*/,
     bool output_logsumexp,
     bool force_fused,
@@ -168,15 +169,14 @@ bool ScaledDotProductAttention::use_fallback(
   // Vector + scalar flash reject output_logsumexp. WMMA flash can emit LSE and
   // must be counted here or MLX_SDPA_FLASH_VJP never attaches (frontend only
   // requests LSE when VJP is non-fallback, and VJP needs LSE forward).
-  // Note: this is static — no has_sinks_ available. Sinks + LSE is rare; eval
-  // still refuses sinks on the WMMA path.
+  // WMMA does not support sinks; keep its admission identical to eval_gpu.
   bool vector_ok = supports_sdpa_vector(
       q, k, v, has_mask, has_arr_mask, do_causal, output_logsumexp);
   bool flash_ok = supports_sdpa_flash(
       q, k, v, has_mask, has_arr_mask, do_causal, output_logsumexp);
 #ifdef MLX_HAS_ROCM_WMMA
   static const bool wmma_disabled = std::getenv("MLX_SDPA_NO_WMMA") != nullptr;
-  bool wmma_ok = !wmma_disabled &&
+  bool wmma_ok = !wmma_disabled && !has_sinks &&
       supports_sdpa_flash_wmma(q, k, v, has_arr_mask, output_logsumexp) &&
       s.device == Device::gpu && rocm::device(s.device).has_native_wmma() &&
       sdpa_flash_wmma_smem(q.shape(-1)) <=

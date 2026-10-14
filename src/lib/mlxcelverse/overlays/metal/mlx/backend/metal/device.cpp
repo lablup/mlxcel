@@ -1,7 +1,7 @@
 // Copyright © 2023-2024 Apple Inc.
 // Patched by mlxcel: a runtime override for the per-command-buffer input
-// budget. Synced to upstream 81ba1c6a.
-// Modified from upstream MLX 81ba1c6a mlx/backend/metal/device.cpp The delta is three hunks: the <atomic>
+// budget. Synced to upstream 243bdf09.
+// Modified from upstream MLX 243bdf09c0cccbb85ca6a686dab3cc0102cf1f7e mlx/backend/metal/device.cpp The delta is three hunks: the <atomic>
 // include below, the override read in `CommandEncoder::needs_commit`, and the
 // two bridge entry points `mlxcel_set_mb_per_buffer_override()` /
 // `mlxcel_mb_per_buffer_override()` at the end of the file. Everything else is
@@ -231,7 +231,7 @@ MTL::Library* load_default_library(MTL::Device* device) {
     return lib;
   }
 
-  NS::Error* error[5];
+  NS::Error* error[6];
   MTL::Library* lib;
   // First try the colocated mlx.metallib
   std::tie(lib, error[0]) = load_colocated_library(device, "mlx");
@@ -243,6 +243,22 @@ MTL::Library* load_default_library(MTL::Device* device) {
   if (lib) {
     return lib;
   }
+
+#ifdef SWIFTPM_BUNDLE
+  // `swift test` with the default Swift Build build system nests resource
+  // bundles inside the .xctest and runs tests via the toolchain's
+  // swiftpm-testing-helper, so the running binary is the toolchain helper:
+  // neither Bundle.main nor Bundle.allBundles names the test bundle, and the
+  // SwiftPM bundle search below cannot reach it. In that layout the metallib
+  // sits at a fixed offset from the binary.
+  std::tie(lib, error[5]) = load_colocated_library(
+      device,
+      std::string("../Resources/") + SWIFTPM_BUNDLE +
+          ".bundle/Contents/Resources/default");
+  if (lib) {
+    return lib;
+  }
+#endif
 
   // Then try default.metallib in a SwiftPM bundle if we have one
   std::tie(lib, error[2]) = load_swiftpm_library(device, "default");
@@ -262,7 +278,7 @@ MTL::Library* load_default_library(MTL::Device* device) {
   if (!lib) {
     std::ostringstream msg;
     msg << "Failed to load the default metallib. ";
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 6; i++) {
       if (error[i] != nullptr) {
         msg << error[i]->localizedDescription()->utf8String() << " ";
       }
@@ -966,8 +982,13 @@ CommandEncoder& get_command_encoder(Stream s) {
 }
 
 std::unordered_map<int, CommandEncoder>& get_command_encoders() {
-  static thread_local std::unordered_map<int, CommandEncoder> encoders;
-  return encoders;
+  if (is_main_thread()) {
+    static auto* encoders = new std::unordered_map<int, CommandEncoder>();
+    return *encoders;
+  } else {
+    static thread_local std::unordered_map<int, CommandEncoder> encoders;
+    return encoders;
+  }
 }
 
 std::unordered_map<int, CommandEncoder>& get_global_command_encoders() {

@@ -2,7 +2,7 @@
 //
 // CUDA patch: bf16 reduce accumulation optimization
 //
-// Modified from upstream MLX 59d600b5e mlx/backend/cuda/reduce/col_reduce.cu
+// Modified from upstream MLX 243bdf09c0cccbb85ca6a686dab3cc0102cf1f7e mlx/backend/cuda/reduce/col_reduce.cu
 //
 // Changes:
 //   - Added output type template parameter V (separate from accumulation type U)
@@ -413,8 +413,7 @@ void col_reduce_two_pass(
       cu::malloc_async(intermediate.nbytes(), encoder),
       data_size,
       intermediate_strides,
-      fl,
-      allocator::free);
+      fl);
 
   // Single dispatch on the original input type handles both passes.
   // This avoids N^2 template instantiations from nested dispatch_all_types.

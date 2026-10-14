@@ -461,6 +461,9 @@ void FFT::eval_gpu(const std::vector<array>& inputs, array& out) {
 
     Shape step_shape = prepared.arr.shape();
     if (step_real) {
+      // The output shape already encodes upstream's odd_out_ flag. Preserve
+      // that exact length for C2R (including odd lengths), not 2 * (in - 1).
+      // execute_fft keys the hipFFT plan and inverse scaling by this length.
       step_shape.back() = out.shape(axis);
     }
 

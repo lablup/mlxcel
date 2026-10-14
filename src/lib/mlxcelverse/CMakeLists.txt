@@ -29,10 +29,13 @@ function(mlx_apply_source_overlays mlx_source_dir)
   # The steel/gemm/mma.h overlay (issue #217: upstream safe-load fix
   # cherry-pick, PRs #3560/#3565) was retired when the pin moved to
   # 2026-06-11 upstream main, which carries the fix natively (issue #222).
-  # quantized.cpp carries one delta, the MLXCEL_QMV_WIDE off-switch on
-  # `use_qmv_wide` (issue #1187). Upstream has no equivalent knob and the
-  # predicate is unchanged as of pin 81ba1c6a, so it has to be overlaid here.
-  # Refresh the file wholesale on a bump and re-apply that one hunk.
+  # quantized.cpp retains the MLXCEL_QMV_WIDE off-switch (#1187) and the
+  # broadcast gathered-row count (#1599) in GatherQMM/GatherQQMM. Refresh
+  # wholesale on a bump and re-apply only those documented local changes.
+  # Upstream #4594 supplies the Xcode 27 cooperative-tensor workaround;
+  # no gated_delta_update_nax.h overlay is needed at this pin.
+  # Upstream #4514 also supplies nonthrowing CUDA handle teardown, so the
+  # cuda_utils.h overlay is retired.
   # device.cpp carries a runtime override of the per-command-buffer input
   # budget (`mlxcel_set_mb_per_buffer_override`), which mlxcel raises around
   # decode steps and leaves at the device default for prefill. Upstream latches
@@ -200,7 +203,7 @@ else()
     #     `)` as ending the declaration, so one there would hide the tag
     #     instead of being read past.
     # Both parsers fail loudly rather than guess when the shape does not hold.
-    GIT_TAG 59d600b5e64c238427d0f8d897ab7c682ef4d3d2)
+    GIT_TAG 243bdf09c0cccbb85ca6a686dab3cc0102cf1f7e)
 
   # Use FetchContent_Populate + add_subdirectory so we can apply source
   # overlays before the MLX build system processes the files.

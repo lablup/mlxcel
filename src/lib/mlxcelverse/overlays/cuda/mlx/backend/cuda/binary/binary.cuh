@@ -2,7 +2,7 @@
 //
 // CUDA patch: Mixed-precision binary operation kernels for bf16
 //
-// Modified from upstream MLX e9463bb mlx/backend/cuda/binary/binary.cuh
+// Modified from upstream MLX 243bdf09c0cccbb85ca6a686dab3cc0102cf1f7e mlx/backend/cuda/binary/binary.cuh
 //
 // Changes:
 //   - Added mixed-type kernel templates (binary_ss_mixed, binary_sv_mixed, etc.)
@@ -19,7 +19,7 @@
 // GPU time during bf16 model inference.
 //
 // The same-type kernels and dispatch below are byte-identical to upstream
-// e9463bb (including the large-grid index_rest fix and
+// 243bdf09 (including FloorDivide and the large-grid index_rest fix and
 // get_launch_args_general); the mixed kernels mirror those conventions.
 //
 // This patch is CUDA-only -- applied via the overlay system in CMakeLists.txt
@@ -464,9 +464,10 @@ __global__ void binary_g_mixed(
 template <typename Op, typename In, typename Out>
 constexpr bool supports_binary_op() {
   if (std::is_same_v<Op, Add> || std::is_same_v<Op, Divide> ||
-      std::is_same_v<Op, Maximum> || std::is_same_v<Op, Minimum> ||
-      std::is_same_v<Op, Multiply> || std::is_same_v<Op, Subtract> ||
-      std::is_same_v<Op, Power> || std::is_same_v<Op, Remainder>) {
+      std::is_same_v<Op, FloorDivide> || std::is_same_v<Op, Maximum> ||
+      std::is_same_v<Op, Minimum> || std::is_same_v<Op, Multiply> ||
+      std::is_same_v<Op, Subtract> || std::is_same_v<Op, Power> ||
+      std::is_same_v<Op, Remainder>) {
     return std::is_same_v<In, Out>;
   }
   if (std::is_same_v<Op, Equal> || std::is_same_v<Op, Greater> ||

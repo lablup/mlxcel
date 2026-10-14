@@ -57,6 +57,17 @@ bool GatedDeltaUpdate::use_fallback(
   return true;
 }
 NO_GPU_MULTI(GatedDeltaUpdate)
+// The forward primitive is always expanded into its graph on ROCm. Its VJP
+// likewise uses upstream's differentiable graph, never an unsupported kernel.
+bool GatedDeltaUpdateVJP::use_fallback(
+    const int Hk,
+    const int Dk,
+    const int Hv,
+    const int Dv,
+    Stream s) {
+  return true;
+}
+NO_GPU_MULTI(GatedDeltaUpdateVJP)
 } // namespace fast
 
 // Note: The following are now implemented in their respective files:

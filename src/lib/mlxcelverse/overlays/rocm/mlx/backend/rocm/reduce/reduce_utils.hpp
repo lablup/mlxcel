@@ -150,8 +150,7 @@ inline void allocate_same_layout(
       mlx::core::rocm::malloc_async(out.nbytes(), encoder),
       data_size,
       final_strides,
-      fl,
-      allocator::free);
+      fl);
 }
 
 } // namespace mlx::core

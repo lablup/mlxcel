@@ -12,7 +12,7 @@
 // dispatch in decode and MLX exposes no hook for it, so the one-shot trace has
 // to be emitted from the dispatch site itself.
 //
-// Modified from upstream MLX 59d600b5e mlx/backend/cuda/quantized/quantized.cpp
+// Modified from upstream MLX 243bdf09c0cccbb85ca6a686dab3cc0102cf1f7e mlx/backend/cuda/quantized/quantized.cpp
 //
 // Between 81ba1c6a and 59d600b5e upstream touched this file in
 // ml-explore/mlx#4507, plumbing `global_scale` into GatherQMM::eval_gpu for
@@ -459,8 +459,13 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
   // naive kernel until it does.
   bool can_use_qmm_sm80 =
       !global_scale.has_value() && supports(supports_qmm_sm80);
+  bool can_use_gather_qmm_rhs_sm80 = mode_ != QuantizationMode::Affine &&
+      right_sorted_ && !global_scale.has_value() &&
+      supports(supports_gather_qmm_rhs_sm80);
   bool can_use_qmm_naive = supports(supports_qmm_naive);
-  bool can_use_qmv = supports(supports_qmv);
+  bool can_use_fp_gather_qmv = supports(supports_fp_gather_qmv);
+  bool can_use_qmv = supports(supports_qmv) || can_use_fp_gather_qmv;
+  bool prefer_qmv = can_use_fp_gather_qmv || (can_use_qmv && M * B < 8);
 
   auto call_qmm_sm80 = [&]() {
     out.set_data(cu::malloc_async(out.nbytes(), encoder));
@@ -507,6 +512,11 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
     run_batch_chunked(
         out, lhs_indices, rhs_indices, M, N,
         [&](const array& lc, const array& rc, array& oc) {
+          if (can_use_fp_gather_qmv) {
+            fp_gather_qmv(
+                x, w, scales, global_scale, lc, rc, oc, bits_, group_size_, encoder);
+            return;
+          }
           gather_qmv(
               x,
               w,
@@ -523,8 +533,24 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
         });
   };
 
+  if (can_use_gather_qmm_rhs_sm80) {
+    out.set_data(cu::malloc_async(out.nbytes(), encoder));
+    gather_qmm_rhs_sm80(
+        x,
+        w,
+        scales,
+        biases,
+        rhs_indices,
+        out,
+        bits_,
+        group_size_,
+        mode_,
+        encoder);
+    return;
+  }
+
   if (can_use_qmm_sm80) {
-    if (can_use_qmv && (M * B < 8)) {
+    if (prefer_qmv) {
       call_qmv();
     } else {
       call_qmm_sm80();
@@ -533,7 +559,7 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
   }
 
   if (can_use_qmm_naive) {
-    if (can_use_qmv && (M * B < 8)) {
+    if (prefer_qmv) {
       call_qmv();
     } else {
       call_qmm_naive();

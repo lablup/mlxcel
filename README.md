@@ -341,7 +341,7 @@ Apache License 2.0 unless otherwise noted. See [LICENSE](LICENSE). Third-party a
 
 ## Acknowledgments
 
-- [MLX](https://github.com/ml-explore/mlx), Apple's machine learning framework.
+- [MLX](https://github.com/ml-explore/mlx), Copyright © 2023 Apple Inc., licensed under the MIT License, provides the runtime and source adapted for mlxcel's fused xIELU `expm1f` routine. See [NOTICE](NOTICE).
 - [NripeshN/mlx](https://github.com/NripeshN/mlx), whose `rocm-support` branch is the AMD GPU (ROCm/HIP) MLX backend vendored as the ROCm part of mlxcelverse, under the MIT License. See [NOTICE](NOTICE).
 - [mlx-lm](https://github.com/ml-explore/mlx-lm), [mlx-vlm](https://github.com/Blaizzy/mlx-vlm), and [mlx-audio](https://github.com/Blaizzy/mlx-audio), whose model coverage and behavior mlxcel ports and mirrors. See [NOTICE](NOTICE).
 - [MLX Community](https://huggingface.co/mlx-community), pre-converted MLX checkpoints.
