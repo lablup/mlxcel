@@ -391,7 +391,7 @@ impl<'a> Gemma4MtpTargetAdapter<'a> {
         self
     }
 
-    /// Match the scheduler's classic prefill geometry on the corrected 31B
+    /// Match the scheduler's classic prefill geometry on corrected 31B/12B
     /// target. Other Gemma variants retain their existing prefill path.
     #[must_use]
     pub fn with_prefill_chunk_size(mut self, chunk_size: usize) -> Self {

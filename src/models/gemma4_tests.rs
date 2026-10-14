@@ -1602,24 +1602,41 @@ mod mtp_hooks {
 }
 
 #[test]
-fn linear_singleton_geometry_and_long_probe_are_limited_to_31b_and_12b() {
+fn linear_singleton_geometry_and_long_probe_are_limited_to_measured_backends() {
     let args = cache_isolation::make_test_gemma4_args_with_layer("sliding_attention");
     let mut config = parse_text_config(args.text_config);
     config.sliding_window = 1024;
-    for (heads, kv, global_kv, dim, global_dim, expected) in [
-        (32, 16, 4, 256, 512, true),  // measured 31B
-        (16, 8, 1, 256, 512, true),  // measured 12B Metal (#1986) and CUDA (#2160)
-        (32, 8, 2, 256, 512, false), // different KV geometry
-        (16, 8, 2, 256, 512, false),
-        (16, 8, 1, 128, 512, false),
-        (32, 16, 4, 128, 512, false),
-        (32, 16, 4, 256, 256, false),
+    for (heads, kv, global_kv, dim, global_dim, always, gated) in [
+        (32, 16, 4, 256, 512, true, false), // unchanged 31B on every backend
+        (16, 8, 1, 256, 512, false, true),  // 12B only on supported backend policy
+        (32, 8, 2, 256, 512, false, false),
+        (16, 8, 2, 256, 512, false, false),
+        (16, 8, 1, 128, 512, false, false),
+        (32, 16, 4, 128, 512, false, false),
+        (32, 16, 4, 256, 256, false, false),
     ] {
         config.num_attention_heads = heads;
         config.num_key_value_heads = kv;
         config.num_global_key_value_heads = Some(global_kv);
         config.head_dim = dim;
         config.global_head_dim = Some(global_dim);
+        for (cuda, metal, gpu, supported) in [
+            (false, false, false, false), // CPU-only
+            (false, false, true, false),  // ROCm / other GPU backend
+            (false, true, false, false),  // CPU selected on a Metal host
+            (false, true, true, true),    // measured Metal execution
+            (true, false, false, true),   // preserve the original CUDA condition
+            (true, false, true, true),    // CUDA GPU
+        ] {
+            assert_eq!(
+                config.mtp_requires_linear_singleton_on(cuda, metal, gpu),
+                always || (gated && supported),
+                "heads={heads}, kv={kv}, global_kv={global_kv}, cuda={cuda}, metal={metal}, gpu={gpu}"
+            );
+        }
+        let supported = mlxcel_core::cuda_is_available()
+            || (mlxcel_core::metal_is_available() && mlxcel_core::default_device_is_gpu());
+        let expected = always || (gated && supported);
         assert_eq!(config.mtp_requires_linear_singleton(), expected);
         assert_eq!(
             config.mtp_probe_prompt_lengths(),
