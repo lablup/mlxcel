@@ -736,10 +736,16 @@ fn iree_dist() -> Result<PathBuf, String> {
 /// build it is the dist's own `bin/iree-compile`.
 pub(crate) fn iree_compile_bin() -> Result<PathBuf, String> {
     if let Ok(ic) = std::env::var("MLXCEL_XLA_IREE_COMPILE") {
-        return Ok(PathBuf::from(ic));
+        let trimmed = ic.trim();
+        if !trimmed.is_empty() {
+            return Ok(PathBuf::from(trimmed));
+        }
     }
     if let Some(ic) = option_env!("MLXCEL_XLA_IREE_COMPILE") {
-        return Ok(PathBuf::from(ic));
+        let trimmed = ic.trim();
+        if !trimmed.is_empty() {
+            return Ok(PathBuf::from(trimmed));
+        }
     }
     #[cfg(xla_iree_cuda)]
     {

@@ -62,6 +62,14 @@ MAXCAP=24
 ORACLE=""
 SKIP_STRUCTURAL=0
 STRUCTURAL_ONLY=0
+TEMP_ORACLE=""
+
+cleanup() {
+  if [ -n "$TEMP_ORACLE" ] && [ -f "$TEMP_ORACLE" ]; then
+    rm -f "$TEMP_ORACLE"
+  fi
+}
+trap cleanup EXIT
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -105,12 +113,18 @@ echo "== validate_arch: model=$MODEL device=$DEVICE =="
 if [ -n "$ORACLE" ] && [ -f "$ORACLE" ]; then
   echo "== [oracle] reusing existing oracle -> $ORACLE =="
 elif [ -x "$VENV_PY" ]; then
-  ORACLE="${ORACLE:-$(mktemp -t xla_oracle.XXXXXX.json)}"
+  if [ -z "$ORACLE" ]; then
+    TEMP_ORACLE="$(mktemp -t xla_oracle.XXXXXX.json)"
+    ORACLE="$TEMP_ORACLE"
+  fi
   echo "== [oracle] producing HF fp32 continuation -> $ORACLE =="
   "$VENV_PY" "$ORACLE_PY" --model "$MODEL" --out "$ORACLE" \
     --prompt "$PROMPT" --max-new "$MAXNEW"
 else
-  ORACLE="${ORACLE:-$(mktemp -t xla_oracle.XXXXXX.json)}"
+  if [ -z "$ORACLE" ]; then
+    TEMP_ORACLE="$(mktemp -t xla_oracle.XXXXXX.json)"
+    ORACLE="$TEMP_ORACLE"
+  fi
   echo "== [oracle] oracle venv not found at $VENV_PY; producing XLA local-task f32 continuation -> $ORACLE =="
   MLXCEL_XLA_PRECISION=f32 cargo run --release --features xla-iree --example xla_traj_dump -- \
     --model "$MODEL" --device local-task --prompt "$PROMPT" --max-new "$MAXNEW" --out "$ORACLE"

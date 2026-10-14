@@ -177,7 +177,7 @@ if [ ! -x "$IREE_COMPILE" ]; then
     python3 -m venv --without-pip "$VENV"
     VENV_INSTALL_MODE="zipfile"
   fi
-  curl -sSL -o "$IREE_DIR/$WHEEL" \
+  curl -fsSL -o "$IREE_DIR/$WHEEL" \
     "https://github.com/iree-org/iree/releases/download/${IREE_TAG}/${WHEEL}"
   GOT=$(sha256sum "$IREE_DIR/$WHEEL" | awk '{print $1}')
   [ "$GOT" = "$WHEEL_SHA256" ] || { echo "sha256 mismatch for $WHEEL: got $GOT" >&2; exit 1; }

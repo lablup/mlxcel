@@ -249,7 +249,7 @@ pub fn check_packed_supported(device: &str, packed_active: bool) -> Result<(), S
 /// Validate an AMD GPU target identifier (e.g. `gfx1151`, `gfx1100`, `gfx942`,
 /// `gfx90a`) for `--iree-rocm-target=<target>`.
 fn validate_rocm_target(raw: Option<&str>) -> Result<String, String> {
-    let target = raw.map(str::trim).unwrap_or("");
+    let target = raw.map(str::trim).unwrap_or("").to_ascii_lowercase();
     if target.is_empty() {
         return Err(
             "[compile] MLXCEL_XLA_DEVICE=hip requires MLXCEL_XLA_ROCM_TARGET \
@@ -279,7 +279,7 @@ fn validate_rocm_target(raw: Option<&str>) -> Result<String, String> {
              `gfx942`. Check `rocminfo | grep -E 'Name:\\s+gfx'`."
         ));
     }
-    Ok(target.to_string())
+    Ok(target)
 }
 
 /// Pure `iree-compile` target-flag resolver for `device` with an explicit
@@ -1776,6 +1776,13 @@ mod tests {
             vec![
                 "--iree-hal-target-device=hip".to_string(),
                 "--iree-rocm-target=gfx90a".to_string(),
+            ]
+        );
+        assert_eq!(
+            target_flags_with_rocm_target("hip", Some("GFX1151")).unwrap(),
+            vec![
+                "--iree-hal-target-device=hip".to_string(),
+                "--iree-rocm-target=gfx1151".to_string(),
             ]
         );
         let unset_err = target_flags_with_rocm_target("hip", None).unwrap_err();

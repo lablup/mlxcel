@@ -31,6 +31,9 @@ use std::path::PathBuf;
 /// `rocm` feature is on. A no-op otherwise, so Apple Silicon, CUDA and CI
 /// builds are unaffected.
 pub fn emit() {
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux") {
+        return;
+    }
     println!("cargo:rerun-if-env-changed=ROCM_PATH");
     println!("cargo:rerun-if-env-changed=IREE_ROCM_HOME");
     let has_rocm_feature = env::var_os("CARGO_FEATURE_ROCM").is_some();
