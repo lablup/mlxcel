@@ -1406,7 +1406,7 @@ bool custom_kernels_available();
 int32_t gpu_backend_kind();
 
 // Wavefront-width hold on ROCm ports (lablup/mlxcel#2147); see
-// `src/lib/mlx-cpp/turbo/gpu_backend.h`. `rocm_port_allowed` is the pure rule
+// `src/lib/mlxcelverse/kernels/gpu_backend.h`. `rocm_port_allowed` is the pure rule
 // `port_for` applies, `rocm_device_warp_size` the hardware width of the
 // current HIP device (0 off ROCm or when the query fails, never the
 // `MLX_ROCM_FORCE_WARP_SIZE` override), and
@@ -2369,7 +2369,7 @@ std::unique_ptr<MlxArray> fused_metal4_attention(
 // Fused Sparse-V SDPA Metal kernel launcher.
 // Wraps `mlxcel::turbo::sparse_v_weighted_sum` so the cxx bridge can expose it
 // via the `turbo_sparse_v_weighted_sum` FFI symbol. Implementation lives in
-// `src/lib/mlx-cpp/turbo/sparse_v_sdpa.cpp`.
+// `src/lib/mlxcelverse/kernels/sparse_v_sdpa.cpp`.
 //
 // `v_rescale` (4th argument) carries the precomputed per-token rescale
 // `norm[t] / |y_hat[t]|` introduced. The previous kernel
@@ -2388,7 +2388,7 @@ std::unique_ptr<MlxArray> turbo_sparse_v_weighted_sum(
 // Fused Turbo4Delegated cold-V weighted-sum kernel launcher.
 // Wraps `mlxcel::turbo::turbo4_delegated_cold_weighted_sum` so the cxx bridge
 // can expose it via the `turbo4_delegated_cold_weighted_sum` FFI symbol.
-// Implementation lives in `src/lib/mlx-cpp/turbo/turbo4_delegated_sdpa.cpp`.
+// Implementation lives in `src/lib/mlxcelverse/kernels/turbo4_delegated_sdpa.cpp`.
 //
 // The kernel returns the unrotated weighted sum of the cold V tokens. The
 // host caller applies the inverse Turbo4 rotation to that result and adds
@@ -2601,7 +2601,7 @@ bool fused_rope_qk_append_available();
 
 // Wraps `mlxcel::turbo::inplace_slice_write` (#1959): `dst` with `rows` written
 // at `start`, sharing `dst`'s buffer instead of copying it. See
-// `src/lib/mlx-cpp/turbo/kv_inplace_write.h` for when that is sound.
+// `src/lib/mlxcelverse/kernels/kv_inplace_write.h` for when that is sound.
 // A second handle to the same MLX array node (same id, same buffer; no copy).
 std::unique_ptr<MlxArray> array_handle_clone(const MlxArray& a);
 

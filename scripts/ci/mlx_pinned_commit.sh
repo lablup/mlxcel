@@ -3,7 +3,7 @@
 #
 # The pin has a single source of truth: the GIT_TAG argument of the
 # FetchContent_Declare block naming the MLX repository in
-# src/lib/mlx-cpp/CMakeLists.txt. src/lib/mlxcel-core/build.rs parses that same
+# src/lib/mlxcelverse/CMakeLists.txt. src/lib/mlxcel-core/build.rs parses that same
 # line in Rust (src/lib/mlxcel-core/build_support/mlx_pin.rs, unit-tested by
 # src/lib/mlxcel-mlx-pin). This script exists so release.yml's "Validate MLX
 # build cache" steps can compare the _deps/.mlx-build-commit markers against the
@@ -22,7 +22,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-cmake_file="${MLX_PIN_CMAKE_FILE:-$repo_root/src/lib/mlx-cpp/CMakeLists.txt}"
+cmake_file="${MLX_PIN_CMAKE_FILE:-$repo_root/src/lib/mlxcelverse/CMakeLists.txt}"
 
 if [ ! -f "$cmake_file" ]; then
   echo "mlx_pinned_commit: $cmake_file not found" >&2

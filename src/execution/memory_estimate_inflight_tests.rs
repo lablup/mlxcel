@@ -152,7 +152,7 @@ fn reserve_parser_follows_strtoull_where_the_overlay_does() {
 #[test]
 fn default_budget_and_env_name_match_the_overlay_source() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src/lib/mlx-cpp/patches-rocm/mlx/backend/rocm/device.cpp");
+        .join("src/lib/mlxcelverse/overlays/rocm/mlx/backend/rocm/device.cpp");
     let source = std::fs::read_to_string(&path).unwrap();
     let declaration =
         format!("constexpr size_t default_max_inflight_mb = {ROCM_DEFAULT_MAX_INFLIGHT_MB};");

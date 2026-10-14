@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Maintenance tooling for the mlxcelverse ROCm overlay (issue #1813).
 
-The overlay in src/lib/mlx-cpp/patches-rocm/ has two moving upstreams: the MLX
+The overlay in src/lib/mlxcelverse/overlays/rocm/ has two moving upstreams: the MLX
 pin (ml-explore/mlx) and the fork it vendors its backend from
 (NripeshN/mlx@rocm-support). `UPSTREAM` records the three commits that define
 it: the fork commit, the fork's merge base with upstream MLX, and the MLX pin
@@ -59,7 +59,7 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parents[1]
-DEFAULT_OVERLAY = REPO_ROOT / "src" / "lib" / "mlx-cpp" / "patches-rocm"
+DEFAULT_OVERLAY = REPO_ROOT / "src" / "lib" / "mlxcelverse" / "overlays" / "rocm"
 PIN_SCRIPT = REPO_ROOT / "scripts" / "ci" / "mlx_pinned_commit.sh"
 
 # Files at the overlay root that are records, never copied into MLX.
@@ -783,7 +783,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
     if args.check:
         tmp = Path(tempfile.mkdtemp(prefix="mlxcelverse-sync-"))
-        out_root = tmp / "patches-rocm"
+        out_root = tmp / "rocm"
     elif args.out:
         out_root = Path(args.out).resolve()
     else:

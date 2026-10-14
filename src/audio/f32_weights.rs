@@ -27,7 +27,7 @@
 //! the resident size of the promoted weights.
 //!
 //! On CUDA builds the precast is required, not only faster: mlxcel's CUDA
-//! overlay of MLX's promotion table (`src/lib/mlx-cpp/patches-cuda/dtype.cpp`,
+//! overlay of MLX's promotion table (`src/lib/mlxcelverse/overlays/cuda/mlx/dtype.cpp`,
 //! kept for the single-dtype bf16 decode graph of issue #636) resolves bf16
 //! with f32 to bf16, so a bf16 weight left as stored would demote the f32
 //! activation stream instead of promoting the weight (issue #2087). Code that
@@ -129,7 +129,7 @@ mod tests {
 
     /// Issue #2087 probe: the dtype an f32 activation meets a bf16 operand in.
     /// Upstream MLX gives f32. mlxcel's CUDA overlay
-    /// (`src/lib/mlx-cpp/patches-cuda/dtype.cpp`, issue #636) gives bf16 on
+    /// (`src/lib/mlxcelverse/overlays/cuda/mlx/dtype.cpp`, issue #636) gives bf16 on
     /// every device of a CUDA build, because the promotion table is compiled
     /// into the library; ROCm and Metal use the upstream table. Production
     /// code must therefore cast explicitly wherever it needs f32 from a stored

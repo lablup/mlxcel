@@ -105,7 +105,7 @@ RS
 setup_root() {
   local root="$1" list="$2" documented="${3-$2}" injection="${4-present}"
   local build_rs="${5-bounded}" cuda_arch_rs="${6-bounded}"
-  mkdir -p "$root/.github/workflows" "$root/docs" "$root/src/lib/mlx-cpp"
+  mkdir -p "$root/.github/workflows" "$root/docs" "$root/src/lib/mlxcelverse"
   write_suffix_rules "$root" "$build_rs" "$cuda_arch_rs"
   cat > "$root/.github/workflows/release.yml" <<YAML
 jobs:
@@ -115,13 +115,13 @@ jobs:
 YAML
   printf 'The release workflow builds `%s` on this target.\n' "$documented" > "$root/docs/installation.md"
   if [ "$injection" = "present" ]; then
-    cat > "$root/src/lib/mlx-cpp/CMakeLists.txt" <<'CM'
+    cat > "$root/src/lib/mlxcelverse/CMakeLists.txt" <<'CM'
 set_source_files_properties(
   "${mlx_SOURCE_DIR}/mlx/backend/cuda/quantized/fp_quantize.cu"
   TARGET_DIRECTORY mlx PROPERTIES COMPILE_OPTIONS "${_fp_quantize_arch_flags}")
 CM
   else
-    printf '# the injection was removed\n' > "$root/src/lib/mlx-cpp/CMakeLists.txt"
+    printf '# the injection was removed\n' > "$root/src/lib/mlxcelverse/CMakeLists.txt"
   fi
 }
 

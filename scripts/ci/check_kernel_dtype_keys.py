@@ -20,7 +20,7 @@ JIT cache key.
   ``CustomKernel::eval_gpu`` passes ``name_ + "_" + hex(hash(source_))`` as the
   module name, so the generated source, dtypes included, is in the key.
 * ROCm (``fast::hip_kernel``, vendored at
-  ``src/lib/mlx-cpp/patches-rocm/mlx/backend/rocm/custom_kernel.cpp``) builds
+  ``src/lib/mlxcelverse/overlays/rocm/mlx/backend/rocm/custom_kernel.cpp``) builds
   the same name the same way and, since #2149 (``LOCAL_FIXES.md``), keys the
   module in ``rocm::get_jit_module`` by device index, that name and a hash of
   the generated source, as CUDA does. Before that it keyed by the name alone.
@@ -121,13 +121,13 @@ import sys
 # removes or moves a launch.
 EXPECTED_IN_SCOPE = frozenset(
     {
-        "src/lib/mlx-cpp/turbo/fused_norm.cpp",
-        "src/lib/mlx-cpp/turbo/fused_rope_append.cpp",
-        "src/lib/mlx-cpp/turbo/paged_attention.cpp",
-        "src/lib/mlx-cpp/turbo/paged_attention_v2.cpp",
-        "src/lib/mlx-cpp/turbo/paged_attention_v2_merge.cpp",
-        "src/lib/mlx-cpp/turbo/sampling.cpp",
-        "src/lib/mlx-cpp/turbo/sampling_rejection.cpp",
+        "src/lib/mlxcelverse/kernels/fused_norm.cpp",
+        "src/lib/mlxcelverse/kernels/fused_rope_append.cpp",
+        "src/lib/mlxcelverse/kernels/paged_attention.cpp",
+        "src/lib/mlxcelverse/kernels/paged_attention_v2.cpp",
+        "src/lib/mlxcelverse/kernels/paged_attention_v2_merge.cpp",
+        "src/lib/mlxcelverse/kernels/sampling.cpp",
+        "src/lib/mlxcelverse/kernels/sampling_rejection.cpp",
         # The #1804 ROCm fault probe (`rocm_fault_probe_array`) and the #2149
         # JIT-key probe (`rocm_jit_key_probe`): `fast::hip_kernel` launches in
         # a file with no CUDA launch, so it was out of scope while only

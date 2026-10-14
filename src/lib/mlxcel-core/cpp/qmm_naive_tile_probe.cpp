@@ -5,7 +5,7 @@
 // host with no CUDA device, no CUDA toolkit and no GPU feature enabled.
 //
 // The header this includes is the same file the CUDA overlay
-// `patches/mlx/backend/cuda/quantized/qmm/qmm_naive.cu` includes; CMake copies
+// `overlays/cuda/mlx/backend/cuda/quantized/qmm/qmm_naive.cu` includes; CMake copies
 // it into the fetched MLX tree verbatim (`configure_file ... COPYONLY`). There
 // is one definition, and the test exercises it rather than a restatement of it.
 // It is pure integer arithmetic with no CUDA in it, which is why this file is
@@ -13,7 +13,7 @@
 // non-regression claim in #1541 has to be checkable on a machine with no
 // NVIDIA hardware at all, including the macOS hosts this project also targets.
 
-#include "../../mlx-cpp/patches/mlx/backend/cuda/quantized/qmm/qmm_naive_tile.h"
+#include "../../mlxcelverse/overlays/cuda/mlx/backend/cuda/quantized/qmm/qmm_naive_tile.h"
 
 extern "C" {
 

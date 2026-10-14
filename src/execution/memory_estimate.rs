@@ -165,7 +165,7 @@ pub const ROCM_MAX_INFLIGHT_ENV: &str = "MLX_ROCM_MAX_INFLIGHT_MB";
 
 /// The backend's in-flight budget when [`ROCM_MAX_INFLIGHT_ENV`] is unset or
 /// invalid. Must equal `default_max_inflight_mb` in
-/// `src/lib/mlx-cpp/patches-rocm/mlx/backend/rocm/device.cpp`; a unit test
+/// `src/lib/mlxcelverse/overlays/rocm/mlx/backend/rocm/device.cpp`; a unit test
 /// reads that file and fails when the two drift.
 pub const ROCM_DEFAULT_MAX_INFLIGHT_MB: u64 = 1024;
 

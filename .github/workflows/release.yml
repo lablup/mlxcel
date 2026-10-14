@@ -25,7 +25,7 @@ permissions: {}
 
 # This workflow does not store the pinned MLX C++ commit. Both Linux CUDA jobs
 # derive it from its single source of truth, GIT_TAG in
-# src/lib/mlx-cpp/CMakeLists.txt, via scripts/ci/mlx_pinned_commit.sh. The
+# src/lib/mlxcelverse/CMakeLists.txt, via scripts/ci/mlx_pinned_commit.sh. The
 # workflow used to keep its own literal at this scope and it had already drifted
 # a bump behind the CMake file, so every release build was purging and rebuilding
 # MLX from scratch while reporting a pin the tree no longer used (issue #1047).
@@ -549,7 +549,7 @@ jobs:
     # compiles them out (issue #1934). Naming Blackwell `<sm>a` in this list
     # would enable them for every translation unit, which costs 12.7 MB of
     # archive and changes the machine code of every kernel, decode included.
-    # `src/lib/mlx-cpp/CMakeLists.txt` adds the architecture-specific image to
+    # `src/lib/mlxcelverse/CMakeLists.txt` adds the architecture-specific image to
     # `fp_quantize.cu` alone instead, which is the only translation unit that
     # can reach those converters, so this list needs no `a` entry to get them.
     # scripts/ci/check_cuda_arch_lists.py rejects one.
@@ -622,7 +622,7 @@ jobs:
           MLX_PIN_CMAKE_FILE: ""
         run: |
           # Derive the pin from its single source of truth (GIT_TAG in
-          # src/lib/mlx-cpp/CMakeLists.txt), the same line mlxcel-core's
+          # src/lib/mlxcelverse/CMakeLists.txt), the same line mlxcel-core's
           # build.rs parses, rather than restating it here. The script exits
           # non-zero unless the pin resolves to exactly one 40-character
           # lowercase hex SHA; an empty value must never reach the comparison
@@ -782,7 +782,7 @@ jobs:
     # because auto-detection now mirrors this list (issue #1943).
     # Blackwell stays plain for the reason spelled out in the aarch64 job
     # above: the hardware NVFP4/MXFP4 converters are added to `fp_quantize.cu`
-    # alone by `src/lib/mlx-cpp/CMakeLists.txt` rather than to the whole target.
+    # alone by `src/lib/mlxcelverse/CMakeLists.txt` rather than to the whole target.
     # This corrects the rationale that stood here before, which said Blackwell
     # had no MLX gate and that plain numbers were therefore enough. There is a
     # gate (issue #1934); it is simply not answered from this list. sm_87
@@ -846,7 +846,7 @@ jobs:
           MLX_PIN_CMAKE_FILE: ""
         run: |
           # Derive the pin from its single source of truth (GIT_TAG in
-          # src/lib/mlx-cpp/CMakeLists.txt), the same line mlxcel-core's
+          # src/lib/mlxcelverse/CMakeLists.txt), the same line mlxcel-core's
           # build.rs parses, rather than restating it here. The script exits
           # non-zero unless the pin resolves to exactly one 40-character
           # lowercase hex SHA; an empty value must never reach the comparison
@@ -1121,7 +1121,7 @@ jobs:
           VERSION="${TAG#v}"
           # syft dir:. catalogs the Rust workspace via the committed Cargo.lock.
           # Note: it does NOT capture the MLX C++ dependency fetched at build time
-          # via FetchContent (pinned by GIT_TAG in src/lib/mlx-cpp/CMakeLists.txt);
+          # via FetchContent (pinned by GIT_TAG in src/lib/mlxcelverse/CMakeLists.txt);
           # recording that native pin in the SBOM is out of scope here.
           syft dir:. -o cyclonedx-json > sbom.cyclonedx.json
           gzip -9 sbom.cyclonedx.json

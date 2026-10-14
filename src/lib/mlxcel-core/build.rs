@@ -33,7 +33,7 @@ fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
 
     // The pinned MLX commit has exactly one home: GIT_TAG in
-    // ../mlx-cpp/CMakeLists.txt, which is what CMake actually fetches. Resolve
+    // ../mlxcelverse/CMakeLists.txt, which is what CMake actually fetches. Resolve
     // it once, here, before anything compares against it. Everything below
     // (the _deps/ purge decision, the MLXCEL_MLX_COMMIT export, the post-build
     // HEAD verification and the cache marker) consumes this one value, so they
@@ -94,53 +94,53 @@ fn main() {
         .file("cpp/mlx_cxx_ext.cpp")
         .file("cpp/mlx_cxx_one_bit.cpp")
         // Fused Sparse-V SDPA kernel launcher. Lives under
-        // `src/lib/mlx-cpp/turbo/` so the MLX-upstream-commit upgrade
+        // `src/lib/mlxcelverse/kernels/` so the MLX-upstream-commit upgrade
         // checklist ("Bumping the MLX upstream pin" in CONTRIBUTING.md)
         // treats this directory as in-scope.
         // Resolves which GPU backend the custom kernels target (issue
-        // #1803). Shared by the bridge and every turbo/ launcher.
-        .file("../mlx-cpp/turbo/gpu_backend.cpp")
+        // #1803). Shared by the bridge and every kernels/ launcher.
+        .file("../mlxcelverse/kernels/gpu_backend.cpp")
         // The one place a fused kernel chooses its per-backend port (#1801).
-        .file("../mlx-cpp/turbo/kernel_port.cpp")
-        .file("../mlx-cpp/turbo/sparse_v_sdpa.cpp")
+        .file("../mlxcelverse/kernels/kernel_port.cpp")
+        .file("../mlxcelverse/kernels/sparse_v_sdpa.cpp")
         // Fused Turbo4Delegated cold-V weighted-sum kernel
         // launcher. Reads the packed cold V directly so the dequantised
         // FP16 cold body never materialises in global memory; the host
         // pairs this with a hot-V matmul to produce the final SDPA output.
-        .file("../mlx-cpp/turbo/turbo4_delegated_sdpa.cpp")
+        .file("../mlxcelverse/kernels/turbo4_delegated_sdpa.cpp")
         // Fused paged-attention decode kernel launcher (epic #116 Phase 6,
         // #123). Reads scattered KV blocks out of the global pool via a block
         // table with no separate gather copy; the gather-then-SDPA path stays
         // the correctness reference and fallback.
-        .file("../mlx-cpp/turbo/paged_attention.cpp")
+        .file("../mlxcelverse/kernels/paged_attention.cpp")
         // Paged-attention decode v2 (#898): CSR page table plus cross-CTA
         // split-KV in `paged_attention_v2.cpp`, and the variable-length
         // attention-state merge kernel in `paged_attention_v2_merge.cpp`. The
         // merge half is split out because the cascade issue #903 reuses it
         // unchanged. v1 above stays intact and remains the default path.
-        .file("../mlx-cpp/turbo/paged_attention_v2.cpp")
-        .file("../mlx-cpp/turbo/paged_attention_v2_merge.cpp")
+        .file("../mlxcelverse/kernels/paged_attention_v2.cpp")
+        .file("../mlxcelverse/kernels/paged_attention_v2_merge.cpp")
         // Softmax-free Gumbel-max categorical sampling kernel launcher (#900).
         // Replaces the `random::categorical` normalization pass plus the
         // `argpartition` sort on the no-filter sampling path with one
         // index-carrying max reduction over the vocabulary.
-        .file("../mlx-cpp/turbo/sampling.cpp")
+        .file("../mlxcelverse/kernels/sampling.cpp")
         // Sorting-free top-k / top-p / min-p sampling by dual-pivot rejection
         // (#901). Replaces the `argpartition` + `argsort` + `cumsum` filter
         // chain with a shrinking probability interval resolved by two pivots
         // per vocabulary sweep.
-        .file("../mlx-cpp/turbo/sampling_rejection.cpp")
+        .file("../mlxcelverse/kernels/sampling_rejection.cpp")
         // Fused residual-add + RMSNorm and fused q/k RoPE + KV-append-layout
         // decode kernel launchers (#905). Both are two/three-output custom
         // kernels: MLX arrays are immutable from the graph's perspective, so
         // the in-place residual update and the append payload are returned as
         // values rather than written through.
-        .file("../mlx-cpp/turbo/fused_norm.cpp")
-        .file("../mlx-cpp/turbo/fused_rope_append.cpp")
+        .file("../mlxcelverse/kernels/fused_norm.cpp")
+        .file("../mlxcelverse/kernels/fused_rope_append.cpp")
         // In-place decode KV row write (#1959): a primitive whose output
         // adopts the cache buffer, since slice_update copies it whole while the
         // previous pipelined step still references it.
-        .file("../mlx-cpp/turbo/kv_inplace_write.cpp")
+        .file("../mlxcelverse/kernels/kv_inplace_write.cpp")
         // C shim over the `qmm_naive` CTA tile selector (#1541), so
         // `qmm_naive_tile_tests.rs` can sweep the shipped selection function on
         // the host. The selector is pure integer arithmetic with no CUDA in it,
@@ -157,7 +157,7 @@ fn main() {
         .file("cpp/grouped_gemm_arch_probe.cpp")
         .include(&mlx_include)
         .include("cpp")
-        .include("../mlx-cpp/turbo")
+        .include("../mlxcelverse/kernels")
         .flag_if_supported("-std=c++20")
         .flag_if_supported("-Wno-unused-parameter")
         .flag_if_supported("-Wno-deprecated-declarations")
@@ -293,51 +293,52 @@ fn main() {
     println!("cargo:rerun-if-changed=cpp/qmm_naive_tile_probe.cpp");
     println!("cargo:rerun-if-changed=cpp/grouped_gemm_arch_probe.cpp");
     println!("cargo:rerun-if-changed=metal/fused_attention_metal4.metal");
-    println!("cargo:rerun-if-changed=../mlx-cpp/CMakeLists.txt");
-    println!("cargo:rerun-if-changed=../mlx-cpp/patches");
-    println!("cargo:rerun-if-changed=../mlx-cpp/patches-cuda");
-    println!("cargo:rerun-if-changed=../mlx-cpp/patches-rocm");
+    println!("cargo:rerun-if-changed=../mlxcelverse/CMakeLists.txt");
+    println!("cargo:rerun-if-changed=../mlxcelverse/overlays/cpu");
+    println!("cargo:rerun-if-changed=../mlxcelverse/overlays/metal");
+    println!("cargo:rerun-if-changed=../mlxcelverse/overlays/cuda");
+    println!("cargo:rerun-if-changed=../mlxcelverse/overlays/rocm");
     // Sparse-V fused-skip Metal kernel launchers.
-    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/CMakeLists.txt");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/CMakeLists.txt");
     // The port-selection helpers every launcher includes (#1803, #2147). Not
     // tracked before, so an edit to the wavefront hold in `port_for` left the
     // bridge library stale until some other tracked file changed.
-    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/gpu_backend.h");
-    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/gpu_backend.cpp");
-    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/kernel_port.h");
-    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/kernel_port.cpp");
-    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sparse_v_sdpa.h");
-    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sparse_v_sdpa.cpp");
-    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sparse_v_sdpa.metal");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/gpu_backend.h");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/gpu_backend.cpp");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/kernel_port.h");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/kernel_port.cpp");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/sparse_v_sdpa.h");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/sparse_v_sdpa.cpp");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/sparse_v_sdpa.metal");
     // Turbo4Delegated cold-V fused weighted-sum kernel launcher.
-    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/turbo4_delegated_sdpa.h");
-    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/turbo4_delegated_sdpa.cpp");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/turbo4_delegated_sdpa.h");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/turbo4_delegated_sdpa.cpp");
     // Fused paged-attention decode kernel launcher (#123).
-    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/paged_attention.h");
-    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/paged_attention.cpp");
-    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/paged_attention.metal");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/paged_attention.h");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/paged_attention.cpp");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/paged_attention.metal");
     // HIP bodies of the three paged-attention kernels (#2068).
-    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/paged_attention_hip.h");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/paged_attention_hip.h");
 
-    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/paged_attention_v2.h");
-    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/paged_attention_v2.cpp");
-    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/paged_attention_v2_merge.cpp");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/paged_attention_v2.h");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/paged_attention_v2.cpp");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/paged_attention_v2_merge.cpp");
     // Gumbel-max categorical sampling kernel launcher (#900).
-    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sampling.h");
-    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sampling.cpp");
-    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sampling_gumbel_hip.h");
-    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sampling_rejection.h");
-    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sampling_rejection.cpp");
-    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sampling_rejection_hip.h");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/sampling.h");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/sampling.cpp");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/sampling_gumbel_hip.h");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/sampling_rejection.h");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/sampling_rejection.cpp");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/sampling_rejection_hip.h");
     // Fused residual-add RMSNorm and fused RoPE + KV-append kernel launchers (#905).
-    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/fused_norm.h");
-    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/fused_norm.cpp");
-    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/fused_norm_hip.h");
-    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/fused_rope_append.h");
-    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/fused_rope_append.cpp");
-    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/fused_rope_append_hip.h");
-    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/kv_inplace_write.h");
-    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/kv_inplace_write.cpp");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/fused_norm.h");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/fused_norm.cpp");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/fused_norm_hip.h");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/fused_rope_append.h");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/fused_rope_append.cpp");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/fused_rope_append_hip.h");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/kv_inplace_write.h");
+    println!("cargo:rerun-if-changed=../mlxcelverse/kernels/kv_inplace_write.cpp");
     println!("cargo:rerun-if-env-changed=MLX_CUDA_ARCHITECTURES");
     println!("cargo:rerun-if-env-changed=MLX_ROCM_ARCHITECTURES");
     println!("cargo:rerun-if-env-changed=ROCM_PATH");
@@ -357,7 +358,7 @@ fn main() {
 /// after a successful build, `_deps/.mlx-build-commit` records the commit.
 /// If the marker is missing or doesn't match, we purge the entire `_deps/`.
 ///
-/// `expected_commit` is the value resolved from `../mlx-cpp/CMakeLists.txt` in
+/// `expected_commit` is the value resolved from `../mlxcelverse/CMakeLists.txt` in
 /// `main`, so this decision is made against the tag CMake would actually fetch.
 fn purge_stale_mlx_cache(out_dir: &std::path::Path, expected_commit: &str) {
     let deps_dir = out_dir.join("build/_deps");
@@ -424,7 +425,7 @@ fn build_mlx(
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     purge_stale_mlx_cache(&out_dir, expected_commit);
 
-    let mut config = Config::new("../mlx-cpp");
+    let mut config = Config::new("../mlxcelverse");
     config.very_verbose(true);
     config.define("CMAKE_INSTALL_PREFIX", ".");
 
@@ -472,7 +473,7 @@ fn build_mlx(
         // spells it here instead. It deliberately stops suffixing at
         // `FIRST_PLAIN_SM`, where MLX's rule would not: on Blackwell the suffix
         // belongs on one translation unit rather than on the whole target, which
-        // is what `src/lib/mlx-cpp/CMakeLists.txt` arranges and what the release
+        // is what `src/lib/mlxcelverse/CMakeLists.txt` arranges and what the release
         // lists carry. See `sm_arch_with_suffix` and docs/installation.md (CUDA
         // architecture selection).
         //
@@ -484,7 +485,7 @@ fn build_mlx(
 
     #[cfg(feature = "rocm")]
     {
-        // Turns on the ROCm overlay in ../mlx-cpp/CMakeLists.txt and the
+        // Turns on the ROCm overlay in ../mlxcelverse/CMakeLists.txt and the
         // backend's own CMake in mlx/backend/rocm/. The backend passes one
         // `--offload-arch` per entry of CMAKE_HIP_ARCHITECTURES to hipcc.
         let rocm = rocm_path();
@@ -725,7 +726,7 @@ const FIRST_PLAIN_SM: u32 = 100;
 /// target would compile under `__CUDA_ARCH_SPECIFIC__`, CUTLASS keys
 /// `CUTLASS_ARCH_MMA_SM121A_ENABLED` on the same macro, and every decode kernel
 /// would get a second, architecture-specific image that the driver prefers on a
-/// matching device. `src/lib/mlx-cpp/CMakeLists.txt` injects that image into
+/// matching device. `src/lib/mlxcelverse/CMakeLists.txt` injects that image into
 /// `fp_quantize.cu` alone instead, the one translation unit that can reach
 /// MLX's hardware block-float converters, and that injection only fires for
 /// plain entries: an entry already carrying `a` is recorded as

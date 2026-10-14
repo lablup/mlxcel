@@ -348,7 +348,7 @@ impl CudaArchMismatch {
     /// operator an `MLX_CUDA_ARCHITECTURES` value to paste, so a suffix here
     /// that auto-detection would not produce sends them to a build the project
     /// rejects everywhere else: `121a` compiles every translation unit
-    /// architecture-specific rather than letting `src/lib/mlx-cpp/CMakeLists.txt`
+    /// architecture-specific rather than letting `src/lib/mlxcelverse/CMakeLists.txt`
     /// give that image to `fp_quantize.cu` alone, and
     /// `scripts/ci/check_cuda_arch_lists.py` fails any workflow list spelled
     /// that way (lablup/mlxcel#1934, #1943).

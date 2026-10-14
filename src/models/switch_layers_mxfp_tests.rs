@@ -35,7 +35,7 @@
 //!
 //! # Which ROCm branches this reaches
 //!
-//! `GatherQMM::eval_gpu` in `patches-rocm/mlx/backend/rocm/quantized/qmm.hip`
+//! `GatherQMM::eval_gpu` in `overlays/rocm/mlx/backend/rocm/quantized/qmm.hip`
 //! gates every specialised path (grouped WMMA prefill, expert-batched, tiled,
 //! wide, idot and the warp-shared fast kernel) on `mode_ == Affine`, so a
 //! non-affine mode reaches exactly one launch: the

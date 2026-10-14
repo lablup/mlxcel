@@ -19,7 +19,7 @@
 //! scalar loops in `mlx/backend/cpu/quantized.cpp`. Upstream they keep the
 //! running sum in the activation type, so a bf16 projection summed its 2048
 //! products in an 8-bit mantissa. The overlay in
-//! `src/lib/mlx-cpp/patches/mlx/backend/cpu/quantized.cpp` accumulates in
+//! `src/lib/mlxcelverse/overlays/cpu/mlx/backend/cpu/quantized.cpp` accumulates in
 //! f32 and rounds once on store.
 //!
 //! Each case runs on the CPU stream against a host f64 reference built from

@@ -20,7 +20,7 @@ entry-point name that was wrong for one of its two callers.
 The lesson is not that the guards were written badly. It is that a convention
 which has to be re-applied at every new launcher will be missed at some of them,
 and the failure is silent until that backend runs that kernel. So the choice now
-goes through ``mlxcel::select_kernel_port`` (``src/lib/mlx-cpp/turbo/
+goes through ``mlxcel::select_kernel_port`` (``src/lib/mlxcelverse/kernels/
 kernel_port.h``), which owns the refusal and reads a per-kernel ``KernelPorts``
 table, and this check keeps it that way.
 
@@ -116,8 +116,8 @@ BACKEND_ENUMERATION_TODO: set[str] = set()
 
 # The helper's own translation units, which are allowed to name the backend.
 HELPERS = {
-    "src/lib/mlx-cpp/turbo/kernel_port.cpp",
-    "src/lib/mlx-cpp/turbo/gpu_backend.cpp",
+    "src/lib/mlxcelverse/kernels/kernel_port.cpp",
+    "src/lib/mlxcelverse/kernels/gpu_backend.cpp",
 }
 
 # Tables allowed to run their ROCm port at any wavefront width (rule 5), each
@@ -157,8 +157,8 @@ CPP_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)
 # anywhere in those (large) files still fails.
 SEAM = re.compile(r"\bset_rocm_port_warp_size_for_tests\b")
 SEAM_DEFINITIONS = {
-    "src/lib/mlx-cpp/turbo/gpu_backend.h": 1,
-    "src/lib/mlx-cpp/turbo/gpu_backend.cpp": 1,
+    "src/lib/mlxcelverse/kernels/gpu_backend.h": 1,
+    "src/lib/mlxcelverse/kernels/gpu_backend.cpp": 1,
     "src/lib/mlxcel-core/cpp/mlx_cxx_bridge.h": 1,
     "src/lib/mlxcel-core/cpp/mlx_cxx_bridge.cpp": 2,
 }
@@ -483,7 +483,7 @@ def main() -> int:
         for f in failures:
             print(f"  {f}", file=sys.stderr)
         print(
-            "\nSee src/lib/mlx-cpp/turbo/kernel_port.h for the pattern and why "
+            "\nSee src/lib/mlxcelverse/kernels/kernel_port.h for the pattern and why "
             "it exists (lablup/mlxcel#1801, #1803, #1885, #2018, #2147).",
             file=sys.stderr)
         return 1

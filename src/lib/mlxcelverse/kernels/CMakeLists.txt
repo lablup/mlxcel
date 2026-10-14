@@ -21,7 +21,7 @@
 # source via `cxx_build::bridge(..).file(...)`.
 #
 # IMPORTANT: This subdirectory is INFORMATIONAL only at the moment — the
-# top-level `src/lib/mlx-cpp/CMakeLists.txt` does not yet add_subdirectory()
+# top-level `src/lib/mlxcelverse/CMakeLists.txt` does not yet add_subdirectory()
 # this dir, because the cxx-build path in `mlxcel-core/build.rs` compiles the
 # launcher .cpp files directly. The CMakeLists.txt below documents the build
 # contract so MLX upstream-commit upgrades treat this directory as in-scope.
@@ -34,7 +34,7 @@ set(CMAKE_CXX_STANDARD 20)
 
 # Header search paths — these are exported to consumers via target_include
 # directories so a parent CMakeLists.txt can pick this up via
-# add_subdirectory(turbo).
+# add_subdirectory(kernels).
 set(MLXCEL_TURBO_KERNEL_HEADERS
     ${CMAKE_CURRENT_SOURCE_DIR}/sparse_v_sdpa.h
     ${CMAKE_CURRENT_SOURCE_DIR}/turbo4_delegated_sdpa.h

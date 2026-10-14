@@ -18,7 +18,7 @@
 //! No wave64 device is available to the ROCm gate (gfx1151 is wave32), so this
 //! replaces the width the port tables are checked against through
 //! `set_rocm_port_warp_size_for_tests`, the test-only seam in
-//! `src/lib/mlx-cpp/turbo/gpu_backend.cpp`. Everything downstream of the width
+//! `src/lib/mlxcelverse/kernels/gpu_backend.cpp`. Everything downstream of the width
 //! is the production path: `port_for`, `has_kernel_port`, every C++
 //! `*_available()` predicate, `select_kernel_port`, and the Rust callers.
 //!

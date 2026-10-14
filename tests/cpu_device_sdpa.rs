@@ -22,7 +22,7 @@
 //! so a decode-shaped query got the fused primitive, whose `eval_cpu` throws
 //! "NYI" across the cxx bridge and terminates the process: `mlxcel generate`
 //! and `examples/logit_trace` aborted at the first token on the CPU device.
-//! `patches-rocm/LOCAL_FIXES.md` item 23 adds the GPU-stream check upstream
+//! `overlays/rocm/LOCAL_FIXES.md` item 23 adds the GPU-stream check upstream
 //! CUDA makes first. On the pre-fix overlay this binary aborts at the decode
 //! case (checked on gfx1151).
 //!

@@ -31,7 +31,7 @@ or test scaffolding.
 | `metal` | off | Apple Silicon Metal GPU backend (delegates to `mlxcel-core/metal`). Standard on macOS. |
 | `accelerate` | off | Apple Accelerate CPU BLAS backend (delegates to `mlxcel-core/accelerate`). Standard on macOS. |
 | `cuda` | off | NVIDIA CUDA GPU backend (delegates to `mlxcel-core/cuda`). Required on NVIDIA hosts; a plain build is CPU-only (see the footgun note below). |
-| `rocm` | off | AMD GPU backend on Linux (delegates to `mlxcel-core/rocm`), built from the ROCm overlay in `src/lib/mlx-cpp/patches-rocm/`. Cannot be combined with `cuda` or `metal`. Experimental; see [Linux with AMD ROCm](#linux-with-amd-rocm-experimental). |
+| `rocm` | off | AMD GPU backend on Linux (delegates to `mlxcel-core/rocm`), built from the ROCm overlay in `src/lib/mlxcelverse/overlays/rocm/`. Cannot be combined with `cuda` or `metal`. Experimental; see [Linux with AMD ROCm](#linux-with-amd-rocm-experimental). |
 | `experimental-backend` | off | Reserves the non-MLX compute-backend seam slot (issue #338). Ships no kernels and adds no runtime dispatch; it only compiles the plug-in boundary where a future non-MLX engine (e.g. FuriosaAI RNGD) would implement `ComputeBackend`. `select_backend()` still folds to MLX. |
 | `xla-backend` | off | OpenXLA / StableHLO backend seam (issue #449, [ADR 0004](adr/0004-compute-backend-session-seam-and-stablehlo-family.md)). Pulls in `mlxcel-xla` and compiles the `Backend::Xla` / `Session::Xla` arms and the `MLXCEL_BACKEND=xla` selector, but no native execution engine: the crate is pure-Rust stubs plus the StableHLO graph emitter, so CI builds it unchanged. |
 | `xla-iree` | off | `xla-backend` plus real IREE execution (`mlxcel-xla/iree`). Compiles a C shim against a prebuilt IREE runtime and drives the bundled prefill / decode_step graphs. Needs `IREE_DIST` (or the source-build vars below) at build time, so it is a local / opt-in build, not a CI or release default. |
@@ -199,7 +199,7 @@ than an alternative it can ignore. On this project's GB10 that is 12.7 MB of
 extra archive and a different `qmv` on every Blackwell machine, to fix a
 converter no decode kernel calls.
 
-So the list stays plain and `src/lib/mlx-cpp/CMakeLists.txt` adds the
+So the list stays plain and `src/lib/mlxcelverse/CMakeLists.txt` adds the
 architecture-specific image to `fp_quantize.cu` alone, which is the only
 translation unit that can reach those converters. You get the hardware path
 without asking for it, and without it reaching anything else. Building with
@@ -372,10 +372,10 @@ release artifact and no ROCm CI job running yet, and the gaps listed below are o
 The backend is not part of upstream MLX. mlxcel vendors the ROCm backend from
 the `rocm-support` branch of
 [NripeshN/mlx](https://github.com/NripeshN/mlx/tree/rocm-support) (MIT) into
-`src/lib/mlx-cpp/patches-rocm/` and applies it on top of the same pinned MLX
+`src/lib/mlxcelverse/overlays/rocm/` and applies it on top of the same pinned MLX
 commit that the Metal and CUDA builds use. See
 [mlxcelverse](architecture.md#mlxcelverse-the-mlx-side-layer) for how the
-overlay is organized, and `src/lib/mlx-cpp/patches-rocm/LOCAL_FIXES.md` for the
+overlay is organized, and `src/lib/mlxcelverse/overlays/rocm/LOCAL_FIXES.md` for the
 changes mlxcel carries on top of the fork.
 
 Tested configuration: AMD Ryzen AI MAX+ 395 with Radeon 8060S (`gfx1151`,
@@ -424,7 +424,7 @@ which takes a few minutes on top of the Rust build.
 
 Incremental builds track headers: `hipcc` writes a dependency file next to
 each HIP object, so after you change a header under
-`src/lib/mlx-cpp/patches-rocm/`, the next build recompiles exactly the `.hip`
+`src/lib/mlxcelverse/overlays/rocm/`, the next build recompiles exactly the `.hip`
 files that include it, directly or transitively, and a build with no change
 recompiles none. The overlay reaches the build tree through CMake's
 `configure_file`, which rewrites a copy only when its content differs, so a
@@ -440,7 +440,7 @@ the build script:
 
 ```bash
 rm -rf target/release/build/mlxcel-core-*/out/build/_deps/mlx-build/mlx/backend/rocm/hip_objs
-touch src/lib/mlx-cpp/patches-rocm/mlx/backend/rocm/CMakeLists.txt
+touch src/lib/mlxcelverse/overlays/rocm/mlx/backend/rocm/CMakeLists.txt
 cargo build --release --features rocm
 ```
 
@@ -589,7 +589,7 @@ the 1.20 headroom factor alone fell short for the dense models.
 | GPU faults | Reported as errors (lablup/mlxcel#1804). A launch HIP rejects (an oversized block, no code object for the device) fails the evaluation that issued it and the device stays usable. An asynchronous fault (an out-of-bounds access) fails the evaluation waiting on it within about a second instead of hanging or returning NaN; the server fails that request and answers later ones with the same error, because after a queue fault the HIP runtime rejects every call for the rest of the process, so the process has to restart, and its shutdown may need a SIGKILL (HIP's teardown waits on callbacks the faulted queue never runs). A kernel that never finishes is not detected; `MLX_ROCM_GPU_WATCHDOG_SECS` (default off) fails any single host wait that outlives it. |
 | Memory estimation on UMA hosts | Correct. Measured on the tested configuration: the ROCm allocator reports a nonzero cap (76.80 GiB of the 96 GiB carve-out), which the estimator reads before it would ever reach host RAM, so nothing that fits the carve-out is refused for that reason (lablup/mlxcel#1805). |
 | Diagnostics | Report the AMD vendor, device name, `gfx` target and device memory, and no longer print a CUDA compute capability for it (lablup/mlxcel#1805). A binary whose compiled `gfx` list does not cover the device refuses to start rather than failing at the first kernel launch. |
-| CPU device on a ROCm build (`MLXCEL_DEVICE=cpu`) | Runs, but slowly: on the tested host a Qwen3-0.6B-4bit decode step takes about two minutes, so it is a correctness reference and an escape hatch for a mismatched `gfx` build, not a serving mode. Before lablup/mlxcel#1807 every attention model aborted at the first token with `NYI`. BLAS work on this device (f32 matmul, convolution, linear algebra) runs on one OpenBLAS thread: with OpenBLAS's default thread count it intermittently wrote wrong output columns into the ROCm allocator's fine-grained memory (lablup/mlxcel#2072, `patches-rocm/LOCAL_FIXES.md` item 27). |
+| CPU device on a ROCm build (`MLXCEL_DEVICE=cpu`) | Runs, but slowly: on the tested host a Qwen3-0.6B-4bit decode step takes about two minutes, so it is a correctness reference and an escape hatch for a mismatched `gfx` build, not a serving mode. Before lablup/mlxcel#1807 every attention model aborted at the first token with `NYI`. BLAS work on this device (f32 matmul, convolution, linear algebra) runs on one OpenBLAS thread: with OpenBLAS's default thread count it intermittently wrote wrong output columns into the ROCm allocator's fine-grained memory (lablup/mlxcel#2072, `overlays/rocm/LOCAL_FIXES.md` item 27). |
 | `mlxcel-server` chat completions | Work for dense and affine MoE checkpoints, streaming and non-streaming; verified with `scripts/server_chat_smoke.sh`. |
 | Audio (speech to text, text to speech) | Works. The FFT primitive runs on hipFFT; plans are cached up to `MLX_ROCM_FFT_CACHE_SIZE` (default 128, as on CUDA; lablup/mlxcel#1825, #1876); a value that is not a positive integer is ignored with a warning (#2051). |
 | Wave64 devices (CDNA: MI200 `gfx90a`, MI300 `gfx942`) | Not run. The fused HIP kernels that reduce across lanes (BitLinear, the two fused MoE kernels and the squared-ReLU one, the Mamba2 SSM update, the Mamba1 scan, the add3 LayerNorm, the fused residual-add RMSNorm, and the paged-attention v1 decode and v2 partial) have only run on 32-lane wavefronts, and their compile-time wavefront guards do nothing with AMD clang 23. So mlxcel selects them only when the device reports a 32-lane wavefront (the hardware value, which `MLX_ROCM_FORCE_WARP_SIZE` does not change); on a 64-lane device those paths use their MLX graph fallbacks, and stderr says so once per process (lablup/mlxcel#2147). The kernels with no cross-lane operation (xIELU, RoPE + KV append, the paged-attention merge, both samplers) are selected at any width. BitLinear has no graph fallback, so BitNet checkpoints are refused at load on a wave64 device. |
@@ -776,13 +776,13 @@ are chasing one of those.
 
 ### CPU-only link check
 
-A Linux build with no GPU feature compiles MLX without any GPU backend, so MLX's GPU-side helpers (for example `copy_gpu_inplace`) do not exist in it. Bridge C++ under `src/lib/mlx-cpp/turbo/` and `src/lib/mlxcel-core/cpp/` that calls one must sit behind `MLXCEL_BRIDGE_GPU_BACKEND`, which `mlxcel-core/build.rs` defines exactly when MLX builds Metal, CUDA or ROCm. A missed guard is a link error that only this configuration shows: `cargo check` does not link, and every GB10 CI job passes `--features cuda`. Check it locally with a separate target directory so it does not evict a CUDA cache:
+A Linux build with no GPU feature compiles MLX without any GPU backend, so MLX's GPU-side helpers (for example `copy_gpu_inplace`) do not exist in it. Bridge C++ under `src/lib/mlxcelverse/kernels/` and `src/lib/mlxcel-core/cpp/` that calls one must sit behind `MLXCEL_BRIDGE_GPU_BACKEND`, which `mlxcel-core/build.rs` defines exactly when MLX builds Metal, CUDA or ROCm. A missed guard is a link error that only this configuration shows: `cargo check` does not link, and every GB10 CI job passes `--features cuda`. Check it locally with a separate target directory so it does not evict a CUDA cache:
 
 ```bash
 CARGO_TARGET_DIR=target/cpu cargo test -p mlxcel-core --profile test-fast --lib --no-run
 ```
 
-Measured on GB10 (2026-10, lablup/mlxcel#2108): about 2.5 minutes cold, including the CPU-only MLX tree, and about 6 seconds to rebuild and relink after a one-file change in the bridge or in `mlxcel-core`. CI runs the same command as the `CPU-only link` job in `.github/workflows/ci.yml`, on the GB10 runner with its own persistent target directory (`$HOME/.cargo-target/mlxcel-cpu-link-ci`), whenever a pull request changes Rust sources, manifests, or the bridge C++ under `src/lib/mlx-cpp/` or `src/lib/mlxcel-core/cpp/` (lablup/mlxcel#2111).
+Measured on GB10 (2026-10, lablup/mlxcel#2108): about 2.5 minutes cold, including the CPU-only MLX tree, and about 6 seconds to rebuild and relink after a one-file change in the bridge or in `mlxcel-core`. CI runs the same command as the `CPU-only link` job in `.github/workflows/ci.yml`, on the GB10 runner with its own persistent target directory (`$HOME/.cargo-target/mlxcel-cpu-link-ci`), whenever a pull request changes Rust sources, manifests, or the bridge C++ under `src/lib/mlxcelverse/` or `src/lib/mlxcel-core/cpp/` (lablup/mlxcel#2111).
 
 ## Why the gate says `--workspace`
 

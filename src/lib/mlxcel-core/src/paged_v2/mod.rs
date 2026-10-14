@@ -17,7 +17,7 @@
 //!
 //! ## What v1 cannot do
 //!
-//! The v1 fused kernel (`src/lib/mlx-cpp/turbo/paged_attention.cpp`, entered
+//! The v1 fused kernel (`src/lib/mlxcelverse/kernels/paged_attention.cpp`, entered
 //! through [`crate::cache::PagedBlockPool::paged_decode_fused`]) splits the KV
 //! range inside a single threadgroup. One CTA serves one `(batch, query head)`
 //! pair no matter how long the context is, so a small batch with a long context

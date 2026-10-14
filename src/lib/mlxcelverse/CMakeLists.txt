@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(mlx-cpp LANGUAGES CXX C)
+project(mlxcelverse LANGUAGES CXX C)
 set(CMAKE_CXX_STANDARD 20)
 
 # ----------------------------- Fetch MLX C++ -----------------------------
@@ -44,9 +44,9 @@ function(mlx_apply_source_overlays mlx_source_dir)
       "mlx/backend/metal/kernels/utils.h"
       "mlx/backend/metal/quantized.cpp")
   foreach(_patch_file ${_metal_patch_files})
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/patches/${_patch_file}")
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/overlays/metal/${_patch_file}")
       configure_file(
-        "${CMAKE_CURRENT_SOURCE_DIR}/patches/${_patch_file}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/overlays/metal/${_patch_file}"
         "${mlx_source_dir}/${_patch_file}"
         COPYONLY)
     endif()
@@ -65,13 +65,13 @@ function(mlx_apply_source_overlays mlx_source_dir)
   # Metal files: take the new upstream file and re-apply the four bodies
   # marked `mlxcel:`. The NripeshN/mlx fork does not change this file, so the
   # ROCm overlay below never replaces it.
-  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/patches/mlx/backend/cpu")
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/overlays/cpu/mlx/backend/cpu")
     file(GLOB_RECURSE _cpu_patch_files
-         RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}/patches"
-         "${CMAKE_CURRENT_SOURCE_DIR}/patches/mlx/backend/cpu/*")
+         RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}/overlays/cpu"
+         "${CMAKE_CURRENT_SOURCE_DIR}/overlays/cpu/mlx/backend/cpu/*")
     foreach(_patch_file ${_cpu_patch_files})
       configure_file(
-        "${CMAKE_CURRENT_SOURCE_DIR}/patches/${_patch_file}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/overlays/cpu/${_patch_file}"
         "${mlx_source_dir}/${_patch_file}"
         COPYONLY)
     endforeach()
@@ -79,15 +79,15 @@ function(mlx_apply_source_overlays mlx_source_dir)
   endif()
 
   # CUDA patches: custom grouped GEMM, quantized kernels, reduce ops, binary ops.
-  # These are in patches/mlx/backend/cuda/ and only compiled for CUDA targets,
+  # These are in overlays/cuda/mlx/backend/cuda/ and only compiled for CUDA targets,
   # so they are safe to apply unconditionally (harmless on Metal-only builds).
-  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/patches/mlx/backend/cuda")
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/overlays/cuda/mlx/backend/cuda")
     file(GLOB_RECURSE _cuda_patch_files
-         RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}/patches"
-         "${CMAKE_CURRENT_SOURCE_DIR}/patches/mlx/backend/cuda/*")
+         RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}/overlays/cuda"
+         "${CMAKE_CURRENT_SOURCE_DIR}/overlays/cuda/mlx/backend/cuda/*")
     foreach(_patch_file ${_cuda_patch_files})
       configure_file(
-        "${CMAKE_CURRENT_SOURCE_DIR}/patches/${_patch_file}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/overlays/cuda/${_patch_file}"
         "${mlx_source_dir}/${_patch_file}"
         COPYONLY)
     endforeach()
@@ -98,9 +98,9 @@ function(mlx_apply_source_overlays mlx_source_dir)
   # These change dtype promotion rules (bf16+fp32→bf16) to avoid copy_v kernel
   # overhead on CUDA, but break Metal precision for bf16 vision weights
   # (e.g., SigLIP position embeddings). Apply ONLY for CUDA builds.
-  if(MLX_BUILD_CUDA AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/patches-cuda")
+  if(MLX_BUILD_CUDA AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/overlays/cuda/mlx")
     file(GLOB _cuda_only_patches
-         "${CMAKE_CURRENT_SOURCE_DIR}/patches-cuda/*.cpp")
+         "${CMAKE_CURRENT_SOURCE_DIR}/overlays/cuda/mlx/*.cpp")
     foreach(_patch_file ${_cuda_only_patches})
       get_filename_component(_fname "${_patch_file}" NAME)
       configure_file(
@@ -116,10 +116,10 @@ function(mlx_apply_source_overlays mlx_source_dir)
   # files it hooks, merged at the pinned commit. Copied only for ROCm builds so
   # Metal and CUDA never compile a ROCm-modified core file. Only CMakeLists.txt
   # and mlx/ are overlays; README.md, UPSTREAM, LOCAL_FIXES.md and
-  # CORE_RESIDUAL.diff next to them are records. See patches-rocm/README.md for
+  # CORE_RESIDUAL.diff next to them are records. See overlays/rocm/README.md for
   # the pin-bump procedure.
   if(MLX_BUILD_ROCM)
-    set(_rocm_root "${CMAKE_CURRENT_SOURCE_DIR}/patches-rocm")
+    set(_rocm_root "${CMAKE_CURRENT_SOURCE_DIR}/overlays/rocm")
     if(NOT EXISTS "${_rocm_root}/mlx/backend/rocm")
       message(FATAL_ERROR
         "MLX_BUILD_ROCM is ON but the ROCm overlay is missing: expected "
@@ -221,7 +221,7 @@ foreach(_patch_file ${_metal_patch_files_global})
   # _metal_patch_files is function-local; re-glob here
 endforeach()
 file(GLOB_RECURSE _all_patches
-     "${CMAKE_CURRENT_SOURCE_DIR}/patches/mlx/backend/metal/*.cpp")
+     "${CMAKE_CURRENT_SOURCE_DIR}/overlays/metal/mlx/backend/metal/*.cpp")
 foreach(_pf ${_all_patches})
   file(READ "${_pf}" _pf_content)
   foreach(_pat ${_deprecated_patterns})

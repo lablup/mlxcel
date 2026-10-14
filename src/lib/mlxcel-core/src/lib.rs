@@ -1602,7 +1602,7 @@ mod ffi {
         /// `dst` with `rows` written at `start`, sharing `dst`'s buffer
         /// instead of copying it (#1959). Sound only when no reader of `dst`
         /// needs the written region's old contents and the caller owns the
-        /// buffer alone; see `src/lib/mlx-cpp/turbo/kv_inplace_write.h`. GPU
+        /// buffer alone; see `src/lib/mlxcelverse/kernels/kv_inplace_write.h`. GPU
         /// only.
         fn inplace_slice_write(
             dst: &MlxArray,

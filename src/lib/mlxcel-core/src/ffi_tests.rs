@@ -1438,7 +1438,7 @@ fn test_rms_norm() {
 
 /// Verify that rms_norm with bf16 input preserves bf16 output dtype.
 ///
-/// The CUDA patch in `patches/mlx/fast.cpp` selects `compute_type = bfloat16`
+/// The CUDA patch in `overlays/cuda/mlx/fast.cpp` selects `compute_type = bfloat16`
 /// when `out_type == bfloat16`, avoiding unnecessary fp32 promotion and
 /// copy_v kernels.  This test confirms the invariant holds at the Rust FFI
 /// boundary.
@@ -1486,7 +1486,7 @@ fn test_rms_norm_bf16_dtype_preserved() {
 /// Verify that layer_norm with bf16 input preserves bf16 output dtype.
 ///
 /// Mirrors the rms_norm bf16 test but exercises the layer_norm fallback path
-/// patched in `patches/mlx/fast.cpp`.
+/// patched in `overlays/cuda/mlx/fast.cpp`.
 #[test]
 fn test_layer_norm_bf16_dtype_preserved() {
     let x_f32 = from_slice_f32(&[1.0, 2.0, 3.0, 4.0], &[1, 4]);

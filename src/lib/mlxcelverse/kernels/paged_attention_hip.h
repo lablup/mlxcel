@@ -41,7 +41,7 @@
 //   an `explicit` operator.
 // - The geometry is read from `<input>_shape` exactly as the CUDA bodies read
 //   it. That relies on the overlay passing shapes by value, which it does
-//   since lablup/mlxcel#2100 (`patches-rocm/LOCAL_FIXES.md` item 30); before
+//   since lablup/mlxcel#2100 (`overlays/rocm/LOCAL_FIXES.md` item 30); before
 //   that fix a HIP body that named `<input>_shape` faulted the queue.
 //
 // Wave32 guard. The v1 and v2-partial bodies fold a dot product across 32

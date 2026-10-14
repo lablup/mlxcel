@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! Strided copies of 2^32 elements or more on ROCm (issue #2184,
-//! `patches-rocm/LOCAL_FIXES.md` item 42).
+//! `overlays/rocm/LOCAL_FIXES.md` item 42).
 //!
 //! The overlay's strided copy kernels (`copy_g_byval`, `copy_gg_byval`,
 //! `copy_gg_dynamic_nd`, `copy_gg_dynamic`) launched one thread per element.

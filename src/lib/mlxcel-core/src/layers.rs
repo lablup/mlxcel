@@ -1138,7 +1138,7 @@ fn fused_add_rms_norm_eligible(delta: &MlxArray, residual: &MlxArray, weight: &M
 /// The kernel emits the K/V append payload in the layout its destination
 /// consumes, so the cache append stays an O(new tokens) donated `slice_update`
 /// instead of the O(capacity) slab copy an in-kernel write would force. See
-/// `src/lib/mlx-cpp/turbo/fused_rope_append.h` for why the write itself cannot
+/// `src/lib/mlxcelverse/kernels/fused_rope_append.h` for why the write itself cannot
 /// be fused under MLX's custom-kernel contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FusedRopeDestLayout {
@@ -5033,7 +5033,7 @@ fn sdpa_plan_bucket_max_queries() -> i32 {
 /// materialized and the small-query fallback below does not apply.
 ///
 /// Mirrors `sdpa_plan_bucket_shape_eligible` in
-/// `src/lib/mlx-cpp/patches/mlx/backend/cuda/scaled_dot_product_attention.cpp`,
+/// `src/lib/mlxcelverse/overlays/cuda/mlx/backend/cuda/scaled_dot_product_attention.cpp`,
 /// which is deliberately shape-only so it answers the same during MLX graph
 /// building as at eval time. The layout half of the C++ gate (k/v being slices
 /// of one fixed-size KV cache, and the mask being the broadcast plane
@@ -5085,7 +5085,7 @@ fn plan_bucket_eligible_with(
 /// flash-eligible and [`cuda_sdpa_materializes_scores`] alone would say no.
 ///
 /// Mirrors the gate added to `supports_sdpa_cudnn` in
-/// `src/lib/mlx-cpp/patches/mlx/backend/cuda/scaled_dot_product_attention.cpp`
+/// `src/lib/mlxcelverse/overlays/cuda/mlx/backend/cuda/scaled_dot_product_attention.cpp`
 /// (issue #1799): a masked or causal call with 2 to
 /// `MLXCEL_SDPA_FALLBACK_MAX_QUERIES` query rows over a longer key sequence,
 /// which is the speculative verify shape and the short trailing chunk of a

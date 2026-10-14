@@ -14,9 +14,9 @@
 
 //! The expert-batched `gather_qmm` kernel on ROCm matches the unsorted path
 //! and a dequantized f32 reference (issues #2066 and #2106,
-//! `patches-rocm/LOCAL_FIXES.md` items 9 and 31).
+//! `overlays/rocm/LOCAL_FIXES.md` items 9 and 31).
 //!
-//! `GatherQMM::eval_gpu` in `patches-rocm/mlx/backend/rocm/quantized/qmm.hip`
+//! `GatherQMM::eval_gpu` in `overlays/rocm/mlx/backend/rocm/quantized/qmm.hip`
 //! sends a sorted, transposed call with `M == 1`, `B >= 64`, `E <= 64` and
 //! `B / E >= 4` to `gather_qmv_expert_batched_kernel`, which loads each
 //! expert's weights once for all of that expert's rows, when it is affine at

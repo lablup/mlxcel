@@ -2,7 +2,7 @@
 // Direct C++ bridge implementation for MLX via cxx
 
 #include "mlx_cxx_internal.h"
-#include "../../mlx-cpp/turbo/gpu_backend.h"
+#include "../../mlxcelverse/kernels/gpu_backend.h"
 
 #include "mlx/primitives.h"
 // Backend-agnostic CUDA availability probe; non-CUDA builds link the stub.

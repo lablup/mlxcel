@@ -27,7 +27,7 @@ src/
 ├── tokenizer/                   # tokenizer loading helpers
 ├── lora/                        # LoRA adapter loading
 ├── lib/mlxcel-core/             # MLX C++ FFI crate and low-level generation primitives
-└── lib/mlx-cpp/                 # mlxcelverse: MLX build, per-backend overlays, fused kernels
+└── lib/mlxcelverse/             # mlxcelverse: MLX build, per-backend overlays, fused kernels
 ```
 
 ## `mlxcel-core`
@@ -80,14 +80,15 @@ src/
   the microbench harnesses under `examples/` (see [benchmarks](benchmarks.md)).
 
 `src/lib/mlxcel-core/build.rs` builds the pinned MLX commit through
-`src/lib/mlx-cpp/` and compiles the bridge code; see
+`src/lib/mlxcelverse/` and compiles the bridge code; see
 [mlxcelverse](#mlxcelverse-the-mlx-side-layer) for what is layered on top of
 upstream MLX.
 
 ## mlxcelverse: the MLX-side layer
 
-mlxcelverse is the name for everything mlxcel builds on top of upstream MLX.
-mlxcel does not use a fork of MLX: `src/lib/mlx-cpp/CMakeLists.txt` fetches
+mlxcelverse is the name for everything mlxcel builds on top of upstream MLX
+(`src/lib/mlxcelverse/`, described in its [README](../src/lib/mlxcelverse/README.md)).
+mlxcel does not use a fork of MLX: `src/lib/mlxcelverse/CMakeLists.txt` fetches
 `ml-explore/mlx` at one pinned commit (its `GIT_TAG`, the single source of truth
 for the pin), copies mlxcelverse's source overlays over the checkout, and builds
 a static `libmlx.a` that the `cxx` bridge links. Every backend (Metal, CUDA,
@@ -97,8 +98,8 @@ mlxcelverse holds two kinds of code, maintained by different rules:
 
 | Kind | Where | What changes on an MLX pin bump |
 |------|-------|---------------------------------|
-| Per-backend source overlays: whole files that replace or add MLX sources before MLX is compiled | `src/lib/mlx-cpp/patches/mlx/backend/metal/` (always copied), `patches/mlx/backend/cuda/` (always copied, compiled only by CUDA builds), `patches/mlx/backend/cpu/` (always copied and compiled by every build: the CPU quantized matmul accumulating in f32, #2248), `patches-cuda/` (MLX core files copied only for CUDA builds), `patches-rocm/` (the ROCm backend plus the MLX core files it hooks, copied only for ROCm builds) | Each overlay is 3-way merged against the new upstream file and compared with it line by line; see "Bumping the MLX upstream pin" in `CONTRIBUTING.md` and `patches-rocm/README.md` |
-| mlxcel's own kernels: fusions and extension functions built on MLX's public custom-kernel APIs (`fast::metal_kernel`, `fast::cuda_kernel`, and `fast::hip_kernel` on ROCm) | `src/lib/mlx-cpp/turbo/` and the kernel bodies in `src/lib/mlxcel-core/cpp/mlx_cxx_kernels.cpp` | Only public-API compatibility; the fused launchers are revalidated against their graph references |
+| Per-backend source overlays: whole files that replace or add MLX sources before MLX is compiled | `src/lib/mlxcelverse/overlays/metal/` (always copied), `overlays/cpu/` (always copied and compiled by every build: the CPU quantized matmul accumulating in f32, #2248), `overlays/cuda/` (CUDA backend files and MLX core files, copied only for CUDA builds), `overlays/rocm/` (the ROCm backend plus the MLX core files it hooks, copied only for ROCm builds) | Each overlay is 3-way merged against the new upstream file and compared with it line by line; see "Bumping the MLX upstream pin" in `CONTRIBUTING.md` and `overlays/rocm/README.md` |
+| mlxcel's own kernels: fusions and extension functions built on MLX's public custom-kernel APIs (`fast::metal_kernel`, `fast::cuda_kernel`, and `fast::hip_kernel` on ROCm) | `src/lib/mlxcelverse/kernels/` and the kernel bodies in `src/lib/mlxcel-core/cpp/mlx_cxx_kernels.cpp` | Only public-API compatibility; the fused launchers are revalidated against their graph references |
 
 The overlay copy is whole-file `configure_file(... COPYONLY)`, so rerunning
 CMake configure (which `build.rs` does on every rebuild) is idempotent.
@@ -108,14 +109,12 @@ features cannot be enabled together.
 
 The ROCm overlay is vendored from the `rocm-support` branch of NripeshN/mlx
 (MIT), the head of the upstream draft ml-explore/mlx#2300.
-`patches-rocm/UPSTREAM` records the source commit and the MLX pin it was
-retargeted to, and `patches-rocm/LOCAL_FIXES.md` lists every change mlxcel
+`overlays/rocm/UPSTREAM` records the source commit and the MLX pin it was
+retargeted to, and `overlays/rocm/LOCAL_FIXES.md` lists every change mlxcel
 carries on top of it. `docs/mlxcelverse/rocm-overlay.md` is the procedure for
 following both upstreams (pin bumps, fork syncs, and the `scripts/mlxcelverse/`
 tools), and `docs/mlxcelverse/upstream/` holds fork-side fix packages kept as
-historical reference (not submitted; fixes stay in the overlay). Reorganizing the whole tree under an `mlxcelverse`
-directory name, with no change to build output, is tracked in
-lablup/mlxcel#1816.
+historical reference (not submitted; fixes stay in the overlay).
 
 ## Loading pipeline
 
@@ -188,11 +187,11 @@ Release builds use `panic = "unwind"` (issue #375), so the deliberate audio work
 ## Platform-specific behavior
 
 - macOS/Metal, Linux/CUDA and Linux/ROCm behavior is primarily determined by
-  the pinned MLX build under `src/lib/mlx-cpp/`, the backend's mlxcelverse
+  the pinned MLX build under `src/lib/mlxcelverse/`, the backend's mlxcelverse
   overlays, and the feature flags passed to Cargo.
 - Apple Silicon runtime/device helpers live in `src/lib/mlxcel-core/src/hardware.rs`
   and `src/execution/runtime.rs`.
-- Custom fused kernel launchers live under `src/lib/mlx-cpp/turbo/` and are
+- Custom fused kernel launchers live under `src/lib/mlxcelverse/kernels/` and are
   called through the C++ bridge. Each one carries a Metal JIT source and, where
   ported, a CUDA counterpart selected at runtime by
   `mlx::core::metal::is_available()`: TurboQuant Sparse-V and delegated SDPA,
@@ -202,7 +201,7 @@ Release builds use `panic = "unwind"` (issue #375), so the deliberate audio work
 - CUDA kernel behavior is mostly inherited from MLX; `mlxcel` passes the CUDA
   architecture list through `MLX_CUDA_ARCHITECTURES` at build time.
 - ROCm (experimental, `--features rocm`) runs the vendored ROCm backend from
-  `src/lib/mlx-cpp/patches-rocm/`. The build passes the HIP `gfx` targets
+  `src/lib/mlxcelverse/overlays/rocm/`. The build passes the HIP `gfx` targets
   through `MLX_ROCM_ARCHITECTURES` (default: the targets `rocminfo` reports),
   links the backend's kernel archive and the ROCm libraries, and embeds
   `$ROCM_PATH/lib` as an rpath. The fused launchers above choose CUDA whenever

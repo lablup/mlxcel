@@ -22,7 +22,7 @@
 // gfx1151 host that made these loops 2x to 30x faster, not slower.
 //
 // Applied on every build (Metal, CUDA, ROCm, CPU-only) by
-// `mlx_apply_source_overlays` in src/lib/mlx-cpp/CMakeLists.txt. Refresh rule
+// `mlx_apply_source_overlays` in src/lib/mlxcelverse/CMakeLists.txt. Refresh rule
 // on a pin bump: take the new upstream file and re-apply the four marked
 // bodies, or drop this overlay if upstream accumulates in float itself.
 // Regression test: src/lib/mlxcel-core/src/cpu_qmm_accum_tests.rs.

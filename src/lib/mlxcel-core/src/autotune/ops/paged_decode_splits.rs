@@ -16,7 +16,7 @@
 //!
 //! ## Why this knob
 //!
-//! `src/lib/mlx-cpp/turbo/paged_attention.cpp` launches the fused decode kernel
+//! `src/lib/mlxcelverse/kernels/paged_attention.cpp` launches the fused decode kernel
 //! over `(32, NumSplits, B*Hq)`: 32 lanes partition the head dimension and
 //! `NumSplits` SIMD groups sweep strided token stripes, then SIMD group 0
 //! merges the partials with a flash rescale. Before #906 `NumSplits` came from

@@ -4,8 +4,8 @@
 // mlx_cxx_bridge.cpp; see mlx_cxx_internal.h for the shared helpers.
 
 #include "mlx_cxx_internal.h"
-#include "../../mlx-cpp/turbo/gpu_backend.h"
-#include "../../mlx-cpp/turbo/kernel_port.h"
+#include "../../mlxcelverse/kernels/gpu_backend.h"
+#include "../../mlxcelverse/kernels/kernel_port.h"
 
 // CUDA backend availability probe for the fused-kernel gates (#631). The
 // header is backend-agnostic: builds without CUDA link the no_cuda stub.

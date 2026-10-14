@@ -1,6 +1,6 @@
 # Maintaining the ROCm overlay
 
-The ROCm part of mlxcelverse (`src/lib/mlx-cpp/patches-rocm/`, described in its [README](../../src/lib/mlx-cpp/patches-rocm/README.md)) has two moving upstreams: the MLX pin (ml-explore/mlx, bumped regularly) and the fork its backend is vendored from (NripeshN/mlx `rocm-support`). This page is the procedure for following both, and the tools that support it. Tooling and procedure come from lablup/mlxcel#1813.
+The ROCm part of mlxcelverse (`src/lib/mlxcelverse/overlays/rocm/`, described in its [README](../../src/lib/mlxcelverse/overlays/rocm/README.md)) has two moving upstreams: the MLX pin (ml-explore/mlx, bumped regularly) and the fork its backend is vendored from (NripeshN/mlx `rocm-support`). This page is the procedure for following both, and the tools that support it. Tooling and procedure come from lablup/mlxcel#1813.
 
 ## The records
 

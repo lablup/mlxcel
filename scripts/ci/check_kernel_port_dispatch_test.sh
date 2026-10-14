@@ -27,8 +27,8 @@ failures=0
 # bridge, and the Rust bridge declaration in lib.rs.
 make_tree() {
   local dir="$work/$1"
-  mkdir -p "$dir/src/lib/mlx-cpp" "$dir/src/lib/mlxcel-core/src" || return 1
-  cp -R "$repo_root/src/lib/mlx-cpp/turbo" "$dir/src/lib/mlx-cpp/turbo" || return 1
+  mkdir -p "$dir/src/lib/mlxcelverse" "$dir/src/lib/mlxcel-core/src" || return 1
+  cp -R "$repo_root/src/lib/mlxcelverse/kernels" "$dir/src/lib/mlxcelverse/kernels" || return 1
   cp -R "$repo_root/src/lib/mlxcel-core/cpp" "$dir/src/lib/mlxcel-core/cpp" || return 1
   cp "$repo_root/src/lib/mlxcel-core/src/lib.rs" "$dir/src/lib/mlxcel-core/src/lib.rs" || return 1
   echo "$dir"
@@ -75,9 +75,9 @@ path.write_text(text.replace(old, new, 1))
 PY
 }
 
-norm="src/lib/mlx-cpp/turbo/fused_norm.cpp"
-gumbel_hip="src/lib/mlx-cpp/turbo/sampling_gumbel_hip.h"
-rejection="src/lib/mlx-cpp/turbo/sampling_rejection.cpp"
+norm="src/lib/mlxcelverse/kernels/fused_norm.cpp"
+gumbel_hip="src/lib/mlxcelverse/kernels/sampling_gumbel_hip.h"
+rejection="src/lib/mlxcelverse/kernels/sampling_rejection.cpp"
 kernels="src/lib/mlxcel-core/cpp/mlx_cxx_kernels.cpp"
 bridge="src/lib/mlxcel-core/cpp/mlx_cxx_bridge.cpp"
 norm_rocm_entry='            return get_fused_norm_kernel_hip().get();
@@ -167,7 +167,7 @@ fi
 
 # ... in C++ too ...
 dir="$(make_tree seam-in-cpp)"
-replace_in "$dir/src/lib/mlx-cpp/turbo/kernel_port.cpp" "namespace mlxcel {" "namespace mlxcel {
+replace_in "$dir/src/lib/mlxcelverse/kernels/kernel_port.cpp" "namespace mlxcel {" "namespace mlxcel {
 static int forced = (set_rocm_port_warp_size_for_tests(32), 0);"
 if run_case seam-in-cpp "$dir" 1; then
   assert_contains seam-in-cpp "kernel_port.cpp: calls set_rocm_port_warp_size_for_tests outside its definition"

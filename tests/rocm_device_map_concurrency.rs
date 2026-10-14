@@ -15,7 +15,7 @@
 //! The ROCm overlay's device table (`rocm::device()`) is safe to read while
 //! another thread inserts into it (issue #2197).
 //!
-//! `device()` in `patches-rocm/mlx/backend/rocm/device.cpp` memoises one
+//! `device()` in `overlays/rocm/mlx/backend/rocm/device.cpp` memoises one
 //! `Device` per HIP device index in a process-global map. It used to do an
 //! unlocked `find` and, on a miss, an unlocked `try_emplace`; it is called for
 //! every primitive `gpu::eval` launches, from whichever thread evaluates, and

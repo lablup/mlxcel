@@ -1993,7 +1993,7 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
     // every other bf16-scale quant decode correctly with no scale promotion.
     //
     // On CUDA the base policy keeps bf16 (native bf16 ALUs, and the merged
-    // patches-cuda/dtype.cpp promotion patch already yields a 0-AsType,
+    // overlays/cuda/mlx/dtype.cpp promotion patch already yields a 0-AsType,
     // single-dtype bf16 decode graph). Issue #636 adds an opt-in load-time
     // bf16 -> f16 normalization for the fixed-topology / CUDA-graph-reuse
     // experiment, gated by MLXCEL_CUDA_F16_NORMALIZE and skipped for

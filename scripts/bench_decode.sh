@@ -534,7 +534,7 @@ BACKEND=""
 SYSTEM_MEMORY_BYTES=0
 MEMORY_LIMIT_BYTES=0
 # The trailing commit columns of every row. ROCm rows carry two more: the
-# source commit of the MLX ROCm overlay (src/lib/mlx-cpp/patches-rocm/UPSTREAM),
+# source commit of the MLX ROCm overlay (src/lib/mlxcelverse/overlays/rocm/UPSTREAM),
 # since `mlx_commit` names only the upstream pin and cannot tell upstream MLX
 # from a build carrying the overlay, and the HIP runtime version.
 COMMIT_FIELDS=""
@@ -551,7 +551,7 @@ resolve_platform() {
   COMMIT_FIELDS="${SOURCE_COMMIT},${MLX_COMMIT}"
   if [[ "$BACKEND" == "rocm" ]]; then
     local overlay
-    overlay=$(sed -n 's/^commit:[[:space:]]*//p' src/lib/mlx-cpp/patches-rocm/UPSTREAM 2>/dev/null | cut -c1-8)
+    overlay=$(sed -n 's/^commit:[[:space:]]*//p' src/lib/mlxcelverse/overlays/rocm/UPSTREAM 2>/dev/null | cut -c1-8)
     COMMIT_FIELDS="${COMMIT_FIELDS},${overlay:-unknown},${HIP_VERSION:-unknown}"
     CSV_HEADER_EXTRA=",mlx_rocm_overlay_commit,hip_version"
   fi

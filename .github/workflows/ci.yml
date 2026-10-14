@@ -123,12 +123,13 @@ jobs:
         with:
           # Required for the `!` patterns below to mean anything. Under the
           # default `some`, a negated pattern is just another pattern to match,
-          # so `'src/lib/mlx-cpp/**'` plus `'!src/lib/mlx-cpp/patches-rocm/**'`
-          # still matches a ROCm-only change: the action's own README says the
-          # exclusion syntax is ignored "UNLESS you specify 'every' or
-          # 'some-with-excludes'". Safe to set globally because no filter here
-          # used negation before this change, and for a filter with no negated
-          # rule `some-with-excludes` reduces to `some` (lablup/mlxcel#1992).
+          # so `'src/lib/mlxcelverse/**'` plus
+          # `'!src/lib/mlxcelverse/overlays/rocm/**'` still matches a ROCm-only
+          # change: the action's own README says the exclusion syntax is
+          # ignored "UNLESS you specify 'every' or 'some-with-excludes'". Safe
+          # to set globally because no filter here used negation before this
+          # change, and for a filter with no negated rule `some-with-excludes`
+          # reduces to `some` (lablup/mlxcel#1992).
           predicate-quantifier: 'some-with-excludes'
           filters: |
             rust:
@@ -139,7 +140,7 @@ jobs:
               - 'build.rs'
               - 'scripts/iree/**'
             mlx_pin:
-              - 'src/lib/mlx-cpp/CMakeLists.txt'
+              - 'src/lib/mlxcelverse/CMakeLists.txt'
               - 'src/lib/mlxcel-core/build_support/mlx_pin.rs'
               - 'src/lib/mlxcel-mlx-pin/**'
               - 'scripts/ci/mlx_pinned_commit.sh'
@@ -157,31 +158,23 @@ jobs:
               # script names the CUDA libraries, and the MLX pin decides which
               # of them libmlx.a needs. See the `xla-link` job comment.
               - 'src/lib/mlxcel-core/build.rs'
-              - 'src/lib/mlx-cpp/CMakeLists.txt'
+              - 'src/lib/mlxcelverse/CMakeLists.txt'
             # Everything that can compile differently per CUDA architecture: the
-            # MLX overlays and turbo kernels, the pinned MLX commit, and the
+            # MLX overlays and mlxcel kernels, the pinned MLX commit, and the
             # build scripts that hand CMake the architecture list. Rust sources
             # outside these paths cannot break an arch-conditional compile, so
             # the sm_70 gate below does not run on every Rust PR. See the
             # `cuda-sm70-compile` job comment for why sm_70 specifically.
             cuda_arch:
-              - 'src/lib/mlx-cpp/**'
+              - 'src/lib/mlxcelverse/**'
               # Two subtrees under that glob cannot change what nvcc compiles,
               # and these are the heaviest jobs on the shared GB10 runner. Most
-              # of epic #1801's pull requests touch only `patches-rocm/`, so
+              # of epic #1801's pull requests touch only `overlays/rocm/`, so
               # before this exclusion every one of them woke both CUDA jobs
-              # (lablup/mlxcel#1992).
-              #
-              # Note what is NOT excluded: `patches/` as a whole. Despite the
-              # name it is not the Metal overlay. `patches/mlx/backend/cuda/`
-              # holds 24 CUDA sources, applied and compiled for CUDA targets by
-              # `src/lib/mlx-cpp/CMakeLists.txt`, against 4 Metal files in
-              # `patches/mlx/backend/metal/`, plus the CPU backend overlay in
-              # `patches/mlx/backend/cpu/` that every build compiles (#2248).
-              # Excluding `patches/**` would drop real CUDA coverage, so only
-              # the Metal subtree is named.
-              - '!src/lib/mlx-cpp/patches-rocm/**'
-              - '!src/lib/mlx-cpp/patches/mlx/backend/metal/**'
+              # (lablup/mlxcel#1992). `overlays/cpu/` is not excluded because
+              # every build compiles it (#2248).
+              - '!src/lib/mlxcelverse/overlays/rocm/**'
+              - '!src/lib/mlxcelverse/overlays/metal/**'
               - 'src/lib/mlxcel-core/build.rs'
               - 'src/lib/mlxcel-core/build_support/**'
               - 'build.rs'
@@ -189,17 +182,14 @@ jobs:
             # runs: the HIP overlay, the shared MLX build inputs, the bridge
             # sources the overlay is called through, and the pinned MLX commit.
             # A pin bump must trigger this, because the ROCm half of every bump
-            # now lives in `patches-rocm/` and nothing else in CI links it.
+            # now lives in `overlays/rocm/` and nothing else in CI links it.
             rocm:
-              - 'src/lib/mlx-cpp/**'
-              # The mirror of the exclusion above: neither the Metal files nor
-              # the CUDA overlays reach a HIP compile. `patches/` is split by
-              # subtree here for the same reason it is there, that the directory
-              # holds several backends' files. `patches/mlx/backend/cpu/` is not
+              - 'src/lib/mlxcelverse/**'
+              # The mirror of the exclusion above: neither the Metal overlay nor
+              # the CUDA overlay reaches a HIP compile. `overlays/cpu/` is not
               # excluded: the ROCm build compiles it too (#2248).
-              - '!src/lib/mlx-cpp/patches/mlx/backend/metal/**'
-              - '!src/lib/mlx-cpp/patches/mlx/backend/cuda/**'
-              - '!src/lib/mlx-cpp/patches-cuda/**'
+              - '!src/lib/mlxcelverse/overlays/metal/**'
+              - '!src/lib/mlxcelverse/overlays/cuda/**'
               - 'src/lib/mlxcel-core/build.rs'
               - 'src/lib/mlxcel-core/build_support/**'
               - 'src/lib/mlxcel-core/cpp/**'
@@ -209,18 +199,19 @@ jobs:
             # What can break the CPU-only link of `mlxcel-core`: the Rust
             # sources and manifests, plus the bridge C++ that `rust` above does
             # not match. The bug that motivated the `cpu-link` job lived in
-            # `src/lib/mlx-cpp/turbo/` (#2108). No overlay excludes: that job
-            # costs seconds warm, unlike the CUDA jobs those excludes protect.
+            # `src/lib/mlxcelverse/kernels/` (#2108). No overlay excludes: that
+            # job costs seconds warm, unlike the CUDA jobs those excludes
+            # protect.
             cpu_link:
               # The CPU backend overlay compiles into every build, this one
               # included (#2248).
-              - 'src/lib/mlx-cpp/patches/mlx/backend/cpu/**'
+              - 'src/lib/mlxcelverse/overlays/cpu/**'
               - '**/*.rs'
               - '**/Cargo.toml'
               - 'Cargo.lock'
               - 'build.rs'
               - 'rust-toolchain.toml'
-              - 'src/lib/mlx-cpp/**'
+              - 'src/lib/mlxcelverse/**'
               - 'src/lib/mlxcel-core/cpp/**'
               - 'src/lib/mlxcel-core/build_support/**'
             # The workflow files themselves. Deliberately NOT folded into the
@@ -488,7 +479,7 @@ jobs:
     # mlx/backend/cuda/quantized/nvfp4_quantize.cuh) only under an
     # architecture-specific target, and the lists here are plain, so what
     # supplies them is the per-source injection in
-    # `src/lib/mlx-cpp/CMakeLists.txt`. Remove that and the plain lists quietly
+    # `src/lib/mlxcelverse/CMakeLists.txt`. Remove that and the plain lists quietly
     # go back to compiling the converters out of every artifact and every test,
     # which is where issue #1934 started, so this asserts it is still there.
     #
@@ -532,8 +523,8 @@ jobs:
     # would touch, reusing the same `has_existing_header` predicate the writer
     # branches on, so the gate can never demand an edit that running
     # `python3 scripts/insert_apache_header.py` does not produce. Files that
-    # already carry someone else's provenance (the vendored MLX patches under
-    # src/lib/mlx-cpp/patches/ keep Apple's copyright) are skipped by that same
+    # already carry someone else's provenance (the vendored MLX overlays under
+    # src/lib/mlxcelverse/overlays/ keep Apple's copyright) are skipped by that same
     # predicate and must stay that way: this gate must never stamp a Lablup
     # header onto upstream-derived code.
     runs-on: ubuntu-latest
@@ -1035,7 +1026,7 @@ jobs:
         with:
           persist-credentials: false
       # The pinned MLX commit has one home, GIT_TAG in
-      # src/lib/mlx-cpp/CMakeLists.txt, and two independent parsers read it:
+      # src/lib/mlxcelverse/CMakeLists.txt, and two independent parsers read it:
       # mlxcel-core's build.rs in Rust (build_support/mlx_pin.rs, unit-tested by
       # mlxcel-mlx-pin) and this script in awk, for release.yml's "Validate MLX
       # build cache" steps. The shell half accepts strictly less than the Rust
@@ -1157,7 +1148,7 @@ jobs:
       # #1943 auto-detection produces this same `121` on a GB10; the pin remains
       # because a gate should name the list it compiles instead of inferring it.
       # The hardware NVFP4/MXFP4 converters come from the per-source injection in
-      # `src/lib/mlx-cpp/CMakeLists.txt`, not from this list.
+      # `src/lib/mlxcelverse/CMakeLists.txt`, not from this list.
       MLX_CUDA_ARCHITECTURES: "121"
       # Every rustc lint, not just the `unused_imports` this job started with.
       # The narrower value existed because the XLA feature combination carried a
@@ -1252,7 +1243,7 @@ jobs:
   # rejected because the release link is minutes of shared-runner time and the
   # overwhelming majority of Rust PRs cannot affect the link line.
   #
-  # `src/lib/mlxcel-core/build.rs` and `src/lib/mlx-cpp/CMakeLists.txt` are on
+  # `src/lib/mlxcel-core/build.rs` and `src/lib/mlxcelverse/CMakeLists.txt` are on
   # the causal path as well. The former lists the CUDA libraries every
   # `--features cuda` link resolves `libmlx.a` against; the latter holds the MLX
   # pin, and a pin bump can add one without touching any build script. That is
@@ -1344,7 +1335,7 @@ jobs:
       # auto-detection produces this same `121` on a GB10; the pin remains
       # because a gate should name the list it compiles instead of inferring it.
       # The hardware NVFP4/MXFP4 converters come from the per-source injection in
-      # `src/lib/mlx-cpp/CMakeLists.txt`, not from this list.
+      # `src/lib/mlxcelverse/CMakeLists.txt`, not from this list.
       MLX_CUDA_ARCHITECTURES: "121"
     steps:
       - uses: actions/checkout@v7
@@ -1542,7 +1533,7 @@ jobs:
   # block-float quantization exercised only the scalar CUTLASS fallback.
   #
   # It also proves the converter reached *only* there. The architecture lists
-  # stay plain and `src/lib/mlx-cpp/CMakeLists.txt` gives the extra image to
+  # stay plain and `src/lib/mlxcelverse/CMakeLists.txt` gives the extra image to
   # `fp_quantize.cu` alone, so an architecture-specific image anywhere else
   # means the injection was replaced by a target-level list and every kernel on
   # every Blackwell host now runs different machine code. `cuda-arch-lists`
@@ -1719,7 +1710,7 @@ jobs:
           GATED=$(grep -rl '__CUDA_ARCH_SPECIFIC__\|__CUDA_ARCH_FAMILY_SPECIFIC__' "$MLX_SRC" | sed "s|$MLX_SRC/||" | sort | tr '\n' ' ' | sed 's/ $//')
           echo "MLX files gated on an architecture-specific target: $GATED"
           if [ "$GATED" != "backend/cuda/quantized/nvfp4_quantize.cuh" ]; then
-            echo "the arch-specific surface of the pinned MLX has changed; the per-source injection in src/lib/mlx-cpp/CMakeLists.txt covers only fp_quantize.cu, so decide whether to extend it or move to a target-level architecture list (issue #1934)" >&2
+            echo "the arch-specific surface of the pinned MLX has changed; the per-source injection in src/lib/mlxcelverse/CMakeLists.txt covers only fp_quantize.cu, so decide whether to extend it or move to a target-level architecture list (issue #1934)" >&2
             exit 1
           fi
           rm -rf "$WORK"
@@ -1744,7 +1735,7 @@ jobs:
   # ============================================================================
   # Nothing else in CI compiles the ROCm feature at all. `cargo check` jobs do
   # not carry it, the CUDA jobs point at NVIDIA runners, and the ROCm half of
-  # every MLX pin bump now lives in `src/lib/mlx-cpp/patches-rocm/`. Without
+  # every MLX pin bump now lives in `src/lib/mlxcelverse/overlays/rocm/`. Without
   # this job a bump that breaks the HIP overlay reaches `main` unnoticed, which
   # is exactly how the CUDA link regression in #1274 got in: `cargo check` was
   # green on a tree that could not link a single test.

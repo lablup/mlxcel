@@ -41,15 +41,15 @@ use crate::paged_v2::{PagedDecodeGeometry, PagedDecodePlan, V2Context};
 
 const PAGED_V1_SRC: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../mlx-cpp/turbo/paged_attention.cpp"
+    "/../mlxcelverse/kernels/paged_attention.cpp"
 ));
 const PAGED_V2_SRC: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../mlx-cpp/turbo/paged_attention_v2.cpp"
+    "/../mlxcelverse/kernels/paged_attention_v2.cpp"
 ));
 const PAGED_HIP_SRC: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../mlx-cpp/turbo/paged_attention_hip.h"
+    "/../mlxcelverse/kernels/paged_attention_hip.h"
 ));
 
 /// Every `<type> base = <expr>;` declaration in `src`, as `(type, expr)`.

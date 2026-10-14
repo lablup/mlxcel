@@ -15,7 +15,7 @@
 //! Resolution and verification of the pinned MLX upstream commit (issue #1047).
 //!
 //! The pin has exactly one home: the `GIT_TAG` argument of the
-//! `FetchContent_Declare(mlx ...)` block in `src/lib/mlx-cpp/CMakeLists.txt`.
+//! `FetchContent_Declare(mlx ...)` block in `src/lib/mlxcelverse/CMakeLists.txt`.
 //! That is the value CMake actually fetches, so everything else derives from it
 //! rather than restating it. Before #1047 the same 40-character SHA was written
 //! out in three places (the CMake file, a `MLX_EXPECTED_COMMIT` constant in
@@ -56,13 +56,13 @@ use std::process::Command;
 /// directory: a build script's CWD is the package root today, but that is a
 /// Cargo implementation detail and not something a correctness check should
 /// rest on.
-pub const CMAKE_LISTS_RELATIVE_PATH: &str = "../mlx-cpp/CMakeLists.txt";
+pub const CMAKE_LISTS_RELATIVE_PATH: &str = "../mlxcelverse/CMakeLists.txt";
 
 /// The same file spelled from the repository root, for human-facing messages.
 /// Nothing resolves a path through this; it exists so a build failure points at
 /// something the reader can open without first working out where the build
 /// script was standing.
-pub const CMAKE_LISTS_REPO_PATH: &str = "src/lib/mlx-cpp/CMakeLists.txt";
+pub const CMAKE_LISTS_REPO_PATH: &str = "src/lib/mlxcelverse/CMakeLists.txt";
 
 /// The MLX upstream repository, used to pick the right `FetchContent_Declare`
 /// block out of the CMake file.
@@ -541,7 +541,7 @@ mod tests {
     const OTHER_PIN: &str = "b7c3dd6d27f45b5365b08a840310187dc503f1db";
 
     fn path() -> PathBuf {
-        PathBuf::from("/repo/src/lib/mlx-cpp/CMakeLists.txt")
+        PathBuf::from("/repo/src/lib/mlxcelverse/CMakeLists.txt")
     }
 
     fn mlx_declaration(tag_line: &str) -> String {
@@ -703,7 +703,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            message.contains("/repo/src/lib/mlx-cpp/CMakeLists.txt"),
+            message.contains("/repo/src/lib/mlxcelverse/CMakeLists.txt"),
             "{message}"
         );
         assert!(message.contains("40-character lowercase hex"), "{message}");

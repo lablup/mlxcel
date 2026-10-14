@@ -5,7 +5,7 @@
 # Usage:
 #   scripts/mlxcelverse/sync_from_fork.sh [<fork-commit-or-branch>] [options]
 #
-# With no commit the head of the branch recorded in patches-rocm/UPSTREAM is
+# With no commit the head of the branch recorded in overlays/rocm/UPSTREAM is
 # used. Options are those of `rocm_overlay.py sync`, most usefully:
 #   --check        sync into a scratch copy and require it to equal the
 #                  committed overlay byte for byte (no change is written)

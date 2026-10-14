@@ -16,7 +16,7 @@
 //! keep their value while other threads evaluate on their own streams
 //! (issue #2213).
 //!
-//! `SmallSizePool` in `patches-rocm/mlx/backend/rocm/allocator.cpp` serves
+//! `SmallSizePool` in `overlays/rocm/mlx/backend/rocm/allocator.cpp` serves
 //! every allocation of at most 8 bytes: `array(2.0f)`, `full(shape, value)`,
 //! a one-token index, anything the host writes and a kernel then reads
 //! through `binary_vs`, `copy_s` and friends. It used to carve its slots 8

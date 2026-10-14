@@ -29,7 +29,7 @@ use crate::cuda_arch::{
 /// The two lists `.github/workflows/release.yml` builds, and the CI pin.
 ///
 /// Blackwell is plain in both. MLX's hardware NVFP4/MXFP4 converters do need an
-/// architecture-specific target, but `src/lib/mlx-cpp/CMakeLists.txt` gives that
+/// architecture-specific target, but `src/lib/mlxcelverse/CMakeLists.txt` gives that
 /// to `fp_quantize.cu` alone rather than to the whole `mlx` target, so these
 /// lists stay plain and every other kernel keeps the code it had (issue #1934).
 /// Hopper's `90a` is unrelated: these converters need compute capability 10.0,

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! An f32 matmul on the CPU stream of a ROCm build is right every time (issue
-//! #2072, `patches-rocm/LOCAL_FIXES.md` item 27).
+//! #2072, `overlays/rocm/LOCAL_FIXES.md` item 27).
 //!
 //! On an APU the ROCm allocator hands out fine-grained device memory for every
 //! array, CPU-stream arrays included, and the CPU stream's f32 matmul is an

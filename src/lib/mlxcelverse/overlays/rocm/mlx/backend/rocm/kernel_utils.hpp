@@ -207,7 +207,7 @@ inline std::pair<dim3, dim3> get_grid_and_block(int dim0, int dim1, int dim2) {
 }
 
 // get_launch_args is deliberately unavailable in this backend (mlxcel
-// patches-rocm LOCAL_FIXES.md item 19). The fork's version capped the grid at
+// overlays/rocm LOCAL_FIXES.md item 19). The fork's version capped the grid at
 // 65535 blocks of 256 threads and returned it with no sign that the kernel had
 // to be grid-stride, so a one-index-per-thread kernel launched with it left
 // every element past 65535 * 256 unwritten. It had no caller. Upstream CUDA's

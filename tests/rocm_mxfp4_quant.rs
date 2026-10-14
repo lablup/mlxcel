@@ -22,7 +22,7 @@
 //!
 //! - GPU `quantize` in mxfp4 at 4096x4096 failed with `hipLaunchKernel(...)
 //!   failed: invalid configuration argument` (an `arg_reduce` launch whose
-//!   1-D grid exceeded AMD's 2^32 - 1 thread limit, `patches-rocm/
+//!   1-D grid exceeded AMD's 2^32 - 1 thread limit, `overlays/rocm/
 //!   LOCAL_FIXES.md` item 11). It must now succeed and match the CPU
 //!   quantizer bit for bit.
 //! - `quantized_matmul` in mxfp4 hung at 256x512 with M = 1, and on the

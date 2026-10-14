@@ -42,7 +42,7 @@
 //!    for non-power-of-2 `head_dim` values (Gemma 4's 192-dim heads). Use
 //!    `MLXCEL_SPARSE_V_KERNEL=0` to force the graph fallback for A/B testing.
 //!
-//! The kernel sources live under `src/lib/mlx-cpp/turbo/` and use MLX's
+//! The kernel sources live under `src/lib/mlxcelverse/kernels/` and use MLX's
 //! runtime `mlx::core::fast::metal_kernel` JIT path.
 //!
 //! # Design rationale: graph-level vs Metal kernel

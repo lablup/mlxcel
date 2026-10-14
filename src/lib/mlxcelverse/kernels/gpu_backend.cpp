@@ -18,7 +18,7 @@
 #include <mlx/backend/metal/metal.h>
 
 // `mlx/backend/rocm/rocm.h` ships in the ROCm overlay
-// (`src/lib/mlx-cpp/patches-rocm/`), which CMake copies into the MLX source
+// (`src/lib/mlxcelverse/overlays/rocm/`), which CMake copies into the MLX source
 // tree only for a ROCm build, so the include has to be gated the same way the
 // Metal-backend-only symbols are. build.rs defines this alongside
 // MLXCEL_BRIDGE_METAL_BACKEND.

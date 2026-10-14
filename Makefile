@@ -859,7 +859,7 @@ verify-python-tooling: ## Run the tests/ Python suites (bench, GPU guard, qualit
 	@python3 -m unittest discover -s tests -p 'test_*.py'
 
 # Offline half of the mlxcelverse ROCm overlay checks (issue #1813). It reads
-# only files in this repository: patches-rocm/UPSTREAM must name the build's MLX
+# only files in this repository: overlays/rocm/UPSTREAM must name the build's MLX
 # pin (so a pin bump that skips the ROCm retarget fails here, on any host, not
 # first on an AMD machine), the README counts must be the real ones,
 # LOCAL_FIXES.md must be numbered without gaps, and CORE_RESIDUAL.diff must have
