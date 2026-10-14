@@ -29,6 +29,10 @@ PR #2307은 이슈 #851에 정의된 전 단계를 거쳐 AMD ROCm/HIP 환경(`M
 1. **포맷팅 검사 (`cargo fmt --check`)**: `builder.rs`, `iree.rs`, `phi4_audio.rs`의 줄바꿈을 조정하여 `cargo fmt --check`를 통과하도록 수정했습니다.
 2. **정밀도 오버라이드 공백 처리 (`builder.rs`)**: `precision_env_override`에서 공백을 trim하여 `MLXCEL_XLA_PRECISION=" f16 "`이 `Precision::F16`으로 올바르게 매칭되도록 수정하고, 프로세스 환경 변수를 변경하지 않고 테스트할 수 있도록 순수 함수 `resolve_precision_checked_with_override`를 추출하고 단위 테스트를 추가했습니다.
 3. **적격성 지원 판정 명시 (`xla_iree_rocm_qualification.md`)**: 이슈 #851 요구사항에 맞추어 Section 6 ("Support Decision & Support Boundaries")을 추가하고 최종 판정(**Conditionally Supported**) 및 프로덕션 vs 실험적 지원 경계를 명확히 정의했습니다.
+4. **ROCm rpath 타깃 OS 분기 (`rocm_rpath.rs`)**: 환경 변수 `IREE_ROCM_HOME`이 설정된 상태에서 macOS 빌드를 수행할 때 지원되지 않는 `-Wl,--disable-new-dtags` 링커 플래그가 주입되지 않도록 `if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux") { return; }` 가드를 추가했습니다.
+5. **`MLXCEL_XLA_IREE_COMPILE` 비어있지 않음 검증 (`iree.rs`)**: 빈 문자열 또는 공백만 포함된 환경 변수가 설정되었을 때 알 수 없는 오류 대신 명확한 설정 안내가 노출되도록 `trim()` 후 빈 문자열 여부를 검증하도록 개선했습니다.
+6. **타깃 아키텍처 식별자 정규화 (`builder.rs`)**: `validate_rocm_target`에서 `.to_ascii_lowercase()`를 적용하여 대문자 입력(`GFX1151`, `gfx90A`)도 안정적으로 파싱되도록 개선하고 단위 테스트를 추가했습니다.
+7. **다운로드 신속 실패 및 임시 파일 정리 (`setup-rocm.sh`, `validate_arch.sh`)**: `setup-rocm.sh`의 curl에 `-f` 플래그를 추가하여 HTTP 오류 시 즉시 실패하도록 하고, `validate_arch.sh`에서 `--oracle`이 전달되지 않았을 때 생성되는 `mktemp` 임시 파일을 스크립트 종료 시 정리하도록 exit trap을 등록했습니다.
 
 ## Verification
 

@@ -29,6 +29,10 @@ Prior to this PR, mlxcel supported OpenXLA/IREE execution only on CPU (`local-ta
 1. **Formatting check (`cargo fmt --check`)**: Fixed line wrapping in `builder.rs`, `iree.rs`, and `phi4_audio.rs` so `cargo fmt --check` passes cleanly.
 2. **Whitespace handling in precision override (`builder.rs`)**: Updated `precision_env_override` to trim whitespace so `MLXCEL_XLA_PRECISION=" f16 "` correctly matches `Precision::F16`, extracted `resolve_precision_checked_with_override` for pure testing without process environment mutation, and added unit test coverage.
 3. **Qualification support verdict (`xla_iree_rocm_qualification.md`)**: Appended Section 6 ("Support Decision & Support Boundaries") explicitly stating the **Conditionally Supported** verdict and defining production-ready vs experimental boundaries.
+4. **Target OS gate in ROCm rpath (`rocm_rpath.rs`)**: Added `if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux") { return; }` to prevent macOS builds from emitting unsupported `-Wl,--disable-new-dtags` when `IREE_ROCM_HOME` is set.
+5. **Non-empty validation for `MLXCEL_XLA_IREE_COMPILE` (`iree.rs`)**: Checked that `MLXCEL_XLA_IREE_COMPILE` is non-empty after trimming before returning `PathBuf`, avoiding opaque errors on empty environment overrides.
+6. **Architecture normalization (`builder.rs`)**: Added `.to_ascii_lowercase()` in `validate_rocm_target` to accept uppercase target strings (e.g., `GFX1151`) and verified with unit test.
+7. **Fast fail on download and temporary file cleanup (`setup-rocm.sh`, `validate_arch.sh`)**: Added `-f` flag to curl in `setup-rocm.sh` and registered an exit trap in `validate_arch.sh` to remove temporary oracle files.
 
 ## Verification
 
