@@ -37,7 +37,7 @@ __global__ void unary_v(const In* in, Out* out, IdxT size) {
   }
 }
 
-template <typename Op, typename In, typename Out, typename IdxT, int N_READS>
+template <typename Op, typename In, typename Out, typename IdxT, int N_READS, bool kLoop>
 __global__ void unary_g(
     const In* in,
     Out* out,
@@ -45,38 +45,53 @@ __global__ void unary_g(
     hip_array<int32_t, MAX_NDIM> shape,
     hip_array<int64_t, MAX_NDIM> strides,
     int ndim) {
-  IdxT index_rest = blockIdx.y * blockDim.y + threadIdx.y;
-  if (index_rest >= size_rest) {
-    return;
-  }
-
   auto shape_x = shape[ndim - 1];
   auto stride_x = strides[ndim - 1];
-  
+
   IdxT index_x = blockIdx.x * blockDim.x + threadIdx.x;
-  
-  // Compute base offset for this row using elem_to_loc style calculation
-  // elem = index_rest * shape_x gives us the linear element index for the start of this row
-  IdxT elem = index_rest * shape_x;
-  IdxT idx = 0;
-  for (int i = ndim - 1; i >= 0 && elem > 0; --i) {
-    idx += (elem % shape[i]) * strides[i];
-    elem /= shape[i];
-  }
-  
-  // Process elements in this row
-  for (IdxT i = index_x * N_READS; i < shape_x; i += blockDim.x * gridDim.x * N_READS) {
-    if (i + N_READS <= shape_x) {
-      #pragma unroll
-      for (int j = 0; j < N_READS; ++j) {
-        IdxT in_idx = idx + (i + j) * stride_x;
-        out[shape_x * index_rest + i + j] = Op{}(in[in_idx]);
+
+  // One row of the output per pass, addressed by its rest index.
+  auto process_row = [&](IdxT index_rest) {
+    // Compute base offset for this row using elem_to_loc style calculation
+    // elem = index_rest * shape_x gives us the linear element index for the start of this row
+    IdxT elem = index_rest * shape_x;
+    IdxT idx = 0;
+    for (int i = ndim - 1; i >= 0 && elem > 0; --i) {
+      idx += (elem % shape[i]) * strides[i];
+      elem /= shape[i];
+    }
+
+    // Process elements in this row
+    for (IdxT i = index_x * N_READS; i < shape_x; i += blockDim.x * gridDim.x * N_READS) {
+      if (i + N_READS <= shape_x) {
+        #pragma unroll
+        for (int j = 0; j < N_READS; ++j) {
+          IdxT in_idx = idx + (i + j) * stride_x;
+          out[shape_x * index_rest + i + j] = Op{}(in[in_idx]);
+        }
+      } else {
+        for (IdxT j = i; j < shape_x; ++j) {
+          IdxT in_idx = idx + j * stride_x;
+          out[shape_x * index_rest + j] = Op{}(in[in_idx]);
+        }
       }
-    } else {
-      for (IdxT j = i; j < shape_x; ++j) {
-        IdxT in_idx = idx + j * stride_x;
-        out[shape_x * index_rest + j] = Op{}(in[in_idx]);
-      }
+    }
+  };
+
+  // Grid y is capped by copy_grid_blocks (LOCAL_FIXES.md 46); past the cap
+  // the rows stride a 64-bit counter, which cannot overflow a 32-bit IdxT.
+  if constexpr (!kLoop) {
+    // At most 65535 blocks of blockDim.y rows, so this fits in 32 bits.
+    IdxT index_rest = blockIdx.y * blockDim.y + threadIdx.y;
+    if (index_rest < size_rest) {
+      process_row(index_rest);
+    }
+  } else {
+    const int64_t stride_y = int64_t(blockDim.y) * gridDim.y;
+    for (int64_t y = int64_t(blockIdx.y) * blockDim.y + threadIdx.y;
+         y < int64_t(size_rest);
+         y += stride_y) {
+      process_row(IdxT(y));
     }
   }
 }
@@ -198,50 +213,62 @@ void unary_op_gpu_inplace(
           int block_x = std::min(dim0, 32);
           int block_y = std::min(static_cast<int>(rest), 256 / block_x);
           int num_blocks_x = (dim0 + block_x - 1) / block_x;
-          int num_blocks_y = (rest + block_y - 1) / block_y;
-          
-          if (large) {
-            int64_t rest_arg = static_cast<int64_t>(rest);
-            if (work_per_thread == 4) {
-              encoder.add_kernel_node(
-                  &rocm::unary_g<Op, InType, OutType, int64_t, 4>,
-                  dim3(num_blocks_x, num_blocks_y), dim3(block_x, block_y), 0,
-                  gpu_ptr<const InType>(in), gpu_ptr<OutType>(out),
-                  rest_arg,
-                  shape_arg,
-                  strides_arg,
-                  ndim);
+          int64_t blocks_y = (int64_t(rest) + block_y - 1) / block_y;
+          // Grid y capped at the launch limit (LOCAL_FIXES.md 46); the kernel
+          // strides the rows past it.
+          bool loop_y = blocks_y > 65535;
+          int num_blocks_y = static_cast<int>(std::min(blocks_y, int64_t{65535}));
+
+          auto launch_g = [&](auto kLoopTag) {
+            constexpr bool kLoop = decltype(kLoopTag)::value;
+            if (large) {
+              int64_t rest_arg = static_cast<int64_t>(rest);
+              if (work_per_thread == 4) {
+                encoder.add_kernel_node(
+                    &rocm::unary_g<Op, InType, OutType, int64_t, 4, kLoop>,
+                    dim3(num_blocks_x, num_blocks_y), dim3(block_x, block_y), 0,
+                    gpu_ptr<const InType>(in), gpu_ptr<OutType>(out),
+                    rest_arg,
+                    shape_arg,
+                    strides_arg,
+                    ndim);
+              } else {
+                encoder.add_kernel_node(
+                    &rocm::unary_g<Op, InType, OutType, int64_t, 1, kLoop>,
+                    dim3(num_blocks_x, num_blocks_y), dim3(block_x, block_y), 0,
+                    gpu_ptr<const InType>(in), gpu_ptr<OutType>(out),
+                    rest_arg,
+                    shape_arg,
+                    strides_arg,
+                    ndim);
+              }
             } else {
-              encoder.add_kernel_node(
-                  &rocm::unary_g<Op, InType, OutType, int64_t, 1>,
-                  dim3(num_blocks_x, num_blocks_y), dim3(block_x, block_y), 0,
-                  gpu_ptr<const InType>(in), gpu_ptr<OutType>(out),
-                  rest_arg,
-                  shape_arg,
-                  strides_arg,
-                  ndim);
+              int32_t rest_arg = static_cast<int32_t>(rest);
+              if (work_per_thread == 4) {
+                encoder.add_kernel_node(
+                    &rocm::unary_g<Op, InType, OutType, int32_t, 4, kLoop>,
+                    dim3(num_blocks_x, num_blocks_y), dim3(block_x, block_y), 0,
+                    gpu_ptr<const InType>(in), gpu_ptr<OutType>(out),
+                    rest_arg,
+                    shape_arg,
+                    strides_arg,
+                    ndim);
+              } else {
+                encoder.add_kernel_node(
+                    &rocm::unary_g<Op, InType, OutType, int32_t, 1, kLoop>,
+                    dim3(num_blocks_x, num_blocks_y), dim3(block_x, block_y), 0,
+                    gpu_ptr<const InType>(in), gpu_ptr<OutType>(out),
+                    rest_arg,
+                    shape_arg,
+                    strides_arg,
+                    ndim);
+              }
             }
+          };
+          if (loop_y) {
+            launch_g(std::true_type{});
           } else {
-            int32_t rest_arg = static_cast<int32_t>(rest);
-            if (work_per_thread == 4) {
-              encoder.add_kernel_node(
-                  &rocm::unary_g<Op, InType, OutType, int32_t, 4>,
-                  dim3(num_blocks_x, num_blocks_y), dim3(block_x, block_y), 0,
-                  gpu_ptr<const InType>(in), gpu_ptr<OutType>(out),
-                  rest_arg,
-                  shape_arg,
-                  strides_arg,
-                  ndim);
-            } else {
-              encoder.add_kernel_node(
-                  &rocm::unary_g<Op, InType, OutType, int32_t, 1>,
-                  dim3(num_blocks_x, num_blocks_y), dim3(block_x, block_y), 0,
-                  gpu_ptr<const InType>(in), gpu_ptr<OutType>(out),
-                  rest_arg,
-                  shape_arg,
-                  strides_arg,
-                  ndim);
-            }
+            launch_g(std::false_type{});
           }
         }
       }

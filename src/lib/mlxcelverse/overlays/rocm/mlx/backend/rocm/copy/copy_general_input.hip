@@ -46,24 +46,33 @@ __global__ void copy_col_row(
     int64_t cols) {
   __shared__ T tile[TILE_SIZE][TILE_SIZE + 1];
 
-  int tile_row = blockIdx.x * TILE_SIZE;
-  int tile_col = blockIdx.y * TILE_SIZE;
-
   int tidx = threadIdx.x;
   int tidy = threadIdx.y;
 
-  int in_row = tile_row + tidx;
-  int in_col = tile_col + tidy;
-  if (in_row < rows && in_col < cols) {
-    tile[tidx][tidy] = in[in_col * rows + in_row];
-  }
+  const int64_t tile_row0 = int64_t(blockIdx.x) * TILE_SIZE;
+  // The tile grid y is capped by copy_grid_blocks (LOCAL_FIXES.md 46); the
+  // tiles stride a 64-bit counter, and the tile and row indices stay 64-bit
+  // because rows and cols are int64_t.
+  const int64_t stride_y = int64_t(gridDim.y) * TILE_SIZE;
+  for (int64_t tile_col0 = int64_t(blockIdx.y) * TILE_SIZE;
+       tile_col0 < cols;
+       tile_col0 += stride_y) {
+    const int64_t in_row = tile_row0 + tidx;
+    const int64_t in_col = tile_col0 + tidy;
+    if (in_row < rows && in_col < cols) {
+      tile[tidx][tidy] = in[in_col * rows + in_row];
+    }
 
-  __syncthreads();
+    __syncthreads();
 
-  int out_row = tile_row + tidy;
-  int out_col = tile_col + tidx;
-  if (out_row < rows && out_col < cols) {
-    out[out_row * cols + out_col] = tile[tidy][tidx];
+    const int64_t out_row = tile_row0 + tidy;
+    const int64_t out_col = tile_col0 + tidx;
+    if (out_row < rows && out_col < cols) {
+      out[out_row * cols + out_col] = tile[tidy][tidx];
+    }
+
+    // Keep the next iteration's tile write from racing this one's reads.
+    __syncthreads();
   }
 }
 
@@ -91,8 +100,11 @@ void copy_general_input(
     dispatch_all_types(in.dtype(), [&](auto type_tag) {
       using T = hip_type_t<MLX_GET_TYPE(type_tag)>;
       dim3 block(TILE_SIZE, TILE_SIZE);
-      dim3 grid((shape[0] + TILE_SIZE - 1) / TILE_SIZE,
-                (shape[1] + TILE_SIZE - 1) / TILE_SIZE);
+      // Tile grid y capped at the launch limit (LOCAL_FIXES.md 46).
+      unsigned int tiles_x = (unsigned int)((shape[0] + TILE_SIZE - 1) / TILE_SIZE);
+      unsigned int tiles_y = (unsigned int)std::min<uint64_t>(
+          (uint64_t(shape[1]) + TILE_SIZE - 1) / TILE_SIZE, 65535);
+      dim3 grid(tiles_x, tiles_y);
       const T* in_typed =
           reinterpret_cast<const T*>(gpu_ptr<void>(in)) + offset_in;
       T* out_typed = reinterpret_cast<T*>(gpu_ptr<void>(out)) + offset_out;

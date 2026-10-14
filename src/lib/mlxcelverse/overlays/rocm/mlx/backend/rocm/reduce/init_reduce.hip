@@ -1,5 +1,6 @@
 // Copyright © 2025 Apple Inc.
 
+#include "mlx/backend/rocm/copy/copy.hpp"
 #include "mlx/backend/rocm/device.h"
 #include "mlx/backend/rocm/allocator.h"
 #include "mlx/backend/rocm/reduce/reduce.hpp"
@@ -13,9 +14,13 @@ namespace mlx::core {
 namespace rocm {
 
 template <typename T, typename U, typename Op>
-__global__ void init_reduce_kernel(U* out, size_t size) {
-  size_t index = blockIdx.x * blockDim.x + threadIdx.x;
-  if (index < size) {
+__global__ void init_reduce_kernel(U* out, int64_t size) {
+  // Grid capped by copy_grid_blocks (LOCAL_FIXES.md 46); the threads stride
+  // the elements on a 64-bit counter.
+  const int64_t stride = int64_t(blockDim.x) * gridDim.x;
+  for (int64_t index = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+       index < size;
+       index += stride) {
     out[index] = ReduceInit<Op, T>::value();
   }
 }
@@ -62,18 +67,18 @@ void init_reduce(
   encoder.set_output_array(out);
   
   int block_size = 256;
-  int num_blocks = (out.size() + block_size - 1) / block_size;
-  
+  uint32_t num_blocks = rocm::copy_grid_blocks(out.size(), block_size);
+
   dispatch_all_types(in.dtype(), [&](auto type_tag) {
     dispatch_reduce_ops_init(reduce_type, [&](auto reduce_type_tag) {
       using OP = MLX_GET_TYPE(reduce_type_tag);
       using T = hip_type_t<MLX_GET_TYPE(type_tag)>;
       using U = typename rocm::ReduceResult<OP, T>::type;
-      
+
       encoder.add_kernel_node(
           &rocm::init_reduce_kernel<T, U, OP>,
           dim3(num_blocks), dim3(block_size), 0,
-          gpu_ptr<U>(out), out.size());
+          gpu_ptr<U>(out), static_cast<int64_t>(out.size()));
     });
   });
 }

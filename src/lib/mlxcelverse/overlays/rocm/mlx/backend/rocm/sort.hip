@@ -1,5 +1,6 @@
 // Copyright © 2025 Apple Inc.
 
+#include "mlx/backend/rocm/copy/copy.hpp"
 #include "mlx/backend/rocm/device.h"
 #include "mlx/backend/rocm/allocator.h"
 #include "mlx/backend/rocm/kernel_utils.hpp"
@@ -384,9 +385,13 @@ __global__ void block_sort_kernel(
 
 // Simple iota kernel: fills output[i] = i for i in [0, n).
 // Used to initialize index arrays on-device instead of copying from host.
-__global__ void iota_kernel(uint32_t* out, int n) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i < n) {
+__global__ void iota_kernel(uint32_t* out, int64_t n) {
+  // Grid capped by copy_grid_blocks (LOCAL_FIXES.md 46); the threads stride
+  // the elements on a 64-bit counter.
+  const int64_t stride = int64_t(blockDim.x) * gridDim.x;
+  for (int64_t i = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+       i < n;
+       i += stride) {
     out[i] = static_cast<uint32_t>(i);
   }
 }
@@ -510,9 +515,10 @@ void gpu_sort(const Stream& s, array in, array& out_, int axis, bool argsort) {
             // Initialize iota indices on device (avoids host vector + memcpy).
             {
               int block = 256;
-              int grid = (N + block - 1) / block;
+              // Grid capped by copy_grid_blocks (LOCAL_FIXES.md 46).
+              dim3 grid(rocm::copy_grid_blocks(N, block));
               hipLaunchKernelGGL(
-                  rocm::iota_kernel, dim3(grid), dim3(block), 0, hip_stream,
+                  rocm::iota_kernel, grid, dim3(block), 0, hip_stream,
                   indices_in, N);
             }
 
@@ -526,9 +532,10 @@ void gpu_sort(const Stream& s, array in, array& out_, int axis, bool argsort) {
               // Re-initialize indices for each row (iota is idempotent so
               // we can re-use the same buffer if we reset it).
               if (row > 0) {
+                // Grid capped by copy_grid_blocks (LOCAL_FIXES.md 46).
                 hipLaunchKernelGGL(
-                    rocm::iota_kernel, dim3((N + 255) / 256), dim3(256),
-                    0, hip_stream, indices_in, N);
+                    rocm::iota_kernel, dim3(rocm::copy_grid_blocks(N, 256)),
+                    dim3(256), 0, hip_stream, indices_in, N);
               }
 
               rocprim::radix_sort_pairs(

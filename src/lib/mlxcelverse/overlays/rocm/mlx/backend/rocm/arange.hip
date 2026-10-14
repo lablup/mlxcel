@@ -1,5 +1,6 @@
 // Copyright © 2025 Apple Inc.
 
+#include "mlx/backend/rocm/copy/copy.hpp"
 #include "mlx/backend/rocm/device.h"
 #include "mlx/backend/rocm/allocator.h"
 #include "mlx/backend/rocm/device/arange.hpp"
@@ -21,7 +22,7 @@ void Arange::eval_gpu(const std::vector<array>& inputs, array& out) {
 
   size_t size = out.size();
   int block_size = 256;
-  int num_blocks = (size + block_size - 1) / block_size;
+  uint32_t num_blocks = rocm::copy_grid_blocks(size, block_size);
   
   switch (out.dtype()) {
     case float32: {

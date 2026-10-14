@@ -1,5 +1,6 @@
 // Copyright © 2025 Apple Inc.
 
+#include "mlx/backend/rocm/copy/copy.hpp"
 #include "mlx/backend/rocm/device.h"
 #include "mlx/backend/rocm/allocator.h"
 #include "mlx/backend/rocm/kernel_utils.hpp"
@@ -89,19 +90,27 @@ __device__ T fp8_e4m3_to_float(uint8_t val) {
 }
 
 template <typename InT, typename OutT>
-__global__ void to_fp8_kernel(const InT* in, OutT* out, size_t size) {
-  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx >= size) return;
-  
-  out[idx] = float_to_fp8_e4m3(in[idx]);
+__global__ void to_fp8_kernel(const InT* in, OutT* out, int64_t size) {
+  // Grid capped by copy_grid_blocks (LOCAL_FIXES.md 46); the threads stride
+  // the elements on a 64-bit counter.
+  const int64_t stride = int64_t(blockDim.x) * gridDim.x;
+  for (int64_t idx = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+       idx < size;
+       idx += stride) {
+    out[idx] = float_to_fp8_e4m3(in[idx]);
+  }
 }
 
 template <typename InT, typename OutT>
-__global__ void from_fp8_kernel(const InT* in, OutT* out, size_t size) {
-  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx >= size) return;
-  
-  out[idx] = fp8_e4m3_to_float<OutT>(in[idx]);
+__global__ void from_fp8_kernel(const InT* in, OutT* out, int64_t size) {
+  // Grid capped by copy_grid_blocks (LOCAL_FIXES.md 46); the threads stride
+  // the elements on a 64-bit counter.
+  const int64_t stride = int64_t(blockDim.x) * gridDim.x;
+  for (int64_t idx = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+       idx < size;
+       idx += stride) {
+    out[idx] = fp8_e4m3_to_float<OutT>(in[idx]);
+  }
 }
 
 } // namespace rocm
@@ -120,7 +129,7 @@ void fast::ConvertFP8::eval_gpu(
 
   size_t size = in.size();
   int block_size = 256;
-  int num_blocks = (size + block_size - 1) / block_size;
+  uint32_t num_blocks = rocm::copy_grid_blocks(size, block_size);
 
   enc.set_input_array(in);
   enc.set_output_array(out);

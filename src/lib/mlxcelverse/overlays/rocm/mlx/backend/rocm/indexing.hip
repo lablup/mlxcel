@@ -1,5 +1,6 @@
 // Copyright © 2025 Apple Inc.
 
+#include "mlx/backend/rocm/copy/copy.hpp"
 #include "mlx/backend/rocm/device.h"
 #include "mlx/backend/rocm/allocator.h"
 #include "mlx/backend/rocm/kernel_utils.hpp"
@@ -84,44 +85,45 @@ __global__ void gather_general_kernel(
     hip_array<int32_t, 8 * MAX_NDIM> indices_shape,
     hip_array<int64_t, 8 * MAX_NDIM> indices_strides,
     int32_t idx_ndim) {
-  int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (out_idx >= size) {
-    return;
-  }
+  // Grid capped by copy_grid_blocks (LOCAL_FIXES.md 46); the threads stride
+  // the elements on a 64-bit counter.
+  for (int64_t out_idx = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+       out_idx < size;
+       out_idx += int64_t(blockDim.x) * gridDim.x) {
+    int64_t src_elem = out_idx % slice_size;
+    int64_t idx_elem = out_idx / slice_size;
 
-  int64_t src_elem = out_idx % slice_size;
-  int64_t idx_elem = out_idx / slice_size;
-
-  // Compute source location from slice element
-  int64_t src_loc = 0;
-  int64_t tmp = src_elem;
-  for (int i = src_ndim - 1; i >= 0; --i) {
-    src_loc += (tmp % slice_sizes[i]) * src_strides[i];
-    tmp /= slice_sizes[i];
-  }
-
-  // Add index contributions
-  for (int i = 0; i < NIDX; ++i) {
-    // Compute index location
-    int64_t idx_loc = 0;
-    int64_t tmp_idx = idx_elem;
-    for (int j = idx_ndim - 1; j >= 0; --j) {
-      idx_loc += (tmp_idx % indices_shape[i * idx_ndim + j]) * indices_strides[i * idx_ndim + j];
-      tmp_idx /= indices_shape[i * idx_ndim + j];
+    // Compute source location from slice element
+    int64_t src_loc = 0;
+    int64_t tmp = src_elem;
+    for (int i = src_ndim - 1; i >= 0; --i) {
+      src_loc += (tmp % slice_sizes[i]) * src_strides[i];
+      tmp /= slice_sizes[i];
     }
-    
-    int32_t axis = axes[i];
-    IdxT idx_val = indices[i][idx_loc];
-    
-    // Handle negative indices
-    if (idx_val < 0) {
-      idx_val += src_shape[axis];
-    }
-    
-    src_loc += idx_val * src_strides[axis];
-  }
 
-  out[out_idx] = src[src_loc];
+    // Add index contributions
+    for (int i = 0; i < NIDX; ++i) {
+      // Compute index location
+      int64_t idx_loc = 0;
+      int64_t tmp_idx = idx_elem;
+      for (int j = idx_ndim - 1; j >= 0; --j) {
+        idx_loc += (tmp_idx % indices_shape[i * idx_ndim + j]) * indices_strides[i * idx_ndim + j];
+        tmp_idx /= indices_shape[i * idx_ndim + j];
+      }
+
+      int32_t axis = axes[i];
+      IdxT idx_val = indices[i][idx_loc];
+
+      // Handle negative indices
+      if (idx_val < 0) {
+        idx_val += src_shape[axis];
+      }
+
+      src_loc += idx_val * src_strides[axis];
+    }
+
+    out[out_idx] = src[src_loc];
+  }
 }
 
 // Fast contiguous row gather: out[row, :] = src[idx[row], :] where each row is a
@@ -168,42 +170,45 @@ __global__ void gather_axis_kernel(
     int32_t axis_size,
     int64_t src_stride_axis,
     int64_t idx_stride_axis) {
-  int64_t index = blockIdx.x * blockDim.x + threadIdx.x;
+  // Grid capped by copy_grid_blocks (LOCAL_FIXES.md 46); the threads stride
+  // the elements on a 64-bit counter.
   int64_t total = idx_size_pre * idx_size_axis * idx_size_post;
-  if (index >= total) return;
-  
-  // Decompose index into x (post), y (axis), z (pre) coordinates
-  int64_t x, y, z;
-  index_to_dims(index, idx_size_axis, idx_size_pre, x, y, z);
-  
-  int64_t elem_idx = z * idx_size_post;
-  
-  // Compute index location
-  int64_t idx_loc = y * idx_stride_axis;
-  if constexpr (IdxC) {
-    idx_loc += elem_idx * idx_size_axis + x;
-  } else {
-    idx_loc += elem_to_loc_nd<NDIM>(elem_idx + x, shape.data_, idx_strides.data_);
+  for (int64_t index = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+       index < total;
+       index += int64_t(blockDim.x) * gridDim.x) {
+    // Decompose index into x (post), y (axis), z (pre) coordinates
+    int64_t x, y, z;
+    index_to_dims(index, idx_size_axis, idx_size_pre, x, y, z);
+
+    int64_t elem_idx = z * idx_size_post;
+
+    // Compute index location
+    int64_t idx_loc = y * idx_stride_axis;
+    if constexpr (IdxC) {
+      idx_loc += elem_idx * idx_size_axis + x;
+    } else {
+      idx_loc += elem_to_loc_nd<NDIM>(elem_idx + x, shape.data_, idx_strides.data_);
+    }
+
+    // Get index value and handle negative indices
+    IdxT idx_val = idx[idx_loc];
+    if (idx_val < 0) {
+      idx_val += axis_size;
+    }
+
+    // Compute source location
+    int64_t src_loc = idx_val * src_stride_axis;
+    if constexpr (SrcC) {
+      src_loc += elem_idx * axis_size + x;
+    } else {
+      src_loc += elem_to_loc_nd<NDIM>(elem_idx + x, shape.data_, src_strides.data_);
+    }
+
+    // Output is always contiguous
+    int64_t out_idx = y * idx_size_post + elem_idx * idx_size_axis + x;
+
+    out[out_idx] = src[src_loc];
   }
-  
-  // Get index value and handle negative indices
-  IdxT idx_val = idx[idx_loc];
-  if (idx_val < 0) {
-    idx_val += axis_size;
-  }
-  
-  // Compute source location
-  int64_t src_loc = idx_val * src_stride_axis;
-  if constexpr (SrcC) {
-    src_loc += elem_idx * axis_size + x;
-  } else {
-    src_loc += elem_to_loc_nd<NDIM>(elem_idx + x, shape.data_, src_strides.data_);
-  }
-  
-  // Output is always contiguous
-  int64_t out_idx = y * idx_size_post + elem_idx * idx_size_axis + x;
-  
-  out[out_idx] = src[src_loc];
 }
 
 // Simple scatter kernel for axis-based scatter
@@ -224,49 +229,52 @@ __global__ void scatter_axis_kernel(
     int64_t upd_stride_axis,
     int64_t idx_stride_axis,
     int64_t out_stride_axis) {
-  int64_t index = blockIdx.x * blockDim.x + threadIdx.x;
+  // Grid capped by copy_grid_blocks (LOCAL_FIXES.md 46); the threads stride
+  // the elements on a 64-bit counter.
   int64_t total = idx_size_pre * idx_size_axis * idx_size_post;
-  if (index >= total) return;
-  
-  // Decompose index into x (post), y (axis), z (pre) coordinates
-  int64_t x, y, z;
-  index_to_dims(index, idx_size_axis, idx_size_pre, x, y, z);
-  
-  int64_t elem_idx = z * idx_size_post;
-  
-  // Compute index location
-  int64_t idx_loc = y * idx_stride_axis;
-  if constexpr (IdxC) {
-    idx_loc += elem_idx * idx_size_axis + x;
-  } else {
-    idx_loc += elem_to_loc_nd<NDIM>(elem_idx + x, shape.data_, idx_strides.data_);
-  }
-  
-  // Get index value and handle negative indices
-  IdxT idx_val = idx[idx_loc];
-  if (idx_val < 0) {
-    idx_val += axis_size;
-  }
-  
-  // Compute update location
-  int64_t upd_loc = y * upd_stride_axis;
-  if constexpr (UpdC) {
-    upd_loc += elem_idx * idx_size_axis + x;
-  } else {
-    upd_loc += elem_to_loc_nd<NDIM>(elem_idx + x, shape.data_, upd_strides.data_);
-  }
-  
-  // Compute output location
-  int64_t out_loc = idx_val * out_stride_axis;
-  out_loc += elem_to_loc_nd<NDIM>(elem_idx + x, shape.data_, out_strides.data_);
-  
-  if constexpr (IS_SUM) {
-    // atomic_add has CAS-based specializations for hip_bfloat16 / __half, so
-    // the Sum reduction (embedding-lookup / MoE-gather gradient) works for the
-    // half-precision dtypes too, not just float32 as a raw atomicAdd would.
-    atomic_add(&out[out_loc], upd[upd_loc]);
-  } else {
-    out[out_loc] = upd[upd_loc];
+  for (int64_t index = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+       index < total;
+       index += int64_t(blockDim.x) * gridDim.x) {
+    // Decompose index into x (post), y (axis), z (pre) coordinates
+    int64_t x, y, z;
+    index_to_dims(index, idx_size_axis, idx_size_pre, x, y, z);
+
+    int64_t elem_idx = z * idx_size_post;
+
+    // Compute index location
+    int64_t idx_loc = y * idx_stride_axis;
+    if constexpr (IdxC) {
+      idx_loc += elem_idx * idx_size_axis + x;
+    } else {
+      idx_loc += elem_to_loc_nd<NDIM>(elem_idx + x, shape.data_, idx_strides.data_);
+    }
+
+    // Get index value and handle negative indices
+    IdxT idx_val = idx[idx_loc];
+    if (idx_val < 0) {
+      idx_val += axis_size;
+    }
+
+    // Compute update location
+    int64_t upd_loc = y * upd_stride_axis;
+    if constexpr (UpdC) {
+      upd_loc += elem_idx * idx_size_axis + x;
+    } else {
+      upd_loc += elem_to_loc_nd<NDIM>(elem_idx + x, shape.data_, upd_strides.data_);
+    }
+
+    // Compute output location
+    int64_t out_loc = idx_val * out_stride_axis;
+    out_loc += elem_to_loc_nd<NDIM>(elem_idx + x, shape.data_, out_strides.data_);
+
+    if constexpr (IS_SUM) {
+      // atomic_add has CAS-based specializations for hip_bfloat16 / __half, so
+      // the Sum reduction (embedding-lookup / MoE-gather gradient) works for the
+      // half-precision dtypes too, not just float32 as a raw atomicAdd would.
+      atomic_add(&out[out_loc], upd[upd_loc]);
+    } else {
+      out[out_loc] = upd[upd_loc];
+    }
   }
 }
 
@@ -294,189 +302,190 @@ __global__ void scatter_general_kernel(
     hip_array<int32_t, 8 * MAX_NDIM> indices_shape,
     hip_array<int64_t, 8 * MAX_NDIM> indices_strides,
     int32_t idx_ndim) {
-  int64_t gid = blockIdx.x * blockDim.x + threadIdx.x;
-  if (gid >= upd_size) {
-    return;
-  }
-
-  int64_t out_elem = gid % upd_post_idx_size;
-  int64_t idx_elem = gid / upd_post_idx_size;
-
-  // Compute output location from out_elem using upd_shape after idx_ndim dimensions
-  // This matches the CUDA implementation: elem_to_loc(out_elem, upd_shape + IDX_NDIM, out_strides, out_ndim)
-  int64_t out_loc = 0;
-  int64_t tmp = out_elem;
-  for (int i = out_ndim - 1; i >= 0; --i) {
-    // Use upd_shape[idx_ndim + i] for the shape dimensions after the index dimensions
-    int32_t dim_size = (idx_ndim + i < upd_ndim) ? upd_shape[idx_ndim + i] : 1;
-    out_loc += (tmp % dim_size) * out_strides[i];
-    tmp /= dim_size;
-  }
-
-  // Add index contributions
-  for (int i = 0; i < NIDX; ++i) {
-    // Compute index location
-    int64_t idx_loc = 0;
-    int64_t tmp_idx = idx_elem;
-    for (int j = idx_ndim - 1; j >= 0; --j) {
-      idx_loc += (tmp_idx % indices_shape[i * idx_ndim + j]) * indices_strides[i * idx_ndim + j];
-      tmp_idx /= indices_shape[i * idx_ndim + j];
-    }
-    
-    int32_t axis = axes[i];
-    IdxT idx_val = indices[i][idx_loc];
-    
-    // Handle negative indices
-    if (idx_val < 0) {
-      idx_val += out_shape[axis];
-    }
-    
-    out_loc += idx_val * out_strides[axis];
-  }
-
-  // Compute update location
-  int64_t upd_loc = 0;
-  tmp = out_elem + idx_elem * upd_post_idx_size;
-  for (int i = upd_ndim - 1; i >= 0; --i) {
-    upd_loc += (tmp % upd_shape[i]) * upd_strides[i];
-    tmp /= upd_shape[i];
-  }
-
-  T val = upd[upd_loc];
+  // Grid capped by copy_grid_blocks (LOCAL_FIXES.md 46); the threads stride
+  // the elements on a 64-bit counter.
+  for (int64_t gid = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+       gid < upd_size;
+       gid += int64_t(blockDim.x) * gridDim.x) {
+    int64_t out_elem = gid % upd_post_idx_size;
+    int64_t idx_elem = gid / upd_post_idx_size;
   
-  // Apply reduce operation
-  if constexpr (ReduceType == 0) { // Assign
-    out[out_loc] = val;
-  } else if constexpr (ReduceType == 1) { // Sum
-    // Use appropriate atomic based on type
-    if constexpr (std::is_same_v<T, float>) {
-      atomicAdd(&out[out_loc], val);
-    } else if constexpr (std::is_same_v<T, int32_t>) {
-      atomicAdd(&out[out_loc], val);
-    } else if constexpr (std::is_same_v<T, uint32_t>) {
-      atomicAdd(&out[out_loc], val);
-    } else if constexpr (std::is_same_v<T, int64_t>) {
-      atomicAdd(reinterpret_cast<unsigned long long*>(&out[out_loc]), 
-                static_cast<unsigned long long>(val));
-    } else if constexpr (std::is_same_v<T, uint64_t>) {
-      atomicAdd(&out[out_loc], val);
-    } else {
-      // Fallback for types without atomic support - use CAS loop
-      T* addr = &out[out_loc];
-      T old_val = *addr;
-      T new_val;
-      do {
-        new_val = old_val + val;
-      } while (!__hip_atomic_compare_exchange_strong(addr, &old_val, new_val, 
-               __ATOMIC_RELAXED, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT));
+    // Compute output location from out_elem using upd_shape after idx_ndim dimensions
+    // This matches the CUDA implementation: elem_to_loc(out_elem, upd_shape + IDX_NDIM, out_strides, out_ndim)
+    int64_t out_loc = 0;
+    int64_t tmp = out_elem;
+    for (int i = out_ndim - 1; i >= 0; --i) {
+      // Use upd_shape[idx_ndim + i] for the shape dimensions after the index dimensions
+      int32_t dim_size = (idx_ndim + i < upd_ndim) ? upd_shape[idx_ndim + i] : 1;
+      out_loc += (tmp % dim_size) * out_strides[i];
+      tmp /= dim_size;
     }
-  } else if constexpr (ReduceType == 2) { // Prod
-    // Use CAS loop for atomic multiply
-    if constexpr (std::is_same_v<T, float>) {
-      float* addr = &out[out_loc];
-      float old_val = *addr;
-      float new_val;
-      do {
-        new_val = old_val * val;
-      } while (!__hip_atomic_compare_exchange_strong(addr, &old_val, new_val,
-               __ATOMIC_RELAXED, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT));
-    } else if constexpr (std::is_same_v<T, int32_t>) {
-      int32_t* addr = &out[out_loc];
-      int32_t old_val = *addr;
-      int32_t new_val;
-      do {
-        new_val = old_val * val;
-      } while (!__hip_atomic_compare_exchange_strong(addr, &old_val, new_val,
-               __ATOMIC_RELAXED, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT));
-    } else {
-      // Fallback for other types
-      T* addr = &out[out_loc];
-      T old_val = *addr;
-      T new_val;
-      do {
-        new_val = old_val * val;
-      } while (!__hip_atomic_compare_exchange_strong(addr, &old_val, new_val,
-               __ATOMIC_RELAXED, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT));
+  
+    // Add index contributions
+    for (int i = 0; i < NIDX; ++i) {
+      // Compute index location
+      int64_t idx_loc = 0;
+      int64_t tmp_idx = idx_elem;
+      for (int j = idx_ndim - 1; j >= 0; --j) {
+        idx_loc += (tmp_idx % indices_shape[i * idx_ndim + j]) * indices_strides[i * idx_ndim + j];
+        tmp_idx /= indices_shape[i * idx_ndim + j];
+      }
+      
+      int32_t axis = axes[i];
+      IdxT idx_val = indices[i][idx_loc];
+      
+      // Handle negative indices
+      if (idx_val < 0) {
+        idx_val += out_shape[axis];
+      }
+      
+      out_loc += idx_val * out_strides[axis];
     }
-  } else if constexpr (ReduceType == 3) { // Max
-    // Use CAS loop for atomic max
-    if constexpr (std::is_same_v<T, int32_t>) {
-      int32_t* addr = &out[out_loc];
-      int32_t old_val = *addr;
-      while (val > old_val) {
-        if (__hip_atomic_compare_exchange_strong(addr, &old_val, val,
-            __ATOMIC_RELAXED, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT)) {
-          break;
-        }
-      }
-    } else if constexpr (std::is_same_v<T, uint32_t>) {
-      uint32_t* addr = &out[out_loc];
-      uint32_t old_val = *addr;
-      while (val > old_val) {
-        if (__hip_atomic_compare_exchange_strong(addr, &old_val, val,
-            __ATOMIC_RELAXED, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT)) {
-          break;
-        }
-      }
-    } else if constexpr (std::is_same_v<T, float>) {
-      // Use CAS loop for float max
-      float* addr = &out[out_loc];
-      float old_val = *addr;
-      while (val > old_val) {
-        if (__hip_atomic_compare_exchange_strong(addr, &old_val, val,
-            __ATOMIC_RELAXED, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT)) {
-          break;
-        }
-      }
-    } else {
-      // Fallback for other types
-      T* addr = &out[out_loc];
-      T old_val = *addr;
-      while (val > old_val) {
-        if (__hip_atomic_compare_exchange_strong(addr, &old_val, val,
-            __ATOMIC_RELAXED, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT)) {
-          break;
-        }
-      }
+  
+    // Compute update location
+    int64_t upd_loc = 0;
+    tmp = out_elem + idx_elem * upd_post_idx_size;
+    for (int i = upd_ndim - 1; i >= 0; --i) {
+      upd_loc += (tmp % upd_shape[i]) * upd_strides[i];
+      tmp /= upd_shape[i];
     }
-  } else if constexpr (ReduceType == 4) { // Min
-    // Use CAS loop for atomic min
-    if constexpr (std::is_same_v<T, int32_t>) {
-      int32_t* addr = &out[out_loc];
-      int32_t old_val = *addr;
-      while (val < old_val) {
-        if (__hip_atomic_compare_exchange_strong(addr, &old_val, val,
-            __ATOMIC_RELAXED, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT)) {
-          break;
+  
+    T val = upd[upd_loc];
+    
+    // Apply reduce operation
+    if constexpr (ReduceType == 0) { // Assign
+      out[out_loc] = val;
+    } else if constexpr (ReduceType == 1) { // Sum
+      // Use appropriate atomic based on type
+      if constexpr (std::is_same_v<T, float>) {
+        atomicAdd(&out[out_loc], val);
+      } else if constexpr (std::is_same_v<T, int32_t>) {
+        atomicAdd(&out[out_loc], val);
+      } else if constexpr (std::is_same_v<T, uint32_t>) {
+        atomicAdd(&out[out_loc], val);
+      } else if constexpr (std::is_same_v<T, int64_t>) {
+        atomicAdd(reinterpret_cast<unsigned long long*>(&out[out_loc]), 
+                  static_cast<unsigned long long>(val));
+      } else if constexpr (std::is_same_v<T, uint64_t>) {
+        atomicAdd(&out[out_loc], val);
+      } else {
+        // Fallback for types without atomic support - use CAS loop
+        T* addr = &out[out_loc];
+        T old_val = *addr;
+        T new_val;
+        do {
+          new_val = old_val + val;
+        } while (!__hip_atomic_compare_exchange_strong(addr, &old_val, new_val, 
+                 __ATOMIC_RELAXED, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT));
+      }
+    } else if constexpr (ReduceType == 2) { // Prod
+      // Use CAS loop for atomic multiply
+      if constexpr (std::is_same_v<T, float>) {
+        float* addr = &out[out_loc];
+        float old_val = *addr;
+        float new_val;
+        do {
+          new_val = old_val * val;
+        } while (!__hip_atomic_compare_exchange_strong(addr, &old_val, new_val,
+                 __ATOMIC_RELAXED, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT));
+      } else if constexpr (std::is_same_v<T, int32_t>) {
+        int32_t* addr = &out[out_loc];
+        int32_t old_val = *addr;
+        int32_t new_val;
+        do {
+          new_val = old_val * val;
+        } while (!__hip_atomic_compare_exchange_strong(addr, &old_val, new_val,
+                 __ATOMIC_RELAXED, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT));
+      } else {
+        // Fallback for other types
+        T* addr = &out[out_loc];
+        T old_val = *addr;
+        T new_val;
+        do {
+          new_val = old_val * val;
+        } while (!__hip_atomic_compare_exchange_strong(addr, &old_val, new_val,
+                 __ATOMIC_RELAXED, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT));
+      }
+    } else if constexpr (ReduceType == 3) { // Max
+      // Use CAS loop for atomic max
+      if constexpr (std::is_same_v<T, int32_t>) {
+        int32_t* addr = &out[out_loc];
+        int32_t old_val = *addr;
+        while (val > old_val) {
+          if (__hip_atomic_compare_exchange_strong(addr, &old_val, val,
+              __ATOMIC_RELAXED, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT)) {
+            break;
+          }
+        }
+      } else if constexpr (std::is_same_v<T, uint32_t>) {
+        uint32_t* addr = &out[out_loc];
+        uint32_t old_val = *addr;
+        while (val > old_val) {
+          if (__hip_atomic_compare_exchange_strong(addr, &old_val, val,
+              __ATOMIC_RELAXED, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT)) {
+            break;
+          }
+        }
+      } else if constexpr (std::is_same_v<T, float>) {
+        // Use CAS loop for float max
+        float* addr = &out[out_loc];
+        float old_val = *addr;
+        while (val > old_val) {
+          if (__hip_atomic_compare_exchange_strong(addr, &old_val, val,
+              __ATOMIC_RELAXED, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT)) {
+            break;
+          }
+        }
+      } else {
+        // Fallback for other types
+        T* addr = &out[out_loc];
+        T old_val = *addr;
+        while (val > old_val) {
+          if (__hip_atomic_compare_exchange_strong(addr, &old_val, val,
+              __ATOMIC_RELAXED, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT)) {
+            break;
+          }
         }
       }
-    } else if constexpr (std::is_same_v<T, uint32_t>) {
-      uint32_t* addr = &out[out_loc];
-      uint32_t old_val = *addr;
-      while (val < old_val) {
-        if (__hip_atomic_compare_exchange_strong(addr, &old_val, val,
-            __ATOMIC_RELAXED, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT)) {
-          break;
+    } else if constexpr (ReduceType == 4) { // Min
+      // Use CAS loop for atomic min
+      if constexpr (std::is_same_v<T, int32_t>) {
+        int32_t* addr = &out[out_loc];
+        int32_t old_val = *addr;
+        while (val < old_val) {
+          if (__hip_atomic_compare_exchange_strong(addr, &old_val, val,
+              __ATOMIC_RELAXED, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT)) {
+            break;
+          }
         }
-      }
-    } else if constexpr (std::is_same_v<T, float>) {
-      // Use CAS loop for float min
-      float* addr = &out[out_loc];
-      float old_val = *addr;
-      while (val < old_val) {
-        if (__hip_atomic_compare_exchange_strong(addr, &old_val, val,
-            __ATOMIC_RELAXED, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT)) {
-          break;
+      } else if constexpr (std::is_same_v<T, uint32_t>) {
+        uint32_t* addr = &out[out_loc];
+        uint32_t old_val = *addr;
+        while (val < old_val) {
+          if (__hip_atomic_compare_exchange_strong(addr, &old_val, val,
+              __ATOMIC_RELAXED, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT)) {
+            break;
+          }
         }
-      }
-    } else {
-      // Fallback for other types
-      T* addr = &out[out_loc];
-      T old_val = *addr;
-      while (val < old_val) {
-        if (__hip_atomic_compare_exchange_strong(addr, &old_val, val,
-            __ATOMIC_RELAXED, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT)) {
-          break;
+      } else if constexpr (std::is_same_v<T, float>) {
+        // Use CAS loop for float min
+        float* addr = &out[out_loc];
+        float old_val = *addr;
+        while (val < old_val) {
+          if (__hip_atomic_compare_exchange_strong(addr, &old_val, val,
+              __ATOMIC_RELAXED, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT)) {
+            break;
+          }
+        }
+      } else {
+        // Fallback for other types
+        T* addr = &out[out_loc];
+        T old_val = *addr;
+        while (val < old_val) {
+          if (__hip_atomic_compare_exchange_strong(addr, &old_val, val,
+              __ATOMIC_RELAXED, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT)) {
+            break;
+          }
         }
       }
     }
@@ -705,7 +714,9 @@ void Gather::eval_gpu(const std::vector<array>& inputs, array& out) {
 
   int64_t total = out.size();
   int block_size = 256;
-  int num_blocks = (total + block_size - 1) / block_size;
+  // Grid capped by copy_grid_blocks (LOCAL_FIXES.md 46); the kernel strides
+  // the elements past it.
+  uint32_t num_blocks = rocm::copy_grid_blocks(total, block_size);
 
   // Fast path: axis-0 full-row gather of a row-contiguous source with a single
   // contiguous (flattened) index -> coalesced per-row copy (gather_rows_kernel).
@@ -921,7 +932,9 @@ void Scatter::eval_gpu(const std::vector<array>& inputs, array& out) {
 
   int64_t total = upd.size();
   int block_size = 256;
-  int num_blocks = (total + block_size - 1) / block_size;
+  // Grid capped by copy_grid_blocks (LOCAL_FIXES.md 46); the kernel strides
+  // the elements past it.
+  uint32_t num_blocks = rocm::copy_grid_blocks(total, block_size);
 
   // Pass all metadata BY VALUE (see scatter_general_kernel) — no device buffers,
   // no H2D uploads, so nothing reads stale host memory on HIP graph replay.
@@ -1093,8 +1106,10 @@ void GatherAxis::eval_gpu(const std::vector<array>& inputs, array& out) {
   
   int64_t total = idx_size_pre * idx_size_axis * idx_size_post;
   int block_size = 256;
-  int num_blocks = (total + block_size - 1) / block_size;
-  
+  // Grid capped by copy_grid_blocks (LOCAL_FIXES.md 46); the kernel strides
+  // the elements past it.
+  uint32_t num_blocks = rocm::copy_grid_blocks(total, block_size);
+
   // Dispatch based on ndim, contiguity, and index type
   #define LAUNCH_GATHER_KERNEL(T, IdxT, NDIM, SrcC, IdxC) \
     encoder.add_kernel_node( \
@@ -1242,8 +1257,10 @@ void ScatterAxis::eval_gpu(const std::vector<array>& inputs, array& out) {
   
   int64_t total = idx_size_pre * idx_size_axis * idx_size_post;
   int block_size = 256;
-  int num_blocks = (total + block_size - 1) / block_size;
-  
+  // Grid capped by copy_grid_blocks (LOCAL_FIXES.md 46); the kernel strides
+  // the elements past it.
+  uint32_t num_blocks = rocm::copy_grid_blocks(total, block_size);
+
   bool is_sum = (reduce_type_ == ScatterAxis::Sum);
   
   #define LAUNCH_SCATTER_KERNEL(T, IdxT, IS_SUM, NDIM, UpdC, IdxC) \

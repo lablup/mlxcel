@@ -2,6 +2,7 @@
 
 #include "mlx/backend/common/binary.h"
 #include "mlx/backend/common/utils.h"
+#include "mlx/backend/rocm/copy/copy.hpp"
 #include "mlx/backend/rocm/device.h"
 #include "mlx/backend/rocm/device/binary_ops.hpp"
 #include "mlx/backend/rocm/kernel_utils.hpp"
@@ -91,7 +92,7 @@ __global__ void binary_vv(const In* a, const In* b, Out* out, IdxT size) {
   }
 }
 
-template <typename Op, typename In, typename Out, typename IdxT, int N_READS>
+template <typename Op, typename In, typename Out, typename IdxT, int N_READS, bool kLoop>
 __global__ void binary_g(
     const In* a,
     const In* b,
@@ -101,22 +102,23 @@ __global__ void binary_g(
     hip_array<int64_t, MAX_NDIM> a_strides,
     hip_array<int64_t, MAX_NDIM> b_strides,
     int ndim) {
-  IdxT index = blockIdx.x * blockDim.x + threadIdx.x;
-  if (index >= size) {
-    return;
-  }
+  // Grid capped by copy_grid_blocks (LOCAL_FIXES.md 46); past the cap the
+  // threads stride the elements on a 64-bit counter.
+  for_each_copy_index<kLoop>(int64_t(size), [&](int64_t i) {
+    IdxT index = IdxT(i);
 
-  // Compute offsets using elem_to_loc style
-  IdxT a_idx = 0, b_idx = 0;
-  IdxT tmp = index;
-  for (int i = ndim - 1; i >= 0 && tmp > 0; --i) {
-    IdxT coord = tmp % shape[i];
-    a_idx += coord * a_strides[i];
-    b_idx += coord * b_strides[i];
-    tmp /= shape[i];
-  }
-  
-  out[index] = Op{}(a[a_idx], b[b_idx]);
+    // Compute offsets using elem_to_loc style
+    IdxT a_idx = 0, b_idx = 0;
+    IdxT tmp = index;
+    for (int d = ndim - 1; d >= 0 && tmp > 0; --d) {
+      IdxT coord = tmp % shape[d];
+      a_idx += coord * a_strides[d];
+      b_idx += coord * b_strides[d];
+      tmp /= shape[d];
+    }
+
+    out[index] = Op{}(a[a_idx], b[b_idx]);
+  });
 }
 
 template <typename Op, typename In, typename Out>
@@ -182,11 +184,14 @@ void launch_binary_general(
   }
 
   int block_size = 256;
-  int num_blocks = (data_size + block_size - 1) / block_size;
+  uint32_t num_blocks = rocm::copy_grid_blocks(data_size, block_size);
+  bool loop = rocm::copy_grid_loops(data_size, block_size);
 
   int64_t size_arg = static_cast<int64_t>(data_size);
+  auto kernel = loop ? &binary_g<Op, InType, OutType, int64_t, 1, true>
+                     : &binary_g<Op, InType, OutType, int64_t, 1, false>;
   encoder.add_kernel_node(
-      &binary_g<Op, InType, OutType, int64_t, 1>,
+      kernel,
       dim3(num_blocks), dim3(block_size), 0,
       gpu_ptr<const InType>(a), gpu_ptr<const InType>(b), gpu_ptr<OutType>(out),
       size_arg,

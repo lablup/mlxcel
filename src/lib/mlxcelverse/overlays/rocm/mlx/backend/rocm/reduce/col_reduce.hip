@@ -2,6 +2,7 @@
 
 #include <numeric>
 
+#include "mlx/backend/rocm/copy/copy.hpp"
 #include "mlx/backend/rocm/device.h"
 #include "mlx/backend/rocm/reduce/reduce.hpp"
 #include "mlx/backend/rocm/reduce/reduce_utils.hpp"
@@ -219,35 +220,41 @@ __global__ void col_reduce_small(
     size_t total) {
   Op op;
 
-  const auto idx = (blockIdx.x * blockDim.x + threadIdx.x) * N_READS;
-  const auto before_axis = idx / args.reduction_stride;
-  const auto after_axis = idx % args.reduction_stride;
-  const auto offset =
-      before_axis * args.reduction_stride * args.reduction_size + after_axis;
+  // Grid capped by copy_grid_blocks (LOCAL_FIXES.md 46); the threads stride
+  // their N_READS-element chunks on a 64-bit counter. reduction_stride is a
+  // multiple of N_READS, so a chunk never crosses an innermost row and the
+  // before/after-axis decomposition stays the original one.
+  const int64_t stride = int64_t(blockDim.x) * gridDim.x * N_READS;
+  for (int64_t idx = int64_t(blockIdx.x) * blockDim.x * N_READS + threadIdx.x * N_READS;
+       idx < int64_t(total);
+       idx += stride) {
+    const int64_t before_axis = idx / args.reduction_stride;
+    const auto after_axis = idx % args.reduction_stride;
+    const int64_t offset =
+        before_axis * args.reduction_stride * args.reduction_size + after_axis;
 
-  if (idx >= total) {
-    return;
-  }
+    // Per-iteration locals: the chunk indexes stay relative to the launch
+    // bases, so the advances below cannot compound across the loop.
+    const T* in_p = in + offset;
+    U* out_p = out + idx;
 
-  in += offset;
-  out += idx;
-
-  AlignedVector<U, N_READS> accumulator;
-  for (int i = 0; i < N_READS; i++) {
-    accumulator[i] = ReduceInit<Op, T>::value();
-  }
-
-  for (size_t i = 0; i < args.reduction_size; i++) {
-    auto values = load_vector<N_READS>(in, 0);
-
-    for (int j = 0; j < N_READS; j++) {
-      accumulator[j] = op(accumulator[j], cast_to_col<U>(values[j]));
+    AlignedVector<U, N_READS> accumulator;
+    for (int i = 0; i < N_READS; i++) {
+      accumulator[i] = ReduceInit<Op, T>::value();
     }
 
-    in += args.reduction_stride;
-  }
+    for (size_t i = 0; i < args.reduction_size; i++) {
+      auto values = load_vector<N_READS>(in_p, 0);
 
-  store_vector(out, 0, accumulator);
+      for (int j = 0; j < N_READS; j++) {
+        accumulator[j] = op(accumulator[j], cast_to_col<U>(values[j]));
+      }
+
+      in_p += args.reduction_stride;
+    }
+
+    store_vector(out_p, 0, accumulator);
+  }
 }
 
 // Simple column reduction kernel for contiguous strided reduce
@@ -450,7 +457,8 @@ void col_reduce_small(
 
       constexpr int N_READS = 4;
       int block_size = 256;
-      int num_blocks = (out.size() + block_size * N_READS - 1) / (block_size * N_READS);
+      uint32_t num_blocks = rocm::copy_grid_blocks(
+          (out.size() + N_READS - 1) / N_READS, block_size);
       
       encoder.add_kernel_node(
           &rocm::col_reduce_small<T, U, OP, N_READS>,

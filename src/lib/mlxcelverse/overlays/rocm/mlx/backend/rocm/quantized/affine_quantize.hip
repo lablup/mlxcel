@@ -1,5 +1,6 @@
 // Copyright © 2025 Apple Inc.
 
+#include "mlx/backend/rocm/copy/copy.hpp"
 #include "mlx/backend/rocm/device.h"
 #include "mlx/backend/rocm/kernel_utils.hpp"
 #include "mlx/backend/rocm/quantized/quantized.h"
@@ -18,12 +19,14 @@ __global__ void affine_quantize_kernel(
     uint8_t* __restrict__ output,
     ScaleT* __restrict__ scales,
     ScaleT* __restrict__ biases,
-    int num_groups,
+    int64_t num_groups,
     int group_size) {
-  int group_idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (group_idx >= num_groups)
-    return;
-
+  // Grid capped by copy_grid_blocks (LOCAL_FIXES.md 46); the threads stride
+  // the groups on a 64-bit counter, which also widens the group indexing.
+  const int64_t stride = int64_t(blockDim.x) * gridDim.x;
+  for (int64_t group_idx = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+       group_idx < num_groups;
+       group_idx += stride) {
   const T* group_input = input + group_idx * group_size;
 
   // Find min and max in group
@@ -50,7 +53,7 @@ __global__ void affine_quantize_kernel(
   biases[group_idx] = static_cast<ScaleT>(bias);
 
   // Quantize values
-  int output_idx = group_idx * (group_size * BITS / 8);
+  int64_t output_idx = group_idx * (group_size * BITS / 8);
   int group_bytes = group_size * BITS / 8;
   constexpr uint8_t mask = static_cast<uint8_t>((1u << BITS) - 1u);
 
@@ -64,7 +67,7 @@ __global__ void affine_quantize_kernel(
     quant_val = max(0, min(static_cast<int>(max_quant), quant_val));
 
     int bit_index = i * BITS;
-    int byte_idx = output_idx + (bit_index >> 3);
+    int64_t byte_idx = output_idx + (bit_index >> 3);
     int bit_offset = bit_index & 0x7;
     uint32_t shifted =
         static_cast<uint32_t>(static_cast<uint8_t>(quant_val) & mask)
@@ -75,6 +78,7 @@ __global__ void affine_quantize_kernel(
       output[byte_idx + 1] |= static_cast<uint8_t>((shifted >> 8) & 0xFF);
     }
   }
+  }
 }
 
 template <typename T, typename ScaleT, int BITS>
@@ -83,22 +87,24 @@ __global__ void affine_dequantize_kernel(
     const ScaleT* __restrict__ scales,
     const ScaleT* __restrict__ biases,
     T* __restrict__ output,
-    int num_groups,
+    int64_t num_groups,
     int group_size) {
-  int group_idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (group_idx >= num_groups)
-    return;
-
+  // Grid capped by copy_grid_blocks (LOCAL_FIXES.md 46); the threads stride
+  // the groups on a 64-bit counter, which also widens the group indexing.
+  const int64_t stride = int64_t(blockDim.x) * gridDim.x;
+  for (int64_t group_idx = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+       group_idx < num_groups;
+       group_idx += stride) {
   float scale = static_cast<float>(scales[group_idx]);
   float bias = biases ? static_cast<float>(biases[group_idx]) : 0.0f;
 
-  int input_base = group_idx * (group_size * BITS / 8);
+  int64_t input_base = group_idx * (group_size * BITS / 8);
   T* group_output = output + group_idx * group_size;
   constexpr uint8_t mask = static_cast<uint8_t>((1u << BITS) - 1u);
 
   for (int i = 0; i < group_size; ++i) {
     int bit_index = i * BITS;
-    int byte_idx = input_base + (bit_index >> 3);
+    int64_t byte_idx = input_base + (bit_index >> 3);
     int bit_offset = bit_index & 0x7;
 
     uint32_t packed = static_cast<uint32_t>(input[byte_idx]);
@@ -109,6 +115,7 @@ __global__ void affine_dequantize_kernel(
     int quant_val = static_cast<int>((packed >> bit_offset) & mask);
     float dequant_val = static_cast<float>(quant_val) * scale + bias;
     group_output[i] = static_cast<T>(dequant_val);
+  }
   }
 }
 
@@ -123,16 +130,17 @@ __global__ void affine_dequantize_packed_kernel(
     const T* __restrict__ scales,
     const T* __restrict__ biases,
     T* __restrict__ output,
-    size_t size,
+    int64_t size,
     int group_size) {
   constexpr int pack_factor = 8 / BITS;
 
-  size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-  size_t oindex = idx * pack_factor;
-
-  if (oindex >= size) {
-    return;
-  }
+  // Grid capped by copy_grid_blocks (LOCAL_FIXES.md 46); the threads stride
+  // their packed chunks on a 64-bit counter.
+  const int64_t stride = int64_t(blockDim.x) * gridDim.x * pack_factor;
+  for (int64_t oindex = int64_t(blockIdx.x) * blockDim.x * pack_factor + threadIdx.x * pack_factor;
+       oindex < size;
+       oindex += stride) {
+  size_t idx = oindex / pack_factor;
 
   size_t gindex = oindex / group_size;
   float scale = static_cast<float>(scales[gindex]);
@@ -155,6 +163,7 @@ __global__ void affine_dequantize_packed_kernel(
     }
     output[oindex + i] = static_cast<T>(scale * static_cast<float>(d) + bias);
   }
+  }
 }
 
 } // namespace rocm
@@ -168,11 +177,11 @@ void affine_quantize(
     int bits,
     rocm::CommandEncoder& enc,
     const Stream& s) {
-  int num_elements = w.size();
-  int num_groups = num_elements / group_size;
+  int64_t num_elements = w.size();
+  int64_t num_groups = num_elements / group_size;
 
   int block_size = 256;
-  int num_blocks = (num_groups + block_size - 1) / block_size;
+  uint32_t num_blocks = rocm::copy_grid_blocks(num_groups, block_size);
 
   enc.set_input_array(w);
   enc.set_output_array(wq);
@@ -251,10 +260,11 @@ void affine_dequantize(
   // Use packed kernel for power-of-2 bits
   if (bits == 2 || bits == 4 || bits == 8) {
     int pack_factor = 8 / bits;
-    size_t size = w.size() / pack_factor;
+    int64_t size = w.size() / pack_factor;
 
     int block_size = 256;
-    int num_blocks = (size + block_size - 1) / block_size;
+    uint32_t num_blocks = rocm::copy_grid_blocks(
+        (size + pack_factor - 1) / pack_factor, block_size);
 
 #define LAUNCH_DEQUANTIZE_PACKED(T, BITS)               \
   enc.add_kernel_node(                                  \
@@ -268,7 +278,6 @@ void affine_dequantize(
       gpu_ptr<T>(w),                                    \
       w.size(),                                         \
       group_size)
-
 #define DISPATCH_BITS_PACKED(T)       \
   switch (bits) {                     \
     case 2:                           \
@@ -301,11 +310,11 @@ void affine_dequantize(
 #undef LAUNCH_DEQUANTIZE_PACKED
   } else {
     // Fallback for non-power-of-2 bits (3, 5, 6)
-    int num_elements = w.size();
-    int num_groups = num_elements / group_size;
+    int64_t num_elements = w.size();
+    int64_t num_groups = num_elements / group_size;
 
     int block_size = 256;
-    int num_blocks = (num_groups + block_size - 1) / block_size;
+    uint32_t num_blocks = rocm::copy_grid_blocks(num_groups, block_size);
 
 #define LAUNCH_DEQUANTIZE(T, ScaleT, BITS)               \
   enc.add_kernel_node(                                   \
