@@ -622,6 +622,8 @@ def run_activity_script(h: Harness, model_id: str, inference_id: str) -> tuple[d
     env = {**h.env, "WEBUI_PERF_BASE": h.base_prefixed + "/", "WEBUI_PERF_KEY_FILE": str(h.key_file), "WEBUI_PERF_INFERENCE_MODEL": inference_id, "WEBUI_PERF_MODEL_ID": model_id, "WEBUI_PERF_OUTPUT": str(output), "WEBUI_PERF_MODE": h.args.perf_mode}
     if h.args.prompt_file:
         env["WEBUI_PERF_PROMPT_FILE"] = str(h.args.prompt_file.resolve())
+    if h.args.nvidia_smi:
+        env["WEBUI_PERF_NVIDIA_SMI"] = str(h.args.nvidia_smi.resolve())
     command = [h.args.node_bin, "webui/scripts/activity-performance.mjs"]
     with open_private_append(log_path) as log_file:
         proc = subprocess.Popen(command, cwd=h.args.repo_root, env=env, stdout=log_file, stderr=subprocess.STDOUT, start_new_session=True)
@@ -678,6 +680,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--work-dir", type=Path, help="Parent directory for a new private 0700 run directory; never reused directly")
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
     parser.add_argument("--node-bin", default=shutil.which("node") or "node")
+    parser.add_argument("--nvidia-smi", type=Path, help="Explicit nvidia-smi executable used only for per-sample diagnostics")
     parser.add_argument("--prompt-file", type=Path)
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--activity-timeout", type=float, default=1800.0)
@@ -693,6 +696,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         parser.error("--model must be a checkpoint directory")
     if args.host_state is not None and not args.host_state.is_file():
         parser.error("--host-state must name the file activity_gate_host.py precheck wrote")
+    if args.nvidia_smi is not None and (not args.nvidia_smi.is_file() or not os.access(args.nvidia_smi, os.X_OK)):
+        parser.error("--nvidia-smi must be an executable file")
     if args.port == 0:
         args.port = free_port()
     return args

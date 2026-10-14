@@ -946,6 +946,7 @@ jobs:
             --work-dir "$RUNNER_TEMP" \
             --repo-root "$GITHUB_WORKSPACE" \
             --node-bin "$(command -v node)" \
+            --nvidia-smi "$(command -v nvidia-smi)" \
             --virtual-display \
             --activity-timeout 1800 \
             --pid-file "$RUNNER_TEMP/webui-activity-gate.pid" \

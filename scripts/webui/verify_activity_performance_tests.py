@@ -140,6 +140,9 @@ class ActivityPerformanceHelperTests(unittest.TestCase):
             server.chmod(0o700)
             model = root / "model"
             model.mkdir()
+            nvidia_smi = root / "nvidia-smi"
+            nvidia_smi.write_text("#!/bin/sh\n")
+            nvidia_smi.chmod(0o700)
             args = verify.parse_args([
                 "--server-bin", str(server),
                 "--model", str(model),
@@ -147,10 +150,12 @@ class ActivityPerformanceHelperTests(unittest.TestCase):
                 "--source-sha", "a" * 40,
                 "--features", "cuda,webui",
                 "--evidence", str(root / "evidence.json"),
+                "--nvidia-smi", str(nvidia_smi),
                 "--port", "53001",
             ])
             self.assertEqual(args.features, ["cuda", "webui"])
             self.assertEqual(args.port, 53001)
+            self.assertEqual(args.nvidia_smi, nvidia_smi)
             nonexec = root / "nonexec"
             nonexec.write_text("#!/bin/sh\n")
             with redirect_stderr(StringIO()):
