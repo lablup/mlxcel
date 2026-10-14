@@ -1492,13 +1492,1616 @@
     "reference_perplexity": 246.8612
   },
   "remaining": [
-    "release throughput repetitions",
-    "startup cost"
+    "final-head release smoke after backend-scope refinement",
+    "untouched-default startup control"
   ],
   "unmeasured": [
     "M5 Max",
     "CUDA",
     "ROCm",
     "CPU"
-  ]
+  ],
+  "requests": {
+    "gemma": {
+      "science": {
+        "prompt": "<bos><start_of_turn>user\nExplain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. \nWrite a detailed, coherent answer with several examples.<end_of_turn>\n<start_of_turn>model\n",
+        "n_predict": 256,
+        "temperature": 0,
+        "seed": 42,
+        "cache_prompt": false,
+        "stream": false,
+        "repeat_penalty": 1.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "dry_multiplier": 0.0
+      },
+      "software": {
+        "prompt": "<bos><start_of_turn>user\nExplain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. \nWrite a detailed, coherent answer with several examples.<end_of_turn>\n<start_of_turn>model\n",
+        "n_predict": 256,
+        "temperature": 0,
+        "seed": 42,
+        "cache_prompt": false,
+        "stream": false,
+        "repeat_penalty": 1.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "dry_multiplier": 0.0
+      },
+      "history": {
+        "prompt": "<bos><start_of_turn>user\nExplain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. \nWrite a detailed, coherent answer with several examples.<end_of_turn>\n<start_of_turn>model\n",
+        "n_predict": 256,
+        "temperature": 0,
+        "seed": 42,
+        "cache_prompt": false,
+        "stream": false,
+        "repeat_penalty": 1.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "dry_multiplier": 0.0
+      }
+    },
+    "qwen": {
+      "science": {
+        "prompt": "<|im_start|>user\nExplain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. Explain why the seasons change, and describe the role of axial tilt and sunlight. \nWrite a detailed, coherent answer with several examples.<|im_end|>\n<|im_start|>assistant\n",
+        "n_predict": 256,
+        "temperature": 0,
+        "seed": 42,
+        "cache_prompt": false,
+        "stream": false,
+        "repeat_penalty": 1.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "dry_multiplier": 0.0
+      },
+      "software": {
+        "prompt": "<|im_start|>user\nExplain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. Explain a reliable method for testing concurrent software and investigating race conditions. \nWrite a detailed, coherent answer with several examples.<|im_end|>\n<|im_start|>assistant\n",
+        "n_predict": 256,
+        "temperature": 0,
+        "seed": 42,
+        "cache_prompt": false,
+        "stream": false,
+        "repeat_penalty": 1.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "dry_multiplier": 0.0
+      },
+      "history": {
+        "prompt": "<|im_start|>user\nExplain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. Explain how libraries preserve knowledge and make information accessible across generations. \nWrite a detailed, coherent answer with several examples.<|im_end|>\n<|im_start|>assistant\n",
+        "n_predict": 256,
+        "temperature": 0,
+        "seed": 42,
+        "cache_prompt": false,
+        "stream": false,
+        "repeat_penalty": 1.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "dry_multiplier": 0.0
+      }
+    }
+  },
+  "release_measurements": {
+    "runs": {
+      "0-baseline": {
+        "command": [
+          "/private/tmp/mlxcel-1986-main-c0ae26b2-server",
+          "--model",
+          "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-4bit",
+          "--parallel",
+          "1",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "19866",
+          "--batch-size",
+          "512",
+          "--ctx-size",
+          "16384"
+        ],
+        "environment": {
+          "MLXCEL_QMV_WIDE": "0",
+          "MLXCEL_ENABLE_MTP_B1": "1",
+          "MLXCEL_MTP_ADAPTIVE": "0",
+          "MLXCEL_MTP_SLICE_GRANT_ROUNDS": "0"
+        },
+        "load_before": [
+          5.4365234375,
+          5.4833984375,
+          5.76708984375
+        ],
+        "health_seconds": 14.691451333113946,
+        "exit": -15,
+        "results": [
+          {
+            "label": "0-science",
+            "wall_s": 11.917355166980997,
+            "load_before": [
+              5.2041015625,
+              5.4267578125,
+              5.7412109375
+            ],
+            "load_after": [
+              5.23291015625,
+              5.42822265625,
+              5.73779296875
+            ],
+            "tokens_evaluated": 1638,
+            "tokens_predicted": 256,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 1638,
+              "prompt_ms": 4779.0,
+              "prompt_per_token_ms": 2.9175824175824174,
+              "prompt_per_second": 342.74952919020717,
+              "predicted_n": 256,
+              "predicted_ms": 7135.0,
+              "predicted_per_token_ms": 27.980392156862745,
+              "predicted_per_second": 35.739313244569026
+            },
+            "text_sha256": "0dbc5cb5ccaa4b21b5c7c7313694633a79bb0db44da20f15b529ffee9ada35e1"
+          },
+          {
+            "label": "0-software",
+            "wall_s": 10.971975083928555,
+            "load_before": [
+              5.23291015625,
+              5.42822265625,
+              5.73779296875
+            ],
+            "load_after": [
+              5.28955078125,
+              5.4306640625,
+              5.73486328125
+            ],
+            "tokens_evaluated": 1338,
+            "tokens_predicted": 256,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 1338,
+              "prompt_ms": 3826.0,
+              "prompt_per_token_ms": 2.85949177877429,
+              "prompt_per_second": 349.7124934657606,
+              "predicted_n": 256,
+              "predicted_ms": 7142.0,
+              "predicted_per_token_ms": 28.007843137254902,
+              "predicted_per_second": 35.7042845141417
+            },
+            "text_sha256": "1770852d1cbde47c54d6b657f7e52a09019dff67ba2c5968377b566221927536"
+          },
+          {
+            "label": "0-history",
+            "wall_s": 10.651969416998327,
+            "load_before": [
+              5.28955078125,
+              5.4306640625,
+              5.73486328125
+            ],
+            "load_after": [
+              4.943359375,
+              5.3505859375,
+              5.70263671875
+            ],
+            "tokens_evaluated": 1238,
+            "tokens_predicted": 256,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 1238,
+              "prompt_ms": 3570.0,
+              "prompt_per_token_ms": 2.8836833602584813,
+              "prompt_per_second": 346.7787114845938,
+              "predicted_n": 256,
+              "predicted_ms": 7078.0,
+              "predicted_per_token_ms": 27.75686274509804,
+              "predicted_per_second": 36.02712630686634
+            },
+            "text_sha256": "111352576aab1e1d7a78711b8951d6400da58926fb5b15c78d1d9cc3018fe7e9"
+          }
+        ]
+      },
+      "0-classic": {
+        "command": [
+          "/private/tmp/mlxcel-1986-candidate-release-server",
+          "--model",
+          "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-4bit",
+          "--parallel",
+          "1",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "19866",
+          "--batch-size",
+          "512",
+          "--ctx-size",
+          "16384"
+        ],
+        "environment": {
+          "MLXCEL_QMV_WIDE": "0",
+          "MLXCEL_ENABLE_MTP_B1": "1",
+          "MLXCEL_MTP_ADAPTIVE": "0",
+          "MLXCEL_MTP_SLICE_GRANT_ROUNDS": "0"
+        },
+        "load_before": [
+          4.943359375,
+          5.3505859375,
+          5.70263671875
+        ],
+        "health_seconds": 4.393101374967955,
+        "exit": -15,
+        "results": [
+          {
+            "label": "0-science",
+            "wall_s": 11.928783874958754,
+            "load_before": [
+              4.78759765625,
+              5.3115234375,
+              5.6865234375
+            ],
+            "load_after": [
+              5.37451171875,
+              5.4111328125,
+              5.71435546875
+            ],
+            "tokens_evaluated": 1638,
+            "tokens_predicted": 256,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 1638,
+              "prompt_ms": 4763.0,
+              "prompt_per_token_ms": 2.9078144078144077,
+              "prompt_per_second": 343.9009027923578,
+              "predicted_n": 256,
+              "predicted_ms": 7160.0,
+              "predicted_per_token_ms": 28.07843137254902,
+              "predicted_per_second": 35.614525139664806
+            },
+            "text_sha256": "0dbc5cb5ccaa4b21b5c7c7313694633a79bb0db44da20f15b529ffee9ada35e1"
+          },
+          {
+            "label": "0-software",
+            "wall_s": 10.981070791953243,
+            "load_before": [
+              5.37451171875,
+              5.4111328125,
+              5.71435546875
+            ],
+            "load_after": [
+              5.08251953125,
+              5.34765625,
+              5.68798828125
+            ],
+            "tokens_evaluated": 1338,
+            "tokens_predicted": 256,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 1338,
+              "prompt_ms": 3819.0,
+              "prompt_per_token_ms": 2.8542600896860986,
+              "prompt_per_second": 350.35349567949726,
+              "predicted_n": 256,
+              "predicted_ms": 7159.0,
+              "predicted_per_token_ms": 28.07450980392157,
+              "predicted_per_second": 35.61949993015784
+            },
+            "text_sha256": "1770852d1cbde47c54d6b657f7e52a09019dff67ba2c5968377b566221927536"
+          },
+          {
+            "label": "0-history",
+            "wall_s": 10.746148249949329,
+            "load_before": [
+              5.08251953125,
+              5.34765625,
+              5.68798828125
+            ],
+            "load_after": [
+              5.0693359375,
+              5.3359375,
+              5.67919921875
+            ],
+            "tokens_evaluated": 1238,
+            "tokens_predicted": 256,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 1238,
+              "prompt_ms": 3587.0,
+              "prompt_per_token_ms": 2.897415185783522,
+              "prompt_per_second": 345.13521048229717,
+              "predicted_n": 256,
+              "predicted_ms": 7155.0,
+              "predicted_per_token_ms": 28.058823529411764,
+              "predicted_per_second": 35.63941299790356
+            },
+            "text_sha256": "111352576aab1e1d7a78711b8951d6400da58926fb5b15c78d1d9cc3018fe7e9"
+          }
+        ]
+      },
+      "0-mtp": {
+        "command": [
+          "/private/tmp/mlxcel-1986-candidate-release-server",
+          "--model",
+          "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-4bit",
+          "--parallel",
+          "1",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "19866",
+          "--batch-size",
+          "512",
+          "--ctx-size",
+          "16384",
+          "--model-draft",
+          "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-assistant-4bit",
+          "--draft-kind",
+          "mtp",
+          "--draft-block-size",
+          "4"
+        ],
+        "environment": {
+          "MLXCEL_QMV_WIDE": "0",
+          "MLXCEL_ENABLE_MTP_B1": "1",
+          "MLXCEL_MTP_ADAPTIVE": "0",
+          "MLXCEL_MTP_SLICE_GRANT_ROUNDS": "0"
+        },
+        "load_before": [
+          5.0693359375,
+          5.3359375,
+          5.67919921875
+        ],
+        "health_seconds": 10.389757249969989,
+        "exit": -15,
+        "results": [
+          {
+            "label": "0-science",
+            "wall_s": 13.280796832987107,
+            "load_before": [
+              4.744140625,
+              5.25830078125,
+              5.64697265625
+            ],
+            "load_after": [
+              4.51123046875,
+              5.1796875,
+              5.61181640625
+            ],
+            "tokens_evaluated": 1638,
+            "tokens_predicted": 256,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 1638,
+              "prompt_ms": 4724.0,
+              "prompt_per_token_ms": 2.884004884004884,
+              "prompt_per_second": 346.74005080440304,
+              "predicted_n": 256,
+              "predicted_ms": 8553.0,
+              "predicted_per_token_ms": 33.54117647058823,
+              "predicted_per_second": 29.814100315678708,
+              "draft_n": 317,
+              "draft_n_accepted": 150,
+              "draft_rounds": 106,
+              "draft_kind": "mtp"
+            },
+            "text_sha256": "0dbc5cb5ccaa4b21b5c7c7313694633a79bb0db44da20f15b529ffee9ada35e1"
+          },
+          {
+            "label": "0-software",
+            "wall_s": 11.694252790999599,
+            "load_before": [
+              4.51123046875,
+              5.1796875,
+              5.61181640625
+            ],
+            "load_after": [
+              4.97998046875,
+              5.255859375,
+              5.63330078125
+            ],
+            "tokens_evaluated": 1338,
+            "tokens_predicted": 256,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 1338,
+              "prompt_ms": 3759.0,
+              "prompt_per_token_ms": 2.809417040358744,
+              "prompt_per_second": 355.94573024740623,
+              "predicted_n": 256,
+              "predicted_ms": 7929.0,
+              "predicted_per_token_ms": 31.094117647058823,
+              "predicted_per_second": 32.16042376087779,
+              "draft_n": 295,
+              "draft_n_accepted": 157,
+              "draft_rounds": 99,
+              "draft_kind": "mtp"
+            },
+            "text_sha256": "1770852d1cbde47c54d6b657f7e52a09019dff67ba2c5968377b566221927536"
+          },
+          {
+            "label": "0-history",
+            "wall_s": 12.209003041032702,
+            "load_before": [
+              4.97998046875,
+              5.255859375,
+              5.63330078125
+            ],
+            "load_after": [
+              4.70068359375,
+              5.17822265625,
+              5.59814453125
+            ],
+            "tokens_evaluated": 1238,
+            "tokens_predicted": 256,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 1238,
+              "prompt_ms": 3532.0,
+              "prompt_per_token_ms": 2.852988691437803,
+              "prompt_per_second": 350.5096262740657,
+              "predicted_n": 256,
+              "predicted_ms": 8671.0,
+              "predicted_per_token_ms": 34.003921568627455,
+              "predicted_per_second": 29.40837273670857,
+              "draft_n": 322,
+              "draft_n_accepted": 148,
+              "draft_rounds": 108,
+              "draft_kind": "mtp"
+            },
+            "text_sha256": "111352576aab1e1d7a78711b8951d6400da58926fb5b15c78d1d9cc3018fe7e9"
+          }
+        ]
+      },
+      "1-baseline": {
+        "command": [
+          "/private/tmp/mlxcel-1986-main-c0ae26b2-server",
+          "--model",
+          "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-4bit",
+          "--parallel",
+          "1",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "19866",
+          "--batch-size",
+          "512",
+          "--ctx-size",
+          "16384"
+        ],
+        "environment": {
+          "MLXCEL_QMV_WIDE": "0",
+          "MLXCEL_ENABLE_MTP_B1": "1",
+          "MLXCEL_MTP_ADAPTIVE": "0",
+          "MLXCEL_MTP_SLICE_GRANT_ROUNDS": "0"
+        },
+        "load_before": [
+          4.8447265625,
+          5.12255859375,
+          5.5361328125
+        ],
+        "health_seconds": 3.549774582963437,
+        "exit": -15,
+        "results": [
+          {
+            "label": "0-science",
+            "wall_s": 11.974503208999522,
+            "load_before": [
+              4.61669921875,
+              5.0703125,
+              5.51513671875
+            ],
+            "load_after": [
+              4.90234375,
+              5.11669921875,
+              5.52587890625
+            ],
+            "tokens_evaluated": 1638,
+            "tokens_predicted": 256,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 1638,
+              "prompt_ms": 4788.0,
+              "prompt_per_token_ms": 2.923076923076923,
+              "prompt_per_second": 342.10526315789474,
+              "predicted_n": 256,
+              "predicted_ms": 7181.0,
+              "predicted_per_token_ms": 28.16078431372549,
+              "predicted_per_second": 35.510374599637935
+            },
+            "text_sha256": "0dbc5cb5ccaa4b21b5c7c7313694633a79bb0db44da20f15b529ffee9ada35e1"
+          },
+          {
+            "label": "0-software",
+            "wall_s": 11.023008292075247,
+            "load_before": [
+              4.90234375,
+              5.11669921875,
+              5.52587890625
+            ],
+            "load_after": [
+              4.7763671875,
+              5.080078125,
+              5.50732421875
+            ],
+            "tokens_evaluated": 1338,
+            "tokens_predicted": 256,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 1338,
+              "prompt_ms": 3835.0,
+              "prompt_per_token_ms": 2.866218236173393,
+              "prompt_per_second": 348.8917861799218,
+              "predicted_n": 256,
+              "predicted_ms": 7183.0,
+              "predicted_per_token_ms": 28.16862745098039,
+              "predicted_per_second": 35.50048726158987
+            },
+            "text_sha256": "1770852d1cbde47c54d6b657f7e52a09019dff67ba2c5968377b566221927536"
+          },
+          {
+            "label": "0-history",
+            "wall_s": 10.762071458040737,
+            "load_before": [
+              4.7763671875,
+              5.080078125,
+              5.50732421875
+            ],
+            "load_after": [
+              4.8037109375,
+              5.07666015625,
+              5.50048828125
+            ],
+            "tokens_evaluated": 1238,
+            "tokens_predicted": 256,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 1238,
+              "prompt_ms": 3565.0,
+              "prompt_per_token_ms": 2.879644588045234,
+              "prompt_per_second": 347.26507713884996,
+              "predicted_n": 256,
+              "predicted_ms": 7192.0,
+              "predicted_per_token_ms": 28.20392156862745,
+              "predicted_per_second": 35.456062291434925
+            },
+            "text_sha256": "111352576aab1e1d7a78711b8951d6400da58926fb5b15c78d1d9cc3018fe7e9"
+          }
+        ]
+      },
+      "1-classic": {
+        "command": [
+          "/private/tmp/mlxcel-1986-candidate-release-server",
+          "--model",
+          "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-4bit",
+          "--parallel",
+          "1",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "19866",
+          "--batch-size",
+          "512",
+          "--ctx-size",
+          "16384"
+        ],
+        "environment": {
+          "MLXCEL_QMV_WIDE": "0",
+          "MLXCEL_ENABLE_MTP_B1": "1",
+          "MLXCEL_MTP_ADAPTIVE": "0",
+          "MLXCEL_MTP_SLICE_GRANT_ROUNDS": "0"
+        },
+        "load_before": [
+          4.609375,
+          5.12548828125,
+          5.5576171875
+        ],
+        "health_seconds": 3.5329729589866474,
+        "exit": -15,
+        "results": [
+          {
+            "label": "0-science",
+            "wall_s": 11.91583004198037,
+            "load_before": [
+              4.560546875,
+              5.1064453125,
+              5.54833984375
+            ],
+            "load_after": [
+              4.92236328125,
+              5.16796875,
+              5.56494140625
+            ],
+            "tokens_evaluated": 1638,
+            "tokens_predicted": 256,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 1638,
+              "prompt_ms": 4767.0,
+              "prompt_per_token_ms": 2.91025641025641,
+              "prompt_per_second": 343.6123348017621,
+              "predicted_n": 256,
+              "predicted_ms": 7145.0,
+              "predicted_per_token_ms": 28.019607843137255,
+              "predicted_per_second": 35.68929321203639
+            },
+            "text_sha256": "0dbc5cb5ccaa4b21b5c7c7313694633a79bb0db44da20f15b529ffee9ada35e1"
+          },
+          {
+            "label": "0-software",
+            "wall_s": 10.984886458027177,
+            "load_before": [
+              4.92236328125,
+              5.16796875,
+              5.56494140625
+            ],
+            "load_after": [
+              4.64306640625,
+              5.09375,
+              5.53125
+            ],
+            "tokens_evaluated": 1338,
+            "tokens_predicted": 256,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 1338,
+              "prompt_ms": 3818.0,
+              "prompt_per_token_ms": 2.8535127055306426,
+              "prompt_per_second": 350.4452592980618,
+              "predicted_n": 256,
+              "predicted_ms": 7162.0,
+              "predicted_per_token_ms": 28.08627450980392,
+              "predicted_per_second": 35.60457972633343
+            },
+            "text_sha256": "1770852d1cbde47c54d6b657f7e52a09019dff67ba2c5968377b566221927536"
+          },
+          {
+            "label": "0-history",
+            "wall_s": 10.713498166995123,
+            "load_before": [
+              4.64306640625,
+              5.09375,
+              5.53125
+            ],
+            "load_after": [
+              4.8447265625,
+              5.12255859375,
+              5.5361328125
+            ],
+            "tokens_evaluated": 1238,
+            "tokens_predicted": 256,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 1238,
+              "prompt_ms": 3559.0,
+              "prompt_per_token_ms": 2.874798061389338,
+              "prompt_per_second": 347.8505198089351,
+              "predicted_n": 256,
+              "predicted_ms": 7150.0,
+              "predicted_per_token_ms": 28.03921568627451,
+              "predicted_per_second": 35.66433566433566
+            },
+            "text_sha256": "111352576aab1e1d7a78711b8951d6400da58926fb5b15c78d1d9cc3018fe7e9"
+          }
+        ]
+      },
+      "1-mtp": {
+        "command": [
+          "/private/tmp/mlxcel-1986-candidate-release-server",
+          "--model",
+          "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-4bit",
+          "--parallel",
+          "1",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "19866",
+          "--batch-size",
+          "512",
+          "--ctx-size",
+          "16384",
+          "--model-draft",
+          "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-assistant-4bit",
+          "--draft-kind",
+          "mtp",
+          "--draft-block-size",
+          "4"
+        ],
+        "environment": {
+          "MLXCEL_QMV_WIDE": "0",
+          "MLXCEL_ENABLE_MTP_B1": "1",
+          "MLXCEL_MTP_ADAPTIVE": "0",
+          "MLXCEL_MTP_SLICE_GRANT_ROUNDS": "0"
+        },
+        "load_before": [
+          4.70068359375,
+          5.17822265625,
+          5.59814453125
+        ],
+        "health_seconds": 10.358674957999028,
+        "exit": -15,
+        "results": [
+          {
+            "label": "0-science",
+            "wall_s": 13.315939499996603,
+            "load_before": [
+              4.72705078125,
+              5.1708984375,
+              5.59033203125
+            ],
+            "load_after": [
+              5.38330078125,
+              5.296875,
+              5.62939453125
+            ],
+            "tokens_evaluated": 1638,
+            "tokens_predicted": 256,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 1638,
+              "prompt_ms": 4722.0,
+              "prompt_per_token_ms": 2.8827838827838828,
+              "prompt_per_second": 346.8869123252859,
+              "predicted_n": 256,
+              "predicted_ms": 8590.0,
+              "predicted_per_token_ms": 33.68627450980392,
+              "predicted_per_second": 29.68568102444703,
+              "draft_n": 317,
+              "draft_n_accepted": 150,
+              "draft_rounds": 106,
+              "draft_kind": "mtp"
+            },
+            "text_sha256": "0dbc5cb5ccaa4b21b5c7c7313694633a79bb0db44da20f15b529ffee9ada35e1"
+          },
+          {
+            "label": "0-software",
+            "wall_s": 11.783573749940842,
+            "load_before": [
+              5.38330078125,
+              5.296875,
+              5.62939453125
+            ],
+            "load_after": [
+              4.9970703125,
+              5.2158203125,
+              5.59423828125
+            ],
+            "tokens_evaluated": 1338,
+            "tokens_predicted": 256,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 1338,
+              "prompt_ms": 3796.0,
+              "prompt_per_token_ms": 2.8370702541106128,
+              "prompt_per_second": 352.4762908324552,
+              "predicted_n": 256,
+              "predicted_ms": 7981.0,
+              "predicted_per_token_ms": 31.298039215686273,
+              "predicted_per_second": 31.950883347951386,
+              "draft_n": 295,
+              "draft_n_accepted": 157,
+              "draft_rounds": 99,
+              "draft_kind": "mtp"
+            },
+            "text_sha256": "1770852d1cbde47c54d6b657f7e52a09019dff67ba2c5968377b566221927536"
+          },
+          {
+            "label": "0-history",
+            "wall_s": 12.323237666976638,
+            "load_before": [
+              4.9970703125,
+              5.2158203125,
+              5.59423828125
+            ],
+            "load_after": [
+              4.609375,
+              5.12548828125,
+              5.5576171875
+            ],
+            "tokens_evaluated": 1238,
+            "tokens_predicted": 256,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 1238,
+              "prompt_ms": 3544.0,
+              "prompt_per_token_ms": 2.862681744749596,
+              "prompt_per_second": 349.32279909706546,
+              "predicted_n": 256,
+              "predicted_ms": 8773.0,
+              "predicted_per_token_ms": 34.40392156862745,
+              "predicted_per_second": 29.066453892625102,
+              "draft_n": 322,
+              "draft_n_accepted": 148,
+              "draft_rounds": 108,
+              "draft_kind": "mtp"
+            },
+            "text_sha256": "111352576aab1e1d7a78711b8951d6400da58926fb5b15c78d1d9cc3018fe7e9"
+          }
+        ]
+      },
+      "2-baseline": {
+        "command": [
+          "/private/tmp/mlxcel-1986-main-c0ae26b2-server",
+          "--model",
+          "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-4bit",
+          "--parallel",
+          "1",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "19866",
+          "--batch-size",
+          "512",
+          "--ctx-size",
+          "16384"
+        ],
+        "environment": {
+          "MLXCEL_QMV_WIDE": "0",
+          "MLXCEL_ENABLE_MTP_B1": "1",
+          "MLXCEL_MTP_ADAPTIVE": "0",
+          "MLXCEL_MTP_SLICE_GRANT_ROUNDS": "0"
+        },
+        "load_before": [
+          5.724609375,
+          5.32080078125,
+          5.57177734375
+        ],
+        "health_seconds": 3.5356014169519767,
+        "exit": -15,
+        "results": [
+          {
+            "label": "0-science",
+            "wall_s": 11.989921082975343,
+            "load_before": [
+              5.42626953125,
+              5.265625,
+              5.55078125
+            ],
+            "load_after": [
+              5.3603515625,
+              5.25634765625,
+              5.5439453125
+            ],
+            "tokens_evaluated": 1638,
+            "tokens_predicted": 256,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 1638,
+              "prompt_ms": 4792.0,
+              "prompt_per_token_ms": 2.9255189255189253,
+              "prompt_per_second": 341.81969949916527,
+              "predicted_n": 256,
+              "predicted_ms": 7193.0,
+              "predicted_per_token_ms": 28.2078431372549,
+              "predicted_per_second": 35.45113304601696
+            },
+            "text_sha256": "0dbc5cb5ccaa4b21b5c7c7313694633a79bb0db44da20f15b529ffee9ada35e1"
+          },
+          {
+            "label": "0-software",
+            "wall_s": 11.092362124938518,
+            "load_before": [
+              5.3603515625,
+              5.25634765625,
+              5.5439453125
+            ],
+            "load_after": [
+              5.23046875,
+              5.23095703125,
+              5.53125
+            ],
+            "tokens_evaluated": 1338,
+            "tokens_predicted": 256,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 1338,
+              "prompt_ms": 3815.0,
+              "prompt_per_token_ms": 2.8512705530642752,
+              "prompt_per_second": 350.7208387942333,
+              "predicted_n": 256,
+              "predicted_ms": 7273.0,
+              "predicted_per_token_ms": 28.521568627450982,
+              "predicted_per_second": 35.06118520555479
+            },
+            "text_sha256": "1770852d1cbde47c54d6b657f7e52a09019dff67ba2c5968377b566221927536"
+          },
+          {
+            "label": "0-history",
+            "wall_s": 10.745918000000529,
+            "load_before": [
+              5.23046875,
+              5.23095703125,
+              5.53125
+            ],
+            "load_after": [
+              5.8896484375,
+              5.37158203125,
+              5.5771484375
+            ],
+            "tokens_evaluated": 1238,
+            "tokens_predicted": 256,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 1238,
+              "prompt_ms": 3565.0,
+              "prompt_per_token_ms": 2.879644588045234,
+              "prompt_per_second": 347.26507713884996,
+              "predicted_n": 256,
+              "predicted_ms": 7177.0,
+              "predicted_per_token_ms": 28.145098039215686,
+              "predicted_per_second": 35.53016580744044
+            },
+            "text_sha256": "111352576aab1e1d7a78711b8951d6400da58926fb5b15c78d1d9cc3018fe7e9"
+          }
+        ]
+      },
+      "2-classic": {
+        "command": [
+          "/private/tmp/mlxcel-1986-candidate-release-server",
+          "--model",
+          "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-4bit",
+          "--parallel",
+          "1",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "19866",
+          "--batch-size",
+          "512",
+          "--ctx-size",
+          "16384"
+        ],
+        "environment": {
+          "MLXCEL_QMV_WIDE": "0",
+          "MLXCEL_ENABLE_MTP_B1": "1",
+          "MLXCEL_MTP_ADAPTIVE": "0",
+          "MLXCEL_MTP_SLICE_GRANT_ROUNDS": "0"
+        },
+        "load_before": [
+          4.8037109375,
+          5.07666015625,
+          5.50048828125
+        ],
+        "health_seconds": 3.5129505419172347,
+        "exit": -15,
+        "results": [
+          {
+            "label": "0-science",
+            "wall_s": 11.92703999998048,
+            "load_before": [
+              5.6201171875,
+              5.2412109375,
+              5.5556640625
+            ],
+            "load_after": [
+              5.9375,
+              5.31640625,
+              5.578125
+            ],
+            "tokens_evaluated": 1638,
+            "tokens_predicted": 256,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 1638,
+              "prompt_ms": 4749.0,
+              "prompt_per_token_ms": 2.899267399267399,
+              "prompt_per_second": 344.914718888187,
+              "predicted_n": 256,
+              "predicted_ms": 7174.0,
+              "predicted_per_token_ms": 28.133333333333333,
+              "predicted_per_second": 35.54502369668246
+            },
+            "text_sha256": "0dbc5cb5ccaa4b21b5c7c7313694633a79bb0db44da20f15b529ffee9ada35e1"
+          },
+          {
+            "label": "0-software",
+            "wall_s": 11.02446400001645,
+            "load_before": [
+              5.9375,
+              5.31640625,
+              5.578125
+            ],
+            "load_after": [
+              5.94384765625,
+              5.34912109375,
+              5.5849609375
+            ],
+            "tokens_evaluated": 1338,
+            "tokens_predicted": 256,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 1338,
+              "prompt_ms": 3861.0,
+              "prompt_per_token_ms": 2.8856502242152464,
+              "prompt_per_second": 346.54234654234654,
+              "predicted_n": 256,
+              "predicted_ms": 7160.0,
+              "predicted_per_token_ms": 28.07843137254902,
+              "predicted_per_second": 35.614525139664806
+            },
+            "text_sha256": "1770852d1cbde47c54d6b657f7e52a09019dff67ba2c5968377b566221927536"
+          },
+          {
+            "label": "0-history",
+            "wall_s": 10.725204874994233,
+            "load_before": [
+              5.94384765625,
+              5.34912109375,
+              5.5849609375
+            ],
+            "load_after": [
+              5.724609375,
+              5.32080078125,
+              5.57177734375
+            ],
+            "tokens_evaluated": 1238,
+            "tokens_predicted": 256,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 1238,
+              "prompt_ms": 3568.0,
+              "prompt_per_token_ms": 2.8820678513731823,
+              "prompt_per_second": 346.97309417040356,
+              "predicted_n": 256,
+              "predicted_ms": 7153.0,
+              "predicted_per_token_ms": 28.050980392156863,
+              "predicted_per_second": 35.64937788340556
+            },
+            "text_sha256": "111352576aab1e1d7a78711b8951d6400da58926fb5b15c78d1d9cc3018fe7e9"
+          }
+        ]
+      },
+      "2-mtp": {
+        "command": [
+          "/private/tmp/mlxcel-1986-candidate-release-server",
+          "--model",
+          "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-4bit",
+          "--parallel",
+          "1",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "19866",
+          "--batch-size",
+          "512",
+          "--ctx-size",
+          "16384",
+          "--model-draft",
+          "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-assistant-4bit",
+          "--draft-kind",
+          "mtp",
+          "--draft-block-size",
+          "4"
+        ],
+        "environment": {
+          "MLXCEL_QMV_WIDE": "0",
+          "MLXCEL_ENABLE_MTP_B1": "1",
+          "MLXCEL_MTP_ADAPTIVE": "0",
+          "MLXCEL_MTP_SLICE_GRANT_ROUNDS": "0"
+        },
+        "load_before": [
+          5.8896484375,
+          5.37158203125,
+          5.5771484375
+        ],
+        "health_seconds": 10.341701708966866,
+        "exit": -15,
+        "results": [
+          {
+            "label": "0-science",
+            "wall_s": 13.2974437919911,
+            "load_before": [
+              5.59228515625,
+              5.32568359375,
+              5.55859375
+            ],
+            "load_after": [
+              5.09716796875,
+              5.22705078125,
+              5.51904296875
+            ],
+            "tokens_evaluated": 1638,
+            "tokens_predicted": 256,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 1638,
+              "prompt_ms": 4721.0,
+              "prompt_per_token_ms": 2.882173382173382,
+              "prompt_per_second": 346.96038974793476,
+              "predicted_n": 256,
+              "predicted_ms": 8572.0,
+              "predicted_per_token_ms": 33.615686274509805,
+              "predicted_per_second": 29.748016798880077,
+              "draft_n": 317,
+              "draft_n_accepted": 150,
+              "draft_rounds": 106,
+              "draft_kind": "mtp"
+            },
+            "text_sha256": "0dbc5cb5ccaa4b21b5c7c7313694633a79bb0db44da20f15b529ffee9ada35e1"
+          },
+          {
+            "label": "0-software",
+            "wall_s": 11.640739666996524,
+            "load_before": [
+              5.09716796875,
+              5.22705078125,
+              5.51904296875
+            ],
+            "load_after": [
+              5.2294921875,
+              5.251953125,
+              5.52392578125
+            ],
+            "tokens_evaluated": 1338,
+            "tokens_predicted": 256,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 1338,
+              "prompt_ms": 3777.0,
+              "prompt_per_token_ms": 2.8228699551569507,
+              "prompt_per_second": 354.24940428911833,
+              "predicted_n": 256,
+              "predicted_ms": 7859.0,
+              "predicted_per_token_ms": 30.819607843137256,
+              "predicted_per_second": 32.44687619289986,
+              "draft_n": 295,
+              "draft_n_accepted": 157,
+              "draft_rounds": 99,
+              "draft_kind": "mtp"
+            },
+            "text_sha256": "1770852d1cbde47c54d6b657f7e52a09019dff67ba2c5968377b566221927536"
+          },
+          {
+            "label": "0-history",
+            "wall_s": 12.349978749989532,
+            "load_before": [
+              5.2294921875,
+              5.251953125,
+              5.52392578125
+            ],
+            "load_after": [
+              4.92626953125,
+              5.1884765625,
+              5.49609375
+            ],
+            "tokens_evaluated": 1238,
+            "tokens_predicted": 256,
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 1238,
+              "prompt_ms": 3533.0,
+              "prompt_per_token_ms": 2.8537964458804526,
+              "prompt_per_second": 350.4104160769884,
+              "predicted_n": 256,
+              "predicted_ms": 8811.0,
+              "predicted_per_token_ms": 34.55294117647059,
+              "predicted_per_second": 28.941096356826694,
+              "draft_n": 322,
+              "draft_n_accepted": 148,
+              "draft_rounds": 108,
+              "draft_kind": "mtp"
+            },
+            "text_sha256": "111352576aab1e1d7a78711b8951d6400da58926fb5b15c78d1d9cc3018fe7e9"
+          }
+        ]
+      }
+    },
+    "throughput": {
+      "science": {
+        "baseline": {
+          "samples": [
+            35.739313244569026,
+            35.510374599637935,
+            35.45113304601696
+          ],
+          "median": 35.510374599637935,
+          "min": 35.45113304601696,
+          "max": 35.739313244569026,
+          "mad": 0.05924155362097139
+        },
+        "classic": {
+          "samples": [
+            35.614525139664806,
+            35.68929321203639,
+            35.54502369668246
+          ],
+          "median": 35.614525139664806,
+          "min": 35.54502369668246,
+          "max": 35.68929321203639,
+          "mad": 0.06950144298234306
+        },
+        "mtp": {
+          "samples": [
+            29.814100315678708,
+            29.68568102444703,
+            29.748016798880077
+          ],
+          "median": 29.748016798880077,
+          "min": 29.68568102444703,
+          "max": 29.814100315678708,
+          "mad": 0.06233577443304483
+        },
+        "paired_mtp_over_classic": [
+          0.8371331696480766,
+          0.8317811408614668,
+          0.8369108726084928
+        ]
+      },
+      "software": {
+        "baseline": {
+          "samples": [
+            35.7042845141417,
+            35.50048726158987,
+            35.06118520555479
+          ],
+          "median": 35.50048726158987,
+          "min": 35.06118520555479,
+          "max": 35.7042845141417,
+          "mad": 0.2037972525518299
+        },
+        "classic": {
+          "samples": [
+            35.61949993015784,
+            35.60457972633343,
+            35.614525139664806
+          ],
+          "median": 35.614525139664806,
+          "min": 35.60457972633343,
+          "max": 35.61949993015784,
+          "mad": 0.004974790493037062
+        },
+        "mtp": {
+          "samples": [
+            32.16042376087779,
+            31.950883347951386,
+            32.44687619289986
+          ],
+          "median": 32.16042376087779,
+          "min": 31.950883347951386,
+          "max": 32.44687619289986,
+          "mad": 0.20954041292640468
+        },
+        "paired_mtp_over_classic": [
+          0.9028881321730357,
+          0.8973812805412856,
+          0.9110573864359333
+        ]
+      },
+      "history": {
+        "baseline": {
+          "samples": [
+            36.02712630686634,
+            35.456062291434925,
+            35.53016580744044
+          ],
+          "median": 35.53016580744044,
+          "min": 35.456062291434925,
+          "max": 36.02712630686634,
+          "mad": 0.07410351600551479
+        },
+        "classic": {
+          "samples": [
+            35.63941299790356,
+            35.66433566433566,
+            35.64937788340556
+          ],
+          "median": 35.64937788340556,
+          "min": 35.63941299790356,
+          "max": 35.66433566433566,
+          "mad": 0.009964885502000698
+        },
+        "mtp": {
+          "samples": [
+            29.40837273670857,
+            29.066453892625102,
+            28.941096356826694
+          ],
+          "median": 29.066453892625102,
+          "min": 28.941096356826694,
+          "max": 29.40837273670857,
+          "mad": 0.12535753579840758
+        },
+        "paired_mtp_over_classic": [
+          0.82516434090647,
+          0.8150005699304687,
+          0.811826126432868
+        ]
+      }
+    },
+    "startup_runs": {
+      "baseline": [
+        {
+          "command": [
+            "/private/tmp/mlxcel-1986-main-c0ae26b2-server",
+            "--model",
+            "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-4bit",
+            "--model-draft",
+            "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-assistant-4bit",
+            "--draft-kind",
+            "mtp",
+            "--draft-block-size",
+            "4",
+            "--parallel",
+            "1",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "19866"
+          ],
+          "environment": {
+            "MLXCEL_QMV_WIDE": "0",
+            "MLXCEL_ENABLE_MTP_B1": "1"
+          },
+          "load_before": [
+            4.92626953125,
+            5.1884765625,
+            5.49609375
+          ],
+          "health": {
+            "status": "ok"
+          },
+          "health_seconds": 4.795902332989499,
+          "load_after": [
+            5.57275390625,
+            5.31787109375,
+            5.5400390625
+          ],
+          "exit": -15,
+          "scheduler_setup_to_probe_pass_s": 1.264233
+        },
+        {
+          "command": [
+            "/private/tmp/mlxcel-1986-main-c0ae26b2-server",
+            "--model",
+            "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-4bit",
+            "--model-draft",
+            "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-assistant-4bit",
+            "--draft-kind",
+            "mtp",
+            "--draft-block-size",
+            "4",
+            "--parallel",
+            "1",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "19866"
+          ],
+          "environment": {
+            "MLXCEL_QMV_WIDE": "0",
+            "MLXCEL_ENABLE_MTP_B1": "1"
+          },
+          "load_before": [
+            5.70703125,
+            5.3583984375,
+            5.54638671875
+          ],
+          "health": {
+            "status": "ok"
+          },
+          "health_seconds": 4.804472625022754,
+          "load_after": [
+            5.70703125,
+            5.3583984375,
+            5.54638671875
+          ],
+          "exit": -15,
+          "scheduler_setup_to_probe_pass_s": 1.245476
+        },
+        {
+          "command": [
+            "/private/tmp/mlxcel-1986-main-c0ae26b2-server",
+            "--model",
+            "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-4bit",
+            "--model-draft",
+            "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-assistant-4bit",
+            "--draft-kind",
+            "mtp",
+            "--draft-block-size",
+            "4",
+            "--parallel",
+            "1",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "19866"
+          ],
+          "environment": {
+            "MLXCEL_QMV_WIDE": "0",
+            "MLXCEL_ENABLE_MTP_B1": "1"
+          },
+          "load_before": [
+            5.73046875,
+            5.36865234375,
+            5.548828125
+          ],
+          "health": {
+            "status": "ok"
+          },
+          "health_seconds": 4.569863250013441,
+          "load_after": [
+            5.73046875,
+            5.36865234375,
+            5.548828125
+          ],
+          "exit": -15,
+          "scheduler_setup_to_probe_pass_s": 1.244672
+        }
+      ],
+      "candidate": [
+        {
+          "command": [
+            "/private/tmp/mlxcel-1986-candidate-release-server",
+            "--model",
+            "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-4bit",
+            "--model-draft",
+            "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-assistant-4bit",
+            "--draft-kind",
+            "mtp",
+            "--draft-block-size",
+            "4",
+            "--parallel",
+            "1",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "19866"
+          ],
+          "environment": {
+            "MLXCEL_QMV_WIDE": "0",
+            "MLXCEL_ENABLE_MTP_B1": "1"
+          },
+          "load_before": [
+            5.57275390625,
+            5.31787109375,
+            5.5400390625
+          ],
+          "health": {
+            "status": "ok"
+          },
+          "health_seconds": 10.407509207958356,
+          "load_after": [
+            5.404296875,
+            5.29052734375,
+            5.52734375
+          ],
+          "exit": -15,
+          "scheduler_setup_to_probe_pass_s": 7.072555
+        },
+        {
+          "command": [
+            "/private/tmp/mlxcel-1986-candidate-release-server",
+            "--model",
+            "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-4bit",
+            "--model-draft",
+            "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-assistant-4bit",
+            "--draft-kind",
+            "mtp",
+            "--draft-block-size",
+            "4",
+            "--parallel",
+            "1",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "19866"
+          ],
+          "environment": {
+            "MLXCEL_QMV_WIDE": "0",
+            "MLXCEL_ENABLE_MTP_B1": "1"
+          },
+          "load_before": [
+            5.404296875,
+            5.29052734375,
+            5.52734375
+          ],
+          "health": {
+            "status": "ok"
+          },
+          "health_seconds": 10.582289542071521,
+          "load_after": [
+            5.5947265625,
+            5.3310546875,
+            5.5380859375
+          ],
+          "exit": -15,
+          "scheduler_setup_to_probe_pass_s": 7.040669
+        },
+        {
+          "command": [
+            "/private/tmp/mlxcel-1986-candidate-release-server",
+            "--model",
+            "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-4bit",
+            "--model-draft",
+            "/Volumes/Monolith/Development/rust/models/mlx/gemma-4-12b-it-assistant-4bit",
+            "--draft-kind",
+            "mtp",
+            "--draft-block-size",
+            "4",
+            "--parallel",
+            "1",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "19866"
+          ],
+          "environment": {
+            "MLXCEL_QMV_WIDE": "0",
+            "MLXCEL_ENABLE_MTP_B1": "1"
+          },
+          "load_before": [
+            5.591796875,
+            5.345703125,
+            5.53955078125
+          ],
+          "health": {
+            "status": "ok"
+          },
+          "health_seconds": 10.35662729095202,
+          "load_after": [
+            4.96533203125,
+            5.21875,
+            5.49169921875
+          ],
+          "exit": -15,
+          "scheduler_setup_to_probe_pass_s": 7.00898
+        }
+      ]
+    },
+    "startup_cost": {
+      "baseline": {
+        "health_seconds": {
+          "samples": [
+            4.795902332989499,
+            4.804472625022754,
+            4.569863250013441
+          ],
+          "median": 4.795902332989499,
+          "min": 4.569863250013441,
+          "max": 4.804472625022754
+        },
+        "scheduler_setup_to_probe_pass_s": {
+          "samples": [
+            1.264233,
+            1.245476,
+            1.244672
+          ],
+          "median": 1.245476,
+          "min": 1.244672,
+          "max": 1.264233
+        }
+      },
+      "candidate": {
+        "health_seconds": {
+          "samples": [
+            10.407509207958356,
+            10.582289542071521,
+            10.35662729095202
+          ],
+          "median": 10.407509207958356,
+          "min": 10.35662729095202,
+          "max": 10.582289542071521
+        },
+        "scheduler_setup_to_probe_pass_s": {
+          "samples": [
+            7.072555,
+            7.040669,
+            7.00898
+          ],
+          "median": 7.040669,
+          "min": 7.00898,
+          "max": 7.072555
+        }
+      }
+    },
+    "load_1m_min_max": [
+      4.51123046875,
+      5.94384765625
+    ]
+  },
+  "release_provenance": {
+    "baseline_revision": "c0ae26b2",
+    "baseline_sha256": "4fdb66333c5862fbf7d6b14129c11fde6f017d4a27aae8090035a0346e7c27ba",
+    "candidate_revision": "bd6d33f2c5c4ad632bc8c7361d1203b28b193d7f",
+    "candidate_sha256": "de772cee794bd5680fdbd0e354e25800d3c000e5af2c5ba8d195a7889bcceada",
+    "candidate_product_patch_sha256": "f4192c3fc452590f2f9ee35eb3eb71d3b89524988dd7bb9bedd0030701bbd0b4",
+    "review_refinement_revision": "1eda64efea3d7e738c67916931b29de07f980252",
+    "final_head_runtime_measured": false,
+    "startup_interval_definition": "Starting BatchScheduler log timestamp to MTP exactness probe passed log timestamp; includes scheduler setup, not isolated pure probe time",
+    "throughput_policy": "Pinned validation switches, forced M1 B=1 eligibility, adaptive sizing and slice grants disabled; no default broadening"
+  }
 }

@@ -53,7 +53,7 @@ All three attention-only MTP outputs differ from classic. A fresh-process classi
 
 Thus attention correction alone is insufficient: 12B also requires the target adapter to use classic's configured prefill chunking. The ordinary short startup test and the isolated long attention test both start from equal whole-prompt prefixes, so neither catches this serving-only prefix mismatch.
 
-The product candidate reuses the existing exact-geometry predicate rather than adding an attention-only gate. This also keeps the correction inside its linear, unpadded query-layout contract, declines unmeasured Metal batched/nonlinear-tree execution, and prevents chronological buffered caches from being donated to classic automatic prompt-cache reuse. Those restrictions are necessary because row-wise attention intentionally drops structural masks and reproduces physical-ring order; a passing singleton startup draw does not certify other layouts. CUDA's per-row RoPE correction stays CUDA-only. Classic forward arithmetic and the 31B geometry are unchanged.
+The product candidate reuses the existing exact-geometry predicate rather than adding an attention-only gate. This also keeps the correction inside its linear, unpadded query-layout contract, declines unmeasured Metal batched/nonlinear-tree execution, and prevents chronological buffered caches from being donated to classic automatic prompt-cache reuse. Those restrictions are necessary because row-wise attention intentionally drops structural masks and reproduces physical-ring order; a passing singleton startup draw does not certify other layouts. CUDA's per-row RoPE correction stays CUDA-only. Classic forward arithmetic and the 31B geometry are unchanged. Review refinement `1eda64ef` preserves the existing 31B policy on every backend and the original CUDA condition, and adds 12B only when Metal is available and the default device is GPU. CPU-selected Metal, CPU-only and ROCm execution are not broadened. A pure matrix test covers seven geometries across six backend conditions and passes, including production predicate and long-probe checks on this host.
 
 ## Teacher-forced and integrated free-generation parity
 
@@ -66,7 +66,7 @@ The final test-fast candidate traces `docs/architecture.md` with 1,536 prefix to
 
 Reference/corrected perplexity is 246.8612; ordinary block is 249.2134. These corpus values are diagnostics, not quality evaluations. The top-8 trace does not compare every vocabulary logit byte, unlike the startup probe.
 
-With the integrated prefill policy, all three real-serving 256-token outputs now match the two stable classic reference runs byte-for-byte at the default 512-token prefill setting. Actual proposed/accepted/round counts are 317/150/106, 295/157/99 and 322/148/108. The strengthened startup guard passes with normal product settings, no diagnostic variables and no inexact override.
+With the integrated prefill policy, all three real-serving 256-token outputs now match the two stable classic reference runs byte-for-byte at the default 512-token prefill setting. Actual proposed/accepted/round counts are 317/150/106, 295/157/99 and 322/148/108. The strengthened startup guard passes with the explicit validation switches above (`MLXCEL_QMV_WIDE=0`, `MLXCEL_ENABLE_MTP_B1=1`, adaptive sizing and slice grants disabled), no diagnostic variables and no inexact override. These are not untouched product defaults.
 
 ## Other target regressions and tests
 
@@ -81,6 +81,30 @@ These are actual MTP regressions, not classic-only smoke tests. Their single-run
 
 Narrow tests pass: `gemma4::` 82 tests (one unrelated ffmpeg test ignored); `gemma4_tests::` 12 ordinary tests plus all 13 serial-only tests explicitly selected with `--ignored --test-threads=1`. This includes the exact-geometry/long-probe gate, 12B 16/8/256 attention at a realistic 1,024-token window, rollover and partial acceptance, and existing snapshot/cache tests. Formatting and cross-repository reference checks pass.
 
-## Pending validation
+## Repeated release throughput and startup cost
 
-Startup cost and repeated release throughput are not yet recorded. No completion or performance claim follows from the correctness runs, which may overlap compilation. M5, CUDA, ROCm and CPU remain unmeasured.
+The measured candidate is `bd6d33f2`, executable SHA-256 `de772cee794bd5680fdbd0e354e25800d3c000e5af2c5ba8d195a7889bcceada`. Its six-file product patch against `a2698835` has SHA-256 `f4192c3fc452590f2f9ee35eb3eb71d3b89524988dd7bb9bedd0030701bbd0b4`. The before-arm is the `c0ae26b2` release artifact identified above. These measurements precede the backend-scope refinement `1eda64ef`; that refinement leaves the active-Metal numerical path unchanged, but the results must not be presented as final-head artifact measurements.
+
+Three counterbalanced repetitions each start fresh baseline-classic, candidate-classic and candidate-MTP processes, with three 256-token requests per process. Arm order rotates baseline/classic/MTP, MTP/classic/baseline, then classic/baseline/MTP. All 27 output hashes agree per scenario. The summarizer checks equality, positive MTP draft/round counters and absent classic draft counters before calculating throughput. All runs use the explicit validation switches in Reproduction, including forced B=1 eligibility on this M1 host. No competing build or other owned inference process ran during the sweep; background one-minute load was 4.51–5.94 on 24 CPU cores, not an idle-machine guarantee.
+
+Decode throughput is tokens/s, median [minimum, maximum] over three runs. MAD and raw samples are retained in the companion JSON. Ratios are medians of paired candidate-MTP/candidate-classic ratios, not ratios chosen from unrelated runs.
+
+| Scenario | Baseline classic | Candidate classic | Candidate MTP | Paired MTP/classic |
+|---|---|---|---|---|
+| Science | 35.510 [35.451, 35.739] | 35.615 [35.545, 35.689] | 29.748 [29.686, 29.814] | 0.837x |
+| Software | 35.500 [35.061, 35.704] | 35.615 [35.605, 35.619] | 32.160 [31.951, 32.447] | 0.903x |
+| History | 35.530 [35.456, 36.027] | 35.649 [35.639, 35.664] | 29.066 [28.941, 29.408] | 0.815x |
+
+**This is a negative MTP throughput result on M1 Ultra**, not a speedup claim: exact forced-width MTP is 0.815–0.903x classic for these prompts. Classic medians are similar, but background load and three samples do not prove zero overhead. This correctness fix does not broaden B=1 defaults or change existing adaptive profitability policy.
+
+Three additional paired fresh-process startups compare the baseline short guard with the strengthened candidate guard, with no diagnostic variables or inexact override. They retain `MLXCEL_QMV_WIDE=0` and `MLXCEL_ENABLE_MTP_B1=1`. All six guards pass. The scheduler-setup-to-probe-pass log interval is 1.245 s [1.245, 1.264] before versus 7.041 s [7.009, 7.073] after: +5.795 s between medians. This interval includes scheduler setup and is **not isolated pure probe duration**. Process-to-health medians are 4.796 s [4.570, 4.804] versus 10.408 s [10.357, 10.582], a +5.612 s increase including load/warmup and health polling. These startup costs are an explicit tradeoff of covering the real window in the fail-closed guard.
+
+Final-head release rebuild and smoke are pending separately; the above artifact provenance remains fixed. M5, CUDA, ROCm and CPU runtime behavior, 31B QAT, Qwen bf16 drafter and untouched-default performance remain unmeasured.
+
+## Reproduction
+
+Build the server with `cargo build --release --features metal,accelerate --bin mlxcel-server`, and the trace with the test-fast example command in [benchmarks.md](../benchmarks.md#judging-a-change-that-moves-the-numbers). Run each arm in a fresh process, serially, after builds finish. Serving flags are `--parallel 1 --batch-size 512 --ctx-size 16384 --host 127.0.0.1 --port 19866`. Add `--model-draft ASSISTANT --draft-kind mtp --draft-block-size 4` for MTP. Set `MLXCEL_QMV_WIDE=0 MLXCEL_ENABLE_MTP_B1=1 MLXCEL_MTP_ADAPTIVE=0 MLXCEL_MTP_SLICE_GRANT_ROUNDS=0`, and leave `MLXCEL_MTP_ALLOW_INEXACT` unset.
+
+The companion JSON's `requests.gemma` and `requests.qwen` contain the exact science/software/history request bodies. Post each to `/completion`, preserve the entire response and compare `content` bytes across repeated reference/candidate runs. Require `timings.draft_kind == "mtp"`, positive `draft_n` and positive `draft_rounds` before reporting an MTP timing; require no draft counters in the classic arm. The long Gemma prompts repeat each scenario's topic 100 times; they exercise realistic context lengths, not a natural-language quality benchmark.
+
+For teacher forcing, run `MLXCEL_TRACE_GEMMA4=chain`, `block` and `verify` separately with `MLXCEL_TRACE_START_TOKEN=1536 MLXCEL_TRACE_CONTIGUOUS=1`, `docs/architecture.md` and positional arguments `4 64 8 1536`. Compare the trace pairs with `scripts/compare_logit_traces.py --decided 2`. These controls deliberately keep the prefill equal; the serving comparisons separately test scheduler chunking.
