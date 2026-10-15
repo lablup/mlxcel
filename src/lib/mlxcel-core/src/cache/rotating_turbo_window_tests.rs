@@ -192,3 +192,58 @@ fn turbo_decode_after_over_window_install_sees_the_window() {
     }
     pair.append(4);
 }
+
+/// Key rows of a `[1, 2, T, HEAD_DIM]` tensor per head, sorted, so two rings
+/// holding the same tokens in different physical order compare equal.
+fn sorted_rows(keys: &MlxArray) -> Vec<Vec<Vec<u32>>> {
+    let tokens = ffi::array_shape(keys)[2] as usize;
+    let flat = to_f32(keys);
+    (0..2)
+        .map(|head| {
+            let mut rows: Vec<Vec<u32>> = (0..tokens)
+                .map(|t| {
+                    let at = (head * tokens + t) * HEAD_DIM as usize;
+                    flat[at..at + HEAD_DIM as usize]
+                        .iter()
+                        .map(|x| x.to_bits())
+                        .collect()
+                })
+                .collect();
+            rows.sort();
+            rows
+        })
+        .collect()
+}
+
+/// A `trim` after an over-window append rewinds `idx` inside the oversized
+/// buffer; the next decode step must keep the window that ends at `idx`, not
+/// the physical end, or the rolled-back draft keys come back and the newest
+/// live key is overwritten instead.
+#[test]
+fn decode_after_over_window_append_and_trim_drops_rolled_back_keys() {
+    let block = tensor(40, 901);
+    let block_v = tensor(40, 902);
+    let kept = |arr: &MlxArray| ffi::slice(arr, &[0, 0, 0, 0], &[1, 2, 37, HEAD_DIM]);
+    for mode in [KVCacheMode::Fp16, KVCacheMode::Turbo4Asym] {
+        // Appends 40, rolls 3 back, then decodes one token.
+        let mut rolled = RotatingKVCache::new_with_mode(32, mode);
+        // Appends only the 37 tokens that survive, then the same token.
+        let mut reference = RotatingKVCache::new_with_mode(32, mode);
+        for cache in [&mut rolled, &mut reference] {
+            cache.update_and_fetch(tensor(40, 900), tensor(40, 899));
+        }
+        rolled.update_and_fetch(ffi::copy(&block), ffi::copy(&block_v));
+        assert_eq!(rolled.trim(3), 3);
+        reference.update_and_fetch(kept(&block), kept(&block_v));
+        assert_eq!(rolled.offset, reference.offset);
+
+        let (got, _) = rolled.update_and_fetch(tensor(1, 903), tensor(1, 904));
+        let (want, _) = reference.update_and_fetch(tensor(1, 903), tensor(1, 904));
+        assert_eq!(
+            sorted_rows(&got),
+            sorted_rows(&want),
+            "{mode:?}: the decode step after a rollback must see the window ending at the \
+             rolled-back offset"
+        );
+    }
+}

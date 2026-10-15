@@ -4940,6 +4940,19 @@ impl RotatingKVCache {
         (concat_k, concat_v)
     }
 
+    /// Physical range `[start, end)` a single-token update keeps from an
+    /// over-window (longer than `max_size`) buffer: the newest `max_size`
+    /// slots before `idx`. Only a multi-token append leaves such a buffer, and
+    /// it stores the slots in chronological order, so `idx` is the end of the
+    /// live tokens; a `trim` since then moved it back past rolled-back keys,
+    /// which the physical end would still include.
+    ///
+    /// Used by: [`Self::update_in_place`], [`Self::update_turbo4_in_place`].
+    fn over_window_keep_range(&self, physical_len: i32) -> (i32, i32) {
+        let end = self.idx.clamp(0, physical_len);
+        ((end - self.max_size).max(0), end)
+    }
+
     /// The newest `max_keep` visible slots, in chronological order, sliced
     /// identically from every array in `arrays`.
     ///
@@ -5029,14 +5042,17 @@ impl RotatingKVCache {
                 // multi-token append (which already cleared the log) leaves
                 // one, but never keep an entry across a layout change.
                 self.clear_decode_undo();
-                let start = buffer_size - self.max_size;
+                // Keep the newest `max_size` slots before `idx`, not before
+                // the physical end: a `trim` after the over-window append
+                // rewound `idx` past rolled-back keys that must not survive.
+                let (start, end) = self.over_window_keep_range(buffer_size);
                 let ks = ffi::array_shape(self.keys.as_ref().unwrap());
                 let vs = ffi::array_shape(self.values.as_ref().unwrap());
                 self.keys = Some(ffi::contiguous(
                     &ffi::slice(
                         self.keys.as_ref().unwrap(),
                         &[0, 0, start, 0],
-                        &[ks[0], ks[1], buffer_size, ks[3]],
+                        &[ks[0], ks[1], end, ks[3]],
                     ),
                     false,
                 ));
@@ -5044,11 +5060,11 @@ impl RotatingKVCache {
                     &ffi::slice(
                         self.values.as_ref().unwrap(),
                         &[0, 0, start, 0],
-                        &[vs[0], vs[1], buffer_size, vs[3]],
+                        &[vs[0], vs[1], end, vs[3]],
                     ),
                     false,
                 ));
-                self.idx = self.max_size;
+                self.idx = end - start;
             }
         }
 
@@ -5298,17 +5314,13 @@ impl RotatingKVCache {
                 .v_norms
                 .as_ref()
                 .expect("v_norms lockstep with keys in rotating cache");
-            let mut arrays: Vec<&MlxArray> = vec![keys, v_packed, v_norms];
-            if let Some(v_rescale) = self.v_rescale.as_ref() {
-                arrays.push(v_rescale);
-            }
-            self.visible_window(&arrays, self.max_size - 1)
+            let v_rescale = self
+                .v_rescale
+                .as_ref()
+                .expect("v_rescale lockstep with v_norms in rotating cache");
+            self.visible_window(&[keys, v_packed, v_norms, v_rescale], self.max_size - 1)
         };
-        let base_vr = if self.v_rescale.is_some() {
-            prior.pop()
-        } else {
-            None
-        };
+        let base_vr = prior.pop().expect("one window slice per array");
         let base_vn = prior.pop().expect("one window slice per array");
         let base_vp = prior.pop().expect("one window slice per array");
         let base_k = prior.pop().expect("one window slice per array");
@@ -5316,10 +5328,7 @@ impl RotatingKVCache {
         let concat_k = concatenate(&base_k, &new_keys_f16, 2);
         let concat_vp = concatenate(&base_vp, &v_packed_new, 2);
         let concat_vn = concatenate(&base_vn, &v_norms_new, 2);
-        let concat_vr = match base_vr {
-            Some(vr) => concatenate(&vr, &v_rescale_new, 2),
-            None => ffi::contiguous(&v_rescale_new, false),
-        };
+        let concat_vr = concatenate(&base_vr, &v_rescale_new, 2);
 
         let total_len = kept_len + new_seq_len;
         self.offset += new_seq_len;
@@ -5432,15 +5441,11 @@ impl RotatingKVCache {
         // past `max_size` were never overwritten.
         let physical = ffi::array_shape(&k_buffer)[2];
         if physical > self.max_size {
-            let start = physical - self.max_size;
+            let (start, end) = self.over_window_keep_range(physical);
             let newest = |arr: &MlxArray| {
                 let shape = ffi::array_shape(arr);
                 ffi::contiguous(
-                    &ffi::slice(
-                        arr,
-                        &[0, 0, start, 0],
-                        &[shape[0], shape[1], physical, shape[3]],
-                    ),
+                    &ffi::slice(arr, &[0, 0, start, 0], &[shape[0], shape[1], end, shape[3]]),
                     false,
                 )
             };
@@ -5448,7 +5453,7 @@ impl RotatingKVCache {
             vp_buffer = newest(&vp_buffer);
             vn_buffer = newest(&vn_buffer);
             vr_buffer = newest(&vr_buffer);
-            self.idx = self.max_size;
+            self.idx = end - start;
         }
 
         let shape = ffi::array_shape(&k_buffer);
