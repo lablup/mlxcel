@@ -258,6 +258,9 @@ fn mtp_verify_argmax_matches_the_incremental_target_chain() {
 
 #[test]
 fn mtp_partial_accept_restores_then_replays_kv_and_conv_state_exactly() {
+    // Exact comparison of two computations: both must run on one default
+    // device while sibling tests move it (#1622).
+    let _guard = crate::models::embedding_test_support::mlx_test_guard();
     let prompt = [1, 2, 3];
     let verify_input = [4, 5, 6];
     let accepted = 1;

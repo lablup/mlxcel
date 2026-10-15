@@ -448,14 +448,55 @@ mod tests {
         )
     }
 
-    fn arrays_equal(left: &MlxArray, right: &MlxArray) -> bool {
+    /// Exact comparison (`allclose` with rtol = atol = 0). On a mismatch the
+    /// error names the shapes, the first differing flat index with both
+    /// values and bit patterns, the mismatch count and the largest absolute
+    /// difference, so a permutation, a partial write and last-bit numeric
+    /// drift read differently at a glance (#1622).
+    fn arrays_equal(left: &MlxArray, right: &MlxArray) -> Result<(), String> {
+        let left_shape = mlxcel_core::array_shape(left);
+        let right_shape = mlxcel_core::array_shape(right);
+        if left_shape != right_shape {
+            return Err(format!(
+                "shape mismatch: left {left_shape:?}, right {right_shape:?}"
+            ));
+        }
         let equal = mlxcel_core::allclose(left, right, 0.0, 0.0);
         mlxcel_core::eval(&equal);
-        mlxcel_core::item_bool(&equal)
+        if mlxcel_core::item_bool(&equal) {
+            return Ok(());
+        }
+        let (lhs, rhs) = (array_to_vec_f32(left), array_to_vec_f32(right));
+        // `!=` matches allclose with equal_nan = false: NaN never equals
+        // anything, and -0.0 equals 0.0.
+        let differing: Vec<usize> = (0..lhs.len()).filter(|&i| lhs[i] != rhs[i]).collect();
+        let Some(&first) = differing.first() else {
+            return Err(format!(
+                "allclose reported a mismatch but the f32 host copies of {left_shape:?} agree"
+            ));
+        };
+        let max_abs = differing
+            .iter()
+            .map(|&i| (lhs[i] - rhs[i]).abs())
+            .fold(0.0f32, f32::max);
+        Err(format!(
+            "arrays of shape {left_shape:?} (both sides) differ at flat index {first} first: \
+             left {:e} ({:#010x}), right {:e} ({:#010x}); {} of {} elements differ, \
+             max |diff| {max_abs:e}",
+            lhs[first],
+            lhs[first].to_bits(),
+            rhs[first],
+            rhs[first].to_bits(),
+            differing.len(),
+            lhs.len(),
+        ))
     }
 
     #[test]
     fn image_prefill_keeps_hmlp_prepared_embeddings_on_classic_wrapper_path() {
+        // Both logits must come from one default device; see the mixed
+        // prefill test below for why an unguarded exact comparison flakes.
+        let _guard = crate::models::embedding_test_support::mlx_test_guard();
         let vlm = tiny_vlm();
         let input_ids = mlxcel_core::from_slice_i32(&[1, 7, 2], &[1, 3]);
         let pixel_values = mlxcel_core::zeros(&[1, 2, 40, 40, 3], dtype::FLOAT32);
@@ -481,15 +522,25 @@ mod tests {
             last_pos,
         );
 
-        assert!(
-            arrays_equal(&wrapper_logits, &direct_logits),
-            "InklingVLM image prefill must feed HMLP-merged prepared embeddings directly \
-             to vlm.text without replacing them with token embeddings or normalizing twice"
-        );
+        if let Err(diff) = arrays_equal(&wrapper_logits, &direct_logits) {
+            panic!(
+                "InklingVLM image prefill must feed HMLP-merged prepared embeddings directly \
+                 to vlm.text without replacing them with token embeddings or normalizing \
+                 twice: {diff}"
+            );
+        }
     }
 
     #[test]
     fn mixed_prefill_scatter_order_is_normalized_text_then_image_then_audio() {
+        // MLX's default device is process-global, and sibling tests (e.g.
+        // `vision::merge::tests`) move it to the CPU under
+        // `lock_default_device()`. Without this guard, a parallel libtest run
+        // can build one side of the comparison on the CPU and the other on
+        // the GPU; CPU and GPU RMSNorm and the audio-tower sum differ in the
+        // last bits and the exact comparison fails (#1622, same class as
+        // #2058).
+        let _guard = crate::models::embedding_test_support::mlx_test_guard();
         let vlm = tiny_audio_vlm();
         let input_ids = mlxcel_core::from_slice_i32(&[1, 7, 6, 2], &[1, 4]);
         let pixel_values = mlxcel_core::zeros(&[1, 2, 40, 40, 3], dtype::FLOAT32);
@@ -506,7 +557,9 @@ mod tests {
             .prepare_input_embeddings_with_audio(&input_ids, Some(&pixel_values), &audio_ids)
             .unwrap();
 
-        assert!(arrays_equal(&actual.inputs_embeds, &expected.inputs_embeds));
+        if let Err(diff) = arrays_equal(&actual.inputs_embeds, &expected.inputs_embeds) {
+            panic!("mixed prefill must equal image scatter then audio scatter: {diff}");
+        }
         assert!(vlm.supports_audio());
         assert_eq!(vlm.audio_token_id(), 6);
         assert!(vlm.output_suppressed_token_ids().contains(&6));
