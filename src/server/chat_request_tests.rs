@@ -3855,6 +3855,52 @@ async fn video_frames_render_for_an_imageless_template_is_the_flattened_turn() {
     );
 }
 
+/// A template with a `video` branch and no `image` branch (issue #1789). The
+/// same template string is pinned in
+/// `server::chat_request::tests::video_only_template_renders_the_cli_prompt`.
+const VIDEO_ONLY_TEMPLATE: &str = "{% for message in messages %}<|{{ message['role'] }}|>\
+    {% if message['content'] is string %}{{ message['content'] }}\
+    {% else %}{% for item in message['content'] %}\
+    {% if item['type'] == 'video' %}<VIDEO>\
+    {% elif item['type'] == 'text' %}{{ item['text'] }}{% endif %}\
+    {% endfor %}{% endif %}<|end|>{% endfor %}\
+    {% if add_generation_prompt %}<|assistant|>{% endif %}";
+
+#[tokio::test]
+async fn video_only_template_renders_the_cli_prompt() {
+    // Issue #1789: a template with a `video` branch and no `image` branch is
+    // raw-rendered for a clip, and an image part it cannot render is dropped,
+    // which is the prompt `commands::generate` builds for the same request.
+    let processor = ChatTemplateProcessor::with_template(VIDEO_ONLY_TEMPLATE.to_string());
+    assert!(!processor.supports_image_content());
+    let expected = "<|user|><VIDEO>What moves?<|end|><|assistant|>";
+
+    let request = request_with_messages(vec![user_parts(vec![
+        video_part("file:///clip.mp4"),
+        ContentPart::Text {
+            text: "What moves?".to_string(),
+        },
+    ])]);
+    let prepared = prepare_chat_request(&processor, &request, None)
+        .await
+        .expect("a native-video body renders");
+    assert_eq!(prepared.prompt, expected);
+
+    let with_image = request_with_messages(vec![user_parts(vec![
+        ContentPart::ImageUrl {
+            image_url: ImageUrl::new("data:image/png;base64,aGVsbG8=".to_string()),
+        },
+        video_part("file:///clip.mp4"),
+        ContentPart::Text {
+            text: "What moves?".to_string(),
+        },
+    ])]);
+    let prepared = prepare_chat_request(&processor, &with_image, None)
+        .await
+        .expect("an image plus video body renders");
+    assert_eq!(prepared.prompt, expected);
+}
+
 #[test]
 fn has_video_urls_agrees_with_video_urls() {
     // `has_video_urls` answers the question `video_urls().is_empty()` asked,

@@ -1373,6 +1373,65 @@ fn cli_video_fallback_renders_the_server_prompt_for_an_imageless_template() {
     );
 }
 
+/// A template with a `video` branch and no `image` branch (issue #1789). The
+/// same template string is pinned in
+/// `server::chat_request::tests::video_only_template_renders_the_cli_prompt`.
+const VIDEO_ONLY_TEMPLATE: &str = "{% for message in messages %}<|{{ message['role'] }}|>\
+    {% if message['content'] is string %}{{ message['content'] }}\
+    {% else %}{% for item in message['content'] %}\
+    {% if item['type'] == 'video' %}<VIDEO>\
+    {% elif item['type'] == 'text' %}{{ item['text'] }}{% endif %}\
+    {% endfor %}{% endif %}<|end|>{% endfor %}\
+    {% if add_generation_prompt %}<|assistant|>{% endif %}";
+
+#[test]
+fn cli_video_only_template_renders_the_server_prompt() {
+    // Issue #1789: the CLI used to flatten the turn because the template has no
+    // `image` branch, dropping the video item the server hands the template.
+    let processor = ChatTemplateProcessor::with_template(VIDEO_ONLY_TEMPLATE.to_string());
+    assert!(!processor.supports_image_content());
+    assert!(processor.supports_video_content());
+
+    let cli = resolve_cli_prompt(
+        "What moves?",
+        false,
+        Some(&processor),
+        &CliPromptMedia {
+            videos: 1,
+            ..CliPromptMedia::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(cli, "<|user|><VIDEO>What moves?<|end|><|assistant|>");
+
+    // The server's raw render of the same request: a typed list with the
+    // video item and the question.
+    let server = processor
+        .apply_raw(
+            &serde_json::json!([{
+                "role": "user",
+                "content": [{"type": "video"}, {"type": "text", "text": "What moves?"}],
+            }]),
+            None,
+        )
+        .unwrap();
+    assert_eq!(cli, server);
+
+    // An image the template cannot render is left out, as the server does.
+    let with_image = resolve_cli_prompt(
+        "What moves?",
+        false,
+        Some(&processor),
+        &CliPromptMedia {
+            images: 1,
+            videos: 1,
+            ..CliPromptMedia::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(with_image, cli);
+}
+
 #[cfg(unix)]
 #[test]
 fn cli_video_frames_are_private_and_removed_with_the_run() {

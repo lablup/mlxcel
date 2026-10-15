@@ -784,20 +784,27 @@ impl CliPromptMedia {
 /// are later expanded into full soft-token blocks by the per-family expansion
 /// helpers).
 ///
-/// Only used when the template explicitly handles `type == 'image'`
-/// content items. Video content parts are only emitted when the template
-/// also handles `type == 'video'`, and audio content parts only when it
-/// handles `type == 'audio'`. Templates without image support fall back to
+/// Each modality is decided on its own (issue #1789): image items (and the
+/// fallback frames) only when the template handles `type == 'image'`, video
+/// items only when it handles `type == 'video'`, audio items only when it
+/// handles `type == 'audio'`. A template with none of the three falls back to
 /// text-only.
 fn apply_vlm_chat_template(
     processor: &ChatTemplateProcessor,
     user_prompt: &str,
     media: &CliPromptMedia,
 ) -> Result<String> {
-    // Only attempt multimodal rendering when the template handles image
-    // content items.  Templates that don't (e.g. Vicuna, ChatML) would
-    // render the raw JSON list as text, producing garbled output.
-    if !processor.supports_image_content() {
+    // The list shape follows the template as a whole, the way the server's
+    // raw-render choice does: a typed content list is built when the template
+    // handles image, video or audio items. Templates that handle none of them
+    // (e.g. Vicuna, ChatML) would render the raw JSON list as text, producing
+    // garbled output. The items inside the list are decided per modality
+    // (issue #1789), so a template with a `video` branch and no `image`
+    // branch still gets the video item, as the server hands it.
+    let emit_image = processor.supports_image_content();
+    let emit_video = media.videos > 0 && processor.supports_video_content();
+    let emit_audio = media.audios > 0 && processor.supports_audio_content();
+    if !(emit_image || processor.supports_video_content() || processor.supports_audio_content()) {
         return apply_user_chat_template(processor, &media.flattened_text(user_prompt));
     }
 
@@ -825,11 +832,11 @@ fn apply_vlm_chat_template(
     // server. Keep audio last so the CLI and server render the identical audio
     // user turn.
     // https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/prompt_utils.py
-    let emit_video = media.videos > 0 && processor.supports_video_content();
-    let emit_audio = media.audios > 0 && processor.supports_audio_content();
     let mut content_parts: Vec<serde_json::Value> = Vec::new();
-    for _ in 0..media.images {
-        content_parts.push(serde_json::json!({"type": "image"}));
+    if emit_image {
+        for _ in 0..media.images {
+            content_parts.push(serde_json::json!({"type": "image"}));
+        }
     }
     // Clips the fallback turned into stills (issue #1766): each clip's own
     // lead sentence immediately ahead of that clip's frames, so two clips reach
@@ -837,8 +844,10 @@ fn apply_vlm_chat_template(
     // under a sentence naming their sum.
     for group in &media.video_frame_groups {
         content_parts.push(serde_json::json!({"type": "text", "text": group.lead_text}));
-        for _ in 0..group.frames {
-            content_parts.push(serde_json::json!({"type": "image"}));
+        if emit_image {
+            for _ in 0..group.frames {
+                content_parts.push(serde_json::json!({"type": "image"}));
+            }
         }
     }
     if emit_video {

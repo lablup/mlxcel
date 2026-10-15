@@ -984,6 +984,12 @@ pub(crate) async fn prepare_chat_request_with_cache_and_video_allowlist(
     // text render is both what the template expects and what the token-level
     // expansion assumes. Audio requests stay on the raw path regardless,
     // because that is where the ordered `<|audio_i|>` sentinels are emitted.
+    //
+    // The list shape follows the template as a whole (any of the three typed
+    // branches), and the items inside it follow each modality (issue #1789):
+    // `drop_unsupported_media_items` removes the ones the template has no
+    // branch for, so a template that handles `video` but not `image` gets the
+    // clip item the CLI also hands it.
     let media_parts_need_raw_render = has_template_media_parts(request)
         && (processor.supports_image_content()
             || processor.supports_video_content()
@@ -1001,6 +1007,7 @@ pub(crate) async fn prepare_chat_request_with_cache_and_video_allowlist(
         // text, which would otherwise drop image/audio/video positions before
         // processor-aware templates can render their placeholder tokens.
         let mut raw_messages = build_raw_json_messages_with_thinking(request, preserve_thinking);
+        drop_unsupported_media_items(&mut raw_messages, processor);
         // Under a prefill the continuation message is not rendered by the
         // template: it is appended after the generation prompt below.
         if prefill.is_some()
@@ -1981,6 +1988,41 @@ fn build_raw_json_messages_with_thinking(
 /// (`image`, `video`, `audio`). Routing only these requests through the raw
 /// renderer keeps the established string-content path unchanged for ordinary
 /// text requests and text-only content arrays.
+/// Remove typed `image` / `video` items the template has no branch for from a
+/// raw-JSON message list, so each modality is decided on its own (issue
+/// #1789). The CLI's `apply_vlm_chat_template` omits the same items, which
+/// keeps the two fronts' prompts identical for a template that renders only
+/// one of them. Audio items are not touched: the server never emits them on
+/// this path.
+fn drop_unsupported_media_items(
+    messages: &mut serde_json::Value,
+    processor: &ChatTemplateProcessor,
+) {
+    let drop_image = !processor.supports_image_content();
+    let drop_video = !processor.supports_video_content();
+    if !drop_image && !drop_video {
+        return;
+    }
+    let Some(messages) = messages.as_array_mut() else {
+        return;
+    };
+    for message in messages {
+        let Some(items) = message
+            .get_mut("content")
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            continue;
+        };
+        items.retain(
+            |item| match item.get("type").and_then(serde_json::Value::as_str) {
+                Some("image") => !drop_image,
+                Some("video") => !drop_video,
+                _ => true,
+            },
+        );
+    }
+}
+
 fn has_template_media_parts(request: &ChatCompletionRequest) -> bool {
     request.messages.iter().any(|message| {
         matches!(
