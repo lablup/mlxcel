@@ -134,6 +134,23 @@ mlxcel-server --models-dir /srv/models \
 
 Router management, live LoRA, native routes, runtime settings, context sizing, idle sleep, and compatibility migration details are in [Server features](docs/server-features.md).
 
+### Use the bundled WebUI
+
+`--webui` adds a browser interface to either server entry point: a model library with load, unload, download, and delete; local chat; runtime activity; and scoped settings. It is compiled into the binary and makes no external requests.
+
+```bash
+# From an interactive terminal: prints a one-time session key, then open
+# http://127.0.0.1:8080/webui/ and paste it.
+mlxcel-server --webui --models-dir ~/models/mlx
+
+# As a service, or anywhere without a terminal: use a key file.
+mkdir -p ~/.config/mlxcel
+(umask 077 && openssl rand -hex 32 > ~/.config/mlxcel/webui.key)
+mlxcel serve --webui --api-key-file ~/.config/mlxcel/webui.key --models-dir ~/models/mlx
+```
+
+The [WebUI guide](docs/webui/README.md) ([한국어](docs/webui/user-guide.ko.md)) covers keys, remote access over TLS or a reverse proxy, offline use, privacy, and troubleshooting.
+
 ### Embed and rerank
 
 The offline commands use the same loaders and batching paths as the HTTP endpoints.
@@ -306,11 +323,12 @@ Install with `pip install ./python`. See [Python client](docs/python-client.md) 
 
 ## Optional GUI
 
-`mlxcel-server` can be used directly through HTTP clients. [Backend.AI Go](https://go.backend.ai) is available as a companion UI for local chat, model management, and multi-model routing.
+`mlxcel-server --webui` serves the bundled browser WebUI described in [docs/webui](docs/webui/README.md). `mlxcel-server` can also be used directly through HTTP clients, and [Backend.AI Go](https://go.backend.ai) is available as a companion desktop UI for local chat, model management, and multi-model routing.
 
 ## Documentation
 
 - [Server features and route map](docs/server-features.md)
+- [Bundled WebUI](docs/webui/README.md)
 - [llama-server b10621 compatibility boundary](docs/llama-server-compat.md)
 - [Installation and build prerequisites](docs/installation.md)
 - [Environment variables](docs/environment-variables.md)

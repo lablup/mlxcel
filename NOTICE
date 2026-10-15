@@ -160,6 +160,23 @@ The bundled WebUI assets under src/webui/assets/ include production runtime code
     SOFTWARE.
 
 
+@lablup/ui-common (WebUI shared components)
+-------------------------------------------
+
+The bundled WebUI assets under src/webui/assets/ include compiled code and the base stylesheet of @lablup/ui-common 0.1.0-alpha.19 (https://github.com/lablup/ui-common), Copyright 2026 Lablup Inc., licensed under the Apache License, Version 2.0. The package's own NOTICE and LICENSE are also shipped verbatim inside the offline WebUI bundle as part of third-party-licenses.txt. The following notice is carried forward verbatim from its NOTICE file, as required by Apache License 2.0 Section 4(d):
+
+    @lablup/ui-common
+    Copyright 2026 Lablup Inc.
+
+    This product includes software developed at Lablup Inc.
+    (https://www.lablup.com/).
+
+    Portions of this package were extracted from an existing Lablup product
+    frontend. The extraction is a clean import: no upstream git history is
+    published here, and the migration record is kept in that product's own
+    repository.
+
+
 backend.ai-go (WebUI glass theme)
 ---------------------------------
 

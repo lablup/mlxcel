@@ -326,7 +326,9 @@ environment map.
 ## Deliberate non-goals
 
 mlxcel does not ship llama-server's embedded Web UI and does not execute tools,
-MCP servers, an agent loop, or the UI CORS proxy. Enabling those compatibility
+MCP servers, an agent loop, or the UI CORS proxy. Its own bundled WebUI is a
+separate, opt-in feature started with `--webui`; see
+[`webui/README.md`](webui/README.md). Enabling those compatibility
 flags fails at startup instead of silently pretending that the capability is
 active. `/tools` and `/cors-proxy` retain the disabled-feature response shape
 expected by clients. Client-declared tools and parsed `tool_calls` remain
