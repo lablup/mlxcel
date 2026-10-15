@@ -83,6 +83,12 @@ mod decode_undo;
 #[cfg(test)]
 #[path = "cache/decode_undo_tests.rs"]
 mod decode_undo_tests;
+#[cfg(test)]
+#[path = "cache/delegated_parity_diag.rs"]
+mod delegated_parity_diag;
+#[cfg(test)]
+#[path = "cache/delegated_parity_diag_tests.rs"]
+mod delegated_parity_diag_tests;
 mod detach;
 mod paged;
 #[cfg(test)]

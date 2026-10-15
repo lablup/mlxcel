@@ -2714,21 +2714,27 @@ fn delegated_dequant_sdpa_matches_reference_attention() {
 
 /// Steel-envelope vs cold-only fused composition parity.
 ///
-/// `update_and_turbo4_delegated_attention` first tries the steel-envelope
-/// kernel (single Metal dispatch covering softmax, cold-V dequant, and hot-V accumulate). On the same hardware where the cold-only fused
-/// composition path already produces correct output, the
-/// steel-envelope path must produce numerically equivalent output (within
-/// FP16 round-off) — both paths funnel through the same MLX softmax algebra
-/// and the same Turbo4 inverse rotation; the only difference is whether the
-/// post-Q·K work runs as one Metal dispatch or as a host-graph composition.
+/// Drives two caches with identical inputs and compares, at every decode
+/// step, the steel-envelope kernel (`attention_turbo4_delegated_steel`, one
+/// Metal dispatch for softmax, cold-V dequant and hot-V accumulate) against
+/// the cold-only fused composition (`attention_turbo4_delegated_fused`). Both
+/// funnel through the same softmax algebra and the same inverse Turbo4
+/// rotation, so they must agree within FP16 round-off (RMS < 5e-3). This
+/// catches a softmax-merge bug inside the steel kernel that a comparison
+/// against the graph reference alone would not localise.
 ///
-/// This is a **direct** comparison: we drive two caches with identical
-/// inputs, call the steel-envelope path on one and the cold-only fused path
-/// on the other, and require RMS < 5e-3. This guards against the failure
-/// mode where both paths individually pass against the
-/// `delegated_reference_attention` baseline (which uses graph-level dense
-/// V dequant) but disagree with each other due to a softmax-merge bug
-/// inside the steel kernel.
+/// The steel kernel is called directly on the steel cache's kernel inputs.
+/// Until #1712 this test reached it only through
+/// `update_and_turbo4_delegated_attention`, which since the dequant-first
+/// SDPA route became the default (`MLXCEL_TURBO4_DELEGATED_DEQUANT_SDPA`,
+/// on unless set falsy) returns before the steel kernel is tried, so the
+/// launcher CONTRIBUTING.md names for post-pin-bump re-validation had no
+/// test at all. The wrapper's output is still compared against the cold-only
+/// composition, because that pairing (dequant-first SDPA vs cold-only) is the
+/// one that failed twice in #1712 with an identical `RMS 4.6824e-1` at step
+/// 0; on any failure the panic carries the
+/// `delegated_parity_diag::diagnose_delegated_mismatch` report, which is
+/// enough to classify a single recurrence.
 ///
 /// The 200-step length and `hot_threshold = 32` cadence match
 /// `delegated_fused_kernel_matches_reference_over_200_steps` so this test
@@ -2736,17 +2742,20 @@ fn delegated_dequant_sdpa_matches_reference_attention() {
 #[cfg(target_os = "macos")]
 #[test]
 fn delegated_steel_envelope_matches_cold_only_fused_over_200_steps() {
+    use super::delegated_parity_diag::{
+        DelegatedKernelInputs, DelegatedPath, MismatchContext, diagnose_delegated_mismatch,
+        parity_diff,
+    };
+
     let head_dim = 64;
     let prefill_len = 8;
     let total_steps = 200;
     let scale = 1.0 / (head_dim as f32).sqrt();
 
-    // Cache A: drives `update_and_turbo4_delegated_attention`, which prefers
-    // the steel-envelope kernel on macOS + power-of-2 head_dim (wiring in `cache::update_and_turbo4_delegated_attention`).
+    // Cache A: drives `update_and_turbo4_delegated_attention` (whatever route
+    // it selects), then the steel kernel directly on the same updated state.
     let mut cache_steel = build_delegated_cache_with_small_threshold(32);
-    // Cache B: drives the cold-only fused composition directly
-    // by calling `attention_turbo4_delegated_fused` after `update`. Bypasses
-    // the wrapper so the steel envelope is not selected.
+    // Cache B: `update`, then the cold-only fused composition directly.
     let mut cache_cold_only = build_delegated_cache_with_small_threshold(32);
 
     let k_pre = synth_kv_tensor(1, 1, prefill_len, head_dim, 7);
@@ -2767,127 +2776,86 @@ fn delegated_steel_envelope_matches_cold_only_fused_over_200_steps() {
         let v_b = ffi::copy(&v_a);
         let q = synth_kv_tensor(1, 1, 1, head_dim, 9000 + step as u32);
 
-        // Steel-envelope path (default after).
-        let q_for_steel = ffi::copy(&q);
-        let out_steel =
-            cache_steel.update_and_turbo4_delegated_attention(&q_for_steel, k_a, v_a, scale, None);
-
-        // Cold-only fused composition path. We replicate the relevant slice
-        // of `update_and_turbo4_delegated_attention` so the cold-only fused
-        // helper sees the same per-token snapshot the wrapper would have
-        // built. The wrapper code path is mirrored verbatim from `cache.rs`
-        // (commit 5d95adb on this branch) modulo the steel-envelope try
-        // that we explicitly skip.
-        cache_cold_only.update(k_b, v_b);
-        let cold_offset = cache_cold_only.cold_offset();
-        let hot_offset = cache_cold_only.seq_len() - cold_offset;
-
-        // Eagerly resolve turbo_params just like the wrapper does. We poke
-        // the cache through one no-op `delegated_graph_attention` call so
-        // turbo_params is populated; that call is otherwise harmless for
-        // this comparison since we throw away its output.
-        let _ = cache_cold_only.delegated_graph_attention(&q, scale, None);
-        // (The `delegated_graph_attention` mutated nothing on the cache —
-        // it only reads. After it returns, turbo_params is set if it was
-        // unset, and v_packed/v_rescale/values are still in sync.)
-
-        // Slice the kernel inputs out of the (now-updated) cache, mirroring
-        // the wrapper's slicing logic.
-        let k_buf = cache_cold_only
-            .keys
-            .as_ref()
-            .expect("unified keys must exist after update on Turbo4Delegated");
-        let ks = ffi::array_shape(k_buf);
-        let k_slice = ffi::slice(
-            k_buf,
-            &[0, 0, 0, 0],
-            &[ks[0], ks[1], cache_cold_only.seq_len(), ks[3]],
-        );
-        let v_packed_owned = if cold_offset > 0 {
-            let vp = cache_cold_only
-                .v_packed
-                .as_ref()
-                .expect("v_packed must exist when cold_offset > 0");
-            let vp_shape = ffi::array_shape(vp);
-            Some(ffi::slice(
-                vp,
-                &[0, 0, 0, 0],
-                &[vp_shape[0], vp_shape[1], cold_offset, vp_shape[3]],
-            ))
-        } else {
-            None
-        };
-        let v_rescale_owned = if cold_offset > 0 {
-            let vr = cache_cold_only
-                .v_rescale
-                .as_ref()
-                .expect("v_rescale must exist when cold_offset > 0");
-            let vr_shape = ffi::array_shape(vr);
-            Some(ffi::slice(
-                vr,
-                &[0, 0, 0, 0],
-                &[vr_shape[0], vr_shape[1], cold_offset, 1],
-            ))
-        } else {
-            None
-        };
-        let hot_v_owned = if hot_offset > 0 {
-            let hv = cache_cold_only
-                .values
-                .as_ref()
-                .expect("hot values must exist when hot_offset > 0");
-            let hv_shape = ffi::array_shape(hv);
-            Some(ffi::slice(
-                hv,
-                &[0, 0, 0, 0],
-                &[hv_shape[0], hv_shape[1], hot_offset, hv_shape[3]],
-            ))
-        } else {
-            None
-        };
-        let params = cache_cold_only
-            .turbo_params
-            .as_ref()
-            .expect("turbo_params populated after delegated_graph_attention");
-        let threshold = crate::cache::turbo::sparse_v::threshold();
-
-        let out_cold_only = crate::cache::turbo::sparse_v::attention_turbo4_delegated_fused(
-            &q,
-            &k_slice,
-            v_packed_owned.as_deref(),
-            v_rescale_owned.as_deref(),
-            hot_v_owned.as_deref(),
-            params,
-            cold_offset,
-            hot_offset,
+        let q_for_wrapper = ffi::copy(&q);
+        let out_wrapper = cache_steel.update_and_turbo4_delegated_attention(
+            &q_for_wrapper,
+            k_a,
+            v_a,
             scale,
             None,
-            threshold,
-        )
-        .expect("cold-only fused path must dispatch on macOS + pow-of-2 head_dim");
+        );
+        let steel_inputs = DelegatedKernelInputs::from_cache(&cache_steel);
+        let steel_params = cache_steel
+            .turbo_params
+            .clone()
+            .expect("turbo_params set by update_and_turbo4_delegated_attention");
+        let out_steel = DelegatedPath::Steel
+            .run(&steel_inputs, &q, &steel_params, scale, None)
+            .expect("steel envelope must dispatch on macOS + pow-of-2 head_dim");
 
-        // Compare steel vs cold-only output element-by-element.
-        let flat_a = flatten_fp32(&out_steel);
-        let flat_b = flatten_fp32(&out_cold_only);
-        assert_eq!(flat_a.len(), flat_b.len(), "step {step}: shape mismatch");
-        let mut sum_sq = 0.0_f64;
-        for (x, y) in flat_a.iter().zip(flat_b.iter()) {
-            let d = (x - y) as f64;
-            sum_sq += d * d;
-        }
-        let rms = (sum_sq / flat_a.len() as f64).sqrt() as f32;
-        if rms > max_rms {
-            max_rms = rms;
-        }
+        cache_cold_only.update(k_b, v_b);
+        // `delegated_graph_attention` only reads; it is called to make sure
+        // turbo_params is resolved before the inputs are sliced.
+        let _ = cache_cold_only.delegated_graph_attention(&q, scale, None);
+        let cold_inputs = DelegatedKernelInputs::from_cache(&cache_cold_only);
+        let cold_params = cache_cold_only
+            .turbo_params
+            .clone()
+            .expect("turbo_params populated after delegated_graph_attention");
+        let out_cold_only = DelegatedPath::ColdOnlyFused
+            .run(&cold_inputs, &q, &cold_params, scale, None)
+            .expect("cold-only fused path must dispatch on macOS + pow-of-2 head_dim");
+        let (cold_offset, hot_offset) = (cold_inputs.cold_offset, cold_inputs.hot_offset);
+
+        let flat_wrapper = flatten_fp32(&out_wrapper);
+        let flat_steel = flatten_fp32(&out_steel);
+        let flat_cold = flatten_fp32(&out_cold_only);
+        assert_eq!(
+            flat_steel.len(),
+            flat_cold.len(),
+            "step {step}: shape mismatch"
+        );
+        assert_eq!(
+            flat_wrapper.len(),
+            flat_cold.len(),
+            "step {step}: wrapper shape mismatch"
+        );
+        let steel_diff = parity_diff(&flat_steel, &flat_cold, head_dim as usize);
+        let wrapper_diff = parity_diff(&flat_wrapper, &flat_cold, head_dim as usize);
+        max_rms = max_rms.max(steel_diff.rms).max(wrapper_diff.rms);
         if cache_steel.cold_offset() != prev_cold_offset {
             steps_with_fold += 1;
             prev_cold_offset = cache_steel.cold_offset();
         }
-        assert!(
-            rms < 5e-3,
-            "step {step}: steel vs cold-only RMS {rms:.4e} exceeds 5e-3 \
-             (cold_offset={cold_offset}, hot_offset={hot_offset})",
-        );
+
+        // A NaN RMS fails too, not only one at or over the bound.
+        let failure = [("steel", steel_diff), ("wrapper", wrapper_diff)]
+            .into_iter()
+            .find(|(_, d)| d.rms.is_nan() || d.rms >= 5e-3);
+        if let Some((label, diff)) = failure {
+            let observed: [(&str, &[f32]); 3] = [
+                ("wrapper", &flat_wrapper),
+                ("steel", &flat_steel),
+                ("cold-only", &flat_cold),
+            ];
+            let report = diagnose_delegated_mismatch(
+                &MismatchContext {
+                    step,
+                    head_dim: head_dim as usize,
+                    q: &q,
+                    scale,
+                    mask: None,
+                    observed: &observed,
+                },
+                &mut cache_steel,
+                &mut cache_cold_only,
+            );
+            panic!(
+                "step {step}: {label} vs cold-only RMS {:.4e} exceeds 5e-3 \
+                 (cold_offset={cold_offset}, hot_offset={hot_offset}); {diff}\n{report}",
+                diff.rms
+            );
+        }
     }
 
     assert!(
@@ -2914,9 +2882,18 @@ fn delegated_steel_envelope_matches_cold_only_fused_over_200_steps() {
 /// exactly one fold boundary at `hot_threshold = 32` (16 + 16 = 32 →
 /// fold on step 17). Both pre-fold (only hot) and post-fold (cold + hot)
 /// states are exercised.
+///
+/// Both the wrapper's output (its default dequant-first SDPA route) and the
+/// steel kernel called directly are held to the reference: the wrapper alone
+/// never reaches the steel kernel (#1712).
 #[cfg(target_os = "macos")]
 #[test]
 fn delegated_steel_envelope_grouped_attention_with_mask_parity() {
+    use super::delegated_parity_diag::{
+        DelegatedKernelInputs, DelegatedPath, MismatchContext, diagnose_delegated_mismatch,
+        parity_diff,
+    };
+
     let head_dim = 64;
     let kv_heads = 2_i32;
     let n_rep = 2_i32;
@@ -2965,13 +2942,23 @@ fn delegated_steel_envelope_grouped_attention_with_mask_parity() {
         let mask_b = ffi::copy(&mask_a);
 
         let q_for_steel = ffi::copy(&q);
-        let out_steel = cache_steel.update_and_turbo4_delegated_attention(
+        let out_wrapper = cache_steel.update_and_turbo4_delegated_attention(
             &q_for_steel,
             k_a,
             v_a,
             scale,
             Some(&mask_a),
         );
+        // The wrapper takes the dequant-first SDPA route by default and never
+        // reaches the steel kernel (#1712), so call it directly as well.
+        let steel_inputs = DelegatedKernelInputs::from_cache(&cache_steel);
+        let steel_params = cache_steel
+            .turbo_params
+            .clone()
+            .expect("turbo_params set by update_and_turbo4_delegated_attention");
+        let out_steel = DelegatedPath::Steel
+            .run(&steel_inputs, &q, &steel_params, scale, Some(&mask_a))
+            .expect("steel envelope must dispatch on macOS + pow-of-2 head_dim");
 
         // Reference: drive `cache_ref` through update_and_fetch + manual SDPA
         // including the additive mask.
@@ -3012,25 +2999,51 @@ fn delegated_steel_envelope_grouped_attention_with_mask_parity() {
         let out_f32 = ffi::matmul(&attn, &v_f32);
         let out_ref = ffi::astype(&out_f32, dtype::FLOAT16);
 
-        let flat_a = flatten_fp32(&out_steel);
-        let flat_b = flatten_fp32(&out_ref);
-        assert_eq!(flat_a.len(), flat_b.len(), "step {step}: shape mismatch");
-        let mut sum_sq = 0.0_f64;
-        for (x, y) in flat_a.iter().zip(flat_b.iter()) {
-            let d = (x - y) as f64;
-            sum_sq += d * d;
-        }
-        let rms = (sum_sq / flat_a.len() as f64).sqrt() as f32;
-        if rms > max_rms {
-            max_rms = rms;
-        }
-        assert!(
-            rms < 5e-3,
-            "step {step}: grouped+masked steel vs reference RMS {rms:.4e} exceeds 5e-3 \
-             (cold_offset={}, hot_offset={})",
-            cache_steel.cold_offset(),
-            cache_steel.seq_len() - cache_steel.cold_offset()
+        let flat_wrapper = flatten_fp32(&out_wrapper);
+        let flat_steel = flatten_fp32(&out_steel);
+        let flat_ref = flatten_fp32(&out_ref);
+        assert_eq!(
+            flat_steel.len(),
+            flat_ref.len(),
+            "step {step}: shape mismatch"
         );
+        assert_eq!(
+            flat_wrapper.len(),
+            flat_ref.len(),
+            "step {step}: wrapper shape mismatch"
+        );
+        let steel_diff = parity_diff(&flat_steel, &flat_ref, head_dim as usize);
+        let wrapper_diff = parity_diff(&flat_wrapper, &flat_ref, head_dim as usize);
+        max_rms = max_rms.max(steel_diff.rms).max(wrapper_diff.rms);
+        let failure = [("steel", steel_diff), ("wrapper", wrapper_diff)]
+            .into_iter()
+            .find(|(_, d)| d.rms.is_nan() || d.rms >= 5e-3);
+        if let Some((label, diff)) = failure {
+            let observed: [(&str, &[f32]); 3] = [
+                ("wrapper", &flat_wrapper),
+                ("steel", &flat_steel),
+                ("reference", &flat_ref),
+            ];
+            let report = diagnose_delegated_mismatch(
+                &MismatchContext {
+                    step,
+                    head_dim: head_dim as usize,
+                    q: &q,
+                    scale,
+                    mask: Some(&mask_a),
+                    observed: &observed,
+                },
+                &mut cache_steel,
+                &mut cache_ref,
+            );
+            panic!(
+                "step {step}: grouped+masked {label} vs reference RMS {:.4e} exceeds 5e-3 \
+                 (cold_offset={}, hot_offset={}); {diff}\n{report}",
+                diff.rms,
+                cache_steel.cold_offset(),
+                cache_steel.seq_len() - cache_steel.cold_offset()
+            );
+        }
     }
 
     eprintln!(
