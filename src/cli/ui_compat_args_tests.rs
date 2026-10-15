@@ -138,6 +138,57 @@ fn webui_enable_disable_resolves_with_last_flag_winning() {
     );
 }
 
+/// #1900: `--webui` / `--no-webui` are the one visible pair of the group,
+/// under their own help heading, and no other spelling of the group (the
+/// b10621 `--ui` / `--no-ui` aliases and every refused surface) is listed.
+#[test]
+fn help_lists_only_the_webui_pair_under_its_heading() {
+    use clap::CommandFactory;
+
+    let command = Probe::command();
+    let mut visible: Vec<&str> = command
+        .get_arguments()
+        .filter(|arg| !arg.is_hide_set())
+        .filter_map(|arg| arg.get_long())
+        .collect();
+    visible.sort_unstable();
+    assert_eq!(visible, ["no-webui", "webui"]);
+    for arg in command.get_arguments().filter(|arg| !arg.is_hide_set()) {
+        assert_eq!(
+            arg.get_help_heading(),
+            Some(WEBUI_HELP_HEADING),
+            "{:?} must sit under the WebUI heading",
+            arg.get_long()
+        );
+        assert!(
+            arg.get_visible_aliases().unwrap_or_default().is_empty(),
+            "{:?} must not list its b10621 alias",
+            arg.get_long()
+        );
+    }
+
+    let help = Probe::command().render_help().to_string();
+    assert!(
+        help.contains(&format!("\n{WEBUI_HELP_HEADING}:\n")),
+        "rendered help must carry the {WEBUI_HELP_HEADING:?} section:\n{help}"
+    );
+    for hidden in [
+        "--ui ",
+        "--no-ui ",
+        "--ui-config",
+        "--path",
+        "--tools",
+        "--mcp-servers",
+        "--ui-mcp-proxy",
+        "--agent",
+    ] {
+        assert!(
+            !help.contains(hidden),
+            "rendered help lists {hidden}:\n{help}"
+        );
+    }
+}
+
 #[test]
 fn bool_pair_env_bindings_follow_b10621_rules() {
     let _guard = crate::test_support::env_lock::env_lock();

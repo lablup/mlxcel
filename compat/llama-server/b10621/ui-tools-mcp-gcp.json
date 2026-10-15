@@ -227,7 +227,7 @@
       "state": "by_design",
       "issue": 1838,
       "test": "src/cli/ui_compat_args_tests.rs::webui_enable_disable_resolves_with_last_flag_winning",
-      "notes": "mlxcel now accepts --ui/--webui as aliases for the bundled WebUI and accepts --no-ui/--no-webui as explicit disables. LLAMA_ARG_UI resolves at runtime with b10621's parse_bool_value rules (LLAMA_ARG_NO_UI wins and means false), CLI flags take precedence, and repeated flag pairs use clap's last-wins override behavior.",
+      "notes": "mlxcel accepts --ui/--webui as aliases for the bundled WebUI and accepts --no-ui/--no-webui as explicit disables. LLAMA_ARG_UI resolves at runtime with b10621's parse_bool_value rules (LLAMA_ARG_NO_UI wins and means false), CLI flags take precedence, and repeated flag pairs use clap's last-wins override behavior. --webui and --no-webui are mlxcel's own product flags and are listed in --help under WebUI Options on both server binaries (#1900); --ui and --no-ui stay hidden aliases of the same two arguments, and every other entry in this shard stays hidden (tests/webui_cli_help.rs).",
       "divergence": [
         "b10621 enables its Web UI by default at /; mlxcel keeps the WebUI opt-in and serves it at ${api-prefix}/webui/."
       ],
@@ -249,7 +249,7 @@
         "env": "LLAMA_ARG_UI",
         "env_binding": "runtime",
         "env_test": "src/cli/ui_compat_args_tests.rs",
-        "hidden": true
+        "hidden": false
       }
     },
     {
@@ -272,9 +272,9 @@
       "state": "not_applicable",
       "issue": 1435,
       "test": "src/cli/ui_compat_args_tests.rs::every_unsupported_enabling_form_is_rejected_with_its_flag_named",
-      "notes": "Configures the web UI mlxcel does not ship; any value fails startup with the UI diagnostic.",
+      "notes": "Configures llama-server's own web UI. mlxcel's bundled WebUI (--webui) keeps its preferences in the browser and does not consume upstream UI JSON, so any value fails startup with the UI diagnostic, also when --webui is on.",
       "divergence": [
-        "b10621 applies the JSON to its web UI; mlxcel rejects the flag at startup because no UI exists."
+        "b10621 applies the JSON to its web UI; mlxcel rejects the flag at startup because its bundled WebUI does not read upstream UI settings."
       ],
       "rationale": null,
       "mlxcel": {
@@ -307,9 +307,9 @@
       "state": "not_applicable",
       "issue": 1435,
       "test": "src/cli/ui_compat_args_tests.rs::every_unsupported_enabling_form_is_rejected_with_its_flag_named",
-      "notes": "Configures the web UI mlxcel does not ship; any value fails startup with the UI diagnostic.",
+      "notes": "The file form of --ui-config. mlxcel's bundled WebUI (--webui) does not consume upstream UI JSON files, so any value fails startup with the UI diagnostic, also when --webui is on.",
       "divergence": [
-        "b10621 applies the file to its web UI; mlxcel rejects the flag at startup because no UI exists."
+        "b10621 applies the file to its web UI; mlxcel rejects the flag at startup because its bundled WebUI does not read upstream UI settings."
       ],
       "rationale": null,
       "mlxcel": {

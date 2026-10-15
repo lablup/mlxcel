@@ -23,9 +23,9 @@
 //! covers what only the built binaries can answer:
 //!
 //! 1. Every mlxcel acceptance claim on an option entry (accepted spellings,
-//!    clap env bindings, defaults, hidden-ness) holds against the actual
-//!    clap surface of BOTH `mlxcel serve` and `mlxcel-server`, hidden
-//!    compatibility arguments included. The surface comes from the hidden
+//!    clap env bindings, defaults, hidden-ness in both directions) holds
+//!    against the actual clap surface of BOTH `mlxcel serve` and
+//!    `mlxcel-server`, hidden compatibility arguments included. The surface comes from the hidden
 //!    `--dump-flag-surface` machine interface (`src/cli/flag_surface.rs`),
 //!    not from `--help`, precisely so hidden arguments are visible.
 //! 2. When the official b10621 archive is available locally, the manifest's
@@ -232,6 +232,17 @@ fn manifest_option_claims_hold_on_both_server_binaries() {
                         arg["hidden"], true,
                         "{id}: manifest records a hidden compatibility \
                          argument but {} no longer hides it",
+                        surface.label
+                    );
+                }
+                // The other direction (#1900): an entry that claims a
+                // visible argument must really be listed in `--help`, so
+                // the claim cannot outlive a later re-hide.
+                if claim["hidden"] == false {
+                    assert_eq!(
+                        arg["hidden"], false,
+                        "{id}: manifest records a visible argument but {} \
+                         hides it",
                         surface.label
                     );
                 }

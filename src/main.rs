@@ -1221,6 +1221,13 @@ Model store:
   Use --model-store-root (or MLXCEL_MODELS_DIR) to point the mlxcel store at another
   volume; snapshots live at <root>/<owner>/<name> under that root.
 
+WebUI:
+  --webui serves the bundled browser UI at <api-prefix>/webui/, for example
+  http://127.0.0.1:8080/webui/. Without --api-key or --api-key-file it starts
+  only on an interactive loopback terminal, which prints a session key once.
+  User guide, remote access, and troubleshooting:
+    https://github.com/lablup/mlxcel/blob/main/docs/webui/README.md
+
 Embeddings and Reranking:
   -m <embedding checkpoint> serves POST /v1/embeddings without a chat model.
   --embedding-model <checkpoint> adds embeddings beside the chat model in -m.

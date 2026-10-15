@@ -29,12 +29,15 @@
 //! server-side MCP tool loop is tracked separately as a product feature
 //! (#1457), outside b10621 compatibility.
 //!
-//! The classification is now split between #1435 and #1838: the flags parse
-//! (hidden), `--ui`/`--webui` enable mlxcel's bundled WebUI, the negative
-//! forms (`--no-ui`, `--no-webui`, `--no-agent`, `--no-ui-mcp-proxy`,
+//! The classification is now split between #1435 and #1838: the flags parse,
+//! `--ui`/`--webui` enable mlxcel's bundled WebUI, the negative forms
+//! (`--no-ui`, `--no-webui`, `--no-agent`, `--no-ui-mcp-proxy`,
 //! `--no-webui-mcp-proxy`) are accepted as disables/no-ops, and every
 //! unsupported adjacent surface fails startup with a one-line diagnostic
-//! naming the supported alternative, before the model load. The `/tools` and `/cors-proxy` routes are mounted as b10621's own
+//! naming the supported alternative, before the model load. Only the
+//! `--webui` / `--no-webui` pair is listed in `--help` (#1900); every other
+//! argument in the group, `--ui` and `--no-ui` included, stays hidden. The
+//! `/tools` and `/cors-proxy` routes are mounted as b10621's own
 //! disabled-feature stubs: 403 with
 //! `{"error":{"message":"this feature is disabled","type":"feature_disabled"}}`,
 //! which is exactly what upstream answers when the features are off.
@@ -59,28 +62,40 @@ use clap::Args;
 
 use crate::cli::ggml_compat_args::env_bool_pair;
 
+/// `--help` section that holds the visible `--webui` / `--no-webui` pair on
+/// both `mlxcel serve` and `mlxcel-server`. Set per argument rather than with
+/// `next_help_heading`, so it cannot bleed into the flag groups flattened
+/// after this one.
+pub const WEBUI_HELP_HEADING: &str = "WebUI Options";
+
 /// llama-server b10621 Web UI / tools / MCP / agent compatibility surface.
 ///
-/// All hidden: these are llama-server compatibility arguments. The bundled
-/// WebUI has its own docs and startup log instead of expanding the existing
-/// llama-compatible help surface.
+/// The `--webui` / `--no-webui` pair is mlxcel's own product flag for the
+/// bundled WebUI, so it is the one visible pair here, under its own
+/// [`WEBUI_HELP_HEADING`] (#1900); `--ui` / `--no-ui` stay hidden aliases of
+/// it for b10621 compatibility. Every other argument is a hidden llama-server
+/// compatibility surface that fails startup in [`Self::ensure_supported`].
 #[derive(Debug, Clone, Default, Args)]
 pub struct UiCompatArgs {
-    /// b10621 `--ui` / `--webui`: serve the bundled WebUI.
+    /// Serve the bundled browser WebUI at <api-prefix>/webui/ with its
+    /// authenticated UI API. Without --api-key or --api-key-file it is only
+    /// allowed on an interactive loopback terminal, which prints a generated
+    /// session key once. Off by default; also enabled by LLAMA_ARG_UI.
     #[arg(
-        long = "ui",
-        alias = "webui",
-        hide = true,
+        long = "webui",
+        alias = "ui",
+        help_heading = WEBUI_HELP_HEADING,
         action = clap::ArgAction::SetTrue,
         overrides_with = "no_ui"
     )]
     pub ui: bool,
 
-    /// b10621 `--no-ui` / `--no-webui`: explicitly disable the bundled WebUI.
+    /// Explicitly disable the bundled WebUI (the default). The last of
+    /// --webui and --no-webui on the command line wins.
     #[arg(
-        long = "no-ui",
-        alias = "no-webui",
-        hide = true,
+        long = "no-webui",
+        alias = "no-ui",
+        help_heading = WEBUI_HELP_HEADING,
         action = clap::ArgAction::SetTrue,
         overrides_with = "ui"
     )]
