@@ -458,7 +458,7 @@ Everything except `--media-path` is hidden from `--help`. Rendering the projecto
 
 ### Media parts a checkpoint cannot consume are refused
 
-A text-only checkpoint used to accept an `image_url` content block at the HTTP boundary, drop it inside `prepare_request_vlm_embeddings`, and answer from the prompt alone. The reply was fluent, and a caller could not tell an ignored picture from a described one. The chat-completions, responses and Anthropic-messages routes now refuse the request before any referenced URL or file is read, with b10621's own leading clause and its `not_supported_error` type at HTTP 501:
+A text-only checkpoint used to accept an `image_url` content block at the HTTP boundary, drop it inside `prepare_request_vlm_embeddings`, and answer from the prompt alone. The reply was fluent, and a caller could not tell an ignored picture from a described one. The chat-completions, responses and Anthropic-messages routes, and their token-count routes, now refuse the request before any referenced URL or file is read, with b10621's own leading clause and its `not_supported_error` type at HTTP 501:
 
 ```text
 image input is not supported - hint: the loaded checkpoint 'qwen3-0.6b-4bit' has no image tower; ...

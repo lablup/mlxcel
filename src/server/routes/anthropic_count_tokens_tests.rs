@@ -167,6 +167,40 @@ async fn an_image_block_is_refused_before_its_url_is_fetched() {
 }
 
 #[tokio::test]
+async fn an_image_inside_a_tool_result_is_refused_before_its_url_is_fetched() {
+    // The translator surfaces tool-result images as `image_url` parts through a
+    // branch of its own (PR #1200), so the user-turn case above does not cover
+    // it.
+    let _private = crate::server::media_net::allow_private_media_urls_in_tests();
+    let (url, hits, server) = recording_origin().await;
+    let body = serde_json::json!({
+        "model": "count-tokens-test-model",
+        "max_tokens": 16,
+        "messages": [
+            {"role": "user", "content": "look at this"},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "t1", "name": "camera", "input": {}}
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": [
+                    {"type": "image", "source": {"type": "url", "url": url}}
+                ]}
+            ]}
+        ]
+    });
+    for path in ["/v1/messages/count_tokens", "/messages/count_tokens"] {
+        let (status, response) = post(text_only_app(), path, &body).await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{path}: {response}");
+        assert_eq!(
+            response["error"]["type"], "not_supported_error",
+            "{path}: {response}"
+        );
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+    server.abort();
+}
+
+#[tokio::test]
 async fn the_recording_origin_does_see_a_fetch_the_gate_admits() {
     // Positive control for the test above: on a checkpoint that can consume
     // images, the same body passes the gate and the render resolves the URL,
