@@ -538,7 +538,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     out.write("# columns\tchunk\tpos\ttarget\tnll\ttop_ids\ttop_logits\n")
     bos_anchor = ",".join(str(t) for t in bos_prefix) or "none"
-    out.write(f"# bos_anchor\t{bos_anchor}\tchunks\tall\n")
+    anchored = "all" if bos_prefix else "none"
+    out.write(f"# bos_anchor\t{bos_anchor}\tchunks\t{anchored}\n")
     for chunk in chunks:
         nll, top_ids, top_logits = results[chunk.index]
         for j, target in enumerate(chunk.targets):

@@ -258,16 +258,17 @@ fn main() -> Result<()> {
     println!("# columns\tchunk\tpos\ttarget\tnll\ttop_ids\ttop_logits");
     // Traces written before #1785 left chunk 0 unanchored, so their chunk-0
     // rows are not comparable with a trace that carries this line.
-    let bos_anchor = if bos_prefix.is_empty() {
-        "none".to_string()
+    let (bos_anchor, anchored) = if bos_prefix.is_empty() {
+        ("none".to_string(), "none")
     } else {
-        bos_prefix
+        let ids = bos_prefix
             .iter()
             .map(i32::to_string)
             .collect::<Vec<_>>()
-            .join(",")
+            .join(",");
+        (ids, "all")
     };
-    println!("# bos_anchor\t{bos_anchor}\tchunks\tall");
+    println!("# bos_anchor\t{bos_anchor}\tchunks\t{anchored}");
 
     println!("# start_token\t{start_token}");
     if let Ok(mode) = std::env::var("MLXCEL_TRACE_GEMMA4") {
