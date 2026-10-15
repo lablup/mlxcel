@@ -1980,14 +1980,6 @@ fn build_raw_json_messages_with_thinking(
     serde_json::Value::Array(messages)
 }
 
-/// Return whether any message carries a media part whose position must reach
-/// the processor-aware chat template.
-///
-/// OpenAI's wire types (`image_url`, `video_url`, `input_audio`) are transport
-/// objects, while Hugging Face processor templates branch on semantic types
-/// (`image`, `video`, `audio`). Routing only these requests through the raw
-/// renderer keeps the established string-content path unchanged for ordinary
-/// text requests and text-only content arrays.
 /// Remove typed `image` / `video` items the template has no branch for from a
 /// raw-JSON message list, so each modality is decided on its own (issue
 /// #1789). The CLI's `apply_vlm_chat_template` omits the same items, which
@@ -2023,6 +2015,14 @@ fn drop_unsupported_media_items(
     }
 }
 
+/// Return whether any message carries a media part whose position must reach
+/// the processor-aware chat template.
+///
+/// OpenAI's wire types (`image_url`, `video_url`, `input_audio`) are transport
+/// objects, while Hugging Face processor templates branch on semantic types
+/// (`image`, `video`, `audio`). Routing only these requests through the raw
+/// renderer keeps the established string-content path unchanged for ordinary
+/// text requests and text-only content arrays.
 fn has_template_media_parts(request: &ChatCompletionRequest) -> bool {
     request.messages.iter().any(|message| {
         matches!(

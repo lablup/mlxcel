@@ -43,4 +43,3 @@ CLI는 템플릿에 `image` 분기가 없으면 항상 턴을 텍스트로 평�
 
 - image 분기 없이 video 분기만 가진 체크포인트가 로컬이나 알려진 범위에 없다(Qwen-VL과 Gemma 4 템플릿은 둘 다 가진다). 실제 체크포인트 실행은 기존 image+video 경로만 다루며, video 전용 경우는 합성 템플릿 테스트에 의존한다.
 - 서버에서 audio는 여전히 평탄화되고 CLI는 audio 분기가 있을 때만 audio 항목을 내보내므로, audio 분기만 있는 템플릿은 일치 테스트로 고정되어 있지 않다.
-- `src/server/chat_request.rs`에서 새 함수가 `has_template_media_parts`를 설명하는 문서 주석과 그 함수 사이에 들어가, 기존 주석이 `drop_unsupported_media_items`에 붙어 있다. 후속으로 제자리에 옮길 수 있다.

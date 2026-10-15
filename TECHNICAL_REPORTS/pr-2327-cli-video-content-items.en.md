@@ -43,4 +43,3 @@ For a template with a `video` branch and no `image` branch, the CLI now includes
 
 - No local or known checkpoint has a video branch without an image branch (Qwen-VL and Gemma 4 templates have both), so the real-checkpoint run covers the existing image-plus-video path only. The video-only case rests on the synthetic template test.
 - Audio is still flattened on the server and the CLI emits audio items only with an audio branch, so a template with only an audio branch is not pinned by a parity test.
-- In `src/server/chat_request.rs` the new function sits between the doc comment that describes `has_template_media_parts` and that function, so the older comment now attaches to `drop_unsupported_media_items`. A follow-up can move it back.
