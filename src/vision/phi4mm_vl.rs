@@ -91,6 +91,16 @@ impl Phi4MMRequestModes {
             .insert(embeddings as *const MlxArray as usize, mode);
     }
 
+    /// Drop the registration of embeddings that will never be prefilled, such
+    /// as the ones a count-only request prepares (issue #1788); otherwise the
+    /// entry outlives the array and a later array at the same address would
+    /// inherit its adapter mode.
+    fn forget_embeddings(&self, embeddings: &MlxArray) {
+        self.embedding_modes
+            .borrow_mut()
+            .remove(&(embeddings as *const MlxArray as usize));
+    }
+
     fn begin_prefill(
         &self,
         embeddings: Option<&MlxArray>,
@@ -145,6 +155,12 @@ impl Phi4MMRequestModes {
 }
 
 impl Phi4MMVLModel {
+    /// Forget embeddings this model prepared for a request that ends before
+    /// prefill (issue #1788). See [`Phi4MMRequestModes`].
+    pub(crate) fn forget_prepared_embeddings(&self, embeddings: &MlxArray) {
+        self.request_modes.forget_embeddings(embeddings);
+    }
+
     pub fn get_input_embeddings(
         &self,
         input_ids: &MlxArray,

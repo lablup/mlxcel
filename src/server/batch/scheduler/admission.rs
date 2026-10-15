@@ -301,6 +301,19 @@ impl BatchScheduler {
 
         let is_multimodal = !images.is_empty() || !audio.is_empty() || !videos.is_empty();
 
+        // A count-only request (issue #1788) on a model whose media never
+        // enters the token stream already knows its length; preparing the
+        // media would only overwrite model-wide state in-flight decodes read.
+        if options.count_prompt_only
+            && is_multimodal
+            && !self.engine.model().media_preparation_expands_prompt()
+        {
+            let _ = response_tx.send(GenerateEvent::Done(
+                crate::server::model_provider::GenerationResult::prompt_count(prompt_tokens.len()),
+            ));
+            return;
+        }
+
         // Experimental VLM prompt-prefix cache sharing (#124 step c). Off by
         // default; the operator opts in with `--enable-vlm-prefix-cache`. Video
         // payloads are excluded because video frame bytes are not folded into
@@ -490,13 +503,14 @@ impl BatchScheduler {
         // releases the per-sequence model state the binds above just attached,
         // so nothing it prepared can reach another request.
         if options.count_prompt_only {
-            drop(vlm_embeddings);
+            self.engine
+                .model()
+                .discard_prepared_vlm_embeddings(vlm_embeddings);
             self.prompt_cache_seq_ctx.remove(&seq_id);
             self.release_sequence_caches(seq_id);
             let _ = response_tx.send(GenerateEvent::Done(
-                crate::server::model_provider::GenerationResult::prompt_count(
-                prompt_tokens.len(),
-            )));
+                crate::server::model_provider::GenerationResult::prompt_count(prompt_tokens.len()),
+            ));
             return;
         }
 

@@ -203,9 +203,12 @@ impl PromptCountError {
 /// tokens only on the worker (issue #1788). Those requests go to the worker as
 /// a count-only request, which runs the generation path's own tokenization and
 /// media preparation and stops before prefill, so the answer is the
-/// `prompt_tokens` the same body reports when it generates. The media bytes
-/// this function receives are the ones the render already fetched; nothing is
-/// read a second time.
+/// `prompt_tokens` the same body reports when it generates. Image and audio
+/// bytes are the ones the render already fetched, so no URL is read twice; a
+/// clip on a family with a native video path is decoded on the worker, as for
+/// a generation, from the handle the render resolved. The count takes a slot
+/// on the worker like a generation does, so under load it can be refused as
+/// busy.
 pub(crate) async fn count_prompt_tokens(
     state: &AppState,
     live: &Arc<LiveSettings>,

@@ -451,6 +451,35 @@ impl LoadedModel {
     /// Gemma 3n VLM model load), the binding leaves the map without an
     /// entry — the prefill consumer then surfaces `None` for
     /// `per_layer_inputs`, matching the no-VLM-prefill semantics.
+    /// Whether preparing this model's media rewrites the prompt token stream,
+    /// so a count-only request (issue #1788) has to run the preparation to
+    /// learn the prompt length.
+    ///
+    /// Llama 3.2 Vision keeps image features out of the token stream: its
+    /// preparation only stashes cross-attention states in the model, shared
+    /// by every in-flight decode, so a count must not run it.
+    pub fn media_preparation_expands_prompt(&self) -> bool {
+        !matches!(self.vlm_runtime(), Some(VlmRuntimeRef::Mllama(_)))
+    }
+
+    /// Release media embeddings that were prepared but will never be
+    /// prefilled (a count-only request, issue #1788).
+    ///
+    /// Phi4MM registers each prepared embedding by address to pick its
+    /// adapter mode at prefill; without this the registration would outlive
+    /// the array. Every other family needs nothing beyond the drop.
+    pub fn discard_prepared_vlm_embeddings(
+        &self,
+        embeddings: Option<vision::merge::InputEmbeddings>,
+    ) {
+        if let (Some(VlmRuntimeRef::Phi4MM(phi4mm)), Some(prepared)) =
+            (self.vlm_runtime(), embeddings.as_ref())
+            && let Some(array) = prepared.inputs_embeds.as_ref()
+        {
+            phi4mm.forget_prepared_embeddings(array);
+        }
+    }
+
     pub fn bind_gemma3n_per_layer_inputs_to_sequence(
         &self,
         seq_id: mlxcel_core::cache::SequenceId,
