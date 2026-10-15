@@ -1243,6 +1243,7 @@ fn inspect_registry_id(model_type: ModelType) -> &'static str {
         ModelType::ModernBert => "modernbert",
         ModelType::SiglipText => "siglip",
         ModelType::Gemma3Embedding => "gemma3_embedding",
+        ModelType::EmbeddingGemma2 => "embedding_gemma2",
         ModelType::Qwen3Embedding => "qwen3_embedding",
         ModelType::Qwen3VLEmbedding => "qwen3_vl_embedding",
         ModelType::Lfm2Embedding => "lfm2_embedding",

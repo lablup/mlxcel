@@ -278,6 +278,7 @@ macro_rules! for_each_model_registration {
             ModernBert => { kind: Embedding, directory: Nonstandard, weight: None, adapter: Some("ModernBERT is an embedding model served through /v1/embeddings; adapters are not supported") };
             SiglipText => { kind: Embedding, directory: Nonstandard, weight: None, adapter: Some("SigLIP text is an embedding model served through /v1/embeddings; adapters are not supported") };
             Gemma3Embedding => { kind: Embedding, directory: Nonstandard, weight: None, adapter: Some("EmbeddingGemma is an embedding model served through /v1/embeddings; adapters are not supported") };
+    EmbeddingGemma2 => { kind: Embedding, directory: Nonstandard, weight: None, adapter: Some("EmbeddingGemma 2 is an embedding model served through /v1/embeddings; adapters are not supported") };
             Qwen3Embedding => { kind: Embedding, directory: Nonstandard, weight: None, adapter: Some("Qwen3-Embedding is an embedding model served through /v1/embeddings; adapters are not supported") };
             Qwen3VLEmbedding => { kind: Embedding, directory: Nonstandard, weight: None, adapter: Some("Qwen3-VL-Embedding is an embedding model served through /v1/embeddings; adapters are not supported") };
             Lfm2Embedding => { kind: Embedding, directory: Nonstandard, weight: None, adapter: Some("LFM2 bidirectional embedding is an embedding model served through /v1/embeddings; adapters are not supported") };

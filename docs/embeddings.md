@@ -44,6 +44,7 @@ Relevance scoring lives on the same page, under [Reranking](#reranking-v1rerank-
 | `src/commands/embed.rs` | `mlxcel embed`. |
 | `src/models/embedding_sanitize.rs` | Weight-key normalization shared by the decoder-backbone families: `{N}_Dense.linear.*` folding, head dropping, `model.` prefixing. |
 | `src/models/gemma3_embedding.rs` | EmbeddingGemma: bidirectional Gemma 3, mean pooling, two `Dense` projections. |
+| `src/models/embedding_gemma2.rs` | EmbeddingGemma 2: multimodal bidirectional Gemma 4, projection-only PLE, 512 -> 768 `embedding_projection`, mean pooling. |
 | `src/models/qwen3_embedding.rs` | Qwen3-Embedding: causal Qwen3, last-token pooling. |
 | `src/models/qwen3_vl_embedding.rs` | Qwen3-VL-Embedding: multimodal chat formatting, vision injection and last-token pooling. |
 | `src/models/llama_nemotron_vl_embedding.rs` | Llama-Nemotron-VL-Embed: SigLIP tiling, projection and bidirectional Llama pooling. |
@@ -68,8 +69,8 @@ Relevance scoring lives on the same page, under [Reranking](#reranking-v1rerank-
 
 A checkpoint is served as an embedding model, before the ordinary `model_type` dispatch runs, when any of these hold:
 
-- `config.json` `model_type` is an encoder-only family: `bert`, `xlm-roberta`, `modernbert`, `siglip`. These never generate text; a `BertForMaskedLM` or `ModernBertForMaskedLM` export loads as an embedder with its MLM head dropped.
-- `config.json` `architectures[0]` is an embedding architecture: `BertModel`, `XLMRobertaModel`, `ModernBertModel`, `SiglipModel`, `SiglipTextModel`, `Gemma3TextModel` with `use_bidirectional_attention: true`, `LlamaBidirectionalModel`, `LlamaNemotronVLModel`, `Lfm2BidirectionalModel`, `Ministral3Model` with `is_causal: false`, `ColIdefics3`, `ColQwen2_5`, `ColQwen2ForRetrieval`.
+- `config.json` `model_type` is an encoder-only family: `bert`, `xlm-roberta`, `modernbert`, `siglip`, `embedding_gemma2`, `embedding_gemma2_text`. These never generate text; a `BertForMaskedLM` or `ModernBertForMaskedLM` export loads as an embedder with its MLM head dropped.
+- `config.json` `architectures[0]` is an embedding architecture: `BertModel`, `XLMRobertaModel`, `ModernBertModel`, `SiglipModel`, `SiglipTextModel`, `EmbeddingGemma2Model`, `Gemma3TextModel` with `use_bidirectional_attention: true`, `LlamaBidirectionalModel`, `LlamaNemotronVLModel`, `Lfm2BidirectionalModel`, `Ministral3Model` with `is_causal: false`, `ColIdefics3`, `ColQwen2_5`, `ColQwen2ForRetrieval`.
 - `modules.json` exists and lists a module whose `type` ends with `.Pooling` (the sentence-transformers layout). A `modules.json` whose only extra module is `1_LogitScore` (Qwen3-VL-Reranker) does not qualify.
 - `1_Pooling/config.json` exists.
 
@@ -84,6 +85,7 @@ The resolved family is keyed on `model_type`:
 | `modernbert` | `ModernBert` |
 | `siglip` | `SiglipText` |
 | `gemma3_text`, `gemma3` | `Gemma3Embedding` |
+| `embedding_gemma2`, `embedding_gemma2_text` | `EmbeddingGemma2` |
 | `qwen3` | `Qwen3Embedding` |
 | `qwen3_vl` | `Qwen3VLEmbedding` |
 | `lfm2` | `Lfm2Embedding` |

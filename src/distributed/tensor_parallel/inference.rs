@@ -493,6 +493,7 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         | ModelType::ModernBert
         | ModelType::SiglipText
         | ModelType::Gemma3Embedding
+        | ModelType::EmbeddingGemma2
         | ModelType::Qwen3Embedding
         | ModelType::Qwen3VLEmbedding
         | ModelType::Lfm2Embedding

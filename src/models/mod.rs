@@ -115,6 +115,7 @@ pub mod dots1;
 /// Binary-side drafter factory: builds the `glm4_moe_lite_mtp` drafter and
 /// delegates every other kind to `mlxcel_core::drafter::load_drafter`.
 pub mod drafter_loader;
+pub mod embedding_gemma2;
 pub mod ernie4_5;
 pub mod ernie4_5_moe;
 pub mod ernie4_5_moe_vl;
@@ -688,6 +689,7 @@ pub enum ModelType {
     ModernBert,               // ModernBERT encoders (modernbert)
     SiglipText,               // SigLIP text tower (siglip)
     Gemma3Embedding,          // EmbeddingGemma (gemma3_text, bidirectional)
+    EmbeddingGemma2,          // EmbeddingGemma 2 (embedding_gemma2 / embedding_gemma2_text)
     Qwen3Embedding,           // Qwen3-Embedding (qwen3 + 1_Pooling lasttoken)
     Qwen3VLEmbedding,         // Qwen3-VL-Embedding (qwen3_vl)
     Lfm2Embedding,            // LFM2 bidirectional embedder (lfm2)
@@ -914,6 +916,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::ModernBert,
     ModelType::SiglipText,
     ModelType::Gemma3Embedding,
+    ModelType::EmbeddingGemma2,
     ModelType::Qwen3Embedding,
     ModelType::Qwen3VLEmbedding,
     ModelType::Lfm2Embedding,
@@ -1178,6 +1181,10 @@ impl ModelType {
             ModelType::ModernBert => ("ModernBERT encoder", "Embedding"),
             ModelType::SiglipText => ("SigLIP text tower", "Embedding"),
             ModelType::Gemma3Embedding => ("EmbeddingGemma (bidirectional Gemma 3)", "Embedding"),
+            ModelType::EmbeddingGemma2 => (
+                "EmbeddingGemma 2 (multimodal bidirectional Gemma 4)",
+                "Embedding",
+            ),
             ModelType::Qwen3Embedding => ("Qwen3-Embedding (last-token)", "Embedding"),
             ModelType::Qwen3VLEmbedding => ("Qwen3-VL-Embedding (multimodal)", "Embedding"),
             ModelType::Lfm2Embedding => ("LFM2.5-Embedding (bidirectional LFM2)", "Embedding"),
@@ -1535,6 +1542,7 @@ mod metadata_tests {
             ModernBert,
             SiglipText,
             Gemma3Embedding,
+            EmbeddingGemma2,
             Qwen3Embedding,
             Qwen3VLEmbedding,
             Lfm2Embedding,

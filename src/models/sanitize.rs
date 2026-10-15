@@ -2072,6 +2072,31 @@ fn bf16_conversion_reason() -> &'static str {
     }
 }
 
+pub fn is_embedding_gemma2_config(config: &Value) -> bool {
+    let mt = config
+        .get("model_type")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            config
+                .get("text_config")
+                .and_then(|c| c.get("model_type"))
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("");
+    if matches!(mt, "embedding_gemma2" | "embedding_gemma2_text") {
+        return true;
+    }
+    config
+        .get("architectures")
+        .and_then(Value::as_array)
+        .is_some_and(|archs| {
+            archs
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|a| a == "EmbeddingGemma2Model")
+        })
+}
+
 pub fn bf16_to_f16_at_load(is_quantized: bool, config: Option<&Value>) -> bool {
     // Measurement instrument for dtype-policy A/B runs, not a supported
     // configuration: it loads every checkpoint uniformly bf16. This is what
@@ -2080,6 +2105,11 @@ pub fn bf16_to_f16_at_load(is_quantized: bool, config: Option<&Value>) -> bool {
     // since on families with no forced-bf16 subset the two land within noise.
     // f16 stays the default for everything else.
     if std::env::var("MLXCEL_KEEP_BF16").is_ok() {
+        return false;
+    }
+    // EmbeddingGemma 2 specifies BFloat16-only execution: float16 overflows its
+    // activation dynamic range across the PLE + bidirectional Gemma 4 stack.
+    if config.is_some_and(is_embedding_gemma2_config) {
         return false;
     }
     if pre_ampere_cuda() {

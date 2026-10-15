@@ -492,7 +492,14 @@ pub(crate) fn detect_hunyuan_model_type(config: &serde_json::Value) -> ModelType
 /// `model_type` values that are encoder-only and never generate text. A
 /// `BertForMaskedLM` / `ModernBertForMaskedLM` checkpoint loads as an
 /// embedder with its MLM head dropped.
-const ENCODER_ONLY_MODEL_TYPES: &[&str] = &["bert", "xlm-roberta", "modernbert", "siglip"];
+const ENCODER_ONLY_MODEL_TYPES: &[&str] = &[
+    "bert",
+    "xlm-roberta",
+    "modernbert",
+    "siglip",
+    "embedding_gemma2",
+    "embedding_gemma2_text",
+];
 
 pub(crate) fn is_encoder_only_model_type(model_type: &str) -> bool {
     ENCODER_ONLY_MODEL_TYPES.contains(&model_type)
@@ -505,6 +512,7 @@ const EMBEDDING_ARCHITECTURES: &[&str] = &[
     "ModernBertModel",
     "SiglipModel",
     "SiglipTextModel",
+    "EmbeddingGemma2Model",
     "LlamaBidirectionalModel",
     "LlamaNemotronVLModel",
     "Lfm2BidirectionalModel",
@@ -608,6 +616,7 @@ pub(crate) fn embedding_variant_for_model_type(model_type: &str) -> Option<Model
         "modernbert" => ModelType::ModernBert,
         "siglip" | "siglip_text_model" => ModelType::SiglipText,
         "gemma3_text" | "gemma3" => ModelType::Gemma3Embedding,
+        "embedding_gemma2" | "embedding_gemma2_text" => ModelType::EmbeddingGemma2,
         "qwen3" => ModelType::Qwen3Embedding,
         "qwen3_vl" => ModelType::Qwen3VLEmbedding,
         "lfm2" => ModelType::Lfm2Embedding,

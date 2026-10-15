@@ -154,6 +154,9 @@ fn build_family_model(
         ModelType::Gemma3Embedding => Ok(Box::new(
             crate::models::gemma3_embedding::Gemma3EmbeddingModel::load(model_dir, config)?,
         )),
+        ModelType::EmbeddingGemma2 => Ok(Box::new(
+            crate::models::embedding_gemma2::EmbeddingGemma2Model::load(model_dir, config)?,
+        )),
         ModelType::Qwen3Embedding => Ok(Box::new(
             crate::models::qwen3_embedding::Qwen3EmbeddingModel::load(model_dir, config)?,
         )),

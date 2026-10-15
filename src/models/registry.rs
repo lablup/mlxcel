@@ -419,6 +419,7 @@ impl ModelType {
             ModelType::ModernBert => "modernbert",
             ModelType::SiglipText => "siglip",
             ModelType::Gemma3Embedding => "gemma3_embedding",
+            ModelType::EmbeddingGemma2 => "embedding_gemma2",
             ModelType::Qwen3Embedding => "qwen3_embedding",
             ModelType::Qwen3VLEmbedding => "qwen3_vl_embedding",
             ModelType::Lfm2Embedding => "lfm2_embedding",
@@ -438,6 +439,7 @@ impl ModelType {
             | ModelType::ModernBert
             | ModelType::SiglipText
             | ModelType::Gemma3Embedding
+            | ModelType::EmbeddingGemma2
             | ModelType::Qwen3Embedding
             | ModelType::Qwen3VLEmbedding
             | ModelType::Lfm2Embedding
@@ -461,6 +463,7 @@ impl ModelType {
             | ModelType::ModernBert
             | ModelType::SiglipText
             | ModelType::Gemma3Embedding
+            | ModelType::EmbeddingGemma2
             | ModelType::Qwen3Embedding
             | ModelType::Qwen3VLEmbedding
             | ModelType::Lfm2Embedding
@@ -526,6 +529,7 @@ impl ModelType {
             | ModelType::ModernBert
             | ModelType::SiglipText
             | ModelType::Gemma3Embedding
+            | ModelType::EmbeddingGemma2
             | ModelType::Qwen3Embedding
             | ModelType::Qwen3VLEmbedding
             | ModelType::Lfm2Embedding
@@ -841,6 +845,7 @@ fn model_type_keys(model_type: ModelType) -> &'static [&'static str] {
         ModelType::ModernBert => &["modernbert"],
         ModelType::SiglipText => &["siglip", "siglip_text_model"],
         ModelType::Gemma3Embedding => &["gemma3_text", "gemma3"],
+        ModelType::EmbeddingGemma2 => &["embedding_gemma2", "embedding_gemma2_text"],
         ModelType::Qwen3Embedding => &["qwen3"],
         ModelType::Qwen3VLEmbedding => &["qwen3_vl"],
         ModelType::Lfm2Embedding => &["lfm2"],
@@ -857,7 +862,8 @@ fn model_type_keys(model_type: ModelType) -> &'static [&'static str] {
 fn modalities_for(model_type: ModelType) -> &'static [Modality] {
     match model_type {
         ModelType::Whisper | ModelType::NemotronVoiceChat => AUDIO,
-        ModelType::Qwen3VLEmbedding
+        ModelType::EmbeddingGemma2
+        | ModelType::Qwen3VLEmbedding
         | ModelType::LlamaNemotronVLEmbedding
         | ModelType::ColIdefics3
         | ModelType::ColQwen25 => TEXT_IMAGE,
