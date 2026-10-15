@@ -1295,7 +1295,7 @@ mod tests {
             f32::NEG_INFINITY
         );
         assert_eq!(inputs.packed_attention_bias[48 * 64 + 48], 0.0);
-        assert_eq!(inputs.packed_attention_bias[48 * 64 + 0], f32::NEG_INFINITY);
+        assert_eq!(inputs.packed_attention_bias[48 * 64], f32::NEG_INFINITY);
         let mut non_finite = values;
         non_finite[7] = f32::NAN;
         assert!(
