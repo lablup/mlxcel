@@ -18,16 +18,16 @@
 
 ## 계약부터 바꾸기
 
-API 변경은 생산자 스키마(`docs/webui/api.yaml`), 생성된 선언, 픽스처, 최소 한 곳의 소비자를 한 PR에서 함께 고칩니다. `python3 scripts/ci/check_webui_contract.py`가 드리프트 검사이고(`--fix`는 선언만 다시 생성), `make verify-webui-contract`는 격리된 환경에서 이를 실행합니다. 소유권과 변경 규칙은 [architecture.md](architecture.md)에, 생명주기와 재생 규칙은 [state-machines.md](state-machines.md)에 있습니다.
+API 변경은 생산자 스키마(`docs/webui/api.yaml`), 생성된 선언, 픽스처, 최소 한 곳의 소비자를 한 PR에서 함께 고칩니다. `python3 scripts/ci/check_webui_contract.py`가 드리프트 검사이고(`--fix`는 선언만 다시 생성), `make verify-webui-contract`는 자체 테스트와 함께 이를 실행합니다. `WEBUI_CONTRACT_PY`를 [architecture.md](architecture.md#running-the-contract-gate)에 설명된 격리 환경의 Python으로 지정하세요. 소유권과 변경 규칙은 [architecture.md](architecture.md)에, 생명주기와 재생 규칙은 [state-machines.md](state-machines.md)에 있습니다.
 
 ## 공유 모듈 사용
 
 - `webui/src/api`가 유일한 전송 계층입니다. 화면은 백엔드 URL이나 자체 fetch 래퍼를 만들지 않습니다.
 - `webui/src/state`가 유일한 상태 기준입니다(`WebUiProvider`, `useWebUi()`, `useWebUiActions()`). 화면은 자체 폴링 타이머, 저장, 모델 캐시를 추가하지 않습니다.
 - `webui/src/design-system`이 `@lablup/ui-common`을 감쌉니다. 기능 화면은 패키지를 직접 가져오지 않고 이 계층의 기본 요소를 씁니다. [ui-common.md](ui-common.md)와 [design-system.md](design-system.md)를 참고하세요.
-- 사용자에게 보이는 모든 문자열은 `webui/src/i18n/catalog.ts`에 영어와 한국어 값을 가진 키로 있어야 하고, `tests/fixtures/webui/strings.json`과 일치해야 합니다([ux-contract.md](ux-contract.md)).
+- 사용자에게 보이는 모든 문자열은 해당 기능 옆의 `strings.ts`(`webui/src/features/*/strings.ts`, `webui/src/i18n/catalog.ts`가 합침)에 영어와 한국어 값을 가진 키로 있어야 하고, `tests/fixtures/webui/strings.json`과 일치해야 합니다([ux-contract.md](ux-contract.md)).
 
-화면별 동작은 [catalog.md](catalog.ko.md)(모델), [chat.md](chat.md), [activity.md](activity.md), [settings.md](settings.md), [runtime.md](runtime.md)에 있습니다.
+화면별 동작은 [catalog.ko.md](catalog.ko.md)(모델), [chat.md](chat.md), [activity.md](activity.md), [settings.md](settings.md), [runtime.md](runtime.md)에 있습니다.
 
 ## 프런트엔드 빌드와 자산 재생성
 

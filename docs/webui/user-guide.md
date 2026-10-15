@@ -28,7 +28,7 @@ Open `http://127.0.0.1:8080/webui/`, paste the key into **Session key**, and pre
 
 ### Key file (services, scripts, and non-interactive shells)
 
-A server started without a terminal (a service manager, `nohup`, a CI job) cannot show a generated key, so it needs an explicit one:
+A server started without a terminal (a service manager, a container, a CI job) cannot show a generated key, so it needs an explicit one:
 
 ```bash
 mkdir -p ~/.config/mlxcel
@@ -133,7 +133,7 @@ Settings separates values by how long they live and who they affect:
 
 Chat history is kept in memory by default and disappears on reload or sign-out. **Save conversations on this device (IndexedDB)**, under **Local history and privacy** in the Chat settings drawer, is an opt-in that saves conversations in this browser's IndexedDB for this origin; it has to be re-enabled after a reload before saved data is read. Turning saving off stops new writes but keeps old data; **Clear All** deletes saved and in-memory conversations. **Export JSON** writes a file you choose to save; import validates the file and asks before replacing current history. Images are saved only with separate consent. Keys and system prompts are never written by Settings.
 
-The WebUI sends no telemetry and contacts no third-party server: the only requests it makes go to the server that served it. Model output is rendered as untrusted text (no raw HTML, no remote images). Tool calls a model emits are displayed and can be copied, but the WebUI and the server never execute them. **Stop** ends the stream and keeps the partial answer; it is not a guarantee that generation already stopped on the server.
+The WebUI sends no telemetry and contacts no third-party server: the only requests it makes go to the server that served it. Model output is rendered as untrusted text (no raw HTML, no remote images). Tool calls a model emits are displayed and marked as not executed; neither the WebUI nor the server runs them. **Stop** ends the stream and keeps the partial answer; it is not a guarantee that generation already stopped on the server.
 
 ## Not in this release
 
@@ -145,9 +145,9 @@ Each message below is printed verbatim by the server, prefixed with `Error: `, w
 
 | Symptom | Message | Fix |
 |---|---|---|
-| No key and no interactive terminal | `--webui without --api-key is only allowed on an interactive loopback terminal so the generated session key can be shown once` | Pass `--api-key-file`, or start the server from a terminal. |
+| No API key, and no interactive terminal or a non-loopback address | `--webui without --api-key is only allowed on an interactive loopback terminal so the generated session key can be shown once` | Pass `--api-key-file` (always required off loopback), or start a loopback server from a terminal. |
 | Listening on a Unix socket | `--webui requires a TCP listener; use a loopback TCP listener behind a reverse proxy instead of a Unix socket` | Use `--host 127.0.0.1` and a reverse proxy. |
-| Non-loopback address without key or TLS | `non-loopback --webui requires an explicit API key and TLS; alternatively bind the WebUI backend to loopback behind a TLS reverse proxy` | Add `--api-key-file` plus `--ssl-cert-file`/`--ssl-key-file`, or bind loopback behind a proxy. |
+| Non-loopback address with a key but without TLS | `non-loopback --webui requires an explicit API key and TLS; alternatively bind the WebUI backend to loopback behind a TLS reverse proxy` | Add `--ssl-cert-file`/`--ssl-key-file`, or bind loopback behind a proxy. |
 | `--models-dir` does not exist or cannot be read | `--models-dir /srv/missing: cannot open models directory: No such file or directory (os error 2)` | Point `--models-dir` at an existing directory. |
 | Explicit store root does not exist or cannot be read | `--model-store-root /srv/missing: explicit WebUI/router cache root must be a readable directory: No such file or directory (os error 2)` | Create the directory or fix the path; `MLXCEL_MODELS_DIR` gets the same check. |
 | Binary built without the WebUI | `` --webui requires a binary built with the Cargo `webui` feature; rebuild mlxcel with bundled WebUI support `` | Use an official build or a build without `--no-default-features`. |
@@ -179,7 +179,7 @@ A UI request that reaches the server under a host name or address it did not bin
 
 The [integration requirement matrix](../webui-integration-matrix.md) is the canonical record of what was verified for the bundled WebUI and how. Do not copy its numbers into other documents; link the row instead.
 
-- **Bundle source hash and size:** `src/webui/assets/mlxcel-webui-manifest.json` records the source digest, per-file SHA-256, and gzip sizes against the budgets in [Developing the bundled WebUI](bundling.md); the matrix row "Bundle budgets and deterministic assets" tracks the release reading.
+- **Bundle source hash and size:** `src/webui/assets/mlxcel-webui-manifest.json` records the source digest, per-file SHA-256, and gzip sizes against the budgets in [Developing the bundled WebUI](bundling.md); the matrix row "Bundle budgets and deterministic assets" records the CI reproducibility run, its digest, and the measured sizes for this release.
 - **Offline moved-binary check:** the matrix row "Installed artifact, not Vite-only" holds the relocated-binary and outbound-network-denial evidence (`integration-1848/offline-52103-pass`).
 - **Release feature inclusion:** the `webui` Cargo feature is on by default, so `--features metal,accelerate` and `--features cuda` release builds embed the bundle; the same row covers the installed artifact with the feature on and off.
 - **Runtime dependencies:** embedding the WebUI does not make the binary self-contained. The platform GPU runtime is still required: the `mlx.metallib` artifact the macOS release packages, or the CUDA and cuDNN runtime libraries on Linux, as [installation.md](../installation.md) describes.

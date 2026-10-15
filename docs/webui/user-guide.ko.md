@@ -28,7 +28,7 @@ mlxcel WebUI session key (shown once): mlxcel_webui_<generated>
 
 ### 키 파일 사용 (서비스, 스크립트, 비대화형 셸)
 
-터미널 없이 시작한 서버(서비스 관리자, `nohup`, CI 작업)는 생성된 키를 보여 줄 수 없으므로 명시적인 키가 필요합니다.
+터미널 없이 시작한 서버(서비스 관리자, 컨테이너, CI 작업)는 생성된 키를 보여 줄 수 없으므로 명시적인 키가 필요합니다.
 
 ```bash
 mkdir -p ~/.config/mlxcel
@@ -133,7 +133,7 @@ mlxcel-server --webui --host 127.0.0.1 --port 8080 --api-prefix /lab \
 
 대화 기록은 기본적으로 메모리에만 있고 새로고침하거나 로그아웃하면 사라집니다. 대화 설정 서랍의 **로컬 기록과 개인정보**에서 **이 기기에 대화 저장 (IndexedDB)**을 켜면 이 오리진의 브라우저 IndexedDB에 대화를 저장합니다. 새로고침한 뒤에는 다시 켜야 저장된 데이터를 읽습니다. 저장을 끄면 새로 쓰지 않을 뿐 기존 데이터는 남으며, **모두 지우기**가 저장된 대화와 메모리의 대화를 함께 지웁니다. **JSON 내보내기**는 직접 저장할 파일을 만들고, 가져오기는 파일을 검증한 뒤 현재 기록을 바꾸기 전에 확인을 받습니다. 이미지는 별도로 동의한 경우에만 저장됩니다. 설정은 키와 시스템 프롬프트를 저장하지 않습니다.
 
-WebUI는 원격 측정 데이터를 보내지 않고 제3자 서버에 접속하지 않습니다. 요청은 WebUI를 제공한 서버로만 갑니다. 모델 출력은 신뢰하지 않는 텍스트로 렌더링합니다(원시 HTML, 원격 이미지 없음). 모델이 만든 도구 호출은 표시하고 복사할 수 있지만 WebUI와 서버 모두 실행하지 않습니다. **중지**는 스트림을 끝내고 부분 응답을 남깁니다. 서버에서 생성이 이미 멈췄다는 보장은 아닙니다.
+WebUI는 원격 측정 데이터를 보내지 않고 제3자 서버에 접속하지 않습니다. 요청은 WebUI를 제공한 서버로만 갑니다. 모델 출력은 신뢰하지 않는 텍스트로 렌더링합니다(원시 HTML, 원격 이미지 없음). 모델이 만든 도구 호출은 실행되지 않았다는 표시와 함께 보여 주며, WebUI와 서버 모두 실행하지 않습니다. **중지**는 스트림을 끝내고 부분 응답을 남깁니다. 서버에서 생성이 이미 멈췄다는 보장은 아닙니다.
 
 ## 이번 릴리스에 없는 것
 
@@ -145,9 +145,9 @@ WebUI는 원격 측정 데이터를 보내지 않고 제3자 서버에 접속하
 
 | 증상 | 메시지 | 해결 |
 |---|---|---|
-| 키도 대화형 터미널도 없음 | `--webui without --api-key is only allowed on an interactive loopback terminal so the generated session key can be shown once` | `--api-key-file`을 지정하거나 터미널에서 서버를 시작합니다. |
+| API 키가 없고, 대화형 터미널이 없거나 루프백이 아닌 주소 사용 | `--webui without --api-key is only allowed on an interactive loopback terminal so the generated session key can be shown once` | `--api-key-file`을 지정하거나(루프백이 아니면 항상 필요), 루프백 서버를 터미널에서 시작합니다. |
 | Unix 소켓에서 대기 | `--webui requires a TCP listener; use a loopback TCP listener behind a reverse proxy instead of a Unix socket` | `--host 127.0.0.1`과 리버스 프록시를 사용합니다. |
-| 키나 TLS 없이 루프백이 아닌 주소 사용 | `non-loopback --webui requires an explicit API key and TLS; alternatively bind the WebUI backend to loopback behind a TLS reverse proxy` | `--api-key-file`과 `--ssl-cert-file`/`--ssl-key-file`을 추가하거나, 루프백에 바인드하고 프록시를 둡니다. |
+| 키는 있지만 TLS 없이 루프백이 아닌 주소 사용 | `non-loopback --webui requires an explicit API key and TLS; alternatively bind the WebUI backend to loopback behind a TLS reverse proxy` | `--ssl-cert-file`/`--ssl-key-file`을 추가하거나, 루프백에 바인드하고 프록시를 둡니다. |
 | `--models-dir`가 없거나 읽을 수 없음 | `--models-dir /srv/missing: cannot open models directory: No such file or directory (os error 2)` | 존재하는 디렉터리를 `--models-dir`에 지정합니다. |
 | 명시한 저장소 경로가 없거나 읽을 수 없음 | `--model-store-root /srv/missing: explicit WebUI/router cache root must be a readable directory: No such file or directory (os error 2)` | 디렉터리를 만들거나 경로를 고칩니다. `MLXCEL_MODELS_DIR`도 같은 검사를 받습니다. |
 | WebUI 없이 빌드된 바이너리 | `` --webui requires a binary built with the Cargo `webui` feature; rebuild mlxcel with bundled WebUI support `` | 공식 빌드나 `--no-default-features` 없이 만든 빌드를 사용합니다. |
@@ -179,7 +179,7 @@ WebUI는 원격 측정 데이터를 보내지 않고 제3자 서버에 접속하
 
 [통합 요구 사항 매트릭스](../webui-integration-matrix.md)가 번들 WebUI에서 무엇을 어떻게 검증했는지에 대한 기준 기록입니다. 그 숫자를 다른 문서에 옮기지 말고 해당 행을 링크하세요.
 
-- **번들 소스 해시와 크기:** `src/webui/assets/mlxcel-webui-manifest.json`이 소스 다이제스트, 파일별 SHA-256, gzip 크기를 [번들 WebUI 개발](bundling.ko.md)의 예산과 함께 기록합니다. 릴리스 시점 값은 매트릭스의 "Bundle budgets and deterministic assets" 행에서 관리합니다.
+- **번들 소스 해시와 크기:** `src/webui/assets/mlxcel-webui-manifest.json`이 소스 다이제스트, 파일별 SHA-256, gzip 크기를 [번들 WebUI 개발](bundling.ko.md)의 예산과 함께 기록합니다. 이번 릴리스의 CI 재현성 검사, 다이제스트, 측정 크기는 매트릭스의 "Bundle budgets and deterministic assets" 행에 기록되어 있습니다.
 - **오프라인 이동 바이너리 점검:** 매트릭스의 "Installed artifact, not Vite-only" 행에 위치를 옮긴 바이너리와 외부 네트워크 차단 근거(`integration-1848/offline-52103-pass`)가 있습니다.
 - **릴리스 feature 포함:** `webui` Cargo feature는 기본으로 켜져 있으므로 `--features metal,accelerate`와 `--features cuda` 릴리스 빌드는 번들을 포함합니다. 같은 행이 feature를 켠 산출물과 끈 산출물을 모두 다룹니다.
 - **런타임 의존성:** WebUI를 포함해도 바이너리가 자기 완결형이 되지는 않습니다. 플랫폼 GPU 런타임은 계속 필요합니다. macOS 릴리스가 함께 패키징하는 `mlx.metallib` 산출물, 또는 Linux의 CUDA와 cuDNN 런타임 라이브러리가 그것이며 [installation.md](../installation.md)에 설명되어 있습니다.

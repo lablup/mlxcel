@@ -18,14 +18,14 @@ This page is the map for changing the bundled WebUI. The linked documents are th
 
 ## Change the contract first
 
-An API change lands in one PR that updates the producer schema (`docs/webui/api.yaml`), the generated declarations, the fixtures, and at least one consumer. `python3 scripts/ci/check_webui_contract.py` is the drift gate (`--fix` regenerates only the declarations), and `make verify-webui-contract` runs it in an isolated environment. The ownership and change rules are in [architecture.md](architecture.md); lifecycle and replay rules are in [state-machines.md](state-machines.md).
+An API change lands in one PR that updates the producer schema (`docs/webui/api.yaml`), the generated declarations, the fixtures, and at least one consumer. `python3 scripts/ci/check_webui_contract.py` is the drift gate (`--fix` regenerates only the declarations), and `make verify-webui-contract` runs it with its self-tests; point `WEBUI_CONTRACT_PY` at the isolated environment described in [architecture.md](architecture.md#running-the-contract-gate). The ownership and change rules are in [architecture.md](architecture.md); lifecycle and replay rules are in [state-machines.md](state-machines.md).
 
 ## Use the shared modules
 
 - `webui/src/api` is the only transport layer. Pages never build backend URLs or their own fetch wrappers.
 - `webui/src/state` is the only state authority (`WebUiProvider`, `useWebUi()`, `useWebUiActions()`). Pages do not add their own polling timers, persistence, or model caches.
 - `webui/src/design-system` wraps `@lablup/ui-common`; feature pages import its primitives, never the package directly. See [ui-common.md](ui-common.md) and [design-system.md](design-system.md).
-- Every user-facing string has a key with English and Korean values in `webui/src/i18n/catalog.ts`, mirrored in `tests/fixtures/webui/strings.json` ([ux-contract.md](ux-contract.md)).
+- Every user-facing string has a key with English and Korean values in a `strings.ts` next to its feature (`webui/src/features/*/strings.ts`, combined by `webui/src/i18n/catalog.ts`), mirrored in `tests/fixtures/webui/strings.json` ([ux-contract.md](ux-contract.md)).
 
 Page-specific behavior is documented per screen: [catalog.md](catalog.md) (Models), [chat.md](chat.md), [activity.md](activity.md), [settings.md](settings.md), and [runtime.md](runtime.md).
 
