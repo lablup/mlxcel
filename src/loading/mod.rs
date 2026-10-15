@@ -60,13 +60,13 @@ pub(crate) use self::vlm::load_llava_host_preprocessor;
 #[cfg(feature = "xla-iree")]
 pub(crate) use self::vlm::load_llava_iree_host_preprocessor;
 pub use self::vlm::load_qwen3_omni_speech;
+#[cfg(feature = "xla-iree")]
+pub(crate) use self::vlm::load_qwen3_vl_iree_host_preprocessor;
 #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 pub use self::vlm::{
     Molmo2XlaVisionReference, Molmo2XlaVisionReferenceProjection, Molmo2XlaVisionReferenceStage,
     load_molmo2_xla_vision_reference,
 };
-#[cfg(feature = "xla-iree")]
-pub(crate) use self::vlm::load_qwen3_vl_iree_host_preprocessor;
 #[cfg(feature = "xla-iree")]
 pub(crate) use self::vlm::{
     Phi4MMXlaVisionComponents, load_molmo2_xla_text_embeddings, load_phi4mm_xla_media_components,

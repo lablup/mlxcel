@@ -154,6 +154,16 @@ impl XlaServingEngine for mlxcel_xla::XlaBucketSet {
             .map_err(|error| error.to_string())
     }
 
+    fn submit_deepstack_prepared(
+        &mut self,
+        request: DeepStackPreparedPrefill,
+        max_new_tokens: usize,
+        params: SampleParams,
+    ) -> Result<u64, String> {
+        mlxcel_xla::XlaBucketSet::submit_deepstack_prepared(self, request, max_new_tokens, params)
+            .map_err(|error| error.to_string())
+    }
+
     fn cancel(&mut self, req_id: u64) -> bool {
         mlxcel_xla::XlaBucketSet::cancel(self, req_id)
     }

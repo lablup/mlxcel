@@ -54,7 +54,9 @@ use export::{
 // unconditionally leaves them unused in a default-feature build and `-D warnings`
 // turns that into a hard error.
 #[cfg(any(feature = "xla-iree", test))]
-use export::{export_qwen2_vl_prefill, export_qwen3_vl_prefill};
+use export::export_qwen2_vl_prefill;
+#[cfg(feature = "xla-iree")]
+use export::export_qwen3_vl_prefill;
 #[cfg(feature = "xla-iree")]
 pub use molmo2_xla::Molmo2IreeHostPreprocessor;
 
@@ -640,7 +642,7 @@ pub struct Qwen3VlIreeHostPreprocessor {
 
 /// Exact shared processor payload and IREE vision result used by the
 /// actual-checkpoint Qwen3-VL oracle.
-#[cfg(feature = "xla-diagnostics")]
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 pub struct Qwen3VlIreeVisionCapture {
     pub patch_values: Vec<f32>,
     pub grids: Vec<(i32, i32, i32)>,
@@ -850,7 +852,7 @@ impl Qwen3VlIreeHostPreprocessor {
 
     /// Run the qualified host processor and resident IREE vision graph while
     /// retaining the exact patch payload for an eager MLX comparison.
-    #[cfg(feature = "xla-diagnostics")]
+    #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
     pub fn capture_vision(
         &self,
         images: &[DynamicImage],

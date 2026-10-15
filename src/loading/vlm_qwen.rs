@@ -493,11 +493,14 @@ pub(crate) fn load_qwen3_vl_iree_host_preprocessor(
             video_token_id: 151656,
             vision_start_token_id: 151652,
         },
-    );
+    )
+    .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
     let processor_policy = load_qwen3_vl_processor_policy(model_path)?;
-    let processor = qwen_vl_processor_with_norm(&vision_config, [0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
-        .with_pixel_bounds(processor_policy.min_pixels, processor_policy.max_pixels)
-        .with_resize_filter(FilterType::CatmullRom);
+    let processor =
+        qwen_vl_processor_with_norm(model_path, &vision_config, [0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
+            .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?
+            .with_pixel_bounds(processor_policy.min_pixels, processor_policy.max_pixels)
+            .with_resize_filter(FilterType::CatmullRom);
     let projector = mlxcel_xla::IreeQwen3VlProjector::load(model_path, device)
         .map_err(HostPreprocessorError::Iree)?;
     Qwen3VlIreeHostPreprocessor::from_parts(

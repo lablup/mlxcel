@@ -1108,7 +1108,7 @@ fn compile_deepstack_diagnostics(device: &str, cfg: &RuntimeConfig) -> Result<Pa
     compile_one(
         &compiler,
         &mlir,
-        target_flags(device)?,
+        &target_flags(device)?,
         &cache,
         "prefill_embeddings_deepstack_diagnostics",
         cfg.context_capacity(),

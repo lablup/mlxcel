@@ -695,6 +695,33 @@ impl XlaBucketSet {
         }
     }
 
+    /// Queue an owned prepared-embeddings + DeepStack request into the smallest
+    /// bucket that admits its expanded length plus its whole generation budget.
+    ///
+    /// # Errors
+    ///
+    /// Reports the same admission errors a single engine does, including a
+    /// request too large for the largest bucket.
+    pub fn submit_deepstack_prepared(
+        &mut self,
+        request: DeepStackPreparedPrefill,
+        max_new_tokens: usize,
+        params: SampleParams,
+    ) -> Result<u64, XlaAdmissionError> {
+        let sequence_len = request.prepared().sequence_len;
+        match self.route(sequence_len, max_new_tokens) {
+            Some(index) => {
+                self.buckets[index].submit_deepstack_prepared(request, max_new_tokens, params)
+            }
+            None => Err(crate::ContextCapacityError {
+                effective_prompt_len: sequence_len,
+                max_new_tokens,
+                context_capacity: self.largest_capacity(),
+            }
+            .into()),
+        }
+    }
+
     /// Cancel `req_id` in whichever bucket owns it.
     pub fn cancel(&mut self, req_id: u64) -> bool {
         let stride = self.buckets.len() as u64;

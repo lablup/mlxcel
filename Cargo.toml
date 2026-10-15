@@ -474,7 +474,7 @@ required-features = ["xla-diagnostics-cpu"]
 # merger, every DeepStack branch, post-injection hidden states, and logits.
 [[example]]
 name = "xla_qwen3_vl_deepstack_check"
-required-features = ["xla-diagnostics"]
+required-features = ["xla-diagnostics-cpu"]
 
 [[example]]
 name = "xla_aux_smoke"

@@ -178,6 +178,7 @@ pub(super) fn export_qwen2_vl_prefill(
     )
 }
 
+#[cfg(feature = "xla-iree")]
 pub(super) fn export_qwen3_vl_prefill(
     logical_tokens: Vec<i32>,
     merged: InputEmbeddings,
@@ -200,6 +201,7 @@ pub(super) fn export_qwen3_vl_prefill(
     )
 }
 
+#[cfg(any(feature = "xla-iree", test))]
 #[allow(clippy::too_many_arguments)]
 fn export_qwen_vl_prefill(
     logical_tokens: Vec<i32>,

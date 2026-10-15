@@ -37,11 +37,11 @@ use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_
 #[cfg(not(feature = "diagnostics"))]
 use crate::emitter::emit_qwen3_vl;
 #[cfg(feature = "diagnostics")]
-use crate::emitter::emit_qwen3_vl_diagnostics;
 use crate::emitter::{
     QWEN3_VL_BLOCK_DIAGNOSTIC_STAGES, QWEN3_VL_DIAGNOSTIC_BLOCK, QWEN3_VL_FIRST_DIAGNOSTIC_BLOCK,
-    Qwen3VlConfig, Qwen3VlHostInputs, prepare_qwen3_vl_host_inputs,
+    emit_qwen3_vl_diagnostics,
 };
+use crate::emitter::{Qwen3VlConfig, Qwen3VlHostInputs, prepare_qwen3_vl_host_inputs};
 use crate::iree::{cached_vmfb_path, compile_one_to, iree_compile_bin, target_flags};
 use crate::weights::{bf16_to_f32, dequantize_affine, f16_to_f32, f32_le_to_f32};
 
@@ -134,7 +134,7 @@ fn sha256_file(path: &Path) -> Result<String, String> {
 
 fn compiler_generation_identity(
     compiler: &Path,
-    flags: &[&str],
+    flags: &[String],
     mlir: &str,
 ) -> Result<String, String> {
     let version = Command::new(compiler)
@@ -647,12 +647,12 @@ fn compile_and_load(
             processor_identity,
             sha256_hex(checkpoint_schema.as_bytes())
         ),
-        compiler_generation_identity(&compiler, flags, &mlir)?,
+        compiler_generation_identity(&compiler, &flags, &mlir)?,
     )?;
     let tag = format!("qwen3-vl-vision-{patch_bucket}");
-    let vmfb = cached_vmfb_path(&compiler, &mlir, flags, &cache, &tag, 0);
+    let vmfb = cached_vmfb_path(&compiler, &mlir, &flags, &cache, &tag, 0);
     ensure_qualified_auxiliary_artifact(&vmfb, &contract, &weights, |temporary| {
-        compile_one_to(&compiler, &mlir, flags, &cache, &tag, 0, temporary)
+        compile_one_to(&compiler, &mlir, &flags, &cache, &tag, 0, temporary)
     })?;
     IreeAuxiliaryModule::load(device, &vmfb, &contract, weights)
 }
@@ -734,6 +734,7 @@ impl IreeQwen3VlProjector {
             self.config.text_hidden,
         ];
         let standard_output_count = 1 + self.config.deepstack_visual_indexes.len();
+        #[cfg_attr(not(feature = "diagnostics"), allow(unused_mut))]
         let mut output_shapes = vec![full_output_shape.to_vec(); standard_output_count];
         #[cfg(feature = "diagnostics")]
         {

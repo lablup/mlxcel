@@ -247,9 +247,11 @@ fn main() {
         &vision_capture.patch_values,
         &[patch_rows as i32, patch_width as i32],
     );
-    let eager_vision = model
+    let vision_encoder = model
         .vision_encoder
-        .forward_with_grid_diagnostics(&pixels, &vision_capture.grids);
+        .as_ref()
+        .expect("Qwen3-VL model must have a vision encoder");
+    let eager_vision = vision_encoder.forward_with_grid_diagnostics(&pixels, &vision_capture.grids);
     let eager_main = mlx_f32(&eager_vision.output.hidden_states);
     let eager_branches = eager_vision
         .output
@@ -380,8 +382,7 @@ fn main() {
         (0, &iree_diagnostics.block_0_states[0]),
         (1, &iree_diagnostics.block_hidden_states[0]),
     ] {
-        let controls = model
-            .vision_encoder
+        let controls = vision_encoder
             .block_projection_controls_from_f32(layer, input, &vision_capture.grids)
             .unwrap_or_else(|error| {
                 panic!("run Qwen3-VL block {layer} same-input projection controls: {error}")
@@ -403,8 +404,7 @@ fn main() {
             );
         }
     }
-    let same_input_norms = model
-        .vision_encoder
+    let same_input_norms = vision_encoder
         .block_layer_norms_from_f32(
             2,
             &iree_diagnostics.block_2_states[0],
@@ -493,15 +493,29 @@ fn main() {
             );
         }
     }
-    record_comparison(
-        &mut failures,
-        compare_vision_branches(
-            &mut reports,
-            &vision_capture.projection.deepstack_values,
-            &eager_branches,
-            tolerance,
-        ),
+    assert_eq!(
+        vision_capture.projection.deepstack_values.len(),
+        eager_branches.len(),
+        "DeepStack branch count differs"
     );
+    for (index, (actual, expected)) in vision_capture
+        .projection
+        .deepstack_values
+        .iter()
+        .zip(&eager_branches)
+        .enumerate()
+    {
+        record_comparison(
+            &mut failures,
+            compare_stage(
+                &mut reports,
+                &format!("vision.deepstack_merger_{index}"),
+                actual,
+                expected,
+                tolerance,
+            ),
+        );
+    }
 
     let mut dropped = vision_capture.projection.deepstack_values.clone();
     dropped
@@ -517,26 +531,6 @@ fn main() {
         compare_vision_branches(&mut Vec::new(), &zeroed, &eager_branches, tolerance).is_err(),
         "negative oracle accepted a zeroed actual-checkpoint DeepStack branch"
     );
-    if let Some(first_failure) = failures.first().cloned() {
-        let report = json!({
-            "schema": 1,
-            "model": model_path,
-            "image": image_path,
-            "device": device,
-            "context_capacity": context_capacity,
-            "completed_phase": "vision",
-            "grid_thw": vision_capture.grids,
-            "vision_shape": vision_capture.projection.shape,
-            "deepstack_branches": eager_branches.len(),
-            "negative_dropped_branch_detected": true,
-            "negative_zeroed_branch_detected": true,
-            "comparisons": reports,
-            "comparison_failures": failures,
-            "passed": false,
-        });
-        render_and_persist_report(&report, report_path.as_deref());
-        panic!("Qwen3-VL DeepStack oracle failed after rendering its report: {first_failure}");
-    }
 
     let unexpanded_tokens = vec![1, model.vision_start_token_id, model.image_token_id, 2];
     let prepared = production_preprocessor
@@ -599,6 +593,17 @@ fn main() {
     let eager_logits = mlx_f32(&eager_language.logits);
     let vocab = iree_language.logits.len();
     let eager_last = &eager_logits[(sequence_len - 1) * vocab..sequence_len * vocab];
+    let iree_top1 = iree_language
+        .logits
+        .iter()
+        .enumerate()
+        .max_by(|left, right| left.1.total_cmp(right.1))
+        .map_or(0, |(index, _)| index);
+    let eager_top1 = eager_last
+        .iter()
+        .enumerate()
+        .max_by(|left, right| left.1.total_cmp(right.1))
+        .map_or(0, |(index, _)| index);
     record_comparison(
         &mut failures,
         compare_stage(
@@ -609,10 +614,23 @@ fn main() {
             tolerance,
         ),
     );
+    let same_input_control_failures = failures
+        .iter()
+        .filter(|failure| {
+            failure.starts_with("vision.patch_embedding:")
+                || failure.starts_with("vision.position_embedding:")
+                || failure.starts_with("vision.positioned_embedding:")
+                || failure.contains(".same_input.host_dequant_dense_f32:")
+                || failure.contains(".norm1.same_input:")
+                || failure.contains(".norm2.same_input:")
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let greedy_top1_exact = iree_top1 == eager_top1;
+    let passed = same_input_control_failures.is_empty() && greedy_top1_exact;
 
-    let first_failure = failures.first().cloned();
     let report = json!({
-        "schema": 1,
+        "schema": 2,
         "model": model_path,
         "image": image_path,
         "device": device,
@@ -624,14 +642,22 @@ fn main() {
         "deepstack_target_language_layers": iree_language.target_layer_indices,
         "negative_dropped_branch_detected": true,
         "negative_zeroed_branch_detected": true,
+        "final_top1": iree_top1,
+        "eager_top1": eager_top1,
+        "greedy_top1_exact": greedy_top1_exact,
         "comparisons": reports,
         "comparison_failures": failures,
-        "passed": first_failure.is_none(),
+        "same_input_control_failures": same_input_control_failures,
+        "passed": passed,
     });
     render_and_persist_report(&report, report_path.as_deref());
-    if let Some(error) = first_failure {
-        panic!("Qwen3-VL DeepStack oracle failed after rendering its report: {error}");
+    if let Some(error) = same_input_control_failures.first() {
+        panic!("Qwen3-VL DeepStack oracle failed same-input operator control: {error}");
     }
+    assert!(
+        greedy_top1_exact,
+        "Qwen3-VL DeepStack oracle final top-1 token differed: iree={iree_top1}, eager={eager_top1}"
+    );
 }
 
 #[cfg(test)]

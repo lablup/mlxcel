@@ -16,14 +16,9 @@ use super::{
     VisionBlockDiagnosticStage, diagnostic_dense_linear_from_weight_f32, ensure_fused_sdpa,
     fused_sdpa_target_dim, gelu_pytorch_tanh, sdpa_pad_width,
 };
+use crate::models::embedding_test_support::mlx_test_guard;
 use mlxcel_core::dtype;
 use mlxcel_core::layers::LayerNorm;
-use std::sync::Once;
-
-fn ensure_cpu_device() {
-    static INIT: Once = Once::new();
-    INIT.call_once(|| mlxcel_core::set_default_device(false));
-}
 
 #[test]
 fn fused_sdpa_target_dim_uses_next_supported_kernel_width() {
@@ -44,6 +39,7 @@ fn sdpa_pad_width_only_pads_the_last_dimension() {
 
 #[test]
 fn ensure_fused_sdpa_restores_original_output_shape() {
+    let _guard = mlx_test_guard();
     let q = mlxcel_core::ones(&[1, 2, 4, 96], dtype::FLOAT32);
     let k = mlxcel_core::ones(&[1, 2, 4, 96], dtype::FLOAT32);
     let v = mlxcel_core::ones(&[1, 2, 4, 96], dtype::FLOAT32);
@@ -57,6 +53,7 @@ fn ensure_fused_sdpa_restores_original_output_shape() {
 
 #[test]
 fn block_gelu_matches_qwen3_vl_pytorch_tanh_contract() {
+    let _guard = mlx_test_guard();
     let input = mlxcel_core::from_slice_f32(&[-3.0, -1.0, 0.0, 1.0, 3.0], &[5]);
     let output = gelu_pytorch_tanh(&input);
     mlxcel_core::eval(&output);
@@ -73,6 +70,7 @@ fn block_gelu_matches_qwen3_vl_pytorch_tanh_contract() {
 
 #[test]
 fn block_layer_norm_matches_centered_variance_f32_contract() {
+    let _guard = mlx_test_guard();
     let values = [3.5_f32, -2.0, 0.25, 7.0, -4.0, 1.5, 8.0, -0.75];
     let weights = [1.25_f32, 0.5, -0.75, 2.0];
     let biases = [-0.25_f32, 0.125, 0.5, -1.0];
@@ -114,7 +112,7 @@ fn block_layer_norm_matches_centered_variance_f32_contract() {
 
 #[test]
 fn diagnostic_dense_linear_runs_transposed_weight_and_bias_in_f32() {
-    ensure_cpu_device();
+    let _guard = mlx_test_guard();
     let input = mlxcel_core::from_slice_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2]);
     let weight = mlxcel_core::from_slice_f32(&[2.0, 0.0, 0.0, 3.0], &[2, 2]);
     let bias = mlxcel_core::from_slice_f32(&[0.5, -1.0], &[2]);

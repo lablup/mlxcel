@@ -203,14 +203,14 @@ pub use qwen2_vl_runtime::{
     IreeQwen2VlProjector, Qwen2VlVisionExecutionMetrics, Qwen2VlVisionProjection,
 };
 #[cfg(feature = "diagnostics")]
+pub use qwen2_vl_runtime::{
+    IreeQwen25VlDiagnosticProjector, Qwen25VlDiagnosticMutation, Qwen25VlVisionDiagnostics,
+};
+#[cfg(feature = "diagnostics")]
 pub use qwen3_vl_runtime::Qwen3VlVisionDiagnostics;
 #[cfg(feature = "iree")]
 pub use qwen3_vl_runtime::{
     IreeQwen3VlProjector, Qwen3VlVisionExecutionMetrics, Qwen3VlVisionProjection,
-};
-#[cfg(feature = "diagnostics")]
-pub use qwen2_vl_runtime::{
-    IreeQwen25VlDiagnosticProjector, Qwen25VlDiagnosticMutation, Qwen25VlVisionDiagnostics,
 };
 #[cfg(feature = "diagnostics")]
 pub use vision_runtime::{IreeVisionDiagnosticProjector, VisionDiagnosticProjection};
@@ -241,6 +241,7 @@ pub fn dequantize_gemma3n_affine_diagnostic(
 /// Expose the exact host-side affine widening used by the Qwen3-VL IREE
 /// checkpoint loader to diagnostics without making it part of the runtime API.
 #[cfg(feature = "diagnostics")]
+#[allow(clippy::too_many_arguments)]
 pub fn dequantize_affine_f32_diagnostic(
     packed: &[u8],
     scales: &[u8],

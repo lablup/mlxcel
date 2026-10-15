@@ -371,7 +371,6 @@ impl Qwen2VLProcessor {
         let patch_area = self.patch_size * self.patch_size;
         let features_per_pixel = in_channels * patch_area;
 
-<<<<<<< HEAD
         for item in media {
             let (frames, target_h, target_w, grid_t) = match *item {
                 Qwen2VLMediaInput::Image(image) => {
@@ -379,29 +378,6 @@ impl Qwen2VLProcessor {
                     let frames =
                         std::iter::repeat_n(image, self.temporal_patch_size).collect::<Vec<_>>();
                     (frames, h, w, 1usize)
-=======
-        for (img_idx, img) in images.iter().enumerate() {
-            let (t, h_patches, w_patches) = grid_thw[img_idx];
-            let target_h = h_patches as u32 * self.patch_size as u32;
-            let target_w = w_patches as u32 * self.patch_size as u32;
-
-            // Resize image
-            let resized = img.resize_exact(target_w, target_h, self.resize_filter);
-            let rgb = resized.to_rgb8();
-
-            // Normalize: (pixel / 255.0 - mean) / std
-            let h = target_h as usize;
-            let w = target_w as usize;
-            let mut normalized = vec![0f32; in_channels * h * w];
-            for y in 0..h {
-                for x in 0..w {
-                    let pixel = rgb.get_pixel(x as u32, y as u32);
-                    for c in 0..3 {
-                        let val = pixel[c] as f32 / 255.0;
-                        let norm_val = (val - self.mean[c]) / self.std[c];
-                        normalized[c * h * w + y * w + x] = norm_val;
-                    }
->>>>>>> ddd793f5 (fix(xla): honor Qwen3-VL processor contract)
                 }
                 Qwen2VLMediaInput::Video(frames) => {
                     let frames = self.pad_video_frames(frames)?;

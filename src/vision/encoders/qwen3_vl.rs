@@ -440,7 +440,7 @@ struct VisionAttention {
     scale: f32,
 }
 
-#[cfg(any(test, feature = "xla-diagnostics"))]
+#[cfg(any(test, feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 fn diagnostic_dense_linear_from_weight_f32(
     input: &MlxArray,
     weight: &MlxArray,
@@ -462,7 +462,7 @@ fn diagnostic_dense_linear_from_weight_f32(
 /// Run one checkpoint projection with the exact affine-to-F32 host widening
 /// used by the IREE loader, followed by an MLX dense F32 matmul. This is
 /// diagnostics-only: production eager inference keeps its fused QMM path.
-#[cfg(feature = "xla-diagnostics")]
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 fn diagnostic_dense_linear_f32(
     linear: &UnifiedLinear,
     input: &MlxArray,
@@ -651,7 +651,7 @@ impl VisionAttention {
         self.proj.forward(&output)
     }
 
-    #[cfg(feature = "xla-diagnostics")]
+    #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
     fn forward_dequantized_f32(
         &self,
         x: &MlxArray,
@@ -799,7 +799,7 @@ impl VisionMLP {
         self.linear_fc2.forward(&h)
     }
 
-    #[cfg(feature = "xla-diagnostics")]
+    #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
     fn forward_dequantized_f32(&self, x: &MlxArray) -> Result<UniquePtr<MlxArray>, String> {
         let hidden = diagnostic_dense_linear_f32(&self.linear_fc1, x)?;
         let hidden = gelu_pytorch_tanh(&hidden);
@@ -866,7 +866,7 @@ impl VisionBlock {
         output
     }
 
-    #[cfg(feature = "xla-diagnostics")]
+    #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
     fn forward_dequantized_f32(
         &self,
         hidden_states: &MlxArray,
@@ -881,33 +881,6 @@ impl VisionBlock {
         let norm2 = self.norm2.forward(&residual);
         let mlp = self.mlp.forward_dequantized_f32(&norm2)?;
         Ok(mlxcel_core::add(&residual, &mlp))
-    }
-}
-
-#[derive(Clone, Copy)]
-enum VisionBlockDiagnosticStage {
-    Input,
-    Norm1,
-    Attention,
-    PostAttentionResidual,
-    Norm2,
-    Mlp,
-    Output,
-}
-
-impl VisionBlockDiagnosticStage {
-    const COUNT: usize = 7;
-
-    fn index(self) -> usize {
-        match self {
-            Self::Input => 0,
-            Self::Norm1 => 1,
-            Self::Attention => 2,
-            Self::PostAttentionResidual => 3,
-            Self::Norm2 => 4,
-            Self::Mlp => 5,
-            Self::Output => 6,
-        }
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -936,6 +909,35 @@ impl VisionBlockDiagnosticStage {
         let h = mlxcel_core::add(&h, &mlp_out);
         observe(Qwen3VLVisionStage::BlockOutput { layer }, &h);
         h
+    }
+}
+
+#[derive(Clone, Copy)]
+enum VisionBlockDiagnosticStage {
+    Input,
+    Norm1,
+    Attention,
+    PostAttentionResidual,
+    Norm2,
+    Mlp,
+    Output,
+}
+
+impl VisionBlockDiagnosticStage {
+    #[cfg(any(test, feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+    const COUNT: usize = 7;
+
+    #[cfg(any(test, feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+    fn index(self) -> usize {
+        match self {
+            Self::Input => 0,
+            Self::Norm1 => 1,
+            Self::Attention => 2,
+            Self::PostAttentionResidual => 3,
+            Self::Norm2 => 4,
+            Self::Mlp => 5,
+            Self::Output => 6,
+        }
     }
 }
 
@@ -985,6 +987,11 @@ impl PatchMerger {
         })
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
+    fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+        self.forward_with_observer(x, |_, _| {})
+    }
+
     fn forward_with_observer<F>(&self, x: &MlxArray, mut observe: F) -> UniquePtr<MlxArray>
     where
         F: FnMut(PatchMergerStage, &MlxArray),
@@ -1014,6 +1021,7 @@ enum PatchMergerStage {
     Activation,
 }
 
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 impl PatchMergerStage {
     fn index(self) -> usize {
         match self {
@@ -1031,7 +1039,7 @@ pub struct Qwen3VLVisionEncoderOutput {
     pub deepstack_features: Vec<UniquePtr<MlxArray>>,
 }
 
-#[cfg(feature = "xla-diagnostics")]
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 pub struct Qwen3VLVisionEncoderDiagnosticOutput {
     pub output: Qwen3VLVisionEncoderOutput,
     pub patch_embeddings: UniquePtr<MlxArray>,
@@ -1054,12 +1062,16 @@ pub struct Qwen3VLVisionEncoderDiagnosticOutput {
 
 /// Same-input eager controls for distinguishing fused QMM accumulation from
 /// explicitly dequantized dense F32 projection arithmetic.
-#[cfg(feature = "xla-diagnostics")]
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 pub struct Qwen3VLVisionBlockProjectionControls {
     pub fused_qmm: UniquePtr<MlxArray>,
     pub host_dequant_dense_f32: UniquePtr<MlxArray>,
 }
 
+#[cfg_attr(
+    not(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu")),
+    allow(dead_code)
+)]
 #[derive(Clone, Copy)]
 enum VisionStage {
     PatchEmbedding,
@@ -1238,10 +1250,10 @@ impl Qwen3VLVisionEncoder {
         hidden_states: &MlxArray,
         grid_thw: &[(i32, i32, i32)],
     ) -> Qwen3VLVisionEncoderOutput {
-        self.forward_with_grid_observer(hidden_states, grid_thw, |_, _| {})
+        self.forward_with_diagnostic_observer(hidden_states, grid_thw, |_, _| {})
     }
 
-    #[cfg(feature = "xla-diagnostics")]
+    #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
     pub fn forward_with_grid_diagnostics(
         &self,
         hidden_states: &MlxArray,
@@ -1258,39 +1270,41 @@ impl Qwen3VLVisionEncoder {
             .map(|_| Vec::with_capacity(3))
             .collect::<Vec<_>>();
         let output =
-            self.forward_with_grid_observer(hidden_states, grid_thw, |stage, hidden| match stage {
-                VisionStage::PatchEmbedding => {
-                    patch_embeddings = Some(mlxcel_core::copy(hidden));
-                }
-                VisionStage::PositionEmbedding => {
-                    position_embeddings = Some(mlxcel_core::copy(hidden));
-                }
-                VisionStage::PositionedEmbedding => {
-                    positioned_embeddings = Some(mlxcel_core::copy(hidden));
-                }
-                VisionStage::Block(layer) => {
-                    debug_assert_eq!(layer, block_hidden_states.len());
-                    block_hidden_states.push(mlxcel_core::copy(hidden));
-                }
-                VisionStage::Block0(stage) => {
-                    debug_assert_eq!(stage.index(), block_0_states.len());
-                    let snapshot = mlxcel_core::copy(hidden);
-                    mlxcel_core::eval(&snapshot);
-                    block_0_states.push(snapshot);
-                }
-                VisionStage::Block2(stage) => {
-                    debug_assert_eq!(stage.index(), block_2_states.len());
-                    let snapshot = mlxcel_core::copy(hidden);
-                    mlxcel_core::eval(&snapshot);
-                    block_2_states.push(snapshot);
-                }
-                VisionStage::MainMerger(stage) => {
-                    debug_assert_eq!(stage.index(), main_merger_states.len());
-                    main_merger_states.push(mlxcel_core::copy(hidden));
-                }
-                VisionStage::DeepStackMerger(branch, stage) => {
-                    debug_assert_eq!(stage.index(), deepstack_merger_states[branch].len());
-                    deepstack_merger_states[branch].push(mlxcel_core::copy(hidden));
+            self.forward_with_diagnostic_observer(hidden_states, grid_thw, |stage, hidden| {
+                match stage {
+                    VisionStage::PatchEmbedding => {
+                        patch_embeddings = Some(mlxcel_core::copy(hidden));
+                    }
+                    VisionStage::PositionEmbedding => {
+                        position_embeddings = Some(mlxcel_core::copy(hidden));
+                    }
+                    VisionStage::PositionedEmbedding => {
+                        positioned_embeddings = Some(mlxcel_core::copy(hidden));
+                    }
+                    VisionStage::Block(layer) => {
+                        debug_assert_eq!(layer, block_hidden_states.len());
+                        block_hidden_states.push(mlxcel_core::copy(hidden));
+                    }
+                    VisionStage::Block0(stage) => {
+                        debug_assert_eq!(stage.index(), block_0_states.len());
+                        let snapshot = mlxcel_core::copy(hidden);
+                        mlxcel_core::eval(&snapshot);
+                        block_0_states.push(snapshot);
+                    }
+                    VisionStage::Block2(stage) => {
+                        debug_assert_eq!(stage.index(), block_2_states.len());
+                        let snapshot = mlxcel_core::copy(hidden);
+                        mlxcel_core::eval(&snapshot);
+                        block_2_states.push(snapshot);
+                    }
+                    VisionStage::MainMerger(stage) => {
+                        debug_assert_eq!(stage.index(), main_merger_states.len());
+                        main_merger_states.push(mlxcel_core::copy(hidden));
+                    }
+                    VisionStage::DeepStackMerger(branch, stage) => {
+                        debug_assert_eq!(stage.index(), deepstack_merger_states[branch].len());
+                        deepstack_merger_states[branch].push(mlxcel_core::copy(hidden));
+                    }
                 }
             });
         Qwen3VLVisionEncoderDiagnosticOutput {
@@ -1312,7 +1326,7 @@ impl Qwen3VLVisionEncoder {
     /// F32 activations. The Qwen3-VL oracle uses this to compare eager MLX and
     /// IREE with identical inputs, separating normalization arithmetic from
     /// upstream quantized-matmul drift.
-    #[cfg(feature = "xla-diagnostics")]
+    #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
     pub fn block_layer_norms_from_f32(
         &self,
         layer: usize,
@@ -1365,7 +1379,7 @@ impl Qwen3VLVisionEncoder {
     /// production eager fused-QMM path and a diagnostics-only host-dequantized
     /// dense-F32 path. All non-linear operators are shared, so the two outputs
     /// isolate the block's four checkpoint projections.
-    #[cfg(feature = "xla-diagnostics")]
+    #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
     pub fn block_projection_controls_from_f32(
         &self,
         layer: usize,
@@ -1417,7 +1431,7 @@ impl Qwen3VLVisionEncoder {
         })
     }
 
-    fn forward_with_grid_observer<F>(
+    fn forward_with_diagnostic_observer<F>(
         &self,
         hidden_states: &MlxArray,
         grid_thw: &[(i32, i32, i32)],

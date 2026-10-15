@@ -607,7 +607,7 @@ pub struct Qwen3VLModel {
 ///
 /// The snapshots are taken immediately after each configured DeepStack
 /// residual injection. Normal generation never constructs this value.
-#[cfg(feature = "xla-diagnostics")]
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 pub struct Qwen3VLDeepStackDiagnostics {
     pub logits: UniquePtr<MlxArray>,
     pub post_injection_hidden_states: Vec<UniquePtr<MlxArray>>,
@@ -858,7 +858,7 @@ impl Qwen3VLModel {
     /// This entry is compiled only for the actual-checkpoint XLA oracle. It
     /// shares every operation with [`Self::forward_for_sequence`] and merely
     /// copies the selected post-hook tensors before final norm and LM head.
-    #[cfg(feature = "xla-diagnostics")]
+    #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
     pub fn forward_deepstack_diagnostics(
         &self,
         input_ids: &MlxArray,
@@ -866,13 +866,14 @@ impl Qwen3VLModel {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> Qwen3VLDeepStackDiagnostics {
-        let (hidden, post_injection_hidden_states) = self.forward_hidden_for_sequence_inner::<true>(
-            input_ids,
-            Some(input_embeddings),
-            caches,
-            mask,
-            None,
-        );
+        let (hidden, post_injection_hidden_states) = self
+            .forward_hidden_for_sequence_inner::<true>(
+                input_ids,
+                Some(input_embeddings),
+                caches,
+                mask,
+                None,
+            );
         let logits = self.lm_head.forward(&hidden);
         Qwen3VLDeepStackDiagnostics {
             logits,
