@@ -491,6 +491,55 @@ static iree_status_t xla_append_bundle(xla_ctx* c, const char* prefill_vmfb,
   return iree_ok_status();
 }
 
+static iree_status_t xla_upload_one_weight_impl(
+    xla_ctx* c, int32_t i, const void* weight_data, int32_t weight_dtype,
+    int32_t weight_rank, const int64_t* weight_dims, const char* device_uri) {
+  int32_t rank = weight_rank;
+  iree_hal_dim_t shape[4];
+  iree_host_size_t nelem = 1;
+  for (int32_t d = 0; d < rank; d++) {
+    iree_hal_dim_t dim = (iree_hal_dim_t)weight_dims[d];
+    shape[d] = dim;
+    nelem *= (iree_host_size_t)dim;
+  }
+  // issue #516 per-weight dtype: f32 (0, a widened / dequantized weight) or the
+  // raw parts of an MLX affine-quantized projection, f16 (1) scales / biases or a
+  // packed U32 (2) weight the graph dequantizes in place.
+  iree_hal_element_type_t elt;
+  iree_host_size_t esize;
+  switch (weight_dtype) {
+    case 0:
+      elt = IREE_HAL_ELEMENT_TYPE_FLOAT_32;
+      esize = 4;
+      break;
+    case 1:
+      elt = IREE_HAL_ELEMENT_TYPE_FLOAT_16;
+      esize = 2;
+      break;
+    case 2:
+      elt = IREE_HAL_ELEMENT_TYPE_UINT_32;
+      esize = 4;
+      break;
+    default:
+      return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                              "unknown weight dtype %d for weight %d",
+                              weight_dtype, i);
+  }
+  if (c->weights[i]) {
+    iree_hal_buffer_view_release(c->weights[i]);
+    c->weights[i] = NULL;
+  }
+  iree_status_t status =
+      xla_alloc_bv(c, (iree_host_size_t)rank, shape, elt, weight_data,
+                   nelem * esize, &c->weights[i]);
+  if (!iree_status_is_ok(status)) {
+    return iree_status_annotate_f(
+        status, "[weight-upload] failed to allocate/upload weight %d on '%s'",
+        i, device_uri ? device_uri : "device");
+  }
+  return iree_ok_status();
+}
+
 static iree_status_t xla_llama_create_impl(
     xla_ctx* c, const char* device_uri, const char* prefill_vmfb,
     const char* prefill_embeddings_vmfb,
@@ -613,47 +662,36 @@ static iree_status_t xla_llama_create_impl(
   c->weights = (iree_hal_buffer_view_t**)calloc(
       (size_t)n_weights, sizeof(iree_hal_buffer_view_t*));
   if (!c->weights) return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED);
-  for (int32_t i = 0; i < n_weights; i++) {
-    int32_t rank = weight_ranks[i];
-    iree_hal_dim_t shape[4];
-    iree_host_size_t nelem = 1;
-    for (int32_t d = 0; d < rank; d++) {
-      iree_hal_dim_t dim = (iree_hal_dim_t)weight_dims[i * 4 + d];
-      shape[d] = dim;
-      nelem *= (iree_host_size_t)dim;
-    }
-    // issue #516 per-weight dtype: f32 (0, a widened / dequantized weight) or the
-    // raw parts of an MLX affine-quantized projection, f16 (1) scales / biases or a
-    // packed U32 (2) weight the graph dequantizes in place.
-    iree_hal_element_type_t elt;
-    iree_host_size_t esize;
-    switch (weight_dtypes[i]) {
-      case 0:
-        elt = IREE_HAL_ELEMENT_TYPE_FLOAT_32;
-        esize = 4;
-        break;
-      case 1:
-        elt = IREE_HAL_ELEMENT_TYPE_FLOAT_16;
-        esize = 2;
-        break;
-      case 2:
-        elt = IREE_HAL_ELEMENT_TYPE_UINT_32;
-        esize = 4;
-        break;
-      default:
-        return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                                "unknown weight dtype %d for weight %d",
-                                weight_dtypes[i], i);
-    }
-    status = xla_alloc_bv(c, (iree_host_size_t)rank, shape, elt,
-                          weight_data[i], nelem * esize, &c->weights[i]);
-    if (!iree_status_is_ok(status)) {
-      return iree_status_annotate_f(
-          status, "[weight-upload] failed to allocate/upload weight %d on '%s'",
-          i, device_uri);
+  if (weight_data != NULL) {
+    for (int32_t i = 0; i < n_weights; i++) {
+      status = xla_upload_one_weight_impl(
+          c, i, weight_data[i], weight_dtypes[i], weight_ranks[i],
+          &weight_dims[i * 4], device_uri);
+      if (!iree_status_is_ok(status)) {
+        return status;
+      }
     }
   }
   return iree_ok_status();
+}
+
+int xla_llama_upload_weight(xla_ctx* c, int32_t i, const void* weight_data,
+                            int32_t weight_dtype, int32_t weight_rank,
+                            const int64_t* weight_dims) {
+  if (!c || !c->weights || i < 0 || i >= c->n_weights || !weight_data ||
+      weight_rank < 0 || weight_rank > 4 || !weight_dims) {
+    return 1;
+  }
+  iree_status_t s = xla_upload_one_weight_impl(
+      c, i, weight_data, weight_dtype, weight_rank, weight_dims, NULL);
+  if (!iree_status_is_ok(s)) {
+    fprintf(stderr, "xla_llama_upload_weight failed (code %d):\n",
+            (int)iree_status_code(s));
+    iree_status_fprint(stderr, s);
+    iree_status_ignore(s);
+    return 1;
+  }
+  return 0;
 }
 
 // Create the execution context. `device_uri` is "local-task" (CPU) or another

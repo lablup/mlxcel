@@ -52,6 +52,7 @@ use mlxcel_core::session::{InferenceSession, PreparedPrefill, SessionCapabilitie
 mod context;
 #[cfg(any(feature = "diagnostics", test))]
 mod diagnostic_flags;
+mod float;
 #[cfg(any(feature = "iree", test))]
 #[allow(dead_code)]
 mod numeric_dtype_contract;
@@ -68,6 +69,7 @@ mod prepared;
 mod prepared_deepstack;
 mod prepared_gemma3;
 mod prepared_gemma3n;
+mod prepared_molmo;
 
 #[cfg(feature = "iree")]
 mod aux;
@@ -81,6 +83,8 @@ mod iree;
 mod molmo2;
 #[cfg(feature = "iree")]
 mod molmo2_vision_runtime;
+#[cfg(feature = "iree")]
+mod molmo_vision_runtime;
 #[cfg(feature = "iree")]
 mod phi4_audio;
 #[cfg(feature = "iree")]
@@ -179,6 +183,10 @@ pub use emitter::{
 };
 #[cfg(feature = "diagnostics")]
 pub use iree::{DeepStackPrefillDiagnostics, PreparedPrefillDiagnostics};
+#[cfg(feature = "diagnostics")]
+pub use molmo_vision_runtime::{IreeMolmoVisionDiagnosticProjector, MolmoVisionDiagnostics};
+#[cfg(feature = "iree")]
+pub use molmo_vision_runtime::{IreeMolmoVisionProjector, MolmoVisionProjection};
 #[cfg(any(feature = "iree", test))]
 pub use molmo2::{
     Molmo2InputError, Molmo2SafePooling, add_projected_features as add_molmo2_projected_features,
@@ -199,6 +207,10 @@ pub use phi4_audio::{
 #[cfg(feature = "iree")]
 #[doc(hidden)]
 pub use phi4_audio::{Phi4AudioCheckpoint, Phi4AudioDiagnosticRuntime, Phi4AudioDiagnostics};
+pub use prepared_molmo::{
+    MOLMO_V1_MERGE_MODE, MolmoEmbeddingDType, MolmoPreparedImage, MolmoSparseAddError,
+    MolmoSparseAddPair, MolmoSparseAddPlan,
+};
 #[cfg(feature = "iree")]
 pub use qwen2_vl_runtime::{
     IreeQwen2VlProjector, Qwen2VlVisionExecutionMetrics, Qwen2VlVisionProjection,

@@ -233,6 +233,14 @@ unsafe extern "C" {
         deepstack_target_layers: *const c_int,
         has_adapter_modes: c_int,
     ) -> *mut XlaCtx;
+    fn xla_llama_upload_weight(
+        c: *mut XlaCtx,
+        i: c_int,
+        weight_data: *const c_void,
+        weight_dtype: c_int,
+        weight_rank: c_int,
+        weight_dims: *const i64,
+    ) -> c_int;
     fn xla_llama_prefill(
         c: *mut XlaCtx,
         adapter_mode: c_int,
@@ -1693,12 +1701,21 @@ mod checkpoint_name_tests {
 /// mmap'd exactly once, its tensors copied out as owned f32) and placed back into
 /// the emitter's arg order by index, so the buffers line up with the graph args
 /// regardless of how the checkpoint was split.
-#[allow(clippy::type_complexity)]
-fn load_weights(
+/// Stream-load weights shard by shard and tensor by tensor, invoking `sink`
+/// for each weight slot `i` so the host `WeightBuf` is freed immediately after
+/// the device buffer view is allocated. Grouping indices within a shard by
+/// canonical tensor name also ensures fused tensors (`qkv_proj`, `gate_up_proj`,
+/// `att_proj`, `ff_proj`) are dequantized once per layer instead of once per
+/// slice.
+fn upload_weights_with_sink<F>(
     model_dir: &Path,
     cfg: &RuntimeConfig,
     resident_f16: bool,
-) -> Result<(Vec<WeightBuf>, Vec<c_int>, Vec<c_int>, Vec<i64>), String> {
+    mut sink: F,
+) -> Result<(), String>
+where
+    F: FnMut(usize, WeightBuf, c_int, c_int, [i64; 4]) -> Result<(), String>,
+{
     let specs = cfg.weight_specs();
     let names: Vec<String> = specs.iter().map(|s| s.tensor_name().to_string()).collect();
     let (shard_paths, mut dense_name_scheme, gemma3n_name_scheme) = match cfg {
@@ -1721,20 +1738,13 @@ fn load_weights(
     };
 
     // Group weight indices by shard so each shard file is opened/mmap'd once; the
-    // results are placed by index, preserving the emitter's arg order. A Phi3
-    // fused checkpoint references one tensor (`qkv_proj` / `gate_up_proj`) from
-    // several specs; each reads and row-slices the (memmapped) shard.
+    // results are placed by index, preserving the emitter's arg order.
     let mut by_shard: std::collections::BTreeMap<&Path, Vec<usize>> =
         std::collections::BTreeMap::new();
     for (i, p) in shard_paths.iter().enumerate() {
         by_shard.entry(p.as_path()).or_default().push(i);
     }
 
-    let n = specs.len();
-    let mut bufs: Vec<WeightBuf> = (0..n).map(|_| WeightBuf::F32(Vec::new())).collect();
-    let mut dtypes: Vec<c_int> = vec![WDT_F32; n];
-    let mut ranks: Vec<c_int> = vec![0; n];
-    let mut dims: Vec<i64> = vec![0; n * 4];
     for (shard, idxs) in by_shard {
         let file = File::open(shard).map_err(|e| format!("open {}: {e}", shard.display()))?;
         // Safety: the file is read-only for the lifetime of the mmap below.
@@ -1742,8 +1752,12 @@ fn load_weights(
             unsafe { Mmap::map(&file) }.map_err(|e| format!("mmap {}: {e}", shard.display()))?;
         let st = SafeTensors::deserialize(&mmap)
             .map_err(|e| format!("parse {}: {e}", shard.display()))?;
+        let mut by_tensor: std::collections::BTreeMap<&str, Vec<usize>> =
+            std::collections::BTreeMap::new();
         for &i in &idxs {
-            let name = &names[i];
+            by_tensor.entry(names[i].as_str()).or_default().push(i);
+        }
+        for (name, tensor_idxs) in by_tensor {
             let (checkpoint_name, t) = match cfg {
                 RuntimeConfig::Gemma3n(_) => {
                     let checkpoint_name = checkpoint_tensor_name(gemma3n_name_scheme, name)?;
@@ -1757,14 +1771,14 @@ fn load_weights(
                 }
                 RuntimeConfig::Dense(_) => {
                     let checkpoint_name = match dense_name_scheme {
-                        Some(DenseCheckpointNames::Canonical) => name.clone(),
+                        Some(DenseCheckpointNames::Canonical) => name.to_string(),
                         Some(DenseCheckpointNames::LanguageModelPrefixed) => {
                             language_model_tensor_name(name)
                         }
                         None => {
                             if st.tensor(name).is_ok() {
                                 dense_name_scheme = Some(DenseCheckpointNames::Canonical);
-                                name.clone()
+                                name.to_string()
                             } else {
                                 let wrapped = language_model_tensor_name(name);
                                 st.tensor(&wrapped).map_err(|error| {
@@ -1790,217 +1804,257 @@ fn load_weights(
                 }
             };
 
-            // issue #516 packed path: upload the raw quantized part (the packed U32
-            // weight, or its f16 scales / biases) as-is, no dequant. Its native dtype
-            // and 2-D shape go straight to the device; the graph dequants in-place.
-            if let WeightSpec::QuantRaw { part, .. } = &specs[i] {
-                let (code, expect) = match part {
-                    QuantPart::Packed => (WDT_U32, Dtype::U32),
-                    QuantPart::Scales | QuantPart::Biases => (WDT_F16, Dtype::F16),
-                };
-                if t.dtype() != expect {
-                    return Err(format!(
-                        "quant part {name} dtype {:?}, expected {expect:?}",
-                        t.dtype()
-                    ));
-                }
-                let shape = t.shape();
-                if shape.len() != 2 {
-                    return Err(format!(
-                        "quant part {name} is rank {} (expected 2)",
-                        shape.len()
-                    ));
-                }
-                dtypes[i] = code;
-                ranks[i] = 2;
-                dims[i * 4] = checked_ffi_i64(shape[0], &format!("weight {name} dim 0"))?;
-                dims[i * 4 + 1] = checked_ffi_i64(shape[1], &format!("weight {name} dim 1"))?;
-                bufs[i] = WeightBuf::Raw(t.data().to_vec());
-                continue;
-            }
-
-            // Widen the whole tensor to row-major `[out, in]` (or `[out]`) f32 (the
-            // graph's dtype): an MLX affine `U32`-packed weight is dequantized (the
-            // layernorms / biases are not quantized and take the widen path).
-            let (data, shape): (Vec<f32>, Vec<usize>) = if t.dtype() == Dtype::U32 {
-                let qc = cfg.quantization().ok_or_else(|| {
-                    format!(
-                        "weight {name} is U32 (quantized) but config.json has no `quantization`"
-                    )
-                })?;
-                let prefix = checkpoint_name.strip_suffix(".weight").ok_or_else(|| {
-                    format!("quantized weight {checkpoint_name} does not end in `.weight`")
-                })?;
-                let scales_name = format!("{prefix}.scales");
-                let biases_name = format!("{prefix}.biases");
-                let scales = st.tensor(&scales_name).map_err(|e| {
-                    format!("{scales_name} (for {name}) in {}: {e}", shard.display())
-                })?;
-                let biases = st.tensor(&biases_name).map_err(|e| {
-                    format!("{biases_name} (for {name}) in {}: {e}", shard.display())
-                })?;
-                // mlx-lm emits the affine scales/biases as either f16 or bf16
-                // (Qwen3 / Gemma3-27B / Qwen3-MoE checkpoints use bf16); accept a
-                // matching 16-bit pair and widen it to f32 in the dequantizer.
-                let sb_dtype = match (scales.dtype(), biases.dtype()) {
-                    (Dtype::F16, Dtype::F16) => Dtype::F16,
-                    (Dtype::BF16, Dtype::BF16) => Dtype::BF16,
-                    (Dtype::F32, Dtype::F32)
-                        if matches!(
-                            cfg,
-                            RuntimeConfig::Dense(config)
-                                if config.weight_scheme == WeightScheme::Molmo2
-                        ) =>
-                    {
-                        Dtype::F32
-                    }
-                    (s, b) => {
-                        return Err(format!(
-                            "{prefix} scales/biases dtype {s:?}/{b:?}, expected a matching F16/BF16 pair or Molmo2 F32 pair"
-                        ));
-                    }
-                };
-                let shape = t.shape();
-                match shape.len() {
-                    // Ordinary `[out, in_packed]` weight (attention, dense MLP,
-                    // shared expert, router when quantized).
-                    2 => {
-                        let (out, in_packed) = (shape[0], shape[1]);
-                        let in_ = in_packed * (32 / qc.bits);
-                        let d = if matches!(cfg, RuntimeConfig::Gemma3n(_)) {
-                            if sb_dtype != Dtype::BF16 {
-                                return Err(format!(
-                                    "{prefix} uses F16 affine scales/biases, but Gemma3n requires BF16 affine metadata"
-                                ));
+            let needs_widened = tensor_idxs
+                .iter()
+                .any(|&i| !matches!(specs[i], WeightSpec::QuantRaw { .. }));
+            let widened: Option<(Vec<f32>, Vec<usize>)> = if needs_widened {
+                // Widen the whole tensor to row-major `[out, in]` (or `[out]`) f32 (the
+                // graph's dtype): an MLX affine `U32`-packed weight is dequantized (the
+                // layernorms / biases are not quantized and take the widen path).
+                Some(if t.dtype() == Dtype::U32 {
+                    let qc = cfg.quantization().ok_or_else(|| {
+                        format!(
+                            "weight {name} is U32 (quantized) but config.json has no `quantization`"
+                        )
+                    })?;
+                    let prefix = checkpoint_name.strip_suffix(".weight").ok_or_else(|| {
+                        format!("quantized weight {checkpoint_name} does not end in `.weight`")
+                    })?;
+                    let scales_name = format!("{prefix}.scales");
+                    let biases_name = format!("{prefix}.biases");
+                    let scales = st.tensor(&scales_name).map_err(|e| {
+                        format!("{scales_name} (for {name}) in {}: {e}", shard.display())
+                    })?;
+                    let biases = st.tensor(&biases_name).map_err(|e| {
+                        format!("{biases_name} (for {name}) in {}: {e}", shard.display())
+                    })?;
+                    let sb_dtype = match (scales.dtype(), biases.dtype()) {
+                        (Dtype::F16, Dtype::F16) => Dtype::F16,
+                        (Dtype::BF16, Dtype::BF16) => Dtype::BF16,
+                        (Dtype::F32, Dtype::F32)
+                            if matches!(
+                                cfg,
+                                RuntimeConfig::Dense(config)
+                                    if config.weight_scheme == WeightScheme::Molmo2
+                            ) =>
+                        {
+                            Dtype::F32
+                        }
+                        (s, b) => {
+                            return Err(format!(
+                                "{prefix} scales/biases dtype {s:?}/{b:?}, expected a matching F16/BF16 pair or Molmo2 F32 pair"
+                            ));
+                        }
+                    };
+                    let shape = t.shape();
+                    match shape.len() {
+                        2 => {
+                            let (out, in_packed) = (shape[0], shape[1]);
+                            let in_ = in_packed * (32 / qc.bits);
+                            let d = if matches!(cfg, RuntimeConfig::Gemma3n(_)) {
+                                if sb_dtype != Dtype::BF16 {
+                                    return Err(format!(
+                                        "{prefix} uses F16 affine scales/biases, but Gemma3n requires BF16 affine metadata"
+                                    ));
+                                }
+                                dequantize_affine_bf16_fused(
+                                    t.data(),
+                                    scales.data(),
+                                    biases.data(),
+                                    out,
+                                    in_packed,
+                                    qc.bits,
+                                    qc.group_size,
+                                )
+                            } else if sb_dtype == Dtype::F32 {
+                                dequantize_affine_f32(
+                                    t.data(),
+                                    scales.data(),
+                                    biases.data(),
+                                    out,
+                                    in_packed,
+                                    qc.bits,
+                                    qc.group_size,
+                                )
+                            } else {
+                                dequantize_affine(
+                                    t.data(),
+                                    scales.data(),
+                                    biases.data(),
+                                    out,
+                                    in_packed,
+                                    qc.bits,
+                                    qc.group_size,
+                                    sb_dtype == Dtype::BF16,
+                                )
                             }
-                            dequantize_affine_bf16_fused(
+                            .map_err(|e| format!("dequantize {name}: {e}"))?;
+                            (d, vec![out, in_])
+                        }
+                        3 => {
+                            let (experts, out, in_packed) = (shape[0], shape[1], shape[2]);
+                            let in_ = in_packed * (32 / qc.bits);
+                            let d = dequantize_affine_stacked(
                                 t.data(),
                                 scales.data(),
                                 biases.data(),
-                                out,
-                                in_packed,
-                                qc.bits,
-                                qc.group_size,
-                            )
-                        } else if sb_dtype == Dtype::F32 {
-                            dequantize_affine_f32(
-                                t.data(),
-                                scales.data(),
-                                biases.data(),
-                                out,
-                                in_packed,
-                                qc.bits,
-                                qc.group_size,
-                            )
-                        } else {
-                            dequantize_affine(
-                                t.data(),
-                                scales.data(),
-                                biases.data(),
+                                experts,
                                 out,
                                 in_packed,
                                 qc.bits,
                                 qc.group_size,
                                 sb_dtype == Dtype::BF16,
                             )
+                            .map_err(|e| format!("dequantize stacked {name}: {e}"))?;
+                            (d, vec![experts, out, in_])
                         }
-                        .map_err(|e| format!("dequantize {name}: {e}"))?;
-                        (d, vec![out, in_])
+                        r => {
+                            return Err(format!(
+                                "quantized weight {name} rank {r} not in {{2, 3}}"
+                            ));
+                        }
                     }
-                    // Stacked `[experts, out, in_packed]` MoE `switch_mlp` weight
-                    // (issue #500); dequantize each expert slab and keep the leading
-                    // expert axis so it feeds the emitter's `[E, out, in]` arg.
-                    3 => {
-                        let (experts, out, in_packed) = (shape[0], shape[1], shape[2]);
-                        let in_ = in_packed * (32 / qc.bits);
-                        let d = dequantize_affine_stacked(
-                            t.data(),
-                            scales.data(),
-                            biases.data(),
-                            experts,
-                            out,
-                            in_packed,
-                            qc.bits,
-                            qc.group_size,
-                            sb_dtype == Dtype::BF16,
-                        )
-                        .map_err(|e| format!("dequantize stacked {name}: {e}"))?;
-                        (d, vec![experts, out, in_])
+                } else {
+                    let d = match t.dtype() {
+                        Dtype::BF16 => bf16_to_f32(t.data()),
+                        Dtype::F16 => f16_to_f32(t.data()),
+                        Dtype::F32 => f32_le_to_f32(t.data()),
+                        other => {
+                            return Err(format!(
+                                "weight {name} dtype {other:?}, expected BF16/F16/F32 or \
+                                 MLX-quantized U32"
+                            ));
+                        }
+                    };
+                    let shape = t.shape();
+                    if shape.len() > 4 {
+                        return Err(format!("weight {name} rank {} > 4", shape.len()));
                     }
-                    r => {
-                        return Err(format!("quantized weight {name} rank {r} not in {{2, 3}}"));
-                    }
-                }
+                    (d, shape.to_vec())
+                })
             } else {
-                // bf16 and f16 are the common checkpoint dtypes; f32 is a
-                // passthrough. The widening is exact for all three, matching HF's
-                // f32 reference.
-                let d = match t.dtype() {
-                    Dtype::BF16 => bf16_to_f32(t.data()),
-                    Dtype::F16 => f16_to_f32(t.data()),
-                    Dtype::F32 => f32_le_to_f32(t.data()),
-                    other => {
-                        return Err(format!(
-                            "weight {name} dtype {other:?}, expected BF16/F16/F32 or \
-                             MLX-quantized U32"
-                        ));
-                    }
-                };
-                let shape = t.shape();
-                if shape.len() > 4 {
-                    return Err(format!("weight {name} rank {} > 4", shape.len()));
-                }
-                (d, shape.to_vec())
+                None
             };
 
-            // Place the whole tensor, or (Phi3 fused) a row-slice, into arg slot i.
-            match &specs[i] {
-                WeightSpec::Whole(_) => {
-                    ranks[i] = checked_ffi_int(shape.len(), &format!("weight {name} rank"))?;
-                    for (k, &s) in shape.iter().enumerate() {
-                        dims[i * 4 + k] = checked_ffi_i64(s, &format!("weight {name} dim {k}"))?;
+            let mut remaining = tensor_idxs.len();
+            let mut owned_widened = widened;
+            for i in tensor_idxs {
+                remaining -= 1;
+                if let WeightSpec::QuantRaw { part, .. } = &specs[i] {
+                    let (code, expect) = match part {
+                        QuantPart::Packed => (WDT_U32, Dtype::U32),
+                        QuantPart::Scales | QuantPart::Biases => (WDT_F16, Dtype::F16),
+                    };
+                    if t.dtype() != expect {
+                        return Err(format!(
+                            "quant part {name} dtype {:?}, expected {expect:?}",
+                            t.dtype()
+                        ));
                     }
-                    bufs[i] = WeightBuf::F32(data);
-                }
-                // issue #572: a linear projection. On the f16 GPU path pack it to an
-                // f16 resident buffer (WDT_F16), matching the emitter's f16 weight arg
-                // and halving its per-step DRAM read; otherwise upload f32, identical
-                // to the old `Whole`. `data` / `shape` are the widened row-major weight.
-                WeightSpec::Proj(_) => {
-                    ranks[i] = checked_ffi_int(shape.len(), &format!("weight {name} rank"))?;
-                    for (k, &s) in shape.iter().enumerate() {
-                        dims[i * 4 + k] = checked_ffi_i64(s, &format!("weight {name} dim {k}"))?;
-                    }
-                    if resident_f16 {
-                        dtypes[i] = WDT_F16;
-                        bufs[i] = WeightBuf::F16(pack_f16(&data));
-                    } else {
-                        bufs[i] = WeightBuf::F32(data);
-                    }
-                }
-                WeightSpec::Rows { start, end, .. } => {
+                    let shape = t.shape();
                     if shape.len() != 2 {
                         return Err(format!(
-                            "row-slice weight {name} is rank {} (expected 2)",
+                            "quant part {name} is rank {} (expected 2)",
                             shape.len()
                         ));
                     }
-                    bufs[i] = WeightBuf::F32(
-                        slice_rows(&data, shape[0], *start, *end)
-                            .map_err(|e| format!("row-slice {name}: {e}"))?,
-                    );
-                    ranks[i] = 2;
-                    dims[i * 4] =
-                        checked_ffi_i64(*end - *start, &format!("weight {name} sliced rows"))?;
-                    dims[i * 4 + 1] = checked_ffi_i64(shape[1], &format!("weight {name} dim 1"))?;
+                    let mut dims = [0i64; 4];
+                    dims[0] = checked_ffi_i64(shape[0], &format!("weight {name} dim 0"))?;
+                    dims[1] = checked_ffi_i64(shape[1], &format!("weight {name} dim 1"))?;
+                    sink(i, WeightBuf::Raw(t.data().to_vec()), code, 2, dims)?;
+                    continue;
                 }
-                WeightSpec::QuantRaw { .. } => {
-                    unreachable!("QuantRaw is handled by the early-continue above")
+
+                let (data_ref, shape) = owned_widened
+                    .as_ref()
+                    .expect("widened tensor materialized for non-QuantRaw spec");
+                let mut dims = [0i64; 4];
+                match &specs[i] {
+                    WeightSpec::Whole(_) => {
+                        let rank = checked_ffi_int(shape.len(), &format!("weight {name} rank"))?;
+                        for (k, &s) in shape.iter().enumerate() {
+                            dims[k] = checked_ffi_i64(s, &format!("weight {name} dim {k}"))?;
+                        }
+                        let data = if remaining == 0 {
+                            owned_widened.take().unwrap().0
+                        } else {
+                            data_ref.clone()
+                        };
+                        sink(i, WeightBuf::F32(data), WDT_F32, rank, dims)?;
+                    }
+                    WeightSpec::Proj(_) => {
+                        let rank = checked_ffi_int(shape.len(), &format!("weight {name} rank"))?;
+                        for (k, &s) in shape.iter().enumerate() {
+                            dims[k] = checked_ffi_i64(s, &format!("weight {name} dim {k}"))?;
+                        }
+                        if resident_f16 {
+                            let packed = pack_f16(data_ref);
+                            if remaining == 0 {
+                                drop(owned_widened.take());
+                            }
+                            sink(i, WeightBuf::F16(packed), WDT_F16, rank, dims)?;
+                        } else {
+                            let data = if remaining == 0 {
+                                owned_widened.take().unwrap().0
+                            } else {
+                                data_ref.clone()
+                            };
+                            sink(i, WeightBuf::F32(data), WDT_F32, rank, dims)?;
+                        }
+                    }
+                    WeightSpec::Rows { start, end, .. } => {
+                        if shape.len() != 2 {
+                            return Err(format!(
+                                "row-slice weight {name} is rank {} (expected 2)",
+                                shape.len()
+                            ));
+                        }
+                        let sliced = slice_rows(data_ref, shape[0], *start, *end)
+                            .map_err(|e| format!("row-slice {name}: {e}"))?;
+                        dims[0] =
+                            checked_ffi_i64(*end - *start, &format!("weight {name} sliced rows"))?;
+                        dims[1] = checked_ffi_i64(shape[1], &format!("weight {name} dim 1"))?;
+                        if remaining == 0 {
+                            drop(owned_widened.take());
+                        }
+                        if resident_f16 {
+                            sink(i, WeightBuf::F16(pack_f16(&sliced)), WDT_F16, 2, dims)?;
+                        } else {
+                            sink(i, WeightBuf::F32(sliced), WDT_F32, 2, dims)?;
+                        }
+                    }
+                    WeightSpec::Elements { start, end, .. } => {
+                        if shape.len() != 1 {
+                            return Err(format!(
+                                "element-slice weight {name} is rank {} (expected 1)",
+                                shape.len()
+                            ));
+                        }
+                        let sliced = data_ref.get(*start..*end).ok_or_else(|| {
+                            format!(
+                                "element-slice {name}: range [{start},{end}) is outside length {}",
+                                shape[0]
+                            )
+                        })?;
+                        let length = end.checked_sub(*start).ok_or_else(|| {
+                            format!("element-slice {name}: start {start} exceeds end {end}")
+                        })?;
+                        dims[0] =
+                            checked_ffi_i64(length, &format!("weight {name} sliced elements"))?;
+                        let buf = WeightBuf::F32(sliced.to_vec());
+                        if remaining == 0 {
+                            drop(owned_widened.take());
+                        }
+                        sink(i, buf, WDT_F32, 1, dims)?;
+                    }
+                    WeightSpec::QuantRaw { .. } => {
+                        unreachable!("QuantRaw is handled by the early-continue above")
+                    }
                 }
             }
         }
     }
-    Ok((bufs, dtypes, ranks, dims))
+    Ok(())
 }
 
 fn path_cstring(p: &Path) -> Result<CString, String> {
@@ -2127,12 +2181,7 @@ fn create_ctx_with_diagnostics(
     // match the emitter's f16 args. Uses the same resolve_precision(device) the graph
     // emit uses, so the uploaded buffer dtype always lines up with the emitted arg.
     let resident_f16 = resolve_precision(device) == Precision::F16 && cfg.supports_f16_resident();
-    let (bufs, dtypes, ranks, dims) = load_weights(model_dir, cfg, resident_f16)?;
-    let ffi = runtime_ffi_dimensions(cfg, bufs.len())?;
-    let ptrs: Vec<*const c_void> = bufs
-        .iter()
-        .map(|b| b.as_u8_ptr() as *const c_void)
-        .collect();
+    let ffi = runtime_ffi_dimensions(cfg, cfg.weight_specs().len())?;
     let c_dev = CString::new(device).map_err(|_| "device has interior nul".to_string())?;
     let c_pre = path_cstring(&bundle.prefill_vmfb)?;
     let c_pre_embeddings = path_cstring(&bundle.prefill_embeddings_vmfb)?;
@@ -2154,8 +2203,9 @@ fn create_ctx_with_diagnostics(
         })
         .transpose()?
         .unwrap_or_default();
-    // Safety: pointers are valid for the duration of the call; the shim copies
-    // the weight data into device buffers before returning.
+    // Safety: pointers are valid for the duration of the call; passing null
+    // weight pointers allocates the empty weight slot table so each tensor can
+    // be uploaded and freed incrementally via `xla_llama_upload_weight`.
     let ctx = unsafe {
         xla_llama_create(
             c_dev.as_ptr(),
@@ -2170,10 +2220,10 @@ fn create_ctx_with_diagnostics(
                 .map_or(std::ptr::null(), |path| path.as_ptr()),
             bundle.compatibility_fingerprint,
             ffi.n_weights,
-            ptrs.as_ptr(),
-            dtypes.as_ptr(),
-            ranks.as_ptr(),
-            dims.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
             ffi.context_capacity,
             ffi.hidden,
             cfg.position_mode().ffi_code(),
@@ -2191,9 +2241,6 @@ fn create_ctx_with_diagnostics(
             i32::from(cfg.has_adapter_modes()),
         )
     };
-    // Weights are resident on the device now; free the host copy.
-    drop(ptrs);
-    drop(bufs);
     if ctx.is_null() {
         if device == "hip" {
             let target =
@@ -2211,6 +2258,31 @@ fn create_ctx_with_diagnostics(
             "[runtime-init / module-load] xla_llama_create failed on device={device:?} \
              (IREE runtime; see stderr for the annotated status)"
         ));
+    }
+    if let Err(error) =
+        upload_weights_with_sink(model_dir, cfg, resident_f16, |i, buf, dtype, rank, dims| {
+            let index = checked_ffi_int(i, "weight index")?;
+            let rc = unsafe {
+                xla_llama_upload_weight(
+                    ctx,
+                    index,
+                    buf.as_u8_ptr() as *const c_void,
+                    dtype,
+                    rank,
+                    dims.as_ptr(),
+                )
+            };
+            drop(buf);
+            if rc != 0 {
+                return Err(format!(
+                    "[weight-upload] failed to allocate/upload weight {i} on device={device:?}"
+                ));
+            }
+            Ok(())
+        })
+    {
+        unsafe { xla_llama_free(ctx) };
+        return Err(error);
     }
     Ok(ctx)
 }

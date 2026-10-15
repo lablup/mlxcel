@@ -1,0 +1,89 @@
+// Copyright 2025-2026 Lablup Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use super::*;
+
+fn config() -> MolmoVisionConfig {
+    MolmoVisionConfig::from_json_strs(
+        r#"{
+            "model_type":"molmo",
+            "hidden_size":3584,
+            "intermediate_size":37888,
+            "quantization":{"bits":4,"group_size":64},
+            "vision_config":{}
+        }"#,
+        r#"{"max_crops":12}"#,
+    )
+    .unwrap()
+}
+
+#[test]
+fn pinned_graph_contains_vit_pool_projector_and_static_output() {
+    let mlir = emit_molmo_vision(&config());
+    assert!(mlir.contains("stablehlo.dot_general"));
+    assert!(mlir.contains("stablehlo.reduce"));
+    assert!(mlir.contains("stablehlo.exponential"));
+    assert!(mlir.contains("stablehlo.compare"));
+    assert!(mlir.contains("tensor<13x144x3584xf32>"));
+    assert!(mlir.contains("molmo.image_masks"));
+}
+
+#[test]
+fn diagnostics_return_patch_selected_layer_and_projector_boundaries() {
+    let diagnostic = emit_molmo_vision_diagnostics(&config());
+    assert!(diagnostic.contains(
+        "-> (tensor<13x576x1024xf32>, tensor<7501x1024xf32>, \
+         tensor<7501x1024xf32>, tensor<13x144x3584xf32>)"
+    ));
+    let production = emit_molmo_vision(&config());
+    assert!(!production.contains("tensor<7501x1024xf32>, tensor<7501x1024xf32>"));
+}
+
+#[cfg(feature = "iree")]
+#[test]
+fn pinned_graph_compiles_for_cpu() {
+    let mlir = emit_molmo_vision(&config());
+    let compiler = crate::iree::iree_compile_bin().unwrap();
+    let cache = std::env::temp_dir().join("mlxcel-xla-molmo-vision-emitter-test");
+    std::fs::create_dir_all(&cache).unwrap();
+    let vmfb = crate::iree::compile_one(
+        &compiler,
+        &mlir,
+        &crate::iree::target_flags("local-task").unwrap(),
+        &cache,
+        "pinned-molmo-v1-vision",
+        0,
+    )
+    .unwrap();
+    assert!(vmfb.metadata().unwrap().len() > 0);
+}
+
+#[cfg(feature = "iree")]
+#[test]
+fn diagnostic_graph_compiles_for_cpu() {
+    let mlir = emit_molmo_vision_diagnostics(&config());
+    let compiler = crate::iree::iree_compile_bin().unwrap();
+    let cache = std::env::temp_dir().join("mlxcel-xla-molmo-vision-emitter-test");
+    std::fs::create_dir_all(&cache).unwrap();
+    let vmfb = crate::iree::compile_one(
+        &compiler,
+        &mlir,
+        &crate::iree::target_flags("local-task").unwrap(),
+        &cache,
+        "pinned-molmo-v1-vision-diagnostics",
+        0,
+    )
+    .unwrap();
+    assert!(vmfb.metadata().unwrap().len() > 0);
+}

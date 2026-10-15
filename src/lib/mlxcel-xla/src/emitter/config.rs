@@ -148,6 +148,9 @@ pub enum WeightScheme {
     Exaone,
     /// Molmo2's OLMo-style names under a VLM `language_model.*` namespace.
     Molmo2,
+    /// Molmo v1's OLMo-style decoder layout under `language_model.model`, with
+    /// fused `att_proj` QKV and fused `ff_proj` gate/up projections.
+    Molmo,
 }
 
 /// MLX affine weight quantization (`config.json` `quantization`). The linear /
@@ -597,6 +600,7 @@ impl Config {
         let weight_scheme = match model_type {
             Some("exaone") => WeightScheme::Exaone,
             Some("molmo2_text") if is_molmo2 => WeightScheme::Molmo2,
+            Some("molmo") => WeightScheme::Molmo,
             _ => WeightScheme::Llama,
         };
 
@@ -984,6 +988,37 @@ impl Config {
                     one_plus: false,
                 });
             }
+            Some("molmo") => {
+                rope_interleaved = match v.get("rope_impl").and_then(serde_json::Value::as_str) {
+                    None | Some("llama") => false,
+                    Some("interleave") => true,
+                    Some(other) => {
+                        return Err(format!(
+                            "Molmo v1 XLA requires rope_impl = \"llama\" or \"interleave\", got {other:?}"
+                        ));
+                    }
+                };
+                if v.get("qkv_bias").and_then(serde_json::Value::as_bool) == Some(false) {
+                    return Err("Molmo v1 XLA requires qkv_bias = true".to_string());
+                }
+                if !matches!(
+                    v.get("layer_norm_type").and_then(serde_json::Value::as_str),
+                    None | Some("rms")
+                ) {
+                    return Err("Molmo v1 XLA requires layer_norm_type = \"rms\"".to_string());
+                }
+                if v.get("tie_word_embeddings")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                    || v.get("weight_tying").and_then(serde_json::Value::as_bool) == Some(true)
+                {
+                    return Err("Molmo v1 XLA requires an untied output head".to_string());
+                }
+                qkv_bias = true;
+                tie_default = false;
+                fused_qkv = true;
+                fused_gate_up = true;
+            }
             Some("stablelm") => {
                 // LayerNorm with bias, partial RoPE, optional q/k/v bias, untied.
                 layernorm = true;
@@ -1117,7 +1152,7 @@ impl Config {
                 return Err(format!(
                     "the OpenXLA emitter supports the dense architectures Llama, Qwen2, \
                      Qwen3, Gemma1/2/3, SmolLM3, OLMo2/3, Seed-OSS, MiMo, InternLM3, ExaOne, \
-                     Cohere, Cohere2, Phi3, Phi4MM, Molmo2, StableLM, StarCoder2, Granite, and MiniCPM, plus \
+                     Cohere, Cohere2, Phi3, Phi4MM, Molmo, Molmo2, StableLM, StarCoder2, Granite, and MiniCPM, plus \
                      the Mixtral, Qwen2-MoE, Qwen3-MoE, and OLMoE mixture-of-experts \
                      architectures; config.json model_type = {other:?} (other MoE / MLA / \
                      novel-activation variants are follow-ups)"
@@ -1465,10 +1500,22 @@ impl Config {
             None
         };
 
+        let intermediate = u("intermediate_size")?;
+        let intermediate = if model_type == Some("molmo") {
+            if !intermediate.is_multiple_of(2) {
+                return Err(format!(
+                    "Molmo fused intermediate_size={intermediate} must be even"
+                ));
+            }
+            intermediate / 2
+        } else {
+            intermediate
+        };
+
         Ok(Config {
             context_capacity: crate::DEFAULT_CONTEXT_CAPACITY,
             hidden,
-            inter: u("intermediate_size")?,
+            inter: intermediate,
             n_layers,
             n_q,
             n_kv: u("num_key_value_heads")?,
@@ -1563,7 +1610,7 @@ impl Config {
     /// one); the packed in-graph path (`supports_packed_quant`) takes precedence
     /// when its env opt-in is set, since it keeps the weights ui32-resident instead.
     pub(crate) fn supports_f16_resident(&self) -> bool {
-        !self.fused_qkv && !self.fused_gate_up
+        (!self.fused_qkv && !self.fused_gate_up) || self.weight_scheme == WeightScheme::Molmo
     }
 
     /// Attention score scale. Granite supplies the raw multiplier directly

@@ -92,6 +92,9 @@ mod mage_vl;
 mod minimax_m3_vl;
 #[path = "vlm_mllama.rs"]
 mod mllama;
+#[cfg(feature = "xla-backend")]
+#[path = "vlm_molmo_xla.rs"]
+mod molmo_xla;
 #[path = "vlm_muse_glimmer.rs"]
 mod muse_glimmer;
 #[path = "vlm_nemotron_h_nano_omni.rs"]
@@ -150,6 +153,10 @@ pub(crate) use locateanything::load_locateanything_vlm;
 pub(crate) use mage_vl::load_mage_vl;
 pub(crate) use minimax_m3_vl::load_minimax_m3_vl;
 pub(crate) use mllama::load_mllama_vlm;
+#[cfg(feature = "xla-backend")]
+pub(crate) use molmo_xla::load_molmo_host_preprocessor;
+#[cfg(feature = "xla-iree")]
+pub(crate) use molmo_xla::load_molmo_iree_host_preprocessor;
 pub(crate) use muse_glimmer::{
     ensure_supported_muse_weight_map, load_muse_glimmer_vlm, normalize_muse_glimmer_weights,
 };

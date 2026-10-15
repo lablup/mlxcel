@@ -60,6 +60,15 @@ use export::export_qwen3_vl_prefill;
 #[cfg(feature = "xla-iree")]
 pub use molmo2_xla::Molmo2IreeHostPreprocessor;
 
+#[cfg(feature = "xla-backend")]
+#[path = "host_preprocessor_molmo.rs"]
+mod molmo;
+#[cfg(feature = "xla-backend")]
+pub use molmo::MolmoHostPreprocessor;
+#[cfg(feature = "xla-reference-diagnostics")]
+#[doc(hidden)]
+pub use molmo::run_pinned_molmo_eager_mlx_iree_boundaries;
+
 /// Vision implementation selected for OpenXLA multimodal preprocessing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum XlaVisionBackend {
@@ -233,14 +242,6 @@ pub fn load_xla_image_preprocessor(
             ));
         }
     }
-    if model_type != crate::models::ModelType::LlavaVLM
-        && model_type != crate::models::ModelType::Molmo2VLM
-        && model_type != crate::models::ModelType::Qwen2VL
-        && model_type != crate::models::ModelType::Qwen25VL
-    {
-        return Ok(None);
-    }
-
     match model_type {
         crate::models::ModelType::Qwen2VL | crate::models::ModelType::Qwen25VL => {
             let family = if model_type == crate::models::ModelType::Qwen25VL {
@@ -280,6 +281,8 @@ pub fn load_xla_image_preprocessor(
             }
         }
         crate::models::ModelType::LlavaVLM => load_llava_image_preprocessor(model_path, policy),
+        #[cfg(feature = "xla-backend")]
+        crate::models::ModelType::MolmoVLM => load_molmo_image_preprocessor(model_path, policy),
         crate::models::ModelType::Molmo2VLM => {
             #[cfg(feature = "xla-iree")]
             {
@@ -545,6 +548,53 @@ fn load_gemma3_image_preprocessor(
             "Gemma3 VLM image input requires the xla-iree feature".to_string(),
         ))
     }
+}
+
+#[cfg(feature = "xla-backend")]
+fn load_molmo_image_preprocessor(
+    model_path: &Path,
+    policy: XlaVisionBackendPolicy,
+) -> Result<Option<Box<dyn HostMultimodalPreprocessor>>, HostPreprocessorError> {
+    #[cfg(feature = "xla-iree")]
+    if policy != XlaVisionBackendPolicy::Host {
+        let device = std::env::var("MLXCEL_XLA_DEVICE")
+            .unwrap_or_else(|_| mlxcel_xla::default_device().to_string());
+        match MolmoHostPreprocessor::load_iree(model_path, &device) {
+            Ok(preprocessor) => {
+                tracing::info!(
+                    vision_backend = "iree",
+                    vision_device = %device,
+                    vision_backend_policy = ?policy,
+                    merge_mode = mlxcel_xla::MOLMO_V1_MERGE_MODE,
+                    "OpenXLA Molmo v1 native vision backend selected"
+                );
+                return Ok(Some(Box::new(preprocessor)));
+            }
+            Err(error) if policy == XlaVisionBackendPolicy::Auto => {
+                tracing::warn!(
+                    vision_backend = "host",
+                    vision_device = %device,
+                    fallback_reason = %error,
+                    "Molmo v1 native vision unavailable; using observable host fallback"
+                );
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    #[cfg(not(feature = "xla-iree"))]
+    if policy == XlaVisionBackendPolicy::Iree {
+        return Err(HostPreprocessorError::InvalidConfig(
+            "MLXCEL_XLA_VISION_BACKEND=iree requires the xla-iree feature".to_string(),
+        ));
+    }
+    let preprocessor = MolmoHostPreprocessor::load(model_path)?;
+    tracing::info!(
+        vision_backend = "host",
+        vision_backend_policy = ?policy,
+        merge_mode = mlxcel_xla::MOLMO_V1_MERGE_MODE,
+        "OpenXLA Molmo v1 sparse-add preprocessor selected"
+    );
+    Ok(Some(Box::new(preprocessor)))
 }
 
 fn load_llava_host_preprocessor_boxed(
