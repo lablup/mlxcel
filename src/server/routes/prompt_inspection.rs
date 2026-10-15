@@ -28,14 +28,20 @@
 //! The count is the number of tokens the same body would actually have been
 //! prefilled with, because it runs the identical render and the identical
 //! encode the generation path runs: `prepare_chat_request_with_cache` followed
-//! by `encode(prompt, /*add_special=*/true)`. A separate estimator would drift
-//! from the prompt the server really builds, which is the failure this endpoint
-//! exists to prevent. `POST /v1/messages/count_tokens` answers the same
-//! `input_tokens` key for the Anthropic body shape and lives with the rest of
-//! that surface in `routes/anthropic.rs`.
+//! by the generation path's own `add_special` rule. A separate estimator would
+//! drift from the prompt the server really builds, which is the failure this
+//! endpoint exists to prevent. A body carrying images, clips or audio is
+//! counted on the worker, through the same media expansion a generation runs,
+//! because each media part becomes its soft tokens only there (issue #1788):
+//! the answer equals that body's `usage.prompt_tokens`.
+//! `POST /v1/messages/count_tokens` answers the same `input_tokens` key for
+//! the Anthropic body shape, lives with the rest of that surface in
+//! `routes/anthropic.rs`, and counts through [`count_prompt_tokens`] here.
 //!
 //! Upstream reference:
 //! <https://github.com/ggml-org/llama.cpp/blob/c1d0e7a004015f23bc0233470b747b596f29b264/tools/server/server.cpp>
+
+use std::sync::Arc;
 
 use axum::{
     Json,
@@ -44,7 +50,12 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use crate::server::chat_request::prepare_chat_request_with_cache_and_video_allowlist;
+use crate::server::chat_request::{
+    PreparedChatRequest, prepare_chat_request_with_cache_and_video_allowlist,
+};
+use crate::server::request_options::{
+    RequestOptionOverrides, build_server_generate_options_with_live,
+};
 use crate::server::responses_translator::responses_request_to_chat;
 use crate::server::types::{ChatCompletionRequest, CreateResponseRequest, ErrorResponse};
 use crate::server::{AppState, LiveSettings};
@@ -78,25 +89,26 @@ fn parse_with_default_model<T: serde::de::DeserializeOwned>(
 /// Render one chat-completions body into the prompt the generation path would
 /// prefill.
 ///
-/// Returns the rendered prompt or an error response. The media-capability gate
-/// and the tool guard run in the order `/v1/chat/completions` runs them, so
-/// neither an image the checkpoint has no tower for nor an oversized tool array
-/// can reach the Jinja2 renderer through a route that does not generate.
+/// Returns the prepared request (prompt plus resolved media) or an error
+/// response. The media-capability gate and the tool guard run in the order
+/// `/v1/chat/completions` runs them, so neither an image the checkpoint has no
+/// tower for nor an oversized tool array can reach the Jinja2 renderer through
+/// a route that does not generate.
 ///
 /// The media gate is not only about answering consistently. `prepare_chat_request_with_cache`
 /// downloads every `image_url` and `input_audio` payload and opens every
-/// `video_url` as part of rendering, and these routes never reach a model
-/// worker, so without a gate here a text-only checkpoint would fetch a URL a
-/// client named and report nothing but a token count for it. The generating
-/// routes have refused that at the boundary since issue #1451; this closes the
-/// same hole on the three routes that only inspect (issue #1349 moved the
-/// video+audio arm of that check here too, so the combination is covered by
-/// the same call).
+/// `video_url` as part of rendering, and these routes never generate, so
+/// without a gate here a text-only checkpoint would fetch a URL a client named
+/// and report nothing but a token count for it. The generating routes have
+/// refused that at the boundary since issue #1451; this closes the same hole
+/// on the three routes that only inspect (issue #1349 moved the video+audio
+/// arm of that check here too, so the combination is covered by the same
+/// call).
 async fn render_chat_prompt(
     state: &AppState,
     live: &LiveSettings,
-    mut request: ChatCompletionRequest,
-) -> Result<RenderedPrompt, ErrorResponse> {
+    request: ChatCompletionRequest,
+) -> Result<PreparedChatRequest, ErrorResponse> {
     if let Some(rejection) = crate::server::media_capability_rejection(
         &request,
         state.media_support,
@@ -107,6 +119,20 @@ async fn render_chat_prompt(
     if let Err(message) = super::chat::validate_chat_tool_inputs(&request) {
         return Err(ErrorResponse::new(message, "invalid_request_error"));
     }
+    render_admitted_chat_prompt(state, live, request).await
+}
+
+/// Render a request that has already passed the media-capability gate and the
+/// tool guard, the way the generating route renders it.
+///
+/// Split out of [`render_chat_prompt`] for `/v1/messages/count_tokens`, which
+/// runs both checks itself so their refusals keep the Anthropic error envelope
+/// (issue #1788).
+pub(crate) async fn render_admitted_chat_prompt(
+    state: &AppState,
+    live: &LiveSettings,
+    mut request: ChatCompletionRequest,
+) -> Result<PreparedChatRequest, ErrorResponse> {
     // These routes exist to answer "what prompt would the generating route
     // build for this body?", so they have to run the same video-to-frames
     // substitution the generating route does (issue #1322); otherwise the
@@ -131,49 +157,100 @@ async fn render_chat_prompt(
         &state.video_dir_allowlist,
     )
     .await
-    .map(|prepared| RenderedPrompt {
-        prompt: prepared.prompt,
-        token_ids: prepared.prompt_token_ids,
-    })
     .map_err(|err| ErrorResponse::new(err.to_string(), "invalid_request_error"))
 }
 
-/// One rendered prompt, plus the ids a native renderer produced for it.
-///
-/// Kimi K3's XTML renderer (#1338) emits ids directly, so `token_ids` is the
-/// authoritative count for it and `prompt` is the text form the generation
-/// path also carries. `token_ids` is `None` for every template-rendered
-/// request, and the count then comes from encoding `prompt` exactly as before.
-struct RenderedPrompt {
-    prompt: String,
-    token_ids: Option<Vec<i32>>,
+/// Why [`count_prompt_tokens`] produced no count.
+#[derive(Debug)]
+pub(crate) enum PromptCountError {
+    /// The rendered prompt could not be encoded: a request error.
+    Tokenization(String),
+    /// The worker could not count a media request: busy, gone, or refusing
+    /// the media on preparation. Each route renders it the way its generating
+    /// sibling renders a generation failure.
+    Worker(anyhow::Error),
 }
 
-/// Count the tokens a rendered prompt occupies.
+impl PromptCountError {
+    /// The OpenAI-envelope response for this failure.
+    fn into_error_response(self) -> ErrorResponse {
+        match self {
+            Self::Tokenization(message) => ErrorResponse::new(
+                format!("Tokenization error: {message}"),
+                "invalid_request_error",
+            ),
+            Self::Worker(err) => super::generation_error_to_response(err),
+        }
+    }
+}
+
+/// Count the tokens a prepared request would be prefilled with.
 ///
-/// A native renderer's ids (#1338) are authoritative, so they are counted
-/// directly. Otherwise `add_special` follows `prompt_carries_bos`, the same
-/// rule the generation path uses, which is what makes the number comparable to
+/// Shared by every counting route (`/chat/completions/input_tokens`,
+/// `/responses/input_tokens` and `/v1/messages/count_tokens`), so they cannot
+/// drift from each other or from `usage.prompt_tokens`.
+///
+/// A text-only prompt is counted here, on the request thread. A native
+/// renderer's ids (#1338) are authoritative, so they are counted directly;
+/// otherwise `add_special` follows `prompt_carries_bos`, the same rule the
+/// generation path uses, which is what makes the number comparable to
 /// `tokens_evaluated`. Passing `true` unconditionally over-counted by one for
 /// every template that emits its own BOS (Laguna, and the whole Llama 3
 /// lineage since #1347).
-fn count_prompt_tokens(
+///
+/// A prompt carrying resolved media is not countable from its text: each
+/// image, clip or audio part is one placeholder there and becomes its soft
+/// tokens only on the worker (issue #1788). Those requests go to the worker as
+/// a count-only request, which runs the generation path's own tokenization and
+/// media preparation and stops before prefill, so the answer is the
+/// `prompt_tokens` the same body reports when it generates. The media bytes
+/// this function receives are the ones the render already fetched; nothing is
+/// read a second time.
+pub(crate) async fn count_prompt_tokens(
     state: &AppState,
-    rendered: &RenderedPrompt,
-) -> Result<usize, ErrorResponse> {
-    if let Some(ids) = rendered.token_ids.as_ref() {
-        return Ok(ids.len());
+    live: &Arc<LiveSettings>,
+    prepared: PreparedChatRequest,
+) -> Result<usize, PromptCountError> {
+    let carries_media = !prepared.image_data.is_empty()
+        || !prepared.audio_data.is_empty()
+        || !prepared.videos.is_empty();
+    if !carries_media {
+        if let Some(ids) = prepared.prompt_token_ids.as_ref() {
+            return Ok(ids.len());
+        }
+        return state
+            .tokenizer
+            .encode(
+                &prepared.prompt,
+                !state.tokenizer.prompt_carries_bos(&prepared.prompt),
+            )
+            .map(|ids| ids.len())
+            .map_err(|e| PromptCountError::Tokenization(e.to_string()));
     }
-    state
-        .tokenizer
-        .encode(
-            &rendered.prompt,
-            !state.tokenizer.prompt_carries_bos(&rendered.prompt),
+
+    let mut options = build_server_generate_options_with_live(
+        &state.config,
+        live,
+        RequestOptionOverrides::default(),
+    );
+    options.image_soft_tokens = prepared.image_soft_tokens;
+    options.pre_rendered_prompt_tokens = prepared.prompt_token_ids;
+    let provider = Arc::clone(&state.model_provider);
+    let live = Arc::clone(live);
+    tokio::task::spawn_blocking(move || {
+        provider.count_prompt_tokens_with_media(
+            prepared.prompt,
+            options,
+            prepared.image_data,
+            prepared.audio_data,
+            prepared.videos,
+            prepared.media,
+            &live,
         )
-        .map(|ids| ids.len())
-        .map_err(|e| {
-            ErrorResponse::new(format!("Tokenization error: {e}"), "invalid_request_error")
-        })
+    })
+    .await
+    .map_err(|err| PromptCountError::Worker(anyhow::anyhow!("prompt count task failed: {err}")))?
+    .map_err(PromptCountError::Worker)
 }
 
 /// POST /apply-template
@@ -196,9 +273,9 @@ pub async fn apply_template(
         // A native renderer's id count is reported alongside the text so an
         // operator inspecting a Kimi K3 prompt sees the length the model
         // actually prefills, which is not what re-encoding the text gives.
-        Ok(rendered) => {
-            let mut body = serde_json::json!({ "prompt": rendered.prompt });
-            if let Some(ids) = rendered.token_ids.as_ref()
+        Ok(prepared) => {
+            let mut body = serde_json::json!({ "prompt": prepared.prompt });
+            if let Some(ids) = prepared.prompt_token_ids.as_ref()
                 && let Some(object) = body.as_object_mut()
             {
                 object.insert(
@@ -222,17 +299,17 @@ pub async fn chat_input_tokens(
         Ok(request) => request,
         Err(err) => return err.into_response(),
     };
-    let rendered = match render_chat_prompt(&state, &live, request).await {
-        Ok(rendered) => rendered,
+    let prepared = match render_chat_prompt(&state, &live, request).await {
+        Ok(prepared) => prepared,
         Err(err) => return err.into_response(),
     };
-    match count_prompt_tokens(&state, &rendered) {
+    match count_prompt_tokens(&state, &live, prepared).await {
         Ok(count) => (
             StatusCode::OK,
             Json(serde_json::json!({ "input_tokens": count })),
         )
             .into_response(),
-        Err(err) => err.into_response(),
+        Err(err) => err.into_error_response().into_response(),
     }
 }
 
@@ -261,20 +338,24 @@ pub async fn responses_input_tokens(
             return ErrorResponse::new(err.to_string(), "invalid_request_error").into_response();
         }
     };
-    let rendered = match render_chat_prompt(&state, &live, translated.chat_request).await {
-        Ok(rendered) => rendered,
+    let prepared = match render_chat_prompt(&state, &live, translated.chat_request).await {
+        Ok(prepared) => prepared,
         Err(err) => return err.into_response(),
     };
-    match count_prompt_tokens(&state, &rendered) {
+    match count_prompt_tokens(&state, &live, prepared).await {
         Ok(count) => (
             StatusCode::OK,
             Json(serde_json::json!({ "input_tokens": count })),
         )
             .into_response(),
-        Err(err) => err.into_response(),
+        Err(err) => err.into_error_response().into_response(),
     }
 }
 
 #[cfg(test)]
 #[path = "prompt_inspection_tests.rs"]
 mod prompt_inspection_tests;
+
+#[cfg(test)]
+#[path = "prompt_count_route_tests.rs"]
+mod prompt_count_route_tests;

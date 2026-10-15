@@ -17,7 +17,7 @@ use crate::models::nemotron_h::{BlockType, NemotronHConfig, NemotronHModel};
 use mlxcel_core::memory::MemorySnapshot;
 use mlxcel_core::weights::WeightMap;
 
-fn scheduler() -> BatchScheduler {
+pub(super) fn scheduler() -> BatchScheduler {
     let mut c: NemotronHConfig = serde_json::from_value(serde_json::json!({
         "model_type":"nemotron_h", "vocab_size":8, "hidden_size":8,
         "intermediate_size":16, "num_hidden_layers":1, "num_attention_heads":2,

@@ -82,6 +82,7 @@ fn sample_options() -> crate::server::ServerGenerateOptions {
         image_soft_tokens: None,
         pre_rendered_prompt_tokens: None,
         admission_notification: None,
+        count_prompt_only: false,
     }
 }
 

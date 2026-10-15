@@ -1097,3 +1097,6 @@ fn context_shift_trim_depth(live_len: i32, excess: i32, keep: i32, requested_dis
 
 #[cfg(test)]
 mod request_memory_tests;
+
+#[cfg(test)]
+mod prompt_count_tests;

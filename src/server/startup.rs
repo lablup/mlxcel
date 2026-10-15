@@ -2009,6 +2009,7 @@ pub(crate) fn warmup_model(model_provider: &ModelProvider) -> Result<()> {
         "Hello".to_string(),
         ServerGenerateOptions {
             admission_notification: None,
+            count_prompt_only: false,
             // Inert: the generation bounds are native-route fields (#1477).
             n_indent: 0,
             t_max_predict_ms: None,

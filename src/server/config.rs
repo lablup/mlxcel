@@ -345,6 +345,21 @@ pub struct ServerGenerateOptions {
     pub pre_rendered_prompt_tokens: Option<Vec<i32>>,
     /// HTTP-only admission handshake, removed before dispatch to the scheduler.
     pub admission_notification: Option<crate::server::model_provider::AdmissionNotification>,
+    /// Count the prompt instead of generating from it (issue #1788).
+    ///
+    /// The prompt-inspection routes report how many tokens a body would be
+    /// prefilled with, and for a body carrying media that number only exists
+    /// after the worker has expanded each image, clip or audio placeholder into
+    /// its soft tokens. The batch scheduler honors this flag by running the
+    /// request through the same tokenization and media preparation a generation
+    /// gets, answering [`GenerateEvent::Done`] with the expanded
+    /// `prompt_tokens` and no completion, and releasing the sequence before any
+    /// prefill. Workers that do not read it serve the request as the one-token
+    /// generation its `max_tokens` asks for, which reports the same
+    /// `prompt_tokens`. `false` for every generating request.
+    ///
+    /// [`GenerateEvent::Done`]: crate::server::model_provider::GenerateEvent::Done
+    pub count_prompt_only: bool,
 }
 
 /// Per-request context-retention overrides (b10621 `n_keep` / `n_discard`,

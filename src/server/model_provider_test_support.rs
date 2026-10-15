@@ -32,6 +32,7 @@ impl ModelProvider {
             max_queue_depth,
             None,
             None,
+            0,
         )
     }
 
@@ -48,6 +49,7 @@ impl ModelProvider {
             usize::MAX,
             Some(speculative),
             None,
+            0,
         )
     }
 
@@ -63,6 +65,29 @@ impl ModelProvider {
                 estimated_bytes: 2048,
                 budget_bytes: 1024,
             }),
+            0,
+        )
+    }
+
+    /// The recording provider, answering every request as if the worker
+    /// expanded each media item into `tokens_per_media` soft tokens (issue
+    /// #1788): `prompt_tokens` is the rendered prompt's byte length plus that
+    /// expansion, for a generation and a count-only request alike.
+    ///
+    /// A route test can then hold a counting route to the `usage` its
+    /// generating sibling reports for the same body, and tell a count taken
+    /// through the worker from one taken by encoding the placeholder text.
+    pub(crate) fn media_expanding_for_route_tests(
+        options_tx: mpsc::Sender<ServerGenerateOptions>,
+        tokens_per_media: usize,
+    ) -> Self {
+        Self::recording_for_route_tests_inner(
+            options_tx,
+            false,
+            usize::MAX,
+            None,
+            None,
+            tokens_per_media,
         )
     }
 
@@ -72,6 +97,7 @@ impl ModelProvider {
         max_queue_depth: usize,
         speculative: Option<SpeculativeStats>,
         memory_rejection: Option<crate::execution::request_memory::RequestMemoryRejection>,
+        tokens_per_media: usize,
     ) -> Self {
         let (request_tx, request_rx) = mpsc::channel::<ModelRequest>();
         let loaded = Arc::new(AtomicBool::new(true));
@@ -81,12 +107,22 @@ impl ModelProvider {
             while let Ok(request) = request_rx.recv() {
                 match request {
                     ModelRequest::Generate {
+                        prompt,
                         options,
+                        images,
+                        audio,
+                        videos,
                         queue_reservation,
                         response_tx,
                         ..
                     } => {
                         drop(queue_reservation);
+                        let prompt_tokens = if tokens_per_media == 0 {
+                            0
+                        } else {
+                            prompt.len()
+                                + tokens_per_media * (images.len() + audio.len() + videos.len())
+                        };
                         if let Some(rejection) = memory_rejection {
                             if options.max_tokens >= 64 {
                                 let _ = options_tx.send(options);
@@ -111,7 +147,7 @@ impl ModelProvider {
                         let _ = options_tx.send(options);
                         let _ = response_tx.send(GenerateEvent::Done(GenerationResult {
                             text: String::new(),
-                            prompt_tokens: 0,
+                            prompt_tokens,
                             completion_tokens: 0,
                             generation_time_ms: 0,
                             prompt_eval_ms: 0,

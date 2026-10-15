@@ -403,6 +403,7 @@ fn end_to_end_constrained_chat_completion_emits_schema_conforming_json() {
         image_soft_tokens: None,
         pre_rendered_prompt_tokens: None,
         admission_notification: None,
+        count_prompt_only: false,
     };
 
     let result = provider

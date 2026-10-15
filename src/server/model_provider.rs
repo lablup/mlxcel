@@ -590,6 +590,9 @@ pub struct GenerationResult {
 #[path = "model_worker.rs"]
 pub mod model_worker;
 
+#[path = "model_provider_prompt_count.rs"]
+mod prompt_count;
+
 /// Thread-safe model provider using channels
 pub struct ModelProvider {
     request_tx: mpsc::Sender<ModelRequest>,

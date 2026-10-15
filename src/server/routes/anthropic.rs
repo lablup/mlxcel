@@ -854,7 +854,8 @@ async fn stream_messages(
 /// POST /v1/messages/count_tokens
 ///
 /// Renders the prompt through the chat template and returns the prompt token
-/// count. Mirrors the upstream `anthropic_count_tokens_endpoint`.
+/// count, the figure `/v1/messages` reports as `usage.input_tokens` for the
+/// same body. Mirrors the upstream `anthropic_count_tokens_endpoint`.
 pub async fn anthropic_count_tokens(
     State(state): State<AppState>,
     Json(request): Json<AnthropicRequest>,
@@ -891,40 +892,38 @@ pub async fn anthropic_count_tokens(
         .into_response();
     }
 
-    let prompt_cache_enabled = state.prompt_cache.is_some();
-    let prepared = match prepare_chat_request_with_cache_and_video_allowlist(
-        &state.chat_template,
-        &translated.chat_request,
-        live.chat_template_kwargs.as_ref(),
-        prompt_cache_enabled,
-        state.should_render_history_boundary_snapshot(),
-        state.prefill_assistant(),
-        &state.thinking_markers,
-        &state.video_dir_allowlist,
+    // Render and count through the helpers the other counting routes share
+    // (issue #1788), so this route cannot drift from them or from the usage
+    // `/v1/messages` reports: a body with images is counted on the worker,
+    // after its soft-token expansion, rather than from the placeholder text.
+    let prepared = match super::prompt_inspection::render_admitted_chat_prompt(
+        &state,
+        &live,
+        translated.chat_request,
     )
     .await
     {
         Ok(prepared) => prepared,
-        Err(err) => return AnthropicErrorResponse::bad_request(err.to_string()).into_response(),
+        Err(err) => {
+            let error_type = if err.status.is_client_error() {
+                "invalid_request_error"
+            } else {
+                "api_error"
+            };
+            return AnthropicErrorResponse::new(err.status, err.error.message, error_type)
+                .into_response();
+        }
     };
-
-    // A native chat renderer already produced this prompt's exact ids (#1338),
-    // so count those rather than re-encoding the text form: the text is a
-    // faithful rendering, but re-encoding it would re-recognize control-token
-    // spellings that came from message bodies. Everything else follows the
-    // `add_special` rule the generation path uses, so the reported count
-    // matches what a request would actually evaluate (issue #1347).
-    let token_count = match prepared.prompt_token_ids.as_ref() {
-        Some(ids) => ids.len(),
-        None => {
-            let add_special = !state.tokenizer.prompt_carries_bos(&prepared.prompt);
-            match state.tokenizer.encode(&prepared.prompt, add_special) {
-                Ok(ids) => ids.len(),
-                Err(e) => {
-                    return AnthropicErrorResponse::bad_request(format!("Tokenization error: {e}"))
-                        .into_response();
-                }
-            }
+    let token_count = match super::prompt_inspection::count_prompt_tokens(&state, &live, prepared)
+        .await
+    {
+        Ok(count) => count,
+        Err(super::prompt_inspection::PromptCountError::Tokenization(message)) => {
+            return AnthropicErrorResponse::bad_request(format!("Tokenization error: {message}"))
+                .into_response();
+        }
+        Err(super::prompt_inspection::PromptCountError::Worker(err)) => {
+            return generation_error_to_response(err);
         }
     };
 

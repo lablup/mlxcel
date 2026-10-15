@@ -321,6 +321,7 @@ pub(super) fn options(max_tokens: usize) -> ServerGenerateOptions {
         image_soft_tokens: None,
         pre_rendered_prompt_tokens: None,
         admission_notification: None,
+        count_prompt_only: false,
     }
 }
 

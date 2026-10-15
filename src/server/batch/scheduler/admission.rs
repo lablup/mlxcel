@@ -484,6 +484,22 @@ impl BatchScheduler {
             .model()
             .bind_gemma3n_per_layer_inputs_to_sequence(seq_id);
 
+        // A count-only request (issue #1788) ends here: `prompt_tokens` is now
+        // the post-expansion stream a prefill would run over, which is the
+        // figure a generation reports as `prompt_tokens`. Closing the sequence
+        // releases the per-sequence model state the binds above just attached,
+        // so nothing it prepared can reach another request.
+        if options.count_prompt_only {
+            drop(vlm_embeddings);
+            self.prompt_cache_seq_ctx.remove(&seq_id);
+            self.release_sequence_caches(seq_id);
+            let _ = response_tx.send(GenerateEvent::Done(
+                crate::server::model_provider::GenerationResult::prompt_count(
+                prompt_tokens.len(),
+            )));
+            return;
+        }
+
         let decode_state = StreamingDecodeState::new(&self.tokenizer, &prompt_tokens);
 
         // resolve the effective thinking-token budget for this
