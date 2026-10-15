@@ -95,9 +95,18 @@
 // context pass (alone, for a chunk with no history). The `# bos_anchor`
 // metadata line records it; traces without that line left chunk 0 unanchored
 // and are not comparable with newer ones at chunk 0.
+//
+// `MLXCEL_TRACE_KV_CACHE_MODE` and `MLXCEL_TRACE_DECODE_STEP` select the KV
+// cache storage and end the context pass with a single-token step (see
+// `logit_trace/kv_mode.rs`); together they reach the quantized sliding-cache
+// append a speculative verify block runs after decode (#1793). Warnings from
+// the runtime go to stderr (`RUST_LOG` overrides the `warn` default), so an
+// arm that reaches a fallback branch says so.
 
 #[path = "logit_trace/gemma4.rs"]
 mod gemma4;
+#[path = "logit_trace/kv_mode.rs"]
+mod kv_mode;
 
 use anyhow::{Context, Result};
 use mlxcel::LanguageModel;
@@ -126,6 +135,13 @@ fn to_i32_vec(arr: &mlxcel_core::MlxArray) -> Vec<i32> {
 }
 
 fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .with_writer(std::io::stderr)
+        .init();
     let args: Vec<String> = std::env::args().collect();
     let model_dir = args
         .get(1)
@@ -150,6 +166,11 @@ fn main() -> Result<()> {
         .context("MLXCEL_TRACE_START_TOKEN must be a non-negative integer")?
         .unwrap_or(0);
     let gemma4_mode = gemma4::Mode::from_env()?;
+    let kv_arm = kv_mode::KvArm::from_env()?;
+    anyhow::ensure!(
+        !kv_arm.decode_step || (prefill > 0 && gemma4_mode.is_none()),
+        "MLXCEL_TRACE_DECODE_STEP needs a nonzero prefill and no Gemma 4 mode"
+    );
     let contiguous = std::env::var("MLXCEL_TRACE_CONTIGUOUS").as_deref() == Ok("1");
     anyhow::ensure!(
         !contiguous || (gemma4_mode.is_some() && prefill > 0 && start_token > 0),
@@ -219,6 +240,8 @@ fn main() -> Result<()> {
             .with_context(|| format!("loading model {model_dir}"))?
     };
 
+    kv_arm.install(&model)?;
+
     let ids: Vec<i32> = tokenizer
         .encode(text.as_str(), false)
         .map_err(|e| anyhow::anyhow!("tokenize: {e}"))?
@@ -275,6 +298,12 @@ fn main() -> Result<()> {
         println!("# gemma4_mode\t{mode}");
     }
     println!("# contiguous\t{contiguous}");
+    if let Some(mode) = kv_arm.mode {
+        println!("# kv_cache_mode\t{mode}");
+    }
+    if kv_arm.decode_step {
+        println!("# decode_step\ttrue");
+    }
     for c in 0..n_chunks {
         let start = start_token + c * chunk_tokens;
         let seg = &ids[start..start + chunk_tokens + 1];
@@ -315,9 +344,15 @@ fn main() -> Result<()> {
                 if let Some(mode) = gemma4_mode {
                     mode.prefill(&model, &ctx, chunk_tokens)?;
                 } else {
-                    let ctx_arr = from_slice_i32(&ctx, &[1, ctx_len]);
+                    let split = kv_arm.context_split(ctx.len());
+                    let ctx_arr = from_slice_i32(&ctx[..split], &[1, split as i32]);
                     let warm = model.forward(&ctx_arr, &mut caches, None);
                     eval(&warm);
+                    if split < ctx.len() {
+                        let step = from_slice_i32(&ctx[split..], &[1, ctx_len - split as i32]);
+                        let warm = model.forward(&step, &mut caches, None);
+                        eval(&warm);
+                    }
                 }
             }
         }

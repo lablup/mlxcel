@@ -4672,22 +4672,16 @@ impl RotatingKVCache {
             );
         }
 
-        let (keys, values, visible_len) = self.visible_fp16_prefix_for_concat();
+        let (mut window, keep) = {
+            let keys = self.keys.as_ref().expect("keys checked above");
+            let values = self.values.as_ref().expect("values checked above");
+            self.visible_window(&[keys, values], self.max_size)
+        };
+        let kept_values = window.pop().expect("one window slice per array");
+        let kept_keys = window.pop().expect("one window slice per array");
         self.buffer_size = self.buffer_size.max(buffer_size);
-        let keep = visible_len.min(self.max_size).max(0);
-        let start = visible_len - keep;
-        let k_shape = ffi::array_shape(&keys);
-        let v_shape = ffi::array_shape(&values);
-        let kept_keys = ffi::slice(
-            &keys,
-            &[0, 0, start, 0],
-            &[k_shape[0], k_shape[1], visible_len, k_shape[3]],
-        );
-        let kept_values = ffi::slice(
-            &values,
-            &[0, 0, start, 0],
-            &[v_shape[0], v_shape[1], visible_len, v_shape[3]],
-        );
+        let k_shape = ffi::array_shape(&kept_keys);
+        let v_shape = ffi::array_shape(&kept_values);
 
         let capacity = self.buffered_capacity_for(keep, 0);
         let k_zeros = ffi::zeros(
@@ -4927,38 +4921,14 @@ impl RotatingKVCache {
             return (new_keys, new_values);
         }
 
-        let (base_k, base_v, current_seq_len) = self.visible_fp16_prefix_for_concat();
-
-        // Mirror upstream `RotatingKVCache._update_concat`: keep at most
-        // `max_size - 1` PRIOR tokens, then append ALL new tokens, and return
-        // (and store) that full concatenation. The return must include every
-        // key the incoming rows can attend: clamping it to `max_size` starves
-        // the earliest rows of a continuation chunk with `new_seq_len >=
-        // max_size` of their entire window (all-masked rows -> NaN -> `<pad>`
-        // decode, issue #678, the chunked-prefill sibling of #401/#413). The
-        // oversized STORED buffer is temporary by design: the next
-        // single-token update pre-trims it back to `max_size` exactly as it
-        // does after a fresh over-window prefill.
-        let prior_trim = (current_seq_len - self.max_size + 1).max(0);
-        let (base_k, base_v, kept_len) = if prior_trim > 0 {
-            let k_shape = ffi::array_shape(&base_k);
-            let v_shape = ffi::array_shape(&base_v);
-            (
-                ffi::slice(
-                    &base_k,
-                    &[0, 0, prior_trim, 0],
-                    &[k_shape[0], k_shape[1], current_seq_len, k_shape[3]],
-                ),
-                ffi::slice(
-                    &base_v,
-                    &[0, 0, prior_trim, 0],
-                    &[v_shape[0], v_shape[1], current_seq_len, v_shape[3]],
-                ),
-                current_seq_len - prior_trim,
-            )
-        } else {
-            (base_k, base_v, current_seq_len)
-        };
+        let keys = self.keys.as_ref().expect("keys checked above");
+        let values = self
+            .values
+            .as_ref()
+            .expect("values lockstep with keys in update_concat");
+        let (mut prior, kept_len) = self.visible_window(&[keys, values], self.max_size - 1);
+        let base_v = prior.pop().expect("one window slice per array");
+        let base_k = prior.pop().expect("one window slice per array");
 
         let concat_k = concatenate(&base_k, &new_keys, 2);
         let concat_v = concatenate(&base_v, &new_values, 2);
@@ -4970,61 +4940,80 @@ impl RotatingKVCache {
         (concat_k, concat_v)
     }
 
-    /// Return the visible FP16 K/V prefix in chronological order for a
-    /// multi-token append.
+    /// The newest `max_keep` visible slots, in chronological order, sliced
+    /// identically from every array in `arrays`.
     ///
-    /// Used by: [`Self::update_concat`] after speculative decode rewinds.
-    /// `RotatingKVCache::trim` mirrors upstream and only rewinds
-    /// `offset`/`idx`; it intentionally leaves the backing buffer at its
-    /// previous capacity. A later multi-token verify append must therefore
-    /// concatenate onto the visible prefix (`visible_len()`), not onto stale
-    /// tail slots still present in the physical allocation.
-    fn visible_fp16_prefix_for_concat(&self) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>, i32) {
-        let keys = self
-            .keys
-            .as_ref()
-            .expect("visible_fp16_prefix_for_concat requires initialized keys");
-        let values = self
-            .values
-            .as_ref()
-            .expect("visible_fp16_prefix_for_concat requires initialized values");
-        let k_shape = ffi::array_shape(keys);
-        let v_shape = ffi::array_shape(values);
-        let physical_len = k_shape[2];
+    /// `arrays` are buffers that hold one slot per token along axis 2 in the
+    /// key buffer's layout: `keys`/`values` for FP16 storage, and `keys` plus
+    /// the `v_packed`/`v_norms`/`v_rescale` sidecars for Turbo4Asym, so both
+    /// storage modes keep exactly the same prior tokens. The first array sets
+    /// the physical length. Returns one slice per input, in input order, and
+    /// the number of slots kept.
+    ///
+    /// A multi-token append passes `max_keep = max_size - 1`; converting the
+    /// ring for speculative buffering passes `max_size`. For an append, two
+    /// rules pick the window:
+    ///
+    /// - Only the `visible_len()` prior slots, rotated into chronological
+    ///   order after a wrap (`logical_start`). The physical buffer can be
+    ///   longer: decode grows it by `step` zero slots ahead of `offset`, and
+    ///   `trim` (speculative rollback, truncated snapshot restore) mirrors
+    ///   upstream and only rewinds `offset`/`idx`, leaving rolled-back keys
+    ///   in place. The caller's mask is sized from `visible_len()`
+    ///   (`first_cache_live_len` in Gemma 4, `live_len` in Gemma 3), so a
+    ///   window wider than that attends zero-filled or stale slots and leaves
+    ///   the mask shorter than the keys (#1793).
+    /// - At most `max_size - 1` of them, dropping the oldest. This mirrors
+    ///   upstream `RotatingKVCache._update_concat`, which keeps `max_size - 1`
+    ///   prior tokens and appends ALL new ones: the return must include every
+    ///   key the incoming rows can attend, and clamping it to `max_size`
+    ///   starves the earliest rows of a continuation chunk at least
+    ///   `max_size` long of their window (all-masked rows, NaN, `<pad>`
+    ///   decode, #678, the chunked-prefill sibling of #401/#413).
+    ///
+    /// Used by: [`Self::update_concat`], [`Self::update_turbo4_concat`],
+    /// [`Self::enable_speculative_buffer`].
+    fn visible_window(
+        &self,
+        arrays: &[&MlxArray],
+        max_keep: i32,
+    ) -> (Vec<UniquePtr<MlxArray>>, i32) {
+        let physical_len = arrays.first().map_or(0, |first| ffi::array_shape(first)[2]);
         let visible_len = self.visible_len().min(physical_len).max(0);
         let logical_start = self.logical_start().min(physical_len).max(0);
+        // Chronological slot `i` of the visible window lives at physical
+        // `logical_start + i` for `i < tail_len` (the part before the wrap
+        // point), and at physical `i - tail_len` after it.
+        let tail_len = (physical_len - logical_start).min(visible_len);
+        let head_len = visible_len - tail_len;
+        let drop = (visible_len - max_keep.max(0)).clamp(0, visible_len);
+        let kept_len = visible_len - drop;
 
-        let slice_range = |arr: &MlxArray, shape: &[i32], start: i32, stop: i32| {
+        let slice_range = |arr: &MlxArray, start: i32, stop: i32| {
+            let shape = ffi::array_shape(arr);
             ffi::slice(
                 arr,
                 &[0, 0, start, 0],
                 &[shape[0], shape[1], stop, shape[3]],
             )
         };
+        let tail = (drop < tail_len).then_some((logical_start + drop, logical_start + tail_len));
+        let head_from = (drop - tail_len).max(0);
+        let head = (head_from < head_len).then_some((head_from, head_len));
 
-        if visible_len == 0 || logical_start == 0 {
-            return (
-                slice_range(keys, &k_shape, 0, visible_len),
-                slice_range(values, &v_shape, 0, visible_len),
-                visible_len,
-            );
-        }
-
-        let tail_len = (physical_len - logical_start).min(visible_len);
-        let k_tail = slice_range(keys, &k_shape, logical_start, logical_start + tail_len);
-        let v_tail = slice_range(values, &v_shape, logical_start, logical_start + tail_len);
-        if tail_len == visible_len {
-            return (k_tail, v_tail, visible_len);
-        }
-
-        let head_len = visible_len - tail_len;
-        let k_head = slice_range(keys, &k_shape, 0, head_len);
-        let v_head = slice_range(values, &v_shape, 0, head_len);
-        (
-            concatenate(&k_tail, &k_head, 2),
-            concatenate(&v_tail, &v_head, 2),
-            visible_len,
-        )
+        let window = arrays
+            .iter()
+            .map(|arr| match (tail, head) {
+                (Some((t0, t1)), Some((h0, h1))) => {
+                    concatenate(&slice_range(arr, t0, t1), &slice_range(arr, h0, h1), 2)
+                }
+                (Some((start, stop)), None) | (None, Some((start, stop))) => {
+                    slice_range(arr, start, stop)
+                }
+                (None, None) => slice_range(arr, 0, 0),
+            })
+            .collect();
+        (window, kept_len)
     }
 
     fn update_in_place(
@@ -5293,71 +5282,65 @@ impl RotatingKVCache {
             return (new_keys_f16, v_out);
         }
 
-        let current_seq_len = {
-            let shape = ffi::array_shape(self.keys.as_ref().unwrap());
-            shape[2]
+        // Same prior window as the FP16 `update_concat`: the `visible_len()`
+        // prior keys in chronological order, at most `max_size - 1` of them,
+        // with the identical slices applied to every V sidecar. Concatenating
+        // the whole physical buffer instead returned decode-growth zero slots
+        // and rolled-back draft keys, more keys than the `visible_len()`-sized
+        // mask covers (#1793).
+        let (mut prior, kept_len) = {
+            let keys = self.keys.as_ref().expect("keys checked above");
+            let v_packed = self
+                .v_packed
+                .as_ref()
+                .expect("v_packed lockstep with keys in rotating cache");
+            let v_norms = self
+                .v_norms
+                .as_ref()
+                .expect("v_norms lockstep with keys in rotating cache");
+            let mut arrays: Vec<&MlxArray> = vec![keys, v_packed, v_norms];
+            if let Some(v_rescale) = self.v_rescale.as_ref() {
+                arrays.push(v_rescale);
+            }
+            self.visible_window(&arrays, self.max_size - 1)
         };
+        let base_vr = if self.v_rescale.is_some() {
+            prior.pop()
+        } else {
+            None
+        };
+        let base_vn = prior.pop().expect("one window slice per array");
+        let base_vp = prior.pop().expect("one window slice per array");
+        let base_k = prior.pop().expect("one window slice per array");
 
-        let concat_k = concatenate(self.keys.as_ref().unwrap(), &new_keys_f16, 2);
-        let concat_vp = concatenate(self.v_packed.as_ref().unwrap(), &v_packed_new, 2);
-        let concat_vn = concatenate(self.v_norms.as_ref().unwrap(), &v_norms_new, 2);
-        let concat_vr = match self.v_rescale.as_ref() {
-            Some(vr) => concatenate(vr, &v_rescale_new, 2),
+        let concat_k = concatenate(&base_k, &new_keys_f16, 2);
+        let concat_vp = concatenate(&base_vp, &v_packed_new, 2);
+        let concat_vn = concatenate(&base_vn, &v_norms_new, 2);
+        let concat_vr = match base_vr {
+            Some(vr) => concatenate(&vr, &v_rescale_new, 2),
             None => ffi::contiguous(&v_rescale_new, false),
         };
 
-        let total_len = current_seq_len + new_seq_len;
+        let total_len = kept_len + new_seq_len;
         self.offset += new_seq_len;
 
-        // Block alignment is preserved: per-token quantization means slicing
-        // a packed buffer along axis=2 always yields valid packed tokens. No
-        // partial-block re-quantization is needed regardless of `start`.
-        if total_len > self.max_size {
-            let start = total_len - self.max_size;
-            let k = ffi::slice(
-                &concat_k,
-                &[0, 0, start, 0],
-                &[i32::MAX, i32::MAX, total_len, i32::MAX],
-            );
-            let vp = ffi::slice(
-                &concat_vp,
-                &[0, 0, start, 0],
-                &[i32::MAX, i32::MAX, total_len, i32::MAX],
-            );
-            let vn = ffi::slice(
-                &concat_vn,
-                &[0, 0, start, 0],
-                &[i32::MAX, i32::MAX, total_len, i32::MAX],
-            );
-            let vr = ffi::slice(
-                &concat_vr,
-                &[0, 0, start, 0],
-                &[i32::MAX, i32::MAX, total_len, i32::MAX],
-            );
-            self.idx = self.max_size;
-            self.keys = Some(ffi::contiguous(&k, false));
-            self.v_packed = Some(ffi::contiguous(&vp, false));
-            self.v_norms = Some(ffi::contiguous(&vn, false));
-            self.v_rescale = Some(ffi::contiguous(&vr, false));
-            let params = self
-                .turbo_params
-                .as_ref()
-                .expect("turbo_params populated by caller");
-            let v_out = turbo::quant::dequantize_v_turbo4(&vp, &vn, params);
-            (k, v_out)
-        } else {
-            self.idx = total_len;
-            self.keys = Some(ffi::contiguous(&concat_k, false));
-            self.v_packed = Some(ffi::contiguous(&concat_vp, false));
-            self.v_norms = Some(ffi::contiguous(&concat_vn, false));
-            self.v_rescale = Some(ffi::contiguous(&concat_vr, false));
-            let params = self
-                .turbo_params
-                .as_ref()
-                .expect("turbo_params populated by caller");
-            let v_out = turbo::quant::dequantize_v_turbo4(&concat_vp, &concat_vn, params);
-            (concat_k, v_out)
-        }
+        // Return and store every concatenated key, exactly as FP16 does
+        // (#678): the earliest incoming rows need their full window. An
+        // over-window result is a temporary oversized buffer that the next
+        // single-token update pre-trims back to `max_size`. Block alignment is
+        // preserved: per-token quantization means slicing a packed buffer
+        // along axis=2 always yields valid packed tokens.
+        let params = self
+            .turbo_params
+            .as_ref()
+            .expect("turbo_params populated by caller");
+        let v_out = turbo::quant::dequantize_v_turbo4(&concat_vp, &concat_vn, params);
+        self.idx = total_len;
+        self.keys = Some(ffi::contiguous(&concat_k, false));
+        self.v_packed = Some(ffi::contiguous(&concat_vp, false));
+        self.v_norms = Some(ffi::contiguous(&concat_vn, false));
+        self.v_rescale = Some(ffi::contiguous(&concat_vr, false));
+        (concat_k, v_out)
     }
 
     /// Single-token (decode) path for Turbo4Asym. Mirrors `update_in_place`,
@@ -5440,6 +5423,33 @@ impl RotatingKVCache {
             .v_rescale
             .take()
             .expect("v_rescale lockstep with v_norms in rotating cache");
+
+        // Pre-trim an over-window buffer to its newest `max_size` slots, as
+        // the FP16 `update_in_place` does. A first multi-token install longer
+        // than the window stores every token (the earliest rows needed them),
+        // and without this trim the ring below would wrap inside the longer
+        // buffer: every decode step returned the surplus slots too, and slots
+        // past `max_size` were never overwritten.
+        let physical = ffi::array_shape(&k_buffer)[2];
+        if physical > self.max_size {
+            let start = physical - self.max_size;
+            let newest = |arr: &MlxArray| {
+                let shape = ffi::array_shape(arr);
+                ffi::contiguous(
+                    &ffi::slice(
+                        arr,
+                        &[0, 0, start, 0],
+                        &[shape[0], shape[1], physical, shape[3]],
+                    ),
+                    false,
+                )
+            };
+            k_buffer = newest(&k_buffer);
+            vp_buffer = newest(&vp_buffer);
+            vn_buffer = newest(&vn_buffer);
+            vr_buffer = newest(&vr_buffer);
+            self.idx = self.max_size;
+        }
 
         let shape = ffi::array_shape(&k_buffer);
         let batch = shape[0];
@@ -10264,3 +10274,7 @@ mod tests {
 #[cfg(test)]
 #[path = "cache/rotating_ring_tests.rs"]
 mod rotating_ring_tests;
+
+#[cfg(test)]
+#[path = "cache/rotating_turbo_window_tests.rs"]
+mod rotating_turbo_window_tests;

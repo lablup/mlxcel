@@ -4281,12 +4281,13 @@ pub(crate) fn first_cache_offset(caches: &mut [Cache], layer_type: &str) -> i32 
 /// `offset` in two states Gemma 4 reaches: after a decode step, because
 /// `update_in_place` grows the buffer by `step` (256) slots, and after a
 /// truncated snapshot restore (or a rollback of an unbuffered cache), because
-/// `trim` rewinds `offset` and leaves the buffer as it was. For an FP16
-/// rotating cache `update_concat` concatenates only the `visible_len()` prior
-/// keys, so a `seq_len()`-sized mask carried surplus leading key columns
-/// there. A turbo-quantized sliding cache (`update_turbo4_concat`) still
-/// returns the whole physical buffer, so its mask is cropped to the keys by
-/// `trim_mask_to_keys` as before. #430 read `seq_len()` on the assumption
+/// `trim` rewinds `offset` and leaves the buffer as it was. A multi-token
+/// append concatenates only the `visible_len()` prior keys, in FP16
+/// (`update_concat`) and Turbo4Asym (`update_turbo4_concat`) storage alike,
+/// so a `seq_len()`-sized mask carried surplus leading key columns. Before
+/// #1793 the turbo append returned the whole physical buffer, more keys than
+/// this live length, so `trim_mask_to_keys` discarded the mask (with a
+/// warning) instead of cropping it. #430 read `seq_len()` on the assumption
 /// that it reported the live window; #1335 showed it does not, and #1764
 /// switched this lookup over. The old value never crashed Gemma 4 because
 /// `attend` crops every mask to the trailing key columns
@@ -6783,6 +6784,68 @@ mod gemma4_unified_mask_tests {
             "first_cache_live_len = {live_len} sized a sliding mask with {mask_keys} key columns, \
              but the append returned {returned} keys"
         );
+    }
+
+    /// Issue #1793: the turbo variant of
+    /// [`first_cache_live_len_sliding_matches_returned_keys`]. With
+    /// `--kv-cache-mode fp16+turbo4` the sliding layers hold a Turbo4Asym
+    /// `RotatingKVCache`, whose multi-token append used to concatenate the
+    /// whole physical buffer: after a decode step grew it, and after a
+    /// speculative `trim` left rolled-back draft keys in it, the append
+    /// returned more keys than the `visible_len()`-sized mask covers, and
+    /// `trim_mask_to_keys` discarded the mask with a warning.
+    #[test]
+    fn first_cache_live_len_sliding_matches_returned_keys_turbo4() {
+        const H: i32 = 2;
+        // Turbo V quantization needs a head dim its rotation supports.
+        const D: i32 = 64;
+        const WINDOW: i32 = 512;
+
+        let mut caches = vec![
+            Cache::Rotating(RotatingKVCache::new_with_mode(
+                WINDOW,
+                mlxcel_core::cache::KVCacheMode::Turbo4Asym,
+            )),
+            Cache::Standard(KVCache::new()),
+        ];
+        let Cache::Rotating(ref mut rotating) = caches[0] else {
+            unreachable!("layer 0 is constructed as Rotating")
+        };
+        // A prefill, one decode step (grows the buffer), then a draft block
+        // that a rollback partly rejects.
+        rotating.update_and_fetch(make_kv(H, 6, D, 0.0), make_kv(H, 6, D, 1.0));
+        rotating.update_and_fetch(make_kv(H, 1, D, 2.0), make_kv(H, 1, D, 3.0));
+
+        for (step, (appended, rollback)) in [(4, 3), (2, 0)].into_iter().enumerate() {
+            let Cache::Rotating(ref rotating) = caches[0] else {
+                unreachable!("layer 0 is constructed as Rotating")
+            };
+            assert!(
+                physical_len(rotating) > rotating.offset,
+                "step {step}: fixture must reach physical > offset; physical {}, offset {}",
+                physical_len(rotating),
+                rotating.offset
+            );
+            let live_len = first_cache_live_len(&caches, "sliding_attention");
+            let mask = create_sliding_window_prefill_mask(appended, live_len, WINDOW);
+            let mask_keys = *mlxcel_core::array_shape(&mask)
+                .last()
+                .expect("mask must be rank >= 1");
+            let Cache::Rotating(ref mut rotating) = caches[0] else {
+                unreachable!("layer 0 is constructed as Rotating")
+            };
+            let (k, _) = rotating
+                .update_and_fetch(make_kv(H, appended, D, 4.0), make_kv(H, appended, D, 5.0));
+            let returned = mlxcel_core::array_shape(&k)[2];
+            assert_eq!(
+                mask_keys, returned,
+                "step {step}: first_cache_live_len = {live_len} sized a sliding mask with \
+                 {mask_keys} key columns, but the turbo append returned {returned} keys"
+            );
+            if rollback > 0 {
+                assert_eq!(rotating.trim(rollback), rollback);
+            }
+        }
     }
 
     /// Issue #1764: what the pre-fix sliding lookup did to Gemma 4's masks.

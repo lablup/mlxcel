@@ -708,6 +708,7 @@ mod snapshot_prompt_cache {
 // appended-token prefill of the next turn.
 mod rotating_live_len {
     use crate::models::gemma3::CacheInterface;
+    use mlxcel_core::cache::KVCacheMode;
     use mlxcel_core::layers::RotatingKVCache;
     use mlxcel_core::utils::create_sliding_window_prefill_mask;
     use mlxcel_core::{MlxArray, UniquePtr};
@@ -773,6 +774,77 @@ mod rotating_live_len {
             mask_keys, returned,
             "prefill mask key axis {mask_keys} must equal the {returned} keys the cache returned"
         );
+    }
+
+    // Turbo4Asym sliding storage (`--kv-cache-mode fp16+turbo4`, #1793).
+    // Its V is quantized per token at head dims the rotation supports, so the
+    // fixture uses a wider head than the FP16 one above.
+    const TURBO_HEAD_DIM: i32 = 64;
+
+    fn turbo_kv(tokens: i32) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        let shape = [1, KV_HEADS, tokens, TURBO_HEAD_DIM];
+        let len = (KV_HEADS * tokens * TURBO_HEAD_DIM) as usize;
+        let keys: Vec<f32> = (0..len).map(|i| (i % 97) as f32 * 0.01).collect();
+        let values: Vec<f32> = (0..len).map(|i| 1.0 - (i % 89) as f32 * 0.01).collect();
+        (
+            mlxcel_core::from_slice_f32(&keys, &shape),
+            mlxcel_core::from_slice_f32(&values, &shape),
+        )
+    }
+
+    /// Size the sliding mask from the cache, append, and assert the mask's
+    /// key axis equals the returned keys.
+    fn assert_turbo_append_matches_live_len(cache: &mut RotatingKVCache, appended: i32) {
+        let live_len = CacheInterface::live_len(cache);
+        let mask = create_sliding_window_prefill_mask(appended, live_len, WINDOW);
+        let mask_keys = *mlxcel_core::array_shape(&mask)
+            .last()
+            .expect("mask must be rank >= 1");
+        let (k, v) = turbo_kv(appended);
+        let (returned_keys, _) = cache.update_and_fetch(k, v);
+        let returned = mlxcel_core::array_shape(&returned_keys)[2];
+        assert_eq!(
+            mask_keys, returned,
+            "turbo prefill mask key axis {mask_keys} (live_len {live_len}) must equal the \
+             {returned} keys the cache returned"
+        );
+    }
+
+    #[test]
+    fn turbo_live_len_matches_the_keys_a_multi_token_append_returns() {
+        let mut cache = RotatingKVCache::new_with_mode(WINDOW, KVCacheMode::Turbo4Asym);
+        let (k, v) = turbo_kv(6);
+        cache.update_and_fetch(k, v);
+        let (k, v) = turbo_kv(1);
+        cache.update_and_fetch(k, v);
+        assert!(
+            physical_len(&cache) > cache.offset,
+            "fixture must reach physical > offset; physical {}, offset {}",
+            physical_len(&cache),
+            cache.offset
+        );
+        assert_turbo_append_matches_live_len(&mut cache, 3);
+    }
+
+    /// A speculative rollback (`trim`) rewinds `offset` and `idx` and leaves
+    /// the draft keys in the buffer; the next verify block must not return them.
+    #[test]
+    fn turbo_live_len_matches_the_keys_after_a_trim_rollback() {
+        let mut cache = RotatingKVCache::new_with_mode(WINDOW, KVCacheMode::Turbo4Asym);
+        let (k, v) = turbo_kv(6);
+        cache.update_and_fetch(k, v);
+        let (k, v) = turbo_kv(1);
+        cache.update_and_fetch(k, v);
+        let (k, v) = turbo_kv(4);
+        cache.update_and_fetch(k, v);
+        assert_eq!(cache.trim(3), 3);
+        assert!(
+            physical_len(&cache) > cache.offset,
+            "fixture must leave rolled-back keys past offset; physical {}, offset {}",
+            physical_len(&cache),
+            cache.offset
+        );
+        assert_turbo_append_matches_live_len(&mut cache, 2);
     }
 }
 
