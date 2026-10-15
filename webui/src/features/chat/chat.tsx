@@ -16,6 +16,7 @@ import { Composer } from './composer';
 import { ModelPicker } from './model-picker';
 import { SettingsDrawer } from './settings-drawer';
 import { HistoryControls } from './privacy';
+import { clockTime, hasClockTime } from '../activity/format';
 import { useGenerationDefaults } from '../settings/generation-preferences';
 import { GENERATION_FIELDS } from '../settings/generation-defaults';
 import { resolveTurnParameters, TurnParameters, type TurnParameterDraft } from './parameters';
@@ -153,7 +154,8 @@ export function Chat({ locale }: { locale: Locale }): React.JSX.Element {
     setAnnouncement(localized('chat.announce.stopped'));
     void actions.refreshRuntime(request.turn.modelId).then((runtime) => {
       if (statusEpoch.current !== epoch) return;
-      setAnnouncement(localized('chat.announce.aborted_observed', { time: runtime.measurements.active_requests?.measured_at ?? localized('chat.announce.unknown_time') }));
+      const measuredAt = runtime.measurements.active_requests?.measured_at ?? null;
+      setAnnouncement(localized('chat.announce.aborted_observed', { time: hasClockTime(measuredAt) ? clockTime(measuredAt, localeRef.current) : localized('chat.announce.unknown_time') }));
     }).catch(() => { if (statusEpoch.current === epoch) setAnnouncement(localized('chat.announce.aborted_unobserved')); });
   };
   const send = async (source: SendSource = { prompt: draft, images, conversation: current, fromComposer: true }): Promise<void> => {

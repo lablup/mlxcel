@@ -64,7 +64,7 @@ Read active `/props` after a successful reload. `n_ctx` is an effective per-slot
 
 Optional raw tokenization checks are sent only when Check is pressed and never persisted. Raw tokens exclude chat templates, conversation history and media, so the count is a lower bound; it never certifies that a complete chat request fits, and server validation is final.
 
-Startup values are the schema's read-only entries, listed as text rather than disabled inputs. The server's reason for each one (restart required, worker-owned, and so on) is its own wording and sits behind the "Why these values are read-only" disclosure. With `--settings` off, the Server tab shows only the `/props` facts and the disabled-endpoint banner.
+Startup values are the schema's read-only entries, listed as text rather than disabled inputs. A structured value (tensor parallel, prompt cache, KV quantization, CORS, pipeline topology) spans the row and lists its fields as labelled sub-rows; an absent value reads "not set". The server never sends Rust `Debug` text for these entries, and the tab never prints a JSON object. The server's reason for each one (restart required, worker-owned, and so on) is its own wording and sits behind the "Why these values are read-only" disclosure. With `--settings` off, the Server tab shows only the `/props` facts and the disabled-endpoint banner.
 
 ## Validation boundaries
 

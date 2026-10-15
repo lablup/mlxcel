@@ -159,6 +159,10 @@ export type StringKey = typeof modelStrings[number]['key']
   | 'connection.footer.details'
   | 'connection.footer.instance'
   | 'connection.footer.sequence'
+  | 'connection.mode.model_free'
+  | 'connection.mode.single_model'
+  | 'connection.mode.router_pool'
+  | 'connection.mode.unknown'
   | 'connection.snapshot.pending'
   | 'connection.authenticated.title'
   | 'connection.authenticated.body'
@@ -228,6 +232,10 @@ export const entries: Entry[] = [
   { key: 'connection.footer.details', en: 'Connection details', ko: '연결 세부 정보', test_id: 'connection-footer-details' },
   { key: 'connection.footer.instance', en: 'Server instance: {id}', ko: '서버 인스턴스: {id}', test_id: 'connection-footer-instance' },
   { key: 'connection.footer.sequence', en: 'Event sequence: {sequence}', ko: '이벤트 순번: {sequence}', test_id: 'connection-footer-sequence' },
+  { key: 'connection.mode.model_free', en: 'Multi-model, none loaded', ko: '다중 모델, 로드된 모델 없음', test_id: 'connection-mode-model-free' },
+  { key: 'connection.mode.single_model', en: 'Single model', ko: '단일 모델', test_id: 'connection-mode-single-model' },
+  { key: 'connection.mode.router_pool', en: 'Multi-model', ko: '다중 모델', test_id: 'connection-mode-router-pool' },
+  { key: 'connection.mode.unknown', en: 'Server', ko: '서버', test_id: 'connection-mode-unknown' },
   { key: 'connection.snapshot.pending', en: 'pending', ko: '대기 중', test_id: 'connection-snapshot-pending' },
   { key: 'connection.authenticated.title', en: 'Authenticated local API session', ko: '인증된 로컬 API 세션', test_id: 'connection-authenticated-title' },
   { key: 'connection.authenticated.body', en: 'This route is connected to the shared provider. Browsing does not load models or start inference; load, unload and chat actions remain explicit.', ko: '이 경로는 공유 provider에 연결되어 있습니다. 탐색만으로 모델을 로드하거나 추론을 시작하지 않으며, 로드·언로드·대화 동작은 명시적으로 실행됩니다.', test_id: 'connection-authenticated-body' },

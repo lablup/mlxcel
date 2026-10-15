@@ -1,36 +1,36 @@
 {
   "budgets": {
-    "embedded_asset_bytes": 855324,
+    "embedded_asset_bytes": 857331,
     "embedded_asset_limit_bytes": 5242880,
-    "initial_js_gzip_bytes": 181473,
+    "initial_js_gzip_bytes": 181878,
     "initial_js_gzip_limit_bytes": 204800,
-    "total_js_gzip_bytes": 182086,
+    "total_js_gzip_bytes": 182489,
     "total_js_gzip_limit_bytes": 716800
   },
   "files": [
     {
       "bytes": 951,
-      "gzip_bytes": 613,
-      "path": "assets/code-highlight-Dfvzh9FE.js",
-      "sha256": "b847dff5824cf8e3557a8e5505910991cbd58b0683ae04deff021b888a99ccba"
+      "gzip_bytes": 611,
+      "path": "assets/code-highlight-CS8gbB_h.js",
+      "sha256": "2235a2bbe43172548a83eed5571c55633abd064d501bb5392d072c77805fb1fb"
     },
     {
-      "bytes": 137465,
-      "gzip_bytes": 21825,
-      "path": "assets/index-B5U0RsHg.css",
-      "sha256": "23836a64534b2144f66f05ce625ed90a96fc57f0e56375556887e327c4c79510"
+      "bytes": 138018,
+      "gzip_bytes": 21913,
+      "path": "assets/index-0JVegFfJ.css",
+      "sha256": "3e21904cb5fc5fe38d2c5a554d5c864aab43063e69acb7b89e4b0a324c1ead81"
     },
     {
-      "bytes": 698956,
-      "gzip_bytes": 180484,
-      "path": "assets/index-DHDb0T8Z.js",
-      "sha256": "555f07899b2ca6041a72b302107c419f3c7ec5fc6b992ca6fab86b1848b58f92"
+      "bytes": 700410,
+      "gzip_bytes": 180889,
+      "path": "assets/index-DijbViQi.js",
+      "sha256": "fae3681d31585bf01c68125022833b1875b1fe4b16a268770dfdbae9e6713cd2"
     },
     {
       "bytes": 503,
-      "gzip_bytes": 304,
+      "gzip_bytes": 300,
       "path": "index.html",
-      "sha256": "beed570f02d5548f90b049bed5d365ab68f2c0ce8935d45688f473dc189a39bf"
+      "sha256": "d1fc2d9edb25cce1c0929842ad4631b137a81b3e6b0deea21b0f5d593a96d79f"
     },
     {
       "bytes": 2129,
@@ -67,5 +67,5 @@
   },
   "pnpm_version": "11.18.0",
   "schema_version": 1,
-  "source_digest_sha256": "1ebf0921089e00db6bf288cdd66fb2ba6265f9ee43a4224a07d483f1201d79c8"
+  "source_digest_sha256": "d8f6c02c88c61298a4f2425332cbc914a3c0fcbe6825e3b682f0fdb234a27a63"
 }

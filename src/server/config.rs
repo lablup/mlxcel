@@ -94,6 +94,18 @@ impl std::str::FromStr for DecodeStorageBackend {
     }
 }
 
+impl DecodeStorageBackend {
+    /// The `--decode-storage-backend` spelling of this backend.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Dense => "dense",
+            Self::Paged => "paged",
+        }
+    }
+}
+
 /// Per-request metadata that the scheduler needs to compose a
 /// [`crate::server::prompt_cache::key::PromptCacheKey`] without re-running
 /// the chat template pipeline on the worker thread.
@@ -378,6 +390,17 @@ pub enum PreemptionPolicy {
     LowestPriority,
 }
 
+impl PreemptionPolicy {
+    /// The `--preemption-policy` spelling of this policy.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LongestFirst => "longest-first",
+            Self::LowestPriority => "lowest-priority",
+        }
+    }
+}
+
 /// Normalized pipeline-parallel runtime mode for the server worker.
 #[derive(Debug, Clone)]
 pub enum PipelineParallelRuntimeConfig {
@@ -485,6 +508,16 @@ impl EmbeddingServingMode {
     #[must_use]
     pub fn blocks_generation(self) -> bool {
         !matches!(self, Self::Any)
+    }
+
+    /// Stable plain spelling for the settings API.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Any => "any",
+            Self::EmbeddingOnly => "embedding_only",
+            Self::RerankOnly => "rerank_only",
+        }
     }
 }
 

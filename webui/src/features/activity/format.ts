@@ -52,10 +52,19 @@ export function tokenCount(value: number | null, locale: Locale): string {
   return value === null ? t(locale, 'format.unknown') : t(locale, pluralKey(value, ['activity.unit.token_one', 'activity.unit.tokens'], locale), { value: formatCount(value, locale) });
 }
 
+// The server reports RFC 3339 with nanoseconds; not every engine's Date parser accepts more than
+// millisecond precision, so the extra fraction digits are dropped before parsing.
+const SUB_MILLISECOND_DIGITS = /(T\d{2}:\d{2}:\d{2}\.\d{3})\d+/;
+
 function toDate(at: string | number | null): Date | null {
   if (at === null) return null;
-  const date = new Date(at);
+  const date = new Date(typeof at === 'string' ? at.replace(SUB_MILLISECOND_DIGITS, '$1') : at);
   return Number.isFinite(date.getTime()) ? date : null;
+}
+
+/** Whether `at` is a time `clockTime` can show, rather than its "no observation time" fallback. */
+export function hasClockTime(at: string | number | null): boolean {
+  return toDate(at) !== null;
 }
 
 /** Wall-clock time of an observation, or the localized "no observation time". */

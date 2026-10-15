@@ -531,10 +531,11 @@ fn read_only_reason(field: &str) -> &'static str {
     }
 }
 
+/// The startup value of a read-only field, as plain JSON. Never Rust `Debug`
+/// output: the WebUI prints these values as user copy (#2329).
 fn read_only_value(config: &ServerConfig, field: &str) -> Value {
-    let debug = |value: &dyn std::fmt::Debug| Value::String(format!("{value:?}"));
     match field {
-        "gcp" => debug(&config.gcp),
+        "gcp" => values::gcp(config.gcp.as_ref()),
         "reasoning_format" => json!(config.reasoning_format.as_str()),
         "reasoning_alias_field" => json!(config.reasoning_alias_field.as_str()),
         "skip_chat_parsing" => json!(config.skip_chat_parsing),
@@ -601,7 +602,7 @@ fn read_only_value(config: &ServerConfig, field: &str) -> Value {
             .embd_normalize
             .map(|value| json!(value.value()))
             .unwrap_or(Value::Null),
-        "embedding_serving_mode" => debug(&config.embedding_serving_mode),
+        "embedding_serving_mode" => json!(config.embedding_serving_mode.as_str()),
         "spm_infill" => json!(config.spm_infill),
         "default_typical_p" => json!(config.default_typical_p),
         "default_top_n_sigma" => json!(config.default_top_n_sigma),
@@ -641,28 +642,32 @@ fn read_only_value(config: &ServerConfig, field: &str) -> Value {
         "prefill_chunk_size_contended" => json!(config.prefill_chunk_size_contended),
         "prefill_grant_interval" => json!(config.prefill_grant_interval),
         "enable_preemption" => json!(config.enable_preemption),
-        "preemption_policy" => debug(&config.preemption_policy),
+        "preemption_policy" => json!(config.preemption_policy.as_str()),
         "no_batch" => json!(config.no_batch),
         "max_batch_prefill" => json!(config.max_batch_prefill),
         "max_batch_prefill_tokens" => json!(config.max_batch_prefill_tokens),
-        "decode_storage_backend" => debug(&config.decode_storage_backend),
-        "pipeline_parallel_runtime" => debug(&config.pipeline_parallel_runtime),
-        "remote_pipeline_stage" => debug(&config.remote_pipeline_stage),
-        "tensor_parallel" => debug(&config.tensor_parallel),
+        "decode_storage_backend" => json!(config.decode_storage_backend.as_str()),
+        "pipeline_parallel_runtime" => {
+            values::pipeline_parallel_runtime(config.pipeline_parallel_runtime.as_ref())
+        }
+        "remote_pipeline_stage" => {
+            values::remote_pipeline_stage(config.remote_pipeline_stage.as_ref())
+        }
+        "tensor_parallel" => values::tensor_parallel(&config.tensor_parallel),
         "vision_cache_size" => json!(config.vision_cache_size),
         "video_max_frames" => json!(config.video_max_frames),
         "video_fps" => json!(config.video_fps),
-        "prompt_cache" => debug(&config.prompt_cache),
+        "prompt_cache" => values::prompt_cache(&config.prompt_cache),
         "kv_cache_mode" => json!(config.kv_cache_mode.to_string()),
-        "batch_kv_quant" => debug(&config.batch_kv_quant),
+        "batch_kv_quant" => values::batch_kv_quant(&config.batch_kv_quant),
         "max_kv_size" => json!(config.max_kv_size),
         "context_shift" => json!(config.context_shift),
         "n_keep" => json!(config.n_keep),
-        "kv_cache_budget" => debug(&config.kv_cache_budget),
+        "kv_cache_budget" => values::kv_cache_budget(config.kv_cache_budget),
         "kv_admission_watermark" => json!(config.kv_admission_watermark),
         "enable_vlm_prefix_cache" => json!(config.enable_vlm_prefix_cache),
-        "cors_policy" => debug(&config.cors_policy),
-        "serving_mode" => debug(&config.serving_mode),
+        "cors_policy" => values::cors_policy(&config.cors_policy),
+        "serving_mode" => json!(config.serving_mode.to_string()),
         "prefill_peers" => json!(
             config
                 .prefill_peers
@@ -749,7 +754,9 @@ fn read_only_kind(field: &str) -> KnobKind {
         | "default_adaptive_target"
         | "default_adaptive_decay"
         | "kv_admission_watermark" => KnobKind::Float,
-        "api_keys" | "lora_adapters" | "lora_runtime" => KnobKind::Object,
+        "api_keys" | "lora_adapters" | "lora_runtime" | "tensor_parallel" | "prompt_cache"
+        | "batch_kv_quant" | "cors_policy" => KnobKind::Object,
+        "gcp" | "pipeline_parallel_runtime" | "remote_pipeline_stage" => KnobKind::ObjectOrNull,
         "reasoning_budget_message"
         | "model_alias"
         | "slot_save_path"
@@ -758,6 +765,7 @@ fn read_only_kind(field: &str) -> KnobKind {
         | "embedding_model_path"
         | "reranker_model_path"
         | "serving_bind"
+        | "kv_cache_budget"
         | "default_grammar" => KnobKind::StrOrNull,
         _ => KnobKind::Str,
     }
@@ -1134,6 +1142,13 @@ pub fn parse_patch_body(mut body: Map<String, Value>) -> Result<(Op, Map<String,
     Ok((op, values))
 }
 
+#[path = "runtime_settings_values.rs"]
+mod values;
+
 #[cfg(test)]
 #[path = "runtime_settings_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "runtime_settings_values_tests.rs"]
+mod values_tests;

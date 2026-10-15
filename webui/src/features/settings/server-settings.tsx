@@ -35,6 +35,21 @@ export function ModelSettings({ locale }: { locale: Locale }): React.JSX.Element
   );
 }
 
+const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> => typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/** A value inside a structured startup value: plain text, a list joined by commas, or further sub-rows. */
+function nestedValue(locale: Locale, value: unknown): React.ReactNode {
+  if (value === null || value === undefined || Array.isArray(value) && value.length === 0) return t(locale, 'settings.value.unset');
+  if (isRecord(value)) return <StartupSubValues locale={locale} value={value} />;
+  if (Array.isArray(value)) return value.map((item) => isRecord(item) || Array.isArray(item) ? JSON.stringify(item) : String(item)).join(', ');
+  return String(value);
+}
+
+/** A structured startup value (tensor parallel, prompt cache, CORS, ...) as labelled sub-rows rather than a JSON string. */
+function StartupSubValues({ locale, value }: { locale: Locale; value: Readonly<Record<string, unknown>> }): React.JSX.Element {
+  return <dl className="settings-subvalues">{Object.entries(value).map(([key, item]) => <div key={key}><dt>{key}</dt><dd>{nestedValue(locale, item)}</dd></div>)}</dl>;
+}
+
 /** Startup values as text: a disabled input per value would make the tab several screens tall. */
 function StartupValues({ locale, specs, current }: { locale: Locale; specs: readonly SettingSpec[]; current: Readonly<Record<string, unknown>> }): React.JSX.Element {
   const titleId = useId();
@@ -43,15 +58,19 @@ function StartupValues({ locale, specs, current }: { locale: Locale; specs: read
     const reason = spec.reason ?? spec.help;
     reasons.set(reason, [...reasons.get(reason) ?? [], spec.name]);
   }
-  const text = (spec: SettingSpec): string => {
-    const value = Object.hasOwn(current, spec.name) ? current[spec.name] : spec.default;
-    return value === null || value === undefined ? t(locale, 'settings.value.unset') : formatSettingValue(spec, value);
+  const valueOf = (spec: SettingSpec): unknown => Object.hasOwn(current, spec.name) ? current[spec.name] : spec.default;
+  const text = (spec: SettingSpec, value: unknown): React.ReactNode => {
+    if (value === null || value === undefined) return t(locale, 'settings.value.unset');
+    return isRecord(value) ? <StartupSubValues locale={locale} value={value} /> : formatSettingValue(spec, value);
   };
   return (
     <section className="screen-stack" aria-labelledby={titleId}>
       <h2 id={titleId}>{t(locale, 'settings.live.startup')}</h2>
       <dl className="settings-values settings-keys" data-testid="settings-startup-values">
-        {specs.map((spec) => <div key={spec.name}><dt>{settingLabel(locale, spec.name).label}</dt><dd>{text(spec)}</dd></div>)}
+        {specs.map((spec) => {
+          const value = valueOf(spec);
+          return <div key={spec.name} className={isRecord(value) ? 'settings-value-group' : undefined}><dt>{settingLabel(locale, spec.name).label}</dt><dd>{text(spec, value)}</dd></div>;
+        })}
       </dl>
       {/* Server reason strings are internal wording, kept inside an explicit disclosure. */}
       <details className="settings-disclosure">

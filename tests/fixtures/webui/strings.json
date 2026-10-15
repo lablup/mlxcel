@@ -169,6 +169,30 @@
       "test_id": "connection-footer-sequence"
     },
     {
+      "key": "connection.mode.model_free",
+      "en": "Multi-model, none loaded",
+      "ko": "다중 모델, 로드된 모델 없음",
+      "test_id": "connection-mode-model-free"
+    },
+    {
+      "key": "connection.mode.single_model",
+      "en": "Single model",
+      "ko": "단일 모델",
+      "test_id": "connection-mode-single-model"
+    },
+    {
+      "key": "connection.mode.router_pool",
+      "en": "Multi-model",
+      "ko": "다중 모델",
+      "test_id": "connection-mode-router-pool"
+    },
+    {
+      "key": "connection.mode.unknown",
+      "en": "Server",
+      "ko": "서버",
+      "test_id": "connection-mode-unknown"
+    },
+    {
       "key": "connection.snapshot.pending",
       "en": "pending",
       "ko": "대기 중",

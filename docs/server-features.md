@@ -305,6 +305,15 @@ are returned in `rejected`. Mutable groups include request timeouts, generation
 defaults, DRY, language bias, reasoning budget, chat-template kwargs, loop
 detection, and diffusion defaults.
 
+Read-only entries report their startup value as plain JSON: an absent value is
+`null`, an enum is its CLI spelling (`preemption_policy: "longest-first"`,
+`decode_storage_backend: "auto"`, `serving_mode: "hybrid"`), and a structured
+value such as `tensor_parallel`, `prompt_cache`, `batch_kv_quant` or
+`cors_policy` is a flat object of named fields (schema type `object`, or
+`object_or_null` for `gcp`, `pipeline_parallel_runtime` and
+`remote_pipeline_stage`). `kv_cache_budget` is the `--kv-cache-budget` spelling
+(`auto`, `disabled`, or a byte count) or `null`.
+
 ## Transport and access control
 
 Configure API keys with repeatable `--api-key` values, comma-separated values,

@@ -3,7 +3,8 @@ import { describe, expect, it } from 'vitest';
 import type { CatalogEntry, ModelLifecycleState, WebUiSnapshot } from './api/types';
 import { paletteModelMatches, PALETTE_MODEL_LIMIT } from './command-palette';
 import { model, snapshot } from './features/models/test-fixtures';
-import { connectionFooterDetails, connectionFooterLabel, loadedModels, modelSelectionFor } from './provider-surfaces';
+import contractText from '../../docs/webui/api.yaml?raw';
+import { connectedDetail, connectionFooterDetails, connectionFooterLabel, loadedModels, modelSelectionFor, serverModeLabel } from './provider-surfaces';
 import { initialSnapshot } from './state/reducer';
 
 function entry(id: string, name: string, state: ModelLifecycleState): CatalogEntry {
@@ -70,9 +71,38 @@ describe('modelSelectionFor', () => {
 describe('connection footer', () => {
   it('prints mode, status and version without the internal sequence', () => {
     const state = { ...snapshot(), lastSequence: 42 };
-    expect(connectionFooterLabel('en', state)).toBe('model_free · ready · v0.7.0');
+    expect(connectionFooterLabel('en', state)).toBe('Multi-model, none loaded · ready · v0.7.0');
     expect(connectionFooterLabel('en', state)).not.toContain('42');
     expect(connectionFooterLabel('en', initialSnapshot())).toBe('Shell loaded; local API not connected');
+  });
+
+  it('names every contract server mode in both locales, never by its snake_case identifier', () => {
+    const contract = JSON.parse(contractText) as { components: { schemas: { ServerMode: { enum: string[] } } } };
+    const modes = contract.components.schemas.ServerMode.enum;
+    expect(modes.length).toBeGreaterThan(0);
+    const base = snapshot();
+    const bootstrap = base.bootstrap;
+    if (bootstrap === null) throw new Error('Missing bootstrap fixture');
+    for (const locale of ['en', 'ko'] as const) {
+      const labels = new Set<string>();
+      for (const mode of modes) {
+        const state = { ...base, bootstrap: { ...bootstrap, server: { ...bootstrap.server, mode } } } as typeof base;
+        const footer = connectionFooterLabel(locale, state);
+        expect(footer, `${locale} ${mode}`).not.toMatch(/[a-z]+_[a-z]+/);
+        expect(footer.startsWith(serverModeLabel(locale, mode)), `${locale} ${mode}`).toBe(true);
+        expect(connectedDetail(locale, state), `${locale} ${mode}`).not.toContain(mode);
+        labels.add(serverModeLabel(locale, mode));
+      }
+      // Each mode has its own label, and none is the unknown-mode fallback.
+      expect(labels.size).toBe(modes.length);
+      expect(labels.has(serverModeLabel(locale, 'future_mode'))).toBe(false);
+    }
+  });
+
+  it('falls back to a generic localized label for a mode this bundle does not know', () => {
+    expect(serverModeLabel('en', 'future_mode')).toBe('Server');
+    expect(serverModeLabel('ko', 'future_mode')).toBe('서버');
+    expect(serverModeLabel('en', 'toString')).toBe('Server');
   });
 
   it('returns details only after bootstrap, preferring the live instance and the newest sequence', () => {

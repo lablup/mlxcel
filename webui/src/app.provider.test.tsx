@@ -165,7 +165,8 @@ describe('provider-backed WebUI shell', () => {
     expect(snapshotCalls.map((call) => call.auth)).toEqual(snapshotCalls.map(() => 'Bearer good-key'));
     expect(snapshotCalls.map((call) => call.url).join('\n')).toContain('/ui-api/v1/catalog');
     expect(document.querySelector('[data-testid="connection-authenticated-detail"]')?.textContent).toContain('catalog 1');
-    expect(document.querySelector('[data-testid="connection-ready"]')?.textContent).toContain('model_free');
+    expect(document.querySelector('[data-testid="connection-ready"]')?.textContent).toContain('Multi-model, none loaded');
+    expect(document.querySelector('[data-testid="connection-ready"]')?.textContent).not.toContain('model_free');
     expect(document.querySelector('[data-testid="connection-ready"]')?.textContent).not.toContain('seq');
     expect(`${localStorage.getItem('good-key')} ${sessionStorage.getItem('good-key')}`).not.toContain('good-key');
     expect(mock.calls.map((call) => call.url).join(' ')).not.toContain('good-key');
@@ -395,7 +396,7 @@ describe('provider-backed WebUI shell', () => {
     await waitFor(() => expect(document.querySelector('[data-testid="connection-footer-details"]')).not.toBeNull());
     const instance = bootstrapFixture.server.server_instance_id;
     const label = document.querySelector<HTMLElement>('[data-testid="connection-ready"]');
-    expect(label?.textContent).toMatch(/^model_free · \w+ · v0\.7\.0$/);
+    expect(label?.textContent).toMatch(/^Multi-model, none loaded · \w+ · v0\.7\.0$/);
     const footer = label?.closest('footer');
     const details = footer?.querySelector<HTMLDetailsElement>('details.connection-details');
     expect(details?.open).toBe(false);

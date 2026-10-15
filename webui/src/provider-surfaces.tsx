@@ -1,6 +1,6 @@
 import React from 'react';
 import { WebUiHttpError } from './api/client';
-import type { CatalogEntry, ConnectionPhase, ModelId, ModelLifecycleState, WebUiSnapshot } from './api/types';
+import type { CatalogEntry, ConnectionPhase, ModelId, ModelLifecycleState, ServerMode, WebUiSnapshot } from './api/types';
 import { ValidationError } from './api/validation';
 import { Button, ErrorBanner, LoginView, PageHeader, SchemaMismatchView } from './design-system/primitives';
 import type { Locale, StringKey } from './i18n/catalog';
@@ -50,10 +50,21 @@ export function modelSelectionFor(snapshot: WebUiSnapshot, id: ModelId): ModelId
   return snapshot.catalog.some((entry) => entry.identity.id === id) ? id : null;
 }
 
+const SERVER_MODE_KEYS: Readonly<Record<ServerMode, StringKey>> = {
+  model_free: 'connection.mode.model_free',
+  single_model: 'connection.mode.single_model',
+  router_pool: 'connection.mode.router_pool',
+};
+
+/** The localized name of the server's bootstrap mode; a mode this bundle does not know reads as a generic label, never the raw identifier. */
+export function serverModeLabel(locale: Locale, mode: string): string {
+  return t(locale, Object.hasOwn(SERVER_MODE_KEYS, mode) ? SERVER_MODE_KEYS[mode as ServerMode] : 'connection.mode.unknown');
+}
+
 export function connectionFooterLabel(locale: Locale, snapshot: WebUiSnapshot): string {
   if (snapshot.bootstrap === null) return t(locale, 'connection.ready');
   return t(locale, 'connection.footer.connected', {
-    mode: snapshot.bootstrap.server.mode,
+    mode: serverModeLabel(locale, snapshot.bootstrap.server.mode),
     version: snapshot.bootstrap.server.build.version,
     status: connectionPhaseLabel(locale, snapshot.connection),
   });
@@ -159,7 +170,7 @@ export function connectedDetail(locale: Locale, snapshot: WebUiSnapshot): string
   const bootstrap = snapshot.bootstrap;
   if (bootstrap === null) return t(locale, 'connection.prompt.detail');
   return t(locale, 'connection.authenticated.detail', {
-    mode: bootstrap.server.mode,
+    mode: serverModeLabel(locale, bootstrap.server.mode),
     version: bootstrap.server.build.version,
     status: connectionPhaseLabel(locale, snapshot.connection),
     count: snapshot.catalogSequence === null ? t(locale, 'connection.snapshot.pending') : String(snapshot.catalog.length),

@@ -1,0 +1,110 @@
+{
+  "$comment": "Read-only /settings values of a configured server (issue #2329). Asserted equal to the server's output by src/server/runtime_settings_values_tests.rs and rendered by webui/src/features/settings/startup-values.test.tsx.",
+  "values": [
+    {
+      "name": "gcp",
+      "type": "object_or_null",
+      "default": {
+        "health_route": "/health",
+        "predict_route": "/predict"
+      }
+    },
+    {
+      "name": "embedding_serving_mode",
+      "type": "str",
+      "default": "embedding_only"
+    },
+    {
+      "name": "preemption_policy",
+      "type": "str",
+      "default": "lowest-priority"
+    },
+    {
+      "name": "decode_storage_backend",
+      "type": "str",
+      "default": "paged"
+    },
+    {
+      "name": "pipeline_parallel_runtime",
+      "type": "object_or_null",
+      "default": {
+        "mode": "in_process",
+        "layers": "0-13,14-27",
+        "micro_batch_size": 2
+      }
+    },
+    {
+      "name": "remote_pipeline_stage",
+      "type": "object_or_null",
+      "default": {
+        "bind_address": "0.0.0.0:9100",
+        "stage_index": 1,
+        "num_stages": 2,
+        "upstream_peer": "10.0.0.1:9100",
+        "downstream_peer": null,
+        "transport": "tcp"
+      }
+    },
+    {
+      "name": "tensor_parallel",
+      "type": "object",
+      "default": {
+        "tp_size": 2,
+        "moe_mode": "expert_parallel",
+        "embedding_mode": "replicated",
+        "lm_head_mode": "vocab_parallel"
+      }
+    },
+    {
+      "name": "prompt_cache",
+      "type": "object",
+      "default": {
+        "enabled": true,
+        "capacity_bytes": 1073741824,
+        "max_entries": 64,
+        "ttl_secs": 600,
+        "min_prefix_tokens": 32,
+        "apc_enabled": false,
+        "apc_block_size": 16,
+        "apc_num_blocks": null,
+        "apc_hash": "sha256",
+        "snapshot_capacity_bytes": 268435456,
+        "snapshot_max_entries": 8,
+        "snapshot_ttl_secs": 300
+      }
+    },
+    {
+      "name": "batch_kv_quant",
+      "type": "object",
+      "default": {
+        "scheme": "turboquant",
+        "bits": 4,
+        "group_size": 64,
+        "skip_last_layer": true
+      }
+    },
+    {
+      "name": "kv_cache_budget",
+      "type": "str_or_null",
+      "default": "auto"
+    },
+    {
+      "name": "cors_policy",
+      "type": "object",
+      "default": {
+        "origin_policy": "allow_list",
+        "origins": [
+          "http://localhost:5173"
+        ],
+        "methods": "GET, POST",
+        "headers": "Authorization, Content-Type",
+        "credentials": false
+      }
+    },
+    {
+      "name": "serving_mode",
+      "type": "str",
+      "default": "prefill-only"
+    }
+  ]
+}

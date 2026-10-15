@@ -9,6 +9,7 @@ import type { WebUiSnapshot } from '../../api/types';
 import { WebUiHttpError, type ChatStreamHandlers } from '../../api/client';
 import { t } from '../../i18n/catalog';
 import { Chat } from './chat';
+import { clockTime } from '../activity/format';
 import { consumeNewConversationRequest, newConversation, replaceConversations, requestNewConversation, useConversations } from './session';
 import type { ChatConversation, ChatTurn } from './history';
 import { useGenerationDefaults } from '../settings/generation-preferences';
@@ -45,6 +46,19 @@ describe('Chat real component composition',()=>{
   await act(async()=>frame?.onFrame({data:JSON.stringify({choices:[{index:0,delta:{content:'Partial'},finish_reason:null}]}),event:'message',id:null,retry:null}));
   await act(async()=>button('Stop').click());
   expect(signal?.aborted).toBe(true);expect(host.textContent).toContain(t('en','chat.transcript.status.cancelled'));expect(host.textContent).toContain('Partial');expect(mocked.stream).toHaveBeenCalledOnce();expect(mocked.runtime).toHaveBeenCalledOnce();
+ });
+ for (const locale of ['en','ko'] as const) it(`announces a stopped request with a formatted clock time, never the raw RFC 3339 value (${locale})`,async()=>{
+  const measuredAt='2026-10-15T19:02:45.302834164+00:00';
+  mocked.runtime.mockResolvedValue({measurements:{active_requests:{measured_at:measuredAt}}});
+  mocked.stream.mockImplementation((_id:string,_body:unknown,_handlers:ChatStreamHandlers,upstream:AbortSignal)=>new Promise<void>((_resolve,reject)=>upstream.addEventListener('abort',()=>reject(new DOMException('aborted','AbortError')))));
+  act(()=>root.render(<><DefaultsControl/><Chat locale={locale}/></>));
+  const field=host.querySelector<HTMLTextAreaElement>(`textarea[aria-label="${t(locale,'chat.composer.label')}"]`);if(!field)throw new Error('Missing composer');
+  act(()=>{Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')?.set?.call(field,'Hello');field.dispatchEvent(new Event('input',{bubbles:true}));});
+  await act(async()=>button(t(locale,'common.send')).click());
+  await act(async()=>button(t(locale,'chat.stop')).click());
+  const announcement=host.querySelector('.chat-announcement')?.textContent??'';
+  expect(announcement).not.toContain(measuredAt);expect(announcement).not.toMatch(/\d{4}-\d{2}-\d{2}T|\+00:00/);
+  expect(announcement).toBe(t(locale,'chat.announce.aborted_observed',{time:clockTime(measuredAt,locale)}));
  });
  it('does not send Enter while composing or Shift+Enter',async()=>{
   const field=input('한글');
