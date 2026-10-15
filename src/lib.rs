@@ -83,6 +83,8 @@ pub use mlxcel_core::speculative::prompt_lookup::{
     DraftPolicy, PromptLookupConfig, prompt_lookup_unsupported_reason, supports_prompt_lookup,
 };
 pub use mlxcel_core::speculative::prompt_lookup_drafter::PromptLookupDrafter;
+#[cfg(feature = "xla-diagnostics")]
+pub use multimodal::host_preprocessor::LlavaHostReferenceCapture;
 #[cfg(feature = "xla-iree")]
 pub use multimodal::host_preprocessor::LlavaIreeHostPreprocessor;
 pub use multimodal::host_preprocessor::{
@@ -90,10 +92,8 @@ pub use multimodal::host_preprocessor::{
     HostPreprocessorError, LlavaHostPreprocessor, XlaVisionBackend,
     ensure_xla_image_context_capacity, load_xla_image_preprocessor, xla_image_context_floor,
 };
-#[cfg(feature = "xla-diagnostics")]
-pub use multimodal::host_preprocessor::{
-    LlavaHostReferenceCapture, Qwen2VlIreeHostPreprocessor, QwenVlProcessorCapture,
-};
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+pub use multimodal::host_preprocessor::{Qwen2VlIreeHostPreprocessor, QwenVlProcessorCapture};
 pub use multimodal::{
     falcon_ocr_prompt, internvl_prompt, kimi_vl_prompt, locateanything_prompt, minicpmo_prompt,
     moondream2_prompt, moondream3_prompt, phi3v_prompt, phi4_siglip_prompt, phi4mm_prompt,

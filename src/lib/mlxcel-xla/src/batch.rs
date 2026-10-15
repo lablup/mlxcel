@@ -1232,10 +1232,11 @@ impl Qwen25VlLanguageDiagnosticEngine {
 
     pub fn capture(&mut self, prepared: &PreparedPrefill) -> Result<Vec<f32>, String> {
         self.engine.reset_slots_for_diagnostics()?;
-        let prepared_iree = PreparedIreePrefill::prepare(
+        let prepared_iree = PreparedIreePrefill::prepare_for_mode(
             prepared,
             self.engine.hidden_size(),
             self.engine.context_capacity(),
+            self.engine.position_mode(),
         )
         .map_err(|error| error.to_string())?;
         if prepared_iree.positions.mode() != PreparedPositionMode::Mrope3D {

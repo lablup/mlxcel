@@ -130,7 +130,7 @@ impl Qwen25VLModel {
         merged
     }
 
-    #[cfg(feature = "xla-diagnostics")]
+    #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
     pub fn mrope_diagnostics(
         &self,
         input_ids: &MlxArray,

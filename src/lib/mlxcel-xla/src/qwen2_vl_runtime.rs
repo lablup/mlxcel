@@ -763,6 +763,18 @@ fn audit_attention_masks(
     audit
 }
 
+fn qwen2_vl_target_flags(device: &str) -> Result<Vec<String>, String> {
+    let mut flags = target_flags(device)?;
+    if device.trim().eq_ignore_ascii_case("hip") {
+        // IREE 3.12's TileAndFuse matmul heuristic pads unaligned N=3420 to 3456,
+        // falls back to mustBeAligned=false with a 256x256x64 tile (65536 B), and
+        // then GPUReduceBankConflictsPass pads rows to 80 f16 elements (81920 B),
+        // exceeding RDNA3/3.5's 64 KiB workgroup memory limit.
+        flags.push("--iree-codegen-llvmgpu-use-tile-and-fuse-matmul=false".to_string());
+    }
+    Ok(flags)
+}
+
 fn compile_and_load(
     model_dir: &Path,
     device: &str,
@@ -776,7 +788,7 @@ fn compile_and_load(
     if !compiler.is_file() {
         return Err(format!("iree-compile not found at {}", compiler.display()));
     }
-    let flags = target_flags(device)?;
+    let flags = qwen2_vl_target_flags(device)?;
     let cache = std::env::temp_dir().join("mlxcel-xla-qwen2-vl-vmfb");
     std::fs::create_dir_all(&cache)
         .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
@@ -817,7 +829,7 @@ fn compile_and_load_diagnostics(
     if !compiler.is_file() {
         return Err(format!("iree-compile not found at {}", compiler.display()));
     }
-    let flags = target_flags(device)?;
+    let flags = qwen2_vl_target_flags(device)?;
     let cache = std::env::temp_dir().join("mlxcel-xla-qwen2-vl-vmfb");
     std::fs::create_dir_all(&cache)
         .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
@@ -830,12 +842,12 @@ fn compile_and_load_diagnostics(
             processor_identity,
             sha256_hex(checkpoint_schema.as_bytes())
         ),
-        compiler_generation_identity(&compiler, flags, &mlir)?,
+        compiler_generation_identity(&compiler, &flags, &mlir)?,
     )?;
     let tag = format!("qwen2-5-vl-vision-diagnostics-{patch_bucket}");
-    let vmfb = cached_vmfb_path(&compiler, &mlir, flags, &cache, &tag, 0);
+    let vmfb = cached_vmfb_path(&compiler, &mlir, &flags, &cache, &tag, 0);
     ensure_qualified_auxiliary_artifact(&vmfb, &contract, &weights, |temporary| {
-        compile_one_to(&compiler, &mlir, flags, &cache, &tag, 0, temporary)
+        compile_one_to(&compiler, &mlir, &flags, &cache, &tag, 0, temporary)
     })?;
     Ok((
         IreeAuxiliaryModule::load(device, &vmfb, &contract, weights)?,

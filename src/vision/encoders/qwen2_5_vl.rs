@@ -450,7 +450,7 @@ struct VisionMLP {
     down_proj: UnifiedLinear,
 }
 
-#[cfg(feature = "xla-diagnostics")]
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 #[derive(Clone, Copy)]
 enum VisionMLPDiagnosticStage {
     GateProjection,
@@ -491,7 +491,7 @@ impl VisionMLP {
         self.down_proj.forward(&h)
     }
 
-    #[cfg(feature = "xla-diagnostics")]
+    #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
     fn dense_f32_projection(linear: &UnifiedLinear, x: &MlxArray) -> UniquePtr<MlxArray> {
         let x = mlxcel_core::astype(x, mlxcel_core::dtype::FLOAT32);
         let weight = linear.dequantized_weight();
@@ -515,7 +515,7 @@ impl VisionMLP {
         output
     }
 
-    #[cfg(feature = "xla-diagnostics")]
+    #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
     fn dense_f32_gate_up_controls(
         &self,
         x: &MlxArray,
@@ -526,7 +526,7 @@ impl VisionMLP {
         )
     }
 
-    #[cfg(feature = "xla-diagnostics")]
+    #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
     fn forward_with_observer<F>(&self, x: &MlxArray, mut observe: F) -> UniquePtr<MlxArray>
     where
         F: FnMut(VisionMLPDiagnosticStage, &MlxArray),
@@ -551,7 +551,7 @@ struct VisionBlock {
     mlp: VisionMLP,
 }
 
-#[cfg(feature = "xla-diagnostics")]
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 struct Qwen25VLBlockDiagnostics {
     input: Vec<f32>,
     norm1: Vec<f32>,
@@ -571,7 +571,7 @@ struct Qwen25VLBlockDiagnostics {
     mlp_down_projection: Vec<f32>,
 }
 
-#[cfg(any(test, feature = "xla-diagnostics"))]
+#[cfg(any(test, feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 fn host_f32_diagnostic_snapshot(array: &MlxArray) -> Vec<f32> {
     let array = mlxcel_core::astype(array, mlxcel_core::dtype::FLOAT32);
     mlxcel_core::eval(&array);
@@ -616,7 +616,7 @@ impl VisionBlock {
         mlxcel_core::add(&h, &mlp_out)
     }
 
-    #[cfg(feature = "xla-diagnostics")]
+    #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
     fn forward_with_diagnostics(
         &self,
         hidden_states: &MlxArray,
@@ -753,7 +753,7 @@ pub struct Qwen25VLVisionEncoder {
     fullatt_block_indexes: Vec<usize>,
 }
 
-#[cfg(feature = "xla-diagnostics")]
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 pub struct Qwen25VLVisionDiagnostics {
     pub window_index: Vec<i32>,
     pub restore_indices: Vec<i32>,
@@ -789,15 +789,15 @@ pub struct Qwen25VLVisionDiagnostics {
     pub restored_projection: UniquePtr<MlxArray>,
 }
 
-#[cfg(feature = "xla-diagnostics")]
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 pub struct Qwen25VLMlpProjectionControls {
     pub gate_projection: Vec<f32>,
     pub up_projection: Vec<f32>,
 }
 
-#[cfg(feature = "xla-diagnostics")]
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 type Qwen25VLCapture = Option<Qwen25VLVisionDiagnostics>;
-#[cfg(not(feature = "xla-diagnostics"))]
+#[cfg(not(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu")))]
 type Qwen25VLCapture = ();
 
 impl Qwen25VLVisionEncoder {
@@ -846,7 +846,7 @@ impl Qwen25VLVisionEncoder {
         })
     }
 
-    #[cfg(feature = "xla-diagnostics")]
+    #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
     pub fn f16_input_dense_f32_mlp_projection_controls(
         &self,
         layer_index: usize,
@@ -857,7 +857,7 @@ impl Qwen25VLVisionEncoder {
             .blocks
             .get(layer_index)
             .ok_or_else(|| format!("Qwen2.5-VL diagnostic layer {layer_index} is out of range"))?;
-        if rows == 0 || input.len() % rows != 0 {
+        if rows == 0 || !input.len().is_multiple_of(rows) {
             return Err(format!(
                 "Qwen2.5-VL diagnostic projection input has {} values for {rows} rows",
                 input.len()
@@ -984,7 +984,7 @@ impl Qwen25VLVisionEncoder {
             .0
     }
 
-    #[cfg(feature = "xla-diagnostics")]
+    #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
     pub fn forward_with_grid_diagnostics(
         &self,
         hidden_states: &MlxArray,
@@ -1018,7 +1018,7 @@ impl Qwen25VLVisionEncoder {
             mlxcel_core::from_slice_i32(&window_index, &[window_index.len() as i32]);
         let h_reordered = mlxcel_core::take(&h_grouped, &window_idx_arr, 0);
         h = mlxcel_core::reshape(&h_reordered, &[-1, dim]);
-        #[cfg(feature = "xla-diagnostics")]
+        #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
         let reordered_patch_embedding = CAPTURE
             .then(|| mlxcel_core::copy(h.as_ref().expect("Qwen2.5-VL reordered patch embedding")));
 
@@ -1036,26 +1036,26 @@ impl Qwen25VLVisionEncoder {
         let cu_seqlens = Self::compute_cu_seqlens(grid_thw, self.spatial_merge_size as i32);
 
         // Run blocks with windowed or full attention
-        #[cfg(feature = "xla-diagnostics")]
+        #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
         let window_layer_index =
             (0..self.blocks.len()).find(|layer| !self.fullatt_block_indexes.contains(layer));
-        #[cfg(feature = "xla-diagnostics")]
+        #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
         let mut post_window_layer = None;
-        #[cfg(feature = "xla-diagnostics")]
+        #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
         let mut post_full_layers = Vec::new();
-        #[cfg(feature = "xla-diagnostics")]
+        #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
         let full_layer_indices = (0..self.blocks.len())
             .filter(|layer| self.fullatt_block_indexes.contains(layer))
             .collect::<Vec<_>>();
-        #[cfg(feature = "xla-diagnostics")]
+        #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
         let target_full_layer_index = full_layer_indices.last().copied();
-        #[cfg(feature = "xla-diagnostics")]
+        #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
         let final_interval_start = full_layer_indices
             .iter()
             .rev()
             .nth(1)
             .map_or(0, |layer| layer + 1);
-        #[cfg(feature = "xla-diagnostics")]
+        #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
         let final_interval_layer_indices = target_full_layer_index
             .map(|target| (final_interval_start..=target).collect::<Vec<_>>())
             .unwrap_or_default();
@@ -1063,14 +1063,14 @@ impl Qwen25VLVisionEncoder {
         // 17. Probe that first failing layer so the next bounded run
         // distinguishes Q/K/V, masked attention context, projection, residual,
         // norm, and MLP without changing production execution.
-        #[cfg(feature = "xla-diagnostics")]
+        #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
         let target_probe_boundary = full_layer_indices
             .iter()
             .rev()
             .nth(1)
             .copied()
             .or(target_full_layer_index);
-        #[cfg(feature = "xla-diagnostics")]
+        #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
         let substage_probe_layer_index = target_probe_boundary.map(|target| {
             full_layer_indices
                 .iter()
@@ -1081,7 +1081,7 @@ impl Qwen25VLVisionEncoder {
                 .filter(|&layer| layer <= target)
                 .unwrap_or(target)
         });
-        #[cfg(feature = "xla-diagnostics")]
+        #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
         let diagnostic_layer_indices = substage_probe_layer_index
             .and_then(|probe| {
                 full_layer_indices
@@ -1092,11 +1092,11 @@ impl Qwen25VLVisionEncoder {
                     .map(|previous_full| ((previous_full + 1)..=probe).collect::<Vec<_>>())
             })
             .unwrap_or_default();
-        #[cfg(feature = "xla-diagnostics")]
+        #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
         let mut post_final_interval_layers = Vec::new();
-        #[cfg(feature = "xla-diagnostics")]
+        #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
         let mut post_diagnostic_layers = Vec::new();
-        #[cfg(feature = "xla-diagnostics")]
+        #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
         let mut substage_probe_layer_state = None;
         for (layer_num, block) in self.blocks.iter().enumerate() {
             let cu_seqlens_now = if self.fullatt_block_indexes.contains(&layer_num) {
@@ -1104,7 +1104,7 @@ impl Qwen25VLVisionEncoder {
             } else {
                 &cu_window_seqlens
             };
-            #[cfg(feature = "xla-diagnostics")]
+            #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
             if CAPTURE && Some(layer_num) == substage_probe_layer_index {
                 let (output, capture) =
                     block.forward_with_diagnostics(&h, cu_seqlens_now, &rotary_pos_emb);
@@ -1113,11 +1113,11 @@ impl Qwen25VLVisionEncoder {
             } else {
                 h = block.forward(&h, cu_seqlens_now, &rotary_pos_emb);
             }
-            #[cfg(not(feature = "xla-diagnostics"))]
+            #[cfg(not(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu")))]
             {
                 h = block.forward(&h, cu_seqlens_now, &rotary_pos_emb);
             }
-            #[cfg(feature = "xla-diagnostics")]
+            #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
             if CAPTURE {
                 if Some(layer_num) == window_layer_index {
                     post_window_layer = Some(mlxcel_core::copy(
@@ -1144,7 +1144,7 @@ impl Qwen25VLVisionEncoder {
 
         // Merge patches
         h = self.merger.forward(&h);
-        #[cfg(feature = "xla-diagnostics")]
+        #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
         let merger_window_ordered = CAPTURE.then(|| {
             mlxcel_core::copy(h.as_ref().expect("Qwen2.5-VL window-ordered merger output"))
         });
@@ -1160,7 +1160,7 @@ impl Qwen25VLVisionEncoder {
             mlxcel_core::from_slice_i32(&reverse_indices, &[reverse_indices.len() as i32]);
         h = mlxcel_core::take(&h, &reverse_arr, 0);
 
-        #[cfg(feature = "xla-diagnostics")]
+        #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
         if CAPTURE {
             let substage_probe_layer_index = substage_probe_layer_index
                 .expect("Qwen2.5-VL diagnostics require a substage probe layer");
@@ -1219,11 +1219,11 @@ impl Qwen25VLVisionEncoder {
                 }),
             );
         }
-        #[cfg(not(feature = "xla-diagnostics"))]
+        #[cfg(not(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu")))]
         {
             (VisionEncoderOutput { hidden_states: h }, ())
         }
-        #[cfg(feature = "xla-diagnostics")]
+        #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
         {
             (VisionEncoderOutput { hidden_states: h }, None)
         }
@@ -1383,21 +1383,9 @@ fn window_index_for_grid(
 /// at 336x336 and 352 of 384 at 448x672 (issue #1596).
 ///
 /// Used by: Qwen2.5-VL (and ColQwen2.5 through the same encoder).
+#[cfg(test)]
 fn invert_window_index(window_index: &[i32]) -> Vec<i32> {
-    let len = window_index.len();
-    let mut inverse = vec![0i32; len];
-    for (rank, &raster_idx) in window_index.iter().enumerate() {
-        // `get_window_index` emits a permutation of `0..len` over every image in
-        // the batch, so this bound is a guard against a malformed grid rather
-        // than an expected branch.
-        if let Some(slot) = usize::try_from(raster_idx)
-            .ok()
-            .and_then(|i| inverse.get_mut(i))
-        {
-            *slot = rank as i32;
-        }
-    }
-    inverse
+    restoration_indices(window_index)
 }
 
 /// VisionEncoder trait - panics since grid_thw is required
@@ -1409,7 +1397,7 @@ impl super::VisionEncoder for Qwen25VLVisionEncoder {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "xla-diagnostics")]
+    #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
     use super::VisionMLP;
     use super::{host_f32_diagnostic_snapshot, restoration_indices};
 
@@ -1426,7 +1414,7 @@ mod tests {
         assert_eq!(original, vec!["zero", "one", "two", "three"]);
     }
 
-    #[cfg(feature = "xla-diagnostics")]
+    #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
     #[test]
     fn dense_f32_projection_control_preserves_linear_order_and_dtype() {
         use mlxcel_core::layers::{Linear, UnifiedLinear};

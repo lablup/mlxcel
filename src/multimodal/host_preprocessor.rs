@@ -295,7 +295,9 @@ pub fn xla_image_context_floor(model_path: &Path) -> Option<usize> {
     match crate::models::get_model_type(model_path) {
         Ok(crate::models::ModelType::Molmo2VLM) => molmo2_image_context_floor(model_path),
         Ok(crate::models::ModelType::LlavaVLM) => llava_image_context_floor(model_path),
-        Ok(crate::models::ModelType::Qwen2VL) => qwen2_vl_image_context_floor(model_path),
+        Ok(crate::models::ModelType::Qwen2VL | crate::models::ModelType::Qwen25VL) => {
+            qwen2_vl_image_context_floor(model_path)
+        }
         // A family without a formula here reports `None` rather than being
         // guarded with another family's shape.
         _ => None,
@@ -568,7 +570,7 @@ pub struct Qwen2VlIreeHostPreprocessor {
     device: String,
 }
 
-#[cfg(feature = "xla-diagnostics")]
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct QwenVlProcessorCapture {
     pub patch_values: Vec<f32>,
@@ -593,7 +595,7 @@ impl Qwen2VlIreeHostPreprocessor {
         }
     }
 
-    #[cfg(feature = "xla-diagnostics")]
+    #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
     pub fn capture_processor_inputs(
         &self,
         images: &[DynamicImage],

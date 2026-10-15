@@ -125,26 +125,32 @@ fn xla_loader_keeps_text_and_unqualified_vlm_image_capability_false() {
 #[cfg(not(feature = "xla-iree"))]
 #[test]
 fn xla_loader_rejects_qwen2_vl_without_the_iree_feature() {
-    let model_dir = tempfile::tempdir().unwrap();
-    std::fs::write(
-        model_dir.path().join("config.json"),
-        r#"{"model_type":"qwen2_vl"}"#,
-    )
-    .unwrap();
-    let error = load_xla_image_preprocessor(model_dir.path())
-        .err()
-        .expect("qwen2_vl without xla-iree must fail startup, not downgrade image capability");
-    let HostPreprocessorError::InvalidConfig(message) = &error else {
-        panic!("expected a build-configuration error, got {error:?}");
-    };
-    assert!(
-        message.contains("requires the xla-iree feature"),
-        "the message must name the missing feature: {message}"
-    );
-    assert!(
-        message.contains("--features xla-iree"),
-        "the message must carry the actionable rebuild instruction: {message}"
-    );
+    for (model_type, family) in [("qwen2_vl", "Qwen2-VL"), ("qwen2_5_vl", "Qwen2.5-VL")] {
+        let model_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            model_dir.path().join("config.json"),
+            format!(r#"{{"model_type":"{model_type}"}}"#),
+        )
+        .unwrap();
+        let error = load_xla_image_preprocessor(model_dir.path())
+            .err()
+            .expect("qwen_vl without xla-iree must fail startup, not downgrade image capability");
+        let HostPreprocessorError::InvalidConfig(message) = &error else {
+            panic!("expected a build-configuration error, got {error:?}");
+        };
+        assert!(
+            message.contains(family),
+            "the message must name the family {family}: {message}"
+        );
+        assert!(
+            message.contains("requires the xla-iree feature"),
+            "the message must name the missing feature: {message}"
+        );
+        assert!(
+            message.contains("--features xla-iree"),
+            "the message must carry the actionable rebuild instruction: {message}"
+        );
+    }
 }
 
 #[test]
@@ -547,11 +553,19 @@ fn llava_checkpoint_dir(
 }
 
 fn qwen2_vl_checkpoint_dir(patch_size: u32, merge_size: u32) -> tempfile::TempDir {
+    qwen_vl_checkpoint_dir("qwen2_vl", patch_size, merge_size)
+}
+
+fn qwen2_5_vl_checkpoint_dir(patch_size: u32, merge_size: u32) -> tempfile::TempDir {
+    qwen_vl_checkpoint_dir("qwen2_5_vl", patch_size, merge_size)
+}
+
+fn qwen_vl_checkpoint_dir(model_type: &str, patch_size: u32, merge_size: u32) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("config.json"),
         format!(
-            r#"{{"model_type":"qwen2_vl","vision_config":{{"patch_size":{patch_size},"spatial_merge_size":{merge_size}}}}}"#
+            r#"{{"model_type":"{model_type}","vision_config":{{"patch_size":{patch_size},"spatial_merge_size":{merge_size}}}}}"#
         ),
     )
     .unwrap();
@@ -579,15 +593,20 @@ fn llava_image_floor_matches_the_loader_expression() {
 
 #[test]
 fn qwen2_vl_image_floor_bounds_every_admissible_image() {
-    let dir = qwen2_vl_checkpoint_dir(14, 2);
-    let floor = xla_image_context_floor(dir.path()).expect("qwen2_vl must derive a floor");
-    assert_eq!(floor, 16384);
+    for dir in [
+        qwen2_vl_checkpoint_dir(14, 2),
+        qwen2_5_vl_checkpoint_dir(14, 2),
+    ] {
+        let floor = xla_image_context_floor(dir.path()).expect("qwen_vl must derive a floor");
+        assert_eq!(floor, 16384);
+    }
 
     // Validation against the processor rather than against the same formula:
     // run the real `smart_resize` and token count over extreme shapes and
     // confirm none exceeds the floor. A floor that is too low reinstates the
     // late-admission failure the guard exists to prevent, so this is the
     // property that matters.
+    let floor = 16384;
     let processor = crate::vision::processors::qwen2_vl::Qwen2VLProcessor::new(14, 2, 2);
     let mut worst = 0usize;
     for (h, w) in [
@@ -633,6 +652,8 @@ fn the_new_families_report_no_floor_for_an_unreadable_config() {
     // A zero patch size must report no floor rather than divide.
     let degenerate = qwen2_vl_checkpoint_dir(0, 2);
     assert_eq!(xla_image_context_floor(degenerate.path()), None);
+    let degenerate_qwen25 = qwen2_5_vl_checkpoint_dir(0, 2);
+    assert_eq!(xla_image_context_floor(degenerate_qwen25.path()), None);
 }
 
 #[test]
@@ -642,10 +663,14 @@ fn the_capacity_guard_covers_the_new_families_at_the_boundary() {
     assert!(ensure_xla_image_context_capacity(llava.path(), 575, false).is_err());
     assert!(ensure_xla_image_context_capacity(llava.path(), 575, true).is_ok());
 
-    let qwen = qwen2_vl_checkpoint_dir(14, 2);
-    assert!(ensure_xla_image_context_capacity(qwen.path(), 16384, false).is_ok());
-    assert!(ensure_xla_image_context_capacity(qwen.path(), 16383, false).is_err());
-    assert!(ensure_xla_image_context_capacity(qwen.path(), 16383, true).is_ok());
+    for qwen in [
+        qwen2_vl_checkpoint_dir(14, 2),
+        qwen2_5_vl_checkpoint_dir(14, 2),
+    ] {
+        assert!(ensure_xla_image_context_capacity(qwen.path(), 16384, false).is_ok());
+        assert!(ensure_xla_image_context_capacity(qwen.path(), 16383, false).is_err());
+        assert!(ensure_xla_image_context_capacity(qwen.path(), 16383, true).is_ok());
+    }
 }
 
 /// Close the loop on a real checkpoint instead of a synthetic config.

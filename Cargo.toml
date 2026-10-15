@@ -120,7 +120,9 @@ xla-iree = ["xla-backend", "mlxcel-xla/iree"]
 # Its pinned reference is the production CUDA runtime, so enabling diagnostics
 # also enables the root MLX CUDA backend. This is not part of `xla-iree`; normal
 # production bundles remain unchanged.
-xla-diagnostics = ["cuda", "xla-iree", "mlxcel-xla/diagnostics"]
+xla-diagnostics = ["cuda", "xla-diagnostics-cpu"]
+# ROCm-backed companion for production AMD GPU intermediate oracle validation.
+xla-diagnostics-rocm = ["rocm", "xla-diagnostics-cpu"]
 # CPU-capable bounded MLX/IREE operator-oracle harness. CUDA-specific production
 # probes may add `cuda`, but the shared report/comparison layer does not require it.
 xla-micro-oracle = ["xla-iree", "mlxcel-xla/micro-oracle"]
@@ -466,7 +468,7 @@ required-features = ["xla-diagnostics"]
 # Actual-checkpoint eager MLX vs IREE Qwen2.5-VL window-attention oracle.
 [[example]]
 name = "xla_qwen25_vl_window_check"
-required-features = ["xla-diagnostics"]
+required-features = ["xla-diagnostics-cpu"]
 
 [[example]]
 name = "xla_aux_smoke"
