@@ -5264,7 +5264,10 @@ namespace {
 // The compiled min-p filter that used to live here was removed with #1379:
 // on the Metal backend the `mlx::core::compile`d callable returned its input
 // unfiltered (see the min-p block in `fused_sample_filter_logits`), so min-p
-// now runs as straight-line ops inside the chain.
+// now runs as straight-line ops inside the chain. The mechanism was found in
+// #1792: the Metal compiled-kernel overlay cast comparison operands to bool, so
+// `greater_equal(probs, threshold)` compared true with true. The overlay is
+// fixed and `compiled_dtype_cast_tests` pins this graph compiled vs eager.
 
 // Env kill switch for the Gumbel-max sampling kernel (#900). Falsy disables
 // and restores the `random::categorical` path exactly. Read once per process

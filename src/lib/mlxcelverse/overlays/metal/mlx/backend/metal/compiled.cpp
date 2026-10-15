@@ -1,9 +1,11 @@
 // Copyright © 2023-2024 Apple Inc.
 // mlxcel patch: adds static_cast for mixed-dtype compiled ops.
-// Modified from upstream MLX 81ba1c6a mlx/backend/metal/compiled.cpp
-// Synced to upstream 81ba1c6a. The only delta is that cast, in build_kernel's
-// emission of an op's inputs; everything else is upstream verbatim. Until this
-// sync the file also emitted `elem_to_loc_1<uint>` for 1-D inputs, a leftover
+// Modified from upstream MLX 243bdf09c0cccbb85ca6a686dab3cc0102cf1f7e mlx/backend/metal/compiled.cpp
+// Synced to upstream 243bdf09. The only delta is that cast, in build_kernel's
+// emission of an op's inputs; everything else is upstream verbatim. A bool
+// output (comparisons) casts to the promoted input type, not to bool (#1792).
+// Until the 81ba1c6a sync the file also emitted `elem_to_loc_1<uint>` for 1-D
+// inputs, a leftover
 // from before ml-explore/mlx#3720 that wraps a negative stride in the large
 // kernel negative strides select, so compare against upstream on every bump.
 #include <fmt/format.h>
@@ -219,7 +221,17 @@ inline void build_kernel(
           get_type_string(x.dtype()),
           namer.get_name(x.inputs()[0]));
     } else {
-      auto out_type = get_type_string(x.dtype());
+      // An input whose type differs from out_type is cast to it. For a bool
+      // output (a comparison; isnan/isinf lower to one) out_type is the
+      // promoted input type instead: casting comparison operands to bool
+      // turned Less(0.2, 0.7) into Less(true, true), i.e. false (#1792).
+      auto cast_dtype = x.dtype();
+      if (cast_dtype == bool_) {
+        for (auto& in : x.inputs()) {
+          cast_dtype = promote_types(cast_dtype, in.dtype());
+        }
+      }
+      auto out_type = get_type_string(cast_dtype);
       os += x.primitive().name();
       os += "()(";
       for (int i = 0; i < x.inputs().size() - 1; i++) {

@@ -4,7 +4,7 @@ This directory holds mlxcelverse's source overlays for MLX's Metal backend (`mlx
 
 ## Files
 
-- `mlx/backend/metal/compiled.cpp`: JIT type promotion fix (`get_type_string` promotion for mixed-precision fused graphs).
+- `mlx/backend/metal/compiled.cpp`: JIT input cast for mixed-precision fused graphs: an op input whose type differs from the op's output type is `static_cast` to it, except that a bool-output op (a comparison, and `isnan` / `isinf`, which lower to one) casts to the promoted input type instead of to `bool` (issue #1792).
 - `mlx/backend/metal/device.cpp`: Runtime override of the per-command-buffer input budget (`mlxcel_set_mb_per_buffer_override`), allowing decode steps to raise the budget while prefill keeps the device default.
 - `mlx/backend/metal/kernels/utils.h`: Metal kernel utility additions (SIMD group matrix helpers).
 - `mlx/backend/metal/quantized.cpp`: `MLXCEL_QMV_WIDE` runtime off-switch on `use_qmv_wide` (issue #1187).
