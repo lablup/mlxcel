@@ -165,6 +165,29 @@ match neither the base model nor the fine-tune. In a pipeline-parallel run a
 stage that owns none of the adapter's layers still applies nothing, which stays
 a valid load.
 
+The unfused path also checks that the model actually consumes every adapter
+layer. A term reaches the forward pass only when the layer is built by one of
+the shared linear constructors; a layer a family builds some other way (an
+embedding table, a hand-built projection) would keep its base weights. Such an
+adapter fails startup with every unclaimed layer listed. On an unquantized base
+`--lora-fuse` can serve it instead, since fusion writes the deltas into the base
+weights.
+
+An `lm_head` pair is refused when the checkpoint ties its output projection to
+its input embeddings, either because `config.json` sets `tie_word_embeddings`
+or because the checkpoint stores no `lm_head.weight` of its own. The model then
+reads its logits through the embedding matrix, so the pair would either never
+be applied or silently untie the two projections. The single-process and the
+pipeline-parallel loaders give the same answer. `mlx_lm.lora` only trains
+modules inside `model.layers`, so its adapters never carry such a pair.
+
+Mixture-of-experts expert adapters are not supported on either path. mlx-lm's
+`LoRASwitchLinear` stores one low-rank pair per expert as 3-D `lora_a` /
+`lora_b` tensors, and an adapter that contains them fails the load with an
+error naming the limitation. Leave the expert projections out of the LoRA
+target set; pairs on an MoE model's other projections are checked like any
+other adapter.
+
 ## Sampling, structured output, and reasoning
 
 The server exposes the commonly used llama-server sampling stages, including

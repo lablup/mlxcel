@@ -20,7 +20,8 @@
 //! `adapters.safetensors` files. This module holds that writer once so the
 //! fused-path tests and the runtime-path tests do not each carry a copy.
 //!
-//! Used by: `loader_tests.rs`, `runtime_tests.rs`
+//! Used by: `loader_tests.rs`, `runtime_tests.rs`, `tied_head_tests.rs`,
+//! `loading/adapter_load_tests.rs`, the pipeline Llama stage adapter tests
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -72,6 +73,19 @@ pub(crate) fn ones_vector(n: usize) -> OwnedTensor {
     }
     OwnedTensor {
         shape: vec![n],
+        data,
+    }
+}
+
+/// An all-ones `[experts, rows, cols]` f32 tensor, the per-expert layout
+/// mlx-lm's `LoRASwitchLinear` writes for a mixture-of-experts adapter.
+pub(crate) fn ones_tensor_3d(experts: usize, rows: usize, cols: usize) -> OwnedTensor {
+    let mut data = Vec::with_capacity(experts * rows * cols * 4);
+    for _ in 0..experts * rows * cols {
+        data.extend_from_slice(&1.0f32.to_le_bytes());
+    }
+    OwnedTensor {
+        shape: vec![experts, rows, cols],
         data,
     }
 }
@@ -129,4 +143,77 @@ pub(crate) fn adapter_pair_tensors(
     tensors.insert(format!("{layer}.lora_a"), ones_tensor(in_features, rank));
     tensors.insert(format!("{layer}.lora_b"), ones_tensor(rank, out_features));
     tensors
+}
+
+/// Hidden width of the [`write_tiny_llama_checkpoint`] model.
+pub(crate) const TINY_HIDDEN: usize = 8;
+/// Vocabulary size of the [`write_tiny_llama_checkpoint`] model.
+pub(crate) const TINY_VOCAB: usize = 32;
+
+/// How [`write_tiny_llama_checkpoint`] lays out the output head.
+pub(crate) struct TinyLlama {
+    /// The `tie_word_embeddings` value written to `config.json`; `None` leaves
+    /// the key out.
+    pub(crate) tie_word_embeddings: Option<bool>,
+    /// Whether the checkpoint stores its own `lm_head.weight`.
+    pub(crate) stores_lm_head: bool,
+    /// Extra `[rows, cols]` tensors the Llama constructors never read, for a
+    /// fixture that needs a base weight no layer constructor claims.
+    pub(crate) unread: Vec<(&'static str, usize, usize)>,
+}
+
+/// Write a complete one-layer Llama checkpoint (`config.json` plus a single
+/// `model.safetensors`) that the real Llama constructors load.
+///
+/// Every LoRA path checks adapters against what a family's constructors do,
+/// which a synthetic `WeightMap` cannot stand in for, so these fixtures go
+/// through the real loaders. Dimensions: hidden 8, two query heads and one
+/// KV head of width 4, MLP 16, vocabulary 32.
+pub(crate) fn write_tiny_llama_checkpoint(dir: &Path, spec: &TinyLlama) {
+    std::fs::create_dir_all(dir).expect("create model dir");
+    let mut config = serde_json::json!({
+        "model_type": "llama",
+        "architectures": ["LlamaForCausalLM"],
+        "hidden_size": TINY_HIDDEN,
+        "num_hidden_layers": 1,
+        "intermediate_size": 16,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 1,
+        "head_dim": 4,
+        "rms_norm_eps": 1e-5,
+        "vocab_size": TINY_VOCAB,
+    });
+    if let Some(tie) = spec.tie_word_embeddings {
+        config["tie_word_embeddings"] = serde_json::Value::Bool(tie);
+    }
+    std::fs::write(dir.join("config.json"), config.to_string()).expect("write model config");
+
+    let h = TINY_HIDDEN;
+    let mut tensors: HashMap<String, OwnedTensor> = HashMap::new();
+    let mut matrix = |name: &str, rows: usize, cols: usize| {
+        tensors.insert(name.to_string(), ones_tensor(rows, cols));
+    };
+    matrix("model.embed_tokens.weight", TINY_VOCAB, h);
+    matrix("model.layers.0.self_attn.q_proj.weight", h, h);
+    matrix("model.layers.0.self_attn.k_proj.weight", 4, h);
+    matrix("model.layers.0.self_attn.v_proj.weight", 4, h);
+    matrix("model.layers.0.self_attn.o_proj.weight", h, h);
+    matrix("model.layers.0.mlp.gate_proj.weight", 16, h);
+    matrix("model.layers.0.mlp.up_proj.weight", 16, h);
+    matrix("model.layers.0.mlp.down_proj.weight", h, 16);
+    if spec.stores_lm_head {
+        matrix("lm_head.weight", TINY_VOCAB, h);
+    }
+    for (name, rows, cols) in &spec.unread {
+        matrix(name, *rows, *cols);
+    }
+    for norm in [
+        "model.layers.0.input_layernorm.weight",
+        "model.layers.0.post_attention_layernorm.weight",
+        "model.norm.weight",
+    ] {
+        tensors.insert(norm.to_string(), ones_vector(h));
+    }
+    safetensors::serialize_to_file(&tensors, None, &dir.join("model.safetensors"))
+        .expect("write model safetensors");
 }

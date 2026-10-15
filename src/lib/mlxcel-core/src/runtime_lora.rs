@@ -222,11 +222,13 @@ pub fn claim(prefix: &str) -> Vec<RuntimeLoraTerm> {
         .collect()
 }
 
-/// Drain whatever construction did not claim, returning the layer prefixes.
+/// Drain whatever construction did not claim, returning the layer prefixes in
+/// no particular order.
 ///
-/// The loader only logs these. The fused path's unmatched-tensor case became a
-/// hard failure in #1328, but an unclaimed term is a different hole and is not
-/// covered by it: issue #1577 owns turning this into a load failure.
+/// This is the single source of the unclaimed list. The loader sorts it and
+/// fails the load when it is non-empty (issue #1577): an unclaimed term means
+/// the model built that layer outside the claiming constructors, so the
+/// adapter would never reach it.
 pub fn drain_unclaimed() -> Vec<String> {
     PENDING.with(|pending| pending.borrow_mut().drain().map(|(k, _)| k).collect())
 }
@@ -348,7 +350,7 @@ mod tests {
     }
 
     /// Staging is replaced wholesale and unclaimed terms drain with their
-    /// layer names, the loader's warning source.
+    /// layer names, the source of the loader's unclaimed-layer error.
     #[test]
     fn unclaimed_terms_drain_with_their_prefixes() {
         let handle = SharedLoraScale::new(1.0);

@@ -45,6 +45,16 @@ impl LlamaStageExecutor {
             .map_err(|err| anyhow!("failed to parse {}: {}", config_path.display(), err))?;
         args.set_checkpoint_label(model_dir);
 
+        // The tied-head verdict is taken from the checkpoint before any weight
+        // is read: `load_text_weights` below synthesizes `lm_head.weight` on a
+        // tied checkpoint, so validating against its map would accept an
+        // output-head pair the single-process loaders refuse, and this stage
+        // then builds its output projection from `model.embed_tokens` and
+        // never reads the fused copy (#1577).
+        if let Some(path) = adapter_path {
+            crate::lora::reject_tied_output_head_adapter(model_dir, path)?;
+        }
+
         let mut weights = models::load_text_weights(model_dir, None).map_err(anyhow::Error::msg)?;
         let mut effective_filter = filter.clone();
         if args.tie_word_embeddings && filter.has_lm_head {
@@ -161,3 +171,7 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
         .map(|weight| copy(weight))
         .ok_or_else(|| anyhow!("weight not found: {}", name))
 }
+
+#[cfg(test)]
+#[path = "llama_adapter_tests.rs"]
+mod adapter_tests;

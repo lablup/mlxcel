@@ -189,6 +189,14 @@ fn detect_orientation(
     a_shape: &[i32],
     b_shape: &[i32],
 ) -> Result<(PairOrientation, i32, i32)> {
+    if a_shape.len() == 3 || b_shape.len() == 3 {
+        // `validate_adapter_tensors` screens this out first; kept so this path
+        // never reports an expert adapter as a bare tensor rank either.
+        anyhow::bail!(
+            "LoRA adapter layer {layer}: {}",
+            super::pair_rank::moe_expert_adapter_reason(a_shape, 1)
+        );
+    }
     if a_shape.len() != 2 || b_shape.len() != 2 {
         anyhow::bail!(
             "LoRA adapter layer {layer}: expected 2-D matrices, got A {a_shape:?}, B {b_shape:?}"
@@ -348,15 +356,48 @@ pub fn stage_runtime_adapters(base_weights: &WeightMap, set: &RuntimeLoraSet) ->
     Ok(())
 }
 
-/// Report (and clear) whatever model construction did not claim.
-pub fn finish_runtime_staging() {
-    for layer in mlxcel_core::runtime_lora::drain_unclaimed() {
-        tracing::warn!(
-            "Runtime LoRA terms for layer {layer} were not claimed by the model's constructors; \
-             the adapter does not apply to that layer (the model builds it outside the \
-             UnifiedLinear/Linear/FusedQKV constructors)"
-        );
+/// Clear whatever model construction did not claim and return those layer
+/// prefixes, sorted.
+///
+/// The caller must run this after construction whether or not construction
+/// succeeded, so a failed load cannot leak staged terms into the next load on
+/// the same thread. The list is sorted because
+/// [`mlxcel_core::runtime_lora::drain_unclaimed`] drains a `HashMap`, and an
+/// unsorted list would change the load error's wording between runs.
+///
+/// Used by: `loading::load_model_with_adapter_specs`
+#[must_use]
+pub fn finish_runtime_staging() -> Vec<String> {
+    let mut unclaimed = mlxcel_core::runtime_lora::drain_unclaimed();
+    unclaimed.sort();
+    unclaimed
+}
+
+/// Fail the load when any staged term was left unclaimed.
+///
+/// A staged term reaches the forward pass only through a layer constructor
+/// that claims it (`Linear::from_weights`, `UnifiedLinear::from_weights`,
+/// `FusedQKVLinear`). A layer the model builds any other way keeps serving its
+/// base weight, so loading anyway would serve the base model under the
+/// adapter's name, the failure #1328 closed for unmapped tensors (#1577).
+/// Every unclaimed layer is reported at once, because an adapter built against
+/// the wrong module set is wrong on every layer it carries.
+///
+/// Used by: `loading::load_model_with_adapter_specs`
+pub fn ensure_runtime_terms_claimed(unclaimed: &[String]) -> Result<()> {
+    if unclaimed.is_empty() {
+        return Ok(());
     }
+    let count = unclaimed.len();
+    let noun = if count == 1 { "layer" } else { "layers" };
+    anyhow::bail!(
+        "Runtime LoRA adapter terms for {count} {noun} were not claimed by the model:\n  {}\n\
+         The model builds these layers outside the Linear / UnifiedLinear / FusedQKVLinear \
+         constructors, so the unfused adapter would never reach them and those layers would \
+         serve the base weights. Remove these modules from the adapter, or, on an unquantized \
+         base, serve it fused with --lora-fuse, which writes the deltas into the base weights.",
+        unclaimed.join("\n  "),
+    );
 }
 
 #[cfg(test)]

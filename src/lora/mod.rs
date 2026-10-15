@@ -23,9 +23,11 @@
 mod config;
 mod loader;
 pub mod multi;
+mod pair_rank;
 pub mod runtime;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
+mod tied_head;
 
 pub use config::{AdapterConfig, LoRAParameters};
 pub use loader::{
@@ -34,5 +36,7 @@ pub use loader::{
 };
 pub use multi::LoraAdapterSpec;
 pub use runtime::{
-    RuntimeLoraAdapter, RuntimeLoraSet, finish_runtime_staging, stage_runtime_adapters,
+    RuntimeLoraAdapter, RuntimeLoraSet, ensure_runtime_terms_claimed, finish_runtime_staging,
+    stage_runtime_adapters,
 };
+pub use tied_head::reject_tied_output_head_adapter;

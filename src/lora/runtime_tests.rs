@@ -107,10 +107,9 @@ fn a_well_formed_runtime_adapter_still_stages() {
     let base = base_map(&[("layer", 3, 4)]);
 
     stage_runtime_adapters(&base, &set).expect("a well-formed adapter stages");
-    // `drain_unclaimed` drains a `HashMap`, so sort before comparing: this
-    // fixture has one layer today and would be order-flaky with two.
-    let mut unclaimed = mlxcel_core::runtime_lora::drain_unclaimed();
-    unclaimed.sort();
+    // No model is built here, so nothing claims the term and the drain
+    // returns it: that is how this test sees that it was staged.
+    let unclaimed = finish_runtime_staging();
     assert_eq!(
         unclaimed,
         vec!["layer".to_string()],
@@ -118,4 +117,40 @@ fn a_well_formed_runtime_adapter_still_stages() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn finish_runtime_staging_returns_every_unclaimed_prefix_sorted_and_clears_the_slot() {
+    // `drain_unclaimed` drains a `HashMap`; the load error lists these in the
+    // returned order, so it has to be deterministic.
+    let dir = temp_dir("runtime_sorted");
+    let mut tensors = adapter_pair_tensors("zeta", 4, 2, 3);
+    tensors.extend(adapter_pair_tensors("alpha", 4, 2, 3));
+    tensors.extend(adapter_pair_tensors("mid", 4, 2, 3));
+    write_adapter_dir(&dir, "lora", 2, tensors);
+
+    let set = RuntimeLoraSet::from_specs(&[spec_for(&dir)]).expect("a lora adapter config");
+    let base = base_map(&[("zeta", 3, 4), ("alpha", 3, 4), ("mid", 3, 4)]);
+    stage_runtime_adapters(&base, &set).expect("a well-formed adapter stages");
+
+    assert_eq!(
+        finish_runtime_staging(),
+        vec!["alpha".to_string(), "mid".to_string(), "zeta".to_string()]
+    );
+    assert!(!mlxcel_core::runtime_lora::has_pending());
+    assert!(finish_runtime_staging().is_empty(), "the slot was drained");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn unclaimed_terms_fail_with_every_layer_named_once() {
+    ensure_runtime_terms_claimed(&[]).expect("an empty list is a successful load");
+
+    let err = ensure_runtime_terms_claimed(&["a.proj".to_string(), "b.proj".to_string()])
+        .expect_err("any unclaimed term fails the load")
+        .to_string();
+    assert!(err.contains("for 2 layers"), "{err}");
+    assert!(err.contains("\n  a.proj\n  b.proj\n"), "{err}");
+    assert!(err.contains("not claimed"), "{err}");
 }

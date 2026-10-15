@@ -28,6 +28,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use super::config::{AdapterConfig, FineTuneType};
+use super::pair_rank::{PairRankScreen, moe_expert_adapter_reason};
 
 /// Load adapter weights from a safetensors file
 pub(crate) fn load_adapter_weights(adapter_path: &Path) -> Result<WeightMap> {
@@ -149,7 +150,10 @@ fn find_base_weight_name(lora_name: &str, base_weights: &WeightMap) -> Option<St
 ///    single aggregated line, because reporting it per tensor would be one
 ///    line per layer per module for an adapter that has exactly one problem.
 /// 2. Both halves of every pair are present.
-/// 3. Every pair resolves to a base weight this checkpoint actually holds.
+/// 3. Both halves are 2-D. A 3-D pair is a mixture-of-experts expert adapter
+///    (mlx-lm `LoRASwitchLinear`), which no path can apply; it is named as
+///    that, once per adapter, instead of as a tensor rank (issue #1577).
+/// 4. Every pair resolves to a base weight this checkpoint actually holds.
 ///
 /// Rank compatibility and the delta-versus-base shape check stay where they
 /// already were, in [`compute_lora_delta`] and the fusion loop's shape guard,
@@ -208,6 +212,7 @@ pub(super) fn validate_adapter_tensors(
     // only to drop them at the bail below.
     let mut resolved: Vec<(&str, String, &UniquePtr<MlxArray>, &UniquePtr<MlxArray>)> =
         Vec::with_capacity(halves.len());
+    let mut rank_screen = PairRankScreen::default();
     for (layer, (lora_a, lora_b)) in halves {
         let (Some(lora_a), Some(lora_b)) = (lora_a, lora_b) else {
             let (present, missing) = if lora_a.is_some() {
@@ -220,6 +225,11 @@ pub(super) fn validate_adapter_tensors(
             ));
             continue;
         };
+        let a_shape = mlxcel_core::array_shape(lora_a);
+        let b_shape = mlxcel_core::array_shape(lora_b);
+        if !rank_screen.admit(layer, &a_shape, &b_shape) {
+            continue;
+        }
         let Some(base_weight_name) = find_base_weight_name(layer, base_weights) else {
             violations.push(format!(
                 "{layer}.lora_a: no base weight (tried {})",
@@ -229,6 +239,7 @@ pub(super) fn validate_adapter_tensors(
         };
         resolved.push((layer, base_weight_name, lora_a, lora_b));
     }
+    rank_screen.report_into(&mut violations);
 
     if !violations.is_empty() {
         violations.sort();
@@ -599,6 +610,10 @@ fn compute_lora_delta(
                 b_shape
             );
         }
+    } else if a_shape.len() == 3 || b_shape.len() == 3 {
+        // `validate_adapter_tensors` screens this out first; kept so the
+        // delta computation never reports an expert adapter as a bare rank.
+        anyhow::bail!("LoRA pair: {}", moe_expert_adapter_reason(&a_shape, 1));
     } else {
         anyhow::bail!(
             "Expected 2D LoRA matrices, got lora_a={:?}, lora_b={:?}",

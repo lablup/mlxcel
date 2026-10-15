@@ -808,6 +808,7 @@ pub fn load_model_with_adapter(
     // Disable CUDA graphs for Gemma 4 before any weight realisation (issue #688).
     maybe_disable_cuda_graphs_for_model(get_model_type(model_path)?);
     reject_adapter_unsupported_family(model_path)?;
+    lora::reject_tied_output_head_adapter(model_path, adapter_path)?;
     // Load base weights
     let base_weights = mlxcel_core::weights::load_weights_from_dir(model_path)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -840,19 +841,22 @@ pub fn load_model_with_adapter_specs(
     let model_path = model_path.as_path();
     maybe_disable_cuda_graphs_for_model(get_model_type(model_path)?);
     reject_adapter_unsupported_family(model_path)?;
+    let runtime_paths = runtime.into_iter().flat_map(|set| {
+        set.adapters
+            .iter()
+            .map(|adapter| adapter.spec.path.as_path())
+    });
+    for adapter_path in specs
+        .iter()
+        .map(|spec| spec.path.as_path())
+        .chain(runtime_paths)
+    {
+        lora::reject_tied_output_head_adapter(model_path, adapter_path)?;
+    }
     let mut weights = mlxcel_core::weights::load_weights_from_dir(model_path)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
     if let Some(set) = runtime {
-        // Unfused runtime path (#1439): stage per-layer terms for the model
-        // construction below to claim; the base weights stay untouched, so
-        // scale zero serves the base model byte-identically and the serving
-        // layer can change scales afterwards.
-        lora::stage_runtime_adapters(&weights, set)?;
-        let model = load_model_from_weights(model_path, &mut weights);
-        // Report and clear whatever construction did not claim, on the error
-        // path too, so a failed load cannot leak terms into the next one.
-        lora::finish_runtime_staging();
-        let model = model?;
+        let model = load_runtime_adapted_model(model_path, &mut weights, set)?;
         let tokenizer = tokenizer::load_tokenizer(model_path)?;
         return Ok((model, tokenizer));
     }
@@ -874,6 +878,29 @@ pub fn load_model_with_adapter_specs(
     let model = load_model_from_weights(model_path, &mut weights)?;
     let tokenizer = tokenizer::load_tokenizer(model_path)?;
     Ok((model, tokenizer))
+}
+
+/// Build the model with the unfused runtime adapters in `set` attached (#1439).
+///
+/// The per-layer terms are staged for the construction below to claim; the
+/// base weights stay untouched, so scale zero serves the base model
+/// byte-identically and the serving layer can change scales afterwards. The
+/// staging slot is drained whether or not construction succeeds, so a failed
+/// load cannot leak terms into the next one on this thread, and a term no
+/// constructor claimed fails the load with every such layer named (#1577).
+///
+/// Used by: [`load_model_with_adapter_specs`]
+fn load_runtime_adapted_model(
+    model_path: &Path,
+    weights: &mut WeightMap,
+    set: &lora::RuntimeLoraSet,
+) -> Result<LoadedModel> {
+    lora::stage_runtime_adapters(weights, set)?;
+    let model = load_model_from_weights(model_path, weights);
+    let unclaimed = lora::finish_runtime_staging();
+    let model = model?;
+    lora::ensure_runtime_terms_claimed(&unclaimed)?;
+    Ok(model)
 }
 
 /// Refuse an adapter for a family that cannot take one, before any fusion runs.
@@ -954,3 +981,7 @@ mod generation_config_tests;
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "adapter_load_tests.rs"]
+mod adapter_load_tests;
