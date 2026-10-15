@@ -278,8 +278,13 @@ impl EmbeddingGemma2Layer {
             h = ple_block.forward(&h, ple_slice);
         }
         if let Some(scalar) = &self.layer_scalar {
-            let scalar_cast = mlxcel_core::astype(scalar, mlxcel_core::array_dtype(&h));
-            h = mlxcel_core::multiply(&h, &scalar_cast);
+            let h_dtype = mlxcel_core::array_dtype(&h);
+            if mlxcel_core::array_dtype(scalar) == h_dtype {
+                h = mlxcel_core::multiply(&h, scalar);
+            } else {
+                let scalar_cast = mlxcel_core::astype(scalar, h_dtype);
+                h = mlxcel_core::multiply(&h, &scalar_cast);
+            }
         }
         h
     }

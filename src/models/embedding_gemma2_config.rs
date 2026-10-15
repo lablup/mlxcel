@@ -64,24 +64,50 @@ impl EmbeddingGemma2Config {
 
         let vocab_size = i32_field(tc, "vocab_size")
             .or_else(|| i32_field(config, "vocab_size"))
-            .unwrap_or(262_144);
-        let hidden_size = i32_field(tc, "hidden_size").unwrap_or(512);
-        let intermediate_size = i32_field(tc, "intermediate_size").unwrap_or(2048);
-        let num_hidden_layers = i32_field(tc, "num_hidden_layers").unwrap_or(24).max(1) as usize;
-        let default_n_heads = i32_field(tc, "num_attention_heads").unwrap_or(4);
-        let default_n_kv_heads = i32_field(tc, "num_key_value_heads").unwrap_or(2);
-        let default_head_dim = i32_field(tc, "head_dim").unwrap_or(256);
+            .unwrap_or(262_144)
+            .max(1);
+        let hidden_size = i32_field(tc, "hidden_size")
+            .or_else(|| i32_field(config, "hidden_size"))
+            .unwrap_or(512)
+            .max(1);
+        let intermediate_size = i32_field(tc, "intermediate_size")
+            .or_else(|| i32_field(config, "intermediate_size"))
+            .unwrap_or(2048)
+            .max(1);
+        let num_hidden_layers = i32_field(tc, "num_hidden_layers")
+            .or_else(|| i32_field(config, "num_hidden_layers"))
+            .unwrap_or(24)
+            .max(1) as usize;
+        let default_n_heads = i32_field(tc, "num_attention_heads")
+            .or_else(|| i32_field(config, "num_attention_heads"))
+            .unwrap_or(4)
+            .max(1);
+        let default_n_kv_heads = i32_field(tc, "num_key_value_heads")
+            .or_else(|| i32_field(config, "num_key_value_heads"))
+            .unwrap_or(2)
+            .max(1);
+        let default_head_dim = i32_field(tc, "head_dim")
+            .or_else(|| i32_field(config, "head_dim"))
+            .unwrap_or(256)
+            .max(1);
         let default_rope_theta = f32_field(tc, "rope_theta")
+            .or_else(|| f32_field(config, "rope_theta"))
             .or_else(|| {
-                tc.get("rope_parameters")?
+                tc.get("rope_parameters")
+                    .or_else(|| config.get("rope_parameters"))?
                     .get("sliding_attention")?
                     .get("rope_theta")?
                     .as_f64()
                     .map(|v| v as f32)
             })
             .unwrap_or(10_000.0);
-        let rms_norm_eps = f32_field(tc, "rms_norm_eps").unwrap_or(1e-6);
-        let sliding_window = i32_field(tc, "sliding_window").unwrap_or(512);
+        let rms_norm_eps = f32_field(tc, "rms_norm_eps")
+            .or_else(|| f32_field(config, "rms_norm_eps"))
+            .unwrap_or(1e-6);
+        let sliding_window = i32_field(tc, "sliding_window")
+            .or_else(|| i32_field(config, "sliding_window"))
+            .unwrap_or(512)
+            .max(1);
 
         let embedding_dim = i32_field(tc, "embedding_dim")
             .or_else(|| i32_field(config, "embedding_dim"))
@@ -94,24 +120,37 @@ impl EmbeddingGemma2Config {
             .max(1) as usize;
 
         let ple_dim = i32_field(tc, "hidden_size_per_layer_input")
+            .or_else(|| i32_field(config, "hidden_size_per_layer_input"))
             .filter(|&d| d > 0)
             .or_else(|| {
                 weights
                     .and_then(|w| w.get("language_model.ple.per_layer_projection_norm.weight"))
                     .and_then(|arr| mlxcel_core::array_shape(arr).first().copied())
             })
-            .unwrap_or(hidden_size);
+            .unwrap_or(hidden_size)
+            .max(1);
 
         let layer_types: Option<Vec<&str>> = tc
             .get("layer_types")
+            .or_else(|| config.get("layer_types"))
             .and_then(Value::as_array)
             .map(|arr| arr.iter().filter_map(Value::as_str).collect());
 
-        let per_layer_map = tc.get("per_layer_config").and_then(Value::as_object);
-        let fallback_global_head_dim = i32_field(tc, "global_head_dim").unwrap_or(512);
-        let fallback_global_kv_heads = i32_field(tc, "global_num_key_value_heads").unwrap_or(1);
+        let per_layer_map = tc
+            .get("per_layer_config")
+            .or_else(|| config.get("per_layer_config"))
+            .and_then(Value::as_object);
+        let fallback_global_head_dim = i32_field(tc, "global_head_dim")
+            .or_else(|| i32_field(config, "global_head_dim"))
+            .unwrap_or(512)
+            .max(1);
+        let fallback_global_kv_heads = i32_field(tc, "global_num_key_value_heads")
+            .or_else(|| i32_field(config, "global_num_key_value_heads"))
+            .unwrap_or(1)
+            .max(1);
         let fallback_global_rope_theta = tc
             .get("rope_parameters")
+            .or_else(|| config.get("rope_parameters"))
             .and_then(|rp| rp.get("full_attention"))
             .and_then(|fa| fa.get("rope_theta"))
             .and_then(Value::as_f64)
@@ -138,7 +177,8 @@ impl EmbeddingGemma2Config {
 
             let num_attention_heads = override_entry
                 .and_then(|e| i32_field(e, "num_attention_heads"))
-                .unwrap_or(default_n_heads);
+                .unwrap_or(default_n_heads)
+                .max(1);
 
             let num_key_value_heads = override_entry
                 .and_then(|e| i32_field(e, "num_key_value_heads"))
@@ -146,7 +186,8 @@ impl EmbeddingGemma2Config {
                     default_n_kv_heads
                 } else {
                     fallback_global_kv_heads
-                });
+                })
+                .max(1);
 
             let head_dim = override_entry
                 .and_then(|e| i32_field(e, "head_dim"))
@@ -154,7 +195,8 @@ impl EmbeddingGemma2Config {
                     default_head_dim
                 } else {
                     fallback_global_head_dim
-                });
+                })
+                .max(1);
 
             let rope_theta = override_entry
                 .and_then(|e| {
@@ -255,26 +297,31 @@ pub fn quant_params_for_prefix(config: &Value, prefix: &str) -> (i32, i32) {
             || prefix.starts_with(&format!("{clean_key}."))
             || prefix.strip_prefix("language_model.").is_some_and(|rest| {
                 rest == clean_key || rest.starts_with(&format!("{clean_key}."))
-            });
+            })
+            || ((clean_key == "ple" || clean_key == "language_model.ple")
+                && (prefix.starts_with("language_model.ple.") || prefix.contains(".ple_block")));
         if matches_prefix && best_match.is_none_or(|(len, _)| clean_key.len() > len) {
             best_match = Some((clean_key.len(), val));
         }
     }
 
-    if let Some((_, override_val)) = best_match
-        && let Some(obj) = override_val.as_object()
-    {
-        let gs = obj
-            .get("group_size")
-            .and_then(Value::as_i64)
-            .map(|v| v as i32)
-            .unwrap_or(default_gs);
-        let bits = obj
-            .get("bits")
-            .and_then(Value::as_i64)
-            .map(|v| v as i32)
-            .unwrap_or(default_bits);
-        return (gs, bits);
+    if let Some((_, override_val)) = best_match {
+        if override_val.as_bool() == Some(false) {
+            return (0, 0);
+        }
+        if let Some(obj) = override_val.as_object() {
+            let gs = obj
+                .get("group_size")
+                .and_then(Value::as_i64)
+                .map(|v| v as i32)
+                .unwrap_or(default_gs);
+            let bits = obj
+                .get("bits")
+                .and_then(Value::as_i64)
+                .map(|v| v as i32)
+                .unwrap_or(default_bits);
+            return (gs, bits);
+        }
     }
 
     (default_gs, default_bits)
@@ -285,7 +332,9 @@ pub fn quant_params_for_prefix(config: &Value, prefix: &str) -> (i32, i32) {
 /// and `{vision_tower,embed_vision,audio_tower,embed_audio}.*` layout.
 pub fn sanitize_embedding_gemma2_weights(weights: &mut WeightMap) {
     weights.retain(|key, _| {
-        !key.starts_with("lm_head.")
+        let stripped = key.strip_prefix("model.").unwrap_or(key);
+        let stripped = stripped.strip_prefix("language_model.").unwrap_or(stripped);
+        !stripped.starts_with("lm_head.")
             && !key.ends_with(".rotary_emb.inv_freq")
             && !key.ends_with(".position_ids")
     });

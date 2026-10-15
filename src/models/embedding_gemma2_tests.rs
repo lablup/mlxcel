@@ -290,6 +290,8 @@ fn sanitize_and_quant_params_handle_hf_and_mlx_layouts() {
     w.insert("embedding_projection.weight".into(), one());
     w.insert("model.vision_tower.patch_embed.weight".into(), one());
     w.insert("lm_head.weight".into(), one());
+    w.insert("model.lm_head.weight".into(), one());
+    w.insert("language_model.lm_head.weight".into(), one());
 
     sanitize_embedding_gemma2_weights(&mut w);
     assert!(w.contains_key("language_model.embed_tokens.weight"));
@@ -298,6 +300,8 @@ fn sanitize_and_quant_params_handle_hf_and_mlx_layouts() {
     assert!(w.contains_key("language_model.embedding_projection.weight"));
     assert!(w.contains_key("vision_tower.patch_embed.weight"));
     assert!(!w.contains_key("lm_head.weight"));
+    assert!(!w.contains_key("model.lm_head.weight"));
+    assert!(!w.contains_key("language_model.lm_head.weight"));
 
     let q_cfg = json!({
         "quantization": {
@@ -314,6 +318,14 @@ fn sanitize_and_quant_params_handle_hf_and_mlx_layouts() {
     assert_eq!(
         quant_params_for_prefix(&q_cfg, "vision_tower.encoder"),
         (32, 8)
+    );
+    assert_eq!(
+        quant_params_for_prefix(&q_cfg, "language_model.ple.per_layer_model_projection"),
+        (0, 0)
+    );
+    assert_eq!(
+        quant_params_for_prefix(&q_cfg, "language_model.layers.0.ple_block.per_layer_input_gate"),
+        (0, 0)
     );
 }
 
@@ -436,6 +448,57 @@ fn expand_image_tokens_text_only_and_vision_paths() {
     assert_eq!(out, ids);
     assert_eq!(model.format_text("hello", None), "hello");
     assert_eq!(model.format_text("", None), "");
+}
+
+#[test]
+fn short_sequence_sliding_window_bypass_matches_explicit_window_mask() {
+    let _guard = mlx_test_guard();
+    // sliding_window = 10, input length = 4 (4 <= 10 + 1)
+    let raw_cfg = synthetic_config(2, 10);
+    let parsed_cfg = EmbeddingGemma2Config::from_json(&raw_cfg, None);
+    let mut weights = build_synthetic_weights(&parsed_cfg);
+    let model = EmbeddingGemma2Model::from_weights(&mut weights, &raw_cfg, PoolingMode::Mean, true)
+        .unwrap();
+
+    let ids = mlxcel_core::from_slice_i32(&[2, 5, 8, 11], &[1, 4]);
+    let mask = mlxcel_core::from_slice_i32(&[1, 1, 1, 1], &[1, 4]);
+    let out = model.forward_multimodal(&ids, &mask, None, None).unwrap();
+    let v_out = to_vec(&out);
+    assert_eq!(v_out.len(), 4 * 24);
+
+    // Verify empty sequence handling returns clean zero tensor without panicking
+    let empty_ids = mlxcel_core::from_slice_i32(&[], &[1, 0]);
+    let empty_mask = mlxcel_core::from_slice_i32(&[], &[1, 0]);
+    let empty_out = model.forward_multimodal(&empty_ids, &empty_mask, None, None).unwrap();
+    assert_eq!(mlxcel_core::array_shape(&empty_out), vec![1, 0, 24]);
+}
+
+#[test]
+fn config_bounds_guard_against_malformed_nonpositive_values() {
+    let bad_cfg = json!({
+        "text_config": {
+            "vocab_size": -10,
+            "hidden_size": 0,
+            "intermediate_size": -50,
+            "num_hidden_layers": 0,
+            "num_attention_heads": -4,
+            "num_key_value_heads": 0,
+            "head_dim": -128,
+            "sliding_window": -512,
+            "hidden_size_per_layer_input": -1
+        }
+    });
+    let cfg = EmbeddingGemma2Config::from_json(&bad_cfg, None);
+    assert!(cfg.vocab_size >= 1);
+    assert!(cfg.hidden_size >= 1);
+    assert!(cfg.intermediate_size >= 1);
+    assert!(cfg.num_hidden_layers >= 1);
+    assert!(cfg.sliding_window >= 1);
+    assert!(cfg.ple_dim >= 1);
+    assert_eq!(cfg.layers.len(), 1);
+    assert!(cfg.layers[0].num_attention_heads >= 1);
+    assert!(cfg.layers[0].num_key_value_heads >= 1);
+    assert!(cfg.layers[0].head_dim >= 1);
 }
 
 #[test]

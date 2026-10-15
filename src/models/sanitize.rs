@@ -2088,6 +2088,7 @@ pub fn is_embedding_gemma2_config(config: &Value) -> bool {
     }
     config
         .get("architectures")
+        .or_else(|| config.get("text_config").and_then(|c| c.get("architectures")))
         .and_then(Value::as_array)
         .is_some_and(|archs| {
             archs

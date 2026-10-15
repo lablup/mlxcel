@@ -253,6 +253,14 @@ impl EmbeddingGemma2Model {
         attention_mask: &MlxArray,
     ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(inputs_embeds);
+        if shape.len() < 2 || shape[0] == 0 || shape[1] == 0 {
+            let b = if shape.is_empty() { 0 } else { shape[0] };
+            let l = if shape.len() < 2 { 0 } else { shape[1] };
+            return mlxcel_core::zeros(
+                &[b, l, self.config.embedding_dim as i32],
+                mlxcel_core::array_dtype(inputs_embeds),
+            );
+        }
         let (b, l) = (shape[0], shape[1]);
 
         let ple = if let (Some(proj), Some(norm)) = (
@@ -260,10 +268,10 @@ impl EmbeddingGemma2Model {
             &self.per_layer_projection_norm,
         ) {
             let raw = proj.forward(inputs_embeds);
-            let inv_sqrt =
-                mlxcel_core::from_slice_f32(&[(self.config.hidden_size as f32).powf(-0.5)], &[1]);
-            let inv_sqrt = mlxcel_core::astype(&inv_sqrt, mlxcel_core::array_dtype(&raw));
-            let scaled = mlxcel_core::multiply(&raw, &inv_sqrt);
+            let scaled = mlxcel_core::multiply_scalar(
+                &raw,
+                (self.config.hidden_size as f32).powf(-0.5),
+            );
             let reshaped = mlxcel_core::reshape(
                 &scaled,
                 &[
@@ -279,31 +287,51 @@ impl EmbeddingGemma2Model {
         };
 
         let full_mask = create_bidirectional_padding_mask(attention_mask);
-        // `create_bidirectional_window_mask` unmasks `|q - k| < window`;
-        // EmbeddingGemma 2 specifies inclusive `|q - k| <= sliding_window`.
-        let sliding_mask =
-            create_bidirectional_window_mask(attention_mask, self.config.sliding_window + 1);
+        // Only materialize the O(L^2) window mask when at least one layer uses sliding attention
+        // and the sequence length exceeds sliding_window + 1. For shorter sequences, all token
+        // distances are within the window so full_mask is mathematically identical.
+        let has_sliding = self.layers.iter().any(|layer| layer.self_attn.is_sliding);
+        let sliding_mask = if has_sliding && l > self.config.sliding_window + 1 {
+            Some(create_bidirectional_window_mask(
+                attention_mask,
+                self.config.sliding_window + 1,
+            ))
+        } else {
+            None
+        };
 
-        let mut h = mlxcel_core::copy(inputs_embeds);
+        let mut h: Option<UniquePtr<MlxArray>> = None;
         for (idx, layer) in self.layers.iter().enumerate() {
-            let ple_i = ple.as_ref().map(|p| {
-                let idx_i32 = idx as i32;
-                let sliced = mlxcel_core::slice(
-                    p,
-                    &[0, 0, idx_i32, 0],
-                    &[b, l, idx_i32 + 1, self.config.ple_dim],
-                );
-                mlxcel_core::squeeze_axis(&sliced, 2)
+            let ple_i = ple.as_ref().and_then(|p| {
+                if idx >= self.config.num_hidden_layers {
+                    None
+                } else {
+                    let idx_i32 = idx as i32;
+                    let sliced = mlxcel_core::slice(
+                        p,
+                        &[0, 0, idx_i32, 0],
+                        &[b, l, idx_i32 + 1, self.config.ple_dim],
+                    );
+                    Some(mlxcel_core::squeeze_axis(&sliced, 2))
+                }
             });
-            let mask = if layer.self_attn.is_sliding {
-                &sliding_mask
+            let mask = if layer.self_attn.is_sliding && let Some(sm) = &sliding_mask {
+                sm
             } else {
                 &full_mask
             };
-            h = layer.forward(&h, mask, ple_i.as_deref());
+            let current_x = match &h {
+                Some(prev) => prev.as_ref().unwrap(),
+                None => inputs_embeds,
+            };
+            h = Some(layer.forward(current_x, mask, ple_i.as_deref()));
         }
 
-        let normed = self.norm.forward(&h);
+        let h_final = match h {
+            Some(out) => out,
+            None => mlxcel_core::copy(inputs_embeds),
+        };
+        let normed = self.norm.forward(&h_final);
         self.embedding_projection.forward(&normed)
     }
 
@@ -318,9 +346,10 @@ impl EmbeddingGemma2Model {
         audio_mel_and_mask: Option<(&MlxArray, &MlxArray)>,
     ) -> Result<UniquePtr<MlxArray>> {
         let raw_embeds = self.embed_tokens.forward(input_ids);
-        let scale = mlxcel_core::from_slice_f32(&[(self.config.hidden_size as f32).sqrt()], &[1]);
-        let scale = mlxcel_core::astype(&scale, mlxcel_core::array_dtype(&raw_embeds));
-        let mut inputs_embeds = mlxcel_core::multiply(&raw_embeds, &scale);
+        let mut inputs_embeds = mlxcel_core::multiply_scalar(
+            &raw_embeds,
+            (self.config.hidden_size as f32).sqrt(),
+        );
 
         if let (Some(vision), Some(imgs)) = (&self.vision, images)
             && !imgs.is_empty()
@@ -329,28 +358,30 @@ impl EmbeddingGemma2Model {
             let processed = vision.processor.preprocess(&decoded);
             let mut feat_list = Vec::with_capacity(processed.len());
             for item in &processed {
-                let v_out = vision
-                    .tower
-                    .forward(item.pixel_values.as_ref().unwrap(), item.patch_grid);
-                let projected = vision.embedder.forward(&v_out);
-                feat_list.push(projected);
+                if let Some(pixel_values) = item.pixel_values.as_ref() {
+                    let v_out = vision.tower.forward(pixel_values, item.patch_grid);
+                    let projected = vision.embedder.forward(&v_out);
+                    feat_list.push(projected);
+                }
             }
-            let merged_feats = if feat_list.len() == 1 {
-                mlxcel_core::astype(
-                    feat_list[0].as_ref().unwrap(),
-                    mlxcel_core::array_dtype(&inputs_embeds),
+            if !feat_list.is_empty() {
+                let merged_feats = if feat_list.len() == 1 {
+                    mlxcel_core::astype(
+                        feat_list[0].as_ref().unwrap(),
+                        mlxcel_core::array_dtype(&inputs_embeds),
+                    )
+                } else {
+                    let cat = crate::vision::encoders::qwen2_vl::concat_many(&feat_list, 1);
+                    mlxcel_core::astype(&cat, mlxcel_core::array_dtype(&inputs_embeds))
+                };
+                inputs_embeds = merge::merge_llava(
+                    self.config.image_token_id,
+                    &merged_feats,
+                    &inputs_embeds,
+                    input_ids,
                 )
-            } else {
-                let cat = crate::vision::encoders::qwen2_vl::concat_many(&feat_list, 1);
-                mlxcel_core::astype(&cat, mlxcel_core::array_dtype(&inputs_embeds))
-            };
-            inputs_embeds = merge::merge_llava(
-                self.config.image_token_id,
-                &merged_feats,
-                &inputs_embeds,
-                input_ids,
-            )
-            .inputs_embeds;
+                .inputs_embeds;
+            }
         }
 
         if let (Some(audio), Some((audio_mel, audio_mask))) = (&self.audio, audio_mel_and_mask) {
@@ -359,14 +390,19 @@ impl EmbeddingGemma2Model {
                 .forward(audio_mel, audio_mask)
                 .map_err(|e| anyhow::anyhow!("EmbeddingGemma2 audio tower failed: {e}"))?;
             let audio_proj = audio.embedder.forward(&audio_enc);
-            let audio_proj =
-                mlxcel_core::astype(&audio_proj, mlxcel_core::array_dtype(&inputs_embeds));
-            let tok_arr = mlxcel_core::from_slice_i32(&[self.config.audio_token_id], &[1]);
-            let tok_mask = mlxcel_core::equal(input_ids, &tok_arr);
-            let tok_mask_exp = mlxcel_core::expand_dims(&tok_mask, -1);
-            let tok_mask_exp =
-                mlxcel_core::broadcast_to(&tok_mask_exp, &mlxcel_core::array_shape(&inputs_embeds));
-            inputs_embeds = masked_scatter(&inputs_embeds, &tok_mask_exp, &audio_proj);
+            let audio_size: i32 = mlxcel_core::array_shape(&audio_proj).iter().product();
+            if audio_size > 0 {
+                let audio_proj =
+                    mlxcel_core::astype(&audio_proj, mlxcel_core::array_dtype(&inputs_embeds));
+                let tok_arr = mlxcel_core::from_slice_i32(&[self.config.audio_token_id], &[1]);
+                let tok_mask = mlxcel_core::equal(input_ids, &tok_arr);
+                let tok_mask_exp = mlxcel_core::expand_dims(&tok_mask, -1);
+                let tok_mask_exp = mlxcel_core::broadcast_to(
+                    &tok_mask_exp,
+                    &mlxcel_core::array_shape(&inputs_embeds),
+                );
+                inputs_embeds = masked_scatter(&inputs_embeds, &tok_mask_exp, &audio_proj);
+            }
         }
 
         Ok(self.forward_from_embeds(&inputs_embeds, attention_mask))
@@ -418,6 +454,9 @@ impl EmbeddingModel for EmbeddingGemma2Model {
         let decoded: Vec<_> = images.iter().map(|img| img.image.clone()).collect();
         let processed = vision.processor.preprocess(&decoded);
         let counts: Vec<usize> = processed.iter().map(|p| p.num_soft_tokens).collect();
+        if counts.is_empty() {
+            return Ok(ids.to_vec());
+        }
         let img_tok_u32 = self.config.image_token_id as u32;
         if ids.contains(&img_tok_u32) {
             let signed: Vec<i32> = ids.iter().map(|&id| id as i32).collect();

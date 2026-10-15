@@ -536,6 +536,7 @@ const RERANKER_CLASSIFIER_MODEL_TYPES: &[&str] =
 fn first_architecture(config: &Value) -> Option<&str> {
     config
         .get("architectures")
+        .or_else(|| config.get("text_config").and_then(|c| c.get("architectures")))
         .and_then(Value::as_array)
         .and_then(|arr| arr.first())
         .and_then(Value::as_str)

@@ -51,6 +51,21 @@ Google DeepMind released EmbeddingGemma 2 (`embedding_gemma2`, `embedding_gemma2
 4. **Multimodal Expansion Unit Coverage (Medium)**:
    - *Issue*: `expand_image_tokens` had no direct unit test.
    - *Fix*: Added `expand_image_tokens_text_only_and_vision_paths` testing text-only passthrough and image token handling.
+5. **Multimodal Scatter Empty-List / Null DoS & Audio Zero-Length Div-by-Zero (High)**:
+   - *Issue*: In `forward_multimodal`, `concat_many(&feat_list, 1)` asserted `!arrays.is_empty()`, resulting in a server panic if multimodal preprocessing emitted 0 items or null pixel values. An empty audio sequence also caused a divide-by-zero panic in `masked_scatter`'s remainder calculation.
+   - *Fix*: Added an explicit check `!feat_list.is_empty()` before `concat_many`, guarded `audio_size > 0` before scattering, and validated soft token counts in `expand_image_tokens`.
+6. **Mixed Quantization Boolean `false` Override Ignored (High)**:
+   - *Issue*: `quant_params_for_prefix` only checked `override_val.as_object()`, ignoring boolean `false` overrides (e.g., `"language_model.ple": false`). It fell through to the default group-64 4-bit quantization `(64, 4)`, treating unquantized modules as quantized and corrupting weights during load.
+   - *Fix*: Handled `override_val.as_bool() == Some(false)` to return `(0, 0)` (unquantized), inspected both `text_config` and root `config`, and mapped `"ple"` / `"language_model.ple"` to `.ple_block`.
+7. **Quadratic Window Mask Memory Allocation on Short Sequences (High)**:
+   - *Issue*: `sliding_window = 512` means for any sequence with `L <= 513`, every token pair satisfies `|q - k| <= 512`. Generating an `[B, 1, L, L]` float32 tensor (up to 268 MB) for short sequences caused significant unnecessary VRAM allocation and graph overhead.
+   - *Fix*: Checked `has_sliding && l > sliding_window + 1`, falling back to broadcasting the `[B, 1, 1, L]` full bidirectional mask when `L <= sliding_window + 1`.
+8. **In-Loop Scalar Transfers & Cloning Overhead (Medium)**:
+   - *Issue*: `layer_scalar` created temporary host vectors and performed redundant dtype conversions via `from_slice_f32` and `astype`.
+   - *Fix*: Replaced host conversions with `mlxcel_core::multiply_scalar`, eliminated redundant `inputs_embeds` cloning, and avoided `astype` when scalar dtype already matches activations.
+9. **Malformed Configuration Geometry Bounds & Architecture Detection (Low)**:
+   - *Issue*: Non-positive or zero configuration dimensions could cause zero-division panics. Nested `text_config.architectures` was not checked in detection or sanitization.
+   - *Fix*: Added `.max(1)` lower bounds to all geometry parameters, checked `text_config.architectures` in `detection.rs` and `sanitize.rs`, and stripped `model.` / `language_model.` prefixes before dropping `lm_head.*`.
 
 ---
 
@@ -64,6 +79,6 @@ Google DeepMind released EmbeddingGemma 2 (`embedding_gemma2`, `embedding_gemma2
 
 ## 4. Verification
 
-- `cargo test --lib embedding_gemma2`: 6 passed, 0 failed, 1 ignored (real checkpoint test requiring external model weights).
+- `cargo test --lib embedding_gemma2`: 8 passed, 0 failed, 1 ignored (real checkpoint test requiring external model weights).
 - `cargo test --lib embeddings::`: 85 passed, 0 failed.
 - `cargo clippy --lib --tests -- -D warnings`: 0 warnings.

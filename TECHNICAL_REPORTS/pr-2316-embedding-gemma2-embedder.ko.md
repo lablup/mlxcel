@@ -51,6 +51,21 @@ Google DeepMind는 2026년 10월 6일 EmbeddingGemma 2(`embedding_gemma2`, `embe
 4. **멀티모달 토큰 확장 단위 테스트 부재 (Medium)**:
    - *문제*: `expand_image_tokens`에 대한 직접적인 단위 테스트가 없었습니다.
    - *조치*: 텍스트 전용 패스스루 및 이미지 토큰 처리를 검증하는 `expand_image_tokens_text_only_and_vision_paths` 테스트를 추가했습니다.
+5. **멀티모달 스캐터 빈 리스트/Null DoS 및 오디오 0길이 0나누기 방지 (High)**:
+   - *문제*: `forward_multimodal`에서 `concat_many(&feat_list, 1)`가 `!arrays.is_empty()`를 단언하여, 멀티모달 전처리에서 0개 아이템 또는 null 픽셀 값이 발생할 경우 서버 패닉이 발생했습니다. 또한 빈 오디오 시퀀스 처리 시 `masked_scatter`의 나머지 연산에서 0나누기 패닉이 발생했습니다.
+   - *조치*: `concat_many` 호출 전 `!feat_list.is_empty()` 검사를 추가하고, 스캐터 전 `audio_size > 0` 가드를 적용했으며, `expand_image_tokens`에서 소프트 토큰 수를 검증하도록 보강했습니다.
+6. **혼합 양자화 boolean `false` 오버라이드 무시 문제 (High)**:
+   - *문제*: `quant_params_for_prefix`가 `override_val.as_object()`만 확인하여 boolean `false` 오버라이드(예: `"language_model.ple": false`)를 무시했습니다. 그 결과 기본 group-64 4-bit 양자화 `(64, 4)`로 폴스루되어 비양자화 모듈을 양자화된 모듈로 취급해 로드 시 가중치가 손상되었습니다.
+   - *조치*: `override_val.as_bool() == Some(false)`인 경우 `(0, 0)`(비양자화)을 반환하도록 수정하고, `text_config` 및 루트 `config` 모두를 확인하며, `"ple"` 및 `"language_model.ple"` 접두사가 `.ple_block`에 매핑되도록 처리했습니다.
+7. **짧은 시퀀스에 대한 슬라이딩 윈도우 마스크 2차 메모리 할당 최적화 (High)**:
+   - *문제*: `sliding_window = 512`일 때 시퀀스 길이 `L <= 513`인 모든 시퀀스는 토큰 쌍 간 거리가 항상 512 이하를 만족합니다. 짧은 시퀀스에 대해 `[B, 1, L, L]` float32 텐서(최대 268MB)를 매번 생성하여 불필요한 VRAM 사용과 그래프 생성 오버헤드가 발생했습니다.
+   - *조치*: `has_sliding && l > sliding_window + 1` 조건을 적용하여 `L <= sliding_window + 1`일 때는 `[B, 1, 1, L]` 전체 양방향 마스크 브로드캐스트로 폴백하여 메모리 사용량과 피크 VRAM을 절감했습니다.
+8. **루프 내 호스트 스칼라 전송 및 불필요한 복사 제거 (Medium)**:
+   - *문제*: `layer_scalar`에서 `from_slice_f32` 및 `astype`을 통해 불필요한 호스트 임시 벡터 할당과 타입 변환이 발생했습니다.
+   - *조치*: 호스트 변환을 `mlxcel_core::multiply_scalar`로 대체하고, `inputs_embeds`의 불필요한 복제를 제거했으며, 스칼라 dtype이 활성화 dtype과 이미 일치하는 경우 `astype`을 건너뛰도록 최적화했습니다.
+9. **비정상 설정 지오메트리 하한 및 아키텍처 탐지 보강 (Low)**:
+   - *문제*: 0 또는 음수 설정 치수가 들어올 경우 0나누기 패닉이 발생할 수 있었습니다. 또한 중첩된 `text_config.architectures`가 탐지 및 가중치 정규화에서 확인되지 않았습니다.
+   - *조치*: 모든 지오메트리 파라미터에 `.max(1)` 하한을 적용하고, `detection.rs` 및 `sanitize.rs`에서 `text_config.architectures`를 확인하도록 지원했으며, `lm_head.*` 가중치 제거 시 `model.` 및 `language_model.` 접두사를 선행 제거하도록 개선했습니다.
 
 ---
 
@@ -64,6 +79,6 @@ Google DeepMind는 2026년 10월 6일 EmbeddingGemma 2(`embedding_gemma2`, `embe
 
 ## 4. 검증 결과
 
-- `cargo test --lib embedding_gemma2`: 6개 통과, 0개 실패, 1개 무시(체크포인트 필요 통합 테스트).
+- `cargo test --lib embedding_gemma2`: 8개 통과, 0개 실패, 1개 무시(체크포인트 필요 통합 테스트).
 - `cargo test --lib embeddings::`: 85개 통과, 0개 실패.
 - `cargo clippy --lib --tests -- -D warnings`: 경고 0건.
