@@ -144,20 +144,16 @@ impl EmbeddingGemma2Config {
                 .and_then(|e| i32_field(e, "num_key_value_heads"))
                 .unwrap_or(if is_sliding {
                     default_n_kv_heads
-                } else if per_layer_map.is_none() {
-                    fallback_global_kv_heads
                 } else {
-                    default_n_kv_heads
+                    fallback_global_kv_heads
                 });
 
             let head_dim = override_entry
                 .and_then(|e| i32_field(e, "head_dim"))
                 .unwrap_or(if is_sliding {
                     default_head_dim
-                } else if per_layer_map.is_none() {
-                    fallback_global_head_dim
                 } else {
-                    default_head_dim
+                    fallback_global_head_dim
                 });
 
             let rope_theta = override_entry

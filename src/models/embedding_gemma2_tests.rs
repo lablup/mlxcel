@@ -420,6 +420,25 @@ fn sliding_window_mask_blocks_tokens_beyond_window() {
 }
 
 #[test]
+fn expand_image_tokens_text_only_and_vision_paths() {
+    let raw_cfg = synthetic_config(2, 2);
+    let parsed_cfg = EmbeddingGemma2Config::from_json(&raw_cfg, None);
+    let mut weights = build_synthetic_weights(&parsed_cfg);
+    let model = EmbeddingGemma2Model::from_weights(&mut weights, &raw_cfg, PoolingMode::Mean, true)
+        .unwrap();
+
+    let dummy_img = image::DynamicImage::new_rgb8(32, 32);
+    let images = [ImageInput { image: dummy_img }];
+
+    // Text-only model (no vision tower loaded): expand_image_tokens returns ids unchanged
+    let ids = vec![101u32, 202u32];
+    let out = model.expand_image_tokens(&ids, &images).unwrap();
+    assert_eq!(out, ids);
+    assert_eq!(model.format_text("hello", None), "hello");
+    assert_eq!(model.format_text("", None), "");
+}
+
+#[test]
 #[ignore = "requires local mlx-community/embeddinggemma-2-bf16 or 4bit checkpoint"]
 fn real_checkpoint_embeddinggemma2_parity_and_ranking() {
     use crate::embeddings::{EmbedOptions, EmbeddingEngine, load_embedding_model};
@@ -442,7 +461,8 @@ fn real_checkpoint_embeddinggemma2_parity_and_ranking() {
         .embed_texts(
             &[
                 "task: search result | query: Which planet is known as the Red Planet?".to_string(),
-                "title: Mars | text: Mars is the fourth planet from the Sun, known as the Red Planet.".to_string(),
+                "title: none | text: Venus is the second planet from the Sun.".to_string(),
+                "title: none | text: Mars, known for its reddish appearance, is often referred to as the Red Planet.".to_string(),
                 "title: Baking | text: Sourdough bread requires flour, water, salt, and fermentation.".to_string(),
             ],
             &EmbedOptions::default(),
@@ -457,10 +477,27 @@ fn real_checkpoint_embeddinggemma2_parity_and_ranking() {
         })
         .collect();
     assert_eq!(vecs[0].len(), 768);
-    let pos_sim = cosine(&vecs[0], &vecs[1]);
-    let neg_sim = cosine(&vecs[0], &vecs[2]);
+    let query = &vecs[0];
+    let venus_sim = cosine(query, &vecs[1]);
+    let mars_sim = cosine(query, &vecs[2]);
+    let baking_sim = cosine(query, &vecs[3]);
+
+    // Reference validation numbers from validation.json:
+    // retrieval_scores_venus_mars: [0.6774646639823914, 0.8348115086555481]
     assert!(
-        pos_sim > neg_sim + 0.15,
-        "expected positive document similarity ({pos_sim}) >> negative ({neg_sim})"
+        (venus_sim - 0.6775).abs() < 0.05,
+        "expected venus similarity ~0.6775, got {venus_sim}"
+    );
+    assert!(
+        (mars_sim - 0.8348).abs() < 0.05,
+        "expected mars similarity ~0.8348, got {mars_sim}"
+    );
+    assert!(
+        mars_sim > venus_sim + 0.10,
+        "expected positive document similarity ({mars_sim}) > negative ({venus_sim})"
+    );
+    assert!(
+        venus_sim > baking_sim,
+        "expected venus ({venus_sim}) > baking ({baking_sim})"
     );
 }

@@ -405,11 +405,7 @@ impl EmbeddingModel for EmbeddingGemma2Model {
     }
 
     fn format_text(&self, text: &str, _instruction: Option<&str>) -> String {
-        if text.is_empty() {
-            "<|image><|image|><image|>".to_string()
-        } else {
-            text.to_string()
-        }
+        text.to_string()
     }
 
     fn expand_image_tokens(&self, ids: &[u32], images: &[ImageInput]) -> Result<Vec<u32>> {
@@ -435,7 +431,7 @@ impl EmbeddingModel for EmbeddingGemma2Model {
             .context("EmbeddingGemma 2 image placeholder expansion")?;
             Ok(expanded.into_iter().map(|id| id as u32).collect())
         } else {
-            let mut out = Vec::new();
+            let mut out = ids.to_vec();
             for count in counts {
                 out.push(self.config.boi_token_id as u32);
                 out.extend(std::iter::repeat_n(img_tok_u32, count));

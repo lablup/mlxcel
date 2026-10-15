@@ -644,7 +644,11 @@ pub(crate) fn is_embedding_checkpoint(
     model_path: &Path,
     config: &Value,
 ) -> Result<Option<ModelType>> {
-    let Some(model_type_raw) = config.get("model_type").and_then(Value::as_str) else {
+    let Some(model_type_raw) = config
+        .get("model_type")
+        .or_else(|| config.get("text_config").and_then(|tc| tc.get("model_type")))
+        .and_then(Value::as_str)
+    else {
         return Ok(None);
     };
     let model_type = model_type_raw.to_ascii_lowercase();
