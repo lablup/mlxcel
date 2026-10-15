@@ -82,3 +82,4 @@ Google DeepMind는 2026년 10월 6일 EmbeddingGemma 2(`embedding_gemma2`, `embe
 - `cargo test --lib embedding_gemma2`: 8개 통과, 0개 실패, 1개 무시(체크포인트 필요 통합 테스트).
 - `cargo test --lib embeddings::`: 85개 통과, 0개 실패.
 - `cargo clippy --lib --tests -- -D warnings`: 경고 0건.
+- `cargo fmt --check`: 통과.

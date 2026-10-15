@@ -324,7 +324,10 @@ fn sanitize_and_quant_params_handle_hf_and_mlx_layouts() {
         (0, 0)
     );
     assert_eq!(
-        quant_params_for_prefix(&q_cfg, "language_model.layers.0.ple_block.per_layer_input_gate"),
+        quant_params_for_prefix(
+            &q_cfg,
+            "language_model.layers.0.ple_block.per_layer_input_gate"
+        ),
         (0, 0)
     );
 }
@@ -469,7 +472,9 @@ fn short_sequence_sliding_window_bypass_matches_explicit_window_mask() {
     // Verify empty sequence handling returns clean zero tensor without panicking
     let empty_ids = mlxcel_core::from_slice_i32(&[], &[1, 0]);
     let empty_mask = mlxcel_core::from_slice_i32(&[], &[1, 0]);
-    let empty_out = model.forward_multimodal(&empty_ids, &empty_mask, None, None).unwrap();
+    let empty_out = model
+        .forward_multimodal(&empty_ids, &empty_mask, None, None)
+        .unwrap();
     assert_eq!(mlxcel_core::array_shape(&empty_out), vec![1, 0, 24]);
 }
 

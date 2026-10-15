@@ -82,3 +82,4 @@ Google DeepMind released EmbeddingGemma 2 (`embedding_gemma2`, `embedding_gemma2
 - `cargo test --lib embedding_gemma2`: 8 passed, 0 failed, 1 ignored (real checkpoint test requiring external model weights).
 - `cargo test --lib embeddings::`: 85 passed, 0 failed.
 - `cargo clippy --lib --tests -- -D warnings`: 0 warnings.
+- `cargo fmt --check`: passed.

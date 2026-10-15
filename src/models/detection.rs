@@ -536,7 +536,11 @@ const RERANKER_CLASSIFIER_MODEL_TYPES: &[&str] =
 fn first_architecture(config: &Value) -> Option<&str> {
     config
         .get("architectures")
-        .or_else(|| config.get("text_config").and_then(|c| c.get("architectures")))
+        .or_else(|| {
+            config
+                .get("text_config")
+                .and_then(|c| c.get("architectures"))
+        })
         .and_then(Value::as_array)
         .and_then(|arr| arr.first())
         .and_then(Value::as_str)
@@ -647,7 +651,11 @@ pub(crate) fn is_embedding_checkpoint(
 ) -> Result<Option<ModelType>> {
     let Some(model_type_raw) = config
         .get("model_type")
-        .or_else(|| config.get("text_config").and_then(|tc| tc.get("model_type")))
+        .or_else(|| {
+            config
+                .get("text_config")
+                .and_then(|tc| tc.get("model_type"))
+        })
         .and_then(Value::as_str)
     else {
         return Ok(None);

@@ -268,10 +268,8 @@ impl EmbeddingGemma2Model {
             &self.per_layer_projection_norm,
         ) {
             let raw = proj.forward(inputs_embeds);
-            let scaled = mlxcel_core::multiply_scalar(
-                &raw,
-                (self.config.hidden_size as f32).powf(-0.5),
-            );
+            let scaled =
+                mlxcel_core::multiply_scalar(&raw, (self.config.hidden_size as f32).powf(-0.5));
             let reshaped = mlxcel_core::reshape(
                 &scaled,
                 &[
@@ -315,7 +313,9 @@ impl EmbeddingGemma2Model {
                     Some(mlxcel_core::squeeze_axis(&sliced, 2))
                 }
             });
-            let mask = if layer.self_attn.is_sliding && let Some(sm) = &sliding_mask {
+            let mask = if layer.self_attn.is_sliding
+                && let Some(sm) = &sliding_mask
+            {
                 sm
             } else {
                 &full_mask
@@ -346,10 +346,8 @@ impl EmbeddingGemma2Model {
         audio_mel_and_mask: Option<(&MlxArray, &MlxArray)>,
     ) -> Result<UniquePtr<MlxArray>> {
         let raw_embeds = self.embed_tokens.forward(input_ids);
-        let mut inputs_embeds = mlxcel_core::multiply_scalar(
-            &raw_embeds,
-            (self.config.hidden_size as f32).sqrt(),
-        );
+        let mut inputs_embeds =
+            mlxcel_core::multiply_scalar(&raw_embeds, (self.config.hidden_size as f32).sqrt());
 
         if let (Some(vision), Some(imgs)) = (&self.vision, images)
             && !imgs.is_empty()
