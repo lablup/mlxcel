@@ -53,6 +53,7 @@ pub const GEMMA3_VLM_PREPARED_PREFILL_CONTRACT: &str =
 /// The language graphs, resident SigLIP/projector module, and host producer are
 /// separate runtime components. This explicit identity prevents their semantic
 /// boundary from depending on derived `Debug` output.
+#[cfg_attr(not(feature = "iree"), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Gemma3VlmCompatibilityContract {
     pub(crate) prepared_prefill: String,
@@ -73,6 +74,7 @@ pub(crate) struct Gemma3VlmCompatibilityContract {
     pub(crate) vision_identity: String,
 }
 
+#[cfg_attr(not(feature = "iree"), allow(dead_code))]
 impl Gemma3VlmCompatibilityContract {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
@@ -159,6 +161,7 @@ impl Gemma3VlmCompatibilityContract {
 ///
 /// Returning the input verbatim for `None` is intentional: ordinary text-only
 /// bundle identities must not move when this VLM-only contract evolves.
+#[cfg_attr(not(feature = "iree"), allow(dead_code))]
 pub(crate) fn bind_gemma3_vlm_compatibility(
     runtime_identity: String,
     contract: Option<&Gemma3VlmCompatibilityContract>,
@@ -551,6 +554,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::identity_op)] // `row * width + col` keeps the mask indices readable.
     fn exports_post_scale_text_unscaled_images_and_exact_bidirectional_mask() {
         let prepared = prepare_gemma3_vlm_prefill(
             vec![0, 9, 7, 0],

@@ -3544,24 +3544,6 @@ fn emit_prefill_module(
     }
 }
 
-#[cfg(test)]
-mod gemma3_vlm_mask_tests {
-    use super::*;
-
-    #[test]
-    fn authoritative_embeddings_mask_bypasses_only_the_external_local_intersection() {
-        let mut config = Config::llama_3_2_1b();
-        config.sliding_window = Some(4096);
-        assert_eq!(embeddings_prefill_local_window(&config), Some(4096));
-        config.embeddings_prefill_uses_authoritative_mask = true;
-        assert_eq!(embeddings_prefill_local_window(&config), None);
-        assert!(
-            config.is_sliding_layer(0),
-            "the token-prefill/decode layer schedule must remain windowed"
-        );
-    }
-}
-
 // ===========================================================================
 // MoE FFN block probe (issue #500): a standalone module for the execution check
 // ===========================================================================
@@ -3608,4 +3590,22 @@ pub(crate) fn emit_moe_probe_with(c: &Config, n: usize, precision: Precision) ->
         body = b.body(),
         o = out.name,
     )
+}
+
+#[cfg(test)]
+mod gemma3_vlm_mask_tests {
+    use super::*;
+
+    #[test]
+    fn authoritative_embeddings_mask_bypasses_only_the_external_local_intersection() {
+        let mut config = Config::llama_3_2_1b();
+        config.sliding_window = Some(4096);
+        assert_eq!(embeddings_prefill_local_window(&config), Some(4096));
+        config.embeddings_prefill_uses_authoritative_mask = true;
+        assert_eq!(embeddings_prefill_local_window(&config), None);
+        assert!(
+            config.is_sliding_layer(0),
+            "the token-prefill/decode layer schedule must remain windowed"
+        );
+    }
 }
