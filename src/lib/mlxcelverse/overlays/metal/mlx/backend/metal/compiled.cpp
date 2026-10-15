@@ -5,9 +5,9 @@
 // emission of an op's inputs; everything else is upstream verbatim. A bool
 // output (comparisons) casts to the promoted input type, not to bool (#1792).
 // Until the 81ba1c6a sync the file also emitted `elem_to_loc_1<uint>` for 1-D
-// inputs, a leftover
-// from before ml-explore/mlx#3720 that wraps a negative stride in the large
-// kernel negative strides select, so compare against upstream on every bump.
+// inputs, a leftover from before ml-explore/mlx#3720 that wraps a negative
+// stride in the large kernel negative strides select, so compare against
+// upstream on every bump.
 #include <fmt/format.h>
 #include <sstream>
 

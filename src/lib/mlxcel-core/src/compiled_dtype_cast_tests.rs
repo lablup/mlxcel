@@ -174,8 +174,11 @@ fn compiled_min_p_filter_matches_eager() {
 
 #[test]
 fn compiled_mixed_bf16_f32_arithmetic_matches_eager() {
-    // The case the Metal overlay's input cast exists for. Rounding may differ
-    // by a bf16 ulp where a fused kernel contracts a multiply-add.
+    // Parity guard for the mixed-dtype arithmetic the overlay cast was added
+    // for (1923da32). MLX ops promote through `AsType`, so at 243bdf09 these
+    // fused ops see matching input dtypes and the cast branch is not reached;
+    // the test pins that compiled output still equals eager. Rounding may
+    // differ by a bf16 ulp where a fused kernel contracts a multiply-add.
     let a = array(&A, &[5], dtype::BFLOAT16);
     let b = array(&B, &[5], dtype::FLOAT32);
     assert_compiled_matches_eager("bf16 / f32 chain", MIXED_ARITHMETIC, &a, &b, 1e-2);
