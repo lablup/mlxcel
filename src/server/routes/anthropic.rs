@@ -862,6 +862,20 @@ pub async fn anthropic_count_tokens(
     let live = state.live();
     let translated = anthropic_request_to_chat(&request);
 
+    // Refuse media parts the loaded checkpoint cannot consume before the render
+    // below runs, because rendering is what resolves them: without this gate an
+    // `image` block with a `url` source is downloaded and counted on a
+    // checkpoint with no image tower, and this route never reaches a worker
+    // that would refuse it later (issue #1748). Same check, same order and same
+    // envelope as `anthropic_messages`, so both routes answer one body alike.
+    if let Some(rejection) = crate::server::media_capability_rejection(
+        &translated.chat_request,
+        state.media_support,
+        state.display_model_id(),
+    ) {
+        return media_rejection_response(rejection).into_response();
+    }
+
     // Enforce the tools array size limit before rendering the chat template.
     // count_tokens expands `tools` into the template just like the main
     // endpoint, so it needs the same MAX_TOOLS guard to avoid a
@@ -1206,3 +1220,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "anthropic_count_tokens_tests.rs"]
+mod anthropic_count_tokens_tests;
