@@ -117,12 +117,13 @@ fn qwen3_standard_prefill_is_rejected_instead_of_dropping_deepstack() {
 
 #[test]
 fn xla_loader_keeps_text_and_unqualified_vlm_image_capability_false() {
-    // `llama` is text-only and `mllama` is a VLM family whose processor and
-    // position contract has never been qualified for XLA. Both are capability
-    // downgrades rather than errors. `qwen2_vl` is deliberately not in this set:
-    // it is qualified, so a build that cannot run it is an error instead, pinned
-    // by `xla_loader_rejects_qwen2_vl_without_the_iree_feature` below.
-    for model_type in ["llama", "mllama"] {
+    // `llama` and root `gemma3` (without `vision_config`) are text-only, and
+    // `mllama` is a VLM family whose processor and position contract has never
+    // been qualified for XLA. All three are capability downgrades rather than
+    // errors. `qwen2_vl` is deliberately not in this set: it is qualified, so a
+    // build that cannot run it is an error instead, pinned by
+    // `xla_loader_rejects_qwen2_vl_without_the_iree_feature` below.
+    for model_type in ["llama", "mllama", "gemma3"] {
         let model_dir = tempfile::tempdir().unwrap();
         std::fs::write(
             model_dir.path().join("config.json"),

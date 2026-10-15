@@ -38,7 +38,7 @@ use crate::aux::{
 use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
 #[cfg(feature = "diagnostics")]
 use crate::emitter::emit_vision_diagnostics;
-use crate::emitter::{LlavaVisionConfig, VisionWeightSpec, emit_vision};
+use crate::emitter::{LlavaVisionConfig, VisionProjector, VisionWeightSpec, emit_vision};
 use crate::iree::{cached_vmfb_path, compile_one_to, iree_compile_bin, target_flags};
 use crate::weights::{bf16_to_f32, f16_to_f32, f32_le_to_f32};
 
@@ -265,8 +265,30 @@ impl VisionProcessorContract {
                 config.image_size
             ));
         }
-        if object.get("resample").and_then(serde_json::Value::as_u64) != Some(3) {
-            return Err("preprocessor_config.json resample must be PIL bicubic (3)".to_string());
+        let expected_resample = match config.projector {
+            VisionProjector::LlavaMlp => 3,
+            VisionProjector::Gemma3AvgPool { .. } => 2,
+        };
+        if matches!(config.projector, VisionProjector::Gemma3AvgPool { .. })
+            && object
+                .get("image_processor_type")
+                .and_then(serde_json::Value::as_str)
+                != Some("Gemma3ImageProcessor")
+        {
+            return Err(
+                "preprocessor_config.json image_processor_type must be Gemma3ImageProcessor"
+                    .to_string(),
+            );
+        }
+        if object.get("resample").and_then(serde_json::Value::as_u64) != Some(expected_resample) {
+            return Err(format!(
+                "preprocessor_config.json resample must be {} ({expected_resample})",
+                if expected_resample == 3 {
+                    "PIL bicubic"
+                } else {
+                    "PIL bilinear"
+                }
+            ));
         }
         let factor = finite_number(object, "rescale_factor")?;
         if factor <= 0.0 {
@@ -296,44 +318,66 @@ impl VisionProcessorContract {
         let processor_object = processor
             .as_object()
             .ok_or_else(|| format!("{} must be a JSON object", processor_path.display()))?;
-        if processor_object
-            .get("patch_size")
-            .and_then(serde_json::Value::as_u64)
-            != Some(config.patch_size as u64)
-        {
-            return Err(format!(
-                "processor patch_size disagrees with vision patch_size={}",
-                config.patch_size
-            ));
-        }
-        let expected_strategy = if config.drop_first_token {
-            "default"
+        if matches!(config.projector, VisionProjector::LlavaMlp) {
+            if processor_object
+                .get("patch_size")
+                .and_then(serde_json::Value::as_u64)
+                != Some(config.patch_size as u64)
+            {
+                return Err(format!(
+                    "processor patch_size disagrees with vision patch_size={}",
+                    config.patch_size
+                ));
+            }
+            let expected_strategy = if config.drop_first_token {
+                "default"
+            } else {
+                "full"
+            };
+            if processor_object
+                .get("vision_feature_select_strategy")
+                .and_then(serde_json::Value::as_str)
+                != Some(expected_strategy)
+            {
+                return Err(format!(
+                    "processor vision_feature_select_strategy disagrees with config ({expected_strategy})"
+                ));
+            }
+            let expected_additional_tokens = usize::from(config.class_token) as u64;
+            if processor_object
+                .get("num_additional_image_tokens")
+                .and_then(serde_json::Value::as_u64)
+                != Some(expected_additional_tokens)
+            {
+                return Err(format!(
+                    "processor num_additional_image_tokens disagrees with class-token contract ({expected_additional_tokens})"
+                ));
+            }
         } else {
-            "full"
-        };
-        if processor_object
-            .get("vision_feature_select_strategy")
-            .and_then(serde_json::Value::as_str)
-            != Some(expected_strategy)
-        {
-            return Err(format!(
-                "processor vision_feature_select_strategy disagrees with config ({expected_strategy})"
-            ));
-        }
-        let expected_additional_tokens = usize::from(config.class_token) as u64;
-        if processor_object
-            .get("num_additional_image_tokens")
-            .and_then(serde_json::Value::as_u64)
-            != Some(expected_additional_tokens)
-        {
-            return Err(format!(
-                "processor num_additional_image_tokens disagrees with class-token contract ({expected_additional_tokens})"
-            ));
+            if processor_object
+                .get("processor_class")
+                .and_then(serde_json::Value::as_str)
+                != Some("Gemma3Processor")
+            {
+                return Err(
+                    "processor_config.json processor_class must be Gemma3Processor".to_string(),
+                );
+            }
+            if processor_object
+                .get("image_seq_length")
+                .and_then(serde_json::Value::as_u64)
+                != Some(config.image_tokens() as u64)
+            {
+                return Err(format!(
+                    "processor image_seq_length disagrees with Gemma3 projector output {}",
+                    config.image_tokens()
+                ));
+            }
         }
         Ok(Self {
             identity: format!(
-                "preprocessor={};processor={};resolved=size:{};crop:{};resample:bicubic;\
-                 rescale:{:016x};mean:{mean:?};std:{std:?}",
+                "preprocessor={};processor={};resolved=size:{};crop:{};\
+                 resample:{expected_resample};rescale:{:016x};mean:{mean:?};std:{std:?}",
                 preprocessor,
                 processor,
                 config.image_size,
@@ -663,7 +707,11 @@ impl IreeVisionProjector {
     pub fn load(model_dir: &Path, device: &str) -> Result<Self, String> {
         let config = LlavaVisionConfig::from_model_dir(model_dir)?;
         let mlir = emit_vision(&config);
-        let module = compile_and_load(model_dir, device, &config, &mlir, "llava-vision")?;
+        let cache_tag = match config.projector {
+            VisionProjector::LlavaMlp => "llava-vision",
+            VisionProjector::Gemma3AvgPool { .. } => "gemma3-vision",
+        };
+        let module = compile_and_load(model_dir, device, &config, &mlir, cache_tag)?;
         Ok(Self { module, config })
     }
 

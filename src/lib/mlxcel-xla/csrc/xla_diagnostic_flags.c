@@ -22,7 +22,7 @@
 int xla_diagnostics_configure_local_task_threads(void) {
   char program[] = "mlxcel-xla-diagnostics";
   char topology_flag[] = "--task_topology_group_count=1";
-  char worker_stack_flag[] = "--task_worker_stack_size=0";
+  char worker_stack_flag[] = "--task_worker_stack_size=8388608";
   char* argv_storage[] = {program, topology_flag, worker_stack_flag, NULL};
   char** argv = argv_storage;
   int argc = 3;

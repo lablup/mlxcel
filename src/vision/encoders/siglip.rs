@@ -720,7 +720,7 @@ impl VisionEncoder for SigLipVisionModel {
         self.forward_impl(pixel_values, false).0
     }
 
-    #[cfg(feature = "xla-diagnostics")]
+    #[cfg(any(feature = "xla-diagnostics", feature = "xla-reference-diagnostics"))]
     fn forward_with_hidden_state_diagnostics(
         &self,
         pixel_values: &MlxArray,

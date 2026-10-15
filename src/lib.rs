@@ -83,6 +83,8 @@ pub use mlxcel_core::speculative::prompt_lookup::{
     DraftPolicy, PromptLookupConfig, prompt_lookup_unsupported_reason, supports_prompt_lookup,
 };
 pub use mlxcel_core::speculative::prompt_lookup_drafter::PromptLookupDrafter;
+#[cfg(feature = "xla-iree")]
+pub use multimodal::host_preprocessor::Gemma3IreeHostPreprocessor;
 #[cfg(feature = "xla-diagnostics")]
 pub use multimodal::host_preprocessor::LlavaHostReferenceCapture;
 #[cfg(feature = "xla-iree")]
@@ -141,6 +143,8 @@ pub fn decode_image_payloads_with_limits(
 // Re-export split modules
 pub use loaded_model::LoadedModel;
 pub use loaded_model_capabilities::VlmRuntimeRef;
+#[cfg(feature = "xla-reference-diagnostics")]
+pub use loading::run_gemma3_eager_mlx_iree_prepared_boundary;
 #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 pub use loading::{
     Molmo2XlaVisionReference, Molmo2XlaVisionReferenceProjection, Molmo2XlaVisionReferenceStage,

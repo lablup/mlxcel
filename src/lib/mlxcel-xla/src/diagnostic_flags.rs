@@ -27,8 +27,9 @@ unsafe extern "C" {
 
 /// Configure bounded local-task threading before diagnostics create IREE.
 ///
-/// This selects one topology group and lets pthreads choose the host-default
-/// worker stack instead of IREE's exact `PTHREAD_STACK_MIN` request. The IREE
+/// This selects one topology group and an 8 MiB worker stack instead of IREE's
+/// 128 KiB default (or 32 KiB `IREE_TASK_WORKER_MIN_STACK_SIZE` clamp on zero),
+/// which is smaller than static TLS when GPU runtimes are loaded. The IREE
 /// flag registry is process-global, so cache both success and failure and make
 /// repeated diagnostic calls observe one immutable parse result.
 #[cfg(feature = "diagnostics")]
@@ -63,7 +64,7 @@ mod tests {
     fn native_helper_pins_bounded_host_thread_flags() {
         let source = include_str!("../csrc/xla_diagnostic_flags.c");
         assert!(source.contains("--task_topology_group_count=1"));
-        assert!(source.contains("--task_worker_stack_size=0"));
+        assert!(source.contains("--task_worker_stack_size=8388608"));
         assert!(source.contains("IREE_FLAGS_PARSE_MODE_DEFAULT"));
     }
 
