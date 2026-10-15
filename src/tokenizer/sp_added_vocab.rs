@@ -14,15 +14,17 @@
 
 //! Added-token matching for the SentencePiece backend (#1758).
 //!
-//! A checkpoint that ships only `tokenizer.model` is a `transformers` *slow*
-//! tokenizer, and every `added_tokens_decoder` entry is an `AddedToken` in its
-//! added vocabulary whether or not it is `special`. `PreTrainedTokenizer.tokenize`
-//! splits the input on all of them with a trie before SentencePiece sees any
-//! text, so `<tool_call>` (marked `"special": false` on IQuest-Coder) encodes
-//! as its one reserved id exactly like `<|im_start|>` (marked special) does.
-//! The `special` flag only decides what `skip_special_tokens` drops on decode
-//! and what `split_special_tokens` (llama.cpp's `parse_special: false`)
-//! stops matching on encode.
+//! The checkpoints that ship only `tokenizer.model` (IQuest-Coder, Baichuan-M1,
+//! ERNIE-4.5, InternLM3, TeleChat3) declare slow-only `transformers` tokenizer
+//! classes, and every `added_tokens_decoder` entry is an `AddedToken` in their
+//! added vocabulary whether or not it is `special`.
+//! `PreTrainedTokenizer.tokenize` splits the input on all of them with a trie
+//! before SentencePiece sees any text, so `<tool_call>` (marked
+//! `"special": false` on IQuest-Coder) encodes as its one reserved id exactly
+//! like `<|im_start|>` (marked special) does. On decode the `special` flag
+//! decides what `skip_special_tokens` drops; on encode it decides what
+//! `parse_special: false` stops matching, as the fast tokenizer's
+//! `encode_special_tokens` and llama.cpp do.
 //!
 //! [`SpAddedVocab::split`] reproduces that split, including the per-token
 //! `lstrip` / `rstrip` / `single_word` handling, so a non-special token that is
@@ -46,13 +48,14 @@ pub(super) enum Piece {
 }
 
 /// The added vocabulary of a SentencePiece checkpoint, special and not.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(super) struct SpAddedVocab {
     /// Every entry with non-empty content, in id order.
     tokens: Vec<(u32, AddedToken)>,
-    /// First byte of a content to the indices into `tokens` that start with
-    /// it, longest content first, so a scan tries the longest match first.
-    by_first_byte: HashMap<u8, Vec<usize>>,
+    /// Indexed by first byte: the indices into `tokens` whose content starts
+    /// with it, longest content first, so a scan tries the longest match
+    /// first. A flat table keeps the per-byte lookup off the hasher.
+    by_first_byte: Vec<Vec<usize>>,
     /// Content to index into `tokens`. A content declared twice resolves to
     /// the higher id, as `_added_tokens_encoder` (built in id order) does.
     by_content: HashMap<String, usize>,
@@ -71,12 +74,12 @@ impl SpAddedVocab {
         for (index, (_, token)) in tokens.iter().enumerate() {
             by_content.insert(token.content.clone(), index);
         }
-        let mut by_first_byte: HashMap<u8, Vec<usize>> = HashMap::new();
+        let mut by_first_byte: Vec<Vec<usize>> = vec![Vec::new(); 256];
         for &index in by_content.values() {
             let first = tokens[index].1.content.as_bytes()[0];
-            by_first_byte.entry(first).or_default().push(index);
+            by_first_byte[usize::from(first)].push(index);
         }
-        for indices in by_first_byte.values_mut() {
+        for indices in &mut by_first_byte {
             indices.sort_by_key(|&index| std::cmp::Reverse(tokens[index].1.content.len()));
         }
 
@@ -139,12 +142,13 @@ impl SpAddedVocab {
             // Every content is valid UTF-8, so its first byte is never a
             // continuation byte and a match can only start on a char
             // boundary; the slices below are therefore always valid.
-            let found = self.by_first_byte.get(&bytes[pos]).and_then(|indices| {
-                indices.iter().copied().find(|&index| {
+            let found = self.by_first_byte[usize::from(bytes[pos])]
+                .iter()
+                .copied()
+                .find(|&index| {
                     self.matches(index, parse_special)
                         && bytes[pos..].starts_with(self.tokens[index].1.content.as_bytes())
-                })
-            });
+                });
             match found {
                 Some(index) => {
                     if text_start < pos {
@@ -211,6 +215,12 @@ impl SpAddedVocab {
 /// Unlike that function this one is lenient: a malformed entry is skipped
 /// rather than failing the load, because the SentencePiece loader never
 /// failed on one and a checkpoint that loads today must keep loading.
+///
+/// An `added_tokens.json` entry is always non-special here, as on the
+/// `tokenizers` path. `transformers`' legacy loader would mark one special
+/// when its content is also a declared special token (`eos_token` and the
+/// like); no surveyed checkpoint relies on that, because every one of them
+/// ships `added_tokens_decoder`.
 pub(super) fn read_sp_added_tokens(
     config: Option<&serde_json::Value>,
     model_path: &Path,
@@ -220,21 +230,9 @@ pub(super) fn read_sp_added_tokens(
         .and_then(|cfg| cfg.get("added_tokens_decoder"))
         .and_then(|v| v.as_object())
     {
-        for (id, entry) in decoder {
-            let (Ok(id), Some(content)) = (
-                id.parse::<u32>(),
-                entry.get("content").and_then(|v| v.as_str()),
-            ) else {
-                continue;
-            };
-            let flag = |name: &str| entry.get(name).and_then(|v| v.as_bool()).unwrap_or(false);
-            let token = AddedToken::from(content.to_string(), flag("special"))
-                .single_word(flag("single_word"))
-                .lstrip(flag("lstrip"))
-                .rstrip(flag("rstrip"))
-                .normalized(flag("normalized"));
-            out.push((id, token));
-        }
+        out.extend(decoder.iter().filter_map(|(id, entry)| {
+            super::added_tokens::parse_added_token_entry(id, entry).ok()
+        }));
     } else if let Ok(raw) = std::fs::read_to_string(model_path.join("added_tokens.json"))
         && let Ok(map) = serde_json::from_str::<HashMap<String, u32>>(&raw)
     {

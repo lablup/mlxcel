@@ -40,8 +40,8 @@ pub enum MlxcelTokenizer {
 
 pub struct SentencePieceTokenizer {
     processor: SentencePieceProcessor,
-    /// Special added tokens, which `skip_special_tokens` drops on decode.
-    special_token_to_id: HashMap<String, u32>,
+    /// Special added tokens by id, which `skip_special_tokens` drops on
+    /// decode.
     id_to_special_token: HashMap<u32, String>,
     /// Non-special added tokens by id. Added tokens live OUTSIDE the
     /// SentencePiece vocab, so `decode_piece_ids` errors "Out of range" on
@@ -715,12 +715,10 @@ impl SentencePieceTokenizer {
         add_bos: bool,
     ) -> Self {
         let added_vocab = sp_added_vocab::SpAddedVocab::new(&added_tokens);
-        let mut special_token_to_id = HashMap::new();
         let mut id_to_special_token = HashMap::new();
         let mut added_token_contents = HashMap::new();
         for (id, token) in added_tokens {
             if token.special {
-                special_token_to_id.insert(token.content.clone(), id);
                 id_to_special_token.insert(id, token.content);
             } else {
                 added_token_contents.insert(id, token.content);
@@ -729,7 +727,6 @@ impl SentencePieceTokenizer {
 
         Self {
             processor,
-            special_token_to_id,
             id_to_special_token,
             added_token_contents,
             added_vocab,
@@ -757,11 +754,9 @@ impl SentencePieceTokenizer {
 
     /// The id a vocabulary entry holds, by its exact spelling.
     fn token_to_id(&self, token: &str) -> Option<u32> {
-        if let Some(&id) = self.special_token_to_id.get(token) {
-            return Some(id);
-        }
-        // Non-special added tokens resolve too (#1758): they are in the
-        // added vocabulary exactly like the special ones.
+        // Every added token resolves, special or not (#1758), through the
+        // same table encode uses, so the two never disagree on a content the
+        // checkpoint declares twice.
         if let Some(id) = self.added_vocab.id_of(token) {
             return Some(id);
         }
@@ -3466,6 +3461,11 @@ mod tests {
             }
         }
         assert_eq!((specials, non_specials), (19, 8));
+
+        // `</s>` is declared `single_word: true`, so glued to a word it is
+        // text (as in transformers) and only matches as a whole word.
+        assert!(!tokenizer.encode("d</s>e", false).unwrap().contains(&2));
+        assert!(tokenizer.encode("x </s> y", false).unwrap().contains(&2));
 
         // The ChatML scaffold the chat template emits on a plain (non-tool)
         // turn, which uses only `special: true` tokens and so is exact. The

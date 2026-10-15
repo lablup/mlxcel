@@ -36,27 +36,35 @@ use tokenizers::{AddedToken, Model};
 pub(super) fn parse_added_tokens_decoder(
     decoder: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<Vec<(u32, AddedToken)>> {
-    let mut out = Vec::with_capacity(decoder.len());
-    for (id, entry) in decoder {
-        let id: u32 = id
-            .parse()
-            .map_err(|e| anyhow::anyhow!("added_tokens_decoder key {id:?}: {e}"))?;
-        let content = entry
-            .get("content")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("added_tokens_decoder[{id}] has no content"))?;
-        let flag = |name: &str, default: bool| {
-            entry.get(name).and_then(|v| v.as_bool()).unwrap_or(default)
-        };
-        let token = AddedToken::from(content.to_string(), flag("special", false))
-            .single_word(flag("single_word", false))
-            .lstrip(flag("lstrip", false))
-            .rstrip(flag("rstrip", false))
-            .normalized(flag("normalized", false));
-        out.push((id, token));
-    }
+    let mut out = decoder
+        .iter()
+        .map(|(id, entry)| parse_added_token_entry(id, entry))
+        .collect::<Result<Vec<_>>>()?;
     out.sort_by_key(|(id, _)| *id);
     Ok(out)
+}
+
+/// Parse one `added_tokens_decoder` entry (`"<id>": {"content": .., flags}`).
+/// Shared by the strict reader above and the lenient SentencePiece reader
+/// (`sp_added_vocab::read_sp_added_tokens`), which drops failures instead.
+pub(super) fn parse_added_token_entry(
+    id: &str,
+    entry: &serde_json::Value,
+) -> Result<(u32, AddedToken)> {
+    let id: u32 = id
+        .parse()
+        .map_err(|e| anyhow::anyhow!("added_tokens_decoder key {id:?}: {e}"))?;
+    let content = entry
+        .get("content")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("added_tokens_decoder[{id}] has no content"))?;
+    let flag = |name: &str| entry.get(name).and_then(|v| v.as_bool()).unwrap_or(false);
+    let token = AddedToken::from(content.to_string(), flag("special"))
+        .single_word(flag("single_word"))
+        .lstrip(flag("lstrip"))
+        .rstrip(flag("rstrip"))
+        .normalized(flag("normalized"));
+    Ok((id, token))
 }
 
 /// The id the `tokenizers` crate gives the next added token whose content is

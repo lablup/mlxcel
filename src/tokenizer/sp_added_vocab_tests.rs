@@ -57,7 +57,7 @@ fn text_without_any_added_token_is_one_piece() {
     let v = vocab(&[(101, plain("<tool_call>", false))]);
     assert_eq!(v.split("a < b > c", true), vec![text("a < b > c")]);
     assert_eq!(v.split("", true), Vec::<Piece>::new());
-    assert_eq!(SpAddedVocab::default().split("x", true), vec![text("x")]);
+    assert_eq!(SpAddedVocab::new(&[]).split("x", true), vec![text("x")]);
 }
 
 /// Leftmost wins over longer, and at one position the longest wins.
@@ -124,6 +124,39 @@ fn single_word_tokens_only_match_as_whole_words() {
         v.split("a catalog", true),
         vec![text("a "), text("catalog")]
     );
+}
+
+/// `rstrip` runs first, but the `single_word` fold appends the right
+/// neighbour as it was before stripping, exactly as the Python loop does.
+#[test]
+fn a_single_word_right_fold_uses_the_unstripped_neighbour() {
+    let v = vocab(&[(4, plain("<w>", false).rstrip(true).single_word(true))]);
+    assert_eq!(v.split("<w>\tx", true), vec![text("<w>\tx")]);
+    assert_eq!(v.split("<w> x", true), vec![Piece::Token(4), text("x")]);
+}
+
+/// A `single_word` token glued to another added token is folded into it,
+/// and the merged string is no longer any token, so both become text.
+#[test]
+fn a_single_word_token_next_to_another_token_turns_both_into_text() {
+    let v = vocab(&[
+        (1, plain("<a>", false).single_word(true)),
+        (2, plain("<b>", false)),
+    ]);
+    assert_eq!(v.split("<a><b>", true), vec![text("<a><b>")]);
+    assert_eq!(
+        v.split("<a> <b>", true),
+        vec![Piece::Token(1), text(" "), Piece::Token(2)]
+    );
+}
+
+/// A multibyte content whose first byte also starts a different character in
+/// the text only matches on the character it really is.
+#[test]
+fn multibyte_contents_match_only_whole_characters() {
+    let v = vocab(&[(9, plain("가나", false))]);
+    assert_eq!(v.split("각가나", true), vec![text("각"), Piece::Token(9)]);
+    assert_eq!(v.split("가각", true), vec![text("가각")]);
 }
 
 #[test]
@@ -335,4 +368,19 @@ fn the_loader_registers_non_special_entries_for_encoding() {
     assert_eq!(tok.token_to_id("<tool_call>"), Some(101));
     assert_eq!(tok.encode("<tool_call>", true).unwrap(), vec![101]);
     assert_eq!(tok.decode(&[100, 101], true).unwrap(), "<tool_call>");
+}
+
+/// A content declared twice, once special at a lower id and once not at a
+/// higher one, resolves to the same (higher) id through `token_to_id` and
+/// `encode`, as transformers' `_added_tokens_encoder` does.
+#[test]
+fn token_to_id_and_encode_agree_on_a_duplicated_content() {
+    let tok = MlxcelTokenizer::SentencePiece(SentencePieceTokenizer::new(
+        char_model(CHARS),
+        vec![(100, plain("<x>", true)), (101, plain("<x>", false))],
+        None,
+        false,
+    ));
+    assert_eq!(tok.token_to_id("<x>"), Some(101));
+    assert_eq!(tok.encode("<x>", true).unwrap(), vec![101]);
 }
