@@ -241,3 +241,42 @@ fn a_quantized_markov_factor_has_its_packed_width_checked() {
         "a short packed table must still fail the row check"
     );
 }
+
+/// MLX's affine quantize kernel supports 5 bits, so a 5-bit factor must load.
+/// The loader used to carry its own `[2, 3, 4, 6, 8]` list that omitted it
+/// (issue #1790); the list now comes from `SUPPORTED_AFFINE_BITS`.
+#[test]
+fn a_five_bit_markov_factor_loads() {
+    // rank 64 at 5 bits packs to 64 * 5 / 32 = 10 u32 columns.
+    let mut weights: WeightMap = std::collections::HashMap::new();
+    for factor in ["markov_w1", "markov_w2"] {
+        weights.insert(
+            format!("markov_head.{factor}.weight"),
+            ffi::zeros(&[VOCAB, 10], dtype::UINT32),
+        );
+        weights.insert(
+            format!("markov_head.{factor}.scales"),
+            ffi::zeros(&[VOCAB, 1], dtype::FLOAT32),
+        );
+        weights.insert(
+            format!("markov_head.{factor}.biases"),
+            ffi::zeros(&[VOCAB, 1], dtype::FLOAT32),
+        );
+    }
+    assert!(
+        VanillaMarkovHead::from_weights(&weights, "markov_head", VOCAB as usize, 64, 64, 5).is_ok(),
+        "10 packed columns is rank 64 at 5 bits"
+    );
+    // 7 bits is not a width MLX implements, so 7 * 64 / 32 = 14 stays refused.
+    for factor in ["markov_w1", "markov_w2"] {
+        weights.insert(
+            format!("markov_head.{factor}.weight"),
+            ffi::zeros(&[VOCAB, 14], dtype::UINT32),
+        );
+    }
+    assert!(
+        VanillaMarkovHead::from_weights(&weights, "markov_head", VOCAB as usize, 64, 64, 4)
+            .is_err(),
+        "an unexplainable width is still refused"
+    );
+}

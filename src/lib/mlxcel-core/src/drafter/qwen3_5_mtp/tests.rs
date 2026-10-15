@@ -401,3 +401,122 @@ fn block_size_flags_match_upstream() {
     assert!(drafter.prefer_requested_block_size());
     assert_eq!(drafter.configured_block_size(), Some(3));
 }
+
+/// [`tiny_config`] with an explicit `quantization` block on the text config.
+fn quantized_config(bits: i32, group_size: i32) -> Qwen35MtpConfig {
+    let cfg: Qwen35MtpConfig = serde_json::from_value(serde_json::json!({
+        "model_type": "qwen3_5_mtp",
+        "block_size": 3,
+        "text_config": {
+            "model_type": "qwen3_5_text",
+            "hidden_size": 8,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 1,
+            "head_dim": 4,
+            "intermediate_size": 16,
+            "vocab_size": 16,
+            "rms_norm_eps": 1e-6,
+            "rope_parameters": {"rope_theta": 10000.0, "partial_rotary_factor": 0.5},
+            "mtp_num_hidden_layers": 1,
+            "tie_word_embeddings": false,
+            "quantization": {"bits": bits, "group_size": group_size}
+        }
+    }))
+    .expect("quantized tiny config parses");
+    cfg.normalize()
+        .expect("config gate does not check the scheme")
+}
+
+/// An unsupported `bits` or `group_size` (including 0) in the drafter config
+/// must come back as a load error. MLX's affine quantize kernel throws
+/// `std::invalid_argument` on them, which crosses the cxx bridge as a process
+/// abort, and `group_size: 0` panics earlier on the `%` (issue #1790).
+#[test]
+fn quantize_dense_projections_rejects_unsupported_quantization() {
+    for (bits, group_size, needle) in [
+        (7, 64, "quantization bits (7)"),
+        (1, 64, "quantization bits (1)"),
+        (4, 0, "quantization group_size (0)"),
+        (4, 48, "quantization group_size (48)"),
+        (4, -64, "quantization group_size (-64)"),
+    ] {
+        let mut weights = tiny_weights();
+        let err = Qwen35MtpDraftModel::quantize_dense_projections(
+            &mut weights,
+            &quantized_config(bits, group_size),
+        )
+        .expect_err("an unsupported scheme must be refused, not abort");
+        assert!(
+            err.contains(needle),
+            "bits {bits} group {group_size}: {err}"
+        );
+    }
+}
+
+/// The check follows the candidate list, so it neither refuses a supported
+/// scheme nor refuses a pre-converted checkpoint over values it never uses.
+#[test]
+fn quantize_dense_projections_only_validates_when_it_would_quantize() {
+    let mut weights = tiny_weights();
+    assert!(
+        Qwen35MtpDraftModel::quantize_dense_projections(&mut weights, &quantized_config(4, 32))
+            .is_ok()
+    );
+
+    let mut converted = tiny_weights();
+    let keys: Vec<String> = converted.keys().cloned().collect();
+    for key in keys {
+        if let Some(prefix) = key.strip_suffix(".weight") {
+            insert_val(&mut converted, &format!("{prefix}.scales"), &[1], 1.0);
+        }
+    }
+    assert!(
+        Qwen35MtpDraftModel::quantize_dense_projections(&mut converted, &quantized_config(7, 0))
+            .is_ok(),
+        "nothing to quantize, so the config values are never used"
+    );
+}
+
+/// Real-checkpoint check for issue #1790, run by hand with
+/// `MLXCEL_TEST_QWEN35_MTP_DRAFTER=<dir> cargo test ... -- --ignored`. The
+/// checkpoint must load as shipped, and a copy of it whose config declares an
+/// unsupported `bits` or `group_size` (including 0) must return a
+/// `DrafterError::Config` instead of aborting the process.
+#[test]
+#[ignore = "needs a real qwen3_5_mtp checkpoint in MLXCEL_TEST_QWEN35_MTP_DRAFTER"]
+fn real_drafter_loads_and_refuses_an_unsupported_scheme() {
+    let Ok(dir) = std::env::var("MLXCEL_TEST_QWEN35_MTP_DRAFTER") else {
+        panic!("set MLXCEL_TEST_QWEN35_MTP_DRAFTER to a qwen3_5_mtp checkpoint directory");
+    };
+    let dir = std::path::Path::new(&dir);
+    Qwen35MtpDraftModel::from_path(dir).expect("the shipped checkpoint must still load");
+
+    let config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("config.json")).expect("config.json"))
+            .expect("config parses");
+    for (bits, group_size, needle) in [
+        (7, 64, "quantization bits (7)"),
+        (4, 0, "quantization group_size (0)"),
+    ] {
+        let scratch = tempfile::tempdir().expect("scratch dir");
+        let mut cfg = config.clone();
+        cfg["text_config"]["quantization"] =
+            serde_json::json!({"bits": bits, "group_size": group_size});
+        std::fs::write(scratch.path().join("config.json"), cfg.to_string()).expect("write config");
+        for entry in std::fs::read_dir(dir).expect("list checkpoint").flatten() {
+            let name = entry.file_name();
+            if name.to_string_lossy().ends_with(".safetensors") {
+                std::os::unix::fs::symlink(entry.path(), scratch.path().join(&name))
+                    .expect("link weights");
+            }
+        }
+        let Err(err) = Qwen35MtpDraftModel::from_path(scratch.path()) else {
+            panic!("bits {bits} group {group_size} must be refused");
+        };
+        assert!(
+            matches!(&err, DrafterError::Config(m) if m.contains(needle)),
+            "{err}"
+        );
+        eprintln!("bits {bits} group {group_size}: {err}");
+    }
+}

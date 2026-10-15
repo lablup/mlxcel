@@ -197,11 +197,10 @@ fn validate_markov_factor(
         // throws inside MLX and crosses the cxx bridge as a process abort
         // rather than a load error, and every mlx-community conversion of
         // these drafters is quantized.
-        const SUPPORTED_BITS: [i64; 5] = [2, 3, 4, 6, 8];
         let packed_bits = i64::from(*cols) * 32;
-        let explained = SUPPORTED_BITS
+        let explained = crate::layers::SUPPORTED_AFFINE_BITS
             .iter()
-            .any(|&b| packed_bits == b * rank as i64);
+            .any(|&b| packed_bits == i64::from(b) * rank as i64);
         if !explained {
             return Err(format!(
                 "{name} is a quantized [{rows}, {cols}] table, and no supported bit depth makes \

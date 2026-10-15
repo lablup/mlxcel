@@ -1654,7 +1654,9 @@ pub fn validate_quantization_params(group_size: i32, bits: i32) -> Result<(), St
 /// any particular CLI flag; the caller names its own flag (`split-mtp` says
 /// `--q-bits`) around this error.
 ///
-/// Used by: `mlxcel_surgery::ops::split_mtp::split_mtp` in the consuming crate
+/// Used by: `mlxcel_surgery::ops::split_mtp::split_mtp` and `preflight_checks`
+///          in `src/commands/split_mtp.rs` in the consuming crate, and the
+///          Qwen 3.5 MTP drafter's `quantize_dense_projections`
 pub fn validate_affine_quantization_bits(bits: i32) -> Result<(), String> {
     if SUPPORTED_AFFINE_BITS.contains(&bits) {
         return Ok(());
@@ -1685,7 +1687,9 @@ pub fn validate_affine_quantization_bits(bits: i32) -> Result<(), String> {
 /// picks the group size itself, such as `split-mtp`, calls this in addition
 /// to, not instead of, that bounds check.
 ///
-/// Used by: `mlxcel_surgery::ops::split_mtp::split_mtp` in the consuming crate
+/// Used by: `mlxcel_surgery::ops::split_mtp::split_mtp` and `preflight_checks`
+///          in `src/commands/split_mtp.rs` in the consuming crate, and the
+///          Qwen 3.5 MTP drafter's `quantize_dense_projections`
 pub fn validate_affine_quantization_group_size(group_size: i32) -> Result<(), String> {
     if SUPPORTED_AFFINE_GROUP_SIZES.contains(&group_size) {
         return Ok(());
@@ -1738,7 +1742,8 @@ pub const SUPPORTED_QUANTIZATION_MODES: [&str; 4] = ["affine", "mxfp4", "mxfp8",
 /// needs before it spends any tensor work on a width nothing can load.
 ///
 /// Used by: [`infer_quantization_bits`], [`validate_affine_quantization_bits`],
-///          and `crate::models::gemma4::validate_override_bits` in the
+///          `crate::drafter::dflash::markov`'s `validate_markov_factor`, and
+///          `crate::models::gemma4::validate_override_bits` in the
 ///          consuming crate
 pub const SUPPORTED_AFFINE_BITS: [i32; 6] = [2, 3, 4, 5, 6, 8];
 

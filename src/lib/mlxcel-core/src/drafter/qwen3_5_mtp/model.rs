@@ -209,7 +209,7 @@ impl Qwen35MtpDraftModel {
         // quantization auxiliaries, and the packed payload is uint32 either
         // way, so ordering it after would only leave scales as f16 where every
         // shipped checkpoint keeps them bf16.
-        Self::quantize_dense_projections(&mut weights, &config);
+        Self::quantize_dense_projections(&mut weights, &config).map_err(DrafterError::Config)?;
         // Apple Silicon precision: bf16 → f16 on non-quantized tensors at
         // the weight-loading boundary, matching the target model loaders and
         // the DFlash drafter loader. The published drafter is bf16; the
@@ -240,9 +240,19 @@ impl Qwen35MtpDraftModel {
     ///
     /// `MLXCEL_MTP_QUANTIZE_DRAFTER=0` keeps the checkpoint's own precision,
     /// for an acceptance A/B on a pairing this has not been measured on.
-    fn quantize_dense_projections(weights: &mut WeightMap, config: &Qwen35MtpConfig) {
+    ///
+    /// Returns an error when the config's `bits` or `group_size` is outside
+    /// what MLX's affine quantize kernel implements (issue #1790). Without it
+    /// the kernel's `std::invalid_argument` crosses the cxx bridge as a process
+    /// abort, and `group_size: 0` panics on the `%` below. The check runs only
+    /// once a tensor actually needs quantizing, so a pre-converted checkpoint
+    /// is not refused over values this function never uses.
+    pub(super) fn quantize_dense_projections(
+        weights: &mut WeightMap,
+        config: &Qwen35MtpConfig,
+    ) -> Result<(), String> {
         if !quantize_drafter_enabled() {
-            return;
+            return Ok(());
         }
         let text_cfg = config.text_config();
         let (group_size, bits) = (text_cfg.group_size(), text_cfg.bits());
@@ -256,6 +266,14 @@ impl Qwen35MtpDraftModel {
             })
             .map(|(key, _)| key.clone())
             .collect();
+
+        if candidates.is_empty() {
+            return Ok(());
+        }
+        crate::layers::validate_affine_quantization_bits(bits)
+            .map_err(|e| format!("Qwen 3.5 MTP drafter config: {e}"))?;
+        crate::layers::validate_affine_quantization_group_size(group_size)
+            .map_err(|e| format!("Qwen 3.5 MTP drafter config: {e}"))?;
 
         let mut converted = 0usize;
         for key in candidates {
@@ -291,6 +309,7 @@ impl Qwen35MtpDraftModel {
                 "quantized the MTP drafter's dense projections at load"
             );
         }
+        Ok(())
     }
 
     /// Construct from an in-memory weight map (already sanitized). Used by
