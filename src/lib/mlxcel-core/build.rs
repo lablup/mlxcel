@@ -93,6 +93,8 @@ fn main() {
         .file("cpp/mlx_cxx_nemotron.cpp")
         .file("cpp/mlx_cxx_ext.cpp")
         .file("cpp/mlx_cxx_one_bit.cpp")
+        // Test-only compiled-vs-eager probe for fused input casts (#1792).
+        .file("cpp/mlx_cxx_compile_probe.cpp")
         // Fused Sparse-V SDPA kernel launcher. Lives under
         // `src/lib/mlxcelverse/kernels/` so the MLX-upstream-commit upgrade
         // checklist ("Bumping the MLX upstream pin" in CONTRIBUTING.md)
@@ -290,6 +292,7 @@ fn main() {
     println!("cargo:rerun-if-changed=cpp/mlx_cxx_nemotron.cpp");
     println!("cargo:rerun-if-changed=cpp/mlx_cxx_ext.cpp");
     println!("cargo:rerun-if-changed=cpp/mlx_cxx_one_bit.cpp");
+    println!("cargo:rerun-if-changed=cpp/mlx_cxx_compile_probe.cpp");
     println!("cargo:rerun-if-changed=cpp/qmm_naive_tile_probe.cpp");
     println!("cargo:rerun-if-changed=cpp/grouped_gemm_arch_probe.cpp");
     println!("cargo:rerun-if-changed=metal/fused_attention_metal4.metal");

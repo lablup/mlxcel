@@ -225,6 +225,19 @@ mod ffi {
         /// independent error so tests can exercise consuming read boundaries.
         fn array_with_failed_event_for_test() -> UniquePtr<MlxArray>;
 
+        /// Test-only (issue #1792). Run fixed graph `graph` on `(a, b)`
+        /// eagerly (`mode` 0), through `mlx::core::compile` (1), or through
+        /// a shapeless compile (2), and return the evaluated output. The
+        /// graphs (comparisons, `isnan` / `isinf`, the min-p filter, mixed
+        /// bf16/f32 arithmetic) are listed in `compiled_dtype_cast_tests.rs`.
+        /// Errors on an unknown graph or mode.
+        fn compile_dtype_probe_for_test(
+            graph: i32,
+            a: &MlxArray,
+            b: &MlxArray,
+            mode: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
         /// Fallible counterpart of [`array_to_raw_bytes`].
         ///
         /// Makes the array contiguous, evaluates it, and copies the bytes out,
@@ -4074,6 +4087,14 @@ mod array_evaluated_bytes_tests;
 #[cfg(test)]
 #[path = "one_bit_tests.rs"]
 mod one_bit_tests;
+
+// Compiled kernels must agree with eager evaluation on comparisons, isnan /
+// isinf, the min-p filter and mixed bf16/f32 arithmetic (issue #1792: the Metal
+// compiled-kernel overlay cast comparison operands to bool). Runs on every GPU
+// backend.
+#[cfg(test)]
+#[path = "compiled_dtype_cast_tests.rs"]
+mod compiled_dtype_cast_tests;
 
 // CPU quantized matmul accumulates in f32 for bf16 and f16 activations (issue
 // #2248): affine transposed and plain, 3/4/6/8-bit, and MXFP4, each against a
