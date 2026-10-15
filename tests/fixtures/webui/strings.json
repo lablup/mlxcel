@@ -170,8 +170,8 @@
     },
     {
       "key": "connection.mode.model_free",
-      "en": "Multi-model, none loaded",
-      "ko": "다중 모델, 로드된 모델 없음",
+      "en": "Multi-model, no models",
+      "ko": "다중 모델, 등록된 모델 없음",
       "test_id": "connection-mode-model-free"
     },
     {

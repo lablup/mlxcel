@@ -110,7 +110,7 @@ test('the toolbar names the server-loaded model and its chip opens the inspector
   await expect(page.getByRole('complementary', { name: 'Model details' })).toContainText('alpha');
   // The footer keeps identity and hides the internal counters in a collapsed disclosure.
   const footer = page.locator('.desktop-sidebar footer');
-  await expect(footer.getByTestId('connection-ready')).toHaveText(/^Multi-model, none loaded · \S+ · v0\.7\.0$/);
+  await expect(footer.getByTestId('connection-ready')).toHaveText(/^Multi-model, no models · \S+ · v0\.7\.0$/);
   await expect(footer.getByTestId('connection-footer-instance')).toBeHidden();
   await footer.getByText('Connection details', { exact: true }).click();
   await expect(footer.getByTestId('connection-footer-instance')).toHaveText('Server instance: srv_20260912_a');

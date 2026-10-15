@@ -45,6 +45,16 @@ describe('Settings > Server startup values', () => {
   let cleanup: (() => void) | null = null;
   afterEach(() => { cleanup?.(); cleanup = null; });
 
+  it('keeps a list of structured items as sub-rows and joins a list of plain values', async () => {
+    const nested: SettingSpec = { name: 'nested_probe', type: 'object', default: { peers: [{ host: 'a.test', port: 9100 }], tags: ['x', 'y'] }, mutable: false, allowed: null, help: 'Startup server configuration.', reason: 'restart required' };
+    const rendered = await renderServerTab('en', { schema: [nested], current: {}, fingerprint: 'a'.repeat(64) });
+    cleanup = rendered.unmount;
+    const texts = startupCells(rendered.host).map((cell) => cell.textContent ?? '');
+    expect(texts.filter((text) => DEBUG_SHAPE.test(text))).toEqual([]);
+    expect(texts).toContain('x, y');
+    expect(texts).toContain('a.test');
+  });
+
   for (const locale of ['en', 'ko'] as const) {
     it(`prints no Debug or JSON shape in any value cell (${locale})`, async () => {
       const rendered = await renderServerTab(locale, { schema: specs, current: {}, fingerprint: 'a'.repeat(64) });

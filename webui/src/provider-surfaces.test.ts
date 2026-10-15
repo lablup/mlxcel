@@ -71,7 +71,7 @@ describe('modelSelectionFor', () => {
 describe('connection footer', () => {
   it('prints mode, status and version without the internal sequence', () => {
     const state = { ...snapshot(), lastSequence: 42 };
-    expect(connectionFooterLabel('en', state)).toBe('Multi-model, none loaded · ready · v0.7.0');
+    expect(connectionFooterLabel('en', state)).toBe('Multi-model, no models · ready · v0.7.0');
     expect(connectionFooterLabel('en', state)).not.toContain('42');
     expect(connectionFooterLabel('en', initialSnapshot())).toBe('Shell loaded; local API not connected');
   });

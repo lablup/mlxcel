@@ -41,7 +41,11 @@ const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
 function nestedValue(locale: Locale, value: unknown): React.ReactNode {
   if (value === null || value === undefined || Array.isArray(value) && value.length === 0) return t(locale, 'settings.value.unset');
   if (isRecord(value)) return <StartupSubValues locale={locale} value={value} />;
-  if (Array.isArray(value)) return value.map((item) => isRecord(item) || Array.isArray(item) ? JSON.stringify(item) : String(item)).join(', ');
+  if (Array.isArray(value)) {
+    // A list of structured items stays sub-rows per item; a list of plain values reads as one line.
+    if (value.some((item) => isRecord(item) || Array.isArray(item))) return value.map((item, index) => <React.Fragment key={index}>{nestedValue(locale, item)}</React.Fragment>);
+    return value.map(String).join(', ');
+  }
   return String(value);
 }
 

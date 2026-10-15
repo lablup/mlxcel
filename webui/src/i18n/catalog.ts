@@ -232,7 +232,7 @@ export const entries: Entry[] = [
   { key: 'connection.footer.details', en: 'Connection details', ko: '연결 세부 정보', test_id: 'connection-footer-details' },
   { key: 'connection.footer.instance', en: 'Server instance: {id}', ko: '서버 인스턴스: {id}', test_id: 'connection-footer-instance' },
   { key: 'connection.footer.sequence', en: 'Event sequence: {sequence}', ko: '이벤트 순번: {sequence}', test_id: 'connection-footer-sequence' },
-  { key: 'connection.mode.model_free', en: 'Multi-model, none loaded', ko: '다중 모델, 로드된 모델 없음', test_id: 'connection-mode-model-free' },
+  { key: 'connection.mode.model_free', en: 'Multi-model, no models', ko: '다중 모델, 등록된 모델 없음', test_id: 'connection-mode-model-free' },
   { key: 'connection.mode.single_model', en: 'Single model', ko: '단일 모델', test_id: 'connection-mode-single-model' },
   { key: 'connection.mode.router_pool', en: 'Multi-model', ko: '다중 모델', test_id: 'connection-mode-router-pool' },
   { key: 'connection.mode.unknown', en: 'Server', ko: '서버', test_id: 'connection-mode-unknown' },
