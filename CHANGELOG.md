@@ -23,6 +23,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `--prompt-lookup` runs as a token-only drafter (`PromptLookupDrafter`) on the engine, so it works over any model whose KV state can drop a rejected block, and it pipelines its plain rounds as before. `PromptLookupGenerator` and `CxxGenerator` are removed from the public API (`MlxInferenceSession` and `mlxcel_core::engine::DirectEngine` replace them).
 - `mlxcel generate --profile` reports the sampler graph build and the first evaluation as one phase: the `[TTFT]` line's `sample` is 0 and `eval` carries both. The line is printed for the measured run only, not for the one-token warmup. `mlxcel-bench-decode` and the parity harness render the chat template through the same function as the server and `generate` (`server::chat_front`), so their prompts carry the same `enable_thinking` default.
 
+### Fixed
+
+- Checkpoints that load through the SentencePiece fallback (a `tokenizer.model` with no `tokenizer.json`) now encode their `"special": false` added tokens as the one id each was declared with, as `transformers` does, instead of splitting them into ordinary pieces (#1758). IQuest-Coder and IQuest-Coder Loop tool-calling prompts now carry `<tools>`, `<tool_call>`, `<tool_response>` and their closers as single ids, Baichuan-M1's `<C_A>` turn marker and ERNIE-4.5-VL's `<|IMAGE_PLACEHOLDER|>` and `<|LOC_n|>` tokens do the same, and each added token's `lstrip`, `rstrip` and `single_word` flags are honored. `skip_special_tokens` still drops only the special ones.
+
 ## [v0.7.0] - 2026-09-09
 
 ### llama-server b10621 compatibility, complete

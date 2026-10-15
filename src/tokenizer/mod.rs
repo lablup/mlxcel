@@ -15,6 +15,7 @@
 mod added_tokens;
 pub mod fim;
 pub mod pieces;
+mod sp_added_vocab;
 mod spm_proto;
 mod thinking;
 mod tiktoken;
@@ -39,16 +40,20 @@ pub enum MlxcelTokenizer {
 
 pub struct SentencePieceTokenizer {
     processor: SentencePieceProcessor,
+    /// Special added tokens, which `skip_special_tokens` drops on decode.
     special_token_to_id: HashMap<String, u32>,
     id_to_special_token: HashMap<u32, String>,
-    /// Special tokens sorted by length descending for greedy longest-match-first splitting
-    special_tokens_sorted: Vec<(String, u32)>,
-    /// Every `added_tokens_decoder` entry (special or not) by id. Added tokens
-    /// live OUTSIDE the SentencePiece vocab, so `decode_piece_ids` errors
-    /// "Out of range" on them; decode must map them from this table instead.
-    /// Non-special added tokens (e.g. ERNIE's `<|IMAGE_PLACEHOLDER|>`, marked
-    /// `special: false`) are real text per HF semantics and are never skipped.
+    /// Non-special added tokens by id. Added tokens live OUTSIDE the
+    /// SentencePiece vocab, so `decode_piece_ids` errors "Out of range" on
+    /// them; decode must map them from this table instead. Non-special added
+    /// tokens (e.g. ERNIE's `<|IMAGE_PLACEHOLDER|>`, IQuest-Coder's
+    /// `<tool_call>`, marked `special: false`) are real text per HF semantics
+    /// and are never skipped.
     added_token_contents: HashMap<u32, String>,
+    /// Every added token, special or not, for the encode-side split (#1758).
+    /// HuggingFace matches all of them on encode; `special` only governs
+    /// decode-side skipping and `parse_special: false`.
+    added_vocab: sp_added_vocab::SpAddedVocab,
     bos_id: Option<u32>,
     add_bos: bool,
     /// Byte-fallback token ids, resolved on first use. See
@@ -705,29 +710,29 @@ impl SentencePieceTokenizer {
 
     fn new(
         processor: SentencePieceProcessor,
-        special_tokens: HashMap<String, u32>,
-        added_token_contents: HashMap<u32, String>,
+        added_tokens: Vec<(u32, tokenizers::AddedToken)>,
         bos_id: Option<u32>,
         add_bos: bool,
     ) -> Self {
-        let id_to_special_token: HashMap<u32, String> = special_tokens
-            .iter()
-            .map(|(k, &v)| (v, k.clone()))
-            .collect();
-
-        let mut special_tokens_sorted: Vec<(String, u32)> = special_tokens
-            .iter()
-            .map(|(k, &v)| (k.clone(), v))
-            .collect();
-        // Sort by length descending for greedy longest-match-first
-        special_tokens_sorted.sort_by_key(|a| std::cmp::Reverse(a.0.len()));
+        let added_vocab = sp_added_vocab::SpAddedVocab::new(&added_tokens);
+        let mut special_token_to_id = HashMap::new();
+        let mut id_to_special_token = HashMap::new();
+        let mut added_token_contents = HashMap::new();
+        for (id, token) in added_tokens {
+            if token.special {
+                special_token_to_id.insert(token.content.clone(), id);
+                id_to_special_token.insert(id, token.content);
+            } else {
+                added_token_contents.insert(id, token.content);
+            }
+        }
 
         Self {
             processor,
-            special_token_to_id: special_tokens,
+            special_token_to_id,
             id_to_special_token,
-            special_tokens_sorted,
             added_token_contents,
+            added_vocab,
             bos_id,
             add_bos,
             byte_fallback_ids: std::sync::OnceLock::new(),
@@ -737,31 +742,27 @@ impl SentencePieceTokenizer {
     /// Encode without recognizing special-token spellings written into the
     /// input text (`parse_special: false`, #1442).
     ///
-    /// The BOS prefix is still governed by `add_special_tokens`, which is a
-    /// separate switch upstream too.
+    /// Non-special added tokens are still recognized, as llama.cpp does for
+    /// user-defined tokens and the `tokenizers` backend does under
+    /// `set_encode_special_tokens(true)` (#1758). The BOS prefix is still
+    /// governed by `add_special_tokens`, which is a separate switch upstream
+    /// too.
     fn encode_without_special_parsing(
         &self,
         text: &str,
         add_special_tokens: bool,
     ) -> Result<Vec<u32>> {
-        let mut result = Vec::new();
-        if add_special_tokens
-            && self.add_bos
-            && let Some(bos) = self.bos_id
-        {
-            result.push(bos);
-        }
-        let pieces = self
-            .processor
-            .encode(text)
-            .map_err(|e| anyhow::anyhow!("SentencePiece encode failed: {}", e))?;
-        result.extend(pieces.iter().map(|piece| piece.id));
-        Ok(result)
+        self.encode_split(text, add_special_tokens, false)
     }
 
     /// The id a vocabulary entry holds, by its exact spelling.
     fn token_to_id(&self, token: &str) -> Option<u32> {
         if let Some(&id) = self.special_token_to_id.get(token) {
+            return Some(id);
+        }
+        // Non-special added tokens resolve too (#1758): they are in the
+        // added vocabulary exactly like the special ones.
+        if let Some(id) = self.added_vocab.id_of(token) {
             return Some(id);
         }
         // `piece_to_id` answers `Some(unk_id)` for an unknown piece on some
@@ -812,47 +813,37 @@ impl SentencePieceTokenizer {
     }
 
     fn encode(&self, text: &str, add_special_tokens: bool) -> Result<Vec<u32>> {
-        let mut result = Vec::new();
+        self.encode_split(text, add_special_tokens, true)
+    }
 
-        // Prepend BOS if configured
+    /// Split `text` on the added tokens (all of them, or only the non-special
+    /// ones when `parse_special` is off), emit each matched token as its id
+    /// and encode the text between them with the SentencePiece model.
+    fn encode_split(
+        &self,
+        text: &str,
+        add_special_tokens: bool,
+        parse_special: bool,
+    ) -> Result<Vec<u32>> {
+        let mut result = Vec::new();
         if add_special_tokens
             && self.add_bos
             && let Some(bos) = self.bos_id
         {
             result.push(bos);
         }
-
-        if self.special_tokens_sorted.is_empty() {
-            // No special tokens to handle — encode directly
-            let pieces = self
-                .processor
-                .encode(text)
-                .map_err(|e| anyhow::anyhow!("SentencePiece encode failed: {}", e))?;
-            for piece in &pieces {
-                result.push(piece.id);
-            }
-            return Ok(result);
-        }
-
-        // Split text at special token boundaries (greedy longest-match-first)
-        let segments = self.split_with_special_tokens(text);
-
-        for segment in segments {
-            if let Some(&id) = self.special_token_to_id.get(&segment) {
-                // This segment is a special token — insert its ID directly
-                result.push(id);
-            } else {
-                // Regular text — encode via sentencepiece
-                let pieces = self
-                    .processor
-                    .encode(&segment)
-                    .map_err(|e| anyhow::anyhow!("SentencePiece encode failed: {}", e))?;
-                for piece in &pieces {
-                    result.push(piece.id);
+        for piece in self.added_vocab.split(text, parse_special) {
+            match piece {
+                sp_added_vocab::Piece::Token(id) => result.push(id),
+                sp_added_vocab::Piece::Text(segment) => {
+                    let pieces = self
+                        .processor
+                        .encode(&segment)
+                        .map_err(|e| anyhow::anyhow!("SentencePiece encode failed: {}", e))?;
+                    result.extend(pieces.iter().map(|piece| piece.id));
                 }
             }
         }
-
         Ok(result)
     }
 
@@ -904,43 +895,6 @@ impl SentencePieceTokenizer {
 
         Ok(result)
     }
-
-    /// Split text into segments, alternating between special tokens and regular text.
-    /// Uses greedy longest-match-first strategy.
-    fn split_with_special_tokens(&self, text: &str) -> Vec<String> {
-        let mut segments = Vec::new();
-        let mut remaining = text;
-
-        while !remaining.is_empty() {
-            // Try to match a special token at the current position
-            let mut matched = false;
-            for (token, _id) in &self.special_tokens_sorted {
-                if remaining.starts_with(token.as_str()) {
-                    segments.push(token.clone());
-                    remaining = &remaining[token.len()..];
-                    matched = true;
-                    break;
-                }
-            }
-
-            if !matched {
-                // Find the next special token occurrence
-                let mut next_pos = remaining.len();
-                for (token, _id) in &self.special_tokens_sorted {
-                    if let Some(pos) = remaining.find(token.as_str())
-                        && pos < next_pos
-                    {
-                        next_pos = pos;
-                    }
-                }
-                // Everything before the next special token is regular text
-                segments.push(remaining[..next_pos].to_string());
-                remaining = &remaining[next_pos..];
-            }
-        }
-
-        segments
-    }
 }
 
 /// What `tokenizer_config.json` says about a SentencePiece checkpoint.
@@ -949,11 +903,10 @@ impl SentencePieceTokenizer {
 /// SentencePiece loader needs all of it and the set has grown twice.
 #[derive(Debug)]
 struct SentencePieceConfig {
-    /// Special-token spelling to id, from `added_tokens_decoder`.
-    special_tokens: HashMap<String, u32>,
-    /// Non-special added tokens, id to content; these live outside the
-    /// SentencePiece vocabulary and must be decoded from this map.
-    added_token_contents: HashMap<u32, String>,
+    /// Every added token with its flags, special or not, from
+    /// `added_tokens_decoder` (or `added_tokens.json` when the decoder table
+    /// is absent). See [`sp_added_vocab::read_sp_added_tokens`].
+    added_tokens: Vec<(u32, tokenizers::AddedToken)>,
     /// `add_bos_token`, defaulting to false when the key is absent.
     add_bos: bool,
     /// `add_prefix_space`, kept as an `Option` because "absent" and
@@ -963,17 +916,19 @@ struct SentencePieceConfig {
     add_prefix_space: Option<bool>,
 }
 
-/// Parse special tokens from tokenizer_config.json's `added_tokens_decoder` field
+/// Read the SentencePiece-relevant parts of `tokenizer_config.json`: the
+/// added tokens, `add_bos_token` and `add_prefix_space`.
 fn parse_special_tokens(model_path: &Path) -> SentencePieceConfig {
     let config_path = model_path.join("tokenizer_config.json");
-    let mut special_tokens = HashMap::new();
-    let mut added_token_contents = HashMap::new();
     let mut add_bos = false;
     let mut add_prefix_space = None;
 
-    if let Ok(content) = std::fs::read_to_string(&config_path)
-        && let Ok(config) = serde_json::from_str::<serde_json::Value>(&content)
-    {
+    let config = std::fs::read_to_string(&config_path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok());
+    let added_tokens = sp_added_vocab::read_sp_added_tokens(config.as_ref(), model_path);
+
+    if let Some(config) = &config {
         // Parse add_bos_token
         if let Some(v) = config.get("add_bos_token").and_then(|v| v.as_bool()) {
             add_bos = v;
@@ -983,37 +938,10 @@ fn parse_special_tokens(model_path: &Path) -> SentencePieceConfig {
         // key must stay `None` so the SentencePiece model keeps its own
         // setting.
         add_prefix_space = config.get("add_prefix_space").and_then(|v| v.as_bool());
-
-        // Parse added_tokens_decoder: { "128132": { "content": "<|im_start|>", "special": true }, ... }
-        if let Some(decoder) = config
-            .get("added_tokens_decoder")
-            .and_then(|v| v.as_object())
-        {
-            for (id_str, entry) in decoder {
-                if let (Ok(id), Some(content)) = (
-                    id_str.parse::<u32>(),
-                    entry.get("content").and_then(|v| v.as_str()),
-                ) {
-                    let is_special = entry
-                        .get("special")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-                    if is_special {
-                        special_tokens.insert(content.to_string(), id);
-                    } else {
-                        // Non-special added tokens (outside the SentencePiece
-                        // vocab) still need an id -> content mapping so decode
-                        // can render them instead of erroring "Out of range".
-                        added_token_contents.insert(id, content.to_string());
-                    }
-                }
-            }
-        }
     }
 
     SentencePieceConfig {
-        special_tokens,
-        added_token_contents,
+        added_tokens,
         add_bos,
         add_prefix_space,
     }
@@ -1915,13 +1843,8 @@ pub fn load_tokenizer(model_path: &Path) -> Result<MlxcelTokenizer> {
 
         let bos_id = processor.bos_id();
 
-        let sp_tokenizer = SentencePieceTokenizer::new(
-            processor,
-            config.special_tokens,
-            config.added_token_contents,
-            bos_id,
-            config.add_bos,
-        );
+        let sp_tokenizer =
+            SentencePieceTokenizer::new(processor, config.added_tokens, bos_id, config.add_bos);
         return Ok(MlxcelTokenizer::SentencePiece(sp_tokenizer));
     }
 
@@ -3443,23 +3366,18 @@ mod tests {
     /// two could drift.
     const IQUEST_LOOP_MODEL_DIR: &str = "models/mlx/iquest-coder-v1-40b-loop-instruct-4bit";
 
-    /// The Loop checkpoint's added tokens, split by what the SentencePiece
-    /// loader actually does with each half.
+    /// The Loop checkpoint's added tokens all round-trip, special or not.
     ///
-    /// `added_tokens_decoder` marks 19 of the 27 entries `"special": true`;
-    /// those are the chat scaffold (`<|im_start|>`, `<|im_end|>`, the FIM and
-    /// repo markers, `<|endoftext|>`) and they round-trip in both directions.
-    /// The other 8 are the thinking and tool-call tags, marked
-    /// `"special": false`, and [`parse_special_tokens`] deliberately keeps
-    /// those decode-only: they render correctly from an id but do not fold back
-    /// into one id on encode, splitting into their SentencePiece pieces
-    /// instead. That is a property of the shared SentencePiece loader, not of
-    /// this checkpoint, and it is asserted here rather than glossed over so the
-    /// difference from HuggingFace (which matches every `added_tokens_decoder`
-    /// entry on encode regardless of `special`) is written down where the next
-    /// reader of this family will find it. It is observable only on a
-    /// tool-calling prompt: `chat_template.jinja` emits the six tool tags
-    /// literally and emits neither `<think>` nor `</think>`.
+    /// `added_tokens_decoder` marks 19 of the 27 entries `"special": true`
+    /// (the chat scaffold: `<|im_start|>`, `<|im_end|>`, the FIM and repo
+    /// markers, `<|endoftext|>`) and the other 8, the thinking and tool-call
+    /// tags, `"special": false`. HuggingFace matches every entry on encode
+    /// regardless of `special`, and so does the SentencePiece loader since
+    /// #1758; before that the 8 non-special tags were decode-only and split
+    /// into 3 to 5 SentencePiece pieces on encode, which a tool-calling prompt
+    /// (`chat_template.jinja` emits the six tool tags literally) exposed.
+    /// `special` still decides what `skip_special_tokens` drops, which this
+    /// test pins too.
     #[test]
     fn the_iquest_loop_coder_tokenizer_round_trips_its_added_tokens() {
         let model_dir = std::path::Path::new(IQUEST_LOOP_MODEL_DIR);
@@ -3522,30 +3440,28 @@ mod tests {
                 "{content} must decode back to itself"
             );
 
+            // Every entry, special or not, resolves and encodes as one id.
+            assert_eq!(
+                tokenizer.token_to_id(content),
+                Some(id),
+                "{content} must resolve to the id the checkpoint declares"
+            );
+            assert_eq!(
+                tokenizer.encode(content, true).unwrap(),
+                vec![id],
+                "{content} must encode as exactly one id, not as several pieces"
+            );
+
+            // `special` governs decode-side skipping only.
             if entry["special"].as_bool().unwrap_or(false) {
                 specials += 1;
-                assert_eq!(
-                    tokenizer.token_to_id(content),
-                    Some(id),
-                    "{content} must resolve to the id the checkpoint declares"
-                );
-                assert_eq!(
-                    tokenizer.encode(content, true).unwrap(),
-                    vec![id],
-                    "{content} must encode as exactly one id, not as several pieces"
-                );
+                assert_eq!(tokenizer.decode(&[id], true).unwrap(), "");
             } else {
                 non_specials += 1;
                 assert_eq!(
-                    tokenizer.token_to_id(content),
-                    None,
-                    "non-special added tokens are decode-only on this path; if {content} now \
-                     resolves, the loader changed and this test should assert the round trip \
-                     instead of the gap"
-                );
-                assert!(
-                    tokenizer.encode(content, true).unwrap().len() > 1,
-                    "{content} is expected to split into pieces on encode today"
+                    tokenizer.decode(&[id], true).unwrap(),
+                    content,
+                    "{content} is not special, so skip_special_tokens must keep it"
                 );
             }
         }
@@ -3568,5 +3484,72 @@ mod tests {
 
         // All three stop ids resolve, not just `eos_token`.
         assert_eq!(crate::read_eos_token_ids(model_dir), vec![2, 75864, 75869]);
+    }
+
+    /// A tool-calling prompt rendered through each IQuest checkpoint's own
+    /// `chat_template.jinja` carries the six tool tags as one reserved id
+    /// each (#1758), on both the plain `iquestcoder` and the Loop checkpoint.
+    #[test]
+    fn iquest_tool_prompts_encode_each_tool_tag_as_one_id() {
+        const TOOL_TAGS: [(&str, u32); 6] = [
+            ("<tools>", 75874),
+            ("</tools>", 75875),
+            ("<tool_call>", 75876),
+            ("</tool_call>", 75877),
+            ("<tool_response>", 75878),
+            ("</tool_response>", 75879),
+        ];
+        for dir in [IQUEST_MODEL_DIR, IQUEST_LOOP_MODEL_DIR] {
+            let model_dir = std::path::Path::new(dir);
+            if !model_dir.join("chat_template.jinja").exists() {
+                crate::test_support::pinned_checkpoint::skip_or_fail_pinned_checkpoint(
+                    "iquest_tool_prompts_encode_each_tool_tag_as_one_id",
+                    &format!("IQuest checkpoint not present at {}", model_dir.display()),
+                );
+                continue;
+            }
+            let tokenizer = load_tokenizer(model_dir).expect("load IQuest tokenizer");
+            let template =
+                crate::server::chat_template::ChatTemplateProcessor::from_model_path(model_dir)
+                    .expect("read chat template")
+                    .expect("IQuest ships a chat template");
+            let tools: Vec<crate::server::types::Tool> =
+                serde_json::from_value(serde_json::json!([{
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "Get the current weather for a city",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                            "required": ["city"]
+                        }
+                    }
+                }]))
+                .expect("tool schema");
+            let messages = serde_json::json!([
+                {"role": "user", "content": "What is the weather in Seoul?"},
+                {"role": "assistant", "content": "", "tool_calls": [{
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": {"city": "Seoul"}}
+                }]},
+                {"role": "tool", "content": "{\"temp_c\": 18}"}
+            ]);
+            let prompt = template
+                .apply_raw(&messages, Some(&tools))
+                .expect("render tool prompt");
+            let ids = tokenizer.encode(&prompt, true).unwrap();
+            for (tag, id) in TOOL_TAGS {
+                let spelled = prompt.matches(tag).count();
+                assert!(spelled > 0, "{dir}: the template must emit {tag}");
+                assert_eq!(
+                    ids.iter().filter(|&&t| t == id).count(),
+                    spelled,
+                    "{dir}: every {tag} in the rendered prompt must be the single id {id}"
+                );
+            }
+            // The tags are not also present as text: decoding round-trips.
+            assert_eq!(tokenizer.decode(&ids, false).unwrap(), prompt);
+        }
     }
 }
