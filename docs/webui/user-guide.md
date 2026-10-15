@@ -113,7 +113,7 @@ Selecting a model in Models or Chat only selects it. **Load** starts a server op
 
 **Unload** stops new requests to the model, waits for the active ones to finish (draining), and only then releases the worker. Its memory counts as in use until the server observes the worker exit. Closing a browser tab never unloads a model.
 
-**Delete** removes a checkpoint's files from the managed store. It is a different action from Unload: Unload keeps the files, Delete removes them. Only managed-store entries can be deleted, never `--models-dir` directories or preset paths, never a model that is loading, loaded, downloading, or draining, and only after you type `DELETE` in the confirmation.
+**Delete** removes a checkpoint's files from the managed store. It is a different action from Unload: Unload keeps the files, Delete removes them. Only managed-store entries can be deleted, never `--models-dir` directories or preset paths, never a model that is loading, loaded, downloading, or draining, and only after you type the model's opaque ID (shown in the dialog, starting with `mdl_`), not its name, in the confirmation.
 
 **Add model** downloads a public Hugging Face repository by its `owner/name` id into the managed store. URLs and local paths are refused before any request is made. Downloads are anonymous: the server sends no Hugging Face token, even when `HF_TOKEN` is set, so a private or gated repository fails at its metadata check, before any file is written. Private Hub authentication is not part of this release. A download can be cancelled; the cancellation finishes only once the downloader has stopped, and a partial download is never shown as complete. Loads and unloads cannot be cancelled once accepted.
 
