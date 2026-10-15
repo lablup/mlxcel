@@ -573,6 +573,8 @@ python3 scripts/compare_logit_traces.py chain.tsv block.tsv --decided 2
 python3 scripts/compare_logit_traces.py chain.tsv verify.tsv --decided 2
 ```
 
+Every chunk starts at the tokenizer's BOS, chunk 0 included: without `PREFILL` the BOS is prepended to the traced forward, and with it the BOS leads the context pass (alone, for a chunk with no history), so the traced forward keeps the chunk's width. The trace records this in a `# bos_anchor` metadata line. Traces written before #1785 lack that line and left chunk 0 unanchored, which on a model trained behind a document separator collapses the first chunk (Laguna XS 2.1 read perplexity about 1000 there against about 18 in an anchored chunk), so do not compare an older trace with a newer one at chunk 0; regenerate both arms with the same build of the harness. `scripts/laguna_oracle_trace.py` follows the same rule.
+
 The metric to gate on is **disagreement on decided positions**: the fraction
 of positions where the reference's own top two were more than a stated gap
 apart and the candidate still picked something else. A position the reference

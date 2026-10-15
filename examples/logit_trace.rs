@@ -89,6 +89,12 @@
 // traced, and the remaining rows are traced from a forward at the chunk's own
 // width. That is the shape a real verify runs at, long context and narrow
 // forward, which a bare small chunk does not reproduce.
+//
+// Every chunk, chunk 0 included, is anchored by the tokenizer's BOS: without
+// `PREFILL` it is prepended to the traced forward, with `PREFILL` it leads the
+// context pass (alone, for a chunk with no history). The `# bos_anchor`
+// metadata line records it; traces without that line left chunk 0 unanchored
+// and are not comparable with newer ones at chunk 0.
 
 #[path = "logit_trace/gemma4.rs"]
 mod gemma4;
@@ -229,7 +235,12 @@ fn main() -> Result<()> {
     // Same BOS anchoring as `examples/perplexity`, and for the same reason
     // (#686): the Gemma family collapses on a BOS-less window, so a
     // mid-corpus chunk scored raw measures the missing anchor rather than
-    // the change under test.
+    // the change under test. Every chunk carries it, chunk 0 included
+    // (#1785): the corpus is encoded without special tokens, so chunk 0
+    // starts unanchored too, and on Laguna XS 2.1 at width 256 that alone
+    // read as perplexity ~1000 against ~17.8 for an anchored chunk. The
+    // corpus stays encoded without special tokens because adding them would
+    // shift every chunk boundary, not just chunk 0's.
     let bos_prefix: Vec<i32> = tokenizer
         .encode("", true)
         .map(|ids| ids.into_iter().take(1).map(|t| t as i32).collect())
@@ -245,6 +256,18 @@ fn main() -> Result<()> {
         "# chunks\t{n_chunks}\tchunk_tokens\t{chunk_tokens}\ttopk\t{topk}\tprefill\t{prefill}"
     );
     println!("# columns\tchunk\tpos\ttarget\tnll\ttop_ids\ttop_logits");
+    // Traces written before #1785 left chunk 0 unanchored, so their chunk-0
+    // rows are not comparable with a trace that carries this line.
+    let bos_anchor = if bos_prefix.is_empty() {
+        "none".to_string()
+    } else {
+        bos_prefix
+            .iter()
+            .map(i32::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    println!("# bos_anchor\t{bos_anchor}\tchunks\tall");
 
     println!("# start_token\t{start_token}");
     if let Ok(mode) = std::env::var("MLXCEL_TRACE_GEMMA4") {
@@ -260,7 +283,7 @@ fn main() -> Result<()> {
             // The context pass already carried the anchor and the history, so
             // the traced forward is the continuation itself.
             (seg[..(l as usize - 1)].to_vec(), 0i32)
-        } else if c == 0 || bos_prefix.is_empty() {
+        } else if bos_prefix.is_empty() {
             (seg[..(l as usize - 1)].to_vec(), 0i32)
         } else {
             let mut with_bos = bos_prefix.clone();
@@ -279,12 +302,14 @@ fn main() -> Result<()> {
         let mut caches = model.make_caches();
         // Optional context pass. Its rows are discarded; it exists so the
         // traced forward runs at the chunk's width against a realistic
-        // context rather than against nothing.
+        // context rather than against nothing. A chunk with no history (chunk
+        // 0 at the corpus head) still gets the anchor alone, so the traced
+        // forward keeps the chunk's width and `target_offset` stays 0.
         if prefill > 0 && (!contiguous || c == 0) {
             let ctx_from = start.saturating_sub(prefill);
-            if ctx_from < start {
-                let mut ctx: Vec<i32> = bos_prefix.clone();
-                ctx.extend_from_slice(&ids[ctx_from..start]);
+            let mut ctx: Vec<i32> = bos_prefix.clone();
+            ctx.extend_from_slice(&ids[ctx_from..start]);
+            if !ctx.is_empty() {
                 let ctx_len = ctx.len() as i32;
                 if let Some(mode) = gemma4_mode {
                     mode.prefill(&model, &ctx, chunk_tokens)?;

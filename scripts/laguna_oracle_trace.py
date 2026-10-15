@@ -44,10 +44,10 @@ to `logit_trace`, including its fallback to the default for a value that does
 not parse. The token stream is the same: `tokenizer.json` with mlxcel's BOS
 post-processor rule, the corpus encoded without special tokens, the BOS anchor
 taken from `encode("", add_special_tokens=True)[:1]`, the per-chunk `seg`
-slice, a BOS in front of every chunk after the first when PREFILL is 0, and a
-context pass of `BOS + PREFILL` history tokens in front of every chunk after
-the first when it is not (chunk 0 then has neither). Rows, targets, NLL and
-the sorted top-k columns are the same.
+slice, a BOS in front of every chunk (chunk 0 included) when PREFILL is 0, and
+a context pass of `BOS + PREFILL` history tokens in front of every chunk when
+it is not (chunk 0 at the corpus head has no history, so its context pass is
+the BOS alone). Rows, targets, NLL and the sorted top-k columns are the same.
 
 What is not reproduced, on purpose. `logit_trace` runs the context pass and
 the traced forward at CHUNK_TOKENS width because MLX picks a kernel by width.
@@ -192,13 +192,11 @@ def plan_chunks(
         seg = ids[c * chunk_tokens : (c + 1) * chunk_tokens + 1]
         traced = seg[:-1]
         if prefill > 0:
-            # The context pass carries the anchor and the history, and chunk 0
-            # has no history, so it gets neither.
+            # The context pass carries the anchor and the history; chunk 0 has
+            # no history, so its context pass is the anchor alone (#1785).
             start = c * chunk_tokens
             ctx_from = max(start - prefill, 0)
-            context = bos_prefix + ids[ctx_from:start] if ctx_from < start else []
-        elif c == 0 or not bos_prefix:
-            context = []
+            context = bos_prefix + ids[ctx_from:start]
         else:
             context = list(bos_prefix)
         chunks.append(Chunk(c, tuple(seg[1:]), tuple(context + traced), len(context)))
@@ -539,6 +537,8 @@ def main(argv: list[str] | None = None) -> int:
         f"# forwards\t{len(groups)}\tprefix_sharing\t{str(not args.no_prefix_sharing).lower()}\n"
     )
     out.write("# columns\tchunk\tpos\ttarget\tnll\ttop_ids\ttop_logits\n")
+    bos_anchor = ",".join(str(t) for t in bos_prefix) or "none"
+    out.write(f"# bos_anchor\t{bos_anchor}\tchunks\tall\n")
     for chunk in chunks:
         nll, top_ids, top_logits = results[chunk.index]
         for j, target in enumerate(chunk.targets):
