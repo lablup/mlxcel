@@ -36,6 +36,8 @@ export function ModelSettings({ locale }: { locale: Locale }): React.JSX.Element
 }
 
 const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> => typeof value === 'object' && value !== null && !Array.isArray(value);
+/** A value shown as sub-rows spanning the whole row: a record, or a list holding records. */
+const isStructured = (value: unknown): boolean => isRecord(value) || Array.isArray(value) && value.some(isRecord);
 
 /** Where a nested value sits, for its catalog label; `null` inside the raw-name disclosure, where names stay raw. */
 type LabelPath = readonly string[] | null;
@@ -60,7 +62,7 @@ function RawValues({ locale, rows, testId }: { locale: Locale; rows: readonly (r
   return (
     <details className="settings-disclosure" data-testid={testId}>
       <summary>{t(locale, 'settings.server.startup.other')}</summary>
-      <dl className="settings-values settings-keys">{rows.map(([key, value, text]) => <div key={key} className={isRecord(value) ? 'settings-value-group' : undefined}><dt>{key}</dt><dd>{text}</dd></div>)}</dl>
+      <dl className="settings-values settings-keys">{rows.map(([key, value, text]) => <div key={key} className={isStructured(value) ? 'settings-value-group' : undefined}><dt>{key}</dt><dd>{text}</dd></div>)}</dl>
     </details>
   );
 }
@@ -90,7 +92,10 @@ function StartupValues({ locale, specs, current }: { locale: Locale; specs: read
   const valueOf = (spec: SettingSpec): unknown => Object.hasOwn(current, spec.name) ? current[spec.name] : spec.default;
   const text = (spec: SettingSpec, value: unknown, path: LabelPath): React.ReactNode => {
     if (value === null || value === undefined) return t(locale, 'settings.value.unset');
-    return isRecord(value) ? <StartupSubValues locale={locale} value={value} path={path} /> : formatSettingValue(spec, value);
+    if (isRecord(value)) return <StartupSubValues locale={locale} value={value} path={path} />;
+    // A list of structured items takes the sub-row path too; formatSettingValue would print it as JSON.
+    if (isStructured(value)) return nestedValue(locale, value, path);
+    return formatSettingValue(spec, value);
   };
   const rows = specs.map((spec) => ({ spec, value: valueOf(spec), label: startupLabel(locale, [spec.name]) }));
   const raw = rows.filter((row) => row.label === null);
@@ -98,7 +103,7 @@ function StartupValues({ locale, specs, current }: { locale: Locale; specs: read
     <section className="screen-stack" aria-labelledby={titleId}>
       <h2 id={titleId}>{t(locale, 'settings.live.startup')}</h2>
       <dl className="settings-values" data-testid="settings-startup-values">
-        {rows.filter((row) => row.label !== null).map(({ spec, value, label }) => <div key={spec.name} data-setting={spec.name} className={isRecord(value) ? 'settings-value-group' : undefined}><dt>{label}</dt><dd>{text(spec, value, [spec.name])}</dd></div>)}
+        {rows.filter((row) => row.label !== null).map(({ spec, value, label }) => <div key={spec.name} data-setting={spec.name} className={isStructured(value) ? 'settings-value-group' : undefined}><dt>{label}</dt><dd>{text(spec, value, [spec.name])}</dd></div>)}
       </dl>
       {raw.length > 0 ? <RawValues locale={locale} testId="settings-startup-other" rows={raw.map(({ spec, value }) => [spec.name, value, text(spec, value, null)] as const)} /> : null}
       {/* Server reason strings are internal wording, kept inside an explicit disclosure. */}

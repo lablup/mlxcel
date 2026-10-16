@@ -128,7 +128,7 @@ const settingsBaseStrings = [
   { key: 'settings.server.props_unavailable.title', en: 'Context unavailable', ko: '컨텍스트를 확인할 수 없음', test_id: 'settings-server-props-unavailable-title' },
   { key: 'settings.server.props_unavailable.body', en: 'The model did not answer /props. Restart with --props to observe its context.', ko: '모델이 /props에 응답하지 않았습니다. 컨텍스트를 확인하려면 --props로 재시작하세요.', test_id: 'settings-server-props-unavailable-body' },
   { key: 'settings.server.startup.failed', en: 'Startup values unavailable', ko: '시작 값을 확인할 수 없음', test_id: 'settings-server-startup-failed' },
-  { key: 'settings.server.startup.other', en: 'Values without a label (internal names)', ko: '라벨이 없는 값 (내부 이름)', test_id: 'settings-server-startup-other' },
+  { key: 'settings.server.startup.other', en: 'Other values (internal names)', ko: '기타 값 (내부 이름)', test_id: 'settings-server-startup-other' },
 ] as const;
 
 // Labels and help the UI owns for known live settings, in both locales. A schema name

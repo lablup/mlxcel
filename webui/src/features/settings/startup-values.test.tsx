@@ -106,6 +106,16 @@ describe('Settings > Server startup values', () => {
       expect(rendered.host.querySelector('[data-testid="settings-startup-other"]')).toBeNull();
     });
 
+    it(`labels a top-level list of structured items as sub-rows, not JSON (${locale})`, async () => {
+      const listed: SettingSpec = { name: 'tensor_parallel', type: 'array', default: [{ tp_size: 2 }, { tp_size: 4 }], mutable: false, allowed: null, help: 'Startup server configuration.', reason: 'restart required' };
+      const rendered = await renderServerTab(locale, { schema: [listed], current: {}, fingerprint: 'a'.repeat(64) });
+      cleanup = rendered.unmount;
+      const sub = t(locale, 'settings.startup.tensor_parallel.tp_size');
+      expect(visibleLabels(rendered.host)).toEqual([t(locale, 'settings.startup.tensor_parallel'), sub, sub]);
+      expect(startupCells(rendered.host).map((cell) => cell.textContent ?? '').filter((text) => DEBUG_SHAPE.test(text))).toEqual([]);
+      expect(rendered.host.querySelector('[data-setting="tensor_parallel"]')?.classList.contains('settings-value-group')).toBe(true);
+    });
+
     it(`keeps an unlabelled sub-field's raw name inside a disclosure (${locale})`, async () => {
       const future: SettingSpec = { name: 'tensor_parallel', type: 'object', default: { tp_size: 2, future_knob: 3 }, mutable: false, allowed: null, help: 'Startup server configuration.', reason: 'restart required' };
       const rendered = await renderServerTab(locale, { schema: [future], current: {}, fingerprint: 'a'.repeat(64) });

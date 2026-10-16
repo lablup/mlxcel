@@ -3644,8 +3644,8 @@
     },
     {
       "key": "settings.server.startup.other",
-      "en": "Values without a label (internal names)",
-      "ko": "라벨이 없는 값 (내부 이름)",
+      "en": "Other values (internal names)",
+      "ko": "기타 값 (내부 이름)",
       "test_id": "settings-server-startup-other"
     },
     {
@@ -3722,8 +3722,8 @@
     },
     {
       "key": "settings.startup.sleep_idle_seconds",
-      "en": "Sleep after idle (seconds)",
-      "ko": "유휴 후 절전(초)",
+      "en": "Idle time before sleep (seconds)",
+      "ko": "유휴 절전 대기 시간(초)",
       "test_id": "settings-startup-sleep-idle-seconds"
     },
     {
@@ -3740,14 +3740,14 @@
     },
     {
       "key": "settings.startup.model_alias",
-      "en": "Model alias",
-      "ko": "모델 별칭",
+      "en": "Served model name",
+      "ko": "서빙 모델 이름",
       "test_id": "settings-startup-model-alias"
     },
     {
       "key": "settings.startup.model_aliases",
-      "en": "Additional model aliases",
-      "ko": "추가 모델 별칭",
+      "en": "Model aliases",
+      "ko": "모델 별칭",
       "test_id": "settings-startup-model-aliases"
     },
     {
@@ -4131,7 +4131,7 @@
     {
       "key": "settings.startup.pipeline_parallel_runtime.stage_peers",
       "en": "Stage peers",
-      "ko": "단계 피어",
+      "ko": "스테이지 피어",
       "test_id": "settings-startup-pipeline-parallel-runtime-stage-peers"
     },
     {
@@ -4149,13 +4149,13 @@
     {
       "key": "settings.startup.pipeline_parallel_runtime.stage_timeout_ms",
       "en": "Stage timeout (ms)",
-      "ko": "단계 제한 시간(ms)",
+      "ko": "스테이지 제한 시간(ms)",
       "test_id": "settings-startup-pipeline-parallel-runtime-stage-timeout-ms"
     },
     {
       "key": "settings.startup.remote_pipeline_stage",
       "en": "Remote pipeline stage",
-      "ko": "원격 파이프라인 단계",
+      "ko": "원격 파이프라인 스테이지",
       "test_id": "settings-startup-remote-pipeline-stage"
     },
     {
@@ -4167,25 +4167,25 @@
     {
       "key": "settings.startup.remote_pipeline_stage.stage_index",
       "en": "Stage index",
-      "ko": "단계 번호",
+      "ko": "스테이지 번호",
       "test_id": "settings-startup-remote-pipeline-stage-stage-index"
     },
     {
       "key": "settings.startup.remote_pipeline_stage.num_stages",
       "en": "Stage count",
-      "ko": "단계 수",
+      "ko": "스테이지 수",
       "test_id": "settings-startup-remote-pipeline-stage-num-stages"
     },
     {
       "key": "settings.startup.remote_pipeline_stage.upstream_peer",
       "en": "Upstream peer",
-      "ko": "이전 단계 피어",
+      "ko": "이전 스테이지 피어",
       "test_id": "settings-startup-remote-pipeline-stage-upstream-peer"
     },
     {
       "key": "settings.startup.remote_pipeline_stage.downstream_peer",
       "en": "Downstream peer",
-      "ko": "다음 단계 피어",
+      "ko": "다음 스테이지 피어",
       "test_id": "settings-startup-remote-pipeline-stage-downstream-peer"
     },
     {
@@ -4382,8 +4382,8 @@
     },
     {
       "key": "settings.startup.kv_admission_watermark",
-      "en": "KV admission watermark",
-      "ko": "KV 수락 기준선",
+      "en": "KV admission headroom",
+      "ko": "KV 수락 여유 비율",
       "test_id": "settings-startup-kv-admission-watermark"
     },
     {

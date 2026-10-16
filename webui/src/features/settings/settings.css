@@ -43,6 +43,8 @@
 .settings-subvalues > div { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0 var(--space-2); min-width: 0; padding: 1px 0; }
 .settings-values .settings-subvalues dt { font-size: 0.8rem; }
 .settings-values .settings-subvalues dd { font-size: 0.85rem; text-align: end; }
+/* A sub-field disclosure inside a sub-row takes the full row and reads from the start. */
+.settings-subvalues .settings-disclosure { flex-basis: 100%; text-align: start; }
 .settings-reasons { display: grid; gap: var(--space-2); margin: 0; }
 .settings-reasons dt { color: var(--color-text); font-weight: 650; }
 .settings-reasons dd { margin: 0; color: var(--color-muted); font-family: ui-monospace, monospace; font-size: 0.85rem; overflow-wrap: anywhere; }

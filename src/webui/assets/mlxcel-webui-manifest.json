@@ -1,36 +1,36 @@
 {
   "budgets": {
-    "embedded_asset_bytes": 877986,
+    "embedded_asset_bytes": 878196,
     "embedded_asset_limit_bytes": 5242880,
-    "initial_js_gzip_bytes": 186613,
+    "initial_js_gzip_bytes": 186645,
     "initial_js_gzip_limit_bytes": 204800,
-    "total_js_gzip_bytes": 187225,
+    "total_js_gzip_bytes": 187256,
     "total_js_gzip_limit_bytes": 716800
   },
   "files": [
     {
       "bytes": 951,
-      "gzip_bytes": 612,
-      "path": "assets/code-highlight-2cVBePlD.js",
-      "sha256": "e070cf5297a43ba43cd188e7841036d18a37afe129a050f9a47fbb867e5d1fdc"
+      "gzip_bytes": 611,
+      "path": "assets/code-highlight-_iDoP7ib.js",
+      "sha256": "65cf5bd9f1d2cec75733ec9b6f6a9b30a54c0799cdba76edf6ddc32322628a60"
     },
     {
-      "bytes": 138018,
-      "gzip_bytes": 21913,
-      "path": "assets/index-0JVegFfJ.css",
-      "sha256": "3e21904cb5fc5fe38d2c5a554d5c864aab43063e69acb7b89e4b0a324c1ead81"
+      "bytes": 138092,
+      "gzip_bytes": 21927,
+      "path": "assets/index-B8XA_0O-.css",
+      "sha256": "26f4c4f85c6611bb19cec62d8bb9361d26e92b26c887cf50e9297e2202e211dc"
     },
     {
-      "bytes": 721065,
-      "gzip_bytes": 185624,
-      "path": "assets/index-C7nSDVtB.js",
-      "sha256": "b1f928c68a33ab94334044f3497c2aa24b03eb2d4db318f538922454c9d90f56"
+      "bytes": 721201,
+      "gzip_bytes": 185656,
+      "path": "assets/index-C4SwCRsr.js",
+      "sha256": "7917cb89794327db2a28f7511de4541a0f9fe8fbc475dd39e09964e9893cab5a"
     },
     {
       "bytes": 503,
-      "gzip_bytes": 301,
+      "gzip_bytes": 305,
       "path": "index.html",
-      "sha256": "8bdb3bc6473d39da8df5df6ac0dd9e9255e29637ac99597f09a6e77bb4d3dec4"
+      "sha256": "9162b8c3363df9c80224d7346888c1b5cd35320d4f5eb39f02b6200d2a2e1b82"
     },
     {
       "bytes": 2129,
@@ -67,5 +67,5 @@
   },
   "pnpm_version": "11.18.0",
   "schema_version": 1,
-  "source_digest_sha256": "3e8de03c3a90e87cf165b89f7b9e6d1a1e98512dfd7ccd60fcc96ff46c074f56"
+  "source_digest_sha256": "7608fee3d04185c7f911cc9bc1fc2d8c988869a38b7453fdfb50a4b494e2a6f6"
 }

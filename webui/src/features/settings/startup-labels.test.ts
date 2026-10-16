@@ -37,5 +37,7 @@ describe('Settings > Server startup labels', () => {
     expect(startupLabel('ko', ['tensor_parallel', 'tp_size'])).toBe('텐서 병렬 크기');
     expect(startupLabel('en', ['some_future_field'])).toBeNull();
     expect(startupLabel('en', ['tensor_parallel', 'some_future_sub_field'])).toBeNull();
+    // A name holding the separator must not borrow another field's label.
+    expect(startupLabel('en', ['tensor_parallel.tp_size'])).toBeNull();
   });
 });

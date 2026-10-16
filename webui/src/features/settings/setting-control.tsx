@@ -19,6 +19,8 @@ export function settingLabel(locale: Locale, name: string): { label: string; key
  * caller then shows the raw name only inside a disclosure, never as a visible label (#2334).
  */
 export function startupLabel(locale: Locale, path: readonly string[]): string | null {
+  // A name holding the separator would address another field's key (`a.b` reads as `a` > `b`).
+  if (path.some((segment) => segment.includes('.'))) return null;
   const catalogKey = `settings.startup.${path.join('.')}`;
   return STARTUP_SETTING_KEYS.has(catalogKey) ? t(locale, catalogKey as StringKey) : null;
 }
