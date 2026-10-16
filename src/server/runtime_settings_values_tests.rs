@@ -15,6 +15,7 @@
 //! Read-only `/settings` values are user copy on the WebUI Server tab, so no
 //! value may be Rust `Debug` output (issue #2329).
 
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use axum::http::HeaderValue;
@@ -52,6 +53,11 @@ const STRUCTURED_FIELDS: [&str; 12] = [
 /// Shared with `webui/src/features/settings/startup-values.test.tsx`, which
 /// renders exactly these values on the Server tab.
 const FIXTURE: &str = include_str!("../../tests/fixtures/settings/startup-values.json");
+
+/// Every read-only field and its sub-fields, shared with
+/// `webui/src/features/settings/startup-labels.test.ts`, which fails when one
+/// of them has no catalog label (issue #2334).
+const READ_ONLY_FIELDS: &str = include_str!("../../tests/fixtures/settings/read-only-fields.json");
 
 /// A bare CamelCase word such as `Hybrid` or `LongestFirst`: what `Debug`
 /// prints for a unit enum variant. Upper-case acronyms (`GET`) do not match.
@@ -168,6 +174,21 @@ fn configured() -> ServerConfig {
     }
 }
 
+/// The configured server as a remote pipeline coordinator: the other
+/// `pipeline_parallel_runtime` shape.
+fn remote_coordinator() -> ServerConfig {
+    let mut config = configured();
+    config.pipeline_parallel_runtime = Some(PipelineParallelRuntimeConfig::RemoteCoordinator(
+        RemotePipelineRuntimeConfig {
+            stage_peers: vec!["10.0.0.2:9100".to_string()],
+            transport_backend: TransportBackend::Rdma,
+            bind_address: "0.0.0.0:9000".to_string(),
+            stage_timeout: Duration::from_millis(1500),
+        },
+    ));
+    config
+}
+
 fn assert_plain(config: &ServerConfig, label: &str) {
     let mut found = Vec::new();
     for field in STRUCTURED_FIELDS {
@@ -187,15 +208,7 @@ fn structured_read_only_values_are_plain_json_for_default_and_configured_servers
     assert_plain(&ServerConfig::default(), "default");
     assert_plain(&configured(), "configured");
 
-    let mut config = configured();
-    config.pipeline_parallel_runtime = Some(PipelineParallelRuntimeConfig::RemoteCoordinator(
-        RemotePipelineRuntimeConfig {
-            stage_peers: vec!["10.0.0.2:9100".to_string()],
-            transport_backend: TransportBackend::Rdma,
-            bind_address: "0.0.0.0:9000".to_string(),
-            stage_timeout: Duration::from_millis(1500),
-        },
-    ));
+    let mut config = remote_coordinator();
     config.kv_cache_budget = Some(PagedBudgetDirective::Bytes(4_294_967_296));
     config.cors_policy.origins = OriginPolicy::Literal(HeaderValue::from_static("https://a.test"));
     assert_plain(&config, "remote coordinator");
@@ -273,5 +286,59 @@ fn shared_webui_fixture_matches_the_configured_server() {
         Value::Array(actual.clone()),
         "update tests/fixtures/settings/startup-values.json `values` to:\n{}",
         serde_json::to_string_pretty(&actual).expect("values serialize")
+    );
+}
+
+/// The dotted key path of every object member in `value`, looking through
+/// lists, so a nested structure contributes `outer.inner`.
+fn sub_field_paths(value: &Value, prefix: &str, out: &mut BTreeSet<String>) {
+    match value {
+        Value::Object(map) => {
+            for (key, item) in map {
+                let path = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                sub_field_paths(item, &path, out);
+                out.insert(path);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                sub_field_paths(item, prefix, out);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
+#[test]
+fn read_only_field_fixture_lists_every_field_and_sub_field() {
+    let configs = [ServerConfig::default(), configured(), remote_coordinator()];
+    let mut fields: Vec<(&'static str, BTreeSet<String>)> = schema(&configs[0])
+        .into_iter()
+        .filter(|spec| !spec.mutable)
+        .map(|spec| (spec.name, BTreeSet::new()))
+        .collect();
+    for config in &configs {
+        for spec in schema(config).into_iter().filter(|spec| !spec.mutable) {
+            let (_, sub_fields) = fields
+                .iter_mut()
+                .find(|(name, _)| *name == spec.name)
+                .expect("every server config has the same read-only fields");
+            sub_field_paths(&spec.default, "", sub_fields);
+        }
+    }
+    let actual: Vec<Value> = fields
+        .into_iter()
+        .map(|(name, sub_fields)| json!({"name": name, "sub_fields": sub_fields}))
+        .collect();
+    let fixture: Value = serde_json::from_str(READ_ONLY_FIELDS).expect("fixture must be JSON");
+    assert_eq!(
+        fixture["fields"],
+        Value::Array(actual.clone()),
+        "update tests/fixtures/settings/read-only-fields.json `fields` to the list below, then give each new entry a label in webui/src/features/settings/startup-strings.ts:\n{}",
+        serde_json::to_string_pretty(&actual).expect("fields serialize")
     );
 }

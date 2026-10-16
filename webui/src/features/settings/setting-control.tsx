@@ -5,12 +5,22 @@ import React, { useId, useState } from 'react';
 import { formatSettingValue, type SettingSpec } from '../../api/settings';
 import { Field, IconButton, Select, Toggle, Tooltip } from '../../design-system/primitives';
 import { t, type Locale, type StringKey } from '../../i18n/catalog';
-import { LIVE_SETTING_KEYS } from './strings';
+import { LIVE_SETTING_KEYS, STARTUP_SETTING_KEYS } from './strings';
 
 /** The catalog label for a live setting, with its raw key as secondary text; an uncatalogued name shows the raw key alone. */
 export function settingLabel(locale: Locale, name: string): { label: string; key: string | null } {
   const catalogKey = `settings.live.${name}`;
   return LIVE_SETTING_KEYS.has(catalogKey) ? { label: t(locale, catalogKey as StringKey), key: name } : { label: name, key: null };
+}
+
+/**
+ * The catalog label for a read-only startup value or one of its sub-fields, addressed by its path
+ * (`['tensor_parallel']`, `['tensor_parallel', 'tp_size']`). `null` when the UI has no label: the
+ * caller then shows the raw name only inside a disclosure, never as a visible label (#2334).
+ */
+export function startupLabel(locale: Locale, path: readonly string[]): string | null {
+  const catalogKey = `settings.startup.${path.join('.')}`;
+  return STARTUP_SETTING_KEYS.has(catalogKey) ? t(locale, catalogKey as StringKey) : null;
 }
 
 /** The UI's own help for a known setting; otherwise the server's help sentence, as the server wrote it. */

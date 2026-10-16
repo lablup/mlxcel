@@ -3643,6 +3643,822 @@
       "test_id": "settings-server-startup-failed"
     },
     {
+      "key": "settings.server.startup.other",
+      "en": "Values without a label (internal names)",
+      "ko": "라벨이 없는 값 (내부 이름)",
+      "test_id": "settings-server-startup-other"
+    },
+    {
+      "key": "settings.startup.gcp",
+      "en": "Vertex AI routes",
+      "ko": "Vertex AI 경로",
+      "test_id": "settings-startup-gcp"
+    },
+    {
+      "key": "settings.startup.gcp.health_route",
+      "en": "Health route",
+      "ko": "상태 확인 경로",
+      "test_id": "settings-startup-gcp-health-route"
+    },
+    {
+      "key": "settings.startup.gcp.predict_route",
+      "en": "Predict route",
+      "ko": "예측 경로",
+      "test_id": "settings-startup-gcp-predict-route"
+    },
+    {
+      "key": "settings.startup.reasoning_format",
+      "en": "Reasoning format",
+      "ko": "추론 출력 형식",
+      "test_id": "settings-startup-reasoning-format"
+    },
+    {
+      "key": "settings.startup.reasoning_alias_field",
+      "en": "Reasoning field name",
+      "ko": "추론 필드 이름",
+      "test_id": "settings-startup-reasoning-alias-field"
+    },
+    {
+      "key": "settings.startup.skip_chat_parsing",
+      "en": "Skip chat output parsing",
+      "ko": "대화 출력 파싱 건너뛰기",
+      "test_id": "settings-startup-skip-chat-parsing"
+    },
+    {
+      "key": "settings.startup.no_prefill_assistant",
+      "en": "No assistant prefill",
+      "ko": "어시스턴트 프리필 안 함",
+      "test_id": "settings-startup-no-prefill-assistant"
+    },
+    {
+      "key": "settings.startup.reasoning_budget_message",
+      "en": "Reasoning budget message",
+      "ko": "추론 예산 종료 메시지",
+      "test_id": "settings-startup-reasoning-budget-message"
+    },
+    {
+      "key": "settings.startup.api_keys",
+      "en": "API keys",
+      "ko": "API 키",
+      "test_id": "settings-startup-api-keys"
+    },
+    {
+      "key": "settings.startup.api_keys.configured",
+      "en": "Configured",
+      "ko": "설정됨",
+      "test_id": "settings-startup-api-keys-configured"
+    },
+    {
+      "key": "settings.startup.api_keys.count",
+      "en": "Count",
+      "ko": "개수",
+      "test_id": "settings-startup-api-keys-count"
+    },
+    {
+      "key": "settings.startup.api_keys.redacted",
+      "en": "Values hidden",
+      "ko": "값 숨김",
+      "test_id": "settings-startup-api-keys-redacted"
+    },
+    {
+      "key": "settings.startup.sleep_idle_seconds",
+      "en": "Sleep after idle (seconds)",
+      "ko": "유휴 후 절전(초)",
+      "test_id": "settings-startup-sleep-idle-seconds"
+    },
+    {
+      "key": "settings.startup.api_prefix",
+      "en": "API path prefix",
+      "ko": "API 경로 접두사",
+      "test_id": "settings-startup-api-prefix"
+    },
+    {
+      "key": "settings.startup.sse_ping_interval",
+      "en": "SSE ping interval (seconds)",
+      "ko": "SSE 핑 간격(초)",
+      "test_id": "settings-startup-sse-ping-interval"
+    },
+    {
+      "key": "settings.startup.model_alias",
+      "en": "Model alias",
+      "ko": "모델 별칭",
+      "test_id": "settings-startup-model-alias"
+    },
+    {
+      "key": "settings.startup.model_aliases",
+      "en": "Additional model aliases",
+      "ko": "추가 모델 별칭",
+      "test_id": "settings-startup-model-aliases"
+    },
+    {
+      "key": "settings.startup.context_size",
+      "en": "Context size",
+      "ko": "컨텍스트 크기",
+      "test_id": "settings-startup-context-size"
+    },
+    {
+      "key": "settings.startup.context_size_total",
+      "en": "Total context size",
+      "ko": "전체 컨텍스트 크기",
+      "test_id": "settings-startup-context-size-total"
+    },
+    {
+      "key": "settings.startup.explicit_max_kv_size",
+      "en": "Explicit KV size limit",
+      "ko": "명시한 KV 크기 상한",
+      "test_id": "settings-startup-explicit-max-kv-size"
+    },
+    {
+      "key": "settings.startup.kv_unified",
+      "en": "Unified KV cache",
+      "ko": "통합 KV 캐시",
+      "test_id": "settings-startup-kv-unified"
+    },
+    {
+      "key": "settings.startup.n_parallel",
+      "en": "Parallel slots",
+      "ko": "병렬 슬롯",
+      "test_id": "settings-startup-n-parallel"
+    },
+    {
+      "key": "settings.startup.enable_slots_endpoint",
+      "en": "/slots endpoint",
+      "ko": "/slots 엔드포인트",
+      "test_id": "settings-startup-enable-slots-endpoint"
+    },
+    {
+      "key": "settings.startup.enable_props_endpoint",
+      "en": "/props endpoint",
+      "ko": "/props 엔드포인트",
+      "test_id": "settings-startup-enable-props-endpoint"
+    },
+    {
+      "key": "settings.startup.enable_metrics_endpoint",
+      "en": "/metrics endpoint",
+      "ko": "/metrics 엔드포인트",
+      "test_id": "settings-startup-enable-metrics-endpoint"
+    },
+    {
+      "key": "settings.startup.enable_settings_endpoint",
+      "en": "/settings endpoint",
+      "ko": "/settings 엔드포인트",
+      "test_id": "settings-startup-enable-settings-endpoint"
+    },
+    {
+      "key": "settings.startup.slot_save_path",
+      "en": "Slot save directory",
+      "ko": "슬롯 저장 경로",
+      "test_id": "settings-startup-slot-save-path"
+    },
+    {
+      "key": "settings.startup.model_tags",
+      "en": "Model tags",
+      "ko": "모델 태그",
+      "test_id": "settings-startup-model-tags"
+    },
+    {
+      "key": "settings.startup.lora_adapters",
+      "en": "LoRA adapters",
+      "ko": "LoRA 어댑터",
+      "test_id": "settings-startup-lora-adapters"
+    },
+    {
+      "key": "settings.startup.lora_adapters.count",
+      "en": "Count",
+      "ko": "개수",
+      "test_id": "settings-startup-lora-adapters-count"
+    },
+    {
+      "key": "settings.startup.lora_runtime",
+      "en": "Runtime LoRA",
+      "ko": "런타임 LoRA",
+      "test_id": "settings-startup-lora-runtime"
+    },
+    {
+      "key": "settings.startup.lora_runtime.unfused",
+      "en": "Unfused serving",
+      "ko": "비융합 서빙",
+      "test_id": "settings-startup-lora-runtime-unfused"
+    },
+    {
+      "key": "settings.startup.embd_normalize",
+      "en": "Embedding normalization",
+      "ko": "임베딩 정규화",
+      "test_id": "settings-startup-embd-normalize"
+    },
+    {
+      "key": "settings.startup.embedding_serving_mode",
+      "en": "Embedding serving mode",
+      "ko": "임베딩 서빙 모드",
+      "test_id": "settings-startup-embedding-serving-mode"
+    },
+    {
+      "key": "settings.startup.spm_infill",
+      "en": "SPM infill order",
+      "ko": "SPM 인필 순서",
+      "test_id": "settings-startup-spm-infill"
+    },
+    {
+      "key": "settings.startup.default_typical_p",
+      "en": "Typical P",
+      "ko": "Typical P",
+      "test_id": "settings-startup-default-typical-p"
+    },
+    {
+      "key": "settings.startup.default_top_n_sigma",
+      "en": "Top-n sigma",
+      "ko": "Top-n 시그마",
+      "test_id": "settings-startup-default-top-n-sigma"
+    },
+    {
+      "key": "settings.startup.default_xtc_probability",
+      "en": "XTC probability",
+      "ko": "XTC 확률",
+      "test_id": "settings-startup-default-xtc-probability"
+    },
+    {
+      "key": "settings.startup.default_xtc_threshold",
+      "en": "XTC threshold",
+      "ko": "XTC 임계값",
+      "test_id": "settings-startup-default-xtc-threshold"
+    },
+    {
+      "key": "settings.startup.default_ignore_eos",
+      "en": "Ignore end of sequence",
+      "ko": "시퀀스 종료 토큰 무시",
+      "test_id": "settings-startup-default-ignore-eos"
+    },
+    {
+      "key": "settings.startup.default_stop_sequences",
+      "en": "Stop sequences",
+      "ko": "중지 시퀀스",
+      "test_id": "settings-startup-default-stop-sequences"
+    },
+    {
+      "key": "settings.startup.default_grammar",
+      "en": "Grammar (GBNF)",
+      "ko": "문법(GBNF)",
+      "test_id": "settings-startup-default-grammar"
+    },
+    {
+      "key": "settings.startup.default_mirostat",
+      "en": "Mirostat mode",
+      "ko": "Mirostat 모드",
+      "test_id": "settings-startup-default-mirostat"
+    },
+    {
+      "key": "settings.startup.default_mirostat_tau",
+      "en": "Mirostat tau",
+      "ko": "Mirostat 타우",
+      "test_id": "settings-startup-default-mirostat-tau"
+    },
+    {
+      "key": "settings.startup.default_mirostat_eta",
+      "en": "Mirostat eta",
+      "ko": "Mirostat 에타",
+      "test_id": "settings-startup-default-mirostat-eta"
+    },
+    {
+      "key": "settings.startup.default_dynatemp_range",
+      "en": "Dynamic temperature range",
+      "ko": "동적 온도 범위",
+      "test_id": "settings-startup-default-dynatemp-range"
+    },
+    {
+      "key": "settings.startup.default_dynatemp_exponent",
+      "en": "Dynamic temperature exponent",
+      "ko": "동적 온도 지수",
+      "test_id": "settings-startup-default-dynatemp-exponent"
+    },
+    {
+      "key": "settings.startup.default_adaptive_target",
+      "en": "Adaptive-P target",
+      "ko": "Adaptive-P 목표값",
+      "test_id": "settings-startup-default-adaptive-target"
+    },
+    {
+      "key": "settings.startup.default_adaptive_decay",
+      "en": "Adaptive-P decay",
+      "ko": "Adaptive-P 감쇠",
+      "test_id": "settings-startup-default-adaptive-decay"
+    },
+    {
+      "key": "settings.startup.default_adaptive_p_named",
+      "en": "Adaptive-P in sampler list",
+      "ko": "샘플러 목록의 Adaptive-P",
+      "test_id": "settings-startup-default-adaptive-p-named"
+    },
+    {
+      "key": "settings.startup.default_logit_bias",
+      "en": "Logit bias",
+      "ko": "로짓 편향",
+      "test_id": "settings-startup-default-logit-bias"
+    },
+    {
+      "key": "settings.startup.draft_model_path",
+      "en": "Draft model path",
+      "ko": "드래프트 모델 경로",
+      "test_id": "settings-startup-draft-model-path"
+    },
+    {
+      "key": "settings.startup.num_draft_tokens",
+      "en": "Draft tokens per step",
+      "ko": "단계당 드래프트 토큰 수",
+      "test_id": "settings-startup-num-draft-tokens"
+    },
+    {
+      "key": "settings.startup.draft_kind",
+      "en": "Draft method",
+      "ko": "드래프트 방식",
+      "test_id": "settings-startup-draft-kind"
+    },
+    {
+      "key": "settings.startup.draft_block_size",
+      "en": "Draft block size",
+      "ko": "드래프트 블록 크기",
+      "test_id": "settings-startup-draft-block-size"
+    },
+    {
+      "key": "settings.startup.prompt_lookup_max_batch",
+      "en": "Prompt lookup batch limit",
+      "ko": "프롬프트 조회 배치 상한",
+      "test_id": "settings-startup-prompt-lookup-max-batch"
+    },
+    {
+      "key": "settings.startup.max_batch_size",
+      "en": "Max batch size",
+      "ko": "최대 배치 크기",
+      "test_id": "settings-startup-max-batch-size"
+    },
+    {
+      "key": "settings.startup.max_queue_depth",
+      "en": "Max queue depth",
+      "ko": "최대 대기열 길이",
+      "test_id": "settings-startup-max-queue-depth"
+    },
+    {
+      "key": "settings.startup.audio_queue_depth",
+      "en": "Audio queue depth",
+      "ko": "오디오 대기열 길이",
+      "test_id": "settings-startup-audio-queue-depth"
+    },
+    {
+      "key": "settings.startup.audio_request_timeout_secs",
+      "en": "Audio request timeout (seconds)",
+      "ko": "오디오 요청 제한 시간(초)",
+      "test_id": "settings-startup-audio-request-timeout-secs"
+    },
+    {
+      "key": "settings.startup.embedding_model_path",
+      "en": "Embedding model path",
+      "ko": "임베딩 모델 경로",
+      "test_id": "settings-startup-embedding-model-path"
+    },
+    {
+      "key": "settings.startup.embedding_batch_size",
+      "en": "Embedding batch size",
+      "ko": "임베딩 배치 크기",
+      "test_id": "settings-startup-embedding-batch-size"
+    },
+    {
+      "key": "settings.startup.embedding_max_length",
+      "en": "Embedding max length",
+      "ko": "임베딩 최대 길이",
+      "test_id": "settings-startup-embedding-max-length"
+    },
+    {
+      "key": "settings.startup.embedding_queue_depth",
+      "en": "Embedding queue depth",
+      "ko": "임베딩 대기열 길이",
+      "test_id": "settings-startup-embedding-queue-depth"
+    },
+    {
+      "key": "settings.startup.embedding_request_timeout_secs",
+      "en": "Embedding request timeout (seconds)",
+      "ko": "임베딩 요청 제한 시간(초)",
+      "test_id": "settings-startup-embedding-request-timeout-secs"
+    },
+    {
+      "key": "settings.startup.reranker_model_path",
+      "en": "Reranker model path",
+      "ko": "리랭커 모델 경로",
+      "test_id": "settings-startup-reranker-model-path"
+    },
+    {
+      "key": "settings.startup.rerank_batch_size",
+      "en": "Rerank batch size",
+      "ko": "리랭크 배치 크기",
+      "test_id": "settings-startup-rerank-batch-size"
+    },
+    {
+      "key": "settings.startup.prefill_chunk_size",
+      "en": "Prefill chunk size",
+      "ko": "프리필 청크 크기",
+      "test_id": "settings-startup-prefill-chunk-size"
+    },
+    {
+      "key": "settings.startup.prefill_chunk_size_contended",
+      "en": "Prefill chunk size under contention",
+      "ko": "경합 시 프리필 청크 크기",
+      "test_id": "settings-startup-prefill-chunk-size-contended"
+    },
+    {
+      "key": "settings.startup.prefill_grant_interval",
+      "en": "Prefill grant interval",
+      "ko": "프리필 할당 간격",
+      "test_id": "settings-startup-prefill-grant-interval"
+    },
+    {
+      "key": "settings.startup.enable_preemption",
+      "en": "Preemption",
+      "ko": "선점",
+      "test_id": "settings-startup-enable-preemption"
+    },
+    {
+      "key": "settings.startup.preemption_policy",
+      "en": "Preemption policy",
+      "ko": "선점 정책",
+      "test_id": "settings-startup-preemption-policy"
+    },
+    {
+      "key": "settings.startup.no_batch",
+      "en": "Batching off",
+      "ko": "배치 처리 끔",
+      "test_id": "settings-startup-no-batch"
+    },
+    {
+      "key": "settings.startup.max_batch_prefill",
+      "en": "Max batched prefills",
+      "ko": "최대 배치 프리필 수",
+      "test_id": "settings-startup-max-batch-prefill"
+    },
+    {
+      "key": "settings.startup.max_batch_prefill_tokens",
+      "en": "Max batched prefill tokens",
+      "ko": "배치 프리필 최대 토큰 수",
+      "test_id": "settings-startup-max-batch-prefill-tokens"
+    },
+    {
+      "key": "settings.startup.decode_storage_backend",
+      "en": "Decode KV storage",
+      "ko": "디코드 KV 저장 방식",
+      "test_id": "settings-startup-decode-storage-backend"
+    },
+    {
+      "key": "settings.startup.pipeline_parallel_runtime",
+      "en": "Pipeline parallelism",
+      "ko": "파이프라인 병렬 처리",
+      "test_id": "settings-startup-pipeline-parallel-runtime"
+    },
+    {
+      "key": "settings.startup.pipeline_parallel_runtime.mode",
+      "en": "Mode",
+      "ko": "모드",
+      "test_id": "settings-startup-pipeline-parallel-runtime-mode"
+    },
+    {
+      "key": "settings.startup.pipeline_parallel_runtime.layers",
+      "en": "Layer ranges",
+      "ko": "레이어 범위",
+      "test_id": "settings-startup-pipeline-parallel-runtime-layers"
+    },
+    {
+      "key": "settings.startup.pipeline_parallel_runtime.micro_batch_size",
+      "en": "Micro-batch size",
+      "ko": "마이크로배치 크기",
+      "test_id": "settings-startup-pipeline-parallel-runtime-micro-batch-size"
+    },
+    {
+      "key": "settings.startup.pipeline_parallel_runtime.stage_peers",
+      "en": "Stage peers",
+      "ko": "단계 피어",
+      "test_id": "settings-startup-pipeline-parallel-runtime-stage-peers"
+    },
+    {
+      "key": "settings.startup.pipeline_parallel_runtime.transport",
+      "en": "Transport",
+      "ko": "전송 방식",
+      "test_id": "settings-startup-pipeline-parallel-runtime-transport"
+    },
+    {
+      "key": "settings.startup.pipeline_parallel_runtime.bind_address",
+      "en": "Bind address",
+      "ko": "바인드 주소",
+      "test_id": "settings-startup-pipeline-parallel-runtime-bind-address"
+    },
+    {
+      "key": "settings.startup.pipeline_parallel_runtime.stage_timeout_ms",
+      "en": "Stage timeout (ms)",
+      "ko": "단계 제한 시간(ms)",
+      "test_id": "settings-startup-pipeline-parallel-runtime-stage-timeout-ms"
+    },
+    {
+      "key": "settings.startup.remote_pipeline_stage",
+      "en": "Remote pipeline stage",
+      "ko": "원격 파이프라인 단계",
+      "test_id": "settings-startup-remote-pipeline-stage"
+    },
+    {
+      "key": "settings.startup.remote_pipeline_stage.bind_address",
+      "en": "Bind address",
+      "ko": "바인드 주소",
+      "test_id": "settings-startup-remote-pipeline-stage-bind-address"
+    },
+    {
+      "key": "settings.startup.remote_pipeline_stage.stage_index",
+      "en": "Stage index",
+      "ko": "단계 번호",
+      "test_id": "settings-startup-remote-pipeline-stage-stage-index"
+    },
+    {
+      "key": "settings.startup.remote_pipeline_stage.num_stages",
+      "en": "Stage count",
+      "ko": "단계 수",
+      "test_id": "settings-startup-remote-pipeline-stage-num-stages"
+    },
+    {
+      "key": "settings.startup.remote_pipeline_stage.upstream_peer",
+      "en": "Upstream peer",
+      "ko": "이전 단계 피어",
+      "test_id": "settings-startup-remote-pipeline-stage-upstream-peer"
+    },
+    {
+      "key": "settings.startup.remote_pipeline_stage.downstream_peer",
+      "en": "Downstream peer",
+      "ko": "다음 단계 피어",
+      "test_id": "settings-startup-remote-pipeline-stage-downstream-peer"
+    },
+    {
+      "key": "settings.startup.remote_pipeline_stage.transport",
+      "en": "Transport",
+      "ko": "전송 방식",
+      "test_id": "settings-startup-remote-pipeline-stage-transport"
+    },
+    {
+      "key": "settings.startup.tensor_parallel",
+      "en": "Tensor parallelism",
+      "ko": "텐서 병렬 처리",
+      "test_id": "settings-startup-tensor-parallel"
+    },
+    {
+      "key": "settings.startup.tensor_parallel.tp_size",
+      "en": "Tensor-parallel size",
+      "ko": "텐서 병렬 크기",
+      "test_id": "settings-startup-tensor-parallel-tp-size"
+    },
+    {
+      "key": "settings.startup.tensor_parallel.moe_mode",
+      "en": "MoE sharding",
+      "ko": "MoE 분할 방식",
+      "test_id": "settings-startup-tensor-parallel-moe-mode"
+    },
+    {
+      "key": "settings.startup.tensor_parallel.embedding_mode",
+      "en": "Embedding sharding",
+      "ko": "임베딩 분할 방식",
+      "test_id": "settings-startup-tensor-parallel-embedding-mode"
+    },
+    {
+      "key": "settings.startup.tensor_parallel.lm_head_mode",
+      "en": "LM head sharding",
+      "ko": "LM 헤드 분할 방식",
+      "test_id": "settings-startup-tensor-parallel-lm-head-mode"
+    },
+    {
+      "key": "settings.startup.vision_cache_size",
+      "en": "Vision cache size",
+      "ko": "비전 캐시 크기",
+      "test_id": "settings-startup-vision-cache-size"
+    },
+    {
+      "key": "settings.startup.video_max_frames",
+      "en": "Video max frames",
+      "ko": "비디오 최대 프레임 수",
+      "test_id": "settings-startup-video-max-frames"
+    },
+    {
+      "key": "settings.startup.video_fps",
+      "en": "Video frame rate",
+      "ko": "비디오 프레임 속도",
+      "test_id": "settings-startup-video-fps"
+    },
+    {
+      "key": "settings.startup.prompt_cache",
+      "en": "Prompt cache",
+      "ko": "프롬프트 캐시",
+      "test_id": "settings-startup-prompt-cache"
+    },
+    {
+      "key": "settings.startup.prompt_cache.enabled",
+      "en": "Enabled",
+      "ko": "사용",
+      "test_id": "settings-startup-prompt-cache-enabled"
+    },
+    {
+      "key": "settings.startup.prompt_cache.capacity_bytes",
+      "en": "Capacity (bytes)",
+      "ko": "용량(바이트)",
+      "test_id": "settings-startup-prompt-cache-capacity-bytes"
+    },
+    {
+      "key": "settings.startup.prompt_cache.max_entries",
+      "en": "Max entries",
+      "ko": "최대 항목 수",
+      "test_id": "settings-startup-prompt-cache-max-entries"
+    },
+    {
+      "key": "settings.startup.prompt_cache.ttl_secs",
+      "en": "Entry lifetime (seconds)",
+      "ko": "항목 유지 시간(초)",
+      "test_id": "settings-startup-prompt-cache-ttl-secs"
+    },
+    {
+      "key": "settings.startup.prompt_cache.min_prefix_tokens",
+      "en": "Min prefix tokens",
+      "ko": "최소 프리픽스 토큰 수",
+      "test_id": "settings-startup-prompt-cache-min-prefix-tokens"
+    },
+    {
+      "key": "settings.startup.prompt_cache.apc_enabled",
+      "en": "Automatic prefix caching",
+      "ko": "자동 프리픽스 캐싱",
+      "test_id": "settings-startup-prompt-cache-apc-enabled"
+    },
+    {
+      "key": "settings.startup.prompt_cache.apc_block_size",
+      "en": "APC block size",
+      "ko": "APC 블록 크기",
+      "test_id": "settings-startup-prompt-cache-apc-block-size"
+    },
+    {
+      "key": "settings.startup.prompt_cache.apc_num_blocks",
+      "en": "APC block count",
+      "ko": "APC 블록 수",
+      "test_id": "settings-startup-prompt-cache-apc-num-blocks"
+    },
+    {
+      "key": "settings.startup.prompt_cache.apc_hash",
+      "en": "APC hash",
+      "ko": "APC 해시",
+      "test_id": "settings-startup-prompt-cache-apc-hash"
+    },
+    {
+      "key": "settings.startup.prompt_cache.snapshot_capacity_bytes",
+      "en": "Snapshot capacity (bytes)",
+      "ko": "스냅샷 용량(바이트)",
+      "test_id": "settings-startup-prompt-cache-snapshot-capacity-bytes"
+    },
+    {
+      "key": "settings.startup.prompt_cache.snapshot_max_entries",
+      "en": "Snapshot max entries",
+      "ko": "스냅샷 최대 항목 수",
+      "test_id": "settings-startup-prompt-cache-snapshot-max-entries"
+    },
+    {
+      "key": "settings.startup.prompt_cache.snapshot_ttl_secs",
+      "en": "Snapshot lifetime (seconds)",
+      "ko": "스냅샷 유지 시간(초)",
+      "test_id": "settings-startup-prompt-cache-snapshot-ttl-secs"
+    },
+    {
+      "key": "settings.startup.kv_cache_mode",
+      "en": "KV cache mode",
+      "ko": "KV 캐시 모드",
+      "test_id": "settings-startup-kv-cache-mode"
+    },
+    {
+      "key": "settings.startup.batch_kv_quant",
+      "en": "Batch KV quantization",
+      "ko": "배치 KV 양자화",
+      "test_id": "settings-startup-batch-kv-quant"
+    },
+    {
+      "key": "settings.startup.batch_kv_quant.scheme",
+      "en": "Scheme",
+      "ko": "방식",
+      "test_id": "settings-startup-batch-kv-quant-scheme"
+    },
+    {
+      "key": "settings.startup.batch_kv_quant.bits",
+      "en": "Bits",
+      "ko": "비트 수",
+      "test_id": "settings-startup-batch-kv-quant-bits"
+    },
+    {
+      "key": "settings.startup.batch_kv_quant.group_size",
+      "en": "Group size",
+      "ko": "그룹 크기",
+      "test_id": "settings-startup-batch-kv-quant-group-size"
+    },
+    {
+      "key": "settings.startup.batch_kv_quant.skip_last_layer",
+      "en": "Skip last layer",
+      "ko": "마지막 레이어 제외",
+      "test_id": "settings-startup-batch-kv-quant-skip-last-layer"
+    },
+    {
+      "key": "settings.startup.max_kv_size",
+      "en": "Max KV size",
+      "ko": "최대 KV 크기",
+      "test_id": "settings-startup-max-kv-size"
+    },
+    {
+      "key": "settings.startup.context_shift",
+      "en": "Context shift",
+      "ko": "컨텍스트 이동",
+      "test_id": "settings-startup-context-shift"
+    },
+    {
+      "key": "settings.startup.n_keep",
+      "en": "Tokens kept on shift",
+      "ko": "이동 시 유지할 토큰 수",
+      "test_id": "settings-startup-n-keep"
+    },
+    {
+      "key": "settings.startup.kv_cache_budget",
+      "en": "KV cache budget",
+      "ko": "KV 캐시 예산",
+      "test_id": "settings-startup-kv-cache-budget"
+    },
+    {
+      "key": "settings.startup.kv_admission_watermark",
+      "en": "KV admission watermark",
+      "ko": "KV 수락 기준선",
+      "test_id": "settings-startup-kv-admission-watermark"
+    },
+    {
+      "key": "settings.startup.enable_vlm_prefix_cache",
+      "en": "Vision prefix cache",
+      "ko": "비전 프리픽스 캐시",
+      "test_id": "settings-startup-enable-vlm-prefix-cache"
+    },
+    {
+      "key": "settings.startup.cors_policy",
+      "en": "CORS policy",
+      "ko": "CORS 정책",
+      "test_id": "settings-startup-cors-policy"
+    },
+    {
+      "key": "settings.startup.cors_policy.origin_policy",
+      "en": "Origin policy",
+      "ko": "출처 정책",
+      "test_id": "settings-startup-cors-policy-origin-policy"
+    },
+    {
+      "key": "settings.startup.cors_policy.origins",
+      "en": "Allowed origins",
+      "ko": "허용 출처",
+      "test_id": "settings-startup-cors-policy-origins"
+    },
+    {
+      "key": "settings.startup.cors_policy.methods",
+      "en": "Allowed methods",
+      "ko": "허용 메서드",
+      "test_id": "settings-startup-cors-policy-methods"
+    },
+    {
+      "key": "settings.startup.cors_policy.headers",
+      "en": "Allowed headers",
+      "ko": "허용 헤더",
+      "test_id": "settings-startup-cors-policy-headers"
+    },
+    {
+      "key": "settings.startup.cors_policy.credentials",
+      "en": "Credentials allowed",
+      "ko": "자격 증명 허용",
+      "test_id": "settings-startup-cors-policy-credentials"
+    },
+    {
+      "key": "settings.startup.serving_mode",
+      "en": "Serving mode",
+      "ko": "서빙 모드",
+      "test_id": "settings-startup-serving-mode"
+    },
+    {
+      "key": "settings.startup.prefill_peers",
+      "en": "Prefill peers",
+      "ko": "프리필 피어",
+      "test_id": "settings-startup-prefill-peers"
+    },
+    {
+      "key": "settings.startup.decode_peers",
+      "en": "Decode peers",
+      "ko": "디코드 피어",
+      "test_id": "settings-startup-decode-peers"
+    },
+    {
+      "key": "settings.startup.serving_bind",
+      "en": "Serving bind address",
+      "ko": "서빙 바인드 주소",
+      "test_id": "settings-startup-serving-bind"
+    },
+    {
+      "key": "settings.startup.model_is_gemma4_family",
+      "en": "Gemma 4 family model",
+      "ko": "Gemma 4 계열 모델",
+      "test_id": "settings-startup-model-is-gemma4-family"
+    },
+    {
       "key": "activity.intro",
       "en": "Operations and runtime observations. Browsing never loads a model.",
       "ko": "작업과 런타임 관측입니다. 조회는 모델을 로드하지 않습니다.",

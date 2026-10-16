@@ -8,7 +8,7 @@ import { formatSettingValue, type ModelProps, type SettingSpec, type SettingsRes
 import { LiveSettings } from './live-settings';
 import { ProfileSettings } from './profile-settings';
 import { recordServerSettings } from './server-defaults';
-import { HelpTip, settingLabel } from './setting-control';
+import { HelpTip, startupLabel } from './setting-control';
 import { useSettingsTarget, type SettingsTarget } from './settings-target';
 
 /** The app-wide model selection, scoped here to what Settings observes. Selecting never loads. */
@@ -37,21 +37,45 @@ export function ModelSettings({ locale }: { locale: Locale }): React.JSX.Element
 
 const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> => typeof value === 'object' && value !== null && !Array.isArray(value);
 
+/** Where a nested value sits, for its catalog label; `null` inside the raw-name disclosure, where names stay raw. */
+type LabelPath = readonly string[] | null;
+
 /** A value inside a structured startup value: plain text, a list joined by commas, or further sub-rows. */
-function nestedValue(locale: Locale, value: unknown): React.ReactNode {
+function nestedValue(locale: Locale, value: unknown, path: LabelPath): React.ReactNode {
   if (value === null || value === undefined || Array.isArray(value) && value.length === 0) return t(locale, 'settings.value.unset');
-  if (isRecord(value)) return <StartupSubValues locale={locale} value={value} />;
+  if (isRecord(value)) return <StartupSubValues locale={locale} value={value} path={path} />;
   if (Array.isArray(value)) {
     // A list of structured items stays sub-rows per item; a list of plain values reads as one line.
-    if (value.some((item) => isRecord(item) || Array.isArray(item))) return value.map((item, index) => <React.Fragment key={index}>{nestedValue(locale, item)}</React.Fragment>);
+    if (value.some((item) => isRecord(item) || Array.isArray(item))) return value.map((item, index) => <React.Fragment key={index}>{nestedValue(locale, item, path)}</React.Fragment>);
     return value.map(String).join(', ');
   }
   return String(value);
 }
 
+/**
+ * Values the catalog has no label for (a field or sub-field newer than this UI), under their raw
+ * names. Internal identifiers are not user copy, so they appear only inside this disclosure (#2334).
+ */
+function RawValues({ locale, rows, testId }: { locale: Locale; rows: readonly (readonly [string, unknown, React.ReactNode])[]; testId?: string }): React.JSX.Element {
+  return (
+    <details className="settings-disclosure" data-testid={testId}>
+      <summary>{t(locale, 'settings.server.startup.other')}</summary>
+      <dl className="settings-values settings-keys">{rows.map(([key, value, text]) => <div key={key} className={isRecord(value) ? 'settings-value-group' : undefined}><dt>{key}</dt><dd>{text}</dd></div>)}</dl>
+    </details>
+  );
+}
+
 /** A structured startup value (tensor parallel, prompt cache, CORS, ...) as labelled sub-rows rather than a JSON string. */
-function StartupSubValues({ locale, value }: { locale: Locale; value: Readonly<Record<string, unknown>> }): React.JSX.Element {
-  return <dl className="settings-subvalues">{Object.entries(value).map(([key, item]) => <div key={key}><dt>{key}</dt><dd>{nestedValue(locale, item)}</dd></div>)}</dl>;
+function StartupSubValues({ locale, value, path }: { locale: Locale; value: Readonly<Record<string, unknown>>; path: LabelPath }): React.JSX.Element {
+  const rows = Object.entries(value).map(([key, item]) => ({ key, item, label: path === null ? key : startupLabel(locale, [...path, key]), childPath: path === null ? null : [...path, key] }));
+  const labelled = rows.filter((row) => row.label !== null);
+  const raw = rows.filter((row) => row.label === null);
+  return (
+    <>
+      {labelled.length > 0 ? <dl className="settings-subvalues">{labelled.map(({ key, item, label, childPath }) => <div key={key} data-setting={key}><dt>{label}</dt><dd>{nestedValue(locale, item, childPath)}</dd></div>)}</dl> : null}
+      {raw.length > 0 ? <RawValues locale={locale} rows={raw.map(({ key, item }) => [key, item, nestedValue(locale, item, null)] as const)} /> : null}
+    </>
+  );
 }
 
 /** Startup values as text: a disabled input per value would make the tab several screens tall. */
@@ -60,22 +84,23 @@ function StartupValues({ locale, specs, current }: { locale: Locale; specs: read
   const reasons = new Map<string, string[]>();
   for (const spec of specs) {
     const reason = spec.reason ?? spec.help;
-    reasons.set(reason, [...reasons.get(reason) ?? [], spec.name]);
+    const label = startupLabel(locale, [spec.name]);
+    reasons.set(reason, [...reasons.get(reason) ?? [], label === null ? spec.name : `${label} (${spec.name})`]);
   }
   const valueOf = (spec: SettingSpec): unknown => Object.hasOwn(current, spec.name) ? current[spec.name] : spec.default;
-  const text = (spec: SettingSpec, value: unknown): React.ReactNode => {
+  const text = (spec: SettingSpec, value: unknown, path: LabelPath): React.ReactNode => {
     if (value === null || value === undefined) return t(locale, 'settings.value.unset');
-    return isRecord(value) ? <StartupSubValues locale={locale} value={value} /> : formatSettingValue(spec, value);
+    return isRecord(value) ? <StartupSubValues locale={locale} value={value} path={path} /> : formatSettingValue(spec, value);
   };
+  const rows = specs.map((spec) => ({ spec, value: valueOf(spec), label: startupLabel(locale, [spec.name]) }));
+  const raw = rows.filter((row) => row.label === null);
   return (
     <section className="screen-stack" aria-labelledby={titleId}>
       <h2 id={titleId}>{t(locale, 'settings.live.startup')}</h2>
-      <dl className="settings-values settings-keys" data-testid="settings-startup-values">
-        {specs.map((spec) => {
-          const value = valueOf(spec);
-          return <div key={spec.name} className={isRecord(value) ? 'settings-value-group' : undefined}><dt>{settingLabel(locale, spec.name).label}</dt><dd>{text(spec, value)}</dd></div>;
-        })}
+      <dl className="settings-values" data-testid="settings-startup-values">
+        {rows.filter((row) => row.label !== null).map(({ spec, value, label }) => <div key={spec.name} data-setting={spec.name} className={isRecord(value) ? 'settings-value-group' : undefined}><dt>{label}</dt><dd>{text(spec, value, [spec.name])}</dd></div>)}
       </dl>
+      {raw.length > 0 ? <RawValues locale={locale} testId="settings-startup-other" rows={raw.map(({ spec, value }) => [spec.name, value, text(spec, value, null)] as const)} /> : null}
       {/* Server reason strings are internal wording, kept inside an explicit disclosure. */}
       <details className="settings-disclosure">
         <summary>{t(locale, 'settings.server.startup.reasons')}</summary>

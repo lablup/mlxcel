@@ -1,6 +1,8 @@
 // Copyright 2026 Lablup Inc. Licensed under the Apache License, Version 2.0.
 // Settings copy for request defaults, live server values, next-load profiles and
 // observed context. Every entry is mirrored in tests/fixtures/webui/strings.json.
+import { startupSettingStrings } from './startup-strings';
+
 const settingsBaseStrings = [
   { key: 'settings.server.privacy.body', en: 'Appearance and explicitly saved load profiles use this browser’s preferences. Request defaults stay in memory; API credentials and system prompts are never stored by Settings. Conversation history is controlled separately in Chat.', ko: '모양과 명시적으로 저장한 로드 프로필은 브라우저 환경설정을 사용합니다. 요청 기본값은 메모리에만 유지하며 API 자격 증명과 시스템 프롬프트는 설정에서 저장하지 않습니다. 대화 기록은 대화 화면에서 별도로 관리합니다.', test_id: 'settings-server-privacy-body' },
   { key: 'settings.server.unavailable.title', en: 'Server controls unavailable', ko: '서버 제어 사용 불가', test_id: 'settings-server-unavailable-title' },
@@ -126,6 +128,7 @@ const settingsBaseStrings = [
   { key: 'settings.server.props_unavailable.title', en: 'Context unavailable', ko: '컨텍스트를 확인할 수 없음', test_id: 'settings-server-props-unavailable-title' },
   { key: 'settings.server.props_unavailable.body', en: 'The model did not answer /props. Restart with --props to observe its context.', ko: '모델이 /props에 응답하지 않았습니다. 컨텍스트를 확인하려면 --props로 재시작하세요.', test_id: 'settings-server-props-unavailable-body' },
   { key: 'settings.server.startup.failed', en: 'Startup values unavailable', ko: '시작 값을 확인할 수 없음', test_id: 'settings-server-startup-failed' },
+  { key: 'settings.server.startup.other', en: 'Values without a label (internal names)', ko: '라벨이 없는 값 (내부 이름)', test_id: 'settings-server-startup-other' },
 ] as const;
 
 // Labels and help the UI owns for known live settings, in both locales. A schema name
@@ -182,4 +185,7 @@ const liveSettingStrings = [
 /** Catalog keys that name a live setting (`settings.live.<name>`) or its help (`settings.live.<name>.help`). */
 export const LIVE_SETTING_KEYS: ReadonlySet<string> = new Set(liveSettingStrings.map((entry) => entry.key));
 
-export const settingsStrings = [...settingsBaseStrings, ...liveSettingStrings] as const;
+/** Catalog keys that label a read-only startup value (`settings.startup.<field>[.<sub_field>]`). */
+export const STARTUP_SETTING_KEYS: ReadonlySet<string> = new Set(startupSettingStrings.map((entry) => entry.key));
+
+export const settingsStrings = [...settingsBaseStrings, ...liveSettingStrings, ...startupSettingStrings] as const;

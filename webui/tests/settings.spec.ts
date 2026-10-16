@@ -67,7 +67,9 @@ for (const width of [390, 1440]) {
     await expectAxeClean(page); await expectSafeLayout(page);
     await tab(page, 'Server').click();
     await expect(page.getByTestId('settings-context-n-ctx')).toHaveText('2048');
-    await expect(page.getByTestId('settings-startup-values')).toContainText('n_parallel');
+    // Startup values carry catalog labels; the raw field name is not a visible label (#2334).
+    await expect(page.getByTestId('settings-startup-values')).toContainText(fixtureString('en', 'settings.startup.n_parallel'));
+    await expect(page.getByTestId('settings-startup-values')).not.toContainText('n_parallel');
     await expectAxeClean(page); await expectSafeLayout(page);
     await tab(page, 'Requests').click();
     await expect(page.getByTestId('settings-requests-server')).toHaveText(fixtureString('en', 'settings.requests.server_from', { model: entry.identity.display_name }));

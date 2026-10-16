@@ -1,0 +1,420 @@
+{
+  "$comment": "Every read-only /settings field and the sub-fields its structured value can carry (issue #2334). src/server/runtime_settings_values_tests.rs asserts this equals the server schema; webui/src/features/settings/startup-labels.test.ts asserts each entry has a catalog label in English and Korean.",
+  "fields": [
+    {
+      "name": "gcp",
+      "sub_fields": [
+        "health_route",
+        "predict_route"
+      ]
+    },
+    {
+      "name": "reasoning_format",
+      "sub_fields": []
+    },
+    {
+      "name": "reasoning_alias_field",
+      "sub_fields": []
+    },
+    {
+      "name": "skip_chat_parsing",
+      "sub_fields": []
+    },
+    {
+      "name": "no_prefill_assistant",
+      "sub_fields": []
+    },
+    {
+      "name": "reasoning_budget_message",
+      "sub_fields": []
+    },
+    {
+      "name": "api_keys",
+      "sub_fields": [
+        "configured",
+        "count",
+        "redacted"
+      ]
+    },
+    {
+      "name": "sleep_idle_seconds",
+      "sub_fields": []
+    },
+    {
+      "name": "api_prefix",
+      "sub_fields": []
+    },
+    {
+      "name": "sse_ping_interval",
+      "sub_fields": []
+    },
+    {
+      "name": "model_alias",
+      "sub_fields": []
+    },
+    {
+      "name": "model_aliases",
+      "sub_fields": []
+    },
+    {
+      "name": "context_size",
+      "sub_fields": []
+    },
+    {
+      "name": "context_size_total",
+      "sub_fields": []
+    },
+    {
+      "name": "explicit_max_kv_size",
+      "sub_fields": []
+    },
+    {
+      "name": "kv_unified",
+      "sub_fields": []
+    },
+    {
+      "name": "n_parallel",
+      "sub_fields": []
+    },
+    {
+      "name": "enable_slots_endpoint",
+      "sub_fields": []
+    },
+    {
+      "name": "enable_props_endpoint",
+      "sub_fields": []
+    },
+    {
+      "name": "enable_metrics_endpoint",
+      "sub_fields": []
+    },
+    {
+      "name": "enable_settings_endpoint",
+      "sub_fields": []
+    },
+    {
+      "name": "slot_save_path",
+      "sub_fields": []
+    },
+    {
+      "name": "model_tags",
+      "sub_fields": []
+    },
+    {
+      "name": "lora_adapters",
+      "sub_fields": [
+        "count"
+      ]
+    },
+    {
+      "name": "lora_runtime",
+      "sub_fields": [
+        "unfused"
+      ]
+    },
+    {
+      "name": "embd_normalize",
+      "sub_fields": []
+    },
+    {
+      "name": "embedding_serving_mode",
+      "sub_fields": []
+    },
+    {
+      "name": "spm_infill",
+      "sub_fields": []
+    },
+    {
+      "name": "default_typical_p",
+      "sub_fields": []
+    },
+    {
+      "name": "default_top_n_sigma",
+      "sub_fields": []
+    },
+    {
+      "name": "default_xtc_probability",
+      "sub_fields": []
+    },
+    {
+      "name": "default_xtc_threshold",
+      "sub_fields": []
+    },
+    {
+      "name": "default_ignore_eos",
+      "sub_fields": []
+    },
+    {
+      "name": "default_stop_sequences",
+      "sub_fields": []
+    },
+    {
+      "name": "default_grammar",
+      "sub_fields": []
+    },
+    {
+      "name": "default_mirostat",
+      "sub_fields": []
+    },
+    {
+      "name": "default_mirostat_tau",
+      "sub_fields": []
+    },
+    {
+      "name": "default_mirostat_eta",
+      "sub_fields": []
+    },
+    {
+      "name": "default_dynatemp_range",
+      "sub_fields": []
+    },
+    {
+      "name": "default_dynatemp_exponent",
+      "sub_fields": []
+    },
+    {
+      "name": "default_adaptive_target",
+      "sub_fields": []
+    },
+    {
+      "name": "default_adaptive_decay",
+      "sub_fields": []
+    },
+    {
+      "name": "default_adaptive_p_named",
+      "sub_fields": []
+    },
+    {
+      "name": "default_logit_bias",
+      "sub_fields": []
+    },
+    {
+      "name": "draft_model_path",
+      "sub_fields": []
+    },
+    {
+      "name": "num_draft_tokens",
+      "sub_fields": []
+    },
+    {
+      "name": "draft_kind",
+      "sub_fields": []
+    },
+    {
+      "name": "draft_block_size",
+      "sub_fields": []
+    },
+    {
+      "name": "prompt_lookup_max_batch",
+      "sub_fields": []
+    },
+    {
+      "name": "max_batch_size",
+      "sub_fields": []
+    },
+    {
+      "name": "max_queue_depth",
+      "sub_fields": []
+    },
+    {
+      "name": "audio_queue_depth",
+      "sub_fields": []
+    },
+    {
+      "name": "audio_request_timeout_secs",
+      "sub_fields": []
+    },
+    {
+      "name": "embedding_model_path",
+      "sub_fields": []
+    },
+    {
+      "name": "embedding_batch_size",
+      "sub_fields": []
+    },
+    {
+      "name": "embedding_max_length",
+      "sub_fields": []
+    },
+    {
+      "name": "embedding_queue_depth",
+      "sub_fields": []
+    },
+    {
+      "name": "embedding_request_timeout_secs",
+      "sub_fields": []
+    },
+    {
+      "name": "reranker_model_path",
+      "sub_fields": []
+    },
+    {
+      "name": "rerank_batch_size",
+      "sub_fields": []
+    },
+    {
+      "name": "prefill_chunk_size",
+      "sub_fields": []
+    },
+    {
+      "name": "prefill_chunk_size_contended",
+      "sub_fields": []
+    },
+    {
+      "name": "prefill_grant_interval",
+      "sub_fields": []
+    },
+    {
+      "name": "enable_preemption",
+      "sub_fields": []
+    },
+    {
+      "name": "preemption_policy",
+      "sub_fields": []
+    },
+    {
+      "name": "no_batch",
+      "sub_fields": []
+    },
+    {
+      "name": "max_batch_prefill",
+      "sub_fields": []
+    },
+    {
+      "name": "max_batch_prefill_tokens",
+      "sub_fields": []
+    },
+    {
+      "name": "decode_storage_backend",
+      "sub_fields": []
+    },
+    {
+      "name": "pipeline_parallel_runtime",
+      "sub_fields": [
+        "bind_address",
+        "layers",
+        "micro_batch_size",
+        "mode",
+        "stage_peers",
+        "stage_timeout_ms",
+        "transport"
+      ]
+    },
+    {
+      "name": "remote_pipeline_stage",
+      "sub_fields": [
+        "bind_address",
+        "downstream_peer",
+        "num_stages",
+        "stage_index",
+        "transport",
+        "upstream_peer"
+      ]
+    },
+    {
+      "name": "tensor_parallel",
+      "sub_fields": [
+        "embedding_mode",
+        "lm_head_mode",
+        "moe_mode",
+        "tp_size"
+      ]
+    },
+    {
+      "name": "vision_cache_size",
+      "sub_fields": []
+    },
+    {
+      "name": "video_max_frames",
+      "sub_fields": []
+    },
+    {
+      "name": "video_fps",
+      "sub_fields": []
+    },
+    {
+      "name": "prompt_cache",
+      "sub_fields": [
+        "apc_block_size",
+        "apc_enabled",
+        "apc_hash",
+        "apc_num_blocks",
+        "capacity_bytes",
+        "enabled",
+        "max_entries",
+        "min_prefix_tokens",
+        "snapshot_capacity_bytes",
+        "snapshot_max_entries",
+        "snapshot_ttl_secs",
+        "ttl_secs"
+      ]
+    },
+    {
+      "name": "kv_cache_mode",
+      "sub_fields": []
+    },
+    {
+      "name": "batch_kv_quant",
+      "sub_fields": [
+        "bits",
+        "group_size",
+        "scheme",
+        "skip_last_layer"
+      ]
+    },
+    {
+      "name": "max_kv_size",
+      "sub_fields": []
+    },
+    {
+      "name": "context_shift",
+      "sub_fields": []
+    },
+    {
+      "name": "n_keep",
+      "sub_fields": []
+    },
+    {
+      "name": "kv_cache_budget",
+      "sub_fields": []
+    },
+    {
+      "name": "kv_admission_watermark",
+      "sub_fields": []
+    },
+    {
+      "name": "enable_vlm_prefix_cache",
+      "sub_fields": []
+    },
+    {
+      "name": "cors_policy",
+      "sub_fields": [
+        "credentials",
+        "headers",
+        "methods",
+        "origin_policy",
+        "origins"
+      ]
+    },
+    {
+      "name": "serving_mode",
+      "sub_fields": []
+    },
+    {
+      "name": "prefill_peers",
+      "sub_fields": []
+    },
+    {
+      "name": "decode_peers",
+      "sub_fields": []
+    },
+    {
+      "name": "serving_bind",
+      "sub_fields": []
+    },
+    {
+      "name": "model_is_gemma4_family",
+      "sub_fields": []
+    }
+  ]
+}
