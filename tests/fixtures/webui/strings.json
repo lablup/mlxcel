@@ -2666,8 +2666,8 @@
     },
     {
       "key": "settings.server.context.n_ctx",
-      "en": "Per-slot context tokens (/props n_ctx)",
-      "ko": "슬롯별 컨텍스트 토큰 (/props n_ctx)",
+      "en": "Per-slot context tokens",
+      "ko": "슬롯별 컨텍스트 토큰",
       "test_id": "settings-server-context-n-ctx"
     },
     {
@@ -2678,15 +2678,21 @@
     },
     {
       "key": "settings.server.context.slots",
-      "en": "Configured slots (/props total_slots)",
-      "ko": "설정된 슬롯 (/props total_slots)",
+      "en": "Configured slots",
+      "ko": "설정된 슬롯",
       "test_id": "settings-server-context-slots"
     },
     {
       "key": "settings.server.context.kv_mode",
-      "en": "Active resolved KV cache mode (/props)",
-      "ko": "현재 실제 KV 캐시 모드 (/props)",
+      "en": "Active KV cache mode",
+      "ko": "현재 KV 캐시 모드",
       "test_id": "settings-server-context-kv-mode"
+    },
+    {
+      "key": "settings.server.context.source",
+      "en": "Read from /props: n_ctx, total_slots and kv_cache_mode.",
+      "ko": "/props의 n_ctx, total_slots, kv_cache_mode 값입니다.",
+      "test_id": "settings-server-context-source"
     },
     {
       "key": "settings.server.context.geometry",

@@ -104,6 +104,9 @@ describe('Settings > Server startup values', () => {
       expect(labels.length).toBe(readOnlyFields.fields.reduce((total, field) => total + 1 + field.sub_fields.length, 0));
       expect(labels.filter((label) => RAW_NAME.test(label))).toEqual([]);
       expect(rendered.host.querySelector('[data-testid="settings-startup-other"]')).toBeNull();
+      // The whole tab, the observed-context facts included: names, headings and summaries carry no raw field name.
+      const tabLabels = Array.from(rendered.host.querySelectorAll('dt, h2, label, summary')).filter((cell) => cell.tagName === 'SUMMARY' || cell.closest('details') === null).map((cell) => cell.textContent ?? '');
+      expect(tabLabels.filter((label) => RAW_NAME.test(label))).toEqual([]);
     });
 
     it(`labels a top-level list of structured items as sub-rows, not JSON (${locale})`, async () => {

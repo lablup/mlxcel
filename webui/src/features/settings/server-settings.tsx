@@ -160,6 +160,7 @@ export function ServerSettings({ locale }: { locale: Locale }): React.JSX.Elemen
           </dl>
           <details className="settings-disclosure">
             <summary>{t(locale, 'settings.server.context.geometry')}</summary>
+            <p className="settings-note">{t(locale, 'settings.server.context.source')}</p>
             <code className="settings-cli">{props === null || props.geometry === null ? t(locale, 'settings.server.context.geometry_unknown') : JSON.stringify(props.geometry)}</code>
           </details>
           <ContextCheck key={readyId} modelId={readyId} nCtx={props?.nCtx ?? null} locale={locale} />
