@@ -131,7 +131,7 @@ const SHORT_CHAT_GREEDY: &[i32] = &[
 ///
 /// mlxcel runs 160 layer applications in bf16; the oracle is f32 throughout,
 /// over the same dequantized 4-bit weights. Across the two prompts the largest
-/// observed top-5 deviation is 1.83, almost all of it a systematic shift shared
+/// observed top-5 deviation is 1.87 (re-measured for #2143), almost all of it a systematic shift shared
 /// by the whole row (the fitted relation is `mlxcel = 1.095 * oracle - 0.155`
 /// at 218 tokens), which softmax is insensitive to. 2.5 is that envelope with
 /// room to spare.
@@ -152,8 +152,11 @@ fn checkpoint_present() -> bool {
 }
 
 fn top_k(logits: &mlxcel_core::MlxArray, k: usize) -> Vec<(i32, f32)> {
-    let values = mlxcel_core::utils::array_to_vec_f32(logits);
-    let mut indexed: Vec<(i32, f32)> = values
+    top_k_of_row(&mlxcel_core::utils::array_to_vec_f32(logits), k)
+}
+
+fn top_k_of_row(row: &[f32], k: usize) -> Vec<(i32, f32)> {
+    let mut indexed: Vec<(i32, f32)> = row
         .iter()
         .enumerate()
         .map(|(i, v)| (i as i32, *v))
@@ -369,7 +372,8 @@ fn check_greedy_continuation(model: &IQuestLoopCoderModel) {
 /// 0.0071.
 ///
 /// 1.0 is eight bf16 steps at this magnitude (16 to 32), 1.6x the measured worst
-/// and still under each route's own distance from f32. Together with
+/// and under each route's own top-5 distance from the f32 run (1.87 single-pass,
+/// 1.87 to 2.33 chunked, mostly a row-wide shift). Together with
 /// [`CHUNKED_KL_TOLERANCE`] it is a coarse guard, and this checkpoint limits how
 /// coarse: the gate gives pass 2's local branch about 12% of the mix, and pass-2
 /// faults stay small at the logits. Measured with deliberate faults injected
@@ -430,24 +434,26 @@ fn check_chunked_prefill(model: &IQuestLoopCoderModel) {
         }
         mlxcel_core::utils::array_to_vec_f32(logits.as_ref().expect("at least one chunk"))
     };
-    let top5 = |row: &[f32]| -> Vec<(i32, f32)> {
-        let mut indexed: Vec<(i32, f32)> = row
-            .iter()
-            .enumerate()
-            .map(|(i, v)| (i as i32, *v))
-            .collect();
-        indexed.sort_by(|a, b| b.1.total_cmp(&a.1));
-        indexed.truncate(5);
-        indexed
-    };
 
     let single = chunked(LONG_CHAT_IDS.len());
-    let single_top = top5(&single);
+    // NaN is the historical failure at this seam (an all-`-inf` window row,
+    // #401/#408), and `f32::max` and `>` comparisons silently skip it.
+    assert!(
+        single.iter().all(|v| v.is_finite()),
+        "single-pass prefill produced a non-finite logit"
+    );
+    let single_top = top_k_of_row(&single, 5);
     let single_max = single_top[0].1;
     let mut failures = Vec::new();
     for chunk in [128, 97, 64, 32] {
         let split = chunked(chunk);
-        let split_top = top5(&split);
+        if !split.iter().all(|v| v.is_finite()) {
+            failures.push(format!(
+                "chunk {chunk}: chunked prefill produced a non-finite logit"
+            ));
+            continue;
+        }
+        let split_top = top_k_of_row(&split, 5);
         let worst = single_top
             .iter()
             .map(|(id, v)| (split[*id as usize] - v).abs())
