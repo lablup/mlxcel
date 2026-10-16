@@ -6848,6 +6848,137 @@ mod gemma4_unified_mask_tests {
         }
     }
 
+    /// Issue #2336: Gemma 4 with `--kv-cache-mode fp16+turbo4` aborted in SDPA
+    /// (`Mask type must promote to output type float32`) once a prefill ran
+    /// past the 1024-token sliding window.
+    ///
+    /// A Turbo4Asym cache stores and returns FP16 K/V whatever the model
+    /// dtype, so a bf16 model hands SDPA a bf16 query with FP16 keys and
+    /// values. MLX attends in `result_type(q, k, v)`, which is float32 for
+    /// that pair (the CUDA overlay keeps fp16 + bf16 at float32). Inside the
+    /// window Gemma 4 attends maskless, so nothing checked the mask. Past the
+    /// window the sliding layers carry an additive band mask, and the bridge
+    /// cast it to the query's bf16, which the CUDA promotion table does not
+    /// widen to float32, so SDPA threw and the worker aborted.
+    ///
+    /// This drives the same pieces `Attention::attend` does on that path: a
+    /// Turbo4Asym `RotatingKVCache` fed bf16 K/V, the past-window
+    /// `create_sliding_window_prefill_mask`, `trim_mask_to_keys`, and
+    /// `attention_from_ptr` with the layer window. It checks the output
+    /// against the same attention computed entirely in float32. Before the fix
+    /// the attention call aborts the test process with the error above.
+    #[test]
+    fn turbo4_past_window_sliding_mask_is_accepted_by_sdpa() {
+        const HQ: i32 = 4;
+        const H: i32 = 2;
+        // Turbo V quantization needs a head dim its rotation supports.
+        const D: i32 = 64;
+        // Rotating turbo caches need a block-aligned window.
+        const WINDOW: i32 = 64;
+        const PREFILL: i32 = 48;
+        const APPENDED: i32 = 32;
+
+        fn bf16_tensor(h: i32, n: i32, d: i32, phase: f32) -> UniquePtr<MlxArray> {
+            let count = (h * n * d) as usize;
+            let data: Vec<f32> = (0..count)
+                .map(|i| (i as f32 * 0.37 + phase).sin() * 0.5)
+                .collect();
+            let arr = mlxcel_core::from_slice_f32(&data, &[1, h, n, d]);
+            mlxcel_core::astype(&arr, mlxcel_core::dtype::BFLOAT16)
+        }
+
+        let mut caches = vec![
+            Cache::Rotating(RotatingKVCache::new_with_mode(
+                WINDOW,
+                mlxcel_core::cache::KVCacheMode::Turbo4Asym,
+            )),
+            Cache::Standard(KVCache::new()),
+        ];
+        let Cache::Rotating(ref mut rotating) = caches[0] else {
+            unreachable!("layer 0 is constructed as Rotating")
+        };
+        rotating.update_and_fetch(
+            bf16_tensor(H, PREFILL, D, 0.0),
+            bf16_tensor(H, PREFILL, D, 1.0),
+        );
+
+        let live_len = first_cache_live_len(&caches, "sliding_attention");
+        assert!(
+            live_len + APPENDED > WINDOW,
+            "fixture must run past the window; live {live_len} + {APPENDED} vs {WINDOW}"
+        );
+        let mask = create_sliding_window_prefill_mask(APPENDED, live_len, WINDOW);
+
+        let Cache::Rotating(ref mut rotating) = caches[0] else {
+            unreachable!("layer 0 is constructed as Rotating")
+        };
+        let (keys, values) = rotating.update_and_fetch(
+            bf16_tensor(H, APPENDED, D, 2.0),
+            bf16_tensor(H, APPENDED, D, 3.0),
+        );
+        let queries = bf16_tensor(HQ, APPENDED, D, 4.0);
+
+        // Fixture guards: the dtype split is the whole bug.
+        assert_eq!(
+            mlxcel_core::array_dtype(&queries),
+            mlxcel_core::dtype::BFLOAT16
+        );
+        assert_eq!(mlxcel_core::array_dtype(&keys), mlxcel_core::dtype::FLOAT16);
+        assert_eq!(
+            mlxcel_core::array_dtype(&values),
+            mlxcel_core::dtype::FLOAT16
+        );
+
+        let local_mask = trim_mask_to_keys(Some(&mask), &keys, APPENDED)
+            .expect("the past-window mask matches the returned keys and must be kept");
+        let scale = 1.0 / (D as f32).sqrt();
+        let attended = unsafe {
+            mlxcel_core::layers::attention_from_ptr(
+                &queries,
+                &keys,
+                &values,
+                scale,
+                local_mask.as_ref().unwrap() as *const MlxArray,
+                0.0,
+                WINDOW,
+            )
+        };
+        let got = mlxcel_core::utils::array_to_vec_f32(&mlxcel_core::astype(
+            &attended,
+            mlxcel_core::dtype::FLOAT32,
+        ));
+
+        let f32_of = |a: &MlxArray| mlxcel_core::astype(a, mlxcel_core::dtype::FLOAT32);
+        let reference = unsafe {
+            mlxcel_core::layers::attention_from_ptr(
+                &f32_of(&queries),
+                &f32_of(&keys),
+                &f32_of(&values),
+                scale,
+                local_mask.as_ref().unwrap() as *const MlxArray,
+                0.0,
+                WINDOW,
+            )
+        };
+        let want = mlxcel_core::utils::array_to_vec_f32(&reference);
+
+        assert_eq!(got.len(), (HQ * APPENDED * D) as usize);
+        assert_eq!(got.len(), want.len());
+        let max_diff = got
+            .iter()
+            .zip(&want)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            got.iter().all(|v| v.is_finite()),
+            "past-window turbo4 attention produced a non-finite value"
+        );
+        assert!(
+            max_diff < 1e-2,
+            "past-window turbo4 attention diverged from the float32 reference by {max_diff}"
+        );
+    }
+
     /// Issue #1764: what the pre-fix sliding lookup did to Gemma 4's masks.
     ///
     /// The lookup used to read `seq_len()`, so once the rotating buffer

@@ -5220,10 +5220,23 @@ fn slice_mask_query_rows(
 /// transients of exactly the configurations that reach the fallback (#672).
 /// `-inf` sentinels survive the cast. Bool masks take the fallback's `where`
 /// path, which never promotes, and pass through.
-fn mask_in_score_dtype(mask: &MlxArray, q_dtype: i32) -> Option<UniquePtr<MlxArray>> {
+///
+/// The score dtype is the query's only when K and V share it. A bf16 model
+/// on an fp16 TurboQuant KV cache attends in float32 (bf16 + fp16 promotes
+/// to float32), so the mask is left alone there and the bridge casts it to
+/// that attention dtype (issue #2336).
+fn mask_in_score_dtype(
+    mask: &MlxArray,
+    q: &MlxArray,
+    k: &MlxArray,
+    v: &MlxArray,
+) -> Option<UniquePtr<MlxArray>> {
     let m_dtype = ffi::array_dtype(mask);
+    let q_dtype = ffi::array_dtype(q);
     (m_dtype == crate::dtype::FLOAT32
-        && (q_dtype == crate::dtype::FLOAT16 || q_dtype == crate::dtype::BFLOAT16))
+        && (q_dtype == crate::dtype::FLOAT16 || q_dtype == crate::dtype::BFLOAT16)
+        && ffi::array_dtype(k) == q_dtype
+        && ffi::array_dtype(v) == q_dtype)
         .then(|| ffi::astype(mask, q_dtype))
 }
 
@@ -5239,7 +5252,6 @@ fn chunked_query_attention(
     chunk: i32,
 ) -> UniquePtr<MlxArray> {
     let q_len = ffi::array_shape(q)[2];
-    let q_dtype = ffi::array_dtype(q);
     let mut parts: Vec<UniquePtr<MlxArray>> =
         Vec::with_capacity(((q_len + chunk - 1) / chunk).max(1) as usize);
     let mut start = 0;
@@ -5251,7 +5263,7 @@ fn chunked_query_attention(
         // the fallback's mask-add cannot promote scores to f32.
         let sliced = mask.and_then(|m| slice_mask_query_rows(m, start, stop, q_len));
         let base_ref: Option<&MlxArray> = sliced.as_deref().or(mask);
-        let cast = base_ref.and_then(|m| mask_in_score_dtype(m, q_dtype));
+        let cast = base_ref.and_then(|m| mask_in_score_dtype(m, &q_c, k, v));
         let mask_ref: Option<&MlxArray> = cast.as_deref().or(base_ref);
         parts.push(attention_dispatch(&q_c, k, v, scale, mask_ref, softcap));
         start = stop;
@@ -5309,7 +5321,7 @@ pub(crate) fn chunked_causal_attention(
         );
         let mask = crate::utils::create_causal_mask(stop - start, offset + start);
         // Keep the per-chunk mask in the score dtype (see mask_in_score_dtype).
-        let mask = mask_in_score_dtype(mask.as_ref().unwrap(), ffi::array_dtype(q)).unwrap_or(mask);
+        let mask = mask_in_score_dtype(mask.as_ref().unwrap(), &q_c, &k_c, &v_c).unwrap_or(mask);
         parts.push(attention_dispatch(
             &q_c,
             &k_c,
@@ -8034,6 +8046,45 @@ mod tests {
         // A mask that broadcasts over the query axis passes through unsliced.
         let broadcast = crate::from_slice_f32(&[0.0; 6], &[1, 6]);
         assert!(slice_mask_query_rows(&broadcast, 1, 3, 4).is_none());
+    }
+
+    /// Issue #2336: a bf16 query over fp16 K/V (a bf16 model on an fp16
+    /// TurboQuant KV cache) attends in float32, and an additive f32 mask must
+    /// reach SDPA in that attention dtype. The bridge used to cast it to the
+    /// query's bf16, which the CUDA promotion table does not widen to float32,
+    /// so SDPA threw `Mask type must promote to output type float32` and the
+    /// process aborted. Covers the direct dispatch and the query-chunked path,
+    /// whose `mask_in_score_dtype` must leave the mask alone for mixed dtypes.
+    #[test]
+    fn additive_mask_with_bf16_query_over_fp16_kv_is_accepted() {
+        use crate::dtype;
+        let q = ffi::astype(&test_tensor(&[1, 4, 6, 64]), dtype::BFLOAT16);
+        let k = ffi::astype(&test_tensor(&[1, 2, 9, 64]), dtype::FLOAT16);
+        let v = ffi::astype(&test_tensor(&[1, 2, 9, 64]), dtype::FLOAT16);
+        let scale = 0.125_f32;
+        let mask = crate::utils::create_causal_mask_with_window_full(6, 3, Some(4));
+        let mask = mask.as_ref().unwrap();
+        assert_eq!(ffi::array_dtype(mask), dtype::FLOAT32);
+        assert!(mask_in_score_dtype(mask, &q, &k, &v).is_none());
+
+        let f32_of = |a: &MlxArray| ffi::astype(a, dtype::FLOAT32);
+        let reference = attention_dispatch(
+            &f32_of(&q),
+            &f32_of(&k),
+            &f32_of(&v),
+            scale,
+            Some(mask),
+            0.0,
+        );
+
+        let direct = attention(&q, &k, &v, scale, Some(mask), 0.0, 4);
+        assert_eq!(ffi::array_shape(&direct), ffi::array_shape(&reference));
+        let diff = max_abs_diff(&f32_of(&direct), &reference);
+        assert!(diff < 1e-3, "direct dispatch diverged by {diff}");
+
+        let chunked = chunked_query_attention(&q, &k, &v, scale, Some(mask), 0.0, 4);
+        let diff = max_abs_diff(&f32_of(&chunked), &reference);
+        assert!(diff < 1e-3, "chunked dispatch diverged by {diff}");
     }
 
     /// Chunked SDPA must reproduce the unchunked dispatch with an explicit

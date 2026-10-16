@@ -2357,8 +2357,8 @@ void nemotron_full_forward(
 //   - MQA: n_kv_heads == 1
 //
 // Mask handling: boolean/integer masks are passed through unchanged. Float
-// masks are cast to Q's dtype. See fast_scaled_dot_product_attention() for
-// the reference implementation.
+// masks are cast to the attention dtype, `result_type(q, k, v)`. See
+// fast_scaled_dot_product_attention() for the reference implementation.
 //
 // Use `mlxcel_core::layers::metal4_attention()` from Rust, which queries
 // `hardware::get_hardware()` to set `use_metal4` automatically.

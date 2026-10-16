@@ -4078,21 +4078,13 @@ std::unique_ptr<MlxArray> fast_scaled_dot_product_attention(
     // MLX SDPA accepts boolean masks (True=attend, False=mask) and additive
     // masks (0=attend, -inf=mask).  Boolean/integer masks must NOT be cast to
     // float, or their True/False semantics are lost and they become additive
-    // 1.0/0.0 offsets.  Float masks are cast to Q's dtype to satisfy the
-    // "must promote to output type" constraint.
+    // 1.0/0.0 offsets.  Float masks are cast to the attention dtype
+    // (`result_type(q, k, v)`) to satisfy the "must promote to output type"
+    // constraint; see `sdpa_mask_for_inputs`.
     std::optional<array> mask_opt = std::nullopt;
     std::string mask_mode = "";
     if (mask) {
-        auto m = mask->inner;
-        if (mlx::core::issubdtype(m.dtype(), mlx::core::floating)) {
-            // Additive mask: cast to Q's dtype
-            if (m.dtype() != q.inner.dtype()) {
-                m = mlx::core::astype(m, q.inner.dtype());
-            }
-        }
-        // Boolean/integer masks are passed through unchanged — MLX
-        // handles them natively.
-        mask_opt = m;
+        mask_opt = sdpa_mask_for_inputs(mask->inner, q.inner, k.inner, v.inner);
         mask_mode = "array";
     }
     return std::make_unique<MlxArray>(mlx::core::fast::scaled_dot_product_attention(
@@ -4113,16 +4105,8 @@ std::unique_ptr<MlxArray> fast_scaled_dot_product_attention_with_sinks(
     std::optional<array> mask_opt = std::nullopt;
     std::string mask_mode = "";
     if (mask) {
-        auto m = mask->inner;
-        if (mlx::core::issubdtype(m.dtype(), mlx::core::floating)) {
-            // Additive mask: cast to Q's dtype
-            if (m.dtype() != q.inner.dtype()) {
-                m = mlx::core::astype(m, q.inner.dtype());
-            }
-        }
-        // Boolean/integer masks are passed through unchanged — MLX
-        // handles them natively.
-        mask_opt = m;
+        // Same mask coercion as fast_scaled_dot_product_attention().
+        mask_opt = sdpa_mask_for_inputs(mask->inner, q.inner, k.inner, v.inner);
         mask_mode = "array";
     }
     std::optional<array> sinks_opt = sinks ? std::optional(sinks->inner) : std::nullopt;

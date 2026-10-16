@@ -69,14 +69,9 @@ std::unique_ptr<MlxArray> fused_metal4_attention(
     std::optional<mlx::core::array> mask_opt = std::nullopt;
     std::string mask_mode = "";
     if (mask) {
-        auto m = mask->inner;
-        // Float masks are additive masks and should match q dtype.
-        // Bool/int masks must preserve original semantics.
-        if (mlx::core::issubdtype(m.dtype(), mlx::core::floating) &&
-            m.dtype() != q.inner.dtype()) {
-            m = mlx::core::astype(m, q.inner.dtype());
-        }
-        mask_opt = m;
+        // Float masks are additive and take the attention dtype; bool/int
+        // masks keep their select semantics (see `sdpa_mask_for_inputs`).
+        mask_opt = sdpa_mask_for_inputs(mask->inner, q.inner, k.inner, v.inner);
         mask_mode = "array";
     }
 

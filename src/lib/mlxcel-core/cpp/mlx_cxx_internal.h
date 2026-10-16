@@ -84,6 +84,29 @@ inline int32_t from_dtype(Dtype dtype) {
     }
 }
 
+// Coerce an SDPA array mask to the dtype `fast::scaled_dot_product_attention`
+// requires.
+//
+// SDPA attends in `result_type(q, k, v)` and rejects an array mask whose dtype
+// does not promote into that type. Bool and integer masks keep their select
+// semantics and pass through unchanged. An additive (floating) mask is cast to
+// the attention dtype, not to the query's dtype: the two differ whenever K/V
+// are held in another precision than the activations, which is every bf16
+// model on an fp16 TurboQuant KV cache. bf16 + fp16 promotes to float32, and
+// the CUDA overlay's patched table keeps bf16 + float32 at bf16, so a mask
+// cast to the bf16 query does not promote into the float32 output and SDPA
+// throws (issue #2336). SDPA casts an accepted mask to the attention dtype
+// itself, so when q, k and v share a dtype this is the cast it always did, and
+// otherwise it drops only an extra rounding through the query dtype.
+inline array sdpa_mask_for_inputs(
+    const array& mask, const array& q, const array& k, const array& v) {
+    if (!mlx::core::issubdtype(mask.dtype(), mlx::core::floating)) {
+        return mask;
+    }
+    auto attn_dtype = mlx::core::result_type(q, k, v);
+    return mask.dtype() == attn_dtype ? mask : mlx::core::astype(mask, attn_dtype);
+}
+
 // MLX Python's nn.gelu_approx uses the tanh approximation:
 // 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3))).
 // Keep this helper shared so exact-GELU models can continue to use the
