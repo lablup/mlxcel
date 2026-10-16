@@ -40,7 +40,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::server::streaming::IntoKeepAlive;
 #[cfg(test)]
 use crate::server::streaming::SSE_KEEPALIVE_INTERVAL_SECS;
-use crate::server::types::anthropic_response::AnthropicResponseBlock;
+use crate::server::types::anthropic_response::{AnthropicMessageResponse, AnthropicResponseBlock};
 use crate::server::types::anthropic_stream::{AnthropicBlockDelta, AnthropicStreamEvent};
 
 /// Cancellation token shared with the scheduler for client-disconnect detection.
@@ -298,9 +298,80 @@ impl AnthropicBlockEmitter {
     }
 }
 
+/// The `message_start` event of one streamed reply, sent at most once.
+///
+/// `message_start` must be the first event of the stream, and its
+/// `usage.input_tokens` should be the prompt length the reply is billed for.
+/// For a body with media that length exists only once the worker has expanded
+/// each placeholder into its soft tokens (issue #2337), so the route can hold
+/// the event until the worker reports it. Every path that could send another
+/// event first calls [`send`](Self::send) with the best figure it has; the
+/// first call wins and later ones are no-ops, so the event goes out exactly
+/// once and ahead of everything else.
+pub(crate) struct AnthropicMessageStart {
+    sender: AnthropicStreamSender,
+    message: std::sync::Mutex<Option<AnthropicMessageResponse>>,
+}
+
+impl AnthropicMessageStart {
+    /// Hold `message` (an empty, `stop_reason: null` reply) until
+    /// [`send`](Self::send).
+    pub(crate) fn new(sender: AnthropicStreamSender, message: AnthropicMessageResponse) -> Self {
+        Self {
+            sender,
+            message: std::sync::Mutex::new(Some(message)),
+        }
+    }
+
+    /// Send the held `message_start` with `input_tokens`, unless it already
+    /// went out.
+    pub(crate) fn send(&self, input_tokens: usize) {
+        let held = self
+            .message
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(mut message) = held {
+            message.usage.input_tokens = input_tokens;
+            let _ = self
+                .sender
+                .send_event(&AnthropicStreamEvent::MessageStart { message });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn message_start_goes_out_once_with_the_first_figure() {
+        let (sender, stream, _cancelled, _keepalive) = anthropic_sse_channel(8, None);
+        let task = tokio::task::spawn_blocking(move || {
+            let start = AnthropicMessageStart::new(
+                sender.clone(),
+                AnthropicMessageResponse::new(
+                    "msg_1".to_string(),
+                    vec![],
+                    "m".to_string(),
+                    None,
+                    None,
+                    crate::server::types::anthropic_response::AnthropicUsage {
+                        input_tokens: 0,
+                        output_tokens: 0,
+                    },
+                ),
+            );
+            start.send(275);
+            start.send(16);
+            sender
+                .send_event(&AnthropicStreamEvent::MessageStop)
+                .expect("send");
+        });
+        task.await.expect("task");
+        let frames: Vec<_> = stream.collect().await;
+        assert_eq!(frames.len(), 2, "one message_start, then message_stop");
+    }
 
     #[tokio::test]
     async fn channel_round_trips_event_with_header() {

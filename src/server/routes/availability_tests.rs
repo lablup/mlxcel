@@ -278,3 +278,75 @@ async fn exited_chat_worker_returns_503_without_channel_details() {
         "{body}"
     );
 }
+
+/// Issue #2337: a count route answers what its generating sibling answers when
+/// the server cannot generate, both with no chat model loaded and under
+/// `--embeddings` with one loaded. Each pair runs one body through both.
+#[tokio::test]
+async fn count_routes_refuse_like_their_generating_siblings() {
+    let chat =
+        json!({"model": "route-test-model", "messages": [{"role": "user", "content": "hello"}]});
+    let responses = json!({"model": "route-test-model", "input": "hello"});
+    let messages = json!({
+        "model": "route-test-model",
+        "messages": [{"role": "user", "content": "hello"}],
+        "max_tokens": 1
+    });
+    let pairs = [
+        (
+            "/v1/chat/completions",
+            "/v1/chat/completions/input_tokens",
+            &chat,
+        ),
+        (
+            "/v1/chat/completions",
+            "/chat/completions/input_tokens",
+            &chat,
+        ),
+        ("/v1/responses", "/v1/responses/input_tokens", &responses),
+        ("/v1/responses", "/responses/input_tokens", &responses),
+        ("/v1/messages", "/v1/messages/count_tokens", &messages),
+        ("/v1/messages", "/messages/count_tokens", &messages),
+    ];
+    let servers: [(&str, fn() -> AppState); 2] = [
+        ("no chat model", || {
+            state_with(ModelProvider::chat_unavailable_for_route_tests())
+                .with_embedding_model(Some(Arc::new(SideEmbeddingProvider)))
+        }),
+        ("--embeddings", || {
+            let (options_tx, _options_rx) = std::sync::mpsc::channel();
+            let provider = Arc::new(ModelProvider::recording_for_route_tests(options_tx));
+            let batch_metrics = provider.batch_metrics().clone();
+            AppState::new(
+                provider,
+                ServerConfig {
+                    embedding_serving_mode:
+                        crate::server::config::EmbeddingServingMode::EmbeddingOnly,
+                    ..ServerConfig::default()
+                },
+                ChatTemplateProcessor::with_template("ok".to_string()),
+                MlxcelTokenizer::stub(),
+                PathBuf::from("route-test-model"),
+                batch_metrics,
+            )
+        }),
+    ];
+
+    for (server, state) in servers {
+        for (sibling, count, body) in pairs {
+            let (sibling_status, sibling_body) =
+                post(create_app(state()), sibling, body.clone()).await;
+            assert_eq!(
+                sibling_status,
+                StatusCode::NOT_IMPLEMENTED,
+                "{server} {sibling}: {sibling_body}"
+            );
+            let (status, response) = post(create_app(state()), count, body.clone()).await;
+            assert_eq!(status, sibling_status, "{server} {count}: {response}");
+            assert_eq!(
+                response, sibling_body,
+                "{server}: {count} answers what {sibling} answers"
+            );
+        }
+    }
+}

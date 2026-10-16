@@ -195,6 +195,16 @@ pub(crate) struct PreparedChatRequest {
     pub(crate) videos: Vec<ResolvedVideo>,
 }
 
+impl PreparedChatRequest {
+    /// Whether the request resolved any image, audio or video. Each such part
+    /// is one placeholder in [`prompt`](Self::prompt) and becomes its soft
+    /// tokens only on the worker, so the prompt text alone cannot be counted
+    /// (issue #1788).
+    pub(crate) fn carries_media(&self) -> bool {
+        !self.image_data.is_empty() || !self.audio_data.is_empty() || !self.videos.is_empty()
+    }
+}
+
 /// Dedup set for the "defaulted `preserve_thinking=true`" info log.
 ///
 /// Keyed by the resolved `session_key` (see [`resolve_session_key`]) so we

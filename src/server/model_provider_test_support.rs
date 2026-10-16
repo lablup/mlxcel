@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+/// The one token [`ModelProvider::media_expanding_for_route_tests`] generates.
+pub(crate) const MEDIA_EXPANDING_TOKEN: &str = "ok";
+
 impl ModelProvider {
     /// Build a model-free provider that records the options dispatched by HTTP
     /// route tests and immediately returns an empty successful generation.
@@ -144,11 +147,34 @@ impl ModelProvider {
                             .and_then(<[String]>::first)
                             .map(|word| crate::server::model_provider::StopKind::Word(word.clone()))
                             .unwrap_or(crate::server::model_provider::StopKind::Eos);
+                        // The media-expanding provider generates the way the
+                        // batch scheduler does (issue #2337): the prefill
+                        // report with the expanded length comes first, then
+                        // one token. A count-only request stops before
+                        // prefill, so it reports neither.
+                        let generates = tokens_per_media > 0 && !options.count_prompt_only;
                         let _ = options_tx.send(options);
+                        if generates {
+                            let _ = response_tx.send(GenerateEvent::Prefill(PrefillStats {
+                                prompt_tokens,
+                                cached_tokens: 0,
+                                prompt_ms: 0,
+                                processed: prompt_tokens,
+                                first_token: true,
+                            }));
+                            let _ = response_tx.send(GenerateEvent::Token(
+                                MEDIA_EXPANDING_TOKEN.to_string(),
+                                TokenMeta::default(),
+                            ));
+                        }
                         let _ = response_tx.send(GenerateEvent::Done(GenerationResult {
-                            text: String::new(),
+                            text: if generates {
+                                MEDIA_EXPANDING_TOKEN.to_string()
+                            } else {
+                                String::new()
+                            },
                             prompt_tokens,
-                            completion_tokens: 0,
+                            completion_tokens: usize::from(generates),
                             generation_time_ms: 0,
                             prompt_eval_ms: 0,
                             generation_only_ms: 0,

@@ -145,10 +145,20 @@ pub(crate) async fn render_admitted_chat_prompt(
     crate::server::chat_request::expand_request_video_parts(state, &mut request)
         .await
         .map_err(crate::server::chat_request::VideoFramesError::into_error_response)?;
+    // The generating routes render with the reasoning this server generated
+    // re-injected into content-only assistant turns (issues #2110, #2118), so
+    // the prompt they prefill can be longer than the body as sent. Render the
+    // same filled copy, in the same order (after the video substitution), or
+    // a count would come in under the `usage` of the same body (issue #2337).
+    // Only `fill` runs here: a route that does not generate has no reply to
+    // remember, so it never calls `record_reply`.
+    let echo_scope = crate::server::reasoning_echo::chat_scope(state, live, &request);
+    let render_request =
+        crate::server::reasoning_echo::render_request(state, echo_scope.as_ref(), &request);
     let prompt_cache_enabled = state.prompt_cache.is_some();
     prepare_chat_request_with_cache_and_video_allowlist(
         &state.chat_template,
-        &request,
+        &render_request,
         live.chat_template_kwargs.as_ref(),
         prompt_cache_enabled,
         state.should_render_history_boundary_snapshot(),
@@ -184,19 +194,41 @@ impl PromptCountError {
     }
 }
 
+/// Count a prompt that carries no media, on the request thread.
+///
+/// A native renderer's ids (#1338) are authoritative, so they are counted
+/// directly; otherwise `add_special` follows `prompt_carries_bos`, the same
+/// rule the generation path uses, which is what makes the number comparable to
+/// `tokens_evaluated`. Passing `true` unconditionally over-counted by one for
+/// every template that emits its own BOS (Laguna, and the whole Llama 3
+/// lineage since #1347).
+///
+/// The text-only arm of [`count_prompt_tokens`], and the figure the streaming
+/// `/v1/messages` puts on `message_start` for a text-only body (issue #2337).
+/// The error is the tokenizer's message.
+pub(crate) fn count_text_prompt_tokens(
+    state: &AppState,
+    prompt: &str,
+    prompt_token_ids: Option<&[i32]>,
+) -> Result<usize, String> {
+    if let Some(ids) = prompt_token_ids {
+        return Ok(ids.len());
+    }
+    state
+        .tokenizer
+        .encode(prompt, !state.tokenizer.prompt_carries_bos(prompt))
+        .map(|ids| ids.len())
+        .map_err(|e| e.to_string())
+}
+
 /// Count the tokens a prepared request would be prefilled with.
 ///
 /// Shared by every counting route (`/chat/completions/input_tokens`,
 /// `/responses/input_tokens` and `/v1/messages/count_tokens`), so they cannot
 /// drift from each other or from `usage.prompt_tokens`.
 ///
-/// A text-only prompt is counted here, on the request thread. A native
-/// renderer's ids (#1338) are authoritative, so they are counted directly;
-/// otherwise `add_special` follows `prompt_carries_bos`, the same rule the
-/// generation path uses, which is what makes the number comparable to
-/// `tokens_evaluated`. Passing `true` unconditionally over-counted by one for
-/// every template that emits its own BOS (Laguna, and the whole Llama 3
-/// lineage since #1347).
+/// A text-only prompt is counted here, on the request thread, by
+/// [`count_text_prompt_tokens`].
 ///
 /// A prompt carrying resolved media is not countable from its text: each
 /// image, clip or audio part is one placeholder there and becomes its soft
@@ -214,21 +246,13 @@ pub(crate) async fn count_prompt_tokens(
     live: &Arc<LiveSettings>,
     prepared: PreparedChatRequest,
 ) -> Result<usize, PromptCountError> {
-    let carries_media = !prepared.image_data.is_empty()
-        || !prepared.audio_data.is_empty()
-        || !prepared.videos.is_empty();
-    if !carries_media {
-        if let Some(ids) = prepared.prompt_token_ids.as_ref() {
-            return Ok(ids.len());
-        }
-        return state
-            .tokenizer
-            .encode(
-                &prepared.prompt,
-                !state.tokenizer.prompt_carries_bos(&prepared.prompt),
-            )
-            .map(|ids| ids.len())
-            .map_err(|e| PromptCountError::Tokenization(e.to_string()));
+    if !prepared.carries_media() {
+        return count_text_prompt_tokens(
+            state,
+            &prepared.prompt,
+            prepared.prompt_token_ids.as_deref(),
+        )
+        .map_err(PromptCountError::Tokenization);
     }
 
     let mut options = build_server_generate_options_with_live(
@@ -297,6 +321,13 @@ pub async fn chat_input_tokens(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> Response {
+    // The generating sibling refuses first when this server cannot generate
+    // (`--embeddings` / `--reranking`, or no chat model loaded), and a count
+    // of a prompt nothing here will prefill is not an answer: refuse with the
+    // same 501 and body (issue #2337).
+    if let Some(response) = super::chat_not_available(&state) {
+        return response.into_response();
+    }
     let live = state.live();
     let request: ChatCompletionRequest = match parse_with_default_model(&state, body) {
         Ok(request) => request,
@@ -326,6 +357,10 @@ pub async fn responses_input_tokens(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> Response {
+    // `/v1/responses` refuses first too; see `chat_input_tokens`.
+    if let Some(response) = super::chat_not_available(&state) {
+        return response.into_response();
+    }
     let live = state.live();
     let request: CreateResponseRequest = match parse_with_default_model(&state, body) {
         Ok(request) => request,

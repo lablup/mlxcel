@@ -48,7 +48,9 @@ use crate::server::chat_request::{
 use crate::server::config::ReasoningBudgetOverride;
 use crate::server::model_provider::{ChatWorkerGoneError, QueueFullError};
 use crate::server::streaming::sse_response;
-use crate::server::streaming_anthropic::{AnthropicBlockEmitter, anthropic_sse_channel_resumable};
+use crate::server::streaming_anthropic::{
+    AnthropicBlockEmitter, AnthropicMessageStart, anthropic_sse_channel_resumable,
+};
 use crate::server::thinking_budget::{pick_budget_alias, resolve_request_budget};
 use crate::server::tool_calls;
 use crate::server::tool_calls::stream_filter::StreamFilter;
@@ -133,6 +135,17 @@ use crate::server::request_options::{
     chat_carries_loop_amplifier, resolve_server_max_tokens_with_live,
 };
 
+/// The 501 this surface answers when the server cannot generate
+/// (`--embeddings` / `--reranking`, or no chat model loaded), in the Anthropic
+/// envelope. `/v1/messages` and `/v1/messages/count_tokens` both run it first,
+/// so one body gets one answer from either (issue #2337).
+fn chat_unavailable_response(state: &AppState) -> Option<Response> {
+    super::chat_unavailable_message(state).map(|message| {
+        AnthropicErrorResponse::new(StatusCode::NOT_IMPLEMENTED, message, "not_implemented")
+            .into_response()
+    })
+}
+
 /// POST /v1/messages
 pub async fn anthropic_messages(
     State(state): State<AppState>,
@@ -140,13 +153,8 @@ pub async fn anthropic_messages(
     Json(request): Json<AnthropicRequest>,
 ) -> Response {
     let live = state.live();
-    if let Some(message) = super::chat_unavailable_message(&state) {
-        return AnthropicErrorResponse::new(
-            StatusCode::NOT_IMPLEMENTED,
-            message,
-            "not_implemented",
-        )
-        .into_response();
+    if let Some(response) = chat_unavailable_response(&state) {
+        return response;
     }
     let translated = anthropic_request_to_chat(&request);
 
@@ -511,6 +519,21 @@ async fn stream_messages(
         Err(err) => return AnthropicErrorResponse::bad_request(err.to_string()).into_response(),
     };
 
+    // `message_start.usage.input_tokens` (issue #2337). A text-only prompt is
+    // counted here by the rule `/v1/messages/count_tokens` uses, which is the
+    // rule the generation tokenizes with, so the event can go out at once. A
+    // prompt with media is one placeholder per part until the worker expands
+    // it, so its event waits for the worker's figure (see the task below) and
+    // this local count is only the fallback for a backend that never reports
+    // one. Falls back to 0 if tokenization fails.
+    let local_prompt_tokens = super::prompt_inspection::count_text_prompt_tokens(
+        &state,
+        &prepared.prompt,
+        prepared.prompt_token_ids.as_deref(),
+    )
+    .unwrap_or(0);
+    let defer_message_start = prepared.carries_media();
+
     // Loop-detection amplifier signal (issue #967): the Anthropic Messages
     // surface maps translated tool declarations into the chat request. The
     // declarations can turn the Gemma 4 family default-on on. The translator also
@@ -578,39 +601,41 @@ async fn stream_messages(
         None
     };
 
-    // Encode the rendered prompt once so the streaming `message_start` can
-    // report the real prompt `input_tokens` up front (matches upstream; the
-    // prior hardcoded 0 left strict Anthropic SDK clients without prompt
-    // usage). Falls back to 0 if tokenization fails.
-    let prompt_tokens = state
-        .tokenizer
-        .encode(&prepared.prompt, true)
-        .map(|ids| ids.len())
-        .unwrap_or(0);
-
     let admission =
         crate::server::model_provider::AdmissionWaiter::arm(&mut options, cancelled.clone());
 
     tokio::task::spawn_blocking(move || {
         let message_id = format!("msg_{}", short_uuid());
 
-        // message_start carries the real prompt token count up front (matches
-        // upstream); output_tokens accrues over the stream and is finalized in
-        // the closing message_delta.
-        let start_message = AnthropicMessageResponse::new(
-            message_id.clone(),
-            vec![],
-            model_id_for_task.clone(),
-            None,
-            None,
-            AnthropicUsage {
-                input_tokens: prompt_tokens,
-                output_tokens: 0,
-            },
+        // message_start carries the prompt token count (matches upstream);
+        // output_tokens accrues over the stream and is finalized in the
+        // closing message_delta. A text-only prompt's count is known, so the
+        // event goes out now. A prompt with media waits for the worker's
+        // prefill report: on the batch scheduler every request that prefills
+        // reports `PrefillStats` before its first token (the one-shot
+        // first-token snapshot, plus a progress report per chunk of a chunked
+        // prefill), and its `prompt_tokens` is the expanded length that
+        // `usage` and `count_tokens` report. A backend that sends a token, a
+        // completion or an error without that report gets the event first with
+        // the best figure on hand: the local count before a token or an
+        // error, the result's own count on completion.
+        let message_start = AnthropicMessageStart::new(
+            sender.clone(),
+            AnthropicMessageResponse::new(
+                message_id.clone(),
+                vec![],
+                model_id_for_task.clone(),
+                None,
+                None,
+                AnthropicUsage {
+                    input_tokens: local_prompt_tokens,
+                    output_tokens: 0,
+                },
+            ),
         );
-        let _ = sender.send_event(&AnthropicStreamEvent::MessageStart {
-            message: start_message,
-        });
+        if !defer_message_start {
+            message_start.send(local_prompt_tokens);
+        }
 
         // Shared streaming state.
         // Slot accounting (#1440); see the non-streaming arm above.
@@ -656,6 +681,7 @@ async fn stream_messages(
                 cancelled,
                 &live,
                 |token, _lp| {
+                    message_start.send(local_prompt_tokens);
                     slot.on_token(&token);
                     if let Ok(mut acc) = acc_clone.lock() {
                         acc.push_str(&token);
@@ -690,6 +716,7 @@ async fn stream_messages(
                     }
                 },
                 |stats| {
+                    message_start.send(stats.prompt_tokens);
                     slot.on_prefill_progress(
                         stats.prompt_tokens,
                         stats.cached_tokens,
@@ -697,6 +724,10 @@ async fn stream_messages(
                     );
                 },
             );
+        message_start.send(match &result {
+            Ok(r) => r.prompt_tokens,
+            Err(_) => local_prompt_tokens,
+        });
 
         // Flush any buffered content out of the stream filter.
         let trailing = stream_filter
@@ -860,6 +891,9 @@ pub async fn anthropic_count_tokens(
     State(state): State<AppState>,
     Json(request): Json<AnthropicRequest>,
 ) -> Response {
+    if let Some(response) = chat_unavailable_response(&state) {
+        return response;
+    }
     let live = state.live();
     let translated = anthropic_request_to_chat(&request);
 
