@@ -21,6 +21,13 @@
 //! ever reading the fused copy. These pin that the stage now gives the
 //! single-process answer, word for word, and still applies a head pair where
 //! the head is genuinely separate.
+//!
+//! The `model.embed_tokens` parity test (#2332) runs all three load paths, the
+//! fused single-process path, the unfused runtime path, and this stage
+//! loader, against one tied checkpoint: before the fix the first and last
+//! folded a linear-shaped pair into the matrix both ends read while the
+//! runtime path applied it to the head alone, and an mlx-lm `LoRAEmbedding`
+//! pair failed with a different shape message on each.
 
 use std::path::{Path, PathBuf};
 
@@ -128,4 +135,82 @@ fn the_stage_loader_applies_a_head_pair_on_an_untied_checkpoint() {
         .expect("a separately stored head takes its pair on a pipeline stage");
 
     cleanup(&[&model, &adapter]);
+}
+
+/// An adapter with a `model.embed_tokens` pair and a `q_proj` pair. `linear`
+/// picks the `[hidden] -> [vocab]` orientation every path reads as a fit for
+/// the embedding matrix; otherwise the pair is in mlx-lm's `LoRAEmbedding`
+/// layout, `lora_a = [vocab, rank]`, `lora_b = [rank, hidden]`.
+fn embedding_adapter(name: &str, linear: bool) -> PathBuf {
+    let dir = temp_dir(name);
+    let mut tensors = if linear {
+        adapter_pair_tensors("model.embed_tokens", TINY_HIDDEN, 2, TINY_VOCAB)
+    } else {
+        adapter_pair_tensors("model.embed_tokens", TINY_VOCAB, 2, TINY_HIDDEN)
+    };
+    tensors.extend(adapter_pair_tensors(
+        "model.layers.0.self_attn.q_proj",
+        TINY_HIDDEN,
+        2,
+        TINY_HIDDEN,
+    ));
+    write_adapter_dir(&dir, "lora", 2, tensors);
+    dir
+}
+
+#[test]
+fn every_load_path_gives_the_same_verdict_on_a_tied_embedding_pair() {
+    use crate::lora::{LoraAdapterSpec, RuntimeLoraSet};
+
+    let model = checkpoint("stage_tied_embed_model", true, false);
+    for linear in [true, false] {
+        let adapter = embedding_adapter("stage_tied_embed_adapter", linear);
+        let spec = LoraAdapterSpec {
+            path: adapter.clone(),
+            scale: 1.0,
+            apply: true,
+        };
+
+        let stage = LlamaStageExecutor::load(&model, &whole_model_stage(), 0, Some(&adapter))
+            .err()
+            .map(|err| err.to_string());
+        let fused = crate::loading::load_model_with_adapter(&model, &adapter)
+            .err()
+            .map(|err| err.to_string());
+        let set =
+            RuntimeLoraSet::from_specs(std::slice::from_ref(&spec)).expect("a lora adapter config");
+        let runtime = crate::loading::load_model_with_adapter_specs(
+            &model,
+            std::slice::from_ref(&spec),
+            Some(&set),
+        )
+        .err()
+        .map(|err| err.to_string());
+        assert!(
+            !mlxcel_core::runtime_lora::has_pending(),
+            "a refused runtime load leaves no staged term behind"
+        );
+
+        let layout = if linear { "linear" } else { "mlx-lm embedding" };
+        let stage = stage.unwrap_or_else(|| {
+            panic!(
+                "the pipeline stage must refuse a {layout} embed_tokens pair on a tied checkpoint"
+            )
+        });
+        assert!(stage.contains("model.embed_tokens"), "{stage}");
+        assert!(stage.contains("input-embedding LoRA"), "{stage}");
+        assert_eq!(
+            Some(&stage),
+            fused.as_ref(),
+            "the fused single-process path must give the stage's verdict ({layout} layout)"
+        );
+        assert_eq!(
+            Some(&stage),
+            runtime.as_ref(),
+            "the unfused runtime path must give the stage's verdict ({layout} layout)"
+        );
+
+        cleanup(&[&adapter]);
+    }
+    cleanup(&[&model]);
 }

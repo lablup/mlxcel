@@ -20,8 +20,10 @@
 //! rather than a synthetic weight map: an unclaimed term must fail the load
 //! with every layer named, a fully claimed adapter must still load, and the
 //! staging slot must be empty afterwards on every outcome. The tied output-head
-//! verdict is pinned on each single-process entry point here; the pipeline
-//! stage's copy of it is pinned in the Llama stage executor tests.
+//! verdict, for a head pair (#1577) and for an embedding pair (#2332), is
+//! pinned on each single-process entry point here; the pipeline stage's copy
+//! of it, and the three-path parity for the embedding pair, are pinned in the
+//! Llama stage executor tests.
 
 use std::path::{Path, PathBuf};
 
@@ -253,6 +255,62 @@ fn every_single_process_entry_refuses_a_head_pair_on_a_tied_checkpoint() {
         .to_string();
     assert_tied_head_refusal(&err);
     assert!(!mlxcel_core::runtime_lora::has_pending());
+
+    cleanup(&[&model, &adapter_dir]);
+}
+
+#[test]
+fn a_tied_embedding_pair_never_reaches_the_head_on_a_single_process_entry() {
+    // #2332: the tiny Llama builds its tied head with
+    // `UnifiedLinear::from_weights(.., "model.embed_tokens", ..)`, which claims
+    // the staged `model.embed_tokens` term. Before the fix the unfused load
+    // therefore succeeded with the pair applied to the logits alone while the
+    // embedding lookup served base weights; now every entry refuses it before
+    // anything is staged.
+    let model = temp_dir("tied_embed_single_model");
+    write_tiny_llama_checkpoint(
+        &model,
+        &TinyLlama {
+            tie_word_embeddings: Some(true),
+            stores_lm_head: false,
+            unread: Vec::new(),
+        },
+    );
+    let adapter_dir = adapter(
+        "tied_embed_single_adapter",
+        &[
+            ("model.embed_tokens", H, TINY_VOCAB),
+            ("model.layers.0.self_attn.q_proj", H, H),
+        ],
+    );
+    let assert_refusal = |err: &str| {
+        assert!(err.contains("model.embed_tokens"), "{err}");
+        assert!(err.contains("ties its output projection"), "{err}");
+        assert!(err.contains("input-embedding LoRA"), "{err}");
+    };
+
+    let set = RuntimeLoraSet::from_specs(&[spec(&adapter_dir)]).expect("a lora adapter config");
+    let err = load_model_with_adapter_specs(&model, &[spec(&adapter_dir)], Some(&set))
+        .err()
+        .expect("unfused --lora must not hand the pair to the tied head")
+        .to_string();
+    assert_refusal(&err);
+    assert!(
+        !mlxcel_core::runtime_lora::has_pending(),
+        "the verdict runs before anything is staged"
+    );
+
+    let err = load_model_with_adapter(&model, &adapter_dir)
+        .err()
+        .expect("--adapter refuses it")
+        .to_string();
+    assert_refusal(&err);
+
+    let err = load_model_with_adapter_specs(&model, &[spec(&adapter_dir)], None)
+        .err()
+        .expect("--lora --lora-fuse refuses it")
+        .to_string();
+    assert_refusal(&err);
 
     cleanup(&[&model, &adapter_dir]);
 }

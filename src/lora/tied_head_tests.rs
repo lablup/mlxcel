@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Unit tests for the tied output-head verdict (issue #1577).
+//! Unit tests for the tied output-head verdict (issues #1577 and #2332).
 //!
-//! These pin the verdict itself against each way a checkpoint can be tied.
+//! These pin the verdict itself against each way a checkpoint can be tied,
+//! for a pair on the output head and for a pair on the input embedding.
 //! That every load path reaches it is pinned by
 //! `loading/adapter_load_tests.rs` and the pipeline Llama stage tests.
 
@@ -163,4 +164,136 @@ fn the_config_tie_is_read_from_text_config_too() {
     });
     assert!(!declares_tied_embeddings(&top_false), "the top level wins");
     assert!(!declares_tied_embeddings(&serde_json::json!({})));
+}
+
+/// An adapter holding one `model.embed_tokens` pair in each orientation a
+/// file can carry: `linear` is the `[hidden] -> [vocab]` shape every load path
+/// accepts for the embedding matrix, `!linear` is mlx-lm's `LoRAEmbedding`
+/// layout, `lora_a = [vocab, rank]`, `lora_b = [rank, hidden]`.
+fn embedding_adapter(name: &str, linear: bool) -> PathBuf {
+    let dir = temp_dir(name);
+    let tensors = if linear {
+        adapter_pair_tensors("model.embed_tokens", TINY_HIDDEN, 2, TINY_VOCAB)
+    } else {
+        adapter_pair_tensors("model.embed_tokens", TINY_VOCAB, 2, TINY_HIDDEN)
+    };
+    write_adapter_dir(&dir, "lora", 2, tensors);
+    dir
+}
+
+fn assert_embedding_refusal(err: &str, adapter: &Path) {
+    assert!(err.contains("model.embed_tokens"), "{err}");
+    assert!(err.contains("ties its output projection"), "{err}");
+    assert!(err.contains("input-embedding LoRA"), "{err}");
+    assert!(err.contains("mlx_lm.fuse"), "{err}");
+    assert!(
+        !err.contains("output-head LoRA"),
+        "an embedding-only adapter is not told about a head pair it does not carry: {err}"
+    );
+    assert!(err.contains(&adapter.display().to_string()), "{err}");
+}
+
+#[test]
+fn an_embedding_pair_on_a_config_tied_checkpoint_is_refused_in_either_orientation() {
+    // #2332: the tied head reads the embedding matrix, so an embed_tokens pair
+    // lands on whichever end the load path's constructors happen to claim it
+    // for. Both on-disk orientations get the same verdict before any shape
+    // check runs.
+    let model = checkpoint("tied_embed_cfg_model", Some(true), false);
+    for linear in [true, false] {
+        let adapter = embedding_adapter("tied_embed_cfg_adapter", linear);
+        let err = reject_tied_output_head_adapter(&model, &adapter)
+            .expect_err("an embed_tokens pair on a tied checkpoint must not load")
+            .to_string();
+        assert_embedding_refusal(&err, &adapter);
+        assert!(err.contains("tie_word_embeddings"), "{err}");
+        cleanup(&[&adapter]);
+    }
+    cleanup(&[&model]);
+}
+
+#[test]
+fn an_embedding_pair_on_a_checkpoint_without_its_own_head_is_refused() {
+    let model = checkpoint("tied_embed_implicit_model", None, false);
+    let adapter = embedding_adapter("tied_embed_implicit_adapter", true);
+
+    let err = reject_tied_output_head_adapter(&model, &adapter)
+        .expect_err("with no stored head the embedding matrix is the head")
+        .to_string();
+    assert_embedding_refusal(&err, &adapter);
+    assert!(err.contains("stores no lm_head.weight"), "{err}");
+
+    cleanup(&[&model, &adapter]);
+}
+
+#[test]
+fn an_embedding_pair_on_an_untied_checkpoint_passes_the_tie_verdict() {
+    // The tie is the only thing this verdict is about; an untied embedding is
+    // left to the loaders' own checks.
+    let model = checkpoint("untied_embed_model", Some(false), true);
+    let adapter = embedding_adapter("untied_embed_adapter", true);
+
+    reject_tied_output_head_adapter(&model, &adapter)
+        .expect("an untied embedding is not the output head");
+
+    cleanup(&[&model, &adapter]);
+}
+
+#[test]
+fn a_head_and_an_embedding_pair_are_refused_together() {
+    let model = checkpoint("tied_both_model", Some(true), false);
+    let adapter = temp_dir("tied_both_adapter");
+    let mut tensors = adapter_pair_tensors("lm_head", TINY_HIDDEN, 2, TINY_VOCAB);
+    tensors.extend(adapter_pair_tensors(
+        "model.embed_tokens",
+        TINY_HIDDEN,
+        2,
+        TINY_VOCAB,
+    ));
+    write_adapter_dir(&adapter, "lora", 2, tensors);
+
+    let err = reject_tied_output_head_adapter(&model, &adapter)
+        .expect_err("both ends of the tie are refused")
+        .to_string();
+    assert!(
+        err.contains("a LoRA pair for lm_head, model.embed_tokens,"),
+        "{err}"
+    );
+    assert!(err.contains("output-head LoRA"), "{err}");
+    assert!(err.contains("input-embedding LoRA"), "{err}");
+
+    cleanup(&[&model, &adapter]);
+}
+
+#[test]
+fn embedding_stems_cover_the_text_and_vlm_layouts() {
+    assert_eq!(
+        tied_end_of("model.embed_tokens.lora_a"),
+        Some(TiedTarget::Embedding("model.embed_tokens", "lm_head"))
+    );
+    assert_eq!(
+        tied_end_of("model.embed_tokens.base_layer.lora_b"),
+        Some(TiedTarget::Embedding("model.embed_tokens", "lm_head"))
+    );
+    assert_eq!(
+        tied_end_of("language_model.model.embed_tokens.lora_a"),
+        Some(TiedTarget::Embedding(
+            "language_model.model.embed_tokens",
+            "language_model.lm_head"
+        ))
+    );
+    assert_eq!(
+        tied_end_of("model.language_model.embed_tokens.lora_a"),
+        Some(TiedTarget::Embedding(
+            "model.language_model.embed_tokens",
+            "lm_head"
+        ))
+    );
+    assert_eq!(
+        tied_end_of("lm_head.lora_a"),
+        Some(TiedTarget::Head("lm_head"))
+    );
+    assert_eq!(tied_end_of("model.embed_tokens.weight"), None);
+    assert_eq!(tied_end_of("model.embed_tokens_norm.lora_a"), None);
+    assert_eq!(tied_end_of("model.layers.0.self_attn.q_proj.lora_a"), None);
 }

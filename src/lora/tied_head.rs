@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The one verdict on an output-head LoRA pair against a tied-embeddings
-//! checkpoint (issue #1577).
+//! The one verdict on a LoRA pair that addresses either end of a tied
+//! input/output projection (issues #1577 and #2332).
 //!
 //! The single-process loaders validate an adapter against the raw safetensors
 //! map, where a tied checkpoint has no `lm_head.weight`, so an `lm_head` pair
@@ -29,9 +29,26 @@
 //! rather than from either path's weight map, so both reach it identically and
 //! before any weight is read. Applying the pair instead would mean writing a
 //! delta into a copy of the embedding matrix, which silently unties the input
-//! and output projections the checkpoint was trained with. `mlx_lm.lora` only
-//! wraps modules inside `model.layers`, so no adapter it trains carries such a
-//! pair, which is what makes refusing cheap.
+//! and output projections the checkpoint was trained with. A tied mlx-lm model
+//! has no `lm_head` module for `mlx_lm.lora` to wrap, so no adapter it trains
+//! carries such a pair, which is what makes refusing cheap.
+//!
+//! An `embed_tokens` pair on the same checkpoint is the other end of the tie
+//! and gets the same verdict (#2332). mlx-lm's `LoRAEmbedding` stores it as
+//! `lora_a = [vocab, rank]`, `lora_b = [rank, hidden]` and adds the delta to
+//! the embedding lookup and to the tied head alike (its `as_linear` and its
+//! `fuse` both use the adapted matrix). The load paths here read every pair in
+//! the `Linear` orientation instead, so they disagreed with mlx-lm and with
+//! each other: fusing folded a `Linear`-shaped pair into the shared matrix (both
+//! ends), the runtime path handed it to whichever constructor claimed the
+//! `model.embed_tokens` prefix (the tied head on the Llama family, nothing on
+//! Qwen3, whose head reads the embedding through `as_linear`), and an mlx-lm
+//! embedding pair failed a shape check on every path with a message about
+//! transposed weights. Reproducing mlx-lm would need an embedding-orientation
+//! pair, a runtime lookup term in `UnifiedEmbedding`, and a transposed runtime
+//! head term on every family that builds its head from the embedding, so the
+//! pair is refused here, before any path reads a weight, with `mlx_lm.fuse`
+//! named as the way to serve such an adapter.
 //!
 //! Used by: `loading::load_model_with_adapter`,
 //! `loading::load_model_with_adapter_specs`, the pipeline Llama stage loader
@@ -45,18 +62,59 @@ use anyhow::Result;
 /// checkpoint and for a VLM that nests its language model.
 const OUTPUT_HEADS: [&str; 2] = ["lm_head", "language_model.lm_head"];
 
+/// Input-embedding stems an adapter pair can address, each with the output
+/// head whose stored weight decides whether the two are tied: a text
+/// checkpoint, a VLM that nests the language model's `model`, and the
+/// transformers 4.52+ VLM layout that nests it inside `model` and keeps the
+/// head at the top level.
+const INPUT_EMBEDDINGS: [(&str, &str); 3] = [
+    ("model.embed_tokens", "lm_head"),
+    (
+        "language_model.model.embed_tokens",
+        "language_model.lm_head",
+    ),
+    ("model.language_model.embed_tokens", "lm_head"),
+];
+
+/// One end of a tied projection an adapter pair addresses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum TiedTarget {
+    /// An output head, by its stem.
+    Head(&'static str),
+    /// An input embedding, by its stem, with the head it is tied to.
+    Embedding(&'static str, &'static str),
+}
+
+impl TiedTarget {
+    /// The adapter stem this target was matched from.
+    fn stem(self) -> &'static str {
+        match self {
+            Self::Head(stem) | Self::Embedding(stem, _) => stem,
+        }
+    }
+
+    /// The output head whose stored weight decides the tie.
+    fn head(self) -> &'static str {
+        match self {
+            Self::Head(head) | Self::Embedding(_, head) => head,
+        }
+    }
+}
+
 /// Largest safetensors header this probe reads. An adapter header is a few
 /// kilobytes; anything past this is a malformed file the real loader reports.
 const MAX_HEADER_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Refuse an adapter that carries a LoRA pair for the output head of a
-/// checkpoint whose output head is tied to its input embeddings.
+/// Refuse an adapter that carries a LoRA pair for the output head or the
+/// input embedding of a checkpoint whose output head is tied to its input
+/// embeddings.
 ///
-/// A checkpoint counts as tied for a head when its `config.json` sets
+/// A checkpoint counts as tied for a pair when its `config.json` sets
 /// `tie_word_embeddings: true` (top level or `text_config`), or when it stores
-/// no `<head>.weight` tensor of its own, which is the case the loaders fill by
-/// copying the embeddings. Only the adapter's safetensors header and the
-/// checkpoint's headers are read, never tensor data.
+/// no `<head>.weight` tensor of its own for the head that pair's end belongs
+/// to, which is the case the loaders fill by copying the embeddings. Only the
+/// adapter's safetensors header and the checkpoint's headers are read, never
+/// tensor data.
 ///
 /// An adapter whose file cannot be found or parsed is passed through: the
 /// adapter loader that runs next reports that with its own wording, and this
@@ -64,13 +122,14 @@ const MAX_HEADER_BYTES: u64 = 64 * 1024 * 1024;
 ///
 /// # Errors
 ///
-/// Returns an error naming every targeted head when the checkpoint is tied,
-/// or when the checkpoint's `config.json` or headers cannot be read.
+/// Returns an error naming every targeted head and embedding when the
+/// checkpoint is tied, or when the checkpoint's `config.json` or headers
+/// cannot be read.
 pub fn reject_tied_output_head_adapter(model_dir: &Path, adapter_path: &Path) -> Result<()> {
-    let Some(heads) = targeted_output_heads(adapter_path) else {
+    let Some(targets) = targeted_tied_ends(adapter_path) else {
         return Ok(());
     };
-    if heads.is_empty() {
+    if targets.is_empty() {
         return Ok(());
     }
 
@@ -81,39 +140,81 @@ pub fn reject_tied_output_head_adapter(model_dir: &Path, adapter_path: &Path) ->
         serde_json::from_str(&crate::models::sanitize_config_json(&config_str))
             .map_err(|err| anyhow::anyhow!("failed to parse {}: {err}", config_path.display()))?;
 
-    let reason = if declares_tied_embeddings(&config) {
-        "its config.json sets tie_word_embeddings".to_string()
+    let (refused, reason) = if declares_tied_embeddings(&config) {
+        (
+            targets.into_iter().collect::<Vec<_>>(),
+            "its config.json sets tie_word_embeddings".to_string(),
+        )
     } else {
-        let mut missing = Vec::new();
-        for head in &heads {
+        let heads: BTreeSet<&str> = targets.iter().map(|target| target.head()).collect();
+        let mut missing = BTreeSet::new();
+        for head in heads {
             let stored = format!("{head}.weight");
             let present =
                 mlxcel_core::weights::dir_has_tensor_name(model_dir, |name| name == stored)
                     .map_err(anyhow::Error::msg)?;
             if !present {
-                missing.push(stored);
+                missing.insert(head);
             }
         }
-        if missing.is_empty() {
+        let refused: Vec<TiedTarget> = targets
+            .into_iter()
+            .filter(|target| missing.contains(target.head()))
+            .collect();
+        if refused.is_empty() {
             return Ok(());
         }
-        format!(
-            "it stores no {} of its own and reuses the embedding matrix",
-            missing.join(" / ")
+        let stored: Vec<String> = missing
+            .iter()
+            .map(|head| format!("{head}.weight"))
+            .collect();
+        (
+            refused,
+            format!(
+                "it stores no {} of its own and reuses the embedding matrix",
+                stored.join(" / ")
+            ),
         )
     };
 
-    let heads: Vec<&str> = heads.into_iter().collect();
-    anyhow::bail!(
+    let stems: Vec<&str> = refused.iter().map(|target| target.stem()).collect();
+    let heads: Vec<&str> = refused
+        .iter()
+        .filter(|target| matches!(target, TiedTarget::Head(_)))
+        .map(|target| target.stem())
+        .collect();
+    let embeddings: Vec<&str> = refused
+        .iter()
+        .filter(|target| matches!(target, TiedTarget::Embedding(..)))
+        .map(|target| target.stem())
+        .collect();
+
+    let mut message = format!(
         "Adapter at {} carries a LoRA pair for {}, but this checkpoint ties its output projection \
-         to its input embeddings ({reason}). An output-head LoRA on a tied checkpoint is refused \
-         on every load path: the model reads its logits through the embedding matrix, so the \
-         pair would either never reach the forward pass or silently untie the two projections. \
-         Remove the {} pair from the adapter (mlx-lm's LoRA training never targets it).",
+         to its input embeddings ({reason}).",
         adapter_path.display(),
-        heads.join(", "),
-        heads.join(" / "),
+        stems.join(", "),
     );
+    if !heads.is_empty() {
+        message.push_str(&format!(
+            " An output-head LoRA on a tied checkpoint is refused on every load path: the model \
+             reads its logits through the embedding matrix, so the pair would either never reach \
+             the forward pass or silently untie the two projections. Remove the {} pair from the \
+             adapter (mlx-lm's LoRA training never targets it).",
+            heads.join(" / "),
+        ));
+    }
+    if !embeddings.is_empty() {
+        message.push_str(&format!(
+            " An input-embedding LoRA on a tied checkpoint is refused on every load path: mlx-lm \
+             applies such a pair to the embedding lookup and to the tied output projection alike, \
+             and the load paths here read every pair as a linear projection, so they cannot apply \
+             it to both ends the same way. Merge the adapter into the checkpoint with mlx_lm.fuse \
+             and load the merged model, or remove the {} pair from the adapter.",
+            embeddings.join(" / "),
+        ));
+    }
+    anyhow::bail!("{message}");
 }
 
 /// Whether the config declares the output projection tied, at the top level or
@@ -131,30 +232,42 @@ fn declares_tied_embeddings(config: &serde_json::Value) -> bool {
         .unwrap_or(false)
 }
 
-/// The output heads the adapter's tensors address, or `None` when its weights
-/// file cannot be located or its header cannot be read.
-fn targeted_output_heads(adapter_path: &Path) -> Option<BTreeSet<&'static str>> {
+/// The ends of a tied projection the adapter's tensors address, or `None` when
+/// its weights file cannot be located or its header cannot be read.
+fn targeted_tied_ends(adapter_path: &Path) -> Option<BTreeSet<TiedTarget>> {
     let weights_path =
         crate::distributed::pipeline::resolve_adapter_weights_path(adapter_path).ok()?;
     let names = safetensors_tensor_names(&weights_path)?;
-    Some(
-        names
-            .iter()
-            .filter_map(|name| output_head_of(name))
-            .collect(),
-    )
+    Some(names.iter().filter_map(|name| tied_end_of(name)).collect())
 }
 
-/// The output head an adapter tensor name addresses, if any.
+/// The layer stem of an adapter tensor name.
 ///
 /// Accepts the mlx-lm `.lora_a` / `.lora_b` spelling and a PEFT
 /// `.base_layer` wrapper, the same stems the base-weight resolver accepts.
-fn output_head_of(tensor_name: &str) -> Option<&'static str> {
+fn adapter_stem(tensor_name: &str) -> Option<&str> {
     let stem = tensor_name
         .strip_suffix(".lora_a")
         .or_else(|| tensor_name.strip_suffix(".lora_b"))?;
-    let stem = stem.strip_suffix(".base_layer").unwrap_or(stem);
+    Some(stem.strip_suffix(".base_layer").unwrap_or(stem))
+}
+
+/// The output head an adapter tensor name addresses, if any.
+fn output_head_of(tensor_name: &str) -> Option<&'static str> {
+    let stem = adapter_stem(tensor_name)?;
     OUTPUT_HEADS.into_iter().find(|head| *head == stem)
+}
+
+/// The end of a tied projection an adapter tensor name addresses, if any.
+fn tied_end_of(tensor_name: &str) -> Option<TiedTarget> {
+    if let Some(head) = output_head_of(tensor_name) {
+        return Some(TiedTarget::Head(head));
+    }
+    let stem = adapter_stem(tensor_name)?;
+    INPUT_EMBEDDINGS
+        .into_iter()
+        .find(|(embedding, _)| *embedding == stem)
+        .map(|(embedding, head)| TiedTarget::Embedding(embedding, head))
 }
 
 /// Tensor names from a safetensors header, without reading tensor data.
