@@ -209,8 +209,9 @@ pub fn reject_tied_output_head_adapter(model_dir: &Path, adapter_path: &Path) ->
             " An input-embedding LoRA on a tied checkpoint is refused on every load path: mlx-lm \
              applies such a pair to the embedding lookup and to the tied output projection alike, \
              and the load paths here read every pair as a linear projection, so they cannot apply \
-             it to both ends the same way. Merge the adapter into the checkpoint with mlx_lm.fuse \
-             and load the merged model, or remove the {} pair from the adapter.",
+             it to both ends the same way. If mlx_lm.lora trained the adapter, merge it into the \
+             checkpoint with mlx_lm.fuse and load the merged model; otherwise remove the {} pair \
+             from the adapter.",
             embeddings.join(" / "),
         ));
     }
@@ -243,13 +244,18 @@ fn targeted_tied_ends(adapter_path: &Path) -> Option<BTreeSet<TiedTarget>> {
 
 /// The layer stem of an adapter tensor name.
 ///
-/// Accepts the mlx-lm `.lora_a` / `.lora_b` spelling and a PEFT
-/// `.base_layer` wrapper, the same stems the base-weight resolver accepts.
+/// Accepts the mlx-lm `.lora_a` / `.lora_b` spelling, a PEFT `.base_layer`
+/// wrapper, and a stem that names the `.weight` itself, the same stems the
+/// base-weight resolver accepts.
 fn adapter_stem(tensor_name: &str) -> Option<&str> {
     let stem = tensor_name
         .strip_suffix(".lora_a")
         .or_else(|| tensor_name.strip_suffix(".lora_b"))?;
-    Some(stem.strip_suffix(".base_layer").unwrap_or(stem))
+    let stem = stem.strip_suffix(".base_layer").unwrap_or(stem);
+    // The resolver also accepts a stem that already ends in `.weight`
+    // (`lm_head.weight.lora_a` resolves to `lm_head.weight`), so the verdict
+    // has to read it the same way or such an adapter would slip past it.
+    Some(stem.strip_suffix(".weight").unwrap_or(stem))
 }
 
 /// The output head an adapter tensor name addresses, if any.

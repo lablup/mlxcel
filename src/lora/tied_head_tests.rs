@@ -293,7 +293,53 @@ fn embedding_stems_cover_the_text_and_vlm_layouts() {
         tied_end_of("lm_head.lora_a"),
         Some(TiedTarget::Head("lm_head"))
     );
+    // The resolver reads a stem that names the `.weight` itself as that
+    // weight, so the verdict must too.
+    assert_eq!(
+        tied_end_of("model.embed_tokens.weight.lora_a"),
+        Some(TiedTarget::Embedding("model.embed_tokens", "lm_head"))
+    );
+    assert_eq!(
+        tied_end_of("lm_head.weight.lora_b"),
+        Some(TiedTarget::Head("lm_head"))
+    );
     assert_eq!(tied_end_of("model.embed_tokens.weight"), None);
     assert_eq!(tied_end_of("model.embed_tokens_norm.lora_a"), None);
     assert_eq!(tied_end_of("model.layers.0.self_attn.q_proj.lora_a"), None);
+}
+
+#[test]
+fn without_a_declared_tie_only_the_ends_whose_head_is_missing_are_refused() {
+    // No `tie_word_embeddings` key and a stored `lm_head.weight`: the text
+    // head is untied, so its pair passes, while the nested VLM spelling of the
+    // embedding belongs to a `language_model.lm_head` the checkpoint does not
+    // store.
+    let model = checkpoint("partial_tie_model", None, true);
+    let adapter = temp_dir("partial_tie_adapter");
+    let mut tensors = adapter_pair_tensors("lm_head", TINY_HIDDEN, 2, TINY_VOCAB);
+    tensors.extend(adapter_pair_tensors(
+        "language_model.model.embed_tokens",
+        TINY_HIDDEN,
+        2,
+        TINY_VOCAB,
+    ));
+    write_adapter_dir(&adapter, "lora", 2, tensors);
+
+    let err = reject_tied_output_head_adapter(&model, &adapter)
+        .expect_err("the embedding whose head is not stored is refused")
+        .to_string();
+    assert!(
+        err.contains("a LoRA pair for language_model.model.embed_tokens, but"),
+        "{err}"
+    );
+    assert!(
+        err.contains("stores no language_model.lm_head.weight of its own"),
+        "{err}"
+    );
+    assert!(
+        !err.contains("output-head LoRA"),
+        "the stored lm_head is untied and its pair is not refused: {err}"
+    );
+
+    cleanup(&[&model, &adapter]);
 }

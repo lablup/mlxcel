@@ -171,15 +171,24 @@ the shared linear constructors; a layer a family builds some other way (an
 embedding table, a hand-built projection) would keep its base weights. Such an
 adapter fails startup with every unclaimed layer listed. On an unquantized base
 `--lora-fuse` can serve it instead, since fusion writes the deltas into the base
-weights.
+weights (on an untied checkpoint; a tied one refuses an embedding pair, below).
 
 An `lm_head` pair is refused when the checkpoint ties its output projection to
 its input embeddings, either because `config.json` sets `tie_word_embeddings`
 or because the checkpoint stores no `lm_head.weight` of its own. The model then
 reads its logits through the embedding matrix, so the pair would either never
-be applied or silently untie the two projections. The single-process and the
-pipeline-parallel loaders give the same answer. `mlx_lm.lora` only trains
-modules inside `model.layers`, so its adapters never carry such a pair.
+be applied or silently untie the two projections. A tied mlx-lm model has no
+`lm_head` module, so `mlx_lm.lora` never trains such a pair.
+
+A `model.embed_tokens` pair (or its `language_model.model.embed_tokens` /
+`model.language_model.embed_tokens` VLM spelling) on the same kind of checkpoint
+is refused too. mlx-lm can train one when `lora_parameters.keys` names the
+embedding, and its `LoRAEmbedding` applies the delta to the embedding lookup and
+to the tied head alike. The load paths here read every pair as a linear
+projection, so before the refusal the fused path adapted both ends while the
+unfused path adapted only the head. Merge an mlx-lm adapter of this kind with
+`mlx_lm.fuse` and load the merged checkpoint. The single-process (fused and
+unfused) and pipeline-parallel loaders give the same answer for both pairs.
 
 Mixture-of-experts expert adapters are not supported on either path. mlx-lm's
 `LoRASwitchLinear` stores one low-rank pair per expert as 3-D `lora_a` /
