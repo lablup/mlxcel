@@ -740,6 +740,76 @@ fn prefill_matches_incremental_decode() {
     );
 }
 
+/// Chunked prefill at the real checkpoint's geometry, in f32, at every position.
+///
+/// `check_chunked_prefill` in `tests/iquestloopcoder_parity.rs` runs this
+/// comparison on the 40B checkpoint, where it executes in bf16 and the chunked
+/// and single-pass routes legitimately differ by a few bf16 steps (issue
+/// #2143). That bound is too loose to see a window error, so the chunk-boundary
+/// logic is pinned here instead, in f32 where the two routes agree to rounding:
+/// 218 tokens (past `2 * loop_window_size`), `loop_window_size` 64, and chunk
+/// sizes that land on, inside and across the window, including a 24-token tail
+/// after a ring that already wrapped (97 + 97 + 24) and a one-token-at-a-time
+/// feed that reaches the single-query decode path.
+///
+/// Every position's logits are compared, not only the last one. The oldest key
+/// a continuation chunk retains is visible to that chunk's first row alone, so
+/// a cache that kept one key too few moves the last row by about 2e-05 here
+/// (through the next layer's attention) but moves the first row of each
+/// continuation chunk directly.
+#[test]
+fn chunked_prefill_matches_single_pass_past_the_window() {
+    const LEN: i32 = 218;
+    let args = tiny_args(64, 2);
+    let model = tiny_model(&args);
+    let ids: Vec<i32> = (0..LEN).map(|i| (i * i * 7 + i * 5 + 3) % 16).collect();
+
+    let run = |chunk: i32| -> Vec<f32> {
+        let mut caches = model.make_caches();
+        let mut logits = Vec::new();
+        let mut start = 0;
+        while start < LEN {
+            let end = (start + chunk).min(LEN);
+            let piece =
+                mlxcel_core::from_slice_i32(&ids[start as usize..end as usize], &[1, end - start]);
+            logits.extend(array_to_vec_f32(
+                &model.forward_with_caches(&piece, &mut caches),
+            ));
+            start = end;
+        }
+        assert_eq!(caches[0].pass1.offset, LEN);
+        assert_eq!(caches[0].pass2.offset, LEN);
+        logits
+    };
+
+    let single = run(LEN);
+    let vocab = args.vocab_size;
+    assert_eq!(single.len(), LEN as usize * vocab);
+    for chunk in [128, 97, 65, 64, 63, 32, 1] {
+        let split = run(chunk);
+        let (worst_pos, diff) = single
+            .chunks(vocab)
+            .zip(split.chunks(vocab))
+            .map(|(a, b)| {
+                a.iter()
+                    .zip(b)
+                    .map(|(x, y)| (x - y).abs())
+                    .fold(0.0f32, f32::max)
+            })
+            .enumerate()
+            .fold(
+                (0, 0.0f32),
+                |acc, (pos, d)| if d > acc.1 { (pos, d) } else { acc },
+            );
+        eprintln!("chunk {chunk}: max abs diff {diff} at position {worst_pos}");
+        assert!(
+            diff < 1e-4,
+            "chunk {chunk}: chunked prefill must land on the single-pass logits in f32 at every \
+             position; max abs diff {diff} at position {worst_pos}"
+        );
+    }
+}
+
 #[test]
 fn forward_last_logits_matches_the_sliced_full_logits() {
     let args = tiny_args(4, 1);

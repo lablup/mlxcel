@@ -47,11 +47,19 @@
 //! output. Re-running the oracle with the window removed moves the 218-token
 //! logits by mean 5.0e-02 / max 3.4e-01 and changes neither the argmax nor the
 //! top-10 order; at 521 tokens the gap shrinks further, to mean 8.9e-03. mlxcel
-//! executes in f16 with a quantized `lm_head`, which puts its own deviation
-//! from the f32 oracle at mean 2.7e-01 after removing the constant offset, 5.3x
-//! the entire window effect. Measured directly: mlxcel sits 0.2674 from the
-//! windowed oracle and 0.2678 from the unwindowed one, which is no separation
-//! at all.
+//! executes in bf16, the checkpoint's own activation dtype, which puts its own
+//! deviation from the f32 oracle at mean 2.7e-01 after removing the constant
+//! offset, 5.3x the entire window effect. Measured directly: mlxcel sits 0.2674
+//! from the windowed oracle and 0.2678 from the unwindowed one, which is no
+//! separation at all.
+//!
+//! That deviation is activation rounding, not structure (issue #2143). With
+//! every floating tensor promoted to f32 at load and `MLX_ENABLE_TF32=0`, the
+//! same 4-bit weights land within 1.3e-04 of the oracle's top-5 on the 38-token
+//! prompt and within 4.7e-04 on the 218-token one, where the bf16 run sits 1.6
+//! to 1.9 high; the f32 run also recovers the oracle's rank 2/3 order that bf16
+//! swaps. The same f32 run puts every chunked prefill in
+//! [`check_chunked_prefill`] within 2.1e-05 of the single-pass row.
 //!
 //! So the window is pinned where it can be isolated instead of diluted:
 //! `window_limits_local_branch` and `pass2_matches_only_the_correct_reference`
@@ -102,9 +110,9 @@ const LONG_CHAT_IDS: &[i32] = &[
 /// Oracle last-position top-5 for `LONG_CHAT_IDS`, `(id, logit)` in order.
 ///
 /// Ranks 2 and 3 are separated by 0.0395 in the oracle's f32, which is below
-/// the 0.125 spacing mlxcel's quantized `lm_head` resolves at this magnitude,
-/// so their relative order is not a meaningful assertion here. See
-/// [`TIE_GAP`].
+/// the 0.125 spacing a bf16 logit resolves at this magnitude, so their relative
+/// order is not a meaningful assertion here (bf16 mlxcel swaps them; an f32 run
+/// does not). See [`TIE_GAP`].
 const LONG_CHAT_TOP5: &[(i32, f32)] = &[
     (5123, 27.333_853),
     (32349, 27.166_67),
@@ -121,8 +129,8 @@ const SHORT_CHAT_GREEDY: &[i32] = &[
 
 /// How far a logit may sit from the oracle.
 ///
-/// mlxcel runs 160 layer applications in f16 and projects through a quantized
-/// `lm_head`; the oracle is f32 throughout. Across the two prompts the largest
+/// mlxcel runs 160 layer applications in bf16; the oracle is f32 throughout,
+/// over the same dequantized 4-bit weights. Across the two prompts the largest
 /// observed top-5 deviation is 1.83, almost all of it a systematic shift shared
 /// by the whole row (the fitted relation is `mlxcel = 1.095 * oracle - 0.155`
 /// at 218 tokens), which softmax is insensitive to. 2.5 is that envelope with
@@ -134,9 +142,9 @@ const LOGIT_TOLERANCE: f32 = 2.5;
 
 /// Oracle logit gap below which two entries are treated as tied.
 ///
-/// mlxcel's quantized `lm_head` resolves about 0.125 between adjacent logits at
-/// magnitude 16 to 32, so any oracle pair closer than that has no defined order
-/// here. 0.5 is four times that spacing.
+/// A bf16 logit resolves 0.125 between adjacent values at magnitude 16 to 32,
+/// so any oracle pair closer than that has no defined order here. 0.5 is four
+/// times that spacing.
 const TIE_GAP: f32 = 0.5;
 
 fn checkpoint_present() -> bool {
@@ -249,7 +257,7 @@ const LONG_CHAT_GREEDY: &[(i32, f32)] = &[
 ];
 
 /// Below this oracle margin, which token wins is not something mlxcel can be
-/// held to: its quantized `lm_head` resolves about 0.125 at these magnitudes and
+/// held to: its bf16 logits resolve 0.125 at these magnitudes and
 /// its deviation from the f32 oracle is mean 0.27. Steps closer than this are
 /// still exercised, they just are not asserted against the oracle's choice.
 const ORACLE_DECISIVE_MARGIN: f32 = 1.0;
@@ -333,6 +341,67 @@ fn check_greedy_continuation(model: &IQuestLoopCoderModel) {
     );
 }
 
+/// How far a chunked prefill's logit may sit from the single-pass one.
+///
+/// The two routes are not expected to agree bit for bit in bf16, and that is
+/// precision, not a chunk-boundary bug (issue #2143). Measured on GB10 (sm_121,
+/// cuDNN SDPA), deterministic run to run and identical with and without
+/// `MLXCEL_SDPA_DETERMINISTIC=1`, worst delta over the single-pass top-5 ids and
+/// `KL(single || chunked)` over the full 76 800-entry row:
+///
+/// | chunk | chunks       | worst top-5 delta | KL      |
+/// |-------|--------------|-------------------|---------|
+/// | 128   | 128 + 90     | 0.000             | 0.00002 |
+/// | 97    | 97 + 97 + 24 | 0.500             | 0.00272 |
+/// | 64    | 64 x 3 + 26  | 0.375             | 0.00204 |
+/// | 32    | 32 x 6 + 26  | 0.625             | 0.00737 |
+///
+/// Promoting every floating tensor to f32 at load (with `MLX_ENABLE_TF32=0`)
+/// collapses all four to at most 2.1e-05 over the whole row, so the keys,
+/// offsets and masks the two routes use agree; what differs is where bf16
+/// rounds. Different chunk sizes change the attention call shapes: a short
+/// masked tail can leave cuDNN for MLX's unfused fallback (`supports_sdpa_cudnn`
+/// in the CUDA SDPA overlay), and a continuation chunk's keys start at a
+/// different block offset than the single-pass keys do. Each shape rounds its
+/// bf16 intermediates differently. Neither route is the more accurate one:
+/// against the f32 run, the single-pass bf16 row itself sits 1.87 off on its
+/// top-5 at `KL = 0.0047`, and the four chunked rows sit at `KL` 0.0041 to
+/// 0.0071.
+///
+/// 1.0 is eight bf16 steps at this magnitude (16 to 32), 1.6x the measured worst
+/// and still under each route's own distance from f32. Together with
+/// [`CHUNKED_KL_TOLERANCE`] it is a coarse guard, and this checkpoint limits how
+/// coarse: the gate gives pass 2's local branch about 12% of the mix, and pass-2
+/// faults stay small at the logits. Measured with deliberate faults injected
+/// into `forward_pass2` on continuation chunks: rotating pass 2 from position 0
+/// lands at KL 0.024 to 0.030 (top-5 deltas up to 0.875), which the KL bound
+/// rejects; a one-position pass-2 RoPE slip (KL at most 0.0015) and a cache that
+/// keeps one key too few (KL at most 0.0031) stay inside bf16 noise and pass.
+/// Those boundary seams are pinned in f32 instead, at every position, by
+/// `chunked_prefill_matches_single_pass_past_the_window` in
+/// `src/models/iquestloopcoder_tests.rs`, which fails on both.
+const CHUNKED_LOGIT_TOLERANCE: f32 = 1.0;
+
+/// Bound on `KL(single || chunked)` over the full row: twice the measured worst
+/// of 0.0074 (chunk 32), and below the 0.024 a wholesale pass-2 RoPE fault
+/// produces. See [`CHUNKED_LOGIT_TOLERANCE`].
+const CHUNKED_KL_TOLERANCE: f64 = 0.015;
+
+/// `KL(softmax(p) || softmax(q))` over two logit rows, in f64.
+fn kl_divergence(p: &[f32], q: &[f32]) -> f64 {
+    let log_softmax = |row: &[f32]| -> Vec<f64> {
+        let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
+        let log_sum = row
+            .iter()
+            .map(|v| (*v as f64 - max).exp())
+            .sum::<f64>()
+            .ln();
+        row.iter().map(|v| *v as f64 - max - log_sum).collect()
+    };
+    let (lp, lq) = (log_softmax(p), log_softmax(q));
+    lp.iter().zip(&lq).map(|(a, b)| a.exp() * (a - b)).sum()
+}
+
 /// Chunked prefill must land where a single-pass prefill lands.
 ///
 /// This is the regime the two caches disagree about most easily. A continuation
@@ -341,14 +410,13 @@ fn check_greedy_continuation(model: &IQuestLoopCoderModel) {
 /// `RotatingKVCache::update_concat` returns `kept + L` keys while the pass-1
 /// cache returns `S + L`, and the windowed mask
 /// [`mlxcel_core::causal_attention`] builds has to match the first of those, not
-/// the second. An off-by-one there windows the wrong keys, which stays fluent.
+/// the second.
 ///
-/// `prefill_matches_incremental_decode` in
-/// `src/models/iquestloopcoder_tests.rs` covers the same seam on a synthetic
-/// one-layer model; this pins it on the real 80-layer checkpoint, across chunk
-/// sizes that land on, inside and across the 64-token window boundary.
+/// Every chunk size is measured before anything is asserted, so a failure
+/// reports all four rather than stopping at the first. The bounds are bf16
+/// bounds; see [`CHUNKED_LOGIT_TOLERANCE`] for what they can and cannot catch.
 fn check_chunked_prefill(model: &IQuestLoopCoderModel) {
-    let chunked = |chunk: usize| -> Vec<(i32, f32)> {
+    let chunked = |chunk: usize| -> Vec<f32> {
         let mut caches = model.make_caches();
         let mut logits = None;
         let mut start = 0;
@@ -360,25 +428,75 @@ fn check_chunked_prefill(model: &IQuestLoopCoderModel) {
                 Some(model.forward_last_logits_with_caches(&arr, &mut caches, piece.len() - 1));
             start = end;
         }
-        top_k(logits.as_ref().expect("at least one chunk"), 5)
+        mlxcel_core::utils::array_to_vec_f32(logits.as_ref().expect("at least one chunk"))
+    };
+    let top5 = |row: &[f32]| -> Vec<(i32, f32)> {
+        let mut indexed: Vec<(i32, f32)> = row
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (i as i32, *v))
+            .collect();
+        indexed.sort_by(|a, b| b.1.total_cmp(&a.1));
+        indexed.truncate(5);
+        indexed
     };
 
     let single = chunked(LONG_CHAT_IDS.len());
+    let single_top = top5(&single);
+    let single_max = single_top[0].1;
+    let mut failures = Vec::new();
     for chunk in [128, 97, 64, 32] {
         let split = chunked(chunk);
-        assert_eq!(
-            split.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-            single.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-            "chunk {chunk}: top-5 ids diverged from the single-pass prefill; got {split:?} \
-             against {single:?}"
+        let split_top = top5(&split);
+        let worst = single_top
+            .iter()
+            .map(|(id, v)| (split[*id as usize] - v).abs())
+            .fold(0.0f32, f32::max);
+        let kl = kl_divergence(&single, &split);
+        eprintln!(
+            "chunk {chunk}: worst top-5 delta {worst}, KL(single || chunked) {kl:.5}, top-5 \
+             {split_top:?} against single-pass {single_top:?}"
         );
-        for ((id, value), (_, reference)) in split.iter().zip(&single) {
-            assert!(
-                (value - reference).abs() <= 0.25,
-                "chunk {chunk}: logit for token {id} is {value}, single-pass says {reference}"
-            );
+
+        // The greedy token may only move to one the single-pass row cannot
+        // separate from its own top.
+        let greedy = split_top[0].0;
+        if single[greedy as usize] < single_max - TIE_GAP {
+            failures.push(format!(
+                "chunk {chunk}: greedy token {greedy} sits {} below the single-pass top",
+                single_max - single[greedy as usize]
+            ));
+        }
+        // Order is held only between entries the single-pass row separates by
+        // more than bf16 resolves, as in `assert_matches_oracle`.
+        for (i, (id_i, logit_i)) in single_top.iter().enumerate() {
+            for (id_j, logit_j) in &single_top[i + 1..] {
+                if logit_i - logit_j > TIE_GAP && split[*id_i as usize] <= split[*id_j as usize] {
+                    failures.push(format!(
+                        "chunk {chunk}: single-pass separates {id_i} from {id_j} by {} but the \
+                         chunked row does not order them",
+                        logit_i - logit_j
+                    ));
+                }
+            }
+        }
+        if worst > CHUNKED_LOGIT_TOLERANCE {
+            failures.push(format!(
+                "chunk {chunk}: a single-pass top-5 logit moved by {worst} (tolerance \
+                 {CHUNKED_LOGIT_TOLERANCE})"
+            ));
+        }
+        if kl > CHUNKED_KL_TOLERANCE {
+            failures.push(format!(
+                "chunk {chunk}: KL(single || chunked) is {kl} (tolerance {CHUNKED_KL_TOLERANCE})"
+            ));
         }
     }
+    assert!(
+        failures.is_empty(),
+        "chunked prefill diverged from the single-pass prefill:\n{}",
+        failures.join("\n")
+    );
 }
 
 /// Decode past the window: the rotating ring must agree with a full re-prefill,
@@ -394,7 +512,7 @@ fn check_chunked_prefill(model: &IQuestLoopCoderModel) {
 /// reads a physically trimmed 64-key ring while a full re-prefill of the same
 /// sequence keeps every key and windows them with a mask, so the two routes
 /// reach the same answer through different code. It needs no reference and is
-/// unaffected by mlxcel's f16 deviation from the f32 oracle, which is what makes
+/// unaffected by mlxcel's bf16 deviation from the f32 oracle, which is what makes
 /// it able to catch a ring that trims the wrong end, wraps at the wrong point,
 /// or loses the current token.
 ///
