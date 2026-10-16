@@ -26,6 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Fixed
 
 - Checkpoints that load through the SentencePiece fallback (a `tokenizer.model` with no `tokenizer.json`) now encode their `"special": false` added tokens as the one id each was declared with, as `transformers` does, instead of splitting them into ordinary pieces (#1758). IQuest-Coder and IQuest-Coder Loop tool-calling prompts now carry `<tools>`, `<tool_call>`, `<tool_response>` and their closers as single ids, Baichuan-M1's `<C_A>` turn marker and ERNIE-4.5-VL's `<|IMAGE_PLACEHOLDER|>` and `<|LOC_n|>` tokens do the same, and each added token's `lstrip`, `rstrip` and `single_word` flags are honored. `skip_special_tokens` still drops only the special ones. On this path `parse_special: false` (`/tokenize`, logit-bias text keys) now also recognizes non-special added tokens, as llama.cpp does, `added_tokens.json` is read when `added_tokens_decoder` is absent, and a `single_word` special token glued to a word (IQuest's `</s>` in `d</s>e`) encodes as text, as in `transformers`.
+- On CUDA, a bf16 model on an fp16 TurboQuant KV cache (`--kv-cache-mode fp16+turbo4` and the other turbo modes) no longer aborts with `Mask type must promote to output type float32` when attention carries an array mask, which for Gemma 4 meant any prompt past the 1024-token sliding window (#2336). Additive masks now reach SDPA in the attention dtype, `result_type(q, k, v)`, instead of the query's dtype.
 
 ## [v0.7.0] - 2026-09-09
 

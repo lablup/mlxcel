@@ -84,8 +84,8 @@ inline int32_t from_dtype(Dtype dtype) {
     }
 }
 
-// Coerce an SDPA array mask to the dtype `fast::scaled_dot_product_attention`
-// requires.
+// Coerce an SDPA array mask (or attention sinks, which follow the same rule)
+// to the dtype `fast::scaled_dot_product_attention` requires.
 //
 // SDPA attends in `result_type(q, k, v)` and rejects an array mask whose dtype
 // does not promote into that type. Bool and integer masks keep their select

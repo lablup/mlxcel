@@ -5933,7 +5933,8 @@ pub fn paged_decode_attention_pooled(
 ///
 /// This helper now routes M5-capable requests through upstream MLX main's
 /// NAX-backed SDPA implementation via the C++ bridge. Boolean/integer masks
-/// are passed through unchanged; float masks are cast to Q's dtype.
+/// are passed through unchanged; float masks are cast to the attention dtype,
+/// `result_type(q, k, v)` (`sdpa_mask_for_inputs` in the bridge).
 ///
 /// Used by: Llama, Qwen, Gemma2, Gemma3, Mistral, Ministral, DeepSeek, Phi,
 /// Exaone, Cohere, InternLM, OLMo, StableLM, StarCoder2, GLM4, Ernie4.5,

@@ -4109,7 +4109,12 @@ std::unique_ptr<MlxArray> fast_scaled_dot_product_attention_with_sinks(
         mask_opt = sdpa_mask_for_inputs(mask->inner, q.inner, k.inner, v.inner);
         mask_mode = "array";
     }
-    std::optional<array> sinks_opt = sinks ? std::optional(sinks->inner) : std::nullopt;
+    // SDPA applies the same "must promote to output type" rule to sinks, so
+    // they take the attention dtype as well; SDPA casts them to it anyway.
+    std::optional<array> sinks_opt = std::nullopt;
+    if (sinks) {
+        sinks_opt = sdpa_mask_for_inputs(sinks->inner, q.inner, k.inner, v.inner);
+    }
     return std::make_unique<MlxArray>(mlx::core::fast::scaled_dot_product_attention(
         q.inner, k.inner, v.inner, scale, mask_mode, mask_opt, sinks_opt
     ));
