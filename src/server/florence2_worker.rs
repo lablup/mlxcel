@@ -58,7 +58,7 @@ use crate::models::florence2::{
 use crate::server::ServerGenerateOptions;
 use crate::server::model_provider::model_worker::decode_request_images;
 use crate::server::model_provider::{
-    GenerateEvent, GenerationResult, ModelRequest, StopKind, TokenMeta,
+    GenerateEvent, GenerationResult, ModelRequest, PrefillStats, StopKind, TokenMeta,
 };
 
 /// Error message sent for an audio/video Florence-2 request.
@@ -391,6 +391,17 @@ fn handle_florence2_request(
     // needs the complete decode, so streaming clients receive the final text
     // as a single delta rather than a token-by-token stream of raw
     // `<loc_*>` markers that would not match the non-streaming content.
+    // Report the prompt length before the answer, as the batch scheduler
+    // does at its first token, so a streaming route that waits for it (the
+    // Anthropic `message_start`, issue #2337) sees the image's expanded
+    // length rather than the placeholder text's.
+    let _ = response_tx.send(GenerateEvent::Prefill(PrefillStats {
+        prompt_tokens: run.prompt_tokens,
+        cached_tokens: 0,
+        prompt_ms: elapsed_ms,
+        processed: run.prompt_tokens,
+        first_token: true,
+    }));
     if !cancelled.load(Ordering::Relaxed) {
         let _ = response_tx.send(GenerateEvent::Token(rendered.clone(), TokenMeta::default()));
     }

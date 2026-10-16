@@ -150,7 +150,8 @@ pub(crate) async fn render_admitted_chat_prompt(
     // the prompt they prefill can be longer than the body as sent. Render the
     // same filled copy, in the same order (after the video substitution), or
     // a count would come in under the `usage` of the same body (issue #2337).
-    // Only `fill` runs here: a route that does not generate has no reply to
+    // Only `fill` runs here (a hit refreshes the entry's recency, as a
+    // generation's would): a route that does not generate has no reply to
     // remember, so it never calls `record_reply`.
     let echo_scope = crate::server::reasoning_echo::chat_scope(state, live, &request);
     let render_request =

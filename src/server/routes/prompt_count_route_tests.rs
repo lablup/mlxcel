@@ -611,3 +611,33 @@ async fn anthropic_count_includes_the_reasoning_echo() {
     )
     .await;
 }
+
+/// A backend that streams a token without a prefill report first (the XLA
+/// serve loop, the disaggregated coordinator) still gets `message_start` as
+/// the stream's first event, exactly once, carrying the local fallback count
+/// (issue #2337).
+#[tokio::test]
+async fn anthropic_streaming_media_without_a_prefill_report_still_opens_with_message_start() {
+    let (options_tx, _options_rx) = mpsc::channel();
+    let (provider, handle) = ModelProvider::scripted_streaming_for_route_tests(options_tx);
+    let provider = Arc::new(provider);
+    let batch_metrics = provider.batch_metrics().clone();
+    let app = create_app(
+        AppState::new(
+            provider,
+            ServerConfig::default(),
+            ChatTemplateProcessor::with_template(TEMPLATE.to_string()),
+            MlxcelTokenizer::stub_all_byte_fallback(),
+            PathBuf::from("prompt-count-test-model"),
+            batch_metrics,
+        )
+        .with_media_support(ModelMediaSupport {
+            image: true,
+            ..ModelMediaSupport::default()
+        }),
+    );
+    handle.token("hi");
+    handle.finish();
+    let streamed = streamed_input_tokens(&app, &anthropic_image_body()).await;
+    assert!(streamed > 0, "the local count stands in: {streamed}");
+}

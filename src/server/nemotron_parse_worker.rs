@@ -42,7 +42,7 @@ use crate::models::nemotron_parse::DEFAULT_TASK_PROMPT;
 use crate::server::ServerGenerateOptions;
 use crate::server::model_provider::model_worker::decode_request_images;
 use crate::server::model_provider::{
-    GenerateEvent, GenerationResult, ModelRequest, StopKind, TokenMeta,
+    GenerateEvent, GenerationResult, ModelRequest, PrefillStats, StopKind, TokenMeta,
 };
 
 pub(crate) const NEMOTRON_PARSE_MEDIA_UNSUPPORTED_MSG: &str =
@@ -220,6 +220,17 @@ fn handle_request(
 
     // The answer is sent as one delta: the decode is model-owned and not
     // streamed token by token, same as Florence-2.
+    // Report the prompt length before the answer, as the batch scheduler
+    // does at its first token (as Florence-2 does), so a streaming route that waits for it (the
+    // Anthropic `message_start`, issue #2337) sees the image's expanded
+    // length rather than the placeholder text's.
+    let _ = response_tx.send(GenerateEvent::Prefill(PrefillStats {
+        prompt_tokens: run.prompt_tokens,
+        cached_tokens: 0,
+        prompt_ms: elapsed_ms,
+        processed: run.prompt_tokens,
+        first_token: true,
+    }));
     if !cancelled.load(Ordering::Relaxed) {
         let _ = response_tx.send(GenerateEvent::Token(run.text.clone(), TokenMeta::default()));
     }
