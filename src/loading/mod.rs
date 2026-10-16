@@ -68,6 +68,8 @@ pub(crate) use self::vlm::load_molmo_iree_host_preprocessor;
 pub use self::vlm::load_qwen3_omni_speech;
 #[cfg(feature = "xla-iree")]
 pub(crate) use self::vlm::load_qwen3_vl_iree_host_preprocessor;
+#[cfg(feature = "xla-iree")]
+pub(crate) use self::vlm::load_youtu_vl_iree_host_preprocessor;
 #[cfg(feature = "xla-reference-diagnostics")]
 pub use self::vlm::run_gemma3_eager_mlx_iree_prepared_boundary;
 #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]

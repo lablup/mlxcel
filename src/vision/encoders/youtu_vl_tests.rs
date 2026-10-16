@@ -45,6 +45,25 @@ fn small_config() -> YoutuVisionConfig {
     }
 }
 
+fn tiny_oracle_config() -> YoutuVisionConfig {
+    YoutuVisionConfig {
+        hidden_size: 16,
+        out_hidden_size: 12,
+        intermediate_size: 32,
+        num_hidden_layers: 2,
+        num_attention_heads: 4,
+        num_channels: 3,
+        num_patches: 64,
+        patch_size: 2,
+        spatial_merge_size: 2,
+        // Three merged groups per edge makes the `(4x8, 8x4)` packed fixture
+        // exercise a non-self-inverse window permutation.
+        window_size: 12,
+        fullatt_block_indexes: vec![1],
+        ..small_config()
+    }
+}
+
 fn put(weights: &mut WeightMap, key: &str, shape: &[i32]) {
     let total: i64 = shape.iter().map(|&d| d as i64).product();
     let arr = mlxcel_core::arange_f32(0.0, total as f32, 1.0);
@@ -126,6 +145,15 @@ fn build_synthetic_weights(prefix: &str, config: &YoutuVisionConfig) -> WeightMa
     w
 }
 
+fn array_to_vec_f32(array: &MlxArray) -> Vec<f32> {
+    let array = mlxcel_core::astype(array, mlxcel_core::dtype::FLOAT32);
+    mlxcel_core::eval(&array);
+    mlxcel_core::array_to_raw_bytes(&array)
+        .chunks_exact(4)
+        .map(|bytes| f32::from_ne_bytes(bytes.try_into().unwrap()))
+        .collect()
+}
+
 #[test]
 fn config_defaults_match_upstream() {
     let raw = serde_json::json!({});
@@ -176,6 +204,72 @@ fn window_index_partitions_token_set() {
     assert_eq!(*cu_window_seqlens.last().unwrap(), pre_merge_total);
     for w in cu_window_seqlens.windows(2) {
         assert!(w[0] <= w[1], "cu_window_seqlens must be non-decreasing");
+    }
+}
+
+#[test]
+fn tiny_two_layer_oracle_exposes_non_vacuous_window_and_restore_stages() {
+    let config = tiny_oracle_config();
+    let prefix = "vision_tower";
+    let weights = build_synthetic_weights(prefix, &config);
+    let encoder = YoutuVLVisionEncoder::from_weights(&weights, &config, prefix).unwrap();
+    let patch_width = config.num_channels * config.patch_size * config.patch_size;
+    let mut values = vec![0.0f32; 64 * patch_width];
+    for patch in 0..64 {
+        for column in 0..patch_width {
+            values[patch * patch_width + column] = patch as f32 * 0.01 + column as f32 * 0.0001;
+        }
+    }
+    let patches = mlxcel_core::from_slice_f32(&values, &[64, patch_width as i32]);
+    let capture = encoder
+        .forward_with_spatial_diagnostics(&patches, &[(4, 8), (8, 4)])
+        .unwrap();
+
+    assert_eq!(
+        mlxcel_core::array_shape(&capture.patch_projection),
+        vec![64, 16]
+    );
+    assert_eq!(
+        mlxcel_core::array_shape(&capture.window_layer0),
+        vec![64, 16]
+    );
+    assert_eq!(mlxcel_core::array_shape(&capture.full_layer1), vec![64, 16]);
+    assert_eq!(
+        mlxcel_core::array_shape(&capture.merger_window_order),
+        vec![16, 12]
+    );
+    assert_eq!(
+        mlxcel_core::array_shape(&capture.restored_output),
+        vec![16, 12]
+    );
+    assert_ne!(
+        capture.window_index,
+        (0..capture.window_index.len() as i32).collect::<Vec<_>>()
+    );
+    assert_ne!(capture.window_index, capture.reverse_indices);
+
+    let patch_projection = array_to_vec_f32(&capture.patch_projection);
+    let layer0 = array_to_vec_f32(&capture.window_layer0);
+    let layer1 = array_to_vec_f32(&capture.full_layer1);
+    let merger_window = array_to_vec_f32(&capture.merger_window_order);
+    let restored = array_to_vec_f32(&capture.restored_output);
+    for stage in [
+        &patch_projection,
+        &layer0,
+        &layer1,
+        &merger_window,
+        &restored,
+    ] {
+        assert!(stage.iter().all(|value| value.is_finite()));
+    }
+    assert_ne!(patch_projection, layer0);
+    assert_ne!(layer0, layer1);
+    assert_ne!(merger_window, restored);
+    for (original_group, &window_position) in capture.reverse_indices.iter().enumerate() {
+        assert_eq!(
+            &restored[original_group * 12..original_group * 12 + 12],
+            &merger_window[window_position as usize * 12..window_position as usize * 12 + 12]
+        );
     }
 }
 

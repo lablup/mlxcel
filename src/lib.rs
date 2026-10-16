@@ -87,13 +87,13 @@ pub use mlxcel_core::speculative::prompt_lookup_drafter::PromptLookupDrafter;
 pub use multimodal::host_preprocessor::Gemma3IreeHostPreprocessor;
 #[cfg(feature = "xla-diagnostics")]
 pub use multimodal::host_preprocessor::LlavaHostReferenceCapture;
-#[cfg(feature = "xla-iree")]
-pub use multimodal::host_preprocessor::LlavaIreeHostPreprocessor;
 pub use multimodal::host_preprocessor::{
     CONTEXT_CAPACITY_ENV, FakeHostMultimodalPreprocessor, HostMultimodalPreprocessor,
     HostPreprocessorError, LlavaHostPreprocessor, XlaVisionBackend,
     ensure_xla_image_context_capacity, load_xla_image_preprocessor, xla_image_context_floor,
 };
+#[cfg(feature = "xla-iree")]
+pub use multimodal::host_preprocessor::{LlavaIreeHostPreprocessor, YoutuVlIreeHostPreprocessor};
 #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 pub use multimodal::host_preprocessor::{
     Qwen2VlIreeHostPreprocessor, Qwen3VlIreeHostPreprocessor, Qwen3VlIreeVisionCapture,

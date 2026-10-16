@@ -480,6 +480,13 @@ required-features = ["xla-diagnostics-cpu"]
 name = "xla_qwen3_vl_deepstack_check"
 required-features = ["xla-diagnostics-cpu"]
 
+# Independent pinned HF-eager Youtu-VL oracle runner (#872). Captures the
+# production 27-layer vision schedule, prepared embeddings, MLA logits/KV,
+# greedy tokens, and reset/reuse lifecycle.
+[[example]]
+name = "xla_youtu_vl_reference_check"
+required-features = ["xla-diagnostics-cpu"]
+
 [[example]]
 name = "xla_aux_smoke"
 required-features = ["xla-iree"]

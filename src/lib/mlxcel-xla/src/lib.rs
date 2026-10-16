@@ -93,6 +93,8 @@ mod qwen2_vl_runtime;
 mod qwen3_vl_runtime;
 #[cfg(feature = "iree")]
 mod vision_runtime;
+#[cfg(feature = "iree")]
+mod youtu_vl_runtime;
 
 #[cfg(feature = "micro-oracle")]
 pub use numeric_oracle::{
@@ -159,8 +161,9 @@ pub use batch::{EngineEvent, FinishReason, XlaAdmissionError, XlaBatchEngine, Xl
 pub use batch::{
     Gemma3nAllLayerDiagnosticRun, Gemma3nCanonicalDiagnosticRun, Gemma3nPrefixDecodeDiagnosticRun,
     LlavaReferenceDiagnosticEngine, LlavaReferenceDiagnosticRun, Qwen3VlDeepStackDiagnosticEngine,
-    Qwen25VlLanguageDiagnosticEngine, run_gemma3n_all_layer_diagnostics,
-    run_gemma3n_canonical_diagnostics, run_gemma3n_prefix_decode_diagnostic,
+    Qwen25VlLanguageDiagnosticEngine, YoutuVlReferenceDiagnosticEngine,
+    run_gemma3n_all_layer_diagnostics, run_gemma3n_canonical_diagnostics,
+    run_gemma3n_prefix_decode_diagnostic,
 };
 pub use context::{
     CONTEXT_BUCKETS_ENV, CONTEXT_CAPACITY_ENV, ContextCapacityError, DEFAULT_CONTEXT_CAPACITY,
@@ -171,6 +174,8 @@ pub use context::{
 pub use diagnostic_flags::{
     configure_diagnostic_local_task_threads, diagnostic_local_task_threads_are_configured,
 };
+#[cfg(feature = "diagnostics")]
+pub use emitter::YOUTU_VL_DIAGNOSTIC_ABI_VERSION;
 #[cfg(all(feature = "diagnostics", xla_iree_cuda))]
 pub use emitter::{
     run_gemma3n_altup_correct_diagnostic_probe, run_gemma3n_altup_predict_diagnostic_probe,
@@ -229,6 +234,15 @@ pub use qwen3_vl_runtime::{
 pub use vision_runtime::{IreeVisionDiagnosticProjector, VisionDiagnosticProjection};
 #[cfg(feature = "iree")]
 pub use vision_runtime::{IreeVisionProjector, VisionExecutionMetrics, VisionProjection};
+#[cfg(feature = "diagnostics")]
+pub use youtu_vl_runtime::{
+    IreeYoutuVlDiagnosticProjector, YoutuVlVisionDiagnosticProjection,
+    YoutuVlVisionDiagnosticStageOutput,
+};
+#[cfg(feature = "iree")]
+pub use youtu_vl_runtime::{
+    IreeYoutuVlProjector, YoutuVlVisionExecutionMetrics, YoutuVlVisionProjection,
+};
 #[cfg(any(test, feature = "diagnostics"))]
 #[must_use]
 pub fn llava_diagnostic_device_memory_note(device: &str) -> &'static str {
