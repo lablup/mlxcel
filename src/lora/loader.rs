@@ -383,21 +383,33 @@ pub fn fuse_lora_weights_into(
             );
         };
 
+        let is_embedding = super::embedding::is_input_embedding_weight(base_weight_name);
+
+        // A packed weight's columns are not its input width, and a delta whose
+        // width happened to equal them would be added to the packed words;
+        // refuse it by the `.scales` plane, not by shape. This covers the
+        // embedding table (#2421) and every linear weight (#2437). A valid
+        // adapter never fused into a packed linear either: its `[out, in]`
+        // delta failed the shape guard below against the `[out, in * bits /
+        // 32]` plane, so the refusal only changes the message for it.
+        let scales_name = format!("{}.scales", base_weight_name.trim_end_matches(".weight"));
+        if base_weights.contains_key(&scales_name) {
+            let kind = if is_embedding {
+                "quantized embedding table"
+            } else {
+                "quantized linear weight"
+            };
+            anyhow::bail!(
+                "LoRA fusion refused for adapter layer {base_name}: {base_weight_name} is a \
+                 {kind}, and fusing writes the delta into dense weights only. Serve the adapter \
+                 unfused with --lora, or use an unquantized checkpoint."
+            );
+        }
+
         // An input embedding is `[vocab, hidden]` and its pair uses mlx-lm's
         // `LoRAEmbedding` orientation, the transpose of a linear pair's, so it
         // takes its own delta (#2421).
-        if super::embedding::is_input_embedding_weight(base_weight_name) {
-            // A packed table's columns are not the hidden width, and a delta
-            // whose width happened to equal them would be added to the packed
-            // words; refuse it by the `.scales` plane, not by shape.
-            let scales_name = format!("{}.scales", base_weight_name.trim_end_matches(".weight"));
-            if base_weights.contains_key(&scales_name) {
-                anyhow::bail!(
-                    "LoRA fusion refused for adapter layer {base_name}: {base_weight_name} is a \
-                     quantized embedding table, and fusing writes the delta into dense weights \
-                     only. Serve the adapter unfused with --lora, or use an unquantized checkpoint."
-                );
-            }
+        if is_embedding {
             let fused = super::embedding::fuse_embedding_pair(
                 base_name,
                 base_weight_name,

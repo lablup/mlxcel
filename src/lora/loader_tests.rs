@@ -396,6 +396,62 @@ fn a_mismatch_that_is_not_a_transpose_omits_the_transpose_hint() {
     assert!(!err.contains("transposes"), "{err}");
 }
 
+/// A 4-bit group-64 `[8, 256]` linear weight as a checkpoint stores it: a
+/// packed `[8, 32]` plane with its `[8, 4]` scales and biases.
+fn quantized_q_proj(prefix: &str) -> WeightMap {
+    let dense = mlxcel_core::ones(&[8, 256], mlxcel_core::dtype::FLOAT32);
+    let q = mlxcel_core::quantize_weights(&dense, 64, 4);
+    let mut base = WeightMap::new();
+    base.insert(
+        format!("{prefix}.weight"),
+        mlxcel_core::quantized_weights_w(&q),
+    );
+    base.insert(
+        format!("{prefix}.scales"),
+        mlxcel_core::quantized_weights_scales(&q),
+    );
+    base.insert(
+        format!("{prefix}.biases"),
+        mlxcel_core::quantized_weights_biases(&q),
+    );
+    base
+}
+
+#[test]
+fn the_fusion_loop_refuses_a_packed_width_delta_on_a_quantized_linear() {
+    // A delta as wide as the packed plane ([8, 32]) passes the shape guard and
+    // used to be added to the packed words (issue #2437).
+    let layer = "model.layers.0.self_attn.q_proj";
+    let mut base = quantized_q_proj(layer);
+    let packed = mlxcel_core::array_shape(base.get(&format!("{layer}.weight")).unwrap());
+    assert_eq!(packed, vec![8, 32]);
+    let packed_dtype = mlxcel_core::array_dtype(base.get(&format!("{layer}.weight")).unwrap());
+
+    let adapter = lora_pair(layer, 32, 2, 8);
+    let err = fusion_error(
+        fuse_lora_weights_into(&mut base, &adapter, 1.0),
+        "a packed-width delta must not fuse into a quantized linear",
+    );
+    assert!(err.contains("quantized linear weight"), "{err}");
+    assert!(err.contains(&format!("{layer}.weight")), "{err}");
+    assert!(err.contains("--lora"), "{err}");
+    let weight = base.get(&format!("{layer}.weight")).unwrap();
+    assert_eq!(
+        mlxcel_core::array_dtype(weight),
+        packed_dtype,
+        "packed plane rewritten"
+    );
+
+    // An adapter of the real width is refused with the same message; it never
+    // fused before either, failing the shape guard against the packed plane.
+    let adapter = lora_pair(layer, 256, 2, 8);
+    let err = fusion_error(
+        fuse_lora_weights_into(&mut base, &adapter, 1.0),
+        "a real-width delta must not fuse into a quantized linear",
+    );
+    assert!(err.contains("quantized linear weight"), "{err}");
+}
+
 // ---------------------------------------------------------------------------
 // Adapter tensor validation (issue #1328)
 //

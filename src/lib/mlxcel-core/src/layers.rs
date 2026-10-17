@@ -1396,8 +1396,10 @@ impl Linear {
         let bias_name = format!("{}.bias", prefix);
         let bias = weights.get(&bias_name).map(|w| ffi::copy(w));
 
-        // Unfused LoRA terms staged for this layer (issue #1439).
-        let runtime_loras = crate::runtime_lora::claim(prefix);
+        // Unfused LoRA terms staged for this layer (issue #1439), pinned to
+        // the weight's `[out, in]` (issue #2437).
+        let (in_features, out_features) = runtime_lora_widths(&ffi::array_shape(&weight), None);
+        let runtime_loras = crate::runtime_lora::claim_linear(prefix, in_features, out_features)?;
 
         Ok(Self {
             weight,
@@ -2545,6 +2547,25 @@ pub fn validate_quantized_packing(
     Ok(())
 }
 
+/// The `(in_features, out_features)` a runtime LoRA term must have on a linear
+/// weight of `weight_shape` (issue #2437): the rows, and the columns of a dense
+/// weight or, for a packed one (`quantized = Some((scales_shape, group_size))`),
+/// its group count times the group size it is served with. A degenerate shape
+/// gives `0`, which no term matches.
+fn runtime_lora_widths(weight_shape: &[i32], quantized: Option<(&[i32], i32)>) -> (i32, i32) {
+    let out_features = weight_shape
+        .len()
+        .checked_sub(2)
+        .map_or(0, |axis| weight_shape[axis]);
+    let in_features = match quantized {
+        Some((scales_shape, group_size)) => scales_shape
+            .last()
+            .map_or(0, |groups| groups.saturating_mul(group_size)),
+        None => weight_shape.last().copied().unwrap_or(0),
+    };
+    (in_features, out_features)
+}
+
 /// Unified Linear layer that auto-detects quantization
 ///
 /// Checks for `.scales` key in weight map to determine whether to use
@@ -2658,8 +2679,13 @@ impl UnifiedLinear {
             let global_scale_name = format!("{}.global_scale", prefix);
             let global_scale = weights.get(&global_scale_name).map(|w| ffi::copy(w));
 
-            // Unfused LoRA terms staged for this layer (issue #1439).
-            let runtime_loras = crate::runtime_lora::claim(prefix);
+            // Unfused LoRA terms staged for this layer (issue #1439), pinned to
+            // the logical input width, groups times the reconciled group size,
+            // which the packed plane hides from the loader (issue #2437).
+            let (in_features, out_features) =
+                runtime_lora_widths(&w_shape, Some((&s_shape, effective_group_size)));
+            let runtime_loras =
+                crate::runtime_lora::claim_linear(prefix, in_features, out_features)?;
 
             let qweight = QuantizedWeight {
                 weight,
@@ -3543,10 +3569,30 @@ impl FusedQKVLinear {
 
         // The fused representation concatenated the raw planes, so the
         // per-projection prefixes never went through a per-plane constructor;
-        // claim their staged runtime-LoRA terms here (issue #1439).
-        let lora_q = crate::runtime_lora::claim(&q_prefix);
-        let lora_k = crate::runtime_lora::claim(&k_prefix);
-        let lora_v = crate::runtime_lora::claim(&v_prefix);
+        // claim their staged runtime-LoRA terms here (issue #1439), each pinned
+        // to its own plane's widths (issue #2437). A packed plane is served at
+        // the group size the concatenated weight carries.
+        let fused_group_size = match &qkv_proj {
+            UnifiedLinear::Quantized { weight, .. } => Some(weight.group_size),
+            UnifiedLinear::Regular(_) => None,
+        };
+        let claim_plane = |plane: &str| {
+            let shape_of = |suffix: &str| {
+                weights
+                    .get(&format!("{plane}.{suffix}"))
+                    .map(|array| ffi::array_shape(array))
+                    .unwrap_or_default()
+            };
+            let scales_shape = fused_group_size.map(|_| shape_of("scales"));
+            let (in_features, out_features) = runtime_lora_widths(
+                &shape_of("weight"),
+                scales_shape.as_deref().zip(fused_group_size),
+            );
+            crate::runtime_lora::claim_linear(plane, in_features, out_features)
+        };
+        let lora_q = claim_plane(&q_prefix)?;
+        let lora_k = claim_plane(&k_prefix)?;
+        let lora_v = claim_plane(&v_prefix)?;
 
         Ok(Self {
             qkv_proj: QkvProjection::Fused(qkv_proj),

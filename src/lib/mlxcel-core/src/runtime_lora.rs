@@ -457,6 +457,62 @@ pub fn claim(prefix: &str) -> Vec<RuntimeLoraTerm> {
     claimed
 }
 
+/// Check every linear term in `terms` against the layer it was claimed for:
+/// each must be `a_t = [in_features, rank]`, `b_t = [rank, out_features]` for
+/// the layer's logical (dequantized) input width and its output rows.
+///
+/// The loader's check on a quantized base only knows the scales' group count
+/// (`validate_pair_shapes` in the consuming crate), so a pair of the wrong
+/// input width can get here, and an MLX shape mismatch in the forward crosses
+/// the cxx bridge as `std::terminate`. The constructor is where the real width
+/// is known, so it is pinned here and a mismatch fails the load instead
+/// (issue #2437), as [`EmbeddingLoraTerms::new`] does for embedding tables.
+///
+/// # Errors
+///
+/// Returns an error naming `prefix` when a term does not fit the layer.
+pub fn check_linear_terms(
+    prefix: &str,
+    terms: &[RuntimeLoraTerm],
+    in_features: i32,
+    out_features: i32,
+) -> Result<(), String> {
+    for term in terms {
+        let a = ffi::array_shape(&term.a_t);
+        let b = ffi::array_shape(&term.b_t);
+        let fits = a.len() == 2
+            && b.len() == 2
+            && a[0] == in_features
+            && a[1] == b[0]
+            && b[1] == out_features;
+        if !fits {
+            return Err(format!(
+                "LoRA adapter layer {prefix}: the pair (A {a:?}, B {b:?} in [in, rank] / \
+                 [rank, out] orientation) does not fit the linear layer, which takes \
+                 {in_features} input features and produces {out_features}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// [`claim`] the staged terms for a linear layer built at `prefix` and check
+/// them against its real widths ([`check_linear_terms`]). Every linear
+/// constructor that claims runtime terms goes through this.
+///
+/// # Errors
+///
+/// Returns an error naming `prefix` when a claimed term does not fit the layer.
+pub fn claim_linear(
+    prefix: &str,
+    in_features: i32,
+    out_features: i32,
+) -> Result<Vec<RuntimeLoraTerm>, String> {
+    let terms = claim(prefix);
+    check_linear_terms(prefix, &terms, in_features, out_features)?;
+    Ok(terms)
+}
+
 /// Claim the staged embedding terms for `prefix`, for the embedding lookup
 /// built there. The terms stay staged for a tied head built later from the
 /// same prefix (see [`claim`]); this marks them claimed so the load does not
@@ -775,5 +831,194 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A packed `[out, in]` linear weight of all `0.25` under `prefix`, in
+    /// `mode` at `group_size` / `bits`, as a checkpoint stores it.
+    fn quantized_linear(
+        prefix: &str,
+        out_features: i32,
+        in_features: i32,
+        group_size: i32,
+        bits: i32,
+        mode: &str,
+    ) -> WeightMap {
+        let dense = crate::from_slice_f32(
+            &vec![0.25f32; (out_features * in_features) as usize],
+            &[out_features, in_features],
+        );
+        let q = crate::quantize_weights_with_mode(&dense, group_size, bits, mode);
+        let mut weights = WeightMap::new();
+        weights.insert(format!("{prefix}.weight"), crate::quantized_weights_w(&q));
+        weights.insert(
+            format!("{prefix}.scales"),
+            crate::quantized_weights_scales(&q),
+        );
+        if crate::quantized_weights_has_biases(&q) {
+            weights.insert(
+                format!("{prefix}.biases"),
+                crate::quantized_weights_biases(&q),
+            );
+        }
+        weights
+    }
+
+    /// Stage one all-ones linear term of `[in_width] -> [out_width]`, rank 1,
+    /// for `prefix`.
+    fn stage_linear(prefix: &str, handle: &SharedLoraScale, in_width: i32, out_width: i32) {
+        let mut pending = std::collections::HashMap::new();
+        pending.insert(
+            prefix.to_string(),
+            vec![PendingLoraTerm {
+                handle: handle.clone(),
+                base_scale: 1.0,
+                a_t: crate::from_slice_f32(&vec![1.0f32; in_width as usize], &[in_width, 1]),
+                b_t: crate::from_slice_f32(&vec![1.0f32; out_width as usize], &[1, out_width]),
+            }],
+        );
+        stage(pending);
+    }
+
+    /// The input widths the loader's packed-base check accepts for a base of
+    /// `groups` quantization groups (`in / groups` in {16, 32, 64, 128}), other
+    /// than the real `in_features`. Every one of them passes the loader and
+    /// must fail the claim.
+    fn loader_plausible_wrong_widths(groups: i32, in_features: i32) -> Vec<i32> {
+        [16, 32, 64, 128]
+            .into_iter()
+            .map(|group| group * groups)
+            .filter(|width| *width != in_features)
+            .collect()
+    }
+
+    /// A term whose input width does not match a packed linear weight fails
+    /// the claim with an error instead of reaching the forward, where the
+    /// shape mismatch would abort the process (issue #2437). The loader's
+    /// packed-base check only knows the group count, so on a 4-bit group-64
+    /// `[8, 256]` weight (four groups) widths 64, 128 and 512 get this far.
+    /// The right width still loads and adds its term in the forward.
+    #[test]
+    fn a_term_of_the_wrong_width_on_a_quantized_linear_fails_the_claim() {
+        let weights = quantized_linear("proj", 8, 256, 64, 4, "affine");
+        let handle = SharedLoraScale::new(1.0);
+        let wrong = loader_plausible_wrong_widths(4, 256);
+        assert_eq!(wrong, vec![64, 128, 512]);
+        for width in wrong {
+            stage_linear("proj", &handle, width, 8);
+            let built = UnifiedLinear::from_weights(&weights, "proj", 64, 4);
+            let _ = drain_unclaimed();
+            match built {
+                Ok(_) => panic!("a [{width}, 1] lora_a must not fit a 256-wide quantized weight"),
+                Err(err) => {
+                    assert!(err.contains("LoRA adapter layer proj"), "{err}");
+                    assert!(
+                        err.contains("takes 256 input features and produces 8"),
+                        "{err}"
+                    );
+                }
+            }
+        }
+        // A wrong output width is pinned as well.
+        stage_linear("proj", &handle, 256, 16);
+        let built = UnifiedLinear::from_weights(&weights, "proj", 64, 4);
+        let _ = drain_unclaimed();
+        assert!(
+            built.is_err(),
+            "a [1, 16] lora_b must not fit 8 output rows"
+        );
+
+        stage_linear("proj", &handle, 256, 8);
+        let layer = UnifiedLinear::from_weights(&weights, "proj", 64, 4).expect("right width");
+        assert!(drain_unclaimed().is_empty(), "the term was claimed");
+        assert!(layer.is_quantized());
+        let x = crate::from_slice_f32(&vec![1.0f32; 256], &[1, 256]);
+        // 0.25 dequantizes exactly: base 256 * 0.25 = 64 per output; the term
+        // adds (x @ a_t) @ b_t = 256 per output.
+        assert_eq!(to_vec_f32(&layer.forward(&x)), vec![320.0f32; 8]);
+    }
+
+    /// Every packing the reconciler accepts pins the input width at claim:
+    /// affine at every bit width and group size, and the block-float modes.
+    #[test]
+    fn every_quantized_linear_layout_pins_the_term_width() {
+        use crate::hardware::{QuantMode, QuantModeSupport, quant_mode_support};
+        let (out_features, in_features) = (8, 256);
+        let mut layouts: Vec<(&str, i32, i32)> = Vec::new();
+        for group_size in [32, 64, 128] {
+            for bits in [2, 3, 4, 5, 6, 8] {
+                layouts.push(("affine", group_size, bits));
+            }
+        }
+        layouts.push(("mxfp4", 32, 4));
+        layouts.push(("mxfp8", 32, 8));
+        if matches!(
+            quant_mode_support(QuantMode::Nvfp4),
+            QuantModeSupport::Native
+        ) {
+            layouts.push(("nvfp4", 16, 4));
+        }
+        let handle = SharedLoraScale::new(1.0);
+        for (mode, group_size, bits) in layouts {
+            let weights =
+                quantized_linear("proj", out_features, in_features, group_size, bits, mode);
+            let groups = in_features / group_size;
+            for width in loader_plausible_wrong_widths(groups, in_features) {
+                stage_linear("proj", &handle, width, out_features);
+                let built =
+                    UnifiedLinear::from_weights_with_mode(&weights, "proj", group_size, bits, mode);
+                let _ = drain_unclaimed();
+                assert!(
+                    built.is_err(),
+                    "{mode} {bits}-bit gs{group_size}: a {width}-wide term must fail the claim"
+                );
+            }
+            stage_linear("proj", &handle, in_features, out_features);
+            let built =
+                UnifiedLinear::from_weights_with_mode(&weights, "proj", group_size, bits, mode);
+            assert!(drain_unclaimed().is_empty());
+            if let Err(err) = built {
+                panic!("{mode} {bits}-bit gs{group_size}: the right width must load: {err}");
+            }
+        }
+    }
+
+    /// The fused q/k/v representation pins each projection's terms to its own
+    /// packed plane: a k term as wide as the q plane's output, or of a
+    /// loader-plausible wrong input width, fails the claim (issue #2437).
+    #[test]
+    fn fused_qkv_pins_each_projection_term_to_its_own_plane() {
+        // hidden 128, two q heads and one kv head of head_dim 32: q [64, 128],
+        // k and v [32, 128], 4-bit group 64.
+        let mut weights = WeightMap::new();
+        for (name, rows) in [("q_proj", 64), ("k_proj", 32), ("v_proj", 32)] {
+            let plane = quantized_linear(&format!("attn.{name}"), rows, 128, 64, 4, "affine");
+            weights.extend(plane);
+        }
+        let handle = SharedLoraScale::new(1.0);
+        for (in_width, out_width) in [(256, 32), (64, 32), (128, 64)] {
+            stage_linear("attn.k_proj", &handle, in_width, out_width);
+            let built = FusedQKVLinear::from_weights_separate(&weights, "attn", 64, 4, 2, 1, 32);
+            let _ = drain_unclaimed();
+            match built {
+                Ok(_) => panic!("a [{in_width}] -> [{out_width}] k term must not fit"),
+                Err(err) => {
+                    assert!(err.contains("LoRA adapter layer attn.k_proj"), "{err}");
+                    assert!(
+                        err.contains("takes 128 input features and produces 32"),
+                        "{err}"
+                    );
+                }
+            }
+        }
+        stage_linear("attn.k_proj", &handle, 128, 32);
+        let fused = FusedQKVLinear::from_weights_separate(&weights, "attn", 64, 4, 2, 1, 32)
+            .expect("right width");
+        assert!(drain_unclaimed().is_empty(), "the k term was claimed");
+        let x = crate::from_slice_f32(&vec![1.0f32; 128], &[1, 128]);
+        let (q, k, v) = fused.forward(&x);
+        // base 128 * 0.25 = 32 per output; the k term adds 128.
+        assert_eq!(to_vec_f32(&q), vec![32.0f32; 64]);
+        assert_eq!(to_vec_f32(&k), vec![160.0f32; 32]);
+        assert_eq!(to_vec_f32(&v), vec![32.0f32; 32]);
     }
 }

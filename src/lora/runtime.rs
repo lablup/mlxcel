@@ -225,7 +225,10 @@ fn detect_orientation(
 /// For a dense base, `in_features` is checked exactly. For a quantized base
 /// the packed plane hides `in_features`, so the check pins it through the
 /// scales plane instead: the input width must be a whole multiple of the
-/// scales' group count with a plausible group size. The GPT-2 `Conv1D`
+/// scales' group count with a plausible group size. That still admits up to
+/// four widths, so the exact width is pinned again when the layer claims the
+/// term, where its reconciled group size is known
+/// ([`mlxcel_core::runtime_lora::claim_linear`], issue #2437). The GPT-2 `Conv1D`
 /// transposed layout fails these checks loudly, matching the fused path's
 /// refusal of that layout.
 fn validate_pair_shapes(

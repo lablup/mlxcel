@@ -174,6 +174,15 @@ weights. Such an adapter fails startup with every unclaimed layer listed. On an
 unquantized base `--lora-fuse` can serve it instead, since fusion writes the
 deltas into the base weights.
 
+On a quantized checkpoint only the unfused path applies adapters. Fusion
+(`mlxcel generate --adapter`, `--lora-fuse`, and the pipeline-parallel stage
+loader) refuses any pair whose base weight has a `.scales` plane, because it
+adds a dense delta and the stored weight is packed; serve the adapter unfused
+with `--lora` instead. The unfused path checks every pair against the layer's
+real input width, the scales' group count times the group size, when the
+layer is built, so an adapter trained for a different width fails startup
+with the layer named instead of aborting at the first request.
+
 An `lm_head` pair is refused when the checkpoint ties its output projection to
 its input embeddings, either because `config.json` sets `tie_word_embeddings`
 or because the checkpoint stores no `lm_head.weight` of its own. The model then
