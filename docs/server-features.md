@@ -167,11 +167,12 @@ a valid load.
 
 The unfused path also checks that the model actually consumes every adapter
 layer. A term reaches the forward pass only when the layer is built by one of
-the shared linear constructors; a layer a family builds some other way (an
-embedding table, a hand-built projection) would keep its base weights. Such an
-adapter fails startup with every unclaimed layer listed. On an unquantized base
-`--lora-fuse` can serve it instead, since fusion writes the deltas into the base
-weights (on an untied checkpoint; a tied one refuses an embedding pair, below).
+the shared linear constructors, or, for an `embed_tokens` pair, by the shared
+embedding constructor; a layer a family builds some other way (a hand-built
+projection, an embedding table under another name) would keep its base
+weights. Such an adapter fails startup with every unclaimed layer listed. On an
+unquantized base `--lora-fuse` can serve it instead, since fusion writes the
+deltas into the base weights.
 
 An `lm_head` pair is refused when the checkpoint ties its output projection to
 its input embeddings, either because `config.json` sets `tie_word_embeddings`
@@ -180,15 +181,26 @@ reads its logits through the embedding matrix, so the pair would either never
 be applied or silently untie the two projections. A tied mlx-lm model has no
 `lm_head` module, so `mlx_lm.lora` never trains such a pair.
 
-A `model.embed_tokens` pair (or its `language_model.model.embed_tokens` /
-`model.language_model.embed_tokens` VLM spelling) on the same kind of checkpoint
-is refused too. mlx-lm can train one when `lora_parameters.keys` names the
-embedding, and its `LoRAEmbedding` applies the delta to the embedding lookup and
-to the tied head alike. The load paths here read every pair as a linear
-projection, so before the refusal the fused path adapted both ends while the
-unfused path adapted only the head. Merge an mlx-lm adapter of this kind with
-`mlx_lm.fuse` and load the merged checkpoint. The single-process (fused and
-unfused) and pipeline-parallel loaders give the same answer for both pairs.
+A `model.embed_tokens` pair is what `mlx_lm.lora` writes when
+`lora_parameters.keys` names the embedding. Its `LoRAEmbedding` stores
+`lora_a = [vocab, rank]` and `lora_b = [rank, hidden]`, adds
+`scale * lora_a[ids] @ lora_b` to the lookup and, on a tied checkpoint,
+`scale * (x @ lora_b.T) @ lora_a.T` to the logits, and `mlx_lm.fuse` writes
+`W + scale * lora_a @ lora_b`. mlxcel reads the pair in that layout (a pair
+written for the `[hidden] -> [vocab]` projection in the linear orientation is
+canonicalized to the same delta) and applies it the same way on every path:
+`--lora` adds the lookup term in the embedding and the transposed term in the
+tied head, both behind the adapter's one scale handle, so `POST /lora-adapters`
+moves them together and scale 0.0 serves the base logits exactly; `--adapter`,
+`--lora-fuse` and `--pp-size N --adapter` fold the delta into the one table
+both ends read (dense base only). An untied checkpoint adapts the lookup alone,
+as mlx-lm does. On a tied checkpoint this is supported for the Llama decoder
+(`llama`, `qwen2`) when `config.json` sets `tie_word_embeddings: true`, and
+for Qwen3 unless it sets it `false`. A pair on any other tied family, on a
+Llama checkpoint that is tied only because it stores no `lm_head.weight`, or
+under the `language_model.model.embed_tokens` / `model.language_model.embed_tokens`
+VLM spellings is still refused at startup on every load path; merge such an
+adapter with `mlx_lm.fuse` and load the merged checkpoint.
 
 Mixture-of-experts expert adapters are not supported on either path. mlx-lm's
 `LoRASwitchLinear` stores one low-rank pair per expert as 3-D `lora_a` /

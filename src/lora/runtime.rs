@@ -38,10 +38,13 @@
 use std::sync::RwLock;
 
 use anyhow::Result;
-use mlxcel_core::runtime_lora::{PendingLoraTerm, SharedLoraScale};
+use mlxcel_core::runtime_lora::{PendingLoraEmbeddingTerm, PendingLoraTerm, SharedLoraScale};
 use mlxcel_core::weights::WeightMap;
 
 use super::config::AdapterConfig;
+use super::embedding::{
+    canonical_embedding_factors, detect_embedding_layout, is_input_embedding_weight,
+};
 use super::loader::{
     load_adapter_weights, reject_unsupported_fine_tune_type, validate_adapter_tensors,
 };
@@ -295,6 +298,7 @@ pub fn stage_runtime_adapters(base_weights: &WeightMap, set: &RuntimeLoraSet) ->
     use std::collections::HashMap;
 
     let mut pending: HashMap<String, Vec<PendingLoraTerm>> = HashMap::new();
+    let mut embeddings: HashMap<String, Vec<PendingLoraEmbeddingTerm>> = HashMap::new();
     for adapter in &set.adapters {
         let adapter_weights = load_adapter_weights(&adapter.spec.path)?;
         let pairs = validate_adapter_tensors(base_weights, &adapter_weights)
@@ -304,6 +308,37 @@ pub fn stage_runtime_adapters(base_weights: &WeightMap, set: &RuntimeLoraSet) ->
             let layer = pair.layer.as_str();
             let a_shape = mlxcel_core::array_shape(&pair.lora_a);
             let b_shape = mlxcel_core::array_shape(&pair.lora_b);
+            let prefix = pair
+                .base_weight_name
+                .trim_end_matches(".weight")
+                .to_string();
+            if is_input_embedding_weight(&pair.base_weight_name) {
+                // An embedding pair is read in mlx-lm's `LoRAEmbedding`
+                // layout and staged for the embedding lookup (and a tied head)
+                // to claim, not for a linear layer (#2421).
+                let vocab = base_weights
+                    .get(&pair.base_weight_name)
+                    .map(|base| mlxcel_core::array_shape(base))
+                    .and_then(|shape| shape.first().copied())
+                    .unwrap_or(0);
+                let (layout, hidden) = detect_embedding_layout(layer, &a_shape, &b_shape, vocab)?;
+                // Rows are the vocabulary and columns the hidden width, so the
+                // linear check (out = rows, in = columns, packed or not)
+                // applies as it stands.
+                validate_pair_shapes(layer, base_weights, &pair.base_weight_name, hidden, vocab)?;
+                let (a, b) = canonical_embedding_factors(&pair.lora_a, &pair.lora_b, layout);
+                embeddings
+                    .entry(prefix)
+                    .or_default()
+                    .push(PendingLoraEmbeddingTerm {
+                        handle: adapter.handle.clone(),
+                        base_scale: adapter.base_scale,
+                        a,
+                        b,
+                    });
+                staged_layers += 1;
+                continue;
+            }
             let (orientation, in_features, out_features) =
                 detect_orientation(layer, &a_shape, &b_shape)?;
             validate_pair_shapes(
@@ -313,10 +348,6 @@ pub fn stage_runtime_adapters(base_weights: &WeightMap, set: &RuntimeLoraSet) ->
                 in_features,
                 out_features,
             )?;
-            let prefix = pair
-                .base_weight_name
-                .trim_end_matches(".weight")
-                .to_string();
             // Normalize both on-disk orientations into the forward
             // orientation the layers consume: a_t = [in, rank],
             // b_t = [rank, out].
@@ -352,7 +383,7 @@ pub fn stage_runtime_adapters(base_weights: &WeightMap, set: &RuntimeLoraSet) ->
             adapter.handle.get(),
         );
     }
-    mlxcel_core::runtime_lora::stage(pending);
+    mlxcel_core::runtime_lora::stage_with_embeddings(pending, embeddings);
     Ok(())
 }
 
@@ -377,7 +408,8 @@ pub fn finish_runtime_staging() -> Vec<String> {
 ///
 /// A staged term reaches the forward pass only through a layer constructor
 /// that claims it (`Linear::from_weights`, `UnifiedLinear::from_weights`,
-/// `FusedQKVLinear`). A layer the model builds any other way keeps serving its
+/// `FusedQKVLinear`, and `UnifiedEmbedding::from_weights` for an embedding
+/// term). A layer the model builds any other way keeps serving its
 /// base weight, so loading anyway would serve the base model under the
 /// adapter's name, the failure #1328 closed for unmapped tensors (#1577).
 /// Every unclaimed layer is reported at once, because an adapter built against
@@ -392,8 +424,8 @@ pub fn ensure_runtime_terms_claimed(unclaimed: &[String]) -> Result<()> {
     let noun = if count == 1 { "layer" } else { "layers" };
     anyhow::bail!(
         "Runtime LoRA adapter terms for {count} {noun} were not claimed by the model:\n  {}\n\
-         The model builds these layers outside the Linear / UnifiedLinear / FusedQKVLinear \
-         constructors, so the unfused adapter would never reach them and those layers would \
+         The model builds these layers outside the Linear / UnifiedLinear / FusedQKVLinear / \
+         UnifiedEmbedding constructors, so the unfused adapter would never reach them and those layers would \
          serve the base weights. Remove these modules from the adapter, or, on an unquantized \
          base, serve it fused with --lora-fuse, which writes the deltas into the base weights.",
         unclaimed.join("\n  "),

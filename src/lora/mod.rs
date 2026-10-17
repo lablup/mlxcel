@@ -21,6 +21,7 @@
 //! Uses mlxcel-core types (WeightMap) for weight storage.
 
 mod config;
+mod embedding;
 mod loader;
 pub mod multi;
 mod pair_rank;

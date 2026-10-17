@@ -50,6 +50,17 @@
 //! pair is refused here, before any path reads a weight, with `mlx_lm.fuse`
 //! named as the way to serve such an adapter.
 //!
+//! Issue #2421 added that support for the Llama decoder (`llama`, `qwen2`)
+//! and Qwen3: the loaders read an embedding pair in the `LoRAEmbedding` layout
+//! (`super::embedding`), the runtime path stages it for
+//! `UnifiedEmbedding::from_weights` and attaches its transposed form to a head
+//! built from the embedding, and the fused and stage paths fold it into the one
+//! matrix both ends read. For those families, and only when their constructors
+//! read the head from the embedding (see `applies_tied_embedding_pairs`), the
+//! `model.embed_tokens` pair is no longer refused. Every other family, every
+//! other embedding stem and every output-head pair keeps the verdict and its
+//! wording.
+//!
 //! Used by: `loading::load_model_with_adapter`,
 //! `loading::load_model_with_adapter_specs`, the pipeline Llama stage loader
 
@@ -177,6 +188,23 @@ pub fn reject_tied_output_head_adapter(model_dir: &Path, adapter_path: &Path) ->
         )
     };
 
+    // The families that apply a `model.embed_tokens` pair at both ends of the
+    // tie, the way mlx-lm does, take it (#2421); every other refusal stands
+    // exactly as worded below.
+    let refused: Vec<TiedTarget> = if refused.contains(&APPLIED_TIED_EMBEDDING)
+        && applies_tied_embedding_pairs(model_dir, &config)
+    {
+        refused
+            .into_iter()
+            .filter(|target| *target != APPLIED_TIED_EMBEDDING)
+            .collect()
+    } else {
+        refused
+    };
+    if refused.is_empty() {
+        return Ok(());
+    }
+
     let stems: Vec<&str> = refused.iter().map(|target| target.stem()).collect();
     let heads: Vec<&str> = refused
         .iter()
@@ -216,6 +244,38 @@ pub fn reject_tied_output_head_adapter(model_dir: &Path, adapter_path: &Path) ->
         ));
     }
     anyhow::bail!("{message}");
+}
+
+/// The embedding end a supported family applies on a tied checkpoint.
+const APPLIED_TIED_EMBEDDING: TiedTarget = TiedTarget::Embedding("model.embed_tokens", "lm_head");
+
+/// Whether this checkpoint's family applies a `model.embed_tokens` pair to the
+/// lookup and to the tied head alike, on every load path (#2421).
+///
+/// Only the Llama decoder (`llama`, its `mistral` alias, and `qwen2`, which
+/// loads through the same constructors) and Qwen3 qualify, and only when the
+/// constructors actually read the head from the embedding: Llama builds its
+/// head from `model.embed_tokens` only when `config.json` sets
+/// `tie_word_embeddings: true` (its default is `false`), and Qwen3 reads it
+/// through `embed_tokens.as_linear` unless the config sets it `false`. A Llama
+/// checkpoint that is tied only because it stores no `lm_head.weight` builds
+/// its head from the copy `sanitize_tied_embeddings` makes, which the fused
+/// path takes after fusing and the runtime and stage paths before, so the
+/// paths would disagree and it keeps the refusal.
+fn applies_tied_embedding_pairs(model_dir: &Path, config: &serde_json::Value) -> bool {
+    use crate::models::ModelType;
+
+    let Ok(model_type) = crate::models::get_model_type(model_dir) else {
+        return false;
+    };
+    let tie = config
+        .get("tie_word_embeddings")
+        .and_then(serde_json::Value::as_bool);
+    match model_type {
+        ModelType::Llama | ModelType::Qwen2 => tie == Some(true),
+        ModelType::Qwen3 => tie != Some(false),
+        _ => false,
+    }
 }
 
 /// Whether the config declares the output projection tied, at the top level or

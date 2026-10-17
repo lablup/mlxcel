@@ -23,8 +23,8 @@ use std::path::PathBuf;
 
 use super::*;
 use crate::lora::test_support::{
-    TINY_HIDDEN, TINY_VOCAB, TinyLlama, adapter_pair_tensors, temp_dir, write_adapter_dir,
-    write_tiny_llama_checkpoint,
+    TINY_HIDDEN, TINY_VOCAB, TinyLlama, adapter_pair_tensors, relabel_checkpoint_family, temp_dir,
+    write_adapter_dir, write_tiny_llama_checkpoint,
 };
 
 fn checkpoint(name: &str, tie_word_embeddings: Option<bool>, stores_lm_head: bool) -> PathBuf {
@@ -49,6 +49,18 @@ fn head_adapter(name: &str, layer: &str) -> PathBuf {
         2,
         adapter_pair_tensors(layer, TINY_HIDDEN, 2, TINY_VOCAB),
     );
+    dir
+}
+
+/// [`checkpoint`] relabelled as a tied family that does not apply an
+/// embedding pair at both ends (Gemma), which keeps the #2332 refusal.
+fn other_family_checkpoint(
+    name: &str,
+    tie_word_embeddings: Option<bool>,
+    stores_lm_head: bool,
+) -> PathBuf {
+    let dir = checkpoint(name, tie_word_embeddings, stores_lm_head);
+    relabel_checkpoint_family(&dir, "gemma", "GemmaForCausalLM");
     dir
 }
 
@@ -198,8 +210,9 @@ fn an_embedding_pair_on_a_config_tied_checkpoint_is_refused_in_either_orientatio
     // #2332: the tied head reads the embedding matrix, so an embed_tokens pair
     // lands on whichever end the load path's constructors happen to claim it
     // for. Both on-disk orientations get the same verdict before any shape
-    // check runs.
-    let model = checkpoint("tied_embed_cfg_model", Some(true), false);
+    // check runs. Gemma is not one of the families that apply the pair at
+    // both ends (#2421), so the refusal and its wording stand.
+    let model = other_family_checkpoint("tied_embed_cfg_model", Some(true), false);
     for linear in [true, false] {
         let adapter = embedding_adapter("tied_embed_cfg_adapter", linear);
         let err = reject_tied_output_head_adapter(&model, &adapter)
@@ -214,6 +227,9 @@ fn an_embedding_pair_on_a_config_tied_checkpoint_is_refused_in_either_orientatio
 
 #[test]
 fn an_embedding_pair_on_a_checkpoint_without_its_own_head_is_refused() {
+    // A Llama checkpoint tied only by a missing head builds its head from the
+    // `lm_head` copy the loaders make, not from the embedding, so even the
+    // Llama family keeps the refusal here (#2421).
     let model = checkpoint("tied_embed_implicit_model", None, false);
     let adapter = embedding_adapter("tied_embed_implicit_adapter", true);
 
@@ -241,7 +257,7 @@ fn an_embedding_pair_on_an_untied_checkpoint_passes_the_tie_verdict() {
 
 #[test]
 fn a_head_and_an_embedding_pair_are_refused_together() {
-    let model = checkpoint("tied_both_model", Some(true), false);
+    let model = other_family_checkpoint("tied_both_model", Some(true), false);
     let adapter = temp_dir("tied_both_adapter");
     let mut tensors = adapter_pair_tensors("lm_head", TINY_HIDDEN, 2, TINY_VOCAB);
     tensors.extend(adapter_pair_tensors(
@@ -340,6 +356,98 @@ fn without_a_declared_tie_only_the_ends_whose_head_is_missing_are_refused() {
         !err.contains("output-head LoRA"),
         "the stored lm_head is untied and its pair is not refused: {err}"
     );
+
+    cleanup(&[&model, &adapter]);
+}
+
+/// The families that apply a `model.embed_tokens` pair to the lookup and the
+/// tied head alike (#2421), each relabelled from the tiny Llama checkpoint:
+/// `(model_type, architecture)`.
+const APPLYING_FAMILIES: [(&str, &str); 3] = [
+    ("llama", "LlamaForCausalLM"),
+    ("qwen2", "Qwen2ForCausalLM"),
+    ("qwen3", "Qwen3ForCausalLM"),
+];
+
+#[test]
+fn an_embedding_pair_on_a_config_tied_llama_qwen2_or_qwen3_checkpoint_passes() {
+    for (model_type, architecture) in APPLYING_FAMILIES {
+        let model = checkpoint("tied_embed_applied_model", Some(true), false);
+        relabel_checkpoint_family(&model, model_type, architecture);
+        for linear in [true, false] {
+            let adapter = embedding_adapter("tied_embed_applied_adapter", linear);
+            reject_tied_output_head_adapter(&model, &adapter).unwrap_or_else(|err| {
+                panic!("{model_type} applies an embed_tokens pair at both ends of the tie: {err}")
+            });
+            cleanup(&[&adapter]);
+        }
+        cleanup(&[&model]);
+    }
+}
+
+#[test]
+fn qwen3_takes_an_embedding_pair_when_its_default_tie_reads_the_embedding() {
+    // Qwen3 defaults `tie_word_embeddings` to true and reads its head through
+    // `embed_tokens.as_linear`, so a checkpoint with no key and no stored head
+    // applies the pair at both ends on every path.
+    let model = checkpoint("qwen3_implicit_model", None, false);
+    relabel_checkpoint_family(&model, "qwen3", "Qwen3ForCausalLM");
+    let adapter = embedding_adapter("qwen3_implicit_adapter", false);
+
+    reject_tied_output_head_adapter(&model, &adapter)
+        .expect("Qwen3's default tie reads the head from the embedding");
+
+    cleanup(&[&model, &adapter]);
+}
+
+#[test]
+fn a_head_pair_next_to_an_applied_embedding_pair_is_still_refused_alone() {
+    // On a family that applies the embedding pair, only the head pair is
+    // refused, in the #1577 wording, without the embedding paragraph.
+    let model = checkpoint("tied_both_llama_model", Some(true), false);
+    let adapter = temp_dir("tied_both_llama_adapter");
+    let mut tensors = adapter_pair_tensors("lm_head", TINY_HIDDEN, 2, TINY_VOCAB);
+    tensors.extend(adapter_pair_tensors(
+        "model.embed_tokens",
+        TINY_VOCAB,
+        2,
+        TINY_HIDDEN,
+    ));
+    write_adapter_dir(&adapter, "lora", 2, tensors);
+
+    let err = reject_tied_output_head_adapter(&model, &adapter)
+        .expect_err("an lm_head pair on a tied checkpoint is still refused")
+        .to_string();
+    assert!(err.contains("a LoRA pair for lm_head, but"), "{err}");
+    assert!(err.contains("output-head LoRA"), "{err}");
+    assert!(!err.contains("input-embedding LoRA"), "{err}");
+
+    cleanup(&[&model, &adapter]);
+}
+
+#[test]
+fn a_nested_embedding_stem_keeps_the_refusal_on_an_applying_family() {
+    // Only the text layout's `model.embed_tokens` is applied; the VLM stems
+    // belong to families this does not cover.
+    let model = checkpoint("tied_nested_llama_model", Some(true), false);
+    let adapter = temp_dir("tied_nested_llama_adapter");
+    write_adapter_dir(
+        &adapter,
+        "lora",
+        2,
+        adapter_pair_tensors(
+            "model.language_model.embed_tokens",
+            TINY_VOCAB,
+            2,
+            TINY_HIDDEN,
+        ),
+    );
+
+    let err = reject_tied_output_head_adapter(&model, &adapter)
+        .expect_err("a nested embedding stem is not applied")
+        .to_string();
+    assert!(err.contains("model.language_model.embed_tokens"), "{err}");
+    assert!(err.contains("input-embedding LoRA"), "{err}");
 
     cleanup(&[&model, &adapter]);
 }

@@ -383,6 +383,23 @@ pub fn fuse_lora_weights_into(
             );
         };
 
+        // An input embedding is `[vocab, hidden]` and its pair uses mlx-lm's
+        // `LoRAEmbedding` orientation, the transpose of a linear pair's, so it
+        // takes its own delta (#2421).
+        if super::embedding::is_input_embedding_weight(base_weight_name) {
+            let fused = super::embedding::fuse_embedding_pair(
+                base_name,
+                base_weight_name,
+                base_weight,
+                lora_a,
+                lora_b,
+                scale,
+            )?;
+            base_weights.insert(base_weight_name.clone(), fused);
+            fused_count += 1;
+            continue;
+        }
+
         // Compute the LoRA delta: scale * (lora_b @ lora_a)
         let delta = compute_lora_delta(lora_a, lora_b, scale)?;
 

@@ -997,3 +997,7 @@ mod tests;
 #[cfg(test)]
 #[path = "adapter_load_tests.rs"]
 mod adapter_load_tests;
+
+#[cfg(test)]
+#[path = "adapter_embedding_tests.rs"]
+mod adapter_embedding_tests;

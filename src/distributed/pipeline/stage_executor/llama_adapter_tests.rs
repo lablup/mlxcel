@@ -22,19 +22,21 @@
 //! single-process answer, word for word, and still applies a head pair where
 //! the head is genuinely separate.
 //!
-//! The `model.embed_tokens` parity test (#2332) runs all three load paths, the
+//! The `model.embed_tokens` verdict test (#2332) runs all three load paths, the
 //! fused single-process path, the unfused runtime path, and this stage
 //! loader, against one tied checkpoint: before the fix the first and last
 //! folded a linear-shaped pair into the matrix both ends read while the
 //! runtime path applied it to the head alone, and an mlx-lm `LoRAEmbedding`
-//! pair failed with a different shape message on each.
+//! pair failed with a different shape message on each. Since #2421 the Llama
+//! decoder applies the pair, so the verdict test uses a relabelled family that
+//! still refuses it.
 
 use std::path::{Path, PathBuf};
 
 use super::*;
 use crate::lora::test_support::{
-    TINY_HIDDEN, TINY_VOCAB, TinyLlama, adapter_pair_tensors, temp_dir, write_adapter_dir,
-    write_tiny_llama_checkpoint,
+    TINY_HIDDEN, TINY_VOCAB, TinyLlama, adapter_pair_tensors, relabel_checkpoint_family, temp_dir,
+    write_adapter_dir, write_tiny_llama_checkpoint,
 };
 
 fn checkpoint(name: &str, tie_word_embeddings: bool, stores_lm_head: bool) -> PathBuf {
@@ -162,7 +164,13 @@ fn embedding_adapter(name: &str, linear: bool) -> PathBuf {
 fn every_load_path_gives_the_same_verdict_on_a_tied_embedding_pair() {
     use crate::lora::{LoraAdapterSpec, RuntimeLoraSet};
 
+    // The tiny Llama relabelled as Gemma: the Llama stage loader reads its
+    // weights the same way, and the verdict, which runs first, sees a family
+    // that does not apply the pair at both ends (#2421). That the three paths
+    // agree on the logits where the pair is applied is pinned in
+    // `loading/adapter_embedding_tests.rs`.
     let model = checkpoint("stage_tied_embed_model", true, false);
+    relabel_checkpoint_family(&model, "gemma", "GemmaForCausalLM");
     for linear in [true, false] {
         let adapter = embedding_adapter("stage_tied_embed_adapter", linear);
         let spec = LoraAdapterSpec {

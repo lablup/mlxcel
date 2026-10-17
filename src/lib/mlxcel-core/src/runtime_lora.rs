@@ -41,6 +41,13 @@
 //! base weights after a load that succeeded. That is still only logged; issue
 //! #1577 owns making it strict.
 //!
+//! Input embeddings take their own term type (issue #2421), in mlx-lm's
+//! `LoRAEmbedding` layout: [`RuntimeLoraEmbeddingTerm`] adds
+//! `scale * a[ids] @ b` to the lookup and, when the output head reads the same
+//! matrix, `scale * (x @ bᵀ) @ aᵀ` to the logits. They are staged in a map of
+//! their own, claimed by `UnifiedEmbedding::from_weights`, and shared with a
+//! tied head through an `Arc` and one scale handle.
+//!
 //! A term whose user scale reads `0.0` contributes nothing and, crucially,
 //! changes nothing about the base computation path, so a model loaded with
 //! adapters at scale zero is byte-identical to the base model. That is the
@@ -163,6 +170,124 @@ pub fn any_active(terms: &[RuntimeLoraTerm]) -> bool {
     terms.iter().any(RuntimeLoraTerm::is_active)
 }
 
+/// One adapter's contribution to one input embedding, in mlx-lm's
+/// `LoRAEmbedding` layout (issue #2421): `a` is `[vocab, rank]` and `b` is
+/// `[rank, hidden]`, so the adapted table is `W + scale * a @ b`, the matrix
+/// `mlx_lm.fuse` writes. Held in `float32` like [`RuntimeLoraTerm`].
+///
+/// The term is shared through an `Arc` between the embedding that claimed it
+/// (the lookup end, [`Self::lookup_contribution`]) and, on a tied checkpoint,
+/// the output head that reads the same matrix: either the embedding's own
+/// `as_linear` ([`apply_embedding_head_terms`]) or a linear layer built from
+/// the embedding's prefix ([`Self::head_term`], attached by [`claim`]). Both
+/// ends read the same [`SharedLoraScale`], so `POST /lora-adapters` moves
+/// them together.
+pub struct RuntimeLoraEmbeddingTerm {
+    /// The adapter's user scale (what `POST /lora-adapters` sets).
+    pub handle: SharedLoraScale,
+    /// The adapter's own scale, fixed at load.
+    pub base_scale: f32,
+    /// `[vocab, rank]`, `float32`.
+    pub a: UniquePtr<MlxArray>,
+    /// `[rank, hidden]`, `float32`.
+    pub b: UniquePtr<MlxArray>,
+}
+
+impl RuntimeLoraEmbeddingTerm {
+    /// The lookup end, `scale * a[indices] @ b` in `float32`, or `None` when
+    /// the user scale is `0.0` (no operation is added at all).
+    #[must_use]
+    pub fn lookup_contribution(&self, indices: &MlxArray) -> Option<UniquePtr<MlxArray>> {
+        let user_scale = self.handle.get();
+        if user_scale == 0.0 {
+            return None;
+        }
+        let rows = ffi::embedding(&self.a, indices);
+        let out = ffi::matmul(&rows, &self.b);
+        Some(crate::multiply_scalar(&out, user_scale * self.base_scale))
+    }
+
+    /// The tied-head end as a linear term over `[hidden] -> [vocab]`,
+    /// `scale * (x @ bᵀ) @ aᵀ` (mlx-lm's `LoRAEmbedding.as_linear`). The
+    /// factors are transposed views of this term's own buffers, so attaching
+    /// it copies no tensor data, and the handle is this term's.
+    #[must_use]
+    pub fn head_term(&self) -> RuntimeLoraTerm {
+        RuntimeLoraTerm {
+            handle: self.handle.clone(),
+            base_scale: self.base_scale,
+            a_t: ffi::transpose(&self.b),
+            b_t: ffi::transpose(&self.a),
+        }
+    }
+
+    /// Whether this term currently contributes (user scale non-zero).
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.handle.get() != 0.0
+    }
+}
+
+/// Add every active embedding term's lookup contribution to the lookup output
+/// `y` for `indices`.
+///
+/// Each contribution is cast to `y`'s dtype before the add, as mlx-lm's
+/// `LoRAEmbedding.__call__` does, which also makes an adapted row equal to the
+/// same row of a table fused as `W + (scale * a @ b).astype(W.dtype)`.
+#[must_use]
+pub fn apply_embedding_lookup_terms(
+    terms: &[Arc<RuntimeLoraEmbeddingTerm>],
+    indices: &MlxArray,
+    mut y: UniquePtr<MlxArray>,
+) -> UniquePtr<MlxArray> {
+    if terms.is_empty() {
+        return y;
+    }
+    let y_dtype = ffi::array_dtype(&y);
+    for term in terms {
+        if let Some(contribution) = term.lookup_contribution(indices) {
+            y = ffi::add(&y, &ffi::astype(&contribution, y_dtype));
+        }
+    }
+    y
+}
+
+/// Add every active embedding term's tied-head contribution to the head
+/// output `y` for input `x` (the embedding's `as_linear`). It goes through
+/// [`apply_terms`], the arithmetic a linear head built from the embedding's
+/// prefix applies, so the two tied-head constructions agree.
+#[must_use]
+pub fn apply_embedding_head_terms(
+    terms: &[Arc<RuntimeLoraEmbeddingTerm>],
+    x: &MlxArray,
+    y: UniquePtr<MlxArray>,
+) -> UniquePtr<MlxArray> {
+    if !terms.iter().any(|term| term.is_active()) {
+        return y;
+    }
+    let head_terms: Vec<RuntimeLoraTerm> = terms.iter().map(|term| term.head_term()).collect();
+    apply_terms(&head_terms, x, y)
+}
+
+/// A staged embedding term in the [`RuntimeLoraEmbeddingTerm`] layout
+/// (`a = [vocab, rank]`, `b = [rank, hidden]`). The loader canonicalizes every
+/// on-disk orientation it accepts for an embedding pair into this one before
+/// staging.
+pub struct PendingLoraEmbeddingTerm {
+    pub handle: SharedLoraScale,
+    pub base_scale: f32,
+    pub a: UniquePtr<MlxArray>,
+    pub b: UniquePtr<MlxArray>,
+}
+
+/// The staged embedding terms for one prefix and whether an embedding lookup
+/// has claimed them. They stay staged after the lookup claims them, because a
+/// tied output head built later from the same prefix attaches the same terms.
+struct StagedEmbedding {
+    terms: Vec<Arc<RuntimeLoraEmbeddingTerm>>,
+    lookup_claimed: bool,
+}
+
 /// A staged, not-yet-claimed adapter term for one layer prefix. The loader
 /// normalizes both on-disk orientations (mlx-lm `[in, rank]` / `[rank, out]`
 /// and PEFT `[rank, in]` / `[out, rank]`) into the forward orientation
@@ -181,13 +306,52 @@ thread_local! {
     /// `.weight` suffix).
     static PENDING: RefCell<HashMap<String, Vec<PendingLoraTerm>>> =
         RefCell::new(HashMap::new());
+
+    /// Embedding terms staged next to [`PENDING`], keyed by embedding prefix
+    /// (issue #2421).
+    static PENDING_EMBEDDINGS: RefCell<HashMap<String, StagedEmbedding>> =
+        RefCell::new(HashMap::new());
 }
 
 /// Stage adapter terms for the model construction about to run on this
-/// thread. Replaces any previous staging (a failed load must not leak terms
-/// into the next one).
+/// thread. Replaces any previous staging, embedding terms included (a failed
+/// load must not leak terms into the next one).
 pub fn stage(terms: HashMap<String, Vec<PendingLoraTerm>>) {
+    stage_with_embeddings(terms, HashMap::new());
+}
+
+/// [`stage`] with embedding terms as well (issue #2421). The embedding terms
+/// are converted to `float32` here, once, because the lookup and the tied head
+/// share them.
+pub fn stage_with_embeddings(
+    terms: HashMap<String, Vec<PendingLoraTerm>>,
+    embeddings: HashMap<String, Vec<PendingLoraEmbeddingTerm>>,
+) {
+    let embeddings = embeddings
+        .into_iter()
+        .map(|(prefix, terms)| {
+            let terms = terms
+                .into_iter()
+                .map(|term| {
+                    Arc::new(RuntimeLoraEmbeddingTerm {
+                        handle: term.handle,
+                        base_scale: term.base_scale,
+                        a: ffi::astype(&term.a, crate::dtype::FLOAT32),
+                        b: ffi::astype(&term.b, crate::dtype::FLOAT32),
+                    })
+                })
+                .collect();
+            (
+                prefix,
+                StagedEmbedding {
+                    terms,
+                    lookup_claimed: false,
+                },
+            )
+        })
+        .collect();
     PENDING.with(|pending| *pending.borrow_mut() = terms);
+    PENDING_EMBEDDINGS.with(|pending| *pending.borrow_mut() = embeddings);
 }
 
 /// Whether anything is staged on this thread. The layer constructors check
@@ -195,6 +359,7 @@ pub fn stage(terms: HashMap<String, Vec<PendingLoraTerm>>) {
 #[must_use]
 pub fn has_pending() -> bool {
     PENDING.with(|pending| !pending.borrow().is_empty())
+        || PENDING_EMBEDDINGS.with(|pending| !pending.borrow().is_empty())
 }
 
 /// Claim the staged terms for `prefix`. The terms are held in f32 (see
@@ -202,16 +367,21 @@ pub fn has_pending() -> bool {
 /// and [`apply_terms`] casts the summed output back to the base dtype, so
 /// the claim needs no dtype from the caller. Returns an empty vector when
 /// nothing is staged for the prefix.
+///
+/// A linear layer built from an embedding's prefix is that embedding read as
+/// a tied output head (`UnifiedLinear::from_weights(.., "model.embed_tokens",
+/// ..)` on the Llama family), so it also receives the tied-head end of every
+/// embedding term staged for the prefix ([`RuntimeLoraEmbeddingTerm::head_term`]).
+/// That attaches the term without claiming it: the lookup end still has to be
+/// claimed by the embedding, or the load fails as unclaimed.
 #[must_use]
 pub fn claim(prefix: &str) -> Vec<RuntimeLoraTerm> {
     if !has_pending() {
         return Vec::new();
     }
     let staged = PENDING.with(|pending| pending.borrow_mut().remove(prefix));
-    let Some(staged) = staged else {
-        return Vec::new();
-    };
-    staged
+    let mut claimed: Vec<RuntimeLoraTerm> = staged
+        .unwrap_or_default()
         .into_iter()
         .map(|term| RuntimeLoraTerm {
             handle: term.handle,
@@ -219,7 +389,34 @@ pub fn claim(prefix: &str) -> Vec<RuntimeLoraTerm> {
             a_t: ffi::astype(&term.a_t, crate::dtype::FLOAT32),
             b_t: ffi::astype(&term.b_t, crate::dtype::FLOAT32),
         })
-        .collect()
+        .collect();
+    PENDING_EMBEDDINGS.with(|pending| {
+        if let Some(staged) = pending.borrow().get(prefix) {
+            claimed.extend(staged.terms.iter().map(|term| term.head_term()));
+        }
+    });
+    claimed
+}
+
+/// Claim the staged embedding terms for `prefix`, for the embedding lookup
+/// built there. The terms stay staged for a tied head built later from the
+/// same prefix (see [`claim`]); this marks them claimed so the load does not
+/// report them. Returns an empty vector when nothing is staged for the prefix.
+#[must_use]
+pub fn claim_embedding(prefix: &str) -> Vec<Arc<RuntimeLoraEmbeddingTerm>> {
+    if !has_pending() {
+        return Vec::new();
+    }
+    PENDING_EMBEDDINGS.with(|pending| {
+        pending
+            .borrow_mut()
+            .get_mut(prefix)
+            .map(|staged| {
+                staged.lookup_claimed = true;
+                staged.terms.clone()
+            })
+            .unwrap_or_default()
+    })
 }
 
 /// Drain whatever construction did not claim, returning the layer prefixes in
@@ -228,15 +425,28 @@ pub fn claim(prefix: &str) -> Vec<RuntimeLoraTerm> {
 /// This is the single source of the unclaimed list. The loader sorts it and
 /// fails the load when it is non-empty (issue #1577): an unclaimed term means
 /// the model built that layer outside the claiming constructors, so the
-/// adapter would never reach it.
+/// adapter would never reach it. An embedding term counts as claimed once an
+/// embedding lookup claimed it; a tied head attaching it is not enough, since
+/// the lookup would still serve the base table.
 pub fn drain_unclaimed() -> Vec<String> {
-    PENDING.with(|pending| pending.borrow_mut().drain().map(|(k, _)| k).collect())
+    let mut unclaimed: Vec<String> =
+        PENDING.with(|pending| pending.borrow_mut().drain().map(|(k, _)| k).collect());
+    PENDING_EMBEDDINGS.with(|pending| {
+        unclaimed.extend(
+            pending
+                .borrow_mut()
+                .drain()
+                .filter(|(_, staged)| !staged.lookup_claimed)
+                .map(|(prefix, _)| prefix),
+        );
+    });
+    unclaimed
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layers::{FusedQKVLinear, Linear, UnifiedLinear};
+    use crate::layers::{FusedQKVLinear, Linear, UnifiedEmbedding, UnifiedLinear};
     use crate::weights::WeightMap;
 
     fn weights_from(entries: Vec<(&str, Vec<f32>, Vec<i32>)>) -> WeightMap {
@@ -359,5 +569,99 @@ mod tests {
         let unclaimed = drain_unclaimed();
         assert_eq!(unclaimed, vec!["nonexistent.layer".to_string()]);
         assert!(!has_pending());
+    }
+
+    /// Stage one embedding term for `emb`: a = [[1], [2], [3]] (vocab 3,
+    /// rank 1), b = [[1, 10]] (hidden 2), so the delta is a @ b.
+    fn stage_embedding(handle: &SharedLoraScale, base_scale: f32) {
+        let mut embeddings = std::collections::HashMap::new();
+        embeddings.insert(
+            "emb".to_string(),
+            vec![PendingLoraEmbeddingTerm {
+                handle: handle.clone(),
+                base_scale,
+                a: crate::from_slice_f32(&[1.0f32, 2.0, 3.0], &[3, 1]),
+                b: crate::from_slice_f32(&[1.0f32, 10.0], &[1, 2]),
+            }],
+        );
+        stage_with_embeddings(std::collections::HashMap::new(), embeddings);
+    }
+
+    fn table() -> WeightMap {
+        weights_from(vec![(
+            "emb.weight",
+            vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+            vec![3, 2],
+        )])
+    }
+
+    /// The embedding claims its term: the lookup adds `scale * a[ids] @ b`,
+    /// `as_linear` adds `scale * (x @ bᵀ) @ aᵀ`, and a linear head built from
+    /// the same prefix gets the same tied-head term (issue #2421).
+    #[test]
+    fn embedding_claims_the_lookup_term_and_shares_it_with_the_tied_head() {
+        let weights = table();
+        let handle = SharedLoraScale::new(1.0);
+        stage_embedding(&handle, 2.0);
+        let embedding = UnifiedEmbedding::from_weights(&weights, "emb", 64, 4).expect("emb");
+        let head = UnifiedLinear::from_weights(&weights, "emb", 64, 4).expect("head");
+        assert!(drain_unclaimed().is_empty(), "the lookup claimed the term");
+        assert!(embedding.has_active_runtime_lora());
+        assert!(head.has_active_runtime_lora());
+
+        // Rows 0 and 2: base [0, 1] and [4, 5]; delta 2 * a[i] @ b = [2, 20]
+        // and [6, 60].
+        let ids = crate::from_slice_i32(&[0, 2], &[2]);
+        assert_eq!(
+            to_vec_f32(&embedding.forward(&ids)),
+            vec![2.0, 21.0, 10.0, 65.0]
+        );
+
+        // x = [1, 1]: base x @ Wᵀ = [1, 5, 9]; term 2 * (x @ bᵀ) @ aᵀ =
+        // 2 * 11 * [1, 2, 3] = [22, 44, 66].
+        let x = crate::from_slice_f32(&[1.0f32, 1.0], &[1, 2]);
+        let expected = vec![23.0, 49.0, 75.0];
+        assert_eq!(to_vec_f32(&embedding.as_linear(&x)), expected);
+        assert_eq!(to_vec_f32(&head.forward(&x)), expected);
+
+        // One handle drives both ends; at zero both are byte-identical to the
+        // base table.
+        handle.set(0.0);
+        let base = UnifiedEmbedding::from_weights(&weights, "emb", 64, 4).expect("base");
+        for (adapted, plain) in [
+            (embedding.forward(&ids), base.forward(&ids)),
+            (embedding.as_linear(&x), base.as_linear(&x)),
+            (head.forward(&x), base.as_linear(&x)),
+        ] {
+            crate::eval(&adapted);
+            crate::eval(&plain);
+            assert_eq!(
+                crate::array_to_raw_bytes(&adapted),
+                crate::array_to_raw_bytes(&plain)
+            );
+        }
+    }
+
+    /// A tied head attaching an embedding term does not claim it: the lookup
+    /// would still serve the base table, so the load must report it.
+    #[test]
+    fn an_embedding_term_only_a_head_attached_is_unclaimed() {
+        let weights = table();
+        let handle = SharedLoraScale::new(1.0);
+        stage_embedding(&handle, 1.0);
+        let _head = UnifiedLinear::from_weights(&weights, "emb", 64, 4).expect("head");
+        assert_eq!(drain_unclaimed(), vec!["emb".to_string()]);
+        assert!(!has_pending());
+    }
+
+    /// `stage` replaces embedding staging too, so a failed load cannot leak
+    /// an embedding term into the next one.
+    #[test]
+    fn staging_linear_terms_clears_embedding_terms() {
+        let handle = SharedLoraScale::new(1.0);
+        stage_embedding(&handle, 1.0);
+        stage(std::collections::HashMap::new());
+        assert!(!has_pending());
+        assert!(claim_embedding("emb").is_empty());
     }
 }

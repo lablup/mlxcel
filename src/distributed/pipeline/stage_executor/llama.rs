@@ -50,10 +50,13 @@ impl LlamaStageExecutor {
         // tied checkpoint, so validating against its map would accept an
         // output-head pair the single-process loaders refuse, and this stage
         // then builds its output projection from `model.embed_tokens` and
-        // never reads the fused copy (#1577). The same verdict refuses a
-        // `model.embed_tokens` pair on a tied checkpoint, which this stage
-        // would otherwise fuse into the matrix both its embedding and its head
-        // read, while the runtime path hands it to the head alone (#2332).
+        // never reads the fused copy (#1577). A `model.embed_tokens` pair on a
+        // checkpoint whose config ties the head is accepted (#2421): the
+        // shared fusion folds it into the matrix this stage's embedding and
+        // head both read, which is what the single-process paths apply. On a
+        // checkpoint tied only by a missing `lm_head.weight` the head below is
+        // built from the copy `load_text_weights` made before fusion, so the
+        // verdict still refuses that pair (#2332).
         if let Some(path) = adapter_path {
             crate::lora::reject_tied_output_head_adapter(model_dir, path)?;
         }

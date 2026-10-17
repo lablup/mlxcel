@@ -20,8 +20,9 @@
 //! rather than a synthetic weight map: an unclaimed term must fail the load
 //! with every layer named, a fully claimed adapter must still load, and the
 //! staging slot must be empty afterwards on every outcome. The tied output-head
-//! verdict, for a head pair (#1577) and for an embedding pair (#2332), is
-//! pinned on each single-process entry point here; the pipeline stage's copy
+//! verdict, for a head pair (#1577) and for an embedding pair of a family that
+//! does not apply it at both ends (#2332, #2421), is pinned on each
+//! single-process entry point here; the pipeline stage's copy
 //! of it, and the three-path parity for the embedding pair, are pinned in the
 //! Llama stage executor tests.
 
@@ -29,8 +30,8 @@ use std::path::{Path, PathBuf};
 
 use super::*;
 use crate::lora::test_support::{
-    TINY_HIDDEN, TINY_VOCAB, TinyLlama, adapter_pair_tensors, temp_dir, write_adapter_dir,
-    write_tiny_llama_checkpoint,
+    TINY_HIDDEN, TINY_VOCAB, TinyLlama, adapter_pair_tensors, relabel_checkpoint_family, temp_dir,
+    write_adapter_dir, write_tiny_llama_checkpoint,
 };
 use crate::lora::{LoraAdapterSpec, RuntimeLoraSet};
 
@@ -86,14 +87,15 @@ const H: usize = TINY_HIDDEN;
 
 #[test]
 fn an_unclaimed_runtime_term_fails_the_load_with_its_layer_named() {
-    // `model.embed_tokens` is built by `UnifiedEmbedding`, which does not
-    // claim: before #1577 this loaded, logged a warning, and served the base
-    // embedding under the adapter's name.
-    let model = untied_checkpoint("unclaimed_one_model", Vec::new());
+    // `model.unread` is a base weight no Llama constructor reads: before #1577
+    // this loaded, logged a warning, and served the base model under the
+    // adapter's name. (This used to be `model.embed_tokens`, which
+    // `UnifiedEmbedding` claims since #2421.)
+    let model = untied_checkpoint("unclaimed_one_model", vec![("model.unread.weight", H, H)]);
     let adapter_dir = adapter(
         "unclaimed_one_adapter",
         &[
-            ("model.embed_tokens", H, TINY_VOCAB),
+            ("model.unread", H, H),
             ("model.layers.0.self_attn.q_proj", H, H),
         ],
     );
@@ -102,7 +104,7 @@ fn an_unclaimed_runtime_term_fails_the_load_with_its_layer_named() {
         .err()
         .expect("an adapter term no constructor claims must fail the load")
         .to_string();
-    assert!(err.contains("model.embed_tokens"), "{err}");
+    assert!(err.contains("model.unread"), "{err}");
     assert!(err.contains("not claimed"), "{err}");
     assert!(
         !err.contains("q_proj"),
@@ -122,6 +124,7 @@ fn several_unclaimed_runtime_terms_are_reported_together_in_sorted_order() {
         "unclaimed_many_model",
         vec![
             ("model.zz_unread.weight", H, H),
+            ("model.mm_unread.weight", H, H),
             ("model.aa_unread.weight", H, H),
         ],
     );
@@ -129,7 +132,7 @@ fn several_unclaimed_runtime_terms_are_reported_together_in_sorted_order() {
         "unclaimed_many_adapter",
         &[
             ("model.zz_unread", H, H),
-            ("model.embed_tokens", H, TINY_VOCAB),
+            ("model.mm_unread", H, H),
             ("model.aa_unread", H, H),
             ("model.layers.0.mlp.down_proj", 16, H),
         ],
@@ -140,7 +143,7 @@ fn several_unclaimed_runtime_terms_are_reported_together_in_sorted_order() {
         .expect("every unclaimed term fails the same load")
         .to_string();
     assert!(err.contains("for 3 layers"), "{err}");
-    let listed = "  model.aa_unread\n  model.embed_tokens\n  model.zz_unread\n";
+    let listed = "  model.aa_unread\n  model.mm_unread\n  model.zz_unread\n";
     assert!(
         err.contains(listed),
         "the unclaimed layers must be listed one per line, sorted: {err}"
@@ -167,6 +170,9 @@ fn a_fully_claimed_runtime_adapter_still_loads() {
             ("model.layers.0.mlp.up_proj", H, 16),
             ("model.layers.0.mlp.down_proj", 16, H),
             ("lm_head", H, TINY_VOCAB),
+            // mlx-lm `LoRAEmbedding` layout, claimed by `UnifiedEmbedding`
+            // since #2421.
+            ("model.embed_tokens", TINY_VOCAB, H),
         ],
     );
 
@@ -260,13 +266,14 @@ fn every_single_process_entry_refuses_a_head_pair_on_a_tied_checkpoint() {
 }
 
 #[test]
-fn a_tied_embedding_pair_never_reaches_the_head_on_a_single_process_entry() {
-    // #2332: the tiny Llama builds its tied head with
-    // `UnifiedLinear::from_weights(.., "model.embed_tokens", ..)`, which claims
-    // the staged `model.embed_tokens` term. Before the fix the unfused load
-    // therefore succeeded with the pair applied to the logits alone while the
-    // embedding lookup served base weights; now every entry refuses it before
-    // anything is staged.
+fn a_tied_embedding_pair_of_another_family_is_refused_on_every_single_process_entry() {
+    // #2332: before the fix the unfused load handed a tied `model.embed_tokens`
+    // pair to whichever constructor claimed the prefix, so it reached one end
+    // of the tie only. #2421 applies it at both ends for the Llama decoder and
+    // Qwen3 (`adapter_embedding_tests.rs`); every other tied family keeps the
+    // refusal on every entry, before anything is staged. The checkpoint is the
+    // tiny Llama relabelled as Gemma, which the verdict reads before any
+    // weight.
     let model = temp_dir("tied_embed_single_model");
     write_tiny_llama_checkpoint(
         &model,
@@ -276,6 +283,7 @@ fn a_tied_embedding_pair_never_reaches_the_head_on_a_single_process_entry() {
             unread: Vec::new(),
         },
     );
+    relabel_checkpoint_family(&model, "gemma", "GemmaForCausalLM");
     let adapter_dir = adapter(
         "tied_embed_single_adapter",
         &[
@@ -292,7 +300,7 @@ fn a_tied_embedding_pair_never_reaches_the_head_on_a_single_process_entry() {
     let set = RuntimeLoraSet::from_specs(&[spec(&adapter_dir)]).expect("a lora adapter config");
     let err = load_model_with_adapter_specs(&model, &[spec(&adapter_dir)], Some(&set))
         .err()
-        .expect("unfused --lora must not hand the pair to the tied head")
+        .expect("unfused --lora refuses it")
         .to_string();
     assert_refusal(&err);
     assert!(

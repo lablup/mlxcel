@@ -62,6 +62,36 @@ pub(crate) fn ones_tensor(rows: usize, cols: usize) -> OwnedTensor {
     }
 }
 
+/// `rows * cols` deterministic pseudo-random values in `[-0.5, 0.5)`, row
+/// major, so a delta varies across rows and columns and a term applied at the
+/// wrong end of a tie changes the logits (issue #2421).
+pub(crate) fn seeded_values(rows: usize, cols: usize, seed: u64) -> Vec<f32> {
+    let mut state = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+    (0..rows * cols)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            // The top 24 bits give an exactly representable f32 in [0, 1).
+            (state >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+        })
+        .collect()
+}
+
+/// A `[rows, cols]` f32 tensor holding `values` (row major).
+pub(crate) fn tensor_from_values(rows: usize, cols: usize, values: &[f32]) -> OwnedTensor {
+    assert_eq!(values.len(), rows * cols, "values fill [{rows}, {cols}]");
+    OwnedTensor {
+        shape: vec![rows, cols],
+        data: values.iter().flat_map(|v| v.to_le_bytes()).collect(),
+    }
+}
+
+/// A `[rows, cols]` f32 tensor of [`seeded_values`].
+pub(crate) fn seeded_tensor(rows: usize, cols: usize, seed: u64) -> OwnedTensor {
+    tensor_from_values(rows, cols, &seeded_values(rows, cols, seed))
+}
+
 /// An all-ones 1-D f32 tensor of length `n`.
 ///
 /// A real DoRA magnitude vector is 1-D, so the fixtures that stand one in use
@@ -216,4 +246,67 @@ pub(crate) fn write_tiny_llama_checkpoint(dir: &Path, spec: &TinyLlama) {
     }
     safetensors::serialize_to_file(&tensors, None, &dir.join("model.safetensors"))
         .expect("write model safetensors");
+}
+
+/// Rewrite a [`write_tiny_llama_checkpoint`] directory's `config.json` to
+/// declare another family, for verdict tests that need a tied family outside
+/// the ones that apply an embedding pair at both ends (issue #2421). The
+/// tensors stay Llama-shaped, so only checks that run before construction can
+/// use it.
+pub(crate) fn relabel_checkpoint_family(dir: &Path, model_type: &str, architecture: &str) {
+    let path = dir.join("config.json");
+    let mut config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("read model config"))
+            .expect("parse model config");
+    config["model_type"] = serde_json::Value::String(model_type.to_string());
+    config["architectures"] = serde_json::json!([architecture]);
+    std::fs::write(&path, config.to_string()).expect("write model config");
+}
+
+/// Write a WordLevel `tokenizer.json` covering the tiny vocabulary (`t0` ..
+/// `t31`) into a [`write_tiny_llama_checkpoint`] directory, so the public load
+/// entry points, which load the tokenizer last, can return the model.
+pub(crate) fn write_tiny_tokenizer(dir: &Path) {
+    let vocab: serde_json::Map<String, serde_json::Value> = (0..TINY_VOCAB)
+        .map(|id| (format!("t{id}"), serde_json::Value::from(id)))
+        .collect();
+    let tokenizer = serde_json::json!({
+        "version": "1.0",
+        "truncation": null,
+        "padding": null,
+        "added_tokens": [],
+        "normalizer": null,
+        "pre_tokenizer": {"type": "Whitespace"},
+        "post_processor": null,
+        "decoder": null,
+        "model": {"type": "WordLevel", "vocab": vocab, "unk_token": "t0"},
+    });
+    std::fs::write(dir.join("tokenizer.json"), tokenizer.to_string()).expect("write tokenizer");
+}
+
+/// Replace every 2-D tensor of a [`write_tiny_llama_checkpoint`] directory with
+/// [`seeded_values`], one seed per tensor, so the tiny model's logits depend on
+/// its input and on every projection (the all-ones fixture gives every token
+/// the same logit). Norm vectors keep their ones.
+pub(crate) fn reseed_tiny_checkpoint(dir: &Path) {
+    let path = dir.join("model.safetensors");
+    let bytes = std::fs::read(&path).expect("read model safetensors");
+    let parsed = safetensors::SafeTensors::deserialize(&bytes).expect("parse model safetensors");
+    let mut names: Vec<String> = parsed.names().into_iter().map(str::to_string).collect();
+    names.sort();
+    let mut tensors: HashMap<String, OwnedTensor> = HashMap::new();
+    for (index, name) in names.iter().enumerate() {
+        let view = parsed.tensor(name).expect("tensor");
+        let shape = view.shape().to_vec();
+        let tensor = if let [rows, cols] = shape[..] {
+            seeded_tensor(rows, cols, 1000 + index as u64)
+        } else {
+            OwnedTensor {
+                shape,
+                data: view.data().to_vec(),
+            }
+        };
+        tensors.insert(name.clone(), tensor);
+    }
+    safetensors::serialize_to_file(&tensors, None, &path).expect("write model safetensors");
 }
